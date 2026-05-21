@@ -1688,6 +1688,12 @@ function transformInner(input: {
   // but overhead EMA captures most of the gap. 1.5 provides a safe margin.
   const UNCALIBRATED_SAFETY = 1.5;
 
+  // Hard ceiling: never allow layer-0 passthrough within 5% of maxInput,
+  // regardless of calibration accuracy or economic analysis.  The estimation
+  // error on calibrated deltas can be 5-10K tokens, and maxInput is a hard
+  // API limit — exceeding it causes an unrecoverable 400.
+  const HARD_CEILING_MARGIN = 0.95;
+
   // Returns true if the tryFit result is safe to use: either we have calibrated
   // data (exact) or the estimated total * safety factor fits within maxInput.
   function fitsWithSafetyMargin(result: { totalTokens: number } | null): boolean {
@@ -1741,10 +1747,18 @@ function transformInner(input: {
     // Use message ID tracking (Option B) to identify new messages accurately.
     // After compression, the "last window" is a subset of the full message array —
     // counting by index would treat evicted messages as new (off-by-250 error).
+    // Safety multiplier for the delta portion of the calibrated estimate.
+    // The base (lastKnownInput) is exact from the API, but new messages use
+    // chars/3 which undercounts by ~1.68x.  Calibrated overhead captures most
+    // of the structural gap, but the per-message content gap remains ~20-30%.
+    // 1.3 covers this without triggering unnecessary compression.
+    const CALIBRATED_DELTA_SAFETY = 1.3;
+
     const newMessages = sessState.lastWindowMessageIDs.size > 0
       ? input.messages.filter((m) => !sessState.lastWindowMessageIDs.has(m.info.id))
       : input.messages.slice(-Math.max(0, input.messages.length - sessState.lastKnownMessageCount));
-    const newMsgTokens = newMessages.reduce((s, m) => s + estimateMessage(m), 0);
+    const rawNewMsgTokens = newMessages.reduce((s, m) => s + estimateMessage(m), 0);
+    const newMsgTokens = Math.ceil(rawNewMsgTokens * CALIBRATED_DELTA_SAFETY);
     const ltmDelta = sessLtmTokens - sessState.lastKnownLtm;
     expectedInput = sessState.lastKnownInput + newMsgTokens + ltmDelta;
   } else {
@@ -1771,7 +1785,7 @@ function transformInner(input: {
     layer0Ceiling = Math.floor(layer0Ceiling * 0.7);
   }
 
-  if (effectiveMinLayer === 0 && layer0Input <= layer0Ceiling) {
+  if (effectiveMinLayer === 0 && layer0Input <= layer0Ceiling && layer0Input <= maxInput * HARD_CEILING_MARGIN) {
     // All messages fit — return unmodified to preserve append-only prompt-cache pattern.
     // Raw messages are strictly better context than lossy distilled summaries.
     const messageTokens = calibrated
@@ -1800,7 +1814,7 @@ function transformInner(input: {
   if (
     effectiveMinLayer === 0 &&
     layer0Input > layer0Ceiling &&
-    layer0Input <= maxInput &&
+    layer0Input <= maxInput * HARD_CEILING_MARGIN &&
     sid
   ) {
     const busts = getSessionState(sid).consecutiveBusts;

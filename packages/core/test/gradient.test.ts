@@ -620,15 +620,15 @@ describe("gradient — exact token tracking (proactive layer 0)", () => {
   });
 
   test("exact tracking prevents overflow: near-limit session stays layer 0", () => {
-    // maxInput = 10000 - 2000 = 8000
-    // Set lastKnownInput close to limit but within budget
-    calibrate(7_800, SESSION, 10);
-    // New message: very short (~25 tokens)
+    // maxInput = 10000 - 2000 = 8000, hard ceiling = 8000 * 0.95 = 7600
+    // Set lastKnownInput close to limit but within the hard ceiling margin
+    calibrate(7_400, SESSION, 10);
+    // New message: very short (~25 tokens × 1.3 safety = ~33 tokens)
     const messages = Array.from({ length: 10 }, (_, i) =>
       makeMsg(`near-${i}`, i % 2 === 0 ? "user" : "assistant", "X".repeat(50), SESSION),
     );
     const withNew = [...messages, makeMsg("near-new", "user", "hi", SESSION)];
-    // expectedInput ≈ 7800 + 25 = 7825 ≤ 8000 → layer 0
+    // expectedInput ≈ 7400 + 33 = 7433 ≤ 7600 → layer 0
     const result = transform({ messages: withNew, projectPath: PROJECT, sessionID: SESSION });
     expect(result.layer).toBe(0);
   });
@@ -2717,5 +2717,75 @@ describe("gradient — prefix/raw boundary role alternation (#424)", () => {
       const firstRaw = result.messages[2]; // after [user, assistant] prefix
       expect(firstRaw.info.role).toBe("user");
     }
+  });
+});
+
+describe("gradient — calibrated delta safety multiplier", () => {
+  const SESSION = "delta-safety-sess";
+  beforeAll(() => {
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0);
+    resetPrefixCache();
+    resetRawWindowCache();
+  });
+
+  beforeEach(() => {
+    resetCalibration(SESSION);
+    calibrate(0);
+    resetPrefixCache();
+    resetRawWindowCache();
+    resetDistillationSnapshot(SESSION);
+  });
+
+  test("calibrated delta applies 1.3x safety to new messages", () => {
+    // maxInput = 8000, hard ceiling = 8000 * 0.95 = 7600
+    // Isolate the multiplier: find base + rawEstimate <= 7600 but base + ceil(rawEstimate * 1.3) > 7600
+    //
+    // New message: 150 chars → estimateMessage = ceil(150/3) + 20 = 70 (rawEstimate)
+    // With 1.3x: ceil(70 * 1.3) = 91
+    // Need: base + 91 > 7600 AND base + 70 <= 7600
+    //       base > 7509 AND base <= 7530
+    // Use base = 7520
+    calibrate(7_520, SESSION, 10);
+    const messages = Array.from({ length: 10 }, (_, i) =>
+      makeMsg(`ds-${i}`, i % 2 === 0 ? "user" : "assistant", "X".repeat(50), SESSION),
+    );
+    const withNew = [...messages, makeMsg("ds-new", "user", "Z".repeat(150), SESSION)];
+    // Without 1.3x multiplier: 7520 + 70 = 7590 ≤ 7600 → would be layer 0
+    // With 1.3x multiplier:    7520 + 91 = 7611 > 7600 → must escalate
+    const result = transform({ messages: withNew, projectPath: PROJECT, sessionID: SESSION });
+    expect(result.layer).toBeGreaterThanOrEqual(1);
+  });
+
+  test("hard ceiling rejects layer-0 passthrough near maxInput", () => {
+    // maxInput = 8000, hard ceiling = 8000 * 0.95 = 7600
+    // Set lastKnownInput = 7650 — above the hard ceiling
+    calibrate(7_650, SESSION, 10);
+    const messages = Array.from({ length: 10 }, (_, i) =>
+      makeMsg(`hc-${i}`, i % 2 === 0 ? "user" : "assistant", "X".repeat(50), SESSION),
+    );
+    // Even with a tiny new message, expectedInput ≈ 7650 + 33 = 7683 > 7600 → must escalate
+    const withNew = [...messages, makeMsg("hc-new", "user", "hi", SESSION)];
+    const result = transform({ messages: withNew, projectPath: PROJECT, sessionID: SESSION });
+    expect(result.layer).toBeGreaterThanOrEqual(1);
+  });
+
+  test("hard ceiling also blocks bust-vs-continue gate", () => {
+    // Verify the tier gate (shouldCompress path) also respects the hard ceiling.
+    // We need layer0Input > layer0Ceiling but <= maxInput * HARD_CEILING_MARGIN
+    // to be false, i.e. layer0Input > maxInput * 0.95.
+    // With no cost cap (layer0Ceiling = maxInput * 0.95 = 7600), the tier gate
+    // fires when layer0Input > 7600. Set lastKnownInput = 7700 (above ceiling).
+    setCachePricing(0, 0); // no pricing → shouldCompress returns false
+    calibrate(7_700, SESSION, 10);
+    const messages = Array.from({ length: 10 }, (_, i) =>
+      makeMsg(`bg-${i}`, i % 2 === 0 ? "user" : "assistant", "X".repeat(50), SESSION),
+    );
+    const withNew = [...messages, makeMsg("bg-new", "user", "hi", SESSION)];
+    const result = transform({ messages: withNew, projectPath: PROJECT, sessionID: SESSION });
+    // Without hard ceiling margin, the tier gate would pass through at layer 0
+    // because shouldCompress returns false (no pricing). With the margin,
+    // 7700 > 7600 so the tier gate condition fails → compression is forced.
+    expect(result.layer).toBeGreaterThanOrEqual(1);
   });
 });

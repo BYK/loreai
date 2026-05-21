@@ -27,6 +27,7 @@ import {
   getLtmBudget,
   getPreferenceLtmBudget,
   setMaxLayer0Tokens,
+  setForceMinLayer,
   computeLayer0Cap,
   setCachePricing,
   recordCacheUsage,
@@ -3344,6 +3345,31 @@ async function handleConversationTurn(
     log.error(
       `upstream error: ${upstreamResponse.status} ${errorBody.slice(0, 500)}`,
     );
+
+    // When the API rejects with a context-length error, escalate the compression
+    // layer for the next turn so the session doesn't get stuck in a loop.
+    // Anthropic format: "prompt is too long: 206029 tokens > 200000 maximum"
+    // OpenAI format:    "maximum context length is 128000 tokens. However, your messages resulted in 135421 tokens"
+    if (upstreamResponse.status === 400 && (
+      errorBody.includes("prompt is too long") ||
+      errorBody.includes("context_length_exceeded") ||
+      errorBody.includes("maximum context length")
+    )) {
+      const anthropicMatch = errorBody.match(/prompt is too long: (\d+) tokens > (\d+) maximum/);
+      const openaiMatch = !anthropicMatch && errorBody.match(/resulted in (\d+) tokens.*?(\d+) tokens/);
+      const match = anthropicMatch || openaiMatch;
+      // Default to 1.3 (maps to layer 3) when the format can't be parsed,
+      // since an unparseable error suggests an unexpected situation where
+      // aggressive compression is safer.
+      const overshootRatio = match ? Number(match[1]) / Number(match[2]) : 1.3;
+      const escalateLayer = overshootRatio >= 1.2 ? 3 : 2;
+      setForceMinLayer(escalateLayer, sessionID);
+      log.warn(
+        `prompt overflow: escalating to layer ${escalateLayer} for session ${sessionID.slice(0, 16)}` +
+        ` (ratio=${overshootRatio.toFixed(2)})`,
+      );
+    }
+
     genAiSpan.setStatus({ code: 2, message: `HTTP ${upstreamResponse.status}` });
     genAiSpan.end();
     return new Response(errorBody, {
