@@ -1117,6 +1117,8 @@ async function loadScenarios(
       case "context": {
         const mod = await import("./scenarios/context-management");
         scenarios.push(...mod.scenarios);
+        const mega = await import("./scenarios/mega-session");
+        scenarios.push(mega.default);
         break;
       }
       case "recall": {

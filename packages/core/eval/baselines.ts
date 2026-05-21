@@ -171,29 +171,71 @@ export async function compactionBaseline(
 
     if (prefix.length === 0) break;
 
-    // Summarize the prefix via LLM
-    const prefixText = renderConversation(prefix);
-    const userPrompt = COMPACTION_USER_TEMPLATE.replace(
-      "{{conversation}}",
-      prefixText,
-    );
+    // Summarize the prefix via LLM. If the prefix exceeds the model's
+    // context window, chunk it into segments and summarize each, then
+    // concatenate the summaries.
+    const MAX_CHUNK_TOKENS = 800_000; // leave room for system prompt + output
+    const prefixTokens = totalTokens(prefix);
+    let summaryText: string;
 
-    const result = await llm.prompt(COMPACTION_SYSTEM, userPrompt, {
-      maxTokens: 4096,
-      temperature: 0,
-    });
+    if (prefixTokens <= MAX_CHUNK_TOKENS) {
+      // Fits in one call
+      const prefixText = renderConversation(prefix);
+      const userPrompt = COMPACTION_USER_TEMPLATE.replace("{{conversation}}", prefixText);
+      const result = await llm.prompt(COMPACTION_SYSTEM, userPrompt, {
+        maxTokens: 4096,
+        temperature: 0,
+      });
+      summaryText = result.text;
+    } else {
+      // Chunk the prefix into segments that fit
+      const chunks: ConversationTurn[][] = [];
+      let chunk: ConversationTurn[] = [];
+      let chunkTokens = 0;
+      for (const turn of prefix) {
+        const t = turn.tokens ?? estimateTokens(renderTurn(turn));
+        if (chunkTokens + t > MAX_CHUNK_TOKENS && chunk.length > 0) {
+          chunks.push(chunk);
+          chunk = [];
+          chunkTokens = 0;
+        }
+        chunk.push(turn);
+        chunkTokens += t;
+      }
+      if (chunk.length > 0) chunks.push(chunk);
+
+      console.log(
+        `  [compaction] prefix too large (${prefixTokens} tok), splitting into ${chunks.length} chunks`,
+      );
+
+      // Summarize each chunk
+      const chunkSummaries: string[] = [];
+      for (let c = 0; c < chunks.length; c++) {
+        const chunkText = renderConversation(chunks[c]);
+        const userPrompt = COMPACTION_USER_TEMPLATE.replace("{{conversation}}", chunkText);
+        const result = await llm.prompt(COMPACTION_SYSTEM, userPrompt, {
+          maxTokens: 4096,
+          temperature: 0,
+        });
+        chunkSummaries.push(result.text);
+        console.log(
+          `  [compaction] chunk ${c + 1}/${chunks.length}: ${totalTokens(chunks[c])} tok → ${estimateTokens(result.text)} tok`,
+        );
+      }
+      summaryText = chunkSummaries.join("\n\n---\n\n");
+    }
 
     // Replace prefix with a synthetic summary turn + keep tail
     const summaryTurn: ConversationTurn = {
       role: "assistant",
-      content: [{ type: "text", text: `## Compacted Summary (pass ${compactionCount + 1})\n\n${result.text}` }],
-      tokens: estimateTokens(result.text),
+      content: [{ type: "text", text: `## Compacted Summary (pass ${compactionCount + 1})\n\n${summaryText}` }],
+      tokens: estimateTokens(summaryText),
     };
     currentTurns = [summaryTurn, ...tail];
     compactionCount++;
 
     console.log(
-      `  [compaction] pass ${compactionCount}: ${prefix.length} turns summarized → ${estimateTokens(result.text)} tok, ${currentTurns.length} turns remaining (${totalTokens(currentTurns)} tok)`,
+      `  [compaction] pass ${compactionCount}: ${prefix.length} turns summarized → ${estimateTokens(summaryText)} tok, ${currentTurns.length} turns remaining (${totalTokens(currentTurns)} tok)`,
     );
   }
 

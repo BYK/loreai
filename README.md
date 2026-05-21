@@ -326,9 +326,23 @@ Lore re-scans the `lat.md/` directory periodically (on session idle), so changes
 
 ## Eval results
 
-At 400K tokens (realistic coding session length), Lore outperforms standard compaction — the approach used by Claude Code, Codex, and other tools that summarize older context when the conversation grows too long:
+### The mega-session test: 2.3 million tokens
 
-### Context retention (400K tokens)
+Real-world coding sessions can span days and accumulate millions of tokens. We extracted a real 5-day, 2.3M-token session (getsentry/cli refactoring — 95 user turns, multiple PRs, architectural decisions, code reviews) and tested whether each approach can answer questions about details from throughout the session:
+
+| What's tested | Lore | Compaction | Lore vs Compaction |
+|---|---|---|---|
+| Easy (late-session details) | **4.0**/5 | 2.4/5 | +67% |
+| Medium (mid-session details) | **3.9**/5 | 3.0/5 | +29% |
+| Hard (early-session details) | **4.1**/5 | 1.8/5 | +136% |
+| **Average** | **4.0**/5 | 2.4/5 | **+70%** |
+| **Perfect scores (5.0)** | **13/20** | 5/20 | 2.6x more |
+
+*At 2.3M tokens, compaction compresses the entire conversation into ~11K tokens of summary — a 200x compression that destroys most details. Lore preserves them through distillation (21 observations totaling ~10K tokens) + 64K raw tail window + searchable temporal archive via recall. The hard questions — details from the first day of a 5-day session — are where compaction fails (1.8/5) and Lore excels (4.1/5).*
+
+### At 400K tokens
+
+At more typical session lengths, Lore still outperforms:
 
 | What's tested | Lore | Compaction | Lore vs Compaction |
 |---|---|---|---|
@@ -338,7 +352,7 @@ At 400K tokens (realistic coding session length), Lore outperforms standard comp
 | **Average** | **4.8**/5 | 4.5/5 | **+7%** |
 | **Perfect scores (5.0)** | **12/15** | 9/15 | — |
 
-*Compaction baseline: multi-pass LLM summarization matching Claude Code's auto-compact behavior (~140K threshold, 2-3 cycles at 400K tokens). Scored by LLM-as-judge on a 1–5 scale. Lore's advantage is largest on medium-difficulty questions — mid-session details like decision alternatives, exact error messages, and rejected approaches that compaction summarizes away but Lore's distillation + recall preserves.*
+*Compaction baseline: multi-pass LLM summarization matching Claude Code's auto-compact behavior (~140K threshold). At 400K tokens, compaction only loses a few details — the advantage grows dramatically at larger scales.*
 
 ### Preference recall (400K tokens)
 
@@ -351,12 +365,16 @@ At 400K tokens (realistic coding session length), Lore outperforms standard comp
 
 *Preference recall baselines are from a prior eval run with tail-window (80K). Compaction preference baselines pending re-run.*
 
-**What this means:** at 400K tokens, Lore scores 4.8/5 on context retention with 12 out of 15 perfect scores — compared to compaction's 4.5/5 with 9 perfect scores. The gap is largest on mid-session details that compaction loses through repeated summarization cycles.
+**What this means:** the longer the session, the bigger Lore's advantage. At 400K tokens, Lore is +7% over compaction. At 2.3M tokens, Lore is +70% — compaction retains less than half the information (2.4/5) while Lore retains 80% (4.0/5). Early-session details that compaction destroys completely (1.8/5) are preserved by Lore's three-tier architecture (4.1/5).
 
-The eval suite (16 scenarios, 130+ questions, 5 dimensions) is open source in `packages/core/eval/`. Run it yourself:
+The eval suite is open source in `packages/core/eval/`. Run it yourself:
 
 ```bash
+# 400K inflated scenario
 bun packages/core/eval/run.ts --mode live --inflate 400000
+
+# 2.3M mega-session (real session, no inflation needed)
+bun packages/core/eval/run.ts --mode live --scenarios mega-cli-refactor
 ```
 
 **Cost:** Lore's memory layer runs at minimal additional cost — background distillation and curation use batch APIs (50% off on supported providers) and cheaper models. Local on-device embeddings (Nomic Embed v1.5) mean zero API cost for vector search. Predictive cache warming reduces expensive cache rebuilds.
@@ -373,7 +391,7 @@ bun packages/core/eval/run.ts --mode live --inflate 400000
 
 **v5 — behavioral pattern detection + 400K eval.** Vector similarity-based pattern echo detection, action tagging in distillation, cross-session pattern clustering, assertion pinning for long sessions, and a scenario inflator for realistic 400K-token evaluation. This is what closed the preference gap from +15% to +47% over tail-window.
 
-**v6 — recall quality + distillation transparency.** Uniform citation format `(d:xxx, t:xxx)` with compression metadata, session-affinity boosting, knowledge downweighting when session content exists, scripted eval replay (zero API calls during replay), amnesia mode, multi-pass compaction baseline. Context retention: 4.8/5 with 12/15 perfect scores, +7% over compaction at 400K tokens.
+**v6 — recall quality + distillation transparency.** Uniform citation format `(d:xxx, t:xxx)` with compression metadata, session-affinity boosting, knowledge downweighting when session content exists, scripted eval replay (zero API calls during replay), amnesia mode, multi-pass compaction baseline. 2.3M-token mega-session eval on a real 5-day coding session: Lore 4.0/5 vs compaction 2.4/5 (+70%), with 13/20 perfect scores vs 5/20.
 
 ## Development setup
 
