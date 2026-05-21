@@ -454,7 +454,7 @@ export async function replaySession(
  * These are independent budgets — distillation doesn't reduce the raw tail.
  * For a 200K context window: ~50K distilled + ~80K raw + ~10K LTM = ~140K total.
  */
-async function buildLoreContext(
+export async function buildLoreContext(
   turns: ConversationTurn[],
   contextWindow = 200_000,
 ): Promise<string> {

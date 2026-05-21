@@ -15,13 +15,16 @@
     "typecheck": "bun --filter '*' typecheck",
     "test": "bun test",
     "build": "bun --filter '*' build",
+    "evals": "vitest run --config vitest.evals.config.ts",
     "postinstall": "bun --filter '@loreai/gateway' build"
   },
   "devDependencies": {
     "@types/bun": "^1.2.0",
     "esbuild": "^0.25.12",
     "fast-check": "^4.5.3",
-    "typescript": "^5.8.0"
+    "typescript": "^5.8.0",
+    "vitest": "^4.1.7",
+    "vitest-evals": "^0.10.0"
   },
   "repository": {
     "type": "git",
