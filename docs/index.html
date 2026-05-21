@@ -750,17 +750,39 @@
       opacity: .7;
     }
 
+    .cta-form-view { display: none; }
+    .cta-form-view.show { display: block; }
+
     .cta-success {
-      display: none;
       font-family: var(--serif);
       font-size: 1.3rem;
       color: var(--g2);
       margin-top: 1rem;
     }
 
-    .cta-success.show {
-      display: block;
+    .cta-error {
+      font-size: .88rem;
+      color: #8b3a3a;
+      margin-top: 1rem;
+      line-height: 1.6;
     }
+
+    .cta-back {
+      display: inline-block;
+      margin-top: 1rem;
+      padding: .6rem 1.6rem;
+      background: transparent;
+      border: 1px solid var(--c2);
+      border-radius: 2px;
+      color: var(--g0);
+      cursor: pointer;
+      font-size: .82rem;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+    }
+
+    .cta-back:hover { background: var(--c0); }
+    .cta-submit:disabled { opacity: .7; cursor: not-allowed; }
 
     /* FOOTER */
     footer {
@@ -827,7 +849,7 @@
       .code-block code { font-size: 0.75rem; white-space: pre; }
       
       .cta-form { display: flex; flex-direction: column; align-items: center; gap: 0.8rem; width: 100%; }
-      .cta-input, .cta-submit { width: 100%; max-width: none; box-sizing: border-box; }
+      .cta-input, .cta-submit, .cta-back { width: 100%; max-width: none; box-sizing: border-box; }
     }
 
     @media(pointer: coarse), (max-width: 768px) {
@@ -1206,16 +1228,27 @@
     <div class="cta-inner">
       <h2 class="sr">Stop managing context. <em>Start building.</em></h2>
       <p class="cta-sub sr">Self-hosted Lore is available now. Join the waitlist for Lore Cloud — hosted memory with zero setup.</p>
-      <form class="cta-form sr" id="waitlist-form" action="https://formsubmit.co/build@withlore.ai" method="POST">
-        <input type="hidden" name="_subject" value="New Lore Waitlist Signup">
-        <input type="hidden" name="_captcha" value="false">
-        <input type="hidden" name="_template" value="box">
-        <input type="hidden" name="_next" value="https://byk.github.io/loreai/#waitlist">
-        <input class="cta-input" type="email" name="email" placeholder="your@email.com" id="emailInput" required />
-        <button class="cta-submit" type="submit" id="submitBtn">Join Waitlist</button>
-      </form>
-      <p class="cta-note sr">No spam. Unsubscribe anytime.</p>
-      <p class="cta-success" id="waitlist-success">✓ You're on the list. We'll be in touch.</p>
+
+      <!-- View 1: Form (default) -->
+      <div class="cta-form-view show" id="waitlist-form-view">
+        <form class="cta-form sr" id="waitlist-form"
+              action="https://app.loops.so/api/newsletter-form/cmpemslgp03m10jxaipjw78iq" method="POST">
+          <input class="cta-input" type="email" name="email" placeholder="your@email.com" id="waitlist-email" required />
+          <button class="cta-submit" type="submit" id="waitlist-btn">Join Waitlist</button>
+        </form>
+        <p class="cta-note sr">No spam. Unsubscribe anytime.</p>
+      </div>
+
+      <!-- View 2: Success -->
+      <div class="cta-form-view" id="waitlist-success" aria-live="polite">
+        <p class="cta-success">&check; You're on the list. We'll be in touch.</p>
+      </div>
+
+      <!-- View 3: Error -->
+      <div class="cta-form-view" id="waitlist-error" role="alert">
+        <p class="cta-error" id="waitlist-error-msg">Something went wrong. Please try again.</p>
+        <button class="cta-back" id="waitlist-retry">&larr; Try Again</button>
+      </div>
     </div>
   </section>
 
@@ -1259,35 +1292,79 @@
       }
     })();
 
-    // waitlist form — intercept submit for AJAX + feedback
-    const form = document.getElementById('waitlist-form');
-    form?.addEventListener('submit', async function (e) {
-      e.preventDefault();
-      const btn = document.getElementById('submitBtn');
-      const inp = document.getElementById('emailInput');
-      const success = document.getElementById('waitlist-success');
-      const email = inp.value;
-      if (!email) return;
+    // newsletter form — Loops.so integration
+    (() => {
+      const LOOPS_ENDPOINT = 'https://app.loops.so/api/newsletter-form/cmpemslgp03m10jxaipjw78iq';
+      const RATE_LIMIT_KEY = 'loops-form-timestamp';
+      const RATE_LIMIT_MS = 60_000;
 
-      btn.textContent = 'Sending…';
-      btn.disabled = true;
+      const form = document.getElementById('waitlist-form');
+      const email = document.getElementById('waitlist-email');
+      const btn = document.getElementById('waitlist-btn');
+      const formView = document.getElementById('waitlist-form-view');
+      const successView = document.getElementById('waitlist-success');
+      const errorView = document.getElementById('waitlist-error');
+      const errorMsg = document.getElementById('waitlist-error-msg');
+      const retryBtn = document.getElementById('waitlist-retry');
 
-      try {
-        await fetch(form.action, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-          body: JSON.stringify({ email })
-        });
-      } catch { /* formsubmit.co may redirect — that's fine */ }
+      function showView(view) {
+        formView.classList.remove('show');
+        successView.classList.remove('show');
+        errorView.classList.remove('show');
+        view.classList.add('show');
+      }
 
-      // Always show success (formsubmit handles the email)
-      btn.textContent = '✓ You\'re on the list';
-      btn.style.background = 'var(--g2)';
-      inp.value = '';
-      inp.placeholder = 'Thanks! We\'ll be in touch.';
-      success.classList.add('show');
-      form.querySelector('.cta-note')?.remove();
-    });
+      function showError(msg) {
+        errorMsg.textContent = msg || 'Something went wrong. Please try again.';
+        showView(errorView);
+        retryBtn.focus();
+      }
+
+      retryBtn?.addEventListener('click', () => {
+        showView(formView);
+        email.focus();
+      });
+
+      form?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const value = email.value.trim();
+        if (!value) return;
+
+        // Rate limiting (60s cooldown)
+        let last = 0;
+        try { last = parseInt(localStorage.getItem(RATE_LIMIT_KEY) || '0', 10); } catch {}
+        if (Date.now() - last < RATE_LIMIT_MS) {
+          showError('Too many attempts. Please try again in a minute.');
+          return;
+        }
+
+        btn.textContent = 'Sending\u2026';
+        btn.disabled = true;
+
+        try {
+          const res = await fetch(LOOPS_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({ email: value }),
+          });
+
+          const data = await res.json();
+
+          if (res.ok || data.message === 'Email already on list.') {
+            try { localStorage.setItem(RATE_LIMIT_KEY, String(Date.now())); } catch {}
+            email.value = '';
+            showView(successView);
+          } else {
+            showError(data.message || null);
+          }
+        } catch {
+          showError('Network error. Please check your connection and try again.');
+        } finally {
+          btn.textContent = 'Join Waitlist';
+          btn.disabled = false;
+        }
+      });
+    })();
   </script>
 </body>
 
