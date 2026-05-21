@@ -326,31 +326,32 @@ Lore re-scans the `lat.md/` directory periodically (on session idle), so changes
 
 ## Eval results
 
-At 400K tokens (realistic coding session length), Lore significantly outperforms the standard tail-window approach across both context retention and preference recall:
+At 400K tokens (realistic coding session length), Lore outperforms standard compaction — the approach used by Claude Code, Codex, and other tools that summarize older context when the conversation grows too long:
 
 ### Context retention (400K tokens)
 
-| What's tested | Lore | Tail-window | Compaction | Lore vs TW |
-|---|---|---|---|---|
-| Easy (late-session details) | **5.0**/5 | 4.7/5 | 4.7/5 | +6% |
-| Medium (mid-session details) | **4.1**/5 | 1.3/5 | 3.9/5 | +215% |
-| Hard (early-session details) | **4.8**/5 | 1.4/5 | 4.1/5 | +243% |
-| **Average across context** | **4.6**/5 | 2.6/5 | 4.1/5 | **+77%** |
+| What's tested | Lore | Compaction | Lore vs Compaction |
+|---|---|---|---|
+| Easy (late-session details) | 4.7/5 | **4.8**/5 | −2% |
+| Medium (mid-session details) | **4.8**/5 | 4.0/5 | +19% |
+| Hard (early-session details) | **4.9**/5 | 4.7/5 | +5% |
+| **Average** | **4.8**/5 | 4.5/5 | **+7%** |
+| **Perfect scores (5.0)** | **12/15** | 9/15 | — |
 
-*Lore scores are averaged across multiple runs at 400K tokens. Tail-window and compaction baselines are from a prior eval run with the same scenarios. Tail-window drops early-session details entirely; Lore's distillation + recall preserves them — including decision alternatives, exact error messages, and debugging hypotheses.*
+*Compaction baseline: multi-pass LLM summarization matching Claude Code's auto-compact behavior (~140K threshold, 2-3 cycles at 400K tokens). Scored by LLM-as-judge on a 1–5 scale. Lore's advantage is largest on medium-difficulty questions — mid-session details like decision alternatives, exact error messages, and rejected approaches that compaction summarizes away but Lore's distillation + recall preserves.*
 
 ### Preference recall (400K tokens)
 
-| What's tested | Lore | Tail-window | Delta |
+| What's tested | Lore | Compaction | Delta |
 |---|---|---|---|
 | Explicit preferences ("always use const") | **4.96**/5 | 3.40/5 | +46% |
 | Implicit behavioral patterns | **4.83**/5 | 2.97/5 | +63% |
 | Preference evolution (user switches tools) | **5.00**/5 | 3.67/5 | +36% |
 | **Average across preferences** | **4.92**/5 | 3.34/5 | **+47%** |
 
-*Scored by LLM-as-judge on a 1–5 scale. Tail-window baseline: last 80K tokens of raw conversation (the default behavior without Lore). Evaluated at 400K tokens — the point where context management actually matters.*
+*Preference recall baselines are from a prior eval run with tail-window (80K). Compaction preference baselines pending re-run.*
 
-**What this means:** after 400K tokens of conversation, the standard approach loses early-session details entirely and forgets a third of your stated preferences. Lore's distillation + recall preserves both — averaging 4.6/5 on context retention where tail-window averages 2.6/5.
+**What this means:** at 400K tokens, Lore scores 4.8/5 on context retention with 12 out of 15 perfect scores — compared to compaction's 4.5/5 with 9 perfect scores. The gap is largest on mid-session details that compaction loses through repeated summarization cycles.
 
 The eval suite (16 scenarios, 130+ questions, 5 dimensions) is open source in `packages/core/eval/`. Run it yourself:
 
@@ -372,7 +373,7 @@ bun packages/core/eval/run.ts --mode live --inflate 400000
 
 **v5 — behavioral pattern detection + 400K eval.** Vector similarity-based pattern echo detection, action tagging in distillation, cross-session pattern clustering, assertion pinning for long sessions, and a scenario inflator for realistic 400K-token evaluation. This is what closed the preference gap from +15% to +47% over tail-window.
 
-**v6 — recall quality + distillation transparency.** Uniform citation format `(d:xxx, t:xxx)` with compression metadata, session-affinity boosting, knowledge downweighting when session content exists, scripted eval replay (zero API calls during replay), amnesia mode, multi-pass compaction baseline. Context retention eval shows +77% over tail-window at 400K tokens (4.6/5 vs 2.6/5) — up from +50% in v5.
+**v6 — recall quality + distillation transparency.** Uniform citation format `(d:xxx, t:xxx)` with compression metadata, session-affinity boosting, knowledge downweighting when session content exists, scripted eval replay (zero API calls during replay), amnesia mode, multi-pass compaction baseline. Context retention: 4.8/5 with 12/15 perfect scores, +7% over compaction at 400K tokens.
 
 ## Development setup
 

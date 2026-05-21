@@ -108,7 +108,7 @@ function parseDimensions(raw: string): Dimension[] {
 function parseBaselines(raw: string): BaselineMode[] {
   if (!raw) {
     // Default baselines depend on dimensions
-    return ["lore", "tail-window", "compaction"];
+    return ["lore", "compaction"];
   }
   return raw.split(",").map((b) => b.trim() as BaselineMode);
 }

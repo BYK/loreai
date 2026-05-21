@@ -124,8 +124,9 @@ Conversation to summarize:
  *
  * Iterative: when the total exceeds `compactionThreshold`, compact the prefix
  * and check again. Real tools (Claude Code) auto-compact at ~83.5% of the
- * context window, and a 400K session triggers 2-3 compaction cycles. Each
- * cycle replaces the prefix with a summary, losing more detail.
+ * context window (~140K for a 200K model). A 400K session triggers 2-3
+ * compaction cycles. Each cycle replaces the prefix with a summary, losing
+ * more detail.
  */
 export async function compactionBaseline(
   turns: ConversationTurn[],
@@ -133,7 +134,9 @@ export async function compactionBaseline(
   llm: EvalLLMClient,
   modelContextWindow: number = 200_000,
 ): Promise<string> {
-  // Match Claude Code's autoCompactThreshold: effectiveContextWindow * 0.835
+  // Match real tool behavior: no compaction until the conversation exceeds
+  // the model's effective context window. Claude Code auto-compacts at ~83.5%
+  // of (contextWindow - outputReserve). For a 200K model: ~140K threshold.
   const compactionThreshold = Math.floor(
     (modelContextWindow - Math.min(32_000, modelContextWindow * 0.15)) * 0.835,
   );
@@ -144,10 +147,10 @@ export async function compactionBaseline(
   while (compactionCount < maxCompactions) {
     const total = totalTokens(currentTurns);
 
-    // If everything fits within the threshold (or within the tail budget
-    // on the first pass), no more compaction needed.
-    if (compactionCount > 0 && total <= compactionThreshold) break;
-    if (total <= tailBudgetTokens) break;
+    // No compaction until the conversation exceeds the threshold (~140K for
+    // a 200K model). This matches real tool behavior — compaction doesn't
+    // trigger at 80K, only when context pressure is real.
+    if (total <= compactionThreshold) break;
 
     // Find the tail window cutoff
     let tailTokens = 0;
