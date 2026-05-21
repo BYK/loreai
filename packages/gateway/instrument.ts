@@ -72,6 +72,19 @@ const sentryEnabled =
   sentryEnvVar === "1" ? true : sentryEnvVar === "0" ? false : !isDev;
 
 if (sentryEnabled && !Sentry.isInitialized()) {
+  // Transient network errors that are expected in a long-running LLM proxy.
+  // These are not actionable bugs — they occur when clients disconnect,
+  // upstreams are temporarily unavailable, or network conditions degrade.
+  const TRANSIENT_ERROR_PATTERNS = [
+    /\bEPIPE\b/,
+    /socket connection was closed unexpectedly/i,
+    /ZlibError/,
+    /The operation timed out/i,
+    /Worker upstream exhausted \d+ retries/,
+    /ECONNRESET\b/,
+    /ECONNREFUSED\b/,
+  ];
+
   Sentry.init({
     dsn: "https://0282201d6a3df3bc46423e61012ae62b@o275100.ingest.us.sentry.io/4511355222622208",
 
@@ -85,6 +98,20 @@ if (sentryEnabled && !Sentry.isInitialized()) {
     // Capture 100% of transactions and logs
     tracesSampleRate: 1.0,
     enableLogs: true,
+
+    // Drop transient network errors that are not actionable bugs.
+    // Each exception in the chain is tested independently so a real bug
+    // wrapping a transient cause isn't accidentally silenced.
+    beforeSend(event) {
+      const values = event.exception?.values;
+      if (values?.some((v) => {
+        const msg = `${v.type}: ${v.value}`;
+        return TRANSIENT_ERROR_PATTERNS.some((re) => re.test(msg));
+      })) {
+        return null;
+      }
+      return event;
+    },
   });
 
   // Bridge core's log.* calls → Sentry structured logs + error capture

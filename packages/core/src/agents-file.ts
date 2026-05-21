@@ -540,9 +540,16 @@ export function exportLoreFile(projectPath: string): void {
   }
 
   // Content changed — write and update cache.
-  writeFileSync(fp, content, "utf8");
-  const { mtimeMs } = statSync(fp);
-  setCache(fp, { mtimeMs, hash: contentHash });
+  // Wrap in try-catch to silently handle ENOENT (project dir deleted/renamed
+  // mid-session). Other FS errors (EACCES, EIO) still propagate.
+  try {
+    writeFileSync(fp, content, "utf8");
+    const { mtimeMs } = statSync(fp);
+    setCache(fp, { mtimeMs, hash: contentHash });
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw e;
+  }
 }
 
 /**

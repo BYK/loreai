@@ -2,6 +2,18 @@ import { z } from "zod";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { isHostedMode } from "./hosted";
+import { warn } from "./log";
+
+/**
+ * Strip JS-style comments from a JSON string, enabling JSONC support for
+ * `.lore.json`. Preserves `//` and `/* ... *​/` inside quoted strings.
+ * Also removes trailing commas before `}` or `]`.
+ */
+function stripJsonComments(str: string): string {
+  return str
+    .replace(/("(?:[^"\\]|\\.)*")|\/\/[^\n]*|\/\*[\s\S]*?\*\//g, (m, s) => s ?? "")
+    .replace(/,\s*([}\]])/g, "$1");
+}
 
 export const LoreConfig = z.object({
   model: z
@@ -257,9 +269,15 @@ export async function load(directory: string): Promise<LoreConfig> {
   if (!isHostedMode()) {
     const path = join(directory, ".lore.json");
     if (existsSync(path)) {
-      const raw = JSON.parse(readFileSync(path, "utf8"));
-      current = LoreConfig.parse(raw);
-      return current;
+      try {
+        const raw = JSON.parse(stripJsonComments(readFileSync(path, "utf8")));
+        current = LoreConfig.parse(raw);
+        return current;
+      } catch (e) {
+        warn(
+          `Failed to parse ${path}: ${e instanceof Error ? e.message : e}. Using defaults.`,
+        );
+      }
     }
   }
   current = LoreConfig.parse({});

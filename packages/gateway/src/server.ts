@@ -260,6 +260,9 @@ export function startServer(config: GatewayConfig): {
   stop: () => void;
   port: number;
   hosts: string[];
+  /** Resolves when the server is listening. Present under Node.js (where
+   *  server.listen() is async); absent under Bun (where bind is synchronous). */
+  ready?: Promise<void>;
 } {
   // Defensive defaults for public API consumers who may pass incomplete config.
   // loadConfig() always provides these, but startServer is a public export.
@@ -367,9 +370,19 @@ export function startServer(config: GatewayConfig): {
     return s;
   });
 
+  // Under Node.js the polyfill's serve() returns a `ready` promise that
+  // resolves when the server is actually listening (server.listen() is async).
+  // Collect all ready promises so startGateway() can await them.
+  const readyPromises = servers
+    .map((s: any) => s.ready as Promise<void> | undefined)
+    .filter(Boolean) as Promise<void>[];
+
   return {
     stop: () => servers.forEach((s) => s.stop()),
     port: resolvedPort,
     hosts: config.hosts,
+    ready: readyPromises.length > 0
+      ? Promise.all(readyPromises).then(() => {})
+      : undefined,
   };
 }

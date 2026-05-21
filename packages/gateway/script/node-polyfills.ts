@@ -85,6 +85,17 @@ if (typeof globalThis.Bun === "undefined") {
       }
     });
 
+    // Node's server.listen() is async — EADDRINUSE is emitted as an 'error'
+    // event, not thrown synchronously. Expose a `ready` promise so callers
+    // (startGateway) can await successful bind and catch port conflicts.
+    const ready = new Promise<void>((resolve, reject) => {
+      server.once("listening", resolve);
+      server.once("error", reject);
+    });
+    // Prevent UnhandledPromiseRejection if the caller never awaits `ready`.
+    // The real error surfaces when startGateway() awaits it.
+    ready.catch(() => {});
+
     server.listen(opts.port, opts.hostname);
 
     return {
@@ -94,6 +105,7 @@ if (typeof globalThis.Bun === "undefined") {
         if (typeof addr === "object" && addr !== null) return addr.port;
         return opts.port;
       },
+      ready,
     };
   }
 

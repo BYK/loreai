@@ -331,6 +331,8 @@ export declare function startServer(config: GatewayConfig): {
   stop: () => void;
   port: number;
   hosts: string[];
+  /** Resolves when the server is listening. Present under Node.js; absent under Bun. */
+  ready?: Promise<void>;
 };
 
 /**

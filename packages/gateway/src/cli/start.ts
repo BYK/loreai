@@ -107,8 +107,11 @@ export async function startGateway(opts: StartOptions = {}): Promise<GatewayHand
 
   for (const candidatePort of portsToTry) {
     config.port = candidatePort;
+    const server = startServer(config);
     try {
-      const server = startServer(config);
+      // Under Node.js, server.listen() is async — await the ready promise
+      // so EADDRINUSE rejects here and the catch block can try the next port.
+      if (server.ready) await server.ready;
       const actualPort = server.port;
 
       // Write port file so plugins can discover us (even on random port).
@@ -134,6 +137,11 @@ export async function startGateway(opts: StartOptions = {}): Promise<GatewayHand
 
       return { config, port: actualPort, owned: true, shutdown };
     } catch (e) {
+      // Clean up any successfully-bound servers before retrying.
+      // In multi-host configs, some hosts may have bound before another
+      // failed with EADDRINUSE — stop them to avoid leaking FDs.
+      server.stop();
+
       const msg = e instanceof Error ? e.message : String(e);
       if (!(/port\b.*\bin use/i.test(msg) || /EADDRINUSE/i.test(msg))) {
         throw e; // Not a port conflict — don't retry
