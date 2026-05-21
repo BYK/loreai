@@ -153,3 +153,27 @@ bun run build        # build all packages (esbuild bundles)
 - Tests use a temporary SQLite DB (via `packages/core/test/setup.ts` preload) — never the production DB
 - Gateway build: `packages/gateway/script/build.ts` produces CJS bundle; `script/bundle.ts` creates standalone binary
 - Core build: `packages/core/script/build.ts` produces Node.js-compatible CJS output
+
+## Releasing
+
+Releases use [Sentry Craft](https://github.com/getsentry/craft) via GitHub Actions. **Never manually bump versions or edit CHANGELOG.md** — Craft handles both automatically.
+
+To cut a release:
+
+```bash
+# Trigger the Release workflow (version: "auto" uses conventional commits to determine semver)
+gh workflow run release.yml -f version=auto
+
+# Or specify an explicit version
+gh workflow run release.yml -f version=0.23.0
+```
+
+The workflow:
+1. Runs `scripts/bump-version.sh` to update all `package.json` versions
+2. Generates changelog from conventional commit messages
+3. Creates a `release/X.Y.Z` branch and pushes it
+4. CI runs on the release branch: tests, builds npm tarballs, standalone binaries, delta patches
+5. Craft opens a "publish" issue; when labeled `accepted`, the Publish workflow runs
+6. Publish: npm publish (OIDC trusted publishing), GitHub Release with binaries and patches
+
+Config: `.craft.yml` defines targets (4 npm workspaces + legacy `opencode-lore` alias + GitHub Release with binaries).
