@@ -61,6 +61,44 @@ jobs:
           sudo curl -fsSL -o /usr/local/bin/craft "$CRAFT_URL"
           sudo chmod +x /usr/local/bin/craft
 
+      # Parse checked targets from the publish issue body and write a Craft
+      # publish-state file so Craft skips already-published targets on retry.
+      # Modelled after getsentry/publish's "Set targets" step.
+      - name: Set already-published targets
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          VERSION: ${{ steps.inputs.outputs.version }}
+        run: |
+          # Extract checked targets (already published / skip)
+          CHECKED=$(echo "$ISSUE_BODY" \
+            | grep -oP '^\s*- \[x\] \K\S+' || true)
+
+          if [[ -n "$CHECKED" ]]; then
+            # Build JSON: {"published": {"target1": true, "target2": true}}
+            published="{}"
+            while IFS= read -r t; do
+              published=$(echo "$published" | jq --arg t "$t" '.[$t] = true')
+            done <<< "$CHECKED"
+            payload=$(jq -n --argjson p "$published" '{"published": $p}')
+
+            # Compute state file path the same way Craft does:
+            # SHA1 of cwd, sanitised owner/repo/version
+            cwd_hash=$(printf '%s' "$GITHUB_WORKSPACE" | sha1sum | cut -c1-12)
+            sanitise() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]\+/_/g; s/^_\+//; s/_\+$//'; }
+            owner_sanitised=$(sanitise "${GITHUB_REPOSITORY_OWNER}")
+            repo_sanitised=$(sanitise "${GITHUB_REPOSITORY#*/}")
+            version_sanitised=$(sanitise "$VERSION")
+
+            state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/craft"
+            state_file="$state_dir/publish-state-${owner_sanitised}-${repo_sanitised}-${cwd_hash}-${version_sanitised}.json"
+            mkdir -p "$state_dir"
+            printf '%s' "$payload" > "$state_file"
+            echo "Wrote publish state file: $state_file"
+            echo "Contents: $(cat "$state_file")"
+          else
+            echo "No checked targets found — publishing all targets."
+          fi
+
       - name: Publish
         run: craft publish "${{ steps.inputs.outputs.version }}" --no-input
         env:
@@ -74,6 +112,49 @@ jobs:
           gh issue close "${{ github.event.issue.number }}" \
             --comment "Published **${{ steps.inputs.outputs.version }}** successfully.
           [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+
+      # On failure/cancel, read the Craft publish state file to find which
+      # targets succeeded, then check them off in the issue body so the next
+      # retry skips them automatically.
+      - name: Update published targets in issue
+        if: cancelled() || failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.inputs.outputs.version }}
+        run: |
+          # Locate the state file
+          cwd_hash=$(printf '%s' "$GITHUB_WORKSPACE" | sha1sum | cut -c1-12)
+          sanitise() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]\+/_/g; s/^_\+//; s/_\+$//'; }
+          owner_sanitised=$(sanitise "${GITHUB_REPOSITORY_OWNER}")
+          repo_sanitised=$(sanitise "${GITHUB_REPOSITORY#*/}")
+          version_sanitised=$(sanitise "$VERSION")
+          state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/craft"
+          state_file="$state_dir/publish-state-${owner_sanitised}-${repo_sanitised}-${cwd_hash}-${version_sanitised}.json"
+
+          if [[ ! -f "$state_file" ]]; then
+            echo "No publish state file found — skipping target update."
+            exit 0
+          fi
+
+          echo "State file contents: $(cat "$state_file")"
+
+          # Get published target names from state file
+          published_targets=$(jq -r '.published // {} | keys[]' "$state_file")
+          if [[ -z "$published_targets" ]]; then
+            echo "No published targets in state file."
+            exit 0
+          fi
+
+          # Fetch current issue body and check off published targets
+          body=$(gh issue view "${{ github.event.issue.number }}" --json body --jq '.body')
+          while IFS= read -r target; do
+            # Escape special regex chars in target name
+            escaped=$(printf '%s' "$target" | sed 's/[][().\*^$?+{}|/]/\\&/g')
+            body=$(echo "$body" | sed "s/- \[ \] ${escaped}/- [x] ${escaped}/")
+          done <<< "$published_targets"
+
+          gh issue edit "${{ github.event.issue.number }}" --body "$body"
+          echo "Updated issue with published targets."
 
       - name: Comment on failure
         if: failure()
