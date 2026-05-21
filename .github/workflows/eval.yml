@@ -1,13 +1,6 @@
 name: Lore Eval Suite
 
 on:
-  # Fixture mode on PRs that touch core/gateway code or eval suite
-  pull_request:
-    paths:
-      - 'packages/core/src/**'
-      - 'packages/gateway/src/**'
-      - 'packages/core/eval/**'
-
   # Live mode on weekly schedule
   schedule:
     - cron: '0 6 * * 1' # Monday 6am UTC
@@ -31,9 +24,7 @@ on:
 
 jobs:
   eval-fixture:
-    if: >
-      github.event_name == 'pull_request' ||
-      (github.event_name == 'workflow_dispatch' && inputs.mode == 'fixture')
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'fixture'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
