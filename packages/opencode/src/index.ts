@@ -1,5 +1,5 @@
 import type { Plugin, Hooks } from "@opencode-ai/plugin";
-import { log, getGitRemote } from "@loreai/core";
+import { log, getGitRemote, discoverWorkspaceRoot } from "@loreai/core";
 
 /**
  * Providers whose wire protocol the Lore gateway can proxy.
@@ -254,9 +254,11 @@ export const LorePlugin: Plugin = async (ctx) => {
       output.headers["x-lore-session-id"] = input.sessionID;
       output.headers["x-lore-agent"] = input.agent;
       // Inject project path so the gateway can attribute data correctly.
-      output.headers["x-lore-project"] = ctx.worktree || ctx.directory;
+      // discoverWorkspaceRoot walks up from the project dir to find a
+      // monorepo/workspace root (cached after first call).
+      output.headers["x-lore-project"] = discoverWorkspaceRoot(ctx.worktree || ctx.directory);
       if (cachedGitRemote === undefined) {
-        const projectPath = ctx.worktree || ctx.directory;
+        const projectPath = discoverWorkspaceRoot(ctx.worktree || ctx.directory);
         cachedGitRemote = getGitRemote(projectPath) ?? "";
       }
       if (cachedGitRemote) {
@@ -277,7 +279,7 @@ export const LorePlugin: Plugin = async (ctx) => {
 
   // Startup banner — visible in stderr so silent failures are obvious.
   if (!processInitDone) {
-    const projectPath = ctx.worktree || ctx.directory;
+    const projectPath = discoverWorkspaceRoot(ctx.worktree || ctx.directory);
     process.stderr.write(`[lore] active: ${projectPath}\n`);
 
     if (loreActive) {

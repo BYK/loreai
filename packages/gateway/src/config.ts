@@ -4,7 +4,7 @@
  * (only `normalizeRemoteUrl` for git URL canonicalization).
  */
 
-import { normalizeRemoteUrl } from "@loreai/core";
+import { normalizeRemoteUrl, discoverWorkspaceRoot } from "@loreai/core";
 
 // ---------------------------------------------------------------------------
 // Port defaults
@@ -270,8 +270,8 @@ export function getProjectPath(
   const inferred = inferProjectPath(systemPrompt);
   if (inferred) return { path: inferred, source: "inferred", gitRemote };
 
-  // 3. Fall back to gateway's own cwd
-  return { path: process.cwd(), source: "cwd", gitRemote };
+  // 3. Fall back to gateway's own cwd (with workspace root discovery)
+  return { path: discoverWorkspaceRoot(process.cwd()), source: "cwd", gitRemote };
 }
 
 // ---------------------------------------------------------------------------

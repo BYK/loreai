@@ -12,6 +12,7 @@ import { loadConfig } from "../config";
 import { detectAgents, AGENTS, type DetectedAgent } from "./agents";
 import { safeExit } from "./exit";
 import { maybeAutoImport } from "./import-auto";
+import { discoverWorkspaceRoot } from "@loreai/core";
 
 // ---------------------------------------------------------------------------
 // Interactive agent picker (TTY only)
@@ -59,12 +60,18 @@ async function resolveLaunchTarget(
   cmdArgs: string[],
   extraArgs: string[],
 ): Promise<LaunchTarget | null> {
+  // Resolve workspace root once — walks up from cwd looking for monorepo
+  // markers (.lore.json with workspaces, .git, pnpm-workspace.yaml, etc.)
+  const projectDir = discoverWorkspaceRoot(process.cwd());
+  if (projectDir !== process.cwd()) {
+    console.log(`[lore] Workspace root: ${projectDir}`);
+  }
+
   // --- Explicit command given: inject all known env vars ---
   if (cmdArgs.length > 0) {
-    const cwd = process.cwd();
     const env: Record<string, string> = {};
     for (const agent of AGENTS) {
-      Object.assign(env, agent.envVars(gatewayUrl, cwd));
+      Object.assign(env, agent.envVars(gatewayUrl, projectDir));
     }
     return { command: cmdArgs[0], args: [...cmdArgs.slice(1), ...extraArgs], env };
   }
@@ -99,7 +106,7 @@ async function resolveLaunchTarget(
   return {
     command: agent.def.binary,
     args: [...extraArgs],
-    env: agent.def.envVars(gatewayUrl, process.cwd()),
+    env: agent.def.envVars(gatewayUrl, projectDir),
   };
 }
 

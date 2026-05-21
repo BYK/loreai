@@ -147,8 +147,14 @@ export {
   shouldImportLoreFile,
   loreFileExists,
   clearLoreFileCache,
+  importLoreFileAs,
   LORE_FILE,
 } from "./agents-file";
+export {
+  discoverWorkspaceRoot,
+  resolveWorkspaces,
+  clearWorkspaceCache,
+} from "./workspace";
 export { workerSessionIDs, isWorkerSession } from "./worker";
 export * as workerModel from "./worker-model";
 export {

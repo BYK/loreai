@@ -244,6 +244,11 @@ export const LoreConfig = z.object({
       conversationTTL: "auto",
       warming: { enabled: true },
     }),
+  /** Workspace sub-project paths or globs, relative to the `.lore.json` directory.
+   *  At startup, Lore imports `.lore.md` from each resolved sub-project into the
+   *  root project's knowledge base. Supports literal paths (`"project-a"`) and
+   *  single-level globs (`"packages/*"`). */
+  workspaces: z.array(z.string()).default([]),
   crossProject: z.boolean().default(false),
   agentsFile: z
     .object({

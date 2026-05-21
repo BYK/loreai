@@ -617,3 +617,47 @@ export function importLoreFile(projectPath: string): void {
     // stat failure is non-fatal — worst case we re-import next time
   }
 }
+
+/**
+ * Import knowledge entries from a `.lore.md` file at `sourcePath`,
+ * attributed to `targetProjectPath`'s project.
+ *
+ * Used for monorepo workspace imports: sub-project knowledge should be
+ * visible in the parent project's session, so entries are created under
+ * the target project's ID rather than the source directory's.
+ *
+ * The source `.lore.md` is read-only — Lore does not write back to it.
+ */
+export function importLoreFileAs(
+  sourcePath: string,
+  targetProjectPath: string,
+): void {
+  if (isHostedMode()) return;
+
+  const fp = join(sourcePath, LORE_FILE);
+  if (!existsSync(fp)) return;
+
+  // Fast path: skip re-import when the source file hasn't changed since
+  // the last import (mtime check, then content hash verification).
+  try {
+    const { mtimeMs } = statSync(fp);
+    const cached = getCache(fp);
+    if (cached && cached.mtimeMs === mtimeMs) return;
+  } catch {
+    // stat failure — proceed with import
+  }
+
+  const fileContent = readFileSync(fp, "utf8");
+  const fileEntries = parseEntriesFromSection(fileContent);
+  if (!fileEntries.length) return;
+
+  _importEntries(fileEntries, targetProjectPath);
+
+  // Update cache so subsequent calls fast-path.
+  try {
+    const { mtimeMs } = statSync(fp);
+    setCache(fp, { mtimeMs, hash: hashSection(fileContent) });
+  } catch {
+    // stat failure is non-fatal
+  }
+}

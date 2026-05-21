@@ -53,6 +53,8 @@ import {
   loadHeaderSessionIndex,
   isHostedMode,
   enableHostedMode,
+  importLoreFileAs,
+  resolveWorkspaces,
 } from "@loreai/core";
 
 import type {
@@ -618,12 +620,47 @@ function startKnowledgeFileWatcher(projectPath: string): () => void {
     }
   }
 
+  // Watch .lore.md in configured workspace sub-projects.
+  // Changes in sub-project files trigger a re-import into the root project.
+  // Each sub-project gets its own debounce timer so concurrent edits across
+  // sub-projects don't cancel each other's pending imports.
+  const allTimers: Array<{ clear: () => void }> = [
+    { clear: () => { if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; } } },
+  ];
+  if (cfg.workspaces.length > 0) {
+    const subDirs = resolveWorkspaces(projectPath, cfg.workspaces);
+    for (const subDir of subDirs) {
+      const subLoreFile = join(subDir, LORE_FILE);
+      if (existsSync(subLoreFile)) {
+        try {
+          let subTimer: ReturnType<typeof setTimeout> | null = null;
+          const w = watch(subLoreFile, () => {
+            if (subTimer) clearTimeout(subTimer);
+            subTimer = setTimeout(() => {
+              subTimer = null;
+              try {
+                importLoreFileAs(subDir, projectPath);
+              } catch (e) {
+                log.error(`workspace knowledge re-import error (${subDir}):`, e);
+              }
+            }, DEBOUNCE_MS);
+          });
+          w.on("error", () => {});
+          watchers.push(w);
+          allTimers.push({ clear: () => { if (subTimer) { clearTimeout(subTimer); subTimer = null; } } });
+        } catch {
+          // watch not supported
+        }
+      }
+    }
+  }
+
   if (watchers.length > 0) {
     log.info(`watching ${watchers.length} knowledge file(s) for changes`);
   }
 
   return () => {
-    if (debounceTimer) clearTimeout(debounceTimer);
+    for (const t of allTimers) t.clear();
     for (const w of watchers) {
       try { w.close(); } catch { /* already closed */ }
     }
@@ -657,6 +694,24 @@ async function initIfNeeded(projectPath: string, config: GatewayConfig, gitRemot
   const cfg = loreConfig();
   if (cfg.knowledge.enabled) {
     tryImportKnowledge(projectPath);
+
+    // Import .lore.md files from configured workspace sub-projects.
+    // Entries are attributed to the root project so they're visible in
+    // the current session's knowledge context.
+    if (cfg.workspaces.length > 0) {
+      const { basename } = require("node:path") as typeof import("node:path");
+      const subDirs = resolveWorkspaces(projectPath, cfg.workspaces);
+      for (const subDir of subDirs) {
+        try {
+          if (loreFileExists(subDir)) {
+            importLoreFileAs(subDir, projectPath);
+            log.info(`imported knowledge from workspace: ${basename(subDir)}`);
+          }
+        } catch (e) {
+          log.error(`workspace knowledge import error (${subDir}):`, e);
+        }
+      }
+    }
 
     // Prune corrupted/oversized knowledge entries (safety net for past bugs).
     const pruned = ltm.pruneOversized(1200);
