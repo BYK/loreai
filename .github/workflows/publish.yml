@@ -39,6 +39,7 @@ jobs:
           ref: release/${{ steps.inputs.outputs.version }}
           token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Set git user
         run: |
@@ -65,6 +66,24 @@ jobs:
         run: craft publish "${{ steps.inputs.outputs.version }}" --no-input
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      # Finalize the Sentry release: associate commits and mark as deployed.
+      # Sourcemaps are already uploaded during the CI build step — this step
+      # only needs to set commits, finalize, and create a deploy marker.
+      # continue-on-error: this is post-publish telemetry — a Sentry API
+      # outage must not block issue closure or trigger false failure comments.
+      - name: Finalize Sentry release
+        if: success()
+        continue-on-error: true
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: byk
+          SENTRY_PROJECT: loreai-gateway
+          VERSION: ${{ steps.inputs.outputs.version }}
+        run: |
+          npx --yes @sentry/cli releases set-commits "$VERSION" --auto
+          npx --yes @sentry/cli releases finalize "$VERSION"
+          npx --yes @sentry/cli releases deploys "$VERSION" new -e production
 
       - name: Close issue on success
         if: success()
