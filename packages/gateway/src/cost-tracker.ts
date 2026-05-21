@@ -236,21 +236,27 @@ export function getPricingSync(model: string): Pricing {
  *
  * This is the single source of truth for cost computation — used by both
  * the accumulator (sync, hot path) and Sentry metrics emission.
+ *
+ * @param ttl - Cache TTL for this call. Anthropic charges 2× cache_write
+ *   for 1h TTL; without this parameter the cost uses the base (5m) rate.
  */
 export function computeCallCost(
   model: string,
   usage: Usage,
   callType: "conversation" | "direct" | "batch",
+  ttl?: "5m" | "1h",
 ): CallCost {
   const pricing = getPricingSync(model);
   const batchMultiplier = callType === "batch" ? 0.5 : 1.0;
+  // Anthropic doubles cache_write pricing for 1h TTL
+  const cacheWriteRate = ttl === "1h" ? pricing.cache_write * 2 : pricing.cache_write;
 
   const inputCost =
     ((usage.input_tokens ?? 0) / 1_000_000) * pricing.input * batchMultiplier;
   const cacheReadCost =
     ((usage.cache_read_input_tokens ?? 0) / 1_000_000) * pricing.cache_read;
   const cacheWriteCost =
-    ((usage.cache_creation_input_tokens ?? 0) / 1_000_000) * pricing.cache_write;
+    ((usage.cache_creation_input_tokens ?? 0) / 1_000_000) * cacheWriteRate;
   const outputCost =
     ((usage.output_tokens ?? 0) / 1_000_000) * pricing.output * batchMultiplier;
 
@@ -269,14 +275,18 @@ export function computeCallCost(
 
 /**
  * Record a conversation turn's cost (called from postResponse).
+ *
+ * @param ttl - Cache TTL for this session. Anthropic charges 2× cache_write
+ *   for 1h TTL; without this the cost uses the base (5m) rate.
  */
 export function recordConversationCost(
   sessionID: string,
   model: string,
   usage: Usage,
+  ttl?: "5m" | "1h",
 ): void {
   const costs = getOrCreate(sessionID);
-  const call = computeCallCost(model, usage, "conversation");
+  const call = computeCallCost(model, usage, "conversation", ttl);
   costs.conversation.cost += call.total;
   costs.conversation.inputTokens += usage.input_tokens ?? 0;
   costs.conversation.outputTokens += usage.output_tokens ?? 0;
@@ -364,6 +374,7 @@ const POST_COMPACTION_CONTEXT = 30_000;
 function estimateCompactionCost(
   workerModel: string,
   conversationModel?: string,
+  ttl?: "5m" | "1h",
 ): number {
   const wPricing = getPricingSync(workerModel);
   // Force-distill: ~10K input, ~2K output
@@ -376,12 +387,14 @@ function estimateCompactionCost(
   // Cache bust: post-compaction context (~POST_COMPACTION_CONTEXT tokens) must
   // be re-written to cache. The penalty is the difference between cache_write
   // and cache_read pricing on the conversation model.
+  // Anthropic charges 2× cache_write for 1h TTL.
   let cacheBustCost = 0;
   if (conversationModel) {
     const cPricing = getPricingSync(conversationModel);
+    const cacheWriteRate = ttl === "1h" ? cPricing.cache_write * 2 : cPricing.cache_write;
     cacheBustCost =
       (POST_COMPACTION_CONTEXT / 1_000_000) *
-      (cPricing.cache_write - cPricing.cache_read);
+      (cacheWriteRate - cPricing.cache_read);
   }
 
   return distillCost + compactCost + cacheBustCost;
@@ -413,6 +426,7 @@ export function updateShadowContext(
   outputTokens: number,
   workerModel: string,
   conversationModel?: string,
+  ttl?: "5m" | "1h",
 ): void {
   const costs = getOrCreate(sessionID);
 
@@ -443,7 +457,7 @@ export function updateShadowContext(
   if (costs._shadowContextTokens > AUTOCOMPACT_THRESHOLD) {
     costs.counterfactual.avoidedCompactions++;
     costs.counterfactual.avoidedCompactionCost +=
-      estimateCompactionCost(workerModel, conversationModel);
+      estimateCompactionCost(workerModel, conversationModel, ttl);
     costs._shadowContextTokens = POST_COMPACTION_CONTEXT;
     log.info(
       `cost-tracker: shadow compaction #${costs.counterfactual.avoidedCompactions} ` +

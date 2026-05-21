@@ -1983,8 +1983,8 @@ function postResponse(
       cache_read_input_tokens: resp.usage.cacheReadInputTokens,
       cache_creation_input_tokens: resp.usage.cacheCreationInputTokens,
     };
-    emitCostMetric(resp.model, usageForSentry, "conversation");
-    recordConversationCost(sessionID, resp.model, usageForSentry);
+    emitCostMetric(resp.model, usageForSentry, "conversation", sessionState.resolvedConversationTTL);
+    recordConversationCost(sessionID, resp.model, usageForSentry, sessionState.resolvedConversationTTL);
     if (genAiSpan) {
       setGenAiUsageAttributes(genAiSpan, usageForSentry, resp.model);
     }
@@ -2230,7 +2230,7 @@ function postResponse(
     // Track how large the context *would* be without Lore's distillation
     // compressing it. When the shadow counter crosses the auto-compact
     // threshold, record a counterfactual compaction event.
-    updateShadowContext(sessionID, actualInput, resp.usage.outputTokens ?? 0, getWorkerModel()?.modelID ?? "unknown", req.model);
+    updateShadowContext(sessionID, actualInput, resp.usage.outputTokens ?? 0, getWorkerModel()?.modelID ?? "unknown", req.model, sessionState.resolvedConversationTTL);
 
     // Mark session dirty for periodic flush (gradient + warming + costs).
     // The 30s idle tick will persist state only for dirty sessions.
@@ -2871,8 +2871,13 @@ async function handleConversationTurn(
   }
 
   // Set cache pricing for tier-based bust-vs-continue decisions in gradient.ts.
+  // Anthropic charges 2× cache_write for 1h TTL — adjust so shouldCompress()
+  // uses the actual write cost when deciding whether to bust the cache.
   if (modelSpec.cacheWriteCost && modelSpec.cacheReadCost) {
-    setCachePricing(modelSpec.cacheWriteCost, modelSpec.cacheReadCost);
+    const effectiveCacheWriteCost = sessionState.resolvedConversationTTL === "1h"
+      ? modelSpec.cacheWriteCost * 2
+      : modelSpec.cacheWriteCost;
+    setCachePricing(effectiveCacheWriteCost, modelSpec.cacheReadCost);
   }
 
   // --- 4c. Dynamic max_tokens sizing for non-Claude-Code clients ---

@@ -1283,7 +1283,7 @@ function renderLiveSessionsTable(rows: LiveSessionRow[], emptyMessage?: string, 
       <th data-sort="text">Session</th>
       <th data-sort="num">Turns</th>
       <th data-sort="num">Total</th>
-      <th data-sort="num">Savings</th>
+      <th data-sort="num">Net</th>
       <th data-sort="num">Cache&nbsp;Hit</th>
       <th data-sort="num">P(returns)</th>
       <th data-sort="text">Status</th>
@@ -1330,7 +1330,11 @@ function pageDashboard(): string {
     <div class="stat"><div class="label">Projects</div><div class="value">${stats.project_count}</div></div>
     <div class="stat"><div class="label">Knowledge</div><div class="value">${stats.knowledge_count}</div></div>
     <div class="stat"><div class="label">Sessions</div><div class="value">${allCosts.size}<span class="total">/${stats.session_count}</span></div></div>
-    ${netSavings > 0 ? `<div class="stat"><div class="label">Net Savings</div><div class="value" style="color:#10b981">${formatUSD(liveSavings)}<span class="total">/${formatUSD(netSavings)}</span></div></div>` : ""}
+    ${netSavings > 0
+      ? `<div class="stat"><div class="label">Net Savings</div><div class="value" style="color:#10b981">${formatUSD(liveSavings)}<span class="total">/${formatUSD(netSavings)}</span></div></div>`
+      : netSavings < 0
+        ? `<div class="stat"><div class="label">Net Overhead</div><div class="value" style="color:#e06c75">${formatUSD(Math.abs(liveSavings))}<span class="total">/${formatUSD(Math.abs(netSavings))}</span></div></div>`
+        : ""}
   </div>`;
 
   if (!projects.length) {
@@ -2177,7 +2181,9 @@ function pageCosts(): string {
           ? `Saved: ${formatUSD(liveTotalSavings)}`
           : `Overhead: ${formatUSD(-liveTotalSavings)}`,
         detailRightHtml: liveTotalWithout > 0
-          ? `${(100 - actualPct).toFixed(0)}% saved`
+          ? liveTotalSavings >= 0
+            ? `${(100 - actualPct).toFixed(0)}% saved`
+            : `${(actualPct - 100).toFixed(0)}% overhead`
           : "",
       });
     }
@@ -2205,8 +2211,10 @@ function pageCosts(): string {
       if (liveBatchSavings > 0) savingsItems.push(`Batch API: ${formatUSD(liveBatchSavings)}`);
       if (liveAvoidedCompactionCost > 0) savingsItems.push(`Avoided compactions: ${formatUSD(liveAvoidedCompactionCost)} (&times;${liveAvoidedCompactions})`);
       if (savingsItems.length) {
+        const netLabel = liveTotalSavings >= 0 ? "Net savings" : "Net overhead";
+        const netValue = liveTotalSavings >= 0 ? formatUSD(liveTotalSavings) : formatUSD(Math.abs(liveTotalSavings));
         body += `<div style="margin-top:10px;font-size:0.85em;color:var(--fg2)">
-          <strong style="color:${liveTotalSavings >= 0 ? "#10b981" : "#e06c75"}">Net savings: ${formatUSD(liveTotalSavings)}</strong>
+          <strong style="color:${liveTotalSavings >= 0 ? "#10b981" : "#e06c75"}">${netLabel}: ${netValue}</strong>
           &mdash; ${savingsItems.join(" &middot; ")}
         </div>`;
       }
@@ -2258,7 +2266,7 @@ function pageCosts(): string {
         ${hist.warmupSavings > 0 ? `<tr><td>Cache warming</td><td>${formatUSD(hist.warmupSavings)} <span style="color:var(--fg3);font-size:0.85em">(${hist.warmupHits} hits)</span></td></tr>` : ""}
         ${hist.ttlSavings > 0 ? `<tr><td>1h TTL extension</td><td>${formatUSD(hist.ttlSavings)} <span style="color:var(--fg3);font-size:0.85em">(${hist.ttlHits} hits)</span></td></tr>` : ""}
         ${hist.batchSavings > 0 ? `<tr><td>Batch API discount</td><td>${formatUSD(hist.batchSavings)}</td></tr>` : ""}
-        <tr style="border-top:1px solid var(--border)"><td><strong>Net estimated savings</strong></td><td><strong style="color:${histNetSavings >= 0 ? "#10b981" : "#e06c75"}">${formatUSD(histNetSavings)}</strong></td></tr>
+        <tr style="border-top:1px solid var(--border)"><td><strong>${histNetSavings >= 0 ? "Net estimated savings" : "Net estimated overhead"}</strong></td><td><strong style="color:${histNetSavings >= 0 ? "#10b981" : "#e06c75"}">${histNetSavings >= 0 ? formatUSD(histNetSavings) : formatUSD(Math.abs(histNetSavings))}</strong></td></tr>
       </table>
     </div>`;
 

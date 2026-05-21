@@ -339,6 +339,7 @@ export function emitCostMetric(
   model: string,
   usage: AnthropicUsage,
   callType: "conversation" | "direct" | "batch",
+  ttl?: "5m" | "1h",
 ): void {
   if (!Sentry.isInitialized()) return;
 
@@ -349,13 +350,15 @@ export function emitCostMetric(
     // Batch discount applies to base input/output only — cache ops have their
     // own pricing tiers and are not discounted by the batch API.
     const batchMultiplier = callType === "batch" ? 0.5 : 1.0;
+    // Anthropic charges 2× cache_write for 1h TTL
+    const cacheWriteRate = ttl === "1h" ? pricing.cache_write * 2 : pricing.cache_write;
 
     const uncachedInputCost =
       ((usage.input_tokens ?? 0) / 1_000_000) * pricing.input * batchMultiplier;
     const cacheReadCost =
       ((usage.cache_read_input_tokens ?? 0) / 1_000_000) * pricing.cache_read;
     const cacheWriteCost =
-      ((usage.cache_creation_input_tokens ?? 0) / 1_000_000) * pricing.cache_write;
+      ((usage.cache_creation_input_tokens ?? 0) / 1_000_000) * cacheWriteRate;
     const outputCost =
       ((usage.output_tokens ?? 0) / 1_000_000) * pricing.output * batchMultiplier;
 
