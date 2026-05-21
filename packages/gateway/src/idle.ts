@@ -35,6 +35,7 @@ import type { SessionState } from "./translate/types";
 import { getWorkerModel } from "./worker-model";
 import {
   isCircuitBreakerTripped,
+  isWarmupAuthDisabled,
   resolveProfile,
   blendedHistogramForSession,
   shouldWarm,
@@ -100,6 +101,9 @@ export function startIdleScheduler(
 
     for (const [sessionID, state] of sessions) {
       if (warmupInProgress.has(sessionID)) continue;
+
+      // Skip sessions with stale auth credentials — warmup would just 401
+      if (isWarmupAuthDisabled(sessionID)) continue;
 
       // Skip sub-agent sessions — ephemeral, warming is wasted work
       if (state.isSubagent) continue;

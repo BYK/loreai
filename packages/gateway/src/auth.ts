@@ -90,6 +90,7 @@ export function setSessionAuth(
   cred: AuthCredential,
 ): void {
   sessionAuth.set(sessionID, cred);
+  staleSessionAuth.delete(sessionID); // Fresh credential clears staleness
 }
 
 export function getSessionAuth(
@@ -101,6 +102,36 @@ export function getSessionAuth(
 /** Delete a session's credential (for future eviction). */
 export function deleteSessionAuth(sessionID: string): void {
   sessionAuth.delete(sessionID);
+  staleSessionAuth.delete(sessionID);
+}
+
+// ---------------------------------------------------------------------------
+// Staleness tracking (per-session)
+// ---------------------------------------------------------------------------
+
+/**
+ * Session IDs whose stored credential returned a 401/403.
+ *
+ * Tracked separately from AuthCredential to keep the type clean (follows
+ * batch-queue's `disabledBatchSessions` pattern). Not persisted — on
+ * process restart, the first client request provides fresh credentials.
+ * Cleared automatically when `setSessionAuth()` stores a new credential.
+ */
+const staleSessionAuth = new Set<string>();
+
+/** Mark a session's credential as stale (401/403 received). */
+export function markAuthStale(sessionID: string): void {
+  staleSessionAuth.add(sessionID);
+}
+
+/** Check if a session's credential is marked stale. */
+export function isAuthStale(sessionID: string): boolean {
+  return staleSessionAuth.has(sessionID);
+}
+
+/** Clear staleness for a session (fresh credential arrived). */
+export function clearAuthStale(sessionID: string): void {
+  staleSessionAuth.delete(sessionID);
 }
 
 // ---------------------------------------------------------------------------
@@ -125,6 +156,8 @@ export function getLastSeenAuth(): AuthCredential | null {
  * Resolve auth credentials for a given session.
  *
  * 1. If `sessionID` is provided, check the per-session registry first.
+ *    Skips stale credentials (401/403 received) so the global fallback
+ *    can provide a potentially-refreshed token.
  * 2. Fall back to the global `lastSeenAuth` (for cold-start or callers
  *    that don't pass a session ID).
  */
@@ -133,7 +166,18 @@ export function resolveAuth(
 ): AuthCredential | null {
   if (sessionID) {
     const cred = getSessionAuth(sessionID);
-    if (cred) return cred;
+    if (cred && !staleSessionAuth.has(sessionID)) return cred;
   }
   return getLastSeenAuth();
+}
+
+// ---------------------------------------------------------------------------
+// Test helpers
+// ---------------------------------------------------------------------------
+
+/** Reset all auth state — test-only. */
+export function _resetAuthForTest(): void {
+  sessionAuth.clear();
+  staleSessionAuth.clear();
+  lastSeenAuth = null;
 }

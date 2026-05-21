@@ -82,6 +82,7 @@ mock.module("@loreai/core", () => ({
 // Mock cache-warmer (imported by idle.ts for warmup scheduling)
 mock.module("../../src/cache-warmer", () => ({
   isCircuitBreakerTripped: () => false,
+  isWarmupAuthDisabled: () => false,
   resolveProfile: () => null,
   blendedHistogramForSession: () => null,
   shouldWarm: () => false,

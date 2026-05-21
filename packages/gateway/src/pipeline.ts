@@ -139,6 +139,7 @@ import {
   getSessionHistogram,
   recordGlobalGap,
   resolveProfile as resolveWarmingProfile,
+  clearWarmupAuthDisabled,
 } from "./cache-warmer";
 import {
    setSentryRequestContext,
@@ -2811,6 +2812,7 @@ async function handleConversationTurn(
   // Bind auth credential to this session for background workers
   if (cred) {
     setSessionAuth(sessionID, cred);
+    clearWarmupAuthDisabled(sessionID); // Re-enable cache warming on fresh credential
   }
 
   // Capture billing header prefix for worker cch computation, scoped to

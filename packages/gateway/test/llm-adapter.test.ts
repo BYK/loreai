@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { backoffMs, maxRetriesFor, normalizeOpenAIUsage } from "../src/llm-adapter";
+import { backoffMs, maxRetriesFor, normalizeOpenAIUsage, AUTH_ERROR_CODES } from "../src/llm-adapter";
 
 // ---------------------------------------------------------------------------
 // maxRetriesFor — background (default)
@@ -233,5 +233,34 @@ describe("normalizeOpenAIUsage", () => {
       cache_read_input_tokens: 0,
       cache_creation_input_tokens: 0,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AUTH_ERROR_CODES — auth failure detection
+// ---------------------------------------------------------------------------
+
+describe("AUTH_ERROR_CODES", () => {
+  test("includes 401 (Unauthorized)", () => {
+    expect(AUTH_ERROR_CODES.has(401)).toBe(true);
+  });
+
+  test("includes 403 (Forbidden)", () => {
+    expect(AUTH_ERROR_CODES.has(403)).toBe(true);
+  });
+
+  test("does not include transient error codes", () => {
+    // These should be retried, not treated as auth errors
+    expect(AUTH_ERROR_CODES.has(429)).toBe(false);
+    expect(AUTH_ERROR_CODES.has(500)).toBe(false);
+    expect(AUTH_ERROR_CODES.has(502)).toBe(false);
+    expect(AUTH_ERROR_CODES.has(503)).toBe(false);
+    expect(AUTH_ERROR_CODES.has(529)).toBe(false);
+  });
+
+  test("does not include success or other client errors", () => {
+    expect(AUTH_ERROR_CODES.has(200)).toBe(false);
+    expect(AUTH_ERROR_CODES.has(400)).toBe(false);
+    expect(AUTH_ERROR_CODES.has(404)).toBe(false);
   });
 });

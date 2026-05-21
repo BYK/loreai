@@ -31,7 +31,7 @@ import type {
   SessionState,
 } from "./translate/types";
 import { decompressBody } from "./cache-analytics";
-import { resolveAuth, authHeaders } from "./auth";
+import { resolveAuth, authHeaders, markAuthStale } from "./auth";
 import { resignBody } from "./cch";
 import { resolveUpstreamRoute } from "./config";
 import { getModelEntrySync } from "./worker-model";
@@ -217,6 +217,27 @@ export function checkCircuitBreaker(result: WarmupResult): boolean {
   }
 
   return circuitBreakerTripped;
+}
+
+// ---------------------------------------------------------------------------
+// Auth-disabled sessions (401/403 from upstream)
+// ---------------------------------------------------------------------------
+
+/**
+ * Sessions whose warmup requests returned 401/403.
+ * Cleared when a fresh credential arrives (via clearWarmupAuthDisabled).
+ * Not persisted — on restart, sessions re-attempt naturally.
+ */
+const authDisabledSessions = new Set<string>();
+
+/** Check if warmup is auth-disabled for a session. */
+export function isWarmupAuthDisabled(sessionID: string): boolean {
+  return authDisabledSessions.has(sessionID);
+}
+
+/** Clear warmup auth-disabled flag for a session (fresh credential arrived). */
+export function clearWarmupAuthDisabled(sessionID: string): void {
+  authDisabledSessions.delete(sessionID);
 }
 
 // ---------------------------------------------------------------------------
@@ -1262,6 +1283,16 @@ export async function executeWarmup(
         `cache-warmer: upstream error ${response.status} for ` +
           `session=${state.sessionID.slice(0, 16)}: ${errorBody.slice(0, 300)}`,
       );
+      // On auth error, disable future warmups for this session until
+      // a fresh credential arrives. Prevents unbounded 401 spam every 30s.
+      if (response.status === 401 || response.status === 403) {
+        authDisabledSessions.add(state.sessionID);
+        markAuthStale(state.sessionID);
+        log.warn(
+          `cache-warmer: auth error ${response.status} — disabling warmup for ` +
+            `session=${state.sessionID.slice(0, 16)} until fresh credential`,
+        );
+      }
       return { ok: false, cacheReadTokens: 0, cacheCreationTokens: 0 };
     }
 
@@ -1501,4 +1532,5 @@ export function _resetForTest(): void {
   try { setKV(CB_KV_KEY, JSON.stringify({ tripped: false, failures: 0 })); } catch { /* DB may not be available in all test contexts */ }
   globalHistograms.clear();
   dirtyProjects.clear();
+  authDisabledSessions.clear();
 }

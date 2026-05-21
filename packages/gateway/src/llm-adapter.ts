@@ -16,7 +16,7 @@ import type { LLMClient } from "@loreai/core";
 import { log } from "@loreai/core";
 import * as Sentry from "@sentry/bun";
 import type { AuthCredential } from "./auth";
-import { authHeaders } from "./auth";
+import { authHeaders, markAuthStale } from "./auth";
 import { tripCircuitBreaker } from "./background-limiter";
 import { buildBillingBlock, signBody } from "./cch";
 import {
@@ -39,6 +39,9 @@ export const activeWorkerCalls = new Set<string>();
 
 /** HTTP status codes that are transient and worth retrying. */
 const TRANSIENT_CODES = new Set([429, 500, 502, 503, 529]);
+
+/** HTTP status codes indicating permanent auth failure. */
+export const AUTH_ERROR_CODES = new Set([401, 403]);
 
 /** Max retries by error category for **background** (non-urgent) calls. */
 const MAX_RETRIES_RATE_LIMIT = 3; // 429s: ~6 min with wider spacing to reduce API pressure
@@ -340,7 +343,7 @@ export function createGatewayLLMClient(
       const maxTokens = opts?.maxTokens ?? 8192;
 
       // Build provider-specific request
-      const req = isOpenAI
+      let req = isOpenAI
         ? buildOpenAIWorkerRequest(target, cred, model, system, user, maxTokens, opts?.temperature)
         : buildAnthropicWorkerRequest(
             target, cred, model, system, user, maxTokens, opts?.sessionID, opts?.temperature,
@@ -439,6 +442,60 @@ export function createGatewayLLMClient(
                 }
 
                 return parsed.text;
+              }
+
+              // --- Auth error: 401/403 — mark stale, re-resolve, retry once ---
+              if (AUTH_ERROR_CODES.has(response.status)) {
+                const text = await response.text().catch(() => "(no body)");
+
+                // Mark session credential stale so resolveAuth() falls through to global
+                if (opts?.sessionID) {
+                  markAuthStale(opts.sessionID);
+                }
+
+                // Re-resolve: credential may have been refreshed by a concurrent client request
+                const freshCred = getAuth(opts?.sessionID);
+                const credentialChanged = !!freshCred && freshCred.value !== cred.value;
+                if (credentialChanged && attempt === 0) {
+                  // Credential changed — rebuild request and retry once
+                  log.info(
+                    `worker auth error ${response.status}, credential refreshed — retrying: ${text.slice(0, 200)}`,
+                  );
+                  req = isOpenAI
+                    ? buildOpenAIWorkerRequest(target, freshCred, model, system, user, maxTokens, opts?.temperature)
+                    : buildAnthropicWorkerRequest(
+                        target, freshCred, model, system, user, maxTokens, opts?.sessionID, opts?.temperature,
+                      );
+                  retryCount++;
+                  continue;
+                }
+
+                // No fresh credential or retry also failed — alert and bail
+                log.error(
+                  `worker upstream auth error: ${response.status} ${response.statusText} — ${text}`,
+                );
+                Sentry.captureException(
+                  new Error(
+                    `Worker upstream auth error: ${response.status} ${response.statusText}`,
+                  ),
+                  {
+                    fingerprint: [
+                      "LOREAI-GATEWAY",
+                      "worker-auth-error",
+                      String(response.status),
+                    ],
+                    extra: {
+                      status: response.status,
+                      model: model.modelID,
+                      workerID: opts?.workerID ?? "unknown",
+                      sessionID: opts?.sessionID?.slice(0, 16),
+                      credentialChanged,
+                      freshCredAvailable: !!freshCred,
+                    },
+                  },
+                );
+                span.setStatus({ code: 2, message: `HTTP ${response.status} auth` });
+                return null;
               }
 
               // Non-transient error — fail immediately, no retry
