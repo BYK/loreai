@@ -884,8 +884,9 @@
         your project to<br>
         <em>your AI.</em>
       </h1>
-      <p class="hero-desc sr">Your AI forgets decisions, loses file paths, and undoes its own work.
-        Lore fixes this automatically — no context files to maintain, no workflow changes.</p>
+      <p class="hero-desc sr">Your AI forgets decisions, loses file paths, and undoes its own work — worse with every turn.
+        Lore gives it crystal-clear memory across sessions lasting days, hundreds of turns, any LLM provider.
+        No context files to maintain. No workflow changes.</p>
       <div class="hero-install sr">
         <div class="install-block" onclick="navigator.clipboard.writeText('curl -fsSL https://withlore.ai/install | bash').then(()=>{this.querySelector('.install-copied').classList.add('show');setTimeout(()=>this.querySelector('.install-copied').classList.remove('show'),2000)})">
           <code><span class="install-prompt">$</span> curl -fsSL https://withlore.ai/install | bash</code>
@@ -922,13 +923,13 @@
         <div class="g-chip gc1">Lore Distillation</div>
         <div class="g-chip gc2">Any Provider*</div>
         <div class="g-chip gc3">On-Device Vector Search</div>
-        <div class="g-chip gc4">400K+ Token Sessions</div>
+        <div class="g-chip gc4">Sessions Lasting Days</div>
       </div>
     </div>
 
     <div class="hero-stats sr">
       <div class="stat-cell">
-        <div class="stat-n">+70%</div>
+        <div class="stat-n">+67%</div>
         <div class="stat-l">vs Compaction at 2.3M Tokens</div>
       </div>
       <div class="stat-cell">
@@ -945,16 +946,16 @@
   <!-- TICKER -->
   <div class="ticker">
     <div class="ticker-track">
-      <span class="ti">Compaction destroys details <span class="td">&#9670;</span> Lore distills them</span>
+      <span class="ti">2.3M tokens, 5 days, 2.6x total recall <span class="td">&#9670;</span> Compaction: 2.4/5. Lore: 4.0/5.</span>
       <span class="ti">68 min/day re-explaining <span class="td">&#9670;</span> Lore remembers for you</span>
-      <span class="ti">49 manual learnings <span class="td">&#9670;</span> Lore curates automatically</span>
+      <span class="ti">Any provider, any tool <span class="td">&#9670;</span> Portable memory that travels with you</span>
       <span class="ti">Total amnesia on new sessions <span class="td">&#9670;</span> Lore persists across sessions</span>
-      <span class="ti">Context files by hand <span class="td">&#9670;</span> Lore exports .lore.md automatically</span>
-      <span class="ti">Compaction destroys details <span class="td">&#9670;</span> Lore distills them</span>
+      <span class="ti">49 manual learnings <span class="td">&#9670;</span> Lore curates automatically</span>
+      <span class="ti">2.3M tokens, 5 days, 2.6x total recall <span class="td">&#9670;</span> Compaction: 2.4/5. Lore: 4.0/5.</span>
       <span class="ti">68 min/day re-explaining <span class="td">&#9670;</span> Lore remembers for you</span>
-      <span class="ti">49 manual learnings <span class="td">&#9670;</span> Lore curates automatically</span>
+      <span class="ti">Any provider, any tool <span class="td">&#9670;</span> Portable memory that travels with you</span>
       <span class="ti">Total amnesia on new sessions <span class="td">&#9670;</span> Lore persists across sessions</span>
-      <span class="ti">Context files by hand <span class="td">&#9670;</span> Lore exports .lore.md automatically</span>
+      <span class="ti">49 manual learnings <span class="td">&#9670;</span> Lore curates automatically</span>
     </div>
   </div>
 
@@ -977,8 +978,9 @@
         <p class="step-b">When the context window fills up, your AI tool
           <a href="https://www.oreilly.com/radar/why-doesnt-anyone-teach-developers-about-context-management/"
             target="_blank" style="border-bottom:1px solid var(--g4)">compacts the conversation</a>.
-          After a few passes, it knows you "discussed authentication" but can't actually continue the work.
-          The file paths, the error messages, the reasons behind decisions — gone.</p>
+          In a real 5-day coding session, compaction reduces 2.3 million tokens to an 11K summary — a 200x
+          compression that loses which issues were picked, what alternatives were rejected, and why.
+          It scores 2.4/5 on recall. Lore scores 4.0/5.</p>
       </div>
       <div class="step sr">
         <div class="step-n">02</div>
@@ -1028,9 +1030,10 @@
       <div class="step sr">
         <div class="step-n">03</div>
         <h3 class="step-t">Recall</h3>
-        <p class="step-b">Every detail from every session is searchable. When the distilled context isn't enough,
-          your agent's recall tool retrieves the exact file path, error message, or decision rationale it
-          needs — across sessions, without you re-explaining anything.</p>
+        <p class="step-b">Details from every session are searchable — even hundreds of turns later.
+          When the distilled context isn't enough, your agent's recall tool retrieves the exact file path,
+          error message, or decision rationale it needs. In our 2.3M-token benchmark:
+          2.6x total recall over compaction — 13 perfect scores vs 5.</p>
       </div>
     </div>
   </section>
@@ -1110,11 +1113,11 @@
     <div class="bento" style="margin-top:1rem">
       <div class="bc bc-2 sr">
         <p class="bc-tag">Cost</p>
-        <h3 class="bc-t">Infinite sessions, lower cost</h3>
-        <p class="bc-b">Sessions run forever without degradation or extra cost. Background distillation
-          and curation run at 50% off via batch APIs on cheaper models — A/B validated for quality parity.
-          Predictive cache warming and smart cache management avoid the expensive cache rebuilds that
-          compaction triggers on every turn.</p>
+        <h3 class="bc-t">Sessions as long as you want</h3>
+        <p class="bc-b">Work for days, hundreds of turns, millions of tokens — memory stays sharp.
+          Tested on a real 5-day, 2.3M-token session. Background distillation
+          and curation run at 50% off via batch APIs on cheaper models. Predictive cache warming
+          avoids the expensive cache rebuilds that compaction triggers on every turn.</p>
       </div>
       <div class="bc bc-1 sr">
         <p class="bc-tag">Search</p>
@@ -1132,9 +1135,10 @@
       </div>
       <div class="bc bc-1 sr">
         <p class="bc-tag">Compatibility</p>
-        <h3 class="bc-t">Works with any provider*</h3>
+        <h3 class="bc-t">Portable memory, any provider</h3>
         <p class="bc-b">Claude Code, Cursor, Copilot, Windsurf, OpenCode, Pi, Codex — any tool that speaks
-          Anthropic or OpenAI protocols. Switch providers freely; your memory stays.
+          Anthropic or OpenAI protocols. Switch providers, switch tools, switch machines — your memory travels
+          with you. No vendor lock-in, no walled gardens.
           <span style="display:block;margin-top:.6rem;font-size:.78rem;opacity:.7">* Any provider accessible
           via an OpenAI or Anthropic-compatible API.</span></p>
       </div>
