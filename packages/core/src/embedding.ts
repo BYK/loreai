@@ -32,8 +32,10 @@ const EMBED_TIMEOUT_MS = 10_000;
  * Safe per-text character limit for local ONNX inference. The Nomic v1.5 model
  * supports up to 8192 tokens, but ONNX runtime OOMs on inputs near that ceiling
  * (error codes 284432024, 287180544, 144786472). Pre-truncating to ~4096 tokens
- * worth of characters keeps the tensor well within safe allocation bounds.
- * The worker's `truncation: true` remains as a safety net.
+ * worth of characters keeps the tensor well within safe allocation bounds for
+ * typical English text (~4 chars/token). For dense-token content (code, CJK,
+ * base64) where the ratio is lower, the worker retries with token-level
+ * truncation on OOM — see OOM_RETRY_START_TOKENS in embedding-worker.ts.
  */
 const LOCAL_MAX_CHARS = 4096 * 4; // ~4096 tokens × ~4 chars/token
 
