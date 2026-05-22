@@ -284,6 +284,12 @@ export async function _cli(): Promise<void> {
         break;
       }
 
+      case "entity": {
+        const { commandEntity } = await import("./entity");
+        await commandEntity(rest, values as Record<string, unknown>);
+        break;
+      }
+
       case "upgrade": {
         const { commandUpgrade } = await import("./upgrade");
         // Pass raw args so upgrade's own parseArgs handles --version, --channel etc.
@@ -308,7 +314,7 @@ export async function _cli(): Promise<void> {
           if (!knownBinaries.includes(command)) {
             // Not a known agent — likely a typo. Show a helpful error.
             const knownCommands = [
-              "start", "run", "data", "recall", "logs", "import", "upgrade", "help",
+              "start", "run", "data", "recall", "logs", "import", "entity", "upgrade", "help",
               ...knownBinaries,
             ];
             // "Did you mean?" — use Levenshtein distance for robust matching

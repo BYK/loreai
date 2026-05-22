@@ -13,6 +13,7 @@ import * as latReader from "./lat-reader";
 import * as ltm from "./ltm";
 import * as temporal from "./temporal";
 import * as embedding from "./embedding";
+import * as entities from "./entities";
 import * as log from "./log";
 import { db, ensureProject, projectName } from "./db";
 import type { LoreConfig } from "./config";
@@ -504,6 +505,23 @@ export async function searchRecall(
     } catch (err) {
       log.info("recall: query expansion failed, using original:", err);
     }
+  }
+
+  // Entity-aware query expansion: detect entity references in the query
+  // and add all known aliases as additional search queries. This ensures
+  // "what did Seylan say?" finds results referencing "@seylancinar" or email.
+  try {
+    const entityExpansions = entities.expandQueryWithEntities(query);
+    if (entityExpansions.length > 0) {
+      // Add each alias as a separate query variant (up to 4)
+      for (const alias of entityExpansions.slice(0, 4)) {
+        if (!queries.includes(alias)) {
+          queries.push(alias);
+        }
+      }
+    }
+  } catch (err) {
+    log.info("recall: entity query expansion failed (non-fatal):", err);
   }
 
   // Determine vector boost weight: for queries with enough meaningful terms,

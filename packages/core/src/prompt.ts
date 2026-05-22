@@ -410,7 +410,33 @@ Produce a JSON array of operations:
   }
 ]
 
-If nothing warrants extraction, return an empty array: []
+ENTITY GROUNDING — resolve ambiguous references to canonical names:
+- When creating or updating knowledge entries, replace pronouns and nicknames with
+  canonical names from the entity context provided: "He approved the PR" → "Bob (backend lead) approved the PR".
+  "Deploy to the usual place" → "Deploy to Vercel". This makes entries self-contained.
+- If you detect a person, service, tool, organization, repo, or infrastructure component
+  NOT in the known entities list, include it in a top-level "entities" field in your response:
+  {
+    "ops": [ ... ],   // knowledge operations (same format as before)
+    "entities": [     // NEW — detected entities not already known
+      {
+        "type": "person" | "org" | "service" | "tool" | "repo" | "infra",
+        "canonical_name": "Full Canonical Name",
+        "aliases": [
+          { "type": "name" | "email" | "github" | "slack" | "nickname" | "url" | "domain", "value": "..." }
+        ]
+      }
+    ]
+  }
+- Only propose new entities when you are confident they are real, recurring references —
+  not one-off mentions of generic concepts. People, services, and tools referenced by name
+  are good candidates. Generic phrases like "the database" or "the CI" are not unless they
+  map to a specific known service.
+- If the entity list is provided and a mention matches a known entity, use its canonical name
+  in knowledge entries — do not propose a new entity.
+
+If nothing warrants extraction, return: { "ops": [], "entities": [] }
+The response may also be a plain JSON array of ops (backward compatible): []
 
 Output ONLY valid JSON. No markdown fences, no explanation, no preamble.`;
 
@@ -422,12 +448,16 @@ export function curatorUser(input: {
     title: string;
     content: string;
   }>;
+  entityContext?: string;
 }): string {
   const count = input.existing.length;
   const existing = count
     ? `Existing knowledge entries (${count} total — you may update or delete these):\n${input.existing.map((e) => `- [${e.id}] (${e.category}) ${e.title}: ${e.content}`).join("\n")}`
     : "No existing knowledge entries.";
-  return `${existing}
+  const entitySection = input.entityContext
+    ? `\n\n---\n${input.entityContext}`
+    : "";
+  return `${existing}${entitySection}
 
 ---
 Recent conversation to extract knowledge from:
@@ -446,7 +476,9 @@ IMPORTANT:
    ("I use X", "I prefer X", "our convention is X", "I don't like X"). Both forms are equally
    important. Confidence: 1.0 for absolute directives, 0.9 for explicit preferences.
 7. If a user CHANGED a preference ("switched from X to Y", "no longer use X", "moved to Y"),
-   find the existing entry about X and UPDATE it — do not leave contradictory entries.`;
+   find the existing entry about X and UPDATE it — do not leave contradictory entries.
+8. Resolve ambiguous references (pronouns, nicknames, abbreviations) to canonical names from
+   the entity list. If you detect new recurring entities, include them in the "entities" field.`;
 }
 
 /**

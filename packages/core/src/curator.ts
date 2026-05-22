@@ -3,11 +3,13 @@ import { db, saveSessionTracking, loadSessionTracking, ensureProject } from "./d
 import * as temporal from "./temporal";
 import * as distillation from "./distillation";
 import * as ltm from "./ltm";
+import * as entities from "./entities";
 import * as log from "./log";
 import { CURATOR_SYSTEM, curatorUser, CONSOLIDATION_SYSTEM, consolidationUser } from "./prompt";
 import { detectAndFormat } from "./instruction-detect";
 import { curatorLimiter } from "./session-limiter";
 import type { LLMClient } from "./types";
+import type { EntityType, AliasType } from "./entities";
 
 /**
  * Maximum length (chars) for a single knowledge entry's content.
@@ -16,6 +18,19 @@ import type { LLMClient } from "./types";
  * so truncation is a last-resort safety net.
  */
 export const MAX_ENTRY_CONTENT_LENGTH = 1200;
+
+/** Entity detected by the curator from conversation context. */
+export type DetectedEntity = {
+  type: EntityType;
+  canonical_name: string;
+  aliases?: Array<{ type: AliasType; value: string }>;
+};
+
+/** Parsed curator response containing both knowledge ops and detected entities. */
+export type CuratorResponse = {
+  ops: CuratorOp[];
+  entities: DetectedEntity[];
+};
 
 export type CuratorOp =
   | {
@@ -34,29 +49,94 @@ export type CuratorOp =
 /**
  * Parse the LLM's JSON response into typed curator ops.
  * Handles markdown fences and filters invalid entries.
+ *
+ * Supports two response shapes:
+ * 1. Legacy: plain JSON array of ops → `[{ op: "create", ... }]`
+ * 2. New:    `{ ops: [...], entities: [...] }` with optional entity detections
  */
 export function parseOps(text: string): CuratorOp[] {
+  return parseResponse(text).ops;
+}
+
+/**
+ * Parse the full curator response including both ops and detected entities.
+ */
+export function parseResponse(text: string): CuratorResponse {
   const cleaned = text
     .trim()
     .replace(/^```json?\s*/i, "")
     .replace(/\s*```$/i, "");
   try {
     const parsed = JSON.parse(cleaned);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (op: unknown) =>
-        typeof op === "object" &&
-        op !== null &&
-        "op" in op &&
-        typeof (op as Record<string, unknown>).op === "string",
-    ) as CuratorOp[];
+
+    // Legacy format: plain array of ops
+    if (Array.isArray(parsed)) {
+      return {
+        ops: filterOps(parsed),
+        entities: [],
+      };
+    }
+
+    // New format: { ops: [...], entities: [...] }
+    if (typeof parsed === "object" && parsed !== null) {
+      const ops = Array.isArray(parsed.ops) ? filterOps(parsed.ops) : [];
+      const detectedEntities = Array.isArray(parsed.entities)
+        ? filterEntities(parsed.entities)
+        : [];
+      return { ops, entities: detectedEntities };
+    }
+
+    return { ops: [], entities: [] };
   } catch {
-    return [];
+    return { ops: [], entities: [] };
   }
 }
 
+function filterOps(arr: unknown[]): CuratorOp[] {
+  return arr.filter(
+    (op: unknown) =>
+      typeof op === "object" &&
+      op !== null &&
+      "op" in op &&
+      typeof (op as Record<string, unknown>).op === "string",
+  ) as CuratorOp[];
+}
+
+function filterEntities(arr: unknown[]): DetectedEntity[] {
+  return arr
+    .filter((e: unknown): e is Record<string, unknown> => {
+      if (typeof e !== "object" || e === null) return false;
+      const obj = e as Record<string, unknown>;
+      return (
+        typeof obj.type === "string" &&
+        typeof obj.canonical_name === "string" &&
+        obj.canonical_name.length > 0 &&
+        entities.ENTITY_TYPES.includes(obj.type as EntityType)
+      );
+    })
+    .map((obj) => {
+      // Validate alias objects — LLM may return malformed structures
+      const validAliases = Array.isArray(obj.aliases)
+        ? (obj.aliases as unknown[]).filter(
+            (a): a is { type: AliasType; value: string } =>
+              typeof a === "object" &&
+              a !== null &&
+              typeof (a as Record<string, unknown>).type === "string" &&
+              typeof (a as Record<string, unknown>).value === "string" &&
+              ((a as Record<string, unknown>).value as string).length > 0,
+          )
+        : undefined;
+      return {
+        type: obj.type as EntityType,
+        canonical_name: obj.canonical_name as string,
+        aliases: validAliases,
+      };
+    });
+}
+
 /**
- * Apply a list of curator ops (create/update/delete) to the knowledge DB.
+ * Apply a list of curator ops (create/update/delete) to the knowledge DB,
+ * and optionally create detected entities.
  * Shared by both the live curator and the conversation import system.
  *
  * @returns Counts of applied operations.
@@ -68,11 +148,14 @@ export function applyOps(
     sessionID?: string;
     /** If true, skip "create" ops (used by consolidation). */
     skipCreate?: boolean;
+    /** Entities detected by the curator from conversation context. */
+    detectedEntities?: DetectedEntity[];
   },
-): { created: number; updated: number; deleted: number } {
+): { created: number; updated: number; deleted: number; entitiesCreated: number } {
   let created = 0;
   let updated = 0;
   let deleted = 0;
+  let entitiesCreated = 0;
   const idsToSync: string[] = [];
 
   for (const op of ops) {
@@ -130,9 +213,40 @@ export function applyOps(
   // Sync cross-references for created/updated entries
   for (const id of idsToSync) {
     ltm.syncRefs(id);
+    // Also sync entity references (detect entity mentions in content)
+    const entry = ltm.get(id);
+    if (entry) {
+      try {
+        entities.syncEntityRefs(id, entry.content);
+      } catch (err) {
+        log.warn(`entity ref sync failed for ${id}:`, err);
+      }
+    }
   }
 
-  return { created, updated, deleted };
+  // Create detected entities
+  if (input.detectedEntities?.length) {
+    for (const de of input.detectedEntities) {
+      try {
+        const result = entities.create({
+          projectPath: input.projectPath,
+          entityType: de.type,
+          canonicalName: de.canonical_name,
+          aliases: de.aliases?.map((a) => ({
+            type: a.type,
+            value: a.value,
+            source: "curator",
+          })),
+          crossProject: true, // entities default to cross-project
+        });
+        if (result.created) entitiesCreated++;
+      } catch (err) {
+        log.warn(`entity creation failed for "${de.canonical_name}":`, err);
+      }
+    }
+  }
+
+  return { created, updated, deleted, entitiesCreated };
 }
 
 // Track which messages we've already curated — per session to prevent
@@ -157,9 +271,9 @@ export async function run(input: {
   projectPath: string;
   sessionID: string;
   model?: { providerID: string; modelID: string };
-}): Promise<{ created: number; updated: number; deleted: number }> {
+}): Promise<{ created: number; updated: number; deleted: number; entitiesCreated: number }> {
   const cfg = config();
-  if (!cfg.curator.enabled) return { created: 0, updated: 0, deleted: 0 };
+  if (!cfg.curator.enabled) return { created: 0, updated: 0, deleted: 0, entitiesCreated: 0 };
 
   // Skip-if-busy: curation is periodic, not accumulative. If a curation is
   // already running for this session, skip — the next trigger will pick up
@@ -171,7 +285,7 @@ export async function run(input: {
   // if this invariant is ever violated.
   if (curatorLimiter.isBusy(input.sessionID)) {
     log.info(`curation skipped: already running for session ${input.sessionID.slice(0, 16)}`);
-    return { created: 0, updated: 0, deleted: 0 };
+    return { created: 0, updated: 0, deleted: 0, entitiesCreated: 0 };
   }
 
   return curatorLimiter.get(input.sessionID)(() => runInner(input));
@@ -182,7 +296,7 @@ async function runInner(input: {
   projectPath: string;
   sessionID: string;
   model?: { providerID: string; modelID: string };
-}): Promise<{ created: number; updated: number; deleted: number }> {
+}): Promise<{ created: number; updated: number; deleted: number; entitiesCreated: number }> {
   const cfg = config();
 
   // Get recent undistilled messages since last curation.
@@ -202,7 +316,7 @@ async function runInner(input: {
     // This is the common case after /lore:curate runs distillation first.
     const distillations = distillation.loadForSession(input.projectPath, input.sessionID, true);
     const recentDistillations = distillations.filter((d) => d.created_at > sessionCuratedAt);
-    if (recentDistillations.length === 0) return { created: 0, updated: 0, deleted: 0 };
+    if (recentDistillations.length === 0) return { created: 0, updated: 0, deleted: 0, entitiesCreated: 0 };
     text = recentDistillations.map((d) => d.observations).join("\n\n");
   }
   // Include cross-project entries so the curator can see and update
@@ -217,9 +331,21 @@ async function runInner(input: {
     content: e.content,
   }));
 
+  // Load known entities for grounding context
+  let entityContext = "";
+  try {
+    const knownEntities = entities.forProject(input.projectPath);
+    if (knownEntities.length > 0) {
+      entityContext = entities.formatForPrompt(knownEntities);
+    }
+  } catch (err) {
+    log.warn("entity context loading failed (non-fatal):", err);
+  }
+
   const baseUserContent = curatorUser({
     messages: text,
     existing: existingForPrompt,
+    entityContext: entityContext || undefined,
   });
 
   // Detect repeated instructions across prior sessions and append as
@@ -253,12 +379,13 @@ async function runInner(input: {
     userContent,
     { model, workerID: "lore-curator", thinking: false, sessionID: input.sessionID, maxTokens: 2048, temperature: 0 },
   );
-  if (!responseText) return { created: 0, updated: 0, deleted: 0 };
+  if (!responseText) return { created: 0, updated: 0, deleted: 0, entitiesCreated: 0 };
 
-  const ops = parseOps(responseText);
-  const result = applyOps(ops, {
+  const response = parseResponse(responseText);
+  const result = applyOps(response.ops, {
     projectPath: input.projectPath,
     sessionID: input.sessionID,
+    detectedEntities: response.entities,
   });
 
   // Post-curation dedup sweep: if the curator created new entries, check for

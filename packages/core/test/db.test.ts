@@ -23,7 +23,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(26);
+    expect(row.version).toBe(27);
   });
 
   test("distillation_fts virtual table exists", () => {

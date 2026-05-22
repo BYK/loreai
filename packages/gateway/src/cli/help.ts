@@ -18,6 +18,7 @@ Commands:
   import              Import knowledge from prior AI agent conversations
   data <subcommand>   Manage stored data (list, show, clear, delete)
   recall <query>      Search project memory from the command line
+  entity <subcommand> Manage the entity registry (list, show, add, merge)
   upgrade [version]   Update lore to the latest (or specified) version
                       Flags: --check, --force, --offline, --channel <ch>
   help                Show this help text
@@ -66,6 +67,19 @@ Agent arguments:
   Use -- to also forward flags that share names with lore's own options:
     lore -- --verbose --debug
     lore run -- --port 8080
+
+Entity subcommands:
+  entity list                                 List all entities with aliases
+  entity show <id>                            Show full entity detail
+  entity add <type> <name>                    Create a new entity
+  entity alias add <id> --type <t> --value <v>  Add an alias to an entity
+  entity alias rm <alias-id>                  Remove an alias
+  entity merge <target-id> <source-id>        Merge two entities
+  entity search <query>                       Search entities by name or alias
+  entity delete <id>                          Delete an entity
+
+  Entity types: person, org, service, tool, repo, infra
+  Alias types: name, email, github, slack, phone, nickname, url, domain
 
 Recall options:
   --project <path>              Target project (default: cwd)

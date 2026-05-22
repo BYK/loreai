@@ -575,6 +575,88 @@ const MIGRATIONS: string[] = [
   ALTER TABLE session_state ADD COLUMN is_subagent INTEGER NOT NULL DEFAULT 0;
   CREATE INDEX IF NOT EXISTS idx_session_state_parent ON session_state(parent_session_id);
   `,
+  `
+  -- Version 27: Entity Registry — recurring people, services, repos, tools, and
+  -- companies that users reference across sessions with inconsistent names.
+  -- Enables grounding pass (pronoun/nickname → canonical name) and alias-expanded recall.
+
+  CREATE TABLE IF NOT EXISTS entities (
+    id             TEXT PRIMARY KEY,
+    project_id     TEXT,
+    entity_type    TEXT NOT NULL,
+    canonical_name TEXT NOT NULL,
+    metadata       TEXT,
+    cross_project  INTEGER DEFAULT 0,
+    created_at     INTEGER NOT NULL,
+    updated_at     INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_entities_project ON entities(project_id);
+  CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);
+
+  -- FTS5 for fast canonical name lookup
+  CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(
+    canonical_name,
+    content=entities,
+    content_rowid=rowid,
+    tokenize='porter unicode61'
+  );
+  CREATE TRIGGER IF NOT EXISTS entities_fts_insert AFTER INSERT ON entities BEGIN
+    INSERT INTO entities_fts(rowid, canonical_name)
+    VALUES (new.rowid, new.canonical_name);
+  END;
+  CREATE TRIGGER IF NOT EXISTS entities_fts_delete AFTER DELETE ON entities BEGIN
+    INSERT INTO entities_fts(entities_fts, rowid, canonical_name)
+    VALUES('delete', old.rowid, old.canonical_name);
+  END;
+  CREATE TRIGGER IF NOT EXISTS entities_fts_update AFTER UPDATE ON entities BEGIN
+    INSERT INTO entities_fts(entities_fts, rowid, canonical_name)
+    VALUES('delete', old.rowid, old.canonical_name);
+    INSERT INTO entities_fts(rowid, canonical_name)
+    VALUES (new.rowid, new.canonical_name);
+  END;
+
+  CREATE TABLE IF NOT EXISTS entity_aliases (
+    id          TEXT PRIMARY KEY,
+    entity_id   TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    alias_type  TEXT NOT NULL,
+    alias_value TEXT NOT NULL,
+    source      TEXT,
+    created_at  INTEGER NOT NULL,
+    UNIQUE(alias_type, alias_value)
+  );
+  CREATE INDEX IF NOT EXISTS idx_entity_aliases_value ON entity_aliases(alias_value COLLATE NOCASE);
+  CREATE INDEX IF NOT EXISTS idx_entity_aliases_entity ON entity_aliases(entity_id);
+
+  -- FTS5 for alias value search (handles partial/prefix matching)
+  CREATE VIRTUAL TABLE IF NOT EXISTS entity_aliases_fts USING fts5(
+    alias_value,
+    content=entity_aliases,
+    content_rowid=rowid,
+    tokenize='porter unicode61'
+  );
+  CREATE TRIGGER IF NOT EXISTS entity_aliases_fts_insert AFTER INSERT ON entity_aliases BEGIN
+    INSERT INTO entity_aliases_fts(rowid, alias_value)
+    VALUES (new.rowid, new.alias_value);
+  END;
+  CREATE TRIGGER IF NOT EXISTS entity_aliases_fts_delete AFTER DELETE ON entity_aliases BEGIN
+    INSERT INTO entity_aliases_fts(entity_aliases_fts, rowid, alias_value)
+    VALUES('delete', old.rowid, old.alias_value);
+  END;
+  CREATE TRIGGER IF NOT EXISTS entity_aliases_fts_update AFTER UPDATE ON entity_aliases BEGIN
+    INSERT INTO entity_aliases_fts(entity_aliases_fts, rowid, alias_value)
+    VALUES('delete', old.rowid, old.alias_value);
+    INSERT INTO entity_aliases_fts(rowid, alias_value)
+    VALUES (new.rowid, new.alias_value);
+  END;
+
+  -- Link knowledge entries to entities they reference
+  CREATE TABLE IF NOT EXISTS knowledge_entity_refs (
+    knowledge_id TEXT NOT NULL REFERENCES knowledge(id) ON DELETE CASCADE,
+    entity_id    TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    PRIMARY KEY (knowledge_id, entity_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_knowledge_entity_refs_entity ON knowledge_entity_refs(entity_id);
+  `,
 ];
 
 /** Return the resolved path of the SQLite database file. */
@@ -737,6 +819,30 @@ function recoverMissingObjects(database: Database) {
       path TEXT PRIMARY KEY,
       project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE
     );
+    CREATE TABLE IF NOT EXISTS entities (
+      id             TEXT PRIMARY KEY,
+      project_id     TEXT,
+      entity_type    TEXT NOT NULL,
+      canonical_name TEXT NOT NULL,
+      metadata       TEXT,
+      cross_project  INTEGER DEFAULT 0,
+      created_at     INTEGER NOT NULL,
+      updated_at     INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS entity_aliases (
+      id          TEXT PRIMARY KEY,
+      entity_id   TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+      alias_type  TEXT NOT NULL,
+      alias_value TEXT NOT NULL,
+      source      TEXT,
+      created_at  INTEGER NOT NULL,
+      UNIQUE(alias_type, alias_value)
+    );
+    CREATE TABLE IF NOT EXISTS knowledge_entity_refs (
+      knowledge_id TEXT NOT NULL REFERENCES knowledge(id) ON DELETE CASCADE,
+      entity_id    TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+      PRIMARY KEY (knowledge_id, entity_id)
+    );
   `);
 
   // Recover missing columns from partial migration runs.
@@ -778,6 +884,10 @@ export function mergeProjectInternal(
       "UPDATE distillations SET project_id = ? WHERE project_id = ?",
     ).run(targetId, sourceId);
     d.query("UPDATE lat_sections SET project_id = ? WHERE project_id = ?").run(
+      targetId,
+      sourceId,
+    );
+    d.query("UPDATE entities SET project_id = ? WHERE project_id = ?").run(
       targetId,
       sourceId,
     );

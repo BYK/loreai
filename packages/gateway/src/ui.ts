@@ -7,7 +7,9 @@
  */
 import {
   data,
+  db,
   ltm,
+  entities,
   temporal,
   searchRecall,
   recallById,
@@ -390,12 +392,24 @@ tr:hover { background: var(--bg2); }
 .badge-gotcha { background: #fef3c7; color: #92400e; }
 .badge-decision { background: #f3e8ff; color: #6b21a8; }
 .badge-preference { background: #fce7f3; color: #9d174d; }
+.badge-person { background: #dbeafe; color: #1e40af; }
+.badge-org { background: #f3e8ff; color: #6b21a8; }
+.badge-service { background: #dcfce7; color: #166534; }
+.badge-tool { background: #fef3c7; color: #92400e; }
+.badge-repo { background: #e0e7ff; color: #3730a3; }
+.badge-infra { background: #fce7f3; color: #9d174d; }
 @media (prefers-color-scheme: dark) {
   .badge-architecture { background: #1e3a5f; color: #93c5fd; }
   .badge-pattern { background: #14532d; color: #86efac; }
   .badge-gotcha { background: #451a03; color: #fcd34d; }
   .badge-decision { background: #3b0764; color: #d8b4fe; }
   .badge-preference { background: #500724; color: #f9a8d4; }
+  .badge-person { background: #1e3a5f; color: #93c5fd; }
+  .badge-org { background: #3b0764; color: #d8b4fe; }
+  .badge-service { background: #14532d; color: #86efac; }
+  .badge-tool { background: #451a03; color: #fcd34d; }
+  .badge-repo { background: #1e1b4b; color: #a5b4fc; }
+  .badge-infra { background: #500724; color: #f9a8d4; }
 }
 .btn { display: inline-block; padding: 6px 14px; border-radius: var(--radius); font-size: 0.85em;
   font-weight: 500; cursor: pointer; border: 1px solid var(--border); background: var(--bg2); color: var(--fg); text-decoration: none; }
@@ -703,6 +717,7 @@ function layout(title: string, body: string): string {
   <span class="brand">Lore</span>
   <a href="/ui">Dashboard</a>
   <a href="/ui/knowledge">Knowledge</a>
+  <a href="/ui/entities">Entities</a>
   <a href="/ui/search">Search</a>
   <a href="/ui/costs">Costs</a>
   <a href="/ui/warming">Warming</a>
@@ -2382,6 +2397,134 @@ function matchRoute(
 }
 
 // ---------------------------------------------------------------------------
+// Entities pages
+// ---------------------------------------------------------------------------
+
+function pageEntities(): string {
+  const all = entities.listAll();
+
+  let body = breadcrumb([
+    { label: "Dashboard", href: "/ui" },
+    { label: "Entities" },
+  ]);
+  body += `<h1>Entities (${all.length})</h1>`;
+
+  if (!all.length) {
+    body += `<p class="empty">No entities found. Entities are created automatically when the curator detects recurring people, services, tools, and other named references in conversations.</p>`;
+    return layout("Entities", body);
+  }
+
+  // Type breakdown stats
+  const types: Record<string, number> = {};
+  for (const e of all) {
+    types[e.entity_type] = (types[e.entity_type] || 0) + 1;
+  }
+  body += `<div class="stats">
+    <div class="stat"><div class="label">Total</div><div class="value">${all.length}</div></div>`;
+  for (const [type, count] of Object.entries(types).sort((a, b) => b[1] - a[1])) {
+    body += `<div class="stat"><div class="label">${esc(type)}</div><div class="value">${count}</div></div>`;
+  }
+  body += `</div>`;
+
+  // Batch-load knowledge ref counts to avoid N+1 queries
+  const knowledgeCounts = new Map<string, number>();
+  {
+    const rows = db()
+      .query("SELECT entity_id, COUNT(*) as cnt FROM knowledge_entity_refs GROUP BY entity_id")
+      .all() as Array<{ entity_id: string; cnt: number }>;
+    for (const r of rows) knowledgeCounts.set(r.entity_id, r.cnt);
+  }
+
+  body += `<div class="table-filter"><input type="text" placeholder="Filter entities\u2026"><span class="count"></span></div>
+  <table data-table-id="entities">
+    <tr><th data-sort="text">Type</th><th data-sort="text">Name</th><th data-sort="num">Aliases</th><th data-sort="num">Knowledge</th><th data-sort="text">Cross</th><th data-sort="date" data-default-sort="desc">Updated</th></tr>`;
+  for (const e of all) {
+    const aliasCount = e.aliases.filter((a) => a.alias_value !== e.canonical_name).length;
+    const knowledgeCount = knowledgeCounts.get(e.id) ?? 0;
+    body += `<tr>
+      <td>${badge(e.entity_type)}</td>
+      <td><a href="/ui/entities/${esc(e.id)}">${esc(truncate(e.canonical_name, 50))}</a></td>
+      <td>${aliasCount}</td>
+      <td>${knowledgeCount}</td>
+      <td>${e.cross_project ? "yes" : "no"}</td>
+      <td>${timeAgo(e.updated_at)}</td>
+    </tr>`;
+  }
+  body += `</table>`;
+
+  return layout("Entities", body);
+}
+
+function pageEntity(id: string): string | null {
+  const entity = entities.getWithAliases(id);
+  if (!entity) return null;
+
+  const projName = entity.project_id ? projectName(entity.project_id) : null;
+
+  let body = breadcrumb([
+    { label: "Dashboard", href: "/ui" },
+    { label: "Entities", href: "/ui/entities" },
+    { label: truncate(entity.canonical_name, 40) },
+  ]);
+
+  body += `<h1>${esc(entity.canonical_name)}</h1>`;
+  body += `<div class="field"><span class="key">Type:</span> ${badge(entity.entity_type)}</div>`;
+  body += `<div class="field"><span class="key">ID:</span> <code>${esc(entity.id)}</code></div>`;
+  body += `<div class="field"><span class="key">Project:</span> ${entity.project_id
+    ? `<a href="/ui/projects/${esc(entity.project_id)}">${esc(projName ?? "(unknown)")}</a>`
+    : "(global)"}</div>`;
+  body += `<div class="field"><span class="key">Cross-project:</span> ${entity.cross_project ? "Yes" : "No"}</div>`;
+  body += `<div class="field"><span class="key">Created:</span> ${formatDate(entity.created_at)}</div>`;
+  body += `<div class="field"><span class="key">Updated:</span> ${formatDate(entity.updated_at)}</div>`;
+  if (entity.metadata) {
+    body += `<div class="field"><span class="key">Metadata:</span></div><pre>${esc(entity.metadata)}</pre>`;
+  }
+
+  // Aliases
+  const displayAliases = entity.aliases.filter((a) => a.alias_value !== entity.canonical_name);
+  if (displayAliases.length > 0) {
+    body += `<h2>Aliases (${displayAliases.length})</h2>`;
+    body += `<table data-table-id="entity-aliases">
+      <tr><th data-sort="text">Type</th><th data-sort="text">Value</th><th data-sort="text">Source</th><th data-sort="date">Added</th></tr>`;
+    for (const a of displayAliases) {
+      body += `<tr>
+        <td>${badge(a.alias_type)}</td>
+        <td><code>${esc(a.alias_value)}</code></td>
+        <td>${esc(a.source ?? "(auto)")}</td>
+        <td>${timeAgo(a.created_at)}</td>
+      </tr>`;
+    }
+    body += `</table>`;
+  } else {
+    body += `<h2>Aliases</h2><p class="empty">No additional aliases (only the canonical name).</p>`;
+  }
+
+  // Linked knowledge entries
+  const knowledgeIds = entities.knowledgeForEntity(entity.id);
+  if (knowledgeIds.length > 0) {
+    body += `<h2>Linked Knowledge (${knowledgeIds.length})</h2>`;
+    body += `<table data-table-id="entity-knowledge">
+      <tr><th data-sort="text">Category</th><th data-sort="text">Title</th></tr>`;
+    for (const kid of knowledgeIds) {
+      const entry = ltm.get(kid);
+      if (entry) {
+        body += `<tr>
+          <td>${badge(entry.category)}</td>
+          <td><a href="/ui/knowledge/${esc(entry.id)}">${esc(truncate(entry.title, 60))}</a></td>
+        </tr>`;
+      }
+    }
+    body += `</table>`;
+  }
+
+  body += `<div class="actions">
+    ${deleteForm(`/ui/api/delete/entity/${esc(entity.id)}`, "Delete Entity", "Delete this entity and all its aliases?")}
+  </div>`;
+
+  return layout(entity.canonical_name, body);
+}
+
+// ---------------------------------------------------------------------------
 // Main request handler
 // ---------------------------------------------------------------------------
 
@@ -2450,6 +2593,20 @@ export async function handleUIRequest(
       return htmlResponse(pageWarming());
     }
 
+    // Entity list
+    if (pathname === "/ui/entities") {
+      return htmlResponse(pageEntities());
+    }
+
+    // Entity detail
+    const entityMatch = matchRoute(pathname, "/ui/entities/:id");
+    if (entityMatch) {
+      const html = pageEntity(entityMatch.id);
+      return html
+        ? htmlResponse(html)
+        : htmlResponse(layout("Not Found", `<h1>Entity not found</h1>`), 404);
+    }
+
     // Search detail (by source-prefixed ID)
     const searchDetailMatch = matchRoute(pathname, "/ui/search/detail/:fullId");
     if (searchDetailMatch) {
@@ -2467,6 +2624,13 @@ export async function handleUIRequest(
 
   // --- POST routes (mutations) ---
   if (method === "POST") {
+    // Delete entity
+    const delEntity = matchRoute(pathname, "/ui/api/delete/entity/:id");
+    if (delEntity) {
+      entities.remove(delEntity.id);
+      return redirect("/ui/entities");
+    }
+
     // Delete knowledge
     const delKnowledge = matchRoute(pathname, "/ui/api/delete/knowledge/:id");
     if (delKnowledge) {
