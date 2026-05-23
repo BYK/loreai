@@ -215,6 +215,23 @@ function isOomError(msg: string): boolean {
   return false;
 }
 
+/**
+ * Detect fatal WASM runtime errors that leave the ONNX session in an
+ * unrecoverable state. Unlike OOM (which can be retried with smaller
+ * input), these indicate the WASM module has called `abort()` — all
+ * subsequent inference calls will also fail.
+ *
+ * After detecting a fatal error, the worker should exit so the main
+ * thread's `on("exit")` handler marks the provider as broken.
+ */
+function isWasmFatalError(msg: string): boolean {
+  // WASM abort() — "Aborted(). Build with -sASSERTIONS for more info."
+  if (/\bAborted\b/i.test(msg)) return true;
+  // RuntimeError from WASM (e.g. "unreachable", "memory access out of bounds")
+  if (/\bRuntimeError\b/.test(msg)) return true;
+  return false;
+}
+
 /** Run inference on `texts` and return per-text vectors. */
 async function runInference(texts: string[]): Promise<Float32Array[]> {
   // Run feature extraction with mean pooling.
@@ -304,6 +321,18 @@ async function processEmbed(req: EmbedRequest): Promise<void> {
     // Don't re-post init-error — it was already sent in ensurePipeline().
     if (!initFailed) {
       const raw = err instanceof Error ? err.message : String(err);
+
+      // Fatal WASM errors (e.g. "Aborted()") leave the ONNX runtime in an
+      // unrecoverable state — every subsequent request would also fail,
+      // generating unbounded Sentry events. Report the error for this
+      // request and exit the worker so the main thread marks the provider
+      // as broken and stops sending work.
+      if (isWasmFatalError(raw)) {
+        post({ type: "error", id: req.id, error: `WASM fatal error (worker exiting): ${raw}` });
+        process.exit(1);
+        return; // unreachable, but makes intent clear
+      }
+
       const msg = isOomError(raw)
         ? `ONNX runtime out of memory after ${OOM_MAX_RETRIES} retries ` +
           `(batch=${req.texts.length}, ` +

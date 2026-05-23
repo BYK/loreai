@@ -466,9 +466,11 @@ class LocalProvider implements EmbeddingProvider {
     this.workerInitError = null;
     this.initPromise = null;
 
-    // Reject any in-flight requests.
+    // Reject any in-flight requests with LocalProviderUnavailableError so
+    // fire-and-forget callers' catch blocks handle it the same way as other
+    // provider failures (graceful degradation, no Sentry noise).
     for (const [, p] of this.pendingRequests) {
-      p.reject(new Error("embedding worker shut down"));
+      p.reject(new LocalProviderUnavailableError("embedding worker shut down"));
     }
     this.pendingRequests.clear();
 

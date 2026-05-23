@@ -82,6 +82,9 @@ if (sentryEnabled && !Sentry.isInitialized()) {
     /The operation timed out/i,
     /Worker upstream exhausted \d+ retries/,
     /Worker upstream auth error/,
+    /embedding worker shut down/,
+    /Worker embedding failed/,
+    /LocalProviderUnavailableError/,
     /ECONNRESET\b/,
     /ECONNREFUSED\b/,
   ];
