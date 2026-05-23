@@ -1,0 +1,9 @@
+name: lore
+version: 0.1.0
+description: >
+  Lore integration — three-tier cross-session memory with distillation,
+  hybrid recall, and gradient context management. Replaces the built-in
+  compressor and routes LLM calls through the Lore gateway.
+provides_hooks:
+  - on_session_start
+  - pre_llm_call

@@ -974,11 +974,63 @@ function getOrCreateSession(
  *     resumes it instead of creating a new one.
  *  2. **Learned headers** — `x-` headers discovered via fingerprint-bootstrapped
  *     learning. Promoted after 3 stable turns + cross-session uniqueness.
+ *  2.5. **Context markers** — `[lore:session-id=<hex>]` markers injected into
+ *     user message context by the lore-hermes plugin's pre_llm_call hook.
  *  3. **Fingerprint fallback** — SHA-256 of first user message + auth suffix
  *     (no model). Message-count proximity for fork disambiguation.
  *
- * Priority: Tier 1 > 1a > 1b > Tier 2 > Tier 3.
+ * Priority: Tier 1 > 1a > 1b > Tier 2 > 2.5 > Tier 3.
  */
+
+/** Pattern for `[lore:session-id=<hex>]` context markers. */
+const LORE_SESSION_MARKER_RE = /\[lore:session-id=([a-f0-9]{8,64})\]/;
+/** Pattern for `[lore:project=<path>]` context markers. */
+const LORE_PROJECT_MARKER_RE = /\[lore:project=([^\]]+)\]/;
+
+/**
+ * Concatenate all text blocks from a message's content array.
+ */
+function messageText(msg: GatewayMessage): string {
+  let out = "";
+  for (const block of msg.content) {
+    if (block.type === "text") out += block.text;
+  }
+  return out;
+}
+
+/**
+ * Extract a Lore session ID from `[lore:session-id=...]` context markers
+ * injected by the lore-hermes plugin's `pre_llm_call` hook.
+ *
+ * Scans the last user message only (the marker is appended each turn).
+ */
+export function extractSessionMarker(messages: GatewayMessage[]): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role !== "user") continue;
+    const match = messageText(messages[i]).match(LORE_SESSION_MARKER_RE);
+    return match?.[1];
+  }
+  return undefined;
+}
+
+/**
+ * Extract a Lore project path from `[lore:project=...]` context markers.
+ * Returns `undefined` when no marker is found or the path is invalid.
+ */
+export function extractProjectMarker(messages: GatewayMessage[]): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role !== "user") continue;
+    const match = messageText(messages[i]).match(LORE_PROJECT_MARKER_RE);
+    if (match?.[1]) {
+      const path = match[1].trim();
+      // Must be an absolute path
+      if (path.startsWith("/")) return path.replace(/\/+$/, "") || undefined;
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
 async function identifySession(
   req: GatewayRequest,
   _projectPath: string,
@@ -1105,6 +1157,23 @@ async function identifySession(
     if (currentValue && currentValue === state.headerSessionId) {
       return { sessionID: sid, isNew: false, tier: 2 };
     }
+  }
+
+  // --- Tier 2.5: Context markers (injected by Hermes plugin pre_llm_call) ---
+  // The lore-hermes plugin injects [lore:session-id=<hex>] into the user
+  // message context.  This is more reliable than fingerprint fallback (Tier 3)
+  // but less authoritative than explicit headers (Tier 1).
+  const markerSid = extractSessionMarker(req.messages);
+  if (markerSid) {
+    const markerKey = `context-marker:${markerSid}`;
+    const existingSid = headerSessionIndex.get(markerKey);
+    if (existingSid) {
+      return { sessionID: existingSid, isNew: false, tier: 2 as const };
+    }
+    // New session identified via context marker.
+    const sessionID = generateSessionID();
+    headerSessionIndex.set(markerKey, sessionID);
+    return { sessionID, isNew: true, tier: 2 as const };
   }
 
   // --- Tier 3: Fingerprint fallback ---
@@ -2520,6 +2589,10 @@ async function handleCompaction(
   req: GatewayRequest,
   config: GatewayConfig,
 ): Promise<Response> {
+  if (!req.rawHeaders["x-lore-project"]) {
+    const markerProject = extractProjectMarker(req.messages);
+    if (markerProject) req.rawHeaders["x-lore-project"] = markerProject;
+  }
   const pathResult = getProjectPath(req.system, req.rawHeaders);
   await initIfNeeded(pathResult.path, config, pathResult.gitRemote);
 
@@ -2756,6 +2829,13 @@ async function handleConversationTurn(
   config: GatewayConfig,
 ): Promise<Response> {
   // --- 1. Project path & init ---
+  // Enrich headers with context markers injected by lore-hermes plugin.
+  // This lets getProjectPath() pick up [lore:project=...] via the existing
+  // header resolution path without modifying config.ts.
+  if (!req.rawHeaders["x-lore-project"]) {
+    const markerProject = extractProjectMarker(req.messages);
+    if (markerProject) req.rawHeaders["x-lore-project"] = markerProject;
+  }
   const pathResult = getProjectPath(req.system, req.rawHeaders);
   await initIfNeeded(pathResult.path, config, pathResult.gitRemote);
 
@@ -2767,7 +2847,7 @@ async function handleConversationTurn(
 
   // --- 3. Session identification ---
   const { sessionID, isNew, tier } = await identifySession(req, pathResult.path);
-   const sessionState = getOrCreateSession(sessionID, pathResult.path);
+  const sessionState = getOrCreateSession(sessionID, pathResult.path);
   const projectPath = resolveSessionProjectPath(pathResult, sessionState);
 
   // Mark sub-agent sessions (x-parent-session-id present).

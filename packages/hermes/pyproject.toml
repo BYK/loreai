@@ -1,0 +1,21 @@
+[project]
+name = "lore-hermes"
+version = "0.1.0"
+description = "Lore memory integration for Hermes Agent"
+readme = "lore_hermes/README.md"
+requires-python = ">=3.11"
+license = {text = "FSL-1.1-Apache-2.0"}
+authors = [{name = "Burak Yigit Kaya", email = "ben@byk.im"}]
+dependencies = ["httpx>=0.27"]
+
+[project.urls]
+Homepage = "https://withlore.ai"
+Repository = "https://github.com/BYK/loreai"
+Documentation = "https://withlore.ai"
+
+[project.entry-points."hermes_agent.plugins"]
+lore = "lore_hermes"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

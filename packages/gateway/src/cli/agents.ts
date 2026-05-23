@@ -143,6 +143,27 @@ export const AGENTS: AgentDef[] = [
       // injection via chat.headers hook.
     }),
   },
+  {
+    name: "hermes",
+    displayName: "Hermes Agent",
+    binary: "hermes",
+    detect: () => which("hermes"),
+    envVars: (url, cwd) => {
+      const env: Record<string, string> = {
+        // Hermes uses OPENAI_BASE_URL for custom OpenAI-compatible endpoints.
+        // Force provider to "custom" so Hermes picks up the base URL.
+        OPENAI_BASE_URL: `${url}/v1`,
+        HERMES_INFERENCE_PROVIDER: "custom",
+      };
+      // Expose project path & git remote as env vars so Hermes can map
+      // them to custom headers if supported in the future.  The gateway
+      // resolves the project from system-prompt inference and cwd for now.
+      env.LORE_PROJECT = cwd;
+      const remote = safeRemote(cwd);
+      if (remote) env.LORE_GIT_REMOTE = remote;
+      return env;
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
