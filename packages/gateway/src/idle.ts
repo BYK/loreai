@@ -47,6 +47,7 @@ import {
 } from "./cache-warmer";
 import * as Sentry from "@sentry/bun";
 import { runBackground } from "./background-limiter";
+import { isAuthStale, resolveAuth } from "./auth";
 import { emitWarmupMetric, emitSessionCostMetrics, emitCurationMetrics } from "./sentry";
 import { getSessionCosts, totalWorkerCost } from "./cost-tracker";
 
@@ -86,6 +87,12 @@ export function startIdleScheduler(
       // is still active, not genuinely idle. Distillation/curation should
       // wait for the actual idle period after the tool-use turn completes.
       if (state.lastStopReason === "tool_use") continue;
+
+      // Skip sessions with stale auth credentials — background LLM calls
+      // (distillation, curation) would just 401, flooding Sentry with
+      // events every 30s. Auth refreshes when the next client request
+      // arrives via setSessionAuth(), which clears the stale flag.
+      if (isAuthStale(sessionID) && !resolveAuth(sessionID)) continue;
 
       inProgress.add(sessionID);
       runBackground(

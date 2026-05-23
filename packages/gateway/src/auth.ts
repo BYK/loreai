@@ -160,6 +160,11 @@ export function getLastSeenAuth(): AuthCredential | null {
  *    can provide a potentially-refreshed token.
  * 2. Fall back to the global `lastSeenAuth` (for cold-start or callers
  *    that don't pass a session ID).
+ * 3. If the global fallback holds the same value as the stale session
+ *    credential, return `null` — the token is expired everywhere and
+ *    retrying would just generate another 401. This prevents the
+ *    background worker 401 storm in single-session OAuth setups where
+ *    session and global credentials are the same expired token.
  */
 export function resolveAuth(
   sessionID?: string,
@@ -167,6 +172,14 @@ export function resolveAuth(
   if (sessionID) {
     const cred = getSessionAuth(sessionID);
     if (cred && !staleSessionAuth.has(sessionID)) return cred;
+
+    // Global fallback — but guard against returning the same stale token.
+    // In single-session OAuth setups, session and global hold the exact
+    // same expired bearer token. Returning it would cause callers to make
+    // a request that immediately 401s again.
+    const global = getLastSeenAuth();
+    if (cred && global && global.value === cred.value) return null;
+    return global;
   }
   return getLastSeenAuth();
 }

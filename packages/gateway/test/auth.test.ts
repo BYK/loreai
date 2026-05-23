@@ -133,6 +133,27 @@ describe("resolveAuth with staleness", () => {
     expect(result).toBe(null);
   });
 
+  test("returns null when stale session and global hold the same token", () => {
+    // Single-session OAuth setup: session and global have the same expired token
+    setSessionAuth("sess-1", bearerCred);
+    setLastSeenAuth(bearerCred);
+    markAuthStale("sess-1");
+
+    // Global fallback has the same value as the stale session credential —
+    // returning it would cause another 401, so resolveAuth returns null
+    expect(resolveAuth("sess-1")).toBe(null);
+  });
+
+  test("returns global when stale session and global hold different tokens", () => {
+    // Multi-session setup: another client refreshed the global credential
+    setSessionAuth("sess-1", bearerCred);
+    setLastSeenAuth(bearerCred2);
+    markAuthStale("sess-1");
+
+    // Global has a different (potentially fresh) token — return it
+    expect(resolveAuth("sess-1")).toEqual(bearerCred2);
+  });
+
   test("re-resolves to session credential after staleness cleared", () => {
     setSessionAuth("sess-1", bearerCred);
     setLastSeenAuth(apiKeyCred);

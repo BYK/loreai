@@ -81,6 +81,7 @@ if (sentryEnabled && !Sentry.isInitialized()) {
     /ZlibError/,
     /The operation timed out/i,
     /Worker upstream exhausted \d+ retries/,
+    /Worker upstream auth error/,
     /ECONNRESET\b/,
     /ECONNREFUSED\b/,
   ];
