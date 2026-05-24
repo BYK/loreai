@@ -12,7 +12,7 @@
 
 import { getModelEntrySync, getWorkerModel } from "./worker-model";
 import { AUTOCOMPACT_THRESHOLD } from "./compaction";
-import { log, data, temporal, loadAllSessionCosts } from "@loreai/core";
+import { log, data, temporal, loadAllSessionCosts, db, getKV, setKV } from "@loreai/core";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -70,6 +70,14 @@ export type SessionCosts = {
     avoidedCompactions: number;
     /** Estimated cost of those avoided compactions. */
     avoidedCompactionCost: number;
+  };
+
+  // --- Budget throttle diagnostics ---
+  throttle: {
+    /** Number of requests that were throttled (delayed). */
+    events: number;
+    /** Total delay imposed in milliseconds. */
+    totalDelayMs: number;
   };
 
   /** Shadow context counter — tracks virtual uncompressed context growth for compaction estimation. */
@@ -154,6 +162,281 @@ let historicalCacheAt = 0;
 const HISTORICAL_CACHE_TTL_MS = 60_000; // 1 minute
 
 // ---------------------------------------------------------------------------
+// Daily budget throttle state
+// ---------------------------------------------------------------------------
+
+/** Cumulative USD spend for the current UTC day (conversation + worker + warmup). */
+let dailySpend = 0;
+
+/** UTC date string (YYYY-MM-DD) for which `dailySpend` is valid. */
+let dailySpendDate = "";
+
+/** EMA of cost-per-hour (USD/hr) — tracks spending velocity across all sessions. */
+let costRateEMA = 0;
+
+/** Timestamp (ms) of the last conversation turn that updated the EMA. */
+let costRateLastUpdate = 0;
+
+/** Whether the cost-rate EMA has been seeded (first turn sets it directly). */
+let costRateSeeded = false;
+
+/**
+ * Base alpha for cost-rate EMA. Slower than the output-token EMA (0.3)
+ * for spike resistance — one expensive turn only moves the EMA ~15%.
+ */
+const COST_RATE_ALPHA = 0.15;
+
+/** Maximum throttle delay in seconds. */
+const MAX_THROTTLE_DELAY = 60;
+
+/**
+ * Budget fraction below which no throttling occurs, regardless of rate.
+ * At 50% spend, no friction is applied even if the rate is high.
+ */
+const THROTTLE_FLOOR = 0.50;
+
+/**
+ * Reset the daily spend counter if the UTC day has changed.
+ * Called before every cost increment — a single string comparison.
+ */
+function maybeResetDay(): void {
+  const today = new Date().toISOString().slice(0, 10);
+  if (today !== dailySpendDate) {
+    dailySpend = 0;
+    dailySpendDate = today;
+  }
+}
+
+/**
+ * Update the cost-rate EMA after a conversation turn.
+ *
+ * Computes instantaneous rate as (turnCost / hoursSinceLastTurn),
+ * then blends into the EMA with time-gap-adjusted alpha.
+ * Worker costs are excluded — we only track the user-facing request velocity.
+ */
+function updateCostRate(turnCost: number): void {
+  const now = Date.now();
+
+  if (!costRateSeeded) {
+    // First turn: seed with a conservative estimate.
+    // Assume 1 turn per 2 minutes = 30 turns/hr as baseline cadence.
+    costRateEMA = turnCost * 30;
+    costRateLastUpdate = now;
+    costRateSeeded = true;
+    return;
+  }
+
+  const elapsedHours = (now - costRateLastUpdate) / 3_600_000;
+  costRateLastUpdate = now;
+
+  if (elapsedHours < 0.0001) {
+    // Sub-second since last update (tool-use auto-continuation).
+    // Don't spike the rate — treat as part of the same logical turn.
+    return;
+  }
+
+  // Instantaneous rate: cost of this turn / time since last turn
+  const instantRate = turnCost / elapsedHours;
+
+  // Time-gap adjusted alpha: after long gaps, the EMA should decay toward
+  // the (low) instantaneous rate faster. After a 1-hour gap where no money
+  // was spent, the old EMA is stale.
+  // Reference interval = 1/30 hr ≈ 2 min (typical turn cadence).
+  const referenceHours = 1 / 30;
+  const effectiveAlpha = 1 - Math.pow(1 - COST_RATE_ALPHA, elapsedHours / referenceHours);
+
+  costRateEMA = costRateEMA * (1 - effectiveAlpha) + instantRate * effectiveAlpha;
+}
+
+/**
+ * Bootstrap the daily spend counter from persisted DB data on startup.
+ *
+ * Queries `session_state` for today's persisted costs (sessions that went
+ * idle and were flushed to DB). Also sums any live in-memory sessions.
+ * Call once during gateway startup.
+ */
+export function bootstrapDailySpend(): void {
+  const today = new Date();
+  const todayStr = today.toISOString().slice(0, 10);
+  dailySpendDate = todayStr;
+
+  // Midnight UTC today as epoch ms
+  const midnightMs = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate());
+
+  // Sum persisted session costs updated today.
+  // Note: conversation_cost and worker_cost are cumulative session totals,
+  // so multi-day sessions may overestimate today's spend. In practice most
+  // sessions don't span midnight boundaries (they idle out).
+  try {
+    const row = db()
+      .query(
+        `SELECT COALESCE(SUM(conversation_cost + worker_cost), 0) as total
+         FROM session_state
+         WHERE updated_at >= ?`,
+      )
+      .get(midnightMs) as { total: number } | null;
+    dailySpend = row?.total ?? 0;
+  } catch (err) {
+    log.error("budget-throttle: failed to bootstrap daily spend from DB", err);
+    dailySpend = 0;
+  }
+
+  if (dailySpend > 0) {
+    log.info(`budget-throttle: bootstrapped daily spend=$${dailySpend.toFixed(4)} for ${todayStr}`);
+  }
+}
+
+/**
+ * Estimate the USD cost of a request before sending it upstream.
+ *
+ * Input cost is exact (token count known from gradient transform).
+ * Output cost uses a conservative heuristic: 25% of input tokens, capped
+ * at 16K tokens. Actual median is 1-4% — the estimate deliberately
+ * overestimates to avoid budget overshoot.
+ */
+export function estimateRequestCost(model: string, inputTokens: number): number {
+  const pricing = getPricingSync(model);
+  const inputCost = (inputTokens / 1_000_000) * pricing.input;
+  // Conservative output estimate — 25% of input, capped at 16K tokens
+  const estOutputTokens = Math.min(inputTokens * 0.25, 16_384);
+  const outputCost = (estOutputTokens / 1_000_000) * pricing.output;
+  return inputCost + outputCost;
+}
+
+/**
+ * Compute the throttle delay for a request given current budget state.
+ *
+ * Two factors multiplied together:
+ * 1. Budget pressure: (spendFraction - THROTTLE_FLOOR)² — gentle ramp
+ * 2. Rate overshoot: tanh((currentRate / targetRate - 1) / 3) — smooth S-curve
+ *
+ * Returns 0 when:
+ * - No budget configured (dailyBudget ≤ 0)
+ * - Spend below THROTTLE_FLOOR (50%)
+ * - Current rate is sustainable (projected spend ≤ budget)
+ *
+ * @returns Delay in seconds (0 = no throttle, max MAX_THROTTLE_DELAY)
+ */
+export function computeThrottleDelay(
+  dailySpendUSD: number,
+  dailyBudget: number,
+  costRatePerHour: number,
+  hoursRemaining: number,
+): number {
+  if (dailyBudget <= 0) return 0;
+
+  const spendFraction = dailySpendUSD / dailyBudget;
+  if (spendFraction < THROTTLE_FLOOR) return 0;
+
+  // Budget fully exhausted — apply max delay regardless of rate.
+  // Without this, a user who exhausts their budget then goes idle (EMA → 0)
+  // would get zero delay on return because 0 <= targetRate(0).
+  if (spendFraction >= 1.0) return MAX_THROTTLE_DELAY;
+
+  // Target rate = remaining budget / remaining hours.
+  // Floor hoursRemaining at 0.5 to avoid division explosion near midnight.
+  const remainingBudget = Math.max(0, dailyBudget - dailySpendUSD);
+  const safeHours = Math.max(hoursRemaining, 0.5);
+  const targetRate = remainingBudget / safeHours;
+
+  // If current rate is sustainable, no throttle
+  if (costRatePerHour <= targetRate) return 0;
+
+  // Overshoot ratio: how much faster than sustainable (clamped to [0, 10])
+  const overshoot = Math.min((costRatePerHour / targetRate) - 1, 10);
+
+  // Budget pressure: maps [THROTTLE_FLOOR, 1.0] → [0, 1], squared for gentle ramp
+  const pressure = (spendFraction - THROTTLE_FLOOR) / (1 - THROTTLE_FLOOR);
+
+  // delay = MAX_THROTTLE_DELAY × pressure² × tanh(overshoot / 3)
+  // tanh provides smooth S-curve: overshoot=1 → 0.32, 3 → 0.76, 10 → ~1.0
+  const delay = MAX_THROTTLE_DELAY * pressure * pressure * Math.tanh(overshoot / 3);
+
+  return Math.min(Math.round(delay * 10) / 10, MAX_THROTTLE_DELAY);
+}
+
+/**
+ * Get the throttle delay for the next request, factoring in current daily
+ * spend, cost-rate EMA, and time remaining in the UTC day.
+ *
+ * @param dailyBudget - Configured daily budget in USD (0 = disabled)
+ * @param estimatedCost - Estimated cost of the upcoming request
+ * @returns Delay in seconds (0 = no throttle)
+ */
+export function getDailyThrottleDelay(dailyBudget: number, estimatedCost: number): number {
+  if (dailyBudget <= 0) return 0;
+
+  maybeResetDay();
+  const projectedSpend = dailySpend + estimatedCost;
+
+  // Hours remaining in the UTC day
+  const now = new Date();
+  const endOfDay = new Date(now);
+  endOfDay.setUTCHours(24, 0, 0, 0);
+  const hoursRemaining = (endOfDay.getTime() - now.getTime()) / 3_600_000;
+
+  return computeThrottleDelay(projectedSpend, dailyBudget, costRateEMA, hoursRemaining);
+}
+
+/** Get current daily spend and date (for UI / diagnostics). */
+export function getDailySpend(): { date: string; spend: number } {
+  maybeResetDay();
+  return { date: dailySpendDate, spend: dailySpend };
+}
+
+/** Get current cost-rate EMA in USD/hr (for UI / diagnostics). */
+export function getCostRate(): number {
+  return costRateEMA;
+}
+
+/** KV key for the persisted daily budget value. */
+const DAILY_BUDGET_KV_KEY = "daily_budget";
+
+/**
+ * Get the effective daily budget in USD.
+ *
+ * Resolution priority:
+ * 1. `LORE_DAILY_BUDGET` env var (override for automation / CI)
+ * 2. DB-persisted value from `kv_meta` (set via UI)
+ * 3. 0 (disabled)
+ */
+export function getDailyBudget(): number {
+  const envVal = process.env.LORE_DAILY_BUDGET;
+  if (envVal) {
+    const parsed = parseFloat(envVal);
+    if (parsed > 0) return parsed;
+  }
+  try {
+    const dbVal = getKV(DAILY_BUDGET_KV_KEY);
+    if (dbVal) {
+      const parsed = parseFloat(dbVal);
+      if (parsed > 0) return parsed;
+    }
+  } catch {
+    // DB not initialized yet (e.g., early startup) — fall through
+  }
+  return 0;
+}
+
+/**
+ * Set the daily budget in the DB (persisted across restarts).
+ * Pass 0 to disable.
+ */
+export function setDailyBudget(budgetUSD: number): void {
+  if (!Number.isFinite(budgetUSD) || budgetUSD < 0) budgetUSD = 0;
+  setKV(DAILY_BUDGET_KV_KEY, String(budgetUSD));
+}
+
+/** Reset daily budget throttle state (for testing). */
+export function resetDailyBudgetState(): void {
+  dailySpend = 0;
+  dailySpendDate = "";
+  costRateEMA = 0;
+  costRateLastUpdate = 0;
+  costRateSeeded = false;
+}
+
+// ---------------------------------------------------------------------------
 // Initialization
 // ---------------------------------------------------------------------------
 
@@ -183,6 +466,7 @@ function emptyCosts(): SessionCosts {
       avoidedCompactions: 0,
       avoidedCompactionCost: 0,
     },
+    throttle: { events: 0, totalDelayMs: 0 },
     _shadowContextTokens: 0,
     _lastActualInput: 0,
     _lastOutputTokens: 0,
@@ -293,6 +577,11 @@ export function recordConversationCost(
   costs.conversation.cacheReadTokens += usage.cache_read_input_tokens ?? 0;
   costs.conversation.cacheWriteTokens += usage.cache_creation_input_tokens ?? 0;
   costs.conversation.turns++;
+
+  // Daily budget throttle: accumulate spend and update velocity EMA
+  maybeResetDay();
+  dailySpend += call.total;
+  updateCostRate(call.total);
 }
 
 /** Worker ID → cost bucket mapping. */
@@ -328,6 +617,10 @@ export function recordWorkerCost(
     const fullCost = computeCallCost(model, usage, "direct");
     costs.batchSavings += fullCost.total - call.total;
   }
+
+  // Daily budget throttle: accumulate worker spend (no EMA update — workers excluded from velocity)
+  maybeResetDay();
+  dailySpend += call.total;
 }
 
 /**
@@ -349,8 +642,13 @@ export function recordWarmupCost(
   // Anthropic doubles cache_write pricing for 1h TTL
   const cacheWriteRate = ttl === "1h" ? pricing.cache_write * 2 : pricing.cache_write;
   const writeCost = (cacheCreationTokens / 1_000_000) * cacheWriteRate;
-  costs.workers.warmup.cost += readCost + writeCost;
+  const warmupTotal = readCost + writeCost;
+  costs.workers.warmup.cost += warmupTotal;
   costs.workers.warmup.calls++;
+
+  // Daily budget throttle: accumulate warmup spend (no EMA update)
+  maybeResetDay();
+  dailySpend += warmupTotal;
 }
 
 // ---------------------------------------------------------------------------
@@ -581,6 +879,7 @@ export function deleteSessionCosts(sessionID: string): void {
 /** Clear all sessions (for testing). */
 export function clearAllCosts(): void {
   sessions.clear();
+  resetDailyBudgetState();
 }
 
 // ---------------------------------------------------------------------------

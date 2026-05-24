@@ -29,6 +29,10 @@ import {
   totalWorkerCost,
   totalSavings,
   costWithoutLore,
+  getDailySpend,
+  getDailyBudget,
+  setDailyBudget,
+  getCostRate,
   type SessionCosts,
 } from "./cost-tracker";
 import { getActiveSessions } from "./pipeline";
@@ -333,6 +337,14 @@ function renderCostSummary(sessionId: string): string {
   } else if (savings < 0) {
     html += `<div style="margin-top:10px;font-size:0.85em;color:#e06c75">
       <strong>Net overhead: ${formatUSD(-savings)}</strong> &mdash; Lore overhead exceeds savings this session
+    </div>`;
+  }
+
+  // Budget throttle diagnostics
+  if (costs.throttle.events > 0) {
+    const totalDelaySec = (costs.throttle.totalDelayMs / 1000).toFixed(1);
+    html += `<div style="margin-top:10px;font-size:0.85em;color:var(--fg2)">
+      <strong style="color:#f59e0b">Budget throttle:</strong> ${costs.throttle.events} event${costs.throttle.events === 1 ? "" : "s"}, ${totalDelaySec}s total delay
     </div>`;
   }
 
@@ -2109,6 +2121,59 @@ function pageCosts(): string {
     </div>`;
   }
 
+  // --- Daily budget status + settings ---
+  const currentBudget = getDailyBudget();
+  {
+    const { spend, date } = getDailySpend();
+    const rate = getCostRate();
+
+    body += `<div class="card" style="margin-bottom:1em">
+      <h3 style="margin-top:0;margin-bottom:0.5em">Daily Budget</h3>`;
+
+    if (currentBudget > 0) {
+      const budgetPct = Math.min((spend / currentBudget) * 100, 100);
+
+      // Count total throttle events across live sessions
+      let totalThrottleEvents = 0;
+      let totalThrottleDelayMs = 0;
+      for (const [, c] of allCosts) {
+        totalThrottleEvents += c.throttle.events;
+        totalThrottleDelayMs += c.throttle.totalDelayMs;
+      }
+
+      body += renderCostBar({
+        title: `Budget (${date})`,
+        value: `${formatUSD(spend)} / ${formatUSD(currentBudget)}`,
+        percent: budgetPct,
+        tint: budgetPct < 60 ? "bar-green" : budgetPct < 85 ? "bar-amber" : "bar-red",
+        detailLeftHtml: `Rate: ${formatUSD(rate)}/hr`,
+        detailRightHtml: totalThrottleEvents > 0
+          ? `Throttled: ${totalThrottleEvents} req, ${(totalThrottleDelayMs / 1000).toFixed(1)}s delay`
+          : "",
+      });
+    } else {
+      body += `<p style="color:var(--fg2);margin:0 0 8px">No daily budget set. Configure one to automatically throttle spending.</p>`;
+    }
+
+    // Budget settings form
+    const envOverride = process.env.LORE_DAILY_BUDGET;
+    if (envOverride) {
+      body += `<div style="margin-top:8px;font-size:0.85em;color:var(--fg2)">
+        Overridden by env var <code>LORE_DAILY_BUDGET=${esc(envOverride)}</code>
+      </div>`;
+    } else {
+      body += `<form method="POST" action="/ui/api/budget" style="margin-top:8px;display:flex;gap:8px;align-items:center">
+        <label style="font-size:0.85em;color:var(--fg2)">Budget (USD/day):</label>
+        <input type="number" name="budget" step="0.01" min="0" value="${currentBudget || ""}"
+          placeholder="e.g. 10.00" style="width:100px;padding:4px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg2);color:var(--fg)">
+        <button type="submit" class="btn">Save</button>
+        ${currentBudget > 0 ? `<button type="submit" name="budget" value="0" class="btn" style="background:var(--bg2);color:var(--fg2)">Disable</button>` : ""}
+      </form>`;
+    }
+
+    body += `</div>`;
+  }
+
   // Summary stats (compact pills for secondary metrics)
   // Trend arrow: compare live savings rate vs historical average.
   // Both rates use the same formula: netSavings / counterfactual,
@@ -2689,6 +2754,15 @@ export async function handleUIRequest(
         data.renameProject(renameProjectMatch.id, newName);
       }
       return redirect(`/ui/projects/${renameProjectMatch.id}`);
+    }
+
+    // Set daily budget
+    if (pathname === "/ui/api/budget") {
+      const formData = await req.formData();
+      const budgetStr = formData.get("budget");
+      const budgetVal = parseFloat(typeof budgetStr === "string" ? budgetStr : "0") || 0;
+      setDailyBudget(budgetVal);
+      return redirect("/ui/costs");
     }
 
     // Set warming mode for a live session

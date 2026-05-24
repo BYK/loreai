@@ -227,6 +227,9 @@ export type SessionState = {
   fingerprint: string;
   /** Unix timestamp (ms) of the last request in this session. */
   lastRequestTime: number;
+  /** Unix timestamp (ms) of the request before the current one — used by budget
+   *  throttle to compute elapsed time since the previous turn for cache TTL safety. */
+  prevRequestTime?: number;
   /** Unix timestamp (ms) of the last user-initiated turn — excludes tool-use
    *  auto-continuations. Used exclusively for inter-turn gap histogram
    *  recording (survival analysis). */

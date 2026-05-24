@@ -33,6 +33,7 @@ import {
   recordCacheUsage,
   calibrate,
   getLastTransformedCount,
+  getLastTransformEstimate,
   getLastLayer,
   onIdleResume,
   consumeCameOutOfIdle,
@@ -158,6 +159,12 @@ import {
   updateShadowContext,
   recordWarmupHit,
   recordTTLSavings,
+  getDailyThrottleDelay,
+  estimateRequestCost,
+  getDailySpend,
+  getDailyBudget,
+  getCostRate,
+  getSessionCosts,
 } from "./cost-tracker";
 import {
   RECALL_GATEWAY_TOOL,
@@ -949,6 +956,7 @@ function getOrCreateSession(
     }
     sessions.set(sessionID, state);
   }
+  state.prevRequestTime = state.lastRequestTime;
   state.lastRequestTime = Date.now();
 
   // Ensure recallStore exists (upgrade from older session state)
@@ -3492,6 +3500,47 @@ async function handleConversationTurn(
     cacheConversation: true,
     conversationTTL: resolvedConversationTTL,
   };
+
+  // --- Daily budget throttle ---
+  // Apply an invisible proxy-level sleep to slow the agent when approaching
+  // the daily budget. The sleep is capped to avoid causing cache busts
+  // (which would be self-defeating — costing more than the throttle saved).
+  const dailyBudget = getDailyBudget();
+  if (dailyBudget > 0) {
+    const inputTokens = getLastTransformEstimate(sessionID)
+      || Math.ceil(JSON.stringify(modifiedReq.messages).length / 3);
+    const estimatedCost = estimateRequestCost(req.model, inputTokens);
+    const delay = getDailyThrottleDelay(dailyBudget, estimatedCost);
+
+    if (delay > 0) {
+      // Cap delay to avoid pushing the next request past the cache TTL boundary.
+      // Use prevRequestTime (the request before this one) to compute how much
+      // of the cache TTL window has already been consumed.
+      const ttlMs = resolvedConversationTTL === "1h" ? 3_600_000 : 300_000;
+      const elapsed = sessionState.prevRequestTime
+        ? Date.now() - sessionState.prevRequestTime
+        : 0; // first request — no prior timing, full TTL available
+      const maxSafe = Math.max(0, (ttlMs - elapsed) * 0.50) / 1000;
+      const actualDelay = Math.min(delay, maxSafe);
+
+      if (actualDelay > 0.5) { // don't bother sleeping < 500ms
+        log.info(
+          `budget-throttle: sleeping ${actualDelay.toFixed(1)}s ` +
+            `session=${sessionID.slice(0, 16)} ` +
+            `spend=$${getDailySpend().spend.toFixed(2)} ` +
+            `rate=$${getCostRate().toFixed(2)}/hr`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, actualDelay * 1000));
+
+        // Track throttle event on session costs
+        const costs = getSessionCosts(sessionID);
+        if (costs) {
+          costs.throttle.events++;
+          costs.throttle.totalDelayMs += actualDelay * 1000;
+        }
+      }
+    }
+  }
 
   // Start gen_ai.chat span before the upstream call so it captures real
   // wall-clock duration (including network latency and streaming time).

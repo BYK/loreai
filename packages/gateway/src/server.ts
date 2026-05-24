@@ -12,6 +12,7 @@
  * Uses `Bun.serve()` — this package targets Bun exclusively.
  */
 import { DEFAULT_PORT, type GatewayConfig } from "./config";
+import { bootstrapDailySpend, getDailyBudget } from "./cost-tracker";
 import type { GatewayRequest } from "./translate/types";
 import { parseAnthropicRequest } from "./translate/anthropic";
 import { parseOpenAIRequest, buildOpenAIResponse } from "./translate/openai";
@@ -276,6 +277,11 @@ export function startServer(config: GatewayConfig): {
   }
   if (!Number.isFinite(config.port) || config.port < 0) {
     config = { ...config, port: DEFAULT_PORT };
+  }
+
+  // Bootstrap the daily spend counter from DB (recovers today's spend after restart)
+  if (getDailyBudget() > 0) {
+    bootstrapDailySpend();
   }
 
   // Shared fetch handler for all server instances.
