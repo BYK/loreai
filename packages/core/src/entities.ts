@@ -163,8 +163,7 @@ export function create(input: {
           .get(input.canonicalName) as { id: string; metadata: string | null } | null);
 
     if (existing) {
-      d.exec("COMMIT");
-      // Merge metadata into the existing entity (incoming fills gaps, existing wins)
+      // Merge metadata inside the transaction to avoid race conditions
       if (input.metadata && Object.keys(input.metadata).length > 0) {
         const merged = mergeMetadata(existing.metadata, input.metadata);
         if (merged) {
@@ -172,7 +171,9 @@ export function create(input: {
             .run(JSON.stringify(merged), Date.now(), existing.id);
         }
       }
-      // Add any new aliases to the existing entity (outside transaction)
+      d.exec("COMMIT");
+      // Add any new aliases to the existing entity (outside transaction —
+      // addAlias has its own error handling for UNIQUE constraint violations)
       if (input.aliases?.length) {
         for (const alias of input.aliases) {
           addAlias(existing.id, alias.type, alias.value, alias.source);
@@ -346,7 +347,8 @@ export function ensureSelfEntity(projectPath: string): EntityWithAliases | null 
   }
 
   const result = create({
-    projectPath,
+    // No projectPath — self entity is global (project_id=NULL) so it's
+    // visible across all projects and dedup works correctly.
     entityType: "self",
     canonicalName: name,
     aliases,
@@ -817,6 +819,10 @@ export function addRelation(
   relation: RelationType,
   opts?: { metadata?: Record<string, unknown>; source?: string },
 ): string | null {
+  if (entityA === entityB) {
+    log.info(`skipping self-referential relation: ${entityA} (${relation})`);
+    return null;
+  }
   if (!RELATION_TYPES.includes(relation)) {
     throw new Error(`invalid relation type: ${relation}`);
   }

@@ -258,7 +258,7 @@ async function cmdEdit(
       process.exit(1);
     }
     const merged = entities.mergeMetadata(entity.metadata, parsed!);
-    updates.metadata = JSON.stringify(merged);
+    updates.metadata = merged ?? {};
   }
 
   if (Object.keys(updates).length === 0) {
