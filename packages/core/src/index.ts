@@ -89,7 +89,7 @@ export {
   getInstanceId,
   close,
 } from "./db";
-export { normalizeRemoteUrl, getGitRemote, clearGitRemoteCache } from "./git";
+export { normalizeRemoteUrl, getGitRemote, clearGitRemoteCache, getGitUser, clearGitUserCache } from "./git";
 export { enableHostedMode, isHostedMode } from "./hosted";
 export {
   transform,

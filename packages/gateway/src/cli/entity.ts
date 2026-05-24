@@ -5,8 +5,11 @@
  *   list                         List all entities with aliases
  *   show <id>                    Show full detail for an entity
  *   add <type> <name>            Create a new entity
+ *   edit <id>                    Edit an entity
  *   alias add <id> --type <t> --value <v>   Add an alias to an entity
  *   alias rm <alias-id>          Remove an alias
+ *   relation add <a-id> <b-id> --relation <type>  Add a relation
+ *   relation rm <relation-id>    Remove a relation
  *   merge <target-id> <source-id>  Merge two entities
  *   search <query>               Search entities by name or alias
  *   delete <id>                  Delete an entity
@@ -140,6 +143,16 @@ async function cmdShow(
       }
     }
   }
+
+  // Show relationships
+  const relations = entities.relationsFor(entity.id);
+  if (relations.length > 0) {
+    console.log(`\nRelationships (${relations.length}):`);
+    for (const r of relations) {
+      const metaStr = r.metadata ? ` ${r.metadata}` : "";
+      console.log(`  ${r.relation}: ${r.other_name} (${r.other_type})${metaStr}  (${r.id.slice(0, 12)})`);
+    }
+  }
 }
 
 async function cmdAdd(
@@ -166,11 +179,26 @@ async function cmdAdd(
   const projectPath = resolve((flags.project as string) ?? process.cwd());
   const cross = flags.cross !== false; // default true
 
+  let metadata: Record<string, unknown> | undefined;
+  if (flags.metadata) {
+    try {
+      metadata = JSON.parse(flags.metadata as string);
+      if (typeof metadata !== "object" || Array.isArray(metadata) || metadata === null) {
+        console.error("--metadata must be a JSON object");
+        process.exit(1);
+      }
+    } catch {
+      console.error("--metadata must be valid JSON");
+      process.exit(1);
+    }
+  }
+
   const result = entities.create({
     projectPath,
     entityType: entityType as (typeof entities.ENTITY_TYPES)[number],
     canonicalName: name,
     crossProject: cross,
+    metadata,
   });
 
   if (result.created) {
@@ -180,6 +208,66 @@ async function cmdAdd(
   }
   console.log(`  Type: ${entityType}`);
   console.log(`  Name: ${name}`);
+}
+
+async function cmdEdit(
+  args: string[],
+  flags: Record<string, unknown>,
+): Promise<void> {
+  const id = args[0];
+  if (!id) {
+    console.error("Usage: lore entity edit <id> [--name <name>] [--metadata <json>] [--cross]");
+    process.exit(1);
+  }
+
+  const { entities, db } = await import("@loreai/core");
+
+  // Support prefix matching on ID
+  let entity = entities.get(id);
+  if (!entity && id.length < 36) {
+    const match = db()
+      .query("SELECT id FROM entities WHERE id LIKE ? LIMIT 1")
+      .get(`${id}%`) as { id: string } | null;
+    if (match) entity = entities.get(match.id);
+  }
+  if (!entity) {
+    console.error(`Entity not found: ${id}`);
+    process.exit(1);
+  }
+
+  const updates: Record<string, unknown> = {};
+
+  if (flags.name) {
+    updates.canonicalName = flags.name as string;
+  }
+
+  if (flags.cross !== undefined) {
+    updates.crossProject = flags.cross !== false;
+  }
+
+  if (flags.metadata) {
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(flags.metadata as string);
+      if (typeof parsed !== "object" || Array.isArray(parsed) || parsed === null) {
+        console.error("--metadata must be a JSON object");
+        process.exit(1);
+      }
+    } catch {
+      console.error("--metadata must be valid JSON");
+      process.exit(1);
+    }
+    const merged = entities.mergeMetadata(entity.metadata, parsed!);
+    updates.metadata = JSON.stringify(merged);
+  }
+
+  if (Object.keys(updates).length === 0) {
+    console.error("No changes specified. Use --name, --metadata, or --cross.");
+    process.exit(1);
+  }
+
+  entities.update(entity.id, updates);
+  console.log(`Updated entity: ${entity.canonical_name} (${entity.id})`);
 }
 
 async function cmdAliasAdd(
@@ -232,6 +320,93 @@ async function cmdAliasRm(
   const { entities } = await import("@loreai/core");
   entities.removeAlias(aliasId);
   console.log(`Removed alias: ${aliasId}`);
+}
+
+async function cmdRelationAdd(
+  args: string[],
+  flags: Record<string, unknown>,
+): Promise<void> {
+  const idA = args[0];
+  const idB = args[1];
+  const relation = flags.relation as string;
+
+  if (!idA || !idB || !relation) {
+    console.error("Usage: lore entity relation add <entity-a-id> <entity-b-id> --relation <type> [--metadata <json>]");
+    process.exit(1);
+  }
+
+  const { entities, db } = await import("@loreai/core");
+
+  const validRelations = entities.RELATION_TYPES as readonly string[];
+  if (!validRelations.includes(relation)) {
+    console.error(`Invalid relation type: ${relation}`);
+    console.error(`Valid types: ${entities.RELATION_TYPES.join(", ")}`);
+    process.exit(1);
+  }
+
+  // Prefix matching on both IDs
+  let entityA = entities.get(idA);
+  if (!entityA && idA.length < 36) {
+    const match = db()
+      .query("SELECT id FROM entities WHERE id LIKE ? LIMIT 1")
+      .get(`${idA}%`) as { id: string } | null;
+    if (match) entityA = entities.get(match.id);
+  }
+  if (!entityA) {
+    console.error(`Entity A not found: ${idA}`);
+    process.exit(1);
+  }
+
+  let entityB = entities.get(idB);
+  if (!entityB && idB.length < 36) {
+    const match = db()
+      .query("SELECT id FROM entities WHERE id LIKE ? LIMIT 1")
+      .get(`${idB}%`) as { id: string } | null;
+    if (match) entityB = entities.get(match.id);
+  }
+  if (!entityB) {
+    console.error(`Entity B not found: ${idB}`);
+    process.exit(1);
+  }
+
+  let relMetadata: Record<string, unknown> | undefined;
+  if (flags.metadata) {
+    try {
+      const parsed = JSON.parse(flags.metadata as string);
+      if (typeof parsed !== "object" || Array.isArray(parsed) || parsed === null) {
+        console.error("--metadata must be a JSON object");
+        process.exit(1);
+      }
+      relMetadata = parsed as Record<string, unknown>;
+    } catch {
+      console.error("--metadata must be valid JSON");
+      process.exit(1);
+    }
+  }
+
+  const relId = entities.addRelation(
+    entityA.id,
+    entityB.id,
+    relation as (typeof entities.RELATION_TYPES)[number],
+    { metadata: relMetadata, source: "manual" },
+  );
+  console.log(`Added relation: ${entityA.canonical_name} —[${relation}]→ ${entityB.canonical_name}`);
+  console.log(`  Relation ID: ${relId}`);
+}
+
+async function cmdRelationRm(
+  args: string[],
+  _flags: Record<string, unknown>,
+): Promise<void> {
+  const relationId = args[0];
+  if (!relationId) {
+    console.error("Usage: lore entity relation rm <relation-id>");
+    process.exit(1);
+  }
+
+  const { entities } = await import("@loreai/core");
+  entities.removeRelation(relationId);
+  console.log(`Removed relation: ${relationId}`);
 }
 
 async function cmdMerge(
@@ -324,8 +499,11 @@ Subcommands:
   list                                 List all entities
   show <id>                            Show entity detail with aliases
   add <type> <name>                    Create a new entity
+  edit <id>                            Edit an entity
   alias add <id> --type <t> --value <v>  Add an alias
   alias rm <alias-id>                  Remove an alias
+  relation add <a-id> <b-id> --relation <type>  Add a relation
+  relation rm <relation-id>            Remove a relation
   merge <target-id> <source-id>        Merge two entities
   search <query>                       Search entities
   delete <id>                          Delete an entity
@@ -337,6 +515,9 @@ Options:
   --project <path>   Project path (default: cwd)
   --all              List all entities (ignore project scope)
   --json             Output as JSON (list only)
+  --metadata <json>  JSON metadata (add, edit, relation add)
+  --name <name>      New name (edit only)
+  --cross            Cross-project flag (add, edit)
 `.trim();
 
 export async function commandEntity(
@@ -356,6 +537,9 @@ export async function commandEntity(
     case "add":
       await cmdAdd(subArgs, values);
       break;
+    case "edit":
+      await cmdEdit(subArgs, values);
+      break;
     case "alias": {
       const aliasCmd = subArgs[0];
       const aliasArgs = subArgs.slice(1);
@@ -366,6 +550,20 @@ export async function commandEntity(
       } else {
         console.error(`Unknown alias subcommand: ${aliasCmd}`);
         console.log("Usage: lore entity alias add|rm ...");
+        process.exit(1);
+      }
+      break;
+    }
+    case "relation": {
+      const relCmd = subArgs[0];
+      const relArgs = subArgs.slice(1);
+      if (relCmd === "add") {
+        await cmdRelationAdd(relArgs, values);
+      } else if (relCmd === "rm" || relCmd === "remove") {
+        await cmdRelationRm(relArgs, values);
+      } else {
+        console.error(`Unknown relation subcommand: ${relCmd}`);
+        console.log("Usage: lore entity relation add|rm ...");
         process.exit(1);
       }
       break;

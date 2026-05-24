@@ -2476,9 +2476,38 @@ function pageEntity(id: string): string | null {
   body += `<div class="field"><span class="key">Cross-project:</span> ${entity.cross_project ? "Yes" : "No"}</div>`;
   body += `<div class="field"><span class="key">Created:</span> ${formatDate(entity.created_at)}</div>`;
   body += `<div class="field"><span class="key">Updated:</span> ${formatDate(entity.updated_at)}</div>`;
+  // Metadata section
+  let parsedMeta: Record<string, unknown> = {};
   if (entity.metadata) {
-    body += `<div class="field"><span class="key">Metadata:</span></div><pre>${esc(entity.metadata)}</pre>`;
+    try { parsedMeta = JSON.parse(entity.metadata); } catch { /* ignore */ }
   }
+  const hasMetadata = Object.keys(parsedMeta).length > 0;
+  if (hasMetadata) {
+    body += `<h2>Metadata</h2>`;
+    if (typeof parsedMeta.role === "string" && parsedMeta.role) {
+      body += `<div class="field"><span class="key">Role:</span> ${esc(parsedMeta.role)}</div>`;
+    }
+    if (typeof parsedMeta.description === "string" && parsedMeta.description) {
+      body += `<div class="field"><span class="key">Description:</span> ${esc(parsedMeta.description)}</div>`;
+    }
+    if (typeof parsedMeta.notes === "string" && parsedMeta.notes) {
+      body += `<div class="field"><span class="key">Notes:</span> ${esc(parsedMeta.notes)}</div>`;
+    }
+    // Show any extra keys as raw JSON
+    const { role, description, notes, ...extra } = parsedMeta as Record<string, unknown>;
+    if (Object.keys(extra).length > 0) {
+      body += `<div class="field"><span class="key">Other:</span></div><pre>${esc(JSON.stringify(extra, null, 2))}</pre>`;
+    }
+  }
+
+  // Metadata edit form
+  body += `<h2>Edit Metadata</h2>`;
+  body += `<form method="POST" action="/ui/api/update/entity/${esc(entity.id)}/metadata" style="display:flex;flex-direction:column;gap:8px;max-width:500px;">`;
+  body += `<label>Role: <input name="role" value="${esc(String(parsedMeta.role ?? ""))}" style="width:100%;" /></label>`;
+  body += `<label>Description: <input name="description" value="${esc(String(parsedMeta.description ?? ""))}" style="width:100%;" /></label>`;
+  body += `<label>Notes: <textarea name="notes" rows="3" style="width:100%;">${esc(String(parsedMeta.notes ?? ""))}</textarea></label>`;
+  body += `<button type="submit">Save Metadata</button>`;
+  body += `</form>`;
 
   // Aliases
   const displayAliases = entity.aliases.filter((a) => a.alias_value !== entity.canonical_name);
@@ -2497,6 +2526,22 @@ function pageEntity(id: string): string | null {
     body += `</table>`;
   } else {
     body += `<h2>Aliases</h2><p class="empty">No additional aliases (only the canonical name).</p>`;
+  }
+
+  // Relationships
+  const relations = entities.relationsFor(entity.id);
+  if (relations.length > 0) {
+    body += `<h2>Relationships (${relations.length})</h2>`;
+    body += `<table data-table-id="entity-relations">
+      <tr><th data-sort="text">Relation</th><th data-sort="text">Entity</th><th data-sort="text">Type</th></tr>`;
+    for (const r of relations) {
+      body += `<tr>
+        <td>${badge(r.relation)}</td>
+        <td><a href="/ui/entities/${esc(r.other_id)}">${esc(r.other_name)}</a></td>
+        <td>${badge(r.other_type)}</td>
+      </tr>`;
+    }
+    body += `</table>`;
   }
 
   // Linked knowledge entries
@@ -2629,6 +2674,27 @@ export async function handleUIRequest(
     if (delEntity) {
       entities.remove(delEntity.id);
       return redirect("/ui/entities");
+    }
+
+    // Update entity metadata
+    const updateEntityMeta = matchRoute(pathname, "/ui/api/update/entity/:id/metadata");
+    if (updateEntityMeta) {
+      const entity = entities.get(updateEntityMeta.id);
+      if (!entity) return redirect("/ui/entities");
+      const formData = await req.formData();
+      const existing = entity.metadata ? JSON.parse(entity.metadata) : {};
+      const role = (formData.get("role") as string)?.trim() || undefined;
+      const description = (formData.get("description") as string)?.trim() || undefined;
+      const notes = (formData.get("notes") as string)?.trim() || undefined;
+      const metadata: Record<string, unknown> = { ...existing };
+      // Update known fields — set to value or remove if empty
+      if (role !== undefined) metadata.role = role; else delete metadata.role;
+      if (description !== undefined) metadata.description = description; else delete metadata.description;
+      if (notes !== undefined) metadata.notes = notes; else delete metadata.notes;
+      entities.update(updateEntityMeta.id, {
+        metadata: Object.keys(metadata).length > 0 ? metadata : {},
+      });
+      return redirect(`/ui/entities/${updateEntityMeta.id}`);
     }
 
     // Delete knowledge

@@ -146,3 +146,56 @@ export function getGitRemote(path: string): string | null {
     return null;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Git user identity
+// ---------------------------------------------------------------------------
+
+/** Cached git user identity (process-lifetime, like gitRemoteCache). */
+const gitUserCache = new Map<string, { name: string | null; email: string | null }>();
+
+/**
+ * Clear the in-memory git user cache. For test isolation.
+ */
+export function clearGitUserCache(): void {
+  gitUserCache.clear();
+}
+
+/**
+ * Get the git user.name and user.email for a repository at the given path.
+ *
+ * Results are cached in-memory for the process lifetime.
+ * Returns `{ name: null, email: null }` if not in a git repo or git is not installed.
+ * Skipped in hosted mode — never run git subprocesses with client-controlled cwd.
+ */
+export function getGitUser(path: string): { name: string | null; email: string | null } {
+  if (isHostedMode()) return { name: null, email: null };
+
+  const cached = gitUserCache.get(path);
+  if (cached !== undefined) return cached;
+
+  const result = { name: null as string | null, email: null as string | null };
+  try {
+    result.name = execSync("git config user.name", {
+      cwd: path,
+      encoding: "utf-8",
+      timeout: 5000,
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim() || null;
+  } catch {
+    // git not installed, not a repo, or user.name not set
+  }
+  try {
+    result.email = execSync("git config user.email", {
+      cwd: path,
+      encoding: "utf-8",
+      timeout: 5000,
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim() || null;
+  } catch {
+    // git not installed, not a repo, or user.email not set
+  }
+
+  gitUserCache.set(path, result);
+  return result;
+}

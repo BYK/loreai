@@ -117,8 +117,13 @@ export const LoreConfig = z.object({
        *  the curator, knowledge DB writes, AGENTS.md sync, and LTM injection into the
        *  system prompt. Default: true. */
       enabled: z.boolean().default(true),
+      /** Max entities to inject into the agent system prompt. When the total entity count
+       *  exceeds this cap, the self entity + its relations are always included and the rest
+       *  are relevance-ranked. Remaining entities are discoverable via recall.
+       *  Set to 0 to disable entity injection. Default: 30. */
+      maxEntityInject: z.number().min(0).default(30),
     })
-    .default({ enabled: true }),
+    .default({ enabled: true, maxEntityInject: 30 }),
   curator: z
     .object({
       enabled: z.boolean().default(true),
@@ -258,6 +263,27 @@ export const LoreConfig = z.object({
       path: z.string().default("AGENTS.md"),
     })
     .default({ enabled: true, path: "AGENTS.md" }),
+  /** User identity for the self-entity. When provided, creates/updates a "self" entity
+   *  with this information. If omitted, falls back to git config user.name / user.email. */
+  user: z
+    .object({
+      /** Display name. Overrides git config user.name. */
+      name: z.string().optional(),
+      /** Email address. Overrides git config user.email. */
+      email: z.string().optional(),
+      /** Additional aliases for the self entity. */
+      aliases: z
+        .array(
+          z.object({
+            type: z.enum(["name", "email", "github", "slack", "phone", "nickname", "url", "domain"]),
+            value: z.string(),
+          }),
+        )
+        .default([]),
+      /** Metadata for the self entity (description, role, notes, etc.). */
+      metadata: z.record(z.string(), z.unknown()).optional(),
+    })
+    .optional(),
 });
 
 export type LoreConfig = z.infer<typeof LoreConfig>;

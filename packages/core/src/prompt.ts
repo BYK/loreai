@@ -417,25 +417,45 @@ ENTITY GROUNDING — resolve ambiguous references to canonical names:
 - If you detect a person, service, tool, organization, repo, or infrastructure component
   NOT in the known entities list, include it in a top-level "entities" field in your response:
   {
-    "ops": [ ... ],   // knowledge operations (same format as before)
-    "entities": [     // NEW — detected entities not already known
+    "ops": [ ... ],
+    "entities": [
       {
         "type": "person" | "org" | "service" | "tool" | "repo" | "infra",
         "canonical_name": "Full Canonical Name",
         "aliases": [
           { "type": "name" | "email" | "github" | "slack" | "nickname" | "url" | "domain", "value": "..." }
-        ]
+        ],
+        "metadata": {
+          "description": "brief factual description (e.g. 'CI/CD platform', 'Twitch streamer')",
+          "role": "relationship/role relative to user (e.g. 'backend lead', 'my manager', 'contractor')"
+        }
+      }
+    ],
+    "relations": [
+      {
+        "entity_a": "Canonical Name A",
+        "entity_b": "Canonical Name B",
+        "relation": "friend" | "colleague" | "manager" | "report" | "collaborator" | "client" | "mentor" | "partner",
+        "metadata": { "context": "optional note about the relationship" }
       }
     ]
   }
+- Include metadata only when the conversation provides clear context about an entity's
+  role or description. Omit metadata fields you're unsure about — don't guess.
+- For EXISTING entities: if the conversation reveals new metadata (role, description)
+  for a known entity, include that entity in "entities" with only the new metadata fields.
+  Use the exact canonical_name so the system can merge the metadata.
 - Only propose new entities when you are confident they are real, recurring references —
   not one-off mentions of generic concepts. People, services, and tools referenced by name
   are good candidates. Generic phrases like "the database" or "the CI" are not unless they
   map to a specific known service.
 - If the entity list is provided and a mention matches a known entity, use its canonical name
   in knowledge entries — do not propose a new entity.
+- Only create relations when the conversation explicitly states a relationship.
+  "Melkey and I are friends" → relation. "I talked to Melkey" → no relation (just a mention).
+  Use the user's canonical name (marked "you (the user)" in the entity list) for self-references.
 
-If nothing warrants extraction, return: { "ops": [], "entities": [] }
+If nothing warrants extraction, return: { "ops": [], "entities": [], "relations": [] }
 The response may also be a plain JSON array of ops (backward compatible): []
 
 Output ONLY valid JSON. No markdown fences, no explanation, no preamble.`;
@@ -478,7 +498,9 @@ IMPORTANT:
 7. If a user CHANGED a preference ("switched from X to Y", "no longer use X", "moved to Y"),
    find the existing entry about X and UPDATE it — do not leave contradictory entries.
 8. Resolve ambiguous references (pronouns, nicknames, abbreviations) to canonical names from
-   the entity list. If you detect new recurring entities, include them in the "entities" field.`;
+   the entity list. If you detect new recurring entities, include them in the "entities" field.
+9. If the conversation reveals relationships between entities (friend, colleague, manager, etc.),
+   include them in the "relations" field. Only explicit statements — not inferred from context.`;
 }
 
 /**

@@ -9,7 +9,7 @@ import { CURATOR_SYSTEM, curatorUser, CONSOLIDATION_SYSTEM, consolidationUser } 
 import { detectAndFormat } from "./instruction-detect";
 import { curatorLimiter } from "./session-limiter";
 import type { LLMClient } from "./types";
-import type { EntityType, AliasType } from "./entities";
+import type { EntityType, AliasType, RelationType } from "./entities";
 
 /**
  * Maximum length (chars) for a single knowledge entry's content.
@@ -24,12 +24,22 @@ export type DetectedEntity = {
   type: EntityType;
   canonical_name: string;
   aliases?: Array<{ type: AliasType; value: string }>;
+  metadata?: Record<string, unknown>;
 };
 
-/** Parsed curator response containing both knowledge ops and detected entities. */
+/** Relationship detected by the curator from conversation context. */
+export type DetectedRelation = {
+  entity_a: string; // canonical name or [uuid]
+  entity_b: string;
+  relation: string;
+  metadata?: Record<string, unknown>;
+};
+
+/** Parsed curator response containing knowledge ops, entities, and relations. */
 export type CuratorResponse = {
   ops: CuratorOp[];
   entities: DetectedEntity[];
+  relations: DetectedRelation[];
 };
 
 export type CuratorOp =
@@ -74,21 +84,25 @@ export function parseResponse(text: string): CuratorResponse {
       return {
         ops: filterOps(parsed),
         entities: [],
+        relations: [],
       };
     }
 
-    // New format: { ops: [...], entities: [...] }
+    // New format: { ops: [...], entities: [...], relations: [...] }
     if (typeof parsed === "object" && parsed !== null) {
       const ops = Array.isArray(parsed.ops) ? filterOps(parsed.ops) : [];
       const detectedEntities = Array.isArray(parsed.entities)
         ? filterEntities(parsed.entities)
         : [];
-      return { ops, entities: detectedEntities };
+      const detectedRelations = Array.isArray(parsed.relations)
+        ? filterRelations(parsed.relations)
+        : [];
+      return { ops, entities: detectedEntities, relations: detectedRelations };
     }
 
-    return { ops: [], entities: [] };
+    return { ops: [], entities: [], relations: [] };
   } catch {
-    return { ops: [], entities: [] };
+    return { ops: [], entities: [], relations: [] };
   }
 }
 
@@ -126,17 +140,62 @@ function filterEntities(arr: unknown[]): DetectedEntity[] {
               ((a as Record<string, unknown>).value as string).length > 0,
           )
         : undefined;
+
+      // Validate metadata — must be a plain object with non-empty string values ≤500 chars
+      let validMetadata: Record<string, unknown> | undefined;
+      if (typeof obj.metadata === "object" && obj.metadata !== null && !Array.isArray(obj.metadata)) {
+        const filtered = Object.fromEntries(
+          Object.entries(obj.metadata as Record<string, unknown>).filter(
+            ([, v]) => typeof v === "string" && v.length > 0 && v.length <= 500,
+          ),
+        );
+        if (Object.keys(filtered).length > 0) validMetadata = filtered;
+      }
+
       return {
         type: obj.type as EntityType,
         canonical_name: obj.canonical_name as string,
         aliases: validAliases,
+        metadata: validMetadata,
       };
     });
 }
 
+function filterRelations(arr: unknown[]): DetectedRelation[] {
+  return arr.filter((r: unknown): r is DetectedRelation => {
+    if (typeof r !== "object" || r === null) return false;
+    const obj = r as Record<string, unknown>;
+    return (
+      typeof obj.entity_a === "string" &&
+      obj.entity_a.length > 0 &&
+      typeof obj.entity_b === "string" &&
+      obj.entity_b.length > 0 &&
+      typeof obj.relation === "string" &&
+      entities.RELATION_TYPES.includes(obj.relation as RelationType)
+    );
+  }).map((obj) => {
+    // Validate relation metadata
+    let validMetadata: Record<string, unknown> | undefined;
+    if (typeof obj.metadata === "object" && obj.metadata !== null && !Array.isArray(obj.metadata)) {
+      const filtered = Object.fromEntries(
+        Object.entries(obj.metadata as Record<string, unknown>).filter(
+          ([, v]) => typeof v === "string" && v.length > 0 && v.length <= 500,
+        ),
+      );
+      if (Object.keys(filtered).length > 0) validMetadata = filtered;
+    }
+    return {
+      entity_a: obj.entity_a,
+      entity_b: obj.entity_b,
+      relation: obj.relation,
+      metadata: validMetadata,
+    };
+  });
+}
+
 /**
  * Apply a list of curator ops (create/update/delete) to the knowledge DB,
- * and optionally create detected entities.
+ * and optionally create detected entities and relations.
  * Shared by both the live curator and the conversation import system.
  *
  * @returns Counts of applied operations.
@@ -150,8 +209,10 @@ export function applyOps(
     skipCreate?: boolean;
     /** Entities detected by the curator from conversation context. */
     detectedEntities?: DetectedEntity[];
+    /** Relations detected by the curator from conversation context. */
+    detectedRelations?: DetectedRelation[];
   },
-): { created: number; updated: number; deleted: number; entitiesCreated: number } {
+): { created: number; updated: number; deleted: number; entitiesCreated: number; relationsCreated: number } {
   let created = 0;
   let updated = 0;
   let deleted = 0;
@@ -224,7 +285,7 @@ export function applyOps(
     }
   }
 
-  // Create detected entities
+  // Create detected entities (metadata merged on dedup via create())
   if (input.detectedEntities?.length) {
     for (const de of input.detectedEntities) {
       try {
@@ -237,7 +298,7 @@ export function applyOps(
             value: a.value,
             source: "curator",
           })),
-          crossProject: true, // entities default to cross-project
+          metadata: de.metadata,
         });
         if (result.created) entitiesCreated++;
       } catch (err) {
@@ -246,7 +307,42 @@ export function applyOps(
     }
   }
 
-  return { created, updated, deleted, entitiesCreated };
+  // Create detected relations
+  let relationsCreated = 0;
+  if (input.detectedRelations?.length) {
+    for (const dr of input.detectedRelations) {
+      try {
+        // Resolve entity references by canonical name or UUID
+        const resolveRef = (ref: string): string | null => {
+          // Check if it's a UUID (wrapped in brackets like [uuid])
+          const uuidMatch = ref.match(/^\[([^\]]+)\]$/);
+          if (uuidMatch) {
+            const entity = entities.get(uuidMatch[1]);
+            return entity?.id ?? null;
+          }
+          // Try to resolve by name
+          const entity = entities.resolve(ref);
+          return entity?.id ?? null;
+        };
+
+        const aId = resolveRef(dr.entity_a);
+        const bId = resolveRef(dr.entity_b);
+        if (aId && bId && aId !== bId) {
+          const relId = entities.addRelation(
+            aId,
+            bId,
+            dr.relation as entities.RelationType,
+            { metadata: dr.metadata, source: "curator" },
+          );
+          if (relId) relationsCreated++;
+        }
+      } catch (err) {
+        log.warn(`relation creation failed for "${dr.entity_a}" → "${dr.entity_b}":`, err);
+      }
+    }
+  }
+
+  return { created, updated, deleted, entitiesCreated, relationsCreated };
 }
 
 // Track which messages we've already curated — per session to prevent
@@ -271,9 +367,9 @@ export async function run(input: {
   projectPath: string;
   sessionID: string;
   model?: { providerID: string; modelID: string };
-}): Promise<{ created: number; updated: number; deleted: number; entitiesCreated: number }> {
+}): Promise<{ created: number; updated: number; deleted: number; entitiesCreated: number; relationsCreated: number }> {
   const cfg = config();
-  if (!cfg.curator.enabled) return { created: 0, updated: 0, deleted: 0, entitiesCreated: 0 };
+  if (!cfg.curator.enabled) return { created: 0, updated: 0, deleted: 0, entitiesCreated: 0, relationsCreated: 0 };
 
   // Skip-if-busy: curation is periodic, not accumulative. If a curation is
   // already running for this session, skip — the next trigger will pick up
@@ -285,7 +381,7 @@ export async function run(input: {
   // if this invariant is ever violated.
   if (curatorLimiter.isBusy(input.sessionID)) {
     log.info(`curation skipped: already running for session ${input.sessionID.slice(0, 16)}`);
-    return { created: 0, updated: 0, deleted: 0, entitiesCreated: 0 };
+    return { created: 0, updated: 0, deleted: 0, entitiesCreated: 0, relationsCreated: 0 };
   }
 
   return curatorLimiter.get(input.sessionID)(() => runInner(input));
@@ -296,7 +392,7 @@ async function runInner(input: {
   projectPath: string;
   sessionID: string;
   model?: { providerID: string; modelID: string };
-}): Promise<{ created: number; updated: number; deleted: number; entitiesCreated: number }> {
+}): Promise<{ created: number; updated: number; deleted: number; entitiesCreated: number; relationsCreated: number }> {
   const cfg = config();
 
   // Get recent undistilled messages since last curation.
@@ -316,7 +412,7 @@ async function runInner(input: {
     // This is the common case after /lore:curate runs distillation first.
     const distillations = distillation.loadForSession(input.projectPath, input.sessionID, true);
     const recentDistillations = distillations.filter((d) => d.created_at > sessionCuratedAt);
-    if (recentDistillations.length === 0) return { created: 0, updated: 0, deleted: 0, entitiesCreated: 0 };
+    if (recentDistillations.length === 0) return { created: 0, updated: 0, deleted: 0, entitiesCreated: 0, relationsCreated: 0 };
     text = recentDistillations.map((d) => d.observations).join("\n\n");
   }
   // Include cross-project entries so the curator can see and update
@@ -379,13 +475,14 @@ async function runInner(input: {
     userContent,
     { model, workerID: "lore-curator", thinking: false, sessionID: input.sessionID, maxTokens: 2048, temperature: 0 },
   );
-  if (!responseText) return { created: 0, updated: 0, deleted: 0, entitiesCreated: 0 };
+  if (!responseText) return { created: 0, updated: 0, deleted: 0, entitiesCreated: 0, relationsCreated: 0 };
 
   const response = parseResponse(responseText);
   const result = applyOps(response.ops, {
     projectPath: input.projectPath,
     sessionID: input.sessionID,
     detectedEntities: response.entities,
+    detectedRelations: response.relations,
   });
 
   // Post-curation dedup sweep: if the curator created new entries, check for

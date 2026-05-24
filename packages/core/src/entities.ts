@@ -8,16 +8,18 @@
 import { uuidv7 } from "uuidv7";
 import { db, ensureProject } from "./db";
 import { ftsQuery, ftsQueryOr, EMPTY_QUERY, filterTerms } from "./search";
+import { config } from "./config";
+import { getGitUser } from "./git";
 import * as log from "./log";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-export type EntityType = "person" | "org" | "service" | "tool" | "repo" | "infra";
+export type EntityType = "self" | "person" | "org" | "service" | "tool" | "repo" | "infra";
 
 export const ENTITY_TYPES: readonly EntityType[] = [
-  "person", "org", "service", "tool", "repo", "infra",
+  "self", "person", "org", "service", "tool", "repo", "infra",
 ] as const;
 
 export type AliasType =
@@ -53,6 +55,53 @@ export type EntityAlias = {
 export type EntityWithAliases = Entity & {
   aliases: EntityAlias[];
 };
+
+/** Structured metadata for entities — role, description, notes. */
+export type EntityMetadata = {
+  description?: string;
+  role?: string;
+  notes?: string;
+  [key: string]: unknown;
+};
+
+/** Relationship types between entities. */
+export type RelationType =
+  | "friend"
+  | "colleague"
+  | "manager"
+  | "report"
+  | "collaborator"
+  | "client"
+  | "mentor"
+  | "partner";
+
+export const RELATION_TYPES: readonly RelationType[] = [
+  "friend", "colleague", "manager", "report",
+  "collaborator", "client", "mentor", "partner",
+] as const;
+
+export type EntityRelation = {
+  id: string;
+  entity_a: string;
+  entity_b: string;
+  relation: RelationType;
+  metadata: string | null;
+  source: string | null;
+  created_at: number;
+  updated_at: number;
+};
+
+/** Relation with the other entity's name resolved for display. */
+export type EntityRelationResolved = EntityRelation & {
+  other_id: string;
+  other_name: string;
+  other_type: EntityType;
+};
+
+/** Entity types that default to cross-project (user-level). */
+const CROSS_PROJECT_TYPES: ReadonlySet<EntityType> = new Set([
+  "self", "person", "org", "service", "tool",
+]);
 
 /** Columns to SELECT for Entity — avoids pulling unnecessary data. */
 const ENTITY_COLS =
@@ -92,7 +141,10 @@ export function create(input: {
   }
 
   const pid = input.projectPath ? ensureProject(input.projectPath) : null;
-  const cross = input.crossProject ?? (pid === null ? 1 : 0);
+  // Type-based cross_project defaults:
+  // self/person/org/service/tool → cross-project (user-level)
+  // repo/infra → project-scoped
+  const cross = input.crossProject ?? (CROSS_PROJECT_TYPES.has(input.entityType) ? true : pid === null);
   const d = db();
 
   // Dedup + insert inside a transaction to avoid race conditions
@@ -101,17 +153,25 @@ export function create(input: {
     const existing = pid
       ? (d
           .query(
-            `SELECT id FROM entities WHERE canonical_name = ? COLLATE NOCASE AND (project_id = ? OR project_id IS NULL)`,
+            `SELECT id, metadata FROM entities WHERE canonical_name = ? COLLATE NOCASE AND (project_id = ? OR project_id IS NULL)`,
           )
-          .get(input.canonicalName, pid) as { id: string } | null)
+          .get(input.canonicalName, pid) as { id: string; metadata: string | null } | null)
       : (d
           .query(
-            `SELECT id FROM entities WHERE canonical_name = ? COLLATE NOCASE AND project_id IS NULL`,
+            `SELECT id, metadata FROM entities WHERE canonical_name = ? COLLATE NOCASE AND project_id IS NULL`,
           )
-          .get(input.canonicalName) as { id: string } | null);
+          .get(input.canonicalName) as { id: string; metadata: string | null } | null);
 
     if (existing) {
       d.exec("COMMIT");
+      // Merge metadata into the existing entity (incoming fills gaps, existing wins)
+      if (input.metadata && Object.keys(input.metadata).length > 0) {
+        const merged = mergeMetadata(existing.metadata, input.metadata);
+        if (merged) {
+          d.query("UPDATE entities SET metadata = ?, updated_at = ? WHERE id = ?")
+            .run(JSON.stringify(merged), Date.now(), existing.id);
+        }
+      }
       // Add any new aliases to the existing entity (outside transaction)
       if (input.aliases?.length) {
         for (const alias of input.aliases) {
@@ -205,14 +265,101 @@ export function update(
   }
 }
 
-/** Delete an entity, its aliases, and knowledge refs. */
+/** Delete an entity, its aliases, relations, and knowledge refs. */
 export function remove(id: string): void {
   db().query("DELETE FROM knowledge_entity_refs WHERE entity_id = ?").run(id);
+  db().query("DELETE FROM entity_relations WHERE entity_a = ? OR entity_b = ?").run(id, id);
   // Explicitly delete aliases BEFORE the entity so FTS5 content-sync triggers
   // fire correctly (CASCADE deletes do NOT fire AFTER DELETE triggers in SQLite).
   db().query("DELETE FROM entity_aliases WHERE entity_id = ?").run(id);
   db().query("DELETE FROM entities WHERE id = ?").run(id);
 }
+
+// ---------------------------------------------------------------------------
+// Self-entity
+// ---------------------------------------------------------------------------
+
+/**
+ * Get the self entity (entity_type = 'self'). Returns null if none exists.
+ * The self entity is always cross-project — there is at most one per installation.
+ */
+export function getSelfEntity(): EntityWithAliases | null {
+  const row = db()
+    .query(`SELECT ${ENTITY_COLS} FROM entities WHERE entity_type = 'self' LIMIT 1`)
+    .get() as Entity | null;
+  if (!row) return null;
+  const aliases = db()
+    .query("SELECT * FROM entity_aliases WHERE entity_id = ? ORDER BY alias_type, alias_value")
+    .all(row.id) as EntityAlias[];
+  return { ...row, aliases };
+}
+
+/**
+ * Ensure the self entity exists. Creates or updates it from:
+ *   1. `.lore.json` `user` config (explicit override)
+ *   2. `git config user.name` / `user.email` (auto-detect fallback)
+ *
+ * Returns the self entity, or null if no identity could be determined.
+ */
+export function ensureSelfEntity(projectPath: string): EntityWithAliases | null {
+  const cfg = config().user;
+  const git = getGitUser(projectPath);
+
+  const name = cfg?.name || git.name;
+  if (!name) return getSelfEntity(); // no identity source — return existing or null
+
+  const email = cfg?.email || git.email;
+  const existing = getSelfEntity();
+
+  if (existing) {
+    // Update name if changed
+    const updates: { canonicalName?: string; metadata?: Record<string, unknown> } = {};
+    if (existing.canonical_name !== name) {
+      updates.canonicalName = name;
+    }
+    // Merge config metadata into existing
+    if (cfg?.metadata && Object.keys(cfg.metadata).length > 0) {
+      const merged = mergeMetadata(existing.metadata, cfg.metadata as Record<string, unknown>);
+      if (merged) updates.metadata = merged;
+    }
+    if (Object.keys(updates).length > 0) {
+      update(existing.id, updates);
+    }
+    // Add email alias if not present
+    if (email) addAlias(existing.id, "email", email, "auto");
+    // Add config aliases
+    if (cfg?.aliases) {
+      for (const a of cfg.aliases) {
+        addAlias(existing.id, a.type as AliasType, a.value, "config");
+      }
+    }
+    return getSelfEntity();
+  }
+
+  // Create self entity
+  const aliases: Array<{ type: AliasType; value: string; source?: string }> = [];
+  if (email) aliases.push({ type: "email", value: email, source: "auto" });
+  if (cfg?.aliases) {
+    for (const a of cfg.aliases) {
+      aliases.push({ type: a.type as AliasType, value: a.value, source: "config" });
+    }
+  }
+
+  const result = create({
+    projectPath,
+    entityType: "self",
+    canonicalName: name,
+    aliases,
+    metadata: cfg?.metadata as Record<string, unknown> | undefined,
+    crossProject: true,
+  });
+
+  return result.id ? getSelfEntity() : null;
+}
+
+// ---------------------------------------------------------------------------
+// CRUD — Read
+// ---------------------------------------------------------------------------
 
 /** Get a single entity by ID. */
 export function get(id: string): Entity | null {
@@ -231,6 +378,55 @@ export function getWithAliases(id: string): EntityWithAliases | null {
     .query("SELECT * FROM entity_aliases WHERE entity_id = ? ORDER BY alias_type, alias_value")
     .all(id) as EntityAlias[];
   return { ...entity, aliases };
+}
+
+// ---------------------------------------------------------------------------
+// Metadata helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Shallow-merge incoming metadata into existing metadata.
+ * Existing non-empty values win (first observation preserved); new keys fill gaps.
+ * Returns the merged object, or null if both inputs are empty.
+ */
+export function mergeMetadata(
+  existing: string | null,
+  incoming: Record<string, unknown> | undefined,
+): Record<string, unknown> | null {
+  if (!incoming || Object.keys(incoming).length === 0) {
+    return existing ? (JSON.parse(existing) as Record<string, unknown>) : null;
+  }
+  const base = existing ? (JSON.parse(existing) as Record<string, unknown>) : {};
+  // Start from incoming, then overlay existing non-empty values
+  const merged: Record<string, unknown> = { ...incoming };
+  for (const [k, v] of Object.entries(base)) {
+    if (v !== null && v !== undefined && v !== "") {
+      merged[k] = v;
+    }
+  }
+  return Object.keys(merged).length > 0 ? merged : null;
+}
+
+/**
+ * Format metadata for prompt injection — role/description only, max 80 chars.
+ * Notes are omitted (too noisy for system prompts).
+ */
+function formatMetadataBrief(metadataJson: string | null): string {
+  if (!metadataJson) return "";
+  try {
+    const m = JSON.parse(metadataJson) as Record<string, unknown>;
+    const parts: string[] = [];
+    if (typeof m.role === "string" && m.role) parts.push(m.role);
+    if (typeof m.description === "string" && m.description && m.description !== m.role) {
+      parts.push(`"${m.description}"`);
+    }
+    if (!parts.length) return "";
+    const joined = parts.join("; ");
+    const truncated = joined.length > 80 ? joined.slice(0, 77) + "..." : joined;
+    return ` — ${truncated}`;
+  } catch {
+    return "";
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -580,6 +776,16 @@ export function merge(targetId: string, sourceId: string): void {
       `UPDATE OR IGNORE knowledge_entity_refs SET entity_id = ? WHERE entity_id = ?`,
     ).run(targetId, sourceId);
 
+    // Move relations from source to target (update both sides)
+    d.query(
+      `UPDATE OR IGNORE entity_relations SET entity_a = ? WHERE entity_a = ?`,
+    ).run(targetId, sourceId);
+    d.query(
+      `UPDATE OR IGNORE entity_relations SET entity_b = ? WHERE entity_b = ?`,
+    ).run(targetId, sourceId);
+    // Clean up any remaining source relations (UNIQUE conflict → left behind by OR IGNORE)
+    d.query("DELETE FROM entity_relations WHERE entity_a = ? OR entity_b = ?").run(sourceId, sourceId);
+
     // Delete source — explicit alias delete so FTS5 triggers fire
     // (CASCADE deletes don't fire AFTER DELETE triggers in SQLite)
     d.query("DELETE FROM knowledge_entity_refs WHERE entity_id = ?").run(sourceId);
@@ -594,6 +800,117 @@ export function merge(targetId: string, sourceId: string): void {
     try { d.exec("ROLLBACK"); } catch (rbErr) { log.info("merge rollback failed:", rbErr); }
     throw e;
   }
+}
+
+// ---------------------------------------------------------------------------
+// CRUD — Relations
+// ---------------------------------------------------------------------------
+
+/**
+ * Add a relationship between two entities. Silently ignores duplicates
+ * (UNIQUE constraint on entity_a + entity_b + relation).
+ * Returns the relation ID or null if already exists.
+ */
+export function addRelation(
+  entityA: string,
+  entityB: string,
+  relation: RelationType,
+  opts?: { metadata?: Record<string, unknown>; source?: string },
+): string | null {
+  if (!RELATION_TYPES.includes(relation)) {
+    throw new Error(`invalid relation type: ${relation}`);
+  }
+  const id = uuidv7();
+  const now = Date.now();
+  try {
+    db()
+      .query(
+        `INSERT INTO entity_relations (id, entity_a, entity_b, relation, metadata, source, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        entityA,
+        entityB,
+        relation,
+        opts?.metadata ? JSON.stringify(opts.metadata) : null,
+        opts?.source ?? null,
+        now,
+        now,
+      );
+    return id;
+  } catch (e: unknown) {
+    if (e instanceof Error && /UNIQUE constraint/i.test(e.message)) {
+      log.info(`relation already exists: ${entityA} → ${entityB} (${relation})`);
+      return null;
+    }
+    throw e;
+  }
+}
+
+/** Remove a relation by its ID. */
+export function removeRelation(id: string): void {
+  db().query("DELETE FROM entity_relations WHERE id = ?").run(id);
+}
+
+/**
+ * Get all relations for an entity (either side), with the other entity's
+ * name and type resolved for display.
+ */
+export function relationsFor(entityId: string): EntityRelationResolved[] {
+  const rows = db()
+    .query(
+      `SELECT r.*, 
+              CASE WHEN r.entity_a = ? THEN r.entity_b ELSE r.entity_a END AS other_id,
+              CASE WHEN r.entity_a = ? THEN eb.canonical_name ELSE ea.canonical_name END AS other_name,
+              CASE WHEN r.entity_a = ? THEN eb.entity_type ELSE ea.entity_type END AS other_type
+       FROM entity_relations r
+       JOIN entities ea ON ea.id = r.entity_a
+       JOIN entities eb ON eb.id = r.entity_b
+       WHERE r.entity_a = ? OR r.entity_b = ?
+       ORDER BY r.relation, other_name`,
+    )
+    .all(entityId, entityId, entityId, entityId, entityId) as EntityRelationResolved[];
+  return rows;
+}
+
+/**
+ * Look up specific relation(s) between two entities. If `relation` is provided,
+ * returns at most one row; otherwise returns all relations between the pair.
+ */
+export function getRelation(
+  entityA: string,
+  entityB: string,
+  relation?: RelationType,
+): EntityRelation[] {
+  if (relation) {
+    const row = db()
+      .query(
+        `SELECT * FROM entity_relations
+         WHERE ((entity_a = ? AND entity_b = ?) OR (entity_a = ? AND entity_b = ?))
+           AND relation = ?
+         LIMIT 1`,
+      )
+      .get(entityA, entityB, entityB, entityA, relation) as EntityRelation | null;
+    return row ? [row] : [];
+  }
+  return db()
+    .query(
+      `SELECT * FROM entity_relations
+       WHERE (entity_a = ? AND entity_b = ?) OR (entity_a = ? AND entity_b = ?)
+       ORDER BY relation`,
+    )
+    .all(entityA, entityB, entityB, entityA) as EntityRelation[];
+}
+
+/**
+ * Format relations for an entity as a concise string for prompt injection.
+ * Example: "friend of Melkey, colleague of Alice"
+ */
+export function formatRelationsForPrompt(entityId: string): string {
+  const rels = relationsFor(entityId);
+  if (!rels.length) return "";
+  return rels.map((r) => `${r.relation} of ${r.other_name}`).join(", ");
 }
 
 // ---------------------------------------------------------------------------
@@ -647,19 +964,90 @@ export function knowledgeForEntity(entityId: string): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// Session injection — hybrid cap-based entity selection
+// ---------------------------------------------------------------------------
+
+/**
+ * Select entities to inject into the agent system prompt.
+ *
+ * - If total count ≤ maxEntityInject (default 30): return all
+ * - If count exceeds cap:
+ *   - Always include: self entity + entities with direct relationships to self
+ *   - Relevance-rank the rest by: knowledge ref count, recency of linked knowledge
+ *   - Return up to `maxEntityInject` entities
+ *
+ * The curator always uses `forProject()` directly (needs the full list).
+ */
+export function entitiesForSession(
+  projectPath: string,
+  maxInject?: number,
+): EntityWithAliases[] {
+  const cap = maxInject ?? config().knowledge.maxEntityInject;
+  if (cap === 0) return [];
+
+  const all = forProject(projectPath);
+  if (all.length <= cap) return all;
+
+  // Always include self entity + entities related to self
+  const selfEntity = all.find((e) => e.entity_type === "self");
+  const alwaysInclude = new Set<string>();
+  if (selfEntity) {
+    alwaysInclude.add(selfEntity.id);
+    const selfRels = relationsFor(selfEntity.id);
+    for (const r of selfRels) {
+      alwaysInclude.add(r.other_id);
+    }
+  }
+
+  const guaranteed = all.filter((e) => alwaysInclude.has(e.id));
+  const remaining = all.filter((e) => !alwaysInclude.has(e.id));
+
+  if (guaranteed.length >= cap) {
+    return guaranteed.slice(0, cap);
+  }
+
+  // Relevance-rank remaining by knowledge ref count (more refs = more relevant)
+  const slots = cap - guaranteed.length;
+  const scored = remaining.map((e) => {
+    const refCount = knowledgeForEntity(e.id).length;
+    return { entity: e, score: refCount };
+  });
+  scored.sort((a, b) => b.score - a.score);
+
+  return [...guaranteed, ...scored.slice(0, slots).map((s) => s.entity)];
+}
+
+// ---------------------------------------------------------------------------
 // Formatting for prompts
 // ---------------------------------------------------------------------------
 
 /**
  * Format entities for injection into the curator prompt or system prompt.
- * Groups by type, includes aliases.
+ * Groups by type, includes aliases, metadata brief, and relationship tags.
+ *
+ * The self entity is marked with " — you (the user)" and other entities
+ * that have relationships with the self entity get a `[relation]` tag.
  */
 export function formatForPrompt(entities: EntityWithAliases[]): string {
   if (!entities.length) return "";
 
+  // Build a map of self-entity relationships for tagging
+  const selfEntity = entities.find((e) => e.entity_type === "self");
+  const selfRelMap = new Map<string, string[]>(); // entityId → [relation names]
+  if (selfEntity) {
+    const selfRels = relationsFor(selfEntity.id);
+    for (const r of selfRels) {
+      const rels = selfRelMap.get(r.other_id) ?? [];
+      rels.push(r.relation);
+      selfRelMap.set(r.other_id, rels);
+    }
+  }
+
+  // Group entities — show "self" under "person" since it's a person
   const grouped: Record<string, EntityWithAliases[]> = {};
   for (const e of entities) {
-    const group = grouped[e.entity_type] ?? (grouped[e.entity_type] = []);
+    const displayType = e.entity_type === "self" ? "person" : e.entity_type;
+    const group = grouped[displayType] ?? (grouped[displayType] = []);
     group.push(e);
   }
 
@@ -671,7 +1059,20 @@ export function formatForPrompt(entities: EntityWithAliases[]): string {
         .filter((a) => a.alias_value !== e.canonical_name) // skip canonical dupe
         .map((a) => `${a.alias_type}:${a.alias_value}`);
       const aliasInfo = aliasStrs.length ? ` (aliases: ${aliasStrs.join(", ")})` : "";
-      lines.push(`    - [${e.id}] ${e.canonical_name}${aliasInfo}`);
+
+      // Self-entity marker
+      const selfMarker = e.entity_type === "self" ? " — you (the user)" : "";
+
+      // Metadata brief (role/description)
+      const metaInfo = e.entity_type === "self" ? "" : formatMetadataBrief(e.metadata);
+
+      // Relationship tags from self entity (e.g. [friend])
+      const relTags = selfRelMap.get(e.id);
+      const relInfo = relTags?.length ? ` [${relTags.join(", ")}]` : "";
+
+      lines.push(
+        `    - [${e.id}] ${e.canonical_name}${aliasInfo}${selfMarker}${metaInfo}${relInfo}`,
+      );
     }
   }
 

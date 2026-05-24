@@ -657,6 +657,24 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX IF NOT EXISTS idx_knowledge_entity_refs_entity ON knowledge_entity_refs(entity_id);
   `,
+  `
+  -- Version 28: Entity relationships.
+
+  CREATE TABLE IF NOT EXISTS entity_relations (
+    id          TEXT PRIMARY KEY,
+    entity_a    TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    entity_b    TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    relation    TEXT NOT NULL,
+    metadata    TEXT,
+    source      TEXT,
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL,
+    UNIQUE(entity_a, entity_b, relation)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_entity_relations_a ON entity_relations(entity_a);
+  CREATE INDEX IF NOT EXISTS idx_entity_relations_b ON entity_relations(entity_b);
+  `,
 ];
 
 /** Return the resolved path of the SQLite database file. */
@@ -843,6 +861,17 @@ function recoverMissingObjects(database: Database) {
       entity_id    TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
       PRIMARY KEY (knowledge_id, entity_id)
     );
+    CREATE TABLE IF NOT EXISTS entity_relations (
+      id          TEXT PRIMARY KEY,
+      entity_a    TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+      entity_b    TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+      relation    TEXT NOT NULL,
+      metadata    TEXT,
+      source      TEXT,
+      created_at  INTEGER NOT NULL,
+      updated_at  INTEGER NOT NULL,
+      UNIQUE(entity_a, entity_b, relation)
+    );
   `);
 
   // Recover missing columns from partial migration runs.
@@ -891,6 +920,8 @@ export function mergeProjectInternal(
       targetId,
       sourceId,
     );
+    // entity_relations references entities by FK — no project_id column to update.
+    // Relations move implicitly when their parent entities move.
     d.query(
       "UPDATE OR IGNORE project_path_aliases SET project_id = ? WHERE project_id = ?",
     ).run(targetId, sourceId);
