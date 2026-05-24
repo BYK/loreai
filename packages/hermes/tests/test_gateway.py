@@ -78,17 +78,25 @@ class TestEnsureGateway:
 class TestDeriveSessionId:
     """Test session ID derivation."""
 
-    def test_uses_provided_session_id(self):
+    def test_hashes_provided_session_id_to_hex(self):
+        """Provided session IDs are always hashed to hex for gateway compatibility."""
         from lore_hermes import _derive_session_id
 
-        assert _derive_session_id("my-session-123") == "my-session-123"
+        result = _derive_session_id("my-session-123")
+        assert isinstance(result, str)
+        assert len(result) == 16
+        # Must be lowercase hex (gateway regex requires [a-f0-9]{8,64})
+        assert all(c in "0123456789abcdef" for c in result)
+        # Different input → different hash
+        assert _derive_session_id("other-session") != result
 
     def test_derives_from_env_when_none(self):
         from lore_hermes import _derive_session_id
 
         result = _derive_session_id(None)
         assert isinstance(result, str)
-        assert len(result) == 16  # SHA-256 hex, truncated to 16 chars
+        assert len(result) == 16
+        assert all(c in "0123456789abcdef" for c in result)
 
     def test_derives_from_env_when_empty(self):
         from lore_hermes import _derive_session_id
@@ -96,3 +104,4 @@ class TestDeriveSessionId:
         result = _derive_session_id("")
         assert isinstance(result, str)
         assert len(result) == 16
+        assert all(c in "0123456789abcdef" for c in result)

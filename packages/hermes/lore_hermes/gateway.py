@@ -86,12 +86,18 @@ def ensure_gateway() -> str | None:
                 )
                 return url
 
+        # Gateway didn't respond in time — kill the orphaned process.
         logger.warning(
             "Lore gateway process started (pid %d) but not responding "
-            "after %.0fs",
+            "after %.0fs — terminating",
             proc.pid,
             STARTUP_MAX_WAIT,
         )
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
     except Exception as e:
         logger.warning("Failed to start Lore gateway: %s", e)
 

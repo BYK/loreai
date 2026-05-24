@@ -39,13 +39,15 @@ _gateway_url: str | None = None
 
 
 def _derive_session_id(session_id: str | None) -> str:
-    """Derive a stable session ID.
+    """Derive a stable hex session ID.
 
-    Prefers the Hermes-provided session ID. Falls back to a hash of
-    HERMES_HOME + PID for uniqueness within a machine.
+    Always returns a lowercase hex string (gateway regex requires ``[a-f0-9]{8,64}``).
+    When a Hermes session ID is provided, it is hashed to normalize any format
+    (UUIDs, nanoids, etc.) into a gateway-compatible hex string.  Falls back to
+    a hash of HERMES_HOME + PID for uniqueness within a machine.
     """
     if session_id:
-        return session_id
+        return hashlib.sha256(session_id.encode()).hexdigest()[:16]
     home = os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))
     raw = f"{home}:{os.getpid()}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
@@ -65,11 +67,12 @@ def _on_session_start(session_id: str = "", **kwargs):
     _gateway_url = url
 
     # Point Hermes's LLM calls at the gateway if not already configured
-    # (e.g. when running `hermes` directly without `lore run`)
-    if "OPENAI_BASE_URL" not in os.environ or _gateway_url not in os.environ.get(
-        "OPENAI_BASE_URL", ""
-    ):
-        os.environ["OPENAI_BASE_URL"] = f"{url}/v1"
+    # (e.g. when running `hermes` directly without `lore run`).
+    # This intentionally mutates os.environ so Hermes's provider resolution
+    # picks up the gateway URL on its next API call.
+    gateway_base = f"{url}/v1"
+    if os.environ.get("OPENAI_BASE_URL") != gateway_base:
+        os.environ["OPENAI_BASE_URL"] = gateway_base
         os.environ.setdefault("HERMES_INFERENCE_PROVIDER", "custom")
 
     # Expose project context for the gateway
@@ -89,16 +92,13 @@ def _on_pre_llm_call(session_id: str = "", user_message: str = "", **kwargs):
     if not _gateway_url:
         return None
 
-    parts: list[str] = []
     sid = _session_id or _derive_session_id(session_id)
+    cwd = os.getcwd()
+
+    parts: list[str] = []
     if sid:
         parts.append(f"[lore:session-id={sid}]")
-
-    cwd = os.getcwd()
     parts.append(f"[lore:project={cwd}]")
-
-    if not parts:
-        return None
 
     return {"context": "\n".join(parts)}
 

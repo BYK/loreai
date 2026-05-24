@@ -986,6 +986,11 @@ function getOrCreateSession(
 const LORE_SESSION_MARKER_RE = /\[lore:session-id=([a-f0-9]{8,64})\]/;
 /** Pattern for `[lore:project=<path>]` context markers. */
 const LORE_PROJECT_MARKER_RE = /\[lore:project=([^\]]+)\]/;
+/** Matches any `[lore:...]` context marker (for stripping before upstream). */
+const LORE_CONTEXT_MARKER_RE = /\[lore:(?:session-id|project)=[^\]]*\]\n?/g;
+
+/** Maximum allowed length for a project path extracted from a context marker. */
+const MAX_MARKER_PROJECT_PATH_LENGTH = 1024;
 
 /**
  * Concatenate all text blocks from a message's content array.
@@ -1015,6 +1020,11 @@ export function extractSessionMarker(messages: GatewayMessage[]): string | undef
 
 /**
  * Extract a Lore project path from `[lore:project=...]` context markers.
+ *
+ * Applies the same sanitization as `extractProjectHeader()` in config.ts:
+ * control character stripping, length validation, absolute path check,
+ * trailing slash removal, and path traversal rejection.
+ *
  * Returns `undefined` when no marker is found or the path is invalid.
  */
 export function extractProjectMarker(messages: GatewayMessage[]): string | undefined {
@@ -1022,19 +1032,44 @@ export function extractProjectMarker(messages: GatewayMessage[]): string | undef
     if (messages[i].role !== "user") continue;
     const match = messageText(messages[i]).match(LORE_PROJECT_MARKER_RE);
     if (match?.[1]) {
-      const path = match[1].trim();
+      // Strip control characters (same as extractProjectHeader in config.ts)
+      const sanitized = match[1].replace(/[\x00-\x1f\x7f]/g, "").trim();
+      if (!sanitized || sanitized.length > MAX_MARKER_PROJECT_PATH_LENGTH) return undefined;
       // Must be an absolute path
-      if (path.startsWith("/")) return path.replace(/\/+$/, "") || undefined;
+      if (!sanitized.startsWith("/")) return undefined;
+      // Reject path traversal
+      if (sanitized.includes("..")) return undefined;
+      return sanitized.replace(/\/+$/, "") || undefined;
     }
     return undefined;
   }
   return undefined;
 }
 
+/**
+ * Strip `[lore:session-id=...]` and `[lore:project=...]` context markers
+ * from user messages so they are not forwarded to the upstream LLM.
+ *
+ * Called after marker extraction but before forwarding the request upstream.
+ * Mutates the message array in place.
+ */
+export function stripContextMarkers(messages: GatewayMessage[]): void {
+  for (const msg of messages) {
+    if (msg.role !== "user") continue;
+    for (const block of msg.content) {
+      if (block.type === "text" && LORE_CONTEXT_MARKER_RE.test(block.text)) {
+        // Reset lastIndex since the regex has the global flag
+        LORE_CONTEXT_MARKER_RE.lastIndex = 0;
+        block.text = block.text.replace(LORE_CONTEXT_MARKER_RE, "").trimEnd();
+      }
+    }
+  }
+}
+
 async function identifySession(
   req: GatewayRequest,
   _projectPath: string,
-): Promise<{ sessionID: string; isNew: boolean; tier: 1 | 2 | 3 }> {
+): Promise<{ sessionID: string; isNew: boolean; tier: 1 | 2 | 2.5 | 3 }> {
   const headers = req.rawHeaders;
 
   // --- Tier 1: Known headers ---
@@ -1168,12 +1203,12 @@ async function identifySession(
     const markerKey = `context-marker:${markerSid}`;
     const existingSid = headerSessionIndex.get(markerKey);
     if (existingSid) {
-      return { sessionID: existingSid, isNew: false, tier: 2 as const };
+      return { sessionID: existingSid, isNew: false, tier: 2.5 as const };
     }
     // New session identified via context marker.
     const sessionID = generateSessionID();
     headerSessionIndex.set(markerKey, sessionID);
-    return { sessionID, isNew: true, tier: 2 as const };
+    return { sessionID, isNew: true, tier: 2.5 as const };
   }
 
   // --- Tier 3: Fingerprint fallback ---
@@ -2597,6 +2632,7 @@ async function handleCompaction(
   await initIfNeeded(pathResult.path, config, pathResult.gitRemote);
 
   const { sessionID } = await identifySession(req, pathResult.path);
+  stripContextMarkers(req.messages);
   const sessionState = getOrCreateSession(sessionID, pathResult.path);
   const projectPath = resolveSessionProjectPath(pathResult, sessionState);
 
@@ -2847,6 +2883,12 @@ async function handleConversationTurn(
 
   // --- 3. Session identification ---
   const { sessionID, isNew, tier } = await identifySession(req, pathResult.path);
+
+  // Strip [lore:session-id=...] and [lore:project=...] context markers from
+  // user messages so they are not forwarded to the upstream LLM, stored in
+  // temporal storage, or visible to the model.
+  stripContextMarkers(req.messages);
+
   const sessionState = getOrCreateSession(sessionID, pathResult.path);
   const projectPath = resolveSessionProjectPath(pathResult, sessionState);
 

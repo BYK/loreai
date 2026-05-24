@@ -3,7 +3,7 @@
  * marker extraction, used by the lore-hermes plugin integration.
  */
 import { describe, test, expect } from "bun:test";
-import { extractSessionMarker, extractProjectMarker } from "../src/pipeline";
+import { extractSessionMarker, extractProjectMarker, stripContextMarkers } from "../src/pipeline";
 import type { GatewayMessage } from "../src/translate/types";
 
 // ---------------------------------------------------------------------------
@@ -199,5 +199,83 @@ describe("extractProjectMarker", () => {
     ];
     expect(extractProjectMarker(msgs)).toBe("/home/user/project");
     expect(extractSessionMarker(msgs)).toBe("abc123def456");
+  });
+
+  test("rejects path traversal with ..", () => {
+    const msgs: GatewayMessage[] = [
+      userMsg("[lore:project=/home/user/../../etc]"),
+    ];
+    expect(extractProjectMarker(msgs)).toBeUndefined();
+  });
+
+  test("strips control characters", () => {
+    const msgs: GatewayMessage[] = [
+      userMsg("[lore:project=/home/user/proj\x00ect]"),
+    ];
+    expect(extractProjectMarker(msgs)).toBe("/home/user/project");
+  });
+
+  test("rejects paths exceeding max length", () => {
+    const longPath = "/home/" + "a".repeat(1020);
+    const msgs: GatewayMessage[] = [
+      userMsg(`[lore:project=${longPath}]`),
+    ];
+    expect(extractProjectMarker(msgs)).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// stripContextMarkers
+// ---------------------------------------------------------------------------
+
+describe("stripContextMarkers", () => {
+  test("removes session-id marker from user message", () => {
+    const msgs: GatewayMessage[] = [
+      userMsg("Hello world\n[lore:session-id=abc123def456]"),
+    ];
+    stripContextMarkers(msgs);
+    expect(msgs[0].content[0]).toEqual({ type: "text", text: "Hello world" });
+  });
+
+  test("removes project marker from user message", () => {
+    const msgs: GatewayMessage[] = [
+      userMsg("Hello\n[lore:project=/home/user/project]"),
+    ];
+    stripContextMarkers(msgs);
+    expect(msgs[0].content[0]).toEqual({ type: "text", text: "Hello" });
+  });
+
+  test("removes both markers", () => {
+    const msgs: GatewayMessage[] = [
+      userMsg("Query\n[lore:session-id=aabb11223344]\n[lore:project=/home/user/proj]"),
+    ];
+    stripContextMarkers(msgs);
+    expect(msgs[0].content[0]).toEqual({ type: "text", text: "Query" });
+  });
+
+  test("does not modify assistant messages", () => {
+    const msgs: GatewayMessage[] = [
+      assistantMsg("Response with [lore:session-id=abc123def456]"),
+    ];
+    stripContextMarkers(msgs);
+    expect((msgs[0].content[0] as { type: "text"; text: string }).text).toContain("[lore:session-id=");
+  });
+
+  test("does not modify messages without markers", () => {
+    const msgs: GatewayMessage[] = [
+      userMsg("Just a normal message"),
+    ];
+    stripContextMarkers(msgs);
+    expect(msgs[0].content[0]).toEqual({ type: "text", text: "Just a normal message" });
+  });
+
+  test("handles multi-block content", () => {
+    const msgs: GatewayMessage[] = [
+      userMsgMultiBlock("Do something", "\n[lore:session-id=aabb11223344]"),
+    ];
+    stripContextMarkers(msgs);
+    // First block unchanged, second block stripped
+    expect((msgs[0].content[0] as { type: "text"; text: string }).text).toBe("Do something");
+    expect((msgs[0].content[1] as { type: "text"; text: string }).text).toBe("");
   });
 });

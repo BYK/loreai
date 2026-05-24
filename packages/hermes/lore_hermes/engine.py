@@ -14,6 +14,12 @@ from agent.context_engine import ContextEngine
 class LoreContextEngine(ContextEngine):
     """Passthrough context engine — never compresses locally."""
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.last_prompt_tokens: int = 0
+        self.last_completion_tokens: int = 0
+        self.last_total_tokens: int = 0
+
     @property
     def name(self) -> str:
         return "lore"
