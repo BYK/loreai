@@ -478,9 +478,24 @@ async function runInner(input: {
   if (!responseText) return { created: 0, updated: 0, deleted: 0, entitiesCreated: 0, relationsCreated: 0 };
 
   const response = parseResponse(responseText);
+
+  // Gate entry creation when at or above maxEntries to prevent the ratchet
+  // effect: curation creates entries → count exceeds limit → consolidation
+  // can't reduce (all unique) → curation creates more → count grows forever.
+  // When at the limit, only allow update/delete ops. Creates are allowed
+  // again once consolidation (or manual deletion) brings count below limit.
+  const currentEntries = ltm.forProject(input.projectPath, false);
+  const atLimit = currentEntries.length >= cfg.curator.maxEntries;
+  if (atLimit && response.ops.some((op) => op.op === "create")) {
+    log.info(
+      `curation: skipping creates (${currentEntries.length} entries >= maxEntries ${cfg.curator.maxEntries})`,
+    );
+  }
+
   const result = applyOps(response.ops, {
     projectPath: input.projectPath,
     sessionID: input.sessionID,
+    skipCreate: atLimit,
     detectedEntities: response.entities,
     detectedRelations: response.relations,
   });

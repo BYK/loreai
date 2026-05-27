@@ -74,6 +74,7 @@ mock.module("@loreai/core", () => ({
   loadSessionTracking: () => null,
   getKV: () => null,
   setKV: () => {},
+  evictSession: () => {},
   // Needed by transitive imports (cache-warmer.ts, cost-tracker.ts)
   db: () => ({}),
   projectId: () => undefined,
@@ -83,6 +84,7 @@ mock.module("@loreai/core", () => ({
 mock.module("../../src/cache-warmer", () => ({
   isCircuitBreakerTripped: () => false,
   isWarmupAuthDisabled: () => false,
+  clearWarmupAuthDisabled: () => {},
   resolveProfile: () => null,
   blendedHistogramForSession: () => null,
   shouldWarm: () => false,
@@ -94,7 +96,8 @@ mock.module("../../src/cache-warmer", () => ({
 }));
 
 mock.module("../../src/worker-model", () => ({
-  getWorkerModel: () => "claude-sonnet-4-20250514",
+  getWorkerModel: () => ({ providerID: "anthropic", modelID: "claude-sonnet-4-20250514" }),
+  getModelEntrySync: () => ({ id: "claude-sonnet-4-20250514", cost: { input: 3, output: 15 } }),
 }));
 
 mock.module("@sentry/bun", () => ({
@@ -110,6 +113,18 @@ mock.module("../../src/sentry", () => ({
 mock.module("../../src/cost-tracker", () => ({
   getSessionCosts: () => null,
   totalWorkerCost: () => 0,
+  deleteSessionCosts: () => {},
+}));
+
+mock.module("../../src/auth", () => ({
+  isAuthStale: () => false,
+  resolveAuth: () => null,
+  deleteSessionAuth: () => {},
+  clearAuthStale: () => {},
+}));
+
+mock.module("../../src/cch", () => ({
+  deleteBillingPrefix: () => {},
 }));
 
 // Import AFTER mocks are set up

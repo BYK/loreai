@@ -28,14 +28,16 @@ import {
   saveGradientState,
   getConsecutiveBusts,
   effectiveMetaThreshold,
+  evictSession as evictGradientSession,
 } from "@loreai/core";
 import type { LLMClient } from "@loreai/core";
 import type { GatewayConfig } from "./config";
 import type { SessionState } from "./translate/types";
-import { getWorkerModel } from "./worker-model";
+import { getWorkerModel, getModelEntrySync } from "./worker-model";
 import {
   isCircuitBreakerTripped,
   isWarmupAuthDisabled,
+  clearWarmupAuthDisabled,
   resolveProfile,
   blendedHistogramForSession,
   shouldWarm,
@@ -47,11 +49,38 @@ import {
 } from "./cache-warmer";
 import * as Sentry from "@sentry/bun";
 import { runBackground } from "./background-limiter";
-import { isAuthStale, resolveAuth } from "./auth";
+import { isAuthStale, resolveAuth, deleteSessionAuth, clearAuthStale } from "./auth";
 import { emitWarmupMetric, emitSessionCostMetrics, emitCurationMetrics } from "./sentry";
-import { getSessionCosts, totalWorkerCost } from "./cost-tracker";
+import { getSessionCosts, totalWorkerCost, deleteSessionCosts } from "./cost-tracker";
+import { deleteBillingPrefix } from "./cch";
 
 const POLL_INTERVAL_MS = 30_000;
+
+/**
+ * Cooldown tracking for knowledge consolidation.
+ *
+ * When consolidation runs but fails to reduce entries below maxEntries
+ * (e.g. all entries are genuinely unique), we record the attempt so the
+ * idle scheduler doesn't retry every 30s — which wastes Sonnet calls.
+ *
+ * Keyed by projectPath. Cleared when entry count changes (new curation
+ * creates/deletes entries) so consolidation retries with fresh data.
+ */
+const consolidationCooldown = new Map<
+  string,
+  { attemptedAt: number; entryCount: number }
+>();
+
+/** 1 hour cooldown before retrying consolidation with the same entry count. */
+const CONSOLIDATION_COOLDOWN_MS = 60 * 60 * 1000;
+
+/**
+ * Evict sessions that have been idle for longer than this threshold.
+ * All important state is already persisted to SQLite — eviction only frees
+ * in-memory caches (prefix cache, distillation snapshot, recall store, etc.).
+ * If the session resumes, state is reloaded from DB on the next request.
+ */
+const SESSION_EVICTION_MS = 60 * 60 * 1000; // 1 hour
 
 // ---------------------------------------------------------------------------
 // startIdleScheduler
@@ -70,6 +99,8 @@ export function startIdleScheduler(
   config: GatewayConfig,
   sessions: Map<string, SessionState>,
   doIdleWork: (sessionID: string, state: SessionState) => Promise<void>,
+  /** Optional callback to clean up pipeline-level satellite Maps when a session is evicted. */
+  onEvict?: (sessionID: string) => void,
 ): () => void {
   const inProgress = new Set<string>();
   const warmupInProgress = new Set<string>();
@@ -101,6 +132,66 @@ export function startIdleScheduler(
       )
         .catch((e) => log.error(`idle work failed for session ${sessionID}:`, e))
         .finally(() => inProgress.delete(sessionID));
+    }
+
+    // --- Session eviction — free memory for sessions idle > 1 hour ---
+    // All important state is persisted to SQLite; eviction only releases
+    // in-memory caches (gradient state, prefix cache, recall store, LTM
+    // caches, cost tracking, auth credentials). If a session resumes,
+    // getOrCreateSession() in pipeline.ts reloads persisted state from DB.
+    for (const [sessionID, state] of sessions) {
+      if (inProgress.has(sessionID)) continue; // don't evict during active idle work
+      if (warmupInProgress.has(sessionID)) continue;
+      if (now - state.lastRequestTime < SESSION_EVICTION_MS) continue;
+      // Don't evict sessions still executing tools — they're active
+      if (state.lastStopReason === "tool_use") continue;
+
+      log.info(`evicting idle session ${sessionID.slice(0, 16)} (idle ${Math.round((now - state.lastRequestTime) / 60_000)}m)`);
+
+      // Persist final cost snapshot before eviction
+      try {
+        const costs = getSessionCosts(sessionID);
+        if (costs && costs.conversation.turns > 0) {
+          saveSessionCosts(sessionID, {
+            conversationCost: costs.conversation.cost,
+            workerCost: totalWorkerCost(costs),
+            conversationTurns: costs.conversation.turns,
+            cacheReadTokens: costs.conversation.cacheReadTokens,
+            cacheWriteTokens: costs.conversation.cacheWriteTokens,
+            warmupSavings: costs.counterfactual.warmupSavings,
+            warmupHits: costs.counterfactual.warmupHits,
+            ttlSavings: costs.counterfactual.ttlSavings,
+            ttlHits: costs.counterfactual.ttlHits,
+            batchSavings: costs.batchSavings,
+            avoidedCompactions: costs.counterfactual.avoidedCompactions,
+            avoidedCompactionCost: costs.counterfactual.avoidedCompactionCost,
+          });
+        }
+      } catch (e) {
+        log.warn(`session eviction: cost persistence failed for ${sessionID.slice(0, 16)}:`, e);
+      }
+
+      // Persist gradient state before eviction
+      try {
+        saveGradientState(sessionID);
+      } catch (e) {
+        log.warn(`session eviction: gradient persistence failed for ${sessionID.slice(0, 16)}:`, e);
+      }
+
+      // Clean up all per-session in-memory state across modules
+      evictGradientSession(sessionID);
+      curator.resetCurationTracker(sessionID);
+      deleteSessionCosts(sessionID);
+      deleteSessionAuth(sessionID);
+      clearAuthStale(sessionID);
+      deleteBillingPrefix(sessionID);
+      clearWarmupAuthDisabled(sessionID);
+
+      // Clean up pipeline-level satellite Maps via callback
+      onEvict?.(sessionID);
+
+      // Remove from the main sessions map last
+      sessions.delete(sessionID);
     }
 
     // --- Cache warming (separate from idle work — fires before TTL expiry) ---
@@ -269,10 +360,15 @@ export function buildIdleWorkHandler(
       log.error("idle distillation error:", e);
     }
 
-    // 2. Curation
+    // 2. Curation — cost-aware frequency: on expensive worker models, curate
+    //    less often (same multiplier as the inline path in pipeline.ts).
     if (cfg.knowledge.enabled && cfg.curator.onIdle) {
       try {
-        if (state.turnsSinceCuration >= cfg.curator.afterTurns) {
+        const workerModelID = model?.modelID ?? "unknown";
+        const modelInputCost = getModelEntrySync(workerModelID).cost?.input ?? 3;
+        const curationMultiplier = modelInputCost >= 5 ? 3 : modelInputCost >= 1 ? 2 : 1;
+        const effectiveAfterTurns = cfg.curator.afterTurns * curationMultiplier;
+        if (state.turnsSinceCuration >= effectiveAfterTurns) {
           const result = await Sentry.startSpan(
             { name: "lore.curator", op: "lore.curation", attributes: { trigger: "idle" } },
             () => curator.run({ llm, projectPath, sessionID, model }),
@@ -284,6 +380,9 @@ export function buildIdleWorkHandler(
               `idle curation: ${result.created} created, ${result.updated} updated, ${result.deleted} deleted`,
             );
             emitCurationMetrics({ ...result, trigger: "idle" });
+            // Entry count changed — clear consolidation cooldown so it
+            // retries with fresh data on the next idle tick.
+            consolidationCooldown.delete(projectPath);
           }
         }
       } catch (e) {
@@ -291,21 +390,49 @@ export function buildIdleWorkHandler(
       }
     }
 
-    // 3. Consolidation — runs after curation so new entries are counted
+    // 3. Consolidation — runs after curation so new entries are counted.
+    //    Cooldown: skip if we already attempted consolidation for this project
+    //    with the same entry count within the last hour — avoids wasting
+    //    Sonnet calls when the LLM correctly concludes all entries are unique.
     if (cfg.knowledge.enabled) {
       try {
         const entries = ltm.forProject(projectPath, false);
         if (entries.length > cfg.curator.maxEntries) {
-          log.info(
-            `entry count ${entries.length} exceeds maxEntries ${cfg.curator.maxEntries} — running consolidation`,
-          );
-          const result = await Sentry.startSpan(
-            { name: "lore.consolidation", op: "lore.curation", attributes: { trigger: "consolidation" } },
-            () => curator.consolidate({ llm, projectPath, sessionID, model }),
-          );
-          if (result.updated > 0 || result.deleted > 0) {
-            log.info(`consolidation: ${result.updated} updated, ${result.deleted} deleted`);
-            emitCurationMetrics({ created: 0, ...result, trigger: "consolidation" });
+          const cooldown = consolidationCooldown.get(projectPath);
+          const now = Date.now();
+          if (
+            cooldown &&
+            cooldown.entryCount === entries.length &&
+            now - cooldown.attemptedAt < CONSOLIDATION_COOLDOWN_MS
+          ) {
+            // Cooldown active — skip to avoid wasting Sonnet calls on
+            // repeated consolidation attempts that produce no changes.
+          } else {
+            log.info(
+              `entry count ${entries.length} exceeds maxEntries ${cfg.curator.maxEntries} — running consolidation`,
+            );
+            const beforeCount = entries.length;
+            const result = await Sentry.startSpan(
+              { name: "lore.consolidation", op: "lore.curation", attributes: { trigger: "consolidation" } },
+              () => curator.consolidate({ llm, projectPath, sessionID, model }),
+            );
+            if (result.updated > 0 || result.deleted > 0) {
+              log.info(`consolidation: ${result.updated} updated, ${result.deleted} deleted`);
+              emitCurationMetrics({ created: 0, ...result, trigger: "consolidation" });
+              // Consolidation made progress — clear cooldown so it can retry
+              consolidationCooldown.delete(projectPath);
+            } else {
+              // Consolidation produced no changes — enter cooldown to prevent
+              // retry storm (the LLM thinks all entries are unique).
+              consolidationCooldown.set(projectPath, {
+                attemptedAt: Date.now(),
+                entryCount: beforeCount,
+              });
+              log.info(
+                `consolidation produced no changes — cooldown active for 1h ` +
+                `(${beforeCount} entries in ${projectPath})`,
+              );
+            }
           }
         }
       } catch (e) {

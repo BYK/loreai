@@ -511,9 +511,9 @@ IMPORTANT:
  */
 export const CONSOLIDATION_SYSTEM = `You are a long-term memory curator performing a consolidation pass. The knowledge base has grown too large and needs to be trimmed.
 
-Your goal: reduce the entry count to the target maximum while preserving the most valuable knowledge.
+Your goal: reduce the entry count to AT MOST the target maximum while preserving the most valuable knowledge. You MUST produce enough ops to reach the target — returning an empty array is not acceptable.
 
-CONSOLIDATION RULES:
+CONSOLIDATION STRATEGY (apply in order):
 1. MERGE related entries — if multiple entries describe the same system, module, or concept
    from different angles (e.g. several bug fixes in the same component), merge them into
    ONE concise entry. Use an "update" op for the surviving entry and "delete" ops for the rest.
@@ -524,10 +524,15 @@ CONSOLIDATION RULES:
    - Entries whose knowledge is fully subsumed by another entry
    - Entries about one-off incidents with no recurring applicability
    - General advice available in any documentation
-4. PRESERVE:
-   - Entries describing non-obvious design decisions specific to this codebase
-   - Entries about recurring traps that a developer would hit again
-   - Entries that capture a hard-won gotcha with a concrete fix
+4. FORCED EVICTION — if steps 1–3 are insufficient to reach the target, you MUST delete
+   the least valuable remaining entries until the count reaches the target. Rank entries by
+   recurring impact: entries about rare edge cases or narrow contexts are lower value than
+   entries about broadly applicable patterns or frequently encountered gotchas.
+
+PRESERVE (highest priority — delete these last):
+- Entries describing non-obvious design decisions specific to this codebase
+- Entries about recurring traps that a developer would hit again
+- Entries that capture a hard-won gotcha with a concrete fix
 
 OUTPUT: A JSON array of "update" and "delete" ops only. No "create" ops — you are not
 extracting new knowledge, only consolidating existing knowledge.
@@ -550,11 +555,12 @@ export function consolidationUser(input: {
   const listed = input.entries
     .map((e) => `- [${e.id}] (${e.category}) ${e.title}: ${e.content}`)
     .join("\n");
-  return `Current knowledge entries (${count} total, target max: ${input.targetMax}):
+  const excess = count - input.targetMax;
+  return `Current knowledge entries (${count} total, target max: ${input.targetMax}, must remove at least ${excess}):
 
 ${listed}
 
-Produce update/delete ops to reduce entry count to at most ${input.targetMax}. Prioritize merging related entries and trimming verbose ones over outright deletion.`;
+Produce update/delete ops to reduce entry count to at most ${input.targetMax}. Prioritize merging related entries and trimming verbose ones, but if that is insufficient, delete the least valuable entries. You MUST remove at least ${excess} entries.`;
 }
 
 // Format distillations for injection into the message context.

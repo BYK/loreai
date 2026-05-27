@@ -574,6 +574,19 @@ export function setForceMinLayer(layer: SafetyLayer, sessionID?: string) {
   }
 }
 
+/**
+ * Evict a single session's in-memory state. Called when a session has been
+ * idle long enough that keeping its caches resident is wasteful. All
+ * important state (gradient calibration, force-min-layer) is already
+ * persisted to SQLite and will be reloaded if the session resumes.
+ *
+ * Does NOT reset global calibration — only frees session-specific caches
+ * (prefix cache, raw window cache, distillation snapshot, etc.).
+ */
+export function evictSession(sessionID: string): void {
+  sessionStates.delete(sessionID);
+}
+
 // For testing only — reset all calibration and force-escalation state
 export function resetCalibration(sessionID?: string) {
   calibratedOverhead = null;

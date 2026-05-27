@@ -778,7 +778,18 @@ async function initIfNeeded(projectPath: string, config: GatewayConfig, gitRemot
   if (config && !stopIdleScheduler) {
     const llm = getLLMClient(config);
     const idleHandler = buildIdleWorkHandler(llm);
-    stopIdleScheduler = startIdleScheduler(config, sessions, idleHandler);
+    stopIdleScheduler = startIdleScheduler(config, sessions, idleHandler, (sessionID) => {
+      // Clean up pipeline-level satellite Maps on session eviction.
+      // The headerSessionIndex entries are keyed by header values pointing
+      // TO this sessionID — remove them too.
+      for (const [key, sid] of headerSessionIndex) {
+        if (sid === sessionID) headerSessionIndex.delete(key);
+      }
+      ltmSessionCache.delete(sessionID);
+      ltmPinnedText.delete(sessionID);
+      stableLtmCache.delete(sessionID);
+      cwdWarned.delete(sessionID);
+    });
   }
 
   log.info(`gateway pipeline initialized: ${projectPath}`);
