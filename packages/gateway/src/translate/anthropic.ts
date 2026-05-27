@@ -518,6 +518,10 @@ export function parseAnthropicResponseJSON(
             input: block.input,
           });
           break;
+        default:
+          // Preserve unknown block types as text so no data is silently lost
+          content.push({ type: "text", text: JSON.stringify(block) });
+          break;
       }
     }
   }

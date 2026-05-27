@@ -616,9 +616,10 @@ let remoteFallbackLogged = false;
  * produces 401 errors.
  */
 function looksLikeApiKey(key: string): boolean {
-  // Real API keys are at least 20 characters and don't look like
-  // common placeholders.
-  return key.length >= 20;
+  // Real API keys are at least 20 characters, don't contain whitespace,
+  // and aren't common placeholders.
+  const trimmed = key.trim();
+  return trimmed.length >= 20 && !/\s/.test(trimmed);
 }
 
 /**

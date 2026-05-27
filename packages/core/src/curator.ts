@@ -118,7 +118,7 @@ function filterOps(arr: unknown[]): CuratorOp[] {
         typeof o.category === "string" &&
         typeof o.title === "string" &&
         typeof o.content === "string" &&
-        typeof o.scope === "string"
+        (o.scope === "project" || o.scope === "global")
       );
     }
     if (o.op === "update") {

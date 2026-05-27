@@ -87,9 +87,9 @@ if (sentryEnabled && !Sentry.isInitialized()) {
     /LocalProviderUnavailableError/,
     /ECONNRESET\b/,
     /ECONNREFUSED\b/,
-    // Remote embedding fallback with invalid/placeholder API key
-    /Incorrect API key/i,
-    /onnxruntime/i,
+    // Remote embedding fallback with invalid/placeholder API key (OpenAI SDK format)
+    /Incorrect API key provided/i,
+    // ONNX runtime init failures on various platforms
     /Cannot find package 'onnxruntime-node'/,
     /LoadLibrary failed/,
     /Protobuf parsing failed/,
