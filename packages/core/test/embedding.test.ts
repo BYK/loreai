@@ -211,7 +211,7 @@ describe("auto-fallback to remote provider when local provider is unavailable", 
 
   test("auto-falls back to Voyage when VOYAGE_API_KEY is set", async () => {
     _markLocalProviderUnavailable();
-    process.env.VOYAGE_API_KEY = "vk-test";
+    process.env.VOYAGE_API_KEY = "vk-test-key-that-is-long-enough";
     const { fetch, calls } = fakeFetch("voyage");
     globalThis.fetch = fetch;
 
@@ -224,7 +224,7 @@ describe("auto-fallback to remote provider when local provider is unavailable", 
 
   test("auto-falls back to OpenAI when only OPENAI_API_KEY is set", async () => {
     _markLocalProviderUnavailable();
-    process.env.OPENAI_API_KEY = "sk-test";
+    process.env.OPENAI_API_KEY = "sk-test-key-that-is-long-enough";
     const { fetch, calls } = fakeFetch("openai");
     globalThis.fetch = fetch;
 
@@ -237,8 +237,8 @@ describe("auto-fallback to remote provider when local provider is unavailable", 
 
   test("Voyage wins when both keys are set", async () => {
     _markLocalProviderUnavailable();
-    process.env.VOYAGE_API_KEY = "vk-test";
-    process.env.OPENAI_API_KEY = "sk-test";
+    process.env.VOYAGE_API_KEY = "vk-test-key-that-is-long-enough";
+    process.env.OPENAI_API_KEY = "sk-test-key-that-is-long-enough";
     const { fetch, calls } = fakeFetch("voyage");
     globalThis.fetch = fetch;
 
@@ -248,7 +248,7 @@ describe("auto-fallback to remote provider when local provider is unavailable", 
 
   test("subsequent embed() calls go directly to the swapped provider (no double fail)", async () => {
     _markLocalProviderUnavailable();
-    process.env.VOYAGE_API_KEY = "vk-test";
+    process.env.VOYAGE_API_KEY = "vk-test-key-that-is-long-enough";
     const { fetch, calls } = fakeFetch("voyage");
     globalThis.fetch = fetch;
 
@@ -290,22 +290,27 @@ describe("pickRemoteFallback", () => {
   });
 
   test("returns Voyage when only VOYAGE_API_KEY is set", () => {
-    process.env.VOYAGE_API_KEY = "vk-test";
+    process.env.VOYAGE_API_KEY = "vk-test-key-that-is-long-enough";
     const result = pickRemoteFallback();
     expect(result?.name).toBe("voyage");
   });
 
   test("returns OpenAI when only OPENAI_API_KEY is set", () => {
-    process.env.OPENAI_API_KEY = "sk-test";
+    process.env.OPENAI_API_KEY = "sk-test-key-that-is-long-enough";
     const result = pickRemoteFallback();
     expect(result?.name).toBe("openai");
   });
 
   test("Voyage wins when both keys are set", () => {
-    process.env.VOYAGE_API_KEY = "vk-test";
-    process.env.OPENAI_API_KEY = "sk-test";
+    process.env.VOYAGE_API_KEY = "vk-test-key-that-is-long-enough";
+    process.env.OPENAI_API_KEY = "sk-test-key-that-is-long-enough";
     const result = pickRemoteFallback();
     expect(result?.name).toBe("voyage");
+  });
+
+  test("rejects placeholder API keys (e.g. 'nokey')", () => {
+    process.env.OPENAI_API_KEY = "nokey";
+    expect(pickRemoteFallback()).toBeNull();
   });
 });
 

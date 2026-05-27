@@ -87,6 +87,15 @@ if (sentryEnabled && !Sentry.isInitialized()) {
     /LocalProviderUnavailableError/,
     /ECONNRESET\b/,
     /ECONNREFUSED\b/,
+    // Remote embedding fallback with invalid/placeholder API key
+    /Incorrect API key/i,
+    /onnxruntime/i,
+    /Cannot find package 'onnxruntime-node'/,
+    /LoadLibrary failed/,
+    /Protobuf parsing failed/,
+    // Bun doesn't implement getSystemErrorMap from node:util —
+    // this crashes the Sentry SDK itself during error processing
+    /getSystemErrorMap/,
   ];
 
   Sentry.init({

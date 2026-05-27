@@ -609,6 +609,17 @@ export function _restoreProvider(token: unknown): void {
  *  one-line warning from spamming on every fire-and-forget embed call. */
 let remoteFallbackLogged = false;
 
+/**
+ * Quick sanity check that a string looks like a real API key rather than
+ * a placeholder. Tools like Codex set `OPENAI_API_KEY=nokey` when routing
+ * through a custom base URL — using such a value for real API calls
+ * produces 401 errors.
+ */
+function looksLikeApiKey(key: string): boolean {
+  // Real API keys are at least 20 characters and don't look like
+  // common placeholders.
+  return key.length >= 20;
+}
 
 /**
  * Build a remote `EmbeddingProvider` from whichever API key is in env.
@@ -623,18 +634,23 @@ export function pickRemoteFallback(): {
   name: "voyage" | "openai";
   provider: EmbeddingProvider;
 } | null {
-  if (process.env.VOYAGE_API_KEY) {
+  // Validate keys before using them — tools like Codex/OpenCode often set
+  // OPENAI_API_KEY to a placeholder (e.g. "nokey") when using a custom
+  // OPENAI_BASE_URL. Using such a key for real API calls produces 401 noise.
+  const voyageKey = process.env.VOYAGE_API_KEY;
+  if (voyageKey && looksLikeApiKey(voyageKey)) {
     const d = PROVIDER_DEFAULTS.voyage;
     return {
       name: "voyage",
-      provider: new VoyageProvider(process.env.VOYAGE_API_KEY, d.model, d.dimensions),
+      provider: new VoyageProvider(voyageKey, d.model, d.dimensions),
     };
   }
-  if (process.env.OPENAI_API_KEY) {
+  const openaiKey = process.env.OPENAI_API_KEY;
+  if (openaiKey && looksLikeApiKey(openaiKey)) {
     const d = PROVIDER_DEFAULTS.openai;
     return {
       name: "openai",
-      provider: new OpenAIProvider(process.env.OPENAI_API_KEY, d.model, d.dimensions),
+      provider: new OpenAIProvider(openaiKey, d.model, d.dimensions),
     };
   }
   return null;
