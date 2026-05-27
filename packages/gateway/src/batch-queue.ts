@@ -72,12 +72,13 @@ export interface BatchProvider {
   /**
    * Submit a batch. Returns a batch ID on success.
    * Returns `"auth-error"` for 401/403 (permanent — session should be disabled).
+   * Returns `"not-found"` for 404 (permanent — provider doesn't support batches).
    * Returns `null` for transient failures (network, 5xx — retry via fallback).
    */
   submit(
     auth: AuthCredential,
     items: Array<{ customId: string; params: PendingRequest["params"] }>,
-  ): Promise<string | "auth-error" | null>;
+  ): Promise<string | "auth-error" | "not-found" | null>;
   /** Poll a batch for completion. */
   poll(auth: AuthCredential, batchId: string): Promise<PollResult>;
 }
@@ -216,11 +217,9 @@ export function createAnthropicBatchProvider(upstreamUrl: string): BatchProvider
           log.warn(`anthropic batch auth error (${response.status}): ${text}`);
           return "auth-error";
         }
-        // 404/405 means the upstream doesn't support the batch API at all.
-        // Treat as permanent failure to avoid retrying on every flush cycle.
-        if (response.status === 404 || response.status === 405) {
-          log.warn(`anthropic batch not supported (${response.status}): ${text}`);
-          return "auth-error";
+        if (response.status === 404) {
+          log.warn(`anthropic batch endpoint not found (404) at ${baseUrl} — provider does not support batches`);
+          return "not-found";
         }
         log.error(`anthropic batch create failed: ${response.status} ${response.statusText} — ${text}`);
         return null;
@@ -330,7 +329,7 @@ async function uploadOpenAIBatchFile(
   baseUrl: string,
   auth: AuthCredential,
   jsonlContent: string,
-): Promise<string | null> {
+): Promise<string | "auth-error" | "not-found" | null> {
   const formData = new FormData();
   formData.append("purpose", "batch");
   formData.append(
@@ -352,11 +351,10 @@ async function uploadOpenAIBatchFile(
       return "auth-error";
     }
     // 404/405 means the upstream doesn't support the batch/files API at all
-    // (e.g. vLLM, local models). Treat as permanent failure to avoid retrying
-    // on every flush cycle.
+    // (e.g. vLLM, local models, MiniMax). Treat as permanent provider-level failure.
     if (response.status === 404 || response.status === 405) {
       log.warn(`openai file upload not supported (${response.status}): ${text}`);
-      return "auth-error";
+      return "not-found";
     }
     log.error(`openai file upload failed: ${response.status} — ${text}`);
     return null;
@@ -489,7 +487,7 @@ export function createOpenAIBatchProvider(upstreamUrl: string): BatchProvider {
 
       // 2. Upload JSONL file
       const fileId = await uploadOpenAIBatchFile(baseUrl, auth, jsonl);
-      if (!fileId || fileId === "auth-error") return fileId;
+      if (!fileId || fileId === "auth-error" || fileId === "not-found") return fileId;
 
       // 3. Create batch
       const response = await fetch(`${baseUrl}/v1/batches`, {
@@ -511,9 +509,11 @@ export function createOpenAIBatchProvider(upstreamUrl: string): BatchProvider {
           log.warn(`openai batch auth error (${response.status}): ${text}`);
           return "auth-error";
         }
+        // 404/405 means the upstream doesn't support the batch API at all
+        // (e.g. vLLM, local models, MiniMax). Treat as permanent provider-level failure.
         if (response.status === 404 || response.status === 405) {
           log.warn(`openai batch not supported (${response.status}): ${text}`);
-          return "auth-error";
+          return "not-found";
         }
         log.error(`openai batch create failed: ${response.status} ${response.statusText} — ${text}`);
         return null;
@@ -630,6 +630,29 @@ export function createBatchLLMClient(
     // Corrupted value — start fresh
   }
 
+  /**
+   * Provider names whose batch API endpoint doesn't exist (404).
+   *
+   * Unlike per-session disable (403 auth scope), a 404 means the upstream
+   * URL doesn't implement the batch endpoint at all (e.g. MiniMax proxying
+   * Anthropic API without Batch support). This is permanent for the provider
+   * URL — affects all sessions, not just the one that discovered the 404.
+   *
+   * Persisted to kv_meta so it survives restarts (the upstream URL is
+   * configured via env var and won't change between restarts).
+   */
+  const DISABLED_BATCH_PROVIDERS_KV_KEY = "disabled_batch_providers";
+  const disabledBatchProviders = new Set<string>();
+  try {
+    const raw = getKV(DISABLED_BATCH_PROVIDERS_KV_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as string[];
+      for (const name of parsed) disabledBatchProviders.add(name);
+    }
+  } catch {
+    // Corrupted value — start fresh
+  }
+
   // Stats
   let totalQueued = 0;
   let totalBatched = 0;
@@ -655,8 +678,16 @@ export function createBatchLLMClient(
         items.map((item) => ({ customId: item.customId, params: item.params })),
       );
 
-      if (!batchId || batchId === "auth-error") {
-        if (batchId === "auth-error") {
+      if (!batchId || batchId === "auth-error" || batchId === "not-found") {
+        if (batchId === "not-found") {
+          // Provider doesn't support batches (404) — disable for the entire provider
+          disabledBatchProviders.add(provider.name);
+          setKV(DISABLED_BATCH_PROVIDERS_KV_KEY, JSON.stringify([...disabledBatchProviders]));
+          log.warn(
+            `batch API disabled for provider "${provider.name}" (404 — endpoint not supported). ` +
+              `All future worker calls will use individual requests.`,
+          );
+        } else if (batchId === "auth-error") {
           // Permanent auth failure — disable batch for affected sessions
           const sessionIDs = new Set(items.map((i) => i.sessionID).filter(Boolean) as string[]);
           for (const sid of sessionIDs) {
@@ -670,7 +701,7 @@ export function createBatchLLMClient(
             );
           }
         }
-        // Transient (null) or auth error — fall back to synchronous
+        // Transient (null), auth error, or not-found — fall back to synchronous
         await fallbackAll(items);
         return;
       }
@@ -730,6 +761,13 @@ export function createBatchLLMClient(
     }
 
     for (const { auth, providerID, items } of byGroup.values()) {
+      // Provider-level disable: if the upstream doesn't support batches (404),
+      // skip the batch entirely for all items from this provider.
+      if (disabledBatchProviders.has(providerID)) {
+        await fallbackAll(items);
+        continue;
+      }
+
       // Split items: disabled sessions fall back, others go to batch.
       // A session is disabled when a prior batch 403'd for that session's credential.
       const batchable: PendingRequest[] = [];
@@ -919,10 +957,15 @@ export function createBatchLLMClient(
         return inner.prompt(system, user, opts);
       }
 
-      // Fast-path: if this session's batch access is already disabled (e.g.
-      // Claude Max OAuth tokens that lack batch scope), skip the queue and
-      // process synchronously. Without this, calls wait up to 30s in the
-      // queue only to be routed through fallbackAll() at flush time.
+      // Fast-path: if this provider's batch endpoint doesn't exist (404)
+      // or this session's batch access is disabled (403 auth scope), skip
+      // the queue and process synchronously. Without this, calls wait up
+      // to 30s in the queue only to be routed through fallbackAll() at flush time.
+      const providerID = (opts?.model ?? defaultModel).providerID;
+      if (disabledBatchProviders.has(providerID)) {
+        totalFallback++;
+        return inner.prompt(system, user, opts);
+      }
       if (opts?.sessionID && disabledBatchSessions.has(opts.sessionID)) {
         totalFallback++;
         return inner.prompt(system, user, opts);
