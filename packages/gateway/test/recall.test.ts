@@ -315,7 +315,7 @@ describe("recallStoreKey", () => {
 // ---------------------------------------------------------------------------
 
 describe("buildRecallFollowUp", () => {
-  test("builds correct follow-up request structure with text blocks", () => {
+  test("builds correct follow-up request structure with tool_use/tool_result", () => {
     const req = makeRequest(
       [{ role: "user", content: [{ type: "text", text: "hello" }] }],
       [
@@ -337,25 +337,27 @@ describe("buildRecallFollowUp", () => {
       recallBlock,
     );
 
-    // Original messages + assistant (marker text) + user (recall results as text)
+    // Original messages + assistant (tool_use) + user (tool_result)
     expect(followUp.messages).toHaveLength(3);
     expect(followUp.messages[0].role).toBe("user");
     expect(followUp.messages[1].role).toBe("assistant");
     expect(followUp.messages[2].role).toBe("user");
 
-    // Assistant message contains a marker text block (not tool_use)
+    // Assistant message contains the tool_use block (not marker text)
     expect(followUp.messages[1].content).toHaveLength(1);
-    expect(followUp.messages[1].content[0].type).toBe("text");
-    expect((followUp.messages[1].content[0] as { text: string }).text).toContain(
-      "find config",
-    );
+    expect(followUp.messages[1].content[0].type).toBe("tool_use");
+    const toolUse = followUp.messages[1].content[0] as GatewayToolUseBlock;
+    expect(toolUse.name).toBe(RECALL_TOOL_NAME);
+    expect(toolUse.id).toBe(recallBlock.id);
+    expect(toolUse.input).toEqual(recallBlock.input);
 
-    // User message contains recall results as plain text (not tool_result)
+    // User message contains recall results as tool_result
     const resultBlock = followUp.messages[2].content[0];
-    expect(resultBlock.type).toBe("text");
-    expect((resultBlock as { text: string }).text).toBe(
+    expect(resultBlock.type).toBe("tool_result");
+    expect((resultBlock as { content: string }).content).toBe(
       "## Recall Results\n* config is in /root",
     );
+    expect((resultBlock as { toolUseId: string }).toolUseId).toBe(recallBlock.id);
 
     // Tools list keeps recall — the continuation is recall-aware and
     // can handle further recall calls (multi-turn recall).
@@ -405,7 +407,7 @@ describe("buildRecallFollowUp", () => {
       recallBlock,
     );
 
-    // Assistant message should contain thinking block + marker text
+    // Assistant message should contain thinking block + tool_use
     const assistant = followUp.messages[1];
     expect(assistant.content).toHaveLength(2);
     expect(assistant.content[0].type).toBe("thinking");
@@ -415,8 +417,8 @@ describe("buildRecallFollowUp", () => {
     expect((assistant.content[0] as { signature: string }).signature).toBe(
       "sig_abc123",
     );
-    expect(assistant.content[1].type).toBe("text");
-    expect((assistant.content[1] as { text: string }).text).toContain("find config");
+    expect(assistant.content[1].type).toBe("tool_use");
+    expect((assistant.content[1] as GatewayToolUseBlock).name).toBe(RECALL_TOOL_NAME);
   });
 
   test("excludes text blocks but keeps thinking blocks", () => {
@@ -438,11 +440,11 @@ describe("buildRecallFollowUp", () => {
     const followUp = buildRecallFollowUp(req, resp, "result", recallBlock);
 
     const assistant = followUp.messages[1];
-    // Only thinking + marker text — original text blocks excluded
+    // Only thinking + tool_use — original text blocks excluded
     expect(assistant.content).toHaveLength(2);
     expect(assistant.content[0].type).toBe("thinking");
-    expect(assistant.content[1].type).toBe("text");
-    expect((assistant.content[1] as { text: string }).text).toContain("test query");
+    expect(assistant.content[1].type).toBe("tool_use");
+    expect((assistant.content[1] as GatewayToolUseBlock).name).toBe(RECALL_TOOL_NAME);
   });
 
   test("handles multiple thinking blocks", () => {
@@ -466,8 +468,8 @@ describe("buildRecallFollowUp", () => {
     expect(assistant.content).toHaveLength(3);
     expect(assistant.content[0].type).toBe("thinking");
     expect(assistant.content[1].type).toBe("thinking");
-    expect(assistant.content[2].type).toBe("text");
-    expect((assistant.content[2] as { text: string }).text).toContain("test query");
+    expect(assistant.content[2].type).toBe("tool_use");
+    expect((assistant.content[2] as GatewayToolUseBlock).name).toBe(RECALL_TOOL_NAME);
   });
 
   test("works without thinking blocks (non-thinking model)", () => {
@@ -484,10 +486,10 @@ describe("buildRecallFollowUp", () => {
     const followUp = buildRecallFollowUp(req, resp, "result", recallBlock);
 
     const assistant = followUp.messages[1];
-    // No thinking blocks — just the marker text
+    // No thinking blocks — just the tool_use
     expect(assistant.content).toHaveLength(1);
-    expect(assistant.content[0].type).toBe("text");
-    expect((assistant.content[0] as { text: string }).text).toContain("test query");
+    expect(assistant.content[0].type).toBe("tool_use");
+    expect((assistant.content[0] as GatewayToolUseBlock).name).toBe(RECALL_TOOL_NAME);
   });
 
   test("uses '[No results found.]' for empty recall result", () => {
@@ -501,8 +503,9 @@ describe("buildRecallFollowUp", () => {
     const followUp = buildRecallFollowUp(req, resp, "", recallBlock);
 
     const resultBlock = followUp.messages[2].content[0];
-    expect(resultBlock.type).toBe("text");
-    expect((resultBlock as { text: string }).text).toBe("[No results found.]");
+    expect(resultBlock.type).toBe("tool_result");
+    expect((resultBlock as { content: string }).content).toBe("[No results found.]");
+    expect((resultBlock as { toolUseId: string }).toolUseId).toBe(recallBlock.id);
   });
 });
 

@@ -383,8 +383,8 @@ export async function executeRecall(
  *
  * The follow-up includes:
  *  - All original messages
- *  - The assistant's full response (with recall tool_use replaced by marker text)
- *  - A user message with the recall results as plain text
+ *  - A synthetic assistant message with thinking blocks + recall tool_use
+ *  - A user message with recall results as a tool_result
  *  - Full tools list (including recall — the continuation is recall-aware)
  *
  * The model continues from where it left off, now with recall results
@@ -396,12 +396,16 @@ export function buildRecallFollowUp(
   recallResult: string,
   recallToolUseBlock: GatewayToolUseBlock,
 ): GatewayRequest {
-  // Build the follow-up using plain text blocks instead of tool_use/tool_result.
+  // Build the follow-up using proper tool_use/tool_result pairs.
   //
-  // Why: marker text is what the client sees in its conversation history.
-  // Using text blocks keeps the follow-up consistent with the marker-based
-  // round-trip strategy (expandRecallMarkers reconstructs proper tool_use +
-  // tool_result pairs on the next client turn).
+  // Why: sending recall results as plain user text causes the LLM to treat
+  // them as conversational input — during streaming, the model may echo raw
+  // recall formatting (knowledge entries, internal IDs, score tiers) before
+  // settling into a natural response. Using tool_result tells the LLM these
+  // are tool outputs to synthesize, not user speech to parrot.
+  //
+  // This also matches the shape that expandRecallMarkers() reconstructs on
+  // subsequent turns, so the model sees a consistent message structure.
   //
   // Thinking blocks MUST be preserved: the Anthropic API requires thinking
   // blocks (with their cryptographic signatures) to precede content blocks
@@ -413,25 +417,26 @@ export function buildRecallFollowUp(
     (b) => b.type !== "text" && b.type !== "tool_use" && b.type !== "tool_result",
   );
 
-  // Build a marker text for what was recalled
-  const input = recallToolUseBlock.input as Record<string, unknown>;
-  const query = typeof input.query === "string" ? input.query : "";
-  const scope = (input.scope as string) ?? "all";
-  const id = typeof input.id === "string" && input.id ? input.id : undefined;
-  const markerText = buildRecallMarker(query, scope, id);
-
   const assistantMessage: GatewayMessage = {
     role: "assistant",
-    content: [...prefixBlocks, { type: "text" as const, text: markerText }],
+    content: [
+      ...prefixBlocks,
+      {
+        type: "tool_use",
+        id: recallToolUseBlock.id,
+        name: recallToolUseBlock.name,
+        input: recallToolUseBlock.input,
+      },
+    ],
   };
 
-  // Provide recall results as plain text in the user message
   const resultMessage: GatewayMessage = {
     role: "user",
     content: [
       {
-        type: "text" as const,
-        text: recallResult || "[No results found.]",
+        type: "tool_result",
+        toolUseId: recallToolUseBlock.id,
+        content: recallResult || "[No results found.]",
       },
     ],
   };
