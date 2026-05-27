@@ -604,9 +604,28 @@ export function resetCurationTracker(sessionID?: string) {
 }
 
 /**
- * Consolidation pass: reviews ALL project entries and merges/trims/deletes
- * to reduce entry count to cfg.curator.maxEntries. Only runs when the current
- * entry count exceeds the target. Uses the same worker session as curation.
+ * Maximum entries to include in a single consolidation prompt.
+ *
+ * With ~300 tokens per entry (title + content), 50 entries ≈ 15K tokens of
+ * input — well within the context window. The 4096 output token budget can
+ * express ~80-100 delete/update ops, enough to act on most of the batch.
+ *
+ * When the total entry count exceeds this, consolidation runs in batched
+ * mode: each pass evaluates the lowest-confidence entries for deletion,
+ * and the idle scheduler runs subsequent passes as the count drops.
+ */
+const CONSOLIDATION_BATCH_SIZE = 50;
+
+/**
+ * Consolidation pass: reviews project entries and merges/trims/deletes
+ * to reduce entry count to cfg.curator.maxEntries.
+ *
+ * When the entry count is moderately above the limit (≤ CONSOLIDATION_BATCH_SIZE),
+ * sends all entries in a single prompt. When massively over (e.g., 1143 entries),
+ * operates in batched mode: sends the lowest-confidence entries as candidates
+ * for deletion. Each pass makes progress; the idle scheduler runs subsequent
+ * passes as the count drops (the cooldown tracks entry count and clears when
+ * it changes).
  *
  * Only "update" and "delete" ops are applied — consolidation never creates entries.
  */
@@ -625,16 +644,40 @@ export async function consolidate(input: {
   const entries = ltm.forProject(input.projectPath, false);
   if (entries.length <= cfg.curator.maxEntries) return { updated: 0, deleted: 0 };
 
-  const entriesForPrompt = entries.map((e) => ({
-    id: e.id,
-    category: e.category,
-    title: e.title,
-    content: e.content,
-  }));
+  // Entries are sorted by confidence DESC, updated_at DESC from forProject().
+  // For batched mode, we take the lowest-confidence entries (tail of the list)
+  // as candidates for deletion — they're the least valuable.
+  let entriesForPrompt: Array<{ id: string; category: string; title: string; content: string }>;
+  let batchTarget: number;
+
+  if (entries.length <= CONSOLIDATION_BATCH_SIZE) {
+    // Small overshoot — send all entries, target is maxEntries
+    entriesForPrompt = entries.map((e) => ({
+      id: e.id, category: e.category, title: e.title, content: e.content,
+    }));
+    batchTarget = cfg.curator.maxEntries;
+  } else {
+    // Large overshoot — batched mode. Take the lowest-confidence entries.
+    // The LLM evaluates this batch and deletes the least valuable ones.
+    // Subsequent passes (on future idle ticks) handle the rest.
+    const candidates = entries.slice(-CONSOLIDATION_BATCH_SIZE);
+    entriesForPrompt = candidates.map((e) => ({
+      id: e.id, category: e.category, title: e.title, content: e.content,
+    }));
+    // Target is relative to the batch (not the global total) because the
+    // prompt only sees the batch entries. Keep at most half — delete the rest.
+    // Each pass deletes ~25 entries, the idle scheduler re-triggers (cooldown
+    // clears when entry count changes), converging over multiple passes.
+    batchTarget = Math.ceil(CONSOLIDATION_BATCH_SIZE / 2);
+    log.info(
+      `consolidation: batched mode — evaluating ${candidates.length} lowest-confidence entries ` +
+      `(${entries.length} total, batch keeps at most ${batchTarget})`,
+    );
+  }
 
   const userContent = consolidationUser({
     entries: entriesForPrompt,
-    targetMax: cfg.curator.maxEntries,
+    targetMax: batchTarget,
   });
   const model = input.model ?? cfg.model;
   const responseText = await input.llm.prompt(
