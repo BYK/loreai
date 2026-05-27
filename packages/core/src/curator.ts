@@ -107,13 +107,28 @@ export function parseResponse(text: string): CuratorResponse {
 }
 
 function filterOps(arr: unknown[]): CuratorOp[] {
-  return arr.filter(
-    (op: unknown) =>
-      typeof op === "object" &&
-      op !== null &&
-      "op" in op &&
-      typeof (op as Record<string, unknown>).op === "string",
-  ) as CuratorOp[];
+  return arr.filter((op: unknown) => {
+    if (typeof op !== "object" || op === null || !("op" in op)) return false;
+    const o = op as Record<string, unknown>;
+    if (typeof o.op !== "string") return false;
+    // Validate required fields per op type to prevent runtime crashes
+    // from malformed LLM output (e.g. missing content on create ops).
+    if (o.op === "create") {
+      return (
+        typeof o.category === "string" &&
+        typeof o.title === "string" &&
+        typeof o.content === "string" &&
+        typeof o.scope === "string"
+      );
+    }
+    if (o.op === "update") {
+      return typeof o.id === "string";
+    }
+    if (o.op === "delete") {
+      return typeof o.id === "string";
+    }
+    return false;
+  }) as CuratorOp[];
 }
 
 function filterEntities(arr: unknown[]): DetectedEntity[] {
@@ -222,6 +237,8 @@ export function applyOps(
   for (const op of ops) {
     if (op.op === "create") {
       if (input.skipCreate) continue;
+      // Defensive: skip malformed ops missing required fields
+      if (!op.content || !op.title || !op.category) continue;
       const content =
         op.content.length > MAX_ENTRY_CONTENT_LENGTH
           ? op.content.slice(0, MAX_ENTRY_CONTENT_LENGTH) +

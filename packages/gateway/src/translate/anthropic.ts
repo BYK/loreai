@@ -484,6 +484,61 @@ export function buildAnthropicRequest(
 // ---------------------------------------------------------------------------
 
 /**
+ * Parse an Anthropic-format response JSON back into a `GatewayResponse`.
+ *
+ * This is the inverse of `buildAnthropicNonStreamResponse`. Used when the
+ * pipeline returns Anthropic-format JSON that needs to be translated to
+ * another protocol (OpenAI Chat Completions, OpenAI Responses API).
+ */
+export function parseAnthropicResponseJSON(
+  json: Record<string, unknown>,
+): GatewayResponse {
+  const content: GatewayContentBlock[] = [];
+  const rawContent = json.content as Array<Record<string, unknown>> | undefined;
+  if (rawContent) {
+    for (const block of rawContent) {
+      switch (block.type) {
+        case "text":
+          content.push({ type: "text", text: String(block.text ?? "") });
+          break;
+        case "thinking":
+          content.push({
+            type: "thinking",
+            thinking: String(block.thinking ?? ""),
+            ...(block.signature
+              ? { signature: String(block.signature) }
+              : undefined),
+          });
+          break;
+        case "tool_use":
+          content.push({
+            type: "tool_use",
+            id: String(block.id ?? ""),
+            name: String(block.name ?? ""),
+            input: block.input,
+          });
+          break;
+      }
+    }
+  }
+
+  const usage = json.usage as Record<string, number> | undefined;
+
+  return {
+    id: String(json.id ?? ""),
+    model: String(json.model ?? ""),
+    content,
+    stopReason: String((json.stop_reason as string) ?? "end_turn"),
+    usage: {
+      inputTokens: usage?.input_tokens ?? 0,
+      outputTokens: usage?.output_tokens ?? 0,
+      cacheReadInputTokens: usage?.cache_read_input_tokens,
+      cacheCreationInputTokens: usage?.cache_creation_input_tokens,
+    },
+  };
+}
+
+/**
  * Build a non-streaming Anthropic response JSON from a `GatewayResponse`.
  *
  * Produces the standard Anthropic `/v1/messages` response shape with

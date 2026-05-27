@@ -14,7 +14,7 @@
 import { DEFAULT_PORT, type GatewayConfig } from "./config";
 import { bootstrapDailySpend, getDailyBudget } from "./cost-tracker";
 import type { GatewayRequest } from "./translate/types";
-import { parseAnthropicRequest } from "./translate/anthropic";
+import { parseAnthropicRequest, parseAnthropicResponseJSON } from "./translate/anthropic";
 import { parseOpenAIRequest, buildOpenAIResponse } from "./translate/openai";
 import { translateAnthropicStreamToOpenAI } from "./stream/openai";
 import {
@@ -203,9 +203,10 @@ async function handleOpenAIChatCompletions(
     return withCors(translateAnthropicStreamToOpenAI(pipelineResp));
   }
 
-  // Non-streaming: translate JSON body
+  // Non-streaming: translate Anthropic wire JSON → GatewayResponse → OpenAI
   const respBody = await pipelineResp.json();
-  return withCors(buildOpenAIResponse(respBody, false));
+  const gatewayResp = parseAnthropicResponseJSON(respBody as Record<string, unknown>);
+  return withCors(buildOpenAIResponse(gatewayResp, false));
 }
 
 async function handleOpenAIResponses(
@@ -248,9 +249,10 @@ async function handleOpenAIResponses(
     return withCors(translateAnthropicStreamToResponses(pipelineResp));
   }
 
-  // Non-streaming: translate JSON body
+  // Non-streaming: translate Anthropic wire JSON → GatewayResponse → Responses API
   const respBody = await pipelineResp.json();
-  return withCors(buildOpenAIResponsesResponse(respBody, false));
+  const gatewayResp = parseAnthropicResponseJSON(respBody as Record<string, unknown>);
+  return withCors(buildOpenAIResponsesResponse(gatewayResp, false));
 }
 
 // ---------------------------------------------------------------------------

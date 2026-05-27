@@ -216,6 +216,12 @@ export function createAnthropicBatchProvider(upstreamUrl: string): BatchProvider
           log.warn(`anthropic batch auth error (${response.status}): ${text}`);
           return "auth-error";
         }
+        // 404/405 means the upstream doesn't support the batch API at all.
+        // Treat as permanent failure to avoid retrying on every flush cycle.
+        if (response.status === 404 || response.status === 405) {
+          log.warn(`anthropic batch not supported (${response.status}): ${text}`);
+          return "auth-error";
+        }
         log.error(`anthropic batch create failed: ${response.status} ${response.statusText} — ${text}`);
         return null;
       }
@@ -343,6 +349,13 @@ async function uploadOpenAIBatchFile(
     const text = await response.text().catch(() => "(no body)");
     if (response.status === 401 || response.status === 403) {
       log.warn(`openai file upload auth error (${response.status}): ${text}`);
+      return "auth-error";
+    }
+    // 404/405 means the upstream doesn't support the batch/files API at all
+    // (e.g. vLLM, local models). Treat as permanent failure to avoid retrying
+    // on every flush cycle.
+    if (response.status === 404 || response.status === 405) {
+      log.warn(`openai file upload not supported (${response.status}): ${text}`);
       return "auth-error";
     }
     log.error(`openai file upload failed: ${response.status} — ${text}`);
@@ -496,6 +509,10 @@ export function createOpenAIBatchProvider(upstreamUrl: string): BatchProvider {
         const text = await response.text().catch(() => "(no body)");
         if (response.status === 401 || response.status === 403) {
           log.warn(`openai batch auth error (${response.status}): ${text}`);
+          return "auth-error";
+        }
+        if (response.status === 404 || response.status === 405) {
+          log.warn(`openai batch not supported (${response.status}): ${text}`);
           return "auth-error";
         }
         log.error(`openai batch create failed: ${response.status} ${response.statusText} — ${text}`);
