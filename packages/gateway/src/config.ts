@@ -76,7 +76,7 @@ export function loadConfig(): GatewayConfig {
       env.LORE_UPSTREAM_OPENAI || "https://api.openai.com",
     ),
     idleTimeoutSeconds: parsePositiveInt(env.LORE_IDLE_TIMEOUT, 60),
-    sessionEvictionTimeoutSeconds: parsePositiveInt(env.LORE_SESSION_EVICTION_TIMEOUT, 1800),
+    sessionEvictionTimeoutSeconds: parseNonNegativeInt(env.LORE_SESSION_EVICTION_TIMEOUT, 1800),
     debug: isTruthy(env.LORE_DEBUG),
     remoteUrl: env.LORE_REMOTE_URL
       ? trimTrailingSlash(env.LORE_REMOTE_URL)
@@ -359,6 +359,22 @@ function parsePositiveInt(
   if (!value) return fallback;
   const n = Number.parseInt(value, 10);
   if (Number.isNaN(n) || n <= 0) {
+    console.error(
+      `[lore] warning: invalid value "${value}", using default ${fallback}`,
+    );
+    return fallback;
+  }
+  return n;
+}
+
+/** Like parsePositiveInt but allows 0 (for "disabled" semantics). */
+function parseNonNegativeInt(
+  value: string | undefined,
+  fallback: number,
+): number {
+  if (!value) return fallback;
+  const n = Number.parseInt(value, 10);
+  if (Number.isNaN(n) || n < 0) {
     console.error(
       `[lore] warning: invalid value "${value}", using default ${fallback}`,
     );

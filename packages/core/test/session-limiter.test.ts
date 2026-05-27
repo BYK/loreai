@@ -149,12 +149,12 @@ describe("session-limiter", () => {
 
   test("evict removes an idle limiter", () => {
     // Create a limiter for a session (lazy, so .get creates it)
-    distillLimiter.get("evict-me");
+    const original = distillLimiter.get("evict-me");
     // Evict should remove it
     distillLimiter.evict("evict-me");
-    // A new .get call should create a fresh instance
+    // A new .get call should create a fresh (different) instance
     const fresh = distillLimiter.get("evict-me");
-    expect(fresh).toBeDefined();
+    expect(fresh).not.toBe(original);
   });
 
   test("evict is a no-op for unknown keys", () => {
