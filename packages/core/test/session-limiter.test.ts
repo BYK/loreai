@@ -142,4 +142,44 @@ describe("session-limiter", () => {
     // After clear, isBusy should return false (no limiter)
     expect(distillLimiter.isBusy("a")).toBe(false);
   });
+
+  // -------------------------------------------------------------------------
+  // evict()
+  // -------------------------------------------------------------------------
+
+  test("evict removes an idle limiter", () => {
+    // Create a limiter for a session (lazy, so .get creates it)
+    distillLimiter.get("evict-me");
+    // Evict should remove it
+    distillLimiter.evict("evict-me");
+    // A new .get call should create a fresh instance
+    const fresh = distillLimiter.get("evict-me");
+    expect(fresh).toBeDefined();
+  });
+
+  test("evict is a no-op for unknown keys", () => {
+    // Should not throw
+    distillLimiter.evict("nonexistent");
+    expect(distillLimiter.isBusy("nonexistent")).toBe(false);
+  });
+
+  test("evict does not remove a busy limiter", async () => {
+    let resolve: () => void;
+    const blocker = new Promise<void>((r) => { resolve = r; });
+
+    const p = distillLimiter.get("busy-session")(async () => {
+      await blocker;
+    });
+
+    // Give the microtask a tick to start
+    await new Promise((r) => setTimeout(r, 0));
+    expect(distillLimiter.isBusy("busy-session")).toBe(true);
+
+    // Evict should NOT remove a busy limiter
+    distillLimiter.evict("busy-session");
+    expect(distillLimiter.isBusy("busy-session")).toBe(true);
+
+    resolve!();
+    await p;
+  });
 });

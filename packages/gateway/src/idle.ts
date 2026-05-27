@@ -29,6 +29,8 @@ import {
   getConsecutiveBusts,
   effectiveMetaThreshold,
   evictSession as evictGradientSession,
+  distillLimiter,
+  curatorLimiter,
 } from "@loreai/core";
 import type { LLMClient } from "@loreai/core";
 import type { GatewayConfig } from "./config";
@@ -75,12 +77,10 @@ const consolidationCooldown = new Map<
 const CONSOLIDATION_COOLDOWN_MS = 60 * 60 * 1000;
 
 /**
- * Evict sessions that have been idle for longer than this threshold.
- * All important state is already persisted to SQLite — eviction only frees
- * in-memory caches (prefix cache, distillation snapshot, recall store, etc.).
- * If the session resumes, state is reloaded from DB on the next request.
+ * Sub-agent sessions are ephemeral (1-3 turns) — evict them faster than
+ * regular sessions to free memory sooner.
  */
-const SESSION_EVICTION_MS = 60 * 60 * 1000; // 1 hour
+const SUBAGENT_EVICTION_MS = 5 * 60 * 1000; // 5 minutes
 
 // ---------------------------------------------------------------------------
 // startIdleScheduler
@@ -134,19 +134,29 @@ export function startIdleScheduler(
         .finally(() => inProgress.delete(sessionID));
     }
 
-    // --- Session eviction — free memory for sessions idle > 1 hour ---
+    // --- Session eviction — free memory for long-idle sessions ---
     // All important state is persisted to SQLite; eviction only releases
     // in-memory caches (gradient state, prefix cache, recall store, LTM
     // caches, cost tracking, auth credentials). If a session resumes,
     // getOrCreateSession() in pipeline.ts reloads persisted state from DB.
+    const evictionTimeoutMs = config.sessionEvictionTimeoutSeconds * 1000;
     for (const [sessionID, state] of sessions) {
+      if (evictionTimeoutMs <= 0) break; // eviction disabled
       if (inProgress.has(sessionID)) continue; // don't evict during active idle work
       if (warmupInProgress.has(sessionID)) continue;
-      if (now - state.lastRequestTime < SESSION_EVICTION_MS) continue;
+      // Sub-agent sessions are ephemeral — evict faster
+      const timeout = state.isSubagent
+        ? Math.min(evictionTimeoutMs, SUBAGENT_EVICTION_MS)
+        : evictionTimeoutMs;
+      if (now - state.lastRequestTime < timeout) continue;
       // Don't evict sessions still executing tools — they're active
       if (state.lastStopReason === "tool_use") continue;
 
-      log.info(`evicting idle session ${sessionID.slice(0, 16)} (idle ${Math.round((now - state.lastRequestTime) / 60_000)}m)`);
+      log.info(
+        `evicting idle session ${sessionID.slice(0, 16)}` +
+        `${state.isSubagent ? " (subagent)" : ""}` +
+        ` (idle ${Math.round((now - state.lastRequestTime) / 60_000)}m)`,
+      );
 
       // Persist final cost snapshot before eviction
       try {
@@ -186,6 +196,8 @@ export function startIdleScheduler(
       clearAuthStale(sessionID);
       deleteBillingPrefix(sessionID);
       clearWarmupAuthDisabled(sessionID);
+      distillLimiter.evict(sessionID);
+      curatorLimiter.evict(sessionID);
 
       // Clean up pipeline-level satellite Maps via callback
       onEvict?.(sessionID);
@@ -283,6 +295,7 @@ export function startIdleScheduler(
         log.error(`periodic state flush error for session ${sessionID.slice(0, 16)}:`, e);
       }
     }
+
   }, POLL_INTERVAL_MS);
 
   return () => clearInterval(timer);

@@ -75,6 +75,8 @@ mock.module("@loreai/core", () => ({
   getKV: () => null,
   setKV: () => {},
   evictSession: () => {},
+  distillLimiter: { get: () => {}, isBusy: () => false, evict: () => {}, clear: () => {} },
+  curatorLimiter: { get: () => {}, isBusy: () => false, evict: () => {}, clear: () => {} },
   // Needed by transitive imports (cache-warmer.ts, cost-tracker.ts)
   db: () => ({}),
   projectId: () => undefined,

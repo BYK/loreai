@@ -42,6 +42,10 @@ export interface GatewayConfig {
   upstreamOpenAI: string;
   /** Idle timeout in seconds before triggering background work. Default: 60 */
   idleTimeoutSeconds: number;
+  /** Session eviction timeout in seconds. Sessions idle beyond this are evicted
+   *  from memory (state is preserved in DB). Default: 1800 (30 min).
+   *  Set to 0 to disable eviction. Env: LORE_SESSION_EVICTION_TIMEOUT */
+  sessionEvictionTimeoutSeconds: number;
   /** Whether to log requests. Default: false. Env: LORE_DEBUG */
   debug: boolean;
   /** Remote gateway URL. When set, `lore run` delegates to this gateway instead of starting a local one. Env: LORE_REMOTE_URL */
@@ -72,6 +76,7 @@ export function loadConfig(): GatewayConfig {
       env.LORE_UPSTREAM_OPENAI || "https://api.openai.com",
     ),
     idleTimeoutSeconds: parsePositiveInt(env.LORE_IDLE_TIMEOUT, 60),
+    sessionEvictionTimeoutSeconds: parsePositiveInt(env.LORE_SESSION_EVICTION_TIMEOUT, 1800),
     debug: isTruthy(env.LORE_DEBUG),
     remoteUrl: env.LORE_REMOTE_URL
       ? trimTrailingSlash(env.LORE_REMOTE_URL)

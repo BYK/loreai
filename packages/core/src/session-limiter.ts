@@ -32,12 +32,23 @@ function createLimiterPool() {
     return limiter ? limiter.activeCount + limiter.pendingCount > 0 : false;
   }
 
+  /**
+   * Evict a single key's limiter (for idle session eviction).
+   * Only removes the limiter if it is not currently busy (active or pending).
+   */
+  function evict(key: string): void {
+    const limiter = limiters.get(key);
+    if (!limiter || limiter.activeCount + limiter.pendingCount === 0) {
+      limiters.delete(key);
+    }
+  }
+
   /** Clear all limiters (for test cleanup). */
   function clear(): void {
     limiters.clear();
   }
 
-  return { get, isBusy, clear };
+  return { get, isBusy, evict, clear };
 }
 
 /** Serializes distillation.run() and metaDistill() per session. */

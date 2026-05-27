@@ -158,6 +158,7 @@ export {
   clearWorkspaceCache,
 } from "./workspace";
 export { workerSessionIDs, isWorkerSession } from "./worker";
+export { distillLimiter, curatorLimiter } from "./session-limiter";
 export * as workerModel from "./worker-model";
 export {
   ftsQuery,
