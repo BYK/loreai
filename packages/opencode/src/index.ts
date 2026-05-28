@@ -3,6 +3,7 @@ import { log, getGitRemote, discoverWorkspaceRoot } from "@loreai/core";
 
 /**
  * Providers whose wire protocol the Lore gateway can proxy.
+ * Keep in sync with packages/pi/src/index.ts ANTHROPIC_PROVIDERS + OPENAI_PROVIDERS.
  *
  * - anthropic-messages API → gateway POST /v1/messages
  * - openai-completions API → gateway POST /v1/chat/completions
@@ -28,6 +29,10 @@ const GATEWAY_PROVIDERS: string[] = [
   "cerebras",
   "openrouter",
   "huggingface",
+  "zai",
+  "minimax",
+  "minimax-cn",
+  "kimi-coding",
   "vercel-ai-gateway",
   // openai-responses API
   "openai",

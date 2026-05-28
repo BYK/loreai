@@ -23,6 +23,7 @@ import {
   recordCacheUsage,
   setCachePricing,
   shouldCompress,
+  isFreeWriteSession,
   getTier,
   selectDistillations,
 } from "../src/gradient";
@@ -2479,6 +2480,216 @@ describe("tier-based context management", () => {
       recordCacheUsage(0, 0, 0, SID);
       expect(inspectSessionState(SID)!.consecutiveBusts).toBe(1);
     });
+  });
+
+  describe("free-write detection — zeroCacheWriteTurns tracking", () => {
+    const SID = "free-write-detect-sess";
+
+    beforeEach(() => {
+      resetCalibration(SID);
+    });
+
+    test("tracks consecutive turns with zero cache writes", () => {
+      // MiniMax-like: cacheWrite=0, cacheRead varies, inputTokens non-zero
+      recordCacheUsage(0, 5_000, 50_000, SID);
+      expect(inspectSessionState(SID)!.zeroCacheWriteTurns).toBe(1);
+
+      recordCacheUsage(0, 8_000, 45_000, SID);
+      expect(inspectSessionState(SID)!.zeroCacheWriteTurns).toBe(2);
+
+      recordCacheUsage(0, 10_000, 40_000, SID);
+      expect(inspectSessionState(SID)!.zeroCacheWriteTurns).toBe(3);
+    });
+
+    test("resets counter on non-zero cache write", () => {
+      // Build up to threshold
+      recordCacheUsage(0, 5_000, 50_000, SID);
+      recordCacheUsage(0, 5_000, 50_000, SID);
+      recordCacheUsage(0, 5_000, 50_000, SID);
+      expect(inspectSessionState(SID)!.zeroCacheWriteTurns).toBe(3);
+
+      // Non-zero cache write resets
+      recordCacheUsage(1_000, 40_000, 5_000, SID);
+      expect(inspectSessionState(SID)!.zeroCacheWriteTurns).toBe(0);
+    });
+
+    test("resets consecutiveBusts when crossing threshold", () => {
+      // Accumulate busts under false pricing assumptions
+      recordCacheUsage(100_000, 0, 3, SID);
+      recordCacheUsage(100_000, 0, 3, SID);
+      expect(inspectSessionState(SID)!.consecutiveBusts).toBe(2);
+
+      // Now simulate MiniMax: 3 turns with zero cache writes
+      // Turn 1: bustRatio=0 → resets consecutiveBusts to 0
+      recordCacheUsage(0, 0, 50_000, SID);
+      expect(inspectSessionState(SID)!.consecutiveBusts).toBe(0);
+      expect(inspectSessionState(SID)!.zeroCacheWriteTurns).toBe(1);
+
+      // Accumulate busts again
+      recordCacheUsage(100_000, 0, 3, SID);
+      expect(inspectSessionState(SID)!.consecutiveBusts).toBe(1);
+      // zeroCacheWriteTurns resets because cacheWrite > 0
+      expect(inspectSessionState(SID)!.zeroCacheWriteTurns).toBe(0);
+
+      // Now 3 consecutive zero-write turns
+      recordCacheUsage(0, 0, 50_000, SID);
+      recordCacheUsage(0, 0, 50_000, SID);
+      recordCacheUsage(0, 0, 50_000, SID);
+      // Threshold crossed at turn 3 → busts reset to 0
+      expect(inspectSessionState(SID)!.zeroCacheWriteTurns).toBe(3);
+      expect(inspectSessionState(SID)!.consecutiveBusts).toBe(0);
+    });
+
+    test("zero-usage turn does not affect zeroCacheWriteTurns", () => {
+      recordCacheUsage(0, 5_000, 50_000, SID);
+      expect(inspectSessionState(SID)!.zeroCacheWriteTurns).toBe(1);
+
+      // total=0 → entire block skipped
+      recordCacheUsage(0, 0, 0, SID);
+      expect(inspectSessionState(SID)!.zeroCacheWriteTurns).toBe(1);
+    });
+  });
+
+  describe("isFreeWriteSession", () => {
+    const SID = "free-write-session-check";
+
+    beforeEach(() => {
+      resetCalibration(SID);
+    });
+
+    test("returns false before threshold is reached", () => {
+      expect(isFreeWriteSession(SID)).toBe(false);
+      recordCacheUsage(0, 5_000, 50_000, SID);
+      expect(isFreeWriteSession(SID)).toBe(false);
+      recordCacheUsage(0, 5_000, 50_000, SID);
+      expect(isFreeWriteSession(SID)).toBe(false);
+    });
+
+    test("returns true at threshold", () => {
+      recordCacheUsage(0, 5_000, 50_000, SID);
+      recordCacheUsage(0, 5_000, 50_000, SID);
+      recordCacheUsage(0, 5_000, 50_000, SID);
+      expect(isFreeWriteSession(SID)).toBe(true);
+    });
+
+    test("returns false after reset", () => {
+      // Reach threshold
+      recordCacheUsage(0, 5_000, 50_000, SID);
+      recordCacheUsage(0, 5_000, 50_000, SID);
+      recordCacheUsage(0, 5_000, 50_000, SID);
+      expect(isFreeWriteSession(SID)).toBe(true);
+
+      // Non-zero cache write resets
+      recordCacheUsage(1_000, 40_000, 5_000, SID);
+      expect(isFreeWriteSession(SID)).toBe(false);
+    });
+
+    test("returns false for unknown session (no phantom state)", () => {
+      expect(isFreeWriteSession("nonexistent-session-id")).toBe(false);
+    });
+  });
+
+  describe("shouldCompress — freeWrite option", () => {
+    beforeEach(() => {
+      // Opus 4.6 pricing where bust is expensive
+      setCachePricing(6.25 / 1_000_000, 0.50 / 1_000_000);
+    });
+
+    test("returns true with freeWrite even when bust cost exceeds continue cost", () => {
+      // Without freeWrite: bustCost ($0.9375) >> continueCost ($0.125) → false
+      expect(shouldCompress(250_000, 150_000, 0)).toBe(false);
+      // With freeWrite: compression is free → true
+      expect(shouldCompress(250_000, 150_000, 0, { freeWrite: true })).toBe(true);
+    });
+
+    test("returns false with freeWrite when busts >= 5", () => {
+      // Even free compression shouldn't run if it's not helping
+      expect(shouldCompress(250_000, 150_000, 5, { freeWrite: true })).toBe(false);
+      expect(shouldCompress(250_000, 150_000, 10, { freeWrite: true })).toBe(false);
+    });
+
+    test("returns true with freeWrite at 4 busts", () => {
+      expect(shouldCompress(250_000, 150_000, 4, { freeWrite: true })).toBe(true);
+    });
+
+    test("backward compatible — no opts uses defaults", () => {
+      // Same behavior as before: Opus pricing, large context
+      expect(shouldCompress(2_000_000, 100_000, 0)).toBe(true);
+      expect(shouldCompress(250_000, 150_000, 0)).toBe(false);
+    });
+
+    test("threshold option still works", () => {
+      // With very low threshold, even economical compression is rejected
+      expect(shouldCompress(2_000_000, 100_000, 0, { threshold: 0.01 })).toBe(false);
+    });
+  });
+});
+
+// ─── free-write layer0 ceiling integration test ────────────────────────────
+
+describe("gradient — free-write session compresses earlier than normal", () => {
+  // Use totally unique session IDs to avoid any DB/state leaks
+  const NORMAL_SID = `fw-normal-${Date.now()}`;
+  const FREE_SID = `fw-free-${Date.now()}`;
+
+  beforeEach(() => {
+    resetCalibration(); // clear ALL sessions + calibratedOverhead
+    setCachePricing(0, 0); // no pricing → shouldCompress returns false
+    // 200k context, 32k output → maxInput = 168,000
+    setModelLimits({ context: 200_000, output: 32_000 });
+    ensureProject(PROJECT);
+  });
+
+  test("free-write session enters compression earlier due to reduced layer0Ceiling", () => {
+    // maxInput = 168,000
+    // HARD_CEILING_MARGIN = 0.95 → normal ceiling = 159,600
+    // FREE_WRITE_LAYER0_FRACTION = 0.65 → free-write ceiling = 109,200
+    //
+    // Build a conversation at ~120k tokens (above 109k, below 159.6k).
+    // Each message: 9,000 chars → ceil(9000/3)=3000 + 20 overhead = 3,020 tokens.
+    // 40 messages × 3,020 = 120,800 + final msg ≈ 120,830 tokens.
+    //
+    // On FIRST turn (calibratedOverhead=null), UNCALIBRATED_SAFETY=1.5 applies:
+    // layer0Input = (120,830 + FIRST_TURN_OVERHEAD=15,000) × 1.5 = ~203k → exceeds maxInput.
+    // So we must not use uncalibrated mode. Instead, fake a prior calibrated turn.
+    const bigText = "x".repeat(9_000);
+
+    function buildMsgs(sid: string) {
+      const msgs: ReturnType<typeof makeMsg>[] = [];
+      for (let i = 0; i < 40; i++) {
+        const role = i % 2 === 0 ? "user" : "assistant";
+        msgs.push(makeMsg(`fw-${i}`, role as "user" | "assistant", bigText, sid));
+      }
+      msgs.push(makeMsg("fw-final", "user", "do the fix", sid));
+      return msgs;
+    }
+
+    // Set calibratedOverhead to 0 (module-level), then set per-session state.
+    // calibrate(0) zeros overhead; calibrate(100, sid, 1) sets lastKnownInput=100
+    // so the calibrated delta path kicks in for all messages.
+    calibrate(0);
+    calibrate(100, NORMAL_SID, 1);
+
+    // Normal session: ~120k tokens (via delta path: lastKnownInput=100 + newMsgs*1.3)
+    // delta = 120,830 * 1.3 ≈ 157k. Add lastKnownInput=100 → ~157k.
+    // 157k < 159,600 ceiling → should be layer 0.
+    const normalMsgs = buildMsgs(NORMAL_SID);
+    const normalResult = transform({ messages: normalMsgs, projectPath: PROJECT, sessionID: NORMAL_SID });
+    expect(normalResult.layer).toBe(0);
+
+    // Set up free-write session: calibrate it, then add zero-cache-write turns
+    calibrate(0);
+    calibrate(100, FREE_SID, 1);
+    recordCacheUsage(0, 0, 50_000, FREE_SID);
+    recordCacheUsage(0, 0, 50_000, FREE_SID);
+    recordCacheUsage(0, 0, 50_000, FREE_SID);
+    expect(isFreeWriteSession(FREE_SID)).toBe(true);
+
+    // Free-write session: ceiling drops to 109,200.
+    // Same ~157k estimate → exceeds 109k → should compress.
+    const fwMsgs = buildMsgs(FREE_SID);
+    const fwResult = transform({ messages: fwMsgs, projectPath: PROJECT, sessionID: FREE_SID });
+    expect(fwResult.layer).toBeGreaterThanOrEqual(1);
   });
 });
 

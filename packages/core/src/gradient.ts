@@ -67,7 +67,7 @@ let cacheReadCostPerToken = 0;
  * Set cache pricing for the current model. Called by the host adapter after
  * looking up model cost data. Required for tier-based bust-vs-continue
  * decisions. When not set (both 0), tier decisions fall back to conservative
- * defaults: always compress at tier boundaries.
+ * defaults: do NOT compress (preserve the cache).
  */
 export function setCachePricing(writeCost: number, readCost: number) {
   cacheWriteCostPerToken = Math.max(0, writeCost);
@@ -88,24 +88,60 @@ let maxLayer0Tokens = 0;
 
 const MIN_LAYER0_FLOOR = 40_000;
 
+/** Consecutive zero-cache-write turns before treating the session as free-write. */
+const NO_CACHE_WRITE_THRESHOLD = 3;
+
+/** Layer-0 ceiling fraction for free-write sessions.
+ *  65% of maxInput ≈ 109k for 200k context → ~59k headroom for tool-heavy turns. */
+const FREE_WRITE_LAYER0_FRACTION = 0.65;
+
+/**
+ * True when the session's upstream has reported zero cache_creation_input_tokens
+ * for at least {@link NO_CACHE_WRITE_THRESHOLD} consecutive turns.  Covers both
+ * free-write-cache providers (e.g. MiniMax passive caching) and non-caching
+ * providers.  Self-correcting: any turn with non-zero cache writes resets
+ * the counter.
+ *
+ * Note: a fully cache-warmed Anthropic session could theoretically trigger this
+ * if the prompt stays byte-identical for 3+ turns, but that's rare in practice
+ * (LTM injection and new messages almost always cause cache writes).
+ *
+ * Uses Map.get() to avoid creating phantom SessionState entries — same pattern
+ * as {@link getConsecutiveBusts}.
+ */
+export function isFreeWriteSession(sessionID: string): boolean {
+  return (
+    (sessionStates.get(sessionID)?.zeroCacheWriteTurns ?? 0) >=
+    NO_CACHE_WRITE_THRESHOLD
+  );
+}
+
 /**
  * Decide whether compression is economical at a tier boundary.
  *
  * @param currentTokens   - expected input tokens if we stay at the current layer
  * @param compressedTokens - expected tokens after compression
  * @param consecutiveBusts - how many turns in a row we've busted the cache
- * @param threshold        - bust cost must be < threshold × continue cost to compress (default 0.85)
+ * @param opts.threshold   - bust cost must be < threshold × continue cost (default 0.85)
+ * @param opts.freeWrite   - when true, compression is free (no cache write cost)
  * @returns true if compression is worth it
  */
 export function shouldCompress(
   currentTokens: number,
   compressedTokens: number,
   consecutiveBusts: number,
-  threshold = 0.85,
+  opts?: { threshold?: number; freeWrite?: boolean },
 ): boolean {
+  const { threshold = 0.85, freeWrite = false } = opts ?? {};
+
   // Rolling bust detection: if we've been busting 5+ turns in a row,
   // stop trying to compress — it's clearly not helping.
+  // Applies even to free-write sessions to prevent compress→overflow loops.
   if (consecutiveBusts >= 5) return false;
+
+  // Free-write cache (or no cache): compression never incurs a write cost.
+  // Always compress at tier boundaries — there's no economic downside.
+  if (freeWrite) return true;
 
   // If no pricing data, fall back to conservative: do NOT compress.
   // Compression busts the cache, which is expensive. Without pricing data
@@ -168,6 +204,25 @@ export function recordCacheUsage(
         ` (write=${cacheWrite} read=${cacheRead} uncached=${inputTokens})` +
         ` busts=${prev}→${state.consecutiveBusts}`,
       );
+    }
+
+    // Free-write detection: track consecutive turns with zero cache writes.
+    // Covers providers with free passive caching (e.g. MiniMax) and
+    // non-caching providers. Both produce the same observable signal.
+    if (cacheWrite === 0) {
+      state.zeroCacheWriteTurns++;
+      // Crossing the threshold: reset bust counter — prior busts were
+      // computed under false pricing assumptions (inflated write cost).
+      if (state.zeroCacheWriteTurns === NO_CACHE_WRITE_THRESHOLD) {
+        state.consecutiveBusts = 0;
+        log.info(
+          `free-write-detect: session=${sessionID.slice(0, 16)} ` +
+          `${NO_CACHE_WRITE_THRESHOLD} consecutive turns with zero cache writes — ` +
+          `treating compression as free`,
+        );
+      }
+    } else {
+      state.zeroCacheWriteTurns = 0;
     }
   }
 }
@@ -262,6 +317,13 @@ type SessionState = {
    *  Used for rolling bust detection: after 5+ consecutive busts, stop
    *  trying to compress and warn that the conversation is unsustainable. */
   consecutiveBusts: number;
+  /** Consecutive turns where the upstream reported zero cache_creation_input_tokens.
+   *  After >= NO_CACHE_WRITE_THRESHOLD turns, the session is treated as "free-write" —
+   *  compression never busts an expensive cache, so shouldCompress() always says yes.
+   *  Covers both free-write-cache providers (MiniMax) and non-caching providers.
+   *  Not persisted to DB — rebuilds from live API responses (same rationale as
+   *  consecutiveBusts: stale values from a prior process would be incorrect). */
+  zeroCacheWriteTurns: number;
 
   /**
    * Distillation row snapshot — cached to avoid hitting the DB on every
@@ -296,6 +358,7 @@ function makeSessionState(): SessionState {
     postIdleCompact: false,
     consecutiveHighLayer: 0,
     consecutiveBusts: 0,
+    zeroCacheWriteTurns: 0,
 
     distillationSnapshot: null,
   };
@@ -617,6 +680,7 @@ export function inspectSessionState(sessionID: string): {
   lastTurnAt: number;
   distillationSnapshot: DistillationSnapshot | null;
   consecutiveBusts: number;
+  zeroCacheWriteTurns: number;
 } | null {
   const state = sessionStates.get(sessionID);
   if (!state) return null;
@@ -628,6 +692,7 @@ export function inspectSessionState(sessionID: string): {
     lastTurnAt: state.lastTurnAt,
     distillationSnapshot: state.distillationSnapshot,
     consecutiveBusts: state.consecutiveBusts,
+    zeroCacheWriteTurns: state.zeroCacheWriteTurns,
   };
 }
 
@@ -1798,6 +1863,12 @@ function transformInner(input: {
     layer0Ceiling = Math.floor(layer0Ceiling * 0.7);
   }
 
+  // Free-write cache / non-caching: no expensive cache writes to avoid, so
+  // compress earlier to leave headroom for tool-heavy turns.
+  if (sid && isFreeWriteSession(sid)) {
+    layer0Ceiling = Math.min(layer0Ceiling, Math.floor(maxInput * FREE_WRITE_LAYER0_FRACTION));
+  }
+
   if (effectiveMinLayer === 0 && layer0Input <= layer0Ceiling && layer0Input <= maxInput * HARD_CEILING_MARGIN) {
     // All messages fit — return unmodified to preserve append-only prompt-cache pattern.
     // Raw messages are strictly better context than lossy distilled summaries.
@@ -1831,11 +1902,12 @@ function transformInner(input: {
     sid
   ) {
     const busts = getSessionState(sid).consecutiveBusts;
+    const freeWrite = isFreeWriteSession(sid);
     // For compression, estimate the compressed size as the layer-1 budget
     // (distilled + raw fractions). This is a rough upper bound — actual
     // compressed output may be smaller.
     const compressedEstimate = distilledBudget + rawBudget;
-    if (!shouldCompress(Math.round(layer0Input), compressedEstimate, busts)) {
+    if (!shouldCompress(Math.round(layer0Input), compressedEstimate, busts, { freeWrite })) {
       const messageTokens = calibrated
         ? expectedInput - (sessLtmTokens - sessState.lastKnownLtm)
         : expectedInput - overhead - sessLtmTokens;
