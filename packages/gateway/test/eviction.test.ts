@@ -1,13 +1,9 @@
 /**
  * Tests for idle session eviction.
  *
- * Validates that:
- * - The idle scheduler fires eviction after the configured timeout
- * - Sub-agent sessions use the shorter eviction timeout
- * - Eviction is disabled when timeout is 0
- * - Gradient session eviction works
- * - Auth/cost cleanup functions work
- * - Session-limiter eviction is wired up
+ * Uses the extracted `evictIdleSessions()` function directly — no timer
+ * involvement — to verify the full eviction pipeline: guards, persistence,
+ * cleanup, and consolidation cooldown removal.
  */
 import { describe, test, expect, beforeEach } from "bun:test";
 import {
@@ -31,7 +27,7 @@ import {
   distillLimiter,
   curatorLimiter,
 } from "@loreai/core";
-import { startIdleScheduler } from "../src/idle";
+import { startIdleScheduler, evictIdleSessions } from "../src/idle";
 import { loadConfig } from "../src/config";
 import type { GatewayConfig } from "../src/config";
 import type { SessionState } from "../src/translate/types";
@@ -78,6 +74,8 @@ function makeSessionState(overrides?: Partial<SessionState>): SessionState {
   };
 }
 
+const EMPTY_SET = new Set<string>();
+
 // ---------------------------------------------------------------------------
 // Setup
 // ---------------------------------------------------------------------------
@@ -106,7 +104,6 @@ describe("session cleanup helpers", () => {
 
   test("evictGradientSession does not throw for unknown sessions", () => {
     expect(inspectSessionState("grad-evict-sess")).toBeNull();
-    // Should not throw
     evictGradientSession("grad-evict-sess");
     expect(inspectSessionState("grad-evict-sess")).toBeNull();
   });
@@ -139,12 +136,11 @@ describe("sessionEvictionTimeoutSeconds config", () => {
 });
 
 // ---------------------------------------------------------------------------
-// startIdleScheduler eviction — integration tests
+// evictIdleSessions — integration tests (no timers needed)
 // ---------------------------------------------------------------------------
 
-describe("idle scheduler eviction", () => {
-  test("evicts sessions past the eviction timeout via onEvict callback", () => {
-    const evicted: string[] = [];
+describe("evictIdleSessions", () => {
+  test("evicts sessions past the eviction timeout", () => {
     const sessions = new Map<string, SessionState>();
     sessions.set("idle-sess", makeSessionState({
       sessionID: "idle-sess",
@@ -156,96 +152,215 @@ describe("idle scheduler eviction", () => {
     }));
 
     const config = makeConfig({ sessionEvictionTimeoutSeconds: 1800 });
+    const evicted = evictIdleSessions(config, sessions, EMPTY_SET, EMPTY_SET, Date.now());
 
-    // The eviction logic runs inside the 30s setInterval. We can't easily
-    // trigger it in a unit test, but we CAN verify the timeout arithmetic
-    // and callback type are correct:
-    const evictionTimeoutMs = config.sessionEvictionTimeoutSeconds * 1000;
-
-    // idle-sess: 33min idle > 30min timeout → should be evicted
-    const idleState = sessions.get("idle-sess")!;
-    expect(Date.now() - idleState.lastRequestTime).toBeGreaterThan(evictionTimeoutMs);
-
-    // active-sess: 5s idle < 30min timeout → should NOT be evicted
-    const activeState = sessions.get("active-sess")!;
-    expect(Date.now() - activeState.lastRequestTime).toBeLessThan(evictionTimeoutMs);
-
-    // Verify startIdleScheduler accepts the callback and returns a cleanup fn
-    const stop = startIdleScheduler(
-      config,
-      sessions,
-      async () => {},
-      (sid) => { evicted.push(sid); },
-    );
-    stop();
-    expect(typeof stop).toBe("function");
+    expect(evicted).toBe(1);
+    expect(sessions.has("idle-sess")).toBe(false);
+    expect(sessions.has("active-sess")).toBe(true);
   });
 
-  test("sub-agent sessions use shorter eviction timeout (5 min)", () => {
+  test("calls onEvict callback for each evicted session", () => {
+    const sessions = new Map<string, SessionState>();
+    sessions.set("sess-a", makeSessionState({
+      sessionID: "sess-a",
+      lastRequestTime: Date.now() - 2_000_000,
+    }));
+    sessions.set("sess-b", makeSessionState({
+      sessionID: "sess-b",
+      lastRequestTime: Date.now() - 2_000_000,
+    }));
+
+    const evictedIds: string[] = [];
     const config = makeConfig({ sessionEvictionTimeoutSeconds: 1800 });
-    const evictionTimeoutMs = config.sessionEvictionTimeoutSeconds * 1000;
-    const subagentEvictionTimeoutMs = Math.min(evictionTimeoutMs, 5 * 60 * 1000);
+    const evicted = evictIdleSessions(
+      config, sessions, EMPTY_SET, EMPTY_SET, Date.now(),
+      (sid) => { evictedIds.push(sid); },
+    );
 
-    // Sub-agent at 6min > 5min sub-agent timeout → should be evicted
-    const subagentAge = 6 * 60 * 1000;
-    expect(subagentAge).toBeGreaterThan(subagentEvictionTimeoutMs);
-
-    // But 6min < 30min regular timeout → regular session should NOT be evicted
-    expect(subagentAge).toBeLessThan(evictionTimeoutMs);
+    expect(evicted).toBe(2);
+    expect(evictedIds).toContain("sess-a");
+    expect(evictedIds).toContain("sess-b");
+    expect(sessions.size).toBe(0);
   });
 
-  test("sub-agent timeout is capped by configurable timeout when lower", () => {
-    // If user sets eviction to 2 min, sub-agents should use 2 min (not 5 min)
+  test("cleans up auth credentials on eviction", () => {
+    setSessionAuth("auth-evict", { scheme: "bearer", value: "tok-abc" });
+    expect(getSessionAuth("auth-evict")).not.toBeNull();
+
+    const sessions = new Map<string, SessionState>();
+    sessions.set("auth-evict", makeSessionState({
+      sessionID: "auth-evict",
+      lastRequestTime: Date.now() - 2_000_000,
+    }));
+
+    const config = makeConfig({ sessionEvictionTimeoutSeconds: 1800 });
+    evictIdleSessions(config, sessions, EMPTY_SET, EMPTY_SET, Date.now());
+
+    expect(getSessionAuth("auth-evict")).toBeNull();
+    expect(sessions.has("auth-evict")).toBe(false);
+  });
+
+  test("cleans up session-limiter instances on eviction", () => {
+    // Create limiter instances for the session
+    const distillOriginal = distillLimiter.get("limiter-evict");
+    const curatorOriginal = curatorLimiter.get("limiter-evict");
+
+    const sessions = new Map<string, SessionState>();
+    sessions.set("limiter-evict", makeSessionState({
+      sessionID: "limiter-evict",
+      lastRequestTime: Date.now() - 2_000_000,
+    }));
+
+    const config = makeConfig({ sessionEvictionTimeoutSeconds: 1800 });
+    evictIdleSessions(config, sessions, EMPTY_SET, EMPTY_SET, Date.now());
+
+    // After eviction, .get() should return a new (different) instance
+    expect(distillLimiter.get("limiter-evict")).not.toBe(distillOriginal);
+    expect(curatorLimiter.get("limiter-evict")).not.toBe(curatorOriginal);
+  });
+
+  test("sub-agent sessions evict after 5 minutes", () => {
+    const sessions = new Map<string, SessionState>();
+    sessions.set("subagent-old", makeSessionState({
+      sessionID: "subagent-old",
+      isSubagent: true,
+      lastRequestTime: Date.now() - 6 * 60 * 1000, // 6 min ago
+    }));
+    sessions.set("subagent-recent", makeSessionState({
+      sessionID: "subagent-recent",
+      isSubagent: true,
+      lastRequestTime: Date.now() - 3 * 60 * 1000, // 3 min ago
+    }));
+    sessions.set("regular-6min", makeSessionState({
+      sessionID: "regular-6min",
+      lastRequestTime: Date.now() - 6 * 60 * 1000, // 6 min ago — NOT evicted (< 30min)
+    }));
+
+    const config = makeConfig({ sessionEvictionTimeoutSeconds: 1800 });
+    const evicted = evictIdleSessions(config, sessions, EMPTY_SET, EMPTY_SET, Date.now());
+
+    expect(evicted).toBe(1);
+    expect(sessions.has("subagent-old")).toBe(false);    // 6min > 5min → evicted
+    expect(sessions.has("subagent-recent")).toBe(true);   // 3min < 5min → kept
+    expect(sessions.has("regular-6min")).toBe(true);       // 6min < 30min → kept
+  });
+
+  test("sub-agent timeout capped by configurable timeout when lower", () => {
+    const sessions = new Map<string, SessionState>();
+    sessions.set("subagent", makeSessionState({
+      sessionID: "subagent",
+      isSubagent: true,
+      lastRequestTime: Date.now() - 3 * 60 * 1000, // 3 min ago
+    }));
+
+    // Config timeout is 2 min — lower than the 5 min sub-agent constant
     const config = makeConfig({ sessionEvictionTimeoutSeconds: 120 });
-    const evictionTimeoutMs = config.sessionEvictionTimeoutSeconds * 1000;
-    const subagentEvictionTimeoutMs = Math.min(evictionTimeoutMs, 5 * 60 * 1000);
+    const evicted = evictIdleSessions(config, sessions, EMPTY_SET, EMPTY_SET, Date.now());
 
-    expect(subagentEvictionTimeoutMs).toBe(120 * 1000); // 2 min, not 5 min
+    // 3 min > 2 min → evicted (Math.min picks the config value)
+    expect(evicted).toBe(1);
+    expect(sessions.has("subagent")).toBe(false);
   });
 
-  test("eviction disabled when timeout is 0", () => {
-    const config = makeConfig({ sessionEvictionTimeoutSeconds: 0 });
-
+  test("does not evict when timeout is 0 (disabled)", () => {
     const sessions = new Map<string, SessionState>();
     sessions.set("old-sess", makeSessionState({
       sessionID: "old-sess",
-      lastRequestTime: Date.now() - 999_999_999, // very old
+      lastRequestTime: Date.now() - 999_999_999,
     }));
 
-    const evicted: string[] = [];
-    const stop = startIdleScheduler(
-      config,
-      sessions,
-      async () => {},
-      (sid) => { evicted.push(sid); },
-    );
-    stop();
+    const config = makeConfig({ sessionEvictionTimeoutSeconds: 0 });
+    const evicted = evictIdleSessions(config, sessions, EMPTY_SET, EMPTY_SET, Date.now());
 
-    // The evictionTimeoutMs is 0, so the `break` guard fires immediately.
-    // Verify the guard logic: 0 <= 0 is true → loop breaks without evicting.
-    expect(config.sessionEvictionTimeoutSeconds * 1000).toBeLessThanOrEqual(0);
+    expect(evicted).toBe(0);
+    expect(sessions.has("old-sess")).toBe(true);
   });
 
-  test("accepts startIdleScheduler without eviction callback", () => {
+  test("does not evict sessions with in-flight idle work", () => {
+    const sessions = new Map<string, SessionState>();
+    sessions.set("busy-sess", makeSessionState({
+      sessionID: "busy-sess",
+      lastRequestTime: Date.now() - 2_000_000,
+    }));
+
+    const inProgress = new Set(["busy-sess"]);
+    const config = makeConfig({ sessionEvictionTimeoutSeconds: 1800 });
+    const evicted = evictIdleSessions(config, sessions, inProgress, EMPTY_SET, Date.now());
+
+    expect(evicted).toBe(0);
+    expect(sessions.has("busy-sess")).toBe(true);
+  });
+
+  test("does not evict sessions with in-flight warmup", () => {
+    const sessions = new Map<string, SessionState>();
+    sessions.set("warming-sess", makeSessionState({
+      sessionID: "warming-sess",
+      lastRequestTime: Date.now() - 2_000_000,
+    }));
+
+    const warmupInProgress = new Set(["warming-sess"]);
+    const config = makeConfig({ sessionEvictionTimeoutSeconds: 1800 });
+    const evicted = evictIdleSessions(config, sessions, EMPTY_SET, warmupInProgress, Date.now());
+
+    expect(evicted).toBe(0);
+    expect(sessions.has("warming-sess")).toBe(true);
+  });
+
+  test("does not evict sessions still executing tools", () => {
+    const sessions = new Map<string, SessionState>();
+    sessions.set("tool-sess", makeSessionState({
+      sessionID: "tool-sess",
+      lastRequestTime: Date.now() - 2_000_000,
+      lastStopReason: "tool_use",
+    }));
+
+    const config = makeConfig({ sessionEvictionTimeoutSeconds: 1800 });
+    const evicted = evictIdleSessions(config, sessions, EMPTY_SET, EMPTY_SET, Date.now());
+
+    expect(evicted).toBe(0);
+    expect(sessions.has("tool-sess")).toBe(true);
+  });
+
+  test("returns count of evicted sessions", () => {
+    const sessions = new Map<string, SessionState>();
+    for (let i = 0; i < 5; i++) {
+      sessions.set(`sess-${i}`, makeSessionState({
+        sessionID: `sess-${i}`,
+        lastRequestTime: Date.now() - 2_000_000,
+      }));
+    }
+    sessions.set("active", makeSessionState({
+      sessionID: "active",
+      lastRequestTime: Date.now(),
+    }));
+
+    const config = makeConfig({ sessionEvictionTimeoutSeconds: 1800 });
+    const evicted = evictIdleSessions(config, sessions, EMPTY_SET, EMPTY_SET, Date.now());
+
+    expect(evicted).toBe(5);
+    expect(sessions.size).toBe(1);
+    expect(sessions.has("active")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// startIdleScheduler — compatibility tests
+// ---------------------------------------------------------------------------
+
+describe("startIdleScheduler", () => {
+  test("accepts optional onEvict callback", () => {
     const sessions = new Map<string, SessionState>();
     const config = makeConfig();
-
-    // 4th param is optional — should not throw
     const stop = startIdleScheduler(config, sessions, async () => {});
     stop();
   });
 
-  test("onEvict callback signature matches idle scheduler", () => {
+  test("accepts onEvict callback without error", () => {
     const sessions = new Map<string, SessionState>();
     const config = makeConfig();
-    const evictCalled: string[] = [];
-
-    // Verify the callback type is compatible
     const stop = startIdleScheduler(
-      config,
-      sessions,
-      async () => {},
-      (sessionID: string) => { evictCalled.push(sessionID); },
+      config, sessions, async () => {},
+      (_sid) => {},
     );
     stop();
     expect(typeof stop).toBe("function");

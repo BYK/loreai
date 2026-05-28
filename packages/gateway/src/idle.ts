@@ -134,77 +134,7 @@ export function startIdleScheduler(
         .finally(() => inProgress.delete(sessionID));
     }
 
-    // --- Session eviction — free memory for long-idle sessions ---
-    // All important state is persisted to SQLite; eviction only releases
-    // in-memory caches (gradient state, prefix cache, recall store, LTM
-    // caches, cost tracking, auth credentials). If a session resumes,
-    // getOrCreateSession() in pipeline.ts reloads persisted state from DB.
-    const evictionTimeoutMs = config.sessionEvictionTimeoutSeconds * 1000;
-    for (const [sessionID, state] of sessions) {
-      if (evictionTimeoutMs <= 0) break; // eviction disabled
-      if (inProgress.has(sessionID)) continue; // don't evict during active idle work
-      if (warmupInProgress.has(sessionID)) continue;
-      // Sub-agent sessions are ephemeral — evict faster
-      const timeout = state.isSubagent
-        ? Math.min(evictionTimeoutMs, SUBAGENT_EVICTION_MS)
-        : evictionTimeoutMs;
-      if (now - state.lastRequestTime < timeout) continue;
-      // Don't evict sessions still executing tools — they're active
-      if (state.lastStopReason === "tool_use") continue;
-
-      log.info(
-        `evicting idle session ${sessionID.slice(0, 16)}` +
-        `${state.isSubagent ? " (subagent)" : ""}` +
-        ` (idle ${Math.round((now - state.lastRequestTime) / 60_000)}m)`,
-      );
-
-      // Persist final cost snapshot before eviction
-      try {
-        const costs = getSessionCosts(sessionID);
-        if (costs && costs.conversation.turns > 0) {
-          saveSessionCosts(sessionID, {
-            conversationCost: costs.conversation.cost,
-            workerCost: totalWorkerCost(costs),
-            conversationTurns: costs.conversation.turns,
-            cacheReadTokens: costs.conversation.cacheReadTokens,
-            cacheWriteTokens: costs.conversation.cacheWriteTokens,
-            warmupSavings: costs.counterfactual.warmupSavings,
-            warmupHits: costs.counterfactual.warmupHits,
-            ttlSavings: costs.counterfactual.ttlSavings,
-            ttlHits: costs.counterfactual.ttlHits,
-            batchSavings: costs.batchSavings,
-            avoidedCompactions: costs.counterfactual.avoidedCompactions,
-            avoidedCompactionCost: costs.counterfactual.avoidedCompactionCost,
-          });
-        }
-      } catch (e) {
-        log.warn(`session eviction: cost persistence failed for ${sessionID.slice(0, 16)}:`, e);
-      }
-
-      // Persist gradient state before eviction
-      try {
-        saveGradientState(sessionID);
-      } catch (e) {
-        log.warn(`session eviction: gradient persistence failed for ${sessionID.slice(0, 16)}:`, e);
-      }
-
-      // Clean up all per-session in-memory state across modules
-      evictGradientSession(sessionID);
-      curator.resetCurationTracker(sessionID);
-      deleteSessionCosts(sessionID);
-      deleteSessionAuth(sessionID);
-      clearAuthStale(sessionID);
-      deleteBillingPrefix(sessionID);
-      clearWarmupAuthDisabled(sessionID);
-      distillLimiter.evict(sessionID);
-      curatorLimiter.evict(sessionID);
-
-      // Clean up pipeline-level satellite Maps via callback
-      onEvict?.(sessionID);
-
-      // Remove from the main sessions map last
-      sessions.delete(sessionID);
-    }
+    evictIdleSessions(config, sessions, inProgress, warmupInProgress, now, onEvict);
 
     // --- Cache warming (separate from idle work — fires before TTL expiry) ---
     if (isCircuitBreakerTripped()) return;
@@ -299,6 +229,117 @@ export function startIdleScheduler(
   }, POLL_INTERVAL_MS);
 
   return () => clearInterval(timer);
+}
+
+// ---------------------------------------------------------------------------
+// evictIdleSessions — extracted for testability
+// ---------------------------------------------------------------------------
+
+/**
+ * Evict sessions that have been idle beyond the configured eviction timeout.
+ *
+ * All important state is persisted to SQLite before eviction; only in-memory
+ * caches are freed (gradient state, prefix cache, recall store, LTM caches,
+ * cost tracking, auth credentials). If a session resumes, getOrCreateSession()
+ * in pipeline.ts reloads persisted state from DB.
+ *
+ * Extracted from the scheduler interval so it can be tested directly without
+ * waiting for a 30s timer tick.
+ *
+ * @returns Number of sessions evicted.
+ */
+export function evictIdleSessions(
+  config: GatewayConfig,
+  sessions: Map<string, SessionState>,
+  inProgress: ReadonlySet<string>,
+  warmupInProgress: ReadonlySet<string>,
+  now: number,
+  onEvict?: (sessionID: string) => void,
+): number {
+  const evictionTimeoutMs = config.sessionEvictionTimeoutSeconds * 1000;
+  let evicted = 0;
+
+  for (const [sessionID, state] of sessions) {
+    if (evictionTimeoutMs <= 0) break; // eviction disabled
+    if (inProgress.has(sessionID)) continue; // don't evict during active idle work
+    if (warmupInProgress.has(sessionID)) continue;
+    // Sub-agent sessions are ephemeral — evict faster
+    const timeout = state.isSubagent
+      ? Math.min(evictionTimeoutMs, SUBAGENT_EVICTION_MS)
+      : evictionTimeoutMs;
+    if (now - state.lastRequestTime < timeout) continue;
+    // Don't evict sessions still executing tools — they're active
+    if (state.lastStopReason === "tool_use") continue;
+
+    log.info(
+      `evicting idle session ${sessionID.slice(0, 16)}` +
+      `${state.isSubagent ? " (subagent)" : ""}` +
+      ` (idle ${Math.round((now - state.lastRequestTime) / 60_000)}m)`,
+    );
+
+    // Persist final cost snapshot before eviction
+    try {
+      const costs = getSessionCosts(sessionID);
+      if (costs && costs.conversation.turns > 0) {
+        saveSessionCosts(sessionID, {
+          conversationCost: costs.conversation.cost,
+          workerCost: totalWorkerCost(costs),
+          conversationTurns: costs.conversation.turns,
+          cacheReadTokens: costs.conversation.cacheReadTokens,
+          cacheWriteTokens: costs.conversation.cacheWriteTokens,
+          warmupSavings: costs.counterfactual.warmupSavings,
+          warmupHits: costs.counterfactual.warmupHits,
+          ttlSavings: costs.counterfactual.ttlSavings,
+          ttlHits: costs.counterfactual.ttlHits,
+          batchSavings: costs.batchSavings,
+          avoidedCompactions: costs.counterfactual.avoidedCompactions,
+          avoidedCompactionCost: costs.counterfactual.avoidedCompactionCost,
+        });
+      }
+    } catch (e) {
+      log.warn(`session eviction: cost persistence failed for ${sessionID.slice(0, 16)}:`, e);
+    }
+
+    // Persist gradient state before eviction
+    try {
+      saveGradientState(sessionID);
+    } catch (e) {
+      log.warn(`session eviction: gradient persistence failed for ${sessionID.slice(0, 16)}:`, e);
+    }
+
+    // Clean up all per-session in-memory state across modules
+    evictGradientSession(sessionID);
+    curator.resetCurationTracker(sessionID);
+    deleteSessionCosts(sessionID);
+    deleteSessionAuth(sessionID);
+    clearAuthStale(sessionID);
+    deleteBillingPrefix(sessionID);
+    clearWarmupAuthDisabled(sessionID);
+    distillLimiter.evict(sessionID);
+    curatorLimiter.evict(sessionID);
+
+    // Clean up pipeline-level satellite Maps via callback
+    onEvict?.(sessionID);
+
+    // Remove from the main sessions map last
+    sessions.delete(sessionID);
+
+    // Clean up project-scoped cooldowns if no other session uses this project
+    let projectStillActive = false;
+    for (const [, s] of sessions) {
+      if (s.projectPath === state.projectPath) {
+        projectStillActive = true;
+        break;
+      }
+    }
+    if (!projectStillActive) {
+      consolidationCooldown.delete(state.projectPath);
+    }
+
+    evicted++;
+  }
+
+  return evicted;
 }
 
 // ---------------------------------------------------------------------------
