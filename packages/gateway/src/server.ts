@@ -22,7 +22,7 @@ import {
   buildOpenAIResponsesResponse,
 } from "./translate/openai-responses";
 import { translateAnthropicStreamToResponses } from "./stream/openai-responses";
-import { handleRequest, handleCompactEndpoint } from "./pipeline";
+import { handleRequest, handleCompactEndpoint, accumulateResponsesNonStreamJSON } from "./pipeline";
 
 // ---------------------------------------------------------------------------
 // Version — best-effort from package.json, falls back gracefully
@@ -245,14 +245,33 @@ async function handleOpenAIResponses(
 
   const contentType = pipelineResp.headers.get("content-type") ?? "";
   if (contentType.includes("text/event-stream")) {
-    // True streaming: translate Anthropic SSE → Responses API SSE incrementally
+    // Pipeline returned SSE. This can be either:
+    //  a) Anthropic SSE from normal conversation turns → needs translation
+    //  b) Raw OpenAI Responses SSE from passthrough → forward as-is
+    // Detect by peeking at the x-lore-upstream-protocol header (set by
+    // passthrough) or by checking the original request protocol.
+    if (gatewayReq.protocol === "openai-responses") {
+      // For passthrough: the SSE is already in Responses API format,
+      // just forward it directly. For normal turns: the pipeline converts
+      // openai-responses to non-streaming internally (accumulateResponsesSSEStream),
+      // so we never get Anthropic SSE for openai-responses protocol.
+      return withCors(pipelineResp);
+    }
+    // Anthropic SSE → translate to Responses API SSE
     return withCors(translateAnthropicStreamToResponses(pipelineResp));
   }
 
-  // Non-streaming: translate Anthropic wire JSON → GatewayResponse → Responses API
-  const respBody = await pipelineResp.json();
-  const gatewayResp = parseAnthropicResponseJSON(respBody as Record<string, unknown>);
-  return withCors(buildOpenAIResponsesResponse(gatewayResp, false));
+  // Non-streaming: translate pipeline JSON → GatewayResponse → Responses API.
+  // The pipeline may return either Anthropic-format JSON (normal conversation turns
+  // go through accumulate→nonStreamHttpResponse) or raw OpenAI Responses API JSON
+  // (meta/passthrough requests forward the upstream response as-is). Detect which
+  // format we received and parse accordingly.
+  const respBody = await pipelineResp.json() as Record<string, unknown>;
+  const isRawResponsesFormat = respBody.object === "response" && Array.isArray(respBody.output);
+  const gatewayResp = isRawResponsesFormat
+    ? accumulateResponsesNonStreamJSON(respBody)
+    : parseAnthropicResponseJSON(respBody);
+  return withCors(buildOpenAIResponsesResponse(gatewayResp, gatewayReq.stream));
 }
 
 // ---------------------------------------------------------------------------

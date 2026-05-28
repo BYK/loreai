@@ -1871,7 +1871,7 @@ function accumulateOpenAINonStreamJSON(json: Record<string, unknown>): GatewayRe
   };
 }
 
-function accumulateResponsesNonStreamJSON(json: Record<string, unknown>): GatewayResponse {
+export function accumulateResponsesNonStreamJSON(json: Record<string, unknown>): GatewayResponse {
   const content: GatewayContentBlock[] = [];
   const output = json.output as Array<Record<string, unknown>> | undefined;
 
