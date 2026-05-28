@@ -444,6 +444,15 @@ async function runInner(input: {
     content: e.content,
   }));
 
+  // Ensure the self entity exists (created from git config / .lore.json user section).
+  // Must run before forProject() so the self entity is included in the entity context
+  // and the curator can anchor "I"/"me" references and detect relationships to the user.
+  try {
+    entities.ensureSelfEntity(input.projectPath);
+  } catch (err) {
+    log.warn("self entity creation failed (non-fatal):", err);
+  }
+
   // Load known entities for grounding context
   let entityContext = "";
   try {
