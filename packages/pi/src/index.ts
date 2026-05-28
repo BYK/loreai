@@ -41,11 +41,12 @@ type SessionBeforeCompactResult = {
 };
 
 /**
- * Providers whose wire protocol the Lore gateway can proxy.
+ * Providers whose wire protocol the Lore gateway can proxy, split by SDK
+ * protocol so we can set the correct `baseUrl` for each group.
  *
- * - anthropic-messages API → gateway POST /v1/messages
- * - openai-completions API → gateway POST /v1/chat/completions
- * - openai-responses API   → gateway POST /v1/responses
+ * - Anthropic SDK appends `/v1/messages` to baseURL → pass gateway root.
+ * - OpenAI SDK appends `/chat/completions` or `/responses` to baseURL
+ *   and expects it to already include `/v1` → pass `${gateway}/v1`.
  *
  * Providers using other protocols (Google SDK, AWS Bedrock SDK,
  * Mistral conversations) are not redirected.
@@ -55,11 +56,16 @@ type SessionBeforeCompactResult = {
  * where to forward requests. Cloud providers are routed automatically by
  * model name prefix.
  */
-const GATEWAY_PROVIDERS = [
-  // anthropic-messages API
+
+/** Anthropic-messages API → gateway POST /v1/messages */
+const ANTHROPIC_PROVIDERS = [
   "anthropic",
   "fireworks",
   "github-copilot",
+] as const;
+
+/** OpenAI-completions / OpenAI-responses API → gateway POST /v1/chat/completions or /v1/responses */
+const OPENAI_PROVIDERS = [
   // openai-completions API
   "deepseek",
   "xai",
@@ -84,7 +90,10 @@ const GATEWAY_PROVIDERS = [
   "tgi",
   "tabbyml",
   "litellm",
-];
+] as const;
+
+/** All providers that can be routed through the gateway. */
+const GATEWAY_PROVIDERS: readonly string[] = [...ANTHROPIC_PROVIDERS, ...OPENAI_PROVIDERS];
 
 /** Default ports to probe when looking for a running gateway (must match gateway defaults). */
 const KNOWN_GATEWAY_PORTS = [3207, 5673];
@@ -253,6 +262,14 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
     const remote = getGitRemote(projectPath);
     if (remote) baseHeaders["x-lore-git-remote"] = remote;
 
+    // Anthropic SDK appends `/v1/messages` to baseURL — pass gateway root.
+    const anthropicBase = gatewayBase;
+    // OpenAI SDK expects baseURL to already include `/v1` — it only appends
+    // `/chat/completions` or `/responses`. Matches the pattern in agents.ts.
+    const openaiBase = `${gatewayBase}/v1`;
+
+    const anthropicSet: ReadonlySet<string> = new Set(ANTHROPIC_PROVIDERS);
+
     for (const provider of GATEWAY_PROVIDERS) {
       const headers = { ...baseHeaders };
       // For local/custom providers, inject the original upstream URL so the
@@ -263,7 +280,8 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
       if (upstream) {
         headers["x-lore-upstream-url"] = upstream;
       }
-      pi.registerProvider(provider, { baseUrl: gatewayBase, headers });
+      const baseUrl = anthropicSet.has(provider) ? anthropicBase : openaiBase;
+      pi.registerProvider(provider, { baseUrl, headers });
     }
   }
 
