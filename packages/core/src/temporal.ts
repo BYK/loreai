@@ -161,6 +161,83 @@ export function bySession(
     .all(pid, sessionID) as TemporalMessage[];
 }
 
+/** Per-session aggregate used by historical cost estimation. */
+export type SessionTokenAggregate = {
+  session_id: string;
+  /** Sum of `tokens` across all messages in the session. */
+  total_tokens: number;
+  /** Metadata of the earliest assistant message (for model detection), or null. */
+  first_assistant_metadata: string | null;
+};
+
+/**
+ * Aggregate per-session token sums and first-assistant metadata for a project
+ * in two grouped queries (instead of one `SELECT *` per session).
+ *
+ * Optionally restricts to sessions whose messages were created on/after
+ * `sinceMs` (scope-limiting for historical cost scans). Note the token sum is
+ * computed over the same window, which matches the historical scan's intent of
+ * only attributing recent activity.
+ */
+export function aggregateTokensBySession(
+  projectPath: string,
+  opts?: { sinceMs?: number },
+): Map<string, SessionTokenAggregate> {
+  const pid = ensureProject(projectPath);
+  const sinceMs = opts?.sinceMs ?? 0;
+
+  const result = new Map<string, SessionTokenAggregate>();
+
+  // 1. Token sums per session.
+  const tokenRows = db()
+    .query(
+      `SELECT session_id, SUM(tokens) as total_tokens
+       FROM temporal_messages
+       WHERE project_id = ? AND created_at >= ?
+       GROUP BY session_id`,
+    )
+    .all(pid, sinceMs) as Array<{ session_id: string; total_tokens: number }>;
+  for (const row of tokenRows) {
+    result.set(row.session_id, {
+      session_id: row.session_id,
+      total_tokens: row.total_tokens ?? 0,
+      first_assistant_metadata: null,
+    });
+  }
+
+  // 2. Earliest assistant message metadata per session (for model detection).
+  //    MIN(created_at) groups to the first assistant message; metadata is the
+  //    value at that row via a correlated min — but SQLite's bare aggregate
+  //    pairs columns from arbitrary rows, so use a window-free subquery.
+  const metaRows = db()
+    .query(
+      `SELECT t.session_id, t.metadata
+       FROM temporal_messages t
+       WHERE t.project_id = ? AND t.role = 'assistant' AND t.created_at >= ?
+         AND t.created_at = (
+           SELECT MIN(t2.created_at) FROM temporal_messages t2
+           WHERE t2.project_id = t.project_id AND t2.session_id = t.session_id
+             AND t2.role = 'assistant' AND t2.created_at >= ?
+         )
+       GROUP BY t.session_id`,
+    )
+    .all(pid, sinceMs, sinceMs) as Array<{ session_id: string; metadata: string }>;
+  for (const row of metaRows) {
+    const existing = result.get(row.session_id);
+    if (existing) {
+      existing.first_assistant_metadata = row.metadata;
+    } else {
+      result.set(row.session_id, {
+        session_id: row.session_id,
+        total_tokens: 0,
+        first_assistant_metadata: row.metadata,
+      });
+    }
+  }
+
+  return result;
+}
+
 export function markDistilled(ids: string[]) {
   if (!ids.length) return;
   const placeholders = ids.map(() => "?").join(",");

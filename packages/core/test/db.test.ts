@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { db, close, ensureProject, projectId, mergeProjectInternal, loadForceMinLayer, saveForceMinLayer, getMeta, setMeta, getInstanceId, saveSessionCosts, loadSessionCosts, loadAllSessionCosts, getLastImportAt, setLastImportAt, saveSessionTracking, loadSessionTracking, loadHeaderSessionIndex, getKV, setKV } from "../src/db";
+import { db, close, ensureProject, projectId, mergeProjectInternal, loadForceMinLayer, saveForceMinLayer, getMeta, setMeta, getInstanceId, saveSessionCosts, loadSessionCosts, loadAllSessionCosts, getLastImportAt, setLastImportAt, saveSessionTracking, loadSessionTracking, loadHeaderSessionIndex, getKV, setKV, addDailyCost, getDailyCostTotals, getDailyCostForDay } from "../src/db";
 
 
 describe("db", () => {
@@ -23,7 +23,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(29);
+    expect(row.version).toBe(30);
   });
 
   test("distillation_fts virtual table exists", () => {
@@ -855,6 +855,76 @@ describe("db", () => {
       // /testing/... and /test (no trailing slash) should NOT be rejected
       expect(() => ensureProject("/testing/something")).not.toThrow();
       expect(() => ensureProject("/test")).not.toThrow();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Migration v30: per-day cost ledger (daily_costs)
+  // -------------------------------------------------------------------------
+
+  describe("daily_costs ledger (v30)", () => {
+    test("daily_costs table exists", () => {
+      const tables = db()
+        .query("SELECT name FROM sqlite_master WHERE type='table' AND name='daily_costs'")
+        .all() as Array<{ name: string }>;
+      expect(tables.length).toBe(1);
+    });
+
+    test("addDailyCost accumulates per (day, bucket)", () => {
+      const day = "2099-01-01";
+      addDailyCost(day, "conversation", 1.5);
+      addDailyCost(day, "conversation", 0.5);
+      addDailyCost(day, "worker", 0.25);
+      addDailyCost(day, "warmup", 0.1);
+      // Total across all buckets for the day = 1.5 + 0.5 + 0.25 + 0.1
+      expect(getDailyCostForDay(day)).toBeCloseTo(2.35, 6);
+    });
+
+    test("addDailyCost ignores zero, negative, and non-finite costs", () => {
+      const day = "2099-01-02";
+      addDailyCost(day, "conversation", 0);
+      addDailyCost(day, "conversation", -1.5);
+      addDailyCost(day, "conversation", Number.NaN);
+      addDailyCost(day, "conversation", Number.POSITIVE_INFINITY);
+      expect(getDailyCostForDay(day)).toBe(0);
+    });
+
+    test("getDailyCostTotals groups by day for days >= sinceDay", () => {
+      addDailyCost("2099-02-01", "conversation", 1.0);
+      addDailyCost("2099-02-02", "conversation", 2.0);
+      addDailyCost("2099-02-02", "worker", 0.5);
+      addDailyCost("2099-02-03", "warmup", 0.25);
+
+      const totals = getDailyCostTotals("2099-02-02");
+      // 2099-02-01 is before the cutoff — excluded.
+      expect(totals.has("2099-02-01")).toBe(false);
+      expect(totals.get("2099-02-02")).toBeCloseTo(2.5, 6);
+      expect(totals.get("2099-02-03")).toBeCloseTo(0.25, 6);
+    });
+
+    test("cost is attributed to the actual day, not dumped onto one date", () => {
+      // Simulate a multi-day session: spend split across two UTC days.
+      addDailyCost("2099-03-01", "conversation", 3.0);
+      addDailyCost("2099-03-02", "conversation", 1.0);
+      const totals = getDailyCostTotals("2099-03-01");
+      expect(totals.get("2099-03-01")).toBeCloseTo(3.0, 6);
+      expect(totals.get("2099-03-02")).toBeCloseTo(1.0, 6);
+    });
+
+    test("recoverMissingObjects recreates daily_costs when missing", () => {
+      const d = db();
+      d.exec("DROP TABLE IF EXISTS daily_costs");
+      expect(
+        d.query("SELECT name FROM sqlite_master WHERE type='table' AND name='daily_costs'").get(),
+      ).toBeNull();
+
+      close();
+      const fresh = db();
+      const after = fresh
+        .query("SELECT name FROM sqlite_master WHERE type='table' AND name='daily_costs'")
+        .get() as { name: string } | null;
+      expect(after).not.toBeNull();
+      expect(after!.name).toBe("daily_costs");
     });
   });
 });

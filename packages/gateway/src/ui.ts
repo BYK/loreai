@@ -2200,7 +2200,7 @@ function pageCosts(): string {
   </div>`;
 
   // --- Daily cost trend chart ---
-  const dailyCosts = computeDailyCosts(14, historical);
+  const dailyCosts = computeDailyCosts(14);
   const maxDayCost = Math.max(...dailyCosts.map((d) => d.cost), 0.001);
   if (dailyCosts.some((d) => d.cost > 0)) {
     body += `<h3>Daily Cost Trend (last 14 days)</h3>`;
@@ -2209,7 +2209,7 @@ function pageCosts(): string {
     for (const day of dailyCosts) {
       const barPx = Math.max(2, (day.cost / maxDayCost) * barMaxPx);
       const label = day.date.slice(5); // "MM-DD"
-      const tooltip = `${day.date}: ${formatUSD(day.cost)} (${day.sessions} session${day.sessions !== 1 ? "s" : ""})`;
+      const tooltip = `${day.date}: ${formatUSD(day.cost)}`;
       body += `<div class="day-col" title="${esc(tooltip)}">
         <div class="day-bar" style="height:${barPx.toFixed(0)}px"></div>
         <div class="day-label">${esc(label)}</div>

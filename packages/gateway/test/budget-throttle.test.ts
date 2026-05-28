@@ -7,9 +7,14 @@ import {
   estimateRequestCost,
   resetDailyBudgetState,
   recordConversationCost,
+  recordWorkerCost,
+  recordWarmupCost,
+  computeDailyCosts,
+  bootstrapDailySpend,
   clearAllCosts,
   getSessionCosts,
 } from "../src/cost-tracker";
+import { getDailyCostForDay } from "@loreai/core";
 
 describe("budget-throttle", () => {
   beforeEach(() => {
@@ -215,6 +220,62 @@ describe("budget-throttle", () => {
       const { date } = getDailySpend();
       const today = new Date().toISOString().slice(0, 10);
       expect(date).toBe(today);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Per-day cost ledger (daily_costs) — fed by the three record* functions
+  // ---------------------------------------------------------------------------
+  describe("daily cost ledger", () => {
+    const today = new Date().toISOString().slice(0, 10);
+
+    test("recordConversationCost writes to the ledger for today", () => {
+      const before = getDailyCostForDay(today);
+      recordConversationCost("ledger-session", "claude-sonnet-4-20250514", {
+        input_tokens: 50_000,
+        output_tokens: 1_000,
+      });
+      const after = getDailyCostForDay(today);
+      expect(after).toBeGreaterThan(before);
+      // Ledger increment should match the in-memory dailySpend delta.
+      expect(after - before).toBeCloseTo(getDailySpend().spend, 6);
+    });
+
+    test("worker and warmup costs accumulate into the same day", () => {
+      const before = getDailyCostForDay(today);
+      recordWorkerCost("ledger-session", "claude-sonnet-4-20250514", {
+        input_tokens: 10_000,
+        output_tokens: 500,
+      }, "direct", "lore-distill");
+      recordWarmupCost("ledger-session", "claude-sonnet-4-20250514", 20_000, 2_000);
+      const after = getDailyCostForDay(today);
+      expect(after).toBeGreaterThan(before);
+    });
+
+    test("computeDailyCosts reflects ledger totals on today's bucket", () => {
+      recordConversationCost("ledger-session-2", "claude-sonnet-4-20250514", {
+        input_tokens: 80_000,
+        output_tokens: 2_000,
+      });
+      const daily = computeDailyCosts(14);
+      expect(daily.length).toBe(14);
+      // Last bucket is today (UTC), and its cost matches the ledger.
+      const todayBucket = daily[daily.length - 1];
+      expect(todayBucket.date).toBe(today);
+      expect(todayBucket.cost).toBeCloseTo(getDailyCostForDay(today), 6);
+    });
+
+    test("bootstrapDailySpend reads today's spend from the ledger", () => {
+      recordConversationCost("ledger-session-3", "claude-sonnet-4-20250514", {
+        input_tokens: 40_000,
+        output_tokens: 1_000,
+      });
+      const ledgerToday = getDailyCostForDay(today);
+      // Clear in-memory state, then bootstrap — should recover from the ledger.
+      resetDailyBudgetState();
+      expect(getDailySpend().spend).toBe(0);
+      bootstrapDailySpend();
+      expect(getDailySpend().spend).toBeCloseTo(ledgerToday, 6);
     });
   });
 

@@ -12,7 +12,18 @@
 
 import { getModelEntrySync, getWorkerModel } from "./worker-model";
 import { AUTOCOMPACT_THRESHOLD } from "./compaction";
-import { log, data, temporal, loadAllSessionCosts, db, getKV, setKV } from "@loreai/core";
+import {
+  log,
+  data,
+  temporal,
+  loadAllSessionCosts,
+  db,
+  getKV,
+  setKV,
+  addDailyCost,
+  getDailyCostTotals,
+  getDailyCostForDay,
+} from "@loreai/core";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -159,7 +170,14 @@ const sessions = new Map<string, SessionCosts>();
 /** Cached historical estimates (computed once, refreshed on demand). */
 let historicalCache: HistoricalEstimates | null = null;
 let historicalCacheAt = 0;
-const HISTORICAL_CACHE_TTL_MS = 60_000; // 1 minute
+const HISTORICAL_CACHE_TTL_MS = 300_000; // 5 minutes — historical data changes slowly
+
+/**
+ * Only scan sessions with activity in the last N days for historical cost
+ * estimates. Older sessions rarely change; their persisted cost is still
+ * reflected in the per-day ledger and budget bar.
+ */
+const HISTORICAL_SCAN_DAYS = 90;
 
 // ---------------------------------------------------------------------------
 // Daily budget throttle state
@@ -260,22 +278,16 @@ export function bootstrapDailySpend(): void {
   const todayStr = today.toISOString().slice(0, 10);
   dailySpendDate = todayStr;
 
-  // Midnight UTC today as epoch ms
-  const midnightMs = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate());
-
-  // Sum persisted session costs updated today.
-  // Note: conversation_cost and worker_cost are cumulative session totals,
-  // so multi-day sessions may overestimate today's spend. In practice most
-  // sessions don't span midnight boundaries (they idle out).
   try {
-    const row = db()
-      .query(
-        `SELECT COALESCE(SUM(conversation_cost + worker_cost), 0) as total
-         FROM session_state
-         WHERE updated_at >= ?`,
-      )
-      .get(midnightMs) as { total: number } | null;
-    dailySpend = row?.total ?? 0;
+    // Use the per-day ledger — it attributes cost to the exact UTC day,
+    // avoiding the multi-day over-count of cumulative session_state totals.
+    //
+    // When the ledger reads 0 for today (fresh UTC day with no cost yet, or
+    // right after the v30 migration), we accept 0 and let the in-memory
+    // accumulator catch up as costs arrive. The old session_state fallback
+    // used cumulative session totals that could overcount — the very bug this
+    // ledger fixes — so we no longer use it.
+    dailySpend = getDailyCostForDay(todayStr);
   } catch (err) {
     log.error("budget-throttle: failed to bootstrap daily spend from DB", err);
     dailySpend = 0;
@@ -581,6 +593,7 @@ export function recordConversationCost(
   // Daily budget throttle: accumulate spend and update velocity EMA
   maybeResetDay();
   dailySpend += call.total;
+  addDailyCost(dailySpendDate, "conversation", call.total);
   updateCostRate(call.total);
 }
 
@@ -621,6 +634,7 @@ export function recordWorkerCost(
   // Daily budget throttle: accumulate worker spend (no EMA update — workers excluded from velocity)
   maybeResetDay();
   dailySpend += call.total;
+  addDailyCost(dailySpendDate, "worker", call.total);
 }
 
 /**
@@ -649,6 +663,7 @@ export function recordWarmupCost(
   // Daily budget throttle: accumulate warmup spend (no EMA update)
   maybeResetDay();
   dailySpend += warmupTotal;
+  addDailyCost(dailySpendDate, "warmup", warmupTotal);
 }
 
 // ---------------------------------------------------------------------------
@@ -873,7 +888,11 @@ export function costWithoutLore(costs: SessionCosts): number {
 
 /** Delete a session's cost data (cleanup on session expiry). */
 export function deleteSessionCosts(sessionID: string): void {
-  sessions.delete(sessionID);
+  const existed = sessions.delete(sessionID);
+  // The session just moved from "live" to "historical". Invalidate the
+  // historical estimate cache so its persisted snapshot is picked up on the
+  // next Costs page load instead of waiting out the TTL.
+  if (existed) invalidateHistoricalCache();
 }
 
 /** Clear all sessions (for testing). */
@@ -958,6 +977,12 @@ export function computeHistoricalEstimates(): HistoricalEstimates {
   // Load persisted cost snapshots from DB (saved on idle).
   const persistedCosts = loadAllSessionCosts();
 
+  // Scope-limit the scan to recent sessions. Older sessions rarely change and
+  // re-scanning them on every (uncached) load is the dominant cost. Their
+  // persisted snapshots are still reflected in the daily ledger / budget, just
+  // not in this rolling "intelligence" estimate.
+  const scanCutoffMs = Date.now() - HISTORICAL_SCAN_DAYS * 86_400_000;
+
   try {
     const projects = data.listProjects();
 
@@ -967,65 +992,71 @@ export function computeHistoricalEstimates(): HistoricalEstimates {
 
       const projectSessions = data.listSessions(project.path, 500);
 
+      // Batch per-session aggregates for the whole project in a few grouped
+      // queries instead of 2 queries per session (the old N+1 hotspot).
+      const tokenAggs = temporal.aggregateTokensBySession(project.path, {
+        sinceMs: scanCutoffMs,
+      });
+      const distillAggs = data.aggregateDistillationsBySession(project.path, {
+        sinceMs: scanCutoffMs,
+      });
+
       for (const sess of projectSessions) {
+        // Scope-limit: skip sessions with no activity in the scan window.
+        if (sess.last_message_at < scanCutoffMs) continue;
+
         // Skip sessions that are currently tracked live
         if (sessions.has(sess.session_id)) continue;
 
         totals.sessionCount++;
         totals.messageCount += sess.message_count;
 
+        const tokenAgg = tokenAggs.get(sess.session_id);
+        const distillAgg = distillAggs.get(sess.session_id);
+
         // --- Determine model for this session ---
-        // Look at assistant messages' metadata for model info (user messages have "unknown")
-        const messages = temporal.bySession(project.path, sess.session_id);
+        // Use the earliest assistant message's metadata (user messages have
+        // "unknown"). Falls back to the default estimation model.
         let model = DEFAULT_ESTIMATION_MODEL;
-        for (const msg of messages) {
-          const m = extractModelFromMetadata(msg.metadata);
-          if (m) {
-            model = m;
-            break;
-          }
-        }
+        const m = extractModelFromMetadata(tokenAgg?.first_assistant_metadata);
+        if (m) model = m;
 
         // --- 1. Estimate distillation overhead ---
-        // Use worker model pricing — distillations run on the worker, not conversation model
-        const distillations = data.listDistillations(project.path, {
-          sessionId: sess.session_id,
-          limit: 500,
-        });
-        let sessionDistillCost = 0;
-        for (const d of distillations) {
-          // Estimate: input tokens = source message tokens (typically 2-5x output)
-          // We use 3x the output token count as a rough input estimate
-          const estInputTokens = d.token_count * 3;
-          const estOutputTokens = d.token_count;
-          // Use recorded call_type for accurate pricing. Batch API gets 50%
-          // discount. Pre-migration rows (NULL call_type) default to 'direct'
-          // for conservative estimates.
-          const batchMultiplier = d.call_type === "batch" ? 0.5 : 1.0;
-          const callCost =
-            ((estInputTokens / 1_000_000) * workerPricing.input +
-            (estOutputTokens / 1_000_000) * workerPricing.output) * batchMultiplier;
-          sessionDistillCost += callCost;
-        }
-        const sessionBatchCalls = distillations.filter((d) => d.call_type === "batch").length;
-        const sessionDirectCalls = distillations.length - sessionBatchCalls;
+        // Use worker model pricing — distillations run on the worker, not
+        // conversation model. The grouped aggregate gives total token_count
+        // split by call_type, so the batch discount (50%) is applied to the
+        // actual batch token sum — equivalent to the old per-row loop.
+        const totalDistillCalls = distillAgg?.total_calls ?? 0;
+        const sessionBatchCalls = distillAgg?.batch_calls ?? 0;
+        const sessionDirectCalls = totalDistillCalls - sessionBatchCalls;
+        const batchTokens = distillAgg?.batch_tokens ?? 0;
+        const directTokens = (distillAgg?.total_tokens ?? 0) - batchTokens;
+        const perTokenCost = (estOut: number, mult: number) =>
+          ((estOut * 3) / 1_000_000) * workerPricing.input * mult +
+          (estOut / 1_000_000) * workerPricing.output * mult;
+        const sessionDistillCost =
+          perTokenCost(directTokens, 1.0) + perTokenCost(batchTokens, 0.5);
         totals.distillationCost += sessionDistillCost;
-        totals.distillationCalls += distillations.length;
+        totals.distillationCalls += totalDistillCalls;
         totals.distillationBatchCalls += sessionBatchCalls;
         totals.distillationDirectCalls += sessionDirectCalls;
 
-        // --- 2. Simulate shadow context for avoided compactions ---
-        let shadowContext = 0;
+        // --- 2. Approximate avoided compactions from total token sum ---
+        // The old per-message running-context simulation is too expensive for
+        // batched queries. This formula approximates the same count using the
+        // session token total. It overestimates slightly when individual messages
+        // are large relative to the stride (overshoot tokens beyond the threshold
+        // are discarded in the per-message sim but counted by the division).
+        // This is only a fallback — sessions with persisted snapshots (the common
+        // case) use real data from live tracking.
+        const sessionTokens = tokenAgg?.total_tokens ?? 0;
         let avoidedCompactions = 0;
-
-        for (const msg of messages) {
-          // Each message adds its tokens to the running context
-          shadowContext += msg.tokens;
-
-          if (shadowContext > AUTOCOMPACT_THRESHOLD) {
-            avoidedCompactions++;
-            shadowContext = POST_COMPACTION_CONTEXT;
-          }
+        if (sessionTokens > AUTOCOMPACT_THRESHOLD) {
+          // First compaction at AUTOCOMPACT_THRESHOLD, then every
+          // (AUTOCOMPACT_THRESHOLD - POST_COMPACTION_CONTEXT) tokens thereafter.
+          const stride = AUTOCOMPACT_THRESHOLD - POST_COMPACTION_CONTEXT;
+          avoidedCompactions =
+            1 + Math.floor((sessionTokens - AUTOCOMPACT_THRESHOLD) / Math.max(stride, 1));
         }
 
         const sessionCompactionCost = avoidedCompactions * estimateCompactionCost(workerModelID, model);
@@ -1089,7 +1120,7 @@ export function computeHistoricalEstimates(): HistoricalEstimates {
           firstMessage: sess.first_message_at,
           lastMessage: sess.last_message_at,
           distillationCost: sessionDistillCost,
-          distillationCalls: distillations.length,
+          distillationCalls: totalDistillCalls,
           distillationBatchCalls: sessionBatchCalls,
           distillationDirectCalls: sessionDirectCalls,
           avoidedCompactions: persisted?.avoidedCompactions || avoidedCompactions,
@@ -1133,67 +1164,42 @@ export function invalidateHistoricalCache(): void {
 // ---------------------------------------------------------------------------
 
 export type DailyCostEntry = {
-  /** Date string in YYYY-MM-DD format. */
+  /** Date string in YYYY-MM-DD format (UTC). */
   date: string;
-  /** Total USD cost for the day (conversation + worker). */
+  /** Total USD cost for the day (conversation + worker + warmup). */
   cost: number;
-  /** Number of sessions active on this day. */
-  sessions: number;
 };
 
+/** Format a Date as a UTC YYYY-MM-DD string. */
+function utcDayString(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
 /**
- * Compute per-day cost totals over the last N days.
+ * Compute per-day cost totals over the last N days from the per-day ledger.
  *
- * Uses historical estimates (persisted snapshots) bucketed by lastMessage date,
- * plus live session costs bucketed to today. Pass a pre-fetched `preloaded`
- * to avoid redundant DB scans when the caller already has the data.
+ * Reads the `daily_costs` table — a single grouped query — so cost is
+ * attributed to the actual UTC day it was incurred. This replaces the prior
+ * per-session bucketing that dumped whole-session cumulative cost onto a
+ * single date and re-attributed all live-session cost to "today" (which
+ * inflated recent days). Day boundaries are UTC throughout.
+ *
+ * Note: the ledger is forward-only. Cost incurred before the v30 migration
+ * is not back-filled, so days before the ledger existed read 0.
  */
-export function computeDailyCosts(days = 14, preloaded?: HistoricalEstimates): DailyCostEntry[] {
-  const today = new Date();
-  const cutoff = new Date(today);
-  cutoff.setDate(cutoff.getDate() - days + 1);
-  cutoff.setHours(0, 0, 0, 0);
-  const cutoffMs = cutoff.getTime();
+export function computeDailyCosts(days = 14): DailyCostEntry[] {
+  const now = Date.now();
+  const dayMs = 86_400_000;
 
-  // Initialize date buckets
-  const buckets = new Map<string, { cost: number; sessions: number }>();
-  for (let i = 0; i < days; i++) {
-    const d = new Date(cutoff);
-    d.setDate(d.getDate() + i);
-    buckets.set(d.toISOString().slice(0, 10), { cost: 0, sessions: 0 });
+  // Build the ordered list of UTC day strings, oldest first.
+  const dayKeys: string[] = [];
+  for (let i = days - 1; i >= 0; i--) {
+    dayKeys.push(utcDayString(new Date(now - i * dayMs)));
   }
+  const cutoffDay = dayKeys[0];
 
-  // Historical sessions (excludes currently-live sessions)
-  const hist = preloaded ?? computeHistoricalEstimates();
-  for (const s of hist.sessions) {
-    if (s.lastMessage < cutoffMs) continue;
-    const dateKey = new Date(s.lastMessage).toISOString().slice(0, 10);
-    const bucket = buckets.get(dateKey);
-    if (!bucket) continue;
-    const sessionCost = s.persisted
-      ? s.persisted.conversationCost + s.persisted.workerCost
-      : s.distillationCost;
-    bucket.cost += sessionCost;
-    bucket.sessions += 1;
-  }
+  // Single grouped query for all days in the window.
+  const totals = getDailyCostTotals(cutoffDay);
 
-  // Live sessions — bucket by today's date. Historical estimates skip live
-  // sessions (to avoid double-counting), so we must add them here. We bucket
-  // to today since these sessions are actively accumulating cost right now.
-  const todayKey = today.toISOString().slice(0, 10);
-  const todayBucket = buckets.get(todayKey);
-  if (todayBucket) {
-    for (const [, c] of sessions) {
-      const cost = totalActualCost(c);
-      if (cost > 0) {
-        todayBucket.cost += cost;
-        todayBucket.sessions += 1;
-      }
-    }
-  }
-
-  // Convert to sorted array
-  return [...buckets.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([date, v]) => ({ date, cost: v.cost, sessions: v.sessions }));
+  return dayKeys.map((date) => ({ date, cost: totals.get(date) ?? 0 }));
 }

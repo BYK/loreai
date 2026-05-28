@@ -722,6 +722,22 @@ const MIGRATIONS: string[] = [
     value TEXT NOT NULL
   );
   `,
+
+  `
+  -- Version 30: Per-day cost ledger for accurate daily spend attribution.
+  -- Each cost-recording call appends to the (day, bucket) row, so cost is
+  -- attributed to the actual UTC day it was incurred — avoiding the prior
+  -- bar-chart inflation where whole-session cumulative cost was dumped onto a
+  -- single day. Day is a UTC 'YYYY-MM-DD' string; bucket is one of
+  -- 'conversation' | 'worker' | 'warmup'.
+  CREATE TABLE IF NOT EXISTS daily_costs (
+    day        TEXT NOT NULL,
+    bucket     TEXT NOT NULL,
+    cost       REAL NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (day, bucket)
+  );
+  `,
 ];
 
 /** Return the resolved path of the SQLite database file. */
@@ -934,6 +950,13 @@ function recoverMissingObjects(database: Database) {
     CREATE TABLE IF NOT EXISTS team_config (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS daily_costs (
+      day        TEXT NOT NULL,
+      bucket     TEXT NOT NULL,
+      cost       REAL NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (day, bucket)
     );
   `);
 
@@ -1379,6 +1402,61 @@ export function loadAllSessionCosts(): Map<string, SessionCostSnapshot> {
     });
   }
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Per-day cost ledger (daily_costs table, v30)
+// ---------------------------------------------------------------------------
+
+/** Cost bucket for the per-day ledger. */
+export type DailyCostBucket = "conversation" | "worker" | "warmup";
+
+/**
+ * Append `cost` to the (day, bucket) ledger row, creating it if absent.
+ *
+ * `day` is a UTC date string (YYYY-MM-DD). Costs accumulate on the actual
+ * day they were incurred, so multi-day or long-lived sessions attribute
+ * spend to the correct day instead of dumping cumulative totals onto one date.
+ */
+export function addDailyCost(day: string, bucket: DailyCostBucket, cost: number): void {
+  if (!Number.isFinite(cost) || cost <= 0) return;
+  db()
+    .query(
+      `INSERT INTO daily_costs (day, bucket, cost, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(day, bucket) DO UPDATE SET
+         cost = cost + excluded.cost,
+         updated_at = excluded.updated_at`,
+    )
+    .run(day, bucket, cost, Date.now());
+}
+
+/**
+ * Sum daily-cost totals (across all buckets) per day for days >= `sinceDay`.
+ * Returns a Map of UTC date string → total USD. Single grouped query.
+ */
+export function getDailyCostTotals(sinceDay: string): Map<string, number> {
+  const rows = db()
+    .query(
+      `SELECT day, SUM(cost) AS total
+       FROM daily_costs
+       WHERE day >= ?
+       GROUP BY day`,
+    )
+    .all(sinceDay) as Array<{ day: string; total: number }>;
+  const result = new Map<string, number>();
+  for (const row of rows) {
+    result.set(row.day, row.total);
+  }
+  return result;
+}
+
+/** Total USD cost recorded for a single UTC day (across all buckets). */
+export function getDailyCostForDay(day: string): number {
+  const row = db()
+    .query("SELECT COALESCE(SUM(cost), 0) AS total FROM daily_costs WHERE day = ?")
+    .get(day) as { total: number } | null;
+  return row?.total ?? 0;
 }
 
 // ---------------------------------------------------------------------------

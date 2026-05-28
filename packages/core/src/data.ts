@@ -157,6 +157,62 @@ export function listDistillations(
     .all(pid, limit) as DistillationSummary[];
 }
 
+/** Per-session distillation aggregate (cost estimation inputs). */
+export type SessionDistillAggregate = {
+  session_id: string;
+  total_calls: number;
+  batch_calls: number;
+  /** Sum of token_count across all distillations for the session. */
+  total_tokens: number;
+  /** Sum of token_count for batch-type distillations only. */
+  batch_tokens: number;
+};
+
+/**
+ * Aggregate distillation stats per session for a project, in a single grouped
+ * query. Replaces the per-session `listDistillations` N+1 in cost estimation.
+ *
+ * Optionally restricts to sessions whose distillations were created on/after
+ * `sinceMs` (scope-limiting for historical cost scans).
+ */
+export function aggregateDistillationsBySession(
+  projectPath: string,
+  opts?: { sinceMs?: number },
+): Map<string, SessionDistillAggregate> {
+  const pid = ensureProject(projectPath);
+  const sinceMs = opts?.sinceMs ?? 0;
+  const rows = db()
+    .query(
+      `SELECT
+         session_id,
+         COUNT(*) as total_calls,
+         SUM(CASE WHEN call_type = 'batch' THEN 1 ELSE 0 END) as batch_calls,
+         SUM(token_count) as total_tokens,
+         SUM(CASE WHEN call_type = 'batch' THEN token_count ELSE 0 END) as batch_tokens
+       FROM distillations
+       WHERE project_id = ? AND created_at >= ?
+       GROUP BY session_id`,
+    )
+    .all(pid, sinceMs) as Array<{
+      session_id: string;
+      total_calls: number;
+      batch_calls: number;
+      total_tokens: number;
+      batch_tokens: number;
+    }>;
+  const result = new Map<string, SessionDistillAggregate>();
+  for (const row of rows) {
+    result.set(row.session_id, {
+      session_id: row.session_id,
+      total_calls: row.total_calls,
+      batch_calls: row.batch_calls ?? 0,
+      total_tokens: row.total_tokens ?? 0,
+      batch_tokens: row.batch_tokens ?? 0,
+    });
+  }
+  return result;
+}
+
 /** Get a single distillation by ID (or resolved prefix). */
 export function getDistillation(id: string): DistillationDetail | null {
   return db()
