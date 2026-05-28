@@ -299,6 +299,20 @@ function resolveGitHubCopilotWorker(sessionModelID: string): { providerID: strin
  *  4. Config model fallback (session model)
  */
 export function getWorkerModel(): { providerID: string; modelID: string } | undefined {
+  // Env var override — highest priority. Useful for global worker model
+  // configuration without per-project .lore.json (e.g. routing all workers
+  // to MiniMax). Format: "providerID/modelID" or just "modelID" (defaults
+  // to anthropic provider).
+  const envModel = process.env.LORE_WORKER_MODEL;
+  if (envModel) {
+    const slashIdx = envModel.indexOf("/");
+    if (slashIdx > 0) {
+      return { providerID: envModel.slice(0, slashIdx), modelID: envModel.slice(slashIdx + 1) };
+    }
+    // No slash — assume anthropic provider (most common case)
+    return { providerID: "anthropic", modelID: envModel };
+  }
+
   const cfg = loreConfig();
 
   // Determine if the session model is expensive enough to warrant a cheaper worker

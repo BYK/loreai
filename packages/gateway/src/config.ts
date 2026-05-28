@@ -56,6 +56,22 @@ export interface GatewayConfig {
    * lat.md/ directory scan, file watchers). Env: LORE_HOSTED_MODE.
    */
   hostedMode: boolean;
+  /**
+   * Standalone API key for background worker calls (distillation, curation,
+   * consolidation, etc.). When set, workers authenticate with this key
+   * instead of the session's client credential — enabling workers to use
+   * a different provider (e.g. MiniMax) than the session's Anthropic key.
+   * Env: LORE_WORKER_API_KEY
+   */
+  workerApiKey?: string;
+  /**
+   * Custom upstream URL for background worker calls. When set, all worker
+   * HTTP calls route to this URL instead of the default upstream URLs.
+   * Enables routing workers to a different provider (e.g. MiniMax's
+   * Anthropic-compatible endpoint) while sessions continue using Anthropic.
+   * Env: LORE_WORKER_UPSTREAM
+   */
+  workerUpstream?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -82,6 +98,10 @@ export function loadConfig(): GatewayConfig {
       ? trimTrailingSlash(env.LORE_REMOTE_URL)
       : undefined,
     hostedMode: isTruthy(env.LORE_HOSTED_MODE),
+    workerApiKey: env.LORE_WORKER_API_KEY || undefined,
+    workerUpstream: env.LORE_WORKER_UPSTREAM
+      ? trimTrailingSlash(env.LORE_WORKER_UPSTREAM)
+      : undefined,
   };
 }
 

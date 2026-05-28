@@ -128,6 +128,7 @@ import {
   setLastSeenAuth,
   setSessionAuth,
   resolveAuth,
+  type AuthCredential,
 } from "./auth";
 import type { UpstreamInterceptor } from "./recorder";
 import { startIdleScheduler, buildIdleWorkHandler } from "./idle";
@@ -803,9 +804,33 @@ function getLLMClient(config: GatewayConfig): LLMClient {
       providerID: "anthropic",
       modelID: "claude-sonnet-4-6",
     };
+
+    // Worker-specific auth: when LORE_WORKER_API_KEY is set, workers use a
+    // dedicated credential instead of the session's client key. This enables
+    // routing workers to a different provider (e.g. MiniMax) while sessions
+    // continue using Anthropic. Falls back to session auth when not set.
+    const getWorkerAuth: (sessionID?: string) => AuthCredential | null =
+      config.workerApiKey
+        ? () => ({ scheme: "api-key", value: config.workerApiKey! })
+        : resolveAuth;
+
+    // Worker-specific upstream: when LORE_WORKER_UPSTREAM is set, all worker
+    // calls route to this URL instead of the default upstream URLs.
+    const workerUpstreams = config.workerUpstream
+      ? { anthropic: config.workerUpstream, openai: config.workerUpstream }
+      : { anthropic: config.upstreamAnthropic, openai: config.upstreamOpenAI };
+
+    if (config.workerApiKey || config.workerUpstream) {
+      log.info(
+        `worker routing: ` +
+        `auth=${config.workerApiKey ? "dedicated key" : "session"}, ` +
+        `upstream=${config.workerUpstream ?? "default"}`,
+      );
+    }
+
     const inner = createGatewayLLMClient(
-      { anthropic: config.upstreamAnthropic, openai: config.upstreamOpenAI },
-      resolveAuth,
+      workerUpstreams,
+      getWorkerAuth,
       defaultModel,
     );
 
@@ -821,8 +846,8 @@ function getLLMClient(config: GatewayConfig): LLMClient {
     } else {
       llmClient = createBatchLLMClient(
         inner,
-        { anthropic: config.upstreamAnthropic, openai: config.upstreamOpenAI },
-        resolveAuth,
+        workerUpstreams,
+        getWorkerAuth,
         defaultModel,
       );
       batchQueueEnabled = true;
