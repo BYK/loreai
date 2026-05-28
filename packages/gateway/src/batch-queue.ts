@@ -847,8 +847,8 @@ export function createBatchLLMClient(
                   setGenAiUsageAttributes(span, result.usage!, result.model ?? undefined);
                 },
               );
-              emitCostMetric(pending.params.model, result.usage, "batch");
-              recordWorkerCost(pending.sessionID, pending.params.model, result.usage, "batch", pending.workerID);
+              emitCostMetric(pending.params.model, result.usage, "batch", "1h");
+              recordWorkerCost(pending.sessionID, pending.params.model, result.usage, "batch", pending.workerID, "1h");
             }
 
             pending.resolve(result.text);

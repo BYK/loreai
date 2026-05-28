@@ -538,9 +538,9 @@ export function computeCallCost(
   const inputCost =
     ((usage.input_tokens ?? 0) / 1_000_000) * pricing.input * batchMultiplier;
   const cacheReadCost =
-    ((usage.cache_read_input_tokens ?? 0) / 1_000_000) * pricing.cache_read;
+    ((usage.cache_read_input_tokens ?? 0) / 1_000_000) * pricing.cache_read * batchMultiplier;
   const cacheWriteCost =
-    ((usage.cache_creation_input_tokens ?? 0) / 1_000_000) * cacheWriteRate;
+    ((usage.cache_creation_input_tokens ?? 0) / 1_000_000) * cacheWriteRate * batchMultiplier;
   const outputCost =
     ((usage.output_tokens ?? 0) / 1_000_000) * pricing.output * batchMultiplier;
 
@@ -603,10 +603,11 @@ export function recordWorkerCost(
   usage: Usage,
   callType: "direct" | "batch",
   workerID?: string,
+  ttl?: "5m" | "1h",
 ): void {
   if (!sessionID) return;
   const costs = getOrCreate(sessionID);
-  const call = computeCallCost(model, usage, callType);
+  const call = computeCallCost(model, usage, callType, ttl);
 
   const bucket = WORKER_BUCKETS[workerID ?? ""] ?? "distillation";
   costs.workers[bucket].cost += call.total;
@@ -614,7 +615,7 @@ export function recordWorkerCost(
 
   // Track batch savings: how much more this would have cost at full price
   if (callType === "batch") {
-    const fullCost = computeCallCost(model, usage, "direct");
+    const fullCost = computeCallCost(model, usage, "direct", ttl);
     costs.batchSavings += fullCost.total - call.total;
   }
 

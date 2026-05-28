@@ -347,18 +347,18 @@ export function emitCostMetric(
   // The models.dev data is cached after first fetch, so subsequent calls resolve
   // from memory without network I/O.
   getPricing(model).then((pricing) => {
-    // Batch discount applies to base input/output only — cache ops have their
-    // own pricing tiers and are not discounted by the batch API.
+    // Batch discount (0.5×) applies to ALL token categories — input, output,
+    // cache read, and cache write. These multipliers stack with TTL modifiers.
     const batchMultiplier = callType === "batch" ? 0.5 : 1.0;
-    // Anthropic charges 2× cache_write for 1h TTL
+    // Anthropic charges 2× cache_write for 1h TTL (stacks with batch discount)
     const cacheWriteRate = ttl === "1h" ? pricing.cache_write * 2 : pricing.cache_write;
 
     const uncachedInputCost =
       ((usage.input_tokens ?? 0) / 1_000_000) * pricing.input * batchMultiplier;
     const cacheReadCost =
-      ((usage.cache_read_input_tokens ?? 0) / 1_000_000) * pricing.cache_read;
+      ((usage.cache_read_input_tokens ?? 0) / 1_000_000) * pricing.cache_read * batchMultiplier;
     const cacheWriteCost =
-      ((usage.cache_creation_input_tokens ?? 0) / 1_000_000) * cacheWriteRate;
+      ((usage.cache_creation_input_tokens ?? 0) / 1_000_000) * cacheWriteRate * batchMultiplier;
     const outputCost =
       ((usage.output_tokens ?? 0) / 1_000_000) * pricing.output * batchMultiplier;
 
