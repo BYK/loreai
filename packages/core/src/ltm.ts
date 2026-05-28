@@ -11,6 +11,13 @@ function estimateTokens(text: string): number {
   return Math.ceil(text.length / 3);
 }
 
+/** Sensitivity classification — product hint guiding auto-promotion decisions. */
+export type Sensitivity = "normal" | "sensitive" | "restricted";
+/** Promotion intent — tracks the personal \u2192 team DB promotion flow. */
+export type PromotionStatus = "nominated" | "suggested" | "promoted";
+/** Approval state — used in team DB for admin approval workflow. */
+export type ApprovalStatus = "auto" | "pending" | "approved" | "rejected";
+
 export type KnowledgeEntry = {
   id: string;
   project_id: string | null;
@@ -23,16 +30,28 @@ export type KnowledgeEntry = {
   created_at: number;
   updated_at: number;
   metadata: string | null;
+  // Multi-user attribution & sync (v29)
+  created_by: string | null;
+  updated_by: string | null;
+  sensitivity: Sensitivity;
+  promotion_status: PromotionStatus | null;
+  promoted_at: number | null;
+  approval_status: ApprovalStatus;
+  approved_by: string | null;
+  approved_at: number | null;
+  source_user_id: string | null;
+  source_entry_id: string | null;
+  last_accessed_at: number | null;
 };
 
 /** Columns to select for KnowledgeEntry — excludes the embedding BLOB
  *  (4KB per entry) which is only needed by vectorSearch() in embedding.ts. */
 const KNOWLEDGE_COLS =
-  "id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at, metadata";
+  "id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at, metadata, created_by, updated_by, sensitivity, promotion_status, promoted_at, approval_status, approved_by, approved_at, source_user_id, source_entry_id, last_accessed_at";
 
 /** Same columns with table alias prefix for use in JOIN queries. */
 const KNOWLEDGE_COLS_K =
-  "k.id, k.project_id, k.category, k.title, k.content, k.source_session, k.cross_project, k.confidence, k.created_at, k.updated_at, k.metadata";
+  "k.id, k.project_id, k.category, k.title, k.content, k.source_session, k.cross_project, k.confidence, k.created_at, k.updated_at, k.metadata, k.created_by, k.updated_by, k.sensitivity, k.promotion_status, k.promoted_at, k.approval_status, k.approved_by, k.approved_at, k.source_user_id, k.source_entry_id, k.last_accessed_at";
 
 export function create(input: {
   projectPath?: string;
@@ -46,6 +65,10 @@ export function create(input: {
   id?: string;
   /** Initial confidence (0.0–1.0). Default 1.0. Controls injection priority for preferences. */
   confidence?: number;
+  /** User ID who created this entry. Null for system-created entries. */
+  createdBy?: string;
+  /** Sensitivity classification — guides auto-promotion decisions. Default 'normal'. */
+  sensitivity?: Sensitivity;
 }): string {
   const pid =
     input.scope === "project" && input.projectPath
@@ -122,8 +145,8 @@ export function create(input: {
     : 1.0;
   db()
     .query(
-      `INSERT INTO knowledge (id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO knowledge (id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at, created_by, sensitivity)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -136,6 +159,8 @@ export function create(input: {
       confidence,
       now,
       now,
+      input.createdBy ?? null,
+      input.sensitivity ?? "normal",
     );
 
   // Fire-and-forget: embed for vector search (errors logged, never thrown)
@@ -148,7 +173,7 @@ export function create(input: {
 
 export function update(
   id: string,
-  input: { content?: string; confidence?: number },
+  input: { content?: string; confidence?: number; updatedBy?: string; sensitivity?: Sensitivity },
 ) {
   const sets: string[] = [];
   const params: unknown[] = [];
@@ -161,6 +186,14 @@ export function update(
     // give disproportionate scoring weight (>1) or silently soft-delete (<0.2).
     sets.push("confidence = ?");
     params.push(Math.max(0, Math.min(1, input.confidence)));
+  }
+  if (input.updatedBy !== undefined) {
+    sets.push("updated_by = ?");
+    params.push(input.updatedBy);
+  }
+  if (input.sensitivity !== undefined) {
+    sets.push("sensitivity = ?");
+    params.push(input.sensitivity);
   }
   sets.push("updated_at = ?");
   params.push(Date.now());
@@ -654,6 +687,17 @@ export async function forSession(
         created_at: section.updated_at,
         updated_at: section.updated_at,
         metadata: null,
+        created_by: null,
+        updated_by: null,
+        sensitivity: "normal",
+        promotion_status: null,
+        promoted_at: null,
+        approval_status: "auto",
+        approved_by: null,
+        approved_at: null,
+        source_user_id: null,
+        source_entry_id: null,
+        last_accessed_at: null,
       });
       used += cost;
     }

@@ -21,8 +21,6 @@ export function repoNameFromRemote(remote: string | null): string | null {
   return name.length > 0 ? name : null;
 }
 
-const SCHEMA_VERSION = 16;
-
 const MIGRATIONS: string[] = [
   `
   -- Version 1: Initial schema
@@ -675,6 +673,55 @@ const MIGRATIONS: string[] = [
   CREATE INDEX IF NOT EXISTS idx_entity_relations_a ON entity_relations(entity_a);
   CREATE INDEX IF NOT EXISTS idx_entity_relations_b ON entity_relations(entity_b);
   `,
+  `
+  -- Version 29: Multi-user attribution, promotion workflow, and team sync scaffolding.
+  -- All columns nullable/defaulted for backward compat with local-only users.
+  -- Security note: these columns are sync metadata and product UX hints,
+  -- NOT access control. Isolation is enforced at the DB level (database-per-user/team).
+
+  -- User attribution
+  ALTER TABLE knowledge ADD COLUMN created_by TEXT;
+  ALTER TABLE knowledge ADD COLUMN updated_by TEXT;
+
+  -- Sensitivity classification (product hint — guides auto-promotion decisions)
+  ALTER TABLE knowledge ADD COLUMN sensitivity TEXT NOT NULL DEFAULT 'normal';
+
+  -- Promotion workflow (used in personal DB to track personal -> team flow)
+  ALTER TABLE knowledge ADD COLUMN promotion_status TEXT;
+  ALTER TABLE knowledge ADD COLUMN promoted_at INTEGER;
+
+  -- Approval workflow (used in team DB for admin approval)
+  ALTER TABLE knowledge ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'auto';
+  ALTER TABLE knowledge ADD COLUMN approved_by TEXT;
+  ALTER TABLE knowledge ADD COLUMN approved_at INTEGER;
+
+  -- Origin tracking (used in team DB to trace back to source user)
+  ALTER TABLE knowledge ADD COLUMN source_user_id TEXT;
+  ALTER TABLE knowledge ADD COLUMN source_entry_id TEXT;
+
+  -- Access tracking
+  ALTER TABLE knowledge ADD COLUMN last_accessed_at INTEGER;
+
+  -- Team knowledge cache (local read-only copy of approved team entries)
+  CREATE TABLE IF NOT EXISTS team_knowledge (
+    id TEXT PRIMARY KEY,
+    category TEXT NOT NULL,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_by TEXT,
+    confidence REAL DEFAULT 1.0,
+    sensitivity TEXT NOT NULL DEFAULT 'normal',
+    source_user_id TEXT,
+    synced_at INTEGER NOT NULL,
+    metadata TEXT
+  );
+
+  -- Team configuration (credentials, sync state)
+  CREATE TABLE IF NOT EXISTS team_config (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+  `,
 ];
 
 /** Return the resolved path of the SQLite database file. */
@@ -871,6 +918,22 @@ function recoverMissingObjects(database: Database) {
       created_at  INTEGER NOT NULL,
       updated_at  INTEGER NOT NULL,
       UNIQUE(entity_a, entity_b, relation)
+    );
+    CREATE TABLE IF NOT EXISTS team_knowledge (
+      id TEXT PRIMARY KEY,
+      category TEXT NOT NULL,
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      created_by TEXT,
+      confidence REAL DEFAULT 1.0,
+      sensitivity TEXT NOT NULL DEFAULT 'normal',
+      source_user_id TEXT,
+      synced_at INTEGER NOT NULL,
+      metadata TEXT
+    );
+    CREATE TABLE IF NOT EXISTS team_config (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
     );
   `);
 

@@ -1221,3 +1221,123 @@ describe("ltm.rerankPreferences", () => {
     expect(ltm.get(ids[3])!.confidence).toBe(0.9);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Multi-user attribution, promotion, and team sync columns (v29)
+// ---------------------------------------------------------------------------
+describe("ltm — multi-user columns (v29)", () => {
+  const PROJ = "/test/ltm/multiuser";
+
+  beforeEach(() => {
+    const pid = ensureProject(PROJ);
+    db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+  });
+
+  test("new entries have correct default values for v29 columns", () => {
+    const id = ltm.create({
+      projectPath: PROJ,
+      category: "decision",
+      title: "Default values test",
+      content: "Test content for defaults",
+      scope: "project",
+    });
+    const entry = ltm.get(id);
+    expect(entry).not.toBeNull();
+    expect(entry!.created_by).toBeNull();
+    expect(entry!.updated_by).toBeNull();
+    expect(entry!.sensitivity).toBe("normal");
+    expect(entry!.promotion_status).toBeNull();
+    expect(entry!.promoted_at).toBeNull();
+    expect(entry!.approval_status).toBe("auto");
+    expect(entry!.approved_by).toBeNull();
+    expect(entry!.approved_at).toBeNull();
+    expect(entry!.source_user_id).toBeNull();
+    expect(entry!.source_entry_id).toBeNull();
+    expect(entry!.last_accessed_at).toBeNull();
+  });
+
+  test("create() accepts createdBy", () => {
+    const id = ltm.create({
+      projectPath: PROJ,
+      category: "pattern",
+      title: "Created by test",
+      content: "Test content",
+      scope: "project",
+      createdBy: "user-abc-123",
+    });
+    const entry = ltm.get(id);
+    expect(entry!.created_by).toBe("user-abc-123");
+  });
+
+  test("create() accepts sensitivity override", () => {
+    const id = ltm.create({
+      projectPath: PROJ,
+      category: "architecture",
+      title: "Sensitivity test",
+      content: "Contains API keys pattern",
+      scope: "project",
+      sensitivity: "sensitive",
+    });
+    const entry = ltm.get(id);
+    expect(entry!.sensitivity).toBe("sensitive");
+  });
+
+  test("update() sets updated_by when updatedBy provided", () => {
+    const id = ltm.create({
+      projectPath: PROJ,
+      category: "gotcha",
+      title: "Updated by test",
+      content: "Original content",
+      scope: "project",
+    });
+    ltm.update(id, { content: "Modified content", updatedBy: "user-xyz-456" });
+    const entry = ltm.get(id);
+    expect(entry!.content).toBe("Modified content");
+    expect(entry!.updated_by).toBe("user-xyz-456");
+  });
+
+  test("update() can change sensitivity", () => {
+    const id = ltm.create({
+      projectPath: PROJ,
+      category: "architecture",
+      title: "Sensitivity update test",
+      content: "Contains credentials pattern",
+      scope: "project",
+      sensitivity: "normal",
+    });
+    ltm.update(id, { sensitivity: "restricted" });
+    const entry = ltm.get(id);
+    expect(entry!.sensitivity).toBe("restricted");
+  });
+
+  test("update() without updatedBy leaves updated_by unchanged", () => {
+    const id = ltm.create({
+      projectPath: PROJ,
+      category: "pattern",
+      title: "No updatedBy test",
+      content: "Original content",
+      scope: "project",
+      createdBy: "user-abc-123",
+    });
+    ltm.update(id, { content: "Modified content" });
+    const entry = ltm.get(id);
+    expect(entry!.updated_by).toBeNull();
+    expect(entry!.created_by).toBe("user-abc-123");
+  });
+
+  test("team_knowledge table exists", () => {
+    const tables = db()
+      .query("SELECT name FROM sqlite_master WHERE type='table' AND name='team_knowledge'")
+      .all() as Array<{ name: string }>;
+    expect(tables).toHaveLength(1);
+    expect(tables[0].name).toBe("team_knowledge");
+  });
+
+  test("team_config table exists", () => {
+    const tables = db()
+      .query("SELECT name FROM sqlite_master WHERE type='table' AND name='team_config'")
+      .all() as Array<{ name: string }>;
+    expect(tables).toHaveLength(1);
+    expect(tables[0].name).toBe("team_config");
+  });
+});
