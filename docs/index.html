@@ -973,11 +973,13 @@
       <span class="ti">Any provider, any tool <span class="td">&#9670;</span> Portable memory that travels with you</span>
       <span class="ti">Total amnesia on new sessions <span class="td">&#9670;</span> Lore persists across sessions</span>
       <span class="ti">49 manual learnings <span class="td">&#9670;</span> Lore curates automatically</span>
+      <span class="ti">5 feedback loops <span class="td">&#9670;</span> Your agent improves every session</span>
       <span class="ti">2.3M tokens, 5 days, 2.6x total recall <span class="td">&#9670;</span> Compaction: 2.4/5. Lore: 4.0/5.</span>
       <span class="ti">68 min/day re-explaining <span class="td">&#9670;</span> Lore remembers for you</span>
       <span class="ti">Any provider, any tool <span class="td">&#9670;</span> Portable memory that travels with you</span>
       <span class="ti">Total amnesia on new sessions <span class="td">&#9670;</span> Lore persists across sessions</span>
       <span class="ti">49 manual learnings <span class="td">&#9670;</span> Lore curates automatically</span>
+      <span class="ti">5 feedback loops <span class="td">&#9670;</span> Your agent improves every session</span>
     </div>
   </div>
 
@@ -1084,7 +1086,9 @@
         <h3 class="step-t">Context management alone doesn't learn</h3>
         <p class="step-b">Compressing conversation history keeps the current session alive, but nothing
           is extracted from the compression. Start a new session and you're back to zero. Switch tools
-          and the knowledge stays behind. Nothing transfers to other projects or team members.</p>
+          and the knowledge stays behind. Nothing transfers to other projects, team members,
+          or <a href="https://arxiv.org/abs/2603.28052"
+          target="_blank" style="border-bottom:1px solid var(--g4)">even other models</a>.</p>
       </div>
       <div class="step sr">
         <div class="step-n">03</div>
@@ -1111,10 +1115,13 @@
       <div class="bc bc-2 sr">
         <p class="bc-tag">Learning</p>
         <h3 class="bc-t">Your AI learns from experience</h3>
-        <p class="bc-b">Patterns, gotchas, and architectural decisions are automatically curated across sessions
-          and exported to <code style="font-size:.85em;background:var(--g6);padding:.15em .4em;border-radius:3px;">.lore.md</code> —
-          the project documentation you should have been writing all along, maintained for you.
-          Lore Cloud adds team-wide shared knowledge and management.</p>
+        <p class="bc-b">Five feedback loops — behavioral pattern detection, semantic clustering,
+          instruction capture, LLM-mediated curation, and adaptive calibration —
+          compound across sessions. Patterns, gotchas, and decisions are automatically curated and exported to
+          <code style="font-size:.85em;background:var(--g6);padding:.15em .4em;border-radius:3px;">.lore.md</code>,
+          git-portable and model-agnostic. What <a href="https://arxiv.org/abs/2605.27276"
+          target="_blank" style="border-bottom:1px solid var(--g4)">researchers call</a>
+          "harness self-improvement" — Lore does it automatically.</p>
       </div>
       <div class="bc bc-3 sr">
         <div>
@@ -1183,7 +1190,7 @@
   <section class="how" id="voices">
     <div class="sec-hd">
       <div>
-        <p class="eyebrow sr">What the industry is discovering</p>
+        <p class="eyebrow sr">What the industry and research are discovering</p>
         <h2 class="sec-title sr">The problem is <em>real.</em> The manual fix is <em>exhausting.</em></h2>
       </div>
     </div>
@@ -1212,13 +1219,16 @@
           experience with AI coding tools and the gap between demos and real codebases.</p>
       </div>
       <div class="step sr">
-        <div class="step-n" style="font-size:.65rem;color:var(--g4)">Lore</div>
-        <h3 class="step-t" style="font-size:1.1rem;line-height:1.6">
-          Lore automates what both articles describe doing by hand.
+        <div class="step-n" style="font-size:.65rem;color:var(--g4)">The Research</div>
+        <h3 class="step-t" style="font-size:1.1rem;font-style:italic;line-height:1.6">
+          "The performance of LLM systems depends not only on model weights,
+          but also on their harness: the code that determines what information
+          to store, retrieve, and present to the model."
         </h3>
-        <p class="step-b">No context files to maintain. No key learnings to track manually.
-          No copilot-instructions.md to write and keep current. Lore distills, curates, and recalls — so your
-          AI learns from experience the way these authors wish it would.</p>
+        <p class="step-b"><a href="https://arxiv.org/abs/2603.28052"
+          target="_blank" style="border-bottom:1px solid var(--g4)">Meta-Harness</a> (Stanford, 2026) —
+          on why optimizing what context the model sees matters as much as the model itself.
+          Lore is this optimization layer for coding agents.</p>
       </div>
     </div>
   </section>

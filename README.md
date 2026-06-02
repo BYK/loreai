@@ -18,6 +18,8 @@ The manual alternative is writing context files by hand — key technical learni
 
 Other tools try to solve this in halves. Memory-only tools store past conversations but don't manage the context window — your AI still gets compacted mid-session. Context-only tools compress history but nothing is learned from the compression — start a new session and you're back to zero.
 
+Recent research on AI self-improvement identifies two fundamental levers: **harness updates** (changing what context the model sees) and **weight updates** (retraining the model). [Meta-Harness](https://arxiv.org/abs/2603.28052) (Lee et al., 2026) proved that *what information you store, retrieve, and present to a model* matters as much as the model itself — and that richer access to prior experience enables automated improvement. [SIA](https://arxiv.org/abs/2605.27276) (Hebbar et al., 2026) showed harness updates and weight updates occupy distinct change spaces, with harness improvements concentrating on the infrastructure that shapes how the model searches and acts. Lore is this infrastructure for coding agents — a system that continuously improves the context your agent sees, session after session.
+
 Lore treats context management and memory as the same problem. Distillation, knowledge curation, cross-session recall, and `.lore.md` export — all in one pipeline. You keep coding. Lore keeps the context.
 
 ## What to expect
@@ -27,7 +29,7 @@ Once Lore is active, you should notice:
 - **No more compactions** — Lore replaces compaction with incremental distillation. Your context never gets wiped and rebuilt from a lossy summary.
 - **Infinite sessions at lower cost** — the gradient context manager keeps sessions running indefinitely without degradation. Background work runs at up to 50% off via batch APIs on supported providers, using cheaper models (A/B tested for quality parity). Predictive cache warming avoids expensive cache rebuilds.
 - **Decisions stick** — the curator preserves the "why" behind every choice. A future session won't "helpfully" refactor your workaround back to the broken approach.
-- **Your AI learns from experience** — patterns, gotchas, and architectural decisions are automatically curated across sessions and exported to `.lore.md`. Project-specific knowledge and global preferences follow you everywhere.
+- **Your AI learns from experience** — patterns, gotchas, and architectural decisions are automatically curated across sessions and exported to `.lore.md`. Five distinct feedback loops — behavioral pattern detection, semantic clustering, instruction capture, LLM-mediated curation, and adaptive calibration — compound across sessions. Project-specific knowledge and global preferences follow you everywhere.
 - **Free on-device vector search** — Nomic Embed v1.5 runs locally with zero API cost. Hybrid architecture fuses vector similarity with BM25 keyword search and LLM-powered query expansion for best-of-both-worlds recall.
 - **Works with any provider** — `lore run` auto-detects Claude Code, OpenCode, Pi, and Codex. Cursor, Copilot, Windsurf, and any other Anthropic/OpenAI-compatible tool work by pointing their base URL at the gateway. Switch providers freely; your memory stays.*
 - **Import your history** — Lore imports conversations from Claude Code, Codex, Aider, Cline, Continue, OpenCode, and Pi, extracting knowledge from your existing sessions so your AI starts with context from day one.
@@ -407,11 +409,21 @@ user-facing system prompt injection in `packages/opencode/src/index.ts` /
 
 ## Standing on the shoulders of
 
+### Memory architecture
 - [How we solved the agent memory problem](https://www.sanity.io/blog/how-we-solved-the-agent-memory-problem) — Simen Svale at Sanity on the Nuum memory architecture: three-tier storage, distillation not summarization, recursive compression. The foundation this project is built on.
 - [Mastra Observational Memory](https://mastra.ai/research/observational-memory) — the observer/reflector architecture and the switch from structured JSON to timestamped observation logs that made v2 work.
 - [Mastra Memory source](https://github.com/mastra-ai/mastra/tree/main/packages/memory) — reference implementation.
+
+### Context compression
 - [Fast KV Compaction via Attention Matching](https://arxiv.org/abs/2602.16284) — Adam Zweiger, Xinghong Fu, Han Guo, Yoon Kim on preserving attention mass when compressing KV caches. Inspired the loss-annotated tool stripping approach.
 - [Cartridges: Compact Representations of Context for LLMs](https://arxiv.org/abs/2501.17390) — Simran Arora, Sabri Eyuboglu, Michael Zhang et al. on offline compressed context representations. Key ideas adopted: context-distillation objective for meta-distillation, and composable multi-resolution distillations.
+
+### Harness self-improvement
+- [Meta-Harness: End-to-End Optimization of Model Harnesses](https://arxiv.org/abs/2603.28052) — Yoonho Lee et al. at Stanford on automated harness optimization. Defines a harness as "the code that determines what information to store, retrieve, and present to the model" — precisely what Lore optimizes for coding agents. Key finding: raw execution traces are the most important ingredient for harness improvement; compressed summaries lose critical signal.
+- [SIA: Self Improving AI with Harness & Weight Updates](https://arxiv.org/abs/2605.27276) — Hebbar et al. on combining harness updates with weight updates. Establishes that harness improvements and weight updates occupy distinct change spaces — harness shapes *how* the agent searches and acts; weights change *what* the model knows. Lore implements the harness update side of this framework.
+- [Automated Design of Agentic Systems](https://arxiv.org/abs/2408.08435) — Shengran Hu, Cong Lu, Jeff Clune on Meta Agent Search for automatically discovering better agent designs. Demonstrates that agents invented by meta-search maintain superior performance even when transferred across domains and models.
+
+### Industry context
 - [Why Doesn't Anyone Teach Developers About Context Management?](https://www.oreilly.com/radar/why-doesnt-anyone-teach-developers-about-context-management/) — Andrew Stellman at O'Reilly Radar on why context management is the most important undiscussed skill in AI development. The manual practices described are what Lore automates.
 - [OpenCode](https://opencode.ai) — one of the AI coding agents Lore integrates with natively.
 
