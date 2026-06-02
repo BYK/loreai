@@ -117,6 +117,55 @@ describe("BatchLLMClient", () => {
     await client.shutdown();
   });
 
+  test("bearer-token (OAuth) calls bypass the queue and delegate to inner client", async () => {
+    const inner = createMockLLMClient();
+    const bearerAuth: AuthCredential = { scheme: "bearer", value: "sk-ant-oat-test-token" };
+    const getBearerAuth = () => bearerAuth;
+
+    const client = createBatchLLMClient(inner, UPSTREAMS, getBearerAuth, DEFAULT_MODEL, {
+      flushIntervalMs: 60_000,
+    });
+
+    const result = await client.prompt("system", "oauth worker call", {
+      workerID: "lore-distill",
+      sessionID: "oauth-session",
+    });
+
+    // Should process synchronously via inner client, not queue
+    expect(result).toBe("sync-response-for: oauth worker call");
+    expect(inner.calls).toHaveLength(1);
+    expect(inner.calls[0].user).toBe("oauth worker call");
+
+    const s = client.stats();
+    expect(s.totalFallback).toBe(1); // Counted as fallback, not urgent or queued
+    expect(s.totalQueued).toBe(0);
+    expect(s.totalUrgent).toBe(0);
+    expect(s.queued).toBe(0);
+
+    await client.shutdown();
+  });
+
+  test("api-key calls are still queued normally (not affected by bearer bypass)", async () => {
+    const inner = createMockLLMClient();
+    const client = createBatchLLMClient(inner, UPSTREAMS, getTestAuth, DEFAULT_MODEL, {
+      flushIntervalMs: 60_000,
+      maxQueueSize: 100,
+    });
+
+    // Don't await — should be queued
+    const _promise = client.prompt("system", "api-key background work", {
+      workerID: "lore-distill",
+    });
+
+    // Should be queued, not sent to inner yet
+    expect(inner.calls).toHaveLength(0);
+    const s = client.stats();
+    expect(s.totalQueued).toBe(1);
+    expect(s.queued).toBe(1);
+
+    await client.shutdown();
+  });
+
   test("non-urgent calls are queued (not immediately sent to inner)", async () => {
     const inner = createMockLLMClient();
     const client = createBatchLLMClient(inner, UPSTREAMS, getTestAuth, DEFAULT_MODEL, {

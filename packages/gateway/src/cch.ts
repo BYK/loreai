@@ -268,6 +268,7 @@ const WORKER_BETAS = [
   "oauth-2025-04-20",
   "interleaved-thinking-2025-05-14",
   "extended-cache-ttl-2025-04-11",
+  "prompt-caching-scope-2026-01-05",
 ].join(",");
 
 /**

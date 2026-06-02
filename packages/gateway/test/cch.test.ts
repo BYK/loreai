@@ -3,7 +3,9 @@ import {
   signBody,
   resignBody,
   captureBillingPrefix,
+  captureSessionHeaders,
   buildBillingBlock,
+  buildOAuthWorkerHeaders,
   deleteBillingPrefix,
   validateSeed,
   resolveSeed,
@@ -743,5 +745,135 @@ describe("binary-verified values", () => {
     const cch = (hash & 0xFFFFFn).toString(16).padStart(5, "0");
     const signedOld = body2.replace("cch=00000", `cch=${cch}`);
     expect(validateSeed(signedOld)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// captureSessionHeaders + buildOAuthWorkerHeaders
+// ---------------------------------------------------------------------------
+
+const BILLING_SYSTEM = "x-anthropic-billing-header: cc_version=2.1.152.e9a; cc_entrypoint=cli; cch=abcde;";
+
+describe("captureSessionHeaders", () => {
+  test("is a no-op for non-billing sessions", () => {
+    captureSessionHeaders("non-billing-sess", {
+      "anthropic-beta": "some-beta",
+      "user-agent": "some-agent",
+    });
+    // buildOAuthWorkerHeaders should return null since session has no billing
+    expect(buildOAuthWorkerHeaders("non-billing-sess")).toBeNull();
+  });
+
+  test("captures headers for billing sessions", () => {
+    // First register as a billing session
+    captureBillingPrefix(SID_A, BILLING_SYSTEM);
+
+    // Then capture headers
+    captureSessionHeaders(SID_A, {
+      "anthropic-beta": "oauth-2025-04-20,interleaved-thinking-2025-05-14",
+      "user-agent": "claude-cli/2.1.152 (external, sdk-cli)",
+    });
+
+    const headers = buildOAuthWorkerHeaders(SID_A);
+    expect(headers).not.toBeNull();
+    expect(headers!["anthropic-beta"]).toBe("oauth-2025-04-20,interleaved-thinking-2025-05-14");
+    expect(headers!["user-agent"]).toBe("claude-cli/2.1.152 (external, sdk-cli)");
+  });
+
+  test("captures partial headers (only anthropic-beta present)", () => {
+    captureBillingPrefix(SID_A, BILLING_SYSTEM);
+    captureSessionHeaders(SID_A, {
+      "anthropic-beta": "oauth-2025-04-20",
+    });
+
+    const headers = buildOAuthWorkerHeaders(SID_A);
+    expect(headers).not.toBeNull();
+    expect(headers!["anthropic-beta"]).toBe("oauth-2025-04-20");
+    // user-agent should fall back to default
+    expect(headers!["user-agent"]).toContain("claude-cli/");
+  });
+
+  test("works on the first turn (captureBillingPrefix sets flag before captureSessionHeaders reads it)", () => {
+    // Simulate first-turn ordering: captureBillingPrefix then captureSessionHeaders
+    captureBillingPrefix(SID_A, BILLING_SYSTEM);
+    captureSessionHeaders(SID_A, {
+      "anthropic-beta": "first-turn-beta",
+      "user-agent": "first-turn-ua",
+    });
+
+    const headers = buildOAuthWorkerHeaders(SID_A);
+    expect(headers).not.toBeNull();
+    expect(headers!["anthropic-beta"]).toBe("first-turn-beta");
+    expect(headers!["user-agent"]).toBe("first-turn-ua");
+  });
+});
+
+describe("buildOAuthWorkerHeaders", () => {
+  test("returns null when sessionID is undefined", () => {
+    expect(buildOAuthWorkerHeaders(undefined)).toBeNull();
+  });
+
+  test("returns null for API-key sessions (no billing)", () => {
+    expect(buildOAuthWorkerHeaders("unknown-sess")).toBeNull();
+  });
+
+  test("uses fallback betas when no snapshot exists", () => {
+    // Register as billing session but don't capture headers
+    captureBillingPrefix(SID_A, BILLING_SYSTEM);
+
+    const headers = buildOAuthWorkerHeaders(SID_A);
+    expect(headers).not.toBeNull();
+    expect(headers!["anthropic-beta"]).toContain("oauth-2025-04-20");
+    expect(headers!["anthropic-beta"]).toContain("extended-cache-ttl-2025-04-11");
+    expect(headers!["anthropic-beta"]).toContain("prompt-caching-scope-2026-01-05");
+    expect(headers!["user-agent"]).toContain("claude-cli/");
+  });
+
+  test("includes required OAuth headers", () => {
+    captureBillingPrefix(SID_A, BILLING_SYSTEM);
+
+    const headers = buildOAuthWorkerHeaders(SID_A);
+    expect(headers).not.toBeNull();
+    expect(headers!["anthropic-dangerous-direct-browser-access"]).toBe("true");
+    expect(headers!["x-client-request-id"]).toBeDefined();
+    // UUID format
+    expect(headers!["x-client-request-id"]).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
+  });
+
+  test("generates unique x-client-request-id per call", () => {
+    captureBillingPrefix(SID_A, BILLING_SYSTEM);
+
+    const h1 = buildOAuthWorkerHeaders(SID_A)!;
+    const h2 = buildOAuthWorkerHeaders(SID_A)!;
+    expect(h1["x-client-request-id"]).not.toBe(h2["x-client-request-id"]);
+  });
+
+  test("sessions are isolated — different sessions get different headers", () => {
+    captureBillingPrefix(SID_A, BILLING_SYSTEM);
+    captureBillingPrefix(SID_B, BILLING_SYSTEM);
+
+    captureSessionHeaders(SID_A, { "anthropic-beta": "beta-a" });
+    captureSessionHeaders(SID_B, { "anthropic-beta": "beta-b" });
+
+    expect(buildOAuthWorkerHeaders(SID_A)!["anthropic-beta"]).toBe("beta-a");
+    expect(buildOAuthWorkerHeaders(SID_B)!["anthropic-beta"]).toBe("beta-b");
+  });
+});
+
+describe("deleteBillingPrefix clears header snapshots", () => {
+  test("removes both billing flag and header snapshot", () => {
+    captureBillingPrefix(SID_A, BILLING_SYSTEM);
+    captureSessionHeaders(SID_A, { "anthropic-beta": "test-beta" });
+
+    // Before deletion: returns headers
+    expect(buildOAuthWorkerHeaders(SID_A)).not.toBeNull();
+
+    // Delete
+    deleteBillingPrefix(SID_A);
+
+    // After deletion: returns null
+    expect(buildOAuthWorkerHeaders(SID_A)).toBeNull();
   });
 });
