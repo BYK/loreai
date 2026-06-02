@@ -18,7 +18,7 @@ import * as Sentry from "@sentry/bun";
 import type { AuthCredential } from "./auth";
 import { authHeaders, markAuthStale } from "./auth";
 import { tripCircuitBreaker } from "./background-limiter";
-import { buildBillingBlock, signBody } from "./cch";
+import { buildBillingBlock, buildOAuthWorkerHeaders, signBody } from "./cch";
 import {
   setGenAiUsageAttributes,
   emitCostMetric,
@@ -237,12 +237,18 @@ function buildAnthropicWorkerRequest(
     body = signBody(body);
   }
 
+  // For OAuth sessions, include Claude Code headers (anthropic-beta,
+  // user-agent, etc.) sniffed from conversation turns. Without these,
+  // Anthropic may reject worker calls with 401 even when the token is valid.
+  const oauthHeaders = buildOAuthWorkerHeaders(sessionID);
+
   return {
     url: `${target.url}/v1/messages`,
     headers: {
       "Content-Type": "application/json",
       "anthropic-version": "2023-06-01",
       ...authHeaders(cred),
+      ...oauthHeaders,
     },
     body,
   };

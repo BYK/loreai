@@ -134,7 +134,7 @@ import type { UpstreamInterceptor } from "./recorder";
 import { startIdleScheduler, buildIdleWorkHandler } from "./idle";
 import { getWorkerModel, resetWorkerModelState, fetchModelData, getModelEntrySync } from "./worker-model";
 import * as Sentry from "@sentry/bun";
-import { captureBillingPrefix, hasBillingHeader, resignBody } from "./cch";
+import { captureBillingPrefix, captureSessionHeaders, hasBillingHeader, resignBody } from "./cch";
 import { detectClientType } from "./session";
 import { analyzeCacheTurn, categorizeBust } from "./cache-analytics";
 import {
@@ -2943,6 +2943,11 @@ async function handleConversationTurn(
   // so workers can rebuild it. Per-session storage prevents cross-session
   // contamination when multiple Claude Code versions share one process.
   captureBillingPrefix(sessionID, req.system);
+
+  // Sniff Claude Code headers from conversation turns for replay on worker
+  // calls. For OAuth sessions, workers need the same anthropic-beta and
+  // user-agent headers as conversation turns to avoid 401 rejections.
+  captureSessionHeaders(sessionID, req.rawHeaders);
 
   // Track fingerprint for future correlation
   if (isNew) {

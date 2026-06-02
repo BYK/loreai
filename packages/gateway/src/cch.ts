@@ -29,7 +29,7 @@
  * contamination. Mirrors the per-session `sessionAuth` in `auth.ts`.
  */
 
-import { createHash } from "crypto";
+import { createHash, randomUUID } from "crypto";
 
 // ---------------------------------------------------------------------------
 // Version→seed mapping
@@ -248,6 +248,102 @@ export function buildBillingBlock(
 /** Drop billing state for a session (used by session eviction). */
 export function deleteBillingPrefix(sessionID: string): void {
   sessionNeedsBilling.delete(sessionID);
+  sessionHeaderSnapshots.delete(sessionID);
+}
+
+// ---------------------------------------------------------------------------
+// Claude Code header sniffing & simulation for OAuth worker calls
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimal beta set for worker calls on OAuth sessions.
+ * Workers send simple single-turn requests (no tools, no thinking, no
+ * structured output) so only the base betas are needed. This matches
+ * CortexKit's CLAUDE_CODE_BASE_BETAS for non-agent requests.
+ *
+ * NOTE: `extended-cache-ttl-2025-04-11` is included so workers' 1h TTL
+ * cache_control breakpoints are actually honored by the API.
+ */
+const WORKER_BETAS = [
+  "oauth-2025-04-20",
+  "interleaved-thinking-2025-05-14",
+  "extended-cache-ttl-2025-04-11",
+].join(",");
+
+/**
+ * Per-session snapshot of headers observed on conversation turns.
+ *
+ * When the gateway sees a conversation turn from a Claude Code OAuth
+ * session, it captures the `anthropic-beta` and `user-agent` values.
+ * Worker calls for that session replay these headers so Anthropic sees
+ * a consistent client fingerprint. Without this, worker calls using
+ * OAuth tokens may be rejected because they lack the expected header set.
+ *
+ * Only populated for bearer-token sessions that have billing headers
+ * (i.e. Claude Code OAuth). API-key sessions don't need this.
+ */
+type SessionHeaderSnapshot = {
+  /** The anthropic-beta header from the last conversation turn. */
+  anthropicBeta?: string;
+  /** The user-agent header from the last conversation turn. */
+  userAgent?: string;
+};
+
+const sessionHeaderSnapshots = new Map<string, SessionHeaderSnapshot>();
+
+/**
+ * Capture Claude Code headers from a conversation turn for later replay
+ * on worker calls. Called alongside `captureBillingPrefix()` on each turn.
+ *
+ * Only stores headers for sessions that use billing headers (bearer-token
+ * OAuth). For API-key sessions this is a no-op.
+ */
+export function captureSessionHeaders(
+  sessionID: string,
+  rawHeaders: Record<string, string>,
+): void {
+  // Only capture for sessions that have billing headers
+  if (!sessionNeedsBilling.get(sessionID)) return;
+
+  const snapshot: SessionHeaderSnapshot = {};
+
+  const beta = rawHeaders["anthropic-beta"] || rawHeaders["Anthropic-Beta"];
+  if (beta) snapshot.anthropicBeta = beta;
+
+  const ua = rawHeaders["user-agent"] || rawHeaders["User-Agent"];
+  if (ua) snapshot.userAgent = ua;
+
+  sessionHeaderSnapshots.set(sessionID, snapshot);
+}
+
+/**
+ * Build extra HTTP headers for an Anthropic worker request on an OAuth
+ * session. Returns null for API-key sessions (no extra headers needed).
+ *
+ * For bearer-token sessions, builds the Claude Code header fingerprint:
+ * - `anthropic-beta`: from sniffed session headers, or fallback worker set
+ * - `user-agent`: from sniffed session headers, or fallback Claude Code UA
+ * - `anthropic-dangerous-direct-browser-access`: required for OAuth
+ * - `x-client-request-id`: fresh UUID per request
+ *
+ * This ensures worker calls (distillation, curation) present the same
+ * client fingerprint as conversation turns, avoiding 401 rejections from
+ * Anthropic's OAuth validation.
+ */
+export function buildOAuthWorkerHeaders(
+  sessionID: string | undefined,
+): Record<string, string> | null {
+  if (!sessionID) return null;
+  if (!sessionNeedsBilling.get(sessionID)) return null;
+
+  const snapshot = sessionHeaderSnapshots.get(sessionID);
+
+  return {
+    "anthropic-beta": snapshot?.anthropicBeta || WORKER_BETAS,
+    "user-agent": snapshot?.userAgent || `claude-cli/${WORKER_VERSION} (external, sdk-cli)`,
+    "anthropic-dangerous-direct-browser-access": "true",
+    "x-client-request-id": randomUUID(),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -389,6 +485,7 @@ export function validateSeed(body: string): boolean | null {
 /** @internal Reset module state for tests. */
 export function _resetForTest(): void {
   sessionNeedsBilling.clear();
+  sessionHeaderSnapshots.clear();
 }
 
 /** @internal Exposed for tests. */

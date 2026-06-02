@@ -957,10 +957,22 @@ export function createBatchLLMClient(
         return inner.prompt(system, user, opts);
       }
 
-      // Fast-path: if this provider's batch endpoint doesn't exist (404)
-      // or this session's batch access is disabled (403 auth scope), skip
-      // the queue and process synchronously. Without this, calls wait up
-      // to 30s in the queue only to be routed through fallbackAll() at flush time.
+      // Snapshot auth credential at enqueue time for session isolation.
+      // If no credential is available, fall back to synchronous processing
+      // (which will also attempt to resolve auth — matches prior behavior).
+      const cred = getAuth(opts?.sessionID);
+      if (!cred) {
+        totalUrgent++;
+        return inner.prompt(system, user, opts);
+      }
+
+      // Fast-path: if this provider's batch endpoint doesn't exist (404),
+      // this session's batch access is disabled (403 auth scope), or the
+      // credential is an OAuth bearer token (batch API doesn't support OAuth),
+      // skip the queue and process synchronously. Without this, calls wait
+      // up to 30s in the queue only to be routed through fallbackAll() at
+      // flush time — and for bearer tokens, the batch submit always 401s
+      // before falling back to sync anyway.
       const providerID = (opts?.model ?? defaultModel).providerID;
       if (disabledBatchProviders.has(providerID)) {
         totalFallback++;
@@ -970,13 +982,8 @@ export function createBatchLLMClient(
         totalFallback++;
         return inner.prompt(system, user, opts);
       }
-
-      // Snapshot auth credential at enqueue time for session isolation.
-      // If no credential is available, fall back to synchronous processing
-      // (which will also attempt to resolve auth — matches prior behavior).
-      const cred = getAuth(opts?.sessionID);
-      if (!cred) {
-        totalUrgent++;
+      if (cred.scheme === "bearer") {
+        totalFallback++;
         return inner.prompt(system, user, opts);
       }
 
