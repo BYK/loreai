@@ -311,13 +311,42 @@ export function estimateRequestCost(model: string, inputTokens: number): number 
  * 2. Rate overshoot: tanh((currentRate / targetRate - 1) / 3) — smooth S-curve
  *
  * Returns 0 when:
- * - No budget configured (dailyBudget ≤ 0)
- * - Spend below THROTTLE_FLOOR (50%)
- * - Current rate is sustainable (projected spend ≤ budget)
+ * - No budget configured (dailyBudget ≤ 0) AND no quota pressure
+ * - Spend below THROTTLE_FLOOR (50%) AND no quota pressure
+ * - Current rate is sustainable (projected spend ≤ budget) AND no quota pressure
+ *
+ * The optional `quotaPressure` (0-1) is an independent throttle signal derived
+ * from Anthropic OAuth quota utilization. The final delay is the MAX of the
+ * budget-derived delay and the quota-derived delay, so quota throttling works
+ * even when no USD budget is configured. When `quotaPressure` is 0, behavior
+ * is identical to the budget-only computation (backward compatible).
  *
  * @returns Delay in seconds (0 = no throttle, max MAX_THROTTLE_DELAY)
  */
 export function computeThrottleDelay(
+  dailySpendUSD: number,
+  dailyBudget: number,
+  costRatePerHour: number,
+  hoursRemaining: number,
+  quotaPressure: number = 0,
+): number {
+  const budgetDelay = computeBudgetThrottleDelay(
+    dailySpendUSD,
+    dailyBudget,
+    costRatePerHour,
+    hoursRemaining,
+  );
+
+  // Quota-derived delay: gentle ramp (squared) up to MAX_THROTTLE_DELAY.
+  const qp = Math.min(1, Math.max(0, quotaPressure));
+  const quotaDelay =
+    qp > 0 ? Math.round(MAX_THROTTLE_DELAY * qp * qp * 10) / 10 : 0;
+
+  return Math.min(Math.max(budgetDelay, quotaDelay), MAX_THROTTLE_DELAY);
+}
+
+/** Budget-only throttle delay (see computeThrottleDelay for the curve). */
+function computeBudgetThrottleDelay(
   dailySpendUSD: number,
   dailyBudget: number,
   costRatePerHour: number,
@@ -357,14 +386,23 @@ export function computeThrottleDelay(
 
 /**
  * Get the throttle delay for the next request, factoring in current daily
- * spend, cost-rate EMA, and time remaining in the UTC day.
+ * spend, cost-rate EMA, time remaining in the UTC day, and (optionally)
+ * Anthropic OAuth quota pressure.
+ *
+ * Quota pressure is an independent signal: when `quotaPressure > 0` the
+ * throttle applies even if no USD budget is configured.
  *
  * @param dailyBudget - Configured daily budget in USD (0 = disabled)
  * @param estimatedCost - Estimated cost of the upcoming request
+ * @param quotaPressure - OAuth quota pressure in [0, 1] (default 0)
  * @returns Delay in seconds (0 = no throttle)
  */
-export function getDailyThrottleDelay(dailyBudget: number, estimatedCost: number): number {
-  if (dailyBudget <= 0) return 0;
+export function getDailyThrottleDelay(
+  dailyBudget: number,
+  estimatedCost: number,
+  quotaPressure: number = 0,
+): number {
+  if (dailyBudget <= 0 && quotaPressure <= 0) return 0;
 
   maybeResetDay();
   const projectedSpend = dailySpend + estimatedCost;
@@ -375,7 +413,13 @@ export function getDailyThrottleDelay(dailyBudget: number, estimatedCost: number
   endOfDay.setUTCHours(24, 0, 0, 0);
   const hoursRemaining = (endOfDay.getTime() - now.getTime()) / 3_600_000;
 
-  return computeThrottleDelay(projectedSpend, dailyBudget, costRateEMA, hoursRemaining);
+  return computeThrottleDelay(
+    projectedSpend,
+    dailyBudget,
+    costRateEMA,
+    hoursRemaining,
+    quotaPressure,
+  );
 }
 
 /** Get current daily spend and date (for UI / diagnostics). */

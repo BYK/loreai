@@ -169,6 +169,11 @@ import {
   getSessionCosts,
 } from "./cost-tracker";
 import {
+  getQuotaForCredential,
+  computeQuotaPressure,
+  isQuotaPaused,
+} from "./quota";
+import {
   RECALL_GATEWAY_TOOL,
   RECALL_TOOL_NAME,
   MAX_RECALL_DEPTH,
@@ -2434,6 +2439,11 @@ function scheduleBackgroundWork(
   const cfg = loreConfig();
   const model = getWorkerModel();
 
+  // When the OAuth account is near quota exhaustion, skip non-urgent
+  // background work to preserve remaining entitlement for user-facing turns.
+  // Urgent distillation is exempt (it unblocks the next user turn).
+  const quotaPaused = isQuotaPaused(resolveAuth(sessionID));
+
   // Check if urgent distillation is needed (gradient flagged it).
   // Mark urgent: true so these bypass the batch queue — the gradient is
   // in overflow and needs the result before the next user turn.
@@ -2461,7 +2471,7 @@ function scheduleBackgroundWork(
         metaThresholdOverride,
       })
       .catch((e) => log.error("background distillation failed:", e));
-  } else if (!isBackgroundPaused()) {
+  } else if (!isBackgroundPaused() && !quotaPaused) {
     // Incremental distillation and curation are non-urgent — skip when the
     // circuit breaker is active to reduce API pressure. These are also gated
     // by runBackground() which checks isBackgroundPaused(), but the early
@@ -2485,7 +2495,8 @@ function scheduleBackgroundWork(
   // the probability of LTM changes that bust the cache. Each LTM change
   // that exceeds the diff pinning threshold invalidates tools + messages.
   // Also gated by circuit breaker — curation is never urgent.
-  if (isBackgroundPaused()) return;
+  // Quota-paused accounts skip curation too (non-urgent background work).
+  if (isBackgroundPaused() || quotaPaused) return;
 
   const modelInputCost = getModelEntrySync(
     getWorkerModel()?.modelID ?? "unknown",
@@ -3498,16 +3509,21 @@ async function handleConversationTurn(
     conversationTTL: resolvedConversationTTL,
   };
 
-  // --- Daily budget throttle ---
+  // --- Daily budget + OAuth quota throttle ---
   // Apply an invisible proxy-level sleep to slow the agent when approaching
-  // the daily budget. The sleep is capped to avoid causing cache busts
-  // (which would be self-defeating — costing more than the throttle saved).
+  // the daily budget OR the Anthropic OAuth quota. The sleep is capped to
+  // avoid causing cache busts (which would be self-defeating — costing more
+  // than the throttle saved).
   const dailyBudget = getDailyBudget();
-  if (dailyBudget > 0) {
+  // Quota pressure is an independent signal — applies even with no USD budget.
+  // Gated to Anthropic-OAuth accounts; 0 for everything else.
+  const quotaSnapshot = getQuotaForCredential(resolveAuth(sessionID));
+  const quotaPressure = computeQuotaPressure(quotaSnapshot);
+  if (dailyBudget > 0 || quotaPressure > 0) {
     const inputTokens = getLastTransformEstimate(sessionID)
       || Math.ceil(JSON.stringify(modifiedReq.messages).length / 3);
     const estimatedCost = estimateRequestCost(req.model, inputTokens);
-    const delay = getDailyThrottleDelay(dailyBudget, estimatedCost);
+    const delay = getDailyThrottleDelay(dailyBudget, estimatedCost, quotaPressure);
 
     if (delay > 0) {
       // Cap delay to avoid pushing the next request past the cache TTL boundary.

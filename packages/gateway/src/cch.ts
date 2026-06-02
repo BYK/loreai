@@ -251,6 +251,22 @@ export function deleteBillingPrefix(sessionID: string): void {
   sessionHeaderSnapshots.delete(sessionID);
 }
 
+/**
+ * Whether a session is a Claude Code Anthropic OAuth session.
+ *
+ * True only when a Claude Code billing header was observed in the session's
+ * system prompt (see `captureBillingPrefix`). This is the canonical signal
+ * for "this bearer token is an Anthropic OAuth/subscription token" — a bearer
+ * token for a non-Anthropic provider (OpenAI-protocol, MiniMax, vLLM, etc.)
+ * never carries this header, so it is naturally excluded.
+ *
+ * Used to gate Anthropic-specific behavior (e.g. the OAuth usage/quota API)
+ * to genuine Claude Code OAuth sessions only.
+ */
+export function isClaudeCodeOAuthSession(sessionID: string): boolean {
+  return sessionNeedsBilling.get(sessionID) === true;
+}
+
 // ---------------------------------------------------------------------------
 // Claude Code header sniffing & simulation for OAuth worker calls
 // ---------------------------------------------------------------------------

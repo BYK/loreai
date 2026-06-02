@@ -134,6 +134,42 @@ describe("budget-throttle", () => {
         expect(Math.abs(d2 - d1)).toBeLessThan(5);
       }
     });
+
+    // --- quota pressure (5th param) ---
+
+    test("quotaPressure=0 leaves budget-only behavior unchanged", () => {
+      // No budget, no quota → 0
+      expect(computeThrottleDelay(5, 0, 10, 12, 0)).toBe(0);
+      // Below floor, no quota → 0
+      expect(computeThrottleDelay(4, 10, 100, 12, 0)).toBe(0);
+      // Same as omitting the 5th param
+      expect(computeThrottleDelay(8, 10, 0.4, 10, 0)).toBe(
+        computeThrottleDelay(8, 10, 0.4, 10),
+      );
+    });
+
+    test("quota pressure throttles even with no USD budget", () => {
+      // dailyBudget=0 (disabled), high quota pressure → non-zero delay
+      const delay = computeThrottleDelay(0, 0, 0, 12, 1);
+      expect(delay).toBe(60); // MAX_THROTTLE_DELAY at full pressure
+    });
+
+    test("quota delay ramps with pressure (squared)", () => {
+      const half = computeThrottleDelay(0, 0, 0, 12, 0.5);
+      expect(half).toBeCloseTo(15, 0); // 60 * 0.5^2 = 15
+      expect(computeThrottleDelay(0, 0, 0, 12, 0)).toBe(0);
+    });
+
+    test("final delay is the max of budget and quota delays", () => {
+      // Strong budget delay, weak quota → budget wins
+      const budgetStrong = computeThrottleDelay(10, 10, 100, 1, 0.2);
+      const budgetOnly = computeThrottleDelay(10, 10, 100, 1, 0);
+      expect(budgetStrong).toBe(budgetOnly);
+
+      // Weak budget (below floor), strong quota → quota wins
+      const quotaWins = computeThrottleDelay(0, 10, 0, 12, 1);
+      expect(quotaWins).toBe(60);
+    });
   });
 
   // ---------------------------------------------------------------------------

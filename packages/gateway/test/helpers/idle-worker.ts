@@ -123,10 +123,20 @@ mock.module("../../src/auth", () => ({
   resolveAuth: () => null,
   deleteSessionAuth: () => {},
   clearAuthStale: () => {},
+  authFingerprint: () => "fp",
 }));
 
 mock.module("../../src/cch", () => ({
   deleteBillingPrefix: () => {},
+}));
+
+// Mock quota (imported by idle.ts) to avoid pulling in llm-adapter → sentry,
+// which is only partially mocked above. This test only exercises project-path
+// isolation, so quota functions can be no-ops.
+mock.module("../../src/quota", () => ({
+  maybeFetchQuota: () => {},
+  isQuotaPaused: () => false,
+  deleteQuotaForFingerprint: () => {},
 }));
 
 // Import AFTER mocks are set up

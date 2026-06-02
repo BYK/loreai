@@ -45,6 +45,8 @@ import {
   type WarmingSnapshot,
 } from "./cache-warmer";
 import type { InterTurnHistogram, SessionState } from "./translate/types";
+import { resolveAuth } from "./auth";
+import { getQuotaForCredential, type QuotaSnapshot } from "./quota";
 
 // ---------------------------------------------------------------------------
 // HTML template helpers
@@ -1659,6 +1661,47 @@ function renderWarmingSection(sessionId: string): string {
   return html;
 }
 
+/** Tint class for a utilization percentage (green < 60 < amber < 85 < red). */
+function quotaTint(percent: number): string {
+  return percent < 60 ? "bar-green" : percent < 85 ? "bar-amber" : "bar-red";
+}
+
+/** Render a single quota window as a cost bar, or "" if absent. */
+function renderQuotaWindow(
+  title: string,
+  window: QuotaSnapshot["fiveHour"],
+): string {
+  if (!window) return "";
+  const pct = window.utilization;
+  return renderCostBar({
+    title,
+    value: `${pct.toFixed(1)}% used`,
+    percent: pct,
+    tint: quotaTint(pct),
+    detailRightHtml:
+      window.resetsAt != null ? `Resets ${esc(formatDate(window.resetsAt))}` : "",
+  });
+}
+
+/**
+ * Render the Anthropic OAuth quota section for a live session.
+ *
+ * Returns "" for historical sessions, non-OAuth sessions, or sessions whose
+ * quota hasn't been fetched yet (no snapshot in the per-account cache).
+ */
+function renderQuotaSection(sessionId: string): string {
+  const cred = resolveAuth(sessionId);
+  if (!cred) return "";
+  const snapshot = getQuotaForCredential(cred);
+  if (!snapshot || (!snapshot.fiveHour && !snapshot.sevenDay)) return "";
+
+  let html = `<h2>Anthropic OAuth Quota</h2>`;
+  html += renderQuotaWindow("5-hour window", snapshot.fiveHour);
+  html += renderQuotaWindow("7-day window", snapshot.sevenDay);
+  html += `<div class="field"><span class="key">Updated:</span> ${formatDate(snapshot.fetchedAt)}</div>`;
+  return html;
+}
+
 function pageSession(pid: string, sessionId: string): string | null {
   // Find the project path from the project ID
   const projects = data.listProjects();
@@ -1686,6 +1729,9 @@ function pageSession(pid: string, sessionId: string): string | null {
 
   // Cost intelligence
   body += renderCostSummary(sessionId);
+
+  // Anthropic OAuth quota (live OAuth sessions only)
+  body += renderQuotaSection(sessionId);
 
   // Cache warming heuristics (live sessions only)
   body += renderWarmingSection(sessionId);

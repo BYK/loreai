@@ -51,10 +51,21 @@ import {
 } from "./cache-warmer";
 import * as Sentry from "@sentry/bun";
 import { runBackground } from "./background-limiter";
-import { isAuthStale, resolveAuth, deleteSessionAuth, clearAuthStale } from "./auth";
+import {
+  isAuthStale,
+  resolveAuth,
+  deleteSessionAuth,
+  clearAuthStale,
+  authFingerprint,
+} from "./auth";
 import { emitWarmupMetric, emitSessionCostMetrics, emitCurationMetrics } from "./sentry";
 import { getSessionCosts, totalWorkerCost, deleteSessionCosts } from "./cost-tracker";
 import { deleteBillingPrefix } from "./cch";
+import {
+  maybeFetchQuota,
+  isQuotaPaused,
+  deleteQuotaForFingerprint,
+} from "./quota";
 
 const POLL_INTERVAL_MS = 30_000;
 
@@ -125,6 +136,10 @@ export function startIdleScheduler(
       // arrives via setSessionAuth(), which clears the stale flag.
       if (isAuthStale(sessionID) && !resolveAuth(sessionID)) continue;
 
+      // Skip background work for OAuth accounts near quota exhaustion — preserve
+      // remaining entitlement for user-facing conversation turns.
+      if (isQuotaPaused(resolveAuth(sessionID))) continue;
+
       inProgress.add(sessionID);
       runBackground(
         () => doIdleWork(sessionID, state),
@@ -132,6 +147,18 @@ export function startIdleScheduler(
       )
         .catch((e) => log.error(`idle work failed for session ${sessionID}:`, e))
         .finally(() => inProgress.delete(sessionID));
+    }
+
+    // --- Anthropic OAuth quota refresh ---
+    // Separate pass (not gated by idle timeout) so quota refreshes even on
+    // active sessions. maybeFetchQuota gates internally to Anthropic-OAuth
+    // sessions, applies a 5-min per-account cooldown, and deduplicates
+    // concurrent requests for the same OAuth account.
+    for (const [sessionID] of sessions) {
+      if (isAuthStale(sessionID)) continue;
+      const cred = resolveAuth(sessionID);
+      if (!cred) continue;
+      maybeFetchQuota(sessionID, cred);
     }
 
     evictIdleSessions(config, sessions, inProgress, warmupInProgress, now, onEvict);
@@ -307,6 +334,11 @@ export function evictIdleSessions(
       log.warn(`session eviction: gradient persistence failed for ${sessionID.slice(0, 16)}:`, e);
     }
 
+    // Capture the OAuth account fingerprint BEFORE deleting the session's
+    // auth, so we can GC the shared (per-account) quota cache afterwards.
+    const evictedCred = resolveAuth(sessionID);
+    const evictedFingerprint = evictedCred ? authFingerprint(evictedCred) : null;
+
     // Clean up all per-session in-memory state across modules
     evictGradientSession(sessionID);
     curator.resetCurationTracker(sessionID);
@@ -334,6 +366,22 @@ export function evictIdleSessions(
     }
     if (!projectStillActive) {
       consolidationCooldown.delete(state.projectPath);
+    }
+
+    // GC the shared quota cache only when no remaining session uses this
+    // OAuth account (the cache is keyed by account fingerprint, not session).
+    if (evictedFingerprint) {
+      let fingerprintStillActive = false;
+      for (const [otherID] of sessions) {
+        const otherCred = resolveAuth(otherID);
+        if (otherCred && authFingerprint(otherCred) === evictedFingerprint) {
+          fingerprintStillActive = true;
+          break;
+        }
+      }
+      if (!fingerprintStillActive) {
+        deleteQuotaForFingerprint(evictedFingerprint);
+      }
     }
 
     evicted++;
