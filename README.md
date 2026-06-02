@@ -2,7 +2,9 @@
 
 > **Experimental** — Under active development. APIs, storage format, and behavior may change.
 
-**Stop re-explaining your project to your AI.** Your AI forgets decisions, loses file paths, and undoes its own work. Lore fixes this automatically — no context files to maintain, no workflow changes.
+**Stop re-explaining your project to your AI.** Your tools change. Your memory doesn't.
+
+Your AI forgets decisions, loses file paths, and undoes its own work. Lore fixes this automatically — no context files to maintain, no workflow changes.
 
 Lore is a transparent LLM proxy that adds three-tier memory to any AI coding agent. Context management and long-term memory aren't separate problems — they're one continuous pipeline. Distillation feeds the gradient context manager, which feeds the knowledge curator, which feeds `.lore.md`, and with Lore Cloud *(coming soon)*, your team.
 
