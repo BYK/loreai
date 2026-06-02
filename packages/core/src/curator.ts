@@ -4,6 +4,7 @@ import * as temporal from "./temporal";
 import * as distillation from "./distillation";
 import * as ltm from "./ltm";
 import * as entities from "./entities";
+import * as embedding from "./embedding";
 import * as log from "./log";
 import { CURATOR_SYSTEM, curatorUser, CONSOLIDATION_SYSTEM, consolidationUser } from "./prompt";
 import { detectAndFormat } from "./instruction-detect";
@@ -550,6 +551,25 @@ async function runInner(input: {
       }
     } catch (err) {
       log.warn("post-curation dedup failed (non-fatal):", err);
+    }
+
+    // Cross-project auto-promotion (issue #498): after new knowledge lands,
+    // detect entries whose meaning recurs across 3+ unrelated projects and
+    // promote them to cross_project = 1 so they surface everywhere. Reuses the
+    // dedup similarity machinery; gated by the top-level crossProject flag and
+    // embedding availability (inner function also guards on isAvailable for
+    // callers that don't pre-check).
+    if (cfg.crossProject && embedding.isAvailable()) {
+      try {
+        const promotion = ltm.promoteCrossProject({ dryRun: false });
+        if (promotion.promoted > 0) {
+          log.info(
+            `cross-project promotion: promoted ${promotion.promoted} entries across ${promotion.clusters.length} cluster(s)`,
+          );
+        }
+      } catch (err) {
+        log.warn("cross-project promotion failed (non-fatal):", err);
+      }
     }
   }
 

@@ -252,6 +252,23 @@ const FUZZY_DEDUP_MIN_OVERLAP = 4;
  *  - <0.92: mixed or unrelated entries */
 const EMBEDDING_DEDUP_THRESHOLD = 0.935;
 
+// --- Cross-project auto-promotion thresholds (issue #498) ---
+/** A semantic cluster must span at least this many distinct projects to
+ *  qualify its members for cross-project promotion. */
+const MIN_PROMOTION_PROJECTS = 3;
+/** Only project-scoped entries at or above this confidence are eligible
+ *  for promotion — we only spread knowledge that is already strong/directive
+ *  in its home projects. */
+const MIN_PROMOTION_CONFIDENCE = 0.8;
+/** Cross-project semantic-match threshold. Reuses the (conservative,
+ *  empirically-tuned) dedup threshold to avoid false promotions; cross-project
+ *  phrasing varies more, but staying strict keeps promotions trustworthy. */
+const PROMOTION_SIMILARITY_THRESHOLD = EMBEDDING_DEDUP_THRESHOLD;
+/** Max candidates to consider — keeps the O(n²) pairwise comparison bounded.
+ *  With 200 candidates: 200² = 40K cosine computations (microseconds).
+ *  Query orders by confidence DESC so the highest-quality entries are kept. */
+const MAX_PROMOTION_CANDIDATES = 200;
+
 /**
  * Find an existing knowledge entry whose title is fuzzy-similar to the given title.
  *
@@ -1425,6 +1442,147 @@ export async function deduplicateGlobal(
     )
     .all() as KnowledgeEntry[];
   return _dedup(entries, opts?.dryRun ?? true, threshold);
+}
+
+// ---------------------------------------------------------------------------
+// Cross-project auto-promotion (issue #498)
+// ---------------------------------------------------------------------------
+
+/** A cluster of semantically-similar entries that spans multiple projects. */
+export type PromotionCluster = {
+  /** IDs of the entries in this cluster (all promoted when it qualifies). */
+  memberIds: string[];
+  /** Number of distinct project_ids represented in the cluster. */
+  distinctProjects: number;
+};
+
+export type PromotionResult = {
+  /** Number of entries flipped to cross_project = 1. */
+  promoted: number;
+  /** Qualifying clusters (distinctProjects >= MIN_PROMOTION_PROJECTS). */
+  clusters: PromotionCluster[];
+};
+
+/**
+ * Detect knowledge entries whose meaning appears across 3+ unrelated projects
+ * and promote them to cross_project = 1 in place.
+ *
+ * Candidates are project-scoped (non-null project_id, cross_project = 0),
+ * high-confidence (>= MIN_PROMOTION_CONFIDENCE), embedded entries. They are
+ * clustered across project boundaries by embedding cosine similarity using the
+ * same star-clustering (no-transitivity) approach as dedup. A cluster qualifies
+ * when it spans >= MIN_PROMOTION_PROJECTS distinct project_ids; every member is
+ * then flipped to cross_project = 1 with promotion_status = 'promoted'.
+ *
+ * No-ops (returns { promoted: 0, clusters: [] }) when embeddings are unavailable.
+ */
+export function promoteCrossProject(opts?: { dryRun?: boolean }): PromotionResult {
+  const dryRun = opts?.dryRun ?? false;
+  if (!embedding.isAvailable()) return { promoted: 0, clusters: [] };
+
+  // 1. Load eligible candidate entries (project-scoped, high-confidence, embedded).
+  //    Capped at MAX_PROMOTION_CANDIDATES to keep O(n²) pairwise comparison
+  //    bounded. Query orders by confidence DESC so the best entries survive.
+  const candidates = db()
+    .query(
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge
+       WHERE project_id IS NOT NULL
+       AND cross_project = 0
+       AND confidence >= ?
+       AND embedding IS NOT NULL
+       ORDER BY confidence DESC, updated_at DESC
+       LIMIT ?`,
+    )
+    .all(MIN_PROMOTION_CONFIDENCE, MAX_PROMOTION_CANDIDATES) as KnowledgeEntry[];
+
+  if (candidates.length < MIN_PROMOTION_PROJECTS) {
+    // Fewer entries than the minimum distinct-project requirement — impossible
+    // to span enough projects.
+    return { promoted: 0, clusters: [] };
+  }
+
+  // 2. Load embeddings for the candidate set.
+  const embeddingMap = new Map<string, Float32Array>();
+  {
+    const ids = candidates.map((e) => e.id);
+    const placeholders = ids.map(() => "?").join(",");
+    const rows = db()
+      .query(`SELECT id, embedding FROM knowledge WHERE embedding IS NOT NULL AND id IN (${placeholders})`)
+      .all(...ids) as Array<{ id: string; embedding: Buffer }>;
+    for (const row of rows) {
+      try {
+        embeddingMap.set(row.id, embedding.fromBlob(row.embedding));
+      } catch {
+        log.info(`skipping corrupted embedding for entry ${row.id}`);
+      }
+    }
+  }
+
+  // 3. Build neighbor map by cross-project embedding similarity.
+  const neighborMap = new Map<string, string[]>();
+  for (const entry of candidates) {
+    const entryVec = embeddingMap.get(entry.id);
+    const neighbors: string[] = [];
+    if (entryVec) {
+      for (const other of candidates) {
+        if (other.id === entry.id) continue;
+        const otherVec = embeddingMap.get(other.id);
+        if (!otherVec || otherVec.length !== entryVec.length) continue;
+        if (embedding.cosineSimilarity(entryVec, otherVec) >= PROMOTION_SIMILARITY_THRESHOLD) {
+          neighbors.push(other.id);
+        }
+      }
+    }
+    neighborMap.set(entry.id, neighbors);
+  }
+
+  // 4. Greedy star clustering (no transitivity) — process entries with the
+  //    most neighbors first, claim center + unclaimed neighbors.
+  const entryById = new Map(candidates.map((e) => [e.id, e]));
+  const claimed = new Set<string>();
+  const sortedIds = [...neighborMap.keys()].sort(
+    (a, b) => neighborMap.get(b)!.length - neighborMap.get(a)!.length,
+  );
+
+  const clusters: PromotionCluster[] = [];
+  const toPromote: string[] = [];
+
+  for (const centerId of sortedIds) {
+    if (claimed.has(centerId)) continue;
+    claimed.add(centerId);
+    const members = [centerId];
+    for (const neighborId of neighborMap.get(centerId)!) {
+      if (claimed.has(neighborId)) continue;
+      claimed.add(neighborId);
+      members.push(neighborId);
+    }
+
+    // 5. Qualify cluster by distinct project count.
+    const projects = new Set<string>();
+    for (const id of members) {
+      const pid = entryById.get(id)?.project_id;
+      if (pid) projects.add(pid);
+    }
+    if (projects.size < MIN_PROMOTION_PROJECTS) continue;
+
+    clusters.push({ memberIds: members, distinctProjects: projects.size });
+    toPromote.push(...members);
+  }
+
+  // 6. Flip qualifying members to cross_project = 1 in place.
+  if (!dryRun && toPromote.length) {
+    const now = Date.now();
+    const stmt = db().query(
+      `UPDATE knowledge
+       SET cross_project = 1, promotion_status = 'promoted', promoted_at = ?, updated_at = ?
+       WHERE id = ?`,
+    );
+    for (const id of toPromote) {
+      stmt.run(now, now, id);
+    }
+  }
+
+  return { promoted: toPromote.length, clusters };
 }
 
 // ---------------------------------------------------------------------------

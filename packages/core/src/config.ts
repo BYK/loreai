@@ -254,7 +254,10 @@ export const LoreConfig = z.object({
    *  root project's knowledge base. Supports literal paths (`"project-a"`) and
    *  single-level globs (`"packages/*"`). */
   workspaces: z.array(z.string()).default([]),
-  crossProject: z.boolean().default(false),
+  /** When true, include cross-project knowledge in compaction summaries and
+   *  enable auto-promotion of knowledge that recurs across 3+ unrelated
+   *  projects to `cross_project = 1` (issue #498). */
+  crossProject: z.boolean().default(true),
   agentsFile: z
     .object({
       /** Set to false to disable all AGENTS.md export/import behaviour. */

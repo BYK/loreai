@@ -1,6 +1,8 @@
-import { describe, test, expect, beforeAll, beforeEach } from "bun:test";
+import { describe, test, expect, beforeAll, beforeEach, afterEach, spyOn } from "bun:test";
+import { uuidv7 } from "uuidv7";
 import { db, ensureProject } from "../src/db";
 import * as ltm from "../src/ltm";
+import * as embedding from "../src/embedding";
 
 // UUID v7 pattern: starts with version nibble 7, variant bits 10xxxxxx
 const UUID_V7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -1339,5 +1341,192 @@ describe("ltm — multi-user columns (v29)", () => {
       .all() as Array<{ name: string }>;
     expect(tables).toHaveLength(1);
     expect(tables[0].name).toBe("team_config");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cross-project auto-promotion (issue #498)
+// ---------------------------------------------------------------------------
+
+describe("ltm — cross-project promotion", () => {
+  const PA = "/test/promote/project-a";
+  const PB = "/test/promote/project-b";
+  const PC = "/test/promote/project-c";
+
+  /** Inject a deterministic unit-norm embedding for an entry. Same seed => same
+   *  vector => cosine similarity 1.0 (well above the promotion threshold). */
+  function injectEmbedding(entryId: string, seed: number, dims = 768): void {
+    const vec = new Float32Array(dims);
+    for (let i = 0; i < dims; i++) vec[i] = Math.sin(seed * (i + 1) * 0.1);
+    let norm = 0;
+    for (let i = 0; i < dims; i++) norm += vec[i] * vec[i];
+    norm = Math.sqrt(norm);
+    for (let i = 0; i < dims; i++) vec[i] /= norm;
+    db().query("UPDATE knowledge SET embedding = ? WHERE id = ?").run(Buffer.from(vec.buffer), entryId);
+  }
+
+  /** Create a project-scoped entry with explicit id (bypasses create-time dedup
+   *  guard), a given confidence, and an injected embedding. */
+  function seedEntry(opts: {
+    projectPath: string;
+    title: string;
+    confidence?: number;
+    embedSeed: number;
+  }): string {
+    const id = ltm.create({
+      id: uuidv7(),
+      projectPath: opts.projectPath,
+      category: "preference",
+      title: opts.title,
+      content: `Content for ${opts.title}`,
+      scope: "project",
+      crossProject: false,
+      session: "test-session",
+    });
+    if (opts.confidence != null && opts.confidence !== 1.0) {
+      ltm.update(id, { confidence: opts.confidence });
+    }
+    injectEmbedding(id, opts.embedSeed);
+    return id;
+  }
+
+  // promoteCrossProject() reads embeddings directly from the DB; it only calls
+  // embedding.isAvailable() as a cheap "embeddings configured?" guard. Stub it
+  // rather than touch real provider/worker state — instantiating or shutting
+  // down a LocalProvider in-process triggers Bun NAPI/ONNX crashes, and other
+  // suites may have left the provider disabled or broken. Each test sets the
+  // desired return value via availableSpy.
+  let availableSpy: ReturnType<typeof spyOn>;
+
+  beforeEach(() => {
+    // vectorSearch / promotion queries are unscoped — wipe ALL knowledge so
+    // embeddings from other suites don't leak in. (Documented gotcha.)
+    db().query("DELETE FROM knowledge WHERE embedding IS NOT NULL").run();
+    db().query("DELETE FROM knowledge").run();
+    availableSpy = spyOn(embedding, "isAvailable").mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    availableSpy.mockRestore();
+  });
+
+  test("promotes a cluster spanning 3 distinct projects", () => {
+    const a = seedEntry({ projectPath: PA, title: "Always run tests before committing code", confidence: 0.9, embedSeed: 5 });
+    const b = seedEntry({ projectPath: PB, title: "Run the test suite prior to any commit", confidence: 0.85, embedSeed: 5 });
+    const c = seedEntry({ projectPath: PC, title: "Tests must pass before commit is made", confidence: 0.95, embedSeed: 5 });
+
+    const res = ltm.promoteCrossProject({ dryRun: false });
+    expect(res.promoted).toBe(3);
+    expect(res.clusters).toHaveLength(1);
+    expect(res.clusters[0].distinctProjects).toBe(3);
+
+    for (const id of [a, b, c]) {
+      const e = ltm.get(id)!;
+      expect(e.cross_project).toBe(1);
+      expect(e.promotion_status).toBe("promoted");
+      expect(e.promoted_at).not.toBeNull();
+    }
+  });
+
+  test("does NOT promote a cluster spanning only 2 projects", () => {
+    const a = seedEntry({ projectPath: PA, title: "Always run tests before committing code", confidence: 0.9, embedSeed: 7 });
+    const b = seedEntry({ projectPath: PB, title: "Run the test suite prior to any commit", confidence: 0.9, embedSeed: 7 });
+
+    const res = ltm.promoteCrossProject({ dryRun: false });
+    expect(res.promoted).toBe(0);
+    expect(res.clusters).toHaveLength(0);
+    expect(ltm.get(a)!.cross_project).toBe(0);
+    expect(ltm.get(b)!.cross_project).toBe(0);
+  });
+
+  test("does NOT promote low-confidence entries (< 0.8)", () => {
+    const a = seedEntry({ projectPath: PA, title: "Always run tests before committing code", confidence: 0.7, embedSeed: 9 });
+    const b = seedEntry({ projectPath: PB, title: "Run the test suite prior to any commit", confidence: 0.5, embedSeed: 9 });
+    const c = seedEntry({ projectPath: PC, title: "Tests must pass before commit is made", confidence: 0.6, embedSeed: 9 });
+
+    const res = ltm.promoteCrossProject({ dryRun: false });
+    expect(res.promoted).toBe(0);
+    for (const id of [a, b, c]) expect(ltm.get(id)!.cross_project).toBe(0);
+  });
+
+  test("ignores entries already cross_project = 1", () => {
+    // Three already-cross-project entries across 3 projects — not candidates.
+    for (const [p, seed] of [[PA, 11], [PB, 11], [PC, 11]] as const) {
+      const id = ltm.create({
+        id: uuidv7(),
+        projectPath: p,
+        category: "preference",
+        title: `Cross entry in ${p}`,
+        content: "already shared",
+        scope: "project",
+        crossProject: true,
+        session: "test-session",
+      });
+      injectEmbedding(id, seed);
+    }
+    const res = ltm.promoteCrossProject({ dryRun: false });
+    expect(res.promoted).toBe(0);
+    expect(res.clusters).toHaveLength(0);
+  });
+
+  test("dryRun: true reports clusters but does not mutate", () => {
+    const a = seedEntry({ projectPath: PA, title: "Always run tests before committing code", confidence: 0.9, embedSeed: 13 });
+    const b = seedEntry({ projectPath: PB, title: "Run the test suite prior to any commit", confidence: 0.9, embedSeed: 13 });
+    const c = seedEntry({ projectPath: PC, title: "Tests must pass before commit is made", confidence: 0.9, embedSeed: 13 });
+
+    const res = ltm.promoteCrossProject({ dryRun: true });
+    expect(res.promoted).toBe(3);
+    expect(res.clusters).toHaveLength(1);
+    for (const id of [a, b, c]) {
+      const e = ltm.get(id)!;
+      expect(e.cross_project).toBe(0);
+      expect(e.promotion_status).toBeNull();
+    }
+  });
+
+  test("no-op when embeddings are unavailable", () => {
+    seedEntry({ projectPath: PA, title: "Always run tests before committing code", confidence: 0.9, embedSeed: 15 });
+    seedEntry({ projectPath: PB, title: "Run the test suite prior to any commit", confidence: 0.9, embedSeed: 15 });
+    seedEntry({ projectPath: PC, title: "Tests must pass before commit is made", confidence: 0.9, embedSeed: 15 });
+
+    availableSpy.mockReturnValue(false);
+    const res = ltm.promoteCrossProject({ dryRun: false });
+    expect(res.promoted).toBe(0);
+    expect(res.clusters).toHaveLength(0);
+  });
+
+  test("does NOT promote when 3 similar entries are all in the same project", () => {
+    const a = seedEntry({ projectPath: PA, title: "Always run tests before committing code", confidence: 0.9, embedSeed: 17 });
+    const b = seedEntry({ projectPath: PA, title: "Run the test suite prior to any commit", confidence: 0.9, embedSeed: 17 });
+    const c = seedEntry({ projectPath: PA, title: "Tests must pass before commit is made", confidence: 0.9, embedSeed: 17 });
+
+    const res = ltm.promoteCrossProject({ dryRun: false });
+    expect(res.promoted).toBe(0);
+    expect(res.clusters).toHaveLength(0);
+    for (const id of [a, b, c]) expect(ltm.get(id)!.cross_project).toBe(0);
+  });
+
+  test("mixed-confidence cluster: low-confidence entries excluded, qualifying remainder still promotes", () => {
+    // 4 similar entries across 4 projects, but one is below the confidence threshold.
+    // The low-confidence entry is excluded from candidates entirely, so the
+    // remaining 3 high-confidence entries should still form a qualifying cluster.
+    const PD = "/test/promote/project-d";
+    const a = seedEntry({ projectPath: PA, title: "Always run tests before committing code", confidence: 0.9, embedSeed: 19 });
+    const b = seedEntry({ projectPath: PB, title: "Run the test suite prior to any commit", confidence: 0.85, embedSeed: 19 });
+    const c = seedEntry({ projectPath: PC, title: "Tests must pass before commit is made", confidence: 0.95, embedSeed: 19 });
+    const d = seedEntry({ projectPath: PD, title: "Test before every commit always", confidence: 0.5, embedSeed: 19 });
+
+    const res = ltm.promoteCrossProject({ dryRun: false });
+    // Only the 3 high-confidence entries should be promoted
+    expect(res.promoted).toBe(3);
+    expect(res.clusters).toHaveLength(1);
+    expect(res.clusters[0].distinctProjects).toBe(3);
+    for (const id of [a, b, c]) {
+      expect(ltm.get(id)!.cross_project).toBe(1);
+      expect(ltm.get(id)!.promotion_status).toBe("promoted");
+    }
+    // Low-confidence entry untouched
+    expect(ltm.get(d)!.cross_project).toBe(0);
+    expect(ltm.get(d)!.promotion_status).toBeNull();
   });
 });
