@@ -5,8 +5,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LoreAI — Persistent Memory for AI Coding Agents</title>
-  <link rel="icon" href="favicon.ico" sizes="16x16 32x32">
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%2252%2037%2096%2076%22%3E%3Cpath%20d%3D%22M%2080%2045%20L%2060%2045%20L%2060%20105%20L%2080%20105%22%20fill%3D%22none%22%20stroke%3D%22%232B2B2B%22%20stroke-width%3D%228%22%2F%3E%3Cline%20x1%3D%2275%22%20y1%3D%2255%22%20x2%3D%22140%22%20y2%3D%2255%22%20stroke%3D%22%232B2B2B%22%20stroke-width%3D%224%22%20stroke-linecap%3D%22square%22%2F%3E%3Cline%20x1%3D%2275%22%20y1%3D%2275%22%20x2%3D%22125%22%20y2%3D%2275%22%20stroke%3D%22%232B2B2B%22%20stroke-width%3D%224%22%20stroke-linecap%3D%22square%22%2F%3E%3Cline%20x1%3D%2275%22%20y1%3D%2295%22%20x2%3D%22110%22%20y2%3D%2295%22%20stroke%3D%22%232B2B2B%22%20stroke-width%3D%224%22%20stroke-linecap%3D%22square%22%2F%3E%3C%2Fsvg%3E">
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
   <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -100,7 +100,7 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 0 3rem;
+      padding: .45rem 3rem;
       background: var(--ink); /* Dark green background */
       border-bottom: 1px solid rgba(255, 255, 255, 0.05);
       color: var(--c0);
@@ -114,7 +114,7 @@
     .nav-right {
       display: flex;
       align-items: center;
-      gap: 3rem;
+      gap: 2.4rem;
     }
 
     .logo {
@@ -365,20 +365,42 @@
     }
 
     .graph-wrap {
-      width: min(430px, 100%);
+      width: min(460px, 100%);
       aspect-ratio: 1;
       position: relative;
+      margin-top: -1.5rem;
     }
 
     .graph-wrap svg {
       width: 100%;
       height: 100%;
+      position: relative;
+      z-index: 1;
     }
 
     .mg-edge {
-      stroke-dasharray: 220;
-      stroke-dashoffset: 220;
+      stroke-dasharray: 420;
+      stroke-dashoffset: 420;
       animation: draw 2s var(--ease) forwards;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .mg-edge-soft {
+      stroke-dasharray: 8 10;
+      opacity: .45;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .mg-feature {
+      stroke: #3d6644;
+      stroke-width: 1;
+      opacity: .62;
+    }
+
+    .mg-node {
+      filter: drop-shadow(0 8px 16px rgba(26, 51, 32, .08));
     }
 
     @keyframes draw {
@@ -408,32 +430,59 @@
       background: var(--c0);
       border: 1px solid var(--c2);
       border-radius: 3px;
-      padding: .28rem .65rem;
-      font-size: .67rem;
+      padding: .28rem .62rem;
+      font-size: .62rem;
       letter-spacing: .07em;
       color: var(--mid);
       box-shadow: 0 4px 14px rgba(26, 51, 32, .06);
       white-space: nowrap;
+      z-index: 2;
     }
 
     .gc1 {
-      top: 10%;
-      left: 2%
+      top: 20%;
+      left: 6%
     }
 
     .gc2 {
-      top: 28%;
-      right: -2%
+      top: 14%;
+      right: 0%
     }
 
     .gc3 {
-      bottom: 20%;
-      left: 0%
+      bottom: 19%;
+      left: 1%
     }
 
     .gc4 {
+      bottom: 5%;
+      right: 26%;
+    }
+
+    .gc5 {
+      top: 8%;
+      left: 50%;
+      transform: translateX(-50%);
+    }
+
+    .gc6 {
+      top: 42%;
+      left: -4%;
+    }
+
+    .gc7 {
+      top: 45%;
+      right: 2%;
+    }
+
+    .gc8 {
       bottom: 8%;
-      right: 5%
+      left: 20%;
+    }
+
+    .gc9 {
+      bottom: 22%;
+      right: 10%;
     }
 
     /* stat strip */
@@ -813,7 +862,7 @@
     }    @media(max-width:900px){
       html, body { overflow-x: hidden; width: 100%; -webkit-text-size-adjust: 100%; }
       
-      nav { padding: 1rem 1.2rem; }
+      nav { padding: .8rem 1.2rem; }
       .nav-links { display: none; }
       .nav-btn { padding: .5rem 1rem; font-size: .65rem; }
       
@@ -827,7 +876,8 @@
       .btn-fill, .btn-ghost { width: 100%; justify-content: center; box-sizing: border-box; }
       
       .hero-visual { order: -1; margin-bottom: 1rem; max-width: 100%; }
-      .gc1, .gc2, .gc3, .gc4 { display: none; }
+      .graph-wrap { width: min(340px, 100%); margin-top: 0; }
+      .g-chip { display: none; }
       
       .hero-stats { grid-template-columns: 1fr; margin-top: 1.5rem; }
       .stat-cell { padding: 1.2rem; }
@@ -869,9 +919,8 @@
   <!-- NAV -->
   <nav>
     <div class="nav-left">
-      <a href="#" class="logo" style="display: flex; align-items: center; gap: 0.2rem; text-decoration: none;">
-        <img src="logo-final.png" alt="Lore Icon" style="height: 120px; width: auto; filter: invert(1); mix-blend-mode: screen; display: block; margin-left: -120px;" />
-        <span class="logo-text" style="font-family: var(--serif); font-size: 2.3rem; font-weight: 400; font-style: italic; color: var(--c0); margin-left: -80px;">Lore<span style="color: var(--g5)">.AI</span></span>
+      <a href="#" class="logo" style="display: flex; align-items: center; text-decoration: none;">
+        <img src="brand-mark.svg?v=6" alt="Lore.AI" style="height: 78px; width: auto; display: block;" />
       </a>
     </div>
     <div class="nav-right">
@@ -931,20 +980,48 @@
     <div class="hero-visual sr">
       <div class="graph-wrap">
         <svg viewBox="0 0 400 400" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <line x1="200" y1="200" x2="90" y2="100" stroke="#8fba96" stroke-width="1" class="mg-edge" />
-          <line x1="200" y1="200" x2="310" y2="100" stroke="#8fba96" stroke-width="1" class="mg-edge" />
-          <line x1="200" y1="200" x2="200" y2="330" stroke="#8fba96" stroke-width="1" class="mg-edge" />
+          <circle cx="200" cy="200" r="158" stroke="#8fba96" stroke-width=".8" opacity=".28" />
+          <circle cx="200" cy="200" r="104" stroke="#8fba96" stroke-width=".7" opacity=".22" />
+          <circle cx="200" cy="200" r="58" stroke="#8fba96" stroke-width=".6" opacity=".18" />
+          <path d="M200 146 C199 125 200 104 200 84" stroke="#8fba96" class="mg-edge mg-feature" />
+          <path d="M169 158 C143 145 126 135 109 126" stroke="#8fba96" class="mg-edge mg-feature" />
+          <path d="M232 158 C260 140 288 122 324 102" stroke="#8fba96" class="mg-edge mg-feature" />
+          <path d="M146 200 C121 198 99 197 78 196" stroke="#8fba96" class="mg-edge mg-feature" />
+          <path d="M254 200 C276 201 296 203 316 206" stroke="#8fba96" class="mg-edge mg-feature" />
+          <path d="M161 238 C139 258 115 279 88 302" stroke="#8fba96" class="mg-edge mg-feature" />
+          <path d="M238 238 C253 252 268 266 284 281" stroke="#8fba96" class="mg-edge mg-feature" />
+          <path d="M181 251 C166 283 151 313 134 338" stroke="#8fba96" class="mg-edge mg-feature" />
+          <path d="M221 251 C238 291 256 323 274 344" stroke="#8fba96" class="mg-edge mg-feature" />
+          <path d="M109 126 C131 95 164 78 200 84 C247 74 288 86 324 102" stroke="#8fba96" stroke-width=".8" class="mg-edge-soft" />
+          <path d="M78 196 C104 238 140 266 198 272 C246 268 286 244 316 206" stroke="#8fba96" stroke-width=".8" class="mg-edge-soft" />
+          <path d="M88 302 C133 284 173 287 214 306 C237 316 259 320 284 281" stroke="#8fba96" stroke-width=".7" class="mg-edge-soft" />
+          <path d="M109 126 C105 165 91 183 78 196 C112 207 135 219 161 238" stroke="#8fba96" stroke-width=".7" class="mg-edge-soft" />
+          <circle cx="151" cy="139" r="4" fill="#8fba96" opacity=".45" />
+          <circle cx="244" cy="130" r="4" fill="#8fba96" opacity=".45" />
+          <circle cx="139" cy="257" r="4" fill="#8fba96" opacity=".35" />
+          <circle cx="252" cy="252" r="4" fill="#8fba96" opacity=".35" />
           <circle cx="200" cy="200" r="54" fill="#2a4d32" class="mn" />
           <text class="logo-text" x="200" y="206" text-anchor="middle" font-style="italic" font-weight="400" font-size="22">
             <tspan fill="var(--c0)">Lore</tspan><tspan fill="var(--g5)">.AI</tspan>
           </text>
-          <circle cx="90" cy="100" r="15" fill="#c4ddc7" opacity=".8" />
-          <circle cx="310" cy="100" r="15" fill="#c4ddc7" opacity=".8" />
-          <circle cx="200" cy="330" r="15" fill="#dfd5bb" opacity=".8" />
+          <circle cx="200" cy="84" r="11" fill="#dfd5bb" opacity=".86" class="mg-node" />
+          <circle cx="109" cy="126" r="12" fill="#bfdcc2" opacity=".82" class="mg-node" />
+          <circle cx="324" cy="102" r="12" fill="#bfdcc2" opacity=".82" class="mg-node" />
+          <circle cx="78" cy="196" r="10" fill="#b7d6bb" opacity=".82" class="mg-node" />
+          <circle cx="316" cy="206" r="10" fill="#b7d6bb" opacity=".82" class="mg-node" />
+          <circle cx="88" cy="302" r="11" fill="#b7d6bb" opacity=".82" class="mg-node" />
+          <circle cx="284" cy="281" r="11" fill="#dfd5bb" opacity=".82" class="mg-node" />
+          <circle cx="134" cy="338" r="10" fill="#dfd5bb" opacity=".8" class="mg-node" />
+          <circle cx="274" cy="344" r="10" fill="#bfdcc2" opacity=".78" class="mg-node" />
         </svg>
+        <div class="g-chip gc5">Gradient Context</div>
         <div class="g-chip gc1">Lore Distillation</div>
         <div class="g-chip gc2">Any Provider*</div>
+        <div class="g-chip gc6">Recall Tool</div>
+        <div class="g-chip gc7">.lore.md Sync</div>
         <div class="g-chip gc3">On-Device Vector Search</div>
+        <div class="g-chip gc8">Import History</div>
+        <div class="g-chip gc9">Cost-Aware Caching</div>
         <div class="g-chip gc4">Sessions Lasting Days</div>
       </div>
     </div>
