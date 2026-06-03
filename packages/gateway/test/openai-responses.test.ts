@@ -287,6 +287,26 @@ describe("parseOpenAIResponsesRequest", () => {
     expect(ids).toEqual(["call_A", "call_B"]);
   });
 
+  test("drops item_reference items without breaking surrounding messages", () => {
+    const req = parseOpenAIResponsesRequest(
+      {
+        model: "gpt-5.5",
+        input: [
+          { type: "message", role: "user", content: "hello" },
+          // Server-side reference the gateway cannot resolve — must be dropped,
+          // not crash, and not corrupt the surrounding messages.
+          { type: "item_reference", id: "msg_server_123" },
+          { type: "message", role: "assistant", content: [{ type: "output_text", text: "hi" }] },
+        ],
+      },
+      headers,
+    );
+
+    expect(req.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(req.messages[0].content).toEqual([{ type: "text", text: "hello" }]);
+    expect(req.messages[1].content).toEqual([{ type: "text", text: "hi" }]);
+  });
+
   test("extracts instructions as system prompt", () => {
     const req = parseOpenAIResponsesRequest(
       {
@@ -471,7 +491,10 @@ describe("buildOpenAIResponsesUpstreamRequest", () => {
     expect(tools[0].parameters).toEqual({ type: "object", properties: {} });
   });
 
-  test("forwards previous_response_id and reasoning", () => {
+  test("does NOT forward previous_response_id (gateway is stateless full-history)", () => {
+    // The gateway always sends the complete conversation as `input`. Forwarding
+    // previous_response_id would make the upstream ALSO prepend its server-stored
+    // history (duplication) and defeat the gateway's compression/recall edits.
     const req = parseOpenAIResponsesRequest(
       {
         model: "gpt-4o",
@@ -484,7 +507,8 @@ describe("buildOpenAIResponsesUpstreamRequest", () => {
 
     const result = buildOpenAIResponsesUpstreamRequest(req, "https://api.openai.com");
     const body = result.body as Record<string, unknown>;
-    expect(body.previous_response_id).toBe("resp_abc");
+    expect(body.previous_response_id).toBeUndefined();
+    // reasoning is still forwarded
     expect(body.reasoning).toEqual({ effort: "medium" });
   });
 

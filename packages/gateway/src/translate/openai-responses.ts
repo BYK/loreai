@@ -10,6 +10,7 @@
  *   - System prompt is in the `instructions` field
  *   - Tools use `parameters` directly (not wrapped in `function`)
  */
+import { log } from "@loreai/core";
 import type {
   GatewayContentBlock,
   GatewayMessage,
@@ -193,7 +194,23 @@ function parseInputItems(input: unknown): GatewayMessage[] {
       continue;
     }
 
-    // Other item types (reasoning, item_reference, etc.) — skip
+    // Other item types — skip, but warn about ones that can carry conversation
+    // content the gateway cannot reconstruct.
+    //
+    // `item_reference` points to an item OpenAI stored server-side (under an
+    // opaque upstream id). The gateway is a stateless full-history proxy: it
+    // rewrites the conversation every turn and never persists upstream item
+    // ids, so it has no way to resolve a reference. Codex itself never emits
+    // these (it always sends full input items), but other Responses-API
+    // clients might. Surface it so we have observability if it ever happens
+    // rather than silently dropping context. (`reasoning` items are expected
+    // and intentionally dropped — don't warn on those.)
+    if (itemType === "item_reference") {
+      log.warn(
+        `dropping unresolvable Responses API item_reference (id=${String(item.id ?? "?")}); ` +
+          `gateway is stateless full-history and cannot resolve server-side item references`,
+      );
+    }
   }
 
   return messages;
@@ -289,8 +306,19 @@ export function buildOpenAIResponsesUpstreamRequest(
     if (req.extras.user !== undefined) {
       body.user = req.extras.user;
     }
+    // Intentionally do NOT forward `previous_response_id`. The gateway is a
+    // stateless full-history proxy: `buildResponsesInput` above already sends
+    // the COMPLETE (gradient-transformed, recall-injected) conversation as
+    // `input`. `previous_response_id` would tell the upstream to ALSO prepend
+    // its server-stored copy of the prior turns — duplicating history and,
+    // worse, defeating the gateway's compression and recall edits with an
+    // un-editable server-side copy. Dropping it keeps the upstream's view
+    // consistent with what the gateway actually sends.
     if (req.extras.previous_response_id !== undefined) {
-      body.previous_response_id = req.extras.previous_response_id;
+      log.warn(
+        "dropping previous_response_id; gateway sends full conversation history " +
+          "as input and does not rely on server-side response storage",
+      );
     }
     if (req.extras.reasoning !== undefined) {
       body.reasoning = req.extras.reasoning;
