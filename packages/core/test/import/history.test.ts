@@ -123,6 +123,23 @@ describe("import history", () => {
       recordDecline(P, "aider");
       expect(isImported(P, "aider", "some-session", "anyhash")).toBeNull();
     });
+
+    test("coexistence: recordDecline then recordImport — both visible appropriately", () => {
+      const CP = "/test/coexist-project";
+      ensureProject(CP);
+      recordDecline(CP, "claude-code");
+      expect(hasAgentImportRecord(CP, "claude-code")).toBe(true);
+
+      // Real import after sentinel (mirrors the accept path in auto-import)
+      recordImport(CP, "claude-code", "sess-1", "h1", { created: 3, updated: 1 });
+      expect(hasAgentImportRecord(CP, "claude-code")).toBe(true);
+
+      // listImports shows only the real import, not the sentinel
+      const imports = listImports(CP);
+      const agentImports = imports.filter((r) => r.agent_name === "claude-code");
+      expect(agentImports.length).toBe(1);
+      expect(agentImports[0].source_id).toBe("sess-1");
+    });
   });
 
   describe("computeHash", () => {

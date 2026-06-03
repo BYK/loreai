@@ -1216,7 +1216,9 @@ export function getLastImportAt(projectPath: string): number | null {
 
 /**
  * Record that conversation import was offered/run for a project.
- * Prevents auto-import from re-prompting, and enables incremental imports.
+ * Supplementary timestamp — auto-import now gates on per-agent import_history
+ * rows (via hasAgentImportRecord), not this field. Still written by explicit
+ * `lore import` for bookkeeping.
  */
 export function setLastImportAt(projectPath: string, timestamp: number): void {
   const id = ensureProject(projectPath);
