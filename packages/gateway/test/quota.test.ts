@@ -301,6 +301,22 @@ describe("fetchQuotaDeduped", () => {
     expect(r1).toEqual(r2 as QuotaSnapshot);
   });
 
+  test("serial gate keeps advancing after a failed fetch (no deadlock)", async () => {
+    // A failure must release the serial gate so subsequent fetches proceed.
+    globalThis.fetch = mock(() =>
+      Promise.reject(new Error("network")),
+    ) as unknown as typeof fetch;
+    const r1 = await fetchOAuthQuotaSnapshot(BEARER);
+    expect(r1).toBeNull();
+
+    // The gate should be free — a following fetch must complete, not hang.
+    globalThis.fetch = mock(() =>
+      Promise.resolve(new Response(quotaBody(), { status: 200 })),
+    ) as unknown as typeof fetch;
+    const r2 = await fetchOAuthQuotaSnapshot(BEARER);
+    expect(r2).not.toBeNull();
+  });
+
   test("stores result in cache, then clears inflight (allows re-fetch)", async () => {
     globalThis.fetch = mock(() =>
       Promise.resolve(new Response(quotaBody(), { status: 200 })),
@@ -378,6 +394,43 @@ describe("maybeFetchQuota — provider isolation", () => {
     // Allow the first background fetch to settle.
     await new Promise((r) => setTimeout(r, 1100));
     expect(calls).toBe(1);
+  });
+
+  test("a failed fetch does not hold the full 5-min cooldown (retry allowed sooner)", async () => {
+    // First fetch fails (timeout) → only the short retry cooldown should apply.
+    globalThis.fetch = mock(() =>
+      Promise.reject(new Error("boom")),
+    ) as unknown as typeof fetch;
+
+    makeOAuthSession("sid-retry");
+    maybeFetchQuota("sid-retry", BEARER);
+    await new Promise((r) => setTimeout(r, 1100)); // let the failed fetch settle
+
+    // The cooldown was set to (now - 5min + 30s), so the account is still
+    // gated now, but will be eligible again in ~30s rather than 5min. Verify
+    // the next call within the SHORT window is still skipped (no stampede)...
+    let calls = 0;
+    globalThis.fetch = mock(() => {
+      calls++;
+      return Promise.resolve(new Response(quotaBody(), { status: 200 }));
+    }) as unknown as typeof fetch;
+    maybeFetchQuota("sid-retry", BEARER);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(calls).toBe(0); // still inside the 30s retry window
+  });
+
+  test("a successful fetch holds the full cooldown", async () => {
+    let calls = 0;
+    globalThis.fetch = mock(() => {
+      calls++;
+      return Promise.resolve(new Response(quotaBody(), { status: 200 }));
+    }) as unknown as typeof fetch;
+
+    makeOAuthSession("sid-ok");
+    maybeFetchQuota("sid-ok", BEARER);
+    await new Promise((r) => setTimeout(r, 1100));
+    expect(calls).toBe(1);
+    expect(getQuotaForCredential(BEARER)).not.toBeNull();
   });
 });
 

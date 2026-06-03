@@ -66,8 +66,15 @@ const QUOTA_ANTHROPIC_VERSION = "2023-06-01";
  */
 const QUOTA_FALLBACK_USER_AGENT = "claude-cli/2.1.160 (external, sdk-cli)";
 
-/** Refresh quota at most once per 5 minutes per OAuth account. */
+/** Refresh quota at most once per 5 minutes per OAuth account (on success). */
 const QUOTA_FETCH_INTERVAL_MS = 5 * 60 * 1000;
+
+/**
+ * Shorter cooldown after a failed fetch so a transient error (429/timeout/
+ * network) doesn't suppress quota data for the full 5-minute window. Still
+ * long enough to avoid hammering the endpoint on sustained failures.
+ */
+const QUOTA_FETCH_RETRY_INTERVAL_MS = 30 * 1000;
 
 /** Minimum gap between any two quota API calls (across all accounts). */
 const QUOTA_SERIAL_GAP_MS = 1_000;
@@ -180,19 +187,21 @@ export async function fetchOAuthQuotaSnapshot(
 ): Promise<QuotaSnapshot | null> {
   if (cred.scheme !== "bearer") return null;
 
-  // Serial gate: wait for the previous call to finish + a minimum spacing.
-  const release = (() => {
-    let resolveFn: () => void = () => {};
-    const next = new Promise<void>((r) => {
-      resolveFn = r;
-    });
-    const prev = quotaFetchGate;
-    quotaFetchGate = prev.then(() => next);
-    return { prev, done: resolveFn };
-  })();
-  await release.prev;
+  // Serial gate: serialize calls across accounts with a minimum spacing to
+  // avoid 429 bursts. We chain `quotaFetchGate` so each call waits for the
+  // previous one. `next` only ever resolves (via `done()` in the finally),
+  // so the chain can never reject and stall — but we still await inside the
+  // try and release in finally to guarantee the gate advances even if an
+  // unexpected error occurs before/after the fetch.
+  let releaseDone: () => void = () => {};
+  const next = new Promise<void>((r) => {
+    releaseDone = r;
+  });
+  const prev = quotaFetchGate;
+  quotaFetchGate = prev.then(() => next);
 
   try {
+    await prev;
     // Reuse the Claude Code header fingerprint (user-agent, anthropic-beta,
     // browser-access, request-id) sniffed from the session's conversation
     // turns. Anthropic's OAuth endpoints validate the client fingerprint and
@@ -234,8 +243,10 @@ export async function fetchOAuthQuotaSnapshot(
     return null;
   } finally {
     // Space out the next call by the serial gap, then release the gate.
+    // Always runs — even if `await prev` or fetch threw — so the gate can
+    // never deadlock.
     await sleep(QUOTA_SERIAL_GAP_MS);
-    release.done();
+    releaseDone();
   }
 }
 
@@ -306,14 +317,24 @@ export function maybeFetchQuota(sessionID: string, cred: AuthCredential): void {
   const now = Date.now();
   const last = quotaFetchCooldown.get(fp) ?? 0;
   if (now - last < QUOTA_FETCH_INTERVAL_MS) return;
-  quotaFetchCooldown.set(fp, now);
+
+  // Provisional cooldown: record the attempt with the short retry interval so
+  // concurrent ticks don't stampede, but a failure only suppresses retries for
+  // ~30s (not the full 5 min). On success we bump it to the full interval.
+  quotaFetchCooldown.set(fp, now - QUOTA_FETCH_INTERVAL_MS + QUOTA_FETCH_RETRY_INTERVAL_MS);
 
   void runBackground(
     () => fetchQuotaDeduped(cred, sessionID),
     `quota fp=${fp.slice(0, 8)}`,
-  ).catch((err) => {
-    log.warn("quota: background fetch failed", err);
-  });
+  )
+    .then((snap) => {
+      // Success → hold the full 5-minute cooldown. (undefined = skipped by the
+      // background limiter; leave the short retry window in place.)
+      if (snap) quotaFetchCooldown.set(fp, Date.now());
+    })
+    .catch((err) => {
+      log.warn("quota: background fetch failed", err);
+    });
 }
 
 // ---------------------------------------------------------------------------
