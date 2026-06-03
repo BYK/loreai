@@ -1262,6 +1262,26 @@ export function close() {
 // Project management
 
 /**
+ * Path prefix for synthetic "unattributed" project buckets. Created when a
+ * remote/central gateway can't determine a confident project path for a
+ * request (no `X-Lore-Project` header, no inferable path in the system
+ * prompt). Each such session gets its own bucket
+ * (`/__lore_unattributed__/<sessionID>`) so unrelated sessions are never
+ * merged onto the gateway's own cwd. Buckets self-heal (when a confident path
+ * later arrives) or can be consolidated. Defined here (in core) so both the
+ * gateway and DB-layer naming agree on the canonical prefix.
+ */
+export const UNATTRIBUTED_PROJECT_PREFIX = "/__lore_unattributed__";
+
+/** True when a project path is a synthetic unattributed bucket. */
+export function isUnattributedProjectPath(path: string): boolean {
+  return (
+    path === UNATTRIBUTED_PROJECT_PREFIX ||
+    path.startsWith(`${UNATTRIBUTED_PROJECT_PREFIX}/`)
+  );
+}
+
+/**
  * Look up or create a project by filesystem path, with git-remote awareness.
  *
  * Resolution order:
@@ -1343,6 +1363,11 @@ export function ensureProject(path: string, name?: string, suppliedGitRemote?: s
 
   // 4. Create new project
   const id = crypto.randomUUID();
+  // Synthetic unattributed buckets get a clearly-marked provisional name so the
+  // dashboard never shows a bare session ID as if it were a real repo.
+  const derivedName = isUnattributedProjectPath(path)
+    ? `(unattributed) ${(path.split("/").pop() ?? "").slice(0, 12)}`
+    : name ?? repoNameFromRemote(gitRemote) ?? path.split("/").pop() ?? "unknown";
   db()
     .query(
       "INSERT INTO projects (id, path, name, git_remote, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -1350,7 +1375,7 @@ export function ensureProject(path: string, name?: string, suppliedGitRemote?: s
     .run(
       id,
       path,
-      name ?? repoNameFromRemote(gitRemote) ?? path.split("/").pop() ?? "unknown",
+      derivedName,
       gitRemote,
       Date.now(),
     );

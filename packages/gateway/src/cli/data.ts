@@ -1588,6 +1588,7 @@ Subcommands:
   clear [options]       Clear data for a project or wipe the database
   delete <type> <id>    Delete a single entry (type: knowledge, session, distillation, project)
   merge                 Scan git remotes and merge duplicate projects
+  consolidate           Merge "(unattributed)" buckets into matched real projects
   recover               Re-import knowledge from .lore.md / AGENTS.md files
   dedup                 Find and remove duplicate knowledge entries (all projects)
   reindex               Rebuild embedding vectors (after model/config change)
@@ -1618,6 +1619,9 @@ Examples:
   lore data delete project /path/to/project  # delete project and ALL its data
   lore data merge                          # scan & merge git duplicates
   lore data merge --yes                    # skip confirmation
+  lore data consolidate                    # dry-run: show "(unattributed)" buckets & matches
+  lore data consolidate --yes              # apply: merge matched buckets into real projects
+  lore data consolidate --json             # machine-readable plan (dryRun:true unless --yes)
   lore data recover                        # re-import from .lore.md / AGENTS.md
   lore data recover --yes                  # skip confirmation
   lore data dedup                          # dry-run: show duplicate clusters
@@ -1627,6 +1631,123 @@ Examples:
   lore data reindex                        # rebuild all embedding vectors
   lore data rerank                         # re-score preference confidence
 `.trimStart();
+
+/**
+ * Consolidate synthetic "unattributed" project buckets
+ * (`/__lore_unattributed__/<sessionID>`) created by a remote gateway when it
+ * couldn't determine a confident project path.
+ *
+ * For each bucket, attempt to match a REAL project by git_remote (the only
+ * reliable cross-session signal). When matched, merge the bucket into the real
+ * project (re-pointing all rows). Buckets with no confident match are reported
+ * but left intact (they remain a clearly-labelled cross-project memory source).
+ */
+async function cmdConsolidate(
+  _args: string[],
+  flags: Record<string, unknown>,
+): Promise<void> {
+  const remote = getRemoteUrl();
+  if (remote) {
+    console.error(
+      "Error: consolidate is not supported in remote mode (run it on the gateway host).",
+    );
+    process.exit(1);
+  }
+
+  const { data, isUnattributedProjectPath } = await import("@loreai/core");
+  const mergeProjects = data.mergeProjects;
+  const skipConfirm = !!flags.yes;
+  const asJson = !!flags.json;
+  // Destructive op → default to a dry run. Apply only with --yes. `--dry-run`
+  // forces preview even when --yes is present.
+  const dryRun = !!flags["dry-run"] || !skipConfirm;
+
+  const projects = data.listProjects();
+  const buckets = projects.filter((p) => isUnattributedProjectPath(p.path));
+  // Candidate targets are REAL projects only (never other buckets). Matching a
+  // bucket to a real project by git remote is the only reliable cross-session
+  // signal — note both the bucket AND the real project may carry the same
+  // remote, so we must explicitly exclude buckets from the target set rather
+  // than relying on a first-match lookup.
+  const realProjects = projects.filter((p) => !isUnattributedProjectPath(p.path));
+
+  type Plan = {
+    bucket: (typeof projects)[number];
+    target?: (typeof projects)[number];
+  };
+  const plans: Plan[] = [];
+  for (const bucket of buckets) {
+    let target: (typeof projects)[number] | undefined;
+    if (bucket.git_remote) {
+      target = realProjects.find((p) => p.git_remote === bucket.git_remote);
+    }
+    plans.push({ bucket, target });
+  }
+
+  const mergeable = plans.filter((p) => p.target);
+  const orphans = plans.filter((p) => !p.target);
+
+  if (asJson) {
+    console.log(
+      JSON.stringify(
+        {
+          dryRun,
+          buckets: buckets.length,
+          mergeable: mergeable.map((p) => ({
+            from: p.bucket.path,
+            into: p.target!.path,
+            gitRemote: p.bucket.git_remote,
+          })),
+          orphans: orphans.map((p) => ({
+            path: p.bucket.path,
+            knowledge: p.bucket.knowledge_count,
+            sessions: p.bucket.session_count,
+          })),
+        },
+        null,
+        2,
+      ),
+    );
+  } else {
+    console.log(`\nUnattributed buckets: ${buckets.length}`);
+    console.log(`  mergeable (matched by git remote): ${mergeable.length}`);
+    console.log(`  orphans (no confident match): ${orphans.length}\n`);
+    for (const p of mergeable) {
+      console.log(`  merge ${p.bucket.path} → ${p.target!.name ?? p.target!.path}`);
+    }
+    for (const p of orphans) {
+      console.log(
+        `  keep  ${p.bucket.path} (${p.bucket.knowledge_count} knowledge, ${p.bucket.session_count} sessions)`,
+      );
+    }
+  }
+
+  if (mergeable.length === 0) {
+    if (!asJson) console.log("\nNothing to consolidate.");
+    return;
+  }
+
+  // Dry run (default, or explicit --dry-run): preview only, never mutate.
+  if (dryRun) {
+    if (!asJson) {
+      console.log(
+        `\nDry run — no changes made. Re-run with --yes to merge ${mergeable.length} bucket(s).`,
+      );
+    }
+    return;
+  }
+
+  let merged = 0;
+  for (const p of mergeable) {
+    try {
+      mergeProjects(p.bucket.id, p.target!.id);
+      merged++;
+    } catch (e) {
+      console.error(`  failed to merge ${p.bucket.path}: ${(e as Error).message}`);
+    }
+  }
+  console.log(`\nConsolidated ${merged} bucket(s).`);
+}
 
 export async function commandData(
   positionals: string[],
@@ -1650,6 +1771,9 @@ export async function commandData(
       break;
     case "merge":
       await cmdMerge(subArgs, values);
+      break;
+    case "consolidate":
+      await cmdConsolidate(subArgs, values);
       break;
     case "recover":
       await cmdRecover(subArgs, values);

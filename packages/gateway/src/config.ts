@@ -4,7 +4,7 @@
  * (only `normalizeRemoteUrl` for git URL canonicalization).
  */
 
-import { normalizeRemoteUrl, discoverWorkspaceRoot } from "@loreai/core";
+import { normalizeRemoteUrl, discoverWorkspaceRoot, UNATTRIBUTED_PROJECT_PREFIX, isUnattributedProjectPath } from "@loreai/core";
 
 // ---------------------------------------------------------------------------
 // Port defaults
@@ -72,6 +72,20 @@ export interface GatewayConfig {
    * Env: LORE_WORKER_UPSTREAM
    */
   workerUpstream?: string;
+  /**
+   * Remote/central gateway mode. When true, the gateway is serving agents
+   * running on OTHER machines, so its own `process.cwd()` has no relationship
+   * to any client's project. In this mode the gateway MUST NOT attribute
+   * path-less requests to its own cwd (doing so merges unrelated projects).
+   * Instead, requests that cannot resolve a confident project path are routed
+   * to a per-session synthetic "unattributed" bucket
+   * (`/__lore_unattributed__/<sessionID>`) that can later self-heal or be
+   * consolidated. Env: LORE_REMOTE_GATEWAY.
+   *
+   * Note: hosted mode (`LORE_HOSTED_MODE`) implies remote-gateway behavior —
+   * a hosted gateway never shares a filesystem with its clients.
+   */
+  remoteGateway: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +116,8 @@ export function loadConfig(): GatewayConfig {
     workerUpstream: env.LORE_WORKER_UPSTREAM
       ? trimTrailingSlash(env.LORE_WORKER_UPSTREAM)
       : undefined,
+    // Hosted mode is always a remote gateway (no shared filesystem with clients).
+    remoteGateway: isTruthy(env.LORE_REMOTE_GATEWAY) || isTruthy(env.LORE_HOSTED_MODE),
   };
 }
 
@@ -265,6 +281,28 @@ export type ProjectPathResult = {
   /** Normalized git remote URL from `X-Lore-Git-Remote` header, if provided. */
   gitRemote?: string;
 };
+
+/**
+ * Path prefix for synthetic "unattributed" project buckets created when a
+ * remote/central gateway cannot determine a confident project path for a
+ * request. Each such session gets its own bucket
+ * (`/__lore_unattributed__/<sessionID>`) so unrelated sessions are never
+ * merged. Buckets are clearly marked (this prefix + a provisional project
+ * name) so they can later self-heal (when a confident path arrives) or be
+ * consolidated into real projects.
+ *
+ * Canonical prefix is defined in `@loreai/core` so the gateway and the DB
+ * naming layer agree. Re-exported here for gateway-local convenience.
+ */
+export const UNATTRIBUTED_PREFIX = UNATTRIBUTED_PROJECT_PREFIX;
+
+/** Build the synthetic unattributed-bucket path for a given session. */
+export function unattributedBucketPath(sessionID: string): string {
+  return `${UNATTRIBUTED_PREFIX}/${sessionID}`;
+}
+
+/** True when a project path is a synthetic unattributed bucket. */
+export const isUnattributedPath = isUnattributedProjectPath;
 
 /**
  * Resolve the project path for a request. Checks in order:

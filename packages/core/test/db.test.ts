@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { db, close, ensureProject, projectId, mergeProjectInternal, loadForceMinLayer, saveForceMinLayer, getMeta, setMeta, getInstanceId, saveSessionCosts, loadSessionCosts, loadAllSessionCosts, getLastImportAt, setLastImportAt, saveSessionTracking, loadSessionTracking, loadHeaderSessionIndex, getKV, setKV, addDailyCost, getDailyCostTotals, getDailyCostForDay } from "../src/db";
+import { db, close, ensureProject, projectId, mergeProjectInternal, loadForceMinLayer, saveForceMinLayer, getMeta, setMeta, getInstanceId, saveSessionCosts, loadSessionCosts, loadAllSessionCosts, getLastImportAt, setLastImportAt, saveSessionTracking, loadSessionTracking, loadHeaderSessionIndex, getKV, setKV, addDailyCost, getDailyCostTotals, getDailyCostForDay, isUnattributedProjectPath, UNATTRIBUTED_PROJECT_PREFIX } from "../src/db";
 
 
 describe("db", () => {
@@ -135,6 +135,24 @@ describe("db", () => {
     ensureProject("/test/project/gamma");
     const id = projectId("/test/project/gamma");
     expect(id).toBeTruthy();
+  });
+
+  test("isUnattributedProjectPath recognizes synthetic buckets", () => {
+    expect(isUnattributedProjectPath(`${UNATTRIBUTED_PROJECT_PREFIX}/abc123`)).toBe(true);
+    expect(isUnattributedProjectPath(UNATTRIBUTED_PROJECT_PREFIX)).toBe(true);
+    expect(isUnattributedProjectPath("/home/user/real-project")).toBe(false);
+    // Must not match a real path that merely contains the segment elsewhere.
+    expect(isUnattributedProjectPath("/home/__lore_unattributed__/x")).toBe(false);
+  });
+
+  test("ensureProject gives unattributed buckets a provisional name", () => {
+    const id = ensureProject(`${UNATTRIBUTED_PROJECT_PREFIX}/sessabcdef123456`);
+    const row = db()
+      .query("SELECT name FROM projects WHERE id = ?")
+      .get(id) as { name: string };
+    expect(row.name.startsWith("(unattributed)")).toBe(true);
+    // Should not be the bare session ID as if it were a real repo.
+    expect(row.name).not.toBe("sessabcdef123456");
   });
 
   test("projectId returns undefined for unknown path", () => {

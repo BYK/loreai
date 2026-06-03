@@ -70,6 +70,8 @@ export {
   projectPath,
   resolveProjectByRemoteOrPath,
   mergeProjectInternal,
+  UNATTRIBUTED_PROJECT_PREFIX,
+  isUnattributedProjectPath,
   loadForceMinLayer,
   saveForceMinLayer,
   saveSessionCosts,

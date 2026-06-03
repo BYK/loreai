@@ -16,6 +16,7 @@ import {
   config,
   projectName,
   projectId as lookupProjectId,
+  isUnattributedProjectPath,
   renderMarkdown,
   loadParentChildMap,
   type TaggedResult,
@@ -1374,8 +1375,11 @@ function pageDashboard(): string {
     <table data-table-id="dashboard-projects">
       <tr><th data-sort="text">Name</th><th data-sort="text">Path</th><th data-sort="text">Git Remote</th><th data-sort="num">Knowledge</th><th data-sort="num">Sessions</th><th data-sort="num">Messages</th><th data-sort="date" data-default-sort="desc">Created</th></tr>`;
     for (const p of projects) {
+      const provisional = isUnattributedProjectPath(p.path)
+        ? ` <span title="Provisional: created when the gateway couldn't determine a project. Will self-heal or can be consolidated via 'lore data consolidate'." style="font-size:0.72em;padding:1px 5px;border-radius:6px;background:var(--bg3);color:var(--fg3);vertical-align:middle">provisional</span>`
+        : "";
       body += `<tr>
-        <td><a href="/ui/projects/${esc(p.id)}">${esc(p.name ?? "(unnamed)")}</a></td>
+        <td><a href="/ui/projects/${esc(p.id)}">${esc(p.name ?? "(unnamed)")}</a>${provisional}</td>
         <td style="font-family:var(--mono);font-size:0.85em">${esc(truncate(p.path, 50))}</td>
         <td style="font-family:var(--mono);font-size:0.85em">${esc(p.git_remote ? truncate(p.git_remote, 40) : "-")}</td>
         <td>${p.knowledge_count}</td>

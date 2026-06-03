@@ -219,6 +219,13 @@ export type CacheAnalytics = {
 export type SessionState = {
   sessionID: string;
   projectPath: string;
+  /** True when `projectPath` was set from a low-confidence source (the cwd
+   *  fallback or a synthetic "unattributed" bucket) rather than an explicit
+   *  `X-Lore-Project` header or a path inferred from the system prompt. While
+   *  provisional, a later turn that DOES carry a confident path is allowed to
+   *  overwrite `projectPath` (and re-point any rows already stored under the
+   *  provisional path). Cleared once a confident path binds the session. */
+  projectPathProvisional?: boolean;
   /** Normalized git remote URL received via `X-Lore-Git-Remote` header.
    *  Cached on the session so subsequent turns benefit even if the header
    *  is absent (e.g. prompt-cache probes). */

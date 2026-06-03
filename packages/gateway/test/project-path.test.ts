@@ -1,6 +1,7 @@
 import { describe, test, expect } from "bun:test";
-import { inferProjectPath, getProjectPath, extractGitRemoteHeader, extractProjectHeader } from "../src/config";
+import { inferProjectPath, getProjectPath, extractGitRemoteHeader, extractProjectHeader, unattributedBucketPath, isUnattributedPath, UNATTRIBUTED_PREFIX, type GatewayConfig } from "../src/config";
 import { resolveSessionProjectPath } from "../src/pipeline";
+import { ensureProject, projectId, ltm } from "@loreai/core";
 
 // ---------------------------------------------------------------------------
 // inferProjectPath
@@ -391,95 +392,163 @@ describe("extractGitRemoteHeader", () => {
 // ---------------------------------------------------------------------------
 
 describe("resolveSessionProjectPath", () => {
-  function makeSessionState(projectPath: string) {
-    return { projectPath } as any;
+  // A confident binding has projectPath set and projectPathProvisional falsy.
+  function confidentState(projectPath: string) {
+    return { sessionID: "sid-confident", projectPath, projectPathProvisional: false } as any;
+  }
+  // A provisional binding (cwd fallback / bucket) — overridable by a later
+  // confident path.
+  function provisionalState(sessionID: string, projectPath: string) {
+    return { sessionID, projectPath, projectPathProvisional: true } as any;
+  }
+  // Freshly-created session (e.g. first turn) seeded by getOrCreateSession with
+  // a cwd path → provisional.
+  function freshCwdState(sessionID: string, cwdPath: string) {
+    return { sessionID, projectPath: cwdPath, projectPathProvisional: true } as any;
   }
 
-  test("upgrades cwd fallback to session's cached path", () => {
-    const state = makeSessionState("/home/user/real-project");
+  const localCfg = { remoteGateway: false } as GatewayConfig;
+  const remoteCfg = { remoteGateway: true } as GatewayConfig;
+
+  test("keeps confident binding when a cwd probe arrives (no downgrade)", () => {
+    const state = confidentState("/home/user/real-project");
     const result = resolveSessionProjectPath(
       { path: process.cwd(), source: "cwd" },
       state,
+      localCfg,
     );
     expect(result).toBe("/home/user/real-project");
-  });
-
-  test("keeps cwd when session has the same path (no upgrade available)", () => {
-    const cwd = process.cwd();
-    const state = makeSessionState(cwd);
-    const result = resolveSessionProjectPath(
-      { path: cwd, source: "cwd" },
-      state,
-    );
-    expect(result).toBe(cwd);
-  });
-
-  test("uses inferred path and updates session cache", () => {
-    const state = makeSessionState("/home/user/old-project");
-    const result = resolveSessionProjectPath(
-      { path: "/home/user/new-project", source: "inferred" },
-      state,
-    );
-    expect(result).toBe("/home/user/new-project");
-    expect(state.projectPath).toBe("/home/user/new-project");
-  });
-
-  test("uses header path and updates session cache", () => {
-    const state = makeSessionState("/home/user/old-project");
-    const result = resolveSessionProjectPath(
-      { path: "/home/user/header-project", source: "header" },
-      state,
-    );
-    expect(result).toBe("/home/user/header-project");
-    expect(state.projectPath).toBe("/home/user/header-project");
-  });
-
-  test("does not update session cache on cwd fallback", () => {
-    const state = makeSessionState("/home/user/real-project");
-    resolveSessionProjectPath(
-      { path: process.cwd(), source: "cwd" },
-      state,
-    );
-    // Session cache should remain unchanged (upgraded, not overwritten)
     expect(state.projectPath).toBe("/home/user/real-project");
   });
 
-  test("does not update session cache when upgrade from cwd occurs", () => {
-    const state = makeSessionState("/home/user/cached-project");
+  test("local gateway: provisional cwd keeps the cwd path (legacy behavior)", () => {
+    const cwd = process.cwd();
+    const state = freshCwdState("sid-local", cwd);
     const result = resolveSessionProjectPath(
-      { path: "/tmp/wrong", source: "cwd" },
+      { path: cwd, source: "cwd" },
       state,
+      localCfg,
     );
-    expect(result).toBe("/home/user/cached-project");
-    // Session cache should remain unchanged
-    expect(state.projectPath).toBe("/home/user/cached-project");
+    expect(result).toBe(cwd);
+    expect(state.projectPathProvisional).toBe(true);
   });
 
+  test("inferred path binds the session and clears provisional flag", () => {
+    const state = provisionalState("sid-inf", "/home/user/old-project");
+    const result = resolveSessionProjectPath(
+      { path: "/home/user/new-project", source: "inferred" },
+      state,
+      localCfg,
+    );
+    expect(result).toBe("/home/user/new-project");
+    expect(state.projectPath).toBe("/home/user/new-project");
+    expect(state.projectPathProvisional).toBe(false);
+  });
+
+  test("header path binds the session and clears provisional flag", () => {
+    const state = provisionalState("sid-hdr", "/home/user/old-project");
+    const result = resolveSessionProjectPath(
+      { path: "/home/user/header-project", source: "header" },
+      state,
+      localCfg,
+    );
+    expect(result).toBe("/home/user/header-project");
+    expect(state.projectPath).toBe("/home/user/header-project");
+    expect(state.projectPathProvisional).toBe(false);
+  });
+
+  // --- Fix 3: remote-gateway synthetic bucketing ---
+
+  test("remote gateway: cwd fallback routes to a per-session bucket (never cwd)", () => {
+    const state = freshCwdState("abc123session", process.cwd());
+    const result = resolveSessionProjectPath(
+      { path: process.cwd(), source: "cwd" },
+      state,
+      remoteCfg,
+    );
+    expect(result).toBe(unattributedBucketPath("abc123session"));
+    expect(isUnattributedPath(result)).toBe(true);
+    expect(state.projectPath).toBe(result);
+    expect(state.projectPathProvisional).toBe(true);
+  });
+
+  test("remote gateway: two path-less sessions get DISTINCT buckets (never merged)", () => {
+    const s1 = freshCwdState("sessionAAA", process.cwd());
+    const s2 = freshCwdState("sessionBBB", process.cwd());
+    const r1 = resolveSessionProjectPath({ path: process.cwd(), source: "cwd" }, s1, remoteCfg);
+    const r2 = resolveSessionProjectPath({ path: process.cwd(), source: "cwd" }, s2, remoteCfg);
+    expect(r1).not.toBe(r2);
+    expect(r1).toBe(`${UNATTRIBUTED_PREFIX}/sessionAAA`);
+    expect(r2).toBe(`${UNATTRIBUTED_PREFIX}/sessionBBB`);
+  });
+
+  // --- Fix 3: self-heal — re-point bucket rows to the real project ---
+
+  test("self-heal: confident path re-attributes rows from a provisional bucket", () => {
+    const sessionID = "selfhealsession1";
+    const bucketPath = unattributedBucketPath(sessionID);
+    // Simulate prior provisional attribution: create the bucket project and
+    // store a knowledge entry under it.
+    const bucketId = ensureProject(bucketPath);
+    ltm.create({
+      projectPath: bucketPath,
+      scope: "project",
+      category: "gotcha",
+      title: "probe-turn-finding",
+      content: "something learned during a path-less probe turn",
+    });
+    expect(projectId(bucketPath)).toBe(bucketId);
+
+    // Now a confident header turn arrives for the same session.
+    const state = provisionalState(sessionID, bucketPath);
+    const realPath = "/home/user/real-faiss-project";
+    const result = resolveSessionProjectPath(
+      { path: realPath, source: "header", gitRemote: "github.com/onur/faiss" },
+      state,
+      remoteCfg,
+    );
+
+    expect(result).toBe(realPath);
+    expect(state.projectPathProvisional).toBe(false);
+
+    // The bucket project should have been merged into the real one: bucket row
+    // deleted, knowledge re-pointed to the real project.
+    const realId = projectId(realPath);
+    expect(realId).toBeDefined();
+    expect(realId).not.toBe(bucketId);
+    const moved = ltm.search({ query: "probe-turn-finding", projectPath: realPath });
+    expect(moved.length).toBeGreaterThan(0);
+  });
+
+  // --- gitRemote caching (unchanged behavior) ---
+
   test("caches gitRemote from result onto session state", () => {
-    const state = makeSessionState("/home/user/project");
+    const state = provisionalState("sid-gr1", "/home/user/project");
     resolveSessionProjectPath(
       { path: "/home/user/project", source: "inferred", gitRemote: "github.com/org/repo" },
       state,
+      localCfg,
     );
     expect(state.gitRemote).toBe("github.com/org/repo");
   });
 
   test("does not overwrite existing session gitRemote", () => {
-    const state = makeSessionState("/home/user/project");
+    const state = provisionalState("sid-gr2", "/home/user/project");
     state.gitRemote = "github.com/org/original-repo";
     resolveSessionProjectPath(
       { path: "/home/user/project", source: "inferred", gitRemote: "github.com/org/new-repo" },
       state,
+      localCfg,
     );
-    // Should keep the original cached value
     expect(state.gitRemote).toBe("github.com/org/original-repo");
   });
 
   test("does not set gitRemote when result has none", () => {
-    const state = makeSessionState("/home/user/project");
+    const state = provisionalState("sid-gr3", "/home/user/project");
     resolveSessionProjectPath(
       { path: "/home/user/project", source: "inferred" },
       state,
+      localCfg,
     );
     expect(state.gitRemote).toBeUndefined();
   });

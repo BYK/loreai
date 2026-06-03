@@ -16,6 +16,8 @@ import {
   load,
   config as loreConfig,
   ensureProject,
+  projectId,
+  mergeProjectInternal,
   temporal,
   ltm,
   distillation,
@@ -69,7 +71,7 @@ import type {
   SessionState,
 } from "./translate/types";
 import type { GatewayConfig } from "./config";
-import { getProjectPath, extractGitRemoteHeader, resolveUpstreamRoute, extractUpstreamUrlHeader, type ProjectPathResult } from "./config";
+import { getProjectPath, extractGitRemoteHeader, resolveUpstreamRoute, extractUpstreamUrlHeader, unattributedBucketPath, type ProjectPathResult } from "./config";
 import {
   generateSessionID,
   fingerprintMessages,
@@ -866,59 +868,153 @@ function getLLMClient(config: GatewayConfig): LLMClient {
 // ---------------------------------------------------------------------------
 
 /**
- * Upgrade a project path result using the session's cached path.
+ * Resolve the final project path for a session, applying sticky per-session
+ * binding and (on remote gateways) synthetic "unattributed" bucketing.
  *
- * Some requests (e.g. Claude Code's non-streaming prompt-caching probes)
- * have stripped-down system prompts that lack path references, causing
- * `getProjectPath()` to fall back to `process.cwd()`. When the session
- * already has a known-good path from a prior turn, we use that instead.
+ * Context: some requests (Claude Code's haiku side-channel / prompt-cache
+ * probes) carry stripped-down system prompts that lack any path reference, so
+ * `getProjectPath()` returns `source: "cwd"`. On a central/remote gateway the
+ * gateway's own cwd has NO relationship to the client's project — attributing
+ * such requests to cwd merges unrelated sessions into one bogus project (the
+ * "lore-config" bug).
  *
- * Also updates the session cache when a fresh inference or header provides
- * a new path, so future path-less turns benefit.
+ * Rules:
+ *  - A **confident** path (`header`/`inferred`) always binds the session and
+ *    clears the provisional flag. If it overwrites a previously-provisional
+ *    path under which rows were already stored, those rows are re-pointed
+ *    (self-heal) to the real project.
+ *  - A **cwd** result NEVER overwrites a confident binding. If the session has
+ *    no confident binding yet, it stays/becomes provisional:
+ *      - local gateway: keep the cwd path (legacy behavior — gateway shares the
+ *        filesystem with the agent, so cwd is meaningful);
+ *      - remote gateway: route to a per-session synthetic bucket
+ *        (`/__lore_unattributed__/<sessionID>`) so unrelated sessions never
+ *        merge.
  *
  * Returns the final resolved project path.
  */
 export function resolveSessionProjectPath(
   result: ProjectPathResult,
   sessionState: SessionState,
+  config: GatewayConfig,
 ): string {
   let { path: projectPath, source } = result;
 
   // Cache git remote on the session so subsequent turns benefit even if
   // the header is absent (e.g. prompt-cache probes or follow-up requests).
-  // Also backfill ensureProject() — initIfNeeded is one-shot, so if the
-  // first request lacked the header, the project row has no git_remote.
-  // Calling ensureProject() again is safe: it's idempotent and will
-  // backfill git_remote on the existing row if missing.
   if (result.gitRemote && !sessionState.gitRemote) {
     sessionState.gitRemote = result.gitRemote;
-    ensureProject(projectPath, undefined, result.gitRemote);
   }
 
-  // Upgrade from cwd fallback using session's cached path
-  if (source === "cwd" && sessionState.projectPath !== projectPath) {
-    projectPath = sessionState.projectPath;
-    source = "cached" as typeof source;
-  }
+  const hasConfident = !!sessionState.projectPath && !sessionState.projectPathProvisional;
+  // Best git remote we know for this session — the current turn's, falling back
+  // to a value cached on an earlier turn (the header is independent of path
+  // resolution, so it can arrive on a turn that otherwise lacks a path).
+  const effectiveRemote = result.gitRemote ?? sessionState.gitRemote;
 
-  // Update session cache when a fresh path was resolved so future
-  // path-less turns benefit from the cached value.
   if (source === "inferred" || source === "header") {
+    // Confident path — bind the session.
+    const previous = sessionState.projectPath;
+    const wasProvisional = sessionState.projectPathProvisional === true;
+
+    // Self-heal: if the session was previously bound to a provisional path
+    // (cwd fallback or synthetic bucket) under which rows may already be
+    // stored, migrate those rows into the real project now that we know it.
+    // Only clear the provisional flag once the migration succeeds — otherwise
+    // a transient failure (e.g. SQLITE_BUSY from a separate process) would
+    // permanently strand the bucket data with no retry. Keeping the flag set
+    // lets the next confident turn re-attempt.
+    let healed = true;
+    if (wasProvisional && previous && previous !== projectPath) {
+      healed = reattributeProvisionalProject(previous, projectPath, effectiveRemote);
+    }
+
     sessionState.projectPath = projectPath;
+    sessionState.projectPathProvisional = healed ? false : true;
+
+    // Backfill git_remote on the (now confident) project row — idempotent.
+    if (effectiveRemote) {
+      ensureProject(projectPath, undefined, effectiveRemote);
+    }
+    return projectPath;
   }
 
-  // Log warning only when the cwd fallback truly sticks (no session cache
-  // was available to upgrade from).
-  if (source === "cwd" && !cwdWarned.has(sessionState.sessionID)) {
+  // source === "cwd" (no header, inference failed).
+  if (hasConfident) {
+    // Never downgrade a confident binding to cwd. Keep the known-good path.
+    return sessionState.projectPath;
+  }
+
+  // No confident binding yet → provisional attribution.
+  if (config.remoteGateway) {
+    // Remote/central gateway: the gateway's cwd is meaningless for the client.
+    // Use a per-session synthetic bucket so unrelated sessions never merge.
+    projectPath = unattributedBucketPath(sessionState.sessionID);
+  }
+  // (local gateway: keep the cwd path from `result` — cwd is meaningful there.)
+
+  sessionState.projectPath = projectPath;
+  sessionState.projectPathProvisional = true;
+
+  // Record the git remote on the bucket/cwd project row when known. This is
+  // what later lets self-heal and `lore data consolidate` match a provisional
+  // bucket back to its real project by git remote — a common case is a client
+  // that sends X-Lore-Git-Remote but no X-Lore-Project (and no inferable path).
+  if (effectiveRemote) {
+    ensureProject(projectPath, undefined, effectiveRemote);
+  }
+
+  // One-time warning per session when we couldn't confidently attribute.
+  if (!cwdWarned.has(sessionState.sessionID)) {
     cwdWarned.add(sessionState.sessionID);
+    const detail = config.remoteGateway
+      ? `routed to provisional bucket ${projectPath}`
+      : `falling back to process.cwd() (${projectPath})`;
     console.error(
-      `[lore] warning: project path falling back to process.cwd() (${projectPath}). ` +
-      `Data may be misattributed. Fix: use \`lore run\` to launch your agent, ` +
-      `or set ANTHROPIC_CUSTOM_HEADERS="X-Lore-Project: /path/to/project".`,
+      `[lore] warning: could not determine project for session ` +
+        `${sessionState.sessionID.slice(0, 16)} — ${detail}. ` +
+        `Data may be misattributed. Fix: launch your agent via \`lore run\`, ` +
+        `or have your client send the "X-Lore-Project: /path/to/project" header ` +
+        `(provider-agnostic; e.g. via ANTHROPIC_CUSTOM_HEADERS for Claude Code, ` +
+        `the OpenCode/Pi plugins, or your client's custom-header mechanism).`,
     );
   }
 
   return projectPath;
+}
+
+/**
+ * Migrate all rows stored under a provisional project path (a cwd fallback or
+ * a synthetic `/__lore_unattributed__/...` bucket) into the real project once
+ * a confident path is learned for the session.
+ *
+ * Returns `true` when the re-attribution is complete (either there was nothing
+ * to migrate, the source already resolves to the target, or the merge
+ * succeeded) and `false` when a transient failure left bucket data behind. The
+ * caller keeps the session provisional on `false` so a later turn retries
+ * rather than permanently stranding the data. Never throws — a failed self-heal
+ * must not break the live request.
+ */
+function reattributeProvisionalProject(
+  fromPath: string,
+  toPath: string,
+  gitRemote?: string,
+): boolean {
+  try {
+    const fromId = projectId(fromPath);
+    if (!fromId) return true; // nothing was stored under the provisional path
+    // Ensure the destination project row exists before merging into it.
+    const toId = ensureProject(toPath, undefined, gitRemote);
+    if (fromId === toId) return true;
+    mergeProjectInternal(fromId, toId);
+    log.info(
+      `self-heal: re-attributed provisional project ${fromPath} → ${toPath}`,
+    );
+    return true;
+  } catch (e) {
+    log.warn(`self-heal re-attribution failed (${fromPath} → ${toPath}); will retry on next confident turn:`, e);
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -928,6 +1024,7 @@ export function resolveSessionProjectPath(
 function getOrCreateSession(
   sessionID: string,
   projectPath: string,
+  pathSource: ProjectPathResult["source"] = "cwd",
 ): SessionState {
   let state = sessions.get(sessionID);
   if (!state) {
@@ -936,6 +1033,12 @@ function getOrCreateSession(
     state = {
       sessionID,
       projectPath,
+      // A freshly-seeded path from the cwd fallback is NOT a confident binding.
+      // Mark it provisional so a later header/inferred turn can overwrite it
+      // (and self-heal any rows stored under the provisional path). Only
+      // header/inferred seeds are confident. `projectPath` itself is not
+      // persisted in session_state, so this is purely in-memory bootstrap.
+      projectPathProvisional: pathSource === "cwd",
       fingerprint: persisted?.fingerprint || "",
       lastRequestTime: Date.now(),
       lastUserTurnTime: 0,
@@ -2660,12 +2763,15 @@ async function handleCompaction(
     if (markerProject) req.rawHeaders["x-lore-project"] = markerProject;
   }
   const pathResult = getProjectPath(req.system, req.rawHeaders);
-  await initIfNeeded(pathResult.path, config, pathResult.gitRemote);
 
   const { sessionID } = await identifySession(req, pathResult.path);
   stripContextMarkers(req.messages);
-  const sessionState = getOrCreateSession(sessionID, pathResult.path);
-  const projectPath = resolveSessionProjectPath(pathResult, sessionState);
+  const sessionState = getOrCreateSession(sessionID, pathResult.path, pathResult.source);
+  const projectPath = resolveSessionProjectPath(pathResult, sessionState, config);
+
+  // Initialize the project AFTER path correction so we never create a row for
+  // the gateway's cwd / an unattributed bucket from a path-less probe request.
+  await initIfNeeded(projectPath, config, pathResult.gitRemote);
 
   setSentryLightContext({ model: req.model, projectPath });
   log.info(`compaction intercepted for session ${sessionID.slice(0, 16)}`);
@@ -2904,7 +3010,6 @@ async function handleConversationTurn(
     if (markerProject) req.rawHeaders["x-lore-project"] = markerProject;
   }
   const pathResult = getProjectPath(req.system, req.rawHeaders);
-  await initIfNeeded(pathResult.path, config, pathResult.gitRemote);
 
   // --- 2. Capture auth credentials for background workers ---
   const cred = extractAuth(req.rawHeaders);
@@ -2920,8 +3025,13 @@ async function handleConversationTurn(
   // temporal storage, or visible to the model.
   stripContextMarkers(req.messages);
 
-  const sessionState = getOrCreateSession(sessionID, pathResult.path);
-  const projectPath = resolveSessionProjectPath(pathResult, sessionState);
+  const sessionState = getOrCreateSession(sessionID, pathResult.path, pathResult.source);
+  const projectPath = resolveSessionProjectPath(pathResult, sessionState, config);
+
+  // Initialize the project AFTER path correction so a path-less probe request
+  // never creates a project row for the gateway's cwd or an unattributed
+  // bucket (provider-agnostic: applies to every protocol/client).
+  await initIfNeeded(projectPath, config, pathResult.gitRemote);
 
   // Mark sub-agent sessions (x-parent-session-id present).
   // These get their own session but are flagged for cache warming exemption.
