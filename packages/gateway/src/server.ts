@@ -91,6 +91,45 @@ function errorResponse(
   );
 }
 
+/**
+ * Detect a WebSocket upgrade request.
+ *
+ * Clients like Codex (OpenAI Responses API) optimistically try to open a
+ * WebSocket to the endpoint (e.g. `ws://host/v1/responses`) before falling
+ * back to HTTP. The lore gateway is a translating HTTP proxy — it buffers and
+ * transforms full request/response bodies and forwards them over HTTP to the
+ * upstream — so it does not (and cannot meaningfully) speak WebSocket here.
+ *
+ * A WS upgrade arrives as a GET with `Upgrade: websocket` + `Connection`
+ * containing `upgrade` (per RFC 6455). We detect it explicitly so we can
+ * return a definitive "not supported" response instead of a misleading
+ * `404 No route for GET /v1/responses`, which made it look like the endpoint
+ * was missing and produced repeated upgrade attempts in the client logs.
+ */
+function isWebSocketUpgrade(req: Request): boolean {
+  const upgrade = req.headers.get("upgrade");
+  if (!upgrade || upgrade.toLowerCase() !== "websocket") return false;
+  const connection = req.headers.get("connection");
+  // Connection may be a comma-separated list (e.g. "keep-alive, Upgrade").
+  return !!connection && connection.toLowerCase().includes("upgrade");
+}
+
+/**
+ * Reject a WebSocket upgrade cleanly so the client falls back to HTTP on the
+ * first attempt. `426 Upgrade Required` is the closest semantic fit ("this
+ * resource is served over a different protocol"); `Connection: close` tells the
+ * client not to keep retrying on the same socket.
+ */
+function rejectWebSocketUpgrade(pathname: string): Response {
+  const resp = errorResponse(
+    426,
+    "websocket_not_supported",
+    `WebSocket transport is not supported for ${pathname}; use HTTP.`,
+  );
+  resp.headers.set("Connection", "close");
+  return resp;
+}
+
 // ---------------------------------------------------------------------------
 // Route handlers
 // ---------------------------------------------------------------------------
@@ -318,6 +357,19 @@ export function startServer(config: GatewayConfig): {
 
     if (config.debug) {
       console.error(`[lore] ${method} ${pathname}`);
+    }
+
+    // Clients (e.g. Codex) optimistically try a WebSocket upgrade before
+    // falling back to HTTP. The gateway is HTTP-only, so reject the upgrade
+    // definitively rather than returning a misleading 404 (which caused
+    // repeated upgrade attempts and noisy logs).
+    if (isWebSocketUpgrade(req)) {
+      if (config.debug) {
+        console.error(
+          `[lore] rejecting WebSocket upgrade for ${pathname} (HTTP-only gateway)`,
+        );
+      }
+      return withCors(rejectWebSocketUpgrade(pathname));
     }
 
     try {
