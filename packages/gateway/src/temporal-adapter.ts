@@ -121,12 +121,21 @@ function contentBlockToPart(
         type: "tool",
         tool: "result",
         callID: block.toolUseId,
-        state: {
-          status: "completed",
-          input: null,
-          output: block.content,
-          time: { start: now, end: now },
-        },
+        // Propagate the error flag so downstream consumers (structured
+        // tool-call trace, gradient) can distinguish failed tool results.
+        state: block.isError
+          ? {
+              status: "error",
+              input: null,
+              error: block.content,
+              time: { start: now, end: now },
+            }
+          : {
+              status: "completed",
+              input: null,
+              output: block.content,
+              time: { start: now, end: now },
+            },
       } satisfies LoreToolPart;
   }
 }
@@ -245,15 +254,18 @@ export function resolveToolResults(messages: LoreMessageWithParts[]): void {
 
   for (const msg of messages) {
     for (const part of msg.parts) {
-      if (
-        isToolPart(part) &&
-        part.tool === "result" &&
-        part.state.status === "completed"
-      ) {
-        resultsByCallID.set(part.callID, {
-          output: part.state.output,
-          isError: false,
-        });
+      if (isToolPart(part) && part.tool === "result") {
+        if (part.state.status === "completed") {
+          resultsByCallID.set(part.callID, {
+            output: part.state.output,
+            isError: false,
+          });
+        } else if (part.state.status === "error") {
+          resultsByCallID.set(part.callID, {
+            output: part.state.error,
+            isError: true,
+          });
+        }
       }
     }
   }
@@ -269,12 +281,19 @@ export function resolveToolResults(messages: LoreMessageWithParts[]): void {
       ) {
         const result = resultsByCallID.get(part.callID);
         if (result) {
-          part.state = {
-            status: "completed",
-            input: part.state.input,
-            output: result.output,
-            time: { start: now, end: now },
-          };
+          part.state = result.isError
+            ? {
+                status: "error",
+                input: part.state.input,
+                error: result.output,
+                time: { start: now, end: now },
+              }
+            : {
+                status: "completed",
+                input: part.state.input,
+                output: result.output,
+                time: { start: now, end: now },
+              };
         }
       }
     }

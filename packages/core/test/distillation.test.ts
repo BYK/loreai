@@ -10,6 +10,7 @@ import {
   distillTokenBudget,
   maxAllowedExpansion,
   detectAssertions,
+  detectToolFailures,
   run,
   type Distillation,
 } from "../src/distillation";
@@ -1793,5 +1794,79 @@ describe("distillationUser — pinned assertions", () => {
     const dateIdx = result.indexOf("Session date: April 24, 2026");
     const pinnedIdx = result.indexOf("HIGH-PRIORITY");
     expect(dateIdx).toBeLessThan(pinnedIdx);
+  });
+});
+
+describe("distillationUser — tool failures", () => {
+  test("no tool failures — output omits the block", () => {
+    const result = distillationUser({
+      date: "April 24, 2026",
+      messages: "[user] (09:15) Hello",
+    });
+    expect(result).not.toContain("TOOL FAILURES");
+  });
+
+  test("with tool failures — block injected before conversation", () => {
+    const result = distillationUser({
+      date: "April 24, 2026",
+      messages: "[user] (09:15) test",
+      toolFailures: "- bash:timeout (×2)",
+    });
+    expect(result).toContain("TOOL FAILURES OBSERVED IN THIS SEGMENT");
+    expect(result).toContain("bash:timeout");
+    expect(result).toContain("[tool-failure]");
+    const failIdx = result.indexOf("TOOL FAILURES");
+    const convIdx = result.indexOf("Conversation to observe:");
+    expect(failIdx).toBeLessThan(convIdx);
+  });
+});
+
+describe("detectToolFailures", () => {
+  const PROJECT = "/test/distillation/tool-failures";
+
+  beforeEach(() => {
+    const pid = ensureProject(PROJECT);
+    db().query("DELETE FROM tool_calls WHERE project_id = ?").run(pid);
+  });
+
+  function addFailure(session: string, tool: string, errorType: string, createdAt: number) {
+    const pid = ensureProject(PROJECT);
+    db()
+      .query(
+        `INSERT INTO tool_calls
+           (call_id, message_id, project_id, session_id, tool, status, error_type, error_message, duration_ms, created_at)
+         VALUES (?, ?, ?, ?, ?, 'error', ?, NULL, 0, ?)`,
+      )
+      .run(`c-${createdAt}`, `m-${createdAt}`, pid, session, tool, errorType, createdAt);
+  }
+
+  test("returns undefined when no messages", () => {
+    expect(detectToolFailures(PROJECT, "s1", [])).toBeUndefined();
+  });
+
+  test("returns undefined when no in-window failures", () => {
+    addFailure("s1", "bash", "timeout", 5000);
+    const messages = [
+      msg("assistant", "x", { session_id: "s1", created_at: 100 }),
+      msg("assistant", "y", { session_id: "s1", created_at: 200 }),
+    ];
+    expect(detectToolFailures(PROJECT, "s1", messages)).toBeUndefined();
+  });
+
+  test("aggregates in-window failures by tool:error_type", () => {
+    addFailure("s1", "bash", "timeout", 100);
+    addFailure("s1", "bash", "timeout", 150);
+    addFailure("s1", "edit", "edit_noop", 180);
+    // Out of window (after last message).
+    addFailure("s1", "read", "not_found", 5000);
+    const messages = [
+      msg("assistant", "x", { session_id: "s1", created_at: 100 }),
+      msg("assistant", "y", { session_id: "s1", created_at: 200 }),
+    ];
+    const result = detectToolFailures(PROJECT, "s1", messages);
+    expect(result).toBeDefined();
+    expect(result).toContain("bash:timeout (×2)");
+    expect(result).toContain("edit:edit_noop (×1)");
+    expect(result).not.toContain("read");
   });
 });

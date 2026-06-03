@@ -738,6 +738,35 @@ const MIGRATIONS: string[] = [
     PRIMARY KEY (day, bucket)
   );
   `,
+  `
+  -- Version 31: Structured tool-call execution trace for richer pattern
+  -- extraction (issue #496). Each tool invocation is recorded with its name,
+  -- success/failure status, a bucketed error type, the raw error message, and
+  -- wall-clock duration. Feeds the curator context, the distillation observer
+  -- pinned block, auto-gotcha creation, and recall.
+  --
+  -- A tool call spans two messages in the Anthropic protocol: the assistant
+  -- tool_use (carries the tool name) and the following user message
+  -- tool_result (carries the outcome). Both phases UPSERT on the globally
+  -- unique call_id PK: the tool_use seeds name + 'pending'; the tool_result
+  -- updates status/error/duration. This also makes re-stores idempotent.
+  CREATE TABLE IF NOT EXISTS tool_calls (
+    call_id       TEXT PRIMARY KEY,
+    message_id    TEXT NOT NULL,
+    project_id    TEXT NOT NULL,
+    session_id    TEXT NOT NULL,
+    tool          TEXT NOT NULL,
+    status        TEXT NOT NULL,        -- 'pending' | 'completed' | 'error'
+    error_type    TEXT,                 -- bucketed classifier output, NULL unless error
+    error_message TEXT,                 -- raw error string (truncated), NULL unless error
+    duration_ms   INTEGER,              -- end-start, NULL if unavailable
+    created_at    INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_tool_calls_project_tool_status
+    ON tool_calls (project_id, tool, status);
+  CREATE INDEX IF NOT EXISTS idx_tool_calls_project_session
+    ON tool_calls (project_id, session_id);
+  `,
 ];
 
 /** Return the resolved path of the SQLite database file. */
@@ -958,6 +987,22 @@ function recoverMissingObjects(database: Database) {
       updated_at INTEGER NOT NULL,
       PRIMARY KEY (day, bucket)
     );
+    CREATE TABLE IF NOT EXISTS tool_calls (
+      call_id       TEXT PRIMARY KEY,
+      message_id    TEXT NOT NULL,
+      project_id    TEXT NOT NULL,
+      session_id    TEXT NOT NULL,
+      tool          TEXT NOT NULL,
+      status        TEXT NOT NULL,
+      error_type    TEXT,
+      error_message TEXT,
+      duration_ms   INTEGER,
+      created_at    INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_tool_calls_project_tool_status
+      ON tool_calls (project_id, tool, status);
+    CREATE INDEX IF NOT EXISTS idx_tool_calls_project_session
+      ON tool_calls (project_id, session_id);
   `);
 
   // Recover missing columns from partial migration runs.
@@ -1003,6 +1048,10 @@ export function mergeProjectInternal(
       sourceId,
     );
     d.query("UPDATE entities SET project_id = ? WHERE project_id = ?").run(
+      targetId,
+      sourceId,
+    );
+    d.query("UPDATE tool_calls SET project_id = ? WHERE project_id = ?").run(
       targetId,
       sourceId,
     );

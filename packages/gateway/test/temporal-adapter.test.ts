@@ -232,4 +232,48 @@ describe("resolveToolResults", () => {
     expect(textParts).toHaveLength(1);
     expect(toolParts).toHaveLength(1);
   });
+
+  test("error tool_result resolves the tool_use to error state", () => {
+    const gwMessages: GatewayMessage[] = [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "toolu_err",
+            name: "bash",
+            input: { command: "false" },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            toolUseId: "toolu_err",
+            content: "command failed with exit code 1",
+            isError: true,
+          },
+        ],
+      },
+    ];
+
+    const messages = gatewayMessagesToLore(gwMessages, "sess-err");
+    // contentBlockToPart maps an error tool_result to an error-state part.
+    const resultPart = messages[1]!.parts.find(
+      (p) => isToolPart(p) && p.tool === "result",
+    );
+    expect((resultPart as any).state.status).toBe("error");
+    expect((resultPart as any).state.error).toBe("command failed with exit code 1");
+
+    resolveToolResults(messages);
+
+    // The assistant's tool_use is now resolved to error with the message.
+    const toolPart = messages[0]!.parts.find(
+      (p) => isToolPart(p) && p.tool === "bash",
+    );
+    expect((toolPart as any).state.status).toBe("error");
+    expect((toolPart as any).state.error).toBe("command failed with exit code 1");
+  });
 });

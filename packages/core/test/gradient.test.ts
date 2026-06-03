@@ -3000,3 +3000,48 @@ describe("gradient — calibrated delta safety multiplier", () => {
     expect(result.layer).toBeGreaterThanOrEqual(1);
   });
 });
+
+describe("gradient — error-state tool outputs are estimated (not flat 20)", () => {
+  // Regression guard: error tool_result parts are now stored as error-state
+  // (status:"error", carrying `error` text). estimateParts must size them by
+  // their error payload — not the flat 20-token fallback — or the gradient's
+  // token calibration silently undercounts failure-heavy turns and overflows.
+  test("a large error output is estimated by its size", () => {
+    const SID = "err-estimate-sess";
+    const bigError = "STACK TRACE\n".repeat(2000); // ~24K chars
+    const errorMsg: LoreMessageWithParts = {
+      info: {
+        id: "err-a1",
+        sessionID: SID,
+        role: "assistant",
+        time: { created: Date.now() },
+        parentID: "p",
+        modelID: "claude-sonnet-4-20250514",
+        providerID: "anthropic",
+        mode: "build",
+        path: { cwd: "/test", root: "/test" },
+        cost: 0,
+        tokens: { input: 100, output: 50, reasoning: 0, cache: { read: 0, write: 0 } },
+      },
+      parts: [
+        {
+          id: "err-t1",
+          sessionID: SID,
+          messageID: "err-a1",
+          type: "tool",
+          callID: "call-err",
+          tool: "bash",
+          state: {
+            status: "error",
+            input: { command: "x" },
+            error: bigError,
+            time: { start: Date.now(), end: Date.now() },
+          },
+        } as unknown as LorePart,
+      ],
+    };
+    const estimate = estimateMessages([errorMsg]);
+    // ~24K chars / 3 ≈ 8000 tokens — must be far above the flat-20 fallback.
+    expect(estimate).toBeGreaterThan(1000);
+  });
+});

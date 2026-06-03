@@ -2217,6 +2217,9 @@ function postResponse(
     // The session still gets full Lore processing (LTM, recall, gradient)
     // but doesn't write to memory. Amnesia is session-scoped (toggle via
     // /lore:amnesia:on|off); no-store is per-request (header-based).
+    // Note: tool-call outcomes for a tool_use seeded during a no-store turn are
+    // intentionally dropped — the seed row never exists, so the later
+    // tool_result UPDATE is a harmless no-op (no phantom 'pending' rows leak).
     const noStore = sessionState.amnesia || req.rawHeaders["x-lore-no-store"] === "true";
     if (!noStore) {
       // Store the latest user message BEFORE resolveToolResults — we want the
@@ -2225,6 +2228,14 @@ function postResponse(
       for (let i = loreMessages.length - 1; i >= 0; i--) {
         if (loreMessages[i].info.role === "user") {
           temporal.store({
+            projectPath,
+            info: loreMessages[i].info,
+            parts: loreMessages[i].parts,
+          });
+          // The latest user message carries tool_result blocks that resolve
+          // the PRIOR assistant turn's tool calls — record their outcomes
+          // (status/error/duration) keyed by call_id.
+          temporal.recordToolCalls({
             projectPath,
             info: loreMessages[i].info,
             parts: loreMessages[i].parts,
@@ -2246,18 +2257,27 @@ function postResponse(
       const assistantContent = resp.content.filter(
         (b) => !(b.type === "text" && isRecallMarker(b.text)),
       );
+      const assistantMsg = gatewayMessagesToLore(
+        [{ role: "assistant", content: assistantContent }],
+        sessionID,
+      )[0];
+      updateAssistantMessageTokens(assistantMsg, resp.usage, resp.model);
       if (assistantContent.length > 0) {
-        const assistantMsg = gatewayMessagesToLore(
-          [{ role: "assistant", content: assistantContent }],
-          sessionID,
-        )[0];
-        updateAssistantMessageTokens(assistantMsg, resp.usage, resp.model);
         temporal.store({
           projectPath,
           info: assistantMsg.info,
           parts: assistantMsg.parts,
         });
       }
+      // Always record structured tool-call traces — even when the assistant
+      // content is empty after recall-marker stripping, or when partsToText
+      // would produce empty content (tool-only / all-failed turns). Tool parts
+      // survive the text-only recall-marker filter above.
+      temporal.recordToolCalls({
+        projectPath,
+        info: assistantMsg.info,
+        parts: assistantMsg.parts,
+      });
     }
 
     // Update session state (persisted in the batched save after messageCount update)

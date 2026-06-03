@@ -200,6 +200,9 @@ export function distillationUser(input: {
   /** Pre-scanned user assertions to pin in the prompt so the observer
    *  cannot accidentally drop them in large, code-dominated segments. */
   pinnedAssertions?: string;
+  /** Pre-scanned tool failures observed in this segment, so the observer
+   *  surfaces recurring obstacles instead of dropping them as noise. */
+  toolFailures?: string;
 }): string {
   const context = input.priorObservations
     ? `Previous observations (do NOT repeat these — your new observations will be appended):\n${input.priorObservations}\n\n---`
@@ -207,10 +210,13 @@ export function distillationUser(input: {
   const pinned = input.pinnedAssertions
     ? `\n⚠️ HIGH-PRIORITY USER ASSERTIONS DETECTED IN THIS SEGMENT:\n${input.pinnedAssertions}\nThese statements MUST appear in your observations — they represent user preferences, decisions, or directives that override prior state.\n`
     : "";
+  const failures = input.toolFailures
+    ? `\n⚙️ TOOL FAILURES OBSERVED IN THIS SEGMENT:\n${input.toolFailures}\nWhen these reflect a recurring obstacle, environment issue, or a fix that had to be worked around, note them in your observations using the [tool-failure] tag.\n`
+    : "";
   return `${context}
 
 Session date: ${input.date}
-${pinned}
+${pinned}${failures}
 Conversation to observe:
 
 ${input.messages}

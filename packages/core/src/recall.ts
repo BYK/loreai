@@ -14,6 +14,7 @@ import * as ltm from "./ltm";
 import * as temporal from "./temporal";
 import * as embedding from "./embedding";
 import * as entities from "./entities";
+import * as toolTrace from "./tool-trace";
 import * as log from "./log";
 import { db, ensureProject, projectName } from "./db";
 import type { LoreConfig } from "./config";
@@ -1045,12 +1046,29 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
 
   const fused = await searchRecall(input);
   const recallCfg = input.searchConfig?.recall;
-  return formatFusedResults(fused, {
+  let out = formatFusedResults(fused, {
     charBudget: recallCfg?.charBudget ?? DEFAULT_FORMAT_CONFIG.charBudget,
     relevanceFloor:
       recallCfg?.relevanceFloor ?? DEFAULT_FORMAT_CONFIG.relevanceFloor,
     maxResults: recallCfg?.maxResults ?? DEFAULT_FORMAT_CONFIG.maxResults,
   });
+
+  // Surface structured tool-failure stats for debugging. Appended outside the
+  // RRF scoring/budget logic so it never displaces actual search hits.
+  // Skipped for `knowledge` scope (pure LTM lookups, no execution traces).
+  if (input.scope !== "knowledge") {
+    try {
+      const section = toolTrace.formatToolFailureSection(
+        input.projectPath,
+        input.scope === "session" ? input.sessionID : undefined,
+      );
+      if (section) out += `\n\n${section}`;
+    } catch (err) {
+      log.warn("tool failure section failed (non-fatal):", err);
+    }
+  }
+
+  return out;
 }
 
 /** Standard tool description reused verbatim by each host adapter. */

@@ -17,13 +17,14 @@ describe("db", () => {
     expect(names).toContain("session_state");
     expect(names).toContain("metadata");
     expect(names).toContain("import_history");
+    expect(names).toContain("tool_calls");
   });
 
   test("schema version is set", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(30);
+    expect(row.version).toBe(31);
   });
 
   test("distillation_fts virtual table exists", () => {
@@ -925,6 +926,77 @@ describe("db", () => {
         .get() as { name: string } | null;
       expect(after).not.toBeNull();
       expect(after!.name).toBe("daily_costs");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Migration v31: structured tool-call execution trace (tool_calls)
+  // -------------------------------------------------------------------------
+
+  describe("tool_calls trace (v31)", () => {
+    test("tool_calls table exists", () => {
+      const tables = db()
+        .query("SELECT name FROM sqlite_master WHERE type='table' AND name='tool_calls'")
+        .all() as Array<{ name: string }>;
+      expect(tables.length).toBe(1);
+    });
+
+    test("tool_calls indexes exist", () => {
+      const idx = db()
+        .query("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='tool_calls'")
+        .all() as Array<{ name: string }>;
+      const names = idx.map((i) => i.name);
+      expect(names).toContain("idx_tool_calls_project_tool_status");
+      expect(names).toContain("idx_tool_calls_project_session");
+    });
+
+    test("call_id PK upserts in place", () => {
+      const pid = ensureProject("/tmp/tool-calls-pk-test");
+      const insert = () =>
+        db()
+          .query(
+            `INSERT INTO tool_calls
+               (call_id, message_id, project_id, session_id, tool, status, error_type, error_message, duration_ms, created_at)
+             VALUES ('c1', 'm1', ?, 's1', 'bash', ?, ?, ?, ?, 1000)
+             ON CONFLICT(call_id) DO UPDATE SET
+               status = excluded.status,
+               error_type = excluded.error_type,
+               error_message = excluded.error_message,
+               duration_ms = excluded.duration_ms`,
+          );
+      insert().run(pid, "pending", null, null, null);
+      insert().run(pid, "error", "timeout", "timed out", 20);
+
+      const rows = db()
+        .query("SELECT status, error_type, duration_ms FROM tool_calls WHERE call_id='c1'")
+        .all() as Array<{ status: string; error_type: string | null; duration_ms: number }>;
+      expect(rows.length).toBe(1);
+      expect(rows[0].status).toBe("error");
+      expect(rows[0].error_type).toBe("timeout");
+      expect(rows[0].duration_ms).toBe(20);
+    });
+
+    test("recoverMissingObjects recreates tool_calls when missing", () => {
+      const d = db();
+      d.exec("DROP TABLE IF EXISTS tool_calls");
+      expect(
+        d.query("SELECT name FROM sqlite_master WHERE type='table' AND name='tool_calls'").get(),
+      ).toBeNull();
+
+      close();
+      const fresh = db();
+      const after = fresh
+        .query("SELECT name FROM sqlite_master WHERE type='table' AND name='tool_calls'")
+        .get() as { name: string } | null;
+      expect(after).not.toBeNull();
+      expect(after!.name).toBe("tool_calls");
+      // Indexes recovered too.
+      const idx = fresh
+        .query("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='tool_calls'")
+        .all() as Array<{ name: string }>;
+      const names = idx.map((i) => i.name);
+      expect(names).toContain("idx_tool_calls_project_tool_status");
+      expect(names).toContain("idx_tool_calls_project_session");
     });
   });
 });

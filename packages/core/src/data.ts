@@ -359,6 +359,9 @@ export function clearProject(projectPath: string): ClearResult {
       )
       .run(pid);
     database
+      .query("DELETE FROM tool_calls WHERE project_id = ?")
+      .run(pid);
+    database
       .query("DELETE FROM knowledge WHERE project_id = ?")
       .run(pid);
     database
@@ -459,6 +462,9 @@ export function deleteProject(projectId: string): ClearResult | null {
         `DELETE FROM session_state WHERE session_id IN
          (SELECT DISTINCT session_id FROM temporal_messages WHERE project_id = ?)`,
       )
+      .run(projectId);
+    database
+      .query("DELETE FROM tool_calls WHERE project_id = ?")
       .run(projectId);
     database
       .query("DELETE FROM knowledge WHERE project_id = ?")
@@ -617,6 +623,11 @@ export function deleteSession(
       .get(pid, sessionId) as { c: number }
   ).c;
 
+  database
+    .query(
+      "DELETE FROM tool_calls WHERE project_id = ? AND session_id = ?",
+    )
+    .run(pid, sessionId);
   database
     .query(
       "DELETE FROM temporal_messages WHERE project_id = ? AND session_id = ?",

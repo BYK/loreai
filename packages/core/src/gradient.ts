@@ -24,6 +24,8 @@ function estimateParts(parts: LorePart[]): number {
       total += estimate(part.text);
     else if (isToolPart(part) && part.state.status === "completed")
       total += estimate(part.state.output) + estimate(part.tool) + 50;
+    else if (isToolPart(part) && part.state.status === "error")
+      total += estimate(part.state.error) + estimate(part.tool) + 50;
     else total += 20; // metadata overhead for other part types
   }
   return total;
@@ -1202,14 +1204,28 @@ function sanitizeToolParts(
 function stripToolOutputs(parts: LorePart[]): LorePart[] {
   return parts.map((part) => {
     if (!isToolPart(part)) return part;
-    if (part.state.status !== "completed") return part;
-    return {
-      ...part,
-      state: {
-        ...part.state,
-        output: toolStripAnnotation(part.tool, part.state.output),
-      },
-    } as LorePart;
+    if (part.state.status === "completed") {
+      return {
+        ...part,
+        state: {
+          ...part.state,
+          output: toolStripAnnotation(part.tool, part.state.output),
+        },
+      } as LorePart;
+    }
+    // Error outputs (e.g. large stack traces) must also be stripped under
+    // aggressive (Layer 2) compression — otherwise failure-heavy turns evade
+    // the strip entirely and can overflow the context.
+    if (part.state.status === "error") {
+      return {
+        ...part,
+        state: {
+          ...part.state,
+          error: toolStripAnnotation(part.tool, part.state.error),
+        },
+      } as LorePart;
+    }
+    return part;
   });
 }
 

@@ -2,7 +2,8 @@ import { db, ensureProject } from "./db";
 import { ftsQuery, EMPTY_QUERY, runRelaxedSearch } from "./search";
 import { sanitizeSurrogates } from "./markdown";
 import * as embedding from "./embedding";
-import type { LoreMessage, LorePart } from "./types";
+import { classifyToolError, MAX_ERROR_MESSAGE_LEN } from "./tool-trace";
+import type { LoreMessage, LorePart, LoreToolState } from "./types";
 import { isTextPart, isReasoningPart, isToolPart } from "./types";
 
 // ~3 chars per token — validated as best heuristic against real API data.
@@ -121,6 +122,123 @@ export function store(input: {
   if (embedding.isAvailable()) {
     embedding.embedTemporalMessage(input.info.id, content);
   }
+}
+
+/**
+ * Record structured tool-call metadata into the `tool_calls` table.
+ *
+ * A tool call spans two messages in the Anthropic protocol:
+ *   - the assistant's `tool_use` part carries the tool NAME (state typically
+ *     `pending` at this point — the result hasn't arrived yet);
+ *   - the following turn's user message carries a `tool: "result"` part
+ *     (state `completed` or `error`, after the gateway adapter resolves it)
+ *     with the OUTCOME, keyed by the same `callID`.
+ *
+ * Both phases UPSERT on the globally-unique `call_id` primary key: the tool_use
+ * seeds the name + `pending`; the result updates status/error/duration in place.
+ * The result branch deliberately does NOT overwrite the recorded tool name with
+ * the synthetic `"result"` (it preserves the seeded name).
+ *
+ * This is a SEPARATE function from `store()` because `store()` early-returns on
+ * empty `partsToText()` content and `partsToText()` drops error-state tools —
+ * so failures would otherwise be invisible.
+ *
+ * Idempotent on re-store (retries / stream re-delivery) via the UPSERT.
+ */
+export function recordToolCalls(input: {
+  projectPath: string;
+  info: LoreMessage;
+  parts: LorePart[];
+}): void {
+  const toolParts = input.parts.filter(isToolPart);
+  if (!toolParts.length) return;
+
+  const pid = ensureProject(input.projectPath);
+  const createdAt = input.info.time.created;
+
+  // Phase A: assistant tool_use parts — seed name + status. May already be
+  // resolved (e.g. host delivers completed state directly). On conflict, only
+  // overwrite outcome fields when the existing row is still `pending` — never
+  // revert a resolved row back to pending on a re-seed (retry / re-delivery).
+  const seedStmt = db().query(
+    `INSERT INTO tool_calls
+       (call_id, message_id, project_id, session_id, tool, status, error_type, error_message, duration_ms, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(call_id) DO UPDATE SET
+       status = CASE WHEN tool_calls.status = 'pending' THEN excluded.status ELSE tool_calls.status END,
+       error_type = CASE WHEN tool_calls.status = 'pending' THEN excluded.error_type ELSE tool_calls.error_type END,
+       error_message = CASE WHEN tool_calls.status = 'pending' THEN excluded.error_message ELSE tool_calls.error_message END,
+       duration_ms = COALESCE(excluded.duration_ms, tool_calls.duration_ms)`,
+  );
+  // Phase B: user tool_result parts — update outcome by call_id, preserving
+  // the previously-seeded tool name and message_id.
+  const updateStmt = db().query(
+    `UPDATE tool_calls
+       SET status = ?, error_type = ?, error_message = ?, duration_ms = ?
+     WHERE call_id = ?`,
+  );
+
+  for (const p of toolParts) {
+    const st = p.state;
+    const outcome = toolOutcome(p.tool, st);
+
+    if (p.tool === "result") {
+      // Outcome-only update; the tool name was seeded by the tool_use phase.
+      updateStmt.run(
+        outcome.status,
+        outcome.errorType,
+        outcome.errorMessage,
+        outcome.duration,
+        p.callID,
+      );
+      continue;
+    }
+
+    seedStmt.run(
+      p.callID,
+      input.info.id,
+      pid,
+      input.info.sessionID,
+      p.tool,
+      outcome.status,
+      outcome.errorType,
+      outcome.errorMessage,
+      outcome.duration,
+      createdAt,
+    );
+  }
+}
+
+/** Derive structured outcome fields from a tool part's state. */
+function toolOutcome(
+  tool: string,
+  st: LoreToolState,
+): {
+  status: string;
+  errorType: string | null;
+  errorMessage: string | null;
+  duration: number | null;
+} {
+  let errorType: string | null = null;
+  let errorMessage: string | null = null;
+  let duration: number | null = null;
+
+  if (st.status === "error") {
+    const raw = st.error ?? "";
+    errorMessage = raw ? raw.slice(0, MAX_ERROR_MESSAGE_LEN) : null;
+    errorType = classifyToolError(tool, raw);
+  }
+  if (
+    (st.status === "completed" || st.status === "error") &&
+    typeof st.time?.end === "number" &&
+    st.time.end > st.time.start
+  ) {
+    // Only record a real duration. Some hosts (e.g. the gateway adapter) set
+    // start === end as a placeholder — store NULL rather than a fake 0 so
+    // aggregations aren't polluted with meaningless zeros.
+    duration = st.time.end - st.time.start;
+  }
+  return { status: st.status, errorType, errorMessage, duration };
 }
 
 export type TemporalMessage = {

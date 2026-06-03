@@ -6,6 +6,7 @@ import * as embedding from "./embedding";
 import * as ltm from "./ltm";
 import * as log from "./log";
 import { extractPatterns, extractActionTags, tagToTitle } from "./pattern-extract";
+import * as toolTrace from "./tool-trace";
 import { detectPatternEchoes } from "./pattern-echo";
 import {
   DISTILLATION_SYSTEM,
@@ -445,6 +446,51 @@ export function detectAssertions(messages: TemporalMessage[]): PinnedAssertion[]
   return results;
 }
 
+/** Max distinct tool-failure lines pinned into a single distillation prompt. */
+const MAX_PINNED_TOOL_FAILURES = 5;
+
+/**
+ * Minimum distinct sessions and total failures before a recurring tool
+ * failure is auto-promoted to a `gotcha` knowledge entry. Mirrors the
+ * cross-session bar used for action-tag behavioral preferences.
+ */
+const GOTCHA_MIN_SESSIONS = 3;
+const GOTCHA_MIN_FAILURES = 4;
+
+/**
+ * Build a compact tool-failure block for the observer prompt, scoped to the
+ * current segment's time window. Reads the structured `tool_calls` table
+ * (authoritative) rather than re-parsing `[tool:...]` text — which doesn't
+ * carry error info. Returns `undefined` when there are no in-window failures.
+ */
+export function detectToolFailures(
+  projectPath: string,
+  sessionID: string,
+  messages: TemporalMessage[],
+): string | undefined {
+  if (!messages.length) return undefined;
+  const since = messages[0].created_at;
+  const until = messages[messages.length - 1].created_at;
+  const rows = toolTrace.recentSessionFailures(projectPath, sessionID, {
+    sinceMs: since,
+    limit: 100,
+  });
+  const inWindow = rows.filter((r) => r.created_at <= until);
+  if (!inWindow.length) return undefined;
+
+  // Aggregate by (tool, error_type) for compactness.
+  const byKey = new Map<string, number>();
+  for (const r of inWindow) {
+    const key = `${r.tool}:${r.error_type ?? "unknown"}`;
+    byKey.set(key, (byKey.get(key) ?? 0) + 1);
+  }
+  const lines = [...byKey.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, MAX_PINNED_TOOL_FAILURES)
+    .map(([key, n]) => `- ${key} (×${n})`);
+  return lines.join("\n");
+}
+
 type DistillationResult = {
   observations: string;
 };
@@ -881,6 +927,13 @@ async function distillSegment(input: {
       `pinned ${assertions.length} user assertion(s) in segment of ${input.messages.length} msgs`,
     );
   }
+  // Pre-scan structured tool failures in this segment's time window so the
+  // observer surfaces recurring obstacles instead of dropping them as noise.
+  const toolFailures = detectToolFailures(
+    input.projectPath,
+    input.sessionID,
+    input.messages,
+  );
   // Derive session date from first message timestamp
   const first = input.messages[0];
   const date = first
@@ -895,6 +948,7 @@ async function distillSegment(input: {
     date,
     messages: text,
     pinnedAssertions,
+    toolFailures,
   });
 
   const model = input.model ?? config().model;
@@ -1042,6 +1096,36 @@ async function distillSegment(input: {
           // Dedup guard or DB error — swallow
         }
       }
+    }
+
+    // Tool-failure gotcha detection: a tool that fails with the same error
+    // type across multiple distinct sessions is a recurring environmental or
+    // usage gotcha worth surfacing as a knowledge entry.
+    try {
+      const failureStats = toolTrace.toolFailureStats(input.projectPath, {
+        minSessions: GOTCHA_MIN_SESSIONS,
+      });
+      for (const stat of failureStats) {
+        if (stat.failure_count < GOTCHA_MIN_FAILURES) continue;
+        try {
+          ltm.create({
+            projectPath: input.projectPath,
+            category: "gotcha",
+            title: toolTrace.toolGotchaTitle(stat.tool, stat.error_type),
+            content: toolTrace.toolGotchaContent(stat),
+            session: input.sessionID,
+            scope: "project",
+            confidence: 0.75,
+          });
+          log.info(
+            `tool-failure gotcha: ${stat.tool}/${stat.error_type} in ${stat.session_count} sessions — created gotcha`,
+          );
+        } catch {
+          // Dedup guard or DB error — swallow
+        }
+      }
+    } catch {
+      // Aggregation query failure is non-fatal — swallow
     }
   }
 

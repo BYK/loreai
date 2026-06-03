@@ -54,6 +54,23 @@ function makeParts(messageID: string, text: string): LorePart[] {
   ];
 }
 
+function toolPart(
+  messageID: string,
+  callID: string,
+  tool: string,
+  state: Record<string, unknown>,
+): LorePart {
+  return {
+    id: `tp-${callID}`,
+    sessionID: "sess-tool",
+    messageID,
+    type: "tool",
+    tool,
+    callID,
+    state,
+  } as unknown as LorePart;
+}
+
 describe("temporal", () => {
   beforeAll(() => {
     // Clean stale data from prior test runs — tests are cumulative within a run
@@ -332,6 +349,156 @@ describe("temporal", () => {
       expect(() =>
         temporal.search({ projectPath: PROJECT, query: "sanity.io article" }),
       ).not.toThrow();
+    });
+  });
+
+  describe("recordToolCalls", () => {
+    const TOOL_PROJECT = "/test/temporal/tool-calls";
+
+    beforeEach(() => {
+      const pid = ensureProject(TOOL_PROJECT);
+      db().query("DELETE FROM tool_calls WHERE project_id = ?").run(pid);
+    });
+
+    function rows(pid: string) {
+      return db()
+        .query("SELECT call_id, tool, status, error_type, error_message, duration_ms FROM tool_calls WHERE project_id = ? ORDER BY call_id")
+        .all(pid) as Array<{
+        call_id: string;
+        tool: string;
+        status: string;
+        error_type: string | null;
+        error_message: string | null;
+        duration_ms: number | null;
+      }>;
+    }
+
+    test("seeds tool name + pending from assistant tool_use parts", () => {
+      const pid = ensureProject(TOOL_PROJECT);
+      const info = makeMessage("tm-1", "assistant", "sess-tool");
+      const parts: LorePart[] = [
+        toolPart("tm-1", "ca", "read", { status: "pending", input: {} }),
+        toolPart("tm-1", "cb", "bash", { status: "pending", input: {} }),
+      ];
+      temporal.recordToolCalls({ projectPath: TOOL_PROJECT, info, parts });
+
+      const r = rows(pid);
+      expect(r.length).toBe(2);
+      expect(r.find((x) => x.call_id === "ca")!.tool).toBe("read");
+      expect(r.find((x) => x.call_id === "ca")!.status).toBe("pending");
+      expect(r.find((x) => x.call_id === "cb")!.tool).toBe("bash");
+    });
+
+    test("result parts update outcome by call_id, preserving seeded name", () => {
+      const pid = ensureProject(TOOL_PROJECT);
+      // Phase A: assistant seeds names (prior turn).
+      temporal.recordToolCalls({
+        projectPath: TOOL_PROJECT,
+        info: makeMessage("tm-asst", "assistant", "sess-tool"),
+        parts: [
+          toolPart("tm-asst", "ca", "read", { status: "pending", input: {} }),
+          toolPart("tm-asst", "cb", "bash", { status: "pending", input: {} }),
+        ],
+      });
+      // Phase B: user message carries the tool_result outcomes (next turn).
+      temporal.recordToolCalls({
+        projectPath: TOOL_PROJECT,
+        info: makeMessage("tm-user", "user", "sess-tool"),
+        parts: [
+          toolPart("tm-user", "ca", "result", {
+            status: "completed",
+            input: null,
+            output: "file contents",
+            time: { start: 100, end: 150 },
+          }),
+          toolPart("tm-user", "cb", "result", {
+            status: "error",
+            input: null,
+            error: "ENOENT: no such file or directory",
+            time: { start: 200, end: 260 },
+          }),
+        ],
+      });
+
+      const r = rows(pid);
+      expect(r.length).toBe(2);
+      const completed = r.find((x) => x.call_id === "ca")!;
+      expect(completed.tool).toBe("read"); // name preserved, not "result"
+      expect(completed.status).toBe("completed");
+      expect(completed.error_type).toBeNull();
+      expect(completed.duration_ms).toBe(50);
+      const errored = r.find((x) => x.call_id === "cb")!;
+      expect(errored.tool).toBe("bash"); // name preserved
+      expect(errored.status).toBe("error");
+      expect(errored.error_type).toBe("not_found");
+      expect(errored.error_message).toBe("ENOENT: no such file or directory");
+      expect(errored.duration_ms).toBe(60);
+    });
+
+    test("is idempotent on re-store (UPSERT on call_id)", () => {
+      const pid = ensureProject(TOOL_PROJECT);
+      const info = makeMessage("tm-2", "assistant", "sess-tool");
+      const parts: LorePart[] = [
+        toolPart("tm-2", "cx", "edit", { status: "pending", input: {} }),
+      ];
+      temporal.recordToolCalls({ projectPath: TOOL_PROJECT, info, parts });
+      temporal.recordToolCalls({ projectPath: TOOL_PROJECT, info, parts });
+
+      const r = rows(pid);
+      expect(r.length).toBe(1);
+      expect(r[0].tool).toBe("edit");
+    });
+
+    test("orphan result (no seeded row) is a silent no-op", () => {
+      const pid = ensureProject(TOOL_PROJECT);
+      temporal.recordToolCalls({
+        projectPath: TOOL_PROJECT,
+        info: makeMessage("tm-orphan", "user", "sess-tool"),
+        parts: [
+          toolPart("tm-orphan", "missing", "result", {
+            status: "completed",
+            input: null,
+            output: "x",
+            time: { start: 1, end: 2 },
+          }),
+        ],
+      });
+      expect(rows(pid).length).toBe(0);
+    });
+
+    test("no-op when there are no tool parts", () => {
+      const pid = ensureProject(TOOL_PROJECT);
+      const info = makeMessage("tm-3", "assistant", "sess-tool");
+      temporal.recordToolCalls({
+        projectPath: TOOL_PROJECT,
+        info,
+        parts: makeParts("tm-3", "just text"),
+      });
+      expect(rows(pid).length).toBe(0);
+    });
+
+    test("empty error string yields error_type bucket 'unknown'", () => {
+      const pid = ensureProject(TOOL_PROJECT);
+      temporal.recordToolCalls({
+        projectPath: TOOL_PROJECT,
+        info: makeMessage("tm-4a", "assistant", "sess-tool"),
+        parts: [toolPart("tm-4a", "ce", "bash", { status: "pending", input: {} })],
+      });
+      temporal.recordToolCalls({
+        projectPath: TOOL_PROJECT,
+        info: makeMessage("tm-4b", "user", "sess-tool"),
+        parts: [
+          toolPart("tm-4b", "ce", "result", {
+            status: "error",
+            input: null,
+            error: "",
+            time: { start: 1, end: 2 },
+          }),
+        ],
+      });
+      const r = rows(pid);
+      expect(r[0].error_type).toBe("unknown");
+      expect(r[0].error_message).toBeNull();
     });
   });
 });

@@ -7,6 +7,7 @@ import * as entities from "./entities";
 import * as embedding from "./embedding";
 import * as log from "./log";
 import { CURATOR_SYSTEM, curatorUser, CONSOLIDATION_SYSTEM, consolidationUser } from "./prompt";
+import * as toolTrace from "./tool-trace";
 import { detectAndFormat } from "./instruction-detect";
 import { curatorLimiter } from "./session-limiter";
 import type { LLMClient } from "./types";
@@ -495,7 +496,17 @@ async function runInner(input: {
     log.warn("action tag context failed (non-fatal):", err);
   }
 
-  const userContent = baseUserContent + crossSessionContext + actionTagContext;
+  // Cross-session tool-failure signal: recurring tool failures across prior
+  // sessions, so the curator can decide whether they warrant a gotcha entry.
+  let toolFailureContext = "";
+  try {
+    toolFailureContext = buildToolFailureContext(input.projectPath, input.sessionID);
+  } catch (err) {
+    log.warn("tool failure context failed (non-fatal):", err);
+  }
+
+  const userContent =
+    baseUserContent + crossSessionContext + actionTagContext + toolFailureContext;
   const model = input.model ?? cfg.model;
   const responseText = await input.llm.prompt(
     CURATOR_SYSTEM,
@@ -637,6 +648,35 @@ function buildActionTagContext(
 
   return (
     "\n\n---\nCross-session behavioral patterns detected (consider creating preference entries for these):\n" +
+    lines.join("\n")
+  );
+}
+
+/**
+ * Build a compact cross-session tool-failure block for the curator prompt.
+ * Aggregates recurring tool failures from the structured `tool_calls` table
+ * (excluding the current session), so the curator can decide whether a
+ * recurring failure warrants a gotcha entry. Returns "" when none qualify.
+ */
+function buildToolFailureContext(
+  projectPath: string,
+  currentSessionID: string,
+): string {
+  const stats = toolTrace.toolFailureStats(projectPath, {
+    minSessions: 2,
+    excludeSessionID: currentSessionID,
+  });
+  if (!stats.length) return "";
+
+  const lines = stats
+    .slice(0, 8)
+    .map(
+      (s) =>
+        `- ${s.tool} failed with "${s.error_type ?? "unknown"}" in ${s.session_count} sessions (${s.failure_count}×)`,
+    );
+
+  return (
+    "\n\n---\nRecurring tool failures across sessions (consider creating gotcha entries for root causes):\n" +
     lines.join("\n")
   );
 }
