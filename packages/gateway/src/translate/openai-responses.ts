@@ -140,33 +140,56 @@ function parseInputItems(input: unknown): GatewayMessage[] {
     }
 
     if (itemType === "function_call") {
-      // Function call from assistant — maps to tool_use
-      messages.push({
-        role: "assistant",
-        content: [
-          {
-            type: "tool_use",
-            id: String(item.call_id ?? item.id ?? ""),
-            name: String(item.name ?? ""),
-            input: parseArguments(item.arguments),
-          },
-        ],
-      });
+      // Function call from assistant — maps to tool_use.
+      //
+      // The Responses API emits each parallel tool call as its OWN
+      // `function_call` item, and each tool result as its own
+      // `function_call_output` item. The gateway's downstream tool-pairing
+      // (loreMessagesToGateway + removeOrphanedToolResults) assumes the
+      // Anthropic shape: one assistant message carries ALL tool_use blocks,
+      // and the single immediately-following user message carries ALL matching
+      // tool_result blocks. Coalesce consecutive function_call items into one
+      // assistant message so an N-tool-call turn keeps its N tool_use blocks
+      // together (and matched by the coalesced tool_result message below).
+      const toolUseBlock: GatewayContentBlock = {
+        type: "tool_use",
+        id: String(item.call_id ?? item.id ?? ""),
+        name: String(item.name ?? ""),
+        input: parseArguments(item.arguments),
+      };
+      const last = messages[messages.length - 1];
+      const lastIsToolUseMessage =
+        last !== undefined &&
+        last.role === "assistant" &&
+        last.content.length > 0 &&
+        last.content.every((b) => b.type === "tool_use");
+      if (lastIsToolUseMessage) {
+        last.content.push(toolUseBlock);
+      } else {
+        messages.push({ role: "assistant", content: [toolUseBlock] });
+      }
       continue;
     }
 
     if (itemType === "function_call_output") {
-      // Function output — maps to tool_result
-      messages.push({
-        role: "user",
-        content: [
-          {
-            type: "tool_result",
-            toolUseId: String(item.call_id ?? ""),
-            content: String(item.output ?? ""),
-          },
-        ],
-      });
+      // Function output — maps to tool_result. Coalesce consecutive outputs
+      // into one user message (see the function_call comment above).
+      const toolResultBlock: GatewayContentBlock = {
+        type: "tool_result",
+        toolUseId: String(item.call_id ?? ""),
+        content: String(item.output ?? ""),
+      };
+      const last = messages[messages.length - 1];
+      const lastIsToolResultMessage =
+        last !== undefined &&
+        last.role === "user" &&
+        last.content.length > 0 &&
+        last.content.every((b) => b.type === "tool_result");
+      if (lastIsToolResultMessage) {
+        last.content.push(toolResultBlock);
+      } else {
+        messages.push({ role: "user", content: [toolResultBlock] });
+      }
       continue;
     }
 

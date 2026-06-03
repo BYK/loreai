@@ -15,7 +15,20 @@ import {
   buildOpenAIResponsesResponse,
 } from "../src/translate/openai-responses";
 import { buildOpenAIResponse } from "../src/translate/openai";
-import type { GatewayResponse } from "../src/translate/types";
+import {
+  loreMessagesToGateway,
+  removeOrphanedToolResults,
+} from "../src/pipeline";
+import {
+  gatewayMessagesToLore,
+  resolveToolResults,
+} from "../src/temporal-adapter";
+import type {
+  GatewayResponse,
+  GatewayContentBlock,
+  GatewayToolUseBlock,
+  GatewayToolResultBlock,
+} from "../src/translate/types";
 
 // ---------------------------------------------------------------------------
 // parseOpenAIResponsesRequest
@@ -113,6 +126,165 @@ describe("parseOpenAIResponsesRequest", () => {
         content: "Found 5 cats",
       },
     ]);
+  });
+
+  test("coalesces parallel function_call items into one assistant message", () => {
+    const req = parseOpenAIResponsesRequest(
+      {
+        model: "gpt-5.5",
+        input: [
+          { type: "message", role: "user", content: "do two things" },
+          { type: "function_call", call_id: "call_A", name: "read", arguments: "{}" },
+          { type: "function_call", call_id: "call_B", name: "grep", arguments: "{}" },
+          { type: "function_call_output", call_id: "call_A", output: "result A" },
+          { type: "function_call_output", call_id: "call_B", output: "result B" },
+        ],
+      },
+      headers,
+    );
+
+    // user, assistant (both tool_use), user (both tool_result)
+    expect(req.messages.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
+
+    const toolUses = req.messages[1].content as GatewayToolUseBlock[];
+    expect(toolUses.map((b) => b.id)).toEqual(["call_A", "call_B"]);
+
+    const toolResults = req.messages[2].content as GatewayToolResultBlock[];
+    expect(toolResults.map((b) => b.toolUseId)).toEqual(["call_A", "call_B"]);
+  });
+
+  test("coalesces parallel function_call items across interleaved reasoning items", () => {
+    const req = parseOpenAIResponsesRequest(
+      {
+        model: "gpt-5.5",
+        input: [
+          { type: "message", role: "user", content: "do two things" },
+          { type: "function_call", call_id: "call_A", name: "read", arguments: "{}" },
+          // The Responses API can interleave reasoning items between calls;
+          // they are skipped and must NOT break coalescing of A and B.
+          { type: "reasoning", summary: [] },
+          { type: "function_call", call_id: "call_B", name: "grep", arguments: "{}" },
+          { type: "function_call_output", call_id: "call_A", output: "result A" },
+          { type: "function_call_output", call_id: "call_B", output: "result B" },
+        ],
+      },
+      headers,
+    );
+
+    expect(req.messages.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
+    expect((req.messages[1].content as GatewayToolUseBlock[]).map((b) => b.id)).toEqual([
+      "call_A",
+      "call_B",
+    ]);
+    expect((req.messages[2].content as GatewayToolResultBlock[]).map((b) => b.toolUseId)).toEqual([
+      "call_A",
+      "call_B",
+    ]);
+  });
+
+  test("sequential call/output pairs are NOT coalesced across the boundary", () => {
+    const req = parseOpenAIResponsesRequest(
+      {
+        model: "gpt-5.5",
+        input: [
+          { type: "message", role: "user", content: "go" },
+          { type: "function_call", call_id: "call_A", name: "read", arguments: "{}" },
+          { type: "function_call_output", call_id: "call_A", output: "result A" },
+          { type: "function_call", call_id: "call_B", name: "grep", arguments: "{}" },
+          { type: "function_call_output", call_id: "call_B", output: "result B" },
+        ],
+      },
+      headers,
+    );
+
+    // Each call stays adjacent to its own output: asst[A] user[A] asst[B] user[B].
+    expect(req.messages.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "assistant",
+      "user",
+    ]);
+    expect((req.messages[1].content as GatewayToolUseBlock[]).map((b) => b.id)).toEqual(["call_A"]);
+    expect((req.messages[2].content as GatewayToolResultBlock[]).map((b) => b.toolUseId)).toEqual(["call_A"]);
+    expect((req.messages[3].content as GatewayToolUseBlock[]).map((b) => b.id)).toEqual(["call_B"]);
+    expect((req.messages[4].content as GatewayToolResultBlock[]).map((b) => b.toolUseId)).toEqual(["call_B"]);
+  });
+
+  test("does not merge function_call into a preceding assistant text message", () => {
+    const req = parseOpenAIResponsesRequest(
+      {
+        model: "gpt-5.5",
+        input: [
+          { type: "message", role: "user", content: "go" },
+          { type: "message", role: "assistant", content: [{ type: "output_text", text: "Let me check." }] },
+          { type: "function_call", call_id: "call_A", name: "read", arguments: "{}" },
+          { type: "function_call_output", call_id: "call_A", output: "result A" },
+        ],
+      },
+      headers,
+    );
+
+    // The assistant text message stays separate from the tool_use message.
+    expect(req.messages.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "assistant",
+      "user",
+    ]);
+    expect(req.messages[1].content).toEqual([{ type: "text", text: "Let me check." }]);
+    expect((req.messages[2].content as GatewayToolUseBlock[]).map((b) => b.id)).toEqual(["call_A"]);
+  });
+
+  test("end-to-end: parallel tool calls survive reconstruction with no orphans", () => {
+    const req = parseOpenAIResponsesRequest(
+      {
+        model: "gpt-5.5",
+        input: [
+          { type: "message", role: "user", content: "do two things" },
+          { type: "function_call", call_id: "call_A", name: "read", arguments: "{}" },
+          { type: "function_call", call_id: "call_B", name: "grep", arguments: "{}" },
+          { type: "function_call_output", call_id: "call_A", output: "result A" },
+          { type: "function_call_output", call_id: "call_B", output: "result B" },
+          { type: "message", role: "user", content: "now summarize" },
+        ],
+      },
+      headers,
+    );
+
+    const lore = gatewayMessagesToLore(req.messages, "test-session");
+    resolveToolResults(lore);
+    const reconstructed = loreMessagesToGateway(lore);
+
+    const warnings: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+    try {
+      removeOrphanedToolResults(reconstructed);
+    } finally {
+      console.warn = origWarn;
+    }
+
+    expect(warnings.filter((w) => w.includes("orphaned tool_use"))).toEqual([]);
+
+    const allText = reconstructed
+      .flatMap((m) => m.content)
+      .filter((b) => b.type === "text")
+      .map((b) => (b as { text: string }).text);
+    expect(allText).not.toContain("[assistant response]");
+
+    const assistant = reconstructed.find(
+      (m) =>
+        m.role === "assistant" &&
+        m.content.some((b: GatewayContentBlock) => b.type === "tool_use"),
+    )!;
+    const ids = (assistant.content as GatewayContentBlock[])
+      .filter((b): b is GatewayToolUseBlock => b.type === "tool_use")
+      .map((b) => b.id)
+      .sort();
+    expect(ids).toEqual(["call_A", "call_B"]);
   });
 
   test("extracts instructions as system prompt", () => {
