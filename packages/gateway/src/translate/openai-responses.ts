@@ -314,6 +314,12 @@ export function buildOpenAIResponsesUpstreamRequest(
     // worse, defeating the gateway's compression and recall edits with an
     // un-editable server-side copy. Dropping it keeps the upstream's view
     // consistent with what the gateway actually sends.
+    //
+    // Logged at `warn` (not `error`) deliberately: this is the gateway working
+    // as designed, not a failure. `error` would print red `[lore]` noise on
+    // every request from a client that sets the field. The file log + Sentry
+    // breadcrumb provide observability; the application-level symptom (no
+    // server-side continuation) is what a debugging user would actually chase.
     if (req.extras.previous_response_id !== undefined) {
       log.warn(
         "dropping previous_response_id; gateway sends full conversation history " +

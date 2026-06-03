@@ -6,7 +6,8 @@
  *  - Upstream request round-trip
  *  - Response conversion (non-streaming and streaming)
  *  - Stop reason → status mapping
- *  - Extras passthrough (previous_response_id, reasoning, truncation)
+ *  - Extras: reasoning/truncation passthrough; previous_response_id is DROPPED
+ *    (the gateway is a stateless full-history proxy)
  */
 import { describe, test, expect } from "bun:test";
 import {
