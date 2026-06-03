@@ -100,13 +100,18 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 1rem 3rem;
+      padding: 0 3rem;
       background: var(--ink); /* Dark green background */
       border-bottom: 1px solid rgba(255, 255, 255, 0.05);
       color: var(--c0);
     }
 
     .nav-left {
+      display: flex;
+      align-items: center;
+    }
+
+    .nav-right {
       display: flex;
       align-items: center;
       gap: 3rem;
@@ -160,11 +165,10 @@
       display: flex;
       gap: 2.2rem;
       list-style: none;
-      font-size: .75rem;
-      letter-spacing: .14em;
-      text-transform: uppercase;
-      color: rgba(247, 242, 232, 0.6); /* Faded cream */
-      font-weight: 700;
+      font-size: 1rem;
+      font-family: var(--sans);
+      color: rgba(247, 242, 232, 0.8); /* Faded cream */
+      font-weight: 400;
     }
 
     .nav-links a {
@@ -176,15 +180,14 @@
     }
 
     .nav-btn {
-      font-size: .73rem;
-      letter-spacing: .13em;
-      text-transform: uppercase;
+      font-size: 1rem;
+      font-family: var(--sans);
+      font-weight: 400;
       padding: .6rem 1.6rem;
       background: var(--c0);
       color: var(--ink);
       border-radius: 3px;
       transition: background .3s, color .3s;
-      font-weight: 700;
     }
 
     .nav-btn:hover {
@@ -870,14 +873,14 @@
         <img src="logo-final.png" alt="Lore Icon" style="height: 120px; width: auto; filter: invert(1); mix-blend-mode: screen; display: block; margin-left: -120px;" />
         <span class="logo-text" style="font-family: var(--serif); font-size: 2.3rem; font-weight: 400; font-style: italic; color: var(--c0); margin-left: -80px;">Lore<span style="color: var(--g5)">.AI</span></span>
       </a>
+    </div>
+    <div class="nav-right">
       <ul class="nav-links">
         <li><a href="#problem">The Problem</a></li>
         <li><a href="#how">How It Works</a></li>
         <li><a href="#features">Features</a></li>
         <li><a href="https://github.com/byk/loreai" target="_blank">GitHub</a></li>
       </ul>
-    </div>
-    <div class="nav-right">
       <a href="#waitlist" class="nav-btn">Lore Cloud Waitlist</a>
     </div>
   </nav>
