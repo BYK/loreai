@@ -1152,7 +1152,7 @@ describe("ltm.rerankPreferences", () => {
       .run();
   });
 
-  test("sets 1.0 for strong directives, 0.9 for explicit prefs, 0.8 for others", () => {
+  test("sets 1.0 for strong directives, 0.9 for explicit prefs, keeps others unchanged", () => {
     const id_strong = ltm.create({
       category: "preference",
       title: "rerank-test strong",
@@ -1181,11 +1181,33 @@ describe("ltm.rerankPreferences", () => {
     expect(ltm.get(id_mild)!.confidence).toBe(1.0);
 
     const updated = ltm.rerankPreferences();
-    expect(updated).toBe(2); // strong stays at 1.0, only explicit and mild change
+    // Only the explicit-pref entry changes (1.0 → 0.9). The strong directive
+    // stays at 1.0, and the "mild" entry (no English directive language) is no
+    // longer demoted — it keeps the curator's confidence (1.0).
+    expect(updated).toBe(1);
 
     expect(ltm.get(id_strong)!.confidence).toBe(1.0);
     expect(ltm.get(id_explicit)!.confidence).toBe(0.9);
-    expect(ltm.get(id_mild)!.confidence).toBe(0.8);
+    expect(ltm.get(id_mild)!.confidence).toBe(1.0);
+  });
+
+  test("does not demote non-English (Turkish) directives", () => {
+    // Turkish "asla" = never, "her zaman" = always. The English directive
+    // regexes cannot match these, but the entry must NOT be demoted — it keeps
+    // the curator's confidence (1.0) instead of being forced down to 0.8.
+    const id_tr = ltm.create({
+      category: "preference",
+      title: "rerank-test turkish",
+      content: "Asla main dalına doğrudan push yapma; her zaman PR aç",
+      scope: "global",
+      crossProject: true,
+    });
+
+    expect(ltm.get(id_tr)!.confidence).toBe(1.0);
+
+    ltm.rerankPreferences();
+
+    expect(ltm.get(id_tr)!.confidence).toBe(1.0);
   });
 
   test("skips entries already scored by curator (confidence < 1.0)", () => {

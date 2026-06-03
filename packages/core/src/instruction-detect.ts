@@ -51,6 +51,25 @@ const INSTRUCTION_PATTERNS: RegExp[] = [
   /\bI (?:want|need|prefer|expect) (?:you to )?(.{10,80}?)(?:\.|,|!|$)/gi,
 ];
 
+/**
+ * Heuristic: does a message contain non-ASCII letters (a strong signal it is
+ * not plain English, so the English INSTRUCTION_PATTERNS / ASSERTION_PATTERNS
+ * are unlikely to capture it)?
+ *
+ * Note: Turkish (and many other languages) use the Latin alphabet, so a pure
+ * "non-Latin script" test would never fire for them. What we actually want is
+ * "contains letters outside the ASCII A–Z range" — e.g. Turkish ç/ğ/ı/ö/ş/ü,
+ * which guarantees the message is non-English. Used to gate language-agnostic
+ * fallbacks so non-English directives still feed downstream multilingual
+ * matching instead of being silently dropped. Conservative on purpose —
+ * plain-ASCII English text keeps the exact existing behavior.
+ */
+export function hasNonAsciiLetters(s: string): boolean {
+  // Match any Unicode letter that is not a plain ASCII A–Z/a–z letter.
+  // (Strip ASCII first, then test whether any Unicode letter remains.)
+  return /\p{L}/u.test(s.replace(/[\x00-\x7F]/g, ""));
+}
+
 export type InstructionCandidate = {
   /** The matched instruction text. */
   text: string;
@@ -79,6 +98,7 @@ export function extractInstructionCandidates(
   for (const msg of messages) {
     if (msg.role !== "user") continue;
 
+    let matchedThisMsg = false;
     for (const pattern of INSTRUCTION_PATTERNS) {
       pattern.lastIndex = 0;
       let match: RegExpMatchArray | null;
@@ -90,6 +110,7 @@ export function extractInstructionCandidates(
         const key = text.toLowerCase();
         if (seen.has(key)) continue;
         seen.add(key);
+        matchedThisMsg = true;
 
         candidates.push({
           text,
@@ -97,6 +118,20 @@ export function extractInstructionCandidates(
         });
 
         // Cap total candidates to bound search cost
+        if (candidates.length >= MAX_CANDIDATES) return candidates;
+      }
+    }
+
+    // Language-agnostic fallback: the English INSTRUCTION_PATTERNS cannot match
+    // non-English text (e.g. Turkish). When a message with non-ASCII letters
+    // produced no candidate, emit the message itself so the multilingual
+    // cross-session matcher (embeddings in findRepeatedInstructions) can work.
+    if (!matchedThisMsg && hasNonAsciiLetters(msg.content)) {
+      const text = msg.content.trim().slice(0, 80);
+      const key = text.toLowerCase();
+      if (text.length >= 10 && !seen.has(key)) {
+        seen.add(key);
+        candidates.push({ text, sessionID: msg.session_id });
         if (candidates.length >= MAX_CANDIDATES) return candidates;
       }
     }

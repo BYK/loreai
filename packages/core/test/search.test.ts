@@ -2,6 +2,7 @@ import { describe, test, expect } from "bun:test";
 import {
   ftsQuery,
   ftsQueryOr,
+  filterTerms,
   STOPWORDS,
   EMPTY_QUERY,
   normalizeRank,
@@ -75,6 +76,33 @@ describe("search", () => {
 
     test("underscores preserved as word chars", () => {
       expect(ftsQuery("my_variable")).toBe("my_variable*");
+    });
+  });
+
+  describe("Unicode-aware tokenization (non-English)", () => {
+    test("filterTerms keeps Turkish words intact (no split at ç/ğ/ı/ö/ş/ü)", () => {
+      // With ASCII \w, "değişiklik" split into de/i/iklik (and single chars
+      // were dropped). With \p{L}, it stays one token.
+      expect(filterTerms("değişiklik yap")).toEqual(["değişiklik", "yap"]);
+    });
+
+    test("filterTerms preserves a variety of Turkish letters", () => {
+      expect(filterTerms("şöğüçı İçin")).toEqual(["şöğüçı", "İçin"]);
+    });
+
+    test("ftsQuery builds a valid prefix query from Turkish terms", () => {
+      expect(ftsQuery("değişiklik yap")).toBe("değişiklik* yap*");
+    });
+
+    test("punctuation around Turkish words is still stripped", () => {
+      expect(filterTerms("değişiklik, yap!")).toEqual(["değişiklik", "yap"]);
+    });
+
+    test("extractTopTerms keeps Turkish tokens intact", () => {
+      expect(extractTopTerms("değişiklik değişiklik yap")).toEqual([
+        "değişiklik",
+        "yap",
+      ]);
     });
   });
 

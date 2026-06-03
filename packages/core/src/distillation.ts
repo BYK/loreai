@@ -8,6 +8,7 @@ import * as log from "./log";
 import { extractPatterns, extractActionTags, tagToTitle } from "./pattern-extract";
 import * as toolTrace from "./tool-trace";
 import { detectPatternEchoes } from "./pattern-echo";
+import { hasNonAsciiLetters } from "./instruction-detect";
 import {
   DISTILLATION_SYSTEM,
   distillationUser,
@@ -406,39 +407,59 @@ export function detectAssertions(messages: TemporalMessage[]): PinnedAssertion[]
   // Track lowercased texts for dedup — both exact and substring overlap.
   const seenTexts: string[] = [];
 
+  // Add an assertion snippet, applying overlap-dedup against existing entries
+  // and the MAX_PINNED_ASSERTIONS cap. Returns true if the cap has been hit
+  // (caller should stop scanning).
+  const addAssertion = (rawText: string, createdAt: number): boolean => {
+    let text = rawText.trim();
+    // Cap length to avoid injecting huge blocks
+    if (text.length > 200) text = text.slice(0, 200) + "…";
+
+    const key = text.toLowerCase();
+
+    // Skip if this text is a substring of an existing match, or if an
+    // existing match is a substring of this text (overlapping patterns).
+    for (let i = 0; i < seenTexts.length; i++) {
+      if (key.includes(seenTexts[i]) || seenTexts[i].includes(key)) {
+        // If the new match is longer, replace the shorter one
+        if (key.length > seenTexts[i].length) {
+          seenTexts[i] = key;
+          results[i] = { text, time: formatTime(createdAt) };
+        }
+        return false;
+      }
+    }
+
+    seenTexts.push(key);
+    results.push({ text, time: formatTime(createdAt) });
+    return results.length >= MAX_PINNED_ASSERTIONS;
+  };
+
   for (const m of messages) {
     if (m.role !== "user") continue;
 
+    let matchedThisMsg = false;
     for (const pattern of ASSERTION_PATTERNS) {
       pattern.lastIndex = 0;
       let match: RegExpExecArray | null;
       while ((match = pattern.exec(m.content)) !== null) {
         // Use the full match as the assertion text (not just capture group)
-        let text = match[0].trim();
-        // Cap length to avoid injecting huge blocks
-        if (text.length > 200) text = text.slice(0, 200) + "…";
+        matchedThisMsg = true;
+        if (addAssertion(match[0], m.created_at)) return results;
+      }
+    }
 
-        const key = text.toLowerCase();
-
-        // Skip if this text is a substring of an existing match, or if an
-        // existing match is a substring of this text (overlapping patterns).
-        let isOverlap = false;
-        for (let i = 0; i < seenTexts.length; i++) {
-          if (key.includes(seenTexts[i]) || seenTexts[i].includes(key)) {
-            // If the new match is longer, replace the shorter one
-            if (key.length > seenTexts[i].length) {
-              seenTexts[i] = key;
-              results[i] = { text, time: formatTime(m.created_at) };
-            }
-            isOverlap = true;
-            break;
-          }
-        }
-        if (isOverlap) continue;
-
-        seenTexts.push(key);
-        results.push({ text, time: formatTime(m.created_at) });
-        if (results.length >= MAX_PINNED_ASSERTIONS) return results;
+    // Language-agnostic fallback: the English ASSERTION_PATTERNS cannot match
+    // non-English text (e.g. Turkish), which silently disables the pinned-
+    // assertion safety net. When a message with non-ASCII letters produced no
+    // match, pin its first sentence (or first ~160 chars) so directives survive
+    // distillation compression.
+    if (!matchedThisMsg && hasNonAsciiLetters(m.content)) {
+      const trimmed = m.content.trim();
+      const firstSentence = trimmed.split(/(?<=[.!?。！？\n])/)[0] ?? trimmed;
+      const snippet = firstSentence.trim().slice(0, 160);
+      if (snippet.length >= 10 && addAssertion(snippet, m.created_at)) {
+        return results;
       }
     }
   }

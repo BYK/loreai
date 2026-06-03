@@ -777,6 +777,13 @@ export function crossProject(): KnowledgeEntry[] {
  * Only touches entries with confidence = 1.0 (legacy/unscored). Entries already
  * scored by the curator (confidence < 1.0) are left untouched.
  *
+ * The directive patterns are English-only. To avoid penalizing non-English
+ * preferences (e.g. Turkish "her zaman"/"asla" directives), entries whose text
+ * matches NO English directive pattern keep their existing confidence rather
+ * than being demoted. This means English explicit-prefs are lowered to 0.9 and
+ * English strong directives confirmed at 1.0, while everything else (including
+ * all non-English entries) retains the curator's chosen confidence.
+ *
  * @returns Count of entries updated.
  */
 export function rerankPreferences(): number {
@@ -798,7 +805,10 @@ export function rerankPreferences(): number {
     } else if (EXPLICIT_PREF_RE.test(text)) {
       newConfidence = 0.9; // Strong but not absolute
     } else {
-      newConfidence = 0.8; // No directive language detected — moderate
+      // No English directive language detected. Do NOT demote — the patterns
+      // are English-only, so a non-match may simply be a non-English directive.
+      // Keep the curator's existing confidence instead of forcing 0.8.
+      newConfidence = entry.confidence;
     }
     if (newConfidence !== entry.confidence) {
       update(entry.id, { confidence: newConfidence });

@@ -138,10 +138,16 @@ export const EMPTY_QUERY = '""';
  *
  * No general length filter — short but meaningful tokens like "DB", "CI",
  * "IO", "PR" are preserved. Only single chars are dropped.
+ *
+ * Tokenization is Unicode-aware: the strip class keeps any Unicode letter
+ * (\p{L}), number (\p{N}), and underscore. This preserves non-English words
+ * intact — e.g. Turkish "değişiklik" stays one token instead of splitting at
+ * ç/ğ/ı/ö/ş/ü (which ASCII \w treats as non-word). Underscore is kept so
+ * snake_case identifiers survive (matching the prior \w behavior).
  */
 export function filterTerms(raw: string): string[] {
   const words = raw
-    .replace(/[^\w\s]/g, " ")
+    .replace(/[^\p{L}\p{N}_\s]/gu, " ")
     .split(/\s+/)
     .filter(Boolean);
 
@@ -260,7 +266,7 @@ export function runRelaxedSearch<T>(
  */
 export function extractTopTerms(text: string, limit = 40): string[] {
   const freq = text
-    .replace(/[^\w\s]/g, " ")
+    .replace(/[^\p{L}\p{N}_\s]/gu, " ")
     .toLowerCase()
     .split(/\s+/)
     .filter((w) => w.length > 1 && !STOPWORDS.has(w))

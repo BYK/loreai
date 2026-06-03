@@ -24,7 +24,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(31);
+    expect(row.version).toBe(32);
   });
 
   test("distillation_fts virtual table exists", () => {
@@ -43,6 +43,57 @@ describe("db", () => {
     expect(names).toContain("distillation_fts_insert");
     expect(names).toContain("distillation_fts_delete");
     expect(names).toContain("distillation_fts_update");
+  });
+
+  test("all FTS5 tables use a language-neutral tokenizer (no English porter stemmer)", () => {
+    const ftsTables = [
+      "temporal_fts",
+      "knowledge_fts",
+      "distillation_fts",
+      "lat_sections_fts",
+      "entities_fts",
+      "entity_aliases_fts",
+    ];
+    for (const name of ftsTables) {
+      const row = db()
+        .query("SELECT sql FROM sqlite_master WHERE type='table' AND name = ?")
+        .get(name) as { sql: string } | undefined;
+      expect(row, `${name} should exist`).toBeTruthy();
+      // Must NOT use the English-only porter stemmer.
+      expect(row!.sql).not.toContain("porter");
+      // Must use unicode61 and preserve diacritics (Turkish letters are distinct).
+      expect(row!.sql).toContain("unicode61");
+      expect(row!.sql).toContain("remove_diacritics 0");
+    }
+  });
+
+  test("Turkish content is searchable via FTS5 after the tokenizer change", () => {
+    const pid = ensureProject("/tmp/lore-test-tr-fts");
+    const now = Date.now();
+    db()
+      .query(
+        `INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at)
+         VALUES (?, ?, 'preference', ?, ?, ?, ?)`,
+      )
+      .run(
+        "tr-fts-1",
+        pid,
+        "Türkçe tercih",
+        "Her zaman değişiklik için PR aç",
+        now,
+        now,
+      );
+
+    // A Turkish keyword with special letters must match (it would have been
+    // mangled/split by the old porter+ASCII pipeline at the query layer).
+    const hit = db()
+      .query(
+        `SELECT k.id FROM knowledge_fts f
+         JOIN knowledge k ON k.rowid = f.rowid
+         WHERE knowledge_fts MATCH ? AND k.project_id = ?`,
+      )
+      .get("değişiklik*", pid) as { id: string } | undefined;
+    expect(hit?.id).toBe("tr-fts-1");
   });
 
   test("compound indexes exist for common query patterns", () => {

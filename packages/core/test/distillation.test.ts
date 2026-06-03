@@ -1751,6 +1751,31 @@ describe("detectAssertions", () => {
     // Must NOT contain the trailing sentence
     expect(assertions[0].text).not.toContain("lockfile");
   });
+
+  test("pins non-Latin (Turkish) directive via fallback (first sentence)", () => {
+    // English ASSERTION_PATTERNS cannot match Turkish, which would silently
+    // disable the safety net. The non-Latin fallback pins the first sentence.
+    const messages = [
+      msg(
+        "user",
+        "Asla main dalına doğrudan push yapma. İkinci cümle önemsiz.",
+      ),
+    ];
+    const assertions = detectAssertions(messages);
+    expect(assertions.length).toBe(1);
+    expect(assertions[0].text).toContain("Asla main dalına doğrudan push yapma");
+    // Only the first sentence is pinned.
+    expect(assertions[0].text).not.toContain("önemsiz");
+  });
+
+  test("non-Latin fallback does not fire for English text", () => {
+    // A plain English statement with no assertion keyword must yield nothing —
+    // the fallback is gated on predominantly-non-Latin content.
+    const messages = [
+      msg("user", "The build is green and all the tests pass right now."),
+    ];
+    expect(detectAssertions(messages)).toEqual([]);
+  });
 });
 
 // ─── distillationUser with pinned assertions ──────────────────────────

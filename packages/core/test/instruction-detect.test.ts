@@ -215,6 +215,27 @@ describe("extractInstructionCandidates", () => {
     expect(results).toHaveLength(1);
     expect(results[0].sessionID).toBe("my-session-42");
   });
+
+  test("non-Latin (Turkish) message becomes a candidate via fallback", () => {
+    // English regexes cannot match Turkish — the non-Latin fallback emits the
+    // whole message so the downstream multilingual matcher can still work.
+    const messages = [
+      { role: "user", content: "Her zaman değişiklikler için PR aç", session_id: "s1" },
+    ];
+    const results = extractInstructionCandidates(messages);
+    expect(results).toHaveLength(1);
+    expect(results[0].text).toBe("Her zaman değişiklikler için PR aç");
+    expect(results[0].sessionID).toBe("s1");
+  });
+
+  test("English messages are unaffected by the non-Latin fallback", () => {
+    // A plain English statement with no instruction keyword yields no candidate
+    // (the fallback must NOT fire for Latin-script text).
+    const messages = [
+      { role: "user", content: "The build is green and the tests pass.", session_id: "s1" },
+    ];
+    expect(extractInstructionCandidates(messages)).toHaveLength(0);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -48,7 +48,7 @@ const MIGRATIONS: string[] = [
     content,
     content=temporal_messages,
     content_rowid=rowid,
-    tokenize='porter unicode61'
+    tokenize='unicode61 remove_diacritics 0'
   );
 
   -- Triggers to keep FTS in sync
@@ -107,7 +107,7 @@ const MIGRATIONS: string[] = [
     category,
     content=knowledge,
     content_rowid=rowid,
-    tokenize='porter unicode61'
+    tokenize='unicode61 remove_diacritics 0'
   );
 
   CREATE TRIGGER IF NOT EXISTS knowledge_fts_insert AFTER INSERT ON knowledge BEGIN
@@ -202,7 +202,7 @@ const MIGRATIONS: string[] = [
     observations,
     content=distillations,
     content_rowid=rowid,
-    tokenize='porter unicode61'
+    tokenize='unicode61 remove_diacritics 0'
   );
 
   -- Backfill existing data (skip empty observations from schema v1→v2 migration)
@@ -267,7 +267,7 @@ const MIGRATIONS: string[] = [
     content,
     content=lat_sections,
     content_rowid=rowid,
-    tokenize='porter unicode61'
+    tokenize='unicode61 remove_diacritics 0'
   );
 
   CREATE TRIGGER IF NOT EXISTS lat_fts_insert AFTER INSERT ON lat_sections BEGIN
@@ -596,7 +596,7 @@ const MIGRATIONS: string[] = [
     canonical_name,
     content=entities,
     content_rowid=rowid,
-    tokenize='porter unicode61'
+    tokenize='unicode61 remove_diacritics 0'
   );
   CREATE TRIGGER IF NOT EXISTS entities_fts_insert AFTER INSERT ON entities BEGIN
     INSERT INTO entities_fts(rowid, canonical_name)
@@ -630,7 +630,7 @@ const MIGRATIONS: string[] = [
     alias_value,
     content=entity_aliases,
     content_rowid=rowid,
-    tokenize='porter unicode61'
+    tokenize='unicode61 remove_diacritics 0'
   );
   CREATE TRIGGER IF NOT EXISTS entity_aliases_fts_insert AFTER INSERT ON entity_aliases BEGIN
     INSERT INTO entity_aliases_fts(rowid, alias_value)
@@ -766,6 +766,181 @@ const MIGRATIONS: string[] = [
     ON tool_calls (project_id, tool, status);
   CREATE INDEX IF NOT EXISTS idx_tool_calls_project_session
     ON tool_calls (project_id, session_id);
+  `,
+
+  `
+  -- Version 32: Rebuild all FTS5 tables with a language-neutral tokenizer.
+  --
+  -- The original 'porter unicode61' tokenizer applies the Porter stemmer, which
+  -- is English-only and counterproductive for other languages. This migration
+  -- switches every FTS table to bare 'unicode61 remove_diacritics 0'.
+  --
+  -- remove_diacritics 0 is REQUIRED: Turkish ç/ğ/ı/ö/ş/ü (and similar letters in
+  -- other languages) are DISTINCT letters, not accented variants. Folding them
+  -- (remove_diacritics 1/2) would corrupt meaning and collapse distinct words.
+  --
+  -- Each FTS table is external-content (content=<source>), so the FTS5 'rebuild'
+  -- command repopulates the index directly from the source table — no manual
+  -- column SELECT needed. Sync triggers are dropped and recreated verbatim.
+
+  -- temporal_fts (source: temporal_messages, col: content)
+  DROP TRIGGER IF EXISTS temporal_fts_insert;
+  DROP TRIGGER IF EXISTS temporal_fts_delete;
+  DROP TRIGGER IF EXISTS temporal_fts_update;
+  DROP TABLE IF EXISTS temporal_fts;
+  CREATE VIRTUAL TABLE temporal_fts USING fts5(
+    content,
+    content=temporal_messages,
+    content_rowid=rowid,
+    tokenize='unicode61 remove_diacritics 0'
+  );
+  INSERT INTO temporal_fts(temporal_fts) VALUES('rebuild');
+  CREATE TRIGGER temporal_fts_insert AFTER INSERT ON temporal_messages BEGIN
+    INSERT INTO temporal_fts(rowid, content) VALUES (new.rowid, new.content);
+  END;
+  CREATE TRIGGER temporal_fts_delete AFTER DELETE ON temporal_messages BEGIN
+    INSERT INTO temporal_fts(temporal_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+  END;
+  CREATE TRIGGER temporal_fts_update AFTER UPDATE ON temporal_messages BEGIN
+    INSERT INTO temporal_fts(temporal_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+    INSERT INTO temporal_fts(rowid, content) VALUES (new.rowid, new.content);
+  END;
+
+  -- knowledge_fts (source: knowledge, cols: title, content, category)
+  DROP TRIGGER IF EXISTS knowledge_fts_insert;
+  DROP TRIGGER IF EXISTS knowledge_fts_delete;
+  DROP TRIGGER IF EXISTS knowledge_fts_update;
+  DROP TABLE IF EXISTS knowledge_fts;
+  CREATE VIRTUAL TABLE knowledge_fts USING fts5(
+    title,
+    content,
+    category,
+    content=knowledge,
+    content_rowid=rowid,
+    tokenize='unicode61 remove_diacritics 0'
+  );
+  INSERT INTO knowledge_fts(knowledge_fts) VALUES('rebuild');
+  CREATE TRIGGER knowledge_fts_insert AFTER INSERT ON knowledge BEGIN
+    INSERT INTO knowledge_fts(rowid, title, content, category)
+    VALUES (new.rowid, new.title, new.content, new.category);
+  END;
+  CREATE TRIGGER knowledge_fts_delete AFTER DELETE ON knowledge BEGIN
+    INSERT INTO knowledge_fts(knowledge_fts, rowid, title, content, category)
+    VALUES('delete', old.rowid, old.title, old.content, old.category);
+  END;
+  CREATE TRIGGER knowledge_fts_update AFTER UPDATE ON knowledge BEGIN
+    INSERT INTO knowledge_fts(knowledge_fts, rowid, title, content, category)
+    VALUES('delete', old.rowid, old.title, old.content, old.category);
+    INSERT INTO knowledge_fts(rowid, title, content, category)
+    VALUES (new.rowid, new.title, new.content, new.category);
+  END;
+
+  -- distillation_fts (source: distillations, col: observations)
+  DROP TRIGGER IF EXISTS distillation_fts_insert;
+  DROP TRIGGER IF EXISTS distillation_fts_delete;
+  DROP TRIGGER IF EXISTS distillation_fts_update;
+  DROP TABLE IF EXISTS distillation_fts;
+  CREATE VIRTUAL TABLE distillation_fts USING fts5(
+    observations,
+    content=distillations,
+    content_rowid=rowid,
+    tokenize='unicode61 remove_diacritics 0'
+  );
+  INSERT INTO distillation_fts(distillation_fts) VALUES('rebuild');
+  CREATE TRIGGER distillation_fts_insert AFTER INSERT ON distillations BEGIN
+    INSERT INTO distillation_fts(rowid, observations) VALUES (new.rowid, new.observations);
+  END;
+  CREATE TRIGGER distillation_fts_delete AFTER DELETE ON distillations BEGIN
+    INSERT INTO distillation_fts(distillation_fts, rowid, observations)
+    VALUES('delete', old.rowid, old.observations);
+  END;
+  CREATE TRIGGER distillation_fts_update AFTER UPDATE ON distillations BEGIN
+    INSERT INTO distillation_fts(distillation_fts, rowid, observations)
+    VALUES('delete', old.rowid, old.observations);
+    INSERT INTO distillation_fts(rowid, observations) VALUES (new.rowid, new.observations);
+  END;
+
+  -- lat_sections_fts (source: lat_sections, cols: heading, content)
+  DROP TRIGGER IF EXISTS lat_fts_insert;
+  DROP TRIGGER IF EXISTS lat_fts_delete;
+  DROP TRIGGER IF EXISTS lat_fts_update;
+  DROP TABLE IF EXISTS lat_sections_fts;
+  CREATE VIRTUAL TABLE lat_sections_fts USING fts5(
+    heading,
+    content,
+    content=lat_sections,
+    content_rowid=rowid,
+    tokenize='unicode61 remove_diacritics 0'
+  );
+  INSERT INTO lat_sections_fts(lat_sections_fts) VALUES('rebuild');
+  CREATE TRIGGER lat_fts_insert AFTER INSERT ON lat_sections BEGIN
+    INSERT INTO lat_sections_fts(rowid, heading, content)
+    VALUES (new.rowid, new.heading, new.content);
+  END;
+  CREATE TRIGGER lat_fts_delete AFTER DELETE ON lat_sections BEGIN
+    INSERT INTO lat_sections_fts(lat_sections_fts, rowid, heading, content)
+    VALUES('delete', old.rowid, old.heading, old.content);
+  END;
+  CREATE TRIGGER lat_fts_update AFTER UPDATE ON lat_sections BEGIN
+    INSERT INTO lat_sections_fts(lat_sections_fts, rowid, heading, content)
+    VALUES('delete', old.rowid, old.heading, old.content);
+    INSERT INTO lat_sections_fts(rowid, heading, content)
+    VALUES (new.rowid, new.heading, new.content);
+  END;
+
+  -- entities_fts (source: entities, col: canonical_name)
+  DROP TRIGGER IF EXISTS entities_fts_insert;
+  DROP TRIGGER IF EXISTS entities_fts_delete;
+  DROP TRIGGER IF EXISTS entities_fts_update;
+  DROP TABLE IF EXISTS entities_fts;
+  CREATE VIRTUAL TABLE entities_fts USING fts5(
+    canonical_name,
+    content=entities,
+    content_rowid=rowid,
+    tokenize='unicode61 remove_diacritics 0'
+  );
+  INSERT INTO entities_fts(entities_fts) VALUES('rebuild');
+  CREATE TRIGGER entities_fts_insert AFTER INSERT ON entities BEGIN
+    INSERT INTO entities_fts(rowid, canonical_name)
+    VALUES (new.rowid, new.canonical_name);
+  END;
+  CREATE TRIGGER entities_fts_delete AFTER DELETE ON entities BEGIN
+    INSERT INTO entities_fts(entities_fts, rowid, canonical_name)
+    VALUES('delete', old.rowid, old.canonical_name);
+  END;
+  CREATE TRIGGER entities_fts_update AFTER UPDATE ON entities BEGIN
+    INSERT INTO entities_fts(entities_fts, rowid, canonical_name)
+    VALUES('delete', old.rowid, old.canonical_name);
+    INSERT INTO entities_fts(rowid, canonical_name)
+    VALUES (new.rowid, new.canonical_name);
+  END;
+
+  -- entity_aliases_fts (source: entity_aliases, col: alias_value)
+  DROP TRIGGER IF EXISTS entity_aliases_fts_insert;
+  DROP TRIGGER IF EXISTS entity_aliases_fts_delete;
+  DROP TRIGGER IF EXISTS entity_aliases_fts_update;
+  DROP TABLE IF EXISTS entity_aliases_fts;
+  CREATE VIRTUAL TABLE entity_aliases_fts USING fts5(
+    alias_value,
+    content=entity_aliases,
+    content_rowid=rowid,
+    tokenize='unicode61 remove_diacritics 0'
+  );
+  INSERT INTO entity_aliases_fts(entity_aliases_fts) VALUES('rebuild');
+  CREATE TRIGGER entity_aliases_fts_insert AFTER INSERT ON entity_aliases BEGIN
+    INSERT INTO entity_aliases_fts(rowid, alias_value)
+    VALUES (new.rowid, new.alias_value);
+  END;
+  CREATE TRIGGER entity_aliases_fts_delete AFTER DELETE ON entity_aliases BEGIN
+    INSERT INTO entity_aliases_fts(entity_aliases_fts, rowid, alias_value)
+    VALUES('delete', old.rowid, old.alias_value);
+  END;
+  CREATE TRIGGER entity_aliases_fts_update AFTER UPDATE ON entity_aliases BEGIN
+    INSERT INTO entity_aliases_fts(entity_aliases_fts, rowid, alias_value)
+    VALUES('delete', old.rowid, old.alias_value);
+    INSERT INTO entity_aliases_fts(rowid, alias_value)
+    VALUES (new.rowid, new.alias_value);
+  END;
   `,
 ];
 
