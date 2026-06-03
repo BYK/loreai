@@ -63,11 +63,15 @@ const INSTRUCTION_PATTERNS: RegExp[] = [
  * fallbacks so non-English directives still feed downstream multilingual
  * matching instead of being silently dropped. Conservative on purpose —
  * plain-ASCII English text keeps the exact existing behavior.
+ *
+ * Requires ≥3 non-ASCII letters to avoid false positives on English text
+ * containing loanwords with diacritics (e.g. "café", "naïve", "résumé").
  */
 export function hasNonAsciiLetters(s: string): boolean {
-  // Match any Unicode letter that is not a plain ASCII A–Z/a–z letter.
-  // (Strip ASCII first, then test whether any Unicode letter remains.)
-  return /\p{L}/u.test(s.replace(/[\x00-\x7F]/g, ""));
+  // Strip ASCII chars, then count remaining Unicode letters.
+  const nonAscii = s.replace(/[\x00-\x7F]/g, "");
+  const letters = nonAscii.match(/\p{L}/gu);
+  return (letters?.length ?? 0) >= 3;
 }
 
 export type InstructionCandidate = {

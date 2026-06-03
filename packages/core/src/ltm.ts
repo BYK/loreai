@@ -808,7 +808,7 @@ export function rerankPreferences(): number {
       // No English directive language detected. Do NOT demote — the patterns
       // are English-only, so a non-match may simply be a non-English directive.
       // Keep the curator's existing confidence instead of forcing 0.8.
-      newConfidence = entry.confidence;
+      continue;
     }
     if (newConfidence !== entry.confidence) {
       update(entry.id, { confidence: newConfidence });

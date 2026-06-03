@@ -6,6 +6,7 @@ import {
   findRepeatedInstructions,
   formatForCurator,
   detectAndFormat,
+  hasNonAsciiLetters,
   type InstructionCandidate,
   type RepeatedInstruction,
 } from "../src/instruction-detect";
@@ -92,6 +93,50 @@ function insertDistillation(input: {
     );
   return id;
 }
+
+// ---------------------------------------------------------------------------
+// hasNonAsciiLetters
+// ---------------------------------------------------------------------------
+
+describe("hasNonAsciiLetters", () => {
+  test("returns true for Turkish text (ç, ğ, ı, ö, ş, ü)", () => {
+    expect(hasNonAsciiLetters("Her zaman değişiklik için PR aç")).toBe(true);
+  });
+
+  test("returns true for CJK text", () => {
+    expect(hasNonAsciiLetters("これはテストです")).toBe(true);
+  });
+
+  test("returns false for plain ASCII English", () => {
+    expect(hasNonAsciiLetters("Always run the tests before pushing")).toBe(false);
+  });
+
+  test("returns false for empty string", () => {
+    expect(hasNonAsciiLetters("")).toBe(false);
+  });
+
+  test("returns false for emoji-only (emoji are not letters)", () => {
+    expect(hasNonAsciiLetters("🎉🔥✅")).toBe(false);
+  });
+
+  test("returns false for English loanwords with 1-2 diacritics (café, naïve)", () => {
+    // A single accented letter in otherwise-English text shouldn't trigger
+    // the fallback — requires ≥3 non-ASCII letters.
+    expect(hasNonAsciiLetters("Let's meet at the café")).toBe(false);
+    expect(hasNonAsciiLetters("That's a naïve approach")).toBe(false);
+  });
+
+  test("returns true for text with 3+ non-ASCII letters", () => {
+    // "şöğüçı" has 6 non-ASCII letters, well above threshold
+    expect(hasNonAsciiLetters("şöğüçı test")).toBe(true);
+    // "ışığı" has 3 non-ASCII letters (ı, ğ, ı) — at threshold
+    expect(hasNonAsciiLetters("check the ışığı value")).toBe(true);
+  });
+
+  test("returns false for pure numbers and punctuation", () => {
+    expect(hasNonAsciiLetters("123 + 456 = 579!")).toBe(false);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // extractInstructionCandidates
