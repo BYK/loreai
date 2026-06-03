@@ -67,13 +67,21 @@ async function resolveLaunchTarget(
     console.log(`[lore] Workspace root: ${projectDir}`);
   }
 
-  // --- Explicit command given: inject all known env vars ---
+  // --- Explicit command given: inject all known env vars + matching CLI args ---
   if (cmdArgs.length > 0) {
     const env: Record<string, string> = {};
+    const prependArgs: string[] = [];
     for (const agent of AGENTS) {
+      // Env vars are safe to merge from all agents (unused vars are harmless).
       Object.assign(env, agent.envVars(gatewayUrl, projectDir));
+      // CLI args are agent-specific (e.g. Codex's `-c` flag) — only inject
+      // them for the agent that matches the explicit command to avoid passing
+      // unrecognized flags to other agents.
+      if (agent.cliArgs && agent.binary === cmdArgs[0]) {
+        prependArgs.push(...agent.cliArgs(gatewayUrl, projectDir));
+      }
     }
-    return { command: cmdArgs[0], args: [...cmdArgs.slice(1), ...extraArgs], env };
+    return { command: cmdArgs[0], args: [...prependArgs, ...cmdArgs.slice(1), ...extraArgs], env };
   }
 
   // --- No command: auto-detect agents ---
@@ -103,9 +111,10 @@ async function resolveLaunchTarget(
     return null;
   }
 
+  const agentCliArgs = agent.def.cliArgs?.(gatewayUrl, projectDir) ?? [];
   return {
     command: agent.def.binary,
-    args: [...extraArgs],
+    args: [...agentCliArgs, ...extraArgs],
     env: agent.def.envVars(gatewayUrl, projectDir),
   };
 }

@@ -52,6 +52,12 @@ export interface AgentDef {
   detect: () => string | null;
   /** Env vars to inject given the gateway URL (e.g. "http://127.0.0.1:3207") and project cwd */
   envVars: (gatewayUrl: string, cwd: string) => Record<string, string>;
+  /**
+   * Extra CLI arguments to prepend when launching the agent.
+   * Used by agents like Codex that read config from their own config file
+   * rather than environment variables — we inject `-c key=value` overrides.
+   */
+  cliArgs?: (gatewayUrl: string, cwd: string) => string[];
 }
 
 /**
@@ -107,18 +113,23 @@ export const AGENTS: AgentDef[] = [
     displayName: "Codex",
     binary: "codex",
     detect: () => which("codex"),
-    envVars: (url, cwd) => {
-      const env: Record<string, string> = { OPENAI_BASE_URL: `${url}/v1` };
-      // Codex supports custom headers via env_http_headers config (since 0.3.0).
-      // Set LORE_PROJECT / LORE_GIT_REMOTE so users can map them in config.toml:
-      //   [model_provider.custom.env_http_headers]
-      //   X-Lore-Project = "LORE_PROJECT"
-      //   X-Lore-Git-Remote = "LORE_GIT_REMOTE"
-      env.LORE_PROJECT = cwd;
+    envVars: (_url, cwd) => {
+      // Codex CLI is a Rust binary that does NOT read OPENAI_BASE_URL from the
+      // environment. Provider routing is done exclusively via config.toml or
+      // `-c` CLI overrides (see cliArgs below). We still expose LORE_PROJECT /
+      // LORE_GIT_REMOTE for env_http_headers mapping if the user configures a
+      // custom provider with env_http_headers in their config.toml.
+      const env: Record<string, string> = { LORE_PROJECT: cwd };
       const remote = safeRemote(cwd);
       if (remote) env.LORE_GIT_REMOTE = remote;
       return env;
     },
+    cliArgs: (url) => [
+      // Override the built-in OpenAI provider's base URL to route through the
+      // Lore gateway. Uses `-c` so the change is per-invocation only — it does
+      // not affect Codex's persisted config or session scoping.
+      "-c", `openai_base_url="${url}/v1"`,
+    ],
   },
   {
     name: "pi",

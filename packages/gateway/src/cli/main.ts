@@ -6,6 +6,7 @@
  * Commands:
  *   (none) / run   → start gateway + launch agent
  *   start          → start gateway server (no agent auto-launch)
+ *   setup          → configure an AI app to route through lore
  *   data           → inspect and manage stored data
  *   recall         → search project memory from the terminal
  *   upgrade        → self-update
@@ -260,6 +261,12 @@ export async function _cli(): Promise<void> {
         break;
       }
 
+      case "setup": {
+        const { commandSetup } = await import("./setup");
+        await commandSetup(rest, values as Record<string, unknown>);
+        break;
+      }
+
       case "data": {
         const { commandData } = await import("./data");
         await commandData(rest, values as Record<string, unknown>);
@@ -314,7 +321,7 @@ export async function _cli(): Promise<void> {
           if (!knownBinaries.includes(command)) {
             // Not a known agent — likely a typo. Show a helpful error.
             const knownCommands = [
-              "start", "run", "data", "recall", "logs", "import", "entity", "upgrade", "help",
+              "start", "run", "setup", "data", "recall", "logs", "import", "entity", "upgrade", "help",
               ...knownBinaries,
             ];
             // "Did you mean?" — use Levenshtein distance for robust matching

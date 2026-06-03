@@ -14,6 +14,8 @@ Commands:
                            Extra arguments are forwarded to the launched agent
   start               Start the gateway server (without launching an agent)
                       Hosted mode is ON by default; use --local to disable
+  setup [app]         Configure an AI app to route through lore
+                      Supported: codex
   logs                Show lore activity log
   import              Import knowledge from prior AI agent conversations
   data <subcommand>   Manage stored data (list, show, clear, delete)
@@ -102,6 +104,9 @@ Examples:
   lore start -p 8080            # Start gateway on a custom port
   lore start -H 127.0.0.1 -H 100.69.65.125  # Bind to multiple interfaces
   lore start -H 127.0.0.1,100.69.65.125     # Same, comma-separated
+  lore setup                    # Auto-detect and configure installed apps
+  lore setup codex              # Configure Codex to use lore
+  lore setup codex -r http://remote:3207  # Configure Codex with a remote gateway
   lore upgrade                  # Upgrade to latest version
   lore upgrade --check          # Check for updates without installing
   lore upgrade --force          # Force re-download even if up to date

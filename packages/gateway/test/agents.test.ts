@@ -70,9 +70,24 @@ describe("Codex agent envVars", () => {
     expect(env.LORE_PROJECT).toBe("/home/user/my-project");
   });
 
-  test("sets OPENAI_BASE_URL with /v1 suffix", () => {
+  test("does NOT set OPENAI_BASE_URL (Codex CLI ignores it)", () => {
     const codex = AGENTS.find((a) => a.name === "codex")!;
     const env = codex.envVars("http://127.0.0.1:3207", "/tmp/test");
-    expect(env.OPENAI_BASE_URL).toBe("http://127.0.0.1:3207/v1");
+    expect(env.OPENAI_BASE_URL).toBeUndefined();
+  });
+});
+
+describe("Codex agent cliArgs", () => {
+  test("returns -c openai_base_url override with /v1 suffix", () => {
+    const codex = AGENTS.find((a) => a.name === "codex")!;
+    expect(codex.cliArgs).toBeDefined();
+    const args = codex.cliArgs!("http://127.0.0.1:3207", "/tmp/test");
+    expect(args).toEqual(["-c", 'openai_base_url="http://127.0.0.1:3207/v1"']);
+  });
+
+  test("includes gateway URL in the override", () => {
+    const codex = AGENTS.find((a) => a.name === "codex")!;
+    const args = codex.cliArgs!("http://192.168.1.100:5673", "/tmp/test");
+    expect(args[1]).toContain("http://192.168.1.100:5673/v1");
   });
 });
