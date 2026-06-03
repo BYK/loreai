@@ -91,12 +91,28 @@ export function parseOpenAIRequest(
     }
 
     if (role === "tool") {
-      // Tool results are already represented in the content of the user message
-      // that follows them in OpenAI. We process them when we encounter the
-      // assistant message that generated the tool call.
+      // OpenAI sends each tool response as its own `role:"tool"` message, but
+      // the gateway's downstream tool-pairing (loreMessagesToGateway +
+      // removeOrphanedToolResults) assumes the Anthropic shape: the single
+      // user message immediately after an assistant carries ALL matching
+      // tool_result blocks. Coalesce consecutive tool messages into one user
+      // message so an assistant emitting N tool_calls keeps its N tool_use
+      // blocks paired with N tool_result blocks in that one following message.
       const toolResultBlocks = parseToolResult(msg);
       if (toolResultBlocks.length > 0) {
-        messages.push({ role: "user", content: toolResultBlocks });
+        const last = messages[messages.length - 1];
+        // Only merge into a user message that was itself produced from tool
+        // messages — never a genuine user text turn.
+        const lastIsToolResultMessage =
+          last !== undefined &&
+          last.role === "user" &&
+          last.content.length > 0 &&
+          last.content.every((b) => b.type === "tool_result");
+        if (lastIsToolResultMessage) {
+          last.content.push(...toolResultBlocks);
+        } else {
+          messages.push({ role: "user", content: toolResultBlocks });
+        }
       }
       continue;
     }

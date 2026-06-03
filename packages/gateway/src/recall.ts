@@ -443,6 +443,11 @@ export function buildRecallFollowUp(
 
   return {
     ...originalReq,
+    // Recall follow-ups are always non-streaming: the accumulated response is
+    // parsed as JSON via accumulateNonStreamResponse(). Without this override,
+    // a streaming client request would forward stream:true to the upstream,
+    // which returns SSE — causing a JSON parse crash.
+    stream: false,
     messages: [
       ...originalReq.messages,
       assistantMessage,

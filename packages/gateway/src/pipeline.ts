@@ -3619,23 +3619,141 @@ async function handleConversationTurn(
     });
   }
 
+  // Run the recall-interception loop over an already-accumulated
+  // (internal Anthropic-format) GatewayResponse and return the client HTTP
+  // response. Shared by the non-streaming path AND the OpenAI/openai-responses
+  // streaming paths — those accumulate the upstream SSE into the same internal
+  // Anthropic-format response, so the recall loop is protocol-agnostic here.
+  // Without this, a `recall` tool_use injected by the gateway would leak to the
+  // client (e.g. "Model tried to call unavailable tool 'recall'").
+  const finalizeWithRecall = async (resp: GatewayResponse): Promise<Response> => {
+    // --- Recall interception (non-streaming) ---
+    // Loop allows the model to call recall multiple times (e.g. drill down
+    // into t:<id> source citations). MAX_RECALL_DEPTH is a safety net only.
+    let currentResp = resp;
+    let recallDepth = 0;
+    let currentModifiedReq = modifiedReq;
+    const cumulativeUsage = { ...resp.usage };
+
+    while (hasRecallToolUse(currentResp) && recallDepth < MAX_RECALL_DEPTH) {
+      recallDepth++;
+      const recallBlock = findRecallToolUse(currentResp)!;
+      const { result, input } = await executeRecall(
+        recallBlock,
+        sessionState.projectPath,
+        sessionState.sessionID,
+        getLLMClient(config),
+      );
+
+      // Store recall result for marker round-trip expansion
+      const storeKey = recallStoreKey(input.query, input.scope ?? "all", input.id);
+      const position = currentResp.content.indexOf(recallBlock);
+      sessionState.recallStore.set(storeKey, {
+        toolUseId: recallBlock.id,
+        input,
+        position,
+        result,
+      });
+
+      const markerResp = replaceRecallWithMarker(currentResp);
+
+      if (hasOtherToolUse(currentResp)) {
+        // Mixed tools — return response with marker, client handles the rest
+        log.info(
+          `recall (non-stream, mixed, depth=${recallDepth}): stored result for session ${sessionState.sessionID.slice(0, 16)}`,
+        );
+        markerResp.usage = cumulativeUsage;
+        postResponse(req, markerResp, sessionState, config, requestBody, genAiSpan);
+        return nonStreamHttpResponse(
+          unsustainable ? injectContextWarning(markerResp) : markerResp,
+          { "x-lore-recall-invoked": "true" },
+        );
+      }
+
+      // Recall-only — send follow-up request for seamless UX
+      log.info(
+        `recall (non-stream, depth=${recallDepth}): executing follow-up for session ${sessionState.sessionID.slice(0, 16)}`,
+      );
+      const followUp = buildRecallFollowUp(currentModifiedReq, currentResp, result, recallBlock);
+      let followUpResponse: Response;
+      let followUpProtocol: "anthropic" | "openai" | "openai-responses";
+      ({ response: followUpResponse, effectiveProtocol: followUpProtocol } = await forwardToUpstream(
+        followUp,
+        config,
+        undefined,
+        // Disable conversation caching on follow-up: the appended
+        // recall result makes the prefix diverge from the next real turn,
+        // so the cache write would be wasted money.
+        { ...cacheOptions, cacheConversation: false },
+      ));
+
+      if (!followUpResponse.ok) {
+        const errorBody = await followUpResponse.text();
+        log.error(
+          `recall follow-up upstream error: ${followUpResponse.status} ${errorBody.slice(0, 500)}`,
+          new Error(`recall follow-up upstream ${followUpResponse.status}`),
+        );
+        // Fall back to response with marker (no continuation)
+        markerResp.usage = cumulativeUsage;
+        postResponse(req, markerResp, sessionState, config, requestBody, genAiSpan);
+        return nonStreamHttpResponse(
+          unsustainable ? injectContextWarning(markerResp) : markerResp,
+          { "x-lore-recall-invoked": "true" },
+        );
+      }
+
+      const continuationResp = await accumulateNonStreamResponse(followUpResponse, followUpProtocol);
+
+      // Accumulate usage from this iteration
+      cumulativeUsage.inputTokens += continuationResp.usage.inputTokens;
+      cumulativeUsage.outputTokens += continuationResp.usage.outputTokens;
+      if (continuationResp.usage.cacheReadInputTokens) {
+        cumulativeUsage.cacheReadInputTokens =
+          (cumulativeUsage.cacheReadInputTokens ?? 0) +
+          continuationResp.usage.cacheReadInputTokens;
+      }
+      if (continuationResp.usage.cacheCreationInputTokens) {
+        cumulativeUsage.cacheCreationInputTokens =
+          (cumulativeUsage.cacheCreationInputTokens ?? 0) +
+          continuationResp.usage.cacheCreationInputTokens;
+      }
+
+      // Update for next iteration
+      currentModifiedReq = followUp;
+      currentResp = continuationResp;
+      // Loop continues — hasRecallToolUse checked at top
+    }
+
+    // Depth exhausted or no more recall — finalize
+    if (hasRecallToolUse(currentResp)) {
+      log.warn(`recall depth exhausted (${MAX_RECALL_DEPTH}) — stripping remaining recall`);
+      currentResp = replaceRecallWithMarker(currentResp);
+    }
+    currentResp.usage = cumulativeUsage;
+    postResponse(req, currentResp, sessionState, config, requestBody, genAiSpan);
+    const recallHeaders = recallDepth > 0 ? { "x-lore-recall-invoked": "true" } : undefined;
+    return nonStreamHttpResponse(
+      unsustainable ? injectContextWarning(currentResp) : currentResp,
+      recallHeaders,
+    );
+  };
+
   if (req.stream && upstreamResponse.body) {
     // Non-Anthropic upstream streaming responses need their own accumulator
     // since the Anthropic SSE accumulator can't parse OpenAI SSE formats.
+    // Both OpenAI variants accumulate into internal Anthropic-format and then
+    // run the SAME recall interception loop as the non-streaming path —
+    // otherwise an injected `recall` tool_use would leak straight to the client.
     if (effectiveProtocol === "openai-responses") {
       const resp = await accumulateResponsesSSEStream(upstreamResponse);
-      // postResponse sees the clean response (for calibration, cost tracking).
-      // Only the client-facing HTTP response gets the warning injected.
-      postResponse(req, resp, sessionState, config, requestBody, genAiSpan);
-      return nonStreamHttpResponse(unsustainable ? injectContextWarning(resp) : resp);
+      return finalizeWithRecall(resp);
     }
 
     if (effectiveProtocol === "openai") {
       // OpenAI Chat Completions streaming — accumulate and return as
       // non-streaming Anthropic format (same pattern as non-stream path).
       const resp = await accumulateNonStreamOpenAIStream(upstreamResponse);
-      postResponse(req, resp, sessionState, config, requestBody, genAiSpan);
-      return nonStreamHttpResponse(unsustainable ? injectContextWarning(resp) : resp);
+      return finalizeWithRecall(resp);
     }
 
     // Anthropic streaming: forward events and accumulate in parallel.
@@ -3655,116 +3773,7 @@ async function handleConversationTurn(
 
   // Non-streaming: dispatch to correct accumulator based on upstream protocol.
   const resp = await accumulateNonStreamResponse(upstreamResponse, effectiveProtocol);
-
-  // --- Recall interception (non-streaming) ---
-  // Loop allows the model to call recall multiple times (e.g. drill down
-  // into t:<id> source citations). MAX_RECALL_DEPTH is a safety net only.
-  let currentResp = resp;
-  let recallDepth = 0;
-  let currentModifiedReq = modifiedReq;
-  const cumulativeUsage = { ...resp.usage };
-
-  while (hasRecallToolUse(currentResp) && recallDepth < MAX_RECALL_DEPTH) {
-    recallDepth++;
-    const recallBlock = findRecallToolUse(currentResp)!;
-    const { result, input } = await executeRecall(
-      recallBlock,
-      sessionState.projectPath,
-      sessionState.sessionID,
-      getLLMClient(config),
-    );
-
-    // Store recall result for marker round-trip expansion
-    const storeKey = recallStoreKey(input.query, input.scope ?? "all", input.id);
-    const position = currentResp.content.indexOf(recallBlock);
-    sessionState.recallStore.set(storeKey, {
-      toolUseId: recallBlock.id,
-      input,
-      position,
-      result,
-    });
-
-    const markerResp = replaceRecallWithMarker(currentResp);
-
-    if (hasOtherToolUse(currentResp)) {
-      // Mixed tools — return response with marker, client handles the rest
-      log.info(
-        `recall (non-stream, mixed, depth=${recallDepth}): stored result for session ${sessionState.sessionID.slice(0, 16)}`,
-      );
-      markerResp.usage = cumulativeUsage;
-      postResponse(req, markerResp, sessionState, config, requestBody, genAiSpan);
-      return nonStreamHttpResponse(
-        unsustainable ? injectContextWarning(markerResp) : markerResp,
-        { "x-lore-recall-invoked": "true" },
-      );
-    }
-
-    // Recall-only — send follow-up request for seamless UX
-    log.info(
-      `recall (non-stream, depth=${recallDepth}): executing follow-up for session ${sessionState.sessionID.slice(0, 16)}`,
-    );
-    const followUp = buildRecallFollowUp(currentModifiedReq, currentResp, result, recallBlock);
-    let followUpResponse: Response;
-    let followUpProtocol: "anthropic" | "openai" | "openai-responses";
-    ({ response: followUpResponse, effectiveProtocol: followUpProtocol } = await forwardToUpstream(
-      followUp,
-      config,
-      undefined,
-      // Disable conversation caching on follow-up: the appended
-      // recall result makes the prefix diverge from the next real turn,
-      // so the cache write would be wasted money.
-      { ...cacheOptions, cacheConversation: false },
-    ));
-
-    if (!followUpResponse.ok) {
-      const errorBody = await followUpResponse.text();
-      log.error(
-        `recall follow-up upstream error: ${followUpResponse.status} ${errorBody.slice(0, 500)}`,
-        new Error(`recall follow-up upstream ${followUpResponse.status}`),
-      );
-      // Fall back to response with marker (no continuation)
-      markerResp.usage = cumulativeUsage;
-      postResponse(req, markerResp, sessionState, config, requestBody, genAiSpan);
-      return nonStreamHttpResponse(
-        unsustainable ? injectContextWarning(markerResp) : markerResp,
-        { "x-lore-recall-invoked": "true" },
-      );
-    }
-
-    const continuationResp = await accumulateNonStreamResponse(followUpResponse, followUpProtocol);
-
-    // Accumulate usage from this iteration
-    cumulativeUsage.inputTokens += continuationResp.usage.inputTokens;
-    cumulativeUsage.outputTokens += continuationResp.usage.outputTokens;
-    if (continuationResp.usage.cacheReadInputTokens) {
-      cumulativeUsage.cacheReadInputTokens =
-        (cumulativeUsage.cacheReadInputTokens ?? 0) +
-        continuationResp.usage.cacheReadInputTokens;
-    }
-    if (continuationResp.usage.cacheCreationInputTokens) {
-      cumulativeUsage.cacheCreationInputTokens =
-        (cumulativeUsage.cacheCreationInputTokens ?? 0) +
-        continuationResp.usage.cacheCreationInputTokens;
-    }
-
-    // Update for next iteration
-    currentModifiedReq = followUp;
-    currentResp = continuationResp;
-    // Loop continues — hasRecallToolUse checked at top
-  }
-
-  // Depth exhausted or no more recall — finalize
-  if (hasRecallToolUse(currentResp)) {
-    log.warn(`recall depth exhausted (${MAX_RECALL_DEPTH}) — stripping remaining recall`);
-    currentResp = replaceRecallWithMarker(currentResp);
-  }
-  currentResp.usage = cumulativeUsage;
-  postResponse(req, currentResp, sessionState, config, requestBody, genAiSpan);
-  const recallHeaders = recallDepth > 0 ? { "x-lore-recall-invoked": "true" } : undefined;
-  return nonStreamHttpResponse(
-    unsustainable ? injectContextWarning(currentResp) : currentResp,
-    recallHeaders,
-  );
+  return finalizeWithRecall(resp);
 }
 
 // ---------------------------------------------------------------------------
