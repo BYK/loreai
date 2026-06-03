@@ -270,7 +270,8 @@ export async function commandImport(
       totalFailed += extractResult.chunksFailed;
     }
 
-    // Record import timestamp (prevents auto-import re-prompting on `lore run`)
+    // Record import timestamp (supplementary — auto-import gates on per-agent
+    // import_history rows via hasAgentImportRecord, not this timestamp)
     setLastImportAt(projectPath, Date.now());
 
     // Export .lore.md
@@ -389,7 +390,8 @@ async function importRemote(
     totalFailed += extractResult.chunksFailed;
   }
 
-  // Record import timestamp locally (prevents auto-import re-prompting on `lore run`)
+  // Record import timestamp locally (supplementary — auto-import gates on per-agent
+  // import_history rows via hasAgentImportRecord, not this timestamp)
   setLastImportAt(projectPath, Date.now());
 
   // Export .lore.md locally so knowledge appears in the local file

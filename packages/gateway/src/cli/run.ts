@@ -180,7 +180,7 @@ export async function commandRun(
   }
   console.log(`[lore] Dashboard: ${gatewayUrl}/ui`);
 
-  // 2. Auto-detect prior conversations (first run only)
+  // 2. Auto-detect prior conversations (per newly-detected agent)
   if (owned) {
     await maybeAutoImport(config);
   }

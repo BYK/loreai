@@ -72,8 +72,57 @@ export function recordImport(
 }
 
 /**
+ * Check whether an agent has any import_history row for this project,
+ * including the "__declined__" sentinel. Used by auto-import to decide
+ * whether an agent is brand-new (never imported AND never declined).
+ *
+ * Unlike isImported(), this is hash-agnostic and source-agnostic — it
+ * answers "have we ever offered/handled this agent here?".
+ */
+export function hasAgentImportRecord(projectPath: string, agentName: string): boolean {
+  const projectId = ensureProject(projectPath);
+  return !!db()
+    .query(
+      `SELECT 1 FROM import_history
+       WHERE project_id = ? AND agent_name = ?
+       LIMIT 1`,
+    )
+    .get(projectId, agentName);
+}
+
+/**
+ * Record that the user declined auto-import for a specific agent in this
+ * project. Writes a sentinel row (source_id = "__declined__") so the agent
+ * is not re-offered. Excluded from listImports() by the sentinel filter.
+ *
+ * NOTE: This revives a per-agent variant of the pre-v22 decline sentinel.
+ * Do not remove the "__declined__" filter in listImports() — it keeps these
+ * sentinels invisible to the dashboard/REST surface.
+ */
+export function recordDecline(projectPath: string, agentName: string): void {
+  const projectId = ensureProject(projectPath);
+  db()
+    .query(
+      `INSERT OR REPLACE INTO import_history
+       (id, project_id, agent_name, source_id, source_hash, entries_created, entries_updated, imported_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      crypto.randomUUID(),
+      projectId,
+      agentName,
+      "__declined__",
+      "", // source_hash unused for sentinel — never compared
+      0,
+      0,
+      Date.now(),
+    );
+}
+
+/**
  * Get all import records for a project.
- * Excludes legacy "__declined__" sentinel rows from pre-v22 databases.
+ * Excludes "__declined__" sentinel rows written by {@link recordDecline}
+ * (used for auto-import gating, not visible to the user/dashboard).
  */
 export function listImports(projectPath: string): ImportRecord[] {
   const projectId = ensureProject(projectPath);

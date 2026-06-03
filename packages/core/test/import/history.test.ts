@@ -1,8 +1,10 @@
 import { describe, test, expect } from "bun:test";
-import { ensureProject } from "../../src/db";
+import { db, ensureProject } from "../../src/db";
 import {
   isImported,
   recordImport,
+  recordDecline,
+  hasAgentImportRecord,
   listImports,
   computeHash,
 } from "../../src/import/history";
@@ -69,6 +71,57 @@ describe("import history", () => {
 
       const imports = listImports(LIST_PROJECT);
       expect(imports.length).toBe(2);
+    });
+  });
+
+  describe("hasAgentImportRecord / recordDecline", () => {
+    const P = "/test/import-per-agent-project";
+
+    test("setup: create test project", () => {
+      ensureProject(P);
+    });
+
+    test("hasAgentImportRecord false for unknown agent", () => {
+      expect(hasAgentImportRecord(P, "codex")).toBe(false);
+    });
+
+    test("true after a real import; sibling agent unaffected", () => {
+      recordImport(P, "claude-code", "sess-1", "h1", { created: 1, updated: 0 });
+      expect(hasAgentImportRecord(P, "claude-code")).toBe(true);
+      expect(hasAgentImportRecord(P, "codex")).toBe(false);
+    });
+
+    test("recordDecline makes the agent 'handled'", () => {
+      expect(hasAgentImportRecord(P, "codex")).toBe(false);
+      recordDecline(P, "codex");
+      expect(hasAgentImportRecord(P, "codex")).toBe(true);
+    });
+
+    test("recordDecline is idempotent (INSERT OR REPLACE, no duplicate row)", () => {
+      recordDecline(P, "opencode");
+      recordDecline(P, "opencode");
+      const row = db()
+        .query(
+          `SELECT COUNT(*) as c FROM import_history
+           WHERE project_id = ? AND agent_name = ? AND source_id = '__declined__'`,
+        )
+        .get(ensureProject(P), "opencode") as { c: number };
+      expect(row.c).toBe(1);
+    });
+
+    test("listImports still excludes __declined__ sentinels", () => {
+      const LP = "/test/per-agent-list";
+      ensureProject(LP);
+      recordImport(LP, "claude-code", "s1", "h", { created: 1, updated: 0 });
+      recordDecline(LP, "codex");
+      const imports = listImports(LP);
+      expect(imports.length).toBe(1);
+      expect(imports.every((r) => r.source_id !== "__declined__")).toBe(true);
+    });
+
+    test("declined agent: isImported still null for real sessions", () => {
+      recordDecline(P, "aider");
+      expect(isImported(P, "aider", "some-session", "anyhash")).toBeNull();
     });
   });
 

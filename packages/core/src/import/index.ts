@@ -29,6 +29,8 @@ export { extractKnowledge, type ExtractionProgress, type ExtractionResult } from
 export {
   isImported,
   recordImport,
+  recordDecline,
+  hasAgentImportRecord,
   computeHash,
   listImports,
   type ImportRecord,

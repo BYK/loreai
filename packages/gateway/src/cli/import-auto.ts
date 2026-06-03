@@ -2,16 +2,16 @@
  * Auto-detection and background import of prior AI agent conversations.
  *
  * Called from `lore run` between gateway startup and agent launch.
- * Only triggers once per project (tracks via last_import_at on the projects table).
- * Prompts once, then runs import in the background if confirmed.
+ * Offers import per newly-detected agent (tracked via import_history per agent;
+ * declines are recorded as "__declined__" sentinels). Agents already imported or
+ * previously declined are skipped, so a newly installed agent is still offered.
+ * Prompts once per new agent, then runs import in the background if confirmed.
  */
 import { createInterface } from "node:readline";
 import {
   conversationImport,
   config as loreConfig,
   ensureProject,
-  getLastImportAt,
-  setLastImportAt,
   exportLoreFile,
 } from "@loreai/core";
 import { createGatewayLLMClient } from "../llm-adapter";
@@ -24,6 +24,8 @@ const {
   getProvider,
   isImported,
   recordImport,
+  recordDecline,
+  hasAgentImportRecord,
   computeHash,
 } = conversationImport;
 
@@ -44,10 +46,10 @@ async function promptYesNo(message: string): Promise<boolean> {
  * Auto-detect prior conversations and offer to import them.
  * Called from `commandRun()` before launching the agent.
  *
- * - Only triggers for fresh projects (no existing lore data).
+ * - Only offers agents not yet imported or declined for this project.
  * - Shows a one-line prompt to the user.
  * - If confirmed, runs extraction in the background (fire-and-forget).
- * - If declined, records the decision so we don't ask again.
+ * - If declined, records a per-agent decline sentinel so we don't ask again.
  */
 export async function maybeAutoImport(gatewayConfig: GatewayConfig): Promise<void> {
   const projectPath = process.cwd();
@@ -58,14 +60,20 @@ export async function maybeAutoImport(gatewayConfig: GatewayConfig): Promise<voi
     return; // Can't determine project — skip
   }
 
-  // Skip if import was already offered/run for this project
-  if (getLastImportAt(projectPath) !== null) return;
-
-  // Detect conversation history
+  // Detect conversation history across all known agents.
   let results = detectAll(projectPath);
   if (results.length === 0) return;
 
-  // Filter out already-imported sessions
+  // PER-AGENT GATE (apply FIRST): only consider agents we've never handled
+  // here — neither imported (real rows) nor declined ("__declined__" sentinel).
+  // This must run before the per-session filter below: a declined agent has no
+  // session rows, so isImported() would not catch it — only the gate does.
+  // Known agents with new sessions are intentionally skipped; incremental
+  // same-agent imports remain the job of explicit `lore import`.
+  results = results.filter((r) => !hasAgentImportRecord(projectPath, r.agentName));
+  if (results.length === 0) return;
+
+  // Defensive per-session filter for the surviving brand-new agents.
   for (const result of results) {
     result.sessions = result.sessions.filter((sess) => {
       const hash = computeHash({
@@ -83,14 +91,21 @@ export async function maybeAutoImport(gatewayConfig: GatewayConfig): Promise<voi
   const totalMessages = results.reduce((s, r) => s + r.totalMessages, 0);
   const agentNames = results.map((r) => r.agentDisplayName).join(", ");
 
-  // Prompt the user
+  // Prompt the user (lists only the brand-new agents).
   const ok = await promptYesNo(
     `[lore] Found ${totalMessages} messages from prior conversations (${agentNames}).\n` +
       "[lore] Import knowledge from them?",
   );
 
-  // Record that import was offered — prevents re-prompting regardless of answer
-  setLastImportAt(projectPath, Date.now());
+  // Record decline sentinels BEFORE any background work — prevents a second
+  // `lore run` from re-prompting while the background import is still running.
+  // On accept, the sentinels are harmless: real recordImport() rows (with actual
+  // session source_ids) are written later and hasAgentImportRecord() returns true
+  // regardless. This mirrors the old per-project setLastImportAt() which also
+  // ran before checking the user's answer.
+  for (const result of results) {
+    recordDecline(projectPath, result.agentName);
+  }
 
   if (!ok) return;
 
