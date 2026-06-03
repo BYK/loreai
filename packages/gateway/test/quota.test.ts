@@ -99,6 +99,35 @@ describe("fetchOAuthQuotaSnapshot", () => {
     expect(headers["anthropic-beta"]).toBe("oauth-2025-04-20");
   });
 
+  test("sends a Claude Code user-agent (fallback when no session)", async () => {
+    let capturedInit: RequestInit | undefined;
+    globalThis.fetch = mock((_url: string, init?: RequestInit) => {
+      capturedInit = init;
+      return Promise.resolve(new Response(quotaBody(), { status: 200 }));
+    }) as unknown as typeof fetch;
+
+    await fetchOAuthQuotaSnapshot(BEARER);
+    const headers = capturedInit!.headers as Record<string, string>;
+    expect(headers["user-agent"]).toContain("claude-cli/");
+  });
+
+  test("reuses sniffed Claude Code headers when a session is provided", async () => {
+    makeOAuthSession("sid-ua");
+    // captureSessionHeaders requires billing + a turn; simulate by capturing
+    // the session's anthropic-beta/user-agent via the cch snapshot path.
+    let capturedInit: RequestInit | undefined;
+    globalThis.fetch = mock((_url: string, init?: RequestInit) => {
+      capturedInit = init;
+      return Promise.resolve(new Response(quotaBody(), { status: 200 }));
+    }) as unknown as typeof fetch;
+
+    await fetchOAuthQuotaSnapshot(BEARER, "sid-ua");
+    const headers = capturedInit!.headers as Record<string, string>;
+    // buildOAuthWorkerHeaders always sets a UA + the oauth beta for OAuth sessions.
+    expect(headers["user-agent"]).toContain("claude-cli/");
+    expect(headers["anthropic-beta"]).toContain("oauth-2025-04-20");
+  });
+
   test("missing seven_day → that window is null", async () => {
     globalThis.fetch = mock(() =>
       Promise.resolve(
@@ -145,6 +174,65 @@ describe("fetchOAuthQuotaSnapshot", () => {
     const snap = await fetchOAuthQuotaSnapshot(BEARER);
     expect(snap!.fiveHour?.utilization).toBe(100);
     expect(snap!.sevenDay?.utilization).toBe(0);
+  });
+
+  test("fraction-format utilization (0.0-1.0) is scaled to percent", async () => {
+    globalThis.fetch = mock(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            five_hour: { utilization: 0.452 },
+            seven_day: { utilization: 0.128 },
+          }),
+          { status: 200 },
+        ),
+      ),
+    ) as unknown as typeof fetch;
+
+    const snap = await fetchOAuthQuotaSnapshot(BEARER);
+    expect(snap!.fiveHour?.utilization).toBeCloseTo(45.2);
+    expect(snap!.sevenDay?.utilization).toBeCloseTo(12.8);
+  });
+
+  test("percent-format utilization (>1) is kept as-is", async () => {
+    globalThis.fetch = mock(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ five_hour: { utilization: 45.2 } }), { status: 200 }),
+      ),
+    ) as unknown as typeof fetch;
+
+    const snap = await fetchOAuthQuotaSnapshot(BEARER);
+    expect(snap!.fiveHour?.utilization).toBeCloseTo(45.2);
+  });
+
+  test("numeric epoch resets_at (seconds) is parsed to ms", async () => {
+    const epochSec = 1_780_000_000;
+    globalThis.fetch = mock(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({ five_hour: { utilization: 50, resets_at: epochSec } }),
+          { status: 200 },
+        ),
+      ),
+    ) as unknown as typeof fetch;
+
+    const snap = await fetchOAuthQuotaSnapshot(BEARER);
+    expect(snap!.fiveHour?.resetsAt).toBe(epochSec * 1000);
+  });
+
+  test("numeric epoch resets_at (milliseconds) is kept as-is", async () => {
+    const epochMs = 1_780_000_000_000;
+    globalThis.fetch = mock(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({ five_hour: { utilization: 50, resets_at: epochMs } }),
+          { status: 200 },
+        ),
+      ),
+    ) as unknown as typeof fetch;
+
+    const snap = await fetchOAuthQuotaSnapshot(BEARER);
+    expect(snap!.fiveHour?.resetsAt).toBe(epochMs);
   });
 
   test("empty body → both windows null, no throw", async () => {

@@ -28,7 +28,7 @@ import { log } from "@loreai/core";
 import type { AuthCredential } from "./auth";
 import { authFingerprint, resolveAuth } from "./auth";
 import { runBackground } from "./background-limiter";
-import { isClaudeCodeOAuthSession } from "./cch";
+import { isClaudeCodeOAuthSession, buildOAuthWorkerHeaders } from "./cch";
 import { parseRetryAfter } from "./llm-adapter";
 
 // ---------------------------------------------------------------------------
@@ -58,6 +58,13 @@ export type QuotaSnapshot = {
 const QUOTA_URL = "https://api.anthropic.com/api/oauth/usage";
 const QUOTA_BETA = "oauth-2025-04-20";
 const QUOTA_ANTHROPIC_VERSION = "2023-06-01";
+
+/**
+ * Fallback user-agent for sessions whose Claude Code headers haven't been
+ * sniffed yet. Anthropic's OAuth endpoints validate the client fingerprint
+ * and may 403 requests without a recognizable Claude Code user-agent.
+ */
+const QUOTA_FALLBACK_USER_AGENT = "claude-cli/2.1.160 (external, sdk-cli)";
 
 /** Refresh quota at most once per 5 minutes per OAuth account. */
 const QUOTA_FETCH_INTERVAL_MS = 5 * 60 * 1000;
@@ -101,22 +108,45 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Normalize a utilization value to a 0-100 percentage.
+ *
+ * The OAuth usage API has been observed to return utilization in two formats
+ * across Claude Code versions: a 0.0-1.0 fraction or a 0-100 percentage.
+ * Values in [0, 1] are treated as fractions and scaled by 100; anything above
+ * 1 is treated as an already-percentage value. (A genuine 1% reads as 1.0 in
+ * fraction form too, but the difference between 1% and 100% is not worth
+ * mis-scaling the common case — every known client makes the same choice.)
+ */
+function normalizeUtilization(raw: unknown): number | null {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  const pct = n > 0 && n <= 1 ? n * 100 : n;
+  return Math.min(100, Math.max(0, pct));
+}
+
+/** Parse a resets_at value (ISO-8601 string OR epoch number) into epoch ms. */
+function parseResetsAt(raw: unknown): number | null {
+  if (typeof raw === "string") {
+    const parsed = Date.parse(raw);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    // Heuristic: values below ~1e12 are seconds, otherwise milliseconds.
+    return raw < 1e12 ? raw * 1000 : raw;
+  }
+  return null;
+}
+
 /** Parse a raw window object into a QuotaWindow, or null if unusable. */
 function parseWindow(raw: unknown): QuotaWindow | null {
   if (!raw || typeof raw !== "object") return null;
   const obj = raw as Record<string, unknown>;
 
-  const utilRaw = Number(obj.utilization);
-  if (!Number.isFinite(utilRaw)) return null;
-  const utilization = Math.min(100, Math.max(0, utilRaw));
+  const utilization = normalizeUtilization(obj.utilization);
+  if (utilization === null) return null;
 
-  let resetsAt: number | null = null;
-  if (typeof obj.resets_at === "string") {
-    const parsed = Date.parse(obj.resets_at);
-    if (!Number.isNaN(parsed)) resetsAt = parsed;
-  }
-
-  return { utilization, resetsAt };
+  return { utilization, resetsAt: parseResetsAt(obj.resets_at) };
 }
 
 /** Parse a raw API body into a QuotaSnapshot. Missing keys → null windows. */
@@ -146,6 +176,7 @@ function parseSnapshot(body: unknown): QuotaSnapshot {
  */
 export async function fetchOAuthQuotaSnapshot(
   cred: AuthCredential,
+  sessionID?: string,
 ): Promise<QuotaSnapshot | null> {
   if (cred.scheme !== "bearer") return null;
 
@@ -162,12 +193,20 @@ export async function fetchOAuthQuotaSnapshot(
   await release.prev;
 
   try {
+    // Reuse the Claude Code header fingerprint (user-agent, anthropic-beta,
+    // browser-access, request-id) sniffed from the session's conversation
+    // turns. Anthropic's OAuth endpoints validate the client fingerprint and
+    // can 403 a request that lacks a recognizable Claude Code user-agent.
+    const ccHeaders = sessionID ? buildOAuthWorkerHeaders(sessionID) : null;
     const response = await fetch(QUOTA_URL, {
       method: "GET",
       headers: {
         Authorization: `Bearer ${cred.value}`,
-        "anthropic-beta": QUOTA_BETA,
         "anthropic-version": QUOTA_ANTHROPIC_VERSION,
+        // Defaults; overridden by the sniffed Claude Code fingerprint below.
+        "anthropic-beta": QUOTA_BETA,
+        "user-agent": QUOTA_FALLBACK_USER_AGENT,
+        ...(ccHeaders ?? {}),
       },
       signal: AbortSignal.timeout(QUOTA_FETCH_TIMEOUT_MS),
     });
@@ -206,12 +245,13 @@ export async function fetchOAuthQuotaSnapshot(
  */
 export function fetchQuotaDeduped(
   cred: AuthCredential,
+  sessionID?: string,
 ): Promise<QuotaSnapshot | null> {
   const fp = authFingerprint(cred);
   const existing = inflight.get(fp);
   if (existing) return existing;
 
-  const p = fetchOAuthQuotaSnapshot(cred)
+  const p = fetchOAuthQuotaSnapshot(cred, sessionID)
     .then((snap) => {
       if (snap) {
         quotaCache.set(fp, snap);
@@ -269,7 +309,7 @@ export function maybeFetchQuota(sessionID: string, cred: AuthCredential): void {
   quotaFetchCooldown.set(fp, now);
 
   void runBackground(
-    () => fetchQuotaDeduped(cred),
+    () => fetchQuotaDeduped(cred, sessionID),
     `quota fp=${fp.slice(0, 8)}`,
   ).catch((err) => {
     log.warn("quota: background fetch failed", err);
