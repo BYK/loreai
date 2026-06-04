@@ -6,11 +6,12 @@
  * formatting for system prompt injection and recall query expansion.
  */
 import { uuidv7 } from "uuidv7";
-import { db, ensureProject } from "./db";
+import { db, ensureProject, getKV, setKV } from "./db";
 import { ftsQuery, ftsQueryOr, EMPTY_QUERY, filterTerms } from "./search";
 import { config } from "./config";
 import { getGitUser } from "./git";
 import * as log from "./log";
+import * as embedding from "./embedding";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -210,6 +211,8 @@ export function create(input: {
         for (const alias of input.aliases) {
           addAlias(existing.id, alias.type, alias.value, alias.source);
         }
+        // Alias set changed — refresh the dedup embedding.
+        reembedEntity(existing.id);
       }
       return { id: existing.id, created: false };
     }
@@ -242,6 +245,7 @@ export function create(input: {
     }
 
     d.exec("COMMIT");
+    reembedEntity(id);
     return { id, created: true };
   } catch (e) {
     try {
@@ -251,6 +255,22 @@ export function create(input: {
     }
     throw e;
   }
+}
+
+/**
+ * Recompute and store an entity's embedding from its current canonical name +
+ * alias values. Fire-and-forget (errors logged inside embedEntity). Called
+ * whenever the name or alias set changes so the entity dedup vector stays
+ * current. No-op when no embedding provider is available. Exported so external
+ * mutation paths (CLI alias add/rm) can refresh the vector after changing the
+ * alias set without going through create()/update().
+ */
+export function reembedEntity(id: string): void {
+  const row = db()
+    .query("SELECT canonical_name FROM entities WHERE id = ?")
+    .get(id) as { canonical_name: string } | null;
+  if (!row) return;
+  embedding.embedEntity(id, row.canonical_name, aliasValues(id));
 }
 
 /** Update an entity's canonical name or metadata. */
@@ -299,6 +319,8 @@ export function update(
       db().query("DELETE FROM entity_aliases WHERE id = ?").run(oldAlias.id);
     }
     addAlias(id, "name", input.canonicalName, "auto");
+    // Canonical name changed — refresh the dedup embedding.
+    reembedEntity(id);
   }
 }
 
@@ -384,6 +406,8 @@ export function ensureSelfEntity(
         addAlias(existing.id, a.type as AliasType, a.value, "config");
       }
     }
+    // Name/alias set may have changed — refresh the dedup embedding.
+    reembedEntity(existing.id);
     return getSelfEntity();
   }
 
@@ -886,6 +910,8 @@ export function merge(targetId: string, sourceId: string): void {
     );
 
     d.exec("COMMIT");
+    // Target absorbed source aliases — refresh its dedup embedding.
+    reembedEntity(targetId);
   } catch (e) {
     try {
       d.exec("ROLLBACK");
@@ -1275,80 +1301,552 @@ export function syncEntityRefs(knowledgeId: string, content: string): number {
 }
 
 // ---------------------------------------------------------------------------
-// Auto-dedup candidates
+// Entity auto-dedup (#462)
 // ---------------------------------------------------------------------------
 
 /**
- * Find potential duplicate entities by alias overlap or canonical name similarity.
- * Returns pairs of (entity1, entity2) that are likely duplicates.
+ * Minimum embedding cosine similarity for two same-type entities to be
+ * considered duplicates. Lower than the 0.935 knowledge dedup threshold
+ * because entity names are short and noisy ("GitHub Actions" ↔ "GHA").
  */
-export function findDuplicateCandidates(
+export const ENTITY_EMBEDDING_DEDUP_THRESHOLD = 0.85;
+/**
+ * Similarity at/above which a pair is auto-merged silently. Pairs in
+ * [ENTITY_EMBEDDING_DEDUP_THRESHOLD, ENTITY_AUTO_MERGE_THRESHOLD) are only
+ * *suggested* (surfaced in CLI / dashboard for explicit confirmation).
+ */
+export const ENTITY_AUTO_MERGE_THRESHOLD = 0.92;
+/** Canonical-name Jaccard at/above which the name signal boosts a pair. */
+const ENTITY_NAME_JACCARD_THRESHOLD = 0.5;
+/** Small additive boost applied to a pair's score when a softer signal fires. */
+const ENTITY_SIGNAL_BOOST = 0.05;
+
+/** A cluster of duplicate entities sharing one survivor. */
+export type EntityDedupCluster = {
+  surviving: { id: string; name: string };
+  merged: Array<{ id: string; name: string; similarity: number }>;
+};
+
+export type EntityDedupResult = {
+  /** Auto-merge tier (similarity ≥ ENTITY_AUTO_MERGE_THRESHOLD or alias overlap). */
+  merged: EntityDedupCluster[];
+  /** Suggestion tier (≥ dedup threshold, < auto-merge threshold). */
+  suggested: EntityDedupCluster[];
+  /** All pairwise similarities (key = entityPairKey) for calibration. */
+  pairSimilarities: Map<string, number>;
+  /** id → canonical name for every input entity (survives deletion). */
+  names: Map<string, string>;
+};
+
+/** Order-independent key for an entity pair (mirrors ltm.dedupPairKey). */
+export function entityPairKey(idA: string, idB: string): string {
+  return idA < idB ? `${idA}:${idB}` : `${idB}:${idA}`;
+}
+
+/** Jaccard word-overlap of two canonical names (using search term filtering). */
+function nameJaccard(a: string, b: string): number {
+  const wa = new Set(filterTerms(a).map((w) => w.toLowerCase()));
+  const wb = new Set(filterTerms(b).map((w) => w.toLowerCase()));
+  if (wa.size === 0 || wb.size === 0) return 0;
+  const intersection = [...wa].filter((w) => wb.has(w)).length;
+  const union = new Set([...wa, ...wb]).size;
+  return union === 0 ? 0 : intersection / union;
+}
+
+/**
+ * Deduplicate entities using embedding similarity + multi-signal scoring.
+ *
+ * Signals (issue #462):
+ *  - Same entity_type — REQUIRED (never merge a person with a service).
+ *  - Embedding cosine similarity — primary signal.
+ *  - Exact alias-value overlap — strong; forces the auto-merge tier.
+ *  - Canonical-name Jaccard ≥ 0.5 — moderate boost.
+ *  - Shared linked-knowledge — small boost.
+ *
+ * Uses greedy star clustering (no transitivity — mirrors ltm._dedup) so that
+ * A~B and B~C but not A~C only merges the strongest pair. Survivor per cluster:
+ * most aliases (richest) → most recent → shortest canonical name.
+ *
+ * `dryRun` defaults to true — callers must pass { dryRun: false } to merge.
+ * Only the auto-merge tier is ever applied; suggestions are never auto-merged.
+ */
+export async function deduplicateEntities(
   projectPath?: string,
-  maxCandidates = 50,
-): Array<{
-  entity1: EntityWithAliases;
-  entity2: EntityWithAliases;
-  reason: string;
-}> {
+  opts?: { dryRun?: boolean; threshold?: number },
+): Promise<EntityDedupResult> {
+  const dryRun = opts?.dryRun ?? true;
   const entities = projectPath ? forProject(projectPath) : listAll();
-  const candidates: Array<{
-    entity1: EntityWithAliases;
-    entity2: EntityWithAliases;
-    reason: string;
-  }> = [];
-  const seen = new Set<string>();
+  const names = new Map(entities.map((e) => [e.id, e.canonical_name]));
 
-  for (
-    let i = 0;
-    i < entities.length && candidates.length < maxCandidates;
-    i++
-  ) {
-    for (
-      let j = i + 1;
-      j < entities.length && candidates.length < maxCandidates;
-      j++
-    ) {
-      const e1 = entities[i];
-      const e2 = entities[j];
-      const pairKey = `${e1.id}:${e2.id}`;
-      if (seen.has(pairKey)) continue;
+  const empty: EntityDedupResult = {
+    merged: [],
+    suggested: [],
+    pairSimilarities: new Map(),
+    names,
+  };
+  if (entities.length < 2) return empty;
 
-      // Check alias overlap
-      const aliases1 = new Set(
-        e1.aliases.map((a) => a.alias_value.toLowerCase()),
-      );
-      const aliases2 = new Set(
-        e2.aliases.map((a) => a.alias_value.toLowerCase()),
-      );
-      const overlap = [...aliases1].filter((a) => aliases2.has(a));
-      if (overlap.length > 0) {
-        seen.add(pairKey);
-        candidates.push({
-          entity1: e1,
-          entity2: e2,
-          reason: `shared aliases: ${overlap.join(", ")}`,
-        });
-        continue;
-      }
+  const dedupThreshold =
+    opts?.threshold ??
+    loadEntityCalibratedThreshold(
+      projectPath ? ensureProject(projectPath) : null,
+    ) ??
+    ENTITY_EMBEDDING_DEDUP_THRESHOLD;
 
-      // Check canonical name word overlap (Jaccard similarity)
-      const words1 = new Set(filterTerms(e1.canonical_name));
-      const words2 = new Set(filterTerms(e2.canonical_name));
-      if (words1.size > 0 && words2.size > 0) {
-        const intersection = [...words1].filter((w) => words2.has(w)).length;
-        const union = new Set([...words1, ...words2]).size;
-        const jaccard = intersection / union;
-        if (jaccard >= 0.5 && intersection >= 2) {
-          seen.add(pairKey);
-          candidates.push({
-            entity1: e1,
-            entity2: e2,
-            reason: `similar names (jaccard=${jaccard.toFixed(2)})`,
-          });
-        }
+  // --- Load embeddings for the candidate entities (if available) ---
+  const embeddingMap = new Map<string, Float32Array>();
+  {
+    const ids = entities.map((e) => e.id);
+    const placeholders = ids.map(() => "?").join(",");
+    const rows = db()
+      .query(
+        `SELECT id, embedding FROM entities WHERE embedding IS NOT NULL AND id IN (${placeholders})`,
+      )
+      .all(...ids) as Array<{ id: string; embedding: Buffer }>;
+    for (const row of rows) {
+      try {
+        embeddingMap.set(row.id, embedding.fromBlob(row.embedding));
+      } catch {
+        log.info(`skipping corrupted embedding for entity ${row.id}`);
       }
     }
   }
 
-  return candidates;
+  // Pre-compute lowercased alias sets + linked-knowledge sets per entity.
+  const aliasSets = new Map<string, Set<string>>();
+  const knowledgeSets = new Map<string, Set<string>>();
+  for (const e of entities) {
+    aliasSets.set(
+      e.id,
+      new Set(e.aliases.map((a) => a.alias_value.toLowerCase())),
+    );
+    knowledgeSets.set(e.id, new Set(knowledgeForEntity(e.id)));
+  }
+
+  // --- Build neighbor map (O(n²) pairwise) ---
+  type DedupHit = { id: string; score: number; forceMerge: boolean };
+  const neighborMap = new Map<string, DedupHit[]>();
+  const pairSimilarities = new Map<string, number>();
+
+  for (const entry of entities) {
+    const neighbors: DedupHit[] = [];
+    const entryVec = embeddingMap.get(entry.id);
+
+    for (const other of entities) {
+      if (other.id === entry.id) continue;
+      // REQUIRED gate: same entity_type or never a candidate.
+      if (other.entity_type !== entry.entity_type) continue;
+
+      // Embedding cosine similarity (primary signal).
+      let similarity = 0;
+      if (entryVec) {
+        const otherVec = embeddingMap.get(other.id);
+        if (otherVec && entryVec.length === otherVec.length) {
+          similarity = embedding.cosineSimilarity(entryVec, otherVec);
+        }
+      }
+
+      // Alias-value overlap (strong → force auto-merge regardless of cosine).
+      const aSet = aliasSets.get(entry.id)!;
+      const bSet = aliasSets.get(other.id)!;
+      let aliasOverlap = false;
+      for (const v of aSet) {
+        if (bSet.has(v)) {
+          aliasOverlap = true;
+          break;
+        }
+      }
+
+      // Canonical-name Jaccard (moderate boost).
+      const jaccard = nameJaccard(entry.canonical_name, other.canonical_name);
+
+      // Shared linked-knowledge (small boost).
+      const kA = knowledgeSets.get(entry.id)!;
+      const kB = knowledgeSets.get(other.id)!;
+      let sharedKnowledge = false;
+      for (const k of kA) {
+        if (kB.has(k)) {
+          sharedKnowledge = true;
+          break;
+        }
+      }
+
+      // Combined score: cosine, lifted by softer signals.
+      let score = similarity;
+      if (jaccard >= ENTITY_NAME_JACCARD_THRESHOLD) {
+        score = Math.max(score, jaccard);
+        score += ENTITY_SIGNAL_BOOST;
+      }
+      if (sharedKnowledge) score += ENTITY_SIGNAL_BOOST;
+      score = Math.min(score, 1);
+
+      // Record similarity for calibration (cosine only; > 0).
+      if (similarity > 0) {
+        const pk = entityPairKey(entry.id, other.id);
+        if (!pairSimilarities.has(pk)) pairSimilarities.set(pk, similarity);
+      }
+
+      const isNeighbor = aliasOverlap || score >= dedupThreshold;
+      if (isNeighbor) {
+        neighbors.push({
+          id: other.id,
+          score: aliasOverlap ? 1 : score,
+          forceMerge: aliasOverlap || score >= ENTITY_AUTO_MERGE_THRESHOLD,
+        });
+      }
+    }
+    neighbors.sort((a, b) => b.score - a.score);
+    neighborMap.set(entry.id, neighbors);
+  }
+
+  // --- Greedy star clustering (no transitivity) ---
+  const claimed = new Set<string>();
+  const rawClusters = new Map<string, DedupHit[]>();
+  const sortedIds = [...neighborMap.keys()].sort(
+    (a, b) => neighborMap.get(b)!.length - neighborMap.get(a)!.length,
+  );
+
+  for (const centerId of sortedIds) {
+    if (claimed.has(centerId)) continue;
+    claimed.add(centerId);
+    const members: DedupHit[] = [];
+    for (const hit of neighborMap.get(centerId)!) {
+      if (claimed.has(hit.id)) continue;
+      claimed.add(hit.id);
+      members.push(hit);
+    }
+    if (members.length > 0) rawClusters.set(centerId, members);
+  }
+
+  // --- Build clusters, pick survivors, split into tiers ---
+  const entityById = new Map(entities.map((e) => [e.id, e]));
+  const merged: EntityDedupCluster[] = [];
+  const suggested: EntityDedupCluster[] = [];
+
+  for (const [centerId, hits] of rawClusters) {
+    const all = [centerId, ...hits.map((h) => h.id)]
+      .map((id) => entityById.get(id))
+      .filter((e): e is EntityWithAliases => Boolean(e));
+    if (all.length < 2) continue;
+
+    // Survivor: most aliases → most recent → shortest canonical name.
+    const sorted = [...all].sort((a, b) => {
+      const aliasDiff = b.aliases.length - a.aliases.length;
+      if (aliasDiff !== 0) return aliasDiff;
+      if (b.updated_at !== a.updated_at) return b.updated_at - a.updated_at;
+      return a.canonical_name.length - b.canonical_name.length;
+    });
+    const survivor = sorted[0];
+
+    // Tier each non-survivor member by its pair score vs the survivor.
+    const scoreFor = (memberId: string): { score: number; force: boolean } => {
+      // Direct alias-value overlap with the survivor always forces a merge,
+      // even if the member only clustered transitively via the center.
+      const survivorAliases = aliasSets.get(survivor.id);
+      const memberAliases = aliasSets.get(memberId);
+      if (survivorAliases && memberAliases) {
+        for (const v of memberAliases) {
+          if (survivorAliases.has(v)) return { score: 1, force: true };
+        }
+      }
+      const fromCenter = neighborMap
+        .get(survivor.id)
+        ?.find((h) => h.id === memberId);
+      if (fromCenter)
+        return { score: fromCenter.score, force: fromCenter.forceMerge };
+      const fromMember = neighborMap
+        .get(memberId)
+        ?.find((h) => h.id === survivor.id);
+      if (fromMember)
+        return { score: fromMember.score, force: fromMember.forceMerge };
+      const pk = entityPairKey(survivor.id, memberId);
+      const sim = pairSimilarities.get(pk) ?? 0;
+      return { score: sim, force: sim >= ENTITY_AUTO_MERGE_THRESHOLD };
+    };
+
+    const mergeMembers: EntityDedupCluster["merged"] = [];
+    const suggestMembers: EntityDedupCluster["merged"] = [];
+    for (const m of sorted.slice(1)) {
+      const { score, force } = scoreFor(m.id);
+      const entry = { id: m.id, name: m.canonical_name, similarity: score };
+      if (force) mergeMembers.push(entry);
+      else suggestMembers.push(entry);
+    }
+
+    if (mergeMembers.length > 0) {
+      merged.push({
+        surviving: { id: survivor.id, name: survivor.canonical_name },
+        merged: mergeMembers,
+      });
+      if (!dryRun) {
+        for (const m of mergeMembers) merge(survivor.id, m.id);
+      }
+    }
+    if (suggestMembers.length > 0) {
+      suggested.push({
+        surviving: { id: survivor.id, name: survivor.canonical_name },
+        merged: suggestMembers,
+      });
+    }
+  }
+
+  merged.sort((a, b) => b.merged.length - a.merged.length);
+  suggested.sort((a, b) => b.merged.length - a.merged.length);
+
+  return { merged, suggested, pairSimilarities, names };
+}
+
+// ---------------------------------------------------------------------------
+// Entity dedup adaptive threshold calibration (#462)
+//
+// Reuses the shared `dedup_feedback` table with kind='entity' so entity and
+// knowledge feedback coexist without a second table. All queries here scope to
+// kind='entity'; the knowledge calibration path (ltm.ts) implicitly operates on
+// kind='knowledge' (the column default).
+// ---------------------------------------------------------------------------
+
+export type EntityDedupFeedbackSource =
+  | "auto_dedup"
+  | "cli_yes"
+  | "cli_interactive";
+
+const MIN_ENTITY_CALIBRATION_SAMPLES = 20;
+/** Only record auto-signals for pairs with similarity >= this floor. */
+const ENTITY_AUTO_SIGNAL_MIN_SIMILARITY = 0.8;
+/** Max auto-signal pairs to record per dedup run (closest to threshold). */
+const ENTITY_AUTO_SIGNAL_MAX_PAIRS = 50;
+/** Max feedback rows to keep per project (prevents unbounded growth). */
+const MAX_ENTITY_FEEDBACK_ROWS_PER_PROJECT = 500;
+
+/** Record a single entity dedup feedback row (kind='entity'). */
+export function recordEntityDedupFeedback(input: {
+  projectId: string | null;
+  entryATitle: string;
+  entryBTitle: string;
+  similarity: number;
+  accepted: boolean;
+  source: EntityDedupFeedbackSource;
+}): void {
+  db()
+    .query(
+      `INSERT INTO dedup_feedback
+         (project_id, entry_a_title, entry_b_title, similarity, accepted, source, created_at, kind)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'entity')`,
+    )
+    .run(
+      input.projectId,
+      input.entryATitle,
+      input.entryBTitle,
+      input.similarity,
+      input.accepted ? 1 : 0,
+      input.source,
+      Date.now(),
+    );
+}
+
+/**
+ * Record automatic calibration signals from a post-curation entity dedup sweep.
+ * Records only **reject** signals — non-merged pairs with cosine similarity in
+ * [floor, threshold). Accept signals from auto-merge are tautological, so they
+ * are excluded (manual cli_yes/cli_interactive provide the accept side).
+ */
+export function recordEntityAutoSignals(
+  projectId: string | null,
+  result: EntityDedupResult,
+): void {
+  // Collect merged/suggested pair keys to exclude from reject signals.
+  const decidedPairs = new Set<string>();
+  for (const cluster of [...result.merged, ...result.suggested]) {
+    for (const m of cluster.merged) {
+      decidedPairs.add(entityPairKey(cluster.surviving.id, m.id));
+    }
+  }
+
+  type Signal = {
+    entryATitle: string;
+    entryBTitle: string;
+    similarity: number;
+  };
+  const signals: Signal[] = [];
+  for (const [pk, sim] of result.pairSimilarities) {
+    if (sim < ENTITY_AUTO_SIGNAL_MIN_SIMILARITY) continue;
+    if (decidedPairs.has(pk)) continue; // merged/suggested — skip
+    const [idA, idB] = pk.split(":");
+    const nameA = result.names.get(idA);
+    const nameB = result.names.get(idB);
+    if (!nameA || !nameB) continue;
+    signals.push({ entryATitle: nameA, entryBTitle: nameB, similarity: sim });
+  }
+
+  const currentThreshold =
+    loadEntityCalibratedThreshold(projectId) ??
+    ENTITY_EMBEDDING_DEDUP_THRESHOLD;
+  signals.sort(
+    (a, b) =>
+      Math.abs(a.similarity - currentThreshold) -
+      Math.abs(b.similarity - currentThreshold),
+  );
+  const capped = signals.slice(0, ENTITY_AUTO_SIGNAL_MAX_PAIRS);
+
+  pruneEntityDedupFeedback(projectId);
+
+  for (const s of capped) {
+    recordEntityDedupFeedback({
+      projectId,
+      entryATitle: s.entryATitle,
+      entryBTitle: s.entryBTitle,
+      similarity: s.similarity,
+      accepted: false,
+      source: "auto_dedup",
+    });
+  }
+}
+
+/** Get all entity feedback for a project (for calibration). */
+export function getEntityDedupFeedback(
+  projectId: string | null,
+): Array<{ similarity: number; accepted: boolean; source: string }> {
+  const rows = (
+    projectId !== null
+      ? db()
+          .query(
+            "SELECT similarity, accepted, source FROM dedup_feedback WHERE kind = 'entity' AND project_id = ? ORDER BY similarity",
+          )
+          .all(projectId)
+      : db()
+          .query(
+            "SELECT similarity, accepted, source FROM dedup_feedback WHERE kind = 'entity' AND project_id IS NULL ORDER BY similarity",
+          )
+          .all()
+  ) as Array<{ similarity: number; accepted: number; source: string }>;
+  return rows.map((r) => ({
+    similarity: r.similarity,
+    accepted: r.accepted === 1,
+    source: r.source,
+  }));
+}
+
+/** Quick count of entity feedback rows for a project. */
+export function getEntityDedupFeedbackCount(projectId: string | null): number {
+  const row = (
+    projectId !== null
+      ? db()
+          .query(
+            "SELECT COUNT(*) as cnt FROM dedup_feedback WHERE kind = 'entity' AND project_id = ?",
+          )
+          .get(projectId)
+      : db()
+          .query(
+            "SELECT COUNT(*) as cnt FROM dedup_feedback WHERE kind = 'entity' AND project_id IS NULL",
+          )
+          .get()
+  ) as { cnt: number } | null;
+  return row?.cnt ?? 0;
+}
+
+/** Prune old entity feedback rows, keeping the most recent rows. */
+export function pruneEntityDedupFeedback(projectId: string | null): void {
+  const count = getEntityDedupFeedbackCount(projectId);
+  if (count <= MAX_ENTITY_FEEDBACK_ROWS_PER_PROJECT) return;
+  const excess = count - MAX_ENTITY_FEEDBACK_ROWS_PER_PROJECT;
+  if (projectId !== null) {
+    db()
+      .query(
+        `DELETE FROM dedup_feedback WHERE id IN (
+           SELECT id FROM dedup_feedback WHERE kind = 'entity' AND project_id = ?
+           ORDER BY created_at ASC LIMIT ?
+         )`,
+      )
+      .run(projectId, excess);
+  } else {
+    db()
+      .query(
+        `DELETE FROM dedup_feedback WHERE id IN (
+           SELECT id FROM dedup_feedback WHERE kind = 'entity' AND project_id IS NULL
+           ORDER BY created_at ASC LIMIT ?
+         )`,
+      )
+      .run(excess);
+  }
+}
+
+/**
+ * Calibrate the entity dedup threshold by accuracy maximization over recorded
+ * feedback. Returns null until MIN_ENTITY_CALIBRATION_SAMPLES are collected.
+ * Mirrors ltm.calibrateDedupThreshold but clamps to the entity range.
+ */
+export function calibrateEntityDedupThreshold(
+  projectId: string | null,
+): number | null {
+  const feedback = getEntityDedupFeedback(projectId);
+  if (feedback.length < MIN_ENTITY_CALIBRATION_SAMPLES) return null;
+
+  const accepted = feedback.filter((f) => f.accepted);
+  const rejected = feedback.filter((f) => !f.accepted);
+
+  // Edge case: all accept, no rejects
+  if (rejected.length === 0) {
+    const minAccepted = Math.min(...accepted.map((f) => f.similarity));
+    return Math.max(0.8, minAccepted - 0.005);
+  }
+  // Edge case: all reject, no accepts → keep default
+  if (accepted.length === 0) {
+    log.warn(
+      "entity dedup calibration: all feedback is reject — keeping default threshold",
+    );
+    return null;
+  }
+
+  const allSims = [...new Set(feedback.map((f) => f.similarity))].sort(
+    (a, b) => a - b,
+  );
+  let bestThreshold = ENTITY_EMBEDDING_DEDUP_THRESHOLD;
+  let bestAccuracy = -1;
+  for (let i = 0; i < allSims.length - 1; i++) {
+    const candidate = (allSims[i] + allSims[i + 1]) / 2;
+    const correctAccepted = accepted.filter(
+      (f) => f.similarity >= candidate,
+    ).length;
+    const correctRejected = rejected.filter(
+      (f) => f.similarity < candidate,
+    ).length;
+    const accuracy = (correctAccepted + correctRejected) / feedback.length;
+    if (
+      accuracy > bestAccuracy ||
+      (accuracy === bestAccuracy && candidate > bestThreshold)
+    ) {
+      bestAccuracy = accuracy;
+      bestThreshold = candidate;
+    }
+  }
+  // Clamp to the entity range (lower than knowledge's [0.85, 0.98]).
+  return Math.max(0.8, Math.min(0.95, bestThreshold));
+}
+
+/** Persist the calibrated entity dedup threshold for a project. */
+export function saveEntityCalibratedThreshold(
+  projectId: string | null,
+  threshold: number,
+  sampleSize: number,
+): void {
+  const key = `entity_dedup_threshold:${projectId ?? "global"}`;
+  setKV(
+    key,
+    JSON.stringify({ threshold, sampleSize, calibratedAt: Date.now() }),
+  );
+}
+
+/** Load the calibrated entity dedup threshold for a project, or null. */
+export function loadEntityCalibratedThreshold(
+  projectId: string | null,
+): number | null {
+  const key = `entity_dedup_threshold:${projectId ?? "global"}`;
+  const raw = getKV(key);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return typeof parsed.threshold === "number" ? parsed.threshold : null;
+  } catch {
+    return null;
+  }
 }

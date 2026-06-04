@@ -832,6 +832,30 @@ export function vectorSearch(
   return scored.slice(0, limit);
 }
 
+/**
+ * Search all entities with embeddings by cosine similarity.
+ * Returns top-k entities sorted by similarity descending.
+ * Pure brute-force — fine for the typical entity-registry size.
+ */
+export function vectorSearchEntities(
+  queryEmbedding: Float32Array,
+  limit = 10,
+): VectorHit[] {
+  const rows = db()
+    .query("SELECT id, embedding FROM entities WHERE embedding IS NOT NULL")
+    .all() as Array<{ id: string; embedding: Buffer }>;
+
+  const scored: VectorHit[] = [];
+  for (const row of rows) {
+    const vec = fromBlob(row.embedding);
+    const sim = cosineSimilarity(queryEmbedding, vec);
+    scored.push({ id: row.id, similarity: sim });
+  }
+
+  scored.sort((a, b) => b.similarity - a.similarity);
+  return scored.slice(0, limit);
+}
+
 // ---------------------------------------------------------------------------
 // Vector search — distillations
 // ---------------------------------------------------------------------------
@@ -937,6 +961,43 @@ export function embedKnowledgeEntry(
     })
     .catch((err) => {
       log.error("embedding failed for knowledge entry", id, ":", err);
+    });
+}
+
+/**
+ * Embed an entity (canonical name + all alias values) and store the result.
+ * Fire-and-forget — errors are logged, never thrown. Used by entity auto-dedup
+ * (#462) to compute semantic similarity between entities whose names differ but
+ * mean the same thing ("GitHub Actions" ↔ "GHA").
+ */
+export function embedEntity(
+  id: string,
+  canonicalName: string,
+  aliasValues: string[],
+): void {
+  if (!isAvailable()) return;
+  // Composite text: canonical name followed by every alias value. Deduped and
+  // joined so the vector captures all surface forms of the entity.
+  const seen = new Set<string>();
+  const parts: string[] = [];
+  for (const v of [canonicalName, ...aliasValues]) {
+    const t = v.trim();
+    if (!t) continue;
+    const key = t.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    parts.push(t);
+  }
+  const text = parts.join(" ");
+  if (!text) return;
+  embed([text], "document")
+    .then(([vec]) => {
+      db()
+        .query("UPDATE entities SET embedding = ? WHERE id = ?")
+        .run(toBlob(vec), id);
+    })
+    .catch((err) => {
+      log.error("embedding failed for entity", id, ":", err);
     });
 }
 
@@ -1152,6 +1213,7 @@ export async function runStartupBackfill(): Promise<void> {
 
   const knowledgeEmbedded = await backfillEmbeddings();
   const distillationEmbedded = await backfillDistillationEmbeddings();
+  const entityEmbedded = await backfillEntityEmbeddings();
 
   // Coverage stats — always log to stderr so the problem is visible.
   const kTotal = (
@@ -1182,9 +1244,9 @@ export async function runStartupBackfill(): Promise<void> {
   ).n;
 
   const parts: string[] = [];
-  if (knowledgeEmbedded > 0 || distillationEmbedded > 0) {
+  if (knowledgeEmbedded > 0 || distillationEmbedded > 0 || entityEmbedded > 0) {
     parts.push(
-      `backfilled ${knowledgeEmbedded} knowledge + ${distillationEmbedded} distillations`,
+      `backfilled ${knowledgeEmbedded} knowledge + ${distillationEmbedded} distillations + ${entityEmbedded} entities`,
     );
   }
   parts.push(
@@ -1381,6 +1443,83 @@ export async function backfillDistillationEmbeddings(): Promise<number> {
 
   if (embedded > 0) {
     log.info(`embedded ${embedded} distillations`);
+  }
+  return embedded;
+}
+
+// ---------------------------------------------------------------------------
+// Backfill — entities
+// ---------------------------------------------------------------------------
+
+/**
+ * Embed all entities that are missing embeddings. Composite text is the
+ * canonical name plus all alias values. Called on startup alongside knowledge
+ * and distillation backfill, and as a preflight before entity dedup so
+ * similarity comparisons have vectors to work with. Returns the count embedded.
+ */
+export async function backfillEntityEmbeddings(): Promise<number> {
+  const provider = getProvider();
+  if (!provider) return 0;
+
+  const rows = db()
+    .query(
+      `SELECT e.id AS id, e.canonical_name AS canonical_name,
+              GROUP_CONCAT(a.alias_value, ' ') AS aliases
+       FROM entities e
+       LEFT JOIN entity_aliases a ON a.entity_id = e.id
+       WHERE e.embedding IS NULL
+       GROUP BY e.id`,
+    )
+    .all() as Array<{
+    id: string;
+    canonical_name: string;
+    aliases: string | null;
+  }>;
+
+  if (!rows.length) return 0;
+
+  // Pre-compute text for token-budget batching. Canonical name is also stored
+  // as a "name" alias, so it may already appear in `aliases` — harmless for the
+  // embedding (duplicate surface form), and entity names are short.
+  const items = rows.map((r) => ({
+    ...r,
+    text: `${r.canonical_name} ${r.aliases ?? ""}`.trim(),
+  }));
+
+  let embedded = 0;
+  let i = 0;
+
+  while (i < items.length) {
+    const batch = nextBatch(items, i);
+    i += batch.length;
+
+    try {
+      const vectors = await embed(
+        batch.map((b) => b.text),
+        "document",
+      );
+      const update = db().prepare(
+        "UPDATE entities SET embedding = ? WHERE id = ?",
+      );
+
+      for (let j = 0; j < batch.length; j++) {
+        update.run(toBlob(vectors[j]), batch[j].id);
+        embedded++;
+      }
+    } catch (err) {
+      // log.error sends to Sentry via captureException
+      log.error(
+        `entity embedding backfill batch failed (${batch.length} items):`,
+        err,
+      );
+      // Provider is dead — no point retrying remaining batches.
+      if (err instanceof LocalProviderUnavailableError) break;
+    }
+    // No yieldToEventLoop() needed — embed() is truly async (worker thread).
+  }
+
+  if (embedded > 0) {
+    log.info(`embedded ${embedded} entities`);
   }
   return embedded;
 }

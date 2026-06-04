@@ -966,6 +966,16 @@ const MIGRATIONS: string[] = [
   CREATE INDEX IF NOT EXISTS idx_knowledge_transfers_recalled_in
     ON knowledge_transfers (recalled_in_project_id);
   `,
+  `
+  -- Version 34: Entity auto-dedup (#462). Embedding-based alias clustering.
+  -- Add a vector column to entities (same Float32Array-as-BLOB pattern as
+  -- knowledge.embedding) and a 'kind' discriminator on dedup_feedback so the
+  -- adaptive threshold calibration table can hold both knowledge and entity
+  -- feedback rows. Existing rows default to 'knowledge' to keep the knowledge
+  -- dedup code paths unchanged.
+  ALTER TABLE entities ADD COLUMN embedding BLOB;
+  ALTER TABLE dedup_feedback ADD COLUMN kind TEXT NOT NULL DEFAULT 'knowledge';
+  `,
 ];
 
 /** Return the resolved path of the SQLite database file. */
@@ -1133,7 +1143,8 @@ function recoverMissingObjects(database: Database) {
       metadata       TEXT,
       cross_project  INTEGER DEFAULT 0,
       created_at     INTEGER NOT NULL,
-      updated_at     INTEGER NOT NULL
+      updated_at     INTEGER NOT NULL,
+      embedding      BLOB
     );
     CREATE TABLE IF NOT EXISTS entity_aliases (
       id          TEXT PRIMARY KEY,

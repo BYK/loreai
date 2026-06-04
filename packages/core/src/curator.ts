@@ -682,6 +682,41 @@ async function runInner(input: {
     }
   }
 
+  // Post-curation entity dedup sweep (#462): if the curator created new
+  // entities, auto-merge high-confidence semantic duplicates it introduced
+  // ("Seylan Cinar" ↔ "Seylan", "GitHub Actions" ↔ "GHA"). Only the auto-merge
+  // tier is applied; moderate-confidence pairs are surfaced as suggestions via
+  // the CLI / dashboard. Gated on embedding availability since the primary
+  // signal is vector similarity. Note: freshly created entities embed
+  // fire-and-forget, so some vectors may not have landed yet — name-Jaccard and
+  // alias-overlap signals still fire, and the next run catches the rest.
+  if (result.entitiesCreated > 0 && embedding.isAvailable()) {
+    try {
+      const dupes = await entities.deduplicateEntities(input.projectPath, {
+        dryRun: false,
+      });
+      const autoMerged = dupes.merged.reduce((n, c) => n + c.merged.length, 0);
+      if (autoMerged > 0) {
+        log.info(
+          `post-curation entity dedup: merged ${autoMerged} duplicate entit${autoMerged === 1 ? "y" : "ies"}`,
+        );
+        result.deleted += autoMerged;
+      }
+      // Record reject auto-signals + recalibrate the entity threshold.
+      if (dupes.pairSimilarities.size > 0) {
+        const pid = ensureProject(input.projectPath);
+        entities.recordEntityAutoSignals(pid, dupes);
+        const newThreshold = entities.calibrateEntityDedupThreshold(pid);
+        if (newThreshold !== null) {
+          const count = entities.getEntityDedupFeedbackCount(pid);
+          entities.saveEntityCalibratedThreshold(pid, newThreshold, count);
+        }
+      }
+    } catch (err) {
+      log.warn("post-curation entity dedup failed (non-fatal):", err);
+    }
+  }
+
   const now = Date.now();
   lastCuratedAt.set(input.sessionID, now);
   saveSessionTracking(input.sessionID, { lastCuratedAt: now });

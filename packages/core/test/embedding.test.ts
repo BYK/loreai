@@ -14,6 +14,7 @@ import {
   fromBlob,
   isAvailable,
   vectorSearch,
+  vectorSearchEntities,
   checkConfigChange,
   resetProvider,
   _shutdownAndDisable,
@@ -521,6 +522,50 @@ describe("vectorSearch", () => {
 
     expect(results.length).toBe(1);
     expect(results[0].id).toBe("embed-high");
+  });
+});
+
+describe("vectorSearchEntities", () => {
+  const PROJECT = "/test/embedding/entity-vectorsearch";
+
+  beforeEach(() => {
+    db().query("DELETE FROM entity_aliases").run();
+    db().query("DELETE FROM entities").run();
+  });
+
+  function insertEntity(id: string, name: string, vec: Float32Array): void {
+    const pid = ensureProject(PROJECT);
+    const now = Date.now();
+    db()
+      .query(
+        "INSERT INTO entities (id, project_id, entity_type, canonical_name, cross_project, created_at, updated_at, embedding) VALUES (?, ?, 'tool', ?, 0, ?, ?, ?)",
+      )
+      .run(id, pid, name, now, now, toBlob(vec));
+  }
+
+  test("returns entities sorted by similarity descending", () => {
+    insertEntity("ent-a", "Exact", new Float32Array([1, 0, 0]));
+    insertEntity("ent-b", "Orthogonal", new Float32Array([0, 1, 0]));
+    insertEntity("ent-c", "Close", new Float32Array([0.9, 0.1, 0]));
+
+    const results = vectorSearchEntities(new Float32Array([1, 0, 0]), 10);
+    expect(results.map((r) => r.id)).toEqual(["ent-a", "ent-c", "ent-b"]);
+    expect(results[0].similarity).toBeCloseTo(1, 5);
+  });
+
+  test("ignores entities with no embedding and respects limit", () => {
+    insertEntity("ent-x", "Has vec", new Float32Array([1, 0, 0]));
+    const pid = ensureProject(PROJECT);
+    const now = Date.now();
+    db()
+      .query(
+        "INSERT INTO entities (id, project_id, entity_type, canonical_name, cross_project, created_at, updated_at) VALUES ('ent-novec', ?, 'tool', 'No vec', 0, ?, ?)",
+      )
+      .run(pid, now, now);
+
+    const results = vectorSearchEntities(new Float32Array([1, 0, 0]), 1);
+    expect(results.length).toBe(1);
+    expect(results[0].id).toBe("ent-x");
   });
 });
 

@@ -49,7 +49,40 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(33);
+    expect(row.version).toBe(34);
+  });
+
+  test("entities table has embedding column (migration v34)", () => {
+    const cols = (
+      db().query("PRAGMA table_info(entities)").all() as Array<{
+        name: string;
+      }>
+    ).map((c) => c.name);
+    expect(cols).toContain("embedding");
+  });
+
+  test("dedup_feedback has kind discriminator defaulting to 'knowledge' (v34)", () => {
+    const cols = db()
+      .query("PRAGMA table_info(dedup_feedback)")
+      .all() as Array<{
+      name: string;
+      dflt_value: string | null;
+    }>;
+    const kind = cols.find((c) => c.name === "kind");
+    expect(kind).toBeDefined();
+    // Rows inserted without an explicit kind are treated as knowledge feedback.
+    db()
+      .query(
+        `INSERT INTO dedup_feedback
+           (project_id, entry_a_title, entry_b_title, similarity, accepted, source, created_at)
+         VALUES (NULL, 'a', 'b', 0.9, 1, 'cli_yes', ?)`,
+      )
+      .run(Date.now());
+    const last = db()
+      .query("SELECT kind FROM dedup_feedback ORDER BY id DESC LIMIT 1")
+      .get() as { kind: string };
+    expect(last.kind).toBe("knowledge");
+    db().query("DELETE FROM dedup_feedback").run();
   });
 
   test("distillation_fts virtual table exists", () => {

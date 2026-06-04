@@ -335,6 +335,8 @@ async function cmdAliasAdd(
     "manual",
   );
   if (id) {
+    // Refresh the dedup embedding now that the alias set changed.
+    entities.reembedEntity(entityId);
     console.log(
       `Added alias: ${aliasType}:${aliasValue} → ${entity.canonical_name}`,
     );
@@ -353,8 +355,13 @@ async function cmdAliasRm(
     process.exit(1);
   }
 
-  const { entities } = await import("@loreai/core");
+  const { entities, db } = await import("@loreai/core");
+  // Capture the owning entity before deletion so we can refresh its embedding.
+  const owner = db()
+    .query("SELECT entity_id FROM entity_aliases WHERE id = ?")
+    .get(aliasId) as { entity_id: string } | null;
   entities.removeAlias(aliasId);
+  if (owner) entities.reembedEntity(owner.entity_id);
   console.log(`Removed alias: ${aliasId}`);
 }
 
@@ -537,6 +544,267 @@ async function cmdDelete(
 }
 
 // ---------------------------------------------------------------------------
+// dedup — find and merge duplicate entities
+// ---------------------------------------------------------------------------
+
+type EntityDedupResult = Awaited<
+  ReturnType<typeof import("@loreai/core").entities.deduplicateEntities>
+>;
+type EntityDedupCluster = EntityDedupResult["merged"][number];
+
+function printEntityClusters(
+  clusters: EntityDedupCluster[],
+  heading: string,
+  apply: boolean,
+): void {
+  if (!clusters.length) return;
+  console.log(`\n${heading}`);
+  for (let i = 0; i < clusters.length; i++) {
+    const c = clusters[i];
+    const total = 1 + c.merged.length;
+    console.log(`\nCluster ${i + 1} (${total} → 1):`);
+    console.log(
+      `  Keep:   ${c.surviving.name} (${c.surviving.id.slice(0, 8)}…)`,
+    );
+    for (const m of c.merged) {
+      const verb = apply ? "Merge " : "Would merge";
+      console.log(
+        `  ${verb}: ${m.name} (${m.id.slice(0, 8)}…) [sim: ${m.similarity.toFixed(3)}]`,
+      );
+    }
+  }
+}
+
+/** Prompt the user for a single-key choice. Returns the chosen key, or fallback on EOF. */
+function promptChoice(
+  message: string,
+  choices: string[],
+  fallback = "s",
+): Promise<string> {
+  return new Promise((resolveChoice) => {
+    // Lazy import keeps CLI startup fast and avoids a top-level node:readline dep.
+    const { createInterface } =
+      require("readline") as typeof import("readline");
+    const rl = createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+    let resolved = false;
+    const done = (v: string) => {
+      if (resolved) return;
+      resolved = true;
+      rl.close();
+      resolveChoice(v);
+    };
+    rl.on("close", () => {
+      if (!resolved) {
+        resolved = true;
+        resolveChoice(fallback);
+      }
+    });
+    const ask = () => {
+      rl.question(message, (answer) => {
+        const key = answer.trim().toLowerCase()[0] ?? "";
+        if (choices.includes(key)) done(key);
+        else ask();
+      });
+    };
+    ask();
+  });
+}
+
+async function cmdDedup(
+  _args: string[],
+  flags: Record<string, unknown>,
+): Promise<void> {
+  const {
+    entities,
+    embedding: emb,
+    projectId: getProjectId,
+  } = await import("@loreai/core");
+
+  const apply = !!flags.yes;
+  const interactive = !!flags.interactive;
+  const asJson = !!flags.json;
+  const projectPath = flags.all
+    ? undefined
+    : resolve((flags.project as string) ?? process.cwd());
+
+  if (interactive && apply) {
+    console.error("--interactive and --yes are mutually exclusive.");
+    process.exit(1);
+  }
+  if (interactive && !process.stdin.isTTY) {
+    console.error("--interactive requires a TTY.");
+    process.exit(1);
+  }
+
+  // Preflight: backfill missing entity embeddings so similarity has vectors.
+  if (emb.isAvailable()) {
+    try {
+      const n = await emb.backfillEntityEmbeddings();
+      if (n > 0) console.log(`Re-indexed ${n} entit${n === 1 ? "y" : "ies"}.`);
+    } catch (err) {
+      console.error(
+        "Warning: entity embedding reindex failed, dedup will use name/alias signals only:",
+        err,
+      );
+    }
+  } else {
+    console.log(
+      "Note: no embedding provider available — using name/alias signals only.",
+    );
+  }
+
+  const pid = projectPath ? (getProjectId(projectPath) ?? null) : null;
+
+  // Calibration status line.
+  const count = entities.getEntityDedupFeedbackCount(pid);
+  const threshold = entities.loadEntityCalibratedThreshold(pid);
+  if (threshold !== null) {
+    console.log(
+      `Using calibrated threshold ${threshold.toFixed(3)} (from ${count} feedback pairs, default: ${entities.ENTITY_EMBEDDING_DEDUP_THRESHOLD}).`,
+    );
+  } else if (count > 0) {
+    console.log(
+      `${count}/20 feedback samples collected. Threshold calibration activates after 20 samples.`,
+    );
+  }
+
+  // Interactive mode: compute dry-run, prompt per cluster.
+  if (interactive) {
+    const result = await entities.deduplicateEntities(projectPath, {
+      dryRun: true,
+    });
+    const clusters = [...result.merged, ...result.suggested];
+    if (!clusters.length) {
+      console.log("\nNo duplicate entities found.");
+      return;
+    }
+    let mergedCount = 0;
+    for (let i = 0; i < clusters.length; i++) {
+      const c = clusters[i];
+      console.log(`\nCluster ${i + 1} (${1 + c.merged.length} → 1):`);
+      console.log(
+        `  Keep: ${c.surviving.name} (${c.surviving.id.slice(0, 8)}…)`,
+      );
+      for (const m of c.merged) {
+        console.log(
+          `  Dup:  ${m.name} (${m.id.slice(0, 8)}…) [sim: ${m.similarity.toFixed(3)}]`,
+        );
+      }
+      const choice = await promptChoice(
+        "\n  [a]ccept merge / [r]eject (keep all) / [s]kip? ",
+        ["a", "r", "s"],
+      );
+      if (choice === "a") {
+        for (const m of c.merged) {
+          entities.merge(c.surviving.id, m.id);
+          entities.recordEntityDedupFeedback({
+            projectId: pid,
+            entryATitle: c.surviving.name,
+            entryBTitle: m.name,
+            similarity: m.similarity,
+            accepted: true,
+            source: "cli_interactive",
+          });
+          mergedCount++;
+        }
+      } else if (choice === "r") {
+        for (const m of c.merged) {
+          entities.recordEntityDedupFeedback({
+            projectId: pid,
+            entryATitle: c.surviving.name,
+            entryBTitle: m.name,
+            similarity: m.similarity,
+            accepted: false,
+            source: "cli_interactive",
+          });
+        }
+      }
+    }
+    console.log(
+      `\nMerged ${mergedCount} entit${mergedCount === 1 ? "y" : "ies"}.`,
+    );
+    const newThreshold = entities.calibrateEntityDedupThreshold(pid);
+    if (newThreshold !== null) {
+      const c = entities.getEntityDedupFeedbackCount(pid);
+      entities.saveEntityCalibratedThreshold(pid, newThreshold, c);
+      console.log(
+        `Threshold calibrated to ${newThreshold.toFixed(3)} (from ${c} feedback pairs).`,
+      );
+    }
+    return;
+  }
+
+  // Non-interactive: dry-run (default) or apply (--yes).
+  const result = await entities.deduplicateEntities(projectPath, {
+    dryRun: !apply,
+  });
+
+  if (asJson) {
+    console.log(
+      JSON.stringify(
+        {
+          merged: result.merged,
+          suggested: result.suggested,
+          applied: apply,
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+
+  if (!result.merged.length && !result.suggested.length) {
+    console.log("\nNo duplicate entities found.");
+    return;
+  }
+
+  printEntityClusters(
+    result.merged,
+    apply ? "Auto-merged:" : "Auto-merge candidates (use --yes to apply):",
+    apply,
+  );
+  printEntityClusters(
+    result.suggested,
+    "Suggestions (moderate confidence — review with `lore entity merge`):",
+    false,
+  );
+
+  if (apply) {
+    let mergedCount = 0;
+    for (const c of result.merged) {
+      for (const m of c.merged) {
+        entities.recordEntityDedupFeedback({
+          projectId: pid,
+          entryATitle: c.surviving.name,
+          entryBTitle: m.name,
+          similarity: m.similarity,
+          accepted: true,
+          source: "cli_yes",
+        });
+        mergedCount++;
+      }
+    }
+    console.log(
+      `\nMerged ${mergedCount} entit${mergedCount === 1 ? "y" : "ies"}.`,
+    );
+    const newThreshold = entities.calibrateEntityDedupThreshold(pid);
+    if (newThreshold !== null) {
+      const c = entities.getEntityDedupFeedbackCount(pid);
+      entities.saveEntityCalibratedThreshold(pid, newThreshold, c);
+      console.log(
+        `Threshold calibrated to ${newThreshold.toFixed(3)} (from ${c} feedback pairs).`,
+      );
+    }
+  } else {
+    console.log("\nRun with --yes to apply auto-merges.");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Help & dispatch
 // ---------------------------------------------------------------------------
 
@@ -553,6 +821,7 @@ Subcommands:
   relation add <a-id> <b-id> --relation <type>  Add a relation
   relation rm <relation-id>            Remove a relation
   merge <target-id> <source-id>        Merge two entities
+  dedup                                Find/merge duplicate entities
   search <query>                       Search entities
   delete <id>                          Delete an entity
 
@@ -561,11 +830,18 @@ Alias types: name, email, github, slack, phone, nickname, url, domain
 
 Options:
   --project <path>   Project path (default: cwd)
-  --all              List all entities (ignore project scope)
-  --json             Output as JSON (list only)
+  --all              All entities, ignore project scope (list, dedup)
+  --json             Output as JSON (list, dedup)
   --metadata <json>  JSON metadata (add, edit, relation add)
   --name <name>      New name (edit only)
   --cross            Cross-project flag (add, edit)
+  --yes, -y          Apply auto-merges (dedup)
+  --interactive, -i  Accept/reject each cluster (dedup)
+
+Examples:
+  lore entity dedup                    # dry-run: show duplicate clusters
+  lore entity dedup --yes              # apply: auto-merge high-confidence dupes
+  lore entity dedup --interactive      # decide per cluster
 `.trim();
 
 export async function commandEntity(
@@ -618,6 +894,9 @@ export async function commandEntity(
     }
     case "merge":
       await cmdMerge(subArgs, values);
+      break;
+    case "dedup":
+      await cmdDedup(subArgs, values);
       break;
     case "search":
       await cmdSearch(subArgs, values);

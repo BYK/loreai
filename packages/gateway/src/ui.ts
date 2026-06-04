@@ -10,10 +10,12 @@ import {
   db,
   ltm,
   entities,
+  embedding,
   temporal,
   searchRecall,
   recallById,
   config,
+  log,
   projectName,
   projectId as lookupProjectId,
   isUnattributedProjectPath,
@@ -2716,7 +2718,7 @@ function matchRoute(pathname: string, pattern: string): RouteParams | null {
 // Entities pages
 // ---------------------------------------------------------------------------
 
-function pageEntities(): string {
+async function pageEntities(): Promise<string> {
   const all = entities.listAll();
 
   let body = breadcrumb([
@@ -2728,6 +2730,46 @@ function pageEntities(): string {
   if (!all.length) {
     body += `<p class="empty">No entities found. Entities are created automatically when the curator detects recurring people, services, tools, and other named references in conversations.</p>`;
     return layout("Entities", body);
+  }
+
+  // Merge suggestions (#462): surface duplicate candidates as a dry-run banner.
+  // Only compute when embeddings are available (the primary signal); cheap for
+  // typical registry sizes. Non-fatal — failures just omit the section.
+  if (embedding.isAvailable() && all.length >= 2) {
+    try {
+      const dupes = await entities.deduplicateEntities(undefined, {
+        dryRun: true,
+      });
+      const clusters = [...dupes.merged, ...dupes.suggested];
+      if (clusters.length > 0) {
+        const pairCount = clusters.reduce((n, c) => n + c.merged.length, 0);
+        body += `<div class="banner" style="border:1px solid #d0a000;background:#fffbe6;padding:12px 16px;border-radius:6px;margin:12px 0;">`;
+        body += `<strong>${pairCount} possible duplicate ${pairCount === 1 ? "entity" : "entities"} found.</strong> Review and merge below, or run <code>lore entity dedup</code>.`;
+        body += `<div style="margin-top:10px;display:flex;flex-direction:column;gap:8px;">`;
+        const MAX_SUGGESTIONS = 25;
+        let shown = 0;
+        for (const c of clusters) {
+          for (const m of c.merged) {
+            if (shown >= MAX_SUGGESTIONS) break;
+            shown++;
+            body += `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">`;
+            body += `<span><a href="/ui/entities/${esc(m.id)}">${esc(truncate(m.name, 40))}</a> → <a href="/ui/entities/${esc(c.surviving.id)}">${esc(truncate(c.surviving.name, 40))}</a></span>`;
+            body += `<span class="muted" style="color:#888;">[sim: ${m.similarity.toFixed(3)}]</span>`;
+            body += `<form method="POST" action="/ui/api/merge/entity/${esc(c.surviving.id)}/${esc(m.id)}" style="display:inline;" onsubmit="return confirm('Merge &quot;${esc(m.name)}&quot; into &quot;${esc(c.surviving.name)}&quot;?');">`;
+            body += `<button type="submit" style="font-size:12px;padding:2px 8px;">Merge</button>`;
+            body += `</form>`;
+            body += `</div>`;
+          }
+          if (shown >= MAX_SUGGESTIONS) break;
+        }
+        if (pairCount > shown) {
+          body += `<span class="muted" style="color:#888;">…and ${pairCount - shown} more. Use <code>lore entity dedup</code>.</span>`;
+        }
+        body += `</div></div>`;
+      }
+    } catch (err) {
+      log.warn("entity dedup suggestions failed (non-fatal):", err);
+    }
   }
 
   // Type breakdown stats
@@ -2982,7 +3024,7 @@ export async function handleUIRequest(
 
     // Entity list
     if (pathname === "/ui/entities") {
-      return htmlResponse(pageEntities());
+      return htmlResponse(await pageEntities());
     }
 
     // Entity detail
@@ -3021,6 +3063,42 @@ export async function handleUIRequest(
     const delEntity = matchRoute(pathname, "/ui/api/delete/entity/:id");
     if (delEntity) {
       entities.remove(delEntity.id);
+      return redirect("/ui/entities");
+    }
+
+    // Merge entity (dedup suggestion): keep target, absorb source (#462)
+    const mergeEntity = matchRoute(
+      pathname,
+      "/ui/api/merge/entity/:targetId/:sourceId",
+    );
+    if (mergeEntity) {
+      const target = entities.get(mergeEntity.targetId);
+      const source = entities.get(mergeEntity.sourceId);
+      if (target && source && target.id !== source.id) {
+        entities.merge(target.id, source.id);
+        // Manual accept signal for adaptive threshold calibration.
+        try {
+          const pid = target.project_id ?? null;
+          entities.recordEntityDedupFeedback({
+            projectId: pid,
+            entryATitle: target.canonical_name,
+            entryBTitle: source.canonical_name,
+            similarity: 1,
+            accepted: true,
+            source: "cli_yes",
+          });
+          const newThreshold = entities.calibrateEntityDedupThreshold(pid);
+          if (newThreshold !== null) {
+            entities.saveEntityCalibratedThreshold(
+              pid,
+              newThreshold,
+              entities.getEntityDedupFeedbackCount(pid),
+            );
+          }
+        } catch (err) {
+          log.warn("entity merge feedback failed (non-fatal):", err);
+        }
+      }
       return redirect("/ui/entities");
     }
 
