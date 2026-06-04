@@ -6,21 +6,15 @@
  * cleanup, and consolidation cooldown removal.
  */
 import { describe, test, expect, beforeEach } from "bun:test";
-import {
-  resetPipelineState,
-} from "../src/pipeline";
+import { resetPipelineState } from "../src/pipeline";
 import {
   setSessionAuth,
   getSessionAuth,
   deleteSessionAuth,
   _resetAuthForTest,
 } from "../src/auth";
-import {
-  _resetForTest as resetCch,
-} from "../src/cch";
-import {
-  clearAllCosts,
-} from "../src/cost-tracker";
+import { _resetForTest as resetCch } from "../src/cch";
+import { clearAllCosts } from "../src/cost-tracker";
 import {
   evictSession as evictGradientSession,
   inspectSessionState,
@@ -143,17 +137,29 @@ describe("sessionEvictionTimeoutSeconds config", () => {
 describe("evictIdleSessions", () => {
   test("evicts sessions past the eviction timeout", () => {
     const sessions = new Map<string, SessionState>();
-    sessions.set("idle-sess", makeSessionState({
-      sessionID: "idle-sess",
-      lastRequestTime: Date.now() - 2_000_000, // ~33 min ago
-    }));
-    sessions.set("active-sess", makeSessionState({
-      sessionID: "active-sess",
-      lastRequestTime: Date.now() - 5_000, // 5 seconds ago
-    }));
+    sessions.set(
+      "idle-sess",
+      makeSessionState({
+        sessionID: "idle-sess",
+        lastRequestTime: Date.now() - 2_000_000, // ~33 min ago
+      }),
+    );
+    sessions.set(
+      "active-sess",
+      makeSessionState({
+        sessionID: "active-sess",
+        lastRequestTime: Date.now() - 5_000, // 5 seconds ago
+      }),
+    );
 
     const config = makeConfig({ sessionEvictionTimeoutSeconds: 1800 });
-    const evicted = evictIdleSessions(config, sessions, EMPTY_SET, EMPTY_SET, Date.now());
+    const evicted = evictIdleSessions(
+      config,
+      sessions,
+      EMPTY_SET,
+      EMPTY_SET,
+      Date.now(),
+    );
 
     expect(evicted).toBe(1);
     expect(sessions.has("idle-sess")).toBe(false);
@@ -162,20 +168,32 @@ describe("evictIdleSessions", () => {
 
   test("calls onEvict callback for each evicted session", () => {
     const sessions = new Map<string, SessionState>();
-    sessions.set("sess-a", makeSessionState({
-      sessionID: "sess-a",
-      lastRequestTime: Date.now() - 2_000_000,
-    }));
-    sessions.set("sess-b", makeSessionState({
-      sessionID: "sess-b",
-      lastRequestTime: Date.now() - 2_000_000,
-    }));
+    sessions.set(
+      "sess-a",
+      makeSessionState({
+        sessionID: "sess-a",
+        lastRequestTime: Date.now() - 2_000_000,
+      }),
+    );
+    sessions.set(
+      "sess-b",
+      makeSessionState({
+        sessionID: "sess-b",
+        lastRequestTime: Date.now() - 2_000_000,
+      }),
+    );
 
     const evictedIds: string[] = [];
     const config = makeConfig({ sessionEvictionTimeoutSeconds: 1800 });
     const evicted = evictIdleSessions(
-      config, sessions, EMPTY_SET, EMPTY_SET, Date.now(),
-      (sid) => { evictedIds.push(sid); },
+      config,
+      sessions,
+      EMPTY_SET,
+      EMPTY_SET,
+      Date.now(),
+      (sid) => {
+        evictedIds.push(sid);
+      },
     );
 
     expect(evicted).toBe(2);
@@ -189,10 +207,13 @@ describe("evictIdleSessions", () => {
     expect(getSessionAuth("auth-evict")).not.toBeNull();
 
     const sessions = new Map<string, SessionState>();
-    sessions.set("auth-evict", makeSessionState({
-      sessionID: "auth-evict",
-      lastRequestTime: Date.now() - 2_000_000,
-    }));
+    sessions.set(
+      "auth-evict",
+      makeSessionState({
+        sessionID: "auth-evict",
+        lastRequestTime: Date.now() - 2_000_000,
+      }),
+    );
 
     const config = makeConfig({ sessionEvictionTimeoutSeconds: 1800 });
     evictIdleSessions(config, sessions, EMPTY_SET, EMPTY_SET, Date.now());
@@ -207,10 +228,13 @@ describe("evictIdleSessions", () => {
     const curatorOriginal = curatorLimiter.get("limiter-evict");
 
     const sessions = new Map<string, SessionState>();
-    sessions.set("limiter-evict", makeSessionState({
-      sessionID: "limiter-evict",
-      lastRequestTime: Date.now() - 2_000_000,
-    }));
+    sessions.set(
+      "limiter-evict",
+      makeSessionState({
+        sessionID: "limiter-evict",
+        lastRequestTime: Date.now() - 2_000_000,
+      }),
+    );
 
     const config = makeConfig({ sessionEvictionTimeoutSeconds: 1800 });
     evictIdleSessions(config, sessions, EMPTY_SET, EMPTY_SET, Date.now());
@@ -222,41 +246,65 @@ describe("evictIdleSessions", () => {
 
   test("sub-agent sessions evict after 5 minutes", () => {
     const sessions = new Map<string, SessionState>();
-    sessions.set("subagent-old", makeSessionState({
-      sessionID: "subagent-old",
-      isSubagent: true,
-      lastRequestTime: Date.now() - 6 * 60 * 1000, // 6 min ago
-    }));
-    sessions.set("subagent-recent", makeSessionState({
-      sessionID: "subagent-recent",
-      isSubagent: true,
-      lastRequestTime: Date.now() - 3 * 60 * 1000, // 3 min ago
-    }));
-    sessions.set("regular-6min", makeSessionState({
-      sessionID: "regular-6min",
-      lastRequestTime: Date.now() - 6 * 60 * 1000, // 6 min ago — NOT evicted (< 30min)
-    }));
+    sessions.set(
+      "subagent-old",
+      makeSessionState({
+        sessionID: "subagent-old",
+        isSubagent: true,
+        lastRequestTime: Date.now() - 6 * 60 * 1000, // 6 min ago
+      }),
+    );
+    sessions.set(
+      "subagent-recent",
+      makeSessionState({
+        sessionID: "subagent-recent",
+        isSubagent: true,
+        lastRequestTime: Date.now() - 3 * 60 * 1000, // 3 min ago
+      }),
+    );
+    sessions.set(
+      "regular-6min",
+      makeSessionState({
+        sessionID: "regular-6min",
+        lastRequestTime: Date.now() - 6 * 60 * 1000, // 6 min ago — NOT evicted (< 30min)
+      }),
+    );
 
     const config = makeConfig({ sessionEvictionTimeoutSeconds: 1800 });
-    const evicted = evictIdleSessions(config, sessions, EMPTY_SET, EMPTY_SET, Date.now());
+    const evicted = evictIdleSessions(
+      config,
+      sessions,
+      EMPTY_SET,
+      EMPTY_SET,
+      Date.now(),
+    );
 
     expect(evicted).toBe(1);
-    expect(sessions.has("subagent-old")).toBe(false);    // 6min > 5min → evicted
-    expect(sessions.has("subagent-recent")).toBe(true);   // 3min < 5min → kept
-    expect(sessions.has("regular-6min")).toBe(true);       // 6min < 30min → kept
+    expect(sessions.has("subagent-old")).toBe(false); // 6min > 5min → evicted
+    expect(sessions.has("subagent-recent")).toBe(true); // 3min < 5min → kept
+    expect(sessions.has("regular-6min")).toBe(true); // 6min < 30min → kept
   });
 
   test("sub-agent timeout capped by configurable timeout when lower", () => {
     const sessions = new Map<string, SessionState>();
-    sessions.set("subagent", makeSessionState({
-      sessionID: "subagent",
-      isSubagent: true,
-      lastRequestTime: Date.now() - 3 * 60 * 1000, // 3 min ago
-    }));
+    sessions.set(
+      "subagent",
+      makeSessionState({
+        sessionID: "subagent",
+        isSubagent: true,
+        lastRequestTime: Date.now() - 3 * 60 * 1000, // 3 min ago
+      }),
+    );
 
     // Config timeout is 2 min — lower than the 5 min sub-agent constant
     const config = makeConfig({ sessionEvictionTimeoutSeconds: 120 });
-    const evicted = evictIdleSessions(config, sessions, EMPTY_SET, EMPTY_SET, Date.now());
+    const evicted = evictIdleSessions(
+      config,
+      sessions,
+      EMPTY_SET,
+      EMPTY_SET,
+      Date.now(),
+    );
 
     // 3 min > 2 min → evicted (Math.min picks the config value)
     expect(evicted).toBe(1);
@@ -265,13 +313,22 @@ describe("evictIdleSessions", () => {
 
   test("does not evict when timeout is 0 (disabled)", () => {
     const sessions = new Map<string, SessionState>();
-    sessions.set("old-sess", makeSessionState({
-      sessionID: "old-sess",
-      lastRequestTime: Date.now() - 999_999_999,
-    }));
+    sessions.set(
+      "old-sess",
+      makeSessionState({
+        sessionID: "old-sess",
+        lastRequestTime: Date.now() - 999_999_999,
+      }),
+    );
 
     const config = makeConfig({ sessionEvictionTimeoutSeconds: 0 });
-    const evicted = evictIdleSessions(config, sessions, EMPTY_SET, EMPTY_SET, Date.now());
+    const evicted = evictIdleSessions(
+      config,
+      sessions,
+      EMPTY_SET,
+      EMPTY_SET,
+      Date.now(),
+    );
 
     expect(evicted).toBe(0);
     expect(sessions.has("old-sess")).toBe(true);
@@ -279,14 +336,23 @@ describe("evictIdleSessions", () => {
 
   test("does not evict sessions with in-flight idle work", () => {
     const sessions = new Map<string, SessionState>();
-    sessions.set("busy-sess", makeSessionState({
-      sessionID: "busy-sess",
-      lastRequestTime: Date.now() - 2_000_000,
-    }));
+    sessions.set(
+      "busy-sess",
+      makeSessionState({
+        sessionID: "busy-sess",
+        lastRequestTime: Date.now() - 2_000_000,
+      }),
+    );
 
     const inProgress = new Set(["busy-sess"]);
     const config = makeConfig({ sessionEvictionTimeoutSeconds: 1800 });
-    const evicted = evictIdleSessions(config, sessions, inProgress, EMPTY_SET, Date.now());
+    const evicted = evictIdleSessions(
+      config,
+      sessions,
+      inProgress,
+      EMPTY_SET,
+      Date.now(),
+    );
 
     expect(evicted).toBe(0);
     expect(sessions.has("busy-sess")).toBe(true);
@@ -294,14 +360,23 @@ describe("evictIdleSessions", () => {
 
   test("does not evict sessions with in-flight warmup", () => {
     const sessions = new Map<string, SessionState>();
-    sessions.set("warming-sess", makeSessionState({
-      sessionID: "warming-sess",
-      lastRequestTime: Date.now() - 2_000_000,
-    }));
+    sessions.set(
+      "warming-sess",
+      makeSessionState({
+        sessionID: "warming-sess",
+        lastRequestTime: Date.now() - 2_000_000,
+      }),
+    );
 
     const warmupInProgress = new Set(["warming-sess"]);
     const config = makeConfig({ sessionEvictionTimeoutSeconds: 1800 });
-    const evicted = evictIdleSessions(config, sessions, EMPTY_SET, warmupInProgress, Date.now());
+    const evicted = evictIdleSessions(
+      config,
+      sessions,
+      EMPTY_SET,
+      warmupInProgress,
+      Date.now(),
+    );
 
     expect(evicted).toBe(0);
     expect(sessions.has("warming-sess")).toBe(true);
@@ -309,14 +384,23 @@ describe("evictIdleSessions", () => {
 
   test("does not evict sessions still executing tools", () => {
     const sessions = new Map<string, SessionState>();
-    sessions.set("tool-sess", makeSessionState({
-      sessionID: "tool-sess",
-      lastRequestTime: Date.now() - 2_000_000,
-      lastStopReason: "tool_use",
-    }));
+    sessions.set(
+      "tool-sess",
+      makeSessionState({
+        sessionID: "tool-sess",
+        lastRequestTime: Date.now() - 2_000_000,
+        lastStopReason: "tool_use",
+      }),
+    );
 
     const config = makeConfig({ sessionEvictionTimeoutSeconds: 1800 });
-    const evicted = evictIdleSessions(config, sessions, EMPTY_SET, EMPTY_SET, Date.now());
+    const evicted = evictIdleSessions(
+      config,
+      sessions,
+      EMPTY_SET,
+      EMPTY_SET,
+      Date.now(),
+    );
 
     expect(evicted).toBe(0);
     expect(sessions.has("tool-sess")).toBe(true);
@@ -325,18 +409,30 @@ describe("evictIdleSessions", () => {
   test("returns count of evicted sessions", () => {
     const sessions = new Map<string, SessionState>();
     for (let i = 0; i < 5; i++) {
-      sessions.set(`sess-${i}`, makeSessionState({
-        sessionID: `sess-${i}`,
-        lastRequestTime: Date.now() - 2_000_000,
-      }));
+      sessions.set(
+        `sess-${i}`,
+        makeSessionState({
+          sessionID: `sess-${i}`,
+          lastRequestTime: Date.now() - 2_000_000,
+        }),
+      );
     }
-    sessions.set("active", makeSessionState({
-      sessionID: "active",
-      lastRequestTime: Date.now(),
-    }));
+    sessions.set(
+      "active",
+      makeSessionState({
+        sessionID: "active",
+        lastRequestTime: Date.now(),
+      }),
+    );
 
     const config = makeConfig({ sessionEvictionTimeoutSeconds: 1800 });
-    const evicted = evictIdleSessions(config, sessions, EMPTY_SET, EMPTY_SET, Date.now());
+    const evicted = evictIdleSessions(
+      config,
+      sessions,
+      EMPTY_SET,
+      EMPTY_SET,
+      Date.now(),
+    );
 
     expect(evicted).toBe(5);
     expect(sessions.size).toBe(1);
@@ -360,7 +456,9 @@ describe("startIdleScheduler", () => {
     const sessions = new Map<string, SessionState>();
     const config = makeConfig();
     const stop = startIdleScheduler(
-      config, sessions, async () => {},
+      config,
+      sessions,
+      async () => {},
       (_sid) => {},
     );
     stop();

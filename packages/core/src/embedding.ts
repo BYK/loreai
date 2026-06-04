@@ -47,7 +47,7 @@ function safeLocalTruncate(text: string): string {
   if (text.length <= LOCAL_MAX_CHARS) return text;
   let end = LOCAL_MAX_CHARS;
   const code = text.charCodeAt(end - 1);
-  if (code >= 0xD800 && code <= 0xDBFF) end--; // don't split surrogate pair
+  if (code >= 0xd800 && code <= 0xdbff) end--; // don't split surrogate pair
   return text.slice(0, end);
 }
 
@@ -56,7 +56,10 @@ function safeLocalTruncate(text: string): string {
 // ---------------------------------------------------------------------------
 
 export interface EmbeddingProvider {
-  embed(texts: string[], inputType: "document" | "query"): Promise<Float32Array[]>;
+  embed(
+    texts: string[],
+    inputType: "document" | "query",
+  ): Promise<Float32Array[]>;
   readonly maxBatchSize: number;
 }
 
@@ -84,7 +87,10 @@ class VoyageProvider implements EmbeddingProvider {
     this.dimensions = dimensions;
   }
 
-  async embed(texts: string[], inputType: "document" | "query"): Promise<Float32Array[]> {
+  async embed(
+    texts: string[],
+    inputType: "document" | "query",
+  ): Promise<Float32Array[]> {
     const res = await fetch(VOYAGE_API_URL, {
       method: "POST",
       headers: {
@@ -135,7 +141,10 @@ class OpenAIProvider implements EmbeddingProvider {
     this.dimensions = dimensions;
   }
 
-  async embed(texts: string[], _inputType: "document" | "query"): Promise<Float32Array[]> {
+  async embed(
+    texts: string[],
+    _inputType: "document" | "query",
+  ): Promise<Float32Array[]> {
     const body: Record<string, unknown> = {
       input: texts,
       model: this.model,
@@ -183,7 +192,8 @@ export class LocalProviderUnavailableError extends Error {
         "set VOYAGE_API_KEY/OPENAI_API_KEY for automatic remote fallback.",
     );
     this.name = "LocalProviderUnavailableError";
-    if (cause !== undefined) (this as Error & { cause?: unknown }).cause = cause;
+    if (cause !== undefined)
+      (this as Error & { cause?: unknown }).cause = cause;
   }
 }
 
@@ -244,7 +254,10 @@ class LocalProvider implements EmbeddingProvider {
   private workerInitError: string | null = null;
   private pendingRequests = new Map<
     number,
-    { resolve: (vectors: Float32Array[]) => void; reject: (error: Error) => void }
+    {
+      resolve: (vectors: Float32Array[]) => void;
+      reject: (error: Error) => void;
+    }
   >();
   private nextRequestId = 0;
   private initPromise: Promise<void> | null = null;
@@ -263,7 +276,8 @@ class LocalProvider implements EmbeddingProvider {
    */
   private async ensureWorker(): Promise<void> {
     if (this.workerReady) return;
-    if (this.workerInitError) throw new LocalProviderUnavailableError(this.workerInitError);
+    if (this.workerInitError)
+      throw new LocalProviderUnavailableError(this.workerInitError);
     if (this.initPromise) return this.initPromise;
 
     this.initPromise = (async () => {
@@ -283,7 +297,8 @@ class LocalProvider implements EmbeddingProvider {
       //
       // In dev (Bun running .ts directly): embedding-worker.ts
       // In dist (esbuild bundle): embedding-worker.js
-      const vendorWorkerUrl = (globalThis as Record<string, unknown>).__LORE_VENDOR_WORKER_URL__ as string | undefined;
+      const vendorWorkerUrl = (globalThis as Record<string, unknown>)
+        .__LORE_VENDOR_WORKER_URL__ as string | undefined;
       let workerUrl: string | URL;
       if (vendorWorkerUrl) {
         if (process.platform === "win32") {
@@ -298,7 +313,8 @@ class LocalProvider implements EmbeddingProvider {
         // In CJS bundles (gateway npm package), esbuild shims import.meta as
         // an empty object {}, so import.meta.url is undefined. Fall back to
         // __filename which esbuild defines in CJS output.
-        const selfUrl = typeof import.meta.url === "string" ? import.meta.url : undefined;
+        const selfUrl =
+          typeof import.meta.url === "string" ? import.meta.url : undefined;
         if (selfUrl) {
           workerUrl = new URL(
             `./embedding-worker${selfUrl.endsWith(".ts") ? ".ts" : ".js"}`,
@@ -308,7 +324,10 @@ class LocalProvider implements EmbeddingProvider {
           // CJS fallback: __filename is defined by esbuild's CJS output.
           // The embedding-worker.cjs is built alongside the main bundle.
           const { pathToFileURL } = await import("node:url");
-          workerUrl = new URL("./embedding-worker.cjs", pathToFileURL(__filename));
+          workerUrl = new URL(
+            "./embedding-worker.cjs",
+            pathToFileURL(__filename),
+          );
         }
       }
 
@@ -316,9 +335,7 @@ class LocalProvider implements EmbeddingProvider {
       const workerInitData: WorkerInitData = {
         modelId: this.modelId,
         dimensions: this.dimensions,
-        vendorModel: vendor
-          ? { localModelPath: vendor.localModelPath }
-          : null,
+        vendorModel: vendor ? { localModelPath: vendor.localModelPath } : null,
       };
 
       this.worker = new Worker(workerUrl, { workerData: workerInitData });
@@ -343,7 +360,9 @@ class LocalProvider implements EmbeddingProvider {
             if (pending) {
               this.pendingRequests.delete(msg.id);
               this.updateWorkerRef();
-              pending.reject(new Error(`Worker embedding failed: ${msg.error}`));
+              pending.reject(
+                new Error(`Worker embedding failed: ${msg.error}`),
+              );
             }
             break;
           }
@@ -386,15 +405,14 @@ class LocalProvider implements EmbeddingProvider {
       this.worker.on("exit", (code) => {
         if (code !== 0 && !this.workerInitError) {
           this.workerInitError = `embedding worker exited with code ${code}`;
-          log.error(
-            this.workerInitError,
-            new Error(this.workerInitError),
-          );
+          log.error(this.workerInitError, new Error(this.workerInitError));
         }
         this.workerReady = false;
         for (const [, p] of this.pendingRequests) {
           p.reject(
-            new LocalProviderUnavailableError(this.workerInitError ?? "embedding worker exited"),
+            new LocalProviderUnavailableError(
+              this.workerInitError ?? "embedding worker exited",
+            ),
           );
         }
         this.pendingRequests.clear();
@@ -422,7 +440,10 @@ class LocalProvider implements EmbeddingProvider {
     }
   }
 
-  async embed(texts: string[], inputType: "document" | "query"): Promise<Float32Array[]> {
+  async embed(
+    texts: string[],
+    inputType: "document" | "query",
+  ): Promise<Float32Array[]> {
     await this.ensureWorker();
 
     // Pre-truncate texts that exceed the safe ONNX inference limit.
@@ -430,13 +451,15 @@ class LocalProvider implements EmbeddingProvider {
     const truncated = texts.map(safeLocalTruncate);
 
     // Prepend Nomic task instruction prefix.
-    const prefix = inputType === "document" ? "search_document: " : "search_query: ";
+    const prefix =
+      inputType === "document" ? "search_document: " : "search_query: ";
     const prefixed = truncated.map((t) => prefix + t);
 
     const id = this.nextRequestId++;
     // Recall queries (single query-type texts) get high priority so they
     // jump ahead of any queued backfill batches in the worker.
-    const priority = inputType === "query" && texts.length === 1 ? "high" : "normal";
+    const priority =
+      inputType === "query" && texts.length === 1 ? "high" : "normal";
 
     return new Promise<Float32Array[]>((resolve, reject) => {
       this.pendingRequests.set(id, { resolve, reject });
@@ -486,11 +509,12 @@ class LocalProvider implements EmbeddingProvider {
 // ---------------------------------------------------------------------------
 
 /** Default models per provider — used when config doesn't override. */
-const PROVIDER_DEFAULTS: Record<string, { model: string; dimensions: number }> = {
-  local: { model: "nomic-ai/nomic-embed-text-v1.5", dimensions: 768 },
-  voyage: { model: "voyage-code-3", dimensions: 1024 },
-  openai: { model: "text-embedding-3-small", dimensions: 1536 },
-};
+const PROVIDER_DEFAULTS: Record<string, { model: string; dimensions: number }> =
+  {
+    local: { model: "nomic-ai/nomic-embed-text-v1.5", dimensions: 768 },
+    voyage: { model: "voyage-code-3", dimensions: 1024 },
+    openai: { model: "text-embedding-3-small", dimensions: 1536 },
+  };
 
 /** Env var name for each provider's API key. */
 const PROVIDER_ENV_KEYS: Record<string, string> = {
@@ -600,7 +624,10 @@ export function _saveAndClearProvider(): unknown {
  *  ensure it's not a LocalProvider with a live worker — those suites only
  *  use `_markLocalProviderUnavailable()` so no worker is spawned). */
 export function _restoreProvider(token: unknown): void {
-  const saved = token as { provider: EmbeddingProvider | null | undefined; remoteFallbackLogged: boolean };
+  const saved = token as {
+    provider: EmbeddingProvider | null | undefined;
+    remoteFallbackLogged: boolean;
+  };
   cachedProvider = saved.provider;
   remoteFallbackLogged = saved.remoteFallbackLogged;
 }
@@ -671,7 +698,8 @@ export function pickRemoteFallback(): {
 export function isAvailable(): boolean {
   const provider = getProvider();
   if (!provider) return false;
-  if (provider instanceof LocalProvider && localProviderKnownUnavailable()) return false;
+  if (provider instanceof LocalProvider && localProviderKnownUnavailable())
+    return false;
   return true;
 }
 
@@ -782,7 +810,8 @@ export function vectorSearch(
   limit = 10,
   excludeCategories?: string[],
 ): VectorHit[] {
-  let sql = "SELECT id, embedding FROM knowledge WHERE embedding IS NOT NULL AND confidence > 0.2";
+  let sql =
+    "SELECT id, embedding FROM knowledge WHERE embedding IS NOT NULL AND confidence > 0.2";
   const params: string[] = [];
   if (excludeCategories?.length) {
     sql += ` AND category NOT IN (${excludeCategories.map(() => "?").join(",")})`;
@@ -867,7 +896,11 @@ export function vectorSearchAllDistillations(
     .query(
       "SELECT id, session_id, embedding FROM distillations WHERE embedding IS NOT NULL AND project_id = ? ORDER BY created_at DESC LIMIT ?",
     )
-    .all(projectId, MAX_DISTILLATION_VECTOR_ROWS) as Array<{ id: string; session_id: string; embedding: Buffer }>;
+    .all(projectId, MAX_DISTILLATION_VECTOR_ROWS) as Array<{
+    id: string;
+    session_id: string;
+    embedding: Buffer;
+  }>;
 
   const scored: DistillationVectorHit[] = [];
   for (const row of rows) {
@@ -912,10 +945,7 @@ export function embedKnowledgeEntry(
  * Fire-and-forget — errors are logged, never thrown.
  * The distillation remains searchable via FTS even if embedding fails.
  */
-export function embedDistillation(
-  id: string,
-  observations: string,
-): void {
+export function embedDistillation(id: string, observations: string): void {
   if (!isAvailable()) return;
   embed([observations], "document")
     .then(([vec]) => {
@@ -934,10 +964,7 @@ export function embedDistillation(
  * Only called for undistilled messages; once distilled, the embedding
  * is NULLed (semantic content captured by distillation embedding).
  */
-export function embedTemporalMessage(
-  id: string,
-  content: string,
-): void {
+export function embedTemporalMessage(id: string, content: string): void {
   if (!isAvailable()) return;
   // Skip very short messages — they don't carry enough semantic signal
   // to be useful in vector search and would waste embedding capacity.
@@ -1034,10 +1061,14 @@ export function checkConfigChange(): boolean {
       .query("SELECT COUNT(*) as n FROM knowledge WHERE embedding IS NOT NULL")
       .get() as { n: number };
     const distillCount = db()
-      .query("SELECT COUNT(*) as n FROM distillations WHERE embedding IS NOT NULL")
+      .query(
+        "SELECT COUNT(*) as n FROM distillations WHERE embedding IS NOT NULL",
+      )
       .get() as { n: number };
     const temporalCount = db()
-      .query("SELECT COUNT(*) as n FROM temporal_messages WHERE embedding IS NOT NULL")
+      .query(
+        "SELECT COUNT(*) as n FROM temporal_messages WHERE embedding IS NOT NULL",
+      )
       .get() as { n: number };
     const total = knowledgeCount.n + distillCount.n + temporalCount.n;
     if (total > 0) {
@@ -1152,7 +1183,9 @@ export async function runStartupBackfill(): Promise<void> {
 
   const parts: string[] = [];
   if (knowledgeEmbedded > 0 || distillationEmbedded > 0) {
-    parts.push(`backfilled ${knowledgeEmbedded} knowledge + ${distillationEmbedded} distillations`);
+    parts.push(
+      `backfilled ${knowledgeEmbedded} knowledge + ${distillationEmbedded} distillations`,
+    );
   }
   parts.push(
     `coverage: knowledge ${kWithEmb}/${kTotal}, distillations ${dWithEmb}/${dTotal}`,
@@ -1198,7 +1231,11 @@ function nextBatch<T extends { text: string }>(rows: T[], start: number): T[] {
   const batch: T[] = [];
   let maxTokens = 0;
 
-  for (let i = start; i < rows.length && batch.length < MAX_BACKFILL_CHUNK; i++) {
+  for (
+    let i = start;
+    i < rows.length && batch.length < MAX_BACKFILL_CHUNK;
+    i++
+  ) {
     const estTokens = Math.ceil(rows[i].text.length / CHARS_PER_TOKEN);
     const newMax = Math.max(maxTokens, estTokens);
     const newArea = (batch.length + 1) * newMax;
@@ -1227,7 +1264,9 @@ export async function backfillEmbeddings(): Promise<number> {
   if (!provider) return 0;
 
   const rows = db()
-    .query("SELECT id, title, content FROM knowledge WHERE embedding IS NULL AND confidence > 0.2")
+    .query(
+      "SELECT id, title, content FROM knowledge WHERE embedding IS NULL AND confidence > 0.2",
+    )
     .all() as Array<{ id: string; title: string; content: string }>;
 
   if (!rows.length) return 0;
@@ -1243,7 +1282,10 @@ export async function backfillEmbeddings(): Promise<number> {
     i += batch.length;
 
     try {
-      const vectors = await embed(batch.map((b) => b.text), "document");
+      const vectors = await embed(
+        batch.map((b) => b.text),
+        "document",
+      );
       const update = db().prepare(
         "UPDATE knowledge SET embedding = ? WHERE id = ?",
       );
@@ -1254,7 +1296,10 @@ export async function backfillEmbeddings(): Promise<number> {
       }
     } catch (err) {
       // log.error sends to Sentry via captureException
-      log.error(`embedding backfill batch failed (${batch.length} items):`, err);
+      log.error(
+        `embedding backfill batch failed (${batch.length} items):`,
+        err,
+      );
       // Provider is dead — no point retrying remaining batches.
       if (err instanceof LocalProviderUnavailableError) break;
     }
@@ -1305,7 +1350,10 @@ export async function backfillDistillationEmbeddings(): Promise<number> {
     i += batch.length;
 
     try {
-      const vectors = await embed(batch.map((b) => b.text), "document");
+      const vectors = await embed(
+        batch.map((b) => b.text),
+        "document",
+      );
       const update = db().prepare(
         "UPDATE distillations SET embedding = ? WHERE id = ?",
       );
@@ -1316,7 +1364,10 @@ export async function backfillDistillationEmbeddings(): Promise<number> {
       }
     } catch (err) {
       // log.error sends to Sentry via captureException
-      log.error(`distillation embedding backfill batch failed (${batch.length} items):`, err);
+      log.error(
+        `distillation embedding backfill batch failed (${batch.length} items):`,
+        err,
+      );
       // Provider is dead — no point retrying remaining batches.
       if (err instanceof LocalProviderUnavailableError) break;
     }

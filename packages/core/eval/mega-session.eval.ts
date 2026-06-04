@@ -5,8 +5,16 @@
  * No inflation needed — the session is already at mega-scale.
  */
 import { beforeAll, afterAll } from "vitest";
-import { describeEval, FactualityJudge, createJudgeHarness } from "vitest-evals";
-import { loreEvalHarness, replayAndWarmup, teardownGateway } from "./lore-harness";
+import {
+  describeEval,
+  FactualityJudge,
+  createJudgeHarness,
+} from "vitest-evals";
+import {
+  loreEvalHarness,
+  replayAndWarmup,
+  teardownGateway,
+} from "./lore-harness";
 
 // Load scenario
 const mod = await import("./scenarios/mega-session");
@@ -15,10 +23,13 @@ const scenario = mod.default;
 // Judge harness
 const judgeHarness = createJudgeHarness({
   run: async (input) => {
-    const { resolveBackend, createEvalLLMClient } = await import("./llm-backend");
+    const { resolveBackend, createEvalLLMClient } = await import(
+      "./llm-backend"
+    );
     const llm = createEvalLLMClient(resolveBackend());
     const result = await llm.prompt(
-      input.system ?? "You are an expert judge evaluating the accuracy of answers about past coding sessions.",
+      input.system ??
+        "You are an expert judge evaluating the accuracy of answers about past coding sessions.",
       input.prompt,
       { maxTokens: 1024, temperature: 0 },
     );
@@ -44,19 +55,23 @@ afterAll(async () => {
 // Tests: 20 questions across easy/medium/hard
 // ---------------------------------------------------------------------------
 
-describeEval("Mega CLI Refactor (2.3M tokens, Lore)", {
-  harness: loreEvalHarness,
-  judges: [factuality],
-  judgeThreshold: 0.6,
-}, (it) => {
-  for (const q of scenario.questions) {
-    it(q.id, async ({ run }) => {
-      await run(q.question, {
-        metadata: {
-          expected: q.referenceAnswer,
-          difficulty: q.metadata.difficulty,
-        },
+describeEval(
+  "Mega CLI Refactor (2.3M tokens, Lore)",
+  {
+    harness: loreEvalHarness,
+    judges: [factuality],
+    judgeThreshold: 0.6,
+  },
+  (it) => {
+    for (const q of scenario.questions) {
+      it(q.id, async ({ run }) => {
+        await run(q.question, {
+          metadata: {
+            expected: q.referenceAnswer,
+            difficulty: q.metadata.difficulty,
+          },
+        });
       });
-    });
-  }
-});
+    }
+  },
+);

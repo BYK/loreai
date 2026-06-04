@@ -164,7 +164,10 @@ function createZstdStreamReader(compressed: Uint8Array): BufferedStreamReader {
   // The double cast works around TypeScript's strict WritableStream<BufferSource>
   // vs WritableStream<Uint8Array> mismatch in DecompressionStream.
   const decompressed = input.pipeThrough(
-    new DecompressionStream("zstd" as "deflate") as unknown as TransformStream<Uint8Array, Uint8Array>,
+    new DecompressionStream("zstd" as "deflate") as unknown as TransformStream<
+      Uint8Array,
+      Uint8Array
+    >,
   );
 
   return new BufferedStreamReader(

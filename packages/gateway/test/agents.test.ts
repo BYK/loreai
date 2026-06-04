@@ -24,8 +24,13 @@ describe("Claude Code agent envVars", () => {
   });
 
   test("injects X-Lore-Project in ANTHROPIC_CUSTOM_HEADERS", () => {
-    const env = claude.envVars("http://127.0.0.1:3207", "/home/user/my-project");
-    expect(env.ANTHROPIC_CUSTOM_HEADERS).toContain("X-Lore-Project: /home/user/my-project");
+    const env = claude.envVars(
+      "http://127.0.0.1:3207",
+      "/home/user/my-project",
+    );
+    expect(env.ANTHROPIC_CUSTOM_HEADERS).toContain(
+      "X-Lore-Project: /home/user/my-project",
+    );
   });
 
   test("both X-Lore-Project and X-Lore-Git-Remote coexist when git remote is available", () => {
@@ -49,7 +54,10 @@ describe("Claude Code agent envVars", () => {
   });
 
   test("sets ANTHROPIC_BASE_URL", () => {
-    const env = claude.envVars("http://127.0.0.1:3207", "/home/user/my-project");
+    const env = claude.envVars(
+      "http://127.0.0.1:3207",
+      "/home/user/my-project",
+    );
     expect(env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:3207");
   });
 

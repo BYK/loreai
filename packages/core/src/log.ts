@@ -55,7 +55,9 @@ const isDebug = !!process.env.LORE_DEBUG;
 /** Format variadic args into a single string for the sink. */
 function formatArgs(args: unknown[]): string {
   return args
-    .map((a) => (typeof a === "string" ? a : a instanceof Error ? a.message : String(a)))
+    .map((a) =>
+      typeof a === "string" ? a : a instanceof Error ? a.message : String(a),
+    )
     .join(" ");
 }
 

@@ -21,8 +21,14 @@ beforeEach(() => {
   _resetAuthForTest();
 });
 
-const bearerCred: AuthCredential = { scheme: "bearer", value: "tok-session-abc" };
-const bearerCred2: AuthCredential = { scheme: "bearer", value: "tok-session-xyz" };
+const bearerCred: AuthCredential = {
+  scheme: "bearer",
+  value: "tok-session-abc",
+};
+const bearerCred2: AuthCredential = {
+  scheme: "bearer",
+  value: "tok-session-xyz",
+};
 const apiKeyCred: AuthCredential = { scheme: "api-key", value: "sk-test-key" };
 
 // ---------------------------------------------------------------------------

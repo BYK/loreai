@@ -29,7 +29,9 @@ describe("LoreConfig — agentsFile schema", () => {
   });
 
   test("agentsFile.path accepts nested paths", () => {
-    const cfg = LoreConfig.parse({ agentsFile: { path: ".cursor/rules/lore.md" } });
+    const cfg = LoreConfig.parse({
+      agentsFile: { path: ".cursor/rules/lore.md" },
+    });
     expect(cfg.agentsFile.path).toBe(".cursor/rules/lore.md");
   });
 

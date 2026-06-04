@@ -46,7 +46,13 @@ export async function accumulateResponsesSSEStream(
   const items = new Map<
     number,
     | { type: "text"; text: string }
-    | { type: "tool_use"; id: string; callId: string; name: string; args: string }
+    | {
+        type: "tool_use";
+        id: string;
+        callId: string;
+        name: string;
+        args: string;
+      }
   >();
 
   const reader = response.body!.getReader();
@@ -159,7 +165,9 @@ export async function accumulateResponsesSSEStream(
             if (typeof respUsage.output_tokens === "number") {
               usage.outputTokens = respUsage.output_tokens as number;
             }
-            const promptDetails = respUsage.prompt_tokens_details as Record<string, number> | undefined;
+            const promptDetails = respUsage.prompt_tokens_details as
+              | Record<string, number>
+              | undefined;
             if (promptDetails?.cached_tokens !== undefined) {
               usage.cacheReadInputTokens = promptDetails.cached_tokens;
             }
@@ -320,13 +328,9 @@ export function translateAnthropicStreamToResponses(
                 | Record<string, unknown>
                 | undefined;
               if (message) {
-                const rawId =
-                  typeof message.id === "string" ? message.id : "";
-                respId = rawId.startsWith("resp_")
-                  ? rawId
-                  : `resp_${rawId}`;
-                model =
-                  typeof message.model === "string" ? message.model : "";
+                const rawId = typeof message.id === "string" ? message.id : "";
+                respId = rawId.startsWith("resp_") ? rawId : `resp_${rawId}`;
+                model = typeof message.model === "string" ? message.model : "";
                 created = Math.floor(Date.now() / 1000);
               }
 
@@ -422,10 +426,8 @@ export function translateAnthropicStreamToResponses(
                   ),
                 );
               } else if (block.type === "tool_use") {
-                const callId =
-                  typeof block.id === "string" ? block.id : "";
-                const name =
-                  typeof block.name === "string" ? block.name : "";
+                const callId = typeof block.id === "string" ? block.id : "";
+                const name = typeof block.name === "string" ? block.name : "";
                 const itemId = `fc_${callId}`;
                 outputItems.set(index, {
                   kind: "tool_use",
@@ -462,9 +464,7 @@ export function translateAnthropicStreamToResponses(
               const index = parsed.index as number;
               if (typeof index !== "number") break;
 
-              const delta = parsed.delta as
-                | Record<string, unknown>
-                | undefined;
+              const delta = parsed.delta as Record<string, unknown> | undefined;
               if (!delta || typeof delta.type !== "string") break;
 
               const item = outputItems.get(index);
@@ -648,8 +648,7 @@ export function translateAnthropicStreamToResponses(
               const usageData: Record<string, unknown> = {
                 input_tokens: resp.usage.inputTokens,
                 output_tokens: resp.usage.outputTokens,
-                total_tokens:
-                  resp.usage.inputTokens + resp.usage.outputTokens,
+                total_tokens: resp.usage.inputTokens + resp.usage.outputTokens,
               };
               if (resp.usage.cacheReadInputTokens != null) {
                 usageData.prompt_tokens_details = {
@@ -680,10 +679,7 @@ export function translateAnthropicStreamToResponses(
           }
         }
       } catch (err) {
-        console.error(
-          "[lore] openai-responses stream translation error:",
-          err,
-        );
+        console.error("[lore] openai-responses stream translation error:", err);
         // Emit a response.failed event so clients don't hang waiting
         try {
           controller.enqueue(
@@ -700,7 +696,10 @@ export function translateAnthropicStreamToResponses(
                   usage: null,
                   error: {
                     type: "server_error",
-                    message: err instanceof Error ? err.message : "upstream stream error",
+                    message:
+                      err instanceof Error
+                        ? err.message
+                        : "upstream stream error",
                   },
                 },
               }),

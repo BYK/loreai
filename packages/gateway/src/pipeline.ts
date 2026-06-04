@@ -72,7 +72,14 @@ import type {
 } from "./translate/types";
 import { blocksToText } from "./translate/types";
 import type { GatewayConfig } from "./config";
-import { getProjectPath, extractGitRemoteHeader, resolveUpstreamRoute, extractUpstreamUrlHeader, unattributedBucketPath, type ProjectPathResult } from "./config";
+import {
+  getProjectPath,
+  extractGitRemoteHeader,
+  resolveUpstreamRoute,
+  extractUpstreamUrlHeader,
+  unattributedBucketPath,
+  type ProjectPathResult,
+} from "./config";
 import {
   generateSessionID,
   fingerprintMessages,
@@ -102,12 +109,8 @@ import {
   buildOpenAIUpstreamRequest,
   buildOpenAIResponse,
 } from "./translate/openai";
-import {
-  buildOpenAIResponsesUpstreamRequest,
-} from "./translate/openai-responses";
-import {
-  accumulateResponsesSSEStream,
-} from "./stream/openai-responses";
+import { buildOpenAIResponsesUpstreamRequest } from "./translate/openai-responses";
+import { accumulateResponsesSSEStream } from "./stream/openai-responses";
 import {
   createStreamAccumulator,
   createRecallAwareAccumulator,
@@ -124,7 +127,11 @@ import {
 } from "./temporal-adapter";
 import { createGatewayLLMClient } from "./llm-adapter";
 import { createBatchLLMClient } from "./batch-queue";
-import { runBackground, resetBackgroundLimiter, isBackgroundPaused } from "./background-limiter";
+import {
+  runBackground,
+  resetBackgroundLimiter,
+  isBackgroundPaused,
+} from "./background-limiter";
 import {
   extractAuth,
   authFingerprint,
@@ -135,9 +142,19 @@ import {
 } from "./auth";
 import type { UpstreamInterceptor } from "./recorder";
 import { startIdleScheduler, buildIdleWorkHandler } from "./idle";
-import { getWorkerModel, resetWorkerModelState, fetchModelData, getModelEntrySync } from "./worker-model";
+import {
+  getWorkerModel,
+  resetWorkerModelState,
+  fetchModelData,
+  getModelEntrySync,
+} from "./worker-model";
 import * as Sentry from "@sentry/bun";
-import { captureBillingPrefix, captureSessionHeaders, hasBillingHeader, resignBody } from "./cch";
+import {
+  captureBillingPrefix,
+  captureSessionHeaders,
+  hasBillingHeader,
+  resignBody,
+} from "./cch";
 import { detectClientType } from "./session";
 import { analyzeCacheTurn, categorizeBust } from "./cache-analytics";
 import {
@@ -148,16 +165,16 @@ import {
   clearWarmupAuthDisabled,
 } from "./cache-warmer";
 import {
-   setSentryRequestContext,
-   setSentryCacheContext,
-   setSentryLightContext,
-   setGenAiUsageAttributes,
-   setCacheAnalyticsAttributes,
-     emitCostMetric,
-     emitCacheBustMetric,
-     emitWarmupHitMetric,
-     emitCurationMetrics,
-     type AnthropicUsage,
+  setSentryRequestContext,
+  setSentryCacheContext,
+  setSentryLightContext,
+  setGenAiUsageAttributes,
+  setCacheAnalyticsAttributes,
+  emitCostMetric,
+  emitCacheBustMetric,
+  emitWarmupHitMetric,
+  emitCurationMetrics,
+  type AnthropicUsage,
 } from "./sentry";
 import {
   recordConversationCost,
@@ -216,11 +233,17 @@ function injectContextWarning(resp: GatewayResponse): GatewayResponse {
   // (thinking first, then text). Clients may inspect the first block's type
   // to determine if extended thinking is active.
   let insertIdx = 0;
-  while (insertIdx < resp.content.length && resp.content[insertIdx].type === "thinking") {
+  while (
+    insertIdx < resp.content.length &&
+    resp.content[insertIdx].type === "thinking"
+  ) {
     insertIdx++;
   }
   const content = [...resp.content];
-  content.splice(insertIdx, 0, { type: "text" as const, text: CONTEXT_WARNING_TEXT });
+  content.splice(insertIdx, 0, {
+    type: "text" as const,
+    text: CONTEXT_WARNING_TEXT,
+  });
   return { ...resp, content };
 }
 
@@ -240,7 +263,10 @@ function stripContextWarnings(messages: GatewayMessage[]): void {
     for (let i = 0; i < msg.content.length; i++) {
       const block = msg.content[i];
       if (block.type === "thinking") continue;
-      if (block.type === "text" && block.text.startsWith(CONTEXT_WARNING_MARKER)) {
+      if (
+        block.type === "text" &&
+        block.text.startsWith(CONTEXT_WARNING_MARKER)
+      ) {
         msg.content.splice(i, 1);
       }
       break; // only check the first non-thinking block
@@ -262,7 +288,10 @@ function containsGitCommit(req: GatewayRequest): boolean {
       if (block.type === "tool_use") {
         const input = block.input;
         if (typeof input === "object" && input !== null) {
-          const cmd = (input as Record<string, unknown>).command ?? (input as Record<string, unknown>).content ?? "";
+          const cmd =
+            (input as Record<string, unknown>).command ??
+            (input as Record<string, unknown>).content ??
+            "";
           if (typeof cmd === "string" && GIT_COMMIT_RE.test(cmd)) return true;
         }
       }
@@ -311,7 +340,9 @@ export async function resetPipelineState(): Promise<void> {
   stableLtmCache.clear();
   // Shut down batch queue gracefully before clearing the client
   if (llmClient && "shutdown" in llmClient) {
-    await (llmClient as LLMClient & { shutdown: () => Promise<void> }).shutdown();
+    await (
+      llmClient as LLMClient & { shutdown: () => Promise<void> }
+    ).shutdown();
   }
   llmClient = null;
   activeInterceptor = undefined;
@@ -431,9 +462,9 @@ function textDiffRatio(a: string, b: string): number {
 function ltmDiffThreshold(inputCostPerMillion?: number): number {
   const base = 0.05;
   const cost = inputCostPerMillion ?? 3;
-  if (cost >= 5) return Math.min(base * 3, 0.20);   // opus: 15%
-  if (cost >= 1) return Math.min(base * 2, 0.15);   // sonnet: 10%
-  return base;                                        // haiku: 5%
+  if (cost >= 5) return Math.min(base * 3, 0.2); // opus: 15%
+  if (cost >= 1) return Math.min(base * 2, 0.15); // sonnet: 10%
+  return base; // haiku: 5%
 }
 
 /** Cached LLM client for background workers. */
@@ -478,14 +509,16 @@ function getModelSpec(model: string): ModelSpec {
   return {
     context: entry.limit?.context ?? DEFAULT_MODEL_SPEC.context,
     output: entry.limit?.output ?? DEFAULT_MODEL_SPEC.output,
-    cacheReadCost: entry.cost?.cache_read != null
-      ? entry.cost.cache_read / 1_000_000  // models.dev is per-million, we need per-token
-      : undefined,
-    cacheWriteCost: entry.cost?.cache_write != null
-      ? entry.cost.cache_write / 1_000_000
-      : entry.cost?.input != null
-        ? (entry.cost.input * 1.25) / 1_000_000  // Anthropic: cache_write = 1.25× input
+    cacheReadCost:
+      entry.cost?.cache_read != null
+        ? entry.cost.cache_read / 1_000_000 // models.dev is per-million, we need per-token
         : undefined,
+    cacheWriteCost:
+      entry.cost?.cache_write != null
+        ? entry.cost.cache_write / 1_000_000
+        : entry.cost?.input != null
+          ? (entry.cost.input * 1.25) / 1_000_000 // Anthropic: cache_write = 1.25× input
+          : undefined,
     inputCostPerMillion: entry.cost?.input ?? undefined,
   };
 }
@@ -528,7 +561,10 @@ export function computeMaxTokens(
   );
 
   // History: 3× recent output EMA — generous multiplier to absorb spikes
-  let adaptive = Math.max(MAX_TOKENS_FLOOR, MAX_TOKENS_EMA_MULTIPLIER * outputEMA);
+  let adaptive = Math.max(
+    MAX_TOKENS_FLOOR,
+    MAX_TOKENS_EMA_MULTIPLIER * outputEMA,
+  );
 
   // Safety: if last turn was truncated, jump to ceiling
   if (lastStopReason === "length") {
@@ -644,7 +680,14 @@ function startKnowledgeFileWatcher(projectPath: string): () => void {
   // Each sub-project gets its own debounce timer so concurrent edits across
   // sub-projects don't cancel each other's pending imports.
   const allTimers: Array<{ clear: () => void }> = [
-    { clear: () => { if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; } } },
+    {
+      clear: () => {
+        if (debounceTimer) {
+          clearTimeout(debounceTimer);
+          debounceTimer = null;
+        }
+      },
+    },
   ];
   if (cfg.workspaces.length > 0) {
     const subDirs = resolveWorkspaces(projectPath, cfg.workspaces);
@@ -660,13 +703,23 @@ function startKnowledgeFileWatcher(projectPath: string): () => void {
               try {
                 importLoreFileAs(subDir, projectPath);
               } catch (e) {
-                log.error(`workspace knowledge re-import error (${subDir}):`, e);
+                log.error(
+                  `workspace knowledge re-import error (${subDir}):`,
+                  e,
+                );
               }
             }, DEBOUNCE_MS);
           });
           w.on("error", () => {});
           watchers.push(w);
-          allTimers.push({ clear: () => { if (subTimer) { clearTimeout(subTimer); subTimer = null; } } });
+          allTimers.push({
+            clear: () => {
+              if (subTimer) {
+                clearTimeout(subTimer);
+                subTimer = null;
+              }
+            },
+          });
         } catch {
           // watch not supported
         }
@@ -681,7 +734,11 @@ function startKnowledgeFileWatcher(projectPath: string): () => void {
   return () => {
     for (const t of allTimers) t.clear();
     for (const w of watchers) {
-      try { w.close(); } catch { /* already closed */ }
+      try {
+        w.close();
+      } catch {
+        /* already closed */
+      }
     }
     watchers.length = 0;
   };
@@ -695,7 +752,11 @@ function startKnowledgeFileWatcher(projectPath: string): () => void {
  * One-time init: load Lore config, ensure project exists in DB, start idle scheduler.
  * Safe to call multiple times — only the first call does work.
  */
-async function initIfNeeded(projectPath: string, config: GatewayConfig, gitRemote?: string): Promise<void> {
+async function initIfNeeded(
+  projectPath: string,
+  config: GatewayConfig,
+  gitRemote?: string,
+): Promise<void> {
   if (initialized) return;
 
   // Enable hosted mode before any FS operations — once set, all core
@@ -735,7 +796,9 @@ async function initIfNeeded(projectPath: string, config: GatewayConfig, gitRemot
     // Prune corrupted/oversized knowledge entries (safety net for past bugs).
     const pruned = ltm.pruneOversized(1200);
     if (pruned > 0) {
-      log.info(`pruned ${pruned} oversized knowledge entries (confidence set to 0)`);
+      log.info(
+        `pruned ${pruned} oversized knowledge entries (confidence set to 0)`,
+      );
     }
 
     // Watch knowledge files for live changes (git pull, manual edits, etc.)
@@ -772,7 +835,9 @@ async function initIfNeeded(projectPath: string, config: GatewayConfig, gitRemot
       headerSessionIndex.set(indexKey, entry.sessionId);
     }
     if (headerEntries.length > 0) {
-      log.info(`restored ${headerEntries.length} header→session mappings from DB`);
+      log.info(
+        `restored ${headerEntries.length} header→session mappings from DB`,
+      );
     }
   } catch (e) {
     log.warn("header session index restore failed:", e);
@@ -788,18 +853,23 @@ async function initIfNeeded(projectPath: string, config: GatewayConfig, gitRemot
   if (config && !stopIdleScheduler) {
     const llm = getLLMClient(config);
     const idleHandler = buildIdleWorkHandler(llm);
-    stopIdleScheduler = startIdleScheduler(config, sessions, idleHandler, (sessionID) => {
-      // Clean up pipeline-level satellite Maps on session eviction.
-      // The headerSessionIndex entries are keyed by header values pointing
-      // TO this sessionID — remove them too.
-      for (const [key, sid] of headerSessionIndex) {
-        if (sid === sessionID) headerSessionIndex.delete(key);
-      }
-      ltmSessionCache.delete(sessionID);
-      ltmPinnedText.delete(sessionID);
-      stableLtmCache.delete(sessionID);
-      cwdWarned.delete(sessionID);
-    });
+    stopIdleScheduler = startIdleScheduler(
+      config,
+      sessions,
+      idleHandler,
+      (sessionID) => {
+        // Clean up pipeline-level satellite Maps on session eviction.
+        // The headerSessionIndex entries are keyed by header values pointing
+        // TO this sessionID — remove them too.
+        for (const [key, sid] of headerSessionIndex) {
+          if (sid === sessionID) headerSessionIndex.delete(key);
+        }
+        ltmSessionCache.delete(sessionID);
+        ltmPinnedText.delete(sessionID);
+        stableLtmCache.delete(sessionID);
+        cwdWarned.delete(sessionID);
+      },
+    );
   }
 
   log.info(`gateway pipeline initialized: ${projectPath}`);
@@ -831,8 +901,8 @@ function getLLMClient(config: GatewayConfig): LLMClient {
     if (config.workerApiKey || config.workerUpstream) {
       log.info(
         `worker routing: ` +
-        `auth=${config.workerApiKey ? "dedicated key" : "session"}, ` +
-        `upstream=${config.workerUpstream ?? "default"}`,
+          `auth=${config.workerApiKey ? "dedicated key" : "session"}, ` +
+          `upstream=${config.workerUpstream ?? "default"}`,
       );
     }
 
@@ -907,7 +977,8 @@ export function resolveSessionProjectPath(
     sessionState.gitRemote = result.gitRemote;
   }
 
-  const hasConfident = !!sessionState.projectPath && !sessionState.projectPathProvisional;
+  const hasConfident =
+    !!sessionState.projectPath && !sessionState.projectPathProvisional;
   // Best git remote we know for this session — the current turn's, falling back
   // to a value cached on an earlier turn (the header is independent of path
   // resolution, so it can arrive on a turn that otherwise lacks a path).
@@ -927,7 +998,11 @@ export function resolveSessionProjectPath(
     // lets the next confident turn re-attempt.
     let healed = true;
     if (wasProvisional && previous && previous !== projectPath) {
-      healed = reattributeProvisionalProject(previous, projectPath, effectiveRemote);
+      healed = reattributeProvisionalProject(
+        previous,
+        projectPath,
+        effectiveRemote,
+      );
     }
 
     sessionState.projectPath = projectPath;
@@ -1013,7 +1088,10 @@ function reattributeProvisionalProject(
     );
     return true;
   } catch (e) {
-    log.warn(`self-heal re-attribution failed (${fromPath} → ${toPath}); will retry on next confident turn:`, e);
+    log.warn(
+      `self-heal re-attribution failed (${fromPath} → ${toPath}); will retry on next confident turn:`,
+      e,
+    );
     return false;
   }
 }
@@ -1069,13 +1147,15 @@ function getOrCreateSession(
     // Restore cache warming state (v24) — preserves earned TTL tier
     if (persisted?.resolvedConversationTTL) {
       const ttl = persisted.resolvedConversationTTL;
-      state.resolvedConversationTTL = (ttl === "5m" || ttl === "1h") ? ttl : "5m";
+      state.resolvedConversationTTL = ttl === "5m" || ttl === "1h" ? ttl : "5m";
     }
     if (persisted?.warmupState) {
       try {
         state.warmup = JSON.parse(persisted.warmupState);
       } catch {
-        log.warn(`corrupt warmup state for session ${sessionID.slice(0, 16)}, starting fresh`);
+        log.warn(
+          `corrupt warmup state for session ${sessionID.slice(0, 16)}, starting fresh`,
+        );
       }
     }
 
@@ -1163,7 +1243,9 @@ function messageText(msg: GatewayMessage): string {
  *
  * Scans the last user message only (the marker is appended each turn).
  */
-export function extractSessionMarker(messages: GatewayMessage[]): string | undefined {
+export function extractSessionMarker(
+  messages: GatewayMessage[],
+): string | undefined {
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].role !== "user") continue;
     const match = messageText(messages[i]).match(LORE_SESSION_MARKER_RE);
@@ -1181,14 +1263,17 @@ export function extractSessionMarker(messages: GatewayMessage[]): string | undef
  *
  * Returns `undefined` when no marker is found or the path is invalid.
  */
-export function extractProjectMarker(messages: GatewayMessage[]): string | undefined {
+export function extractProjectMarker(
+  messages: GatewayMessage[],
+): string | undefined {
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].role !== "user") continue;
     const match = messageText(messages[i]).match(LORE_PROJECT_MARKER_RE);
     if (match?.[1]) {
       // Strip control characters (same as extractProjectHeader in config.ts)
       const sanitized = match[1].replace(/[\x00-\x1f\x7f]/g, "").trim();
-      if (!sanitized || sanitized.length > MAX_MARKER_PROJECT_PATH_LENGTH) return undefined;
+      if (!sanitized || sanitized.length > MAX_MARKER_PROJECT_PATH_LENGTH)
+        return undefined;
       // Must be an absolute path
       if (!sanitized.startsWith("/")) return undefined;
       // Reject path traversal
@@ -1301,7 +1386,8 @@ async function identifySession(
           isSubagent: persisted.isSubagent,
           // lastTurnAt=0 means gradient never ran yet — session is new,
           // treat as recently active (not infinitely stale).
-          lastActiveAt: persisted.lastTurnAt > 0 ? persisted.lastTurnAt : Date.now(),
+          lastActiveAt:
+            persisted.lastTurnAt > 0 ? persisted.lastTurnAt : Date.now(),
         };
       },
     );
@@ -1482,9 +1568,15 @@ async function forwardToUpstream(
     // OpenAI paths receive a single system string, so we concatenate here.
     const ltmParts = [cache?.stableLtmSystem, cache?.ltmSystem].filter(Boolean);
     const reqWithLtm = ltmParts.length
-      ? { ...req, system: [req.system, ...ltmParts].filter(Boolean).join("\n\n") }
+      ? {
+          ...req,
+          system: [req.system, ...ltmParts].filter(Boolean).join("\n\n"),
+        }
       : req;
-    const result = buildOpenAIResponsesUpstreamRequest(reqWithLtm, effectiveUpstreamBase);
+    const result = buildOpenAIResponsesUpstreamRequest(
+      reqWithLtm,
+      effectiveUpstreamBase,
+    );
     url = result.url;
     headers = result.headers;
     body = result.body;
@@ -1492,9 +1584,15 @@ async function forwardToUpstream(
     // Inject LTM into system prompt (see comment above for openai-responses).
     const ltmParts = [cache?.stableLtmSystem, cache?.ltmSystem].filter(Boolean);
     const reqWithLtm = ltmParts.length
-      ? { ...req, system: [req.system, ...ltmParts].filter(Boolean).join("\n\n") }
+      ? {
+          ...req,
+          system: [req.system, ...ltmParts].filter(Boolean).join("\n\n"),
+        }
       : req;
-    const result = buildOpenAIUpstreamRequest(reqWithLtm, effectiveUpstreamBase);
+    const result = buildOpenAIUpstreamRequest(
+      reqWithLtm,
+      effectiveUpstreamBase,
+    );
     url = result.url;
     headers = result.headers;
     body = result.body;
@@ -1514,8 +1612,9 @@ async function forwardToUpstream(
   // billing headers and re-signs with our known seed + version.
   if (effectiveProtocol === "anthropic") {
     const firstUserMsg = req.messages.find((m) => m.role === "user");
-    const firstUserText =
-      firstUserMsg?.content.find((b) => b.type === "text" && "text" in b);
+    const firstUserText = firstUserMsg?.content.find(
+      (b) => b.type === "text" && "text" in b,
+    );
     serializedBody = resignBody(
       serializedBody,
       (firstUserText as { text: string } | undefined)?.text ?? "",
@@ -1645,7 +1744,9 @@ function buildStreamingResponse(
                     if (!safeEnqueue(encoder.encode(forwarded))) break;
                     continue;
                   }
-                } catch { /* fall through to inject */ }
+                } catch {
+                  /* fall through to inject */
+                }
               }
               if (inThinking) {
                 if (event === "content_block_stop") inThinking = false;
@@ -1654,9 +1755,20 @@ function buildStreamingResponse(
               }
 
               // First non-thinking content block — inject warning before it
-              const blockStart = JSON.stringify({ type: "content_block_start", index: warningBlockIndex, content_block: { type: "text", text: "" } });
-              const blockDelta = JSON.stringify({ type: "content_block_delta", index: warningBlockIndex, delta: { type: "text_delta", text: warningText } });
-              const blockStop = JSON.stringify({ type: "content_block_stop", index: warningBlockIndex });
+              const blockStart = JSON.stringify({
+                type: "content_block_start",
+                index: warningBlockIndex,
+                content_block: { type: "text", text: "" },
+              });
+              const blockDelta = JSON.stringify({
+                type: "content_block_delta",
+                index: warningBlockIndex,
+                delta: { type: "text_delta", text: warningText },
+              });
+              const blockStop = JSON.stringify({
+                type: "content_block_stop",
+                index: warningBlockIndex,
+              });
               const warningSSE =
                 `event: content_block_start\ndata: ${blockStart}\n\n` +
                 `event: content_block_delta\ndata: ${blockDelta}\n\n` +
@@ -1669,16 +1781,21 @@ function buildStreamingResponse(
             // Offset content block indices to account for the injected warning block
             let toSend = forwarded;
             if (warningOffset > 0 && warningEmitted) {
-              toSend = forwarded.replace(/^(data: )(.+)$/m, (_, prefix, jsonStr) => {
-                try {
-                  const obj = JSON.parse(jsonStr);
-                  if (typeof obj.index === "number") {
-                    obj.index += warningOffset;
-                    return prefix + JSON.stringify(obj);
+              toSend = forwarded.replace(
+                /^(data: )(.+)$/m,
+                (_, prefix, jsonStr) => {
+                  try {
+                    const obj = JSON.parse(jsonStr);
+                    if (typeof obj.index === "number") {
+                      obj.index += warningOffset;
+                      return prefix + JSON.stringify(obj);
+                    }
+                  } catch {
+                    /* not JSON — leave as-is */
                   }
-                } catch { /* not JSON — leave as-is */ }
-                return prefix + jsonStr;
-              });
+                  return prefix + jsonStr;
+                },
+              );
             }
             if (!safeEnqueue(encoder.encode(toSend))) break;
           }
@@ -1722,22 +1839,32 @@ function buildStreamingResponse(
 
             // Emit marker text block in place of the suppressed recall block
             const markerText = buildRecallMarker(input.query, scope, input.id);
-            const markerIdx = currentAccum.clientBlockCount() + currentBlockOffset;
+            const markerIdx =
+              currentAccum.clientBlockCount() + currentBlockOffset;
             const syntheticMarker = [
-              formatSSEEvent("content_block_start", JSON.stringify({
-                type: "content_block_start",
-                index: markerIdx,
-                content_block: { type: "text", text: "" },
-              })),
-              formatSSEEvent("content_block_delta", JSON.stringify({
-                type: "content_block_delta",
-                index: markerIdx,
-                delta: { type: "text_delta", text: markerText },
-              })),
-              formatSSEEvent("content_block_stop", JSON.stringify({
-                type: "content_block_stop",
-                index: markerIdx,
-              })),
+              formatSSEEvent(
+                "content_block_start",
+                JSON.stringify({
+                  type: "content_block_start",
+                  index: markerIdx,
+                  content_block: { type: "text", text: "" },
+                }),
+              ),
+              formatSSEEvent(
+                "content_block_delta",
+                JSON.stringify({
+                  type: "content_block_delta",
+                  index: markerIdx,
+                  delta: { type: "text_delta", text: markerText },
+                }),
+              ),
+              formatSSEEvent(
+                "content_block_stop",
+                JSON.stringify({
+                  type: "content_block_stop",
+                  index: markerIdx,
+                }),
+              ),
             ].join("");
             if (!safeEnqueue(encoder.encode(syntheticMarker))) return;
 
@@ -1806,7 +1933,9 @@ function buildStreamingResponse(
               const errorBody = await followUpResponse.text();
               log.error(
                 `recall follow-up upstream error: ${followUpResponse.status} ${errorBody.slice(0, 500)}`,
-                new Error(`recall follow-up upstream ${followUpResponse.status}`),
+                new Error(
+                  `recall follow-up upstream ${followUpResponse.status}`,
+                ),
               );
               const heldBack = currentAccum.heldBackEvents();
               if (heldBack) {
@@ -1820,7 +1949,8 @@ function buildStreamingResponse(
 
             // Pipe the continuation stream through a recall-aware accumulator.
             // +1 accounts for the synthetic marker block just emitted.
-            const contBlockOffset = currentAccum.clientBlockCount() + currentBlockOffset + 1;
+            const contBlockOffset =
+              currentAccum.clientBlockCount() + currentBlockOffset + 1;
             const contAccum = createRecallAwareAccumulator(RECALL_TOOL_NAME, {
               blockOffset: contBlockOffset,
               suppressMessageStart: true,
@@ -1828,7 +1958,10 @@ function buildStreamingResponse(
             const contReader = followUpResponse.body!.getReader();
             activeReader = contReader;
 
-            for await (const { event: contEvent, data: contData } of parseSSEStream(contReader)) {
+            for await (const {
+              event: contEvent,
+              data: contData,
+            } of parseSSEStream(contReader)) {
               const forwarded = contAccum.processEvent(contEvent, contData);
               if (forwarded) {
                 // Forward non-recall, non-held-back events to client.
@@ -1854,7 +1987,9 @@ function buildStreamingResponse(
 
             // No more recall (or depth exhausted) — forward terminal events, close
             if (contAccum.hasRecall()) {
-              log.warn(`recall depth exhausted (${MAX_RECALL_DEPTH}) in streaming path`);
+              log.warn(
+                `recall depth exhausted (${MAX_RECALL_DEPTH}) in streaming path`,
+              );
             }
 
             const heldBack = contAccum.heldBackEvents();
@@ -1887,7 +2022,11 @@ function buildStreamingResponse(
     },
     cancel() {
       cancelled = true;
-      try { activeReader?.cancel(); } catch { /* ignore */ }
+      try {
+        activeReader?.cancel();
+      } catch {
+        /* ignore */
+      }
     },
   });
 
@@ -1928,7 +2067,9 @@ async function accumulateNonStreamResponse(
 // Anthropic non-stream JSON → GatewayResponse: use shared parseAnthropicResponseJSON
 const accumulateAnthropicNonStreamJSON = parseAnthropicResponseJSON;
 
-function accumulateOpenAINonStreamJSON(json: Record<string, unknown>): GatewayResponse {
+function accumulateOpenAINonStreamJSON(
+  json: Record<string, unknown>,
+): GatewayResponse {
   const content: GatewayContentBlock[] = [];
   const choices = json.choices as Array<Record<string, unknown>> | undefined;
   const firstChoice = choices?.[0];
@@ -1939,13 +2080,19 @@ function accumulateOpenAINonStreamJSON(json: Record<string, unknown>): GatewayRe
     if (textContent) {
       content.push({ type: "text", text: textContent });
     }
-    const toolCalls = message.tool_calls as Array<Record<string, unknown>> | undefined;
+    const toolCalls = message.tool_calls as
+      | Array<Record<string, unknown>>
+      | undefined;
     if (toolCalls) {
       for (const tc of toolCalls) {
         const fn = tc.function as Record<string, unknown> | undefined;
         let input: unknown = {};
         if (typeof fn?.arguments === "string") {
-          try { input = JSON.parse(fn.arguments as string); } catch { input = fn.arguments; }
+          try {
+            input = JSON.parse(fn.arguments as string);
+          } catch {
+            input = fn.arguments;
+          }
         }
         content.push({
           type: "tool_use",
@@ -1965,7 +2112,9 @@ function accumulateOpenAINonStreamJSON(json: Record<string, unknown>): GatewayRe
   else if (finishReason === "tool_calls") stopReason = "tool_use";
 
   const usage = json.usage as Record<string, unknown> | undefined;
-  const promptTokensDetails = usage?.prompt_tokens_details as Record<string, number> | undefined;
+  const promptTokensDetails = usage?.prompt_tokens_details as
+    | Record<string, number>
+    | undefined;
 
   return {
     id: String(json.id ?? ""),
@@ -1980,14 +2129,18 @@ function accumulateOpenAINonStreamJSON(json: Record<string, unknown>): GatewayRe
   };
 }
 
-export function accumulateResponsesNonStreamJSON(json: Record<string, unknown>): GatewayResponse {
+export function accumulateResponsesNonStreamJSON(
+  json: Record<string, unknown>,
+): GatewayResponse {
   const content: GatewayContentBlock[] = [];
   const output = json.output as Array<Record<string, unknown>> | undefined;
 
   if (output) {
     for (const item of output) {
       if (item.type === "message") {
-        const msgContent = item.content as Array<Record<string, unknown>> | undefined;
+        const msgContent = item.content as
+          | Array<Record<string, unknown>>
+          | undefined;
         if (msgContent) {
           for (const part of msgContent) {
             if (part.type === "output_text") {
@@ -1998,7 +2151,11 @@ export function accumulateResponsesNonStreamJSON(json: Record<string, unknown>):
       } else if (item.type === "function_call") {
         let input: unknown = {};
         if (typeof item.arguments === "string") {
-          try { input = JSON.parse(item.arguments as string); } catch { input = item.arguments; }
+          try {
+            input = JSON.parse(item.arguments as string);
+          } catch {
+            input = item.arguments;
+          }
         }
         content.push({
           type: "tool_use",
@@ -2014,12 +2171,14 @@ export function accumulateResponsesNonStreamJSON(json: Record<string, unknown>):
   const status = json.status as string | undefined;
   let stopReason = "end_turn";
   if (status === "incomplete") stopReason = "max_tokens";
-  if (content.some(b => b.type === "tool_use") && stopReason === "end_turn") {
+  if (content.some((b) => b.type === "tool_use") && stopReason === "end_turn") {
     stopReason = "tool_use";
   }
 
   const usage = json.usage as Record<string, unknown> | undefined;
-  const promptTokensDetails = usage?.prompt_tokens_details as Record<string, number> | undefined;
+  const promptTokensDetails = usage?.prompt_tokens_details as
+    | Record<string, number>
+    | undefined;
 
   return {
     id: String(json.id ?? ""),
@@ -2067,7 +2226,10 @@ async function accumulateNonStreamOpenAIStream(
   let model = "";
   let stopReason = "end_turn";
   let textContent = "";
-  const toolCalls = new Map<number, { id: string; name: string; args: string }>();
+  const toolCalls = new Map<
+    number,
+    { id: string; name: string; args: string }
+  >();
   let inputTokens = 0;
   let outputTokens = 0;
   let cachedTokens: number | undefined;
@@ -2087,7 +2249,9 @@ async function accumulateNonStreamOpenAIStream(
     if (typeof parsed.id === "string") id = parsed.id;
     if (typeof parsed.model === "string") model = parsed.model;
 
-    const choices = parsed.choices as Array<Record<string, unknown>> | undefined;
+    const choices = parsed.choices as
+      | Array<Record<string, unknown>>
+      | undefined;
     const firstChoice = choices?.[0];
     if (firstChoice) {
       const delta = firstChoice.delta as Record<string, unknown> | undefined;
@@ -2095,7 +2259,9 @@ async function accumulateNonStreamOpenAIStream(
         if (typeof delta.content === "string") {
           textContent += delta.content;
         }
-        const tcs = delta.tool_calls as Array<Record<string, unknown>> | undefined;
+        const tcs = delta.tool_calls as
+          | Array<Record<string, unknown>>
+          | undefined;
         if (tcs) {
           for (const tc of tcs) {
             const idx = tc.index as number;
@@ -2124,10 +2290,15 @@ async function accumulateNonStreamOpenAIStream(
     // Usage is typically in the final chunk
     const usage = parsed.usage as Record<string, unknown> | undefined;
     if (usage) {
-      if (typeof usage.prompt_tokens === "number") inputTokens = usage.prompt_tokens as number;
-      if (typeof usage.completion_tokens === "number") outputTokens = usage.completion_tokens as number;
-      const details = usage.prompt_tokens_details as Record<string, number> | undefined;
-      if (details?.cached_tokens !== undefined) cachedTokens = details.cached_tokens;
+      if (typeof usage.prompt_tokens === "number")
+        inputTokens = usage.prompt_tokens as number;
+      if (typeof usage.completion_tokens === "number")
+        outputTokens = usage.completion_tokens as number;
+      const details = usage.prompt_tokens_details as
+        | Record<string, number>
+        | undefined;
+      if (details?.cached_tokens !== undefined)
+        cachedTokens = details.cached_tokens;
     }
   }
 
@@ -2135,10 +2306,16 @@ async function accumulateNonStreamOpenAIStream(
   if (textContent) {
     content.push({ type: "text", text: textContent });
   }
-  for (const [, tc] of Array.from(toolCalls.entries()).sort(([a], [b]) => a - b)) {
+  for (const [, tc] of Array.from(toolCalls.entries()).sort(
+    ([a], [b]) => a - b,
+  )) {
     let input: unknown = {};
     if (tc.args) {
-      try { input = JSON.parse(tc.args); } catch { input = tc.args; }
+      try {
+        input = JSON.parse(tc.args);
+      } catch {
+        input = tc.args;
+      }
     }
     content.push({ type: "tool_use", id: tc.id, name: tc.name, input });
   }
@@ -2239,11 +2416,7 @@ function postResponse(
       (resp.usage.inputTokens ?? 0) +
       (resp.usage.cacheReadInputTokens ?? 0) +
       (resp.usage.cacheCreationInputTokens ?? 0);
-    calibrate(
-      actualInput,
-      sessionID,
-      getLastTransformedCount(sessionID),
-    );
+    calibrate(actualInput, sessionID, getLastTransformedCount(sessionID));
 
     // --- Sentry cache context + cost metric ---
     setSentryCacheContext(resp.usage);
@@ -2253,8 +2426,18 @@ function postResponse(
       cache_read_input_tokens: resp.usage.cacheReadInputTokens,
       cache_creation_input_tokens: resp.usage.cacheCreationInputTokens,
     };
-    emitCostMetric(resp.model, usageForSentry, "conversation", sessionState.resolvedConversationTTL);
-    recordConversationCost(sessionID, resp.model, usageForSentry, sessionState.resolvedConversationTTL);
+    emitCostMetric(
+      resp.model,
+      usageForSentry,
+      "conversation",
+      sessionState.resolvedConversationTTL,
+    );
+    recordConversationCost(
+      sessionID,
+      resp.model,
+      usageForSentry,
+      sessionState.resolvedConversationTTL,
+    );
     if (genAiSpan) {
       setGenAiUsageAttributes(genAiSpan, usageForSentry, resp.model);
     }
@@ -2264,7 +2447,10 @@ function postResponse(
     // divergence diagnostics (divergence point, prefix match, bust cause).
     if (requestBody) {
       const turnAnalysis = analyzeCacheTurn(
-        sessionState.cacheAnalytics, requestBody, resp.usage, sessionID,
+        sessionState.cacheAnalytics,
+        requestBody,
+        resp.usage,
+        sessionID,
         sessionState.messageCount,
       );
       const bustCause = categorizeBust(
@@ -2273,8 +2459,11 @@ function postResponse(
       );
       if (genAiSpan) {
         setCacheAnalyticsAttributes(
-          genAiSpan, turnAnalysis, bustCause,
-          turnAnalysis.prevSnippet, turnAnalysis.currSnippet,
+          genAiSpan,
+          turnAnalysis,
+          bustCause,
+          turnAnalysis.prevSnippet,
+          turnAnalysis.currSnippet,
         );
       }
       emitCacheBustMetric(
@@ -2324,7 +2513,8 @@ function postResponse(
     // Note: tool-call outcomes for a tool_use seeded during a no-store turn are
     // intentionally dropped — the seed row never exists, so the later
     // tool_result UPDATE is a harmless no-op (no phantom 'pending' rows leak).
-    const noStore = sessionState.amnesia || req.rawHeaders["x-lore-no-store"] === "true";
+    const noStore =
+      sessionState.amnesia || req.rawHeaders["x-lore-no-store"] === "true";
     if (!noStore) {
       // Store the latest user message BEFORE resolveToolResults — we want the
       // original content (including tool_result text), not the placeholder
@@ -2447,7 +2637,8 @@ function postResponse(
       // A warmup can only benefit the FIRST turn after it fires — clear
       // lastWarmupAt unconditionally so subsequent turns are not attributed.
       if (sessionState.warmup?.lastWarmupAt) {
-        const ttlMs = sessionState.resolvedConversationTTL === "1h" ? 3_600_000 : 300_000;
+        const ttlMs =
+          sessionState.resolvedConversationTTL === "1h" ? 3_600_000 : 300_000;
         const sinceWarmup = now - sessionState.warmup.lastWarmupAt;
         sessionState.warmup.lastWarmupAt = 0;
         if (sinceWarmup < ttlMs) {
@@ -2511,7 +2702,10 @@ function postResponse(
           `cache-warmer: re-enabled session=${sessionID.slice(0, 16)} (user resumed)`,
         );
       }
-      if (sessionState.warmup.warmupCount > 0 && !sessionState.warmup.forceKeepWarm) {
+      if (
+        sessionState.warmup.warmupCount > 0 &&
+        !sessionState.warmup.forceKeepWarm
+      ) {
         sessionState.warmup.warmupCount = 0;
       }
     }
@@ -2520,7 +2714,14 @@ function postResponse(
     // Track how large the context *would* be without Lore's distillation
     // compressing it. When the shadow counter crosses the auto-compact
     // threshold, record a counterfactual compaction event.
-    updateShadowContext(sessionID, actualInput, resp.usage.outputTokens ?? 0, getWorkerModel()?.modelID ?? "unknown", req.model, sessionState.resolvedConversationTTL);
+    updateShadowContext(
+      sessionID,
+      actualInput,
+      resp.usage.outputTokens ?? 0,
+      getWorkerModel()?.modelID ?? "unknown",
+      req.model,
+      sessionState.resolvedConversationTTL,
+    );
 
     // Mark session dirty for periodic flush (gradient + warming + costs).
     // The 30s idle tick will persist state only for dirty sessions.
@@ -2530,14 +2731,22 @@ function postResponse(
     // Git commits are natural task boundaries where decisions crystallize.
     // When a commit is detected in tool outputs, force curation to trigger
     // on this turn by bumping turnsSinceCuration to the threshold.
-    if (loreConfig().knowledge.enabled && loreConfig().curator.onIdle && containsGitCommit(req)) {
-      const modelInputCost = getModelEntrySync(
-        getWorkerModel()?.modelID ?? "unknown",
-      ).cost?.input ?? 3;
-      const curationMultiplier = modelInputCost >= 5 ? 3 : modelInputCost >= 1 ? 2 : 1;
-      const effectiveAfterTurns = loreConfig().curator.afterTurns * curationMultiplier;
+    if (
+      loreConfig().knowledge.enabled &&
+      loreConfig().curator.onIdle &&
+      containsGitCommit(req)
+    ) {
+      const modelInputCost =
+        getModelEntrySync(getWorkerModel()?.modelID ?? "unknown").cost?.input ??
+        3;
+      const curationMultiplier =
+        modelInputCost >= 5 ? 3 : modelInputCost >= 1 ? 2 : 1;
+      const effectiveAfterTurns =
+        loreConfig().curator.afterTurns * curationMultiplier;
       if (sessionState.turnsSinceCuration < effectiveAfterTurns) {
-        log.info(`commit detected in session ${sessionID.slice(0, 16)} — triggering curation`);
+        log.info(
+          `commit detected in session ${sessionID.slice(0, 16)} — triggering curation`,
+        );
         sessionState.turnsSinceCuration = effectiveAfterTurns;
       }
     }
@@ -2582,7 +2791,8 @@ function scheduleBackgroundWork(
   if (needsUrgentDistillation(sessionState.sessionID)) {
     const busts = getConsecutiveBusts(sessionState.sessionID);
     const lowered = computeMetaThreshold(busts, cfg.distillation.metaThreshold);
-    const metaThresholdOverride = lowered < cfg.distillation.metaThreshold ? lowered : undefined;
+    const metaThresholdOverride =
+      lowered < cfg.distillation.metaThreshold ? lowered : undefined;
     distillation
       .run({
         llm,
@@ -2608,7 +2818,15 @@ function scheduleBackgroundWork(
         `incremental distillation: ${pendingTokens} undistilled tokens in ${sessionID.slice(0, 16)}`,
       );
       runBackground(
-        () => distillation.run({ llm, projectPath, sessionID, model, skipMeta: true, callType: batchQueueEnabled ? "batch" : "direct" }),
+        () =>
+          distillation.run({
+            llm,
+            projectPath,
+            sessionID,
+            model,
+            skipMeta: true,
+            callType: batchQueueEnabled ? "batch" : "direct",
+          }),
         `incremental-distill session=${sessionID.slice(0, 16)}`,
       ).catch((e) => log.error("background distillation failed:", e));
     }
@@ -2622,10 +2840,10 @@ function scheduleBackgroundWork(
   // Quota-paused accounts skip curation too (non-urgent background work).
   if (isBackgroundPaused() || quotaPaused) return;
 
-  const modelInputCost = getModelEntrySync(
-    getWorkerModel()?.modelID ?? "unknown",
-  ).cost?.input ?? 3;
-  const curationMultiplier = modelInputCost >= 5 ? 3 : modelInputCost >= 1 ? 2 : 1;
+  const modelInputCost =
+    getModelEntrySync(getWorkerModel()?.modelID ?? "unknown").cost?.input ?? 3;
+  const curationMultiplier =
+    modelInputCost >= 5 ? 3 : modelInputCost >= 1 ? 2 : 1;
   const effectiveAfterTurns = cfg.curator.afterTurns * curationMultiplier;
 
   if (
@@ -2634,10 +2852,15 @@ function scheduleBackgroundWork(
     sessionState.turnsSinceCuration >= effectiveAfterTurns
   ) {
     runBackground(
-      () => Sentry.startSpan(
-        { name: "lore.curator", op: "lore.curation", attributes: { trigger: "in-flight" } },
-        () => curator.run({ llm, projectPath, sessionID, model }),
-      ),
+      () =>
+        Sentry.startSpan(
+          {
+            name: "lore.curator",
+            op: "lore.curation",
+            attributes: { trigger: "in-flight" },
+          },
+          () => curator.run({ llm, projectPath, sessionID, model }),
+        ),
       `in-flight-curation session=${sessionID.slice(0, 16)}`,
     )
       .then((result) => {
@@ -2647,7 +2870,10 @@ function scheduleBackgroundWork(
         if (result.created > 0 || result.updated > 0 || result.deleted > 0) {
           // Invalidate LTM cache only when curation actually changed entries
           ltmSessionCache.delete(sessionID);
-          saveSessionTracking(sessionID, { ltmCacheText: null, ltmCacheTokens: null });
+          saveSessionTracking(sessionID, {
+            ltmCacheText: null,
+            ltmCacheTokens: null,
+          });
           log.info(
             `curation: ${result.created} created, ${result.updated} updated, ${result.deleted} deleted`,
           );
@@ -2739,7 +2965,10 @@ export async function generateCompactionSummary(opts: {
     : compactPrompt;
 
   const compactInputTokens = Math.ceil(userContent.length / 3);
-  const compactMaxTokens = Math.max(2048, Math.min(Math.ceil(compactInputTokens * 0.5), 20_000));
+  const compactMaxTokens = Math.max(
+    2048,
+    Math.min(Math.ceil(compactInputTokens * 0.5), 20_000),
+  );
   const summaryText = await llm.prompt(compactPrompt, userContent, {
     model: getWorkerModel(),
     workerID: "lore-compact",
@@ -2767,8 +2996,16 @@ async function handleCompaction(
 
   const { sessionID } = await identifySession(req, pathResult.path);
   stripContextMarkers(req.messages);
-  const sessionState = getOrCreateSession(sessionID, pathResult.path, pathResult.source);
-  const projectPath = resolveSessionProjectPath(pathResult, sessionState, config);
+  const sessionState = getOrCreateSession(
+    sessionID,
+    pathResult.path,
+    pathResult.source,
+  );
+  const projectPath = resolveSessionProjectPath(
+    pathResult,
+    sessionState,
+    config,
+  );
 
   // Initialize the project AFTER path correction so we never create a row for
   // the gateway's cwd / an unattributed bucket from a path-less probe request.
@@ -2831,7 +3068,10 @@ export async function handleCompactEndpoint(
     body = (await req.json()) as typeof body;
   } catch {
     return new Response(
-      JSON.stringify({ error: "invalid_request", message: "Invalid JSON body" }),
+      JSON.stringify({
+        error: "invalid_request",
+        message: "Invalid JSON body",
+      }),
       { status: 400, headers: { "content-type": "application/json" } },
     );
   }
@@ -2839,7 +3079,10 @@ export async function handleCompactEndpoint(
   const projectPath = body.project_path;
   if (!projectPath || typeof projectPath !== "string") {
     return new Response(
-      JSON.stringify({ error: "invalid_request", message: "project_path is required" }),
+      JSON.stringify({
+        error: "invalid_request",
+        message: "project_path is required",
+      }),
       { status: 400, headers: { "content-type": "application/json" } },
     );
   }
@@ -2877,23 +3120,27 @@ export async function handleCompactEndpoint(
     return new Response(
       JSON.stringify({
         error: "session_not_found",
-        message: "No active session found for the given headers. " +
+        message:
+          "No active session found for the given headers. " +
           "Ensure at least one conversation turn has been routed through the gateway.",
       }),
       { status: 404, headers: { "content-type": "application/json" } },
     );
   }
 
-  log.info(`compact endpoint: generating summary for session ${sessionID.slice(0, 16)}`);
+  log.info(
+    `compact endpoint: generating summary for session ${sessionID.slice(0, 16)}`,
+  );
 
   try {
     const summary = await generateCompactionSummary({
       projectPath,
       sessionID,
       config,
-      previousSummary: typeof body.previous_summary === "string"
-        ? body.previous_summary
-        : undefined,
+      previousSummary:
+        typeof body.previous_summary === "string"
+          ? body.previous_summary
+          : undefined,
     });
 
     if (summary == null) {
@@ -2901,7 +3148,10 @@ export async function handleCompactEndpoint(
         `compact endpoint: summary generation failed for session ${sessionID.slice(0, 16)} — returning 502`,
       );
       return new Response(
-        JSON.stringify({ error: "compaction_failed", message: "Summary generation failed (worker model unavailable)" }),
+        JSON.stringify({
+          error: "compaction_failed",
+          message: "Summary generation failed (worker model unavailable)",
+        }),
         { status: 502, headers: { "content-type": "application/json" } },
       );
     }
@@ -2913,10 +3163,10 @@ export async function handleCompactEndpoint(
       sessionState.cacheAnalytics.lastRequestBody = null;
     }
 
-    return new Response(
-      JSON.stringify({ summary }),
-      { status: 200, headers: { "content-type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ summary }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Compaction failed";
     log.error("compact endpoint error:", err);
@@ -2945,8 +3195,7 @@ async function handlePassthrough(
       status: upstreamResponse.status,
       headers: {
         "content-type":
-          upstreamResponse.headers.get("content-type") ??
-          "text/event-stream",
+          upstreamResponse.headers.get("content-type") ?? "text/event-stream",
       },
     });
   }
@@ -2988,10 +3237,10 @@ function isCacheWarm(state: SessionState): boolean {
   // safety margin while still expiring if the warmer has stopped
   // (e.g. circuit breaker tripped, process-level failure).
   if (warmup.forceKeepWarm) {
-    return (Date.now() - warmup.lastWarmupAt) < profile.ttlMs * 2;
+    return Date.now() - warmup.lastWarmupAt < profile.ttlMs * 2;
   }
 
-  return (Date.now() - warmup.lastWarmupAt) < profile.ttlMs;
+  return Date.now() - warmup.lastWarmupAt < profile.ttlMs;
 }
 
 // ---------------------------------------------------------------------------
@@ -3019,15 +3268,26 @@ async function handleConversationTurn(
   }
 
   // --- 3. Session identification ---
-  const { sessionID, isNew, tier } = await identifySession(req, pathResult.path);
+  const { sessionID, isNew, tier } = await identifySession(
+    req,
+    pathResult.path,
+  );
 
   // Strip [lore:session-id=...] and [lore:project=...] context markers from
   // user messages so they are not forwarded to the upstream LLM, stored in
   // temporal storage, or visible to the model.
   stripContextMarkers(req.messages);
 
-  const sessionState = getOrCreateSession(sessionID, pathResult.path, pathResult.source);
-  const projectPath = resolveSessionProjectPath(pathResult, sessionState, config);
+  const sessionState = getOrCreateSession(
+    sessionID,
+    pathResult.path,
+    pathResult.source,
+  );
+  const projectPath = resolveSessionProjectPath(
+    pathResult,
+    sessionState,
+    config,
+  );
 
   // Initialize the project AFTER path correction so a path-less probe request
   // never creates a project row for the gateway's cwd or an unattributed
@@ -3042,7 +3302,10 @@ async function handleConversationTurn(
   // and a warning is logged.
   {
     const parentClientId = req.rawHeaders["x-parent-session-id"];
-    if (parentClientId && (!sessionState.isSubagent || !sessionState.parentSessionId)) {
+    if (
+      parentClientId &&
+      (!sessionState.isSubagent || !sessionState.parentSessionId)
+    ) {
       if (!sessionState.isSubagent) {
         sessionState.isSubagent = true;
       }
@@ -3108,7 +3371,10 @@ async function handleConversationTurn(
     // avoids branching. For Tier 3 (fingerprinted) new sessions,
     // this seeds the first round of candidate collection.
     if (!sessionState.headerSessionId) {
-      const result = learnHeaders(sessionState.candidateHeaders, req.rawHeaders);
+      const result = learnHeaders(
+        sessionState.candidateHeaders,
+        req.rawHeaders,
+      );
       sessionState.candidateHeaders = result.updatedCandidates;
     }
 
@@ -3151,7 +3417,11 @@ async function handleConversationTurn(
     authFingerprint: cred ? authFingerprint(cred) : null,
     sessionID,
     model: req.model,
-    upstreamUrl: resolveUpstreamRoute(req.model)?.url ?? (req.protocol === "anthropic" ? config.upstreamAnthropic : config.upstreamOpenAI),
+    upstreamUrl:
+      resolveUpstreamRoute(req.model)?.url ??
+      (req.protocol === "anthropic"
+        ? config.upstreamAnthropic
+        : config.upstreamOpenAI),
     port: config.port,
     projectPath,
   });
@@ -3162,9 +3432,7 @@ async function handleConversationTurn(
   if (sessionState.recallStore.size > 0) {
     const expanded = expandRecallMarkers(req, sessionState.recallStore);
     if (expanded) {
-      log.info(
-        `expanded recall markers for session ${sessionID.slice(0, 16)}`,
-      );
+      log.info(`expanded recall markers for session ${sessionID.slice(0, 16)}`);
     }
     // Clean up orphaned store entries (markers evicted by gradient)
     cleanupRecallStore(req, sessionState.recallStore);
@@ -3190,20 +3458,26 @@ async function handleConversationTurn(
   const cfg = loreConfig();
   if (cfg.budget.maxLayer0Tokens !== undefined) {
     setMaxLayer0Tokens(cfg.budget.maxLayer0Tokens);
-  } else if (modelSpec.cacheReadCost && cfg.budget.targetCacheReadCostPerTurn > 0) {
-    setMaxLayer0Tokens(computeLayer0Cap(
-      cfg.budget.targetCacheReadCostPerTurn,
-      modelSpec.cacheReadCost,
-    ));
+  } else if (
+    modelSpec.cacheReadCost &&
+    cfg.budget.targetCacheReadCostPerTurn > 0
+  ) {
+    setMaxLayer0Tokens(
+      computeLayer0Cap(
+        cfg.budget.targetCacheReadCostPerTurn,
+        modelSpec.cacheReadCost,
+      ),
+    );
   }
 
   // Set cache pricing for tier-based bust-vs-continue decisions in gradient.ts.
   // Anthropic charges 2× cache_write for 1h TTL — adjust so shouldCompress()
   // uses the actual write cost when deciding whether to bust the cache.
   if (modelSpec.cacheWriteCost && modelSpec.cacheReadCost) {
-    const effectiveCacheWriteCost = sessionState.resolvedConversationTTL === "1h"
-      ? modelSpec.cacheWriteCost * 2
-      : modelSpec.cacheWriteCost;
+    const effectiveCacheWriteCost =
+      sessionState.resolvedConversationTTL === "1h"
+        ? modelSpec.cacheWriteCost * 2
+        : modelSpec.cacheWriteCost;
     setCachePricing(effectiveCacheWriteCost, modelSpec.cacheReadCost);
   }
 
@@ -3245,11 +3519,19 @@ async function handleConversationTurn(
   // skip post-idle compaction — compacting would produce a different prompt
   // body that doesn't match the warmed prefix, causing a cache bust.
   const cacheWarm = isCacheWarm(sessionState);
-  const idleResult = onIdleResume(sessionID, thresholdMs, Date.now(), cacheWarm);
+  const idleResult = onIdleResume(
+    sessionID,
+    thresholdMs,
+    Date.now(),
+    cacheWarm,
+  );
   sessionState.lastTurnWasIdle = idleResult.triggered;
   if (idleResult.triggered) {
     ltmSessionCache.delete(sessionID);
-    saveSessionTracking(sessionID, { ltmCacheText: null, ltmCacheTokens: null });
+    saveSessionTracking(sessionID, {
+      ltmCacheText: null,
+      ltmCacheTokens: null,
+    });
     log.info(
       `session idle ${Math.round(idleResult.idleMs / 60_000)}min — refreshing caches` +
         (cacheWarm ? " (cache warm — skipping compact)" : ""),
@@ -3266,7 +3548,7 @@ async function handleConversationTurn(
   // 1.25×). When context-bound LTM changes (turn 1→2, curation), only
   // system[2] and messages are re-processed; system[0]+[1] are cache reads.
   let stableLtmText: string | undefined; // block 2: preferences
-  let ltmText: string | undefined;       // block 3: context-bound entries
+  let ltmText: string | undefined; // block 3: context-bound entries
   if (cfg.knowledge.enabled) {
     // Track whether LTM state changed for batched DB persistence
     let ltmDirty = false;
@@ -3276,7 +3558,8 @@ async function handleConversationTurn(
       const ltmFraction = cfg.budget.ltm;
       const ltmBudget = getLtmBudget(ltmFraction);
       const prefBudget = getPreferenceLtmBudget(cfg.budget.preferenceLtm);
-      const isFirstTurn = sessionID != null && !temporal.hasMessages(projectPath, sessionID);
+      const isFirstTurn =
+        sessionID != null && !temporal.hasMessages(projectPath, sessionID);
       const contextHint = lastUserTextTrimmed(req);
 
       // --- system[1]: Stable LTM (preferences) ---
@@ -3286,10 +3569,15 @@ async function handleConversationTurn(
       // Uses a dedicated budget independent of context-bound LTM.
       let stable = stableLtmCache.get(sessionID);
       if (!stable) {
-        const prefEntries = await ltm.forSession(projectPath, sessionID, prefBudget, {
-          categories: ["preference"],
-          ...(contextHint ? { contextHint } : {}),
-        });
+        const prefEntries = await ltm.forSession(
+          projectPath,
+          sessionID,
+          prefBudget,
+          {
+            categories: ["preference"],
+            ...(contextHint ? { contextHint } : {}),
+          },
+        );
         if (prefEntries.length) {
           const formatted = formatKnowledge(
             prefEntries.map((e) => ({
@@ -3318,10 +3606,15 @@ async function handleConversationTurn(
           // Full context-bound budget — preferences have their own dedicated budget.
           const contextBudget = ltmBudget;
           // Exclude preferences — they're already in system[1]
-          const contextEntries = await ltm.forSession(projectPath, sessionID, contextBudget, {
-            excludeCategories: ["preference"],
-            ...(contextHint ? { contextHint } : {}),
-          });
+          const contextEntries = await ltm.forSession(
+            projectPath,
+            sessionID,
+            contextBudget,
+            {
+              excludeCategories: ["preference"],
+              ...(contextHint ? { contextHint } : {}),
+            },
+          );
           if (contextEntries.length) {
             const formatted = formatKnowledge(
               contextEntries.map((e) => ({
@@ -3346,7 +3639,11 @@ async function handleConversationTurn(
           // pinned. This prevents cache busts from minor re-ranking after
           // background curation/consolidation invalidates the LTM cache.
           const pinned = ltmPinnedText.get(sessionID);
-          if (pinned && textDiffRatio(pinned.formatted, cached.formatted) < ltmDiffThreshold(modelSpec.inputCostPerMillion)) {
+          if (
+            pinned &&
+            textDiffRatio(pinned.formatted, cached.formatted) <
+              ltmDiffThreshold(modelSpec.inputCostPerMillion)
+          ) {
             // Near-identical — keep the pinned text to preserve cache prefix
             ltmText = pinned.formatted;
           } else {
@@ -3361,9 +3658,9 @@ async function handleConversationTurn(
       // Use stored tokenCount from cache/pin rather than re-estimating
       // from string length — avoids inconsistent estimates.
       const contextTokens = ltmText
-        ? (ltmPinnedText.get(sessionID)?.tokenCount
-          ?? ltmSessionCache.get(sessionID)?.tokenCount
-          ?? 0)
+        ? (ltmPinnedText.get(sessionID)?.tokenCount ??
+          ltmSessionCache.get(sessionID)?.tokenCount ??
+          0)
         : 0;
       setLtmTokens((stable?.tokenCount ?? 0) + contextTokens, sessionID);
     } catch (e) {
@@ -3378,8 +3675,15 @@ async function handleConversationTurn(
       const cached = ltmSessionCache.get(sessionID);
       const pinned = ltmPinnedText.get(sessionID);
       saveSessionTracking(sessionID, {
-        ...(ltmDirty && cached ? { ltmCacheText: cached.formatted, ltmCacheTokens: cached.tokenCount } : {}),
-        ...(pinDirty && pinned ? { ltmPinText: pinned.formatted, ltmPinTokens: pinned.tokenCount } : {}),
+        ...(ltmDirty && cached
+          ? {
+              ltmCacheText: cached.formatted,
+              ltmCacheTokens: cached.tokenCount,
+            }
+          : {}),
+        ...(pinDirty && pinned
+          ? { ltmPinText: pinned.formatted, ltmPinTokens: pinned.tokenCount }
+          : {}),
       });
     }
   } else {
@@ -3425,10 +3729,15 @@ async function handleConversationTurn(
       const contextBudget = ltmBudget;
       const stableTokens = stableLtmCache.get(sessionID)?.tokenCount ?? 0;
       const contextHint = lastUserTextTrimmed(req);
-      const contextEntries = await ltm.forSession(projectPath, sessionID, contextBudget, {
-        excludeCategories: ["preference"],
-        ...(contextHint ? { contextHint } : {}),
-      });
+      const contextEntries = await ltm.forSession(
+        projectPath,
+        sessionID,
+        contextBudget,
+        {
+          excludeCategories: ["preference"],
+          ...(contextHint ? { contextHint } : {}),
+        },
+      );
       let refreshed = false;
 
       if (contextEntries.length) {
@@ -3453,7 +3762,11 @@ async function handleConversationTurn(
           // substantially — same threshold as step 6.
           const pinned = ltmPinnedText.get(sessionID);
 
-          if (pinned && textDiffRatio(pinned.formatted, formatted) < ltmDiffThreshold(modelSpec.inputCostPerMillion)) {
+          if (
+            pinned &&
+            textDiffRatio(pinned.formatted, formatted) <
+              ltmDiffThreshold(modelSpec.inputCostPerMillion)
+          ) {
             // Near-identical — keep the pinned text to preserve cache prefix
             ltmText = pinned.formatted;
             setLtmTokens(stableTokens + pinned.tokenCount, sessionID);
@@ -3475,7 +3788,10 @@ async function handleConversationTurn(
             });
           }
           refreshed = true;
-          log.info("Context-bound LTM refreshed on emergency layer (Layer 4) for session", sessionID);
+          log.info(
+            "Context-bound LTM refreshed on emergency layer (Layer 4) for session",
+            sessionID,
+          );
         }
       }
 
@@ -3487,10 +3803,15 @@ async function handleConversationTurn(
         ltmText = undefined;
         setLtmTokens(stableTokens, sessionID);
         saveSessionTracking(sessionID, {
-          ltmCacheText: null, ltmCacheTokens: null,
-          ltmPinText: null, ltmPinTokens: null,
+          ltmCacheText: null,
+          ltmCacheTokens: null,
+          ltmPinText: null,
+          ltmPinTokens: null,
         });
-        log.info("Context-bound LTM cleared on emergency layer (Layer 4) — stable LTM preserved for session", sessionID);
+        log.info(
+          "Context-bound LTM cleared on emergency layer (Layer 4) — stable LTM preserved for session",
+          sessionID,
+        );
       }
     } catch (e) {
       // On error, leave the step-6 LTM state intact (cache, pin, text)
@@ -3507,16 +3828,23 @@ async function handleConversationTurn(
   // This rides system[2] which already changes per-turn — no cache impact on
   // the stable prefix (system[0]+[1]).
   if (result.layer >= 1 && ltmText) {
-    const layerDesc = result.layer === 1 ? "compressed"
-      : result.layer === 2 ? "aggressively compressed"
-      : result.layer >= 3 ? "emergency compressed" : "compressed";
-    ltmText += `\n\n[Context health: conversation history is ${layerDesc}. ` +
+    const layerDesc =
+      result.layer === 1
+        ? "compressed"
+        : result.layer === 2
+          ? "aggressively compressed"
+          : result.layer >= 3
+            ? "emergency compressed"
+            : "compressed";
+    ltmText +=
+      `\n\n[Context health: conversation history is ${layerDesc}. ` +
       `Distilled observations above are lossy summaries — specific details ` +
       `(exact error messages, rejected alternatives, file paths, numerical values) ` +
       `are likely omitted. Use recall to verify any specific claim before answering ` +
       `questions about what happened, what was considered, or what the exact values were.]`;
   } else if (result.layer >= 1 && !ltmText) {
-    ltmText = `[Context health: conversation history is compressed. ` +
+    ltmText =
+      `[Context health: conversation history is compressed. ` +
       `Distilled observations above are lossy summaries — specific details ` +
       `(exact error messages, rejected alternatives, file paths, numerical values) ` +
       `are likely omitted. Use recall to verify any specific claim before answering ` +
@@ -3533,7 +3861,7 @@ async function handleConversationTurn(
   if (unsustainable) {
     log.warn(
       `session ${sessionID}: unsustainable conversation detected (5+ consecutive cache busts). ` +
-      `Warning will be prepended to response.`,
+        `Warning will be prepended to response.`,
     );
   }
 
@@ -3585,7 +3913,8 @@ async function handleConversationTurn(
 
   // Resolve conversation cache TTL: explicit "5m"/"1h" pass through,
   // "auto" upgrades to 1h when cold-cache turns exceed 40% of recent window.
-  let resolvedConversationTTL: "5m" | "1h" = sessionState.resolvedConversationTTL ?? "5m";
+  let resolvedConversationTTL: "5m" | "1h" =
+    sessionState.resolvedConversationTTL ?? "5m";
   const configTTL = cfg.cache.conversationTTL;
   if (configTTL === "5m" || configTTL === "1h") {
     resolvedConversationTTL = configTTL;
@@ -3599,7 +3928,7 @@ async function handleConversationTurn(
         sessionState.ttlDowngradeStreak = 0;
         log.info(
           `auto-upgrade conversation TTL to 1h: session=${sessionID.slice(0, 16)}` +
-          ` coldFraction=${(coldFraction * 100).toFixed(0)}%`,
+            ` coldFraction=${(coldFraction * 100).toFixed(0)}%`,
         );
       } else if (coldFraction < 0.2 && resolvedConversationTTL === "1h") {
         // Hysteresis: require 3 consecutive qualifying turns before downgrading.
@@ -3613,12 +3942,12 @@ async function handleConversationTurn(
           sessionState.ttlDowngradeStreak = 0;
           log.info(
             `auto-downgrade conversation TTL to 5m: session=${sessionID.slice(0, 16)}` +
-            ` coldFraction=${(coldFraction * 100).toFixed(0)}% streak=${streak}`,
+              ` coldFraction=${(coldFraction * 100).toFixed(0)}% streak=${streak}`,
           );
         } else {
           log.info(
             `TTL downgrade deferred (streak ${streak}/3): session=${sessionID.slice(0, 16)}` +
-            ` coldFraction=${(coldFraction * 100).toFixed(0)}%`,
+              ` coldFraction=${(coldFraction * 100).toFixed(0)}%`,
           );
         }
       } else {
@@ -3651,10 +3980,15 @@ async function handleConversationTurn(
   const quotaSnapshot = getQuotaForCredential(resolveAuth(sessionID));
   const quotaPressure = computeQuotaPressure(quotaSnapshot);
   if (dailyBudget > 0 || quotaPressure > 0) {
-    const inputTokens = getLastTransformEstimate(sessionID)
-      || Math.ceil(JSON.stringify(modifiedReq.messages).length / 3);
+    const inputTokens =
+      getLastTransformEstimate(sessionID) ||
+      Math.ceil(JSON.stringify(modifiedReq.messages).length / 3);
     const estimatedCost = estimateRequestCost(req.model, inputTokens);
-    const delay = getDailyThrottleDelay(dailyBudget, estimatedCost, quotaPressure);
+    const delay = getDailyThrottleDelay(
+      dailyBudget,
+      estimatedCost,
+      quotaPressure,
+    );
 
     if (delay > 0) {
       // Cap delay to avoid pushing the next request past the cache TTL boundary.
@@ -3664,10 +3998,11 @@ async function handleConversationTurn(
       const elapsed = sessionState.prevRequestTime
         ? Date.now() - sessionState.prevRequestTime
         : 0; // first request — no prior timing, full TTL available
-      const maxSafe = Math.max(0, (ttlMs - elapsed) * 0.50) / 1000;
+      const maxSafe = Math.max(0, (ttlMs - elapsed) * 0.5) / 1000;
       const actualDelay = Math.min(delay, maxSafe);
 
-      if (actualDelay > 0.5) { // don't bother sleeping < 500ms
+      if (actualDelay > 0.5) {
+        // don't bother sleeping < 500ms
         log.info(
           `budget-throttle: sleeping ${actualDelay.toFixed(1)}s ` +
             `session=${sessionID.slice(0, 16)} ` +
@@ -3704,13 +4039,11 @@ async function handleConversationTurn(
     },
   });
 
-  const { response: upstreamResponse, serializedBody: requestBody, effectiveProtocol } =
-    await forwardToUpstream(
-      modifiedReq,
-      config,
-      undefined,
-      cacheOptions,
-    );
+  const {
+    response: upstreamResponse,
+    serializedBody: requestBody,
+    effectiveProtocol,
+  } = await forwardToUpstream(modifiedReq, config, undefined, cacheOptions);
 
   if (!upstreamResponse.ok) {
     const errorBody = await upstreamResponse.text();
@@ -3722,13 +4055,18 @@ async function handleConversationTurn(
     // layer for the next turn so the session doesn't get stuck in a loop.
     // Anthropic format: "prompt is too long: 206029 tokens > 200000 maximum"
     // OpenAI format:    "maximum context length is 128000 tokens. However, your messages resulted in 135421 tokens"
-    if (upstreamResponse.status === 400 && (
-      errorBody.includes("prompt is too long") ||
-      errorBody.includes("context_length_exceeded") ||
-      errorBody.includes("maximum context length")
-    )) {
-      const anthropicMatch = errorBody.match(/prompt is too long: (\d+) tokens > (\d+) maximum/);
-      const openaiMatch = !anthropicMatch && errorBody.match(/resulted in (\d+) tokens.*?(\d+) tokens/);
+    if (
+      upstreamResponse.status === 400 &&
+      (errorBody.includes("prompt is too long") ||
+        errorBody.includes("context_length_exceeded") ||
+        errorBody.includes("maximum context length"))
+    ) {
+      const anthropicMatch = errorBody.match(
+        /prompt is too long: (\d+) tokens > (\d+) maximum/,
+      );
+      const openaiMatch =
+        !anthropicMatch &&
+        errorBody.match(/resulted in (\d+) tokens.*?(\d+) tokens/);
       const match = anthropicMatch || openaiMatch;
       // Default to 1.3 (maps to layer 3) when the format can't be parsed,
       // since an unparseable error suggests an unexpected situation where
@@ -3738,11 +4076,14 @@ async function handleConversationTurn(
       setForceMinLayer(escalateLayer, sessionID);
       log.warn(
         `prompt overflow: escalating to layer ${escalateLayer} for session ${sessionID.slice(0, 16)}` +
-        ` (ratio=${overshootRatio.toFixed(2)})`,
+          ` (ratio=${overshootRatio.toFixed(2)})`,
       );
     }
 
-    genAiSpan.setStatus({ code: 2, message: `HTTP ${upstreamResponse.status}` });
+    genAiSpan.setStatus({
+      code: 2,
+      message: `HTTP ${upstreamResponse.status}`,
+    });
     genAiSpan.end();
     return new Response(errorBody, {
       status: upstreamResponse.status,
@@ -3757,7 +4098,9 @@ async function handleConversationTurn(
   // Anthropic-format response, so the recall loop is protocol-agnostic here.
   // Without this, a `recall` tool_use injected by the gateway would leak to the
   // client (e.g. "Model tried to call unavailable tool 'recall'").
-  const finalizeWithRecall = async (resp: GatewayResponse): Promise<Response> => {
+  const finalizeWithRecall = async (
+    resp: GatewayResponse,
+  ): Promise<Response> => {
     // --- Recall interception (non-streaming) ---
     // Loop allows the model to call recall multiple times (e.g. drill down
     // into t:<id> source citations). MAX_RECALL_DEPTH is a safety net only.
@@ -3777,7 +4120,11 @@ async function handleConversationTurn(
       );
 
       // Store recall result for marker round-trip expansion
-      const storeKey = recallStoreKey(input.query, input.scope ?? "all", input.id);
+      const storeKey = recallStoreKey(
+        input.query,
+        input.scope ?? "all",
+        input.id,
+      );
       const position = currentResp.content.indexOf(recallBlock);
       sessionState.recallStore.set(storeKey, {
         toolUseId: recallBlock.id,
@@ -3794,7 +4141,14 @@ async function handleConversationTurn(
           `recall (non-stream, mixed, depth=${recallDepth}): stored result for session ${sessionState.sessionID.slice(0, 16)}`,
         );
         markerResp.usage = cumulativeUsage;
-        postResponse(req, markerResp, sessionState, config, requestBody, genAiSpan);
+        postResponse(
+          req,
+          markerResp,
+          sessionState,
+          config,
+          requestBody,
+          genAiSpan,
+        );
         return nonStreamHttpResponse(
           unsustainable ? injectContextWarning(markerResp) : markerResp,
           { "x-lore-recall-invoked": "true" },
@@ -3805,18 +4159,24 @@ async function handleConversationTurn(
       log.info(
         `recall (non-stream, depth=${recallDepth}): executing follow-up for session ${sessionState.sessionID.slice(0, 16)}`,
       );
-      const followUp = buildRecallFollowUp(currentModifiedReq, currentResp, result, recallBlock);
+      const followUp = buildRecallFollowUp(
+        currentModifiedReq,
+        currentResp,
+        result,
+        recallBlock,
+      );
       let followUpResponse: Response;
       let followUpProtocol: "anthropic" | "openai" | "openai-responses";
-      ({ response: followUpResponse, effectiveProtocol: followUpProtocol } = await forwardToUpstream(
-        followUp,
-        config,
-        undefined,
-        // Disable conversation caching on follow-up: the appended
-        // recall result makes the prefix diverge from the next real turn,
-        // so the cache write would be wasted money.
-        { ...cacheOptions, cacheConversation: false },
-      ));
+      ({ response: followUpResponse, effectiveProtocol: followUpProtocol } =
+        await forwardToUpstream(
+          followUp,
+          config,
+          undefined,
+          // Disable conversation caching on follow-up: the appended
+          // recall result makes the prefix diverge from the next real turn,
+          // so the cache write would be wasted money.
+          { ...cacheOptions, cacheConversation: false },
+        ));
 
       if (!followUpResponse.ok) {
         const errorBody = await followUpResponse.text();
@@ -3826,14 +4186,24 @@ async function handleConversationTurn(
         );
         // Fall back to response with marker (no continuation)
         markerResp.usage = cumulativeUsage;
-        postResponse(req, markerResp, sessionState, config, requestBody, genAiSpan);
+        postResponse(
+          req,
+          markerResp,
+          sessionState,
+          config,
+          requestBody,
+          genAiSpan,
+        );
         return nonStreamHttpResponse(
           unsustainable ? injectContextWarning(markerResp) : markerResp,
           { "x-lore-recall-invoked": "true" },
         );
       }
 
-      const continuationResp = await accumulateNonStreamResponse(followUpResponse, followUpProtocol);
+      const continuationResp = await accumulateNonStreamResponse(
+        followUpResponse,
+        followUpProtocol,
+      );
 
       // Accumulate usage from this iteration
       cumulativeUsage.inputTokens += continuationResp.usage.inputTokens;
@@ -3857,12 +4227,22 @@ async function handleConversationTurn(
 
     // Depth exhausted or no more recall — finalize
     if (hasRecallToolUse(currentResp)) {
-      log.warn(`recall depth exhausted (${MAX_RECALL_DEPTH}) — stripping remaining recall`);
+      log.warn(
+        `recall depth exhausted (${MAX_RECALL_DEPTH}) — stripping remaining recall`,
+      );
       currentResp = replaceRecallWithMarker(currentResp);
     }
     currentResp.usage = cumulativeUsage;
-    postResponse(req, currentResp, sessionState, config, requestBody, genAiSpan);
-    const recallHeaders = recallDepth > 0 ? { "x-lore-recall-invoked": "true" } : undefined;
+    postResponse(
+      req,
+      currentResp,
+      sessionState,
+      config,
+      requestBody,
+      genAiSpan,
+    );
+    const recallHeaders =
+      recallDepth > 0 ? { "x-lore-recall-invoked": "true" } : undefined;
     return nonStreamHttpResponse(
       unsustainable ? injectContextWarning(currentResp) : currentResp,
       recallHeaders,
@@ -3894,7 +4274,8 @@ async function handleConversationTurn(
     );
     return buildStreamingResponse(
       upstreamResponse,
-      (resp) => postResponse(req, resp, sessionState, config, requestBody, genAiSpan),
+      (resp) =>
+        postResponse(req, resp, sessionState, config, requestBody, genAiSpan),
       hasRecallTool
         ? { modifiedReq, config, sessionState, cacheOptions }
         : undefined,
@@ -3903,7 +4284,10 @@ async function handleConversationTurn(
   }
 
   // Non-streaming: dispatch to correct accumulator based on upstream protocol.
-  const resp = await accumulateNonStreamResponse(upstreamResponse, effectiveProtocol);
+  const resp = await accumulateNonStreamResponse(
+    upstreamResponse,
+    effectiveProtocol,
+  );
   return finalizeWithRecall(resp);
 }
 
@@ -3933,16 +4317,20 @@ async function handleConversationTurn(
  * tool state. If structured `blocks` were preserved (non-text sub-blocks like
  * images), re-emit them losslessly; otherwise wrap the text string.
  */
-function toolResultContent(
-  state: { status: string; output?: string; error?: string; blocks?: unknown[] },
-): GatewayContentBlock[] {
+function toolResultContent(state: {
+  status: string;
+  output?: string;
+  error?: string;
+  blocks?: unknown[];
+}): GatewayContentBlock[] {
   if (state.blocks && state.blocks.length > 0) {
     // Re-emit the structured blocks that were preserved from ingress.
     return state.blocks as GatewayContentBlock[];
   }
-  const text = state.status === "error"
-    ? (state.error ?? "[error]")
-    : (state.output ?? "");
+  const text =
+    state.status === "error"
+      ? (state.error ?? "[error]")
+      : (state.output ?? "");
   return text ? [{ type: "text", text }] : [];
 }
 
@@ -4043,8 +4431,15 @@ export function loreMessagesToGateway(
         // Opaque parts (image, audio, document, …) — reconstruct the
         // gateway opaque block from the generic part's raw payload.
         default:
-          if ("raw" in part && typeof part.raw === "object" && part.raw !== null) {
-            content.push({ type: "opaque", raw: part.raw as Record<string, unknown> });
+          if (
+            "raw" in part &&
+            typeof part.raw === "object" &&
+            part.raw !== null
+          ) {
+            content.push({
+              type: "opaque",
+              raw: part.raw as Record<string, unknown>,
+            });
           } else if ("text" in part && typeof part.text === "string") {
             content.push({ type: "text", text: part.text });
           }
@@ -4087,9 +4482,7 @@ export function removeOrphanedToolResults(
 
     // Collect tool_use IDs from the preceding assistant message
     const prev =
-      i > 0 && messages[i - 1]!.role === "assistant"
-        ? messages[i - 1]!
-        : null;
+      i > 0 && messages[i - 1]!.role === "assistant" ? messages[i - 1]! : null;
     const toolUseIds = new Set(
       (prev?.content ?? [])
         .filter((b): b is GatewayToolUseBlock => b.type === "tool_use")
@@ -4207,7 +4600,11 @@ async function handleLoreSlashCommand(
 
   // Unknown /lore:* command — return error instead of forwarding upstream
   log.warn(`unknown slash command: ${text}`);
-  return slashResponse(req, `Unknown command: ${text}. Available: /lore:curate, /lore:warm:stop|keep|auto, /lore:amnesia:on|off`, `msg_lore_${Date.now()}`);
+  return slashResponse(
+    req,
+    `Unknown command: ${text}. Available: /lore:curate, /lore:warm:stop|keep|auto, /lore:amnesia:on|off`,
+    `msg_lore_${Date.now()}`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -4246,7 +4643,7 @@ function handleAmnesiaSlashCommand(
     state.amnesia = isOn;
     log.info(
       `amnesia: ${lower} for session=${state.sessionID.slice(0, 16)} — ` +
-      `storage ${isOn ? "suppressed" : "resumed"}`,
+        `storage ${isOn ? "suppressed" : "resumed"}`,
     );
   }
 
@@ -4294,7 +4691,13 @@ function handleWarmupSlashCommand(
   // Update session warmup state
   if (state) {
     if (!state.warmup) {
-      state.warmup = { lastWarmupAt: 0, warmupCount: 0, totalWarmups: 0, warmupHits: 0, disabled: false };
+      state.warmup = {
+        lastWarmupAt: 0,
+        warmupCount: 0,
+        totalWarmups: 0,
+        warmupHits: 0,
+        disabled: false,
+      };
     }
     if (isStop) {
       state.warmup.disabled = true;
@@ -4371,7 +4774,11 @@ async function handleCurateSlashCommand(
   }
 
   if (!sessionID || !state) {
-    return slashResponse(req, "No active session found for curation.", "msg_lore_curate_none");
+    return slashResponse(
+      req,
+      "No active session found for curation.",
+      "msg_lore_curate_none",
+    );
   }
 
   const projectPath = state.projectPath;
@@ -4422,7 +4829,11 @@ async function handleCurateSlashCommand(
 }
 
 /** Build a synthetic slash-command response (streaming or JSON). */
-function slashResponse(req: GatewayRequest, text: string, msgId: string): Response {
+function slashResponse(
+  req: GatewayRequest,
+  text: string,
+  msgId: string,
+): Response {
   if (req.stream) {
     const sseBody = buildSSETextResponse(msgId, req.model, text, {
       inputTokens: 0,
@@ -4519,7 +4930,9 @@ export async function handleRequest(
     // Sub-agents now get their own sessions (separate x-session-affinity), so
     // priorState is the sub-agent's own state — structural detection is safe.
     const structuralCompaction = isStructuralCompaction(req, priorState);
-    const patternDetection = structuralCompaction ? undefined : detectCompactionRequest(req);
+    const patternDetection = structuralCompaction
+      ? undefined
+      : detectCompactionRequest(req);
     if (structuralCompaction || patternDetection?.detected) {
       const reason = structuralCompaction
         ? `structural (prior=${priorState?.messageCount ?? "?"} curr=${req.messages.length})`
@@ -4530,15 +4943,17 @@ export async function handleRequest(
               ? `pattern: user-keyword match "${patternDetection.pattern}"`
               : `pattern: template-sections (${patternDetection.matchCount} matches)`
           : "unknown";
-      log.info(`compaction detected: ${reason} messages=${req.messages.length} tools=${req.tools.length}`);
+      log.info(
+        `compaction detected: ${reason} messages=${req.messages.length} tools=${req.tools.length}`,
+      );
       return await handleCompaction(req, config);
     }
 
     // --- Case 2: Meta request (title gen, summary, categorization, etc.) → passthrough ---
     if (isMetaRequest(req)) {
       log.info(
-        `meta request detected: messages=${req.messages.length} tools=${req.tools.length}`
-        + ` maxTokens=${req.maxTokens} agent=${req.rawHeaders[LORE_AGENT_HEADER] ?? "none"}`,
+        `meta request detected: messages=${req.messages.length} tools=${req.tools.length}` +
+          ` maxTokens=${req.maxTokens} agent=${req.rawHeaders[LORE_AGENT_HEADER] ?? "none"}`,
       );
       return await handlePassthrough(req, config);
     }

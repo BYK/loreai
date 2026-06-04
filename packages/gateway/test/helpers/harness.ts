@@ -54,8 +54,7 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
 
   // --- 2. Random port in [20000, 50000) ---
   const port =
-    (opts.configOverrides?.port ??
-      20000 + Math.floor(Math.random() * 30000));
+    opts.configOverrides?.port ?? 20000 + Math.floor(Math.random() * 30000);
 
   process.env.LORE_LISTEN_PORT = String(port);
 

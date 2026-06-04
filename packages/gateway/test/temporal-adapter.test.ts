@@ -252,7 +252,9 @@ describe("resolveToolResults", () => {
           {
             type: "tool_result",
             toolUseId: "toolu_err",
-            content: [{ type: "text", text: "command failed with exit code 1" }],
+            content: [
+              { type: "text", text: "command failed with exit code 1" },
+            ],
             isError: true,
           },
         ],
@@ -265,7 +267,9 @@ describe("resolveToolResults", () => {
       (p) => isToolPart(p) && p.tool === "result",
     );
     expect((resultPart as any).state.status).toBe("error");
-    expect((resultPart as any).state.error).toBe("command failed with exit code 1");
+    expect((resultPart as any).state.error).toBe(
+      "command failed with exit code 1",
+    );
 
     resolveToolResults(messages);
 
@@ -274,6 +278,8 @@ describe("resolveToolResults", () => {
       (p) => isToolPart(p) && p.tool === "bash",
     );
     expect((toolPart as any).state.status).toBe("error");
-    expect((toolPart as any).state.error).toBe("command failed with exit code 1");
+    expect((toolPart as any).state.error).toBe(
+      "command failed with exit code 1",
+    );
   });
 });

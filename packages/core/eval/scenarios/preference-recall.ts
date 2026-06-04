@@ -62,7 +62,14 @@ function userToolResult(
 ): ConversationTurn {
   return {
     role: "user",
-    content: [{ type: "tool_result", tool_use_id: toolUseId, content, is_error: isError }],
+    content: [
+      {
+        type: "tool_result",
+        tool_use_id: toolUseId,
+        content,
+        is_error: isError,
+      },
+    ],
     timestamp,
   };
 }
@@ -108,7 +115,10 @@ const pr1Session1Turns: ConversationTurn[] = (() => {
   // Turn 4: Assistant acknowledges and runs pnpm
   const t4 = assistantToolUse(
     "bash",
-    { command: "pnpm init && pnpm add react react-dom typescript @types/react @types/react-dom" },
+    {
+      command:
+        "pnpm init && pnpm add react react-dom typescript @types/react @types/react-dom",
+    },
     base + 3 * MINUTE,
   );
   turns.push(t4.turn);
@@ -330,7 +340,10 @@ export function SidebarNav({ items }: SidebarNavProps) {
   // Turn 22: Assistant creates branch and commits
   const t22 = assistantToolUse(
     "bash",
-    { command: "git checkout -b feat/dashboard-scaffold && git add -A && git commit -m 'feat: scaffold dashboard with React + TypeScript'" },
+    {
+      command:
+        "git checkout -b feat/dashboard-scaffold && git add -A && git commit -m 'feat: scaffold dashboard with React + TypeScript'",
+    },
     base + 18 * MINUTE,
   );
   turns.push(t22.turn);
@@ -512,7 +525,10 @@ export function DataTable<T extends Record<string, unknown>>({
   // Turn 5: Assistant uses pnpm (tests: package manager recall)
   const t5 = assistantToolUse(
     "bash",
-    { command: "pnpm add -D vitest @testing-library/react @testing-library/jest-dom" },
+    {
+      command:
+        "pnpm add -D vitest @testing-library/react @testing-library/jest-dom",
+    },
     base + 5 * MINUTE,
   );
   turns.push(t5.turn);
@@ -607,7 +623,10 @@ describe('DataTable', () => {
   // Turn 11: Assistant creates branch (tests: never push to main)
   const t11 = assistantToolUse(
     "bash",
-    { command: "git checkout -b feat/data-table && git add -A && git commit -m 'feat: add DataTable component with sorting, pagination, and filtering'" },
+    {
+      command:
+        "git checkout -b feat/data-table && git add -A && git commit -m 'feat: add DataTable component with sorting, pagination, and filtering'",
+    },
     base + 12 * MINUTE,
   );
   turns.push(t11.turn);
@@ -873,7 +892,11 @@ export { router as userRouter };
 
   // Turn 3: Tool result
   turns.push(
-    userToolResult(t2.id, "File written: src/routes/users.ts", base + 2.5 * MINUTE),
+    userToolResult(
+      t2.id,
+      "File written: src/routes/users.ts",
+      base + 2.5 * MINUTE,
+    ),
   );
 
   // Turn 4: User corrects let → const (IMPLICIT PATTERN: const preference, occurrence 1)
@@ -912,7 +935,11 @@ export { router as userRouter };
 
   // Turn 6: Tool result
   turns.push(
-    userToolResult(t5.id, "File written: src/routes/users.ts", base + 4.5 * MINUTE),
+    userToolResult(
+      t5.id,
+      "File written: src/routes/users.ts",
+      base + 4.5 * MINUTE,
+    ),
   );
 
   // Turn 7: User asks for validation
@@ -962,7 +989,11 @@ export { router as userRouter };
 
   // Turn 9: Tool result
   turns.push(
-    userToolResult(t9_id(), "File written: src/routes/users.ts", base + 8.5 * MINUTE),
+    userToolResult(
+      t9_id(),
+      "File written: src/routes/users.ts",
+      base + 8.5 * MINUTE,
+    ),
   );
   // Patch: we need the actual id from t8
   turns[turns.length - 1] = userToolResult(
@@ -1216,10 +1247,7 @@ describe('GET /users/:id', () => {
 
   // Turn 24: User asks for a DELETE endpoint (no tests yet — will they ask?)
   turns.push(
-    userText(
-      "Add a DELETE /users/:id endpoint as well.",
-      base + 26 * MINUTE,
-    ),
+    userText("Add a DELETE /users/:id endpoint as well.", base + 26 * MINUTE),
   );
 
   // Turn 25: Assistant implements DELETE
@@ -1404,10 +1432,7 @@ export { router as productRouter };
 
   // Turn 6: User confirms (IMPLICIT PATTERN: expects tests alongside implementation)
   turns.push(
-    userText(
-      "Yes, write it and the tests together please.",
-      base + 8 * MINUTE,
-    ),
+    userText("Yes, write it and the tests together please.", base + 8 * MINUTE),
   );
 
   // Turn 7-8: Implementation + tests written (omitted for brevity, assistant complies)
@@ -1482,7 +1507,8 @@ const pr2Questions: EvalQuestion[] = [
     dimension: "preferences",
     scenario: "pr-2-implicit",
     sessionRef: "pr2-session1-implicit",
-    question: "Does the user expect tests to be written alongside implementation?",
+    question:
+      "Does the user expect tests to be written alongside implementation?",
     referenceAnswer:
       "Yes. The user consistently asked for tests immediately after implementation was done. They said 'write the tests for both endpoints before we move on' and 'And the tests for DELETE? Don't forget those.' This is a clear behavioral pattern — they always want tests alongside new code.",
     rubric: RUBRICS.implicitPreference,
@@ -1723,7 +1749,10 @@ const pr3Session2Turns: ConversationTurn[] = (() => {
   // Turn 4: Assistant starts migration
   const t4 = assistantToolUse(
     "bash",
-    { command: "pnpm remove mocha chai @types/mocha @types/chai ts-node && pnpm add -D vitest" },
+    {
+      command:
+        "pnpm remove mocha chai @types/mocha @types/chai ts-node && pnpm add -D vitest",
+    },
     base + 3 * MINUTE,
   );
   turns.push(t4.turn);
@@ -1759,7 +1788,11 @@ export default defineConfig({
 
   // Turn 7: Tool result
   turns.push(
-    userToolResult(t6.id, "File written: vitest.config.ts", base + 4.5 * MINUTE),
+    userToolResult(
+      t6.id,
+      "File written: vitest.config.ts",
+      base + 4.5 * MINUTE,
+    ),
   );
 
   // Turn 8: Assistant migrates the test file
@@ -1842,9 +1875,7 @@ const pr3Session3Turns: ConversationTurn[] = (() => {
   );
 
   // Turn 3: User confirms
-  turns.push(
-    userText("Yes, go ahead.", base + 2 * MINUTE),
-  );
+  turns.push(userText("Yes, go ahead.", base + 2 * MINUTE));
 
   // Turn 4: Assistant writes the test
   const t4 = assistantToolUse(
@@ -1902,12 +1933,7 @@ describe('Auth Integration', () => {
   );
 
   // Turn 6: User is happy
-  turns.push(
-    userText(
-      "Looks good. Run the tests.",
-      base + 5 * MINUTE,
-    ),
-  );
+  turns.push(userText("Looks good. Run the tests.", base + 5 * MINUTE));
 
   // Turn 7: Assistant runs vitest
   const t7 = assistantToolUse(
@@ -1986,8 +2012,7 @@ const pr3Questions: EvalQuestion[] = [
     dimension: "preferences",
     scenario: "pr-3-evolution",
     sessionRef: "pr3-session3-test",
-    question:
-      "Why did the user switch testing frameworks?",
+    question: "Why did the user switch testing frameworks?",
     referenceAnswer:
       "The user switched from Mocha to Vitest because Vitest is faster — it uses Vite's transform pipeline instead of ts-node, which reduced test startup from ~30 seconds to ~312ms. They also noted Vitest has a Jest-compatible API making migration straightforward.",
     rubric: RUBRICS.preferenceEvolution,

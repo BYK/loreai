@@ -23,7 +23,10 @@ export function detectAll(projectPath: string): DetectionResult[] {
           agentName: provider.name,
           agentDisplayName: provider.displayName,
           sessions,
-          totalTokens: sessions.reduce((s, sess) => s + sess.estimatedTokens, 0),
+          totalTokens: sessions.reduce(
+            (s, sess) => s + sess.estimatedTokens,
+            0,
+          ),
           totalMessages: sessions.reduce((s, sess) => s + sess.messageCount, 0),
         });
       }

@@ -24,10 +24,7 @@ import { RUBRICS } from "../judge";
 const PROJECT_A_PYTHON = "/tmp/eval-project-python-api";
 const PROJECT_B_TS = "/tmp/eval-project-ts-cli";
 
-const CROSS_PROJECT_BASELINES: BaselineMode[] = [
-  "lore",
-  "lore-memory-only",
-];
+const CROSS_PROJECT_BASELINES: BaselineMode[] = ["lore", "lore-memory-only"];
 
 // ---------------------------------------------------------------------------
 // Helper: deterministic tool IDs
@@ -53,7 +50,10 @@ function makeTimestamps(
   gapMinutes = 2,
 ): number[] {
   const start = new Date(startIso).getTime();
-  return Array.from({ length: count }, (_, i) => start + i * gapMinutes * 60_000);
+  return Array.from(
+    { length: count },
+    (_, i) => start + i * gapMinutes * 60_000,
+  );
 }
 
 // =========================================================================
@@ -152,7 +152,9 @@ function buildCP1(): ScenarioDefinition {
           type: "tool_use",
           id: toolId("a3"),
           name: "bash",
-          input: { command: `cd ${PROJECT_A_PYTHON} && python -m pytest tests/test_orders.py -v --tb=short` },
+          input: {
+            command: `cd ${PROJECT_A_PYTHON} && python -m pytest tests/test_orders.py -v --tb=short`,
+          },
         },
       ],
       tokens: 200,
@@ -215,7 +217,9 @@ function buildCP1(): ScenarioDefinition {
           type: "tool_use",
           id: toolId("a5"),
           name: "bash",
-          input: { command: `cd ${PROJECT_A_PYTHON} && python -c "import sqlalchemy; help(sqlalchemy.orm.Session.begin_nested)" 2>&1 | head -30` },
+          input: {
+            command: `cd ${PROJECT_A_PYTHON} && python -c "import sqlalchemy; help(sqlalchemy.orm.Session.begin_nested)" 2>&1 | head -30`,
+          },
         },
       ],
       tokens: 500,
@@ -299,7 +303,9 @@ function buildCP1(): ScenarioDefinition {
           type: "tool_use",
           id: toolId("a7"),
           name: "bash",
-          input: { command: `cd ${PROJECT_A_PYTHON} && python -m pytest tests/test_orders.py -v --tb=short` },
+          input: {
+            command: `cd ${PROJECT_A_PYTHON} && python -m pytest tests/test_orders.py -v --tb=short`,
+          },
         },
       ],
       tokens: 200,
@@ -554,7 +560,9 @@ function buildCP1(): ScenarioDefinition {
           type: "tool_use",
           id: toolId("b5"),
           name: "bash",
-          input: { command: `cd ${PROJECT_B_TS} && npx jest tests/import.test.ts --verbose` },
+          input: {
+            command: `cd ${PROJECT_B_TS} && npx jest tests/import.test.ts --verbose`,
+          },
         },
       ],
       tokens: 200,
@@ -680,9 +688,9 @@ function buildCP1(): ScenarioDefinition {
       referenceAnswer:
         "The gotcha was discovered in the Python REST API project " +
         "(at /tmp/eval-project-python-api) using SQLAlchemy. The exact " +
-        "error message was: \"sqlalchemy.exc.InvalidRequestError: This session " +
+        'error message was: "sqlalchemy.exc.InvalidRequestError: This session ' +
         "is in 'committed' state; no further SQL can be emitted within this " +
-        "transaction.\"",
+        'transaction."',
       rubric: RUBRICS.crossProject,
       metadata: {
         difficulty: "hard",
@@ -879,7 +887,9 @@ function buildCP2(): ScenarioDefinition {
           type: "tool_use",
           id: toolId("a5"),
           name: "bash",
-          input: { command: `cd ${PROJECT_A_PYTHON} && python -m pytest tests/ -v --tb=short` },
+          input: {
+            command: `cd ${PROJECT_A_PYTHON} && python -m pytest tests/ -v --tb=short`,
+          },
         },
       ],
       tokens: 200,
@@ -928,7 +938,7 @@ function buildCP2(): ScenarioDefinition {
       content: [
         {
           type: "text",
-          text: "Since repositories are injected via FastAPI's `Depends`, you can override the dependency in tests:\n\n```python\nfrom unittest.mock import MagicMock\nfrom app.repositories.user import UserRepository\n\ndef test_create_user_endpoint():\n    mock_repo = MagicMock(spec=UserRepository)\n    mock_repo.email_exists.return_value = False\n    mock_repo.create.return_value = Customer(id=1, name=\"Test\", email=\"test@example.com\")\n    \n    app.dependency_overrides[get_user_repo] = lambda: mock_repo\n    response = client.post(\"/users/\", json={\"name\": \"Test\", \"email\": \"test@example.com\"})\n    assert response.status_code == 200\n    mock_repo.create.assert_called_once()\n```\n\nThis is a key benefit of the repository pattern — you can test route logic without any database. The repository itself is tested separately with a real (test) database.",
+          text: 'Since repositories are injected via FastAPI\'s `Depends`, you can override the dependency in tests:\n\n```python\nfrom unittest.mock import MagicMock\nfrom app.repositories.user import UserRepository\n\ndef test_create_user_endpoint():\n    mock_repo = MagicMock(spec=UserRepository)\n    mock_repo.email_exists.return_value = False\n    mock_repo.create.return_value = Customer(id=1, name="Test", email="test@example.com")\n    \n    app.dependency_overrides[get_user_repo] = lambda: mock_repo\n    response = client.post("/users/", json={"name": "Test", "email": "test@example.com"})\n    assert response.status_code == 200\n    mock_repo.create.assert_called_once()\n```\n\nThis is a key benefit of the repository pattern — you can test route logic without any database. The repository itself is tested separately with a real (test) database.',
         },
       ],
       tokens: 800,
@@ -1009,7 +1019,9 @@ function buildCP2(): ScenarioDefinition {
           type: "tool_use",
           id: toolId("b1"),
           name: "bash",
-          input: { command: `find ${PROJECT_B_TS}/src -type f -name '*.ts' | sort` },
+          input: {
+            command: `find ${PROJECT_B_TS}/src -type f -name '*.ts' | sort`,
+          },
         },
       ],
       tokens: 200,
@@ -1152,7 +1164,9 @@ function buildCP2(): ScenarioDefinition {
           type: "tool_use",
           id: toolId("b5"),
           name: "bash",
-          input: { command: `cd ${PROJECT_B_TS} && npx jest tests/repositories/ --verbose` },
+          input: {
+            command: `cd ${PROJECT_B_TS} && npx jest tests/repositories/ --verbose`,
+          },
         },
       ],
       tokens: 200,
@@ -1314,7 +1328,7 @@ function buildCP3(): ScenarioDefinition {
       content: [
         {
           type: "text",
-          text: "First off — whenever we write TypeScript in any project, always use strict mode. I mean `\"strict\": true` in tsconfig, and absolutely no `any` types. Use `unknown` and type guards if the type isn't known. This is non-negotiable.",
+          text: 'First off — whenever we write TypeScript in any project, always use strict mode. I mean `"strict": true` in tsconfig, and absolutely no `any` types. Use `unknown` and type guards if the type isn\'t known. This is non-negotiable.',
         },
       ],
       tokens: 200,
@@ -1356,7 +1370,9 @@ function buildCP3(): ScenarioDefinition {
           type: "tool_use",
           id: toolId("a1"),
           name: "bash",
-          input: { command: `cd ${PROJECT_A_PYTHON} && echo "engine-strict=true" > .npmrc` },
+          input: {
+            command: `cd ${PROJECT_A_PYTHON} && echo "engine-strict=true" > .npmrc`,
+          },
         },
       ],
       tokens: 200,
@@ -1445,7 +1461,7 @@ function buildCP3(): ScenarioDefinition {
       content: [
         {
           type: "text",
-          text: "For error handling, I want user-friendly error messages in APIs. Never return raw stack traces to the client. Log the full error server-side but return a clean message with an error code. Something like `{ error: { code: \"VALIDATION_ERROR\", message: \"Email is already registered\" } }`.",
+          text: 'For error handling, I want user-friendly error messages in APIs. Never return raw stack traces to the client. Log the full error server-side but return a clean message with an error code. Something like `{ error: { code: "VALIDATION_ERROR", message: "Email is already registered" } }`.',
         },
       ],
       tokens: 200,
@@ -1566,7 +1582,9 @@ function buildCP3(): ScenarioDefinition {
           type: "tool_use",
           id: toolId("b2"),
           name: "bash",
-          input: { command: `cd ${PROJECT_B_TS} && pnpm add commander zod && pnpm add -D typescript @types/node` },
+          input: {
+            command: `cd ${PROJECT_B_TS} && pnpm add commander zod && pnpm add -D typescript @types/node`,
+          },
         },
       ],
       tokens: 200,
@@ -1754,10 +1772,9 @@ function buildCP3(): ScenarioDefinition {
       dimension: "cross-project",
       scenario: "cp-3-preferences",
       sessionRef: "cp3-session-b-ts-cli",
-      question:
-        "What TypeScript strictness rules apply in this project?",
+      question: "What TypeScript strictness rules apply in this project?",
       referenceAnswer:
-        "TypeScript strict mode must be enabled (`\"strict\": true` in " +
+        'TypeScript strict mode must be enabled (`"strict": true` in ' +
         "tsconfig.json). No `any` types are allowed — use `unknown` with " +
         "type guards instead. This is described as 'non-negotiable' by " +
         "the user and applies to all TypeScript projects.",
@@ -1772,8 +1789,7 @@ function buildCP3(): ScenarioDefinition {
       dimension: "cross-project",
       scenario: "cp-3-preferences",
       sessionRef: "cp3-session-b-ts-cli",
-      question:
-        "What is the user's policy on pushing to the main branch?",
+      question: "What is the user's policy on pushing to the main branch?",
       referenceAnswer:
         "Never push directly to main or master. Always create a feature " +
         "branch and open a PR. No exceptions, even for single-line fixes " +
@@ -1789,8 +1805,7 @@ function buildCP3(): ScenarioDefinition {
       dimension: "cross-project",
       scenario: "cp-3-preferences",
       sessionRef: "cp3-session-b-ts-cli",
-      question:
-        "What file naming convention does the user require?",
+      question: "What file naming convention does the user require?",
       referenceAnswer:
         "Kebab-case for all file and directory names. For example: " +
         "`user-repository.ts`, not `UserRepository.ts` or " +
@@ -1799,7 +1814,12 @@ function buildCP3(): ScenarioDefinition {
       rubric: RUBRICS.crossProjectPreference,
       metadata: {
         difficulty: "medium",
-        tags: ["cross-project", "preference", "naming-convention", "kebab-case"],
+        tags: [
+          "cross-project",
+          "preference",
+          "naming-convention",
+          "kebab-case",
+        ],
       },
     },
     {
@@ -1833,7 +1853,7 @@ function buildCP3(): ScenarioDefinition {
         "regardless of the change scope (even documentation changes). If " +
         "tests fail, don't commit. (2) Error responses should be " +
         "user-friendly with the format " +
-        "`{ error: { code: \"...\", message: \"...\" } }` — never return " +
+        '`{ error: { code: "...", message: "..." } }` — never return ' +
         "raw stack traces to the client. Full errors are logged server-side " +
         "only.",
       rubric: RUBRICS.crossProjectPreference,

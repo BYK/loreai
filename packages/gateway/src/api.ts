@@ -35,10 +35,7 @@ import { resolveAuth } from "./auth";
 
 type RouteParams = Record<string, string>;
 
-function matchRoute(
-  pathname: string,
-  pattern: string,
-): RouteParams | null {
+function matchRoute(pathname: string, pattern: string): RouteParams | null {
   const patternParts = pattern.split("/");
   const pathParts = pathname.split("/");
   if (patternParts.length !== pathParts.length) return null;
@@ -81,9 +78,7 @@ async function parseBody<T = unknown>(req: Request): Promise<T> {
   const encoding = req.headers.get("content-encoding");
   if (encoding === "zstd") {
     const raw = new Uint8Array(await req.arrayBuffer());
-    const decompressed = Bun.zstdDecompressSync(
-      raw as Uint8Array<ArrayBuffer>,
-    );
+    const decompressed = Bun.zstdDecompressSync(raw as Uint8Array<ArrayBuffer>);
     return JSON.parse(new TextDecoder().decode(decompressed)) as T;
   }
   return (await req.json()) as T;
@@ -178,25 +173,29 @@ function handleListSessions(url: URL, projectPath: string): Response {
 function handleListDistillations(url: URL, projectPath: string): Response {
   const limit = getLimit(url);
   const sessionId = url.searchParams.get("session") ?? undefined;
-  return jsonResponse(data.listDistillations(projectPath, { sessionId, limit }));
+  return jsonResponse(
+    data.listDistillations(projectPath, { sessionId, limit }),
+  );
 }
 
 function handleShowKnowledge(id: string): Response {
   // Support prefix resolution
   const resolvedId = data.resolveId("knowledge", id) ?? id;
   const entry = ltm.get(resolvedId);
-  if (!entry) return errorResponse(404, "not_found", `Knowledge entry not found: ${id}`);
+  if (!entry)
+    return errorResponse(404, "not_found", `Knowledge entry not found: ${id}`);
   return jsonResponse(entry);
 }
 
-function handleShowSession(
-  url: URL,
-  sessionId: string,
-): Response {
+function handleShowSession(url: URL, sessionId: string): Response {
   // Session show needs a project to scope the query
   const project = resolveProject(url);
   if (!project) {
-    return errorResponse(400, "invalid_request", "Session show requires ?git_remote or ?path to identify the project");
+    return errorResponse(
+      400,
+      "invalid_request",
+      "Session show requires ?git_remote or ?path to identify the project",
+    );
   }
   const messages = temporal.bySession(project.path, sessionId);
   const distillations = data.listDistillations(project.path, { sessionId });
@@ -206,7 +205,8 @@ function handleShowSession(
 function handleShowDistillation(id: string): Response {
   const resolvedId = data.resolveId("distillations", id) ?? id;
   const entry = data.getDistillation(resolvedId);
-  if (!entry) return errorResponse(404, "not_found", `Distillation not found: ${id}`);
+  if (!entry)
+    return errorResponse(404, "not_found", `Distillation not found: ${id}`);
   return jsonResponse(entry);
 }
 
@@ -222,13 +222,14 @@ function handleDeleteKnowledge(id: string): Response {
   return errorResponse(404, "not_found", `Knowledge entry not found: ${id}`);
 }
 
-function handleDeleteSession(
-  url: URL,
-  sessionId: string,
-): Response {
+function handleDeleteSession(url: URL, sessionId: string): Response {
   const project = resolveProject(url);
   if (!project) {
-    return errorResponse(400, "invalid_request", "Session delete requires ?git_remote or ?path to identify the project");
+    return errorResponse(
+      400,
+      "invalid_request",
+      "Session delete requires ?git_remote or ?path to identify the project",
+    );
   }
   const result = data.deleteSession(project.path, sessionId);
   return jsonResponse(result);
@@ -244,7 +245,8 @@ function handleDeleteDistillation(id: string): Response {
 
 function handleDeleteProject(id: string): Response {
   const result = data.deleteProject(id);
-  if (!result) return errorResponse(404, "not_found", `Project not found: ${id}`);
+  if (!result)
+    return errorResponse(404, "not_found", `Project not found: ${id}`);
   return jsonResponse(result);
 }
 
@@ -252,7 +254,11 @@ async function handleClearProject(
   req: Request,
   projectPath: string,
 ): Promise<Response> {
-  let body: { knowledge?: boolean; temporal?: boolean; distillations?: boolean } = {};
+  let body: {
+    knowledge?: boolean;
+    temporal?: boolean;
+    distillations?: boolean;
+  } = {};
   try {
     body = (await parseBody(req)) ?? {};
   } catch {
@@ -263,9 +269,12 @@ async function handleClearProject(
   const hasFlags = body.knowledge || body.temporal || body.distillations;
   if (hasFlags) {
     const result: Record<string, number> = {};
-    if (body.knowledge) result.knowledge_deleted = data.clearKnowledge(projectPath);
-    if (body.temporal) result.temporal_deleted = data.clearTemporal(projectPath);
-    if (body.distillations) result.distillations_deleted = data.clearDistillations(projectPath);
+    if (body.knowledge)
+      result.knowledge_deleted = data.clearKnowledge(projectPath);
+    if (body.temporal)
+      result.temporal_deleted = data.clearTemporal(projectPath);
+    if (body.distillations)
+      result.distillations_deleted = data.clearDistillations(projectPath);
     return jsonResponse(result);
   }
 
@@ -276,7 +285,8 @@ async function handleClearProject(
 function handleMergeProjects(): Response {
   if (isHostedMode()) {
     return errorResponse(
-      400, "invalid_request",
+      400,
+      "invalid_request",
       "Merge is not supported in hosted mode (requires local filesystem access to scan git remotes)",
     );
   }
@@ -287,7 +297,10 @@ function handleMergeProjects(): Response {
 async function handleReindex(): Promise<Response> {
   const knowledge = await embedding.backfillEmbeddings();
   const distillations = await embedding.backfillDistillationEmbeddings();
-  return jsonResponse({ knowledge_embedded: knowledge, distillations_embedded: distillations });
+  return jsonResponse({
+    knowledge_embedded: knowledge,
+    distillations_embedded: distillations,
+  });
 }
 
 async function handleDedup(projectPath: string): Promise<Response> {
@@ -307,18 +320,30 @@ async function handleRecall(
 ): Promise<Response> {
   const query = url.searchParams.get("q");
   if (!query) {
-    return errorResponse(400, "invalid_request", "Missing required query parameter: q");
+    return errorResponse(
+      400,
+      "invalid_request",
+      "Missing required query parameter: q",
+    );
   }
 
   const project = resolveProject(url);
   if (!project) {
-    return errorResponse(400, "invalid_request", "Recall requires ?git_remote or ?path to identify the project");
+    return errorResponse(
+      400,
+      "invalid_request",
+      "Recall requires ?git_remote or ?path to identify the project",
+    );
   }
 
   const VALID_SCOPES = new Set(["all", "session", "project", "knowledge"]);
   const rawScope = url.searchParams.get("scope") ?? "all";
   if (!VALID_SCOPES.has(rawScope)) {
-    return errorResponse(400, "invalid_request", `Invalid scope: "${rawScope}". Must be one of: all, session, project, knowledge`);
+    return errorResponse(
+      400,
+      "invalid_request",
+      `Invalid scope: "${rawScope}". Must be one of: all, session, project, knowledge`,
+    );
   }
   const scope = rawScope as RecallScope;
   const sessionID = url.searchParams.get("session") ?? undefined;
@@ -370,27 +395,40 @@ async function handleImportExtract(
   }>(req);
 
   if (!body.chunks?.length) {
-    return errorResponse(400, "invalid_request", "Missing or empty chunks array");
+    return errorResponse(
+      400,
+      "invalid_request",
+      "Missing or empty chunks array",
+    );
   }
 
   // Resolve project
   const projectId = resolveProjectByRemoteOrPath(body.git_remote, body.path);
   const projectPath = projectId ? getProjectPathById(projectId) : body.path;
   if (!projectPath) {
-    return errorResponse(404, "not_found", "Project not found. Provide git_remote or path.");
+    return errorResponse(
+      404,
+      "not_found",
+      "Project not found. Provide git_remote or path.",
+    );
   }
 
   const cfg = loreConfig();
-  const defaultModel = body.model ?? cfg.model ?? {
-    providerID: "anthropic",
-    modelID: "claude-sonnet-4-6",
-  };
+  const defaultModel = body.model ??
+    cfg.model ?? {
+      providerID: "anthropic",
+      modelID: "claude-sonnet-4-6",
+    };
 
   let llm: LLMClient;
   try {
     llm = getAPILLMClient(config);
   } catch {
-    return errorResponse(503, "service_unavailable", "No LLM client available for extraction");
+    return errorResponse(
+      503,
+      "service_unavailable",
+      "No LLM client available for extraction",
+    );
   }
 
   const result = await conversationImport.extractKnowledge({
@@ -406,7 +444,11 @@ async function handleImportExtract(
 function handleImportHistory(url: URL): Response {
   const project = resolveProject(url);
   if (!project) {
-    return errorResponse(400, "invalid_request", "Import history requires ?git_remote or ?path to identify the project");
+    return errorResponse(
+      400,
+      "invalid_request",
+      "Import history requires ?git_remote or ?path to identify the project",
+    );
   }
 
   const records = conversationImport.listImports(project.path);
@@ -424,16 +466,30 @@ async function handleImportRecord(req: Request): Promise<Response> {
   }>(req);
 
   if (!body.agent_name || !body.source_id || !body.source_hash || !body.stats) {
-    return errorResponse(400, "invalid_request", "Missing required fields: agent_name, source_id, source_hash, stats");
+    return errorResponse(
+      400,
+      "invalid_request",
+      "Missing required fields: agent_name, source_id, source_hash, stats",
+    );
   }
 
   const projectId = resolveProjectByRemoteOrPath(body.git_remote, body.path);
   const projectPath = projectId ? getProjectPathById(projectId) : body.path;
   if (!projectPath) {
-    return errorResponse(404, "not_found", "Project not found. Provide git_remote or path.");
+    return errorResponse(
+      404,
+      "not_found",
+      "Project not found. Provide git_remote or path.",
+    );
   }
 
-  conversationImport.recordImport(projectPath, body.agent_name, body.source_id, body.source_hash, body.stats);
+  conversationImport.recordImport(
+    projectPath,
+    body.agent_name,
+    body.source_id,
+    body.source_hash,
+    body.stats,
+  );
   return jsonResponse({ recorded: true });
 }
 
@@ -469,7 +525,12 @@ export async function handleAPIRequest(
     params = matchRoute(pathname, "/api/v1/projects/:id/knowledge");
     if (params) {
       const project = resolveProject(url, params.id);
-      if (!project) return errorResponse(404, "not_found", `Project not found: ${params.id}`);
+      if (!project)
+        return errorResponse(
+          404,
+          "not_found",
+          `Project not found: ${params.id}`,
+        );
       return handleListKnowledge(url, project.path);
     }
 
@@ -477,7 +538,12 @@ export async function handleAPIRequest(
     params = matchRoute(pathname, "/api/v1/projects/:id/sessions");
     if (params) {
       const project = resolveProject(url, params.id);
-      if (!project) return errorResponse(404, "not_found", `Project not found: ${params.id}`);
+      if (!project)
+        return errorResponse(
+          404,
+          "not_found",
+          `Project not found: ${params.id}`,
+        );
       return handleListSessions(url, project.path);
     }
 
@@ -485,7 +551,12 @@ export async function handleAPIRequest(
     params = matchRoute(pathname, "/api/v1/projects/:id/distillations");
     if (params) {
       const project = resolveProject(url, params.id);
-      if (!project) return errorResponse(404, "not_found", `Project not found: ${params.id}`);
+      if (!project)
+        return errorResponse(
+          404,
+          "not_found",
+          `Project not found: ${params.id}`,
+        );
       return handleListDistillations(url, project.path);
     }
 
@@ -563,7 +634,12 @@ export async function handleAPIRequest(
     params = matchRoute(pathname, "/api/v1/projects/:id/clear");
     if (params) {
       const project = resolveProject(url, params.id);
-      if (!project) return errorResponse(404, "not_found", `Project not found: ${params.id}`);
+      if (!project)
+        return errorResponse(
+          404,
+          "not_found",
+          `Project not found: ${params.id}`,
+        );
       return await handleClearProject(req, project.path);
     }
 
@@ -571,10 +647,19 @@ export async function handleAPIRequest(
     params = matchRoute(pathname, "/api/v1/projects/:id/dedup");
     if (params) {
       const project = resolveProject(url, params.id);
-      if (!project) return errorResponse(404, "not_found", `Project not found: ${params.id}`);
+      if (!project)
+        return errorResponse(
+          404,
+          "not_found",
+          `Project not found: ${params.id}`,
+        );
       return await handleDedup(project.path);
     }
   }
 
-  return errorResponse(404, "not_found", `No API route for ${method} ${pathname}`);
+  return errorResponse(
+    404,
+    "not_found",
+    `No API route for ${method} ${pathname}`,
+  );
 }

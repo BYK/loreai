@@ -54,9 +54,7 @@ describe("knowledge cross-references", () => {
     });
 
     test("returns null for non-existent UUID", () => {
-      const resolved = ltm.resolveRef(
-        "00000000-0000-0000-0000-000000000000",
-      );
+      const resolved = ltm.resolveRef("00000000-0000-0000-0000-000000000000");
       expect(resolved).toBeNull();
     });
 
@@ -97,9 +95,7 @@ describe("knowledge cross-references", () => {
 
       // Check join table
       const refs = db()
-        .query(
-          "SELECT * FROM knowledge_refs WHERE from_id = ? AND to_id = ?",
-        )
+        .query("SELECT * FROM knowledge_refs WHERE from_id = ? AND to_id = ?")
         .all(sourceId, targetId);
       expect(refs.length).toBe(1);
     });

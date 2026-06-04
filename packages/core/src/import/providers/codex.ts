@@ -10,7 +10,11 @@
 import { readdirSync, readFileSync, statSync, existsSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
-import type { AgentHistoryProvider, ConversationChunk, DetectedSession } from "../types";
+import type {
+  AgentHistoryProvider,
+  ConversationChunk,
+  DetectedSession,
+} from "../types";
 import { registerProvider } from "./index";
 
 // ---------------------------------------------------------------------------
@@ -180,9 +184,7 @@ function parseJSONL(filePath: string): CodexLine[] {
 }
 
 /** Get session metadata from the first line of a JSONL file. */
-function getSessionMeta(
-  filePath: string,
-): {
+function getSessionMeta(filePath: string): {
   id: string;
   cwd: string;
   timestamp: string;

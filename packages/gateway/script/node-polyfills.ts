@@ -23,7 +23,8 @@ if (typeof globalThis.Bun === "undefined") {
   const http = require("node:http") as typeof import("node:http");
   const { Readable } = require("node:stream") as typeof import("node:stream");
   const zlib = require("node:zlib") as typeof import("node:zlib");
-  const cp = require("node:child_process") as typeof import("node:child_process");
+  const cp =
+    require("node:child_process") as typeof import("node:child_process");
 
   // ---------------------------------------------------------------------------
   // Bun.serve() → node:http

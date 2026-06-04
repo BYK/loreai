@@ -83,9 +83,7 @@ function makeRecallToolUse(
   };
 }
 
-function makeStoredRecall(
-  overrides: Partial<StoredRecall> = {},
-): StoredRecall {
+function makeStoredRecall(overrides: Partial<StoredRecall> = {}): StoredRecall {
   return {
     toolUseId: "toolu_recall_1",
     input: { query: "test query", scope: "all" },
@@ -126,10 +124,7 @@ describe("MAX_RECALL_DEPTH", () => {
 describe("findRecallToolUse", () => {
   test("finds recall block in response", () => {
     const recallBlock = makeRecallToolUse();
-    const resp = makeResponse([
-      { type: "text", text: "hello" },
-      recallBlock,
-    ]);
+    const resp = makeResponse([{ type: "text", text: "hello" }, recallBlock]);
     expect(findRecallToolUse(resp)).toBe(recallBlock);
   });
 
@@ -280,10 +275,18 @@ describe("parseRecallMarker", () => {
 
 describe("isRecallMarker", () => {
   test("detects search markers", () => {
-    expect(isRecallMarker('📚 Searching all archives for "test query"…')).toBe(true);
-    expect(isRecallMarker('📚 Searching session history for "auth"…')).toBe(true);
-    expect(isRecallMarker('📚 Searching project archives for "config"…')).toBe(true);
-    expect(isRecallMarker('📚 Searching knowledge base for "patterns"…')).toBe(true);
+    expect(isRecallMarker('📚 Searching all archives for "test query"…')).toBe(
+      true,
+    );
+    expect(isRecallMarker('📚 Searching session history for "auth"…')).toBe(
+      true,
+    );
+    expect(isRecallMarker('📚 Searching project archives for "config"…')).toBe(
+      true,
+    );
+    expect(isRecallMarker('📚 Searching knowledge base for "patterns"…')).toBe(
+      true,
+    );
   });
 
   test("detects id-based detail markers", () => {
@@ -354,15 +357,23 @@ describe("buildRecallFollowUp", () => {
     // User message contains recall results as tool_result
     const resultBlock = followUp.messages[2].content[0];
     expect(resultBlock.type).toBe("tool_result");
-    expect((resultBlock as { content: Array<{type: string; text?: string}> }).content).toEqual(
-      [{ type: "text", text: "## Recall Results\n* config is in /root" }],
+    expect(
+      (resultBlock as { content: Array<{ type: string; text?: string }> })
+        .content,
+    ).toEqual([
+      { type: "text", text: "## Recall Results\n* config is in /root" },
+    ]);
+    expect((resultBlock as { toolUseId: string }).toolUseId).toBe(
+      recallBlock.id,
     );
-    expect((resultBlock as { toolUseId: string }).toolUseId).toBe(recallBlock.id);
 
     // Tools list keeps recall — the continuation is recall-aware and
     // can handle further recall calls (multi-turn recall).
     expect(followUp.tools).toHaveLength(2);
-    expect(followUp.tools.map((t) => t.name).sort()).toEqual(["Read", "recall"]);
+    expect(followUp.tools.map((t) => t.name).sort()).toEqual([
+      "Read",
+      "recall",
+    ]);
   });
 
   test("preserves other request properties", () => {
@@ -393,7 +404,11 @@ describe("buildRecallFollowUp", () => {
     const recallBlock = makeRecallToolUse("find config");
     const resp = makeResponse(
       [
-        { type: "thinking", thinking: "Let me search for config info...", signature: "sig_abc123" },
+        {
+          type: "thinking",
+          thinking: "Let me search for config info...",
+          signature: "sig_abc123",
+        },
         { type: "text", text: "Let me search." },
         recallBlock,
       ],
@@ -418,13 +433,15 @@ describe("buildRecallFollowUp", () => {
       "sig_abc123",
     );
     expect(assistant.content[1].type).toBe("tool_use");
-    expect((assistant.content[1] as GatewayToolUseBlock).name).toBe(RECALL_TOOL_NAME);
+    expect((assistant.content[1] as GatewayToolUseBlock).name).toBe(
+      RECALL_TOOL_NAME,
+    );
   });
 
   test("excludes text blocks but keeps thinking blocks", () => {
-    const req = makeRequest(
-      [{ role: "user", content: [{ type: "text", text: "hello" }] }],
-    );
+    const req = makeRequest([
+      { role: "user", content: [{ type: "text", text: "hello" }] },
+    ]);
 
     const recallBlock = makeRecallToolUse();
     const resp = makeResponse(
@@ -444,13 +461,15 @@ describe("buildRecallFollowUp", () => {
     expect(assistant.content).toHaveLength(2);
     expect(assistant.content[0].type).toBe("thinking");
     expect(assistant.content[1].type).toBe("tool_use");
-    expect((assistant.content[1] as GatewayToolUseBlock).name).toBe(RECALL_TOOL_NAME);
+    expect((assistant.content[1] as GatewayToolUseBlock).name).toBe(
+      RECALL_TOOL_NAME,
+    );
   });
 
   test("handles multiple thinking blocks", () => {
-    const req = makeRequest(
-      [{ role: "user", content: [{ type: "text", text: "hello" }] }],
-    );
+    const req = makeRequest([
+      { role: "user", content: [{ type: "text", text: "hello" }] },
+    ]);
 
     const recallBlock = makeRecallToolUse();
     const resp = makeResponse(
@@ -469,13 +488,15 @@ describe("buildRecallFollowUp", () => {
     expect(assistant.content[0].type).toBe("thinking");
     expect(assistant.content[1].type).toBe("thinking");
     expect(assistant.content[2].type).toBe("tool_use");
-    expect((assistant.content[2] as GatewayToolUseBlock).name).toBe(RECALL_TOOL_NAME);
+    expect((assistant.content[2] as GatewayToolUseBlock).name).toBe(
+      RECALL_TOOL_NAME,
+    );
   });
 
   test("works without thinking blocks (non-thinking model)", () => {
-    const req = makeRequest(
-      [{ role: "user", content: [{ type: "text", text: "hello" }] }],
-    );
+    const req = makeRequest([
+      { role: "user", content: [{ type: "text", text: "hello" }] },
+    ]);
 
     const recallBlock = makeRecallToolUse();
     const resp = makeResponse(
@@ -489,13 +510,15 @@ describe("buildRecallFollowUp", () => {
     // No thinking blocks — just the tool_use
     expect(assistant.content).toHaveLength(1);
     expect(assistant.content[0].type).toBe("tool_use");
-    expect((assistant.content[0] as GatewayToolUseBlock).name).toBe(RECALL_TOOL_NAME);
+    expect((assistant.content[0] as GatewayToolUseBlock).name).toBe(
+      RECALL_TOOL_NAME,
+    );
   });
 
   test("uses '[No results found.]' for empty recall result", () => {
-    const req = makeRequest(
-      [{ role: "user", content: [{ type: "text", text: "hello" }] }],
-    );
+    const req = makeRequest([
+      { role: "user", content: [{ type: "text", text: "hello" }] },
+    ]);
 
     const recallBlock = makeRecallToolUse();
     const resp = makeResponse([recallBlock], "tool_use");
@@ -504,8 +527,13 @@ describe("buildRecallFollowUp", () => {
 
     const resultBlock = followUp.messages[2].content[0];
     expect(resultBlock.type).toBe("tool_result");
-    expect((resultBlock as { content: Array<{type: string; text?: string}> }).content).toEqual([{ type: "text", text: "[No results found.]" }]);
-    expect((resultBlock as { toolUseId: string }).toolUseId).toBe(recallBlock.id);
+    expect(
+      (resultBlock as { content: Array<{ type: string; text?: string }> })
+        .content,
+    ).toEqual([{ type: "text", text: "[No results found.]" }]);
+    expect((resultBlock as { toolUseId: string }).toolUseId).toBe(
+      recallBlock.id,
+    );
   });
 });
 
@@ -525,13 +553,22 @@ describe("expandRecallMarkers", () => {
         content: [
           { type: "text", text: "I'll read the file." },
           { type: "text", text: buildRecallMarker("test query", "all") },
-          { type: "tool_use", id: "toolu_1", name: "Read", input: { path: "/a" } },
+          {
+            type: "tool_use",
+            id: "toolu_1",
+            name: "Read",
+            input: { path: "/a" },
+          },
         ],
       },
       {
         role: "user",
         content: [
-          { type: "tool_result", toolUseId: "toolu_1", content: [{ type: "text", text: "file content" }] },
+          {
+            type: "tool_result",
+            toolUseId: "toolu_1",
+            content: [{ type: "text", text: "file content" }],
+          },
         ],
       },
     ]);
@@ -594,11 +631,14 @@ describe("expandRecallMarkers", () => {
 
   test("splits assistant message when continuation text follows marker (recall-only)", () => {
     const store: RecallStore = new Map();
-    store.set(recallStoreKey("arch query", "all"), makeStoredRecall({
-      toolUseId: "toolu_recall_split",
-      input: { query: "arch query", scope: "all" },
-      result: "Found: architecture docs",
-    }));
+    store.set(
+      recallStoreKey("arch query", "all"),
+      makeStoredRecall({
+        toolUseId: "toolu_recall_split",
+        input: { query: "arch query", scope: "all" },
+        result: "Found: architecture docs",
+      }),
+    );
 
     // Simulate recall-only with follow-up: the client sees one assistant
     // message with marker + continuation text from the follow-up.
@@ -608,10 +648,16 @@ describe("expandRecallMarkers", () => {
         role: "assistant",
         content: [
           { type: "text", text: buildRecallMarker("arch query", "all") },
-          { type: "text", text: "Based on the architecture docs, here's what I found..." },
+          {
+            type: "text",
+            text: "Based on the architecture docs, here's what I found...",
+          },
         ],
       },
-      { role: "user", content: [{ type: "text", text: "thanks, tell me more" }] },
+      {
+        role: "user",
+        content: [{ type: "text", text: "thanks, tell me more" }],
+      },
     ]);
 
     const result = expandRecallMarkers(req, store);
@@ -624,14 +670,24 @@ describe("expandRecallMarkers", () => {
     expect(req.messages[1].role).toBe("assistant");
     expect(req.messages[1].content).toHaveLength(1);
     expect(req.messages[1].content[0].type).toBe("tool_use");
-    expect((req.messages[1].content[0] as GatewayToolUseBlock).id).toBe("toolu_recall_split");
+    expect((req.messages[1].content[0] as GatewayToolUseBlock).id).toBe(
+      "toolu_recall_split",
+    );
 
     // Message 2: synthetic user with tool_result
     expect(req.messages[2].role).toBe("user");
     expect(req.messages[2].content).toHaveLength(1);
     expect(req.messages[2].content[0].type).toBe("tool_result");
-    expect((req.messages[2].content[0] as { toolUseId: string }).toolUseId).toBe("toolu_recall_split");
-    expect((req.messages[2].content[0] as { content: Array<{type: string; text?: string}> }).content).toEqual([{ type: "text", text: "Found: architecture docs" }]);
+    expect(
+      (req.messages[2].content[0] as { toolUseId: string }).toolUseId,
+    ).toBe("toolu_recall_split");
+    expect(
+      (
+        req.messages[2].content[0] as {
+          content: Array<{ type: string; text?: string }>;
+        }
+      ).content,
+    ).toEqual([{ type: "text", text: "Found: architecture docs" }]);
 
     // Message 3: continuation assistant message
     expect(req.messages[3].role).toBe("assistant");
@@ -642,15 +698,20 @@ describe("expandRecallMarkers", () => {
 
     // Message 4: original next user message (unchanged)
     expect(req.messages[4].role).toBe("user");
-    expect((req.messages[4].content[0] as { text: string }).text).toBe("thanks, tell me more");
+    expect((req.messages[4].content[0] as { text: string }).text).toBe(
+      "thanks, tell me more",
+    );
   });
 
   test("does NOT split when content after marker is only tool_use blocks (mixed tools)", () => {
     const store: RecallStore = new Map();
-    store.set(recallStoreKey("mixed query", "all"), makeStoredRecall({
-      toolUseId: "toolu_recall_mixed",
-      input: { query: "mixed query", scope: "all" },
-    }));
+    store.set(
+      recallStoreKey("mixed query", "all"),
+      makeStoredRecall({
+        toolUseId: "toolu_recall_mixed",
+        input: { query: "mixed query", scope: "all" },
+      }),
+    );
 
     const req = makeRequest([
       { role: "user", content: [{ type: "text", text: "search and read" }] },
@@ -659,13 +720,22 @@ describe("expandRecallMarkers", () => {
         content: [
           { type: "text", text: "I'll search and read." },
           { type: "text", text: buildRecallMarker("mixed query", "all") },
-          { type: "tool_use", id: "toolu_read_1", name: "Read", input: { path: "/a" } },
+          {
+            type: "tool_use",
+            id: "toolu_read_1",
+            name: "Read",
+            input: { path: "/a" },
+          },
         ],
       },
       {
         role: "user",
         content: [
-          { type: "tool_result", toolUseId: "toolu_read_1", content: [{ type: "text", text: "file content" }] },
+          {
+            type: "tool_result",
+            toolUseId: "toolu_read_1",
+            content: [{ type: "text", text: "file content" }],
+          },
         ],
       },
     ]);
@@ -686,20 +756,30 @@ describe("expandRecallMarkers", () => {
     // User message has recall tool_result prepended
     const user = req.messages[2];
     expect(user.content).toHaveLength(2);
-    expect((user.content[0] as { toolUseId: string }).toolUseId).toBe("toolu_recall_mixed");
-    expect((user.content[1] as { toolUseId: string }).toolUseId).toBe("toolu_read_1");
+    expect((user.content[0] as { toolUseId: string }).toolUseId).toBe(
+      "toolu_recall_mixed",
+    );
+    expect((user.content[1] as { toolUseId: string }).toolUseId).toBe(
+      "toolu_read_1",
+    );
   });
 
   test("expands markers across multiple assistant messages", () => {
     const store: RecallStore = new Map();
-    store.set(recallStoreKey("query1", "all"), makeStoredRecall({
-      toolUseId: "toolu_recall_1",
-      input: { query: "query1", scope: "all" },
-    }));
-    store.set(recallStoreKey("query2", "session"), makeStoredRecall({
-      toolUseId: "toolu_recall_2",
-      input: { query: "query2", scope: "session" },
-    }));
+    store.set(
+      recallStoreKey("query1", "all"),
+      makeStoredRecall({
+        toolUseId: "toolu_recall_1",
+        input: { query: "query1", scope: "all" },
+      }),
+    );
+    store.set(
+      recallStoreKey("query2", "session"),
+      makeStoredRecall({
+        toolUseId: "toolu_recall_2",
+        input: { query: "query2", scope: "session" },
+      }),
+    );
 
     const req = makeRequest([
       { role: "user", content: [{ type: "text", text: "first" }] },
@@ -710,7 +790,9 @@ describe("expandRecallMarkers", () => {
       { role: "user", content: [{ type: "text", text: "second" }] },
       {
         role: "assistant",
-        content: [{ type: "text", text: buildRecallMarker("query2", "session") }],
+        content: [
+          { type: "text", text: buildRecallMarker("query2", "session") },
+        ],
       },
       { role: "user", content: [{ type: "text", text: "third" }] },
     ]);
@@ -720,15 +802,23 @@ describe("expandRecallMarkers", () => {
 
     // Both assistant messages should have tool_use blocks
     expect(req.messages[1].content[0].type).toBe("tool_use");
-    expect((req.messages[1].content[0] as GatewayToolUseBlock).id).toBe("toolu_recall_1");
+    expect((req.messages[1].content[0] as GatewayToolUseBlock).id).toBe(
+      "toolu_recall_1",
+    );
     expect(req.messages[3].content[0].type).toBe("tool_use");
-    expect((req.messages[3].content[0] as GatewayToolUseBlock).id).toBe("toolu_recall_2");
+    expect((req.messages[3].content[0] as GatewayToolUseBlock).id).toBe(
+      "toolu_recall_2",
+    );
 
     // Both following user messages should have tool_results inserted
     expect(req.messages[2].content[0].type).toBe("tool_result");
-    expect((req.messages[2].content[0] as { toolUseId: string }).toolUseId).toBe("toolu_recall_1");
+    expect(
+      (req.messages[2].content[0] as { toolUseId: string }).toolUseId,
+    ).toBe("toolu_recall_1");
     expect(req.messages[4].content[0].type).toBe("tool_result");
-    expect((req.messages[4].content[0] as { toolUseId: string }).toolUseId).toBe("toolu_recall_2");
+    expect(
+      (req.messages[4].content[0] as { toolUseId: string }).toolUseId,
+    ).toBe("toolu_recall_2");
   });
 });
 

@@ -185,7 +185,11 @@ export async function findRepeatedInstructions(input: {
 
     // Path A: Vector search (when embeddings succeeded)
     if (candidateEmbeddings.length > i) {
-      const hits = embedding.vectorSearchAllDistillations(candidateEmbeddings[i], pid, 20);
+      const hits = embedding.vectorSearchAllDistillations(
+        candidateEmbeddings[i],
+        pid,
+        20,
+      );
       for (const hit of hits) {
         if (
           hit.similarity >= VECTOR_SIMILARITY_THRESHOLD &&

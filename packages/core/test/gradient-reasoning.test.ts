@@ -387,7 +387,9 @@ describe("reasoning preservation — semantic invariant", () => {
         if (isReasoningPart(p)) {
           // Reasoning text must not be replaced with a stub. We check for
           // common placeholder-style phrases.
-          expect(p.text).not.toMatch(/\[reasoning (?:omitted|removed|cleared|truncated)\]/i);
+          expect(p.text).not.toMatch(
+            /\[reasoning (?:omitted|removed|cleared|truncated)\]/i,
+          );
           expect(p.text.length).toBeGreaterThan(0);
         }
       }

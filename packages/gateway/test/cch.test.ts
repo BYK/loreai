@@ -50,8 +50,10 @@ describe("signBody", () => {
   });
 
   test("produces different hashes for different bodies", () => {
-    const body1 = '{"system":[{"type":"text","text":"cch=00000;"}],"messages":[{"role":"user","content":"hello"}]}';
-    const body2 = '{"system":[{"type":"text","text":"cch=00000;"}],"messages":[{"role":"user","content":"world"}]}';
+    const body1 =
+      '{"system":[{"type":"text","text":"cch=00000;"}],"messages":[{"role":"user","content":"hello"}]}';
+    const body2 =
+      '{"system":[{"type":"text","text":"cch=00000;"}],"messages":[{"role":"user","content":"world"}]}';
 
     const cch1 = signBody(body1).match(/cch=([0-9a-f]{5})/)?.[1];
     const cch2 = signBody(body2).match(/cch=([0-9a-f]{5})/)?.[1];
@@ -131,7 +133,10 @@ describe("captureBillingPrefix", () => {
 
   test("returns false when no billing header is present", () => {
     expect(
-      captureBillingPrefix(SID_A, "You are Claude Code, Anthropic's official CLI."),
+      captureBillingPrefix(
+        SID_A,
+        "You are Claude Code, Anthropic's official CLI.",
+      ),
     ).toBe(false);
   });
 
@@ -211,10 +216,17 @@ describe("buildBillingBlock", () => {
       "x-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=a39d0;",
     );
     const block1 = buildBillingBlock(SID_A, "Summarize this conversation.");
-    const block2 = buildBillingBlock(SID_A, "Expand query for semantic search.");
+    const block2 = buildBillingBlock(
+      SID_A,
+      "Expand query for semantic search.",
+    );
     // Extract the suffix
-    const suffix1 = block1!.text.match(/cc_version=\d+\.\d+\.\d+\.([0-9a-f]{3})/)?.[1];
-    const suffix2 = block2!.text.match(/cc_version=\d+\.\d+\.\d+\.([0-9a-f]{3})/)?.[1];
+    const suffix1 = block1!.text.match(
+      /cc_version=\d+\.\d+\.\d+\.([0-9a-f]{3})/,
+    )?.[1];
+    const suffix2 = block2!.text.match(
+      /cc_version=\d+\.\d+\.\d+\.([0-9a-f]{3})/,
+    )?.[1];
     expect(suffix1).toBeDefined();
     expect(suffix2).toBeDefined();
     expect(suffix1).not.toEqual(suffix2);
@@ -397,11 +409,13 @@ describe("round-trip", () => {
 
 describe("resignBody", () => {
   /** Helper: build a serialized body with a client-signed billing header. */
-  function buildClientBody(opts: {
-    clientVersion?: string;
-    clientCch?: string;
-    userMessage?: string;
-  } = {}): string {
+  function buildClientBody(
+    opts: {
+      clientVersion?: string;
+      clientCch?: string;
+      userMessage?: string;
+    } = {},
+  ): string {
     const version = opts.clientVersion ?? "2.1.35.abc";
     const cch = opts.clientCch ?? "deadb";
     const user = opts.userMessage ?? "Tell me about TypeScript generics";
@@ -463,7 +477,10 @@ describe("resignBody", () => {
     });
 
     const resigned1 = resignBody(body1, "Tell me about TypeScript generics");
-    const resigned2 = resignBody(body2, "Completely different user message here!");
+    const resigned2 = resignBody(
+      body2,
+      "Completely different user message here!",
+    );
 
     // Different user messages produce different suffixes
     const suffix1 = resigned1.match(
@@ -573,8 +590,8 @@ describe("exported constants", () => {
 
   test("VERSION_SEEDS contains known historical seeds", () => {
     // Permanent regression anchors — these versions will always exist
-    expect(VERSION_SEEDS["2.1.37"]).toBe(0x6E52736AC806831En);
-    expect(VERSION_SEEDS["2.1.138"]).toBe(0x4D659218E32A3268n);
+    expect(VERSION_SEEDS["2.1.37"]).toBe(0x6e52736ac806831en);
+    expect(VERSION_SEEDS["2.1.138"]).toBe(0x4d659218e32a3268n);
   });
 
   test("VERSION_SEEDS has at least 2 entries, all non-zero bigints", () => {
@@ -600,8 +617,9 @@ describe("resolveSeed", () => {
   // Derive known versions sorted ascending so tests adapt to any VERSION_SEEDS
   const knownVersions = Object.keys(VERSION_SEEDS)
     .map((v) => ({ version: v, parsed: _parseSemver(v) }))
-    .filter((e): e is { version: string; parsed: [number, number, number] } =>
-      e.parsed !== null,
+    .filter(
+      (e): e is { version: string; parsed: [number, number, number] } =>
+        e.parsed !== null,
     )
     .sort((a, b) => _compareSemver(a.parsed, b.parsed));
 
@@ -716,7 +734,12 @@ describe("binary-verified values", () => {
     // Sign a test body with the 2.1.138 seed and verify round-trip
     const body = JSON.stringify({
       model: "claude-sonnet-4-20250514",
-      system: [{ type: "text", text: "x-anthropic-billing-header: cc_version=2.1.138.470; cc_entrypoint=cli; cch=00000;" }],
+      system: [
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.138.470; cc_entrypoint=cli; cch=00000;",
+        },
+      ],
       messages: [{ role: "user", content: "hello" }],
     });
     const signed = signBody(body);
@@ -728,7 +751,12 @@ describe("binary-verified values", () => {
     // Sign with current WORKER_SEED
     const body = JSON.stringify({
       model: "claude-sonnet-4-20250514",
-      system: [{ type: "text", text: `x-anthropic-billing-header: cc_version=${WORKER_VERSION}.abc; cc_entrypoint=cli; cch=00000;` }],
+      system: [
+        {
+          type: "text",
+          text: `x-anthropic-billing-header: cc_version=${WORKER_VERSION}.abc; cc_entrypoint=cli; cch=00000;`,
+        },
+      ],
       messages: [{ role: "user", content: "test" }],
     });
     const signed = signBody(body);
@@ -738,11 +766,16 @@ describe("binary-verified values", () => {
     const oldSeed = VERSION_SEEDS["2.1.37"];
     const body2 = JSON.stringify({
       model: "claude-sonnet-4-20250514",
-      system: [{ type: "text", text: "x-anthropic-billing-header: cc_version=2.1.37.def; cc_entrypoint=cli; cch=00000;" }],
+      system: [
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.37.def; cc_entrypoint=cli; cch=00000;",
+        },
+      ],
       messages: [{ role: "user", content: "test" }],
     });
     const hash = Bun.hash.xxHash64(body2, oldSeed);
-    const cch = (hash & 0xFFFFFn).toString(16).padStart(5, "0");
+    const cch = (hash & 0xfffffn).toString(16).padStart(5, "0");
     const signedOld = body2.replace("cch=00000", `cch=${cch}`);
     expect(validateSeed(signedOld)).toBe(true);
   });
@@ -752,7 +785,8 @@ describe("binary-verified values", () => {
 // captureSessionHeaders + buildOAuthWorkerHeaders
 // ---------------------------------------------------------------------------
 
-const BILLING_SYSTEM = "x-anthropic-billing-header: cc_version=2.1.152.e9a; cc_entrypoint=cli; cch=abcde;";
+const BILLING_SYSTEM =
+  "x-anthropic-billing-header: cc_version=2.1.152.e9a; cc_entrypoint=cli; cch=abcde;";
 
 describe("captureSessionHeaders", () => {
   test("is a no-op for non-billing sessions", () => {
@@ -776,8 +810,12 @@ describe("captureSessionHeaders", () => {
 
     const headers = buildOAuthWorkerHeaders(SID_A);
     expect(headers).not.toBeNull();
-    expect(headers!["anthropic-beta"]).toBe("oauth-2025-04-20,interleaved-thinking-2025-05-14");
-    expect(headers!["user-agent"]).toBe("claude-cli/2.1.152 (external, sdk-cli)");
+    expect(headers!["anthropic-beta"]).toBe(
+      "oauth-2025-04-20,interleaved-thinking-2025-05-14",
+    );
+    expect(headers!["user-agent"]).toBe(
+      "claude-cli/2.1.152 (external, sdk-cli)",
+    );
   });
 
   test("captures partial headers (only anthropic-beta present)", () => {
@@ -824,8 +862,12 @@ describe("buildOAuthWorkerHeaders", () => {
     const headers = buildOAuthWorkerHeaders(SID_A);
     expect(headers).not.toBeNull();
     expect(headers!["anthropic-beta"]).toContain("oauth-2025-04-20");
-    expect(headers!["anthropic-beta"]).toContain("extended-cache-ttl-2025-04-11");
-    expect(headers!["anthropic-beta"]).toContain("prompt-caching-scope-2026-01-05");
+    expect(headers!["anthropic-beta"]).toContain(
+      "extended-cache-ttl-2025-04-11",
+    );
+    expect(headers!["anthropic-beta"]).toContain(
+      "prompt-caching-scope-2026-01-05",
+    );
     expect(headers!["user-agent"]).toContain("claude-cli/");
   });
 

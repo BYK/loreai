@@ -1,15 +1,24 @@
-import { describe, test, expect, beforeAll, beforeEach, afterEach, spyOn } from "bun:test";
+import {
+  describe,
+  test,
+  expect,
+  beforeAll,
+  beforeEach,
+  afterEach,
+  spyOn,
+} from "bun:test";
 import { uuidv7 } from "uuidv7";
 import { db, ensureProject } from "../src/db";
 import * as ltm from "../src/ltm";
 import * as embedding from "../src/embedding";
 
 // UUID v7 pattern: starts with version nibble 7, variant bits 10xxxxxx
-const UUID_V7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const UUID_RE    = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const UUID_V7_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 const PROJECT = "/test/ltm/project";
-
 
 describe("ltm", () => {
   test("create and retrieve knowledge entry", () => {
@@ -144,7 +153,8 @@ describe("ltm", () => {
         projectPath: PROJECT,
         category: "architecture",
         title: "Gradient context system",
-        content: "The gradient manages context window compression across layers",
+        content:
+          "The gradient manages context window compression across layers",
         scope: "project",
       });
 
@@ -261,7 +271,9 @@ describe("ltm — crossProject defaults and dedup", () => {
 
     // No duplicate should exist
     const all = ltm.forProject(PROJ, true);
-    const matching = all.filter((e) => e.title === "Cross-project dedup test entry");
+    const matching = all.filter(
+      (e) => e.title === "Cross-project dedup test entry",
+    );
     expect(matching).toHaveLength(1);
   });
 });
@@ -375,7 +387,9 @@ describe("ltm.forSession", () => {
     db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
     // Clean up any cross-project entries from this test project
     db()
-      .query("DELETE FROM knowledge WHERE project_id IN (SELECT id FROM projects WHERE path LIKE '/test/%')")
+      .query(
+        "DELETE FROM knowledge WHERE project_id IN (SELECT id FROM projects WHERE path LIKE '/test/%')",
+      )
       .run();
     db().query("DELETE FROM temporal_messages WHERE project_id = ?").run(pid);
     db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
@@ -393,7 +407,9 @@ describe("ltm.forSession", () => {
 
     const result = await ltm.forSession(PROJ, SESSION, 10_000);
     // Project-specific entry must be included
-    const found = result.find((e) => e.title === "DB choice for forSession test");
+    const found = result.find(
+      (e) => e.title === "DB choice for forSession test",
+    );
     expect(found).toBeDefined();
     // It must be the project-specific entry (cross_project = 0)
     expect(found!.cross_project).toBe(0);
@@ -423,7 +439,8 @@ describe("ltm.forSession", () => {
     ltm.create({
       category: "gotcha",
       title: "TypeScript strict mode caveat",
-      content: "TypeScript strict null checks require explicit undefined handling",
+      content:
+        "TypeScript strict null checks require explicit undefined handling",
       scope: "global",
       crossProject: true,
     });
@@ -432,7 +449,8 @@ describe("ltm.forSession", () => {
     ltm.create({
       category: "pattern",
       title: "Kubernetes deployment pattern",
-      content: "Use helm charts for Kubernetes deployments with resource limits",
+      content:
+        "Use helm charts for Kubernetes deployments with resource limits",
       scope: "global",
       crossProject: true,
     });
@@ -483,7 +501,8 @@ describe("ltm.forSession", () => {
       projectPath: PROJ,
       category: "pattern",
       title: "Kubernetes pod scaling",
-      content: "Configure horizontal pod autoscaler with CPU thresholds for deployment replicas",
+      content:
+        "Configure horizontal pod autoscaler with CPU thresholds for deployment replicas",
       scope: "project",
       crossProject: false,
     });
@@ -493,7 +512,8 @@ describe("ltm.forSession", () => {
       projectPath: PROJ,
       category: "gotcha",
       title: "TypeScript strict null handling",
-      content: "TypeScript strict null checks require explicit undefined handling in function params",
+      content:
+        "TypeScript strict null checks require explicit undefined handling in function params",
       scope: "project",
       crossProject: false,
     });
@@ -558,7 +578,9 @@ describe("ltm.forSession", () => {
 
     const result = await ltm.forSession(PROJ, SESSION, 10_000);
     // Safety net should include up to 5 project entries even though none match
-    const xEntries = result.filter((e) => e.title.startsWith("Xylophage plumbing"));
+    const xEntries = result.filter((e) =>
+      e.title.startsWith("Xylophage plumbing"),
+    );
     expect(xEntries.length).toBeLessThanOrEqual(5);
     expect(xEntries.length).toBeGreaterThan(0);
   });
@@ -569,7 +591,8 @@ describe("ltm.forSession", () => {
       projectPath: PROJ,
       category: "pattern",
       title: "Docker compose networking",
-      content: "Docker compose networking configuration for multi-container orchestration",
+      content:
+        "Docker compose networking configuration for multi-container orchestration",
       scope: "project",
       crossProject: false,
     });
@@ -578,7 +601,8 @@ describe("ltm.forSession", () => {
     ltm.create({
       category: "gotcha",
       title: "React useState async pitfall",
-      content: "React useState setter is async — reading state immediately after setState returns stale value in dashboard components",
+      content:
+        "React useState setter is async — reading state immediately after setState returns stale value in dashboard components",
       scope: "global",
       crossProject: true,
     });
@@ -816,7 +840,8 @@ describe("ltm.forSession", () => {
       projectPath: PROJ,
       category: "gotcha",
       title: "React useState returns stale state",
-      content: "React useState setter is async, reading immediately returns old value",
+      content:
+        "React useState setter is async, reading immediately returns old value",
       scope: "project",
       crossProject: false,
     });
@@ -824,14 +849,16 @@ describe("ltm.forSession", () => {
       projectPath: PROJ,
       category: "gotcha",
       title: "Docker networking bridge mode",
-      content: "Docker bridge networking requires explicit port mapping for container communication",
+      content:
+        "Docker bridge networking requires explicit port mapping for container communication",
       scope: "project",
       crossProject: false,
     });
 
     // No temporal messages, but provide contextHint about React
     const result = await ltm.forSession(PROJ, "no-temporal-session", 10_000, {
-      contextHint: "Fix the React component where useState returns stale value after async update",
+      contextHint:
+        "Fix the React component where useState returns stale value after async update",
     });
 
     // The React entry should appear — either via FTS5 fallback or vector scoring
@@ -970,10 +997,14 @@ describe("preference-only forSession fast path", () => {
     db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
     // Clean up ALL global/cross-project preference entries to avoid leakage between tests
     db()
-      .query("DELETE FROM knowledge WHERE category = 'preference' AND (project_id IS NULL OR cross_project = 1)")
+      .query(
+        "DELETE FROM knowledge WHERE category = 'preference' AND (project_id IS NULL OR cross_project = 1)",
+      )
       .run();
     db()
-      .query("DELETE FROM knowledge WHERE project_id IN (SELECT id FROM projects WHERE path LIKE '/test/%')")
+      .query(
+        "DELETE FROM knowledge WHERE project_id IN (SELECT id FROM projects WHERE path LIKE '/test/%')",
+      )
       .run();
     db().query("DELETE FROM temporal_messages WHERE project_id = ?").run(pid);
     db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
@@ -997,7 +1028,14 @@ describe("preference-only forSession fast path", () => {
       .query(
         "INSERT INTO temporal_messages (id, project_id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?)",
       )
-      .run(`tm-pref-${Date.now()}`, pid, SESSION, "user", "Let's build a React component for the dashboard", Date.now());
+      .run(
+        `tm-pref-${Date.now()}`,
+        pid,
+        SESSION,
+        "user",
+        "Let's build a React component for the dashboard",
+        Date.now(),
+      );
 
     const result = await ltm.forSession(PROJ, SESSION, 10_000, {
       categories: ["preference"],
@@ -1018,9 +1056,14 @@ describe("preference-only forSession fast path", () => {
     }
 
     // No session context — brand new session
-    const result = await ltm.forSession(PROJ, "brand-new-pref-session", 10_000, {
-      categories: ["preference"],
-    });
+    const result = await ltm.forSession(
+      PROJ,
+      "brand-new-pref-session",
+      10_000,
+      {
+        categories: ["preference"],
+      },
+    );
     // Should return all 15, not capped at 10
     expect(result.length).toBe(15);
   });
@@ -1109,7 +1152,9 @@ describe("preference-only forSession fast path", () => {
     });
 
     // Project gotcha should be included (safety net)
-    const projectGotcha = result.find((e) => e.title === "pref-test SQLite WAL gotcha");
+    const projectGotcha = result.find(
+      (e) => e.title === "pref-test SQLite WAL gotcha",
+    );
     expect(projectGotcha).toBeDefined();
     // The non-preference path should still be using relevance scoring,
     // not the preference fast path
@@ -1147,9 +1192,7 @@ describe("ltm.rerankPreferences", () => {
   beforeEach(() => {
     // Clean up ALL preference entries to avoid cross-test interference
     // (rerankPreferences operates on all preferences in the DB)
-    db()
-      .query("DELETE FROM knowledge WHERE category = 'preference'")
-      .run();
+    db().query("DELETE FROM knowledge WHERE category = 'preference'").run();
   });
 
   test("sets 1.0 for strong directives, 0.9 for explicit prefs, keeps others unchanged", () => {
@@ -1227,10 +1270,30 @@ describe("ltm.rerankPreferences", () => {
 
   test("detects various directive patterns", () => {
     const ids = [
-      ltm.create({ category: "preference", title: "rerank-test d1", content: "Always use TypeScript strict mode", scope: "global" }),
-      ltm.create({ category: "preference", title: "rerank-test d2", content: "You must not skip tests", scope: "global" }),
-      ltm.create({ category: "preference", title: "rerank-test d3", content: "Make sure to run linting before commits", scope: "global" }),
-      ltm.create({ category: "preference", title: "rerank-test d4", content: "Don't forget to update changelog", scope: "global" }),
+      ltm.create({
+        category: "preference",
+        title: "rerank-test d1",
+        content: "Always use TypeScript strict mode",
+        scope: "global",
+      }),
+      ltm.create({
+        category: "preference",
+        title: "rerank-test d2",
+        content: "You must not skip tests",
+        scope: "global",
+      }),
+      ltm.create({
+        category: "preference",
+        title: "rerank-test d3",
+        content: "Make sure to run linting before commits",
+        scope: "global",
+      }),
+      ltm.create({
+        category: "preference",
+        title: "rerank-test d4",
+        content: "Don't forget to update changelog",
+        scope: "global",
+      }),
     ];
 
     ltm.rerankPreferences();
@@ -1351,7 +1414,9 @@ describe("ltm — multi-user columns (v29)", () => {
 
   test("team_knowledge table exists", () => {
     const tables = db()
-      .query("SELECT name FROM sqlite_master WHERE type='table' AND name='team_knowledge'")
+      .query(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='team_knowledge'",
+      )
       .all() as Array<{ name: string }>;
     expect(tables).toHaveLength(1);
     expect(tables[0].name).toBe("team_knowledge");
@@ -1359,7 +1424,9 @@ describe("ltm — multi-user columns (v29)", () => {
 
   test("team_config table exists", () => {
     const tables = db()
-      .query("SELECT name FROM sqlite_master WHERE type='table' AND name='team_config'")
+      .query(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='team_config'",
+      )
       .all() as Array<{ name: string }>;
     expect(tables).toHaveLength(1);
     expect(tables[0].name).toBe("team_config");
@@ -1384,7 +1451,9 @@ describe("ltm — cross-project promotion", () => {
     for (let i = 0; i < dims; i++) norm += vec[i] * vec[i];
     norm = Math.sqrt(norm);
     for (let i = 0; i < dims; i++) vec[i] /= norm;
-    db().query("UPDATE knowledge SET embedding = ? WHERE id = ?").run(Buffer.from(vec.buffer), entryId);
+    db()
+      .query("UPDATE knowledge SET embedding = ? WHERE id = ?")
+      .run(Buffer.from(vec.buffer), entryId);
   }
 
   /** Create a project-scoped entry with explicit id (bypasses create-time dedup
@@ -1433,9 +1502,24 @@ describe("ltm — cross-project promotion", () => {
   });
 
   test("promotes a cluster spanning 3 distinct projects", () => {
-    const a = seedEntry({ projectPath: PA, title: "Always run tests before committing code", confidence: 0.9, embedSeed: 5 });
-    const b = seedEntry({ projectPath: PB, title: "Run the test suite prior to any commit", confidence: 0.85, embedSeed: 5 });
-    const c = seedEntry({ projectPath: PC, title: "Tests must pass before commit is made", confidence: 0.95, embedSeed: 5 });
+    const a = seedEntry({
+      projectPath: PA,
+      title: "Always run tests before committing code",
+      confidence: 0.9,
+      embedSeed: 5,
+    });
+    const b = seedEntry({
+      projectPath: PB,
+      title: "Run the test suite prior to any commit",
+      confidence: 0.85,
+      embedSeed: 5,
+    });
+    const c = seedEntry({
+      projectPath: PC,
+      title: "Tests must pass before commit is made",
+      confidence: 0.95,
+      embedSeed: 5,
+    });
 
     const res = ltm.promoteCrossProject({ dryRun: false });
     expect(res.promoted).toBe(3);
@@ -1451,8 +1535,18 @@ describe("ltm — cross-project promotion", () => {
   });
 
   test("does NOT promote a cluster spanning only 2 projects", () => {
-    const a = seedEntry({ projectPath: PA, title: "Always run tests before committing code", confidence: 0.9, embedSeed: 7 });
-    const b = seedEntry({ projectPath: PB, title: "Run the test suite prior to any commit", confidence: 0.9, embedSeed: 7 });
+    const a = seedEntry({
+      projectPath: PA,
+      title: "Always run tests before committing code",
+      confidence: 0.9,
+      embedSeed: 7,
+    });
+    const b = seedEntry({
+      projectPath: PB,
+      title: "Run the test suite prior to any commit",
+      confidence: 0.9,
+      embedSeed: 7,
+    });
 
     const res = ltm.promoteCrossProject({ dryRun: false });
     expect(res.promoted).toBe(0);
@@ -1462,9 +1556,24 @@ describe("ltm — cross-project promotion", () => {
   });
 
   test("does NOT promote low-confidence entries (< 0.8)", () => {
-    const a = seedEntry({ projectPath: PA, title: "Always run tests before committing code", confidence: 0.7, embedSeed: 9 });
-    const b = seedEntry({ projectPath: PB, title: "Run the test suite prior to any commit", confidence: 0.5, embedSeed: 9 });
-    const c = seedEntry({ projectPath: PC, title: "Tests must pass before commit is made", confidence: 0.6, embedSeed: 9 });
+    const a = seedEntry({
+      projectPath: PA,
+      title: "Always run tests before committing code",
+      confidence: 0.7,
+      embedSeed: 9,
+    });
+    const b = seedEntry({
+      projectPath: PB,
+      title: "Run the test suite prior to any commit",
+      confidence: 0.5,
+      embedSeed: 9,
+    });
+    const c = seedEntry({
+      projectPath: PC,
+      title: "Tests must pass before commit is made",
+      confidence: 0.6,
+      embedSeed: 9,
+    });
 
     const res = ltm.promoteCrossProject({ dryRun: false });
     expect(res.promoted).toBe(0);
@@ -1473,7 +1582,11 @@ describe("ltm — cross-project promotion", () => {
 
   test("ignores entries already cross_project = 1", () => {
     // Three already-cross-project entries across 3 projects — not candidates.
-    for (const [p, seed] of [[PA, 11], [PB, 11], [PC, 11]] as const) {
+    for (const [p, seed] of [
+      [PA, 11],
+      [PB, 11],
+      [PC, 11],
+    ] as const) {
       const id = ltm.create({
         id: uuidv7(),
         projectPath: p,
@@ -1492,9 +1605,24 @@ describe("ltm — cross-project promotion", () => {
   });
 
   test("dryRun: true reports clusters but does not mutate", () => {
-    const a = seedEntry({ projectPath: PA, title: "Always run tests before committing code", confidence: 0.9, embedSeed: 13 });
-    const b = seedEntry({ projectPath: PB, title: "Run the test suite prior to any commit", confidence: 0.9, embedSeed: 13 });
-    const c = seedEntry({ projectPath: PC, title: "Tests must pass before commit is made", confidence: 0.9, embedSeed: 13 });
+    const a = seedEntry({
+      projectPath: PA,
+      title: "Always run tests before committing code",
+      confidence: 0.9,
+      embedSeed: 13,
+    });
+    const b = seedEntry({
+      projectPath: PB,
+      title: "Run the test suite prior to any commit",
+      confidence: 0.9,
+      embedSeed: 13,
+    });
+    const c = seedEntry({
+      projectPath: PC,
+      title: "Tests must pass before commit is made",
+      confidence: 0.9,
+      embedSeed: 13,
+    });
 
     const res = ltm.promoteCrossProject({ dryRun: true });
     expect(res.promoted).toBe(3);
@@ -1507,9 +1635,24 @@ describe("ltm — cross-project promotion", () => {
   });
 
   test("no-op when embeddings are unavailable", () => {
-    seedEntry({ projectPath: PA, title: "Always run tests before committing code", confidence: 0.9, embedSeed: 15 });
-    seedEntry({ projectPath: PB, title: "Run the test suite prior to any commit", confidence: 0.9, embedSeed: 15 });
-    seedEntry({ projectPath: PC, title: "Tests must pass before commit is made", confidence: 0.9, embedSeed: 15 });
+    seedEntry({
+      projectPath: PA,
+      title: "Always run tests before committing code",
+      confidence: 0.9,
+      embedSeed: 15,
+    });
+    seedEntry({
+      projectPath: PB,
+      title: "Run the test suite prior to any commit",
+      confidence: 0.9,
+      embedSeed: 15,
+    });
+    seedEntry({
+      projectPath: PC,
+      title: "Tests must pass before commit is made",
+      confidence: 0.9,
+      embedSeed: 15,
+    });
 
     availableSpy.mockReturnValue(false);
     const res = ltm.promoteCrossProject({ dryRun: false });
@@ -1518,9 +1661,24 @@ describe("ltm — cross-project promotion", () => {
   });
 
   test("does NOT promote when 3 similar entries are all in the same project", () => {
-    const a = seedEntry({ projectPath: PA, title: "Always run tests before committing code", confidence: 0.9, embedSeed: 17 });
-    const b = seedEntry({ projectPath: PA, title: "Run the test suite prior to any commit", confidence: 0.9, embedSeed: 17 });
-    const c = seedEntry({ projectPath: PA, title: "Tests must pass before commit is made", confidence: 0.9, embedSeed: 17 });
+    const a = seedEntry({
+      projectPath: PA,
+      title: "Always run tests before committing code",
+      confidence: 0.9,
+      embedSeed: 17,
+    });
+    const b = seedEntry({
+      projectPath: PA,
+      title: "Run the test suite prior to any commit",
+      confidence: 0.9,
+      embedSeed: 17,
+    });
+    const c = seedEntry({
+      projectPath: PA,
+      title: "Tests must pass before commit is made",
+      confidence: 0.9,
+      embedSeed: 17,
+    });
 
     const res = ltm.promoteCrossProject({ dryRun: false });
     expect(res.promoted).toBe(0);
@@ -1533,10 +1691,30 @@ describe("ltm — cross-project promotion", () => {
     // The low-confidence entry is excluded from candidates entirely, so the
     // remaining 3 high-confidence entries should still form a qualifying cluster.
     const PD = "/test/promote/project-d";
-    const a = seedEntry({ projectPath: PA, title: "Always run tests before committing code", confidence: 0.9, embedSeed: 19 });
-    const b = seedEntry({ projectPath: PB, title: "Run the test suite prior to any commit", confidence: 0.85, embedSeed: 19 });
-    const c = seedEntry({ projectPath: PC, title: "Tests must pass before commit is made", confidence: 0.95, embedSeed: 19 });
-    const d = seedEntry({ projectPath: PD, title: "Test before every commit always", confidence: 0.5, embedSeed: 19 });
+    const a = seedEntry({
+      projectPath: PA,
+      title: "Always run tests before committing code",
+      confidence: 0.9,
+      embedSeed: 19,
+    });
+    const b = seedEntry({
+      projectPath: PB,
+      title: "Run the test suite prior to any commit",
+      confidence: 0.85,
+      embedSeed: 19,
+    });
+    const c = seedEntry({
+      projectPath: PC,
+      title: "Tests must pass before commit is made",
+      confidence: 0.95,
+      embedSeed: 19,
+    });
+    const d = seedEntry({
+      projectPath: PD,
+      title: "Test before every commit always",
+      confidence: 0.5,
+      embedSeed: 19,
+    });
 
     const res = ltm.promoteCrossProject({ dryRun: false });
     // Only the 3 high-confidence entries should be promoted

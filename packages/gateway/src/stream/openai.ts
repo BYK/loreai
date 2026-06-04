@@ -142,10 +142,14 @@ export function translateAnthropicStreamToOpenAI(
 
           switch (event) {
             case "message_start": {
-              const message = parsed.message as Record<string, unknown> | undefined;
+              const message = parsed.message as
+                | Record<string, unknown>
+                | undefined;
               if (message) {
                 const rawId = typeof message.id === "string" ? message.id : "";
-                baseId = rawId.startsWith("chatcmpl-") ? rawId : `chatcmpl-${rawId}`;
+                baseId = rawId.startsWith("chatcmpl-")
+                  ? rawId
+                  : `chatcmpl-${rawId}`;
                 model = typeof message.model === "string" ? message.model : "";
                 created = Math.floor(Date.now() / 1000);
               }
@@ -164,7 +168,9 @@ export function translateAnthropicStreamToOpenAI(
               const index = parsed.index as number;
               if (typeof index !== "number") break;
 
-              const block = parsed.content_block as Record<string, unknown> | undefined;
+              const block = parsed.content_block as
+                | Record<string, unknown>
+                | undefined;
               if (!block || typeof block.type !== "string") break;
 
               if (block.type === "tool_use") {
@@ -214,7 +220,10 @@ export function translateAnthropicStreamToOpenAI(
               const delta = parsed.delta as Record<string, unknown> | undefined;
               if (!delta || typeof delta.type !== "string") break;
 
-              if (delta.type === "text_delta" && typeof delta.text === "string") {
+              if (
+                delta.type === "text_delta" &&
+                typeof delta.text === "string"
+              ) {
                 // Emit text content incrementally
                 safeEnqueue(
                   encoder.encode(formatChunk({ content: delta.text }, null)),
@@ -280,9 +289,7 @@ export function translateAnthropicStreamToOpenAI(
 
               // Emit final chunk with finish_reason and usage
               safeEnqueue(
-                encoder.encode(
-                  formatChunk({}, finishReason || "stop", usage),
-                ),
+                encoder.encode(formatChunk({}, finishReason || "stop", usage)),
               );
 
               // Emit [DONE] sentinel

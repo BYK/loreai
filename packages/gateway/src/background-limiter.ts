@@ -70,12 +70,12 @@ export function isBackgroundPaused(): boolean {
  * @param retryAfterSeconds Server-guided pause duration, if available.
  */
 export function tripCircuitBreaker(retryAfterSeconds?: number): void {
-  const scheduled = BACKOFF_SCHEDULE[
-    Math.min(consecutiveTrips, BACKOFF_SCHEDULE.length - 1)
-  ];
-  const duration = retryAfterSeconds && retryAfterSeconds > 0
-    ? Math.max(retryAfterSeconds, scheduled)
-    : scheduled;
+  const scheduled =
+    BACKOFF_SCHEDULE[Math.min(consecutiveTrips, BACKOFF_SCHEDULE.length - 1)];
+  const duration =
+    retryAfterSeconds && retryAfterSeconds > 0
+      ? Math.max(retryAfterSeconds, scheduled)
+      : scheduled;
   consecutiveTrips++;
 
   const until = Date.now() + duration * 1000;

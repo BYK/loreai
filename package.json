@@ -15,10 +15,14 @@
     "typecheck": "bun --filter '*' typecheck",
     "test": "bun test",
     "build": "bun --filter '*' build",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
     "evals": "vitest run --config vitest.evals.config.ts",
     "postinstall": "bun --filter '@loreai/gateway' build"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.4.16",
     "@types/bun": "^1.2.0",
     "esbuild": "^0.25.12",
     "fast-check": "^4.5.3",

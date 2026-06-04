@@ -9,7 +9,6 @@ import {
   extractKnownSessionHeader,
   findRotationPredecessor,
   ROTATION_MAX_AGE_MS,
-
   isSessionHeaderName,
   isIdLikeValue,
   collectCandidateHeaders,
@@ -291,9 +290,7 @@ describe("fingerprintMessages", () => {
 
   test("Anthropic-style concatenates text parts", async () => {
     // "AB" as single string vs two parts "A" + "B" should produce the same hash
-    const single = [
-      { role: "user", content: [{ type: "text", text: "AB" }] },
-    ];
+    const single = [{ role: "user", content: [{ type: "text", text: "AB" }] }];
     const split = [
       {
         role: "user",
@@ -673,7 +670,9 @@ describe("findRotationPredecessor", () => {
   const now = Date.now();
 
   /** Helper to build a simple header index map. */
-  function buildIndex(entries: Array<[string, string, string]>): Map<string, string> {
+  function buildIndex(
+    entries: Array<[string, string, string]>,
+  ): Map<string, string> {
     const index = new Map<string, string>();
     for (const [headerName, headerValue, sid] of entries) {
       index.set(`${headerName}:${headerValue}`, sid);
@@ -693,7 +692,14 @@ describe("findRotationPredecessor", () => {
       ["x-session-affinity", "old-nanoid-abc", "lore-session-123"],
     ]);
     const candidates = new Map<string, RotationCandidate>([
-      ["lore-session-123", { sid: "lore-session-123", isSubagent: false, lastActiveAt: now - 60_000 }],
+      [
+        "lore-session-123",
+        {
+          sid: "lore-session-123",
+          isSubagent: false,
+          lastActiveAt: now - 60_000,
+        },
+      ],
     ]);
 
     const result = findRotationPredecessor(
@@ -731,8 +737,22 @@ describe("findRotationPredecessor", () => {
       ["x-session-affinity", "nanoid-session-b", "lore-session-B"],
     ]);
     const candidates = new Map<string, RotationCandidate>([
-      ["lore-session-A", { sid: "lore-session-A", isSubagent: false, lastActiveAt: now - 60_000 }],
-      ["lore-session-B", { sid: "lore-session-B", isSubagent: false, lastActiveAt: now - 60_000 }],
+      [
+        "lore-session-A",
+        {
+          sid: "lore-session-A",
+          isSubagent: false,
+          lastActiveAt: now - 60_000,
+        },
+      ],
+      [
+        "lore-session-B",
+        {
+          sid: "lore-session-B",
+          isSubagent: false,
+          lastActiveAt: now - 60_000,
+        },
+      ],
     ]);
 
     const result = findRotationPredecessor(
@@ -751,7 +771,14 @@ describe("findRotationPredecessor", () => {
       ["x-session-affinity", "subagent-nanoid", "lore-subagent-1"],
     ]);
     const candidates = new Map<string, RotationCandidate>([
-      ["lore-subagent-1", { sid: "lore-subagent-1", isSubagent: true, lastActiveAt: now - 60_000 }],
+      [
+        "lore-subagent-1",
+        {
+          sid: "lore-subagent-1",
+          isSubagent: true,
+          lastActiveAt: now - 60_000,
+        },
+      ],
     ]);
 
     const result = findRotationPredecessor(
@@ -771,7 +798,14 @@ describe("findRotationPredecessor", () => {
       ["x-session-affinity", "old-nanoid-abc", "lore-session-stale"],
     ]);
     const candidates = new Map<string, RotationCandidate>([
-      ["lore-session-stale", { sid: "lore-session-stale", isSubagent: false, lastActiveAt: staleTime }],
+      [
+        "lore-session-stale",
+        {
+          sid: "lore-session-stale",
+          isSubagent: false,
+          lastActiveAt: staleTime,
+        },
+      ],
     ]);
 
     const result = findRotationPredecessor(
@@ -792,8 +826,22 @@ describe("findRotationPredecessor", () => {
       ["x-session-affinity", "active-nanoid", "lore-session-active"],
     ]);
     const candidates = new Map<string, RotationCandidate>([
-      ["lore-session-stale", { sid: "lore-session-stale", isSubagent: false, lastActiveAt: staleTime }],
-      ["lore-session-active", { sid: "lore-session-active", isSubagent: false, lastActiveAt: now - 60_000 }],
+      [
+        "lore-session-stale",
+        {
+          sid: "lore-session-stale",
+          isSubagent: false,
+          lastActiveAt: staleTime,
+        },
+      ],
+      [
+        "lore-session-active",
+        {
+          sid: "lore-session-active",
+          isSubagent: false,
+          lastActiveAt: now - 60_000,
+        },
+      ],
     ]);
 
     const result = findRotationPredecessor(
@@ -816,8 +864,18 @@ describe("findRotationPredecessor", () => {
       ["x-session-affinity", "real-nanoid", "lore-session-real"],
     ]);
     const candidates = new Map<string, RotationCandidate>([
-      ["lore-subagent", { sid: "lore-subagent", isSubagent: true, lastActiveAt: now - 60_000 }],
-      ["lore-session-real", { sid: "lore-session-real", isSubagent: false, lastActiveAt: now - 60_000 }],
+      [
+        "lore-subagent",
+        { sid: "lore-subagent", isSubagent: true, lastActiveAt: now - 60_000 },
+      ],
+      [
+        "lore-session-real",
+        {
+          sid: "lore-session-real",
+          isSubagent: false,
+          lastActiveAt: now - 60_000,
+        },
+      ],
     ]);
 
     const result = findRotationPredecessor(
@@ -840,8 +898,22 @@ describe("findRotationPredecessor", () => {
       ["x-session-affinity", "old-nanoid", "lore-session-opencode"],
     ]);
     const candidates = new Map<string, RotationCandidate>([
-      ["lore-session-claude", { sid: "lore-session-claude", isSubagent: false, lastActiveAt: now - 60_000 }],
-      ["lore-session-opencode", { sid: "lore-session-opencode", isSubagent: false, lastActiveAt: now - 60_000 }],
+      [
+        "lore-session-claude",
+        {
+          sid: "lore-session-claude",
+          isSubagent: false,
+          lastActiveAt: now - 60_000,
+        },
+      ],
+      [
+        "lore-session-opencode",
+        {
+          sid: "lore-session-opencode",
+          isSubagent: false,
+          lastActiveAt: now - 60_000,
+        },
+      ],
     ]);
 
     // Rotating x-session-affinity should only find the opencode session, not claude
@@ -884,7 +956,14 @@ describe("findRotationPredecessor", () => {
       ["x-session-affinity", "old-nanoid", "lore-session-boundary"],
     ]);
     const candidates = new Map<string, RotationCandidate>([
-      ["lore-session-boundary", { sid: "lore-session-boundary", isSubagent: false, lastActiveAt: justAtBoundary }],
+      [
+        "lore-session-boundary",
+        {
+          sid: "lore-session-boundary",
+          isSubagent: false,
+          lastActiveAt: justAtBoundary,
+        },
+      ],
     ]);
 
     const result = findRotationPredecessor(
@@ -908,7 +987,14 @@ describe("findRotationPredecessor", () => {
       ["x-session-affinity", "old-nanoid", "lore-session-over"],
     ]);
     const candidates = new Map<string, RotationCandidate>([
-      ["lore-session-over", { sid: "lore-session-over", isSubagent: false, lastActiveAt: justOverBoundary }],
+      [
+        "lore-session-over",
+        {
+          sid: "lore-session-over",
+          isSubagent: false,
+          lastActiveAt: justOverBoundary,
+        },
+      ],
     ]);
 
     const result = findRotationPredecessor(

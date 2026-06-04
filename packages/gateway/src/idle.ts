@@ -58,8 +58,16 @@ import {
   clearAuthStale,
   authFingerprint,
 } from "./auth";
-import { emitWarmupMetric, emitSessionCostMetrics, emitCurationMetrics } from "./sentry";
-import { getSessionCosts, totalWorkerCost, deleteSessionCosts } from "./cost-tracker";
+import {
+  emitWarmupMetric,
+  emitSessionCostMetrics,
+  emitCurationMetrics,
+} from "./sentry";
+import {
+  getSessionCosts,
+  totalWorkerCost,
+  deleteSessionCosts,
+} from "./cost-tracker";
 import { deleteBillingPrefix } from "./cch";
 import {
   maybeFetchQuota,
@@ -145,7 +153,9 @@ export function startIdleScheduler(
         () => doIdleWork(sessionID, state),
         `idle session=${sessionID.slice(0, 16)}`,
       )
-        .catch((e) => log.error(`idle work failed for session ${sessionID}:`, e))
+        .catch((e) =>
+          log.error(`idle work failed for session ${sessionID}:`, e),
+        )
         .finally(() => inProgress.delete(sessionID));
     }
 
@@ -161,7 +171,14 @@ export function startIdleScheduler(
       maybeFetchQuota(sessionID, cred);
     }
 
-    evictIdleSessions(config, sessions, inProgress, warmupInProgress, now, onEvict);
+    evictIdleSessions(
+      config,
+      sessions,
+      inProgress,
+      warmupInProgress,
+      now,
+      onEvict,
+    );
 
     // --- Cache warming (separate from idle work — fires before TTL expiry) ---
     if (isCircuitBreakerTripped()) return;
@@ -202,7 +219,10 @@ export function startIdleScheduler(
       executeWarmup(state, profile)
         .then((result) => emitWarmupMetric(state, result))
         .catch((e) =>
-          log.error(`cache-warmer: warmup failed session=${sessionID.slice(0, 16)}:`, e),
+          log.error(
+            `cache-warmer: warmup failed session=${sessionID.slice(0, 16)}:`,
+            e,
+          ),
         )
         .finally(() => warmupInProgress.delete(sessionID));
     }
@@ -249,10 +269,12 @@ export function startIdleScheduler(
         }
         state._dirty = false;
       } catch (e) {
-        log.error(`periodic state flush error for session ${sessionID.slice(0, 16)}:`, e);
+        log.error(
+          `periodic state flush error for session ${sessionID.slice(0, 16)}:`,
+          e,
+        );
       }
     }
-
   }, POLL_INTERVAL_MS);
 
   return () => clearInterval(timer);
@@ -300,8 +322,8 @@ export function evictIdleSessions(
 
     log.info(
       `evicting idle session ${sessionID.slice(0, 16)}` +
-      `${state.isSubagent ? " (subagent)" : ""}` +
-      ` (idle ${Math.round((now - state.lastRequestTime) / 60_000)}m)`,
+        `${state.isSubagent ? " (subagent)" : ""}` +
+        ` (idle ${Math.round((now - state.lastRequestTime) / 60_000)}m)`,
     );
 
     // Persist final cost snapshot before eviction
@@ -324,20 +346,28 @@ export function evictIdleSessions(
         });
       }
     } catch (e) {
-      log.warn(`session eviction: cost persistence failed for ${sessionID.slice(0, 16)}:`, e);
+      log.warn(
+        `session eviction: cost persistence failed for ${sessionID.slice(0, 16)}:`,
+        e,
+      );
     }
 
     // Persist gradient state before eviction
     try {
       saveGradientState(sessionID);
     } catch (e) {
-      log.warn(`session eviction: gradient persistence failed for ${sessionID.slice(0, 16)}:`, e);
+      log.warn(
+        `session eviction: gradient persistence failed for ${sessionID.slice(0, 16)}:`,
+        e,
+      );
     }
 
     // Capture the OAuth account fingerprint BEFORE deleting the session's
     // auth, so we can GC the shared (per-account) quota cache afterwards.
     const evictedCred = resolveAuth(sessionID);
-    const evictedFingerprint = evictedCred ? authFingerprint(evictedCred) : null;
+    const evictedFingerprint = evictedCred
+      ? authFingerprint(evictedCred)
+      : null;
 
     // Clean up all per-session in-memory state across modules
     evictGradientSession(sessionID);
@@ -441,10 +471,21 @@ export function buildIdleWorkHandler(
     // Skip meta-distillation in the run() call: we run it as a separate
     // step below so gen-0 segments from the force-distill are counted.
     try {
-      const callType = process.env.LORE_BATCH_DISABLED === "1" ? "direct" as const : "batch" as const;
+      const callType =
+        process.env.LORE_BATCH_DISABLED === "1"
+          ? ("direct" as const)
+          : ("batch" as const);
       const pending = temporal.undistilledCount(projectPath, sessionID);
       if (pending > 0) {
-        await distillation.run({ llm, projectPath, sessionID, model, force: true, skipMeta: true, callType });
+        await distillation.run({
+          llm,
+          projectPath,
+          sessionID,
+          model,
+          force: true,
+          skipMeta: true,
+          callType,
+        });
       }
       // Meta consolidation: safe on idle because cache is already cold.
       // Run as a separate step so gen-0 segments from the force-distill
@@ -453,10 +494,19 @@ export function buildIdleWorkHandler(
       // to consolidate earlier — shrinks the distilled prefix before the
       // session becomes unsustainable.
       const busts = getConsecutiveBusts(sessionID);
-      const metaThreshold = effectiveMetaThreshold(busts, cfg.distillation.metaThreshold);
+      const metaThreshold = effectiveMetaThreshold(
+        busts,
+        cfg.distillation.metaThreshold,
+      );
       const g0 = distillation.gen0Count(projectPath, sessionID);
       if (g0 >= metaThreshold) {
-        await distillation.metaDistill({ llm, projectPath, sessionID, model, callType });
+        await distillation.metaDistill({
+          llm,
+          projectPath,
+          sessionID,
+          model,
+          callType,
+        });
       }
     } catch (e) {
       log.error("idle distillation error:", e);
@@ -467,12 +517,18 @@ export function buildIdleWorkHandler(
     if (cfg.knowledge.enabled && cfg.curator.onIdle) {
       try {
         const workerModelID = model?.modelID ?? "unknown";
-        const modelInputCost = getModelEntrySync(workerModelID).cost?.input ?? 3;
-        const curationMultiplier = modelInputCost >= 5 ? 3 : modelInputCost >= 1 ? 2 : 1;
+        const modelInputCost =
+          getModelEntrySync(workerModelID).cost?.input ?? 3;
+        const curationMultiplier =
+          modelInputCost >= 5 ? 3 : modelInputCost >= 1 ? 2 : 1;
         const effectiveAfterTurns = cfg.curator.afterTurns * curationMultiplier;
         if (state.turnsSinceCuration >= effectiveAfterTurns) {
           const result = await Sentry.startSpan(
-            { name: "lore.curator", op: "lore.curation", attributes: { trigger: "idle" } },
+            {
+              name: "lore.curator",
+              op: "lore.curation",
+              attributes: { trigger: "idle" },
+            },
             () => curator.run({ llm, projectPath, sessionID, model }),
           );
           state.turnsSinceCuration = 0;
@@ -515,12 +571,22 @@ export function buildIdleWorkHandler(
             );
             const beforeCount = entries.length;
             const result = await Sentry.startSpan(
-              { name: "lore.consolidation", op: "lore.curation", attributes: { trigger: "consolidation" } },
+              {
+                name: "lore.consolidation",
+                op: "lore.curation",
+                attributes: { trigger: "consolidation" },
+              },
               () => curator.consolidate({ llm, projectPath, sessionID, model }),
             );
             if (result.updated > 0 || result.deleted > 0) {
-              log.info(`consolidation: ${result.updated} updated, ${result.deleted} deleted`);
-              emitCurationMetrics({ created: 0, ...result, trigger: "consolidation" });
+              log.info(
+                `consolidation: ${result.updated} updated, ${result.deleted} deleted`,
+              );
+              emitCurationMetrics({
+                created: 0,
+                ...result,
+                trigger: "consolidation",
+              });
               // Consolidation made progress — clear cooldown so it can retry
               consolidationCooldown.delete(projectPath);
             } else {
@@ -532,7 +598,7 @@ export function buildIdleWorkHandler(
               });
               log.info(
                 `consolidation produced no changes — cooldown active for 1h ` +
-                `(${beforeCount} entries in ${projectPath})`,
+                  `(${beforeCount} entries in ${projectPath})`,
               );
             }
           }

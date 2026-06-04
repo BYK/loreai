@@ -72,8 +72,7 @@ export function tailWindowBaseline(
   let cutoff = turns.length;
 
   for (let i = turns.length - 1; i >= 0; i--) {
-    const turnTokens =
-      turns[i].tokens ?? estimateTokens(renderTurn(turns[i]));
+    const turnTokens = turns[i].tokens ?? estimateTokens(renderTurn(turns[i]));
     if (tailTokens + turnTokens > budgetTokens) {
       cutoff = i + 1;
       break;
@@ -181,7 +180,10 @@ export async function compactionBaseline(
     if (prefixTokens <= MAX_CHUNK_TOKENS) {
       // Fits in one call
       const prefixText = renderConversation(prefix);
-      const userPrompt = COMPACTION_USER_TEMPLATE.replace("{{conversation}}", prefixText);
+      const userPrompt = COMPACTION_USER_TEMPLATE.replace(
+        "{{conversation}}",
+        prefixText,
+      );
       const result = await llm.prompt(COMPACTION_SYSTEM, userPrompt, {
         maxTokens: 4096,
         temperature: 0,
@@ -212,7 +214,10 @@ export async function compactionBaseline(
       const chunkSummaries: string[] = [];
       for (let c = 0; c < chunks.length; c++) {
         const chunkText = renderConversation(chunks[c]);
-        const userPrompt = COMPACTION_USER_TEMPLATE.replace("{{conversation}}", chunkText);
+        const userPrompt = COMPACTION_USER_TEMPLATE.replace(
+          "{{conversation}}",
+          chunkText,
+        );
         const result = await llm.prompt(COMPACTION_SYSTEM, userPrompt, {
           maxTokens: 4096,
           temperature: 0,
@@ -228,7 +233,12 @@ export async function compactionBaseline(
     // Replace prefix with a synthetic summary turn + keep tail
     const summaryTurn: ConversationTurn = {
       role: "assistant",
-      content: [{ type: "text", text: `## Compacted Summary (pass ${compactionCount + 1})\n\n${summaryText}` }],
+      content: [
+        {
+          type: "text",
+          text: `## Compacted Summary (pass ${compactionCount + 1})\n\n${summaryText}`,
+        },
+      ],
       tokens: estimateTokens(summaryText),
     };
     currentTurns = [summaryTurn, ...tail];

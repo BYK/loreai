@@ -13,7 +13,13 @@ describe("computeMaxTokens", () => {
 
   test("returns ceiling (32K) on first turn with no history", () => {
     expect(
-      computeMaxTokens(MODEL_OUTPUT, MODEL_CONTEXT, undefined, undefined, undefined),
+      computeMaxTokens(
+        MODEL_OUTPUT,
+        MODEL_CONTEXT,
+        undefined,
+        undefined,
+        undefined,
+      ),
     ).toBe(32_000);
   });
 
@@ -57,7 +63,13 @@ describe("computeMaxTokens", () => {
     // Input 195_000 → headroom = 200_000 - 195_000 - 1000 = 4000 → clamped to floor 8192
     // EMA 20_000 → 3 × 20_000 = 60_000 but headroom is 8192
     expect(
-      computeMaxTokens(MODEL_OUTPUT, MODEL_CONTEXT, 20_000, "end_turn", 195_000),
+      computeMaxTokens(
+        MODEL_OUTPUT,
+        MODEL_CONTEXT,
+        20_000,
+        "end_turn",
+        195_000,
+      ),
     ).toBe(8192);
   });
 
@@ -65,7 +77,13 @@ describe("computeMaxTokens", () => {
     // Input 170_000 → headroom = 200_000 - 170_000 - 1000 = 29_000
     // EMA 15_000 → 3 × 15_000 = 45_000, clamped by headroom → 29_000
     expect(
-      computeMaxTokens(MODEL_OUTPUT, MODEL_CONTEXT, 15_000, "end_turn", 170_000),
+      computeMaxTokens(
+        MODEL_OUTPUT,
+        MODEL_CONTEXT,
+        15_000,
+        "end_turn",
+        170_000,
+      ),
     ).toBe(29_000);
   });
 
@@ -80,7 +98,13 @@ describe("computeMaxTokens", () => {
     // No last input → estimatedInput = 0 → headroom = context - 0 - buffer
     // EMA 3000 → adaptive = 9000
     expect(
-      computeMaxTokens(MODEL_OUTPUT, MODEL_CONTEXT, 3000, "end_turn", undefined),
+      computeMaxTokens(
+        MODEL_OUTPUT,
+        MODEL_CONTEXT,
+        3000,
+        "end_turn",
+        undefined,
+      ),
     ).toBe(9000);
   });
 
@@ -100,9 +124,9 @@ describe("computeMaxTokens", () => {
   test("small model output limits ceiling accordingly", () => {
     // Sonnet-like model with 16K output limit
     // EMA 3000 → adaptive = 9000, ceiling = 16_000
-    expect(
-      computeMaxTokens(16_000, 200_000, 3000, "end_turn", 50_000),
-    ).toBe(9000);
+    expect(computeMaxTokens(16_000, 200_000, 3000, "end_turn", 50_000)).toBe(
+      9000,
+    );
   });
 
   test("floor (8192) is too small for comprehensive planning responses", () => {
@@ -112,7 +136,13 @@ describe("computeMaxTokens", () => {
     // 8192 is insufficient for comprehensive planning responses that need 15-30K.
     // The fix: skip EMA updates for sub-agent turns entirely.
     const subagentEMA = 200; // typical short tool-call output
-    const result = computeMaxTokens(128_000, 200_000, subagentEMA, "tool_use", 50_000);
+    const result = computeMaxTokens(
+      128_000,
+      200_000,
+      subagentEMA,
+      "tool_use",
+      50_000,
+    );
     expect(result).toBe(8192); // floor — too small for parent conversation
   });
 });
@@ -129,9 +159,9 @@ describe("detectClientType", () => {
   });
 
   test("detects OpenCode via x-session-affinity header", () => {
-    expect(
-      detectClientType({ "x-session-affinity": "nano-id-value" }),
-    ).toBe("opencode");
+    expect(detectClientType({ "x-session-affinity": "nano-id-value" })).toBe(
+      "opencode",
+    );
   });
 
   test("returns generic when no known headers", () => {
@@ -176,5 +206,3 @@ describe("hasBillingHeader", () => {
     expect(hasBillingHeader(system)).toBe(false);
   });
 });
-
-

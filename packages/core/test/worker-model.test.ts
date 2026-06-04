@@ -13,16 +13,21 @@ describe("resolveWorkerModel", () => {
       { providerID: "anthropic", modelID: "claude-haiku-4-5" },
       { providerID: "anthropic", modelID: "claude-opus-4-6" },
     );
-    expect(result).toEqual({ providerID: "anthropic", modelID: "claude-haiku-4-5" });
+    expect(result).toEqual({
+      providerID: "anthropic",
+      modelID: "claude-haiku-4-5",
+    });
   });
 
   test("falls back to config model when no workerModel override", () => {
-    const result = resolveWorkerModel(
-      "anthropic",
-      undefined,
-      { providerID: "anthropic", modelID: "claude-opus-4-6" },
-    );
-    expect(result).toEqual({ providerID: "anthropic", modelID: "claude-opus-4-6" });
+    const result = resolveWorkerModel("anthropic", undefined, {
+      providerID: "anthropic",
+      modelID: "claude-opus-4-6",
+    });
+    expect(result).toEqual({
+      providerID: "anthropic",
+      modelID: "claude-opus-4-6",
+    });
   });
 
   test("returns undefined when no config at all", () => {
@@ -47,17 +52,17 @@ describe("resolveWorkerModel", () => {
 describe("computeLayer0Cap", () => {
   test("Opus: $0.10 target / $0.50 per MTok → 200K", () => {
     // $0.50/MTok = $0.0000005/token
-    const cap = computeLayer0Cap(0.10, 0.50 / 1e6);
+    const cap = computeLayer0Cap(0.1, 0.5 / 1e6);
     expect(cap).toBe(200_000);
   });
 
   test("Sonnet: $0.10 target / $0.30 per MTok → 333K", () => {
-    const cap = computeLayer0Cap(0.10, 0.30 / 1e6);
+    const cap = computeLayer0Cap(0.1, 0.3 / 1e6);
     expect(cap).toBe(333_333);
   });
 
   test("Haiku: $0.10 target / $0.10 per MTok → 1M", () => {
-    const cap = computeLayer0Cap(0.10, 0.10 / 1e6);
+    const cap = computeLayer0Cap(0.1, 0.1 / 1e6);
     expect(cap).toBe(1_000_000);
   });
 
@@ -68,22 +73,22 @@ describe("computeLayer0Cap", () => {
   });
 
   test("returns 0 when target is 0 (disabled)", () => {
-    const cap = computeLayer0Cap(0, 0.50 / 1e6);
+    const cap = computeLayer0Cap(0, 0.5 / 1e6);
     expect(cap).toBe(0);
   });
 
   test("returns 0 when cache read cost is 0 (free model)", () => {
-    const cap = computeLayer0Cap(0.10, 0);
+    const cap = computeLayer0Cap(0.1, 0);
     expect(cap).toBe(0);
   });
 
   test("$0.05 target gives tighter cap for Opus", () => {
-    const cap = computeLayer0Cap(0.05, 0.50 / 1e6);
+    const cap = computeLayer0Cap(0.05, 0.5 / 1e6);
     expect(cap).toBe(100_000);
   });
 
   test("$0.15 target gives looser cap for Opus", () => {
-    const cap = computeLayer0Cap(0.15, 0.50 / 1e6);
+    const cap = computeLayer0Cap(0.15, 0.5 / 1e6);
     expect(cap).toBe(300_000);
   });
 });
@@ -98,12 +103,14 @@ describe("LoreConfig — budget cost fields", () => {
   test("budget defaults include new fields", () => {
     const cfg = LoreConfig.parse({});
     expect(cfg.budget.ltm).toBe(0.05);
-    expect(cfg.budget.targetCacheReadCostPerTurn).toBe(0.10);
+    expect(cfg.budget.targetCacheReadCostPerTurn).toBe(0.1);
     expect(cfg.budget.maxLayer0Tokens).toBeUndefined();
   });
 
   test("targetCacheReadCostPerTurn can be customized", () => {
-    const cfg = LoreConfig.parse({ budget: { targetCacheReadCostPerTurn: 0.05 } });
+    const cfg = LoreConfig.parse({
+      budget: { targetCacheReadCostPerTurn: 0.05 },
+    });
     expect(cfg.budget.targetCacheReadCostPerTurn).toBe(0.05);
   });
 

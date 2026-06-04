@@ -9,7 +9,11 @@
  */
 import { existsSync, readFileSync, statSync } from "fs";
 import { join } from "path";
-import type { AgentHistoryProvider, ConversationChunk, DetectedSession } from "../types";
+import type {
+  AgentHistoryProvider,
+  ConversationChunk,
+  DetectedSession,
+} from "../types";
 import { registerProvider } from "./index";
 
 // ---------------------------------------------------------------------------

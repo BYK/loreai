@@ -37,7 +37,10 @@ const REGISTRATION_KEY = "__LORE_VENDOR_MODEL__";
 
 /** Read the vendor registration written by the binary wrapper, if any. */
 function getRegistration(): VendorRegistration | null {
-  const g = globalThis as unknown as Record<string, VendorRegistration | undefined>;
+  const g = globalThis as unknown as Record<
+    string,
+    VendorRegistration | undefined
+  >;
   return g[REGISTRATION_KEY] ?? null;
 }
 
@@ -45,7 +48,10 @@ function getRegistration(): VendorRegistration | null {
  *  both binary-mode and npm-mode code paths without spinning up a real
  *  compiled binary. */
 export function _setVendorRegistration(reg: VendorRegistration | null): void {
-  const g = globalThis as unknown as Record<string, VendorRegistration | undefined>;
+  const g = globalThis as unknown as Record<
+    string,
+    VendorRegistration | undefined
+  >;
   if (reg) g[REGISTRATION_KEY] = reg;
   else delete g[REGISTRATION_KEY];
 }

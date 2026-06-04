@@ -19,7 +19,9 @@ import type {
 
 // Load the extracted session turns from compressed JSON fixture
 const fixtureDir = join(import.meta.dir, ".");
-const compressed = readFileSync(join(fixtureDir, "cli-refactor-session.json.gz"));
+const compressed = readFileSync(
+  join(fixtureDir, "cli-refactor-session.json.gz"),
+);
 const turns: ConversationTurn[] = JSON.parse(gunzipSync(compressed).toString());
 
 const dimension: Dimension = "context";
@@ -57,7 +59,8 @@ const questions: EvalQuestion[] = [
   {
     ...base,
     id: "mega-e1",
-    question: "What was the final phase being worked on at the end of the session?",
+    question:
+      "What was the final phase being worked on at the end of the session?",
     referenceAnswer:
       "Phase 6 (and 6b) — removing direct stdout/stderr usage from remaining commands " +
       "and switching them to the return-based output system. The user also mentioned " +
@@ -68,7 +71,8 @@ const questions: EvalQuestion[] = [
   {
     ...base,
     id: "mega-e2",
-    question: "What PR was being reviewed for Bugbot comments near the end of the session?",
+    question:
+      "What PR was being reviewed for Bugbot comments near the end of the session?",
     referenceAnswer:
       "PR #394 — the user referenced https://github.com/getsentry/cli/pull/394#discussion_r2920036806 " +
       "with review feedback about streaming output and logger.info() calls.",
@@ -77,7 +81,8 @@ const questions: EvalQuestion[] = [
   {
     ...base,
     id: "mega-e3",
-    question: "What was the user's instruction about Phase 6 and 7 being marked as 'future'?",
+    question:
+      "What was the user's instruction about Phase 6 and 7 being marked as 'future'?",
     referenceAnswer:
       "The user said Phase 6 and 7 should NOT be 'future' — they should be done " +
       "once Phase 5 is merged. The user pushed back on deferring these phases.",
@@ -86,10 +91,11 @@ const questions: EvalQuestion[] = [
   {
     ...base,
     id: "mega-e4",
-    question: "What command did the user repeatedly tell the assistant to run for checking CI failures?",
+    question:
+      "What command did the user repeatedly tell the assistant to run for checking CI failures?",
     referenceAnswer:
       "gh run view --log-failed --job $(gh pr checks $PR_NO --json state,link " +
-      "-q '.[] | select(.state == \"FAILURE\").link | split(\"/\")[-1]') — " +
+      '-q \'.[] | select(.state == "FAILURE").link | split("/")[-1]\') — ' +
       "used repeatedly throughout the session after each push.",
     metadata: { difficulty: "easy", tags: ["pattern", "ci"] },
   },
@@ -111,7 +117,8 @@ const questions: EvalQuestion[] = [
   {
     ...base,
     id: "mega-m1",
-    question: "What was the architectural vision for the template-based output system?",
+    question:
+      "What was the architectural vision for the template-based output system?",
     referenceAnswer:
       "Commands become 'data producers' — the framework selects a template " +
       "(JSON, plain text, rendered markdown) based on flags. Commands describe " +
@@ -122,7 +129,8 @@ const questions: EvalQuestion[] = [
   {
     ...base,
     id: "mega-m2",
-    question: "What was the user's position on tuples vs objects for command return values?",
+    question:
+      "What was the user's position on tuples vs objects for command return values?",
     referenceAnswer:
       "The user asked 'are tuples really cheaper than using a simple object?' and " +
       "the assistant confirmed. The user accepted tuples but wanted the simplest " +
@@ -145,7 +153,8 @@ const questions: EvalQuestion[] = [
   {
     ...base,
     id: "mega-m4",
-    question: "Why did the user want to remove the --include flag from the api command?",
+    question:
+      "Why did the user want to remove the --include flag from the api command?",
     referenceAnswer:
       "The user asked to check Sentry traces (org: 'sentry', project: 'cli') to " +
       "see if the -i or --include flag was ever used with api calls. The traces " +
@@ -195,12 +204,16 @@ const questions: EvalQuestion[] = [
   {
     ...base,
     id: "mega-h1",
-    question: "What was the very first issue selected from the open issues list, and why?",
+    question:
+      "What was the very first issue selected from the open issues list, and why?",
     referenceAnswer:
       "Issue #350 — Input hardening against agent hallucinations. It was chosen " +
       "because of security impact (defense-in-depth against URL injection via " +
       "org/project slugs interpolated into API paths).",
-    metadata: { difficulty: "hard", tags: ["early-session", "issue-selection"] },
+    metadata: {
+      difficulty: "hard",
+      tags: ["early-session", "issue-selection"],
+    },
   },
   {
     ...base,
@@ -231,7 +244,8 @@ const questions: EvalQuestion[] = [
   {
     ...base,
     id: "mega-h5",
-    question: "How many tests were passing in the full test suite during the first PR?",
+    question:
+      "How many tests were passing in the full test suite during the first PR?",
     referenceAnswer:
       "359 tests passed in the full test suite, plus 19 property tests for " +
       "the input hardening work specifically.",
@@ -240,7 +254,8 @@ const questions: EvalQuestion[] = [
   {
     ...base,
     id: "mega-h6",
-    question: "What user feedback prompted adding magic selector info to help text?",
+    question:
+      "What user feedback prompted adding magic selector info to help text?",
     referenceAnswer:
       "The user said: 'could we add the magic selector info to sentry issue/sentry " +
       "issue --help? this could help agents' — and then asked 'any other commands " +
@@ -291,7 +306,8 @@ const scenario: ScenarioDefinition = {
       turns,
       metadata: {
         totalTokens: 2374811,
-        description: "5-day CLI refactoring: Issue #350 → PRs #370-394+, buildCommand migration",
+        description:
+          "5-day CLI refactoring: Issue #350 → PRs #370-394+, buildCommand migration",
       },
     },
   ],

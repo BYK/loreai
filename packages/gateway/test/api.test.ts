@@ -50,7 +50,9 @@ afterAll(async () => {
     const file = `${dbPath}${suffix}`;
     try {
       if (existsSync(file)) unlinkSync(file);
-    } catch { /* best-effort */ }
+    } catch {
+      /* best-effort */
+    }
   }
 });
 
@@ -62,7 +64,10 @@ function api(path: string, init?: RequestInit): Promise<Response> {
   return fetch(`${baseURL}${path}`, init);
 }
 
-async function apiJSON<T = unknown>(path: string, init?: RequestInit): Promise<T> {
+async function apiJSON<T = unknown>(
+  path: string,
+  init?: RequestInit,
+): Promise<T> {
   const res = await api(path, init);
   return res.json() as Promise<T>;
 }
@@ -73,7 +78,11 @@ async function seedProject() {
   const { ltm } = await import("@loreai/core");
 
   const projectPath = `/test/api/${Date.now()}`;
-  const projectId = ensureProject(projectPath, "test-project", "git@github.com:test/repo.git");
+  const projectId = ensureProject(
+    projectPath,
+    "test-project",
+    "git@github.com:test/repo.git",
+  );
 
   const knowledgeId = ltm.create({
     projectPath,
@@ -99,9 +108,10 @@ describe("GET /api/v1/projects", () => {
 
   it("returns projects after seeding", async () => {
     const { projectId } = await seedProject();
-    const projects = await apiJSON<Array<{ id: string; name: string | null }>>(
-      "/api/v1/projects",
-    );
+    const projects =
+      await apiJSON<Array<{ id: string; name: string | null }>>(
+        "/api/v1/projects",
+      );
     expect(projects.length).toBeGreaterThanOrEqual(1);
     const found = projects.find((p) => p.id === projectId);
     expect(found).toBeDefined();
@@ -111,9 +121,10 @@ describe("GET /api/v1/projects", () => {
 
 describe("GET /api/v1/stats", () => {
   it("returns global stats", async () => {
-    const stats = await apiJSON<{ project_count: number; knowledge_count: number }>(
-      "/api/v1/stats",
-    );
+    const stats = await apiJSON<{
+      project_count: number;
+      knowledge_count: number;
+    }>("/api/v1/stats");
     expect(stats.project_count).toBeGreaterThanOrEqual(0);
     expect(typeof stats.knowledge_count).toBe("number");
   });
@@ -130,7 +141,9 @@ describe("GET /api/v1/projects/:id/knowledge", () => {
   });
 
   it("returns 404 for unknown project", async () => {
-    const res = await api("/api/v1/projects/00000000-0000-0000-0000-000000000000/knowledge");
+    const res = await api(
+      "/api/v1/projects/00000000-0000-0000-0000-000000000000/knowledge",
+    );
     expect(res.status).toBe(404);
   });
 });
@@ -167,23 +180,25 @@ describe("GET /api/v1/knowledge/:id", () => {
   });
 
   it("returns 404 for unknown knowledge ID", async () => {
-    const res = await api("/api/v1/knowledge/00000000-0000-0000-0000-000000000000");
+    const res = await api(
+      "/api/v1/knowledge/00000000-0000-0000-0000-000000000000",
+    );
     expect(res.status).toBe(404);
   });
 
   it("supports prefix resolution", async () => {
     const { knowledgeId } = await seedProject();
     const prefix = knowledgeId.slice(0, 8);
-    const entry = await apiJSON<{ id: string }>(
-      `/api/v1/knowledge/${prefix}`,
-    );
+    const entry = await apiJSON<{ id: string }>(`/api/v1/knowledge/${prefix}`);
     expect(entry.id).toBe(knowledgeId);
   });
 });
 
 describe("GET /api/v1/distillations/:id", () => {
   it("returns 404 for unknown distillation ID", async () => {
-    const res = await api("/api/v1/distillations/00000000-0000-0000-0000-000000000000");
+    const res = await api(
+      "/api/v1/distillations/00000000-0000-0000-0000-000000000000",
+    );
     expect(res.status).toBe(404);
   });
 });
@@ -196,9 +211,11 @@ describe("DELETE /api/v1/knowledge/:id", () => {
   it("deletes a knowledge entry", async () => {
     const { knowledgeId } = await seedProject();
 
-    const res = await api(`/api/v1/knowledge/${knowledgeId}`, { method: "DELETE" });
+    const res = await api(`/api/v1/knowledge/${knowledgeId}`, {
+      method: "DELETE",
+    });
     expect(res.status).toBe(200);
-    const body = await res.json() as { deleted: boolean };
+    const body = (await res.json()) as { deleted: boolean };
     expect(body.deleted).toBe(true);
 
     // Verify it's gone
@@ -207,7 +224,10 @@ describe("DELETE /api/v1/knowledge/:id", () => {
   });
 
   it("returns 404 for unknown knowledge ID", async () => {
-    const res = await api("/api/v1/knowledge/00000000-0000-0000-0000-000000000000", { method: "DELETE" });
+    const res = await api(
+      "/api/v1/knowledge/00000000-0000-0000-0000-000000000000",
+      { method: "DELETE" },
+    );
     expect(res.status).toBe(404);
   });
 });
@@ -216,9 +236,11 @@ describe("DELETE /api/v1/projects/:id", () => {
   it("deletes a project and all its data", async () => {
     const { projectId } = await seedProject();
 
-    const res = await api(`/api/v1/projects/${projectId}`, { method: "DELETE" });
+    const res = await api(`/api/v1/projects/${projectId}`, {
+      method: "DELETE",
+    });
     expect(res.status).toBe(200);
-    const body = await res.json() as { knowledge_deleted: number };
+    const body = (await res.json()) as { knowledge_deleted: number };
     expect(body.knowledge_deleted).toBeGreaterThanOrEqual(1);
 
     // Verify project is gone
@@ -237,7 +259,7 @@ describe("POST /api/v1/projects/:id/clear", () => {
       body: JSON.stringify({}),
     });
     expect(res.status).toBe(200);
-    const body = await res.json() as { knowledge_deleted: number };
+    const body = (await res.json()) as { knowledge_deleted: number };
     expect(body.knowledge_deleted).toBeGreaterThanOrEqual(1);
   });
 
@@ -250,7 +272,7 @@ describe("POST /api/v1/projects/:id/clear", () => {
       body: JSON.stringify({ knowledge: true }),
     });
     expect(res.status).toBe(200);
-    const body = await res.json() as { knowledge_deleted: number };
+    const body = (await res.json()) as { knowledge_deleted: number };
     expect(body.knowledge_deleted).toBeGreaterThanOrEqual(1);
     // temporal_deleted should not be in response since we only asked for knowledge
     expect(body).not.toHaveProperty("temporal_deleted");
@@ -268,7 +290,10 @@ describe("POST /api/v1/reindex", () => {
   it("succeeds (global reindex)", async () => {
     const res = await api("/api/v1/reindex", { method: "POST" });
     expect(res.status).toBe(200);
-    const body = await res.json() as { knowledge_embedded: number; distillations_embedded: number };
+    const body = (await res.json()) as {
+      knowledge_embedded: number;
+      distillations_embedded: number;
+    };
     expect(typeof body.knowledge_embedded).toBe("number");
     expect(typeof body.distillations_embedded).toBe("number");
   });
@@ -348,7 +373,7 @@ describe("Error handling", () => {
   it("returns 404 for unknown API routes", async () => {
     const res = await api("/api/v1/nonexistent");
     expect(res.status).toBe(404);
-    const body = await res.json() as { type: string };
+    const body = (await res.json()) as { type: string };
     expect(body.type).toBe("error");
   });
 
@@ -378,7 +403,7 @@ describe("GET /api/v1/recall", () => {
     const pq = `path=${encodeURIComponent(projectPath)}`;
     const res = await api(`/api/v1/recall?q=test&${pq}&scope=invalid`);
     expect(res.status).toBe(400);
-    const body = await res.json() as { error: { message: string } };
+    const body = (await res.json()) as { error: { message: string } };
     expect(body.error.message).toContain("Invalid scope");
   });
 
@@ -406,9 +431,7 @@ describe("GET /api/v1/import/history", () => {
   it("returns empty array for project with no imports", async () => {
     const { projectPath } = await seedProject();
     const pq = `path=${encodeURIComponent(projectPath)}`;
-    const records = await apiJSON<unknown[]>(
-      `/api/v1/import/history?${pq}`,
-    );
+    const records = await apiJSON<unknown[]>(`/api/v1/import/history?${pq}`);
     expect(Array.isArray(records)).toBe(true);
     expect(records.length).toBe(0);
   });
@@ -429,14 +452,14 @@ describe("POST /api/v1/import/record", () => {
       }),
     });
     expect(res.status).toBe(200);
-    const body = await res.json() as { recorded: boolean };
+    const body = (await res.json()) as { recorded: boolean };
     expect(body.recorded).toBe(true);
 
     // Verify via history endpoint
     const pq = `path=${encodeURIComponent(projectPath)}`;
-    const records = await apiJSON<Array<{ agent_name: string; source_id: string }>>(
-      `/api/v1/import/history?${pq}`,
-    );
+    const records = await apiJSON<
+      Array<{ agent_name: string; source_id: string }>
+    >(`/api/v1/import/history?${pq}`);
     expect(records.length).toBe(1);
     expect(records[0].agent_name).toBe("test-agent");
     expect(records[0].source_id).toBe("session-123");

@@ -339,7 +339,10 @@ export function aggregateTokensBySession(
          )
        GROUP BY t.session_id`,
     )
-    .all(pid, sinceMs, sinceMs) as Array<{ session_id: string; metadata: string }>;
+    .all(pid, sinceMs, sinceMs) as Array<{
+    session_id: string;
+    metadata: string;
+  }>;
   for (const row of metaRows) {
     const existing = result.get(row.session_id);
     if (existing) {
@@ -419,7 +422,9 @@ export function search(input: {
       const params = input.sessionID
         ? [matchExpr, pid, input.sessionID, limit]
         : [matchExpr, pid, limit];
-      return db().query(ftsSQL).all(...params) as TemporalMessage[];
+      return db()
+        .query(ftsSQL)
+        .all(...params) as TemporalMessage[];
     });
   } catch {
     // FTS5 still choked (edge case) — fall back to LIKE search
@@ -462,7 +467,9 @@ export function searchScored(input: {
       const params = input.sessionID
         ? [matchExpr, pid, input.sessionID, limit]
         : [matchExpr, pid, limit];
-      return db().query(ftsSQL).all(...params) as ScoredTemporalMessage[];
+      return db()
+        .query(ftsSQL)
+        .all(...params) as ScoredTemporalMessage[];
     });
   } catch {
     return [];
@@ -502,8 +509,7 @@ export function temporalCnorm(
   // Var(w) = (1/n) * Σ(w_i - 1/n)²
   // Var_max = (n-1) / n²  (when one weight = 1, rest = 0)
   const uniform = 1 / n;
-  const variance =
-    weights.reduce((sum, w) => sum + (w - uniform) ** 2, 0) / n;
+  const variance = weights.reduce((sum, w) => sum + (w - uniform) ** 2, 0) / n;
   const maxVariance = (n - 1) / (n * n);
   return maxVariance === 0 ? 0 : variance / maxVariance;
 }
@@ -615,11 +621,14 @@ export function prune(input: {
   // Pass 2: Size cap — check if total storage for this project exceeds the
   // limit and if so, evict the oldest distilled messages until under the cap.
   const maxBytes = input.maxStorageMB * 1024 * 1024;
-  const totalBytes = (
-    database
-      .query("SELECT SUM(LENGTH(content)) as b FROM temporal_messages WHERE project_id = ?")
-      .get(pid) as { b: number | null }
-  ).b ?? 0;
+  const totalBytes =
+    (
+      database
+        .query(
+          "SELECT SUM(LENGTH(content)) as b FROM temporal_messages WHERE project_id = ?",
+        )
+        .get(pid) as { b: number | null }
+    ).b ?? 0;
 
   let capDeleted = 0;
   if (totalBytes > maxBytes) {
@@ -643,9 +652,7 @@ export function prune(input: {
     if (toDelete.length) {
       const placeholders = toDelete.map(() => "?").join(",");
       database
-        .query(
-          `DELETE FROM temporal_messages WHERE id IN (${placeholders})`,
-        )
+        .query(`DELETE FROM temporal_messages WHERE id IN (${placeholders})`)
         .run(...toDelete);
       // toDelete.length is the accurate count — result.changes is inflated by FTS triggers.
       capDeleted = toDelete.length;

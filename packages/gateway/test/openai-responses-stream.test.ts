@@ -425,7 +425,11 @@ describe("accumulateResponsesSSEStream", () => {
         event: "response.created",
         data: {
           type: "response.created",
-          response: { id: "resp_cache", model: "gpt-4o", status: "in_progress" },
+          response: {
+            id: "resp_cache",
+            model: "gpt-4o",
+            status: "in_progress",
+          },
         },
       },
       {

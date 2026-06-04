@@ -179,9 +179,7 @@ describe("recency-biased RRF fusion", () => {
     const items = makeItems();
     const bm25List = items; // already sorted by bm25Rank
 
-    const fused = reciprocalRankFusion([
-      { items: bm25List, key: (i) => i.id },
-    ]);
+    const fused = reciprocalRankFusion([{ items: bm25List, key: (i) => i.id }]);
 
     expect(fused.map((r) => r.item.id)).toEqual([
       "old-relevant",

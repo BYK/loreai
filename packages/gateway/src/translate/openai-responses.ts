@@ -119,9 +119,10 @@ function parseInputItems(input: unknown): GatewayMessage[] {
 
     if (itemType === "message" || (!itemType && role)) {
       // Message item — has role + content
-      const msgRole = (role === "assistant" || role === "developer" || role === "system")
-        ? role
-        : "user";
+      const msgRole =
+        role === "assistant" || role === "developer" || role === "system"
+          ? role
+          : "user";
 
       const content = parseMessageContent(item.content);
 
@@ -228,7 +229,11 @@ function parseMessageContent(content: unknown): GatewayContentBlock[] {
 
   const blocks: GatewayContentBlock[] = [];
   for (const part of content as Array<Record<string, unknown>>) {
-    if (part.type === "input_text" || part.type === "output_text" || part.type === "text") {
+    if (
+      part.type === "input_text" ||
+      part.type === "output_text" ||
+      part.type === "text"
+    ) {
       const text = String(part.text ?? "");
       if (text) blocks.push({ type: "text", text });
     } else {
@@ -359,7 +364,12 @@ function buildResponsesInput(
         items.push({
           type: "message",
           role: msg.role === "assistant" ? "assistant" : "user",
-          content: [{ type: msg.role === "assistant" ? "output_text" : "input_text", text: block.text }],
+          content: [
+            {
+              type: msg.role === "assistant" ? "output_text" : "input_text",
+              text: block.text,
+            },
+          ],
         });
       } else if (block.type === "tool_use") {
         items.push({
@@ -406,7 +416,9 @@ export function buildOpenAIResponsesResponse(
   return buildOpenAIResponsesNonStreamResponse(resp);
 }
 
-function buildOpenAIResponsesNonStreamResponse(resp: GatewayResponse): Response {
+function buildOpenAIResponsesNonStreamResponse(
+  resp: GatewayResponse,
+): Response {
   const output: Array<Record<string, unknown>> = [];
   let textContent = "";
   const functionCalls: Array<Record<string, unknown>> = [];
@@ -497,7 +509,9 @@ function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
 
       function emit(eventType: string, data: Record<string, unknown>) {
         controller.enqueue(
-          encoder.encode(`event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`),
+          encoder.encode(
+            `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`,
+          ),
         );
       }
 
@@ -685,7 +699,9 @@ function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
                   id: `msg_${respId}_${i}`,
                   role: "assistant",
                   status: "completed",
-                  content: [{ type: "output_text", text: block.text, annotations: [] }],
+                  content: [
+                    { type: "output_text", text: block.text, annotations: [] },
+                  ],
                 };
               }
               if (block.type === "tool_use") {

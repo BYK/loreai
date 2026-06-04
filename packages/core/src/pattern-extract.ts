@@ -73,7 +73,8 @@ const PATTERNS: PatternDef[] = [
 
   // Preference patterns
   {
-    regex: /prefers? (.+?) (?:over|to|instead of|rather than) (.+?)(?:\.|,|$)/gi,
+    regex:
+      /prefers? (.+?) (?:over|to|instead of|rather than) (.+?)(?:\.|,|$)/gi,
     category: "preference",
     titleFn: (m) => `Prefers ${m[1].trim()} over ${m[2].trim()}`,
   },
@@ -101,8 +102,7 @@ const PATTERNS: PatternDef[] = [
     titleFn: (m) => `Avoids ${m[1].trim()}`,
   },
   {
-    regex:
-      /(?:the |our |project )convention is (.+?)(?:\.|,|$)/gi,
+    regex: /(?:the |our |project )convention is (.+?)(?:\.|,|$)/gi,
     category: "preference",
     titleFn: (m) => `Convention: ${m[1].trim()}`,
   },
@@ -114,22 +114,26 @@ const PATTERNS: PatternDef[] = [
   // existing "typically uses" pattern above (which already handles
   // "user always use/prefer/go with X").
   {
-    regex: /(?:user |team |we )(?:stated |asserted |said )(?:to )?always (.+?)(?:\.|,|$)/gi,
+    regex:
+      /(?:user |team |we )(?:stated |asserted |said )(?:to )?always (.+?)(?:\.|,|$)/gi,
     category: "preference",
     titleFn: (m) => `Always ${m[1].trim()}`,
   },
   {
-    regex: /(?:user |team |we )(?:stated |asserted |said )(?:to )?never (.+?)(?:\.|,|$)/gi,
+    regex:
+      /(?:user |team |we )(?:stated |asserted |said )(?:to )?never (.+?)(?:\.|,|$)/gi,
     category: "preference",
     titleFn: (m) => `Never ${m[1].trim()}`,
   },
   {
-    regex: /(?:user |team |we )(?:stated |asserted |said )(?:to )?make sure to (.+?)(?:\.|,|$)/gi,
+    regex:
+      /(?:user |team |we )(?:stated |asserted |said )(?:to )?make sure to (.+?)(?:\.|,|$)/gi,
     category: "preference",
     titleFn: (m) => `Make sure to ${m[1].trim()}`,
   },
   {
-    regex: /(?:user |team |we )(?:stated |asserted |said )(?:to )?(?:don't|do not) forget (?:to )?(.+?)(?:\.|,|$)/gi,
+    regex:
+      /(?:user |team |we )(?:stated |asserted |said )(?:to )?(?:don't|do not) forget (?:to )?(.+?)(?:\.|,|$)/gi,
     category: "preference",
     titleFn: (m) => `Always ${m[1].trim()}`,
   },
@@ -158,7 +162,14 @@ export function extractPatterns(observations: string): ExtractedPattern[] {
       // real technology/tool names. Plain apostrophes (') are allowed
       // since they appear in valid names like "Bun's test runner".
       const captures = match.slice(1);
-      if (captures.some((c) => c && (c.trim().length <= 2 || /["\u201C\u201D`\u2018\u2019]/.test(c)))) continue;
+      if (
+        captures.some(
+          (c) =>
+            c &&
+            (c.trim().length <= 2 || /["\u201C\u201D`\u2018\u2019]/.test(c)),
+        )
+      )
+        continue;
 
       const title = titleFn(match);
       const key = title.toLowerCase();
@@ -197,9 +208,11 @@ const TAG_TITLE_MAP: Record<string, string> = {
   "requested-tests": "Always write tests alongside implementation",
   "corrected-style": "Follow consistent code style conventions",
   "rejected-approach": "Respect explicitly rejected approaches",
-  "requested-error-handling": "Always add proper error handling with try/catch and status codes",
+  "requested-error-handling":
+    "Always add proper error handling with try/catch and status codes",
   "requested-review": "Review code before committing",
-  "enforced-workflow": "Follow the established git workflow (branch, PR, review)",
+  "enforced-workflow":
+    "Follow the established git workflow (branch, PR, review)",
 };
 
 /**

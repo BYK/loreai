@@ -67,7 +67,9 @@ export async function probeGateway(
  * (verified via `/health` probe), returns a handle with `owned: false`
  * so the caller can reuse the existing instance.
  */
-export async function startGateway(opts: StartOptions = {}): Promise<GatewayHandle> {
+export async function startGateway(
+  opts: StartOptions = {},
+): Promise<GatewayHandle> {
   const config = loadConfig();
 
   // CLI overrides
@@ -200,8 +202,12 @@ export async function commandStart(opts: StartOptions): Promise<never> {
     console.log(`[lore] Gateway already running on ${addrs.join(", ")}`);
     console.log(`[lore] Dashboard: ${addrs[0]}/ui`);
     if (!opts.quiet) {
-      console.log("[lore] Use that instance, or stop it first to start a new one.");
-      console.log("[lore] Note: hosted mode setting reflects the running instance, not this invocation.");
+      console.log(
+        "[lore] Use that instance, or stop it first to start a new one.",
+      );
+      console.log(
+        "[lore] Note: hosted mode setting reflects the running instance, not this invocation.",
+      );
     }
     safeExit(0);
   }
@@ -223,15 +229,33 @@ export async function commandStart(opts: StartOptions): Promise<never> {
     console.log("  export DISABLE_AUTO_COMPACT=1");
     console.log("");
     console.log("[lore] Configuration (environment variables):");
-    console.log(`  LORE_LISTEN_PORT        Port to listen on (current: ${port})`);
-    console.log(`  LORE_LISTEN_HOST        Hosts to bind to, comma-separated (current: ${config.hosts.join(",")})`);
-    console.log(`  LORE_UPSTREAM_ANTHROPIC Anthropic API URL (current: ${config.upstreamAnthropic})`);
-    console.log(`  LORE_UPSTREAM_OPENAI    OpenAI API URL (current: ${config.upstreamOpenAI})`);
-    console.log(`  LORE_IDLE_TIMEOUT       Idle timeout in seconds (current: ${config.idleTimeoutSeconds})`);
-    console.log(`  LORE_DEBUG              Enable debug logging (current: ${config.debug})`);
-    console.log(`  LORE_BATCH_DISABLED     Disable batch background work (current: ${process.env.LORE_BATCH_DISABLED === "1"})`);
-    console.log(`  LORE_REMOTE_URL         Remote gateway URL for \`lore run\` (delegates instead of starting local)`);
-    console.log(`  LORE_HOSTED_MODE        Hosted mode — disable FS ops on client-controlled paths (current: ${config.hostedMode}, default for \`lore start\`: true)`);
+    console.log(
+      `  LORE_LISTEN_PORT        Port to listen on (current: ${port})`,
+    );
+    console.log(
+      `  LORE_LISTEN_HOST        Hosts to bind to, comma-separated (current: ${config.hosts.join(",")})`,
+    );
+    console.log(
+      `  LORE_UPSTREAM_ANTHROPIC Anthropic API URL (current: ${config.upstreamAnthropic})`,
+    );
+    console.log(
+      `  LORE_UPSTREAM_OPENAI    OpenAI API URL (current: ${config.upstreamOpenAI})`,
+    );
+    console.log(
+      `  LORE_IDLE_TIMEOUT       Idle timeout in seconds (current: ${config.idleTimeoutSeconds})`,
+    );
+    console.log(
+      `  LORE_DEBUG              Enable debug logging (current: ${config.debug})`,
+    );
+    console.log(
+      `  LORE_BATCH_DISABLED     Disable batch background work (current: ${process.env.LORE_BATCH_DISABLED === "1"})`,
+    );
+    console.log(
+      `  LORE_REMOTE_URL         Remote gateway URL for \`lore run\` (delegates instead of starting local)`,
+    );
+    console.log(
+      `  LORE_HOSTED_MODE        Hosted mode — disable FS ops on client-controlled paths (current: ${config.hostedMode}, default for \`lore start\`: true)`,
+    );
   }
   // Block until signal
   let shuttingDown = false;

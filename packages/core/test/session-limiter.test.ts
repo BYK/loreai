@@ -50,7 +50,9 @@ describe("session-limiter", () => {
     expect(distillLimiter.isBusy("session-1")).toBe(false);
 
     let resolve: () => void;
-    const blocker = new Promise<void>((r) => { resolve = r; });
+    const blocker = new Promise<void>((r) => {
+      resolve = r;
+    });
 
     const p = distillLimiter.get("session-1")(async () => {
       await blocker;
@@ -67,11 +69,17 @@ describe("session-limiter", () => {
 
   test("isBusy returns true when tasks are pending", async () => {
     let resolve1: () => void;
-    const blocker1 = new Promise<void>((r) => { resolve1 = r; });
+    const blocker1 = new Promise<void>((r) => {
+      resolve1 = r;
+    });
     const limiter = distillLimiter.get("session-1");
 
-    const p1 = limiter(async () => { await blocker1; });
-    const p2 = limiter(async () => { /* quick */ });
+    const p1 = limiter(async () => {
+      await blocker1;
+    });
+    const p2 = limiter(async () => {
+      /* quick */
+    });
 
     await new Promise((r) => setTimeout(r, 0));
     expect(distillLimiter.isBusy("session-1")).toBe(true);
@@ -112,7 +120,9 @@ describe("session-limiter", () => {
   test("distill and curator limiters are independent", async () => {
     const order: string[] = [];
     let resolveDistill: () => void;
-    const distillBlocker = new Promise<void>((r) => { resolveDistill = r; });
+    const distillBlocker = new Promise<void>((r) => {
+      resolveDistill = r;
+    });
 
     const pd = distillLimiter.get("session-1")(async () => {
       order.push("distill-start");
@@ -165,7 +175,9 @@ describe("session-limiter", () => {
 
   test("evict does not remove a busy limiter", async () => {
     let resolve: () => void;
-    const blocker = new Promise<void>((r) => { resolve = r; });
+    const blocker = new Promise<void>((r) => {
+      resolve = r;
+    });
 
     const p = distillLimiter.get("busy-session")(async () => {
       await blocker;

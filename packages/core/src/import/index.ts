@@ -23,7 +23,11 @@ export {
 } from "./providers";
 
 // Extraction (lazy — avoid pulling in LLM/curator deps for detection-only use)
-export { extractKnowledge, type ExtractionProgress, type ExtractionResult } from "./extract";
+export {
+  extractKnowledge,
+  type ExtractionProgress,
+  type ExtractionResult,
+} from "./extract";
 
 // Idempotency
 export {

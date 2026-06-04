@@ -53,7 +53,11 @@ function makeMessage(
   };
 }
 
-function makeParts(messageID: string, text: string, sessionID = "sess-1"): LorePart[] {
+function makeParts(
+  messageID: string,
+  text: string,
+  sessionID = "sess-1",
+): LorePart[] {
   return [
     {
       id: `part-${messageID}`,
@@ -108,7 +112,9 @@ describe("hasNonAsciiLetters", () => {
   });
 
   test("returns false for plain ASCII English", () => {
-    expect(hasNonAsciiLetters("Always run the tests before pushing")).toBe(false);
+    expect(hasNonAsciiLetters("Always run the tests before pushing")).toBe(
+      false,
+    );
   });
 
   test("returns false for empty string", () => {
@@ -145,7 +151,11 @@ describe("hasNonAsciiLetters", () => {
 describe("extractInstructionCandidates", () => {
   test("extracts 'always X' from user messages", () => {
     const messages = [
-      { role: "user", content: "Please always create a PR for changes.", session_id: "s1" },
+      {
+        role: "user",
+        content: "Please always create a PR for changes.",
+        session_id: "s1",
+      },
     ];
     const results = extractInstructionCandidates(messages);
     expect(results).toHaveLength(1);
@@ -154,7 +164,11 @@ describe("extractInstructionCandidates", () => {
 
   test("extracts 'never X' from user messages", () => {
     const messages = [
-      { role: "user", content: "You should never push directly to main.", session_id: "s1" },
+      {
+        role: "user",
+        content: "You should never push directly to main.",
+        session_id: "s1",
+      },
     ];
     const results = extractInstructionCandidates(messages);
     expect(results).toHaveLength(1);
@@ -163,7 +177,11 @@ describe("extractInstructionCandidates", () => {
 
   test("extracts 'make sure to X' from user messages", () => {
     const messages = [
-      { role: "user", content: "Make sure to run the linter before pushing.", session_id: "s1" },
+      {
+        role: "user",
+        content: "Make sure to run the linter before pushing.",
+        session_id: "s1",
+      },
     ];
     const results = extractInstructionCandidates(messages);
     expect(results).toHaveLength(1);
@@ -172,7 +190,11 @@ describe("extractInstructionCandidates", () => {
 
   test("extracts 'don't forget to X' from user messages", () => {
     const messages = [
-      { role: "user", content: "Don't forget to update the changelog when releasing.", session_id: "s1" },
+      {
+        role: "user",
+        content: "Don't forget to update the changelog when releasing.",
+        session_id: "s1",
+      },
     ];
     const results = extractInstructionCandidates(messages);
     expect(results).toHaveLength(1);
@@ -181,7 +203,11 @@ describe("extractInstructionCandidates", () => {
 
   test("extracts 'I want/need/prefer/expect' patterns", () => {
     const messages = [
-      { role: "user", content: "I want you to use squash merges for all PRs.", session_id: "s1" },
+      {
+        role: "user",
+        content: "I want you to use squash merges for all PRs.",
+        session_id: "s1",
+      },
     ];
     const results = extractInstructionCandidates(messages);
     expect(results).toHaveLength(1);
@@ -190,7 +216,11 @@ describe("extractInstructionCandidates", () => {
 
   test("extracts 'please always X' pattern — deduped with 'always X'", () => {
     const messages = [
-      { role: "user", content: "Please always run tests before committing.", session_id: "s1" },
+      {
+        role: "user",
+        content: "Please always run tests before committing.",
+        session_id: "s1",
+      },
     ];
     const results = extractInstructionCandidates(messages);
     // Both "always X" and "please always X" patterns fire, but dedup
@@ -201,7 +231,11 @@ describe("extractInstructionCandidates", () => {
 
   test("ignores assistant messages", () => {
     const messages = [
-      { role: "assistant", content: "I'll always create a PR for changes.", session_id: "s1" },
+      {
+        role: "assistant",
+        content: "I'll always create a PR for changes.",
+        session_id: "s1",
+      },
     ];
     const results = extractInstructionCandidates(messages);
     expect(results).toHaveLength(0);
@@ -218,8 +252,16 @@ describe("extractInstructionCandidates", () => {
 
   test("deduplicates by lowercased text", () => {
     const messages = [
-      { role: "user", content: "Always create a PR for changes.", session_id: "s1" },
-      { role: "user", content: "Always create a PR for changes.", session_id: "s1" },
+      {
+        role: "user",
+        content: "Always create a PR for changes.",
+        session_id: "s1",
+      },
+      {
+        role: "user",
+        content: "Always create a PR for changes.",
+        session_id: "s1",
+      },
     ];
     const results = extractInstructionCandidates(messages);
     expect(results).toHaveLength(1);
@@ -227,7 +269,11 @@ describe("extractInstructionCandidates", () => {
 
   test("extracts multiple different instructions", () => {
     const messages = [
-      { role: "user", content: "Always create a PR. Never push to main directly.", session_id: "s1" },
+      {
+        role: "user",
+        content: "Always create a PR. Never push to main directly.",
+        session_id: "s1",
+      },
     ];
     const results = extractInstructionCandidates(messages);
     expect(results).toHaveLength(2);
@@ -254,7 +300,11 @@ describe("extractInstructionCandidates", () => {
 
   test("preserves session_id on candidates", () => {
     const messages = [
-      { role: "user", content: "Always create a PR for changes.", session_id: "my-session-42" },
+      {
+        role: "user",
+        content: "Always create a PR for changes.",
+        session_id: "my-session-42",
+      },
     ];
     const results = extractInstructionCandidates(messages);
     expect(results).toHaveLength(1);
@@ -265,7 +315,11 @@ describe("extractInstructionCandidates", () => {
     // English regexes cannot match Turkish — the non-Latin fallback emits the
     // whole message so the downstream multilingual matcher can still work.
     const messages = [
-      { role: "user", content: "Her zaman değişiklikler için PR aç", session_id: "s1" },
+      {
+        role: "user",
+        content: "Her zaman değişiklikler için PR aç",
+        session_id: "s1",
+      },
     ];
     const results = extractInstructionCandidates(messages);
     expect(results).toHaveLength(1);
@@ -277,7 +331,11 @@ describe("extractInstructionCandidates", () => {
     // A plain English statement with no instruction keyword yields no candidate
     // (the fallback must NOT fire for Latin-script text).
     const messages = [
-      { role: "user", content: "The build is green and the tests pass.", session_id: "s1" },
+      {
+        role: "user",
+        content: "The build is green and the tests pass.",
+        session_id: "s1",
+      },
     ];
     expect(extractInstructionCandidates(messages)).toHaveLength(0);
   });
@@ -486,7 +544,9 @@ describe("formatForCurator", () => {
     ];
     const result = formatForCurator(instructions);
     expect(result).toContain("CROSS-SESSION REPEATED INSTRUCTIONS");
-    expect(result).toContain('"create a PR for all changes" (seen in 3 prior sessions)');
+    expect(result).toContain(
+      '"create a PR for all changes" (seen in 3 prior sessions)',
+    );
     expect(result).toContain('"merge with squash" (seen in 2 prior sessions)');
   });
 
@@ -521,7 +581,11 @@ describe("detectAndFormat", () => {
     temporal.store({
       projectPath: PROJECT,
       info: makeMessage("msg-current-1", "user", "current-sess"),
-      parts: makeParts("msg-current-1", "Always create a PR for all changes.", "current-sess"),
+      parts: makeParts(
+        "msg-current-1",
+        "Always create a PR for all changes.",
+        "current-sess",
+      ),
     });
 
     // Insert distillations from 2 prior sessions mentioning similar instructions
@@ -550,7 +614,11 @@ describe("detectAndFormat", () => {
     temporal.store({
       projectPath: PROJECT,
       info: makeMessage("msg-no-instr", "user", "current-sess"),
-      parts: makeParts("msg-no-instr", "Can you help me fix this bug?", "current-sess"),
+      parts: makeParts(
+        "msg-no-instr",
+        "Can you help me fix this bug?",
+        "current-sess",
+      ),
     });
 
     const result = await detectAndFormat({
@@ -566,7 +634,11 @@ describe("detectAndFormat", () => {
     temporal.store({
       projectPath: PROJECT,
       info: makeMessage("msg-lonely", "user", "current-sess"),
-      parts: makeParts("msg-lonely", "Always create a PR for all changes.", "current-sess"),
+      parts: makeParts(
+        "msg-lonely",
+        "Always create a PR for all changes.",
+        "current-sess",
+      ),
     });
 
     const result = await detectAndFormat({

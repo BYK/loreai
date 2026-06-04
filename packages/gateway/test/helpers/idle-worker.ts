@@ -75,8 +75,18 @@ mock.module("@loreai/core", () => ({
   getKV: () => null,
   setKV: () => {},
   evictSession: () => {},
-  distillLimiter: { get: () => {}, isBusy: () => false, evict: () => {}, clear: () => {} },
-  curatorLimiter: { get: () => {}, isBusy: () => false, evict: () => {}, clear: () => {} },
+  distillLimiter: {
+    get: () => {},
+    isBusy: () => false,
+    evict: () => {},
+    clear: () => {},
+  },
+  curatorLimiter: {
+    get: () => {},
+    isBusy: () => false,
+    evict: () => {},
+    clear: () => {},
+  },
   // Needed by transitive imports (cache-warmer.ts, cost-tracker.ts)
   db: () => ({}),
   projectId: () => undefined,
@@ -98,8 +108,14 @@ mock.module("../../src/cache-warmer", () => ({
 }));
 
 mock.module("../../src/worker-model", () => ({
-  getWorkerModel: () => ({ providerID: "anthropic", modelID: "claude-sonnet-4-20250514" }),
-  getModelEntrySync: () => ({ id: "claude-sonnet-4-20250514", cost: { input: 3, output: 15 } }),
+  getWorkerModel: () => ({
+    providerID: "anthropic",
+    modelID: "claude-sonnet-4-20250514",
+  }),
+  getModelEntrySync: () => ({
+    id: "claude-sonnet-4-20250514",
+    cost: { input: 3, output: 15 },
+  }),
 }));
 
 mock.module("@sentry/bun", () => ({

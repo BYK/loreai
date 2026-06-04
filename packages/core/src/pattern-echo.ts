@@ -115,17 +115,11 @@ async function _detect(input: {
 
   // Step 2: Search for similar distillations across the project (wide net)
   const pid = ensureProject(input.projectPath);
-  const hits = embedding.vectorSearchAllDistillations(
-    vec,
-    pid,
-    MAX_CANDIDATES,
-  );
+  const hits = embedding.vectorSearchAllDistillations(vec, pid, MAX_CANDIDATES);
 
   // Step 3: Filter candidates — above lower threshold, exclude self
   const candidates = hits.filter(
-    (h) =>
-      h.id !== input.distillId &&
-      h.similarity >= CANDIDATE_THRESHOLD,
+    (h) => h.id !== input.distillId && h.similarity >= CANDIDATE_THRESHOLD,
   );
 
   if (candidates.length < 2) return;
@@ -144,7 +138,9 @@ async function _detect(input: {
   );
 
   // Step 5: Load the observation text of the cluster members
-  const memberIds = cluster.members.slice(0, MAX_ECHO_SEGMENTS).map((e) => e.id);
+  const memberIds = cluster.members
+    .slice(0, MAX_ECHO_SEGMENTS)
+    .map((e) => e.id);
   const placeholders = memberIds.map(() => "?").join(",");
   const echoRows = db()
     .query(
@@ -231,7 +227,11 @@ function clusterBySimilarity(
     .query(
       `SELECT id, session_id, embedding FROM distillations WHERE id IN (${placeholders}) AND embedding IS NOT NULL`,
     )
-    .all(...ids) as Array<{ id: string; session_id: string; embedding: Buffer }>;
+    .all(...ids) as Array<{
+    id: string;
+    session_id: string;
+    embedding: Buffer;
+  }>;
 
   if (rows.length < 2) return null;
 
@@ -278,7 +278,9 @@ function clusterBySimilarity(
     }
 
     // Count distinct sessions (including current session)
-    const sessions = new Set(cluster.map((c) => sessionMap.get(c.id) ?? c.session_id));
+    const sessions = new Set(
+      cluster.map((c) => sessionMap.get(c.id) ?? c.session_id),
+    );
     sessions.add(currentSessionID);
 
     const clusterResult: Cluster = {

@@ -255,9 +255,7 @@ Examples:
     if (VERSION === target) {
       console.error(`[lore] Already up to date (${VERSION})`);
     } else {
-      const direction = isDowngrade(VERSION, target)
-        ? "Downgrade"
-        : "Update";
+      const direction = isDowngrade(VERSION, target) ? "Downgrade" : "Update";
       console.error(`[lore] ${direction} available: ${VERSION} -> ${target}`);
       console.error(`[lore] Run 'lore upgrade' to update.`);
     }
@@ -274,11 +272,7 @@ Examples:
   }
 
   // Validate pinned version exists (skip for channel keywords)
-  if (
-    cleanVersionArg &&
-    !CHANNEL_VERSIONS.has(cleanVersionArg) &&
-    !offline
-  ) {
+  if (cleanVersionArg && !CHANNEL_VERSIONS.has(cleanVersionArg) && !offline) {
     const exists = await versionExists(target, channel);
     if (!exists) {
       throw new UpgradeError(
@@ -327,4 +321,3 @@ Examples:
     releaseLock(downloadResult.lockPath);
   }
 }
-

@@ -18,12 +18,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getConfigDir } from "./binary";
 import { VERSION } from "../version";
-import {
-  prefetchNightlyPatches,
-  prefetchStablePatches,
-} from "./delta-upgrade";
+import { prefetchNightlyPatches, prefetchStablePatches } from "./delta-upgrade";
 import { cleanupPatchCache } from "./patch-cache";
-import { fetchLatestFromGitHub, fetchLatestNightlyVersion, getReleaseChannel } from "./upgrade";
+import {
+  fetchLatestFromGitHub,
+  fetchLatestNightlyVersion,
+  getReleaseChannel,
+} from "./upgrade";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -91,9 +92,12 @@ function readVersionCheckData(): VersionCheckData {
     const content = readFileSync(getVersionCheckPath(), "utf-8");
     const data = JSON.parse(content) as Partial<VersionCheckData>;
     return {
-      lastChecked: typeof data.lastChecked === "number" ? data.lastChecked : null,
-      latestVersion: typeof data.latestVersion === "string" ? data.latestVersion : null,
-      lastNotified: typeof data.lastNotified === "number" ? data.lastNotified : null,
+      lastChecked:
+        typeof data.lastChecked === "number" ? data.lastChecked : null,
+      latestVersion:
+        typeof data.latestVersion === "string" ? data.latestVersion : null,
+      lastNotified:
+        typeof data.lastNotified === "number" ? data.lastNotified : null,
     };
   } catch {
     return { lastChecked: null, latestVersion: null, lastNotified: null };

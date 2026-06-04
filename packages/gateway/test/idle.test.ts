@@ -26,7 +26,11 @@ describe("buildIdleWorkHandler", () => {
 /**
  * Run the idle worker test file in an isolated Bun subprocess.
  */
-async function runIsolatedTests(): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+async function runIsolatedTests(): Promise<{
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}> {
   const proc = Bun.spawn(["bun", "test", WORKER_PATH], {
     env: { ...process.env, NODE_ENV: "test" },
     stdout: "pipe",

@@ -69,9 +69,9 @@ describe("normalizeRemoteUrl", () => {
   });
 
   test("handles nested paths (subgroups)", () => {
-    expect(
-      normalizeRemoteUrl("git@gitlab.com:org/subgroup/project.git"),
-    ).toBe("gitlab.com/org/subgroup/project");
+    expect(normalizeRemoteUrl("git@gitlab.com:org/subgroup/project.git")).toBe(
+      "gitlab.com/org/subgroup/project",
+    );
   });
 
   test("produces same result for SSH and HTTPS of same repo", () => {

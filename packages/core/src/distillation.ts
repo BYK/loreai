@@ -5,7 +5,11 @@ import { CHUNK_TERMINATOR } from "./temporal";
 import * as embedding from "./embedding";
 import * as ltm from "./ltm";
 import * as log from "./log";
-import { extractPatterns, extractActionTags, tagToTitle } from "./pattern-extract";
+import {
+  extractPatterns,
+  extractActionTags,
+  tagToTitle,
+} from "./pattern-extract";
 import * as toolTrace from "./tool-trace";
 import { detectPatternEchoes } from "./pattern-echo";
 import { hasNonAsciiLetters } from "./instruction-detect";
@@ -122,7 +126,10 @@ export function distillTokenBudget(sourceTokens: number): number {
   const MULTIPLIER = 10;
   const FLOOR = 256;
   const CAP = 4096;
-  return Math.max(FLOOR, Math.min(Math.ceil(MULTIPLIER * Math.sqrt(sourceTokens)), CAP));
+  return Math.max(
+    FLOOR,
+    Math.min(Math.ceil(MULTIPLIER * Math.sqrt(sourceTokens)), CAP),
+  );
 }
 
 /**
@@ -139,7 +146,11 @@ const MIN_SEGMENT_TOKENS = 64;
 const GAP_THRESHOLD_MULTIPLIER = 3;
 
 /** Sum tokens for a slice of messages. */
-function sliceTokens(messages: TemporalMessage[], start: number, end: number): number {
+function sliceTokens(
+  messages: TemporalMessage[],
+  start: number,
+  end: number,
+): number {
   let sum = 0;
   for (let i = start; i < end; i++) sum += messages[i].tokens;
   return sum;
@@ -233,7 +244,10 @@ function findSplitIndex(
   }
 
   // Use the time gap if it's significantly larger than median
-  if (bestGap.index > 0 && bestGap.gap >= medianGap * GAP_THRESHOLD_MULTIPLIER) {
+  if (
+    bestGap.index > 0 &&
+    bestGap.gap >= medianGap * GAP_THRESHOLD_MULTIPLIER
+  ) {
     return bestGap.index;
   }
 
@@ -335,7 +349,9 @@ export function messagesToText(
     .map((m) => {
       // User text is always signal — never truncate.
       const body =
-        m.role === "user" ? m.content : truncateToolOutputsInContent(m.content, cap);
+        m.role === "user"
+          ? m.content
+          : truncateToolOutputsInContent(m.content, cap);
       return `[${m.role}] (${formatTime(m.created_at)}) ${body}`;
     })
     .join("\n\n");
@@ -402,7 +418,9 @@ const MAX_PINNED_ASSERTIONS = 5;
  *
  * Only scans `role === "user"` messages — assertions come from the user.
  */
-export function detectAssertions(messages: TemporalMessage[]): PinnedAssertion[] {
+export function detectAssertions(
+  messages: TemporalMessage[],
+): PinnedAssertion[] {
   const results: PinnedAssertion[] = [];
   // Track lowercased texts for dedup — both exact and substring overlap.
   const seenTexts: string[] = [];
@@ -573,9 +591,7 @@ function latestMeta(
        WHERE project_id = ? AND session_id = ? AND generation > 0
        ORDER BY generation DESC, created_at DESC LIMIT 1`,
     )
-    .get(pid, sessionID) as
-    | { observations: string; generation: number }
-    | null;
+    .get(pid, sessionID) as { observations: string; generation: number } | null;
   if (!row || !row.observations) return undefined;
   return row;
 }
@@ -629,9 +645,7 @@ export function loadForSession(
   const sql = includeArchived
     ? "SELECT id, project_id, session_id, observations, source_ids, generation, token_count, created_at, r_compression, c_norm FROM distillations WHERE project_id = ? AND session_id = ? ORDER BY created_at ASC"
     : "SELECT id, project_id, session_id, observations, source_ids, generation, token_count, created_at, r_compression, c_norm FROM distillations WHERE project_id = ? AND session_id = ? AND archived = 0 ORDER BY created_at ASC";
-  const rows = db()
-    .query(sql)
-    .all(pid, sessionID) as Array<{
+  const rows = db().query(sql).all(pid, sessionID) as Array<{
     id: string;
     project_id: string;
     session_id: string;
@@ -839,9 +853,7 @@ async function runInner(input: {
   // Reset orphaned messages (marked distilled by a deleted/migrated distillation)
   const orphans = resetOrphans(input.projectPath, input.sessionID);
   if (orphans > 0) {
-    log.info(
-      `Reset ${orphans} orphaned messages for re-observation`,
-    );
+    log.info(`Reset ${orphans} orphaned messages for re-observation`);
   }
 
   const cfg = config();
@@ -860,7 +872,10 @@ async function runInner(input: {
       break;
 
     if (pending.length > 0) {
-      const segments = detectSegments(pending, cfg.distillation.maxSegmentTokens);
+      const segments = detectSegments(
+        pending,
+        cfg.distillation.maxSegmentTokens,
+      );
       for (const segment of segments) {
         const segTokens = segment.reduce((s, m) => s + m.tokens, 0);
         if (segTokens < cfg.distillation.minSegmentTokens) {
@@ -902,8 +917,7 @@ async function runInner(input: {
     );
     if (
       !input.skipMeta &&
-      gen0Count(input.projectPath, input.sessionID) >=
-      effectiveMetaThreshold
+      gen0Count(input.projectPath, input.sessionID) >= effectiveMetaThreshold
     ) {
       // Call inner directly — we're already under the per-session limiter.
       await metaDistillInner({
@@ -940,9 +954,10 @@ async function distillSegment(input: {
   // Pre-scan for high-priority user assertions that might be lost in a
   // large segment dominated by routine code or tool output.
   const assertions = detectAssertions(input.messages);
-  const pinnedAssertions = assertions.length > 0
-    ? assertions.map((a) => `- "${a.text}" (${a.time})`).join("\n")
-    : undefined;
+  const pinnedAssertions =
+    assertions.length > 0
+      ? assertions.map((a) => `- "${a.text}" (${a.time})`).join("\n")
+      : undefined;
   if (assertions.length > 0) {
     log.info(
       `pinned ${assertions.length} user assertion(s) in segment of ${input.messages.length} msgs`,
@@ -978,7 +993,15 @@ async function distillSegment(input: {
   const responseText = await input.llm.prompt(
     DISTILLATION_SYSTEM,
     userContent,
-    { model, workerID: "lore-distill", thinking: false, urgent: input.urgent, sessionID: input.sessionID, maxTokens, temperature: 0 },
+    {
+      model,
+      workerID: "lore-distill",
+      thinking: false,
+      urgent: input.urgent,
+      sessionID: input.sessionID,
+      maxTokens,
+      temperature: 0,
+    },
   );
   if (!responseText) return null;
 
@@ -1082,7 +1105,9 @@ async function distillSegment(input: {
       }
     }
     if (patterns.length > 0) {
-      log.info(`pattern extraction: ${patterns.length} entries from distillation`);
+      log.info(
+        `pattern extraction: ${patterns.length} entries from distillation`,
+      );
     }
 
     // Action tag counting: extract tags from this segment, then count
@@ -1111,7 +1136,9 @@ async function distillSegment(input: {
               scope: "project",
               confidence: 0.8,
             });
-            log.info(`action tag '${tag}' found in ${sessionCount} sessions — created preference`);
+            log.info(
+              `action tag '${tag}' found in ${sessionCount} sessions — created preference`,
+            );
           }
         } catch {
           // Dedup guard or DB error — swallow
@@ -1197,9 +1224,10 @@ async function metaDistillInner(input: {
   // (error messages, file paths, version numbers) in long sessions. See #417.
   const cfg = config();
   const recentToKeep = cfg.distillation.recentSegmentsToKeep;
-  const toConsolidate = recentToKeep > 0 && existing.length >= recentToKeep
-    ? existing.slice(0, -recentToKeep)
-    : existing;
+  const toConsolidate =
+    recentToKeep > 0 && existing.length >= recentToKeep
+      ? existing.slice(0, -recentToKeep)
+      : existing;
 
   // Threshold: first meta needs ≥3 gen-0 segments to consolidate. Subsequent
   // anchored metas only need ≥1 new gen-0 since the prior meta already covers
@@ -1218,11 +1246,15 @@ async function metaDistillInner(input: {
   const model = input.model ?? cfg.model;
   const inputTokens = Math.ceil(userContent.length / 3);
   const maxTokens = workerTokenBudget(inputTokens, 0.25, 1024, 8192);
-  const responseText = await input.llm.prompt(
-    RECURSIVE_SYSTEM,
-    userContent,
-    { model, workerID: "lore-distill", thinking: false, urgent: input.urgent, sessionID: input.sessionID, maxTokens, temperature: 0 },
-  );
+  const responseText = await input.llm.prompt(RECURSIVE_SYSTEM, userContent, {
+    model,
+    workerID: "lore-distill",
+    thinking: false,
+    urgent: input.urgent,
+    sessionID: input.sessionID,
+    maxTokens,
+    temperature: 0,
+  });
   if (!responseText) return null;
 
   const result = parseDistillationResult(responseText);
@@ -1292,7 +1324,9 @@ async function metaDistillInner(input: {
       }
     }
     if (patterns.length > 0) {
-      log.info(`pattern extraction: ${patterns.length} entries from meta-distillation`);
+      log.info(
+        `pattern extraction: ${patterns.length} entries from meta-distillation`,
+      );
     }
   }
 

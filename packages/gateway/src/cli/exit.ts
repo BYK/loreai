@@ -22,7 +22,8 @@ export function safeExit(code: number): never {
   if (typeof globalThis.Bun !== "undefined") {
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { dlopen, FFIType } = require("bun:ffi") as typeof import("bun:ffi");
+      const { dlopen, FFIType } =
+        require("bun:ffi") as typeof import("bun:ffi");
       const libs =
         process.platform === "win32"
           ? ["msvcrt.dll"]

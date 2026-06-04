@@ -1,6 +1,31 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { db, close, ensureProject, projectId, mergeProjectInternal, loadForceMinLayer, saveForceMinLayer, getMeta, setMeta, getInstanceId, saveSessionCosts, loadSessionCosts, loadAllSessionCosts, getLastImportAt, setLastImportAt, saveSessionTracking, loadSessionTracking, loadHeaderSessionIndex, getKV, setKV, addDailyCost, getDailyCostTotals, getDailyCostForDay, isUnattributedProjectPath, UNATTRIBUTED_PROJECT_PREFIX } from "../src/db";
-
+import {
+  db,
+  close,
+  ensureProject,
+  projectId,
+  mergeProjectInternal,
+  loadForceMinLayer,
+  saveForceMinLayer,
+  getMeta,
+  setMeta,
+  getInstanceId,
+  saveSessionCosts,
+  loadSessionCosts,
+  loadAllSessionCosts,
+  getLastImportAt,
+  setLastImportAt,
+  saveSessionTracking,
+  loadSessionTracking,
+  loadHeaderSessionIndex,
+  getKV,
+  setKV,
+  addDailyCost,
+  getDailyCostTotals,
+  getDailyCostForDay,
+  isUnattributedProjectPath,
+  UNATTRIBUTED_PROJECT_PREFIX,
+} from "../src/db";
 
 describe("db", () => {
   test("initializes and creates tables", () => {
@@ -37,7 +62,9 @@ describe("db", () => {
 
   test("distillation_fts triggers exist for sync", () => {
     const triggers = db()
-      .query("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'distillation_fts_%' ORDER BY name")
+      .query(
+        "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'distillation_fts_%' ORDER BY name",
+      )
       .all() as Array<{ name: string }>;
     const names = triggers.map((t) => t.name);
     expect(names).toContain("distillation_fts_insert");
@@ -98,7 +125,9 @@ describe("db", () => {
 
   test("compound indexes exist for common query patterns", () => {
     const indexes = db()
-      .query("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%' ORDER BY name")
+      .query(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%' ORDER BY name",
+      )
       .all() as Array<{ name: string }>;
     const names = indexes.map((i) => i.name);
     // Compound indexes added in version 6
@@ -138,11 +167,15 @@ describe("db", () => {
   });
 
   test("isUnattributedProjectPath recognizes synthetic buckets", () => {
-    expect(isUnattributedProjectPath(`${UNATTRIBUTED_PROJECT_PREFIX}/abc123`)).toBe(true);
+    expect(
+      isUnattributedProjectPath(`${UNATTRIBUTED_PROJECT_PREFIX}/abc123`),
+    ).toBe(true);
     expect(isUnattributedProjectPath(UNATTRIBUTED_PROJECT_PREFIX)).toBe(true);
     expect(isUnattributedProjectPath("/home/user/real-project")).toBe(false);
     // Must not match a real path that merely contains the segment elsewhere.
-    expect(isUnattributedProjectPath("/home/__lore_unattributed__/x")).toBe(false);
+    expect(isUnattributedProjectPath("/home/__lore_unattributed__/x")).toBe(
+      false,
+    );
   });
 
   test("ensureProject gives unattributed buckets a provisional name", () => {
@@ -211,7 +244,9 @@ describe("db", () => {
     expect(id).toBeTruthy();
     expect(typeof id).toBe("string");
     // UUID v4 format
-    expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
     // Same value on subsequent calls
     expect(getInstanceId()).toBe(id);
   });
@@ -230,7 +265,9 @@ describe("db", () => {
 
     // Verify the new instance is fully migrated (kv_meta exists)
     const row = second
-      .query("SELECT name FROM sqlite_master WHERE type='table' AND name='kv_meta'")
+      .query(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='kv_meta'",
+      )
       .get() as { name: string } | null;
     expect(row).not.toBeNull();
     expect(row!.name).toBe("kv_meta");
@@ -246,23 +283,35 @@ describe("db", () => {
     d.exec("DROP TABLE IF EXISTS kv_meta");
     d.exec("DROP TABLE IF EXISTS metadata");
     expect(
-      d.query("SELECT name FROM sqlite_master WHERE type='table' AND name='kv_meta'").get(),
+      d
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='kv_meta'",
+        )
+        .get(),
     ).toBeNull();
     expect(
-      d.query("SELECT name FROM sqlite_master WHERE type='table' AND name='metadata'").get(),
+      d
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='metadata'",
+        )
+        .get(),
     ).toBeNull();
 
     // Close and re-open — migrate() should recover the missing tables
     close();
     const fresh = db();
     const afterKv = fresh
-      .query("SELECT name FROM sqlite_master WHERE type='table' AND name='kv_meta'")
+      .query(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='kv_meta'",
+      )
       .get() as { name: string } | null;
     expect(afterKv).not.toBeNull();
     expect(afterKv!.name).toBe("kv_meta");
 
     const afterMeta = fresh
-      .query("SELECT name FROM sqlite_master WHERE type='table' AND name='metadata'")
+      .query(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='metadata'",
+      )
       .get() as { name: string } | null;
     expect(afterMeta).not.toBeNull();
     expect(afterMeta!.name).toBe("metadata");
@@ -273,22 +322,26 @@ describe("db", () => {
   // -------------------------------------------------------------------------
 
   test("projects table has git_remote column (migration v14)", () => {
-    const cols = db()
-      .query("PRAGMA table_info(projects)")
-      .all() as Array<{ name: string }>;
+    const cols = db().query("PRAGMA table_info(projects)").all() as Array<{
+      name: string;
+    }>;
     expect(cols.map((c) => c.name)).toContain("git_remote");
   });
 
   test("project_path_aliases table exists (migration v14)", () => {
     const tables = db()
-      .query("SELECT name FROM sqlite_master WHERE type='table' AND name='project_path_aliases'")
+      .query(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='project_path_aliases'",
+      )
       .all() as Array<{ name: string }>;
     expect(tables.length).toBe(1);
   });
 
   test("idx_projects_git_remote index exists (migration v14)", () => {
     const indexes = db()
-      .query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_projects_git_remote'")
+      .query(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_projects_git_remote'",
+      )
       .all() as Array<{ name: string }>;
     expect(indexes.length).toBe(1);
   });
@@ -305,7 +358,9 @@ describe("db", () => {
     // Manually create a project and alias
     const id = ensureProject("/test/alias/original");
     db()
-      .query("INSERT OR IGNORE INTO project_path_aliases (path, project_id) VALUES (?, ?)")
+      .query(
+        "INSERT OR IGNORE INTO project_path_aliases (path, project_id) VALUES (?, ?)",
+      )
       .run("/test/alias/worktree", id);
 
     // projectId should resolve the alias
@@ -316,8 +371,16 @@ describe("db", () => {
     // Manually insert a project with a git_remote
     const id1 = crypto.randomUUID();
     db()
-      .query("INSERT INTO projects (id, path, name, git_remote, created_at) VALUES (?, ?, ?, ?, ?)")
-      .run(id1, "/test/git-dedup/original", "original", "github.com/test/dedup-repo", Date.now());
+      .query(
+        "INSERT INTO projects (id, path, name, git_remote, created_at) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run(
+        id1,
+        "/test/git-dedup/original",
+        "original",
+        "github.com/test/dedup-repo",
+        Date.now(),
+      );
 
     // Mock getGitRemote by pre-populating the cache
     // (getGitRemote for /test/git-dedup/worktree would return null since it's
@@ -328,7 +391,9 @@ describe("db", () => {
     // Since we can't easily mock getGitRemote in the same module, we test
     // the alias path: register an alias, then verify it resolves.
     db()
-      .query("INSERT OR IGNORE INTO project_path_aliases (path, project_id) VALUES (?, ?)")
+      .query(
+        "INSERT OR IGNORE INTO project_path_aliases (path, project_id) VALUES (?, ?)",
+      )
       .run("/test/git-dedup/worktree", id1);
 
     const id2 = ensureProject("/test/git-dedup/worktree");
@@ -393,11 +458,7 @@ describe("db", () => {
   test("ensureProject with supplied gitRemote=null falls through to create", () => {
     // Passing null explicitly should behave like not passing it at all
     // (no git remote, no deduplication by remote).
-    const id = ensureProject(
-      "/test/null-remote/project",
-      undefined,
-      null,
-    );
+    const id = ensureProject("/test/null-remote/project", undefined, null);
     const row = db()
       .query("SELECT git_remote FROM projects WHERE id = ?")
       .get(id) as { git_remote: string | null };
@@ -414,18 +475,35 @@ describe("db", () => {
       .query(
         "INSERT INTO temporal_messages (id, project_id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?)",
       )
-      .run(crypto.randomUUID(), sourceId, "session-merge", "user", "test message", Date.now());
+      .run(
+        crypto.randomUUID(),
+        sourceId,
+        "session-merge",
+        "user",
+        "test message",
+        Date.now(),
+      );
 
     db()
       .query(
         "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
       )
-      .run(crypto.randomUUID(), sourceId, "pattern", "Test", "test content", Date.now(), Date.now());
+      .run(
+        crypto.randomUUID(),
+        sourceId,
+        "pattern",
+        "Test",
+        "test content",
+        Date.now(),
+        Date.now(),
+      );
 
     // Verify source has data
     const sourceMsgsBefore = (
       db()
-        .query("SELECT COUNT(*) as c FROM temporal_messages WHERE project_id = ?")
+        .query(
+          "SELECT COUNT(*) as c FROM temporal_messages WHERE project_id = ?",
+        )
         .get(sourceId) as { c: number }
     ).c;
     expect(sourceMsgsBefore).toBe(1);
@@ -449,7 +527,9 @@ describe("db", () => {
     // Target should have the data
     const targetMsgs = (
       db()
-        .query("SELECT COUNT(*) as c FROM temporal_messages WHERE project_id = ?")
+        .query(
+          "SELECT COUNT(*) as c FROM temporal_messages WHERE project_id = ?",
+        )
         .get(targetId) as { c: number }
     ).c;
     expect(targetMsgs).toBe(1);
@@ -475,14 +555,20 @@ describe("db", () => {
     // Drop the table to simulate the broken state
     d.exec("DROP TABLE IF EXISTS project_path_aliases");
     expect(
-      d.query("SELECT name FROM sqlite_master WHERE type='table' AND name='project_path_aliases'").get(),
+      d
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='project_path_aliases'",
+        )
+        .get(),
     ).toBeNull();
 
     // Close and re-open — migrate() should recover
     close();
     const fresh = db();
     const after = fresh
-      .query("SELECT name FROM sqlite_master WHERE type='table' AND name='project_path_aliases'")
+      .query(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='project_path_aliases'",
+      )
       .get() as { name: string } | null;
     expect(after).not.toBeNull();
     expect(after!.name).toBe("project_path_aliases");
@@ -512,16 +598,32 @@ describe("db", () => {
   test("saveSessionCosts overwrites existing data", () => {
     const sid = `test-costs-overwrite-${crypto.randomUUID()}`;
     saveSessionCosts(sid, {
-      conversationCost: 1.0, workerCost: 0, conversationTurns: 5,
-      cacheReadTokens: 0, cacheWriteTokens: 0,
-      warmupSavings: 0, warmupHits: 0, ttlSavings: 0, ttlHits: 0, batchSavings: 0,
-      avoidedCompactions: 0, avoidedCompactionCost: 0,
+      conversationCost: 1.0,
+      workerCost: 0,
+      conversationTurns: 5,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      warmupSavings: 0,
+      warmupHits: 0,
+      ttlSavings: 0,
+      ttlHits: 0,
+      batchSavings: 0,
+      avoidedCompactions: 0,
+      avoidedCompactionCost: 0,
     });
     saveSessionCosts(sid, {
-      conversationCost: 2.0, workerCost: 0.5, conversationTurns: 15,
-      cacheReadTokens: 100000, cacheWriteTokens: 10000,
-      warmupSavings: 0.5, warmupHits: 5, ttlSavings: 0.8, ttlHits: 10, batchSavings: 1.2,
-      avoidedCompactions: 3, avoidedCompactionCost: 1.5,
+      conversationCost: 2.0,
+      workerCost: 0.5,
+      conversationTurns: 15,
+      cacheReadTokens: 100000,
+      cacheWriteTokens: 10000,
+      warmupSavings: 0.5,
+      warmupHits: 5,
+      ttlSavings: 0.8,
+      ttlHits: 10,
+      batchSavings: 1.2,
+      avoidedCompactions: 3,
+      avoidedCompactionCost: 1.5,
     });
     const loaded = loadSessionCosts(sid);
     expect(loaded!.conversationCost).toBe(2.0);
@@ -535,10 +637,18 @@ describe("db", () => {
     const sid = `test-costs-layer-${crypto.randomUUID()}`;
     saveForceMinLayer(sid, 2);
     saveSessionCosts(sid, {
-      conversationCost: 1.0, workerCost: 0, conversationTurns: 5,
-      cacheReadTokens: 0, cacheWriteTokens: 0,
-      warmupSavings: 0, warmupHits: 0, ttlSavings: 0, ttlHits: 0, batchSavings: 0,
-      avoidedCompactions: 0, avoidedCompactionCost: 0,
+      conversationCost: 1.0,
+      workerCost: 0,
+      conversationTurns: 5,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      warmupSavings: 0,
+      warmupHits: 0,
+      ttlSavings: 0,
+      ttlHits: 0,
+      batchSavings: 0,
+      avoidedCompactions: 0,
+      avoidedCompactionCost: 0,
     });
     expect(loadForceMinLayer(sid)).toBe(2);
     expect(loadSessionCosts(sid)!.conversationTurns).toBe(5);
@@ -553,9 +663,9 @@ describe("db", () => {
   // -------------------------------------------------------------------------
 
   test("projects table has last_import_at column (migration v22)", () => {
-    const cols = db()
-      .query("PRAGMA table_info(projects)")
-      .all() as Array<{ name: string }>;
+    const cols = db().query("PRAGMA table_info(projects)").all() as Array<{
+      name: string;
+    }>;
     expect(cols.map((c) => c.name)).toContain("last_import_at");
   });
 
@@ -583,10 +693,18 @@ describe("db", () => {
     const sid1 = `test-costs-all-1-${crypto.randomUUID()}`;
     const sid2 = `test-costs-all-2-${crypto.randomUUID()}`;
     saveSessionCosts(sid1, {
-      conversationCost: 1.0, workerCost: 0, conversationTurns: 5,
-      cacheReadTokens: 0, cacheWriteTokens: 0,
-      warmupSavings: 0.1, warmupHits: 1, ttlSavings: 0, ttlHits: 0, batchSavings: 0,
-      avoidedCompactions: 1, avoidedCompactionCost: 0.3,
+      conversationCost: 1.0,
+      workerCost: 0,
+      conversationTurns: 5,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      warmupSavings: 0.1,
+      warmupHits: 1,
+      ttlSavings: 0,
+      ttlHits: 0,
+      batchSavings: 0,
+      avoidedCompactions: 1,
+      avoidedCompactionCost: 0.3,
     });
     // sid2: all zeros — should not appear (only forceMinLayer row)
     saveForceMinLayer(sid2, 1);
@@ -602,9 +720,9 @@ describe("db", () => {
   // -------------------------------------------------------------------------
 
   test("session_state has v23 tracking columns", () => {
-    const cols = db()
-      .query("PRAGMA table_info(session_state)")
-      .all() as Array<{ name: string }>;
+    const cols = db().query("PRAGMA table_info(session_state)").all() as Array<{
+      name: string;
+    }>;
     const names = cols.map((c) => c.name);
     expect(names).toContain("last_curated_at");
     expect(names).toContain("message_count");
@@ -702,7 +820,14 @@ describe("db", () => {
 
   test("saveSessionTracking v24 cache warming round-trip", () => {
     const sid = `test-v24-warming-${crypto.randomUUID()}`;
-    const warmup = { lastWarmupAt: 1000, warmupCount: 3, totalWarmups: 3, warmupHits: 1, disabled: false, forceKeepWarm: true };
+    const warmup = {
+      lastWarmupAt: 1000,
+      warmupCount: 3,
+      totalWarmups: 3,
+      warmupHits: 1,
+      disabled: false,
+      forceKeepWarm: true,
+    };
     saveSessionTracking(sid, {
       resolvedConversationTTL: "1h",
       warmupState: JSON.stringify(warmup),
@@ -827,7 +952,6 @@ describe("db", () => {
     expect(getKV("kv_upsert")).toBe("second");
   });
 
-
   test("BUG-001: saveForceMinLayer(sid, 0) preserves other session_state columns", () => {
     const sid = "test-bug-001";
     saveSessionTracking(sid, {
@@ -935,7 +1059,9 @@ describe("db", () => {
   describe("daily_costs ledger (v30)", () => {
     test("daily_costs table exists", () => {
       const tables = db()
-        .query("SELECT name FROM sqlite_master WHERE type='table' AND name='daily_costs'")
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='daily_costs'",
+        )
         .all() as Array<{ name: string }>;
       expect(tables.length).toBe(1);
     });
@@ -985,13 +1111,19 @@ describe("db", () => {
       const d = db();
       d.exec("DROP TABLE IF EXISTS daily_costs");
       expect(
-        d.query("SELECT name FROM sqlite_master WHERE type='table' AND name='daily_costs'").get(),
+        d
+          .query(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='daily_costs'",
+          )
+          .get(),
       ).toBeNull();
 
       close();
       const fresh = db();
       const after = fresh
-        .query("SELECT name FROM sqlite_master WHERE type='table' AND name='daily_costs'")
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='daily_costs'",
+        )
         .get() as { name: string } | null;
       expect(after).not.toBeNull();
       expect(after!.name).toBe("daily_costs");
@@ -1005,14 +1137,18 @@ describe("db", () => {
   describe("tool_calls trace (v31)", () => {
     test("tool_calls table exists", () => {
       const tables = db()
-        .query("SELECT name FROM sqlite_master WHERE type='table' AND name='tool_calls'")
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='tool_calls'",
+        )
         .all() as Array<{ name: string }>;
       expect(tables.length).toBe(1);
     });
 
     test("tool_calls indexes exist", () => {
       const idx = db()
-        .query("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='tool_calls'")
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='tool_calls'",
+        )
         .all() as Array<{ name: string }>;
       const names = idx.map((i) => i.name);
       expect(names).toContain("idx_tool_calls_project_tool_status");
@@ -1022,9 +1158,8 @@ describe("db", () => {
     test("call_id PK upserts in place", () => {
       const pid = ensureProject("/tmp/tool-calls-pk-test");
       const insert = () =>
-        db()
-          .query(
-            `INSERT INTO tool_calls
+        db().query(
+          `INSERT INTO tool_calls
                (call_id, message_id, project_id, session_id, tool, status, error_type, error_message, duration_ms, created_at)
              VALUES ('c1', 'm1', ?, 's1', 'bash', ?, ?, ?, ?, 1000)
              ON CONFLICT(call_id) DO UPDATE SET
@@ -1032,13 +1167,19 @@ describe("db", () => {
                error_type = excluded.error_type,
                error_message = excluded.error_message,
                duration_ms = excluded.duration_ms`,
-          );
+        );
       insert().run(pid, "pending", null, null, null);
       insert().run(pid, "error", "timeout", "timed out", 20);
 
       const rows = db()
-        .query("SELECT status, error_type, duration_ms FROM tool_calls WHERE call_id='c1'")
-        .all() as Array<{ status: string; error_type: string | null; duration_ms: number }>;
+        .query(
+          "SELECT status, error_type, duration_ms FROM tool_calls WHERE call_id='c1'",
+        )
+        .all() as Array<{
+        status: string;
+        error_type: string | null;
+        duration_ms: number;
+      }>;
       expect(rows.length).toBe(1);
       expect(rows[0].status).toBe("error");
       expect(rows[0].error_type).toBe("timeout");
@@ -1049,19 +1190,27 @@ describe("db", () => {
       const d = db();
       d.exec("DROP TABLE IF EXISTS tool_calls");
       expect(
-        d.query("SELECT name FROM sqlite_master WHERE type='table' AND name='tool_calls'").get(),
+        d
+          .query(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='tool_calls'",
+          )
+          .get(),
       ).toBeNull();
 
       close();
       const fresh = db();
       const after = fresh
-        .query("SELECT name FROM sqlite_master WHERE type='table' AND name='tool_calls'")
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='tool_calls'",
+        )
         .get() as { name: string } | null;
       expect(after).not.toBeNull();
       expect(after!.name).toBe("tool_calls");
       // Indexes recovered too.
       const idx = fresh
-        .query("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='tool_calls'")
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='tool_calls'",
+        )
         .all() as Array<{ name: string }>;
       const names = idx.map((i) => i.name);
       expect(names).toContain("idx_tool_calls_project_tool_status");

@@ -17,8 +17,20 @@ const MODELS_DEV_API = "https://models.dev/api.json";
 
 /** Build a mock models.dev api.json response with full cost+limit data. */
 function buildModelsDevResponse(
-  anthropicModels: Record<string, { cost: { input: number; output: number; cache_read: number }; limit: { context: number; output: number } }>,
-  openaiModels?: Record<string, { cost: { input: number; output: number; cache_read: number }; limit: { context: number; output: number } }>,
+  anthropicModels: Record<
+    string,
+    {
+      cost: { input: number; output: number; cache_read: number };
+      limit: { context: number; output: number };
+    }
+  >,
+  openaiModels?: Record<
+    string,
+    {
+      cost: { input: number; output: number; cache_read: number };
+      limit: { context: number; output: number };
+    }
+  >,
 ) {
   const toEntries = (models: typeof anthropicModels) => {
     const entries: Record<string, ModelsDevEntry> = {};
@@ -87,7 +99,9 @@ describe("fetchModelData", () => {
   test("fetches and parses model data from models.dev JSON API", async () => {
     globalThis.fetch = mock(() =>
       Promise.resolve(
-        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), { status: 200 }),
+        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), {
+          status: 200,
+        }),
       ),
     ) as unknown as typeof fetch;
 
@@ -105,7 +119,15 @@ describe("fetchModelData", () => {
   test("fetches models from multiple providers", async () => {
     globalThis.fetch = mock(() =>
       Promise.resolve(
-        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_ANTHROPIC_MODELS, DEFAULT_OPENAI_MODELS)), { status: 200 }),
+        new Response(
+          JSON.stringify(
+            buildModelsDevResponse(
+              DEFAULT_ANTHROPIC_MODELS,
+              DEFAULT_OPENAI_MODELS,
+            ),
+          ),
+          { status: 200 },
+        ),
       ),
     ) as unknown as typeof fetch;
 
@@ -122,7 +144,9 @@ describe("fetchModelData", () => {
     globalThis.fetch = mock(() => {
       callCount++;
       return Promise.resolve(
-        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), { status: 200 }),
+        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), {
+          status: 200,
+        }),
       );
     }) as unknown as typeof fetch;
 
@@ -164,7 +188,9 @@ describe("fetchModelData", () => {
   test("deduplicates concurrent in-flight requests", async () => {
     globalThis.fetch = mock(() =>
       Promise.resolve(
-        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), { status: 200 }),
+        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), {
+          status: 200,
+        }),
       ),
     ) as unknown as typeof fetch;
 
@@ -212,7 +238,9 @@ describe("fetchModelData", () => {
   test("handles missing providers gracefully", async () => {
     globalThis.fetch = mock(() =>
       Promise.resolve(
-        new Response(JSON.stringify({ google: { models: {} } }), { status: 200 }),
+        new Response(JSON.stringify({ google: { models: {} } }), {
+          status: 200,
+        }),
       ),
     ) as unknown as typeof fetch;
 
@@ -223,7 +251,20 @@ describe("fetchModelData", () => {
   test("loads available providers even when some are missing", async () => {
     globalThis.fetch = mock(() =>
       Promise.resolve(
-        new Response(JSON.stringify({ openai: { models: { "gpt-5.4": { id: "gpt-5.4", cost: { input: 2.5, output: 15 }, limit: { context: 1_050_000, output: 100_000 } } } } }), { status: 200 }),
+        new Response(
+          JSON.stringify({
+            openai: {
+              models: {
+                "gpt-5.4": {
+                  id: "gpt-5.4",
+                  cost: { input: 2.5, output: 15 },
+                  limit: { context: 1_050_000, output: 100_000 },
+                },
+              },
+            },
+          }),
+          { status: 200 },
+        ),
       ),
     ) as unknown as typeof fetch;
 
@@ -253,7 +294,9 @@ describe("getModelEntry", () => {
   test("returns exact match from models.dev", async () => {
     globalThis.fetch = mock(() =>
       Promise.resolve(
-        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), { status: 200 }),
+        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), {
+          status: 200,
+        }),
       ),
     ) as unknown as typeof fetch;
 
@@ -266,7 +309,9 @@ describe("getModelEntry", () => {
   test("returns prefix match for dated model IDs", async () => {
     globalThis.fetch = mock(() =>
       Promise.resolve(
-        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), { status: 200 }),
+        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), {
+          status: 200,
+        }),
       ),
     ) as unknown as typeof fetch;
 
@@ -278,7 +323,9 @@ describe("getModelEntry", () => {
   test("returns fallback for unknown model", async () => {
     globalThis.fetch = mock(() =>
       Promise.resolve(
-        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), { status: 200 }),
+        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), {
+          status: 200,
+        }),
       ),
     ) as unknown as typeof fetch;
 
@@ -318,7 +365,9 @@ describe("getModelEntrySync", () => {
   test("returns cached data after fetchModelData populates cache", async () => {
     globalThis.fetch = mock(() =>
       Promise.resolve(
-        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), { status: 200 }),
+        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), {
+          status: 200,
+        }),
       ),
     ) as unknown as typeof fetch;
 
@@ -334,7 +383,9 @@ describe("getModelEntrySync", () => {
   test("prefix matches work in sync mode", async () => {
     globalThis.fetch = mock(() =>
       Promise.resolve(
-        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), { status: 200 }),
+        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), {
+          status: 200,
+        }),
       ),
     ) as unknown as typeof fetch;
 
@@ -390,7 +441,9 @@ describe("resetWorkerModelState", () => {
     globalThis.fetch = mock(() => {
       callCount++;
       return Promise.resolve(
-        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), { status: 200 }),
+        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), {
+          status: 200,
+        }),
       );
     }) as unknown as typeof fetch;
 

@@ -20,7 +20,11 @@ import {
   recallStoreKey,
   buildRecallMarker,
 } from "../src/recall";
-import type { GatewayRequest, GatewayToolUseBlock, RecallStore } from "../src/translate/types";
+import type {
+  GatewayRequest,
+  GatewayToolUseBlock,
+  RecallStore,
+} from "../src/translate/types";
 
 // ---------------------------------------------------------------------------
 // Helpers: build SSE events matching Anthropic's streaming format
@@ -99,21 +103,23 @@ function inputJsonDelta(
   index: number,
   json: string,
 ): { event: string; data: string } {
-  return contentBlockDelta(index, { type: "input_json_delta", partial_json: json });
+  return contentBlockDelta(index, {
+    type: "input_json_delta",
+    partial_json: json,
+  });
 }
 
-function contentBlockStop(
-  index: number,
-): { event: string; data: string } {
+function contentBlockStop(index: number): { event: string; data: string } {
   return {
     event: "content_block_stop",
     data: JSON.stringify({ type: "content_block_stop", index }),
   };
 }
 
-function messageDelta(
-  stopReason = "end_turn",
-): { event: string; data: string } {
+function messageDelta(stopReason = "end_turn"): {
+  event: string;
+  data: string;
+} {
   return {
     event: "message_delta",
     data: JSON.stringify({
@@ -390,11 +396,11 @@ describe("RecallAwareAccumulator — mixed tools (Case 2)", () => {
       contentBlockStop(1),
       // Read at 2 → becomes 1
       toolUseBlockStart(2, "Read"),
-      inputJsonDelta(2, '{}'),
+      inputJsonDelta(2, "{}"),
       contentBlockStop(2),
       // Bash at 3 → becomes 2
       toolUseBlockStart(3, "Bash"),
-      inputJsonDelta(3, '{}'),
+      inputJsonDelta(3, "{}"),
       contentBlockStop(3),
       messageDelta("tool_use"),
       messageStop(),
@@ -429,7 +435,7 @@ describe("RecallAwareAccumulator — mixed tools (Case 2)", () => {
       contentBlockStop(0),
       // Read at 1 — forwarded as-is
       toolUseBlockStart(1, "Read"),
-      inputJsonDelta(1, '{}'),
+      inputJsonDelta(1, "{}"),
       contentBlockStop(1),
       // recall at 2 — suppressed
       toolUseBlockStart(2, "recall"),
@@ -554,9 +560,7 @@ describe("RecallAwareAccumulator — edge cases", () => {
 
     // Verify thinking and text events are present
     const parsed = parseForwardedEvents(output);
-    const blockStarts = parsed.filter(
-      (e) => e.event === "content_block_start",
-    );
+    const blockStarts = parsed.filter((e) => e.event === "content_block_start");
     expect(blockStarts).toHaveLength(2);
     expect(
       (blockStarts[0].data.content_block as Record<string, unknown>).type,
@@ -914,10 +918,13 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
       buildRecallMarker("gateway architecture", "all"),
     );
     // No recall tool_use blocks remain
-    expect(markerResp.content.every((b) => {
-      if (b.type === "tool_use") return (b as GatewayToolUseBlock).name !== "recall";
-      return true;
-    })).toBe(true);
+    expect(
+      markerResp.content.every((b) => {
+        if (b.type === "tool_use")
+          return (b as GatewayToolUseBlock).name !== "recall";
+        return true;
+      }),
+    ).toBe(true);
 
     // --- Step 5: Store recall result in recallStore ---
     const store: RecallStore = new Map();
@@ -926,7 +933,8 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
       toolUseId: recallBlock!.id,
       input: { query: "gateway architecture" },
       position: accum.recallBlockIndex(),
-      result: "Found: gateway uses Anthropic protocol, recall interception is transparent",
+      result:
+        "Found: gateway uses Anthropic protocol, recall interception is transparent",
     });
 
     // --- Step 6: Expand markers in next request ---
@@ -937,20 +945,35 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
       protocol: "anthropic",
       system: "You are helpful.",
       messages: [
-        { role: "user", content: [{ type: "text", text: "Search memory and read file" }] },
+        {
+          role: "user",
+          content: [{ type: "text", text: "Search memory and read file" }],
+        },
         {
           role: "assistant",
           content: [
             { type: "text", text: "Let me search memory and read the file." },
-            { type: "text", text: buildRecallMarker("gateway architecture", "all") },
+            {
+              type: "text",
+              text: buildRecallMarker("gateway architecture", "all"),
+            },
             // Client only saw Read at index 1 (recall was suppressed, marker emitted)
-            { type: "tool_use", id: "toolu_read_1", name: "Read", input: { path: "/src/index.ts" } },
+            {
+              type: "tool_use",
+              id: "toolu_read_1",
+              name: "Read",
+              input: { path: "/src/index.ts" },
+            },
           ],
         },
         {
           role: "user",
           content: [
-            { type: "tool_result", toolUseId: "toolu_read_1", content: [{ type: "text", text: "// index.ts content" }] },
+            {
+              type: "tool_result",
+              toolUseId: "toolu_read_1",
+              content: [{ type: "text", text: "// index.ts content" }],
+            },
           ],
         },
       ],
@@ -972,8 +995,12 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
     expect(assistantMsg.content).toHaveLength(3); // text + recall + Read
     expect(assistantMsg.content[0].type).toBe("text");
     expect(assistantMsg.content[1].type).toBe("tool_use");
-    expect((assistantMsg.content[1] as GatewayToolUseBlock).name).toBe("recall");
-    expect((assistantMsg.content[1] as GatewayToolUseBlock).id).toBe("toolu_recall_1");
+    expect((assistantMsg.content[1] as GatewayToolUseBlock).name).toBe(
+      "recall",
+    );
+    expect((assistantMsg.content[1] as GatewayToolUseBlock).id).toBe(
+      "toolu_recall_1",
+    );
     expect(assistantMsg.content[2].type).toBe("tool_use");
     expect((assistantMsg.content[2] as GatewayToolUseBlock).name).toBe("Read");
 
@@ -981,9 +1008,13 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
     const userMsg = nextReq.messages[2];
     expect(userMsg.content).toHaveLength(2);
     expect(userMsg.content[0].type).toBe("tool_result");
-    expect((userMsg.content[0] as { toolUseId: string }).toolUseId).toBe("toolu_recall_1");
+    expect((userMsg.content[0] as { toolUseId: string }).toolUseId).toBe(
+      "toolu_recall_1",
+    );
     expect(userMsg.content[1].type).toBe("tool_result");
-    expect((userMsg.content[1] as { toolUseId: string }).toolUseId).toBe("toolu_read_1");
+    expect((userMsg.content[1] as { toolUseId: string }).toolUseId).toBe(
+      "toolu_read_1",
+    );
   });
 
   test("pending recall with multiple other tools — correct injection order", () => {
@@ -998,7 +1029,7 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
       inputJsonDelta(1, '{"query":"patterns"}'),
       contentBlockStop(1),
       toolUseBlockStart(2, "Read", "toolu_read_2"),
-      inputJsonDelta(2, '{}'),
+      inputJsonDelta(2, "{}"),
       contentBlockStop(2),
       toolUseBlockStart(3, "Bash", "toolu_bash_1"),
       inputJsonDelta(3, '{"command":"ls"}'),
@@ -1048,14 +1079,27 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
             { type: "text", text: "I'll search, read, and run." },
             { type: "text", text: buildRecallMarker("patterns", "all") },
             { type: "tool_use", id: "toolu_read_2", name: "Read", input: {} },
-            { type: "tool_use", id: "toolu_bash_1", name: "Bash", input: { command: "ls" } },
+            {
+              type: "tool_use",
+              id: "toolu_bash_1",
+              name: "Bash",
+              input: { command: "ls" },
+            },
           ],
         },
         {
           role: "user",
           content: [
-            { type: "tool_result", toolUseId: "toolu_read_2", content: [{ type: "text", text: "file" }] },
-            { type: "tool_result", toolUseId: "toolu_bash_1", content: [{ type: "text", text: "dir listing" }] },
+            {
+              type: "tool_result",
+              toolUseId: "toolu_read_2",
+              content: [{ type: "text", text: "file" }],
+            },
+            {
+              type: "tool_result",
+              toolUseId: "toolu_bash_1",
+              content: [{ type: "text", text: "dir listing" }],
+            },
           ],
         },
       ],
@@ -1076,15 +1120,23 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
     // Assistant: text + recall(replacing marker) + Read + Bash
     const assistantMsg = nextReq.messages[1];
     expect(assistantMsg.content).toHaveLength(4);
-    expect((assistantMsg.content[1] as GatewayToolUseBlock).name).toBe("recall");
+    expect((assistantMsg.content[1] as GatewayToolUseBlock).name).toBe(
+      "recall",
+    );
     expect((assistantMsg.content[2] as GatewayToolUseBlock).name).toBe("Read");
     expect((assistantMsg.content[3] as GatewayToolUseBlock).name).toBe("Bash");
 
     // User: recall_result + Read_result + Bash_result
     const userMsg = nextReq.messages[2];
     expect(userMsg.content).toHaveLength(3);
-    expect((userMsg.content[0] as { toolUseId: string }).toolUseId).toBe("toolu_recall_2");
-    expect((userMsg.content[1] as { toolUseId: string }).toolUseId).toBe("toolu_read_2");
-    expect((userMsg.content[2] as { toolUseId: string }).toolUseId).toBe("toolu_bash_1");
+    expect((userMsg.content[0] as { toolUseId: string }).toolUseId).toBe(
+      "toolu_recall_2",
+    );
+    expect((userMsg.content[1] as { toolUseId: string }).toolUseId).toBe(
+      "toolu_read_2",
+    );
+    expect((userMsg.content[2] as { toolUseId: string }).toolUseId).toBe(
+      "toolu_bash_1",
+    );
   });
 });

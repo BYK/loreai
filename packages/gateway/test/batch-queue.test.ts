@@ -21,7 +21,9 @@ const getTestAuth = () => TEST_AUTH;
 // ---------------------------------------------------------------------------
 
 /** Create a mock LLMClient that records calls and returns canned responses. */
-function createMockLLMClient(): LLMClient & { calls: Array<{ system: string; user: string; opts: unknown }> } {
+function createMockLLMClient(): LLMClient & {
+  calls: Array<{ system: string; user: string; opts: unknown }>;
+} {
   const calls: Array<{ system: string; user: string; opts: unknown }> = [];
   return {
     calls,
@@ -46,7 +48,8 @@ interface BatchCreateBody {
 }
 
 /** Track fetch calls for assertions. */
-let fetchCalls: Array<{ url: string; method: string; body?: BatchCreateBody }> = [];
+let fetchCalls: Array<{ url: string; method: string; body?: BatchCreateBody }> =
+  [];
 let fetchResponses: Array<{ ok: boolean; status: number; body: unknown }> = [];
 
 function pushFetchResponse(ok: boolean, status: number, body: unknown) {
@@ -63,14 +66,20 @@ beforeEach(() => {
   globalThis.fetch = async (url: string, init?: RequestInit) => {
     const method = init?.method ?? "GET";
     // FormData bodies (OpenAI file uploads) can't be JSON-parsed
-    const body = init?.body && typeof init.body === "string"
-      ? JSON.parse(init.body)
-      : undefined;
+    const body =
+      init?.body && typeof init.body === "string"
+        ? JSON.parse(init.body)
+        : undefined;
     fetchCalls.push({ url: url.toString(), method, body });
 
     const response = fetchResponses.shift();
     if (!response) {
-      return { ok: false, status: 500, text: async () => "no mock response", json: async () => ({}) };
+      return {
+        ok: false,
+        status: 500,
+        text: async () => "no mock response",
+        json: async () => ({}),
+      };
     }
     return {
       ok: response.ok,
@@ -86,8 +95,14 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
-const DEFAULT_MODEL = { providerID: "anthropic", modelID: "claude-sonnet-4-20250514" };
-const UPSTREAMS = { anthropic: "https://api.anthropic.com", openai: "https://api.openai.com" };
+const DEFAULT_MODEL = {
+  providerID: "anthropic",
+  modelID: "claude-sonnet-4-20250514",
+};
+const UPSTREAMS = {
+  anthropic: "https://api.anthropic.com",
+  openai: "https://api.openai.com",
+};
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -96,9 +111,15 @@ const UPSTREAMS = { anthropic: "https://api.anthropic.com", openai: "https://api
 describe("BatchLLMClient", () => {
   test("urgent calls bypass the queue and delegate to inner client", async () => {
     const inner = createMockLLMClient();
-    const client = createBatchLLMClient(inner, UPSTREAMS, getTestAuth, DEFAULT_MODEL, {
-      flushIntervalMs: 60_000, // Long interval so flush doesn't auto-trigger
-    });
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      getTestAuth,
+      DEFAULT_MODEL,
+      {
+        flushIntervalMs: 60_000, // Long interval so flush doesn't auto-trigger
+      },
+    );
 
     const result = await client.prompt("system", "urgent message", {
       workerID: "lore-distill",
@@ -119,12 +140,21 @@ describe("BatchLLMClient", () => {
 
   test("bearer-token (OAuth) calls bypass the queue and delegate to inner client", async () => {
     const inner = createMockLLMClient();
-    const bearerAuth: AuthCredential = { scheme: "bearer", value: "sk-ant-oat-test-token" };
+    const bearerAuth: AuthCredential = {
+      scheme: "bearer",
+      value: "sk-ant-oat-test-token",
+    };
     const getBearerAuth = () => bearerAuth;
 
-    const client = createBatchLLMClient(inner, UPSTREAMS, getBearerAuth, DEFAULT_MODEL, {
-      flushIntervalMs: 60_000,
-    });
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      getBearerAuth,
+      DEFAULT_MODEL,
+      {
+        flushIntervalMs: 60_000,
+      },
+    );
 
     const result = await client.prompt("system", "oauth worker call", {
       workerID: "lore-distill",
@@ -147,10 +177,16 @@ describe("BatchLLMClient", () => {
 
   test("api-key calls are still queued normally (not affected by bearer bypass)", async () => {
     const inner = createMockLLMClient();
-    const client = createBatchLLMClient(inner, UPSTREAMS, getTestAuth, DEFAULT_MODEL, {
-      flushIntervalMs: 60_000,
-      maxQueueSize: 100,
-    });
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      getTestAuth,
+      DEFAULT_MODEL,
+      {
+        flushIntervalMs: 60_000,
+        maxQueueSize: 100,
+      },
+    );
 
     // Don't await — should be queued
     const _promise = client.prompt("system", "api-key background work", {
@@ -168,10 +204,16 @@ describe("BatchLLMClient", () => {
 
   test("non-urgent calls are queued (not immediately sent to inner)", async () => {
     const inner = createMockLLMClient();
-    const client = createBatchLLMClient(inner, UPSTREAMS, getTestAuth, DEFAULT_MODEL, {
-      flushIntervalMs: 60_000,
-      maxQueueSize: 100,
-    });
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      getTestAuth,
+      DEFAULT_MODEL,
+      {
+        flushIntervalMs: 60_000,
+        maxQueueSize: 100,
+      },
+    );
 
     // Don't await — the promise is pending until batch resolves
     const promise = client.prompt("system", "background work", {
@@ -203,11 +245,17 @@ describe("BatchLLMClient", () => {
       processing_status: "in_progress",
     });
 
-    const client = createBatchLLMClient(inner, UPSTREAMS, getTestAuth, DEFAULT_MODEL, {
-      flushIntervalMs: 60_000,
-      maxQueueSize: 3,
-      pollIntervalMs: 60_000,
-    });
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      getTestAuth,
+      DEFAULT_MODEL,
+      {
+        flushIntervalMs: 60_000,
+        maxQueueSize: 3,
+        pollIntervalMs: 60_000,
+      },
+    );
 
     // Queue 3 items — should auto-flush on the 3rd
     const p1 = client.prompt("sys", "msg1", { workerID: "lore-distill" });
@@ -219,7 +267,9 @@ describe("BatchLLMClient", () => {
 
     // Should have called the batch API
     expect(fetchCalls).toHaveLength(1);
-    expect(fetchCalls[0]!.url).toBe(`${UPSTREAMS.anthropic}/v1/messages/batches`);
+    expect(fetchCalls[0]!.url).toBe(
+      `${UPSTREAMS.anthropic}/v1/messages/batches`,
+    );
     expect(fetchCalls[0]!.method).toBe("POST");
     expect(fetchCalls[0]!.body!.requests).toHaveLength(3);
 
@@ -237,10 +287,16 @@ describe("BatchLLMClient", () => {
     // Set up batch create to fail
     pushFetchResponse(false, 500, { error: "internal server error" });
 
-    const client = createBatchLLMClient(inner, UPSTREAMS, getTestAuth, DEFAULT_MODEL, {
-      flushIntervalMs: 60_000,
-      maxQueueSize: 2,
-    });
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      getTestAuth,
+      DEFAULT_MODEL,
+      {
+        flushIntervalMs: 60_000,
+        maxQueueSize: 2,
+      },
+    );
 
     const p1 = client.prompt("sys", "msg1", { workerID: "lore-distill" });
     const p2 = client.prompt("sys", "msg2", { workerID: "lore-distill" });
@@ -266,10 +322,16 @@ describe("BatchLLMClient", () => {
   test("fallback to synchronous when no API key", async () => {
     const inner = createMockLLMClient();
 
-    const client = createBatchLLMClient(inner, UPSTREAMS, () => null, DEFAULT_MODEL, {
-      flushIntervalMs: 60_000,
-      maxQueueSize: 1,
-    });
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      () => null,
+      DEFAULT_MODEL,
+      {
+        flushIntervalMs: 60_000,
+        maxQueueSize: 1,
+      },
+    );
 
     const p1 = client.prompt("sys", "msg1", { workerID: "lore-distill" });
 
@@ -285,10 +347,16 @@ describe("BatchLLMClient", () => {
 
   test("shutdown drains queue synchronously via inner client", async () => {
     const inner = createMockLLMClient();
-    const client = createBatchLLMClient(inner, UPSTREAMS, getTestAuth, DEFAULT_MODEL, {
-      flushIntervalMs: 60_000,
-      maxQueueSize: 100,
-    });
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      getTestAuth,
+      DEFAULT_MODEL,
+      {
+        flushIntervalMs: 60_000,
+        maxQueueSize: 100,
+      },
+    );
 
     const p1 = client.prompt("sys", "msg1", { workerID: "lore-distill" });
     const p2 = client.prompt("sys", "msg2", { workerID: "lore-curator" });
@@ -306,9 +374,15 @@ describe("BatchLLMClient", () => {
 
   test("after shutdown, new calls go directly to inner client", async () => {
     const inner = createMockLLMClient();
-    const client = createBatchLLMClient(inner, UPSTREAMS, getTestAuth, DEFAULT_MODEL, {
-      flushIntervalMs: 60_000,
-    });
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      getTestAuth,
+      DEFAULT_MODEL,
+      {
+        flushIntervalMs: 60_000,
+      },
+    );
 
     await client.shutdown();
 
@@ -323,10 +397,16 @@ describe("BatchLLMClient", () => {
 
   test("stats reflect accurate counts", async () => {
     const inner = createMockLLMClient();
-    const client = createBatchLLMClient(inner, UPSTREAMS, getTestAuth, DEFAULT_MODEL, {
-      flushIntervalMs: 60_000,
-      maxQueueSize: 100,
-    });
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      getTestAuth,
+      DEFAULT_MODEL,
+      {
+        flushIntervalMs: 60_000,
+        maxQueueSize: 100,
+      },
+    );
 
     // 2 urgent, 3 queued
     await client.prompt("sys", "urgent1", { urgent: true });
@@ -357,10 +437,16 @@ describe("BatchLLMClient", () => {
       processing_status: "in_progress",
     });
 
-    const client = createBatchLLMClient(inner, UPSTREAMS, getTestAuth, DEFAULT_MODEL, {
-      flushIntervalMs: 60_000,
-      maxQueueSize: 1,
-    });
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      getTestAuth,
+      DEFAULT_MODEL,
+      {
+        flushIntervalMs: 60_000,
+        maxQueueSize: 1,
+      },
+    );
 
     client.prompt("sys prompt", "user msg", { workerID: "lore-distill" });
 
@@ -387,10 +473,16 @@ describe("BatchLLMClient", () => {
       processing_status: "in_progress",
     });
 
-    const client = createBatchLLMClient(inner, UPSTREAMS, getTestAuth, DEFAULT_MODEL, {
-      flushIntervalMs: 60_000,
-      maxQueueSize: 1,
-    });
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      getTestAuth,
+      DEFAULT_MODEL,
+      {
+        flushIntervalMs: 60_000,
+        maxQueueSize: 1,
+      },
+    );
 
     client.prompt("sys", "msg", {
       model: { providerID: "anthropic", modelID: "claude-haiku-3-5-20241022" },
@@ -398,7 +490,9 @@ describe("BatchLLMClient", () => {
 
     await new Promise((r) => setTimeout(r, 50));
 
-    expect(fetchCalls[0]!.body!.requests[0]!.params.model).toBe("claude-haiku-3-5-20241022");
+    expect(fetchCalls[0]!.body!.requests[0]!.params.model).toBe(
+      "claude-haiku-3-5-20241022",
+    );
 
     await client.shutdown();
   });
@@ -420,10 +514,16 @@ describe("BatchLLMClient", () => {
     // Response for OpenAI batch create
     pushFetchResponse(true, 200, { id: "batch_openai1" });
 
-    const client = createBatchLLMClient(inner, UPSTREAMS, getTestAuth, DEFAULT_MODEL, {
-      flushIntervalMs: 60_000,
-      maxQueueSize: 2,
-    });
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      getTestAuth,
+      DEFAULT_MODEL,
+      {
+        flushIntervalMs: 60_000,
+        maxQueueSize: 2,
+      },
+    );
 
     // Queue one Anthropic item
     client.prompt("sys", "anthropic-msg", {
@@ -441,7 +541,9 @@ describe("BatchLLMClient", () => {
     expect(fetchCalls).toHaveLength(3);
 
     // First call: Anthropic batch submission
-    expect(fetchCalls[0]!.url).toBe(`${UPSTREAMS.anthropic}/v1/messages/batches`);
+    expect(fetchCalls[0]!.url).toBe(
+      `${UPSTREAMS.anthropic}/v1/messages/batches`,
+    );
     expect(fetchCalls[0]!.method).toBe("POST");
 
     // Second call: OpenAI file upload (FormData — body won't be JSON-parsed)
@@ -465,10 +567,16 @@ describe("BatchLLMClient", () => {
     // OpenAI file upload fails
     pushFetchResponse(false, 500, { error: "internal server error" });
 
-    const client = createBatchLLMClient(inner, UPSTREAMS, getTestAuth, DEFAULT_MODEL, {
-      flushIntervalMs: 60_000,
-      maxQueueSize: 1,
-    });
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      getTestAuth,
+      DEFAULT_MODEL,
+      {
+        flushIntervalMs: 60_000,
+        maxQueueSize: 1,
+      },
+    );
 
     const p1 = client.prompt("sys", "openai-msg", {
       model: { providerID: "openai", modelID: "gpt-5.4-mini" },
@@ -512,7 +620,9 @@ describe("BatchLLMClient", () => {
           capturedCustomId = parsed.custom_id;
         }
         return {
-          ok: true, status: 200, statusText: "OK",
+          ok: true,
+          status: 200,
+          statusText: "OK",
           text: async () => JSON.stringify({ id: "file-batch123" }),
           json: async () => ({ id: "file-batch123" }),
         };
@@ -527,7 +637,9 @@ describe("BatchLLMClient", () => {
         expect(body.endpoint).toBe("/v1/chat/completions");
         expect(body.completion_window).toBe("24h");
         return {
-          ok: true, status: 200, statusText: "OK",
+          ok: true,
+          status: 200,
+          statusText: "OK",
           text: async () => JSON.stringify({ id: "batch_lifecycle" }),
           json: async () => ({ id: "batch_lifecycle" }),
         };
@@ -537,9 +649,18 @@ describe("BatchLLMClient", () => {
       if (idx === 2) {
         expect(String(url)).toContain("/v1/batches/batch_lifecycle");
         return {
-          ok: true, status: 200, statusText: "OK",
-          text: async () => JSON.stringify({ status: "completed", output_file_id: "file-results" }),
-          json: async () => ({ status: "completed", output_file_id: "file-results" }),
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          text: async () =>
+            JSON.stringify({
+              status: "completed",
+              output_file_id: "file-results",
+            }),
+          json: async () => ({
+            status: "completed",
+            output_file_id: "file-results",
+          }),
         };
       }
 
@@ -558,20 +679,33 @@ describe("BatchLLMClient", () => {
           },
         });
         return {
-          ok: true, status: 200, statusText: "OK",
+          ok: true,
+          status: 200,
+          statusText: "OK",
           text: async () => resultsJsonl,
           json: async () => JSON.parse(resultsJsonl),
         };
       }
 
-      return { ok: false, status: 500, text: async () => "unexpected", json: async () => ({}) };
+      return {
+        ok: false,
+        status: 500,
+        text: async () => "unexpected",
+        json: async () => ({}),
+      };
     };
 
-    const client = createBatchLLMClient(inner, UPSTREAMS, getTestAuth, DEFAULT_MODEL, {
-      flushIntervalMs: 60_000,
-      maxQueueSize: 1,
-      pollIntervalMs: 50, // Fast polling for test
-    });
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      getTestAuth,
+      DEFAULT_MODEL,
+      {
+        flushIntervalMs: 60_000,
+        maxQueueSize: 1,
+        pollIntervalMs: 50, // Fast polling for test
+      },
+    );
 
     const promise = client.prompt("sys prompt", "user msg", {
       model: { providerID: "openai", modelID: "gpt-5.4-mini" },
@@ -602,10 +736,16 @@ describe("BatchLLMClient", () => {
     // Set up batch create to fail — triggers fallbackAll
     pushFetchResponse(false, 500, { error: "internal server error" });
 
-    const client = createBatchLLMClient(inner, UPSTREAMS, getTestAuth, DEFAULT_MODEL, {
-      flushIntervalMs: 60_000,
-      maxQueueSize: 2,
-    });
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      getTestAuth,
+      DEFAULT_MODEL,
+      {
+        flushIntervalMs: 60_000,
+        maxQueueSize: 2,
+      },
+    );
 
     const p1 = client.prompt("sys", "msg1", { workerID: "lore-distill" });
     const p2 = client.prompt("sys", "msg2", { workerID: "lore-curator" });
@@ -629,12 +769,20 @@ describe("BatchLLMClient", () => {
     const inner = createMockLLMClient();
 
     // First: submit a batch that returns 403 (auth error) to disable the session
-    pushFetchResponse(false, 403, { error: "OAuth token does not meet scope requirement" });
-
-    const client = createBatchLLMClient(inner, UPSTREAMS, getTestAuth, DEFAULT_MODEL, {
-      flushIntervalMs: 60_000,
-      maxQueueSize: 1,
+    pushFetchResponse(false, 403, {
+      error: "OAuth token does not meet scope requirement",
     });
+
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      getTestAuth,
+      DEFAULT_MODEL,
+      {
+        flushIntervalMs: 60_000,
+        maxQueueSize: 1,
+      },
+    );
 
     // Queue one item with a session ID — triggers auto-flush → 403 → session disabled
     const p1 = client.prompt("sys", "first-msg", {
@@ -678,7 +826,11 @@ describe("BatchLLMClient", () => {
       const method = init?.method ?? "GET";
 
       // For file upload, capture the FormData body
-      if (typeof url === "string" && url.includes("/v1/files") && init?.body instanceof FormData) {
+      if (
+        typeof url === "string" &&
+        url.includes("/v1/files") &&
+        init?.body instanceof FormData
+      ) {
         const formData = init.body as FormData;
         const file = formData.get("file") as Blob;
         if (file) {
@@ -694,7 +846,11 @@ describe("BatchLLMClient", () => {
       }
 
       // For batch create, return success
-      if (typeof url === "string" && url.includes("/v1/batches") && method === "POST") {
+      if (
+        typeof url === "string" &&
+        url.includes("/v1/batches") &&
+        method === "POST"
+      ) {
         return {
           ok: true,
           status: 200,
@@ -705,13 +861,24 @@ describe("BatchLLMClient", () => {
       }
 
       // Default
-      return { ok: false, status: 500, text: async () => "unexpected", json: async () => ({}) };
+      return {
+        ok: false,
+        status: 500,
+        text: async () => "unexpected",
+        json: async () => ({}),
+      };
     };
 
-    const client = createBatchLLMClient(inner, UPSTREAMS, getTestAuth, DEFAULT_MODEL, {
-      flushIntervalMs: 60_000,
-      maxQueueSize: 1,
-    });
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      getTestAuth,
+      DEFAULT_MODEL,
+      {
+        flushIntervalMs: 60_000,
+        maxQueueSize: 1,
+      },
+    );
 
     client.prompt("my system prompt", "my user message", {
       model: { providerID: "openai", modelID: "gpt-5.4-mini" },
@@ -741,8 +908,14 @@ describe("BatchLLMClient", () => {
 
     // System should be converted to a message, not a block array
     expect(line.body.messages).toHaveLength(2);
-    expect(line.body.messages[0]).toEqual({ role: "system", content: "my system prompt" });
-    expect(line.body.messages[1]).toEqual({ role: "user", content: "my user message" });
+    expect(line.body.messages[0]).toEqual({
+      role: "system",
+      content: "my system prompt",
+    });
+    expect(line.body.messages[1]).toEqual({
+      role: "user",
+      content: "my user message",
+    });
 
     // Restore original mock
     globalThis.fetch = prevFetch;

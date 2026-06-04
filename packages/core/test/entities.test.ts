@@ -4,7 +4,8 @@ import * as entities from "../src/entities";
 import { parseResponse, applyOps } from "../src/curator";
 
 const PROJECT = "/test/entities/project";
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function cleanup() {
   const d = db();
@@ -99,7 +100,9 @@ describe("entities", () => {
         canonicalName: "Eve",
         metadata: { role: "intern" },
       });
-      entities.update(result.id, { metadata: { role: "senior", description: "promoted" } });
+      entities.update(result.id, {
+        metadata: { role: "senior", description: "promoted" },
+      });
       const entity = entities.get(result.id);
       const meta = JSON.parse(entity!.metadata!);
       expect(meta.role).toBe("senior");
@@ -247,17 +250,35 @@ describe("entities", () => {
 
   describe("relations", () => {
     test("addRelation creates a relation between two entities", () => {
-      const a = entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "RelA" });
-      const b = entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "RelB" });
+      const a = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "RelA",
+      });
+      const b = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "RelB",
+      });
 
-      const relId = entities.addRelation(a.id, b.id, "friend", { source: "manual" });
+      const relId = entities.addRelation(a.id, b.id, "friend", {
+        source: "manual",
+      });
       expect(relId).not.toBeNull();
       expect(relId).toMatch(UUID_RE);
     });
 
     test("addRelation rejects duplicate relation", () => {
-      const a = entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "DupA" });
-      const b = entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "DupB" });
+      const a = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "DupA",
+      });
+      const b = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "DupB",
+      });
 
       const first = entities.addRelation(a.id, b.id, "colleague");
       expect(first).not.toBeNull();
@@ -266,8 +287,16 @@ describe("entities", () => {
     });
 
     test("multiple relation types between same pair", () => {
-      const a = entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "MultiA" });
-      const b = entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "MultiB" });
+      const a = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "MultiA",
+      });
+      const b = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "MultiB",
+      });
 
       expect(entities.addRelation(a.id, b.id, "friend")).not.toBeNull();
       expect(entities.addRelation(a.id, b.id, "colleague")).not.toBeNull();
@@ -277,8 +306,16 @@ describe("entities", () => {
     });
 
     test("relationsFor returns relations from both sides", () => {
-      const a = entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "SideA" });
-      const b = entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "SideB" });
+      const a = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "SideA",
+      });
+      const b = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "SideB",
+      });
 
       entities.addRelation(a.id, b.id, "friend");
 
@@ -292,8 +329,16 @@ describe("entities", () => {
     });
 
     test("removeRelation deletes a relation", () => {
-      const a = entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "RmA" });
-      const b = entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "RmB" });
+      const a = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "RmA",
+      });
+      const b = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "RmB",
+      });
 
       const relId = entities.addRelation(a.id, b.id, "mentor")!;
       expect(entities.relationsFor(a.id).length).toBe(1);
@@ -303,8 +348,16 @@ describe("entities", () => {
     });
 
     test("getRelation finds specific relation between pair", () => {
-      const a = entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "GetA" });
-      const b = entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "GetB" });
+      const a = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "GetA",
+      });
+      const b = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "GetB",
+      });
 
       entities.addRelation(a.id, b.id, "partner");
       const rels = entities.getRelation(a.id, b.id, "partner");
@@ -313,8 +366,16 @@ describe("entities", () => {
     });
 
     test("getRelation finds bidirectionally", () => {
-      const a = entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "BiA" });
-      const b = entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "BiB" });
+      const a = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "BiA",
+      });
+      const b = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "BiB",
+      });
 
       entities.addRelation(a.id, b.id, "friend");
       // Query with reversed order
@@ -323,8 +384,16 @@ describe("entities", () => {
     });
 
     test("removing entity cleans up relations", () => {
-      const a = entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "CleanA" });
-      const b = entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "CleanB" });
+      const a = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "CleanA",
+      });
+      const b = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "CleanB",
+      });
 
       entities.addRelation(a.id, b.id, "colleague");
       entities.remove(a.id);
@@ -332,10 +401,20 @@ describe("entities", () => {
     });
 
     test("addRelation with metadata", () => {
-      const a = entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "MetaRelA" });
-      const b = entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "MetaRelB" });
+      const a = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "MetaRelA",
+      });
+      const b = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "MetaRelB",
+      });
 
-      entities.addRelation(a.id, b.id, "friend", { metadata: { context: "met at conference" } });
+      entities.addRelation(a.id, b.id, "friend", {
+        metadata: { context: "met at conference" },
+      });
       const rels = entities.getRelation(a.id, b.id, "friend");
       expect(rels.length).toBe(1);
       const meta = JSON.parse(rels[0].metadata!);
@@ -343,9 +422,21 @@ describe("entities", () => {
     });
 
     test("formatRelationsForPrompt produces concise output", () => {
-      const a = entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "FmtA" });
-      const b = entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "FmtB" });
-      const c = entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "FmtC" });
+      const a = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "FmtA",
+      });
+      const b = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "FmtB",
+      });
+      const c = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "FmtC",
+      });
 
       entities.addRelation(a.id, b.id, "friend");
       entities.addRelation(a.id, c.id, "colleague");
@@ -440,15 +531,27 @@ describe("entities", () => {
 
   describe("entitiesForSession", () => {
     test("returns all entities when count <= cap", () => {
-      entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "Sess1" });
-      entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "Sess2" });
+      entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "Sess1",
+      });
+      entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "Sess2",
+      });
 
       const result = entities.entitiesForSession(PROJECT, 30);
       expect(result.length).toBe(2);
     });
 
     test("returns empty when maxInject is 0", () => {
-      entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "Zero1" });
+      entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "Zero1",
+      });
       const result = entities.entitiesForSession(PROJECT, 0);
       expect(result.length).toBe(0);
     });
@@ -460,9 +563,21 @@ describe("entities", () => {
         canonicalName: "CapSelf",
       });
       // Create enough entities to exceed cap of 2
-      entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "Cap1" });
-      entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "Cap2" });
-      entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "Cap3" });
+      entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "Cap1",
+      });
+      entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "Cap2",
+      });
+      entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "Cap3",
+      });
 
       const result = entities.entitiesForSession(PROJECT, 2);
       expect(result.length).toBe(2);
@@ -481,8 +596,16 @@ describe("entities", () => {
         entityType: "person",
         canonicalName: "PriFriend",
       });
-      entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "PriOther1" });
-      entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "PriOther2" });
+      entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "PriOther1",
+      });
+      entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "PriOther2",
+      });
 
       entities.addRelation(self.id, friend.id, "friend");
 
@@ -500,46 +623,60 @@ describe("entities", () => {
 
   describe("curator integration", () => {
     test("parseResponse handles entities with metadata", () => {
-      const response = parseResponse(JSON.stringify({
-        ops: [],
-        entities: [
-          {
-            type: "person",
-            canonical_name: "CuratorPerson",
-            aliases: [{ type: "github", value: "@curator" }],
-            metadata: { role: "reviewer", description: "code reviewer" },
-          },
-        ],
-        relations: [],
-      }));
+      const response = parseResponse(
+        JSON.stringify({
+          ops: [],
+          entities: [
+            {
+              type: "person",
+              canonical_name: "CuratorPerson",
+              aliases: [{ type: "github", value: "@curator" }],
+              metadata: { role: "reviewer", description: "code reviewer" },
+            },
+          ],
+          relations: [],
+        }),
+      );
       expect(response.entities.length).toBe(1);
-      expect(response.entities[0].metadata).toEqual({ role: "reviewer", description: "code reviewer" });
+      expect(response.entities[0].metadata).toEqual({
+        role: "reviewer",
+        description: "code reviewer",
+      });
     });
 
     test("parseResponse filters invalid metadata values", () => {
-      const response = parseResponse(JSON.stringify({
-        ops: [],
-        entities: [
-          {
-            type: "person",
-            canonical_name: "FilterPerson",
-            metadata: { role: "valid", bad: 123, empty: "", toolong: "x".repeat(501) },
-          },
-        ],
-        relations: [],
-      }));
+      const response = parseResponse(
+        JSON.stringify({
+          ops: [],
+          entities: [
+            {
+              type: "person",
+              canonical_name: "FilterPerson",
+              metadata: {
+                role: "valid",
+                bad: 123,
+                empty: "",
+                toolong: "x".repeat(501),
+              },
+            },
+          ],
+          relations: [],
+        }),
+      );
       expect(response.entities[0].metadata).toEqual({ role: "valid" });
     });
 
     test("parseResponse handles relations", () => {
-      const response = parseResponse(JSON.stringify({
-        ops: [],
-        entities: [],
-        relations: [
-          { entity_a: "Alice", entity_b: "Bob", relation: "friend" },
-          { entity_a: "Alice", entity_b: "Bob", relation: "invalid_type" }, // filtered
-        ],
-      }));
+      const response = parseResponse(
+        JSON.stringify({
+          ops: [],
+          entities: [],
+          relations: [
+            { entity_a: "Alice", entity_b: "Bob", relation: "friend" },
+            { entity_a: "Alice", entity_b: "Bob", relation: "invalid_type" }, // filtered
+          ],
+        }),
+      );
       expect(response.relations.length).toBe(1);
       expect(response.relations[0].relation).toBe("friend");
     });
@@ -564,8 +701,16 @@ describe("entities", () => {
     });
 
     test("applyOps creates relations between known entities", () => {
-      const a = entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "OpRelA" });
-      const b = entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "OpRelB" });
+      const a = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "OpRelA",
+      });
+      const b = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "OpRelB",
+      });
 
       const result = applyOps([], {
         projectPath: PROJECT,
@@ -580,21 +725,37 @@ describe("entities", () => {
     });
 
     test("applyOps skips relations for unknown entities", () => {
-      entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "KnownPerson" });
+      entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "KnownPerson",
+      });
 
       const result = applyOps([], {
         projectPath: PROJECT,
         detectedRelations: [
-          { entity_a: "KnownPerson", entity_b: "UnknownPerson", relation: "friend" },
+          {
+            entity_a: "KnownPerson",
+            entity_b: "UnknownPerson",
+            relation: "friend",
+          },
         ],
       });
       expect(result.relationsCreated).toBe(0);
     });
 
     test("legacy array format still works", () => {
-      const response = parseResponse(JSON.stringify([
-        { op: "create", category: "decision", title: "test", content: "test content", scope: "project" },
-      ]));
+      const response = parseResponse(
+        JSON.stringify([
+          {
+            op: "create",
+            category: "decision",
+            title: "test",
+            content: "test content",
+            scope: "project",
+          },
+        ]),
+      );
       expect(response.ops.length).toBe(1);
       expect(response.entities.length).toBe(0);
       expect(response.relations.length).toBe(0);
@@ -607,9 +768,21 @@ describe("entities", () => {
 
   describe("merge", () => {
     test("merge moves relations from source to target", () => {
-      const target = entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "MergeTarget" });
-      const source = entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "MergeSource" });
-      const other = entities.create({ projectPath: PROJECT, entityType: "person", canonicalName: "MergeOther" });
+      const target = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "MergeTarget",
+      });
+      const source = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "MergeSource",
+      });
+      const other = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "MergeOther",
+      });
 
       entities.addRelation(source.id, other.id, "friend");
       entities.merge(target.id, source.id);

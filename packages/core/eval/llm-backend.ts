@@ -96,7 +96,9 @@ class RateLimiter {
 // Resolve backend from environment
 // ---------------------------------------------------------------------------
 
-export function resolveBackend(overrides?: Partial<BackendConfig>): BackendConfig {
+export function resolveBackend(
+  overrides?: Partial<BackendConfig>,
+): BackendConfig {
   // Anthropic direct — preferred when available (no daily limits, best quality)
   if (process.env.ANTHROPIC_API_KEY) {
     return {
@@ -248,7 +250,9 @@ async function promptOpenAI(
       console.error(`  API error: ${resp.status} ${url} model=${model}`);
       console.error(`  Response: ${respBody.slice(0, 300)}`);
     }
-    throw new Error(`OpenAI API error ${resp.status}: ${respBody.slice(0, 500)}`);
+    throw new Error(
+      `OpenAI API error ${resp.status}: ${respBody.slice(0, 500)}`,
+    );
   }
 
   const data = (await resp.json()) as {

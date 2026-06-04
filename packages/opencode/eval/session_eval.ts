@@ -80,7 +80,12 @@ type MessageInfo = {
     cost?: number;
     tokens?: TokenInfo;
   };
-  parts: Array<{ type: string; text?: string; tool?: string; state?: { status: string } }>;
+  parts: Array<{
+    type: string;
+    text?: string;
+    tool?: string;
+    state?: { status: string };
+  }>;
 };
 
 type AggregatedTokens = {
@@ -97,13 +102,25 @@ type AggregatedTokens = {
 
 function emptyTokens(): AggregatedTokens {
   return {
-    input: 0, raw_input: 0, cache_read: 0, cache_write: 0,
-    output: 0, reasoning: 0, cost: 0, cache_hit_rate: 0, api_calls: 0,
+    input: 0,
+    raw_input: 0,
+    cache_read: 0,
+    cache_write: 0,
+    output: 0,
+    reasoning: 0,
+    cost: 0,
+    cache_hit_rate: 0,
+    api_calls: 0,
   };
 }
 
 function aggregateTokens(msgs: MessageInfo[]): AggregatedTokens {
-  let rawInput = 0, cacheRead = 0, cacheWrite = 0, output = 0, reasoning = 0, cost = 0;
+  let rawInput = 0,
+    cacheRead = 0,
+    cacheWrite = 0,
+    output = 0,
+    reasoning = 0,
+    cost = 0;
   for (const msg of msgs) {
     if (msg.info.role !== "assistant" || !msg.info.tokens) continue;
     const t = msg.info.tokens;
@@ -173,7 +190,12 @@ async function promptAndWait(
   options?: { system?: string; agent?: string },
 ): Promise<{ text: string; tokens: AggregatedTokens }> {
   const body: Record<string, unknown> = {
-    parts: [{ type: "text", text: options?.system ? `${options.system}\n\n${text}` : text }],
+    parts: [
+      {
+        type: "text",
+        text: options?.system ? `${options.system}\n\n${text}` : text,
+      },
+    ],
     model: MODEL,
     // Omit agent field to use default agent (with tools like recall).
     // Explicitly pass "lore-distill" for tool-less tasks (distillation, compaction, judge).
@@ -199,7 +221,9 @@ async function promptAndWait(
     const assistants = msgs.filter((m) => m.info.role === "assistant");
     if (assistants.length > 0) {
       const last = assistants[assistants.length - 1];
-      const hasText = last.parts.some((p) => p.type === "text" && p.text?.trim());
+      const hasText = last.parts.some(
+        (p) => p.type === "text" && p.text?.trim(),
+      );
       const hasPendingTool = last.parts.some(
         (p) => p.type === "tool" && p.state?.status !== "completed",
       );
@@ -207,9 +231,14 @@ async function promptAndWait(
         if (msgs.length === lastMsgCount) stableCount++;
         else stableCount = 0;
         if (stableCount >= 1) {
-          const textPart = last.parts.find((p) => p.type === "text" && p.text?.trim());
+          const textPart = last.parts.find(
+            (p) => p.type === "text" && p.text?.trim(),
+          );
           if (textPart?.text) {
-            return { text: textPart.text.trim(), tokens: aggregateTokens(msgs) };
+            return {
+              text: textPart.text.trim(),
+              tokens: aggregateTokens(msgs),
+            };
           }
         }
       }
@@ -221,9 +250,7 @@ async function promptAndWait(
 }
 
 // --- Distillation (for lore mode) ---
-async function distillTranscript(
-  messages: SessionMessage[],
-): Promise<string> {
+async function distillTranscript(messages: SessionMessage[]): Promise<string> {
   const segments: string[] = [];
   let current: string[] = [];
   let tokens = 0;
@@ -250,7 +277,9 @@ async function distillTranscript(
       })
     : "unknown date";
 
-  console.log(`    Distilling ${messages.length} messages in ${segments.length} segments...`);
+  console.log(
+    `    Distilling ${messages.length} messages in ${segments.length} segments...`,
+  );
 
   let allObservations = "";
   for (let i = 0; i < segments.length; i++) {
@@ -264,7 +293,9 @@ async function distillTranscript(
     const { text: responseText } = await promptAndWait(sid, userMsg, {
       system: DISTILLATION_SYSTEM,
     });
-    const match = responseText.match(/<observations>([\s\S]*?)<\/observations>/i);
+    const match = responseText.match(
+      /<observations>([\s\S]*?)<\/observations>/i,
+    );
     const obs = match ? match[1].trim() : responseText.trim();
     allObservations += (allObservations ? "\n" : "") + obs;
     console.log(`    Segment ${i + 1}/${segments.length}: ${obs.length} chars`);
@@ -281,7 +312,9 @@ const seededSessionIds: string[] = [];
 function getProjectId(): string {
   const d = new Database(DB_PATH, { readonly: true });
   const cwd = process.cwd();
-  const row = d.query("SELECT id FROM projects WHERE path = ?").get(cwd) as { id: string } | null;
+  const row = d.query("SELECT id FROM projects WHERE path = ?").get(cwd) as {
+    id: string;
+  } | null;
   d.close();
   if (!row) throw new Error(`No project found for path ${cwd} in lore DB`);
   return row.id;
@@ -344,7 +377,9 @@ function cleanupSeededData(): void {
   }
   d.query("INSERT INTO temporal_fts(temporal_fts) VALUES('rebuild')").run();
   d.close();
-  console.log(`Cleaned up ${seededSessionIds.length} seeded eval session(s) from DB`);
+  console.log(
+    `Cleaned up ${seededSessionIds.length} seeded eval session(s) from DB`,
+  );
 }
 
 // --- Compaction (for default mode) ---
@@ -364,9 +399,7 @@ Focus on information that would be helpful for continuing the conversation, incl
 
 Your summary should be comprehensive enough to provide context but concise enough to be quickly understood.`;
 
-async function compactMessages(
-  messages: SessionMessage[],
-): Promise<string> {
+async function compactMessages(messages: SessionMessage[]): Promise<string> {
   const CHUNK_TOKEN_LIMIT = 80_000;
   const segments: string[] = [];
   let current: string[] = [];
@@ -385,7 +418,9 @@ async function compactMessages(
   }
   if (current.length) segments.push(current.join("\n\n"));
 
-  console.log(`    Compacting ${messages.length} dropped messages in ${segments.length} chunk(s)...`);
+  console.log(
+    `    Compacting ${messages.length} dropped messages in ${segments.length} chunk(s)...`,
+  );
 
   let summary = "";
   for (let i = 0; i < segments.length; i++) {
@@ -394,9 +429,13 @@ async function compactMessages(
       : "";
     const prompt = `${prior}${segments[i]}\n\n${COMPACTION_PROMPT}`;
     const sid = await createSession();
-    const { text } = await promptAndWait(sid, prompt, { system: COMPACTION_SYSTEM });
+    const { text } = await promptAndWait(sid, prompt, {
+      system: COMPACTION_SYSTEM,
+    });
     summary = text;
-    console.log(`    Chunk ${i + 1}/${segments.length}: ${summary.length} chars`);
+    console.log(
+      `    Chunk ${i + 1}/${segments.length}: ${summary.length} chars`,
+    );
   }
   return summary;
 }
@@ -472,7 +511,9 @@ async function pool<T, R>(
       results[i] = await fn(items[i], i);
     }
   }
-  await Promise.all(Array.from({ length: Math.min(max, items.length) }, () => worker()));
+  await Promise.all(
+    Array.from({ length: Math.min(max, items.length) }, () => worker()),
+  );
   return results;
 }
 
@@ -509,7 +550,9 @@ if (modes.includes("lore")) {
     projectId = getProjectId();
     console.log(`Recall tool: will seed DB under project ${projectId}`);
   } catch (e: any) {
-    console.log(`Warning: ${e.message} — recall tool won't work, falling back to distillation-only`);
+    console.log(
+      `Warning: ${e.message} — recall tool won't work, falling back to distillation-only`,
+    );
   }
   console.log("");
 }
@@ -517,7 +560,9 @@ if (modes.includes("lore")) {
 for (const file of sessionFiles) {
   const data: SessionData = await Bun.file(file).json();
   const totalTokens = data.messages.reduce((s, m) => s + m.tokens, 0);
-  console.log(`Loading session: ${data.label} (${data.stats.total_messages} msgs, ${Math.round(totalTokens / 1000)}K tokens)`);
+  console.log(
+    `Loading session: ${data.label} (${data.stats.total_messages} msgs, ${Math.round(totalTokens / 1000)}K tokens)`,
+  );
 
   // Find where the 80K tail cutoff lands
   const cutoffIdx = findTailCutoff(data.messages);
@@ -526,19 +571,29 @@ for (const file of sessionFiles) {
   const droppedTokens = droppedMsgs.reduce((s, m) => s + m.tokens, 0);
   const tailTokens = tailMsgs.reduce((s, m) => s + m.tokens, 0);
 
-  console.log(`  Tail window: msgs ${cutoffIdx}-${data.messages.length - 1} (${Math.round(tailTokens / 1000)}K tokens, ${tailMsgs.length} msgs)`);
-  console.log(`  Dropped: msgs 0-${cutoffIdx - 1} (${Math.round(droppedTokens / 1000)}K tokens, ${droppedMsgs.length} msgs)`);
+  console.log(
+    `  Tail window: msgs ${cutoffIdx}-${data.messages.length - 1} (${Math.round(tailTokens / 1000)}K tokens, ${tailMsgs.length} msgs)`,
+  );
+  console.log(
+    `  Dropped: msgs 0-${cutoffIdx - 1} (${Math.round(droppedTokens / 1000)}K tokens, ${droppedMsgs.length} msgs)`,
+  );
 
   // Build default context: compact dropped messages + tail window
   let defaultContext: string;
   if (modes.includes("default") && droppedMsgs.length > 0) {
     console.log(`  Building default context (compaction + tail)...`);
     const compacted = await compactMessages(droppedMsgs);
-    const tailText = tailMsgs.map((m) => `[${m.role}]: ${m.content}`).join("\n\n");
+    const tailText = tailMsgs
+      .map((m) => `[${m.role}]: ${m.content}`)
+      .join("\n\n");
     defaultContext = `Here is a summary of earlier conversation:\n\n${compacted}\n\n---\n\nRecent conversation:\n\n${tailText}`;
-    console.log(`  Compacted summary: ${compacted.length} chars (~${Math.round(compacted.length / 4)} tokens)`);
+    console.log(
+      `  Compacted summary: ${compacted.length} chars (~${Math.round(compacted.length / 4)} tokens)`,
+    );
   } else {
-    defaultContext = data.messages.map((m) => `[${m.role}]: ${m.content}`).join("\n\n");
+    defaultContext = data.messages
+      .map((m) => `[${m.role}]: ${m.content}`)
+      .join("\n\n");
   }
 
   // Distill and seed DB if needed for lore mode
@@ -547,12 +602,16 @@ for (const file of sessionFiles) {
   if (modes.includes("lore")) {
     console.log(`  Distilling for lore mode...`);
     distilled = await distillTranscript(data.messages);
-    console.log(`  Distilled: ${distilled.length} chars (~${Math.round(distilled.length / 4)} tokens)`);
+    console.log(
+      `  Distilled: ${distilled.length} chars (~${Math.round(distilled.length / 4)} tokens)`,
+    );
 
     // Seed the DB so the recall tool can find the raw messages
     if (projectId) {
       seedSessionData(projectId, evalSessionId, data.messages, distilled);
-      console.log(`  Seeded ${data.messages.length} messages + 1 distillation into DB (session: ${evalSessionId})`);
+      console.log(
+        `  Seeded ${data.messages.length} messages + 1 distillation into DB (session: ${evalSessionId})`,
+      );
     }
   }
 
@@ -573,15 +632,22 @@ let completed = 0;
 const writer = Bun.file(values.out!).writer();
 
 // Ensure cleanup happens even on error/interrupt
-process.on("SIGINT", () => { cleanupSeededData(); process.exit(1); });
-process.on("SIGTERM", () => { cleanupSeededData(); process.exit(1); });
+process.on("SIGINT", () => {
+  cleanupSeededData();
+  process.exit(1);
+});
+process.on("SIGTERM", () => {
+  cleanupSeededData();
+  process.exit(1);
+});
 
 try {
   await pool(
     work,
     async ({ q, mode }) => {
       const session = sessionCache.get(q.session_file)!;
-      const context = mode === "lore" ? session.distilled : session.defaultContext;
+      const context =
+        mode === "lore" ? session.distilled : session.defaultContext;
       const result = await processQuestion(q, mode, context);
       const label = await judge(q.question, q.answer, result.hypothesis);
       const entry = {
@@ -600,9 +666,10 @@ try {
       completed++;
 
       const t = result.tokens;
-      const cacheStr = t.input > 0
-        ? ` [${(t.cache_hit_rate * 100).toFixed(0)}% cache, ${(t.input / 1000).toFixed(1)}K in, $${t.cost.toFixed(4)}]`
-        : "";
+      const cacheStr =
+        t.input > 0
+          ? ` [${(t.cache_hit_rate * 100).toFixed(0)}% cache, ${(t.input / 1000).toFixed(1)}K in, $${t.cost.toFixed(4)}]`
+          : "";
       const icon = label ? "✓" : "✗";
       console.log(
         `[${completed}/${work.length}] ${icon} ${mode.padEnd(7)} ${q.session_label.padEnd(20)} ${q.question_type.padEnd(14)} "${q.question.substring(0, 45)}"${cacheStr}`,
@@ -621,7 +688,13 @@ writer.end();
 const results = (await Bun.file(values.out!).text())
   .trim()
   .split("\n")
-  .flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } });
+  .flatMap((l) => {
+    try {
+      return [JSON.parse(l)];
+    } catch {
+      return [];
+    }
+  });
 
 console.log("\n=== Results ===");
 for (const mode of modes) {
@@ -672,21 +745,36 @@ for (const mode of modes) {
   if (!modeResults.length) continue;
 
   const totals = modeResults.reduce(
-    (acc: AggregatedTokens, r: any) => addTokens(acc, r.tokens as AggregatedTokens),
+    (acc: AggregatedTokens, r: any) =>
+      addTokens(acc, r.tokens as AggregatedTokens),
     emptyTokens(),
   );
   const n = modeResults.length;
   const correct = modeResults.filter((r: any) => r.label).length;
 
   console.log(`\n${mode}:`);
-  console.log(`  Avg input/question : ${(totals.input / n / 1000).toFixed(1)}K tokens`);
-  console.log(`  Avg output/question: ${(totals.output / n).toFixed(0)} tokens`);
-  console.log(`  Cache hit rate     : ${(totals.cache_hit_rate * 100).toFixed(1)}%`);
-  console.log(`    cache_read total : ${(totals.cache_read / 1000).toFixed(1)}K`);
-  console.log(`    cache_write total: ${(totals.cache_write / 1000).toFixed(1)}K`);
-  console.log(`    raw_input total  : ${(totals.raw_input / 1000).toFixed(1)}K`);
+  console.log(
+    `  Avg input/question : ${(totals.input / n / 1000).toFixed(1)}K tokens`,
+  );
+  console.log(
+    `  Avg output/question: ${(totals.output / n).toFixed(0)} tokens`,
+  );
+  console.log(
+    `  Cache hit rate     : ${(totals.cache_hit_rate * 100).toFixed(1)}%`,
+  );
+  console.log(
+    `    cache_read total : ${(totals.cache_read / 1000).toFixed(1)}K`,
+  );
+  console.log(
+    `    cache_write total: ${(totals.cache_write / 1000).toFixed(1)}K`,
+  );
+  console.log(
+    `    raw_input total  : ${(totals.raw_input / 1000).toFixed(1)}K`,
+  );
   console.log(`  Total cost         : $${totals.cost.toFixed(4)}`);
-  console.log(`  Cost/correct answer: $${correct > 0 ? (totals.cost / correct).toFixed(4) : "N/A"}`);
+  console.log(
+    `  Cost/correct answer: $${correct > 0 ? (totals.cost / correct).toFixed(4) : "N/A"}`,
+  );
   console.log(`  Total API calls    : ${totals.api_calls}`);
 }
 

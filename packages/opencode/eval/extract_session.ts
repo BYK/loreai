@@ -22,7 +22,9 @@ const { values } = parseArgs({
 });
 
 if (!values.session) {
-  console.log("Usage: extract_session.ts --session <id-prefix> --out <path> [--label <name>]");
+  console.log(
+    "Usage: extract_session.ts --session <id-prefix> --out <path> [--label <name>]",
+  );
   process.exit(1);
 }
 
@@ -76,7 +78,10 @@ function cleanContent(content: string): string {
   let cleaned = content;
 
   // Strip <system-reminder>...</system-reminder> blocks
-  cleaned = cleaned.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, "");
+  cleaned = cleaned.replace(
+    /<system-reminder>[\s\S]*?<\/system-reminder>/gi,
+    "",
+  );
 
   // Strip recall tool results embedded in messages
   // (keep the recall tool invocation itself as it shows intent, but strip the returned data)
@@ -104,7 +109,9 @@ const totalTokens = messages.reduce((s, m) => s + m.tokens, 0);
 const userMsgs = messages.filter((m) => m.role === "user").length;
 const assistantMsgs = messages.filter((m) => m.role === "assistant").length;
 const firstDate = new Date(messages[0].created_at).toISOString();
-const lastDate = new Date(messages[messages.length - 1].created_at).toISOString();
+const lastDate = new Date(
+  messages[messages.length - 1].created_at,
+).toISOString();
 
 const label = values.label ?? sessionID.substring(4, 20);
 
@@ -126,8 +133,12 @@ const output = {
 const outPath = values.out ?? `eval/data/sessions/${label}.json`;
 await Bun.write(outPath, JSON.stringify(output, null, 2));
 
-console.log(`\nExtracted ${messages.length} messages (${Math.round(totalTokens / 1000)}K tokens)`);
+console.log(
+  `\nExtracted ${messages.length} messages (${Math.round(totalTokens / 1000)}K tokens)`,
+);
 console.log(`  User: ${userMsgs}, Assistant: ${assistantMsgs}`);
-console.log(`  Period: ${firstDate.substring(0, 16)} → ${lastDate.substring(0, 16)}`);
+console.log(
+  `  Period: ${firstDate.substring(0, 16)} → ${lastDate.substring(0, 16)}`,
+);
 console.log(`  Project: ${projRow?.path ?? "unknown"}`);
 console.log(`  Written to: ${outPath}`);

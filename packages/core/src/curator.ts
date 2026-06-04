@@ -1,12 +1,22 @@
 import { config } from "./config";
-import { db, saveSessionTracking, loadSessionTracking, ensureProject } from "./db";
+import {
+  db,
+  saveSessionTracking,
+  loadSessionTracking,
+  ensureProject,
+} from "./db";
 import * as temporal from "./temporal";
 import * as distillation from "./distillation";
 import * as ltm from "./ltm";
 import * as entities from "./entities";
 import * as embedding from "./embedding";
 import * as log from "./log";
-import { CURATOR_SYSTEM, curatorUser, CONSOLIDATION_SYSTEM, consolidationUser } from "./prompt";
+import {
+  CURATOR_SYSTEM,
+  curatorUser,
+  CONSOLIDATION_SYSTEM,
+  consolidationUser,
+} from "./prompt";
 import * as toolTrace from "./tool-trace";
 import { detectAndFormat } from "./instruction-detect";
 import { curatorLimiter } from "./session-limiter";
@@ -160,7 +170,11 @@ function filterEntities(arr: unknown[]): DetectedEntity[] {
 
       // Validate metadata — must be a plain object with non-empty string values ≤500 chars
       let validMetadata: Record<string, unknown> | undefined;
-      if (typeof obj.metadata === "object" && obj.metadata !== null && !Array.isArray(obj.metadata)) {
+      if (
+        typeof obj.metadata === "object" &&
+        obj.metadata !== null &&
+        !Array.isArray(obj.metadata)
+      ) {
         const filtered = Object.fromEntries(
           Object.entries(obj.metadata as Record<string, unknown>).filter(
             ([, v]) => typeof v === "string" && v.length > 0 && v.length <= 500,
@@ -179,35 +193,41 @@ function filterEntities(arr: unknown[]): DetectedEntity[] {
 }
 
 function filterRelations(arr: unknown[]): DetectedRelation[] {
-  return arr.filter((r: unknown): r is DetectedRelation => {
-    if (typeof r !== "object" || r === null) return false;
-    const obj = r as Record<string, unknown>;
-    return (
-      typeof obj.entity_a === "string" &&
-      obj.entity_a.length > 0 &&
-      typeof obj.entity_b === "string" &&
-      obj.entity_b.length > 0 &&
-      typeof obj.relation === "string" &&
-      entities.RELATION_TYPES.includes(obj.relation as RelationType)
-    );
-  }).map((obj) => {
-    // Validate relation metadata
-    let validMetadata: Record<string, unknown> | undefined;
-    if (typeof obj.metadata === "object" && obj.metadata !== null && !Array.isArray(obj.metadata)) {
-      const filtered = Object.fromEntries(
-        Object.entries(obj.metadata as Record<string, unknown>).filter(
-          ([, v]) => typeof v === "string" && v.length > 0 && v.length <= 500,
-        ),
+  return arr
+    .filter((r: unknown): r is DetectedRelation => {
+      if (typeof r !== "object" || r === null) return false;
+      const obj = r as Record<string, unknown>;
+      return (
+        typeof obj.entity_a === "string" &&
+        obj.entity_a.length > 0 &&
+        typeof obj.entity_b === "string" &&
+        obj.entity_b.length > 0 &&
+        typeof obj.relation === "string" &&
+        entities.RELATION_TYPES.includes(obj.relation as RelationType)
       );
-      if (Object.keys(filtered).length > 0) validMetadata = filtered;
-    }
-    return {
-      entity_a: obj.entity_a,
-      entity_b: obj.entity_b,
-      relation: obj.relation,
-      metadata: validMetadata,
-    };
-  });
+    })
+    .map((obj) => {
+      // Validate relation metadata
+      let validMetadata: Record<string, unknown> | undefined;
+      if (
+        typeof obj.metadata === "object" &&
+        obj.metadata !== null &&
+        !Array.isArray(obj.metadata)
+      ) {
+        const filtered = Object.fromEntries(
+          Object.entries(obj.metadata as Record<string, unknown>).filter(
+            ([, v]) => typeof v === "string" && v.length > 0 && v.length <= 500,
+          ),
+        );
+        if (Object.keys(filtered).length > 0) validMetadata = filtered;
+      }
+      return {
+        entity_a: obj.entity_a,
+        entity_b: obj.entity_b,
+        relation: obj.relation,
+        metadata: validMetadata,
+      };
+    });
 }
 
 /**
@@ -229,7 +249,13 @@ export function applyOps(
     /** Relations detected by the curator from conversation context. */
     detectedRelations?: DetectedRelation[];
   },
-): { created: number; updated: number; deleted: number; entitiesCreated: number; relationsCreated: number } {
+): {
+  created: number;
+  updated: number;
+  deleted: number;
+  entitiesCreated: number;
+  relationsCreated: number;
+} {
   let created = 0;
   let updated = 0;
   let deleted = 0;
@@ -268,7 +294,8 @@ export function applyOps(
           if (entry.project_id !== pid) continue;
         }
         const content =
-          op.content !== undefined && op.content.length > MAX_ENTRY_CONTENT_LENGTH
+          op.content !== undefined &&
+          op.content.length > MAX_ENTRY_CONTENT_LENGTH
             ? op.content.slice(0, MAX_ENTRY_CONTENT_LENGTH) +
               " [truncated — entry too long]"
             : op.content;
@@ -356,7 +383,10 @@ export function applyOps(
           if (relId) relationsCreated++;
         }
       } catch (err) {
-        log.warn(`relation creation failed for "${dr.entity_a}" → "${dr.entity_b}":`, err);
+        log.warn(
+          `relation creation failed for "${dr.entity_a}" → "${dr.entity_b}":`,
+          err,
+        );
       }
     }
   }
@@ -386,9 +416,22 @@ export async function run(input: {
   projectPath: string;
   sessionID: string;
   model?: { providerID: string; modelID: string };
-}): Promise<{ created: number; updated: number; deleted: number; entitiesCreated: number; relationsCreated: number }> {
+}): Promise<{
+  created: number;
+  updated: number;
+  deleted: number;
+  entitiesCreated: number;
+  relationsCreated: number;
+}> {
   const cfg = config();
-  if (!cfg.curator.enabled) return { created: 0, updated: 0, deleted: 0, entitiesCreated: 0, relationsCreated: 0 };
+  if (!cfg.curator.enabled)
+    return {
+      created: 0,
+      updated: 0,
+      deleted: 0,
+      entitiesCreated: 0,
+      relationsCreated: 0,
+    };
 
   // Skip-if-busy: curation is periodic, not accumulative. If a curation is
   // already running for this session, skip — the next trigger will pick up
@@ -399,8 +442,16 @@ export async function run(input: {
   // there is no TOCTOU race. The p-limit(1) serialization is a safety net
   // if this invariant is ever violated.
   if (curatorLimiter.isBusy(input.sessionID)) {
-    log.info(`curation skipped: already running for session ${input.sessionID.slice(0, 16)}`);
-    return { created: 0, updated: 0, deleted: 0, entitiesCreated: 0, relationsCreated: 0 };
+    log.info(
+      `curation skipped: already running for session ${input.sessionID.slice(0, 16)}`,
+    );
+    return {
+      created: 0,
+      updated: 0,
+      deleted: 0,
+      entitiesCreated: 0,
+      relationsCreated: 0,
+    };
   }
 
   return curatorLimiter.get(input.sessionID)(() => runInner(input));
@@ -411,7 +462,13 @@ async function runInner(input: {
   projectPath: string;
   sessionID: string;
   model?: { providerID: string; modelID: string };
-}): Promise<{ created: number; updated: number; deleted: number; entitiesCreated: number; relationsCreated: number }> {
+}): Promise<{
+  created: number;
+  updated: number;
+  deleted: number;
+  entitiesCreated: number;
+  relationsCreated: number;
+}> {
   const cfg = config();
 
   // Get recent undistilled messages since last curation.
@@ -420,18 +477,38 @@ async function runInner(input: {
   // messages to the curator. If all messages are distilled, fall back to
   // distilled observations for the session instead.
   const sessionCuratedAt = getLastCuratedAt(input.sessionID);
-  const undistilledAll = temporal.undistilled(input.projectPath, input.sessionID);
-  const recentUndistilled = undistilledAll.filter((m) => m.created_at > sessionCuratedAt);
+  const undistilledAll = temporal.undistilled(
+    input.projectPath,
+    input.sessionID,
+  );
+  const recentUndistilled = undistilledAll.filter(
+    (m) => m.created_at > sessionCuratedAt,
+  );
 
   let text: string;
   if (recentUndistilled.length >= 3) {
-    text = recentUndistilled.map((m) => `[${m.role}] ${m.content}`).join("\n\n");
+    text = recentUndistilled
+      .map((m) => `[${m.role}] ${m.content}`)
+      .join("\n\n");
   } else {
     // All messages distilled — use distillation observations as input.
     // This is the common case after /lore:curate runs distillation first.
-    const distillations = distillation.loadForSession(input.projectPath, input.sessionID, true);
-    const recentDistillations = distillations.filter((d) => d.created_at > sessionCuratedAt);
-    if (recentDistillations.length === 0) return { created: 0, updated: 0, deleted: 0, entitiesCreated: 0, relationsCreated: 0 };
+    const distillations = distillation.loadForSession(
+      input.projectPath,
+      input.sessionID,
+      true,
+    );
+    const recentDistillations = distillations.filter(
+      (d) => d.created_at > sessionCuratedAt,
+    );
+    if (recentDistillations.length === 0)
+      return {
+        created: 0,
+        updated: 0,
+        deleted: 0,
+        entitiesCreated: 0,
+        relationsCreated: 0,
+      };
     text = recentDistillations.map((d) => d.observations).join("\n\n");
   }
   // Include cross-project entries so the curator can see and update
@@ -491,7 +568,10 @@ async function runInner(input: {
   // of full recall results.
   let actionTagContext = "";
   try {
-    actionTagContext = buildActionTagContext(input.projectPath, input.sessionID);
+    actionTagContext = buildActionTagContext(
+      input.projectPath,
+      input.sessionID,
+    );
   } catch (err) {
     log.warn("action tag context failed (non-fatal):", err);
   }
@@ -500,20 +580,36 @@ async function runInner(input: {
   // sessions, so the curator can decide whether they warrant a gotcha entry.
   let toolFailureContext = "";
   try {
-    toolFailureContext = buildToolFailureContext(input.projectPath, input.sessionID);
+    toolFailureContext = buildToolFailureContext(
+      input.projectPath,
+      input.sessionID,
+    );
   } catch (err) {
     log.warn("tool failure context failed (non-fatal):", err);
   }
 
   const userContent =
-    baseUserContent + crossSessionContext + actionTagContext + toolFailureContext;
+    baseUserContent +
+    crossSessionContext +
+    actionTagContext +
+    toolFailureContext;
   const model = input.model ?? cfg.model;
-  const responseText = await input.llm.prompt(
-    CURATOR_SYSTEM,
-    userContent,
-    { model, workerID: "lore-curator", thinking: false, sessionID: input.sessionID, maxTokens: 2048, temperature: 0 },
-  );
-  if (!responseText) return { created: 0, updated: 0, deleted: 0, entitiesCreated: 0, relationsCreated: 0 };
+  const responseText = await input.llm.prompt(CURATOR_SYSTEM, userContent, {
+    model,
+    workerID: "lore-curator",
+    thinking: false,
+    sessionID: input.sessionID,
+    maxTokens: 2048,
+    temperature: 0,
+  });
+  if (!responseText)
+    return {
+      created: 0,
+      updated: 0,
+      deleted: 0,
+      entitiesCreated: 0,
+      relationsCreated: 0,
+    };
 
   const response = parseResponse(responseText);
 
@@ -545,7 +641,9 @@ async function runInner(input: {
     try {
       const dupes = await ltm.deduplicate(input.projectPath, { dryRun: false });
       if (dupes.totalRemoved > 0) {
-        log.info(`post-curation dedup: merged ${dupes.totalRemoved} duplicate entries`);
+        log.info(
+          `post-curation dedup: merged ${dupes.totalRemoved} duplicate entries`,
+        );
         result.deleted += dupes.totalRemoved;
       }
       // Record auto-signals for adaptive threshold calibration.
@@ -643,7 +741,8 @@ function buildActionTagContext(
   if (!significant.length) return "";
 
   const lines = significant.map(
-    ([tag, sessions]) => `- [${tag}] appeared in ${sessions.size} prior sessions`,
+    ([tag, sessions]) =>
+      `- [${tag}] appeared in ${sessions.size} prior sessions`,
   );
 
   return (
@@ -728,18 +827,27 @@ export async function consolidate(input: {
   // Consolidation should only merge/trim project-scoped entries — cross-project
   // entries are shared and should not be deleted by a single project's consolidation.
   const entries = ltm.forProject(input.projectPath, false);
-  if (entries.length <= cfg.curator.maxEntries) return { updated: 0, deleted: 0 };
+  if (entries.length <= cfg.curator.maxEntries)
+    return { updated: 0, deleted: 0 };
 
   // Entries are sorted by confidence DESC, updated_at DESC from forProject().
   // For batched mode, we take the lowest-confidence entries (tail of the list)
   // as candidates for deletion — they're the least valuable.
-  let entriesForPrompt: Array<{ id: string; category: string; title: string; content: string }>;
+  let entriesForPrompt: Array<{
+    id: string;
+    category: string;
+    title: string;
+    content: string;
+  }>;
   let batchTarget: number;
 
   if (entries.length <= CONSOLIDATION_BATCH_SIZE) {
     // Small overshoot — send all entries, target is maxEntries
     entriesForPrompt = entries.map((e) => ({
-      id: e.id, category: e.category, title: e.title, content: e.content,
+      id: e.id,
+      category: e.category,
+      title: e.title,
+      content: e.content,
     }));
     batchTarget = cfg.curator.maxEntries;
   } else {
@@ -748,7 +856,10 @@ export async function consolidate(input: {
     // Subsequent passes (on future idle ticks) handle the rest.
     const candidates = entries.slice(-CONSOLIDATION_BATCH_SIZE);
     entriesForPrompt = candidates.map((e) => ({
-      id: e.id, category: e.category, title: e.title, content: e.content,
+      id: e.id,
+      category: e.category,
+      title: e.title,
+      content: e.content,
     }));
     // Target is relative to the batch (not the global total) because the
     // prompt only sees the batch entries. Keep at most half — delete the rest.
@@ -757,7 +868,7 @@ export async function consolidate(input: {
     batchTarget = Math.ceil(CONSOLIDATION_BATCH_SIZE / 2);
     log.info(
       `consolidation: batched mode — evaluating ${candidates.length} lowest-confidence entries ` +
-      `(${entries.length} total, batch keeps at most ${batchTarget})`,
+        `(${entries.length} total, batch keeps at most ${batchTarget})`,
     );
   }
 
@@ -769,7 +880,14 @@ export async function consolidate(input: {
   const responseText = await input.llm.prompt(
     CONSOLIDATION_SYSTEM,
     userContent,
-    { model, workerID: "lore-curator", thinking: false, sessionID: input.sessionID, maxTokens: 4096, temperature: 0 },
+    {
+      model,
+      workerID: "lore-curator",
+      thinking: false,
+      sessionID: input.sessionID,
+      maxTokens: 4096,
+      temperature: 0,
+    },
   );
   if (!responseText) return { updated: 0, deleted: 0 };
 

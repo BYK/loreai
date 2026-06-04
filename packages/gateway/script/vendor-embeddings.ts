@@ -25,11 +25,7 @@ import {
 } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  MODEL_DIR_NAME,
-  MODEL_ID,
-  MODEL_FILES,
-} from "./vendor-paths";
+import { MODEL_DIR_NAME, MODEL_ID, MODEL_FILES } from "./vendor-paths";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const packageDir = dirname(here);
@@ -81,7 +77,9 @@ async function ensureSharedModelCache(): Promise<string> {
     console.log(`  ↓ ${filePath}`);
     const r = await fetch(url);
     if (!r.ok) {
-      console.error(`✗ download failed: ${url} → HTTP ${r.status} ${r.statusText}`);
+      console.error(
+        `✗ download failed: ${url} → HTTP ${r.status} ${r.statusText}`,
+      );
       process.exit(1);
     }
     writeFileSync(dest, new Uint8Array(await r.arrayBuffer()));

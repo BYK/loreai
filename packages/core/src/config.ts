@@ -11,7 +11,10 @@ import { warn } from "./log";
  */
 function stripJsonComments(str: string): string {
   return str
-    .replace(/("(?:[^"\\]|\\.)*")|\/\/[^\n]*|\/\*[\s\S]*?\*\//g, (m, s) => s ?? "")
+    .replace(
+      /("(?:[^"\\]|\\.)*")|\/\/[^\n]*|\/\*[\s\S]*?\*\//g,
+      (m, s) => s ?? "",
+    )
     .replace(/,\s*([}\]])/g, "$1");
 }
 
@@ -45,17 +48,24 @@ export const LoreConfig = z.object({
        *  maxLayer0Tokens = max(target / model.cost.cache.read, 40K).
        *  Lower = cheaper but earlier compression. Default: 0.10. Set to 0 to
        *  disable cost-aware capping (use the model's full context). */
-      targetCacheReadCostPerTurn: z.number().min(0).default(0.10),
+      targetCacheReadCostPerTurn: z.number().min(0).default(0.1),
       /** Direct override for the layer-0 token cap. When set, bypasses the
        *  cost-aware formula from targetCacheReadCostPerTurn. 0 = disabled
        *  (no cap, use full context). Default: undefined (use cost-aware auto). */
       maxLayer0Tokens: z.number().min(0).optional(),
       /** @deprecated Ignored. Tier-based bust-vs-continue replaces static cap. */
-      targetBustCost: z.number().min(0).default(1.00).optional(),
+      targetBustCost: z.number().min(0).default(1.0).optional(),
       /** @deprecated Ignored. Tier-based bust-vs-continue replaces static cap. */
       maxContextTokens: z.number().min(0).optional(),
     })
-    .default({ distilled: 0.25, raw: 0.4, output: 0.25, ltm: 0.05, preferenceLtm: 0.02, targetCacheReadCostPerTurn: 0.10 }),
+    .default({
+      distilled: 0.25,
+      raw: 0.4,
+      output: 0.25,
+      ltm: 0.05,
+      preferenceLtm: 0.02,
+      targetCacheReadCostPerTurn: 0.1,
+    }),
   /**
    * Cold-cache idle-resume handling.
    *
@@ -77,7 +87,11 @@ export const LoreConfig = z.object({
    * tier (1 h TTL) should set this to 60 in `.lore.json`.
    * Set to 0 to disable the feature.
    */
-  idleResumeMinutes: z.number().min(0).max(24 * 60).default(5),
+  idleResumeMinutes: z
+    .number()
+    .min(0)
+    .max(24 * 60)
+    .default(5),
   distillation: z
     .object({
       minMessages: z.number().min(3).default(5),
@@ -218,7 +232,12 @@ export const LoreConfig = z.object({
       queryExpansion: true,
       vectorBoostWeight: 1.5,
       vectorBoostMinTerms: 2,
-      embeddings: { enabled: true, provider: "local" as const, model: "nomic-ai/nomic-embed-text-v1.5", dimensions: 768 },
+      embeddings: {
+        enabled: true,
+        provider: "local" as const,
+        model: "nomic-ai/nomic-embed-text-v1.5",
+        dimensions: 768,
+      },
       recall: { charBudget: 12000, relevanceFloor: 0.15, maxResults: 15 },
     }),
   cache: z
@@ -278,7 +297,16 @@ export const LoreConfig = z.object({
       aliases: z
         .array(
           z.object({
-            type: z.enum(["name", "email", "github", "slack", "phone", "nickname", "url", "domain"]),
+            type: z.enum([
+              "name",
+              "email",
+              "github",
+              "slack",
+              "phone",
+              "nickname",
+              "url",
+              "domain",
+            ]),
             value: z.string(),
           }),
         )

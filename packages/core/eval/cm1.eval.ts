@@ -5,8 +5,16 @@
  * Replays the CM-1 scenario through the Lore gateway, then asks questions.
  */
 import { beforeAll, afterAll } from "vitest";
-import { describeEval, FactualityJudge, createJudgeHarness } from "vitest-evals";
-import { loreEvalHarness, replayAndWarmup, teardownGateway } from "./lore-harness";
+import {
+  describeEval,
+  FactualityJudge,
+  createJudgeHarness,
+} from "vitest-evals";
+import {
+  loreEvalHarness,
+  replayAndWarmup,
+  teardownGateway,
+} from "./lore-harness";
 import { inflateScenario } from "./inflate";
 
 // Load scenario
@@ -19,10 +27,13 @@ const scenario = inflateScenario(baseScenario, 400_000, 42);
 // Judge harness — uses Anthropic for LLM-as-judge
 const judgeHarness = createJudgeHarness({
   run: async (input) => {
-    const { resolveBackend, createEvalLLMClient } = await import("./llm-backend");
+    const { resolveBackend, createEvalLLMClient } = await import(
+      "./llm-backend"
+    );
     const llm = createEvalLLMClient(resolveBackend());
     const result = await llm.prompt(
-      input.system ?? "You are an expert judge evaluating the accuracy of answers about past coding sessions.",
+      input.system ??
+        "You are an expert judge evaluating the accuracy of answers about past coding sessions.",
       input.prompt,
       { maxTokens: 1024, temperature: 0 },
     );
@@ -48,19 +59,23 @@ afterAll(async () => {
 // Tests: one per question
 // ---------------------------------------------------------------------------
 
-describeEval("CM-1 Context Retention (400K, Lore)", {
-  harness: loreEvalHarness,
-  judges: [factuality],
-  judgeThreshold: 0.6,
-}, (it) => {
-  for (const q of scenario.questions) {
-    it(q.id, async ({ run }) => {
-      await run(q.question, {
-        metadata: {
-          expected: q.referenceAnswer,
-          difficulty: q.metadata.difficulty,
-        },
+describeEval(
+  "CM-1 Context Retention (400K, Lore)",
+  {
+    harness: loreEvalHarness,
+    judges: [factuality],
+    judgeThreshold: 0.6,
+  },
+  (it) => {
+    for (const q of scenario.questions) {
+      it(q.id, async ({ run }) => {
+        await run(q.question, {
+          metadata: {
+            expected: q.referenceAnswer,
+            difficulty: q.metadata.difficulty,
+          },
+        });
       });
-    });
-  }
-});
+    }
+  },
+);

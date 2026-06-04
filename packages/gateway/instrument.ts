@@ -117,10 +117,12 @@ if (sentryEnabled && !Sentry.isInitialized()) {
     // wrapping a transient cause isn't accidentally silenced.
     beforeSend(event) {
       const values = event.exception?.values;
-      if (values?.some((v) => {
-        const msg = `${v.type}: ${v.value}`;
-        return TRANSIENT_ERROR_PATTERNS.some((re) => re.test(msg));
-      })) {
+      if (
+        values?.some((v) => {
+          const msg = `${v.type}: ${v.value}`;
+          return TRANSIENT_ERROR_PATTERNS.some((re) => re.test(msg));
+        })
+      ) {
         return null;
       }
       return event;

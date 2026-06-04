@@ -51,7 +51,9 @@ async function promptYesNo(message: string): Promise<boolean> {
  * - If confirmed, runs extraction in the background (fire-and-forget).
  * - If declined, records a per-agent decline sentinel so we don't ask again.
  */
-export async function maybeAutoImport(gatewayConfig: GatewayConfig): Promise<void> {
+export async function maybeAutoImport(
+  gatewayConfig: GatewayConfig,
+): Promise<void> {
   const projectPath = process.cwd();
 
   try {
@@ -70,7 +72,9 @@ export async function maybeAutoImport(gatewayConfig: GatewayConfig): Promise<voi
   // session rows, so isImported() would not catch it — only the gate does.
   // Known agents with new sessions are intentionally skipped; incremental
   // same-agent imports remain the job of explicit `lore import`.
-  results = results.filter((r) => !hasAgentImportRecord(projectPath, r.agentName));
+  results = results.filter(
+    (r) => !hasAgentImportRecord(projectPath, r.agentName),
+  );
   if (results.length === 0) return;
 
   // Defensive per-session filter for the surviving brand-new agents.
@@ -82,8 +86,14 @@ export async function maybeAutoImport(gatewayConfig: GatewayConfig): Promise<voi
       });
       return !isImported(projectPath, result.agentName, sess.id, hash);
     });
-    result.totalMessages = result.sessions.reduce((s, sess) => s + sess.messageCount, 0);
-    result.totalTokens = result.sessions.reduce((s, sess) => s + sess.estimatedTokens, 0);
+    result.totalMessages = result.sessions.reduce(
+      (s, sess) => s + sess.messageCount,
+      0,
+    );
+    result.totalTokens = result.sessions.reduce(
+      (s, sess) => s + sess.estimatedTokens,
+      0,
+    );
   }
   results = results.filter((r) => r.sessions.length > 0);
   if (results.length === 0) return;
@@ -118,7 +128,10 @@ export async function maybeAutoImport(gatewayConfig: GatewayConfig): Promise<voi
     modelID: "claude-sonnet-4-6",
   };
   const llm = createGatewayLLMClient(
-    { anthropic: gatewayConfig.upstreamAnthropic, openai: gatewayConfig.upstreamOpenAI },
+    {
+      anthropic: gatewayConfig.upstreamAnthropic,
+      openai: gatewayConfig.upstreamOpenAI,
+    },
     resolveAuth,
     defaultModel,
   );

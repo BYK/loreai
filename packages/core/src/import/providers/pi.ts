@@ -13,7 +13,11 @@
 import { readdirSync, readFileSync, existsSync, statSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
-import type { AgentHistoryProvider, ConversationChunk, DetectedSession } from "../types";
+import type {
+  AgentHistoryProvider,
+  ConversationChunk,
+  DetectedSession,
+} from "../types";
 import { registerProvider } from "./index";
 
 // ---------------------------------------------------------------------------
@@ -145,7 +149,8 @@ function linearize(lines: PiLine[]): PiLine[] {
     }
   }
 
-  if (!rootLine || !rootLine.id) return lines.filter((l) => l.type === "message");
+  if (!rootLine || !rootLine.id)
+    return lines.filter((l) => l.type === "message");
 
   // Walk from root, always picking the child with the latest timestamp
   // (or the last one appended if timestamps are equal)
@@ -166,9 +171,7 @@ function linearize(lines: PiLine[]): PiLine[] {
 }
 
 /** Get session metadata from a JSONL file. */
-function getSessionMeta(
-  filePath: string,
-): {
+function getSessionMeta(filePath: string): {
   id: string;
   cwd: string;
   timestamp: number;

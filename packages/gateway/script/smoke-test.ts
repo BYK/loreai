@@ -27,13 +27,7 @@ function resolveApiKey(): string | null {
   }
 
   // 2. OpenCode auth.json fallback
-  const authPath = join(
-    homedir(),
-    ".local",
-    "share",
-    "opencode",
-    "auth.json",
-  );
+  const authPath = join(homedir(), ".local", "share", "opencode", "auth.json");
   if (existsSync(authPath)) {
     try {
       const auth = JSON.parse(readFileSync(authPath, "utf-8"));
@@ -52,7 +46,7 @@ if (!API_KEY) {
   console.error(
     "[smoke] ERROR: No Anthropic API key found.\n" +
       "  Set ANTHROPIC_API_KEY env var, or ensure\n" +
-      "  ~/.local/share/opencode/auth.json has { \"anthropic\": { \"key\": \"sk-ant-...\" } }",
+      '  ~/.local/share/opencode/auth.json has { "anthropic": { "key": "sk-ant-..." } }',
   );
   process.exit(1);
 }
@@ -87,9 +81,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 /** Send an Anthropic-protocol messages request. */
-async function sendMessages(
-  body: Record<string, unknown>,
-): Promise<Response> {
+async function sendMessages(body: Record<string, unknown>): Promise<Response> {
   return fetch(`${BASE}/v1/messages`, {
     method: "POST",
     headers: {
@@ -130,10 +122,7 @@ function parseSSE(text: string): Array<{ event: string; data: string }> {
 type TestResult = { name: string; passed: boolean; error?: string };
 const results: TestResult[] = [];
 
-async function runTest(
-  name: string,
-  fn: () => Promise<void>,
-): Promise<void> {
+async function runTest(name: string, fn: () => Promise<void>): Promise<void> {
   try {
     await fn();
     results.push({ name, passed: true });
@@ -183,9 +172,33 @@ try {
     // Include tools so the request isn't classified as a meta request
     // passthrough (isMetaRequest scores tools.length ≤ 2 as a signal)
     const tools = [
-      { name: "bash", description: "Run a shell command", input_schema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } },
-      { name: "read", description: "Read a file", input_schema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
-      { name: "write", description: "Write a file", input_schema: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } },
+      {
+        name: "bash",
+        description: "Run a shell command",
+        input_schema: {
+          type: "object",
+          properties: { command: { type: "string" } },
+          required: ["command"],
+        },
+      },
+      {
+        name: "read",
+        description: "Read a file",
+        input_schema: {
+          type: "object",
+          properties: { path: { type: "string" } },
+          required: ["path"],
+        },
+      },
+      {
+        name: "write",
+        description: "Write a file",
+        input_schema: {
+          type: "object",
+          properties: { path: { type: "string" }, content: { type: "string" } },
+          required: ["path", "content"],
+        },
+      },
     ];
 
     const resp = await sendMessages({
@@ -234,10 +247,7 @@ try {
       `Second block type should be "text", got "${responseBlock.type}"`,
     );
     responseTextFromTest2 = responseBlock.text as string;
-    assert(
-      responseTextFromTest2.length > 0,
-      "Response text block is empty",
-    );
+    assert(responseTextFromTest2.length > 0, "Response text block is empty");
 
     console.log(
       `[smoke]   marker: [lore:${markerFromTest2}], response: "${responseTextFromTest2.trim()}"`,
@@ -249,9 +259,33 @@ try {
   // -----------------------------------------------------------------------
   await runTest("Test 3: Streaming request", async () => {
     const tools = [
-      { name: "bash", description: "Run a shell command", input_schema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } },
-      { name: "read", description: "Read a file", input_schema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
-      { name: "write", description: "Write a file", input_schema: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } },
+      {
+        name: "bash",
+        description: "Run a shell command",
+        input_schema: {
+          type: "object",
+          properties: { command: { type: "string" } },
+          required: ["command"],
+        },
+      },
+      {
+        name: "read",
+        description: "Read a file",
+        input_schema: {
+          type: "object",
+          properties: { path: { type: "string" } },
+          required: ["path"],
+        },
+      },
+      {
+        name: "write",
+        description: "Write a file",
+        input_schema: {
+          type: "object",
+          properties: { path: { type: "string" }, content: { type: "string" } },
+          required: ["path", "content"],
+        },
+      },
     ];
 
     const resp = await sendMessages({
@@ -326,15 +360,36 @@ try {
   // Test 4 — Session continuity (follow-up, no new marker)
   // -----------------------------------------------------------------------
   await runTest("Test 4: Session continuity", async () => {
-    assert(
-      markerFromTest2.length > 0,
-      "Skipped — no marker from Test 2",
-    );
+    assert(markerFromTest2.length > 0, "Skipped — no marker from Test 2");
 
     const tools = [
-      { name: "bash", description: "Run a shell command", input_schema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } },
-      { name: "read", description: "Read a file", input_schema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
-      { name: "write", description: "Write a file", input_schema: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } },
+      {
+        name: "bash",
+        description: "Run a shell command",
+        input_schema: {
+          type: "object",
+          properties: { command: { type: "string" } },
+          required: ["command"],
+        },
+      },
+      {
+        name: "read",
+        description: "Read a file",
+        input_schema: {
+          type: "object",
+          properties: { path: { type: "string" } },
+          required: ["path"],
+        },
+      },
+      {
+        name: "write",
+        description: "Write a file",
+        input_schema: {
+          type: "object",
+          properties: { path: { type: "string" }, content: { type: "string" } },
+          required: ["path", "content"],
+        },
+      },
     ];
 
     const resp = await sendMessages({
@@ -407,9 +462,7 @@ try {
       max_tokens: 50,
       stream: false,
       system: "Generate a short title.",
-      messages: [
-        { role: "user", content: "Title this: User asks about math" },
-      ],
+      messages: [{ role: "user", content: "Title this: User asks about math" }],
     });
 
     assert(resp.status === 200, `Expected 200, got ${resp.status}`);
@@ -435,10 +488,7 @@ try {
       .filter((b) => b.type === "text")
       .map((b) => (b as { text: string }).text)
       .join("");
-    assert(
-      responseText.trim().length > 0,
-      "Passthrough response is empty",
-    );
+    assert(responseText.trim().length > 0, "Passthrough response is empty");
     console.log(`[smoke]   title: "${responseText.trim()}"`);
   });
 } finally {

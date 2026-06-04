@@ -130,9 +130,7 @@ export type OciManifest = {
  * Fetch a short-lived anonymous bearer token for read-only access to the
  * public ghcr.io/BYK/loreai package.
  */
-export async function getAnonymousToken(
-  signal?: AbortSignal,
-): Promise<string> {
+export async function getAnonymousToken(signal?: AbortSignal): Promise<string> {
   const url = `${GHCR_REGISTRY}/token?scope=repository:${GHCR_REPO}:pull`;
   const response = await fetchWithRetry(
     url,

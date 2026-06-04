@@ -29,8 +29,7 @@ export function parseOpenAIRequest(
   const stream = raw.stream === true;
 
   // max_tokens defaults to 4096 if not specified
-  const maxTokens =
-    typeof raw.max_tokens === "number" ? raw.max_tokens : 4096;
+  const maxTokens = typeof raw.max_tokens === "number" ? raw.max_tokens : 4096;
 
   // Extract extras (temperature, top_p, etc.) for later forwarding
   const extras: GatewayRequest["extras"] = {};
@@ -87,7 +86,10 @@ export function parseOpenAIRequest(
     }
 
     if (role === "user") {
-      const blocks = parseUserContent(content, msg.tool_calls as Array<Record<string, unknown>> | undefined);
+      const blocks = parseUserContent(
+        content,
+        msg.tool_calls as Array<Record<string, unknown>> | undefined,
+      );
       messages.push({ role: "user", content: blocks });
       continue;
     }
@@ -131,16 +133,14 @@ export function parseOpenAIRequest(
 
   // Parse tools
   const rawTools = Array.isArray(raw.tools) ? raw.tools : [];
-  const tools: GatewayTool[] = rawTools.map(
-    (t: Record<string, unknown>) => {
-      const func = t.function as Record<string, unknown> | undefined;
-      return {
-        name: String(func?.name ?? t.name ?? ""),
-        description: String(func?.description ?? ""),
-        inputSchema: (func?.parameters as Record<string, unknown>) ?? {},
-      };
-    },
-  );
+  const tools: GatewayTool[] = rawTools.map((t: Record<string, unknown>) => {
+    const func = t.function as Record<string, unknown> | undefined;
+    return {
+      name: String(func?.name ?? t.name ?? ""),
+      description: String(func?.description ?? ""),
+      inputSchema: (func?.parameters as Record<string, unknown>) ?? {},
+    };
+  });
 
   return {
     protocol: "openai",
@@ -349,8 +349,7 @@ function buildOpenAINonStreamResponse(resp: GatewayResponse): Response {
     usage: {
       prompt_tokens: resp.usage.inputTokens,
       completion_tokens: resp.usage.outputTokens,
-      total_tokens:
-        resp.usage.inputTokens + resp.usage.outputTokens,
+      total_tokens: resp.usage.inputTokens + resp.usage.outputTokens,
       ...(resp.usage.cacheReadInputTokens != null
         ? {
             prompt_tokens_details: {
@@ -602,7 +601,9 @@ function buildOpenAIMessages(
         if (hasOpaque) {
           msgRecord.content = contentParts;
         } else {
-          msgRecord.content = contentParts.map((p) => String(p.text ?? "")).join("");
+          msgRecord.content = contentParts
+            .map((p) => String(p.text ?? ""))
+            .join("");
         }
       }
 

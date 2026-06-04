@@ -29,11 +29,15 @@ describe("in-process gateway startup", () => {
     // Use the gateway API directly with an ephemeral port.
     const gwPkg = "@loreai/gateway";
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const gw = await import(gwPkg) as any;
+    const gw = (await import(gwPkg)) as any;
     const config = gw.loadConfig();
     config.port = 0; // ephemeral
 
-    const server = gw.startServer(config) as { stop: () => void; port: number; hosts: string[] };
+    const server = gw.startServer(config) as {
+      stop: () => void;
+      port: number;
+      hosts: string[];
+    };
     shutdowns.push(async () => server.stop());
     const port = server.port;
     const base = `http://127.0.0.1:${port}`;
@@ -54,7 +58,7 @@ describe("in-process gateway startup", () => {
     // embedding worker init which triggers Bun NAPI teardown crashes).
     const gwPkg = "@loreai/gateway";
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const gw = await import(gwPkg) as any;
+    const gw = (await import(gwPkg)) as any;
 
     // Find a free port first.
     const tmpServer = Bun.serve({
@@ -70,7 +74,11 @@ describe("in-process gateway startup", () => {
 
     const config = gw.loadConfig();
     config.port = freePort;
-    const server = gw.startServer(config) as { stop: () => void; port: number; hosts: string[] };
+    const server = gw.startServer(config) as {
+      stop: () => void;
+      port: number;
+      hosts: string[];
+    };
     shutdowns.push(async () => server.stop());
 
     expect(server.port).toBe(freePort);

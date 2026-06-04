@@ -47,7 +47,9 @@ export function sanitizeSurrogates(value: string): string {
 // Newlines within a single fact/narrative are replaced with a space.
 // Also sanitizes unpaired surrogates to prevent JSON serialization failures.
 export function inline(value: string): string {
-  return sanitizeSurrogates(value).replace(/\s*\n\s*/g, " ").trim();
+  return sanitizeSurrogates(value)
+    .replace(/\s*\n\s*/g, " ")
+    .trim();
 }
 
 // Normalize arbitrary markdown via parse → stringify roundtrip.

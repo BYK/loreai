@@ -23,7 +23,14 @@
  *    are wrong.
  */
 
-import { log, config as loreConfig, db, projectId, getKV, setKV } from "@loreai/core";
+import {
+  log,
+  config as loreConfig,
+  db,
+  projectId,
+  getKV,
+  setKV,
+} from "@loreai/core";
 import type {
   InterTurnHistogram,
   WarmupResult,
@@ -46,19 +53,19 @@ import { recordWarmupCost } from "./cost-tracker";
  * 1h TTL boundaries where the warming decision matters most.
  */
 export const HISTOGRAM_BINS: readonly number[] = [
-  10_000,    // 10s
-  20_000,    // 20s
-  30_000,    // 30s
-  45_000,    // 45s
-  60_000,    // 1m
-  90_000,    // 1.5m
-  120_000,   // 2m
-  180_000,   // 3m
-  240_000,   // 4m
-  300_000,   // 5m   ← 5m TTL boundary
-  420_000,   // 7m
-  600_000,   // 10m
-  900_000,   // 15m
+  10_000, // 10s
+  20_000, // 20s
+  30_000, // 30s
+  45_000, // 45s
+  60_000, // 1m
+  90_000, // 1.5m
+  120_000, // 2m
+  180_000, // 3m
+  240_000, // 4m
+  300_000, // 5m   ← 5m TTL boundary
+  420_000, // 7m
+  600_000, // 10m
+  900_000, // 15m
   1_200_000, // 20m
   1_800_000, // 30m
   2_700_000, // 45m
@@ -116,7 +123,7 @@ export const MIN_INPUT_TOKENS_FOR_WARMING = 50_000;
  *  break-even threshold read/(write-read) is often very low (4–9%),
  *  which causes nearly every non-dead session to get warmed. This floor
  *  ensures at least 30% return probability before the first warmup. */
-export const MIN_RETURN_PROBABILITY_FLOOR = 0.30;
+export const MIN_RETURN_PROBABILITY_FLOOR = 0.3;
 
 // ---------------------------------------------------------------------------
 // Global circuit breaker
@@ -135,7 +142,10 @@ function ensureCircuitBreakerLoaded(): void {
   try {
     const raw = getKV(CB_KV_KEY);
     if (raw) {
-      const parsed = JSON.parse(raw) as { tripped?: boolean; failures?: number };
+      const parsed = JSON.parse(raw) as {
+        tripped?: boolean;
+        failures?: number;
+      };
       circuitBreakerTripped = parsed.tripped ?? false;
       circuitBreakerFailures = parsed.failures ?? 0;
     }
@@ -146,7 +156,13 @@ function ensureCircuitBreakerLoaded(): void {
 
 /** Persist circuit breaker state to DB. */
 function saveCircuitBreaker(): void {
-  setKV(CB_KV_KEY, JSON.stringify({ tripped: circuitBreakerTripped, failures: circuitBreakerFailures }));
+  setKV(
+    CB_KV_KEY,
+    JSON.stringify({
+      tripped: circuitBreakerTripped,
+      failures: circuitBreakerFailures,
+    }),
+  );
 }
 
 /**
@@ -191,7 +207,11 @@ export function checkCircuitBreaker(result: WarmupResult): boolean {
   ensureCircuitBreakerLoaded();
   if (circuitBreakerTripped) return true;
 
-  if (result.ok && result.cacheCreationTokens > 0 && result.cacheReadTokens === 0) {
+  if (
+    result.ok &&
+    result.cacheCreationTokens > 0 &&
+    result.cacheReadTokens === 0
+  ) {
     circuitBreakerFailures++;
     log.error(
       `cache-warmer CIRCUIT BREAKER: warmup caused uncached write ` +
@@ -329,9 +349,7 @@ export function conditionalReturnProbability(
 /**
  * Get (or create) the session-level histogram.
  */
-export function getSessionHistogram(
-  state: SessionState,
-): InterTurnHistogram {
+export function getSessionHistogram(state: SessionState): InterTurnHistogram {
   if (!state.survivalModel) {
     state.survivalModel = createHistogram();
   }
@@ -359,8 +377,7 @@ export function blendHistograms(
     blended.counts[i] =
       sessionWeight * session.counts[i] + globalWeight * global.counts[i];
   }
-  blended.total =
-    sessionWeight * session.total + globalWeight * global.total;
+  blended.total = sessionWeight * session.total + globalWeight * global.total;
   return blended;
 }
 
@@ -376,9 +393,7 @@ const globalHistograms = new Map<string, InterTurnHistogram>();
  *
  * Creates an empty histogram if none exists for the given pid.
  */
-export function getGlobalHistogram(
-  pid: string,
-): InterTurnHistogram {
+export function getGlobalHistogram(pid: string): InterTurnHistogram {
   let hist = globalHistograms.get(pid);
   if (!hist) {
     hist = createHistogram();
@@ -424,10 +439,14 @@ export function breakFraction(hist: InterTurnHistogram): number {
 
   // Fractional inclusion of the floor bin via linear interpolation
   const binStart = floorIdx > 0 ? HISTOGRAM_BINS[floorIdx - 1] : 0;
-  const binEnd = floorIdx < HISTOGRAM_BINS.length ? HISTOGRAM_BINS[floorIdx] : Infinity;
+  const binEnd =
+    floorIdx < HISTOGRAM_BINS.length ? HISTOGRAM_BINS[floorIdx] : Infinity;
   const binWidth = binEnd - binStart;
   if (binWidth > 0 && isFinite(binWidth)) {
-    const fractionAbove = Math.max(0, Math.min(1, (binEnd - BREAK_FLOOR_MS) / binWidth));
+    const fractionAbove = Math.max(
+      0,
+      Math.min(1, (binEnd - BREAK_FLOOR_MS) / binWidth),
+    );
     breakCount += hist.counts[floorIdx] * fractionAbove;
   }
 
@@ -592,7 +611,9 @@ export function maxProfitableCycles(
   cacheMissCostPerMTok: number,
 ): number {
   if (cacheReadCostPerMTok <= 0) return 0;
-  return Math.floor((cacheMissCostPerMTok - cacheReadCostPerMTok) / cacheReadCostPerMTok);
+  return Math.floor(
+    (cacheMissCostPerMTok - cacheReadCostPerMTok) / cacheReadCostPerMTok,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -657,9 +678,11 @@ export function buildAnthropicProfile(
   upstreamBase?: string,
 ): CacheWarmingProfile {
   const entry = getModelEntrySync(model);
-  const cacheReadCost = entry.cost?.cache_read ?? (entry.cost?.input ?? 3) * 0.1;
+  const cacheReadCost =
+    entry.cost?.cache_read ?? (entry.cost?.input ?? 3) * 0.1;
   // Base cache_write is the 5m TTL price. Anthropic charges 2× for 1h TTL writes.
-  const baseCacheWrite = entry.cost?.cache_write ?? (entry.cost?.input ?? 3) * 1.25;
+  const baseCacheWrite =
+    entry.cost?.cache_write ?? (entry.cost?.input ?? 3) * 1.25;
   const cacheWriteCost = ttl === "1h" ? baseCacheWrite * 2 : baseCacheWrite;
 
   const ttlMs = ttl === "1h" ? 3_600_000 : 300_000;
@@ -739,7 +762,8 @@ export function shouldWarm(
   if (!state.cacheAnalytics.lastRequestBody) return false;
 
   const elapsed = now - state.lastRequestTime;
-  const { ttlMs, warmupMarginMs, cacheReadCostPerMTok, cacheMissCostPerMTok } = profile;
+  const { ttlMs, warmupMarginMs, cacheReadCostPerMTok, cacheMissCostPerMTok } =
+    profile;
   const forced = state.warmup?.forceKeepWarm === true;
   const toolCallActive = state.lastStopReason === "tool_use";
 
@@ -751,7 +775,10 @@ export function shouldWarm(
   // cheap refresh (~$0.10). This was the dominant cost driver: 65 warmups
   // at cold-write pricing = ~$65 vs ~$6.50 with correct timing.
   const cooldownMs = Math.max(ttlMs - warmupMarginMs, 0);
-  if (state.warmup?.lastWarmupAt && (now - state.warmup.lastWarmupAt) < cooldownMs) {
+  if (
+    state.warmup?.lastWarmupAt &&
+    now - state.warmup.lastWarmupAt < cooldownMs
+  ) {
     return false;
   }
 
@@ -759,7 +786,10 @@ export function shouldWarm(
     // /lore:warm:keep mode: skip survival/signal analysis but still respect
     // the break-even cap — warming beyond maxCycles is always unprofitable,
     // even when the user explicitly asked for /lore:warm:keep.
-    const maxCycles = maxProfitableCycles(cacheReadCostPerMTok, cacheMissCostPerMTok);
+    const maxCycles = maxProfitableCycles(
+      cacheReadCostPerMTok,
+      cacheMissCostPerMTok,
+    );
     const cyclesSpent = state.warmup?.warmupCount ?? 0;
     if (cyclesSpent >= maxCycles) return false;
 
@@ -785,7 +815,10 @@ export function shouldWarm(
       if (hitRate < MIN_SESSION_HIT_RATE) return false;
     }
 
-    const maxCycles = maxProfitableCycles(cacheReadCostPerMTok, cacheMissCostPerMTok);
+    const maxCycles = maxProfitableCycles(
+      cacheReadCostPerMTok,
+      cacheMissCostPerMTok,
+    );
     const cyclesSpent = state.warmup?.warmupCount ?? 0;
     // Tool-call-specific cap: most tools complete in <10min (2 cycles at 5m TTL)
     const effectiveMax = Math.min(maxCycles, TOOL_CALL_MAX_CYCLES);
@@ -795,7 +828,8 @@ export function shouldWarm(
     if (state.messageCount < MIN_TURNS_FOR_WARMING * 2) return false;
 
     // Context too small — absolute savings per hit don't justify risk
-    if ((state.lastInputTokens ?? 0) < MIN_INPUT_TOKENS_FOR_WARMING) return false;
+    if ((state.lastInputTokens ?? 0) < MIN_INPUT_TOKENS_FOR_WARMING)
+      return false;
 
     // Only warm in the margin window of the current TTL cycle
     const intoWindow = elapsed % ttlMs;
@@ -846,12 +880,19 @@ export function shouldWarm(
   // warming sessions with trivially low return probability (8.7% for 5m TTL).
   // NOTE: an explicit minReturnProbability config override intentionally
   // bypasses the floor — it's a user-controlled knob for tuning.
-  const autoThreshold = costThreshold(cacheReadCostPerMTok, cacheMissCostPerMTok);
-  const threshold = cfg.cache.warming.minReturnProbability
-    ?? Math.max(MIN_RETURN_PROBABILITY_FLOOR, autoThreshold);
+  const autoThreshold = costThreshold(
+    cacheReadCostPerMTok,
+    cacheMissCostPerMTok,
+  );
+  const threshold =
+    cfg.cache.warming.minReturnProbability ??
+    Math.max(MIN_RETURN_PROBABILITY_FLOOR, autoThreshold);
 
   // Max cycles before warming becomes unprofitable
-  const maxCycles = maxProfitableCycles(cacheReadCostPerMTok, cacheMissCostPerMTok);
+  const maxCycles = maxProfitableCycles(
+    cacheReadCostPerMTok,
+    cacheMissCostPerMTok,
+  );
 
   // Determine if this is the initial commitment or a continuation
   const cyclesSpent = state.warmup?.warmupCount ?? 0;
@@ -905,7 +946,12 @@ export function shouldWarm(
     }
 
     // Re-evaluate: expected remaining cycles must keep total under maxCycles
-    const remaining = expectedWarmupCycles(blendedHist, elapsed, ttlMs, maxCycles - cyclesSpent);
+    const remaining = expectedWarmupCycles(
+      blendedHist,
+      elapsed,
+      ttlMs,
+      maxCycles - cyclesSpent,
+    );
     if (cyclesSpent + remaining > maxCycles) {
       markDeadIfSurvivalLow(state, survivalAtIdle);
       return false;
@@ -920,10 +966,19 @@ export function shouldWarm(
 }
 
 /** Mark session dead if survival is below the dead session threshold. */
-function markDeadIfSurvivalLow(state: SessionState, survivalAtIdle: number): void {
+function markDeadIfSurvivalLow(
+  state: SessionState,
+  survivalAtIdle: number,
+): void {
   if (survivalAtIdle < DEAD_SESSION_THRESHOLD) {
     if (!state.warmup) {
-      state.warmup = { lastWarmupAt: 0, warmupCount: 0, totalWarmups: 0, warmupHits: 0, disabled: true };
+      state.warmup = {
+        lastWarmupAt: 0,
+        warmupCount: 0,
+        totalWarmups: 0,
+        warmupHits: 0,
+        disabled: true,
+      };
     } else {
       state.warmup.disabled = true;
     }
@@ -1035,12 +1090,16 @@ export function computeWarmingSnapshot(
   const autoThreshold = profile
     ? costThreshold(profile.cacheReadCostPerMTok, profile.cacheMissCostPerMTok)
     : 0.1;
-  const thresholdVal = cfg.cache.warming.minReturnProbability
-    ?? Math.max(MIN_RETURN_PROBABILITY_FLOOR, autoThreshold);
+  const thresholdVal =
+    cfg.cache.warming.minReturnProbability ??
+    Math.max(MIN_RETURN_PROBABILITY_FLOOR, autoThreshold);
 
   // Commitment model cost analysis
   const maxCyclesVal = profile
-    ? maxProfitableCycles(profile.cacheReadCostPerMTok, profile.cacheMissCostPerMTok)
+    ? maxProfitableCycles(
+        profile.cacheReadCostPerMTok,
+        profile.cacheMissCostPerMTok,
+      )
     : 0;
   const cyclesSpent = state.warmup?.warmupCount ?? 0;
   const expectedCycles = profile
@@ -1050,13 +1109,15 @@ export function computeWarmingSnapshot(
   // Determine warming phase
   const isFirstWindow = idleMs < ttlMs;
   const hasWarmed = cyclesSpent > 0;
-  const warmingPhase: "initial" | "continuation" | "none" =
-    isFirstWindow ? "initial" : hasWarmed ? "continuation" : "none";
+  const warmingPhase: "initial" | "continuation" | "none" = isFirstWindow
+    ? "initial"
+    : hasWarmed
+      ? "continuation"
+      : "none";
 
   // Decision + reason
   const warmNow =
-    profile != null &&
-    shouldWarm(state, profile, blendedHist, now);
+    profile != null && shouldWarm(state, profile, blendedHist, now);
 
   let notWarmingReason: string | null = null;
   if (!warmNow) {
@@ -1071,7 +1132,10 @@ export function computeWarmingSnapshot(
     } else if (!profile) {
       notWarmingReason = "No warming profile (non-Anthropic or unknown model)";
     } else if (state.warmup?.forceKeepWarm) {
-      const maxCyc = maxProfitableCycles(profile.cacheReadCostPerMTok, profile.cacheMissCostPerMTok);
+      const maxCyc = maxProfitableCycles(
+        profile.cacheReadCostPerMTok,
+        profile.cacheMissCostPerMTok,
+      );
       if (cyclesSpent >= maxCyc) {
         notWarmingReason = `Force-keep: break-even exceeded (${cyclesSpent} >= ${maxCyc} cycles)`;
       } else {
@@ -1092,23 +1156,38 @@ export function computeWarmingSnapshot(
         notWarmingReason = `Context too small (${tokK}k < ${MIN_INPUT_TOKENS_FOR_WARMING / 1000}k tokens)`;
       } else if (idleMs > MAX_TOOL_CALL_WARMING_MS) {
         notWarmingReason = `Tool call exceeded max duration (${Math.round(idleMs / 60_000)}min > ${Math.round(MAX_TOOL_CALL_WARMING_MS / 60_000)}min)`;
-      } else if ((state.warmup?.totalWarmups ?? 0) >= MIN_WARMUPS_FOR_ROI_CHECK &&
-                 (state.warmup?.warmupHits ?? 0) / (state.warmup?.totalWarmups ?? 1) < MIN_SESSION_HIT_RATE) {
-        const hitRate = ((state.warmup?.warmupHits ?? 0) / (state.warmup?.totalWarmups ?? 1) * 100).toFixed(0);
+      } else if (
+        (state.warmup?.totalWarmups ?? 0) >= MIN_WARMUPS_FOR_ROI_CHECK &&
+        (state.warmup?.warmupHits ?? 0) / (state.warmup?.totalWarmups ?? 1) <
+          MIN_SESSION_HIT_RATE
+      ) {
+        const hitRate = (
+          ((state.warmup?.warmupHits ?? 0) /
+            (state.warmup?.totalWarmups ?? 1)) *
+          100
+        ).toFixed(0);
         notWarmingReason = `Tool call: session hit rate too low (${hitRate}% < ${(MIN_SESSION_HIT_RATE * 100).toFixed(0)}%)`;
       } else {
-        const maxCyc = maxProfitableCycles(profile.cacheReadCostPerMTok, profile.cacheMissCostPerMTok);
+        const maxCyc = maxProfitableCycles(
+          profile.cacheReadCostPerMTok,
+          profile.cacheMissCostPerMTok,
+        );
         const effectiveMax = Math.min(maxCyc, TOOL_CALL_MAX_CYCLES);
         if ((state.warmup?.warmupCount ?? 0) >= effectiveMax) {
           notWarmingReason = `Tool call: cycle cap reached (${state.warmup?.warmupCount ?? 0} >= ${effectiveMax})`;
         } else {
           const intoWindow = idleMs % ttlMs;
-          notWarmingReason = intoWindow < ttlMs - warmupMarginMs
-            ? "Tool call: not in warmup window yet"
-            : "Tool call: cooldown active";
+          notWarmingReason =
+            intoWindow < ttlMs - warmupMarginMs
+              ? "Tool call: not in warmup window yet"
+              : "Tool call: cooldown active";
         }
       }
-    } else if (state.warmup?.lastWarmupAt && now - state.warmup.lastWarmupAt < cooldownFor(state, ttlMs, warmupMarginMs)) {
+    } else if (
+      state.warmup?.lastWarmupAt &&
+      now - state.warmup.lastWarmupAt <
+        cooldownFor(state, ttlMs, warmupMarginMs)
+    ) {
       notWarmingReason = "Already warmed in this TTL window";
     } else if (state.messageCount < MIN_TURNS_FOR_WARMING * 2) {
       notWarmingReason = `Too few turns (${state.messageCount} < ${MIN_TURNS_FOR_WARMING * 2})`;
@@ -1117,9 +1196,15 @@ export function computeWarmingSnapshot(
       notWarmingReason = `Context too small (${tokK}k < ${MIN_INPUT_TOKENS_FOR_WARMING / 1000}k tokens)`;
     } else if (state.warmup?.disabled) {
       notWarmingReason = "Warming stopped (/lore:warm:stop)";
-    } else if ((state.warmup?.totalWarmups ?? 0) >= MIN_WARMUPS_FOR_ROI_CHECK &&
-               (state.warmup?.warmupHits ?? 0) / (state.warmup?.totalWarmups ?? 1) < MIN_SESSION_HIT_RATE) {
-      const hitRate = ((state.warmup?.warmupHits ?? 0) / (state.warmup?.totalWarmups ?? 1) * 100).toFixed(0);
+    } else if (
+      (state.warmup?.totalWarmups ?? 0) >= MIN_WARMUPS_FOR_ROI_CHECK &&
+      (state.warmup?.warmupHits ?? 0) / (state.warmup?.totalWarmups ?? 1) <
+        MIN_SESSION_HIT_RATE
+    ) {
+      const hitRate = (
+        ((state.warmup?.warmupHits ?? 0) / (state.warmup?.totalWarmups ?? 1)) *
+        100
+      ).toFixed(0);
       notWarmingReason = `Session hit rate too low (${hitRate}% < ${(MIN_SESSION_HIT_RATE * 100).toFixed(0)}% after ${state.warmup?.totalWarmups} warmups)`;
     } else if (isFirstWindow && idleMs < ttlMs - warmupMarginMs) {
       notWarmingReason = "Cache still fresh";
@@ -1130,7 +1215,11 @@ export function computeWarmingSnapshot(
     } else if (!isFirstWindow && pFinished > 0.95) {
       notWarmingReason = `Session finished (P=${(pFinished * 100).toFixed(0)}%)`;
     } else if (!isFirstWindow) {
-      const risingThresh = cumulativeCostThreshold(cyclesSpent + 1, profile.cacheReadCostPerMTok, profile.cacheMissCostPerMTok);
+      const risingThresh = cumulativeCostThreshold(
+        cyclesSpent + 1,
+        profile.cacheReadCostPerMTok,
+        profile.cacheMissCostPerMTok,
+      );
       if (pReturns <= risingThresh) {
         notWarmingReason = `Rising threshold: P(returns) ${(pReturns * 100).toFixed(1)}% <= ${(risingThresh * 100).toFixed(1)}% at cycle ${cyclesSpent + 1}`;
       } else {
@@ -1173,7 +1262,10 @@ export function computeWarmingSnapshot(
     pReturnDampened,
     costThreshold: thresholdVal,
     // Tool-call state
-    toolCallActive: state.lastStopReason === "tool_use" && idleMs <= MAX_TOOL_CALL_WARMING_MS && !state.warmup?.disabled,
+    toolCallActive:
+      state.lastStopReason === "tool_use" &&
+      idleMs <= MAX_TOOL_CALL_WARMING_MS &&
+      !state.warmup?.disabled,
     // Decision
     shouldWarmNow: warmNow,
     notWarmingReason,
@@ -1182,7 +1274,11 @@ export function computeWarmingSnapshot(
 }
 
 /** Cooldown between warmups — must match shouldWarm() logic. */
-function cooldownFor(_state: SessionState, ttlMs: number, warmupMarginMs: number): number {
+function cooldownFor(
+  _state: SessionState,
+  ttlMs: number,
+  warmupMarginMs: number,
+): number {
   return Math.max(ttlMs - warmupMarginMs, 0);
 }
 
@@ -1229,7 +1325,11 @@ export async function executeWarmup(
   state: SessionState,
   profile: CacheWarmingProfile,
 ): Promise<WarmupResult> {
-  const noResult: WarmupResult = { ok: false, cacheReadTokens: 0, cacheCreationTokens: 0 };
+  const noResult: WarmupResult = {
+    ok: false,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+  };
 
   const { lastRequestBody } = state.cacheAnalytics;
   if (!lastRequestBody) return noResult;
@@ -1243,7 +1343,9 @@ export async function executeWarmup(
   // Resolve auth for this session
   const cred = resolveAuth(state.sessionID);
   if (!cred) {
-    log.warn(`cache-warmer: no auth for session=${state.sessionID.slice(0, 16)}, skipping`);
+    log.warn(
+      `cache-warmer: no auth for session=${state.sessionID.slice(0, 16)}, skipping`,
+    );
     return noResult;
   }
 
@@ -1318,16 +1420,19 @@ export async function executeWarmup(
     };
 
     // Compute cost estimate for this warmup
-    const readCost = (cacheReadTokens / 1_000_000) * profile.cacheReadCostPerMTok;
-    const writeCost = (cacheCreationTokens / 1_000_000) * profile.cacheMissCostPerMTok;
+    const readCost =
+      (cacheReadTokens / 1_000_000) * profile.cacheReadCostPerMTok;
+    const writeCost =
+      (cacheCreationTokens / 1_000_000) * profile.cacheMissCostPerMTok;
     const warmupCost = readCost + writeCost;
     const costStr = `$${warmupCost.toFixed(4)}`;
 
     // Log the outcome with full cache statistics
     const sid = state.sessionID.slice(0, 16);
-    const hitRate = totalInput > 0
-      ? `${((cacheReadTokens / totalInput) * 100).toFixed(0)}%`
-      : "N/A";
+    const hitRate =
+      totalInput > 0
+        ? `${((cacheReadTokens / totalInput) * 100).toFixed(0)}%`
+        : "N/A";
 
     if (cacheReadTokens > 0 && cacheCreationTokens === 0) {
       log.info(
@@ -1362,7 +1467,13 @@ export async function executeWarmup(
 
     // Update session warmup state
     if (!state.warmup) {
-      state.warmup = { lastWarmupAt: 0, warmupCount: 0, totalWarmups: 0, warmupHits: 0, disabled: false };
+      state.warmup = {
+        lastWarmupAt: 0,
+        warmupCount: 0,
+        totalWarmups: 0,
+        warmupHits: 0,
+        disabled: false,
+      };
     }
     state.warmup.lastWarmupAt = Date.now();
     state.warmup.warmupCount++;
@@ -1373,7 +1484,10 @@ export async function executeWarmup(
 
     return result;
   } catch (e) {
-    log.error(`cache-warmer: fetch error for session=${state.sessionID.slice(0, 16)}:`, e);
+    log.error(
+      `cache-warmer: fetch error for session=${state.sessionID.slice(0, 16)}:`,
+      e,
+    );
     return noResult;
   }
 }
@@ -1410,7 +1524,9 @@ export function loadGlobalHistograms(projectPath: string): string | undefined {
 
   try {
     const rows = db()
-      .query("SELECT time_slot, counts, total FROM warmup_histograms WHERE project_id = ?")
+      .query(
+        "SELECT time_slot, counts, total FROM warmup_histograms WHERE project_id = ?",
+      )
       .all(pid) as Array<{ time_slot: string; counts: string; total: number }>;
 
     for (const row of rows) {
@@ -1500,10 +1616,7 @@ export function flushGlobalHistograms(): void {
  * Wraps the base `recordGap` to also mark the histogram for periodic
  * SQLite flush.
  */
-export function recordGlobalGap(
-  projectPath: string,
-  gapMs: number,
-): void {
+export function recordGlobalGap(projectPath: string, gapMs: number): void {
   const pid = loadGlobalHistograms(projectPath); // ensure loaded; resolves pid
   if (!pid) return; // project not yet in DB — skip
   const hist = getGlobalHistogram(pid);
@@ -1516,7 +1629,10 @@ export function recordGlobalGap(
 // ---------------------------------------------------------------------------
 
 /** Read-only snapshot of all loaded global histograms, keyed by project_id (for dashboard). */
-export function getGlobalHistogramsSnapshot(): ReadonlyMap<string, InterTurnHistogram> {
+export function getGlobalHistogramsSnapshot(): ReadonlyMap<
+  string,
+  InterTurnHistogram
+> {
   return globalHistograms;
 }
 
@@ -1529,7 +1645,11 @@ export function _resetForTest(): void {
   circuitBreakerFailures = 0;
   circuitBreakerTripped = false;
   circuitBreakerLoaded = true; // Mark as loaded so it doesn't re-read stale DB state
-  try { setKV(CB_KV_KEY, JSON.stringify({ tripped: false, failures: 0 })); } catch { /* DB may not be available in all test contexts */ }
+  try {
+    setKV(CB_KV_KEY, JSON.stringify({ tripped: false, failures: 0 }));
+  } catch {
+    /* DB may not be available in all test contexts */
+  }
   globalHistograms.clear();
   dirtyProjects.clear();
   authDisabledSessions.clear();

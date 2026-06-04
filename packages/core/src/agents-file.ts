@@ -8,11 +8,27 @@
  * without duplication.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from "fs";
+import {
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  statSync,
+} from "fs";
 import { dirname, join } from "path";
 import { db, ensureProject } from "./db";
 import * as ltm from "./ltm";
-import { serialize, inline, h, ul, liph, strong, t, root, unescapeMarkdown } from "./markdown";
+import {
+  serialize,
+  inline,
+  h,
+  ul,
+  liph,
+  strong,
+  t,
+  root,
+  unescapeMarkdown,
+} from "./markdown";
 import { isHostedMode } from "./hosted";
 
 // ---------------------------------------------------------------------------
@@ -47,7 +63,8 @@ const LORE_FILE_HEADER =
   "<!-- Managed by lore (https://github.com/BYK/loreai) — manual edits are imported on next session. -->";
 
 /** Regex matching a valid UUID (v4 or v7) — 8-4-4-4-12 hex groups. */
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** Matches `<!-- lore:UUID -->` tracking markers. */
 const MARKER_RE = /^<!--\s*lore:([0-9a-f-]+)\s*-->$/;
@@ -138,7 +155,12 @@ function splitFile(fileContent: string): {
   // start-marker variants (current + historical renamed markers).
   // Each span records: where the section body begins/ends and where the
   // full span (including end-marker) ends.
-  type Span = { markerStart: number; bodyStart: number; bodyEnd: number; spanEnd: number };
+  type Span = {
+    markerStart: number;
+    bodyStart: number;
+    bodyEnd: number;
+    spanEnd: number;
+  };
   const spans: Span[] = [];
 
   let searchFrom = 0;
@@ -159,11 +181,21 @@ function splitFile(fileContent: string): {
     const endIdx = fileContent.indexOf(LORE_SECTION_END, bodyStart);
     if (endIdx === -1) {
       // Unclosed section — consume to EOF
-      spans.push({ markerStart, bodyStart, bodyEnd: fileContent.length, spanEnd: fileContent.length });
+      spans.push({
+        markerStart,
+        bodyStart,
+        bodyEnd: fileContent.length,
+        spanEnd: fileContent.length,
+      });
       break;
     }
 
-    spans.push({ markerStart, bodyStart, bodyEnd: endIdx, spanEnd: endIdx + LORE_SECTION_END.length });
+    spans.push({
+      markerStart,
+      bodyStart,
+      bodyEnd: endIdx,
+      spanEnd: endIdx + LORE_SECTION_END.length,
+    });
     searchFrom = endIdx + LORE_SECTION_END.length;
   }
 
@@ -295,7 +327,9 @@ function buildSection(projectPath: string): string {
   // Section heading
   out.push("## Long-term Knowledge");
 
-  for (const [category, items] of [...grouped.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+  for (const [category, items] of [...grouped.entries()].sort((a, b) =>
+    a[0].localeCompare(b[0]),
+  )) {
     out.push("");
     out.push(`### ${category.charAt(0).toUpperCase() + category.slice(1)}`);
     out.push("");
@@ -312,7 +346,14 @@ function buildSection(projectPath: string): string {
       // serialize(root(ul([liph(...)]))) produces "* **Title**: content\n".
       // Trim the trailing newline since we join with \n ourselves.
       const bullet = serialize(
-        root(ul([liph(strong(inline(sorted[i].title)), t(": " + inline(sorted[i].content)))]))
+        root(
+          ul([
+            liph(
+              strong(inline(sorted[i].title)),
+              t(": " + inline(sorted[i].content)),
+            ),
+          ]),
+        ),
       ).trimEnd();
       out.push(bullet);
     }
@@ -346,8 +387,7 @@ export function exportToFile(input: {
     "For long-term knowledge entries managed by [lore](https://github.com/BYK/loreai) " +
     "(gotchas, patterns, decisions, architecture), see [`.lore.md`](.lore.md) " +
     "in the project root.\n";
-  const newSection =
-    LORE_SECTION_START + pointerBody + LORE_SECTION_END + "\n";
+  const newSection = LORE_SECTION_START + pointerBody + LORE_SECTION_END + "\n";
 
   let fileContent = "";
   if (existsSync(input.filePath)) {
@@ -410,10 +450,7 @@ export function shouldImport(input: {
  * - No UUID (hand-written)      → create with a new UUIDv7
  * - Duplicate UUID in same file → first occurrence wins, rest ignored
  */
-function _importEntries(
-  entries: ParsedFileEntry[],
-  projectPath: string,
-): void {
+function _importEntries(entries: ParsedFileEntry[], projectPath: string): void {
   const seenIds = new Set<string>();
 
   for (const entry of entries) {
@@ -434,10 +471,16 @@ function _importEntries(
         // when two machines independently create entries for the same concept
         // with different UUIDs but similar titles.
         const pid = ensureProject(projectPath);
-        const fuzzyMatch = ltm.findFuzzyDuplicate({ title: entry.title, projectId: pid });
+        const fuzzyMatch = ltm.findFuzzyDuplicate({
+          title: entry.title,
+          projectId: pid,
+        });
         if (fuzzyMatch) {
           // Title-similar entry exists locally — update it, discard foreign UUID
-          if (fuzzyMatch.title !== entry.title || ltm.get(fuzzyMatch.id)?.content !== entry.content) {
+          if (
+            fuzzyMatch.title !== entry.title ||
+            ltm.get(fuzzyMatch.id)?.content !== entry.content
+          ) {
             ltm.update(fuzzyMatch.id, { content: entry.content });
           }
         } else {

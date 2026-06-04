@@ -1,4 +1,12 @@
-import { afterAll, afterEach, describe, test, expect, beforeEach, mock } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  describe,
+  test,
+  expect,
+  beforeEach,
+  mock,
+} from "bun:test";
 import { db, ensureProject } from "../src/db";
 import {
   cosineSimilarity,
@@ -165,7 +173,9 @@ describe("local provider unavailable fallback", () => {
   test("isAvailable() flips to false after the first embed() failure", async () => {
     _markLocalProviderUnavailable();
 
-    await expect(embed(["test"], "query")).rejects.toBeInstanceOf(LocalProviderUnavailableError);
+    await expect(embed(["test"], "query")).rejects.toBeInstanceOf(
+      LocalProviderUnavailableError,
+    );
     expect(isAvailable()).toBe(false);
   });
 });
@@ -200,14 +210,27 @@ describe("auto-fallback to remote provider when local provider is unavailable", 
   function fakeFetch(provider: "voyage" | "openai") {
     const calls: string[] = [];
     const fn = mock(async (url: string | URL | Request) => {
-      const u = typeof url === "string" ? url : url instanceof URL ? url.toString() : url.url;
+      const u =
+        typeof url === "string"
+          ? url
+          : url instanceof URL
+            ? url.toString()
+            : url.url;
       calls.push(u);
       const dim = provider === "voyage" ? 1024 : 1536;
       const embedding = Array.from({ length: dim }, (_, i) => i / dim);
       const body =
         provider === "voyage"
-          ? { data: [{ embedding, index: 0 }], model: "voyage-code-3", usage: { total_tokens: 1 } }
-          : { data: [{ embedding, index: 0 }], model: "text-embedding-3-small", usage: { prompt_tokens: 1, total_tokens: 1 } };
+          ? {
+              data: [{ embedding, index: 0 }],
+              model: "voyage-code-3",
+              usage: { total_tokens: 1 },
+            }
+          : {
+              data: [{ embedding, index: 0 }],
+              model: "text-embedding-3-small",
+              usage: { prompt_tokens: 1, total_tokens: 1 },
+            };
       return new Response(JSON.stringify(body), {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -270,7 +293,9 @@ describe("auto-fallback to remote provider when local provider is unavailable", 
 
   test("with no API keys set, embed() still throws LocalProviderUnavailableError", async () => {
     _markLocalProviderUnavailable();
-    await expect(embed(["x"], "query")).rejects.toBeInstanceOf(LocalProviderUnavailableError);
+    await expect(embed(["x"], "query")).rejects.toBeInstanceOf(
+      LocalProviderUnavailableError,
+    );
   });
 });
 
@@ -340,17 +365,47 @@ describe("vectorSearch", () => {
       .query(
         "INSERT INTO knowledge (id, project_id, category, title, content, confidence, created_at, updated_at, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
-      .run("embed-a", pid, "test", "Entry A", "Perfect match", 1.0, now, now, toBlob(vecA));
+      .run(
+        "embed-a",
+        pid,
+        "test",
+        "Entry A",
+        "Perfect match",
+        1.0,
+        now,
+        now,
+        toBlob(vecA),
+      );
     db()
       .query(
         "INSERT INTO knowledge (id, project_id, category, title, content, confidence, created_at, updated_at, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
-      .run("embed-b", pid, "test", "Entry B", "Orthogonal", 1.0, now, now, toBlob(vecB));
+      .run(
+        "embed-b",
+        pid,
+        "test",
+        "Entry B",
+        "Orthogonal",
+        1.0,
+        now,
+        now,
+        toBlob(vecB),
+      );
     db()
       .query(
         "INSERT INTO knowledge (id, project_id, category, title, content, confidence, created_at, updated_at, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
-      .run("embed-c", pid, "test", "Entry C", "Similar", 1.0, now, now, toBlob(vecC));
+      .run(
+        "embed-c",
+        pid,
+        "test",
+        "Entry C",
+        "Similar",
+        1.0,
+        now,
+        now,
+        toBlob(vecC),
+      );
 
     const query = new Float32Array([1, 0, 0]);
     const results = vectorSearch(query, 10);
@@ -374,7 +429,17 @@ describe("vectorSearch", () => {
         .query(
           "INSERT INTO knowledge (id, project_id, category, title, content, confidence, created_at, updated_at, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .run(`embed-limit-${i}`, pid, "test", `Entry ${i}`, `Content ${i}`, 1.0, now, now, toBlob(vec));
+        .run(
+          `embed-limit-${i}`,
+          pid,
+          "test",
+          `Entry ${i}`,
+          `Content ${i}`,
+          1.0,
+          now,
+          now,
+          toBlob(vec),
+        );
     }
 
     const query = new Float32Array([1, 0, 0]);
@@ -390,7 +455,17 @@ describe("vectorSearch", () => {
       .query(
         "INSERT INTO knowledge (id, project_id, category, title, content, confidence, created_at, updated_at, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
-      .run("embed-yes", pid, "test", "Has Embedding", "Content", 1.0, now, now, toBlob(new Float32Array([1, 0, 0])));
+      .run(
+        "embed-yes",
+        pid,
+        "test",
+        "Has Embedding",
+        "Content",
+        1.0,
+        now,
+        now,
+        toBlob(new Float32Array([1, 0, 0])),
+      );
 
     db()
       .query(
@@ -413,13 +488,33 @@ describe("vectorSearch", () => {
       .query(
         "INSERT INTO knowledge (id, project_id, category, title, content, confidence, created_at, updated_at, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
-      .run("embed-high", pid, "test", "High Confidence", "Content", 1.0, now, now, toBlob(new Float32Array([1, 0, 0])));
+      .run(
+        "embed-high",
+        pid,
+        "test",
+        "High Confidence",
+        "Content",
+        1.0,
+        now,
+        now,
+        toBlob(new Float32Array([1, 0, 0])),
+      );
 
     db()
       .query(
         "INSERT INTO knowledge (id, project_id, category, title, content, confidence, created_at, updated_at, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
-      .run("embed-low", pid, "test", "Low Confidence", "Content", 0.1, now, now, toBlob(new Float32Array([1, 0, 0])));
+      .run(
+        "embed-low",
+        pid,
+        "test",
+        "Low Confidence",
+        "Content",
+        0.1,
+        now,
+        now,
+        toBlob(new Float32Array([1, 0, 0])),
+      );
 
     const query = new Float32Array([1, 0, 0]);
     const results = vectorSearch(query, 10);
@@ -474,65 +569,86 @@ describe("LocalProvider integration", () => {
 
   test(
     "embed produces Float32Array vectors with 768 dimensions",
-    () => withLocalModel(async () => {
-      const { embed } = await import("../src/embedding");
-      const [vec] = await embed(["test query for embedding"], "query");
-      expect(vec).toBeInstanceOf(Float32Array);
-      expect(vec.length).toBe(768);
-      // Vector should not be all zeros
-      const norm = Array.from(vec).reduce((sum, v) => sum + v * v, 0);
-      expect(norm).toBeGreaterThan(0);
-    }),
+    () =>
+      withLocalModel(async () => {
+        const { embed } = await import("../src/embedding");
+        const [vec] = await embed(["test query for embedding"], "query");
+        expect(vec).toBeInstanceOf(Float32Array);
+        expect(vec.length).toBe(768);
+        // Vector should not be all zeros
+        const norm = Array.from(vec).reduce((sum, v) => sum + v * v, 0);
+        expect(norm).toBeGreaterThan(0);
+      }),
     60_000,
   );
 
   test(
     "query and document embeddings have reasonable similarity",
-    () => withLocalModel(async () => {
-      const { embed, cosineSimilarity } = await import("../src/embedding");
-      const [queryVec] = await embed(["database migration"], "query");
-      const [docVec] = await embed(["PostgreSQL database schema migration tool"], "document");
-      const [unrelatedVec] = await embed(["chocolate cake recipe with frosting"], "document");
+    () =>
+      withLocalModel(async () => {
+        const { embed, cosineSimilarity } = await import("../src/embedding");
+        const [queryVec] = await embed(["database migration"], "query");
+        const [docVec] = await embed(
+          ["PostgreSQL database schema migration tool"],
+          "document",
+        );
+        const [unrelatedVec] = await embed(
+          ["chocolate cake recipe with frosting"],
+          "document",
+        );
 
-      const relevantSim = cosineSimilarity(queryVec, docVec);
-      const unrelatedSim = cosineSimilarity(queryVec, unrelatedVec);
+        const relevantSim = cosineSimilarity(queryVec, docVec);
+        const unrelatedSim = cosineSimilarity(queryVec, unrelatedVec);
 
-      // Relevant doc should have higher similarity than unrelated
-      expect(relevantSim).toBeGreaterThan(unrelatedSim);
-    }),
+        // Relevant doc should have higher similarity than unrelated
+        expect(relevantSim).toBeGreaterThan(unrelatedSim);
+      }),
     60_000,
   );
 
   test(
     "vectorSearch returns results using local embeddings",
-    () => withLocalModel(async () => {
-      const { embed, toBlob, vectorSearch } = await import("../src/embedding");
-      const pid = ensureProject(PROJECT);
-      const now = Date.now();
+    () =>
+      withLocalModel(async () => {
+        const { embed, toBlob, vectorSearch } = await import(
+          "../src/embedding"
+        );
+        const pid = ensureProject(PROJECT);
+        const now = Date.now();
 
-      const texts = [
-        "PostgreSQL database migration",
-        "React server components",
-        "Kubernetes deployment strategy",
-      ];
-      const vecs = await embed(texts, "document");
+        const texts = [
+          "PostgreSQL database migration",
+          "React server components",
+          "Kubernetes deployment strategy",
+        ];
+        const vecs = await embed(texts, "document");
 
-      for (let i = 0; i < texts.length; i++) {
-        db()
-          .query(
-            "INSERT INTO knowledge (id, project_id, category, title, content, confidence, created_at, updated_at, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-          )
-          .run(`local-${i}`, pid, "test", `Entry ${i}`, texts[i], 1.0, now, now, toBlob(vecs[i]));
-      }
+        for (let i = 0; i < texts.length; i++) {
+          db()
+            .query(
+              "INSERT INTO knowledge (id, project_id, category, title, content, confidence, created_at, updated_at, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .run(
+              `local-${i}`,
+              pid,
+              "test",
+              `Entry ${i}`,
+              texts[i],
+              1.0,
+              now,
+              now,
+              toBlob(vecs[i]),
+            );
+        }
 
-      const [queryVec] = await embed(["database schema changes"], "query");
-      const results = vectorSearch(queryVec, 3);
+        const [queryVec] = await embed(["database schema changes"], "query");
+        const results = vectorSearch(queryVec, 3);
 
-      expect(results.length).toBe(3);
-      // The PostgreSQL entry should be most relevant
-      expect(results[0].id).toBe("local-0");
-      expect(results[0].similarity).toBeGreaterThan(0.3);
-    }),
+        expect(results.length).toBe(3);
+        // The PostgreSQL entry should be most relevant
+        expect(results[0].id).toBe("local-0");
+        expect(results[0].similarity).toBeGreaterThan(0.3);
+      }),
     60_000,
   );
 });
@@ -540,50 +656,56 @@ describe("LocalProvider integration", () => {
 describe("LocalProvider worker thread", () => {
   test(
     "embed produces Float32Array vectors with 768 dimensions through worker",
-    () => withLocalModel(async () => {
-      const [vec] = await embed(["test query via worker"], "query");
-      expect(vec).toBeInstanceOf(Float32Array);
-      expect(vec.length).toBe(768);
-      const norm = Array.from(vec).reduce((sum, v) => sum + v * v, 0);
-      expect(norm).toBeGreaterThan(0);
-    }),
+    () =>
+      withLocalModel(async () => {
+        const [vec] = await embed(["test query via worker"], "query");
+        expect(vec).toBeInstanceOf(Float32Array);
+        expect(vec.length).toBe(768);
+        const norm = Array.from(vec).reduce((sum, v) => sum + v * v, 0);
+        expect(norm).toBeGreaterThan(0);
+      }),
     60_000,
   );
 
   test(
     "concurrent embed() calls are serialized correctly",
-    () => withLocalModel(async () => {
-      const promises = Array.from({ length: 5 }, (_, i) =>
-        embed([`concurrent test ${i}`], "document"),
-      );
-      const results = await Promise.all(promises);
-      expect(results).toHaveLength(5);
-      for (const [vec] of results) {
-        expect(vec).toBeInstanceOf(Float32Array);
-        expect(vec.length).toBe(768);
-      }
-    }),
+    () =>
+      withLocalModel(async () => {
+        const promises = Array.from({ length: 5 }, (_, i) =>
+          embed([`concurrent test ${i}`], "document"),
+        );
+        const results = await Promise.all(promises);
+        expect(results).toHaveLength(5);
+        for (const [vec] of results) {
+          expect(vec).toBeInstanceOf(Float32Array);
+          expect(vec.length).toBe(768);
+        }
+      }),
     60_000,
   );
 
   test(
     "query embed interleaved with document batch resolves correctly",
-    () => withLocalModel(async () => {
-      const docPromise = embed(
-        Array.from({ length: 5 }, (_, i) => `document text ${i}`),
-        "document",
-      );
-      const queryPromise = embed(["urgent query"], "query");
+    () =>
+      withLocalModel(async () => {
+        const docPromise = embed(
+          Array.from({ length: 5 }, (_, i) => `document text ${i}`),
+          "document",
+        );
+        const queryPromise = embed(["urgent query"], "query");
 
-      const [docs, [queryVec]] = await Promise.all([docPromise, queryPromise]);
-      expect(docs).toHaveLength(5);
-      for (const vec of docs) {
-        expect(vec).toBeInstanceOf(Float32Array);
-        expect(vec.length).toBe(768);
-      }
-      expect(queryVec).toBeInstanceOf(Float32Array);
-      expect(queryVec.length).toBe(768);
-    }),
+        const [docs, [queryVec]] = await Promise.all([
+          docPromise,
+          queryPromise,
+        ]);
+        expect(docs).toHaveLength(5);
+        for (const vec of docs) {
+          expect(vec).toBeInstanceOf(Float32Array);
+          expect(vec.length).toBe(768);
+        }
+        expect(queryVec).toBeInstanceOf(Float32Array);
+        expect(queryVec.length).toBe(768);
+      }),
     60_000,
   );
 
@@ -629,7 +751,17 @@ describe("checkConfigChange", () => {
       .query(
         "INSERT INTO knowledge (id, project_id, category, title, content, confidence, created_at, updated_at, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
-      .run("cc-1", pid, "test", "Test", "Content", 1.0, now, now, toBlob(new Float32Array([1, 0, 0])));
+      .run(
+        "cc-1",
+        pid,
+        "test",
+        "Test",
+        "Content",
+        1.0,
+        now,
+        now,
+        toBlob(new Float32Array([1, 0, 0])),
+      );
 
     // Store a different fingerprint (simulating a previous config)
     db()

@@ -8,7 +8,11 @@
 import { readdirSync, readFileSync, statSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
-import type { AgentHistoryProvider, ConversationChunk, DetectedSession } from "../types";
+import type {
+  AgentHistoryProvider,
+  ConversationChunk,
+  DetectedSession,
+} from "../types";
 import { registerProvider } from "./index";
 
 // ---------------------------------------------------------------------------
@@ -40,7 +44,11 @@ type ContentBlock =
   | { type: "text"; text: string }
   | { type: "thinking"; thinking: string }
   | { type: "tool_use"; name: string; input: Record<string, unknown> }
-  | { type: "tool_result"; tool_use_id: string; content: string | ContentBlock[] }
+  | {
+      type: "tool_result";
+      tool_use_id: string;
+      content: string | ContentBlock[];
+    }
   | { type: string };
 
 // ---------------------------------------------------------------------------
@@ -77,9 +85,16 @@ function blockToText(block: ContentBlock): string | null {
     case "text":
       return (block as { type: "text"; text: string }).text;
     case "tool_use": {
-      const tu = block as { type: "tool_use"; name: string; input: Record<string, unknown> };
+      const tu = block as {
+        type: "tool_use";
+        name: string;
+        input: Record<string, unknown>;
+      };
       // Summarize tool input compactly
-      const inputSummary = truncate(JSON.stringify(tu.input), MAX_TOOL_OUTPUT_CHARS);
+      const inputSummary = truncate(
+        JSON.stringify(tu.input),
+        MAX_TOOL_OUTPUT_CHARS,
+      );
       return `[tool: ${tu.name}] ${inputSummary}`;
     }
     case "tool_result": {
@@ -93,7 +108,8 @@ function blockToText(block: ContentBlock): string | null {
       } else if (Array.isArray(tr.content)) {
         content = tr.content
           .map((b) => {
-            if (b.type === "text") return (b as { type: "text"; text: string }).text;
+            if (b.type === "text")
+              return (b as { type: "text"; text: string }).text;
             return "";
           })
           .filter(Boolean)
@@ -101,7 +117,9 @@ function blockToText(block: ContentBlock): string | null {
       } else {
         content = "";
       }
-      return content ? `[tool_result] ${truncate(content, MAX_TOOL_OUTPUT_CHARS)}` : null;
+      return content
+        ? `[tool_result] ${truncate(content, MAX_TOOL_OUTPUT_CHARS)}`
+        : null;
     }
     case "thinking":
       // Skip thinking/reasoning blocks entirely
@@ -156,9 +174,7 @@ function parseJSONL(filePath: string): ClaudeCodeLine[] {
  * Get metadata from a session file without reading the full contents.
  * Reads first and last few lines for timestamps and session ID.
  */
-function getSessionMetadata(
-  filePath: string,
-): {
+function getSessionMetadata(filePath: string): {
   sessionId: string;
   startedAt: number;
   lastActivityAt: number;
@@ -285,9 +301,10 @@ const claudeCodeProvider: AgentHistoryProvider = {
         const text = lineToText(line);
         if (!text) continue;
 
-        const ts = "timestamp" in line && line.timestamp
-          ? new Date(line.timestamp as string).getTime()
-          : Date.now();
+        const ts =
+          "timestamp" in line && line.timestamp
+            ? new Date(line.timestamp as string).getTime()
+            : Date.now();
 
         messages.push({ text, timestamp: ts });
       }

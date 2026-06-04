@@ -143,7 +143,9 @@ const config: EvalConfig = {
   baselines: parseBaselines(args.baselines || ""),
   recordDir: args.record ? resolve(args.record) : undefined,
   replayDir: args.replay ? resolve(args.replay) : undefined,
-  scenarios: args.scenarios ? args.scenarios.split(",").map((s) => s.trim()) : undefined,
+  scenarios: args.scenarios
+    ? args.scenarios.split(",").map((s) => s.trim())
+    : undefined,
   inflateTokens: args.inflate ? parseInt(args.inflate, 10) : undefined,
 };
 
@@ -157,8 +159,10 @@ console.log(`  Dimensions: ${config.dimensions.join(", ")}`);
 console.log(`  Baselines:  ${config.baselines.join(", ")}`);
 if (config.recordDir) console.log(`  Recording:  ${config.recordDir}`);
 if (config.replayDir) console.log(`  Replaying:  ${config.replayDir}`);
-if (config.scenarios) console.log(`  Scenarios:  ${config.scenarios.join(", ")}`);
-if (config.inflateTokens) console.log(`  Inflate:    ${config.inflateTokens.toLocaleString()} tokens`);
+if (config.scenarios)
+  console.log(`  Scenarios:  ${config.scenarios.join(", ")}`);
+if (config.inflateTokens)
+  console.log(`  Inflate:    ${config.inflateTokens.toLocaleString()} tokens`);
 console.log(`  Output:     ${config.outputPath}`);
 console.log(`  Model:      ${config.model}`);
 console.log("");

@@ -99,7 +99,9 @@ export function backoffMs(
 ): number {
   // Always honor Retry-After from server, but cap tighter for urgent calls
   if (retryAfterMs != null) {
-    const cap = urgent ? RETRY_AFTER_CAP_URGENT_MS : RETRY_AFTER_CAP_BACKGROUND_MS;
+    const cap = urgent
+      ? RETRY_AFTER_CAP_URGENT_MS
+      : RETRY_AFTER_CAP_BACKGROUND_MS;
     return Math.min(retryAfterMs, cap);
   }
 
@@ -197,9 +199,7 @@ function buildAnthropicWorkerRequest(
   // as the first system block with a cch=00000 placeholder that gets
   // signed after JSON serialization.
   const billingBlock =
-    cred.scheme === "bearer"
-      ? buildBillingBlock(sessionID, user)
-      : null;
+    cred.scheme === "bearer" ? buildBillingBlock(sessionID, user) : null;
 
   // System prompt caching for workers: send as block array with 1h TTL.
   // Worker calls come in bursts (distillation, curation) separated by
@@ -218,10 +218,7 @@ function buildAnthropicWorkerRequest(
 
   const systemPayload =
     billingBlock || systemBlocks.length > 0
-      ? [
-          ...(billingBlock ? [billingBlock] : []),
-          ...systemBlocks,
-        ]
+      ? [...(billingBlock ? [billingBlock] : []), ...systemBlocks]
       : undefined;
 
   let body = JSON.stringify({
@@ -291,7 +288,11 @@ function parseAnthropicResponse(data: {
   content?: Array<{ type: string; text?: string }>;
   model?: string;
   usage?: AnthropicUsage;
-}): { text: string | null; usage: AnthropicUsage | null; model: string | null } {
+}): {
+  text: string | null;
+  usage: AnthropicUsage | null;
+  model: string | null;
+} {
   const textBlock = data.content?.find(
     (b) => b.type === "text" && typeof b.text === "string",
   );
@@ -350,9 +351,24 @@ export function createGatewayLLMClient(
 
       // Build provider-specific request
       let req = isOpenAI
-        ? buildOpenAIWorkerRequest(target, cred, model, system, user, maxTokens, opts?.temperature)
+        ? buildOpenAIWorkerRequest(
+            target,
+            cred,
+            model,
+            system,
+            user,
+            maxTokens,
+            opts?.temperature,
+          )
         : buildAnthropicWorkerRequest(
-            target, cred, model, system, user, maxTokens, opts?.sessionID, opts?.temperature,
+            target,
+            cred,
+            model,
+            system,
+            user,
+            maxTokens,
+            opts?.sessionID,
+            opts?.temperature,
           );
 
       // Track this call so temporal capture can skip it
@@ -429,9 +445,19 @@ export function createGatewayLLMClient(
 
                 // Set usage attributes on the span
                 if (parsed.usage) {
-                  setGenAiUsageAttributes(span, parsed.usage, parsed.model ?? undefined);
+                  setGenAiUsageAttributes(
+                    span,
+                    parsed.usage,
+                    parsed.model ?? undefined,
+                  );
                   emitCostMetric(model.modelID, parsed.usage, "direct");
-                  recordWorkerCost(opts?.sessionID, model.modelID, parsed.usage, "direct", opts?.workerID);
+                  recordWorkerCost(
+                    opts?.sessionID,
+                    model.modelID,
+                    parsed.usage,
+                    "direct",
+                    opts?.workerID,
+                  );
                 }
 
                 // Enrich span with retry metadata on eventual success
@@ -461,16 +487,32 @@ export function createGatewayLLMClient(
 
                 // Re-resolve: credential may have been refreshed by a concurrent client request
                 const freshCred = getAuth(opts?.sessionID);
-                const credentialChanged = !!freshCred && freshCred.value !== cred.value;
+                const credentialChanged =
+                  !!freshCred && freshCred.value !== cred.value;
                 if (credentialChanged && attempt === 0) {
                   // Credential changed — rebuild request and retry once
                   log.info(
                     `worker auth error ${response.status}, credential refreshed — retrying: ${text.slice(0, 200)}`,
                   );
                   req = isOpenAI
-                    ? buildOpenAIWorkerRequest(target, freshCred, model, system, user, maxTokens, opts?.temperature)
+                    ? buildOpenAIWorkerRequest(
+                        target,
+                        freshCred,
+                        model,
+                        system,
+                        user,
+                        maxTokens,
+                        opts?.temperature,
+                      )
                     : buildAnthropicWorkerRequest(
-                        target, freshCred, model, system, user, maxTokens, opts?.sessionID, opts?.temperature,
+                        target,
+                        freshCred,
+                        model,
+                        system,
+                        user,
+                        maxTokens,
+                        opts?.sessionID,
+                        opts?.temperature,
                       );
                   retryCount++;
                   continue;
@@ -500,7 +542,10 @@ export function createGatewayLLMClient(
                     },
                   },
                 );
-                span.setStatus({ code: 2, message: `HTTP ${response.status} auth` });
+                span.setStatus({
+                  code: 2,
+                  message: `HTTP ${response.status} auth`,
+                });
                 return null;
               }
 
@@ -528,7 +573,12 @@ export function createGatewayLLMClient(
               const maxRetries = maxRetriesFor(response.status, urgent);
               if (attempt < maxRetries) {
                 const retryAfter = parseRetryAfter(response);
-                const delay = backoffMs(attempt, retryAfter, response.status, urgent);
+                const delay = backoffMs(
+                  attempt,
+                  retryAfter,
+                  response.status,
+                  urgent,
+                );
                 retryCount++;
                 totalDelayMs += delay;
                 if (retryAfter != null) lastRetryAfterMs = retryAfter;

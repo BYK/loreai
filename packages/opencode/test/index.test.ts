@@ -67,7 +67,10 @@ describe("LorePlugin config hook", () => {
       const cfg: Record<string, unknown> = {};
       await hooks.config!(cfg);
 
-      const agents = cfg.agent as Record<string, { hidden: boolean; description: string }>;
+      const agents = cfg.agent as Record<
+        string,
+        { hidden: boolean; description: string }
+      >;
       expect(agents["lore-distill"]).toEqual({
         hidden: true,
         description: "Lore memory distillation worker",
@@ -94,7 +97,10 @@ describe("LorePlugin config hook", () => {
       await hooks.config!(cfg);
 
       const agents = cfg.agent as Record<string, unknown>;
-      expect(agents["my-agent"]).toEqual({ hidden: false, description: "Custom" });
+      expect(agents["my-agent"]).toEqual({
+        hidden: false,
+        description: "Custom",
+      });
       expect(agents["lore-distill"]).toBeDefined();
     } finally {
       cleanup();

@@ -59,8 +59,7 @@ const CCH_REPLACEMENT = "cch=__;";
  * the base version (e.g. 2.1.37) is preserved so genuine
  * version upgrades still show as divergence.
  */
-const CC_VERSION_SUFFIX_PATTERN =
-  /(cc_version=\d+\.\d+\.\d+)\.[0-9a-f]{3};/g;
+const CC_VERSION_SUFFIX_PATTERN = /(cc_version=\d+\.\d+\.\d+)\.[0-9a-f]{3};/g;
 const CC_VERSION_SUFFIX_REPLACEMENT = "$1.___;";
 
 /**
@@ -387,9 +386,10 @@ export function analyzeCacheTurn(
     } else if (prevLength !== currLength) {
       // One is a prefix of the other — new content appended/removed
       divergencePoint = "<end>";
-      divergenceReason = currLength > prevLength
-        ? "new message appended (normal conversation growth)"
-        : "context window compressed (gradient eviction)";
+      divergenceReason =
+        currLength > prevLength
+          ? "new message appended (normal conversation growth)"
+          : "context window compressed (gradient eviction)";
     } else {
       // Identical bodies
       divergencePoint = "<identical>";
@@ -435,7 +435,11 @@ export function analyzeCacheTurn(
 
     // Warn on dramatic cache hit rate drops (e.g. 99% → 23%) to help
     // diagnose cache eviction or unexpected prefix divergence.
-    if (analytics.turnCount > 2 && prevHitRate > 0.5 && cacheHitRate < prevHitRate * 0.4) {
+    if (
+      analytics.turnCount > 2 &&
+      prevHitRate > 0.5 &&
+      cacheHitRate < prevHitRate * 0.4
+    ) {
       log.warn(
         `cache-analytics:${sidStr} dramatic hit rate drop:` +
           ` ${(prevHitRate * 100).toFixed(0)}% → ${(cacheHitRate * 100).toFixed(0)}%` +
@@ -454,14 +458,14 @@ export function analyzeCacheTurn(
 
 /** Cache event categories for telemetry. */
 export type CacheBustCause =
-  | "first-turn"       // session's first request (unavoidable)
-  | "system-change"    // divergence in system blocks (LTM update)
-  | "tools-change"     // tool definitions changed
-  | "prefix-rewrite"   // distilled prefix content changed (meta-distillation)
-  | "window-shift"     // raw window eviction changed message positions
-  | "idle-resume"      // first turn after idle detection (cold cache)
-  | "incremental"      // normal append (cache hit, write only new tail)
-  | "unknown";         // unclassified
+  | "first-turn" // session's first request (unavoidable)
+  | "system-change" // divergence in system blocks (LTM update)
+  | "tools-change" // tool definitions changed
+  | "prefix-rewrite" // distilled prefix content changed (meta-distillation)
+  | "window-shift" // raw window eviction changed message positions
+  | "idle-resume" // first turn after idle detection (cold cache)
+  | "incremental" // normal append (cache hit, write only new tail)
+  | "unknown"; // unclassified
 
 /**
  * Categorize a cache event from the turn analysis.
@@ -527,9 +531,10 @@ export function logCacheAnalyticsSummary(
 ): void {
   if (analytics.turnCount === 0) return;
 
-  const bustRate = analytics.turnCount > 1
-    ? analytics.bustCount / (analytics.turnCount - 1)
-    : 0;
+  const bustRate =
+    analytics.turnCount > 1
+      ? analytics.bustCount / (analytics.turnCount - 1)
+      : 0;
 
   log.info(
     `cache-analytics summary: session=${sessionID.slice(0, 16)}` +

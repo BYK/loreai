@@ -30,7 +30,10 @@ import type {
   LoreTextPart,
   LoreToolPart,
 } from "@loreai/core";
-import type { GatewayContentBlock, GatewayMessage } from "../src/translate/types";
+import type {
+  GatewayContentBlock,
+  GatewayMessage,
+} from "../src/translate/types";
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -169,7 +172,12 @@ describe("loreMessagesToGateway — tool_result reconstruction", () => {
       makeUserMsg("u1", [textPart("list files")]),
       makeAssistantMsg("a1", [
         textPart("I'll list the files."),
-        completedToolPart("bash", "toolu_1", { command: "ls" }, "file1.ts\nfile2.ts"),
+        completedToolPart(
+          "bash",
+          "toolu_1",
+          { command: "ls" },
+          "file1.ts\nfile2.ts",
+        ),
       ]),
       makeUserMsg("u2", [textPart("[tool results provided]")]),
     ];
@@ -181,7 +189,12 @@ describe("loreMessagesToGateway — tool_result reconstruction", () => {
     expect(result[1]!.content).toHaveLength(2);
     expect(result[1]!.content[0]!.type).toBe("text");
     expect(result[1]!.content[1]!.type).toBe("tool_use");
-    const toolUse = result[1]!.content[1]! as { type: "tool_use"; id: string; name: string; input: unknown };
+    const toolUse = result[1]!.content[1]! as {
+      type: "tool_use";
+      id: string;
+      name: string;
+      input: unknown;
+    };
     expect(toolUse.id).toBe("toolu_1");
     expect(toolUse.name).toBe("bash");
 
@@ -189,9 +202,15 @@ describe("loreMessagesToGateway — tool_result reconstruction", () => {
     expect(result[2]!.role).toBe("user");
     expect(result[2]!.content).toHaveLength(2);
     expect(result[2]!.content[0]!.type).toBe("tool_result");
-    const toolResult = result[2]!.content[0]! as { type: "tool_result"; toolUseId: string; content: GatewayContentBlock[] };
+    const toolResult = result[2]!.content[0]! as {
+      type: "tool_result";
+      toolUseId: string;
+      content: GatewayContentBlock[];
+    };
     expect(toolResult.toolUseId).toBe("toolu_1");
-    expect(toolResult.content).toEqual([{ type: "text", text: "file1.ts\nfile2.ts" }]);
+    expect(toolResult.content).toEqual([
+      { type: "text", text: "file1.ts\nfile2.ts" },
+    ]);
     expect(result[2]!.content[1]!.type).toBe("text");
   });
 
@@ -199,7 +218,12 @@ describe("loreMessagesToGateway — tool_result reconstruction", () => {
     const messages: LoreMessageWithParts[] = [
       makeUserMsg("u1", [textPart("run something")]),
       makeAssistantMsg("a1", [
-        errorToolPart("bash", "toolu_err", { command: "fail" }, "command not found"),
+        errorToolPart(
+          "bash",
+          "toolu_err",
+          { command: "fail" },
+          "command not found",
+        ),
       ]),
       makeUserMsg("u2", [textPart("[tool results provided]")]),
     ];
@@ -215,7 +239,9 @@ describe("loreMessagesToGateway — tool_result reconstruction", () => {
     };
     expect(toolResult.type).toBe("tool_result");
     expect(toolResult.toolUseId).toBe("toolu_err");
-    expect(toolResult.content).toEqual([{ type: "text", text: "command not found" }]);
+    expect(toolResult.content).toEqual([
+      { type: "text", text: "command not found" },
+    ]);
     expect(toolResult.isError).toBe(true);
   });
 
@@ -237,8 +263,14 @@ describe("loreMessagesToGateway — tool_result reconstruction", () => {
     expect(result[2]!.content[1]!.type).toBe("tool_result");
     expect(result[2]!.content[2]!.type).toBe("text");
 
-    const tr1 = result[2]!.content[0]! as { toolUseId: string; content: GatewayContentBlock[] };
-    const tr2 = result[2]!.content[1]! as { toolUseId: string; content: GatewayContentBlock[] };
+    const tr1 = result[2]!.content[0]! as {
+      toolUseId: string;
+      content: GatewayContentBlock[];
+    };
+    const tr2 = result[2]!.content[1]! as {
+      toolUseId: string;
+      content: GatewayContentBlock[];
+    };
     expect(tr1.toolUseId).toBe("toolu_a");
     expect(tr1.content).toEqual([{ type: "text", text: "file1" }]);
     expect(tr2.toolUseId).toBe("toolu_b");
@@ -423,9 +455,9 @@ describe("removeOrphanedToolResults", () => {
 
     expect(messages[1]!.content).toHaveLength(2);
     expect(messages[1]!.content[0]!.type).toBe("tool_result");
-    expect(
-      (messages[1]!.content[0]! as { toolUseId: string }).toolUseId,
-    ).toBe("toolu_match");
+    expect((messages[1]!.content[0]! as { toolUseId: string }).toolUseId).toBe(
+      "toolu_match",
+    );
     expect(messages[1]!.content[1]!.type).toBe("text");
   });
 
@@ -544,7 +576,9 @@ describe("end-to-end: gradient eviction doesn't produce orphaned tool_result", (
               .filter((b) => b.type === "tool_use")
               .map((b) => (b as { id: string }).id),
           );
-          expect(toolUseIds.has((block as { toolUseId: string }).toolUseId)).toBe(true);
+          expect(
+            toolUseIds.has((block as { toolUseId: string }).toolUseId),
+          ).toBe(true);
         }
       }
     }
@@ -612,12 +646,17 @@ test("BUG-006: OpenAI translator preserves tool_result as role:tool message", ()
     {
       role: "user",
       content: [
-        { type: "tool_result", toolUseId: "call_123", content: [{ type: "text", text: "the result" }] },
+        {
+          type: "tool_result",
+          toolUseId: "call_123",
+          content: [{ type: "text", text: "the result" }],
+        },
       ],
     },
   ]);
 
-  const body = buildOpenAIUpstreamRequest(req, "https://api.openai.com").body as { messages: any[] };
+  const body = buildOpenAIUpstreamRequest(req, "https://api.openai.com")
+    .body as { messages: any[] };
   const toolMsg = body.messages.find((m: any) => m.role === "tool");
   expect(toolMsg).toBeDefined();
   expect(toolMsg.tool_call_id).toBe("call_123");
@@ -629,13 +668,18 @@ test("BUG-006: mixed text + tool_result in same message emits both", () => {
     {
       role: "user",
       content: [
-        { type: "tool_result", toolUseId: "call_A", content: [{ type: "text", text: "result A" }] },
+        {
+          type: "tool_result",
+          toolUseId: "call_A",
+          content: [{ type: "text", text: "result A" }],
+        },
         { type: "text", text: "Please continue" },
       ],
     },
   ]);
 
-  const body = buildOpenAIUpstreamRequest(req, "https://api.openai.com").body as { messages: any[] };
+  const body = buildOpenAIUpstreamRequest(req, "https://api.openai.com")
+    .body as { messages: any[] };
   // Should have system + tool + user messages
   const toolMsg = body.messages.find((m: any) => m.role === "tool");
   const userMsg = body.messages.find((m: any) => m.role === "user");
@@ -650,14 +694,27 @@ test("BUG-006: multiple tool_results in one message are all preserved", () => {
     {
       role: "user",
       content: [
-        { type: "tool_result", toolUseId: "call_1", content: [{ type: "text", text: "result 1" }] },
-        { type: "tool_result", toolUseId: "call_2", content: [{ type: "text", text: "result 2" }] },
-        { type: "tool_result", toolUseId: "call_3", content: [{ type: "text", text: "" }] },
+        {
+          type: "tool_result",
+          toolUseId: "call_1",
+          content: [{ type: "text", text: "result 1" }],
+        },
+        {
+          type: "tool_result",
+          toolUseId: "call_2",
+          content: [{ type: "text", text: "result 2" }],
+        },
+        {
+          type: "tool_result",
+          toolUseId: "call_3",
+          content: [{ type: "text", text: "" }],
+        },
       ],
     },
   ]);
 
-  const body = buildOpenAIUpstreamRequest(req, "https://api.openai.com").body as { messages: any[] };
+  const body = buildOpenAIUpstreamRequest(req, "https://api.openai.com")
+    .body as { messages: any[] };
   const toolMsgs = body.messages.filter((m: any) => m.role === "tool");
   expect(toolMsgs).toHaveLength(3);
   expect(toolMsgs[0].tool_call_id).toBe("call_1");
@@ -711,21 +768,28 @@ describe("removeOrphanedToolResults — tool_use→tool_result (pass 2, #424)", 
       },
       {
         role: "assistant",
-        content: [
-          { type: "text", text: "distilled observations" },
-        ],
+        content: [{ type: "text", text: "distilled observations" }],
       },
       {
         role: "assistant",
         content: [
           { type: "text", text: "Let me read the file" },
-          { type: "tool_use", id: "toolu_eval_000010", name: "read", input: { path: "src/main.ts" } },
+          {
+            type: "tool_use",
+            id: "toolu_eval_000010",
+            name: "read",
+            input: { path: "src/main.ts" },
+          },
         ],
       },
       {
         role: "user",
         content: [
-          { type: "tool_result", toolUseId: "toolu_eval_000010", content: [{ type: "text", text: "file contents" }] },
+          {
+            type: "tool_result",
+            toolUseId: "toolu_eval_000010",
+            content: [{ type: "text", text: "file contents" }],
+          },
         ],
       },
     ];
@@ -760,7 +824,11 @@ describe("removeOrphanedToolResults — tool_use→tool_result (pass 2, #424)", 
         role: "user",
         content: [
           // Only has tool_result for toolu_001, not toolu_002
-          { type: "tool_result", toolUseId: "toolu_001", content: [{ type: "text", text: "result" }] },
+          {
+            type: "tool_result",
+            toolUseId: "toolu_001",
+            content: [{ type: "text", text: "result" }],
+          },
           { type: "text", text: "continue" },
         ],
       },
@@ -771,7 +839,9 @@ describe("removeOrphanedToolResults — tool_use→tool_result (pass 2, #424)", 
     const assistant = messages[1];
     // toolu_001 kept (has matching result), toolu_002 removed
     expect(assistant.content).toHaveLength(2); // text + toolu_001
-    const toolUseBlocks = assistant.content.filter((b) => b.type === "tool_use");
+    const toolUseBlocks = assistant.content.filter(
+      (b) => b.type === "tool_use",
+    );
     expect(toolUseBlocks).toHaveLength(1);
     expect((toolUseBlocks[0] as any).id).toBe("toolu_001");
   });
@@ -794,7 +864,11 @@ describe("removeOrphanedToolResults — tool_use→tool_result (pass 2, #424)", 
       {
         role: "user",
         content: [
-          { type: "tool_result", toolUseId: "toolu_001", content: [{ type: "text", text: "data" }] },
+          {
+            type: "tool_result",
+            toolUseId: "toolu_001",
+            content: [{ type: "text", text: "data" }],
+          },
         ],
       },
     ];
@@ -896,15 +970,25 @@ describe("end-to-end: inflated eval tool_use/tool_result through full pipeline (
       // User asks to do something (~300 tokens)
       gatewayMessages.push({
         role: "user",
-        content: [{ type: "text", text: `Implement feature ${i}: ${"x".repeat(900)}` }],
+        content: [
+          { type: "text", text: `Implement feature ${i}: ${"x".repeat(900)}` },
+        ],
       });
 
       // Assistant calls a tool (~700 tokens: text + tool input)
       gatewayMessages.push({
         role: "assistant",
         content: [
-          { type: "text", text: `I'll implement feature ${i}. ${"z".repeat(600)}` },
-          { type: "tool_use", id: toolId, name: "write", input: { path: `src/feature${i}.ts`, content: "x".repeat(1200) } },
+          {
+            type: "text",
+            text: `I'll implement feature ${i}. ${"z".repeat(600)}`,
+          },
+          {
+            type: "tool_use",
+            id: toolId,
+            name: "write",
+            input: { path: `src/feature${i}.ts`, content: "x".repeat(1200) },
+          },
         ],
       });
 
@@ -912,14 +996,28 @@ describe("end-to-end: inflated eval tool_use/tool_result through full pipeline (
       gatewayMessages.push({
         role: "user",
         content: [
-          { type: "tool_result", toolUseId: toolId, content: [{ type: "text", text: `Wrote src/feature${i}.ts successfully. ${"w".repeat(800)}` }] },
+          {
+            type: "tool_result",
+            toolUseId: toolId,
+            content: [
+              {
+                type: "text",
+                text: `Wrote src/feature${i}.ts successfully. ${"w".repeat(800)}`,
+              },
+            ],
+          },
         ],
       });
 
       // Assistant summarizes (~300 tokens)
       gatewayMessages.push({
         role: "assistant",
-        content: [{ type: "text", text: `Feature ${i} implemented successfully. ${"y".repeat(900)}` }],
+        content: [
+          {
+            type: "text",
+            text: `Feature ${i} implemented successfully. ${"y".repeat(900)}`,
+          },
+        ],
       });
     }
 
@@ -958,7 +1056,9 @@ describe("end-to-end: inflated eval tool_use/tool_result through full pipeline (
 
     // A. No back-to-back same-role messages
     for (let i = 1; i < transformedMessages.length; i++) {
-      expect(transformedMessages[i].role).not.toBe(transformedMessages[i - 1].role);
+      expect(transformedMessages[i].role).not.toBe(
+        transformedMessages[i - 1].role,
+      );
     }
 
     // B. First message must be user

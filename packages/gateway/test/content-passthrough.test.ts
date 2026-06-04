@@ -83,13 +83,17 @@ describe("Anthropic lossless content passthrough", () => {
 
     // Round-trip: build should re-emit the original block verbatim
     const { body: built } = buildAnthropicRequest(req);
-    const builtMessages = (built as Record<string, unknown>)
-      .messages as Array<Record<string, unknown>>;
+    const builtMessages = (built as Record<string, unknown>).messages as Array<
+      Record<string, unknown>
+    >;
     const builtContent = builtMessages[0].content as Array<
       Record<string, unknown>
     >;
     expect(builtContent).toHaveLength(2);
-    expect(builtContent[0]).toEqual({ type: "text", text: "What's in this image?" });
+    expect(builtContent[0]).toEqual({
+      type: "text",
+      text: "What's in this image?",
+    });
     expect(builtContent[1]).toEqual(IMAGE_BLOCK);
   });
 
@@ -140,8 +144,9 @@ describe("Anthropic lossless content passthrough", () => {
 
     // Round-trip: build should re-emit the image inside tool_result
     const { body: built } = buildAnthropicRequest(req);
-    const builtMessages = (built as Record<string, unknown>)
-      .messages as Array<Record<string, unknown>>;
+    const builtMessages = (built as Record<string, unknown>).messages as Array<
+      Record<string, unknown>
+    >;
     const builtToolResult = (
       builtMessages[1].content as Array<Record<string, unknown>>
     )[0];
@@ -190,8 +195,9 @@ describe("Anthropic lossless content passthrough", () => {
     }
 
     const { body: built } = buildAnthropicRequest(req);
-    const builtMessages = (built as Record<string, unknown>)
-      .messages as Array<Record<string, unknown>>;
+    const builtMessages = (built as Record<string, unknown>).messages as Array<
+      Record<string, unknown>
+    >;
     const builtToolResult = (
       builtMessages[1].content as Array<Record<string, unknown>>
     )[0];
@@ -237,8 +243,9 @@ describe("Anthropic lossless content passthrough", () => {
     }
 
     const { body: built } = buildAnthropicRequest(req);
-    const builtMessages = (built as Record<string, unknown>)
-      .messages as Array<Record<string, unknown>>;
+    const builtMessages = (built as Record<string, unknown>).messages as Array<
+      Record<string, unknown>
+    >;
     const builtToolResult = (
       builtMessages[1].content as Array<Record<string, unknown>>
     )[0];
@@ -282,8 +289,9 @@ describe("Anthropic lossless content passthrough", () => {
     }
 
     const { body: built } = buildAnthropicRequest(req);
-    const builtMessages = (built as Record<string, unknown>)
-      .messages as Array<Record<string, unknown>>;
+    const builtMessages = (built as Record<string, unknown>).messages as Array<
+      Record<string, unknown>
+    >;
     const builtToolResult = (
       builtMessages[1].content as Array<Record<string, unknown>>
     )[0];
@@ -313,8 +321,9 @@ describe("Anthropic lossless content passthrough", () => {
     }
 
     const { body: built } = buildAnthropicRequest(req);
-    const builtMessages = (built as Record<string, unknown>)
-      .messages as Array<Record<string, unknown>>;
+    const builtMessages = (built as Record<string, unknown>).messages as Array<
+      Record<string, unknown>
+    >;
     const builtContent = builtMessages[0].content as Array<
       Record<string, unknown>
     >;

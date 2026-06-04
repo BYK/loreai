@@ -211,7 +211,7 @@ const MAX_THROTTLE_DELAY = 60;
  * Budget fraction below which no throttling occurs, regardless of rate.
  * At 50% spend, no friction is applied even if the rate is high.
  */
-const THROTTLE_FLOOR = 0.50;
+const THROTTLE_FLOOR = 0.5;
 
 /**
  * Reset the daily spend counter if the UTC day has changed.
@@ -261,9 +261,11 @@ function updateCostRate(turnCost: number): void {
   // was spent, the old EMA is stale.
   // Reference interval = 1/30 hr ≈ 2 min (typical turn cadence).
   const referenceHours = 1 / 30;
-  const effectiveAlpha = 1 - Math.pow(1 - COST_RATE_ALPHA, elapsedHours / referenceHours);
+  const effectiveAlpha =
+    1 - Math.pow(1 - COST_RATE_ALPHA, elapsedHours / referenceHours);
 
-  costRateEMA = costRateEMA * (1 - effectiveAlpha) + instantRate * effectiveAlpha;
+  costRateEMA =
+    costRateEMA * (1 - effectiveAlpha) + instantRate * effectiveAlpha;
 }
 
 /**
@@ -294,7 +296,9 @@ export function bootstrapDailySpend(): void {
   }
 
   if (dailySpend > 0) {
-    log.info(`budget-throttle: bootstrapped daily spend=$${dailySpend.toFixed(4)} for ${todayStr}`);
+    log.info(
+      `budget-throttle: bootstrapped daily spend=$${dailySpend.toFixed(4)} for ${todayStr}`,
+    );
   }
 }
 
@@ -306,7 +310,10 @@ export function bootstrapDailySpend(): void {
  * at 16K tokens. Actual median is 1-4% — the estimate deliberately
  * overestimates to avoid budget overshoot.
  */
-export function estimateRequestCost(model: string, inputTokens: number): number {
+export function estimateRequestCost(
+  model: string,
+  inputTokens: number,
+): number {
   const pricing = getPricingSync(model);
   const inputCost = (inputTokens / 1_000_000) * pricing.input;
   // Conservative output estimate — 25% of input, capped at 16K tokens
@@ -384,14 +391,15 @@ function computeBudgetThrottleDelay(
   if (costRatePerHour <= targetRate) return 0;
 
   // Overshoot ratio: how much faster than sustainable (clamped to [0, 10])
-  const overshoot = Math.min((costRatePerHour / targetRate) - 1, 10);
+  const overshoot = Math.min(costRatePerHour / targetRate - 1, 10);
 
   // Budget pressure: maps [THROTTLE_FLOOR, 1.0] → [0, 1], squared for gentle ramp
   const pressure = (spendFraction - THROTTLE_FLOOR) / (1 - THROTTLE_FLOOR);
 
   // delay = MAX_THROTTLE_DELAY × pressure² × tanh(overshoot / 3)
   // tanh provides smooth S-curve: overshoot=1 → 0.32, 3 → 0.76, 10 → ~1.0
-  const delay = MAX_THROTTLE_DELAY * pressure * pressure * Math.tanh(overshoot / 3);
+  const delay =
+    MAX_THROTTLE_DELAY * pressure * pressure * Math.tanh(overshoot / 3);
 
   return Math.min(Math.round(delay * 10) / 10, MAX_THROTTLE_DELAY);
 }
@@ -589,14 +597,19 @@ export function computeCallCost(
   const pricing = getPricingSync(model);
   const batchMultiplier = callType === "batch" ? 0.5 : 1.0;
   // Anthropic doubles cache_write pricing for 1h TTL
-  const cacheWriteRate = ttl === "1h" ? pricing.cache_write * 2 : pricing.cache_write;
+  const cacheWriteRate =
+    ttl === "1h" ? pricing.cache_write * 2 : pricing.cache_write;
 
   const inputCost =
     ((usage.input_tokens ?? 0) / 1_000_000) * pricing.input * batchMultiplier;
   const cacheReadCost =
-    ((usage.cache_read_input_tokens ?? 0) / 1_000_000) * pricing.cache_read * batchMultiplier;
+    ((usage.cache_read_input_tokens ?? 0) / 1_000_000) *
+    pricing.cache_read *
+    batchMultiplier;
   const cacheWriteCost =
-    ((usage.cache_creation_input_tokens ?? 0) / 1_000_000) * cacheWriteRate * batchMultiplier;
+    ((usage.cache_creation_input_tokens ?? 0) / 1_000_000) *
+    cacheWriteRate *
+    batchMultiplier;
   const outputCost =
     ((usage.output_tokens ?? 0) / 1_000_000) * pricing.output * batchMultiplier;
 
@@ -699,7 +712,8 @@ export function recordWarmupCost(
   const pricing = getPricingSync(model);
   const readCost = (cacheReadTokens / 1_000_000) * pricing.cache_read;
   // Anthropic doubles cache_write pricing for 1h TTL
-  const cacheWriteRate = ttl === "1h" ? pricing.cache_write * 2 : pricing.cache_write;
+  const cacheWriteRate =
+    ttl === "1h" ? pricing.cache_write * 2 : pricing.cache_write;
   const writeCost = (cacheCreationTokens / 1_000_000) * cacheWriteRate;
   const warmupTotal = readCost + writeCost;
   costs.workers.warmup.cost += warmupTotal;
@@ -737,10 +751,12 @@ function estimateCompactionCost(
   const wPricing = getPricingSync(workerModel);
   // Force-distill: ~10K input, ~2K output
   const distillCost =
-    (10_000 / 1_000_000) * wPricing.input + (2_000 / 1_000_000) * wPricing.output;
+    (10_000 / 1_000_000) * wPricing.input +
+    (2_000 / 1_000_000) * wPricing.output;
   // Compaction LLM call: ~20K input, ~5K output
   const compactCost =
-    (20_000 / 1_000_000) * wPricing.input + (5_000 / 1_000_000) * wPricing.output;
+    (20_000 / 1_000_000) * wPricing.input +
+    (5_000 / 1_000_000) * wPricing.output;
 
   // Cache bust: post-compaction context (~POST_COMPACTION_CONTEXT tokens) must
   // be re-written to cache. The penalty is the difference between cache_write
@@ -749,7 +765,8 @@ function estimateCompactionCost(
   let cacheBustCost = 0;
   if (conversationModel) {
     const cPricing = getPricingSync(conversationModel);
-    const cacheWriteRate = ttl === "1h" ? cPricing.cache_write * 2 : cPricing.cache_write;
+    const cacheWriteRate =
+      ttl === "1h" ? cPricing.cache_write * 2 : cPricing.cache_write;
     cacheBustCost =
       (POST_COMPACTION_CONTEXT / 1_000_000) *
       (cacheWriteRate - cPricing.cache_read);
@@ -814,8 +831,11 @@ export function updateShadowContext(
 
   if (costs._shadowContextTokens > AUTOCOMPACT_THRESHOLD) {
     costs.counterfactual.avoidedCompactions++;
-    costs.counterfactual.avoidedCompactionCost +=
-      estimateCompactionCost(workerModel, conversationModel, ttl);
+    costs.counterfactual.avoidedCompactionCost += estimateCompactionCost(
+      workerModel,
+      conversationModel,
+      ttl,
+    );
     costs._shadowContextTokens = POST_COMPACTION_CONTEXT;
     log.info(
       `cost-tracker: shadow compaction #${costs.counterfactual.avoidedCompactions} ` +
@@ -843,7 +863,8 @@ export function recordWarmupHit(
   const costs = getOrCreate(sessionID);
   const pricing = getPricingSync(model);
   // Anthropic doubles cache_write pricing for 1h TTL
-  const cacheWriteRate = ttl === "1h" ? pricing.cache_write * 2 : pricing.cache_write;
+  const cacheWriteRate =
+    ttl === "1h" ? pricing.cache_write * 2 : pricing.cache_write;
   // Without warming, these reads would have been writes
   const savings =
     (cacheReadTokens / 1_000_000) * (cacheWriteRate - pricing.cache_read);
@@ -954,14 +975,17 @@ export function clearAllCosts(): void {
  * Extract model ID from a temporal message's metadata JSON.
  * Returns null if metadata is missing or unparseable.
  */
-function extractModelFromMetadata(metadata: string | null | undefined): string | null {
+function extractModelFromMetadata(
+  metadata: string | null | undefined,
+): string | null {
   if (!metadata) return null;
   try {
     const parsed = JSON.parse(metadata);
     // Assistant messages: { modelID, providerID, ... }
     if (parsed.modelID && parsed.modelID !== "unknown") return parsed.modelID;
     // User messages: { agent, model: { providerID, modelID } }
-    if (parsed.model?.modelID && parsed.model.modelID !== "unknown") return parsed.model.modelID;
+    if (parsed.model?.modelID && parsed.model.modelID !== "unknown")
+      return parsed.model.modelID;
     return null;
   } catch {
     return null;
@@ -981,14 +1005,17 @@ const DEFAULT_ESTIMATION_MODEL = "claude-sonnet-4-20250514";
  *    temporal messages chronologically. When the running total crosses the
  *    auto-compact threshold, counts a counterfactual compaction and resets.
  *
-  * Cache/TTL/warmup/batch savings are loaded from persisted session cost
-  * snapshots (saved on idle) when available.
+ * Cache/TTL/warmup/batch savings are loaded from persisted session cost
+ * snapshots (saved on idle) when available.
  *
  * Results are cached for 1 minute to avoid repeated DB scans.
  */
 export function computeHistoricalEstimates(): HistoricalEstimates {
   // Return cache if fresh
-  if (historicalCache && Date.now() - historicalCacheAt < HISTORICAL_CACHE_TTL_MS) {
+  if (
+    historicalCache &&
+    Date.now() - historicalCacheAt < HISTORICAL_CACHE_TTL_MS
+  ) {
     return historicalCache;
   }
 
@@ -1101,16 +1128,21 @@ export function computeHistoricalEstimates(): HistoricalEstimates {
           // (AUTOCOMPACT_THRESHOLD - POST_COMPACTION_CONTEXT) tokens thereafter.
           const stride = AUTOCOMPACT_THRESHOLD - POST_COMPACTION_CONTEXT;
           avoidedCompactions =
-            1 + Math.floor((sessionTokens - AUTOCOMPACT_THRESHOLD) / Math.max(stride, 1));
+            1 +
+            Math.floor(
+              (sessionTokens - AUTOCOMPACT_THRESHOLD) / Math.max(stride, 1),
+            );
         }
 
-        const sessionCompactionCost = avoidedCompactions * estimateCompactionCost(workerModelID, model);
+        const sessionCompactionCost =
+          avoidedCompactions * estimateCompactionCost(workerModelID, model);
 
         // --- 3. Look up persisted live-session cost data ---
         // Avoided compaction and worker cost totals are accumulated here
         // (not above) because persisted real data is preferred over simulation.
         const persisted = persistedCosts.get(sess.session_id);
-        let sessionPersisted: HistoricalEstimates["sessions"][number]["persisted"] = null;
+        let sessionPersisted: HistoricalEstimates["sessions"][number]["persisted"] =
+          null;
         if (persisted) {
           sessionPersisted = {
             conversationCost: persisted.conversationCost,
@@ -1168,8 +1200,10 @@ export function computeHistoricalEstimates(): HistoricalEstimates {
           distillationCalls: totalDistillCalls,
           distillationBatchCalls: sessionBatchCalls,
           distillationDirectCalls: sessionDirectCalls,
-          avoidedCompactions: persisted?.avoidedCompactions || avoidedCompactions,
-          avoidedCompactionCost: persisted?.avoidedCompactionCost || sessionCompactionCost,
+          avoidedCompactions:
+            persisted?.avoidedCompactions || avoidedCompactions,
+          avoidedCompactionCost:
+            persisted?.avoidedCompactionCost || sessionCompactionCost,
           model,
           persisted: sessionPersisted,
         });

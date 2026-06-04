@@ -81,8 +81,7 @@ function estimateTurnTokens(turns: ConversationTurn[]): number {
     const chars = t.content.reduce((s, p) => {
       if (p.type === "text") return s + p.text.length;
       if (p.type === "tool_result") return s + p.content.length;
-      if (p.type === "tool_use")
-        return s + JSON.stringify(p.input).length + 40;
+      if (p.type === "tool_use") return s + JSON.stringify(p.input).length + 40;
       return s;
     }, 0);
     return sum + Math.max(50, Math.ceil(chars / CHARS_PER_TOKEN));
@@ -96,8 +95,7 @@ function stampTokens(turns: ConversationTurn[]): ConversationTurn[] {
     const chars = t.content.reduce((s, p) => {
       if (p.type === "text") return s + p.text.length;
       if (p.type === "tool_result") return s + p.content.length;
-      if (p.type === "tool_use")
-        return s + JSON.stringify(p.input).length + 40;
+      if (p.type === "tool_use") return s + JSON.stringify(p.input).length + 40;
       return s;
     }, 0);
     return { ...t, tokens: Math.max(50, Math.ceil(chars / CHARS_PER_TOKEN)) };
@@ -143,8 +141,7 @@ function assistantToolUse(
   const parts: ConversationTurn["content"] = [];
   if (preamble) parts.push({ type: "text", text: preamble });
   parts.push({ type: "tool_use", id, name, input });
-  const chars =
-    (preamble?.length ?? 0) + JSON.stringify(input).length + 40;
+  const chars = (preamble?.length ?? 0) + JSON.stringify(input).length + 40;
   return {
     id,
     turn: {
@@ -980,9 +977,7 @@ const testCoverageReport: FillerTemplate = (topic) => {
     command: `npx vitest run tests/${topic}/ --coverage --reporter=verbose`,
   });
   return [
-    userText(
-      `Run the full test suite for ${topic} with coverage.`,
-    ),
+    userText(`Run the full test suite for ${topic} with coverage.`),
     t1.turn,
     userToolResult(
       t1.id,
@@ -1136,10 +1131,7 @@ tests/${topic}/service.test.ts:14:  const svc = new ${oldName}(config);
 tests/${topic}/service.test.ts:31:  const svc = new ${oldName}(config);`,
     ),
     t2.turn,
-    userToolResult(
-      t2.id,
-      `(no output — files modified)`,
-    ),
+    userToolResult(t2.id, `(no output — files modified)`),
     assistantText(
       `Renamed \`${oldName}\` → \`${newName}\` across 3 files (8 occurrences):\n` +
         `- \`index.ts\`: export name + type export\n` +
@@ -1621,7 +1613,14 @@ const FILLER_TEMPLATES: FillerEntry[] = [
   // Feature (4)
   {
     category: "feature",
-    keywords: ["service", "crud", "create", "endpoint", "validation", "notification"],
+    keywords: [
+      "service",
+      "crud",
+      "create",
+      "endpoint",
+      "validation",
+      "notification",
+    ],
     generate: featureServiceEndpoint,
   },
   {
@@ -1636,7 +1635,15 @@ const FILLER_TEMPLATES: FillerEntry[] = [
   },
   {
     category: "feature",
-    keywords: ["worker", "queue", "bullmq", "redis", "job", "retry", "background"],
+    keywords: [
+      "worker",
+      "queue",
+      "bullmq",
+      "redis",
+      "job",
+      "retry",
+      "background",
+    ],
     generate: featureWorkerQueue,
   },
   // Test (4)
@@ -1694,7 +1701,14 @@ const FILLER_TEMPLATES: FillerEntry[] = [
   },
   {
     category: "debug",
-    keywords: ["connection", "pool", "database", "transaction", "503", "timeout"],
+    keywords: [
+      "connection",
+      "pool",
+      "database",
+      "transaction",
+      "503",
+      "timeout",
+    ],
     generate: debugConnectionPool,
   },
 ];
@@ -1721,16 +1735,82 @@ export function extractProtectedKeywords(
   scenario: ScenarioDefinition,
 ): Set<string> {
   const STOP_WORDS = new Set([
-    "the", "and", "for", "that", "this", "with", "from", "have", "has",
-    "was", "were", "been", "are", "its", "will", "would", "could",
-    "should", "can", "does", "did", "not", "but", "also", "about",
-    "what", "when", "where", "which", "how", "who", "why", "than",
-    "then", "into", "some", "any", "all", "each", "they", "them",
-    "their", "there", "here", "other", "more", "most", "very",
-    "just", "only", "even", "still", "after", "before", "between",
-    "through", "during", "use", "used", "using", "user", "code",
-    "file", "line", "test", "tests", "make", "like", "need",
-    "new", "see", "set", "get", "way", "let", "ask",
+    "the",
+    "and",
+    "for",
+    "that",
+    "this",
+    "with",
+    "from",
+    "have",
+    "has",
+    "was",
+    "were",
+    "been",
+    "are",
+    "its",
+    "will",
+    "would",
+    "could",
+    "should",
+    "can",
+    "does",
+    "did",
+    "not",
+    "but",
+    "also",
+    "about",
+    "what",
+    "when",
+    "where",
+    "which",
+    "how",
+    "who",
+    "why",
+    "than",
+    "then",
+    "into",
+    "some",
+    "any",
+    "all",
+    "each",
+    "they",
+    "them",
+    "their",
+    "there",
+    "here",
+    "other",
+    "more",
+    "most",
+    "very",
+    "just",
+    "only",
+    "even",
+    "still",
+    "after",
+    "before",
+    "between",
+    "through",
+    "during",
+    "use",
+    "used",
+    "using",
+    "user",
+    "code",
+    "file",
+    "line",
+    "test",
+    "tests",
+    "make",
+    "like",
+    "need",
+    "new",
+    "see",
+    "set",
+    "get",
+    "way",
+    "let",
+    "ask",
   ]);
 
   const words = new Set<string>();
@@ -1785,7 +1865,8 @@ export function generateFillerTurns(
   const usedTopics = new Set<string>();
 
   // Safety: cap iterations to prevent infinite loops
-  const maxIterations = Math.ceil(targetTokens / 100) + eligible.length * FILLER_TOPICS.length;
+  const maxIterations =
+    Math.ceil(targetTokens / 100) + eligible.length * FILLER_TOPICS.length;
   let iterations = 0;
 
   while (accumulatedTokens < targetTokens && iterations < maxIterations) {
@@ -1855,11 +1936,7 @@ export function inflateSession(
   if (fillerTokens <= 0) return session;
 
   const keyTurns = session.turns;
-  const fillerTurns = generateFillerTurns(
-    fillerTokens,
-    protectedKeywords,
-    rng,
-  );
+  const fillerTurns = generateFillerTurns(fillerTokens, protectedKeywords, rng);
 
   if (fillerTurns.length === 0) return session;
 
@@ -1911,7 +1988,8 @@ export function inflateSession(
       ...session.metadata,
       totalTokens,
       description:
-        session.metadata.description + ` [inflated: +${fillerTokens} tokens filler]`,
+        session.metadata.description +
+        ` [inflated: +${fillerTokens} tokens filler]`,
     },
   };
 }
@@ -1971,7 +2049,10 @@ export function inflateScenario(
 
   const inflatedSessions = scenario.sessions.map((session, i) => {
     // Proportional share, with a floor so every session gets some filler
-    const weight = totalWeight > 0 ? sessionWeights[i] / totalWeight : 1 / scenario.sessions.length;
+    const weight =
+      totalWeight > 0
+        ? sessionWeights[i] / totalWeight
+        : 1 / scenario.sessions.length;
     const sessionFillerTokens = Math.max(
       TARGET_FILLER_TOKENS, // at least one exchange worth
       Math.round(tokensNeeded * weight),

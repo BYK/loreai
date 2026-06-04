@@ -3,7 +3,11 @@
  * marker extraction, used by the lore-hermes plugin integration.
  */
 import { describe, test, expect } from "bun:test";
-import { extractSessionMarker, extractProjectMarker, stripContextMarkers } from "../src/pipeline";
+import {
+  extractSessionMarker,
+  extractProjectMarker,
+  stripContextMarkers,
+} from "../src/pipeline";
 import type { GatewayMessage } from "../src/translate/types";
 
 // ---------------------------------------------------------------------------
@@ -25,12 +29,19 @@ function userMsgMultiBlock(...texts: string[]): GatewayMessage {
   };
 }
 
-function userMsgWithToolResult(text: string, toolResult: string): GatewayMessage {
+function userMsgWithToolResult(
+  text: string,
+  toolResult: string,
+): GatewayMessage {
   return {
     role: "user",
     content: [
       { type: "text", text },
-      { type: "tool_result", toolUseId: "toolu_1", content: [{ type: "text", text: toolResult }] },
+      {
+        type: "tool_result",
+        toolUseId: "toolu_1",
+        content: [{ type: "text", text: toolResult }],
+      },
     ],
   };
 }
@@ -81,33 +92,24 @@ describe("extractSessionMarker", () => {
 
   test("extracts from multi-block content", () => {
     const msgs: GatewayMessage[] = [
-      userMsgMultiBlock(
-        "Do something",
-        "\n[lore:session-id=aabb11223344]",
-      ),
+      userMsgMultiBlock("Do something", "\n[lore:session-id=aabb11223344]"),
     ];
     expect(extractSessionMarker(msgs)).toBe("aabb11223344");
   });
 
   test("requires 8+ hex characters", () => {
-    const msgs: GatewayMessage[] = [
-      userMsg("[lore:session-id=abc]"),
-    ];
+    const msgs: GatewayMessage[] = [userMsg("[lore:session-id=abc]")];
     expect(extractSessionMarker(msgs)).toBeUndefined();
   });
 
   test("accepts up to 64 hex characters", () => {
     const long = "a".repeat(64);
-    const msgs: GatewayMessage[] = [
-      userMsg(`[lore:session-id=${long}]`),
-    ];
+    const msgs: GatewayMessage[] = [userMsg(`[lore:session-id=${long}]`)];
     expect(extractSessionMarker(msgs)).toBe(long);
   });
 
   test("rejects non-hex characters", () => {
-    const msgs: GatewayMessage[] = [
-      userMsg("[lore:session-id=ghijklmnopqr]"),
-    ];
+    const msgs: GatewayMessage[] = [userMsg("[lore:session-id=ghijklmnopqr]")];
     expect(extractSessionMarker(msgs)).toBeUndefined();
   });
 
@@ -135,9 +137,7 @@ describe("extractProjectMarker", () => {
   });
 
   test("returns undefined when no marker present", () => {
-    const msgs: GatewayMessage[] = [
-      userMsg("Hello"),
-    ];
+    const msgs: GatewayMessage[] = [userMsg("Hello")];
     expect(extractProjectMarker(msgs)).toBeUndefined();
   });
 
@@ -146,9 +146,7 @@ describe("extractProjectMarker", () => {
   });
 
   test("rejects relative paths", () => {
-    const msgs: GatewayMessage[] = [
-      userMsg("[lore:project=relative/path]"),
-    ];
+    const msgs: GatewayMessage[] = [userMsg("[lore:project=relative/path]")];
     expect(extractProjectMarker(msgs)).toBeUndefined();
   });
 
@@ -185,17 +183,16 @@ describe("extractProjectMarker", () => {
 
   test("extracts from multi-block content", () => {
     const msgs: GatewayMessage[] = [
-      userMsgMultiBlock(
-        "Do something",
-        "\n[lore:project=/home/user/project]",
-      ),
+      userMsgMultiBlock("Do something", "\n[lore:project=/home/user/project]"),
     ];
     expect(extractProjectMarker(msgs)).toBe("/home/user/project");
   });
 
   test("handles both markers in same message", () => {
     const msgs: GatewayMessage[] = [
-      userMsg("Query here\n[lore:session-id=abc123def456]\n[lore:project=/home/user/project]"),
+      userMsg(
+        "Query here\n[lore:session-id=abc123def456]\n[lore:project=/home/user/project]",
+      ),
     ];
     expect(extractProjectMarker(msgs)).toBe("/home/user/project");
     expect(extractSessionMarker(msgs)).toBe("abc123def456");
@@ -217,9 +214,7 @@ describe("extractProjectMarker", () => {
 
   test("rejects paths exceeding max length", () => {
     const longPath = "/home/" + "a".repeat(1020);
-    const msgs: GatewayMessage[] = [
-      userMsg(`[lore:project=${longPath}]`),
-    ];
+    const msgs: GatewayMessage[] = [userMsg(`[lore:project=${longPath}]`)];
     expect(extractProjectMarker(msgs)).toBeUndefined();
   });
 });
@@ -247,7 +242,9 @@ describe("stripContextMarkers", () => {
 
   test("removes both markers", () => {
     const msgs: GatewayMessage[] = [
-      userMsg("Query\n[lore:session-id=aabb11223344]\n[lore:project=/home/user/proj]"),
+      userMsg(
+        "Query\n[lore:session-id=aabb11223344]\n[lore:project=/home/user/proj]",
+      ),
     ];
     stripContextMarkers(msgs);
     expect(msgs[0].content[0]).toEqual({ type: "text", text: "Query" });
@@ -258,15 +255,18 @@ describe("stripContextMarkers", () => {
       assistantMsg("Response with [lore:session-id=abc123def456]"),
     ];
     stripContextMarkers(msgs);
-    expect((msgs[0].content[0] as { type: "text"; text: string }).text).toContain("[lore:session-id=");
+    expect(
+      (msgs[0].content[0] as { type: "text"; text: string }).text,
+    ).toContain("[lore:session-id=");
   });
 
   test("does not modify messages without markers", () => {
-    const msgs: GatewayMessage[] = [
-      userMsg("Just a normal message"),
-    ];
+    const msgs: GatewayMessage[] = [userMsg("Just a normal message")];
     stripContextMarkers(msgs);
-    expect(msgs[0].content[0]).toEqual({ type: "text", text: "Just a normal message" });
+    expect(msgs[0].content[0]).toEqual({
+      type: "text",
+      text: "Just a normal message",
+    });
   });
 
   test("handles multi-block content", () => {
@@ -275,7 +275,11 @@ describe("stripContextMarkers", () => {
     ];
     stripContextMarkers(msgs);
     // First block unchanged, second block stripped
-    expect((msgs[0].content[0] as { type: "text"; text: string }).text).toBe("Do something");
-    expect((msgs[0].content[1] as { type: "text"; text: string }).text).toBe("");
+    expect((msgs[0].content[0] as { type: "text"; text: string }).text).toBe(
+      "Do something",
+    );
+    expect((msgs[0].content[1] as { type: "text"; text: string }).text).toBe(
+      "",
+    );
   });
 });

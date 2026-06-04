@@ -266,11 +266,7 @@ describe("search", () => {
         },
       ]);
 
-      expect(fused.map((r) => r.item.id)).toEqual([
-        "first",
-        "second",
-        "third",
-      ]);
+      expect(fused.map((r) => r.item.id)).toEqual(["first", "second", "third"]);
     });
 
     test("custom k parameter changes scores", () => {
@@ -373,8 +369,14 @@ describe("search", () => {
   describe("exactTermMatchRank", () => {
     const items = [
       { id: "a", text: "Decided to use PostgreSQL for the main database" },
-      { id: "b", text: "CI pipeline runs on GitHub Actions with matrix builds" },
-      { id: "c", text: "PostgreSQL JSONB support enables flexible schema design" },
+      {
+        id: "b",
+        text: "CI pipeline runs on GitHub Actions with matrix builds",
+      },
+      {
+        id: "c",
+        text: "PostgreSQL JSONB support enables flexible schema design",
+      },
       { id: "d", text: "React frontend uses server components" },
     ];
     const getText = (item: (typeof items)[number]) => item.text;
@@ -389,7 +391,11 @@ describe("search", () => {
     });
 
     test("excludes items with zero matches", () => {
-      const ranked = exactTermMatchRank(items, getText, "Kubernetes deployment");
+      const ranked = exactTermMatchRank(
+        items,
+        getText,
+        "Kubernetes deployment",
+      );
       expect(ranked.length).toBe(0);
     });
 
@@ -404,7 +410,11 @@ describe("search", () => {
 
     test("filters stopwords from query", () => {
       // "the" and "with" are stopwords — only "React" should match
-      const ranked = exactTermMatchRank(items, getText, "the React with components");
+      const ranked = exactTermMatchRank(
+        items,
+        getText,
+        "the React with components",
+      );
       expect(ranked.length).toBe(1);
       expect(ranked[0].id).toBe("d");
     });
@@ -453,7 +463,9 @@ describe("search", () => {
     });
 
     test("filters stopwords", () => {
-      const terms = extractTopTerms("the database with the indexes from the table");
+      const terms = extractTopTerms(
+        "the database with the indexes from the table",
+      );
       expect(terms).toContain("database");
       expect(terms).toContain("indexes");
       expect(terms).toContain("table");
@@ -480,7 +492,8 @@ describe("search", () => {
     });
 
     test("respects limit parameter", () => {
-      const text = "alpha bravo charlie delta echo foxtrot golf hotel india juliet";
+      const text =
+        "alpha bravo charlie delta echo foxtrot golf hotel india juliet";
       const terms = extractTopTerms(text, 3);
       expect(terms.length).toBe(3);
     });

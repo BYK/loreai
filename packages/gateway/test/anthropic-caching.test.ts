@@ -18,9 +18,7 @@ import type { GatewayRequest } from "../src/translate/types";
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeRequest(
-  overrides: Partial<GatewayRequest> = {},
-): GatewayRequest {
+function makeRequest(overrides: Partial<GatewayRequest> = {}): GatewayRequest {
   return {
     protocol: "anthropic",
     model: "claude-sonnet-4-20250514",
@@ -230,9 +228,9 @@ describe("buildAnthropicRequest — conversation caching", () => {
     const lastMsg = messages[messages.length - 1]!;
     // Only the LAST block gets the breakpoint
     expect(lastMsg.content[0].cache_control).toBeUndefined();
-    expect(lastMsg.content[lastMsg.content.length - 1]!.cache_control).toEqual(
-      { type: "ephemeral" },
-    );
+    expect(lastMsg.content[lastMsg.content.length - 1]!.cache_control).toEqual({
+      type: "ephemeral",
+    });
   });
 
   test("no-op when messages array is empty", () => {
@@ -327,9 +325,7 @@ describe("buildAnthropicRequest — caching doesn't affect other fields", () => 
       systemTTL: "5m",
     });
     expect(headers["x-api-key"]).toBe("test-key");
-    expect(headers["anthropic-beta"]).toBe(
-      "extended-thinking-2025-04-30",
-    );
+    expect(headers["anthropic-beta"]).toBe("extended-thinking-2025-04-30");
   });
 });
 
@@ -353,7 +349,9 @@ describe("buildAnthropicRequest — LTM system block", () => {
 
     // Block 1: LTM — no cache_control
     expect(blocks[1].type).toBe("text");
-    expect(blocks[1].text).toBe("## Long-term Knowledge\n\n* entry one\n* entry two");
+    expect(blocks[1].text).toBe(
+      "## Long-term Knowledge\n\n* entry one\n* entry two",
+    );
     expect(blocks[1].cache_control).toBeUndefined();
   });
 
@@ -473,7 +471,9 @@ describe("buildAnthropicRequest — 3-block system prompt", () => {
       ltmSystem: "gotchas",
     });
     expect(typeof body.system).toBe("string");
-    expect(body.system).toBe("You are a helpful assistant.\n\nprefs\n\ngotchas");
+    expect(body.system).toBe(
+      "You are a helpful assistant.\n\nprefs\n\ngotchas",
+    );
   });
 
   test("no caching with only stable LTM concatenates correctly", () => {

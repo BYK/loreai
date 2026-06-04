@@ -620,8 +620,12 @@ function formatOneDistillation(d: {
   const meta = [
     `d:${d.id}`,
     lossy ? "lossy" : null,
-    sourceCount > 0 ? `${sourceCount} source${sourceCount > 1 ? "s" : ""}` : null,
-  ].filter(Boolean).join(" | ");
+    sourceCount > 0
+      ? `${sourceCount} source${sourceCount > 1 ? "s" : ""}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" | ");
   return `(${meta})\n${d.observations.trim()}`;
 }
 

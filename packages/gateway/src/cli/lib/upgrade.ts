@@ -97,7 +97,11 @@ export function getReleaseChannel(): ReleaseChannel {
       .trim();
     if (content === "nightly") {
       // Migrate file value to DB
-      try { setMeta(CHANNEL_META_KEY, "nightly"); } catch { /* best-effort */ }
+      try {
+        setMeta(CHANNEL_META_KEY, "nightly");
+      } catch {
+        /* best-effort */
+      }
       return "nightly";
     }
   } catch {
@@ -287,7 +291,10 @@ async function streamDecompressToFile(
   destPath: string,
 ): Promise<void> {
   const stream = body.pipeThrough(
-    new DecompressionStream("gzip") as unknown as TransformStream<Uint8Array, Uint8Array>,
+    new DecompressionStream("gzip") as unknown as TransformStream<
+      Uint8Array,
+      Uint8Array
+    >,
   );
   const writer = Bun.file(destPath).writer();
   try {

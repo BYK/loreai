@@ -37,7 +37,13 @@
  * Two oracle pairs eliminate all false positives (1-in-2^40 collision).
  */
 
-import { readFileSync, existsSync, mkdirSync, unlinkSync, writeFileSync } from "fs";
+import {
+  readFileSync,
+  existsSync,
+  mkdirSync,
+  unlinkSync,
+  writeFileSync,
+} from "fs";
 import { execSync } from "child_process";
 import { parseArgs } from "util";
 
@@ -101,7 +107,9 @@ if (args.apply) {
 }
 
 if (!args.version && !args.binary) {
-  console.error("Either --version or --binary is required. Use --help for usage.");
+  console.error(
+    "Either --version or --binary is required. Use --help for usage.",
+  );
   process.exit(1);
 }
 
@@ -156,7 +164,9 @@ async function generateOraclePairs(
       `\nOnly captured ${pairs.length} oracle pair(s). Need at least 2 to eliminate false positives.`,
     );
     if (pairs.length === 0) process.exit(1);
-    console.warn("WARNING: Proceeding with 1 pair — expect false positives (~11)");
+    console.warn(
+      "WARNING: Proceeding with 1 pair — expect false positives (~11)",
+    );
   }
 
   return pairs;
@@ -180,10 +190,7 @@ async function captureOnePair(
       if (!captured) {
         const cchMatch = body.match(/cch=([0-9a-f]{5})/);
         if (cchMatch) {
-          const placeholder = body.replace(
-            `cch=${cchMatch[1]}`,
-            "cch=00000",
-          );
+          const placeholder = body.replace(`cch=${cchMatch[1]}`, "cch=00000");
           captured = { body: placeholder, cch: cchMatch[1] };
         }
       }
@@ -202,23 +209,20 @@ async function captureOnePair(
   });
 
   try {
-    const proc = Bun.spawn(
-      [binaryPath, "--print", "--bare", "-p", prompt],
-      {
-        env: {
-          ...process.env,
-          HOME: `${tmpDir}/home`,
-          ANTHROPIC_API_KEY:
-            "sk-ant-api03-fakekey1234567890abcdef1234567890abcdef1234567890abcdef",
-          ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.port}`,
-          DISABLE_AUTOUPDATER: "1",
-          DISABLE_UPDATES: "1",
-        },
-        cwd: `${tmpDir}/workdir`,
-        stdout: "ignore",
-        stderr: "ignore",
+    const proc = Bun.spawn([binaryPath, "--print", "--bare", "-p", prompt], {
+      env: {
+        ...process.env,
+        HOME: `${tmpDir}/home`,
+        ANTHROPIC_API_KEY:
+          "sk-ant-api03-fakekey1234567890abcdef1234567890abcdef1234567890abcdef",
+        ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.port}`,
+        DISABLE_AUTOUPDATER: "1",
+        DISABLE_UPDATES: "1",
       },
-    );
+      cwd: `${tmpDir}/workdir`,
+      stdout: "ignore",
+      stderr: "ignore",
+    });
 
     // Wait up to 15s for the binary to make its request
     const timeout = setTimeout(() => proc.kill(), 15_000);
@@ -351,7 +355,7 @@ function obtainBinary(version?: string, binaryPath?: string): string {
 function testCandidate(seed: bigint, pairs: OraclePair[]): boolean {
   for (const pair of pairs) {
     const hash = Bun.hash.xxHash64(pair.body, seed);
-    const cch = (hash & 0xFFFFFn).toString(16).padStart(5, "0");
+    const cch = (hash & 0xfffffn).toString(16).padStart(5, "0");
     if (cch !== pair.cch) return false;
   }
   return true;
@@ -399,9 +403,7 @@ function scan(
 
   if (matches.length === 1 || pairs.length >= 2) {
     const m = matches[0];
-    console.log(
-      `\n✓ Found seed: 0x${m.seed.toString(16).padStart(16, "0")}`,
-    );
+    console.log(`\n✓ Found seed: 0x${m.seed.toString(16).padStart(16, "0")}`);
     return m.seed;
   }
 
@@ -437,15 +439,12 @@ function applySeed(
 
   // Normalize seed format
   const seed = seedHex.startsWith("0x") ? seedHex : `0x${seedHex}`;
-  const seedUpper = seed.replace(/0x/i, "0x").replace(
-    /[0-9a-f]+/i,
-    (m) => m.toUpperCase(),
-  );
+  const seedUpper = seed
+    .replace(/0x/i, "0x")
+    .replace(/[0-9a-f]+/i, (m) => m.toUpperCase());
 
-  const cchPath = new URL(
-    "../packages/gateway/src/cch.ts",
-    import.meta.url,
-  ).pathname;
+  const cchPath = new URL("../packages/gateway/src/cch.ts", import.meta.url)
+    .pathname;
 
   if (!existsSync(cchPath)) {
     console.error(`Cannot find cch.ts at: ${cchPath}`);
@@ -456,7 +455,9 @@ function applySeed(
 
   // Check if version already exists
   if (content.includes(`"${version}"`)) {
-    console.log(`Version ${version} already exists in VERSION_SEEDS. Updating...`);
+    console.log(
+      `Version ${version} already exists in VERSION_SEEDS. Updating...`,
+    );
     // Replace existing entry
     const entryRe = new RegExp(
       `"${version.replace(/\./g, "\\.")}":\\s*0x[0-9A-Fa-f]+n`,

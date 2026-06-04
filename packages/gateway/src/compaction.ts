@@ -123,10 +123,18 @@ export function scaleUsageForClient(usage: {
     input_tokens: Math.floor(usage.input_tokens * scale),
     output_tokens: Math.floor(usage.output_tokens * scale),
     ...(usage.cache_read_input_tokens != null
-      ? { cache_read_input_tokens: Math.floor(usage.cache_read_input_tokens * scale) }
+      ? {
+          cache_read_input_tokens: Math.floor(
+            usage.cache_read_input_tokens * scale,
+          ),
+        }
       : {}),
     ...(usage.cache_creation_input_tokens != null
-      ? { cache_creation_input_tokens: Math.floor(usage.cache_creation_input_tokens * scale) }
+      ? {
+          cache_creation_input_tokens: Math.floor(
+            usage.cache_creation_input_tokens * scale,
+          ),
+        }
       : {}),
   };
 }
@@ -177,7 +185,9 @@ export type CompactionDetection =
  * Detect whether a request is a compaction request and return the reason.
  * Used by the pipeline for logging; `isCompactionRequest` is the boolean wrapper.
  */
-export function detectCompactionRequest(req: GatewayRequest): CompactionDetection {
+export function detectCompactionRequest(
+  req: GatewayRequest,
+): CompactionDetection {
   // 1. System prompt check — strongest signal, sufficient alone
   const systemLower = req.system.toLowerCase();
   for (const pattern of COMPACTION_SYSTEM_PATTERNS) {
@@ -204,7 +214,11 @@ export function detectCompactionRequest(req: GatewayRequest): CompactionDetectio
       if (userText.includes(section)) matches++;
     }
     if (matches >= MIN_TEMPLATE_SECTION_MATCHES) {
-      return { detected: true, reason: "template-sections", matchCount: matches };
+      return {
+        detected: true,
+        reason: "template-sections",
+        matchCount: matches,
+      };
     }
   }
 
@@ -220,8 +234,7 @@ export function isCompactionRequest(req: GatewayRequest): boolean {
 // ---------------------------------------------------------------------------
 
 /** Regex to extract content from `<previous-summary>` block (dotAll). */
-const PREVIOUS_SUMMARY_RE =
-  /<previous-summary>\n(.*?)\n<\/previous-summary>/s;
+const PREVIOUS_SUMMARY_RE = /<previous-summary>\n(.*?)\n<\/previous-summary>/s;
 
 /**
  * Extract the content of a `<previous-summary>` block from the last user
@@ -252,7 +265,14 @@ const PRIMARY_AGENTS = new Set(["coder", "code"]);
  * Agent names known to be meta/housekeeping agents.
  * When `x-lore-agent` matches, the request is always passthrough.
  */
-const META_AGENTS = new Set(["title", "summary", "summarize", "categorize", "label", "classify"]);
+const META_AGENTS = new Set([
+  "title",
+  "summary",
+  "summarize",
+  "categorize",
+  "label",
+  "classify",
+]);
 
 // Heuristic scoring weights — each signal contributes independently.
 // Threshold of 8 preserves backward compat: the old 3-check AND scored 3+3+2 = 8.
@@ -319,7 +339,8 @@ export function isMetaRequest(req: GatewayRequest): boolean {
   if (req.tools.length <= META_MAX_TOOLS) score += SCORE_FEW_TOOLS;
   if (req.messages.length <= META_MAX_MESSAGES) score += SCORE_FEW_MESSAGES;
   if (req.system.length < META_MAX_SYSTEM_LENGTH) score += SCORE_SHORT_SYSTEM;
-  if (req.maxTokens > 0 && req.maxTokens <= META_MAX_TOKENS) score += SCORE_LOW_MAX_TOKENS;
+  if (req.maxTokens > 0 && req.maxTokens <= META_MAX_TOKENS)
+    score += SCORE_LOW_MAX_TOKENS;
 
   // Keyword check — only on short-ish system prompts to avoid false positives
   // from large prompts that mention "title" or "summary" in passing.
@@ -335,7 +356,6 @@ export function isMetaRequest(req: GatewayRequest): boolean {
 
   return score >= META_SCORE_THRESHOLD;
 }
-
 
 // ---------------------------------------------------------------------------
 // buildCompactionResponse

@@ -57,7 +57,8 @@ describe("binary mode (registration set)", () => {
 
   test("vendorRegistration returns the full record (for diagnostics)", () => {
     const reg = {
-      localModelPath: "/home/user/.lore/embeddings-vendored/v0.16.0-darwin-arm64",
+      localModelPath:
+        "/home/user/.lore/embeddings-vendored/v0.16.0-darwin-arm64",
       target: "darwin-arm64",
       version: "0.16.0",
     };

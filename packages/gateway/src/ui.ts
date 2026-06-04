@@ -92,7 +92,8 @@ function truncateText(text: string, maxChars: number): string {
   const truncated = text.slice(0, maxChars);
   // Try to break at last sentence boundary
   const sentenceEnd = truncated.search(/[.!?]\s[^.!?]*$/);
-  if (sentenceEnd > maxChars * 0.5) return truncated.slice(0, sentenceEnd + 1) + " ...";
+  if (sentenceEnd > maxChars * 0.5)
+    return truncated.slice(0, sentenceEnd + 1) + " ...";
   // Fall back to last whitespace
   const lastSpace = truncated.lastIndexOf(" ");
   if (lastSpace > maxChars * 0.5) return truncated.slice(0, lastSpace) + " ...";
@@ -154,7 +155,16 @@ function parseMessageChunks(content: string): MessageChunk[] {
  * User messages are right-aligned (blue), assistant messages left-aligned.
  * Tool calls and reasoning blocks are collapsible within the bubble.
  */
-function renderChatBubble(msg: { role: string; content: string; tokens: number; created_at: number; metadata: string }, index: number): string {
+function renderChatBubble(
+  msg: {
+    role: string;
+    content: string;
+    tokens: number;
+    created_at: number;
+    metadata: string;
+  },
+  index: number,
+): string {
   const isUser = msg.role === "user";
   const chunks = parseMessageChunks(msg.content);
   const meta = safeParseJSON(msg.metadata);
@@ -191,11 +201,17 @@ function renderChatBubble(msg: { role: string; content: string; tokens: number; 
   let metaLine = `<span class="bubble-time">${formatDate(msg.created_at)}</span>`;
   if (isUser) {
     const agent = meta?.agent;
-    if (agent && typeof agent === "string") metaLine = `<span class="bubble-agent">${esc(agent)}</span> &middot; ` + metaLine;
+    if (agent && typeof agent === "string")
+      metaLine =
+        `<span class="bubble-agent">${esc(agent)}</span> &middot; ` + metaLine;
   } else {
     const modelID = meta?.modelID;
-    if (modelID && typeof modelID === "string") metaLine = `<span class="bubble-model">${esc(modelID)}</span> &middot; ` + metaLine;
-    if (msg.tokens) metaLine += ` &middot; <span class="bubble-tokens">~${formatTokens(msg.tokens)} tokens</span>`;
+    if (modelID && typeof modelID === "string")
+      metaLine =
+        `<span class="bubble-model">${esc(modelID)}</span> &middot; ` +
+        metaLine;
+    if (msg.tokens)
+      metaLine += ` &middot; <span class="bubble-tokens">~${formatTokens(msg.tokens)} tokens</span>`;
   }
 
   const align = isUser ? "bubble-right" : "bubble-left";
@@ -236,12 +252,14 @@ function renderCostBar(opts: {
   detailRightHtml?: string;
 }): string {
   const pct = Math.max(0, Math.min(100, opts.percent));
-  const ghostHtml = opts.ghostPercent != null
-    ? `<div class="cost-bar-ghost" style="width:${Math.min(100, opts.ghostPercent).toFixed(1)}%"></div>`
-    : "";
-  const detailHtml = (opts.detailLeftHtml || opts.detailRightHtml)
-    ? `<div class="cost-bar-detail"><span>${opts.detailLeftHtml ?? ""}</span><span>${opts.detailRightHtml ?? ""}</span></div>`
-    : "";
+  const ghostHtml =
+    opts.ghostPercent != null
+      ? `<div class="cost-bar-ghost" style="width:${Math.min(100, opts.ghostPercent).toFixed(1)}%"></div>`
+      : "";
+  const detailHtml =
+    opts.detailLeftHtml || opts.detailRightHtml
+      ? `<div class="cost-bar-detail"><span>${opts.detailLeftHtml ?? ""}</span><span>${opts.detailRightHtml ?? ""}</span></div>`
+      : "";
   return `<div class="cost-bar-container">
     <div class="cost-bar-label"><span class="bar-title">${esc(opts.title)}</span><span class="bar-value">${esc(opts.value)}</span></div>
     <div class="cost-bar">${ghostHtml}<div class="cost-bar-fill ${opts.tint ?? "bar-blue"}" style="width:${pct.toFixed(1)}%"></div></div>
@@ -264,37 +282,51 @@ function renderCostSummary(sessionId: string): string {
   const savings = totalSavings(costs);
   const withoutLore = costWithoutLore(costs);
 
-  const totalInput = costs.conversation.inputTokens +
+  const totalInput =
+    costs.conversation.inputTokens +
     costs.conversation.cacheReadTokens +
     costs.conversation.cacheWriteTokens;
-  const cacheHitRate = totalInput > 0
-    ? (costs.conversation.cacheReadTokens / totalInput * 100).toFixed(0)
-    : "0";
+  const cacheHitRate =
+    totalInput > 0
+      ? ((costs.conversation.cacheReadTokens / totalInput) * 100).toFixed(0)
+      : "0";
 
-  const savingsPct = withoutLore > 0
-    ? (savings / withoutLore * 100).toFixed(0)
-    : "0";
+  const savingsPct =
+    withoutLore > 0 ? ((savings / withoutLore) * 100).toFixed(0) : "0";
 
   let html = `<div class="card" style="margin-bottom:1.5em">
     <h2 style="margin-top:0">Cost Intelligence</h2>`;
 
   // Spend composition bar: conversation vs overhead
   const spendTotal = costs.conversation.cost + workerCost;
-  const convPct = spendTotal > 0 ? (costs.conversation.cost / spendTotal) * 100 : 100;
+  const convPct =
+    spendTotal > 0 ? (costs.conversation.cost / spendTotal) * 100 : 100;
   const overheadParts: string[] = [];
-  if (costs.workers.distillation.cost > 0) overheadParts.push(`distill: ${formatUSD(costs.workers.distillation.cost)}`);
-  if (costs.workers.curation.cost > 0) overheadParts.push(`curate: ${formatUSD(costs.workers.curation.cost)}`);
-  if (costs.workers.compaction.cost > 0) overheadParts.push(`compact: ${formatUSD(costs.workers.compaction.cost)}`);
-  if (costs.workers.warmup.cost > 0) overheadParts.push(`warmup: ${formatUSD(costs.workers.warmup.cost)}`);
-  if (costs.workers.recall.cost > 0) overheadParts.push(`recall: ${formatUSD(costs.workers.recall.cost)}`);
-  const overheadDetail = overheadParts.length ? ` (${overheadParts.join(", ")})` : "";
+  if (costs.workers.distillation.cost > 0)
+    overheadParts.push(
+      `distill: ${formatUSD(costs.workers.distillation.cost)}`,
+    );
+  if (costs.workers.curation.cost > 0)
+    overheadParts.push(`curate: ${formatUSD(costs.workers.curation.cost)}`);
+  if (costs.workers.compaction.cost > 0)
+    overheadParts.push(`compact: ${formatUSD(costs.workers.compaction.cost)}`);
+  if (costs.workers.warmup.cost > 0)
+    overheadParts.push(`warmup: ${formatUSD(costs.workers.warmup.cost)}`);
+  if (costs.workers.recall.cost > 0)
+    overheadParts.push(`recall: ${formatUSD(costs.workers.recall.cost)}`);
+  const overheadDetail = overheadParts.length
+    ? ` (${overheadParts.join(", ")})`
+    : "";
   html += renderCostBar({
     title: "Your Spend",
     value: formatUSD(actual),
     percent: convPct,
     tint: "bar-green",
     detailLeftHtml: `Conversation: ${formatUSD(costs.conversation.cost)} (${costs.conversation.turns} turns)`,
-    detailRightHtml: workerCost > 0 ? `Overhead: ${formatUSD(workerCost)}${overheadDetail}` : "",
+    detailRightHtml:
+      workerCost > 0
+        ? `Overhead: ${formatUSD(workerCost)}${overheadDetail}`
+        : "",
   });
 
   // Cache hit rate bar
@@ -318,9 +350,10 @@ function renderCostSummary(sessionId: string): string {
       percent: actualPct,
       tint: savings >= 0 ? "bar-blue" : "bar-red",
       ghostPercent: 100,
-      detailLeftHtml: savings >= 0
-        ? `Saved: ${formatUSD(savings)} (${savingsPct}%)`
-        : `Net overhead: ${formatUSD(-savings)}`,
+      detailLeftHtml:
+        savings >= 0
+          ? `Saved: ${formatUSD(savings)} (${savingsPct}%)`
+          : `Net overhead: ${formatUSD(-savings)}`,
       detailRightHtml: "",
     });
   }
@@ -328,10 +361,20 @@ function renderCostSummary(sessionId: string): string {
   // Savings breakdown (compact)
   if (savings > 0) {
     const items: string[] = [];
-    if (costs.counterfactual.warmupSavings > 0) items.push(`Cache warming: ${formatUSD(costs.counterfactual.warmupSavings)} (${costs.counterfactual.warmupHits} hits)`);
-    if (costs.counterfactual.ttlSavings > 0) items.push(`1h TTL: ${formatUSD(costs.counterfactual.ttlSavings)} (${costs.counterfactual.ttlHits} turns)`);
-    if (costs.batchSavings > 0) items.push(`Batch API: ${formatUSD(costs.batchSavings)}`);
-    if (costs.counterfactual.avoidedCompactionCost > 0) items.push(`Avoided compactions: ${formatUSD(costs.counterfactual.avoidedCompactionCost)} (&times;${costs.counterfactual.avoidedCompactions})`);
+    if (costs.counterfactual.warmupSavings > 0)
+      items.push(
+        `Cache warming: ${formatUSD(costs.counterfactual.warmupSavings)} (${costs.counterfactual.warmupHits} hits)`,
+      );
+    if (costs.counterfactual.ttlSavings > 0)
+      items.push(
+        `1h TTL: ${formatUSD(costs.counterfactual.ttlSavings)} (${costs.counterfactual.ttlHits} turns)`,
+      );
+    if (costs.batchSavings > 0)
+      items.push(`Batch API: ${formatUSD(costs.batchSavings)}`);
+    if (costs.counterfactual.avoidedCompactionCost > 0)
+      items.push(
+        `Avoided compactions: ${formatUSD(costs.counterfactual.avoidedCompactionCost)} (&times;${costs.counterfactual.avoidedCompactions})`,
+      );
     if (items.length) {
       html += `<div style="margin-top:10px;font-size:0.85em;color:var(--fg2)">
         <strong style="color:#10b981">Savings breakdown:</strong> ${items.join(" &middot; ")}
@@ -1044,9 +1087,12 @@ function renderHistogram(opts: {
     html += `<div class="bin">`;
     html += `<span class="bin-label">${esc(label)}</span>`;
     html += `<span class="bin-bars">`;
-    if (gPct > 0) html += `<span class="bin-bar global" style="width:${gPct.toFixed(1)}%"></span>`;
-    if (sPct > 0) html += `<span class="bin-bar session" style="width:${sPct.toFixed(1)}%"></span>`;
-    if (bPct > 0) html += `<span class="bin-bar blended" style="width:${bPct.toFixed(1)}%"></span>`;
+    if (gPct > 0)
+      html += `<span class="bin-bar global" style="width:${gPct.toFixed(1)}%"></span>`;
+    if (sPct > 0)
+      html += `<span class="bin-bar session" style="width:${sPct.toFixed(1)}%"></span>`;
+    if (bPct > 0)
+      html += `<span class="bin-bar blended" style="width:${bPct.toFixed(1)}%"></span>`;
     html += `</span>`;
     html += `<span class="bin-pct">${displayPct}</span>`;
     if (marker) html += `<span class="bin-ttl-marker">${esc(marker)}</span>`;
@@ -1057,8 +1103,14 @@ function renderHistogram(opts: {
 
   // Legend
   const layers: string[] = [];
-  if (opts.session) layers.push(`<span class="leg-session">Session (${opts.session.total} obs)</span>`);
-  if (opts.global) layers.push(`<span class="leg-global">Global (${opts.global.total} obs)</span>`);
+  if (opts.session)
+    layers.push(
+      `<span class="leg-session">Session (${opts.session.total} obs)</span>`,
+    );
+  if (opts.global)
+    layers.push(
+      `<span class="leg-global">Global (${opts.global.total} obs)</span>`,
+    );
   if (opts.blended) layers.push(`<span class="leg-blended">Blended</span>`);
   if (layers.length > 1) {
     html += `<div class="histogram-legend">${layers.join("")}</div>`;
@@ -1071,8 +1123,7 @@ function renderHistogram(opts: {
 function warmingStatusBadge(snap: WarmingSnapshot): string {
   if (snap.circuitBreaker.tripped)
     return `<span class="badge badge-dead">TRIPPED</span>`;
-  if (snap.disabled)
-    return `<span class="badge badge-stopped">stopped</span>`;
+  if (snap.disabled) return `<span class="badge badge-stopped">stopped</span>`;
   if (snap.toolCallActive)
     return `<span class="badge badge-toolcall">tool call</span>`;
   if (snap.forceKeepWarm)
@@ -1085,14 +1136,25 @@ function warmingStatusBadge(snap: WarmingSnapshot): string {
 /** Render warming mode toggle buttons (auto/keep/stop) for a live session. */
 function warmingModeControls(sessionId: string, snap: WarmingSnapshot): string {
   const modes: Array<{ mode: string; label: string; active: boolean }> = [
-    { mode: "auto", label: "Auto", active: !snap.disabled && !snap.forceKeepWarm },
-    { mode: "keep", label: "Keep", active: snap.forceKeepWarm && !snap.disabled },
+    {
+      mode: "auto",
+      label: "Auto",
+      active: !snap.disabled && !snap.forceKeepWarm,
+    },
+    {
+      mode: "keep",
+      label: "Keep",
+      active: snap.forceKeepWarm && !snap.disabled,
+    },
     { mode: "stop", label: "Stop", active: snap.disabled },
   ];
-  return `<span class="warming-controls">${modes.map(m =>
-    `<form class="inline" method="POST" action="/ui/api/warming/${esc(sessionId)}/${m.mode}">` +
-    `<button type="submit" class="btn-sm${m.active ? " btn-active" : ""}">${m.label}</button></form>`,
-  ).join("")}</span>`;
+  return `<span class="warming-controls">${modes
+    .map(
+      (m) =>
+        `<form class="inline" method="POST" action="/ui/api/warming/${esc(sessionId)}/${m.mode}">` +
+        `<button type="submit" class="btn-sm${m.active ? " btn-active" : ""}">${m.label}</button></form>`,
+    )
+    .join("")}</span>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1133,12 +1195,18 @@ type LiveSessionRow = {
  */
 function buildLiveSessionRows(
   allCosts: ReadonlyMap<string, SessionCosts>,
-  activeSessions: ReadonlyMap<string, Pick<SessionState, "projectPath" | "isSubagent" | "parentSessionId">>,
+  activeSessions: ReadonlyMap<
+    string,
+    Pick<SessionState, "projectPath" | "isSubagent" | "parentSessionId">
+  >,
   snapshots: ReadonlyMap<string, WarmingSnapshot>,
   dbParentMap?: ReadonlyMap<string, string>,
 ): LiveSessionRow[] {
   // Universe of session IDs from both sources
-  const allIds = new Set<string>([...allCosts.keys(), ...activeSessions.keys()]);
+  const allIds = new Set<string>([
+    ...allCosts.keys(),
+    ...activeSessions.keys(),
+  ]);
 
   // Merge parent-child info from live sessions and persisted DB state
   if (!dbParentMap) dbParentMap = loadParentChildMap();
@@ -1166,7 +1234,7 @@ function buildLiveSessionRows(
 
     // Determine parent from live state first, fall back to persisted DB
     const parentSid = sess?.parentSessionId ?? dbParentMap.get(sid) ?? null;
-    const isSub = sess?.isSubagent ?? (parentSid != null);
+    const isSub = sess?.isSubagent ?? parentSid != null;
 
     rowMap.set(sid, {
       sessionId: sid,
@@ -1221,7 +1289,10 @@ function buildLiveSessionRows(
 }
 
 /** Render a single session row (used for both root and child rows). */
-function renderSessionRow(r: LiveSessionRow, opts?: { isChild?: boolean; parentId?: string }): string {
+function renderSessionRow(
+  r: LiveSessionRow,
+  opts?: { isChild?: boolean; parentId?: string },
+): string {
   const isChild = opts?.isChild ?? false;
   const parentId = opts?.parentId;
 
@@ -1260,18 +1331,19 @@ function renderSessionRow(r: LiveSessionRow, opts?: { isChild?: boolean; parentI
     statusCell = "-";
   }
 
-  const hitsCell = r.warmingSnap
-    ? `${r.warmupHits}/${r.totalWarmups}`
-    : "-";
+  const hitsCell = r.warmingSnap ? `${r.warmupHits}/${r.totalWarmups}` : "-";
 
   const trAttrs = isChild
     ? ` class="subagent-row" data-parent="${esc(parentId ?? "")}"`
     : "";
 
   // Savings cell with background tint
-  const savingsBg = r.hasCosts && displaySavings !== 0
-    ? (displaySavings >= 0 ? "rgba(16,185,129,0.08)" : "rgba(239,68,68,0.08)")
-    : "transparent";
+  const savingsBg =
+    r.hasCosts && displaySavings !== 0
+      ? displaySavings >= 0
+        ? "rgba(16,185,129,0.08)"
+        : "rgba(239,68,68,0.08)"
+      : "transparent";
 
   // Cache hit cell with inline mini-bar
   const cacheHitCell = !Number.isNaN(r.cacheHitPct)
@@ -1301,7 +1373,11 @@ function renderSessionRow(r: LiveSessionRow, opts?: { isChild?: boolean; parentI
  * Root rows with sub-agent children show a collapsible toggle (▶/▼).
  * Children are hidden by default and shown on click.
  */
-function renderLiveSessionsTable(rows: LiveSessionRow[], emptyMessage?: string, tableId?: string): string {
+function renderLiveSessionsTable(
+  rows: LiveSessionRow[],
+  emptyMessage?: string,
+  tableId?: string,
+): string {
   if (rows.length === 0) {
     return `<p class="empty">${esc(emptyMessage ?? "No active sessions.")}</p>`;
   }
@@ -1323,7 +1399,10 @@ function renderLiveSessionsTable(rows: LiveSessionRow[], emptyMessage?: string, 
   // Recursively render a row and all its descendants
   function renderTree(row: LiveSessionRow, parentId?: string): void {
     const isChild = parentId != null;
-    html += renderSessionRow(row, isChild ? { isChild: true, parentId } : undefined);
+    html += renderSessionRow(
+      row,
+      isChild ? { isChild: true, parentId } : undefined,
+    );
     for (const child of row.children) {
       renderTree(child, row.sessionId);
     }
@@ -1352,19 +1431,25 @@ function pageDashboard(): string {
     liveSavings += totalSavings(c);
   }
   const hist = computeHistoricalEstimates().totals;
-  const histSavings = hist.warmupSavings + hist.ttlSavings + hist.batchSavings +
-    hist.avoidedCompactionCost - hist.totalWorkerCost;
+  const histSavings =
+    hist.warmupSavings +
+    hist.ttlSavings +
+    hist.batchSavings +
+    hist.avoidedCompactionCost -
+    hist.totalWorkerCost;
   const netSavings = liveSavings + histSavings;
 
   body += `<div class="stats">
     <div class="stat"><div class="label">Projects</div><div class="value">${stats.project_count}</div></div>
     <div class="stat"><div class="label">Knowledge</div><div class="value">${stats.knowledge_count}</div></div>
     <div class="stat"><div class="label">Sessions</div><div class="value">${allCosts.size}<span class="total">/${stats.session_count}</span></div></div>
-    ${netSavings > 0
-      ? `<div class="stat"><div class="label">Net Savings</div><div class="value" style="color:#10b981">${formatUSD(liveSavings)}<span class="total">/${formatUSD(netSavings)}</span></div></div>`
-      : netSavings < 0
-        ? `<div class="stat"><div class="label">Net Overhead</div><div class="value" style="color:#e06c75">${formatUSD(Math.abs(liveSavings))}<span class="total">/${formatUSD(Math.abs(netSavings))}</span></div></div>`
-        : ""}
+    ${
+      netSavings > 0
+        ? `<div class="stat"><div class="label">Net Savings</div><div class="value" style="color:#10b981">${formatUSD(liveSavings)}<span class="total">/${formatUSD(netSavings)}</span></div></div>`
+        : netSavings < 0
+          ? `<div class="stat"><div class="label">Net Overhead</div><div class="value" style="color:#e06c75">${formatUSD(Math.abs(liveSavings))}<span class="total">/${formatUSD(Math.abs(netSavings))}</span></div></div>`
+          : ""
+    }
   </div>`;
 
   if (!projects.length) {
@@ -1458,7 +1543,8 @@ function pageProject(projectId: string): string | null {
       }
     }
     const sessRoots = [...sessNodeMap.values()].filter(
-      (r) => !pMap.has(r.session_id) || !sessNodeMap.has(pMap.get(r.session_id)!),
+      (r) =>
+        !pMap.has(r.session_id) || !sessNodeMap.has(pMap.get(r.session_id)!),
     );
 
     body += `<table data-table-id="project-sessions">
@@ -1474,7 +1560,9 @@ function pageProject(projectId: string): string | null {
         ? `<span class="subagent-count">(+${s.children.length})</span>`
         : "";
       const prefix = isChild ? `<span style="opacity:0.4">\u21B3</span> ` : "";
-      const trAttrs = isChild ? ` class="subagent-row" data-parent="${esc(parentSid!)}"` : "";
+      const trAttrs = isChild
+        ? ` class="subagent-row" data-parent="${esc(parentSid!)}"`
+        : "";
       body += `<tr${trAttrs}>
         <td>${toggle}${prefix}<a href="/ui/sessions/${esc(projectId)}/${esc(s.session_id)}">${esc(s.session_id.slice(0, 12))}</a>${childCount}</td>
         <td>${s.message_count}</td>
@@ -1587,7 +1675,12 @@ function pageKnowledge(id: string): string | null {
     ...(isCrossOrGlobal
       ? [{ label: "Knowledge", href: "/ui/knowledge" }]
       : entry.project_id
-        ? [{ label: projName ?? "Project", href: `/ui/projects/${entry.project_id}` }]
+        ? [
+            {
+              label: projName ?? "Project",
+              href: `/ui/projects/${entry.project_id}`,
+            },
+          ]
         : []),
     { label: truncate(entry.title, 40) },
   ]);
@@ -1707,7 +1800,9 @@ function renderQuotaWindow(
     percent: pct,
     tint: quotaTint(pct),
     detailRightHtml:
-      window.resetsAt != null ? `Resets ${esc(formatDate(window.resetsAt))}` : "",
+      window.resetsAt != null
+        ? `Resets ${esc(formatDate(window.resetsAt))}`
+        : "",
   });
 }
 
@@ -1806,7 +1901,10 @@ function pageDistillation(id: string): string | null {
 
   let body = breadcrumb([
     { label: "Dashboard", href: "/ui" },
-    { label: projName ?? "Project", href: `/ui/projects/${esc(dist.project_id)}` },
+    {
+      label: projName ?? "Project",
+      href: `/ui/projects/${esc(dist.project_id)}`,
+    },
     { label: `Distillation` },
   ]);
 
@@ -1848,17 +1946,19 @@ function idLink(prefix: string, id: string): string {
 
 /** Format a single search result as a compact snippet with ID link. */
 function formatSearchResult(tagged: TaggedResult, score?: number): string {
-  const scoreStr = score != null
-    ? `<span class="score" title="RRF score">${score.toFixed(4)}</span>`
-    : "";
+  const scoreStr =
+    score != null
+      ? `<span class="score" title="RRF score">${score.toFixed(4)}</span>`
+      : "";
   switch (tagged.source) {
     case "knowledge":
     case "cross-knowledge": {
       const k = tagged.item;
       const prefix = tagged.source === "cross-knowledge" ? "xk" : "k";
-      const from = tagged.source === "cross-knowledge"
-        ? ` <span class="meta">from: ${esc(tagged.projectLabel)}</span>`
-        : "";
+      const from =
+        tagged.source === "cross-knowledge"
+          ? ` <span class="meta">from: ${esc(tagged.projectLabel)}</span>`
+          : "";
       return `<li class="result-item">
         ${scoreStr}${badge(k.category)}${from}
         <strong><a href="/ui/knowledge/${esc(k.id)}">${esc(k.title)}</a></strong>:
@@ -1899,7 +1999,11 @@ function formatSearchResult(tagged: TaggedResult, score?: number): string {
 async function pageSearch(url: URL): Promise<string> {
   const query = url.searchParams.get("q") ?? "";
   const projectFilter = url.searchParams.get("project") ?? "";
-  const scope = (url.searchParams.get("scope") ?? "all") as "all" | "session" | "project" | "knowledge";
+  const scope = (url.searchParams.get("scope") ?? "all") as
+    | "all"
+    | "session"
+    | "project"
+    | "knowledge";
 
   const projects = data.listProjects();
 
@@ -1937,38 +2041,45 @@ async function pageSearch(url: URL): Promise<string> {
         // Apply relevance floor: drop results below 15% of top score.
         const topScore = rawResults[0]?.score ?? 0;
         const floor = topScore * 0.15;
-        const results = topScore > 0
-          ? rawResults.filter((r) => r.score >= floor)
-          : rawResults;
+        const results =
+          topScore > 0
+            ? rawResults.filter((r) => r.score >= floor)
+            : rawResults;
 
         const displayed = results.slice(0, 30);
 
         if (!displayed.length) {
           body += `<p class="empty">No results found for this query.</p>`;
         } else {
-          const scoreRange = displayed.length > 1
-            ? `score: ${displayed[0].score.toFixed(4)}–${displayed[displayed.length - 1].score.toFixed(4)}`
-            : "";
+          const scoreRange =
+            displayed.length > 1
+              ? `score: ${displayed[0].score.toFixed(4)}–${displayed[displayed.length - 1].score.toFixed(4)}`
+              : "";
           body += `<p class="result-summary">Found ${rawResults.length} results, showing ${displayed.length}${scoreRange ? ` (${scoreRange})` : ""}.</p>`;
 
           // Group into tiers by relative score (same thresholds as recall)
           const strong = displayed.filter((r) => r.score >= topScore * 0.6);
-          const supporting = displayed.filter((r) => r.score >= topScore * 0.3 && r.score < topScore * 0.6);
+          const supporting = displayed.filter(
+            (r) => r.score >= topScore * 0.3 && r.score < topScore * 0.6,
+          );
           const peripheral = displayed.filter((r) => r.score < topScore * 0.3);
 
           if (strong.length) {
             body += `<h3>Strong Matches</h3><ul class="result-list">`;
-            for (const { item: tagged, score } of strong) body += formatSearchResult(tagged, score);
+            for (const { item: tagged, score } of strong)
+              body += formatSearchResult(tagged, score);
             body += `</ul>`;
           }
           if (supporting.length) {
             body += `<h3>Supporting</h3><ul class="result-list">`;
-            for (const { item: tagged, score } of supporting) body += formatSearchResult(tagged, score);
+            for (const { item: tagged, score } of supporting)
+              body += formatSearchResult(tagged, score);
             body += `</ul>`;
           }
           if (peripheral.length) {
             body += `<h3>Peripheral</h3><ul class="result-list">`;
-            for (const { item: tagged, score } of peripheral) body += formatSearchResult(tagged, score);
+            for (const { item: tagged, score } of peripheral)
+              body += formatSearchResult(tagged, score);
             body += `</ul>`;
           }
         }
@@ -1984,7 +2095,10 @@ async function pageSearch(url: URL): Promise<string> {
 /** Detail page for a search result by source-prefixed ID (e.g. k:019e..., d:019e...). */
 function pageSearchDetail(fullId: string): string | null {
   const result = recallById(fullId);
-  if (result.startsWith("No entry found") || result.startsWith("Unknown source")) {
+  if (
+    result.startsWith("No entry found") ||
+    result.startsWith("Unknown source")
+  ) {
     return null;
   }
 
@@ -1998,7 +2112,6 @@ function pageSearchDetail(fullId: string): string | null {
 
   return layout(`Detail: ${fullId}`, body);
 }
-
 
 // ---------------------------------------------------------------------------
 // Cache Warming page
@@ -2021,7 +2134,11 @@ function pageWarming(): string {
   }
 
   // Build unified rows (shared with Costs page)
-  const rows = buildLiveSessionRows(getAllSessionCosts(), activeSessions, snapshotMap);
+  const rows = buildLiveSessionRows(
+    getAllSessionCosts(),
+    activeSessions,
+    snapshotMap,
+  );
 
   // Aggregate stats from rows (consistent with table content).
   // Walk roots + children to count all sessions and warming stats.
@@ -2058,7 +2175,11 @@ function pageWarming(): string {
 
   // Circuit breaker detail (if non-zero failures or tripped)
   if (cbStatus.failures > 0 || cbStatus.tripped) {
-    const cls = cbStatus.tripped ? "cb-tripped" : cbStatus.failures > 1 ? "cb-warn" : "cb-ok";
+    const cls = cbStatus.tripped
+      ? "cb-tripped"
+      : cbStatus.failures > 1
+        ? "cb-warn"
+        : "cb-ok";
     const pct = (cbStatus.failures / cbStatus.maxFailures) * 100;
     body += `<div class="card ${cls}">
       <strong>Circuit Breaker:</strong> ${cbStatus.failures}/${cbStatus.maxFailures} uncached warmups
@@ -2069,7 +2190,11 @@ function pageWarming(): string {
 
   // Live sessions table (unified: cost + warming columns)
   body += `<h2>Live Sessions</h2>`;
-  body += renderLiveSessionsTable(rows, "No active sessions. Cache warming data appears when sessions are processed through the gateway.", "warming-live-sessions");
+  body += renderLiveSessionsTable(
+    rows,
+    "No active sessions. Cache warming data appears when sessions are processed through the gateway.",
+    "warming-live-sessions",
+  );
 
   // Global histograms
   const globalHists = getGlobalHistogramsSnapshot();
@@ -2149,7 +2274,10 @@ function pageCosts(): string {
     liveWarmupCost += c.workers.warmup.cost;
     liveRecallCost += c.workers.recall.cost;
     liveCacheReadTokens += c.conversation.cacheReadTokens;
-    liveTotalInputTokens += c.conversation.inputTokens + c.conversation.cacheReadTokens + c.conversation.cacheWriteTokens;
+    liveTotalInputTokens +=
+      c.conversation.inputTokens +
+      c.conversation.cacheReadTokens +
+      c.conversation.cacheWriteTokens;
   }
 
   // --- Historical (backdated) estimates ---
@@ -2160,23 +2288,30 @@ function pageCosts(): string {
   // Use totalWorkerCost (persisted real API data where available, heuristic
   // distillation estimate as fallback) instead of distillationCost alone.
   const combinedWorkerCost = liveTotalWorker + hist.totalWorkerCost;
-  const combinedAvoidedCompactions = liveAvoidedCompactions + hist.avoidedCompactions;
-  const combinedAvoidedCompactionCost = liveAvoidedCompactionCost + hist.avoidedCompactionCost;
+  const combinedAvoidedCompactions =
+    liveAvoidedCompactions + hist.avoidedCompactions;
+  const combinedAvoidedCompactionCost =
+    liveAvoidedCompactionCost + hist.avoidedCompactionCost;
   const combinedWarmupSavings = liveWarmupSavings + hist.warmupSavings;
   const combinedTtlSavings = liveTtlSavings + hist.ttlSavings;
   const combinedBatchSavings = liveBatchSavings + hist.batchSavings;
   // Net savings = counterfactual savings - worker overhead
   const combinedNetSavings =
-    combinedWarmupSavings + combinedTtlSavings + combinedBatchSavings +
-    combinedAvoidedCompactionCost - combinedWorkerCost;
+    combinedWarmupSavings +
+    combinedTtlSavings +
+    combinedBatchSavings +
+    combinedAvoidedCompactionCost -
+    combinedWorkerCost;
   const combinedSessionCount = allCosts.size + hist.sessionCount;
-  const combinedTotalSpend = liveTotalSpend + hist.persistedConversationCost + hist.totalWorkerCost;
+  const combinedTotalSpend =
+    liveTotalSpend + hist.persistedConversationCost + hist.totalWorkerCost;
 
   // --- Savings hero stat ---
   const combinedCounterfactual = combinedTotalSpend + combinedNetSavings;
-  const savingsPctCombined = combinedCounterfactual > 0
-    ? (combinedNetSavings / combinedCounterfactual * 100).toFixed(0)
-    : "0";
+  const savingsPctCombined =
+    combinedCounterfactual > 0
+      ? ((combinedNetSavings / combinedCounterfactual) * 100).toFixed(0)
+      : "0";
   if (combinedNetSavings > 0) {
     body += `<div class="savings-hero">
       <div class="big-number" style="color:#10b981">${formatUSD(combinedNetSavings)} saved (${savingsPctCombined}%)</div>
@@ -2219,11 +2354,17 @@ function pageCosts(): string {
         title: `Budget (${date})`,
         value: `${formatUSD(spend)} / ${formatUSD(currentBudget)}`,
         percent: budgetPct,
-        tint: budgetPct < 60 ? "bar-green" : budgetPct < 85 ? "bar-amber" : "bar-red",
+        tint:
+          budgetPct < 60
+            ? "bar-green"
+            : budgetPct < 85
+              ? "bar-amber"
+              : "bar-red",
         detailLeftHtml: `Rate: ${formatUSD(rate)}/hr`,
-        detailRightHtml: totalThrottleEvents > 0
-          ? `Throttled: ${totalThrottleEvents} req, ${(totalThrottleDelayMs / 1000).toFixed(1)}s delay`
-          : "",
+        detailRightHtml:
+          totalThrottleEvents > 0
+            ? `Throttled: ${totalThrottleEvents} req, ${(totalThrottleDelayMs / 1000).toFixed(1)}s delay`
+            : "",
       });
     } else {
       body += `<p style="color:var(--fg2);margin:0 0 8px">No daily budget set. Configure one to automatically throttle spending.</p>`;
@@ -2252,12 +2393,18 @@ function pageCosts(): string {
   // Trend arrow: compare live savings rate vs historical average.
   // Both rates use the same formula: netSavings / counterfactual,
   // where counterfactual = actualSpend + netSavings.
-  const liveSavingsRate = liveTotalWithout > 0 ? liveTotalSavings / liveTotalWithout : 0;
-  const histNetSavings = hist.warmupSavings + hist.ttlSavings + hist.batchSavings +
-    hist.avoidedCompactionCost - hist.totalWorkerCost;
+  const liveSavingsRate =
+    liveTotalWithout > 0 ? liveTotalSavings / liveTotalWithout : 0;
+  const histNetSavings =
+    hist.warmupSavings +
+    hist.ttlSavings +
+    hist.batchSavings +
+    hist.avoidedCompactionCost -
+    hist.totalWorkerCost;
   const histActualSpend = hist.persistedConversationCost + hist.totalWorkerCost;
   const histWithoutLore = histActualSpend + histNetSavings;
-  const histSavingsRate = histWithoutLore > 0 ? histNetSavings / histWithoutLore : 0;
+  const histSavingsRate =
+    histWithoutLore > 0 ? histNetSavings / histWithoutLore : 0;
   let trendArrow = "";
   if (allCosts.size > 0 && hist.sessionCount > 0) {
     if (liveSavingsRate > histSavingsRate + 0.02) {
@@ -2305,14 +2452,22 @@ function pageCosts(): string {
 
     // Spend composition bar: conversation vs overhead
     const spendTotal = liveTotalConversation + liveTotalWorker;
-    const convPct = spendTotal > 0 ? (liveTotalConversation / spendTotal) * 100 : 100;
+    const convPct =
+      spendTotal > 0 ? (liveTotalConversation / spendTotal) * 100 : 100;
     const overheadParts: string[] = [];
-    if (liveDistillCost > 0) overheadParts.push(`distill: ${formatUSD(liveDistillCost)}`);
-    if (liveCurateCost > 0) overheadParts.push(`curate: ${formatUSD(liveCurateCost)}`);
-    if (liveCompactCost > 0) overheadParts.push(`compact: ${formatUSD(liveCompactCost)}`);
-    if (liveWarmupCost > 0) overheadParts.push(`warmup: ${formatUSD(liveWarmupCost)}`);
-    if (liveRecallCost > 0) overheadParts.push(`recall: ${formatUSD(liveRecallCost)}`);
-    const overheadDetail = overheadParts.length ? ` (${overheadParts.join(", ")})` : "";
+    if (liveDistillCost > 0)
+      overheadParts.push(`distill: ${formatUSD(liveDistillCost)}`);
+    if (liveCurateCost > 0)
+      overheadParts.push(`curate: ${formatUSD(liveCurateCost)}`);
+    if (liveCompactCost > 0)
+      overheadParts.push(`compact: ${formatUSD(liveCompactCost)}`);
+    if (liveWarmupCost > 0)
+      overheadParts.push(`warmup: ${formatUSD(liveWarmupCost)}`);
+    if (liveRecallCost > 0)
+      overheadParts.push(`recall: ${formatUSD(liveRecallCost)}`);
+    const overheadDetail = overheadParts.length
+      ? ` (${overheadParts.join(", ")})`
+      : "";
     body += renderCostBar({
       title: "Spend Composition",
       value: formatUSD(liveTotalSpend),
@@ -2331,21 +2486,24 @@ function pageCosts(): string {
         percent: actualPct,
         tint: liveTotalSavings >= 0 ? "bar-blue" : "bar-red",
         ghostPercent: 100,
-        detailLeftHtml: liveTotalSavings >= 0
-          ? `Saved: ${formatUSD(liveTotalSavings)}`
-          : `Overhead: ${formatUSD(-liveTotalSavings)}`,
-        detailRightHtml: liveTotalWithout > 0
-          ? liveTotalSavings >= 0
-            ? `${(100 - actualPct).toFixed(0)}% saved`
-            : `${(actualPct - 100).toFixed(0)}% overhead`
-          : "",
+        detailLeftHtml:
+          liveTotalSavings >= 0
+            ? `Saved: ${formatUSD(liveTotalSavings)}`
+            : `Overhead: ${formatUSD(-liveTotalSavings)}`,
+        detailRightHtml:
+          liveTotalWithout > 0
+            ? liveTotalSavings >= 0
+              ? `${(100 - actualPct).toFixed(0)}% saved`
+              : `${(actualPct - 100).toFixed(0)}% overhead`
+            : "",
       });
     }
 
     // Cache hit rate bar
-    const liveCacheHitPct = liveTotalInputTokens > 0
-      ? (liveCacheReadTokens / liveTotalInputTokens) * 100
-      : 0;
+    const liveCacheHitPct =
+      liveTotalInputTokens > 0
+        ? (liveCacheReadTokens / liveTotalInputTokens) * 100
+        : 0;
     if (liveTotalInputTokens > 0) {
       body += renderCostBar({
         title: "Cache Hit Rate",
@@ -2360,13 +2518,22 @@ function pageCosts(): string {
     // Savings breakdown (compact list)
     if (liveTotalSavings !== 0) {
       const savingsItems: string[] = [];
-      if (liveWarmupSavings > 0) savingsItems.push(`Cache warming: ${formatUSD(liveWarmupSavings)}`);
-      if (liveTtlSavings > 0) savingsItems.push(`1h TTL: ${formatUSD(liveTtlSavings)}`);
-      if (liveBatchSavings > 0) savingsItems.push(`Batch API: ${formatUSD(liveBatchSavings)}`);
-      if (liveAvoidedCompactionCost > 0) savingsItems.push(`Avoided compactions: ${formatUSD(liveAvoidedCompactionCost)} (&times;${liveAvoidedCompactions})`);
+      if (liveWarmupSavings > 0)
+        savingsItems.push(`Cache warming: ${formatUSD(liveWarmupSavings)}`);
+      if (liveTtlSavings > 0)
+        savingsItems.push(`1h TTL: ${formatUSD(liveTtlSavings)}`);
+      if (liveBatchSavings > 0)
+        savingsItems.push(`Batch API: ${formatUSD(liveBatchSavings)}`);
+      if (liveAvoidedCompactionCost > 0)
+        savingsItems.push(
+          `Avoided compactions: ${formatUSD(liveAvoidedCompactionCost)} (&times;${liveAvoidedCompactions})`,
+        );
       if (savingsItems.length) {
         const netLabel = liveTotalSavings >= 0 ? "Net savings" : "Net overhead";
-        const netValue = liveTotalSavings >= 0 ? formatUSD(liveTotalSavings) : formatUSD(Math.abs(liveTotalSavings));
+        const netValue =
+          liveTotalSavings >= 0
+            ? formatUSD(liveTotalSavings)
+            : formatUSD(Math.abs(liveTotalSavings));
         body += `<div style="margin-top:10px;font-size:0.85em;color:var(--fg2)">
           <strong style="color:${liveTotalSavings >= 0 ? "#10b981" : "#e06c75"}">${netLabel}: ${netValue}</strong>
           &mdash; ${savingsItems.join(" &middot; ")}
@@ -2402,7 +2569,12 @@ function pageCosts(): string {
   if (hist.sessionCount === 0) {
     body += `<p class="empty">No historical sessions found in the database.</p>`;
   } else {
-    const histNetSavings = hist.avoidedCompactionCost + hist.warmupSavings + hist.ttlSavings + hist.batchSavings - hist.totalWorkerCost;
+    const histNetSavings =
+      hist.avoidedCompactionCost +
+      hist.warmupSavings +
+      hist.ttlSavings +
+      hist.batchSavings -
+      hist.totalWorkerCost;
     body += `<div class="card">
       <table class="cost-table">`;
     if (hist.persistedConversationCost > 0) {
@@ -2456,7 +2628,9 @@ function pageCosts(): string {
     }
     // Root rows: not a child of any known parent in the set
     const histRoots = [...histRowMap.values()].filter(
-      (r) => !parentMap.has(r.sessionId) || !histRowMap.has(parentMap.get(r.sessionId)!),
+      (r) =>
+        !parentMap.has(r.sessionId) ||
+        !histRowMap.has(parentMap.get(r.sessionId)!),
     );
     for (const root of histRoots) histRollUp(root);
 
@@ -2470,19 +2644,25 @@ function pageCosts(): string {
     function renderHistRow(s: HistRow, parentSid?: string): void {
       const isChild = parentSid != null;
       const hasChildren = s.children.length > 0;
-      const toggle = hasChildren && !isChild
-        ? `<span class="toggle-btn" data-session-id="${esc(s.sessionId)}">\u25B6</span>`
-        : hasChildren
-        ? `<span class="toggle-btn" data-session-id="${esc(s.sessionId)}">\u25B6</span>`
-        : "";
+      const toggle =
+        hasChildren && !isChild
+          ? `<span class="toggle-btn" data-session-id="${esc(s.sessionId)}">\u25B6</span>`
+          : hasChildren
+            ? `<span class="toggle-btn" data-session-id="${esc(s.sessionId)}">\u25B6</span>`
+            : "";
       const childCount = hasChildren
         ? `<span class="subagent-count">(+${s.children.length})</span>`
         : "";
       const prefix = isChild ? `<span style="opacity:0.4">\u21B3</span> ` : "";
-      const trAttrs = isChild ? ` class="subagent-row" data-parent="${esc(parentSid!)}"` : "";
-      const displayCost = hasChildren ? s.rolledUpWorkerCost : (s.persisted?.workerCost ?? s.distillationCost);
+      const trAttrs = isChild
+        ? ` class="subagent-row" data-parent="${esc(parentSid!)}"`
+        : "";
+      const displayCost = hasChildren
+        ? s.rolledUpWorkerCost
+        : (s.persisted?.workerCost ?? s.distillationCost);
 
-      const savingsBg = s.avoidedCompactions > 0 ? "rgba(16,185,129,0.08)" : "transparent";
+      const savingsBg =
+        s.avoidedCompactions > 0 ? "rgba(16,185,129,0.08)" : "transparent";
       body += `<tr${trAttrs}>
         <td>${toggle}<a href="/ui/projects/${esc(s.projectId)}">${esc(s.projectName ?? "(unnamed)")}</a></td>
         <td>${prefix}<a href="/ui/sessions/${esc(s.projectId)}/${esc(s.sessionId)}"><code>${esc(s.sessionId.slice(0, 12))}</code></a>${childCount}</td>
@@ -2515,10 +2695,7 @@ function pageCosts(): string {
 
 type RouteParams = Record<string, string>;
 
-function matchRoute(
-  pathname: string,
-  pattern: string,
-): RouteParams | null {
+function matchRoute(pathname: string, pattern: string): RouteParams | null {
   const patternParts = pattern.split("/");
   const pathParts = pathname.split("/");
 
@@ -2560,7 +2737,9 @@ function pageEntities(): string {
   }
   body += `<div class="stats">
     <div class="stat"><div class="label">Total</div><div class="value">${all.length}</div></div>`;
-  for (const [type, count] of Object.entries(types).sort((a, b) => b[1] - a[1])) {
+  for (const [type, count] of Object.entries(types).sort(
+    (a, b) => b[1] - a[1],
+  )) {
     body += `<div class="stat"><div class="label">${esc(type)}</div><div class="value">${count}</div></div>`;
   }
   body += `</div>`;
@@ -2569,7 +2748,9 @@ function pageEntities(): string {
   const knowledgeCounts = new Map<string, number>();
   {
     const rows = db()
-      .query("SELECT entity_id, COUNT(*) as cnt FROM knowledge_entity_refs GROUP BY entity_id")
+      .query(
+        "SELECT entity_id, COUNT(*) as cnt FROM knowledge_entity_refs GROUP BY entity_id",
+      )
       .all() as Array<{ entity_id: string; cnt: number }>;
     for (const r of rows) knowledgeCounts.set(r.entity_id, r.cnt);
   }
@@ -2578,7 +2759,9 @@ function pageEntities(): string {
   <table data-table-id="entities">
     <tr><th data-sort="text">Type</th><th data-sort="text">Name</th><th data-sort="num">Aliases</th><th data-sort="num">Knowledge</th><th data-sort="text">Cross</th><th data-sort="date" data-default-sort="desc">Updated</th></tr>`;
   for (const e of all) {
-    const aliasCount = e.aliases.filter((a) => a.alias_value !== e.canonical_name).length;
+    const aliasCount = e.aliases.filter(
+      (a) => a.alias_value !== e.canonical_name,
+    ).length;
     const knowledgeCount = knowledgeCounts.get(e.id) ?? 0;
     body += `<tr>
       <td>${badge(e.entity_type)}</td>
@@ -2609,16 +2792,22 @@ function pageEntity(id: string): string | null {
   body += `<h1>${esc(entity.canonical_name)}</h1>`;
   body += `<div class="field"><span class="key">Type:</span> ${badge(entity.entity_type)}</div>`;
   body += `<div class="field"><span class="key">ID:</span> <code>${esc(entity.id)}</code></div>`;
-  body += `<div class="field"><span class="key">Project:</span> ${entity.project_id
-    ? `<a href="/ui/projects/${esc(entity.project_id)}">${esc(projName ?? "(unknown)")}</a>`
-    : "(global)"}</div>`;
+  body += `<div class="field"><span class="key">Project:</span> ${
+    entity.project_id
+      ? `<a href="/ui/projects/${esc(entity.project_id)}">${esc(projName ?? "(unknown)")}</a>`
+      : "(global)"
+  }</div>`;
   body += `<div class="field"><span class="key">Cross-project:</span> ${entity.cross_project ? "Yes" : "No"}</div>`;
   body += `<div class="field"><span class="key">Created:</span> ${formatDate(entity.created_at)}</div>`;
   body += `<div class="field"><span class="key">Updated:</span> ${formatDate(entity.updated_at)}</div>`;
   // Metadata section
   let parsedMeta: Record<string, unknown> = {};
   if (entity.metadata) {
-    try { parsedMeta = JSON.parse(entity.metadata); } catch { /* ignore */ }
+    try {
+      parsedMeta = JSON.parse(entity.metadata);
+    } catch {
+      /* ignore */
+    }
   }
   const hasMetadata = Object.keys(parsedMeta).length > 0;
   if (hasMetadata) {
@@ -2633,7 +2822,10 @@ function pageEntity(id: string): string | null {
       body += `<div class="field"><span class="key">Notes:</span> ${esc(parsedMeta.notes)}</div>`;
     }
     // Show any extra keys as raw JSON
-    const { role, description, notes, ...extra } = parsedMeta as Record<string, unknown>;
+    const { role, description, notes, ...extra } = parsedMeta as Record<
+      string,
+      unknown
+    >;
     if (Object.keys(extra).length > 0) {
       body += `<div class="field"><span class="key">Other:</span></div><pre>${esc(JSON.stringify(extra, null, 2))}</pre>`;
     }
@@ -2649,7 +2841,9 @@ function pageEntity(id: string): string | null {
   body += `</form>`;
 
   // Aliases
-  const displayAliases = entity.aliases.filter((a) => a.alias_value !== entity.canonical_name);
+  const displayAliases = entity.aliases.filter(
+    (a) => a.alias_value !== entity.canonical_name,
+  );
   if (displayAliases.length > 0) {
     body += `<h2>Aliases (${displayAliases.length})</h2>`;
     body += `<table data-table-id="entity-aliases">
@@ -2746,11 +2940,17 @@ export async function handleUIRequest(
       const html = pageKnowledge(knowledgeMatch.id);
       return html
         ? htmlResponse(html)
-        : htmlResponse(layout("Not Found", `<h1>Knowledge entry not found</h1>`), 404);
+        : htmlResponse(
+            layout("Not Found", `<h1>Knowledge entry not found</h1>`),
+            404,
+          );
     }
 
     // Session detail
-    const sessionMatch = matchRoute(pathname, "/ui/sessions/:projectId/:sessionId");
+    const sessionMatch = matchRoute(
+      pathname,
+      "/ui/sessions/:projectId/:sessionId",
+    );
     if (sessionMatch) {
       const html = pageSession(sessionMatch.projectId, sessionMatch.sessionId);
       return html
@@ -2764,7 +2964,10 @@ export async function handleUIRequest(
       const html = pageDistillation(distMatch.id);
       return html
         ? htmlResponse(html)
-        : htmlResponse(layout("Not Found", `<h1>Distillation not found</h1>`), 404);
+        : htmlResponse(
+            layout("Not Found", `<h1>Distillation not found</h1>`),
+            404,
+          );
     }
 
     // Costs
@@ -2797,7 +3000,13 @@ export async function handleUIRequest(
       const html = pageSearchDetail(searchDetailMatch.fullId);
       return html
         ? htmlResponse(html)
-        : htmlResponse(layout("Not Found", `<h1>Entry not found</h1><p>No entry found for ID: ${esc(searchDetailMatch.fullId)}</p>`), 404);
+        : htmlResponse(
+            layout(
+              "Not Found",
+              `<h1>Entry not found</h1><p>No entry found for ID: ${esc(searchDetailMatch.fullId)}</p>`,
+            ),
+            404,
+          );
     }
 
     // Search
@@ -2816,20 +3025,27 @@ export async function handleUIRequest(
     }
 
     // Update entity metadata
-    const updateEntityMeta = matchRoute(pathname, "/ui/api/update/entity/:id/metadata");
+    const updateEntityMeta = matchRoute(
+      pathname,
+      "/ui/api/update/entity/:id/metadata",
+    );
     if (updateEntityMeta) {
       const entity = entities.get(updateEntityMeta.id);
       if (!entity) return redirect("/ui/entities");
       const formData = await req.formData();
       const existing = entity.metadata ? JSON.parse(entity.metadata) : {};
       const role = (formData.get("role") as string)?.trim() || undefined;
-      const description = (formData.get("description") as string)?.trim() || undefined;
+      const description =
+        (formData.get("description") as string)?.trim() || undefined;
       const notes = (formData.get("notes") as string)?.trim() || undefined;
       const metadata: Record<string, unknown> = { ...existing };
       // Update known fields — set to value or remove if empty
-      if (role !== undefined) metadata.role = role; else delete metadata.role;
-      if (description !== undefined) metadata.description = description; else delete metadata.description;
-      if (notes !== undefined) metadata.notes = notes; else delete metadata.notes;
+      if (role !== undefined) metadata.role = role;
+      else delete metadata.role;
+      if (description !== undefined) metadata.description = description;
+      else delete metadata.description;
+      if (notes !== undefined) metadata.notes = notes;
+      else delete metadata.notes;
       entities.update(updateEntityMeta.id, {
         metadata: Object.keys(metadata).length > 0 ? metadata : {},
       });
@@ -2848,7 +3064,10 @@ export async function handleUIRequest(
     }
 
     // Delete session
-    const delSession = matchRoute(pathname, "/ui/api/delete/session/:projectId/:sessionId");
+    const delSession = matchRoute(
+      pathname,
+      "/ui/api/delete/session/:projectId/:sessionId",
+    );
     if (delSession) {
       const projects = data.listProjects();
       const project = projects.find((p) => p.id === delSession.projectId);
@@ -2886,7 +3105,10 @@ export async function handleUIRequest(
     }
 
     // Rename project
-    const renameProjectMatch = matchRoute(pathname, "/ui/api/rename/project/:id");
+    const renameProjectMatch = matchRoute(
+      pathname,
+      "/ui/api/rename/project/:id",
+    );
     if (renameProjectMatch) {
       const formData = await req.formData();
       const newName = formData.get("name");
@@ -2900,23 +3122,38 @@ export async function handleUIRequest(
     if (pathname === "/ui/api/budget") {
       const formData = await req.formData();
       const budgetStr = formData.get("budget");
-      const budgetVal = parseFloat(typeof budgetStr === "string" ? budgetStr : "0") || 0;
+      const budgetVal =
+        parseFloat(typeof budgetStr === "string" ? budgetStr : "0") || 0;
       setDailyBudget(budgetVal);
       return redirect("/ui/costs");
     }
 
     // Set warming mode for a live session
-    const warmingMode = matchRoute(pathname, "/ui/api/warming/:sessionId/:mode");
+    const warmingMode = matchRoute(
+      pathname,
+      "/ui/api/warming/:sessionId/:mode",
+    );
     if (warmingMode) {
       const { sessionId, mode } = warmingMode;
       if (mode !== "keep" && mode !== "stop" && mode !== "auto") {
-        return htmlResponse(layout("Bad Request", `<h1>Unknown warming mode: ${esc(mode)}</h1>`), 400);
+        return htmlResponse(
+          layout("Bad Request", `<h1>Unknown warming mode: ${esc(mode)}</h1>`),
+          400,
+        );
       }
       const sessions = getActiveSessions();
-      const state = [...sessions.values()].find((s) => s.sessionID === sessionId);
+      const state = [...sessions.values()].find(
+        (s) => s.sessionID === sessionId,
+      );
       if (state) {
         if (!state.warmup) {
-          state.warmup = { lastWarmupAt: 0, warmupCount: 0, totalWarmups: 0, warmupHits: 0, disabled: false };
+          state.warmup = {
+            lastWarmupAt: 0,
+            warmupCount: 0,
+            totalWarmups: 0,
+            warmupHits: 0,
+            disabled: false,
+          };
         }
         if (mode === "keep") {
           state.warmup.forceKeepWarm = true;
@@ -2937,7 +3174,10 @@ export async function handleUIRequest(
 
   // 404
   return htmlResponse(
-    layout("Not Found", `<h1>Page not found</h1><p><a href="/ui">Back to dashboard</a></p>`),
+    layout(
+      "Not Found",
+      `<h1>Page not found</h1><p><a href="/ui">Back to dashboard</a></p>`,
+    ),
     404,
   );
 }

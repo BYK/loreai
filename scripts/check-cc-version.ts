@@ -19,7 +19,11 @@
  */
 
 import { parseArgs } from "util";
-import { VERSION_SEEDS, _parseSemver, _compareSemver } from "../packages/gateway/src/cch";
+import {
+  VERSION_SEEDS,
+  _parseSemver,
+  _compareSemver,
+} from "../packages/gateway/src/cch";
 
 const { values: args } = parseArgs({
   args: Bun.argv.slice(2),
@@ -54,7 +58,9 @@ interface NpmRegistryData {
 }
 
 async function fetchRegistry(): Promise<NpmRegistryData> {
-  const res = await fetch("https://registry.npmjs.org/@anthropic-ai/claude-code");
+  const res = await fetch(
+    "https://registry.npmjs.org/@anthropic-ai/claude-code",
+  );
   if (!res.ok) {
     throw new Error(`npm registry returned ${res.status}: ${await res.text()}`);
   }
@@ -87,7 +93,9 @@ async function main() {
 
   const latestTag = distTags.latest ? baseVersion(distTags.latest) : null;
   if (!latestTag) {
-    console.error("No 'latest' dist-tag found on npm for @anthropic-ai/claude-code");
+    console.error(
+      "No 'latest' dist-tag found on npm for @anthropic-ai/claude-code",
+    );
     process.exit(1);
   }
 

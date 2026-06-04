@@ -143,7 +143,13 @@ describe("mapOffsetToJsonPath", () => {
   test("system block array (Anthropic cache format)", () => {
     const json = JSON.stringify({
       model: "opus",
-      system: [{ type: "text", text: "CHANGED_HERE", cache_control: { type: "ephemeral" } }],
+      system: [
+        {
+          type: "text",
+          text: "CHANGED_HERE",
+          cache_control: { type: "ephemeral" },
+        },
+      ],
       messages: [],
     });
     const offset = json.indexOf("CHANGED_HERE");
@@ -154,10 +160,13 @@ describe("mapOffsetToJsonPath", () => {
   test("content block array within message", () => {
     const json = JSON.stringify({
       messages: [
-        { role: "user", content: [
-          { type: "text", text: "first block" },
-          { type: "text", text: "DIVERGED" },
-        ]},
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "first block" },
+            { type: "text", text: "DIVERGED" },
+          ],
+        },
       ],
     });
     const offset = json.indexOf("DIVERGED");
@@ -231,27 +240,27 @@ describe("inferDivergenceReason", () => {
   });
 
   test("message content change — no message count", () => {
-    expect(
-      inferDivergenceReason("messages[3].content[1]", 100, 100),
-    ).toBe("message at position 3 content changed");
+    expect(inferDivergenceReason("messages[3].content[1]", 100, 100)).toBe(
+      "message at position 3 content changed",
+    );
   });
 
   test("message content change — new message at end", () => {
-    expect(
-      inferDivergenceReason("messages[9].content[0]", 100, 120, 10),
-    ).toBe("new conversation message (normal turn progression)");
+    expect(inferDivergenceReason("messages[9].content[0]", 100, 120, 10)).toBe(
+      "new conversation message (normal turn progression)",
+    );
   });
 
   test("message content change — earlier message modified", () => {
-    expect(
-      inferDivergenceReason("messages[3].content[1]", 100, 100, 10),
-    ).toBe("earlier message modified at position 3 (window shift or content change)");
+    expect(inferDivergenceReason("messages[3].content[1]", 100, 100, 10)).toBe(
+      "earlier message modified at position 3 (window shift or content change)",
+    );
   });
 
   test("message content change — distilled prefix rewrite", () => {
-    expect(
-      inferDivergenceReason("messages[0].content[0]", 100, 100, 10),
-    ).toBe("distilled conversation prefix changed (meta-distillation rewrite)");
+    expect(inferDivergenceReason("messages[0].content[0]", 100, 100, 10)).toBe(
+      "distilled conversation prefix changed (meta-distillation rewrite)",
+    );
   });
 
   test("appended content", () => {
@@ -445,7 +454,9 @@ describe("analyzeCacheTurn", () => {
     const result = analyzeCacheTurn(analytics, body2, makeUsage());
 
     expect(result.divergencePoint).toMatch(/messages\[1\]/);
-    expect(result.divergenceReason).toMatch(/message at position 1 content changed/);
+    expect(result.divergenceReason).toMatch(
+      /message at position 1 content changed/,
+    );
   });
 });
 
@@ -455,9 +466,12 @@ describe("analyzeCacheTurn", () => {
 
 describe("normalizeBodyForComparison", () => {
   test("replaces cch= hex hash with fixed placeholder", () => {
-    const body = '{"system":[{"type":"text","text":"entrypoint=cli; cch=f0e67;\\nYou are Claude Code"}]}';
+    const body =
+      '{"system":[{"type":"text","text":"entrypoint=cli; cch=f0e67;\\nYou are Claude Code"}]}';
     const normalized = normalizeBodyForComparison(body);
-    expect(normalized).toBe('{"system":[{"type":"text","text":"entrypoint=cli; cch=__;\\nYou are Claude Code"}]}');
+    expect(normalized).toBe(
+      '{"system":[{"type":"text","text":"entrypoint=cli; cch=__;\\nYou are Claude Code"}]}',
+    );
   });
 
   test("handles varying cch lengths", () => {
@@ -531,11 +545,21 @@ describe("analyzeCacheTurn — cch normalization", () => {
   test("treats bodies differing only in cch= as identical", () => {
     const analytics = makeCacheAnalytics();
     const body1 = JSON.stringify({
-      system: [{ type: "text", text: "entrypoint=cli; cch=f0e67;\nYou are Claude Code" }],
+      system: [
+        {
+          type: "text",
+          text: "entrypoint=cli; cch=f0e67;\nYou are Claude Code",
+        },
+      ],
       messages: [{ role: "user", content: "hello" }],
     });
     const body2 = JSON.stringify({
-      system: [{ type: "text", text: "entrypoint=cli; cch=35c93;\nYou are Claude Code" }],
+      system: [
+        {
+          type: "text",
+          text: "entrypoint=cli; cch=35c93;\nYou are Claude Code",
+        },
+      ],
       messages: [{ role: "user", content: "hello" }],
     });
 
@@ -549,11 +573,21 @@ describe("analyzeCacheTurn — cch normalization", () => {
   test("still detects real system prompt changes alongside cch=", () => {
     const analytics = makeCacheAnalytics();
     const body1 = JSON.stringify({
-      system: [{ type: "text", text: "entrypoint=cli; cch=f0e67;\nYou are Claude Code v1" }],
+      system: [
+        {
+          type: "text",
+          text: "entrypoint=cli; cch=f0e67;\nYou are Claude Code v1",
+        },
+      ],
       messages: [{ role: "user", content: "hello" }],
     });
     const body2 = JSON.stringify({
-      system: [{ type: "text", text: "entrypoint=cli; cch=35c93;\nYou are Claude Code v2" }],
+      system: [
+        {
+          type: "text",
+          text: "entrypoint=cli; cch=35c93;\nYou are Claude Code v2",
+        },
+      ],
       messages: [{ role: "user", content: "hello" }],
     });
 
@@ -571,10 +605,12 @@ describe("analyzeCacheTurn — cch normalization", () => {
         model: "claude-sonnet-4-20250514",
         max_tokens: 8192,
         stream: true,
-        system: [{
-          type: "text",
-          text: `x-anthropic-billing-header: cc_version=2.1.37.${suffix}; cc_entrypoint=cli; cch=abc12;\nYou are Claude Code`,
-        }],
+        system: [
+          {
+            type: "text",
+            text: `x-anthropic-billing-header: cc_version=2.1.37.${suffix}; cc_entrypoint=cli; cch=abc12;\nYou are Claude Code`,
+          },
+        ],
         messages: [{ role: "user", content: "hello" }],
       });
 

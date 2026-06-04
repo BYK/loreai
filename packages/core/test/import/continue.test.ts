@@ -90,7 +90,9 @@ describe("Continue provider", () => {
       const original = process.env.CONTINUE_GLOBAL_DIR;
       process.env.CONTINUE_GLOBAL_DIR = tmp;
       try {
-        const chunks = provider.readChunks("/test/continue-project", ["sess-continue-1"]);
+        const chunks = provider.readChunks("/test/continue-project", [
+          "sess-continue-1",
+        ]);
 
         expect(chunks.length).toBeGreaterThan(0);
 
@@ -124,7 +126,9 @@ describe("Continue provider", () => {
       const original = process.env.CONTINUE_GLOBAL_DIR;
       process.env.CONTINUE_GLOBAL_DIR = tmp;
       try {
-        const chunks = provider.readChunks("/test/continue-project", ["sess-continue-1"]);
+        const chunks = provider.readChunks("/test/continue-project", [
+          "sess-continue-1",
+        ]);
         const fullText = chunks.map((c) => c.text).join("\n");
 
         expect(fullText).toContain("[tool: readFile]");

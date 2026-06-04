@@ -17,8 +17,11 @@ import { fileURLToPath } from "node:url";
 
 const packageDir = join(fileURLToPath(import.meta.url), "..", "..");
 const distDir = join(packageDir, "dist");
-const pkgJson = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"));
-const hasBunBundle = existsSync(join(distDir, "index.bun.js")) &&
+const pkgJson = JSON.parse(
+  readFileSync(join(packageDir, "package.json"), "utf8"),
+);
+const hasBunBundle =
+  existsSync(join(distDir, "index.bun.js")) &&
   !readFileSync(join(distDir, "index.bun.js"), "utf8").startsWith("export *");
 const hasBundle = existsSync(join(distDir, "index.cjs")) && hasBunBundle;
 

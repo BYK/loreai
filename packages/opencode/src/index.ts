@@ -59,7 +59,10 @@ const KNOWN_GATEWAY_PORTS = [3207, 5673];
  * Check if the Lore gateway is reachable at the given base URL.
  * Short timeout so this doesn't delay OpenCode startup noticeably.
  */
-export async function probeGateway(baseURL: string, timeoutMs = 1500): Promise<boolean> {
+export async function probeGateway(
+  baseURL: string,
+  timeoutMs = 1500,
+): Promise<boolean> {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -82,7 +85,9 @@ async function resolveGatewayUrl(): Promise<string | null> {
   if (process.env.LORE_REMOTE_URL) {
     const url = process.env.LORE_REMOTE_URL.replace(/\/$/, "");
     if (await probeGateway(url)) return url;
-    log.info(`remote gateway at ${url} not reachable, falling through to local discovery`);
+    log.info(
+      `remote gateway at ${url} not reachable, falling through to local discovery`,
+    );
   }
 
   // 1. Explicit env var — probe it to verify it's actually reachable.
@@ -142,7 +147,6 @@ async function startInProcess(): Promise<string | null> {
   }
 }
 
-
 // Process-wide initialization state — shared across all sessions.
 // The plugin function is called once per OpenCode session/project, but
 // lore init only needs to run once per process.
@@ -199,7 +203,8 @@ export const LorePlugin: Plugin = async (ctx) => {
       process.env.NODE_ENV === "test" ||
       process.argv.some((a) => a.includes(".test."));
     if (!inTestEnv) {
-      const msg = "Lore failed to start — memory features are unavailable. " +
+      const msg =
+        "Lore failed to start — memory features are unavailable. " +
         "Ensure @loreai/gateway is installed.";
       process.stderr.write(`[lore] ERROR: ${msg}\n`);
       log.error(msg);
@@ -211,91 +216,95 @@ export const LorePlugin: Plugin = async (ctx) => {
   let cachedGitRemote: string | undefined;
 
   try {
-  const hooks: Hooks = {
-    // Disable built-in compaction (gateway handles it), register hidden
-    // worker agents, and redirect all provider baseURLs through the gateway.
-    config: async (input) => {
-      const cfg = input as Record<string, unknown>;
-      cfg.compaction = { auto: false, prune: false };
-      cfg.agent = {
-        ...(cfg.agent as Record<string, unknown> | undefined),
-        "lore-distill": {
-          hidden: true,
-          description: "Lore memory distillation worker",
-        },
-        "lore-curator": {
-          hidden: true,
-          description: "Lore knowledge curator worker",
-        },
-        "lore-query-expand": {
-          hidden: true,
-          description: "Lore query expansion worker",
-        },
-      };
+    const hooks: Hooks = {
+      // Disable built-in compaction (gateway handles it), register hidden
+      // worker agents, and redirect all provider baseURLs through the gateway.
+      config: async (input) => {
+        const cfg = input as Record<string, unknown>;
+        cfg.compaction = { auto: false, prune: false };
+        cfg.agent = {
+          ...(cfg.agent as Record<string, unknown> | undefined),
+          "lore-distill": {
+            hidden: true,
+            description: "Lore memory distillation worker",
+          },
+          "lore-curator": {
+            hidden: true,
+            description: "Lore knowledge curator worker",
+          },
+          "lore-query-expand": {
+            hidden: true,
+            description: "Lore query expansion worker",
+          },
+        };
+
+        if (loreActive) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const p = (cfg.provider as Record<string, any>) ?? {};
+          cfg.provider = p;
+          for (const providerID of GATEWAY_PROVIDERS) {
+            p[providerID] ??= {};
+            p[providerID].options ??= {};
+            p[providerID].options!.baseURL = `${gatewayBase}/v1`;
+          }
+        }
+      },
+
+      tool: {},
+
+      // Inject the agent name so the gateway can distinguish meta requests
+      // (title generation, summary agents, etc.) from real conversation turns.
+      // Also inject the git remote URL so the remote gateway can group
+      // worktrees/clones of the same repo without filesystem access.
+      // For local/custom providers, inject the original upstream URL so the
+      // gateway can forward requests to the correct endpoint.
+      "chat.headers": async (input, output) => {
+        // Inject stable session ID — OpenCode's DB session ID survives restarts,
+        // unlike x-session-affinity (nanoid regenerated per process).
+        output.headers["x-lore-session-id"] = input.sessionID;
+        output.headers["x-lore-agent"] = input.agent;
+        // Inject project path so the gateway can attribute data correctly.
+        // discoverWorkspaceRoot walks up from the project dir to find a
+        // monorepo/workspace root (cached after first call).
+        output.headers["x-lore-project"] = discoverWorkspaceRoot(
+          ctx.worktree || ctx.directory,
+        );
+        if (cachedGitRemote === undefined) {
+          const projectPath = discoverWorkspaceRoot(
+            ctx.worktree || ctx.directory,
+          );
+          cachedGitRemote = getGitRemote(projectPath) ?? "";
+        }
+        if (cachedGitRemote) {
+          output.headers["x-lore-git-remote"] = cachedGitRemote;
+        }
+        // Inject upstream URL for local/custom providers (LORE_UPSTREAM_<PROVIDER>).
+        // input.provider is a ProviderContext { source, info: Provider, options }.
+        const providerID = input.provider?.info?.id;
+        if (providerID) {
+          const envKey = `LORE_UPSTREAM_${providerID.toUpperCase().replace(/-/g, "_")}`;
+          const upstream = process.env[envKey];
+          if (upstream) {
+            output.headers["x-lore-upstream-url"] = upstream;
+          }
+        }
+      },
+    };
+
+    // Startup banner — visible in stderr so silent failures are obvious.
+    if (!processInitDone) {
+      const projectPath = discoverWorkspaceRoot(ctx.worktree || ctx.directory);
+      process.stderr.write(`[lore] active: ${projectPath}\n`);
 
       if (loreActive) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const p = cfg.provider as Record<string, any> ?? {};
-        cfg.provider = p;
-        for (const providerID of GATEWAY_PROVIDERS) {
-          p[providerID] ??= {};
-          p[providerID].options ??= {};
-          p[providerID].options!.baseURL = `${gatewayBase}/v1`;
-        }
+        process.stderr.write(`[lore] routing through ${gatewayBase}\n`);
+        process.stderr.write(`[lore] dashboard: ${gatewayBase}/ui\n`);
       }
-    },
 
-    tool: {},
-
-    // Inject the agent name so the gateway can distinguish meta requests
-    // (title generation, summary agents, etc.) from real conversation turns.
-    // Also inject the git remote URL so the remote gateway can group
-    // worktrees/clones of the same repo without filesystem access.
-    // For local/custom providers, inject the original upstream URL so the
-    // gateway can forward requests to the correct endpoint.
-    "chat.headers": async (input, output) => {
-      // Inject stable session ID — OpenCode's DB session ID survives restarts,
-      // unlike x-session-affinity (nanoid regenerated per process).
-      output.headers["x-lore-session-id"] = input.sessionID;
-      output.headers["x-lore-agent"] = input.agent;
-      // Inject project path so the gateway can attribute data correctly.
-      // discoverWorkspaceRoot walks up from the project dir to find a
-      // monorepo/workspace root (cached after first call).
-      output.headers["x-lore-project"] = discoverWorkspaceRoot(ctx.worktree || ctx.directory);
-      if (cachedGitRemote === undefined) {
-        const projectPath = discoverWorkspaceRoot(ctx.worktree || ctx.directory);
-        cachedGitRemote = getGitRemote(projectPath) ?? "";
-      }
-      if (cachedGitRemote) {
-        output.headers["x-lore-git-remote"] = cachedGitRemote;
-      }
-      // Inject upstream URL for local/custom providers (LORE_UPSTREAM_<PROVIDER>).
-      // input.provider is a ProviderContext { source, info: Provider, options }.
-      const providerID = input.provider?.info?.id;
-      if (providerID) {
-        const envKey = `LORE_UPSTREAM_${providerID.toUpperCase().replace(/-/g, "_")}`;
-        const upstream = process.env[envKey];
-        if (upstream) {
-          output.headers["x-lore-upstream-url"] = upstream;
-        }
-      }
-    },
-  };
-
-  // Startup banner — visible in stderr so silent failures are obvious.
-  if (!processInitDone) {
-    const projectPath = discoverWorkspaceRoot(ctx.worktree || ctx.directory);
-    process.stderr.write(`[lore] active: ${projectPath}\n`);
-
-    if (loreActive) {
-      process.stderr.write(`[lore] routing through ${gatewayBase}\n`);
-      process.stderr.write(`[lore] dashboard: ${gatewayBase}/ui\n`);
+      processInitDone = true;
     }
 
-    processInitDone = true;
-  }
-
-  return hooks;
+    return hooks;
   } catch (e) {
     // Log the full error before re-throwing so OpenCode's plugin loader
     // (which catches and swallows the error) doesn't hide the root cause.

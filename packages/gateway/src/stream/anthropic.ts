@@ -149,7 +149,10 @@ export function createStreamAccumulator(options?: {
    * payload so the client sees scaled token counts.  Returns the modified
    * JSON string, or `null` if no rewrite was needed.
    */
-  function rewriteUsage(parsed: Record<string, unknown>, eventType: string): string | null {
+  function rewriteUsage(
+    parsed: Record<string, unknown>,
+    eventType: string,
+  ): string | null {
     if (!shouldScale) return null;
 
     if (eventType === "message_start") {
@@ -175,7 +178,8 @@ export function createStreamAccumulator(options?: {
 
     if (eventType === "message_delta") {
       const deltaUsage = parsed.usage as Record<string, number> | undefined;
-      if (!deltaUsage || typeof deltaUsage.output_tokens !== "number") return null;
+      if (!deltaUsage || typeof deltaUsage.output_tokens !== "number")
+        return null;
 
       // For message_delta, the usage only carries output_tokens.  We need to
       // scale based on the *total* accumulated so far (input from message_start
@@ -276,8 +280,7 @@ export function createStreamAccumulator(options?: {
       case "thinking":
         blocks.set(index, {
           type: "thinking",
-          thinking:
-            typeof block.thinking === "string" ? block.thinking : "",
+          thinking: typeof block.thinking === "string" ? block.thinking : "",
           signature: "",
         });
         break;
@@ -309,18 +312,12 @@ export function createStreamAccumulator(options?: {
         }
         break;
       case "thinking_delta":
-        if (
-          block.type === "thinking" &&
-          typeof delta.thinking === "string"
-        ) {
+        if (block.type === "thinking" && typeof delta.thinking === "string") {
           block.thinking += delta.thinking;
         }
         break;
       case "signature_delta":
-        if (
-          block.type === "thinking" &&
-          typeof delta.signature === "string"
-        ) {
+        if (block.type === "thinking" && typeof delta.signature === "string") {
           block.signature += delta.signature;
         }
         break;
@@ -354,8 +351,7 @@ export function createStreamAccumulator(options?: {
           thinking: block.thinking,
         };
         if (block.signature) {
-          (thinkingBlock as { signature?: string }).signature =
-            block.signature;
+          (thinkingBlock as { signature?: string }).signature = block.signature;
         }
         content.push(thinkingBlock);
         break;
@@ -580,10 +576,7 @@ export function buildSSETextResponse(
 
   // message_stop
   events.push(
-    formatSSEEvent(
-      "message_stop",
-      JSON.stringify({ type: "message_stop" }),
-    ),
+    formatSSEEvent("message_stop", JSON.stringify({ type: "message_stop" })),
   );
 
   return events.join("");
@@ -635,7 +628,11 @@ export interface RecallAwareAccumulator extends StreamAccumulator {
  */
 export function createRecallAwareAccumulator(
   recallToolName = "recall",
-  options?: { scaleClientUsage?: boolean; blockOffset?: number; suppressMessageStart?: boolean },
+  options?: {
+    scaleClientUsage?: boolean;
+    blockOffset?: number;
+    suppressMessageStart?: boolean;
+  },
 ): RecallAwareAccumulator {
   const shouldScale = options?.scaleClientUsage ?? false;
   const baseOffset = options?.blockOffset ?? 0;
@@ -659,7 +656,10 @@ export function createRecallAwareAccumulator(
   let recallDetected = false;
 
   /** Scale usage in a parsed SSE event and return the rewritten JSON, or null if unchanged. */
-  function maybeScaleEvent(parsed: Record<string, unknown>, eventType: string): string | null {
+  function maybeScaleEvent(
+    parsed: Record<string, unknown>,
+    eventType: string,
+  ): string | null {
     if (!shouldScale) return null;
 
     if (eventType === "message_start") {
@@ -681,7 +681,8 @@ export function createRecallAwareAccumulator(
 
     if (eventType === "message_delta") {
       const deltaUsage = parsed.usage as Record<string, number> | undefined;
-      if (!deltaUsage || typeof deltaUsage.output_tokens !== "number") return null;
+      if (!deltaUsage || typeof deltaUsage.output_tokens !== "number")
+        return null;
       // Scale based on total accumulated in the inner accumulator
       const innerResp = inner.getResponse();
       const scaled = scaleUsageForClient({
@@ -700,7 +701,11 @@ export function createRecallAwareAccumulator(
   }
 
   /** Format an SSE event, applying usage scaling when active. */
-  function forwardEvent(eventType: string, data: string, parsed?: Record<string, unknown>): string {
+  function forwardEvent(
+    eventType: string,
+    data: string,
+    parsed?: Record<string, unknown>,
+  ): string {
     if (parsed) {
       const rewritten = maybeScaleEvent(parsed, eventType);
       if (rewritten) return formatSSEEvent(eventType, rewritten);
@@ -726,11 +731,10 @@ export function createRecallAwareAccumulator(
         const index = parsed.index as number;
         if (typeof index !== "number") break;
 
-        const block = parsed.content_block as Record<string, unknown> | undefined;
-        if (
-          block?.type === "tool_use" &&
-          block.name === recallToolName
-        ) {
+        const block = parsed.content_block as
+          | Record<string, unknown>
+          | undefined;
+        if (block?.type === "tool_use" && block.name === recallToolName) {
           // Suppress this block
           suppressedIndices.add(index);
           suppressedCount++;
@@ -746,7 +750,10 @@ export function createRecallAwareAccumulator(
         clientBlocks++;
         // Re-index: apply suppression offset + base offset
         if (suppressedCount > 0 || baseOffset > 0) {
-          const adjusted = { ...parsed, index: index - suppressedCount + baseOffset };
+          const adjusted = {
+            ...parsed,
+            index: index - suppressedCount + baseOffset,
+          };
           return formatSSEEvent(eventType, JSON.stringify(adjusted));
         }
         break;
@@ -759,7 +766,10 @@ export function createRecallAwareAccumulator(
           return ""; // Don't forward recall block events
         }
         // Re-index: apply suppression offset + base offset
-        if ((suppressedCount > 0 || baseOffset > 0) && typeof (parsed.index) === "number") {
+        if (
+          (suppressedCount > 0 || baseOffset > 0) &&
+          typeof parsed.index === "number"
+        ) {
           const adjusted = {
             ...parsed,
             index: (parsed.index as number) - suppressedCount + baseOffset,

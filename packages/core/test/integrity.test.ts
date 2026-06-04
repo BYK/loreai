@@ -53,14 +53,30 @@ describe("knowledge integrity checking", () => {
           `INSERT INTO knowledge (id, project_id, category, title, content, cross_project, confidence, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, 0, 1.0, ?, ?)`,
         )
-        .run("dup-a", pid, "decision", "Database Migration Strategy", "Use forward-only migrations", now, now);
+        .run(
+          "dup-a",
+          pid,
+          "decision",
+          "Database Migration Strategy",
+          "Use forward-only migrations",
+          now,
+          now,
+        );
 
       db()
         .query(
           `INSERT INTO knowledge (id, project_id, category, title, content, cross_project, confidence, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, 0, 1.0, ?, ?)`,
         )
-        .run("dup-b", pid, "decision", "Database Migration Strategy Revised", "Updated migration approach", now, now);
+        .run(
+          "dup-b",
+          pid,
+          "decision",
+          "Database Migration Strategy Revised",
+          "Updated migration approach",
+          now,
+          now,
+        );
 
       const issues = ltm.check(PROJECT);
       const duplicates = issues.filter((i) => i.type === "duplicate");

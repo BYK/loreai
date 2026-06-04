@@ -35,7 +35,9 @@ function truncate(str: string, max: number): string {
 }
 
 function padRight(str: string, len: number): string {
-  return str.length >= len ? str.slice(0, len) : str + " ".repeat(len - str.length);
+  return str.length >= len
+    ? str.slice(0, len)
+    : str + " ".repeat(len - str.length);
 }
 
 function printTable(
@@ -43,9 +45,7 @@ function printTable(
   rows: string[][],
   widths: number[],
 ): void {
-  const header = headers
-    .map((h, i) => padRight(h, widths[i]))
-    .join("  ");
+  const header = headers.map((h, i) => padRight(h, widths[i])).join("  ");
   console.log(header);
   console.log(widths.map((w) => "-".repeat(w)).join("  "));
   for (const row of rows) {
@@ -55,7 +55,9 @@ function printTable(
 
 async function confirm(message: string): Promise<boolean> {
   if (!process.stdin.isTTY) {
-    console.error("Error: Cannot prompt for confirmation in non-TTY mode. Use --yes to skip.");
+    console.error(
+      "Error: Cannot prompt for confirmation in non-TTY mode. Use --yes to skip.",
+    );
     return false;
   }
   const rl = createInterface({ input: process.stdin, output: process.stderr });
@@ -102,7 +104,15 @@ async function cmdList(
         return;
       }
       printTable(
-        ["Name", "Path", "Git Remote", "ID", "Knowledge", "Sessions", "Created"],
+        [
+          "Name",
+          "Path",
+          "Git Remote",
+          "ID",
+          "Knowledge",
+          "Sessions",
+          "Created",
+        ],
         projects.map((p) => [
           p.name ?? "(unnamed)",
           truncate(p.path, 35),
@@ -153,7 +163,14 @@ async function cmdList(
         return;
       }
       printTable(
-        ["Session ID", "Messages", "Distilled", "Distillations", "First", "Last"],
+        [
+          "Session ID",
+          "Messages",
+          "Distilled",
+          "Distillations",
+          "First",
+          "Last",
+        ],
         sessions.map((s) => [
           s.session_id.slice(0, 12),
           String(s.message_count),
@@ -178,7 +195,16 @@ async function cmdList(
         return;
       }
       printTable(
-        ["Session", "Gen", "Tokens", "R_comp", "C_norm", "Archived", "Created", "ID"],
+        [
+          "Session",
+          "Gen",
+          "Tokens",
+          "R_comp",
+          "C_norm",
+          "Archived",
+          "Created",
+          "ID",
+        ],
         dists.map((d) => [
           d.session_id.slice(0, 12),
           String(d.generation),
@@ -262,7 +288,9 @@ async function cmdShow(
       });
 
       if (asJson) {
-        console.log(JSON.stringify({ session, messages, distillations: dists }, null, 2));
+        console.log(
+          JSON.stringify({ session, messages, distillations: dists }, null, 2),
+        );
         return;
       }
 
@@ -338,7 +366,9 @@ async function cmdClear(
   // Nuclear option: wipe entire database (local-only)
   if (flags.all) {
     if (remote) {
-      console.error("Error: --all (wipe entire database) is not supported in remote mode.");
+      console.error(
+        "Error: --all (wipe entire database) is not supported in remote mode.",
+      );
       process.exit(1);
     }
     const { data } = await import("@loreai/core");
@@ -379,7 +409,8 @@ async function cmdClear(
     const targets: string[] = [];
     if (onlyKnowledge) targets.push(`${counts.knowledge} knowledge entries`);
     if (onlyTemporal) targets.push(`${counts.messages} temporal messages`);
-    if (onlyDistillations) targets.push(`${counts.distillations} distillations`);
+    if (onlyDistillations)
+      targets.push(`${counts.distillations} distillations`);
 
     if (!skipConfirm) {
       const confirmed = await confirm(
@@ -396,7 +427,9 @@ async function cmdClear(
     if (onlyKnowledge) {
       const deleted = data.clearKnowledge(projectPath);
       console.log(`Deleted ${deleted} knowledge entries.`);
-      console.log("Regenerated .lore.md \u2014 commit the change to prevent re-import from git.");
+      console.log(
+        "Regenerated .lore.md \u2014 commit the change to prevent re-import from git.",
+      );
     }
     if (onlyTemporal) {
       const deleted = data.clearTemporal(projectPath);
@@ -429,7 +462,9 @@ async function cmdClear(
   console.log(
     `Cleared: ${result.knowledge_deleted} knowledge, ${result.temporal_deleted} messages, ${result.distillations_deleted} distillations.`,
   );
-  console.log("Regenerated .lore.md \u2014 commit the change to prevent re-import from git.");
+  console.log(
+    "Regenerated .lore.md \u2014 commit the change to prevent re-import from git.",
+  );
 }
 
 async function cmdDelete(
@@ -512,7 +547,11 @@ async function cmdDelete(
       const { projectId: resolveProjectId } = await import("@loreai/core");
       // rawId can be a project UUID or a filesystem path
       let id = rawId;
-      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawId)) {
+      if (
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          rawId,
+        )
+      ) {
         const resolved = resolveProjectId(resolve(rawId));
         if (!resolved) {
           console.error(`No project found for path: ${rawId}`);
@@ -561,14 +600,22 @@ async function cmdRecover(
 ): Promise<void> {
   const remote = getRemoteUrl();
   if (remote) {
-    console.error("Error: recover is not supported in remote mode (requires local filesystem access).");
+    console.error(
+      "Error: recover is not supported in remote mode (requires local filesystem access).",
+    );
     process.exit(1);
   }
 
   const { existsSync } = await import("fs");
   const { join } = await import("path");
-  const { data, importLoreFile, importFromFile, loreFileExists, clearLoreFileCache, LORE_FILE } =
-    await import("@loreai/core");
+  const {
+    data,
+    importLoreFile,
+    importFromFile,
+    loreFileExists,
+    clearLoreFileCache,
+    LORE_FILE,
+  } = await import("@loreai/core");
   const skipConfirm = !!flags.yes;
   const asJson = !!flags.json;
 
@@ -584,13 +631,21 @@ async function cmdRecover(
     if (!existsSync(project.path)) continue;
 
     if (loreFileExists(project.path)) {
-      recoverable.push({ name: project.name, path: project.path, source: LORE_FILE });
+      recoverable.push({
+        name: project.name,
+        path: project.path,
+        source: LORE_FILE,
+      });
     } else {
       // Check AGENTS.md, then CLAUDE.md
       for (const filename of ["AGENTS.md", "CLAUDE.md"]) {
         const filePath = join(project.path, filename);
         if (existsSync(filePath)) {
-          recoverable.push({ name: project.name, path: project.path, source: filename });
+          recoverable.push({
+            name: project.name,
+            path: project.path,
+            source: filename,
+          });
           break; // prefer AGENTS.md over CLAUDE.md
         }
       }
@@ -602,7 +657,9 @@ async function cmdRecover(
     return;
   }
 
-  console.log(`Found ${recoverable.length} project(s) with recoverable knowledge files:\n`);
+  console.log(
+    `Found ${recoverable.length} project(s) with recoverable knowledge files:\n`,
+  );
   for (const r of recoverable) {
     console.log(`  ${r.name ?? r.path}  ← ${r.source}`);
   }
@@ -641,7 +698,13 @@ async function cmdRecover(
     }
 
     const after = data.countForProject(r.path).knowledge;
-    results.push({ name: r.name, path: r.path, source: r.source, before, after });
+    results.push({
+      name: r.name,
+      path: r.path,
+      source: r.source,
+      before,
+      after,
+    });
   }
 
   if (asJson) {
@@ -656,18 +719,26 @@ async function cmdRecover(
     totalImported += imported;
     const label = r.name ?? r.path;
     if (imported > 0) {
-      console.log(`  ${padRight(label, 30)}  +${imported} entries (${r.before} → ${r.after}) from ${r.source}`);
+      console.log(
+        `  ${padRight(label, 30)}  +${imported} entries (${r.before} → ${r.after}) from ${r.source}`,
+      );
     } else {
-      console.log(`  ${padRight(label, 30)}  no change (${r.after} entries) from ${r.source}`);
+      console.log(
+        `  ${padRight(label, 30)}  no change (${r.after} entries) from ${r.source}`,
+      );
     }
   }
-  console.log(`\nTotal: ${totalImported} entries recovered across ${results.length} project(s).`);
+  console.log(
+    `\nTotal: ${totalImported} entries recovered across ${results.length} project(s).`,
+  );
 
   // Re-rank recovered preference entries so they get proper confidence values
   const { ltm } = await import("@loreai/core");
   const reranked = ltm.rerankPreferences();
   if (reranked > 0) {
-    console.log(`Re-ranked ${reranked} preference entries by directive strength.`);
+    console.log(
+      `Re-ranked ${reranked} preference entries by directive strength.`,
+    );
   }
 }
 
@@ -760,21 +831,32 @@ function printDedupResult(
     const cluster = result.clusters[i];
     const total = 1 + cluster.merged.length;
     console.log(`Cluster ${i + 1} (${total} entries → 1):`);
-    console.log(`  Keep:   "${truncate(cluster.surviving.title, 70)}" (${cluster.surviving.id.slice(0, 8)}…)`);
+    console.log(
+      `  Keep:   "${truncate(cluster.surviving.title, 70)}" (${cluster.surviving.id.slice(0, 8)}…)`,
+    );
     for (const m of cluster.merged) {
       const pk = pairKey(cluster.surviving.id, m.id);
       const sim = result.pairSimilarities.get(pk);
       const simStr = sim != null ? ` [sim: ${sim.toFixed(3)}]` : "";
-      console.log(`  ${apply ? "Remove" : "Would remove"}: "${truncate(m.title, 55)}" (${m.id.slice(0, 8)}…)${simStr}`);
+      console.log(
+        `  ${apply ? "Remove" : "Would remove"}: "${truncate(m.title, 55)}" (${m.id.slice(0, 8)}…)${simStr}`,
+      );
     }
     console.log();
   }
 }
 
 /** Prompt the user for a single-key choice. Returns the chosen key, or "s" on EOF/close. */
-function promptChoice(message: string, choices: string[], fallback = "s"): Promise<string> {
+function promptChoice(
+  message: string,
+  choices: string[],
+  fallback = "s",
+): Promise<string> {
   return new Promise((resolve) => {
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const rl = createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
     let resolved = false;
     rl.on("close", () => {
       if (!resolved) {
@@ -806,11 +888,17 @@ async function cmdDedup(
   const remote = getRemoteUrl();
   if (remote) return cmdDedupRemote(remote, flags);
 
-  const { ltm, data, projectId: getProjectId, embedding: emb } = await import("@loreai/core");
+  const {
+    ltm,
+    data,
+    projectId: getProjectId,
+    embedding: emb,
+  } = await import("@loreai/core");
   const apply = !!flags.yes;
   const interactive = !!flags.interactive;
   const asJson = !!flags.json;
-  const explicitProject = typeof flags.project === "string" ? resolve(flags.project) : null;
+  const explicitProject =
+    typeof flags.project === "string" ? resolve(flags.project) : null;
 
   if (interactive && apply) {
     console.error("Error: --interactive and --yes are mutually exclusive.");
@@ -818,14 +906,18 @@ async function cmdDedup(
   }
 
   if (interactive && !process.stdin.isTTY) {
-    console.error("Error: --interactive requires a TTY. Use --yes for non-interactive.");
+    console.error(
+      "Error: --interactive requires a TTY. Use --yes for non-interactive.",
+    );
     process.exit(1);
   }
 
   // Determine which projects to process
   const projects = explicitProject
     ? [{ path: explicitProject, name: explicitProject }]
-    : data.listProjects().map((p) => ({ path: p.path, name: p.name ?? p.path }));
+    : data
+        .listProjects()
+        .map((p) => ({ path: p.path, name: p.name ?? p.path }));
 
   if (projects.length === 0) {
     console.log("No projects found.");
@@ -843,10 +935,15 @@ async function cmdDedup(
       const distillCount = await emb.backfillDistillationEmbeddings();
       const total = knowledgeCount + distillCount;
       if (total > 0) {
-        console.log(`Re-indexed ${total} entries (${knowledgeCount} knowledge, ${distillCount} distillations).\n`);
+        console.log(
+          `Re-indexed ${total} entries (${knowledgeCount} knowledge, ${distillCount} distillations).\n`,
+        );
       }
     } catch (err) {
-      console.error("Warning: embedding reindex failed, dedup will use title-overlap only:", err);
+      console.error(
+        "Warning: embedding reindex failed, dedup will use title-overlap only:",
+        err,
+      );
     }
   }
 
@@ -857,9 +954,13 @@ async function cmdDedup(
     const count = ltm.getDedupFeedbackCount(pid);
     const threshold = ltm.loadCalibratedThreshold(pid);
     if (threshold !== null) {
-      console.log(`[${project.name}] Using calibrated threshold ${threshold.toFixed(3)} (from ${count} feedback pairs, default: 0.935).`);
+      console.log(
+        `[${project.name}] Using calibrated threshold ${threshold.toFixed(3)} (from ${count} feedback pairs, default: 0.935).`,
+      );
     } else if (count > 0) {
-      console.log(`[${project.name}] ${count}/20 feedback samples collected. Threshold calibration activates after 20 samples.`);
+      console.log(
+        `[${project.name}] ${count}/20 feedback samples collected. Threshold calibration activates after 20 samples.`,
+      );
     }
   }
 
@@ -877,7 +978,11 @@ async function cmdDedup(
 
   let grandTotalRemoved = 0;
   let grandTotalClusters = 0;
-  const allResults: Array<{ name: string; path: string; result: Awaited<ReturnType<typeof ltm.deduplicate>> }> = [];
+  const allResults: Array<{
+    name: string;
+    path: string;
+    result: Awaited<ReturnType<typeof ltm.deduplicate>>;
+  }> = [];
 
   for (const project of projects) {
     const result = await ltm.deduplicate(project.path, { dryRun: !apply });
@@ -915,7 +1020,8 @@ async function cmdDedup(
     return;
   }
 
-  const multiProject = allResults.length > 1 || (!explicitProject && projects.length > 1);
+  const multiProject =
+    allResults.length > 1 || (!explicitProject && projects.length > 1);
   for (const { name, result } of allResults) {
     printDedupResult(result, apply, multiProject ? name : undefined);
   }
@@ -929,26 +1035,30 @@ async function cmdDedup(
   // Record feedback and recalibrate when --yes is used
   if (apply) {
     for (const { name, path, result } of allResults) {
-      const pid = name === "Global" ? null : getProjectId(path) ?? null;
+      const pid = name === "Global" ? null : (getProjectId(path) ?? null);
       ltm.recordDedupResultFeedback(pid, result, true, "cli_yes");
     }
     // Recalibrate per project
     const calibratedProjects = new Set<string | null>();
     for (const { name, path } of allResults) {
-      const pid = name === "Global" ? null : getProjectId(path) ?? null;
+      const pid = name === "Global" ? null : (getProjectId(path) ?? null);
       if (calibratedProjects.has(pid)) continue;
       calibratedProjects.add(pid);
       const newThreshold = ltm.calibrateDedupThreshold(pid);
       if (newThreshold !== null) {
         const count = ltm.getDedupFeedbackCount(pid);
         ltm.saveCalibratedThreshold(pid, newThreshold, count);
-        console.log(`Threshold calibrated to ${newThreshold.toFixed(3)} (from ${count} feedback pairs).`);
+        console.log(
+          `Threshold calibrated to ${newThreshold.toFixed(3)} (from ${count} feedback pairs).`,
+        );
       }
     }
   }
 
   if (!apply) {
-    console.log("\nRun with --yes to apply, or --interactive for per-cluster review.");
+    console.log(
+      "\nRun with --yes to apply, or --interactive for per-cluster review.",
+    );
   }
 }
 
@@ -962,7 +1072,9 @@ async function cmdDedupInteractive(
   ltm: typeof import("@loreai/core").ltm,
   getProjectId: typeof import("@loreai/core").projectId,
 ): Promise<void> {
-  console.log("Scanning for duplicate knowledge entries (interactive mode)...\n");
+  console.log(
+    "Scanning for duplicate knowledge entries (interactive mode)...\n",
+  );
 
   // Collect all clusters across projects (dry run)
   type ProjectCluster = {
@@ -1005,24 +1117,36 @@ async function cmdDedupInteractive(
   let rejectedCount = 0;
   let skippedCount = 0;
   let removedCount = 0;
-  const multiProject = allClusters.length > 1 || (!explicitProject && projects.length > 1);
+  const multiProject =
+    allClusters.length > 1 || (!explicitProject && projects.length > 1);
 
   for (let i = 0; i < allClusters.length; i++) {
-    const { projectName, projectPath, cluster, pairSimilarities } = allClusters[i];
+    const { projectName, projectPath, cluster, pairSimilarities } =
+      allClusters[i];
     const total = 1 + cluster.merged.length;
 
     if (multiProject) console.log(`--- ${projectName} ---`);
-    console.log(`\nCluster ${i + 1} of ${allClusters.length} (${total} entries → 1):`);
-    console.log(`  Keep:   "${truncate(cluster.surviving.title, 70)}" (${cluster.surviving.id.slice(0, 8)}…)`);
+    console.log(
+      `\nCluster ${i + 1} of ${allClusters.length} (${total} entries → 1):`,
+    );
+    console.log(
+      `  Keep:   "${truncate(cluster.surviving.title, 70)}" (${cluster.surviving.id.slice(0, 8)}…)`,
+    );
     for (const m of cluster.merged) {
       const pk = pairKey(cluster.surviving.id, m.id);
       const sim = pairSimilarities.get(pk);
       const simStr = sim != null ? ` [sim: ${sim.toFixed(3)}]` : "";
-      console.log(`  Merge:  "${truncate(m.title, 55)}" (${m.id.slice(0, 8)}…)${simStr}`);
+      console.log(
+        `  Merge:  "${truncate(m.title, 55)}" (${m.id.slice(0, 8)}…)${simStr}`,
+      );
     }
 
-    const answer = await promptChoice("\n  [a]ccept merge / [r]eject (keep all) / [s]kip? ", ["a", "r", "s"]);
-    const pid = projectName === "Global" ? null : getProjectId(projectPath) ?? null;
+    const answer = await promptChoice(
+      "\n  [a]ccept merge / [r]eject (keep all) / [s]kip? ",
+      ["a", "r", "s"],
+    );
+    const pid =
+      projectName === "Global" ? null : (getProjectId(projectPath) ?? null);
 
     if (answer === "a") {
       // Apply merge: remove merged entries
@@ -1079,14 +1203,17 @@ async function cmdDedupInteractive(
   // Recalibrate per project after interactive session
   const calibratedProjects = new Set<string | null>();
   for (const { projectName, projectPath } of allClusters) {
-    const pid = projectName === "Global" ? null : getProjectId(projectPath) ?? null;
+    const pid =
+      projectName === "Global" ? null : (getProjectId(projectPath) ?? null);
     if (calibratedProjects.has(pid)) continue;
     calibratedProjects.add(pid);
     const newThreshold = ltm.calibrateDedupThreshold(pid);
     if (newThreshold !== null) {
       const count = ltm.getDedupFeedbackCount(pid);
       ltm.saveCalibratedThreshold(pid, newThreshold, count);
-      console.log(`Threshold calibrated to ${newThreshold.toFixed(3)} (from ${count} feedback pairs).`);
+      console.log(
+        `Threshold calibrated to ${newThreshold.toFixed(3)} (from ${count} feedback pairs).`,
+      );
     }
   }
 }
@@ -1094,7 +1221,9 @@ async function cmdDedupInteractive(
 async function cmdRerank(): Promise<void> {
   const remote = getRemoteUrl();
   if (remote) {
-    console.error("Error: rerank is not supported in remote mode (requires local DB access).");
+    console.error(
+      "Error: rerank is not supported in remote mode (requires local DB access).",
+    );
     process.exit(1);
   }
 
@@ -1108,9 +1237,7 @@ async function cmdRerank(): Promise<void> {
   }
 }
 
-async function cmdReindex(
-  flags?: Record<string, unknown>,
-): Promise<void> {
+async function cmdReindex(flags?: Record<string, unknown>): Promise<void> {
   const remote = getRemoteUrl();
   if (remote) return cmdReindexRemote(remote, flags ?? {});
 
@@ -1164,17 +1291,43 @@ async function cmdListRemote(
 
   switch (type) {
     case "projects": {
-      const projects = await remoteGet<Array<{
-        id: string; path: string; name: string | null; git_remote: string | null;
-        created_at: number; knowledge_count: number; session_count: number;
-      }>>(remote, "/api/v1/projects");
-      if (asJson) { console.log(JSON.stringify(projects, null, 2)); return; }
-      if (!projects.length) { console.log("No projects found."); return; }
+      const projects = await remoteGet<
+        Array<{
+          id: string;
+          path: string;
+          name: string | null;
+          git_remote: string | null;
+          created_at: number;
+          knowledge_count: number;
+          session_count: number;
+        }>
+      >(remote, "/api/v1/projects");
+      if (asJson) {
+        console.log(JSON.stringify(projects, null, 2));
+        return;
+      }
+      if (!projects.length) {
+        console.log("No projects found.");
+        return;
+      }
       printTable(
-        ["Name", "Path", "Git Remote", "ID", "Knowledge", "Sessions", "Created"],
+        [
+          "Name",
+          "Path",
+          "Git Remote",
+          "ID",
+          "Knowledge",
+          "Sessions",
+          "Created",
+        ],
         projects.map((p) => [
-          p.name ?? "(unnamed)", truncate(p.path, 35), truncate(p.git_remote ?? "-", 30),
-          p.id.slice(0, 8), String(p.knowledge_count), String(p.session_count), formatDate(p.created_at),
+          p.name ?? "(unnamed)",
+          truncate(p.path, 35),
+          truncate(p.git_remote ?? "-", 30),
+          p.id.slice(0, 8),
+          String(p.knowledge_count),
+          String(p.session_count),
+          formatDate(p.created_at),
         ]),
         [16, 35, 30, 10, 10, 10, 20],
       );
@@ -1183,18 +1336,36 @@ async function cmdListRemote(
 
     case "knowledge": {
       const matchingProject = await resolveRemoteProject(remote, projectPath);
-      if (!matchingProject) { console.error(`No project found for: ${projectPath}`); process.exit(1); }
-      const entries = await remoteGet<Array<{ id: string; category: string; title: string; confidence: number; updated_at: number }>>(
-        remote, `/api/v1/projects/${matchingProject}/knowledge`,
-      );
+      if (!matchingProject) {
+        console.error(`No project found for: ${projectPath}`);
+        process.exit(1);
+      }
+      const entries = await remoteGet<
+        Array<{
+          id: string;
+          category: string;
+          title: string;
+          confidence: number;
+          updated_at: number;
+        }>
+      >(remote, `/api/v1/projects/${matchingProject}/knowledge`);
       const limited = entries.slice(0, limit);
-      if (asJson) { console.log(JSON.stringify(limited, null, 2)); return; }
-      if (!limited.length) { console.log("No knowledge entries found for this project."); return; }
+      if (asJson) {
+        console.log(JSON.stringify(limited, null, 2));
+        return;
+      }
+      if (!limited.length) {
+        console.log("No knowledge entries found for this project.");
+        return;
+      }
       printTable(
         ["Category", "Title", "Confidence", "Updated", "ID"],
         limited.map((e) => [
-          e.category, truncate(e.title, 40), e.confidence.toFixed(2),
-          formatDate(e.updated_at), e.id.slice(0, 8),
+          e.category,
+          truncate(e.title, 40),
+          e.confidence.toFixed(2),
+          formatDate(e.updated_at),
+          e.id.slice(0, 8),
         ]),
         [14, 40, 12, 20, 10],
       );
@@ -1203,18 +1374,44 @@ async function cmdListRemote(
 
     case "sessions": {
       const projectId = await resolveRemoteProject(remote, projectPath);
-      if (!projectId) { console.error(`No project found for: ${projectPath}`); process.exit(1); }
-      const sessions = await remoteGet<Array<{
-        session_id: string; message_count: number; distilled_count: number;
-        distillation_count: number; first_message_at: number; last_message_at: number;
-      }>>(remote, `/api/v1/projects/${projectId}/sessions?limit=${limit}`);
-      if (asJson) { console.log(JSON.stringify(sessions, null, 2)); return; }
-      if (!sessions.length) { console.log("No sessions found for this project."); return; }
+      if (!projectId) {
+        console.error(`No project found for: ${projectPath}`);
+        process.exit(1);
+      }
+      const sessions = await remoteGet<
+        Array<{
+          session_id: string;
+          message_count: number;
+          distilled_count: number;
+          distillation_count: number;
+          first_message_at: number;
+          last_message_at: number;
+        }>
+      >(remote, `/api/v1/projects/${projectId}/sessions?limit=${limit}`);
+      if (asJson) {
+        console.log(JSON.stringify(sessions, null, 2));
+        return;
+      }
+      if (!sessions.length) {
+        console.log("No sessions found for this project.");
+        return;
+      }
       printTable(
-        ["Session ID", "Messages", "Distilled", "Distillations", "First", "Last"],
+        [
+          "Session ID",
+          "Messages",
+          "Distilled",
+          "Distillations",
+          "First",
+          "Last",
+        ],
         sessions.map((s) => [
-          s.session_id.slice(0, 12), String(s.message_count), String(s.distilled_count),
-          String(s.distillation_count), formatDate(s.first_message_at), formatDate(s.last_message_at),
+          s.session_id.slice(0, 12),
+          String(s.message_count),
+          String(s.distilled_count),
+          String(s.distillation_count),
+          formatDate(s.first_message_at),
+          formatDate(s.last_message_at),
         ]),
         [14, 10, 10, 14, 20, 20],
       );
@@ -1223,19 +1420,50 @@ async function cmdListRemote(
 
     case "distillations": {
       const projectId = await resolveRemoteProject(remote, projectPath);
-      if (!projectId) { console.error(`No project found for: ${projectPath}`); process.exit(1); }
-      const dists = await remoteGet<Array<{
-        id: string; session_id: string; generation: number; token_count: number;
-        r_compression: number | null; c_norm: number | null; archived: number; created_at: number;
-      }>>(remote, `/api/v1/projects/${projectId}/distillations?limit=${limit}`);
-      if (asJson) { console.log(JSON.stringify(dists, null, 2)); return; }
-      if (!dists.length) { console.log("No distillations found for this project."); return; }
+      if (!projectId) {
+        console.error(`No project found for: ${projectPath}`);
+        process.exit(1);
+      }
+      const dists = await remoteGet<
+        Array<{
+          id: string;
+          session_id: string;
+          generation: number;
+          token_count: number;
+          r_compression: number | null;
+          c_norm: number | null;
+          archived: number;
+          created_at: number;
+        }>
+      >(remote, `/api/v1/projects/${projectId}/distillations?limit=${limit}`);
+      if (asJson) {
+        console.log(JSON.stringify(dists, null, 2));
+        return;
+      }
+      if (!dists.length) {
+        console.log("No distillations found for this project.");
+        return;
+      }
       printTable(
-        ["Session", "Gen", "Tokens", "R_comp", "C_norm", "Archived", "Created", "ID"],
+        [
+          "Session",
+          "Gen",
+          "Tokens",
+          "R_comp",
+          "C_norm",
+          "Archived",
+          "Created",
+          "ID",
+        ],
         dists.map((d) => [
-          d.session_id.slice(0, 12), String(d.generation), String(d.token_count),
-          d.r_compression?.toFixed(2) ?? "-", d.c_norm?.toFixed(2) ?? "-",
-          d.archived ? "yes" : "no", formatDate(d.created_at), d.id.slice(0, 8),
+          d.session_id.slice(0, 12),
+          String(d.generation),
+          String(d.token_count),
+          d.r_compression?.toFixed(2) ?? "-",
+          d.c_norm?.toFixed(2) ?? "-",
+          d.archived ? "yes" : "no",
+          formatDate(d.created_at),
+          d.id.slice(0, 8),
         ]),
         [14, 5, 8, 8, 8, 10, 20, 10],
       );
@@ -1268,11 +1496,22 @@ async function cmdShowRemote(
   switch (type) {
     case "knowledge": {
       const entry = await remoteGet<{
-        id: string; category: string; title: string; content: string; confidence: number;
-        project_id: string | null; cross_project: boolean; source_session: string | null;
-        created_at: number; updated_at: number; metadata: string | null;
+        id: string;
+        category: string;
+        title: string;
+        content: string;
+        confidence: number;
+        project_id: string | null;
+        cross_project: boolean;
+        source_session: string | null;
+        created_at: number;
+        updated_at: number;
+        metadata: string | null;
       }>(remote, `/api/v1/knowledge/${encodeURIComponent(rawId)}`);
-      if (asJson) { console.log(JSON.stringify(entry, null, 2)); return; }
+      if (asJson) {
+        console.log(JSON.stringify(entry, null, 2));
+        return;
+      }
       console.log(`ID:          ${entry.id}`);
       console.log(`Category:    ${entry.category}`);
       console.log(`Title:       ${entry.title}`);
@@ -1291,9 +1530,17 @@ async function cmdShowRemote(
       const pq = projectQueryParams(projectPath);
       const data = await remoteGet<{
         messages: Array<{ role: string; content: string; created_at: number }>;
-        distillations: Array<{ id: string; generation: number; token_count: number; created_at: number }>;
+        distillations: Array<{
+          id: string;
+          generation: number;
+          token_count: number;
+          created_at: number;
+        }>;
       }>(remote, `/api/v1/sessions/${encodeURIComponent(rawId)}?${pq}`);
-      if (asJson) { console.log(JSON.stringify(data, null, 2)); return; }
+      if (asJson) {
+        console.log(JSON.stringify(data, null, 2));
+        return;
+      }
       console.log(`Session: ${rawId}`);
       console.log(`Messages: ${data.messages.length}`);
       console.log(`Distillations: ${data.distillations.length}`);
@@ -1301,13 +1548,17 @@ async function cmdShowRemote(
         console.log(`\n--- Messages (${data.messages.length}) ---\n`);
         for (const msg of data.messages) {
           const prefix = msg.role === "user" ? ">" : "<";
-          console.log(`${prefix} [${formatDate(msg.created_at)}] ${msg.role}: ${truncate(msg.content, 120)}`);
+          console.log(
+            `${prefix} [${formatDate(msg.created_at)}] ${msg.role}: ${truncate(msg.content, 120)}`,
+          );
         }
       }
       if (data.distillations.length) {
         console.log(`\n--- Distillations (${data.distillations.length}) ---\n`);
         for (const d of data.distillations) {
-          console.log(`  gen=${d.generation} tokens=${d.token_count} ${formatDate(d.created_at)} ${d.id.slice(0, 8)}`);
+          console.log(
+            `  gen=${d.generation} tokens=${d.token_count} ${formatDate(d.created_at)} ${d.id.slice(0, 8)}`,
+          );
         }
       }
       break;
@@ -1315,11 +1566,22 @@ async function cmdShowRemote(
 
     case "distillation": {
       const dist = await remoteGet<{
-        id: string; session_id: string; project_id: string; generation: number;
-        token_count: number; r_compression: number | null; c_norm: number | null;
-        archived: number; created_at: number; source_ids: string; observations: string;
+        id: string;
+        session_id: string;
+        project_id: string;
+        generation: number;
+        token_count: number;
+        r_compression: number | null;
+        c_norm: number | null;
+        archived: number;
+        created_at: number;
+        source_ids: string;
+        observations: string;
       }>(remote, `/api/v1/distillations/${encodeURIComponent(rawId)}`);
-      if (asJson) { console.log(JSON.stringify(dist, null, 2)); return; }
+      if (asJson) {
+        console.log(JSON.stringify(dist, null, 2));
+        return;
+      }
       console.log(`ID:            ${dist.id}`);
       console.log(`Session:       ${dist.session_id}`);
       console.log(`Project ID:    ${dist.project_id}`);
@@ -1335,7 +1597,9 @@ async function cmdShowRemote(
     }
 
     default:
-      console.error(`Unknown type "${type ?? "(none)"}". Use: knowledge, session, distillation`);
+      console.error(
+        `Unknown type "${type ?? "(none)"}". Use: knowledge, session, distillation`,
+      );
       process.exit(1);
   }
 }
@@ -1347,7 +1611,10 @@ async function cmdClearRemote(
 ): Promise<void> {
   const skipConfirm = !!flags.yes;
   const projectId = await resolveRemoteProject(remote, projectPath);
-  if (!projectId) { console.error(`No project found for: ${projectPath}`); process.exit(1); }
+  if (!projectId) {
+    console.error(`No project found for: ${projectPath}`);
+    process.exit(1);
+  }
 
   const body: Record<string, boolean> = {};
   if (flags.knowledge) body.knowledge = true;
@@ -1360,12 +1627,23 @@ async function cmdClearRemote(
     : "ALL data";
 
   if (!skipConfirm) {
-    const confirmed = await confirm(`\nClear ${label} for project at:\n  ${projectPath}\n`);
-    if (!confirmed) { console.log("Cancelled."); return; }
+    const confirmed = await confirm(
+      `\nClear ${label} for project at:\n  ${projectPath}\n`,
+    );
+    if (!confirmed) {
+      console.log("Cancelled.");
+      return;
+    }
   }
 
-  const result = await remotePost<Record<string, number>>(remote, `/api/v1/projects/${projectId}/clear`, body);
-  const parts = Object.entries(result).map(([k, v]) => `${v} ${k.replace("_", " ")}`);
+  const result = await remotePost<Record<string, number>>(
+    remote,
+    `/api/v1/projects/${projectId}/clear`,
+    body,
+  );
+  const parts = Object.entries(result).map(
+    ([k, v]) => `${v} ${k.replace("_", " ")}`,
+  );
   console.log(`Cleared: ${parts.join(", ")}.`);
 }
 
@@ -1379,38 +1657,61 @@ async function cmdDeleteRemote(
   const skipConfirm = !!flags.yes;
   const projectPath = resolve((flags.project as string) ?? process.cwd());
 
-  if (!rawId) { console.error("Error: Missing <id> argument."); process.exit(1); }
+  if (!rawId) {
+    console.error("Error: Missing <id> argument.");
+    process.exit(1);
+  }
 
   switch (type) {
     case "knowledge": {
       if (!skipConfirm) {
         const confirmed = await confirm(`\nDelete knowledge entry ${rawId}?`);
-        if (!confirmed) { console.log("Cancelled."); return; }
+        if (!confirmed) {
+          console.log("Cancelled.");
+          return;
+        }
       }
-      await remoteDelete(remote, `/api/v1/knowledge/${encodeURIComponent(rawId)}`);
+      await remoteDelete(
+        remote,
+        `/api/v1/knowledge/${encodeURIComponent(rawId)}`,
+      );
       console.log(`Deleted knowledge entry: ${rawId}`);
       break;
     }
 
     case "session": {
       if (!skipConfirm) {
-        const confirmed = await confirm(`\nDelete all messages and distillations for session ${rawId}?`);
-        if (!confirmed) { console.log("Cancelled."); return; }
+        const confirmed = await confirm(
+          `\nDelete all messages and distillations for session ${rawId}?`,
+        );
+        if (!confirmed) {
+          console.log("Cancelled.");
+          return;
+        }
       }
       const pq = projectQueryParams(projectPath);
-      const result = await remoteDelete<{ messages_deleted: number; distillations_deleted: number }>(
-        remote, `/api/v1/sessions/${encodeURIComponent(rawId)}?${pq}`,
+      const result = await remoteDelete<{
+        messages_deleted: number;
+        distillations_deleted: number;
+      }>(remote, `/api/v1/sessions/${encodeURIComponent(rawId)}?${pq}`);
+      console.log(
+        `Deleted: ${result.messages_deleted} messages, ${result.distillations_deleted} distillations.`,
       );
-      console.log(`Deleted: ${result.messages_deleted} messages, ${result.distillations_deleted} distillations.`);
       break;
     }
 
     case "distillation": {
       if (!skipConfirm) {
         const confirmed = await confirm(`\nDelete distillation ${rawId}?`);
-        if (!confirmed) { console.log("Cancelled."); return; }
+        if (!confirmed) {
+          console.log("Cancelled.");
+          return;
+        }
       }
-      await remoteDelete(remote, `/api/v1/distillations/${encodeURIComponent(rawId)}`);
+      await remoteDelete(
+        remote,
+        `/api/v1/distillations/${encodeURIComponent(rawId)}`,
+      );
       console.log(`Deleted distillation: ${rawId}`);
       break;
     }
@@ -1418,18 +1719,32 @@ async function cmdDeleteRemote(
     case "project": {
       // Resolve project: rawId can be UUID or path
       let projectId = rawId;
-      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawId)) {
+      if (
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          rawId,
+        )
+      ) {
         const resolved = await resolveRemoteProject(remote, resolve(rawId));
-        if (!resolved) { console.error(`No project found for path: ${rawId}`); process.exit(1); }
+        if (!resolved) {
+          console.error(`No project found for path: ${rawId}`);
+          process.exit(1);
+        }
         projectId = resolved;
       }
       if (!skipConfirm) {
-        const confirmed = await confirm(`\nDelete project ${projectId.slice(0, 12)}... and ALL its data?`);
-        if (!confirmed) { console.log("Cancelled."); return; }
+        const confirmed = await confirm(
+          `\nDelete project ${projectId.slice(0, 12)}... and ALL its data?`,
+        );
+        if (!confirmed) {
+          console.log("Cancelled.");
+          return;
+        }
       }
       const result = await remoteDelete<{
-        knowledge_deleted: number; temporal_deleted: number;
-        distillations_deleted: number; sessions_cleared: number;
+        knowledge_deleted: number;
+        temporal_deleted: number;
+        distillations_deleted: number;
+        sessions_cleared: number;
       }>(remote, `/api/v1/projects/${encodeURIComponent(projectId)}`);
       console.log(
         `Deleted project: ${result.knowledge_deleted} knowledge, ` +
@@ -1441,7 +1756,9 @@ async function cmdDeleteRemote(
     }
 
     default:
-      console.error(`Unknown type "${type ?? "(none)"}". Use: knowledge, session, distillation, project`);
+      console.error(
+        `Unknown type "${type ?? "(none)"}". Use: knowledge, session, distillation, project`,
+      );
       process.exit(1);
   }
 }
@@ -1457,15 +1774,28 @@ async function cmdMergeRemote(
     const confirmed = await confirm(
       `This will scan git remotes and merge duplicate projects on the remote gateway.`,
     );
-    if (!confirmed) { console.log("Cancelled."); return; }
+    if (!confirmed) {
+      console.log("Cancelled.");
+      return;
+    }
   }
 
   const result = await remotePost<{
-    updated: number; merged: number; namesBackfilled: number;
-    mergeDetails: Array<{ sourcePath: string; targetPath: string; gitRemote: string; result: Record<string, number> }>;
+    updated: number;
+    merged: number;
+    namesBackfilled: number;
+    mergeDetails: Array<{
+      sourcePath: string;
+      targetPath: string;
+      gitRemote: string;
+      result: Record<string, number>;
+    }>;
   }>(remote, "/api/v1/projects/merge");
 
-  if (asJson) { console.log(JSON.stringify(result, null, 2)); return; }
+  if (asJson) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
 
   console.log(`\nResults:`);
   console.log(`  Updated: ${result.updated} project(s) with git remote info`);
@@ -1488,37 +1818,68 @@ async function cmdDedupRemote(
 ): Promise<void> {
   const asJson = !!flags.json;
   const interactive = !!flags.interactive;
-  const explicitProject = typeof flags.project === "string" ? resolve(flags.project) : null;
+  const explicitProject =
+    typeof flags.project === "string" ? resolve(flags.project) : null;
 
   if (interactive) {
-    console.error("Error: --interactive mode is not supported in remote mode. Use --yes for non-interactive.");
+    console.error(
+      "Error: --interactive mode is not supported in remote mode. Use --yes for non-interactive.",
+    );
     process.exit(1);
   }
 
   let projectId: string | undefined;
   if (explicitProject) {
-    projectId = await resolveRemoteProject(remote, explicitProject) ?? undefined;
-    if (!projectId) { console.error(`No project found for: ${explicitProject}`); process.exit(1); }
+    projectId =
+      (await resolveRemoteProject(remote, explicitProject)) ?? undefined;
+    if (!projectId) {
+      console.error(`No project found for: ${explicitProject}`);
+      process.exit(1);
+    }
   }
 
-  console.log("Scanning for duplicate knowledge entries (dry run, remote)...\n");
+  console.log(
+    "Scanning for duplicate knowledge entries (dry run, remote)...\n",
+  );
 
   if (!projectId) {
-    const projects = await remoteGet<Array<{ id: string; name: string | null }>>(remote, "/api/v1/projects");
-    if (!projects.length) { console.log("No projects found."); return; }
+    const projects = await remoteGet<
+      Array<{ id: string; name: string | null }>
+    >(remote, "/api/v1/projects");
+    if (!projects.length) {
+      console.log("No projects found.");
+      return;
+    }
     // Dedup each project
     for (const p of projects) {
       const result = await remotePost(remote, `/api/v1/projects/${p.id}/dedup`);
-      if (asJson) { console.log(JSON.stringify({ project: p.name ?? p.id, ...result as object }, null, 2)); }
-      else { console.log(`[${p.name ?? p.id}] ${JSON.stringify(result)}`); }
+      if (asJson) {
+        console.log(
+          JSON.stringify(
+            { project: p.name ?? p.id, ...(result as object) },
+            null,
+            2,
+          ),
+        );
+      } else {
+        console.log(`[${p.name ?? p.id}] ${JSON.stringify(result)}`);
+      }
     }
   } else {
-    const result = await remotePost(remote, `/api/v1/projects/${projectId}/dedup`);
-    if (asJson) { console.log(JSON.stringify(result, null, 2)); }
-    else { console.log(JSON.stringify(result, null, 2)); }
+    const result = await remotePost(
+      remote,
+      `/api/v1/projects/${projectId}/dedup`,
+    );
+    if (asJson) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log(JSON.stringify(result, null, 2));
+    }
   }
 
-  console.log("\nNote: Remote dedup is always a dry run. Apply changes locally or via the gateway.");
+  console.log(
+    "\nNote: Remote dedup is always a dry run. Apply changes locally or via the gateway.",
+  );
 }
 
 async function cmdReindexRemote(
@@ -1527,7 +1888,8 @@ async function cmdReindexRemote(
 ): Promise<void> {
   console.log("Re-indexing embeddings on remote gateway...");
   const result = await remotePost<{
-    knowledge_embedded: number; distillations_embedded: number;
+    knowledge_embedded: number;
+    distillations_embedded: number;
   }>(remote, "/api/v1/reindex");
 
   const total = result.knowledge_embedded + result.distillations_embedded;
@@ -1552,14 +1914,21 @@ async function resolveRemoteProject(
   const gitRemote = getGitRemote(projectPath);
   const normalizedRemote = gitRemote ? normalizeRemoteUrl(gitRemote) : null;
 
-  const projects = await remoteGet<Array<{
-    id: string; path: string; git_remote: string | null;
-  }>>(remote, "/api/v1/projects");
+  const projects = await remoteGet<
+    Array<{
+      id: string;
+      path: string;
+      git_remote: string | null;
+    }>
+  >(remote, "/api/v1/projects");
 
   // Prefer git_remote match
   if (normalizedRemote) {
     for (const p of projects) {
-      if (p.git_remote && normalizeRemoteUrl(p.git_remote) === normalizedRemote) {
+      if (
+        p.git_remote &&
+        normalizeRemoteUrl(p.git_remote) === normalizedRemote
+      ) {
         return p.id;
       }
     }
@@ -1669,7 +2038,9 @@ async function cmdConsolidate(
   // signal — note both the bucket AND the real project may carry the same
   // remote, so we must explicitly exclude buckets from the target set rather
   // than relying on a first-match lookup.
-  const realProjects = projects.filter((p) => !isUnattributedProjectPath(p.path));
+  const realProjects = projects.filter(
+    (p) => !isUnattributedProjectPath(p.path),
+  );
 
   type Plan = {
     bucket: (typeof projects)[number];
@@ -1713,7 +2084,9 @@ async function cmdConsolidate(
     console.log(`  mergeable (matched by git remote): ${mergeable.length}`);
     console.log(`  orphans (no confident match): ${orphans.length}\n`);
     for (const p of mergeable) {
-      console.log(`  merge ${p.bucket.path} → ${p.target!.name ?? p.target!.path}`);
+      console.log(
+        `  merge ${p.bucket.path} → ${p.target!.name ?? p.target!.path}`,
+      );
     }
     for (const p of orphans) {
       console.log(
@@ -1743,7 +2116,9 @@ async function cmdConsolidate(
       mergeProjects(p.bucket.id, p.target!.id);
       merged++;
     } catch (e) {
-      console.error(`  failed to merge ${p.bucket.path}: ${(e as Error).message}`);
+      console.error(
+        `  failed to merge ${p.bucket.path}: ${(e as Error).message}`,
+      );
     }
   }
   console.log(`\nConsolidated ${merged} bucket(s).`);

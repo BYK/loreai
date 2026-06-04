@@ -9,7 +9,13 @@ describe("parseOps", () => {
   test("parses valid JSON array", () => {
     const ops = parseOps(
       JSON.stringify([
-        { op: "create", category: "gotcha", title: "Test", content: "Body", scope: "project" },
+        {
+          op: "create",
+          category: "gotcha",
+          title: "Test",
+          content: "Body",
+          scope: "project",
+        },
       ]),
     );
     expect(ops.length).toBe(1);
@@ -34,7 +40,13 @@ describe("parseOps", () => {
   test("filters out items without op field", () => {
     const ops = parseOps(
       JSON.stringify([
-        { op: "create", category: "gotcha", title: "T", content: "C", scope: "project" },
+        {
+          op: "create",
+          category: "gotcha",
+          title: "T",
+          content: "C",
+          scope: "project",
+        },
         { notAnOp: true },
         { op: "delete", id: "abc", reason: "outdated" },
       ]),
@@ -139,7 +151,10 @@ describe("applyOps", () => {
       },
     ];
 
-    const result = applyOps(ops, { projectPath: PROJECT_PATH, skipCreate: true });
+    const result = applyOps(ops, {
+      projectPath: PROJECT_PATH,
+      skipCreate: true,
+    });
     expect(result.created).toBe(0);
 
     const entries = ltm.forProject(PROJECT_PATH, false);

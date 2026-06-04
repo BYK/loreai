@@ -38,16 +38,34 @@ type ErrorBucket = { regex: RegExp; type: string };
  */
 const ERROR_BUCKETS: ErrorBucket[] = [
   { regex: /timed? ?out|etimedout/, type: "timeout" },
-  { regex: /permission denied|eacces|not permitted|operation not permitted/, type: "permission" },
+  {
+    regex: /permission denied|eacces|not permitted|operation not permitted/,
+    type: "permission",
+  },
   // edit_noop must precede the generic not_found bucket — "oldString not
   // found" would otherwise match /not found/ first.
-  { regex: /oldstring not found|no changes|nothing to|no replacement/, type: "edit_noop" },
+  {
+    regex: /oldstring not found|no changes|nothing to|no replacement/,
+    type: "edit_noop",
+  },
   { regex: /no such file|enoent|does not exist|not found/, type: "not_found" },
   { regex: /already exists|eexist/, type: "already_exists" },
-  { regex: /connection|econnrefused|econnreset|network|dns|enotfound|socket/, type: "network" },
-  { regex: /syntax error|parse error|unexpected token|unexpected end/, type: "syntax" },
-  { regex: /type error|is not a function|undefined is not|cannot read propert/, type: "type_error" },
-  { regex: /exit code|command failed|non-zero|exited with/, type: "command_failed" },
+  {
+    regex: /connection|econnrefused|econnreset|network|dns|enotfound|socket/,
+    type: "network",
+  },
+  {
+    regex: /syntax error|parse error|unexpected token|unexpected end/,
+    type: "syntax",
+  },
+  {
+    regex: /type error|is not a function|undefined is not|cannot read propert/,
+    type: "type_error",
+  },
+  {
+    regex: /exit code|command failed|non-zero|exited with/,
+    type: "command_failed",
+  },
   { regex: /abort|cancel|interrupt|sigint|sigterm/, type: "aborted" },
 ];
 
@@ -167,7 +185,10 @@ export function recentSessionFailures(
  * Deterministic gotcha title for a recurring tool failure. Stable wording so
  * `ltm.create()`'s title-based dedup guard collapses repeats across distills.
  */
-export function toolGotchaTitle(tool: string, errorType: string | null): string {
+export function toolGotchaTitle(
+  tool: string,
+  errorType: string | null,
+): string {
   return `Recurring ${tool} failure: ${errorType ?? "unknown error"}`;
 }
 
@@ -204,9 +225,7 @@ export function formatToolFailureSection(
   if (sessionID) {
     const rows = recentSessionFailures(projectPath, sessionID, { limit: 5 });
     if (!rows.length) return "";
-    const lines = rows.map(
-      (r) => `- ${r.tool} → ${r.error_type ?? "unknown"}`,
-    );
+    const lines = rows.map((r) => `- ${r.tool} → ${r.error_type ?? "unknown"}`);
     return `### Tool Failures (this session)\n${lines.join("\n")}`;
   }
   const stats = toolFailureStats(projectPath, { minSessions: 1 }).slice(0, 5);

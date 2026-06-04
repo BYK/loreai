@@ -81,7 +81,11 @@ async function resolveLaunchTarget(
         prependArgs.push(...agent.cliArgs(gatewayUrl, projectDir));
       }
     }
-    return { command: cmdArgs[0], args: [...prependArgs, ...cmdArgs.slice(1), ...extraArgs], env };
+    return {
+      command: cmdArgs[0],
+      args: [...prependArgs, ...cmdArgs.slice(1), ...extraArgs],
+      env,
+    };
   }
 
   // --- No command: auto-detect agents ---
@@ -89,7 +93,9 @@ async function resolveLaunchTarget(
 
   if (detected.length === 0) {
     console.error("[lore] No known AI agents found on PATH.");
-    console.error("[lore] Install one of: Claude Code (claude), Codex (codex), Pi (pi), OpenCode (opencode), Hermes (hermes)");
+    console.error(
+      "[lore] Install one of: Claude Code (claude), Codex (codex), Pi (pi), OpenCode (opencode), Hermes (hermes)",
+    );
     console.error(`[lore] Or run with an explicit command: lore run <command>`);
     return null;
   }
@@ -157,7 +163,9 @@ export async function commandRun(
     const alive = await probeGateway(remoteUrl);
     if (!alive) {
       console.error(`[lore] Remote gateway at ${remoteUrl} is not reachable.`);
-      console.error(`[lore] Check LORE_REMOTE_URL and ensure the gateway is running.`);
+      console.error(
+        `[lore] Check LORE_REMOTE_URL and ensure the gateway is running.`,
+      );
       return safeExit(1);
     }
     gatewayUrl = remoteUrl;
@@ -190,7 +198,9 @@ export async function commandRun(
 
   if (!target) {
     // No agent found — start server without launching an agent
-    console.log("[lore] No agent detected. Point your agent at the gateway manually.");
+    console.log(
+      "[lore] No agent detected. Point your agent at the gateway manually.",
+    );
     console.log(`[lore]   export ANTHROPIC_BASE_URL=${gatewayUrl}`);
 
     if (owned) {
@@ -210,7 +220,9 @@ export async function commandRun(
   }
 
   // 4. Launch agent child process
-  console.log(`[lore] Launching: ${target.command} ${target.args.join(" ")}`.trimEnd());
+  console.log(
+    `[lore] Launching: ${target.command} ${target.args.join(" ")}`.trimEnd(),
+  );
 
   const child = launchChild(target);
 
@@ -228,7 +240,10 @@ export async function commandRun(
       // Exit with the child's code (or 128 + signal number for signal deaths)
       if (signal) {
         const SIGNAL_CODES: Record<string, number> = {
-          SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGTERM: 15,
+          SIGHUP: 1,
+          SIGINT: 2,
+          SIGQUIT: 3,
+          SIGTERM: 15,
         };
         safeExit(128 + (SIGNAL_CODES[signal] ?? 1));
       }
@@ -236,7 +251,9 @@ export async function commandRun(
     });
 
     child.on("error", async (err) => {
-      console.error(`[lore] Failed to launch ${target.command}: ${err.message}`);
+      console.error(
+        `[lore] Failed to launch ${target.command}: ${err.message}`,
+      );
       if (owned) await shutdown();
       safeExit(1);
     });

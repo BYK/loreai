@@ -98,7 +98,11 @@ interface PendingRequest {
     temperature?: number;
     system:
       | string
-      | Array<{ type: string; text: string; cache_control?: { type: string; ttl?: string } }>;
+      | Array<{
+          type: string;
+          text: string;
+          cache_control?: { type: string; ttl?: string };
+        }>;
     messages: Array<{ role: string; content: string }>;
   };
   /** Resolve the caller's promise with the text response (null on error). */
@@ -187,7 +191,9 @@ function groupKey(cred: AuthCredential, providerID: string): string {
  * Poll:   GET /v1/messages/batches/{id} → check processing_status
  * Results: GET results_url → JSONL with { custom_id, result: { type, message?, error? } }
  */
-export function createAnthropicBatchProvider(upstreamUrl: string): BatchProvider {
+export function createAnthropicBatchProvider(
+  upstreamUrl: string,
+): BatchProvider {
   const baseUrl = upstreamUrl.replace(/\/$/, "");
 
   return {
@@ -218,10 +224,14 @@ export function createAnthropicBatchProvider(upstreamUrl: string): BatchProvider
           return "auth-error";
         }
         if (response.status === 404) {
-          log.warn(`anthropic batch endpoint not found (404) at ${baseUrl} — provider does not support batches`);
+          log.warn(
+            `anthropic batch endpoint not found (404) at ${baseUrl} — provider does not support batches`,
+          );
           return "not-found";
         }
-        log.error(`anthropic batch create failed: ${response.status} ${response.statusText} — ${text}`);
+        log.error(
+          `anthropic batch create failed: ${response.status} ${response.statusText} — ${text}`,
+        );
         return null;
       }
 
@@ -239,7 +249,9 @@ export function createAnthropicBatchProvider(upstreamUrl: string): BatchProvider
       });
 
       if (!response.ok) {
-        log.error(`anthropic batch poll failed for ${batchId}: ${response.status}`);
+        log.error(
+          `anthropic batch poll failed for ${batchId}: ${response.status}`,
+        );
         return { status: "pending" }; // Retry on next poll
       }
 
@@ -251,7 +263,8 @@ export function createAnthropicBatchProvider(upstreamUrl: string): BatchProvider
       if (data.processing_status !== "ended") return { status: "pending" };
 
       // Batch is done — retrieve results
-      const resultsUrl = data.results_url ?? `${baseUrl}/v1/messages/batches/${batchId}/results`;
+      const resultsUrl =
+        data.results_url ?? `${baseUrl}/v1/messages/batches/${batchId}/results`;
       const resultsResponse = await fetch(resultsUrl, {
         headers: {
           "anthropic-version": "2023-06-01",
@@ -260,7 +273,9 @@ export function createAnthropicBatchProvider(upstreamUrl: string): BatchProvider
       });
 
       if (!resultsResponse.ok) {
-        log.error(`anthropic batch results fetch failed for ${batchId}: ${resultsResponse.status}`);
+        log.error(
+          `anthropic batch results fetch failed for ${batchId}: ${resultsResponse.status}`,
+        );
         return { status: "pending" }; // Retry on next poll
       }
 
@@ -308,7 +323,9 @@ export function createAnthropicBatchProvider(upstreamUrl: string): BatchProvider
             });
           }
         } catch {
-          log.error(`failed to parse anthropic batch result line: ${line.slice(0, 200)}`);
+          log.error(
+            `failed to parse anthropic batch result line: ${line.slice(0, 200)}`,
+          );
         }
       }
 
@@ -353,7 +370,9 @@ async function uploadOpenAIBatchFile(
     // 404/405 means the upstream doesn't support the batch/files API at all
     // (e.g. vLLM, local models, MiniMax). Treat as permanent provider-level failure.
     if (response.status === 404 || response.status === 405) {
-      log.warn(`openai file upload not supported (${response.status}): ${text}`);
+      log.warn(
+        `openai file upload not supported (${response.status}): ${text}`,
+      );
       return "not-found";
     }
     log.error(`openai file upload failed: ${response.status} — ${text}`);
@@ -422,7 +441,9 @@ async function downloadOpenAIResults(
         });
       }
     } catch {
-      log.error(`failed to parse openai batch result line: ${line.slice(0, 200)}`);
+      log.error(
+        `failed to parse openai batch result line: ${line.slice(0, 200)}`,
+      );
     }
   }
 
@@ -478,7 +499,9 @@ export function createOpenAIBatchProvider(upstreamUrl: string): BatchProvider {
           body: {
             model: item.params.model,
             max_completion_tokens: item.params.max_tokens,
-            ...(item.params.temperature != null && { temperature: item.params.temperature }),
+            ...(item.params.temperature != null && {
+              temperature: item.params.temperature,
+            }),
             messages,
           },
         });
@@ -487,7 +510,8 @@ export function createOpenAIBatchProvider(upstreamUrl: string): BatchProvider {
 
       // 2. Upload JSONL file
       const fileId = await uploadOpenAIBatchFile(baseUrl, auth, jsonl);
-      if (!fileId || fileId === "auth-error" || fileId === "not-found") return fileId;
+      if (!fileId || fileId === "auth-error" || fileId === "not-found")
+        return fileId;
 
       // 3. Create batch
       const response = await fetch(`${baseUrl}/v1/batches`, {
@@ -515,7 +539,9 @@ export function createOpenAIBatchProvider(upstreamUrl: string): BatchProvider {
           log.warn(`openai batch not supported (${response.status}): ${text}`);
           return "not-found";
         }
-        log.error(`openai batch create failed: ${response.status} ${response.statusText} — ${text}`);
+        log.error(
+          `openai batch create failed: ${response.status} ${response.statusText} — ${text}`,
+        );
         return null;
       }
 
@@ -529,7 +555,9 @@ export function createOpenAIBatchProvider(upstreamUrl: string): BatchProvider {
       });
 
       if (!response.ok) {
-        log.error(`openai batch poll failed for ${batchId}: ${response.status}`);
+        log.error(
+          `openai batch poll failed for ${batchId}: ${response.status}`,
+        );
         return { status: "pending" }; // Retry on next poll
       }
 
@@ -540,7 +568,11 @@ export function createOpenAIBatchProvider(upstreamUrl: string): BatchProvider {
       };
 
       if (data.status === "completed" && data.output_file_id) {
-        const results = await downloadOpenAIResults(baseUrl, auth, data.output_file_id);
+        const results = await downloadOpenAIResults(
+          baseUrl,
+          auth,
+          data.output_file_id,
+        );
         return { status: "done", results };
       }
 
@@ -587,9 +619,11 @@ export function createBatchLLMClient(
   defaultModel: { providerID: string; modelID: string },
   batchConfig?: BatchQueueConfig,
 ): LLMClient & { shutdown: () => Promise<void>; stats: () => BatchStats } {
-  const flushIntervalMs = batchConfig?.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
+  const flushIntervalMs =
+    batchConfig?.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
   const maxQueueSize = batchConfig?.maxQueueSize ?? DEFAULT_MAX_QUEUE_SIZE;
-  const pollIntervalMs = batchConfig?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+  const pollIntervalMs =
+    batchConfig?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
 
   // Create both batch providers
   const providers: Record<string, BatchProvider> = {
@@ -670,7 +704,9 @@ export function createBatchLLMClient(
     auth: AuthCredential,
     items: PendingRequest[],
   ): Promise<void> {
-    log.info(`batch flush (${provider.name}): submitting ${items.length} requests`);
+    log.info(
+      `batch flush (${provider.name}): submitting ${items.length} requests`,
+    );
 
     try {
       const batchId = await provider.submit(
@@ -682,19 +718,27 @@ export function createBatchLLMClient(
         if (batchId === "not-found") {
           // Provider doesn't support batches (404) — disable for the entire provider
           disabledBatchProviders.add(provider.name);
-          setKV(DISABLED_BATCH_PROVIDERS_KV_KEY, JSON.stringify([...disabledBatchProviders]));
+          setKV(
+            DISABLED_BATCH_PROVIDERS_KV_KEY,
+            JSON.stringify([...disabledBatchProviders]),
+          );
           log.warn(
             `batch API disabled for provider "${provider.name}" (404 — endpoint not supported). ` +
               `All future worker calls will use individual requests.`,
           );
         } else if (batchId === "auth-error") {
           // Permanent auth failure — disable batch for affected sessions
-          const sessionIDs = new Set(items.map((i) => i.sessionID).filter(Boolean) as string[]);
+          const sessionIDs = new Set(
+            items.map((i) => i.sessionID).filter(Boolean) as string[],
+          );
           for (const sid of sessionIDs) {
             disabledBatchSessions.add(sid);
           }
           if (sessionIDs.size > 0) {
-            setKV(DISABLED_BATCH_KV_KEY, JSON.stringify([...disabledBatchSessions]));
+            setKV(
+              DISABLED_BATCH_KV_KEY,
+              JSON.stringify([...disabledBatchSessions]),
+            );
             log.warn(
               `batch API (${provider.name}) disabled for sessions [${[...sessionIDs].join(", ")}]. ` +
                 `Future worker calls for these sessions will use individual requests.`,
@@ -715,7 +759,8 @@ export function createBatchLLMClient(
       }
 
       const pollTimer = setInterval(
-        () => pollBatch(batchId).catch((e) => log.error("batch poll error:", e)),
+        () =>
+          pollBatch(batchId).catch((e) => log.error("batch poll error:", e)),
         pollIntervalMs,
       );
 
@@ -728,7 +773,9 @@ export function createBatchLLMClient(
         provider,
       });
 
-      log.info(`batch created (${provider.name}): ${batchId} with ${items.length} requests`);
+      log.info(
+        `batch created (${provider.name}): ${batchId} with ${items.length} requests`,
+      );
     } catch (e) {
       log.error(`batch create error (${provider.name}):`, e);
       await fallbackAll(items);
@@ -800,7 +847,9 @@ export function createBatchLLMClient(
     // Check max age — give up and fallback if too old
     // Uses provider-specific max age (1h Anthropic, 4h OpenAI)
     if (Date.now() - batch.submittedAt > batch.provider.maxBatchAgeMs) {
-      log.warn(`batch ${batchId} (${batch.provider.name}) exceeded max age — falling back to synchronous`);
+      log.warn(
+        `batch ${batchId} (${batch.provider.name}) exceeded max age — falling back to synchronous`,
+      );
       clearInterval(batch.pollTimer);
       inflight.delete(batchId);
       await fallbackAll([...batch.requests.values()]);
@@ -813,7 +862,9 @@ export function createBatchLLMClient(
       if (pollResult.status === "pending") return;
 
       if (pollResult.status === "failed") {
-        log.error(`batch ${batchId} (${batch.provider.name}) failed: ${pollResult.error}`);
+        log.error(
+          `batch ${batchId} (${batch.provider.name}) failed: ${pollResult.error}`,
+        );
         clearInterval(batch.pollTimer);
         inflight.delete(batchId);
         await fallbackAll([...batch.requests.values()]);
@@ -821,7 +872,9 @@ export function createBatchLLMClient(
       }
 
       // status === "done" — resolve all results
-      log.info(`batch ${batchId} (${batch.provider.name}) completed — resolving ${pollResult.results.length} results`);
+      log.info(
+        `batch ${batchId} (${batch.provider.name}) completed — resolving ${pollResult.results.length} results`,
+      );
 
       for (const result of pollResult.results) {
         const pending = batch.requests.get(result.customId);
@@ -844,11 +897,22 @@ export function createBatchLLMClient(
                   },
                 },
                 (span) => {
-                  setGenAiUsageAttributes(span, result.usage!, result.model ?? undefined);
+                  setGenAiUsageAttributes(
+                    span,
+                    result.usage!,
+                    result.model ?? undefined,
+                  );
                 },
               );
               emitCostMetric(pending.params.model, result.usage, "batch", "1h");
-              recordWorkerCost(pending.sessionID, pending.params.model, result.usage, "batch", pending.workerID, "1h");
+              recordWorkerCost(
+                pending.sessionID,
+                pending.params.model,
+                result.usage,
+                "batch",
+                pending.workerID,
+                "1h",
+              );
             }
 
             pending.resolve(result.text);
@@ -858,7 +922,9 @@ export function createBatchLLMClient(
           case "errored":
             pending.resolve(null); // Match inner client behavior (null on error)
             totalFailed++;
-            log.error(`batch item ${result.customId} errored: ${result.error ?? "unknown"}`);
+            log.error(
+              `batch item ${result.customId} errored: ${result.error ?? "unknown"}`,
+            );
             break;
           case "canceled":
           case "expired":
@@ -911,9 +977,7 @@ export function createBatchLLMClient(
             const system =
               typeof item.params.system === "string"
                 ? item.params.system
-                : item.params.system
-                    .map((b) => b.text)
-                    .join("\n");
+                : item.params.system.map((b) => b.text).join("\n");
             const user = item.params.messages[0]?.content ?? "";
             // Pass sessionID so inner.prompt can resolve the correct auth
             // credential and inject the billing header for bearer-token
@@ -925,7 +989,9 @@ export function createBatchLLMClient(
               sessionID: item.sessionID,
               workerID: item.workerID,
               maxTokens: item.params.max_tokens,
-              ...(item.params.temperature != null && { temperature: item.params.temperature }),
+              ...(item.params.temperature != null && {
+                temperature: item.params.temperature,
+              }),
             });
             item.resolve(result);
           } catch (e) {
@@ -1047,7 +1113,9 @@ export function createBatchLLMClient(
 
       // Flush remaining items synchronously (batch API might not finish before process exits)
       if (queue.length > 0) {
-        log.info(`batch shutdown: processing ${queue.length} remaining items synchronously`);
+        log.info(
+          `batch shutdown: processing ${queue.length} remaining items synchronously`,
+        );
         await fallbackAll(queue.splice(0));
       }
 

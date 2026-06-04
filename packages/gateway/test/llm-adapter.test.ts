@@ -1,5 +1,10 @@
 import { describe, test, expect } from "bun:test";
-import { backoffMs, maxRetriesFor, normalizeOpenAIUsage, AUTH_ERROR_CODES } from "../src/llm-adapter";
+import {
+  backoffMs,
+  maxRetriesFor,
+  normalizeOpenAIUsage,
+  AUTH_ERROR_CODES,
+} from "../src/llm-adapter";
 
 // ---------------------------------------------------------------------------
 // maxRetriesFor — background (default)

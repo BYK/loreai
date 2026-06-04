@@ -1,6 +1,21 @@
-import type { LoreMessage, LorePart, LoreMessageWithParts, LoreToolPart, LoreTextPart, LoreToolState, LoreToolStateCompleted } from "./types";
+import type {
+  LoreMessage,
+  LorePart,
+  LoreMessageWithParts,
+  LoreToolPart,
+  LoreTextPart,
+  LoreToolState,
+  LoreToolStateCompleted,
+} from "./types";
 import { isTextPart, isReasoningPart, isToolPart } from "./types";
-import { db, ensureProject, loadForceMinLayer, saveForceMinLayer, saveSessionTracking, loadSessionTracking } from "./db";
+import {
+  db,
+  ensureProject,
+  loadForceMinLayer,
+  saveForceMinLayer,
+  saveSessionTracking,
+  loadSessionTracking,
+} from "./db";
 import { config } from "./config";
 import { formatDistillations } from "./prompt";
 import { normalize } from "./markdown";
@@ -20,8 +35,7 @@ function estimateParts(parts: LorePart[]): number {
   let total = 0;
   for (const part of parts) {
     if (isTextPart(part)) total += estimate(part.text);
-    else if (isReasoningPart(part) && part.text)
-      total += estimate(part.text);
+    else if (isReasoningPart(part) && part.text) total += estimate(part.text);
     else if (isToolPart(part) && part.state.status === "completed")
       total += estimate(part.state.output) + estimate(part.tool) + 50;
     else if (isToolPart(part) && part.state.status === "error")
@@ -203,8 +217,8 @@ export function recordCacheUsage(
     if (state.consecutiveBusts !== prev) {
       log.info(
         `bust-tracker: session=${sessionID.slice(0, 16)} ratio=${bustRatio.toFixed(3)}` +
-        ` (write=${cacheWrite} read=${cacheRead} uncached=${inputTokens})` +
-        ` busts=${prev}→${state.consecutiveBusts}`,
+          ` (write=${cacheWrite} read=${cacheRead} uncached=${inputTokens})` +
+          ` busts=${prev}→${state.consecutiveBusts}`,
       );
     }
 
@@ -219,8 +233,8 @@ export function recordCacheUsage(
         state.consecutiveBusts = 0;
         log.info(
           `free-write-detect: session=${sessionID.slice(0, 16)} ` +
-          `${NO_CACHE_WRITE_THRESHOLD} consecutive turns with zero cache writes — ` +
-          `treating compression as free`,
+            `${NO_CACHE_WRITE_THRESHOLD} consecutive turns with zero cache writes — ` +
+            `treating compression as free`,
         );
       }
     } else {
@@ -720,7 +734,10 @@ export const BUST_PRESSURE_THRESHOLD = 3;
  * When busts ≥ BUST_PRESSURE_THRESHOLD, lowers the threshold to 1/4 of the
  * configured value (min 3) to consolidate the distilled prefix earlier.
  */
-export function effectiveMetaThreshold(busts: number, configThreshold: number): number {
+export function effectiveMetaThreshold(
+  busts: number,
+  configThreshold: number,
+): number {
   return busts >= BUST_PRESSURE_THRESHOLD
     ? Math.max(3, Math.floor(configThreshold / 4))
     : configThreshold;
@@ -782,7 +799,9 @@ function loadDistillations(
   const params = sessionID ? [pid, sessionID] : [pid];
   const rows = db()
     .query(query)
-    .all(...params) as Array<Omit<Distillation, "source_ids"> & { source_ids: string }>;
+    .all(...params) as Array<
+    Omit<Distillation, "source_ids"> & { source_ids: string }
+  >;
   return rows.map((r) => ({
     ...r,
     source_ids: r.source_ids ? JSON.parse(r.source_ids) : [],
@@ -855,9 +874,7 @@ function cleanParts(parts: LorePart[]): LorePart[] {
   });
   // Filter out text parts that became empty after stripping
   const filtered = cleaned.filter(
-    (part) =>
-      !isTextPart(part) ||
-      part.text.trim().length > 0,
+    (part) => !isTextPart(part) || part.text.trim().length > 0,
   );
   // If all parts were stripped (e.g. a user message that was purely build-switch synthetic
   // content), keep a minimal placeholder so the message survives toModelMessages.
@@ -893,7 +910,8 @@ export function toolStripAnnotation(toolName: string, output: string): string {
   const lines = output.split("\n").length;
 
   // Detect key signals via lightweight heuristics — no LLM call
-  const hasError = /\b(?:error|fail(?:ed|ure)?|exception|panic|traceback)\b/i.test(output);
+  const hasError =
+    /\b(?:error|fail(?:ed|ure)?|exception|panic|traceback)\b/i.test(output);
 
   // Path extraction: skip entirely if no '/' is present (cheap O(n) check
   // via indexOf) to avoid PATH_RE's O(n²) backtracking on long runs of
@@ -910,7 +928,8 @@ export function toolStripAnnotation(toolName: string, output: string): string {
 
   let annotation = `[output omitted — ${toolName}: ${lines} lines`;
   if (hasError) annotation += ", contained errors";
-  if (uniquePaths.length > 0) annotation += `, paths: ${uniquePaths.join(", ")}`;
+  if (uniquePaths.length > 0)
+    annotation += `, paths: ${uniquePaths.join(", ")}`;
   annotation += " — use recall for details]";
   return annotation;
 }
@@ -967,7 +986,8 @@ function extractReadRange(input: string): ReadRange | undefined {
     const parsed = JSON.parse(input);
     const path = parsed.path || parsed.filePath || parsed.file;
     if (!path) return undefined;
-    const offset = typeof parsed.offset === "number" ? parsed.offset : undefined;
+    const offset =
+      typeof parsed.offset === "number" ? parsed.offset : undefined;
     const limit = typeof parsed.limit === "number" ? parsed.limit : undefined;
     return { path, offset, limit };
   } catch {
@@ -1023,7 +1043,11 @@ function rangeLabel(range: ReadRange): string {
 }
 
 /** Annotation for deduplicated tool output — follows the toolStripAnnotation() pattern. */
-function dedupAnnotation(toolName: string, filePath?: string, range?: ReadRange): string {
+function dedupAnnotation(
+  toolName: string,
+  filePath?: string,
+  range?: ReadRange,
+): string {
   if (filePath) {
     const rl = range ? rangeLabel(range) : "";
     return `[earlier read of ${filePath}${rl} — see latest read below for current content]`;
@@ -1058,7 +1082,10 @@ export function deduplicateToolOutputs(
   // Track all read ranges per file path, ordered by message index (ascending).
   // Each entry records the range and the message index so the second pass can
   // check whether any later read covers the current read's range.
-  const fileReads = new Map<string, Array<{ range: ReadRange; msgIdx: number }>>();
+  const fileReads = new Map<
+    string,
+    Array<{ range: ReadRange; msgIdx: number }>
+  >();
 
   // First pass: scan all messages (including current turn) to build tracking maps.
   for (let i = 0; i < messages.length; i++) {
@@ -1072,9 +1099,10 @@ export function deduplicateToolOutputs(
 
       // For read-type tools, record the full range info
       if (part.tool === "read_file" || part.tool === "read") {
-        const inputStr = typeof part.state.input === "string"
-          ? part.state.input
-          : JSON.stringify(part.state.input);
+        const inputStr =
+          typeof part.state.input === "string"
+            ? part.state.input
+            : JSON.stringify(part.state.input);
         const range = extractReadRange(inputStr);
         if (range) {
           let entries = fileReads.get(range.path);
@@ -1108,16 +1136,20 @@ export function deduplicateToolOutputs(
       let readRange: ReadRange | undefined;
       let coveredByLater = false;
       if (part.tool === "read_file" || part.tool === "read") {
-        const inputStr = typeof part.state.input === "string"
-          ? part.state.input
-          : JSON.stringify(part.state.input);
+        const inputStr =
+          typeof part.state.input === "string"
+            ? part.state.input
+            : JSON.stringify(part.state.input);
         readRange = extractReadRange(inputStr);
         if (readRange) {
           const entries = fileReads.get(readRange.path);
           if (entries) {
             // Check if any entry with a higher message index covers this range
             for (const entry of entries) {
-              if (entry.msgIdx > msgIdx && laterReadCovers(entry.range, readRange)) {
+              if (
+                entry.msgIdx > msgIdx &&
+                laterReadCovers(entry.range, readRange)
+              ) {
                 coveredByLater = true;
                 break;
               }
@@ -1157,9 +1189,7 @@ export function deduplicateToolOutputs(
 // This happens when a session errors mid-tool-execution (e.g. context overflow) and
 // the tool part remains in pending/running state on the next transform.
 // Converting to error state generates both tool_use + tool_result(is_error=true).
-function sanitizeToolParts(
-  messages: MessageWithParts[],
-): MessageWithParts[] {
+function sanitizeToolParts(messages: MessageWithParts[]): MessageWithParts[] {
   let changed = false;
   const result = messages.map((msg) => {
     if (msg.info.role !== "assistant") return msg;
@@ -1177,16 +1207,14 @@ function sanitizeToolParts(
       // preserves old pending parts across iterations; Date.now() here
       // would re-stamp them each call → different bytes → cache bust.
       partsChanged = true;
-      const existingStart =
-        "time" in part.state ? part.state.time.start : 0;
+      const existingStart = "time" in part.state ? part.state.time.start : 0;
       return {
         ...part,
         state: {
           status: "error" as const,
           input: part.state.input,
           error: "[tool execution interrupted — session recovered]",
-          metadata:
-            "metadata" in part.state ? part.state.metadata : undefined,
+          metadata: "metadata" in part.state ? part.state.metadata : undefined,
           time: {
             start: existingStart,
             end: existingStart,
@@ -1323,8 +1351,10 @@ function buildPrefixMessages(formatted: string): MessageWithParts[] {
 //   - Meta-distilled (gen >= 1): +0.2 (consolidation = higher value density)
 
 const DECISION_RE = /\b(?:decision|decided|chose|chosen|agreed)\b/i;
-const GOTCHA_RE = /\b(?:gotcha|(?:critical|known|subtle)\s+bug|broken|crash(?:ed|es)?|regression)\b/i;
-const ARCH_RE = /\b(?:architecture|design.(?:decision|pattern)|system.design)\b/i;
+const GOTCHA_RE =
+  /\b(?:gotcha|(?:critical|known|subtle)\s+bug|broken|crash(?:ed|es)?|regression)\b/i;
+const ARCH_RE =
+  /\b(?:architecture|design.(?:decision|pattern)|system.design)\b/i;
 
 function importanceBonus(d: Distillation): number {
   let bonus = 0;
@@ -1335,7 +1365,10 @@ function importanceBonus(d: Distillation): number {
   return Math.min(bonus, 1.0);
 }
 
-export function selectDistillations(all: Distillation[], limit: number): Distillation[] {
+export function selectDistillations(
+  all: Distillation[],
+  limit: number,
+): Distillation[] {
   if (all.length <= limit) return all;
 
   // Always include meta distillations (gen >= 1) — they contain the
@@ -1351,7 +1384,7 @@ export function selectDistillations(all: Distillation[], limit: number): Distill
     const maxIdx = meta.length - 1;
     const scored = meta.map((d, i) => ({
       d,
-      score: (maxIdx > 0 ? (i / maxIdx) : 1) * 0.7 + importanceBonus(d) * 0.3,
+      score: (maxIdx > 0 ? i / maxIdx : 1) * 0.7 + importanceBonus(d) * 0.3,
     }));
     return scored
       .sort((a, b) => b.score - a.score)
@@ -1364,7 +1397,7 @@ export function selectDistillations(all: Distillation[], limit: number): Distill
   const maxIdx = gen0.length - 1;
   const scored = gen0.map((d, i) => ({
     d,
-    score: (maxIdx > 0 ? (i / maxIdx) : 1) * 0.7 + importanceBonus(d) * 0.3,
+    score: (maxIdx > 0 ? i / maxIdx : 1) * 0.7 + importanceBonus(d) * 0.3,
   }));
   const topGen0 = scored
     .sort((a, b) => b.score - a.score)
@@ -1506,7 +1539,8 @@ export function resetDistillationSnapshot(sessionID?: string) {
     const state = sessionStates.get(sessionID);
     if (state) state.distillationSnapshot = null;
   } else {
-    for (const state of sessionStates.values()) state.distillationSnapshot = null;
+    for (const state of sessionStates.values())
+      state.distillationSnapshot = null;
   }
 }
 
@@ -1567,7 +1601,10 @@ function tryFitStable(input: {
   rawBudget: number;
   sessionID: string;
   sessState: SessionState;
-}): Omit<TransformResult, "layer" | "usable" | "distilledBudget" | "rawBudget" | "refreshLtm"> | null {
+}): Omit<
+  TransformResult,
+  "layer" | "usable" | "distilledBudget" | "rawBudget" | "refreshLtm"
+> | null {
   // If the prefix already overflows its budget there's no point trying.
   if (input.prefixTokens > input.distilledBudget && input.prefix.length > 0)
     return null;
@@ -1582,7 +1619,10 @@ function tryFitStable(input: {
     // The pinned window grows to include them: pinnedRawCount + newMessages.
     // This is resilient to front-trimming by the host (e.g. OpenCode evicting
     // old messages) because the offset is relative to the tail.
-    const newMessages = Math.max(0, input.messages.length - rawWindowCache!.pinnedTotalCount);
+    const newMessages = Math.max(
+      0,
+      input.messages.length - rawWindowCache!.pinnedTotalCount,
+    );
     const windowSize = rawWindowCache!.pinnedRawCount + newMessages;
     const pinnedIdx = Math.max(0, input.messages.length - windowSize);
 
@@ -1613,7 +1653,10 @@ function tryFitStable(input: {
     // EMA drift from shrinking the effective budget below what was valid when
     // the pin was created — the budget shrank due to overhead drift, not because
     // the context limit changed.
-    const highWaterBudget = Math.max(rawWindowCache!.pinnedBudget, input.rawBudget);
+    const highWaterBudget = Math.max(
+      rawWindowCache!.pinnedBudget,
+      input.rawBudget,
+    );
     const effectiveBudget = highWaterBudget * 1.15;
     if (pinnedTokens <= effectiveBudget) {
       // Pinned window still fits within the hysteresis margin of the high-water
@@ -1644,8 +1687,8 @@ function tryFitStable(input: {
     // Pinned window is too large for both budgets — fall through to rescan.
     log.info(
       `pin-overflow: session=${input.sessionID} pinnedTokens=${pinnedTokens} ` +
-      `pinnedBudget=${rawWindowCache!.pinnedBudget} effectiveBudget=${Math.round(effectiveBudget)} ` +
-      `currentRawBudget=${input.rawBudget} windowSize=${pinnedWindow.length}`,
+        `pinnedBudget=${rawWindowCache!.pinnedBudget} effectiveBudget=${Math.round(effectiveBudget)} ` +
+        `currentRawBudget=${input.rawBudget} windowSize=${pinnedWindow.length}`,
     );
   }
 
@@ -1687,17 +1730,38 @@ export type SafetyLayer = 0 | 1 | 2 | 3 | 4;
 // Adding a new intermediate stage = one table entry.
 type CompressionStage = {
   strip: "none" | "old-tools" | "all-tools";
-  rawFrac: number | null;     // fraction of usable; null = use default rawBudget
-  distFrac: number | null;    // fraction of usable; null = use default distilledBudget
-  distLimit: number;          // Infinity = all, 5 = last 5, etc.
-  protectedTurns: number;     // turns exempt from tool stripping
-  useStableWindow: boolean;   // use tryFitStable (Approach B pin cache)
+  rawFrac: number | null; // fraction of usable; null = use default rawBudget
+  distFrac: number | null; // fraction of usable; null = use default distilledBudget
+  distLimit: number; // Infinity = all, 5 = last 5, etc.
+  protectedTurns: number; // turns exempt from tool stripping
+  useStableWindow: boolean; // use tryFitStable (Approach B pin cache)
 };
 
 const COMPRESSION_STAGES: CompressionStage[] = [
-  { strip: "none",      rawFrac: null, distFrac: null, distLimit: Infinity, protectedTurns: 0, useStableWindow: true },
-  { strip: "old-tools", rawFrac: 0.50, distFrac: null, distLimit: Infinity, protectedTurns: 2, useStableWindow: false },
-  { strip: "all-tools", rawFrac: 0.55, distFrac: 0.15, distLimit: 5,        protectedTurns: 0, useStableWindow: false },
+  {
+    strip: "none",
+    rawFrac: null,
+    distFrac: null,
+    distLimit: Infinity,
+    protectedTurns: 0,
+    useStableWindow: true,
+  },
+  {
+    strip: "old-tools",
+    rawFrac: 0.5,
+    distFrac: null,
+    distLimit: Infinity,
+    protectedTurns: 2,
+    useStableWindow: false,
+  },
+  {
+    strip: "all-tools",
+    rawFrac: 0.55,
+    distFrac: 0.15,
+    distLimit: 5,
+    protectedTurns: 0,
+    useStableWindow: false,
+  },
 ];
 
 export type TransformResult = {
@@ -1771,8 +1835,8 @@ function transformInner(input: {
 
   // --- Approach A: Cache-preserving passthrough ---
   // Use exact token count from the previous API response when available.
-   // Only the delta (messages added since last call) uses chars/3 estimation,
-   // making the layer-0 decision highly accurate from the API's own tokenizer.
+  // Only the delta (messages added since last call) uses chars/3 estimation,
+  // making the layer-0 decision highly accurate from the API's own tokenizer.
   // maxInput = absolute ceiling the API enforces: input_tokens + max_tokens <= context
   const maxInput = contextLimit - outputReserved;
 
@@ -1795,7 +1859,9 @@ function transformInner(input: {
 
   // Returns true if the tryFit result is safe to use: either we have calibrated
   // data (exact) or the estimated total * safety factor fits within maxInput.
-  function fitsWithSafetyMargin(result: { totalTokens: number } | null): boolean {
+  function fitsWithSafetyMargin(
+    result: { totalTokens: number } | null,
+  ): boolean {
     if (!result) return false;
     if (calibrated) return true;
     return result.totalTokens * UNCALIBRATED_SAFETY <= maxInput;
@@ -1816,8 +1882,16 @@ function transformInner(input: {
   // Layer 4 (emergency) already blows the cache — stickiness there just traps
   // the session at emergency permanently. Only apply stickiness for layers 1-3
   // where dropping back would bust a warm cache.
-  if (calibrated && sessState.lastLayer >= 1 && sessState.lastLayer <= 3 && input.messages.length >= sessState.lastKnownMessageCount) {
-    effectiveMinLayer = Math.max(effectiveMinLayer, sessState.lastLayer) as SafetyLayer;
+  if (
+    calibrated &&
+    sessState.lastLayer >= 1 &&
+    sessState.lastLayer <= 3 &&
+    input.messages.length >= sessState.lastKnownMessageCount
+  ) {
+    effectiveMinLayer = Math.max(
+      effectiveMinLayer,
+      sessState.lastLayer,
+    ) as SafetyLayer;
   }
 
   // --- Post-idle compact layer ---
@@ -1833,10 +1907,10 @@ function transformInner(input: {
     // Skip layer 0 — don't pass through all raw messages on a cold cache.
     effectiveMinLayer = Math.max(effectiveMinLayer, 1) as SafetyLayer;
     // Use a tighter raw budget on cold cache to limit write cost.
-    rawBudget = Math.floor(usable * 0.20);
+    rawBudget = Math.floor(usable * 0.2);
     log.info(
       `post-idle compact: session=${sid} rawBudget=${rawBudget}` +
-      ` (${Math.floor(usable * cfg.budget.raw)}→${rawBudget})`,
+        ` (${Math.floor(usable * cfg.budget.raw)}→${rawBudget})`,
     );
   }
 
@@ -1853,29 +1927,44 @@ function transformInner(input: {
     // 1.3 covers this without triggering unnecessary compression.
     const CALIBRATED_DELTA_SAFETY = 1.3;
 
-    const newMessages = sessState.lastWindowMessageIDs.size > 0
-      ? input.messages.filter((m) => !sessState.lastWindowMessageIDs.has(m.info.id))
-      : input.messages.slice(-Math.max(0, input.messages.length - sessState.lastKnownMessageCount));
-    const rawNewMsgTokens = newMessages.reduce((s, m) => s + estimateMessage(m), 0);
+    const newMessages =
+      sessState.lastWindowMessageIDs.size > 0
+        ? input.messages.filter(
+            (m) => !sessState.lastWindowMessageIDs.has(m.info.id),
+          )
+        : input.messages.slice(
+            -Math.max(
+              0,
+              input.messages.length - sessState.lastKnownMessageCount,
+            ),
+          );
+    const rawNewMsgTokens = newMessages.reduce(
+      (s, m) => s + estimateMessage(m),
+      0,
+    );
     const newMsgTokens = Math.ceil(rawNewMsgTokens * CALIBRATED_DELTA_SAFETY);
     const ltmDelta = sessLtmTokens - sessState.lastKnownLtm;
     expectedInput = sessState.lastKnownInput + newMsgTokens + ltmDelta;
   } else {
     // First turn or session change: fall back to chars/3 estimate + overhead.
-    const messageTokens = input.messages.reduce((s, m) => s + estimateMessage(m), 0);
+    const messageTokens = input.messages.reduce(
+      (s, m) => s + estimateMessage(m),
+      0,
+    );
     expectedInput = messageTokens + overhead + sessLtmTokens;
   }
 
   // When uncalibrated, apply safety multiplier to the layer-0 decision too.
   // chars/3 undercounts by ~1.63x on real sessions — without this, a session
   // estimated at 146K passes layer 0 but actually costs 214K → overflow.
-  const layer0Input = calibrated ? expectedInput : expectedInput * UNCALIBRATED_SAFETY;
+  const layer0Input = calibrated
+    ? expectedInput
+    : expectedInput * UNCALIBRATED_SAFETY;
 
   // Cost-aware layer-0 cap: use the smaller of the API limit and the cost-derived
   // cap. When maxLayer0Tokens is 0 (disabled), fall back to pure maxInput.
-  let layer0Ceiling = maxLayer0Tokens > 0
-    ? Math.min(maxInput, maxLayer0Tokens)
-    : maxInput;
+  let layer0Ceiling =
+    maxLayer0Tokens > 0 ? Math.min(maxInput, maxLayer0Tokens) : maxInput;
 
   // Cold-cache awareness: on the first turn (uncalibrated = no prior API data),
   // the entire context is a cache WRITE at 12.5× the cache-read price. Use 70%
@@ -1887,14 +1976,21 @@ function transformInner(input: {
   // Free-write cache / non-caching: no expensive cache writes to avoid, so
   // compress earlier to leave headroom for tool-heavy turns.
   if (sid && isFreeWriteSession(sid)) {
-    layer0Ceiling = Math.min(layer0Ceiling, Math.floor(maxInput * FREE_WRITE_LAYER0_FRACTION));
+    layer0Ceiling = Math.min(
+      layer0Ceiling,
+      Math.floor(maxInput * FREE_WRITE_LAYER0_FRACTION),
+    );
   }
 
-  if (effectiveMinLayer === 0 && layer0Input <= layer0Ceiling && layer0Input <= maxInput * HARD_CEILING_MARGIN) {
+  if (
+    effectiveMinLayer === 0 &&
+    layer0Input <= layer0Ceiling &&
+    layer0Input <= maxInput * HARD_CEILING_MARGIN
+  ) {
     // All messages fit — return unmodified to preserve append-only prompt-cache pattern.
     // Raw messages are strictly better context than lossy distilled summaries.
     const messageTokens = calibrated
-      ? expectedInput - (sessLtmTokens - sessState.lastKnownLtm)  // approximate raw portion
+      ? expectedInput - (sessLtmTokens - sessState.lastKnownLtm) // approximate raw portion
       : expectedInput - overhead - sessLtmTokens;
     return {
       messages: input.messages,
@@ -1928,13 +2024,17 @@ function transformInner(input: {
     // (distilled + raw fractions). This is a rough upper bound — actual
     // compressed output may be smaller.
     const compressedEstimate = distilledBudget + rawBudget;
-    if (!shouldCompress(Math.round(layer0Input), compressedEstimate, busts, { freeWrite })) {
+    if (
+      !shouldCompress(Math.round(layer0Input), compressedEstimate, busts, {
+        freeWrite,
+      })
+    ) {
       const messageTokens = calibrated
         ? expectedInput - (sessLtmTokens - sessState.lastKnownLtm)
         : expectedInput - overhead - sessLtmTokens;
       log.info(
         `tier gate: session=${sid} skipping compression — bustCost not justified` +
-        ` (input=${Math.round(layer0Input)} compressed=${compressedEstimate} busts=${busts})`,
+          ` (input=${Math.round(layer0Input)} compressed=${compressedEstimate} busts=${busts})`,
       );
       return {
         messages: input.messages,
@@ -1960,7 +2060,6 @@ function transformInner(input: {
   const turnStart = currentTurnStart(input.messages);
   const dedupMessages = deduplicateToolOutputs(input.messages, turnStart);
 
-
   const distillations = sid
     ? loadDistillationsCached(input.projectPath, sid, input.messages, sessState)
     : [];
@@ -1973,7 +2072,10 @@ function transformInner(input: {
     ? distilledPrefixCached(distillations, sid, sessState)
     : (() => {
         const msgs = distilledPrefix(distillations);
-        return { messages: msgs, tokens: msgs.reduce((sum, m) => sum + estimateMessage(m), 0) };
+        return {
+          messages: msgs,
+          tokens: msgs.reduce((sum, m) => sum + estimateMessage(m), 0),
+        };
       })();
 
   // --- Compression stages (layers 1-3) ---
@@ -1987,22 +2089,35 @@ function transformInner(input: {
     if (effectiveMinLayer > stageLayer) continue;
 
     const stage = COMPRESSION_STAGES[s];
-    const stageRawBudget = stage.rawFrac !== null ? Math.floor(usable * stage.rawFrac) : rawBudget;
-    const stageDistBudget = stage.distFrac !== null ? Math.floor(usable * stage.distFrac) : distilledBudget;
+    const stageRawBudget =
+      stage.rawFrac !== null ? Math.floor(usable * stage.rawFrac) : rawBudget;
+    const stageDistBudget =
+      stage.distFrac !== null
+        ? Math.floor(usable * stage.distFrac)
+        : distilledBudget;
 
     // Determine prefix: if distLimit is finite, re-render with trimmed distillations.
     // Otherwise use the cached prefix (Approach C, byte-identical for cache).
     let stagePrefix = cached.messages;
     let stagePrefixTokens = cached.tokens;
-    if (stage.distLimit !== Infinity && distillations.length > stage.distLimit) {
+    if (
+      stage.distLimit !== Infinity &&
+      distillations.length > stage.distLimit
+    ) {
       const trimmed = selectDistillations(distillations, stage.distLimit);
       stagePrefix = distilledPrefix(trimmed);
-      stagePrefixTokens = stagePrefix.reduce((sum, m) => sum + estimateMessage(m), 0);
+      stagePrefixTokens = stagePrefix.reduce(
+        (sum, m) => sum + estimateMessage(m),
+        0,
+      );
     }
 
     // Stage 0 (layer 1) uses tryFitStable for Approach B pin cache.
     // Higher stages reset the raw window cache and use plain tryFit.
-    let result: Omit<TransformResult, "layer" | "usable" | "distilledBudget" | "rawBudget" | "refreshLtm"> | null;
+    let result: Omit<
+      TransformResult,
+      "layer" | "usable" | "distilledBudget" | "rawBudget" | "refreshLtm"
+    > | null;
     if (stage.useStableWindow && sid) {
       result = tryFitStable({
         messages: dedupMessages,
@@ -2072,7 +2187,10 @@ function transformInner(input: {
   );
 
   // Token budget for the raw tail. clamp(usable * 0.25, 2K, 8K).
-  const tailBudget = Math.max(2_000, Math.min(8_000, Math.floor(usable * 0.25)));
+  const tailBudget = Math.max(
+    2_000,
+    Math.min(8_000, Math.floor(usable * 0.25)),
+  );
 
   // Current turn is always included (non-negotiable — dropping it causes
   // the infinite tool-call loop). Clean parts but never strip tool outputs.
@@ -2115,7 +2233,9 @@ function transformInner(input: {
   const nuclearRaw = [...olderMessages, ...currentTurn];
   const nuclearRawTokens = olderTokens + currentTurnTokens;
 
-  const unsustainable = sid ? getSessionState(sid).consecutiveBusts >= 5 : false;
+  const unsustainable = sid
+    ? getSessionState(sid).consecutiveBusts >= 5
+    : false;
 
   return {
     messages: [...nuclearPrefix, ...nuclearRaw],
@@ -2169,7 +2289,7 @@ export function transform(input: {
       if (state.consecutiveHighLayer === 3) {
         log.info(
           `session ${sid} has been at gradient layer ${result.layer}+ for 3 consecutive turns.` +
-          ` Consider running /compact to reset the context window.`,
+            ` Consider running /compact to reset the context window.`,
         );
       }
     } else {
@@ -2178,8 +2298,8 @@ export function transform(input: {
 
     log.info(
       `gradient: session=${sid} layer=${result.layer} tokens=${result.totalTokens}` +
-      ` (distilled=${result.distilledTokens} raw=${result.rawTokens})` +
-      ` usable=${result.usable} tier=${getTier(result.totalTokens)} l0cap=${maxLayer0Tokens || "off"}`,
+        ` (distilled=${result.distilledTokens} raw=${result.rawTokens})` +
+        ` usable=${result.usable} tier=${getTier(result.totalTokens)} l0cap=${maxLayer0Tokens || "off"}`,
     );
   }
   return result;
@@ -2248,7 +2368,10 @@ function tryFit(input: {
   rawBudget: number;
   strip: "none" | "old-tools" | "all-tools";
   protectedTurns?: number;
-}): Omit<TransformResult, "layer" | "usable" | "distilledBudget" | "rawBudget" | "refreshLtm"> | null {
+}): Omit<
+  TransformResult,
+  "layer" | "usable" | "distilledBudget" | "rawBudget" | "refreshLtm"
+> | null {
   // If distilled prefix exceeds its budget, fail this layer
   if (input.prefixTokens > input.distilledBudget && input.prefix.length > 0)
     return null;
@@ -2258,7 +2381,10 @@ function tryFit(input: {
   // raw budget, escalate to the next layer (which strips tool outputs to reduce size).
   const turnStart = currentTurnStart(input.messages);
   const currentTurn = input.messages.slice(turnStart);
-  const currentTurnTokens = currentTurn.reduce((s, m) => s + estimateMessage(m), 0);
+  const currentTurnTokens = currentTurn.reduce(
+    (s, m) => s + estimateMessage(m),
+    0,
+  );
 
   if (currentTurnTokens > input.rawBudget) {
     // Current turn alone exceeds budget — can't fit even with everything else dropped.

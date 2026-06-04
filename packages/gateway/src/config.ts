@@ -4,7 +4,12 @@
  * (only `normalizeRemoteUrl` for git URL canonicalization).
  */
 
-import { normalizeRemoteUrl, discoverWorkspaceRoot, UNATTRIBUTED_PROJECT_PREFIX, isUnattributedProjectPath } from "@loreai/core";
+import {
+  normalizeRemoteUrl,
+  discoverWorkspaceRoot,
+  UNATTRIBUTED_PROJECT_PREFIX,
+  isUnattributedProjectPath,
+} from "@loreai/core";
 
 // ---------------------------------------------------------------------------
 // Port defaults
@@ -106,7 +111,10 @@ export function loadConfig(): GatewayConfig {
       env.LORE_UPSTREAM_OPENAI || "https://api.openai.com",
     ),
     idleTimeoutSeconds: parsePositiveInt(env.LORE_IDLE_TIMEOUT, 60),
-    sessionEvictionTimeoutSeconds: parseNonNegativeInt(env.LORE_SESSION_EVICTION_TIMEOUT, 1800),
+    sessionEvictionTimeoutSeconds: parseNonNegativeInt(
+      env.LORE_SESSION_EVICTION_TIMEOUT,
+      1800,
+    ),
     debug: isTruthy(env.LORE_DEBUG),
     remoteUrl: env.LORE_REMOTE_URL
       ? trimTrailingSlash(env.LORE_REMOTE_URL)
@@ -117,7 +125,8 @@ export function loadConfig(): GatewayConfig {
       ? trimTrailingSlash(env.LORE_WORKER_UPSTREAM)
       : undefined,
     // Hosted mode is always a remote gateway (no shared filesystem with clients).
-    remoteGateway: isTruthy(env.LORE_REMOTE_GATEWAY) || isTruthy(env.LORE_HOSTED_MODE),
+    remoteGateway:
+      isTruthy(env.LORE_REMOTE_GATEWAY) || isTruthy(env.LORE_HOSTED_MODE),
   };
 }
 
@@ -137,30 +146,66 @@ export type UpstreamRoute = {
  * matches `claude-` before any catch-all. Unknown models fall back to the
  * env-var-configured defaults.
  */
-const UPSTREAM_ROUTES: Array<{ prefix: string; url: string; protocol: "anthropic" | "openai" | "openai-responses" }> = [
+const UPSTREAM_ROUTES: Array<{
+  prefix: string;
+  url: string;
+  protocol: "anthropic" | "openai" | "openai-responses";
+}> = [
   // Anthropic
-  { prefix: "claude-",        url: "https://api.anthropic.com",          protocol: "anthropic" },
+  {
+    prefix: "claude-",
+    url: "https://api.anthropic.com",
+    protocol: "anthropic",
+  },
   // Nvidia NIM
-  { prefix: "nvidia/",        url: "https://integrate.api.nvidia.com",   protocol: "openai" },
-  { prefix: "meta/",          url: "https://integrate.api.nvidia.com",   protocol: "openai" },
-  { prefix: "mistralai/",     url: "https://integrate.api.nvidia.com",   protocol: "openai" },
-  { prefix: "google/",        url: "https://integrate.api.nvidia.com",   protocol: "openai" },
-  { prefix: "qwen/",          url: "https://integrate.api.nvidia.com",   protocol: "openai" },
-  { prefix: "deepseek/",      url: "https://integrate.api.nvidia.com",   protocol: "openai" },
+  {
+    prefix: "nvidia/",
+    url: "https://integrate.api.nvidia.com",
+    protocol: "openai",
+  },
+  {
+    prefix: "meta/",
+    url: "https://integrate.api.nvidia.com",
+    protocol: "openai",
+  },
+  {
+    prefix: "mistralai/",
+    url: "https://integrate.api.nvidia.com",
+    protocol: "openai",
+  },
+  {
+    prefix: "google/",
+    url: "https://integrate.api.nvidia.com",
+    protocol: "openai",
+  },
+  {
+    prefix: "qwen/",
+    url: "https://integrate.api.nvidia.com",
+    protocol: "openai",
+  },
+  {
+    prefix: "deepseek/",
+    url: "https://integrate.api.nvidia.com",
+    protocol: "openai",
+  },
   // DeepSeek (direct API, dash-prefix)
-  { prefix: "deepseek-",      url: "https://api.deepseek.com",           protocol: "openai" },
+  { prefix: "deepseek-", url: "https://api.deepseek.com", protocol: "openai" },
   // OpenAI
-  { prefix: "gpt-",           url: "https://api.openai.com",             protocol: "openai" },
-  { prefix: "o1-",            url: "https://api.openai.com",             protocol: "openai" },
-  { prefix: "o3-",            url: "https://api.openai.com",             protocol: "openai" },
-  { prefix: "o4-",            url: "https://api.openai.com",             protocol: "openai" },
+  { prefix: "gpt-", url: "https://api.openai.com", protocol: "openai" },
+  { prefix: "o1-", url: "https://api.openai.com", protocol: "openai" },
+  { prefix: "o3-", url: "https://api.openai.com", protocol: "openai" },
+  { prefix: "o4-", url: "https://api.openai.com", protocol: "openai" },
   // xAI
-  { prefix: "grok-",          url: "https://api.x.ai",                   protocol: "openai" },
+  { prefix: "grok-", url: "https://api.x.ai", protocol: "openai" },
   // Mistral (direct)
-  { prefix: "mistral-",       url: "https://api.mistral.ai",             protocol: "openai" },
-  { prefix: "codestral-",     url: "https://api.mistral.ai",             protocol: "openai" },
+  { prefix: "mistral-", url: "https://api.mistral.ai", protocol: "openai" },
+  { prefix: "codestral-", url: "https://api.mistral.ai", protocol: "openai" },
   // Google (direct)
-  { prefix: "gemini-",        url: "https://generativelanguage.googleapis.com", protocol: "openai" },
+  {
+    prefix: "gemini-",
+    url: "https://generativelanguage.googleapis.com",
+    protocol: "openai",
+  },
 ];
 
 /**
@@ -203,7 +248,8 @@ export function extractUpstreamUrlHeader(
 
   // Sanitize: strip control characters, trim.
   const sanitized = raw.replace(/[\x00-\x1f\x7f]/g, "").trim();
-  if (!sanitized || sanitized.length > MAX_UPSTREAM_URL_LENGTH) return undefined;
+  if (!sanitized || sanitized.length > MAX_UPSTREAM_URL_LENGTH)
+    return undefined;
 
   // Must be a valid URL (http or https only, no embedded credentials).
   try {
@@ -334,7 +380,11 @@ export function getProjectPath(
   if (inferred) return { path: inferred, source: "inferred", gitRemote };
 
   // 3. Fall back to gateway's own cwd (with workspace root discovery)
-  return { path: discoverWorkspaceRoot(process.cwd()), source: "cwd", gitRemote };
+  return {
+    path: discoverWorkspaceRoot(process.cwd()),
+    source: "cwd",
+    gitRemote,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -385,7 +435,8 @@ export function extractProjectHeader(
   // Strip control characters (newlines, carriage returns, null bytes) to
   // prevent header injection and DB corruption.
   const sanitized = raw.replace(/[\x00-\x1f\x7f]/g, "").trim();
-  if (!sanitized || sanitized.length > MAX_PROJECT_PATH_LENGTH) return undefined;
+  if (!sanitized || sanitized.length > MAX_PROJECT_PATH_LENGTH)
+    return undefined;
 
   // Must be an absolute path
   if (!sanitized.startsWith("/")) return undefined;
@@ -410,10 +461,7 @@ function parsePort(value: string | undefined, fallback: number): number {
   return n;
 }
 
-function parsePositiveInt(
-  value: string | undefined,
-  fallback: number,
-): number {
+function parsePositiveInt(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
   const n = Number.parseInt(value, 10);
   if (Number.isNaN(n) || n <= 0) {

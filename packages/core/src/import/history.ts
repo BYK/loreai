@@ -79,7 +79,10 @@ export function recordImport(
  * Unlike isImported(), this is hash-agnostic and source-agnostic — it
  * answers "have we ever offered/handled this agent here?".
  */
-export function hasAgentImportRecord(projectPath: string, agentName: string): boolean {
+export function hasAgentImportRecord(
+  projectPath: string,
+  agentName: string,
+): boolean {
   const projectId = ensureProject(projectPath);
   return !!db()
     .query(

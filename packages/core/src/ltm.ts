@@ -1,7 +1,14 @@
 import { uuidv7 } from "uuidv7";
 import { db, ensureProject, getKV, setKV } from "./db";
 import { config } from "./config";
-import { ftsQuery, ftsQueryOr, EMPTY_QUERY, extractTopTerms, filterTerms, runRelaxedSearch } from "./search";
+import {
+  ftsQuery,
+  ftsQueryOr,
+  EMPTY_QUERY,
+  extractTopTerms,
+  filterTerms,
+  runRelaxedSearch,
+} from "./search";
 import * as embedding from "./embedding";
 import * as latReader from "./lat-reader";
 import * as log from "./log";
@@ -131,7 +138,10 @@ export function create(input: {
     // This catches near-duplicates the curator creates with slightly different
     // titles for the same concept (e.g. "Upgrade lock bug" vs "Upgrade binary
     // lock re-entry bug"). Placed after exact checks (cheaper checks first).
-    const fuzzyMatch = findFuzzyDuplicate({ title: input.title, projectId: pid });
+    const fuzzyMatch = findFuzzyDuplicate({
+      title: input.title,
+      projectId: pid,
+    });
     if (fuzzyMatch) {
       update(fuzzyMatch.id, dedupUpdate);
       return fuzzyMatch.id;
@@ -140,9 +150,8 @@ export function create(input: {
 
   const id = input.id ?? uuidv7();
   const now = Date.now();
-  const confidence = input.confidence != null
-    ? Math.max(0, Math.min(1, input.confidence))
-    : 1.0;
+  const confidence =
+    input.confidence != null ? Math.max(0, Math.min(1, input.confidence)) : 1.0;
   db()
     .query(
       `INSERT INTO knowledge (id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at, created_by, sensitivity)
@@ -173,7 +182,12 @@ export function create(input: {
 
 export function update(
   id: string,
-  input: { content?: string; confidence?: number; updatedBy?: string; sensitivity?: Sensitivity },
+  input: {
+    content?: string;
+    confidence?: number;
+    updatedBy?: string;
+    sensitivity?: Sensitivity;
+  },
 ) {
   const sets: string[] = [];
   const params: unknown[] = [];
@@ -226,10 +240,14 @@ export function remove(id: string) {
  * - intersectionSize = number of shared meaningful words
  * Filters stopwords and single-char tokens for meaningful comparison.
  */
-function titleOverlap(a: string, b: string): { coefficient: number; intersectionSize: number } {
+function titleOverlap(
+  a: string,
+  b: string,
+): { coefficient: number; intersectionSize: number } {
   const wordsA = new Set(filterTerms(a).map((w) => w.toLowerCase()));
   const wordsB = new Set(filterTerms(b).map((w) => w.toLowerCase()));
-  if (wordsA.size === 0 || wordsB.size === 0) return { coefficient: 0, intersectionSize: 0 };
+  if (wordsA.size === 0 || wordsB.size === 0)
+    return { coefficient: 0, intersectionSize: 0 };
   const intersection = [...wordsA].filter((w) => wordsB.has(w));
   return {
     coefficient: intersection.length / Math.min(wordsA.size, wordsB.size),
@@ -291,15 +309,16 @@ export function findFuzzyDuplicate(input: {
   try {
     // Build query scoped to the same project + cross-project entries
     const excludeClause = input.excludeId ? "AND k.id != ?" : "";
-    const sql = input.projectId !== null
-      ? `SELECT k.id, k.title FROM knowledge_fts f
+    const sql =
+      input.projectId !== null
+        ? `SELECT k.id, k.title FROM knowledge_fts f
          CROSS JOIN knowledge k ON k.rowid = f.rowid
          WHERE knowledge_fts MATCH ?
          AND (k.project_id = ? OR k.cross_project = 1)
          AND k.confidence > 0.2
          ${excludeClause}
          ORDER BY bm25(knowledge_fts, ?, ?, ?) LIMIT 5`
-      : `SELECT k.id, k.title FROM knowledge_fts f
+        : `SELECT k.id, k.title FROM knowledge_fts f
          CROSS JOIN knowledge k ON k.rowid = f.rowid
          WHERE knowledge_fts MATCH ?
          AND (k.project_id IS NULL OR k.cross_project = 1)
@@ -307,15 +326,31 @@ export function findFuzzyDuplicate(input: {
          ${excludeClause}
          ORDER BY bm25(knowledge_fts, ?, ?, ?) LIMIT 5`;
 
-    const params: (string | number)[] = input.projectId !== null
-      ? [q, input.projectId, ...(input.excludeId ? [input.excludeId] : []), tw, cw, catw]
-      : [q, ...(input.excludeId ? [input.excludeId] : []), tw, cw, catw];
+    const params: (string | number)[] =
+      input.projectId !== null
+        ? [
+            q,
+            input.projectId,
+            ...(input.excludeId ? [input.excludeId] : []),
+            tw,
+            cw,
+            catw,
+          ]
+        : [q, ...(input.excludeId ? [input.excludeId] : []), tw, cw, catw];
 
-    const candidates = db().query(sql).all(...params) as Array<{ id: string; title: string }>;
+    const candidates = db()
+      .query(sql)
+      .all(...params) as Array<{ id: string; title: string }>;
 
     for (const candidate of candidates) {
-      const { coefficient, intersectionSize } = titleOverlap(input.title, candidate.title);
-      if (coefficient >= FUZZY_DEDUP_THRESHOLD && intersectionSize >= FUZZY_DEDUP_MIN_OVERLAP) {
+      const { coefficient, intersectionSize } = titleOverlap(
+        input.title,
+        candidate.title,
+      );
+      if (
+        coefficient >= FUZZY_DEDUP_THRESHOLD &&
+        intersectionSize >= FUZZY_DEDUP_MIN_OVERLAP
+      ) {
         return candidate;
       }
     }
@@ -388,7 +423,7 @@ function scoreEntriesFTS(sessionContext: string): Map<string, number> {
   try {
     const results = db()
       .query(
-         `SELECT k.id, bm25(knowledge_fts, ?, ?, ?) as rank
+        `SELECT k.id, bm25(knowledge_fts, ?, ?, ?) as rank
           FROM knowledge_fts f
           CROSS JOIN knowledge k ON k.rowid = f.rowid
           WHERE knowledge_fts MATCH ?
@@ -422,7 +457,12 @@ function scoreEntriesFTS(sessionContext: string): Map<string, number> {
  * Well-known knowledge entry categories managed by the curator.
  * The DB column is a free-form string, but these are the standard values.
  */
-export type KnowledgeCategory = "decision" | "pattern" | "preference" | "architecture" | "gotcha";
+export type KnowledgeCategory =
+  | "decision"
+  | "pattern"
+  | "preference"
+  | "architecture"
+  | "gotcha";
 
 /** Options for `forSession()` to control entry selection. */
 export type ForSessionOptions = {
@@ -508,11 +548,14 @@ export async function forSession(
   // Skip scoring; rank purely by confidence (set by curator or `lore data rerank`)
   // then recency. Confidence carries real meaning now: 1.0 = unconditional
   // directive, 0.9 = strong preference, 0.8 = moderate, 0.6 = mild.
-  const isPreferenceOnly = categoryFilter?.length === 1 && categoryFilter[0] === "preference";
+  const isPreferenceOnly =
+    categoryFilter?.length === 1 && categoryFilter[0] === "preference";
   if (isPreferenceOnly) {
     const allPrefs = [...projectEntries, ...crossEntries];
     allPrefs.sort((a, b) =>
-      a.confidence !== b.confidence ? b.confidence - a.confidence : b.updated_at - a.updated_at
+      a.confidence !== b.confidence
+        ? b.confidence - a.confidence
+        : b.updated_at - a.updated_at,
     );
 
     const HEADER_OVERHEAD_TOKENS = 15;
@@ -589,9 +632,10 @@ export async function forSession(
       // Score project entries: prefer vector similarity, fall back to FTS5
       const rawScored: Scored[] = projectEntries.map((entry) => {
         const vecScore = vectorScores.get(entry.id);
-        const score = vecScore != null
-          ? vecScore * entry.confidence
-          : (ftsScores.get(entry.id) ?? 0) * entry.confidence;
+        const score =
+          vecScore != null
+            ? vecScore * entry.confidence
+            : (ftsScores.get(entry.id) ?? 0) * entry.confidence;
         return { entry, score };
       });
       const matched = rawScored.filter((s) => s.score > 0);
@@ -611,9 +655,10 @@ export async function forSession(
         .filter((e) => vectorScores.has(e.id) || ftsScores.has(e.id))
         .map((e) => {
           const vecScore = vectorScores.get(e.id);
-          const score = vecScore != null
-            ? vecScore * e.confidence
-            : (ftsScores.get(e.id) ?? 0) * e.confidence;
+          const score =
+            vecScore != null
+              ? vecScore * e.confidence
+              : (ftsScores.get(e.id) ?? 0) * e.confidence;
           return { entry: e, score };
         });
     } else {
@@ -659,7 +704,9 @@ export async function forSession(
 
   // Phase 1: Pack architecture entries first (up to 20% of budget)
   const archBudget = Math.floor(maxTokens * ARCH_BUDGET_FRACTION);
-  const archEntries = allScored.filter((s) => s.entry.category === "architecture");
+  const archEntries = allScored.filter(
+    (s) => s.entry.category === "architecture",
+  );
   // Sort architecture by score descending (already sorted, but filter may reorder)
   archEntries.sort((a, b) => b.score - a.score);
   for (const { entry } of archEntries) {
@@ -720,7 +767,7 @@ export async function forSession(
         source_entry_id: null,
         last_accessed_at: null,
       });
-       used += cost;
+      used += cost;
     }
   }
 
@@ -811,13 +858,16 @@ export function crossProject(): KnowledgeEntry[] {
  */
 export function rerankPreferences(): number {
   const prefs = db()
-    .query(`SELECT ${KNOWLEDGE_COLS} FROM knowledge WHERE category = 'preference' AND confidence = 1.0`)
+    .query(
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge WHERE category = 'preference' AND confidence = 1.0`,
+    )
     .all() as KnowledgeEntry[];
 
   // Strong unconditional directives
   const STRONG_DIRECTIVE_RE = /\b(never|always|must not|must)\b/i;
   // Explicit preference language
-  const EXPLICIT_PREF_RE = /\b(I (?:want|need|prefer|expect)|make sure to|don'?t forget)\b/i;
+  const EXPLICIT_PREF_RE =
+    /\b(I (?:want|need|prefer|expect)|make sure to|don'?t forget)\b/i;
 
   let updated = 0;
   for (const entry of prefs) {
@@ -900,7 +950,9 @@ export function search(input: {
       const params = pid
         ? [matchExpr, pid, title, content, category, limit]
         : [matchExpr, title, content, category, limit];
-      return db().query(ftsSQL).all(...params) as KnowledgeEntry[];
+      return db()
+        .query(ftsSQL)
+        .all(...params) as KnowledgeEntry[];
     });
   } catch {
     return searchLike({
@@ -945,7 +997,9 @@ export function searchScored(input: {
       const params = pid
         ? [title, content, category, matchExpr, pid, limit]
         : [title, content, category, matchExpr, limit];
-      return db().query(ftsSQL).all(...params) as ScoredKnowledgeEntry[];
+      return db()
+        .query(ftsSQL)
+        .all(...params) as ScoredKnowledgeEntry[];
     });
   } catch {
     return [];
@@ -983,7 +1037,9 @@ export function searchScoredOtherProjects(input: {
   try {
     return runRelaxedSearch(input.query, (matchExpr) => {
       const params = [title, content, category, matchExpr, excludePid, limit];
-      return db().query(ftsSQL).all(...params) as ScoredKnowledgeEntry[];
+      return db()
+        .query(ftsSQL)
+        .all(...params) as ScoredKnowledgeEntry[];
     });
   } catch {
     return [];
@@ -1020,7 +1076,8 @@ export function pruneOversized(maxLength: number): number {
 // Wiki-link cross-references ([[entry-id]] / [[Entry Title]])
 // ---------------------------------------------------------------------------
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const WIKI_LINK_RE = /\[\[([^\]]+)\]\]/g;
 
 /**
@@ -1101,8 +1158,12 @@ export function cascadeRefReplace(oldId: string, newId: string): number {
     .run(oldRef, newRef, Date.now(), `%${oldRef}%`);
 
   // Update the join table
-  db().query("UPDATE OR IGNORE knowledge_refs SET to_id = ? WHERE to_id = ?").run(newId, oldId);
-  db().query("UPDATE OR IGNORE knowledge_refs SET from_id = ? WHERE from_id = ?").run(newId, oldId);
+  db()
+    .query("UPDATE OR IGNORE knowledge_refs SET to_id = ? WHERE to_id = ?")
+    .run(newId, oldId);
+  db()
+    .query("UPDATE OR IGNORE knowledge_refs SET from_id = ? WHERE from_id = ?")
+    .run(newId, oldId);
 
   // Clean up any rows that became self-referential
   db().query("DELETE FROM knowledge_refs WHERE from_id = to_id").run();
@@ -1236,7 +1297,8 @@ export function check(projectPath: string): IntegrityIssue[] {
         const wordsA = new Set(a.split(/\s+/));
         const wordsB = new Set(b.split(/\s+/));
         const intersection = [...wordsA].filter((w) => wordsB.has(w));
-        const overlap = intersection.length / Math.min(wordsA.size, wordsB.size);
+        const overlap =
+          intersection.length / Math.min(wordsA.size, wordsB.size);
         if (overlap >= 0.7) {
           issues.push({
             entryId: entry.id,
@@ -1308,7 +1370,13 @@ function _dedup(
   dryRun: boolean,
   embeddingThreshold: number = EMBEDDING_DEDUP_THRESHOLD,
 ): DedupResult {
-  if (entries.length < 2) return { clusters: [], totalRemoved: 0, pairSimilarities: new Map(), entryTitles: new Map() };
+  if (entries.length < 2)
+    return {
+      clusters: [],
+      totalRemoved: 0,
+      pairSimilarities: new Map(),
+      entryTitles: new Map(),
+    };
 
   // --- Build neighbor map using title overlap + embedding similarity ---
   // Two entries are considered neighbors (potential duplicates) if EITHER:
@@ -1326,7 +1394,9 @@ function _dedup(
     // Build parameterized IN clause for the entry IDs
     const placeholders = entryIds.map(() => "?").join(",");
     const rows = db()
-      .query(`SELECT id, embedding FROM knowledge WHERE embedding IS NOT NULL AND id IN (${placeholders})`)
+      .query(
+        `SELECT id, embedding FROM knowledge WHERE embedding IS NOT NULL AND id IN (${placeholders})`,
+      )
       .all(...entryIds) as Array<{ id: string; embedding: Buffer }>;
     for (const row of rows) {
       try {
@@ -1352,8 +1422,13 @@ function _dedup(
       if (other.id === entry.id) continue;
 
       // Signal 1: title word-overlap
-      const { coefficient, intersectionSize } = titleOverlap(entry.title, other.title);
-      const titleMatch = coefficient >= FUZZY_DEDUP_THRESHOLD && intersectionSize >= FUZZY_DEDUP_MIN_OVERLAP;
+      const { coefficient, intersectionSize } = titleOverlap(
+        entry.title,
+        other.title,
+      );
+      const titleMatch =
+        coefficient >= FUZZY_DEDUP_THRESHOLD &&
+        intersectionSize >= FUZZY_DEDUP_MIN_OVERLAP;
 
       // Signal 2: embedding cosine similarity
       let embeddingMatch = false;
@@ -1376,7 +1451,10 @@ function _dedup(
 
       if (titleMatch || embeddingMatch) {
         // Use the stronger signal as the match score for cluster priority
-        neighbors.push({ id: other.id, score: Math.max(coefficient, similarity) });
+        neighbors.push({
+          id: other.id,
+          score: Math.max(coefficient, similarity),
+        });
       }
     }
     neighbors.sort((a, b) => b.score - a.score);
@@ -1462,9 +1540,9 @@ export async function deduplicate(
 }
 
 /** Deduplicate global (cross-project) entries that have no project_id. */
-export async function deduplicateGlobal(
-  opts?: { dryRun?: boolean },
-): Promise<DedupResult> {
+export async function deduplicateGlobal(opts?: {
+  dryRun?: boolean;
+}): Promise<DedupResult> {
   const threshold = loadCalibratedThreshold(null) ?? EMBEDDING_DEDUP_THRESHOLD;
   const entries = db()
     .query(
@@ -1509,7 +1587,9 @@ export type PromotionResult = {
  *
  * No-ops (returns { promoted: 0, clusters: [] }) when embeddings are unavailable.
  */
-export function promoteCrossProject(opts?: { dryRun?: boolean }): PromotionResult {
+export function promoteCrossProject(opts?: {
+  dryRun?: boolean;
+}): PromotionResult {
   const dryRun = opts?.dryRun ?? false;
   if (!embedding.isAvailable()) return { promoted: 0, clusters: [] };
 
@@ -1526,7 +1606,10 @@ export function promoteCrossProject(opts?: { dryRun?: boolean }): PromotionResul
        ORDER BY confidence DESC, updated_at DESC
        LIMIT ?`,
     )
-    .all(MIN_PROMOTION_CONFIDENCE, MAX_PROMOTION_CANDIDATES) as KnowledgeEntry[];
+    .all(
+      MIN_PROMOTION_CONFIDENCE,
+      MAX_PROMOTION_CANDIDATES,
+    ) as KnowledgeEntry[];
 
   if (candidates.length < MIN_PROMOTION_PROJECTS) {
     // Fewer entries than the minimum distinct-project requirement — impossible
@@ -1540,7 +1623,9 @@ export function promoteCrossProject(opts?: { dryRun?: boolean }): PromotionResul
     const ids = candidates.map((e) => e.id);
     const placeholders = ids.map(() => "?").join(",");
     const rows = db()
-      .query(`SELECT id, embedding FROM knowledge WHERE embedding IS NOT NULL AND id IN (${placeholders})`)
+      .query(
+        `SELECT id, embedding FROM knowledge WHERE embedding IS NOT NULL AND id IN (${placeholders})`,
+      )
       .all(...ids) as Array<{ id: string; embedding: Buffer }>;
     for (const row of rows) {
       try {
@@ -1561,7 +1646,10 @@ export function promoteCrossProject(opts?: { dryRun?: boolean }): PromotionResul
         if (other.id === entry.id) continue;
         const otherVec = embeddingMap.get(other.id);
         if (!otherVec || otherVec.length !== entryVec.length) continue;
-        if (embedding.cosineSimilarity(entryVec, otherVec) >= PROMOTION_SIMILARITY_THRESHOLD) {
+        if (
+          embedding.cosineSimilarity(entryVec, otherVec) >=
+          PROMOTION_SIMILARITY_THRESHOLD
+        ) {
           neighbors.push(other.id);
         }
       }
@@ -1627,7 +1715,7 @@ export type DedupFeedbackSource = "auto_dedup" | "cli_yes" | "cli_interactive";
 const MIN_CALIBRATION_SAMPLES = 20;
 const DEFAULT_EMBEDDING_DEDUP_THRESHOLD = EMBEDDING_DEDUP_THRESHOLD;
 /** Only record auto-signals for pairs with similarity >= this floor. */
-const AUTO_SIGNAL_MIN_SIMILARITY = 0.80;
+const AUTO_SIGNAL_MIN_SIMILARITY = 0.8;
 /** Max auto-signal pairs to record per dedup run (closest to threshold). */
 const AUTO_SIGNAL_MAX_PAIRS = 50;
 
@@ -1723,7 +1811,11 @@ export function recordAutoSignals(
   }
 
   // Collect reject signals: non-merged pairs with high similarity
-  type Signal = { entryATitle: string; entryBTitle: string; similarity: number };
+  type Signal = {
+    entryATitle: string;
+    entryBTitle: string;
+    similarity: number;
+  };
   const signals: Signal[] = [];
 
   for (const [pk, sim] of result.pairSimilarities) {
@@ -1739,8 +1831,13 @@ export function recordAutoSignals(
   }
 
   // Sort by distance to threshold boundary (most informative first), cap
-  const currentThreshold = loadCalibratedThreshold(projectId) ?? DEFAULT_EMBEDDING_DEDUP_THRESHOLD;
-  signals.sort((a, b) => Math.abs(a.similarity - currentThreshold) - Math.abs(b.similarity - currentThreshold));
+  const currentThreshold =
+    loadCalibratedThreshold(projectId) ?? DEFAULT_EMBEDDING_DEDUP_THRESHOLD;
+  signals.sort(
+    (a, b) =>
+      Math.abs(a.similarity - currentThreshold) -
+      Math.abs(b.similarity - currentThreshold),
+  );
   const capped = signals.slice(0, AUTO_SIGNAL_MAX_PAIRS);
 
   // Prune old feedback to prevent unbounded table growth
@@ -1775,7 +1872,11 @@ export function getDedupFeedback(
           )
           .all()
   ) as Array<{ similarity: number; accepted: number; source: string }>;
-  return rows.map((r) => ({ similarity: r.similarity, accepted: r.accepted === 1, source: r.source }));
+  return rows.map((r) => ({
+    similarity: r.similarity,
+    accepted: r.accepted === 1,
+    source: r.source,
+  }));
 }
 
 /** Quick count of feedback rows for a project. */
@@ -1783,10 +1884,14 @@ export function getDedupFeedbackCount(projectId: string | null): number {
   const row = (
     projectId !== null
       ? db()
-          .query("SELECT COUNT(*) as cnt FROM dedup_feedback WHERE project_id = ?")
+          .query(
+            "SELECT COUNT(*) as cnt FROM dedup_feedback WHERE project_id = ?",
+          )
           .get(projectId)
       : db()
-          .query("SELECT COUNT(*) as cnt FROM dedup_feedback WHERE project_id IS NULL")
+          .query(
+            "SELECT COUNT(*) as cnt FROM dedup_feedback WHERE project_id IS NULL",
+          )
           .get()
   ) as { cnt: number } | null;
   return row?.cnt ?? 0;
@@ -1968,7 +2073,9 @@ export function __resetTransferDedup(): void {
  *    - Tie-break: prefer higher threshold (conservative).
  *    - Clamp to [0.85, 0.98].
  */
-export function calibrateDedupThreshold(projectId: string | null): number | null {
+export function calibrateDedupThreshold(
+  projectId: string | null,
+): number | null {
   const feedback = getDedupFeedback(projectId);
   if (feedback.length < MIN_CALIBRATION_SAMPLES) return null;
 
@@ -1983,12 +2090,16 @@ export function calibrateDedupThreshold(projectId: string | null): number | null
 
   // Edge case: all reject, no accepts
   if (accepted.length === 0) {
-    log.warn("dedup calibration: all feedback is reject — keeping default threshold");
+    log.warn(
+      "dedup calibration: all feedback is reject — keeping default threshold",
+    );
     return null;
   }
 
   // Find optimal threshold via accuracy maximization
-  const allSims = [...new Set(feedback.map((f) => f.similarity))].sort((a, b) => a - b);
+  const allSims = [...new Set(feedback.map((f) => f.similarity))].sort(
+    (a, b) => a - b,
+  );
 
   let bestThreshold = DEFAULT_EMBEDDING_DEDUP_THRESHOLD;
   let bestAccuracy = -1;
@@ -1998,12 +2109,19 @@ export function calibrateDedupThreshold(projectId: string | null): number | null
 
     // Pairs above threshold are predicted "merge" — should be accepted
     // Pairs below threshold are predicted "keep separate" — should be rejected
-    const correctAccepted = accepted.filter((f) => f.similarity >= candidate).length;
-    const correctRejected = rejected.filter((f) => f.similarity < candidate).length;
+    const correctAccepted = accepted.filter(
+      (f) => f.similarity >= candidate,
+    ).length;
+    const correctRejected = rejected.filter(
+      (f) => f.similarity < candidate,
+    ).length;
     const accuracy = (correctAccepted + correctRejected) / feedback.length;
 
     // Tie-break: prefer higher threshold (conservative — fewer false merges)
-    if (accuracy > bestAccuracy || (accuracy === bestAccuracy && candidate > bestThreshold)) {
+    if (
+      accuracy > bestAccuracy ||
+      (accuracy === bestAccuracy && candidate > bestThreshold)
+    ) {
       bestAccuracy = accuracy;
       bestThreshold = candidate;
     }
@@ -2020,11 +2138,16 @@ export function saveCalibratedThreshold(
   sampleSize: number,
 ): void {
   const key = `dedup_threshold:${projectId ?? "global"}`;
-  setKV(key, JSON.stringify({ threshold, sampleSize, calibratedAt: Date.now() }));
+  setKV(
+    key,
+    JSON.stringify({ threshold, sampleSize, calibratedAt: Date.now() }),
+  );
 }
 
 /** Load the calibrated threshold for a project, or null if not calibrated. */
-export function loadCalibratedThreshold(projectId: string | null): number | null {
+export function loadCalibratedThreshold(
+  projectId: string | null,
+): number | null {
   const key = `dedup_threshold:${projectId ?? "global"}`;
   const raw = getKV(key);
   if (!raw) return null;

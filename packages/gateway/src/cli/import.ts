@@ -97,28 +97,42 @@ export async function commandImport(
   if (agentFilter) {
     results = results.filter((r) => r.agentName === agentFilter);
     if (results.length === 0) {
-      console.log(`[lore] No conversation history found from "${agentFilter}" for this project.`);
+      console.log(
+        `[lore] No conversation history found from "${agentFilter}" for this project.`,
+      );
       return;
     }
   }
 
   if (results.length === 0) {
-    console.log("[lore] No prior AI conversation history found for this project.");
+    console.log(
+      "[lore] No prior AI conversation history found for this project.",
+    );
     return;
   }
 
   // Filter out already-imported sessions.
   // In remote mode, fetch import history from the remote gateway.
-  let remoteImports: Array<{ agent_name: string; source_id: string; source_hash: string }> | undefined;
+  let remoteImports:
+    | Array<{ agent_name: string; source_id: string; source_hash: string }>
+    | undefined;
   if (remote) {
     try {
       const pq = projectQueryParams(projectPath);
-      remoteImports = await remoteGet<typeof remoteImports>(remote, `/api/v1/import/history?${pq}`);
+      remoteImports = await remoteGet<typeof remoteImports>(
+        remote,
+        `/api/v1/import/history?${pq}`,
+      );
     } catch (err: unknown) {
       // 400/404 = project doesn't exist on remote yet (first import) — proceed without dedup
-      const status = err instanceof Error && "status" in err ? (err as { status: number }).status : 0;
+      const status =
+        err instanceof Error && "status" in err
+          ? (err as { status: number }).status
+          : 0;
       if (status === 400 || status === 404) {
-        console.error("[lore] Note: project not yet known to remote gateway — all sessions will be imported.");
+        console.error(
+          "[lore] Note: project not yet known to remote gateway — all sessions will be imported.",
+        );
       } else {
         // Server errors, auth failures, network issues — re-throw (don't silently double-import)
         throw err;
@@ -138,22 +152,33 @@ export async function commandImport(
       if (remote && remoteImports) {
         // Check against remote import history
         return !remoteImports.some(
-          (r) => r.agent_name === result.agentName && r.source_id === sess.id && r.source_hash === hash,
+          (r) =>
+            r.agent_name === result.agentName &&
+            r.source_id === sess.id &&
+            r.source_hash === hash,
         );
       }
       // Local mode: check local DB
       return !isImported(projectPath, result.agentName, sess.id, hash);
     });
 
-    result.totalMessages = result.sessions.reduce((s, sess) => s + sess.messageCount, 0);
-    result.totalTokens = result.sessions.reduce((s, sess) => s + sess.estimatedTokens, 0);
+    result.totalMessages = result.sessions.reduce(
+      (s, sess) => s + sess.messageCount,
+      0,
+    );
+    result.totalTokens = result.sessions.reduce(
+      (s, sess) => s + sess.estimatedTokens,
+      0,
+    );
   }
 
   // Remove agents with no new sessions
   results = results.filter((r) => r.sessions.length > 0);
 
   if (results.length === 0) {
-    console.log("[lore] All detected conversations have already been imported.");
+    console.log(
+      "[lore] All detected conversations have already been imported.",
+    );
     return;
   }
 
@@ -164,7 +189,9 @@ export async function commandImport(
   console.log("Found prior conversations for this project:\n");
   for (const result of results) {
     console.log(`  ${result.agentDisplayName}`);
-    console.log(`    ${result.sessions.length} sessions, ~${result.totalMessages} messages`);
+    console.log(
+      `    ${result.sessions.length} sessions, ~${result.totalMessages} messages`,
+    );
     if (result.sessions.length > 0) {
       const latest = result.sessions[0];
       console.log(`    Most recent: ${formatDate(latest.lastActivityAt)}`);
@@ -175,7 +202,9 @@ export async function commandImport(
   // Estimate LLM calls (one per ~12K token chunk)
   const totalTokens = results.reduce((s, r) => s + r.totalTokens, 0);
   const estimatedChunks = Math.ceil(totalTokens / 12288);
-  console.log(`  Total: ${totalSessions} sessions, ~${totalMessages} messages (~${estimatedChunks} LLM calls)\n`);
+  console.log(
+    `  Total: ${totalSessions} sessions, ~${totalMessages} messages (~${estimatedChunks} LLM calls)\n`,
+  );
 
   if (dryRun) {
     console.log("[lore] Dry run — no imports performed.");
@@ -184,7 +213,9 @@ export async function commandImport(
 
   // Confirm unless --yes
   if (!yes) {
-    const ok = await confirm("[lore] Import knowledge from these conversations?");
+    const ok = await confirm(
+      "[lore] Import knowledge from these conversations?",
+    );
     if (!ok) {
       console.log("[lore] Import cancelled.");
       return;
@@ -230,11 +261,15 @@ export async function commandImport(
 
       const chunks = provider.readChunks(projectPath, sessionIds);
       if (chunks.length === 0) {
-        console.log(`[lore] No extractable content from ${result.agentDisplayName}.`);
+        console.log(
+          `[lore] No extractable content from ${result.agentDisplayName}.`,
+        );
         continue;
       }
 
-      console.log(`[lore] Extracting knowledge from ${chunks.length} chunks (${result.agentDisplayName})...`);
+      console.log(
+        `[lore] Extracting knowledge from ${chunks.length} chunks (${result.agentDisplayName})...`,
+      );
 
       const extractResult = await extractKnowledge({
         llm,
@@ -324,30 +359,44 @@ async function importRemote(
 
     const chunks = provider.readChunks(projectPath, sessionIds);
     if (chunks.length === 0) {
-      console.log(`[lore] No extractable content from ${result.agentDisplayName}.`);
+      console.log(
+        `[lore] No extractable content from ${result.agentDisplayName}.`,
+      );
       continue;
     }
 
-    console.log(`[lore] Extracting knowledge from ${chunks.length} chunks via remote gateway (${result.agentDisplayName})...`);
+    console.log(
+      `[lore] Extracting knowledge from ${chunks.length} chunks via remote gateway (${result.agentDisplayName})...`,
+    );
 
     // Send chunks to remote gateway for extraction (zstd-compressed)
     let extractResult: {
-      created: number; updated: number; deleted: number;
-      chunksProcessed: number; chunksFailed: number;
+      created: number;
+      updated: number;
+      deleted: number;
+      chunksProcessed: number;
+      chunksFailed: number;
     };
     try {
-      extractResult = await remotePost(remote, "/api/v1/import/extract", {
-        git_remote: normalized,
-        path: projectPath,
-        chunks: chunks.map((c) => ({
-          label: c.label,
-          text: c.text,
-          estimatedTokens: c.estimatedTokens,
-          timestamp: c.timestamp,
-        })),
-      }, { compress: true });
+      extractResult = await remotePost(
+        remote,
+        "/api/v1/import/extract",
+        {
+          git_remote: normalized,
+          path: projectPath,
+          chunks: chunks.map((c) => ({
+            label: c.label,
+            text: c.text,
+            estimatedTokens: c.estimatedTokens,
+            timestamp: c.timestamp,
+          })),
+        },
+        { compress: true },
+      );
     } catch (err) {
-      console.error(`[lore] Extraction failed for ${result.agentDisplayName}: ${err instanceof Error ? err.message : err}`);
+      console.error(
+        `[lore] Extraction failed for ${result.agentDisplayName}: ${err instanceof Error ? err.message : err}`,
+      );
       totalFailed += chunks.length;
       continue;
     }
@@ -367,10 +416,15 @@ async function importRemote(
           agent_name: result.agentName,
           source_id: sess.id,
           source_hash: hash,
-          stats: { created: extractResult.created, updated: extractResult.updated },
+          stats: {
+            created: extractResult.created,
+            updated: extractResult.updated,
+          },
         });
       } catch (err) {
-        console.error(`[lore] Warning: failed to record import on remote: ${err instanceof Error ? err.message : err}`);
+        console.error(
+          `[lore] Warning: failed to record import on remote: ${err instanceof Error ? err.message : err}`,
+        );
       }
       // Also record locally (belt-and-suspenders)
       try {

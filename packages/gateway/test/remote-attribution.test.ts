@@ -56,7 +56,10 @@ describe("remote gateway: path-less session attribution", () => {
           { userMessage: "alpha project question one", assistantText: "A1." },
         ]),
         ...makeConversationFixtures([
-          { userMessage: "beta project totally different", assistantText: "B1." },
+          {
+            userMessage: "beta project totally different",
+            assistantText: "B1.",
+          },
         ]),
       ],
     });
@@ -64,7 +67,9 @@ describe("remote gateway: path-less session attribution", () => {
     const r1 = await harness.chat(pathlessBody("alpha project question one"));
     expect(r1.status).toBe(200);
     await r1.text();
-    const r2 = await harness.chat(pathlessBody("beta project totally different"));
+    const r2 = await harness.chat(
+      pathlessBody("beta project totally different"),
+    );
     expect(r2.status).toBe(200);
     await r2.text();
 
@@ -135,7 +140,13 @@ describe("lore data consolidate", () => {
       .query(
         "INSERT INTO projects (id, path, name, git_remote, created_at) VALUES (?, ?, ?, ?, ?)",
       )
-      .run(bucketId, bucketPath, "(unattributed) sessionfaiss", remote, Date.now());
+      .run(
+        bucketId,
+        bucketPath,
+        "(unattributed) sessionfaiss",
+        remote,
+        Date.now(),
+      );
     ltm.create({
       projectPath: bucketPath,
       scope: "project",
@@ -144,7 +155,9 @@ describe("lore data consolidate", () => {
       content: "learned in an unattributed bucket",
     });
     // Backfill the remote onto the real project so the two share a remote.
-    db().query("UPDATE projects SET git_remote = ? WHERE id = ?").run(remote, realId);
+    db()
+      .query("UPDATE projects SET git_remote = ? WHERE id = ?")
+      .run(remote, realId);
     expect(bucketId).not.toBe(realId);
 
     // Apply consolidation.
@@ -152,7 +165,10 @@ describe("lore data consolidate", () => {
 
     // Bucket project gone; knowledge re-pointed to the real project.
     expect(projectId(bucketPath)).toBe(realId); // path now an alias of real
-    const moved = ltm.search({ query: "bucket-finding-xyz", projectPath: realPath });
+    const moved = ltm.search({
+      query: "bucket-finding-xyz",
+      projectPath: realPath,
+    });
     expect(moved.length).toBeGreaterThan(0);
   });
 

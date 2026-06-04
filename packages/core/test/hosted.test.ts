@@ -1,7 +1,11 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "fs";
 import { join } from "path";
-import { enableHostedMode, isHostedMode, _resetHostedModeForTest } from "../src/hosted";
+import {
+  enableHostedMode,
+  isHostedMode,
+  _resetHostedModeForTest,
+} from "../src/hosted";
 import { getGitRemote, clearGitRemoteCache } from "../src/git";
 import { load } from "../src/config";
 import {

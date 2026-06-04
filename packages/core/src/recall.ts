@@ -183,7 +183,9 @@ function searchDistillationsScored(input: {
       const params = input.sessionID
         ? [matchExpr, pid, input.sessionID, limit]
         : [matchExpr, pid, limit];
-      return db().query(ftsSQL).all(...params) as ScoredDistillation[];
+      return db()
+        .query(ftsSQL)
+        .all(...params) as ScoredDistillation[];
     });
   } catch {
     // FTS5 failed — fall back to LIKE search with synthetic rank
@@ -305,8 +307,7 @@ function formatFusedResults(
   // Step 2: Assign tiers based on relative score.
   const tiered: TieredResult[] = kept.map((r) => ({
     ...r,
-    tier:
-      r.score >= topScore * 0.6 ? 0 : r.score >= topScore * 0.3 ? 1 : 2,
+    tier: r.score >= topScore * 0.6 ? 0 : r.score >= topScore * 0.3 ? 1 : 2,
     charBudget: 0, // computed next
   }));
 
@@ -744,7 +745,10 @@ export async function searchRecall(
 
       // Distillation vector search
       if (scope !== "knowledge") {
-        const distVectorHits = embedding.vectorSearchDistillations(queryVec, limit);
+        const distVectorHits = embedding.vectorSearchDistillations(
+          queryVec,
+          limit,
+        );
         const distVectorTagged: TaggedResult[] = distVectorHits
           .map((hit): TaggedResult | null => {
             const row = db()
@@ -838,7 +842,8 @@ export async function searchRecall(
         allRrfLists.push({
           items: crossProjectResults.map((item: ltm.ScoredKnowledgeEntry) => {
             const label =
-              (item.project_id ? projectName(item.project_id) : null) ?? "other";
+              (item.project_id ? projectName(item.project_id) : null) ??
+              "other";
             return {
               source: "cross-knowledge" as const,
               item,
@@ -874,10 +879,7 @@ export async function searchRecall(
         const cNorm = d.c_norm ?? 0; // NULL → treat as uniform (best case)
         // Quality score: lower c_norm is better. For high c_norm, recency
         // partially compensates. Age is normalized to days (capped at 90).
-        const ageDays = Math.min(
-          (Date.now() - d.created_at) / 86_400_000,
-          90,
-        );
+        const ageDays = Math.min((Date.now() - d.created_at) / 86_400_000, 90);
         // score ∈ [0, ~1]: 0 = best quality (uniform + recent)
         // c_norm dominates (0–1), age adds a mild 0–0.1 penalty
         const score = cNorm + (ageDays / 90) * 0.1;
@@ -947,7 +949,10 @@ export async function searchRecall(
     const primary = allRrfLists.slice(0, primaryListEnd);
     const expanded = allRrfLists.slice(primaryListEnd, perQueryListEnd);
     const supplemental = allRrfLists.slice(perQueryListEnd);
-    const budget = Math.max(0, MAX_RRF_LISTS - primary.length - supplemental.length);
+    const budget = Math.max(
+      0,
+      MAX_RRF_LISTS - primary.length - supplemental.length,
+    );
     allRrfLists.length = 0;
     allRrfLists.push(...primary, ...expanded.slice(0, budget), ...supplemental);
   }
@@ -1064,12 +1069,16 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
     try {
       const pid = ensureProject(input.projectPath);
       for (const { item: tagged } of fused) {
-        if (tagged.source !== "cross-knowledge" && tagged.source !== "knowledge")
+        if (
+          tagged.source !== "cross-knowledge" &&
+          tagged.source !== "knowledge"
+        )
           continue;
         const entry = tagged.item;
         // For same-source knowledge results, only promoted cross-project entries
         // from another project count as transfers.
-        if (tagged.source === "knowledge" && entry.cross_project !== 1) continue;
+        if (tagged.source === "knowledge" && entry.cross_project !== 1)
+          continue;
         if (!entry.project_id || entry.project_id === pid) continue;
         ltm.recordTransfer({ knowledgeId: entry.id, recalledInProjectId: pid });
       }
@@ -1106,13 +1115,14 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
 
 /** Standard tool description reused verbatim by each host adapter. */
 export const RECALL_TOOL_DESCRIPTION =
-  'Search your persistent memory for this project. Your visible context is a trimmed window — older messages, decisions, and details may not be visible to you even within the current session. Use this tool whenever you need information that isn\'t in your current context: file paths, past decisions, user preferences, prior approaches, or anything from earlier in this conversation or previous sessions. Always prefer recall over assuming you don\'t have the information. Searches long-term knowledge, distilled history, and raw message archives.' +
+  "Search your persistent memory for this project. Your visible context is a trimmed window — older messages, decisions, and details may not be visible to you even within the current session. Use this tool whenever you need information that isn't in your current context: file paths, past decisions, user preferences, prior approaches, or anything from earlier in this conversation or previous sessions. Always prefer recall over assuming you don't have the information. Searches long-term knowledge, distilled history, and raw message archives." +
   '\n\nYour context contains references in the format (prefix:id) — e.g. (d:abc123) for distillations, (t:abc123) for messages. These appear in distillation headers, tool result placeholders, and truncated recall results. Pass any such ID to this tool\'s `id` parameter to retrieve the full original content. Distillations marked "lossy" have lost specific details — use the ID to drill down.' +
   '\n\nNever write recall status text (like "📚 Searching…" or "📚 Fetching…") yourself — these are injected by the system automatically when you use this tool.';
 
 /** Standard parameter descriptions reused by each host adapter. */
 export const RECALL_PARAM_DESCRIPTIONS = {
-  query: "What to search for — be specific. Include keywords, file names, or concepts.",
+  query:
+    "What to search for — be specific. Include keywords, file names, or concepts.",
   scope:
     "Search scope: 'all' (default) searches everything, 'session' searches current session only, 'project' searches all sessions in this project, 'knowledge' searches only long-term knowledge.",
   id: "Fetch full content of a specific result by its source-prefixed ID (e.g. 'k:abc123', 'd:abc123', 't:abc123'). These IDs appear throughout your context: in distillation headers, tool result placeholders, and truncated recall results. When id is provided, query is ignored.",

@@ -12,7 +12,11 @@
 import { readdirSync, readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
-import type { AgentHistoryProvider, ConversationChunk, DetectedSession } from "../types";
+import type {
+  AgentHistoryProvider,
+  ConversationChunk,
+  DetectedSession,
+} from "../types";
 import { registerProvider } from "./index";
 
 // ---------------------------------------------------------------------------
@@ -120,8 +124,10 @@ function extractMessageContent(content: string | ContentPart[]): string {
   if (!Array.isArray(content)) return "";
 
   return content
-    .filter((part): part is { type: "text"; text: string } =>
-      part.type === "text" && typeof (part as { text?: string }).text === "string",
+    .filter(
+      (part): part is { type: "text"; text: string } =>
+        part.type === "text" &&
+        typeof (part as { text?: string }).text === "string",
     )
     .map((part) => part.text)
     .join("\n");
@@ -145,7 +151,10 @@ function historyItemToText(item: ChatHistoryItem): string | null {
   if (msg.toolCalls) {
     for (const call of msg.toolCalls) {
       if (call.function) {
-        const args = truncate(call.function.arguments || "{}", MAX_TOOL_OUTPUT_CHARS);
+        const args = truncate(
+          call.function.arguments || "{}",
+          MAX_TOOL_OUTPUT_CHARS,
+        );
         parts.push(`[tool: ${call.function.name}] ${args}`);
       }
     }
@@ -155,7 +164,9 @@ function historyItemToText(item: ChatHistoryItem): string | null {
   if (item.toolCallStates) {
     for (const state of item.toolCallStates) {
       if (state.output && state.status === "done") {
-        parts.push(`[tool_result] ${truncate(state.output, MAX_TOOL_OUTPUT_CHARS)}`);
+        parts.push(
+          `[tool_result] ${truncate(state.output, MAX_TOOL_OUTPUT_CHARS)}`,
+        );
       }
     }
   }
@@ -228,7 +239,9 @@ const continueProvider: AgentHistoryProvider = {
         if (session.workspaceDirectory !== projectPath) continue;
         if (!session.history || session.history.length < 3) continue;
 
-        const dateStr = session.title ? truncate(session.title, 60) : sessionId.slice(0, 8);
+        const dateStr = session.title
+          ? truncate(session.title, 60)
+          : sessionId.slice(0, 8);
         sessions.push({
           id: sessionId,
           label: `${dateStr} (${session.history.length} messages)`,

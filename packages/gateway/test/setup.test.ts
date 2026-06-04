@@ -7,7 +7,9 @@ import { updateCodexConfig, normalizeBaseUrl } from "../src/cli/setup";
 
 describe("normalizeBaseUrl", () => {
   test("default local URL with default port", () => {
-    expect(normalizeBaseUrl(undefined, undefined)).toBe("http://127.0.0.1:3207/v1");
+    expect(normalizeBaseUrl(undefined, undefined)).toBe(
+      "http://127.0.0.1:3207/v1",
+    );
   });
 
   test("default local URL with custom port", () => {
@@ -15,39 +17,57 @@ describe("normalizeBaseUrl", () => {
   });
 
   test("remote URL without trailing slash", () => {
-    expect(normalizeBaseUrl("http://remote:3207", undefined)).toBe("http://remote:3207/v1");
+    expect(normalizeBaseUrl("http://remote:3207", undefined)).toBe(
+      "http://remote:3207/v1",
+    );
   });
 
   test("remote URL with trailing slash", () => {
-    expect(normalizeBaseUrl("http://remote:3207/", undefined)).toBe("http://remote:3207/v1");
+    expect(normalizeBaseUrl("http://remote:3207/", undefined)).toBe(
+      "http://remote:3207/v1",
+    );
   });
 
   test("remote URL with multiple trailing slashes", () => {
-    expect(normalizeBaseUrl("http://remote:3207///", undefined)).toBe("http://remote:3207/v1");
+    expect(normalizeBaseUrl("http://remote:3207///", undefined)).toBe(
+      "http://remote:3207/v1",
+    );
   });
 
   test("remote URL already ending in /v1", () => {
-    expect(normalizeBaseUrl("http://remote:3207/v1", undefined)).toBe("http://remote:3207/v1");
+    expect(normalizeBaseUrl("http://remote:3207/v1", undefined)).toBe(
+      "http://remote:3207/v1",
+    );
   });
 
   test("remote URL ending in /v1/", () => {
-    expect(normalizeBaseUrl("http://remote:3207/v1/", undefined)).toBe("http://remote:3207/v1");
+    expect(normalizeBaseUrl("http://remote:3207/v1/", undefined)).toBe(
+      "http://remote:3207/v1",
+    );
   });
 
   test("remote URL takes precedence over port", () => {
-    expect(normalizeBaseUrl("http://remote:9999", 8080)).toBe("http://remote:9999/v1");
+    expect(normalizeBaseUrl("http://remote:9999", 8080)).toBe(
+      "http://remote:9999/v1",
+    );
   });
 
   test("rejects URL with double-quotes", () => {
-    expect(() => normalizeBaseUrl('http://evil.com/v1"inject', undefined)).toThrow("Invalid characters");
+    expect(() =>
+      normalizeBaseUrl('http://evil.com/v1"inject', undefined),
+    ).toThrow("Invalid characters");
   });
 
   test("rejects URL with control characters", () => {
-    expect(() => normalizeBaseUrl("http://evil.com/v1\nmalicious", undefined)).toThrow("Invalid characters");
+    expect(() =>
+      normalizeBaseUrl("http://evil.com/v1\nmalicious", undefined),
+    ).toThrow("Invalid characters");
   });
 
   test("rejects URL with backslash", () => {
-    expect(() => normalizeBaseUrl("http://evil.com\\v1", undefined)).toThrow("Invalid characters");
+    expect(() => normalizeBaseUrl("http://evil.com\\v1", undefined)).toThrow(
+      "Invalid characters",
+    );
   });
 
   test("rejects whitespace-only remote URL", () => {
@@ -246,7 +266,7 @@ describe("updateCodexConfig — real-world config", () => {
       'last_updated = "2026-06-03T10:29:58Z"',
       'source_type = "local"',
       'source = "/path/to/marketplace"',
-      "[plugins.\"browser@openai-bundled\"]",
+      '[plugins."browser@openai-bundled"]',
       "enabled = true",
       "[features]",
       "js_repl = false",

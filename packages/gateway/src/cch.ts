@@ -47,30 +47,30 @@ import { createHash, randomUUID } from "crypto";
  * See `scripts/extract-cch-seed.ts` for the automated extraction tool.
  */
 const VERSION_SEEDS: Record<string, bigint> = {
-  "2.1.37": 0x6E52736AC806831En,
-  "2.1.138": 0x4D659218E32A3268n,
-  "2.1.140": 0x4D659218E32A3268n,
-  "2.1.139": 0x4D659218E32A3268n,
-  "2.1.141": 0x4D659218E32A3268n,
-  "2.1.142": 0x4D659218E32A3268n,
-  "2.1.143": 0x4D659218E32A3268n,
-  "2.1.144": 0x4D659218E32A3268n,
-  "2.1.145": 0x4D659218E32A3268n,
-  "2.1.146": 0x4D659218E32A3268n,
-  "2.1.152": 0x4D659218E32A3268n,
-  "2.1.147": 0x4D659218E32A3268n,
-  "2.1.148": 0x4D659218E32A3268n,
-  "2.1.149": 0x4D659218E32A3268n,
-  "2.1.150": 0x4D659218E32A3268n,
-  "2.1.153": 0x4D659218E32A3268n,
-  "2.1.160": 0x4D659218E32A3268n,
-  "2.1.154": 0x4D659218E32A3268n,
-  "2.1.156": 0x4D659218E32A3268n,
-  "2.1.157": 0x4D659218E32A3268n,
-  "2.1.158": 0x4D659218E32A3268n,
-  "2.1.159": 0x4D659218E32A3268n,
-  "2.1.161": 0x4D659218E32A3268n,
-  "2.1.162": 0x4D659218E32A3268n,
+  "2.1.37": 0x6e52736ac806831en,
+  "2.1.138": 0x4d659218e32a3268n,
+  "2.1.140": 0x4d659218e32a3268n,
+  "2.1.139": 0x4d659218e32a3268n,
+  "2.1.141": 0x4d659218e32a3268n,
+  "2.1.142": 0x4d659218e32a3268n,
+  "2.1.143": 0x4d659218e32a3268n,
+  "2.1.144": 0x4d659218e32a3268n,
+  "2.1.145": 0x4d659218e32a3268n,
+  "2.1.146": 0x4d659218e32a3268n,
+  "2.1.152": 0x4d659218e32a3268n,
+  "2.1.147": 0x4d659218e32a3268n,
+  "2.1.148": 0x4d659218e32a3268n,
+  "2.1.149": 0x4d659218e32a3268n,
+  "2.1.150": 0x4d659218e32a3268n,
+  "2.1.153": 0x4d659218e32a3268n,
+  "2.1.160": 0x4d659218e32a3268n,
+  "2.1.154": 0x4d659218e32a3268n,
+  "2.1.156": 0x4d659218e32a3268n,
+  "2.1.157": 0x4d659218e32a3268n,
+  "2.1.158": 0x4d659218e32a3268n,
+  "2.1.159": 0x4d659218e32a3268n,
+  "2.1.161": 0x4d659218e32a3268n,
+  "2.1.162": 0x4d659218e32a3268n,
   // Future versions: extract and add entries here.
   // Use `bun run scripts/extract-cch-seed.ts --version X.Y.Z` to extract.
 };
@@ -101,7 +101,7 @@ const CCH_PLACEHOLDER = "cch=00000";
  */
 export function signBody(bodyWithPlaceholder: string): string {
   const hash = Bun.hash.xxHash64(bodyWithPlaceholder, WORKER_SEED);
-  const cch = (hash & 0xFFFFFn).toString(16).padStart(5, "0");
+  const cch = (hash & 0xfffffn).toString(16).padStart(5, "0");
   return bodyWithPlaceholder.replace(CCH_PLACEHOLDER, `cch=${cch}`);
 }
 
@@ -172,10 +172,7 @@ export function resignBody(
   // Step 1: Replace cc_version with our worker version + recomputed suffix.
   // The suffix depends on chars[4,7,20] from the first user message.
   const suffix = computeVersionSuffix(firstUserMessage);
-  body = body.replace(
-    CC_VERSION_RE,
-    `cc_version=${WORKER_VERSION}.${suffix};`,
-  );
+  body = body.replace(CC_VERSION_RE, `cc_version=${WORKER_VERSION}.${suffix};`);
 
   // Step 2: Replace existing cch with placeholder
   body = body.replace(CCH_IN_BODY_RE, `${CCH_PLACEHOLDER};`);
@@ -359,7 +356,8 @@ export function buildOAuthWorkerHeaders(
 
   return {
     "anthropic-beta": snapshot?.anthropicBeta || WORKER_BETAS,
-    "user-agent": snapshot?.userAgent || `claude-cli/${WORKER_VERSION} (external, sdk-cli)`,
+    "user-agent":
+      snapshot?.userAgent || `claude-cli/${WORKER_VERSION} (external, sdk-cli)`,
     "anthropic-dangerous-direct-browser-access": "true",
     "x-client-request-id": randomUUID(),
   };
@@ -418,8 +416,9 @@ export function resolveSeed(version: string): {
   const target = parseSemver(version);
   const entries = Object.entries(VERSION_SEEDS)
     .map(([v, s]) => ({ version: v, seed: s, parsed: parseSemver(v) }))
-    .filter((e): e is typeof e & { parsed: [number, number, number] } =>
-      e.parsed !== null,
+    .filter(
+      (e): e is typeof e & { parsed: [number, number, number] } =>
+        e.parsed !== null,
     );
 
   if (entries.length === 0) {
@@ -429,9 +428,7 @@ export function resolveSeed(version: string): {
 
   if (!target) {
     // Unparseable version string — use the latest known seed
-    const latest = entries.sort((a, b) =>
-      compareSemver(b.parsed, a.parsed),
-    )[0];
+    const latest = entries.sort((a, b) => compareSemver(b.parsed, a.parsed))[0];
     return { version: latest.version, seed: latest.seed, exact: false };
   }
 
@@ -490,7 +487,7 @@ export function validateSeed(body: string): boolean | null {
 
   for (const seed of Object.values(VERSION_SEEDS)) {
     const hash = Bun.hash.xxHash64(bodyWithPlaceholder, seed);
-    const ourCch = (hash & 0xFFFFFn).toString(16).padStart(5, "0");
+    const ourCch = (hash & 0xfffffn).toString(16).padStart(5, "0");
     if (ourCch === clientCch) return true;
   }
 

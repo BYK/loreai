@@ -14,7 +14,13 @@
  * client-facing response contains NO `recall` tool_use block.
  */
 import { describe, test, expect, afterEach } from "bun:test";
-import { unlinkSync, existsSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import {
+  unlinkSync,
+  existsSync,
+  mkdtempSync,
+  writeFileSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -93,7 +99,9 @@ describe("recall interception — OpenAI streaming path", () => {
   test("does not leak recall tool_use to the client", async () => {
     const dbPath = `/tmp/lore-recall-openai-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
     process.env.LORE_DB_PATH = dbPath;
-    process.env.LORE_LISTEN_PORT = String(20000 + Math.floor(Math.random() * 30000));
+    process.env.LORE_LISTEN_PORT = String(
+      20000 + Math.floor(Math.random() * 30000),
+    );
     if (!process.env.LORE_DEBUG) process.env.LORE_DEBUG = "false";
 
     // Isolated project dir with query expansion disabled so executeRecall
@@ -109,7 +117,9 @@ describe("recall interception — OpenAI streaming path", () => {
     );
     const { startServer } = await import("../src/server");
     const { loadConfig } = await import("../src/config");
-    const { close: closeDB, load: loadLoreConfig } = await import("@loreai/core");
+    const { close: closeDB, load: loadLoreConfig } = await import(
+      "@loreai/core"
+    );
 
     closeDB();
     await resetPipelineState();

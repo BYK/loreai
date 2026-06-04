@@ -121,10 +121,13 @@ export function opaquePlaceholder(raw: Record<string, unknown>): string {
     (source?.media_type as string | undefined) ??
     (raw.media_type as string | undefined);
   const data =
-    (source?.data as string | undefined) ??
-    (raw.data as string | undefined);
+    (source?.data as string | undefined) ?? (raw.data as string | undefined);
   const bytes = typeof data === "string" ? data.length : undefined;
-  const descriptor = [type, mediaType, bytes != null ? `${bytes} chars` : undefined]
+  const descriptor = [
+    type,
+    mediaType,
+    bytes != null ? `${bytes} chars` : undefined,
+  ]
     .filter(Boolean)
     .join(" ");
   return `[${descriptor}]`;

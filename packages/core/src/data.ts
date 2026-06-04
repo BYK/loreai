@@ -194,12 +194,12 @@ export function aggregateDistillationsBySession(
        GROUP BY session_id`,
     )
     .all(pid, sinceMs) as Array<{
-      session_id: string;
-      total_calls: number;
-      batch_calls: number;
-      total_tokens: number;
-      batch_tokens: number;
-    }>;
+    session_id: string;
+    total_calls: number;
+    batch_calls: number;
+    total_tokens: number;
+    batch_tokens: number;
+  }>;
   const result = new Map<string, SessionDistillAggregate>();
   for (const row of rows) {
     result.set(row.session_id, {
@@ -285,8 +285,7 @@ export function countForProject(projectPath: string): {
   sessions: number;
 } {
   const pid = projectId(projectPath);
-  if (!pid)
-    return { knowledge: 0, messages: 0, distillations: 0, sessions: 0 };
+  if (!pid) return { knowledge: 0, messages: 0, distillations: 0, sessions: 0 };
 
   const row = db()
     .query(
@@ -320,9 +319,7 @@ export function clearProject(projectPath: string): ClearResult {
   const counts = {
     knowledge: (
       database
-        .query(
-          "SELECT COUNT(*) as c FROM knowledge WHERE project_id = ?",
-        )
+        .query("SELECT COUNT(*) as c FROM knowledge WHERE project_id = ?")
         .get(pid) as { c: number }
     ).c,
     temporal: (
@@ -334,9 +331,7 @@ export function clearProject(projectPath: string): ClearResult {
     ).c,
     distillations: (
       database
-        .query(
-          "SELECT COUNT(*) as c FROM distillations WHERE project_id = ?",
-        )
+        .query("SELECT COUNT(*) as c FROM distillations WHERE project_id = ?")
         .get(pid) as { c: number }
     ).c,
     sessions: (
@@ -358,9 +353,7 @@ export function clearProject(projectPath: string): ClearResult {
          (SELECT DISTINCT session_id FROM temporal_messages WHERE project_id = ?)`,
       )
       .run(pid);
-    database
-      .query("DELETE FROM tool_calls WHERE project_id = ?")
-      .run(pid);
+    database.query("DELETE FROM tool_calls WHERE project_id = ?").run(pid);
     // knowledge_transfers has two project columns (origin via knowledge_id, and
     // recalled_in). Delete BEFORE knowledge so the subquery still sees the rows.
     database
@@ -368,18 +361,12 @@ export function clearProject(projectPath: string): ClearResult {
         "DELETE FROM knowledge_transfers WHERE recalled_in_project_id = ? OR knowledge_id IN (SELECT id FROM knowledge WHERE project_id = ?)",
       )
       .run(pid, pid);
-    database
-      .query("DELETE FROM knowledge WHERE project_id = ?")
-      .run(pid);
+    database.query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
     database
       .query("DELETE FROM temporal_messages WHERE project_id = ?")
       .run(pid);
-    database
-      .query("DELETE FROM distillations WHERE project_id = ?")
-      .run(pid);
-    database
-      .query("DELETE FROM lat_sections WHERE project_id = ?")
-      .run(pid);
+    database.query("DELETE FROM distillations WHERE project_id = ?").run(pid);
+    database.query("DELETE FROM lat_sections WHERE project_id = ?").run(pid);
     database.exec("COMMIT");
   } catch (e) {
     database.exec("ROLLBACK");
@@ -433,9 +420,7 @@ export function deleteProject(projectId: string): ClearResult | null {
   const counts = {
     knowledge: (
       database
-        .query(
-          "SELECT COUNT(*) as c FROM knowledge WHERE project_id = ?",
-        )
+        .query("SELECT COUNT(*) as c FROM knowledge WHERE project_id = ?")
         .get(projectId) as { c: number }
     ).c,
     temporal: (
@@ -447,9 +432,7 @@ export function deleteProject(projectId: string): ClearResult | null {
     ).c,
     distillations: (
       database
-        .query(
-          "SELECT COUNT(*) as c FROM distillations WHERE project_id = ?",
-        )
+        .query("SELECT COUNT(*) as c FROM distillations WHERE project_id = ?")
         .get(projectId) as { c: number }
     ).c,
     sessions: (
@@ -480,9 +463,7 @@ export function deleteProject(projectId: string): ClearResult | null {
         "DELETE FROM knowledge_transfers WHERE recalled_in_project_id = ? OR knowledge_id IN (SELECT id FROM knowledge WHERE project_id = ?)",
       )
       .run(projectId, projectId);
-    database
-      .query("DELETE FROM knowledge WHERE project_id = ?")
-      .run(projectId);
+    database.query("DELETE FROM knowledge WHERE project_id = ?").run(projectId);
     database
       .query("DELETE FROM temporal_messages WHERE project_id = ?")
       .run(projectId);
@@ -500,9 +481,7 @@ export function deleteProject(projectId: string): ClearResult | null {
       .query("DELETE FROM warmup_histograms WHERE project_id = ?")
       .run(projectId);
     // Finally, delete the project row itself
-    database
-      .query("DELETE FROM projects WHERE id = ?")
-      .run(projectId);
+    database.query("DELETE FROM projects WHERE id = ?").run(projectId);
     database.exec("COMMIT");
   } catch (e) {
     database.exec("ROLLBACK");
@@ -539,9 +518,7 @@ export function clearKnowledge(projectPath: string): number {
   const pid = ensureProject(projectPath);
   const count = (
     db()
-      .query(
-        "SELECT COUNT(*) as c FROM knowledge WHERE project_id = ?",
-      )
+      .query("SELECT COUNT(*) as c FROM knowledge WHERE project_id = ?")
       .get(pid) as { c: number }
   ).c;
 
@@ -564,15 +541,11 @@ export function clearTemporal(projectPath: string): number {
   const pid = ensureProject(projectPath);
   const count = (
     db()
-      .query(
-        "SELECT COUNT(*) as c FROM temporal_messages WHERE project_id = ?",
-      )
+      .query("SELECT COUNT(*) as c FROM temporal_messages WHERE project_id = ?")
       .get(pid) as { c: number }
   ).c;
 
-  db()
-    .query("DELETE FROM temporal_messages WHERE project_id = ?")
-    .run(pid);
+  db().query("DELETE FROM temporal_messages WHERE project_id = ?").run(pid);
 
   return count;
 }
@@ -582,15 +555,11 @@ export function clearDistillations(projectPath: string): number {
   const pid = ensureProject(projectPath);
   const count = (
     db()
-      .query(
-        "SELECT COUNT(*) as c FROM distillations WHERE project_id = ?",
-      )
+      .query("SELECT COUNT(*) as c FROM distillations WHERE project_id = ?")
       .get(pid) as { c: number }
   ).c;
 
-  db()
-    .query("DELETE FROM distillations WHERE project_id = ?")
-    .run(pid);
+  db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
 
   return count;
 }
@@ -641,9 +610,7 @@ export function deleteSession(
   // tally); per-session dedup is handled in-memory in ltm.ts, so there is
   // nothing session-scoped to delete here.
   database
-    .query(
-      "DELETE FROM tool_calls WHERE project_id = ? AND session_id = ?",
-    )
+    .query("DELETE FROM tool_calls WHERE project_id = ? AND session_id = ?")
     .run(pid, sessionId);
   database
     .query(
@@ -651,9 +618,7 @@ export function deleteSession(
     )
     .run(pid, sessionId);
   database
-    .query(
-      "DELETE FROM distillations WHERE project_id = ? AND session_id = ?",
-    )
+    .query("DELETE FROM distillations WHERE project_id = ? AND session_id = ?")
     .run(pid, sessionId);
   database
     .query("DELETE FROM session_state WHERE session_id = ?")
@@ -713,9 +678,7 @@ export function mergeProjects(sourceId: string, targetId: string): MergeResult {
   const counts = {
     knowledge: (
       database
-        .query(
-          "SELECT COUNT(*) as c FROM knowledge WHERE project_id = ?",
-        )
+        .query("SELECT COUNT(*) as c FROM knowledge WHERE project_id = ?")
         .get(sourceId) as { c: number }
     ).c,
     messages: (
@@ -727,9 +690,7 @@ export function mergeProjects(sourceId: string, targetId: string): MergeResult {
     ).c,
     distillations: (
       database
-        .query(
-          "SELECT COUNT(*) as c FROM distillations WHERE project_id = ?",
-        )
+        .query("SELECT COUNT(*) as c FROM distillations WHERE project_id = ?")
         .get(sourceId) as { c: number }
     ).c,
   };

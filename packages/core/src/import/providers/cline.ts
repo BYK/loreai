@@ -15,7 +15,11 @@
 import { readdirSync, readFileSync, existsSync, statSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
-import type { AgentHistoryProvider, ConversationChunk, DetectedSession } from "../types";
+import type {
+  AgentHistoryProvider,
+  ConversationChunk,
+  DetectedSession,
+} from "../types";
 import { registerProvider } from "./index";
 
 // ---------------------------------------------------------------------------
@@ -26,10 +30,7 @@ const MAX_TOOL_OUTPUT_CHARS = 500;
 const DEFAULT_MAX_TOKENS = 12288;
 
 // Extension IDs — Cline has been published under multiple IDs
-const EXTENSION_IDS = [
-  "saoudrizwan.claude-dev",
-  "cline.cline",
-];
+const EXTENSION_IDS = ["saoudrizwan.claude-dev", "cline.cline"];
 
 // ---------------------------------------------------------------------------
 // Types (Cline's Anthropic-compatible format)
@@ -37,8 +38,17 @@ const EXTENSION_IDS = [
 
 type ContentBlock =
   | { type: "text"; text: string }
-  | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
-  | { type: "tool_result"; tool_use_id: string; content: string | ContentBlock[] }
+  | {
+      type: "tool_use";
+      id: string;
+      name: string;
+      input: Record<string, unknown>;
+    }
+  | {
+      type: "tool_result";
+      tool_use_id: string;
+      content: string | ContentBlock[];
+    }
   | { type: "image"; source?: unknown }
   | { type: string };
 
@@ -85,9 +95,30 @@ function findGlobalStorageDirs(): string[] {
 
   if (platform === "darwin") {
     basePaths.push(
-      join(home, "Library", "Application Support", "Code", "User", "globalStorage"),
-      join(home, "Library", "Application Support", "Code - Insiders", "User", "globalStorage"),
-      join(home, "Library", "Application Support", "VSCodium", "User", "globalStorage"),
+      join(
+        home,
+        "Library",
+        "Application Support",
+        "Code",
+        "User",
+        "globalStorage",
+      ),
+      join(
+        home,
+        "Library",
+        "Application Support",
+        "Code - Insiders",
+        "User",
+        "globalStorage",
+      ),
+      join(
+        home,
+        "Library",
+        "Application Support",
+        "VSCodium",
+        "User",
+        "globalStorage",
+      ),
     );
   } else if (platform === "win32") {
     const appdata = process.env.APPDATA || join(home, "AppData", "Roaming");
@@ -171,11 +202,18 @@ function blockToText(block: ContentBlock): string | null {
     case "text":
       return (block as { type: "text"; text: string }).text;
     case "tool_use": {
-      const tu = block as { type: "tool_use"; name: string; input: Record<string, unknown> };
+      const tu = block as {
+        type: "tool_use";
+        name: string;
+        input: Record<string, unknown>;
+      };
       return `[tool: ${tu.name}] ${truncate(JSON.stringify(tu.input), MAX_TOOL_OUTPUT_CHARS)}`;
     }
     case "tool_result": {
-      const tr = block as { type: "tool_result"; content: string | ContentBlock[] };
+      const tr = block as {
+        type: "tool_result";
+        content: string | ContentBlock[];
+      };
       let content: string;
       if (typeof tr.content === "string") {
         content = tr.content;
@@ -187,7 +225,9 @@ function blockToText(block: ContentBlock): string | null {
       } else {
         content = "";
       }
-      return content ? `[tool_result] ${truncate(content, MAX_TOOL_OUTPUT_CHARS)}` : null;
+      return content
+        ? `[tool_result] ${truncate(content, MAX_TOOL_OUTPUT_CHARS)}`
+        : null;
     }
     default:
       return null;

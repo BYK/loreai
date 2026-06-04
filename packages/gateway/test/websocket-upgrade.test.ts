@@ -19,7 +19,9 @@ let resetPipelineState: () => Promise<void>;
 beforeAll(async () => {
   dbPath = `/tmp/lore-ws-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
   process.env.LORE_DB_PATH = dbPath;
-  process.env.LORE_LISTEN_PORT = String(20000 + Math.floor(Math.random() * 30000));
+  process.env.LORE_LISTEN_PORT = String(
+    20000 + Math.floor(Math.random() * 30000),
+  );
   process.env.LORE_DEBUG = "false";
 
   const { startServer } = await import("../src/server");
@@ -74,7 +76,9 @@ describe("WebSocket upgrade rejection", () => {
   it("rejects WS upgrade on /v1/responses with 426 (not 404)", async () => {
     const resp = await sendUpgrade("/v1/responses");
     expect(resp.status).toBe(426);
-    const body = (await resp.json()) as { error?: { type?: string; message?: string } };
+    const body = (await resp.json()) as {
+      error?: { type?: string; message?: string };
+    };
     expect(body.error?.type).toBe("websocket_not_supported");
     expect(body.error?.message).toContain("/v1/responses");
     // Must NOT be the misleading "No route" 404.

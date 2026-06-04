@@ -174,8 +174,14 @@ export function setCacheAnalyticsAttributes(
   currSnippet?: string,
 ): void {
   span.setAttribute("lore.cache.turn", analysis.turn);
-  span.setAttribute("lore.cache.hit_rate", Math.round(analysis.cacheHitRate * 1000) / 1000);
-  span.setAttribute("lore.cache.prefix_match", Math.round(analysis.prefixMatchPercent * 1000) / 1000);
+  span.setAttribute(
+    "lore.cache.hit_rate",
+    Math.round(analysis.cacheHitRate * 1000) / 1000,
+  );
+  span.setAttribute(
+    "lore.cache.prefix_match",
+    Math.round(analysis.prefixMatchPercent * 1000) / 1000,
+  );
   span.setAttribute("lore.cache.divergence_point", analysis.divergencePoint);
   span.setAttribute("lore.cache.divergence_reason", analysis.divergenceReason);
   span.setAttribute("lore.cache.bust_cause", bustCause);
@@ -233,7 +239,12 @@ type ModelPricing = {
   cache_write: number;
 };
 
-const DEFAULT_PRICING: ModelPricing = { input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 };
+const DEFAULT_PRICING: ModelPricing = {
+  input: 3,
+  output: 15,
+  cache_read: 0.3,
+  cache_write: 3.75,
+};
 
 /**
  * Look up pricing for a model from models.dev (cached, fetched at startup).
@@ -289,34 +300,49 @@ export function emitWarmupMetric(
   // Count every warmup sent
   Sentry.metrics.count("lore.cache_warmup.sent", 1, { attributes: attrs });
 
-  if (result.ok && result.cacheReadTokens > 0 && result.cacheCreationTokens === 0) {
+  if (
+    result.ok &&
+    result.cacheReadTokens > 0 &&
+    result.cacheCreationTokens === 0
+  ) {
     // Pure cache refresh — ideal outcome
     Sentry.metrics.count("lore.cache_warmup.refresh", 1, { attributes: attrs });
-  } else if (result.ok && result.cacheCreationTokens > 0 && result.cacheReadTokens === 0) {
+  } else if (
+    result.ok &&
+    result.cacheCreationTokens > 0 &&
+    result.cacheReadTokens === 0
+  ) {
     // Uncached warmup — circuit breaker material
-    Sentry.metrics.count("lore.cache_warmup.uncached", 1, { attributes: attrs });
+    Sentry.metrics.count("lore.cache_warmup.uncached", 1, {
+      attributes: attrs,
+    });
   }
 
   // Emit warmup cost as a distribution (fire-and-forget)
   if (result.ok) {
-    getPricing(model).then((pricing) => {
-      const readCost = (result.cacheReadTokens / 1_000_000) * pricing.cache_read;
-      const writeCost = (result.cacheCreationTokens / 1_000_000) * pricing.cache_write;
-      Sentry.metrics.distribution("lore.cache_warmup.cost_usd", readCost + writeCost, {
-        attributes: attrs,
-        unit: "dollar",
-      });
-    }).catch(() => {});
+    getPricing(model)
+      .then((pricing) => {
+        const readCost =
+          (result.cacheReadTokens / 1_000_000) * pricing.cache_read;
+        const writeCost =
+          (result.cacheCreationTokens / 1_000_000) * pricing.cache_write;
+        Sentry.metrics.distribution(
+          "lore.cache_warmup.cost_usd",
+          readCost + writeCost,
+          {
+            attributes: attrs,
+            unit: "dollar",
+          },
+        );
+      })
+      .catch(() => {});
   }
 }
 
 /**
  * Emit a metric when a user returns after a warmup (confirmed save).
  */
-export function emitWarmupHitMetric(
-  model: string,
-  ttl: string,
-): void {
+export function emitWarmupHitMetric(model: string, ttl: string): void {
   if (!Sentry.isInitialized()) return;
   Sentry.metrics.count("lore.cache_warmup.hit", 1, {
     attributes: { model, ttl },
@@ -346,31 +372,43 @@ export function emitCostMetric(
   // Fire-and-forget: pricing lookup is async but we don't want to block callers.
   // The models.dev data is cached after first fetch, so subsequent calls resolve
   // from memory without network I/O.
-  getPricing(model).then((pricing) => {
-    // Batch discount (0.5×) applies to ALL token categories — input, output,
-    // cache read, and cache write. These multipliers stack with TTL modifiers.
-    const batchMultiplier = callType === "batch" ? 0.5 : 1.0;
-    // Anthropic charges 2× cache_write for 1h TTL (stacks with batch discount)
-    const cacheWriteRate = ttl === "1h" ? pricing.cache_write * 2 : pricing.cache_write;
+  getPricing(model)
+    .then((pricing) => {
+      // Batch discount (0.5×) applies to ALL token categories — input, output,
+      // cache read, and cache write. These multipliers stack with TTL modifiers.
+      const batchMultiplier = callType === "batch" ? 0.5 : 1.0;
+      // Anthropic charges 2× cache_write for 1h TTL (stacks with batch discount)
+      const cacheWriteRate =
+        ttl === "1h" ? pricing.cache_write * 2 : pricing.cache_write;
 
-    const uncachedInputCost =
-      ((usage.input_tokens ?? 0) / 1_000_000) * pricing.input * batchMultiplier;
-    const cacheReadCost =
-      ((usage.cache_read_input_tokens ?? 0) / 1_000_000) * pricing.cache_read * batchMultiplier;
-    const cacheWriteCost =
-      ((usage.cache_creation_input_tokens ?? 0) / 1_000_000) * cacheWriteRate * batchMultiplier;
-    const outputCost =
-      ((usage.output_tokens ?? 0) / 1_000_000) * pricing.output * batchMultiplier;
+      const uncachedInputCost =
+        ((usage.input_tokens ?? 0) / 1_000_000) *
+        pricing.input *
+        batchMultiplier;
+      const cacheReadCost =
+        ((usage.cache_read_input_tokens ?? 0) / 1_000_000) *
+        pricing.cache_read *
+        batchMultiplier;
+      const cacheWriteCost =
+        ((usage.cache_creation_input_tokens ?? 0) / 1_000_000) *
+        cacheWriteRate *
+        batchMultiplier;
+      const outputCost =
+        ((usage.output_tokens ?? 0) / 1_000_000) *
+        pricing.output *
+        batchMultiplier;
 
-    const totalCost = uncachedInputCost + cacheReadCost + cacheWriteCost + outputCost;
+      const totalCost =
+        uncachedInputCost + cacheReadCost + cacheWriteCost + outputCost;
 
-    Sentry.metrics.distribution("lore.llm_cost_usd", totalCost, {
-      attributes: { model, call_type: callType },
-      unit: "dollar",
+      Sentry.metrics.distribution("lore.llm_cost_usd", totalCost, {
+        attributes: { model, call_type: callType },
+        unit: "dollar",
+      });
+    })
+    .catch(() => {
+      // Silently ignore — cost metrics are best-effort, not critical path.
     });
-  }).catch(() => {
-    // Silently ignore — cost metrics are best-effort, not critical path.
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -399,9 +437,7 @@ export function emitSessionCostMetrics(sessionID: string): void {
   const actual = totalActualCost(costs);
   const worker = totalWorkerCost(costs);
   const saved = totalSavings(costs);
-  const savingsPct = actual + saved > 0
-    ? (saved / (actual + saved)) * 100
-    : 0;
+  const savingsPct = actual + saved > 0 ? (saved / (actual + saved)) * 100 : 0;
 
   Sentry.metrics.distribution("lore.session_cost_usd", actual, {
     unit: "dollar",
@@ -428,9 +464,13 @@ export function emitSessionCostMetrics(sessionID: string): void {
   }
 
   if (costs.batchSavings > 0) {
-    Sentry.metrics.distribution("lore.session_batch_savings_usd", costs.batchSavings, {
-      unit: "dollar",
-    });
+    Sentry.metrics.distribution(
+      "lore.session_batch_savings_usd",
+      costs.batchSavings,
+      {
+        unit: "dollar",
+      },
+    );
   }
 }
 

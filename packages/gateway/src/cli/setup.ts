@@ -121,9 +121,7 @@ export function updateCodexConfig(content: string, baseUrl: string): string {
 
   // Insert at the top, before the first [section] or at the very start.
   // Find the first non-comment, non-blank line that starts a section.
-  const firstSectionIdx = lines.findIndex((line) =>
-    /^\s*\[/.test(line),
-  );
+  const firstSectionIdx = lines.findIndex((line) => /^\s*\[/.test(line));
 
   if (firstSectionIdx === -1) {
     // No sections — append at end (with blank line separator if needed)
@@ -187,7 +185,9 @@ function setupCodex(baseUrl: string): void {
   console.log(`[lore]   openai_base_url = "${baseUrl}"`);
   console.log(`[lore]   Config: ${configPath}`);
   console.log(`[lore]`);
-  console.log(`[lore] Make sure the gateway is running (lore start) before using Codex.`);
+  console.log(
+    `[lore] Make sure the gateway is running (lore start) before using Codex.`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -220,7 +220,9 @@ export async function commandSetup(
 
     if (!app) {
       const supported = SUPPORTED_APPS.map((a) => a.agentName).join(", ");
-      console.error(`[lore] Unknown app "${args[0]}". Supported apps: ${supported}`);
+      console.error(
+        `[lore] Unknown app "${args[0]}". Supported apps: ${supported}`,
+      );
       process.exitCode = 1;
       return;
     }
@@ -228,7 +230,9 @@ export async function commandSetup(
     // Warn if the binary isn't detected, but proceed anyway
     const detected = detectAgents();
     if (!detected.some((d) => d.def.name === app.agentName)) {
-      console.log(`[lore] Warning: ${app.displayName} binary not found on PATH. Configuring anyway.`);
+      console.log(
+        `[lore] Warning: ${app.displayName} binary not found on PATH. Configuring anyway.`,
+      );
     }
 
     app.run(baseUrl);
@@ -242,10 +246,14 @@ export async function commandSetup(
   );
 
   if (setupTargets.length === 0) {
-    const supported = SUPPORTED_APPS.map((a) => `${a.displayName} (lore setup ${a.agentName})`).join(", ");
+    const supported = SUPPORTED_APPS.map(
+      (a) => `${a.displayName} (lore setup ${a.agentName})`,
+    ).join(", ");
     console.error(`[lore] No supported apps detected.`);
     console.error(`[lore] Supported: ${supported}`);
-    console.error(`[lore] You can also specify an app explicitly: lore setup <app>`);
+    console.error(
+      `[lore] You can also specify an app explicitly: lore setup <app>`,
+    );
     process.exitCode = 1;
     return;
   }

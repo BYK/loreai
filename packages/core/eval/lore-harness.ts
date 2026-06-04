@@ -110,7 +110,9 @@ export async function startGateway(): Promise<GatewayHandle> {
         const file = `${dbPath}${suffix}`;
         try {
           if (existsSync(file)) unlinkSync(file);
-        } catch { /* best-effort */ }
+        } catch {
+          /* best-effort */
+        }
       }
     },
   };
@@ -158,7 +160,12 @@ export async function replayAndWarmup(
           case "text":
             return { type: "text" as const, text: part.text };
           case "tool_use":
-            return { type: "tool_use" as const, id: part.id, name: part.name, input: part.input };
+            return {
+              type: "tool_use" as const,
+              id: part.id,
+              name: part.name,
+              input: part.input,
+            };
           default:
             return { type: "text" as const, text: `[${part.type}]` };
         }
@@ -205,16 +212,22 @@ export async function replayAndWarmup(
     const kn = await embedding.backfillEmbeddings();
     const dist = await embedding.backfillDistillationEmbeddings();
     if (kn > 0 || dist > 0) {
-      console.log(`  [embedding] backfill: ${kn} knowledge, ${dist} distillations`);
+      console.log(
+        `  [embedding] backfill: ${kn} knowledge, ${dist} distillations`,
+      );
     }
-  } catch { /* best-effort */ }
+  } catch {
+    /* best-effort */
+  }
 
   // Build lore context for QA preamble
   const { buildLoreContext } = await import("./harness");
   const allTurns = scenario.sessions.flatMap((s) => s.turns);
   loreContext = await buildLoreContext(allTurns);
 
-  console.log(`  Warmup complete: context ${Math.round((loreContext?.length ?? 0) / 4)} tok`);
+  console.log(
+    `  Warmup complete: context ${Math.round((loreContext?.length ?? 0) / 4)} tok`,
+  );
 }
 
 export async function teardownGateway(): Promise<void> {
@@ -230,7 +243,10 @@ export async function teardownGateway(): Promise<void> {
 export const loreEvalHarness = createHarness<string, string>({
   name: "lore",
   run: async ({ input }) => {
-    if (!gateway) throw new Error("Gateway not started — call replayAndWarmup() in beforeAll");
+    if (!gateway)
+      throw new Error(
+        "Gateway not started — call replayAndWarmup() in beforeAll",
+      );
 
     const contextPreamble = loreContext
       ? `Here are distilled observations and conversation context from previous coding sessions:\n\n${loreContext}\n\n`
@@ -264,11 +280,12 @@ export const loreEvalHarness = createHarness<string, string>({
       };
     };
 
-    const text = data.content
-      ?.filter((b) => b.type === "text")
-      .map((b) => b.text ?? "")
-      .join("\n")
-      .trim() ?? "";
+    const text =
+      data.content
+        ?.filter((b) => b.type === "text")
+        .map((b) => b.text ?? "")
+        .join("\n")
+        .trim() ?? "";
 
     const recallInvoked = resp.headers.get("x-lore-recall-invoked") === "true";
 

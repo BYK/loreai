@@ -1,9 +1,18 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { clearProviders, registerProvider, getProviders } from "../../src/import/providers";
+import {
+  clearProviders,
+  registerProvider,
+  getProviders,
+} from "../../src/import/providers";
 import { detectAll } from "../../src/import/detect";
-import type { AgentHistoryProvider, DetectedSession } from "../../src/import/types";
+import type {
+  AgentHistoryProvider,
+  DetectedSession,
+} from "../../src/import/types";
 
-function makeSession(overrides: Partial<DetectedSession> = {}): DetectedSession {
+function makeSession(
+  overrides: Partial<DetectedSession> = {},
+): DetectedSession {
   return {
     id: "sess-1",
     label: "Test session",
@@ -53,11 +62,15 @@ describe("detectAll", () => {
   });
 
   test("aggregates results from multiple providers", () => {
-    registerProvider(makeProvider("agent-a", [makeSession({ id: "a1", messageCount: 10 })]));
-    registerProvider(makeProvider("agent-b", [
-      makeSession({ id: "b1", messageCount: 30 }),
-      makeSession({ id: "b2", messageCount: 20 }),
-    ]));
+    registerProvider(
+      makeProvider("agent-a", [makeSession({ id: "a1", messageCount: 10 })]),
+    );
+    registerProvider(
+      makeProvider("agent-b", [
+        makeSession({ id: "b1", messageCount: 30 }),
+        makeSession({ id: "b2", messageCount: 20 }),
+      ]),
+    );
 
     const results = detectAll("/some/path");
     expect(results.length).toBe(2);
@@ -78,7 +91,9 @@ describe("detectAll", () => {
       readChunks: () => [],
     };
     registerProvider(failing);
-    registerProvider(makeProvider("working", [makeSession({ messageCount: 5 })]));
+    registerProvider(
+      makeProvider("working", [makeSession({ messageCount: 5 })]),
+    );
 
     const results = detectAll("/some/path");
     expect(results.length).toBe(1);
@@ -86,10 +101,12 @@ describe("detectAll", () => {
   });
 
   test("computes totalTokens from sessions", () => {
-    registerProvider(makeProvider("agent", [
-      makeSession({ estimatedTokens: 1000 }),
-      makeSession({ estimatedTokens: 2000, id: "s2" }),
-    ]));
+    registerProvider(
+      makeProvider("agent", [
+        makeSession({ estimatedTokens: 1000 }),
+        makeSession({ estimatedTokens: 2000, id: "s2" }),
+      ]),
+    );
 
     const results = detectAll("/some/path");
     expect(results[0].totalTokens).toBe(3000);

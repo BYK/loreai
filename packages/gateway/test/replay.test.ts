@@ -32,10 +32,7 @@ function makeBody(
     max_tokens: 1024,
     stream: false,
     system: DEFAULT_SYSTEM,
-    messages: [
-      { role: "user", content: userMessage },
-      ...extraMessages,
-    ],
+    messages: [{ role: "user", content: userMessage }, ...extraMessages],
     tools: STANDARD_TOOLS,
   };
 }
@@ -183,7 +180,10 @@ describe("Session identification", () => {
   it("different first messages produce successful independent responses", async () => {
     harness = await createHarness({
       fixtures: makeConversationFixtures([
-        { userMessage: "Completely different first message", assistantText: "Sure." },
+        {
+          userMessage: "Completely different first message",
+          assistantText: "Sure.",
+        },
       ]),
     });
 
@@ -295,9 +295,7 @@ describe("Meta request passthrough", () => {
       max_tokens: 50,
       stream: false,
       system: "Generate a short title.",
-      messages: [
-        { role: "user", content: "Title: User asks about math" },
-      ],
+      messages: [{ role: "user", content: "Title: User asks about math" }],
       // No tools — signals meta request (title/summary agent)
     });
 
@@ -346,10 +344,9 @@ describe("Compaction interception", () => {
         makeFixtureEntry({
           seq: 0,
           system: compactionSystem,
-          requestMessages: [
-            { role: "user", content: compactionUserMessage },
-          ],
-          responseText: "## Summary\n\nThis is a compaction summary from upstream.",
+          requestMessages: [{ role: "user", content: compactionUserMessage }],
+          responseText:
+            "## Summary\n\nThis is a compaction summary from upstream.",
         }),
       ],
     });

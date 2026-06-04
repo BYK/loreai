@@ -37,7 +37,11 @@ import { blocksToText } from "./translate/types";
  * Same message at the same position produces the same ID across requests,
  * which is critical for gradient prefix fingerprinting and cache-bust detection.
  */
-function deterministicID(role: string, index: number, content: GatewayContentBlock[]): string {
+function deterministicID(
+  role: string,
+  index: number,
+  content: GatewayContentBlock[],
+): string {
   const h = createHash("sha256");
   h.update(`${role}:${index}:`);
   hashBlocks(h, content);
@@ -50,7 +54,10 @@ function deterministicID(role: string, index: number, content: GatewayContentBlo
  * differing only in image/audio/document content produce distinct IDs
  * (prevents gradient fingerprint collisions and cache-bust misattribution).
  */
-function hashBlocks(h: ReturnType<typeof createHash>, blocks: GatewayContentBlock[]): void {
+function hashBlocks(
+  h: ReturnType<typeof createHash>,
+  blocks: GatewayContentBlock[],
+): void {
   for (const block of blocks) {
     switch (block.type) {
       case "text":
@@ -60,7 +67,9 @@ function hashBlocks(h: ReturnType<typeof createHash>, blocks: GatewayContentBloc
         h.update(`thinking:${block.thinking}`);
         break;
       case "tool_use":
-        h.update(`tool_use:${block.id}:${block.name}:${JSON.stringify(block.input)}`);
+        h.update(
+          `tool_use:${block.id}:${block.name}:${JSON.stringify(block.input)}`,
+        );
         break;
       case "tool_result":
         h.update(`tool_result:${block.toolUseId}:`);

@@ -9,7 +9,11 @@ import { existsSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { Database } from "#db/driver";
-import type { AgentHistoryProvider, ConversationChunk, DetectedSession } from "../types";
+import type {
+  AgentHistoryProvider,
+  ConversationChunk,
+  DetectedSession,
+} from "../types";
 import { registerProvider } from "./index";
 
 // ---------------------------------------------------------------------------
@@ -48,14 +52,20 @@ function openDB(): InstanceType<typeof Database> | null {
   if (!existsSync(OPENCODE_DB_PATH)) return null;
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return new Database(OPENCODE_DB_PATH, { readonly: true, readOnly: true } as any);
+    return new Database(OPENCODE_DB_PATH, {
+      readonly: true,
+      readOnly: true,
+    } as any);
   } catch {
     return null;
   }
 }
 
 /** Check if a table exists in the database. */
-function tableExists(database: InstanceType<typeof Database>, table: string): boolean {
+function tableExists(
+  database: InstanceType<typeof Database>,
+  table: string,
+): boolean {
   const row = database
     .query("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
     .get(table) as { name: string } | null;
@@ -78,8 +88,15 @@ function partsToConversationText(parts: PartData[]): string {
   for (const part of parts) {
     if (part.type === "text" && part.text) {
       segments.push(part.text);
-    } else if (part.type === "tool" && part.tool && part.state?.status === "completed" && part.state.output) {
-      segments.push(`[tool: ${part.tool}] ${truncate(part.state.output, MAX_TOOL_OUTPUT_CHARS)}`);
+    } else if (
+      part.type === "tool" &&
+      part.tool &&
+      part.state?.status === "completed" &&
+      part.state.output
+    ) {
+      segments.push(
+        `[tool: ${part.tool}] ${truncate(part.state.output, MAX_TOOL_OUTPUT_CHARS)}`,
+      );
     }
     // Skip reasoning, step-start, and other non-text parts
   }
@@ -100,7 +117,11 @@ const opencodeProvider: AgentHistoryProvider = {
 
     try {
       // Check required tables exist
-      if (!tableExists(database, "project") || !tableExists(database, "session") || !tableExists(database, "message")) {
+      if (
+        !tableExists(database, "project") ||
+        !tableExists(database, "session") ||
+        !tableExists(database, "message")
+      ) {
         return [];
       }
 

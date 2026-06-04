@@ -64,8 +64,7 @@ describe("isCompactionRequest", () => {
 
   test("system prompt detection is case-insensitive", () => {
     const req = makeRequest({
-      system:
-        "You are an ANCHORED CONTEXT SUMMARIZATION ASSISTANT for coding.",
+      system: "You are an ANCHORED CONTEXT SUMMARIZATION ASSISTANT for coding.",
       messages: [userMsg("Summarize")],
     });
     expect(isCompactionRequest(req)).toBe(true);
@@ -111,9 +110,7 @@ describe("isCompactionRequest", () => {
   test("user message patterns require empty tools array", () => {
     const req = makeRequest({
       system: "Generic system prompt",
-      tools: [
-        { name: "bash", description: "Run shell", inputSchema: {} },
-      ],
+      tools: [{ name: "bash", description: "Run shell", inputSchema: {} }],
       messages: [
         userMsg(
           "Please create an anchored summary from the conversation history above.",
@@ -147,9 +144,7 @@ describe("isCompactionRequest", () => {
     const req = makeRequest({
       system: "Generic system prompt",
       // template path works even with tools present
-      tools: [
-        { name: "bash", description: "Run shell", inputSchema: {} },
-      ],
+      tools: [{ name: "bash", description: "Run shell", inputSchema: {} }],
       messages: [userMsg(templateContent)],
     });
     expect(isCompactionRequest(req)).toBe(true);
@@ -277,9 +272,7 @@ describe("extractPreviousSummary", () => {
 
     const req = makeRequest({
       messages: [
-        userMsg(
-          `<previous-summary>\n${multiLine}\n</previous-summary>`,
-        ),
+        userMsg(`<previous-summary>\n${multiLine}\n</previous-summary>`),
       ],
     });
     expect(extractPreviousSummary(req)).toBe(multiLine);
@@ -292,9 +285,7 @@ describe("extractPreviousSummary", () => {
           "<previous-summary>\nOld from first user msg\n</previous-summary>",
         ),
         assistantMsg("Some response"),
-        userMsg(
-          "<previous-summary>\nLatest summary\n</previous-summary>",
-        ),
+        userMsg("<previous-summary>\nLatest summary\n</previous-summary>"),
       ],
     });
     expect(extractPreviousSummary(req)).toBe("Latest summary");
@@ -321,10 +312,7 @@ describe("isMetaRequest", () => {
     const req = makeRequest({
       system: "Summarize this conversation.",
       tools: [{ name: "output", description: "Output", inputSchema: {} }],
-      messages: [
-        userMsg("First"),
-        assistantMsg("Second"),
-      ],
+      messages: [userMsg("First"), assistantMsg("Second")],
     });
     expect(isMetaRequest(req)).toBe(true);
   });
@@ -437,12 +425,21 @@ describe("isMetaRequest", () => {
   });
 
   test("x-lore-agent: all known meta agent names detected", () => {
-    for (const agent of ["title", "summary", "summarize", "categorize", "label", "classify"]) {
+    for (const agent of [
+      "title",
+      "summary",
+      "summarize",
+      "categorize",
+      "label",
+      "classify",
+    ]) {
       const req = makeRequest({
         system: "A".repeat(2000),
-        tools: [{ name: "bash", description: "Run shell", inputSchema: {} },
-                { name: "read", description: "Read", inputSchema: {} },
-                { name: "write", description: "Write", inputSchema: {} }],
+        tools: [
+          { name: "bash", description: "Run shell", inputSchema: {} },
+          { name: "read", description: "Read", inputSchema: {} },
+          { name: "write", description: "Write", inputSchema: {} },
+        ],
         messages: [userMsg("A"), assistantMsg("B"), userMsg("C")],
         rawHeaders: { [LORE_AGENT_HEADER]: agent },
       });
@@ -493,7 +490,8 @@ describe("isMetaRequest", () => {
 
   test("long system prompt with meta keyword + low maxTokens + few messages → detected", () => {
     const req = makeRequest({
-      system: "Please generate a title for the conversation. " + "x".repeat(600),
+      system:
+        "Please generate a title for the conversation. " + "x".repeat(600),
       tools: [],
       messages: [userMsg("Help me")],
       maxTokens: 150,
@@ -504,7 +502,10 @@ describe("isMetaRequest", () => {
 
   test("large system prompt mentioning 'title' casually is not detected", () => {
     const req = makeRequest({
-      system: "You are a coding assistant. " + "x".repeat(3000) + " Always use a descriptive title for PRs.",
+      system:
+        "You are a coding assistant. " +
+        "x".repeat(3000) +
+        " Always use a descriptive title for PRs.",
       tools: [
         { name: "bash", description: "Run shell", inputSchema: {} },
         { name: "read", description: "Read files", inputSchema: {} },
@@ -589,11 +590,7 @@ describe("buildCompactionResponse", () => {
   });
 
   test("passes through model name unchanged", () => {
-    const response = buildCompactionResponse(
-      "s1",
-      "text",
-      "gpt-4o-2024-05-13",
-    );
+    const response = buildCompactionResponse("s1", "text", "gpt-4o-2024-05-13");
     expect(response.model).toBe("gpt-4o-2024-05-13");
   });
 });
@@ -632,7 +629,10 @@ describe("isStructuralCompaction", () => {
   test("returns false when currCount > 3 even with large drop", () => {
     const req = makeRequest({
       messages: [
-        userMsg("a"), assistantMsg("b"), userMsg("c"), assistantMsg("d"),
+        userMsg("a"),
+        assistantMsg("b"),
+        userMsg("c"),
+        assistantMsg("d"),
       ],
     });
     expect(isStructuralCompaction(req, { messageCount: 50 })).toBe(false);
@@ -690,7 +690,9 @@ describe("detectCompactionRequest", () => {
       system: "Generic",
       tools: [],
       messages: [
-        userMsg("Create an anchored summary from the conversation history above."),
+        userMsg(
+          "Create an anchored summary from the conversation history above.",
+        ),
       ],
     });
     const result = detectCompactionRequest(req);
@@ -704,8 +706,12 @@ describe("detectCompactionRequest", () => {
   test("returns template-sections reason for template match", () => {
     const templateContent = [
       "<template>",
-      "## Goal", "## Progress", "## Key Decisions",
-      "## Next Steps", "## Critical Context", "## Relevant Files",
+      "## Goal",
+      "## Progress",
+      "## Key Decisions",
+      "## Next Steps",
+      "## Critical Context",
+      "## Relevant Files",
       "</template>",
     ].join("\n");
     const req = makeRequest({
@@ -722,13 +728,26 @@ describe("detectCompactionRequest", () => {
 
   test("is consistent with isCompactionRequest", () => {
     const cases = [
-      makeRequest({ system: "anchored context summarization assistant", messages: [userMsg("hi")] }),
-      makeRequest({ system: "Normal", tools: [], messages: [userMsg("<previous-summary>x</previous-summary>")] }),
-      makeRequest({ system: "Normal", tools: [{ name: "t", description: "d", inputSchema: {} }], messages: [userMsg("hello")] }),
+      makeRequest({
+        system: "anchored context summarization assistant",
+        messages: [userMsg("hi")],
+      }),
+      makeRequest({
+        system: "Normal",
+        tools: [],
+        messages: [userMsg("<previous-summary>x</previous-summary>")],
+      }),
+      makeRequest({
+        system: "Normal",
+        tools: [{ name: "t", description: "d", inputSchema: {} }],
+        messages: [userMsg("hello")],
+      }),
       makeRequest({ messages: [] }),
     ];
     for (const req of cases) {
-      expect(detectCompactionRequest(req).detected).toBe(isCompactionRequest(req));
+      expect(detectCompactionRequest(req).detected).toBe(
+        isCompactionRequest(req),
+      );
     }
   });
 });

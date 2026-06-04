@@ -25,7 +25,9 @@ function formatDate(ts: number): string {
 }
 
 function padRight(str: string, len: number): string {
-  return str.length >= len ? str.slice(0, len) : str + " ".repeat(len - str.length);
+  return str.length >= len
+    ? str.slice(0, len)
+    : str + " ".repeat(len - str.length);
 }
 
 function printTable(
@@ -33,9 +35,7 @@ function printTable(
   rows: string[][],
   widths: number[],
 ): void {
-  const header = headers
-    .map((h, i) => padRight(h, widths[i]))
-    .join("  ");
+  const header = headers.map((h, i) => padRight(h, widths[i])).join("  ");
   console.log(header);
   console.log(widths.map((w) => "-".repeat(w)).join("  "));
   for (const row of rows) {
@@ -55,9 +55,7 @@ async function cmdList(
   const projectPath = resolve((flags.project as string) ?? process.cwd());
   const asJson = !!flags.json;
 
-  const all = flags.all
-    ? entities.listAll()
-    : entities.forProject(projectPath);
+  const all = flags.all ? entities.listAll() : entities.forProject(projectPath);
 
   if (asJson) {
     console.log(JSON.stringify(all, null, 2));
@@ -70,7 +68,9 @@ async function cmdList(
   }
 
   const rows = all.map((e) => {
-    const aliasCount = e.aliases.filter((a) => a.alias_value !== e.canonical_name).length;
+    const aliasCount = e.aliases.filter(
+      (a) => a.alias_value !== e.canonical_name,
+    ).length;
     return [
       e.id.slice(0, 16),
       e.entity_type,
@@ -128,7 +128,9 @@ async function cmdShow(
     console.log(`\nAliases (${entity.aliases.length}):`);
     for (const a of entity.aliases) {
       const src = a.source ? ` [${a.source}]` : "";
-      console.log(`  ${a.alias_type}: ${a.alias_value}${src}  (${a.id.slice(0, 12)})`);
+      console.log(
+        `  ${a.alias_type}: ${a.alias_value}${src}  (${a.id.slice(0, 12)})`,
+      );
     }
   }
 
@@ -139,7 +141,9 @@ async function cmdShow(
     for (const kid of knowledgeIds) {
       const entry = ltm.get(kid);
       if (entry) {
-        console.log(`  [${entry.id.slice(0, 16)}] (${entry.category}) ${entry.title}`);
+        console.log(
+          `  [${entry.id.slice(0, 16)}] (${entry.category}) ${entry.title}`,
+        );
       }
     }
   }
@@ -150,7 +154,9 @@ async function cmdShow(
     console.log(`\nRelationships (${relations.length}):`);
     for (const r of relations) {
       const metaStr = r.metadata ? ` ${r.metadata}` : "";
-      console.log(`  ${r.relation}: ${r.other_name} (${r.other_type})${metaStr}  (${r.id.slice(0, 12)})`);
+      console.log(
+        `  ${r.relation}: ${r.other_name} (${r.other_type})${metaStr}  (${r.id.slice(0, 12)})`,
+      );
     }
   }
 }
@@ -183,7 +189,11 @@ async function cmdAdd(
   if (flags.metadata) {
     try {
       metadata = JSON.parse(flags.metadata as string);
-      if (typeof metadata !== "object" || Array.isArray(metadata) || metadata === null) {
+      if (
+        typeof metadata !== "object" ||
+        Array.isArray(metadata) ||
+        metadata === null
+      ) {
         console.error("--metadata must be a JSON object");
         process.exit(1);
       }
@@ -216,7 +226,9 @@ async function cmdEdit(
 ): Promise<void> {
   const id = args[0];
   if (!id) {
-    console.error("Usage: lore entity edit <id> [--name <name>] [--metadata <json>] [--cross]");
+    console.error(
+      "Usage: lore entity edit <id> [--name <name>] [--metadata <json>] [--cross]",
+    );
     process.exit(1);
   }
 
@@ -249,7 +261,11 @@ async function cmdEdit(
     let parsed: Record<string, unknown>;
     try {
       parsed = JSON.parse(flags.metadata as string);
-      if (typeof parsed !== "object" || Array.isArray(parsed) || parsed === null) {
+      if (
+        typeof parsed !== "object" ||
+        Array.isArray(parsed) ||
+        parsed === null
+      ) {
         console.error("--metadata must be a JSON object");
         process.exit(1);
       }
@@ -279,14 +295,27 @@ async function cmdAliasAdd(
   const aliasValue = flags.value as string;
 
   if (!entityId || !aliasType || !aliasValue) {
-    console.error("Usage: lore entity alias add <entity-id> --type <type> --value <value>");
-    console.error("Alias types: name, email, github, slack, phone, nickname, url, domain");
+    console.error(
+      "Usage: lore entity alias add <entity-id> --type <type> --value <value>",
+    );
+    console.error(
+      "Alias types: name, email, github, slack, phone, nickname, url, domain",
+    );
     process.exit(1);
   }
 
   const { entities } = await import("@loreai/core");
 
-  const ALIAS_TYPES = ["name", "email", "github", "slack", "phone", "nickname", "url", "domain"] as const;
+  const ALIAS_TYPES = [
+    "name",
+    "email",
+    "github",
+    "slack",
+    "phone",
+    "nickname",
+    "url",
+    "domain",
+  ] as const;
   if (!ALIAS_TYPES.includes(aliasType as (typeof ALIAS_TYPES)[number])) {
     console.error(`Invalid alias type: ${aliasType}`);
     console.error(`Valid types: ${ALIAS_TYPES.join(", ")}`);
@@ -299,9 +328,16 @@ async function cmdAliasAdd(
     process.exit(1);
   }
 
-  const id = entities.addAlias(entityId, aliasType as (typeof ALIAS_TYPES)[number], aliasValue, "manual");
+  const id = entities.addAlias(
+    entityId,
+    aliasType as (typeof ALIAS_TYPES)[number],
+    aliasValue,
+    "manual",
+  );
   if (id) {
-    console.log(`Added alias: ${aliasType}:${aliasValue} → ${entity.canonical_name}`);
+    console.log(
+      `Added alias: ${aliasType}:${aliasValue} → ${entity.canonical_name}`,
+    );
   } else {
     console.error(`Alias already exists: ${aliasType}:${aliasValue}`);
   }
@@ -331,7 +367,9 @@ async function cmdRelationAdd(
   const relation = flags.relation as string;
 
   if (!idA || !idB || !relation) {
-    console.error("Usage: lore entity relation add <entity-a-id> <entity-b-id> --relation <type> [--metadata <json>]");
+    console.error(
+      "Usage: lore entity relation add <entity-a-id> <entity-b-id> --relation <type> [--metadata <json>]",
+    );
     process.exit(1);
   }
 
@@ -373,7 +411,11 @@ async function cmdRelationAdd(
   if (flags.metadata) {
     try {
       const parsed = JSON.parse(flags.metadata as string);
-      if (typeof parsed !== "object" || Array.isArray(parsed) || parsed === null) {
+      if (
+        typeof parsed !== "object" ||
+        Array.isArray(parsed) ||
+        parsed === null
+      ) {
         console.error("--metadata must be a JSON object");
         process.exit(1);
       }
@@ -390,7 +432,9 @@ async function cmdRelationAdd(
     relation as (typeof entities.RELATION_TYPES)[number],
     { metadata: relMetadata, source: "manual" },
   );
-  console.log(`Added relation: ${entityA.canonical_name} —[${relation}]→ ${entityB.canonical_name}`);
+  console.log(
+    `Added relation: ${entityA.canonical_name} —[${relation}]→ ${entityB.canonical_name}`,
+  );
   console.log(`  Relation ID: ${relId}`);
 }
 
@@ -435,7 +479,9 @@ async function cmdMerge(
   }
 
   entities.merge(targetId, sourceId);
-  console.log(`Merged "${source.canonical_name}" into "${target.canonical_name}"`);
+  console.log(
+    `Merged "${source.canonical_name}" into "${target.canonical_name}"`,
+  );
 }
 
 async function cmdSearch(
@@ -463,7 +509,9 @@ async function cmdSearch(
       .map((a) => `${a.alias_type}:${a.alias_value}`)
       .join(", ");
     const aliasStr = aliases ? ` (${aliases})` : "";
-    console.log(`[${e.id.slice(0, 16)}] ${e.entity_type}: ${e.canonical_name}${aliasStr}`);
+    console.log(
+      `[${e.id.slice(0, 16)}] ${e.entity_type}: ${e.canonical_name}${aliasStr}`,
+    );
   }
 }
 

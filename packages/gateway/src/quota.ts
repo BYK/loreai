@@ -321,7 +321,10 @@ export function maybeFetchQuota(sessionID: string, cred: AuthCredential): void {
   // Provisional cooldown: record the attempt with the short retry interval so
   // concurrent ticks don't stampede, but a failure only suppresses retries for
   // ~30s (not the full 5 min). On success we bump it to the full interval.
-  quotaFetchCooldown.set(fp, now - QUOTA_FETCH_INTERVAL_MS + QUOTA_FETCH_RETRY_INTERVAL_MS);
+  quotaFetchCooldown.set(
+    fp,
+    now - QUOTA_FETCH_INTERVAL_MS + QUOTA_FETCH_RETRY_INTERVAL_MS,
+  );
 
   void runBackground(
     () => fetchQuotaDeduped(cred, sessionID),
@@ -371,9 +374,7 @@ export function isQuotaPaused(cred: AuthCredential | null): boolean {
  * QUOTA_PRESSURE_FLOOR (80%) to 1 at 100%. Below the floor there is no
  * quota-driven throttle.
  */
-export function computeQuotaPressure(
-  snapshot: QuotaSnapshot | null,
-): number {
+export function computeQuotaPressure(snapshot: QuotaSnapshot | null): number {
   if (!snapshot) return 0;
   const u5 = snapshot.fiveHour?.utilization ?? 0;
   const u7 = snapshot.sevenDay?.utilization ?? 0;

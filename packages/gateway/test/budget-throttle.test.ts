@@ -133,9 +133,14 @@ describe("budget-throttle", () => {
       const rate = 2;
       const hours = 10;
       // Check that adjacent 0.1% spend increments don't produce >5s jumps
-      for (let pct = 0.50; pct < 1.0; pct += 0.001) {
+      for (let pct = 0.5; pct < 1.0; pct += 0.001) {
         const d1 = computeThrottleDelay(pct * budget, budget, rate, hours);
-        const d2 = computeThrottleDelay((pct + 0.001) * budget, budget, rate, hours);
+        const d2 = computeThrottleDelay(
+          (pct + 0.001) * budget,
+          budget,
+          rate,
+          hours,
+        );
         expect(Math.abs(d2 - d1)).toBeLessThan(5);
       }
     });
@@ -218,13 +223,21 @@ describe("budget-throttle", () => {
 
     test("seeds on first turn", () => {
       expect(getCostRate()).toBe(0);
-      recordConversationCost("session-1", "claude-sonnet-4-20250514", mockUsage);
+      recordConversationCost(
+        "session-1",
+        "claude-sonnet-4-20250514",
+        mockUsage,
+      );
       expect(getCostRate()).toBeGreaterThan(0);
     });
 
     test("EMA is finite after multiple turns", async () => {
       for (let i = 0; i < 5; i++) {
-        recordConversationCost("session-1", "claude-sonnet-4-20250514", mockUsage);
+        recordConversationCost(
+          "session-1",
+          "claude-sonnet-4-20250514",
+          mockUsage,
+        );
         // Small delay to avoid sub-second collapse
         await new Promise((r) => setTimeout(r, 10));
       }
@@ -279,11 +292,22 @@ describe("budget-throttle", () => {
 
     test("worker and warmup costs accumulate into the same day", () => {
       const before = getDailyCostForDay(today);
-      recordWorkerCost("ledger-session", "claude-sonnet-4-20250514", {
-        input_tokens: 10_000,
-        output_tokens: 500,
-      }, "direct", "lore-distill");
-      recordWarmupCost("ledger-session", "claude-sonnet-4-20250514", 20_000, 2_000);
+      recordWorkerCost(
+        "ledger-session",
+        "claude-sonnet-4-20250514",
+        {
+          input_tokens: 10_000,
+          output_tokens: 500,
+        },
+        "direct",
+        "lore-distill",
+      );
+      recordWarmupCost(
+        "ledger-session",
+        "claude-sonnet-4-20250514",
+        20_000,
+        2_000,
+      );
       const after = getDailyCostForDay(today);
       expect(after).toBeGreaterThan(before);
     });

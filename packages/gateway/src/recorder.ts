@@ -159,7 +159,9 @@ export function getRecordedInterceptor(): UpstreamInterceptor | null {
  * Each call advances an internal counter.  When the counter exceeds
  * `fixtures.length`, an error is thrown.
  */
-export function getReplayInterceptor(fixtures: FixtureEntry[]): UpstreamInterceptor {
+export function getReplayInterceptor(
+  fixtures: FixtureEntry[],
+): UpstreamInterceptor {
   let replayCounter = 0;
 
   return async (

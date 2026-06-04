@@ -1,4 +1,11 @@
-import { describe, test, expect, beforeAll, beforeEach, afterAll } from "bun:test";
+import {
+  describe,
+  test,
+  expect,
+  beforeAll,
+  beforeEach,
+  afterAll,
+} from "bun:test";
 import { db, ensureProject, loadForceMinLayer } from "../src/db";
 import {
   transform,
@@ -91,7 +98,6 @@ beforeAll(() => {
   calibrate(0); // zero overhead: no system prompt overhead in unit tests
 });
 
-
 describe("gradient", () => {
   test("passes through small message sets unchanged (Layer 0)", () => {
     const messages = [
@@ -163,7 +169,11 @@ describe("gradient", () => {
     // Verify that more than the old fixed 3 are included.
     const messages = Array.from({ length: 20 }, (_, i) => {
       const role = i % 2 === 0 ? "user" : "assistant";
-      return makeMsg(`tiny-${i}`, role as "user" | "assistant", `Msg ${i}: short`);
+      return makeMsg(
+        `tiny-${i}`,
+        role as "user" | "assistant",
+        `Msg ${i}: short`,
+      );
     });
     setModelLimits({ context: 12_000, output: 2_000 }); // usable ~10000
     calibrate(0);
@@ -208,7 +218,12 @@ describe("gradient", () => {
     const medMessages = Array.from({ length: 14 }, (_, i) => {
       const role = i % 2 === 0 ? "user" : "assistant";
       const text = `Message ${i}: ${"some content that fills the budget moderately well ".repeat(8)}`;
-      return makeMsg(`ltm-flag-med-${i}`, role as "user" | "assistant", text, "ltm-flag-med-sess");
+      return makeMsg(
+        `ltm-flag-med-${i}`,
+        role as "user" | "assistant",
+        text,
+        "ltm-flag-med-sess",
+      );
     });
     const layerMidResult = transform({
       messages: medMessages,
@@ -225,7 +240,12 @@ describe("gradient", () => {
     const bigMessages = Array.from({ length: 10 }, (_, i) => {
       const role = i % 2 === 0 ? "user" : "assistant";
       const text = `Message ${i}: ${"detailed content about various topics and implementation details that span across multiple concerns ".repeat(40)}`;
-      return makeMsg(`ltm-flag-big-${i}`, role as "user" | "assistant", text, "ltm-flag-big-sess");
+      return makeMsg(
+        `ltm-flag-big-${i}`,
+        role as "user" | "assistant",
+        text,
+        "ltm-flag-big-sess",
+      );
     });
     const layer4Result = transform({
       messages: bigMessages,
@@ -261,7 +281,11 @@ describe("gradient", () => {
     calibrate(0);
     const messages = Array.from({ length: 6 }, (_, i) => {
       const role = i % 2 === 0 ? "user" : "assistant";
-      return makeMsg(`exhaust-${i}`, role as "user" | "assistant", "X".repeat(2_000));
+      return makeMsg(
+        `exhaust-${i}`,
+        role as "user" | "assistant",
+        "X".repeat(2_000),
+      );
     });
     const result = transform({
       messages,
@@ -302,10 +326,19 @@ describe("gradient — lazy raw window eviction (Approach B)", () => {
     // 16 messages ≈ 5664 > 4000 → gradient fires.
     // rawBudget=1600 → fits ~4 messages (4 × 354 = 1416 ≤ 1600).
     const base = Array.from({ length: 16 }, (_, i) =>
-      makeMsg(`le-${i}`, i % 2 === 0 ? "user" : "assistant", "A".repeat(1_000), SESSION),
+      makeMsg(
+        `le-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "A".repeat(1_000),
+        SESSION,
+      ),
     );
 
-    const result1 = transform({ messages: base, projectPath: PROJECT, sessionID: SESSION });
+    const result1 = transform({
+      messages: base,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
     expect(result1.layer).toBe(1);
 
     // Identify the first raw message from turn 1
@@ -319,7 +352,11 @@ describe("gradient — lazy raw window eviction (Approach B)", () => {
       ...base,
       makeMsg(`le-new-small`, "user", "short", SESSION),
     ];
-    const result2 = transform({ messages: withNewSmall, projectPath: PROJECT, sessionID: SESSION });
+    const result2 = transform({
+      messages: withNewSmall,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
     expect(result2.layer).toBe(1);
 
     const firstRawId2 = result2.messages.find(
@@ -341,13 +378,23 @@ describe("gradient — lazy raw window eviction (Approach B)", () => {
 
     const SESS2 = "lazy-evict-tight";
     const base = Array.from({ length: 22 }, (_, i) =>
-      makeMsg(`tight-${i}`, i % 2 === 0 ? "user" : "assistant", "B".repeat(400), SESS2),
+      makeMsg(
+        `tight-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "B".repeat(400),
+        SESS2,
+      ),
     );
 
     // First call: fills window, records cutoff
-    const r1 = transform({ messages: base, projectPath: PROJECT, sessionID: SESS2 });
+    const r1 = transform({
+      messages: base,
+      projectPath: PROJECT,
+      sessionID: SESS2,
+    });
     expect(r1.layer).toBe(1);
-    const firstId1 = r1.messages.find((m) => m.info.sessionID === SESS2)?.info.id;
+    const firstId1 = r1.messages.find((m) => m.info.sessionID === SESS2)?.info
+      .id;
 
     // Second call: append a large message that pushes the pinned window past
     // rawBudget (1000), forcing eviction. C(2000) = 687 tokens — fits within
@@ -356,9 +403,14 @@ describe("gradient — lazy raw window eviction (Approach B)", () => {
       ...base,
       makeMsg(`tight-huge`, "user", "C".repeat(2_000), SESS2),
     ];
-    const r2 = transform({ messages: withHuge, projectPath: PROJECT, sessionID: SESS2 });
+    const r2 = transform({
+      messages: withHuge,
+      projectPath: PROJECT,
+      sessionID: SESS2,
+    });
     expect(r2.layer).toBe(1);
-    const firstId2 = r2.messages.find((m) => m.info.sessionID === SESS2)?.info.id;
+    const firstId2 = r2.messages.find((m) => m.info.sessionID === SESS2)?.info
+      .id;
 
     // The window must have advanced (old pinned cutoff no longer fits)
     expect(firstId2).not.toBe(firstId1);
@@ -380,20 +432,40 @@ describe("gradient — lazy raw window eviction (Approach B)", () => {
     const SESS_B = "lazy-sess-b";
 
     const msgsA = Array.from({ length: 22 }, (_, i) =>
-      makeMsg(`sa-${i}`, i % 2 === 0 ? "user" : "assistant", "D".repeat(400), SESS_A),
+      makeMsg(
+        `sa-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "D".repeat(400),
+        SESS_A,
+      ),
     );
     const msgsB = Array.from({ length: 22 }, (_, i) =>
-      makeMsg(`sb-${i}`, i % 2 === 0 ? "user" : "assistant", "E".repeat(400), SESS_B),
+      makeMsg(
+        `sb-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "E".repeat(400),
+        SESS_B,
+      ),
     );
 
-    const rA = transform({ messages: msgsA, projectPath: PROJECT, sessionID: SESS_A });
+    const rA = transform({
+      messages: msgsA,
+      projectPath: PROJECT,
+      sessionID: SESS_A,
+    });
     expect(rA.layer).toBe(1);
-    const firstIdA = rA.messages.find((m) => m.info.sessionID === SESS_A)?.info.id;
+    const firstIdA = rA.messages.find((m) => m.info.sessionID === SESS_A)?.info
+      .id;
 
     // Switch to a different session — cache must not bleed over
-    const rB = transform({ messages: msgsB, projectPath: PROJECT, sessionID: SESS_B });
+    const rB = transform({
+      messages: msgsB,
+      projectPath: PROJECT,
+      sessionID: SESS_B,
+    });
     expect(rB.layer).toBe(1);
-    const firstIdB = rB.messages.find((m) => m.info.sessionID === SESS_B)?.info.id;
+    const firstIdB = rB.messages.find((m) => m.info.sessionID === SESS_B)?.info
+      .id;
 
     expect(firstIdB).not.toBe(firstIdA);
     expect(firstIdB?.startsWith("sb-")).toBe(true);
@@ -414,7 +486,7 @@ describe("gradient — LTM budget coordination", () => {
   test("getLtmBudget returns fraction of usable context", () => {
     // usable = 10_000 - 2_000 - 0 (overhead) = 8_000
     // ltm fraction 0.10 → 800 tokens
-    const budget = getLtmBudget(0.10);
+    const budget = getLtmBudget(0.1);
     expect(budget).toBe(800);
   });
 
@@ -456,7 +528,11 @@ describe("gradient — LTM budget coordination", () => {
     // Inject enough LTM tokens to leave almost no room for messages
     setLtmTokens(7_500, "tight-sess"); // usable after LTM = 500 tokens — very tight
     const messages = Array.from({ length: 6 }, (_, i) =>
-      makeMsg(`tight-${i}`, i % 2 === 0 ? "user" : "assistant", "X".repeat(300)),
+      makeMsg(
+        `tight-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "X".repeat(300),
+      ),
     );
     const result = transform({
       messages,
@@ -485,11 +561,19 @@ describe("gradient — force escalation (reactive error recovery)", () => {
       makeMsg("fe-2", "assistant", "hi", "force-sess"),
     ];
     setForceMinLayer(2, "force-sess");
-    const result = transform({ messages, projectPath: PROJECT, sessionID: "force-sess" });
+    const result = transform({
+      messages,
+      projectPath: PROJECT,
+      sessionID: "force-sess",
+    });
     // Despite tiny messages, force min layer should push to at least layer 2
     expect(result.layer).toBeGreaterThanOrEqual(2);
     // After one use, the flag is consumed — next call should behave normally
-    const result2 = transform({ messages, projectPath: PROJECT, sessionID: "force-sess" });
+    const result2 = transform({
+      messages,
+      projectPath: PROJECT,
+      sessionID: "force-sess",
+    });
     expect(result2.layer).toBe(0);
   });
 
@@ -500,10 +584,18 @@ describe("gradient — force escalation (reactive error recovery)", () => {
     ];
     setForceMinLayer(1, "oneshot-sess");
     // First call consumes the flag
-    const r1 = transform({ messages, projectPath: PROJECT, sessionID: "oneshot-sess" });
+    const r1 = transform({
+      messages,
+      projectPath: PROJECT,
+      sessionID: "oneshot-sess",
+    });
     expect(r1.layer).toBeGreaterThanOrEqual(1);
     // Second call — no flag, tiny messages → layer 0
-    const r2 = transform({ messages, projectPath: PROJECT, sessionID: "oneshot-sess" });
+    const r2 = transform({
+      messages,
+      projectPath: PROJECT,
+      sessionID: "oneshot-sess",
+    });
     expect(r2.layer).toBe(0);
   });
 
@@ -516,7 +608,11 @@ describe("gradient — force escalation (reactive error recovery)", () => {
       makeMsg("rc-2", "assistant", "world", "rc-sess"),
     ];
     // After reset+recalibrate, flag is gone — tiny messages → layer 0
-    const result = transform({ messages, projectPath: PROJECT, sessionID: "rc-sess" });
+    const result = transform({
+      messages,
+      projectPath: PROJECT,
+      sessionID: "rc-sess",
+    });
     expect(result.layer).toBe(0);
   });
 });
@@ -541,19 +637,29 @@ describe("gradient — forceMinLayer persistence (restart survival)", () => {
     calibrate(0);
 
     // Manually write forceMinLayer to DB (simulating a prior process's setForceMinLayer)
-    db().query(
-      "INSERT OR REPLACE INTO session_state (session_id, force_min_layer, updated_at) VALUES (?, ?, ?)",
-    ).run(SID, 2, Date.now());
+    db()
+      .query(
+        "INSERT OR REPLACE INTO session_state (session_id, force_min_layer, updated_at) VALUES (?, ?, ?)",
+      )
+      .run(SID, 2, Date.now());
 
     // transform() should pick up forceMinLayer=2 from DB
-    const result = transform({ messages, projectPath: PROJECT, sessionID: SID });
+    const result = transform({
+      messages,
+      projectPath: PROJECT,
+      sessionID: SID,
+    });
     expect(result.layer).toBeGreaterThanOrEqual(2);
 
     // One-shot: consumed — DB should be cleared
     expect(loadForceMinLayer(SID)).toBe(0);
 
     // Next call should be layer 0 (tiny messages, no escalation)
-    const result2 = transform({ messages, projectPath: PROJECT, sessionID: SID });
+    const result2 = transform({
+      messages,
+      projectPath: PROJECT,
+      sessionID: SID,
+    });
     expect(result2.layer).toBe(0);
   });
 
@@ -571,7 +677,11 @@ describe("gradient — forceMinLayer persistence (restart survival)", () => {
     expect(loadForceMinLayer(SID)).toBe(3);
 
     // Transform consumes the escalation
-    const result = transform({ messages, projectPath: PROJECT, sessionID: SID });
+    const result = transform({
+      messages,
+      projectPath: PROJECT,
+      sessionID: SID,
+    });
     expect(result.layer).toBeGreaterThanOrEqual(3);
 
     // DB row should be deleted after consumption
@@ -599,9 +709,16 @@ describe("gradient — exact token tracking (proactive layer 0)", () => {
     calibrate(3_000, SESSION, 2);
 
     // Now add one new message
-    const withNew = [...messages, makeMsg("et-3", "user", "C".repeat(500), SESSION)];
+    const withNew = [
+      ...messages,
+      makeMsg("et-3", "user", "C".repeat(500), SESSION),
+    ];
     // expectedInput = 3000 + ~130 = ~3130 << maxInput (8000) → layer 0
-    const result = transform({ messages: withNew, projectPath: PROJECT, sessionID: SESSION });
+    const result = transform({
+      messages: withNew,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
     expect(result.layer).toBe(0);
     expect(result.messages).toBe(withNew); // same reference
   });
@@ -616,7 +733,11 @@ describe("gradient — exact token tracking (proactive layer 0)", () => {
       makeMsg("diff-2", "assistant", "B".repeat(200), "other-sess"),
     ];
     // Fallback: messageTokens + overhead(0) + ltm(0) = ~174 << 8000 → still layer 0
-    const result = transform({ messages, projectPath: PROJECT, sessionID: "other-sess" });
+    const result = transform({
+      messages,
+      projectPath: PROJECT,
+      sessionID: "other-sess",
+    });
     expect(result.layer).toBe(0);
   });
 
@@ -626,11 +747,20 @@ describe("gradient — exact token tracking (proactive layer 0)", () => {
     calibrate(7_400, SESSION, 10);
     // New message: very short (~25 tokens × 1.3 safety = ~33 tokens)
     const messages = Array.from({ length: 10 }, (_, i) =>
-      makeMsg(`near-${i}`, i % 2 === 0 ? "user" : "assistant", "X".repeat(50), SESSION),
+      makeMsg(
+        `near-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "X".repeat(50),
+        SESSION,
+      ),
     );
     const withNew = [...messages, makeMsg("near-new", "user", "hi", SESSION)];
     // expectedInput ≈ 7400 + 33 = 7433 ≤ 7600 → layer 0
-    const result = transform({ messages: withNew, projectPath: PROJECT, sessionID: SESSION });
+    const result = transform({
+      messages: withNew,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
     expect(result.layer).toBe(0);
   });
 
@@ -638,11 +768,23 @@ describe("gradient — exact token tracking (proactive layer 0)", () => {
     // lastKnownInput = 7900, maxInput = 8000, new message ~600 tokens
     calibrate(7_900, SESSION, 10);
     const messages = Array.from({ length: 10 }, (_, i) =>
-      makeMsg(`over-${i}`, i % 2 === 0 ? "user" : "assistant", "X".repeat(100), SESSION),
+      makeMsg(
+        `over-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "X".repeat(100),
+        SESSION,
+      ),
     );
-    const withHuge = [...messages, makeMsg("over-huge", "user", "Y".repeat(2_200), SESSION)];
+    const withHuge = [
+      ...messages,
+      makeMsg("over-huge", "user", "Y".repeat(2_200), SESSION),
+    ];
     // expectedInput ≈ 7900 + 570 = 8470 > 8000 → escalate
-    const result = transform({ messages: withHuge, projectPath: PROJECT, sessionID: SESSION });
+    const result = transform({
+      messages: withHuge,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
     expect(result.layer).toBeGreaterThanOrEqual(1);
   });
 });
@@ -705,16 +847,30 @@ describe("gradient — current turn protection (agentic tool-call loop)", () => 
     // context=10000, output=2000, maxInput=8000, rawBudget ≈ 5600
     // Old messages: 40 × 600 chars ≈ 6000 tokens — exceeds rawBudget alone
     const oldMsgs = Array.from({ length: 40 }, (_, i) =>
-      makeMsg(`old-${i}`, i % 2 === 0 ? "user" : "assistant", "X".repeat(600), SESSION),
+      makeMsg(
+        `old-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "X".repeat(600),
+        SESSION,
+      ),
     );
     // Current turn: user + 4 agentic steps × 400 chars ≈ 450 tokens — must all be kept
     const currentUser = makeMsg("cur-user", "user", "do the thing", SESSION);
     const steps = Array.from({ length: 4 }, (_, i) =>
-      makeStep(`step-${i}`, "cur-user", "tool result " + "Y".repeat(380), SESSION),
+      makeStep(
+        `step-${i}`,
+        "cur-user",
+        "tool result " + "Y".repeat(380),
+        SESSION,
+      ),
     );
     const messages = [...oldMsgs, currentUser, ...steps];
 
-    const result = transform({ messages, projectPath: PROJECT, sessionID: SESSION });
+    const result = transform({
+      messages,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
 
     // Should be in gradient mode (too many messages to fit raw)
     expect(result.layer).toBeGreaterThanOrEqual(1);
@@ -734,7 +890,12 @@ describe("gradient — current turn protection (agentic tool-call loop)", () => 
     // Old messages: 50 × 600 chars ≈ 7500 tokens — way over budget alone
     // Current turn: user + 8 steps × 400 chars ≈ 850 tokens — must all be kept
     const oldMsgs = Array.from({ length: 50 }, (_, i) =>
-      makeMsg(`tight-old-${i}`, i % 2 === 0 ? "user" : "assistant", "Z".repeat(600), SESSION),
+      makeMsg(
+        `tight-old-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "Z".repeat(600),
+        SESSION,
+      ),
     );
     const currentUser = makeMsg("tight-user", "user", "go", SESSION);
     const steps = Array.from({ length: 8 }, (_, i) =>
@@ -742,7 +903,11 @@ describe("gradient — current turn protection (agentic tool-call loop)", () => 
     );
     const messages = [...oldMsgs, currentUser, ...steps];
 
-    const result = transform({ messages, projectPath: PROJECT, sessionID: SESSION });
+    const result = transform({
+      messages,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
     expect(result.layer).toBeGreaterThanOrEqual(1);
 
     const ids = result.messages.map((m) => m.info.id);
@@ -771,11 +936,20 @@ describe("gradient — current turn protection (agentic tool-call loop)", () => 
     // 22 old messages to force gradient mode: 22 × 87 = 1914
     // Total = 1914 + 720 = 2634 > maxInput(2500) → gradient fires
     const oldMsgs = Array.from({ length: 22 }, (_, i) =>
-      makeMsg(`huge-old-${i}`, i % 2 === 0 ? "user" : "assistant", "V".repeat(200), SESSION),
+      makeMsg(
+        `huge-old-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "V".repeat(200),
+        SESSION,
+      ),
     );
     const messages = [...oldMsgs, currentUser, ...steps];
 
-    const result = transform({ messages, projectPath: PROJECT, sessionID: SESSION });
+    const result = transform({
+      messages,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
 
     // Must be in gradient mode
     expect(result.layer).toBeGreaterThanOrEqual(1);
@@ -854,7 +1028,12 @@ function makeStepWithTool(
         type: "step-finish",
         reason: "tool_use",
         cost: 0,
-        tokens: { input: 50, output: 10, reasoning: 0, cache: { read: 0, write: 0 } },
+        tokens: {
+          input: 50,
+          output: 10,
+          reasoning: 0,
+          cache: { read: 0, write: 0 },
+        },
       } as unknown as LorePart,
     ],
   };
@@ -989,7 +1168,11 @@ describe("gradient — sanitizeToolParts (orphaned tool_use fix)", () => {
       makeStepWithTool("san-a1", "san-u1", "bash", "done", SESSION),
     ];
 
-    const result = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
+    const result = transform({
+      messages: msgs,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
 
     // Layer 0 for small session — messages should be the same reference
     expect(result.layer).toBe(0);
@@ -1004,11 +1187,19 @@ describe("gradient — sanitizeToolParts (orphaned tool_use fix)", () => {
       makeStepWithPendingTool("san-a2", "san-u2", "bash", SESSION),
     ];
 
-    const result = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
+    const result = transform({
+      messages: msgs,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
 
-    const toolPart = result.messages[1]!.parts.find((p) => p.type === "tool")! as any;
+    const toolPart = result.messages[1]!.parts.find(
+      (p) => p.type === "tool",
+    )! as any;
     expect(toolPart.state.status).toBe("error");
-    expect(toolPart.state.error).toBe("[tool execution interrupted — session recovered]");
+    expect(toolPart.state.error).toBe(
+      "[tool execution interrupted — session recovered]",
+    );
     expect(toolPart.state.input).toEqual({ command: "ls" });
     // Pending has no time field — both start and end should be fabricated
     expect(typeof toolPart.state.time.start).toBe("number");
@@ -1021,15 +1212,25 @@ describe("gradient — sanitizeToolParts (orphaned tool_use fix)", () => {
       makeStepWithRunningTool("san-a3", "san-u3", "bash", SESSION),
     ];
 
-    const result = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
+    const result = transform({
+      messages: msgs,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
 
-    const toolPart = result.messages[1]!.parts.find((p) => p.type === "tool")! as any;
+    const toolPart = result.messages[1]!.parts.find(
+      (p) => p.type === "tool",
+    )! as any;
     expect(toolPart.state.status).toBe("error");
-    expect(toolPart.state.error).toBe("[tool execution interrupted — session recovered]");
+    expect(toolPart.state.error).toBe(
+      "[tool execution interrupted — session recovered]",
+    );
     expect(toolPart.state.input).toEqual({ command: "build" });
     // Running has time.start — should be preserved
     expect(toolPart.state.time.start).toBeLessThan(Date.now());
-    expect(toolPart.state.time.end).toBeGreaterThanOrEqual(toolPart.state.time.start);
+    expect(toolPart.state.time.end).toBeGreaterThanOrEqual(
+      toolPart.state.time.start,
+    );
     // Metadata from running state should be carried over
     expect(toolPart.state.metadata).toEqual({ cwd: "/test" });
   });
@@ -1038,7 +1239,13 @@ describe("gradient — sanitizeToolParts (orphaned tool_use fix)", () => {
     const msgs = [
       makeMsg("san-u4", "user", "do stuff", SESSION),
       {
-        ...makeStepWithTool("san-a4", "san-u4", "bash", "first output", SESSION),
+        ...makeStepWithTool(
+          "san-a4",
+          "san-u4",
+          "bash",
+          "first output",
+          SESSION,
+        ),
         parts: [
           // text part
           {
@@ -1084,7 +1291,11 @@ describe("gradient — sanitizeToolParts (orphaned tool_use fix)", () => {
       },
     ];
 
-    const result = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
+    const result = transform({
+      messages: msgs,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
 
     const parts = result.messages[1]!.parts;
     // Text part unchanged
@@ -1101,14 +1312,23 @@ describe("gradient — sanitizeToolParts (orphaned tool_use fix)", () => {
       (p) => p.type === "tool" && (p as any).callID === "call-pending",
     )! as any;
     expect(pendingTool.state.status).toBe("error");
-    expect(pendingTool.state.error).toBe("[tool execution interrupted — session recovered]");
+    expect(pendingTool.state.error).toBe(
+      "[tool execution interrupted — session recovered]",
+    );
   });
 
   test("user messages are untouched", () => {
     const userMsg = makeMsg("san-u5", "user", "hello", SESSION);
-    const msgs = [userMsg, makeStepWithPendingTool("san-a5", "san-u5", "bash", SESSION)];
+    const msgs = [
+      userMsg,
+      makeStepWithPendingTool("san-a5", "san-u5", "bash", SESSION),
+    ];
 
-    const result = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
+    const result = transform({
+      messages: msgs,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
 
     // User message should be the same object reference (not cloned)
     expect(result.messages[0]!.info.id).toBe("san-u5");
@@ -1123,11 +1343,17 @@ describe("gradient — sanitizeToolParts (orphaned tool_use fix)", () => {
       makeStepWithPendingTool("san-a7", "san-u7", "edit", SESSION), // pending — converted
     ];
 
-    const result = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
+    const result = transform({
+      messages: msgs,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
 
     // Completed tool message untouched
     const completedMsg = result.messages.find((m) => m.info.id === "san-a6")!;
-    const completedTool = completedMsg.parts.find((p) => p.type === "tool")! as any;
+    const completedTool = completedMsg.parts.find(
+      (p) => p.type === "tool",
+    )! as any;
     expect(completedTool.state.status).toBe("completed");
 
     // Pending tool message converted
@@ -1167,7 +1393,11 @@ describe("gradient — layer 0 trailing assistant message drop (index.ts prefill
       makeMsg("l0-a2", "assistant", "no problem", SESSION), // trailing pure-text — prefill error
     ];
 
-    const result = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
+    const result = transform({
+      messages: msgs,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
 
     // Must be layer 0 — tiny messages easily fit
     expect(result.layer).toBe(0);
@@ -1198,7 +1428,11 @@ describe("gradient — layer 0 trailing assistant message drop (index.ts prefill
       makeStepWithTool("l0t-a1", "l0t-u1", "bash", "ok", SESSION), // trailing tool-bearing
     ];
 
-    const result = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
+    const result = transform({
+      messages: msgs,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
 
     // Must be layer 0 — tiny messages
     expect(result.layer).toBe(0);
@@ -1234,16 +1468,31 @@ describe("gradient — tool-bearing steps survive compression (index.ts trailing
   test("gradient output includes tool-bearing agentic steps (not dropped by tryFit)", () => {
     // Old messages: 40 × 400 chars — forces gradient mode
     const oldMsgs = Array.from({ length: 40 }, (_, i) =>
-      makeMsg(`td-old-${i}`, i % 2 === 0 ? "user" : "assistant", "X".repeat(400), SESSION),
+      makeMsg(
+        `td-old-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "X".repeat(400),
+        SESSION,
+      ),
     );
     // Current turn: user + 5 tool-bearing steps
     const currentUser = makeMsg("td-user", "user", "run the build", SESSION);
     const steps = Array.from({ length: 5 }, (_, i) =>
-      makeStepWithTool(`td-step-${i}`, "td-user", "bash", "output ".repeat(30) + i, SESSION),
+      makeStepWithTool(
+        `td-step-${i}`,
+        "td-user",
+        "bash",
+        "output ".repeat(30) + i,
+        SESSION,
+      ),
     );
     const messages = [...oldMsgs, currentUser, ...steps];
 
-    const result = transform({ messages, projectPath: PROJECT, sessionID: SESSION });
+    const result = transform({
+      messages,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
 
     // Must be in gradient mode
     expect(result.layer).toBeGreaterThanOrEqual(1);
@@ -1261,13 +1510,28 @@ describe("gradient — tool-bearing steps survive compression (index.ts trailing
     // Verify the step messages in gradient output actually carry their tool parts
     // (not stripped), so index.ts can inspect them for the hasToolParts check.
     const oldMsgs = Array.from({ length: 40 }, (_, i) =>
-      makeMsg(`tp-old-${i}`, i % 2 === 0 ? "user" : "assistant", "Y".repeat(400), SESSION),
+      makeMsg(
+        `tp-old-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "Y".repeat(400),
+        SESSION,
+      ),
     );
     const currentUser = makeMsg("tp-user", "user", "do work", SESSION);
-    const lastStep = makeStepWithTool("tp-step-last", "tp-user", "bash", "final output", SESSION);
+    const lastStep = makeStepWithTool(
+      "tp-step-last",
+      "tp-user",
+      "bash",
+      "final output",
+      SESSION,
+    );
     const messages = [...oldMsgs, currentUser, lastStep];
 
-    const result = transform({ messages, projectPath: PROJECT, sessionID: SESSION });
+    const result = transform({
+      messages,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
     expect(result.layer).toBeGreaterThanOrEqual(1);
 
     // The last step in the gradient output should retain its tool part
@@ -1300,13 +1564,22 @@ describe("gradient — calibration oscillation fix", () => {
     // maxInput = 10000 - 2000 = 8000. The full session exceeds maxInput,
     // so gradient must activate.
     const msgs = Array.from({ length: 60 }, (_, i) =>
-      makeMsg(`osc-${i}`, i % 2 === 0 ? "user" : "assistant", "A".repeat(600), SESSION),
+      makeMsg(
+        `osc-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "A".repeat(600),
+        SESSION,
+      ),
     );
     // Add final user message to make it a proper conversation end
     msgs.push(makeMsg("osc-user-final", "user", "next step", SESSION));
 
     // First transform: should compress (layer >= 1)
-    const r1 = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
+    const r1 = transform({
+      messages: msgs,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
     expect(r1.layer).toBeGreaterThanOrEqual(1);
 
     // Simulate calibration: model saw the compressed window.
@@ -1316,10 +1589,17 @@ describe("gradient — calibration oscillation fix", () => {
     calibrate(actualInput, SESSION, compressedCount);
 
     // Add one more message (one agentic step)
-    const msgs2 = [...msgs, makeMsg("osc-step-1", "assistant", "working on it", SESSION)];
+    const msgs2 = [
+      ...msgs,
+      makeMsg("osc-step-1", "assistant", "working on it", SESSION),
+    ];
 
     // Second transform: sticky layer guard must prevent layer 0
-    const r2 = transform({ messages: msgs2, projectPath: PROJECT, sessionID: SESSION });
+    const r2 = transform({
+      messages: msgs2,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
     expect(r2.layer).toBeGreaterThanOrEqual(1);
     expect(getLastLayer(SESSION)).toBeGreaterThanOrEqual(1);
   });
@@ -1327,11 +1607,20 @@ describe("gradient — calibration oscillation fix", () => {
   test("sticky layer: allows layer 0 re-entry after compaction shrinks message count", () => {
     // Same setup: force gradient mode (60 × 600 chars ≈ 9000 tokens > maxInput 8000)
     const msgs = Array.from({ length: 60 }, (_, i) =>
-      makeMsg(`comp-${i}`, i % 2 === 0 ? "user" : "assistant", "B".repeat(600), SESSION),
+      makeMsg(
+        `comp-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "B".repeat(600),
+        SESSION,
+      ),
     );
     msgs.push(makeMsg("comp-user-final", "user", "compact", SESSION));
 
-    const r1 = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
+    const r1 = transform({
+      messages: msgs,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
     expect(r1.layer).toBeGreaterThanOrEqual(1);
 
     // Calibrate from the compressed result
@@ -1346,7 +1635,11 @@ describe("gradient — calibration oscillation fix", () => {
     ];
 
     // With fewer messages than lastKnownMessageCount, sticky guard is bypassed
-    const r2 = transform({ messages: postCompaction, projectPath: PROJECT, sessionID: SESSION });
+    const r2 = transform({
+      messages: postCompaction,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
     // Should be layer 0 — 3 tiny messages easily fit
     expect(r2.layer).toBe(0);
   });
@@ -1354,11 +1647,20 @@ describe("gradient — calibration oscillation fix", () => {
   test("ID-based delta: accurately counts new messages after compression", () => {
     // Build a large session (60 × 600 chars ≈ 9000 tokens > maxInput 8000)
     const msgs = Array.from({ length: 60 }, (_, i) =>
-      makeMsg(`id-${i}`, i % 2 === 0 ? "user" : "assistant", "C".repeat(600), SESSION),
+      makeMsg(
+        `id-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "C".repeat(600),
+        SESSION,
+      ),
     );
     msgs.push(makeMsg("id-user-end", "user", "step", SESSION));
 
-    const r1 = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
+    const r1 = transform({
+      messages: msgs,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
     expect(r1.layer).toBeGreaterThanOrEqual(1);
 
     // Calibrate with the compressed window count.
@@ -1368,13 +1670,22 @@ describe("gradient — calibration oscillation fix", () => {
     calibrate(actualInput, SESSION, compressedCount);
 
     // Add one truly new message
-    const newMsg = makeMsg("id-new-step", "assistant", "new work: " + "D".repeat(100), SESSION);
+    const newMsg = makeMsg(
+      "id-new-step",
+      "assistant",
+      "new work: " + "D".repeat(100),
+      SESSION,
+    );
     const msgs2 = [...msgs, newMsg];
 
     // The delta should only include the one new message (id-new-step),
     // not the ~50 evicted messages. Sticky guard keeps us at layer >= 1,
     // so we don't oscillate to a passthrough that would send 300K tokens.
-    const r2 = transform({ messages: msgs2, projectPath: PROJECT, sessionID: SESSION });
+    const r2 = transform({
+      messages: msgs2,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
     expect(r2.layer).toBeGreaterThanOrEqual(1);
 
     // The new message must be in the output
@@ -1389,7 +1700,11 @@ describe("gradient — calibration oscillation fix", () => {
       makeMsg("small-2", "assistant", "hi", SESSION),
       makeMsg("small-3", "user", "how are you", SESSION),
     ];
-    const r = transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
+    const r = transform({
+      messages: msgs,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
     expect(r.layer).toBe(0);
     expect(r.messages).toBe(msgs); // same reference — truly untouched
   });
@@ -1403,17 +1718,26 @@ describe("gradient — calibration oscillation fix", () => {
     //
     // With per-session state, worker transforms are isolated and cannot affect
     // the main session's state.
-    const MAIN = "osc-sess";        // reuse the SESSION constant
+    const MAIN = "osc-sess"; // reuse the SESSION constant
     const WORKER = "worker-distill-sess";
 
     // Set up the main session in gradient mode: 60 large messages
     const mainMsgs = Array.from({ length: 60 }, (_, i) =>
-      makeMsg(`main-${i}`, i % 2 === 0 ? "user" : "assistant", "A".repeat(600), MAIN),
+      makeMsg(
+        `main-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "A".repeat(600),
+        MAIN,
+      ),
     );
     mainMsgs.push(makeMsg("main-user-final", "user", "step 1", MAIN));
 
     // First main transform: gradient activates (layer >= 1)
-    const r1 = transform({ messages: mainMsgs, projectPath: PROJECT, sessionID: MAIN });
+    const r1 = transform({
+      messages: mainMsgs,
+      projectPath: PROJECT,
+      sessionID: MAIN,
+    });
     expect(r1.layer).toBeGreaterThanOrEqual(1);
 
     // Calibrate main session as compressed
@@ -1426,13 +1750,21 @@ describe("gradient — calibration oscillation fix", () => {
       makeMsg("w-2", "assistant", "done", WORKER),
       makeMsg("w-3", "user", "ok", WORKER),
     ];
-    const workerResult = transform({ messages: workerMsgs, projectPath: PROJECT, sessionID: WORKER });
+    const workerResult = transform({
+      messages: workerMsgs,
+      projectPath: PROJECT,
+      sessionID: WORKER,
+    });
     expect(workerResult.layer).toBe(0); // worker is small → layer 0
 
     // After worker transform, main session state must be unaffected.
     // The sticky layer guard must still fire for the main session.
     mainMsgs.push(makeMsg("main-step-2", "assistant", "doing work", MAIN));
-    const r2 = transform({ messages: mainMsgs, projectPath: PROJECT, sessionID: MAIN });
+    const r2 = transform({
+      messages: mainMsgs,
+      projectPath: PROJECT,
+      sessionID: MAIN,
+    });
 
     // Before the fix: worker's layer 0 reset module-level lastLayer=0,
     // so r2 would be layer 0 passthrough (sending all 175K tokens).
@@ -1493,18 +1825,32 @@ describe("deduplicateToolOutputs", () => {
   test("deduplicates identical tool outputs, keeps latest", () => {
     const msgs = [
       makeMsg("u1", "user", "read file A"),
-      makeMsgWithTool("a1", "assistant", "read_file", '{"path":"src/foo.ts"}', LARGE_CONTENT),
+      makeMsgWithTool(
+        "a1",
+        "assistant",
+        "read_file",
+        '{"path":"src/foo.ts"}',
+        LARGE_CONTENT,
+      ),
       makeMsg("u2", "user", "now edit"),
       makeMsg("a2", "assistant", "done editing"),
       makeMsg("u3", "user", "read file A again"),
-      makeMsgWithTool("a3", "assistant", "read_file", '{"path":"src/foo.ts"}', LARGE_CONTENT),
+      makeMsgWithTool(
+        "a3",
+        "assistant",
+        "read_file",
+        '{"path":"src/foo.ts"}',
+        LARGE_CONTENT,
+      ),
       makeMsg("u4", "user", "looks good"), // current turn
     ];
 
     const result = deduplicateToolOutputs(msgs, 6);
 
     // First read (index 1) should be deduplicated
-    expect(getToolOutput(result[1].parts[0])).toContain("earlier read of src/foo.ts");
+    expect(getToolOutput(result[1].parts[0])).toContain(
+      "earlier read of src/foo.ts",
+    );
 
     // Latest read (index 5) should be intact
     expect(getToolOutput(result[5].parts[0])).toBe(LARGE_CONTENT);
@@ -1515,18 +1861,32 @@ describe("deduplicateToolOutputs", () => {
     const newContent = "new version " + "z".repeat(800);
     const msgs = [
       makeMsg("u1", "user", "read file"),
-      makeMsgWithTool("a1", "assistant", "read_file", '{"path":"src/bar.ts"}', oldContent),
+      makeMsgWithTool(
+        "a1",
+        "assistant",
+        "read_file",
+        '{"path":"src/bar.ts"}',
+        oldContent,
+      ),
       makeMsg("u2", "user", "edit it"),
       makeMsg("a2", "assistant", "edited"),
       makeMsg("u3", "user", "read it again"),
-      makeMsgWithTool("a3", "assistant", "read_file", '{"path":"src/bar.ts"}', newContent),
+      makeMsgWithTool(
+        "a3",
+        "assistant",
+        "read_file",
+        '{"path":"src/bar.ts"}',
+        newContent,
+      ),
       makeMsg("u4", "user", "verify"), // current turn
     ];
 
     const result = deduplicateToolOutputs(msgs, 6);
 
     // First read (old content) should be replaced — same file, not latest
-    expect(getToolOutput(result[1].parts[0])).toContain("earlier read of src/bar.ts");
+    expect(getToolOutput(result[1].parts[0])).toContain(
+      "earlier read of src/bar.ts",
+    );
 
     // Latest read (new content) should be intact
     expect(getToolOutput(result[5].parts[0])).toBe(newContent);
@@ -1535,9 +1895,21 @@ describe("deduplicateToolOutputs", () => {
   test("does not touch current turn messages", () => {
     const msgs = [
       makeMsg("u1", "user", "first"),
-      makeMsgWithTool("a1", "assistant", "read_file", '{"path":"src/foo.ts"}', LARGE_CONTENT),
+      makeMsgWithTool(
+        "a1",
+        "assistant",
+        "read_file",
+        '{"path":"src/foo.ts"}',
+        LARGE_CONTENT,
+      ),
       makeMsg("u2", "user", "read again"), // current turn starts here (index 2)
-      makeMsgWithTool("a2", "assistant", "read_file", '{"path":"src/foo.ts"}', LARGE_CONTENT),
+      makeMsgWithTool(
+        "a2",
+        "assistant",
+        "read_file",
+        '{"path":"src/foo.ts"}',
+        LARGE_CONTENT,
+      ),
     ];
 
     const result = deduplicateToolOutputs(msgs, 2);
@@ -1553,9 +1925,21 @@ describe("deduplicateToolOutputs", () => {
     const smallContent = "short"; // well below DEDUP_MIN_CHARS
     const msgs = [
       makeMsg("u1", "user", "read"),
-      makeMsgWithTool("a1", "assistant", "read_file", '{"path":"small.txt"}', smallContent),
+      makeMsgWithTool(
+        "a1",
+        "assistant",
+        "read_file",
+        '{"path":"small.txt"}',
+        smallContent,
+      ),
       makeMsg("u2", "user", "read again"),
-      makeMsgWithTool("a2", "assistant", "read_file", '{"path":"small.txt"}', smallContent),
+      makeMsgWithTool(
+        "a2",
+        "assistant",
+        "read_file",
+        '{"path":"small.txt"}',
+        smallContent,
+      ),
       makeMsg("u3", "user", "done"), // current turn
     ];
 
@@ -1569,9 +1953,21 @@ describe("deduplicateToolOutputs", () => {
   test("returns same array reference when no duplicates", () => {
     const msgs = [
       makeMsg("u1", "user", "hello"),
-      makeMsgWithTool("a1", "assistant", "read_file", '{"path":"a.ts"}', LARGE_CONTENT),
+      makeMsgWithTool(
+        "a1",
+        "assistant",
+        "read_file",
+        '{"path":"a.ts"}',
+        LARGE_CONTENT,
+      ),
       makeMsg("u2", "user", "read different"),
-      makeMsgWithTool("a2", "assistant", "read_file", '{"path":"b.ts"}', "different " + LARGE_CONTENT),
+      makeMsgWithTool(
+        "a2",
+        "assistant",
+        "read_file",
+        '{"path":"b.ts"}',
+        "different " + LARGE_CONTENT,
+      ),
       makeMsg("u3", "user", "done"), // current turn
     ];
 
@@ -1583,9 +1979,21 @@ describe("deduplicateToolOutputs", () => {
     const bashOutput = "npm test\n" + "PASS ".repeat(200); // large enough
     const msgs = [
       makeMsg("u1", "user", "run tests"),
-      makeMsgWithTool("a1", "assistant", "bash", '{"command":"npm test"}', bashOutput),
+      makeMsgWithTool(
+        "a1",
+        "assistant",
+        "bash",
+        '{"command":"npm test"}',
+        bashOutput,
+      ),
       makeMsg("u2", "user", "run tests again"),
-      makeMsgWithTool("a2", "assistant", "bash", '{"command":"npm test"}', bashOutput),
+      makeMsgWithTool(
+        "a2",
+        "assistant",
+        "bash",
+        '{"command":"npm test"}',
+        bashOutput,
+      ),
       makeMsg("u3", "user", "ok"), // current turn
     ];
 
@@ -1603,11 +2011,29 @@ describe("deduplicateToolOutputs", () => {
   test("handles three reads of the same file — only latest survives", () => {
     const msgs = [
       makeMsg("u1", "user", "read"),
-      makeMsgWithTool("a1", "assistant", "read_file", '{"path":"src/x.ts"}', LARGE_CONTENT),
+      makeMsgWithTool(
+        "a1",
+        "assistant",
+        "read_file",
+        '{"path":"src/x.ts"}',
+        LARGE_CONTENT,
+      ),
       makeMsg("u2", "user", "read again"),
-      makeMsgWithTool("a2", "assistant", "read_file", '{"path":"src/x.ts"}', LARGE_CONTENT),
+      makeMsgWithTool(
+        "a2",
+        "assistant",
+        "read_file",
+        '{"path":"src/x.ts"}',
+        LARGE_CONTENT,
+      ),
       makeMsg("u3", "user", "read third time"),
-      makeMsgWithTool("a3", "assistant", "read_file", '{"path":"src/x.ts"}', LARGE_CONTENT),
+      makeMsgWithTool(
+        "a3",
+        "assistant",
+        "read_file",
+        '{"path":"src/x.ts"}',
+        LARGE_CONTENT,
+      ),
       makeMsg("u4", "user", "done"), // current turn
     ];
 
@@ -1624,87 +2050,111 @@ describe("deduplicateToolOutputs", () => {
 
 describe("laterReadCovers", () => {
   test("full-file covers full-file same path", () => {
-    expect(laterReadCovers(
-      { path: "src/foo.ts", offset: undefined, limit: undefined },
-      { path: "src/foo.ts", offset: undefined, limit: undefined },
-    )).toBe(true);
+    expect(
+      laterReadCovers(
+        { path: "src/foo.ts", offset: undefined, limit: undefined },
+        { path: "src/foo.ts", offset: undefined, limit: undefined },
+      ),
+    ).toBe(true);
   });
 
   test("full-file covers ranged read", () => {
-    expect(laterReadCovers(
-      { path: "src/foo.ts", offset: undefined, limit: undefined },
-      { path: "src/foo.ts", offset: 10, limit: 40 },
-    )).toBe(true);
+    expect(
+      laterReadCovers(
+        { path: "src/foo.ts", offset: undefined, limit: undefined },
+        { path: "src/foo.ts", offset: 10, limit: 40 },
+      ),
+    ).toBe(true);
   });
 
   test("ranged read does NOT cover full-file", () => {
-    expect(laterReadCovers(
-      { path: "src/foo.ts", offset: 10, limit: 40 },
-      { path: "src/foo.ts", offset: undefined, limit: undefined },
-    )).toBe(false);
+    expect(
+      laterReadCovers(
+        { path: "src/foo.ts", offset: 10, limit: 40 },
+        { path: "src/foo.ts", offset: undefined, limit: undefined },
+      ),
+    ).toBe(false);
   });
 
   test("exact same range covers", () => {
-    expect(laterReadCovers(
-      { path: "src/foo.ts", offset: 10, limit: 50 },
-      { path: "src/foo.ts", offset: 10, limit: 50 },
-    )).toBe(true);
+    expect(
+      laterReadCovers(
+        { path: "src/foo.ts", offset: 10, limit: 50 },
+        { path: "src/foo.ts", offset: 10, limit: 50 },
+      ),
+    ).toBe(true);
   });
 
   test("wider range covers narrower range", () => {
-    expect(laterReadCovers(
-      { path: "src/foo.ts", offset: 5, limit: 60 },
-      { path: "src/foo.ts", offset: 10, limit: 40 },
-    )).toBe(true);
+    expect(
+      laterReadCovers(
+        { path: "src/foo.ts", offset: 5, limit: 60 },
+        { path: "src/foo.ts", offset: 10, limit: 40 },
+      ),
+    ).toBe(true);
   });
 
   test("narrower range does NOT cover wider range", () => {
-    expect(laterReadCovers(
-      { path: "src/foo.ts", offset: 10, limit: 40 },
-      { path: "src/foo.ts", offset: 5, limit: 60 },
-    )).toBe(false);
+    expect(
+      laterReadCovers(
+        { path: "src/foo.ts", offset: 10, limit: 40 },
+        { path: "src/foo.ts", offset: 5, limit: 60 },
+      ),
+    ).toBe(false);
   });
 
   test("non-overlapping ranges do not cover", () => {
-    expect(laterReadCovers(
-      { path: "src/foo.ts", offset: 100, limit: 50 },
-      { path: "src/foo.ts", offset: 1, limit: 50 },
-    )).toBe(false);
+    expect(
+      laterReadCovers(
+        { path: "src/foo.ts", offset: 100, limit: 50 },
+        { path: "src/foo.ts", offset: 1, limit: 50 },
+      ),
+    ).toBe(false);
   });
 
   test("different paths never cover", () => {
-    expect(laterReadCovers(
-      { path: "src/foo.ts", offset: undefined, limit: undefined },
-      { path: "src/bar.ts", offset: undefined, limit: undefined },
-    )).toBe(false);
+    expect(
+      laterReadCovers(
+        { path: "src/foo.ts", offset: undefined, limit: undefined },
+        { path: "src/bar.ts", offset: undefined, limit: undefined },
+      ),
+    ).toBe(false);
   });
 
   test("open-ended later covers bounded earlier with lower start", () => {
-    expect(laterReadCovers(
-      { path: "src/foo.ts", offset: 10, limit: undefined },
-      { path: "src/foo.ts", offset: 20, limit: 30 },
-    )).toBe(true);
+    expect(
+      laterReadCovers(
+        { path: "src/foo.ts", offset: 10, limit: undefined },
+        { path: "src/foo.ts", offset: 20, limit: 30 },
+      ),
+    ).toBe(true);
   });
 
   test("bounded later does NOT cover open-ended earlier", () => {
-    expect(laterReadCovers(
-      { path: "src/foo.ts", offset: 10, limit: 50 },
-      { path: "src/foo.ts", offset: 10, limit: undefined },
-    )).toBe(false);
+    expect(
+      laterReadCovers(
+        { path: "src/foo.ts", offset: 10, limit: 50 },
+        { path: "src/foo.ts", offset: 10, limit: undefined },
+      ),
+    ).toBe(false);
   });
 
   test("offset-only later covers offset-only earlier with lower start", () => {
-    expect(laterReadCovers(
-      { path: "src/foo.ts", offset: 5, limit: undefined },
-      { path: "src/foo.ts", offset: 10, limit: undefined },
-    )).toBe(true);
+    expect(
+      laterReadCovers(
+        { path: "src/foo.ts", offset: 5, limit: undefined },
+        { path: "src/foo.ts", offset: 10, limit: undefined },
+      ),
+    ).toBe(true);
   });
 
   test("offset-only later does NOT cover earlier with lower start", () => {
-    expect(laterReadCovers(
-      { path: "src/foo.ts", offset: 20, limit: undefined },
-      { path: "src/foo.ts", offset: 10, limit: undefined },
-    )).toBe(false);
+    expect(
+      laterReadCovers(
+        { path: "src/foo.ts", offset: 20, limit: undefined },
+        { path: "src/foo.ts", offset: 10, limit: undefined },
+      ),
+    ).toBe(false);
   });
 });
 
@@ -1714,13 +2164,27 @@ describe("deduplicateToolOutputs — range-aware", () => {
   test("full-file read covers earlier full-file read (baseline)", () => {
     const msgs = [
       makeMsg("u1", "user", "read file"),
-      makeMsgWithTool("a1", "assistant", "read", '{"path":"src/foo.ts"}', LARGE_CONTENT),
+      makeMsgWithTool(
+        "a1",
+        "assistant",
+        "read",
+        '{"path":"src/foo.ts"}',
+        LARGE_CONTENT,
+      ),
       makeMsg("u2", "user", "read again"),
-      makeMsgWithTool("a2", "assistant", "read", '{"path":"src/foo.ts"}', LARGE_CONTENT),
+      makeMsgWithTool(
+        "a2",
+        "assistant",
+        "read",
+        '{"path":"src/foo.ts"}',
+        LARGE_CONTENT,
+      ),
       makeMsg("u3", "user", "done"),
     ];
     const result = deduplicateToolOutputs(msgs, 4);
-    expect(getToolOutput(result[1].parts[0])).toContain("earlier read of src/foo.ts");
+    expect(getToolOutput(result[1].parts[0])).toContain(
+      "earlier read of src/foo.ts",
+    );
     expect(getToolOutput(result[3].parts[0])).toBe(LARGE_CONTENT);
   });
 
@@ -1729,14 +2193,28 @@ describe("deduplicateToolOutputs — range-aware", () => {
     const fullContent = "full file content " + "z".repeat(800);
     const msgs = [
       makeMsg("u1", "user", "read part of file"),
-      makeMsgWithTool("a1", "assistant", "read", '{"path":"src/foo.ts","offset":10,"limit":40}', rangedContent),
+      makeMsgWithTool(
+        "a1",
+        "assistant",
+        "read",
+        '{"path":"src/foo.ts","offset":10,"limit":40}',
+        rangedContent,
+      ),
       makeMsg("u2", "user", "read full file"),
-      makeMsgWithTool("a2", "assistant", "read", '{"path":"src/foo.ts"}', fullContent),
+      makeMsgWithTool(
+        "a2",
+        "assistant",
+        "read",
+        '{"path":"src/foo.ts"}',
+        fullContent,
+      ),
       makeMsg("u3", "user", "done"),
     ];
     const result = deduplicateToolOutputs(msgs, 4);
     // Earlier ranged read should be deduped — full-file covers it
-    expect(getToolOutput(result[1].parts[0])).toContain("earlier read of src/foo.ts");
+    expect(getToolOutput(result[1].parts[0])).toContain(
+      "earlier read of src/foo.ts",
+    );
     expect(getToolOutput(result[1].parts[0])).toContain("lines 10-49");
     // Full-file read should be intact
     expect(getToolOutput(result[3].parts[0])).toBe(fullContent);
@@ -1747,9 +2225,21 @@ describe("deduplicateToolOutputs — range-aware", () => {
     const rangedContent = "lines 10-50 content " + "z".repeat(800);
     const msgs = [
       makeMsg("u1", "user", "read full file"),
-      makeMsgWithTool("a1", "assistant", "read", '{"path":"src/foo.ts"}', fullContent),
+      makeMsgWithTool(
+        "a1",
+        "assistant",
+        "read",
+        '{"path":"src/foo.ts"}',
+        fullContent,
+      ),
       makeMsg("u2", "user", "read part"),
-      makeMsgWithTool("a2", "assistant", "read", '{"path":"src/foo.ts","offset":10,"limit":40}', rangedContent),
+      makeMsgWithTool(
+        "a2",
+        "assistant",
+        "read",
+        '{"path":"src/foo.ts","offset":10,"limit":40}',
+        rangedContent,
+      ),
       makeMsg("u3", "user", "done"),
     ];
     const result = deduplicateToolOutputs(msgs, 4);
@@ -1764,14 +2254,28 @@ describe("deduplicateToolOutputs — range-aware", () => {
     const wideContent = "wide range " + "b".repeat(800);
     const msgs = [
       makeMsg("u1", "user", "read narrow"),
-      makeMsgWithTool("a1", "assistant", "read", '{"path":"src/foo.ts","offset":20,"limit":30}', narrowContent),
+      makeMsgWithTool(
+        "a1",
+        "assistant",
+        "read",
+        '{"path":"src/foo.ts","offset":20,"limit":30}',
+        narrowContent,
+      ),
       makeMsg("u2", "user", "read wider"),
-      makeMsgWithTool("a2", "assistant", "read", '{"path":"src/foo.ts","offset":10,"limit":60}', wideContent),
+      makeMsgWithTool(
+        "a2",
+        "assistant",
+        "read",
+        '{"path":"src/foo.ts","offset":10,"limit":60}',
+        wideContent,
+      ),
       makeMsg("u3", "user", "done"),
     ];
     const result = deduplicateToolOutputs(msgs, 4);
     // Narrow earlier read should be deduped — wider later covers it
-    expect(getToolOutput(result[1].parts[0])).toContain("earlier read of src/foo.ts");
+    expect(getToolOutput(result[1].parts[0])).toContain(
+      "earlier read of src/foo.ts",
+    );
     // Wider read is latest — kept
     expect(getToolOutput(result[3].parts[0])).toBe(wideContent);
   });
@@ -1781,9 +2285,21 @@ describe("deduplicateToolOutputs — range-aware", () => {
     const narrowContent = "narrow range " + "b".repeat(800);
     const msgs = [
       makeMsg("u1", "user", "read wide"),
-      makeMsgWithTool("a1", "assistant", "read", '{"path":"src/foo.ts","offset":10,"limit":60}', wideContent),
+      makeMsgWithTool(
+        "a1",
+        "assistant",
+        "read",
+        '{"path":"src/foo.ts","offset":10,"limit":60}',
+        wideContent,
+      ),
       makeMsg("u2", "user", "read narrow"),
-      makeMsgWithTool("a2", "assistant", "read", '{"path":"src/foo.ts","offset":20,"limit":30}', narrowContent),
+      makeMsgWithTool(
+        "a2",
+        "assistant",
+        "read",
+        '{"path":"src/foo.ts","offset":20,"limit":30}',
+        narrowContent,
+      ),
       makeMsg("u3", "user", "done"),
     ];
     const result = deduplicateToolOutputs(msgs, 4);
@@ -1798,9 +2314,21 @@ describe("deduplicateToolOutputs — range-aware", () => {
     const contentB = "range B " + "b".repeat(800);
     const msgs = [
       makeMsg("u1", "user", "read top"),
-      makeMsgWithTool("a1", "assistant", "read", '{"path":"src/foo.ts","offset":1,"limit":50}', contentA),
+      makeMsgWithTool(
+        "a1",
+        "assistant",
+        "read",
+        '{"path":"src/foo.ts","offset":1,"limit":50}',
+        contentA,
+      ),
       makeMsg("u2", "user", "read bottom"),
-      makeMsgWithTool("a2", "assistant", "read", '{"path":"src/foo.ts","offset":100,"limit":50}', contentB),
+      makeMsgWithTool(
+        "a2",
+        "assistant",
+        "read",
+        '{"path":"src/foo.ts","offset":100,"limit":50}',
+        contentB,
+      ),
       makeMsg("u3", "user", "done"),
     ];
     const result = deduplicateToolOutputs(msgs, 4);
@@ -1813,9 +2341,21 @@ describe("deduplicateToolOutputs — range-aware", () => {
     const content = "ranged " + "x".repeat(800);
     const msgs = [
       makeMsg("u1", "user", "read part"),
-      makeMsgWithTool("a1", "assistant", "read", '{"path":"src/foo.ts","offset":10,"limit":40}', content),
+      makeMsgWithTool(
+        "a1",
+        "assistant",
+        "read",
+        '{"path":"src/foo.ts","offset":10,"limit":40}',
+        content,
+      ),
       makeMsg("u2", "user", "read full"),
-      makeMsgWithTool("a2", "assistant", "read", '{"path":"src/foo.ts"}', "full " + "y".repeat(800)),
+      makeMsgWithTool(
+        "a2",
+        "assistant",
+        "read",
+        '{"path":"src/foo.ts"}',
+        "full " + "y".repeat(800),
+      ),
       makeMsg("u3", "user", "done"),
     ];
     const result = deduplicateToolOutputs(msgs, 4);
@@ -1828,9 +2368,21 @@ describe("deduplicateToolOutputs — range-aware", () => {
     const bashOutput = "npm test\n" + "PASS ".repeat(200);
     const msgs = [
       makeMsg("u1", "user", "run tests"),
-      makeMsgWithTool("a1", "assistant", "bash", '{"command":"npm test"}', bashOutput),
+      makeMsgWithTool(
+        "a1",
+        "assistant",
+        "bash",
+        '{"command":"npm test"}',
+        bashOutput,
+      ),
       makeMsg("u2", "user", "run again"),
-      makeMsgWithTool("a2", "assistant", "bash", '{"command":"npm test"}', bashOutput),
+      makeMsgWithTool(
+        "a2",
+        "assistant",
+        "bash",
+        '{"command":"npm test"}',
+        bashOutput,
+      ),
       makeMsg("u3", "user", "ok"),
     ];
     const result = deduplicateToolOutputs(msgs, 4);
@@ -1842,9 +2394,21 @@ describe("deduplicateToolOutputs — range-aware", () => {
     const content = "exact range " + "x".repeat(800);
     const msgs = [
       makeMsg("u1", "user", "read"),
-      makeMsgWithTool("a1", "assistant", "read", '{"path":"src/foo.ts","offset":10,"limit":50}', content),
+      makeMsgWithTool(
+        "a1",
+        "assistant",
+        "read",
+        '{"path":"src/foo.ts","offset":10,"limit":50}',
+        content,
+      ),
       makeMsg("u2", "user", "read same range"),
-      makeMsgWithTool("a2", "assistant", "read", '{"path":"src/foo.ts","offset":10,"limit":50}', content),
+      makeMsgWithTool(
+        "a2",
+        "assistant",
+        "read",
+        '{"path":"src/foo.ts","offset":10,"limit":50}',
+        content,
+      ),
       makeMsg("u3", "user", "done"),
     ];
     const result = deduplicateToolOutputs(msgs, 4);
@@ -1858,13 +2422,27 @@ describe("deduplicateToolOutputs — range-aware", () => {
     const content = "read_file content " + "x".repeat(800);
     const msgs = [
       makeMsg("u1", "user", "read"),
-      makeMsgWithTool("a1", "assistant", "read_file", '{"filePath":"src/bar.ts","offset":5,"limit":20}', content),
+      makeMsgWithTool(
+        "a1",
+        "assistant",
+        "read_file",
+        '{"filePath":"src/bar.ts","offset":5,"limit":20}',
+        content,
+      ),
       makeMsg("u2", "user", "read full"),
-      makeMsgWithTool("a2", "assistant", "read_file", '{"filePath":"src/bar.ts"}', "full " + "y".repeat(800)),
+      makeMsgWithTool(
+        "a2",
+        "assistant",
+        "read_file",
+        '{"filePath":"src/bar.ts"}',
+        "full " + "y".repeat(800),
+      ),
       makeMsg("u3", "user", "done"),
     ];
     const result = deduplicateToolOutputs(msgs, 4);
-    expect(getToolOutput(result[1].parts[0])).toContain("earlier read of src/bar.ts");
+    expect(getToolOutput(result[1].parts[0])).toContain(
+      "earlier read of src/bar.ts",
+    );
     expect(getToolOutput(result[1].parts[0])).toContain("lines 5-24");
   });
 });
@@ -2169,12 +2747,18 @@ describe("gradient — distillation snapshot caching", () => {
     // Insert a distillation row so the prefix has content
     insertDistillation({
       sessionID: SID,
-      observations: "- Initial observation about the task\n- Second observation",
+      observations:
+        "- Initial observation about the task\n- Second observation",
     });
 
     // Build a conversation big enough to trigger gradient mode (layer 1+)
     const messages = Array.from({ length: 16 }, (_, i) =>
-      makeMsg(`snap-${i}`, i % 2 === 0 ? "user" : "assistant", "X".repeat(1_000), SID),
+      makeMsg(
+        `snap-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "X".repeat(1_000),
+        SID,
+      ),
     );
 
     const projectPath = `/test/${PID_KEY}`;
@@ -2193,12 +2777,20 @@ describe("gradient — distillation snapshot caching", () => {
 
     // The distilled prefix should be identical (snapshot frozen)
     // Find prefix messages (those without session ID = distilled)
-    const prefix1 = result1.messages.filter((m) => !m.info.sessionID || m.info.sessionID !== SID);
-    const prefix2 = result2.messages.filter((m) => !m.info.sessionID || m.info.sessionID !== SID);
+    const prefix1 = result1.messages.filter(
+      (m) => !m.info.sessionID || m.info.sessionID !== SID,
+    );
+    const prefix2 = result2.messages.filter(
+      (m) => !m.info.sessionID || m.info.sessionID !== SID,
+    );
 
     // Prefix text should be byte-identical — the new row was NOT consumed
-    const text1 = prefix1.map((m) => m.parts.map((p) => ("text" in p ? p.text : "")).join()).join();
-    const text2 = prefix2.map((m) => m.parts.map((p) => ("text" in p ? p.text : "")).join()).join();
+    const text1 = prefix1
+      .map((m) => m.parts.map((p) => ("text" in p ? p.text : "")).join())
+      .join();
+    const text2 = prefix2
+      .map((m) => m.parts.map((p) => ("text" in p ? p.text : "")).join())
+      .join();
     expect(text2).toBe(text1);
     expect(text1).not.toContain("should NOT be consumed");
   });
@@ -2213,9 +2805,18 @@ describe("gradient — distillation snapshot caching", () => {
 
     // First call with user msg u-0
     const messages1 = Array.from({ length: 16 }, (_, i) =>
-      makeMsg(`ref-${i}`, i % 2 === 0 ? "user" : "assistant", "X".repeat(1_000), SID),
+      makeMsg(
+        `ref-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "X".repeat(1_000),
+        SID,
+      ),
     );
-    const result1 = transform({ messages: messages1, projectPath, sessionID: SID });
+    const result1 = transform({
+      messages: messages1,
+      projectPath,
+      sessionID: SID,
+    });
     expect(result1.layer).toBeGreaterThanOrEqual(1);
 
     // Insert a new distillation row
@@ -2229,7 +2830,11 @@ describe("gradient — distillation snapshot caching", () => {
       ...messages1,
       makeMsg("ref-new-user", "user", "New question from the user", SID),
     ];
-    const result2 = transform({ messages: messages2, projectPath, sessionID: SID });
+    const result2 = transform({
+      messages: messages2,
+      projectPath,
+      sessionID: SID,
+    });
     expect(result2.layer).toBeGreaterThanOrEqual(1);
 
     // The prefix should now contain the new distillation
@@ -2249,7 +2854,12 @@ describe("gradient — distillation snapshot caching", () => {
 
     // Build up state with a transform
     const messages = Array.from({ length: 16 }, (_, i) =>
-      makeMsg(`idle-${i}`, i % 2 === 0 ? "user" : "assistant", "X".repeat(1_000), SID),
+      makeMsg(
+        `idle-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "X".repeat(1_000),
+        SID,
+      ),
     );
     transform({ messages, projectPath, sessionID: SID });
 
@@ -2313,7 +2923,12 @@ describe("gradient — sanitizeToolParts determinism", () => {
         mode: "build",
         path: { cwd: "/test", root: "/test" },
         cost: 0,
-        tokens: { input: 100, output: 50, reasoning: 0, cache: { read: 0, write: 0 } },
+        tokens: {
+          input: 100,
+          output: 50,
+          reasoning: 0,
+          cache: { read: 0, write: 0 },
+        },
       },
       parts: [
         {
@@ -2346,7 +2961,11 @@ describe("gradient — sanitizeToolParts determinism", () => {
       makeAssistantWithPendingTool("san-2", "bash"),
     ];
 
-    const result1 = transform({ messages, projectPath: PROJECT, sessionID: SID });
+    const result1 = transform({
+      messages,
+      projectPath: PROJECT,
+      sessionID: SID,
+    });
     // The pending tool part should have been converted to error
     const toolPart1 = result1.messages
       .flatMap((m) => m.parts)
@@ -2355,7 +2974,11 @@ describe("gradient — sanitizeToolParts determinism", () => {
     expect(toolPart1!.state.status).toBe("error");
 
     // Second call with the exact same messages (simulating OpenCode's cached array)
-    const result2 = transform({ messages, projectPath: PROJECT, sessionID: SID });
+    const result2 = transform({
+      messages,
+      projectPath: PROJECT,
+      sessionID: SID,
+    });
     const toolPart2 = result2.messages
       .flatMap((m) => m.parts)
       .find((p) => isToolPart(p));
@@ -2392,7 +3015,7 @@ describe("tier-based context management", () => {
   describe("shouldCompress", () => {
     beforeEach(() => {
       // Opus 4.6 pricing: write=$6.25/M, read=$0.50/M
-      setCachePricing(6.25 / 1_000_000, 0.50 / 1_000_000);
+      setCachePricing(6.25 / 1_000_000, 0.5 / 1_000_000);
     });
 
     test("compresses when bust cost is much less than continue cost", () => {
@@ -2592,24 +3215,32 @@ describe("tier-based context management", () => {
   describe("shouldCompress — freeWrite option", () => {
     beforeEach(() => {
       // Opus 4.6 pricing where bust is expensive
-      setCachePricing(6.25 / 1_000_000, 0.50 / 1_000_000);
+      setCachePricing(6.25 / 1_000_000, 0.5 / 1_000_000);
     });
 
     test("returns true with freeWrite even when bust cost exceeds continue cost", () => {
       // Without freeWrite: bustCost ($0.9375) >> continueCost ($0.125) → false
       expect(shouldCompress(250_000, 150_000, 0)).toBe(false);
       // With freeWrite: compression is free → true
-      expect(shouldCompress(250_000, 150_000, 0, { freeWrite: true })).toBe(true);
+      expect(shouldCompress(250_000, 150_000, 0, { freeWrite: true })).toBe(
+        true,
+      );
     });
 
     test("returns false with freeWrite when busts >= 5", () => {
       // Even free compression shouldn't run if it's not helping
-      expect(shouldCompress(250_000, 150_000, 5, { freeWrite: true })).toBe(false);
-      expect(shouldCompress(250_000, 150_000, 10, { freeWrite: true })).toBe(false);
+      expect(shouldCompress(250_000, 150_000, 5, { freeWrite: true })).toBe(
+        false,
+      );
+      expect(shouldCompress(250_000, 150_000, 10, { freeWrite: true })).toBe(
+        false,
+      );
     });
 
     test("returns true with freeWrite at 4 busts", () => {
-      expect(shouldCompress(250_000, 150_000, 4, { freeWrite: true })).toBe(true);
+      expect(shouldCompress(250_000, 150_000, 4, { freeWrite: true })).toBe(
+        true,
+      );
     });
 
     test("backward compatible — no opts uses defaults", () => {
@@ -2620,7 +3251,9 @@ describe("tier-based context management", () => {
 
     test("threshold option still works", () => {
       // With very low threshold, even economical compression is rejected
-      expect(shouldCompress(2_000_000, 100_000, 0, { threshold: 0.01 })).toBe(false);
+      expect(shouldCompress(2_000_000, 100_000, 0, { threshold: 0.01 })).toBe(
+        false,
+      );
     });
   });
 });
@@ -2658,7 +3291,9 @@ describe("gradient — free-write session compresses earlier than normal", () =>
       const msgs: ReturnType<typeof makeMsg>[] = [];
       for (let i = 0; i < 40; i++) {
         const role = i % 2 === 0 ? "user" : "assistant";
-        msgs.push(makeMsg(`fw-${i}`, role as "user" | "assistant", bigText, sid));
+        msgs.push(
+          makeMsg(`fw-${i}`, role as "user" | "assistant", bigText, sid),
+        );
       }
       msgs.push(makeMsg("fw-final", "user", "do the fix", sid));
       return msgs;
@@ -2674,7 +3309,11 @@ describe("gradient — free-write session compresses earlier than normal", () =>
     // delta = 120,830 * 1.3 ≈ 157k. Add lastKnownInput=100 → ~157k.
     // 157k < 159,600 ceiling → should be layer 0.
     const normalMsgs = buildMsgs(NORMAL_SID);
-    const normalResult = transform({ messages: normalMsgs, projectPath: PROJECT, sessionID: NORMAL_SID });
+    const normalResult = transform({
+      messages: normalMsgs,
+      projectPath: PROJECT,
+      sessionID: NORMAL_SID,
+    });
     expect(normalResult.layer).toBe(0);
 
     // Set up free-write session: calibrate it, then add zero-cache-write turns
@@ -2688,7 +3327,11 @@ describe("gradient — free-write session compresses earlier than normal", () =>
     // Free-write session: ceiling drops to 109,200.
     // Same ~157k estimate → exceeds 109k → should compress.
     const fwMsgs = buildMsgs(FREE_SID);
-    const fwResult = transform({ messages: fwMsgs, projectPath: PROJECT, sessionID: FREE_SID });
+    const fwResult = transform({
+      messages: fwMsgs,
+      projectPath: PROJECT,
+      sessionID: FREE_SID,
+    });
     expect(fwResult.layer).toBeGreaterThanOrEqual(1);
   });
 });
@@ -2697,11 +3340,33 @@ describe("gradient — free-write session compresses earlier than normal", () =>
 
 describe("selectDistillations", () => {
   /** Create a distillation stub with the fields selectDistillations uses. */
-  function dist(id: string, generation: number, createdAt: number, observations = ""): {
-    id: string; observations: string; generation: number; token_count: number; created_at: number; session_id: string;
-    r_compression: number | null; c_norm: number | null; source_ids: string[];
+  function dist(
+    id: string,
+    generation: number,
+    createdAt: number,
+    observations = "",
+  ): {
+    id: string;
+    observations: string;
+    generation: number;
+    token_count: number;
+    created_at: number;
+    session_id: string;
+    r_compression: number | null;
+    c_norm: number | null;
+    source_ids: string[];
   } {
-    return { id, observations, generation, token_count: 100, created_at: createdAt, session_id: "sel-sess", r_compression: null, c_norm: null, source_ids: [] };
+    return {
+      id,
+      observations,
+      generation,
+      token_count: 100,
+      created_at: createdAt,
+      session_id: "sel-sess",
+      r_compression: null,
+      c_norm: null,
+      source_ids: [],
+    };
   }
 
   test("returns all when count <= limit", () => {
@@ -2726,7 +3391,9 @@ describe("selectDistillations", () => {
     expect(selected.some((d) => d.id === "g0-0")).toBe(false);
     // Result should be chronologically sorted.
     for (let i = 1; i < selected.length; i++) {
-      expect(selected[i]!.created_at).toBeGreaterThanOrEqual(selected[i - 1]!.created_at);
+      expect(selected[i]!.created_at).toBeGreaterThanOrEqual(
+        selected[i - 1]!.created_at,
+      );
     }
   });
 
@@ -2838,13 +3505,17 @@ describe("gradient — prefix/raw boundary role alternation (#424)", () => {
     resetDistillationSnapshot(SESSION_424);
     setModelLimits({ context: 10_000, output: 2_000 });
     calibrate(0);
-    db().query("DELETE FROM distillations WHERE project_id = ?").run(projectId424);
+    db()
+      .query("DELETE FROM distillations WHERE project_id = ?")
+      .run(projectId424);
   });
 
   afterAll(() => {
     setModelLimits({ context: 10_000, output: 2_000 });
     calibrate(0);
-    db().query("DELETE FROM distillations WHERE project_id = ?").run(projectId424);
+    db()
+      .query("DELETE FROM distillations WHERE project_id = ?")
+      .run(projectId424);
   });
 
   test("raw window after cutoff does not start with assistant when prefix is present", () => {
@@ -2882,16 +3553,9 @@ describe("gradient — prefix/raw boundary role alternation (#424)", () => {
     // (30 messages), we get ~7500 tokens of tool content + overhead.
     const messages: LoreMessageWithParts[] = [];
     for (let i = 0; i < 15; i++) {
+      messages.push(makeMsg(`u${i}`, "user", `Do step ${i}`, SESSION_424));
       messages.push(
-        makeMsg(`u${i}`, "user", `Do step ${i}`, SESSION_424),
-      );
-      messages.push(
-        makeToolAssistant(
-          `a${i}`,
-          "read",
-          `call-${i}`,
-          "x".repeat(1500),
-        ),
+        makeToolAssistant(`a${i}`, "read", `call-${i}`, "x".repeat(1500)),
       );
     }
     // Final user message (current turn)
@@ -2914,11 +3578,7 @@ describe("gradient — prefix/raw boundary role alternation (#424)", () => {
     for (let i = 1; i < result.messages.length; i++) {
       const prev = result.messages[i - 1];
       const curr = result.messages[i];
-      expect(
-        curr.info.role,
-      ).not.toBe(
-        prev.info.role,
-      );
+      expect(curr.info.role).not.toBe(prev.info.role);
     }
 
     // Additional: if the first message after the prefix is in the result,
@@ -2959,12 +3619,24 @@ describe("gradient — calibrated delta safety multiplier", () => {
     // Use base = 7520
     calibrate(7_520, SESSION, 10);
     const messages = Array.from({ length: 10 }, (_, i) =>
-      makeMsg(`ds-${i}`, i % 2 === 0 ? "user" : "assistant", "X".repeat(50), SESSION),
+      makeMsg(
+        `ds-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "X".repeat(50),
+        SESSION,
+      ),
     );
-    const withNew = [...messages, makeMsg("ds-new", "user", "Z".repeat(150), SESSION)];
+    const withNew = [
+      ...messages,
+      makeMsg("ds-new", "user", "Z".repeat(150), SESSION),
+    ];
     // Without 1.3x multiplier: 7520 + 70 = 7590 ≤ 7600 → would be layer 0
     // With 1.3x multiplier:    7520 + 91 = 7611 > 7600 → must escalate
-    const result = transform({ messages: withNew, projectPath: PROJECT, sessionID: SESSION });
+    const result = transform({
+      messages: withNew,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
     expect(result.layer).toBeGreaterThanOrEqual(1);
   });
 
@@ -2973,11 +3645,20 @@ describe("gradient — calibrated delta safety multiplier", () => {
     // Set lastKnownInput = 7650 — above the hard ceiling
     calibrate(7_650, SESSION, 10);
     const messages = Array.from({ length: 10 }, (_, i) =>
-      makeMsg(`hc-${i}`, i % 2 === 0 ? "user" : "assistant", "X".repeat(50), SESSION),
+      makeMsg(
+        `hc-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "X".repeat(50),
+        SESSION,
+      ),
     );
     // Even with a tiny new message, expectedInput ≈ 7650 + 33 = 7683 > 7600 → must escalate
     const withNew = [...messages, makeMsg("hc-new", "user", "hi", SESSION)];
-    const result = transform({ messages: withNew, projectPath: PROJECT, sessionID: SESSION });
+    const result = transform({
+      messages: withNew,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
     expect(result.layer).toBeGreaterThanOrEqual(1);
   });
 
@@ -2990,10 +3671,19 @@ describe("gradient — calibrated delta safety multiplier", () => {
     setCachePricing(0, 0); // no pricing → shouldCompress returns false
     calibrate(7_700, SESSION, 10);
     const messages = Array.from({ length: 10 }, (_, i) =>
-      makeMsg(`bg-${i}`, i % 2 === 0 ? "user" : "assistant", "X".repeat(50), SESSION),
+      makeMsg(
+        `bg-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "X".repeat(50),
+        SESSION,
+      ),
     );
     const withNew = [...messages, makeMsg("bg-new", "user", "hi", SESSION)];
-    const result = transform({ messages: withNew, projectPath: PROJECT, sessionID: SESSION });
+    const result = transform({
+      messages: withNew,
+      projectPath: PROJECT,
+      sessionID: SESSION,
+    });
     // Without hard ceiling margin, the tier gate would pass through at layer 0
     // because shouldCompress returns false (no pricing). With the margin,
     // 7700 > 7600 so the tier gate condition fails → compression is forced.
@@ -3021,7 +3711,12 @@ describe("gradient — error-state tool outputs are estimated (not flat 20)", ()
         mode: "build",
         path: { cwd: "/test", root: "/test" },
         cost: 0,
-        tokens: { input: 100, output: 50, reasoning: 0, cache: { read: 0, write: 0 } },
+        tokens: {
+          input: 100,
+          output: 50,
+          reasoning: 0,
+          cache: { read: 0, write: 0 },
+        },
       },
       parts: [
         {

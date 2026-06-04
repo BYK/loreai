@@ -16,10 +16,23 @@ import * as log from "./log";
 // Types
 // ---------------------------------------------------------------------------
 
-export type EntityType = "self" | "person" | "org" | "service" | "tool" | "repo" | "infra";
+export type EntityType =
+  | "self"
+  | "person"
+  | "org"
+  | "service"
+  | "tool"
+  | "repo"
+  | "infra";
 
 export const ENTITY_TYPES: readonly EntityType[] = [
-  "self", "person", "org", "service", "tool", "repo", "infra",
+  "self",
+  "person",
+  "org",
+  "service",
+  "tool",
+  "repo",
+  "infra",
 ] as const;
 
 export type AliasType =
@@ -76,8 +89,14 @@ export type RelationType =
   | "partner";
 
 export const RELATION_TYPES: readonly RelationType[] = [
-  "friend", "colleague", "manager", "report",
-  "collaborator", "client", "mentor", "partner",
+  "friend",
+  "colleague",
+  "manager",
+  "report",
+  "collaborator",
+  "client",
+  "mentor",
+  "partner",
 ] as const;
 
 export type EntityRelation = {
@@ -100,7 +119,11 @@ export type EntityRelationResolved = EntityRelation & {
 
 /** Entity types that default to cross-project (user-level). */
 const CROSS_PROJECT_TYPES: ReadonlySet<EntityType> = new Set([
-  "self", "person", "org", "service", "tool",
+  "self",
+  "person",
+  "org",
+  "service",
+  "tool",
 ]);
 
 /** Columns to SELECT for Entity — avoids pulling unnecessary data. */
@@ -144,7 +167,9 @@ export function create(input: {
   // Type-based cross_project defaults:
   // self/person/org/service/tool → cross-project (user-level)
   // repo/infra → project-scoped
-  const cross = input.crossProject ?? (CROSS_PROJECT_TYPES.has(input.entityType) ? true : pid === null);
+  const cross =
+    input.crossProject ??
+    (CROSS_PROJECT_TYPES.has(input.entityType) ? true : pid === null);
   const d = db();
 
   // Dedup + insert inside a transaction to avoid race conditions
@@ -155,20 +180,27 @@ export function create(input: {
           .query(
             `SELECT id, metadata FROM entities WHERE canonical_name = ? COLLATE NOCASE AND (project_id = ? OR project_id IS NULL)`,
           )
-          .get(input.canonicalName, pid) as { id: string; metadata: string | null } | null)
+          .get(input.canonicalName, pid) as {
+          id: string;
+          metadata: string | null;
+        } | null)
       : (d
           .query(
             `SELECT id, metadata FROM entities WHERE canonical_name = ? COLLATE NOCASE AND project_id IS NULL`,
           )
-          .get(input.canonicalName) as { id: string; metadata: string | null } | null);
+          .get(input.canonicalName) as {
+          id: string;
+          metadata: string | null;
+        } | null);
 
     if (existing) {
       // Merge metadata inside the transaction to avoid race conditions
       if (input.metadata && Object.keys(input.metadata).length > 0) {
         const merged = mergeMetadata(existing.metadata, input.metadata);
         if (merged) {
-          d.query("UPDATE entities SET metadata = ?, updated_at = ? WHERE id = ?")
-            .run(JSON.stringify(merged), Date.now(), existing.id);
+          d.query(
+            "UPDATE entities SET metadata = ?, updated_at = ? WHERE id = ?",
+          ).run(JSON.stringify(merged), Date.now(), existing.id);
         }
       }
       d.exec("COMMIT");
@@ -212,7 +244,11 @@ export function create(input: {
     d.exec("COMMIT");
     return { id, created: true };
   } catch (e) {
-    try { d.exec("ROLLBACK"); } catch { /* best-effort */ }
+    try {
+      d.exec("ROLLBACK");
+    } catch {
+      /* best-effort */
+    }
     throw e;
   }
 }
@@ -269,7 +305,9 @@ export function update(
 /** Delete an entity, its aliases, relations, and knowledge refs. */
 export function remove(id: string): void {
   db().query("DELETE FROM knowledge_entity_refs WHERE entity_id = ?").run(id);
-  db().query("DELETE FROM entity_relations WHERE entity_a = ? OR entity_b = ?").run(id, id);
+  db()
+    .query("DELETE FROM entity_relations WHERE entity_a = ? OR entity_b = ?")
+    .run(id, id);
   // Explicitly delete aliases BEFORE the entity so FTS5 content-sync triggers
   // fire correctly (CASCADE deletes do NOT fire AFTER DELETE triggers in SQLite).
   db().query("DELETE FROM entity_aliases WHERE entity_id = ?").run(id);
@@ -286,11 +324,15 @@ export function remove(id: string): void {
  */
 export function getSelfEntity(): EntityWithAliases | null {
   const row = db()
-    .query(`SELECT ${ENTITY_COLS} FROM entities WHERE entity_type = 'self' LIMIT 1`)
+    .query(
+      `SELECT ${ENTITY_COLS} FROM entities WHERE entity_type = 'self' LIMIT 1`,
+    )
     .get() as Entity | null;
   if (!row) return null;
   const aliases = db()
-    .query("SELECT * FROM entity_aliases WHERE entity_id = ? ORDER BY alias_type, alias_value")
+    .query(
+      "SELECT * FROM entity_aliases WHERE entity_id = ? ORDER BY alias_type, alias_value",
+    )
     .all(row.id) as EntityAlias[];
   return { ...row, aliases };
 }
@@ -302,7 +344,9 @@ export function getSelfEntity(): EntityWithAliases | null {
  *
  * Returns the self entity, or null if no identity could be determined.
  */
-export function ensureSelfEntity(projectPath: string): EntityWithAliases | null {
+export function ensureSelfEntity(
+  projectPath: string,
+): EntityWithAliases | null {
   const cfg = config().user;
   const git = getGitUser(projectPath);
 
@@ -314,13 +358,19 @@ export function ensureSelfEntity(projectPath: string): EntityWithAliases | null 
 
   if (existing) {
     // Update name if changed
-    const updates: { canonicalName?: string; metadata?: Record<string, unknown> } = {};
+    const updates: {
+      canonicalName?: string;
+      metadata?: Record<string, unknown>;
+    } = {};
     if (existing.canonical_name !== name) {
       updates.canonicalName = name;
     }
     // Merge config metadata into existing
     if (cfg?.metadata && Object.keys(cfg.metadata).length > 0) {
-      const merged = mergeMetadata(existing.metadata, cfg.metadata as Record<string, unknown>);
+      const merged = mergeMetadata(
+        existing.metadata,
+        cfg.metadata as Record<string, unknown>,
+      );
       if (merged) updates.metadata = merged;
     }
     if (Object.keys(updates).length > 0) {
@@ -338,11 +388,16 @@ export function ensureSelfEntity(projectPath: string): EntityWithAliases | null 
   }
 
   // Create self entity
-  const aliases: Array<{ type: AliasType; value: string; source?: string }> = [];
+  const aliases: Array<{ type: AliasType; value: string; source?: string }> =
+    [];
   if (email) aliases.push({ type: "email", value: email, source: "auto" });
   if (cfg?.aliases) {
     for (const a of cfg.aliases) {
-      aliases.push({ type: a.type as AliasType, value: a.value, source: "config" });
+      aliases.push({
+        type: a.type as AliasType,
+        value: a.value,
+        source: "config",
+      });
     }
   }
 
@@ -377,7 +432,9 @@ export function getWithAliases(id: string): EntityWithAliases | null {
   const entity = get(id);
   if (!entity) return null;
   const aliases = db()
-    .query("SELECT * FROM entity_aliases WHERE entity_id = ? ORDER BY alias_type, alias_value")
+    .query(
+      "SELECT * FROM entity_aliases WHERE entity_id = ? ORDER BY alias_type, alias_value",
+    )
     .all(id) as EntityAlias[];
   return { ...entity, aliases };
 }
@@ -398,7 +455,9 @@ export function mergeMetadata(
   if (!incoming || Object.keys(incoming).length === 0) {
     return existing ? (JSON.parse(existing) as Record<string, unknown>) : null;
   }
-  const base = existing ? (JSON.parse(existing) as Record<string, unknown>) : {};
+  const base = existing
+    ? (JSON.parse(existing) as Record<string, unknown>)
+    : {};
   // Start from incoming, then overlay existing non-empty values
   const merged: Record<string, unknown> = { ...incoming };
   for (const [k, v] of Object.entries(base)) {
@@ -419,7 +478,11 @@ function formatMetadataBrief(metadataJson: string | null): string {
     const m = JSON.parse(metadataJson) as Record<string, unknown>;
     const parts: string[] = [];
     if (typeof m.role === "string" && m.role) parts.push(m.role);
-    if (typeof m.description === "string" && m.description && m.description !== m.role) {
+    if (
+      typeof m.description === "string" &&
+      m.description &&
+      m.description !== m.role
+    ) {
       parts.push(`"${m.description}"`);
     }
     if (!parts.length) return "";
@@ -472,7 +535,9 @@ export function removeAlias(aliasId: string): void {
 /** Get all aliases for an entity. */
 export function getAliases(entityId: string): EntityAlias[] {
   return db()
-    .query("SELECT * FROM entity_aliases WHERE entity_id = ? ORDER BY alias_type, alias_value")
+    .query(
+      "SELECT * FROM entity_aliases WHERE entity_id = ? ORDER BY alias_type, alias_value",
+    )
     .all(entityId) as EntityAlias[];
 }
 
@@ -662,7 +727,9 @@ export function forProject(
 /** List all entities (no project filter). */
 export function listAll(): EntityWithAliases[] {
   const rows = db()
-    .query(`SELECT ${ENTITY_COLS} FROM entities ORDER BY entity_type, canonical_name`)
+    .query(
+      `SELECT ${ENTITY_COLS} FROM entities ORDER BY entity_type, canonical_name`,
+    )
     .all() as Entity[];
 
   return withAliases(rows);
@@ -758,18 +825,32 @@ export function merge(targetId: string, sourceId: string): void {
   try {
     // Move aliases from source to target (skip duplicates via OR IGNORE)
     const sourceAliases = d
-      .query("SELECT alias_type, alias_value, source FROM entity_aliases WHERE entity_id = ?")
-      .all(sourceId) as Array<{ alias_type: string; alias_value: string; source: string | null }>;
+      .query(
+        "SELECT alias_type, alias_value, source FROM entity_aliases WHERE entity_id = ?",
+      )
+      .all(sourceId) as Array<{
+      alias_type: string;
+      alias_value: string;
+      source: string | null;
+    }>;
 
     for (const a of sourceAliases) {
       try {
         d.query(
           `INSERT INTO entity_aliases (id, entity_id, alias_type, alias_value, source, created_at)
            VALUES (?, ?, ?, ?, ?, ?)`,
-        ).run(uuidv7(), targetId, a.alias_type, a.alias_value, a.source, Date.now());
+        ).run(
+          uuidv7(),
+          targetId,
+          a.alias_type,
+          a.alias_value,
+          a.source,
+          Date.now(),
+        );
       } catch (e: unknown) {
         // UNIQUE constraint — alias already exists on target, skip
-        if (!(e instanceof Error && /UNIQUE constraint/i.test(e.message))) throw e;
+        if (!(e instanceof Error && /UNIQUE constraint/i.test(e.message)))
+          throw e;
       }
     }
 
@@ -786,20 +867,31 @@ export function merge(targetId: string, sourceId: string): void {
       `UPDATE OR IGNORE entity_relations SET entity_b = ? WHERE entity_b = ?`,
     ).run(targetId, sourceId);
     // Clean up any remaining source relations (UNIQUE conflict → left behind by OR IGNORE)
-    d.query("DELETE FROM entity_relations WHERE entity_a = ? OR entity_b = ?").run(sourceId, sourceId);
+    d.query(
+      "DELETE FROM entity_relations WHERE entity_a = ? OR entity_b = ?",
+    ).run(sourceId, sourceId);
 
     // Delete source — explicit alias delete so FTS5 triggers fire
     // (CASCADE deletes don't fire AFTER DELETE triggers in SQLite)
-    d.query("DELETE FROM knowledge_entity_refs WHERE entity_id = ?").run(sourceId);
+    d.query("DELETE FROM knowledge_entity_refs WHERE entity_id = ?").run(
+      sourceId,
+    );
     d.query("DELETE FROM entity_aliases WHERE entity_id = ?").run(sourceId);
     d.query("DELETE FROM entities WHERE id = ?").run(sourceId);
 
     // Update target timestamp
-    d.query("UPDATE entities SET updated_at = ? WHERE id = ?").run(Date.now(), targetId);
+    d.query("UPDATE entities SET updated_at = ? WHERE id = ?").run(
+      Date.now(),
+      targetId,
+    );
 
     d.exec("COMMIT");
   } catch (e) {
-    try { d.exec("ROLLBACK"); } catch (rbErr) { log.info("merge rollback failed:", rbErr); }
+    try {
+      d.exec("ROLLBACK");
+    } catch (rbErr) {
+      log.info("merge rollback failed:", rbErr);
+    }
     throw e;
   }
 }
@@ -847,7 +939,9 @@ export function addRelation(
     return id;
   } catch (e: unknown) {
     if (e instanceof Error && /UNIQUE constraint/i.test(e.message)) {
-      log.info(`relation already exists: ${entityA} → ${entityB} (${relation})`);
+      log.info(
+        `relation already exists: ${entityA} → ${entityB} (${relation})`,
+      );
       return null;
     }
     throw e;
@@ -876,7 +970,13 @@ export function relationsFor(entityId: string): EntityRelationResolved[] {
        WHERE r.entity_a = ? OR r.entity_b = ?
        ORDER BY r.relation, other_name`,
     )
-    .all(entityId, entityId, entityId, entityId, entityId) as EntityRelationResolved[];
+    .all(
+      entityId,
+      entityId,
+      entityId,
+      entityId,
+      entityId,
+    ) as EntityRelationResolved[];
   return rows;
 }
 
@@ -897,7 +997,13 @@ export function getRelation(
            AND relation = ?
          LIMIT 1`,
       )
-      .get(entityA, entityB, entityB, entityA, relation) as EntityRelation | null;
+      .get(
+        entityA,
+        entityB,
+        entityB,
+        entityA,
+        relation,
+      ) as EntityRelation | null;
     return row ? [row] : [];
   }
   return db()
@@ -935,7 +1041,9 @@ export function linkKnowledge(knowledgeId: string, entityId: string): void {
   } catch (e: unknown) {
     // FK violation (entity or knowledge entry doesn't exist) — ignore
     if (e instanceof Error && /FOREIGN KEY/i.test(e.message)) {
-      log.info(`cannot link knowledge ${knowledgeId} to entity ${entityId}: FK violation`);
+      log.info(
+        `cannot link knowledge ${knowledgeId} to entity ${entityId}: FK violation`,
+      );
       return;
     }
     throw e;
@@ -945,7 +1053,9 @@ export function linkKnowledge(knowledgeId: string, entityId: string): void {
 /** Unlink a knowledge entry from an entity. */
 export function unlinkKnowledge(knowledgeId: string, entityId: string): void {
   db()
-    .query("DELETE FROM knowledge_entity_refs WHERE knowledge_id = ? AND entity_id = ?")
+    .query(
+      "DELETE FROM knowledge_entity_refs WHERE knowledge_id = ? AND entity_id = ?",
+    )
     .run(knowledgeId, entityId);
 }
 
@@ -1057,20 +1167,25 @@ export function formatForPrompt(entities: EntityWithAliases[]): string {
     group.push(e);
   }
 
-  const lines: string[] = ["Known entities (resolve ambiguous references using these):"];
+  const lines: string[] = [
+    "Known entities (resolve ambiguous references using these):",
+  ];
   for (const [type, items] of Object.entries(grouped)) {
     lines.push(`  ${type}:`);
     for (const e of items) {
       const aliasStrs = e.aliases
         .filter((a) => a.alias_value !== e.canonical_name) // skip canonical dupe
         .map((a) => `${a.alias_type}:${a.alias_value}`);
-      const aliasInfo = aliasStrs.length ? ` (aliases: ${aliasStrs.join(", ")})` : "";
+      const aliasInfo = aliasStrs.length
+        ? ` (aliases: ${aliasStrs.join(", ")})`
+        : "";
 
       // Self-entity marker
       const selfMarker = e.entity_type === "self" ? " — you (the user)" : "";
 
       // Metadata brief (role/description)
-      const metaInfo = e.entity_type === "self" ? "" : formatMetadataBrief(e.metadata);
+      const metaInfo =
+        e.entity_type === "self" ? "" : formatMetadataBrief(e.metadata);
 
       // Relationship tags from self entity (e.g. [friend])
       const relTags = selfRelMap.get(e.id);
@@ -1098,7 +1213,9 @@ export function formatForPrompt(entities: EntityWithAliases[]): string {
  */
 export function syncEntityRefs(knowledgeId: string, content: string): number {
   // Clear existing refs for this knowledge entry
-  db().query("DELETE FROM knowledge_entity_refs WHERE knowledge_id = ?").run(knowledgeId);
+  db()
+    .query("DELETE FROM knowledge_entity_refs WHERE knowledge_id = ?")
+    .run(knowledgeId);
 
   // Get all entities for fast matching
   const allEntities = db()
@@ -1120,14 +1237,20 @@ export function syncEntityRefs(knowledgeId: string, content: string): number {
 
   // Check canonical names
   for (const e of allEntities) {
-    if (e.canonical_name.length >= MIN_MATCH_LEN && contentLower.includes(e.canonical_name.toLowerCase())) {
+    if (
+      e.canonical_name.length >= MIN_MATCH_LEN &&
+      contentLower.includes(e.canonical_name.toLowerCase())
+    ) {
       linkedEntityIds.add(e.id);
     }
   }
 
   // Check aliases
   for (const a of allAliases) {
-    if (a.alias_value.length >= MIN_MATCH_LEN && contentLower.includes(a.alias_value.toLowerCase())) {
+    if (
+      a.alias_value.length >= MIN_MATCH_LEN &&
+      contentLower.includes(a.alias_value.toLowerCase())
+    ) {
       linkedEntityIds.add(a.entity_id);
     }
   }
@@ -1162,21 +1285,41 @@ export function syncEntityRefs(knowledgeId: string, content: string): number {
 export function findDuplicateCandidates(
   projectPath?: string,
   maxCandidates = 50,
-): Array<{ entity1: EntityWithAliases; entity2: EntityWithAliases; reason: string }> {
+): Array<{
+  entity1: EntityWithAliases;
+  entity2: EntityWithAliases;
+  reason: string;
+}> {
   const entities = projectPath ? forProject(projectPath) : listAll();
-  const candidates: Array<{ entity1: EntityWithAliases; entity2: EntityWithAliases; reason: string }> = [];
+  const candidates: Array<{
+    entity1: EntityWithAliases;
+    entity2: EntityWithAliases;
+    reason: string;
+  }> = [];
   const seen = new Set<string>();
 
-  for (let i = 0; i < entities.length && candidates.length < maxCandidates; i++) {
-    for (let j = i + 1; j < entities.length && candidates.length < maxCandidates; j++) {
+  for (
+    let i = 0;
+    i < entities.length && candidates.length < maxCandidates;
+    i++
+  ) {
+    for (
+      let j = i + 1;
+      j < entities.length && candidates.length < maxCandidates;
+      j++
+    ) {
       const e1 = entities[i];
       const e2 = entities[j];
       const pairKey = `${e1.id}:${e2.id}`;
       if (seen.has(pairKey)) continue;
 
       // Check alias overlap
-      const aliases1 = new Set(e1.aliases.map((a) => a.alias_value.toLowerCase()));
-      const aliases2 = new Set(e2.aliases.map((a) => a.alias_value.toLowerCase()));
+      const aliases1 = new Set(
+        e1.aliases.map((a) => a.alias_value.toLowerCase()),
+      );
+      const aliases2 = new Set(
+        e2.aliases.map((a) => a.alias_value.toLowerCase()),
+      );
       const overlap = [...aliases1].filter((a) => aliases2.has(a));
       if (overlap.length > 0) {
         seen.add(pairKey);

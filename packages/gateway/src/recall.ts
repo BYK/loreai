@@ -103,7 +103,11 @@ export function labelToScope(label: string): RecallScope {
  * Format: `📚 Searching <scope-label> for "<query>"…`
  * When `id` is provided (detail lookup), uses: `📚 Fetching detail for <id>…`
  */
-export function buildRecallMarker(query: string, scope: string = "all", id?: string): string {
+export function buildRecallMarker(
+  query: string,
+  scope: string = "all",
+  id?: string,
+): string {
   if (id) return `📚 Fetching detail for ${id}…`;
   return `📚 Searching ${scopeToLabel(scope)} for "${query}"…`;
 }
@@ -140,7 +144,11 @@ export function parseRecallMarker(
 }
 
 /** Derive a store key from query + scope, or from id for detail lookups. */
-export function recallStoreKey(query: string, scope: string = "all", id?: string): string {
+export function recallStoreKey(
+  query: string,
+  scope: string = "all",
+  id?: string,
+): string {
   if (id) return `id:${id}`;
   return `${scope}:${query}`;
 }
@@ -173,7 +181,8 @@ export function expandRecallMarkers(
     // We process one marker per assistant message per pass; the outer
     // loop will revisit if there's more than one (rare).
     let markerIdx = -1;
-    let parsed: { query: string; scope: RecallScope; id?: string } | null = null;
+    let parsed: { query: string; scope: RecallScope; id?: string } | null =
+      null;
     for (let j = 0; j < msg.content.length; j++) {
       const block = msg.content[j];
       if (block.type !== "text") continue;
@@ -195,8 +204,8 @@ export function expandRecallMarkers(
     // (text blocks) into the same assistant message. Tool_use blocks after
     // the marker are from the same turn (mixed tools) and stay together.
     const afterMarker = msg.content.slice(markerIdx + 1);
-    const hasContinuationAfter = afterMarker.length > 0 &&
-      afterMarker.some((b) => b.type !== "tool_use");
+    const hasContinuationAfter =
+      afterMarker.length > 0 && afterMarker.some((b) => b.type !== "tool_use");
 
     // Replace marker with tool_use
     msg.content[markerIdx] = {
@@ -348,7 +357,10 @@ export async function executeRecall(
   projectPath: string,
   sessionID: string,
   llm?: LLMClient,
-): Promise<{ result: string; input: { query: string; scope?: RecallScope; id?: string } }> {
+): Promise<{
+  result: string;
+  input: { query: string; scope?: RecallScope; id?: string };
+}> {
   const { query, scope, id } = parseRecallInput(block);
   const cfg = loreConfig();
 
@@ -416,7 +428,8 @@ export function buildRecallFollowUp(
   // allow-list so future block types (e.g. redacted_thinking) are preserved
   // by default.
   const prefixBlocks = resp.content.filter(
-    (b) => b.type !== "text" && b.type !== "tool_use" && b.type !== "tool_result",
+    (b) =>
+      b.type !== "text" && b.type !== "tool_use" && b.type !== "tool_result",
   );
 
   const assistantMessage: GatewayMessage = {
@@ -438,7 +451,9 @@ export function buildRecallFollowUp(
       {
         type: "tool_result",
         toolUseId: recallToolUseBlock.id,
-        content: [{ type: "text", text: recallResult || "[No results found.]" }],
+        content: [
+          { type: "text", text: recallResult || "[No results found.]" },
+        ],
       },
     ],
   };
@@ -450,11 +465,7 @@ export function buildRecallFollowUp(
     // a streaming client request would forward stream:true to the upstream,
     // which returns SSE — causing a JSON parse crash.
     stream: false,
-    messages: [
-      ...originalReq.messages,
-      assistantMessage,
-      resultMessage,
-    ],
+    messages: [...originalReq.messages, assistantMessage, resultMessage],
   };
 }
 
@@ -478,8 +489,12 @@ export function replaceRecallWithMarker(
         const input = b.input as Record<string, unknown>;
         const query = typeof input.query === "string" ? input.query : "";
         const scope = (input.scope as string) ?? "all";
-        const id = typeof input.id === "string" && input.id ? input.id : undefined;
-        return { type: "text" as const, text: buildRecallMarker(query, scope, id) };
+        const id =
+          typeof input.id === "string" && input.id ? input.id : undefined;
+        return {
+          type: "text" as const,
+          text: buildRecallMarker(query, scope, id),
+        };
       }
       return b;
     }),

@@ -15,7 +15,10 @@ import type { GatewayConfig } from "../src/config";
  * Replicate the hosted mode override logic from startGateway() so we can
  * test it without spinning up a real server.
  */
-function applyHostedModeOverrides(config: GatewayConfig, opts: StartOptions): GatewayConfig {
+function applyHostedModeOverrides(
+  config: GatewayConfig,
+  opts: StartOptions,
+): GatewayConfig {
   if (opts.local !== undefined) {
     config.hostedMode = !opts.local;
   } else if (!process.env.LORE_HOSTED_MODE) {

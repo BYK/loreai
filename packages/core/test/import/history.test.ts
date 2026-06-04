@@ -19,7 +19,12 @@ describe("import history", () => {
 
   describe("isImported", () => {
     test("returns null for unknown source", () => {
-      const result = isImported(PROJECT_PATH, "test-agent", "unknown-source", "hash1");
+      const result = isImported(
+        PROJECT_PATH,
+        "test-agent",
+        "unknown-source",
+        "hash1",
+      );
       expect(result).toBeNull();
     });
 
@@ -29,7 +34,12 @@ describe("import history", () => {
         updated: 1,
       });
 
-      const result = isImported(PROJECT_PATH, "test-agent", "source-1", "hash-abc");
+      const result = isImported(
+        PROJECT_PATH,
+        "test-agent",
+        "source-1",
+        "hash-abc",
+      );
       expect(result).not.toBeNull();
       expect(result!.agent_name).toBe("test-agent");
       expect(result!.source_id).toBe("source-1");
@@ -39,19 +49,30 @@ describe("import history", () => {
 
     test("returns null when hash differs (source changed)", () => {
       // source-1 was recorded with hash-abc above
-      const result = isImported(PROJECT_PATH, "test-agent", "source-1", "hash-xyz");
+      const result = isImported(
+        PROJECT_PATH,
+        "test-agent",
+        "source-1",
+        "hash-xyz",
+      );
       expect(result).toBeNull();
     });
   });
 
   describe("recordImport", () => {
     test("upserts on re-import (different hash)", () => {
-      recordImport(PROJECT_PATH, "agent-x", "src-1", "v1", { created: 2, updated: 0 });
+      recordImport(PROJECT_PATH, "agent-x", "src-1", "v1", {
+        created: 2,
+        updated: 0,
+      });
       const r1 = isImported(PROJECT_PATH, "agent-x", "src-1", "v1");
       expect(r1).not.toBeNull();
 
       // Re-import with different hash (source grew)
-      recordImport(PROJECT_PATH, "agent-x", "src-1", "v2", { created: 1, updated: 1 });
+      recordImport(PROJECT_PATH, "agent-x", "src-1", "v2", {
+        created: 1,
+        updated: 1,
+      });
       const r2 = isImported(PROJECT_PATH, "agent-x", "src-1", "v2");
       expect(r2).not.toBeNull();
       expect(r2!.entries_created).toBe(1);
@@ -66,8 +87,14 @@ describe("import history", () => {
       const LIST_PROJECT = "/test/list-project";
       ensureProject(LIST_PROJECT);
 
-      recordImport(LIST_PROJECT, "agent-a", "src-a", "h1", { created: 5, updated: 0 });
-      recordImport(LIST_PROJECT, "agent-b", "src-b", "h2", { created: 2, updated: 1 });
+      recordImport(LIST_PROJECT, "agent-a", "src-a", "h1", {
+        created: 5,
+        updated: 0,
+      });
+      recordImport(LIST_PROJECT, "agent-b", "src-b", "h2", {
+        created: 2,
+        updated: 1,
+      });
 
       const imports = listImports(LIST_PROJECT);
       expect(imports.length).toBe(2);
@@ -86,7 +113,10 @@ describe("import history", () => {
     });
 
     test("true after a real import; sibling agent unaffected", () => {
-      recordImport(P, "claude-code", "sess-1", "h1", { created: 1, updated: 0 });
+      recordImport(P, "claude-code", "sess-1", "h1", {
+        created: 1,
+        updated: 0,
+      });
       expect(hasAgentImportRecord(P, "claude-code")).toBe(true);
       expect(hasAgentImportRecord(P, "codex")).toBe(false);
     });
@@ -131,12 +161,17 @@ describe("import history", () => {
       expect(hasAgentImportRecord(CP, "claude-code")).toBe(true);
 
       // Real import after sentinel (mirrors the accept path in auto-import)
-      recordImport(CP, "claude-code", "sess-1", "h1", { created: 3, updated: 1 });
+      recordImport(CP, "claude-code", "sess-1", "h1", {
+        created: 3,
+        updated: 1,
+      });
       expect(hasAgentImportRecord(CP, "claude-code")).toBe(true);
 
       // listImports shows only the real import, not the sentinel
       const imports = listImports(CP);
-      const agentImports = imports.filter((r) => r.agent_name === "claude-code");
+      const agentImports = imports.filter(
+        (r) => r.agent_name === "claude-code",
+      );
       expect(agentImports.length).toBe(1);
       expect(agentImports[0].source_id).toBe("sess-1");
     });
@@ -144,14 +179,30 @@ describe("import history", () => {
 
   describe("computeHash", () => {
     test("produces consistent hashes", () => {
-      const h1 = computeHash({ size: 100, messageCount: 10, lastTimestamp: 1234 });
-      const h2 = computeHash({ size: 100, messageCount: 10, lastTimestamp: 1234 });
+      const h1 = computeHash({
+        size: 100,
+        messageCount: 10,
+        lastTimestamp: 1234,
+      });
+      const h2 = computeHash({
+        size: 100,
+        messageCount: 10,
+        lastTimestamp: 1234,
+      });
       expect(h1).toBe(h2);
     });
 
     test("produces different hashes for different inputs", () => {
-      const h1 = computeHash({ size: 100, messageCount: 10, lastTimestamp: 1234 });
-      const h2 = computeHash({ size: 100, messageCount: 11, lastTimestamp: 1234 });
+      const h1 = computeHash({
+        size: 100,
+        messageCount: 10,
+        lastTimestamp: 1234,
+      });
+      const h2 = computeHash({
+        size: 100,
+        messageCount: 11,
+        lastTimestamp: 1234,
+      });
       expect(h1).not.toBe(h2);
     });
 

@@ -28,8 +28,7 @@ const GITHUB_OWNER = "BYK";
 const GITHUB_REPO = "loreai";
 
 /** GitHub API base URL for releases */
-export const GITHUB_RELEASES_URL =
-  `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases`;
+export const GITHUB_RELEASES_URL = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases`;
 
 /** Known directories where the curl installer may place the binary */
 export const KNOWN_CURL_DIRS = [".local/bin", "bin", ".lore/bin"];

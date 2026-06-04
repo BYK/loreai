@@ -14,7 +14,10 @@
 import { DEFAULT_PORT, type GatewayConfig } from "./config";
 import { bootstrapDailySpend, getDailyBudget } from "./cost-tracker";
 import type { GatewayRequest } from "./translate/types";
-import { parseAnthropicRequest, parseAnthropicResponseJSON } from "./translate/anthropic";
+import {
+  parseAnthropicRequest,
+  parseAnthropicResponseJSON,
+} from "./translate/anthropic";
 import { parseOpenAIRequest, buildOpenAIResponse } from "./translate/openai";
 import { translateAnthropicStreamToOpenAI } from "./stream/openai";
 import {
@@ -22,7 +25,11 @@ import {
   buildOpenAIResponsesResponse,
 } from "./translate/openai-responses";
 import { translateAnthropicStreamToResponses } from "./stream/openai-responses";
-import { handleRequest, handleCompactEndpoint, accumulateResponsesNonStreamJSON } from "./pipeline";
+import {
+  handleRequest,
+  handleCompactEndpoint,
+  accumulateResponsesNonStreamJSON,
+} from "./pipeline";
 
 // ---------------------------------------------------------------------------
 // Version — best-effort from package.json, falls back gracefully
@@ -168,11 +175,16 @@ async function handleAnthropicMessages(
 // calling GET /v1/models will have their request forwarded to Anthropic,
 // which will likely reject the OpenAI API key. A proper fix would route
 // based on auth header type, but that's a separate enhancement.
-async function handleModelsPassthrough(req: Request, config: GatewayConfig): Promise<Response> {
+async function handleModelsPassthrough(
+  req: Request,
+  config: GatewayConfig,
+): Promise<Response> {
   try {
     // Forward auth headers from the original request so upstream
     // providers that require authentication don't reject with 401.
-    const headers: Record<string, string> = { "content-type": "application/json" };
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+    };
     const apiKey = req.headers.get("x-api-key");
     const auth = req.headers.get("authorization");
     if (apiKey) headers["x-api-key"] = apiKey;
@@ -244,7 +256,9 @@ async function handleOpenAIChatCompletions(
 
   // Non-streaming: translate Anthropic wire JSON → GatewayResponse → OpenAI
   const respBody = await pipelineResp.json();
-  const gatewayResp = parseAnthropicResponseJSON(respBody as Record<string, unknown>);
+  const gatewayResp = parseAnthropicResponseJSON(
+    respBody as Record<string, unknown>,
+  );
   return withCors(buildOpenAIResponse(gatewayResp, false));
 }
 
@@ -261,7 +275,10 @@ async function handleOpenAIResponses(
 
   let gatewayReq: GatewayRequest;
   try {
-    gatewayReq = parseOpenAIResponsesRequest(body, headersToRecord(req.headers));
+    gatewayReq = parseOpenAIResponsesRequest(
+      body,
+      headersToRecord(req.headers),
+    );
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Failed to parse request";
     return errorResponse(400, "invalid_request_error", msg);
@@ -305,8 +322,9 @@ async function handleOpenAIResponses(
   // go through accumulate→nonStreamHttpResponse) or raw OpenAI Responses API JSON
   // (meta/passthrough requests forward the upstream response as-is). Detect which
   // format we received and parse accordingly.
-  const respBody = await pipelineResp.json() as Record<string, unknown>;
-  const isRawResponsesFormat = respBody.object === "response" && Array.isArray(respBody.output);
+  const respBody = (await pipelineResp.json()) as Record<string, unknown>;
+  const isRawResponsesFormat =
+    respBody.object === "response" && Array.isArray(respBody.output);
   const gatewayResp = isRawResponsesFormat
     ? accumulateResponsesNonStreamJSON(respBody)
     : parseAnthropicResponseJSON(respBody);
@@ -421,7 +439,11 @@ export function startServer(config: GatewayConfig): {
       }
 
       // 404 for everything else
-      return errorResponse(404, "not_found", `No route for ${method} ${pathname}`);
+      return errorResponse(
+        404,
+        "not_found",
+        `No route for ${method} ${pathname}`,
+      );
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Internal server error";
       console.error(`[lore] uncaught error: ${msg}`);
@@ -460,8 +482,9 @@ export function startServer(config: GatewayConfig): {
     stop: () => servers.forEach((s) => s.stop()),
     port: resolvedPort,
     hosts: config.hosts,
-    ready: readyPromises.length > 0
-      ? Promise.all(readyPromises).then(() => {})
-      : undefined,
+    ready:
+      readyPromises.length > 0
+        ? Promise.all(readyPromises).then(() => {})
+        : undefined,
   };
 }

@@ -151,9 +151,7 @@ export function filterTerms(raw: string): string[] {
     .split(/\s+/)
     .filter(Boolean);
 
-  return words.filter(
-    (w) => w.length > 1 && !STOPWORDS.has(w.toLowerCase()),
-  );
+  return words.filter((w) => w.length > 1 && !STOPWORDS.has(w.toLowerCase()));
 }
 
 /**
@@ -414,9 +412,19 @@ export async function expandQuery(
         QUERY_EXPANSION_SYSTEM,
         `Input: "${query}"`,
         // temperature: 0 trades expansion diversity for eval reproducibility
-        { model, workerID: "lore-query-expand", thinking: false, urgent: true, sessionID, maxTokens: 256, temperature: 0 },
+        {
+          model,
+          workerID: "lore-query-expand",
+          thinking: false,
+          urgent: true,
+          sessionID,
+          maxTokens: 256,
+          temperature: 0,
+        },
       ),
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), TIMEOUT_MS)),
+      new Promise<null>((resolve) =>
+        setTimeout(() => resolve(null), TIMEOUT_MS),
+      ),
     ]);
 
     if (!responseText) {

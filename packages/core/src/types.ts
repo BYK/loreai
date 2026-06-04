@@ -157,7 +157,11 @@ export type LoreToolPart = {
  *
  * For type-safe narrowing, use `isToolPart()` / `isTextPart()` helpers below.
  */
-export type LorePart = LoreTextPart | LoreReasoningPart | LoreToolPart | LoreGenericPart;
+export type LorePart =
+  | LoreTextPart
+  | LoreReasoningPart
+  | LoreToolPart
+  | LoreGenericPart;
 
 /**
  * Passthrough for host-specific part types that Lore doesn't process.

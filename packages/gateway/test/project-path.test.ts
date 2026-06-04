@@ -1,5 +1,14 @@
 import { describe, test, expect } from "bun:test";
-import { inferProjectPath, getProjectPath, extractGitRemoteHeader, extractProjectHeader, unattributedBucketPath, isUnattributedPath, UNATTRIBUTED_PREFIX, type GatewayConfig } from "../src/config";
+import {
+  inferProjectPath,
+  getProjectPath,
+  extractGitRemoteHeader,
+  extractProjectHeader,
+  unattributedBucketPath,
+  isUnattributedPath,
+  UNATTRIBUTED_PREFIX,
+  type GatewayConfig,
+} from "../src/config";
 import { resolveSessionProjectPath } from "../src/pipeline";
 import { ensureProject, projectId, ltm } from "@loreai/core";
 
@@ -100,31 +109,41 @@ describe("inferProjectPath", () => {
   });
 
   test("extracts path from cwd field with /var/home/ prefix", () => {
-    expect(inferProjectPath('"cwd": "/var/home/user/project"')).toBe("/var/home/user/project");
+    expect(inferProjectPath('"cwd": "/var/home/user/project"')).toBe(
+      "/var/home/user/project",
+    );
   });
 
   test("extracts path from cwd field with /nix/store/ prefix", () => {
-    expect(inferProjectPath('"cwd": "/nix/store/abc/project"')).toBe("/nix/store/abc/project");
+    expect(inferProjectPath('"cwd": "/nix/store/abc/project"')).toBe(
+      "/nix/store/abc/project",
+    );
   });
 
   test("extracts path from Working directory with /root/ prefix", () => {
-    expect(inferProjectPath("Working directory: /root/my-app")).toBe("/root/my-app");
+    expect(inferProjectPath("Working directory: /root/my-app")).toBe(
+      "/root/my-app",
+    );
   });
 
   test("extracts path from Working directory with /data/ prefix (Termux)", () => {
-    expect(inferProjectPath("Working directory: /data/data/com.termux/files/home/project")).toBe(
-      "/data/data/com.termux/files/home/project",
-    );
+    expect(
+      inferProjectPath(
+        "Working directory: /data/data/com.termux/files/home/project",
+      ),
+    ).toBe("/data/data/com.termux/files/home/project");
   });
 
   test("extracts directory from CLAUDE.md with /root/ path", () => {
-    expect(inferProjectPath("Instructions from: /root/project/CLAUDE.md")).toBe("/root/project");
+    expect(inferProjectPath("Instructions from: /root/project/CLAUDE.md")).toBe(
+      "/root/project",
+    );
   });
 
   test("extracts directory from AGENTS.md with /nix/store/ path", () => {
-    expect(inferProjectPath("Instructions from: /nix/store/abc/project/AGENTS.md")).toBe(
-      "/nix/store/abc/project",
-    );
+    expect(
+      inferProjectPath("Instructions from: /nix/store/abc/project/AGENTS.md"),
+    ).toBe("/nix/store/abc/project");
   });
 
   test("generic fallback still requires /home/ or /Users/", () => {
@@ -170,83 +189,79 @@ describe("getProjectPath", () => {
   });
 
   test("ignores empty X-Lore-Project header", () => {
-    const result = getProjectPath(
-      `Working directory: /home/user/project`,
-      { "x-lore-project": "" },
-    );
+    const result = getProjectPath(`Working directory: /home/user/project`, {
+      "x-lore-project": "",
+    });
     expect(result.path).toBe("/home/user/project");
     expect(result.source).toBe("inferred");
     expect(result.gitRemote).toBeUndefined();
   });
 
   test("sanitizes control characters from X-Lore-Project header", () => {
-    const result = getProjectPath("", { "x-lore-project": "/home/user/project\n" });
+    const result = getProjectPath("", {
+      "x-lore-project": "/home/user/project\n",
+    });
     expect(result.path).toBe("/home/user/project");
     expect(result.source).toBe("header");
   });
 
   test("rejects non-absolute X-Lore-Project header, falls through to inference", () => {
-    const result = getProjectPath(
-      "Working directory: /home/user/project",
-      { "x-lore-project": "relative/path" },
-    );
+    const result = getProjectPath("Working directory: /home/user/project", {
+      "x-lore-project": "relative/path",
+    });
     expect(result.source).toBe("inferred");
   });
 
   test("strips trailing slashes from X-Lore-Project header", () => {
-    const result = getProjectPath("", { "x-lore-project": "/home/user/project///" });
+    const result = getProjectPath("", {
+      "x-lore-project": "/home/user/project///",
+    });
     expect(result.path).toBe("/home/user/project");
     expect(result.source).toBe("header");
   });
 
   test("rejects X-Lore-Project header exceeding 1024 characters", () => {
     const longPath = "/" + "a".repeat(1030);
-    const result = getProjectPath(
-      "Working directory: /home/user/project",
-      { "x-lore-project": longPath },
-    );
+    const result = getProjectPath("Working directory: /home/user/project", {
+      "x-lore-project": longPath,
+    });
     expect(result.source).toBe("inferred");
   });
 
   test("extracts and normalizes X-Lore-Git-Remote header (HTTPS)", () => {
-    const result = getProjectPath(
-      `Working directory: /home/user/project`,
-      { "x-lore-git-remote": "https://github.com/org/repo.git" },
-    );
+    const result = getProjectPath(`Working directory: /home/user/project`, {
+      "x-lore-git-remote": "https://github.com/org/repo.git",
+    });
     expect(result.path).toBe("/home/user/project");
     expect(result.source).toBe("inferred");
     expect(result.gitRemote).toBe("github.com/org/repo");
   });
 
   test("extracts and normalizes X-Lore-Git-Remote header (SSH)", () => {
-    const result = getProjectPath(
-      `Working directory: /home/user/project`,
-      { "x-lore-git-remote": "git@github.com:org/repo.git" },
-    );
+    const result = getProjectPath(`Working directory: /home/user/project`, {
+      "x-lore-git-remote": "git@github.com:org/repo.git",
+    });
     expect(result.gitRemote).toBe("github.com/org/repo");
   });
 
   test("extracts and normalizes X-Lore-Git-Remote header (already normalized)", () => {
-    const result = getProjectPath(
-      `Working directory: /home/user/project`,
-      { "x-lore-git-remote": "github.com/org/repo" },
-    );
+    const result = getProjectPath(`Working directory: /home/user/project`, {
+      "x-lore-git-remote": "github.com/org/repo",
+    });
     expect(result.gitRemote).toBe("github.com/org/repo");
   });
 
   test("trims whitespace from X-Lore-Git-Remote header", () => {
-    const result = getProjectPath(
-      `Working directory: /home/user/project`,
-      { "x-lore-git-remote": "  https://github.com/org/repo.git  " },
-    );
+    const result = getProjectPath(`Working directory: /home/user/project`, {
+      "x-lore-git-remote": "  https://github.com/org/repo.git  ",
+    });
     expect(result.gitRemote).toBe("github.com/org/repo");
   });
 
   test("ignores empty X-Lore-Git-Remote header", () => {
-    const result = getProjectPath(
-      `Working directory: /home/user/project`,
-      { "x-lore-git-remote": "" },
-    );
+    const result = getProjectPath(`Working directory: /home/user/project`, {
+      "x-lore-git-remote": "",
+    });
     expect(result.gitRemote).toBeUndefined();
   });
 
@@ -286,32 +301,40 @@ describe("extractProjectHeader", () => {
   });
 
   test("extracts valid absolute path", () => {
-    expect(extractProjectHeader({ "x-lore-project": "/home/user/project" }))
-      .toBe("/home/user/project");
+    expect(
+      extractProjectHeader({ "x-lore-project": "/home/user/project" }),
+    ).toBe("/home/user/project");
   });
 
   test("strips control characters", () => {
-    expect(extractProjectHeader({ "x-lore-project": "/home/user/project\n" }))
-      .toBe("/home/user/project");
+    expect(
+      extractProjectHeader({ "x-lore-project": "/home/user/project\n" }),
+    ).toBe("/home/user/project");
   });
 
   test("strips carriage return and null bytes", () => {
-    expect(extractProjectHeader({ "x-lore-project": "/home/user/project\r\0" }))
-      .toBe("/home/user/project");
+    expect(
+      extractProjectHeader({ "x-lore-project": "/home/user/project\r\0" }),
+    ).toBe("/home/user/project");
   });
 
   test("rejects non-absolute path", () => {
-    expect(extractProjectHeader({ "x-lore-project": "relative/path" })).toBeUndefined();
+    expect(
+      extractProjectHeader({ "x-lore-project": "relative/path" }),
+    ).toBeUndefined();
   });
 
   test("strips trailing slashes", () => {
-    expect(extractProjectHeader({ "x-lore-project": "/home/user/project///" }))
-      .toBe("/home/user/project");
+    expect(
+      extractProjectHeader({ "x-lore-project": "/home/user/project///" }),
+    ).toBe("/home/user/project");
   });
 
   test("rejects values exceeding 1024 characters", () => {
     const longPath = "/" + "a".repeat(1030);
-    expect(extractProjectHeader({ "x-lore-project": longPath })).toBeUndefined();
+    expect(
+      extractProjectHeader({ "x-lore-project": longPath }),
+    ).toBeUndefined();
   });
 
   test("accepts values at exactly 1024 characters", () => {
@@ -320,13 +343,15 @@ describe("extractProjectHeader", () => {
   });
 
   test("trims whitespace before validation", () => {
-    expect(extractProjectHeader({ "x-lore-project": "  /home/user/project  " }))
-      .toBe("/home/user/project");
+    expect(
+      extractProjectHeader({ "x-lore-project": "  /home/user/project  " }),
+    ).toBe("/home/user/project");
   });
 
   test("accepts /root/ paths", () => {
-    expect(extractProjectHeader({ "x-lore-project": "/root/project" }))
-      .toBe("/root/project");
+    expect(extractProjectHeader({ "x-lore-project": "/root/project" })).toBe(
+      "/root/project",
+    );
   });
 });
 
@@ -344,46 +369,65 @@ describe("extractGitRemoteHeader", () => {
   });
 
   test("returns undefined for whitespace-only header", () => {
-    expect(extractGitRemoteHeader({ "x-lore-git-remote": "   " })).toBeUndefined();
+    expect(
+      extractGitRemoteHeader({ "x-lore-git-remote": "   " }),
+    ).toBeUndefined();
   });
 
   test("normalizes HTTPS URL", () => {
-    expect(extractGitRemoteHeader({ "x-lore-git-remote": "https://github.com/org/repo.git" }))
-      .toBe("github.com/org/repo");
+    expect(
+      extractGitRemoteHeader({
+        "x-lore-git-remote": "https://github.com/org/repo.git",
+      }),
+    ).toBe("github.com/org/repo");
   });
 
   test("normalizes SSH URL", () => {
-    expect(extractGitRemoteHeader({ "x-lore-git-remote": "git@github.com:org/repo.git" }))
-      .toBe("github.com/org/repo");
+    expect(
+      extractGitRemoteHeader({
+        "x-lore-git-remote": "git@github.com:org/repo.git",
+      }),
+    ).toBe("github.com/org/repo");
   });
 
   test("strips control characters (newline injection)", () => {
     // After stripping \n, the result is "github.com/org/repoX-Api-Key: stolen"
     // which normalizeRemoteUrl lowercases the host part only.
     // The key point: the newline is gone, preventing header injection.
-    expect(extractGitRemoteHeader({ "x-lore-git-remote": "github.com/org/repo\nX-Api-Key: stolen" }))
-      .toBe("github.com/org/repoX-Api-Key: stolen");
+    expect(
+      extractGitRemoteHeader({
+        "x-lore-git-remote": "github.com/org/repo\nX-Api-Key: stolen",
+      }),
+    ).toBe("github.com/org/repoX-Api-Key: stolen");
   });
 
   test("strips carriage return and null bytes", () => {
-    expect(extractGitRemoteHeader({ "x-lore-git-remote": "github.com/org/repo\r\0" }))
-      .toBe("github.com/org/repo");
+    expect(
+      extractGitRemoteHeader({
+        "x-lore-git-remote": "github.com/org/repo\r\0",
+      }),
+    ).toBe("github.com/org/repo");
   });
 
   test("rejects values exceeding 512 characters", () => {
     const longValue = "github.com/" + "a".repeat(510);
-    expect(extractGitRemoteHeader({ "x-lore-git-remote": longValue })).toBeUndefined();
+    expect(
+      extractGitRemoteHeader({ "x-lore-git-remote": longValue }),
+    ).toBeUndefined();
   });
 
   test("accepts values at exactly 512 characters", () => {
     const value = "github.com/" + "a".repeat(501); // 512 total
-    expect(extractGitRemoteHeader({ "x-lore-git-remote": value })).toBeDefined();
+    expect(
+      extractGitRemoteHeader({ "x-lore-git-remote": value }),
+    ).toBeDefined();
   });
 
   test("trims whitespace before length check", () => {
     const value = "  github.com/org/repo  ";
-    expect(extractGitRemoteHeader({ "x-lore-git-remote": value }))
-      .toBe("github.com/org/repo");
+    expect(extractGitRemoteHeader({ "x-lore-git-remote": value })).toBe(
+      "github.com/org/repo",
+    );
   });
 });
 
@@ -394,7 +438,11 @@ describe("extractGitRemoteHeader", () => {
 describe("resolveSessionProjectPath", () => {
   // A confident binding has projectPath set and projectPathProvisional falsy.
   function confidentState(projectPath: string) {
-    return { sessionID: "sid-confident", projectPath, projectPathProvisional: false } as any;
+    return {
+      sessionID: "sid-confident",
+      projectPath,
+      projectPathProvisional: false,
+    } as any;
   }
   // A provisional binding (cwd fallback / bucket) — overridable by a later
   // confident path.
@@ -404,7 +452,11 @@ describe("resolveSessionProjectPath", () => {
   // Freshly-created session (e.g. first turn) seeded by getOrCreateSession with
   // a cwd path → provisional.
   function freshCwdState(sessionID: string, cwdPath: string) {
-    return { sessionID, projectPath: cwdPath, projectPathProvisional: true } as any;
+    return {
+      sessionID,
+      projectPath: cwdPath,
+      projectPathProvisional: true,
+    } as any;
   }
 
   const localCfg = { remoteGateway: false } as GatewayConfig;
@@ -475,8 +527,16 @@ describe("resolveSessionProjectPath", () => {
   test("remote gateway: two path-less sessions get DISTINCT buckets (never merged)", () => {
     const s1 = freshCwdState("sessionAAA", process.cwd());
     const s2 = freshCwdState("sessionBBB", process.cwd());
-    const r1 = resolveSessionProjectPath({ path: process.cwd(), source: "cwd" }, s1, remoteCfg);
-    const r2 = resolveSessionProjectPath({ path: process.cwd(), source: "cwd" }, s2, remoteCfg);
+    const r1 = resolveSessionProjectPath(
+      { path: process.cwd(), source: "cwd" },
+      s1,
+      remoteCfg,
+    );
+    const r2 = resolveSessionProjectPath(
+      { path: process.cwd(), source: "cwd" },
+      s2,
+      remoteCfg,
+    );
     expect(r1).not.toBe(r2);
     expect(r1).toBe(`${UNATTRIBUTED_PREFIX}/sessionAAA`);
     expect(r2).toBe(`${UNATTRIBUTED_PREFIX}/sessionBBB`);
@@ -516,7 +576,10 @@ describe("resolveSessionProjectPath", () => {
     const realId = projectId(realPath);
     expect(realId).toBeDefined();
     expect(realId).not.toBe(bucketId);
-    const moved = ltm.search({ query: "probe-turn-finding", projectPath: realPath });
+    const moved = ltm.search({
+      query: "probe-turn-finding",
+      projectPath: realPath,
+    });
     expect(moved.length).toBeGreaterThan(0);
   });
 
@@ -525,7 +588,11 @@ describe("resolveSessionProjectPath", () => {
   test("caches gitRemote from result onto session state", () => {
     const state = provisionalState("sid-gr1", "/home/user/project");
     resolveSessionProjectPath(
-      { path: "/home/user/project", source: "inferred", gitRemote: "github.com/org/repo" },
+      {
+        path: "/home/user/project",
+        source: "inferred",
+        gitRemote: "github.com/org/repo",
+      },
       state,
       localCfg,
     );
@@ -536,7 +603,11 @@ describe("resolveSessionProjectPath", () => {
     const state = provisionalState("sid-gr2", "/home/user/project");
     state.gitRemote = "github.com/org/original-repo";
     resolveSessionProjectPath(
-      { path: "/home/user/project", source: "inferred", gitRemote: "github.com/org/new-repo" },
+      {
+        path: "/home/user/project",
+        source: "inferred",
+        gitRemote: "github.com/org/new-repo",
+      },
       state,
       localCfg,
     );

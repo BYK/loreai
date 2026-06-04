@@ -73,7 +73,10 @@ describe("buildCompactPrompt", () => {
   });
 
   test("undefined knowledge is treated the same as empty string", () => {
-    const a = buildCompactPrompt({ hasDistillations: false, knowledge: undefined });
+    const a = buildCompactPrompt({
+      hasDistillations: false,
+      knowledge: undefined,
+    });
     const b = buildCompactPrompt({ hasDistillations: false, knowledge: "" });
     expect(a).toBe(b);
     expect(a).not.toContain("## Long-term Knowledge");
@@ -95,7 +98,8 @@ describe("buildCompactPrompt", () => {
 
   // F1b: anchor parameter
   test("emits a <previous-summary> block when previousSummary is provided", () => {
-    const priorSummary = "## Goal\n- Refactor auth module\n## Progress\n### Done\n- Wrote tests";
+    const priorSummary =
+      "## Goal\n- Refactor auth module\n## Progress\n### Done\n- Wrote tests";
     const prompt = buildCompactPrompt({
       hasDistillations: false,
       previousSummary: priorSummary,
@@ -155,10 +159,7 @@ describe("buildCompactPrompt", () => {
 // ─── F2: recursiveUser anchor parameter ──────────────────────────────
 
 describe("recursiveUser", () => {
-  const segments = [
-    { observations: "obs A" },
-    { observations: "obs B" },
-  ];
+  const segments = [{ observations: "obs A" }, { observations: "obs B" }];
 
   test("no anchor: emits plain consolidation prompt", () => {
     const out = recursiveUser(segments);

@@ -265,9 +265,9 @@ export function detectClientType(
  * Checked in order — first match wins.
  */
 export const KNOWN_SESSION_HEADERS = [
-  "x-lore-session-id",        // Lore plugins (stable, deterministic) — checked first
+  "x-lore-session-id", // Lore plugins (stable, deterministic) — checked first
   "x-claude-code-session-id", // Claude Code (UUID, persists for CLI session)
-  "x-session-affinity",       // OpenCode  (nanoid, volatile — regenerated on restart)
+  "x-session-affinity", // OpenCode  (nanoid, volatile — regenerated on restart)
 ] as const;
 
 /**
@@ -341,7 +341,9 @@ export function _resetGlobalHeaderValues(): void {
  *  - Any `x-` header whose name contains "affinity"
  */
 export function isSessionHeaderName(name: string): boolean {
-  return SESSION_HEADER_PATTERN.test(name) || AFFINITY_HEADER_PATTERN.test(name);
+  return (
+    SESSION_HEADER_PATTERN.test(name) || AFFINITY_HEADER_PATTERN.test(name)
+  );
 }
 
 /**

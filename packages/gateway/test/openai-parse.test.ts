@@ -97,9 +97,21 @@ describe("parseOpenAIRequest — tool message coalescing", () => {
             role: "assistant",
             content: null,
             tool_calls: [
-              { id: "call_A", type: "function", function: { name: "read", arguments: "{}" } },
-              { id: "call_B", type: "function", function: { name: "grep", arguments: "{}" } },
-              { id: "call_C", type: "function", function: { name: "glob", arguments: "{}" } },
+              {
+                id: "call_A",
+                type: "function",
+                function: { name: "read", arguments: "{}" },
+              },
+              {
+                id: "call_B",
+                type: "function",
+                function: { name: "grep", arguments: "{}" },
+              },
+              {
+                id: "call_C",
+                type: "function",
+                function: { name: "glob", arguments: "{}" },
+              },
             ],
           },
           { role: "tool", tool_call_id: "call_A", content: "result A" },
@@ -110,9 +122,21 @@ describe("parseOpenAIRequest — tool message coalescing", () => {
       headers,
     );
 
-    expect(req.messages.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
-    expect(toolUseIds(req.messages[1]!.content)).toEqual(["call_A", "call_B", "call_C"]);
-    expect(toolResultIds(req.messages[2]!.content)).toEqual(["call_A", "call_B", "call_C"]);
+    expect(req.messages.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+    ]);
+    expect(toolUseIds(req.messages[1]!.content)).toEqual([
+      "call_A",
+      "call_B",
+      "call_C",
+    ]);
+    expect(toolResultIds(req.messages[2]!.content)).toEqual([
+      "call_A",
+      "call_B",
+      "call_C",
+    ]);
   });
 
   test("interleaved assistant/tool groups produce separate user messages", () => {
@@ -126,16 +150,30 @@ describe("parseOpenAIRequest — tool message coalescing", () => {
             role: "assistant",
             content: null,
             tool_calls: [
-              { id: "call_A", type: "function", function: { name: "read", arguments: "{}" } },
-              { id: "call_B", type: "function", function: { name: "grep", arguments: "{}" } },
+              {
+                id: "call_A",
+                type: "function",
+                function: { name: "read", arguments: "{}" },
+              },
+              {
+                id: "call_B",
+                type: "function",
+                function: { name: "grep", arguments: "{}" },
+              },
             ],
           },
           { role: "tool", tool_call_id: "call_A", content: "result A" },
           { role: "tool", tool_call_id: "call_B", content: "result B" },
           // Second assistant turn with its own tool call
-          { role: "assistant", content: "Let me also check..." ,
+          {
+            role: "assistant",
+            content: "Let me also check...",
             tool_calls: [
-              { id: "call_C", type: "function", function: { name: "glob", arguments: "{}" } },
+              {
+                id: "call_C",
+                type: "function",
+                function: { name: "glob", arguments: "{}" },
+              },
             ],
           },
           { role: "tool", tool_call_id: "call_C", content: "result C" },
@@ -146,9 +184,16 @@ describe("parseOpenAIRequest — tool message coalescing", () => {
 
     // Two assistant/user pairs — each tool group is its own coalesced user msg.
     expect(req.messages.map((m) => m.role)).toEqual([
-      "user", "assistant", "user", "assistant", "user",
+      "user",
+      "assistant",
+      "user",
+      "assistant",
+      "user",
     ]);
-    expect(toolResultIds(req.messages[2]!.content)).toEqual(["call_A", "call_B"]);
+    expect(toolResultIds(req.messages[2]!.content)).toEqual([
+      "call_A",
+      "call_B",
+    ]);
     expect(toolResultIds(req.messages[4]!.content)).toEqual(["call_C"]);
   });
 

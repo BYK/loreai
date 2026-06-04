@@ -19,4 +19,6 @@ function readVersionFromPackageJson(): string {
 }
 
 export const VERSION: string =
-  typeof LORE_CLI_VERSION !== "undefined" ? LORE_CLI_VERSION : readVersionFromPackageJson();
+  typeof LORE_CLI_VERSION !== "undefined"
+    ? LORE_CLI_VERSION
+    : readVersionFromPackageJson();

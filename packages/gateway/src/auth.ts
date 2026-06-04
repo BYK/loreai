@@ -39,8 +39,7 @@ export function extractAuth(
   const apiKey = headers["x-api-key"] || headers["X-Api-Key"];
   if (apiKey) return { scheme: "api-key", value: apiKey };
 
-  const authHeader =
-    headers["authorization"] || headers["Authorization"];
+  const authHeader = headers["authorization"] || headers["Authorization"];
   if (authHeader) {
     const match = /^Bearer\s+(\S+)$/i.exec(authHeader);
     if (match) return { scheme: "bearer", value: match[1] };
@@ -85,17 +84,12 @@ export function authFingerprint(cred: AuthCredential): string {
 
 const sessionAuth = new Map<string, AuthCredential>();
 
-export function setSessionAuth(
-  sessionID: string,
-  cred: AuthCredential,
-): void {
+export function setSessionAuth(sessionID: string, cred: AuthCredential): void {
   sessionAuth.set(sessionID, cred);
   staleSessionAuth.delete(sessionID); // Fresh credential clears staleness
 }
 
-export function getSessionAuth(
-  sessionID: string,
-): AuthCredential | null {
+export function getSessionAuth(sessionID: string): AuthCredential | null {
   return sessionAuth.get(sessionID) ?? null;
 }
 
@@ -166,9 +160,7 @@ export function getLastSeenAuth(): AuthCredential | null {
  *    background worker 401 storm in single-session OAuth setups where
  *    session and global credentials are the same expired token.
  */
-export function resolveAuth(
-  sessionID?: string,
-): AuthCredential | null {
+export function resolveAuth(sessionID?: string): AuthCredential | null {
   if (sessionID) {
     const cred = getSessionAuth(sessionID);
     if (cred && !staleSessionAuth.has(sessionID)) return cred;

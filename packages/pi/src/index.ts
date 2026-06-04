@@ -93,7 +93,10 @@ const OPENAI_PROVIDERS = [
 ] as const;
 
 /** All providers that can be routed through the gateway. */
-const GATEWAY_PROVIDERS: readonly string[] = [...ANTHROPIC_PROVIDERS, ...OPENAI_PROVIDERS];
+const GATEWAY_PROVIDERS: readonly string[] = [
+  ...ANTHROPIC_PROVIDERS,
+  ...OPENAI_PROVIDERS,
+];
 
 /** Default ports to probe when looking for a running gateway (must match gateway defaults). */
 const KNOWN_GATEWAY_PORTS = [3207, 5673];
@@ -102,7 +105,10 @@ const KNOWN_GATEWAY_PORTS = [3207, 5673];
  * Check if the Lore gateway is reachable at the given base URL.
  * Short timeout so this doesn't delay Pi startup noticeably.
  */
-async function probeGateway(baseURL: string, timeoutMs = 1500): Promise<boolean> {
+async function probeGateway(
+  baseURL: string,
+  timeoutMs = 1500,
+): Promise<boolean> {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -125,7 +131,9 @@ async function resolveGatewayUrl(): Promise<string | null> {
   if (process.env.LORE_REMOTE_URL) {
     const url = process.env.LORE_REMOTE_URL.replace(/\/$/, "");
     if (await probeGateway(url)) return url;
-    console.info(`pi: remote gateway at ${url} not reachable, falling through to local discovery`);
+    console.info(
+      `pi: remote gateway at ${url} not reachable, falling through to local discovery`,
+    );
   }
 
   // 1. Explicit env var — probe it to verify it's actually reachable.
@@ -348,7 +356,10 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
           },
         };
       } catch (err) {
-        console.error("pi: custom compaction failed, falling back to default:", err);
+        console.error(
+          "pi: custom compaction failed, falling back to default:",
+          err,
+        );
         return undefined;
       }
     },

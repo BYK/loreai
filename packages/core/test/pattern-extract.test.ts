@@ -13,7 +13,9 @@ describe("extractPatterns", () => {
       );
       expect(results).toHaveLength(1);
       expect(results[0].category).toBe("decision");
-      expect(results[0].title).toBe("Decided to use PostgreSQL for the main database");
+      expect(results[0].title).toBe(
+        "Decided to use PostgreSQL for the main database",
+      );
       expect(results[0].content).toContain("decided to use PostgreSQL");
     });
 
@@ -38,7 +40,9 @@ describe("extractPatterns", () => {
         "We decided to adopt TypeScript across the codebase.",
       );
       expect(results).toHaveLength(1);
-      expect(results[0].title).toBe("Decided to use TypeScript across the codebase");
+      expect(results[0].title).toBe(
+        "Decided to use TypeScript across the codebase",
+      );
     });
   });
 
@@ -49,7 +53,9 @@ describe("extractPatterns", () => {
       );
       expect(results).toHaveLength(1);
       expect(results[0].category).toBe("decision");
-      expect(results[0].title).toBe("Chose PostgreSQL over MySQL for JSONB support");
+      expect(results[0].title).toBe(
+        "Chose PostgreSQL over MySQL for JSONB support",
+      );
     });
 
     test("chose with longer names", () => {
@@ -70,7 +76,9 @@ describe("extractPatterns", () => {
       );
       expect(results).toHaveLength(1);
       expect(results[0].category).toBe("decision");
-      expect(results[0].title).toBe("Switched from Webpack to esbuild for bundling");
+      expect(results[0].title).toBe(
+        "Switched from Webpack to esbuild for bundling",
+      );
     });
   });
 
@@ -85,9 +93,7 @@ describe("extractPatterns", () => {
     });
 
     test("going with for", () => {
-      const results = extractPatterns(
-        "Going with zod for schema validation.",
-      );
+      const results = extractPatterns("Going with zod for schema validation.");
       expect(results).toHaveLength(1);
       expect(results[0].title).toBe("Going with zod");
     });
@@ -108,7 +114,9 @@ describe("extractPatterns", () => {
       );
       expect(results).toHaveLength(1);
       expect(results[0].category).toBe("decision");
-      expect(results[0].title).toBe("Migrated to ESM modules across the project");
+      expect(results[0].title).toBe(
+        "Migrated to ESM modules across the project",
+      );
     });
 
     test("migrating from X to Y", () => {
@@ -122,9 +130,7 @@ describe("extractPatterns", () => {
 
   describe("adopted X for/as/instead", () => {
     test("adopted for", () => {
-      const results = extractPatterns(
-        "Adopted Prettier for code formatting.",
-      );
+      const results = extractPatterns("Adopted Prettier for code formatting.");
       expect(results).toHaveLength(1);
       expect(results[0].category).toBe("decision");
       expect(results[0].title).toBe("Adopted Prettier");
@@ -179,9 +185,7 @@ describe("extractPatterns", () => {
         "We prefer async/await instead of raw Promises.",
       );
       expect(results).toHaveLength(1);
-      expect(results[0].title).toBe(
-        "Prefers async/await over raw Promises",
-      );
+      expect(results[0].title).toBe("Prefers async/await over raw Promises");
     });
   });
 
@@ -266,7 +270,9 @@ describe("extractPatterns", () => {
       );
       expect(results).toHaveLength(1);
       // Should match the existing "typically uses" pattern, not the new one
-      expect(results[0].title).toBe("Typically uses strict TypeScript settings");
+      expect(results[0].title).toBe(
+        "Typically uses strict TypeScript settings",
+      );
     });
   });
 
@@ -303,7 +309,9 @@ describe("extractPatterns", () => {
       );
       expect(results).toHaveLength(1);
       expect(results[0].category).toBe("preference");
-      expect(results[0].title).toBe("Make sure to run the linter before pushing");
+      expect(results[0].title).toBe(
+        "Make sure to run the linter before pushing",
+      );
     });
 
     test("user stated make sure without 'to' does not match", () => {
@@ -315,9 +323,7 @@ describe("extractPatterns", () => {
     });
 
     test("does not match without stated/asserted/said prefix", () => {
-      const results = extractPatterns(
-        "Make sure to update the changelog.",
-      );
+      const results = extractPatterns("Make sure to update the changelog.");
       expect(results).toHaveLength(0);
     });
   });
@@ -351,9 +357,7 @@ describe("extractPatterns", () => {
     });
 
     test("does not match without stated/asserted/said prefix", () => {
-      const results = extractPatterns(
-        "Don't forget to run the build.",
-      );
+      const results = extractPatterns("Don't forget to run the build.");
       expect(results).toHaveLength(0);
     });
   });
@@ -364,18 +368,14 @@ describe("extractPatterns", () => {
 
   describe("user uses/likes X for Y", () => {
     test("user uses X for Y", () => {
-      const results = extractPatterns(
-        "User uses pnpm for package management.",
-      );
+      const results = extractPatterns("User uses pnpm for package management.");
       expect(results).toHaveLength(1);
       expect(results[0].category).toBe("preference");
       expect(results[0].title).toBe("Uses pnpm for package management");
     });
 
     test("team likes X for Y", () => {
-      const results = extractPatterns(
-        "Team likes Vitest for unit testing.",
-      );
+      const results = extractPatterns("Team likes Vitest for unit testing.");
       expect(results).toHaveLength(1);
       expect(results[0].title).toBe("Uses Vitest for unit testing");
     });
@@ -395,43 +395,33 @@ describe("extractPatterns", () => {
     });
 
     test("does not match without user/team/we prefix", () => {
-      const results = extractPatterns(
-        "The project uses ESLint for linting.",
-      );
+      const results = extractPatterns("The project uses ESLint for linting.");
       expect(results).toHaveLength(0);
     });
   });
 
   describe("user doesn't like/use/want X", () => {
     test("user doesn't like X", () => {
-      const results = extractPatterns(
-        "User doesn't like ORMs.",
-      );
+      const results = extractPatterns("User doesn't like ORMs.");
       expect(results).toHaveLength(1);
       expect(results[0].category).toBe("preference");
       expect(results[0].title).toBe("Avoids ORMs");
     });
 
     test("team does not use X", () => {
-      const results = extractPatterns(
-        "Team does not use default exports.",
-      );
+      const results = extractPatterns("Team does not use default exports.");
       expect(results).toHaveLength(1);
       expect(results[0].title).toBe("Avoids default exports");
     });
 
     test("we don't want X", () => {
-      const results = extractPatterns(
-        "We don't want class components.",
-      );
+      const results = extractPatterns("We don't want class components.");
       expect(results).toHaveLength(1);
       expect(results[0].title).toBe("Avoids class components");
     });
 
     test("does not match without user/team/we prefix", () => {
-      const results = extractPatterns(
-        "Doesn't like the current architecture.",
-      );
+      const results = extractPatterns("Doesn't like the current architecture.");
       expect(results).toHaveLength(0);
     });
   });
@@ -463,16 +453,12 @@ describe("extractPatterns", () => {
     });
 
     test("does not match bare 'convention' without prefix", () => {
-      const results = extractPatterns(
-        "Convention is key to readability.",
-      );
+      const results = extractPatterns("Convention is key to readability.");
       expect(results).toHaveLength(0);
     });
 
     test("does not match 'standard of' idiom", () => {
-      const results = extractPatterns(
-        "The standard of living is high.",
-      );
+      const results = extractPatterns("The standard of living is high.");
       expect(results).toHaveLength(0);
     });
 
@@ -499,9 +485,7 @@ describe("extractPatterns", () => {
     });
 
     test("matches instruction with short but valid capture", () => {
-      const results = extractPatterns(
-        "User stated always do it.",
-      );
+      const results = extractPatterns("User stated always do it.");
       // "do it" is 5 chars (above the 2-char rejection threshold)
       // and "stated" prefix is present — this should match.
       expect(results).toHaveLength(1);
@@ -562,9 +546,7 @@ describe("extractPatterns", () => {
     });
 
     test("end-of-line terminated match", () => {
-      const results = extractPatterns(
-        "Chose SQLite over PostgreSQL",
-      );
+      const results = extractPatterns("Chose SQLite over PostgreSQL");
       expect(results).toHaveLength(1);
       expect(results[0].title).toBe("Chose SQLite over PostgreSQL");
     });
@@ -574,7 +556,9 @@ describe("extractPatterns", () => {
         "DECIDED TO USE MongoDB for flexible schema.",
       );
       expect(results).toHaveLength(1);
-      expect(results[0].title).toBe("Decided to use MongoDB for flexible schema");
+      expect(results[0].title).toBe(
+        "Decided to use MongoDB for flexible schema",
+      );
     });
 
     test("content preserves original matched text", () => {
@@ -602,9 +586,7 @@ describe("extractPatterns", () => {
     });
 
     test("rejects very short captures (1-2 chars)", () => {
-      const results = extractPatterns(
-        "Decided to use Go, which is fast.",
-      );
+      const results = extractPatterns("Decided to use Go, which is fast.");
       // "Go" is only 2 chars — too short to be a reliable extraction
       expect(results).toHaveLength(0);
     });

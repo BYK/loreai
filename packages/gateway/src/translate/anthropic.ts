@@ -142,9 +142,7 @@ function normalizeSystem(system: unknown): string {
 /**
  * Convert a `GatewayContentBlock` back to Anthropic's wire format.
  */
-function toAnthropicBlock(
-  block: GatewayContentBlock,
-): Record<string, unknown> {
+function toAnthropicBlock(block: GatewayContentBlock): Record<string, unknown> {
   switch (block.type) {
     case "text":
       return { type: "text", text: block.text };
@@ -153,7 +151,9 @@ function toAnthropicBlock(
       return {
         type: "thinking",
         thinking: block.thinking,
-        ...(block.signature != null ? { signature: block.signature } : undefined),
+        ...(block.signature != null
+          ? { signature: block.signature }
+          : undefined),
       };
 
     case "tool_use":
@@ -201,8 +201,7 @@ export function parseAnthropicRequest(
   const model = String(raw.model ?? "");
   const system = normalizeSystem(raw.system);
   const stream = raw.stream === true;
-  const maxTokens =
-    typeof raw.max_tokens === "number" ? raw.max_tokens : 4096;
+  const maxTokens = typeof raw.max_tokens === "number" ? raw.max_tokens : 4096;
 
   // --- Messages ---
   const rawMessages = Array.isArray(raw.messages) ? raw.messages : [];
@@ -215,13 +214,11 @@ export function parseAnthropicRequest(
 
   // --- Tools ---
   const rawTools = Array.isArray(raw.tools) ? raw.tools : [];
-  const tools: GatewayTool[] = rawTools.map(
-    (t: Record<string, unknown>) => ({
-      name: String(t.name ?? ""),
-      description: String(t.description ?? ""),
-      inputSchema: (t.input_schema as Record<string, unknown>) ?? {},
-    }),
-  );
+  const tools: GatewayTool[] = rawTools.map((t: Record<string, unknown>) => ({
+    name: String(t.name ?? ""),
+    description: String(t.description ?? ""),
+    inputSchema: (t.input_schema as Record<string, unknown>) ?? {},
+  }));
 
   // --- Metadata: everything the gateway doesn't explicitly process ---
   const metadata: Record<string, unknown> = {};

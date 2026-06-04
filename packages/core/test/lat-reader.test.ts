@@ -52,9 +52,7 @@ Deep nested content.
       expect(sections[1].heading).toBe("Sub Section");
       expect(sections[1].depth).toBe(2);
 
-      expect(sections[2].id).toBe(
-        "lat.md/test#Top Level#Sub Section#Nested",
-      );
+      expect(sections[2].id).toBe("lat.md/test#Top Level#Sub Section#Nested");
       expect(sections[2].depth).toBe(3);
     });
 

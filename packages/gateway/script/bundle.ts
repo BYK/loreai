@@ -16,7 +16,13 @@
  * uploaded to Sentry and then deleted (they shouldn't ship to users).
  */
 import * as esbuild from "esbuild";
-import { rmSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from "node:fs";
+import {
+  rmSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  unlinkSync,
+} from "node:fs";
 import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -48,11 +54,7 @@ mkdirSync(distDir, { recursive: true });
 // External: Node built-ins + native/unused deps from @huggingface/transformers.
 // onnxruntime-node: .node native binaries that esbuild can't handle.
 // sharp: image processing for vision models, not needed for text embeddings.
-const external = [
-  "node:*",
-  "onnxruntime-node",
-  "sharp",
-];
+const external = ["node:*", "onnxruntime-node", "sharp"];
 
 // Remap @sentry/bun → @sentry/node so the CJS bundle gets Node-native
 // Sentry integrations (http server instrumentation via diagnostics_channel)
@@ -206,11 +208,19 @@ if (process.env.SENTRY_AUTH_TOKEN) {
   try {
     execSync(
       [
-        "npx", "sentry", "sourcemap", "upload", "dist/",
-        "--release", pkg.version,
-        "--org", "byk",
-        "--project", "loreai-gateway",
-        "--url-prefix", "~/",
+        "npx",
+        "sentry",
+        "sourcemap",
+        "upload",
+        "dist/",
+        "--release",
+        pkg.version,
+        "--org",
+        "byk",
+        "--project",
+        "loreai-gateway",
+        "--url-prefix",
+        "~/",
       ].join(" "),
       { cwd: packageDir, stdio: "inherit" },
     );

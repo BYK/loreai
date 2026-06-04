@@ -96,7 +96,8 @@ describe("truncateToolOutputsInContent — single-chunk fast path", () => {
   });
 
   test("annotation includes error signal when payload mentions errors", () => {
-    const output = "x".repeat(3_000) + "\nError: connection refused\n" + "y".repeat(3_000);
+    const output =
+      "x".repeat(3_000) + "\nError: connection refused\n" + "y".repeat(3_000);
     const content = `[tool:grep] ${output}`;
     const result = truncateToolOutputsInContent(content, 2_000);
     expect(result).toContain("contained errors");
@@ -115,7 +116,10 @@ describe("truncateToolOutputsInContent — single-chunk fast path", () => {
 describe("truncateToolOutputsInContent — multi-chunk path", () => {
   test("plain text BEFORE an oversized envelope is preserved", () => {
     const output = "y".repeat(5_000);
-    const content = seal("I need to search for that symbol.", `[tool:grep] ${output}`);
+    const content = seal(
+      "I need to search for that symbol.",
+      `[tool:grep] ${output}`,
+    );
     const result = truncateToolOutputsInContent(content, 2_000);
     expect(result).toContain("I need to search for that symbol.");
     expect(result).toContain("[output omitted — grep:");
@@ -126,7 +130,10 @@ describe("truncateToolOutputsInContent — multi-chunk path", () => {
     // tool annotation. The new \x1f separator makes the boundary
     // unambiguous, so the trailing text now survives untouched.
     const output = "y".repeat(5_000);
-    const content = seal(`[tool:grep] ${output}`, "Follow-up text after the tool call.");
+    const content = seal(
+      `[tool:grep] ${output}`,
+      "Follow-up text after the tool call.",
+    );
     const result = truncateToolOutputsInContent(content, 2_000);
     expect(result).toContain("[output omitted — grep:");
     expect(result).toContain("Follow-up text after the tool call.");
@@ -188,7 +195,10 @@ describe("truncateToolOutputsInContent — multi-chunk path", () => {
 
   test("[reasoning] chunks pass through untouched", () => {
     const big = "y".repeat(5_000);
-    const content = seal(`[tool:grep] ${big}`, "[reasoning] Post-search reasoning");
+    const content = seal(
+      `[tool:grep] ${big}`,
+      "[reasoning] Post-search reasoning",
+    );
     const result = truncateToolOutputsInContent(content, 2_000);
     expect(result).toContain("[output omitted — grep:");
     expect(result).toContain("[reasoning] Post-search reasoning");
@@ -356,8 +366,7 @@ describe("partsToText + truncateToolOutputsInContent round trip", () => {
       textPart("last"),
     ]);
     // Expect exactly 3 separators for 4 chunks.
-    const separatorCount =
-      content.split("\n" + CHUNK_TERMINATOR).length - 1;
+    const separatorCount = content.split("\n" + CHUNK_TERMINATOR).length - 1;
     expect(separatorCount).toBe(3);
   });
 
@@ -496,13 +505,21 @@ describe("latestMetaObservations", () => {
 
   test("returns undefined when only gen-0 rows exist (no meta yet)", () => {
     const pid = ensureProject(META_PROJECT);
-    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "raw seg" });
+    insertGen0({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "raw seg",
+    });
     expect(latestMetaObservations(META_PROJECT, META_SESSION)).toBeUndefined();
   });
 
   test("returns gen-1 observations when one meta exists", () => {
     const pid = ensureProject(META_PROJECT);
-    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "raw seg" });
+    insertGen0({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "raw seg",
+    });
     insertMeta({
       projectId: pid,
       sessionID: META_SESSION,
@@ -555,8 +572,18 @@ describe("loadForSession — archived filter", () => {
 
   test("excludes archived rows by default", () => {
     const pid = ensureProject(META_PROJECT);
-    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "live row", archived: 0 });
-    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "merged row", archived: 1 });
+    insertGen0({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "live row",
+      archived: 0,
+    });
+    insertGen0({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "merged row",
+      archived: 1,
+    });
     const rows = loadForSession(META_PROJECT, META_SESSION);
     expect(rows).toHaveLength(1);
     expect(rows[0]!.observations).toBe("live row");
@@ -564,8 +591,18 @@ describe("loadForSession — archived filter", () => {
 
   test("includes archived rows when includeArchived: true", () => {
     const pid = ensureProject(META_PROJECT);
-    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "live row", archived: 0 });
-    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "merged row", archived: 1 });
+    insertGen0({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "live row",
+      archived: 0,
+    });
+    insertGen0({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "merged row",
+      archived: 1,
+    });
     const rows = loadForSession(META_PROJECT, META_SESSION, true);
     expect(rows).toHaveLength(2);
     expect(rows.map((r) => r.observations).sort()).toEqual([
@@ -588,11 +625,25 @@ describe("metaDistill — first round (no anchor)", () => {
 
   test("consolidates 3+ gen-0 rows; user prompt has no <previous-meta-summary>", async () => {
     const pid = ensureProject(META_PROJECT);
-    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "obs A" });
-    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "obs B" });
-    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "obs C" });
+    insertGen0({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "obs A",
+    });
+    insertGen0({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "obs B",
+    });
+    insertGen0({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "obs C",
+    });
 
-    const llm = makeStubLLM("<observations>\nFresh meta from 3 segments\n</observations>");
+    const llm = makeStubLLM(
+      "<observations>\nFresh meta from 3 segments\n</observations>",
+    );
     const result = await metaDistill({
       llm,
       projectPath: META_PROJECT,
@@ -615,8 +666,16 @@ describe("metaDistill — first round (no anchor)", () => {
 
   test("returns null when fewer than 3 gen-0 rows exist (no anchor)", async () => {
     const pid = ensureProject(META_PROJECT);
-    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "only one" });
-    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "and two" });
+    insertGen0({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "only one",
+    });
+    insertGen0({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "and two",
+    });
 
     const llm = makeStubLLM("should not be called");
     const result = await metaDistill({
@@ -631,12 +690,28 @@ describe("metaDistill — first round (no anchor)", () => {
 
   test("archives exactly the merged subset; gen>0 row at gen=1 created", async () => {
     const pid = ensureProject(META_PROJECT);
-    const id1 = insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "obs A" });
-    const id2 = insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "obs B" });
-    const id3 = insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "obs C" });
+    const id1 = insertGen0({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "obs A",
+    });
+    const id2 = insertGen0({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "obs B",
+    });
+    const id3 = insertGen0({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "obs C",
+    });
 
     const llm = makeStubLLM("<observations>\nmerged\n</observations>");
-    await metaDistill({ llm, projectPath: META_PROJECT, sessionID: META_SESSION });
+    await metaDistill({
+      llm,
+      projectPath: META_PROJECT,
+      sessionID: META_SESSION,
+    });
 
     const archivedRows = db()
       .query(
@@ -676,7 +751,11 @@ describe("metaDistill — first round (no anchor)", () => {
     insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "C" });
 
     const llm = makeStubLLM("<observations>\ngood\n</observations>");
-    await metaDistill({ llm, projectPath: META_PROJECT, sessionID: META_SESSION });
+    await metaDistill({
+      llm,
+      projectPath: META_PROJECT,
+      sessionID: META_SESSION,
+    });
 
     const otherSessionArchived = (
       db()
@@ -695,9 +774,21 @@ describe("metaDistill — first round (no anchor)", () => {
 
   test("returns null and archives nothing when LLM returns empty/null", async () => {
     const pid = ensureProject(META_PROJECT);
-    const id1 = insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "A" });
-    const id2 = insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "B" });
-    const id3 = insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "C" });
+    const id1 = insertGen0({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "A",
+    });
+    const id2 = insertGen0({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "B",
+    });
+    const id3 = insertGen0({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "C",
+    });
 
     const llm = makeStubLLM(null);
     const result = await metaDistill({
@@ -709,7 +800,9 @@ describe("metaDistill — first round (no anchor)", () => {
     expect(result).toBeNull();
     // Nothing archived; gen-0 rows survive for retry.
     const rows = db()
-      .query("SELECT id, archived FROM distillations WHERE project_id = ? AND session_id = ?")
+      .query(
+        "SELECT id, archived FROM distillations WHERE project_id = ? AND session_id = ?",
+      )
       .all(pid, META_SESSION) as Array<{ id: string; archived: number }>;
     expect(rows.find((r) => r.id === id1)!.archived).toBe(0);
     expect(rows.find((r) => r.id === id2)!.archived).toBe(0);
@@ -722,7 +815,6 @@ describe("metaDistill — first round (no anchor)", () => {
       .get(pid, META_SESSION) as { c: number };
     expect(metaRows.c).toBe(0);
   });
-
 });
 
 describe("metaDistill — anchored second round", () => {
@@ -741,8 +833,16 @@ describe("metaDistill — anchored second round", () => {
       generation: 1,
     });
     // Two new gen-0 rows since the prior meta.
-    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "new obs X" });
-    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "new obs Y" });
+    insertGen0({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "new obs X",
+    });
+    insertGen0({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "new obs Y",
+    });
 
     const llm = makeStubLLM(
       "<observations>\nUpdated meta with X and Y\n</observations>",
@@ -796,7 +896,11 @@ describe("metaDistill — anchored second round", () => {
       observations: "PRIOR_META",
       generation: 1,
     });
-    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "single new obs" });
+    insertGen0({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "single new obs",
+    });
 
     const llm = makeStubLLM("<observations>\nUpdated\n</observations>");
     const result = await metaDistill({
@@ -818,16 +922,27 @@ describe("metaDistill — anchored second round", () => {
       observations: "PRIOR_META",
       generation: 1,
     });
-    insertGen0({ projectId: pid, sessionID: META_SESSION, observations: "new" });
+    insertGen0({
+      projectId: pid,
+      sessionID: META_SESSION,
+      observations: "new",
+    });
 
     const llm = makeStubLLM("<observations>\nupdated\n</observations>");
-    await metaDistill({ llm, projectPath: META_PROJECT, sessionID: META_SESSION });
+    await metaDistill({
+      llm,
+      projectPath: META_PROJECT,
+      sessionID: META_SESSION,
+    });
 
     const metaRows = db()
       .query(
         "SELECT generation, observations FROM distillations WHERE project_id = ? AND session_id = ? AND generation > 0 ORDER BY generation ASC",
       )
-      .all(pid, META_SESSION) as Array<{ generation: number; observations: string }>;
+      .all(pid, META_SESSION) as Array<{
+      generation: number;
+      observations: string;
+    }>;
     expect(metaRows.map((r) => r.generation)).toEqual([1, 2]);
     expect(metaRows[1]!.observations).toBe("updated");
   });
@@ -856,7 +971,9 @@ describe("metaDistill — recentSegmentsToKeep", () => {
       );
     }
 
-    const llm = makeStubLLM("<observations>\nconsolidated older segments\n</observations>");
+    const llm = makeStubLLM(
+      "<observations>\nconsolidated older segments\n</observations>",
+    );
     const result = await metaDistill({
       llm,
       projectPath: META_PROJECT,
@@ -871,7 +988,11 @@ describe("metaDistill — recentSegmentsToKeep", () => {
       .query(
         "SELECT id, archived, generation FROM distillations WHERE project_id = ? AND session_id = ? ORDER BY created_at ASC",
       )
-      .all(pid, META_SESSION) as Array<{ id: string; archived: number; generation: number }>;
+      .all(pid, META_SESSION) as Array<{
+      id: string;
+      archived: number;
+      generation: number;
+    }>;
 
     // First 3 gen-0 rows should be archived.
     for (let i = 0; i < 3; i++) {
@@ -1204,7 +1325,15 @@ describe("context health columns", () => {
         `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at, r_compression, c_norm)
          VALUES (?, ?, ?, '', '[]', ?, '[]', 0, 10, 0, ?, ?, ?)`,
       )
-      .run(id, pid, HEALTH_SESSION, "observation with metrics", Date.now(), 2.45, 0.037);
+      .run(
+        id,
+        pid,
+        HEALTH_SESSION,
+        "observation with metrics",
+        Date.now(),
+        2.45,
+        0.037,
+      );
 
     const rows = loadForSession(HEALTH_PROJECT, HEALTH_SESSION);
     const row = rows.find((r) => r.id === id)!;
@@ -1296,10 +1425,7 @@ describe("run() expansion guard and tiny-segment handling", () => {
   const RUN_SESSION = "run-guard-sess";
 
   /** Insert temporal messages directly into the DB. */
-  function insertTemporalMessages(
-    n: number,
-    tokensEach: number,
-  ): string[] {
+  function insertTemporalMessages(n: number, tokensEach: number): string[] {
     const pid = ensureProject(RUN_PROJECT);
     const ids: string[] = [];
     const content = "x".repeat(tokensEach * 3);
@@ -1375,7 +1501,9 @@ describe("run() expansion guard and tiny-segment handling", () => {
 
     // LLM returns small observations: 100 tokens = 300 chars
     const compressedObs = "x".repeat(300);
-    const llm = makeStubLLM(`<observations>\n${compressedObs}\n</observations>`);
+    const llm = makeStubLLM(
+      `<observations>\n${compressedObs}\n</observations>`,
+    );
 
     const result = await run({
       llm,
@@ -1419,7 +1547,9 @@ describe("run() expansion guard and tiny-segment handling", () => {
 
     // 1199 tokens = 3597 chars → ceil(3597/3) = 1199 < 1200 → stored
     const barelySmaller = "x".repeat(3597);
-    const llm = makeStubLLM(`<observations>\n${barelySmaller}\n</observations>`);
+    const llm = makeStubLLM(
+      `<observations>\n${barelySmaller}\n</observations>`,
+    );
 
     const result = await run({
       llm,
@@ -1587,11 +1717,15 @@ describe("distillTokenBudget", () => {
   test("is much smaller than old linear budget for typical segments", () => {
     // Old: workerTokenBudget(2000, 0.25, 1024, 8192) = 1024 (floor)
     // New: distillTokenBudget(2000) = 448
-    expect(distillTokenBudget(2000)).toBeLessThan(workerTokenBudget(2000, 0.25, 1024, 8192));
+    expect(distillTokenBudget(2000)).toBeLessThan(
+      workerTokenBudget(2000, 0.25, 1024, 8192),
+    );
 
     // Old: workerTokenBudget(8192, 0.25, 1024, 8192) = 2048
     // New: distillTokenBudget(8192) = 906
-    expect(distillTokenBudget(8192)).toBeLessThan(workerTokenBudget(8192, 0.25, 1024, 8192));
+    expect(distillTokenBudget(8192)).toBeLessThan(
+      workerTokenBudget(8192, 0.25, 1024, 8192),
+    );
   });
 });
 
@@ -1620,20 +1754,29 @@ describe("detectAssertions", () => {
     ];
     const assertions = detectAssertions(messages);
     expect(assertions.length).toBe(2);
-    expect(assertions[0].text).toContain("always want tests alongside implementation");
+    expect(assertions[0].text).toContain(
+      "always want tests alongside implementation",
+    );
     expect(assertions[1].text).toContain("prefer raw SQL over ORMs");
   });
 
   test("detects preference-change patterns — switch/let's use", () => {
     const messages = [
-      msg("user", "Actually, let's switch to Vitest -- it's faster because it uses Vite's transform pipeline instead of ts-node."),
+      msg(
+        "user",
+        "Actually, let's switch to Vitest -- it's faster because it uses Vite's transform pipeline instead of ts-node.",
+      ),
       msg("assistant", "Understood, I'll migrate the tests to Vitest."),
       msg("user", "Let's use Vitest going forward."),
     ];
     const assertions = detectAssertions(messages);
     expect(assertions.length).toBe(2);
-    expect(assertions.some((a) => a.text.toLowerCase().includes("switch to vitest"))).toBe(true);
-    expect(assertions.some((a) => a.text.toLowerCase().includes("let's use vitest"))).toBe(true);
+    expect(
+      assertions.some((a) => a.text.toLowerCase().includes("switch to vitest")),
+    ).toBe(true);
+    expect(
+      assertions.some((a) => a.text.toLowerCase().includes("let's use vitest")),
+    ).toBe(true);
   });
 
   test("detects 'from now on' and 'going forward' directives", () => {
@@ -1733,17 +1876,25 @@ describe("detectAssertions", () => {
     // by a newline should still be detected. The [^\n.!,] body class stops
     // at \n and the terminator group matches it.
     const messages = [
-      msg("user", "Can you help with the migration?\nI always want tests alongside implementation\nAlso please check the config"),
+      msg(
+        "user",
+        "Can you help with the migration?\nI always want tests alongside implementation\nAlso please check the config",
+      ),
     ];
     const assertions = detectAssertions(messages);
     expect(assertions.length).toBe(1);
-    expect(assertions[0].text).toContain("always want tests alongside implementation");
+    expect(assertions[0].text).toContain(
+      "always want tests alongside implementation",
+    );
   });
 
   test("preference-change patterns stop at sentence boundary", () => {
     // "I switched to pnpm." should be captured without the trailing sentence.
     const messages = [
-      msg("user", "I switched to pnpm. The npm lockfile was causing issues with our CI pipeline."),
+      msg(
+        "user",
+        "I switched to pnpm. The npm lockfile was causing issues with our CI pipeline.",
+      ),
     ];
     const assertions = detectAssertions(messages);
     expect(assertions.length).toBe(1);
@@ -1763,7 +1914,9 @@ describe("detectAssertions", () => {
     ];
     const assertions = detectAssertions(messages);
     expect(assertions.length).toBe(1);
-    expect(assertions[0].text).toContain("Asla main dalına doğrudan push yapma");
+    expect(assertions[0].text).toContain(
+      "Asla main dalına doğrudan push yapma",
+    );
     // Only the first sentence is pinned.
     expect(assertions[0].text).not.toContain("önemsiz");
   });
@@ -1854,7 +2007,12 @@ describe("detectToolFailures", () => {
     db().query("DELETE FROM tool_calls WHERE project_id = ?").run(pid);
   });
 
-  function addFailure(session: string, tool: string, errorType: string, createdAt: number) {
+  function addFailure(
+    session: string,
+    tool: string,
+    errorType: string,
+    createdAt: number,
+  ) {
     const pid = ensureProject(PROJECT);
     db()
       .query(
@@ -1862,7 +2020,15 @@ describe("detectToolFailures", () => {
            (call_id, message_id, project_id, session_id, tool, status, error_type, error_message, duration_ms, created_at)
          VALUES (?, ?, ?, ?, ?, 'error', ?, NULL, 0, ?)`,
       )
-      .run(`c-${createdAt}`, `m-${createdAt}`, pid, session, tool, errorType, createdAt);
+      .run(
+        `c-${createdAt}`,
+        `m-${createdAt}`,
+        pid,
+        session,
+        tool,
+        errorType,
+        createdAt,
+      );
   }
 
   test("returns undefined when no messages", () => {

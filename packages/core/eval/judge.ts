@@ -74,8 +74,7 @@ export const DISTINCTION_PRESERVATION: ScoringCriterion = {
 
 export const TEMPORAL_ATTRIBUTION: ScoringCriterion = {
   name: "temporal_attribution",
-  description:
-    "Can the answer correctly attribute facts to specific sessions?",
+  description: "Can the answer correctly attribute facts to specific sessions?",
   scale: {
     1: "Cannot identify which session information came from",
     3: "Generally aware of session boundaries",
@@ -136,8 +135,7 @@ export const PATTERN_DETECTION: ScoringCriterion = {
 
 export const CURRENCY: ScoringCriterion = {
   name: "currency",
-  description:
-    "Does the answer reflect the current (most recent) preference?",
+  description: "Does the answer reflect the current (most recent) preference?",
   scale: {
     1: "Recalls stale/superseded preference",
     3: "Uncertain or mentions both old and new",
@@ -147,8 +145,7 @@ export const CURRENCY: ScoringCriterion = {
 
 export const CROSS_PROJECT_RECALL: ScoringCriterion = {
   name: "cross_project_recall",
-  description:
-    "Does the answer recall knowledge from other projects?",
+  description: "Does the answer recall knowledge from other projects?",
   scale: {
     1: "No awareness of knowledge from other projects",
     3: "Vague awareness that something similar was encountered",
@@ -281,11 +278,7 @@ export const RUBRICS = {
 
   /** CP-3: Cross-project preferences */
   crossProjectPreference: {
-    criteria: [
-      PREFERENCE_RECALL,
-      CONSISTENCY,
-      CROSS_PROJECT_AVAILABILITY,
-    ],
+    criteria: [PREFERENCE_RECALL, CONSISTENCY, CROSS_PROJECT_AVAILABILITY],
     weights: {
       preference_recall: 0.4,
       consistency: 0.3,
@@ -295,7 +288,12 @@ export const RUBRICS = {
 
   /** MSR-1 cross-session cue questions */
   crossSessionCueRecall: {
-    criteria: [FACTUAL_ACCURACY, COMPLETENESS, RECALL_TRIGGER, TEMPORAL_ATTRIBUTION],
+    criteria: [
+      FACTUAL_ACCURACY,
+      COMPLETENESS,
+      RECALL_TRIGGER,
+      TEMPORAL_ATTRIBUTION,
+    ],
     weights: {
       factual_accuracy: 0.25,
       completeness: 0.25,

@@ -40,10 +40,7 @@ import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { processBinary } from "binpunch";
 import { PLACEHOLDER_DEBUG_ID, injectDebugId } from "./debug-id";
-import {
-  MODEL_DIR_NAME,
-  MODEL_FILES,
-} from "./vendor-paths";
+import { MODEL_DIR_NAME, MODEL_FILES } from "./vendor-paths";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const packageDir = dirname(here);
@@ -97,7 +94,10 @@ async function buildLibrary() {
 
   const shims: Array<[string, string]> = [
     ["index.bun.js", 'export * from "../src/index.ts";\n'],
-    ["embedding-worker.js", 'export * from "../../core/src/embedding-worker.ts";\n'],
+    [
+      "embedding-worker.js",
+      'export * from "../../core/src/embedding-worker.ts";\n',
+    ],
   ];
 
   for (const [filename, content] of shims) {
@@ -114,7 +114,9 @@ async function buildLibrary() {
     console.log(`  ${filename}: dev shim created`);
   }
 
-  console.log("✓ @loreai/gateway: dev shims ready (use `bun run bundle` for npm build)");
+  console.log(
+    "✓ @loreai/gateway: dev shims ready (use `bun run bundle` for npm build)",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -133,7 +135,12 @@ type CompileTarget = (typeof VALID_TARGETS)[number];
 
 function currentTarget(): CompileTarget {
   const arch = process.arch === "arm64" ? "arm64" : "x64";
-  const os = process.platform === "darwin" ? "darwin" : process.platform === "win32" ? "windows" : "linux";
+  const os =
+    process.platform === "darwin"
+      ? "darwin"
+      : process.platform === "win32"
+        ? "windows"
+        : "linux";
   return `${os}-${arch}` as CompileTarget;
 }
 
@@ -173,10 +180,7 @@ function prepareVendorModelCache(target: CompileTarget): string | null {
   );
   const result = spawnSync(
     "bun",
-    [
-      "run",
-      join(packageDir, "script/vendor-embeddings.ts"),
-    ],
+    ["run", join(packageDir, "script/vendor-embeddings.ts")],
     { stdio: "inherit", cwd: repoRoot },
   );
   if (result.status !== 0) {
@@ -214,7 +218,9 @@ function findBunPackageDir(name: string): string {
   const prefix = `${name}@`;
   const entries = readdirSync(bunDir).filter((e) => e.startsWith(prefix));
   if (entries.length === 0) {
-    throw new Error(`findBunPackageDir: cannot find ${name} in node_modules/.bun/`);
+    throw new Error(
+      `findBunPackageDir: cannot find ${name} in node_modules/.bun/`,
+    );
   }
   const stable = entries.filter((m) => !m.includes("-", prefix.length));
   const pick = (stable.length > 0 ? stable : entries).sort().reverse()[0];
@@ -225,12 +231,13 @@ function findBunPackageDir(name: string): string {
 function findBunPackageEntry(name: string, entryOverride?: string): string {
   const pkgDir = findBunPackageDir(name);
   if (entryOverride) return join(pkgDir, entryOverride);
-  const pkgJson = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8"));
+  const pkgJson = JSON.parse(
+    readFileSync(join(pkgDir, "package.json"), "utf8"),
+  );
   return join(pkgDir, pkgJson.main || "index.js");
 }
 
 function binaryExternalsPlugin(): esbuild.Plugin {
-
   return {
     name: "binary-externals",
     setup(build) {
@@ -246,7 +253,10 @@ function binaryExternalsPlugin(): esbuild.Plugin {
 
       // Redirect onnxruntime-node → onnxruntime-web's Node.js entry.
       // The WASM runtime is API-compatible with the native one.
-      const ortWebNodeEntry = findBunPackageEntry("onnxruntime-web", "dist/ort.node.min.mjs");
+      const ortWebNodeEntry = findBunPackageEntry(
+        "onnxruntime-web",
+        "dist/ort.node.min.mjs",
+      );
       build.onResolve({ filter: /^onnxruntime-node$/ }, () => ({
         path: ortWebNodeEntry,
       }));
@@ -358,8 +368,6 @@ async function buildBinary() {
 
   console.log(`✓ esbuild worker: ${workerBundlePath}`);
 
-
-
   // Step 2: Inject debug IDs into the JS and sourcemap
   // skipSnippet: true — the IIFE snippet breaks ESM (placed before import
   // declarations). The debug ID is instead registered in instrument.ts via
@@ -382,7 +390,10 @@ async function buildBinary() {
   if (debugId) {
     try {
       const content = readFileSync(bundlePath, "utf-8");
-      writeFileSync(bundlePath, content.replaceAll(PLACEHOLDER_DEBUG_ID, debugId));
+      writeFileSync(
+        bundlePath,
+        content.replaceAll(PLACEHOLDER_DEBUG_ID, debugId),
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`⚠ Debug ID placeholder replacement failed: ${msg}`);
@@ -412,7 +423,8 @@ async function buildBinary() {
     wrapperPath = join(distBinDir, "wrapper.ts");
     // Model files are imported directly from the shared model cache.
     const modelImports = MODEL_FILES.map(
-      (f, i) => `import _model_${i} from ${JSON.stringify(join(vendorModelDir, f))} with { type: "file" };`,
+      (f, i) =>
+        `import _model_${i} from ${JSON.stringify(join(vendorModelDir, f))} with { type: "file" };`,
     ).join("\n");
     const modelEntries = MODEL_FILES.map(
       (f, i) => `  [${JSON.stringify(f)}, _model_${i}],`,
@@ -427,9 +439,12 @@ async function buildBinary() {
       "ort-wasm-simd-threaded.mjs",
       "ort-wasm-simd-threaded.wasm",
     ];
-    const wasmImports = wasmFiles.map(
-      (f, i) => `import _wasm_${i} from ${JSON.stringify(join(ortWebDistDir, f))} with { type: "file" };`,
-    ).join("\n");
+    const wasmImports = wasmFiles
+      .map(
+        (f, i) =>
+          `import _wasm_${i} from ${JSON.stringify(join(ortWebDistDir, f))} with { type: "file" };`,
+      )
+      .join("\n");
 
     const wrapperSrc = [
       `// AUTO-GENERATED by packages/gateway/script/build.ts. Do not commit.`,
@@ -606,11 +621,19 @@ async function buildBinary() {
     try {
       execSync(
         [
-          "npx", "sentry", "sourcemap", "upload", "dist-bin/",
-          "--release", pkg.version,
-          "--org", "byk",
-          "--project", "loreai-gateway",
-          "--url-prefix", "~/dist-bin/",
+          "npx",
+          "sentry",
+          "sourcemap",
+          "upload",
+          "dist-bin/",
+          "--release",
+          pkg.version,
+          "--org",
+          "byk",
+          "--project",
+          "loreai-gateway",
+          "--url-prefix",
+          "~/dist-bin/",
         ].join(" "),
         { cwd: packageDir, stdio: "inherit" },
       );

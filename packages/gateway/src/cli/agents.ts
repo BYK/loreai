@@ -24,7 +24,8 @@ function which(binary: string): string | null {
 
   // Node.js runtime
   try {
-    const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
+    const { execFileSync } =
+      require("node:child_process") as typeof import("node:child_process");
     const cmd = process.platform === "win32" ? "where" : "which";
     const result = execFileSync(cmd, [binary], {
       encoding: "utf8",
@@ -98,12 +99,22 @@ export const AGENTS: AgentDef[] = [
       };
       // Inject project path so the gateway knows which project this session
       // belongs to, regardless of system prompt format.
-      appendCustomHeader(env, "ANTHROPIC_CUSTOM_HEADERS", "X-Lore-Project", cwd);
+      appendCustomHeader(
+        env,
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "X-Lore-Project",
+        cwd,
+      );
       // Inject git remote via ANTHROPIC_CUSTOM_HEADERS so the remote gateway
       // can identify the project by git remote without filesystem access.
       const remote = safeRemote(cwd);
       if (remote) {
-        appendCustomHeader(env, "ANTHROPIC_CUSTOM_HEADERS", "X-Lore-Git-Remote", remote);
+        appendCustomHeader(
+          env,
+          "ANTHROPIC_CUSTOM_HEADERS",
+          "X-Lore-Git-Remote",
+          remote,
+        );
       }
       return env;
     },
@@ -128,7 +139,8 @@ export const AGENTS: AgentDef[] = [
       // Override the built-in OpenAI provider's base URL to route through the
       // Lore gateway. Uses `-c` so the change is per-invocation only — it does
       // not affect Codex's persisted config or session scoping.
-      "-c", `openai_base_url="${url}/v1"`,
+      "-c",
+      `openai_base_url="${url}/v1"`,
     ],
   },
   {

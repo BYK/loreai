@@ -15,7 +15,13 @@
  * synchronous and much simpler — runs once at startup, not in the hot path.
  */
 
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { isHostedMode } from "./hosted";
@@ -154,7 +160,10 @@ export function discoverWorkspaceRoot(startDir: string): string {
     }
 
     // 4. Language markers — remember closest, but keep walking
-    if (closestLanguageMarker === null && hasAnyMarker(current, LANGUAGE_MARKERS)) {
+    if (
+      closestLanguageMarker === null &&
+      hasAnyMarker(current, LANGUAGE_MARKERS)
+    ) {
       closestLanguageMarker = current;
     }
 
@@ -188,7 +197,12 @@ function isGlob(pattern: string): boolean {
 function matchGlob(name: string, pattern: string): boolean {
   // Convert glob to regex: * → .*, ? → .
   const regex = new RegExp(
-    "^" + pattern.replace(/[.+^${}()|\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".") + "$",
+    "^" +
+      pattern
+        .replace(/[.+^${}()|\\]/g, "\\$&")
+        .replace(/\*/g, ".*")
+        .replace(/\?/g, ".") +
+      "$",
   );
   return regex.test(name);
 }
@@ -250,7 +264,8 @@ export function resolveWorkspaces(
     const parentAbs = resolve(resolvedRoot, parentRel);
 
     // Guard: glob parent must be under (or equal to) rootDir
-    if (parentAbs !== resolvedRoot && !parentAbs.startsWith(rootPrefix)) continue;
+    if (parentAbs !== resolvedRoot && !parentAbs.startsWith(rootPrefix))
+      continue;
 
     try {
       const entries = readdirSync(parentAbs, { withFileTypes: true });

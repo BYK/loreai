@@ -219,8 +219,7 @@ export function extractStableChain(
 
   const targetRelease = chainReleases[0];
   if (!targetRelease) return null;
-  const expectedSha256 =
-    getStableTargetSha256(targetRelease, binaryName) ?? "";
+  const expectedSha256 = getStableTargetSha256(targetRelease, binaryName) ?? "";
   if (!expectedSha256) return null;
 
   const patchUrls: string[] = [];

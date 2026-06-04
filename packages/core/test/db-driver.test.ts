@@ -31,10 +31,14 @@ test("Database.query() returns a cached prepared statement", () => {
 
 test("FTS5 MATCH and bm25() work via the driver", () => {
   const db = new Database(":memory:");
-  db.exec("CREATE VIRTUAL TABLE f USING fts5(content, tokenize='porter unicode61')");
+  db.exec(
+    "CREATE VIRTUAL TABLE f USING fts5(content, tokenize='porter unicode61')",
+  );
   db.exec("INSERT INTO f (content) VALUES ('hello world'), ('goodbye moon')");
   const rows = db
-    .query("SELECT content, bm25(f) AS score FROM f WHERE f MATCH ? ORDER BY score")
+    .query(
+      "SELECT content, bm25(f) AS score FROM f WHERE f MATCH ? ORDER BY score",
+    )
     .all("hello") as Array<{ content: string; score: number }>;
   expect(rows.length).toBe(1);
   expect(rows[0].content).toBe("hello world");

@@ -1,7 +1,13 @@
 import { describe, test, expect } from "bun:test";
 import fc from "fast-check";
 import { remark } from "remark";
-import { normalize, unescapeMarkdown, sanitizeSurrogates, inline, renderMarkdown } from "../src/markdown";
+import {
+  normalize,
+  unescapeMarkdown,
+  sanitizeSurrogates,
+  inline,
+  renderMarkdown,
+} from "../src/markdown";
 import { formatDistillations, formatKnowledge } from "../src/prompt";
 
 const proc = remark();
@@ -253,7 +259,9 @@ describe("unescapeMarkdown", () => {
     const original = "Use Extract<T, {type: 'foo'}> for type narrowing";
 
     // First export: serialize to markdown
-    const exported1 = formatKnowledge([{ category: "pattern", title: "T", content: original }]);
+    const exported1 = formatKnowledge([
+      { category: "pattern", title: "T", content: original },
+    ]);
 
     // Parse the bullet back out (as agents-file.ts does), unescaping on read
     const bulletMatch = exported1.match(/^\*\s+\*\*(.+?)\*\*:\s*(.+)$/m);
@@ -264,7 +272,9 @@ describe("unescapeMarkdown", () => {
     expect(parsedContent).toBe(original);
 
     // Second export from unescaped content should be identical to first
-    const exported2 = formatKnowledge([{ category: "pattern", title: "T", content: parsedContent }]);
+    const exported2 = formatKnowledge([
+      { category: "pattern", title: "T", content: parsedContent },
+    ]);
     expect(exported2).toBe(exported1);
   });
 

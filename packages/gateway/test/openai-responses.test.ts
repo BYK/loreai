@@ -36,7 +36,7 @@ import type {
 // ---------------------------------------------------------------------------
 
 describe("parseOpenAIResponsesRequest", () => {
-  const headers = { "authorization": "Bearer sk-test123" };
+  const headers = { authorization: "Bearer sk-test123" };
 
   test("parses string input as single user message", () => {
     const req = parseOpenAIResponsesRequest(
@@ -75,9 +75,7 @@ describe("parseOpenAIResponsesRequest", () => {
       { type: "text", text: "What is 2+2?" },
     ]);
     expect(req.messages[1].role).toBe("assistant");
-    expect(req.messages[1].content).toEqual([
-      { type: "text", text: "4" },
-    ]);
+    expect(req.messages[1].content).toEqual([{ type: "text", text: "4" }]);
     expect(req.messages[2].role).toBe("user");
   });
 
@@ -135,17 +133,39 @@ describe("parseOpenAIResponsesRequest", () => {
         model: "gpt-5.5",
         input: [
           { type: "message", role: "user", content: "do two things" },
-          { type: "function_call", call_id: "call_A", name: "read", arguments: "{}" },
-          { type: "function_call", call_id: "call_B", name: "grep", arguments: "{}" },
-          { type: "function_call_output", call_id: "call_A", output: "result A" },
-          { type: "function_call_output", call_id: "call_B", output: "result B" },
+          {
+            type: "function_call",
+            call_id: "call_A",
+            name: "read",
+            arguments: "{}",
+          },
+          {
+            type: "function_call",
+            call_id: "call_B",
+            name: "grep",
+            arguments: "{}",
+          },
+          {
+            type: "function_call_output",
+            call_id: "call_A",
+            output: "result A",
+          },
+          {
+            type: "function_call_output",
+            call_id: "call_B",
+            output: "result B",
+          },
         ],
       },
       headers,
     );
 
     // user, assistant (both tool_use), user (both tool_result)
-    expect(req.messages.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
+    expect(req.messages.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+    ]);
 
     const toolUses = req.messages[1].content as GatewayToolUseBlock[];
     expect(toolUses.map((b) => b.id)).toEqual(["call_A", "call_B"]);
@@ -160,27 +180,49 @@ describe("parseOpenAIResponsesRequest", () => {
         model: "gpt-5.5",
         input: [
           { type: "message", role: "user", content: "do two things" },
-          { type: "function_call", call_id: "call_A", name: "read", arguments: "{}" },
+          {
+            type: "function_call",
+            call_id: "call_A",
+            name: "read",
+            arguments: "{}",
+          },
           // The Responses API can interleave reasoning items between calls;
           // they are skipped and must NOT break coalescing of A and B.
           { type: "reasoning", summary: [] },
-          { type: "function_call", call_id: "call_B", name: "grep", arguments: "{}" },
-          { type: "function_call_output", call_id: "call_A", output: "result A" },
-          { type: "function_call_output", call_id: "call_B", output: "result B" },
+          {
+            type: "function_call",
+            call_id: "call_B",
+            name: "grep",
+            arguments: "{}",
+          },
+          {
+            type: "function_call_output",
+            call_id: "call_A",
+            output: "result A",
+          },
+          {
+            type: "function_call_output",
+            call_id: "call_B",
+            output: "result B",
+          },
         ],
       },
       headers,
     );
 
-    expect(req.messages.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
-    expect((req.messages[1].content as GatewayToolUseBlock[]).map((b) => b.id)).toEqual([
-      "call_A",
-      "call_B",
+    expect(req.messages.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
     ]);
-    expect((req.messages[2].content as GatewayToolResultBlock[]).map((b) => b.toolUseId)).toEqual([
-      "call_A",
-      "call_B",
-    ]);
+    expect(
+      (req.messages[1].content as GatewayToolUseBlock[]).map((b) => b.id),
+    ).toEqual(["call_A", "call_B"]);
+    expect(
+      (req.messages[2].content as GatewayToolResultBlock[]).map(
+        (b) => b.toolUseId,
+      ),
+    ).toEqual(["call_A", "call_B"]);
   });
 
   test("sequential call/output pairs are NOT coalesced across the boundary", () => {
@@ -189,10 +231,28 @@ describe("parseOpenAIResponsesRequest", () => {
         model: "gpt-5.5",
         input: [
           { type: "message", role: "user", content: "go" },
-          { type: "function_call", call_id: "call_A", name: "read", arguments: "{}" },
-          { type: "function_call_output", call_id: "call_A", output: "result A" },
-          { type: "function_call", call_id: "call_B", name: "grep", arguments: "{}" },
-          { type: "function_call_output", call_id: "call_B", output: "result B" },
+          {
+            type: "function_call",
+            call_id: "call_A",
+            name: "read",
+            arguments: "{}",
+          },
+          {
+            type: "function_call_output",
+            call_id: "call_A",
+            output: "result A",
+          },
+          {
+            type: "function_call",
+            call_id: "call_B",
+            name: "grep",
+            arguments: "{}",
+          },
+          {
+            type: "function_call_output",
+            call_id: "call_B",
+            output: "result B",
+          },
         ],
       },
       headers,
@@ -206,10 +266,22 @@ describe("parseOpenAIResponsesRequest", () => {
       "assistant",
       "user",
     ]);
-    expect((req.messages[1].content as GatewayToolUseBlock[]).map((b) => b.id)).toEqual(["call_A"]);
-    expect((req.messages[2].content as GatewayToolResultBlock[]).map((b) => b.toolUseId)).toEqual(["call_A"]);
-    expect((req.messages[3].content as GatewayToolUseBlock[]).map((b) => b.id)).toEqual(["call_B"]);
-    expect((req.messages[4].content as GatewayToolResultBlock[]).map((b) => b.toolUseId)).toEqual(["call_B"]);
+    expect(
+      (req.messages[1].content as GatewayToolUseBlock[]).map((b) => b.id),
+    ).toEqual(["call_A"]);
+    expect(
+      (req.messages[2].content as GatewayToolResultBlock[]).map(
+        (b) => b.toolUseId,
+      ),
+    ).toEqual(["call_A"]);
+    expect(
+      (req.messages[3].content as GatewayToolUseBlock[]).map((b) => b.id),
+    ).toEqual(["call_B"]);
+    expect(
+      (req.messages[4].content as GatewayToolResultBlock[]).map(
+        (b) => b.toolUseId,
+      ),
+    ).toEqual(["call_B"]);
   });
 
   test("does not merge function_call into a preceding assistant text message", () => {
@@ -218,9 +290,22 @@ describe("parseOpenAIResponsesRequest", () => {
         model: "gpt-5.5",
         input: [
           { type: "message", role: "user", content: "go" },
-          { type: "message", role: "assistant", content: [{ type: "output_text", text: "Let me check." }] },
-          { type: "function_call", call_id: "call_A", name: "read", arguments: "{}" },
-          { type: "function_call_output", call_id: "call_A", output: "result A" },
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "Let me check." }],
+          },
+          {
+            type: "function_call",
+            call_id: "call_A",
+            name: "read",
+            arguments: "{}",
+          },
+          {
+            type: "function_call_output",
+            call_id: "call_A",
+            output: "result A",
+          },
         ],
       },
       headers,
@@ -233,8 +318,12 @@ describe("parseOpenAIResponsesRequest", () => {
       "assistant",
       "user",
     ]);
-    expect(req.messages[1].content).toEqual([{ type: "text", text: "Let me check." }]);
-    expect((req.messages[2].content as GatewayToolUseBlock[]).map((b) => b.id)).toEqual(["call_A"]);
+    expect(req.messages[1].content).toEqual([
+      { type: "text", text: "Let me check." },
+    ]);
+    expect(
+      (req.messages[2].content as GatewayToolUseBlock[]).map((b) => b.id),
+    ).toEqual(["call_A"]);
   });
 
   test("end-to-end: parallel tool calls survive reconstruction with no orphans", () => {
@@ -243,10 +332,28 @@ describe("parseOpenAIResponsesRequest", () => {
         model: "gpt-5.5",
         input: [
           { type: "message", role: "user", content: "do two things" },
-          { type: "function_call", call_id: "call_A", name: "read", arguments: "{}" },
-          { type: "function_call", call_id: "call_B", name: "grep", arguments: "{}" },
-          { type: "function_call_output", call_id: "call_A", output: "result A" },
-          { type: "function_call_output", call_id: "call_B", output: "result B" },
+          {
+            type: "function_call",
+            call_id: "call_A",
+            name: "read",
+            arguments: "{}",
+          },
+          {
+            type: "function_call",
+            call_id: "call_B",
+            name: "grep",
+            arguments: "{}",
+          },
+          {
+            type: "function_call_output",
+            call_id: "call_A",
+            output: "result A",
+          },
+          {
+            type: "function_call_output",
+            call_id: "call_B",
+            output: "result B",
+          },
           { type: "message", role: "user", content: "now summarize" },
         ],
       },
@@ -297,7 +404,11 @@ describe("parseOpenAIResponsesRequest", () => {
           // Server-side reference the gateway cannot resolve — must be dropped,
           // not crash, and not corrupt the surrounding messages.
           { type: "item_reference", id: "msg_server_123" },
-          { type: "message", role: "assistant", content: [{ type: "output_text", text: "hi" }] },
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "hi" }],
+          },
         ],
       },
       headers,
@@ -417,9 +528,7 @@ describe("parseOpenAIResponsesRequest", () => {
     const req = parseOpenAIResponsesRequest(
       {
         model: "gpt-4o",
-        input: [
-          { role: "user", content: "Hello" },
-        ],
+        input: [{ role: "user", content: "Hello" }],
       },
       headers,
     );
@@ -443,7 +552,7 @@ describe("buildOpenAIResponsesUpstreamRequest", () => {
         max_output_tokens: 2048,
         temperature: 0.5,
       },
-      { "authorization": "Bearer sk-test" },
+      { authorization: "Bearer sk-test" },
     );
 
     const result = buildOpenAIResponsesUpstreamRequest(
@@ -481,7 +590,10 @@ describe("buildOpenAIResponsesUpstreamRequest", () => {
       {},
     );
 
-    const result = buildOpenAIResponsesUpstreamRequest(req, "https://api.openai.com");
+    const result = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://api.openai.com",
+    );
     const body = result.body as Record<string, unknown>;
     const tools = body.tools as Array<Record<string, unknown>>;
 
@@ -506,7 +618,10 @@ describe("buildOpenAIResponsesUpstreamRequest", () => {
       {},
     );
 
-    const result = buildOpenAIResponsesUpstreamRequest(req, "https://api.openai.com");
+    const result = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://api.openai.com",
+    );
     const body = result.body as Record<string, unknown>;
     expect(body.previous_response_id).toBeUndefined();
     // reasoning is still forwarded
@@ -535,7 +650,10 @@ describe("buildOpenAIResponsesUpstreamRequest", () => {
       {},
     );
 
-    const result = buildOpenAIResponsesUpstreamRequest(req, "https://api.openai.com");
+    const result = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://api.openai.com",
+    );
     const body = result.body as Record<string, unknown>;
     const input = body.input as Array<Record<string, unknown>>;
 

@@ -134,7 +134,9 @@ const targets = values.all
     : [];
 
 if (!targets.length) {
-  console.log("\nUsage: backfill.ts --all  OR  --session <id-prefix>  [--wipe]");
+  console.log(
+    "\nUsage: backfill.ts --all  OR  --session <id-prefix>  [--wipe]",
+  );
   process.exit(1);
 }
 
@@ -150,10 +152,14 @@ if (values.wipe) {
   const d = new Database(DB_PATH);
   for (const session of targets) {
     const { changes: delDist } = d
-      .query("DELETE FROM distillations WHERE project_id = ? AND session_id = ?")
+      .query(
+        "DELETE FROM distillations WHERE project_id = ? AND session_id = ?",
+      )
       .run(session.project_id, session.session_id);
     const { changes: resetMsgs } = d
-      .query("UPDATE temporal_messages SET distilled = 0 WHERE project_id = ? AND session_id = ?")
+      .query(
+        "UPDATE temporal_messages SET distilled = 0 WHERE project_id = ? AND session_id = ?",
+      )
       .run(session.project_id, session.session_id);
     console.log(
       `  ${session.session_id.substring(0, 16)}: deleted ${delDist} distillation(s), reset ${resetMsgs} message(s)`,
@@ -200,9 +206,7 @@ async function promptAndWait(
   const deadline = Date.now() + 120000;
   while (Date.now() < deadline) {
     await Bun.sleep(2000);
-    const msgs = await fetch(
-      `${BASE_URL}/session/${sessionID}/message`,
-    ).then(
+    const msgs = await fetch(`${BASE_URL}/session/${sessionID}/message`).then(
       (r) =>
         r.json() as Promise<
           Array<{
@@ -219,8 +223,6 @@ async function promptAndWait(
   }
   return "[TIMEOUT]";
 }
-
-
 
 for (const session of targets) {
   console.log(
@@ -242,7 +244,7 @@ for (const session of targets) {
 
   // Chunk into segments of ~50 messages (matching maxSegment config)
   const maxSegment = 50;
-  const segments: typeof msgs[] = [];
+  const segments: (typeof msgs)[] = [];
   for (let i = 0; i < msgs.length; i += maxSegment) {
     segments.push(msgs.slice(i, i + maxSegment));
   }

@@ -15,7 +15,10 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 import { dirname, resolve, join } from "node:path";
-import type { FixtureEntry, UpstreamInterceptor } from "../../gateway/src/recorder";
+import type {
+  FixtureEntry,
+  UpstreamInterceptor,
+} from "../../gateway/src/recorder";
 import type {
   EvalConfig,
   EvalResult,
@@ -124,10 +127,9 @@ export async function connectGateway(
     baseURL: "",
     isReal: false,
     async chat() {
-      return new Response(
-        JSON.stringify({ error: "No gateway available" }),
-        { status: 503 },
-      );
+      return new Response(JSON.stringify({ error: "No gateway available" }), {
+        status: 503,
+      });
     },
   };
 }
@@ -138,9 +140,7 @@ export async function connectGateway(
  */
 async function startFixtureGateway(): Promise<GatewayHandle> {
   // Dynamic import so fixture infra is only loaded when needed
-  const { createHarness } = await import(
-    "../../gateway/test/helpers/harness"
-  );
+  const { createHarness } = await import("../../gateway/test/helpers/harness");
   const { makeConversationFixtures } = await import(
     "../../gateway/test/helpers/fixtures"
   );
@@ -464,7 +464,7 @@ export async function buildLoreContext(
   // which uses: usable = contextLimit - outputReserved - overhead - ltmTokens
   const usable = Math.max(0, contextWindow - 32_000 - 8_000);
   const distilledBudget = Math.floor(usable * 0.25);
-  const rawBudget = Math.floor(usable * 0.40);
+  const rawBudget = Math.floor(usable * 0.4);
 
   try {
     const { db, ensureProject } = await import("@loreai/core");
@@ -478,7 +478,12 @@ export async function buildLoreContext(
       .query(
         "SELECT id, observations, generation, token_count FROM distillations WHERE project_id = ? AND archived = 0 ORDER BY created_at ASC",
       )
-      .all(pid) as Array<{ id: string; observations: string; generation: number; token_count: number }>;
+      .all(pid) as Array<{
+      id: string;
+      observations: string;
+      generation: number;
+      token_count: number;
+    }>;
 
     let distillTokens = 0;
     for (const d of distillations) {
@@ -499,7 +504,8 @@ export async function buildLoreContext(
       let tailTokens = 0;
       let cutoff = turns.length;
       for (let i = turns.length - 1; i >= 0; i--) {
-        const turnTokens = turns[i].tokens ?? estimateTokens(renderConversation([turns[i]]));
+        const turnTokens =
+          turns[i].tokens ?? estimateTokens(renderConversation([turns[i]]));
         if (tailTokens + turnTokens > rawBudget) {
           cutoff = i + 1;
           break;
@@ -516,7 +522,7 @@ export async function buildLoreContext(
     const context = parts.join("\n\n");
     console.log(
       `  [lore-context] Built ${estimateTokens(context)} tok: ${distillations.length} distillation(s) (${distillTokens} tok), ` +
-      `raw tail budget ${rawBudget} tok`,
+        `raw tail budget ${rawBudget} tok`,
     );
 
     return context;
@@ -604,8 +610,7 @@ async function askQuestionViaGateway(
     const resp = await gateway.chat(requestBody, {
       "x-lore-no-store": "true",
     });
-    const recallInvoked =
-      resp.headers.get("x-lore-recall-invoked") === "true";
+    const recallInvoked = resp.headers.get("x-lore-recall-invoked") === "true";
     const data = (await resp.json()) as {
       content?: Array<{ type: string; text?: string }>;
       usage?: {
@@ -652,8 +657,6 @@ async function askQuestionViaGateway(
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalCost: 0 },
   };
 }
-
-
 
 async function askQuestion(
   question: string,
@@ -718,9 +721,7 @@ async function replaySessionWithFixtures(
   gateway: GatewayHandle,
   config: EvalConfig,
 ): Promise<ReplayResult> {
-  const { setUpstreamInterceptor } = await import(
-    "../../gateway/src/pipeline"
-  );
+  const { setUpstreamInterceptor } = await import("../../gateway/src/pipeline");
 
   if (config.recordDir) {
     // --- RECORD MODE ---
@@ -745,9 +746,7 @@ async function replaySessionWithFixtures(
 
   if (config.replayDir) {
     // --- REPLAY MODE ---
-    const { getReplayInterceptor } = await import(
-      "../../gateway/src/recorder"
-    );
+    const { getReplayInterceptor } = await import("../../gateway/src/recorder");
 
     const fixturePath = join(
       config.replayDir,
@@ -783,7 +782,10 @@ async function replaySessionWithFixtures(
   //    own response which would be about fabrication/interruptions)
   // 2. Distillation processes the ground-truth content
   // 3. No upstream API calls during replay (saves cost)
-  const scriptedInterceptor = buildScriptedInterceptor(session.turns, config.model);
+  const scriptedInterceptor = buildScriptedInterceptor(
+    session.turns,
+    config.model,
+  );
   setUpstreamInterceptor(scriptedInterceptor);
 
   try {
@@ -935,7 +937,7 @@ export async function runScenario(
         const dist = await embedding.backfillDistillationEmbeddings();
         console.log(
           `  [embedding] post-replay backfill: ${kn} knowledge, ${dist} distillations` +
-          ` (available=${embedding.isAvailable()})`,
+            ` (available=${embedding.isAvailable()})`,
         );
       } catch (err) {
         console.warn("  Warning: post-replay embedding backfill failed:", err);
@@ -968,7 +970,9 @@ export async function runScenario(
       // (distillation + raw tail), not per question — it's the same for all questions.
       const isGatewayBaseline =
         gateway.isReal !== false &&
-        (mode === "lore" || mode === "lore-context-only" || mode === "lore-memory-only");
+        (mode === "lore" ||
+          mode === "lore-context-only" ||
+          mode === "lore-memory-only");
       const loreContext = isGatewayBaseline
         ? await buildLoreContext(allTurns)
         : "";
@@ -1052,9 +1056,7 @@ export async function runScenario(
 
 export async function runEval(config: EvalConfig): Promise<EvalResult[]> {
   const llm =
-    config.mode === "live"
-      ? createEvalLLMClient(resolveBackend())
-      : undefined;
+    config.mode === "live" ? createEvalLLMClient(resolveBackend()) : undefined;
 
   const gateway = await connectGateway(config);
   const allResults: EvalResult[] = [];
@@ -1080,9 +1082,7 @@ export async function runEval(config: EvalConfig): Promise<EvalResult[]> {
     }
 
     for (const scenario of scenarioModules) {
-      console.log(
-        `Running scenario: ${scenario.id} (${scenario.dimension})`,
-      );
+      console.log(`Running scenario: ${scenario.id} (${scenario.dimension})`);
       const results = await runScenario(scenario, config, gateway, llm);
       allResults.push(...results);
       console.log(

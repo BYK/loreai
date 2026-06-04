@@ -138,8 +138,12 @@ function buildStartOptions(values: {
   local?: boolean;
 }): StartOptions {
   // Flatten: each --host value may itself be comma-separated
-  const hosts = values.host
-    ?.flatMap((h) => h.split(",").map((s) => s.trim()).filter(Boolean));
+  const hosts = values.host?.flatMap((h) =>
+    h
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
   return {
     port: values.port ? parsePort(values.port) : undefined,
     hosts: hosts?.length ? hosts : undefined,
@@ -200,7 +204,7 @@ export async function _cli(): Promise<void> {
   // through the local provider, prints `ok dim=N` or a clear failure
   // message. Used by CI to catch regressions in the model load path
   // that --print-vendor-info wouldn't surface.
-   if (values["check-embeddings"]) {
+  if (values["check-embeddings"]) {
     const { embedding } = await import("@loreai/core");
     try {
       const [vec] = await embedding.embed(["hello world"], "query");
@@ -217,7 +221,10 @@ export async function _cli(): Promise<void> {
       console.error(
         `✗ embed failed: ${err instanceof Error ? err.message : String(err)}`,
       );
-      if (cause) console.error(`  cause: ${cause instanceof Error ? cause.stack ?? cause.message : String(cause)}`);
+      if (cause)
+        console.error(
+          `  cause: ${cause instanceof Error ? (cause.stack ?? cause.message) : String(cause)}`,
+        );
       process.exit(1);
     }
     return;
@@ -234,7 +241,13 @@ export async function _cli(): Promise<void> {
   const rest = positionals.slice(1);
 
   const startOpts = buildStartOptions(
-    values as { port?: string; host?: string[]; debug?: boolean; remote?: string; local?: boolean },
+    values as {
+      port?: string;
+      host?: string[];
+      debug?: boolean;
+      remote?: string;
+      local?: boolean;
+    },
   );
 
   // Start background update check (non-blocking).
@@ -321,33 +334,54 @@ export async function _cli(): Promise<void> {
           if (!knownBinaries.includes(command)) {
             // Not a known agent — likely a typo. Show a helpful error.
             const knownCommands = [
-              "start", "run", "setup", "data", "recall", "logs", "import", "entity", "upgrade", "help",
+              "start",
+              "run",
+              "setup",
+              "data",
+              "recall",
+              "logs",
+              "import",
+              "entity",
+              "upgrade",
+              "help",
               ...knownBinaries,
             ];
             // "Did you mean?" — use Levenshtein distance for robust matching
             function levenshtein(a: string, b: string): number {
-              const m = a.length, n = b.length;
+              const m = a.length,
+                n = b.length;
               const dp: number[][] = Array.from({ length: m + 1 }, (_, i) =>
-                Array.from({ length: n + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)),
+                Array.from({ length: n + 1 }, (_, j) =>
+                  i === 0 ? j : j === 0 ? i : 0,
+                ),
               );
               for (let i = 1; i <= m; i++)
                 for (let j = 1; j <= n; j++)
-                  dp[i][j] = a[i - 1] === b[j - 1]
-                    ? dp[i - 1][j - 1]
-                    : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+                  dp[i][j] =
+                    a[i - 1] === b[j - 1]
+                      ? dp[i - 1][j - 1]
+                      : 1 +
+                        Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
               return dp[m][n];
             }
             let suggestion: string | undefined;
             let bestDist = Infinity;
             for (const c of knownCommands) {
               const dist = levenshtein(command, c);
-              if (dist < bestDist && dist <= Math.max(2, Math.floor(command.length / 2))) {
+              if (
+                dist < bestDist &&
+                dist <= Math.max(2, Math.floor(command.length / 2))
+              ) {
                 bestDist = dist;
                 suggestion = c;
               }
             }
-            const hint = suggestion ? ` Did you mean "lore ${suggestion}"?` : "";
-            console.error(`Unknown command "${command}".${hint}\nRun "lore help" for available commands.`);
+            const hint = suggestion
+              ? ` Did you mean "lore ${suggestion}"?`
+              : "";
+            console.error(
+              `Unknown command "${command}".${hint}\nRun "lore help" for available commands.`,
+            );
             process.exitCode = 1;
             break;
           }

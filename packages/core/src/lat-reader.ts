@@ -15,7 +15,12 @@ import { remark } from "remark";
 import type { Root, Heading, Paragraph, Text } from "mdast";
 import { db, ensureProject } from "./db";
 import { sha256 } from "#db/driver";
-import { ftsQuery, extractTopTerms, EMPTY_QUERY, runRelaxedSearch } from "./search";
+import {
+  ftsQuery,
+  extractTopTerms,
+  EMPTY_QUERY,
+  runRelaxedSearch,
+} from "./search";
 import * as log from "./log";
 import { isHostedMode } from "./hosted";
 
@@ -79,13 +84,22 @@ function paragraphText(node: Paragraph): string {
  * Each heading creates a section; content is everything between headings.
  * Section IDs use the lat.md convention: `file#Heading#SubHeading`.
  */
-export function parseSections(filePath: string, content: string, projectRoot: string): ParsedSection[] {
+export function parseSections(
+  filePath: string,
+  content: string,
+  projectRoot: string,
+): ParsedSection[] {
   const tree = processor.parse(content) as Root;
   const fileRel = relative(projectRoot, filePath).replace(/\.md$/, "");
   const lines = content.split("\n");
 
   // Collect headings with positions
-  const headings: Array<{ node: Heading; text: string; line: number; depth: number }> = [];
+  const headings: Array<{
+    node: Heading;
+    text: string;
+    line: number;
+    depth: number;
+  }> = [];
   for (const node of tree.children) {
     if (node.type === "heading" && node.position) {
       headings.push({
@@ -118,7 +132,8 @@ export function parseSections(filePath: string, content: string, projectRoot: st
 
     // Content: lines from after this heading to before the next heading (or EOF)
     const startLine = line; // 1-indexed
-    const endLine = i + 1 < headings.length ? headings[i + 1].line - 1 : lines.length;
+    const endLine =
+      i + 1 < headings.length ? headings[i + 1].line - 1 : lines.length;
 
     // Skip the heading line itself, collect content
     const contentLines = lines.slice(startLine, endLine);
@@ -129,7 +144,11 @@ export function parseSections(filePath: string, content: string, projectRoot: st
     for (const node of tree.children) {
       if (!node.position) continue;
       if (node.position.start.line <= startLine) continue;
-      if (i + 1 < headings.length && node.position.start.line >= headings[i + 1].line) break;
+      if (
+        i + 1 < headings.length &&
+        node.position.start.line >= headings[i + 1].line
+      )
+        break;
       if (node.type === "paragraph") {
         const text = paragraphText(node);
         firstParagraph = text.length > 250 ? text.slice(0, 250) : text;
@@ -225,8 +244,12 @@ export function refresh(projectPath: string): number {
 
     // Check if any section from this file already has this hash
     const existing = db()
-      .query("SELECT content_hash FROM lat_sections WHERE project_id = ? AND file = ? LIMIT 1")
-      .get(pid, fileRel.replace(/\.md$/, "")) as { content_hash: string } | null;
+      .query(
+        "SELECT content_hash FROM lat_sections WHERE project_id = ? AND file = ? LIMIT 1",
+      )
+      .get(pid, fileRel.replace(/\.md$/, "")) as {
+      content_hash: string;
+    } | null;
 
     if (existing && existing.content_hash === hash) {
       continue; // File unchanged
@@ -257,20 +280,26 @@ export function refresh(projectPath: string): number {
   }
 
   // Cleanup: remove sections from files that no longer exist
-  const seenFileStems = new Set([...seenFiles].map((f) => f.replace(/\.md$/, "")));
+  const seenFileStems = new Set(
+    [...seenFiles].map((f) => f.replace(/\.md$/, "")),
+  );
   const allFiles = db()
     .query("SELECT DISTINCT file FROM lat_sections WHERE project_id = ?")
     .all(pid) as Array<{ file: string }>;
 
   for (const row of allFiles) {
     if (!seenFileStems.has(row.file)) {
-      db().query("DELETE FROM lat_sections WHERE project_id = ? AND file = ?").run(pid, row.file);
+      db()
+        .query("DELETE FROM lat_sections WHERE project_id = ? AND file = ?")
+        .run(pid, row.file);
       log.info(`lat-reader: removed sections for deleted file ${row.file}`);
     }
   }
 
   if (upserted > 0) {
-    log.info(`lat-reader: indexed ${upserted} sections from ${files.length} files`);
+    log.info(
+      `lat-reader: indexed ${upserted} sections from ${files.length} files`,
+    );
   }
 
   return upserted;
@@ -299,8 +328,10 @@ export function searchScored(input: {
        ORDER BY rank LIMIT ?`;
 
   try {
-    return runRelaxedSearch(input.query, (matchExpr) =>
-      db().query(ftsSQL).all(matchExpr, pid, limit) as ScoredLatSection[],
+    return runRelaxedSearch(
+      input.query,
+      (matchExpr) =>
+        db().query(ftsSQL).all(matchExpr, pid, limit) as ScoredLatSection[],
     );
   } catch {
     return [];
@@ -353,7 +384,9 @@ export function scoreForSession(
 
   for (const entry of results) {
     if (used >= maxTokens) break;
-    const cost = estimateTokens(entry.heading + (entry.first_paragraph ?? entry.content)) + 5;
+    const cost =
+      estimateTokens(entry.heading + (entry.first_paragraph ?? entry.content)) +
+      5;
     if (used + cost > maxTokens) continue;
     packed.push(entry);
     used += cost;

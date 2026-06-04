@@ -12,11 +12,7 @@
  *   lore recall "query string" [--project <path>] [--scope <scope>] [--limit <n>] [--json]
  */
 import { resolve } from "path";
-import {
-  getRemoteUrl,
-  projectQueryParams,
-  remoteGet,
-} from "./remote";
+import { getRemoteUrl, projectQueryParams, remoteGet } from "./remote";
 
 export async function commandRecall(
   positionals: string[],
@@ -43,7 +39,9 @@ Options:
   const asJson = !!values.json;
 
   if (scope === "session" && !sessionID) {
-    console.error("Error: --session <id> is required when --scope session is used.");
+    console.error(
+      "Error: --session <id> is required when --scope session is used.",
+    );
     process.exit(1);
   }
 
@@ -55,9 +53,12 @@ Options:
       let apiPath = `/api/v1/recall?q=${encodeURIComponent(query)}&${pq}&scope=${scope}&limit=${limit}`;
       if (sessionID) apiPath += `&session=${encodeURIComponent(sessionID)}`;
 
-      const data = await remoteGet<{ query: string; scope: string; projectPath: string; result: string }>(
-        remote, apiPath,
-      );
+      const data = await remoteGet<{
+        query: string;
+        scope: string;
+        projectPath: string;
+        result: string;
+      }>(remote, apiPath);
 
       if (asJson) {
         console.log(JSON.stringify(data, null, 2));
@@ -65,7 +66,9 @@ Options:
         console.log(data.result);
       }
     } catch (err) {
-      console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+      console.error(
+        `Error: ${err instanceof Error ? err.message : String(err)}`,
+      );
       process.exit(1);
     }
     return;
@@ -91,14 +94,14 @@ Options:
     });
 
     if (asJson) {
-      console.log(JSON.stringify({ query, scope, projectPath, result }, null, 2));
+      console.log(
+        JSON.stringify({ query, scope, projectPath, result }, null, 2),
+      );
     } else {
       console.log(result);
     }
   } catch (err) {
-    console.error(
-      `Error: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
   }
 }

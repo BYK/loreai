@@ -8,11 +8,7 @@
  *   explicit config override > session model fallback.
  */
 
-import {
-  workerModel,
-  config as loreConfig,
-  log,
-} from "@loreai/core";
+import { workerModel, config as loreConfig, log } from "@loreai/core";
 
 // ---------------------------------------------------------------------------
 // Cost lookup — models.dev
@@ -39,7 +35,12 @@ const SUPPORTED_PROVIDERS = ["anthropic", "openai"] as const;
 /** Shape of a model entry in the models.dev JSON API. */
 export type ModelsDevEntry = {
   id: string;
-  cost?: { input?: number; output?: number; cache_read?: number; cache_write?: number };
+  cost?: {
+    input?: number;
+    output?: number;
+    cache_read?: number;
+    cache_write?: number;
+  };
   limit?: { context?: number; output?: number };
 };
 
@@ -68,12 +69,52 @@ const FALLBACK_PRICING: Array<{
   outputLimit: number;
 }> = [
   // Session models that trigger cost-aware worker selection (input ≥ $1.50/M)
-  { prefix: "claude-opus-4", input: 5, output: 25, cache_read: 0.5, cache_write: 6.25, context: 1_000_000, outputLimit: 128_000 },
-  { prefix: "gpt-5.4", input: 2.5, output: 15, cache_read: 0.625, cache_write: 3.125, context: 1_050_000, outputLimit: 100_000 },
-  { prefix: "gpt-5.5", input: 5, output: 30, cache_read: 1.25, cache_write: 6.25, context: 1_050_000, outputLimit: 100_000 },
+  {
+    prefix: "claude-opus-4",
+    input: 5,
+    output: 25,
+    cache_read: 0.5,
+    cache_write: 6.25,
+    context: 1_000_000,
+    outputLimit: 128_000,
+  },
+  {
+    prefix: "gpt-5.4",
+    input: 2.5,
+    output: 15,
+    cache_read: 0.625,
+    cache_write: 3.125,
+    context: 1_050_000,
+    outputLimit: 100_000,
+  },
+  {
+    prefix: "gpt-5.5",
+    input: 5,
+    output: 30,
+    cache_read: 1.25,
+    cache_write: 6.25,
+    context: 1_050_000,
+    outputLimit: 100_000,
+  },
   // Worker model defaults
-  { prefix: "claude-sonnet-4", input: 3, output: 15, cache_read: 0.3, cache_write: 3.75, context: 1_000_000, outputLimit: 64_000 },
-  { prefix: "gpt-5.4-mini", input: 0.75, output: 4.5, cache_read: 0.19, cache_write: 0.94, context: 400_000, outputLimit: 100_000 },
+  {
+    prefix: "claude-sonnet-4",
+    input: 3,
+    output: 15,
+    cache_read: 0.3,
+    cache_write: 3.75,
+    context: 1_000_000,
+    outputLimit: 64_000,
+  },
+  {
+    prefix: "gpt-5.4-mini",
+    input: 0.75,
+    output: 4.5,
+    cache_read: 0.19,
+    cache_write: 0.94,
+    context: 400_000,
+    outputLimit: 100_000,
+  },
 ];
 
 function fallbackEntry(modelID: string): ModelsDevEntry {
@@ -81,7 +122,12 @@ function fallbackEntry(modelID: string): ModelsDevEntry {
     if (modelID.startsWith(fb.prefix)) {
       return {
         id: modelID,
-        cost: { input: fb.input, output: fb.output, cache_read: fb.cache_read, cache_write: fb.cache_write },
+        cost: {
+          input: fb.input,
+          output: fb.output,
+          cache_read: fb.cache_read,
+          cache_write: fb.cache_write,
+        },
         limit: { context: fb.context, output: fb.outputLimit },
       };
     }
@@ -114,11 +160,15 @@ export function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10_000);
 
-      const response = await fetch(MODELS_DEV_API, { signal: controller.signal });
+      const response = await fetch(MODELS_DEV_API, {
+        signal: controller.signal,
+      });
       clearTimeout(timeout);
 
       if (!response.ok) {
-        log.warn(`models.dev API failed: ${response.status} ${response.statusText}`);
+        log.warn(
+          `models.dev API failed: ${response.status} ${response.statusText}`,
+        );
         return cachedModelData ?? new Map();
       }
 
@@ -145,7 +195,9 @@ export function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
       cachedModelData = modelData;
       cachedModelDataAt = Date.now();
 
-      log.info(`models.dev: loaded data for ${modelData.size} models across ${SUPPORTED_PROVIDERS.join(", ")}`);
+      log.info(
+        `models.dev: loaded data for ${modelData.size} models across ${SUPPORTED_PROVIDERS.join(", ")}`,
+      );
       return modelData;
     } catch (e) {
       log.warn("models.dev API error:", e);
@@ -241,7 +293,10 @@ export function clearModelDataCache(): void {
  * Untested (API returned no response via OpenCode SDK):
  *   xAI, Mistral — fall back to session model
  */
-const WORKER_DEFAULTS: Record<string, { providerID: string; modelID: string; alreadyCheap: (id: string) => boolean }> = {
+const WORKER_DEFAULTS: Record<
+  string,
+  { providerID: string; modelID: string; alreadyCheap: (id: string) => boolean }
+> = {
   // Anthropic: sonnet-4-6 matches opus quality on distillation at 40% lower cost
   anthropic: {
     providerID: "anthropic",
@@ -258,7 +313,11 @@ const WORKER_DEFAULTS: Record<string, { providerID: string; modelID: string; alr
   "github-copilot": {
     providerID: "github-copilot",
     modelID: "gpt-5.4-mini", // default; overridden by _resolveGitHubCopilotWorker
-    alreadyCheap: (id) => id.includes("mini") || id.includes("nano") || id.includes("flash") || id.includes("haiku"),
+    alreadyCheap: (id) =>
+      id.includes("mini") ||
+      id.includes("nano") ||
+      id.includes("flash") ||
+      id.includes("haiku"),
   },
 };
 
@@ -274,13 +333,19 @@ const EXPENSIVE_MODEL_THRESHOLD = 1.5;
  * extra cost). For other providers, we fall back to the session model
  * rather than risk calling a provider that may not be configured.
  */
-const GENERAL_FALLBACK_WORKER = { providerID: "github-copilot", modelID: "gpt-5.4-mini" };
+const GENERAL_FALLBACK_WORKER = {
+  providerID: "github-copilot",
+  modelID: "gpt-5.4-mini",
+};
 
 /**
  * For GitHub Copilot sessions, pick the worker based on which provider family
  * the session model belongs to (detected via model ID prefix).
  */
-function resolveGitHubCopilotWorker(sessionModelID: string): { providerID: string; modelID: string } {
+function resolveGitHubCopilotWorker(sessionModelID: string): {
+  providerID: string;
+  modelID: string;
+} {
   if (sessionModelID.startsWith("claude-")) {
     return { providerID: "github-copilot", modelID: "claude-sonnet-4.6" };
   }
@@ -298,7 +363,9 @@ function resolveGitHubCopilotWorker(sessionModelID: string): { providerID: strin
  *  3. General fallback (GPT-5.4-mini) for unknown providers
  *  4. Config model fallback (session model)
  */
-export function getWorkerModel(): { providerID: string; modelID: string } | undefined {
+export function getWorkerModel():
+  | { providerID: string; modelID: string }
+  | undefined {
   // Env var override — highest priority. Useful for global worker model
   // configuration without per-project .lore.json (e.g. routing all workers
   // to MiniMax). Format: "providerID/modelID" or just "modelID" (defaults
@@ -307,7 +374,10 @@ export function getWorkerModel(): { providerID: string; modelID: string } | unde
   if (envModel) {
     const slashIdx = envModel.indexOf("/");
     if (slashIdx > 0) {
-      return { providerID: envModel.slice(0, slashIdx), modelID: envModel.slice(slashIdx + 1) };
+      return {
+        providerID: envModel.slice(0, slashIdx),
+        modelID: envModel.slice(slashIdx + 1),
+      };
     }
     // No slash — assume anthropic provider (most common case)
     return { providerID: "anthropic", modelID: envModel };
@@ -330,7 +400,10 @@ export function getWorkerModel(): { providerID: string; modelID: string } | unde
       } else {
         const mapping = WORKER_DEFAULTS[providerID];
         if (mapping && !mapping.alreadyCheap(cfg.model.modelID)) {
-          costAwareDefault = { providerID: mapping.providerID, modelID: mapping.modelID };
+          costAwareDefault = {
+            providerID: mapping.providerID,
+            modelID: mapping.modelID,
+          };
         }
         // Unknown providers (Google, xAI, Mistral, etc.): fall back to session
         // model rather than calling a provider that may not be configured.

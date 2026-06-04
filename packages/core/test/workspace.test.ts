@@ -18,7 +18,10 @@ function makeTempDir(): string {
   if (!tempBase) {
     tempBase = mkdtempSync(join(tmpdir(), "lore-workspace-test-"));
   }
-  const dir = join(tempBase, `test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  const dir = join(
+    tempBase,
+    `test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  );
   mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -39,7 +42,11 @@ beforeEach(() => {
 
 afterAll(() => {
   if (tempBase) {
-    try { rmSync(tempBase, { recursive: true, force: true }); } catch { /* ok */ }
+    try {
+      rmSync(tempBase, { recursive: true, force: true });
+    } catch {
+      /* ok */
+    }
   }
 });
 
@@ -190,7 +197,10 @@ describe("discoverWorkspaceRoot", () => {
   test(".lore.json without workspaces is not a workspace signal", () => {
     const root = makeTempDir();
     // .lore.json exists but has no workspaces field
-    writeFileSync(join(root, ".lore.json"), JSON.stringify({ crossProject: true }));
+    writeFileSync(
+      join(root, ".lore.json"),
+      JSON.stringify({ crossProject: true }),
+    );
     const sub = join(root, "project");
     mkdirSync(sub, { recursive: true });
     // No definitive marker, no language marker → returns startDir
@@ -199,10 +209,7 @@ describe("discoverWorkspaceRoot", () => {
 
   test(".lore.json with empty workspaces array is not a signal", () => {
     const root = makeTempDir();
-    writeFileSync(
-      join(root, ".lore.json"),
-      JSON.stringify({ workspaces: [] }),
-    );
+    writeFileSync(join(root, ".lore.json"), JSON.stringify({ workspaces: [] }));
     const sub = join(root, "project");
     mkdirSync(sub, { recursive: true });
     expect(discoverWorkspaceRoot(sub)).toBe(sub);
@@ -350,7 +357,9 @@ describe("resolveWorkspaces", () => {
     mkdirSync(sibling, { recursive: true });
 
     try {
-      const result = resolveWorkspaces(root, ["../sibling-" + sibling.split("-").pop()]);
+      const result = resolveWorkspaces(root, [
+        "../sibling-" + sibling.split("-").pop(),
+      ]);
       expect(result).toEqual([]);
     } finally {
       rmSync(sibling, { recursive: true, force: true });

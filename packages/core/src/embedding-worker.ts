@@ -55,7 +55,10 @@ const OOM_MAX_RETRIES = 3;
 /** The transformers.js pipeline instance, typed loosely since the exact
  *  return type depends on the pipeline task. */
 type FeatureExtractionPipeline = {
-  (texts: string[], options?: Record<string, unknown>): Promise<{
+  (
+    texts: string[],
+    options?: Record<string, unknown>,
+  ): Promise<{
     dims: number[];
     data: Float32Array;
     tolist(): number[][];
@@ -68,12 +71,25 @@ let tokenizer: {
   encode(text: string, options?: Record<string, unknown>): number[];
   decode(ids: number[] | bigint[], options?: Record<string, unknown>): string;
 } | null = null;
-let layerNormFn: ((input: unknown, normalized_shape: number[]) => {
-  dims: number[];
-  data: Float32Array;
-  normalize(p: number, dim: number): { tolist(): number[][]; data: Float32Array; dims: number[] };
-  slice(...args: unknown[]): { normalize(p: number, dim: number): { tolist(): number[][]; data: Float32Array; dims: number[] } };
-}) | null = null;
+let layerNormFn:
+  | ((
+      input: unknown,
+      normalized_shape: number[],
+    ) => {
+      dims: number[];
+      data: Float32Array;
+      normalize(
+        p: number,
+        dim: number,
+      ): { tolist(): number[][]; data: Float32Array; dims: number[] };
+      slice(...args: unknown[]): {
+        normalize(
+          p: number,
+          dim: number,
+        ): { tolist(): number[][]; data: Float32Array; dims: number[] };
+      };
+    })
+  | null = null;
 let initPromise: Promise<void> | null = null;
 let initFailed = false;
 let initError: string | null = null;
@@ -85,7 +101,8 @@ let initError: string | null = null;
  */
 async function ensurePipeline(): Promise<void> {
   if (pipe) return;
-  if (initFailed) throw new Error(initError ?? "pipeline init previously failed");
+  if (initFailed)
+    throw new Error(initError ?? "pipeline init previously failed");
 
   if (!initPromise) {
     initPromise = (async () => {
@@ -117,7 +134,8 @@ async function ensurePipeline(): Promise<void> {
 
       // Stash a reference to the pipeline's tokenizer for token-level
       // truncation during OOM retries.
-      tokenizer = (pipe as unknown as { tokenizer: typeof tokenizer }).tokenizer;
+      tokenizer = (pipe as unknown as { tokenizer: typeof tokenizer })
+        .tokenizer;
 
       layerNormFn = layer_norm as typeof layerNormFn;
     })().catch((err) => {
@@ -254,8 +272,7 @@ async function runInference(texts: string[]): Promise<Float32Array[]> {
       .normalize(2, -1);
   } else {
     // layer_norm → L2 normalize (no truncation)
-    normalized = layerNormFn!(output, [fullDim])
-      .normalize(2, -1);
+    normalized = layerNormFn!(output, [fullDim]).normalize(2, -1);
   }
 
   // Extract per-text vectors from the batched tensor.
@@ -309,7 +326,7 @@ async function processEmbed(req: EmbedRequest): Promise<void> {
           texts = truncateTexts(req.texts, maxTokens);
           console.warn(
             `[lore] ONNX OOM on attempt ${attempt + 1}, retrying with ≤${maxTokens} tokens ` +
-            `(batch=${req.texts.length}, longest≈${Math.max(...req.texts.map((t) => t.length))} chars)`,
+              `(batch=${req.texts.length}, longest≈${Math.max(...req.texts.map((t) => t.length))} chars)`,
           );
         }
       }
@@ -328,7 +345,11 @@ async function processEmbed(req: EmbedRequest): Promise<void> {
       // request and exit the worker so the main thread marks the provider
       // as broken and stops sending work.
       if (isWasmFatalError(raw)) {
-        post({ type: "error", id: req.id, error: `WASM fatal error (worker exiting): ${raw}` });
+        post({
+          type: "error",
+          id: req.id,
+          error: `WASM fatal error (worker exiting): ${raw}`,
+        });
         process.exit(1);
         return; // unreachable, but makes intent clear
       }

@@ -55,17 +55,26 @@ function injectEmbedding(entryId: string, seed: number, dims = 768): void {
   for (let i = 0; i < dims; i++) vec[i] /= norm;
 
   const blob = Buffer.from(vec.buffer);
-  db().query("UPDATE knowledge SET embedding = ? WHERE id = ?").run(blob, entryId);
+  db()
+    .query("UPDATE knowledge SET embedding = ? WHERE id = ?")
+    .run(blob, entryId);
 }
 
 /**
  * Inject an embedding that is a slight perturbation of another seed's vector.
  * This creates vectors with high cosine similarity.
  */
-function injectSimilarEmbedding(entryId: string, baseSeed: number, perturbation: number, dims = 768): void {
+function injectSimilarEmbedding(
+  entryId: string,
+  baseSeed: number,
+  perturbation: number,
+  dims = 768,
+): void {
   const vec = new Float32Array(dims);
   for (let i = 0; i < dims; i++) {
-    vec[i] = Math.sin(baseSeed * (i + 1) * 0.1) + perturbation * Math.cos((i + 1) * 0.3);
+    vec[i] =
+      Math.sin(baseSeed * (i + 1) * 0.1) +
+      perturbation * Math.cos((i + 1) * 0.3);
   }
   let norm = 0;
   for (let i = 0; i < dims; i++) norm += vec[i] * vec[i];
@@ -73,7 +82,9 @@ function injectSimilarEmbedding(entryId: string, baseSeed: number, perturbation:
   for (let i = 0; i < dims; i++) vec[i] /= norm;
 
   const blob = Buffer.from(vec.buffer);
-  db().query("UPDATE knowledge SET embedding = ? WHERE id = ?").run(blob, entryId);
+  db()
+    .query("UPDATE knowledge SET embedding = ? WHERE id = ?")
+    .run(blob, entryId);
 }
 
 /** Clean up all knowledge and feedback data between tests. */
@@ -106,8 +117,12 @@ describe("dedup — core _dedup()", () => {
 
   test("two entries with identical long titles → one cluster via title overlap", async () => {
     // Titles with enough meaningful words to pass fuzzy dedup
-    const id1 = createEntry({ title: "Cache warming time slot buckets hardcoded values" });
-    const id2 = createEntry({ title: "Cache warming time slot buckets hardcoded values duplicate" });
+    const id1 = createEntry({
+      title: "Cache warming time slot buckets hardcoded values",
+    });
+    const id2 = createEntry({
+      title: "Cache warming time slot buckets hardcoded values duplicate",
+    });
 
     const result = await ltm.deduplicate(PROJECT, { dryRun: true });
     expect(result.clusters).toHaveLength(1);
@@ -123,8 +138,12 @@ describe("dedup — core _dedup()", () => {
   });
 
   test("dryRun: true does not delete entries", async () => {
-    const id1 = createEntry({ title: "Cache warming time slot buckets hardcoded values" });
-    const id2 = createEntry({ title: "Cache warming time slot buckets hardcoded values duplicate" });
+    const id1 = createEntry({
+      title: "Cache warming time slot buckets hardcoded values",
+    });
+    const id2 = createEntry({
+      title: "Cache warming time slot buckets hardcoded values duplicate",
+    });
 
     await ltm.deduplicate(PROJECT, { dryRun: true });
     // Both entries should still exist
@@ -215,9 +234,15 @@ describe("dedup — core _dedup()", () => {
     // A matches B via title overlap, B matches C via title overlap,
     // but A does NOT match C. Star clustering should prevent A and C
     // from being in the same cluster.
-    const idA = createEntry({ title: "Gateway recall follow-up causes double cache write problem" });
-    const idB = createEntry({ title: "Recall follow-up causes double cache write duplication" });
-    const idC = createEntry({ title: "Double cache write from streaming translator duplication" });
+    const idA = createEntry({
+      title: "Gateway recall follow-up causes double cache write problem",
+    });
+    const idB = createEntry({
+      title: "Recall follow-up causes double cache write duplication",
+    });
+    const idC = createEntry({
+      title: "Double cache write from streaming translator duplication",
+    });
 
     const result = await ltm.deduplicate(PROJECT, { dryRun: true });
 
@@ -280,13 +305,19 @@ describe("dedup — feedback recording", () => {
 
     ltm.recordDedupFeedback({
       projectId: pidA,
-      entryATitle: "A1", entryBTitle: "A2",
-      similarity: 0.93, accepted: true, source: "cli_yes",
+      entryATitle: "A1",
+      entryBTitle: "A2",
+      similarity: 0.93,
+      accepted: true,
+      source: "cli_yes",
     });
     ltm.recordDedupFeedback({
       projectId: pidB,
-      entryATitle: "B1", entryBTitle: "B2",
-      similarity: 0.94, accepted: false, source: "cli_interactive",
+      entryATitle: "B1",
+      entryBTitle: "B2",
+      similarity: 0.94,
+      accepted: false,
+      source: "cli_interactive",
     });
 
     const feedbackA = ltm.getDedupFeedback(pidA);
@@ -304,8 +335,11 @@ describe("dedup — feedback recording", () => {
     for (let i = 0; i < 5; i++) {
       ltm.recordDedupFeedback({
         projectId: pid,
-        entryATitle: `A${i}`, entryBTitle: `B${i}`,
-        similarity: 0.9 + i * 0.01, accepted: true, source: "auto_dedup",
+        entryATitle: `A${i}`,
+        entryBTitle: `B${i}`,
+        similarity: 0.9 + i * 0.01,
+        accepted: true,
+        source: "auto_dedup",
       });
     }
 
@@ -313,8 +347,12 @@ describe("dedup — feedback recording", () => {
   });
 
   test("recordDedupResultFeedback stores one row per merged pair", async () => {
-    const id1 = createEntry({ title: "Cache warming time slot buckets hardcoded values" });
-    const id2 = createEntry({ title: "Cache warming time slot buckets hardcoded values extra" });
+    const id1 = createEntry({
+      title: "Cache warming time slot buckets hardcoded values",
+    });
+    const id2 = createEntry({
+      title: "Cache warming time slot buckets hardcoded values extra",
+    });
     // Inject identical embeddings so they get a similarity score
     injectEmbedding(id1, 42);
     injectEmbedding(id2, 42);
@@ -398,7 +436,8 @@ describe("dedup — feedback recording", () => {
     const sim23 = result.pairSimilarities.get(pk23);
 
     // At least one of the non-merged pairs should have sim >= 0.80
-    const hasHighSimPair = (sim13 != null && sim13 >= 0.80) || (sim23 != null && sim23 >= 0.80);
+    const hasHighSimPair =
+      (sim13 != null && sim13 >= 0.8) || (sim23 != null && sim23 >= 0.8);
     expect(hasHighSimPair).toBe(true);
 
     const pid = ensureProject(PROJECT);
@@ -428,7 +467,7 @@ describe("dedup — feedback recording", () => {
     // Should not record any signals for very dissimilar pairs
     const feedback = ltm.getDedupFeedback(pid);
     for (const f of feedback) {
-      expect(f.similarity).toBeGreaterThanOrEqual(0.80);
+      expect(f.similarity).toBeGreaterThanOrEqual(0.8);
     }
   });
 
@@ -441,8 +480,12 @@ describe("dedup — feedback recording", () => {
     const result = await ltm.deduplicate(PROJECT, { dryRun: false });
     // One entry was deleted, but entryTitles should still have both
     expect(result.entryTitles.size).toBe(2);
-    expect(result.entryTitles.get(id1)).toBe("Entry title alpha for titles test");
-    expect(result.entryTitles.get(id2)).toBe("Entry title beta for titles test");
+    expect(result.entryTitles.get(id1)).toBe(
+      "Entry title alpha for titles test",
+    );
+    expect(result.entryTitles.get(id2)).toBe(
+      "Entry title beta for titles test",
+    );
   });
 });
 
@@ -528,10 +571,10 @@ describe("dedup — threshold calibration", () => {
     // All similarities very close together
     const rows: Array<{ similarity: number; accepted: boolean }> = [];
     for (let i = 0; i < 10; i++) {
-      rows.push({ similarity: 0.930 + i * 0.001, accepted: false }); // 0.930 - 0.939
+      rows.push({ similarity: 0.93 + i * 0.001, accepted: false }); // 0.930 - 0.939
     }
     for (let i = 0; i < 12; i++) {
-      rows.push({ similarity: 0.940 + i * 0.001, accepted: true }); // 0.940 - 0.951
+      rows.push({ similarity: 0.94 + i * 0.001, accepted: true }); // 0.940 - 0.951
     }
     seedFeedback(pid, rows);
 
@@ -546,7 +589,7 @@ describe("dedup — threshold calibration", () => {
     const pid = ensureProject(PROJECT);
     // All accepts with very low similarities → threshold would go below 0.85
     const rows = Array.from({ length: 25 }, (_, i) => ({
-      similarity: 0.80 + i * 0.002,
+      similarity: 0.8 + i * 0.002,
       accepted: true,
     }));
     seedFeedback(pid, rows);
@@ -566,8 +609,8 @@ describe("dedup — threshold calibration", () => {
       rows.push({ similarity: 0.87 + i * 0.005, accepted: false });
     }
     // Overlap zone: mix of accept/reject around 0.92
-    rows.push({ similarity: 0.920, accepted: false });
-    rows.push({ similarity: 0.920, accepted: true });
+    rows.push({ similarity: 0.92, accepted: false });
+    rows.push({ similarity: 0.92, accepted: true });
     rows.push({ similarity: 0.925, accepted: false });
     rows.push({ similarity: 0.925, accepted: true });
     // Mostly accepts above 0.93
@@ -579,7 +622,7 @@ describe("dedup — threshold calibration", () => {
     const threshold = ltm.calibrateDedupThreshold(pid);
     expect(threshold).not.toBeNull();
     // Should still find something in the 0.90-0.93 range despite noise
-    expect(threshold!).toBeGreaterThanOrEqual(0.90);
+    expect(threshold!).toBeGreaterThanOrEqual(0.9);
     expect(threshold!).toBeLessThanOrEqual(0.95);
   });
 
@@ -589,7 +632,7 @@ describe("dedup — threshold calibration", () => {
     // midpoints that all achieve the same accuracy
     const rows: Array<{ similarity: number; accepted: boolean }> = [];
     for (let i = 0; i < 10; i++) {
-      rows.push({ similarity: 0.90, accepted: false });
+      rows.push({ similarity: 0.9, accepted: false });
     }
     for (let i = 0; i < 10; i++) {
       rows.push({ similarity: 0.95, accepted: true });
@@ -698,7 +741,7 @@ describe("dedup — feedback pruning", () => {
         projectId: pid,
         entryATitle: `A-${i}`,
         entryBTitle: `B-${i}`,
-        similarity: 0.90 + (i % 10) * 0.005,
+        similarity: 0.9 + (i % 10) * 0.005,
         accepted: i % 2 === 0,
         source: "auto_dedup",
       });
@@ -735,16 +778,22 @@ describe("dedup — feedback pruning", () => {
     for (let i = 0; i < 510; i++) {
       ltm.recordDedupFeedback({
         projectId: pidA,
-        entryATitle: `A-${i}`, entryBTitle: `B-${i}`,
-        similarity: 0.93, accepted: true, source: "auto_dedup",
+        entryATitle: `A-${i}`,
+        entryBTitle: `B-${i}`,
+        similarity: 0.93,
+        accepted: true,
+        source: "auto_dedup",
       });
     }
     // Project B: 5 rows
     for (let i = 0; i < 5; i++) {
       ltm.recordDedupFeedback({
         projectId: pidB,
-        entryATitle: `A-${i}`, entryBTitle: `B-${i}`,
-        similarity: 0.94, accepted: false, source: "cli_interactive",
+        entryATitle: `A-${i}`,
+        entryBTitle: `B-${i}`,
+        similarity: 0.94,
+        accepted: false,
+        source: "cli_interactive",
       });
     }
 
@@ -762,7 +811,9 @@ describe("dedup — feedback pruning", () => {
 describe("dedup — DB migration", () => {
   test("dedup_feedback table exists", () => {
     const row = db()
-      .query("SELECT name FROM sqlite_master WHERE type='table' AND name='dedup_feedback'")
+      .query(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='dedup_feedback'",
+      )
       .get() as { name: string } | null;
     expect(row).not.toBeNull();
     expect(row!.name).toBe("dedup_feedback");
@@ -789,6 +840,8 @@ describe("dedup — DB migration", () => {
     expect(row.source).toBe("auto_dedup");
 
     // Cleanup
-    db().query("DELETE FROM dedup_feedback WHERE project_id = 'test-pid'").run();
+    db()
+      .query("DELETE FROM dedup_feedback WHERE project_id = 'test-pid'")
+      .run();
   });
 });

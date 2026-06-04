@@ -394,20 +394,29 @@ describe("circuit breaker", () => {
   });
 
   test("does not trip on successful cache reads", () => {
-    const result = makeWarmupResult({ cacheReadTokens: 50000, cacheCreationTokens: 0 });
+    const result = makeWarmupResult({
+      cacheReadTokens: 50000,
+      cacheCreationTokens: 0,
+    });
     expect(checkCircuitBreaker(result)).toBe(false);
     expect(isCircuitBreakerTripped()).toBe(false);
   });
 
   test("counts uncached warmups", () => {
-    const bad = makeWarmupResult({ cacheReadTokens: 0, cacheCreationTokens: 50000 });
+    const bad = makeWarmupResult({
+      cacheReadTokens: 0,
+      cacheCreationTokens: 50000,
+    });
     expect(checkCircuitBreaker(bad)).toBe(false); // 1st failure
     expect(checkCircuitBreaker(bad)).toBe(false); // 2nd failure
     expect(isCircuitBreakerTripped()).toBe(false);
   });
 
   test("trips after 3 consecutive uncached warmups", () => {
-    const bad = makeWarmupResult({ cacheReadTokens: 0, cacheCreationTokens: 50000 });
+    const bad = makeWarmupResult({
+      cacheReadTokens: 0,
+      cacheCreationTokens: 50000,
+    });
     checkCircuitBreaker(bad); // 1
     checkCircuitBreaker(bad); // 2
     const tripped = checkCircuitBreaker(bad); // 3
@@ -416,8 +425,14 @@ describe("circuit breaker", () => {
   });
 
   test("resets failure count on successful read", () => {
-    const bad = makeWarmupResult({ cacheReadTokens: 0, cacheCreationTokens: 50000 });
-    const good = makeWarmupResult({ cacheReadTokens: 50000, cacheCreationTokens: 0 });
+    const bad = makeWarmupResult({
+      cacheReadTokens: 0,
+      cacheCreationTokens: 50000,
+    });
+    const good = makeWarmupResult({
+      cacheReadTokens: 50000,
+      cacheCreationTokens: 0,
+    });
 
     checkCircuitBreaker(bad); // 1
     checkCircuitBreaker(bad); // 2
@@ -428,8 +443,14 @@ describe("circuit breaker", () => {
   });
 
   test("stays tripped permanently after tripping", () => {
-    const bad = makeWarmupResult({ cacheReadTokens: 0, cacheCreationTokens: 50000 });
-    const good = makeWarmupResult({ cacheReadTokens: 50000, cacheCreationTokens: 0 });
+    const bad = makeWarmupResult({
+      cacheReadTokens: 0,
+      cacheCreationTokens: 50000,
+    });
+    const good = makeWarmupResult({
+      cacheReadTokens: 50000,
+      cacheCreationTokens: 0,
+    });
 
     checkCircuitBreaker(bad);
     checkCircuitBreaker(bad);
@@ -442,7 +463,11 @@ describe("circuit breaker", () => {
   });
 
   test("does not count failed requests", () => {
-    const failed = makeWarmupResult({ ok: false, cacheReadTokens: 0, cacheCreationTokens: 0 });
+    const failed = makeWarmupResult({
+      ok: false,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+    });
     checkCircuitBreaker(failed);
     checkCircuitBreaker(failed);
     checkCircuitBreaker(failed);
@@ -450,8 +475,14 @@ describe("circuit breaker", () => {
   });
 
   test("partial hits (read > 0 + creation > 0) reset counter", () => {
-    const bad = makeWarmupResult({ cacheReadTokens: 0, cacheCreationTokens: 50000 });
-    const partial = makeWarmupResult({ cacheReadTokens: 30000, cacheCreationTokens: 20000 });
+    const bad = makeWarmupResult({
+      cacheReadTokens: 0,
+      cacheCreationTokens: 50000,
+    });
+    const partial = makeWarmupResult({
+      cacheReadTokens: 30000,
+      cacheCreationTokens: 20000,
+    });
 
     checkCircuitBreaker(bad); // 1
     checkCircuitBreaker(bad); // 2
@@ -501,7 +532,9 @@ describe("shouldWarm", () => {
       lastRequestTime: now - 270_000, // 4.5 min ago — inside warmup window
       cacheAnalytics: {
         ...makeCacheAnalytics(),
-        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
       },
     });
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
@@ -516,7 +549,13 @@ describe("shouldWarm", () => {
   test("returns false when session is marked dead", () => {
     const state = makeSessionState({
       lastRequestTime: Date.now() - 270_000,
-      warmup: { lastWarmupAt: 0, warmupCount: 0, totalWarmups: 0, warmupHits: 0, disabled: true },
+      warmup: {
+        lastWarmupAt: 0,
+        warmupCount: 0,
+        totalWarmups: 0,
+        warmupHits: 0,
+        disabled: true,
+      },
       cacheAnalytics: {
         ...makeCacheAnalytics(),
         lastRequestBody: compressBody('{"test": true}'),
@@ -626,7 +665,10 @@ describe("shouldWarm", () => {
 
   test("returns false when circuit breaker is tripped", () => {
     // Trip the circuit breaker
-    const bad = makeWarmupResult({ cacheReadTokens: 0, cacheCreationTokens: 50000 });
+    const bad = makeWarmupResult({
+      cacheReadTokens: 0,
+      cacheCreationTokens: 50000,
+    });
     checkCircuitBreaker(bad);
     checkCircuitBreaker(bad);
     checkCircuitBreaker(bad);
@@ -659,7 +701,9 @@ describe("shouldWarm", () => {
       consecutiveTextOnlyTurns: 0,
       cacheAnalytics: {
         ...makeCacheAnalytics(),
-        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
       },
     });
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
@@ -674,7 +718,9 @@ describe("shouldWarm", () => {
       consecutiveTextOnlyTurns: 5,
       cacheAnalytics: {
         ...makeCacheAnalytics(),
-        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
       },
     });
 
@@ -779,7 +825,9 @@ describe("shouldWarm", () => {
       },
       cacheAnalytics: {
         ...makeCacheAnalytics(),
-        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
       },
     });
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
@@ -801,14 +849,19 @@ describe("shouldWarm", () => {
       },
       cacheAnalytics: {
         ...makeCacheAnalytics(),
-        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
       },
     });
     expect(shouldWarm(stateRecent, profile, hist, now)).toBe(false);
   });
 
   test("forceKeepWarm still respects circuit breaker", () => {
-    const bad = makeWarmupResult({ cacheReadTokens: 0, cacheCreationTokens: 50000 });
+    const bad = makeWarmupResult({
+      cacheReadTokens: 0,
+      cacheCreationTokens: 50000,
+    });
     checkCircuitBreaker(bad);
     checkCircuitBreaker(bad);
     checkCircuitBreaker(bad);
@@ -856,8 +909,6 @@ describe("shouldWarm", () => {
     expect(shouldWarm(state, profile, hist, now)).toBe(false);
     expect(state.warmup?.disabled).toBe(true);
   });
-
-
 });
 
 // ---------------------------------------------------------------------------
@@ -870,7 +921,9 @@ describe("buildAnthropicProfile", () => {
     expect(profile.ttlMs).toBe(300_000);
     expect(profile.warmupMarginMs).toBe(45_000);
     expect(profile.cacheReadCostPerMTok).toBeGreaterThan(0);
-    expect(profile.cacheMissCostPerMTok).toBeGreaterThan(profile.cacheReadCostPerMTok);
+    expect(profile.cacheMissCostPerMTok).toBeGreaterThan(
+      profile.cacheReadCostPerMTok,
+    );
   });
 
   test("1h TTL has correct parameters", () => {
@@ -882,14 +935,16 @@ describe("buildAnthropicProfile", () => {
   test("cost ratio gives reasonable threshold (corrected formula)", () => {
     const profile5m = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
     // Corrected: read / (write - read) ≈ 0.087 for 5m TTL
-    const threshold5m = profile5m.cacheReadCostPerMTok /
+    const threshold5m =
+      profile5m.cacheReadCostPerMTok /
       (profile5m.cacheMissCostPerMTok - profile5m.cacheReadCostPerMTok);
     expect(threshold5m).toBeGreaterThan(0.05);
     expect(threshold5m).toBeLessThan(0.15);
 
     const profile1h = buildAnthropicProfile("claude-sonnet-4-20250514", "1h");
     // 1h TTL: 2× write cost → threshold ≈ 0.042
-    const threshold1h = profile1h.cacheReadCostPerMTok /
+    const threshold1h =
+      profile1h.cacheReadCostPerMTok /
       (profile1h.cacheMissCostPerMTok - profile1h.cacheReadCostPerMTok);
     expect(threshold1h).toBeGreaterThan(0.02);
     expect(threshold1h).toBeLessThan(0.08);
@@ -903,7 +958,9 @@ describe("buildAnthropicProfile", () => {
     // Same read cost
     expect(profile1h.cacheReadCostPerMTok).toBe(profile5m.cacheReadCostPerMTok);
     // 1h write cost = 2 × 5m write cost
-    expect(profile1h.cacheMissCostPerMTok).toBeCloseTo(profile5m.cacheMissCostPerMTok * 2);
+    expect(profile1h.cacheMissCostPerMTok).toBeCloseTo(
+      profile5m.cacheMissCostPerMTok * 2,
+    );
   });
 });
 
@@ -931,7 +988,7 @@ describe("breakFraction", () => {
 
   test("mixed gaps give intermediate fraction", () => {
     const hist = createHistogram();
-    for (let i = 0; i < 70; i++) recordGap(hist, 30_000);  // 30s — active
+    for (let i = 0; i < 70; i++) recordGap(hist, 30_000); // 30s — active
     for (let i = 0; i < 30; i++) recordGap(hist, 600_000); // 10m — break
     const bf = breakFraction(hist);
     expect(bf).toBeGreaterThan(0.2);
@@ -1085,8 +1142,8 @@ describe("costThreshold", () => {
   });
 
   test("1h TTL produces lower threshold than 5m", () => {
-    const t5m = costThreshold(0.3, 3.75);   // 5m TTL
-    const t1h = costThreshold(0.3, 7.50);   // 1h TTL (2× write)
+    const t5m = costThreshold(0.3, 3.75); // 5m TTL
+    const t1h = costThreshold(0.3, 7.5); // 1h TTL (2× write)
     expect(t1h).toBeLessThan(t5m);
     expect(t1h).toBeCloseTo(0.042, 2);
   });
@@ -1104,7 +1161,7 @@ describe("maxProfitableCycles", () => {
   });
 
   test("1h TTL Sonnet → 24 cycles (24h)", () => {
-    const max = maxProfitableCycles(0.3, 7.50);
+    const max = maxProfitableCycles(0.3, 7.5);
     expect(max).toBe(24);
   });
 
@@ -1137,7 +1194,9 @@ describe("shouldWarm continuation", () => {
       },
       cacheAnalytics: {
         ...makeCacheAnalytics(),
-        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
       },
     });
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
@@ -1145,7 +1204,7 @@ describe("shouldWarm continuation", () => {
     // Histogram with lots of break-length gaps (users take 10min breaks)
     const hist = createHistogram();
     for (let i = 0; i < 60; i++) recordGap(hist, 600_000); // 10m
-    for (let i = 0; i < 40; i++) recordGap(hist, 60_000);  // 1m
+    for (let i = 0; i < 40; i++) recordGap(hist, 60_000); // 1m
 
     expect(shouldWarm(state, profile, hist, now)).toBe(true);
   });
@@ -1153,7 +1212,10 @@ describe("shouldWarm continuation", () => {
   test("stops when maxCycles exceeded", () => {
     const now = Date.now();
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
-    const maxCyc = maxProfitableCycles(profile.cacheReadCostPerMTok, profile.cacheMissCostPerMTok);
+    const maxCyc = maxProfitableCycles(
+      profile.cacheReadCostPerMTok,
+      profile.cacheMissCostPerMTok,
+    );
 
     // Session has spent maxCycles already
     const state = makeSessionState({
@@ -1167,7 +1229,9 @@ describe("shouldWarm continuation", () => {
       },
       cacheAnalytics: {
         ...makeCacheAnalytics(),
-        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
       },
     });
 
@@ -1191,7 +1255,9 @@ describe("shouldWarm continuation", () => {
       },
       cacheAnalytics: {
         ...makeCacheAnalytics(),
-        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
       },
     });
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
@@ -1216,7 +1282,10 @@ describe("shouldWarm /lore:warm:keep mode", () => {
   test("/lore:warm:keep mode stops at break-even cap", () => {
     const now = Date.now();
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
-    const maxCyc = maxProfitableCycles(profile.cacheReadCostPerMTok, profile.cacheMissCostPerMTok);
+    const maxCyc = maxProfitableCycles(
+      profile.cacheReadCostPerMTok,
+      profile.cacheMissCostPerMTok,
+    );
 
     // Session in /lore:warm:keep mode that has already spent maxCycles
     const state = makeSessionState({
@@ -1231,7 +1300,9 @@ describe("shouldWarm /lore:warm:keep mode", () => {
       },
       cacheAnalytics: {
         ...makeCacheAnalytics(),
-        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
       },
     });
 
@@ -1256,7 +1327,9 @@ describe("shouldWarm /lore:warm:keep mode", () => {
       },
       cacheAnalytics: {
         ...makeCacheAnalytics(),
-        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
       },
     });
 
@@ -1391,7 +1464,10 @@ describe("gap recording filtering", () => {
 
   test("global histogram also records gap for user turns", () => {
     const now = Date.now();
-    const state = makeSessionState({ projectPath: GAP_TEST_PROJECT_PATH, lastUserTurnTime: now - 120_000 }); // 2 min ago
+    const state = makeSessionState({
+      projectPath: GAP_TEST_PROJECT_PATH,
+      lastUserTurnTime: now - 120_000,
+    }); // 2 min ago
 
     simulateGapRecording(state, {
       prevStopReason: "end_turn",
@@ -1520,7 +1596,9 @@ describe("global histogram persistence", () => {
 
     // Verify: old "work" row deleted, "all" row exists
     const rows = d
-      .query("SELECT time_slot, total FROM warmup_histograms WHERE project_id = ?")
+      .query(
+        "SELECT time_slot, total FROM warmup_histograms WHERE project_id = ?",
+      )
       .all(pid) as Array<{ time_slot: string; total: number }>;
 
     expect(rows.length).toBe(1);
@@ -1568,7 +1646,9 @@ describe("shouldWarm tool-call warming", () => {
   });
 
   /** Helper: session mid-tool-call (lastStopReason="tool_use") in warmup window. */
-  function makeToolCallState(overrides: Partial<SessionState> = {}): SessionState {
+  function makeToolCallState(
+    overrides: Partial<SessionState> = {},
+  ): SessionState {
     const now = Date.now();
     return makeSessionState({
       lastRequestTime: now - 270_000, // 4.5 min — in warmup margin of 5m TTL
@@ -1576,7 +1656,9 @@ describe("shouldWarm tool-call warming", () => {
       messageCount: 10,
       cacheAnalytics: {
         ...makeCacheAnalytics(),
-        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
       },
       ...overrides,
     });
@@ -1633,7 +1715,10 @@ describe("shouldWarm tool-call warming", () => {
   test("returns false when break-even exceeded", () => {
     const now = Date.now();
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
-    const maxCyc = maxProfitableCycles(profile.cacheReadCostPerMTok, profile.cacheMissCostPerMTok);
+    const maxCyc = maxProfitableCycles(
+      profile.cacheReadCostPerMTok,
+      profile.cacheMissCostPerMTok,
+    );
 
     const state = makeToolCallState({
       lastRequestTime: now - 270_000,
@@ -1664,7 +1749,10 @@ describe("shouldWarm tool-call warming", () => {
 
   test("respects circuit breaker", () => {
     // Trip the circuit breaker
-    const bad = makeWarmupResult({ cacheReadTokens: 0, cacheCreationTokens: 50000 });
+    const bad = makeWarmupResult({
+      cacheReadTokens: 0,
+      cacheCreationTokens: 50000,
+    });
     checkCircuitBreaker(bad);
     checkCircuitBreaker(bad);
     checkCircuitBreaker(bad);
@@ -1760,7 +1848,10 @@ describe("pSessionFinished tool_use signal", () => {
     };
 
     const pWithout = pSessionFinished(baseSignals);
-    const pWith = pSessionFinished({ ...baseSignals, lastStopReason: "tool_use" });
+    const pWith = pSessionFinished({
+      ...baseSignals,
+      lastStopReason: "tool_use",
+    });
 
     // Without tool_use, P(finished) should be high (low survival)
     expect(pWithout).toBeGreaterThan(0.5);
@@ -1790,7 +1881,7 @@ describe("pSessionFinished tool_use signal", () => {
 
 describe("cumulativeCostThreshold", () => {
   // Opus 5m TTL: read=$0.50, write=$6.25
-  const read = 0.50;
+  const read = 0.5;
   const write = 6.25;
   const spread = write - read; // 5.75
 
@@ -1807,10 +1898,10 @@ describe("cumulativeCostThreshold", () => {
     const t6 = cumulativeCostThreshold(6, read, write);
 
     // k × read / (write - read)
-    expect(t1).toBeCloseTo(1 * read / spread, 6); // ~8.7%
-    expect(t3).toBeCloseTo(3 * read / spread, 6); // ~26.1%
-    expect(t5).toBeCloseTo(5 * read / spread, 6); // ~43.5%
-    expect(t6).toBeCloseTo(6 * read / spread, 6); // ~52.2%
+    expect(t1).toBeCloseTo((1 * read) / spread, 6); // ~8.7%
+    expect(t3).toBeCloseTo((3 * read) / spread, 6); // ~26.1%
+    expect(t5).toBeCloseTo((5 * read) / spread, 6); // ~43.5%
+    expect(t6).toBeCloseTo((6 * read) / spread, 6); // ~52.2%
 
     // Must be strictly increasing
     expect(t3).toBeGreaterThan(t1);
@@ -1824,13 +1915,15 @@ describe("cumulativeCostThreshold", () => {
     const tOver = cumulativeCostThreshold(maxCyc + 1, read, write);
 
     // At maxCycles: 11 * 0.50 / 5.75 = 95.7%
-    expect(tMax).toBeCloseTo(11 * read / spread, 6);
+    expect(tMax).toBeCloseTo((11 * read) / spread, 6);
     // Beyond maxCycles: clamped to 1.0
     expect(tOver).toBe(1.0);
   });
 
   test("k=0 is treated as k=1", () => {
-    expect(cumulativeCostThreshold(0, read, write)).toBe(cumulativeCostThreshold(1, read, write));
+    expect(cumulativeCostThreshold(0, read, write)).toBe(
+      cumulativeCostThreshold(1, read, write),
+    );
   });
 
   test("degenerate case: write <= read returns 1.0", () => {
@@ -1853,13 +1946,15 @@ describe("shouldWarm session ROI guard", () => {
       warmup: {
         lastWarmupAt: 0,
         warmupCount: 0,
-        totalWarmups: 12,  // >= MIN_WARMUPS_FOR_ROI_CHECK (5)
-        warmupHits: 1,     // 8.3% < MIN_SESSION_HIT_RATE (20%)
+        totalWarmups: 12, // >= MIN_WARMUPS_FOR_ROI_CHECK (5)
+        warmupHits: 1, // 8.3% < MIN_SESSION_HIT_RATE (20%)
         disabled: false,
       },
       cacheAnalytics: {
         ...makeCacheAnalytics(),
-        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
       },
     });
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
@@ -1877,12 +1972,14 @@ describe("shouldWarm session ROI guard", () => {
         lastWarmupAt: 0,
         warmupCount: 0,
         totalWarmups: 10,
-        warmupHits: 3,     // 30% > MIN_SESSION_HIT_RATE (20%)
+        warmupHits: 3, // 30% > MIN_SESSION_HIT_RATE (20%)
         disabled: false,
       },
       cacheAnalytics: {
         ...makeCacheAnalytics(),
-        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
       },
     });
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
@@ -1900,12 +1997,14 @@ describe("shouldWarm session ROI guard", () => {
         lastWarmupAt: 0,
         warmupCount: 0,
         totalWarmups: MIN_WARMUPS_FOR_ROI_CHECK - 1, // below threshold
-        warmupHits: 0,     // 0% hit rate, but too few warmups to judge
+        warmupHits: 0, // 0% hit rate, but too few warmups to judge
         disabled: false,
       },
       cacheAnalytics: {
         ...makeCacheAnalytics(),
-        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
       },
     });
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
@@ -1924,12 +2023,14 @@ describe("shouldWarm session ROI guard", () => {
         lastWarmupAt: 0,
         warmupCount: 0,
         totalWarmups: 15,
-        warmupHits: 1,     // 6.7% < MIN_SESSION_HIT_RATE (25%)
+        warmupHits: 1, // 6.7% < MIN_SESSION_HIT_RATE (25%)
         disabled: false,
       },
       cacheAnalytics: {
         ...makeCacheAnalytics(),
-        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
       },
     });
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
@@ -1956,7 +2057,9 @@ describe("shouldWarm cost optimization gates", () => {
       lastInputTokens: 30_000, // below 50K threshold
       cacheAnalytics: {
         ...makeCacheAnalytics(),
-        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
       },
     });
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
@@ -1973,7 +2076,9 @@ describe("shouldWarm cost optimization gates", () => {
       lastInputTokens: 100_000, // above 50K threshold
       cacheAnalytics: {
         ...makeCacheAnalytics(),
-        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
       },
     });
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
@@ -1992,7 +2097,9 @@ describe("shouldWarm cost optimization gates", () => {
       lastInputTokens: 20_000, // below 50K threshold
       cacheAnalytics: {
         ...makeCacheAnalytics(),
-        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
       },
     });
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
@@ -2039,7 +2146,9 @@ describe("shouldWarm cost optimization gates", () => {
       },
       cacheAnalytics: {
         ...makeCacheAnalytics(),
-        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
       },
     });
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
@@ -2062,7 +2171,9 @@ describe("shouldWarm cost optimization gates", () => {
       },
       cacheAnalytics: {
         ...makeCacheAnalytics(),
-        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
       },
     });
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
@@ -2077,15 +2188,17 @@ describe("shouldWarm cost optimization gates", () => {
     // at 4.5m but not to zero. This creates P(returns) ~29%, above the old
     // 8.7% threshold but below the new 30% floor.
     const hist = createHistogram();
-    for (let i = 0; i < 98; i++) recordGap(hist, 30_000);  // 30s — active
-    for (let i = 0; i < 2; i++) recordGap(hist, 360_000);  // 6m — break
+    for (let i = 0; i < 98; i++) recordGap(hist, 30_000); // 30s — active
+    for (let i = 0; i < 2; i++) recordGap(hist, 360_000); // 6m — break
 
     const state = makeSessionState({
       lastRequestTime: now - 270_000,
       consecutiveTextOnlyTurns: 0,
       cacheAnalytics: {
         ...makeCacheAnalytics(),
-        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
       },
     });
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
@@ -2102,7 +2215,10 @@ describe("shouldWarm cost optimization gates", () => {
     const pReturns = 1.0 - pFinished;
     expect(pReturns).toBeLessThan(MIN_RETURN_PROBABILITY_FLOOR);
     // But it would have passed the old break-even threshold
-    const oldThreshold = costThreshold(profile.cacheReadCostPerMTok, profile.cacheMissCostPerMTok);
+    const oldThreshold = costThreshold(
+      profile.cacheReadCostPerMTok,
+      profile.cacheMissCostPerMTok,
+    );
     expect(pReturns).toBeGreaterThan(oldThreshold);
 
     // With the new floor, warming should be rejected
@@ -2123,7 +2239,9 @@ describe("shouldWarm cost optimization gates", () => {
       },
       cacheAnalytics: {
         ...makeCacheAnalytics(),
-        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
       },
     });
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
@@ -2147,7 +2265,9 @@ describe("shouldWarm cost optimization gates", () => {
       },
       cacheAnalytics: {
         ...makeCacheAnalytics(),
-        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
       },
     });
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
@@ -2164,7 +2284,9 @@ describe("shouldWarm cost optimization gates", () => {
       lastInputTokens: undefined, // no response yet — ?? 0 < 50K
       cacheAnalytics: {
         ...makeCacheAnalytics(),
-        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
       },
     });
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
@@ -2192,7 +2314,9 @@ describe("shouldWarm cost optimization gates", () => {
       },
       cacheAnalytics: {
         ...makeCacheAnalytics(),
-        lastRequestBody: compressBody('{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}'),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
       },
     });
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
@@ -2201,8 +2325,8 @@ describe("shouldWarm cost optimization gates", () => {
     // survival is ~2% — P(returns) should land ~29%, between the rising
     // threshold at k=2 (~17.4%) and the 30% floor.
     const hist = createHistogram();
-    for (let i = 0; i < 98; i++) recordGap(hist, 30_000);  // 30s
-    for (let i = 0; i < 2; i++) recordGap(hist, 600_000);  // 10m
+    for (let i = 0; i < 98; i++) recordGap(hist, 30_000); // 30s
+    for (let i = 0; i < 2; i++) recordGap(hist, 600_000); // 10m
 
     // Verify P(returns) is in the interesting range: above rising threshold
     // at k=2 but below the 30% floor

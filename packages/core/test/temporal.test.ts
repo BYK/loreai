@@ -208,7 +208,15 @@ describe("temporal", () => {
            (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
            VALUES (?, ?, ?, 'user', ?, ?, ?, ?, '{}')`,
         )
-        .run(id, pid, sessionID, content, Math.ceil(contentSize / 4), distilled, createdAt);
+        .run(
+          id,
+          pid,
+          sessionID,
+          content,
+          Math.ceil(contentSize / 4),
+          distilled,
+          createdAt,
+        );
     }
 
     // Clean the prune project before every test so data from
@@ -221,10 +229,14 @@ describe("temporal", () => {
     test("TTL pass deletes distilled messages older than retention window", () => {
       const now = Date.now();
       insertMessage("old-distilled", "sess-p1", 1, now - 130 * DAY_MS); // 130 days old — should be pruned
-      insertMessage("new-distilled", "sess-p1", 1, now - 10 * DAY_MS);  // 10 days old — kept
+      insertMessage("new-distilled", "sess-p1", 1, now - 10 * DAY_MS); // 10 days old — kept
       insertMessage("old-undistilled", "sess-p1", 0, now - 130 * DAY_MS); // old but undistilled — never deleted
 
-      const result = temporal.prune({ projectPath: PRUNE_PROJECT, retentionDays: 120, maxStorageMB: 1024 });
+      const result = temporal.prune({
+        projectPath: PRUNE_PROJECT,
+        retentionDays: 120,
+        maxStorageMB: 1024,
+      });
 
       expect(result.ttlDeleted).toBe(1);
       expect(result.capDeleted).toBe(0);
@@ -248,7 +260,11 @@ describe("temporal", () => {
       // Undistilled — must never be evicted even when over cap
       insertMessage("cap-undistilled", "sess-p2", 0, now - 5 * DAY_MS, size);
 
-      const result = temporal.prune({ projectPath: PRUNE_PROJECT, retentionDays: 120, maxStorageMB: 1 });
+      const result = temporal.prune({
+        projectPath: PRUNE_PROJECT,
+        retentionDays: 120,
+        maxStorageMB: 1,
+      });
 
       expect(result.ttlDeleted).toBe(0); // all within 120 days
       expect(result.capDeleted).toBeGreaterThan(0);
@@ -269,9 +285,19 @@ describe("temporal", () => {
       // Very old undistilled — TTL pass must not touch it
       insertMessage("undist-ancient", "sess-p3", 0, now - 365 * DAY_MS);
       // Over-cap scenario — size cap pass must not touch undistilled
-      insertMessage("undist-large", "sess-p3", 0, now - 1 * DAY_MS, 2 * 1024 * 1024);
+      insertMessage(
+        "undist-large",
+        "sess-p3",
+        0,
+        now - 1 * DAY_MS,
+        2 * 1024 * 1024,
+      );
 
-      const result = temporal.prune({ projectPath: PRUNE_PROJECT, retentionDays: 1, maxStorageMB: 1 });
+      const result = temporal.prune({
+        projectPath: PRUNE_PROJECT,
+        retentionDays: 1,
+        maxStorageMB: 1,
+      });
 
       expect(result.ttlDeleted).toBe(0);
       expect(result.capDeleted).toBe(0);
@@ -288,7 +314,11 @@ describe("temporal", () => {
       insertMessage("recent-dist", "sess-p4", 1, now - 1 * DAY_MS);
       insertMessage("recent-undist", "sess-p4", 0, now - 1 * DAY_MS);
 
-      const result = temporal.prune({ projectPath: PRUNE_PROJECT, retentionDays: 120, maxStorageMB: 1024 });
+      const result = temporal.prune({
+        projectPath: PRUNE_PROJECT,
+        retentionDays: 120,
+        maxStorageMB: 1024,
+      });
 
       expect(result.ttlDeleted).toBe(0);
       expect(result.capDeleted).toBe(0);
@@ -303,7 +333,11 @@ describe("temporal", () => {
       insertMessage("both-mid", "sess-p5", 1, now - 5 * DAY_MS, size);
       insertMessage("both-new", "sess-p5", 1, now - 1 * DAY_MS, size);
 
-      const result = temporal.prune({ projectPath: PRUNE_PROJECT, retentionDays: 120, maxStorageMB: 1 });
+      const result = temporal.prune({
+        projectPath: PRUNE_PROJECT,
+        retentionDays: 120,
+        maxStorageMB: 1,
+      });
 
       expect(result.ttlDeleted).toBe(1); // both-old caught by TTL
       expect(result.capDeleted).toBeGreaterThan(0); // at least one of the large ones evicted
@@ -362,7 +396,9 @@ describe("temporal", () => {
 
     function rows(pid: string) {
       return db()
-        .query("SELECT call_id, tool, status, error_type, error_message, duration_ms FROM tool_calls WHERE project_id = ? ORDER BY call_id")
+        .query(
+          "SELECT call_id, tool, status, error_type, error_message, duration_ms FROM tool_calls WHERE project_id = ? ORDER BY call_id",
+        )
         .all(pid) as Array<{
         call_id: string;
         tool: string;
@@ -482,7 +518,9 @@ describe("temporal", () => {
       temporal.recordToolCalls({
         projectPath: TOOL_PROJECT,
         info: makeMessage("tm-4a", "assistant", "sess-tool"),
-        parts: [toolPart("tm-4a", "ce", "bash", { status: "pending", input: {} })],
+        parts: [
+          toolPart("tm-4a", "ce", "bash", { status: "pending", input: {} }),
+        ],
       });
       temporal.recordToolCalls({
         projectPath: TOOL_PROJECT,

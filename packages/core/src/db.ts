@@ -1066,10 +1066,7 @@ function migrate(database: Database) {
         // error from a prior partial run. Swallow duplicate-column errors
         // so the rest of the migration loop and the version bump proceed.
         // Any genuinely new error is re-thrown.
-        if (
-          e instanceof Error &&
-          /duplicate column name/i.test(e.message)
-        ) {
+        if (e instanceof Error && /duplicate column name/i.test(e.message)) {
           // The ALTER TABLE already applied — run remaining statements in
           // this migration by stripping the offending ALTER and re-exec'ing.
           // (Important: migrate() in db.ts runs each migration via database.exec()
@@ -1235,10 +1232,7 @@ function recoverMissingObjects(database: Database) {
  * Used internally during lazy git-remote backfill when two path-only
  * projects are discovered to share the same git remote.
  */
-export function mergeProjectInternal(
-  sourceId: string,
-  targetId: string,
-): void {
+export function mergeProjectInternal(sourceId: string, targetId: string): void {
   const d = db();
   d.exec("BEGIN IMMEDIATE");
   try {
@@ -1249,9 +1243,10 @@ export function mergeProjectInternal(
     d.query(
       "UPDATE temporal_messages SET project_id = ? WHERE project_id = ?",
     ).run(targetId, sourceId);
-    d.query(
-      "UPDATE distillations SET project_id = ? WHERE project_id = ?",
-    ).run(targetId, sourceId);
+    d.query("UPDATE distillations SET project_id = ? WHERE project_id = ?").run(
+      targetId,
+      sourceId,
+    );
     d.query("UPDATE lat_sections SET project_id = ? WHERE project_id = ?").run(
       targetId,
       sourceId,
@@ -1354,7 +1349,11 @@ export function isUnattributedProjectPath(path: string): boolean {
  * an alias so subsequent calls skip the subprocess. If the matched project's
  * git_remote was not yet populated (pre-v14 rows), it is backfilled lazily.
  */
-export function ensureProject(path: string, name?: string, suppliedGitRemote?: string | null): string {
+export function ensureProject(
+  path: string,
+  name?: string,
+  suppliedGitRemote?: string | null,
+): string {
   // Guard: reject synthetic test paths when targeting the production DB.
   // Test paths like "/test/ltm/project" are absolute paths that don't exist
   // on any real filesystem — they're only valid in test suites running against
@@ -1426,18 +1425,15 @@ export function ensureProject(path: string, name?: string, suppliedGitRemote?: s
   // dashboard never shows a bare session ID as if it were a real repo.
   const derivedName = isUnattributedProjectPath(path)
     ? `(unattributed) ${(path.split("/").pop() ?? "").slice(0, 12)}`
-    : name ?? repoNameFromRemote(gitRemote) ?? path.split("/").pop() ?? "unknown";
+    : (name ??
+      repoNameFromRemote(gitRemote) ??
+      path.split("/").pop() ??
+      "unknown");
   db()
     .query(
       "INSERT INTO projects (id, path, name, git_remote, created_at) VALUES (?, ?, ?, ?, ?)",
     )
-    .run(
-      id,
-      path,
-      derivedName,
-      gitRemote,
-      Date.now(),
-    );
+    .run(id, path, derivedName, gitRemote, Date.now());
   return id;
 }
 
@@ -1481,17 +1477,17 @@ export function resolveProjectByRemoteOrPath(
  * that require a path argument.
  */
 export function projectPath(id: string): string | null {
-  const row = db()
-    .query("SELECT path FROM projects WHERE id = ?")
-    .get(id) as { path: string } | null;
+  const row = db().query("SELECT path FROM projects WHERE id = ?").get(id) as {
+    path: string;
+  } | null;
   return row?.path ?? null;
 }
 
 /** Look up a project's display name by its internal ID. */
 export function projectName(id: string): string | null {
-  const row = db()
-    .query("SELECT name FROM projects WHERE id = ?")
-    .get(id) as { name: string } | null;
+  const row = db().query("SELECT name FROM projects WHERE id = ?").get(id) as {
+    name: string;
+  } | null;
   return row?.name ?? null;
 }
 
@@ -1500,9 +1496,9 @@ export function projectName(id: string): string | null {
  * Must be called before ensureProject() to get an accurate result.
  */
 export function isFirstRun(): boolean {
-  const row = db()
-    .query("SELECT COUNT(*) as count FROM projects")
-    .get() as { count: number };
+  const row = db().query("SELECT COUNT(*) as count FROM projects").get() as {
+    count: number;
+  };
   return row.count === 0;
 }
 
@@ -1564,7 +1560,9 @@ export function saveForceMinLayer(sessionID: string, layer: number): void {
     .run(sessionID, now);
   // Update only the force_min_layer column, preserving all others
   db()
-    .query("UPDATE session_state SET force_min_layer = ?, updated_at = ? WHERE session_id = ?")
+    .query(
+      "UPDATE session_state SET force_min_layer = ?, updated_at = ? WHERE session_id = ?",
+    )
     .run(layer, now, sessionID);
 }
 
@@ -1588,7 +1586,10 @@ export type SessionCostSnapshot = {
  * Persist a session's cost snapshot. Uses INSERT OR REPLACE so it works
  * whether or not a row already exists (forceMinLayer may have created one).
  */
-export function saveSessionCosts(sessionID: string, costs: SessionCostSnapshot): void {
+export function saveSessionCosts(
+  sessionID: string,
+  costs: SessionCostSnapshot,
+): void {
   db()
     .query(
       `INSERT INTO session_state (session_id, force_min_layer, updated_at,
@@ -1613,11 +1614,21 @@ export function saveSessionCosts(sessionID: string, costs: SessionCostSnapshot):
          updated_at = excluded.updated_at`,
     )
     .run(
-      sessionID, sessionID, Date.now(),
-      costs.conversationCost, costs.workerCost, costs.conversationTurns,
-      costs.cacheReadTokens, costs.cacheWriteTokens,
-      costs.warmupSavings, costs.warmupHits, costs.ttlSavings, costs.ttlHits, costs.batchSavings,
-      costs.avoidedCompactions, costs.avoidedCompactionCost,
+      sessionID,
+      sessionID,
+      Date.now(),
+      costs.conversationCost,
+      costs.workerCost,
+      costs.conversationTurns,
+      costs.cacheReadTokens,
+      costs.cacheWriteTokens,
+      costs.warmupSavings,
+      costs.warmupHits,
+      costs.ttlSavings,
+      costs.ttlHits,
+      costs.batchSavings,
+      costs.avoidedCompactions,
+      costs.avoidedCompactionCost,
     );
 }
 
@@ -1625,7 +1636,9 @@ export function saveSessionCosts(sessionID: string, costs: SessionCostSnapshot):
  * Load persisted cost snapshot for a session. Returns null if not stored
  * or if all cost columns are zero (pre-migration row from forceMinLayer only).
  */
-export function loadSessionCosts(sessionID: string): SessionCostSnapshot | null {
+export function loadSessionCosts(
+  sessionID: string,
+): SessionCostSnapshot | null {
   const row = db()
     .query(
       `SELECT conversation_cost, worker_cost, conversation_turns,
@@ -1635,19 +1648,19 @@ export function loadSessionCosts(sessionID: string): SessionCostSnapshot | null 
        FROM session_state WHERE session_id = ?`,
     )
     .get(sessionID) as {
-      conversation_cost: number;
-      worker_cost: number;
-      conversation_turns: number;
-      cache_read_tokens: number;
-      cache_write_tokens: number;
-      warmup_savings: number;
-      warmup_hits: number;
-      ttl_savings: number;
-      ttl_hits: number;
-      batch_savings: number;
-      avoided_compactions: number;
-      avoided_compaction_cost: number;
-    } | null;
+    conversation_cost: number;
+    worker_cost: number;
+    conversation_turns: number;
+    cache_read_tokens: number;
+    cache_write_tokens: number;
+    warmup_savings: number;
+    warmup_hits: number;
+    ttl_savings: number;
+    ttl_hits: number;
+    batch_savings: number;
+    avoided_compactions: number;
+    avoided_compaction_cost: number;
+  } | null;
   if (!row) return null;
   return {
     conversationCost: row.conversation_cost,
@@ -1680,20 +1693,20 @@ export function loadAllSessionCosts(): Map<string, SessionCostSnapshot> {
        WHERE conversation_turns > 0 OR warmup_savings > 0 OR ttl_savings > 0 OR batch_savings > 0`,
     )
     .all() as Array<{
-      session_id: string;
-      conversation_cost: number;
-      worker_cost: number;
-      conversation_turns: number;
-      cache_read_tokens: number;
-      cache_write_tokens: number;
-      warmup_savings: number;
-      warmup_hits: number;
-      ttl_savings: number;
-      ttl_hits: number;
-      batch_savings: number;
-      avoided_compactions: number;
-      avoided_compaction_cost: number;
-    }>;
+    session_id: string;
+    conversation_cost: number;
+    worker_cost: number;
+    conversation_turns: number;
+    cache_read_tokens: number;
+    cache_write_tokens: number;
+    warmup_savings: number;
+    warmup_hits: number;
+    ttl_savings: number;
+    ttl_hits: number;
+    batch_savings: number;
+    avoided_compactions: number;
+    avoided_compaction_cost: number;
+  }>;
   const result = new Map<string, SessionCostSnapshot>();
   for (const row of rows) {
     result.set(row.session_id, {
@@ -1728,7 +1741,11 @@ export type DailyCostBucket = "conversation" | "worker" | "warmup";
  * day they were incurred, so multi-day or long-lived sessions attribute
  * spend to the correct day instead of dumping cumulative totals onto one date.
  */
-export function addDailyCost(day: string, bucket: DailyCostBucket, cost: number): void {
+export function addDailyCost(
+  day: string,
+  bucket: DailyCostBucket,
+  cost: number,
+): void {
   if (!Number.isFinite(cost) || cost <= 0) return;
   db()
     .query(
@@ -1764,7 +1781,9 @@ export function getDailyCostTotals(sinceDay: string): Map<string, number> {
 /** Total USD cost recorded for a single UTC day (across all buckets). */
 export function getDailyCostForDay(day: string): number {
   const row = db()
-    .query("SELECT COALESCE(SUM(cost), 0) AS total FROM daily_costs WHERE day = ?")
+    .query(
+      "SELECT COALESCE(SUM(cost), 0) AS total FROM daily_costs WHERE day = ?",
+    )
     .get(day) as { total: number } | null;
   return row?.total ?? 0;
 }
@@ -1807,7 +1826,10 @@ export type SessionTrackingState = {
  * Persist session tracking state. Ensures the row exists, then updates
  * only the fields that are explicitly provided (not undefined).
  */
-export function saveSessionTracking(sessionID: string, state: SessionTrackingState): void {
+export function saveSessionTracking(
+  sessionID: string,
+  state: SessionTrackingState,
+): void {
   const now = Date.now();
 
   // Ensure row exists (no-op if it already does)
@@ -1955,7 +1977,9 @@ export type LoadedSessionTracking = {
 /**
  * Load persisted session tracking state. Returns null if no row exists.
  */
-export function loadSessionTracking(sessionID: string): LoadedSessionTracking | null {
+export function loadSessionTracking(
+  sessionID: string,
+): LoadedSessionTracking | null {
   const row = db()
     .query(
       `SELECT last_curated_at, message_count, turns_since_curation,
@@ -1969,29 +1993,29 @@ export function loadSessionTracking(sessionID: string): LoadedSessionTracking | 
        FROM session_state WHERE session_id = ?`,
     )
     .get(sessionID) as {
-      last_curated_at: number;
-      message_count: number;
-      turns_since_curation: number;
-      consecutive_text_only_turns: number;
-      ltm_cache_text: string | null;
-      ltm_cache_tokens: number | null;
-      ltm_pin_text: string | null;
-      ltm_pin_tokens: number | null;
-      fingerprint: string;
-      header_session_id: string | null;
-      header_name: string | null;
-      resolved_conversation_ttl: string;
-      warmup_state: string | null;
-      dynamic_context_cap: number;
-      bust_rate_ema: number;
-      inter_bust_interval_ema: number;
-      last_layer: number;
-      last_known_input: number;
-      last_turn_at: number;
-      last_bust_at: number;
-      parent_session_id: string | null;
-      is_subagent: number;
-    } | null;
+    last_curated_at: number;
+    message_count: number;
+    turns_since_curation: number;
+    consecutive_text_only_turns: number;
+    ltm_cache_text: string | null;
+    ltm_cache_tokens: number | null;
+    ltm_pin_text: string | null;
+    ltm_pin_tokens: number | null;
+    fingerprint: string;
+    header_session_id: string | null;
+    header_name: string | null;
+    resolved_conversation_ttl: string;
+    warmup_state: string | null;
+    dynamic_context_cap: number;
+    bust_rate_ema: number;
+    inter_bust_interval_ema: number;
+    last_layer: number;
+    last_known_input: number;
+    last_turn_at: number;
+    last_bust_at: number;
+    parent_session_id: string | null;
+    is_subagent: number;
+  } | null;
   if (!row) return null;
   return {
     lastCuratedAt: row.last_curated_at,
@@ -2040,10 +2064,10 @@ export function loadHeaderSessionIndex(): Array<{
        WHERE header_session_id IS NOT NULL AND header_name IS NOT NULL`,
     )
     .all() as Array<{
-      session_id: string;
-      header_session_id: string;
-      header_name: string;
-    }>;
+    session_id: string;
+    header_session_id: string;
+    header_name: string;
+  }>;
   return rows.map((row) => ({
     sessionId: row.session_id,
     headerSessionId: row.header_session_id,

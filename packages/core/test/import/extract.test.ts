@@ -7,7 +7,9 @@ import type { LLMClient } from "../../src/types";
 
 const PROJECT_PATH = "/test/extract-project";
 
-function makeChunk(overrides: Partial<ConversationChunk> = {}): ConversationChunk {
+function makeChunk(
+  overrides: Partial<ConversationChunk> = {},
+): ConversationChunk {
   return {
     label: "Test chunk (1)",
     text: "[user] How do I fix the SQLITE_BUSY error?\n\n[assistant] Use WAL mode and set a busy_timeout.",
@@ -139,7 +141,8 @@ describe("extractKnowledge", () => {
       llm,
       projectPath: PROJECT_PATH,
       chunks: [makeChunk({ timestamp: 1 }), makeChunk({ timestamp: 2 })],
-      onProgress: (p) => progressUpdates.push({ current: p.current, total: p.total }),
+      onProgress: (p) =>
+        progressUpdates.push({ current: p.current, total: p.total }),
     });
 
     expect(progressUpdates).toEqual([
