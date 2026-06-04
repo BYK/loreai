@@ -127,7 +127,6 @@ export function parseOpenAIRequest(
           messages.push({ role: "user", content: toolResultBlocks });
         }
       }
-      continue;
     }
   }
 

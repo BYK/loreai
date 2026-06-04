@@ -21,7 +21,7 @@ let loreContext: string | undefined;
 let activeModel: string = "claude-sonnet-4-6";
 
 // Re-export for eval files
-export { type GatewayHandle };
+export type { GatewayHandle };
 
 // ---------------------------------------------------------------------------
 // Standard tools (ensures requests pass isMetaRequest check)

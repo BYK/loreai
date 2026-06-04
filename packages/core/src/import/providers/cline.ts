@@ -174,9 +174,7 @@ function loadTaskHistory(
       return items.filter(
         (item) => item.cwdOnTaskInitialization === projectPath,
       );
-    } catch {
-      continue;
-    }
+    } catch {}
   }
 
   return [];

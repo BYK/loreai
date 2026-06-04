@@ -15,7 +15,7 @@ import {
   type Distillation,
 } from "../src/distillation";
 import { distillationUser } from "../src/prompt";
-import * as temporal from "../src/temporal";
+import type * as temporal from "../src/temporal";
 import { CHUNK_TERMINATOR, partsToText } from "../src/temporal";
 import { db, ensureProject } from "../src/db";
 import type { LorePart, LLMClient } from "../src/types";

@@ -602,7 +602,7 @@ async function askQuestionViaGateway(
     // Anthropic's org limit is often 30K-80K tokens/min; each QA call
     // with LTM-injected system prompt can be 8K+ tokens.
     if (attempt > 0) {
-      const backoff = 30_000 * Math.pow(2, attempt - 1);
+      const backoff = 30_000 * 2 ** (attempt - 1);
       console.warn(`  Gateway rate limited, retrying in ${backoff / 1000}s...`);
       await new Promise((r) => setTimeout(r, backoff));
     }

@@ -441,12 +441,10 @@ describe("exportToFile", () => {
 
     const loreContent = readFile(LORE_FILE_PATH);
     // Between the first bullet and the second marker there should be a blank line
-    const pattern = new RegExp(
-      "\\* \\*\\*Alpha decision\\*\\*.*\n\n<!-- lore:",
-    );
+    const pattern = /\* \*\*Alpha decision\*\*.*\n\n<!-- lore:/;
     expect(loreContent).toMatch(pattern);
     // First entry after heading should NOT have a leading blank line
-    const headingPattern = new RegExp("### Decision\n\n<!-- lore:");
+    const headingPattern = /### Decision\n\n<!-- lore:/;
     expect(loreContent).toMatch(headingPattern);
   });
 });

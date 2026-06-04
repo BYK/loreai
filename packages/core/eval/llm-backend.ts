@@ -319,7 +319,7 @@ export function createEvalLLMClient(
 
             // Transient rate limit — retry with exponential backoff
             const backoffMs = Math.min(
-              30_000 * Math.pow(2, attempt), // 30s, 60s, 120s, 240s, 480s
+              30_000 * 2 ** attempt, // 30s, 60s, 120s, 240s, 480s
               600_000, // cap at 10 minutes
             );
             console.warn(

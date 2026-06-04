@@ -262,7 +262,7 @@ function updateCostRate(turnCost: number): void {
   // Reference interval = 1/30 hr ≈ 2 min (typical turn cadence).
   const referenceHours = 1 / 30;
   const effectiveAlpha =
-    1 - Math.pow(1 - COST_RATE_ALPHA, elapsedHours / referenceHours);
+    1 - (1 - COST_RATE_ALPHA) ** (elapsedHours / referenceHours);
 
   costRateEMA =
     costRateEMA * (1 - effectiveAlpha) + instantRate * effectiveAlpha;

@@ -11,15 +11,15 @@
       "packages/**/*.{ts,tsx,js,mjs,cjs,json,jsonc}",
       "scripts/**/*.{ts,js}",
       "*.{ts,js,json,jsonc}",
-      "!**/dist/**",
-      "!**/dist-bin/**",
-      "!**/dist-tarballs/**",
-      "!**/dist-vendor/**",
-      "!**/.vendor-build/**",
+      "!**/dist",
+      "!**/dist-bin",
+      "!**/dist-tarballs",
+      "!**/dist-vendor",
+      "!**/.vendor-build",
       "!**/*.d.ts",
-      "!**/eval/data/**",
-      "!**/eval/fixtures/**",
-      "!**/eval/results/**"
+      "!**/eval/data",
+      "!**/eval/fixtures",
+      "!**/eval/results"
     ]
   },
   "formatter": {

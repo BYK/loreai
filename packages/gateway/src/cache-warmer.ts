@@ -1072,7 +1072,7 @@ export function computeWarmingSnapshot(
   const pReturn = conditionalReturnProbability(blendedHist, idleMs, ttlMs);
   const textOnlyRuns = state.consecutiveTextOnlyTurns ?? 0;
   const pReturnDampened =
-    textOnlyRuns > 0 ? pReturn * Math.pow(0.5, textOnlyRuns) : pReturn;
+    textOnlyRuns > 0 ? pReturn * 0.5 ** textOnlyRuns : pReturn;
 
   // Commitment model signals
   const breakFrac = breakFraction(blendedHist);
