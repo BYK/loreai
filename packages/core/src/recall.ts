@@ -64,6 +64,13 @@ export type RecallInput = {
   llm?: LLMClient;
   /** Search config — provides recallLimit, queryExpansion, ftsWeights, etc. */
   searchConfig?: LoreConfig["search"];
+  /**
+   * Record cross-project knowledge transfer metrics (issue #506) for
+   * foreign/promoted entries that survive fusion. Set true ONLY for genuine
+   * agent recall (executeRecall); left false for dashboard/CLI searches so they
+   * don't inflate counts. Default false.
+   */
+  recordTransfers?: boolean;
 };
 
 /** Result of a full recall run — markdown-formatted string for the LLM. */
@@ -1045,6 +1052,32 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
   }
 
   const fused = await searchRecall(input);
+
+  // Record cross-project knowledge transfers (issue #506) — only for genuine
+  // agent recall. id-based detail retrieval already returned above, so
+  // recallById is never counted. Two fused sources qualify:
+  //   - "cross-knowledge": foreign-project non-promoted entries
+  //     (searchScoredOtherProjects guarantees project_id != current project).
+  //   - "knowledge": promoted cross_project=1 entries whose project_id is a
+  //     DIFFERENT non-null project than the current one.
+  if (input.recordTransfers) {
+    try {
+      const pid = ensureProject(input.projectPath);
+      for (const { item: tagged } of fused) {
+        if (tagged.source !== "cross-knowledge" && tagged.source !== "knowledge")
+          continue;
+        const entry = tagged.item;
+        // For same-source knowledge results, only promoted cross-project entries
+        // from another project count as transfers.
+        if (tagged.source === "knowledge" && entry.cross_project !== 1) continue;
+        if (!entry.project_id || entry.project_id === pid) continue;
+        ltm.recordTransfer({ knowledgeId: entry.id, recalledInProjectId: pid });
+      }
+    } catch (err) {
+      log.warn("recall: transfer recording failed (non-fatal):", err);
+    }
+  }
+
   const recallCfg = input.searchConfig?.recall;
   let out = formatFusedResults(fused, {
     charBudget: recallCfg?.charBudget ?? DEFAULT_FORMAT_CONFIG.charBudget,

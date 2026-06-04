@@ -1550,9 +1550,12 @@ function pageUserKnowledge(): string {
   }
   body += `</div>`;
 
+  // Batch-load cross-project transfer counts (#506) to avoid N+1 queries.
+  const transferCounts = ltm.transferCounts();
+
   body += `<div class="table-filter"><input type="text" placeholder="Filter knowledge\u2026"><span class="count"></span></div>
   <table data-table-id="user-knowledge">
-    <tr><th data-sort="text">Category</th><th data-sort="text">Title</th><th data-sort="text">Source Project</th><th data-sort="num">Confidence</th><th data-sort="date" data-default-sort="desc">Updated</th></tr>`;
+    <tr><th data-sort="text">Category</th><th data-sort="text">Title</th><th data-sort="text">Source Project</th><th data-sort="num">Confidence</th><th data-sort="num">Recalls</th><th data-sort="date" data-default-sort="desc">Updated</th></tr>`;
   for (const e of entries) {
     const projName = e.project_id ? projectName(e.project_id) : null;
     const projDisplay = e.project_id
@@ -1563,6 +1566,7 @@ function pageUserKnowledge(): string {
       <td><a href="/ui/knowledge/${esc(e.id)}">${esc(truncate(e.title, 60))}</a></td>
       <td>${projDisplay}</td>
       <td>${e.confidence.toFixed(2)}</td>
+      <td>${transferCounts.get(e.id) ?? 0}</td>
       <td>${timeAgo(e.updated_at)}</td>
     </tr>`;
   }
@@ -1594,12 +1598,32 @@ function pageKnowledge(id: string): string | null {
   body += `<div class="field"><span class="key">ID:</span> <code>${esc(entry.id)}</code></div>`;
   body += `<div class="field"><span class="key">Project ID:</span> ${esc(entry.project_id ?? "(global)")}</div>`;
   body += `<div class="field"><span class="key">Cross-project:</span> ${entry.cross_project ? "Yes" : "No"}</div>`;
+  const transfers = ltm.transfersFor(entry.id);
+  body += `<div class="field"><span class="key">Recalled in other projects:</span> ${transfers.length}</div>`;
   body += `<div class="field"><span class="key">Source session:</span> ${esc(entry.source_session ?? "(none)")}</div>`;
   body += `<div class="field"><span class="key">Created:</span> ${formatDate(entry.created_at)}</div>`;
   body += `<div class="field"><span class="key">Updated:</span> ${formatDate(entry.updated_at)}</div>`;
   if (entry.metadata) {
     body += `<div class="field"><span class="key">Metadata:</span></div><pre>${esc(entry.metadata)}</pre>`;
   }
+
+  // Cross-project recall breakdown (#506): which foreign projects surfaced this
+  // entry, how often, and when last.
+  if (transfers.length) {
+    body += `<h2>Cross-Project Recalls</h2>
+    <table>
+      <tr><th>Project</th><th data-sort="num">Hits</th><th data-sort="date">Last recalled</th></tr>`;
+    for (const t of transfers) {
+      const name = projectName(t.recalled_in_project_id) ?? "(unknown)";
+      body += `<tr>
+        <td><a href="/ui/projects/${esc(t.recalled_in_project_id)}">${esc(name)}</a></td>
+        <td>${t.hit_count}</td>
+        <td>${timeAgo(t.last_recalled_at)}</td>
+      </tr>`;
+    }
+    body += `</table>`;
+  }
+
   body += `<h2>Content</h2>${md(entry.content)}`;
 
   body += `<div class="actions">

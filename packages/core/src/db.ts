@@ -942,6 +942,30 @@ const MIGRATIONS: string[] = [
     VALUES (new.rowid, new.alias_value);
   END;
   `,
+
+  `
+  -- Version 33: Cross-project knowledge transfer metrics (issue #506).
+  -- One row per (knowledge entry, foreign project) pair — a bounded tally,
+  -- NOT an event log. hit_count accumulates via UPSERT; last_recalled_at is
+  -- overwritten while first_recalled_at is set once. Tracks how often a
+  -- cross-project / other-project entry is recalled or surfaced in a project
+  -- that is NOT its origin, so we can measure whether promotions are useful.
+  --
+  -- Global entries (project_id IS NULL) have no origin and are never recorded;
+  -- self-project recalls are filtered out by callers. No FTS, no triggers, no
+  -- FK CASCADE (consistent with tool_calls / daily_costs) — explicit cleanup
+  -- lives in data.ts and mergeProjectInternal().
+  CREATE TABLE IF NOT EXISTS knowledge_transfers (
+    knowledge_id           TEXT NOT NULL,
+    recalled_in_project_id TEXT NOT NULL,
+    hit_count              INTEGER NOT NULL DEFAULT 0,
+    first_recalled_at      INTEGER NOT NULL,
+    last_recalled_at       INTEGER NOT NULL,
+    PRIMARY KEY (knowledge_id, recalled_in_project_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_knowledge_transfers_recalled_in
+    ON knowledge_transfers (recalled_in_project_id);
+  `,
 ];
 
 /** Return the resolved path of the SQLite database file. */
@@ -1178,6 +1202,16 @@ function recoverMissingObjects(database: Database) {
       ON tool_calls (project_id, tool, status);
     CREATE INDEX IF NOT EXISTS idx_tool_calls_project_session
       ON tool_calls (project_id, session_id);
+    CREATE TABLE IF NOT EXISTS knowledge_transfers (
+      knowledge_id           TEXT NOT NULL,
+      recalled_in_project_id TEXT NOT NULL,
+      hit_count              INTEGER NOT NULL DEFAULT 0,
+      first_recalled_at      INTEGER NOT NULL,
+      last_recalled_at       INTEGER NOT NULL,
+      PRIMARY KEY (knowledge_id, recalled_in_project_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_knowledge_transfers_recalled_in
+      ON knowledge_transfers (recalled_in_project_id);
   `);
 
   // Recover missing columns from partial migration runs.
@@ -1230,6 +1264,31 @@ export function mergeProjectInternal(
       targetId,
       sourceId,
     );
+    // knowledge_transfers: re-point the "recalled in" foreign project. A plain
+    // UPDATE would violate the composite PK when a (knowledge_id, targetId) row
+    // already exists, so merge the counts via UPSERT then delete the leftover
+    // source rows. The knowledge_id side needs no update — entries keep their
+    // UUID when their origin project merges.
+    d.query(
+      `INSERT INTO knowledge_transfers
+         (knowledge_id, recalled_in_project_id, hit_count, first_recalled_at, last_recalled_at)
+       SELECT knowledge_id, ?, hit_count, first_recalled_at, last_recalled_at
+         FROM knowledge_transfers WHERE recalled_in_project_id = ?
+       ON CONFLICT(knowledge_id, recalled_in_project_id) DO UPDATE SET
+         hit_count = hit_count + excluded.hit_count,
+         first_recalled_at = MIN(first_recalled_at, excluded.first_recalled_at),
+         last_recalled_at = MAX(last_recalled_at, excluded.last_recalled_at)`,
+    ).run(targetId, sourceId);
+    d.query(
+      "DELETE FROM knowledge_transfers WHERE recalled_in_project_id = ?",
+    ).run(sourceId);
+    // Drop rows that became self-referential (origin == recalled-in) after the
+    // merge: an entry whose origin was the source project, recalled in target.
+    d.query(
+      `DELETE FROM knowledge_transfers
+        WHERE recalled_in_project_id = ?
+          AND knowledge_id IN (SELECT id FROM knowledge WHERE project_id = ?)`,
+    ).run(targetId, targetId);
     // entity_relations references entities by FK — no project_id column to update.
     // Relations move implicitly when their parent entities move.
     d.query(

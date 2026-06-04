@@ -24,7 +24,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(32);
+    expect(row.version).toBe(33);
   });
 
   test("distillation_fts virtual table exists", () => {
@@ -1066,6 +1066,56 @@ describe("db", () => {
       const names = idx.map((i) => i.name);
       expect(names).toContain("idx_tool_calls_project_tool_status");
       expect(names).toContain("idx_tool_calls_project_session");
+    });
+  });
+
+  // Migration v33: cross-project knowledge transfer metrics (knowledge_transfers)
+  describe("knowledge_transfers tally (v33)", () => {
+    test("knowledge_transfers table and index exist", () => {
+      const tbl = db()
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_transfers'",
+        )
+        .get();
+      expect(tbl).not.toBeNull();
+      const idx = db()
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='knowledge_transfers'",
+        )
+        .all() as Array<{ name: string }>;
+      expect(idx.map((i) => i.name)).toContain(
+        "idx_knowledge_transfers_recalled_in",
+      );
+    });
+
+    test("recoverMissingObjects recreates knowledge_transfers when missing", () => {
+      const d = db();
+      d.exec("DROP TABLE IF EXISTS knowledge_transfers");
+      expect(
+        d
+          .query(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_transfers'",
+          )
+          .get(),
+      ).toBeNull();
+
+      close();
+      const fresh = db();
+      const after = fresh
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_transfers'",
+        )
+        .get() as { name: string } | null;
+      expect(after).not.toBeNull();
+      expect(after!.name).toBe("knowledge_transfers");
+      const idx = fresh
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='knowledge_transfers'",
+        )
+        .all() as Array<{ name: string }>;
+      expect(idx.map((i) => i.name)).toContain(
+        "idx_knowledge_transfers_recalled_in",
+      );
     });
   });
 });

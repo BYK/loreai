@@ -525,6 +525,10 @@ export async function forSession(
       result.push(entry);
       used += cost;
     }
+    // Note: transfer metrics (issue #506) are intentionally NOT recorded on this
+    // fast path. Preferences are typically global/cross directives rather than
+    // project-origin knowledge, so counting them as cross-project "transfers"
+    // would be misleading.
     return result;
   }
 
@@ -716,8 +720,27 @@ export async function forSession(
         source_entry_id: null,
         last_accessed_at: null,
       });
-      used += cost;
+       used += cost;
     }
+  }
+
+  // --- 7. Record cross-project transfer metrics (issue #506) ---
+  // An entry counts as a "transfer" when it was injected into a project that is
+  // NOT its origin: cross_project=1 AND a non-null project_id != pid. Global
+  // entries (project_id === null) have no origin; self-project entries
+  // (project_id === pid) are not transfers; lat.md synthetics are skipped (they
+  // are not knowledge rows). The in-memory throttle bounds writes so this
+  // every-message path does not hammer SQLite.
+  try {
+    for (const entry of result) {
+      if (entry.category === "lat.md") continue;
+      if (entry.cross_project !== 1) continue;
+      if (!entry.project_id || entry.project_id === pid) continue;
+      if (!shouldRecordTransfer(sessionID, entry.id, pid)) continue;
+      recordTransfer({ knowledgeId: entry.id, recalledInProjectId: pid });
+    }
+  } catch (err) {
+    log.warn("forSession: transfer recording failed (non-fatal):", err);
   }
 
   return result;
@@ -1801,6 +1824,130 @@ export function pruneDedupFeedback(projectId: string | null): void {
       )
       .run(excess);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-project knowledge transfer metrics (issue #506)
+// ---------------------------------------------------------------------------
+
+/**
+ * Record that a knowledge entry was surfaced in a project other than its
+ * origin. UPSERT-increments the (knowledge_id, recalled_in_project_id) tally.
+ *
+ * Callers MUST pre-filter:
+ *   - the entry's origin project must be non-null (global entries are not
+ *     transfers)
+ *   - recalledInProjectId !== the entry's origin project (no self-project
+ *     recalls)
+ * This function trusts those invariants but defensively no-ops on an empty
+ * recalled-in id.
+ */
+export function recordTransfer(input: {
+  knowledgeId: string;
+  recalledInProjectId: string;
+}): void {
+  if (!input.recalledInProjectId) return;
+  const now = Date.now();
+  db()
+    .query(
+      `INSERT INTO knowledge_transfers
+         (knowledge_id, recalled_in_project_id, hit_count, first_recalled_at, last_recalled_at)
+       VALUES (?, ?, 1, ?, ?)
+       ON CONFLICT(knowledge_id, recalled_in_project_id) DO UPDATE SET
+         hit_count = hit_count + 1,
+         last_recalled_at = ?`,
+    )
+    .run(input.knowledgeId, input.recalledInProjectId, now, now, now);
+}
+
+/**
+ * Number of distinct foreign projects an entry has been recalled in. Each
+ * composite-PK row is already one distinct foreign project, so a plain
+ * COUNT(*) suffices.
+ */
+export function transferCount(knowledgeId: string): number {
+  const row = db()
+    .query(
+      "SELECT COUNT(*) as cnt FROM knowledge_transfers WHERE knowledge_id = ?",
+    )
+    .get(knowledgeId) as { cnt: number } | null;
+  return row?.cnt ?? 0;
+}
+
+/**
+ * Distinct-foreign-project transfer counts for ALL entries, keyed by
+ * knowledge_id. Batch-loaded for the user-knowledge list page to avoid N+1.
+ */
+export function transferCounts(): Map<string, number> {
+  const rows = db()
+    .query(
+      "SELECT knowledge_id, COUNT(*) as cnt FROM knowledge_transfers GROUP BY knowledge_id",
+    )
+    .all() as Array<{ knowledge_id: string; cnt: number }>;
+  const m = new Map<string, number>();
+  for (const r of rows) m.set(r.knowledge_id, r.cnt);
+  return m;
+}
+
+export type KnowledgeTransfer = {
+  recalled_in_project_id: string;
+  hit_count: number;
+  first_recalled_at: number;
+  last_recalled_at: number;
+};
+
+/** Full per-foreign-project breakdown for one entry, newest activity first. */
+export function transfersFor(knowledgeId: string): KnowledgeTransfer[] {
+  return db()
+    .query(
+      `SELECT recalled_in_project_id, hit_count, first_recalled_at, last_recalled_at
+         FROM knowledge_transfers
+        WHERE knowledge_id = ?
+        ORDER BY last_recalled_at DESC`,
+    )
+    .all(knowledgeId) as KnowledgeTransfer[];
+}
+
+// --- forSession transfer-recording throttle (in-memory, process-local) ------
+//
+// forSession() runs on (nearly) every message transform. Recording every
+// cross-pool entry on every call would hammer SQLite. This guard records each
+// (sessionID, knowledgeId, recalledInProjectId) tuple at most once per
+// TRANSFER_DEDUP_WINDOW_MS. The map is bounded by TRANSFER_DEDUP_MAX_KEYS with
+// FIFO eviction (Map preserves insertion order). State is volatile — the tally
+// is durable in the DB, so a process restart simply re-opens the window.
+const transferDedup = new Map<string, number>();
+const TRANSFER_DEDUP_WINDOW_MS = 30 * 60 * 1000; // 30 min
+const TRANSFER_DEDUP_MAX_KEYS = 50_000;
+
+function shouldRecordTransfer(
+  sessionID: string | undefined,
+  knowledgeId: string,
+  recalledInProjectId: string,
+): boolean {
+  // No session → stable synthetic key so we still throttle per (entry, project).
+  const sid = sessionID ?? "__nosession__";
+  const key = `${sid}\x1f${knowledgeId}\x1f${recalledInProjectId}`;
+  const now = Date.now();
+  const last = transferDedup.get(key);
+  if (last != null && now - last < TRANSFER_DEDUP_WINDOW_MS) return false;
+
+  if (transferDedup.size >= TRANSFER_DEDUP_MAX_KEYS) {
+    // Evict ~10% oldest to bound memory.
+    const evict = Math.ceil(TRANSFER_DEDUP_MAX_KEYS * 0.1);
+    let i = 0;
+    for (const k of transferDedup.keys()) {
+      transferDedup.delete(k);
+      if (++i >= evict) break;
+    }
+  }
+  transferDedup.set(key, now);
+  return true;
+}
+
+/** Test-only: clear the in-memory forSession transfer-recording throttle. */
+export function __resetTransferDedup(): void {
+  transferDedup.clear();
 }
 
 /**

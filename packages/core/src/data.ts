@@ -361,6 +361,13 @@ export function clearProject(projectPath: string): ClearResult {
     database
       .query("DELETE FROM tool_calls WHERE project_id = ?")
       .run(pid);
+    // knowledge_transfers has two project columns (origin via knowledge_id, and
+    // recalled_in). Delete BEFORE knowledge so the subquery still sees the rows.
+    database
+      .query(
+        "DELETE FROM knowledge_transfers WHERE recalled_in_project_id = ? OR knowledge_id IN (SELECT id FROM knowledge WHERE project_id = ?)",
+      )
+      .run(pid, pid);
     database
       .query("DELETE FROM knowledge WHERE project_id = ?")
       .run(pid);
@@ -466,6 +473,13 @@ export function deleteProject(projectId: string): ClearResult | null {
     database
       .query("DELETE FROM tool_calls WHERE project_id = ?")
       .run(projectId);
+    // knowledge_transfers has two project columns (origin via knowledge_id, and
+    // recalled_in). Delete BEFORE knowledge so the subquery still sees the rows.
+    database
+      .query(
+        "DELETE FROM knowledge_transfers WHERE recalled_in_project_id = ? OR knowledge_id IN (SELECT id FROM knowledge WHERE project_id = ?)",
+      )
+      .run(projectId, projectId);
     database
       .query("DELETE FROM knowledge WHERE project_id = ?")
       .run(projectId);
@@ -623,6 +637,9 @@ export function deleteSession(
       .get(pid, sessionId) as { c: number }
   ).c;
 
+  // Note: knowledge_transfers has no session_id column (it is a pure per-project
+  // tally); per-session dedup is handled in-memory in ltm.ts, so there is
+  // nothing session-scoped to delete here.
   database
     .query(
       "DELETE FROM tool_calls WHERE project_id = ? AND session_id = ?",

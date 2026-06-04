@@ -362,6 +362,8 @@ export async function executeRecall(
       knowledgeEnabled: cfg.knowledge?.enabled ?? true,
       llm,
       searchConfig: cfg.search,
+      // Genuine agent recall — record cross-project transfer metrics (#506).
+      recordTransfers: true,
     });
 
     return { result, input: { query, scope, id } };
