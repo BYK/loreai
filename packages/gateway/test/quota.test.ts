@@ -27,6 +27,10 @@ import {
 } from "../src/auth";
 import { captureBillingPrefix, _resetForTest as resetCch } from "../src/cch";
 
+// Must match QUOTA_URL in ../src/quota.ts. Used to scope the fetch-mock
+// capture to the quota request and ignore unrelated fetches (issue #527).
+const QUOTA_URL = "https://api.anthropic.com/api/oauth/usage";
+
 const BEARER: AuthCredential = { scheme: "bearer", value: "oauth-token-abc" };
 const API_KEY: AuthCredential = { scheme: "api-key", value: "sk-ant-xyz" };
 const BILLING =
@@ -88,8 +92,13 @@ describe("fetchOAuthQuotaSnapshot", () => {
 
   test("sends bearer auth + oauth beta header", async () => {
     let capturedInit: RequestInit | undefined;
-    globalThis.fetch = mock((_url: string, init?: RequestInit) => {
-      capturedInit = init;
+    globalThis.fetch = mock((url: string, init?: RequestInit) => {
+      // Only capture the quota request — unrelated fetches (e.g. a Sentry
+      // transport flush leaking in from another test file on shared CI
+      // workers) must not clobber `capturedInit`. See issue #527.
+      if (url.startsWith(QUOTA_URL)) {
+        capturedInit = init;
+      }
       return Promise.resolve(new Response(quotaBody(), { status: 200 }));
     }) as unknown as typeof fetch;
 
@@ -101,8 +110,11 @@ describe("fetchOAuthQuotaSnapshot", () => {
 
   test("sends a Claude Code user-agent (fallback when no session)", async () => {
     let capturedInit: RequestInit | undefined;
-    globalThis.fetch = mock((_url: string, init?: RequestInit) => {
-      capturedInit = init;
+    globalThis.fetch = mock((url: string, init?: RequestInit) => {
+      // Capture only the quota request (see issue #527).
+      if (url.startsWith(QUOTA_URL)) {
+        capturedInit = init;
+      }
       return Promise.resolve(new Response(quotaBody(), { status: 200 }));
     }) as unknown as typeof fetch;
 
@@ -111,24 +123,41 @@ describe("fetchOAuthQuotaSnapshot", () => {
     expect(headers["user-agent"]).toContain("claude-cli/");
   });
 
-  // Extended timeout: makeOAuthSession + captureBillingPrefix setup can exceed
-  // the default 1s Bun test timeout on CI runners under load.
+  test("fetches from the expected quota URL", async () => {
+    let capturedUrl: string | undefined;
+    globalThis.fetch = mock((url: string) => {
+      capturedUrl = url;
+      return Promise.resolve(new Response(quotaBody(), { status: 200 }));
+    }) as unknown as typeof fetch;
+
+    await fetchOAuthQuotaSnapshot(BEARER);
+    // Guards against silent drift between this test file's QUOTA_URL
+    // constant and the production QUOTA_URL in ../src/quota.ts.
+    expect(capturedUrl).toBe(QUOTA_URL);
+  });
+
   test("reuses sniffed Claude Code headers when a session is provided", async () => {
     makeOAuthSession("sid-ua");
-    // captureSessionHeaders requires billing + a turn; simulate by capturing
-    // the session's anthropic-beta/user-agent via the cch snapshot path.
     let capturedInit: RequestInit | undefined;
-    globalThis.fetch = mock((_url: string, init?: RequestInit) => {
-      capturedInit = init;
+    globalThis.fetch = mock((url: string, init?: RequestInit) => {
+      // Capture only the quota request. Without this URL guard a Sentry
+      // transport flush leaking in from another test file on shared CI
+      // workers overwrites `capturedInit` with its own request (whose
+      // user-agent is `sentry.javascript.bun/...`), flaking this test.
+      // See issue #527.
+      if (url.startsWith(QUOTA_URL)) {
+        capturedInit = init;
+      }
       return Promise.resolve(new Response(quotaBody(), { status: 200 }));
     }) as unknown as typeof fetch;
 
     await fetchOAuthQuotaSnapshot(BEARER, "sid-ua");
     const headers = capturedInit!.headers as Record<string, string>;
-    // buildOAuthWorkerHeaders always sets a UA + the oauth beta for OAuth sessions.
+    // No captureSessionHeaders was called, so buildOAuthWorkerHeaders uses its
+    // fallback Claude Code UA + worker betas (not sniffed session values).
     expect(headers["user-agent"]).toContain("claude-cli/");
     expect(headers["anthropic-beta"]).toContain("oauth-2025-04-20");
-  }, 5000);
+  });
 
   test("missing seven_day → that window is null", async () => {
     globalThis.fetch = mock(() =>
