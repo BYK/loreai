@@ -21,11 +21,13 @@
  */
 
 import { parentPort, workerData } from "node:worker_threads";
-import type {
-  WorkerInbound,
-  WorkerOutbound,
-  WorkerInitData,
-  EmbedRequest,
+import {
+  isOomError,
+  isWasmFatalError,
+  type WorkerInbound,
+  type WorkerOutbound,
+  type WorkerInitData,
+  type EmbedRequest,
 } from "./embedding-worker-types";
 
 // ---------------------------------------------------------------------------
@@ -125,6 +127,26 @@ async function ensurePipeline(): Promise<void> {
         // Binary mode: point at pre-extracted model files on disk.
         env.localModelPath = vendorModel.localModelPath;
         env.allowRemoteModels = false;
+      }
+
+      // Force single-threaded WASM execution to avoid Bun's buggy
+      // shared-memory/pthread WASM paths. The threaded build uses
+      // `new WebAssembly.Memory({shared:true})` which triggers open Bun bugs:
+      //   - oven-sh/bun#25677: SharedArrayBuffer writes invisible to workers
+      //   - oven-sh/bun#31158: SIGPWR storm with native threads + WASM
+      //   - oven-sh/bun#18145: $bunfs + WASM Aborted() in --compile binaries
+      // Single-thread avoids all three. The ~2× batch speed advantage of
+      // threading is batch-only (single-text is identical) and lore's workload
+      // is incremental single-text embeds, so no practical throughput loss.
+      //
+      // Access the ONNX WASM config via the env object exposed by transformers.js.
+      // `env.backends.onnx.wasm` is the ORT WebAssemblyFlags interface.
+      const wasmEnv = (env as Record<string, unknown>).backends as
+        | { onnx?: { wasm?: { numThreads?: number; proxy?: boolean } } }
+        | undefined;
+      if (wasmEnv?.onnx?.wasm) {
+        wasmEnv.onnx.wasm.numThreads = 1;
+        wasmEnv.onnx.wasm.proxy = false;
       }
 
       // Create feature-extraction pipeline with ONNX quantized model.
@@ -229,36 +251,8 @@ function truncateTexts(texts: string[], maxTokens: number): string[] {
   });
 }
 
-/**
- * Detect ONNX runtime out-of-memory errors. The runtime throws opaque
- * numeric error codes (e.g. "287180544") for allocation failures rather
- * than a readable message. We match on large numeric-only strings and
- * known OOM patterns.
- */
-function isOomError(msg: string): boolean {
-  // Pure numeric error codes ≥ 6 digits are ORT allocation failures
-  if (/^\d{6,}$/.test(msg)) return true;
-  // Explicit OOM messages from various ONNX backends
-  if (/out.of.memory|alloc.*fail|oom/i.test(msg)) return true;
-  return false;
-}
-
-/**
- * Detect fatal WASM runtime errors that leave the ONNX session in an
- * unrecoverable state. Unlike OOM (which can be retried with smaller
- * input), these indicate the WASM module has called `abort()` — all
- * subsequent inference calls will also fail.
- *
- * After detecting a fatal error, the worker should exit so the main
- * thread's `on("exit")` handler marks the provider as broken.
- */
-function isWasmFatalError(msg: string): boolean {
-  // WASM abort() — "Aborted(). Build with -sASSERTIONS for more info."
-  if (/\bAborted\b/i.test(msg)) return true;
-  // RuntimeError from WASM (e.g. "unreachable", "memory access out of bounds")
-  if (/\bRuntimeError\b/.test(msg)) return true;
-  return false;
-}
+// isOomError and isWasmFatalError are imported from embedding-worker-types.ts
+// (shared with the main thread to prevent classification drift).
 
 /** Run inference on `texts` and return per-text vectors. */
 async function runInference(texts: string[]): Promise<Float32Array[]> {
@@ -333,6 +327,17 @@ async function processEmbed(req: EmbedRequest): Promise<void> {
         const raw = err instanceof Error ? err.message : String(err);
         if (!isOomError(raw) || !tokenizer) throw err;
         lastError = err instanceof Error ? err : new Error(raw);
+
+        // If all texts are already shorter than the smallest retry ceiling
+        // (1024 tokens ≈ chars at worst-case 1:1 ratio), truncation cannot
+        // help — the OOM is a model-init/runtime allocation failure, not
+        // input-size-driven. Throw immediately to reach the fatal exit path.
+        const smallestRetryLimit =
+          OOM_RETRY_START_TOKENS >> (OOM_MAX_RETRIES - 1); // 1024
+        const longestText = Math.max(...req.texts.map((t) => t.length));
+        if (longestText <= smallestRetryLimit) {
+          throw lastError;
+        }
 
         // OOM — truncate texts and retry with fewer tokens.
         // attempt 0 failed at full length → retry at 4096 tokens

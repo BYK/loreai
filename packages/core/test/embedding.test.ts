@@ -180,122 +180,35 @@ describe("local provider unavailable fallback", () => {
   });
 });
 
-describe("auto-fallback to remote provider when local provider is unavailable", () => {
-  let savedVoyage: string | undefined;
-  let savedOpenAI: string | undefined;
-  let savedFetch: typeof fetch;
+describe("local provider unavailable — no auto-fallback (remote is opt-in)", () => {
   let savedProvider: unknown;
 
   beforeEach(() => {
-    savedVoyage = process.env.VOYAGE_API_KEY;
-    savedOpenAI = process.env.OPENAI_API_KEY;
-    delete process.env.VOYAGE_API_KEY;
-    delete process.env.OPENAI_API_KEY;
-    savedFetch = globalThis.fetch;
     savedProvider = _saveAndClearProvider();
   });
 
   afterEach(() => {
-    if (savedVoyage !== undefined) process.env.VOYAGE_API_KEY = savedVoyage;
-    else delete process.env.VOYAGE_API_KEY;
-    if (savedOpenAI !== undefined) process.env.OPENAI_API_KEY = savedOpenAI;
-    else delete process.env.OPENAI_API_KEY;
-    globalThis.fetch = savedFetch;
     _resetLocalProviderProbe();
     _restoreProvider(savedProvider);
   });
 
-  /** Build a fake fetch returning provider-shaped JSON. Records URLs for
-   *  assertions on which provider was hit. */
-  function fakeFetch(provider: "voyage" | "openai") {
-    const calls: string[] = [];
-    const fn = mock(async (url: string | URL | Request) => {
-      const u =
-        typeof url === "string"
-          ? url
-          : url instanceof URL
-            ? url.toString()
-            : url.url;
-      calls.push(u);
-      const dim = provider === "voyage" ? 1024 : 1536;
-      const embedding = Array.from({ length: dim }, (_, i) => i / dim);
-      const body =
-        provider === "voyage"
-          ? {
-              data: [{ embedding, index: 0 }],
-              model: "voyage-code-3",
-              usage: { total_tokens: 1 },
-            }
-          : {
-              data: [{ embedding, index: 0 }],
-              model: "text-embedding-3-small",
-              usage: { prompt_tokens: 1, total_tokens: 1 },
-            };
-      return new Response(JSON.stringify(body), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    });
-    return { fetch: fn as unknown as typeof fetch, calls };
-  }
-
-  test("auto-falls back to Voyage when VOYAGE_API_KEY is set", async () => {
+  test("embed() throws LocalProviderUnavailableError when local is broken (no auto-switch to Voyage)", async () => {
     _markLocalProviderUnavailable();
-    process.env.VOYAGE_API_KEY = "vk-test-key-that-is-long-enough";
-    const { fetch, calls } = fakeFetch("voyage");
-    globalThis.fetch = fetch;
-
-    const [vec] = await embed(["test query"], "query");
-    expect(vec).toBeInstanceOf(Float32Array);
-    expect(vec.length).toBe(1024);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toContain("voyageai.com");
-  });
-
-  test("auto-falls back to OpenAI when only OPENAI_API_KEY is set", async () => {
-    _markLocalProviderUnavailable();
-    process.env.OPENAI_API_KEY = "sk-test-key-that-is-long-enough";
-    const { fetch, calls } = fakeFetch("openai");
-    globalThis.fetch = fetch;
-
-    const [vec] = await embed(["test query"], "query");
-    expect(vec).toBeInstanceOf(Float32Array);
-    expect(vec.length).toBe(1536);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toContain("openai.com");
-  });
-
-  test("Voyage wins when both keys are set", async () => {
-    _markLocalProviderUnavailable();
-    process.env.VOYAGE_API_KEY = "vk-test-key-that-is-long-enough";
-    process.env.OPENAI_API_KEY = "sk-test-key-that-is-long-enough";
-    const { fetch, calls } = fakeFetch("voyage");
-    globalThis.fetch = fetch;
-
-    await embed(["x"], "query");
-    expect(calls[0]).toContain("voyageai.com");
-  });
-
-  test("subsequent embed() calls go directly to the swapped provider (no double fail)", async () => {
-    _markLocalProviderUnavailable();
-    process.env.VOYAGE_API_KEY = "vk-test-key-that-is-long-enough";
-    const { fetch, calls } = fakeFetch("voyage");
-    globalThis.fetch = fetch;
-
-    await embed(["one"], "query");
-    await embed(["two"], "query");
-    await embed(["three"], "query");
-
-    expect(calls).toHaveLength(3);
-    expect(calls.every((u) => u.includes("voyageai.com"))).toBe(true);
-    expect(isAvailable()).toBe(true);
-  });
-
-  test("with no API keys set, embed() still throws LocalProviderUnavailableError", async () => {
-    _markLocalProviderUnavailable();
-    await expect(embed(["x"], "query")).rejects.toBeInstanceOf(
+    await expect(embed(["test query"], "query")).rejects.toBeInstanceOf(
       LocalProviderUnavailableError,
     );
+  });
+
+  test("embed() throws LocalProviderUnavailableError when local is broken (no auto-switch to OpenAI)", async () => {
+    _markLocalProviderUnavailable();
+    await expect(embed(["test query"], "query")).rejects.toBeInstanceOf(
+      LocalProviderUnavailableError,
+    );
+  });
+
+  test("isAvailable() returns false when local provider is broken", () => {
+    _markLocalProviderUnavailable();
+    expect(isAvailable()).toBe(false);
   });
 });
 

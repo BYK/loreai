@@ -68,6 +68,53 @@ export interface InitError {
 export type WorkerOutbound = EmbedResult | EmbedError | InitError;
 
 // ---------------------------------------------------------------------------
+// Error classification — shared between worker and main thread
+// ---------------------------------------------------------------------------
+// These functions classify ONNX/WASM error messages. Both the worker
+// (embedding-worker.ts) and the main thread (embedding.ts) need the same
+// logic. Keep them here to prevent drift — a duplicated regex set caused
+// the original 11k-event storm (numeric OOM codes weren't classified as
+// fatal on both sides).
+
+/**
+ * Detect ONNX runtime out-of-memory errors. The runtime throws opaque
+ * numeric error codes (e.g. "287180544") for allocation failures rather
+ * than a readable message. We match on large numeric-only strings and
+ * known OOM patterns.
+ */
+export function isOomError(msg: string): boolean {
+  // Pure numeric error codes ≥ 6 digits are ORT allocation failures
+  if (/^\d{6,}$/.test(msg)) return true;
+  // Explicit OOM messages from various ONNX backends
+  if (/out.of.memory|alloc.*fail|oom/i.test(msg)) return true;
+  return false;
+}
+
+/**
+ * Detect fatal WASM/ONNX runtime errors that leave the session in an
+ * unrecoverable state. These include:
+ *   - WASM `abort()` calls ("Aborted(). Build with -sASSERTIONS...")
+ *   - WASM RuntimeError ("unreachable", "memory access out of bounds")
+ *   - ONNX runtime allocation failures (opaque numeric error codes like
+ *     "284792864" ≈ 271 MiB). These represent model-init allocations
+ *     that cannot succeed with smaller input — retrying is futile.
+ *
+ * After detecting a fatal error, the worker should exit so the main
+ * thread's `on("exit")` handler marks the provider as broken.
+ */
+export function isWasmFatalError(msg: string): boolean {
+  // WASM abort() — "Aborted(). Build with -sASSERTIONS for more info."
+  if (/\bAborted\b/i.test(msg)) return true;
+  // RuntimeError from WASM (e.g. "unreachable", "memory access out of bounds")
+  if (/\bRuntimeError\b/.test(msg)) return true;
+  // ONNX runtime allocation failures — opaque numeric codes (e.g. "284792864").
+  // These are model-init-time OOMs, not input-size-driven, so truncation
+  // retries cannot help. Treat as fatal to stop the event storm.
+  if (isOomError(msg)) return true;
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // workerData contract
 // ---------------------------------------------------------------------------
 

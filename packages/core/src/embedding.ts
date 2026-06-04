@@ -17,10 +17,11 @@ import { db } from "./db";
 import { config } from "./config";
 import * as log from "./log";
 import { vendorModelInfo } from "./embedding-vendor";
-import type {
-  WorkerInbound,
-  WorkerOutbound,
-  WorkerInitData,
+import {
+  isWasmFatalError,
+  type WorkerInbound,
+  type WorkerOutbound,
+  type WorkerInitData,
 } from "./embedding-worker-types";
 
 /** Timeout for embedding API fetch calls (ms). Prevents a hanging API from
@@ -188,8 +189,9 @@ export class LocalProviderUnavailableError extends Error {
   constructor(cause?: unknown) {
     super(
       "Local embedding provider unavailable: '@huggingface/transformers' failed to initialize. " +
-        "Configure search.embeddings.provider to 'voyage' or 'openai', or " +
-        "set VOYAGE_API_KEY/OPENAI_API_KEY for automatic remote fallback.",
+        "Recall will use FTS-only search. To use a remote provider instead, set " +
+        "search.embeddings.provider to 'voyage' or 'openai' in .lore.json " +
+        "and provide the corresponding API key (VOYAGE_API_KEY / OPENAI_API_KEY).",
     );
     this.name = "LocalProviderUnavailableError";
     if (cause !== undefined)
@@ -271,8 +273,8 @@ class LocalProvider implements EmbeddingProvider {
 
   /**
    * Ensure the worker thread is running. Worker startup failure is
-   * surfaced as `LocalProviderUnavailableError` to trigger the existing
-   * auto-fallback to remote providers.
+   * surfaced as `LocalProviderUnavailableError` to mark the provider as
+   * broken and degrade to FTS-only search.
    */
   private async ensureWorker(): Promise<void> {
     if (this.workerReady) return;
@@ -360,9 +362,20 @@ class LocalProvider implements EmbeddingProvider {
             if (pending) {
               this.pendingRequests.delete(msg.id);
               this.updateWorkerRef();
-              pending.reject(
-                new Error(`Worker embedding failed: ${msg.error}`),
-              );
+              // If the worker reports a WASM-fatal or OOM error, reject with
+              // LocalProviderUnavailableError so callers (embed() → isAvailable)
+              // treat the local provider as broken and degrade to FTS-only.
+              // A generic Error would bypass that path, causing silent data loss.
+              // Uses the same isWasmFatalError() from embedding-worker-types.ts
+              // that the worker uses — single source of truth for classification.
+              if (isWasmFatalError(msg.error)) {
+                localProviderKnownBroken = true;
+                pending.reject(new LocalProviderUnavailableError(msg.error));
+              } else {
+                pending.reject(
+                  new Error(`Worker embedding failed: ${msg.error}`),
+                );
+              }
             }
             break;
           }
@@ -376,7 +389,7 @@ class LocalProvider implements EmbeddingProvider {
               localProviderErrorLogged = true;
               log.error(
                 `local embedding provider failed to init: ${msg.error}. ` +
-                  `Set VOYAGE_API_KEY/OPENAI_API_KEY for automatic remote fallback.`,
+                  `Set search.embeddings.provider in .lore.json to use a remote provider.`,
                 new Error(`embedding worker init failed: ${msg.error}`),
               );
             }
@@ -406,6 +419,12 @@ class LocalProvider implements EmbeddingProvider {
         if (code !== 0 && !this.workerInitError) {
           this.workerInitError = `embedding worker exited with code ${code}`;
           log.error(this.workerInitError, new Error(this.workerInitError));
+        }
+        // Latch the provider as permanently broken on non-zero exit so
+        // future ensureWorker() calls fast-fail instead of respawning a
+        // worker that will just OOM/crash again (event storm prevention).
+        if (code !== 0) {
+          localProviderKnownBroken = true;
         }
         this.workerReady = false;
         for (const [, p] of this.pendingRequests) {
@@ -545,8 +564,8 @@ function getProvider(): EmbeddingProvider | null {
     case "local": {
       // Construct the provider optimistically — the ONNX model init
       // happens lazily in the worker thread on first `embed()` call.
-      // If it fails, `LocalProviderUnavailableError` triggers the
-      // auto-fallback to a remote provider or FTS-only search.
+      // If it fails, `LocalProviderUnavailableError` marks the provider
+      // as broken and callers degrade to FTS-only search.
       cachedProvider = new LocalProvider(model, cfg.dimensions);
       break;
     }
@@ -586,7 +605,6 @@ export function resetProvider(): Promise<void> {
     shutdownPromise = cachedProvider.shutdown();
   }
   cachedProvider = undefined;
-  remoteFallbackLogged = false;
   return shutdownPromise;
 }
 
@@ -600,7 +618,6 @@ export function _shutdownAndDisable(): Promise<void> {
     shutdownPromise = cachedProvider.shutdown();
   }
   cachedProvider = null; // null (not undefined) → getProvider() returns null, won't create new
-  remoteFallbackLogged = false;
   return shutdownPromise;
 }
 
@@ -613,9 +630,8 @@ export function _shutdownAndDisable(): Promise<void> {
  *  Test-only helper: lets suites temporarily swap in a mock/unavailable
  *  provider without killing the real worker. */
 export function _saveAndClearProvider(): unknown {
-  const saved = { provider: cachedProvider, remoteFallbackLogged };
+  const saved = { provider: cachedProvider };
   cachedProvider = undefined;
-  remoteFallbackLogged = false;
   return saved;
 }
 
@@ -626,15 +642,9 @@ export function _saveAndClearProvider(): unknown {
 export function _restoreProvider(token: unknown): void {
   const saved = token as {
     provider: EmbeddingProvider | null | undefined;
-    remoteFallbackLogged: boolean;
   };
   cachedProvider = saved.provider;
-  remoteFallbackLogged = saved.remoteFallbackLogged;
 }
-
-/** True once we've logged an auto-fallback notice this process — keeps the
- *  one-line warning from spamming on every fire-and-forget embed call. */
-let remoteFallbackLogged = false;
 
 /**
  * Quick sanity check that a string looks like a real API key rather than
@@ -698,8 +708,17 @@ export function pickRemoteFallback(): {
 export function isAvailable(): boolean {
   const provider = getProvider();
   if (!provider) return false;
-  if (provider instanceof LocalProvider && localProviderKnownUnavailable())
+  if (provider instanceof LocalProvider && localProviderKnownUnavailable()) {
+    // One-time log so the user knows why vector search is degraded.
+    if (!localProviderErrorLogged) {
+      localProviderErrorLogged = true;
+      log.info(
+        "local embedding provider unavailable — recall will use FTS-only search. " +
+          "To use a remote provider, set search.embeddings.provider in .lore.json.",
+      );
+    }
     return false;
+  }
   return true;
 }
 
@@ -710,18 +729,15 @@ export function isAvailable(): boolean {
 /**
  * Generate embeddings for the given texts using the configured provider.
  *
- * If the configured provider is `local` and the local provider turns out to be
- * unavailable at runtime (failed install, vendor extraction blocked, etc.),
- * automatically swap to a remote provider when `VOYAGE_API_KEY` or
- * `OPENAI_API_KEY` is set in env. The swap is permanent for the rest of
- * the process — `cachedProvider` is replaced so subsequent calls skip the
- * local-then-fail path.
+ * Remote providers (voyage, openai) are explicit opt-in via
+ * `search.embeddings.provider` in `.lore.json` — there is no automatic
+ * fallback from local to remote. When the local provider is unavailable,
+ * callers should gate on `isAvailable()` and degrade to FTS-only search.
  *
  * @param texts     Array of texts to embed
  * @param inputType "document" for storage, "query" for search
  * @returns         Float32Array per input text
- * @throws          On API errors or when no provider (local or remote) is
- *                  available
+ * @throws          On API errors or when no provider is available
  */
 export async function embed(
   texts: string[],
@@ -729,26 +745,7 @@ export async function embed(
 ): Promise<Float32Array[]> {
   const provider = getProvider();
   if (!provider) throw new Error("No embedding provider available");
-
-  try {
-    return await provider.embed(texts, inputType);
-  } catch (err) {
-    if (!(err instanceof LocalProviderUnavailableError)) throw err;
-
-    const fallback = pickRemoteFallback();
-    if (!fallback) throw err;
-
-    if (!remoteFallbackLogged) {
-      remoteFallbackLogged = true;
-      log.info(
-        `local embedding provider unavailable; auto-switching to ${fallback.name} ` +
-          `(set search.embeddings.provider in .lore.json to silence this)`,
-      );
-    }
-
-    cachedProvider = fallback.provider;
-    return fallback.provider.embed(texts, inputType);
-  }
+  return provider.embed(texts, inputType);
 }
 
 // ---------------------------------------------------------------------------
