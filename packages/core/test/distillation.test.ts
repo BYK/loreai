@@ -218,28 +218,40 @@ describe("truncateToolOutputsInContent — multi-chunk path", () => {
 });
 
 describe("truncateToolOutputsInContent — perf regression guards", () => {
-  test("100KB single-letter payload without '/' annotates in <500ms", () => {
-    // Regression guard against catastrophic backtracking in the
-    // path-extraction regex inside toolStripAnnotation. Pathological
-    // inputs (minified JS, base64 blobs, binary dumps) used to stall
-    // the background worker for ~30s on this repro. The no-slash
-    // fast-exit in gradient.ts makes this O(n).
+  // These guards catch catastrophic regex backtracking in the path-extraction
+  // regex inside toolStripAnnotation, NOT precise latencies. The thresholds are
+  // deliberately generous: the healthy fast path runs in <1ms (no-slash) and
+  // ~0.7s (with-slash, 64KB scan cap), while a regression that removed either
+  // mitigation scans the full input and takes ~10s+. The wide gap lets us
+  // tolerate parallel-suite / CI-runner jitter without flaking while still
+  // failing loudly on an actual O(n²) regression. A warm-up call removes
+  // first-call JIT/allocation skew from the timed measurement.
+
+  test("100KB single-letter payload without '/' annotates fast (no O(n²) scan)", () => {
+    // The no-slash fast-exit (indexOf check) in gradient.ts makes this O(n);
+    // a regression that dropped it would backtrack O(n²) into the seconds.
     const pathological = "x".repeat(100_000);
     const content = `[tool:grep] ${pathological}`;
+    truncateToolOutputsInContent(content, 2_000); // warm up (JIT/alloc)
     const start = performance.now();
     const result = truncateToolOutputsInContent(content, 2_000);
     const elapsed = performance.now() - start;
-    expect(elapsed).toBeLessThan(500);
+    // Healthy: <1ms. Regression: seconds. 2s gives huge jitter headroom.
+    expect(elapsed).toBeLessThan(2_000);
     expect(result).toContain("[output omitted — grep:");
   });
 
-  test("100KB payload WITH '/' completes in <2s via scan limit", () => {
+  test("100KB payload WITH '/' stays bounded via 64KB scan limit", () => {
     const pathological = `${"x".repeat(50_000)}/file.ts ${"y".repeat(50_000)}`;
     const content = `[tool:grep] ${pathological}`;
+    truncateToolOutputsInContent(content, 2_000); // warm up (JIT/alloc)
     const start = performance.now();
     const result = truncateToolOutputsInContent(content, 2_000);
     const elapsed = performance.now() - start;
-    expect(elapsed).toBeLessThan(2000);
+    // Healthy: ~0.7s (scans the capped 64KB slice). Regression that removed
+    // the cap scans the full 100KB and takes ~10s. 5s sits well between the
+    // two — tolerant of load jitter, still catches the regression.
+    expect(elapsed).toBeLessThan(5_000);
     expect(result).toContain("[output omitted — grep:");
   });
 });
