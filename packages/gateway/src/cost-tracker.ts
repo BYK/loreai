@@ -497,6 +497,9 @@ export function resetDailyBudgetState(): void {
   costRateEMA = 0;
   costRateLastUpdate = 0;
   costRateSeeded = false;
+  dailyCostsCache = null;
+  dailyCostsCacheAt = 0;
+  dailyCostsCacheDays = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1007,7 +1010,7 @@ const DEFAULT_ESTIMATION_MODEL = "claude-sonnet-4-20250514";
  * Cache/TTL/warmup/batch savings are loaded from persisted session cost
  * snapshots (saved on idle) when available.
  *
- * Results are cached for 1 minute to avoid repeated DB scans.
+ * Results are cached for 5 minutes to avoid repeated DB scans.
  */
 export function computeHistoricalEstimates(): HistoricalEstimates {
   // Return cache if fresh
@@ -1265,8 +1268,21 @@ function utcDayString(d: Date): string {
  * Note: the ledger is forward-only. Cost incurred before the v30 migration
  * is not back-filled, so days before the ledger existed read 0.
  */
+let dailyCostsCache: DailyCostEntry[] | null = null;
+let dailyCostsCacheAt = 0;
+let dailyCostsCacheDays = 0;
+const DAILY_COSTS_CACHE_TTL_MS = 60_000; // 1 minute
+
 export function computeDailyCosts(days = 14): DailyCostEntry[] {
   const now = Date.now();
+  if (
+    dailyCostsCache &&
+    dailyCostsCacheDays === days &&
+    now - dailyCostsCacheAt < DAILY_COSTS_CACHE_TTL_MS
+  ) {
+    return dailyCostsCache;
+  }
+
   const dayMs = 86_400_000;
 
   // Build the ordered list of UTC day strings, oldest first.
@@ -1279,5 +1295,9 @@ export function computeDailyCosts(days = 14): DailyCostEntry[] {
   // Single grouped query for all days in the window.
   const totals = getDailyCostTotals(cutoffDay);
 
-  return dayKeys.map((date) => ({ date, cost: totals.get(date) ?? 0 }));
+  const result = dayKeys.map((date) => ({ date, cost: totals.get(date) ?? 0 }));
+  dailyCostsCache = result;
+  dailyCostsCacheAt = now;
+  dailyCostsCacheDays = days;
+  return result;
 }

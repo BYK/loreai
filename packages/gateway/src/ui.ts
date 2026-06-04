@@ -2384,7 +2384,7 @@ function pageCosts(): string {
         <input type="number" name="budget" step="0.01" min="0" value="${currentBudget || ""}"
           placeholder="e.g. 10.00" style="width:100px;padding:4px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg2);color:var(--fg)">
         <button type="submit" class="btn">Save</button>
-        ${currentBudget > 0 ? `<button type="submit" name="budget" value="0" class="btn" style="background:var(--bg2);color:var(--fg2)">Disable</button>` : ""}
+        ${currentBudget > 0 ? `<button type="submit" name="action" value="disable" class="btn" style="background:var(--bg2);color:var(--fg2)">Disable</button>` : ""}
       </form>`;
     }
 
@@ -3188,10 +3188,14 @@ export async function handleUIRequest(
     // Set daily budget
     if (pathname === "/ui/api/budget") {
       const formData = await req.formData();
-      const budgetStr = formData.get("budget");
-      const budgetVal =
-        parseFloat(typeof budgetStr === "string" ? budgetStr : "0") || 0;
-      setDailyBudget(budgetVal);
+      if (formData.get("action") === "disable") {
+        setDailyBudget(0);
+      } else {
+        const budgetStr = formData.get("budget");
+        const budgetVal =
+          parseFloat(typeof budgetStr === "string" ? budgetStr : "0") || 0;
+        setDailyBudget(budgetVal);
+      }
       return redirect("/ui/costs");
     }
 

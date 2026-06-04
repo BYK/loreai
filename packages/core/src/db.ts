@@ -2089,7 +2089,18 @@ export function loadHeaderSessionIndex(): Array<{
  * Returns a map: childSessionId → parentSessionId (Lore internal IDs).
  * Used by the dashboard to build session trees.
  */
+let parentChildCache: Map<string, string> | null = null;
+let parentChildCacheAt = 0;
+const PARENT_CHILD_CACHE_TTL_MS = 30_000; // 30 seconds
+
 export function loadParentChildMap(): Map<string, string> {
+  const now = Date.now();
+  if (
+    parentChildCache &&
+    now - parentChildCacheAt < PARENT_CHILD_CACHE_TTL_MS
+  ) {
+    return parentChildCache;
+  }
   const rows = db()
     .query(
       `SELECT session_id, parent_session_id
@@ -2101,7 +2112,15 @@ export function loadParentChildMap(): Map<string, string> {
   for (const row of rows) {
     map.set(row.session_id, row.parent_session_id);
   }
+  parentChildCache = map;
+  parentChildCacheAt = now;
   return map;
+}
+
+/** Invalidate the parent-child map cache (for testing / after session mutations). */
+export function invalidateParentChildCache(): void {
+  parentChildCache = null;
+  parentChildCacheAt = 0;
 }
 
 // ---------------------------------------------------------------------------
