@@ -147,11 +147,18 @@ if (sentryEnabled && !Sentry.isInitialized()) {
     },
   });
 
-  // Bridge core's log.* calls → Sentry structured logs + error capture
+  // Bridge core's log.* calls → Sentry structured logs + error capture.
+  // Error-level logs are filtered against the same TRANSIENT_ERROR_PATTERNS
+  // used by beforeSend — structured logs bypass beforeSend entirely, so
+  // without this gate transient worker errors flood the Sentry Logs product.
   log.registerSink({
     info: (message, attrs) => Sentry.logger.info(message, attrs),
     warn: (message, attrs) => Sentry.logger.warn(message, attrs),
-    error: (message, attrs) => Sentry.logger.error(message, attrs),
+    error: (message, attrs) => {
+      if (!TRANSIENT_ERROR_PATTERNS.some((re) => re.test(message))) {
+        Sentry.logger.error(message, attrs);
+      }
+    },
     captureException: (err) => Sentry.captureException(err),
   });
 }

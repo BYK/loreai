@@ -133,6 +133,7 @@ import {
   setLastSeenAuth,
   setSessionAuth,
   resolveAuth,
+  isAuthStale,
   type AuthCredential,
 } from "./auth";
 import type { UpstreamInterceptor } from "./recorder";
@@ -2777,6 +2778,12 @@ function scheduleBackgroundWork(
   config: GatewayConfig,
 ): void {
   const { sessionID, projectPath } = sessionState;
+
+  // Skip background work when the session's auth credential is stale and no
+  // fresh fallback is available — worker LLM calls would just 401.
+  // Auth refreshes when the next client request arrives via setSessionAuth().
+  if (isAuthStale(sessionID) && !resolveAuth(sessionID)) return;
+
   const llm = getLLMClient(config);
   const cfg = loreConfig();
   const model = getWorkerModel();
