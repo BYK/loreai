@@ -29,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -41,6 +41,7 @@ jobs:
               - 'bunfig.toml'
               - 'tsconfig*.json'
               - 'package.json'
+              - 'biome.json'
               - '.craft.yml'
               - '.github/workflows/ci.yml'
               - '.github/workflows/publish.yml'
@@ -856,8 +857,9 @@ jobs:
               echo "::error::test job did not succeed (result: ${{ needs.test.result }})"
               exit 1
             fi
-            if [ "${{ needs.binary-smoke-native.result }}" == "failure" ]; then
-              echo "::error::binary-smoke-native failed"
+            result="${{ needs.binary-smoke-native.result }}"
+            if [ "$result" == "failure" ] || [ "$result" == "cancelled" ]; then
+              echo "::error::binary-smoke-native did not succeed (result: $result)"
               exit 1
             fi
           fi

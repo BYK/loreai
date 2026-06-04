@@ -7,10 +7,10 @@ on:
       - 'docs/**'
       - '.github/workflows/docs-preview.yml'
   pull_request:
+    # No paths filter on pull_request: the 'closed' event must always fire
+    # so the preview action can clean up deployed previews. A paths-filter
+    # step inside the job skips deploy for non-docs PRs.
     types: [opened, reopened, synchronize, closed]
-    paths:
-      - 'docs/**'
-      - '.github/workflows/docs-preview.yml'
 
 permissions:
   contents: write
@@ -26,11 +26,23 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # Check if docs files changed. On 'closed' events we always proceed
+      # (cleanup). On push events paths are already filtered at trigger level.
+      - name: Check for docs changes
+        id: filter
+        if: github.event_name == 'pull_request' && github.event.action != 'closed'
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            docs:
+              - 'docs/**'
+              - '.github/workflows/docs-preview.yml'
+
       - name: Ensure .nojekyll at gh-pages root
-        # Fork PRs can't push to the base repo (GITHUB_TOKEN is read-only on
-        # pull_request from forks). Skip the deploy but still run the checkout
-        # above so the workflow validates cleanly.
-        if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
+        # Skip when: (a) non-docs PR (not closed), or (b) fork PR
+        if: >-
+          (github.event.action == 'closed' || steps.filter.outputs.docs == 'true' || github.event_name == 'push') &&
+          (github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request')
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -62,8 +74,10 @@ jobs:
           fi
 
       - name: Deploy Preview
-        # Same fork-PR guard as the .nojekyll step above.
-        if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
+        # Skip when: (a) non-docs PR (not closed), or (b) fork PR
+        if: >-
+          (github.event.action == 'closed' || steps.filter.outputs.docs == 'true' || github.event_name == 'push') &&
+          (github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request')
         uses: rossjrw/pr-preview-action@v1
         with:
           source-dir: docs/
