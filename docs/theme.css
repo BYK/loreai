@@ -163,6 +163,12 @@ nav {
   color: var(--c0);
 }
 
+.nav-socials {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
 .social-link {
   display: inline-flex;
   align-items: center;
