@@ -68,8 +68,26 @@ if (typeof __SENTRY_DEBUG_ID__ !== "undefined") {
 
 const sentryEnvVar = process.env.SENTRY_ENABLED?.trim();
 const isDev = VERSION === "dev";
-const sentryEnabled =
-  sentryEnvVar === "1" ? true : sentryEnvVar === "0" ? false : !isDev;
+// Bun's test runner always sets NODE_ENV="test" — regardless of the working
+// directory or whether a bunfig.toml is loaded. This guard wins over EVERYTHING
+// (including an explicit SENTRY_ENABLED=1) so the SDK never installs its
+// background transport during tests. The transport uses globalThis.fetch and
+// would otherwise race into tests that mock fetch (call-count inflation /
+// capturedInit clobber — see #527 / #529 / #530).
+//
+// Why this is the single, CWD-independent source of truth: the root
+// bunfig.toml [test.env] SENTRY_ENABLED=0 is NOT effective when (a) tests run
+// from a sub-package dir that has no bunfig, or (b) the shell already exports
+// SENTRY_ENABLED — Bun's [test.env] does not override an inherited env var. A
+// test process must never ship telemetry, so NODE_ENV==="test" is a hard off.
+const isTestRunner = process.env.NODE_ENV === "test";
+const sentryEnabled = isTestRunner
+  ? false
+  : sentryEnvVar === "1"
+    ? true
+    : sentryEnvVar === "0"
+      ? false
+      : !isDev;
 
 if (sentryEnabled && !Sentry.isInitialized()) {
   // Transient network errors that are expected in a long-running LLM proxy.

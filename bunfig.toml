@@ -3,10 +3,8 @@ preload = ["./packages/core/test/setup.ts"]
 
 [test.env]
 NODE_ENV = "test"
-# Disable Sentry SDK initialization during tests. Without this, instrument.ts
-# sees VERSION != "dev" (it reads package.json) and calls Sentry.init(), which
-# installs a background transport that uses globalThis.fetch. When quota tests
-# (or any test) mock globalThis.fetch, Sentry's background flushes race with
-# the mock — capturing Sentry DSN URLs instead of the intended test URL.
-# This eliminates the entire class of "Sentry leaks into test mocks" flakes.
+# Redundant backstop — the primary gate is in packages/gateway/instrument.ts
+# (NODE_ENV==="test" check, which Bun's test runner sets unconditionally). This
+# env var is a secondary defense for the rare case where instrument.ts is loaded
+# outside the Bun test runner but still in a test-like context.
 SENTRY_ENABLED = "0"

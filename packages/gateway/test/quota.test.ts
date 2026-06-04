@@ -20,8 +20,8 @@ import {
 } from "../src/auth";
 import { captureBillingPrefix, _resetForTest as resetCch } from "../src/cch";
 
-// Must match QUOTA_URL in ../src/quota.ts. Used to scope the fetch-mock
-// capture to the quota request and ignore unrelated fetches (issue #527).
+// Must match QUOTA_URL in ../src/quota.ts. Used by the drift-guard test that
+// asserts production fetches the expected URL.
 const QUOTA_URL = "https://api.anthropic.com/api/oauth/usage";
 
 const BEARER: AuthCredential = { scheme: "bearer", value: "oauth-token-abc" };
@@ -85,13 +85,8 @@ describe("fetchOAuthQuotaSnapshot", () => {
 
   test("sends bearer auth + oauth beta header", async () => {
     let capturedInit: RequestInit | undefined;
-    globalThis.fetch = mock((url: string, init?: RequestInit) => {
-      // Only capture the quota request — unrelated fetches (e.g. a Sentry
-      // transport flush leaking in from another test file on shared CI
-      // workers) must not clobber `capturedInit`. See issue #527.
-      if (url.startsWith(QUOTA_URL)) {
-        capturedInit = init;
-      }
+    globalThis.fetch = mock((_url: string, init?: RequestInit) => {
+      capturedInit = init;
       return Promise.resolve(new Response(quotaBody(), { status: 200 }));
     }) as unknown as typeof fetch;
 
@@ -103,11 +98,8 @@ describe("fetchOAuthQuotaSnapshot", () => {
 
   test("sends a Claude Code user-agent (fallback when no session)", async () => {
     let capturedInit: RequestInit | undefined;
-    globalThis.fetch = mock((url: string, init?: RequestInit) => {
-      // Capture only the quota request (see issue #527).
-      if (url.startsWith(QUOTA_URL)) {
-        capturedInit = init;
-      }
+    globalThis.fetch = mock((_url: string, init?: RequestInit) => {
+      capturedInit = init;
       return Promise.resolve(new Response(quotaBody(), { status: 200 }));
     }) as unknown as typeof fetch;
 
@@ -119,11 +111,7 @@ describe("fetchOAuthQuotaSnapshot", () => {
   test("fetches from the expected quota URL", async () => {
     let capturedUrl: string | undefined;
     globalThis.fetch = mock((url: string) => {
-      // Only capture the quota request — ignore Sentry transport flushes and
-      // other background fetches that race with the mock (see #524 / #527).
-      if (url.startsWith(QUOTA_URL)) {
-        capturedUrl = url;
-      }
+      capturedUrl = url;
       return Promise.resolve(new Response(quotaBody(), { status: 200 }));
     }) as unknown as typeof fetch;
 
@@ -136,15 +124,8 @@ describe("fetchOAuthQuotaSnapshot", () => {
   test("reuses sniffed Claude Code headers when a session is provided", async () => {
     makeOAuthSession("sid-ua");
     let capturedInit: RequestInit | undefined;
-    globalThis.fetch = mock((url: string, init?: RequestInit) => {
-      // Capture only the quota request. Without this URL guard a Sentry
-      // transport flush leaking in from another test file on shared CI
-      // workers overwrites `capturedInit` with its own request (whose
-      // user-agent is `sentry.javascript.bun/...`), flaking this test.
-      // See issue #527.
-      if (url.startsWith(QUOTA_URL)) {
-        capturedInit = init;
-      }
+    globalThis.fetch = mock((_url: string, init?: RequestInit) => {
+      capturedInit = init;
       return Promise.resolve(new Response(quotaBody(), { status: 200 }));
     }) as unknown as typeof fetch;
 
