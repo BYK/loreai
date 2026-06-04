@@ -1131,11 +1131,16 @@ export function checkConfigChange(): boolean {
         "SELECT COUNT(*) as n FROM temporal_messages WHERE embedding IS NOT NULL",
       )
       .get() as { n: number };
-    const total = knowledgeCount.n + distillCount.n + temporalCount.n;
+    const entityCount = db()
+      .query("SELECT COUNT(*) as n FROM entities WHERE embedding IS NOT NULL")
+      .get() as { n: number };
+    const total =
+      knowledgeCount.n + distillCount.n + temporalCount.n + entityCount.n;
     if (total > 0) {
       db().query("UPDATE knowledge SET embedding = NULL").run();
       db().query("UPDATE distillations SET embedding = NULL").run();
       db().query("UPDATE temporal_messages SET embedding = NULL").run();
+      db().query("UPDATE entities SET embedding = NULL").run();
       log.info(
         `embedding config changed (${stored.value} → ${current}), cleared ${total} stale embeddings`,
       );
@@ -1464,7 +1469,7 @@ export async function backfillEntityEmbeddings(): Promise<number> {
   const rows = db()
     .query(
       `SELECT e.id AS id, e.canonical_name AS canonical_name,
-              GROUP_CONCAT(a.alias_value, ' ') AS aliases
+              GROUP_CONCAT(DISTINCT a.alias_value, ' ') AS aliases
        FROM entities e
        LEFT JOIN entity_aliases a ON a.entity_id = e.id
        WHERE e.embedding IS NULL

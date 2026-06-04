@@ -3074,30 +3074,19 @@ export async function handleUIRequest(
     if (mergeEntity) {
       const target = entities.get(mergeEntity.targetId);
       const source = entities.get(mergeEntity.sourceId);
-      if (target && source && target.id !== source.id) {
+      if (
+        target &&
+        source &&
+        target.id !== source.id &&
+        target.entity_type === source.entity_type
+      ) {
         entities.merge(target.id, source.id);
-        // Manual accept signal for adaptive threshold calibration.
-        try {
-          const pid = target.project_id ?? null;
-          entities.recordEntityDedupFeedback({
-            projectId: pid,
-            entryATitle: target.canonical_name,
-            entryBTitle: source.canonical_name,
-            similarity: 1,
-            accepted: true,
-            source: "cli_yes",
-          });
-          const newThreshold = entities.calibrateEntityDedupThreshold(pid);
-          if (newThreshold !== null) {
-            entities.saveEntityCalibratedThreshold(
-              pid,
-              newThreshold,
-              entities.getEntityDedupFeedbackCount(pid),
-            );
-          }
-        } catch (err) {
-          log.warn("entity merge feedback failed (non-fatal):", err);
-        }
+        // NOTE: We intentionally do NOT record calibration feedback here
+        // because the dashboard does not have the real pairwise similarity
+        // score. Recording a fake similarity (e.g. 1.0) would corrupt the
+        // adaptive threshold calibrator. Calibration data is only recorded
+        // from the CLI (`--yes` / `--interactive`) and from the curator's
+        // auto-dedup sweep where real cosine similarities are available.
       }
       return redirect("/ui/entities");
     }

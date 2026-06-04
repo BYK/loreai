@@ -395,19 +395,21 @@ export function ensureSelfEntity(
       );
       if (merged) updates.metadata = merged;
     }
-    if (Object.keys(updates).length > 0) {
+    let changed = Object.keys(updates).length > 0;
+    if (changed) {
       update(existing.id, updates);
     }
     // Add email alias if not present
-    if (email) addAlias(existing.id, "email", email, "auto");
+    if (email && addAlias(existing.id, "email", email, "auto")) changed = true;
     // Add config aliases
     if (cfg?.aliases) {
       for (const a of cfg.aliases) {
-        addAlias(existing.id, a.type as AliasType, a.value, "config");
+        if (addAlias(existing.id, a.type as AliasType, a.value, "config"))
+          changed = true;
       }
     }
-    // Name/alias set may have changed — refresh the dedup embedding.
-    reembedEntity(existing.id);
+    // Only re-embed when the name or alias set actually changed.
+    if (changed) reembedEntity(existing.id);
     return getSelfEntity();
   }
 
@@ -1412,21 +1414,36 @@ export async function deduplicateEntities(
     }
   }
 
-  // Pre-compute lowercased alias sets + linked-knowledge sets per entity.
+  // Pre-compute lowercased alias sets per entity.
   const aliasSets = new Map<string, Set<string>>();
-  const knowledgeSets = new Map<string, Set<string>>();
   for (const e of entities) {
     aliasSets.set(
       e.id,
       new Set(e.aliases.map((a) => a.alias_value.toLowerCase())),
     );
-    knowledgeSets.set(e.id, new Set(knowledgeForEntity(e.id)));
+  }
+
+  // Batch-load linked-knowledge sets (single query instead of N+1).
+  const knowledgeSets = new Map<string, Set<string>>();
+  {
+    const rows = db()
+      .query("SELECT entity_id, knowledge_id FROM knowledge_entity_refs")
+      .all() as Array<{ entity_id: string; knowledge_id: string }>;
+    for (const r of rows) {
+      let s = knowledgeSets.get(r.entity_id);
+      if (!s) {
+        s = new Set();
+        knowledgeSets.set(r.entity_id, s);
+      }
+      s.add(r.knowledge_id);
+    }
   }
 
   // --- Build neighbor map (O(n²) pairwise) ---
   type DedupHit = { id: string; score: number; forceMerge: boolean };
   const neighborMap = new Map<string, DedupHit[]>();
-  const pairSimilarities = new Map<string, number>();
+  const pairSimilarities = new Map<string, number>(); // raw cosine (for calibration)
+  const pairScores = new Map<string, number>(); // combined/boosted score (for tier assignment)
 
   for (const entry of entities) {
     const neighbors: DedupHit[] = [];
@@ -1461,15 +1478,16 @@ export async function deduplicateEntities(
       const jaccard = nameJaccard(entry.canonical_name, other.canonical_name);
 
       // Shared linked-knowledge (small boost).
-      const kA = knowledgeSets.get(entry.id)!;
-      const kB = knowledgeSets.get(other.id)!;
+      const kA = knowledgeSets.get(entry.id);
+      const kB = knowledgeSets.get(other.id);
       let sharedKnowledge = false;
-      for (const k of kA) {
-        if (kB.has(k)) {
-          sharedKnowledge = true;
-          break;
+      if (kA && kB)
+        for (const k of kA) {
+          if (kB.has(k)) {
+            sharedKnowledge = true;
+            break;
+          }
         }
-      }
 
       // Combined score: cosine, lifted by softer signals.
       let score = similarity;
@@ -1480,10 +1498,14 @@ export async function deduplicateEntities(
       if (sharedKnowledge) score += ENTITY_SIGNAL_BOOST;
       score = Math.min(score, 1);
 
-      // Record similarity for calibration (cosine only; > 0).
-      if (similarity > 0) {
-        const pk = entityPairKey(entry.id, other.id);
-        if (!pairSimilarities.has(pk)) pairSimilarities.set(pk, similarity);
+      // Record raw cosine for calibration (cosine only; > 0) and combined
+      // score for tier assignment when the survivor differs from the center.
+      const pk = entityPairKey(entry.id, other.id);
+      if (similarity > 0 && !pairSimilarities.has(pk)) {
+        pairSimilarities.set(pk, similarity);
+      }
+      if (!pairScores.has(pk) || score > pairScores.get(pk)!) {
+        pairScores.set(pk, aliasOverlap ? 1 : score);
       }
 
       const isNeighbor = aliasOverlap || score >= dedupThreshold;
@@ -1559,9 +1581,11 @@ export async function deduplicateEntities(
         ?.find((h) => h.id === survivor.id);
       if (fromMember)
         return { score: fromMember.score, force: fromMember.forceMerge };
+      // Fallback: use the combined/boosted score (not raw cosine) to preserve
+      // the Jaccard/knowledge boosts when the survivor differs from the center.
       const pk = entityPairKey(survivor.id, memberId);
-      const sim = pairSimilarities.get(pk) ?? 0;
-      return { score: sim, force: sim >= ENTITY_AUTO_MERGE_THRESHOLD };
+      const s = pairScores.get(pk) ?? 0;
+      return { score: s, force: s >= ENTITY_AUTO_MERGE_THRESHOLD };
     };
 
     const mergeMembers: EntityDedupCluster["merged"] = [];
