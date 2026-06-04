@@ -140,6 +140,7 @@ import type { UpstreamInterceptor } from "./recorder";
 import { startIdleScheduler, buildIdleWorkHandler } from "./idle";
 import {
   getWorkerModel,
+  protocolToProviderID,
   resetWorkerModelState,
   fetchModelData,
   getModelEntrySync,
@@ -907,6 +908,7 @@ function getLLMClient(config: GatewayConfig): LLMClient {
       workerUpstreams,
       getWorkerAuth,
       defaultModel,
+      { dedicatedWorkerKey: !!workerApiKey },
     );
 
     // Wrap with batch queue for 50% cost savings on non-urgent worker calls.
@@ -2728,7 +2730,7 @@ function postResponse(
       sessionID,
       actualInput,
       resp.usage.outputTokens ?? 0,
-      getWorkerModel()?.modelID ?? "unknown",
+      getWorkerModel(protocolToProviderID(sessionState.lastProtocol))?.modelID ?? "unknown",
       req.model,
       sessionState.resolvedConversationTTL,
     );
@@ -2747,7 +2749,7 @@ function postResponse(
       containsGitCommit(req)
     ) {
       const modelInputCost =
-        getModelEntrySync(getWorkerModel()?.modelID ?? "unknown").cost?.input ??
+        getModelEntrySync(getWorkerModel(protocolToProviderID(sessionState.lastProtocol))?.modelID ?? "unknown").cost?.input ??
         3;
       const curationMultiplier =
         modelInputCost >= 5 ? 3 : modelInputCost >= 1 ? 2 : 1;
@@ -2786,7 +2788,8 @@ function scheduleBackgroundWork(
 
   const llm = getLLMClient(config);
   const cfg = loreConfig();
-  const model = getWorkerModel();
+  const sessionProvider = protocolToProviderID(sessionState.lastProtocol);
+  const model = getWorkerModel(sessionProvider);
 
   // When the OAuth account is near quota exhaustion, skip non-urgent
   // background work to preserve remaining entitlement for user-facing turns.
@@ -2857,7 +2860,7 @@ function scheduleBackgroundWork(
   if (isBackgroundPaused() || quotaPaused) return;
 
   const modelInputCost =
-    getModelEntrySync(getWorkerModel()?.modelID ?? "unknown").cost?.input ?? 3;
+    getModelEntrySync(getWorkerModel(sessionProvider)?.modelID ?? "unknown").cost?.input ?? 3;
   const curationMultiplier =
     modelInputCost >= 5 ? 3 : modelInputCost >= 1 ? 2 : 1;
   const effectiveAfterTurns = cfg.curator.afterTurns * curationMultiplier;
@@ -2918,13 +2921,14 @@ export async function generateCompactionSummary(opts: {
   sessionID: string;
   config: GatewayConfig;
   previousSummary?: string;
+  sessionProviderID?: string;
 }): Promise<string | null> {
-  const { projectPath, sessionID, config, previousSummary } = opts;
+  const { projectPath, sessionID, config, previousSummary, sessionProviderID } = opts;
   const llm = getLLMClient(config);
 
   // 1. Force-distill all undistilled messages.
   // Mark urgent: true — client is blocking on the compaction response.
-  const model = getWorkerModel();
+  const model = getWorkerModel(sessionProviderID);
   await distillation.run({
     llm,
     projectPath,
@@ -2986,7 +2990,7 @@ export async function generateCompactionSummary(opts: {
     Math.min(Math.ceil(compactInputTokens * 0.5), 20_000),
   );
   const summaryText = await llm.prompt(compactPrompt, userContent, {
-    model: getWorkerModel(),
+    model: getWorkerModel(sessionProviderID),
     workerID: "lore-compact",
     urgent: true,
     maxTokens: compactMaxTokens,
@@ -3035,6 +3039,7 @@ async function handleCompaction(
     sessionID,
     config,
     previousSummary: extractPreviousSummary(req),
+    sessionProviderID: protocolToProviderID(sessionState.lastProtocol),
   });
 
   // If Lore's own summary generation failed (rate limits, auth issues, etc.),
@@ -3149,6 +3154,7 @@ export async function handleCompactEndpoint(
   );
 
   try {
+    const state = sessions.get(sessionID);
     const summary = await generateCompactionSummary({
       projectPath,
       sessionID,
@@ -3157,6 +3163,7 @@ export async function handleCompactEndpoint(
         typeof body.previous_summary === "string"
           ? body.previous_summary
           : undefined,
+      sessionProviderID: protocolToProviderID(state?.lastProtocol),
     });
 
     if (summary == null) {
@@ -4797,7 +4804,7 @@ async function handleCurateSlashCommand(
   const projectPath = state.projectPath;
   const { distillation, curator } = await import("@loreai/core");
   const llm = getLLMClient(config);
-  const model = getWorkerModel();
+  const model = getWorkerModel(protocolToProviderID(state.lastProtocol));
 
   log.info(`/lore:curate: running for session=${sessionID.slice(0, 16)}`);
 

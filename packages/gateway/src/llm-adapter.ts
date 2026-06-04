@@ -335,7 +335,9 @@ export function createGatewayLLMClient(
   upstreams: { anthropic: string; openai: string },
   getAuth: (sessionID?: string) => AuthCredential | null,
   defaultModel: { providerID: string; modelID: string },
+  opts?: { dedicatedWorkerKey?: boolean },
 ): LLMClient {
+  const hasDedicatedKey = opts?.dedicatedWorkerKey === true;
   return {
     async prompt(system, user, opts) {
       const cred = getAuth(opts?.sessionID);
@@ -348,6 +350,28 @@ export function createGatewayLLMClient(
       const isOpenAI = model.providerID === "openai";
       const target = resolveTarget(upstreams, model.providerID);
       const maxTokens = opts?.maxTokens ?? 8192;
+
+      // Defense-in-depth: detect API key / provider mismatch before making
+      // a doomed request. Anthropic keys start with "sk-ant-"; OpenAI keys
+      // start with "sk-" (without "ant"). Bearer tokens (OAuth) can't be
+      // distinguished by prefix, so only API keys are checked.
+      // Skip when LORE_WORKER_API_KEY is set — the user deliberately chose
+      // a cross-provider credential/model combination.
+      if (cred.scheme === "api-key" && !hasDedicatedKey) {
+        const isAnthropicKey = cred.value.startsWith("sk-ant-");
+        if (target.providerName === "anthropic" && !isAnthropicKey) {
+          log.warn(
+            `worker provider mismatch: ${target.providerName} target with non-Anthropic API key — skipping (model=${model.modelID}, worker=${opts?.workerID ?? "unknown"})`,
+          );
+          return null;
+        }
+        if (target.providerName === "openai" && isAnthropicKey) {
+          log.warn(
+            `worker provider mismatch: ${target.providerName} target with Anthropic API key — skipping (model=${model.modelID}, worker=${opts?.workerID ?? "unknown"})`,
+          );
+          return null;
+        }
+      }
 
       // Build provider-specific request
       let req = isOpenAI

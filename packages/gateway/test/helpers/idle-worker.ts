@@ -112,6 +112,10 @@ mock.module("../../src/worker-model", () => ({
     providerID: "anthropic",
     modelID: "claude-sonnet-4-20250514",
   }),
+  protocolToProviderID: (protocol?: string) =>
+    protocol === "openai" || protocol === "openai-responses"
+      ? "openai"
+      : "anthropic",
   getModelEntrySync: () => ({
     id: "claude-sonnet-4-20250514",
     cost: { input: 3, output: 15 },

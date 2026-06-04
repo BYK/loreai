@@ -363,7 +363,9 @@ function resolveGitHubCopilotWorker(sessionModelID: string): {
  *  3. General fallback (GPT-5.4-mini) for unknown providers
  *  4. Config model fallback (session model)
  */
-export function getWorkerModel():
+export function getWorkerModel(
+  sessionProviderID?: string,
+):
   | { providerID: string; modelID: string }
   | undefined {
   // Env var override — highest priority. Useful for global worker model
@@ -412,16 +414,30 @@ export function getWorkerModel():
   }
 
   // When no session model is configured (no .lore.json or no model field),
-  // use the Anthropic worker default rather than returning undefined — which
-  // would cascade to the LLM client's defaultModel fallback.
-  const fallback = cfg.model ?? WORKER_DEFAULTS.anthropic;
+  // use the session's provider to pick a compatible default. Without this,
+  // an OpenAI-only session (e.g. Codex) would get an Anthropic worker model
+  // and every worker call would send the OpenAI key to api.anthropic.com → 401.
+  const effectiveProvider = cfg.model?.providerID ?? sessionProviderID ?? "anthropic";
+  const fallback = cfg.model ?? WORKER_DEFAULTS[effectiveProvider] ?? WORKER_DEFAULTS.anthropic;
 
   return workerModel.resolveWorkerModel(
-    cfg.model?.providerID ?? "anthropic",
+    effectiveProvider,
     cfg.workerModel,
     fallback,
     costAwareDefault,
   );
+}
+
+/**
+ * Map a session wire protocol to the upstream provider ID used for worker
+ * model selection. OpenAI and OpenAI-Responses both route to the "openai"
+ * provider; everything else (including undefined) defaults to "anthropic".
+ */
+export function protocolToProviderID(
+  protocol: "anthropic" | "openai" | "openai-responses" | undefined,
+): "anthropic" | "openai" {
+  if (protocol === "openai" || protocol === "openai-responses") return "openai";
+  return "anthropic";
 }
 
 /** Reset module state (for testing). */
