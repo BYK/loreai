@@ -266,4 +266,24 @@ describe("transfer cleanup on project deletion", () => {
       .get(id) as { c: number };
     expect(remaining.c).toBe(0);
   });
+
+  test("ltm.remove() cleans up transfer rows for the deleted entry", () => {
+    const id = createPromoted("Remove cleanup entry", "to be removed");
+    const fpid = ensureProject(FOREIGN);
+    ltm.recordTransfer({ knowledgeId: id, recalledInProjectId: fpid });
+    expect(ltm.transferCount(id)).toBe(1);
+
+    ltm.remove(id);
+    expect(ltm.transferCount(id)).toBe(0);
+  });
+
+  test("clearKnowledge() cleans up transfer rows for deleted entries", () => {
+    const id = createPromoted("ClearKnowledge entry", "to be bulk-cleared");
+    const fpid = ensureProject(FOREIGN);
+    ltm.recordTransfer({ knowledgeId: id, recalledInProjectId: fpid });
+    expect(ltm.transferCount(id)).toBe(1);
+
+    data.clearKnowledge(ORIGIN);
+    expect(ltm.transferCount(id)).toBe(0);
+  });
 });

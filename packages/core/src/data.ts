@@ -522,6 +522,12 @@ export function clearKnowledge(projectPath: string): number {
       .get(pid) as { c: number }
   ).c;
 
+  // Clean up transfer metrics before deleting entries (no FK CASCADE).
+  db()
+    .query(
+      "DELETE FROM knowledge_transfers WHERE knowledge_id IN (SELECT id FROM knowledge WHERE project_id = ?)",
+    )
+    .run(pid);
   db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
 
   // Regenerate .lore.md

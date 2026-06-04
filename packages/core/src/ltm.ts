@@ -226,6 +226,8 @@ export function update(
 }
 
 export function remove(id: string) {
+  // Clean up transfer metrics before deleting the entry (no FK CASCADE).
+  db().query("DELETE FROM knowledge_transfers WHERE knowledge_id = ?").run(id);
   db().query("DELETE FROM knowledge WHERE id = ?").run(id);
 }
 
