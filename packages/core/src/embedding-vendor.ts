@@ -84,12 +84,15 @@ export const LOCAL_MODEL_PATH_ENV = "LORE_LOCAL_MODEL_PATH";
 function envModelPath(): string | null {
   const p = process.env[LOCAL_MODEL_PATH_ENV];
   if (!p) return null;
-  // Best-effort existence check — a missing path falls through to HF download
-  // rather than failing init (so a stale env var never bricks embeddings).
+  // Best-effort existence check — a missing or non-directory path falls through
+  // to HF download rather than failing init (so a stale env var never bricks
+  // embeddings). We specifically check for a directory because transformers.js
+  // resolves model files as <localModelPath>/<modelId>/<file>.
   try {
     // Lazy require so this module stays usable in non-Node contexts.
-    const { existsSync } = require("node:fs") as typeof import("node:fs");
-    if (!existsSync(p)) return null;
+    const { statSync } = require("node:fs") as typeof import("node:fs");
+    const stat = statSync(p, { throwIfNoEntry: false });
+    if (!stat?.isDirectory()) return null;
   } catch {
     // If we can't stat (unusual), trust the path and let the worker report.
   }

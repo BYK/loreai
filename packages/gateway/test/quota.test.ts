@@ -126,7 +126,11 @@ describe("fetchOAuthQuotaSnapshot", () => {
   test("fetches from the expected quota URL", async () => {
     let capturedUrl: string | undefined;
     globalThis.fetch = mock((url: string) => {
-      capturedUrl = url;
+      // Only capture the quota request — ignore Sentry transport flushes and
+      // other background fetches that race with the mock (see #524 / #527).
+      if (typeof url === "string" && url.startsWith(QUOTA_URL)) {
+        capturedUrl = url;
+      }
       return Promise.resolve(new Response(quotaBody(), { status: 200 }));
     }) as unknown as typeof fetch;
 

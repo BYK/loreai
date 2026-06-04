@@ -94,3 +94,49 @@ describe("binary mode (registration set)", () => {
     expect(vendorModelInfo()).toBeNull();
   });
 });
+
+describe("env override (LORE_LOCAL_MODEL_PATH)", () => {
+  test("existing directory is used as localModelPath", () => {
+    // /tmp always exists and is a directory on Linux/macOS.
+    process.env[LOCAL_MODEL_PATH_ENV] = "/tmp";
+    expect(vendorModelInfo()).toEqual({ localModelPath: "/tmp" });
+  });
+
+  test("non-existent path falls through to null", () => {
+    process.env[LOCAL_MODEL_PATH_ENV] = "/nonexistent/vendor/path-42";
+    expect(vendorModelInfo()).toBeNull();
+  });
+
+  test("empty string falls through to null", () => {
+    process.env[LOCAL_MODEL_PATH_ENV] = "";
+    expect(vendorModelInfo()).toBeNull();
+  });
+
+  test("regular file (not a directory) falls through to null", () => {
+    // package.json exists and is a regular file, not a directory.
+    const { resolve } = require("node:path") as typeof import("node:path");
+    process.env[LOCAL_MODEL_PATH_ENV] = resolve(__dirname, "../package.json");
+    expect(vendorModelInfo()).toBeNull();
+  });
+
+  test("env override takes precedence over binary registration", () => {
+    // Both sources are set — env must win.
+    process.env[LOCAL_MODEL_PATH_ENV] = "/tmp";
+    _setVendorRegistration({
+      localModelPath: "/home/user/.lore/vendor-binary",
+      target: "linux-x64",
+      version: "1.0.0",
+    });
+    const info = vendorModelInfo();
+    expect(info).toEqual({ localModelPath: "/tmp" });
+    // The binary registration is still readable via vendorRegistration()
+    // (diagnostic), but vendorModelInfo() returns the env override.
+    expect(vendorRegistration()).not.toBeNull();
+  });
+
+  test("isVendoredBinary is NOT affected by env override", () => {
+    // LORE_LOCAL_MODEL_PATH is for air-gapped/CI use, not a binary.
+    process.env[LOCAL_MODEL_PATH_ENV] = "/tmp";
+    expect(isVendoredBinary()).toBe(false);
+  });
+});
