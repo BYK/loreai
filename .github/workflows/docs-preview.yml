@@ -47,7 +47,7 @@ jobs:
               git add .nojekyll
               git commit -m "Add .nojekyll to disable Jekyll processing"
               git push origin gh-pages
-              git checkout -
+              git checkout "$GITHUB_SHA"
             fi
           else
             # Branch doesn't exist, create it as an orphan branch
@@ -58,7 +58,7 @@ jobs:
             git add .nojekyll
             git commit -m "Initialize gh-pages with .nojekyll"
             git push origin gh-pages
-            git checkout -
+            git checkout "$GITHUB_SHA"
           fi
 
       - name: Deploy Preview
