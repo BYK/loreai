@@ -40,9 +40,10 @@ jobs:
               - '.github/workflows/docs-preview.yml'
 
       - name: Ensure .nojekyll at gh-pages root
-        # Skip when: (a) non-docs PR (not closed), or (b) fork PR
+        # Skip when: (a) non-docs PR (not closed), or (b) fork PR.
+        # Always run for push and workflow_dispatch events.
         if: >-
-          (github.event.action == 'closed' || steps.filter.outputs.docs == 'true' || github.event_name == 'push') &&
+          (github.event_name != 'pull_request' || github.event.action == 'closed' || steps.filter.outputs.docs == 'true') &&
           (github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request')
         run: |
           git config user.name "github-actions[bot]"
@@ -74,17 +75,28 @@ jobs:
             git checkout "$GITHUB_SHA"
           fi
 
-      - name: Deploy Preview
+      # Production deploy: push docs/ to gh-pages root on main push.
+      # Uses JamesIves action to deploy to root while preserving _preview/.
+      - name: Deploy to GitHub Pages
+        if: github.event_name != 'pull_request'
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: docs
+          branch: gh-pages
+          clean-exclude: _preview
+          force: false
+
+      # PR preview: deploy/remove preview under _preview/pr-N/.
+      - name: Deploy PR Preview
         # Skip when: (a) non-docs PR (not closed), or (b) fork PR
         if: >-
-          (github.event.action == 'closed' || steps.filter.outputs.docs == 'true' || github.event_name == 'push') &&
-          (github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request')
+          github.event_name == 'pull_request' &&
+          (github.event.action == 'closed' || steps.filter.outputs.docs == 'true') &&
+          (github.event.pull_request.head.repo.full_name == github.repository)
         uses: rossjrw/pr-preview-action@v1
         with:
           source-dir: docs/
           preview-branch: gh-pages
           umbrella-dir: _preview
           pages-base-url: withlore.ai
-          action: ${{ github.event_name == 'push' && 'deploy' || 'auto' }}
-          pr-number: ${{ github.event_name == 'push' && 'main' || github.event.pull_request.number }}
-          comment: ${{ github.event_name != 'push' }}
+          action: auto
