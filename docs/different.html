@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Why Lore — What Makes Lore Different</title>
+  <meta name="description" content="Why choose Lore: a local-first, source-available memory proxy that unifies context management and long-term memory for any AI coding agent — no platform lock-in." />
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;1,400;1,500&family=DM+Sans:wght@200;300;400;500;700&display=swap"
+    rel="stylesheet" />
+  <link rel="stylesheet" href="theme.css" />
+</head>
+
+<body>
+
+  <div class="cursor" id="cur"></div>
+
+  <!-- NAV -->
+  <nav>
+    <div class="nav-left">
+      <a href="index.html" class="logo">
+        <img src="brand-mark.svg?v=6" alt="Lore.AI" style="height: 78px; width: auto; display: block;" />
+      </a>
+    </div>
+    <div class="nav-right">
+      <ul class="nav-links">
+        <li><a href="index.html#problem">The Problem</a></li>
+        <li><a href="index.html#how">How It Works</a></li>
+        <li><a href="index.html#features">Features</a></li>
+        <li><a href="different.html">Why Lore</a></li>
+        <li><a href="https://github.com/byk/loreai" target="_blank" rel="noopener noreferrer">GitHub</a></li>
+      </ul>
+      <a href="index.html#waitlist" class="nav-btn">Lore Cloud Waitlist</a>
+    </div>
+  </nav>
+
+  <!-- HERO -->
+  <section class="hero hero-compact">
+    <div style="max-width: 760px;">
+      <div class="hero-badge sr" style="justify-content: center;">
+        <span class="badge-pill">Why Lore</span>
+        A different layer of the stack
+      </div>
+      <h1 class="sr">What makes Lore <em>different</em></h1>
+      <p class="hero-desc sr" style="max-width: 60ch; margin: 0 auto 2.5rem;">
+        Lots of tools now promise "agent memory." Most solve one half of the problem, or bolt memory onto a
+        single tool or cloud platform you have to adopt. Lore takes a different approach: it's a local-first,
+        source-available proxy that treats context management and long-term memory as <em>one</em> pipeline —
+        for whatever agent you already use.
+      </p>
+      <div class="hero-actions sr" style="justify-content: center;">
+        <a href="index.html#waitlist" class="btn-fill">
+          Join the Waitlist
+          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M2 7h10M7 2l5 5-5 5" />
+          </svg>
+        </a>
+        <a href="https://github.com/byk/loreai" target="_blank" rel="noopener noreferrer" class="btn-ghost">View Repository</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- THE THREE THINGS -->
+  <section class="how" id="pillars">
+    <div class="sec-hd">
+      <div>
+        <p class="eyebrow sr">The short version</p>
+        <h2 class="sec-title sr">Three reasons to <em>choose Lore</em></h2>
+      </div>
+      <p class="sec-sub sr">Not a knock on anyone else — just what Lore optimizes for that others, by design, don't.</p>
+    </div>
+    <div class="steps">
+      <div class="step sr">
+        <div class="step-n">01</div>
+        <h3 class="step-t">Memory <em>and</em> context — one pipeline</h3>
+        <p class="step-b">Most memory tools store and retrieve, but leave your context window to the agent's own
+          compaction — so it still loses track mid-session. Most context tools compress history but learn
+          nothing from it. In Lore, compression <em>is</em> the memory pipeline: distillation feeds the
+          gradient context manager, which feeds the knowledge curator, which feeds
+          <code class="code-inline">.lore.md</code>.
+          One system, not two bolted together.</p>
+      </div>
+      <div class="step sr">
+        <div class="step-n">02</div>
+        <h3 class="step-t">Local-first, source-available</h3>
+        <p class="step-b">The whole engine runs on your machine. Messages, distillations, knowledge, and
+          on-device embeddings live in a local SQLite database — zero added infrastructure, nothing to send to a
+          server to make memory work. The engine is source-available, so you can read exactly how your memory is
+          formed and stored. No black box.</p>
+      </div>
+      <div class="step sr">
+        <div class="step-n">03</div>
+        <h3 class="step-t">Your agent, no platform to adopt</h3>
+        <p class="step-b">Lore is a proxy on the API wire, so it works with the agent you already use —
+          Claude Code, Cursor, Copilot, Windsurf, OpenCode, Pi, Codex, or anything speaking the Anthropic or
+          OpenAI protocol — just by pointing its base URL at Lore. You don't move your workflow into a new
+          terminal, IDE, or cloud control plane to get memory.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- THE LANDSCAPE / COMPARISON -->
+  <section class="features" id="landscape">
+    <div class="sec-hd" style="max-width:1100px;margin:0 auto 3rem;">
+      <div>
+        <p class="eyebrow sr">The landscape</p>
+        <h2 class="sec-title sr">How the approaches <em>compare</em></h2>
+      </div>
+      <p class="sec-sub sr">A fair map of the common approaches to agent memory — and where Lore sits.</p>
+    </div>
+
+    <div class="cmp-wrap sr">
+      <table class="cmp">
+        <thead>
+          <tr>
+            <th style="width:26%;">Approach</th>
+            <th>What it does well</th>
+            <th>The trade-off</th>
+            <th class="cmp-lore"><span class="cmp-eyebrow">Where Lore differs</span>Lore's take</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th>Memory-only tools<br><span style="font-weight:300;color:var(--mid);font-size:.86em;">store &amp; retrieve past conversations</span></th>
+            <td>Good at recalling things you explicitly saved or that were captured earlier.</td>
+            <td>Don't manage the live context window — the agent can still get compacted mid-session and lose
+              track of what it's doing right now.</td>
+            <td class="cmp-lore">Lore manages the context window <span class="cmp-yes">and</span> remembers —
+              so memory arrives in-context at the right moment, not just when you ask.</td>
+          </tr>
+          <tr>
+            <th>Context-only tools<br><span style="font-weight:300;color:var(--mid);font-size:.86em;">compress history to extend a session</span></th>
+            <td>Keep a single long session alive without hitting the window limit.</td>
+            <td>Nothing is learned from the compression. New session, new project, or new tool — and you're
+              back to zero.</td>
+            <td class="cmp-lore">Lore extracts durable knowledge <span class="cmp-yes">from</span> the
+              compression, so every session makes the next one smarter.</td>
+          </tr>
+          <tr>
+            <th>Tool- or IDE-bound memory<br><span style="font-weight:300;color:var(--mid);font-size:.86em;">memory built into one agent or editor</span></th>
+            <td>Deep, polished integration inside that one tool.</td>
+            <td>Switch tools, providers, or machines and the memory stays behind. Your knowledge is tied to a
+              product choice.</td>
+            <td class="cmp-lore">Lore sits on the API wire, so memory follows you
+              <span class="cmp-yes">across</span> tools and providers — your constant, not theirs.</td>
+          </tr>
+          <tr>
+            <th>Cloud agent platforms<br><span style="font-weight:300;color:var(--mid);font-size:.86em;">memory inside a hosted control plane</span></th>
+            <td>Org-wide retrieval and governance for fleets of agents run on the platform.</td>
+            <td>Memory exists for agents run <em>through</em> the platform; the engine is hosted and closed.
+              You adopt the platform to get the memory.</td>
+            <td class="cmp-lore">Lore runs locally with the agent you already use. The engine is
+              source-available; your knowledge is a <span class="cmp-yes">plain file in your repo</span>.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="sec-sub sr" style="max-width:1100px;margin:1.5rem auto 0;text-align:left;font-size:.78rem;opacity:.7;">
+      These are categories, not a scorecard against any one product. Many tools blend approaches, and the
+      good ones are genuinely good at what they target. Lore's bet is that unifying the halves — locally,
+      across any harness — is the combination most coding workflows actually want.
+    </p>
+  </section>
+
+  <!-- PORTABILITY -->
+  <section class="features" id="portability" style="background:var(--c0);">
+    <div class="bento">
+      <div class="bc bc-1 sr">
+        <p class="bc-tag">Ownership</p>
+        <h3 class="bc-t">Your memory is a file you can read</h3>
+        <p class="bc-b">Curated knowledge is exported to
+          <code class="code-inline">.lore.md</code>
+          (or AGENTS.md) in your own repository — human-readable markdown, version-controlled with your code,
+          reviewable in a pull request. Stop using Lore tomorrow and you still have everything it learned,
+          in plain text. That's portability you can verify, not just a promise to export.</p>
+      </div>
+      <div class="bc bc-2 sr">
+        <p class="bc-tag">No lock-in</p>
+        <h3 class="bc-t">Where the commitment lives matters</h3>
+        <p class="bc-b">Every memory system asks for <em>some</em> commitment. With a hosted platform, it's at
+          the platform layer — route your agents through it or get nothing. With Lore, it's a one-line base-URL
+          change you can undo at any time, and the data never leaves your machine unless you choose to share it.
+          Switch providers, switch tools, switch laptops — your memory comes with you.</p>
+      </div>
+      <div class="bc bc-3 sr">
+        <div>
+          <p class="bc-tag">Proven where it's hardest</p>
+          <h3 class="bc-t">The advantage grows with the session</h3>
+          <p class="bc-b">On a real 5-day, 2.3M-token coding session, Lore scored 4.0/5 on recall versus 2.4/5
+            for compaction — 2.6x more perfect answers. The early-session details that lossy summaries destroy
+            are exactly what Lore's three-tier memory preserves. The longer you work, the bigger the gap.</p>
+        </div>
+        <div class="code-block">
+          <code><span class="ck"># One line. Any agent.</span><br><span class="cv">$</span> lore run<br><br><span class="ck"># Local engine. Your data stays</span><br><span class="ck"># on your machine.</span></code>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- TEAM -->
+  <section class="how" id="team">
+    <div class="sec-hd">
+      <div>
+        <p class="eyebrow sr">Teams</p>
+        <h2 class="sec-title sr">Team memory, <em>without</em> giving up the local-first model</h2>
+      </div>
+      <p class="sec-sub sr">Because knowledge lives in
+        <code class="code-inline">.lore.md</code>
+        in your repo, sharing it is just git — today.</p>
+    </div>
+    <div class="steps">
+      <div class="step sr">
+        <div class="step-n">01</div>
+        <h3 class="step-t">Share via the tools you already have</h3>
+        <p class="step-b">A teammate clones the repo and Lore imports the committed
+          <code class="code-inline">.lore.md</code>.
+          Shared conventions, gotchas, and decisions travel with the codebase — no extra service required.</p>
+      </div>
+      <div class="step sr">
+        <div class="step-n">02</div>
+        <h3 class="step-t">Reviewable, like code</h3>
+        <p class="step-b">Knowledge changes show up in diffs and pull requests. Your team approves what becomes
+          shared memory the same way it approves any other change — with full history and the ability to roll back.</p>
+      </div>
+      <div class="step sr">
+        <div class="step-n">03</div>
+        <h3 class="step-t">Lore Cloud when you want it</h3>
+        <p class="step-b">For centrally-managed, multi-user shared memory with approval workflows, Lore Cloud is
+          coming. It's an option layered on top of the local-first core — not a platform you have to adopt to get
+          value today.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="cta" id="waitlist">
+    <div class="cta-inner">
+      <h2 class="sr">Memory that's <em>yours.</em></h2>
+      <p class="cta-sub sr">Self-hosted Lore is available now, free and local. Join the waitlist for Lore Cloud —
+        hosted, team-shared memory with zero setup.</p>
+
+      <div class="cta-form-view show" id="waitlist-form-view">
+        <form class="cta-form sr" id="waitlist-form"
+              action="https://app.loops.so/api/newsletter-form/cmpemslgp03m10jxaipjw78iq" method="POST">
+          <input class="cta-input" type="email" name="email" placeholder="your@email.com" id="waitlist-email" required />
+          <button class="cta-submit" type="submit" id="waitlist-btn">Join Waitlist</button>
+        </form>
+        <p class="cta-note sr">No spam. Unsubscribe anytime.</p>
+      </div>
+
+      <div class="cta-form-view" id="waitlist-success" aria-live="polite">
+        <p class="cta-success">&check; You're on the list. We'll be in touch.</p>
+      </div>
+
+      <div class="cta-form-view" id="waitlist-error" role="alert">
+        <p class="cta-error" id="waitlist-error-msg">Something went wrong. Please try again.</p>
+        <button class="cta-back" id="waitlist-retry">&larr; Try Again</button>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="foot-bottom">
+      <p>© 2026 Lore.AI · FSL-1.1-Apache-2.0 · <a href="index.html" style="border-bottom:1px solid rgba(196,221,199,.3)">Home</a></p>
+    </div>
+  </footer>
+
+  <script>
+    // custom cursor
+    const cur = document.getElementById('cur');
+    document.addEventListener('mousemove', e => {
+      cur.style.left = e.clientX + 'px';
+      cur.style.top = e.clientY + 'px';
+    });
+    document.querySelectorAll('a,button').forEach(el => {
+      el.addEventListener('mouseenter', () => cur.classList.add('expand'));
+      el.addEventListener('mouseleave', () => cur.classList.remove('expand'));
+    });
+
+    // scroll reveal
+    const obs = new IntersectionObserver(entries => {
+      entries.forEach(e => { if (e.isIntersecting) { e.target.classList.add('in'); } });
+    }, { threshold: 0.1 });
+    document.querySelectorAll('.sr').forEach(el => obs.observe(el));
+
+    // newsletter form — Loops.so integration
+    (() => {
+      const LOOPS_ENDPOINT = 'https://app.loops.so/api/newsletter-form/cmpemslgp03m10jxaipjw78iq';
+      const RATE_LIMIT_KEY = 'loops-form-timestamp';
+      const RATE_LIMIT_MS = 60_000;
+
+      const form = document.getElementById('waitlist-form');
+      const email = document.getElementById('waitlist-email');
+      const btn = document.getElementById('waitlist-btn');
+      const formView = document.getElementById('waitlist-form-view');
+      const successView = document.getElementById('waitlist-success');
+      const errorView = document.getElementById('waitlist-error');
+      const errorMsg = document.getElementById('waitlist-error-msg');
+      const retryBtn = document.getElementById('waitlist-retry');
+
+      function showView(view) {
+        formView.classList.remove('show');
+        successView.classList.remove('show');
+        errorView.classList.remove('show');
+        view.classList.add('show');
+      }
+
+      function showError(msg) {
+        errorMsg.textContent = msg || 'Something went wrong. Please try again.';
+        showView(errorView);
+        retryBtn.focus();
+      }
+
+      retryBtn?.addEventListener('click', () => {
+        showView(formView);
+        email.focus();
+      });
+
+      form?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const value = email.value.trim();
+        if (!value) return;
+
+        let last = 0;
+        try { last = parseInt(localStorage.getItem(RATE_LIMIT_KEY) || '0', 10); } catch {}
+        if (Date.now() - last < RATE_LIMIT_MS) {
+          showError('Too many attempts. Please try again in a minute.');
+          return;
+        }
+
+        btn.textContent = 'Sending\u2026';
+        btn.disabled = true;
+
+        try {
+          const res = await fetch(LOOPS_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({ email: value }),
+          });
+
+          const data = await res.json();
+
+          if (res.ok || data.message === 'Email already on list.') {
+            try { localStorage.setItem(RATE_LIMIT_KEY, String(Date.now())); } catch {}
+            email.value = '';
+            showView(successView);
+          } else {
+            showError(data.message || null);
+          }
+        } catch {
+          showError('Network error. Please check your connection and try again.');
+        } finally {
+          btn.textContent = 'Join Waitlist';
+          btn.disabled = false;
+        }
+      });
+    })();
+  </script>
+</body>
+
+</html>
