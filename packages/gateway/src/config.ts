@@ -247,6 +247,7 @@ export function extractUpstreamUrlHeader(
   if (!raw) return undefined;
 
   // Sanitize: strip control characters, trim.
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional control-character sanitization
   const sanitized = raw.replace(/[\x00-\x1f\x7f]/g, "").trim();
   if (!sanitized || sanitized.length > MAX_UPSTREAM_URL_LENGTH)
     return undefined;
@@ -408,6 +409,7 @@ export function extractGitRemoteHeader(
 
   // Strip control characters (newlines, carriage returns, null bytes) to
   // prevent header injection and DB corruption.
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional control-character sanitization
   const sanitized = raw.replace(/[\x00-\x1f\x7f]/g, "").trim();
   if (!sanitized || sanitized.length > MAX_GIT_REMOTE_LENGTH) return undefined;
 
@@ -434,6 +436,7 @@ export function extractProjectHeader(
 
   // Strip control characters (newlines, carriage returns, null bytes) to
   // prevent header injection and DB corruption.
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional control-character sanitization
   const sanitized = raw.replace(/[\x00-\x1f\x7f]/g, "").trim();
   if (!sanitized || sanitized.length > MAX_PROJECT_PATH_LENGTH)
     return undefined;

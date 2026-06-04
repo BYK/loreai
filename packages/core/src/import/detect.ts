@@ -30,7 +30,7 @@ export function detectAll(projectPath: string): DetectionResult[] {
           totalMessages: sessions.reduce((s, sess) => s + sess.messageCount, 0),
         });
       }
-    } catch (err) {
+    } catch (_err) {
       // Provider failed (e.g. corrupt DB, missing directory) — skip silently.
       // Avoid log.warn to not alarm users about agents they don't use.
     }

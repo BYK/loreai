@@ -15,7 +15,6 @@ import {
   isAvailable,
   vectorSearch,
   checkConfigChange,
-  resetProvider,
   _shutdownAndDisable,
   _saveAndClearProvider,
   _restoreProvider,
@@ -732,9 +731,9 @@ describe("checkConfigChange", () => {
       .get() as { value: string } | null;
     expect(row).not.toBeNull();
     // Default provider is now "local" with nomic-ai/nomic-embed-text-v1.5:768
-    expect(row!.value).toContain("local");
-    expect(row!.value).toContain("nomic-ai/nomic-embed-text-v1.5");
-    expect(row!.value).toContain("768");
+    expect(row?.value).toContain("local");
+    expect(row?.value).toContain("nomic-ai/nomic-embed-text-v1.5");
+    expect(row?.value).toContain("768");
   });
 
   test("second call with same config returns false", () => {

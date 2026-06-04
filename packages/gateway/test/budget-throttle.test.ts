@@ -386,8 +386,8 @@ describe("budget-throttle", () => {
       });
       const costs = getSessionCosts("new-session");
       expect(costs).not.toBeNull();
-      expect(costs!.throttle.events).toBe(0);
-      expect(costs!.throttle.totalDelayMs).toBe(0);
+      expect(costs?.throttle.events).toBe(0);
+      expect(costs?.throttle.totalDelayMs).toBe(0);
     });
   });
 });

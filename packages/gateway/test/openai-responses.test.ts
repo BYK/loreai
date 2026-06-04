@@ -387,7 +387,8 @@ describe("parseOpenAIResponsesRequest", () => {
       (m) =>
         m.role === "assistant" &&
         m.content.some((b: GatewayContentBlock) => b.type === "tool_use"),
-    )!;
+    );
+    if (!assistant) throw new Error("expected assistant message");
     const ids = (assistant.content as GatewayContentBlock[])
       .filter((b): b is GatewayToolUseBlock => b.type === "tool_use")
       .map((b) => b.id)
@@ -562,7 +563,7 @@ describe("buildOpenAIResponsesUpstreamRequest", () => {
 
     expect(result.url).toBe("https://api.openai.com/v1/responses");
     expect(result.headers["content-type"]).toBe("application/json");
-    expect(result.headers["Authorization"]).toBe("Bearer sk-test");
+    expect(result.headers.Authorization).toBe("Bearer sk-test");
 
     const body = result.body as Record<string, unknown>;
     expect(body.model).toBe("gpt-4o");

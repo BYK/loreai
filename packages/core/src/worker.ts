@@ -1,15 +1,3 @@
-/**
- * Worker session tracking and the LLMClient contract.
- *
- * All lore background tasks (distillation, curation, query expansion) use
- * the LLMClient interface for single-turn LLM calls. The actual prompting
- * is implemented by the host adapter (OpenCode, Pi, etc.).
- *
- * This module owns the shared workerSessionIDs set — used by host adapters
- * to skip storing/distilling worker session messages.
- */
-import type { LLMClient } from "./types";
-
 // Re-export for convenience
 export type { LLMClient } from "./types";
 

@@ -9,7 +9,7 @@
  * being spread across ltm/temporal/distillation modules.
  */
 
-import { statSync, unlinkSync, existsSync } from "fs";
+import { statSync, unlinkSync, existsSync } from "node:fs";
 import {
   db,
   ensureProject,
@@ -234,7 +234,7 @@ export function resolveId(
 ): string | null {
   const results = db()
     .query(`SELECT id FROM ${table} WHERE id LIKE ? LIMIT 2`)
-    .all(prefix + "%") as Array<{ id: string }>;
+    .all(`${prefix}%`) as Array<{ id: string }>;
   return results.length === 1 ? results[0].id : null;
 }
 
@@ -260,7 +260,7 @@ export function globalStats(): GlobalStats {
     const p = dbPath();
     db_size_bytes = statSync(p).size;
     // Add WAL file size if present
-    const walPath = p + "-wal";
+    const walPath = `${p}-wal`;
     if (existsSync(walPath)) {
       db_size_bytes += statSync(walPath).size;
     }

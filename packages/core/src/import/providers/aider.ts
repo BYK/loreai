@@ -7,8 +7,8 @@
  * Format: Markdown with role headers like "#### user" / "#### assistant"
  * separated by horizontal rules (---).
  */
-import { existsSync, readFileSync, statSync } from "fs";
-import { join } from "path";
+import { existsSync, readFileSync, statSync, type Stats } from "node:fs";
+import { join } from "node:path";
 import type {
   AgentHistoryProvider,
   ConversationChunk,
@@ -109,7 +109,7 @@ const aiderProvider: AgentHistoryProvider = {
     const filePath = join(projectPath, HISTORY_FILE);
     if (!existsSync(filePath)) return [];
 
-    let stat;
+    let stat: Stats;
     try {
       stat = statSync(filePath);
     } catch {
@@ -144,7 +144,7 @@ const aiderProvider: AgentHistoryProvider = {
   },
 
   readChunks(
-    projectPath: string,
+    _projectPath: string,
     sessionIds: string[],
     maxTokens: number = DEFAULT_MAX_TOKENS,
   ): ConversationChunk[] {

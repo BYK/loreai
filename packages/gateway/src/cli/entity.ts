@@ -14,7 +14,7 @@
  *   search <query>               Search entities by name or alias
  *   delete <id>                  Delete an entity
  */
-import { resolve } from "path";
+import { resolve } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -48,7 +48,7 @@ function printTable(
 // ---------------------------------------------------------------------------
 
 async function cmdList(
-  args: string[],
+  _args: string[],
   flags: Record<string, unknown>,
 ): Promise<void> {
   const { entities } = await import("@loreai/core");
@@ -258,22 +258,23 @@ async function cmdEdit(
   }
 
   if (flags.metadata) {
-    let parsed: Record<string, unknown>;
+    let parsed: Record<string, unknown> | undefined;
     try {
-      parsed = JSON.parse(flags.metadata as string);
-      if (
-        typeof parsed !== "object" ||
-        Array.isArray(parsed) ||
-        parsed === null
-      ) {
+      const value = JSON.parse(flags.metadata as string);
+      if (typeof value !== "object" || Array.isArray(value) || value === null) {
         console.error("--metadata must be a JSON object");
         process.exit(1);
       }
+      parsed = value as Record<string, unknown>;
     } catch {
       console.error("--metadata must be valid JSON");
       process.exit(1);
     }
-    const merged = entities.mergeMetadata(entity.metadata, parsed!);
+    if (!parsed) {
+      console.error("--metadata must be a JSON object");
+      process.exit(1);
+    }
+    const merged = entities.mergeMetadata(entity.metadata, parsed);
     updates.metadata = merged ?? {};
   }
 

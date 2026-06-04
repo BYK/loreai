@@ -236,8 +236,8 @@ function truncateAtSentence(text: string, maxChars: number): string {
   // No sentence boundary — fall back to word boundary
   const slice = text.slice(0, maxChars);
   const lastSpace = slice.lastIndexOf(" ");
-  if (lastSpace > minPos) return text.slice(0, lastSpace) + "...";
-  return slice + "...";
+  if (lastSpace > minPos) return `${text.slice(0, lastSpace)}...`;
+  return `${slice}...`;
 }
 
 /** Source-type weights for budget allocation. Higher = more space. */

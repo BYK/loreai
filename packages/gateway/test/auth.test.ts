@@ -4,7 +4,6 @@ import {
   getSessionAuth,
   deleteSessionAuth,
   setLastSeenAuth,
-  getLastSeenAuth,
   resolveAuth,
   markAuthStale,
   isAuthStale,

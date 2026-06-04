@@ -1,7 +1,7 @@
 import { describe, test, expect } from "bun:test";
-import { join } from "path";
-import { mkdirSync, copyFileSync, writeFileSync } from "fs";
-import { tmpdir } from "os";
+import { join } from "node:path";
+import { mkdirSync, copyFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 import "../../src/import/providers/cline";
 import { getProvider } from "../../src/import/providers";
@@ -9,7 +9,8 @@ import { getProvider } from "../../src/import/providers";
 const FIXTURES = join(import.meta.dir, "fixtures");
 
 describe("Cline provider", () => {
-  const provider = getProvider("cline")!;
+  const provider = getProvider("cline");
+  if (!provider) throw new Error("cline provider not registered");
 
   test("provider is registered with correct metadata", () => {
     expect(provider).toBeDefined();

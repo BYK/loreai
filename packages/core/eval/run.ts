@@ -15,7 +15,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { EvalConfig, EvalResult, Dimension, BaselineMode } from "./types";
-import { ALL_DIMENSIONS, ALL_BASELINES } from "./types";
+import { ALL_DIMENSIONS } from "./types";
 import { runEval, printSummary } from "./harness";
 
 // ---------------------------------------------------------------------------

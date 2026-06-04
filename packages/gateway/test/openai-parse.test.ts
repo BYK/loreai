@@ -79,10 +79,12 @@ describe("parseOpenAIRequest — tool message coalescing", () => {
       "user",
     ]);
 
-    const assistant = req.messages[1]!;
+    const assistant = req.messages[1];
+    if (!assistant) throw new Error("expected assistant message");
     expect(toolUseIds(assistant.content)).toEqual(["call_A", "call_B"]);
 
-    const toolResultMsg = req.messages[2]!;
+    const toolResultMsg = req.messages[2];
+    if (!toolResultMsg) throw new Error("expected tool result message");
     expect(toolResultIds(toolResultMsg.content)).toEqual(["call_A", "call_B"]);
   });
 
@@ -127,12 +129,12 @@ describe("parseOpenAIRequest — tool message coalescing", () => {
       "assistant",
       "user",
     ]);
-    expect(toolUseIds(req.messages[1]!.content)).toEqual([
+    expect(toolUseIds(req.messages[1]?.content)).toEqual([
       "call_A",
       "call_B",
       "call_C",
     ]);
-    expect(toolResultIds(req.messages[2]!.content)).toEqual([
+    expect(toolResultIds(req.messages[2]?.content)).toEqual([
       "call_A",
       "call_B",
       "call_C",
@@ -190,11 +192,11 @@ describe("parseOpenAIRequest — tool message coalescing", () => {
       "assistant",
       "user",
     ]);
-    expect(toolResultIds(req.messages[2]!.content)).toEqual([
+    expect(toolResultIds(req.messages[2]?.content)).toEqual([
       "call_A",
       "call_B",
     ]);
-    expect(toolResultIds(req.messages[4]!.content)).toEqual(["call_C"]);
+    expect(toolResultIds(req.messages[4]?.content)).toEqual(["call_C"]);
   });
 
   test("single tool response is unchanged (regression guard)", () => {
@@ -226,7 +228,7 @@ describe("parseOpenAIRequest — tool message coalescing", () => {
       "assistant",
       "user",
     ]);
-    expect(toolResultIds(req.messages[2]!.content)).toEqual(["call_A"]);
+    expect(toolResultIds(req.messages[2]?.content)).toEqual(["call_A"]);
   });
 
   test("does NOT merge a genuine user text turn into tool results", () => {
@@ -262,9 +264,11 @@ describe("parseOpenAIRequest — tool message coalescing", () => {
       "user",
       "user",
     ]);
-    const toolResultMsg = req.messages[2]!;
+    const toolResultMsg = req.messages[2];
+    if (!toolResultMsg) throw new Error("expected tool result message");
     expect(toolResultIds(toolResultMsg.content)).toEqual(["call_A"]);
-    const userText = req.messages[3]!;
+    const userText = req.messages[3];
+    if (!userText) throw new Error("expected user message");
     expect(userText.content).toEqual([{ type: "text", text: "thanks" }]);
   });
 
@@ -331,7 +335,8 @@ describe("parseOpenAIRequest — tool message coalescing", () => {
     // The assistant's two tool_use blocks must both still be present.
     const assistant = reconstructed.find(
       (m) => m.role === "assistant" && toolUseIds(m.content).length > 0,
-    )!;
+    );
+    if (!assistant) throw new Error("expected assistant message");
     expect(toolUseIds(assistant.content).sort()).toEqual(["call_A", "call_B"]);
   });
 });

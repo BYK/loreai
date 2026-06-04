@@ -155,13 +155,15 @@ export function extractPatterns(observations: string): ExtractedPattern[] {
   for (const { regex, category, titleFn } of PATTERNS) {
     // Reset lastIndex for global regexes reused across calls
     regex.lastIndex = 0;
-    let match: RegExpMatchArray | null;
-    while ((match = regex.exec(observations)) !== null) {
+    let match = regex.exec(observations);
+    while (match !== null) {
+      const current = match;
+      match = regex.exec(observations);
       // Skip false positives: template placeholders (e.g. "X", "Y"),
       // quoted fragments, or very short captures that are clearly not
       // real technology/tool names. Plain apostrophes (') are allowed
       // since they appear in valid names like "Bun's test runner".
-      const captures = match.slice(1);
+      const captures = current.slice(1);
       if (
         captures.some(
           (c) =>
@@ -171,11 +173,11 @@ export function extractPatterns(observations: string): ExtractedPattern[] {
       )
         continue;
 
-      const title = titleFn(match);
+      const title = titleFn(current);
       const key = title.toLowerCase();
       if (seen.has(key)) continue;
       seen.add(key);
-      results.push({ category, title, content: match[0].trim() });
+      results.push({ category, title, content: current[0].trim() });
     }
   }
 
@@ -196,9 +198,10 @@ const ACTION_TAG_RE = /\[([a-z]+-[a-z-]+)\]/g;
 export function extractActionTags(observations: string): string[] {
   const tags = new Set<string>();
   ACTION_TAG_RE.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = ACTION_TAG_RE.exec(observations)) !== null) {
+  let match = ACTION_TAG_RE.exec(observations);
+  while (match !== null) {
     tags.add(match[1]);
+    match = ACTION_TAG_RE.exec(observations);
   }
   return [...tags];
 }

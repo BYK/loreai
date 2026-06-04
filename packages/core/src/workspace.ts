@@ -22,7 +22,7 @@ import {
   realpathSync,
   statSync,
 } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { isHostedMode } from "./hosted";
 
@@ -232,7 +232,7 @@ export function resolveWorkspaces(
   if (patterns.length === 0) return [];
 
   const resolvedRoot = resolve(rootDir);
-  const rootPrefix = resolvedRoot + "/";
+  const rootPrefix = `${resolvedRoot}/`;
   const cacheKey = `${resolvedRoot}\0${patterns.join("\0")}`;
   const cached = workspacesCache.get(cacheKey);
   if (cached !== undefined) return cached;

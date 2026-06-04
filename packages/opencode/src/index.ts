@@ -239,13 +239,15 @@ export const LorePlugin: Plugin = async (ctx) => {
         };
 
         if (loreActive) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const p = (cfg.provider as Record<string, any>) ?? {};
+          type ProviderEntry = { options?: { baseURL?: string } };
+          const p =
+            (cfg.provider as Record<string, ProviderEntry> | undefined) ?? {};
           cfg.provider = p;
           for (const providerID of GATEWAY_PROVIDERS) {
             p[providerID] ??= {};
-            p[providerID].options ??= {};
-            p[providerID].options!.baseURL = `${gatewayBase}/v1`;
+            const entry = p[providerID];
+            entry.options ??= {};
+            entry.options.baseURL = `${gatewayBase}/v1`;
           }
         }
       },

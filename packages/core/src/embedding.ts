@@ -464,7 +464,7 @@ class LocalProvider implements EmbeddingProvider {
     return new Promise<Float32Array[]>((resolve, reject) => {
       this.pendingRequests.set(id, { resolve, reject });
       this.updateWorkerRef();
-      this.worker!.postMessage({
+      this.worker?.postMessage({
         type: "embed",
         id,
         texts: prefixed,

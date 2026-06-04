@@ -39,7 +39,7 @@ export function extractAuth(
   const apiKey = headers["x-api-key"] || headers["X-Api-Key"];
   if (apiKey) return { scheme: "api-key", value: apiKey };
 
-  const authHeader = headers["authorization"] || headers["Authorization"];
+  const authHeader = headers.authorization || headers.Authorization;
   if (authHeader) {
     const match = /^Bearer\s+(\S+)$/i.exec(authHeader);
     if (match) return { scheme: "bearer", value: match[1] };

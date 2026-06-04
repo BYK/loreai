@@ -1,6 +1,6 @@
 import { describe, test, expect, afterEach } from "bun:test";
-import { mkdirSync, writeFileSync, rmSync } from "fs";
-import { join } from "path";
+import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { load, LoreConfig } from "../src/config";
 
 const TMP = join(import.meta.dir, "__tmp_config__");

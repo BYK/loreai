@@ -36,7 +36,7 @@ interface FillerEntry {
 const CHARS_PER_TOKEN = 4;
 
 /** Minimum tokens per filler exchange. */
-const MIN_FILLER_TOKENS = 1800;
+const _MIN_FILLER_TOKENS = 1800;
 
 /** Target tokens per filler exchange (2-4K range). */
 const TARGET_FILLER_TOKENS = 3000;

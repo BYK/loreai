@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { extractPatterns, type ExtractedPattern } from "../src/pattern-extract";
+import { extractPatterns } from "../src/pattern-extract";
 
 describe("extractPatterns", () => {
   // -----------------------------------------------------------------------

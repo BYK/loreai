@@ -69,6 +69,7 @@ const INSTRUCTION_PATTERNS: RegExp[] = [
  */
 export function hasNonAsciiLetters(s: string): boolean {
   // Strip ASCII chars, then count remaining Unicode letters.
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional control-character sanitization
   const nonAscii = s.replace(/[\x00-\x7F]/g, "");
   const letters = nonAscii.match(/\p{L}/gu);
   return (letters?.length ?? 0) >= 3;
@@ -105,9 +106,10 @@ export function extractInstructionCandidates(
     let matchedThisMsg = false;
     for (const pattern of INSTRUCTION_PATTERNS) {
       pattern.lastIndex = 0;
-      let match: RegExpMatchArray | null;
-      while ((match = pattern.exec(msg.content)) !== null) {
+      let match = pattern.exec(msg.content);
+      while (match !== null) {
         const text = match[1]?.trim();
+        match = pattern.exec(msg.content);
         if (!text || text.length < 10) continue;
 
         // Dedup by lowercased text within this extraction

@@ -6,7 +6,8 @@ import { AGENTS } from "../src/cli/agents";
 // ---------------------------------------------------------------------------
 
 describe("Claude Code agent envVars", () => {
-  const claude = AGENTS.find((a) => a.name === "claude-code")!;
+  const claude = AGENTS.find((a) => a.name === "claude-code");
+  if (!claude) throw new Error("claude-code agent not registered");
 
   // appendCustomHeader reads env[key] ?? process.env[key] to merge with
   // existing headers. Save and restore to avoid test pollution.
@@ -73,13 +74,15 @@ describe("Claude Code agent envVars", () => {
 
 describe("Codex agent envVars", () => {
   test("sets LORE_PROJECT env var to cwd", () => {
-    const codex = AGENTS.find((a) => a.name === "codex")!;
+    const codex = AGENTS.find((a) => a.name === "codex");
+    if (!codex) throw new Error("codex agent not registered");
     const env = codex.envVars("http://127.0.0.1:3207", "/home/user/my-project");
     expect(env.LORE_PROJECT).toBe("/home/user/my-project");
   });
 
   test("does NOT set OPENAI_BASE_URL (Codex CLI ignores it)", () => {
-    const codex = AGENTS.find((a) => a.name === "codex")!;
+    const codex = AGENTS.find((a) => a.name === "codex");
+    if (!codex) throw new Error("codex agent not registered");
     const env = codex.envVars("http://127.0.0.1:3207", "/tmp/test");
     expect(env.OPENAI_BASE_URL).toBeUndefined();
   });
@@ -87,15 +90,17 @@ describe("Codex agent envVars", () => {
 
 describe("Codex agent cliArgs", () => {
   test("returns -c openai_base_url override with /v1 suffix", () => {
-    const codex = AGENTS.find((a) => a.name === "codex")!;
+    const codex = AGENTS.find((a) => a.name === "codex");
+    if (!codex) throw new Error("codex agent not registered");
     expect(codex.cliArgs).toBeDefined();
-    const args = codex.cliArgs!("http://127.0.0.1:3207", "/tmp/test");
+    const args = codex.cliArgs?.("http://127.0.0.1:3207", "/tmp/test");
     expect(args).toEqual(["-c", 'openai_base_url="http://127.0.0.1:3207/v1"']);
   });
 
   test("includes gateway URL in the override", () => {
-    const codex = AGENTS.find((a) => a.name === "codex")!;
-    const args = codex.cliArgs!("http://192.168.1.100:5673", "/tmp/test");
-    expect(args[1]).toContain("http://192.168.1.100:5673/v1");
+    const codex = AGENTS.find((a) => a.name === "codex");
+    if (!codex) throw new Error("codex agent not registered");
+    const args = codex.cliArgs?.("http://192.168.1.100:5673", "/tmp/test");
+    expect(args?.[1]).toContain("http://192.168.1.100:5673/v1");
   });
 });

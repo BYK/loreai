@@ -150,8 +150,8 @@ describe("knowledge cross-references", () => {
 
       // Verify content was updated
       const entry = ltm.get(sourceId);
-      expect(entry!.content).toContain(`[[${newId}]]`);
-      expect(entry!.content).not.toContain(`[[${oldId}]]`);
+      expect(entry?.content).toContain(`[[${newId}]]`);
+      expect(entry?.content).not.toContain(`[[${oldId}]]`);
     });
   });
 
@@ -200,8 +200,8 @@ describe("knowledge cross-references", () => {
 
       // Verify content was cleaned
       const entry = ltm.get(sourceId);
-      expect(entry!.content).not.toContain(`[[${targetId}]]`);
-      expect(entry!.content).toContain("Links to  for info.");
+      expect(entry?.content).not.toContain(`[[${targetId}]]`);
+      expect(entry?.content).toContain("Links to  for info.");
 
       // Verify join table was cleaned
       const refsAfter = db()

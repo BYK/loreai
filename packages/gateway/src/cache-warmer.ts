@@ -34,7 +34,6 @@ import {
 import type {
   InterTurnHistogram,
   WarmupResult,
-  WarmupState,
   SessionState,
 } from "./translate/types";
 import { decompressBody } from "./cache-analytics";
@@ -315,7 +314,7 @@ export function survivalFunction(
   const binStart = idx > 0 ? HISTOGRAM_BINS[idx - 1] : 0;
   const binEnd = idx < HISTOGRAM_BINS.length ? HISTOGRAM_BINS[idx] : Infinity;
   const binWidth = binEnd - binStart;
-  if (binWidth > 0 && isFinite(binWidth)) {
+  if (binWidth > 0 && Number.isFinite(binWidth)) {
     const fractionPast = Math.min(1, Math.max(0, (tMs - binStart) / binWidth));
     surviving += histogram.counts[idx] * (1 - fractionPast);
   }
@@ -442,7 +441,7 @@ export function breakFraction(hist: InterTurnHistogram): number {
   const binEnd =
     floorIdx < HISTOGRAM_BINS.length ? HISTOGRAM_BINS[floorIdx] : Infinity;
   const binWidth = binEnd - binStart;
-  if (binWidth > 0 && isFinite(binWidth)) {
+  if (binWidth > 0 && Number.isFinite(binWidth)) {
     const fractionAbove = Math.max(
       0,
       Math.min(1, (binEnd - BREAK_FLOOR_MS) / binWidth),

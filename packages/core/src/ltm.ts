@@ -586,7 +586,7 @@ export async function forSession(
       )
       .get(pid, sessionID) as { observations: string } | null;
     if (distRow?.observations) {
-      sessionContext += distRow.observations + "\n";
+      sessionContext += `${distRow.observations}\n`;
     }
     const recentMsgs = db()
       .query(
@@ -871,7 +871,7 @@ export function rerankPreferences(): number {
 
   let updated = 0;
   for (const entry of prefs) {
-    const text = entry.title + " " + entry.content;
+    const text = `${entry.title} ${entry.content}`;
     let newConfidence: number;
     if (STRONG_DIRECTIVE_RE.test(text)) {
       newConfidence = 1.0; // Keep at max — unconditional directive
@@ -1102,10 +1102,11 @@ export function resolveRef(ref: string): string | null {
  */
 export function extractRefs(content: string): string[] {
   const refs: string[] = [];
-  let match;
   const re = new RegExp(WIKI_LINK_RE.source, WIKI_LINK_RE.flags);
-  while ((match = re.exec(content)) !== null) {
+  let match = re.exec(content);
+  while (match !== null) {
     refs.push(match[1]);
+    match = re.exec(content);
   }
   return refs;
 }
@@ -1466,7 +1467,8 @@ function _dedup(
   const rawClusters = new Map<string, string[]>();
 
   const sortedIds = [...neighborMap.keys()].sort(
-    (a, b) => neighborMap.get(b)!.length - neighborMap.get(a)!.length,
+    (a, b) =>
+      (neighborMap.get(b)?.length ?? 0) - (neighborMap.get(a)?.length ?? 0),
   );
 
   for (const centerId of sortedIds) {
@@ -1474,7 +1476,7 @@ function _dedup(
     claimed.add(centerId);
     const members = [centerId];
 
-    for (const { id: neighborId } of neighborMap.get(centerId)!) {
+    for (const { id: neighborId } of neighborMap.get(centerId) ?? []) {
       if (claimed.has(neighborId)) continue;
       claimed.add(neighborId);
       members.push(neighborId);
@@ -1495,8 +1497,8 @@ function _dedup(
 
     // Pick survivor: highest confidence → most recent → shortest title
     const sorted = members
-      .map((id) => entryById.get(id)!)
-      .filter(Boolean)
+      .map((id) => entryById.get(id))
+      .filter((e): e is NonNullable<typeof e> => e !== undefined)
       .sort((a, b) => {
         if (b.confidence !== a.confidence) return b.confidence - a.confidence;
         if (b.updated_at !== a.updated_at) return b.updated_at - a.updated_at;
@@ -1662,7 +1664,8 @@ export function promoteCrossProject(opts?: {
   const entryById = new Map(candidates.map((e) => [e.id, e]));
   const claimed = new Set<string>();
   const sortedIds = [...neighborMap.keys()].sort(
-    (a, b) => neighborMap.get(b)!.length - neighborMap.get(a)!.length,
+    (a, b) =>
+      (neighborMap.get(b)?.length ?? 0) - (neighborMap.get(a)?.length ?? 0),
   );
 
   const clusters: PromotionCluster[] = [];
@@ -1672,7 +1675,7 @@ export function promoteCrossProject(opts?: {
     if (claimed.has(centerId)) continue;
     claimed.add(centerId);
     const members = [centerId];
-    for (const neighborId of neighborMap.get(centerId)!) {
+    for (const neighborId of neighborMap.get(centerId) ?? []) {
       if (claimed.has(neighborId)) continue;
       claimed.add(neighborId);
       members.push(neighborId);

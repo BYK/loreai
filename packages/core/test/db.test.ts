@@ -87,10 +87,10 @@ describe("db", () => {
         .get(name) as { sql: string } | undefined;
       expect(row, `${name} should exist`).toBeTruthy();
       // Must NOT use the English-only porter stemmer.
-      expect(row!.sql).not.toContain("porter");
+      expect(row?.sql).not.toContain("porter");
       // Must use unicode61 and preserve diacritics (Turkish letters are distinct).
-      expect(row!.sql).toContain("unicode61");
-      expect(row!.sql).toContain("remove_diacritics 0");
+      expect(row?.sql).toContain("unicode61");
+      expect(row?.sql).toContain("remove_diacritics 0");
     }
   });
 
@@ -270,7 +270,7 @@ describe("db", () => {
       )
       .get() as { name: string } | null;
     expect(row).not.toBeNull();
-    expect(row!.name).toBe("kv_meta");
+    expect(row?.name).toBe("kv_meta");
   });
 
   test("recoverMissingObjects creates kv_meta and metadata when version=latest but tables are missing", () => {
@@ -306,7 +306,7 @@ describe("db", () => {
       )
       .get() as { name: string } | null;
     expect(afterKv).not.toBeNull();
-    expect(afterKv!.name).toBe("kv_meta");
+    expect(afterKv?.name).toBe("kv_meta");
 
     const afterMeta = fresh
       .query(
@@ -314,7 +314,7 @@ describe("db", () => {
       )
       .get() as { name: string } | null;
     expect(afterMeta).not.toBeNull();
-    expect(afterMeta!.name).toBe("metadata");
+    expect(afterMeta?.name).toBe("metadata");
   });
 
   // -------------------------------------------------------------------------
@@ -430,7 +430,7 @@ describe("db", () => {
       .query("SELECT project_id FROM project_path_aliases WHERE path = ?")
       .get("/test/supplied-remote/path-b") as { project_id: string } | null;
     expect(alias).not.toBeNull();
-    expect(alias!.project_id).toBe(id1);
+    expect(alias?.project_id).toBe(id1);
   });
 
   test("ensureProject with supplied gitRemote backfills existing project", () => {
@@ -546,7 +546,7 @@ describe("db", () => {
       .query("SELECT project_id FROM project_path_aliases WHERE path = ?")
       .get("/test/merge/source") as { project_id: string } | null;
     expect(alias).not.toBeNull();
-    expect(alias!.project_id).toBe(targetId);
+    expect(alias?.project_id).toBe(targetId);
   });
 
   test("recoverMissingObjects creates project_path_aliases when missing", () => {
@@ -571,7 +571,7 @@ describe("db", () => {
       )
       .get() as { name: string } | null;
     expect(after).not.toBeNull();
-    expect(after!.name).toBe("project_path_aliases");
+    expect(after?.name).toBe("project_path_aliases");
   });
 
   test("saveSessionCosts and loadSessionCosts round-trip", () => {
@@ -626,11 +626,11 @@ describe("db", () => {
       avoidedCompactionCost: 1.5,
     });
     const loaded = loadSessionCosts(sid);
-    expect(loaded!.conversationCost).toBe(2.0);
-    expect(loaded!.conversationTurns).toBe(15);
-    expect(loaded!.warmupSavings).toBe(0.5);
-    expect(loaded!.avoidedCompactions).toBe(3);
-    expect(loaded!.avoidedCompactionCost).toBe(1.5);
+    expect(loaded?.conversationCost).toBe(2.0);
+    expect(loaded?.conversationTurns).toBe(15);
+    expect(loaded?.warmupSavings).toBe(0.5);
+    expect(loaded?.avoidedCompactions).toBe(3);
+    expect(loaded?.avoidedCompactionCost).toBe(1.5);
   });
 
   test("saveSessionCosts preserves existing forceMinLayer", () => {
@@ -651,7 +651,7 @@ describe("db", () => {
       avoidedCompactionCost: 0,
     });
     expect(loadForceMinLayer(sid)).toBe(2);
-    expect(loadSessionCosts(sid)!.conversationTurns).toBe(5);
+    expect(loadSessionCosts(sid)?.conversationTurns).toBe(5);
   });
 
   test("loadSessionCosts returns null for unknown session", () => {
@@ -712,7 +712,7 @@ describe("db", () => {
     const all = loadAllSessionCosts();
     expect(all.has(sid1)).toBe(true);
     expect(all.has(sid2)).toBe(false);
-    expect(all.get(sid1)!.warmupSavings).toBe(0.1);
+    expect(all.get(sid1)?.warmupSavings).toBe(0.1);
   });
 
   // -------------------------------------------------------------------------
@@ -747,13 +747,13 @@ describe("db", () => {
     });
     const loaded = loadSessionTracking(sid);
     expect(loaded).not.toBeNull();
-    expect(loaded!.lastCuratedAt).toBe(1000);
-    expect(loaded!.messageCount).toBe(42);
-    expect(loaded!.turnsSinceCuration).toBe(5);
-    expect(loaded!.ltmCacheText).toBe("cached LTM text");
-    expect(loaded!.ltmCacheTokens).toBe(100);
-    expect(loaded!.ltmPinText).toBe("pinned LTM text");
-    expect(loaded!.ltmPinTokens).toBe(90);
+    expect(loaded?.lastCuratedAt).toBe(1000);
+    expect(loaded?.messageCount).toBe(42);
+    expect(loaded?.turnsSinceCuration).toBe(5);
+    expect(loaded?.ltmCacheText).toBe("cached LTM text");
+    expect(loaded?.ltmCacheTokens).toBe(100);
+    expect(loaded?.ltmPinText).toBe("pinned LTM text");
+    expect(loaded?.ltmPinTokens).toBe(90);
   });
 
   test("saveSessionTracking partial update preserves other fields", () => {
@@ -766,9 +766,9 @@ describe("db", () => {
     // Update only messageCount
     saveSessionTracking(sid, { messageCount: 20 });
     const loaded = loadSessionTracking(sid);
-    expect(loaded!.lastCuratedAt).toBe(1000);
-    expect(loaded!.messageCount).toBe(20);
-    expect(loaded!.turnsSinceCuration).toBe(3);
+    expect(loaded?.lastCuratedAt).toBe(1000);
+    expect(loaded?.messageCount).toBe(20);
+    expect(loaded?.turnsSinceCuration).toBe(3);
   });
 
   test("saveSessionTracking preserves existing forceMinLayer", () => {
@@ -776,7 +776,7 @@ describe("db", () => {
     saveForceMinLayer(sid, 2);
     saveSessionTracking(sid, { messageCount: 15 });
     expect(loadForceMinLayer(sid)).toBe(2);
-    expect(loadSessionTracking(sid)!.messageCount).toBe(15);
+    expect(loadSessionTracking(sid)?.messageCount).toBe(15);
   });
 
   test("loadSessionTracking returns null for unknown session", () => {
@@ -789,15 +789,15 @@ describe("db", () => {
       ltmCacheText: "some text",
       ltmCacheTokens: 50,
     });
-    expect(loadSessionTracking(sid)!.ltmCacheText).toBe("some text");
+    expect(loadSessionTracking(sid)?.ltmCacheText).toBe("some text");
     // Clear the cache
     saveSessionTracking(sid, {
       ltmCacheText: null,
       ltmCacheTokens: null,
     });
     const loaded = loadSessionTracking(sid);
-    expect(loaded!.ltmCacheText).toBeNull();
-    expect(loaded!.ltmCacheTokens).toBeNull();
+    expect(loaded?.ltmCacheText).toBeNull();
+    expect(loaded?.ltmCacheTokens).toBeNull();
   });
 
   // -------------------------------------------------------------------------
@@ -813,9 +813,9 @@ describe("db", () => {
     });
     const loaded = loadSessionTracking(sid);
     expect(loaded).not.toBeNull();
-    expect(loaded!.fingerprint).toBe("abc123hash");
-    expect(loaded!.headerSessionId).toBe("uuid-4567");
-    expect(loaded!.headerName).toBe("x-claude-code-session-id");
+    expect(loaded?.fingerprint).toBe("abc123hash");
+    expect(loaded?.headerSessionId).toBe("uuid-4567");
+    expect(loaded?.headerName).toBe("x-claude-code-session-id");
   });
 
   test("saveSessionTracking v24 cache warming round-trip", () => {
@@ -834,8 +834,9 @@ describe("db", () => {
     });
     const loaded = loadSessionTracking(sid);
     expect(loaded).not.toBeNull();
-    expect(loaded!.resolvedConversationTTL).toBe("1h");
-    const parsed = JSON.parse(loaded!.warmupState!);
+    if (!loaded?.warmupState) throw new Error("expected warmupState");
+    expect(loaded.resolvedConversationTTL).toBe("1h");
+    const parsed = JSON.parse(loaded.warmupState);
     expect(parsed.warmupCount).toBe(3);
     expect(parsed.totalWarmups).toBe(3);
     expect(parsed.forceKeepWarm).toBe(true);
@@ -854,13 +855,13 @@ describe("db", () => {
     });
     const loaded = loadSessionTracking(sid);
     expect(loaded).not.toBeNull();
-    expect(loaded!.dynamicContextCap).toBe(150000);
-    expect(loaded!.bustRateEMA).toBeCloseTo(0.35);
-    expect(loaded!.interBustIntervalEMA).toBe(120000);
-    expect(loaded!.lastLayer).toBe(1);
-    expect(loaded!.lastKnownInput).toBe(80000);
-    expect(loaded!.lastTurnAt).toBeGreaterThan(0);
-    expect(loaded!.lastBustAt).toBeGreaterThan(0);
+    expect(loaded?.dynamicContextCap).toBe(150000);
+    expect(loaded?.bustRateEMA).toBeCloseTo(0.35);
+    expect(loaded?.interBustIntervalEMA).toBe(120000);
+    expect(loaded?.lastLayer).toBe(1);
+    expect(loaded?.lastKnownInput).toBe(80000);
+    expect(loaded?.lastTurnAt).toBeGreaterThan(0);
+    expect(loaded?.lastBustAt).toBeGreaterThan(0);
   });
 
   test("saveSessionTracking v24 partial update preserves v23 + v24 fields", () => {
@@ -873,10 +874,10 @@ describe("db", () => {
     // Update only gradient field
     saveSessionTracking(sid, { bustRateEMA: 0.5 });
     const loaded = loadSessionTracking(sid);
-    expect(loaded!.messageCount).toBe(10);
-    expect(loaded!.fingerprint).toBe("hash1");
-    expect(loaded!.dynamicContextCap).toBe(100000);
-    expect(loaded!.bustRateEMA).toBeCloseTo(0.5);
+    expect(loaded?.messageCount).toBe(10);
+    expect(loaded?.fingerprint).toBe("hash1");
+    expect(loaded?.dynamicContextCap).toBe(100000);
+    expect(loaded?.bustRateEMA).toBeCloseTo(0.5);
   });
 
   test("saveSessionTracking v24 defaults are correct for new rows", () => {
@@ -885,18 +886,18 @@ describe("db", () => {
     const loaded = loadSessionTracking(sid);
     expect(loaded).not.toBeNull();
     // v24 defaults
-    expect(loaded!.fingerprint).toBe("");
-    expect(loaded!.headerSessionId).toBeNull();
-    expect(loaded!.headerName).toBeNull();
-    expect(loaded!.resolvedConversationTTL).toBe("5m");
-    expect(loaded!.warmupState).toBeNull();
-    expect(loaded!.dynamicContextCap).toBe(0);
-    expect(loaded!.bustRateEMA).toBe(-1);
-    expect(loaded!.interBustIntervalEMA).toBe(-1);
-    expect(loaded!.lastLayer).toBe(0);
-    expect(loaded!.lastKnownInput).toBe(0);
-    expect(loaded!.lastTurnAt).toBe(0);
-    expect(loaded!.lastBustAt).toBe(0);
+    expect(loaded?.fingerprint).toBe("");
+    expect(loaded?.headerSessionId).toBeNull();
+    expect(loaded?.headerName).toBeNull();
+    expect(loaded?.resolvedConversationTTL).toBe("5m");
+    expect(loaded?.warmupState).toBeNull();
+    expect(loaded?.dynamicContextCap).toBe(0);
+    expect(loaded?.bustRateEMA).toBe(-1);
+    expect(loaded?.interBustIntervalEMA).toBe(-1);
+    expect(loaded?.lastLayer).toBe(0);
+    expect(loaded?.lastKnownInput).toBe(0);
+    expect(loaded?.lastTurnAt).toBe(0);
+    expect(loaded?.lastBustAt).toBe(0);
   });
 
   // -------------------------------------------------------------------------
@@ -924,11 +925,11 @@ describe("db", () => {
     const found3 = entries.find((e) => e.sessionId === sid3);
 
     expect(found1).toBeDefined();
-    expect(found1!.headerSessionId).toBe("uuid-aaa");
-    expect(found1!.headerName).toBe("x-claude-code-session-id");
+    expect(found1?.headerSessionId).toBe("uuid-aaa");
+    expect(found1?.headerName).toBe("x-claude-code-session-id");
     expect(found2).toBeDefined();
-    expect(found2!.headerSessionId).toBe("uuid-bbb");
-    expect(found2!.headerName).toBe("x-session-affinity");
+    expect(found2?.headerSessionId).toBe("uuid-bbb");
+    expect(found2?.headerName).toBe("x-session-affinity");
     expect(found3).toBeUndefined();
   });
 
@@ -996,13 +997,13 @@ describe("db", () => {
     // Both tracking and cost data must survive
     const trackingAfter = loadSessionTracking(sid);
     expect(trackingAfter).not.toBeNull();
-    expect(trackingAfter!.lastLayer).toBe(1);
-    expect(trackingAfter!.lastKnownInput).toBe(100);
+    expect(trackingAfter?.lastLayer).toBe(1);
+    expect(trackingAfter?.lastKnownInput).toBe(100);
 
     const costsAfter = loadSessionCosts(sid);
     expect(costsAfter).not.toBeNull();
-    expect(costsAfter!.conversationCost).toBe(0.05);
-    expect(costsAfter!.conversationTurns).toBe(5);
+    expect(costsAfter?.conversationCost).toBe(0.05);
+    expect(costsAfter?.conversationTurns).toBe(5);
 
     // And forceMinLayer should be 2
     expect(loadForceMinLayer(sid)).toBe(2);
@@ -1126,7 +1127,7 @@ describe("db", () => {
         )
         .get() as { name: string } | null;
       expect(after).not.toBeNull();
-      expect(after!.name).toBe("daily_costs");
+      expect(after?.name).toBe("daily_costs");
     });
   });
 
@@ -1205,7 +1206,7 @@ describe("db", () => {
         )
         .get() as { name: string } | null;
       expect(after).not.toBeNull();
-      expect(after!.name).toBe("tool_calls");
+      expect(after?.name).toBe("tool_calls");
       // Indexes recovered too.
       const idx = fresh
         .query(
@@ -1256,7 +1257,7 @@ describe("db", () => {
         )
         .get() as { name: string } | null;
       expect(after).not.toBeNull();
-      expect(after!.name).toBe("knowledge_transfers");
+      expect(after?.name).toBe("knowledge_transfers");
       const idx = fresh
         .query(
           "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='knowledge_transfers'",

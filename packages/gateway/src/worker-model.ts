@@ -333,7 +333,7 @@ const EXPENSIVE_MODEL_THRESHOLD = 1.5;
  * extra cost). For other providers, we fall back to the session model
  * rather than risk calling a provider that may not be configured.
  */
-const GENERAL_FALLBACK_WORKER = {
+const _GENERAL_FALLBACK_WORKER = {
   providerID: "github-copilot",
   modelID: "gpt-5.4-mini",
 };
@@ -414,7 +414,7 @@ export function getWorkerModel():
   // When no session model is configured (no .lore.json or no model field),
   // use the Anthropic worker default rather than returning undefined — which
   // would cascade to the LLM client's defaultModel fallback.
-  const fallback = cfg.model ?? WORKER_DEFAULTS["anthropic"];
+  const fallback = cfg.model ?? WORKER_DEFAULTS.anthropic;
 
   return workerModel.resolveWorkerModel(
     cfg.model?.providerID ?? "anthropic",

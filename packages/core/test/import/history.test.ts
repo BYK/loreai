@@ -41,10 +41,10 @@ describe("import history", () => {
         "hash-abc",
       );
       expect(result).not.toBeNull();
-      expect(result!.agent_name).toBe("test-agent");
-      expect(result!.source_id).toBe("source-1");
-      expect(result!.entries_created).toBe(3);
-      expect(result!.entries_updated).toBe(1);
+      expect(result?.agent_name).toBe("test-agent");
+      expect(result?.source_id).toBe("source-1");
+      expect(result?.entries_created).toBe(3);
+      expect(result?.entries_updated).toBe(1);
     });
 
     test("returns null when hash differs (source changed)", () => {
@@ -75,7 +75,7 @@ describe("import history", () => {
       });
       const r2 = isImported(PROJECT_PATH, "agent-x", "src-1", "v2");
       expect(r2).not.toBeNull();
-      expect(r2!.entries_created).toBe(1);
+      expect(r2?.entries_created).toBe(1);
 
       // Old hash no longer matches
       expect(isImported(PROJECT_PATH, "agent-x", "src-1", "v1")).toBeNull();

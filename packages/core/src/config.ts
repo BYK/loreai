@@ -13,7 +13,7 @@ function stripJsonComments(str: string): string {
   return str
     .replace(
       /("(?:[^"\\]|\\.)*")|\/\/[^\n]*|\/\*[\s\S]*?\*\//g,
-      (m, s) => s ?? "",
+      (_m, s) => s ?? "",
     )
     .replace(/,\s*([}\]])/g, "$1");
 }

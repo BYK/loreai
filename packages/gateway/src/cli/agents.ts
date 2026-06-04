@@ -68,6 +68,7 @@ export interface AgentDef {
 function safeRemote(cwd: string): string | null {
   const remote = getGitRemote(cwd);
   if (!remote) return null;
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional control-character sanitization
   return remote.replace(/[\x00-\x1f\x7f]/g, "");
 }
 

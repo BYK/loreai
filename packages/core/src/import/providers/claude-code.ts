@@ -5,9 +5,9 @@
  * Path mangling: project path with "/" replaced by "-"
  *   e.g. /home/byk/Code/foo → -home-byk-Code-foo
  */
-import { readdirSync, readFileSync, statSync } from "fs";
-import { join } from "path";
-import { homedir } from "os";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import type {
   AgentHistoryProvider,
   ConversationChunk,
@@ -76,7 +76,7 @@ function estimateTokens(text: string): number {
 /** Truncate text to a max length, appending "..." if truncated. */
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
-  return text.slice(0, max) + "...";
+  return `${text.slice(0, max)}...`;
 }
 
 /** Extract text content from a single content block. */

@@ -33,8 +33,9 @@ describe("entities", () => {
       expect(result.created).toBe(true);
       const entity = entities.get(result.id);
       expect(entity).not.toBeNull();
-      expect(entity!.metadata).not.toBeNull();
-      const meta = JSON.parse(entity!.metadata!);
+      expect(entity?.metadata).not.toBeNull();
+      if (!entity?.metadata) throw new Error("expected metadata");
+      const meta = JSON.parse(entity.metadata);
       expect(meta.role).toBe("backend lead");
       expect(meta.description).toBe("works on auth");
     });
@@ -46,7 +47,7 @@ describe("entities", () => {
         canonicalName: "Bob",
       });
       const entity = entities.get(result.id);
-      expect(entity!.metadata).toBeNull();
+      expect(entity?.metadata).toBeNull();
     });
 
     test("dedup merges metadata — existing non-empty values win", () => {
@@ -69,7 +70,8 @@ describe("entities", () => {
       expect(second.id).toBe(first.id);
 
       const entity = entities.get(first.id);
-      const meta = JSON.parse(entity!.metadata!);
+      if (!entity?.metadata) throw new Error("expected metadata");
+      const meta = JSON.parse(entity.metadata);
       expect(meta.role).toBe("frontend dev"); // existing wins
       expect(meta.description).toBe("works on UI"); // preserved
       expect(meta.notes).toBe("joined in 2024"); // new key fills gap
@@ -89,7 +91,8 @@ describe("entities", () => {
       });
       expect(second.id).toBe(first.id);
       const entity = entities.get(first.id);
-      const meta = JSON.parse(entity!.metadata!);
+      if (!entity?.metadata) throw new Error("expected metadata");
+      const meta = JSON.parse(entity.metadata);
       expect(meta.role).toBe("designer"); // unchanged
     });
 
@@ -104,7 +107,8 @@ describe("entities", () => {
         metadata: { role: "senior", description: "promoted" },
       });
       const entity = entities.get(result.id);
-      const meta = JSON.parse(entity!.metadata!);
+      if (!entity?.metadata) throw new Error("expected metadata");
+      const meta = JSON.parse(entity.metadata);
       expect(meta.role).toBe("senior");
       expect(meta.description).toBe("promoted");
     });
@@ -157,8 +161,8 @@ describe("entities", () => {
         '{"role":"","description":"auth team"}',
         { role: "dev" },
       );
-      expect(result!.role).toBe("dev"); // empty string does not win
-      expect(result!.description).toBe("auth team");
+      expect(result?.role).toBe("dev"); // empty string does not win
+      expect(result?.description).toBe("auth team");
     });
   });
 
@@ -174,7 +178,7 @@ describe("entities", () => {
         canonicalName: "CrossPerson",
       });
       const entity = entities.get(result.id);
-      expect(entity!.cross_project).toBe(1);
+      expect(entity?.cross_project).toBe(1);
     });
 
     test("repo defaults to project-scoped", () => {
@@ -184,7 +188,7 @@ describe("entities", () => {
         canonicalName: "my-repo",
       });
       const entity = entities.get(result.id);
-      expect(entity!.cross_project).toBe(0);
+      expect(entity?.cross_project).toBe(0);
     });
 
     test("infra defaults to project-scoped", () => {
@@ -194,7 +198,7 @@ describe("entities", () => {
         canonicalName: "staging-server",
       });
       const entity = entities.get(result.id);
-      expect(entity!.cross_project).toBe(0);
+      expect(entity?.cross_project).toBe(0);
     });
 
     test("explicit crossProject overrides default", () => {
@@ -205,7 +209,7 @@ describe("entities", () => {
         crossProject: true,
       });
       const entity = entities.get(result.id);
-      expect(entity!.cross_project).toBe(1);
+      expect(entity?.cross_project).toBe(1);
     });
 
     test("self is always cross-project", () => {
@@ -215,7 +219,7 @@ describe("entities", () => {
         canonicalName: "TestUser",
       });
       const entity = entities.get(result.id);
-      expect(entity!.cross_project).toBe(1);
+      expect(entity?.cross_project).toBe(1);
     });
   });
 
@@ -239,8 +243,8 @@ describe("entities", () => {
 
       const self = entities.getSelfEntity();
       expect(self).not.toBeNull();
-      expect(self!.entity_type).toBe("self");
-      expect(self!.canonical_name).toBe("Test User");
+      expect(self?.entity_type).toBe("self");
+      expect(self?.canonical_name).toBe("Test User");
     });
   });
 
@@ -340,7 +344,9 @@ describe("entities", () => {
         canonicalName: "RmB",
       });
 
-      const relId = entities.addRelation(a.id, b.id, "mentor")!;
+      const relId = entities.addRelation(a.id, b.id, "mentor");
+      expect(relId).toBeTruthy();
+      if (!relId) throw new Error("expected relation id");
       expect(entities.relationsFor(a.id).length).toBe(1);
 
       entities.removeRelation(relId);
@@ -417,7 +423,9 @@ describe("entities", () => {
       });
       const rels = entities.getRelation(a.id, b.id, "friend");
       expect(rels.length).toBe(1);
-      const meta = JSON.parse(rels[0].metadata!);
+      const relMeta = rels[0]?.metadata;
+      if (!relMeta) throw new Error("expected relation metadata");
+      const meta = JSON.parse(relMeta);
       expect(meta.context).toBe("met at conference");
     });
 
@@ -453,7 +461,7 @@ describe("entities", () => {
 
   describe("formatForPrompt", () => {
     test("includes metadata brief for non-self entities", () => {
-      const result = entities.create({
+      const _result = entities.create({
         projectPath: PROJECT,
         entityType: "person",
         canonicalName: "PromptPerson",
@@ -557,7 +565,7 @@ describe("entities", () => {
     });
 
     test("self entity always included when over cap", () => {
-      const self = entities.create({
+      const _self = entities.create({
         projectPath: PROJECT,
         entityType: "self",
         canonicalName: "CapSelf",
@@ -696,7 +704,8 @@ describe("entities", () => {
 
       const resolved = entities.resolve("ApplyService");
       expect(resolved).not.toBeNull();
-      const meta = JSON.parse(resolved!.metadata!);
+      if (!resolved?.metadata) throw new Error("expected resolved metadata");
+      const meta = JSON.parse(resolved.metadata);
       expect(meta.description).toBe("CI/CD platform");
     });
 

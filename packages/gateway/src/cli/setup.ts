@@ -68,6 +68,7 @@ export function normalizeBaseUrl(
  * or could be used for injection (double-quotes, backslashes, control chars).
  */
 function validateUrl(url: string): void {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional control-character sanitization
   if (/[\x00-\x1f"\\]/.test(url)) {
     throw new Error(`Invalid characters in URL: ${url}`);
   }
@@ -138,7 +139,7 @@ export function updateCodexConfig(content: string, baseUrl: string): string {
     before.pop();
   }
 
-  const beforeStr = before.length > 0 ? before.join("\n") + "\n" : "";
+  const beforeStr = before.length > 0 ? `${before.join("\n")}\n` : "";
   return `${beforeStr}${newLine}\n\n${after.join("\n")}`;
 }
 

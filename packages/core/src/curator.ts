@@ -725,11 +725,12 @@ function buildActionTagContext(
   for (const row of rows) {
     if (row.session_id === currentSessionID) continue;
     tagRe.lastIndex = 0;
-    let match: RegExpExecArray | null;
-    while ((match = tagRe.exec(row.observations)) !== null) {
+    let match = tagRe.exec(row.observations);
+    while (match !== null) {
       const tag = match[1];
       if (!tagSessions.has(tag)) tagSessions.set(tag, new Set());
-      tagSessions.get(tag)!.add(row.session_id);
+      tagSessions.get(tag)?.add(row.session_id);
+      match = tagRe.exec(row.observations);
     }
   }
 

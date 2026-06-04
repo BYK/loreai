@@ -59,7 +59,7 @@ describe("extractKnowledge", () => {
     const entries = ltm.forProject(PROJECT_PATH, false);
     const found = entries.find((e) => e.title === "SQLite WAL mode");
     expect(found).toBeDefined();
-    expect(found!.category).toBe("gotcha");
+    expect(found?.category).toBe("gotcha");
   });
 
   test("handles empty LLM response", async () => {

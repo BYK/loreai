@@ -9,6 +9,13 @@ import { probeGateway } from "../src/index";
  * they don't collide with a running gateway.
  */
 
+// Minimal view of the @loreai/gateway module surface used by these tests.
+type GatewayServer = { stop: () => void; port: number; hosts: string[] };
+type GatewayModule = {
+  loadConfig: () => { port: number } & Record<string, unknown>;
+  startServer: (config: unknown) => GatewayServer;
+};
+
 // Track shutdown handles to clean up after tests.
 const shutdowns: Array<() => Promise<void>> = [];
 
@@ -28,16 +35,11 @@ describe("in-process gateway startup", () => {
   test("startGateway starts the gateway and responds to health checks", async () => {
     // Use the gateway API directly with an ephemeral port.
     const gwPkg = "@loreai/gateway";
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const gw = (await import(gwPkg)) as any;
+    const gw = (await import(gwPkg)) as unknown as GatewayModule;
     const config = gw.loadConfig();
     config.port = 0; // ephemeral
 
-    const server = gw.startServer(config) as {
-      stop: () => void;
-      port: number;
-      hosts: string[];
-    };
+    const server = gw.startServer(config);
     shutdowns.push(async () => server.stop());
     const port = server.port;
     const base = `http://127.0.0.1:${port}`;
@@ -57,8 +59,7 @@ describe("in-process gateway startup", () => {
     // Use startServer directly (lighter than startGateway — avoids
     // embedding worker init which triggers Bun NAPI teardown crashes).
     const gwPkg = "@loreai/gateway";
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const gw = (await import(gwPkg)) as any;
+    const gw = (await import(gwPkg)) as unknown as GatewayModule;
 
     // Find a free port first.
     const tmpServer = Bun.serve({
@@ -66,7 +67,8 @@ describe("in-process gateway startup", () => {
       hostname: "127.0.0.1",
       fetch: () => new Response("tmp"),
     });
-    const freePort = tmpServer.port!;
+    const freePort = tmpServer.port;
+    if (freePort === undefined) throw new Error("expected an ephemeral port");
     tmpServer.stop(true);
 
     // Small delay to ensure the port is released.

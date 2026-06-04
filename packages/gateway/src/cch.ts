@@ -29,7 +29,7 @@
  * contamination. Mirrors the per-session `sessionAuth` in `auth.ts`.
  */
 
-import { createHash, randomUUID } from "crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 // ---------------------------------------------------------------------------
 // Version→seed mapping
@@ -77,7 +77,10 @@ const VERSION_SEEDS: Record<string, bigint> = {
 
 /** Version we pin worker billing headers to (must have a known seed). */
 const WORKER_VERSION = "2.1.162";
-const WORKER_SEED = VERSION_SEEDS[WORKER_VERSION]!;
+const WORKER_SEED = VERSION_SEEDS[WORKER_VERSION];
+if (WORKER_SEED === undefined) {
+  throw new Error(`Missing CCH seed for worker version ${WORKER_VERSION}`);
+}
 
 /**
  * Salt for the cc_version suffix computation. Embedded in Claude Code's

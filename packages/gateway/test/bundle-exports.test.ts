@@ -40,7 +40,7 @@ describe.skipIf(!hasBundle)("bundle exports", () => {
   test("export conditions reference files in the files list", () => {
     const filesSet = new Set(pkgJson.files as string[]);
     const exports = pkgJson.exports["."] as Record<string, string>;
-    for (const [condition, filePath] of Object.entries(exports)) {
+    for (const [_condition, filePath] of Object.entries(exports)) {
       // Strip leading "./" for comparison with files array entries
       const normalized = filePath.replace(/^\.\//, "");
       expect(filesSet.has(normalized)).toBe(true);

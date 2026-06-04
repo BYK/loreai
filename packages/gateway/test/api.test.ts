@@ -115,7 +115,7 @@ describe("GET /api/v1/projects", () => {
     expect(projects.length).toBeGreaterThanOrEqual(1);
     const found = projects.find((p) => p.id === projectId);
     expect(found).toBeDefined();
-    expect(found!.name).toBe("test-project");
+    expect(found?.name).toBe("test-project");
   });
 });
 
@@ -340,7 +340,7 @@ describe("Zstd request body decompression", () => {
 
 describe("Project resolution", () => {
   it("resolves project by git_remote query param", async () => {
-    const { projectPath } = await seedProject();
+    await seedProject();
     // The seedProject uses git_remote "git@github.com:test/repo.git"
     const gitRemote = encodeURIComponent("git@github.com:test/repo.git");
     const data = await apiJSON<{ query: string; result: string }>(

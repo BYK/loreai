@@ -55,7 +55,10 @@ export async function accumulateResponsesSSEStream(
       }
   >();
 
-  const reader = response.body!.getReader();
+  if (!response.body) {
+    throw new Error("Response has no body");
+  }
+  const reader = response.body.getReader();
 
   for await (const { event, data } of parseSSEStream(reader)) {
     // Some Responses API implementations send untyped `data:` lines
@@ -186,7 +189,8 @@ export async function accumulateResponsesSSEStream(
   const sortedIndices = Array.from(items.keys()).sort((a, b) => a - b);
 
   for (const index of sortedIndices) {
-    const item = items.get(index)!;
+    const item = items.get(index);
+    if (!item) continue;
     if (item.type === "text") {
       if (item.text) {
         content.push({ type: "text", text: item.text });
@@ -307,7 +311,10 @@ export function translateAnthropicStreamToResponses(
       }
 
       try {
-        const reader = anthropicResponse.body!.getReader();
+        if (!anthropicResponse.body) {
+          throw new Error("Anthropic response has no body");
+        }
+        const reader = anthropicResponse.body.getReader();
 
         for await (const { event, data } of parseSSEStream(reader)) {
           if (cancelled) break;

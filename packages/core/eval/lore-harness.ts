@@ -8,7 +8,7 @@
  * distilled context.
  */
 import { createHarness } from "vitest-evals";
-import type { ScenarioDefinition, ConversationTurn } from "./types";
+import type { ScenarioDefinition } from "./types";
 import type { GatewayHandle } from "./harness";
 import { QA_SYSTEM } from "./baselines";
 

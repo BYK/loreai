@@ -92,16 +92,16 @@ describe("ltm.recordTransfer / read helpers", () => {
     ltm.recordTransfer({ knowledgeId: id, recalledInProjectId: fpid });
     let breakdown = ltm.transfersFor(id);
     expect(breakdown.length).toBe(1);
-    expect(breakdown[0]!.hit_count).toBe(1);
-    const firstAt = breakdown[0]!.first_recalled_at;
+    expect(breakdown[0]?.hit_count).toBe(1);
+    const firstAt = breakdown[0]?.first_recalled_at;
 
     ltm.recordTransfer({ knowledgeId: id, recalledInProjectId: fpid });
     breakdown = ltm.transfersFor(id);
     expect(breakdown.length).toBe(1);
-    expect(breakdown[0]!.hit_count).toBe(2);
+    expect(breakdown[0]?.hit_count).toBe(2);
     // first_recalled_at is set once and preserved.
-    expect(breakdown[0]!.first_recalled_at).toBe(firstAt);
-    expect(breakdown[0]!.last_recalled_at).toBeGreaterThanOrEqual(firstAt);
+    expect(breakdown[0]?.first_recalled_at).toBe(firstAt);
+    expect(breakdown[0]?.last_recalled_at).toBeGreaterThanOrEqual(firstAt);
   });
 
   test("transferCount = distinct foreign projects", () => {
@@ -149,10 +149,11 @@ describe("forSession transfer recording", () => {
     // Sanity: the promoted entry surfaced in the foreign project.
     const surfaced = result.find((e) => e.title === "Caching layer decision");
     expect(surfaced).toBeDefined();
-    expect(surfaced!.cross_project).toBe(1);
-    expect(surfaced!.project_id).not.toBe(fpid);
+    if (!surfaced) throw new Error("expected surfaced entry");
+    expect(surfaced.cross_project).toBe(1);
+    expect(surfaced.project_id).not.toBe(fpid);
 
-    expect(ltm.transferCount(surfaced!.id)).toBe(1);
+    expect(ltm.transferCount(surfaced.id)).toBe(1);
   });
 
   test("throttle: second forSession within window does not double-count", async () => {
@@ -220,7 +221,7 @@ describe("runRecall transfer gating", () => {
     });
     expect(ltm.transferCount(id)).toBeGreaterThanOrEqual(1);
     const breakdown = ltm.transfersFor(id);
-    expect(breakdown[0]!.recalled_in_project_id).toBe(fpid);
+    expect(breakdown[0]?.recalled_in_project_id).toBe(fpid);
   });
 
   test("recallById never records", async () => {

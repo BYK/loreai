@@ -40,22 +40,8 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
-      # The vendor staging tree (`.vendor-build/.model-cache/`) contains the
-      # nomic-embed-text-v1.5 ONNX model files. Needed by the binary build AND
-      # by the test run (so `LocalProvider integration` tests load the model
-      # from disk instead of downloading from HuggingFace Hub — avoiding
-      # transient 429/outage failures that block the nightly).
-      # Cached aggressively — only rebuilt when core deps or vendor scripts change.
-      - name: Cache vendor staging dirs
-        id: vendor-cache
-        uses: actions/cache@v5
-        with:
-          path: .vendor-build
-          key: vendor-${{ hashFiles('packages/core/package.json', 'packages/gateway/script/vendor-embeddings.ts', 'packages/gateway/script/vendor-paths.ts') }}
-
-      - name: Populate vendor staging (cache miss)
-        if: steps.vendor-cache.outputs.cache-hit != 'true'
-        run: bun run packages/gateway/script/vendor-embeddings.ts
+      - name: Lint
+        run: bun run lint
 
       - name: Test
         run: bun test

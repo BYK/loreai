@@ -11,7 +11,7 @@
  * gateway REST API instead of accessing the local database.
  */
 import { createInterface } from "node:readline";
-import { resolve } from "path";
+import { resolve } from "node:path";
 import {
   getRemoteUrl,
   projectQueryParams,
@@ -31,7 +31,7 @@ function formatDate(ts: number): string {
 function truncate(str: string, max: number): string {
   const oneLine = str.replace(/\n/g, " ").trim();
   if (oneLine.length <= max) return oneLine;
-  return oneLine.slice(0, max - 1) + "\u2026";
+  return `${oneLine.slice(0, max - 1)}\u2026`;
 }
 
 function padRight(str: string, len: number): string {
@@ -576,7 +576,11 @@ async function cmdDelete(
           return;
         }
       }
-      const result = data.deleteProject(id)!;
+      const result = data.deleteProject(id);
+      if (!result) {
+        console.log(`Project not found: ${id}`);
+        return;
+      }
       console.log(
         `Deleted project: ${result.knowledge_deleted} knowledge, ` +
           `${result.temporal_deleted} messages, ` +
@@ -606,8 +610,8 @@ async function cmdRecover(
     process.exit(1);
   }
 
-  const { existsSync } = await import("fs");
-  const { join } = await import("path");
+  const { existsSync } = await import("node:fs");
+  const { join } = await import("node:path");
   const {
     data,
     importLoreFile,
@@ -1884,7 +1888,7 @@ async function cmdDedupRemote(
 
 async function cmdReindexRemote(
   remote: string,
-  flags: Record<string, unknown>,
+  _flags: Record<string, unknown>,
 ): Promise<void> {
   console.log("Re-indexing embeddings on remote gateway...");
   const result = await remotePost<{
@@ -2066,7 +2070,7 @@ async function cmdConsolidate(
           buckets: buckets.length,
           mergeable: mergeable.map((p) => ({
             from: p.bucket.path,
-            into: p.target!.path,
+            into: p.target?.path,
             gitRemote: p.bucket.git_remote,
           })),
           orphans: orphans.map((p) => ({
@@ -2085,7 +2089,7 @@ async function cmdConsolidate(
     console.log(`  orphans (no confident match): ${orphans.length}\n`);
     for (const p of mergeable) {
       console.log(
-        `  merge ${p.bucket.path} → ${p.target!.name ?? p.target!.path}`,
+        `  merge ${p.bucket.path} → ${p.target?.name ?? p.target?.path}`,
       );
     }
     for (const p of orphans) {
@@ -2112,8 +2116,10 @@ async function cmdConsolidate(
 
   let merged = 0;
   for (const p of mergeable) {
+    const target = p.target;
+    if (!target) continue;
     try {
-      mergeProjects(p.bucket.id, p.target!.id);
+      mergeProjects(p.bucket.id, target.id);
       merged++;
     } catch (e) {
       console.error(

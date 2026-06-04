@@ -10,6 +10,7 @@ import {
   type GatewayConfig,
 } from "../src/config";
 import { resolveSessionProjectPath } from "../src/pipeline";
+import type { SessionState } from "../src/translate/types";
 import { ensureProject, projectId, ltm } from "@loreai/core";
 
 // ---------------------------------------------------------------------------
@@ -221,7 +222,7 @@ describe("getProjectPath", () => {
   });
 
   test("rejects X-Lore-Project header exceeding 1024 characters", () => {
-    const longPath = "/" + "a".repeat(1030);
+    const longPath = `/${"a".repeat(1030)}`;
     const result = getProjectPath("Working directory: /home/user/project", {
       "x-lore-project": longPath,
     });
@@ -331,14 +332,14 @@ describe("extractProjectHeader", () => {
   });
 
   test("rejects values exceeding 1024 characters", () => {
-    const longPath = "/" + "a".repeat(1030);
+    const longPath = `/${"a".repeat(1030)}`;
     expect(
       extractProjectHeader({ "x-lore-project": longPath }),
     ).toBeUndefined();
   });
 
   test("accepts values at exactly 1024 characters", () => {
-    const value = "/" + "a".repeat(1023); // 1024 total
+    const value = `/${"a".repeat(1023)}`; // 1024 total
     expect(extractProjectHeader({ "x-lore-project": value })).toBeDefined();
   });
 
@@ -410,14 +411,14 @@ describe("extractGitRemoteHeader", () => {
   });
 
   test("rejects values exceeding 512 characters", () => {
-    const longValue = "github.com/" + "a".repeat(510);
+    const longValue = `github.com/${"a".repeat(510)}`;
     expect(
       extractGitRemoteHeader({ "x-lore-git-remote": longValue }),
     ).toBeUndefined();
   });
 
   test("accepts values at exactly 512 characters", () => {
-    const value = "github.com/" + "a".repeat(501); // 512 total
+    const value = `github.com/${"a".repeat(501)}`; // 512 total
     expect(
       extractGitRemoteHeader({ "x-lore-git-remote": value }),
     ).toBeDefined();
@@ -437,26 +438,33 @@ describe("extractGitRemoteHeader", () => {
 
 describe("resolveSessionProjectPath", () => {
   // A confident binding has projectPath set and projectPathProvisional falsy.
-  function confidentState(projectPath: string) {
+  function confidentState(projectPath: string): SessionState {
     return {
       sessionID: "sid-confident",
       projectPath,
       projectPathProvisional: false,
-    } as any;
+    } as Partial<SessionState> as SessionState;
   }
   // A provisional binding (cwd fallback / bucket) — overridable by a later
   // confident path.
-  function provisionalState(sessionID: string, projectPath: string) {
-    return { sessionID, projectPath, projectPathProvisional: true } as any;
+  function provisionalState(
+    sessionID: string,
+    projectPath: string,
+  ): SessionState {
+    return {
+      sessionID,
+      projectPath,
+      projectPathProvisional: true,
+    } as Partial<SessionState> as SessionState;
   }
   // Freshly-created session (e.g. first turn) seeded by getOrCreateSession with
   // a cwd path → provisional.
-  function freshCwdState(sessionID: string, cwdPath: string) {
+  function freshCwdState(sessionID: string, cwdPath: string): SessionState {
     return {
       sessionID,
       projectPath: cwdPath,
       projectPathProvisional: true,
-    } as any;
+    } as Partial<SessionState> as SessionState;
   }
 
   const localCfg = { remoteGateway: false } as GatewayConfig;

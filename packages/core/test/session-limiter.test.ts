@@ -49,7 +49,7 @@ describe("session-limiter", () => {
   test("isBusy returns true when a task is active", async () => {
     expect(distillLimiter.isBusy("session-1")).toBe(false);
 
-    let resolve: () => void;
+    let resolve: (() => void) | undefined;
     const blocker = new Promise<void>((r) => {
       resolve = r;
     });
@@ -62,13 +62,13 @@ describe("session-limiter", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(distillLimiter.isBusy("session-1")).toBe(true);
 
-    resolve!();
+    resolve?.();
     await p;
     expect(distillLimiter.isBusy("session-1")).toBe(false);
   });
 
   test("isBusy returns true when tasks are pending", async () => {
-    let resolve1: () => void;
+    let resolve1: (() => void) | undefined;
     const blocker1 = new Promise<void>((r) => {
       resolve1 = r;
     });
@@ -84,7 +84,7 @@ describe("session-limiter", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(distillLimiter.isBusy("session-1")).toBe(true);
 
-    resolve1!();
+    resolve1?.();
     await Promise.all([p1, p2]);
     expect(distillLimiter.isBusy("session-1")).toBe(false);
   });
@@ -119,7 +119,7 @@ describe("session-limiter", () => {
 
   test("distill and curator limiters are independent", async () => {
     const order: string[] = [];
-    let resolveDistill: () => void;
+    let resolveDistill: (() => void) | undefined;
     const distillBlocker = new Promise<void>((r) => {
       resolveDistill = r;
     });
@@ -140,7 +140,7 @@ describe("session-limiter", () => {
     // Distillation is still running
     expect(distillLimiter.isBusy("session-1")).toBe(true);
 
-    resolveDistill!();
+    resolveDistill?.();
     await pd;
   });
 
@@ -174,7 +174,7 @@ describe("session-limiter", () => {
   });
 
   test("evict does not remove a busy limiter", async () => {
-    let resolve: () => void;
+    let resolve: (() => void) | undefined;
     const blocker = new Promise<void>((r) => {
       resolve = r;
     });
@@ -191,7 +191,7 @@ describe("session-limiter", () => {
     distillLimiter.evict("busy-session");
     expect(distillLimiter.isBusy("busy-session")).toBe(true);
 
-    resolve!();
+    resolve?.();
     await p;
   });
 });

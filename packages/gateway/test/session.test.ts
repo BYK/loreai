@@ -14,7 +14,6 @@ import {
   collectCandidateHeaders,
   learnHeaders,
   _resetGlobalHeaderValues,
-  type HeaderCandidate,
   type RotationCandidate,
 } from "../src/session";
 
@@ -521,7 +520,7 @@ describe("collectCandidateHeaders", () => {
     const candidates = collectCandidateHeaders({
       "x-client-version": "1.0.0", // contains dots
       "x-debug": "true", // too short
-      "x-api-key": "sk-" + "a".repeat(130), // too long
+      "x-api-key": `sk-${"a".repeat(130)}`, // too long
     });
     expect(candidates.size).toBe(0);
   });

@@ -487,7 +487,7 @@ function formatMetadataBrief(metadataJson: string | null): string {
     }
     if (!parts.length) return "";
     const joined = parts.join("; ");
-    const truncated = joined.length > 80 ? joined.slice(0, 77) + "..." : joined;
+    const truncated = joined.length > 80 ? `${joined.slice(0, 77)}...` : joined;
     return ` — ${truncated}`;
   } catch {
     return "";
@@ -1163,7 +1163,11 @@ export function formatForPrompt(entities: EntityWithAliases[]): string {
   const grouped: Record<string, EntityWithAliases[]> = {};
   for (const e of entities) {
     const displayType = e.entity_type === "self" ? "person" : e.entity_type;
-    const group = grouped[displayType] ?? (grouped[displayType] = []);
+    let group = grouped[displayType];
+    if (!group) {
+      group = [];
+      grouped[displayType] = group;
+    }
     group.push(e);
   }
 

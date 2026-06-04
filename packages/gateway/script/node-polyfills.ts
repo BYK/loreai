@@ -114,12 +114,23 @@ if (typeof globalThis.Bun === "undefined") {
   // Bun.zstdCompressSync / Bun.zstdDecompressSync → node:zlib
   // ---------------------------------------------------------------------------
 
+  const zlibWithZstd = zlib as typeof zlib & {
+    zstdCompressSync?: (buf: Uint8Array | Buffer) => Buffer;
+    zstdDecompressSync?: (buf: Uint8Array | Buffer) => Buffer;
+  };
+
   function zstdCompressSync(buf: Uint8Array | Buffer): Buffer {
-    return (zlib as any).zstdCompressSync(buf);
+    if (!zlibWithZstd.zstdCompressSync) {
+      throw new Error("zstdCompressSync is not available in this runtime");
+    }
+    return zlibWithZstd.zstdCompressSync(buf);
   }
 
   function zstdDecompressSync(buf: Uint8Array | Buffer): Buffer {
-    return (zlib as any).zstdDecompressSync(buf);
+    if (!zlibWithZstd.zstdDecompressSync) {
+      throw new Error("zstdDecompressSync is not available in this runtime");
+    }
+    return zlibWithZstd.zstdDecompressSync(buf);
   }
 
   // ---------------------------------------------------------------------------
@@ -144,7 +155,7 @@ if (typeof globalThis.Bun === "undefined") {
   // Install the Bun global
   // ---------------------------------------------------------------------------
 
-  (globalThis as any).Bun = {
+  (globalThis as { Bun?: unknown }).Bun = {
     serve,
     zstdCompressSync,
     zstdDecompressSync,

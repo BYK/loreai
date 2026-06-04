@@ -9,7 +9,7 @@
  * gateway via the REST API. No local gateway startup is needed.
  */
 import { createInterface } from "node:readline";
-import { resolve } from "path";
+import { resolve } from "node:path";
 import {
   conversationImport,
   config as loreConfig,
@@ -17,12 +17,10 @@ import {
   setLastImportAt,
   load,
 } from "@loreai/core";
-import { loadConfig } from "../config";
 import { createGatewayLLMClient } from "../llm-adapter";
 import { resolveAuth } from "../auth";
 import { exportLoreFile } from "@loreai/core";
 import { startGateway, type StartOptions } from "./start";
-import { safeExit } from "./exit";
 import {
   getRemoteUrl,
   projectQueryParams,
@@ -67,7 +65,7 @@ async function confirm(message: string, defaultYes = true): Promise<boolean> {
 // ---------------------------------------------------------------------------
 
 export async function commandImport(
-  args: string[],
+  _args: string[],
   flags: Record<string, unknown>,
 ): Promise<void> {
   // Parse flags
@@ -233,7 +231,7 @@ export async function commandImport(
 
   // Import always runs locally — reading local agent history files.
   const startOpts: StartOptions = { quiet: true, local: true };
-  const { config, port, owned, shutdown } = await startGateway(startOpts);
+  const { config, owned, shutdown } = await startGateway(startOpts);
   const cfg = loreConfig();
   const defaultModel = cfg.model ?? {
     providerID: "anthropic",
@@ -249,7 +247,7 @@ export async function commandImport(
     let totalCreated = 0;
     let totalUpdated = 0;
     let totalDeleted = 0;
-    let totalChunks = 0;
+    let _totalChunks = 0;
     let totalFailed = 0;
 
     for (const result of results) {
@@ -301,7 +299,7 @@ export async function commandImport(
       totalCreated += extractResult.created;
       totalUpdated += extractResult.updated;
       totalDeleted += extractResult.deleted;
-      totalChunks += extractResult.chunksProcessed;
+      _totalChunks += extractResult.chunksProcessed;
       totalFailed += extractResult.chunksFailed;
     }
 
@@ -347,7 +345,7 @@ async function importRemote(
   let totalCreated = 0;
   let totalUpdated = 0;
   let totalDeleted = 0;
-  let totalChunks = 0;
+  let _totalChunks = 0;
   let totalFailed = 0;
 
   for (const result of results) {
@@ -440,7 +438,7 @@ async function importRemote(
     totalCreated += extractResult.created;
     totalUpdated += extractResult.updated;
     totalDeleted += extractResult.deleted;
-    totalChunks += extractResult.chunksProcessed;
+    _totalChunks += extractResult.chunksProcessed;
     totalFailed += extractResult.chunksFailed;
   }
 

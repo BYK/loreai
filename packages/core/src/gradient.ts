@@ -1,12 +1,4 @@
-import type {
-  LoreMessage,
-  LorePart,
-  LoreMessageWithParts,
-  LoreToolPart,
-  LoreTextPart,
-  LoreToolState,
-  LoreToolStateCompleted,
-} from "./types";
+import type { LorePart, LoreMessageWithParts } from "./types";
 import { isTextPart, isReasoningPart, isToolPart } from "./types";
 import {
   db,
@@ -491,7 +483,7 @@ export function getLastTurnAt(sessionID: string): number {
  */
 export function consumeCameOutOfIdle(sessionID: string): boolean {
   const state = sessionStates.get(sessionID);
-  if (!state || !state.cameOutOfIdle) return false;
+  if (!state?.cameOutOfIdle) return false;
   state.cameOutOfIdle = false;
   return true;
 }
@@ -859,7 +851,7 @@ function stripSystemReminders(text: string): string {
       const inner = match.match(
         /The user sent the following message:\n([\s\S]*?)\n\nPlease address/,
       );
-      return inner ? inner[1].trim() + "\n" : "";
+      return inner ? `${inner[1].trim()}\n` : "";
     })
     .replace(/\n{3,}/g, "\n\n")
     .trim();
@@ -969,7 +961,7 @@ type ReadRange = {
 /** Extract file path from a tool's input JSON.
  *  Handles common formats: {"path": "/foo.ts"}, {"filePath": "/foo.ts"},
  *  and plain text fallback. */
-function extractFilePath(input: string): string | undefined {
+function _extractFilePath(input: string): string | undefined {
   try {
     const parsed = JSON.parse(input);
     return parsed.path || parsed.filePath || parsed.file;
@@ -1262,7 +1254,7 @@ function stripToolOutputs(parts: LorePart[]): LorePart[] {
   });
 }
 
-function stripToTextOnly(parts: LorePart[]): LorePart[] {
+function _stripToTextOnly(parts: LorePart[]): LorePart[] {
   const stripped = parts
     .filter(isTextPart)
     .map((p) => ({
@@ -1475,20 +1467,20 @@ function distilledPrefixCached(
         prefixCache.lastDistillationID);
 
   if (cacheValid) {
-    if (prefixCache!.lastDistillationID === lastRow.id) {
+    if (prefixCache?.lastDistillationID === lastRow.id) {
       // No new rows — return cached prefix as-is (byte-identical for prompt cache)
       return {
-        messages: prefixCache!.prefixMessages,
-        tokens: prefixCache!.prefixTokens,
+        messages: prefixCache?.prefixMessages,
+        tokens: prefixCache?.prefixTokens,
       };
     }
 
     // New rows appended — render only the delta and append to cached text
-    const newRows = distillations.slice(prefixCache!.rowCount);
+    const newRows = distillations.slice(prefixCache?.rowCount);
     const deltaText = formatDistillations(newRows);
 
     if (deltaText) {
-      const fullText = prefixCache!.cachedText + "\n\n" + deltaText;
+      const fullText = `${prefixCache?.cachedText}\n\n${deltaText}`;
       const messages = buildPrefixMessages(fullText);
       const tokens = messages.reduce((sum, m) => sum + estimateMessage(m), 0);
       sessState.prefixCache = {
@@ -1613,7 +1605,7 @@ function tryFitStable(input: {
   const cacheValid =
     rawWindowCache !== null && rawWindowCache.sessionID === input.sessionID;
 
-  if (cacheValid) {
+  if (cacheValid && rawWindowCache) {
     // Compute the pinned index from the stored raw count + new message growth.
     // newMessages = messages appended since pin creation (typically 2 per turn).
     // The pinned window grows to include them: pinnedRawCount + newMessages.
@@ -1621,9 +1613,9 @@ function tryFitStable(input: {
     // old messages) because the offset is relative to the tail.
     const newMessages = Math.max(
       0,
-      input.messages.length - rawWindowCache!.pinnedTotalCount,
+      input.messages.length - rawWindowCache.pinnedTotalCount,
     );
-    const windowSize = rawWindowCache!.pinnedRawCount + newMessages;
+    const windowSize = rawWindowCache.pinnedRawCount + newMessages;
     const pinnedIdx = Math.max(0, input.messages.length - windowSize);
 
     // Ensure the pinned window starts with a user message when a prefix is
@@ -1654,7 +1646,7 @@ function tryFitStable(input: {
     // the pin was created — the budget shrank due to overhead drift, not because
     // the context limit changed.
     const highWaterBudget = Math.max(
-      rawWindowCache!.pinnedBudget,
+      rawWindowCache.pinnedBudget,
       input.rawBudget,
     );
     const effectiveBudget = highWaterBudget * 1.15;
@@ -1662,9 +1654,9 @@ function tryFitStable(input: {
       // Pinned window still fits within the hysteresis margin of the high-water
       // budget. Re-pin at the current budget when the old hysteresis is exceeded
       // so that next turn's check uses a fresh baseline.
-      if (pinnedTokens > rawWindowCache!.pinnedBudget * 1.15) {
+      if (pinnedTokens > rawWindowCache.pinnedBudget * 1.15) {
         input.sessState.rawWindowCache = {
-          ...rawWindowCache!,
+          ...rawWindowCache,
           pinnedRawCount: pinnedWindow.length,
           pinnedTotalCount: input.messages.length,
           pinnedBudget: input.rawBudget,
@@ -1687,7 +1679,7 @@ function tryFitStable(input: {
     // Pinned window is too large for both budgets — fall through to rescan.
     log.info(
       `pin-overflow: session=${input.sessionID} pinnedTokens=${pinnedTokens} ` +
-        `pinnedBudget=${rawWindowCache!.pinnedBudget} effectiveBudget=${Math.round(effectiveBudget)} ` +
+        `pinnedBudget=${rawWindowCache?.pinnedBudget} effectiveBudget=${Math.round(effectiveBudget)} ` +
         `currentRawBudget=${input.rawBudget} windowSize=${pinnedWindow.length}`,
     );
   }
@@ -2144,14 +2136,14 @@ function transformInner(input: {
       });
     }
 
-    if (fitsWithSafetyMargin(result)) {
+    if (result && fitsWithSafetyMargin(result)) {
       // Trigger urgent distillation when: (a) higher stages always need it, or
       // (b) stage 0 with no distillations = first time in gradient mode.
       if (sid && (s > 0 || cached.tokens === 0)) {
         urgentDistillationMap.set(sid, true);
       }
       return {
-        ...result!,
+        ...result,
         layer: stageLayer,
         usable,
         distilledBudget,

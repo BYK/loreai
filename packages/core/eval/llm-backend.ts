@@ -219,7 +219,7 @@ async function promptOpenAI(
 
   // GitHub Models API requires additional headers
   if (config.backend === "github-models") {
-    headers["accept"] = "application/vnd.github+json";
+    headers.accept = "application/vnd.github+json";
     headers["x-github-api-version"] = "2022-11-28";
   }
 

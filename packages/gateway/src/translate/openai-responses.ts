@@ -271,7 +271,7 @@ export function buildOpenAIResponsesUpstreamRequest(
   // Forward auth — Responses API uses Bearer
   const cred = extractAuth(req.rawHeaders);
   if (cred) {
-    headers["Authorization"] = `Bearer ${cred.value}`;
+    headers.Authorization = `Bearer ${cred.value}`;
   }
 
   const body: Record<string, unknown> = {

@@ -110,7 +110,7 @@ function maybeRotate(): void {
   try {
     const stat = statSync(logPath);
     if (stat.size > LOG_MAX_BYTES) {
-      renameSync(logPath, logPath + ".1");
+      renameSync(logPath, `${logPath}.1`);
     }
   } catch {
     // File doesn't exist yet or stat failed — fine

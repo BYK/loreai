@@ -36,7 +36,6 @@ import {
   calibrate,
   getLastTransformedCount,
   getLastTransformEstimate,
-  getLastLayer,
   onIdleResume,
   consumeCameOutOfIdle,
   needsUrgentDistillation,
@@ -90,7 +89,6 @@ import {
   findRotationPredecessor,
 } from "./session";
 import {
-  isCompactionRequest,
   detectCompactionRequest,
   isStructuralCompaction,
   isMetaRequest,
@@ -105,10 +103,7 @@ import {
   parseAnthropicResponseJSON,
   type AnthropicCacheOptions,
 } from "./translate/anthropic";
-import {
-  buildOpenAIUpstreamRequest,
-  buildOpenAIResponse,
-} from "./translate/openai";
+import { buildOpenAIUpstreamRequest } from "./translate/openai";
 import { buildOpenAIResponsesUpstreamRequest } from "./translate/openai-responses";
 import { accumulateResponsesSSEStream } from "./stream/openai-responses";
 import {
@@ -354,7 +349,7 @@ export async function resetPipelineState(): Promise<void> {
     stopIdleScheduler();
     stopIdleScheduler = null;
   }
-  lastSeenSessionModel = null;
+  _lastSeenSessionModel = null;
   resetWorkerModelState();
   resetBackgroundLimiter();
 }
@@ -479,7 +474,7 @@ let stopIdleScheduler: (() => void) | null = null;
 let stopFileWatcher: (() => void) | null = null;
 
 /** Last seen session model ID — used for worker model discovery context. */
-let lastSeenSessionModel: string | null = null;
+let _lastSeenSessionModel: string | null = null;
 
 // ---------------------------------------------------------------------------
 // Model limits — fetched from models.dev, fallback for unknown
@@ -887,9 +882,10 @@ function getLLMClient(config: GatewayConfig): LLMClient {
     // dedicated credential instead of the session's client key. This enables
     // routing workers to a different provider (e.g. MiniMax) while sessions
     // continue using Anthropic. Falls back to session auth when not set.
+    const workerApiKey = config.workerApiKey;
     const getWorkerAuth: (sessionID?: string) => AuthCredential | null =
-      config.workerApiKey
-        ? () => ({ scheme: "api-key", value: config.workerApiKey! })
+      workerApiKey
+        ? () => ({ scheme: "api-key", value: workerApiKey })
         : resolveAuth;
 
     // Worker-specific upstream: when LORE_WORKER_UPSTREAM is set, all worker
@@ -1006,7 +1002,7 @@ export function resolveSessionProjectPath(
     }
 
     sessionState.projectPath = projectPath;
-    sessionState.projectPathProvisional = healed ? false : true;
+    sessionState.projectPathProvisional = !healed;
 
     // Backfill git_remote on the (now confident) project row — idempotent.
     if (effectiveRemote) {
@@ -1271,6 +1267,7 @@ export function extractProjectMarker(
     const match = messageText(messages[i]).match(LORE_PROJECT_MARKER_RE);
     if (match?.[1]) {
       // Strip control characters (same as extractProjectHeader in config.ts)
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional control-character sanitization
       const sanitized = match[1].replace(/[\x00-\x1f\x7f]/g, "").trim();
       if (!sanitized || sanitized.length > MAX_MARKER_PROJECT_PATH_LENGTH)
         return undefined;
@@ -1708,7 +1705,10 @@ function buildStreamingResponse(
 
       try {
         // Parse and forward upstream SSE events
-        const reader = upstreamResponse.body!.getReader();
+        if (!upstreamResponse.body) {
+          throw new Error("Upstream response has no body");
+        }
+        const reader = upstreamResponse.body.getReader();
         activeReader = reader;
 
         // When a warning needs to be prepended to the response, we emit a
@@ -1955,7 +1955,10 @@ function buildStreamingResponse(
               blockOffset: contBlockOffset,
               suppressMessageStart: true,
             });
-            const contReader = followUpResponse.body!.getReader();
+            if (!followUpResponse.body) {
+              throw new Error("Follow-up response has no body");
+            }
+            const contReader = followUpResponse.body.getReader();
             activeReader = contReader;
 
             for await (const {
@@ -2199,11 +2202,14 @@ export function accumulateResponsesNonStreamJSON(
  * Used for Anthropic requests where we need to convert the accumulated
  * response to another format before returning to the client.
  */
-async function accumulateStreamResponse(
+async function _accumulateStreamResponse(
   upstreamResponse: Response,
 ): Promise<GatewayResponse> {
   const accumulator = createStreamAccumulator();
-  const reader = upstreamResponse.body!.getReader();
+  if (!upstreamResponse.body) {
+    throw new Error("Upstream response has no body");
+  }
+  const reader = upstreamResponse.body.getReader();
 
   for await (const { event, data } of parseSSEStream(reader)) {
     accumulator.processEvent(event, data);
@@ -2234,7 +2240,10 @@ async function accumulateNonStreamOpenAIStream(
   let outputTokens = 0;
   let cachedTokens: number | undefined;
 
-  const reader = upstreamResponse.body!.getReader();
+  if (!upstreamResponse.body) {
+    throw new Error("Upstream response has no body");
+  }
+  const reader = upstreamResponse.body.getReader();
 
   for await (const { data } of parseSSEStream(reader)) {
     if (data === "[DONE]") break;
@@ -3410,7 +3419,7 @@ async function handleConversationTurn(
   });
 
   // Track session model for worker model discovery
-  lastSeenSessionModel = req.model;
+  _lastSeenSessionModel = req.model;
 
   // --- Sentry scope enrichment ---
   setSentryRequestContext({
@@ -3702,11 +3711,9 @@ async function handleConversationTurn(
   });
 
   // Drop trailing pure-text assistant messages to prevent prefill errors
-  while (
-    result.messages.length > 0 &&
-    result.messages.at(-1)!.info.role !== "user"
-  ) {
-    const last = result.messages.at(-1)!;
+  for (;;) {
+    const last = result.messages.at(-1);
+    if (!last || last.info.role === "user") break;
     const hasToolParts = last.parts.some((p) => p.type === "tool");
     if (hasToolParts) break;
     result.messages.pop();
@@ -4111,7 +4118,8 @@ async function handleConversationTurn(
 
     while (hasRecallToolUse(currentResp) && recallDepth < MAX_RECALL_DEPTH) {
       recallDepth++;
-      const recallBlock = findRecallToolUse(currentResp)!;
+      const recallBlock = findRecallToolUse(currentResp);
+      if (!recallBlock) break;
       const { result, input } = await executeRecall(
         recallBlock,
         sessionState.projectPath,
@@ -4165,18 +4173,18 @@ async function handleConversationTurn(
         result,
         recallBlock,
       );
-      let followUpResponse: Response;
-      let followUpProtocol: "anthropic" | "openai" | "openai-responses";
-      ({ response: followUpResponse, effectiveProtocol: followUpProtocol } =
-        await forwardToUpstream(
-          followUp,
-          config,
-          undefined,
-          // Disable conversation caching on follow-up: the appended
-          // recall result makes the prefix diverge from the next real turn,
-          // so the cache write would be wasted money.
-          { ...cacheOptions, cacheConversation: false },
-        ));
+      const {
+        response: followUpResponse,
+        effectiveProtocol: followUpProtocol,
+      } = await forwardToUpstream(
+        followUp,
+        config,
+        undefined,
+        // Disable conversation caching on follow-up: the appended
+        // recall result makes the prefix diverge from the next real turn,
+        // so the cache write would be wasted money.
+        { ...cacheOptions, cacheConversation: false },
+      );
 
       if (!followUpResponse.ok) {
         const errorBody = await followUpResponse.text();
@@ -4476,13 +4484,13 @@ export function removeOrphanedToolResults(
 ): void {
   // --- Pass 1: Remove orphaned tool_result blocks (tool_result → tool_use) ---
   for (let i = 0; i < messages.length; i++) {
-    const msg = messages[i]!;
-    if (msg.role !== "user") continue;
+    const msg = messages[i];
+    if (msg?.role !== "user") continue;
     if (!msg.content.some((b) => b.type === "tool_result")) continue;
 
     // Collect tool_use IDs from the preceding assistant message
-    const prev =
-      i > 0 && messages[i - 1]!.role === "assistant" ? messages[i - 1]! : null;
+    const prevMsg = i > 0 ? messages[i - 1] : undefined;
+    const prev = prevMsg?.role === "assistant" ? prevMsg : null;
     const toolUseIds = new Set(
       (prev?.content ?? [])
         .filter((b): b is GatewayToolUseBlock => b.type === "tool_use")
@@ -4515,15 +4523,13 @@ export function removeOrphanedToolResults(
   // after". This catches edge cases where gradient eviction or back-to-back
   // assistants leave tool_use blocks without matching results (#424).
   for (let i = 0; i < messages.length; i++) {
-    const msg = messages[i]!;
-    if (msg.role !== "assistant") continue;
+    const msg = messages[i];
+    if (msg?.role !== "assistant") continue;
     if (!msg.content.some((b) => b.type === "tool_use")) continue;
 
     // Collect tool_result IDs from the following user message
-    const next =
-      i + 1 < messages.length && messages[i + 1]!.role === "user"
-        ? messages[i + 1]!
-        : null;
+    const nextMsg = i + 1 < messages.length ? messages[i + 1] : undefined;
+    const next = nextMsg?.role === "user" ? nextMsg : null;
     const toolResultIds = new Set(
       (next?.content ?? [])
         .filter((b): b is GatewayToolResultBlock => b.type === "tool_result")

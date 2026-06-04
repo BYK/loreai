@@ -35,6 +35,13 @@ import type {
   GatewayMessage,
 } from "../src/translate/types";
 
+// Minimal view of an OpenAI upstream message used in assertions below.
+type OpenAIUpstreamMessage = {
+  role: string;
+  content?: unknown;
+  tool_call_id?: string;
+};
+
 // ---------------------------------------------------------------------------
 // Fixture helpers
 // ---------------------------------------------------------------------------
@@ -185,11 +192,13 @@ describe("loreMessagesToGateway — tool_result reconstruction", () => {
     const result = loreMessagesToGateway(messages);
 
     // Assistant should have text + tool_use
-    expect(result[1]!.role).toBe("assistant");
-    expect(result[1]!.content).toHaveLength(2);
-    expect(result[1]!.content[0]!.type).toBe("text");
-    expect(result[1]!.content[1]!.type).toBe("tool_use");
-    const toolUse = result[1]!.content[1]! as {
+    expect(result[1]?.role).toBe("assistant");
+    expect(result[1]?.content).toHaveLength(2);
+    expect(result[1]?.content[0]?.type).toBe("text");
+    expect(result[1]?.content[1]?.type).toBe("tool_use");
+    const toolUseBlock = result[1]?.content[1];
+    if (!toolUseBlock) throw new Error("expected tool_use block");
+    const toolUse = toolUseBlock as {
       type: "tool_use";
       id: string;
       name: string;
@@ -199,10 +208,12 @@ describe("loreMessagesToGateway — tool_result reconstruction", () => {
     expect(toolUse.name).toBe("bash");
 
     // User message should have reconstructed tool_result prepended before text
-    expect(result[2]!.role).toBe("user");
-    expect(result[2]!.content).toHaveLength(2);
-    expect(result[2]!.content[0]!.type).toBe("tool_result");
-    const toolResult = result[2]!.content[0]! as {
+    expect(result[2]?.role).toBe("user");
+    expect(result[2]?.content).toHaveLength(2);
+    expect(result[2]?.content[0]?.type).toBe("tool_result");
+    const toolResultBlock = result[2]?.content[0];
+    if (!toolResultBlock) throw new Error("expected tool_result block");
+    const toolResult = toolResultBlock as {
       type: "tool_result";
       toolUseId: string;
       content: GatewayContentBlock[];
@@ -211,7 +222,7 @@ describe("loreMessagesToGateway — tool_result reconstruction", () => {
     expect(toolResult.content).toEqual([
       { type: "text", text: "file1.ts\nfile2.ts" },
     ]);
-    expect(result[2]!.content[1]!.type).toBe("text");
+    expect(result[2]?.content[1]?.type).toBe("text");
   });
 
   test("reconstructs tool_result with is_error from error tool part", () => {
@@ -231,7 +242,9 @@ describe("loreMessagesToGateway — tool_result reconstruction", () => {
     const result = loreMessagesToGateway(messages);
 
     // User message should have error tool_result
-    const toolResult = result[2]!.content[0]! as {
+    const toolResultBlock = result[2]?.content[0];
+    if (!toolResultBlock) throw new Error("expected tool_result block");
+    const toolResult = toolResultBlock as {
       type: "tool_result";
       toolUseId: string;
       content: GatewayContentBlock[];
@@ -258,16 +271,20 @@ describe("loreMessagesToGateway — tool_result reconstruction", () => {
     const result = loreMessagesToGateway(messages);
 
     // User message should have 2 tool_results + 1 text
-    expect(result[2]!.content).toHaveLength(3);
-    expect(result[2]!.content[0]!.type).toBe("tool_result");
-    expect(result[2]!.content[1]!.type).toBe("tool_result");
-    expect(result[2]!.content[2]!.type).toBe("text");
+    expect(result[2]?.content).toHaveLength(3);
+    expect(result[2]?.content[0]?.type).toBe("tool_result");
+    expect(result[2]?.content[1]?.type).toBe("tool_result");
+    expect(result[2]?.content[2]?.type).toBe("text");
 
-    const tr1 = result[2]!.content[0]! as {
+    const tr1Block = result[2]?.content[0];
+    if (!tr1Block) throw new Error("expected first tool_result block");
+    const tr1 = tr1Block as {
       toolUseId: string;
       content: GatewayContentBlock[];
     };
-    const tr2 = result[2]!.content[1]! as {
+    const tr2Block = result[2]?.content[1];
+    if (!tr2Block) throw new Error("expected second tool_result block");
+    const tr2 = tr2Block as {
       toolUseId: string;
       content: GatewayContentBlock[];
     };
@@ -289,12 +306,12 @@ describe("loreMessagesToGateway — tool_result reconstruction", () => {
     const result = loreMessagesToGateway(messages);
 
     // Assistant should have tool_use
-    expect(result[1]!.content).toHaveLength(1);
-    expect(result[1]!.content[0]!.type).toBe("tool_use");
+    expect(result[1]?.content).toHaveLength(1);
+    expect(result[1]?.content[0]?.type).toBe("tool_use");
 
     // User should NOT have a tool_result (pending = no result yet)
-    expect(result[2]!.content).toHaveLength(1);
-    expect(result[2]!.content[0]!.type).toBe("text");
+    expect(result[2]?.content).toHaveLength(1);
+    expect(result[2]?.content[0]?.type).toBe("text");
   });
 
   test("residual tool:'result' parts on user messages are still handled gracefully", () => {
@@ -329,7 +346,7 @@ describe("loreMessagesToGateway — tool_result reconstruction", () => {
     // completed part) PLUS the residual tool_result (from the result part).
     // Both reference the same toolUseId — that's harmless (removeOrphanedToolResults
     // would catch mismatches).
-    const userContent = result[2]!.content;
+    const userContent = result[2]?.content;
     const toolResults = userContent.filter((b) => b.type === "tool_result");
     expect(toolResults.length).toBeGreaterThanOrEqual(1);
   });
@@ -344,12 +361,12 @@ describe("loreMessagesToGateway — tool_result reconstruction", () => {
     const result = loreMessagesToGateway(messages);
 
     expect(result).toHaveLength(3);
-    expect(result[0]!.content).toHaveLength(1);
-    expect(result[0]!.content[0]!.type).toBe("text");
-    expect(result[1]!.content).toHaveLength(1);
-    expect(result[1]!.content[0]!.type).toBe("text");
-    expect(result[2]!.content).toHaveLength(1);
-    expect(result[2]!.content[0]!.type).toBe("text");
+    expect(result[0]?.content).toHaveLength(1);
+    expect(result[0]?.content[0]?.type).toBe("text");
+    expect(result[1]?.content).toHaveLength(1);
+    expect(result[1]?.content[0]?.type).toBe("text");
+    expect(result[2]?.content).toHaveLength(1);
+    expect(result[2]?.content[0]?.type).toBe("text");
   });
 });
 
@@ -388,8 +405,8 @@ describe("removeOrphanedToolResults", () => {
     removeOrphanedToolResults(messages);
 
     // tool_result should be removed, text preserved
-    expect(messages[2]!.content).toHaveLength(1);
-    expect(messages[2]!.content[0]!.type).toBe("text");
+    expect(messages[2]?.content).toHaveLength(1);
+    expect(messages[2]?.content[0]?.type).toBe("text");
   });
 
   test("keeps tool_result that matches tool_use on preceding assistant", () => {
@@ -418,8 +435,8 @@ describe("removeOrphanedToolResults", () => {
     removeOrphanedToolResults(messages);
 
     // tool_result should be preserved (matching tool_use exists)
-    expect(messages[1]!.content).toHaveLength(1);
-    expect(messages[1]!.content[0]!.type).toBe("tool_result");
+    expect(messages[1]?.content).toHaveLength(1);
+    expect(messages[1]?.content[0]?.type).toBe("tool_result");
   });
 
   test("removes only the orphaned tool_result, keeps matched ones", () => {
@@ -453,12 +470,12 @@ describe("removeOrphanedToolResults", () => {
 
     removeOrphanedToolResults(messages);
 
-    expect(messages[1]!.content).toHaveLength(2);
-    expect(messages[1]!.content[0]!.type).toBe("tool_result");
-    expect((messages[1]!.content[0]! as { toolUseId: string }).toolUseId).toBe(
+    expect(messages[1]?.content).toHaveLength(2);
+    expect(messages[1]?.content[0]?.type).toBe("tool_result");
+    expect((messages[1]?.content[0] as { toolUseId: string }).toolUseId).toBe(
       "toolu_match",
     );
-    expect(messages[1]!.content[1]!.type).toBe("text");
+    expect(messages[1]?.content[1]?.type).toBe("text");
   });
 
   test("replaces empty user message with placeholder text after removing all tool_results", () => {
@@ -489,9 +506,9 @@ describe("removeOrphanedToolResults", () => {
 
     removeOrphanedToolResults(messages);
 
-    expect(messages[1]!.content).toHaveLength(1);
-    expect(messages[1]!.content[0]!.type).toBe("text");
-    expect((messages[1]!.content[0]! as { text: string }).text).toBe(
+    expect(messages[1]?.content).toHaveLength(1);
+    expect(messages[1]?.content[0]?.type).toBe("text");
+    expect((messages[1]?.content[0] as { text: string }).text).toBe(
       "[tool results provided]",
     );
   });
@@ -515,9 +532,9 @@ describe("removeOrphanedToolResults", () => {
 
     removeOrphanedToolResults(messages);
 
-    expect(messages[0]!.content).toHaveLength(1);
-    expect(messages[0]!.content[0]!.type).toBe("text");
-    expect((messages[0]!.content[0]! as { text: string }).text).toBe(
+    expect(messages[0]?.content).toHaveLength(1);
+    expect(messages[0]?.content[0]?.type).toBe("text");
+    expect((messages[0]?.content[0] as { text: string }).text).toBe(
       "[tool results provided]",
     );
   });
@@ -570,7 +587,7 @@ describe("end-to-end: gradient eviction doesn't produce orphaned tool_result", (
         if (block.type === "tool_result") {
           // If there IS a tool_result, it must match a tool_use on the preceding msg
           const idx = result.indexOf(msg);
-          const prev = idx > 0 ? result[idx - 1]! : null;
+          const prev = idx > 0 ? result[idx - 1] : null;
           const toolUseIds = new Set(
             (prev?.content ?? [])
               .filter((b) => b.type === "tool_use")
@@ -599,8 +616,8 @@ describe("end-to-end: gradient eviction doesn't produce orphaned tool_result", (
     removeOrphanedToolResults(result);
 
     // Validate tool pairing: tool_use on assistant[1], tool_result on user[2]
-    const assistantContent = result[1]!.content;
-    const userContent = result[2]!.content;
+    const assistantContent = result[1]?.content;
+    const userContent = result[2]?.content;
 
     const toolUse = assistantContent.find((b) => b.type === "tool_use") as {
       type: "tool_use";
@@ -656,11 +673,11 @@ test("BUG-006: OpenAI translator preserves tool_result as role:tool message", ()
   ]);
 
   const body = buildOpenAIUpstreamRequest(req, "https://api.openai.com")
-    .body as { messages: any[] };
-  const toolMsg = body.messages.find((m: any) => m.role === "tool");
+    .body as { messages: OpenAIUpstreamMessage[] };
+  const toolMsg = body.messages.find((m) => m.role === "tool");
   expect(toolMsg).toBeDefined();
-  expect(toolMsg.tool_call_id).toBe("call_123");
-  expect(toolMsg.content).toBe("the result");
+  expect(toolMsg?.tool_call_id).toBe("call_123");
+  expect(toolMsg?.content).toBe("the result");
 });
 
 test("BUG-006: mixed text + tool_result in same message emits both", () => {
@@ -679,14 +696,14 @@ test("BUG-006: mixed text + tool_result in same message emits both", () => {
   ]);
 
   const body = buildOpenAIUpstreamRequest(req, "https://api.openai.com")
-    .body as { messages: any[] };
+    .body as { messages: OpenAIUpstreamMessage[] };
   // Should have system + tool + user messages
-  const toolMsg = body.messages.find((m: any) => m.role === "tool");
-  const userMsg = body.messages.find((m: any) => m.role === "user");
+  const toolMsg = body.messages.find((m) => m.role === "tool");
+  const userMsg = body.messages.find((m) => m.role === "user");
   expect(toolMsg).toBeDefined();
-  expect(toolMsg.tool_call_id).toBe("call_A");
+  expect(toolMsg?.tool_call_id).toBe("call_A");
   expect(userMsg).toBeDefined();
-  expect(userMsg.content).toBe("Please continue");
+  expect(userMsg?.content).toBe("Please continue");
 });
 
 test("BUG-006: multiple tool_results in one message are all preserved", () => {
@@ -714,13 +731,13 @@ test("BUG-006: multiple tool_results in one message are all preserved", () => {
   ]);
 
   const body = buildOpenAIUpstreamRequest(req, "https://api.openai.com")
-    .body as { messages: any[] };
-  const toolMsgs = body.messages.filter((m: any) => m.role === "tool");
+    .body as { messages: OpenAIUpstreamMessage[] };
+  const toolMsgs = body.messages.filter((m) => m.role === "tool");
   expect(toolMsgs).toHaveLength(3);
-  expect(toolMsgs[0].tool_call_id).toBe("call_1");
-  expect(toolMsgs[1].tool_call_id).toBe("call_2");
-  expect(toolMsgs[2].tool_call_id).toBe("call_3");
-  expect(toolMsgs[2].content).toBe(""); // empty content preserved
+  expect(toolMsgs[0]?.tool_call_id).toBe("call_1");
+  expect(toolMsgs[1]?.tool_call_id).toBe("call_2");
+  expect(toolMsgs[2]?.tool_call_id).toBe("call_3");
+  expect(toolMsgs[2]?.content).toBe(""); // empty content preserved
 });
 
 // ---------------------------------------------------------------------------
@@ -837,13 +854,14 @@ describe("removeOrphanedToolResults — tool_use→tool_result (pass 2, #424)", 
     removeOrphanedToolResults(messages);
 
     const assistant = messages[1];
+    if (!assistant) throw new Error("expected assistant message");
     // toolu_001 kept (has matching result), toolu_002 removed
     expect(assistant.content).toHaveLength(2); // text + toolu_001
     const toolUseBlocks = assistant.content.filter(
       (b) => b.type === "tool_use",
     );
     expect(toolUseBlocks).toHaveLength(1);
-    expect((toolUseBlocks[0] as any).id).toBe("toolu_001");
+    expect((toolUseBlocks[0] as { id: string }).id).toBe("toolu_001");
   });
 
   test("keeps tool_use when following user has matching tool_result", () => {
@@ -903,9 +921,11 @@ describe("removeOrphanedToolResults — tool_use→tool_result (pass 2, #424)", 
     removeOrphanedToolResults(messages);
 
     // The assistant message should have a placeholder instead of being empty
-    expect(messages[1].content).toHaveLength(1);
-    expect(messages[1].content[0].type).toBe("text");
-    expect((messages[1].content[0] as any).text).toBe("[assistant response]");
+    expect(messages[1]?.content).toHaveLength(1);
+    expect(messages[1]?.content[0]?.type).toBe("text");
+    expect((messages[1]?.content[0] as { text: string }).text).toBe(
+      "[assistant response]",
+    );
   });
 });
 

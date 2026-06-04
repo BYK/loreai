@@ -6,7 +6,7 @@
  * Usage:
  *   bun eval/extract_session.ts --session <id-prefix> --out eval/data/sessions/<label>.json [--label <label>]
  */
-import { parseArgs } from "util";
+import { parseArgs } from "node:util";
 import { Database } from "bun:sqlite";
 import { dbPath } from "@loreai/core";
 
@@ -35,7 +35,7 @@ const sessions = d
   .query(
     "SELECT DISTINCT session_id FROM temporal_messages WHERE session_id LIKE ?",
   )
-  .all(values.session + "%") as Array<{ session_id: string }>;
+  .all(`${values.session}%`) as Array<{ session_id: string }>;
 
 if (sessions.length === 0) {
   console.error("No session found matching:", values.session);
@@ -43,7 +43,7 @@ if (sessions.length === 0) {
 }
 if (sessions.length > 1) {
   console.error("Multiple sessions match:");
-  for (const s of sessions) console.error("  " + s.session_id);
+  for (const s of sessions) console.error(`  ${s.session_id}`);
   process.exit(1);
 }
 

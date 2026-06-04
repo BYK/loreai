@@ -12,7 +12,6 @@ import {
   detectAssertions,
   detectToolFailures,
   run,
-  type Distillation,
 } from "../src/distillation";
 import { distillationUser } from "../src/prompt";
 import type * as temporal from "../src/temporal";
@@ -27,7 +26,7 @@ const T = new Date("2026-04-24T09:15:00Z").getTime();
 // between chunks. Tests use this to construct realistic content
 // fixtures without needing a full producer round trip every time.
 function seal(...chunks: string[]): string {
-  return chunks.join("\n" + CHUNK_TERMINATOR);
+  return chunks.join(`\n${CHUNK_TERMINATOR}`);
 }
 
 function msg(
@@ -96,16 +95,14 @@ describe("truncateToolOutputsInContent — single-chunk fast path", () => {
   });
 
   test("annotation includes error signal when payload mentions errors", () => {
-    const output =
-      "x".repeat(3_000) + "\nError: connection refused\n" + "y".repeat(3_000);
+    const output = `${"x".repeat(3_000)}\nError: connection refused\n${"y".repeat(3_000)}`;
     const content = `[tool:grep] ${output}`;
     const result = truncateToolOutputsInContent(content, 2_000);
     expect(result).toContain("contained errors");
   });
 
   test("annotation includes file paths when payload contains them", () => {
-    const output =
-      "matched: src/foo.ts\nmatched: src/bar.ts\n" + "z".repeat(3_000);
+    const output = `matched: src/foo.ts\nmatched: src/bar.ts\n${"z".repeat(3_000)}`;
     const content = `[tool:grep] ${output}`;
     const result = truncateToolOutputsInContent(content, 2_000);
     expect(result).toContain("paths:");
@@ -237,7 +234,7 @@ describe("truncateToolOutputsInContent — perf regression guards", () => {
   });
 
   test("100KB payload WITH '/' completes in <2s via scan limit", () => {
-    const pathological = "x".repeat(50_000) + "/file.ts " + "y".repeat(50_000);
+    const pathological = `${"x".repeat(50_000)}/file.ts ${"y".repeat(50_000)}`;
     const content = `[tool:grep] ${pathological}`;
     const start = performance.now();
     const result = truncateToolOutputsInContent(content, 2_000);
@@ -366,7 +363,7 @@ describe("partsToText + truncateToolOutputsInContent round trip", () => {
       textPart("last"),
     ]);
     // Expect exactly 3 separators for 4 chunks.
-    const separatorCount = content.split("\n" + CHUNK_TERMINATOR).length - 1;
+    const separatorCount = content.split(`\n${CHUNK_TERMINATOR}`).length - 1;
     expect(separatorCount).toBe(3);
   });
 
@@ -382,7 +379,7 @@ describe("partsToText + truncateToolOutputsInContent round trip", () => {
       textPart("Found it."),
     ]);
     // Three chunks → two separators.
-    const separators = content.split("\n" + CHUNK_TERMINATOR);
+    const separators = content.split(`\n${CHUNK_TERMINATOR}`);
     expect(separators).toHaveLength(3);
     // The middle chunk owns the entire adversarial payload — no \x1f leaks
     // into it because partsToText only injects \x1f between chunks.
@@ -586,7 +583,7 @@ describe("loadForSession — archived filter", () => {
     });
     const rows = loadForSession(META_PROJECT, META_SESSION);
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.observations).toBe("live row");
+    expect(rows[0]?.observations).toBe("live row");
   });
 
   test("includes archived rows when includeArchived: true", () => {
@@ -651,17 +648,17 @@ describe("metaDistill — first round (no anchor)", () => {
     });
 
     expect(result).not.toBeNull();
-    expect(result!.observations).toBe("Fresh meta from 3 segments");
+    expect(result?.observations).toBe("Fresh meta from 3 segments");
 
     // No anchor on first run.
     expect(llm.prompts).toHaveLength(1);
-    expect(llm.prompts[0]!.user).not.toContain("<previous-meta-summary>");
+    expect(llm.prompts[0]?.user).not.toContain("<previous-meta-summary>");
     // All 3 gen-0 segments appear in the prompt.
-    expect(llm.prompts[0]!.user).toContain("Segment 1:");
-    expect(llm.prompts[0]!.user).toContain("Segment 2:");
-    expect(llm.prompts[0]!.user).toContain("Segment 3:");
-    expect(llm.prompts[0]!.user).toContain("obs A");
-    expect(llm.prompts[0]!.user).toContain("obs C");
+    expect(llm.prompts[0]?.user).toContain("Segment 1:");
+    expect(llm.prompts[0]?.user).toContain("Segment 2:");
+    expect(llm.prompts[0]?.user).toContain("Segment 3:");
+    expect(llm.prompts[0]?.user).toContain("obs A");
+    expect(llm.prompts[0]?.user).toContain("obs C");
   });
 
   test("returns null when fewer than 3 gen-0 rows exist (no anchor)", async () => {
@@ -723,13 +720,13 @@ describe("metaDistill — first round (no anchor)", () => {
       generation: number;
     }>;
     const byId = Object.fromEntries(archivedRows.map((r) => [r.id, r]));
-    expect(byId[id1]!.archived).toBe(1);
-    expect(byId[id2]!.archived).toBe(1);
-    expect(byId[id3]!.archived).toBe(1);
+    expect(byId[id1]?.archived).toBe(1);
+    expect(byId[id2]?.archived).toBe(1);
+    expect(byId[id3]?.archived).toBe(1);
     // New gen-1 row exists.
     const meta = archivedRows.find((r) => r.generation === 1);
     expect(meta).toBeDefined();
-    expect(meta!.archived).toBe(0);
+    expect(meta?.archived).toBe(0);
   });
 
   test("does NOT archive rows for unrelated sessions / projects", async () => {
@@ -804,9 +801,9 @@ describe("metaDistill — first round (no anchor)", () => {
         "SELECT id, archived FROM distillations WHERE project_id = ? AND session_id = ?",
       )
       .all(pid, META_SESSION) as Array<{ id: string; archived: number }>;
-    expect(rows.find((r) => r.id === id1)!.archived).toBe(0);
-    expect(rows.find((r) => r.id === id2)!.archived).toBe(0);
-    expect(rows.find((r) => r.id === id3)!.archived).toBe(0);
+    expect(rows.find((r) => r.id === id1)?.archived).toBe(0);
+    expect(rows.find((r) => r.id === id2)?.archived).toBe(0);
+    expect(rows.find((r) => r.id === id3)?.archived).toBe(0);
     // No new gen>0 row.
     const metaRows = db()
       .query(
@@ -856,15 +853,15 @@ describe("metaDistill — anchored second round", () => {
     expect(result).not.toBeNull();
     expect(llm.prompts).toHaveLength(1);
     // Anchor block in the user prompt.
-    expect(llm.prompts[0]!.user).toContain("<previous-meta-summary>");
-    expect(llm.prompts[0]!.user).toContain("PRIOR_META_BODY");
-    expect(llm.prompts[0]!.user).toContain("</previous-meta-summary>");
+    expect(llm.prompts[0]?.user).toContain("<previous-meta-summary>");
+    expect(llm.prompts[0]?.user).toContain("PRIOR_META_BODY");
+    expect(llm.prompts[0]?.user).toContain("</previous-meta-summary>");
     // Only the new gen-0 rows appear as segments (1 and 2, not 3).
-    expect(llm.prompts[0]!.user).toContain("Segment 1:");
-    expect(llm.prompts[0]!.user).toContain("Segment 2:");
-    expect(llm.prompts[0]!.user).not.toContain("Segment 3:");
-    expect(llm.prompts[0]!.user).toContain("new obs X");
-    expect(llm.prompts[0]!.user).toContain("new obs Y");
+    expect(llm.prompts[0]?.user).toContain("Segment 1:");
+    expect(llm.prompts[0]?.user).toContain("Segment 2:");
+    expect(llm.prompts[0]?.user).not.toContain("Segment 3:");
+    expect(llm.prompts[0]?.user).toContain("new obs X");
+    expect(llm.prompts[0]?.user).toContain("new obs Y");
   });
 
   test("returns null without LLM call when anchor exists but no new gen-0 rows", async () => {
@@ -911,7 +908,7 @@ describe("metaDistill — anchored second round", () => {
 
     expect(result).not.toBeNull();
     expect(llm.prompts).toHaveLength(1);
-    expect(llm.prompts[0]!.user).toContain("<previous-meta-summary>");
+    expect(llm.prompts[0]?.user).toContain("<previous-meta-summary>");
   });
 
   test("new gen-1+ row stored at maxGen+1 (gen-2 in this case)", async () => {
@@ -944,7 +941,7 @@ describe("metaDistill — anchored second round", () => {
       observations: string;
     }>;
     expect(metaRows.map((r) => r.generation)).toEqual([1, 2]);
-    expect(metaRows[1]!.observations).toBe("updated");
+    expect(metaRows[1]?.observations).toBe("updated");
   });
 });
 
@@ -998,26 +995,26 @@ describe("metaDistill — recentSegmentsToKeep", () => {
     for (let i = 0; i < 3; i++) {
       const row = rows.find((r) => r.id === ids[i]);
       expect(row).toBeDefined();
-      expect(row!.archived).toBe(1);
+      expect(row?.archived).toBe(1);
     }
     // Last 5 gen-0 rows should remain non-archived.
     for (let i = 3; i < 8; i++) {
       const row = rows.find((r) => r.id === ids[i]);
       expect(row).toBeDefined();
-      expect(row!.archived).toBe(0);
+      expect(row?.archived).toBe(0);
     }
     // A new gen-1 meta row should exist.
     const meta = rows.find((r) => r.generation === 1);
     expect(meta).toBeDefined();
-    expect(meta!.archived).toBe(0);
+    expect(meta?.archived).toBe(0);
 
     // Only the first 3 segments should appear in the LLM prompt.
     expect(llm.prompts).toHaveLength(1);
-    expect(llm.prompts[0]!.user).toContain("obs-0");
-    expect(llm.prompts[0]!.user).toContain("obs-1");
-    expect(llm.prompts[0]!.user).toContain("obs-2");
-    expect(llm.prompts[0]!.user).not.toContain("obs-3");
-    expect(llm.prompts[0]!.user).not.toContain("obs-7");
+    expect(llm.prompts[0]?.user).toContain("obs-0");
+    expect(llm.prompts[0]?.user).toContain("obs-1");
+    expect(llm.prompts[0]?.user).toContain("obs-2");
+    expect(llm.prompts[0]?.user).not.toContain("obs-3");
+    expect(llm.prompts[0]?.user).not.toContain("obs-7");
   });
 
   test("does not re-trigger consolidation when kept segments exist with a prior meta", async () => {
@@ -1123,18 +1120,18 @@ describe("metaDistill — recentSegmentsToKeep", () => {
       .all(pid, META_SESSION) as Array<{ id: string; archived: number }>;
 
     // First 2 archived.
-    expect(gen0Rows.find((r) => r.id === ids[0])!.archived).toBe(1);
-    expect(gen0Rows.find((r) => r.id === ids[1])!.archived).toBe(1);
+    expect(gen0Rows.find((r) => r.id === ids[0])?.archived).toBe(1);
+    expect(gen0Rows.find((r) => r.id === ids[1])?.archived).toBe(1);
     // Last 5 remain non-archived.
     for (let i = 2; i < 7; i++) {
-      expect(gen0Rows.find((r) => r.id === ids[i])!.archived).toBe(0);
+      expect(gen0Rows.find((r) => r.id === ids[i])?.archived).toBe(0);
     }
 
     // Prompt should contain anchor + only the first 2 segments.
-    expect(llm.prompts[0]!.user).toContain("<previous-meta-summary>");
-    expect(llm.prompts[0]!.user).toContain("anchored-obs-0");
-    expect(llm.prompts[0]!.user).toContain("anchored-obs-1");
-    expect(llm.prompts[0]!.user).not.toContain("anchored-obs-2");
+    expect(llm.prompts[0]?.user).toContain("<previous-meta-summary>");
+    expect(llm.prompts[0]?.user).toContain("anchored-obs-0");
+    expect(llm.prompts[0]?.user).toContain("anchored-obs-1");
+    expect(llm.prompts[0]?.user).not.toContain("anchored-obs-2");
   });
 });
 
@@ -1311,8 +1308,9 @@ describe("context health columns", () => {
       .run(id, pid, HEALTH_SESSION, "old-style observation", Date.now());
 
     const rows = loadForSession(HEALTH_PROJECT, HEALTH_SESSION);
-    const row = rows.find((r) => r.id === id)!;
+    const row = rows.find((r) => r.id === id);
     expect(row).toBeDefined();
+    if (!row) throw new Error("expected row");
     expect(row.r_compression).toBeNull();
     expect(row.c_norm).toBeNull();
   });
@@ -1336,8 +1334,9 @@ describe("context health columns", () => {
       );
 
     const rows = loadForSession(HEALTH_PROJECT, HEALTH_SESSION);
-    const row = rows.find((r) => r.id === id)!;
+    const row = rows.find((r) => r.id === id);
     expect(row).toBeDefined();
+    if (!row) throw new Error("expected row");
     expect(row.r_compression).toBeCloseTo(2.45, 5);
     expect(row.c_norm).toBeCloseTo(0.037, 5);
   });
@@ -1543,7 +1542,7 @@ describe("run() expansion guard and tiny-segment handling", () => {
 
   test("expansion guard: barely-smaller output passes through", async () => {
     // Insert 6 messages × 200 tokens = 1200 tokens
-    const ids = insertTemporalMessages(6, 200);
+    const _ids = insertTemporalMessages(6, 200);
 
     // 1199 tokens = 3597 chars → ceil(3597/3) = 1199 < 1200 → stored
     const barelySmaller = "x".repeat(3597);
@@ -1564,7 +1563,7 @@ describe("run() expansion guard and tiny-segment handling", () => {
 
   test("expansion guard: tiny segment (< 100 tokens) allows up to 5x expansion", async () => {
     // Insert 1 message × 80 tokens (tiny segment, above minSegmentTokens=64)
-    const ids = insertTemporalMessages(1, 80);
+    const _ids = insertTemporalMessages(1, 80);
 
     // LLM returns 350 tokens = 1050 chars. Limit is 80 * 5 = 400, so 350 < 400 → stored
     const expandedObs = "x".repeat(1050);
@@ -1603,7 +1602,7 @@ describe("run() expansion guard and tiny-segment handling", () => {
 
   test("expansion guard: small segment (100-499 tokens) allows up to 2x expansion", async () => {
     // Insert 2 messages × 150 tokens = 300 tokens (small segment)
-    const ids = insertTemporalMessages(2, 150);
+    const _ids = insertTemporalMessages(2, 150);
 
     // LLM returns 550 tokens = 1650 chars. Limit is 300 * 2 = 600, so 550 < 600 → stored
     const expandedObs = "x".repeat(1650);
@@ -1649,7 +1648,7 @@ describe("run() expansion guard and tiny-segment handling", () => {
 
     const llm = makeStubLLM("should not be called");
 
-    const result = await run({
+    const _result = await run({
       llm,
       projectPath: RUN_PROJECT,
       sessionID: RUN_SESSION,
@@ -1668,7 +1667,7 @@ describe("run() expansion guard and tiny-segment handling", () => {
 
     const llm = makeStubLLM("should not be called");
 
-    const result = await run({
+    const _result = await run({
       llm,
       projectPath: RUN_PROJECT,
       sessionID: RUN_SESSION,

@@ -36,12 +36,18 @@
     }
   },
   "linter": {
-    "enabled": false,
+    "enabled": true,
     "rules": {
       "recommended": true
     }
   },
   "assist": {
     "enabled": false
-  }
+  },
+  "overrides": [
+    {
+      "includes": ["**/eval/**"],
+      "linter": { "enabled": false }
+    }
+  ]
 }

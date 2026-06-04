@@ -8,7 +8,7 @@
  * Usage:
  *   bun eval/session_eval.ts --data eval/data/coding_session_eval.json --mode all --concurrency 3
  */
-import { parseArgs } from "util";
+import { parseArgs } from "node:util";
 import { Database } from "bun:sqlite";
 import { DISTILLATION_SYSTEM, distillationUser, dbPath } from "@loreai/core";
 
@@ -661,7 +661,7 @@ try {
         tokens: result.tokens,
         cumulative_tokens: q.cumulative_tokens,
       };
-      writer.write(JSON.stringify(entry) + "\n");
+      writer.write(`${JSON.stringify(entry)}\n`);
       writer.flush();
       completed++;
 

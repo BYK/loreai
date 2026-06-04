@@ -41,8 +41,8 @@ function resolveApiKey(): string | null {
   return null;
 }
 
-const API_KEY = resolveApiKey();
-if (!API_KEY) {
+const resolvedApiKey = resolveApiKey();
+if (!resolvedApiKey) {
   console.error(
     "[smoke] ERROR: No Anthropic API key found.\n" +
       "  Set ANTHROPIC_API_KEY env var, or ensure\n" +
@@ -50,6 +50,7 @@ if (!API_KEY) {
   );
   process.exit(1);
 }
+const API_KEY: string = resolvedApiKey;
 
 // ---------------------------------------------------------------------------
 // 1. Configure isolated environment BEFORE any gateway/core imports
@@ -86,7 +87,7 @@ async function sendMessages(body: Record<string, unknown>): Promise<Response> {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      "x-api-key": API_KEY!,
+      "x-api-key": API_KEY,
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify(body),
@@ -134,7 +135,7 @@ async function runTest(name: string, fn: () => Promise<void>): Promise<void> {
   }
 }
 
-function assert(condition: boolean, message: string): void {
+function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
@@ -238,7 +239,7 @@ try {
       parsedMarker !== null,
       `First block should contain [lore:...] marker, got: "${markerText}"`,
     );
-    markerFromTest2 = parsedMarker!;
+    markerFromTest2 = parsedMarker;
 
     // Second block should be actual response text
     const responseBlock = content[1];

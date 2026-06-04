@@ -439,9 +439,9 @@ export function buildAnthropicRequest(
   // the last message. Anthropic's 20-block lookback finds the prior turn's
   // breakpoint, reads the cached prefix, and writes only the new tail.
   if (cache?.cacheConversation && messages.length > 0) {
-    const lastMsg = messages[messages.length - 1]!;
-    if (lastMsg.content.length > 0) {
-      const lastBlock = lastMsg.content[lastMsg.content.length - 1]!;
+    const lastMsg = messages[messages.length - 1];
+    const lastBlock = lastMsg?.content[lastMsg.content.length - 1];
+    if (lastBlock) {
       // Use configured TTL: "1h" for extended cache tier (2× write cost but
       // 12× longer eviction window), bare ephemeral (5m) otherwise.
       (lastBlock as Record<string, unknown>).cache_control =
@@ -464,11 +464,13 @@ export function buildAnthropicRequest(
     // Tool caching: place a 1h breakpoint on the last tool definition.
     // Tool definitions (including our recall tool) are stable across turns.
     if (cache?.cacheTools && tools.length > 0) {
-      const lastTool = tools[tools.length - 1]!;
-      (lastTool as Record<string, unknown>).cache_control = {
-        type: "ephemeral",
-        ttl: "1h",
-      };
+      const lastTool = tools[tools.length - 1];
+      if (lastTool) {
+        (lastTool as Record<string, unknown>).cache_control = {
+          type: "ephemeral",
+          ttl: "1h",
+        };
+      }
     }
 
     body.tools = tools;

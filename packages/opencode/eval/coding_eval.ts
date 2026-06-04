@@ -1,4 +1,4 @@
-import { parseArgs } from "util";
+import { parseArgs } from "node:util";
 import { Database } from "bun:sqlite";
 import { DISTILLATION_SYSTEM, distillationUser, dbPath } from "@loreai/core";
 
@@ -328,7 +328,7 @@ Focus on information that would be helpful for continuing the conversation, incl
 
 Your summary should be comprehensive enough to provide context but concise enough to be quickly understood.`;
 
-async function compactSession(
+async function _compactSession(
   msgs: Array<{ role: string; content: string; created_at: number }>,
 ): Promise<string> {
   // Chunk messages into segments that fit within context (~80K tokens, rough char/4 estimate).
@@ -556,7 +556,7 @@ const sessionCache = new Map<
 
 const sessionIDs = [...new Set(questions.map((q) => q.session_id))];
 purgeEvalMessages(sessionIDs);
-const needDefault = targetMode === "all" || targetMode === "default";
+const _needDefault = targetMode === "all" || targetMode === "default";
 const needLore = targetMode === "all" || targetMode === "lore";
 for (const sid of sessionIDs) {
   console.log(`Loading session ${sid.substring(0, 16)}...`);
@@ -623,11 +623,11 @@ await pool(
       label,
       tokens: result.tokens,
     };
-    writer.write(JSON.stringify(entry) + "\n");
+    writer.write(`${JSON.stringify(entry)}\n`);
     writer.flush();
     completed++;
 
-    const elapsed = (Date.now() - startTime) / 1000;
+    const _elapsed = (Date.now() - startTime) / 1000;
     const icon = label ? "✓" : "✗";
     const t = result.tokens;
     const cacheStr =

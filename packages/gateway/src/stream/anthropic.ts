@@ -53,8 +53,9 @@ export async function* parseSSEStream(
     }
 
     // Process complete events (delimited by blank lines: \n\n)
-    let boundary: number;
-    while ((boundary = buffer.indexOf("\n\n")) !== -1) {
+    for (;;) {
+      const boundary = buffer.indexOf("\n\n");
+      if (boundary === -1) break;
       const block = buffer.slice(0, boundary);
       buffer = buffer.slice(boundary + 2);
 

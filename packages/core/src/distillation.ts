@@ -274,7 +274,7 @@ function formatTime(ms: number): string {
 // over `\n` boundaries which had two ambiguity directions
 // (trailing-text swallow + embedded-envelope fabrication); both are
 // gone for migrated and new rows.
-const CHUNK_SEPARATOR = "\n" + CHUNK_TERMINATOR;
+const CHUNK_SEPARATOR = `\n${CHUNK_TERMINATOR}`;
 
 /**
  * Truncate tool outputs within a `TemporalMessage.content` string (produced
@@ -431,7 +431,7 @@ export function detectAssertions(
   const addAssertion = (rawText: string, createdAt: number): boolean => {
     let text = rawText.trim();
     // Cap length to avoid injecting huge blocks
-    if (text.length > 200) text = text.slice(0, 200) + "…";
+    if (text.length > 200) text = `${text.slice(0, 200)}…`;
 
     const key = text.toLowerCase();
 
@@ -459,11 +459,12 @@ export function detectAssertions(
     let matchedThisMsg = false;
     for (const pattern of ASSERTION_PATTERNS) {
       pattern.lastIndex = 0;
-      let match: RegExpExecArray | null;
-      while ((match = pattern.exec(m.content)) !== null) {
+      let match = pattern.exec(m.content);
+      while (match !== null) {
         // Use the full match as the assertion text (not just capture group)
         matchedThisMsg = true;
         if (addAssertion(match[0], m.created_at)) return results;
+        match = pattern.exec(m.content);
       }
     }
 
@@ -592,7 +593,7 @@ function latestMeta(
        ORDER BY generation DESC, created_at DESC LIMIT 1`,
     )
     .get(pid, sessionID) as { observations: string; generation: number } | null;
-  if (!row || !row.observations) return undefined;
+  if (!row?.observations) return undefined;
   return row;
 }
 

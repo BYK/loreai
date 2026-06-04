@@ -9,18 +9,13 @@
  * Change detection uses SHA-256 content hashes per file — unchanged files are skipped.
  */
 
-import { readdirSync, readFileSync, existsSync, statSync } from "fs";
-import { join, relative, basename } from "path";
+import { readdirSync, readFileSync, existsSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
 import { remark } from "remark";
 import type { Root, Heading, Paragraph, Text } from "mdast";
 import { db, ensureProject } from "./db";
 import { sha256 } from "#db/driver";
-import {
-  ftsQuery,
-  extractTopTerms,
-  EMPTY_QUERY,
-  runRelaxedSearch,
-} from "./search";
+import { extractTopTerms, runRelaxedSearch } from "./search";
 import * as log from "./log";
 import { isHostedMode } from "./hosted";
 
@@ -69,7 +64,7 @@ function paragraphText(node: Paragraph): string {
   const parts: string[] = [];
   for (const child of node.children) {
     if (child.type === "text") parts.push(child.value);
-    else if (child.type === "inlineCode") parts.push("`" + child.value + "`");
+    else if (child.type === "inlineCode") parts.push(`\`${child.value}\``);
     else if ("children" in child) {
       for (const gc of child.children) {
         if ("value" in gc && typeof gc.value === "string") parts.push(gc.value);

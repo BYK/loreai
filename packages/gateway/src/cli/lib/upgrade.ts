@@ -18,7 +18,7 @@
 
 import { chmodSync, statSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { getMeta, setMeta } from "@loreai/core";
 
 import {
@@ -35,10 +35,8 @@ import {
   isNightlyVersion,
   KNOWN_CURL_DIRS,
   releaseLock,
-  replaceBinarySync,
 } from "./binary";
-import { VERSION } from "../version";
-import { attemptDeltaUpgrade, type DeltaResult } from "./delta-upgrade";
+import { attemptDeltaUpgrade } from "./delta-upgrade";
 import { UpgradeError } from "./errors";
 import {
   downloadNightlyBlob,

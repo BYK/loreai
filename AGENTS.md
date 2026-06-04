@@ -147,6 +147,8 @@ recall tool (searchRecall) ----------------> Tool response to agent
 bun install          # install all workspace dependencies
 bun test             # run all tests (uses bunfig.toml preload for test DB isolation)
 bun run typecheck    # typecheck all packages
+bun run lint         # Biome lint + format check (CI-gated); `bun run lint:fix` to autofix
+bun run format       # apply Biome formatting
 bun run build        # build all packages (esbuild bundles)
 ```
 

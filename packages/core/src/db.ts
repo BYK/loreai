@@ -1,6 +1,6 @@
 import { Database } from "#db/driver";
-import { join, dirname } from "path";
-import { mkdirSync } from "fs";
+import { join, dirname } from "node:path";
+import { mkdirSync } from "node:fs";
 import { getGitRemote } from "./git";
 import { dataDir } from "./data-dir";
 
@@ -1938,9 +1938,7 @@ export function saveSessionTracking(
 
   // Update only the specified columns
   db()
-    .query(
-      "UPDATE session_state SET " + sets.join(", ") + " WHERE session_id = ?",
-    )
+    .query(`UPDATE session_state SET ${sets.join(", ")} WHERE session_id = ?`)
     .run(...vals, sessionID);
 }
 

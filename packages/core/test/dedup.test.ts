@@ -1,9 +1,8 @@
 import { describe, test, expect, beforeEach } from "bun:test";
 import { uuidv7 } from "uuidv7";
-import { db, ensureProject, getKV } from "../src/db";
+import { db, ensureProject } from "../src/db";
 import * as ltm from "../src/ltm";
 import { dedupPairKey } from "../src/ltm";
-import * as embedding from "../src/embedding";
 
 const PROJECT = "/test/dedup/project";
 const PROJECT_B = "/test/dedup/project-b";
@@ -117,10 +116,10 @@ describe("dedup — core _dedup()", () => {
 
   test("two entries with identical long titles → one cluster via title overlap", async () => {
     // Titles with enough meaningful words to pass fuzzy dedup
-    const id1 = createEntry({
+    const _id1 = createEntry({
       title: "Cache warming time slot buckets hardcoded values",
     });
-    const id2 = createEntry({
+    const _id2 = createEntry({
       title: "Cache warming time slot buckets hardcoded values duplicate",
     });
 
@@ -201,7 +200,7 @@ describe("dedup — core _dedup()", () => {
     const sim = result.pairSimilarities.get(pk);
     expect(sim).toBeDefined();
     // Identical vectors should have similarity ~1.0
-    expect(sim!).toBeCloseTo(1.0, 2);
+    expect(sim).toBeCloseTo(1.0, 2);
   });
 
   test("embedding-based dedup: high similarity triggers merge", async () => {
@@ -234,13 +233,13 @@ describe("dedup — core _dedup()", () => {
     // A matches B via title overlap, B matches C via title overlap,
     // but A does NOT match C. Star clustering should prevent A and C
     // from being in the same cluster.
-    const idA = createEntry({
+    const _idA = createEntry({
       title: "Gateway recall follow-up causes double cache write problem",
     });
-    const idB = createEntry({
+    const _idB = createEntry({
       title: "Recall follow-up causes double cache write duplication",
     });
-    const idC = createEntry({
+    const _idC = createEntry({
       title: "Double cache write from streaming translator duplication",
     });
 
@@ -533,7 +532,7 @@ describe("dedup — threshold calibration", () => {
     const threshold = ltm.calibrateDedupThreshold(pid);
     expect(threshold).not.toBeNull();
     // Min accepted is 0.93, so threshold should be 0.925
-    expect(threshold!).toBeCloseTo(0.925, 3);
+    expect(threshold).toBeCloseTo(0.925, 3);
   });
 
   test("all-reject: returns null", () => {
@@ -562,8 +561,8 @@ describe("dedup — threshold calibration", () => {
     const threshold = ltm.calibrateDedupThreshold(pid);
     expect(threshold).not.toBeNull();
     // Should be between 0.91 and 0.93 (the gap between reject/accept groups)
-    expect(threshold!).toBeGreaterThanOrEqual(0.91);
-    expect(threshold!).toBeLessThanOrEqual(0.93);
+    expect(threshold).toBeGreaterThanOrEqual(0.91);
+    expect(threshold).toBeLessThanOrEqual(0.93);
   });
 
   test("tight clustering (all between 0.93-0.94) still works", () => {
@@ -581,8 +580,8 @@ describe("dedup — threshold calibration", () => {
     const threshold = ltm.calibrateDedupThreshold(pid);
     expect(threshold).not.toBeNull();
     // Should find the boundary between 0.939 and 0.940
-    expect(threshold!).toBeGreaterThanOrEqual(0.939);
-    expect(threshold!).toBeLessThanOrEqual(0.941);
+    expect(threshold).toBeGreaterThanOrEqual(0.939);
+    expect(threshold).toBeLessThanOrEqual(0.941);
   });
 
   test("clamps to [0.85, 0.98]", () => {
@@ -596,7 +595,7 @@ describe("dedup — threshold calibration", () => {
 
     const threshold = ltm.calibrateDedupThreshold(pid);
     expect(threshold).not.toBeNull();
-    expect(threshold!).toBeGreaterThanOrEqual(0.85);
+    expect(threshold).toBeGreaterThanOrEqual(0.85);
   });
 
   test("overlapping accept/reject ranges: handles noisy feedback gracefully", () => {
@@ -622,8 +621,8 @@ describe("dedup — threshold calibration", () => {
     const threshold = ltm.calibrateDedupThreshold(pid);
     expect(threshold).not.toBeNull();
     // Should still find something in the 0.90-0.93 range despite noise
-    expect(threshold!).toBeGreaterThanOrEqual(0.9);
-    expect(threshold!).toBeLessThanOrEqual(0.95);
+    expect(threshold).toBeGreaterThanOrEqual(0.9);
+    expect(threshold).toBeLessThanOrEqual(0.95);
   });
 
   test("tie-break: prefers higher threshold (conservative)", () => {
@@ -642,7 +641,7 @@ describe("dedup — threshold calibration", () => {
     const threshold = ltm.calibrateDedupThreshold(pid);
     expect(threshold).not.toBeNull();
     // Only one midpoint possible: (0.90 + 0.95) / 2 = 0.925
-    expect(threshold!).toBeCloseTo(0.925, 3);
+    expect(threshold).toBeCloseTo(0.925, 3);
   });
 });
 
@@ -816,7 +815,7 @@ describe("dedup — DB migration", () => {
       )
       .get() as { name: string } | null;
     expect(row).not.toBeNull();
-    expect(row!.name).toBe("dedup_feedback");
+    expect(row?.name).toBe("dedup_feedback");
   });
 
   test("dedup_feedback has expected columns", () => {

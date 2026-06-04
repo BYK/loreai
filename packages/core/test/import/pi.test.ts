@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { join } from "path";
+import { join } from "node:path";
 
 import "../../src/import/providers/pi";
 import { getProvider } from "../../src/import/providers";
@@ -7,7 +7,8 @@ import { getProvider } from "../../src/import/providers";
 const FIXTURES = join(import.meta.dir, "fixtures");
 
 describe("Pi provider", () => {
-  const provider = getProvider("pi")!;
+  const provider = getProvider("pi");
+  if (!provider) throw new Error("pi provider not registered");
 
   test("provider is registered with correct metadata", () => {
     expect(provider).toBeDefined();

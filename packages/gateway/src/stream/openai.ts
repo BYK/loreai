@@ -124,7 +124,10 @@ export function translateAnthropicStreamToOpenAI(
       }
 
       try {
-        const reader = anthropicResponse.body!.getReader();
+        if (!anthropicResponse.body) {
+          throw new Error("Anthropic response has no body");
+        }
+        const reader = anthropicResponse.body.getReader();
 
         for await (const { event, data } of parseSSEStream(reader)) {
           if (cancelled) break;

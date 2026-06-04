@@ -146,9 +146,9 @@ describe("tool-trace", () => {
         (s) => s.tool === "edit" && s.error_type === "edit_noop",
       );
       expect(edit).toBeDefined();
-      expect(edit!.failure_count).toBe(3);
-      expect(edit!.session_count).toBe(2);
-      expect(edit!.sample_message).toBe("oldString not found");
+      expect(edit?.failure_count).toBe(3);
+      expect(edit?.session_count).toBe(2);
+      expect(edit?.sample_message).toBe("oldString not found");
     });
 
     test("toolFailureStats respects minSessions", () => {

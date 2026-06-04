@@ -9,9 +9,9 @@
  *
  * The CONTINUE_GLOBAL_DIR env var overrides the default ~/.continue path.
  */
-import { readdirSync, readFileSync, existsSync } from "fs";
-import { join } from "path";
-import { homedir } from "os";
+import { readdirSync, readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import type {
   AgentHistoryProvider,
   ConversationChunk,
@@ -83,7 +83,7 @@ function estimateTokens(text: string): number {
 
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
-  return text.slice(0, max) + "...";
+  return `${text.slice(0, max)}...`;
 }
 
 /** Get the Continue global directory. */
@@ -195,7 +195,7 @@ const continueProvider: AgentHistoryProvider = {
 
       // Load the full session to count messages
       const session = loadSession(meta.sessionId);
-      if (!session || !session.history || session.history.length < 3) continue;
+      if (!session?.history || session.history.length < 3) continue;
 
       const ts = new Date(meta.dateCreated).getTime();
       const dateStr = new Date(ts).toISOString().slice(0, 10);
@@ -265,7 +265,7 @@ const continueProvider: AgentHistoryProvider = {
 
     for (const sessionId of sessionIds) {
       const session = loadSession(sessionId);
-      if (!session || !session.history) continue;
+      if (!session?.history) continue;
 
       const textMessages: { text: string }[] = [];
       for (const item of session.history) {

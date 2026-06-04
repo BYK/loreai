@@ -35,9 +35,29 @@ import {
   selectDistillations,
 } from "../src/gradient";
 import type { LoreMessage, LorePart, LoreMessageWithParts } from "../src/types";
-import { isToolPart } from "../src/types";
+import { isToolPart, isTextPart } from "../src/types";
 
 const PROJECT = "/test/gradient/project";
+
+// Test-local view of a tool part's state covering all status variants. Tests
+// assert across statuses (pending/running/completed/error) so we widen to a
+// single shape rather than narrowing per-status everywhere.
+type TestToolState = {
+  status: string;
+  input?: unknown;
+  output?: string;
+  error?: string;
+  metadata?: unknown;
+  time?: { start: number; end?: number };
+};
+
+/** Narrow a LorePart to a tool part and expose its state for assertions. */
+function toolStateOf(part: LorePart | undefined): TestToolState {
+  if (!part || !isToolPart(part)) {
+    throw new Error("expected tool part");
+  }
+  return part.state as unknown as TestToolState;
+}
 
 function makeMsg(
   id: string,
@@ -860,7 +880,7 @@ describe("gradient — current turn protection (agentic tool-call loop)", () => 
       makeStep(
         `step-${i}`,
         "cur-user",
-        "tool result " + "Y".repeat(380),
+        `tool result ${"Y".repeat(380)}`,
         SESSION,
       ),
     );
@@ -1177,8 +1197,10 @@ describe("gradient — sanitizeToolParts (orphaned tool_use fix)", () => {
     // Layer 0 for small session — messages should be the same reference
     expect(result.layer).toBe(0);
     // The tool part should still be completed
-    const toolPart = result.messages[1]!.parts.find((p) => p.type === "tool")!;
-    expect((toolPart as any).state.status).toBe("completed");
+    const toolState = toolStateOf(
+      result.messages[1]?.parts.find((p) => p.type === "tool"),
+    );
+    expect(toolState.status).toBe("completed");
   });
 
   test("pending tool part is converted to error state", () => {
@@ -1193,17 +1215,17 @@ describe("gradient — sanitizeToolParts (orphaned tool_use fix)", () => {
       sessionID: SESSION,
     });
 
-    const toolPart = result.messages[1]!.parts.find(
-      (p) => p.type === "tool",
-    )! as any;
-    expect(toolPart.state.status).toBe("error");
-    expect(toolPart.state.error).toBe(
+    const toolState = toolStateOf(
+      result.messages[1]?.parts.find((p) => p.type === "tool"),
+    );
+    expect(toolState.status).toBe("error");
+    expect(toolState.error).toBe(
       "[tool execution interrupted — session recovered]",
     );
-    expect(toolPart.state.input).toEqual({ command: "ls" });
+    expect(toolState.input).toEqual({ command: "ls" });
     // Pending has no time field — both start and end should be fabricated
-    expect(typeof toolPart.state.time.start).toBe("number");
-    expect(typeof toolPart.state.time.end).toBe("number");
+    expect(typeof toolState.time?.start).toBe("number");
+    expect(typeof toolState.time?.end).toBe("number");
   });
 
   test("running tool part is converted to error state, preserving time.start", () => {
@@ -1218,21 +1240,20 @@ describe("gradient — sanitizeToolParts (orphaned tool_use fix)", () => {
       sessionID: SESSION,
     });
 
-    const toolPart = result.messages[1]!.parts.find(
-      (p) => p.type === "tool",
-    )! as any;
-    expect(toolPart.state.status).toBe("error");
-    expect(toolPart.state.error).toBe(
+    const toolState = toolStateOf(
+      result.messages[1]?.parts.find((p) => p.type === "tool"),
+    );
+    expect(toolState.status).toBe("error");
+    expect(toolState.error).toBe(
       "[tool execution interrupted — session recovered]",
     );
-    expect(toolPart.state.input).toEqual({ command: "build" });
+    expect(toolState.input).toEqual({ command: "build" });
     // Running has time.start — should be preserved
-    expect(toolPart.state.time.start).toBeLessThan(Date.now());
-    expect(toolPart.state.time.end).toBeGreaterThanOrEqual(
-      toolPart.state.time.start,
-    );
+    const startTime = toolState.time?.start ?? Number.NaN;
+    expect(startTime).toBeLessThan(Date.now());
+    expect(toolState.time?.end).toBeGreaterThanOrEqual(startTime);
     // Metadata from running state should be carried over
-    expect(toolPart.state.metadata).toEqual({ cwd: "/test" });
+    expect(toolState.metadata).toEqual({ cwd: "/test" });
   });
 
   test("mixed parts: text + completed tool + pending tool — only pending converted", () => {
@@ -1297,22 +1318,22 @@ describe("gradient — sanitizeToolParts (orphaned tool_use fix)", () => {
       sessionID: SESSION,
     });
 
-    const parts = result.messages[1]!.parts;
+    const parts = result.messages[1]?.parts ?? [];
     // Text part unchanged
-    const textPart = parts.find((p) => p.type === "text")!;
-    expect((textPart as any).text).toBe("Let me run two commands");
+    const textPart = parts.find(isTextPart);
+    expect(textPart?.text).toBe("Let me run two commands");
     // Completed tool part unchanged
-    const completedTool = parts.find(
-      (p) => p.type === "tool" && (p as any).callID === "call-completed",
-    )! as any;
-    expect(completedTool.state.status).toBe("completed");
-    expect(completedTool.state.output).toBe("file1.ts file2.ts");
+    const completedState = toolStateOf(
+      parts.find((p) => isToolPart(p) && p.callID === "call-completed"),
+    );
+    expect(completedState.status).toBe("completed");
+    expect(completedState.output).toBe("file1.ts file2.ts");
     // Pending tool part → error
-    const pendingTool = parts.find(
-      (p) => p.type === "tool" && (p as any).callID === "call-pending",
-    )! as any;
-    expect(pendingTool.state.status).toBe("error");
-    expect(pendingTool.state.error).toBe(
+    const pendingState = toolStateOf(
+      parts.find((p) => isToolPart(p) && p.callID === "call-pending"),
+    );
+    expect(pendingState.status).toBe("error");
+    expect(pendingState.error).toBe(
       "[tool execution interrupted — session recovered]",
     );
   });
@@ -1331,8 +1352,8 @@ describe("gradient — sanitizeToolParts (orphaned tool_use fix)", () => {
     });
 
     // User message should be the same object reference (not cloned)
-    expect(result.messages[0]!.info.id).toBe("san-u5");
-    expect(result.messages[0]!.parts[0]!.type).toBe("text");
+    expect(result.messages[0]?.info.id).toBe("san-u5");
+    expect(result.messages[0]?.parts[0]?.type).toBe("text");
   });
 
   test("multiple messages: only affected messages are cloned", () => {
@@ -1350,16 +1371,18 @@ describe("gradient — sanitizeToolParts (orphaned tool_use fix)", () => {
     });
 
     // Completed tool message untouched
-    const completedMsg = result.messages.find((m) => m.info.id === "san-a6")!;
-    const completedTool = completedMsg.parts.find(
-      (p) => p.type === "tool",
-    )! as any;
-    expect(completedTool.state.status).toBe("completed");
+    const completedMsg = result.messages.find((m) => m.info.id === "san-a6");
+    const completedState = toolStateOf(
+      completedMsg?.parts.find((p) => p.type === "tool"),
+    );
+    expect(completedState.status).toBe("completed");
 
     // Pending tool message converted
-    const pendingMsg = result.messages.find((m) => m.info.id === "san-a7")!;
-    const pendingTool = pendingMsg.parts.find((p) => p.type === "tool")! as any;
-    expect(pendingTool.state.status).toBe("error");
+    const pendingMsg = result.messages.find((m) => m.info.id === "san-a7");
+    const pendingState = toolStateOf(
+      pendingMsg?.parts.find((p) => p.type === "tool"),
+    );
+    expect(pendingState.status).toBe("error");
   });
 });
 
@@ -1405,19 +1428,19 @@ describe("gradient — layer 0 trailing assistant message drop (index.ts prefill
     // result.messages is the same reference as the input array at layer 0.
     // The hook's drop loop mutates this in place. Simulate what the hook does:
     while (result.messages.length > 0) {
-      const last = result.messages[result.messages.length - 1]!;
-      if (last.info.role === "user") break;
+      const last = result.messages[result.messages.length - 1];
+      if (!last || last.info.role === "user") break;
       const hasToolParts = last.parts.some((p) => p.type === "tool");
       if (hasToolParts) break;
       result.messages.pop();
     }
 
     // After drop: last message must be user-role
-    const afterLast = result.messages[result.messages.length - 1]!;
-    expect(afterLast.info.role).toBe("user");
-    expect(afterLast.info.id).toBe("l0-u2");
+    const afterLast = result.messages[result.messages.length - 1];
+    expect(afterLast?.info.role).toBe("user");
+    expect(afterLast?.info.id).toBe("l0-u2");
     // And since result.messages === msgs at layer 0, msgs is also trimmed
-    expect(msgs[msgs.length - 1]!.info.id).toBe("l0-u2");
+    expect(msgs[msgs.length - 1]?.info.id).toBe("l0-u2");
   });
 
   test("tool-bearing trailing assistant message at layer 0 is preserved (no infinite tool loop)", () => {
@@ -1440,8 +1463,8 @@ describe("gradient — layer 0 trailing assistant message drop (index.ts prefill
     // Simulate the hook's drop loop — must stop immediately at tool-bearing message
     const beforeLen = result.messages.length;
     while (result.messages.length > 0) {
-      const last = result.messages[result.messages.length - 1]!;
-      if (last.info.role === "user") break;
+      const last = result.messages[result.messages.length - 1];
+      if (!last || last.info.role === "user") break;
       const hasToolParts = last.parts.some((p) => p.type === "tool");
       if (hasToolParts) break;
       result.messages.pop();
@@ -1449,7 +1472,7 @@ describe("gradient — layer 0 trailing assistant message drop (index.ts prefill
 
     // Nothing dropped — length unchanged
     expect(result.messages.length).toBe(beforeLen);
-    expect(result.messages[result.messages.length - 1]!.info.id).toBe("l0t-a1");
+    expect(result.messages[result.messages.length - 1]?.info.id).toBe("l0t-a1");
   });
 });
 
@@ -1535,9 +1558,10 @@ describe("gradient — tool-bearing steps survive compression (index.ts trailing
     expect(result.layer).toBeGreaterThanOrEqual(1);
 
     // The last step in the gradient output should retain its tool part
-    const lastInResult = result.messages[result.messages.length - 1]!;
-    expect(lastInResult.info.id).toBe("tp-step-last");
-    const toolParts = lastInResult.parts.filter((p) => p.type === "tool");
+    const lastInResult = result.messages[result.messages.length - 1];
+    expect(lastInResult?.info.id).toBe("tp-step-last");
+    const toolParts =
+      lastInResult?.parts.filter((p) => p.type === "tool") ?? [];
     expect(toolParts.length).toBeGreaterThan(0);
   });
 });
@@ -1673,7 +1697,7 @@ describe("gradient — calibration oscillation fix", () => {
     const newMsg = makeMsg(
       "id-new-step",
       "assistant",
-      "new work: " + "D".repeat(100),
+      `new work: ${"D".repeat(100)}`,
       SESSION,
     );
     const msgs2 = [...msgs, newMsg];
@@ -1857,8 +1881,8 @@ describe("deduplicateToolOutputs", () => {
   });
 
   test("deduplicates same-file reads with different content", () => {
-    const oldContent = "old version " + "y".repeat(800);
-    const newContent = "new version " + "z".repeat(800);
+    const oldContent = `old version ${"y".repeat(800)}`;
+    const newContent = `new version ${"z".repeat(800)}`;
     const msgs = [
       makeMsg("u1", "user", "read file"),
       makeMsgWithTool(
@@ -1966,7 +1990,7 @@ describe("deduplicateToolOutputs", () => {
         "assistant",
         "read_file",
         '{"path":"b.ts"}',
-        "different " + LARGE_CONTENT,
+        `different ${LARGE_CONTENT}`,
       ),
       makeMsg("u3", "user", "done"), // current turn
     ];
@@ -1976,7 +2000,7 @@ describe("deduplicateToolOutputs", () => {
   });
 
   test("deduplicates non-read tools by exact content hash", () => {
-    const bashOutput = "npm test\n" + "PASS ".repeat(200); // large enough
+    const bashOutput = `npm test\n${"PASS ".repeat(200)}`; // large enough
     const msgs = [
       makeMsg("u1", "user", "run tests"),
       makeMsgWithTool(
@@ -2000,7 +2024,9 @@ describe("deduplicateToolOutputs", () => {
     const result = deduplicateToolOutputs(msgs, 4);
 
     // First bash (index 1) should be deduped — exact same output
-    const firstOut = getToolOutput(result[1].parts[0])!;
+    const firstPart = result[1]?.parts[0];
+    if (!firstPart) throw new Error("expected first tool part");
+    const firstOut = getToolOutput(firstPart);
     expect(firstOut).toContain("duplicate output");
     expect(firstOut).toContain("bash");
 
@@ -2189,8 +2215,8 @@ describe("deduplicateToolOutputs — range-aware", () => {
   });
 
   test("full-file read covers earlier ranged read", () => {
-    const rangedContent = "lines 10-50 content " + "y".repeat(800);
-    const fullContent = "full file content " + "z".repeat(800);
+    const rangedContent = `lines 10-50 content ${"y".repeat(800)}`;
+    const fullContent = `full file content ${"z".repeat(800)}`;
     const msgs = [
       makeMsg("u1", "user", "read part of file"),
       makeMsgWithTool(
@@ -2221,8 +2247,8 @@ describe("deduplicateToolOutputs — range-aware", () => {
   });
 
   test("ranged read does NOT cover earlier full-file read", () => {
-    const fullContent = "full file content " + "y".repeat(800);
-    const rangedContent = "lines 10-50 content " + "z".repeat(800);
+    const fullContent = `full file content ${"y".repeat(800)}`;
+    const rangedContent = `lines 10-50 content ${"z".repeat(800)}`;
     const msgs = [
       makeMsg("u1", "user", "read full file"),
       makeMsgWithTool(
@@ -2250,8 +2276,8 @@ describe("deduplicateToolOutputs — range-aware", () => {
   });
 
   test("wider range covers narrower range", () => {
-    const narrowContent = "narrow range " + "a".repeat(800);
-    const wideContent = "wide range " + "b".repeat(800);
+    const narrowContent = `narrow range ${"a".repeat(800)}`;
+    const wideContent = `wide range ${"b".repeat(800)}`;
     const msgs = [
       makeMsg("u1", "user", "read narrow"),
       makeMsgWithTool(
@@ -2281,8 +2307,8 @@ describe("deduplicateToolOutputs — range-aware", () => {
   });
 
   test("narrower range does NOT cover wider range", () => {
-    const wideContent = "wide range " + "a".repeat(800);
-    const narrowContent = "narrow range " + "b".repeat(800);
+    const wideContent = `wide range ${"a".repeat(800)}`;
+    const narrowContent = `narrow range ${"b".repeat(800)}`;
     const msgs = [
       makeMsg("u1", "user", "read wide"),
       makeMsgWithTool(
@@ -2310,8 +2336,8 @@ describe("deduplicateToolOutputs — range-aware", () => {
   });
 
   test("non-overlapping ranges both kept", () => {
-    const contentA = "range A " + "a".repeat(800);
-    const contentB = "range B " + "b".repeat(800);
+    const contentA = `range A ${"a".repeat(800)}`;
+    const contentB = `range B ${"b".repeat(800)}`;
     const msgs = [
       makeMsg("u1", "user", "read top"),
       makeMsgWithTool(
@@ -2338,7 +2364,7 @@ describe("deduplicateToolOutputs — range-aware", () => {
   });
 
   test("annotation includes range info for ranged reads", () => {
-    const content = "ranged " + "x".repeat(800);
+    const content = `ranged ${"x".repeat(800)}`;
     const msgs = [
       makeMsg("u1", "user", "read part"),
       makeMsgWithTool(
@@ -2354,18 +2380,20 @@ describe("deduplicateToolOutputs — range-aware", () => {
         "assistant",
         "read",
         '{"path":"src/foo.ts"}',
-        "full " + "y".repeat(800),
+        `full ${"y".repeat(800)}`,
       ),
       makeMsg("u3", "user", "done"),
     ];
     const result = deduplicateToolOutputs(msgs, 4);
-    const annotation = getToolOutput(result[1].parts[0])!;
+    const annotationPart = result[1]?.parts[0];
+    if (!annotationPart) throw new Error("expected annotation tool part");
+    const annotation = getToolOutput(annotationPart);
     expect(annotation).toContain("lines 10-49");
     expect(annotation).toContain("src/foo.ts");
   });
 
   test("content-hash dedup still works for non-read tools", () => {
-    const bashOutput = "npm test\n" + "PASS ".repeat(200);
+    const bashOutput = `npm test\n${"PASS ".repeat(200)}`;
     const msgs = [
       makeMsg("u1", "user", "run tests"),
       makeMsgWithTool(
@@ -2391,7 +2419,7 @@ describe("deduplicateToolOutputs — range-aware", () => {
   });
 
   test("same exact ranged reads deduplicates", () => {
-    const content = "exact range " + "x".repeat(800);
+    const content = `exact range ${"x".repeat(800)}`;
     const msgs = [
       makeMsg("u1", "user", "read"),
       makeMsgWithTool(
@@ -2419,7 +2447,7 @@ describe("deduplicateToolOutputs — range-aware", () => {
   });
 
   test("read_file tool name works with ranges", () => {
-    const content = "read_file content " + "x".repeat(800);
+    const content = `read_file content ${"x".repeat(800)}`;
     const msgs = [
       makeMsg("u1", "user", "read"),
       makeMsgWithTool(
@@ -2435,7 +2463,7 @@ describe("deduplicateToolOutputs — range-aware", () => {
         "assistant",
         "read_file",
         '{"filePath":"src/bar.ts"}',
-        "full " + "y".repeat(800),
+        `full ${"y".repeat(800)}`,
       ),
       makeMsg("u3", "user", "done"),
     ];
@@ -2462,7 +2490,7 @@ describe("onIdleResume", () => {
     expect(result.triggered).toBe(false);
     const state = inspectSessionState(SID);
     expect(state).not.toBeNull();
-    expect(state!.cameOutOfIdle).toBe(false);
+    expect(state?.cameOutOfIdle).toBe(false);
   });
 
   test("under threshold — does not trigger or reset caches", () => {
@@ -2502,7 +2530,7 @@ describe("onIdleResume", () => {
     const result = onIdleResume(SID, ONE_HOUR_MS, now);
     expect(result.triggered).toBe(false);
     const state = inspectSessionState(SID);
-    expect(state!.cameOutOfIdle).toBe(false);
+    expect(state?.cameOutOfIdle).toBe(false);
   });
 
   test("over threshold — triggers, resets caches, sets cameOutOfIdle", () => {
@@ -2520,9 +2548,9 @@ describe("onIdleResume", () => {
       expect(result.idleMs).toBe(2 * ONE_HOUR_MS);
     }
     const state = inspectSessionState(SID);
-    expect(state!.hasPrefixCache).toBe(false);
-    expect(state!.hasRawWindowCache).toBe(false);
-    expect(state!.cameOutOfIdle).toBe(true);
+    expect(state?.hasPrefixCache).toBe(false);
+    expect(state?.hasRawWindowCache).toBe(false);
+    expect(state?.cameOutOfIdle).toBe(true);
   });
 
   test("threshold of 0 disables the feature entirely", () => {
@@ -2531,17 +2559,17 @@ describe("onIdleResume", () => {
     const result = onIdleResume(SID, 0, now);
     expect(result.triggered).toBe(false);
     const state = inspectSessionState(SID);
-    expect(state!.cameOutOfIdle).toBe(false);
+    expect(state?.cameOutOfIdle).toBe(false);
   });
 
   test("consumeCameOutOfIdle is one-shot", () => {
     const now = 1_000_000_000_000;
     setLastTurnAtForTest(SID, now - 2 * ONE_HOUR_MS);
     onIdleResume(SID, ONE_HOUR_MS, now);
-    expect(inspectSessionState(SID)!.cameOutOfIdle).toBe(true);
+    expect(inspectSessionState(SID)?.cameOutOfIdle).toBe(true);
 
     expect(consumeCameOutOfIdle(SID)).toBe(true);
-    expect(inspectSessionState(SID)!.cameOutOfIdle).toBe(false);
+    expect(inspectSessionState(SID)?.cameOutOfIdle).toBe(false);
 
     // Second call returns false — flag was cleared.
     expect(consumeCameOutOfIdle(SID)).toBe(false);
@@ -2580,7 +2608,7 @@ describe("onIdleResume", () => {
       sessionID: SID,
     });
     const state = inspectSessionState(SID);
-    expect(state!.lastTurnAt).toBeGreaterThanOrEqual(before);
+    expect(state?.lastTurnAt).toBeGreaterThanOrEqual(before);
     // Without a real idle gap, onIdleResume should not trigger.
     const result = onIdleResume(SID, ONE_HOUR_MS);
     expect(result.triggered).toBe(false);
@@ -2598,12 +2626,12 @@ describe("onIdleResume", () => {
 
     const state = inspectSessionState(SID);
     // Housekeeping still happens:
-    expect(state!.hasPrefixCache).toBe(false);
-    expect(state!.hasRawWindowCache).toBe(false);
-    expect(state!.cameOutOfIdle).toBe(true);
-    expect(state!.distillationSnapshot).toBeNull();
+    expect(state?.hasPrefixCache).toBe(false);
+    expect(state?.hasRawWindowCache).toBe(false);
+    expect(state?.cameOutOfIdle).toBe(true);
+    expect(state?.distillationSnapshot).toBeNull();
     // But compaction is skipped:
-    expect(state!.postIdleCompact).toBe(false);
+    expect(state?.postIdleCompact).toBe(false);
   });
 
   test("skipCompact=false (default) sets postIdleCompact when idle", () => {
@@ -2613,8 +2641,8 @@ describe("onIdleResume", () => {
     const result = onIdleResume(SID, ONE_HOUR_MS, now, /* skipCompact */ false);
     expect(result.triggered).toBe(true);
     const state = inspectSessionState(SID);
-    expect(state!.postIdleCompact).toBe(true);
-    expect(state!.cameOutOfIdle).toBe(true);
+    expect(state?.postIdleCompact).toBe(true);
+    expect(state?.cameOutOfIdle).toBe(true);
   });
 });
 
@@ -2684,7 +2712,7 @@ describe("reasoning preservation (F-REASONING-AUDIT mini-pin)", () => {
       | { type: "reasoning"; text: string }
       | undefined;
     expect(reasoningPart).toBeDefined();
-    expect(reasoningPart!.text).toBe(
+    expect(reasoningPart?.text).toBe(
       "I should consider the trade-offs carefully here.",
     );
   });
@@ -2971,7 +2999,7 @@ describe("gradient — sanitizeToolParts determinism", () => {
       .flatMap((m) => m.parts)
       .find((p) => isToolPart(p));
     expect(toolPart1).toBeDefined();
-    expect(toolPart1!.state.status).toBe("error");
+    expect(toolPart1?.state.status).toBe("error");
 
     // Second call with the exact same messages (simulating OpenCode's cached array)
     const result2 = transform({
@@ -2983,11 +3011,11 @@ describe("gradient — sanitizeToolParts determinism", () => {
       .flatMap((m) => m.parts)
       .find((p) => isToolPart(p));
     expect(toolPart2).toBeDefined();
-    expect(toolPart2!.state.status).toBe("error");
+    expect(toolPart2?.state.status).toBe("error");
 
     // The serialized bytes must be identical — this is what Anthropic's cache sees
-    const json1 = JSON.stringify(toolPart1!.state);
-    const json2 = JSON.stringify(toolPart2!.state);
+    const json1 = JSON.stringify(toolPart1?.state);
+    const json2 = JSON.stringify(toolPart2?.state);
     expect(json2).toBe(json1);
   });
 });
@@ -3072,36 +3100,36 @@ describe("tier-based context management", () => {
       // 100K write, 0 read, 3 uncached → total=100_003, ratio≈100% → bust
       // (inputTokens is the uncached portion from Anthropic API, typically small)
       recordCacheUsage(100_000, 0, 3, SID);
-      expect(inspectSessionState(SID)!.consecutiveBusts).toBe(1);
+      expect(inspectSessionState(SID)?.consecutiveBusts).toBe(1);
 
       // 80K write, 20K read, 5 uncached → total=100_005, ratio=80% → bust
       recordCacheUsage(80_000, 20_000, 5, SID);
-      expect(inspectSessionState(SID)!.consecutiveBusts).toBe(2);
+      expect(inspectSessionState(SID)?.consecutiveBusts).toBe(2);
     });
 
     test("uses sum of write + read + uncached for bust ratio", () => {
       // 60K write, 100K read, 3 uncached → total=160_003, ratio=37.5% → NOT a bust
       recordCacheUsage(60_000, 100_000, 3, SID);
-      expect(inspectSessionState(SID)!.consecutiveBusts).toBe(0);
+      expect(inspectSessionState(SID)?.consecutiveBusts).toBe(0);
     });
 
     test("resets consecutive busts on cache-hit turn (<50% writes)", () => {
       recordCacheUsage(100_000, 0, 3, SID);
       recordCacheUsage(100_000, 0, 3, SID);
-      expect(inspectSessionState(SID)!.consecutiveBusts).toBe(2);
+      expect(inspectSessionState(SID)?.consecutiveBusts).toBe(2);
 
       // Good cache hit — resets counter
       recordCacheUsage(1_000, 90_000, 3, SID);
-      expect(inspectSessionState(SID)!.consecutiveBusts).toBe(0);
+      expect(inspectSessionState(SID)?.consecutiveBusts).toBe(0);
     });
 
     test("zero-usage turn does not change consecutive bust count", () => {
       recordCacheUsage(100_000, 0, 3, SID);
-      expect(inspectSessionState(SID)!.consecutiveBusts).toBe(1);
+      expect(inspectSessionState(SID)?.consecutiveBusts).toBe(1);
 
       // Zero usage — no change
       recordCacheUsage(0, 0, 0, SID);
-      expect(inspectSessionState(SID)!.consecutiveBusts).toBe(1);
+      expect(inspectSessionState(SID)?.consecutiveBusts).toBe(1);
     });
   });
 
@@ -3115,13 +3143,13 @@ describe("tier-based context management", () => {
     test("tracks consecutive turns with zero cache writes", () => {
       // MiniMax-like: cacheWrite=0, cacheRead varies, inputTokens non-zero
       recordCacheUsage(0, 5_000, 50_000, SID);
-      expect(inspectSessionState(SID)!.zeroCacheWriteTurns).toBe(1);
+      expect(inspectSessionState(SID)?.zeroCacheWriteTurns).toBe(1);
 
       recordCacheUsage(0, 8_000, 45_000, SID);
-      expect(inspectSessionState(SID)!.zeroCacheWriteTurns).toBe(2);
+      expect(inspectSessionState(SID)?.zeroCacheWriteTurns).toBe(2);
 
       recordCacheUsage(0, 10_000, 40_000, SID);
-      expect(inspectSessionState(SID)!.zeroCacheWriteTurns).toBe(3);
+      expect(inspectSessionState(SID)?.zeroCacheWriteTurns).toBe(3);
     });
 
     test("resets counter on non-zero cache write", () => {
@@ -3129,47 +3157,47 @@ describe("tier-based context management", () => {
       recordCacheUsage(0, 5_000, 50_000, SID);
       recordCacheUsage(0, 5_000, 50_000, SID);
       recordCacheUsage(0, 5_000, 50_000, SID);
-      expect(inspectSessionState(SID)!.zeroCacheWriteTurns).toBe(3);
+      expect(inspectSessionState(SID)?.zeroCacheWriteTurns).toBe(3);
 
       // Non-zero cache write resets
       recordCacheUsage(1_000, 40_000, 5_000, SID);
-      expect(inspectSessionState(SID)!.zeroCacheWriteTurns).toBe(0);
+      expect(inspectSessionState(SID)?.zeroCacheWriteTurns).toBe(0);
     });
 
     test("resets consecutiveBusts when crossing threshold", () => {
       // Accumulate busts under false pricing assumptions
       recordCacheUsage(100_000, 0, 3, SID);
       recordCacheUsage(100_000, 0, 3, SID);
-      expect(inspectSessionState(SID)!.consecutiveBusts).toBe(2);
+      expect(inspectSessionState(SID)?.consecutiveBusts).toBe(2);
 
       // Now simulate MiniMax: 3 turns with zero cache writes
       // Turn 1: bustRatio=0 → resets consecutiveBusts to 0
       recordCacheUsage(0, 0, 50_000, SID);
-      expect(inspectSessionState(SID)!.consecutiveBusts).toBe(0);
-      expect(inspectSessionState(SID)!.zeroCacheWriteTurns).toBe(1);
+      expect(inspectSessionState(SID)?.consecutiveBusts).toBe(0);
+      expect(inspectSessionState(SID)?.zeroCacheWriteTurns).toBe(1);
 
       // Accumulate busts again
       recordCacheUsage(100_000, 0, 3, SID);
-      expect(inspectSessionState(SID)!.consecutiveBusts).toBe(1);
+      expect(inspectSessionState(SID)?.consecutiveBusts).toBe(1);
       // zeroCacheWriteTurns resets because cacheWrite > 0
-      expect(inspectSessionState(SID)!.zeroCacheWriteTurns).toBe(0);
+      expect(inspectSessionState(SID)?.zeroCacheWriteTurns).toBe(0);
 
       // Now 3 consecutive zero-write turns
       recordCacheUsage(0, 0, 50_000, SID);
       recordCacheUsage(0, 0, 50_000, SID);
       recordCacheUsage(0, 0, 50_000, SID);
       // Threshold crossed at turn 3 → busts reset to 0
-      expect(inspectSessionState(SID)!.zeroCacheWriteTurns).toBe(3);
-      expect(inspectSessionState(SID)!.consecutiveBusts).toBe(0);
+      expect(inspectSessionState(SID)?.zeroCacheWriteTurns).toBe(3);
+      expect(inspectSessionState(SID)?.consecutiveBusts).toBe(0);
     });
 
     test("zero-usage turn does not affect zeroCacheWriteTurns", () => {
       recordCacheUsage(0, 5_000, 50_000, SID);
-      expect(inspectSessionState(SID)!.zeroCacheWriteTurns).toBe(1);
+      expect(inspectSessionState(SID)?.zeroCacheWriteTurns).toBe(1);
 
       // total=0 → entire block skipped
       recordCacheUsage(0, 0, 0, SID);
-      expect(inspectSessionState(SID)!.zeroCacheWriteTurns).toBe(1);
+      expect(inspectSessionState(SID)?.zeroCacheWriteTurns).toBe(1);
     });
   });
 
@@ -3391,8 +3419,8 @@ describe("selectDistillations", () => {
     expect(selected.some((d) => d.id === "g0-0")).toBe(false);
     // Result should be chronologically sorted.
     for (let i = 1; i < selected.length; i++) {
-      expect(selected[i]!.created_at).toBeGreaterThanOrEqual(
-        selected[i - 1]!.created_at,
+      expect(selected[i]?.created_at).toBeGreaterThanOrEqual(
+        selected[i - 1]?.created_at,
       );
     }
   });
@@ -3434,8 +3462,8 @@ describe("selectDistillations", () => {
 
     const selected = selectDistillations(all, 2);
     expect(selected).toHaveLength(2);
-    expect(selected[0]!.id).toBe("meta");
-    expect(selected[1]!.id).toBe("g0-4"); // most recent gen-0
+    expect(selected[0]?.id).toBe("meta");
+    expect(selected[1]?.id).toBe("g0-4"); // most recent gen-0
   });
 });
 

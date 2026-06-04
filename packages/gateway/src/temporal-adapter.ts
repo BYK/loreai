@@ -9,7 +9,7 @@
  * conversation to merge matching tool_result blocks from subsequent user
  * messages into "completed" state.
  */
-import { createHash, randomUUID } from "crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { isToolPart } from "@loreai/core";
 import type {
   LoreAssistantMessage,

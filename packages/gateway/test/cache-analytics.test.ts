@@ -427,7 +427,7 @@ describe("analyzeCacheTurn", () => {
 
     analyzeCacheTurn(analytics, body, makeUsage());
 
-    expect(analytics.lastRequestBody!.length).toBeLessThan(body.length);
+    expect(analytics.lastRequestBody?.length).toBeLessThan(body.length);
     expect(analytics.lastRequestBodyLength).toBe(body.length);
   });
 

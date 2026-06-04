@@ -74,7 +74,7 @@ if (!sessions.length) {
 // Real approach: use the same on-demand distillation from the eval, but store
 // the results in the lore DB.
 
-import { parseArgs } from "util";
+import { parseArgs } from "node:util";
 
 const { values } = parseArgs({
   args: Bun.argv.slice(2),

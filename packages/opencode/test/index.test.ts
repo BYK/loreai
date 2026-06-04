@@ -29,17 +29,18 @@ function createMockClient() {
 async function initPlugin() {
   const client = createMockClient();
   const tmpDir = `${import.meta.dir}/__tmp_plugin_${Date.now()}__`;
-  const { mkdirSync, rmSync } = await import("fs");
+  const { mkdirSync, rmSync } = await import("node:fs");
   mkdirSync(tmpDir, { recursive: true });
 
+  type PluginInput = Parameters<typeof LorePlugin>[0];
   const hooks = await LorePlugin({
     client,
-    project: { id: "test", path: tmpDir } as any,
+    project: { id: "test", path: tmpDir } as unknown as PluginInput["project"],
     directory: tmpDir,
     worktree: tmpDir,
     serverUrl: new URL("http://localhost:0"),
-    $: {} as any,
-  });
+    $: {} as unknown as PluginInput["$"],
+  } as PluginInput);
 
   return {
     hooks,
@@ -53,7 +54,7 @@ describe("LorePlugin config hook", () => {
     const { hooks, cleanup } = await initPlugin();
     try {
       const cfg: Record<string, unknown> = {};
-      await hooks.config!(cfg);
+      await hooks.config?.(cfg);
 
       expect(cfg.compaction).toEqual({ auto: false, prune: false });
     } finally {
@@ -65,7 +66,7 @@ describe("LorePlugin config hook", () => {
     const { hooks, cleanup } = await initPlugin();
     try {
       const cfg: Record<string, unknown> = {};
-      await hooks.config!(cfg);
+      await hooks.config?.(cfg);
 
       const agents = cfg.agent as Record<
         string,
@@ -94,7 +95,7 @@ describe("LorePlugin config hook", () => {
       const cfg: Record<string, unknown> = {
         agent: { "my-agent": { hidden: false, description: "Custom" } },
       };
-      await hooks.config!(cfg);
+      await hooks.config?.(cfg);
 
       const agents = cfg.agent as Record<string, unknown>;
       expect(agents["my-agent"]).toEqual({

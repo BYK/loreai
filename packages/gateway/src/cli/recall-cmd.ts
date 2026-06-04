@@ -11,7 +11,7 @@
  * Usage:
  *   lore recall "query string" [--project <path>] [--scope <scope>] [--limit <n>] [--json]
  */
-import { resolve } from "path";
+import { resolve } from "node:path";
 import { getRemoteUrl, projectQueryParams, remoteGet } from "./remote";
 
 export async function commandRecall(

@@ -211,8 +211,11 @@ describe("recency-biased RRF fusion", () => {
     expect(fused).toHaveLength(3);
 
     // old-relevant and new-weak should have equal scores (symmetric ranks)
-    const oldRelevant = fused.find((r) => r.item.id === "old-relevant")!;
-    const newWeak = fused.find((r) => r.item.id === "new-weak")!;
+    const oldRelevant = fused.find((r) => r.item.id === "old-relevant");
+    const newWeak = fused.find((r) => r.item.id === "new-weak");
+    expect(oldRelevant).toBeDefined();
+    expect(newWeak).toBeDefined();
+    if (!oldRelevant || !newWeak) throw new Error("expected fused items");
     expect(oldRelevant.score).toBeCloseTo(newWeak.score, 10);
   });
 
@@ -248,7 +251,9 @@ describe("recency-biased RRF fusion", () => {
     // Every item should have a higher score with the recency list
     for (const item of withRecency) {
       const without = withoutRecency.find((r) => r.item.id === item.item.id);
-      expect(item.score).toBeGreaterThan(without!.score);
+      expect(without).toBeDefined();
+      if (!without) throw new Error("expected matching item");
+      expect(item.score).toBeGreaterThan(without.score);
     }
   });
 });

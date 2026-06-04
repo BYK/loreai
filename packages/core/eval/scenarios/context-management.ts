@@ -10,7 +10,6 @@ import type {
   ConversationTurn,
   EvalQuestion,
   BaselineMode,
-  PlantedFact,
 } from "../types";
 import { RUBRICS } from "../judge";
 
@@ -2508,7 +2507,7 @@ function buildCM3Transcript(): SessionTranscript {
 
   for (let i = 0; i < implSteps.length; i++) {
     const step = implSteps[i];
-    const turnIdx = 16 + i * 2;
+    const _turnIdx = 16 + i * 2;
     const dir = step.file.includes("test")
       ? "taskflow-api/src/__tests__"
       : step.file.includes("routes") || step.file === "index.ts"

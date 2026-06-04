@@ -159,7 +159,11 @@ export async function commandRun(
     // Remote mode: delegate to an existing remote gateway.
     // The local CLI still runs on the developer's machine, so it can
     // safely compute the git remote and inject it as a header.
-    const remoteUrl = opts.remoteUrl ?? config.remoteUrl!;
+    const remoteUrl = opts.remoteUrl || config.remoteUrl;
+    if (!remoteUrl) {
+      console.error("[lore] Remote gateway URL is not configured.");
+      return safeExit(1);
+    }
     const alive = await probeGateway(remoteUrl);
     if (!alive) {
       console.error(`[lore] Remote gateway at ${remoteUrl} is not reachable.`);
@@ -234,7 +238,7 @@ export async function commandRun(
   process.on("SIGTERM", () => forwardSignal("SIGTERM"));
 
   // Wait for child to exit, then tear down gateway (only if we own it)
-  return new Promise<void>((resolve) => {
+  return new Promise<void>((_resolve) => {
     child.on("exit", async (code, signal) => {
       if (owned) await shutdown();
       // Exit with the child's code (or 128 + signal number for signal deaths)

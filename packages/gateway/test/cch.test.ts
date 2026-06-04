@@ -73,7 +73,7 @@ describe("signBody", () => {
       const body = `{"text":"cch=00000;","i":${i}}`;
       const match = signBody(body).match(/cch=([0-9a-f]+);/);
       expect(match).not.toBeNull();
-      expect(match![1]).toHaveLength(5);
+      expect(match?.[1]).toHaveLength(5);
     }
   });
 });
@@ -182,10 +182,10 @@ describe("buildBillingBlock", () => {
     );
     const block = buildBillingBlock(SID_A, MSG);
     expect(block).not.toBeNull();
-    expect(block!.type).toBe("text");
-    expect(block!.text).toContain("cch=00000;");
-    expect(block!.text).toContain("cc_entrypoint=cli");
-    expect(block!.text).toStartWith("x-anthropic-billing-header:");
+    expect(block?.type).toBe("text");
+    expect(block?.text).toContain("cch=00000;");
+    expect(block?.text).toContain("cc_entrypoint=cli");
+    expect(block?.text).toStartWith("x-anthropic-billing-header:");
   });
 
   test("pins billing header to WORKER_VERSION, not the client version", () => {
@@ -194,8 +194,8 @@ describe("buildBillingBlock", () => {
       "x-anthropic-billing-header: cc_version=2.0.99.fbe; cc_entrypoint=cli; cch=a39d0;",
     );
     const block = buildBillingBlock(SID_A, MSG);
-    expect(block!.text).toContain(`cc_version=${WORKER_VERSION}.`);
-    expect(block!.text).not.toContain("cc_version=2.0.99");
+    expect(block?.text).toContain(`cc_version=${WORKER_VERSION}.`);
+    expect(block?.text).not.toContain("cc_version=2.0.99");
   });
 
   test("includes a 3-char hex version suffix derived from user message", () => {
@@ -205,7 +205,7 @@ describe("buildBillingBlock", () => {
     );
     const block = buildBillingBlock(SID_A, MSG);
     // cc_version=2.1.37.XXX where XXX is 3 hex chars
-    expect(block!.text).toMatch(
+    expect(block?.text).toMatch(
       new RegExp(`cc_version=${WORKER_VERSION}\\.[0-9a-f]{3};`),
     );
   });
@@ -221,10 +221,10 @@ describe("buildBillingBlock", () => {
       "Expand query for semantic search.",
     );
     // Extract the suffix
-    const suffix1 = block1!.text.match(
+    const suffix1 = block1?.text.match(
       /cc_version=\d+\.\d+\.\d+\.([0-9a-f]{3})/,
     )?.[1];
-    const suffix2 = block2!.text.match(
+    const suffix2 = block2?.text.match(
       /cc_version=\d+\.\d+\.\d+\.([0-9a-f]{3})/,
     )?.[1];
     expect(suffix1).toBeDefined();
@@ -259,8 +259,8 @@ describe("buildBillingBlock", () => {
     const blockB = buildBillingBlock(SID_B, MSG);
     expect(blockA).not.toBeNull();
     expect(blockB).not.toBeNull();
-    expect(blockA!.text).toContain(`cc_version=${WORKER_VERSION}.`);
-    expect(blockB!.text).toContain(`cc_version=${WORKER_VERSION}.`);
+    expect(blockA?.text).toContain(`cc_version=${WORKER_VERSION}.`);
+    expect(blockB?.text).toContain(`cc_version=${WORKER_VERSION}.`);
   });
 
   test("an API-key session that never captures a prefix returns null", () => {
@@ -597,7 +597,7 @@ describe("exported constants", () => {
   test("VERSION_SEEDS has at least 2 entries, all non-zero bigints", () => {
     const entries = Object.entries(VERSION_SEEDS);
     expect(entries.length).toBeGreaterThanOrEqual(2);
-    for (const [version, seed] of entries) {
+    for (const [_version, seed] of entries) {
       expect(typeof seed).toBe("bigint");
       expect(seed).not.toBe(0n);
     }
@@ -810,10 +810,10 @@ describe("captureSessionHeaders", () => {
 
     const headers = buildOAuthWorkerHeaders(SID_A);
     expect(headers).not.toBeNull();
-    expect(headers!["anthropic-beta"]).toBe(
+    expect(headers?.["anthropic-beta"]).toBe(
       "oauth-2025-04-20,interleaved-thinking-2025-05-14",
     );
-    expect(headers!["user-agent"]).toBe(
+    expect(headers?.["user-agent"]).toBe(
       "claude-cli/2.1.152 (external, sdk-cli)",
     );
   });
@@ -826,9 +826,9 @@ describe("captureSessionHeaders", () => {
 
     const headers = buildOAuthWorkerHeaders(SID_A);
     expect(headers).not.toBeNull();
-    expect(headers!["anthropic-beta"]).toBe("oauth-2025-04-20");
+    expect(headers?.["anthropic-beta"]).toBe("oauth-2025-04-20");
     // user-agent should fall back to default
-    expect(headers!["user-agent"]).toContain("claude-cli/");
+    expect(headers?.["user-agent"]).toContain("claude-cli/");
   });
 
   test("works on the first turn (captureBillingPrefix sets flag before captureSessionHeaders reads it)", () => {
@@ -841,8 +841,8 @@ describe("captureSessionHeaders", () => {
 
     const headers = buildOAuthWorkerHeaders(SID_A);
     expect(headers).not.toBeNull();
-    expect(headers!["anthropic-beta"]).toBe("first-turn-beta");
-    expect(headers!["user-agent"]).toBe("first-turn-ua");
+    expect(headers?.["anthropic-beta"]).toBe("first-turn-beta");
+    expect(headers?.["user-agent"]).toBe("first-turn-ua");
   });
 });
 
@@ -861,14 +861,14 @@ describe("buildOAuthWorkerHeaders", () => {
 
     const headers = buildOAuthWorkerHeaders(SID_A);
     expect(headers).not.toBeNull();
-    expect(headers!["anthropic-beta"]).toContain("oauth-2025-04-20");
-    expect(headers!["anthropic-beta"]).toContain(
+    expect(headers?.["anthropic-beta"]).toContain("oauth-2025-04-20");
+    expect(headers?.["anthropic-beta"]).toContain(
       "extended-cache-ttl-2025-04-11",
     );
-    expect(headers!["anthropic-beta"]).toContain(
+    expect(headers?.["anthropic-beta"]).toContain(
       "prompt-caching-scope-2026-01-05",
     );
-    expect(headers!["user-agent"]).toContain("claude-cli/");
+    expect(headers?.["user-agent"]).toContain("claude-cli/");
   });
 
   test("includes required OAuth headers", () => {
@@ -876,10 +876,10 @@ describe("buildOAuthWorkerHeaders", () => {
 
     const headers = buildOAuthWorkerHeaders(SID_A);
     expect(headers).not.toBeNull();
-    expect(headers!["anthropic-dangerous-direct-browser-access"]).toBe("true");
-    expect(headers!["x-client-request-id"]).toBeDefined();
+    expect(headers?.["anthropic-dangerous-direct-browser-access"]).toBe("true");
+    expect(headers?.["x-client-request-id"]).toBeDefined();
     // UUID format
-    expect(headers!["x-client-request-id"]).toMatch(
+    expect(headers?.["x-client-request-id"]).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
     );
   });
@@ -887,9 +887,11 @@ describe("buildOAuthWorkerHeaders", () => {
   test("generates unique x-client-request-id per call", () => {
     captureBillingPrefix(SID_A, BILLING_SYSTEM);
 
-    const h1 = buildOAuthWorkerHeaders(SID_A)!;
-    const h2 = buildOAuthWorkerHeaders(SID_A)!;
-    expect(h1["x-client-request-id"]).not.toBe(h2["x-client-request-id"]);
+    const h1 = buildOAuthWorkerHeaders(SID_A);
+    const h2 = buildOAuthWorkerHeaders(SID_A);
+    expect(h1).toBeDefined();
+    expect(h2).toBeDefined();
+    expect(h1?.["x-client-request-id"]).not.toBe(h2?.["x-client-request-id"]);
   });
 
   test("sessions are isolated — different sessions get different headers", () => {
@@ -899,8 +901,8 @@ describe("buildOAuthWorkerHeaders", () => {
     captureSessionHeaders(SID_A, { "anthropic-beta": "beta-a" });
     captureSessionHeaders(SID_B, { "anthropic-beta": "beta-b" });
 
-    expect(buildOAuthWorkerHeaders(SID_A)!["anthropic-beta"]).toBe("beta-a");
-    expect(buildOAuthWorkerHeaders(SID_B)!["anthropic-beta"]).toBe("beta-b");
+    expect(buildOAuthWorkerHeaders(SID_A)?.["anthropic-beta"]).toBe("beta-a");
+    expect(buildOAuthWorkerHeaders(SID_B)?.["anthropic-beta"]).toBe("beta-b");
   });
 });
 

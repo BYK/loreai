@@ -9,10 +9,7 @@
  *  - Block index renumbering correctness
  */
 import { describe, test, expect } from "bun:test";
-import {
-  createRecallAwareAccumulator,
-  formatSSEEvent,
-} from "../src/stream/anthropic";
+import { createRecallAwareAccumulator } from "../src/stream/anthropic";
 import {
   findRecallToolUse,
   replaceRecallWithMarker,
@@ -227,7 +224,7 @@ describe("RecallAwareAccumulator — no recall", () => {
         (e.data.content_block as Record<string, unknown>)?.type === "tool_use",
     );
     expect(toolStart).toBeDefined();
-    expect(toolStart!.data.index).toBe(1);
+    expect(toolStart?.data.index).toBe(1);
     expect(accum.hasOtherTools()).toBe(true);
     expect(accum.hasRecall()).toBe(false);
   });
@@ -359,7 +356,7 @@ describe("RecallAwareAccumulator — mixed tools (Case 2)", () => {
         (e.data.content_block as Record<string, unknown>)?.name === "Read",
     );
     expect(readStart).toBeDefined();
-    expect(readStart!.data.index).toBe(1); // Re-indexed from 2 → 1
+    expect(readStart?.data.index).toBe(1); // Re-indexed from 2 → 1
 
     // Find the Read content_block_delta
     const readDeltas = parsed.filter(
@@ -415,7 +412,7 @@ describe("RecallAwareAccumulator — mixed tools (Case 2)", () => {
         e.event === "content_block_start" &&
         (e.data.content_block as Record<string, unknown>)?.name === "Read",
     );
-    expect(readStart!.data.index).toBe(1);
+    expect(readStart?.data.index).toBe(1);
 
     // Bash should be at index 2
     const bashStart = parsed.find(
@@ -423,7 +420,7 @@ describe("RecallAwareAccumulator — mixed tools (Case 2)", () => {
         e.event === "content_block_start" &&
         (e.data.content_block as Record<string, unknown>)?.name === "Bash",
     );
-    expect(bashStart!.data.index).toBe(2);
+    expect(bashStart?.data.index).toBe(2);
   });
 
   test("recall after other tools — no re-indexing needed for earlier tools", () => {
@@ -454,7 +451,7 @@ describe("RecallAwareAccumulator — mixed tools (Case 2)", () => {
         e.event === "content_block_start" &&
         (e.data.content_block as Record<string, unknown>)?.name === "Read",
     );
-    expect(readStart!.data.index).toBe(1);
+    expect(readStart?.data.index).toBe(1);
 
     // No recall events
     const recallEvents = parsed.filter(
@@ -493,14 +490,14 @@ describe("RecallAwareAccumulator — mixed tools (Case 2)", () => {
         e.event === "content_block_start" &&
         (e.data.content_block as Record<string, unknown>)?.name === "Read",
     );
-    expect(readStart!.data.index).toBe(1);
+    expect(readStart?.data.index).toBe(1);
 
     const bashStart = parsed.find(
       (e) =>
         e.event === "content_block_start" &&
         (e.data.content_block as Record<string, unknown>)?.name === "Bash",
     );
-    expect(bashStart!.data.index).toBe(2);
+    expect(bashStart?.data.index).toBe(2);
 
     expect(accum.clientBlockCount()).toBe(3); // text + Read + Bash
   });
@@ -635,7 +632,7 @@ describe("RecallAwareAccumulator — blockOffset", () => {
         (e.data.content_block as Record<string, unknown>)?.type === "text",
     );
     expect(textStart).toBeDefined();
-    expect(textStart!.data.index).toBe(5);
+    expect(textStart?.data.index).toBe(5);
 
     // Read block should be at index 1 + 5 = 6
     const readStart = parsed.find(
@@ -644,7 +641,7 @@ describe("RecallAwareAccumulator — blockOffset", () => {
         (e.data.content_block as Record<string, unknown>)?.name === "Read",
     );
     expect(readStart).toBeDefined();
-    expect(readStart!.data.index).toBe(6);
+    expect(readStart?.data.index).toBe(6);
 
     // Deltas and stops should also be offset
     const textDeltas = parsed.filter(
@@ -690,7 +687,7 @@ describe("RecallAwareAccumulator — blockOffset", () => {
         e.event === "content_block_start" &&
         (e.data.content_block as Record<string, unknown>)?.type === "text",
     );
-    expect(textStart!.data.index).toBe(3);
+    expect(textStart?.data.index).toBe(3);
 
     // Read: upstream 2 - 1 suppressed + 3 offset = 4
     const readStart = parsed.find(
@@ -698,7 +695,7 @@ describe("RecallAwareAccumulator — blockOffset", () => {
         e.event === "content_block_start" &&
         (e.data.content_block as Record<string, unknown>)?.name === "Read",
     );
-    expect(readStart!.data.index).toBe(4);
+    expect(readStart?.data.index).toBe(4);
 
     // No recall events leaked
     const recallEvents = parsed.filter(
@@ -726,7 +723,7 @@ describe("RecallAwareAccumulator — blockOffset", () => {
     const parsed = parseForwardedEvents(output);
 
     const textStart = parsed.find((e) => e.event === "content_block_start");
-    expect(textStart!.data.index).toBe(0);
+    expect(textStart?.data.index).toBe(0);
   });
 });
 
@@ -811,7 +808,7 @@ describe("RecallAwareAccumulator — continuation stream scenario", () => {
 
     // Text block at index 0 - 0 suppressed + 3 offset = 3
     const textStart = parsed1.find((e) => e.event === "content_block_start");
-    expect(textStart!.data.index).toBe(3);
+    expect(textStart?.data.index).toBe(3);
 
     // No message_start forwarded
     expect(parsed1.filter((e) => e.event === "message_start")).toHaveLength(0);
@@ -841,7 +838,7 @@ describe("RecallAwareAccumulator — continuation stream scenario", () => {
 
     // Text block at 0 + 5 = 5
     const text2Start = parsed2.find((e) => e.event === "content_block_start");
-    expect(text2Start!.data.index).toBe(5);
+    expect(text2Start?.data.index).toBe(5);
 
     // Terminal events forwarded (no recall)
     expect(parsed2.filter((e) => e.event === "message_delta")).toHaveLength(1);
@@ -907,8 +904,9 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
     const resp = accum.getResponse();
     const recallBlock = findRecallToolUse(resp);
     expect(recallBlock).toBeDefined();
-    expect(recallBlock!.id).toBe("toolu_recall_1");
-    expect(recallBlock!.name).toBe("recall");
+    if (!recallBlock) throw new Error("expected recall block");
+    expect(recallBlock.id).toBe("toolu_recall_1");
+    expect(recallBlock.name).toBe("recall");
 
     // --- Step 4: Replace recall with marker in response for post-processing ---
     const markerResp = replaceRecallWithMarker(resp);
@@ -930,7 +928,7 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
     const store: RecallStore = new Map();
     const storeKey = recallStoreKey("gateway architecture", "all");
     store.set(storeKey, {
-      toolUseId: recallBlock!.id,
+      toolUseId: recallBlock.id,
       input: { query: "gateway architecture" },
       position: accum.recallBlockIndex(),
       result:
@@ -1055,11 +1053,12 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
     const resp = accum.getResponse();
     const recallBlock = findRecallToolUse(resp);
     expect(recallBlock).toBeDefined();
+    if (!recallBlock) throw new Error("expected recall block");
 
     const store: RecallStore = new Map();
     const storeKey = recallStoreKey("patterns", "all");
     store.set(storeKey, {
-      toolUseId: recallBlock!.id,
+      toolUseId: recallBlock.id,
       input: { query: "patterns" },
       position: accum.recallBlockIndex(),
       result: "Found patterns info",

@@ -420,9 +420,9 @@ describe("temporal", () => {
 
       const r = rows(pid);
       expect(r.length).toBe(2);
-      expect(r.find((x) => x.call_id === "ca")!.tool).toBe("read");
-      expect(r.find((x) => x.call_id === "ca")!.status).toBe("pending");
-      expect(r.find((x) => x.call_id === "cb")!.tool).toBe("bash");
+      expect(r.find((x) => x.call_id === "ca")?.tool).toBe("read");
+      expect(r.find((x) => x.call_id === "ca")?.status).toBe("pending");
+      expect(r.find((x) => x.call_id === "cb")?.tool).toBe("bash");
     });
 
     test("result parts update outcome by call_id, preserving seeded name", () => {
@@ -458,12 +458,14 @@ describe("temporal", () => {
 
       const r = rows(pid);
       expect(r.length).toBe(2);
-      const completed = r.find((x) => x.call_id === "ca")!;
+      const completed = r.find((x) => x.call_id === "ca");
+      if (!completed) throw new Error("expected completed row");
       expect(completed.tool).toBe("read"); // name preserved, not "result"
       expect(completed.status).toBe("completed");
       expect(completed.error_type).toBeNull();
       expect(completed.duration_ms).toBe(50);
-      const errored = r.find((x) => x.call_id === "cb")!;
+      const errored = r.find((x) => x.call_id === "cb");
+      if (!errored) throw new Error("expected errored row");
       expect(errored.tool).toBe("bash"); // name preserved
       expect(errored.status).toBe("error");
       expect(errored.error_type).toBe("not_found");

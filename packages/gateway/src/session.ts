@@ -494,7 +494,7 @@ export function findRotationPredecessor(
   getCandidate: (sid: string) => RotationCandidate | null,
   now: number = Date.now(),
 ): { sid: string; oldHeaderValue: string } | null {
-  const headerPrefix = headerName + ":";
+  const headerPrefix = `${headerName}:`;
   const newKey = headerPrefix + newHeaderValue;
   let predecessor: { sid: string; oldHeaderValue: string } | null = null;
 

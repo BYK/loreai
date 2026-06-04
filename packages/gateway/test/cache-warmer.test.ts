@@ -20,9 +20,6 @@ import {
   maxProfitableCycles,
   MAX_TOOL_CALL_WARMING_MS,
   MIN_WARMUPS_FOR_ROI_CHECK,
-  MIN_SESSION_HIT_RATE,
-  MIN_TURNS_FOR_WARMING,
-  MIN_INPUT_TOKENS_FOR_WARMING,
   MIN_RETURN_PROBABILITY_FLOOR,
   TOOL_CALL_MAX_CYCLES,
   HISTOGRAM_BINS,
@@ -1544,7 +1541,9 @@ describe("global histogram persistence", () => {
     d.query(
       "INSERT OR IGNORE INTO projects (id, path, name, git_remote, created_at) VALUES (?, ?, ?, ?, ?)",
     ).run("test-hist-pid", TEST_PROJECT_PATH, "test-hist", null, now);
-    pid = projectId(TEST_PROJECT_PATH)!;
+    const resolvedPid = projectId(TEST_PROJECT_PATH);
+    if (!resolvedPid) throw new Error("expected project id");
+    pid = resolvedPid;
     expect(pid).toBe("test-hist-pid");
 
     // Clean any leftover rows from previous test runs.

@@ -136,7 +136,7 @@ export function getRecordedInterceptor(): UpstreamInterceptor | null {
       wasStreaming,
       model,
     };
-    appendFileSync(fixturePath, JSON.stringify(entry) + "\n", "utf8");
+    appendFileSync(fixturePath, `${JSON.stringify(entry)}\n`, "utf8");
 
     log.info(`[recorder] captured turn seq=${seq} model=${model}`);
 

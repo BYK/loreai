@@ -9,7 +9,7 @@
  *   --all             Show sessions from all projects (default if no --project given).
  */
 
-import { parseArgs } from "util";
+import { parseArgs } from "node:util";
 import { load, db } from "@loreai/core";
 
 const { values } = parseArgs({

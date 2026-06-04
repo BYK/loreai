@@ -1,7 +1,7 @@
 import { describe, test, expect } from "bun:test";
-import { join } from "path";
-import { mkdirSync, copyFileSync, writeFileSync } from "fs";
-import { tmpdir } from "os";
+import { join } from "node:path";
+import { mkdirSync, copyFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 import "../../src/import/providers/aider";
 import { getProvider } from "../../src/import/providers";
@@ -9,7 +9,8 @@ import { getProvider } from "../../src/import/providers";
 const FIXTURES = join(import.meta.dir, "fixtures");
 
 describe("Aider provider", () => {
-  const provider = getProvider("aider")!;
+  const provider = getProvider("aider");
+  if (!provider) throw new Error("aider provider not registered");
 
   test("provider is registered with correct metadata", () => {
     expect(provider).toBeDefined();

@@ -179,13 +179,15 @@ describe("buildAnthropicRequest — conversation caching", () => {
     }>;
 
     // Last message's last block should have cache_control
-    const lastMsg = messages[messages.length - 1]!;
-    const lastBlock = lastMsg.content[lastMsg.content.length - 1]!;
+    const lastMsg = messages[messages.length - 1];
+    if (!lastMsg) throw new Error("expected last message");
+    const lastBlock = lastMsg.content[lastMsg.content.length - 1];
+    if (!lastBlock) throw new Error("expected last block");
     expect(lastBlock.cache_control).toEqual({ type: "ephemeral" });
 
     // Earlier messages should NOT have cache_control
     for (let i = 0; i < messages.length - 1; i++) {
-      for (const block of messages[i].content) {
+      for (const block of messages[i]?.content ?? []) {
         expect(block.cache_control).toBeUndefined();
       }
     }
@@ -225,10 +227,11 @@ describe("buildAnthropicRequest — conversation caching", () => {
       content: Array<Record<string, unknown>>;
     }>;
 
-    const lastMsg = messages[messages.length - 1]!;
+    const lastMsg = messages[messages.length - 1];
+    if (!lastMsg) throw new Error("expected last message");
     // Only the LAST block gets the breakpoint
-    expect(lastMsg.content[0].cache_control).toBeUndefined();
-    expect(lastMsg.content[lastMsg.content.length - 1]!.cache_control).toEqual({
+    expect(lastMsg.content[0]?.cache_control).toBeUndefined();
+    expect(lastMsg.content[lastMsg.content.length - 1]?.cache_control).toEqual({
       type: "ephemeral",
     });
   });
@@ -282,8 +285,10 @@ describe("buildAnthropicRequest — combined caching (conversation turn)", () =>
     const messages = body.messages as Array<{
       content: Array<Record<string, unknown>>;
     }>;
-    const lastMsg = messages[messages.length - 1]!;
-    const lastBlock = lastMsg.content[lastMsg.content.length - 1]!;
+    const lastMsg = messages[messages.length - 1];
+    if (!lastMsg) throw new Error("expected last message");
+    const lastBlock = lastMsg.content[lastMsg.content.length - 1];
+    if (!lastBlock) throw new Error("expected last block");
     expect(lastBlock.cache_control).toEqual({ type: "ephemeral" });
   });
 });
@@ -625,8 +630,10 @@ describe("buildAnthropicRequest — full layered caching", () => {
     const messages = body.messages as Array<{
       content: Array<Record<string, unknown>>;
     }>;
-    const lastMsg = messages[messages.length - 1]!;
-    const lastBlock = lastMsg.content[lastMsg.content.length - 1]!;
+    const lastMsg = messages[messages.length - 1];
+    if (!lastMsg) throw new Error("expected last message");
+    const lastBlock = lastMsg.content[lastMsg.content.length - 1];
+    if (!lastBlock) throw new Error("expected last block");
     expect(lastBlock.cache_control).toEqual({ type: "ephemeral" });
   });
 });

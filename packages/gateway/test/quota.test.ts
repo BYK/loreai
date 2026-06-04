@@ -78,9 +78,9 @@ describe("fetchOAuthQuotaSnapshot", () => {
 
     const snap = await fetchOAuthQuotaSnapshot(BEARER);
     expect(snap).not.toBeNull();
-    expect(snap!.fiveHour?.utilization).toBeCloseTo(45.2);
-    expect(snap!.sevenDay?.utilization).toBeCloseTo(12.8);
-    expect(snap!.fiveHour?.resetsAt).toBe(Date.parse("2026-06-02T18:00:00Z"));
+    expect(snap?.fiveHour?.utilization).toBeCloseTo(45.2);
+    expect(snap?.sevenDay?.utilization).toBeCloseTo(12.8);
+    expect(snap?.fiveHour?.resetsAt).toBe(Date.parse("2026-06-02T18:00:00Z"));
   });
 
   test("sends bearer auth + oauth beta header", async () => {
@@ -96,7 +96,7 @@ describe("fetchOAuthQuotaSnapshot", () => {
     }) as unknown as typeof fetch;
 
     await fetchOAuthQuotaSnapshot(BEARER);
-    const headers = capturedInit!.headers as Record<string, string>;
+    const headers = capturedInit?.headers as Record<string, string>;
     expect(headers.Authorization).toBe("Bearer oauth-token-abc");
     expect(headers["anthropic-beta"]).toBe("oauth-2025-04-20");
   });
@@ -112,7 +112,7 @@ describe("fetchOAuthQuotaSnapshot", () => {
     }) as unknown as typeof fetch;
 
     await fetchOAuthQuotaSnapshot(BEARER);
-    const headers = capturedInit!.headers as Record<string, string>;
+    const headers = capturedInit?.headers as Record<string, string>;
     expect(headers["user-agent"]).toContain("claude-cli/");
   });
 
@@ -149,7 +149,7 @@ describe("fetchOAuthQuotaSnapshot", () => {
     }) as unknown as typeof fetch;
 
     await fetchOAuthQuotaSnapshot(BEARER, "sid-ua");
-    const headers = capturedInit!.headers as Record<string, string>;
+    const headers = capturedInit?.headers as Record<string, string>;
     // No captureSessionHeaders was called, so buildOAuthWorkerHeaders uses its
     // fallback Claude Code UA + worker betas (not sniffed session values).
     expect(headers["user-agent"]).toContain("claude-cli/");
@@ -169,8 +169,8 @@ describe("fetchOAuthQuotaSnapshot", () => {
     ) as unknown as typeof fetch;
 
     const snap = await fetchOAuthQuotaSnapshot(BEARER);
-    expect(snap!.fiveHour?.utilization).toBe(50);
-    expect(snap!.sevenDay).toBeNull();
+    expect(snap?.fiveHour?.utilization).toBe(50);
+    expect(snap?.sevenDay).toBeNull();
   });
 
   test("garbage resets_at → resetsAt null but utilization kept", async () => {
@@ -186,8 +186,8 @@ describe("fetchOAuthQuotaSnapshot", () => {
     ) as unknown as typeof fetch;
 
     const snap = await fetchOAuthQuotaSnapshot(BEARER);
-    expect(snap!.fiveHour?.utilization).toBe(30);
-    expect(snap!.fiveHour?.resetsAt).toBeNull();
+    expect(snap?.fiveHour?.utilization).toBe(30);
+    expect(snap?.fiveHour?.resetsAt).toBeNull();
   });
 
   test("out-of-range utilization is clamped to [0,100]", async () => {
@@ -204,8 +204,8 @@ describe("fetchOAuthQuotaSnapshot", () => {
     ) as unknown as typeof fetch;
 
     const snap = await fetchOAuthQuotaSnapshot(BEARER);
-    expect(snap!.fiveHour?.utilization).toBe(100);
-    expect(snap!.sevenDay?.utilization).toBe(0);
+    expect(snap?.fiveHour?.utilization).toBe(100);
+    expect(snap?.sevenDay?.utilization).toBe(0);
   });
 
   test("fraction-format utilization (0.0-1.0) is scaled to percent", async () => {
@@ -222,8 +222,8 @@ describe("fetchOAuthQuotaSnapshot", () => {
     ) as unknown as typeof fetch;
 
     const snap = await fetchOAuthQuotaSnapshot(BEARER);
-    expect(snap!.fiveHour?.utilization).toBeCloseTo(45.2);
-    expect(snap!.sevenDay?.utilization).toBeCloseTo(12.8);
+    expect(snap?.fiveHour?.utilization).toBeCloseTo(45.2);
+    expect(snap?.sevenDay?.utilization).toBeCloseTo(12.8);
   });
 
   test("percent-format utilization (>1) is kept as-is", async () => {
@@ -236,7 +236,7 @@ describe("fetchOAuthQuotaSnapshot", () => {
     ) as unknown as typeof fetch;
 
     const snap = await fetchOAuthQuotaSnapshot(BEARER);
-    expect(snap!.fiveHour?.utilization).toBeCloseTo(45.2);
+    expect(snap?.fiveHour?.utilization).toBeCloseTo(45.2);
   });
 
   test("numeric epoch resets_at (seconds) is parsed to ms", async () => {
@@ -253,7 +253,7 @@ describe("fetchOAuthQuotaSnapshot", () => {
     ) as unknown as typeof fetch;
 
     const snap = await fetchOAuthQuotaSnapshot(BEARER);
-    expect(snap!.fiveHour?.resetsAt).toBe(epochSec * 1000);
+    expect(snap?.fiveHour?.resetsAt).toBe(epochSec * 1000);
   });
 
   test("numeric epoch resets_at (milliseconds) is kept as-is", async () => {
@@ -270,7 +270,7 @@ describe("fetchOAuthQuotaSnapshot", () => {
     ) as unknown as typeof fetch;
 
     const snap = await fetchOAuthQuotaSnapshot(BEARER);
-    expect(snap!.fiveHour?.resetsAt).toBe(epochMs);
+    expect(snap?.fiveHour?.resetsAt).toBe(epochMs);
   });
 
   test("empty body → both windows null, no throw", async () => {
@@ -280,8 +280,8 @@ describe("fetchOAuthQuotaSnapshot", () => {
 
     const snap = await fetchOAuthQuotaSnapshot(BEARER);
     expect(snap).not.toBeNull();
-    expect(snap!.fiveHour).toBeNull();
-    expect(snap!.sevenDay).toBeNull();
+    expect(snap?.fiveHour).toBeNull();
+    expect(snap?.sevenDay).toBeNull();
   });
 
   test("429 returns null without throwing", async () => {

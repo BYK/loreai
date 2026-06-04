@@ -43,9 +43,9 @@ import {
   mkdirSync,
   unlinkSync,
   writeFileSync,
-} from "fs";
-import { execSync } from "child_process";
-import { parseArgs } from "util";
+} from "node:fs";
+import { execSync } from "node:child_process";
+import { parseArgs } from "node:util";
 
 // ---------------------------------------------------------------------------
 // CLI argument parsing
@@ -302,8 +302,10 @@ function obtainBinary(version?: string, binaryPath?: string): string {
       stdio: ["pipe", "pipe", "pipe"],
       cwd: tmpDir,
     });
-  } catch (e: any) {
-    console.error(`Failed to download ${pkg}: ${e.message}`);
+  } catch (e) {
+    console.error(
+      `Failed to download ${pkg}: ${e instanceof Error ? e.message : String(e)}`,
+    );
     process.exit(1);
   }
 

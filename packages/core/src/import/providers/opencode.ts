@@ -5,9 +5,9 @@
  * The message.data and part.data JSON fields use a format very close to lore's
  * own LoreMessage/LorePart types (since lore was designed for OpenCode).
  */
-import { existsSync } from "fs";
-import { join } from "path";
-import { homedir } from "os";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { Database } from "#db/driver";
 import type {
   AgentHistoryProvider,
@@ -38,7 +38,7 @@ function estimateTokens(text: string): number {
 
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
-  return text.slice(0, max) + "...";
+  return `${text.slice(0, max)}...`;
 }
 
 /**
@@ -51,11 +51,14 @@ function truncate(text: string, max: number): string {
 function openDB(): InstanceType<typeof Database> | null {
   if (!existsSync(OPENCODE_DB_PATH)) return null;
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return new Database(OPENCODE_DB_PATH, {
-      readonly: true,
-      readOnly: true,
-    } as any);
+    // Bun's `Database` uses `readonly` while Node's `DatabaseSync` uses
+    // `readOnly`. Pass both via a structurally-typed options object that
+    // covers either runtime's constructor signature.
+    const options = { readonly: true, readOnly: true };
+    return new Database(
+      OPENCODE_DB_PATH,
+      options as ConstructorParameters<typeof Database>[1],
+    );
   } catch {
     return null;
   }

@@ -7,9 +7,9 @@
  * Each JSONL file starts with a session_meta line containing { id, cwd, timestamp, ... }
  * followed by response_item, event_msg, compacted, and turn_context lines.
  */
-import { readdirSync, readFileSync, statSync, existsSync } from "fs";
-import { join } from "path";
-import { homedir } from "os";
+import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import type {
   AgentHistoryProvider,
   ConversationChunk,
@@ -91,7 +91,7 @@ function estimateTokens(text: string): number {
 
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
-  return text.slice(0, max) + "...";
+  return `${text.slice(0, max)}...`;
 }
 
 /** Recursively find all .jsonl files under a directory. */

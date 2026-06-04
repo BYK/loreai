@@ -744,7 +744,11 @@ export function formatKnowledge(
 
   const grouped: Record<string, Array<{ title: string; content: string }>> = {};
   for (const e of included) {
-    const group = grouped[e.category] ?? (grouped[e.category] = []);
+    let group = grouped[e.category];
+    if (!group) {
+      group = [];
+      grouped[e.category] = group;
+    }
     group.push(e);
   }
 
@@ -754,7 +758,7 @@ export function formatKnowledge(
     children.push(
       ul(
         items.map((i) =>
-          liph(strong(inline(i.title)), t(": " + inline(i.content))),
+          liph(strong(inline(i.title)), t(`: ${inline(i.content)}`)),
         ),
       ),
     );

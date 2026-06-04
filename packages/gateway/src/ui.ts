@@ -93,15 +93,15 @@ function truncateText(text: string, maxChars: number): string {
   // Try to break at last sentence boundary
   const sentenceEnd = truncated.search(/[.!?]\s[^.!?]*$/);
   if (sentenceEnd > maxChars * 0.5)
-    return truncated.slice(0, sentenceEnd + 1) + " ...";
+    return `${truncated.slice(0, sentenceEnd + 1)} ...`;
   // Fall back to last whitespace
   const lastSpace = truncated.lastIndexOf(" ");
-  if (lastSpace > maxChars * 0.5) return truncated.slice(0, lastSpace) + " ...";
-  return truncated + "...";
+  if (lastSpace > maxChars * 0.5) return `${truncated.slice(0, lastSpace)} ...`;
+  return `${truncated}...`;
 }
 
 /** Render truncated markdown to HTML for search results. */
-function mdTruncated(markdown: string, maxChars = 500): string {
+function _mdTruncated(markdown: string, maxChars = 500): string {
   return md(truncateText(markdown, maxChars));
 }
 
@@ -202,8 +202,7 @@ function renderChatBubble(
   if (isUser) {
     const agent = meta?.agent;
     if (agent && typeof agent === "string")
-      metaLine =
-        `<span class="bubble-agent">${esc(agent)}</span> &middot; ` + metaLine;
+      metaLine = `<span class="bubble-agent">${esc(agent)}</span> &middot; ${metaLine}`;
   } else {
     const modelID = meta?.modelID;
     if (modelID && typeof modelID === "string")
@@ -401,7 +400,7 @@ function renderCostSummary(sessionId: string): string {
 function truncate(str: string, max: number): string {
   const oneLine = str.replace(/\n/g, " ").trim();
   if (oneLine.length <= max) return oneLine;
-  return oneLine.slice(0, max - 1) + "\u2026";
+  return `${oneLine.slice(0, max - 1)}\u2026`;
 }
 
 const CSS = `
@@ -1081,7 +1080,7 @@ function renderHistogram(opts: {
     const displayHist = opts.blended ?? opts.session ?? opts.global;
     const displayPct =
       displayHist && displayHist.total > 0
-        ? ((displayHist.counts[i] / displayHist.total) * 100).toFixed(0) + "%"
+        ? `${((displayHist.counts[i] / displayHist.total) * 100).toFixed(0)}%`
         : "";
 
     html += `<div class="bin">`;
@@ -1357,7 +1356,7 @@ function renderSessionRow(
     <td>${r.hasCosts ? formatUSD(displayCost) : "-"}</td>
     <td style="background:${savingsBg}">${r.hasCosts ? `<span style="color:${savingsColor}">${formatUSD(displaySavings)}</span>` : "-"}</td>
     <td>${cacheHitCell}</td>
-    <td>${r.warmingSnap ? r.pReturnsPct.toFixed(1) + "%" : "-"}</td>
+    <td>${r.warmingSnap ? `${r.pReturnsPct.toFixed(1)}%` : "-"}</td>
     <td>${statusCell}</td>
     <td>${hitsCell}</td>
   </tr>`;
@@ -1542,16 +1541,17 @@ function pageProject(projectId: string): string | null {
         parent.children.push(child);
       }
     }
-    const sessRoots = [...sessNodeMap.values()].filter(
-      (r) =>
-        !pMap.has(r.session_id) || !sessNodeMap.has(pMap.get(r.session_id)!),
-    );
+    const sessRoots = [...sessNodeMap.values()].filter((r) => {
+      const parentId = pMap.get(r.session_id);
+      return parentId === undefined || !sessNodeMap.has(parentId);
+    });
 
     body += `<table data-table-id="project-sessions">
       <tr><th>Session</th><th data-sort="num">Messages</th><th data-sort="num">Distilled</th><th data-sort="num">Distillations</th><th data-sort="date" data-default-sort="desc">Last Activity</th></tr>`;
 
     function renderProjSession(s: SessNode, parentSid?: string): void {
       const isChild = parentSid != null;
+      const parentSidValue = parentSid ?? "";
       const hasChildren = s.children.length > 0;
       const toggle = hasChildren
         ? `<span class="toggle-btn" data-session-id="${esc(s.session_id)}">\u25B6</span>`
@@ -1561,7 +1561,7 @@ function pageProject(projectId: string): string | null {
         : "";
       const prefix = isChild ? `<span style="opacity:0.4">\u21B3</span> ` : "";
       const trAttrs = isChild
-        ? ` class="subagent-row" data-parent="${esc(parentSid!)}"`
+        ? ` class="subagent-row" data-parent="${esc(parentSidValue)}"`
         : "";
       body += `<tr${trAttrs}>
         <td>${toggle}${prefix}<a href="/ui/sessions/${esc(projectId)}/${esc(s.session_id)}">${esc(s.session_id.slice(0, 12))}</a>${childCount}</td>
@@ -2165,7 +2165,7 @@ function pageWarming(): string {
     <div class="stat"><div class="label">Warming Now</div><div class="value">${warmingNow}</div></div>
     <div class="stat"><div class="label">Dead</div><div class="value">${deadCount}</div></div>
     <div class="stat"><div class="label">Total Warmups</div><div class="value">${totalWarmups}</div></div>
-    <div class="stat"><div class="label">Hit Rate</div><div class="value">${totalWarmups > 0 ? ((totalHits / totalWarmups) * 100).toFixed(0) + "%" : "N/A"}</div></div>
+    <div class="stat"><div class="label">Hit Rate</div><div class="value">${totalWarmups > 0 ? `${((totalHits / totalWarmups) * 100).toFixed(0)}%` : "N/A"}</div></div>
     <div class="stat"><div class="label">Circuit Breaker</div><div class="value">${
       cbStatus.tripped
         ? '<span style="color:var(--danger)">TRIPPED</span>'
@@ -2627,11 +2627,10 @@ function pageCosts(): string {
       }
     }
     // Root rows: not a child of any known parent in the set
-    const histRoots = [...histRowMap.values()].filter(
-      (r) =>
-        !parentMap.has(r.sessionId) ||
-        !histRowMap.has(parentMap.get(r.sessionId)!),
-    );
+    const histRoots = [...histRowMap.values()].filter((r) => {
+      const parentId = parentMap.get(r.sessionId);
+      return parentId === undefined || !histRowMap.has(parentId);
+    });
     for (const root of histRoots) histRollUp(root);
 
     const displayed = histRoots.slice(0, 50);
@@ -2643,6 +2642,7 @@ function pageCosts(): string {
     // Recursive rendering for historical rows
     function renderHistRow(s: HistRow, parentSid?: string): void {
       const isChild = parentSid != null;
+      const parentSidValue = parentSid ?? "";
       const hasChildren = s.children.length > 0;
       const toggle =
         hasChildren && !isChild
@@ -2655,7 +2655,7 @@ function pageCosts(): string {
         : "";
       const prefix = isChild ? `<span style="opacity:0.4">\u21B3</span> ` : "";
       const trAttrs = isChild
-        ? ` class="subagent-row" data-parent="${esc(parentSid!)}"`
+        ? ` class="subagent-row" data-parent="${esc(parentSidValue)}"`
         : "";
       const displayCost = hasChildren
         ? s.rolledUpWorkerCost

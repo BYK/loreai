@@ -13,7 +13,7 @@ import {
 // Helpers
 // ---------------------------------------------------------------------------
 
-const MODELS_DEV_API = "https://models.dev/api.json";
+const _MODELS_DEV_API = "https://models.dev/api.json";
 
 /** Build a mock models.dev api.json response with full cost+limit data. */
 function buildModelsDevResponse(
@@ -108,7 +108,8 @@ describe("fetchModelData", () => {
     const data = await fetchModelData();
 
     expect(data.size).toBeGreaterThanOrEqual(3);
-    const opus = data.get("claude-opus-4-6")!;
+    const opus = data.get("claude-opus-4-6");
+    if (!opus) throw new Error("expected opus model data");
     expect(opus.cost?.input).toBe(5);
     expect(opus.cost?.output).toBe(25);
     expect(opus.cost?.cache_read).toBe(0.5);
@@ -134,9 +135,9 @@ describe("fetchModelData", () => {
     const data = await fetchModelData();
 
     expect(data.size).toBe(5); // 3 Anthropic + 2 OpenAI
-    expect(data.get("claude-opus-4-6")!.cost?.input).toBe(5);
-    expect(data.get("gpt-5.4")!.cost?.input).toBe(2.5);
-    expect(data.get("gpt-5.4-mini")!.cost?.input).toBe(0.75);
+    expect(data.get("claude-opus-4-6")?.cost?.input).toBe(5);
+    expect(data.get("gpt-5.4")?.cost?.input).toBe(2.5);
+    expect(data.get("gpt-5.4-mini")?.cost?.input).toBe(0.75);
   });
 
   test("caches results and returns cache on subsequent calls", async () => {
@@ -270,7 +271,7 @@ describe("fetchModelData", () => {
 
     const data = await fetchModelData();
     expect(data.size).toBe(1); // Only OpenAI, no Anthropic
-    expect(data.get("gpt-5.4")!.cost?.input).toBe(2.5);
+    expect(data.get("gpt-5.4")?.cost?.input).toBe(2.5);
   });
 });
 

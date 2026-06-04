@@ -78,7 +78,7 @@ export function parseOpenAIRequest(
           .join("\n");
       }
       if (system) {
-        system += "\n\n" + text;
+        system += `\n\n${text}`;
       } else {
         system = text;
       }
@@ -304,7 +304,7 @@ export function buildOpenAIResponse(
 }
 
 function buildOpenAINonStreamResponse(resp: GatewayResponse): Response {
-  const chunks: unknown[] = [];
+  const _chunks: unknown[] = [];
   let content = "";
   const toolCalls: Array<Record<string, unknown>> = [];
 
@@ -484,7 +484,7 @@ export function buildOpenAIUpstreamRequest(
   // always use Bearer regardless of the incoming auth scheme.
   const cred = extractAuth(req.rawHeaders);
   if (cred) {
-    headers["Authorization"] = `Bearer ${cred.value}`;
+    headers.Authorization = `Bearer ${cred.value}`;
   }
 
   const body: Record<string, unknown> = {

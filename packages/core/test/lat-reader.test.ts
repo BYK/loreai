@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach } from "bun:test";
-import { join } from "path";
+import { join } from "node:path";
 import { db, ensureProject } from "../src/db";
 import * as latReader from "../src/lat-reader";
 

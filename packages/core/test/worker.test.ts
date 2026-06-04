@@ -12,7 +12,7 @@ describe("workerSessionIDs", () => {
   });
 
   test("isWorkerSession returns true after adding to workerSessionIDs", () => {
-    const id = "test-worker-" + crypto.randomUUID();
+    const id = `test-worker-${crypto.randomUUID()}`;
     workerSessionIDs.add(id);
     expect(isWorkerSession(id)).toBe(true);
     // Cleanup

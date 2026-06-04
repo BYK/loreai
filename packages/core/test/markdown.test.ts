@@ -266,7 +266,8 @@ describe("unescapeMarkdown", () => {
     // Parse the bullet back out (as agents-file.ts does), unescaping on read
     const bulletMatch = exported1.match(/^\*\s+\*\*(.+?)\*\*:\s*(.+)$/m);
     expect(bulletMatch).not.toBeNull();
-    const parsedContent = unescapeMarkdown(bulletMatch![2].trim());
+    if (!bulletMatch) throw new Error("expected bullet match");
+    const parsedContent = unescapeMarkdown(bulletMatch[2].trim());
 
     // Content after parse+unescape should equal original
     expect(parsedContent).toBe(original);

@@ -115,7 +115,7 @@ function errorResponse(
  */
 function isWebSocketUpgrade(req: Request): boolean {
   const upgrade = req.headers.get("upgrade");
-  if (!upgrade || upgrade.toLowerCase() !== "websocket") return false;
+  if (upgrade?.toLowerCase() !== "websocket") return false;
   const connection = req.headers.get("connection");
   // Connection may be a comma-separated list (e.g. "keep-alive, Upgrade").
   return !!connection && connection.toLowerCase().includes("upgrade");
@@ -188,7 +188,7 @@ async function handleModelsPassthrough(
     const apiKey = req.headers.get("x-api-key");
     const auth = req.headers.get("authorization");
     if (apiKey) headers["x-api-key"] = apiKey;
-    if (auth) headers["authorization"] = auth;
+    if (auth) headers.authorization = auth;
     // Anthropic requires the version header
     const anthropicVersion = req.headers.get("anthropic-version");
     if (anthropicVersion) headers["anthropic-version"] = anthropicVersion;
@@ -475,11 +475,13 @@ export function startServer(config: GatewayConfig): {
   // resolves when the server is actually listening (server.listen() is async).
   // Collect all ready promises so startGateway() can await them.
   const readyPromises = servers
-    .map((s: any) => s.ready as Promise<void> | undefined)
+    .map((s) => (s as { ready?: Promise<void> }).ready)
     .filter(Boolean) as Promise<void>[];
 
   return {
-    stop: () => servers.forEach((s) => s.stop()),
+    stop: () => {
+      for (const s of servers) s.stop();
+    },
     port: resolvedPort,
     hosts: config.hosts,
     ready:

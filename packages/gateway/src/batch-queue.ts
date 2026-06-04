@@ -883,7 +883,8 @@ export function createBatchLLMClient(
         switch (result.outcome) {
           case "succeeded": {
             // Emit gen_ai.chat span for batch result with usage + queue time
-            if (Sentry.isInitialized() && result.usage) {
+            const resultUsage = result.usage;
+            if (Sentry.isInitialized() && resultUsage) {
               Sentry.startSpan(
                 {
                   op: "gen_ai.chat",
@@ -899,16 +900,16 @@ export function createBatchLLMClient(
                 (span) => {
                   setGenAiUsageAttributes(
                     span,
-                    result.usage!,
+                    resultUsage,
                     result.model ?? undefined,
                   );
                 },
               );
-              emitCostMetric(pending.params.model, result.usage, "batch", "1h");
+              emitCostMetric(pending.params.model, resultUsage, "batch", "1h");
               recordWorkerCost(
                 pending.sessionID,
                 pending.params.model,
-                result.usage,
+                resultUsage,
                 "batch",
                 pending.workerID,
                 "1h",

@@ -18,7 +18,7 @@
  * Used by the cch-seed-check CI workflow to trigger automated seed extraction.
  */
 
-import { parseArgs } from "util";
+import { parseArgs } from "node:util";
 import {
   VERSION_SEEDS,
   _parseSemver,

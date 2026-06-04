@@ -594,7 +594,6 @@ async function resolveAndApplyDelta(
     oldBinaryPath,
     destPath,
     resolveFromNetwork,
-    channel,
     offline,
   } = opts;
 

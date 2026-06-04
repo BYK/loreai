@@ -6,8 +6,8 @@ import {
   readFileSync,
   existsSync,
   statSync,
-} from "fs";
-import { join } from "path";
+} from "node:fs";
+import { join } from "node:path";
 import { db, ensureProject } from "../src/db";
 import * as ltm from "../src/ltm";
 import {
@@ -23,7 +23,6 @@ import {
   loreFileExists,
   clearLoreFileCache,
   parseEntriesFromSection,
-  type ParsedFileEntry,
 } from "../src/agents-file";
 
 // ---------------------------------------------------------------------------
@@ -36,7 +35,7 @@ const PROJECT = TMP_DIR;
 const AGENTS_FILE = join(TMP_DIR, "AGENTS.md");
 const LORE_FILE_PATH = join(TMP_DIR, LORE_FILE);
 
-function agentsPath(name = "AGENTS.md") {
+function _agentsPath(name = "AGENTS.md") {
   return join(TMP_DIR, name);
 }
 
@@ -65,7 +64,12 @@ function loreSectionWithEntries(
   const lines: string[] = [LORE_SECTION_START];
   const grouped: Record<string, typeof entries> = {};
   for (const e of entries) {
-    (grouped[e.category] ??= []).push(e);
+    let bucket = grouped[e.category];
+    if (!bucket) {
+      bucket = [];
+      grouped[e.category] = bucket;
+    }
+    bucket.push(e);
   }
   lines.push("");
   lines.push("## Long-term Knowledge");
@@ -422,14 +426,14 @@ describe("exportToFile", () => {
   });
 
   test(".lore.md separates entries with blank lines for merge-friendliness", () => {
-    const id1 = ltm.create({
+    const _id1 = ltm.create({
       projectPath: PROJECT,
       category: "decision",
       title: "Alpha decision",
       content: "First",
       scope: "project",
     });
-    const id2 = ltm.create({
+    const _id2 = ltm.create({
       projectPath: PROJECT,
       category: "decision",
       title: "Beta decision",
@@ -543,8 +547,8 @@ describe("importFromFile — known ID tracking", () => {
 
     const entry = ltm.get(remoteId);
     expect(entry).not.toBeNull();
-    expect(entry!.id).toBe(remoteId);
-    expect(entry!.title).toBe("Auth strategy");
+    expect(entry?.id).toBe(remoteId);
+    expect(entry?.title).toBe("Auth strategy");
   });
 
   test("does not duplicate an existing entry on re-import of same file", () => {
@@ -589,7 +593,7 @@ describe("importFromFile — known ID tracking", () => {
     importFromFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
 
     const entry = ltm.get(id);
-    expect(entry!.content).toContain("API keys");
+    expect(entry?.content).toContain("API keys");
   });
 
   test("creates hand-written entries (no marker) with new UUIDs", () => {
@@ -602,9 +606,9 @@ describe("importFromFile — known ID tracking", () => {
     const entries = ltm.forProject(PROJECT);
     const match = entries.find((e) => e.title === "Middleware pattern");
     expect(match).toBeDefined();
-    expect(match!.id).toBeTruthy();
+    expect(match?.id).toBeTruthy();
     // ID should be a valid UUID format
-    expect(match!.id).toMatch(
+    expect(match?.id).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
     );
   });
@@ -771,7 +775,7 @@ ${LORE_SECTION_END}`;
     const match = entries.find((e) => e.title === "Auth strategy");
     expect(match).toBeDefined();
     // The mangled UUID should NOT be used as the ID
-    expect(match!.id).not.toBe("019505a1-7c00-7000-8000-aabbccddeeff");
+    expect(match?.id).not.toBe("019505a1-7c00-7000-8000-aabbccddeeff");
   });
 });
 
@@ -842,7 +846,7 @@ describe("round-trip stability", () => {
 // Cross-project isolation
 // ---------------------------------------------------------------------------
 
-const OTHER_PROJECT = "/test/agents-file/other-project";
+const _OTHER_PROJECT = "/test/agents-file/other-project";
 
 describe("cross-project isolation", () => {
   test("importFromFile creates entries with cross_project = 0", () => {
@@ -861,7 +865,7 @@ describe("cross-project isolation", () => {
 
     const entry = ltm.get(remoteId);
     expect(entry).not.toBeNull();
-    expect(entry!.cross_project).toBe(0);
+    expect(entry?.cross_project).toBe(0);
   });
 
   test("hand-written entries imported from AGENTS.md are project-scoped", () => {
@@ -874,7 +878,7 @@ describe("cross-project isolation", () => {
     const entries = ltm.forProject(PROJECT, false);
     const match = entries.find((e) => e.title === "Hand-written pattern");
     expect(match).toBeDefined();
-    expect(match!.cross_project).toBe(0);
+    expect(match?.cross_project).toBe(0);
   });
 
   test("cross-project entries from another project do not appear in .lore.md", () => {
@@ -1003,7 +1007,7 @@ describe("exportToFile — self-healing duplicate sections", () => {
   });
 
   test("collapses mixed old+new marker sections (the real-world bug) into one", () => {
-    const id = ltm.create({
+    const _id = ltm.create({
       projectPath: PROJECT,
       category: "gotcha",
       title: "Watch this",
@@ -1097,7 +1101,7 @@ describe("shouldImport — old marker variant", () => {
 
     const entry = ltm.get(remoteId);
     expect(entry).not.toBeNull();
-    expect(entry!.title).toBe("Auth strategy");
+    expect(entry?.title).toBe("Auth strategy");
   });
 });
 
@@ -1251,8 +1255,8 @@ describe("importLoreFile", () => {
 
     const entry = ltm.get(id);
     expect(entry).not.toBeNull();
-    expect(entry!.title).toBe("Auth strategy");
-    expect(entry!.content).toBe("OAuth2 with PKCE");
+    expect(entry?.title).toBe("Auth strategy");
+    expect(entry?.content).toBe("OAuth2 with PKCE");
   });
 
   test("updates content when .lore.md has been edited", () => {
@@ -1278,7 +1282,7 @@ describe("importLoreFile", () => {
     importLoreFile(PROJECT);
 
     const entry = ltm.get(id);
-    expect(entry!.content).toContain("API keys");
+    expect(entry?.content).toContain("API keys");
   });
 
   test("handles hand-written entries (no UUID markers) in .lore.md", () => {
@@ -1292,7 +1296,7 @@ describe("importLoreFile", () => {
     const entries = ltm.forProject(PROJECT);
     const match = entries.find((e) => e.title === "Hand-written pattern");
     expect(match).toBeDefined();
-    expect(match!.id).toMatch(
+    expect(match?.id).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
     );
   });
@@ -1450,7 +1454,7 @@ describe("migration from AGENTS.md to .lore.md", () => {
 
     importLoreFile(PROJECT);
     const entry = ltm.get(remoteId);
-    expect(entry!.content).toContain("updated");
+    expect(entry?.content).toContain("updated");
   });
 
   test("pointer in AGENTS.md is safe for importFromFile (no entries parsed)", () => {
@@ -1509,7 +1513,7 @@ describe("lore file cache optimization", () => {
     // Simulate external edit (changes both mtime and content)
     const fp = join(PROJECT, LORE_FILE);
     const content = readFileSync(fp, "utf8");
-    writeFileSync(fp, content + "\n* **New**: Added externally\n", "utf8");
+    writeFileSync(fp, `${content}\n* **New**: Added externally\n`, "utf8");
 
     expect(shouldImportLoreFile(PROJECT)).toBe(true);
   });

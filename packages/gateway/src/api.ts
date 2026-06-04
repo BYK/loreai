@@ -122,7 +122,7 @@ function getLimit(url: URL, defaultLimit = 50, maxLimit = 1000): number {
   const raw = url.searchParams.get("limit");
   if (!raw) return defaultLimit;
   const n = parseInt(raw, 10);
-  if (isNaN(n) || n < 1) return defaultLimit;
+  if (Number.isNaN(n) || n < 1) return defaultLimit;
   return Math.min(n, maxLimit);
 }
 
@@ -160,7 +160,7 @@ function handleGlobalStats(): Response {
   return jsonResponse(data.globalStats());
 }
 
-function handleListKnowledge(url: URL, projectPath: string): Response {
+function handleListKnowledge(_url: URL, projectPath: string): Response {
   const entries = ltm.forProject(projectPath, false);
   return jsonResponse(entries);
 }

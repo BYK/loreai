@@ -14,7 +14,7 @@
  */
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
-import { dirname, resolve, join } from "node:path";
+import { dirname, join } from "node:path";
 import type {
   FixtureEntry,
   UpstreamInterceptor,
@@ -694,7 +694,7 @@ async function writeResult(
 ): Promise<void> {
   const dir = dirname(outputPath);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  await appendFile(outputPath, JSON.stringify(result) + "\n");
+  await appendFile(outputPath, `${JSON.stringify(result)}\n`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1066,7 +1066,7 @@ export async function runEval(config: EvalConfig): Promise<EvalResult[]> {
     let scenarioModules = await loadScenarios(config.dimensions);
     if (config.scenarios?.length) {
       scenarioModules = scenarioModules.filter((s) =>
-        config.scenarios!.includes(s.id),
+        config.scenarios?.includes(s.id),
       );
     }
 
@@ -1163,7 +1163,7 @@ export function printSummary(results: EvalResult[]): string {
   for (const r of results) {
     const key = r.dimension;
     if (!byDimension.has(key)) byDimension.set(key, []);
-    byDimension.get(key)!.push(r);
+    byDimension.get(key)?.push(r);
   }
 
   const dimensionLabels: Record<string, string> = {
@@ -1181,7 +1181,7 @@ export function printSummary(results: EvalResult[]): string {
     const byScenario = new Map<string, EvalResult[]>();
     for (const r of dimResults) {
       if (!byScenario.has(r.scenario)) byScenario.set(r.scenario, []);
-      byScenario.get(r.scenario)!.push(r);
+      byScenario.get(r.scenario)?.push(r);
     }
 
     for (const [scenario, scenResults] of byScenario) {
@@ -1189,7 +1189,7 @@ export function printSummary(results: EvalResult[]): string {
       const byMode = new Map<string, EvalResult[]>();
       for (const r of scenResults) {
         if (!byMode.has(r.mode)) byMode.set(r.mode, []);
-        byMode.get(r.mode)!.push(r);
+        byMode.get(r.mode)?.push(r);
       }
 
       const parts: string[] = [];

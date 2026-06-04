@@ -12,9 +12,9 @@
  *   globalStorage/saoudrizwan.claude-dev/state/taskHistory.json
  * maps tasks to their CWD (cwdOnTaskInitialization).
  */
-import { readdirSync, readFileSync, existsSync, statSync } from "fs";
-import { join } from "path";
-import { homedir } from "os";
+import { readFileSync, existsSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import type {
   AgentHistoryProvider,
   ConversationChunk,
@@ -78,7 +78,7 @@ function estimateTokens(text: string): number {
 
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
-  return text.slice(0, max) + "...";
+  return `${text.slice(0, max)}...`;
 }
 
 /**

@@ -32,6 +32,14 @@ import type {
 // workerData
 // ---------------------------------------------------------------------------
 
+// This module is only ever loaded as a worker thread entry point, so
+// `parentPort` is always present. Capture it into a non-null local and fail
+// fast otherwise.
+if (!parentPort) {
+  throw new Error("embedding-worker must be run as a worker thread");
+}
+const port = parentPort;
+
 const { modelId, dimensions, vendorModel } = workerData as WorkerInitData;
 
 /**
@@ -189,7 +197,8 @@ async function drain(): Promise<void> {
   processing = true;
 
   while (queue.length > 0) {
-    const req = queue.shift()!;
+    const req = queue.shift();
+    if (!req) break;
     await processEmbed(req);
   }
 
@@ -206,14 +215,15 @@ async function drain(): Promise<void> {
  * ~1 char/token, shorter texts can never exceed the limit.
  */
 function truncateTexts(texts: string[], maxTokens: number): string[] {
-  if (!tokenizer) return texts;
+  const tk = tokenizer;
+  if (!tk) return texts;
   return texts.map((text) => {
     if (text.length <= maxTokens) return text;
     // Exclude [CLS]/[SEP] special tokens so ids.length reflects pure content
     // token count — otherwise the 2 extra tokens skew the limit check.
-    const ids = tokenizer!.encode(text, { add_special_tokens: false });
+    const ids = tk.encode(text, { add_special_tokens: false });
     if (ids.length <= maxTokens) return text;
-    return tokenizer!.decode(ids.slice(0, maxTokens), {
+    return tk.decode(ids.slice(0, maxTokens), {
       skip_special_tokens: true,
     });
   });
@@ -252,10 +262,18 @@ function isWasmFatalError(msg: string): boolean {
 
 /** Run inference on `texts` and return per-text vectors. */
 async function runInference(texts: string[]): Promise<Float32Array[]> {
+  // `ensurePipeline()` (awaited by the caller) guarantees both `pipe` and
+  // `layerNormFn` are set; capture into locals for narrowing.
+  const pipeline = pipe;
+  const layerNorm = layerNormFn;
+  if (!pipeline || !layerNorm) {
+    throw new Error("pipeline not initialized");
+  }
+
   // Run feature extraction with mean pooling.
   // truncation: true caps each text at the model's max length (8192 tokens
   // for Nomic v1.5) as a last-resort safety net.
-  const output = await pipe!(texts, { pooling: "mean", truncation: true });
+  const output = await pipeline(texts, { pooling: "mean", truncation: true });
 
   // Post-process following Nomic's recipe:
   //   1. Layer normalization over the full hidden dimension
@@ -267,12 +285,12 @@ async function runInference(texts: string[]): Promise<Float32Array[]> {
   let normalized: { tolist(): number[][]; data: Float32Array; dims: number[] };
   if (truncate) {
     // layer_norm → slice → L2 normalize
-    normalized = layerNormFn!(output, [fullDim])
+    normalized = layerNorm(output, [fullDim])
       .slice(null, [0, dimensions])
       .normalize(2, -1);
   } else {
     // layer_norm → L2 normalize (no truncation)
-    normalized = layerNormFn!(output, [fullDim]).normalize(2, -1);
+    normalized = layerNorm(output, [fullDim]).normalize(2, -1);
   }
 
   // Extract per-text vectors from the batched tensor.
@@ -370,10 +388,10 @@ async function processEmbed(req: EmbedRequest): Promise<void> {
 // ---------------------------------------------------------------------------
 
 function post(msg: WorkerOutbound): void {
-  parentPort!.postMessage(msg);
+  port.postMessage(msg);
 }
 
-parentPort!.on("message", (msg: WorkerInbound) => {
+port.on("message", (msg: WorkerInbound) => {
   switch (msg.type) {
     case "embed":
       enqueue(msg);

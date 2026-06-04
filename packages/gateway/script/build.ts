@@ -434,7 +434,7 @@ async function buildBinary() {
     // onnxruntime-node is redirected to onnxruntime-web (WASM backend).
     // The WASM files are embedded as Bun assets — onnxruntime-web's node
     // entry loads them via readFile(), which can read from Bun's $bunfs.
-    const ortWebDistDir = findBunPackageDir("onnxruntime-web") + "/dist";
+    const ortWebDistDir = `${findBunPackageDir("onnxruntime-web")}/dist`;
     const wasmFiles = [
       "ort-wasm-simd-threaded.mjs",
       "ort-wasm-simd-threaded.wasm",
@@ -554,7 +554,7 @@ async function buildBinary() {
     const result = await Bun.build({
       entrypoints: [compileEntry],
       compile: {
-        target: `bun-${target}` as any,
+        target: `bun-${target}` as Bun.Build.CompileTarget,
         outfile: binaryPath,
       },
       sourcemap: "linked",

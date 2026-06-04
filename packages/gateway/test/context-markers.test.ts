@@ -213,7 +213,7 @@ describe("extractProjectMarker", () => {
   });
 
   test("rejects paths exceeding max length", () => {
-    const longPath = "/home/" + "a".repeat(1020);
+    const longPath = `/home/${"a".repeat(1020)}`;
     const msgs: GatewayMessage[] = [userMsg(`[lore:project=${longPath}]`)];
     expect(extractProjectMarker(msgs)).toBeUndefined();
   });

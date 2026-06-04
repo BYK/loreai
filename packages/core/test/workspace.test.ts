@@ -353,12 +353,12 @@ describe("resolveWorkspaces", () => {
   test("rejects ../ path traversal escapes", () => {
     const root = makeTempDir();
     // Create a sibling directory that should NOT be reachable
-    const sibling = join(root, "..", "sibling-" + Date.now());
+    const sibling = join(root, "..", `sibling-${Date.now()}`);
     mkdirSync(sibling, { recursive: true });
 
     try {
       const result = resolveWorkspaces(root, [
-        "../sibling-" + sibling.split("-").pop(),
+        `../sibling-${sibling.split("-").pop()}`,
       ]);
       expect(result).toEqual([]);
     } finally {

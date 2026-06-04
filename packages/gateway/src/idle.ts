@@ -20,7 +20,6 @@ import {
   latReader,
   log,
   config as loreConfig,
-  getLastTurnAt,
   exportToFile,
   exportLoreFile,
   saveSessionCosts,

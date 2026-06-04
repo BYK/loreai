@@ -9,9 +9,8 @@ import {
   buildCompactionResponse,
   COMPACTION_SYSTEM_PATTERNS,
   COMPACTION_USER_PATTERNS,
-  COMPACTION_TEMPLATE_SECTIONS,
 } from "../src/compaction";
-import type { GatewayRequest, GatewayResponse } from "../src/translate/types";
+import type { GatewayRequest } from "../src/translate/types";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -490,8 +489,7 @@ describe("isMetaRequest", () => {
 
   test("long system prompt with meta keyword + low maxTokens + few messages → detected", () => {
     const req = makeRequest({
-      system:
-        "Please generate a title for the conversation. " + "x".repeat(600),
+      system: `Please generate a title for the conversation. ${"x".repeat(600)}`,
       tools: [],
       messages: [userMsg("Help me")],
       maxTokens: 150,
@@ -722,7 +720,9 @@ describe("detectCompactionRequest", () => {
     expect(result.detected).toBe(true);
     if (result.detected) {
       expect(result.reason).toBe("template-sections");
-      expect((result as any).matchCount).toBeGreaterThanOrEqual(4);
+      if (result.reason === "template-sections") {
+        expect(result.matchCount).toBeGreaterThanOrEqual(4);
+      }
     }
   });
 

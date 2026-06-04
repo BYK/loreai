@@ -14,14 +14,13 @@ import {
   writeFileSync,
   mkdirSync,
   statSync,
-} from "fs";
-import { dirname, join } from "path";
+} from "node:fs";
+import { dirname, join } from "node:path";
 import { db, ensureProject } from "./db";
 import * as ltm from "./ltm";
 import {
   serialize,
   inline,
-  h,
   ul,
   liph,
   strong,
@@ -350,7 +349,7 @@ function buildSection(projectPath: string): string {
           ul([
             liph(
               strong(inline(sorted[i].title)),
-              t(": " + inline(sorted[i].content)),
+              t(`: ${inline(sorted[i].content)}`),
             ),
           ]),
         ),
@@ -387,7 +386,7 @@ export function exportToFile(input: {
     "For long-term knowledge entries managed by [lore](https://github.com/BYK/loreai) " +
     "(gotchas, patterns, decisions, architecture), see [`.lore.md`](.lore.md) " +
     "in the project root.\n";
-  const newSection = LORE_SECTION_START + pointerBody + LORE_SECTION_END + "\n";
+  const newSection = `${LORE_SECTION_START + pointerBody + LORE_SECTION_END}\n`;
 
   let fileContent = "";
   if (existsSync(input.filePath)) {
@@ -398,9 +397,9 @@ export function exportToFile(input: {
 
   // Ensure there's a blank line separator before the section when appending
   const prefix = before.trimEnd();
-  const prefixWithSep = prefix.length > 0 ? prefix + "\n\n" : "";
+  const prefixWithSep = prefix.length > 0 ? `${prefix}\n\n` : "";
   const suffix = after.trimStart();
-  const suffixWithSep = suffix.length > 0 ? "\n" + suffix : "";
+  const suffixWithSep = suffix.length > 0 ? `\n${suffix}` : "";
 
   const result = prefixWithSep + newSection + suffixWithSep;
 
@@ -571,7 +570,7 @@ export function exportLoreFile(projectPath: string): void {
   if (isHostedMode()) return;
 
   const sectionBody = buildSection(projectPath);
-  const content = LORE_FILE_HEADER + "\n" + sectionBody;
+  const content = `${LORE_FILE_HEADER}\n${sectionBody}`;
   const contentHash = hashSection(content);
 
   const fp = join(projectPath, LORE_FILE);
@@ -618,7 +617,7 @@ export function shouldImportLoreFile(projectPath: string): boolean {
   // Slow path: mtime changed (or first check) — read file and compare content.
   const fileContent = readFileSync(fp, "utf8");
   const fileHash = hashSection(fileContent);
-  const expected = LORE_FILE_HEADER + "\n" + buildSection(projectPath);
+  const expected = `${LORE_FILE_HEADER}\n${buildSection(projectPath)}`;
   const expectedHash = hashSection(expected);
 
   if (fileHash === expectedHash) {

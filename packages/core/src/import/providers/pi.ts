@@ -10,9 +10,9 @@
  * We reconstruct the linear conversation by following the chain from root to
  * the latest leaf.
  */
-import { readdirSync, readFileSync, existsSync, statSync } from "fs";
-import { join } from "path";
-import { homedir } from "os";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import type {
   AgentHistoryProvider,
   ConversationChunk,
@@ -82,7 +82,7 @@ function estimateTokens(text: string): number {
 
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
-  return text.slice(0, max) + "...";
+  return `${text.slice(0, max)}...`;
 }
 
 /**
@@ -149,8 +149,7 @@ function linearize(lines: PiLine[]): PiLine[] {
     }
   }
 
-  if (!rootLine || !rootLine.id)
-    return lines.filter((l) => l.type === "message");
+  if (!rootLine?.id) return lines.filter((l) => l.type === "message");
 
   // Walk from root, always picking the child with the latest timestamp
   // (or the last one appended if timestamps are equal)

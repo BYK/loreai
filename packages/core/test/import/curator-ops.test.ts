@@ -97,7 +97,7 @@ describe("applyOps", () => {
     expect(result.updated).toBe(1);
 
     const entry = ltm.get(id);
-    expect(entry!.content).toBe("New improved content");
+    expect(entry?.content).toBe("New improved content");
   });
 
   test("deletes entries", () => {
@@ -136,8 +136,8 @@ describe("applyOps", () => {
     const entries = ltm.forProject(PROJECT_PATH, false);
     const found = entries.find((e) => e.title === "Long entry");
     expect(found).toBeDefined();
-    expect(found!.content.length).toBeLessThan(longContent.length);
-    expect(found!.content).toContain("[truncated");
+    expect(found?.content.length).toBeLessThan(longContent.length);
+    expect(found?.content).toContain("[truncated");
   });
 
   test("skipCreate prevents create ops", () => {

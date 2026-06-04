@@ -57,7 +57,7 @@ if (typeof __SENTRY_DEBUG_ID__ !== "undefined") {
   try {
     const stack = new Error().stack;
     if (stack) {
-      const g = globalThis as any;
+      const g = globalThis as { _sentryDebugIds?: Record<string, string> };
       g._sentryDebugIds = g._sentryDebugIds || {};
       g._sentryDebugIds[stack] = __SENTRY_DEBUG_ID__;
     }

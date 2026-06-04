@@ -297,7 +297,7 @@ export function isAnthropicOAuthSession(
   cred?: AuthCredential | null,
 ): boolean {
   const c = cred ?? resolveAuth(sessionID);
-  if (!c || c.scheme !== "bearer") return false;
+  if (c?.scheme !== "bearer") return false;
   return isClaudeCodeOAuthSession(sessionID);
 }
 

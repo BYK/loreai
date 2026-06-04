@@ -1,5 +1,5 @@
 import { db, ensureProject } from "./db";
-import { ftsQuery, EMPTY_QUERY, runRelaxedSearch } from "./search";
+import { runRelaxedSearch } from "./search";
 import { sanitizeSurrogates } from "./markdown";
 import * as embedding from "./embedding";
 import { classifyToolError, MAX_ERROR_MESSAGE_LEN } from "./tool-trace";
@@ -54,7 +54,7 @@ export function partsToText(parts: LorePart[]): string {
   // Sanitize unpaired surrogates from tool outputs and other raw text.
   // Without this, surrogates survive into the DB and later break JSON
   // serialization when included in recall tool responses.
-  return sanitizeSurrogates(chunks.join("\n" + CHUNK_TERMINATOR));
+  return sanitizeSurrogates(chunks.join(`\n${CHUNK_TERMINATOR}`));
 }
 
 function messageMetadata(info: LoreMessage, parts: LorePart[]): string {

@@ -8,8 +8,8 @@
  *  - Fallback to synchronous on batch API errors
  *  - Shutdown drains the queue
  */
-import { describe, test, expect, mock, beforeEach, afterEach } from "bun:test";
-import { createBatchLLMClient, type BatchStats } from "../src/batch-queue";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { createBatchLLMClient } from "../src/batch-queue";
 import type { LLMClient } from "@loreai/core";
 import type { AuthCredential } from "../src/auth";
 
@@ -258,20 +258,20 @@ describe("BatchLLMClient", () => {
     );
 
     // Queue 3 items — should auto-flush on the 3rd
-    const p1 = client.prompt("sys", "msg1", { workerID: "lore-distill" });
-    const p2 = client.prompt("sys", "msg2", { workerID: "lore-distill" });
-    const p3 = client.prompt("sys", "msg3", { workerID: "lore-distill" });
+    const _p1 = client.prompt("sys", "msg1", { workerID: "lore-distill" });
+    const _p2 = client.prompt("sys", "msg2", { workerID: "lore-distill" });
+    const _p3 = client.prompt("sys", "msg3", { workerID: "lore-distill" });
 
     // Wait a tick for the flush to complete
     await new Promise((r) => setTimeout(r, 50));
 
     // Should have called the batch API
     expect(fetchCalls).toHaveLength(1);
-    expect(fetchCalls[0]!.url).toBe(
+    expect(fetchCalls[0]?.url).toBe(
       `${UPSTREAMS.anthropic}/v1/messages/batches`,
     );
-    expect(fetchCalls[0]!.method).toBe("POST");
-    expect(fetchCalls[0]!.body!.requests).toHaveLength(3);
+    expect(fetchCalls[0]?.method).toBe("POST");
+    expect(fetchCalls[0]?.body?.requests).toHaveLength(3);
 
     const s = client.stats();
     expect(s.totalBatched).toBe(3);
@@ -411,9 +411,9 @@ describe("BatchLLMClient", () => {
     // 2 urgent, 3 queued
     await client.prompt("sys", "urgent1", { urgent: true });
     await client.prompt("sys", "urgent2", { urgent: true });
-    const p1 = client.prompt("sys", "bg1", {});
-    const p2 = client.prompt("sys", "bg2", {});
-    const p3 = client.prompt("sys", "bg3", {});
+    const _p1 = client.prompt("sys", "bg1", {});
+    const _p2 = client.prompt("sys", "bg2", {});
+    const _p3 = client.prompt("sys", "bg3", {});
 
     let s = client.stats();
     expect(s.totalUrgent).toBe(2);
@@ -455,12 +455,14 @@ describe("BatchLLMClient", () => {
 
     // Verify the batch request uses the default model
     expect(fetchCalls).toHaveLength(1);
-    const body = fetchCalls[0]!.body!;
-    const req0 = body.requests[0]!;
+    const body = fetchCalls[0]?.body;
+    if (!body) throw new Error("expected fetch body");
+    const req0 = body.requests[0];
+    if (!req0) throw new Error("expected batch request");
     expect(req0.params.model).toBe("claude-sonnet-4-20250514");
     const sys = req0.params.system as Array<{ type: string; text: string }>;
-    expect(sys[0]!.text).toBe("sys prompt");
-    expect(req0.params.messages[0]!.content).toBe("user msg");
+    expect(sys[0]?.text).toBe("sys prompt");
+    expect(req0.params.messages[0]?.content).toBe("user msg");
 
     await client.shutdown();
   });
@@ -490,7 +492,7 @@ describe("BatchLLMClient", () => {
 
     await new Promise((r) => setTimeout(r, 50));
 
-    expect(fetchCalls[0]!.body!.requests[0]!.params.model).toBe(
+    expect(fetchCalls[0]?.body?.requests[0]?.params.model).toBe(
       "claude-haiku-3-5-20241022",
     );
 
@@ -541,18 +543,18 @@ describe("BatchLLMClient", () => {
     expect(fetchCalls).toHaveLength(3);
 
     // First call: Anthropic batch submission
-    expect(fetchCalls[0]!.url).toBe(
+    expect(fetchCalls[0]?.url).toBe(
       `${UPSTREAMS.anthropic}/v1/messages/batches`,
     );
-    expect(fetchCalls[0]!.method).toBe("POST");
+    expect(fetchCalls[0]?.method).toBe("POST");
 
     // Second call: OpenAI file upload (FormData — body won't be JSON-parsed)
-    expect(fetchCalls[1]!.url).toBe(`${UPSTREAMS.openai}/v1/files`);
-    expect(fetchCalls[1]!.method).toBe("POST");
+    expect(fetchCalls[1]?.url).toBe(`${UPSTREAMS.openai}/v1/files`);
+    expect(fetchCalls[1]?.method).toBe("POST");
 
     // Third call: OpenAI batch creation
-    expect(fetchCalls[2]!.url).toBe(`${UPSTREAMS.openai}/v1/batches`);
-    expect(fetchCalls[2]!.method).toBe("POST");
+    expect(fetchCalls[2]?.url).toBe(`${UPSTREAMS.openai}/v1/batches`);
+    expect(fetchCalls[2]?.method).toBe("POST");
 
     const s = client.stats();
     expect(s.totalBatched).toBe(2);

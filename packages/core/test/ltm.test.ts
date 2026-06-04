@@ -15,7 +15,7 @@ import * as embedding from "../src/embedding";
 // UUID v7 pattern: starts with version nibble 7, variant bits 10xxxxxx
 const UUID_V7_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const UUID_RE =
+const _UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 const PROJECT = "/test/ltm/project";
@@ -34,9 +34,9 @@ describe("ltm", () => {
 
     const entry = ltm.get(id);
     expect(entry).not.toBeNull();
-    expect(entry!.title).toBe("Auth strategy");
-    expect(entry!.category).toBe("decision");
-    expect(entry!.confidence).toBe(1.0);
+    expect(entry?.title).toBe("Auth strategy");
+    expect(entry?.category).toBe("decision");
+    expect(entry?.confidence).toBe(1.0);
   });
 
   test("create global knowledge entry", () => {
@@ -49,8 +49,8 @@ describe("ltm", () => {
     });
     const entry = ltm.get(id);
     expect(entry).not.toBeNull();
-    expect(entry!.project_id).toBeNull();
-    expect(entry!.cross_project).toBe(1);
+    expect(entry?.project_id).toBeNull();
+    expect(entry?.cross_project).toBe(1);
   });
 
   test("update knowledge entry", () => {
@@ -67,8 +67,8 @@ describe("ltm", () => {
     });
 
     const entry = ltm.get(id);
-    expect(entry!.content).toContain("Hono");
-    expect(entry!.confidence).toBe(0.9);
+    expect(entry?.content).toContain("Hono");
+    expect(entry?.confidence).toBe(0.9);
   });
 
   test("remove knowledge entry", () => {
@@ -229,7 +229,7 @@ describe("ltm — crossProject defaults and dedup", () => {
     });
     const entry = ltm.get(id);
     expect(entry).not.toBeNull();
-    expect(entry!.cross_project).toBe(0);
+    expect(entry?.cross_project).toBe(0);
   });
 
   test("create() with explicit crossProject: true sets cross_project = 1", () => {
@@ -242,7 +242,7 @@ describe("ltm — crossProject defaults and dedup", () => {
     });
     const entry = ltm.get(id);
     expect(entry).not.toBeNull();
-    expect(entry!.cross_project).toBe(1);
+    expect(entry?.cross_project).toBe(1);
   });
 
   test("dedup guard catches title match against cross-project entry", () => {
@@ -267,7 +267,7 @@ describe("ltm — crossProject defaults and dedup", () => {
 
     expect(returnedId).toBe(crossId);
     const entry = ltm.get(crossId);
-    expect(entry!.content).toBe("Updated content from project scope");
+    expect(entry?.content).toBe("Updated content from project scope");
 
     // No duplicate should exist
     const all = ltm.forProject(PROJ, true);
@@ -326,8 +326,8 @@ describe("ltm — UUIDv7 IDs", () => {
 
     const entry = ltm.get(explicitId);
     expect(entry).not.toBeNull();
-    expect(entry!.id).toBe(explicitId);
-    expect(entry!.title).toBe("Explicit ID entry");
+    expect(entry?.id).toBe(explicitId);
+    expect(entry?.title).toBe("Explicit ID entry");
   });
 
   test("explicit id can be a UUIDv4 (backwards compat for existing entries)", () => {
@@ -342,7 +342,7 @@ describe("ltm — UUIDv7 IDs", () => {
     });
     const entry = ltm.get(v4Id);
     expect(entry).not.toBeNull();
-    expect(entry!.id).toBe(v4Id);
+    expect(entry?.id).toBe(v4Id);
   });
 
   test("create() with duplicate explicit id throws or silently overwrites — not silent data loss", () => {
@@ -370,7 +370,7 @@ describe("ltm — UUIDv7 IDs", () => {
 
     // Original should still be intact
     const entry = ltm.get(id);
-    expect(entry!.title).toBe("Original");
+    expect(entry?.title).toBe("Original");
   });
 });
 
@@ -412,7 +412,7 @@ describe("ltm.forSession", () => {
     );
     expect(found).toBeDefined();
     // It must be the project-specific entry (cross_project = 0)
-    expect(found!.cross_project).toBe(0);
+    expect(found?.cross_project).toBe(0);
   });
 
   test("respects token budget — stops adding entries when budget exhausted", async () => {
@@ -899,8 +899,8 @@ describe("ltm.pruneOversized", () => {
     // We verify the specific entries we created rather than the total count.
     ltm.pruneOversized(2000);
 
-    expect(ltm.get(longId)!.confidence).toBe(0);
-    expect(ltm.get(shortId)!.confidence).toBe(1.0);
+    expect(ltm.get(longId)?.confidence).toBe(0);
+    expect(ltm.get(shortId)?.confidence).toBe(1.0);
   });
 
   test("pruned entries do not appear in forProject results", () => {
@@ -929,7 +929,7 @@ describe("ltm.pruneOversized", () => {
 
     ltm.pruneOversized(2000);
     // The short entry should retain full confidence
-    expect(ltm.get(id)!.confidence).toBe(1.0);
+    expect(ltm.get(id)?.confidence).toBe(1.0);
   });
 });
 
@@ -949,7 +949,7 @@ describe("ltm.create confidence", () => {
     });
     const entry = ltm.get(id);
     expect(entry).not.toBeNull();
-    expect(entry!.confidence).toBe(0.9);
+    expect(entry?.confidence).toBe(0.9);
   });
 
   test("defaults confidence to 1.0 when omitted", () => {
@@ -962,7 +962,7 @@ describe("ltm.create confidence", () => {
     });
     const entry = ltm.get(id);
     expect(entry).not.toBeNull();
-    expect(entry!.confidence).toBe(1.0);
+    expect(entry?.confidence).toBe(1.0);
   });
 
   test("clamps confidence to [0, 1]", () => {
@@ -974,7 +974,7 @@ describe("ltm.create confidence", () => {
       scope: "project",
       confidence: 1.5,
     });
-    expect(ltm.get(id1)!.confidence).toBe(1.0);
+    expect(ltm.get(id1)?.confidence).toBe(1.0);
 
     const id2 = ltm.create({
       projectPath: "/test/ltm/confidence",
@@ -984,7 +984,7 @@ describe("ltm.create confidence", () => {
       scope: "project",
       confidence: -0.5,
     });
-    expect(ltm.get(id2)!.confidence).toBe(0);
+    expect(ltm.get(id2)?.confidence).toBe(0);
   });
 });
 
@@ -1184,7 +1184,7 @@ describe("curator applyOps confidence", () => {
     const entries = ltm.all();
     const entry = entries.find((e) => e.title === "applyOps confidence test");
     expect(entry).toBeDefined();
-    expect(entry!.confidence).toBe(0.9);
+    expect(entry?.confidence).toBe(0.9);
   });
 });
 
@@ -1219,9 +1219,9 @@ describe("ltm.rerankPreferences", () => {
     });
 
     // All start at confidence 1.0
-    expect(ltm.get(id_strong)!.confidence).toBe(1.0);
-    expect(ltm.get(id_explicit)!.confidence).toBe(1.0);
-    expect(ltm.get(id_mild)!.confidence).toBe(1.0);
+    expect(ltm.get(id_strong)?.confidence).toBe(1.0);
+    expect(ltm.get(id_explicit)?.confidence).toBe(1.0);
+    expect(ltm.get(id_mild)?.confidence).toBe(1.0);
 
     const updated = ltm.rerankPreferences();
     // Only the explicit-pref entry changes (1.0 → 0.9). The strong directive
@@ -1229,9 +1229,9 @@ describe("ltm.rerankPreferences", () => {
     // longer demoted — it keeps the curator's confidence (1.0).
     expect(updated).toBe(1);
 
-    expect(ltm.get(id_strong)!.confidence).toBe(1.0);
-    expect(ltm.get(id_explicit)!.confidence).toBe(0.9);
-    expect(ltm.get(id_mild)!.confidence).toBe(1.0);
+    expect(ltm.get(id_strong)?.confidence).toBe(1.0);
+    expect(ltm.get(id_explicit)?.confidence).toBe(0.9);
+    expect(ltm.get(id_mild)?.confidence).toBe(1.0);
   });
 
   test("does not demote non-English (Turkish) directives", () => {
@@ -1246,11 +1246,11 @@ describe("ltm.rerankPreferences", () => {
       crossProject: true,
     });
 
-    expect(ltm.get(id_tr)!.confidence).toBe(1.0);
+    expect(ltm.get(id_tr)?.confidence).toBe(1.0);
 
     ltm.rerankPreferences();
 
-    expect(ltm.get(id_tr)!.confidence).toBe(1.0);
+    expect(ltm.get(id_tr)?.confidence).toBe(1.0);
   });
 
   test("skips entries already scored by curator (confidence < 1.0)", () => {
@@ -1263,9 +1263,9 @@ describe("ltm.rerankPreferences", () => {
       confidence: 0.6,
     });
 
-    const updated = ltm.rerankPreferences();
+    const _updated = ltm.rerankPreferences();
     // Should not touch this entry — its confidence is already < 1.0
-    expect(ltm.get(id)!.confidence).toBe(0.6);
+    expect(ltm.get(id)?.confidence).toBe(0.6);
   });
 
   test("detects various directive patterns", () => {
@@ -1299,13 +1299,13 @@ describe("ltm.rerankPreferences", () => {
     ltm.rerankPreferences();
 
     // "Always" → strong directive → 1.0
-    expect(ltm.get(ids[0])!.confidence).toBe(1.0);
+    expect(ltm.get(ids[0])?.confidence).toBe(1.0);
     // "must not" → strong directive → 1.0
-    expect(ltm.get(ids[1])!.confidence).toBe(1.0);
+    expect(ltm.get(ids[1])?.confidence).toBe(1.0);
     // "Make sure to" → explicit pref → 0.9
-    expect(ltm.get(ids[2])!.confidence).toBe(0.9);
+    expect(ltm.get(ids[2])?.confidence).toBe(0.9);
     // "Don't forget" → explicit pref → 0.9
-    expect(ltm.get(ids[3])!.confidence).toBe(0.9);
+    expect(ltm.get(ids[3])?.confidence).toBe(0.9);
   });
 });
 
@@ -1330,17 +1330,17 @@ describe("ltm — multi-user columns (v29)", () => {
     });
     const entry = ltm.get(id);
     expect(entry).not.toBeNull();
-    expect(entry!.created_by).toBeNull();
-    expect(entry!.updated_by).toBeNull();
-    expect(entry!.sensitivity).toBe("normal");
-    expect(entry!.promotion_status).toBeNull();
-    expect(entry!.promoted_at).toBeNull();
-    expect(entry!.approval_status).toBe("auto");
-    expect(entry!.approved_by).toBeNull();
-    expect(entry!.approved_at).toBeNull();
-    expect(entry!.source_user_id).toBeNull();
-    expect(entry!.source_entry_id).toBeNull();
-    expect(entry!.last_accessed_at).toBeNull();
+    expect(entry?.created_by).toBeNull();
+    expect(entry?.updated_by).toBeNull();
+    expect(entry?.sensitivity).toBe("normal");
+    expect(entry?.promotion_status).toBeNull();
+    expect(entry?.promoted_at).toBeNull();
+    expect(entry?.approval_status).toBe("auto");
+    expect(entry?.approved_by).toBeNull();
+    expect(entry?.approved_at).toBeNull();
+    expect(entry?.source_user_id).toBeNull();
+    expect(entry?.source_entry_id).toBeNull();
+    expect(entry?.last_accessed_at).toBeNull();
   });
 
   test("create() accepts createdBy", () => {
@@ -1353,7 +1353,7 @@ describe("ltm — multi-user columns (v29)", () => {
       createdBy: "user-abc-123",
     });
     const entry = ltm.get(id);
-    expect(entry!.created_by).toBe("user-abc-123");
+    expect(entry?.created_by).toBe("user-abc-123");
   });
 
   test("create() accepts sensitivity override", () => {
@@ -1366,7 +1366,7 @@ describe("ltm — multi-user columns (v29)", () => {
       sensitivity: "sensitive",
     });
     const entry = ltm.get(id);
-    expect(entry!.sensitivity).toBe("sensitive");
+    expect(entry?.sensitivity).toBe("sensitive");
   });
 
   test("update() sets updated_by when updatedBy provided", () => {
@@ -1379,8 +1379,8 @@ describe("ltm — multi-user columns (v29)", () => {
     });
     ltm.update(id, { content: "Modified content", updatedBy: "user-xyz-456" });
     const entry = ltm.get(id);
-    expect(entry!.content).toBe("Modified content");
-    expect(entry!.updated_by).toBe("user-xyz-456");
+    expect(entry?.content).toBe("Modified content");
+    expect(entry?.updated_by).toBe("user-xyz-456");
   });
 
   test("update() can change sensitivity", () => {
@@ -1394,7 +1394,7 @@ describe("ltm — multi-user columns (v29)", () => {
     });
     ltm.update(id, { sensitivity: "restricted" });
     const entry = ltm.get(id);
-    expect(entry!.sensitivity).toBe("restricted");
+    expect(entry?.sensitivity).toBe("restricted");
   });
 
   test("update() without updatedBy leaves updated_by unchanged", () => {
@@ -1408,8 +1408,8 @@ describe("ltm — multi-user columns (v29)", () => {
     });
     ltm.update(id, { content: "Modified content" });
     const entry = ltm.get(id);
-    expect(entry!.updated_by).toBeNull();
-    expect(entry!.created_by).toBe("user-abc-123");
+    expect(entry?.updated_by).toBeNull();
+    expect(entry?.created_by).toBe("user-abc-123");
   });
 
   test("team_knowledge table exists", () => {
@@ -1527,7 +1527,8 @@ describe("ltm — cross-project promotion", () => {
     expect(res.clusters[0].distinctProjects).toBe(3);
 
     for (const id of [a, b, c]) {
-      const e = ltm.get(id)!;
+      const e = ltm.get(id);
+      if (!e) throw new Error("expected entry");
       expect(e.cross_project).toBe(1);
       expect(e.promotion_status).toBe("promoted");
       expect(e.promoted_at).not.toBeNull();
@@ -1551,8 +1552,8 @@ describe("ltm — cross-project promotion", () => {
     const res = ltm.promoteCrossProject({ dryRun: false });
     expect(res.promoted).toBe(0);
     expect(res.clusters).toHaveLength(0);
-    expect(ltm.get(a)!.cross_project).toBe(0);
-    expect(ltm.get(b)!.cross_project).toBe(0);
+    expect(ltm.get(a)?.cross_project).toBe(0);
+    expect(ltm.get(b)?.cross_project).toBe(0);
   });
 
   test("does NOT promote low-confidence entries (< 0.8)", () => {
@@ -1577,7 +1578,7 @@ describe("ltm — cross-project promotion", () => {
 
     const res = ltm.promoteCrossProject({ dryRun: false });
     expect(res.promoted).toBe(0);
-    for (const id of [a, b, c]) expect(ltm.get(id)!.cross_project).toBe(0);
+    for (const id of [a, b, c]) expect(ltm.get(id)?.cross_project).toBe(0);
   });
 
   test("ignores entries already cross_project = 1", () => {
@@ -1628,7 +1629,8 @@ describe("ltm — cross-project promotion", () => {
     expect(res.promoted).toBe(3);
     expect(res.clusters).toHaveLength(1);
     for (const id of [a, b, c]) {
-      const e = ltm.get(id)!;
+      const e = ltm.get(id);
+      if (!e) throw new Error("expected entry");
       expect(e.cross_project).toBe(0);
       expect(e.promotion_status).toBeNull();
     }
@@ -1683,7 +1685,7 @@ describe("ltm — cross-project promotion", () => {
     const res = ltm.promoteCrossProject({ dryRun: false });
     expect(res.promoted).toBe(0);
     expect(res.clusters).toHaveLength(0);
-    for (const id of [a, b, c]) expect(ltm.get(id)!.cross_project).toBe(0);
+    for (const id of [a, b, c]) expect(ltm.get(id)?.cross_project).toBe(0);
   });
 
   test("mixed-confidence cluster: low-confidence entries excluded, qualifying remainder still promotes", () => {
@@ -1722,11 +1724,11 @@ describe("ltm — cross-project promotion", () => {
     expect(res.clusters).toHaveLength(1);
     expect(res.clusters[0].distinctProjects).toBe(3);
     for (const id of [a, b, c]) {
-      expect(ltm.get(id)!.cross_project).toBe(1);
-      expect(ltm.get(id)!.promotion_status).toBe("promoted");
+      expect(ltm.get(id)?.cross_project).toBe(1);
+      expect(ltm.get(id)?.promotion_status).toBe("promoted");
     }
     // Low-confidence entry untouched
-    expect(ltm.get(d)!.cross_project).toBe(0);
-    expect(ltm.get(d)!.promotion_status).toBeNull();
+    expect(ltm.get(d)?.cross_project).toBe(0);
+    expect(ltm.get(d)?.promotion_status).toBeNull();
   });
 });
