@@ -950,7 +950,7 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
         {
           role: "user",
           content: [
-            { type: "tool_result", toolUseId: "toolu_read_1", content: "// index.ts content" },
+            { type: "tool_result", toolUseId: "toolu_read_1", content: [{ type: "text", text: "// index.ts content" }] },
           ],
         },
       ],
@@ -1054,8 +1054,8 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
         {
           role: "user",
           content: [
-            { type: "tool_result", toolUseId: "toolu_read_2", content: "file" },
-            { type: "tool_result", toolUseId: "toolu_bash_1", content: "dir listing" },
+            { type: "tool_result", toolUseId: "toolu_read_2", content: [{ type: "text", text: "file" }] },
+            { type: "tool_result", toolUseId: "toolu_bash_1", content: [{ type: "text", text: "dir listing" }] },
           ],
         },
       ],

@@ -30,7 +30,7 @@ function userMsgWithToolResult(text: string, toolResult: string): GatewayMessage
     role: "user",
     content: [
       { type: "text", text },
-      { type: "tool_result", toolUseId: "toolu_1", content: toolResult },
+      { type: "tool_result", toolUseId: "toolu_1", content: [{ type: "text", text: toolResult }] },
     ],
   };
 }

@@ -215,7 +215,7 @@ describe("buildAnthropicRequest — conversation caching", () => {
             {
               type: "tool_result",
               toolUseId: "toolu_01",
-              content: "file1.txt\nfile2.txt",
+              content: [{ type: "text", text: "file1.txt\nfile2.txt" }],
             },
             { type: "text", text: "What files are there?" },
           ],

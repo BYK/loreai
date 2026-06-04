@@ -34,7 +34,7 @@ function makeToolConversation(): GatewayMessage[] {
         {
           type: "tool_result",
           toolUseId: "toolu_abc",
-          content: "file1.ts\nfile2.ts",
+          content: [{ type: "text", text: "file1.ts\nfile2.ts" }],
         },
       ],
     },
@@ -108,7 +108,7 @@ describe("resolveToolResults", () => {
           {
             type: "tool_result",
             toolUseId: "toolu_xyz",
-            content: "hi",
+            content: [{ type: "text", text: "hi" }],
           },
           { type: "text", text: "Now do the next thing" },
         ],
@@ -138,7 +138,7 @@ describe("resolveToolResults", () => {
           {
             type: "tool_result",
             toolUseId: "toolu_orphan",
-            content: "orphaned result",
+            content: [{ type: "text", text: "orphaned result" }],
           },
         ],
       },
@@ -185,12 +185,12 @@ describe("resolveToolResults", () => {
           {
             type: "tool_result",
             toolUseId: "toolu_1",
-            content: "file1.ts",
+            content: [{ type: "text", text: "file1.ts" }],
           },
           {
             type: "tool_result",
             toolUseId: "toolu_2",
-            content: "const x = 1;",
+            content: [{ type: "text", text: "const x = 1;" }],
           },
         ],
       },
@@ -252,7 +252,7 @@ describe("resolveToolResults", () => {
           {
             type: "tool_result",
             toolUseId: "toolu_err",
-            content: "command failed with exit code 1",
+            content: [{ type: "text", text: "command failed with exit code 1" }],
             isError: true,
           },
         ],

@@ -95,10 +95,27 @@ export type LoreToolStateRunning = {
   time: { start: number };
 };
 
+/**
+ * Structured content block carried alongside the text `output`/`error`
+ * projection. Host-agnostic shape — the gateway adapter maps between its
+ * `GatewayContentBlock` and this at the adapter boundary. Gradient, temporal,
+ * and distillation only read the string projection; the structured blocks are
+ * preserved solely for lossless upstream forwarding (e.g. images inside tool
+ * results survive the round-trip).
+ */
+export type LoreContentBlock = { type: string; [key: string]: unknown };
+
 export type LoreToolStateCompleted = {
   status: "completed";
   input: unknown;
+  /** Text projection of the tool output — used by memory, FTS, gradient. */
   output: string;
+  /**
+   * Structured content blocks from the tool result (when richer than text).
+   * Preserved for lossless upstream forwarding; dropped by gradient
+   * compression (Layer 2+) when `output` is replaced with an annotation.
+   */
+  blocks?: LoreContentBlock[];
   metadata?: unknown;
   time: { start: number; end: number };
 };
@@ -106,7 +123,10 @@ export type LoreToolStateCompleted = {
 export type LoreToolStateError = {
   status: "error";
   input: unknown;
+  /** Text projection of the error output. */
   error: string;
+  /** Structured content blocks — same semantics as on completed state. */
+  blocks?: LoreContentBlock[];
   metadata?: unknown;
   time: { start: number; end: number };
 };

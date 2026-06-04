@@ -354,8 +354,8 @@ describe("buildRecallFollowUp", () => {
     // User message contains recall results as tool_result
     const resultBlock = followUp.messages[2].content[0];
     expect(resultBlock.type).toBe("tool_result");
-    expect((resultBlock as { content: string }).content).toBe(
-      "## Recall Results\n* config is in /root",
+    expect((resultBlock as { content: Array<{type: string; text?: string}> }).content).toEqual(
+      [{ type: "text", text: "## Recall Results\n* config is in /root" }],
     );
     expect((resultBlock as { toolUseId: string }).toolUseId).toBe(recallBlock.id);
 
@@ -504,7 +504,7 @@ describe("buildRecallFollowUp", () => {
 
     const resultBlock = followUp.messages[2].content[0];
     expect(resultBlock.type).toBe("tool_result");
-    expect((resultBlock as { content: string }).content).toBe("[No results found.]");
+    expect((resultBlock as { content: Array<{type: string; text?: string}> }).content).toEqual([{ type: "text", text: "[No results found.]" }]);
     expect((resultBlock as { toolUseId: string }).toolUseId).toBe(recallBlock.id);
   });
 });
@@ -531,7 +531,7 @@ describe("expandRecallMarkers", () => {
       {
         role: "user",
         content: [
-          { type: "tool_result", toolUseId: "toolu_1", content: "file content" },
+          { type: "tool_result", toolUseId: "toolu_1", content: [{ type: "text", text: "file content" }] },
         ],
       },
     ]);
@@ -631,7 +631,7 @@ describe("expandRecallMarkers", () => {
     expect(req.messages[2].content).toHaveLength(1);
     expect(req.messages[2].content[0].type).toBe("tool_result");
     expect((req.messages[2].content[0] as { toolUseId: string }).toolUseId).toBe("toolu_recall_split");
-    expect((req.messages[2].content[0] as { content: string }).content).toBe("Found: architecture docs");
+    expect((req.messages[2].content[0] as { content: Array<{type: string; text?: string}> }).content).toEqual([{ type: "text", text: "Found: architecture docs" }]);
 
     // Message 3: continuation assistant message
     expect(req.messages[3].role).toBe("assistant");
@@ -665,7 +665,7 @@ describe("expandRecallMarkers", () => {
       {
         role: "user",
         content: [
-          { type: "tool_result", toolUseId: "toolu_read_1", content: "file content" },
+          { type: "tool_result", toolUseId: "toolu_read_1", content: [{ type: "text", text: "file content" }] },
         ],
       },
     ]);

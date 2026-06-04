@@ -46,6 +46,7 @@ export type {
   LoreReasoningPart,
   LoreToolPart,
   LoreGenericPart,
+  LoreContentBlock,
   LoreToolState,
   LoreToolStatePending,
   LoreToolStateRunning,

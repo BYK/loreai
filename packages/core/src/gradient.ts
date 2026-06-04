@@ -1129,13 +1129,15 @@ export function deduplicateToolOutputs(
       // Keep if this is both the latest content AND not covered by a later read
       if (isLatestContent && !coveredByLater) return part;
 
-      // This is a duplicate — replace with compact annotation
+      // This is a duplicate — replace with compact annotation.
+      // Drop structured `blocks` — the content is being compressed away.
       partsChanged = true;
       return {
         ...part,
         state: {
           ...part.state,
           output: dedupAnnotation(part.tool, readRange?.path, readRange),
+          blocks: undefined,
         },
       } as LorePart;
     });
@@ -1205,11 +1207,13 @@ function stripToolOutputs(parts: LorePart[]): LorePart[] {
   return parts.map((part) => {
     if (!isToolPart(part)) return part;
     if (part.state.status === "completed") {
+      // Drop structured `blocks` — content is being compressed to annotation.
       return {
         ...part,
         state: {
           ...part.state,
           output: toolStripAnnotation(part.tool, part.state.output),
+          blocks: undefined,
         },
       } as LorePart;
     }
@@ -1222,6 +1226,7 @@ function stripToolOutputs(parts: LorePart[]): LorePart[] {
         state: {
           ...part.state,
           error: toolStripAnnotation(part.tool, part.state.error),
+          blocks: undefined,
         },
       } as LorePart;
     }

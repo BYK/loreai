@@ -124,7 +124,7 @@ describe("parseOpenAIResponsesRequest", () => {
       {
         type: "tool_result",
         toolUseId: "call_123",
-        content: "Found 5 cats",
+        content: [{ type: "text", text: "Found 5 cats" }],
       },
     ]);
   });

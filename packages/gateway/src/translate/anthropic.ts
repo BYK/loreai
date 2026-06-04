@@ -66,15 +66,19 @@ function toGatewayBlock(block: Record<string, unknown>): GatewayContentBlock {
       };
 
     case "tool_result": {
-      // Anthropic `tool_result` content can be a string or array of blocks.
-      let content = "";
+      // Anthropic `tool_result` content can be a string or an array of blocks
+      // (text, image, …). Normalize to a block array so non-text sub-blocks —
+      // e.g. an image returned by Claude Code's `Read` tool — survive the
+      // round-trip instead of being filtered out.
+      let content: GatewayContentBlock[];
       if (typeof block.content === "string") {
-        content = block.content;
+        content = [{ type: "text", text: block.content }];
       } else if (Array.isArray(block.content)) {
-        content = (block.content as Array<Record<string, unknown>>)
-          .filter((b) => b.type === "text")
-          .map((b) => String(b.text ?? ""))
-          .join("\n");
+        content = (block.content as Array<Record<string, unknown>>).map(
+          toGatewayBlock,
+        );
+      } else {
+        content = [];
       }
       return {
         type: "tool_result",
@@ -85,8 +89,10 @@ function toGatewayBlock(block: Record<string, unknown>): GatewayContentBlock {
     }
 
     default:
-      // Unknown block type — preserve as text so nothing is silently dropped
-      return { type: "text", text: JSON.stringify(block) };
+      // Unknown block type (image, audio, document, …) — preserve verbatim as
+      // an opaque block so it round-trips losslessly instead of being coerced
+      // to a (useless) JSON-text dump.
+      return { type: "opaque", raw: block };
   }
 }
 
@@ -162,11 +168,15 @@ function toAnthropicBlock(
       const result: Record<string, unknown> = {
         type: "tool_result",
         tool_use_id: block.toolUseId,
-        content: block.content,
+        content: block.content.map(toAnthropicBlock),
       };
       if (block.isError) result.is_error = true;
       return result;
     }
+
+    case "opaque":
+      // Re-emit the original block verbatim.
+      return block.raw;
   }
 }
 
@@ -519,8 +529,9 @@ export function parseAnthropicResponseJSON(
           });
           break;
         default:
-          // Preserve unknown block types as text so no data is silently lost
-          content.push({ type: "text", text: JSON.stringify(block) });
+          // Preserve unknown response block types as opaque so no data is
+          // silently lost (lossless-by-default for future modalities).
+          content.push({ type: "opaque", raw: block });
           break;
       }
     }

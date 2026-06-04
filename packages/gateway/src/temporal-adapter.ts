@@ -13,6 +13,7 @@ import { createHash, randomUUID } from "crypto";
 import { isToolPart } from "@loreai/core";
 import type {
   LoreAssistantMessage,
+  LoreContentBlock,
   LoreMessageWithParts,
   LorePart,
   LoreReasoningPart,
@@ -25,6 +26,7 @@ import type {
   GatewayMessage,
   GatewayUsage,
 } from "./translate/types";
+import { blocksToText } from "./translate/types";
 
 // ---------------------------------------------------------------------------
 // Deterministic ID generation
@@ -38,7 +40,18 @@ import type {
 function deterministicID(role: string, index: number, content: GatewayContentBlock[]): string {
   const h = createHash("sha256");
   h.update(`${role}:${index}:`);
-  for (const block of content) {
+  hashBlocks(h, content);
+  return h.digest("hex").slice(0, 32);
+}
+
+/**
+ * Feed content blocks into a hash. Recursive for tool_result sub-blocks.
+ * Every block type — including opaque — contributes to the hash so messages
+ * differing only in image/audio/document content produce distinct IDs
+ * (prevents gradient fingerprint collisions and cache-bust misattribution).
+ */
+function hashBlocks(h: ReturnType<typeof createHash>, blocks: GatewayContentBlock[]): void {
+  for (const block of blocks) {
     switch (block.type) {
       case "text":
         h.update(`text:${block.text}`);
@@ -50,11 +63,25 @@ function deterministicID(role: string, index: number, content: GatewayContentBlo
         h.update(`tool_use:${block.id}:${block.name}:${JSON.stringify(block.input)}`);
         break;
       case "tool_result":
-        h.update(`tool_result:${block.toolUseId}:${block.content}`);
+        h.update(`tool_result:${block.toolUseId}:`);
+        hashBlocks(h, block.content);
         break;
+      case "opaque": {
+        // Hash includes the text projection (type + media_type + length) plus
+        // a prefix of the payload data for collision resistance — two images
+        // with identical type, media_type, and size but different content will
+        // produce distinct hashes.
+        const source = block.raw.source as Record<string, unknown> | undefined;
+        const data =
+          (source?.data as string | undefined) ??
+          (block.raw.data as string | undefined) ??
+          "";
+        const prefix = typeof data === "string" ? data.slice(0, 128) : "";
+        h.update(`opaque:${blocksToText([block])}:${prefix}`);
+        break;
+      }
     }
   }
-  return h.digest("hex").slice(0, 32);
 }
 
 /**
@@ -113,7 +140,16 @@ function contentBlockToPart(
         state: { status: "pending", input: block.input },
       } satisfies LoreToolPart;
 
-    case "tool_result":
+    case "tool_result": {
+      // Text projection for memory/FTS/gradient consumers.
+      const textProjection = blocksToText(block.content);
+      // Carry structured blocks only when the content has non-text blocks
+      // (images, opaque, …) so lossless round-trip is possible.
+      const hasNonText = block.content.some((b) => b.type !== "text");
+      const blocks: LoreContentBlock[] | undefined = hasNonText
+        ? block.content.map((b): LoreContentBlock => ({ ...b }))
+        : undefined;
+
       return {
         id,
         sessionID,
@@ -127,16 +163,31 @@ function contentBlockToPart(
           ? {
               status: "error",
               input: null,
-              error: block.content,
+              error: textProjection,
+              ...(blocks ? { blocks } : undefined),
               time: { start: now, end: now },
             }
           : {
               status: "completed",
               input: null,
-              output: block.content,
+              output: textProjection,
+              ...(blocks ? { blocks } : undefined),
               time: { start: now, end: now },
             },
       } satisfies LoreToolPart;
+    }
+
+    case "opaque":
+      // Opaque block (image, audio, document, …) — preserve as a generic
+      // part so it flows through gradient untouched and can be reconstructed
+      // on egress via loreMessagesToGateway.
+      return {
+        type: "opaque",
+        id,
+        sessionID,
+        messageID,
+        raw: block.raw,
+      };
   }
 }
 
@@ -249,7 +300,7 @@ export function resolveToolResults(messages: LoreMessageWithParts[]): void {
   // --- Pass 1: Index all tool_result parts by callID ---
   const resultsByCallID = new Map<
     string,
-    { output: string; isError: boolean }
+    { output: string; blocks?: LoreContentBlock[]; isError: boolean }
   >();
 
   for (const msg of messages) {
@@ -258,11 +309,13 @@ export function resolveToolResults(messages: LoreMessageWithParts[]): void {
         if (part.state.status === "completed") {
           resultsByCallID.set(part.callID, {
             output: part.state.output,
+            blocks: part.state.blocks,
             isError: false,
           });
         } else if (part.state.status === "error") {
           resultsByCallID.set(part.callID, {
             output: part.state.error,
+            blocks: part.state.blocks,
             isError: true,
           });
         }
@@ -286,12 +339,14 @@ export function resolveToolResults(messages: LoreMessageWithParts[]): void {
                 status: "error",
                 input: part.state.input,
                 error: result.output,
+                ...(result.blocks ? { blocks: result.blocks } : undefined),
                 time: { start: now, end: now },
               }
             : {
                 status: "completed",
                 input: part.state.input,
                 output: result.output,
+                ...(result.blocks ? { blocks: result.blocks } : undefined),
                 time: { start: now, end: now },
               };
         }

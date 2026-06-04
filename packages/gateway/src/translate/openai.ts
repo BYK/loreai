@@ -11,6 +11,7 @@ import type {
   GatewayResponse,
   GatewayTool,
 } from "./types";
+import { blocksToText } from "./types";
 import { extractAuth } from "../auth";
 
 // ---------------------------------------------------------------------------
@@ -64,9 +65,19 @@ export function parseOpenAIRequest(
     const role = msg.role as string;
     const content = msg.content;
 
-    if (role === "system") {
-      // Concatenate multiple system messages with double newline
-      const text = typeof content === "string" ? content : "";
+    if (role === "system" || role === "developer") {
+      // Concatenate multiple system/developer messages with double newline.
+      // Content can be a string or an array of content parts — extract text
+      // from both forms instead of coercing arrays to "".
+      let text = "";
+      if (typeof content === "string") {
+        text = content;
+      } else if (Array.isArray(content)) {
+        text = (content as Array<Record<string, unknown>>)
+          .filter((b) => b.type === "text")
+          .map((b) => String(b.text ?? ""))
+          .join("\n");
+      }
       if (system) {
         system += "\n\n" + text;
       } else {
@@ -167,6 +178,10 @@ function parseUserContent(
           name: String(item.name ?? ""),
           input: item.input ?? {},
         });
+      } else {
+        // Unknown content part (image_url, input_audio, file, …) — preserve
+        // verbatim as opaque so it round-trips losslessly.
+        blocks.push({ type: "opaque", raw: item });
       }
     }
   }
@@ -175,11 +190,19 @@ function parseUserContent(
   if (toolCalls) {
     for (const tc of toolCalls) {
       const fn = tc.function as Record<string, unknown> | undefined;
+      let input: unknown = {};
+      if (fn?.arguments) {
+        try {
+          input = JSON.parse(fn.arguments as string);
+        } catch {
+          input = fn.arguments;
+        }
+      }
       blocks.push({
         type: "tool_use",
         id: String(tc.id ?? ""),
         name: String(fn?.name ?? ""),
-        input: fn?.arguments ? JSON.parse(fn.arguments as string) : {},
+        input,
       });
     }
   }
@@ -206,6 +229,9 @@ function parseAssistantContent(
           name: String(item.name ?? ""),
           input: item.input ?? {},
         });
+      } else {
+        // Unknown content part — preserve verbatim as opaque.
+        blocks.push({ type: "opaque", raw: item });
       }
     }
   }
@@ -214,11 +240,19 @@ function parseAssistantContent(
   if (toolCalls) {
     for (const tc of toolCalls) {
       const fn = tc.function as Record<string, unknown> | undefined;
+      let input: unknown = {};
+      if (fn?.arguments) {
+        try {
+          input = JSON.parse(fn.arguments as string);
+        } catch {
+          input = fn.arguments;
+        }
+      }
       blocks.push({
         type: "tool_use",
         id: String(tc.id ?? ""),
         name: String(fn?.name ?? ""),
-        input: fn?.arguments ? JSON.parse(fn.arguments as string) : {},
+        input,
       });
     }
   }
@@ -227,29 +261,33 @@ function parseAssistantContent(
 }
 
 function parseToolResult(msg: Record<string, unknown>): GatewayContentBlock[] {
-  const blocks: GatewayContentBlock[] = [];
   const toolCallId = String(msg.tool_call_id ?? "");
   const content = msg.content;
 
-  if (typeof content === "string" && content) {
-    blocks.push({
-      type: "tool_result",
-      toolUseId: toolCallId,
-      content,
-    });
+  // Normalize tool-result content to a block array so non-text sub-blocks
+  // (images, files, …) survive the round-trip.
+  let innerBlocks: GatewayContentBlock[];
+  if (typeof content === "string") {
+    innerBlocks = content ? [{ type: "text", text: content }] : [];
   } else if (Array.isArray(content)) {
-    for (const item of content as Array<Record<string, unknown>>) {
+    innerBlocks = (content as Array<Record<string, unknown>>).map((item) => {
       if (item.type === "text") {
-        blocks.push({
-          type: "tool_result",
-          toolUseId: toolCallId,
-          content: String(item.text ?? ""),
-        });
+        return { type: "text" as const, text: String(item.text ?? "") };
       }
-    }
+      // Unknown sub-block (image_url, …) — preserve as opaque.
+      return { type: "opaque" as const, raw: item };
+    });
+  } else {
+    innerBlocks = [];
   }
 
-  return blocks;
+  return [
+    {
+      type: "tool_result",
+      toolUseId: toolCallId,
+      content: innerBlocks,
+    },
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -520,13 +558,14 @@ function buildOpenAIMessages(
     const blocks = msg.content;
     const role = msg.role;
 
-    // Find text content and tool_use blocks
-    const textParts: string[] = [];
+    // Collect text, opaque (image/audio/…), and tool_use blocks.
+    const contentParts: Array<Record<string, unknown>> = [];
     const toolUses: Array<Record<string, unknown>> = [];
+    let hasOpaque = false;
 
     for (const block of blocks) {
       if (block.type === "text") {
-        textParts.push(block.text);
+        contentParts.push({ type: "text", text: block.text });
       } else if (block.type === "tool_use") {
         toolUses.push({
           id: block.id,
@@ -537,19 +576,34 @@ function buildOpenAIMessages(
           },
         });
       } else if (block.type === "tool_result") {
+        // OpenAI tool messages take a string content field. Use the text
+        // projection — non-text sub-blocks (images) are represented as
+        // placeholders. (OpenAI's wire format can't carry structured
+        // tool-result content; Anthropic-native clients are unaffected.)
         result.push({
           role: "tool",
           tool_call_id: block.toolUseId,
-          content: typeof block.content === "string" ? block.content : JSON.stringify(block.content),
+          content: blocksToText(block.content),
         });
+      } else if (block.type === "opaque") {
+        // Re-emit the original block verbatim (e.g. image_url, input_audio).
+        contentParts.push(block.raw);
+        hasOpaque = true;
       }
     }
 
-    if (textParts.length > 0 || toolUses.length > 0) {
+    if (contentParts.length > 0 || toolUses.length > 0) {
       const msgRecord: Record<string, unknown> = { role };
 
-      if (textParts.length > 0) {
-        msgRecord.content = textParts.join("");
+      if (contentParts.length > 0) {
+        // Use array form when non-text (opaque) parts are present — OpenAI
+        // requires array content for multimodal messages. Use plain string
+        // when text-only for maximum compatibility and cache stability.
+        if (hasOpaque) {
+          msgRecord.content = contentParts;
+        } else {
+          msgRecord.content = contentParts.map((p) => String(p.text ?? "")).join("");
+        }
       }
 
       if (toolUses.length > 0) {

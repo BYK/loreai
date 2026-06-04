@@ -189,9 +189,9 @@ describe("loreMessagesToGateway — tool_result reconstruction", () => {
     expect(result[2]!.role).toBe("user");
     expect(result[2]!.content).toHaveLength(2);
     expect(result[2]!.content[0]!.type).toBe("tool_result");
-    const toolResult = result[2]!.content[0]! as { type: "tool_result"; toolUseId: string; content: string };
+    const toolResult = result[2]!.content[0]! as { type: "tool_result"; toolUseId: string; content: GatewayContentBlock[] };
     expect(toolResult.toolUseId).toBe("toolu_1");
-    expect(toolResult.content).toBe("file1.ts\nfile2.ts");
+    expect(toolResult.content).toEqual([{ type: "text", text: "file1.ts\nfile2.ts" }]);
     expect(result[2]!.content[1]!.type).toBe("text");
   });
 
@@ -210,12 +210,12 @@ describe("loreMessagesToGateway — tool_result reconstruction", () => {
     const toolResult = result[2]!.content[0]! as {
       type: "tool_result";
       toolUseId: string;
-      content: string;
+      content: GatewayContentBlock[];
       isError?: boolean;
     };
     expect(toolResult.type).toBe("tool_result");
     expect(toolResult.toolUseId).toBe("toolu_err");
-    expect(toolResult.content).toBe("command not found");
+    expect(toolResult.content).toEqual([{ type: "text", text: "command not found" }]);
     expect(toolResult.isError).toBe(true);
   });
 
@@ -237,12 +237,12 @@ describe("loreMessagesToGateway — tool_result reconstruction", () => {
     expect(result[2]!.content[1]!.type).toBe("tool_result");
     expect(result[2]!.content[2]!.type).toBe("text");
 
-    const tr1 = result[2]!.content[0]! as { toolUseId: string; content: string };
-    const tr2 = result[2]!.content[1]! as { toolUseId: string; content: string };
+    const tr1 = result[2]!.content[0]! as { toolUseId: string; content: GatewayContentBlock[] };
+    const tr2 = result[2]!.content[1]! as { toolUseId: string; content: GatewayContentBlock[] };
     expect(tr1.toolUseId).toBe("toolu_a");
-    expect(tr1.content).toBe("file1");
+    expect(tr1.content).toEqual([{ type: "text", text: "file1" }]);
     expect(tr2.toolUseId).toBe("toolu_b");
-    expect(tr2.content).toBe("const x = 1");
+    expect(tr2.content).toEqual([{ type: "text", text: "const x = 1" }]);
   });
 
   test("pending tool part emits tool_use but no tool_result", () => {
@@ -346,7 +346,7 @@ describe("removeOrphanedToolResults", () => {
           {
             type: "tool_result",
             toolUseId: "toolu_gone",
-            content: "orphaned",
+            content: [{ type: "text", text: "orphaned" }],
           },
           { type: "text", text: "follow-up" },
         ],
@@ -377,7 +377,7 @@ describe("removeOrphanedToolResults", () => {
           {
             type: "tool_result",
             toolUseId: "toolu_ok",
-            content: "output",
+            content: [{ type: "text", text: "output" }],
           },
         ],
       },
@@ -407,12 +407,12 @@ describe("removeOrphanedToolResults", () => {
           {
             type: "tool_result",
             toolUseId: "toolu_match",
-            content: "good",
+            content: [{ type: "text", text: "good" }],
           },
           {
             type: "tool_result",
             toolUseId: "toolu_orphan",
-            content: "bad",
+            content: [{ type: "text", text: "bad" }],
           },
           { type: "text", text: "continue" },
         ],
@@ -444,12 +444,12 @@ describe("removeOrphanedToolResults", () => {
           {
             type: "tool_result",
             toolUseId: "toolu_orphan1",
-            content: "a",
+            content: [{ type: "text", text: "a" }],
           },
           {
             type: "tool_result",
             toolUseId: "toolu_orphan2",
-            content: "b",
+            content: [{ type: "text", text: "b" }],
           },
         ],
       },
@@ -475,7 +475,7 @@ describe("removeOrphanedToolResults", () => {
           {
             type: "tool_result",
             toolUseId: "toolu_impossible",
-            content: "no assistant before",
+            content: [{ type: "text", text: "no assistant before" }],
           },
         ],
       },
@@ -575,13 +575,13 @@ describe("end-to-end: gradient eviction doesn't produce orphaned tool_result", (
     const toolResult = userContent.find((b) => b.type === "tool_result") as {
       type: "tool_result";
       toolUseId: string;
-      content: string;
+      content: GatewayContentBlock[];
     };
 
     expect(toolUse).toBeDefined();
     expect(toolResult).toBeDefined();
     expect(toolResult.toolUseId).toBe(toolUse.id);
-    expect(toolResult.content).toBe("file.ts");
+    expect(toolResult.content).toEqual([{ type: "text", text: "file.ts" }]);
   });
 });
 
@@ -612,7 +612,7 @@ test("BUG-006: OpenAI translator preserves tool_result as role:tool message", ()
     {
       role: "user",
       content: [
-        { type: "tool_result", toolUseId: "call_123", content: "the result" },
+        { type: "tool_result", toolUseId: "call_123", content: [{ type: "text", text: "the result" }] },
       ],
     },
   ]);
@@ -629,7 +629,7 @@ test("BUG-006: mixed text + tool_result in same message emits both", () => {
     {
       role: "user",
       content: [
-        { type: "tool_result", toolUseId: "call_A", content: "result A" },
+        { type: "tool_result", toolUseId: "call_A", content: [{ type: "text", text: "result A" }] },
         { type: "text", text: "Please continue" },
       ],
     },
@@ -650,9 +650,9 @@ test("BUG-006: multiple tool_results in one message are all preserved", () => {
     {
       role: "user",
       content: [
-        { type: "tool_result", toolUseId: "call_1", content: "result 1" },
-        { type: "tool_result", toolUseId: "call_2", content: "result 2" },
-        { type: "tool_result", toolUseId: "call_3", content: "" },
+        { type: "tool_result", toolUseId: "call_1", content: [{ type: "text", text: "result 1" }] },
+        { type: "tool_result", toolUseId: "call_2", content: [{ type: "text", text: "result 2" }] },
+        { type: "tool_result", toolUseId: "call_3", content: [{ type: "text", text: "" }] },
       ],
     },
   ]);
@@ -725,7 +725,7 @@ describe("removeOrphanedToolResults — tool_use→tool_result (pass 2, #424)", 
       {
         role: "user",
         content: [
-          { type: "tool_result", toolUseId: "toolu_eval_000010", content: "file contents" },
+          { type: "tool_result", toolUseId: "toolu_eval_000010", content: [{ type: "text", text: "file contents" }] },
         ],
       },
     ];
@@ -760,7 +760,7 @@ describe("removeOrphanedToolResults — tool_use→tool_result (pass 2, #424)", 
         role: "user",
         content: [
           // Only has tool_result for toolu_001, not toolu_002
-          { type: "tool_result", toolUseId: "toolu_001", content: "result" },
+          { type: "tool_result", toolUseId: "toolu_001", content: [{ type: "text", text: "result" }] },
           { type: "text", text: "continue" },
         ],
       },
@@ -794,7 +794,7 @@ describe("removeOrphanedToolResults — tool_use→tool_result (pass 2, #424)", 
       {
         role: "user",
         content: [
-          { type: "tool_result", toolUseId: "toolu_001", content: "data" },
+          { type: "tool_result", toolUseId: "toolu_001", content: [{ type: "text", text: "data" }] },
         ],
       },
     ];
@@ -912,7 +912,7 @@ describe("end-to-end: inflated eval tool_use/tool_result through full pipeline (
       gatewayMessages.push({
         role: "user",
         content: [
-          { type: "tool_result", toolUseId: toolId, content: `Wrote src/feature${i}.ts successfully. ${"w".repeat(800)}` },
+          { type: "tool_result", toolUseId: toolId, content: [{ type: "text", text: `Wrote src/feature${i}.ts successfully. ${"w".repeat(800)}` }] },
         ],
       });
 

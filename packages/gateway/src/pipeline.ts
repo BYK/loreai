@@ -70,6 +70,7 @@ import type {
   GatewayToolResultBlock,
   SessionState,
 } from "./translate/types";
+import { blocksToText } from "./translate/types";
 import type { GatewayConfig } from "./config";
 import { getProjectPath, extractGitRemoteHeader, resolveUpstreamRoute, extractUpstreamUrlHeader, unattributedBucketPath, type ProjectPathResult } from "./config";
 import {
@@ -267,7 +268,7 @@ function containsGitCommit(req: GatewayRequest): boolean {
       }
       // Check user tool_result content for git commit output patterns
       if (block.type === "tool_result") {
-        const text = block.content;
+        const text = blocksToText(block.content);
         // Match common git commit output (e.g., "[main abc1234] commit message")
         if (text && /^\[[\w/.-]+ [0-9a-f]+\]/.test(text.trim())) return true;
       }
@@ -3927,6 +3928,24 @@ async function handleConversationTurn(
  * after pairing, so under normal operation those parts are gone. The fallback
  * handling for residual `tool: "result"` parts is kept for robustness.
  */
+/**
+ * Reconstruct tool_result content as a `GatewayContentBlock[]` from a Lore
+ * tool state. If structured `blocks` were preserved (non-text sub-blocks like
+ * images), re-emit them losslessly; otherwise wrap the text string.
+ */
+function toolResultContent(
+  state: { status: string; output?: string; error?: string; blocks?: unknown[] },
+): GatewayContentBlock[] {
+  if (state.blocks && state.blocks.length > 0) {
+    // Re-emit the structured blocks that were preserved from ingress.
+    return state.blocks as GatewayContentBlock[];
+  }
+  const text = state.status === "error"
+    ? (state.error ?? "[error]")
+    : (state.output ?? "");
+  return text ? [{ type: "text", text }] : [];
+}
+
 /** @internal Exported for tests. */
 export function loreMessagesToGateway(
   messages: LoreMessageWithParts[],
@@ -3988,7 +4007,7 @@ export function loreMessagesToGateway(
             content.push({
               type: "tool_result",
               toolUseId: toolPart.callID,
-              content: toolPart.state.output ?? "",
+              content: toolResultContent(toolPart.state),
             });
           } else {
             // Emit tool_use on this assistant message
@@ -4005,13 +4024,13 @@ export function loreMessagesToGateway(
               pendingToolResults.push({
                 type: "tool_result",
                 toolUseId: toolPart.callID,
-                content: toolPart.state.output ?? "",
+                content: toolResultContent(toolPart.state),
               });
             } else if (toolPart.state.status === "error") {
               pendingToolResults.push({
                 type: "tool_result",
                 toolUseId: toolPart.callID,
-                content: toolPart.state.error ?? "[error]",
+                content: toolResultContent(toolPart.state),
                 isError: true,
               });
             }
@@ -4021,9 +4040,12 @@ export function loreMessagesToGateway(
           }
           break;
         }
-        // Generic / unknown parts — skip or represent as text
+        // Opaque parts (image, audio, document, …) — reconstruct the
+        // gateway opaque block from the generic part's raw payload.
         default:
-          if ("text" in part && typeof part.text === "string") {
+          if ("raw" in part && typeof part.raw === "object" && part.raw !== null) {
+            content.push({ type: "opaque", raw: part.raw as Record<string, unknown> });
+          } else if ("text" in part && typeof part.text === "string") {
             content.push({ type: "text", text: part.text });
           }
           break;

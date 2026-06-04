@@ -18,6 +18,7 @@ import type {
   GatewayResponse,
   GatewayTool,
 } from "./types";
+import { blocksToText } from "./types";
 import { extractAuth } from "../auth";
 
 // ---------------------------------------------------------------------------
@@ -175,10 +176,12 @@ function parseInputItems(input: unknown): GatewayMessage[] {
     if (itemType === "function_call_output") {
       // Function output — maps to tool_result. Coalesce consecutive outputs
       // into one user message (see the function_call comment above).
+      // Normalize the output string to a block array for consistency.
+      const outputText = String(item.output ?? "");
       const toolResultBlock: GatewayContentBlock = {
         type: "tool_result",
         toolUseId: String(item.call_id ?? ""),
-        content: String(item.output ?? ""),
+        content: outputText ? [{ type: "text", text: outputText }] : [],
       };
       const last = messages[messages.length - 1];
       const lastIsToolResultMessage =
@@ -228,6 +231,10 @@ function parseMessageContent(content: unknown): GatewayContentBlock[] {
     if (part.type === "input_text" || part.type === "output_text" || part.type === "text") {
       const text = String(part.text ?? "");
       if (text) blocks.push({ type: "text", text });
+    } else {
+      // Unknown content part (input_image, input_audio, input_file, …) —
+      // preserve verbatim as opaque so it round-trips losslessly.
+      blocks.push({ type: "opaque", raw: part });
     }
   }
   return blocks;
@@ -362,10 +369,21 @@ function buildResponsesInput(
           arguments: JSON.stringify(block.input),
         });
       } else if (block.type === "tool_result") {
+        // Responses API function_call_output.output is a string — use the
+        // text projection. (Non-text tool-result sub-blocks can't be
+        // represented on this wire format; Anthropic-native clients are
+        // unaffected.)
         items.push({
           type: "function_call_output",
           call_id: block.toolUseId,
-          output: block.content,
+          output: blocksToText(block.content),
+        });
+      } else if (block.type === "opaque") {
+        // Re-emit opaque blocks as message content parts (e.g. input_image).
+        items.push({
+          type: "message",
+          role: msg.role === "assistant" ? "assistant" : "user",
+          content: [block.raw],
         });
       }
     }

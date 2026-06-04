@@ -218,7 +218,7 @@ export function expandRecallMarkers(
         {
           type: "tool_result",
           toolUseId: stored.toolUseId,
-          content: stored.result,
+          content: [{ type: "text", text: stored.result }],
         },
       ],
     };
@@ -242,7 +242,7 @@ export function expandRecallMarkers(
         nextMsg.content.unshift({
           type: "tool_result",
           toolUseId: stored.toolUseId,
-          content: stored.result,
+          content: [{ type: "text", text: stored.result }],
         });
       } else {
         // No following user message — insert a synthetic one
@@ -436,7 +436,7 @@ export function buildRecallFollowUp(
       {
         type: "tool_result",
         toolUseId: recallToolUseBlock.id,
-        content: recallResult || "[No results found.]",
+        content: [{ type: "text", text: recallResult || "[No results found.]" }],
       },
     ],
   };

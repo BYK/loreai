@@ -39,15 +39,96 @@ export type GatewayToolResultBlock = {
   type: "tool_result";
   /** ID of the tool_use block this result corresponds to. */
   toolUseId: string;
-  content: string;
+  /**
+   * Structured tool-result content. Anthropic `tool_result` content can be a
+   * string or an array of blocks (text, image, etc.). We always normalize to
+   * a block array so non-text sub-blocks (e.g. an image returned by Claude
+   * Code's `Read` tool) survive the gateway round-trip losslessly. A plain
+   * text projection is available via `blocksToText()` for memory/FTS and for
+   * text-only wire forms (OpenAI `role:"tool"`, Responses `function_call_output`).
+   */
+  content: GatewayContentBlock[];
   isError?: boolean;
+};
+
+/**
+ * Opaque passthrough block — carries any content block type the gateway does
+ * not actively process (image, audio, document, and any future modality)
+ * verbatim through the entire pipeline. This makes the gateway lossless by
+ * default: instead of an allowlist that coerces unknown blocks to text (and
+ * thereby silently corrupts/drops images), unrecognized blocks are preserved
+ * exactly as received and re-emitted unchanged on egress.
+ *
+ * `raw` holds the original protocol block (e.g. an Anthropic
+ * `{ type: "image", source: { type: "base64", media_type, data } }`).
+ */
+export type GatewayOpaqueBlock = {
+  type: "opaque";
+  raw: Record<string, unknown>;
 };
 
 export type GatewayContentBlock =
   | GatewayTextBlock
   | GatewayThinkingBlock
   | GatewayToolUseBlock
-  | GatewayToolResultBlock;
+  | GatewayToolResultBlock
+  | GatewayOpaqueBlock;
+
+/**
+ * Project a content-block array down to a plain-text representation.
+ *
+ * Used wherever a string is required: memory/FTS storage, deterministic
+ * message-ID hashing, and text-only egress wire forms (OpenAI tool messages,
+ * Responses `function_call_output.output`). Non-text blocks become a stable,
+ * deterministic placeholder (NO base64 payload — keeps the projection compact
+ * and the hash stable regardless of payload size).
+ */
+export function blocksToText(blocks: GatewayContentBlock[], depth = 0): string {
+  // Guard against adversarial/malformed deeply nested tool_result content.
+  if (depth > 10) return "[nested content]";
+  const parts: string[] = [];
+  for (const block of blocks) {
+    switch (block.type) {
+      case "text":
+        parts.push(block.text);
+        break;
+      case "thinking":
+        parts.push(block.thinking);
+        break;
+      case "tool_use":
+        parts.push(`[tool_use:${block.name}]`);
+        break;
+      case "tool_result":
+        parts.push(blocksToText(block.content, depth + 1));
+        break;
+      case "opaque":
+        parts.push(opaquePlaceholder(block.raw));
+        break;
+    }
+  }
+  return parts.join("\n");
+}
+
+/**
+ * Deterministic placeholder for an opaque block. Derives a compact descriptor
+ * from common media fields (type, media_type, payload byte length) without
+ * embedding the payload itself — so the placeholder is stable and cheap.
+ */
+export function opaquePlaceholder(raw: Record<string, unknown>): string {
+  const type = String(raw.type ?? "unknown");
+  const source = raw.source as Record<string, unknown> | undefined;
+  const mediaType =
+    (source?.media_type as string | undefined) ??
+    (raw.media_type as string | undefined);
+  const data =
+    (source?.data as string | undefined) ??
+    (raw.data as string | undefined);
+  const bytes = typeof data === "string" ? data.length : undefined;
+  const descriptor = [type, mediaType, bytes != null ? `${bytes} chars` : undefined]
+    .filter(Boolean)
+    .join(" ");
+  return `[${descriptor}]`;
+}
 
 // ---------------------------------------------------------------------------
 // Messages
