@@ -17,7 +17,45 @@ env:
   COMMIT_TIMESTAMP: ${{ github.event.head_commit.timestamp }}
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Change detection: skip heavy CI for docs-only changes
+  # ---------------------------------------------------------------------------
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      code: ${{ steps.force.outputs.code || steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - 'packages/**'
+              - 'scripts/**'
+              - 'bun.lock'
+              - 'bun.lockb'
+              - 'bunfig.toml'
+              - 'tsconfig*.json'
+              - 'package.json'
+              - '.craft.yml'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/publish.yml'
+              - '.github/workflows/release.yml'
+
+      # Force code=true on main/release pushes — these always run full CI.
+      # dorny/paths-filter only matters for PRs.
+      - name: Force full CI on main/release push
+        id: force
+        if: github.event_name == 'push'
+        run: echo "code=true" >> "$GITHUB_OUTPUT"
+
   test:
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     outputs:
       nightly-version: ${{ steps.nightly.outputs.version }}
@@ -310,7 +348,8 @@ jobs:
 
   binary-smoke-native:
     name: Binary smoke (${{ matrix.target }})
-    needs: [test]
+    needs: [changes, test]
+    if: needs.changes.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -368,9 +407,11 @@ jobs:
 
   build-nightly-binaries:
     name: Build Nightly Binaries
-    needs: [test]
+    needs: [changes, test]
     # Only on main pushes (not PRs, not release branches)
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: >-
+      needs.changes.outputs.code == 'true' &&
+      github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -429,8 +470,10 @@ jobs:
 
   generate-patches:
     name: Generate Delta Patches
-    needs: [test, build-nightly-binaries]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [changes, test, build-nightly-binaries]
+    if: >-
+      needs.changes.outputs.code == 'true' &&
+      github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
@@ -560,8 +603,10 @@ jobs:
 
   publish-nightly:
     name: Publish Nightly to GHCR
-    needs: [test, build-nightly-binaries, generate-patches]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [changes, test, build-nightly-binaries, generate-patches]
+    if: >-
+      needs.changes.outputs.code == 'true' &&
+      github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - name: Download compressed artifacts
@@ -677,9 +722,11 @@ jobs:
 
   generate-release-patches:
     name: Generate Release Patches
-    needs: [test]
+    needs: [changes, test]
     # Only on release branches, not PRs or main
-    if: startsWith(github.ref, 'refs/heads/release/')
+    if: >-
+      needs.changes.outputs.code == 'true' &&
+      startsWith(github.ref, 'refs/heads/release/')
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
@@ -790,3 +837,28 @@ jobs:
           # the placeholder ensures upload-artifact creates the artifact.
           # (upload-artifact ignores hidden files by default)
           path: patches/
+
+  # ---------------------------------------------------------------------------
+  # CI status: single required check for branch protection.
+  # Reports success when either (a) all code jobs passed or (b) they were
+  # legitimately skipped because only docs changed.
+  # ---------------------------------------------------------------------------
+  ci-status:
+    name: CI Status
+    if: always()
+    needs: [changes, test, binary-smoke-native]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check CI result
+        run: |
+          if [ "${{ needs.changes.outputs.code }}" == "true" ]; then
+            if [ "${{ needs.test.result }}" != "success" ]; then
+              echo "::error::test job did not succeed (result: ${{ needs.test.result }})"
+              exit 1
+            fi
+            if [ "${{ needs.binary-smoke-native.result }}" == "failure" ]; then
+              echo "::error::binary-smoke-native failed"
+              exit 1
+            fi
+          fi
+          echo "CI passed (code=${{ needs.changes.outputs.code }})"
