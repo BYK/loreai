@@ -163,6 +163,22 @@ nav {
   color: var(--c0);
 }
 
+.social-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.2rem;
+  height: 1.2rem;
+  color: inherit;
+}
+
+.social-link svg {
+  width: 1.05rem;
+  height: 1.05rem;
+  fill: currentColor;
+  display: block;
+}
+
 .nav-btn {
   font-size: 1rem;
   font-family: var(--sans);
