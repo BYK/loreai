@@ -55,6 +55,9 @@ import { getQuotaForCredential, type QuotaSnapshot } from "./quota";
 // HTML template helpers
 // ---------------------------------------------------------------------------
 
+const FAVICON_HREF =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAEbUlEQVR4nK2Xa4xdUxTHf+fembap1qPM6EiZqmKihiI1QiNeKV/QFIkKJY2QJh6RokIICR8qQSiVEql4tGgiHvEKffBBmhDvD0iFUXxoSmlLveZeWfLbzZ7Tc6ePzEpOzt377L3e67/WhaGpBtRL66CzgMeATr/H05ad7WIYqGixlytURVcBfwG3uA7FWlLbEMKbwNHAAcAaBQ/4jAdmACcDo937B3gLGAv8BjT21Mo2GU4GvgBGAJcCz8r8LqAP+BhYDXwDbAMOBU4ApgDPAK8bsoZyil1VKtFE4Bc9cRowHfgSuF+vtKJQZBHQmwneLerRrUGTgGOBC4AfgDOyc3nSJWr3PU4voRdGAgcNJbTwHQxfAg7LMv5s4GfgKNcjPJ++zwReAOZkPHIlg27Uk+MzpQZRvXQxKXSM8e0tCU9nw1ObZD5QEpCexOdaPZHzb0npYiTazS0uFTL8QAX6dX2Ke8KG3NpcqUF0E7CwFMeI+7rs4v7Aq8Ba4LhMoeOBG4Bu1zvDidzA7bQK+LSEfO9n1gddraXxvJHtHwnMLsU8eJwLLAFeA97xziNW1w5KtLuRrIoy2wgc4bqwGn4CtmYCgyYA92bKT7UMHwXmWg2RwOcDTwC/ArOqlCCzfpYKJIuSYp2W6eWZwqOAx7PQhUc6aE3B+2+VKmrC7aml7O627v9VUNPvGwSjfYGL3f9T4anOv7Iy7gNuVcHknUjaF4FlwEPeZxow38upTK4B3vZ3uRvGM0aoTZY+rRHpzJ1ZvuT5Ufd7IOvvwaemxif6YSAT2l2B3w3PbbUPhKLYiDqyM5/4e4v8034j+x4dc3Iw2yzmX6HLCxtMl8CT3J/cOOA63HhhliMTMmzocWaIEv0oU6BMRUqkiNc9Wt201us2oOT2hsKbrn8UfGab2V1+u10PrRRHcgBLWX+4udGfmK+zdNYIrxvt7fMzzU9SycQoGD+n50Yb44lavjhDwWbpTmFp9uv5QYkWcf0M2NuYbrbHB52SAVM6fyDwNfC9Nb/Ud1Xy5nsxZywYFIsMu1fr3rDmdGC9MLxD/Hyv1cqFoulepTkgYck5vi/TsLHl/lJk7+dlOtfRa6lIOKrCmuWe3SAgJaHJoKDztLjDs1Wtm6T1JJvNHA+vspVG7eYhG6kyD2Y1P62iAy6wYgI7vgWerBKeqGZCPSywhDtXOGS+q0fK4VhsokZbTtTmoPKKvKaadJHYSXhRNRWHFX9YSivsYhepyPXAlT4BLu8Z84NlttIWPt29TXa/TjvrIr2RAx6tZv+mIPRU1u3CmkS9urThjFB3b5yNZpvT8R2Od/NEvjGObzudkIvs95nAm1ob7fQS4BCF9qnsEnNnpv+YvjPe87JYR67cnYWgpQcSFSV3TdHFfZZQKqXIlc9lukWcX26IZhiu9bnbd5dqLea4Xq2PCtnPEk3UY4u+zfKlojr2SJH2TNCHwMsVZyJ3rhNNh53qvh+wYyZgamXZ9nIbDkpCopSi5PZxXSVgVybj/+k/Q/DvREYXw5kAAAAASUVORK5CYII=";
+
 function esc(str: string): string {
   return str
     .replace(/&/g, "&amp;")
@@ -768,7 +771,7 @@ function layout(title: string, body: string): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(title)} - Lore</title>
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%3E%3Cg%20transform%3D%22translate%2832%2032%29%20scale%281.22%29%20translate%28-32%20-32%29%22%20fill%3D%22none%22%20stroke%3D%22%23000%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M32%2052C31%2042%2030%2033%2030%2024%22%20stroke-width%3D%225%22%2F%3E%3Cpath%20d%3D%22M30%2024C23%2018%2018%2014%2011%2012%22%20stroke-width%3D%224%22%2F%3E%3Cpath%20d%3D%22M30%2024C34%2015%2038%209%2045%206%22%20stroke-width%3D%224%22%2F%3E%3Cpath%20d%3D%22M30%2024C39%2022%2046%2024%2054%2031%22%20stroke-width%3D%224%22%2F%3E%3Cpath%20d%3D%22M30%2024C23%2028%2018%2034%2014%2044%22%20stroke-width%3D%223%22%2F%3E%3Cpath%20d%3D%22M30%2024C38%2032%2043%2039%2047%2050%22%20stroke-width%3D%223%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E">
+<link rel="icon" type="image/png" sizes="32x32" href="${FAVICON_HREF}">
 <style>${CSS}</style>
 </head>
 <body>
