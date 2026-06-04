@@ -6,16 +6,29 @@
  * relies on.
  */
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   isVendoredBinary,
   vendorModelInfo,
   vendorRegistration,
   _setVendorRegistration,
+  LOCAL_MODEL_PATH_ENV,
 } from "../src/embedding-vendor";
+
+// These tests verify the binary-mode / npm-mode contract of the vendor module.
+// LORE_LOCAL_MODEL_PATH (set by CI to point at the vendored model cache) would
+// override vendorModelInfo(), so we clear it for the duration of these tests.
+let savedEnv: string | undefined;
+
+beforeEach(() => {
+  savedEnv = process.env[LOCAL_MODEL_PATH_ENV];
+  delete process.env[LOCAL_MODEL_PATH_ENV];
+});
 
 afterEach(() => {
   _setVendorRegistration(null);
+  if (savedEnv !== undefined) process.env[LOCAL_MODEL_PATH_ENV] = savedEnv;
+  else delete process.env[LOCAL_MODEL_PATH_ENV];
 });
 
 describe("npm mode (no registration)", () => {

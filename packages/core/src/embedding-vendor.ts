@@ -62,11 +62,52 @@ export interface VendorModelInfo {
 }
 
 /**
+ * Environment override for the local model directory.
+ *
+ * When `LORE_LOCAL_MODEL_PATH` points at an existing directory, the local
+ * provider loads the model from there with `allowRemoteModels=false` — no
+ * HuggingFace Hub download. This is used for:
+ *  - air-gapped / offline installs that pre-stage the model, and
+ *  - CI, which vendors the model once (cached) and points tests at it so the
+ *    test run never depends on HF Hub availability (avoids transient 429s).
+ *
+ * The value is the cache ROOT, matching the binary wrapper's `localModelPath`:
+ * transformers.js resolves the model at `<root>/<modelId>/<file>` (e.g.
+ * `<root>/nomic-ai/nomic-embed-text-v1.5/onnx/model_quantized.onnx`). This is
+ * the `.vendor-build/.model-cache` dir produced by `vendor-embeddings.ts`.
+ *
+ * Takes precedence over the binary-wrapper registration so it can also be used
+ * to override a vendored binary's extracted path in tests.
+ */
+export const LOCAL_MODEL_PATH_ENV = "LORE_LOCAL_MODEL_PATH";
+
+function envModelPath(): string | null {
+  const p = process.env[LOCAL_MODEL_PATH_ENV];
+  if (!p) return null;
+  // Best-effort existence check — a missing path falls through to HF download
+  // rather than failing init (so a stale env var never bricks embeddings).
+  try {
+    // Lazy require so this module stays usable in non-Node contexts.
+    const { existsSync } = require("node:fs") as typeof import("node:fs");
+    if (!existsSync(p)) return null;
+  } catch {
+    // If we can't stat (unusual), trust the path and let the worker report.
+  }
+  return p;
+}
+
+/**
  * Resolve the vendored model path for transformers.js local loading.
- * Returns `null` when no vendor is registered (npm-mode), so the caller
- * falls through to transformers.js's default HF Hub download + cache.
+ * Resolution order:
+ *   1. `LORE_LOCAL_MODEL_PATH` env override (offline installs / CI), then
+ *   2. binary-wrapper registration (`globalThis.__LORE_VENDOR_MODEL__`).
+ * Returns `null` when neither is present (npm-mode), so the caller falls
+ * through to transformers.js's default HF Hub download + cache.
  */
 export function vendorModelInfo(): VendorModelInfo | null {
+  const envPath = envModelPath();
+  if (envPath) return { localModelPath: envPath };
+
   const reg = getRegistration();
   if (!reg) return null;
   return {

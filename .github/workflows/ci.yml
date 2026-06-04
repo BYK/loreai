@@ -40,8 +40,30 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
+      # The vendor staging tree (`.vendor-build/.model-cache/`) contains the
+      # nomic-embed-text-v1.5 ONNX model files. Needed by the binary build AND
+      # by the test run (so `LocalProvider integration` tests load the model
+      # from disk instead of downloading from HuggingFace Hub — avoiding
+      # transient 429/outage failures that block the nightly).
+      # Cached aggressively — only rebuilt when core deps or vendor scripts change.
+      - name: Cache vendor staging dirs
+        id: vendor-cache
+        uses: actions/cache@v5
+        with:
+          path: .vendor-build
+          key: vendor-${{ hashFiles('packages/core/package.json', 'packages/gateway/script/vendor-embeddings.ts', 'packages/gateway/script/vendor-paths.ts') }}
+
+      - name: Populate vendor staging (cache miss)
+        if: steps.vendor-cache.outputs.cache-hit != 'true'
+        run: bun run packages/gateway/script/vendor-embeddings.ts
+
       - name: Test
         run: bun test
+        env:
+          # Point the local embedding provider at the vendored model cache root
+          # (transformers.js resolves <root>/<modelId>/...). Keeps the test run
+          # off HuggingFace Hub. See packages/core/src/embedding-vendor.ts.
+          LORE_LOCAL_MODEL_PATH: ${{ github.workspace }}/.vendor-build/.model-cache
 
       # Compute nightly version once, pass as job output to downstream jobs.
       # Only on main pushes — PRs and release branches don't get nightly versions.
@@ -153,21 +175,7 @@ jobs:
             packages/gateway/package.json > packages/gateway/package.json.tmp
           mv packages/gateway/package.json.tmp packages/gateway/package.json
 
-      # The vendor staging tree (`.vendor-build/.model-cache/`) contains the
-      # nomic-embed-text-v1.5 ONNX model files that get embedded in the
-      # binary. They depend on @loreai/core's package.json and the vendor
-      # scripts, so cache aggressively — rebuilding only when those change.
-      - name: Cache vendor staging dirs
-        id: vendor-cache
-        uses: actions/cache@v5
-        with:
-          path: .vendor-build
-          key: vendor-${{ hashFiles('packages/core/package.json', 'packages/gateway/script/vendor-embeddings.ts', 'packages/gateway/script/vendor-paths.ts') }}
-
-      - name: Populate vendor staging (cache miss)
-        if: steps.vendor-cache.outputs.cache-hit != 'true'
-        run: bun run packages/gateway/script/vendor-embeddings.ts
-
+      # Vendor staging was already populated above (before the Test step).
       - name: Build linux-x64 binary
         run: bun run --filter '@loreai/gateway' build:binary
         env:
