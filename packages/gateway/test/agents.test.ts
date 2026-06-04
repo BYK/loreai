@@ -94,7 +94,12 @@ describe("Codex agent cliArgs", () => {
     if (!codex) throw new Error("codex agent not registered");
     expect(codex.cliArgs).toBeDefined();
     const args = codex.cliArgs?.("http://127.0.0.1:3207", "/tmp/test");
-    expect(args).toEqual(["-c", 'openai_base_url="http://127.0.0.1:3207/v1"']);
+    expect(args).toEqual([
+      "-c",
+      'openai_base_url="http://127.0.0.1:3207/v1"',
+      "-c",
+      "model_auto_compact_token_limit=999999999",
+    ]);
   });
 
   test("includes gateway URL in the override", () => {
@@ -102,5 +107,12 @@ describe("Codex agent cliArgs", () => {
     if (!codex) throw new Error("codex agent not registered");
     const args = codex.cliArgs?.("http://192.168.1.100:5673", "/tmp/test");
     expect(args?.[1]).toContain("http://192.168.1.100:5673/v1");
+  });
+
+  test("disables auto-compaction via model_auto_compact_token_limit", () => {
+    const codex = AGENTS.find((a) => a.name === "codex");
+    if (!codex) throw new Error("codex agent not registered");
+    const args = codex.cliArgs?.("http://127.0.0.1:3207", "/tmp/test");
+    expect(args).toContain("model_auto_compact_token_limit=999999999");
   });
 });

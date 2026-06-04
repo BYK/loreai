@@ -104,7 +104,10 @@ import {
   type AnthropicCacheOptions,
 } from "./translate/anthropic";
 import { buildOpenAIUpstreamRequest } from "./translate/openai";
-import { buildOpenAIResponsesUpstreamRequest } from "./translate/openai-responses";
+import {
+  buildOpenAIResponsesUpstreamRequest,
+  parseOpenAIResponsesRequest,
+} from "./translate/openai-responses";
 import { accumulateResponsesSSEStream } from "./stream/openai-responses";
 import {
   createStreamAccumulator,
@@ -3201,6 +3204,178 @@ export async function handleCompactEndpoint(
     return new Response(
       JSON.stringify({ error: "compaction_failed", message: msg }),
       { status: 500, headers: { "content-type": "application/json" } },
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Case 1c: Codex compaction endpoint (POST /v1/responses/compact)
+// ---------------------------------------------------------------------------
+
+/**
+ * Handle a Codex-style compaction request at `/v1/responses/compact`.
+ *
+ * Codex sends compaction requests as a POST to `{base_url}/responses/compact`
+ * with a body shaped like a Responses API request (`model`, `instructions`,
+ * `input`, `tools`, etc.). The expected response is `{ output: ResponseItem[] }`.
+ *
+ * Strategy:
+ *  1. Parse the request to identify the session (via headers).
+ *  2. Try Lore's own compaction summary generation.
+ *  3. On success: return a Responses-API-style compacted output.
+ *  4. On failure: passthrough to the upstream OpenAI API.
+ */
+export async function handleResponsesCompactEndpoint(
+  req: Request,
+  config: GatewayConfig,
+): Promise<Response> {
+  // Read the body as text so we can both parse it and replay it for passthrough.
+  const bodyText = await req.text();
+  let body: Record<string, unknown>;
+  try {
+    body = JSON.parse(bodyText) as Record<string, unknown>;
+  } catch {
+    return new Response(
+      JSON.stringify({
+        error: "invalid_request",
+        message: "Invalid JSON body",
+      }),
+      { status: 400, headers: { "content-type": "application/json" } },
+    );
+  }
+
+  const rawHeaders: Record<string, string> = {};
+  req.headers.forEach((value, key) => {
+    rawHeaders[key] = value;
+  });
+
+  // Parse the body as a Responses API request to get messages for session
+  // fingerprinting. The compact request body has the same shape as a normal
+  // /v1/responses request (model, instructions, input, tools, etc.).
+  let gatewayReq: GatewayRequest;
+  try {
+    gatewayReq = parseOpenAIResponsesRequest(body, rawHeaders);
+  } catch {
+    // If parsing fails, still attempt passthrough — the upstream may accept it.
+    log.warn(
+      "responses/compact: failed to parse request body — falling back to upstream",
+    );
+    return await passthroughResponsesCompact(bodyText, rawHeaders, config);
+  }
+
+  const pathResult = getProjectPath(gatewayReq.system, rawHeaders);
+  const gitRemote = extractGitRemoteHeader(rawHeaders);
+
+  await initIfNeeded(pathResult.path, config, gitRemote);
+
+  const { sessionID, isNew } = await identifySession(
+    gatewayReq,
+    pathResult.path,
+  );
+
+  // If no prior session, skip Lore compaction and passthrough to upstream.
+  if (!isNew) {
+    log.info(
+      `responses/compact: generating Lore summary for session ${sessionID.slice(0, 16)}`,
+    );
+
+    try {
+      const summary = await generateCompactionSummary({
+        projectPath: pathResult.path,
+        sessionID,
+        config,
+      });
+
+      if (summary != null) {
+        // Clear cached warmup body — post-compaction messages will differ.
+        const sessionState = sessions.get(sessionID);
+        if (sessionState) {
+          sessionState.cacheAnalytics.lastRequestBody = null;
+        }
+
+        // Return in Codex's expected format: { output: ResponseItem[] }
+        // Must include id, status, and annotations to match the
+        // CompactHistoryResponse { output: Vec<ResponseItem> } struct.
+        return new Response(
+          JSON.stringify({
+            output: [
+              {
+                type: "message",
+                id: `msg_lore_compact_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`,
+                role: "assistant",
+                status: "completed",
+                content: [
+                  { type: "output_text", text: summary, annotations: [] },
+                ],
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      log.warn(
+        `responses/compact: Lore summary generation failed for session ${sessionID.slice(0, 16)} — falling back to upstream`,
+      );
+    } catch (err) {
+      log.warn(
+        "responses/compact: Lore compaction error, falling back to upstream:",
+        err,
+      );
+    }
+  } else {
+    log.info(
+      "responses/compact: no prior session found — falling back to upstream",
+    );
+  }
+
+  // Fallback: passthrough to upstream OpenAI /v1/responses/compact
+  return await passthroughResponsesCompact(bodyText, rawHeaders, config);
+}
+
+/**
+ * Forward a compaction request to the upstream OpenAI API as-is.
+ */
+async function passthroughResponsesCompact(
+  bodyText: string,
+  rawHeaders: Record<string, string>,
+  config: GatewayConfig,
+): Promise<Response> {
+  const upstreamUrl = `${config.upstreamOpenAI}/v1/responses/compact`;
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+  };
+
+  // Forward auth headers (keys are lowercase — Fetch API normalizes them).
+  const auth = rawHeaders.authorization;
+  if (auth) headers.authorization = auth;
+  const apiKey = rawHeaders["x-api-key"];
+  if (apiKey) headers["x-api-key"] = apiKey;
+
+  // Forward OpenAI-specific headers
+  const openAiBeta = rawHeaders["openai-beta"];
+  if (openAiBeta) headers["openai-beta"] = openAiBeta;
+
+  try {
+    const upstream = await fetch(upstreamUrl, {
+      method: "POST",
+      headers,
+      body: bodyText,
+    });
+    return new Response(upstream.body, {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers: new Headers(upstream.headers),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Upstream unreachable";
+    log.error("responses/compact upstream passthrough error:", err);
+    return new Response(
+      JSON.stringify({
+        error: "compaction_failed",
+        message: `Failed to reach upstream: ${msg}`,
+      }),
+      { status: 502, headers: { "content-type": "application/json" } },
     );
   }
 }

@@ -1,5 +1,9 @@
 import { describe, test, expect } from "bun:test";
-import { updateCodexConfig, normalizeBaseUrl } from "../src/cli/setup";
+import {
+  updateCodexConfig,
+  normalizeBaseUrl,
+  setTopLevelKey,
+} from "../src/cli/setup";
 
 // ---------------------------------------------------------------------------
 // normalizeBaseUrl
@@ -94,12 +98,14 @@ describe("normalizeBaseUrl", () => {
 describe("updateCodexConfig — empty file", () => {
   test("creates config from empty string", () => {
     const result = updateCodexConfig("", "http://127.0.0.1:3207/v1");
-    expect(result).toBe('openai_base_url = "http://127.0.0.1:3207/v1"\n');
+    expect(result).toContain('openai_base_url = "http://127.0.0.1:3207/v1"');
+    expect(result).toContain("model_auto_compact_token_limit = 999999999");
   });
 
   test("creates config from whitespace-only string", () => {
     const result = updateCodexConfig("  \n\n  ", "http://127.0.0.1:3207/v1");
-    expect(result).toBe('openai_base_url = "http://127.0.0.1:3207/v1"\n');
+    expect(result).toContain('openai_base_url = "http://127.0.0.1:3207/v1"');
+    expect(result).toContain("model_auto_compact_token_limit = 999999999");
   });
 });
 
@@ -115,7 +121,7 @@ describe("updateCodexConfig — idempotency", () => {
   });
 
   test("idempotent with existing config", () => {
-    const input = `model = "gpt-5.5"\nopenai_base_url = "http://127.0.0.1:3207/v1"\napproval_policy = "on-request"\n`;
+    const input = `model = "gpt-5.5"\nopenai_base_url = "http://127.0.0.1:3207/v1"\nmodel_auto_compact_token_limit = 999999999\napproval_policy = "on-request"\n`;
     const result = updateCodexConfig(input, "http://127.0.0.1:3207/v1");
     expect(result).toBe(input);
   });
@@ -133,12 +139,15 @@ describe("updateCodexConfig — replace existing", () => {
     expect(result).toContain('model = "gpt-5.5"');
     expect(result).toContain('approval_policy = "on-request"');
     expect(result).not.toContain("https://api.openai.com/v1");
+    expect(result).toContain("model_auto_compact_token_limit = 999999999");
   });
 
   test("replaces with different URL", () => {
-    const input = 'openai_base_url = "http://127.0.0.1:3207/v1"\n';
+    const input =
+      'openai_base_url = "http://127.0.0.1:3207/v1"\nmodel_auto_compact_token_limit = 999999999\n';
     const result = updateCodexConfig(input, "http://remote:8080/v1");
-    expect(result).toBe('openai_base_url = "http://remote:8080/v1"\n');
+    expect(result).toContain('openai_base_url = "http://remote:8080/v1"');
+    expect(result).toContain("model_auto_compact_token_limit = 999999999");
   });
 });
 
@@ -280,13 +289,88 @@ describe("updateCodexConfig — real-world config", () => {
     const result = updateCodexConfig(input, "http://127.0.0.1:3207/v1");
     // Should be inserted at the top, before sections
     const urlIdx = result.indexOf("openai_base_url");
+    const compactIdx = result.indexOf("model_auto_compact_token_limit");
     const firstSection = result.indexOf("[marketplaces");
     expect(urlIdx).toBeLessThan(firstSection);
     expect(urlIdx).toBeGreaterThanOrEqual(0);
+    expect(compactIdx).toBeLessThan(firstSection);
+    expect(compactIdx).toBeGreaterThanOrEqual(0);
     // Original content preserved
     expect(result).toContain("notify =");
     expect(result).toContain("[features]");
     expect(result).toContain("[desktop]");
     expect(result).toContain("[mcp_servers.node_repl]");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// updateCodexConfig — model_auto_compact_token_limit
+// ---------------------------------------------------------------------------
+
+describe("updateCodexConfig — auto-compaction disabled", () => {
+  test("adds model_auto_compact_token_limit to empty config", () => {
+    const result = updateCodexConfig("", "http://127.0.0.1:3207/v1");
+    expect(result).toContain("model_auto_compact_token_limit = 999999999");
+  });
+
+  test("replaces existing model_auto_compact_token_limit", () => {
+    const input =
+      'openai_base_url = "http://127.0.0.1:3207/v1"\nmodel_auto_compact_token_limit = 50000\n';
+    const result = updateCodexConfig(input, "http://127.0.0.1:3207/v1");
+    expect(result).toContain("model_auto_compact_token_limit = 999999999");
+    expect(result).not.toContain("model_auto_compact_token_limit = 50000");
+  });
+
+  test("does not replace model_auto_compact_token_limit inside a section", () => {
+    const input = [
+      "[some_section]",
+      "model_auto_compact_token_limit = 50000",
+      "",
+    ].join("\n");
+    const result = updateCodexConfig(input, "http://127.0.0.1:3207/v1");
+    // Section-scoped value preserved
+    expect(result).toContain("model_auto_compact_token_limit = 50000");
+    // Top-level value also added
+    const lines = result.split("\n");
+    const topLevelIdx = lines.findIndex(
+      (l) => l.trim() === "model_auto_compact_token_limit = 999999999",
+    );
+    const sectionIdx = lines.findIndex((l) => l.trim().startsWith("["));
+    expect(topLevelIdx).toBeGreaterThanOrEqual(0);
+    expect(topLevelIdx).toBeLessThan(sectionIdx);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// setTopLevelKey — generic TOML key setter
+// ---------------------------------------------------------------------------
+
+describe("setTopLevelKey", () => {
+  test("inserts a new key into empty content", () => {
+    const result = setTopLevelKey("", "my_key", "42");
+    expect(result).toBe("my_key = 42\n");
+  });
+
+  test("replaces an existing top-level key", () => {
+    const input = "my_key = 10\nother = true\n";
+    const result = setTopLevelKey(input, "my_key", "42");
+    expect(result).toContain("my_key = 42");
+    expect(result).not.toContain("my_key = 10");
+    expect(result).toContain("other = true");
+  });
+
+  test("inserts before first section when key does not exist", () => {
+    const input = "[section]\nfoo = bar\n";
+    const result = setTopLevelKey(input, "my_key", "42");
+    const keyIdx = result.indexOf("my_key = 42");
+    const sectionIdx = result.indexOf("[section]");
+    expect(keyIdx).toBeGreaterThanOrEqual(0);
+    expect(keyIdx).toBeLessThan(sectionIdx);
+  });
+
+  test("is idempotent", () => {
+    const first = setTopLevelKey("", "my_key", "42");
+    const second = setTopLevelKey(first, "my_key", "42");
+    expect(second).toBe(first);
   });
 });

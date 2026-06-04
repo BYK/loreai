@@ -2,12 +2,13 @@
  * HTTP server for the Lore gateway proxy.
  *
  * Routes:
- *   POST /v1/messages          → Anthropic protocol
- *   POST /v1/chat/completions  → OpenAI Chat Completions protocol
- *   POST /v1/responses         → OpenAI Responses API protocol
- *   POST /v1/compact           → Explicit compaction summary (Pi plugin, etc.)
- *   GET  /v1/models            → Passthrough to upstream
- *   GET  /health               → Health check
+ *   POST /v1/messages            → Anthropic protocol
+ *   POST /v1/chat/completions    → OpenAI Chat Completions protocol
+ *   POST /v1/responses           → OpenAI Responses API protocol
+ *   POST /v1/responses/compact   → Codex compaction (Responses API)
+ *   POST /v1/compact             → Explicit compaction summary (Pi plugin, etc.)
+ *   GET  /v1/models              → Passthrough to upstream
+ *   GET  /health                 → Health check
  *
  * Uses `Bun.serve()` — this package targets Bun exclusively.
  */
@@ -28,6 +29,7 @@ import { translateAnthropicStreamToResponses } from "./stream/openai-responses";
 import {
   handleRequest,
   handleCompactEndpoint,
+  handleResponsesCompactEndpoint,
   accumulateResponsesNonStreamJSON,
 } from "./pipeline";
 
@@ -399,6 +401,11 @@ export function startServer(config: GatewayConfig): {
       // POST /v1/chat/completions — OpenAI protocol
       if (method === "POST" && pathname === "/v1/chat/completions") {
         return await handleOpenAIChatCompletions(req, config);
+      }
+
+      // POST /v1/responses/compact — Codex compaction (Responses API)
+      if (method === "POST" && pathname === "/v1/responses/compact") {
+        return withCors(await handleResponsesCompactEndpoint(req, config));
       }
 
       // POST /v1/responses — OpenAI Responses API protocol

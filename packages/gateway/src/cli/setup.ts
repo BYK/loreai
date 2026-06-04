@@ -2,7 +2,8 @@
  * `lore setup [app]` — configure an AI app to route through the Lore gateway.
  *
  * Currently supports:
- *   - codex: writes `openai_base_url` to `~/.codex/config.toml`
+ *   - codex: writes `openai_base_url` and `model_auto_compact_token_limit`
+ *     to `~/.codex/config.toml`
  *
  * The command auto-detects installed apps when no argument is given,
  * or accepts an explicit app name (e.g. `lore setup codex`).
@@ -84,24 +85,51 @@ export function codexConfigPath(): string {
 }
 
 /**
+ * Token limit value large enough to effectively disable Codex auto-compaction.
+ * Lore manages context via its own gradient context manager and distillation
+ * pipeline, so client-side compaction is undesirable.
+ */
+const CODEX_COMPACT_DISABLE_LIMIT = 999999999;
+
+/**
  * Update (or create) the Codex user-level `config.toml` to set
- * `openai_base_url` to the Lore gateway.
+ * `openai_base_url` to the Lore gateway and disable auto-compaction.
  *
- * Strategy:
- * - If `openai_base_url` already exists as a top-level key, replace it.
+ * Strategy (per key):
+ * - If the key already exists as a top-level key, replace it.
  * - Otherwise insert it at the top of the file (before any [section]).
  * - Preserves all other config, comments, and sections.
  * - Idempotent: running twice produces the same result.
  */
 export function updateCodexConfig(content: string, baseUrl: string): string {
-  const newLine = `openai_base_url = "${baseUrl}"`;
+  let result = setTopLevelKey(content, "openai_base_url", `"${baseUrl}"`);
+  result = setTopLevelKey(
+    result,
+    "model_auto_compact_token_limit",
+    String(CODEX_COMPACT_DISABLE_LIMIT),
+  );
+  return result;
+}
 
-  // Check if openai_base_url already exists as a top-level key.
+/**
+ * Set a top-level TOML key to a value, replacing it if it already exists
+ * at the top level, or inserting it before the first `[section]` header.
+ *
+ * The `value` is written literally (caller must add quotes for strings).
+ */
+export function setTopLevelKey(
+  content: string,
+  key: string,
+  value: string,
+): string {
+  const newLine = `${key} = ${value}`;
+
+  // Check if the key already exists as a top-level key.
   // Must match only top-level occurrences (not inside a [section]).
-  // We find lines matching the key and verify they're before the first section
-  // or replace them in-place.
   const lines = content.split("\n");
-  const keyPattern = /^\s*openai_base_url\s*=/;
+  const keyPattern = new RegExp(
+    `^\\s*${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*=`,
+  );
   let replaced = false;
 
   for (let i = 0; i < lines.length; i++) {
@@ -184,6 +212,9 @@ function setupCodex(baseUrl: string): void {
 
   console.log(`[lore] Codex configured to use Lore gateway.`);
   console.log(`[lore]   openai_base_url = "${baseUrl}"`);
+  console.log(
+    `[lore]   model_auto_compact_token_limit = ${CODEX_COMPACT_DISABLE_LIMIT} (auto-compaction disabled)`,
+  );
   console.log(`[lore]   Config: ${configPath}`);
   console.log(`[lore]`);
   console.log(

@@ -142,6 +142,10 @@ export const AGENTS: AgentDef[] = [
       // not affect Codex's persisted config or session scoping.
       "-c",
       `openai_base_url="${url}/v1"`,
+      // Disable Codex auto-compaction — Lore manages context via its own
+      // gradient context manager and distillation pipeline.
+      "-c",
+      "model_auto_compact_token_limit=999999999",
     ],
   },
   {
