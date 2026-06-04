@@ -128,7 +128,7 @@ describe("fetchOAuthQuotaSnapshot", () => {
     globalThis.fetch = mock((url: string) => {
       // Only capture the quota request — ignore Sentry transport flushes and
       // other background fetches that race with the mock (see #524 / #527).
-      if (typeof url === "string" && url.startsWith(QUOTA_URL)) {
+      if (url.startsWith(QUOTA_URL)) {
         capturedUrl = url;
       }
       return Promise.resolve(new Response(quotaBody(), { status: 200 }));
