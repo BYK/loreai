@@ -1463,14 +1463,17 @@ export async function backfillEntityEmbeddings(): Promise<number> {
   const provider = getProvider();
   if (!provider) return 0;
 
+  // Bun's bun:sqlite rejects GROUP_CONCAT(DISTINCT col, separator) with two
+  // arguments when DISTINCT is used ("DISTINCT aggregates must have exactly
+  // one argument"). Use a subquery to deduplicate aliases instead.
   const rows = db()
     .query(
       `SELECT e.id AS id, e.canonical_name AS canonical_name,
-              GROUP_CONCAT(DISTINCT a.alias_value, ' ') AS aliases
+              (SELECT GROUP_CONCAT(da.alias_value, ' ')
+               FROM (SELECT DISTINCT alias_value FROM entity_aliases WHERE entity_id = e.id) da
+              ) AS aliases
        FROM entities e
-       LEFT JOIN entity_aliases a ON a.entity_id = e.id
-       WHERE e.embedding IS NULL
-       GROUP BY e.id`,
+       WHERE e.embedding IS NULL`,
     )
     .all() as Array<{
     id: string;
