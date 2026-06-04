@@ -166,21 +166,30 @@ nav {
 .nav-socials {
   display: flex;
   align-items: center;
-  gap: 1rem;
+  gap: .65rem;
 }
 
 .social-link {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 1.2rem;
-  height: 1.2rem;
+  width: 2.25rem;
+  height: 2.25rem;
+  border: 1px solid rgba(196, 221, 199, .22);
+  border-radius: 50%;
   color: inherit;
+  transition: background .25s, border-color .25s, color .25s;
+}
+
+.social-link:hover {
+  background: rgba(247, 242, 232, .08);
+  border-color: rgba(196, 221, 199, .5);
+  color: var(--c0);
 }
 
 .social-link svg {
-  width: 1.05rem;
-  height: 1.05rem;
+  width: 1.1rem;
+  height: 1.1rem;
   fill: currentColor;
   display: block;
 }
