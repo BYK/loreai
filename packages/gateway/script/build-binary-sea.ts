@@ -281,14 +281,17 @@ function sentryBunToNodePlugin(): esbuild.Plugin {
 
 async function buildBinary() {
   const targets = parseTargets();
+  const firstTarget = targets[0];
   const vendorModelDir =
-    targets.length === 1 ? prepareVendorModelCache(targets[0]!) : null;
+    targets.length === 1 && firstTarget
+      ? prepareVendorModelCache(firstTarget)
+      : null;
   if (targets.length > 1) {
     // Multi-platform build: assume the cache is already populated
     // (callers should have run a single-target build first or staged
     // the model manually).
-    if (!flags["no-vendor"]) {
-      const sample = targets[0]!;
+    if (!flags["no-vendor"] && firstTarget) {
+      const sample = firstTarget;
       if (!VENDORED_TARGETS.has(sample)) {
         console.log(
           `  Vendor: skipped (multi-platform, ${sample} not vendored)`,

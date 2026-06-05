@@ -107,9 +107,8 @@ if (globalThis.__LORE_WASM_READY__) {
     // Convert the mjs path to a file:// URL so the ESM loader
     // accepts it on all platforms. The wasm path is read via fs
     // (not import()), so it stays as a plain file path.
-    var url = require("node:url");
     globalThis.__LORE_VENDOR_WASM_PATHS__ = {
-      mjs: url.pathToFileURL(mjsPath).href,
+      mjs: require("node:url").pathToFileURL(mjsPath).href,
       wasm: wasmPath,
     };
 
