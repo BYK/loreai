@@ -1625,18 +1625,19 @@ async function forwardToUpstream(
     headers = result.headers;
     body = result.body;
   } else {
-    // For non-native-Anthropic upstreams (MiniMax, Fireworks, etc.), strip
-    // extended cache TTL ("1h") — it's an Anthropic beta extension that
-    // third-party endpoints may reject. Standard cache_control ephemeral
-    // breakpoints are kept (widely supported).
+    // For non-native-Anthropic upstreams (MiniMax, Fireworks, etc.), downgrade
+    // extended cache TTL ("1h") to standard 5-minute ephemeral — the "1h" TTL
+    // is an Anthropic beta extension that third-party endpoints may reject.
+    // Standard cache_control breakpoints with bare ephemeral are kept (widely
+    // supported) so third-party providers still benefit from prompt caching.
     const isNativeAnthropic =
       effectiveUpstreamBase === "https://api.anthropic.com";
     const effectiveCache =
       cache && !isNativeAnthropic
         ? {
             ...cache,
-            systemTTL: undefined as undefined,
-            conversationTTL: undefined as undefined,
+            systemTTL: "5m" as const,
+            conversationTTL: "5m" as const,
           }
         : cache;
     const result = buildAnthropicRequest(req, effectiveCache);
