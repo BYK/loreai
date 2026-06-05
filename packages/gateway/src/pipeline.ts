@@ -1563,8 +1563,9 @@ async function forwardToUpstream(
   const providerID = extractProviderHeader(req.rawHeaders);
   let providerRoute = providerID ? resolveProviderRoute(providerID) : null;
   // Dynamic fallback: look up unknown providers from models.dev cache.
+  // Non-blocking — returns cached data or null (triggers background refresh).
   if (!providerRoute && providerID) {
-    providerRoute = await lookupProviderRoute(providerID);
+    providerRoute = lookupProviderRoute(providerID);
   }
   const modelRoute = resolveUpstreamRoute(req.model);
 
@@ -1589,6 +1590,22 @@ async function forwardToUpstream(
     (effectiveProtocol === "anthropic"
       ? config.upstreamAnthropic
       : config.upstreamOpenAI);
+
+  // Warn when a provider route exists but has no URL and no header override —
+  // the request will fall through to config defaults which likely have wrong
+  // credentials. The user should set LORE_UPSTREAM_<PROVIDER>=<url>.
+  if (
+    providerRoute?.url == null &&
+    providerID &&
+    !headerUpstream &&
+    !modelRoute
+  ) {
+    log.warn(
+      `provider "${providerID}" has no upstream URL configured — falling back to default. ` +
+        `Set LORE_UPSTREAM_${providerID.toUpperCase().replace(/-/g, "_")}=<url> ` +
+        `to route requests correctly.`,
+    );
+  }
 
   if (effectiveProtocol === "openai-responses") {
     // Inject LTM into system prompt for non-Anthropic paths.
@@ -2736,13 +2753,19 @@ function postResponse(
     }
     // Track model/protocol/beta for warmup profile resolution
     sessionState.lastModel = req.model;
-    // Use provider-aware protocol resolution: provider route > model prefix > fallback.
+    // Use provider-aware protocol resolution with the same providerRouteUsable
+    // guard as forwardToUpstream: only trust the provider route's protocol when
+    // it also has a usable URL (or headerUpstream is set). Otherwise fall back
+    // to model-prefix routing to avoid protocol/worker mismatch.
     const lpProvider = extractProviderHeader(req.rawHeaders);
     const lpRoute = lpProvider ? resolveProviderRoute(lpProvider) : null;
+    const lpHeaderUpstream = extractUpstreamUrlHeader(req.rawHeaders);
+    const lpRouteUsable =
+      lpRoute && (lpRoute.url != null || lpHeaderUpstream) ? lpRoute : null;
     sessionState.lastProtocol =
       req.protocol === "openai-responses"
         ? "openai-responses"
-        : (lpRoute?.protocol ??
+        : (lpRouteUsable?.protocol ??
           resolveUpstreamRoute(req.model)?.protocol ??
           "anthropic");
     // Capture anthropic-beta so cache-warmer can forward it — beta-gated
@@ -4288,10 +4311,14 @@ async function handleConversationTurn(
       "gen_ai.request.model": req.model,
       "gen_ai.provider.name": (() => {
         if (req.protocol === "openai-responses") return "openai-responses";
+        // Apply the same providerRouteUsable guard as forwardToUpstream:
+        // only trust provider route protocol when it has a usable URL.
         const pid = extractProviderHeader(req.rawHeaders);
         const pr = pid ? resolveProviderRoute(pid) : null;
+        const hdrUp = extractUpstreamUrlHeader(req.rawHeaders);
+        const prUsable = pr && (pr.url != null || hdrUp) ? pr : null;
         return (
-          pr?.protocol ??
+          prUsable?.protocol ??
           resolveUpstreamRoute(req.model)?.protocol ??
           "anthropic"
         );

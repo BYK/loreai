@@ -252,19 +252,22 @@ function npmToProtocol(
  * Dynamically look up a provider route from the models.dev API cache.
  *
  * Called as a fallback when `resolveProviderRoute()` (static table) returns
- * null. Triggers a models.dev fetch if the cache is stale, but never blocks
- * on a fresh network call — returns null if no cached data is available.
+ * null. Returns cached data immediately when available. On cache miss or
+ * stale cache, triggers a background refresh and returns stale data (or
+ * null) — never blocks the hot request path on a network call.
  */
-export async function lookupProviderRoute(
-  providerID: string,
-): Promise<ProviderRoute | null> {
-  // If we have fresh cached routes, use them directly (no network call).
-  if (cachedProviderRoutes && Date.now() - cachedModelDataAt < CACHE_TTL_MS) {
+export function lookupProviderRoute(providerID: string): ProviderRoute | null {
+  // Return from cache (fresh or stale) — never block the request.
+  if (cachedProviderRoutes) {
+    // If stale, trigger a background refresh (fire-and-forget).
+    if (Date.now() - cachedModelDataAt >= CACHE_TTL_MS) {
+      fetchModelData().catch(() => {});
+    }
     return cachedProviderRoutes.get(providerID) ?? null;
   }
-  // Trigger a fetch (deduped + cached) — this also populates cachedProviderRoutes.
-  await fetchModelData();
-  return cachedProviderRoutes?.get(providerID) ?? null;
+  // No cache at all — trigger a background fetch for next request.
+  fetchModelData().catch(() => {});
+  return null;
 }
 
 /**

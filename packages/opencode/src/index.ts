@@ -3,11 +3,10 @@ import { log, getGitRemote, discoverWorkspaceRoot } from "@loreai/core";
 
 /**
  * The Lore gateway can proxy any provider that uses the Anthropic, OpenAI
- * Chat Completions, or OpenAI Responses wire protocol. Instead of
- * maintaining a static allowlist, the plugin redirects ALL configured
- * providers through the gateway. Providers whose SDK doesn't honor
- * `baseURL` (e.g. native Google Vertex, AWS Bedrock) are harmlessly
- * unaffected — the SDK ignores the override.
+ * Chat Completions, or OpenAI Responses wire protocol. The plugin
+ * redirects ALL providers present in cfg.provider through the gateway,
+ * plus a set of well-known providers that may be selected dynamically
+ * in the UI (not present in cfg.provider at config-hook time).
  *
  * The gateway resolves the correct upstream URL via:
  *   1. X-Lore-Upstream-URL header (explicit env var or captured original baseURL)
@@ -19,6 +18,51 @@ import { log, getGitRemote, discoverWorkspaceRoot } from "@loreai/core";
  * (e.g. `LORE_UPSTREAM_VLLM=http://localhost:8000`) so the gateway knows
  * where to forward requests.
  */
+
+/**
+ * Providers to proactively redirect through the gateway even if not yet
+ * in cfg.provider. OpenCode resolves some providers dynamically (e.g.
+ * when the user picks a model in the UI), so they may not be in the
+ * config at hook time. This list ensures their baseURL is pre-set.
+ *
+ * Providers already in cfg.provider are also redirected (wildcard).
+ */
+const WELL_KNOWN_PROVIDERS: string[] = [
+  // Anthropic-messages API
+  "anthropic",
+  "fireworks",
+  "github-copilot",
+  "minimax",
+  "minimax-cn",
+  "kimi-coding",
+  // OpenAI-completions API
+  "deepseek",
+  "xai",
+  "groq",
+  "cerebras",
+  "openrouter",
+  "huggingface",
+  "zai",
+  "opencode",
+  "opencode-go",
+  "vercel-ai-gateway",
+  // OpenAI-responses API
+  "openai",
+  // SDK-routed providers (model-prefix fallback also works)
+  "nvidia",
+  "mistral",
+  "google",
+  // Local / self-hosted (OpenAI-compatible)
+  "vllm",
+  "llamacpp",
+  "ollama",
+  "lmstudio",
+  "jan",
+  "localai",
+  "tgi",
+  "tabbyml",
+  "litellm",
+];
 
 /** Default ports to probe when looking for a running gateway (must match gateway defaults). */
 const KNOWN_GATEWAY_PORTS = [3207, 5673];
@@ -216,13 +260,17 @@ export const LorePlugin: Plugin = async (ctx) => {
           const p =
             (cfg.provider as Record<string, ProviderEntry> | undefined) ?? {};
           cfg.provider = p;
-          // Redirect ALL configured providers through the gateway.
-          // The gateway resolves the correct upstream via provider-ID
-          // routing (PROVIDER_ROUTES + models.dev) and the fallback
-          // X-Lore-Upstream-URL header (captured original baseURL).
-          for (const providerID of Object.keys(p)) {
+          // Redirect ALL configured providers + well-known providers through
+          // the gateway. Some providers are selected dynamically in the UI
+          // and won't be in cfg.provider at config-hook time — the
+          // WELL_KNOWN_PROVIDERS list ensures they're pre-registered.
+          const allProviders = new Set([
+            ...Object.keys(p),
+            ...WELL_KNOWN_PROVIDERS,
+          ]);
+          for (const providerID of allProviders) {
+            p[providerID] ??= {};
             const entry = p[providerID];
-            if (!entry) continue;
             entry.options ??= {};
             // Capture original baseURL before overwriting — sent as
             // fallback X-Lore-Upstream-URL for providers not in the

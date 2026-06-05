@@ -306,7 +306,7 @@ const PROVIDER_ROUTES: Record<string, ProviderRoute> = {
     url: "https://api.fireworks.ai/inference",
     protocol: "anthropic",
   },
-  "github-copilot": { url: null, protocol: "anthropic" },
+  "github-copilot": { url: null, protocol: "openai" },
   minimax: {
     url: "https://api.minimax.io/anthropic",
     protocol: "anthropic",
