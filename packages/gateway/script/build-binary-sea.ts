@@ -573,21 +573,19 @@ async function buildBinary() {
   const fossilizeTarget = (t: CompileTarget): string =>
     t.startsWith("windows") ? t.replace("windows", "win") : t;
   const platformArgs = targets.map(fossilizeTarget).join(",");
-  // Resolve fossilize from local node_modules/.bin instead of npx —
-  // faster, deterministic, and avoids npx version drift.
-  const fossilizeBin = join(
+  // Prefer fossilize from local node_modules/.bin (faster,
+  // deterministic). Fall back to npx for CI environments that
+  // haven't run `bun install` (fossilize is downloaded on demand).
+  const localFossilize = join(
     repoRoot,
     "node_modules",
     ".bin",
     process.platform === "win32" ? "fossilize.cmd" : "fossilize",
   );
-  if (!existsSync(fossilizeBin)) {
-    console.error(
-      `✗ fossilize not found at ${fossilizeBin}. Run \`bun install\`.`,
-    );
-    process.exit(1);
-  }
+  const useLocal = existsSync(localFossilize);
+  const fossilizeBin = useLocal ? localFossilize : "npx";
   const fossilizeArgs: string[] = [
+    ...(useLocal ? [] : ["--yes", "fossilize"]),
     bundlePath,
     "--no-bundle",
     "--hole-punch",
