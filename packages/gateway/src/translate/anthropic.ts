@@ -391,17 +391,21 @@ export function buildAnthropicRequest(
       ];
 
       if (stableLtm) {
-        // Stable LTM always gets a 1h cache breakpoint regardless of the
-        // caller's systemTTL — preferences are pinned ≥1h by design so
-        // the prefix stays warm across turns and sessions. Even when
-        // context-bound LTM changes (turn 1→2, curation), system[0]+[1]
-        // remain cache reads at 0.1× cost. The host prompt (system[0])
-        // needs no cache_control — Anthropic prefix caching means
-        // system[1]'s breakpoint covers everything before it.
+        // Stable LTM gets a cache breakpoint — preferences are pinned by
+        // design so the prefix stays warm across turns and sessions. Even
+        // when context-bound LTM changes (turn 1→2, curation),
+        // system[0]+[1] remain cache reads at 0.1× cost. The host prompt
+        // (system[0]) needs no cache_control — Anthropic prefix caching
+        // means system[1]'s breakpoint covers everything before it.
+        // Use 1h extended TTL on native Anthropic; bare ephemeral on
+        // third-party endpoints that may not support the ttl extension.
         blocks.push({
           type: "text",
           text: stableLtm,
-          cache_control: { type: "ephemeral", ttl: "1h" },
+          cache_control:
+            systemTTL === "1h"
+              ? { type: "ephemeral", ttl: "1h" }
+              : { type: "ephemeral" },
         });
       } else {
         // No stable LTM — fall back to putting the cache breakpoint on
@@ -461,15 +465,18 @@ export function buildAnthropicRequest(
       input_schema: t.inputSchema,
     }));
 
-    // Tool caching: place a 1h breakpoint on the last tool definition.
+    // Tool caching: place a breakpoint on the last tool definition.
     // Tool definitions (including our recall tool) are stable across turns.
+    // Use 1h extended TTL when systemTTL is "1h" (native Anthropic); bare
+    // ephemeral otherwise (third-party Anthropic-compatible endpoints may
+    // reject the extended ttl field).
     if (cache?.cacheTools && tools.length > 0) {
       const lastTool = tools[tools.length - 1];
       if (lastTool) {
-        (lastTool as Record<string, unknown>).cache_control = {
-          type: "ephemeral",
-          ttl: "1h",
-        };
+        (lastTool as Record<string, unknown>).cache_control =
+          cache.systemTTL === "1h"
+            ? { type: "ephemeral", ttl: "1h" }
+            : { type: "ephemeral" };
       }
     }
 

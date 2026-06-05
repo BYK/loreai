@@ -1625,7 +1625,21 @@ async function forwardToUpstream(
     headers = result.headers;
     body = result.body;
   } else {
-    const result = buildAnthropicRequest(req, cache);
+    // For non-native-Anthropic upstreams (MiniMax, Fireworks, etc.), strip
+    // extended cache TTL ("1h") — it's an Anthropic beta extension that
+    // third-party endpoints may reject. Standard cache_control ephemeral
+    // breakpoints are kept (widely supported).
+    const isNativeAnthropic =
+      effectiveUpstreamBase === "https://api.anthropic.com";
+    const effectiveCache =
+      cache && !isNativeAnthropic
+        ? {
+            ...cache,
+            systemTTL: undefined as undefined,
+            conversationTTL: undefined as undefined,
+          }
+        : cache;
+    const result = buildAnthropicRequest(req, effectiveCache);
     url = `${effectiveUpstreamBase}${result.url}`;
     headers = result.headers;
     body = result.body;

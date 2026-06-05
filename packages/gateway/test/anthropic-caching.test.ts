@@ -489,7 +489,7 @@ describe("buildAnthropicRequest — 3-block system prompt", () => {
     expect(body.system).toBe("You are a helpful assistant.\n\nprefs");
   });
 
-  test("5m systemTTL with stable LTM still uses 1h on stable block", () => {
+  test("5m systemTTL with stable LTM uses bare ephemeral on stable block", () => {
     const body = getBody(makeRequest(), {
       systemTTL: "5m",
       stableLtmSystem: "## Preferences\n* style",
@@ -499,8 +499,9 @@ describe("buildAnthropicRequest — 3-block system prompt", () => {
     expect(blocks).toHaveLength(3);
     // Host — no cache_control
     expect(blocks[0].cache_control).toBeUndefined();
-    // Stable LTM always gets 1h regardless of systemTTL
-    expect(blocks[1].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+    // Stable LTM uses bare ephemeral (no ttl) when systemTTL is not "1h" —
+    // third-party Anthropic-compatible endpoints may reject the ttl extension.
+    expect(blocks[1].cache_control).toEqual({ type: "ephemeral" });
     // Context LTM — no cache_control
     expect(blocks[2].cache_control).toBeUndefined();
   });
@@ -527,19 +528,31 @@ describe("buildAnthropicRequest — tool caching", () => {
       ],
     });
 
-  test("last tool gets 1h cache_control when cacheTools is true", () => {
-    const body = getBody(reqWithTools(), { cacheTools: true });
+  test("last tool gets 1h cache_control when cacheTools + systemTTL 1h", () => {
+    const body = getBody(reqWithTools(), {
+      cacheTools: true,
+      systemTTL: "1h",
+    });
     const tools = body.tools as Array<Record<string, unknown>>;
     expect(tools).toHaveLength(2);
 
     // First tool — no cache_control
     expect(tools[0].cache_control).toBeUndefined();
 
-    // Last tool — 1h cache
+    // Last tool — 1h cache (native Anthropic)
     expect(tools[1].cache_control).toEqual({
       type: "ephemeral",
       ttl: "1h",
     });
+  });
+
+  test("last tool gets bare ephemeral when cacheTools without 1h systemTTL", () => {
+    const body = getBody(reqWithTools(), { cacheTools: true });
+    const tools = body.tools as Array<Record<string, unknown>>;
+    expect(tools).toHaveLength(2);
+    expect(tools[0].cache_control).toBeUndefined();
+    // No ttl — safe for third-party Anthropic-compatible endpoints
+    expect(tools[1].cache_control).toEqual({ type: "ephemeral" });
   });
 
   test("no cache_control on tools when cacheTools is false", () => {
@@ -558,7 +571,7 @@ describe("buildAnthropicRequest — tool caching", () => {
     }
   });
 
-  test("single tool gets cache_control when cacheTools is true", () => {
+  test("single tool gets 1h cache_control when cacheTools + systemTTL 1h", () => {
     const req = makeRequest({
       tools: [
         {
@@ -568,7 +581,7 @@ describe("buildAnthropicRequest — tool caching", () => {
         },
       ],
     });
-    const body = getBody(req, { cacheTools: true });
+    const body = getBody(req, { cacheTools: true, systemTTL: "1h" });
     const tools = body.tools as Array<Record<string, unknown>>;
     expect(tools).toHaveLength(1);
     expect(tools[0].cache_control).toEqual({
