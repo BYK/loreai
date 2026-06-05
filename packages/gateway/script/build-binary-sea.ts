@@ -565,6 +565,15 @@ async function buildBinary() {
     process.platform === "win32" ? "fossilize.cmd" : "fossilize",
   );
 
+  // fossilize uses Node.js archive naming which differs from our
+  // VALID_TARGETS on some platforms:
+  //   our "windows-x64"  → fossilize "win-x64"
+  //   our "darwin-arm64" → fossilize "darwin-arm64" (same)
+  //   our "linux-x64"    → fossilize "linux-x64" (same)
+  const fossilizeTarget = (t: CompileTarget): string =>
+    t.startsWith("windows") ? t.replace("windows", "win") : t;
+  const platformArgs = targets.map(fossilizeTarget).join(",");
+
   const fossilizeArgs: string[] = [
     fossilizeBin,
     bundlePath,
@@ -573,7 +582,7 @@ async function buildBinary() {
     "--node-version",
     "lts",
     "--platforms",
-    targets.join(","),
+    platformArgs,
     "--output-name",
     "lore",
     "--out-dir",
@@ -594,19 +603,27 @@ async function buildBinary() {
     process.exit(1);
   }
 
-  // fossilize outputs: dist-bin/lore-<platform> (suffix appended by
-  // fossilize for cross-platform builds). Verify the expected paths
-  // exist before reporting success.
+  // fossilize creates output files with its own platform naming
+  // (e.g. lore-win-x64 for our windows-x64). Verify the expected
+  // paths exist, then rename to our naming convention for CI
+  // compatibility (CI expects lore-windows-x64.exe).
   for (const target of targets) {
-    const ext = target.startsWith("windows") ? ".exe" : "";
-    const expected = join(distBinDir, `lore-${target}${ext}`);
-    if (!existsSync(expected)) {
+    const fossilizePlat = fossilizeTarget(target);
+    const ext = fossilizePlat.startsWith("win") ? ".exe" : "";
+    const fossilizePath = join(distBinDir, `lore-${fossilizePlat}${ext}`);
+    if (!existsSync(fossilizePath)) {
       console.error(
-        `✗ expected output not found: ${expected}. Check fossilize logs.`,
+        `✗ expected output not found: ${fossilizePath}. Check fossilize logs.`,
       );
       process.exit(1);
     }
-    console.log(`✓ Binary: ${expected}`);
+    if (fossilizePlat !== target) {
+      const ourPath = join(distBinDir, `lore-${target}${ext}`);
+      renameSync(fossilizePath, ourPath);
+      console.log(`✓ Binary: ${ourPath} (was ${fossilizePath})`);
+    } else {
+      console.log(`✓ Binary: ${fossilizePath}`);
+    }
   }
 
   // -------------------------------------------------------------------------
