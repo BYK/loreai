@@ -228,7 +228,7 @@ jobs:
 
       # Vendor staging populated by the cache restore + fallback steps above.
       - name: Build linux-x64 binary
-        run: pnpm --filter @loreai/gateway run build:binary:sea -- --platforms linux-x64
+        run: pnpm --filter @loreai/gateway run build:binary:sea --platforms linux-x64
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           FOSSILIZE_CACHE_DIR: ${{ github.workspace }}/.node-cache
@@ -326,7 +326,7 @@ jobs:
         if: startsWith(github.ref, 'refs/heads/release/')
         run: |
           rm -rf packages/gateway/dist-bin
-          pnpm --filter @loreai/gateway run build:binary:sea -- \
+          pnpm --filter @loreai/gateway run build:binary:sea \
             --platforms "darwin-arm64,linux-arm64,linux-x64,windows-x64" \
             --release
           echo "--- Release binaries: ---"
@@ -426,7 +426,7 @@ jobs:
           key: fossilize-${{ matrix.target }}-${{ hashFiles('packages/gateway/script/build-binary-sea.ts') }}
 
       - name: Build ${{ matrix.target }} binary
-        run: pnpm --filter @loreai/gateway run build:binary:sea -- --platforms ${{ matrix.target }}
+        run: pnpm --filter @loreai/gateway run build:binary:sea --platforms ${{ matrix.target }}
         env:
           FOSSILIZE_CACHE_DIR: ${{ github.workspace }}/.node-cache
           LORE_TARGET: ${{ matrix.target }}
@@ -507,7 +507,7 @@ jobs:
 
       - name: Build all platform binaries
         run: |
-          pnpm --filter @loreai/gateway run build:binary:sea -- \
+          pnpm --filter @loreai/gateway run build:binary:sea \
             --platforms "darwin-arm64,linux-arm64,linux-x64,windows-x64" \
             --release
           echo "--- Nightly binaries: ---"
