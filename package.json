@@ -21,6 +21,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.16",
+    "@types/bun": "^1.2.0",
     "esbuild": "^0.25.12",
     "fast-check": "^4.5.3",
     "tsx": "^4.22.3",
