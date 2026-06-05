@@ -25,7 +25,8 @@ export type FetchInterceptorConfig = {
 /**
  * LLM API path patterns that should be intercepted.
  * These are the standard paths used by Anthropic, OpenAI Chat Completions,
- * and OpenAI Responses API endpoints.
+ * and OpenAI Responses API endpoints. Some providers prefix with /api
+ * (e.g., OpenRouter uses /api/v1/chat/completions).
  */
 const LLM_API_PATH_PATTERN =
   /\/v1\/(messages|chat\/completions|responses)(\/.*)?$/;
@@ -120,10 +121,16 @@ export function installFetchInterceptor(
       return originalFetch(input, init);
     }
 
-    // Rewrite URL to gateway, preserving the path and query string
+    // Rewrite URL to gateway, keeping only the /v1/... API path.
+    // Provider base paths vary (e.g., openrouter.ai uses /api/v1/...,
+    // Anthropic uses /v1/...). The gateway only routes /v1/... paths,
+    // so we extract just that portion. The full original URL (including
+    // any prefix) is passed via X-Lore-Upstream-URL.
     const upstream = new URL(url);
     const gateway = new URL(config.gatewayBase);
-    const gatewayUrl = `${gateway.origin}${upstream.pathname}${upstream.search}`;
+    const v1Match = upstream.pathname.match(/(\/v1\/.*)$/);
+    const apiPath = v1Match?.[1] ?? upstream.pathname;
+    const gatewayUrl = `${gateway.origin}${apiPath}${upstream.search}`;
 
     // Merge original headers + X-Lore-* headers.
     // Original headers (including auth) are preserved — the gateway
@@ -136,10 +143,12 @@ export function installFetchInterceptor(
         : undefined);
     const headers = new Headers(existingHeaders);
 
-    // Pass the original upstream base URL (strip API path suffix).
+    // Pass the original upstream base URL (everything before /v1/...).
     // The gateway uses this as the highest-priority routing signal.
-    const upstreamBase =
-      upstream.origin + upstream.pathname.replace(/\/v1\/.*/, "");
+    const upstreamBase = v1Match
+      ? upstream.origin +
+        upstream.pathname.slice(0, upstream.pathname.length - v1Match[1].length)
+      : upstream.origin;
     headers.set("x-lore-upstream-url", upstreamBase);
 
     // Inject dynamic context headers (session ID, project, git remote, etc.)
