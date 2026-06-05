@@ -293,7 +293,7 @@ export function emitWarmupMetric(
 ): void {
   if (!Sentry.isInitialized()) return;
 
-  const model = state.lastModel ?? "unknown";
+  const model = state.lastUpstream?.model ?? "unknown";
   const ttl = state.resolvedConversationTTL ?? "5m";
   const attrs = { model, ttl };
 

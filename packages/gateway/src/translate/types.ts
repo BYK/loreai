@@ -299,6 +299,24 @@ export type CacheAnalytics = {
   bustCount: number;
 };
 
+/** Routing snapshot captured from the last successful session request.
+ *  Workers (distillation, curation) and the cache warmer use this
+ *  to route through the same upstream with matching credentials.
+ *  Single source of truth — replaces lastModel, lastProtocol,
+ *  lastProviderID, lastUpstreamUrl, lastAnthropicBeta. */
+export interface UpstreamSnapshot {
+  /** Resolved upstream base URL (e.g., "https://api.minimax.io/anthropic"). */
+  url: string;
+  /** Wire protocol used for the request. */
+  protocol: "anthropic" | "openai" | "openai-responses";
+  /** Provider ID from X-Lore-Provider header (for worker model selection). */
+  providerID?: string;
+  /** Session model ID (for cost-aware worker model downgrade). */
+  model: string;
+  /** Non-managed headers to forward upstream (anthropic-beta, etc.). */
+  headers: Record<string, string>;
+}
+
 /** Per-session state tracked by the gateway for Lore pipeline decisions. */
 export type SessionState = {
   sessionID: string;
@@ -391,22 +409,9 @@ export type SessionState = {
   warmup?: WarmupState;
   /** Per-session survival model (inter-turn gap histogram). */
   survivalModel?: InterTurnHistogram;
-  /** Model name from the last real request (for warming profile resolution). */
-  lastModel?: string;
-  /** Protocol from the last real request (for warming profile resolution). */
-  lastProtocol?: "anthropic" | "openai" | "openai-responses";
-  /** Provider ID from the last request's `X-Lore-Provider` header. Used to
-   *  route worker calls through the same provider as the owning session. */
-  lastProviderID?: string;
-  /** Resolved upstream base URL from the last request. When set, worker calls
-   *  route through this URL instead of the default provider endpoint — ensures
-   *  proxy/aggregator sessions (e.g. OpenCode Zen) keep working for background
-   *  tasks like distillation and curation. */
-  lastUpstreamUrl?: string;
-  /** anthropic-beta header from the last real request — forwarded by
-   *  cache-warmer so beta-gated body fields (e.g. context_management)
-   *  are accepted upstream. */
-  lastAnthropicBeta?: string;
+  /** Routing snapshot from the last successful session request.
+   *  Used by workers, cache warmer, and idle handler. */
+  lastUpstream?: UpstreamSnapshot;
 
   // --- Amnesia mode ---
 

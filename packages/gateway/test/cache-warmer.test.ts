@@ -60,8 +60,12 @@ function makeSessionState(overrides: Partial<SessionState> = {}): SessionState {
     consecutiveTextOnlyTurns: 0,
     recallStore: new Map(),
     cacheAnalytics: makeCacheAnalytics(),
-    lastModel: "claude-sonnet-4-20250514",
-    lastProtocol: "anthropic",
+    lastUpstream: {
+      url: "https://api.anthropic.com",
+      protocol: "anthropic" as const,
+      model: "claude-sonnet-4-20250514",
+      headers: {},
+    },
     resolvedConversationTTL: "5m",
     lastInputTokens: 100_000, // above MIN_INPUT_TOKENS_FOR_WARMING
     ...overrides,
@@ -348,7 +352,7 @@ describe("prepareAnthropicWarmupBody", () => {
     const result = JSON.parse(prepareAnthropicWarmupBody(body));
     // Beta-gated fields must NOT be stripped from the warmup body —
     // executeWarmup() forwards the anthropic-beta header from
-    // state.lastAnthropicBeta so the API accepts them.
+    // state.lastUpstream.headers["anthropic-beta"] so the API accepts them.
     expect(result.context_management).toEqual({ type: "auto" });
   });
 

@@ -209,8 +209,8 @@ export function startIdleScheduler(
       loadGlobalHistograms(state.projectPath);
 
       const profile = resolveProfile(
-        state.lastModel,
-        state.lastProtocol,
+        state.lastUpstream?.model,
+        state.lastUpstream?.protocol,
         state.resolvedConversationTTL,
       );
       if (!profile) continue;
@@ -466,7 +466,10 @@ export function buildIdleWorkHandler(
   return async (sessionID: string, state: SessionState) => {
     const projectPath = state.projectPath;
     const cfg = loreConfig();
-    const model = getWorkerModel(protocolToProviderID(state.lastProtocol));
+    const model = getWorkerModel(
+      state.lastUpstream?.providerID ??
+        protocolToProviderID(state.lastUpstream?.protocol),
+    );
 
     // 1. Distillation — force-distill ALL pending messages on idle, even
     // below minMessages. The cache is going cold; aggressive distillation

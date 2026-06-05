@@ -1060,8 +1060,8 @@ export function computeWarmingSnapshot(
   const survivalAtIdle = survivalFunction(blendedHist, idleMs);
 
   const profile = resolveProfile(
-    state.lastModel,
-    state.lastProtocol,
+    state.lastUpstream?.model,
+    state.lastUpstream?.protocol,
     state.resolvedConversationTTL,
   );
   const ttlMs = profile?.ttlMs ?? 300_000;
@@ -1356,8 +1356,9 @@ export async function executeWarmup(
 
   // Forward anthropic-beta from the last real request so beta-gated body
   // fields (e.g. context_management) are accepted by the upstream API.
-  if (state.lastAnthropicBeta) {
-    headers["anthropic-beta"] = state.lastAnthropicBeta;
+  const betaHeader = state.lastUpstream?.headers["anthropic-beta"];
+  if (betaHeader) {
+    headers["anthropic-beta"] = betaHeader;
   }
 
   // Re-sign the cch billing header. The cch hash covers the entire
@@ -1368,7 +1369,7 @@ export async function executeWarmup(
 
   log.info(
     `cache-warmer: sending warmup for session=${state.sessionID.slice(0, 16)} ` +
-      `model=${state.lastModel} ttl=${profile.ttlMs / 1000}s`,
+      `model=${state.lastUpstream?.model} ttl=${profile.ttlMs / 1000}s`,
   );
 
   try {
@@ -1458,7 +1459,7 @@ export async function executeWarmup(
     const ttl: "5m" | "1h" = profile.ttlMs >= 3_600_000 ? "1h" : "5m";
     recordWarmupCost(
       state.sessionID,
-      state.lastModel ?? "unknown",
+      state.lastUpstream?.model ?? "unknown",
       cacheReadTokens,
       cacheCreationTokens,
       ttl,

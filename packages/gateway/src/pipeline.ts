@@ -68,8 +68,9 @@ import type {
   GatewayToolUseBlock,
   GatewayToolResultBlock,
   SessionState,
+  UpstreamSnapshot,
 } from "./translate/types";
-import { blocksToText } from "./translate/types";
+import { blocksToText, forwardClientHeaders } from "./translate/types";
 import type { GatewayConfig } from "./config";
 import {
   getProjectPath,
@@ -925,15 +926,15 @@ function getLLMClient(config: GatewayConfig): LLMClient {
     // have their workers route directly to the provider API with the wrong
     // credentials (the proxy's key, not the provider's).
     // Only injects when no explicit upstreamUrl is already set, and the
-    // session has a non-default upstream (lastUpstreamUrl from a provider route).
+    // session has a non-default upstream (lastUpstream.url from a provider route).
     const inner: LLMClient = {
       async prompt(system, user, opts) {
         if (opts?.sessionID && !opts.upstreamUrl && !workerApiKey) {
           const state = sessions.get(opts.sessionID);
-          if (state?.lastUpstreamUrl) {
+          if (state?.lastUpstream?.url) {
             return rawClient.prompt(system, user, {
               ...opts,
-              upstreamUrl: state.lastUpstreamUrl,
+              upstreamUrl: state.lastUpstream.url,
             });
           }
         }
@@ -2783,7 +2784,7 @@ function postResponse(
           warmupHitThisTurn = true;
           sessionState.warmup.warmupHits++;
           emitWarmupHitMetric(
-            sessionState.lastModel ?? req.model,
+            sessionState.lastUpstream?.model ?? req.model,
             sessionState.resolvedConversationTTL ?? "5m",
           );
           // Record counterfactual savings: without warming, these cache
@@ -2817,40 +2818,28 @@ function postResponse(
         }
       }
     }
-    // Track model/protocol/beta for warmup profile resolution
-    sessionState.lastModel = req.model;
-    // Use provider-aware protocol resolution with the same providerRouteUsable
-    // guard as forwardToUpstream: only trust the provider route's protocol when
-    // it also has a usable URL (or headerUpstream is set). Otherwise fall back
-    // to model-prefix routing to avoid protocol/worker mismatch.
+    // Capture the full routing snapshot from this request. Workers, cache
+    // warmer, and idle handler all read from this single source of truth
+    // instead of reconstructing from individual last* fields.
     const lpProvider = extractProviderHeader(req.rawHeaders);
     const lpRoute = lpProvider ? resolveProviderRoute(lpProvider) : null;
     const lpHeaderUpstream = extractUpstreamUrlHeader(req.rawHeaders);
     const lpRouteUsable =
       lpRoute && (lpRoute.url != null || lpHeaderUpstream) ? lpRoute : null;
-    sessionState.lastProtocol =
+    const snapshotProtocol: "anthropic" | "openai" | "openai-responses" =
       req.protocol === "openai-responses"
         ? "openai-responses"
         : (lpRouteUsable?.protocol ??
           resolveUpstreamRoute(req.model)?.protocol ??
           req.protocol);
-    // Track the session's provider route so background workers (distillation,
-    // curation) can route through the same proxy/aggregator instead of hitting
-    // the direct provider API with the wrong credentials.
-    // Always update (including clearing) so a stale header isn't forwarded
-    // after the client switches providers mid-session.
-    // Exclude model-prefix routes from lastUpstreamUrl — those are default
-    // behavior (e.g. claude-* → api.anthropic.com) and don't need an
-    // override. Only header/provider-route overrides indicate a proxy session.
-    sessionState.lastProviderID = lpProvider || undefined;
-    sessionState.lastUpstreamUrl =
-      lpHeaderUpstream ?? lpRoute?.url ?? undefined;
-    // Capture anthropic-beta so cache-warmer can forward it — beta-gated
-    // body fields (e.g. context_management) need the header to be accepted.
-    // Always update (including clearing) so a stale header isn't forwarded
-    // after the client stops sending it.
-    sessionState.lastAnthropicBeta =
-      req.rawHeaders["anthropic-beta"] || undefined;
+
+    sessionState.lastUpstream = {
+      url: lpHeaderUpstream ?? lpRoute?.url ?? "",
+      protocol: snapshotProtocol,
+      providerID: lpProvider || undefined,
+      model: req.model,
+      headers: forwardClientHeaders(req.rawHeaders),
+    };
 
     // Reset warming state if session was marked dead or had active warming.
     // Dead flag is cleared so the next break gets a fresh ROI analysis.
@@ -2878,8 +2867,10 @@ function postResponse(
       sessionID,
       actualInput,
       resp.usage.outputTokens ?? 0,
-      getWorkerModel(protocolToProviderID(sessionState.lastProtocol))
-        ?.modelID ?? "unknown",
+      getWorkerModel(
+        sessionState.lastUpstream?.providerID ??
+          protocolToProviderID(sessionState.lastUpstream?.protocol),
+      )?.modelID ?? "unknown",
       req.model,
       sessionState.resolvedConversationTTL,
     );
@@ -2899,8 +2890,10 @@ function postResponse(
     ) {
       const modelInputCost =
         getModelEntrySync(
-          getWorkerModel(protocolToProviderID(sessionState.lastProtocol))
-            ?.modelID ?? "unknown",
+          getWorkerModel(
+            sessionState.lastUpstream?.providerID ??
+              protocolToProviderID(sessionState.lastUpstream?.protocol),
+          )?.modelID ?? "unknown",
         ).cost?.input ?? 3;
       const curationMultiplier =
         modelInputCost >= 5 ? 3 : modelInputCost >= 1 ? 2 : 1;
@@ -2939,7 +2932,9 @@ function scheduleBackgroundWork(
 
   const llm = getLLMClient(config);
   const cfg = loreConfig();
-  const sessionProvider = protocolToProviderID(sessionState.lastProtocol);
+  const sessionProvider =
+    sessionState.lastUpstream?.providerID ??
+    protocolToProviderID(sessionState.lastUpstream?.protocol);
   const model = getWorkerModel(sessionProvider);
 
   // When the OAuth account is near quota exhaustion, skip non-urgent
@@ -3192,7 +3187,9 @@ async function handleCompaction(
     sessionID,
     config,
     previousSummary: extractPreviousSummary(req),
-    sessionProviderID: protocolToProviderID(sessionState.lastProtocol),
+    sessionProviderID:
+      sessionState.lastUpstream?.providerID ??
+      protocolToProviderID(sessionState.lastUpstream?.protocol),
   });
 
   // If Lore's own summary generation failed (rate limits, auth issues, etc.),
@@ -3316,7 +3313,9 @@ export async function handleCompactEndpoint(
         typeof body.previous_summary === "string"
           ? body.previous_summary
           : undefined,
-      sessionProviderID: protocolToProviderID(state?.lastProtocol),
+      sessionProviderID:
+        state?.lastUpstream?.providerID ??
+        protocolToProviderID(state?.lastUpstream?.protocol),
     });
 
     if (summary == null) {
@@ -3574,8 +3573,8 @@ function isCacheWarm(state: SessionState): boolean {
   if (!warmup?.lastWarmupAt) return false;
 
   const profile = resolveWarmingProfile(
-    state.lastModel,
-    state.lastProtocol,
+    state.lastUpstream?.model,
+    state.lastUpstream?.protocol,
     state.resolvedConversationTTL,
   );
   if (!profile) return false;
@@ -5167,7 +5166,10 @@ async function handleCurateSlashCommand(
   const projectPath = state.projectPath;
   const { distillation, curator } = await import("@loreai/core");
   const llm = getLLMClient(config);
-  const model = getWorkerModel(protocolToProviderID(state.lastProtocol));
+  const model = getWorkerModel(
+    state.lastUpstream?.providerID ??
+      protocolToProviderID(state.lastUpstream?.protocol),
+  );
 
   log.info(`/lore:curate: running for session=${sessionID.slice(0, 16)}`);
 
