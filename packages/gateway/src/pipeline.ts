@@ -4524,13 +4524,35 @@ async function handleConversationTurn(
           }),
         parseJSON: accumulateNonStreamResponse,
       };
-      const jsonFollowUp = await runRecallFollowUpJSON(
-        jsonRecallCtx,
-        currentModifiedReq,
-        currentResp,
-        result,
-        recallBlock,
-      );
+      let jsonFollowUp: Awaited<ReturnType<typeof runRecallFollowUpJSON>>;
+      try {
+        jsonFollowUp = await runRecallFollowUpJSON(
+          jsonRecallCtx,
+          currentModifiedReq,
+          currentResp,
+          result,
+          recallBlock,
+        );
+      } catch (fetchErr) {
+        log.error(
+          `recall follow-up fetch error (non-stream, depth=${recallDepth}) for session ${sessionState.sessionID.slice(0, 16)}:`,
+          fetchErr,
+        );
+        // Fall back to response with marker (no continuation)
+        markerResp.usage = cumulativeUsage;
+        postResponse(
+          req,
+          markerResp,
+          sessionState,
+          config,
+          requestBody,
+          genAiSpan,
+        );
+        return nonStreamHttpResponse(
+          unsustainable ? injectContextWarning(markerResp) : markerResp,
+          { "x-lore-recall-invoked": "true" },
+        );
+      }
 
       if (!jsonFollowUp.ok) {
         log.error(

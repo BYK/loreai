@@ -400,8 +400,8 @@ export type RecallProtocol = "anthropic" | "openai" | "openai-responses";
  *
  * Passed by the pipeline so `recall.ts` never imports `pipeline.ts`
  * (avoids a circular dependency). `forward` wraps `forwardToUpstream`
- * (with `cacheConversation: false` already applied); `parseJSON` wraps
- * `accumulateNonStreamResponse`.
+ * — callers should disable conversation caching on the follow-up;
+ * `parseJSON` wraps `accumulateNonStreamResponse`.
  */
 export interface RecallFollowUpCtx {
   /** Forward a follow-up request upstream and return the raw response. */
