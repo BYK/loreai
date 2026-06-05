@@ -346,20 +346,19 @@ function parseOpenAIResponse(data: OpenAIChatResponse): {
  */
 export function createGatewayLLMClient(
   upstreams: { anthropic: string; openai: string },
-  getAuth: (sessionID?: string) => AuthCredential | null,
+  getAuth: (sessionID?: string, providerID?: string) => AuthCredential | null,
   defaultModel: { providerID: string; modelID: string },
   opts?: { dedicatedWorkerKey?: boolean },
 ): LLMClient {
   const hasDedicatedKey = opts?.dedicatedWorkerKey === true;
   return {
     async prompt(system, user, opts) {
-      const cred = getAuth(opts?.sessionID);
+      const model = opts?.model ?? defaultModel;
+      const cred = getAuth(opts?.sessionID, model.providerID);
       if (!cred) {
         log.warn("no auth credentials available for worker call");
         return null;
       }
-
-      const model = opts?.model ?? defaultModel;
       const isOpenAI = model.providerID === "openai";
       const upstreamOverride = opts?.upstreamUrl;
       const target = resolveTarget(
@@ -531,7 +530,7 @@ export function createGatewayLLMClient(
                 }
 
                 // Re-resolve: credential may have been refreshed by a concurrent client request
-                const freshCred = getAuth(opts?.sessionID);
+                const freshCred = getAuth(opts?.sessionID, model.providerID);
                 const credentialChanged =
                   !!freshCred && freshCred.value !== cred.value;
                 if (credentialChanged && attempt === 0) {

@@ -181,6 +181,7 @@ function makeSessionState(overrides: Partial<SessionState> = {}): SessionState {
     turnsSinceCuration: 0,
     consecutiveTextOnlyTurns: 0,
     recallStore: new Map(),
+    upstreamByProvider: new Map(),
     cacheAnalytics: {
       lastRequestBody: null,
       lastRequestBodyLength: 0,

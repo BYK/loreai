@@ -409,9 +409,16 @@ export type SessionState = {
   warmup?: WarmupState;
   /** Per-session survival model (inter-turn gap histogram). */
   survivalModel?: InterTurnHistogram;
-  /** Routing snapshot from the last successful session request.
-   *  Used by workers, cache warmer, and idle handler. */
+  /** Routing snapshot from the most recent session request.
+   *  Used by cache warmer (targets the most-recent provider) and as
+   *  a convenience accessor. For provider-specific lookups (workers,
+   *  auth), use `upstreamByProvider` instead. */
   lastUpstream?: UpstreamSnapshot;
+  /** Per-provider routing snapshots. Keyed by provider ID (e.g. "anthropic",
+   *  "minimax-coding-plan", "openrouter"). Workers and auth resolution use
+   *  this to find the correct URL/credentials when the session has used
+   *  multiple providers within the same conversation. */
+  upstreamByProvider: Map<string, UpstreamSnapshot>;
 
   // --- Amnesia mode ---
 

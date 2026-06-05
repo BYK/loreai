@@ -1340,8 +1340,9 @@ export async function executeWarmup(
   // Prepare for warmup (max_tokens:0, strip incompatible fields)
   const warmupBody = profile.prepareWarmupBody(storedBody);
 
-  // Resolve auth for this session
-  const cred = resolveAuth(state.sessionID);
+  // Resolve auth for this session — use the provider from lastUpstream
+  // to avoid cross-contamination when the session uses multiple providers.
+  const cred = resolveAuth(state.sessionID, state.lastUpstream?.providerID);
   if (!cred) {
     log.warn(
       `cache-warmer: no auth for session=${state.sessionID.slice(0, 16)}, skipping`,

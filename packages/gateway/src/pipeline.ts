@@ -895,10 +895,12 @@ function getLLMClient(config: GatewayConfig): LLMClient {
     // routing workers to a different provider (e.g. MiniMax) while sessions
     // continue using Anthropic. Falls back to session auth when not set.
     const workerApiKey = config.workerApiKey;
-    const getWorkerAuth: (sessionID?: string) => AuthCredential | null =
-      workerApiKey
-        ? () => ({ scheme: "api-key", value: workerApiKey })
-        : resolveAuth;
+    const getWorkerAuth: (
+      sessionID?: string,
+      providerID?: string,
+    ) => AuthCredential | null = workerApiKey
+      ? () => ({ scheme: "api-key", value: workerApiKey })
+      : resolveAuth;
 
     // Worker-specific upstream: when LORE_WORKER_UPSTREAM is set, all worker
     // calls route to this URL instead of the default upstream URLs.
@@ -926,17 +928,40 @@ function getLLMClient(config: GatewayConfig): LLMClient {
     // Zen) as the owning session. Without this, sessions behind a proxy would
     // have their workers route directly to the provider API with the wrong
     // credentials (the proxy's key, not the provider's).
-    // Only injects when no explicit upstreamUrl is already set, and the
-    // session has a non-default upstream (lastUpstream.url from a provider route).
+    //
+    // When the session has used multiple providers (e.g. Anthropic + MiniMax),
+    // looks up the per-provider snapshot matching the worker's target provider
+    // to avoid cross-contamination (wrong URL/credentials). The
+    // upstreamByProvider map keys are X-Lore-Provider header values (e.g.
+    // "minimax-coding-plan"), while worker model providerIDs are canonical
+    // names (e.g. "anthropic"). We bridge by matching the worker's
+    // providerID against each snapshot's protocol via protocolToProviderID().
     const inner: LLMClient = {
       async prompt(system, user, opts) {
         if (opts?.sessionID && !opts.upstreamUrl && !workerApiKey) {
           const state = sessions.get(opts.sessionID);
-          if (state?.lastUpstream?.url) {
-            return rawClient.prompt(system, user, {
-              ...opts,
-              upstreamUrl: state.lastUpstream.url,
-            });
+          if (state) {
+            const workerProviderID = opts.model?.providerID;
+            let snapshot = state.lastUpstream; // fallback
+
+            // Try to find a per-provider snapshot whose protocol matches the
+            // worker's target. Prefer direct-provider snapshots (url="") over
+            // proxy snapshots when the worker's default upstream is correct.
+            if (workerProviderID && state.upstreamByProvider.size > 1) {
+              for (const [, s] of state.upstreamByProvider) {
+                if (protocolToProviderID(s.protocol) === workerProviderID) {
+                  snapshot = s;
+                  break;
+                }
+              }
+            }
+
+            if (snapshot?.url) {
+              return rawClient.prompt(system, user, {
+                ...opts,
+                upstreamUrl: snapshot.url,
+              });
+            }
           }
         }
         return rawClient.prompt(system, user, opts);
@@ -1156,6 +1181,7 @@ function getOrCreateSession(
       turnsSinceCuration: persisted?.turnsSinceCuration ?? 0,
       consecutiveTextOnlyTurns: persisted?.consecutiveTextOnlyTurns ?? 0,
       recallStore: new Map(),
+      upstreamByProvider: new Map(),
       cacheAnalytics: {
         lastRequestBody: null,
         lastRequestBodyLength: 0,
@@ -1219,6 +1245,10 @@ function getOrCreateSession(
   // Ensure recallStore exists (upgrade from older session state)
   if (!state.recallStore) {
     state.recallStore = new Map();
+  }
+  // Ensure upstreamByProvider exists (upgrade from older session state)
+  if (!state.upstreamByProvider) {
+    state.upstreamByProvider = new Map();
   }
 
   return state;
@@ -2834,13 +2864,22 @@ function postResponse(
           resolveUpstreamRoute(req.model)?.protocol ??
           req.protocol);
 
-    sessionState.lastUpstream = {
+    const upstreamSnapshot: UpstreamSnapshot = {
       url: lpHeaderUpstream ?? lpRoute?.url ?? "",
       protocol: snapshotProtocol,
       providerID: lpProvider || undefined,
       model: req.model,
       headers: forwardClientHeaders(req.rawHeaders),
     };
+    sessionState.lastUpstream = upstreamSnapshot;
+    // Store per-provider snapshot so workers/cache-warmer can look up the
+    // correct URL and credentials when the session uses multiple providers.
+    if (upstreamSnapshot.providerID) {
+      sessionState.upstreamByProvider.set(
+        upstreamSnapshot.providerID,
+        upstreamSnapshot,
+      );
+    }
 
     // Reset warming state if session was marked dead or had active warming.
     // Dead flag is cleared so the next break gets a fresh ROI analysis.
@@ -3684,9 +3723,13 @@ async function handleConversationTurn(
     }
   }
 
-  // Bind auth credential to this session for background workers
+  // Bind auth credential to this session for background workers.
+  // Pass providerID so credentials are stored per-provider — prevents
+  // cross-contamination when a session switches providers mid-conversation
+  // (e.g. Anthropic → MiniMax → Anthropic).
   if (cred) {
-    setSessionAuth(sessionID, cred);
+    const reqProviderID = extractProviderHeader(req.rawHeaders);
+    setSessionAuth(sessionID, cred, reqProviderID || undefined);
     clearWarmupAuthDisabled(sessionID); // Re-enable cache warming on fresh credential
   }
 

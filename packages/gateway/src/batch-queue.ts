@@ -619,7 +619,7 @@ export function createOpenAIBatchProvider(upstreamUrl: string): BatchProvider {
 export function createBatchLLMClient(
   inner: LLMClient,
   upstreams: { anthropic: string; openai: string },
-  getAuth: (sessionID?: string) => AuthCredential | null,
+  getAuth: (sessionID?: string, providerID?: string) => AuthCredential | null,
   defaultModel: { providerID: string; modelID: string },
   batchConfig?: BatchQueueConfig,
 ): LLMClient & { shutdown: () => Promise<void>; stats: () => BatchStats } {
@@ -1031,7 +1031,8 @@ export function createBatchLLMClient(
       // Snapshot auth credential at enqueue time for session isolation.
       // If no credential is available, fall back to synchronous processing
       // (which will also attempt to resolve auth — matches prior behavior).
-      const cred = getAuth(opts?.sessionID);
+      const model = opts?.model ?? defaultModel;
+      const cred = getAuth(opts?.sessionID, model.providerID);
       if (!cred) {
         totalUrgent++;
         return inner.prompt(system, user, opts);
@@ -1059,8 +1060,6 @@ export function createBatchLLMClient(
       }
 
       totalQueued++;
-
-      const model = opts?.model ?? defaultModel;
 
       // Build system payload with 1h cache (same as direct adapter)
       const systemPayload = system

@@ -82,18 +82,57 @@ export function authFingerprint(cred: AuthCredential): string {
 // Per-session registry
 // ---------------------------------------------------------------------------
 
-const sessionAuth = new Map<string, AuthCredential>();
+/**
+ * Per-session, per-provider credential registry. Outer key is Lore session ID,
+ * inner key is provider ID (e.g. "anthropic", "minimax-coding-plan"). This
+ * prevents cross-contamination when a user switches providers mid-conversation
+ * within the same OpenCode session.
+ */
+const sessionAuth = new Map<string, Map<string, AuthCredential>>();
 
-export function setSessionAuth(sessionID: string, cred: AuthCredential): void {
-  sessionAuth.set(sessionID, cred);
+/**
+ * Store a credential for a specific (session, provider) pair.
+ *
+ * @param providerID - Provider identifier. When omitted, falls back to
+ *   the legacy `"_default"` key for backward compatibility with callers
+ *   that don't yet track provider context.
+ */
+export function setSessionAuth(
+  sessionID: string,
+  cred: AuthCredential,
+  providerID?: string,
+): void {
+  let byProvider = sessionAuth.get(sessionID);
+  if (!byProvider) {
+    byProvider = new Map();
+    sessionAuth.set(sessionID, byProvider);
+  }
+  const key = providerID || "_default";
+  byProvider.set(key, cred);
+  // Also keep the _default slot in sync with the latest credential so
+  // callers that don't pass a providerID still get a reasonable result.
+  if (key !== "_default") byProvider.set("_default", cred);
   staleSessionAuth.delete(sessionID); // Fresh credential clears staleness
 }
 
-export function getSessionAuth(sessionID: string): AuthCredential | null {
-  return sessionAuth.get(sessionID) ?? null;
+/**
+ * Look up a credential for a session. When `providerID` is given, returns
+ * the credential stored for that specific provider; otherwise returns the
+ * most-recently-stored credential (the `_default` slot).
+ */
+export function getSessionAuth(
+  sessionID: string,
+  providerID?: string,
+): AuthCredential | null {
+  const byProvider = sessionAuth.get(sessionID);
+  if (!byProvider) return null;
+  if (providerID) {
+    return byProvider.get(providerID) ?? byProvider.get("_default") ?? null;
+  }
+  return byProvider.get("_default") ?? null;
 }
 
-/** Delete a session's credential (for future eviction). */
+/** Delete a session's credentials (for eviction). */
 export function deleteSessionAuth(sessionID: string): void {
   sessionAuth.delete(sessionID);
   staleSessionAuth.delete(sessionID);
@@ -147,9 +186,12 @@ export function getLastSeenAuth(): AuthCredential | null {
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve auth credentials for a given session.
+ * Resolve auth credentials for a given session (and optionally a specific provider).
  *
  * 1. If `sessionID` is provided, check the per-session registry first.
+ *    When `providerID` is also given, returns the credential stored for
+ *    that specific provider — preventing cross-contamination when a session
+ *    uses multiple providers (e.g. Anthropic + MiniMax).
  *    Skips stale credentials (401/403 received) so the global fallback
  *    can provide a potentially-refreshed token.
  * 2. Fall back to the global `lastSeenAuth` (for cold-start or callers
@@ -160,9 +202,12 @@ export function getLastSeenAuth(): AuthCredential | null {
  *    background worker 401 storm in single-session OAuth setups where
  *    session and global credentials are the same expired token.
  */
-export function resolveAuth(sessionID?: string): AuthCredential | null {
+export function resolveAuth(
+  sessionID?: string,
+  providerID?: string,
+): AuthCredential | null {
   if (sessionID) {
-    const cred = getSessionAuth(sessionID);
+    const cred = getSessionAuth(sessionID, providerID);
     if (cred && !staleSessionAuth.has(sessionID)) return cred;
 
     // Global fallback — but guard against returning the same stale token.

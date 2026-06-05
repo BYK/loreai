@@ -49,6 +49,12 @@ function makeCacheAnalytics(): CacheAnalytics {
 }
 
 function makeSessionState(overrides: Partial<SessionState> = {}): SessionState {
+  const lastUpstream = overrides.lastUpstream ?? {
+    url: "https://api.anthropic.com",
+    protocol: "anthropic" as const,
+    model: "claude-sonnet-4-20250514",
+    headers: {},
+  };
   return {
     sessionID: "test-session-abc123",
     projectPath: "/tmp/test-project",
@@ -60,12 +66,10 @@ function makeSessionState(overrides: Partial<SessionState> = {}): SessionState {
     consecutiveTextOnlyTurns: 0,
     recallStore: new Map(),
     cacheAnalytics: makeCacheAnalytics(),
-    lastUpstream: {
-      url: "https://api.anthropic.com",
-      protocol: "anthropic" as const,
-      model: "claude-sonnet-4-20250514",
-      headers: {},
-    },
+    lastUpstream,
+    upstreamByProvider: new Map(
+      lastUpstream.providerID ? [[lastUpstream.providerID, lastUpstream]] : [],
+    ),
     resolvedConversationTTL: "5m",
     lastInputTokens: 100_000, // above MIN_INPUT_TOKENS_FOR_WARMING
     ...overrides,
