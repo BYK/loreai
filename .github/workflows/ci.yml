@@ -418,11 +418,14 @@ jobs:
         run: bun run --filter '@loreai/gateway' build:binary:sea -- --platforms ${{ matrix.target }}
         env:
           FOSSILIZE_CACHE_DIR: ${{ github.workspace }}/.node-cache
+          LORE_TARGET: ${{ matrix.target }}
 
       # End-to-end smoke. The native runner can actually execute its own
       # binary, catching runtime failures that the linux-x64 job can't.
       - name: Smoke-test
         shell: bash
+        env:
+          LORE_TARGET: ${{ matrix.target }}
         run: |
           BIN="./packages/gateway/dist-bin/lore-${{ matrix.target }}${{ matrix.ext }}"
           "$BIN" --version
