@@ -70,6 +70,12 @@ jobs:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
+      # Bun is still used as the TS test runner in this PR. Will be
+      # removed when we migrate to vitest in a follow-up PR.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
       - run: pnpm install --frozen-lockfile
 
       # Restore the vendored embedding model so tests use a local model
@@ -383,10 +389,17 @@ jobs:
       - uses: actions/checkout@v6
 
       - uses: pnpm/action-setup@v4
+
       - uses: actions/setup-node@v6
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
+
+      # Bun is still used as the TS test runner in this PR. Will be
+      # removed when we migrate to vitest in a follow-up PR.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
 
       - run: pnpm install --frozen-lockfile
 
@@ -454,6 +467,12 @@ jobs:
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
+
+      # Bun is still used as the TS test runner in this PR. Will be
+      # removed when we migrate to vitest in a follow-up PR.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
 
       - run: pnpm install --frozen-lockfile
 
