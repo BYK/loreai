@@ -1607,6 +1607,16 @@ async function forwardToUpstream(
     );
   }
 
+  // Debug: log which routing tier resolved the upstream for diagnostics.
+  log.info(
+    `upstream: ${effectiveUpstreamBase} ` +
+      `(provider=${providerID ?? "none"}, ` +
+      `providerURL=${providerRoute?.url ?? "none"}, ` +
+      `modelRoute=${modelRoute?.url ?? "none"}, ` +
+      `headerUpstream=${headerUpstream ? "yes" : "no"}, ` +
+      `protocol=${effectiveProtocol})`,
+  );
+
   if (effectiveProtocol === "openai-responses") {
     // Inject LTM into system prompt for non-Anthropic paths.
     // Anthropic handles LTM via separate system blocks in buildAnthropicRequest;

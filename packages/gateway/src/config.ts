@@ -206,6 +206,18 @@ const UPSTREAM_ROUTES: Array<{
     url: "https://generativelanguage.googleapis.com",
     protocol: "openai",
   },
+  // Minimax (Anthropic-compatible)
+  {
+    prefix: "minimax-",
+    url: "https://api.minimax.io/anthropic",
+    protocol: "anthropic",
+  },
+  // Kimi Coding (Anthropic-compatible)
+  {
+    prefix: "kimi-",
+    url: "https://api.kimi.com/coding",
+    protocol: "anthropic",
+  },
 ];
 
 /**

@@ -324,22 +324,23 @@ export function aggregateTokensBySession(
   }
 
   // 2. Earliest assistant message metadata per session (for model detection).
-  //    MIN(created_at) groups to the first assistant message; metadata is the
-  //    value at that row via a correlated min — but SQLite's bare aggregate
-  //    pairs columns from arbitrary rows, so use a window-free subquery.
+  //    Uses a JOIN on a pre-grouped MIN subquery instead of a correlated
+  //    subquery — the correlated form is O(N²) on large tables (178K+ rows
+  //    causes multi-second hangs even with a project_id filter).
   const metaRows = db()
     .query(
       `SELECT t.session_id, t.metadata
        FROM temporal_messages t
-       WHERE t.project_id = ? AND t.role = 'assistant' AND t.created_at >= ?
-         AND t.created_at = (
-           SELECT MIN(t2.created_at) FROM temporal_messages t2
-           WHERE t2.project_id = t.project_id AND t2.session_id = t.session_id
-             AND t2.role = 'assistant' AND t2.created_at >= ?
-         )
+       JOIN (
+         SELECT session_id, MIN(created_at) AS min_at
+         FROM temporal_messages
+         WHERE project_id = ? AND role = 'assistant' AND created_at >= ?
+         GROUP BY session_id
+       ) m ON m.session_id = t.session_id AND t.created_at = m.min_at
+       WHERE t.project_id = ? AND t.role = 'assistant'
        GROUP BY t.session_id`,
     )
-    .all(pid, sinceMs, sinceMs) as Array<{
+    .all(pid, sinceMs, pid) as Array<{
     session_id: string;
     metadata: string;
   }>;
@@ -391,19 +392,22 @@ export function aggregateTokensBySessionAll(opts?: {
   }
 
   // 2. Earliest assistant message metadata per session (for model detection).
+  //    Uses a JOIN on a pre-grouped MIN subquery instead of a correlated
+  //    subquery — the correlated form is O(N²) on large tables (178K+ rows).
   const metaRows = db()
     .query(
       `SELECT t.session_id, t.metadata
        FROM temporal_messages t
-       WHERE t.role = 'assistant' AND t.created_at >= ?
-         AND t.created_at = (
-           SELECT MIN(t2.created_at) FROM temporal_messages t2
-           WHERE t2.session_id = t.session_id
-             AND t2.role = 'assistant' AND t2.created_at >= ?
-         )
+       JOIN (
+         SELECT session_id, MIN(created_at) AS min_at
+         FROM temporal_messages
+         WHERE role = 'assistant' AND created_at >= ?
+         GROUP BY session_id
+       ) m ON m.session_id = t.session_id AND t.created_at = m.min_at
+       WHERE t.role = 'assistant'
        GROUP BY t.session_id`,
     )
-    .all(sinceMs, sinceMs) as Array<{
+    .all(sinceMs) as Array<{
     session_id: string;
     metadata: string;
   }>;
