@@ -24,6 +24,7 @@ import {
   unlinkSync,
 } from "node:fs";
 import { execSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { PLACEHOLDER_DEBUG_ID, injectDebugId } from "./debug-id";
@@ -62,8 +63,10 @@ const external = ["node:*", "onnxruntime-node", "sharp"];
 // (server.reload, headers.toJSON) that the Node.js polyfill doesn't provide.
 // Resolve @sentry/node via @sentry/bun (its direct dependency), since
 // @sentry/node is not a direct dependency of this package.
-const sentryBunEntry = Bun.resolveSync("@sentry/bun", packageDir);
-const sentryNodeEntry = Bun.resolveSync("@sentry/node", sentryBunEntry);
+const sentryBunEntry = createRequire(packageDir + "/").resolve("@sentry/bun");
+const sentryNodeEntry = createRequire(sentryBunEntry + "/").resolve(
+  "@sentry/node",
+);
 const sentryNodePlugin: esbuild.Plugin = {
   name: "sentry-bun-to-node",
   setup(build) {
