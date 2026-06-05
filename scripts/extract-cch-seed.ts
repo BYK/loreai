@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env tsx
 /**
  * Extract the xxHash64 seed from a Claude Code binary.
  *
@@ -52,7 +52,7 @@ import { parseArgs } from "node:util";
 // ---------------------------------------------------------------------------
 
 const { values: args, positionals } = parseArgs({
-  args: Bun.argv.slice(2),
+  args: process.argv.slice(2),
   options: {
     version: { type: "string", short: "v" },
     binary: { type: "string", short: "b" },

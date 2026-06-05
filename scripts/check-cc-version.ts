@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env tsx
 /**
  * Check if recent Claude Code versions have known cch seeds.
  *
@@ -26,7 +26,7 @@ import {
 } from "../packages/gateway/src/cch";
 
 const { values: args } = parseArgs({
-  args: Bun.argv.slice(2),
+  args: process.argv.slice(2),
   options: {
     json: { type: "boolean" },
     help: { type: "boolean", short: "h" },

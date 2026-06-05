@@ -8,24 +8,22 @@
   "exports": {
     ".": "./packages/opencode/src/index.ts"
   },
-  "workspaces": [
-    "packages/*"
-  ],
+  "packageManager": "pnpm@10.28.0",
   "scripts": {
-    "typecheck": "bun --filter '*' typecheck",
+    "typecheck": "pnpm -r run typecheck",
     "test": "bun test",
-    "build": "bun --filter '*' build",
+    "build": "pnpm -r run build",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
     "evals": "vitest run --config vitest.evals.config.ts",
-    "postinstall": "bun --filter '@loreai/gateway' build"
+    "postinstall": "pnpm --filter @loreai/gateway run build"
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.16",
-    "@types/bun": "^1.2.0",
     "esbuild": "^0.25.12",
     "fast-check": "^4.5.3",
+    "tsx": "^4.22.3",
     "typescript": "^5.8.0",
     "vitest": "^4.1.7",
     "vitest-evals": "^0.10.0"

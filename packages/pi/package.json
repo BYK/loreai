@@ -19,7 +19,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "bun run script/build.ts"
+    "build": "tsx script/build.ts"
   },
   "dependencies": {
     "@loreai/core": "workspace:*",

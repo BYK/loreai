@@ -36,9 +36,8 @@ jobs:
             code:
               - 'packages/**'
               - 'scripts/**'
-              - 'bun.lock'
-              - 'bun.lockb'
-              - 'bunfig.toml'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
               - 'tsconfig*.json'
               - 'package.json'
               - 'biome.json'
@@ -65,16 +64,16 @@ jobs:
         with:
           fetch-tags: true  # fetch all tag refs for craft changelog
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: pnpm/action-setup@v4
         with:
-          bun-version: latest
+          version: 10
 
       - uses: actions/setup-node@v6
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
-      - run: bun install
+      - run: pnpm install --frozen-lockfile
 
       # Restore the vendored embedding model so tests use a local model
       # instead of downloading from HuggingFace Hub (avoids transient 429s).
@@ -88,16 +87,16 @@ jobs:
 
       - name: Populate vendor staging (cache miss)
         if: steps.vendor-cache.outputs.cache-hit != 'true'
-        run: bun run packages/gateway/script/vendor-embeddings.ts
+        run: pnpm tsx packages/gateway/script/vendor-embeddings.ts
 
       - name: Typecheck
-        run: bun run typecheck
+        run: pnpm run typecheck
 
       - name: Lint
-        run: bun run lint
+        run: pnpm run lint
 
       - name: Test
-        run: bun test
+        run: pnpm test
         env:
           # Point the local embedding provider at the vendored model cache root
           # (transformers.js resolves <root>/<modelId>/...). Keeps the test run
@@ -182,7 +181,7 @@ jobs:
       # CLI: npm bundle + smoke test (every run)
       # -----------------------------------------------------------------
       - name: Build npm bundle (CJS)
-        run: bun run --filter '@loreai/gateway' bundle
+        run: pnpm --filter @loreai/gateway run bundle
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
 
@@ -200,7 +199,7 @@ jobs:
           wait $SERVER_PID 2>/dev/null || true
 
       - name: Smoke-test bundle exports under Bun
-        run: bun test packages/gateway/test/bundle-exports.test.ts
+        run: pnpm test packages/gateway/test/bundle-exports.test.ts
 
       # -----------------------------------------------------------------
       # CLI: standalone binary build + smoke test
@@ -226,7 +225,7 @@ jobs:
 
       # Vendor staging populated by the cache restore + fallback steps above.
       - name: Build linux-x64 binary
-        run: bun run --filter '@loreai/gateway' build:binary:sea -- --platforms linux-x64
+        run: pnpm --filter @loreai/gateway run build:binary:sea -- --platforms linux-x64
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           FOSSILIZE_CACHE_DIR: ${{ github.workspace }}/.node-cache
@@ -274,13 +273,13 @@ jobs:
       # -----------------------------------------------------------------
       - name: Build all packages
         if: startsWith(github.ref, 'refs/heads/release/')
-        run: bun run build
+        run: pnpm run build
 
       # Pack each workspace package into its own tarball. Craft's npm target
       # with `workspaces: true` discovers all four and publishes them in
       # dependency order (@loreai/core → @loreai/opencode + @loreai/pi + @loreai/gateway).
       #
-      # We use `bun pm pack` (not `npm pack`) because Bun automatically rewrites
+      # We use `pnpm pack` (not `npm pack`) because pnpm automatically rewrites
       # `workspace:*` dependency specifiers to the actual version being packed.
       # `npm pack` leaves the literal "workspace:*" in the tarball's
       # package.json which breaks installs.
@@ -294,7 +293,7 @@ jobs:
           mkdir -p dist-tarballs
           for pkg in packages/core packages/opencode packages/pi packages/gateway; do
             echo "Packing $pkg"
-            (cd "$pkg" && bun pm pack --destination ../../dist-tarballs)
+            (cd "$pkg" && pnpm pack --pack-destination ../../dist-tarballs)
           done
 
           # Mirror @loreai/opencode as opencode-lore (legacy alias).
@@ -324,7 +323,7 @@ jobs:
         if: startsWith(github.ref, 'refs/heads/release/')
         run: |
           rm -rf packages/gateway/dist-bin
-          bun run --filter '@loreai/gateway' build:binary:sea -- \
+          pnpm --filter @loreai/gateway run build:binary:sea -- \
             --platforms "darwin-arm64,linux-arm64,linux-x64,windows-x64" \
             --release
           echo "--- Release binaries: ---"
@@ -386,11 +385,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: pnpm/action-setup@v4
         with:
-          bun-version: latest
+          version: 10
 
-      - run: bun install
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: pnpm install --frozen-lockfile
 
       # Reuse the cache the test job populated (same key). The
       # `.vendor-build/.model-cache/` tree contains the shared ONNX model
@@ -404,7 +408,7 @@ jobs:
 
       - name: Populate vendor staging (cache miss)
         if: steps.vendor-cache.outputs.cache-hit != 'true'
-        run: bun run packages/gateway/script/vendor-embeddings.ts
+        run: pnpm tsx packages/gateway/script/vendor-embeddings.ts
 
       # Cache fossilize's downloaded Node.js binary for the current platform.
       - name: Cache fossilize Node binaries
@@ -415,7 +419,7 @@ jobs:
           key: fossilize-${{ matrix.target }}-${{ hashFiles('packages/gateway/script/build-binary-sea.ts') }}
 
       - name: Build ${{ matrix.target }} binary
-        run: bun run --filter '@loreai/gateway' build:binary:sea -- --platforms ${{ matrix.target }}
+        run: pnpm --filter @loreai/gateway run build:binary:sea -- --platforms ${{ matrix.target }}
         env:
           FOSSILIZE_CACHE_DIR: ${{ github.workspace }}/.node-cache
           LORE_TARGET: ${{ matrix.target }}
@@ -451,11 +455,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: pnpm/action-setup@v4
         with:
-          bun-version: latest
+          version: 10
 
-      - run: bun install
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: pnpm install --frozen-lockfile
 
       - name: Set nightly version
         run: |
@@ -475,7 +484,7 @@ jobs:
 
       - name: Populate vendor staging (cache miss)
         if: steps.vendor-cache.outputs.cache-hit != 'true'
-        run: bun run packages/gateway/script/vendor-embeddings.ts
+        run: pnpm tsx packages/gateway/script/vendor-embeddings.ts
 
       # Cache fossilize's downloaded Node.js binaries (~200 MB across 4
       # platforms) so nightly builds don't re-download on every run.
@@ -488,7 +497,7 @@ jobs:
 
       - name: Build all platform binaries
         run: |
-          bun run --filter '@loreai/gateway' build:binary:sea -- \
+          pnpm --filter @loreai/gateway run build:binary:sea -- \
             --platforms "darwin-arm64,linux-arm64,linux-x64,windows-x64" \
             --release
           echo "--- Nightly binaries: ---"

@@ -21,7 +21,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "bun run script/build.ts"
+    "build": "tsx script/build.ts"
   },
   "dependencies": {
     "@huggingface/hub": "2.11.0",
