@@ -6,6 +6,7 @@ import {
   getWorkerModel,
   resetWorkerModelState,
   clearModelDataCache,
+  lookupProviderRoute,
   type ModelsDevEntry,
 } from "../src/worker-model";
 
@@ -292,7 +293,7 @@ describe("lookupProviderRoute", () => {
     resetWorkerModelState();
   });
 
-  test("resolves anthropic-protocol provider from models.dev", async () => {
+  test("resolves anthropic-protocol provider after cache is populated", async () => {
     globalThis.fetch = mock(() =>
       Promise.resolve(
         new Response(
@@ -310,15 +311,16 @@ describe("lookupProviderRoute", () => {
       ),
     ) as unknown as typeof fetch;
 
-    const { lookupProviderRoute } = await import("../src/worker-model");
-    const route = await lookupProviderRoute("some-new-provider");
+    // Populate cache first (lookupProviderRoute is sync, non-blocking).
+    await fetchModelData();
+    const route = lookupProviderRoute("some-new-provider");
     expect(route).toEqual({
       url: "https://api.newprovider.com/anthropic",
       protocol: "anthropic",
     });
   });
 
-  test("resolves openai-compatible provider from models.dev", async () => {
+  test("resolves openai-compatible provider after cache is populated", async () => {
     globalThis.fetch = mock(() =>
       Promise.resolve(
         new Response(
@@ -336,15 +338,15 @@ describe("lookupProviderRoute", () => {
       ),
     ) as unknown as typeof fetch;
 
-    const { lookupProviderRoute } = await import("../src/worker-model");
-    const route = await lookupProviderRoute("custom-openai");
+    await fetchModelData();
+    const route = lookupProviderRoute("custom-openai");
     expect(route).toEqual({
       url: "https://api.custom.com",
       protocol: "openai",
     });
   });
 
-  test("resolves openai-responses provider from models.dev", async () => {
+  test("resolves openai-responses provider after cache is populated", async () => {
     globalThis.fetch = mock(() =>
       Promise.resolve(
         new Response(
@@ -362,8 +364,8 @@ describe("lookupProviderRoute", () => {
       ),
     ) as unknown as typeof fetch;
 
-    const { lookupProviderRoute } = await import("../src/worker-model");
-    const route = await lookupProviderRoute("openai-like");
+    await fetchModelData();
+    const route = lookupProviderRoute("openai-like");
     expect(route).toEqual({
       url: "https://api.openailike.com",
       protocol: "openai-responses",
@@ -386,10 +388,9 @@ describe("lookupProviderRoute", () => {
       ),
     ) as unknown as typeof fetch;
 
-    const { lookupProviderRoute } = await import("../src/worker-model");
-    const route = await lookupProviderRoute("anthropic");
+    await fetchModelData();
     // anthropic in models.dev has no `api` field — SDK handles routing
-    expect(route).toBeNull();
+    expect(lookupProviderRoute("anthropic")).toBeNull();
   });
 
   test("returns null for unknown provider", async () => {
@@ -404,9 +405,33 @@ describe("lookupProviderRoute", () => {
       ),
     ) as unknown as typeof fetch;
 
-    const { lookupProviderRoute } = await import("../src/worker-model");
-    const route = await lookupProviderRoute("nonexistent");
+    await fetchModelData();
+    expect(lookupProviderRoute("nonexistent")).toBeNull();
+  });
+
+  test("returns null on cold cache and triggers background fetch", () => {
+    globalThis.fetch = mock(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            anthropic: { models: {} },
+            "delayed-provider": {
+              id: "delayed-provider",
+              api: "https://api.delayed.com/v1",
+              npm: "@ai-sdk/openai-compatible",
+              models: {},
+            },
+          }),
+          { status: 200 },
+        ),
+      ),
+    ) as unknown as typeof fetch;
+
+    // Cold cache — returns null immediately, doesn't block.
+    const route = lookupProviderRoute("delayed-provider");
     expect(route).toBeNull();
+    // Background fetch was triggered.
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
   });
 });
 

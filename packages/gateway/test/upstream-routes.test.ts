@@ -209,7 +209,7 @@ describe("resolveProviderRoute", () => {
     test("returns null url for github-copilot (requires user config)", () => {
       expect(resolveProviderRoute("github-copilot")).toEqual({
         url: null,
-        protocol: "anthropic",
+        protocol: "openai",
       });
     });
   });

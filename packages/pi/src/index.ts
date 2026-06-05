@@ -61,7 +61,6 @@ type SessionBeforeCompactResult = {
 const ANTHROPIC_PROVIDERS = [
   "anthropic",
   "fireworks",
-  "github-copilot",
   "minimax",
   "minimax-cn",
   "kimi-coding",
@@ -70,6 +69,7 @@ const ANTHROPIC_PROVIDERS = [
 /** OpenAI-completions / OpenAI-responses API → gateway POST /v1/chat/completions or /v1/responses */
 const OPENAI_PROVIDERS = [
   // openai-completions API
+  "github-copilot",
   "deepseek",
   "xai",
   "groq",
