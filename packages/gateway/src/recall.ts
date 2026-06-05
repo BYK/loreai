@@ -392,6 +392,29 @@ export async function executeRecall(
 // Follow-up request builder (Case 1: recall-only)
 // ---------------------------------------------------------------------------
 
+/** Wire protocol used for a recall follow-up upstream response. */
+export type RecallProtocol = "anthropic" | "openai" | "openai-responses";
+
+/**
+ * Injected upstream dependencies for recall follow-up execution.
+ *
+ * Passed by the pipeline so `recall.ts` never imports `pipeline.ts`
+ * (avoids a circular dependency). `forward` wraps `forwardToUpstream`
+ * (with `cacheConversation: false` already applied); `parseJSON` wraps
+ * `accumulateNonStreamResponse`.
+ */
+export interface RecallFollowUpCtx {
+  /** Forward a follow-up request upstream and return the raw response. */
+  forward: (
+    req: GatewayRequest,
+  ) => Promise<{ response: Response; effectiveProtocol: RecallProtocol }>;
+  /** Parse a non-streaming (JSON) upstream response into a GatewayResponse. */
+  parseJSON: (
+    response: Response,
+    protocol: RecallProtocol,
+  ) => Promise<GatewayResponse>;
+}
+
 /**
  * Build a follow-up request after recall execution.
  *
@@ -403,12 +426,21 @@ export async function executeRecall(
  *
  * The model continues from where it left off, now with recall results
  * in context. If it needs more detail it can call recall again.
+ *
+ * `stream` is REQUIRED (no default) and MUST match how the caller consumes
+ * the upstream response: `false` → JSON via `accumulateNonStreamResponse()`,
+ * `true` → SSE via `parseSSEStream()`. A mismatch produces a silent empty
+ * stream ("conversation stops after recall"). Callers should NOT use this
+ * builder directly — use `runRecallFollowUpStreaming()` /
+ * `runRecallFollowUpJSON()`, which couple the flag to its consumer so the two
+ * can never diverge. Exported only for unit-testing the message structure.
  */
-export function buildRecallFollowUp(
+export function buildRecallFollowUpRequest(
   originalReq: GatewayRequest,
   resp: GatewayResponse,
   recallResult: string,
   recallToolUseBlock: GatewayToolUseBlock,
+  stream: boolean,
 ): GatewayRequest {
   // Build the follow-up using proper tool_use/tool_result pairs.
   //
@@ -460,13 +492,144 @@ export function buildRecallFollowUp(
 
   return {
     ...originalReq,
-    // Recall follow-ups are always non-streaming: the accumulated response is
-    // parsed as JSON via accumulateNonStreamResponse(). Without this override,
-    // a streaming client request would forward stream:true to the upstream,
-    // which returns SSE — causing a JSON parse crash.
-    stream: false,
+    // The stream flag is set by the caller-specific helper to match its
+    // consumer (JSON vs SSE) — see buildRecallFollowUpRequest's doc comment.
+    stream,
     messages: [...originalReq.messages, assistantMessage, resultMessage],
   };
+}
+
+// ---------------------------------------------------------------------------
+// Content-type guards — fail loud on a stream-flag / consumer mismatch
+// ---------------------------------------------------------------------------
+
+/**
+ * Assert an upstream recall follow-up response is SSE (`text/event-stream`).
+ *
+ * The streaming follow-up path consumes the body via `parseSSEStream()`. If
+ * the follow-up's `stream` flag is ever wrong, the upstream returns JSON and
+ * the SSE parser silently yields zero events — the client gets the recall
+ * marker then dead air. Throwing here converts that silent failure into a
+ * loud, greppable error (caught by the recall try/catch → marker fallback +
+ * Sentry via log.error).
+ */
+function assertSSEResponse(response: Response): void {
+  const ct = response.headers.get("content-type") ?? "";
+  if (!ct.includes("text/event-stream")) {
+    throw new Error(
+      `recall follow-up expected SSE but got "${ct}" — stream flag/consumer mismatch`,
+    );
+  }
+}
+
+/**
+ * Assert an upstream recall follow-up response is NOT SSE (JSON expected).
+ *
+ * The non-streaming follow-up path parses the body as JSON. An SSE body would
+ * crash `response.json()`; throwing here gives a clear diagnostic instead.
+ */
+function assertJSONResponse(response: Response): void {
+  const ct = response.headers.get("content-type") ?? "";
+  if (ct.includes("text/event-stream")) {
+    throw new Error(
+      `recall follow-up expected JSON but got SSE — stream flag/consumer mismatch`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Coupled build + consume — the ONLY entry points the pipeline should use
+// ---------------------------------------------------------------------------
+
+/** Result of a streaming recall follow-up: the SSE reader + the request sent. */
+export interface RecallFollowUpStreaming {
+  ok: true;
+  /** SSE reader for the continuation stream — pipe through parseSSEStream(). */
+  reader: ReadableStreamDefaultReader<Uint8Array>;
+  /** The follow-up request that was sent (for the next loop iteration). */
+  followUp: GatewayRequest;
+}
+
+/** Result of a non-streaming recall follow-up: the parsed continuation. */
+export interface RecallFollowUpJSON {
+  ok: true;
+  /** Parsed continuation response. */
+  continuation: GatewayResponse;
+  /** The follow-up request that was sent (for the next loop iteration). */
+  followUp: GatewayRequest;
+}
+
+/** Failure result shared by both follow-up modes. */
+export interface RecallFollowUpError {
+  ok: false;
+  /** HTTP status when the upstream responded with a non-OK status. */
+  status?: number;
+  /** Human-readable error detail for logging. */
+  detail: string;
+}
+
+/**
+ * Build a `stream: true` follow-up, forward it, and return the SSE reader.
+ *
+ * Couples the stream flag to its consumer: the body is asserted to be SSE and
+ * returned as a reader, so a flag/consumer mismatch is structurally impossible
+ * and any divergence fails loud (see assertSSEResponse).
+ */
+export async function runRecallFollowUpStreaming(
+  ctx: RecallFollowUpCtx,
+  originalReq: GatewayRequest,
+  resp: GatewayResponse,
+  recallResult: string,
+  recallToolUseBlock: GatewayToolUseBlock,
+): Promise<RecallFollowUpStreaming | RecallFollowUpError> {
+  const followUp = buildRecallFollowUpRequest(
+    originalReq,
+    resp,
+    recallResult,
+    recallToolUseBlock,
+    /* stream */ true,
+  );
+  const { response } = await ctx.forward(followUp);
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    return { ok: false, status: response.status, detail: detail.slice(0, 500) };
+  }
+  assertSSEResponse(response);
+  if (!response.body) {
+    throw new Error("recall follow-up (streaming) response has no body");
+  }
+  return { ok: true, reader: response.body.getReader(), followUp };
+}
+
+/**
+ * Build a `stream: false` follow-up, forward it, and parse the JSON response.
+ *
+ * Couples the stream flag to its consumer: the body is asserted to be JSON and
+ * parsed via the injected `parseJSON`, so a flag/consumer mismatch is
+ * structurally impossible and any divergence fails loud (see assertJSONResponse).
+ */
+export async function runRecallFollowUpJSON(
+  ctx: RecallFollowUpCtx,
+  originalReq: GatewayRequest,
+  resp: GatewayResponse,
+  recallResult: string,
+  recallToolUseBlock: GatewayToolUseBlock,
+): Promise<RecallFollowUpJSON | RecallFollowUpError> {
+  const followUp = buildRecallFollowUpRequest(
+    originalReq,
+    resp,
+    recallResult,
+    recallToolUseBlock,
+    /* stream */ false,
+  );
+  const { response, effectiveProtocol } = await ctx.forward(followUp);
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    return { ok: false, status: response.status, detail: detail.slice(0, 500) };
+  }
+  assertJSONResponse(response);
+  const continuation = await ctx.parseJSON(response, effectiveProtocol);
+  return { ok: true, continuation, followUp };
 }
 
 // ---------------------------------------------------------------------------

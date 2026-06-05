@@ -205,7 +205,9 @@ import {
   hasRecallToolUse,
   hasOtherToolUse,
   clientHasRecallTool,
-  buildRecallFollowUp,
+  runRecallFollowUpStreaming,
+  runRecallFollowUpJSON,
+  type RecallFollowUpCtx,
   buildRecallMarker,
   recallStoreKey,
   expandRecallMarkers,
@@ -1995,23 +1997,38 @@ function buildStreamingResponse(
                 `${recallContext.sessionState.sessionID.slice(0, 16)}`,
             );
 
-            const followUp = buildRecallFollowUp(
-              currentModifiedReq,
-              currentResp,
-              result,
-              recallBlock,
-            );
-            let followUpResponse: Response;
+            // Build (stream:true) + forward + assert-SSE + get reader in one
+            // coupled call so the follow-up's stream flag can never diverge
+            // from how the continuation is consumed (parseSSEStream below).
+            // Disable conversation caching on the follow-up: the appended
+            // recall result makes the prefix diverge from the next real turn,
+            // so the cache write would be wasted money.
+            const streamingRecallCtx: RecallFollowUpCtx = {
+              forward: (r) =>
+                forwardToUpstream(r, recallContext.config, undefined, {
+                  ...recallContext.cacheOptions,
+                  cacheConversation: false,
+                }),
+              // JSON parsing is unused on the streaming path (assertSSEResponse
+              // guarantees an SSE body); provide a guard that throws if reached.
+              parseJSON: () => {
+                throw new Error(
+                  "parseJSON must not be called on the streaming recall path",
+                );
+              },
+            };
+
+            let streamingFollowUp: Awaited<
+              ReturnType<typeof runRecallFollowUpStreaming>
+            >;
             try {
-              ({ response: followUpResponse } = await forwardToUpstream(
-                followUp,
-                recallContext.config,
-                undefined,
-                // Disable conversation caching on follow-up: the appended
-                // recall result makes the prefix diverge from the next real
-                // turn, so the cache write would be wasted money.
-                { ...recallContext.cacheOptions, cacheConversation: false },
-              ));
+              streamingFollowUp = await runRecallFollowUpStreaming(
+                streamingRecallCtx,
+                currentModifiedReq,
+                currentResp,
+                result,
+                recallBlock,
+              );
             } catch (fetchErr) {
               log.error(
                 `recall follow-up fetch error (depth=${recallDepth}) for session ${recallContext.sessionState.sessionID.slice(0, 16)}:`,
@@ -2027,17 +2044,11 @@ function buildStreamingResponse(
               return;
             }
 
-            log.info(
-              `recall follow-up response (depth=${recallDepth}): status=${followUpResponse.status} ` +
-                `hasBody=${!!followUpResponse.body} session=${recallContext.sessionState.sessionID.slice(0, 16)}`,
-            );
-
-            if (!followUpResponse.ok) {
-              const errorBody = await followUpResponse.text();
+            if (!streamingFollowUp.ok) {
               log.error(
-                `recall follow-up upstream error: ${followUpResponse.status} ${errorBody.slice(0, 500)}`,
+                `recall follow-up upstream error: ${streamingFollowUp.status ?? "?"} ${streamingFollowUp.detail}`,
                 new Error(
-                  `recall follow-up upstream ${followUpResponse.status}`,
+                  `recall follow-up upstream ${streamingFollowUp.status ?? "?"}`,
                 ),
               );
               const heldBack = currentAccum.heldBackEvents();
@@ -2050,6 +2061,11 @@ function buildStreamingResponse(
               return;
             }
 
+            const followUp = streamingFollowUp.followUp;
+            log.info(
+              `recall follow-up response (depth=${recallDepth}): session=${recallContext.sessionState.sessionID.slice(0, 16)}`,
+            );
+
             // Pipe the continuation stream through a recall-aware accumulator.
             // +1 accounts for the synthetic marker block just emitted.
             const contBlockOffset =
@@ -2058,10 +2074,7 @@ function buildStreamingResponse(
               blockOffset: contBlockOffset,
               suppressMessageStart: true,
             });
-            if (!followUpResponse.body) {
-              throw new Error("Follow-up response has no body");
-            }
-            const contReader = followUpResponse.body.getReader();
+            const contReader = streamingFollowUp.reader;
             activeReader = contReader;
 
             for await (const {
@@ -4496,34 +4509,33 @@ async function handleConversationTurn(
         );
       }
 
-      // Recall-only — send follow-up request for seamless UX
+      // Recall-only — send follow-up request for seamless UX.
+      // Build (stream:false) + forward + assert-JSON + parse in one coupled
+      // call so the follow-up's stream flag can never diverge from how the
+      // continuation is consumed (accumulateNonStreamResponse).
       log.info(
         `recall (non-stream, depth=${recallDepth}): executing follow-up for session ${sessionState.sessionID.slice(0, 16)}`,
       );
-      const followUp = buildRecallFollowUp(
+      const jsonRecallCtx: RecallFollowUpCtx = {
+        forward: (r) =>
+          forwardToUpstream(r, config, undefined, {
+            ...cacheOptions,
+            cacheConversation: false,
+          }),
+        parseJSON: accumulateNonStreamResponse,
+      };
+      const jsonFollowUp = await runRecallFollowUpJSON(
+        jsonRecallCtx,
         currentModifiedReq,
         currentResp,
         result,
         recallBlock,
       );
-      const {
-        response: followUpResponse,
-        effectiveProtocol: followUpProtocol,
-      } = await forwardToUpstream(
-        followUp,
-        config,
-        undefined,
-        // Disable conversation caching on follow-up: the appended
-        // recall result makes the prefix diverge from the next real turn,
-        // so the cache write would be wasted money.
-        { ...cacheOptions, cacheConversation: false },
-      );
 
-      if (!followUpResponse.ok) {
-        const errorBody = await followUpResponse.text();
+      if (!jsonFollowUp.ok) {
         log.error(
-          `recall follow-up upstream error: ${followUpResponse.status} ${errorBody.slice(0, 500)}`,
-          new Error(`recall follow-up upstream ${followUpResponse.status}`),
+          `recall follow-up upstream error: ${jsonFollowUp.status ?? "?"} ${jsonFollowUp.detail}`,
+          new Error(`recall follow-up upstream ${jsonFollowUp.status ?? "?"}`),
         );
         // Fall back to response with marker (no continuation)
         markerResp.usage = cumulativeUsage;
@@ -4541,10 +4553,7 @@ async function handleConversationTurn(
         );
       }
 
-      const continuationResp = await accumulateNonStreamResponse(
-        followUpResponse,
-        followUpProtocol,
-      );
+      const { continuation: continuationResp, followUp } = jsonFollowUp;
 
       // Accumulate usage from this iteration
       cumulativeUsage.inputTokens += continuationResp.usage.inputTokens;

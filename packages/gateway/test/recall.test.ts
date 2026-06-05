@@ -17,7 +17,10 @@ import {
   hasRecallToolUse,
   hasOtherToolUse,
   clientHasRecallTool,
-  buildRecallFollowUp,
+  buildRecallFollowUpRequest,
+  runRecallFollowUpStreaming,
+  runRecallFollowUpJSON,
+  type RecallFollowUpCtx,
   buildRecallMarker,
   parseRecallMarker,
   isRecallMarker,
@@ -314,10 +317,10 @@ describe("recallStoreKey", () => {
 });
 
 // ---------------------------------------------------------------------------
-// buildRecallFollowUp
+// buildRecallFollowUpRequest
 // ---------------------------------------------------------------------------
 
-describe("buildRecallFollowUp", () => {
+describe("buildRecallFollowUpRequest", () => {
   test("builds correct follow-up request structure with tool_use/tool_result", () => {
     const req = makeRequest(
       [{ role: "user", content: [{ type: "text", text: "hello" }] }],
@@ -333,11 +336,12 @@ describe("buildRecallFollowUp", () => {
       "tool_use",
     );
 
-    const followUp = buildRecallFollowUp(
+    const followUp = buildRecallFollowUpRequest(
       req,
       resp,
       "## Recall Results\n* config is in /root",
       recallBlock,
+      /* stream */ false,
     );
 
     // Original messages + assistant (tool_use) + user (tool_result)
@@ -380,16 +384,43 @@ describe("buildRecallFollowUp", () => {
     const req = makeRequest();
     req.system = "my system prompt";
     req.model = "claude-opus-4";
-    req.stream = false;
+    req.stream = true; // originalReq.stream is irrelevant — explicit arg wins
 
     const recallBlock = makeRecallToolUse();
     const resp = makeResponse([recallBlock]);
 
-    const followUp = buildRecallFollowUp(req, resp, "result", recallBlock);
+    const followUp = buildRecallFollowUpRequest(
+      req,
+      resp,
+      "result",
+      recallBlock,
+      /* stream */ false,
+    );
 
     expect(followUp.system).toBe("my system prompt");
     expect(followUp.model).toBe("claude-opus-4");
+    // stream flag comes from the explicit parameter, NOT originalReq.stream
     expect(followUp.stream).toBe(false);
+  });
+
+  test("stream flag is set by the explicit parameter (true for SSE)", () => {
+    const req = makeRequest();
+    req.stream = false; // originalReq says false, but explicit arg overrides
+
+    const recallBlock = makeRecallToolUse();
+    const resp = makeResponse([recallBlock]);
+
+    const followUp = buildRecallFollowUpRequest(
+      req,
+      resp,
+      "result",
+      recallBlock,
+      /* stream */ true,
+    );
+
+    // The explicit stream arg wins — this is what the streaming follow-up
+    // path needs so parseSSEStream() receives an SSE body.
+    expect(followUp.stream).toBe(true);
   });
 
   test("preserves thinking blocks in assistant message for extended thinking", () => {
@@ -415,11 +446,12 @@ describe("buildRecallFollowUp", () => {
       "tool_use",
     );
 
-    const followUp = buildRecallFollowUp(
+    const followUp = buildRecallFollowUpRequest(
       req,
       resp,
       "## Recall Results\n* config is in /root",
       recallBlock,
+      /* stream */ false,
     );
 
     // Assistant message should contain thinking block + tool_use
@@ -454,7 +486,13 @@ describe("buildRecallFollowUp", () => {
       "tool_use",
     );
 
-    const followUp = buildRecallFollowUp(req, resp, "result", recallBlock);
+    const followUp = buildRecallFollowUpRequest(
+      req,
+      resp,
+      "result",
+      recallBlock,
+      false,
+    );
 
     const assistant = followUp.messages[1];
     // Only thinking + tool_use — original text blocks excluded
@@ -481,7 +519,13 @@ describe("buildRecallFollowUp", () => {
       "tool_use",
     );
 
-    const followUp = buildRecallFollowUp(req, resp, "result", recallBlock);
+    const followUp = buildRecallFollowUpRequest(
+      req,
+      resp,
+      "result",
+      recallBlock,
+      false,
+    );
 
     const assistant = followUp.messages[1];
     expect(assistant.content).toHaveLength(3);
@@ -504,7 +548,13 @@ describe("buildRecallFollowUp", () => {
       "tool_use",
     );
 
-    const followUp = buildRecallFollowUp(req, resp, "result", recallBlock);
+    const followUp = buildRecallFollowUpRequest(
+      req,
+      resp,
+      "result",
+      recallBlock,
+      false,
+    );
 
     const assistant = followUp.messages[1];
     // No thinking blocks — just the tool_use
@@ -523,7 +573,13 @@ describe("buildRecallFollowUp", () => {
     const recallBlock = makeRecallToolUse();
     const resp = makeResponse([recallBlock], "tool_use");
 
-    const followUp = buildRecallFollowUp(req, resp, "", recallBlock);
+    const followUp = buildRecallFollowUpRequest(
+      req,
+      resp,
+      "",
+      recallBlock,
+      false,
+    );
 
     const resultBlock = followUp.messages[2].content[0];
     expect(resultBlock.type).toBe("tool_result");
@@ -534,6 +590,203 @@ describe("buildRecallFollowUp", () => {
     expect((resultBlock as { toolUseId: string }).toolUseId).toBe(
       recallBlock.id,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runRecallFollowUpStreaming / runRecallFollowUpJSON — coupled helpers
+// ---------------------------------------------------------------------------
+
+describe("runRecallFollowUpStreaming", () => {
+  const recallBlock = makeRecallToolUse("test query");
+  const resp = makeResponse([recallBlock], "tool_use");
+
+  function makeSseResponse(): Response {
+    return new Response("data: test\n\n", {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  }
+
+  test("sends stream:true and returns the SSE reader", async () => {
+    let capturedReq: GatewayRequest | null = null;
+    const ctx: RecallFollowUpCtx = {
+      forward: async (r) => {
+        capturedReq = r;
+        return { response: makeSseResponse(), effectiveProtocol: "anthropic" };
+      },
+      parseJSON: () => {
+        throw new Error("should not be called");
+      },
+    };
+
+    const result = await runRecallFollowUpStreaming(
+      ctx,
+      makeRequest(),
+      resp,
+      "recall results",
+      recallBlock,
+    );
+
+    expect(capturedReq?.stream).toBe(true);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.reader).toBeDefined();
+      expect(result.followUp).toBeDefined();
+      result.reader.cancel(); // cleanup
+    }
+  });
+
+  test("returns error when upstream responds with non-OK status", async () => {
+    const ctx: RecallFollowUpCtx = {
+      forward: async () => ({
+        response: new Response("bad request", {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        }),
+        effectiveProtocol: "anthropic",
+      }),
+      parseJSON: () => {
+        throw new Error("should not be called");
+      },
+    };
+
+    const result = await runRecallFollowUpStreaming(
+      ctx,
+      makeRequest(),
+      resp,
+      "recall results",
+      recallBlock,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.status).toBe(400);
+      expect(result.detail).toBe("bad request");
+    }
+  });
+
+  test("throws on content-type mismatch (JSON instead of SSE) — #511 regression guard", async () => {
+    // This is the exact failure shape from #511: the follow-up returns JSON
+    // instead of SSE. Without the assertSSEResponse guard, parseSSEStream
+    // would silently yield zero events and the client would see dead air.
+    const ctx: RecallFollowUpCtx = {
+      forward: async () => ({
+        response: new Response(JSON.stringify({ type: "message" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+        effectiveProtocol: "anthropic",
+      }),
+      parseJSON: () => {
+        throw new Error("should not be called");
+      },
+    };
+
+    await expect(
+      runRecallFollowUpStreaming(
+        ctx,
+        makeRequest(),
+        resp,
+        "recall results",
+        recallBlock,
+      ),
+    ).rejects.toThrow("recall follow-up expected SSE");
+  });
+});
+
+describe("runRecallFollowUpJSON", () => {
+  const recallBlock = makeRecallToolUse("test query");
+  const resp = makeResponse([recallBlock], "tool_use");
+
+  test("sends stream:false and returns parsed continuation", async () => {
+    let capturedReq: GatewayRequest | null = null;
+    const fakeGatewayResponse: GatewayResponse = makeResponse(
+      [{ type: "text", text: "Here is the answer." }],
+      "end_turn",
+    );
+    const ctx: RecallFollowUpCtx = {
+      forward: async (r) => {
+        capturedReq = r;
+        return {
+          response: new Response(JSON.stringify({}), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+          effectiveProtocol: "anthropic",
+        };
+      },
+      parseJSON: async () => fakeGatewayResponse,
+    };
+
+    const result = await runRecallFollowUpJSON(
+      ctx,
+      makeRequest(),
+      resp,
+      "recall results",
+      recallBlock,
+    );
+
+    expect(capturedReq?.stream).toBe(false);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.continuation).toBe(fakeGatewayResponse);
+      expect(result.followUp).toBeDefined();
+    }
+  });
+
+  test("returns error when upstream responds with non-OK status", async () => {
+    const ctx: RecallFollowUpCtx = {
+      forward: async () => ({
+        response: new Response("server error", {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        }),
+        effectiveProtocol: "anthropic",
+      }),
+      parseJSON: () => {
+        throw new Error("should not be called");
+      },
+    };
+
+    const result = await runRecallFollowUpJSON(
+      ctx,
+      makeRequest(),
+      resp,
+      "recall results",
+      recallBlock,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.status).toBe(500);
+      expect(result.detail).toBe("server error");
+    }
+  });
+
+  test("throws on content-type mismatch (SSE instead of JSON)", async () => {
+    const ctx: RecallFollowUpCtx = {
+      forward: async () => ({
+        response: new Response("data: test\n\n", {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        }),
+        effectiveProtocol: "anthropic",
+      }),
+      parseJSON: () => {
+        throw new Error("should not be called after assert");
+      },
+    };
+
+    await expect(
+      runRecallFollowUpJSON(
+        ctx,
+        makeRequest(),
+        resp,
+        "recall results",
+        recallBlock,
+      ),
+    ).rejects.toThrow("recall follow-up expected JSON but got SSE");
   });
 });
 
