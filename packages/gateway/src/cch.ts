@@ -71,12 +71,13 @@ const VERSION_SEEDS: Record<string, bigint> = {
   "2.1.159": 0x4d659218e32a3268n,
   "2.1.161": 0x4d659218e32a3268n,
   "2.1.162": 0x4d659218e32a3268n,
+  "2.1.163": 0x4D659218E32A3268n,
   // Future versions: extract and add entries here.
   // Use `bun run scripts/extract-cch-seed.ts --version X.Y.Z` to extract.
 };
 
 /** Version we pin worker billing headers to (must have a known seed). */
-const WORKER_VERSION = "2.1.162";
+const WORKER_VERSION = "2.1.163";
 const WORKER_SEED = VERSION_SEEDS[WORKER_VERSION];
 if (WORKER_SEED === undefined) {
   throw new Error(`Missing CCH seed for worker version ${WORKER_VERSION}`);
