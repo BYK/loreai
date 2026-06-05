@@ -174,19 +174,33 @@ function prepareVendorModelCache(target: CompileTarget): string | null {
 // esbuild: onnxruntime-node → onnxruntime-web (WASM) redirect
 // ---------------------------------------------------------------------------
 
-/** Resolve a path inside the onnxruntime-web package from .bun/ store. */
+/** Resolve a path inside the onnxruntime-web package. Supports three
+ *  layouts:
+ *  - bun (default):     node_modules/.bun/onnxruntime-web@<ver>/node_modules/onnxruntime-web
+ *  - pnpm (default):    node_modules/.pnpm/onnxruntime-web@<ver>/node_modules/onnxruntime-web
+ *  - pnpm (hoisted):    node_modules/onnxruntime-web (or node_modules/.pnpm/... if `.pnpm` exists)
+ *  The hoisted mode (--node-linker=hoisted) matches bun's flat layout. */
 function findOrtWebDir(): string {
-  const bunDir = join(repoRoot, "node_modules", ".bun");
   const prefix = "onnxruntime-web@";
-  const entries = readdirSync(bunDir).filter((e) => e.startsWith(prefix));
-  if (entries.length === 0) {
-    throw new Error(
-      `findOrtWebDir: cannot find onnxruntime-web in node_modules/.bun/`,
-    );
+  const nm = join(repoRoot, "node_modules");
+
+  // Hoisted pnpm + bun: onnxruntime-web is a direct child of node_modules/
+  const direct = join(nm, "onnxruntime-web");
+  if (existsSync(direct)) return direct;
+
+  // Default pnpm / bun: content-addressable store at .pnpm/ or .bun/
+  for (const store of [join(nm, ".pnpm"), join(nm, ".bun")]) {
+    if (!existsSync(store)) continue;
+    const entries = readdirSync(store).filter((e) => e.startsWith(prefix));
+    if (entries.length === 0) continue;
+    const stable = entries.filter((m) => !m.includes("-", prefix.length));
+    const pick = (stable.length > 0 ? stable : entries).sort().reverse()[0];
+    return join(store, pick, "node_modules", "onnxruntime-web");
   }
-  const stable = entries.filter((m) => !m.includes("-", prefix.length));
-  const pick = (stable.length > 0 ? stable : entries).sort().reverse()[0];
-  return join(bunDir, pick, "node_modules", "onnxruntime-web");
+  throw new Error(
+    `findOrtWebDir: cannot find onnxruntime-web under ${nm}/ ` +
+      `(tried direct, .pnpm/, .bun/)`,
+  );
 }
 
 /**
