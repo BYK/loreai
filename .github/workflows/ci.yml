@@ -76,6 +76,20 @@ jobs:
 
       - run: bun install
 
+      # Restore the vendored embedding model so tests use a local model
+      # instead of downloading from HuggingFace Hub (avoids transient 429s).
+      # Same cache key as binary-smoke-native / build-nightly-binaries.
+      - name: Restore vendor staging
+        id: vendor-cache
+        uses: actions/cache@v5
+        with:
+          path: .vendor-build
+          key: vendor-${{ hashFiles('packages/core/package.json', 'packages/gateway/script/vendor-embeddings.ts', 'packages/gateway/script/vendor-paths.ts') }}
+
+      - name: Populate vendor staging (cache miss)
+        if: steps.vendor-cache.outputs.cache-hit != 'true'
+        run: bun run packages/gateway/script/vendor-embeddings.ts
+
       - name: Typecheck
         run: bun run typecheck
 
@@ -200,7 +214,7 @@ jobs:
             packages/gateway/package.json > packages/gateway/package.json.tmp
           mv packages/gateway/package.json.tmp packages/gateway/package.json
 
-      # Vendor staging was already populated above (before the Test step).
+      # Vendor staging populated by the cache restore + fallback steps above.
       - name: Build linux-x64 binary
         run: bun run --filter '@loreai/gateway' build:binary
         env:

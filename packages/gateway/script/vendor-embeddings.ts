@@ -33,11 +33,82 @@ const repoRoot = dirname(dirname(packageDir));
 
 console.log(`→ vendor-embeddings: model=${MODEL_ID}`);
 
-await ensureSharedModelCache();
+// ---------------------------------------------------------------------------
+// Retry logic for transient HuggingFace Hub errors (429, 5xx, network)
+// ---------------------------------------------------------------------------
+
+const MAX_RETRIES = 3;
+/** Transient HTTP codes worth retrying. 529 = Cloudflare "Site Overloaded" (HF uses CF). */
+const TRANSIENT_CODES = new Set([429, 500, 502, 503, 529]);
+const RETRY_AFTER_CAP_MS = 120_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchWithRetry(url: string): Promise<Response> {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    let r: Response;
+    try {
+      r = await fetch(url);
+    } catch (err) {
+      // Network-level failure (DNS, TLS, connection reset)
+      if (attempt === MAX_RETRIES) {
+        console.error(
+          `✗ network error: ${url} → ${err}` +
+            (attempt > 0 ? ` (after ${attempt + 1} attempts)` : ""),
+        );
+        process.exit(1);
+      }
+      const delayMs = Math.min(1000 * 2 ** attempt, 30_000);
+      console.warn(
+        `  ⚠ network error — retrying in ${(delayMs / 1000).toFixed(1)}s ` +
+          `(attempt ${attempt + 1}/${MAX_RETRIES})`,
+      );
+      await sleep(delayMs);
+      continue;
+    }
+
+    if (r.ok) return r;
+
+    if (!TRANSIENT_CODES.has(r.status) || attempt === MAX_RETRIES) {
+      console.error(
+        `✗ download failed: ${url} → HTTP ${r.status} ${r.statusText}` +
+          (attempt > 0 ? ` (after ${attempt + 1} attempts)` : ""),
+      );
+      process.exit(1);
+    }
+
+    // Determine backoff: honor Retry-After when present, else exponential
+    let delayMs: number;
+    const retryAfter = r.headers.get("retry-after");
+    if (retryAfter) {
+      const secs = Number(retryAfter);
+      delayMs = Number.isFinite(secs)
+        ? Math.min(secs * 1000, RETRY_AFTER_CAP_MS)
+        : Math.min(1000 * 2 ** attempt, 30_000);
+    } else {
+      delayMs = Math.min(1000 * 2 ** attempt, 30_000);
+    }
+
+    console.warn(
+      `  ⚠ HTTP ${r.status} — retrying in ${(delayMs / 1000).toFixed(1)}s ` +
+        `(attempt ${attempt + 1}/${MAX_RETRIES})`,
+    );
+    // Drain the response body to release the connection
+    await r.arrayBuffer().catch(() => {});
+    await sleep(delayMs);
+  }
+
+  // Unreachable — the loop either returns or exits, but TypeScript needs this
+  process.exit(1);
+}
 
 // ---------------------------------------------------------------------------
 // Shared model cache (nomic-embed-text-v1.5)
 // ---------------------------------------------------------------------------
+
+await ensureSharedModelCache();
 
 /**
  * Ensure `<repo>/.vendor-build/.model-cache/<MODEL_DIR_NAME>/` is populated
@@ -75,13 +146,7 @@ async function ensureSharedModelCache(): Promise<string> {
     const dest = join(modelDir, filePath);
 
     console.log(`  ↓ ${filePath}`);
-    const r = await fetch(url);
-    if (!r.ok) {
-      console.error(
-        `✗ download failed: ${url} → HTTP ${r.status} ${r.statusText}`,
-      );
-      process.exit(1);
-    }
+    const r = await fetchWithRetry(url);
     writeFileSync(dest, new Uint8Array(await r.arrayBuffer()));
   }
 
