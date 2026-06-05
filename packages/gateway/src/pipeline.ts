@@ -910,12 +910,34 @@ function getLLMClient(config: GatewayConfig): LLMClient {
       );
     }
 
-    const inner = createGatewayLLMClient(
+    const rawClient = createGatewayLLMClient(
       workerUpstreams,
       getWorkerAuth,
       defaultModel,
       { dedicatedWorkerKey: !!workerApiKey },
     );
+
+    // Session-aware wrapper: automatically inject the session's upstream URL
+    // so worker calls route through the same proxy/aggregator (e.g. OpenCode
+    // Zen) as the owning session. Without this, sessions behind a proxy would
+    // have their workers route directly to the provider API with the wrong
+    // credentials (the proxy's key, not the provider's).
+    // Only injects when no explicit upstreamUrl is already set, and the
+    // session has a non-default upstream (lastUpstreamUrl from a provider route).
+    const inner: LLMClient = {
+      async prompt(system, user, opts) {
+        if (opts?.sessionID && !opts.upstreamUrl && !workerApiKey) {
+          const state = sessions.get(opts.sessionID);
+          if (state?.lastUpstreamUrl) {
+            return rawClient.prompt(system, user, {
+              ...opts,
+              upstreamUrl: state.lastUpstreamUrl,
+            });
+          }
+        }
+        return rawClient.prompt(system, user, opts);
+      },
+    };
 
     // Wrap with batch queue for 50% cost savings on non-urgent worker calls.
     // Enabled by default — disable via LORE_BATCH_DISABLED=1.
@@ -2786,6 +2808,17 @@ function postResponse(
         : (lpRouteUsable?.protocol ??
           resolveUpstreamRoute(req.model)?.protocol ??
           req.protocol);
+    // Track the session's provider route so background workers (distillation,
+    // curation) can route through the same proxy/aggregator instead of hitting
+    // the direct provider API with the wrong credentials.
+    // Always update (including clearing) so a stale header isn't forwarded
+    // after the client switches providers mid-session.
+    // Exclude model-prefix routes from lastUpstreamUrl — those are default
+    // behavior (e.g. claude-* → api.anthropic.com) and don't need an
+    // override. Only header/provider-route overrides indicate a proxy session.
+    sessionState.lastProviderID = lpProvider || undefined;
+    sessionState.lastUpstreamUrl =
+      lpHeaderUpstream ?? lpRoute?.url ?? undefined;
     // Capture anthropic-beta so cache-warmer can forward it — beta-gated
     // body fields (e.g. context_management) need the header to be accepted.
     // Always update (including clearing) so a stale header isn't forwarded

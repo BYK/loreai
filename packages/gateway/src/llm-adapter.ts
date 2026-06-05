@@ -164,11 +164,23 @@ type ProviderTarget = {
   providerName: string;
 };
 
-/** Resolve upstream target based on model provider. */
+/** Resolve upstream target based on model provider.
+ *  When `upstreamOverride` is set, the request routes to that URL instead
+ *  of the default — used for proxy/aggregator sessions (e.g. OpenCode Zen)
+ *  where the session's credentials only work against the proxy endpoint. */
 function resolveTarget(
   upstreams: { anthropic: string; openai: string },
   providerID: string,
+  upstreamOverride?: string,
 ): ProviderTarget {
+  if (upstreamOverride) {
+    // Proxy/aggregator route — providerName reflects the wire protocol
+    // target, not the physical endpoint. The override URL IS the endpoint.
+    return {
+      url: upstreamOverride.replace(/\/$/, ""),
+      providerName: providerID === "openai" ? "openai" : "anthropic",
+    };
+  }
   if (providerID === "openai") {
     return {
       url: upstreams.openai.replace(/\/$/, ""),
@@ -348,7 +360,12 @@ export function createGatewayLLMClient(
 
       const model = opts?.model ?? defaultModel;
       const isOpenAI = model.providerID === "openai";
-      const target = resolveTarget(upstreams, model.providerID);
+      const upstreamOverride = opts?.upstreamUrl;
+      const target = resolveTarget(
+        upstreams,
+        model.providerID,
+        upstreamOverride,
+      );
       const maxTokens = opts?.maxTokens ?? 8192;
 
       // Defense-in-depth: detect API key / provider mismatch before making
@@ -357,7 +374,10 @@ export function createGatewayLLMClient(
       // distinguished by prefix, so only API keys are checked.
       // Skip when LORE_WORKER_API_KEY is set — the user deliberately chose
       // a cross-provider credential/model combination.
-      if (cred.scheme === "api-key" && !hasDedicatedKey) {
+      // Also skip when an upstream override is active — the session routes
+      // through a proxy/aggregator (e.g. OpenCode Zen) that accepts the
+      // session's credentials regardless of the provider prefix.
+      if (cred.scheme === "api-key" && !hasDedicatedKey && !upstreamOverride) {
         const isAnthropicKey = cred.value.startsWith("sk-ant-");
         if (target.providerName === "anthropic" && !isAnthropicKey) {
           log.warn(

@@ -299,6 +299,17 @@ export interface LLMClient {
        *   the field is silently ignored
        */
       temperature?: number;
+      /**
+       * Override the upstream URL for this call. When set, the adapter
+       * routes the request to this URL instead of the default provider
+       * endpoint. Used by the gateway to route worker calls through the
+       * same proxy/aggregator (e.g. OpenCode Zen) that the owning
+       * session uses, rather than hitting the direct provider API.
+       *
+       * Only the gateway adapter honors this field; other adapters
+       * (OpenCode, Pi) ignore it.
+       */
+      upstreamUrl?: string;
     },
   ): Promise<string | null>;
 }

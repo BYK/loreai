@@ -395,6 +395,14 @@ export type SessionState = {
   lastModel?: string;
   /** Protocol from the last real request (for warming profile resolution). */
   lastProtocol?: "anthropic" | "openai" | "openai-responses";
+  /** Provider ID from the last request's `X-Lore-Provider` header. Used to
+   *  route worker calls through the same provider as the owning session. */
+  lastProviderID?: string;
+  /** Resolved upstream base URL from the last request. When set, worker calls
+   *  route through this URL instead of the default provider endpoint — ensures
+   *  proxy/aggregator sessions (e.g. OpenCode Zen) keep working for background
+   *  tasks like distillation and curation. */
+  lastUpstreamUrl?: string;
   /** anthropic-beta header from the last real request — forwarded by
    *  cache-warmer so beta-gated body fields (e.g. context_management)
    *  are accepted upstream. */
