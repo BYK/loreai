@@ -1647,6 +1647,19 @@ async function forwardToUpstream(
       `auth=${routingAuth ? `${routingAuth.scheme}:${routingAuth.value.slice(0, 8)}…` : "none"})`,
   );
 
+  // Defense-in-depth: warn when a bearer token prefix clearly mismatches
+  // the resolved upstream. Catches misrouting before the upstream rejects it.
+  if (
+    routingAuth?.scheme === "bearer" &&
+    routingAuth.value.startsWith("gho_") &&
+    !effectiveUpstreamBase.includes("githubcopilot")
+  ) {
+    log.error(
+      `auth/upstream mismatch: GitHub OAuth token (gho_) routed to ${effectiveUpstreamBase} — ` +
+        `provider: ${providerID ?? "none"}`,
+    );
+  }
+
   if (effectiveProtocol === "openai-responses") {
     // Inject LTM into system prompt for non-Anthropic paths.
     // Anthropic handles LTM via separate system blocks in buildAnthropicRequest;

@@ -3,11 +3,12 @@
  *
  * On startup, the extension probes for an existing Lore gateway server
  * and, if none is found, starts one in-process by importing
- * @loreai/gateway. It then redirects compatible provider URLs through
- * the gateway and registers a Pi-specific compaction hook
- * (session_before_compact) that requires Pi's extension API. All other
- * memory features (LTM injection, gradient transforms, temporal capture,
- * recall, idle work) are handled by the gateway pipeline.
+ * @loreai/gateway. It installs a fetch-level interceptor that
+ * transparently reroutes LLM API calls through the gateway (preserving
+ * original auth headers and URLs), registers known providers with Pi,
+ * and adds a Pi-specific compaction hook (session_before_compact).
+ * All other memory features (LTM injection, gradient transforms,
+ * temporal capture, recall, idle work) are handled by the gateway pipeline.
  *
  * If the gateway server cannot be reached, the extension logs an error
  * and becomes inert — no hooks are registered and Pi runs without
@@ -21,7 +22,7 @@
  *   pi install npm:@loreai/pi
  */
 import { createHash } from "node:crypto";
-import { getGitRemote } from "@loreai/core";
+import { getGitRemote, installFetchInterceptor } from "@loreai/core";
 import type {
   ExtensionAPI,
   SessionBeforeCompactEvent,
@@ -102,6 +103,9 @@ const GATEWAY_PROVIDERS: readonly string[] = [
 
 /** Default ports to probe when looking for a running gateway (must match gateway defaults). */
 const KNOWN_GATEWAY_PORTS = [3207, 5673];
+
+/** Guard against double-installing the fetch interceptor if Pi re-initializes. */
+let fetchInterceptorInstalled = false;
 
 /**
  * Check if the Lore gateway is reachable at the given base URL.
@@ -256,6 +260,33 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
 
   let projectPath = process.cwd();
   let currentSessionID = sessionIDFor(undefined);
+
+  // Cache git remote once at init — avoid spawning `git remote -v` on every
+  // intercepted fetch call.
+  const cachedGitRemote = getGitRemote(projectPath) ?? "";
+
+  // Install fetch-level interceptor — transparently reroutes LLM API calls
+  // through the gateway while preserving original auth headers and URLs.
+  // This complements registerProviders() which tells Pi about available
+  // providers but overrides their baseUrl to the gateway. The interceptor
+  // catches any providers Pi discovers on its own (not in our list) and
+  // ensures X-Lore-Upstream-URL is always set from the original URL.
+  // Guard: only install once per process to avoid stacking interceptors
+  // if Pi re-initializes.
+  if (!fetchInterceptorInstalled) {
+    installFetchInterceptor({
+      gatewayBase,
+      getHeaders: () => {
+        const headers: Record<string, string> = {
+          "x-lore-session-id": currentSessionID,
+          "x-lore-project": projectPath,
+        };
+        if (cachedGitRemote) headers["x-lore-git-remote"] = cachedGitRemote;
+        return headers;
+      },
+    });
+    fetchInterceptorInstalled = true;
+  }
 
   /**
    * Register (or re-register) all gateway-compatible providers with the

@@ -12,6 +12,7 @@ import type {
   GatewayResponse,
   GatewayTool,
 } from "./types";
+import { forwardClientHeaders } from "./types";
 import { extractAuth, authHeaders } from "../auth";
 
 // ---------------------------------------------------------------------------
@@ -346,22 +347,20 @@ export function buildAnthropicRequest(
   body: unknown;
 } {
   // --- Headers ---
+  // Forward non-managed client headers first (provider-specific headers like
+  // anthropic-beta, user-agent, etc.), then overlay gateway-managed headers
+  // so they always take precedence.
   const headers: Record<string, string> = {
+    ...forwardClientHeaders(req.rawHeaders),
     "content-type": "application/json",
     "anthropic-version": ANTHROPIC_VERSION,
   };
 
-  // Forward auth from the original request (API key or OAuth Bearer)
+  // Forward auth from the original request (API key or OAuth Bearer).
+  // Overlays any forwarded auth headers to ensure correct scheme.
   const cred = extractAuth(req.rawHeaders);
   if (cred) {
     Object.assign(headers, authHeaders(cred));
-  }
-
-  // Forward anthropic-beta if present (enables features like extended thinking)
-  const beta =
-    req.rawHeaders["anthropic-beta"] || req.rawHeaders["Anthropic-Beta"] || "";
-  if (beta) {
-    headers["anthropic-beta"] = beta;
   }
 
   // --- Body ---

@@ -460,3 +460,57 @@ export type WarmupResult = {
   /** Cache creation tokens (non-zero means warmup caused a fresh write — bad). */
   cacheCreationTokens: number;
 };
+
+// ---------------------------------------------------------------------------
+// Header forwarding — transparent upstream proxy
+// ---------------------------------------------------------------------------
+
+/**
+ * Headers that the gateway manages itself — never forwarded from the client.
+ * Auth headers are listed because each request builder handles them
+ * explicitly (extractAuth + authHeaders) to preserve the correct scheme.
+ */
+const GATEWAY_MANAGED_HEADERS = new Set([
+  // HTTP framing
+  "content-type",
+  "content-length",
+  "host",
+  "connection",
+  "transfer-encoding",
+  "accept-encoding",
+  // Lore-specific (injected by fetch interceptor / plugin hooks)
+  "x-lore-provider",
+  "x-lore-upstream-url",
+  "x-lore-session-id",
+  "x-lore-project",
+  "x-lore-git-remote",
+  "x-lore-agent",
+  "x-lore-no-store",
+  "x-lore-recall-invoked",
+  // Protocol version — set explicitly by each builder
+  "anthropic-version",
+  // Auth — handled separately by each builder (extractAuth + authHeaders)
+  "x-api-key",
+  "authorization",
+]);
+
+/**
+ * Forward non-managed headers from the client request to the upstream.
+ *
+ * The fetch interceptor preserves all original headers (including provider-
+ * specific ones like `anthropic-beta`, `OpenAI-Organization`, etc.) on the
+ * request to the gateway. This function extracts them for forwarding to the
+ * upstream, filtering out headers the gateway sets itself.
+ */
+export function forwardClientHeaders(
+  rawHeaders: Record<string, string>,
+): Record<string, string> {
+  const forwarded: Record<string, string> = {};
+  for (const [key, value] of Object.entries(rawHeaders)) {
+    const lower = key.toLowerCase();
+    if (!lower.startsWith("x-lore-") && !GATEWAY_MANAGED_HEADERS.has(lower)) {
+      forwarded[lower] = value;
+    }
+  }
+  return forwarded;
+}

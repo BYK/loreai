@@ -206,9 +206,9 @@ describe("resolveProviderRoute", () => {
       });
     });
 
-    test("returns null url for github-copilot (requires user config)", () => {
+    test("returns github-copilot route with API URL", () => {
       expect(resolveProviderRoute("github-copilot")).toEqual({
-        url: null,
+        url: "https://api.githubcopilot.com",
         protocol: "openai",
       });
     });

@@ -172,6 +172,11 @@ export {
 } from "./workspace";
 export { workerSessionIDs, isWorkerSession } from "./worker";
 export { distillLimiter, curatorLimiter } from "./session-limiter";
+export {
+  installFetchInterceptor,
+  shouldIntercept,
+  type FetchInterceptorConfig,
+} from "./fetch-interceptor";
 export * as workerModel from "./worker-model";
 export {
   ftsQuery,

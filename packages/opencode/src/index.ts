@@ -1,68 +1,24 @@
 import type { Plugin, Hooks } from "@opencode-ai/plugin";
-import { log, getGitRemote, discoverWorkspaceRoot } from "@loreai/core";
+import {
+  log,
+  getGitRemote,
+  discoverWorkspaceRoot,
+  installFetchInterceptor,
+} from "@loreai/core";
 
 /**
- * The Lore gateway can proxy any provider that uses the Anthropic, OpenAI
- * Chat Completions, or OpenAI Responses wire protocol. The plugin
- * redirects ALL providers present in cfg.provider through the gateway,
- * plus a set of well-known providers that may be selected dynamically
- * in the UI (not present in cfg.provider at config-hook time).
+ * Lore plugin for OpenCode — transparent LLM proxy routing.
  *
- * The gateway resolves the correct upstream URL via:
- *   1. X-Lore-Upstream-URL header (explicit env var or captured original baseURL)
- *   2. X-Lore-Provider header → PROVIDER_ROUTES table + models.dev lookup
- *   3. Model prefix → UPSTREAM_ROUTES (fallback for bare agents)
- *   4. Config defaults (upstreamAnthropic / upstreamOpenAI)
+ * Instead of overwriting provider baseURLs (which loses original auth and
+ * URL context), this plugin installs a fetch-level interceptor that
+ * transparently reroutes outgoing LLM API calls through the Lore gateway.
+ * The SDK builds requests normally (correct auth, correct URL for each
+ * provider), and the interceptor redirects them while preserving all
+ * original headers. The gateway forwards non-managed headers upstream.
  *
- * For local/self-hosted providers, set `LORE_UPSTREAM_<PROVIDER>=<url>`
- * (e.g. `LORE_UPSTREAM_VLLM=http://localhost:8000`) so the gateway knows
- * where to forward requests.
+ * Per-request context (session ID, agent name, provider ID) is injected
+ * via the `chat.headers` hook.
  */
-
-/**
- * Providers to proactively redirect through the gateway even if not yet
- * in cfg.provider. OpenCode resolves some providers dynamically (e.g.
- * when the user picks a model in the UI), so they may not be in the
- * config at hook time. This list ensures their baseURL is pre-set.
- *
- * Providers already in cfg.provider are also redirected (wildcard).
- */
-const WELL_KNOWN_PROVIDERS: string[] = [
-  // Anthropic-messages API
-  "anthropic",
-  "fireworks",
-  "github-copilot",
-  "minimax",
-  "minimax-cn",
-  "kimi-coding",
-  // OpenAI-completions API
-  "deepseek",
-  "xai",
-  "groq",
-  "cerebras",
-  "openrouter",
-  "huggingface",
-  "zai",
-  "opencode",
-  "opencode-go",
-  "vercel-ai-gateway",
-  // OpenAI-responses API
-  "openai",
-  // SDK-routed providers (model-prefix fallback also works)
-  "nvidia",
-  "mistral",
-  "google",
-  // Local / self-hosted (OpenAI-compatible)
-  "vllm",
-  "llamacpp",
-  "ollama",
-  "lmstudio",
-  "jan",
-  "localai",
-  "tgi",
-  "tabbyml",
-  "litellm",
-];
 
 /** Default ports to probe when looking for a running gateway (must match gateway defaults). */
 const KNOWN_GATEWAY_PORTS = [3207, 5673];
@@ -166,6 +122,14 @@ let processInitDone = false;
 let processLoreActive = false;
 let processLoreBase = "";
 
+// Updated per plugin call so the fetch interceptor's getHeaders() callback
+// can reference the latest session's project context.
+let currentProjectPath = "";
+let currentGitRemote = "";
+
+// Cached git remote URL — computed once per process.
+let cachedGitRemote: string | undefined;
+
 /** Memoized lore init promise — ensures concurrent plugin calls don't race. */
 let loreInitPromise: Promise<string | null> | null = null;
 
@@ -223,14 +187,17 @@ export const LorePlugin: Plugin = async (ctx) => {
     }
   }
 
-  // Cache the git remote URL once per process (computed lazily on first
-  // chat.headers call). Avoids spawning `git remote -v` on every turn.
-  let cachedGitRemote: string | undefined;
+  // Cache the git remote URL once per process (computed lazily on first call).
+  // Avoids spawning `git remote -v` on every turn.
+  if (cachedGitRemote === undefined) {
+    const projectPath = discoverWorkspaceRoot(ctx.worktree || ctx.directory);
+    cachedGitRemote = getGitRemote(projectPath) ?? "";
+  }
 
-  // Capture original provider baseURLs before overwriting them with the
-  // gateway URL. Used as a fallback X-Lore-Upstream-URL for providers not
-  // yet in the gateway's PROVIDER_ROUTES table.
-  const originalBaseURLs = new Map<string, string>();
+  // Update module-level context so the fetch interceptor's getHeaders()
+  // callback always returns the latest session's project info.
+  currentProjectPath = discoverWorkspaceRoot(ctx.worktree || ctx.directory);
+  currentGitRemote = cachedGitRemote;
 
   try {
     const hooks: Hooks = {
@@ -254,67 +221,22 @@ export const LorePlugin: Plugin = async (ctx) => {
             description: "Lore query expansion worker",
           },
         };
-
-        if (loreActive) {
-          type ProviderEntry = { options?: { baseURL?: string } };
-          const p =
-            (cfg.provider as Record<string, ProviderEntry> | undefined) ?? {};
-          cfg.provider = p;
-          // Redirect ALL configured providers + well-known providers through
-          // the gateway. Some providers are selected dynamically in the UI
-          // and won't be in cfg.provider at config-hook time — the
-          // WELL_KNOWN_PROVIDERS list ensures they're pre-registered.
-          const allProviders = new Set([
-            ...Object.keys(p),
-            ...WELL_KNOWN_PROVIDERS,
-          ]);
-          for (const providerID of allProviders) {
-            p[providerID] ??= {};
-            const entry = p[providerID];
-            entry.options ??= {};
-            // Capture original baseURL before overwriting — sent as
-            // fallback X-Lore-Upstream-URL for providers not in the
-            // gateway's static PROVIDER_ROUTES table.
-            if (entry.options.baseURL) {
-              originalBaseURLs.set(providerID, entry.options.baseURL);
-            }
-            entry.options.baseURL = `${gatewayBase}/v1`;
-          }
-        }
       },
 
       tool: {},
 
-      // Inject the agent name so the gateway can distinguish meta requests
-      // (title generation, summary agents, etc.) from real conversation turns.
-      // Also inject the git remote URL so the remote gateway can group
-      // worktrees/clones of the same repo without filesystem access.
-      // For local/custom providers, inject the original upstream URL so the
-      // gateway can forward requests to the correct endpoint.
+      // Inject per-request identifiers so the gateway can distinguish meta
+      // requests (title generation, summary agents, etc.) from real
+      // conversation turns and route by provider.
+      // Project path, git remote, and upstream URL are injected by the
+      // fetch interceptor (installed once per process).
       "chat.headers": async (input, output) => {
         // Inject stable session ID — OpenCode's DB session ID survives restarts,
         // unlike x-session-affinity (nanoid regenerated per process).
         output.headers["x-lore-session-id"] = input.sessionID;
         output.headers["x-lore-agent"] = input.agent;
-        // Inject project path so the gateway can attribute data correctly.
-        // discoverWorkspaceRoot walks up from the project dir to find a
-        // monorepo/workspace root (cached after first call).
-        output.headers["x-lore-project"] = discoverWorkspaceRoot(
-          ctx.worktree || ctx.directory,
-        );
-        if (cachedGitRemote === undefined) {
-          const projectPath = discoverWorkspaceRoot(
-            ctx.worktree || ctx.directory,
-          );
-          cachedGitRemote = getGitRemote(projectPath) ?? "";
-        }
-        if (cachedGitRemote) {
-          output.headers["x-lore-git-remote"] = cachedGitRemote;
-        }
         // Inject provider ID so the gateway uses provider-based routing
         // (correct protocol + upstream URL) instead of model-prefix guessing.
-        // Also inject upstream URL override: explicit env var takes priority,
-        // then the original provider baseURL captured before gateway redirect.
         // OpenCode's plugin SDK types don't expose `.id` on the provider
         // object, but it IS present at runtime. Cast around incomplete typedef.
         const providerID = (
@@ -322,19 +244,6 @@ export const LorePlugin: Plugin = async (ctx) => {
         )?.id as string | undefined;
         if (providerID) {
           output.headers["x-lore-provider"] = providerID;
-          const envKey = `LORE_UPSTREAM_${providerID.toUpperCase().replace(/-/g, "_")}`;
-          const upstream = process.env[envKey];
-          if (upstream) {
-            output.headers["x-lore-upstream-url"] = upstream;
-          } else {
-            // Fallback: send the original provider baseURL so the gateway
-            // can forward to the correct endpoint even for providers not yet
-            // in its PROVIDER_ROUTES table.
-            const originalBase = originalBaseURLs.get(providerID);
-            if (originalBase) {
-              output.headers["x-lore-upstream-url"] = originalBase;
-            }
-          }
         }
       },
     };
@@ -345,6 +254,20 @@ export const LorePlugin: Plugin = async (ctx) => {
       process.stderr.write(`[lore] active: ${projectPath}\n`);
 
       if (loreActive) {
+        // Install the fetch interceptor once per process. It transparently
+        // reroutes outgoing LLM API calls through the gateway while
+        // preserving original auth headers and URLs.
+        installFetchInterceptor({
+          gatewayBase,
+          getHeaders: () => {
+            const headers: Record<string, string> = {};
+            if (currentProjectPath)
+              headers["x-lore-project"] = currentProjectPath;
+            if (currentGitRemote)
+              headers["x-lore-git-remote"] = currentGitRemote;
+            return headers;
+          },
+        });
         process.stderr.write(`[lore] routing through ${gatewayBase}\n`);
         process.stderr.write(`[lore] dashboard: ${gatewayBase}/ui\n`);
       }
