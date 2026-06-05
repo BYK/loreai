@@ -501,6 +501,10 @@ const GATEWAY_MANAGED_HEADERS = new Set([
   "x-lore-recall-invoked",
   // Protocol version — set explicitly by each builder
   "anthropic-version",
+  // Session identification — consumed by gateway, not meaningful to upstream
+  "x-parent-session-id",
+  "x-session-affinity",
+  "x-claude-code-session-id",
   // Auth — handled separately by each builder (extractAuth + authHeaders)
   "x-api-key",
   "authorization",

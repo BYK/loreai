@@ -53,8 +53,7 @@ export function shouldIntercept(url: string, gatewayBase: string): boolean {
       host === "localhost" ||
       host === "127.0.0.1" ||
       host === "0.0.0.0" ||
-      host === "::1" ||
-      host === "[::1]"
+      host === "::1" // URL.hostname strips brackets from IPv6
     )
       return false;
     // Intercept known LLM API paths only
@@ -103,6 +102,13 @@ export function getOriginalFetch(): typeof globalThis.fetch {
 export function installFetchInterceptor(
   config: FetchInterceptorConfig,
 ): () => void {
+  // Guard against double-install: if already installed, the second call
+  // would capture the *first* interceptor as _originalFetch, corrupting
+  // the chain. Return a no-op cleanup instead.
+  if (_originalFetch !== null) {
+    return () => {};
+  }
+
   _originalFetch = globalThis.fetch;
   const originalFetch = _originalFetch;
 
