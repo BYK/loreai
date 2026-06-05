@@ -315,7 +315,7 @@ class LocalProvider implements EmbeddingProvider {
       if (workerSource !== undefined) {
         const { join } = await import("node:path");
         const { homedir } = await import("node:os");
-        this.worker = new (Worker as new (...args: unknown[]) => Worker)(
+        this.worker = new (Worker as any)(
           workerSource,
           {
             eval: true,
