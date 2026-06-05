@@ -26,11 +26,12 @@
  *    Do nothing — `transformers.js` uses the CDN fallback for WASM
  *    (the npm path) or the local file system (with `LORE_LOCAL_MODEL_PATH`).
  *
- * The extraction is idempotent: if the files already exist on disk
- * (from a previous run), they're left alone. The `--worker` argv flag
- * causes the binary to run as a worker thread (see sea-entry.ts); the
- * shim is harmless in worker mode — both threads need their own copy
- * of the WASM files (cheap at ~11 MB and avoids cross-thread fs races).
+ * The extraction uses a per-pid tmp dir, so each process gets a
+ * fresh copy. The OS reaps /tmp on reboot, so disk leaks are
+ * bounded. The `--worker` argv flag causes the binary to run as a
+ * worker thread (see sea-entry.ts); the shim is harmless in worker
+ * mode — both threads need their own copy of the WASM files (cheap
+ * at ~11 MB and avoids cross-thread fs races).
  *
  * IMPORTANT: This file is intentionally CJS (not TS) so esbuild's
  * `inject:` mechanism treats it as the very first module in the bundle

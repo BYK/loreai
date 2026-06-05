@@ -25,7 +25,13 @@
  */
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 
 const VERSION = LORE_CLI_VERSION;
 
@@ -77,23 +83,33 @@ if (vendorEnabled) {
   const modelDir = join(vendorRoot, modelDirName);
 
   // Race-safe materialization: write to a per-pid tmp then rename.
-  // Multiple concurrent CLI invocations on the same machine each
-  // get their own pid-suffixed tmp file, so no clobbering.
-  const sea = require("node:sea") as typeof import("node:sea");
+  // renameSync is atomic on the same filesystem, so concurrent
+  // CLI invocations on the same machine each get their own
+  // pid-suffixed tmp file and the last rename wins — no partial
+  // files at the final destination.
   for (const relPath of modelFiles) {
     const assetKey = `model/${relPath}`;
     const buf = Buffer.from(sea.getRawAsset(assetKey));
     const dest = join(modelDir, relPath);
-    mkdirSync(
-      join(
-        modelDir,
-        relPath.includes("/") ? relPath.slice(0, relPath.lastIndexOf("/")) : "",
-      ),
-      { recursive: true },
-    );
+    const subdir = relPath.includes("/")
+      ? relPath.slice(0, relPath.lastIndexOf("/"))
+      : "";
+    mkdirSync(join(modelDir, subdir), { recursive: true });
     // Skip if already extracted (a previous run beat us to it).
     if (existsSync(dest)) continue;
-    writeFileSync(dest, buf, { mode: 0o644 });
+    const tmpDest = `${dest}.${process.pid}.tmp`;
+    try {
+      writeFileSync(tmpDest, buf, { mode: 0o644 });
+      renameSync(tmpDest, dest);
+    } catch (err) {
+      // Best-effort cleanup of the orphaned tmp file on failure.
+      try {
+        unlinkSync(tmpDest);
+      } catch {
+        // Ignore — file may not exist if writeFileSync failed.
+      }
+      throw err;
+    }
   }
 
   // Register for the LocalProvider.
@@ -112,4 +128,7 @@ if (vendorEnabled) {
 // Wrapped in an IIFE because CJS bundles don't support top-level await.
 (async () => {
   await import("./bin");
-})();
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

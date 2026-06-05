@@ -22,7 +22,7 @@
  *
  * Example:
  *   bun run script/build-binary-sea.ts -- --platforms linux-x64
- *   bun run script/build-binary-sea.ts -- --platforms "darwin-arm64 linux-arm64 linux-x64 windows-x64" --release
+ *   bun run script/build-binary-sea.ts -- --platforms "darwin-arm64,linux-arm64,linux-x64,windows-x64" --release
  */
 import * as esbuild from "esbuild";
 import {
@@ -282,14 +282,13 @@ function sentryBunToNodePlugin(): esbuild.Plugin {
 async function buildBinary() {
   const targets = parseTargets();
   const firstTarget = targets[0];
-  const vendorModelDir =
-    targets.length === 1 && firstTarget
-      ? prepareVendorModelCache(firstTarget)
-      : null;
-  if (targets.length > 1) {
-    // Multi-platform build: assume the cache is already populated
-    // (callers should have run a single-target build first or staged
-    // the model manually).
+  let vendorModelDir: string | null = null;
+  if (targets.length === 1 && firstTarget) {
+    vendorModelDir = prepareVendorModelCache(firstTarget);
+  } else if (targets.length > 1) {
+    // Multi-platform build: assume the shared model cache is already
+    // populated (callers should have run a single-target build first
+    // or staged the model manually).
     if (!flags["no-vendor"] && firstTarget) {
       const sample = firstTarget;
       if (!VENDORED_TARGETS.has(sample)) {
@@ -310,6 +309,9 @@ async function buildBinary() {
           );
           process.exit(1);
         }
+        // Use the shared model cache for staging — all platforms
+        // share the same model files.
+        vendorModelDir = modelDir;
         console.log(`  Vendor: cache hit for multi-platform build`);
       }
     }
@@ -479,20 +481,22 @@ async function buildBinary() {
   // We replace the Qb function body with a no-op. The function
   // body is single-line in the minified WASM bundle, so a regex
   // anchored on its declaration and the trailing `}` works.
-  const patchedWasmMjs = readFileSync(wasmMjsPath, "utf-8").replace(
+  const originalWasmMjs = readFileSync(wasmMjsPath, "utf-8");
+  const patchedWasmMjs = originalWasmMjs.replace(
     /function Qb\(\)\{var a=new Worker\(new URL\(import\.meta\.url\),\{type:"module",workerData:"em-pthread",name:"em-pthread"\}\);Q\.push\(a\)\}/,
     "function Qb(){}",
   );
-  // Write patched WASM to a side path so we don't mutate the source.
-  const patchedWasmMjsPath = join(stagingDir, "ort-wasm-simd-threaded.mjs");
-  writeFileSync(patchedWasmMjsPath, patchedWasmMjs);
-  // Verify the patch landed.
+  // Verify the patch landed before writing to avoid leaving
+  // unpatched content on disk if the upstream WASM layout changes.
   if (!patchedWasmMjs.includes("function Qb(){}")) {
     throw new Error(
       "Failed to patch WASM file (Qb() regex didn't match). " +
         "The onnxruntime-web WASM layout may have changed.",
     );
   }
+  // Write patched WASM to a side path so we don't mutate the source.
+  const patchedWasmMjsPath = join(stagingDir, "ort-wasm-simd-threaded.mjs");
+  writeFileSync(patchedWasmMjsPath, patchedWasmMjs);
   const patchedWasmBinPath = join(stagingDir, "ort-wasm-simd-threaded.wasm");
   copyFileSync(wasmBinPath, patchedWasmBinPath);
 
@@ -569,10 +573,21 @@ async function buildBinary() {
   const fossilizeTarget = (t: CompileTarget): string =>
     t.startsWith("windows") ? t.replace("windows", "win") : t;
   const platformArgs = targets.map(fossilizeTarget).join(",");
-  const fossilizeBin = "npx";
+  // Resolve fossilize from local node_modules/.bin instead of npx —
+  // faster, deterministic, and avoids npx version drift.
+  const fossilizeBin = join(
+    repoRoot,
+    "node_modules",
+    ".bin",
+    process.platform === "win32" ? "fossilize.cmd" : "fossilize",
+  );
+  if (!existsSync(fossilizeBin)) {
+    console.error(
+      `✗ fossilize not found at ${fossilizeBin}. Run \`bun install\`.`,
+    );
+    process.exit(1);
+  }
   const fossilizeArgs: string[] = [
-    "--yes",
-    "fossilize",
     bundlePath,
     "--no-bundle",
     "--hole-punch",
@@ -654,7 +669,10 @@ async function buildBinary() {
           "sentry",
           "sourcemap",
           "upload",
-          "dist-bin/",
+          // Sourcemap lives in .sea-staging/ (produced by esbuild
+          // with sourcemap:"linked"). The final binary embeds the
+          // debug ID that links errors back to this map.
+          `${stagingDir}/`,
           "--release",
           pkg.version,
           "--org",
@@ -662,7 +680,7 @@ async function buildBinary() {
           "--project",
           "loreai-gateway",
           "--url-prefix",
-          "~/dist-bin/",
+          "~/sea-staging/",
         ].join(" "),
         { cwd: packageDir, stdio: "inherit" },
       );
