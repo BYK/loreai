@@ -336,6 +336,9 @@ const PROVIDER_ROUTES: Record<string, ProviderRoute> = {
     url: "https://api.openai.com",
     protocol: "openai-responses",
   },
+  // --- Aggregator / gateway providers ---
+  opencode: { url: "https://opencode.ai/zen", protocol: "openai" },
+  "opencode-go": { url: "https://opencode.ai/zen/go", protocol: "openai" },
   // --- SDK-routed providers (model-prefix fallback also works) ---
   nvidia: {
     url: "https://integrate.api.nvidia.com",

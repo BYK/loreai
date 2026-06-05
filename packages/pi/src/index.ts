@@ -77,6 +77,8 @@ const OPENAI_PROVIDERS = [
   "openrouter",
   "huggingface",
   "zai",
+  "opencode",
+  "opencode-go",
   "vercel-ai-gateway",
   // openai-responses API
   "openai",

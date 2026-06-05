@@ -2,55 +2,23 @@ import type { Plugin, Hooks } from "@opencode-ai/plugin";
 import { log, getGitRemote, discoverWorkspaceRoot } from "@loreai/core";
 
 /**
- * Providers whose wire protocol the Lore gateway can proxy.
- * Keep in sync with packages/pi/src/index.ts ANTHROPIC_PROVIDERS + OPENAI_PROVIDERS.
+ * The Lore gateway can proxy any provider that uses the Anthropic, OpenAI
+ * Chat Completions, or OpenAI Responses wire protocol. Instead of
+ * maintaining a static allowlist, the plugin redirects ALL configured
+ * providers through the gateway. Providers whose SDK doesn't honor
+ * `baseURL` (e.g. native Google Vertex, AWS Bedrock) are harmlessly
+ * unaffected — the SDK ignores the override.
  *
- * - anthropic-messages API → gateway POST /v1/messages
- * - openai-completions API → gateway POST /v1/chat/completions
- * - openai-responses API   → gateway POST /v1/responses
- *
- * Providers using other protocols (Google SDK, AWS Bedrock SDK)
- * are not redirected but still benefit from gateway model-prefix routing.
+ * The gateway resolves the correct upstream URL via:
+ *   1. X-Lore-Upstream-URL header (explicit env var or captured original baseURL)
+ *   2. X-Lore-Provider header → PROVIDER_ROUTES table + models.dev lookup
+ *   3. Model prefix → UPSTREAM_ROUTES (fallback for bare agents)
+ *   4. Config defaults (upstreamAnthropic / upstreamOpenAI)
  *
  * For local/self-hosted providers, set `LORE_UPSTREAM_<PROVIDER>=<url>`
  * (e.g. `LORE_UPSTREAM_VLLM=http://localhost:8000`) so the gateway knows
- * where to forward requests. Cloud providers are routed automatically by
- * model name prefix.
+ * where to forward requests.
  */
-const GATEWAY_PROVIDERS: string[] = [
-  // anthropic-messages API
-  "anthropic",
-  "fireworks",
-  "github-copilot",
-  // openai-completions API
-  "deepseek",
-  "xai",
-  "groq",
-  "cerebras",
-  "openrouter",
-  "huggingface",
-  "zai",
-  "minimax",
-  "minimax-cn",
-  "kimi-coding",
-  "vercel-ai-gateway",
-  // openai-responses API
-  "openai",
-  // providers with native SDK support via gateway model-prefix routing
-  "nvidia",
-  "mistral",
-  "google",
-  // Local / self-hosted (OpenAI-compatible)
-  "vllm",
-  "llamacpp",
-  "ollama",
-  "lmstudio",
-  "jan",
-  "localai",
-  "tgi",
-  "tabbyml",
-  "litellm",
-];
 
 /** Default ports to probe when looking for a running gateway (must match gateway defaults). */
 const KNOWN_GATEWAY_PORTS = [3207, 5673];
@@ -248,12 +216,17 @@ export const LorePlugin: Plugin = async (ctx) => {
           const p =
             (cfg.provider as Record<string, ProviderEntry> | undefined) ?? {};
           cfg.provider = p;
-          for (const providerID of GATEWAY_PROVIDERS) {
-            p[providerID] ??= {};
+          // Redirect ALL configured providers through the gateway.
+          // The gateway resolves the correct upstream via provider-ID
+          // routing (PROVIDER_ROUTES + models.dev) and the fallback
+          // X-Lore-Upstream-URL header (captured original baseURL).
+          for (const providerID of Object.keys(p)) {
             const entry = p[providerID];
+            if (!entry) continue;
             entry.options ??= {};
-            // Capture original baseURL before overwriting — used as fallback
-            // X-Lore-Upstream-URL for providers not in gateway PROVIDER_ROUTES.
+            // Capture original baseURL before overwriting — sent as
+            // fallback X-Lore-Upstream-URL for providers not in the
+            // gateway's static PROVIDER_ROUTES table.
             if (entry.options.baseURL) {
               originalBaseURLs.set(providerID, entry.options.baseURL);
             }
