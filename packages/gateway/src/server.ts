@@ -435,9 +435,30 @@ export function startServer(config: GatewayConfig): {
       }
 
       // GET/POST /ui/* — Web dashboard (lazy-imported to keep proxy hot path fast)
+      // Wrapped in a 30-second timeout as a safety net for async hangs (e.g.,
+      // slow module import, embedding dedup on entities page). Note: this does
+      // NOT protect against synchronous SQLite blocking — the timer callback
+      // can't fire while sync queries hold the event loop. The real fix for
+      // query performance is the bulk-query optimization in data.ts / cost-tracker.ts.
       if (pathname === "/ui" || pathname.startsWith("/ui/")) {
         const { handleUIRequest } = await import("./ui");
-        return withCors(await handleUIRequest(req, url));
+        const uiPromise = handleUIRequest(req, url);
+        const timeoutPromise = new Promise<Response>((resolve) =>
+          setTimeout(
+            () =>
+              resolve(
+                new Response(
+                  "<h1>Page render timed out</h1><p>The page took too long to generate. Try again — results may be cached now.</p><p><a href='/ui'>Back to dashboard</a></p>",
+                  {
+                    status: 504,
+                    headers: { "content-type": "text/html; charset=utf-8" },
+                  },
+                ),
+              ),
+            30_000,
+          ),
+        );
+        return withCors(await Promise.race([uiPromise, timeoutPromise]));
       }
 
       // GET / — redirect to dashboard

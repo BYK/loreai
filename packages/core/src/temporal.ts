@@ -359,6 +359,70 @@ export function aggregateTokensBySession(
   return result;
 }
 
+/**
+ * Aggregate per-session token sums and first-assistant metadata across ALL
+ * projects in two grouped queries (instead of P per-project calls).
+ * Used by historical cost estimation to replace the per-project loop.
+ *
+ * INVARIANT: session_id is globally unique (generateSessionID uses 8 random
+ * bytes + timestamp). If this ever changes, GROUP BY must include project_id.
+ */
+export function aggregateTokensBySessionAll(opts?: {
+  sinceMs?: number;
+}): Map<string, SessionTokenAggregate> {
+  const sinceMs = opts?.sinceMs ?? 0;
+  const result = new Map<string, SessionTokenAggregate>();
+
+  // 1. Token sums per session (all projects).
+  const tokenRows = db()
+    .query(
+      `SELECT session_id, SUM(tokens) as total_tokens
+       FROM temporal_messages
+       WHERE created_at >= ?
+       GROUP BY session_id`,
+    )
+    .all(sinceMs) as Array<{ session_id: string; total_tokens: number }>;
+  for (const row of tokenRows) {
+    result.set(row.session_id, {
+      session_id: row.session_id,
+      total_tokens: row.total_tokens ?? 0,
+      first_assistant_metadata: null,
+    });
+  }
+
+  // 2. Earliest assistant message metadata per session (for model detection).
+  const metaRows = db()
+    .query(
+      `SELECT t.session_id, t.metadata
+       FROM temporal_messages t
+       WHERE t.role = 'assistant' AND t.created_at >= ?
+         AND t.created_at = (
+           SELECT MIN(t2.created_at) FROM temporal_messages t2
+           WHERE t2.session_id = t.session_id
+             AND t2.role = 'assistant' AND t2.created_at >= ?
+         )
+       GROUP BY t.session_id`,
+    )
+    .all(sinceMs, sinceMs) as Array<{
+    session_id: string;
+    metadata: string;
+  }>;
+  for (const row of metaRows) {
+    const existing = result.get(row.session_id);
+    if (existing) {
+      existing.first_assistant_metadata = row.metadata;
+    } else {
+      result.set(row.session_id, {
+        session_id: row.session_id,
+        total_tokens: 0,
+        first_assistant_metadata: row.metadata,
+      });
+    }
+  }
+
+  return result;
+}
+
 export function markDistilled(ids: string[]) {
   if (!ids.length) return;
   const placeholders = ids.map(() => "?").join(",");

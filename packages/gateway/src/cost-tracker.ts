@@ -1012,7 +1012,9 @@ const DEFAULT_ESTIMATION_MODEL = "claude-sonnet-4-20250514";
  *
  * Results are cached for 5 minutes to avoid repeated DB scans.
  */
-export function computeHistoricalEstimates(): HistoricalEstimates {
+export function computeHistoricalEstimates(
+  projectsList?: data.ProjectSummary[],
+): HistoricalEstimates {
   // Return cache if fresh
   if (
     historicalCache &&
@@ -1058,158 +1060,161 @@ export function computeHistoricalEstimates(): HistoricalEstimates {
   const scanCutoffMs = Date.now() - HISTORICAL_SCAN_DAYS * 86_400_000;
 
   try {
-    const projects = data.listProjects();
+    // Build a project lookup map for enriching session rows with project info.
+    // Uses the caller-provided list when available to avoid a redundant query.
+    const projects = projectsList ?? data.listProjects();
+    const projectById = new Map<string, (typeof projects)[number]>();
+    for (const p of projects) {
+      projectById.set(p.id, p);
+    }
 
-    for (const project of projects) {
+    // Bulk queries: 4 total instead of 3P+2 (one per table across all projects).
+    const allSessions = data.listAllRecentSessions({
+      sinceMs: scanCutoffMs,
+    });
+    const tokenAggs = temporal.aggregateTokensBySessionAll({
+      sinceMs: scanCutoffMs,
+    });
+    const distillAggs = data.aggregateDistillationsBySessionAll({
+      sinceMs: scanCutoffMs,
+    });
+
+    for (const sess of allSessions) {
       // Skip test sessions (created by the test suite)
-      if (project.path.includes("__tmp_agents_file__")) continue;
+      if (sess.project_path.includes("__tmp_agents_file__")) continue;
 
-      const projectSessions = data.listSessions(project.path, 500);
+      // Skip sessions that are currently tracked live
+      if (sessions.has(sess.session_id)) continue;
 
-      // Batch per-session aggregates for the whole project in a few grouped
-      // queries instead of 2 queries per session (the old N+1 hotspot).
-      const tokenAggs = temporal.aggregateTokensBySession(project.path, {
-        sinceMs: scanCutoffMs,
-      });
-      const distillAggs = data.aggregateDistillationsBySession(project.path, {
-        sinceMs: scanCutoffMs,
-      });
+      totals.sessionCount++;
+      totals.messageCount += sess.message_count;
 
-      for (const sess of projectSessions) {
-        // Scope-limit: skip sessions with no activity in the scan window.
-        if (sess.last_message_at < scanCutoffMs) continue;
+      const tokenAgg = tokenAggs.get(sess.session_id);
+      const distillAgg = distillAggs.get(sess.session_id);
 
-        // Skip sessions that are currently tracked live
-        if (sessions.has(sess.session_id)) continue;
+      // --- Determine model for this session ---
+      // Use the earliest assistant message's metadata (user messages have
+      // "unknown"). Falls back to the default estimation model.
+      let model = DEFAULT_ESTIMATION_MODEL;
+      const m = extractModelFromMetadata(tokenAgg?.first_assistant_metadata);
+      if (m) model = m;
 
-        totals.sessionCount++;
-        totals.messageCount += sess.message_count;
+      // --- 1. Estimate distillation overhead ---
+      // Use worker model pricing — distillations run on the worker, not
+      // conversation model. The grouped aggregate gives total token_count
+      // split by call_type, so the batch discount (50%) is applied to the
+      // actual batch token sum — equivalent to the old per-row loop.
+      const totalDistillCalls = distillAgg?.total_calls ?? 0;
+      const sessionBatchCalls = distillAgg?.batch_calls ?? 0;
+      const sessionDirectCalls = totalDistillCalls - sessionBatchCalls;
+      const batchTokens = distillAgg?.batch_tokens ?? 0;
+      const directTokens = (distillAgg?.total_tokens ?? 0) - batchTokens;
+      const perTokenCost = (estOut: number, mult: number) =>
+        ((estOut * 3) / 1_000_000) * workerPricing.input * mult +
+        (estOut / 1_000_000) * workerPricing.output * mult;
+      const sessionDistillCost =
+        perTokenCost(directTokens, 1.0) + perTokenCost(batchTokens, 0.5);
+      totals.distillationCost += sessionDistillCost;
+      totals.distillationCalls += totalDistillCalls;
+      totals.distillationBatchCalls += sessionBatchCalls;
+      totals.distillationDirectCalls += sessionDirectCalls;
 
-        const tokenAgg = tokenAggs.get(sess.session_id);
-        const distillAgg = distillAggs.get(sess.session_id);
+      // --- 2. Approximate avoided compactions from total token sum ---
+      // The old per-message running-context simulation is too expensive for
+      // batched queries. This formula approximates the same count using the
+      // session token total. It overestimates slightly when individual messages
+      // are large relative to the stride (overshoot tokens beyond the threshold
+      // are discarded in the per-message sim but counted by the division).
+      // This is only a fallback — sessions with persisted snapshots (the common
+      // case) use real data from live tracking.
+      const sessionTokens = tokenAgg?.total_tokens ?? 0;
+      let avoidedCompactions = 0;
+      if (sessionTokens > AUTOCOMPACT_THRESHOLD) {
+        // First compaction at AUTOCOMPACT_THRESHOLD, then every
+        // (AUTOCOMPACT_THRESHOLD - POST_COMPACTION_CONTEXT) tokens thereafter.
+        const stride = AUTOCOMPACT_THRESHOLD - POST_COMPACTION_CONTEXT;
+        avoidedCompactions =
+          1 +
+          Math.floor(
+            (sessionTokens - AUTOCOMPACT_THRESHOLD) / Math.max(stride, 1),
+          );
+      }
 
-        // --- Determine model for this session ---
-        // Use the earliest assistant message's metadata (user messages have
-        // "unknown"). Falls back to the default estimation model.
-        let model = DEFAULT_ESTIMATION_MODEL;
-        const m = extractModelFromMetadata(tokenAgg?.first_assistant_metadata);
-        if (m) model = m;
+      const sessionCompactionCost =
+        avoidedCompactions * estimateCompactionCost(workerModelID, model);
 
-        // --- 1. Estimate distillation overhead ---
-        // Use worker model pricing — distillations run on the worker, not
-        // conversation model. The grouped aggregate gives total token_count
-        // split by call_type, so the batch discount (50%) is applied to the
-        // actual batch token sum — equivalent to the old per-row loop.
-        const totalDistillCalls = distillAgg?.total_calls ?? 0;
-        const sessionBatchCalls = distillAgg?.batch_calls ?? 0;
-        const sessionDirectCalls = totalDistillCalls - sessionBatchCalls;
-        const batchTokens = distillAgg?.batch_tokens ?? 0;
-        const directTokens = (distillAgg?.total_tokens ?? 0) - batchTokens;
-        const perTokenCost = (estOut: number, mult: number) =>
-          ((estOut * 3) / 1_000_000) * workerPricing.input * mult +
-          (estOut / 1_000_000) * workerPricing.output * mult;
-        const sessionDistillCost =
-          perTokenCost(directTokens, 1.0) + perTokenCost(batchTokens, 0.5);
-        totals.distillationCost += sessionDistillCost;
-        totals.distillationCalls += totalDistillCalls;
-        totals.distillationBatchCalls += sessionBatchCalls;
-        totals.distillationDirectCalls += sessionDirectCalls;
+      // --- 3. Look up persisted live-session cost data ---
+      // Avoided compaction and worker cost totals are accumulated here
+      // (not above) because persisted real data is preferred over simulation.
+      const persisted = persistedCosts.get(sess.session_id);
+      let sessionPersisted: HistoricalEstimates["sessions"][number]["persisted"] =
+        null;
+      if (persisted) {
+        sessionPersisted = {
+          conversationCost: persisted.conversationCost,
+          workerCost: persisted.workerCost,
+          conversationTurns: persisted.conversationTurns,
+          warmupSavings: persisted.warmupSavings,
+          warmupHits: persisted.warmupHits,
+          ttlSavings: persisted.ttlSavings,
+          ttlHits: persisted.ttlHits,
+          batchSavings: persisted.batchSavings,
+          avoidedCompactions: persisted.avoidedCompactions,
+          avoidedCompactionCost: persisted.avoidedCompactionCost,
+        };
+        totals.warmupSavings += persisted.warmupSavings;
+        totals.warmupHits += persisted.warmupHits;
+        totals.ttlSavings += persisted.ttlSavings;
+        totals.ttlHits += persisted.ttlHits;
+        totals.batchSavings += persisted.batchSavings;
+        totals.persistedConversationCost += persisted.conversationCost;
 
-        // --- 2. Approximate avoided compactions from total token sum ---
-        // The old per-message running-context simulation is too expensive for
-        // batched queries. This formula approximates the same count using the
-        // session token total. It overestimates slightly when individual messages
-        // are large relative to the stride (overshoot tokens beyond the threshold
-        // are discarded in the per-message sim but counted by the division).
-        // This is only a fallback — sessions with persisted snapshots (the common
-        // case) use real data from live tracking.
-        const sessionTokens = tokenAgg?.total_tokens ?? 0;
-        let avoidedCompactions = 0;
-        if (sessionTokens > AUTOCOMPACT_THRESHOLD) {
-          // First compaction at AUTOCOMPACT_THRESHOLD, then every
-          // (AUTOCOMPACT_THRESHOLD - POST_COMPACTION_CONTEXT) tokens thereafter.
-          const stride = AUTOCOMPACT_THRESHOLD - POST_COMPACTION_CONTEXT;
-          avoidedCompactions =
-            1 +
-            Math.floor(
-              (sessionTokens - AUTOCOMPACT_THRESHOLD) / Math.max(stride, 1),
-            );
-        }
+        // Prefer persisted real worker cost over heuristic distillation estimate.
+        // The persisted workerCost includes all 5 buckets (distillation, curation,
+        // compaction, recall, warmup) from exact API-reported usage.
+        totals.totalWorkerCost += persisted.workerCost;
 
-        const sessionCompactionCost =
-          avoidedCompactions * estimateCompactionCost(workerModelID, model);
-
-        // --- 3. Look up persisted live-session cost data ---
-        // Avoided compaction and worker cost totals are accumulated here
-        // (not above) because persisted real data is preferred over simulation.
-        const persisted = persistedCosts.get(sess.session_id);
-        let sessionPersisted: HistoricalEstimates["sessions"][number]["persisted"] =
-          null;
-        if (persisted) {
-          sessionPersisted = {
-            conversationCost: persisted.conversationCost,
-            workerCost: persisted.workerCost,
-            conversationTurns: persisted.conversationTurns,
-            warmupSavings: persisted.warmupSavings,
-            warmupHits: persisted.warmupHits,
-            ttlSavings: persisted.ttlSavings,
-            ttlHits: persisted.ttlHits,
-            batchSavings: persisted.batchSavings,
-            avoidedCompactions: persisted.avoidedCompactions,
-            avoidedCompactionCost: persisted.avoidedCompactionCost,
-          };
-          totals.warmupSavings += persisted.warmupSavings;
-          totals.warmupHits += persisted.warmupHits;
-          totals.ttlSavings += persisted.ttlSavings;
-          totals.ttlHits += persisted.ttlHits;
-          totals.batchSavings += persisted.batchSavings;
-          totals.persistedConversationCost += persisted.conversationCost;
-
-          // Prefer persisted real worker cost over heuristic distillation estimate.
-          // The persisted workerCost includes all 5 buckets (distillation, curation,
-          // compaction, recall, warmup) from exact API-reported usage.
-          totals.totalWorkerCost += persisted.workerCost;
-
-          // Prefer persisted avoided compaction data over re-simulation.
-          // Live tracking uses real API-reported total input tokens; the
-          // simulation uses chars/3 estimates that miss system prompt and
-          // tool definition overhead.
-          if (persisted.avoidedCompactions > 0) {
-            totals.avoidedCompactions += persisted.avoidedCompactions;
-            totals.avoidedCompactionCost += persisted.avoidedCompactionCost;
-          } else {
-            // No persisted compaction data — use simulation fallback
-            totals.avoidedCompactions += avoidedCompactions;
-            totals.avoidedCompactionCost += sessionCompactionCost;
-          }
+        // Prefer persisted avoided compaction data over re-simulation.
+        // Live tracking uses real API-reported total input tokens; the
+        // simulation uses chars/3 estimates that miss system prompt and
+        // tool definition overhead.
+        if (persisted.avoidedCompactions > 0) {
+          totals.avoidedCompactions += persisted.avoidedCompactions;
+          totals.avoidedCompactionCost += persisted.avoidedCompactionCost;
         } else {
-          // No persisted snapshot — use heuristic distillation estimate as
-          // worker cost and simulation for avoided compactions.
-          totals.totalWorkerCost += sessionDistillCost;
+          // No persisted compaction data — use simulation fallback
           totals.avoidedCompactions += avoidedCompactions;
           totals.avoidedCompactionCost += sessionCompactionCost;
         }
-
-        sessionEstimates.push({
-          projectPath: project.path,
-          projectName: project.name,
-          projectId: project.id,
-          sessionId: sess.session_id,
-          messageCount: sess.message_count,
-          firstMessage: sess.first_message_at,
-          lastMessage: sess.last_message_at,
-          distillationCost: sessionDistillCost,
-          distillationCalls: totalDistillCalls,
-          distillationBatchCalls: sessionBatchCalls,
-          distillationDirectCalls: sessionDirectCalls,
-          avoidedCompactions:
-            persisted?.avoidedCompactions || avoidedCompactions,
-          avoidedCompactionCost:
-            persisted?.avoidedCompactionCost || sessionCompactionCost,
-          model,
-          persisted: sessionPersisted,
-        });
+      } else {
+        // No persisted snapshot — use heuristic distillation estimate as
+        // worker cost and simulation for avoided compactions.
+        totals.totalWorkerCost += sessionDistillCost;
+        totals.avoidedCompactions += avoidedCompactions;
+        totals.avoidedCompactionCost += sessionCompactionCost;
       }
+
+      // Look up project info from the pre-built map
+      const project = projectById.get(sess.project_id);
+
+      sessionEstimates.push({
+        projectPath: sess.project_path,
+        projectName: project?.name ?? sess.project_name,
+        projectId: sess.project_id,
+        sessionId: sess.session_id,
+        messageCount: sess.message_count,
+        firstMessage: sess.first_message_at,
+        lastMessage: sess.last_message_at,
+        distillationCost: sessionDistillCost,
+        distillationCalls: totalDistillCalls,
+        distillationBatchCalls: sessionBatchCalls,
+        distillationDirectCalls: sessionDirectCalls,
+        avoidedCompactions: persisted?.avoidedCompactions || avoidedCompactions,
+        avoidedCompactionCost:
+          persisted?.avoidedCompactionCost || sessionCompactionCost,
+        model,
+        persisted: sessionPersisted,
+      });
     }
   } catch (e) {
     log.error("cost-tracker: historical estimate computation failed:", e);

@@ -18,6 +18,7 @@ import {
   dbPath,
   mergeProjectInternal,
   repoNameFromRemote,
+  onProjectMutation,
 } from "./db";
 import { getGitRemote } from "./git";
 import * as ltm from "./ltm";
@@ -87,18 +88,70 @@ export type GlobalStats = {
 // Listing functions
 // ---------------------------------------------------------------------------
 
+// Short-lived caches for expensive listing/stats queries. Invalidated by
+// mutation functions and on a 5-second TTL so the dashboard never re-runs
+// heavy aggregations within a single page render cycle.
+let projectsCache: ProjectSummary[] | null = null;
+let projectsCacheAt = 0;
+let globalStatsCache: GlobalStats | null = null;
+let globalStatsCacheAt = 0;
+const LIST_CACHE_TTL_MS = 5_000;
+
+/** Invalidate the projects list cache (call after mutations). */
+export function invalidateProjectsCache(): void {
+  projectsCache = null;
+  projectsCacheAt = 0;
+}
+
+/** Invalidate the global stats cache (call after mutations). */
+export function invalidateGlobalStatsCache(): void {
+  globalStatsCache = null;
+  globalStatsCacheAt = 0;
+}
+
+// Auto-invalidate caches when db.ts creates/merges projects (avoids circular dep).
+onProjectMutation(() => {
+  invalidateProjectsCache();
+  invalidateGlobalStatsCache();
+});
+
 /** List all projects with summary counts. */
 export function listProjects(): ProjectSummary[] {
-  return db()
+  const now = Date.now();
+  if (projectsCache && now - projectsCacheAt < LIST_CACHE_TTL_MS) {
+    return projectsCache;
+  }
+  const result = db()
     .query(
       `SELECT p.id, p.path, p.name, p.git_remote, p.created_at,
-        (SELECT COUNT(*) FROM knowledge WHERE project_id = p.id AND confidence > 0.2) as knowledge_count,
-        (SELECT COUNT(DISTINCT session_id) FROM temporal_messages WHERE project_id = p.id) as session_count,
-        (SELECT COUNT(*) FROM temporal_messages WHERE project_id = p.id) as message_count,
-        (SELECT COUNT(*) FROM distillations WHERE project_id = p.id) as distillation_count
-       FROM projects p ORDER BY p.created_at DESC`,
+        COALESCE(k.cnt, 0) AS knowledge_count,
+        COALESCE(t.session_count, 0) AS session_count,
+        COALESCE(t.message_count, 0) AS message_count,
+        COALESCE(d.cnt, 0) AS distillation_count
+       FROM projects p
+       LEFT JOIN (
+         SELECT project_id, COUNT(*) AS cnt
+         FROM knowledge WHERE confidence > 0.2
+         GROUP BY project_id
+       ) k ON k.project_id = p.id
+       LEFT JOIN (
+         SELECT project_id,
+                COUNT(DISTINCT session_id) AS session_count,
+                COUNT(*) AS message_count
+         FROM temporal_messages
+         GROUP BY project_id
+       ) t ON t.project_id = p.id
+       LEFT JOIN (
+         SELECT project_id, COUNT(*) AS cnt
+         FROM distillations
+         GROUP BY project_id
+       ) d ON d.project_id = p.id
+       ORDER BY p.created_at DESC`,
     )
     .all() as ProjectSummary[];
+  projectsCache = result;
+  projectsCacheAt = now;
+  return result;
 }
 
 /** List distinct sessions for a project, with message/distillation counts. */
@@ -110,22 +163,26 @@ export function listSessions(
   return db()
     .query(
       `SELECT
-        session_id,
+        t.session_id,
         COUNT(*) as message_count,
-        MIN(created_at) as first_message_at,
-        MAX(created_at) as last_message_at,
-        SUM(CASE WHEN distilled = 1 THEN 1 ELSE 0 END) as distilled_count,
-        SUM(CASE WHEN distilled = 0 THEN 1 ELSE 0 END) as undistilled_count,
-        (SELECT COUNT(*) FROM distillations d
-         WHERE d.project_id = temporal_messages.project_id
-         AND d.session_id = temporal_messages.session_id) as distillation_count
-       FROM temporal_messages
-       WHERE project_id = ?
-       GROUP BY session_id
-       ORDER BY MAX(created_at) DESC
+        MIN(t.created_at) as first_message_at,
+        MAX(t.created_at) as last_message_at,
+        SUM(CASE WHEN t.distilled = 1 THEN 1 ELSE 0 END) as distilled_count,
+        SUM(CASE WHEN t.distilled = 0 THEN 1 ELSE 0 END) as undistilled_count,
+        COALESCE(d.cnt, 0) as distillation_count
+       FROM temporal_messages t
+       LEFT JOIN (
+         SELECT session_id, COUNT(*) AS cnt
+         FROM distillations
+         WHERE project_id = ?
+         GROUP BY session_id
+       ) d ON d.session_id = t.session_id
+       WHERE t.project_id = ?
+       GROUP BY t.session_id
+       ORDER BY MAX(t.created_at) DESC
        LIMIT ?`,
     )
-    .all(pid, limit) as SessionSummary[];
+    .all(pid, pid, limit) as SessionSummary[];
 }
 
 /** List distillations for a project (optionally filtered by session). */
@@ -213,6 +270,94 @@ export function aggregateDistillationsBySession(
   return result;
 }
 
+/** Session summary with project context, used by bulk historical cost estimation. */
+export type RecentSessionSummary = {
+  project_id: string;
+  project_path: string;
+  project_name: string | null;
+  session_id: string;
+  message_count: number;
+  first_message_at: number;
+  last_message_at: number;
+};
+
+/**
+ * List sessions across ALL projects with activity since `sinceMs`.
+ * Single query — replaces the per-project `listSessions()` loop in cost
+ * estimation (3P queries → 1).
+ *
+ * Groups by (project_id, session_id) since session_id is globally unique
+ * but the project context is needed for the caller's per-project lookups.
+ */
+export function listAllRecentSessions(opts?: {
+  sinceMs?: number;
+  limit?: number;
+}): RecentSessionSummary[] {
+  const sinceMs = opts?.sinceMs ?? 0;
+  const limit = opts?.limit ?? 50_000;
+  return db()
+    .query(
+      `SELECT
+         t.project_id,
+         p.path AS project_path,
+         p.name AS project_name,
+         t.session_id,
+         COUNT(*) AS message_count,
+         MIN(t.created_at) AS first_message_at,
+         MAX(t.created_at) AS last_message_at
+       FROM temporal_messages t
+       JOIN projects p ON p.id = t.project_id
+       WHERE t.created_at >= ?
+       GROUP BY t.project_id, t.session_id
+       ORDER BY MAX(t.created_at) DESC
+       LIMIT ?`,
+    )
+    .all(sinceMs, limit) as RecentSessionSummary[];
+}
+
+/**
+ * Aggregate distillation stats per session across ALL projects.
+ * Single query — replaces the per-project loop in cost estimation.
+ *
+ * INVARIANT: session_id is globally unique (generateSessionID uses 8 random
+ * bytes + timestamp). If this ever changes, GROUP BY must include project_id.
+ */
+export function aggregateDistillationsBySessionAll(opts?: {
+  sinceMs?: number;
+}): Map<string, SessionDistillAggregate> {
+  const sinceMs = opts?.sinceMs ?? 0;
+  const rows = db()
+    .query(
+      `SELECT
+         session_id,
+         COUNT(*) as total_calls,
+         SUM(CASE WHEN call_type = 'batch' THEN 1 ELSE 0 END) as batch_calls,
+         SUM(token_count) as total_tokens,
+         SUM(CASE WHEN call_type = 'batch' THEN token_count ELSE 0 END) as batch_tokens
+       FROM distillations
+       WHERE created_at >= ?
+       GROUP BY session_id`,
+    )
+    .all(sinceMs) as Array<{
+    session_id: string;
+    total_calls: number;
+    batch_calls: number;
+    total_tokens: number;
+    batch_tokens: number;
+  }>;
+  const result = new Map<string, SessionDistillAggregate>();
+  for (const row of rows) {
+    result.set(row.session_id, {
+      session_id: row.session_id,
+      total_calls: row.total_calls,
+      batch_calls: row.batch_calls ?? 0,
+      total_tokens: row.total_tokens ?? 0,
+      batch_tokens: row.batch_tokens ?? 0,
+    });
+  }
+  return result;
+}
+
 /** Get a single distillation by ID (or resolved prefix). */
 export function getDistillation(id: string): DistillationDetail | null {
   return db()
@@ -244,6 +389,11 @@ export function resolveId(
 
 /** Global stats for the dashboard. */
 export function globalStats(): GlobalStats {
+  const now = Date.now();
+  if (globalStatsCache && now - globalStatsCacheAt < LIST_CACHE_TTL_MS) {
+    return globalStatsCache;
+  }
+
   const row = db()
     .query(
       `SELECT
@@ -268,7 +418,10 @@ export function globalStats(): GlobalStats {
     // File may not exist yet or stat fails
   }
 
-  return { ...row, db_size_bytes };
+  const result = { ...row, db_size_bytes };
+  globalStatsCache = result;
+  globalStatsCacheAt = now;
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -381,6 +534,9 @@ export function clearProject(projectPath: string): ClearResult {
       // Non-fatal: project dir may not be writable
     }
   }
+
+  invalidateProjectsCache();
+  invalidateGlobalStatsCache();
 
   return {
     knowledge_deleted: counts.knowledge,
@@ -497,6 +653,9 @@ export function deleteProject(projectId: string): ClearResult | null {
     agentsFile.clearLoreFileCache(p);
   }
 
+  invalidateProjectsCache();
+  invalidateGlobalStatsCache();
+
   return {
     knowledge_deleted: counts.knowledge,
     temporal_deleted: counts.temporal,
@@ -510,6 +669,7 @@ export function renameProject(projectId: string, newName: string): boolean {
   const result = db()
     .query("UPDATE projects SET name = ? WHERE id = ?")
     .run(newName.trim(), projectId);
+  if (result.changes > 0) invalidateProjectsCache();
   return result.changes > 0;
 }
 
@@ -529,6 +689,9 @@ export function clearKnowledge(projectPath: string): number {
     )
     .run(pid);
   db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+
+  invalidateProjectsCache();
+  invalidateGlobalStatsCache();
 
   // Regenerate .lore.md
   if (existsSync(projectPath)) {
@@ -553,6 +716,9 @@ export function clearTemporal(projectPath: string): number {
 
   db().query("DELETE FROM temporal_messages WHERE project_id = ?").run(pid);
 
+  invalidateProjectsCache();
+  invalidateGlobalStatsCache();
+
   return count;
 }
 
@@ -567,6 +733,9 @@ export function clearDistillations(projectPath: string): number {
 
   db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
 
+  invalidateProjectsCache();
+  invalidateGlobalStatsCache();
+
   return count;
 }
 
@@ -575,6 +744,8 @@ export function deleteKnowledge(id: string): boolean {
   const entry = ltm.get(id);
   if (!entry) return false;
   ltm.remove(id);
+  invalidateProjectsCache();
+  invalidateGlobalStatsCache();
   return true;
 }
 
@@ -583,6 +754,8 @@ export function deleteDistillation(id: string): boolean {
   const existing = getDistillation(id);
   if (!existing) return false;
   db().query("DELETE FROM distillations WHERE id = ?").run(id);
+  invalidateProjectsCache();
+  invalidateGlobalStatsCache();
   return true;
 }
 
@@ -629,6 +802,9 @@ export function deleteSession(
   database
     .query("DELETE FROM session_state WHERE session_id = ?")
     .run(sessionId);
+
+  invalidateProjectsCache();
+  invalidateGlobalStatsCache();
 
   return { messages_deleted: msgCount, distillations_deleted: distCount };
 }
@@ -702,6 +878,9 @@ export function mergeProjects(sourceId: string, targetId: string): MergeResult {
   };
 
   mergeProjectInternal(sourceId, targetId);
+
+  invalidateProjectsCache();
+  invalidateGlobalStatsCache();
 
   return {
     knowledge_moved: counts.knowledge,

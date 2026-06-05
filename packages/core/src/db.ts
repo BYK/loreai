@@ -5,6 +5,22 @@ import { getGitRemote } from "./git";
 import { dataDir } from "./data-dir";
 
 /**
+ * Callback fired when project rows are created or mutated (merge, rename, etc.).
+ * Used by data.ts to invalidate its listing caches without a circular import.
+ */
+let onProjectMutationCb: (() => void) | null = null;
+
+/** Register a callback for project mutations. Only one callback is supported. */
+export function onProjectMutation(cb: () => void): void {
+  onProjectMutationCb = cb;
+}
+
+/** Fire the project mutation callback (if registered). */
+function fireProjectMutation(): void {
+  onProjectMutationCb?.();
+}
+
+/**
  * Extract the repository name from a normalized git remote URL.
  *
  * Examples:
@@ -1311,6 +1327,7 @@ export function mergeProjectInternal(sourceId: string, targetId: string): void {
     }
     d.query("DELETE FROM projects WHERE id = ?").run(sourceId);
     d.exec("COMMIT");
+    fireProjectMutation();
   } catch (e) {
     d.exec("ROLLBACK");
     throw e;
@@ -1445,6 +1462,7 @@ export function ensureProject(
       "INSERT INTO projects (id, path, name, git_remote, created_at) VALUES (?, ?, ?, ?, ?)",
     )
     .run(id, path, derivedName, gitRemote, Date.now());
+  fireProjectMutation();
   return id;
 }
 

@@ -1434,7 +1434,7 @@ function pageDashboard(): string {
   for (const [, c] of allCosts) {
     liveSavings += totalSavings(c);
   }
-  const hist = computeHistoricalEstimates().totals;
+  const hist = computeHistoricalEstimates(projects).totals;
   const histSavings =
     hist.warmupSavings +
     hist.ttlSavings +
@@ -2286,7 +2286,7 @@ function pageCosts(): string {
   }
 
   // --- Historical (backdated) estimates ---
-  const historical = computeHistoricalEstimates();
+  const historical = computeHistoricalEstimates(data.listProjects());
   const hist = historical.totals;
 
   // --- Combined totals ---
