@@ -128,8 +128,9 @@ export function installFetchInterceptor(
     // any prefix) is passed via X-Lore-Upstream-URL.
     const upstream = new URL(url);
     const gateway = new URL(config.gatewayBase);
-    const v1Match = upstream.pathname.match(/(\/v1\/.*)$/);
-    const apiPath = v1Match?.[1] ?? upstream.pathname;
+    const v1Idx = upstream.pathname.lastIndexOf("/v1/");
+    const apiPath =
+      v1Idx >= 0 ? upstream.pathname.slice(v1Idx) : upstream.pathname;
     const gatewayUrl = `${gateway.origin}${apiPath}${upstream.search}`;
 
     // Merge original headers + X-Lore-* headers.
@@ -145,10 +146,10 @@ export function installFetchInterceptor(
 
     // Pass the original upstream base URL (everything before /v1/...).
     // The gateway uses this as the highest-priority routing signal.
-    const upstreamBase = v1Match
-      ? upstream.origin +
-        upstream.pathname.slice(0, upstream.pathname.length - v1Match[1].length)
-      : upstream.origin;
+    const upstreamBase =
+      v1Idx >= 0
+        ? upstream.origin + upstream.pathname.slice(0, v1Idx)
+        : upstream.origin;
     headers.set("x-lore-upstream-url", upstreamBase);
 
     // Inject dynamic context headers (session ID, project, git remote, etc.)

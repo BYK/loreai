@@ -571,6 +571,10 @@ type Pricing = {
  * Falls back to sensible defaults (same logic as sentry.ts getPricing).
  */
 export function getPricingSync(model: string): Pricing {
+  // OpenRouter `:free` suffix models cost nothing — don't inflate budget.
+  if (model.endsWith(":free")) {
+    return { input: 0, output: 0, cache_read: 0, cache_write: 0 };
+  }
   const entry = getModelEntrySync(model);
   const input = entry.cost?.input ?? 3;
   return {

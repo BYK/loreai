@@ -125,6 +125,15 @@ const FALLBACK_PRICING: Array<{
 ];
 
 function fallbackEntry(modelID: string): ModelsDevEntry {
+  // OpenRouter `:free` suffix models cost nothing — don't inflate budget.
+  if (modelID.endsWith(":free")) {
+    return {
+      id: modelID,
+      cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
+      limit: { context: 200_000, output: 8_192 },
+    };
+  }
+
   for (const fb of FALLBACK_PRICING) {
     if (modelID.startsWith(fb.prefix)) {
       return {
