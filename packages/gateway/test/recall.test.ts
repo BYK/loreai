@@ -628,7 +628,8 @@ describe("runRecallFollowUpStreaming", () => {
       recallBlock,
     );
 
-    expect(capturedReq?.stream).toBe(true);
+    expect(capturedReq).not.toBeNull();
+    expect(capturedReq!.stream).toBe(true);
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.reader).toBeDefined();
@@ -727,7 +728,8 @@ describe("runRecallFollowUpJSON", () => {
       recallBlock,
     );
 
-    expect(capturedReq?.stream).toBe(false);
+    expect(capturedReq).not.toBeNull();
+    expect(capturedReq!.stream).toBe(false);
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.continuation).toBe(fakeGatewayResponse);
