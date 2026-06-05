@@ -1,13 +1,13 @@
 /**
  * Vendored model registration for the standalone Lore binary.
  *
- * The Bun-compiled `lore` binary bundles `@huggingface/transformers`
- * (which includes ONNX Runtime) into the executable. The model weights
- * and tokenizer files (nomic-embed-text-v1.5, INT8 quantized) are
- * embedded as Bun assets and extracted to a cache dir on first run.
+ * The fossilize-built `lore` binary bundles `@huggingface/transformers`
+ * (which includes onnxruntime-web) into the executable. The model
+ * weights and tokenizer files (nomic-embed-text-v1.5, INT8 quantized)
+ * are embedded as SEA assets and extracted to a cache dir on first run.
  *
- * The binary's wrapper sets `globalThis.__LORE_VENDOR_MODEL__` to the
- * extraction path. This module exposes that registration to the
+ * The binary's sea-entry.ts sets `globalThis.__LORE_VENDOR_MODEL__` to
+ * the extraction path. This module exposes that registration to the
  * `LocalProvider` so it can configure the transformers.js `env` to
  * load from the local path instead of downloading from HuggingFace Hub.
  *

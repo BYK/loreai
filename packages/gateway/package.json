@@ -23,6 +23,7 @@
     "build": "bun run script/build.ts",
     "bundle": "bun run script/bundle.ts",
     "build:binary": "bun run script/build.ts --binary",
+    "build:binary:sea": "bun run script/build-binary-sea.ts",
     "start": "bun run src/index.ts"
   },
   "dependencies": {
@@ -61,6 +62,6 @@
   "devDependencies": {
     "@loreai/core": "workspace:*",
     "@sentry/bun": "^10.52.0",
-    "binpunch": "^1.0.0"
+    "fossilize": "^0.8.1"
   }
 }

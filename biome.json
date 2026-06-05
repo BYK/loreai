@@ -15,6 +15,7 @@
       "!**/dist-bin",
       "!**/dist-tarballs",
       "!**/dist-vendor",
+      "!**/.sea-staging",
       "!**/.vendor-build",
       "!**/*.d.ts",
       "!**/eval/data",

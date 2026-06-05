@@ -81,13 +81,23 @@ const isDev = VERSION === "dev";
 // SENTRY_ENABLED — Bun's [test.env] does not override an inherited env var. A
 // test process must never ship telemetry, so NODE_ENV==="test" is a hard off.
 const isTestRunner = process.env.NODE_ENV === "test";
+// Worker threads spawned by the fossilize binary (via
+// `new Worker(workerFilePath, { workerData })`) must not initialize
+// Sentry — the main thread owns the transport, and a worker-side
+// transport would race on globalThis.fetch and produce duplicate
+// Sentry events. Workers are CJS files spawned from the binary's
+// own bundle, so they don't carry a flag — instead we detect
+// "no parent (i.e. main thread)" by checking isMainThread.
+import { isMainThread } from "node:worker_threads";
 const sentryEnabled = isTestRunner
   ? false
-  : sentryEnvVar === "1"
-    ? true
-    : sentryEnvVar === "0"
-      ? false
-      : !isDev;
+  : isMainThread
+    ? sentryEnvVar === "1"
+      ? true
+      : sentryEnvVar === "0"
+        ? false
+        : !isDev
+    : false;
 
 if (sentryEnabled && !Sentry.isInitialized()) {
   // Transient network errors that are expected in a long-running LLM proxy.

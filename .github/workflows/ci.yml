@@ -205,6 +205,16 @@ jobs:
       # -----------------------------------------------------------------
       # CLI: standalone binary build + smoke test
       # -----------------------------------------------------------------
+
+      # Cache fossilize's downloaded Node.js binaries so we don't
+      # re-download ~200 MB per platform on every CI run.
+      - name: Cache fossilize Node binaries
+        id: fossilize-cache
+        uses: actions/cache@v5
+        with:
+          path: .node-cache
+          key: fossilize-${{ hashFiles('packages/gateway/script/build-binary-sea.ts') }}
+
       - name: Set nightly version
         # Inject the nightly version into package.json before building
         # so it gets baked into the binary via esbuild define.
@@ -216,9 +226,10 @@ jobs:
 
       # Vendor staging populated by the cache restore + fallback steps above.
       - name: Build linux-x64 binary
-        run: bun run --filter '@loreai/gateway' build:binary
+        run: bun run --filter '@loreai/gateway' build:binary:sea -- --platforms linux-x64
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          FOSSILIZE_CACHE_DIR: ${{ github.workspace }}/.node-cache
 
       - name: Smoke-test standalone binary
         run: |
@@ -309,22 +320,18 @@ jobs:
       # exists even when the test-job's build:binary call was skipped on
       # PR runs. No additional vendor step needed here.
 
-      # Build standalone binaries for all supported platforms and gzip them.
-      # The linux-x64 binary was already built above; rebuild with --release
-      # to get the gzip artifact.
       - name: Build release binaries (all platforms)
         if: startsWith(github.ref, 'refs/heads/release/')
         run: |
           rm -rf packages/gateway/dist-bin
-          targets="darwin-arm64 linux-arm64 linux-x64 windows-x64"
-          for target in $targets; do
-            echo "=== Building $target ==="
-            bun run --filter '@loreai/gateway' build:binary -- --target "$target" --release
-          done
+          bun run --filter '@loreai/gateway' build:binary:sea -- \
+            --platforms "darwin-arm64,linux-arm64,linux-x64,windows-x64" \
+            --release
           echo "--- Release binaries: ---"
           ls -la packages/gateway/dist-bin/
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          FOSSILIZE_CACHE_DIR: ${{ github.workspace }}/.node-cache
 
       - name: Upload tarballs
         if: startsWith(github.ref, 'refs/heads/release/')
@@ -399,8 +406,18 @@ jobs:
         if: steps.vendor-cache.outputs.cache-hit != 'true'
         run: bun run packages/gateway/script/vendor-embeddings.ts
 
+      # Cache fossilize's downloaded Node.js binary for the current platform.
+      - name: Cache fossilize Node binaries
+        id: fossilize-cache
+        uses: actions/cache@v5
+        with:
+          path: .node-cache
+          key: fossilize-${{ matrix.target }}-${{ hashFiles('packages/gateway/script/build-binary-sea.ts') }}
+
       - name: Build ${{ matrix.target }} binary
-        run: bun run --filter '@loreai/gateway' build:binary -- --target ${{ matrix.target }}
+        run: bun run --filter '@loreai/gateway' build:binary:sea -- --platforms ${{ matrix.target }}
+        env:
+          FOSSILIZE_CACHE_DIR: ${{ github.workspace }}/.node-cache
 
       # End-to-end smoke. The native runner can actually execute its own
       # binary, catching runtime failures that the linux-x64 job can't.
@@ -457,17 +474,25 @@ jobs:
         if: steps.vendor-cache.outputs.cache-hit != 'true'
         run: bun run packages/gateway/script/vendor-embeddings.ts
 
+      # Cache fossilize's downloaded Node.js binaries (~200 MB across 4
+      # platforms) so nightly builds don't re-download on every run.
+      - name: Cache fossilize Node binaries
+        id: fossilize-cache
+        uses: actions/cache@v5
+        with:
+          path: .node-cache
+          key: fossilize-${{ hashFiles('packages/gateway/script/build-binary-sea.ts') }}
+
       - name: Build all platform binaries
         run: |
-          targets="darwin-arm64 linux-arm64 linux-x64 windows-x64"
-          for target in $targets; do
-            echo "=== Building $target ==="
-            bun run --filter '@loreai/gateway' build:binary -- --target "$target" --release
-          done
+          bun run --filter '@loreai/gateway' build:binary:sea -- \
+            --platforms "darwin-arm64,linux-arm64,linux-x64,windows-x64" \
+            --release
           echo "--- Nightly binaries: ---"
           ls -la packages/gateway/dist-bin/
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          FOSSILIZE_CACHE_DIR: ${{ github.workspace }}/.node-cache
 
       - name: Upload compressed artifacts
         uses: actions/upload-artifact@v7

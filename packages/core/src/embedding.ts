@@ -288,33 +288,44 @@ class LocalProvider implements EmbeddingProvider {
 
       const { Worker } = await import("node:worker_threads");
 
-      // Resolve the worker script path.
+      // Resolve how to spawn the worker.
       //
-      // In vendored binary mode: the compiled binary's wrapper.ts detects
-      // `!isMainThread` and runs the embedding worker code path. We spawn
-      // the Worker with the wrapper's own `import.meta.url` (registered as
-      // __LORE_VENDOR_WORKER_URL__). This avoids needing a separate worker
-      // entrypoint — Bun's --compile silently drops additional entrypoints
-      // on macOS and Windows.
+      // In fossilize SEA binary mode: the binary's sea-entry.ts reads
+      // the worker source from the SEA asset and exposes it via
+      // `globalThis.__LORE_WORKER_SOURCE__`. We pass it to
+      // `new Worker(code, { eval: true, filename, workerData })`.
+      // The `filename` option sets `__filename` inside the worker to
+      // an absolute path, so the post-processing patch that replaces
+      // `createRequire(shim.url)` with
+      // `createRequire(pathToFileURL(__filename).href)` resolves
+      // correctly. No file is written to disk — the filename is
+      // purely virtual.
       //
-      // In dev (Bun running .ts directly): embedding-worker.ts
-      // In dist (esbuild bundle): embedding-worker.js
-      const vendorWorkerUrl = (globalThis as Record<string, unknown>)
-        .__LORE_VENDOR_WORKER_URL__ as string | undefined;
-      let workerUrl: string | URL;
-      if (vendorWorkerUrl) {
-        if (process.platform === "win32") {
-          workerUrl = decodeURIComponent(new URL(vendorWorkerUrl).pathname);
-          if (/^\/[A-Za-z]:/.test(workerUrl)) {
-            workerUrl = workerUrl.slice(1);
-          }
-        } else {
-          workerUrl = vendorWorkerUrl;
-        }
+      // In CJS bundles (gateway npm package) and dev: use the sibling
+      // embedding-worker.{cjs,js,ts} file as the worker entrypoint.
+      const workerSource = (globalThis as Record<string, unknown>)
+        .__LORE_WORKER_SOURCE__ as string | undefined;
+      const vendor = vendorModelInfo();
+      const workerInitData: WorkerInitData = {
+        modelId: this.modelId,
+        dimensions: this.dimensions,
+        vendorModel: vendor ? { localModelPath: vendor.localModelPath } : null,
+      };
+
+      if (workerSource !== undefined) {
+        const { join } = await import("node:path");
+        const { homedir } = await import("node:os");
+        this.worker = new (Worker as new (...args: unknown[]) => Worker)(
+          workerSource,
+          {
+            eval: true,
+            filename: join(homedir(), ".cache", "lore", "worker.cjs"),
+            workerData: workerInitData,
+          },
+        );
       } else {
-        // In CJS bundles (gateway npm package), esbuild shims import.meta as
-        // an empty object {}, so import.meta.url is undefined. Fall back to
-        // __filename which esbuild defines in CJS output.
+        // npm bundle / dev path: point at a sibling worker file.
+        let workerUrl: string | URL;
         const selfUrl =
           typeof import.meta.url === "string" ? import.meta.url : undefined;
         if (selfUrl) {
@@ -323,24 +334,16 @@ class LocalProvider implements EmbeddingProvider {
             selfUrl,
           );
         } else {
-          // CJS fallback: __filename is defined by esbuild's CJS output.
-          // The embedding-worker.cjs is built alongside the main bundle.
           const { pathToFileURL } = await import("node:url");
           workerUrl = new URL(
             "./embedding-worker.cjs",
             pathToFileURL(__filename),
           );
         }
+        this.worker = new Worker(workerUrl, {
+          workerData: workerInitData,
+        });
       }
-
-      const vendor = vendorModelInfo();
-      const workerInitData: WorkerInitData = {
-        modelId: this.modelId,
-        dimensions: this.dimensions,
-        vendorModel: vendor ? { localModelPath: vendor.localModelPath } : null,
-      };
-
-      this.worker = new Worker(workerUrl, { workerData: workerInitData });
 
       // Don't let the worker prevent process exit.
       this.worker.unref();

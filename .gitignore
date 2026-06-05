@@ -4,6 +4,8 @@ dist-bin/
 dist-tarballs/
 .vendor-build/
 dist-vendor/
+.sea-staging/
+.node-cache/
 local_cache/
 *.tgz
 *.db
