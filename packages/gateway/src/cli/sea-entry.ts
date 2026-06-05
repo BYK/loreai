@@ -25,11 +25,7 @@
  */
 import { homedir } from "node:os";
 import { join } from "node:path";
-import {
-  existsSync,
-  mkdirSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 
 const VERSION = LORE_CLI_VERSION;
 

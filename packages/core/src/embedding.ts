@@ -315,11 +315,14 @@ class LocalProvider implements EmbeddingProvider {
       if (workerSource !== undefined) {
         const { join } = await import("node:path");
         const { homedir } = await import("node:os");
-        // Use a local variable so TypeScript's control flow analysis
-        // can narrow the type — assigned in both branches below.
         this.worker = new Worker(
           workerSource,
-          { eval: true, filename: join(homedir(), ".cache", "lore", "worker.cjs"), workerData: workerInitData } as any,
+          // biome-ignore lint/suspicious/noExplicitAny: filename is a valid Worker option but missing from TS types
+          {
+            eval: true,
+            filename: join(homedir(), ".cache", "lore", "worker.cjs"),
+            workerData: workerInitData,
+          } as any,
         );
       } else {
         // npm bundle / dev path: point at a sibling worker file.
