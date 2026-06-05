@@ -25,6 +25,7 @@ import {
   type AnthropicUsage,
 } from "./sentry";
 import { recordWorkerCost } from "./cost-tracker";
+import { upstreamFetch } from "./fetch";
 
 // ---------------------------------------------------------------------------
 // Worker call tracking
@@ -448,7 +449,7 @@ export function createGatewayLLMClient(
             for (let attempt = 0; ; attempt++) {
               let response: Response;
               try {
-                response = await fetch(req.url, {
+                response = await upstreamFetch(req.url, {
                   method: "POST",
                   headers: req.headers,
                   // opts.thinking is intentionally not forwarded — this bare API

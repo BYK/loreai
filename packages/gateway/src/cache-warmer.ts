@@ -42,6 +42,7 @@ import { resignBody } from "./cch";
 import { resolveUpstreamRoute } from "./config";
 import { getModelEntrySync } from "./worker-model";
 import { recordWarmupCost } from "./cost-tracker";
+import { upstreamFetch } from "./fetch";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1373,7 +1374,7 @@ export async function executeWarmup(
   );
 
   try {
-    const response = await fetch(profile.upstreamUrl, {
+    const response = await upstreamFetch(profile.upstreamUrl, {
       method: "POST",
       headers,
       body: signedBody,

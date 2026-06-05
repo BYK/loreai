@@ -216,6 +216,7 @@ import {
   replaceRecallWithMarker,
   isRecallMarker,
 } from "./recall";
+import { upstreamFetch } from "./fetch";
 
 // ---------------------------------------------------------------------------
 // Module state
@@ -1745,7 +1746,7 @@ async function forwardToUpstream(
       req.model,
       req.stream,
       () =>
-        fetch(url, {
+        upstreamFetch(url, {
           method: "POST",
           headers,
           body: serializedBody,
@@ -1754,7 +1755,7 @@ async function forwardToUpstream(
     return { response, serializedBody, effectiveProtocol };
   }
 
-  const response = await fetch(url, {
+  const response = await upstreamFetch(url, {
     method: "POST",
     headers,
     body: serializedBody,
@@ -3501,7 +3502,7 @@ async function passthroughResponsesCompact(
   if (openAiBeta) headers["openai-beta"] = openAiBeta;
 
   try {
-    const upstream = await fetch(upstreamUrl, {
+    const upstream = await upstreamFetch(upstreamUrl, {
       method: "POST",
       headers,
       body: bodyText,

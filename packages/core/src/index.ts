@@ -174,6 +174,7 @@ export { workerSessionIDs, isWorkerSession } from "./worker";
 export { distillLimiter, curatorLimiter } from "./session-limiter";
 export {
   installFetchInterceptor,
+  getOriginalFetch,
   shouldIntercept,
   type FetchInterceptorConfig,
 } from "./fetch-interceptor";

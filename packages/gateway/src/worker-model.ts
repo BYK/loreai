@@ -10,6 +10,7 @@
 
 import { workerModel, config as loreConfig, log } from "@loreai/core";
 import type { ProviderRoute } from "./config";
+import { upstreamFetch } from "./fetch";
 
 // ---------------------------------------------------------------------------
 // Cost lookup — models.dev
@@ -166,7 +167,7 @@ export function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10_000);
 
-      const response = await fetch(MODELS_DEV_API, {
+      const response = await upstreamFetch(MODELS_DEV_API, {
         signal: controller.signal,
       });
       clearTimeout(timeout);

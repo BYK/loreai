@@ -76,10 +76,34 @@ export function shouldIntercept(url: string, gatewayBase: string): boolean {
  *
  * Returns a cleanup function that restores the original `globalThis.fetch`.
  */
+/**
+ * The original `globalThis.fetch` captured before any interceptor was
+ * installed. The gateway (which may run in the same process) must use
+ * this for its own upstream calls to avoid being intercepted in a loop.
+ *
+ * Null until `installFetchInterceptor()` is called.
+ */
+let _originalFetch: typeof globalThis.fetch | null = null;
+
+/**
+ * Return the original, un-intercepted `fetch` function.
+ *
+ * When the gateway runs in-process alongside the plugin, it shares
+ * `globalThis.fetch` — which the interceptor patches. The gateway must
+ * use this function for its own upstream calls to avoid being caught by
+ * the interceptor in an infinite loop.
+ *
+ * Returns `globalThis.fetch` if no interceptor has been installed.
+ */
+export function getOriginalFetch(): typeof globalThis.fetch {
+  return _originalFetch ?? globalThis.fetch;
+}
+
 export function installFetchInterceptor(
   config: FetchInterceptorConfig,
 ): () => void {
-  const originalFetch = globalThis.fetch;
+  _originalFetch = globalThis.fetch;
+  const originalFetch = _originalFetch;
 
   const interceptor = async (
     input: RequestInfo | URL,
@@ -142,5 +166,6 @@ export function installFetchInterceptor(
   // Return cleanup function that restores the original fetch
   return () => {
     globalThis.fetch = originalFetch;
+    _originalFetch = null;
   };
 }

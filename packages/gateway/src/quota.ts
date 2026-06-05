@@ -30,6 +30,7 @@ import { authFingerprint, resolveAuth } from "./auth";
 import { runBackground } from "./background-limiter";
 import { isClaudeCodeOAuthSession, buildOAuthWorkerHeaders } from "./cch";
 import { parseRetryAfter } from "./llm-adapter";
+import { upstreamFetch } from "./fetch";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -207,7 +208,7 @@ export async function fetchOAuthQuotaSnapshot(
     // turns. Anthropic's OAuth endpoints validate the client fingerprint and
     // can 403 a request that lacks a recognizable Claude Code user-agent.
     const ccHeaders = sessionID ? buildOAuthWorkerHeaders(sessionID) : null;
-    const response = await fetch(QUOTA_URL, {
+    const response = await upstreamFetch(QUOTA_URL, {
       method: "GET",
       headers: {
         Authorization: `Bearer ${cred.value}`,

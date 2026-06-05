@@ -32,6 +32,7 @@ import {
   handleResponsesCompactEndpoint,
   accumulateResponsesNonStreamJSON,
 } from "./pipeline";
+import { upstreamFetch } from "./fetch";
 
 // ---------------------------------------------------------------------------
 // Version — best-effort from package.json, falls back gracefully
@@ -195,9 +196,12 @@ async function handleModelsPassthrough(
     const anthropicVersion = req.headers.get("anthropic-version");
     if (anthropicVersion) headers["anthropic-version"] = anthropicVersion;
 
-    const upstream = await fetch(`${config.upstreamAnthropic}/v1/models`, {
-      headers,
-    });
+    const upstream = await upstreamFetch(
+      `${config.upstreamAnthropic}/v1/models`,
+      {
+        headers,
+      },
+    );
     // Clone to a new Response so we can append CORS headers
     const response = new Response(upstream.body, {
       status: upstream.status,

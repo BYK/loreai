@@ -36,6 +36,7 @@ import {
 } from "./sentry";
 import { recordWorkerCost } from "./cost-tracker";
 import { normalizeOpenAIUsage } from "./llm-adapter";
+import { upstreamFetch } from "./fetch";
 
 // ---------------------------------------------------------------------------
 // BatchProvider strategy interface
@@ -207,7 +208,7 @@ export function createAnthropicBatchProvider(
       }));
 
       const url = `${baseUrl}/v1/messages/batches`;
-      const response = await fetch(url, {
+      const response = await upstreamFetch(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -241,7 +242,7 @@ export function createAnthropicBatchProvider(
 
     async poll(auth, batchId) {
       const url = `${baseUrl}/v1/messages/batches/${batchId}`;
-      const response = await fetch(url, {
+      const response = await upstreamFetch(url, {
         headers: {
           "anthropic-version": "2023-06-01",
           ...authHeaders(auth),
@@ -265,7 +266,7 @@ export function createAnthropicBatchProvider(
       // Batch is done — retrieve results
       const resultsUrl =
         data.results_url ?? `${baseUrl}/v1/messages/batches/${batchId}/results`;
-      const resultsResponse = await fetch(resultsUrl, {
+      const resultsResponse = await upstreamFetch(resultsUrl, {
         headers: {
           "anthropic-version": "2023-06-01",
           ...authHeaders(auth),
@@ -355,7 +356,7 @@ async function uploadOpenAIBatchFile(
     "batch.jsonl",
   );
 
-  const response = await fetch(`${baseUrl}/v1/files`, {
+  const response = await upstreamFetch(`${baseUrl}/v1/files`, {
     method: "POST",
     headers: authHeaders(auth), // No Content-Type — FormData sets it with boundary
     body: formData,
@@ -392,9 +393,12 @@ async function downloadOpenAIResults(
   auth: AuthCredential,
   fileId: string,
 ): Promise<BatchResult[]> {
-  const response = await fetch(`${baseUrl}/v1/files/${fileId}/content`, {
-    headers: authHeaders(auth),
-  });
+  const response = await upstreamFetch(
+    `${baseUrl}/v1/files/${fileId}/content`,
+    {
+      headers: authHeaders(auth),
+    },
+  );
   if (!response.ok) {
     log.error(`openai results download failed: ${response.status}`);
     return [];
@@ -514,7 +518,7 @@ export function createOpenAIBatchProvider(upstreamUrl: string): BatchProvider {
         return fileId;
 
       // 3. Create batch
-      const response = await fetch(`${baseUrl}/v1/batches`, {
+      const response = await upstreamFetch(`${baseUrl}/v1/batches`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -550,7 +554,7 @@ export function createOpenAIBatchProvider(upstreamUrl: string): BatchProvider {
     },
 
     async poll(auth, batchId) {
-      const response = await fetch(`${baseUrl}/v1/batches/${batchId}`, {
+      const response = await upstreamFetch(`${baseUrl}/v1/batches/${batchId}`, {
         headers: authHeaders(auth),
       });
 
