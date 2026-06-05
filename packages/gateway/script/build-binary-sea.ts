@@ -558,6 +558,14 @@ async function buildBinary() {
   // -------------------------------------------------------------------------
   // Step 4: Run fossilize
   // -------------------------------------------------------------------------
+  // fossilize uses Node.js archive naming which differs from our
+  // VALID_TARGETS on some platforms:
+  //   our "windows-x64"  → fossilize "win-x64"
+  //   our "darwin-arm64" → fossilize "darwin-arm64" (same)
+  //   our "linux-x64"    → fossilize "linux-x64" (same)
+  const fossilizeTarget = (t: CompileTarget): string =>
+    t.startsWith("windows") ? t.replace("windows", "win") : t;
+  const platformArgs = targets.map(fossilizeTarget).join(",");
   const fossilizeBin = "npx";
   const fossilizeArgs: string[] = [
     "--yes",
