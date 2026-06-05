@@ -9,6 +9,7 @@
  */
 
 import { workerModel, config as loreConfig, log } from "@loreai/core";
+import type { ProviderRoute } from "./config";
 
 // ---------------------------------------------------------------------------
 // Cost lookup — models.dev
@@ -25,6 +26,8 @@ const MODELS_DEV_API = "https://models.dev/api.json";
 
 /** Cached models.dev data: model entries for all supported providers. */
 let cachedModelData: Map<string, ModelsDevEntry> | null = null;
+/** Cached provider routing data extracted from the models.dev response. */
+let cachedProviderRoutes: Map<string, ProviderRoute> | null = null;
 let cachedModelDataAt = 0;
 let inflightFetch: Promise<Map<string, ModelsDevEntry>> | null = null;
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -47,6 +50,9 @@ export type ModelsDevEntry = {
 /** Shape of the models.dev JSON API response (subset we care about). */
 type ModelsDevResponse = {
   [provider: string]: {
+    id?: string;
+    api?: string;
+    npm?: string;
     models?: { [modelId: string]: ModelsDevEntry };
   };
 };
@@ -192,6 +198,22 @@ export function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
         }
       }
 
+      // Extract provider routing data from the full response.
+      // Each provider entry may have `api` (base URL) and `npm` (SDK package).
+      const providerRoutes = new Map<string, ProviderRoute>();
+      for (const [providerID, providerData] of Object.entries(data)) {
+        if (!providerData || typeof providerData !== "object") continue;
+        const api = providerData.api;
+        const npm = providerData.npm;
+        if (!api || typeof api !== "string") continue;
+        // Derive protocol from npm package name.
+        const protocol = npmToProtocol(npm);
+        // Strip trailing /v1 — gateway appends /v1/messages or /v1/chat/completions.
+        const url = api.replace(/\/v1\/?$/, "");
+        providerRoutes.set(providerID, { url, protocol });
+      }
+      cachedProviderRoutes = providerRoutes;
+
       cachedModelData = modelData;
       cachedModelDataAt = Date.now();
 
@@ -208,6 +230,41 @@ export function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
   })();
 
   return inflightFetch;
+}
+
+/**
+ * Derive the wire protocol from the models.dev `npm` package name.
+ *
+ * - `@ai-sdk/anthropic` → "anthropic"
+ * - `@ai-sdk/openai` → "openai-responses"
+ * - everything else (including `@ai-sdk/openai-compatible`) → "openai"
+ */
+function npmToProtocol(
+  npm: string | undefined,
+): "anthropic" | "openai" | "openai-responses" {
+  if (!npm) return "openai";
+  if (npm === "@ai-sdk/anthropic") return "anthropic";
+  if (npm === "@ai-sdk/openai") return "openai-responses";
+  return "openai";
+}
+
+/**
+ * Dynamically look up a provider route from the models.dev API cache.
+ *
+ * Called as a fallback when `resolveProviderRoute()` (static table) returns
+ * null. Triggers a models.dev fetch if the cache is stale, but never blocks
+ * on a fresh network call — returns null if no cached data is available.
+ */
+export async function lookupProviderRoute(
+  providerID: string,
+): Promise<ProviderRoute | null> {
+  // If we have fresh cached routes, use them directly (no network call).
+  if (cachedProviderRoutes && Date.now() - cachedModelDataAt < CACHE_TTL_MS) {
+    return cachedProviderRoutes.get(providerID) ?? null;
+  }
+  // Trigger a fetch (deduped + cached) — this also populates cachedProviderRoutes.
+  await fetchModelData();
+  return cachedProviderRoutes?.get(providerID) ?? null;
 }
 
 /**
@@ -267,6 +324,7 @@ export function getModelEntrySync(modelID: string): ModelsDevEntry {
 /** Clear cached data (for testing). */
 export function clearModelDataCache(): void {
   cachedModelData = null;
+  cachedProviderRoutes = null;
   cachedModelDataAt = 0;
   inflightFetch = null;
 }

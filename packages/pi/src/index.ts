@@ -62,6 +62,9 @@ const ANTHROPIC_PROVIDERS = [
   "anthropic",
   "fireworks",
   "github-copilot",
+  "minimax",
+  "minimax-cn",
+  "kimi-coding",
 ] as const;
 
 /** OpenAI-completions / OpenAI-responses API → gateway POST /v1/chat/completions or /v1/responses */
@@ -74,9 +77,6 @@ const OPENAI_PROVIDERS = [
   "openrouter",
   "huggingface",
   "zai",
-  "minimax",
-  "minimax-cn",
-  "kimi-coding",
   "vercel-ai-gateway",
   // openai-responses API
   "openai",
@@ -279,7 +279,12 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
     const anthropicSet: ReadonlySet<string> = new Set(ANTHROPIC_PROVIDERS);
 
     for (const provider of GATEWAY_PROVIDERS) {
-      const headers = { ...baseHeaders };
+      const headers: Record<string, string> = {
+        ...baseHeaders,
+        // Inject provider ID so the gateway uses provider-based routing
+        // (correct protocol + upstream URL) instead of model-prefix guessing.
+        "x-lore-provider": provider,
+      };
       // For local/custom providers, inject the original upstream URL so the
       // gateway can forward requests to the correct endpoint. The user sets
       // LORE_UPSTREAM_<PROVIDER>=<url> in their environment.

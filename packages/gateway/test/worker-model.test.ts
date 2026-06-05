@@ -276,6 +276,141 @@ describe("fetchModelData", () => {
 });
 
 // ---------------------------------------------------------------------------
+// lookupProviderRoute (dynamic models.dev fallback)
+// ---------------------------------------------------------------------------
+
+describe("lookupProviderRoute", () => {
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    clearModelDataCache();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    resetWorkerModelState();
+  });
+
+  test("resolves anthropic-protocol provider from models.dev", async () => {
+    globalThis.fetch = mock(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            anthropic: { models: {} },
+            "some-new-provider": {
+              id: "some-new-provider",
+              api: "https://api.newprovider.com/anthropic/v1",
+              npm: "@ai-sdk/anthropic",
+              models: {},
+            },
+          }),
+          { status: 200 },
+        ),
+      ),
+    ) as unknown as typeof fetch;
+
+    const { lookupProviderRoute } = await import("../src/worker-model");
+    const route = await lookupProviderRoute("some-new-provider");
+    expect(route).toEqual({
+      url: "https://api.newprovider.com/anthropic",
+      protocol: "anthropic",
+    });
+  });
+
+  test("resolves openai-compatible provider from models.dev", async () => {
+    globalThis.fetch = mock(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            anthropic: { models: {} },
+            "custom-openai": {
+              id: "custom-openai",
+              api: "https://api.custom.com/v1",
+              npm: "@ai-sdk/openai-compatible",
+              models: {},
+            },
+          }),
+          { status: 200 },
+        ),
+      ),
+    ) as unknown as typeof fetch;
+
+    const { lookupProviderRoute } = await import("../src/worker-model");
+    const route = await lookupProviderRoute("custom-openai");
+    expect(route).toEqual({
+      url: "https://api.custom.com",
+      protocol: "openai",
+    });
+  });
+
+  test("resolves openai-responses provider from models.dev", async () => {
+    globalThis.fetch = mock(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            anthropic: { models: {} },
+            "openai-like": {
+              id: "openai-like",
+              api: "https://api.openailike.com/v1",
+              npm: "@ai-sdk/openai",
+              models: {},
+            },
+          }),
+          { status: 200 },
+        ),
+      ),
+    ) as unknown as typeof fetch;
+
+    const { lookupProviderRoute } = await import("../src/worker-model");
+    const route = await lookupProviderRoute("openai-like");
+    expect(route).toEqual({
+      url: "https://api.openailike.com",
+      protocol: "openai-responses",
+    });
+  });
+
+  test("returns null for provider without api field", async () => {
+    globalThis.fetch = mock(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            anthropic: {
+              id: "anthropic",
+              npm: "@ai-sdk/anthropic",
+              models: {},
+            },
+          }),
+          { status: 200 },
+        ),
+      ),
+    ) as unknown as typeof fetch;
+
+    const { lookupProviderRoute } = await import("../src/worker-model");
+    const route = await lookupProviderRoute("anthropic");
+    // anthropic in models.dev has no `api` field — SDK handles routing
+    expect(route).toBeNull();
+  });
+
+  test("returns null for unknown provider", async () => {
+    globalThis.fetch = mock(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            anthropic: { models: {} },
+          }),
+          { status: 200 },
+        ),
+      ),
+    ) as unknown as typeof fetch;
+
+    const { lookupProviderRoute } = await import("../src/worker-model");
+    const route = await lookupProviderRoute("nonexistent");
+    expect(route).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // getModelEntry (async)
 // ---------------------------------------------------------------------------
 

@@ -215,6 +215,11 @@ export const LorePlugin: Plugin = async (ctx) => {
   // chat.headers call). Avoids spawning `git remote -v` on every turn.
   let cachedGitRemote: string | undefined;
 
+  // Capture original provider baseURLs before overwriting them with the
+  // gateway URL. Used as a fallback X-Lore-Upstream-URL for providers not
+  // yet in the gateway's PROVIDER_ROUTES table.
+  const originalBaseURLs = new Map<string, string>();
+
   try {
     const hooks: Hooks = {
       // Disable built-in compaction (gateway handles it), register hidden
@@ -247,6 +252,11 @@ export const LorePlugin: Plugin = async (ctx) => {
             p[providerID] ??= {};
             const entry = p[providerID];
             entry.options ??= {};
+            // Capture original baseURL before overwriting — used as fallback
+            // X-Lore-Upstream-URL for providers not in gateway PROVIDER_ROUTES.
+            if (entry.options.baseURL) {
+              originalBaseURLs.set(providerID, entry.options.baseURL);
+            }
             entry.options.baseURL = `${gatewayBase}/v1`;
           }
         }
@@ -280,14 +290,25 @@ export const LorePlugin: Plugin = async (ctx) => {
         if (cachedGitRemote) {
           output.headers["x-lore-git-remote"] = cachedGitRemote;
         }
-        // Inject upstream URL for local/custom providers (LORE_UPSTREAM_<PROVIDER>).
-        // input.provider is a ProviderContext { source, info: Provider, options }.
+        // Inject provider ID so the gateway uses provider-based routing
+        // (correct protocol + upstream URL) instead of model-prefix guessing.
+        // Also inject upstream URL override: explicit env var takes priority,
+        // then the original provider baseURL captured before gateway redirect.
         const providerID = input.provider?.info?.id;
         if (providerID) {
+          output.headers["x-lore-provider"] = providerID;
           const envKey = `LORE_UPSTREAM_${providerID.toUpperCase().replace(/-/g, "_")}`;
           const upstream = process.env[envKey];
           if (upstream) {
             output.headers["x-lore-upstream-url"] = upstream;
+          } else {
+            // Fallback: send the original provider baseURL so the gateway
+            // can forward to the correct endpoint even for providers not yet
+            // in its PROVIDER_ROUTES table.
+            const originalBase = originalBaseURLs.get(providerID);
+            if (originalBase) {
+              output.headers["x-lore-upstream-url"] = originalBase;
+            }
           }
         }
       },

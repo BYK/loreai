@@ -268,6 +268,134 @@ export function extractUpstreamUrlHeader(
 }
 
 // ---------------------------------------------------------------------------
+// Provider-ID-based routing
+// ---------------------------------------------------------------------------
+
+/**
+ * Route resolved from a provider ID header.
+ *
+ * `url` is null for providers that require user configuration via
+ * `LORE_UPSTREAM_<PROVIDER>` (local/self-hosted inference servers).
+ */
+export type ProviderRoute = {
+  url: string | null;
+  protocol: "anthropic" | "openai" | "openai-responses";
+};
+
+/**
+ * Provider ID → upstream routing table.
+ *
+ * Provider IDs match the keys used by the OpenCode and Pi plugins in their
+ * GATEWAY_PROVIDERS lists. When a request arrives with an `X-Lore-Provider`
+ * header, this table is consulted BEFORE the model-prefix UPSTREAM_ROUTES.
+ *
+ * URLs must NOT include `/v1` — the gateway appends `/v1/messages`,
+ * `/v1/chat/completions`, or `/v1/responses` itself.
+ *
+ * Data sourced from models.dev provider database (https://models.dev/providers).
+ * Protocol derived from the provider's SDK package: `@ai-sdk/anthropic` →
+ * "anthropic", `@ai-sdk/openai` / `@ai-sdk/openai-compatible` → "openai".
+ */
+const PROVIDER_ROUTES: Record<string, ProviderRoute> = {
+  // --- Anthropic protocol ---
+  anthropic: {
+    url: "https://api.anthropic.com",
+    protocol: "anthropic",
+  },
+  fireworks: {
+    url: "https://api.fireworks.ai/inference",
+    protocol: "anthropic",
+  },
+  "github-copilot": { url: null, protocol: "anthropic" },
+  minimax: {
+    url: "https://api.minimax.io/anthropic",
+    protocol: "anthropic",
+  },
+  "minimax-cn": {
+    url: "https://api.minimaxi.com/anthropic",
+    protocol: "anthropic",
+  },
+  "kimi-coding": {
+    url: "https://api.kimi.com/coding",
+    protocol: "anthropic",
+  },
+  // --- OpenAI protocol ---
+  deepseek: { url: "https://api.deepseek.com", protocol: "openai" },
+  xai: { url: "https://api.x.ai", protocol: "openai" },
+  groq: { url: "https://api.groq.com/openai", protocol: "openai" },
+  cerebras: { url: "https://api.cerebras.ai", protocol: "openai" },
+  openrouter: { url: "https://openrouter.ai/api", protocol: "openai" },
+  huggingface: {
+    url: "https://router.huggingface.co",
+    protocol: "openai",
+  },
+  zai: { url: null, protocol: "openai" }, // uses /v4 path — user sets LORE_UPSTREAM_ZAI
+  "vercel-ai-gateway": { url: null, protocol: "openai" },
+  // --- OpenAI Responses protocol ---
+  openai: {
+    url: "https://api.openai.com",
+    protocol: "openai-responses",
+  },
+  // --- SDK-routed providers (model-prefix fallback also works) ---
+  nvidia: {
+    url: "https://integrate.api.nvidia.com",
+    protocol: "openai",
+  },
+  mistral: { url: "https://api.mistral.ai", protocol: "openai" },
+  google: {
+    url: "https://generativelanguage.googleapis.com",
+    protocol: "openai",
+  },
+  // --- Local / self-hosted (url: null → user MUST set LORE_UPSTREAM_<PROVIDER>) ---
+  vllm: { url: null, protocol: "openai" },
+  llamacpp: { url: null, protocol: "openai" },
+  ollama: { url: null, protocol: "openai" },
+  lmstudio: { url: null, protocol: "openai" },
+  jan: { url: null, protocol: "openai" },
+  localai: { url: null, protocol: "openai" },
+  tgi: { url: null, protocol: "openai" },
+  tabbyml: { url: null, protocol: "openai" },
+  litellm: { url: null, protocol: "openai" },
+};
+
+/**
+ * Resolve upstream route by provider ID from the `X-Lore-Provider` header.
+ *
+ * Returns the provider route if found (url may be null for local providers),
+ * or null if the provider ID is not in the table.
+ */
+export function resolveProviderRoute(providerID: string): ProviderRoute | null {
+  return PROVIDER_ROUTES[providerID] ?? null;
+}
+
+/** Maximum allowed length for a provider ID header value. */
+const MAX_PROVIDER_ID_LENGTH = 64;
+
+/**
+ * Extract and validate the `X-Lore-Provider` header from a request.
+ *
+ * Returns the sanitized provider ID (lowercase, alphanumeric + hyphens only)
+ * or `undefined` when the header is absent or invalid.
+ */
+export function extractProviderHeader(
+  headers: Record<string, string>,
+): string | undefined {
+  const raw = headers["x-lore-provider"];
+  if (!raw) return undefined;
+
+  // Sanitize: strip control characters, trim, lowercase.
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional control-character sanitization
+  const cleaned = raw.replace(/[\x00-\x1f\x7f]/g, "");
+  const sanitized = cleaned.trim().toLowerCase();
+  if (!sanitized || sanitized.length > MAX_PROVIDER_ID_LENGTH) return undefined;
+
+  // Provider IDs are alphanumeric + hyphens only (e.g. "minimax-cn").
+  if (!/^[a-z0-9-]+$/.test(sanitized)) return undefined;
+
+  return sanitized;
+}
+
+// ---------------------------------------------------------------------------
 // Project path inference
 // ---------------------------------------------------------------------------
 

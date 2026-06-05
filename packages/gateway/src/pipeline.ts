@@ -76,6 +76,8 @@ import {
   extractGitRemoteHeader,
   resolveUpstreamRoute,
   extractUpstreamUrlHeader,
+  extractProviderHeader,
+  resolveProviderRoute,
   unattributedBucketPath,
   type ProjectPathResult,
 } from "./config";
@@ -147,6 +149,7 @@ import {
   resetWorkerModelState,
   fetchModelData,
   getModelEntrySync,
+  lookupProviderRoute,
 } from "./worker-model";
 import * as Sentry from "@sentry/bun";
 import {
@@ -1547,20 +1550,42 @@ async function forwardToUpstream(
   let headers: Record<string, string>;
   let body: unknown;
 
-  // Infer upstream from model name; fall back to protocol + env-var defaults.
+  // Resolve upstream URL and protocol via a four-tier priority chain:
+  //   1. X-Lore-Upstream-URL header  (explicit user override)
+  //   2. X-Lore-Provider header      (plugin identifies the provider)
+  //      a. Static PROVIDER_ROUTES table (fast, no network)
+  //      b. Dynamic models.dev lookup  (async, cached 1h, covers new providers)
+  //   3. Model prefix route           (fallback for bare agents like Claude Code)
+  //   4. Config defaults              (upstreamAnthropic / upstreamOpenAI)
   // Preserve "openai-responses" from ingress — model prefix routing returns
   // "openai" for OpenAI models, but we must not downgrade the wire protocol.
-  const route = resolveUpstreamRoute(req.model);
+  const headerUpstream = extractUpstreamUrlHeader(req.rawHeaders);
+  const providerID = extractProviderHeader(req.rawHeaders);
+  let providerRoute = providerID ? resolveProviderRoute(providerID) : null;
+  // Dynamic fallback: look up unknown providers from models.dev cache.
+  if (!providerRoute && providerID) {
+    providerRoute = await lookupProviderRoute(providerID);
+  }
+  const modelRoute = resolveUpstreamRoute(req.model);
+
+  // Only use provider route protocol when we also have a usable URL from it
+  // (either providerRoute.url or headerUpstream). When url is null (local/
+  // custom providers like vllm, github-copilot), the protocol should come
+  // from whichever tier actually provides the URL to avoid mismatches.
+  const providerRouteUsable =
+    providerRoute && (providerRoute.url != null || headerUpstream)
+      ? providerRoute
+      : null;
+
   const effectiveProtocol =
     req.protocol === "openai-responses"
       ? "openai-responses"
-      : (route?.protocol ?? req.protocol);
-  // Priority chain: model prefix route (known cloud) > header-provided URL
-  // (local/custom providers like vllm, ollama) > env-var default (fallback).
-  const headerUpstream = extractUpstreamUrlHeader(req.rawHeaders);
+      : (providerRouteUsable?.protocol ?? modelRoute?.protocol ?? req.protocol);
+
   const effectiveUpstreamBase =
-    route?.url ??
     headerUpstream ??
+    providerRoute?.url ??
+    modelRoute?.url ??
     (effectiveProtocol === "anthropic"
       ? config.upstreamAnthropic
       : config.upstreamOpenAI);
@@ -2696,10 +2721,15 @@ function postResponse(
     }
     // Track model/protocol/beta for warmup profile resolution
     sessionState.lastModel = req.model;
+    // Use provider-aware protocol resolution: provider route > model prefix > fallback.
+    const lpProvider = extractProviderHeader(req.rawHeaders);
+    const lpRoute = lpProvider ? resolveProviderRoute(lpProvider) : null;
     sessionState.lastProtocol =
       req.protocol === "openai-responses"
         ? "openai-responses"
-        : (resolveUpstreamRoute(req.model)?.protocol ?? "anthropic");
+        : (lpRoute?.protocol ??
+          resolveUpstreamRoute(req.model)?.protocol ??
+          "anthropic");
     // Capture anthropic-beta so cache-warmer can forward it — beta-gated
     // body fields (e.g. context_management) need the header to be accepted.
     // Always update (including clearing) so a stale header isn't forwarded
@@ -3620,11 +3650,21 @@ async function handleConversationTurn(
     authFingerprint: cred ? authFingerprint(cred) : null,
     sessionID,
     model: req.model,
-    upstreamUrl:
-      resolveUpstreamRoute(req.model)?.url ??
-      (req.protocol === "anthropic"
-        ? config.upstreamAnthropic
-        : config.upstreamOpenAI),
+    upstreamUrl: (() => {
+      const hdrUp = extractUpstreamUrlHeader(req.rawHeaders);
+      if (hdrUp) return hdrUp;
+      const pid = extractProviderHeader(req.rawHeaders);
+      if (pid) {
+        const pr = resolveProviderRoute(pid);
+        if (pr?.url) return pr.url;
+      }
+      return (
+        resolveUpstreamRoute(req.model)?.url ??
+        (req.protocol === "anthropic"
+          ? config.upstreamAnthropic
+          : config.upstreamOpenAI)
+      );
+    })(),
     port: config.port,
     projectPath,
   });
@@ -4231,10 +4271,16 @@ async function handleConversationTurn(
     attributes: {
       "gen_ai.operation.name": "chat",
       "gen_ai.request.model": req.model,
-      "gen_ai.provider.name":
-        req.protocol === "openai-responses"
-          ? "openai-responses"
-          : (resolveUpstreamRoute(req.model)?.protocol ?? "anthropic"),
+      "gen_ai.provider.name": (() => {
+        if (req.protocol === "openai-responses") return "openai-responses";
+        const pid = extractProviderHeader(req.rawHeaders);
+        const pr = pid ? resolveProviderRoute(pid) : null;
+        return (
+          pr?.protocol ??
+          resolveUpstreamRoute(req.model)?.protocol ??
+          "anthropic"
+        );
+      })(),
       "gen_ai.response.streaming": req.stream,
       // NO gen_ai.input.messages — privacy (proxy for other people's projects)
     },

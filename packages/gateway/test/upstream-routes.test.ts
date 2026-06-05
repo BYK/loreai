@@ -1,5 +1,9 @@
 import { describe, test, expect } from "bun:test";
-import { resolveUpstreamRoute } from "../src/config";
+import {
+  resolveUpstreamRoute,
+  resolveProviderRoute,
+  extractProviderHeader,
+} from "../src/config";
 
 // ---------------------------------------------------------------------------
 // resolveUpstreamRoute
@@ -154,5 +158,181 @@ describe("resolveUpstreamRoute", () => {
     test("returns null for model without prefix", () => {
       expect(resolveUpstreamRoute("some-random-model")).toBeNull();
     });
+
+    test("returns null for MiniMax models (handled by provider route)", () => {
+      expect(resolveUpstreamRoute("MiniMax-M3")).toBeNull();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveProviderRoute
+// ---------------------------------------------------------------------------
+
+describe("resolveProviderRoute", () => {
+  describe("Anthropic protocol providers", () => {
+    test("routes anthropic provider", () => {
+      expect(resolveProviderRoute("anthropic")).toEqual({
+        url: "https://api.anthropic.com",
+        protocol: "anthropic",
+      });
+    });
+
+    test("routes minimax to MiniMax global API (Anthropic protocol)", () => {
+      expect(resolveProviderRoute("minimax")).toEqual({
+        url: "https://api.minimax.io/anthropic",
+        protocol: "anthropic",
+      });
+    });
+
+    test("routes minimax-cn to MiniMax China API (Anthropic protocol)", () => {
+      expect(resolveProviderRoute("minimax-cn")).toEqual({
+        url: "https://api.minimaxi.com/anthropic",
+        protocol: "anthropic",
+      });
+    });
+
+    test("routes fireworks provider", () => {
+      expect(resolveProviderRoute("fireworks")).toEqual({
+        url: "https://api.fireworks.ai/inference",
+        protocol: "anthropic",
+      });
+    });
+
+    test("routes kimi-coding provider", () => {
+      expect(resolveProviderRoute("kimi-coding")).toEqual({
+        url: "https://api.kimi.com/coding",
+        protocol: "anthropic",
+      });
+    });
+
+    test("returns null url for github-copilot (requires user config)", () => {
+      expect(resolveProviderRoute("github-copilot")).toEqual({
+        url: null,
+        protocol: "anthropic",
+      });
+    });
+  });
+
+  describe("OpenAI protocol providers", () => {
+    test("routes deepseek provider", () => {
+      expect(resolveProviderRoute("deepseek")).toEqual({
+        url: "https://api.deepseek.com",
+        protocol: "openai",
+      });
+    });
+
+    test("routes xai provider", () => {
+      expect(resolveProviderRoute("xai")).toEqual({
+        url: "https://api.x.ai",
+        protocol: "openai",
+      });
+    });
+
+    test("routes groq provider", () => {
+      expect(resolveProviderRoute("groq")).toEqual({
+        url: "https://api.groq.com/openai",
+        protocol: "openai",
+      });
+    });
+
+    test("routes openrouter provider", () => {
+      expect(resolveProviderRoute("openrouter")).toEqual({
+        url: "https://openrouter.ai/api",
+        protocol: "openai",
+      });
+    });
+  });
+
+  describe("OpenAI Responses protocol", () => {
+    test("routes openai provider with responses protocol", () => {
+      expect(resolveProviderRoute("openai")).toEqual({
+        url: "https://api.openai.com",
+        protocol: "openai-responses",
+      });
+    });
+  });
+
+  describe("Local/self-hosted providers", () => {
+    test("returns null url for vllm (requires user config)", () => {
+      expect(resolveProviderRoute("vllm")).toEqual({
+        url: null,
+        protocol: "openai",
+      });
+    });
+
+    test("returns null url for ollama (requires user config)", () => {
+      expect(resolveProviderRoute("ollama")).toEqual({
+        url: null,
+        protocol: "openai",
+      });
+    });
+  });
+
+  describe("Unknown providers", () => {
+    test("returns null for unknown provider", () => {
+      expect(resolveProviderRoute("unknown-provider")).toBeNull();
+    });
+
+    test("returns null for empty string", () => {
+      expect(resolveProviderRoute("")).toBeNull();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractProviderHeader
+// ---------------------------------------------------------------------------
+
+describe("extractProviderHeader", () => {
+  test("extracts valid provider ID", () => {
+    expect(extractProviderHeader({ "x-lore-provider": "minimax" })).toBe(
+      "minimax",
+    );
+  });
+
+  test("extracts hyphenated provider ID", () => {
+    expect(extractProviderHeader({ "x-lore-provider": "minimax-cn" })).toBe(
+      "minimax-cn",
+    );
+  });
+
+  test("lowercases provider ID", () => {
+    expect(extractProviderHeader({ "x-lore-provider": "MiniMax" })).toBe(
+      "minimax",
+    );
+  });
+
+  test("returns undefined for missing header", () => {
+    expect(extractProviderHeader({})).toBeUndefined();
+  });
+
+  test("returns undefined for empty header", () => {
+    expect(extractProviderHeader({ "x-lore-provider": "" })).toBeUndefined();
+  });
+
+  test("returns undefined for header with invalid characters", () => {
+    expect(
+      extractProviderHeader({ "x-lore-provider": "mini max!" }),
+    ).toBeUndefined();
+  });
+
+  test("returns undefined for header exceeding max length", () => {
+    expect(
+      extractProviderHeader({
+        "x-lore-provider": "a".repeat(65),
+      }),
+    ).toBeUndefined();
+  });
+
+  test("accepts header at max length", () => {
+    const id = "a".repeat(64);
+    expect(extractProviderHeader({ "x-lore-provider": id })).toBe(id);
+  });
+
+  test("strips control characters", () => {
+    expect(extractProviderHeader({ "x-lore-provider": "mini\x00max" })).toBe(
+      "minimax",
+    );
   });
 });
