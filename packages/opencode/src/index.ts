@@ -315,7 +315,11 @@ export const LorePlugin: Plugin = async (ctx) => {
         // (correct protocol + upstream URL) instead of model-prefix guessing.
         // Also inject upstream URL override: explicit env var takes priority,
         // then the original provider baseURL captured before gateway redirect.
-        const providerID = input.provider?.info?.id;
+        // OpenCode's plugin SDK types don't expose `.id` on the provider
+        // object, but it IS present at runtime. Cast around incomplete typedef.
+        const providerID = (
+          input.provider as Record<string, unknown> | undefined
+        )?.id as string | undefined;
         if (providerID) {
           output.headers["x-lore-provider"] = providerID;
           const envKey = `LORE_UPSTREAM_${providerID.toUpperCase().replace(/-/g, "_")}`;

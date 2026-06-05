@@ -1578,6 +1578,11 @@ async function forwardToUpstream(
       ? providerRoute
       : null;
 
+  // Protocol resolution: provider routes with `protocol: null` are proxy/
+  // aggregator providers (OpenCode Zen, Vercel AI Gateway) that accept
+  // whichever protocol the client sent — preserve the ingress protocol.
+  // Direct providers (DeepSeek, Groq, etc.) specify their protocol explicitly
+  // so the gateway can translate (e.g., Claude Code → OpenAI-only backend).
   const effectiveProtocol =
     req.protocol === "openai-responses"
       ? "openai-responses"
@@ -1607,14 +1612,17 @@ async function forwardToUpstream(
     );
   }
 
-  // Debug: log which routing tier resolved the upstream for diagnostics.
+  // Log which routing tier resolved the upstream — useful for diagnosing
+  // provider routing issues without guessing.
+  const routingAuth = extractAuth(req.rawHeaders);
   log.info(
     `upstream: ${effectiveUpstreamBase} ` +
       `(provider=${providerID ?? "none"}, ` +
       `providerURL=${providerRoute?.url ?? "none"}, ` +
       `modelRoute=${modelRoute?.url ?? "none"}, ` +
       `headerUpstream=${headerUpstream ? "yes" : "no"}, ` +
-      `protocol=${effectiveProtocol})`,
+      `protocol=${effectiveProtocol}, ` +
+      `auth=${routingAuth ? `${routingAuth.scheme}:${routingAuth.value.slice(0, 8)}…` : "none"})`,
   );
 
   if (effectiveProtocol === "openai-responses") {
@@ -2777,7 +2785,7 @@ function postResponse(
         ? "openai-responses"
         : (lpRouteUsable?.protocol ??
           resolveUpstreamRoute(req.model)?.protocol ??
-          "anthropic");
+          req.protocol);
     // Capture anthropic-beta so cache-warmer can forward it — beta-gated
     // body fields (e.g. context_management) need the header to be accepted.
     // Always update (including clearing) so a stale header isn't forwarded

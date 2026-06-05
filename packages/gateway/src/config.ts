@@ -206,18 +206,6 @@ const UPSTREAM_ROUTES: Array<{
     url: "https://generativelanguage.googleapis.com",
     protocol: "openai",
   },
-  // Minimax (Anthropic-compatible)
-  {
-    prefix: "minimax-",
-    url: "https://api.minimax.io/anthropic",
-    protocol: "anthropic",
-  },
-  // Kimi Coding (Anthropic-compatible)
-  {
-    prefix: "kimi-",
-    url: "https://api.kimi.com/coding",
-    protocol: "anthropic",
-  },
 ];
 
 /**
@@ -291,7 +279,10 @@ export function extractUpstreamUrlHeader(
  */
 export type ProviderRoute = {
   url: string | null;
-  protocol: "anthropic" | "openai" | "openai-responses";
+  /** Wire protocol for this upstream. When `null`, the ingress protocol is
+   *  preserved — use this for proxy/aggregator providers (OpenCode Zen,
+   *  Vercel AI Gateway, etc.) that accept whichever protocol the client sends. */
+  protocol: "anthropic" | "openai" | "openai-responses" | null;
 };
 
 /**
@@ -342,15 +333,15 @@ const PROVIDER_ROUTES: Record<string, ProviderRoute> = {
     protocol: "openai",
   },
   zai: { url: null, protocol: "openai" }, // uses /v4 path — user sets LORE_UPSTREAM_ZAI
-  "vercel-ai-gateway": { url: null, protocol: "openai" },
+  "vercel-ai-gateway": { url: null, protocol: null },
   // --- OpenAI Responses protocol ---
   openai: {
     url: "https://api.openai.com",
     protocol: "openai-responses",
   },
-  // --- Aggregator / gateway providers ---
-  opencode: { url: "https://opencode.ai/zen", protocol: "openai" },
-  "opencode-go": { url: "https://opencode.ai/zen/go", protocol: "openai" },
+  // --- Aggregator / gateway providers (protocol: null = preserve ingress) ---
+  opencode: { url: "https://opencode.ai/zen", protocol: null },
+  "opencode-go": { url: "https://opencode.ai/zen/go", protocol: null },
   // --- SDK-routed providers (model-prefix fallback also works) ---
   nvidia: {
     url: "https://integrate.api.nvidia.com",
