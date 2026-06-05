@@ -102,8 +102,14 @@ if (globalThis.__LORE_WASM_READY__) {
 
     // Register for the bundled transformers.js (patched via
     // binaryExternalsPlugin to read wasmPaths from this global).
+    // On Windows, absolute paths (e.g. C:\...) passed to dynamic
+    // import() are rejected because 'C:' looks like a URL scheme.
+    // Convert the mjs path to a file:// URL so the ESM loader
+    // accepts it on all platforms. The wasm path is read via fs
+    // (not import()), so it stays as a plain file path.
+    var url = require("node:url");
     globalThis.__LORE_VENDOR_WASM_PATHS__ = {
-      mjs: mjsPath,
+      mjs: url.pathToFileURL(mjsPath).href,
       wasm: wasmPath,
     };
 
