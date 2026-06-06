@@ -1,0 +1,17 @@
+{
+  "name": "@loreai/website",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "check": "astro check"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.4",
+    "@astrojs/starlight": "^0.39.3",
+    "astro": "^6.4.4",
+    "typescript": "^5.8.0"
+  }
+}

@@ -26,3 +26,8 @@ packages/core/eval/fixtures/recorded-responses*/
 .plans/
 .opencode/
 .DS_Store
+
+# Website build artifacts
+packages/website/.astro/
+packages/website/node_modules/
+packages/website/dist/

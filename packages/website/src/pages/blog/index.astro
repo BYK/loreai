@@ -1,0 +1,35 @@
+---
+import { getCollection } from "astro:content";
+import BlogLayout from "../../layouts/BlogLayout.astro";
+
+const posts = (await getCollection("blog"))
+  .filter((post) => !post.data.draft)
+  .sort((a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf());
+---
+
+<BlogLayout title="Lore Blog" description="Product notes, engineering updates, and memory architecture deep dives from Lore.">
+  <section class="blog-hero">
+    <p class="eyebrow">Blog</p>
+    <h1>Lore notes, from the memory layer outward.</h1>
+    <p>
+      Product updates, architecture deep dives, and practical writing about persistent memory for AI coding agents.
+    </p>
+  </section>
+
+  <section class="blog-list" aria-label="Blog posts">
+    {posts.map((post) => (
+      <article class="blog-card">
+        <time datetime={post.data.pubDate.toISOString()}>
+          {post.data.pubDate.toLocaleDateString("en", { month: "long", day: "numeric", year: "numeric" })}
+        </time>
+        <h2><a href={`/blog/${post.id}.html`}>{post.data.title}</a></h2>
+        <p>{post.data.description}</p>
+        {post.data.tags.length > 0 && (
+          <ul aria-label="Tags">
+            {post.data.tags.map((tag) => <li>{tag}</li>)}
+          </ul>
+        )}
+      </article>
+    ))}
+  </section>
+</BlogLayout>

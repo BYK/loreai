@@ -9,10 +9,16 @@
     ".": "./packages/opencode/src/index.ts"
   },
   "packageManager": "pnpm@10.28.0",
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild", "sharp"]
+  },
   "scripts": {
     "typecheck": "pnpm -r run typecheck",
     "test": "vitest run",
     "build": "pnpm -r run build",
+    "site:dev": "pnpm --filter '@loreai/website' dev",
+    "site:build": "pnpm --filter '@loreai/website' build",
+    "site:preview": "pnpm --filter '@loreai/website' preview",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",

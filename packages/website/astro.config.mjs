@@ -1,0 +1,52 @@
+import { defineConfig } from "astro/config";
+import starlight from "@astrojs/starlight";
+
+export default defineConfig({
+  site: "https://withlore.ai",
+  output: "static",
+  outDir: "./dist",
+  publicDir: "./public",
+  build: {
+    format: "file",
+  },
+  integrations: [
+    starlight({
+      title: "Lore",
+      logo: {
+        src: "./public/brand-mark.svg",
+        alt: "Lore.AI",
+        replacesTitle: true,
+      },
+      favicon: "/favicon.svg",
+      customCss: ["./src/styles/starlight.css"],
+      pagefind: false,
+      lastUpdated: false,
+      social: [
+        { icon: "github", label: "GitHub", href: "https://github.com/byk/loreai" },
+        { icon: "x.com", label: "X", href: "https://x.com/withLoreAI" },
+      ],
+      sidebar: [
+        {
+          label: "Lore",
+          items: [
+            { label: "Overview", slug: "docs" },
+            { label: "Install", slug: "docs/install" },
+            { label: "Architecture", slug: "docs/architecture" },
+          ],
+        },
+        {
+          label: "Site",
+          items: [
+            { label: "Home", link: "/" },
+            { label: "Why Lore", link: "/different.html" },
+            { label: "Blog", link: "/blog.html" },
+          ],
+        },
+      ],
+      head: [
+        { tag: "link", attrs: { rel: "icon", href: "/favicon.ico", sizes: "any" } },
+        { tag: "link", attrs: { rel: "apple-touch-icon", href: "/apple-touch-icon.png" } },
+      ],
+    }),
+  ],
+});

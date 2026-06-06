@@ -1,0 +1,44 @@
+---
+import "../styles/blog.css";
+
+const {
+  title = "Lore Blog",
+  description = "Product notes, engineering updates, and memory architecture deep dives from Lore.",
+} = Astro.props;
+---
+
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{title} | Lore</title>
+    <meta name="description" content={description} />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;1,400;1,500&family=DM+Sans:wght@200;300;400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/theme.css" />
+  </head>
+  <body class="blog-body">
+    <header class="blog-nav">
+      <a href="/" class="blog-brand" aria-label="Lore home">
+        <img src="/brand-mark.svg" alt="Lore.AI" />
+      </a>
+      <nav aria-label="Primary navigation">
+        <a href="/docs.html">Docs</a>
+        <a href="/blog.html">Blog</a>
+        <a href="/different.html">Why Lore</a>
+        <a href="https://github.com/byk/loreai" target="_blank" rel="noopener noreferrer">GitHub</a>
+      </nav>
+    </header>
+    <main>
+      <slot />
+    </main>
+  </body>
+</html>

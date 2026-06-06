@@ -1,0 +1,38 @@
+:root {
+  --sl-font: "DM Sans", sans-serif;
+  --sl-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  --sl-color-accent-low: #c4ddc7;
+  --sl-color-accent: #3d6644;
+  --sl-color-accent-high: #1a3320;
+  --sl-color-white: #f7f2e8;
+  --sl-color-gray-1: #e8f2e9;
+  --sl-color-gray-2: #c4ddc7;
+  --sl-color-gray-3: #8fba96;
+  --sl-color-gray-4: #5a8f63;
+  --sl-color-gray-5: #3d6644;
+  --sl-color-gray-6: #2a4d32;
+  --sl-color-black: #102015;
+}
+
+html[data-theme="light"] {
+  --sl-color-white: #1a3320;
+  --sl-color-gray-1: #2a4d32;
+  --sl-color-gray-2: #3d6644;
+  --sl-color-gray-3: #5a8f63;
+  --sl-color-gray-4: #8fba96;
+  --sl-color-gray-5: #dfd5bb;
+  --sl-color-gray-6: #ede5d0;
+  --sl-color-gray-7: #f7f2e8;
+  --sl-color-black: #f7f2e8;
+}
+
+.site-title img {
+  max-height: 2.8rem;
+}
+
+.hero h1,
+.sl-markdown-content h1,
+.sl-markdown-content h2 {
+  font-family: "Playfair Display", Georgia, serif;
+  font-weight: 400;
+}

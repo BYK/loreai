@@ -1,0 +1,155 @@
+.blog-body {
+  min-height: 100svh;
+  background: var(--c0);
+  cursor: auto;
+}
+
+.blog-body::after {
+  z-index: 0;
+}
+
+.blog-nav {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2rem;
+  padding: .6rem 3rem;
+  background: var(--ink);
+  color: var(--c0);
+}
+
+.blog-brand img {
+  display: block;
+  height: 64px;
+  width: auto;
+}
+
+.blog-nav nav {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  font-size: .9rem;
+}
+
+.blog-hero,
+.blog-list,
+.blog-post {
+  width: min(980px, calc(100% - 2rem));
+  margin: 0 auto;
+}
+
+.blog-hero {
+  padding: 7rem 0 4rem;
+}
+
+.blog-hero h1,
+.blog-post h1 {
+  font-family: var(--serif);
+  font-weight: 400;
+  color: var(--g0);
+}
+
+.blog-hero h1 {
+  max-width: 760px;
+  font-size: clamp(2.6rem, 6vw, 5rem);
+  line-height: 1.05;
+}
+
+.blog-hero p:not(.eyebrow),
+.blog-card p,
+.blog-post header p {
+  max-width: 68ch;
+  color: var(--mid);
+}
+
+.blog-list {
+  display: grid;
+  gap: 1px;
+  padding-bottom: 6rem;
+  border: 1px solid var(--c2);
+  background: var(--c2);
+}
+
+.blog-card {
+  background: var(--c0);
+  padding: 2rem;
+}
+
+.blog-card time,
+.blog-post time,
+.blog-back {
+  color: var(--g3);
+  font-size: .78rem;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.blog-card h2 {
+  margin: .7rem 0 .6rem;
+  font-family: var(--serif);
+  font-size: 1.8rem;
+  font-weight: 400;
+}
+
+.blog-card ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem;
+  margin-top: 1rem;
+  list-style: none;
+}
+
+.blog-card li {
+  border: 1px solid var(--c2);
+  border-radius: 3px;
+  padding: .15rem .5rem;
+  color: var(--g2);
+  font-size: .78rem;
+}
+
+.blog-post {
+  padding: 5rem 0 7rem;
+}
+
+.blog-post header {
+  margin: 2rem 0 3rem;
+}
+
+.blog-post h1 {
+  max-width: 820px;
+  font-size: clamp(2.4rem, 5vw, 4.5rem);
+  line-height: 1.08;
+}
+
+.blog-prose {
+  max-width: 760px;
+}
+
+.blog-prose p,
+.blog-prose li {
+  color: var(--ink);
+  font-size: 1.05rem;
+}
+
+.blog-prose pre {
+  overflow-x: auto;
+  border-radius: 4px;
+  padding: 1rem;
+  background: var(--g0);
+  color: var(--g5);
+}
+
+@media (max-width: 780px) {
+  .blog-nav {
+    align-items: flex-start;
+    flex-direction: column;
+    padding: .8rem 1rem 1rem;
+  }
+
+  .blog-nav nav {
+    flex-wrap: wrap;
+  }
+}

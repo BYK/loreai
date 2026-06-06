@@ -5,7 +5,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'docs/**'
+      - 'packages/website/**'
       - '.github/workflows/docs-preview.yml'
   pull_request:
     # No paths filter on pull_request: the 'closed' event must always fire
@@ -27,31 +27,44 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # Check if docs files changed. On 'closed' events we always proceed
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile
+
+      # Check if website files changed. On 'closed' events we always proceed
       # (cleanup). On push events paths are already filtered at trigger level.
-      - name: Check for docs changes
+      - name: Check for website changes
         id: filter
         if: github.event_name == 'pull_request' && github.event.action != 'closed'
         uses: dorny/paths-filter@v4
         with:
           filters: |
-            docs:
-              - 'docs/**'
+            website:
+              - 'packages/website/**'
               - '.github/workflows/docs-preview.yml'
 
-      - name: Ensure .nojekyll at gh-pages root
-        # Skip when: (a) non-docs PR (not closed), or (b) fork PR.
-        # Always run for push and workflow_dispatch events.
+      - name: Build website
         if: >-
-          (github.event_name != 'pull_request' || github.event.action == 'closed' || steps.filter.outputs.docs == 'true') &&
+          (github.event_name != 'pull_request' || github.event.action == 'closed' || steps.filter.outputs.website == 'true') &&
+          (github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request')
+        run: pnpm --filter '@loreai/website' build
+
+      - name: Ensure .nojekyll at gh-pages root
+        if: >-
+          (github.event_name != 'pull_request' || github.event.action == 'closed' || steps.filter.outputs.website == 'true') &&
           (github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request')
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Try to fetch the gh-pages branch
           if git fetch origin gh-pages:gh-pages 2>/dev/null; then
-            # Branch exists remotely, check if .nojekyll is present
             if git show gh-pages:.nojekyll &>/dev/null; then
               echo ".nojekyll already exists at gh-pages root"
             else
@@ -64,7 +77,6 @@ jobs:
               git checkout "$GITHUB_SHA"
             fi
           else
-            # Branch doesn't exist, create it as an orphan branch
             echo "Creating gh-pages branch with .nojekyll"
             git checkout --orphan gh-pages
             git rm -rf .
@@ -75,27 +87,23 @@ jobs:
             git checkout "$GITHUB_SHA"
           fi
 
-      # Production deploy: push docs/ to gh-pages root on main push.
-      # Uses JamesIves action to deploy to root while preserving _preview/.
       - name: Deploy to GitHub Pages
         if: github.event_name != 'pull_request'
         uses: JamesIves/github-pages-deploy-action@v4
         with:
-          folder: docs
+          folder: packages/website/dist
           branch: gh-pages
           clean-exclude: _preview
           force: false
 
-      # PR preview: deploy/remove preview under _preview/pr-N/.
       - name: Deploy PR Preview
-        # Skip when: (a) non-docs PR (not closed), or (b) fork PR
         if: >-
           github.event_name == 'pull_request' &&
-          (github.event.action == 'closed' || steps.filter.outputs.docs == 'true') &&
+          (github.event.action == 'closed' || steps.filter.outputs.website == 'true') &&
           (github.event.pull_request.head.repo.full_name == github.repository)
         uses: rossjrw/pr-preview-action@v1
         with:
-          source-dir: docs/
+          source-dir: packages/website/dist/
           preview-branch: gh-pages
           umbrella-dir: _preview
           pages-base-url: withlore.ai
