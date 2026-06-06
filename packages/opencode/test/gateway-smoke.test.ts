@@ -13,7 +13,7 @@ import { probeGateway } from "../src/index";
 type GatewayServer = { stop: () => void; port: number; hosts: string[] };
 type GatewayModule = {
   loadConfig: () => { port: number } & Record<string, unknown>;
-  startServer: (config: unknown) => GatewayServer;
+  startServer: (config: unknown) => Promise<GatewayServer>;
 };
 
 // Track shutdown handles to clean up after tests.
@@ -39,12 +39,13 @@ describe("in-process gateway startup", () => {
     const config = gw.loadConfig();
     config.port = 0; // ephemeral
 
-    const server = gw.startServer(config);
+    const server = await gw.startServer(config);
     shutdowns.push(async () => server.stop());
     const port = server.port;
     const base = `http://127.0.0.1:${port}`;
 
-    // The server should be immediately healthy (Bun.serve is synchronous).
+    // The server should be healthy after awaiting startServer (which binds
+    // sequentially and resolves the OS-assigned port).
     const healthy = await probeGateway(base, 2000);
     expect(healthy).toBe(true);
 
@@ -61,26 +62,31 @@ describe("in-process gateway startup", () => {
     const gwPkg = "@loreai/gateway";
     const gw = (await import(gwPkg)) as unknown as GatewayModule;
 
-    // Find a free port first.
-    const tmpServer = Bun.serve({
-      port: 0,
-      hostname: "127.0.0.1",
-      fetch: () => new Response("tmp"),
+    // Find a free port by binding to 0, reading the assigned port, then
+    // closing. Uses node:net to avoid Bun-specific APIs.
+    const { createServer } = await import("node:net");
+    const freePort = await new Promise<number>((resolve, reject) => {
+      const tmp = createServer();
+      tmp.listen(0, "127.0.0.1", () => {
+        const addr = tmp.address();
+        const port =
+          addr && typeof addr === "object" ? addr.port : undefined;
+        tmp.close(() =>
+          port !== undefined
+            ? resolve(port)
+            : reject(new Error("expected an ephemeral port")),
+        );
+      });
+      tmp.on("error", reject);
     });
-    const freePort = tmpServer.port;
-    if (freePort === undefined) throw new Error("expected an ephemeral port");
-    tmpServer.stop(true);
 
     // Small delay to ensure the port is released.
-    await Bun.sleep(50);
+    const { setTimeout: sleep } = await import("node:timers/promises");
+    await sleep(50);
 
     const config = gw.loadConfig();
     config.port = freePort;
-    const server = gw.startServer(config) as {
-      stop: () => void;
-      port: number;
-      hosts: string[];
-    };
+    const server = await gw.startServer(config);
     shutdowns.push(async () => server.stop());
 
     expect(server.port).toBe(freePort);
