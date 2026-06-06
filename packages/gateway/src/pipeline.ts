@@ -154,7 +154,6 @@ import type { UpstreamInterceptor } from "./recorder";
 import { startIdleScheduler, buildIdleWorkHandler } from "./idle";
 import {
   getWorkerModel,
-  protocolToProviderID,
   resetWorkerModelState,
   fetchModelData,
   getModelEntrySync,
@@ -938,30 +937,53 @@ function getLLMClient(config: GatewayConfig): LLMClient {
     // credentials (the proxy's key, not the provider's).
     //
     // When the session has used multiple providers (e.g. Anthropic + MiniMax),
-    // looks up the per-provider snapshot matching the worker's target provider
-    // to avoid cross-contamination (wrong URL/credentials). The
-    // upstreamByProvider map keys are X-Lore-Provider header values (e.g.
-    // "minimax-coding-plan"), while worker model providerIDs are canonical
-    // names (e.g. "anthropic"). We bridge by matching the worker's
-    // providerID against each snapshot's protocol via protocolToProviderID().
+    // inject the upstream URL only when the snapshot's provider matches the
+    // worker's target. This prevents routing a Claude worker model through
+    // MiniMax's API (which rejects non-MiniMax models with 401).
+    //
+    // The providerID in the snapshot is the X-Lore-Provider header value
+    // (e.g. "minimax-coding-plan", "anthropic", "openrouter"). The worker
+    // model's providerID is a canonical name (e.g. "anthropic", "openai").
+    // We match by checking if the snapshot's providerID exactly equals the
+    // worker model's providerID. When no exact match exists (e.g. worker
+    // wants "anthropic" but session only used "minimax-coding-plan"), we
+    // DON'T inject any upstream URL — the worker uses its default upstream
+    // (api.anthropic.com), which is correct for a Claude worker model.
     const inner: LLMClient = {
       async prompt(system, user, opts) {
         if (opts?.sessionID && !opts.upstreamUrl && !workerApiKey) {
           const state = sessions.get(opts.sessionID);
           if (state) {
             const workerProviderID = opts.model?.providerID;
-            let snapshot = state.lastUpstream; // fallback
 
-            // Try to find a per-provider snapshot whose protocol matches the
-            // worker's target. Prefer direct-provider snapshots (url="") over
-            // proxy snapshots when the worker's default upstream is correct.
-            if (workerProviderID && state.upstreamByProvider.size > 1) {
-              for (const [, s] of state.upstreamByProvider) {
-                if (protocolToProviderID(s.protocol) === workerProviderID) {
-                  snapshot = s;
-                  break;
+            // Look for a snapshot whose provider exactly matches the worker's
+            // target (e.g. worker="anthropic" matches snapshot="anthropic").
+            //
+            // When no exact match is found, check if the session's last
+            // provider is a proxy/aggregator (protocol=null in PROVIDER_ROUTES,
+            // e.g. OpenCode Zen). Proxy credentials only work through the
+            // proxy URL, so workers must route through it too. For direct
+            // providers (MiniMax, OpenRouter), DON'T fall back — the worker
+            // should use its default upstream to avoid sending wrong models
+            // to provider-specific APIs.
+            let snapshot: typeof state.lastUpstream;
+            if (workerProviderID) {
+              snapshot = state.upstreamByProvider.get(workerProviderID);
+              if (
+                !snapshot &&
+                state.lastUpstream?.url &&
+                state.lastUpstream.providerID
+              ) {
+                const route = resolveProviderRoute(
+                  state.lastUpstream.providerID,
+                );
+                if (route && route.protocol === null) {
+                  // Proxy/aggregator (protocol=null) — route workers through it
+                  snapshot = state.lastUpstream;
                 }
               }
+            } else {
+              snapshot = state.lastUpstream;
             }
 
             if (snapshot?.url) {
@@ -2939,10 +2961,8 @@ function postResponse(
       sessionID,
       actualInput,
       resp.usage.outputTokens ?? 0,
-      getWorkerModel(
-        sessionState.lastUpstream?.providerID ??
-          protocolToProviderID(sessionState.lastUpstream?.protocol),
-      )?.modelID ?? "unknown",
+      getWorkerModel(sessionState.lastUpstream?.providerID)?.modelID ??
+        "unknown",
       req.model,
       sessionState.resolvedConversationTTL,
     );
@@ -2962,10 +2982,8 @@ function postResponse(
     ) {
       const modelInputCost =
         getModelEntrySync(
-          getWorkerModel(
-            sessionState.lastUpstream?.providerID ??
-              protocolToProviderID(sessionState.lastUpstream?.protocol),
-          )?.modelID ?? "unknown",
+          getWorkerModel(sessionState.lastUpstream?.providerID)?.modelID ??
+            "unknown",
         ).cost?.input ?? 3;
       const curationMultiplier =
         modelInputCost >= 5 ? 3 : modelInputCost >= 1 ? 2 : 1;
@@ -3004,9 +3022,7 @@ function scheduleBackgroundWork(
 
   const llm = getLLMClient(config);
   const cfg = loreConfig();
-  const sessionProvider =
-    sessionState.lastUpstream?.providerID ??
-    protocolToProviderID(sessionState.lastUpstream?.protocol);
+  const sessionProvider = sessionState.lastUpstream?.providerID;
   const model = getWorkerModel(sessionProvider);
 
   // When the OAuth account is near quota exhaustion, skip non-urgent
@@ -3259,9 +3275,7 @@ async function handleCompaction(
     sessionID,
     config,
     previousSummary: extractPreviousSummary(req),
-    sessionProviderID:
-      sessionState.lastUpstream?.providerID ??
-      protocolToProviderID(sessionState.lastUpstream?.protocol),
+    sessionProviderID: sessionState.lastUpstream?.providerID,
   });
 
   // If Lore's own summary generation failed (rate limits, auth issues, etc.),
@@ -3393,9 +3407,7 @@ export async function handleCompactEndpoint(
         typeof body.previous_summary === "string"
           ? body.previous_summary
           : undefined,
-      sessionProviderID:
-        state?.lastUpstream?.providerID ??
-        protocolToProviderID(state?.lastUpstream?.protocol),
+      sessionProviderID: state?.lastUpstream?.providerID,
     });
 
     if (summary == null) {
@@ -5267,10 +5279,7 @@ async function handleCurateSlashCommand(
   const projectPath = state.projectPath;
   const { distillation, curator } = await import("@loreai/core");
   const llm = getLLMClient(config);
-  const model = getWorkerModel(
-    state.lastUpstream?.providerID ??
-      protocolToProviderID(state.lastUpstream?.protocol),
-  );
+  const model = getWorkerModel(state.lastUpstream?.providerID);
 
   log.info(`/lore:curate: running for session=${sessionID.slice(0, 16)}`);
 

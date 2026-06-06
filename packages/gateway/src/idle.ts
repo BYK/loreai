@@ -34,11 +34,7 @@ import {
 import type { LLMClient } from "@loreai/core";
 import type { GatewayConfig } from "./config";
 import type { SessionState } from "./translate/types";
-import {
-  getWorkerModel,
-  protocolToProviderID,
-  getModelEntrySync,
-} from "./worker-model";
+import { getWorkerModel, getModelEntrySync } from "./worker-model";
 import {
   isCircuitBreakerTripped,
   isWarmupAuthDisabled,
@@ -466,10 +462,7 @@ export function buildIdleWorkHandler(
   return async (sessionID: string, state: SessionState) => {
     const projectPath = state.projectPath;
     const cfg = loreConfig();
-    const model = getWorkerModel(
-      state.lastUpstream?.providerID ??
-        protocolToProviderID(state.lastUpstream?.protocol),
-    );
+    const model = getWorkerModel(state.lastUpstream?.providerID);
 
     // 1. Distillation — force-distill ALL pending messages on idle, even
     // below minMessages. The cache is going cold; aggressive distillation

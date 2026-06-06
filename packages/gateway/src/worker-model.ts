@@ -501,18 +501,6 @@ export function getWorkerModel(
   );
 }
 
-/**
- * Map a session wire protocol to the upstream provider ID used for worker
- * model selection. OpenAI and OpenAI-Responses both route to the "openai"
- * provider; everything else (including undefined) defaults to "anthropic".
- */
-export function protocolToProviderID(
-  protocol: "anthropic" | "openai" | "openai-responses" | undefined,
-): "anthropic" | "openai" {
-  if (protocol === "openai" || protocol === "openai-responses") return "openai";
-  return "anthropic";
-}
-
 /** Reset module state (for testing). */
 export function resetWorkerModelState(): void {
   clearModelDataCache();
