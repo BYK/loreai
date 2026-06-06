@@ -5,7 +5,7 @@ import {
   test,
   expect,
   beforeEach,
-} from "bun:test";
+} from "vitest";
 import { db, ensureProject } from "../src/db";
 import {
   cosineSimilarity,

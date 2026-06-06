@@ -1,4 +1,4 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect } from "vitest";
 import { computeCallCost } from "../src/cost-tracker";
 
 // Use a fake model name to guarantee we hit getPricingSync defaults:

@@ -5,7 +5,7 @@ import {
   beforeAll,
   beforeEach,
   afterAll,
-} from "bun:test";
+} from "vitest";
 import { db, ensureProject, loadForceMinLayer } from "../src/db";
 import {
   transform,

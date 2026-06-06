@@ -9,7 +9,7 @@
  *  - Extras: reasoning/truncation passthrough; previous_response_id is DROPPED
  *    (the gateway is a stateless full-history proxy)
  */
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect } from "vitest";
 import {
   parseOpenAIResponsesRequest,
   buildOpenAIResponsesUpstreamRequest,

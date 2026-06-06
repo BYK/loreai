@@ -8,7 +8,7 @@
  *  - Recall at different positions (first, middle, last tool)
  *  - Block index renumbering correctness
  */
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect } from "vitest";
 import { createRecallAwareAccumulator } from "../src/stream/anthropic";
 import {
   findRecallToolUse,

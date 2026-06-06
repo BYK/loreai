@@ -51,7 +51,6 @@ async function buildLibrary() {
   mkdirSync(distDir, { recursive: true });
 
   const shims: Array<[string, string]> = [
-    ["index.bun.js", 'export * from "../src/index.ts";\n'],
     [
       "embedding-worker.js",
       'export * from "../../core/src/embedding-worker.ts";\n',

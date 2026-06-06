@@ -70,13 +70,13 @@ jobs:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
-      # Bun is still used as the TS test runner in this PR. Will be
-      # removed when we migrate to vitest in a follow-up PR.
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
       - run: pnpm install --frozen-lockfile
+
+      # Build all packages so tests can resolve workspace dependencies
+      - run: pnpm run build
+
+      # Bundle @loreai/gateway for tests (build.ts only creates dev shims)
+      - run: pnpm --filter @loreai/gateway run bundle
 
       # Restore the vendored embedding model so tests use a local model
       # instead of downloading from HuggingFace Hub (avoids transient 429s).
@@ -201,7 +201,7 @@ jobs:
           kill $SERVER_PID
           wait $SERVER_PID 2>/dev/null || true
 
-      - name: Smoke-test bundle exports under Bun
+      - name: Smoke-test bundle exports
         run: pnpm test packages/gateway/test/bundle-exports.test.ts
 
       # -----------------------------------------------------------------
@@ -395,12 +395,6 @@ jobs:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
-      # Bun is still used as the TS test runner in this PR. Will be
-      # removed when we migrate to vitest in a follow-up PR.
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
       - run: pnpm install --frozen-lockfile
 
       # Reuse the cache the test job populated (same key). The
@@ -467,12 +461,6 @@ jobs:
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
-
-      # Bun is still used as the TS test runner in this PR. Will be
-      # removed when we migrate to vitest in a follow-up PR.
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
 
       - run: pnpm install --frozen-lockfile
 

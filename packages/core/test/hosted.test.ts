@@ -1,4 +1,5 @@
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { fileURLToPath } from "node:url";
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -19,7 +20,10 @@ import {
 } from "../src/agents-file";
 import { hasLatDir, refresh } from "../src/lat-reader";
 
-const TMP = join(import.meta.dir, "__tmp_hosted__");
+const TMP = join(
+  fileURLToPath(new URL(".", import.meta.url)),
+  "__tmp_hosted__",
+);
 
 beforeEach(() => {
   _resetHostedModeForTest();

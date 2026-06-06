@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   fetchOAuthQuotaSnapshot,
   fetchQuotaDeduped,
@@ -61,7 +61,7 @@ afterEach(() => {
 
 describe("fetchOAuthQuotaSnapshot", () => {
   test("returns null for api-key credentials (no fetch)", async () => {
-    const fetchMock = mock(() =>
+    const fetchMock = vi.fn(() =>
       Promise.resolve(new Response(quotaBody(), { status: 200 })),
     );
     globalThis.fetch = fetchMock as unknown as typeof fetch;
@@ -72,7 +72,7 @@ describe("fetchOAuthQuotaSnapshot", () => {
   });
 
   test("parses a valid 200 body", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(new Response(quotaBody(45.2, 12.8), { status: 200 })),
     ) as unknown as typeof fetch;
 
@@ -85,7 +85,7 @@ describe("fetchOAuthQuotaSnapshot", () => {
 
   test("sends bearer auth + oauth beta header", async () => {
     let capturedInit: RequestInit | undefined;
-    globalThis.fetch = mock((_url: string, init?: RequestInit) => {
+    globalThis.fetch = vi.fn((_url: string, init?: RequestInit) => {
       capturedInit = init;
       return Promise.resolve(new Response(quotaBody(), { status: 200 }));
     }) as unknown as typeof fetch;
@@ -98,7 +98,7 @@ describe("fetchOAuthQuotaSnapshot", () => {
 
   test("sends a Claude Code user-agent (fallback when no session)", async () => {
     let capturedInit: RequestInit | undefined;
-    globalThis.fetch = mock((_url: string, init?: RequestInit) => {
+    globalThis.fetch = vi.fn((_url: string, init?: RequestInit) => {
       capturedInit = init;
       return Promise.resolve(new Response(quotaBody(), { status: 200 }));
     }) as unknown as typeof fetch;
@@ -110,7 +110,7 @@ describe("fetchOAuthQuotaSnapshot", () => {
 
   test("fetches from the expected quota URL", async () => {
     let capturedUrl: string | undefined;
-    globalThis.fetch = mock((url: string) => {
+    globalThis.fetch = vi.fn((url: string) => {
       capturedUrl = url;
       return Promise.resolve(new Response(quotaBody(), { status: 200 }));
     }) as unknown as typeof fetch;
@@ -124,7 +124,7 @@ describe("fetchOAuthQuotaSnapshot", () => {
   test("reuses sniffed Claude Code headers when a session is provided", async () => {
     makeOAuthSession("sid-ua");
     let capturedInit: RequestInit | undefined;
-    globalThis.fetch = mock((_url: string, init?: RequestInit) => {
+    globalThis.fetch = vi.fn((_url: string, init?: RequestInit) => {
       capturedInit = init;
       return Promise.resolve(new Response(quotaBody(), { status: 200 }));
     }) as unknown as typeof fetch;
@@ -138,7 +138,7 @@ describe("fetchOAuthQuotaSnapshot", () => {
   });
 
   test("missing seven_day → that window is null", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response(
           JSON.stringify({
@@ -155,7 +155,7 @@ describe("fetchOAuthQuotaSnapshot", () => {
   });
 
   test("garbage resets_at → resetsAt null but utilization kept", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response(
           JSON.stringify({
@@ -172,7 +172,7 @@ describe("fetchOAuthQuotaSnapshot", () => {
   });
 
   test("out-of-range utilization is clamped to [0,100]", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response(
           JSON.stringify({
@@ -190,7 +190,7 @@ describe("fetchOAuthQuotaSnapshot", () => {
   });
 
   test("fraction-format utilization (0.0-1.0) is scaled to percent", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response(
           JSON.stringify({
@@ -208,7 +208,7 @@ describe("fetchOAuthQuotaSnapshot", () => {
   });
 
   test("percent-format utilization (>1) is kept as-is", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response(JSON.stringify({ five_hour: { utilization: 45.2 } }), {
           status: 200,
@@ -222,7 +222,7 @@ describe("fetchOAuthQuotaSnapshot", () => {
 
   test("numeric epoch resets_at (seconds) is parsed to ms", async () => {
     const epochSec = 1_780_000_000;
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response(
           JSON.stringify({
@@ -239,7 +239,7 @@ describe("fetchOAuthQuotaSnapshot", () => {
 
   test("numeric epoch resets_at (milliseconds) is kept as-is", async () => {
     const epochMs = 1_780_000_000_000;
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response(
           JSON.stringify({
@@ -255,7 +255,7 @@ describe("fetchOAuthQuotaSnapshot", () => {
   });
 
   test("empty body → both windows null, no throw", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(new Response(JSON.stringify({}), { status: 200 })),
     ) as unknown as typeof fetch;
 
@@ -266,7 +266,7 @@ describe("fetchOAuthQuotaSnapshot", () => {
   });
 
   test("429 returns null without throwing", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(new Response("rate limited", { status: 429 })),
     ) as unknown as typeof fetch;
 
@@ -275,7 +275,7 @@ describe("fetchOAuthQuotaSnapshot", () => {
   });
 
   test("401 returns null without throwing", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(new Response("unauthorized", { status: 401 })),
     ) as unknown as typeof fetch;
 
@@ -284,7 +284,7 @@ describe("fetchOAuthQuotaSnapshot", () => {
   });
 
   test("network error returns null without throwing", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.reject(new Error("connection refused")),
     ) as unknown as typeof fetch;
 
@@ -300,7 +300,7 @@ describe("fetchOAuthQuotaSnapshot", () => {
 describe("fetchQuotaDeduped", () => {
   test("concurrent calls for same fingerprint → one underlying fetch", async () => {
     let resolveFetch: (r: Response) => void = () => {};
-    const fetchMock = mock(
+    const fetchMock = vi.fn(
       () =>
         new Promise<Response>((r) => {
           resolveFetch = r;
@@ -322,14 +322,14 @@ describe("fetchQuotaDeduped", () => {
 
   test("serial gate keeps advancing after a failed fetch (no deadlock)", async () => {
     // A failure must release the serial gate so subsequent fetches proceed.
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.reject(new Error("network")),
     ) as unknown as typeof fetch;
     const r1 = await fetchOAuthQuotaSnapshot(BEARER);
     expect(r1).toBeNull();
 
     // The gate should be free — a following fetch must complete, not hang.
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(new Response(quotaBody(), { status: 200 })),
     ) as unknown as typeof fetch;
     const r2 = await fetchOAuthQuotaSnapshot(BEARER);
@@ -337,7 +337,7 @@ describe("fetchQuotaDeduped", () => {
   });
 
   test("stores result in cache, then clears inflight (allows re-fetch)", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(new Response(quotaBody(), { status: 200 })),
     ) as unknown as typeof fetch;
 
@@ -345,7 +345,7 @@ describe("fetchQuotaDeduped", () => {
     expect(getQuotaForCredential(BEARER)).not.toBeNull();
 
     // A second sequential call issues a fresh fetch (inflight cleared).
-    const fetchMock2 = mock(() =>
+    const fetchMock2 = vi.fn(() =>
       Promise.resolve(new Response(quotaBody(), { status: 200 })),
     );
     globalThis.fetch = fetchMock2 as unknown as typeof fetch;
@@ -378,7 +378,7 @@ describe("isAnthropicOAuthSession", () => {
 
 describe("maybeFetchQuota — provider isolation", () => {
   test("no fetch for bearer-but-not-Claude-Code session", () => {
-    const fetchMock = mock(() =>
+    const fetchMock = vi.fn(() =>
       Promise.resolve(new Response(quotaBody(), { status: 200 })),
     );
     globalThis.fetch = fetchMock as unknown as typeof fetch;
@@ -389,7 +389,7 @@ describe("maybeFetchQuota — provider isolation", () => {
   });
 
   test("no fetch for api-key session", () => {
-    const fetchMock = mock(() =>
+    const fetchMock = vi.fn(() =>
       Promise.resolve(new Response(quotaBody(), { status: 200 })),
     );
     globalThis.fetch = fetchMock as unknown as typeof fetch;
@@ -402,7 +402,7 @@ describe("maybeFetchQuota — provider isolation", () => {
 
   test("per-account cooldown prevents a second fetch within 5 min", async () => {
     let calls = 0;
-    globalThis.fetch = mock(() => {
+    globalThis.fetch = vi.fn(() => {
       calls++;
       return Promise.resolve(new Response(quotaBody(), { status: 200 }));
     }) as unknown as typeof fetch;
@@ -417,7 +417,7 @@ describe("maybeFetchQuota — provider isolation", () => {
 
   test("a failed fetch does not hold the full 5-min cooldown (retry allowed sooner)", async () => {
     // First fetch fails (timeout) → only the short retry cooldown should apply.
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.reject(new Error("boom")),
     ) as unknown as typeof fetch;
 
@@ -429,7 +429,7 @@ describe("maybeFetchQuota — provider isolation", () => {
     // gated now, but will be eligible again in ~30s rather than 5min. Verify
     // the next call within the SHORT window is still skipped (no stampede)...
     let calls = 0;
-    globalThis.fetch = mock(() => {
+    globalThis.fetch = vi.fn(() => {
       calls++;
       return Promise.resolve(new Response(quotaBody(), { status: 200 }));
     }) as unknown as typeof fetch;
@@ -440,7 +440,7 @@ describe("maybeFetchQuota — provider isolation", () => {
 
   test("a successful fetch holds the full cooldown", async () => {
     let calls = 0;
-    globalThis.fetch = mock(() => {
+    globalThis.fetch = vi.fn(() => {
       calls++;
       return Promise.resolve(new Response(quotaBody(), { status: 200 }));
     }) as unknown as typeof fetch;
@@ -459,7 +459,7 @@ describe("maybeFetchQuota — provider isolation", () => {
 
 describe("isQuotaPaused", () => {
   test("true when 5h utilization > 95%", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(new Response(quotaBody(96, 20), { status: 200 })),
     ) as unknown as typeof fetch;
 
@@ -468,7 +468,7 @@ describe("isQuotaPaused", () => {
   });
 
   test("false when 5h utilization below threshold", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(new Response(quotaBody(50, 20), { status: 200 })),
     ) as unknown as typeof fetch;
 
@@ -520,7 +520,7 @@ describe("computeQuotaPressure", () => {
 
 describe("deleteQuotaForFingerprint", () => {
   test("drops cached snapshot and pause state", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(new Response(quotaBody(96, 20), { status: 200 })),
     ) as unknown as typeof fetch;
 

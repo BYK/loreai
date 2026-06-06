@@ -6,7 +6,7 @@
  * its own isolated harness (separate DB, separate port, separate pipeline
  * state) so tests never interfere with each other.
  */
-import { describe, it, expect, afterEach } from "bun:test";
+import { describe, it, expect, afterEach } from "vitest";
 import type { Harness } from "./helpers/harness";
 import { createHarness } from "./helpers/harness";
 import {

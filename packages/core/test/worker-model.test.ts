@@ -1,6 +1,7 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect } from "vitest";
 import { resolveWorkerModel } from "../src/worker-model";
 import { computeLayer0Cap } from "../src/gradient";
+import { LoreConfig } from "../src/config";
 
 // ---------------------------------------------------------------------------
 // resolveWorkerModel
@@ -98,8 +99,6 @@ describe("computeLayer0Cap", () => {
 // ---------------------------------------------------------------------------
 
 describe("LoreConfig — budget cost fields", () => {
-  const { LoreConfig } = require("../src/config");
-
   test("budget defaults include new fields", () => {
     const cfg = LoreConfig.parse({});
     expect(cfg.budget.ltm).toBe(0.05);
@@ -148,8 +147,6 @@ describe("LoreConfig — budget cost fields", () => {
 // ---------------------------------------------------------------------------
 
 describe("LoreConfig — updated distillation defaults", () => {
-  const { LoreConfig } = require("../src/config");
-
   test("distillation.minMessages defaults to 5", () => {
     const cfg = LoreConfig.parse({});
     expect(cfg.distillation.minMessages).toBe(5);

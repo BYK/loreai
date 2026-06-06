@@ -2,7 +2,7 @@
  * Unit tests for [lore:session-id=...] and [lore:project=...] context
  * marker extraction, used by the lore-hermes plugin integration.
  */
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect } from "vitest";
 import {
   extractSessionMarker,
   extractProjectMarker,

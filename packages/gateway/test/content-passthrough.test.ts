@@ -10,7 +10,7 @@
  * LLM calls to receive empty or corrupted content (e.g. Claude Code's `Read`
  * tool on a PNG returned "Tool ran without output or errors").
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import {
   parseAnthropicRequest,
   buildAnthropicRequest,

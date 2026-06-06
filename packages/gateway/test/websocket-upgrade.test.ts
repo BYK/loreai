@@ -21,7 +21,7 @@
  * 'upgrade' handler either returns 426 (under Node) or silently closes
  * the socket (under Bun), both of which stop the client from retrying.
  */
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 
 /**
  * Mirror of the `isWebSocketUpgrade` check in server.ts. Duplicated here

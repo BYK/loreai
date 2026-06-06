@@ -1,9 +1,13 @@
-import { describe, test, expect, afterEach } from "bun:test";
+import { describe, test, expect, afterEach } from "vitest";
+import { fileURLToPath } from "node:url";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { load, LoreConfig } from "../src/config";
 
-const TMP = join(import.meta.dir, "__tmp_config__");
+const TMP = join(
+  fileURLToPath(new URL(".", import.meta.url)),
+  "__tmp_config__",
+);
 
 afterEach(() => {
   rmSync(TMP, { recursive: true, force: true });

@@ -1,4 +1,5 @@
-import { describe, test, expect, beforeEach, afterAll } from "bun:test";
+import { describe, test, expect, beforeEach, afterAll } from "vitest";
+import { fileURLToPath } from "node:url";
 import {
   mkdirSync,
   rmSync,
@@ -29,7 +30,10 @@ import {
 // Test fixtures
 // ---------------------------------------------------------------------------
 
-const TMP_DIR = join(import.meta.dir, "__tmp_agents_file__");
+const TMP_DIR = join(
+  fileURLToPath(new URL(".", import.meta.url)),
+  "__tmp_agents_file__",
+);
 /** Project path doubles as the filesystem directory for .lore.md functions. */
 const PROJECT = TMP_DIR;
 const AGENTS_FILE = join(TMP_DIR, "AGENTS.md");
@@ -1556,7 +1560,8 @@ describe("lore file cache optimization", () => {
     const mtimeAfterFirst = statSync(fp).mtimeMs;
 
     // Small delay to ensure mtime would differ if file were rewritten
-    Bun.sleepSync(50);
+    const start = Date.now();
+    while (Date.now() - start < 50) {}
 
     exportLoreFile(PROJECT); // should skip — hash unchanged
 

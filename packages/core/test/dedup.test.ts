@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeEach } from "vitest";
 import { uuidv7 } from "uuidv7";
 import { db, ensureProject } from "../src/db";
 import * as ltm from "../src/ltm";

@@ -3,14 +3,12 @@
  *
  * Verifies that:
  * - Every file referenced by package.json `files` and `exports` exists
- * - The Bun ESM bundle uses bun:sqlite (not node:sqlite)
  * - The CJS Node bundle uses node:sqlite (not bun:sqlite)
- * - The Bun ESM bundle can be imported at runtime under Bun
  * - The imported module exports the expected public API
  *
- * Requires `bun run bundle` to have been run first. Skipped otherwise.
+ * Requires `pnpm run build` to have been run first. Skipped otherwise.
  */
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,10 +18,7 @@ const distDir = join(packageDir, "dist");
 const pkgJson = JSON.parse(
   readFileSync(join(packageDir, "package.json"), "utf8"),
 );
-const hasBunBundle =
-  existsSync(join(distDir, "index.bun.js")) &&
-  !readFileSync(join(distDir, "index.bun.js"), "utf8").startsWith("export *");
-const hasBundle = existsSync(join(distDir, "index.cjs")) && hasBunBundle;
+const hasBundle = existsSync(join(distDir, "index.cjs"));
 
 describe.skipIf(!hasBundle)("bundle exports", () => {
   // -------------------------------------------------------------------------
@@ -47,27 +42,9 @@ describe.skipIf(!hasBundle)("bundle exports", () => {
     }
   });
 
-  test("Bun bundle uses bun:sqlite, not node:sqlite", () => {
-    const content = readFileSync(join(distDir, "index.bun.js"), "utf8");
-    expect(content).toContain("bun:sqlite");
-    expect(content).not.toContain("node:sqlite");
-  });
-
   test("CJS bundle uses node:sqlite, not bun:sqlite", () => {
     const content = readFileSync(join(distDir, "index.cjs"), "utf8");
     expect(content).toContain("node:sqlite");
     expect(content).not.toContain("bun:sqlite");
-  });
-
-  // -------------------------------------------------------------------------
-  // Layer 2: Runtime import under Bun
-  // -------------------------------------------------------------------------
-
-  test("Bun bundle can be imported at runtime", async () => {
-    const mod = await import(join(distDir, "index.bun.js"));
-    expect(typeof mod.startGateway).toBe("function");
-    expect(typeof mod.loadConfig).toBe("function");
-    expect(typeof mod.readPortFile).toBe("function");
-    expect(typeof mod.probeGateway).toBe("function");
   });
 });

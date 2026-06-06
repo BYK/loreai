@@ -1,4 +1,4 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect } from "vitest";
 import { ensureProject } from "../../src/db";
 import * as ltm from "../../src/ltm";
 import { parseOps, applyOps, type CuratorOp } from "../../src/curator";

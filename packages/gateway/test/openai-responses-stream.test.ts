@@ -8,7 +8,7 @@
  *  - Stop reason mapping from status
  *  - Mixed text + function_call output
  */
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect } from "vitest";
 import { accumulateResponsesSSEStream } from "../src/stream/openai-responses";
 
 // ---------------------------------------------------------------------------

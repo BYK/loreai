@@ -13,7 +13,7 @@
  * tool_use, the follow-up returns a final text answer. We assert the
  * client-facing response contains NO `recall` tool_use block.
  */
-import { describe, test, expect, afterEach } from "bun:test";
+import { describe, test, expect, afterEach } from "vitest";
 import {
   unlinkSync,
   existsSync,

@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeEach } from "vitest";
 import {
   signBody,
   resignBody,
@@ -186,7 +186,7 @@ describe("buildBillingBlock", () => {
     expect(block?.type).toBe("text");
     expect(block?.text).toContain("cch=00000;");
     expect(block?.text).toContain("cc_entrypoint=cli");
-    expect(block?.text).toStartWith("x-anthropic-billing-header:");
+    expect(block?.text).toMatch(/^x-anthropic-billing-header:/);
   });
 
   test("pins billing header to WORKER_VERSION, not the client version", () => {

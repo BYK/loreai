@@ -1,4 +1,4 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect } from "vitest";
 import {
   gatewayMessagesToLore,
   resolveToolResults,
@@ -110,8 +110,8 @@ describe("resolveToolResults", () => {
     expect(toolResultUser.parts).toHaveLength(1);
     expect(toolResultUser.parts[0]?.type).toBe("text");
     const text = textOf(toolResultUser.parts[0]);
-    expect(text).toStartWith("[tool results provided] (t:");
-    expect(text).toEndWith(")");
+    expect(text).toMatch(/^\[tool results provided\] \(t:/);
+    expect(text).toMatch(/\)$/);
   });
 
   test("user message with text + tool_result preserves text, strips tool_result", () => {
@@ -183,8 +183,8 @@ describe("resolveToolResults", () => {
     expect(userMsg.parts).toHaveLength(1);
     expect(userMsg.parts[0]?.type).toBe("text");
     const text = textOf(userMsg.parts[0]);
-    expect(text).toStartWith("[tool results provided] (t:");
-    expect(text).toEndWith(")");
+    expect(text).toMatch(/^\[tool results provided\] \(t:/);
+    expect(text).toMatch(/\)$/);
   });
 
   test("multiple tool calls in one assistant message: all tool_result parts stripped", () => {

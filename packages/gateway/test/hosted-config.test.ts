@@ -6,7 +6,7 @@
  *   2. `LORE_HOSTED_MODE` env var
  *   3. Caller default: `lore start` → hosted ON, `lore run` → hosted OFF
  */
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { loadConfig } from "../src/config";
 import type { StartOptions } from "../src/cli/start";
 import type { GatewayConfig } from "../src/config";

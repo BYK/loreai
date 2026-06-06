@@ -10,7 +10,7 @@
  * resolveSessionProjectPath) via the real HTTP server, complementing the
  * unit-level tests in project-path.test.ts.
  */
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type { Harness } from "./helpers/harness";
 import { createHarness } from "./helpers/harness";
 import {

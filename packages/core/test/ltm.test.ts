@@ -5,8 +5,8 @@ import {
   beforeAll,
   beforeEach,
   afterEach,
-  spyOn,
-} from "bun:test";
+  vi,
+} from "vitest";
 import { uuidv7 } from "uuidv7";
 import { db, ensureProject } from "../src/db";
 import * as ltm from "../src/ltm";
@@ -1487,14 +1487,14 @@ describe("ltm — cross-project promotion", () => {
   // down a LocalProvider in-process triggers Bun NAPI/ONNX crashes, and other
   // suites may have left the provider disabled or broken. Each test sets the
   // desired return value via availableSpy.
-  let availableSpy: ReturnType<typeof spyOn>;
+  let availableSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     // vectorSearch / promotion queries are unscoped — wipe ALL knowledge so
     // embeddings from other suites don't leak in. (Documented gotcha.)
     db().query("DELETE FROM knowledge WHERE embedding IS NOT NULL").run();
     db().query("DELETE FROM knowledge").run();
-    availableSpy = spyOn(embedding, "isAvailable").mockReturnValue(true);
+    availableSpy = vi.spyOn(embedding, "isAvailable").mockReturnValue(true);
   });
 
   afterEach(() => {

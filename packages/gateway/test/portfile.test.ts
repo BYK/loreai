@@ -1,4 +1,4 @@
-import { describe, test, expect, afterEach } from "bun:test";
+import { describe, test, expect, afterEach } from "vitest";
 import { writePortFile, readPortFile, removePortFile } from "../src/portfile";
 
 // Clean up any port file we wrote during tests.

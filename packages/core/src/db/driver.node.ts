@@ -6,49 +6,48 @@
 //
 // Bun deliberately does NOT implement `node:sqlite`, so src code that imports
 // from this file must go through `#db/driver`. Never import `node:sqlite`
-// directly outside this file — it will break `bun test` which runs against src.
+// directly outside this file — it will break the test runner which runs against src.
 
-import { DatabaseSync, type StatementSync } from "node:sqlite";
+import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 
-/**
- * Per-database cache of prepared statements keyed by SQL string.
- *
- * `bun:sqlite` automatically caches prepared statements per-DB when using
- * `.query(sql)`; `node:sqlite` has only `.prepare(sql)` which recompiles on
- * every call. We add a thin `.query()` alias on top of `.prepare()` with
- * caching so every existing call site (`db().query(...).all(...)`) keeps
- * working identically.
- *
- * WeakMap: cache is tied to the Database instance lifetime, no manual cleanup.
- */
-const statementCache = new WeakMap<DatabaseSync, Map<string, StatementSync>>();
+const statementCache = new WeakMap<DatabaseSync, Map<string, unknown>>();
 
-/**
- * Drop-in replacement for `bun:sqlite`'s `Database`.
- *
- * Adds a `.query()` method that caches the underlying `StatementSync`
- * per SQL string. All other methods (`.prepare()`, `.exec()`, `.run()`,
- * `.close()`, PRAGMAs, transactions) come from `DatabaseSync` unchanged.
- */
+interface QueryStatement {
+  all: (...args: unknown[]) => Record<string, unknown>[];
+  get: (...args: unknown[]) => Record<string, unknown> | null;
+  run: (...args: unknown[]) => { changes: number; lastInsertRowid: bigint };
+}
+
 export class Database extends DatabaseSync {
-  /** Cached prepared statement for this SQL. Compiled on first call. */
-  query(sql: string): StatementSync {
+  query(sql: string): QueryStatement {
     let map = statementCache.get(this);
     if (!map) {
-      map = new Map<string, StatementSync>();
+      map = new Map();
       statementCache.set(this, map);
     }
-    let stmt = map.get(sql);
-    if (!stmt) {
-      stmt = this.prepare(sql);
-      map.set(sql, stmt);
+    let entry = map.get(sql);
+    if (!entry) {
+      const stmt = this.prepare(sql);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      entry = {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        all: (...args: any[]) => stmt.all(...args) as Record<string, unknown>[],
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        get: (...args: any[]) => {
+          const result = stmt.get(...args) as Record<string, unknown> | null;
+          return result ?? null;
+        },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        run: (...args: any[]) =>
+          stmt.run(...args) as { changes: number; lastInsertRowid: bigint },
+      };
+      map.set(sql, entry);
     }
-    return stmt;
+    return entry as QueryStatement;
   }
 }
 
-/** Stable SHA-256 hex digest — replaces the Bun-only `Bun.CryptoHasher`. */
 export function sha256(input: string): string {
   return createHash("sha256").update(input).digest("hex");
 }

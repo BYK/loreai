@@ -11,7 +11,7 @@
   "packageManager": "pnpm@10.28.0",
   "scripts": {
     "typecheck": "pnpm -r run typecheck",
-    "test": "bun test",
+    "test": "vitest run",
     "build": "pnpm -r run build",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",

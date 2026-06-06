@@ -1,4 +1,4 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect } from "vitest";
 import fc from "fast-check";
 import { remark } from "remark";
 import {

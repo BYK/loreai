@@ -1,4 +1,4 @@
-import { describe, test, expect, afterAll } from "bun:test";
+import { describe, test, expect, afterAll } from "vitest";
 import { probeGateway } from "../src/index";
 
 /**
@@ -98,24 +98,30 @@ describe("in-process gateway startup", () => {
 
   test("probeGateway returns true for a running health endpoint", async () => {
     // Occupy a port with a server that responds to /health like a lore gateway.
-    const occupier = Bun.serve({
-      port: 0,
-      hostname: "127.0.0.1",
-      fetch: (req) => {
-        if (new URL(req.url).pathname === "/health") {
-          return Response.json({ status: "ok" });
-        }
-        return new Response("occupied", { status: 404 });
-      },
+    // Uses node:http instead of Bun.serve for cross-runtime compatibility.
+    const { createServer } = await import("node:http");
+    const occupier = createServer((req, res) => {
+      const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      if (url.pathname === "/health") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "ok" }));
+      } else {
+        res.writeHead(404);
+        res.end("occupied");
+      }
     });
-    const occupiedPort = occupier.port;
+    const port = await new Promise<number>((resolve) => {
+      occupier.listen(0, "127.0.0.1", () =>
+        resolve((occupier.address() as { port: number }).port),
+      );
+    });
 
     try {
-      const base = `http://127.0.0.1:${occupiedPort}`;
+      const base = `http://127.0.0.1:${port}`;
       const result = await probeGateway(base, 2000);
       expect(result).toBe(true);
     } finally {
-      occupier.stop(true);
+      await new Promise<void>((resolve) => occupier.close(() => resolve()));
     }
   });
 });

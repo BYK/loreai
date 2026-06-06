@@ -1,9 +1,13 @@
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeEach } from "vitest";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { db, ensureProject } from "../src/db";
 import * as latReader from "../src/lat-reader";
 
-const FIXTURES_DIR = join(import.meta.dir, "fixtures");
+const FIXTURES_DIR = join(
+  fileURLToPath(new URL(".", import.meta.url)),
+  "fixtures",
+);
 const PROJECT = FIXTURES_DIR; // fixtures dir acts as project root (has lat.md/ subdir)
 
 describe("lat-reader", () => {

@@ -1,4 +1,5 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect } from "vitest";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { mkdirSync, copyFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -6,7 +7,7 @@ import { tmpdir } from "node:os";
 import "../../src/import/providers/cline";
 import { getProvider } from "../../src/import/providers";
 
-const FIXTURES = join(import.meta.dir, "fixtures");
+const FIXTURES = join(fileURLToPath(new URL(".", import.meta.url)), "fixtures");
 
 describe("Cline provider", () => {
   const provider = getProvider("cline");
