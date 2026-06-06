@@ -1,8 +1,12 @@
 import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
 
+const prNumber = process.env.PR_NUMBER;
+const base = prNumber ? `/_preview/pr-${prNumber}` : "/";
+
 export default defineConfig({
   site: "https://withlore.ai",
+  base,
   output: "static",
   outDir: "./dist",
   publicDir: "./public",
