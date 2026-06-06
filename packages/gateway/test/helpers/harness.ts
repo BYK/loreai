@@ -12,7 +12,6 @@
  */
 import { unlinkSync, existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import type { StatementSync } from "node:sqlite";
 import type { FixtureEntry } from "../../src/recorder";
 
 // ---------------------------------------------------------------------------

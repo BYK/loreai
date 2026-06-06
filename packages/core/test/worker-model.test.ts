@@ -99,6 +99,13 @@ describe("computeLayer0Cap", () => {
 // ---------------------------------------------------------------------------
 
 describe("LoreConfig — budget cost fields", () => {
+  test("budget defaults include new fields", () => {
+    const cfg = LoreConfig.parse({});
+    expect(cfg.budget.ltm).toBe(0.05);
+    expect(cfg.budget.targetCacheReadCostPerTurn).toBe(0.1);
+    expect(cfg.budget.maxLayer0Tokens).toBeUndefined();
+  });
+
   test("targetCacheReadCostPerTurn can be customized", () => {
     const cfg = LoreConfig.parse({
       budget: { targetCacheReadCostPerTurn: 0.05 },

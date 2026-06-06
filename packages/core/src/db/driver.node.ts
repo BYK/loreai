@@ -6,7 +6,7 @@
 //
 // Bun deliberately does NOT implement `node:sqlite`, so src code that imports
 // from this file must go through `#db/driver`. Never import `node:sqlite`
-// directly outside this file — it will break `bun test` which runs against src.
+// directly outside this file — it will break the test runner which runs against src.
 
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";

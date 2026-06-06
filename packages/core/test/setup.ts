@@ -27,7 +27,7 @@ process.env.LORE_DB_PATH = join(tmp, "test.db");
 // they replace the global, and when they restore the captured `originalFetch`
 // in afterEach they restore THIS guard, so post-test async pre-warms stay
 // offline too. Mirrors the SENTRY_ENABLED=0 "no background fetch leaks into
-// tests" precedent in bunfig.toml.
+// tests" precedent in vitest.config.ts.
 const MODELS_DEV_API = "https://models.dev/api.json";
 const CANNED_MODELS_DEV = {
   anthropic: {
