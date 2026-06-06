@@ -629,7 +629,8 @@ describe("runRecallFollowUpStreaming", () => {
     );
 
     expect(capturedReq).not.toBeNull();
-    expect(capturedReq!.stream).toBe(true);
+    const req = capturedReq as unknown as GatewayRequest;
+    expect(req.stream).toBe(true);
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.reader).toBeDefined();
@@ -729,7 +730,8 @@ describe("runRecallFollowUpJSON", () => {
     );
 
     expect(capturedReq).not.toBeNull();
-    expect(capturedReq!.stream).toBe(false);
+    const req = capturedReq as unknown as GatewayRequest;
+    expect(req.stream).toBe(false);
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.continuation).toBe(fakeGatewayResponse);

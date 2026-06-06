@@ -69,8 +69,7 @@ describe("in-process gateway startup", () => {
       const tmp = createServer();
       tmp.listen(0, "127.0.0.1", () => {
         const addr = tmp.address();
-        const port =
-          addr && typeof addr === "object" ? addr.port : undefined;
+        const port = addr && typeof addr === "object" ? addr.port : undefined;
         tmp.close(() =>
           port !== undefined
             ? resolve(port)
