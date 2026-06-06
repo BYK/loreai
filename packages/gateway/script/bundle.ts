@@ -63,8 +63,8 @@ const external = ["node:*", "onnxruntime-node", "sharp"];
 // (server.reload, headers.toJSON) that the Node.js polyfill doesn't provide.
 // Resolve @sentry/node via @sentry/bun (its direct dependency), since
 // @sentry/node is not a direct dependency of this package.
-const sentryBunEntry = createRequire(packageDir + "/").resolve("@sentry/bun");
-const sentryNodeEntry = createRequire(sentryBunEntry + "/").resolve(
+const sentryBunEntry = createRequire(`${packageDir}/`).resolve("@sentry/bun");
+const sentryNodeEntry = createRequire(`${sentryBunEntry}/`).resolve(
   "@sentry/node",
 );
 const sentryNodePlugin: esbuild.Plugin = {
