@@ -78,6 +78,9 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # Build @loreai/core so tests can resolve the package entry
+      - run: pnpm --filter @loreai/core run build
+
       # Restore the vendored embedding model so tests use a local model
       # instead of downloading from HuggingFace Hub (avoids transient 429s).
       # Same cache key as binary-smoke-native / build-nightly-binaries.
