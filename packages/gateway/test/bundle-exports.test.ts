@@ -47,6 +47,4 @@ describe.skipIf(!hasBundle)("bundle exports", () => {
     expect(content).toContain("node:sqlite");
     expect(content).not.toContain("bun:sqlite");
   });
-
-  
 });

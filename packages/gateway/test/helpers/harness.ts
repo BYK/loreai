@@ -33,10 +33,7 @@ export interface Harness {
   /** Send a POST /v1/messages request, return the raw Response */
   chat(requestBody: unknown, apiKey?: string): Promise<Response>;
   /** Query the temporal DB directly via a read-only SQLite connection */
-  queryDB<T = Record<string, unknown>>(
-    sql: string,
-    params?: unknown[],
-  ): T[];
+  queryDB<T = Record<string, unknown>>(sql: string, params?: unknown[]): T[];
   /** Stop the gateway and clean up */
   teardown(): void;
 }

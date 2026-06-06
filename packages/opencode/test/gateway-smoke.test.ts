@@ -111,7 +111,9 @@ describe("in-process gateway startup", () => {
       }
     });
     const port = await new Promise<number>((resolve) => {
-      occupier.listen(0, "127.0.0.1", () => resolve((occupier.address() as { port: number }).port));
+      occupier.listen(0, "127.0.0.1", () =>
+        resolve((occupier.address() as { port: number }).port),
+      );
     });
 
     try {

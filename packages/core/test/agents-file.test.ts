@@ -30,7 +30,10 @@ import {
 // Test fixtures
 // ---------------------------------------------------------------------------
 
-const TMP_DIR = join(fileURLToPath(new URL(".", import.meta.url)), "__tmp_agents_file__");
+const TMP_DIR = join(
+  fileURLToPath(new URL(".", import.meta.url)),
+  "__tmp_agents_file__",
+);
 /** Project path doubles as the filesystem directory for .lore.md functions. */
 const PROJECT = TMP_DIR;
 const AGENTS_FILE = join(TMP_DIR, "AGENTS.md");

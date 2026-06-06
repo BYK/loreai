@@ -20,7 +20,10 @@ import {
 } from "../src/agents-file";
 import { hasLatDir, refresh } from "../src/lat-reader";
 
-const TMP = join(fileURLToPath(new URL(".", import.meta.url)), "__tmp_hosted__");
+const TMP = join(
+  fileURLToPath(new URL(".", import.meta.url)),
+  "__tmp_hosted__",
+);
 
 beforeEach(() => {
   _resetHostedModeForTest();
