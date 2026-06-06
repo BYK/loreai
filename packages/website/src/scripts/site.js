@@ -7,7 +7,9 @@ if (cursor) {
   });
 
   document.querySelectorAll("a,button").forEach((element) => {
-    element.addEventListener("mouseenter", () => cursor.classList.add("expand"));
+    element.addEventListener("mouseenter", () =>
+      cursor.classList.add("expand"),
+    );
     element.addEventListener("mouseleave", () =>
       cursor.classList.remove("expand"),
     );
@@ -71,7 +73,8 @@ function showView(view) {
 
 function showError(message) {
   if (errorMessage) {
-    errorMessage.textContent = message || "Something went wrong. Please try again.";
+    errorMessage.textContent =
+      message || "Something went wrong. Please try again.";
   }
 
   showView(errorView);
@@ -86,7 +89,10 @@ retryButton?.addEventListener("click", () => {
 form?.addEventListener("submit", async (event) => {
   event.preventDefault();
 
-  if (!(email instanceof HTMLInputElement) || !(button instanceof HTMLButtonElement)) {
+  if (
+    !(email instanceof HTMLInputElement) ||
+    !(button instanceof HTMLButtonElement)
+  ) {
     return;
   }
 
