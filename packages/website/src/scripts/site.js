@@ -28,6 +28,11 @@ const revealObserver = new IntersectionObserver(
 );
 
 document.querySelectorAll(".sr").forEach((element) => {
+  // Mark already-visible elements immediately to avoid flash of invisible content
+  const rect = element.getBoundingClientRect();
+  if (rect.top < window.innerHeight && rect.bottom > 0) {
+    element.classList.add("in");
+  }
   revealObserver.observe(element);
 });
 

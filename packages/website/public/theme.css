@@ -920,16 +920,16 @@ footer {
   border-top: 1px solid rgba(196, 221, 199, .1);
 }
 
-/* REVEAL */
+/* REVEAL — hidden by default; transition only on .in to prevent 1→0 animation */
 .sr {
   opacity: 0;
   transform: translateY(20px);
-  transition: 0.8s var(--ease);
 }
 
 .sr.in {
   opacity: 1;
   transform: none;
+  transition: 0.8s var(--ease);
 }
 
 @media(max-width:900px){
