@@ -1,4 +1,4 @@
-import { describe, test, expect, mock } from "bun:test";
+import { describe, test, expect, vi } from "vitest";
 import { ensureProject } from "../../src/db";
 import * as ltm from "../../src/ltm";
 import { extractKnowledge } from "../../src/import/extract";
@@ -21,7 +21,7 @@ function makeChunk(
 
 function makeMockLLM(response: string | null): LLMClient {
   return {
-    prompt: mock(() => Promise.resolve(response)),
+    prompt: vi.fn(() => Promise.resolve(response)),
   };
 }
 
@@ -92,7 +92,7 @@ describe("extractKnowledge", () => {
 
   test("handles LLM errors gracefully", async () => {
     const llm: LLMClient = {
-      prompt: mock(() => Promise.reject(new Error("API error"))),
+      prompt: vi.fn(() => Promise.reject(new Error("API error"))),
     };
 
     const result = await extractKnowledge({
@@ -110,7 +110,7 @@ describe("extractKnowledge", () => {
     const callOrder: number[] = [];
     let callCount = 0;
     const llm: LLMClient = {
-      prompt: mock(async () => {
+      prompt: vi.fn(async () => {
         callOrder.push(++callCount);
         return "[]";
       }),
@@ -154,7 +154,7 @@ describe("extractKnowledge", () => {
   test("sorts chunks chronologically before processing", async () => {
     const processedLabels: string[] = [];
     const llm: LLMClient = {
-      prompt: mock(async (_sys: string, user: string) => {
+      prompt: vi.fn(async (_sys: string, user: string) => {
         // Extract a label marker from the user prompt
         if (user.includes("CHUNK-A")) processedLabels.push("A");
         if (user.includes("CHUNK-B")) processedLabels.push("B");

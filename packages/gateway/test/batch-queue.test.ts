@@ -8,7 +8,7 @@
  *  - Fallback to synchronous on batch API errors
  *  - Shutdown drains the queue
  */
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { createBatchLLMClient } from "../src/batch-queue";
 import type { LLMClient } from "@loreai/core";
 import type { AuthCredential } from "../src/auth";

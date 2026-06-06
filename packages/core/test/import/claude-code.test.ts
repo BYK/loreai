@@ -1,11 +1,12 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect } from "vitest";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
 // Import the provider module to trigger registration, then access it via registry
 import "../../src/import/providers/claude-code";
 import { getProvider } from "../../src/import/providers";
 
-const FIXTURES = join(import.meta.dir, "fixtures");
+const FIXTURES = join(fileURLToPath(new URL(".", import.meta.url)), "fixtures");
 
 describe("Claude Code provider", () => {
   const provider = getProvider("claude-code");

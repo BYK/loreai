@@ -1,10 +1,11 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect } from "vitest";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
 import "../../src/import/providers/codex";
 import { getProvider } from "../../src/import/providers";
 
-const FIXTURES = join(import.meta.dir, "fixtures");
+const FIXTURES = join(fileURLToPath(new URL(".", import.meta.url)), "fixtures");
 
 describe("Codex provider", () => {
   const provider = getProvider("codex");

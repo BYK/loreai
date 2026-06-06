@@ -6,7 +6,7 @@
  * The gateway uses xxHash64 to replicate Claude Code's `cch` billing
  * header — bit-identical output is required for billing validation.
  */
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect } from "vitest";
 import { xxHash64 } from "../src/xxhash";
 
 describe("xxHash64", () => {

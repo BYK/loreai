@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeEach } from "vitest";
 import { db } from "../src/db";
 import * as entities from "../src/entities";
 import { parseResponse, applyOps } from "../src/curator";

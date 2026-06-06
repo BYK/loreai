@@ -8,7 +8,6 @@
   "types": "./dist/index.d.cts",
   "exports": {
     ".": {
-      "bun": "./dist/index.bun.js",
       "types": "./dist/index.d.cts",
       "require": "./dist/index.cjs",
       "default": "./dist/index.cjs"
@@ -34,13 +33,11 @@
     "dist/bin.cjs",
     "dist/embedding-worker.cjs",
     "dist/embedding-worker.js",
-    "dist/index.bun.js",
     "dist/index.cjs",
     "dist/index.d.cts"
   ],
   "engines": {
-    "node": ">=22.15",
-    "bun": ">=1.2.0"
+    "node": ">=22.15"
   },
   "repository": {
     "type": "git",

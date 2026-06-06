@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterAll } from "bun:test";
+import { afterAll } from "vitest";
 import { close } from "../src/db";
 
 // Create an isolated temporary database for the entire test run.

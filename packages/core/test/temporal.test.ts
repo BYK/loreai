@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeAll, beforeEach } from "bun:test";
+import { describe, test, expect, beforeAll, beforeEach } from "vitest";
 import { db, ensureProject } from "../src/db";
 import * as temporal from "../src/temporal";
 import { ftsQuery } from "../src/search";

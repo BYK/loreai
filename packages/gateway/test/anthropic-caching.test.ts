@@ -7,7 +7,7 @@
  *  3. Conversation message caching (breakpoint on last block)
  *  4. No caching for passthrough (meta requests: title gen, summaries, etc.)
  */
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect } from "vitest";
 import {
   buildAnthropicRequest,
   type AnthropicCacheOptions,

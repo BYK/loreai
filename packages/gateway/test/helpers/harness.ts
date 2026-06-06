@@ -11,8 +11,8 @@
  *   harness.teardown();
  */
 import { unlinkSync, existsSync } from "node:fs";
-import { Database } from "bun:sqlite";
-import type { SQLQueryBindings } from "bun:sqlite";
+import { DatabaseSync } from "node:sqlite";
+import type { StatementSync } from "node:sqlite";
 import type { FixtureEntry } from "../../src/recorder";
 
 // ---------------------------------------------------------------------------
@@ -35,7 +35,7 @@ export interface Harness {
   /** Query the temporal DB directly via a read-only SQLite connection */
   queryDB<T = Record<string, unknown>>(
     sql: string,
-    params?: SQLQueryBindings[],
+    params?: unknown[],
   ): T[];
   /** Stop the gateway and clean up */
   teardown(): void;
@@ -91,15 +91,16 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
   // --- 6. Read-only DB handle for assertions (separate connection, no shared state) ---
   function queryDB<T = Record<string, unknown>>(
     sql: string,
-    params?: SQLQueryBindings[],
+    params?: unknown[],
   ): T[] {
     // Open a fresh read-only connection every query — avoids locking races
     // and ensures we always see the latest committed state.
     try {
-      const db = new Database(dbPath, { readonly: true, create: false });
+      const db = new DatabaseSync(dbPath, { readOnly: true });
       try {
-        const stmt = db.query<T, SQLQueryBindings[]>(sql);
-        return stmt.all(...(params ?? []));
+        const stmt = db.prepare(sql);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return stmt.all(...((params ?? []) as any)) as T[];
       } finally {
         db.close();
       }

@@ -8,7 +8,7 @@
  *  - Pending recall injection
  *  - Response stripping
  */
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect } from "vitest";
 import {
   RECALL_GATEWAY_TOOL,
   RECALL_TOOL_NAME,

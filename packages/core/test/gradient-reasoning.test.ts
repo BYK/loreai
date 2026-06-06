@@ -21,7 +21,7 @@
  * silently regresses this — e.g. by extending `stripToolOutputs` to
  * reasoning, or by routing through `stripToTextOnly` — will fail loudly.
  */
-import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { describe, test, expect, beforeAll, afterAll } from "vitest";
 import { ensureProject } from "../src/db";
 import {
   transform,

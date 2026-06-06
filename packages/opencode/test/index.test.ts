@@ -1,4 +1,5 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect } from "vitest";
+import { fileURLToPath } from "node:url";
 import { LorePlugin } from "../src/index";
 import type { Plugin } from "@opencode-ai/plugin";
 
@@ -28,7 +29,7 @@ function createMockClient() {
  */
 async function initPlugin() {
   const client = createMockClient();
-  const tmpDir = `${import.meta.dir}/__tmp_plugin_${Date.now()}__`;
+  const tmpDir = `${fileURLToPath(new URL(".", import.meta.url))}/__tmp_plugin_${Date.now()}__`;
   const { mkdirSync, rmSync } = await import("node:fs");
   mkdirSync(tmpDir, { recursive: true });
 

@@ -4,7 +4,7 @@
  * Uses a real gateway server on an ephemeral port with an isolated temp DB.
  * No upstream interceptor needed — these endpoints don't call LLM APIs.
  */
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { unlinkSync, existsSync } from "node:fs";
 import { zstdCompressSync } from "node:zlib";
 

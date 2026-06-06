@@ -5,7 +5,7 @@
  * involvement — to verify the full eviction pipeline: guards, persistence,
  * cleanup, and consolidation cooldown removal.
  */
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeEach } from "vitest";
 import { resetPipelineState } from "../src/pipeline";
 import {
   setSessionAuth,

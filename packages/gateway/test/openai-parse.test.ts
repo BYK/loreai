@@ -11,7 +11,7 @@
  * "removed orphaned tool_use block(s)" and inserting "[assistant response]"
  * placeholders).
  */
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect } from "vitest";
 import { parseOpenAIRequest } from "../src/translate/openai";
 import {
   loreMessagesToGateway,

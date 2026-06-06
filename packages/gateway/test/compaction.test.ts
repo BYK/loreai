@@ -1,4 +1,4 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect } from "vitest";
 import {
   isCompactionRequest,
   detectCompactionRequest,
@@ -546,7 +546,7 @@ describe("buildCompactionResponse", () => {
     expect(response.id).toBeTypeOf("string");
     expect(response.id.length).toBeGreaterThan(0);
     expect(response.model).toBe("claude-sonnet-4-20250514");
-    expect(response.content).toBeArray();
+    expect(Array.isArray(response.content)).toBe(true);
     expect(response.content).toHaveLength(1);
     expect(response.content[0].type).toBe("text");
     expect((response.content[0] as { type: "text"; text: string }).text).toBe(
@@ -578,7 +578,7 @@ describe("buildCompactionResponse", () => {
 
   test("response ID starts with msg_lore_compact_", () => {
     const response = buildCompactionResponse("s1", "text", "model-1");
-    expect(response.id).toStartWith("msg_lore_compact_");
+    expect(response.id).toMatch(/^msg_lore_compact_/);
   });
 
   test("response ID is unique across calls", () => {

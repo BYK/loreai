@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   fetchModelData,
   getModelEntry,
@@ -98,7 +98,7 @@ describe("fetchModelData", () => {
   });
 
   test("fetches and parses model data from models.dev JSON API", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), {
           status: 200,
@@ -119,7 +119,7 @@ describe("fetchModelData", () => {
   });
 
   test("fetches models from multiple providers", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response(
           JSON.stringify(
@@ -143,7 +143,7 @@ describe("fetchModelData", () => {
 
   test("caches results and returns cache on subsequent calls", async () => {
     let callCount = 0;
-    globalThis.fetch = mock(() => {
+    globalThis.fetch = vi.fn(() => {
       callCount++;
       return Promise.resolve(
         new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), {
@@ -170,7 +170,7 @@ describe("fetchModelData", () => {
   });
 
   test("returns empty map on API error with no cache", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(new Response("Server Error", { status: 500 })),
     ) as unknown as typeof fetch;
 
@@ -179,7 +179,7 @@ describe("fetchModelData", () => {
   });
 
   test("returns stale cache on network error", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.reject(new Error("Network error")),
     ) as unknown as typeof fetch;
 
@@ -188,7 +188,7 @@ describe("fetchModelData", () => {
   });
 
   test("deduplicates concurrent in-flight requests", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), {
           status: 200,
@@ -217,7 +217,7 @@ describe("fetchModelData", () => {
   });
 
   test("deduplicates concurrent calls even on network error", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.reject(new Error("Network error")),
     ) as unknown as typeof fetch;
 
@@ -238,7 +238,7 @@ describe("fetchModelData", () => {
   });
 
   test("handles missing providers gracefully", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response(JSON.stringify({ google: { models: {} } }), {
           status: 200,
@@ -251,7 +251,7 @@ describe("fetchModelData", () => {
   });
 
   test("loads available providers even when some are missing", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response(
           JSON.stringify({
@@ -294,7 +294,7 @@ describe("lookupProviderRoute", () => {
   });
 
   test("resolves anthropic-protocol provider after cache is populated", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response(
           JSON.stringify({
@@ -321,7 +321,7 @@ describe("lookupProviderRoute", () => {
   });
 
   test("resolves openai-compatible provider after cache is populated", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response(
           JSON.stringify({
@@ -347,7 +347,7 @@ describe("lookupProviderRoute", () => {
   });
 
   test("resolves openai-responses provider after cache is populated", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response(
           JSON.stringify({
@@ -373,7 +373,7 @@ describe("lookupProviderRoute", () => {
   });
 
   test("returns null for provider without api field", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response(
           JSON.stringify({
@@ -394,7 +394,7 @@ describe("lookupProviderRoute", () => {
   });
 
   test("returns null for unknown provider", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response(
           JSON.stringify({
@@ -410,7 +410,7 @@ describe("lookupProviderRoute", () => {
   });
 
   test("returns null on cold cache and triggers background fetch", () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response(
           JSON.stringify({
@@ -453,7 +453,7 @@ describe("getModelEntry", () => {
   });
 
   test("returns exact match from models.dev", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), {
           status: 200,
@@ -468,7 +468,7 @@ describe("getModelEntry", () => {
   });
 
   test("returns prefix match for dated model IDs", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), {
           status: 200,
@@ -482,7 +482,7 @@ describe("getModelEntry", () => {
   });
 
   test("returns fallback for unknown model", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), {
           status: 200,
@@ -524,7 +524,7 @@ describe("getModelEntrySync", () => {
   });
 
   test("returns cached data after fetchModelData populates cache", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), {
           status: 200,
@@ -542,7 +542,7 @@ describe("getModelEntrySync", () => {
   });
 
   test("prefix matches work in sync mode", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), {
           status: 200,
@@ -599,7 +599,7 @@ describe("resetWorkerModelState", () => {
     // resetPipelineState() → resetWorkerModelState() can clear the model
     // cache while our mock is active, causing unexpected re-fetches.
     let callCount = 0;
-    globalThis.fetch = mock(() => {
+    globalThis.fetch = vi.fn(() => {
       callCount++;
       return Promise.resolve(
         new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), {

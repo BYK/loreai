@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeEach } from "vitest";
 import { db, ensureProject } from "../src/db";
 import * as toolTrace from "../src/tool-trace";
 

@@ -6,7 +6,7 @@
  * blocks" Anthropic API error that occurs when gradient evicts an assistant
  * message but keeps the following user message with orphaned tool_result refs.
  */
-import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { describe, test, expect, beforeAll, afterAll } from "vitest";
 import {
   loreMessagesToGateway,
   removeOrphanedToolResults,

@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeEach } from "vitest";
 import { db, ensureProject } from "../src/db";
 import * as temporal from "../src/temporal";
 import {
