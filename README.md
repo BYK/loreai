@@ -1,12 +1,14 @@
 # Lore
 
+> **Lore. The memory that compounds.**
+
 > **Experimental** — Under active development. APIs, storage format, and behavior may change.
 
-**Stop re-explaining your project to your AI.** Your tools change. Your memory doesn't.
+**Stop re-explaining your project to your AI.** Your tools change. Your memory doesn't. **Your team's lore, in every session.**
 
-Your AI forgets decisions, loses file paths, and undoes its own work. Lore fixes this automatically — no context files to maintain, no workflow changes.
+Your AI forgets decisions, loses file paths, and undoes its own work. Lore gives it shared context across projects, tools, and providers — no context files to maintain, no workflow changes. Every new session starts with the relevant facts and gets a fresh injection after the first turn.
 
-Lore is a transparent LLM proxy that adds three-tier memory to any AI coding agent. Context management and long-term memory aren't separate problems — they're one continuous pipeline. Distillation feeds the gradient context manager, which feeds the knowledge curator, which feeds `.lore.md`, and with Lore Cloud *(coming soon)*, your team.
+Lore is a transparent LLM proxy that gives any AI agent shared context — across tools, projects, and teams. The memory that compounds. Context management and long-term memory aren't separate problems: they're one continuous pipeline. Distillation feeds the gradient context manager, which feeds the knowledge curator, which feeds `.lore.md`, and with Lore Cloud *(coming soon)*, your team.
 
 Built on [Sanity's Nuum](https://www.sanity.io/blog/how-we-solved-the-agent-memory-problem) memory architecture and [Mastra's Observational Memory](https://mastra.ai/research/observational-memory) research. The core idea: coding agents need **distillation, not summarization** — preserving file paths, error messages, and exact decisions rather than narrative summaries that lose the details agents need to keep working.
 
