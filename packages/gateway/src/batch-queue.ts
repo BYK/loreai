@@ -28,6 +28,7 @@ import type { LLMClient } from "@loreai/core";
 import { log, getKV, setKV } from "@loreai/core";
 import * as Sentry from "@sentry/bun";
 import { authFingerprint, type AuthCredential } from "./auth";
+import { resolveProviderRoute } from "./config";
 import { authHeaders } from "./auth";
 import {
   setGenAiUsageAttributes,
@@ -635,8 +636,19 @@ export function createBatchLLMClient(
     openai: createOpenAIBatchProvider(upstreams.openai),
   };
 
+  // Map providerID to the correct batch provider. Providers using the
+  // OpenAI wire protocol (NVIDIA, OpenRouter, HuggingFace, etc.) route
+  // through the OpenAI batch provider since they share the same API format.
   function resolveProvider(providerID: string): BatchProvider {
-    return providers[providerID] ?? providers.anthropic;
+    if (providers[providerID]) return providers[providerID];
+    const route = resolveProviderRoute(providerID);
+    if (
+      route?.protocol === "openai" ||
+      route?.protocol === "openai-responses"
+    ) {
+      return providers.openai;
+    }
+    return providers.anthropic;
   }
 
   // State
