@@ -4,9 +4,9 @@
  * running inside the gateway process.
  *
  * Supports both Anthropic Messages API and OpenAI Chat Completions API.
- * The provider is selected at call time based on `model.providerID`:
- *   - "anthropic" → POST /v1/messages (Anthropic wire format)
- *   - "openai"    → POST /v1/chat/completions (OpenAI wire format)
+ * The wire protocol is resolved from the provider route registry:
+ *   - Anthropic-protocol providers → POST /v1/messages
+ *   - OpenAI-protocol providers   → POST /v1/chat/completions
  *
  * Retry logic, Sentry instrumentation, worker call tracking, and error
  * handling are shared across both providers.
@@ -18,6 +18,7 @@ import * as Sentry from "@sentry/bun";
 import type { AuthCredential } from "./auth";
 import { authHeaders, markAuthStale } from "./auth";
 import { tripCircuitBreaker } from "./background-limiter";
+import { resolveProviderRoute } from "./config";
 import { buildBillingBlock, buildOAuthWorkerHeaders, signBody } from "./cch";
 import {
   setGenAiUsageAttributes,
@@ -165,24 +166,43 @@ type ProviderTarget = {
   providerName: string;
 };
 
+/**
+ * Determine whether a provider uses the OpenAI wire protocol.
+ * Checks the provider route registry (PROVIDER_ROUTES) for the wire
+ * protocol. Falls back to name-based heuristic for unregistered providers.
+ * When an upstream override is active, the route's protocol is the source
+ * of truth — the override URL accepts the provider's native format.
+ */
+function resolveIsOpenAI(
+  providerID: string,
+  _upstreamOverride?: string,
+): boolean {
+  const route = resolveProviderRoute(providerID);
+  if (route?.protocol) {
+    return route.protocol === "openai" || route.protocol === "openai-responses";
+  }
+  // Proxy/aggregator (protocol=null) or unknown provider: fall back to
+  // name-based heuristic. Anthropic is the only known non-OpenAI provider.
+  return providerID !== "anthropic";
+}
+
 /** Resolve upstream target based on model provider.
  *  When `upstreamOverride` is set, the request routes to that URL instead
- *  of the default — used for proxy/aggregator sessions (e.g. OpenCode Zen)
- *  where the session's credentials only work against the proxy endpoint. */
+ *  of the default — used for same-provider routing where the session's
+ *  credentials only work against the session's endpoint. */
 function resolveTarget(
   upstreams: { anthropic: string; openai: string },
   providerID: string,
+  isOpenAI: boolean,
   upstreamOverride?: string,
 ): ProviderTarget {
   if (upstreamOverride) {
-    // Proxy/aggregator route — providerName reflects the wire protocol
-    // target, not the physical endpoint. The override URL IS the endpoint.
     return {
       url: upstreamOverride.replace(/\/$/, ""),
-      providerName: providerID === "openai" ? "openai" : "anthropic",
+      providerName: isOpenAI ? "openai" : "anthropic",
     };
   }
-  if (providerID === "openai") {
+  if (isOpenAI) {
     return {
       url: upstreams.openai.replace(/\/$/, ""),
       providerName: "openai",
@@ -359,11 +379,12 @@ export function createGatewayLLMClient(
         log.warn("no auth credentials available for worker call");
         return null;
       }
-      const isOpenAI = model.providerID === "openai";
       const upstreamOverride = opts?.upstreamUrl;
+      const isOpenAI = resolveIsOpenAI(model.providerID, upstreamOverride);
       const target = resolveTarget(
         upstreams,
         model.providerID,
+        isOpenAI,
         upstreamOverride,
       );
       const maxTokens = opts?.maxTokens ?? 8192;

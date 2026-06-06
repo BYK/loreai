@@ -462,7 +462,7 @@ export function buildIdleWorkHandler(
   return async (sessionID: string, state: SessionState) => {
     const projectPath = state.projectPath;
     const cfg = loreConfig();
-    const model = getWorkerModel(state.lastUpstream?.providerID);
+    const model = getWorkerModel(state.lastUpstream);
 
     // 1. Distillation — force-distill ALL pending messages on idle, even
     // below minMessages. The cache is going cold; aggressive distillation

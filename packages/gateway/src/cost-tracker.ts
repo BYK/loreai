@@ -1050,6 +1050,7 @@ export function computeHistoricalEstimates(
   // Resolve the worker model used for distillation calls.
   // Distillations run on the worker model (e.g. claude-sonnet-4-6), not the
   // conversation model (e.g. claude-opus-4-6). Use worker pricing for overhead.
+  // No session context available — use default provider for estimation.
   const workerResult = getWorkerModel();
   const workerModelID = workerResult?.modelID ?? DEFAULT_ESTIMATION_MODEL;
   const workerPricing = getPricingSync(workerModelID);

@@ -937,61 +937,20 @@ function getLLMClient(config: GatewayConfig): LLMClient {
     // credentials (the proxy's key, not the provider's).
     //
     // When the session has used multiple providers (e.g. Anthropic + MiniMax),
-    // inject the upstream URL only when the snapshot's provider matches the
-    // worker's target. This prevents routing a Claude worker model through
-    // MiniMax's API (which rejects non-MiniMax models with 401).
-    //
-    // The providerID in the snapshot is the X-Lore-Provider header value
-    // (e.g. "minimax-coding-plan", "anthropic", "openrouter"). The worker
-    // model's providerID is a canonical name (e.g. "anthropic", "openai").
-    // We match by checking if the snapshot's providerID exactly equals the
-    // worker model's providerID. When no exact match exists (e.g. worker
-    // wants "anthropic" but session only used "minimax-coding-plan"), we
-    // DON'T inject any upstream URL — the worker uses its default upstream
-    // (api.anthropic.com), which is correct for a Claude worker model.
+    // Workers always use the same provider as the session. Route worker
+    // calls through the session's upstream URL so they use the session's
+    // credentials and endpoint. When a dedicated worker API key is set
+    // (LORE_WORKER_API_KEY), skip URL injection — the worker uses its own
+    // credentials and default upstream.
     const inner: LLMClient = {
       async prompt(system, user, opts) {
         if (opts?.sessionID && !opts.upstreamUrl && !workerApiKey) {
           const state = sessions.get(opts.sessionID);
-          if (state) {
-            const workerProviderID = opts.model?.providerID;
-
-            // Look for a snapshot whose provider exactly matches the worker's
-            // target (e.g. worker="anthropic" matches snapshot="anthropic").
-            //
-            // When no exact match is found, check if the session's last
-            // provider is a proxy/aggregator (protocol=null in PROVIDER_ROUTES,
-            // e.g. OpenCode Zen). Proxy credentials only work through the
-            // proxy URL, so workers must route through it too. For direct
-            // providers (MiniMax, OpenRouter), DON'T fall back — the worker
-            // should use its default upstream to avoid sending wrong models
-            // to provider-specific APIs.
-            let snapshot: typeof state.lastUpstream;
-            if (workerProviderID) {
-              snapshot = state.upstreamByProvider.get(workerProviderID);
-              if (
-                !snapshot &&
-                state.lastUpstream?.url &&
-                state.lastUpstream.providerID
-              ) {
-                const route = resolveProviderRoute(
-                  state.lastUpstream.providerID,
-                );
-                if (route && route.protocol === null) {
-                  // Proxy/aggregator (protocol=null) — route workers through it
-                  snapshot = state.lastUpstream;
-                }
-              }
-            } else {
-              snapshot = state.lastUpstream;
-            }
-
-            if (snapshot?.url) {
-              return rawClient.prompt(system, user, {
-                ...opts,
-                upstreamUrl: snapshot.url,
-              });
-            }
+          if (state?.lastUpstream?.url) {
+            return rawClient.prompt(system, user, {
+              ...opts,
+              upstreamUrl: state.lastUpstream.url,
+            });
           }
         }
         return rawClient.prompt(system, user, opts);
@@ -2974,8 +2933,7 @@ function postResponse(
       sessionID,
       actualInput,
       resp.usage.outputTokens ?? 0,
-      getWorkerModel(sessionState.lastUpstream?.providerID)?.modelID ??
-        "unknown",
+      getWorkerModel(sessionState.lastUpstream)?.modelID ?? "unknown",
       req.model,
       sessionState.resolvedConversationTTL,
     );
@@ -2995,8 +2953,7 @@ function postResponse(
     ) {
       const modelInputCost =
         getModelEntrySync(
-          getWorkerModel(sessionState.lastUpstream?.providerID)?.modelID ??
-            "unknown",
+          getWorkerModel(sessionState.lastUpstream)?.modelID ?? "unknown",
         ).cost?.input ?? 3;
       const curationMultiplier =
         modelInputCost >= 5 ? 3 : modelInputCost >= 1 ? 2 : 1;
@@ -3035,8 +2992,7 @@ function scheduleBackgroundWork(
 
   const llm = getLLMClient(config);
   const cfg = loreConfig();
-  const sessionProvider = sessionState.lastUpstream?.providerID;
-  const model = getWorkerModel(sessionProvider);
+  const model = getWorkerModel(sessionState.lastUpstream);
 
   // When the OAuth account is near quota exhaustion, skip non-urgent
   // background work to preserve remaining entitlement for user-facing turns.
@@ -3107,8 +3063,9 @@ function scheduleBackgroundWork(
   if (isBackgroundPaused() || quotaPaused) return;
 
   const modelInputCost =
-    getModelEntrySync(getWorkerModel(sessionProvider)?.modelID ?? "unknown")
-      .cost?.input ?? 3;
+    getModelEntrySync(
+      getWorkerModel(sessionState.lastUpstream)?.modelID ?? "unknown",
+    ).cost?.input ?? 3;
   const curationMultiplier =
     modelInputCost >= 5 ? 3 : modelInputCost >= 1 ? 2 : 1;
   const effectiveAfterTurns = cfg.curator.afterTurns * curationMultiplier;
@@ -3169,15 +3126,15 @@ export async function generateCompactionSummary(opts: {
   sessionID: string;
   config: GatewayConfig;
   previousSummary?: string;
-  sessionProviderID?: string;
+  sessionUpstream?: { providerID?: string; modelID?: string };
 }): Promise<string | null> {
-  const { projectPath, sessionID, config, previousSummary, sessionProviderID } =
+  const { projectPath, sessionID, config, previousSummary, sessionUpstream } =
     opts;
   const llm = getLLMClient(config);
 
   // 1. Force-distill all undistilled messages.
   // Mark urgent: true — client is blocking on the compaction response.
-  const model = getWorkerModel(sessionProviderID);
+  const model = getWorkerModel(sessionUpstream);
   await distillation.run({
     llm,
     projectPath,
@@ -3239,7 +3196,7 @@ export async function generateCompactionSummary(opts: {
     Math.min(Math.ceil(compactInputTokens * 0.5), 20_000),
   );
   const summaryText = await llm.prompt(compactPrompt, userContent, {
-    model: getWorkerModel(sessionProviderID),
+    model: getWorkerModel(sessionUpstream),
     workerID: "lore-compact",
     urgent: true,
     maxTokens: compactMaxTokens,
@@ -3288,7 +3245,7 @@ async function handleCompaction(
     sessionID,
     config,
     previousSummary: extractPreviousSummary(req),
-    sessionProviderID: sessionState.lastUpstream?.providerID,
+    sessionUpstream: sessionState.lastUpstream,
   });
 
   // If Lore's own summary generation failed (rate limits, auth issues, etc.),
@@ -3420,7 +3377,7 @@ export async function handleCompactEndpoint(
         typeof body.previous_summary === "string"
           ? body.previous_summary
           : undefined,
-      sessionProviderID: state?.lastUpstream?.providerID,
+      sessionUpstream: state?.lastUpstream,
     });
 
     if (summary == null) {
@@ -5329,7 +5286,7 @@ async function handleCurateSlashCommand(
   const projectPath = state.projectPath;
   const { distillation, curator } = await import("@loreai/core");
   const llm = getLLMClient(config);
-  const model = getWorkerModel(state.lastUpstream?.providerID);
+  const model = getWorkerModel(state.lastUpstream);
 
   log.info(`/lore:curate: running for session=${sessionID.slice(0, 16)}`);
 

@@ -434,9 +434,11 @@ function resolveGitHubCopilotWorker(sessionModelID: string): {
  *  3. General fallback (GPT-5.4-mini) for unknown providers
  *  4. Config model fallback (session model)
  */
-export function getWorkerModel(
-  sessionProviderID?: string,
-): { providerID: string; modelID: string } | undefined {
+export function getWorkerModel(session?: {
+  providerID?: string;
+  /** Session model ID (UpstreamSnapshot uses `model`, callers may use `modelID`). */
+  model?: string;
+}): { providerID: string; modelID: string } | undefined {
   // Env var override — highest priority. Useful for global worker model
   // configuration without per-project .lore.json (e.g. routing all workers
   // to MiniMax). Format: "providerID/modelID" or just "modelID" (defaults
@@ -456,42 +458,58 @@ export function getWorkerModel(
 
   const cfg = loreConfig();
 
-  // Determine if the session model is expensive enough to warrant a cheaper worker
+  // The session's actual provider and model (from the last API request).
+  // Workers MUST use the same provider as the session — cross-provider
+  // calls always fail (wrong credentials, wrong API format).
+  const sessionProviderID = session?.providerID;
+  const sessionModelID = session?.model;
+
+  // Effective provider: explicit config > session > anthropic default.
+  const effectiveProvider =
+    cfg.model?.providerID ?? sessionProviderID ?? "anthropic";
+
+  // Effective session model: config > session snapshot > provider default.
+  const effectiveModelID = cfg.model?.modelID ?? sessionModelID ?? undefined;
+
+  // Determine if the session model is expensive enough to warrant a cheaper
+  // worker from the SAME provider. Never cross-provider.
   let costAwareDefault: { providerID: string; modelID: string } | undefined;
-  if (cfg.model?.modelID && cfg.model?.providerID) {
-    const entry = getModelEntrySync(cfg.model.modelID);
+  if (effectiveModelID) {
+    const entry = getModelEntrySync(effectiveModelID);
     const inputCost = entry.cost?.input ?? 3;
 
     if (inputCost >= EXPENSIVE_MODEL_THRESHOLD) {
-      const providerID = cfg.model.providerID;
-
-      if (providerID === "github-copilot") {
+      if (effectiveProvider === "github-copilot") {
         // GitHub Copilot proxies many providers — detect family from model ID
-        costAwareDefault = resolveGitHubCopilotWorker(cfg.model.modelID);
+        costAwareDefault = resolveGitHubCopilotWorker(effectiveModelID);
       } else {
-        const mapping = WORKER_DEFAULTS[providerID];
-        if (mapping && !mapping.alreadyCheap(cfg.model.modelID)) {
+        const mapping = WORKER_DEFAULTS[effectiveProvider];
+        if (mapping && !mapping.alreadyCheap(effectiveModelID)) {
           costAwareDefault = {
             providerID: mapping.providerID,
             modelID: mapping.modelID,
           };
         }
-        // Unknown providers (Google, xAI, Mistral, etc.): fall back to session
-        // model rather than calling a provider that may not be configured.
+        // Unknown providers (Google, xAI, Mistral, NVIDIA, etc.): no cheaper
+        // validated model available — fall through to use session model as-is.
       }
     }
   }
 
-  // When no session model is configured (no .lore.json or no model field),
-  // use the session's provider to pick a compatible default. Without this,
-  // an OpenAI-only session (e.g. Codex) would get an Anthropic worker model
-  // and every worker call would send the OpenAI key to api.anthropic.com → 401.
-  const effectiveProvider =
-    cfg.model?.providerID ?? sessionProviderID ?? "anthropic";
-  const fallback =
+  // Build the fallback model (used when no cost-aware default or config
+  // override applies). Priority:
+  //   1. Config model from .lore.json
+  //   2. Session model (actual model from the last API request)
+  //   3. Provider's default worker model (WORKER_DEFAULTS)
+  //   4. undefined → skip background work
+  const fallback: { providerID: string; modelID: string } | undefined =
     cfg.model ??
-    WORKER_DEFAULTS[effectiveProvider] ??
-    WORKER_DEFAULTS.anthropic;
+    (sessionModelID
+      ? { providerID: effectiveProvider, modelID: sessionModelID }
+      : undefined) ??
+    WORKER_DEFAULTS[effectiveProvider];
+
+  if (!fallback) return undefined;
 
   return workerModel.resolveWorkerModel(
     effectiveProvider,

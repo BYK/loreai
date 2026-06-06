@@ -27,9 +27,7 @@
 import type { LLMClient } from "@loreai/core";
 import { log, getKV, setKV } from "@loreai/core";
 import * as Sentry from "@sentry/bun";
-import { authFingerprint, type AuthCredential } from "./auth";
-import { resolveProviderRoute } from "./config";
-import { authHeaders } from "./auth";
+import { authFingerprint, type AuthCredential, authHeaders } from "./auth";
 import {
   setGenAiUsageAttributes,
   emitCostMetric,
@@ -636,19 +634,11 @@ export function createBatchLLMClient(
     openai: createOpenAIBatchProvider(upstreams.openai),
   };
 
-  // Map providerID to the correct batch provider. Providers using the
-  // OpenAI wire protocol (NVIDIA, OpenRouter, HuggingFace, etc.) route
-  // through the OpenAI batch provider since they share the same API format.
-  function resolveProvider(providerID: string): BatchProvider {
-    if (providers[providerID]) return providers[providerID];
-    const route = resolveProviderRoute(providerID);
-    if (
-      route?.protocol === "openai" ||
-      route?.protocol === "openai-responses"
-    ) {
-      return providers.openai;
-    }
-    return providers.anthropic;
+  // Only Anthropic and OpenAI have batch APIs. Return the matching batch
+  // provider, or null for providers that don't support batching (NVIDIA,
+  // OpenRouter, etc.) — callers fall through to synchronous processing.
+  function resolveProvider(providerID: string): BatchProvider | null {
+    return providers[providerID] ?? null;
   }
 
   // State
@@ -847,7 +837,12 @@ export function createBatchLLMClient(
       }
       if (batchable.length > 0) {
         const provider = resolveProvider(providerID);
-        await submitBatch(provider, auth, batchable);
+        if (provider) {
+          await submitBatch(provider, auth, batchable);
+        } else {
+          // No batch API for this provider — process synchronously
+          await fallbackAll(batchable);
+        }
       }
     }
   }
@@ -1058,7 +1053,12 @@ export function createBatchLLMClient(
       // flush time — and for bearer tokens, the batch submit always 401s
       // before falling back to sync anyway.
       const providerID = (opts?.model ?? defaultModel).providerID;
-      if (disabledBatchProviders.has(providerID)) {
+      // Skip queue for providers without batch API support (NVIDIA, etc.)
+      // or providers whose batch endpoint has been disabled (404/auth error).
+      if (
+        !resolveProvider(providerID) ||
+        disabledBatchProviders.has(providerID)
+      ) {
         totalFallback++;
         return inner.prompt(system, user, opts);
       }
