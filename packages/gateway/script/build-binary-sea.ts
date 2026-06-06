@@ -582,40 +582,27 @@ async function buildBinary() {
   const fossilizeTarget = (t: CompileTarget): string =>
     t.startsWith("windows") ? t.replace("windows", "win") : t;
   const platformArgs = targets.map(fossilizeTarget).join(",");
-  // Resolve fossilize from the gateway package's devDependencies.
-  // require.resolve finds the CLI entry regardless of package manager
-  // layout (bun, pnpm, npm). Fall back to npx as a last resort.
-  let fossilizeBin: string;
-  let fossilizePrefix: string[] = [];
-  try {
-    const gatewayRequire = createRequire(`${packageDir}/`);
-    const fossilizePkg = dirname(
-      gatewayRequire.resolve("fossilize/package.json"),
-    );
-    const binPath = join(
-      fossilizePkg,
-      "node_modules",
-      ".bin",
-      process.platform === "win32" ? "fossilize.cmd" : "fossilize",
-    );
-    if (existsSync(binPath)) {
-      fossilizeBin = binPath;
-    } else {
-      // Try the package's own bin entry
-      const pkgJson = JSON.parse(
-        readFileSync(join(fossilizePkg, "package.json"), "utf-8"),
-      ) as { bin?: Record<string, string> | string };
-      const bin =
-        typeof pkgJson.bin === "string" ? pkgJson.bin : pkgJson.bin?.fossilize;
-      fossilizeBin = bin ? join(fossilizePkg, bin) : "npx";
-      if (fossilizeBin === "npx") fossilizePrefix = ["--yes", "fossilize"];
-    }
-  } catch {
-    fossilizeBin = "npx";
-    fossilizePrefix = ["--yes", "fossilize"];
+  // Resolve fossilize's CLI entry from the gateway package's
+  // devDependencies, then invoke it via `node <cli.js>`. This works
+  // on all platforms and with any package manager layout.
+  const gatewayRequire = createRequire(`${packageDir}/`);
+  const fossilizePkgDir = dirname(
+    gatewayRequire.resolve("fossilize/package.json"),
+  );
+  const fossilizePkgJson = JSON.parse(
+    readFileSync(join(fossilizePkgDir, "package.json"), "utf-8"),
+  ) as { bin?: Record<string, string> | string };
+  const fossilizeBinRel =
+    typeof fossilizePkgJson.bin === "string"
+      ? fossilizePkgJson.bin
+      : fossilizePkgJson.bin?.fossilize;
+  if (!fossilizeBinRel) {
+    console.error("✗ fossilize package has no bin entry");
+    process.exit(1);
   }
+  const fossilizeCli = join(fossilizePkgDir, fossilizeBinRel);
   const fossilizeArgs: string[] = [
-    ...fossilizePrefix,
+    fossilizeCli,
     bundlePath,
     "--no-bundle",
     "--hole-punch",
@@ -634,7 +621,7 @@ async function buildBinary() {
   console.log(
     `→ fossilize: ${targets.length} platform(s), ${Object.keys(manifest).length} asset(s)`,
   );
-  const result = spawnSync(fossilizeBin, fossilizeArgs, {
+  const result = spawnSync(process.execPath, fossilizeArgs, {
     cwd: packageDir,
     stdio: "inherit",
   });
