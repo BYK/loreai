@@ -920,7 +920,7 @@ footer {
   border-top: 1px solid rgba(196, 221, 199, .1);
 }
 
-/* REVEAL — hidden by default; transition only on .in to prevent 1→0 animation */
+/* REVEAL — transition only on .in to prevent 1→0 fade-out animation */
 .sr {
   opacity: 0;
   transform: translateY(20px);

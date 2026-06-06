@@ -1,3 +1,7 @@
+---
+import fs from "node:fs";
+const siteJs = fs.readFileSync("src/scripts/site.js", "utf-8");
+---
 <!DOCTYPE html>
 <html lang="en">
 
@@ -463,9 +467,7 @@
     </div>
   </footer>
 
-  <script>
-    import "../scripts/site.js";
-  </script>
+  <script set:html={siteJs}></script>
 </body>
 
 </html>

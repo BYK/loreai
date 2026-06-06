@@ -28,32 +28,33 @@ const revealObserver = new IntersectionObserver(
 );
 
 document.querySelectorAll(".sr").forEach((element) => {
-  // Mark already-visible elements immediately to avoid flash of invisible content
-  const rect = element.getBoundingClientRect();
-  if (rect.top < window.innerHeight && rect.bottom > 0) {
+  // Mark elements already in the viewport immediately to avoid flash of invisible content
+  if (element.getBoundingClientRect().top < window.innerHeight) {
     element.classList.add("in");
   }
   revealObserver.observe(element);
 });
 
-const versionBadge = document.getElementById("version-badge");
+(async () => {
+  const versionBadge = document.getElementById("version-badge");
 
-if (versionBadge) {
-  try {
-    const response = await fetch(
-      "https://api.github.com/repos/BYK/loreai/releases/latest",
-    );
+  if (versionBadge) {
+    try {
+      const response = await fetch(
+        "https://api.github.com/repos/BYK/loreai/releases/latest",
+      );
 
-    if (response.ok) {
-      const data = await response.json();
-      versionBadge.textContent = `v${data.tag_name || "0.13.4"}`;
-    } else {
+      if (response.ok) {
+        const data = await response.json();
+        versionBadge.textContent = `v${data.tag_name || "0.13.4"}`;
+      } else {
+        versionBadge.textContent = "v0.13.4";
+      }
+    } catch {
       versionBadge.textContent = "v0.13.4";
     }
-  } catch {
-    versionBadge.textContent = "v0.13.4";
   }
-}
+})();
 
 const LOOPS_ENDPOINT =
   "https://app.loops.so/api/newsletter-form/cmpemslgp03m10jxaipjw78iq";
