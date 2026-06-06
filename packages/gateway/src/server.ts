@@ -75,7 +75,7 @@ function withCors(response: Response): Response {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Convert Bun's Headers object to a plain Record<string, string>. */
+/** Convert a Web Headers object to a plain Record<string, string>. */
 function headersToRecord(headers: Headers): Record<string, string> {
   const record: Record<string, string> = {};
   headers.forEach((value, key) => {
