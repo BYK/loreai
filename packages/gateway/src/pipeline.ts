@@ -106,12 +106,20 @@ import {
   parseAnthropicResponseJSON,
   type AnthropicCacheOptions,
 } from "./translate/anthropic";
-import { buildOpenAIUpstreamRequest } from "./translate/openai";
+import {
+  buildOpenAIUpstreamRequest,
+  buildOpenAIResponse,
+} from "./translate/openai";
 import {
   buildOpenAIResponsesUpstreamRequest,
+  buildOpenAIResponsesResponse,
   parseOpenAIResponsesRequest,
 } from "./translate/openai-responses";
-import { accumulateResponsesSSEStream } from "./stream/openai-responses";
+import {
+  accumulateResponsesSSEStream,
+  translateAnthropicStreamToResponses,
+} from "./stream/openai-responses";
+import { translateAnthropicStreamToOpenAI } from "./stream/openai";
 import {
   createStreamAccumulator,
   createRecallAwareAccumulator,
@@ -2509,6 +2517,8 @@ async function accumulateNonStreamOpenAIStream(
  */
 function nonStreamHttpResponse(
   resp: GatewayResponse,
+  clientProtocol?: GatewayRequest["protocol"],
+  clientStream?: boolean,
   extraHeaders?: Record<string, string>,
 ): Response {
   // Scale usage so the client's token total stays below auto-compact threshold.
@@ -2528,11 +2538,33 @@ function nonStreamHttpResponse(
       cacheCreationInputTokens: scaledUsage.cache_creation_input_tokens,
     },
   };
-  const body = buildAnthropicNonStreamResponse(scaledResp);
-  return new Response(JSON.stringify(body), {
-    status: 200,
-    headers: { "content-type": "application/json", ...extraHeaders },
-  });
+
+  // Return the response in the client's native wire format so server handlers
+  // can pass through without re-translation. This prevents the class of bugs
+  // where the stream flag is forgotten during server-side format conversion.
+  let clientResp: Response;
+  if (clientProtocol === "openai") {
+    clientResp = buildOpenAIResponse(scaledResp, clientStream ?? false);
+  } else if (clientProtocol === "openai-responses") {
+    clientResp = buildOpenAIResponsesResponse(
+      scaledResp,
+      clientStream ?? false,
+    );
+  } else {
+    // Anthropic or unspecified — default format
+    const body = buildAnthropicNonStreamResponse(scaledResp);
+    clientResp = new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  if (extraHeaders) {
+    for (const [k, v] of Object.entries(extraHeaders)) {
+      clientResp.headers.set(k, v);
+    }
+  }
+  return clientResp;
 }
 
 /**
@@ -3252,9 +3284,17 @@ async function handleCompaction(
   sessionState.cacheAnalytics.lastRequestBody = null;
 
   if (req.stream) {
-    return streamHttpResponse(resp);
+    // streamHttpResponse always emits Anthropic SSE — wrap for OpenAI clients.
+    const anthropicSSE = streamHttpResponse(resp);
+    if (req.protocol === "openai") {
+      return translateAnthropicStreamToOpenAI(anthropicSSE);
+    }
+    if (req.protocol === "openai-responses") {
+      return translateAnthropicStreamToResponses(anthropicSSE);
+    }
+    return anthropicSSE;
   }
-  return nonStreamHttpResponse(resp);
+  return nonStreamHttpResponse(resp, req.protocol, req.stream);
 }
 
 // ---------------------------------------------------------------------------
@@ -4561,6 +4601,8 @@ async function handleConversationTurn(
         );
         return nonStreamHttpResponse(
           unsustainable ? injectContextWarning(markerResp) : markerResp,
+          req.protocol,
+          req.stream,
           { "x-lore-recall-invoked": "true" },
         );
       }
@@ -4606,6 +4648,8 @@ async function handleConversationTurn(
         );
         return nonStreamHttpResponse(
           unsustainable ? injectContextWarning(markerResp) : markerResp,
+          req.protocol,
+          req.stream,
           { "x-lore-recall-invoked": "true" },
         );
       }
@@ -4627,6 +4671,8 @@ async function handleConversationTurn(
         );
         return nonStreamHttpResponse(
           unsustainable ? injectContextWarning(markerResp) : markerResp,
+          req.protocol,
+          req.stream,
           { "x-lore-recall-invoked": "true" },
         );
       }
@@ -4673,6 +4719,8 @@ async function handleConversationTurn(
       recallDepth > 0 ? { "x-lore-recall-invoked": "true" } : undefined;
     return nonStreamHttpResponse(
       unsustainable ? injectContextWarning(currentResp) : currentResp,
+      req.protocol,
+      req.stream,
       recallHeaders,
     );
   };
@@ -4700,7 +4748,7 @@ async function handleConversationTurn(
     const hasRecallTool = modifiedReq.tools.some(
       (t) => t.name === RECALL_TOOL_NAME,
     );
-    return buildStreamingResponse(
+    const anthropicSSE = buildStreamingResponse(
       upstreamResponse,
       (resp) =>
         postResponse(req, resp, sessionState, config, requestBody, genAiSpan),
@@ -4709,6 +4757,15 @@ async function handleConversationTurn(
         : undefined,
       unsustainable ? CONTEXT_WARNING_TEXT : undefined,
     );
+    // Translate to client's wire format if needed. When the upstream is
+    // Anthropic but the client speaks OpenAI, wrap the Anthropic SSE stream.
+    if (req.protocol === "openai") {
+      return translateAnthropicStreamToOpenAI(anthropicSSE);
+    }
+    if (req.protocol === "openai-responses") {
+      return translateAnthropicStreamToResponses(anthropicSSE);
+    }
+    return anthropicSSE;
   }
 
   // Non-streaming: dispatch to correct accumulator based on upstream protocol.

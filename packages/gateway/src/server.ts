@@ -15,22 +15,13 @@
 import { DEFAULT_PORT, type GatewayConfig } from "./config";
 import { bootstrapDailySpend, getDailyBudget } from "./cost-tracker";
 import type { GatewayRequest } from "./translate/types";
-import {
-  parseAnthropicRequest,
-  parseAnthropicResponseJSON,
-} from "./translate/anthropic";
-import { parseOpenAIRequest, buildOpenAIResponse } from "./translate/openai";
-import { translateAnthropicStreamToOpenAI } from "./stream/openai";
-import {
-  parseOpenAIResponsesRequest,
-  buildOpenAIResponsesResponse,
-} from "./translate/openai-responses";
-import { translateAnthropicStreamToResponses } from "./stream/openai-responses";
+import { parseAnthropicRequest } from "./translate/anthropic";
+import { parseOpenAIRequest } from "./translate/openai";
+import { parseOpenAIResponsesRequest } from "./translate/openai-responses";
 import {
   handleRequest,
   handleCompactEndpoint,
   handleResponsesCompactEndpoint,
-  accumulateResponsesNonStreamJSON,
 } from "./pipeline";
 import { upstreamFetch } from "./fetch";
 
@@ -238,34 +229,17 @@ async function handleOpenAIChatCompletions(
     return errorResponse(400, "invalid_request_error", msg);
   }
 
-  let pipelineResp: Response;
   try {
-    pipelineResp = await handleRequest(gatewayReq, config);
+    // Pipeline returns the response in the client's native wire format
+    // (OpenAI Chat Completions JSON or SSE), so no server-side translation
+    // is needed. This prevents the class of bugs where the stream flag is
+    // forgotten during format conversion.
+    return withCors(await handleRequest(gatewayReq, config));
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Pipeline error";
     console.error(`[lore] pipeline error: ${msg}`);
     return errorResponse(502, "api_error", `Gateway pipeline error: ${msg}`);
   }
-
-  // Pipeline always returns internal Anthropic-format response.
-  // Translate back to OpenAI format before returning to the client.
-  if (!pipelineResp.ok) {
-    // Upstream or pipeline error — forward as-is
-    return withCors(pipelineResp);
-  }
-
-  const contentType = pipelineResp.headers.get("content-type") ?? "";
-  if (contentType.includes("text/event-stream")) {
-    // True streaming: translate Anthropic SSE → OpenAI Chat Completions SSE incrementally
-    return withCors(translateAnthropicStreamToOpenAI(pipelineResp));
-  }
-
-  // Non-streaming: translate Anthropic wire JSON → GatewayResponse → OpenAI
-  const respBody = await pipelineResp.json();
-  const gatewayResp = parseAnthropicResponseJSON(
-    respBody as Record<string, unknown>,
-  );
-  return withCors(buildOpenAIResponse(gatewayResp, false));
 }
 
 async function handleOpenAIResponses(
@@ -290,51 +264,16 @@ async function handleOpenAIResponses(
     return errorResponse(400, "invalid_request_error", msg);
   }
 
-  let pipelineResp: Response;
   try {
-    pipelineResp = await handleRequest(gatewayReq, config);
+    // Pipeline returns the response in the client's native wire format
+    // (OpenAI Responses API JSON or SSE), so no server-side translation
+    // is needed.
+    return withCors(await handleRequest(gatewayReq, config));
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Pipeline error";
     console.error(`[lore] pipeline error: ${msg}`);
     return errorResponse(502, "api_error", `Gateway pipeline error: ${msg}`);
   }
-
-  // Pipeline always returns internal Anthropic-format response.
-  // Translate back to Responses API format before returning to the client.
-  if (!pipelineResp.ok) {
-    return withCors(pipelineResp);
-  }
-
-  const contentType = pipelineResp.headers.get("content-type") ?? "";
-  if (contentType.includes("text/event-stream")) {
-    // Pipeline returned SSE. This can be either:
-    //  a) Anthropic SSE from normal conversation turns → needs translation
-    //  b) Raw OpenAI Responses SSE from passthrough → forward as-is
-    // Detect by peeking at the x-lore-upstream-protocol header (set by
-    // passthrough) or by checking the original request protocol.
-    if (gatewayReq.protocol === "openai-responses") {
-      // For passthrough: the SSE is already in Responses API format,
-      // just forward it directly. For normal turns: the pipeline converts
-      // openai-responses to non-streaming internally (accumulateResponsesSSEStream),
-      // so we never get Anthropic SSE for openai-responses protocol.
-      return withCors(pipelineResp);
-    }
-    // Anthropic SSE → translate to Responses API SSE
-    return withCors(translateAnthropicStreamToResponses(pipelineResp));
-  }
-
-  // Non-streaming: translate pipeline JSON → GatewayResponse → Responses API.
-  // The pipeline may return either Anthropic-format JSON (normal conversation turns
-  // go through accumulate→nonStreamHttpResponse) or raw OpenAI Responses API JSON
-  // (meta/passthrough requests forward the upstream response as-is). Detect which
-  // format we received and parse accordingly.
-  const respBody = (await pipelineResp.json()) as Record<string, unknown>;
-  const isRawResponsesFormat =
-    respBody.object === "response" && Array.isArray(respBody.output);
-  const gatewayResp = isRawResponsesFormat
-    ? accumulateResponsesNonStreamJSON(respBody)
-    : parseAnthropicResponseJSON(respBody);
-  return withCors(buildOpenAIResponsesResponse(gatewayResp, gatewayReq.stream));
 }
 
 // ---------------------------------------------------------------------------
