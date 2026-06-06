@@ -3626,27 +3626,64 @@ async function handlePassthrough(
 ): Promise<Response> {
   setSentryLightContext({ model: req.model });
 
-  const { response: upstreamResponse } = await forwardToUpstream(req, config);
+  const { response: upstreamResponse, effectiveProtocol } =
+    await forwardToUpstream(req, config);
 
-  // For streaming, pipe through unchanged
-  if (req.stream && upstreamResponse.body) {
-    return new Response(upstreamResponse.body, {
+  // When upstream and client use the same protocol, pass through unchanged.
+  // Cross-protocol translation is only needed when provider routing maps
+  // to a different protocol (e.g., OpenAI client → Anthropic upstream).
+  if (effectiveProtocol === req.protocol) {
+    if (req.stream && upstreamResponse.body) {
+      return new Response(upstreamResponse.body, {
+        status: upstreamResponse.status,
+        headers: {
+          "content-type":
+            upstreamResponse.headers.get("content-type") ?? "text/event-stream",
+        },
+      });
+    }
+    const body = await upstreamResponse.text();
+    return new Response(body, {
       status: upstreamResponse.status,
-      headers: {
-        "content-type":
-          upstreamResponse.headers.get("content-type") ?? "text/event-stream",
-      },
+      headers: { "content-type": "application/json" },
     });
   }
 
-  // For non-streaming, pass through the JSON response as-is
-  const body = await upstreamResponse.text();
-  return new Response(body, {
-    status: upstreamResponse.status,
-    headers: {
-      "content-type": "application/json",
-    },
-  });
+  // Cross-protocol: accumulate the upstream response and re-emit in the
+  // client's wire format (reuses the same translation infrastructure as
+  // conversation turns).
+  if (req.stream && upstreamResponse.body) {
+    if (effectiveProtocol === "anthropic") {
+      // Anthropic SSE upstream → translate to client's format
+      const anthropicSSE = new Response(upstreamResponse.body, {
+        status: upstreamResponse.status,
+        headers: {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+          connection: "keep-alive",
+        },
+      });
+      if (req.protocol === "openai") {
+        return translateAnthropicStreamToOpenAI(anthropicSSE);
+      }
+      if (req.protocol === "openai-responses") {
+        return translateAnthropicStreamToResponses(anthropicSSE);
+      }
+    }
+    // Other cross-protocol streaming combos: accumulate + re-emit
+    const resp = await accumulateNonStreamResponse(
+      upstreamResponse,
+      effectiveProtocol,
+    );
+    return nonStreamHttpResponse(resp, req.protocol, req.stream);
+  }
+
+  // Non-streaming cross-protocol: accumulate + re-emit
+  const resp = await accumulateNonStreamResponse(
+    upstreamResponse,
+    effectiveProtocol,
+  );
+  return nonStreamHttpResponse(resp, req.protocol, req.stream);
 }
 
 /**
@@ -5323,45 +5360,40 @@ async function handleCurateSlashCommand(
   return slashResponse(req, responseText, `msg_lore_curate_${Date.now()}`);
 }
 
-/** Build a synthetic slash-command response (streaming or JSON). */
+/** Build a synthetic slash-command response in the client's wire format. */
 function slashResponse(
   req: GatewayRequest,
   text: string,
   msgId: string,
 ): Response {
-  if (req.stream) {
-    const sseBody = buildSSETextResponse(msgId, req.model, text, {
+  // Build a GatewayResponse and use the protocol-aware response builders
+  // so slash commands work correctly for all client protocols.
+  const resp: GatewayResponse = {
+    id: msgId,
+    model: req.model,
+    content: [{ type: "text", text }],
+    stopReason: "end_turn",
+    usage: {
       inputTokens: 0,
       outputTokens: 0,
-    });
-    return new Response(sseBody, {
-      status: 200,
-      headers: {
-        "content-type": "text/event-stream",
-        "cache-control": "no-cache",
-        connection: "keep-alive",
-      },
-    });
+      cacheReadInputTokens: 0,
+      cacheCreationInputTokens: 0,
+    },
+  };
+
+  if (req.stream) {
+    // Build Anthropic SSE, then translate to client's format if needed
+    const anthropicSSE = streamHttpResponse(resp);
+    if (req.protocol === "openai") {
+      return translateAnthropicStreamToOpenAI(anthropicSSE);
+    }
+    if (req.protocol === "openai-responses") {
+      return translateAnthropicStreamToResponses(anthropicSSE);
+    }
+    return anthropicSSE;
   }
 
-  return new Response(
-    JSON.stringify({
-      id: msgId,
-      type: "message",
-      role: "assistant",
-      content: [{ type: "text", text }],
-      model: req.model,
-      stop_reason: "end_turn",
-      stop_sequence: null,
-      usage: {
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_read_input_tokens: 0,
-        cache_creation_input_tokens: 0,
-      },
-    }),
-    { status: 200, headers: { "content-type": "application/json" } },
-  );
+  return nonStreamHttpResponse(resp, req.protocol, req.stream);
 }
 
 // ---------------------------------------------------------------------------
