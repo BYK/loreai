@@ -2925,6 +2925,19 @@ function postResponse(
       model: req.model,
       headers: forwardClientHeaders(req.rawHeaders),
     };
+    // Detect provider switch: if the model or provider changed, the cached
+    // warmup body is stale (different model field at byte 10). Clear it to
+    // avoid false cache-bust warnings ("early divergence at byte 10") and
+    // wasted warmup requests that can never hit the cache prefix.
+    const prevUpstream = sessionState.lastUpstream;
+    if (
+      prevUpstream &&
+      (prevUpstream.model !== upstreamSnapshot.model ||
+        prevUpstream.providerID !== upstreamSnapshot.providerID)
+    ) {
+      sessionState.cacheAnalytics.lastRequestBody = null;
+    }
+
     sessionState.lastUpstream = upstreamSnapshot;
     // Store per-provider snapshot so workers/cache-warmer can look up the
     // correct URL and credentials when the session uses multiple providers.
