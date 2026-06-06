@@ -8,8 +8,9 @@
  * Everything is bundled except:
  *   - node:* built-ins (resolved at runtime)
  *
- * The Bun → Node.js polyfill layer (script/node-polyfills.ts) is injected at
- * bundle time so the source code stays Bun-native.
+ * Source code is pure Node.js — no `Bun.*` polyfill layer is needed.
+ * (xxHash64 lives in src/xxhash.ts as a standalone module since there is
+ * no Node.js equivalent of `Bun.hash.xxHash64`.)
  *
  * Debug IDs are injected into the JS + sourcemap after bundling for Sentry
  * source map resolution. When SENTRY_AUTH_TOKEN is set, sourcemaps are
@@ -91,8 +92,6 @@ await esbuild.build({
   logLevel: "info",
   legalComments: "none",
   plugins: [sentryNodePlugin],
-  // Inject polyfills — provides Bun.serve(), Bun.zstd*, etc. under Node.js
-  inject: [join(here, "node-polyfills.ts")],
   // Build-time constants
   define: {
     LORE_CLI_VERSION: JSON.stringify(pkg.version),
@@ -340,13 +339,13 @@ export declare function loadConfig(): GatewayConfig;
  * Prefer startGateway() for most use cases — it handles port fallback,
  * port file management, and existing-instance reuse automatically.
  */
-export declare function startServer(config: GatewayConfig): {
+export declare function startServer(config: GatewayConfig): Promise<{
   stop: () => void;
   port: number;
   hosts: string[];
-  /** Resolves when the server is listening. Present under Node.js; absent under Bun. */
-  ready?: Promise<void>;
-};
+  /** Resolves when all bound servers are listening. */
+  ready: Promise<void>;
+}>;
 
 /**
  * Start the gateway with port fallback, port file management, and

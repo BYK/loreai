@@ -18,8 +18,9 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { chmod, mkdir, unlink } from "node:fs/promises";
+import { chmod, copyFile, mkdir, unlink } from "node:fs/promises";
 import { delimiter, join, resolve } from "node:path";
+import { compare as semverCompare } from "semver";
 import { VERSION } from "../version";
 import { stringifyUnknown, UpgradeError } from "./errors";
 
@@ -72,11 +73,12 @@ export function isNightlyVersion(version: string): boolean {
 /**
  * Compare two version strings and return their ordering.
  *
- * Uses `Bun.semver.order` which handles both stable (`X.Y.Z`) and
- * nightly (`X.Y.Z-dev.<unix-seconds>`) versions correctly.
+ * Uses the `semver` package which handles both stable (`X.Y.Z`) and
+ * nightly (`X.Y.Z-dev.<unix-seconds>`) versions correctly — a nightly
+ * build is always less than the stable release it precedes.
  */
 export function compareVersions(a: string, b: string): -1 | 0 | 1 {
-  return Bun.semver.order(a, b);
+  return semverCompare(a, b) as -1 | 0 | 1;
 }
 
 /**
@@ -330,7 +332,7 @@ export async function installBinary(
         // Ignore if doesn't exist
       }
 
-      await Bun.write(tempPath, Bun.file(sourcePath));
+      await copyFile(sourcePath, tempPath);
 
       if (process.platform !== "win32") {
         await chmod(tempPath, 0o755);

@@ -16,9 +16,13 @@
  * detection, setup spawning, and Sentry SDK telemetry.
  */
 
-import { chmodSync, statSync, unlinkSync } from "node:fs";
+import { chmodSync, createWriteStream, statSync, unlinkSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { setTimeout as sleep } from "node:timers/promises";
 import { getMeta, setMeta } from "@loreai/core";
 
 import {
@@ -294,14 +298,10 @@ async function streamDecompressToFile(
       Uint8Array
     >,
   );
-  const writer = Bun.file(destPath).writer();
-  try {
-    for await (const chunk of stream) {
-      writer.write(chunk);
-    }
-  } finally {
-    await writer.end();
-  }
+  await pipeline(
+    Readable.fromWeb(stream as never),
+    createWriteStream(destPath),
+  );
 }
 
 function getNightlyGzFilename(): string {
@@ -368,7 +368,7 @@ async function downloadStableToPath(
   }
 
   const body = await response.arrayBuffer();
-  await Bun.write(destPath, body);
+  await writeFile(destPath, Buffer.from(body));
 }
 
 /** Max probe attempts before giving up */
@@ -391,7 +391,7 @@ async function waitForBinaryVisible(path: string): Promise<number> {
     if (size !== null) return size;
     if (attempt === VERIFY_MAX_ATTEMPTS) break;
     const delay = VERIFY_BASE_DELAY_MS * 2 ** (attempt - 1);
-    await Bun.sleep(delay);
+    await sleep(delay);
   }
   throw new UpgradeError(
     "execution_failed",

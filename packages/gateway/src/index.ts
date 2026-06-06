@@ -11,6 +11,7 @@
  *   lore run claude
  */
 import "../instrument";
+import { fileURLToPath } from "node:url";
 
 // ---------------------------------------------------------------------------
 // Library API
@@ -31,15 +32,26 @@ export type { GatewayHandle, StartOptions } from "./cli/start";
 export { _cli } from "./cli/main";
 
 // ---------------------------------------------------------------------------
-// Direct execution — `bun run src/index.ts` still works as before
+// Direct execution — `bun run src/index.ts` (or tsx) still works as before
 // ---------------------------------------------------------------------------
 
-if (typeof Bun !== "undefined" && Bun.main === import.meta.path) {
+// Direct execution detection: only auto-start when this module is the entry
+// point. Under the esbuild CJS bundle, `import.meta.url` is replaced with
+// `""` so the IIFE returns false — the block becomes dead code (the bin.cjs
+// wrapper handles entry). Under tsx/bun ESM, the check works correctly.
+const isMainModule = (() => {
+  if (!import.meta.url) return false;
+  try {
+    return process.argv[1] === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+})();
+
+if (isMainModule) {
   // Direct execution (e.g. `bun run src/index.ts` from the OpenCode plugin)
   // defaults to `start` (no agent auto-launch), not `run` — there's no TTY
   // and no reason to auto-detect agents when launched as an embedded server.
-  // esbuild CJS output drops import.meta to `{}` so the condition is
-  // always false in the npm bundle — the await is dead-code-eliminated.
   import("./cli/start").then(({ commandStart }) =>
     commandStart({ quiet: true }),
   );

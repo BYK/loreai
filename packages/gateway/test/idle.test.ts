@@ -7,6 +7,7 @@
  * we run the actual tests in a subprocess via `bun test`.
  */
 import { describe, test, expect } from "bun:test";
+import { spawn } from "node:child_process";
 import { join } from "node:path";
 
 const WORKER_PATH = join(import.meta.dir, "helpers", "idle-worker.ts");
@@ -31,15 +32,31 @@ async function runIsolatedTests(): Promise<{
   stdout: string;
   stderr: string;
 }> {
-  const proc = Bun.spawn(["bun", "test", WORKER_PATH], {
+  const proc = spawn("bun", ["test", WORKER_PATH], {
     env: { ...process.env, NODE_ENV: "test" },
-    stdout: "pipe",
-    stderr: "pipe",
+    // Explicit stdio: ignore stdin (we don't need to write to the child),
+    // pipe stdout/stderr so we can capture them as strings.
+    stdio: ["ignore", "pipe", "pipe"],
   });
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
+  if (!proc.stdout || !proc.stderr) {
+    throw new Error("Failed to capture subprocess output streams");
+  }
+  const [stdout, stderr, exitCode] = await Promise.all([
+    streamToString(proc.stdout),
+    streamToString(proc.stderr),
+    new Promise<number>((resolve, reject) => {
+      proc.once("error", reject);
+      proc.once("close", (code) => resolve(code ?? 1));
+    }),
   ]);
-  const exitCode = await proc.exited;
   return { exitCode, stdout, stderr };
+}
+
+function streamToString(stream: NodeJS.ReadableStream): Promise<string> {
+  const chunks: Buffer[] = [];
+  return new Promise((resolve, reject) => {
+    stream.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    stream.once("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
+    stream.once("error", reject);
+  });
 }

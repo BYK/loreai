@@ -23,6 +23,7 @@
 import { unlinkSync } from "node:fs";
 
 import {
+  compareVersions,
   GITHUB_RELEASES_URL,
   getPlatformBinaryName,
   getUserAgent,
@@ -326,14 +327,13 @@ export function filterAndSortChainTags(
   for (const tag of allTags) {
     const version = tag.slice(PATCH_TAG_PREFIX.length);
     if (
-      Bun.semver.order(version, currentVersion) === 1 &&
-      Bun.semver.order(version, targetVersion) !== 1
+      compareVersions(version, currentVersion) === 1 &&
+      compareVersions(version, targetVersion) !== 1
     ) {
       chainTags.push({ tag, version });
     }
   }
-
-  chainTags.sort((a, b) => Bun.semver.order(a.version, b.version));
+  chainTags.sort((a, b) => compareVersions(a.version, b.version));
   return chainTags.map((t) => t.tag);
 }
 

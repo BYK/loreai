@@ -350,8 +350,6 @@ async function buildBinary() {
       // Runs FIRST: extracts WASM files from SEA assets and registers
       // __LORE_VENDOR_WASM_PATHS__ on globalThis.
       join(here, "native-loader.cjs"),
-      // Bun.serve / Bun.zstd* / etc. shims for Node.
-      join(here, "node-polyfills.ts"),
     ],
     outfile: bundlePath,
     // "linked" produces an external .map file with a //# sourceMappingURL=

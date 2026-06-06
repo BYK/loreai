@@ -16,7 +16,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { getConfigDir } from "./binary";
+import { compareVersions, getConfigDir } from "./binary";
 import { VERSION } from "../version";
 import { prefetchNightlyPatches, prefetchStablePatches } from "./delta-upgrade";
 import { cleanupPatchCache } from "./patch-cache";
@@ -211,7 +211,7 @@ async function maybePrefetchPatches(
   latestVersion: string,
   signal: AbortSignal,
 ): Promise<void> {
-  if (Bun.semver.order(latestVersion, VERSION) !== 1) {
+  if (compareVersions(latestVersion, VERSION) !== 1) {
     return;
   }
   try {
@@ -311,7 +311,7 @@ function getUpdateNotificationImpl(): string | null {
     }
 
     // Only notify if latest is strictly newer than current
-    if (Bun.semver.order(latestVersion, VERSION) !== 1) {
+    if (compareVersions(latestVersion, VERSION) !== 1) {
       return null;
     }
 

@@ -5,11 +5,11 @@
  * TRDIFF10 format (produced by zig-bsdiff with `--use-zstd`). Designed for
  * minimal memory usage during CLI self-upgrades:
  *
- * - Old binary: copy-then-mmap for 0 JS heap (CoW on btrfs/xfs/APFS),
- *   falling back to `arrayBuffer()` if copy/mmap fails
+ * - Old binary: read fully into memory (mmap is a Bun-specific optimization
+ *   without a Node.js equivalent — readFileSync is the cross-runtime option)
  * - Diff/extra blocks: streamed via `DecompressionStream('zstd')`
- * - Output: written incrementally to disk via `Bun.file().writer()`
- * - Integrity: SHA-256 computed inline via `Bun.CryptoHasher`
+ * - Output: written incrementally to disk via `node:fs` createWriteStream
+ * - Integrity: SHA-256 computed inline via `node:crypto` createHash
  *
  * TRDIFF10 format (from zig-bsdiff):
  * ```
@@ -20,13 +20,15 @@
  * [32..]   zstd(control) | zstd(diff) | zstd(extra)
  * ```
  *
- * Adapted from Sentry CLI's bspatch.ts — pure Bun, no external dependencies.
+ * Adapted from Sentry CLI's bspatch.ts — no external dependencies.
  */
 
-import { constants, copyFileSync } from "node:fs";
-import { unlink } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { constants, copyFileSync, createWriteStream } from "node:fs";
+import { readFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { zstdDecompressSync } from "node:zlib";
 
 /** TRDIFF10 header magic bytes */
 const TRDIFF10_MAGIC = "TRDIFF10";
@@ -183,8 +185,9 @@ type OldFileHandle = {
 /**
  * Load the old binary for read access during patching.
  *
- * Strategy: copy to temp file, then try mmap on the copy. Falls back to
- * arrayBuffer() if copy or mmap fails.
+ * Strategy: copy with `COPYFILE_FICLONE` for reflink / CoW (zero disk I/O
+ * on btrfs/xfs/APFS), then read the copy. Bun's mmap optimization has no
+ * Node.js equivalent, so we read into a Buffer instead.
  */
 let loadCounter = 0;
 
@@ -196,7 +199,7 @@ async function loadOldBinary(oldPath: string): Promise<OldFileHandle> {
   );
   try {
     copyFileSync(oldPath, tempCopy, constants.COPYFILE_FICLONE);
-    const data = Bun.mmap(tempCopy, { shared: false });
+    const data = await readFile(tempCopy);
     return {
       data,
       cleanup: () =>
@@ -209,7 +212,7 @@ async function loadOldBinary(oldPath: string): Promise<OldFileHandle> {
       /* May not exist */
     });
     return {
-      data: new Uint8Array(await Bun.file(oldPath).arrayBuffer()),
+      data: await readFile(oldPath),
       cleanup: () => {},
     };
   }
@@ -235,7 +238,7 @@ export async function applyPatch(
   const extraStart = diffStart + diffLen;
 
   // Control block is tiny — decompress fully for random access
-  const controlBlock = Bun.zstdDecompressSync(
+  const controlBlock = zstdDecompressSync(
     patchData.subarray(controlStart, diffStart),
   );
 
@@ -248,8 +251,8 @@ export async function applyPatch(
   const { data: oldFile, cleanup: cleanupOldFile } =
     await loadOldBinary(oldPath);
 
-  const writer = Bun.file(destPath).writer();
-  const hasher = new Bun.CryptoHasher("sha256");
+  const writer = createWriteStream(destPath);
+  const hasher = createHash("sha256");
 
   let oldpos = 0;
   let newpos = 0;
@@ -293,7 +296,11 @@ export async function applyPatch(
     }
   } finally {
     try {
-      await writer.end();
+      // Node's Writable.end() takes an error-first callback — `await` it
+      // (not just fire-and-forget) so write errors propagate to the caller.
+      await new Promise<void>((resolve, reject) => {
+        writer.end((err?: Error | null) => (err ? reject(err) : resolve()));
+      });
     } finally {
       await cleanupOldFile();
     }
@@ -305,5 +312,5 @@ export async function applyPatch(
     );
   }
 
-  return hasher.digest("hex") as string;
+  return hasher.digest("hex");
 }

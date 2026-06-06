@@ -70,7 +70,7 @@ setUpstreamInterceptor(interceptor);
 // ---------------------------------------------------------------------------
 
 const config = loadConfig();
-const server = startServer(config);
+const server = await startServer(config);
 
 // ---------------------------------------------------------------------------
 // Print usage instructions

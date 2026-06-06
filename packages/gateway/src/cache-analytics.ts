@@ -20,19 +20,18 @@ import type {
   GatewayUsage,
 } from "./translate/types.ts";
 import { log } from "@loreai/core";
+import { zstdCompressSync, zstdDecompressSync } from "node:zlib";
 
 // ---------------------------------------------------------------------------
-// Compression helpers (Bun built-in zstd, zero dependencies)
+// Compression helpers (node:zlib zstd, available in Node.js >= 22.15)
 // ---------------------------------------------------------------------------
 
 export function compressBody(body: string): Uint8Array {
-  return Bun.zstdCompressSync(Buffer.from(body));
+  return zstdCompressSync(Buffer.from(body));
 }
 
 export function decompressBody(compressed: Uint8Array): string {
-  return Buffer.from(
-    Bun.zstdDecompressSync(compressed as Uint8Array<ArrayBuffer>),
-  ).toString();
+  return zstdDecompressSync(compressed).toString();
 }
 
 // ---------------------------------------------------------------------------

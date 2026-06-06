@@ -23,10 +23,6 @@ const here = dirname(fileURLToPath(import.meta.url));
 const packageDir = dirname(here);
 const distDir = join(packageDir, "dist");
 
-const pkg = JSON.parse(
-  readFileSync(join(packageDir, "package.json"), "utf8"),
-) as { version: string };
-
 // ---------------------------------------------------------------------------
 // CLI arguments
 // ---------------------------------------------------------------------------

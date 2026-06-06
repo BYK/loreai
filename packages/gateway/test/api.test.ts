@@ -6,6 +6,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { unlinkSync, existsSync } from "node:fs";
+import { zstdCompressSync } from "node:zlib";
 
 // ---------------------------------------------------------------------------
 // Test-scoped server setup
@@ -37,7 +38,7 @@ beforeAll(async () => {
   await resetPipelineState();
 
   const config = loadConfig();
-  server = startServer(config);
+  server = await startServer(config);
   baseURL = `http://127.0.0.1:${server.port}`;
 });
 
@@ -320,7 +321,7 @@ describe("Zstd request body decompression", () => {
   it("handles zstd-compressed POST body", async () => {
     const { projectId } = await seedProject();
     const body = JSON.stringify({ knowledge: true });
-    const compressed = Bun.zstdCompressSync(Buffer.from(body));
+    const compressed = zstdCompressSync(Buffer.from(body));
 
     const res = await api(`/api/v1/projects/${projectId}/clear`, {
       method: "POST",

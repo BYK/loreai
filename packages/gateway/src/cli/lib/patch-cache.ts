@@ -16,7 +16,7 @@
  * Adapted from Sentry CLI's patch-cache.ts for Lore.
  */
 
-import { mkdir, readdir, unlink } from "node:fs/promises";
+import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { getConfigDir } from "./binary";
 
@@ -95,7 +95,7 @@ export async function savePatchesToCache(
         cacheDir,
         patchFileName(step.fromVersion, step.toVersion),
       );
-      return [Bun.write(filePath, patch.data)];
+      return [writeFile(filePath, patch.data)];
     }),
   );
 
@@ -119,7 +119,7 @@ export async function savePatchesToCache(
         cacheDir,
         chainFileName(firstStep.fromVersion, lastStep.toVersion),
       );
-      await Bun.write(metaPath, JSON.stringify(meta));
+      await writeFile(metaPath, JSON.stringify(meta));
     }
   }
 }
@@ -143,7 +143,9 @@ async function loadAllChainMetas(cacheDir: string): Promise<ChainMeta[]> {
   const results = await Promise.all(
     metaFiles.map(async (file) => {
       try {
-        return (await Bun.file(join(cacheDir, file)).json()) as ChainMeta;
+        return JSON.parse(
+          await readFile(join(cacheDir, file), "utf-8"),
+        ) as ChainMeta;
       } catch {
         return null;
       }
@@ -230,7 +232,7 @@ export async function loadCachedChain(
         patchFileName(step.fromVersion, step.toVersion),
       );
       try {
-        const data = new Uint8Array(await Bun.file(filePath).arrayBuffer());
+        const data = await readFile(filePath);
         return { data, size: data.byteLength };
       } catch (err) {
         if (isNotFound(err)) return null;
@@ -266,9 +268,9 @@ async function removeExpiredEntries(
       .filter((f) => f.startsWith("chain-") && f.endsWith(".json"))
       .map(async (file) => {
         try {
-          const meta = (await Bun.file(
-            join(cacheDir, file),
-          ).json()) as ChainMeta;
+          const meta = JSON.parse(
+            await readFile(join(cacheDir, file), "utf-8"),
+          ) as ChainMeta;
           return { file, meta };
         } catch {
           await unlink(join(cacheDir, file)).catch(() => {});

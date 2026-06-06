@@ -27,7 +27,8 @@
     "start": "tsx src/index.ts"
   },
   "dependencies": {
-    "p-limit": "7"
+    "p-limit": "7",
+    "semver": "^7.7.3"
   },
   "files": [
     "dist/bin.cjs",
@@ -62,6 +63,7 @@
   "devDependencies": {
     "@loreai/core": "workspace:*",
     "@sentry/bun": "^10.52.0",
+    "@types/semver": "^7.7.1",
     "fossilize": "^0.8.1"
   }
 }

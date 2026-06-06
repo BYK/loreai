@@ -30,6 +30,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
+import { xxHash64 } from "./xxhash";
 
 // ---------------------------------------------------------------------------
 // Version→seed mapping
@@ -105,7 +106,7 @@ const CCH_PLACEHOLDER = "cch=00000";
  * @returns body with `cch=00000` replaced by `cch=XXXXX`
  */
 export function signBody(bodyWithPlaceholder: string): string {
-  const hash = Bun.hash.xxHash64(bodyWithPlaceholder, WORKER_SEED);
+  const hash = xxHash64(bodyWithPlaceholder, WORKER_SEED);
   const cch = (hash & 0xfffffn).toString(16).padStart(5, "0");
   return bodyWithPlaceholder.replace(CCH_PLACEHOLDER, `cch=${cch}`);
 }
@@ -491,7 +492,7 @@ export function validateSeed(body: string): boolean | null {
   );
 
   for (const seed of Object.values(VERSION_SEEDS)) {
-    const hash = Bun.hash.xxHash64(bodyWithPlaceholder, seed);
+    const hash = xxHash64(bodyWithPlaceholder, seed);
     const ourCch = (hash & 0xfffffn).toString(16).padStart(5, "0");
     if (ourCch === clientCch) return true;
   }

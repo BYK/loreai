@@ -7,36 +7,7 @@
  *  - What env vars to set so it talks through the gateway
  */
 import { getGitRemote } from "@loreai/core";
-
-// ---------------------------------------------------------------------------
-// which() — cross-runtime binary lookup
-// ---------------------------------------------------------------------------
-
-/**
- * Find a binary on PATH. Uses Bun.which() when available (Bun runtime),
- * falls back to `which`/`where` via child_process (Node.js runtime).
- */
-function which(binary: string): string | null {
-  // Bun runtime
-  if (typeof Bun !== "undefined" && typeof Bun.which === "function") {
-    return Bun.which(binary);
-  }
-
-  // Node.js runtime
-  try {
-    const { execFileSync } =
-      require("node:child_process") as typeof import("node:child_process");
-    const cmd = process.platform === "win32" ? "where" : "which";
-    const result = execFileSync(cmd, [binary], {
-      encoding: "utf8",
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    const path = result.trim().split("\n")[0];
-    return path || null;
-  } catch {
-    return null;
-  }
-}
+import { whichSync } from "./lib/which";
 
 // ---------------------------------------------------------------------------
 // Agent definitions
@@ -92,7 +63,7 @@ export const AGENTS: AgentDef[] = [
     name: "claude-code",
     displayName: "Claude Code",
     binary: "claude",
-    detect: () => which("claude"),
+    detect: () => whichSync("claude"),
     envVars: (url, cwd) => {
       const env: Record<string, string> = {
         ANTHROPIC_BASE_URL: url,
@@ -124,7 +95,7 @@ export const AGENTS: AgentDef[] = [
     name: "codex",
     displayName: "Codex",
     binary: "codex",
-    detect: () => which("codex"),
+    detect: () => whichSync("codex"),
     envVars: (_url, cwd) => {
       // Codex CLI is a Rust binary that does NOT read OPENAI_BASE_URL from the
       // environment. Provider routing is done exclusively via config.toml or
@@ -152,7 +123,7 @@ export const AGENTS: AgentDef[] = [
     name: "pi",
     displayName: "Pi",
     binary: "pi",
-    detect: () => which("pi"),
+    detect: () => whichSync("pi"),
     envVars: (url, _cwd) => ({
       ANTHROPIC_BASE_URL: url,
       LORE_GATEWAY_URL: url,
@@ -164,7 +135,7 @@ export const AGENTS: AgentDef[] = [
     name: "opencode",
     displayName: "OpenCode",
     binary: "opencode",
-    detect: () => which("opencode"),
+    detect: () => whichSync("opencode"),
     envVars: (url, _cwd) => ({
       OPENAI_BASE_URL: `${url}/v1`,
       // OpenCode's @loreai/opencode plugin handles git remote header
@@ -175,7 +146,7 @@ export const AGENTS: AgentDef[] = [
     name: "hermes",
     displayName: "Hermes Agent",
     binary: "hermes",
-    detect: () => which("hermes"),
+    detect: () => whichSync("hermes"),
     envVars: (url, cwd) => {
       const env: Record<string, string> = {
         // Hermes uses OPENAI_BASE_URL for custom OpenAI-compatible endpoints.

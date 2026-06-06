@@ -19,6 +19,7 @@ import {
   _parseSemver,
   _compareSemver,
 } from "../src/cch";
+import { xxHash64 } from "../src/xxhash";
 
 const SID_A = "sess-a";
 const SID_B = "sess-b";
@@ -774,7 +775,7 @@ describe("binary-verified values", () => {
       ],
       messages: [{ role: "user", content: "test" }],
     });
-    const hash = Bun.hash.xxHash64(body2, oldSeed);
+    const hash = xxHash64(body2, oldSeed);
     const cch = (hash & 0xfffffn).toString(16).padStart(5, "0");
     const signedOld = body2.replace("cch=00000", `cch=${cch}`);
     expect(validateSeed(signedOld)).toBe(true);

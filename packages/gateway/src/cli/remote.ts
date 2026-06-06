@@ -4,6 +4,7 @@
  */
 
 import { getGitRemote, normalizeRemoteUrl } from "@loreai/core";
+import { zstdCompressSync } from "node:zlib";
 
 // ---------------------------------------------------------------------------
 // Remote URL detection
@@ -115,7 +116,7 @@ export async function remotePost<T = unknown>(
     const json = JSON.stringify(body);
     if (opts?.compress) {
       headers["Content-Encoding"] = "zstd";
-      payload = new Uint8Array(Bun.zstdCompressSync(Buffer.from(json)));
+      payload = new Uint8Array(zstdCompressSync(Buffer.from(json)));
     } else {
       payload = json;
     }

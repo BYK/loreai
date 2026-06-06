@@ -28,6 +28,7 @@ import {
 import type { GatewayConfig } from "./config";
 import { createGatewayLLMClient } from "./llm-adapter";
 import { resolveAuth } from "./auth";
+import { zstdDecompressSync } from "node:zlib";
 
 // ---------------------------------------------------------------------------
 // Route matching (adapted from ui.ts)
@@ -78,7 +79,7 @@ async function parseBody<T = unknown>(req: Request): Promise<T> {
   const encoding = req.headers.get("content-encoding");
   if (encoding === "zstd") {
     const raw = new Uint8Array(await req.arrayBuffer());
-    const decompressed = Bun.zstdDecompressSync(raw as Uint8Array<ArrayBuffer>);
+    const decompressed = zstdDecompressSync(raw);
     return JSON.parse(new TextDecoder().decode(decompressed)) as T;
   }
   return (await req.json()) as T;

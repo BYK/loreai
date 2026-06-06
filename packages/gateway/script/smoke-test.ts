@@ -145,7 +145,7 @@ function assert(condition: unknown, message: string): asserts condition {
 
 console.log(`[smoke] Starting gateway on port ${port}...`);
 const config = loadConfig();
-const server = startServer(config);
+const server = await startServer(config);
 console.log(`[smoke] Gateway running at ${BASE}`);
 
 // Give the server a moment to bind

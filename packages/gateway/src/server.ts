@@ -10,8 +10,13 @@
  *   GET  /v1/models              → Passthrough to upstream
  *   GET  /health                 → Health check
  *
- * Uses `Bun.serve()` — this package targets Bun exclusively.
+ * Uses `node:http` `createServer` with Web `Request`/`Response` — the same
+ * code runs under both Bun and the Node.js npm distribution.
  */
+import { createServer as createHttpServer } from "node:http";
+import type { Server } from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { Readable } from "node:stream";
 import { DEFAULT_PORT, type GatewayConfig } from "./config";
 import { bootstrapDailySpend, getDailyBudget } from "./cost-tracker";
 import type { GatewayRequest } from "./translate/types";
@@ -40,7 +45,8 @@ import { upstreamFetch } from "./fetch";
 
 let version = "unknown";
 try {
-  // Bun resolves JSON imports; use require for sync + no top-level await
+  // Bare require() is statically resolved by esbuild at CJS bundle time and
+  // provided by tsx/bun in the ESM source — same pattern as cli/version.ts.
   const pkg = require("../package.json") as { version?: string };
   if (pkg.version) version = pkg.version;
 } catch {
@@ -341,14 +347,13 @@ async function handleOpenAIResponses(
 // Server
 // ---------------------------------------------------------------------------
 
-export function startServer(config: GatewayConfig): {
+export async function startServer(config: GatewayConfig): Promise<{
   stop: () => void;
   port: number;
   hosts: string[];
-  /** Resolves when the server is listening. Present under Node.js (where
-   *  server.listen() is async); absent under Bun (where bind is synchronous). */
-  ready?: Promise<void>;
-} {
+  /** Resolves when all bound servers are listening. */
+  ready: Promise<void>;
+}> {
   // Defensive defaults for public API consumers who may pass incomplete config.
   // loadConfig() always provides these, but startServer is a public export.
   config = config ?? ({} as GatewayConfig);
@@ -483,42 +488,194 @@ export function startServer(config: GatewayConfig): {
     }
   };
 
-  // Spawn one Bun.serve() per host address. This allows binding to
+  // Spawn one node:http server per host address. This allows binding to
   // specific interfaces (e.g. 127.0.0.1 + a Tailscale IP) without
   // opening to 0.0.0.0.
   //
-  // Pin the resolved port after the first bind so that when config.port
-  // is 0 (OS-assigned), all hosts share the same actual port.
+  // Bind sequentially so the OS-assigned port (when config.port is 0)
+  // is known before the second host binds — that way all hosts share
+  // the same actual port. node:http's listen() is async, so we must
+  // await each bind; Array#map can't await, hence the for-of loop.
+  const servers: Server[] = [];
   let resolvedPort = config.port;
-  const servers = config.hosts.map((host) => {
-    const s = Bun.serve({
-      port: resolvedPort,
-      hostname: host,
-      // Bun defaults to 10s which is too short for LLM streaming responses.
-      // 255 is the maximum allowed by Bun.
-      idleTimeout: 255,
-      fetch,
+  for (const host of config.hosts) {
+    const s = createHttpServer(async (nodeReq, nodeRes) => {
+      await handleNodeRequest(nodeReq, nodeRes, fetch, host, resolvedPort);
     });
-    resolvedPort = s.port ?? resolvedPort;
-    return s;
-  });
+    // LLM streaming responses can be very long-lived — disable Node's
+    // default timeouts (request/headers/keep-alive/socket) that would
+    // otherwise kill idle streaming connections. 0 means "no timeout".
+    s.requestTimeout = 0;
+    s.headersTimeout = 0;
+    s.keepAliveTimeout = 0;
+    s.timeout = 0;
+    // HTTP/1.1 Upgrade requests bypass the request handler entirely in
+    // node:http — they're dispatched as a separate 'upgrade' event on the
+    // server. The fetch handler's WS check never runs for these, so we
+    // install a dedicated listener that writes a 426 + closes the socket.
+    // Mirrors the `isWebSocketUpgrade` rejection in the fetch handler.
+    s.on("upgrade", (req, socket) => {
+      if (config.debug) {
+        console.error(
+          `[lore] rejecting WebSocket upgrade for ${req.url ?? "/"} (HTTP-only gateway)`,
+        );
+      }
+      const url = req.url ?? "/";
+      const body = JSON.stringify({
+        type: "error",
+        error: {
+          type: "websocket_not_supported",
+          message: `WebSocket transport is not supported for ${url}; use HTTP.`,
+        },
+      });
+      // `socket.end(data)` flushes the response, then signals EOF — the
+      // client receives the 426 cleanly. Using `socket.destroy()` races
+      // the response: undici/Bun fetch sees ECONNRESET before parsing the
+      // body and the caller gets a network error instead of a 426.
+      socket.end(
+        "HTTP/1.1 426 Upgrade Required\r\n" +
+          "Content-Type: application/json\r\n" +
+          `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+          "Connection: close\r\n" +
+          "Access-Control-Allow-Origin: *\r\n" +
+          "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n" +
+          "Access-Control-Allow-Headers: *\r\n" +
+          "Access-Control-Max-Age: 86400\r\n" +
+          "\r\n" +
+          body,
+      );
+    });
 
-  // Under Node.js the polyfill's serve() returns a `ready` promise that
-  // resolves when the server is actually listening (server.listen() is async).
+    const { ready } = bindServer(s, host, resolvedPort);
+    // Wait for the first bind so we learn the OS-assigned port (when
+    // resolvedPort started as 0). Subsequent hosts then bind to the
+    // same port to share it.
+    await ready;
+    if (resolvedPort === 0) {
+      const addr = s.address();
+      if (addr && typeof addr === "object") {
+        resolvedPort = addr.port;
+      }
+    }
+    servers.push(s);
+  }
+
   // Collect all ready promises so startGateway() can await them.
   const readyPromises = servers
-    .map((s) => (s as { ready?: Promise<void> }).ready)
-    .filter(Boolean) as Promise<void>[];
+    .map((s) => serverReadyPromises.get(s))
+    .filter((p): p is Promise<void> => p !== undefined);
 
   return {
     stop: () => {
-      for (const s of servers) s.stop();
+      for (const s of servers) s.close();
     },
     port: resolvedPort,
     hosts: config.hosts,
-    ready:
-      readyPromises.length > 0
-        ? Promise.all(readyPromises).then(() => {})
-        : undefined,
+    ready: Promise.all(readyPromises).then(() => {}),
   };
+}
+
+// ---------------------------------------------------------------------------
+// node:http ↔ Web Request/Response bridge
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-server `ready` promise map. Each entry resolves when its server has
+ * successfully called `listen()` (or rejects on bind errors like EADDRINUSE).
+ * Used by startServer() to surface the async bind to callers.
+ */
+const serverReadyPromises = new WeakMap<Server, Promise<void>>();
+
+/**
+ * Bind a server to `host:port` and stash a `ready` promise on it.
+ *
+ * Node's `server.listen()` is async: `EADDRINUSE` is emitted as an `'error'`
+ * event, not thrown synchronously. The returned `ready` promise resolves on
+ * the `'listening'` event and rejects on the first `'error'` event.
+ *
+ * We eagerly attach the listener before calling `listen()` so a synchronous
+ * error (e.g. invalid host) doesn't slip through.
+ */
+function bindServer(
+  server: Server,
+  host: string,
+  port: number,
+): { ready: Promise<void> } {
+  const ready = new Promise<void>((resolve, reject) => {
+    server.once("listening", () => resolve());
+    server.once("error", (err) => reject(err));
+  });
+  // Suppress UnhandledPromiseRejection if no one awaits `ready` — the real
+  // error surfaces when startGateway() awaits it.
+  ready.catch(() => {});
+  serverReadyPromises.set(server, ready);
+  server.listen(port, host);
+  return { ready };
+}
+
+/**
+ * Convert a node:http `IncomingMessage` to a Web `Request`, run the shared
+ * `fetch` handler, and stream the resulting Web `Response` back over the
+ * node:http `ServerResponse`.
+ *
+ * Mirrors what `Bun.serve()` gave us under Bun: handler returns a Web
+ * `Response` (streaming or buffered), we write the status + headers, then
+ * pipe the body chunk-by-chunk to keep long-lived SSE streams alive.
+ */
+async function handleNodeRequest(
+  nodeReq: IncomingMessage,
+  nodeRes: ServerResponse,
+  fetch: (req: Request) => Response | Promise<Response>,
+  host: string,
+  port: number,
+): Promise<void> {
+  try {
+    const url = `http://${host}:${port}${nodeReq.url ?? "/"}`;
+
+    const body =
+      nodeReq.method === "GET" || nodeReq.method === "HEAD"
+        ? null
+        : (Readable.toWeb(nodeReq) as unknown as ReadableStream);
+
+    const req = new Request(url, {
+      method: nodeReq.method,
+      headers: nodeReq.headers as Record<string, string>,
+      body,
+      // @ts-expect-error — required for Node.js request body streaming
+      duplex: "half",
+    });
+
+    const response = await fetch(req);
+
+    const headerEntries: [string, string][] = [];
+    response.headers.forEach((value, key) => {
+      headerEntries.push([key, value]);
+    });
+    nodeRes.writeHead(response.status, Object.fromEntries(headerEntries));
+
+    if (response.body) {
+      const reader = response.body.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          // Coerce SharedArrayBuffer-typed Uint8Array views to a regular
+          // Buffer — Node's write() expects a string, Buffer, or
+          // Uint8Array<ArrayBuffer>, not ArrayBufferLike.
+          nodeRes.write(
+            Buffer.from(value.buffer, value.byteOffset, value.byteLength),
+          );
+        }
+      } finally {
+        reader.releaseLock();
+      }
+    }
+    nodeRes.end();
+  } catch (err) {
+    console.error("[lore] request handler error:", err);
+    if (!nodeRes.headersSent) {
+      nodeRes.writeHead(500, { "content-type": "application/json" });
+    }
+    nodeRes.end(JSON.stringify({ error: "Internal server error" }));
+  }
 }

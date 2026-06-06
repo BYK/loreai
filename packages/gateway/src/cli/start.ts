@@ -109,11 +109,14 @@ export async function startGateway(
 
   for (const candidatePort of portsToTry) {
     config.port = candidatePort;
-    const server = startServer(config);
+    // startServer() is async — it binds each host sequentially so the
+    // OS-assigned port (when port=0) is shared across hosts. The
+    // returned `ready` promise is the same one startServer already
+    // awaited internally; awaiting it here is a no-op for the first
+    // server but still lets EADDRINUSE bubble up.
+    const server = await startServer(config);
     try {
-      // Under Node.js, server.listen() is async — await the ready promise
-      // so EADDRINUSE rejects here and the catch block can try the next port.
-      if (server.ready) await server.ready;
+      await server.ready;
       const actualPort = server.port;
 
       // Write port file so plugins can discover us (even on random port).
@@ -269,6 +272,6 @@ export async function commandStart(opts: StartOptions): Promise<never> {
   process.on("SIGINT", () => onSignal());
   process.on("SIGTERM", () => onSignal());
 
-  // Keep the process alive (Bun.serve already does this, but be explicit)
+  // Keep the process alive (the HTTP server already does this, but be explicit)
   return new Promise(() => {});
 }
