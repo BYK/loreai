@@ -4,9 +4,12 @@ import {
   describe,
   test,
   expect,
+  beforeAll,
   beforeEach,
 } from "vitest";
+import { existsSync } from "node:fs";
 import { db, ensureProject } from "../src/db";
+import { LOCAL_MODEL_PATH_ENV } from "../src/embedding-vendor";
 import {
   cosineSimilarity,
   toBlob,
@@ -480,188 +483,145 @@ describe("vectorSearchEntities", () => {
   });
 });
 
-let loggedModelSkip = false;
-
-/**
- * Run a model-dependent test body, tolerating an unavailable local model.
- *
- * In CI the model is vendored and `LORE_LOCAL_MODEL_PATH` points at it, so the
- * body runs normally. When the body throws `LocalProviderUnavailableError` we
- * SKIP rather than hard-fail, because the underlying worker init has a
- * known pre-existing test-infra limitation: the source worker at
- * `packages/core/src/embedding-worker.ts` does extensionless relative imports
- * (e.g. `./embedding-worker-types`) that Node.js ESM cannot resolve when the
- * worker thread is spawned from source. This is unrelated to test correctness
- * — it surfaces whenever the dev path is taken. Bundled and SEA-binary paths
- * are fine. Tracked in #606; do not "fix" by hard-failing here.
- *
- * Implemented as a body-wrapper (not a separate probe) so it adds NO extra
- * embedding-worker spawn/shutdown cycle — the worker has a fragile NAPI
- * teardown, so we must not perturb its lifecycle.
- */
-async function withLocalModel(body: () => Promise<void>): Promise<void> {
-  try {
-    await body();
-  } catch (err) {
-    if (err instanceof LocalProviderUnavailableError) {
-      if (!loggedModelSkip) {
-        loggedModelSkip = true;
-        console.warn(
-          "[embedding.test] skipping — embedding worker init failed " +
-            "(Node.js ESM cannot resolve extensionless .ts imports in the " +
-            "source worker). See #606.",
-        );
-      }
-      return;
-    }
-    throw err;
+function assertLocalModelAvailable(): void {
+  const path = process.env[LOCAL_MODEL_PATH_ENV];
+  if (!path) {
+    throw new Error(
+      `Local embedding model not available: ${LOCAL_MODEL_PATH_ENV} is not set. ` +
+        `Set it to the vendored model cache root (e.g. .vendor-build/.model-cache) ` +
+        `to run end-to-end embedding tests. See packages/core/src/embedding-vendor.ts.`,
+    );
+  }
+  if (!existsSync(path)) {
+    throw new Error(
+      `Local embedding model not available: ${LOCAL_MODEL_PATH_ENV}="${path}" ` +
+        `does not exist. Vendor the model or unset the env var.`,
+    );
   }
 }
 
 describe("LocalProvider integration", () => {
   const PROJECT = "/test/embedding/local";
 
+  beforeAll(() => {
+    assertLocalModelAvailable();
+  });
+
   beforeEach(() => {
     const pid = ensureProject(PROJECT);
     db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
   });
 
-  test(
-    "embed produces Float32Array vectors with 768 dimensions",
-    () =>
-      withLocalModel(async () => {
-        const [vec] = await embed(["test query for embedding"], "query");
-        expect(vec).toBeInstanceOf(Float32Array);
-        expect(vec.length).toBe(768);
-        // Vector should not be all zeros
-        const norm = Array.from(vec).reduce((sum, v) => sum + v * v, 0);
-        expect(norm).toBeGreaterThan(0);
-      }),
-    60_000,
-  );
+  test("embed produces Float32Array vectors with 768 dimensions", async () => {
+    const { embed } = await import("../src/embedding");
+    const [vec] = await embed(["test query for embedding"], "query");
+    expect(vec).toBeInstanceOf(Float32Array);
+    expect(vec.length).toBe(768);
+    // Vector should not be all zeros
+    const norm = Array.from(vec).reduce((sum, v) => sum + v * v, 0);
+    expect(norm).toBeGreaterThan(0);
+  }, 60_000);
 
-  test(
-    "query and document embeddings have reasonable similarity",
-    () =>
-      withLocalModel(async () => {
-        const [queryVec] = await embed(["database migration"], "query");
-        const [docVec] = await embed(
-          ["PostgreSQL database schema migration tool"],
-          "document",
+  test("query and document embeddings have reasonable similarity", async () => {
+    const { embed, cosineSimilarity } = await import("../src/embedding");
+    const [queryVec] = await embed(["database migration"], "query");
+    const [docVec] = await embed(
+      ["PostgreSQL database schema migration tool"],
+      "document",
+    );
+    const [unrelatedVec] = await embed(
+      ["chocolate cake recipe with frosting"],
+      "document",
+    );
+
+    const relevantSim = cosineSimilarity(queryVec, docVec);
+    const unrelatedSim = cosineSimilarity(queryVec, unrelatedVec);
+
+    // Relevant doc should have higher similarity than unrelated
+    expect(relevantSim).toBeGreaterThan(unrelatedSim);
+  }, 60_000);
+
+  test("vectorSearch returns results using local embeddings", async () => {
+    const { embed, toBlob, vectorSearch } = await import("../src/embedding");
+    const pid = ensureProject(PROJECT);
+    const now = Date.now();
+
+    const texts = [
+      "PostgreSQL database migration",
+      "React server components",
+      "Kubernetes deployment strategy",
+    ];
+    const vecs = await embed(texts, "document");
+
+    for (let i = 0; i < texts.length; i++) {
+      db()
+        .query(
+          "INSERT INTO knowledge (id, project_id, category, title, content, confidence, created_at, updated_at, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run(
+          `local-${i}`,
+          pid,
+          "test",
+          `Entry ${i}`,
+          texts[i],
+          1.0,
+          now,
+          now,
+          toBlob(vecs[i]),
         );
-        const [unrelatedVec] = await embed(
-          ["chocolate cake recipe with frosting"],
-          "document",
-        );
+    }
 
-        const relevantSim = cosineSimilarity(queryVec, docVec);
-        const unrelatedSim = cosineSimilarity(queryVec, unrelatedVec);
+    const [queryVec] = await embed(["database schema changes"], "query");
+    const results = vectorSearch(queryVec, 3);
 
-        // Relevant doc should have higher similarity than unrelated
-        expect(relevantSim).toBeGreaterThan(unrelatedSim);
-      }),
-    60_000,
-  );
-
-  test(
-    "vectorSearch returns results using local embeddings",
-    () =>
-      withLocalModel(async () => {
-        const pid = ensureProject(PROJECT);
-        const now = Date.now();
-
-        const texts = [
-          "PostgreSQL database migration",
-          "React server components",
-          "Kubernetes deployment strategy",
-        ];
-        const vecs = await embed(texts, "document");
-
-        for (let i = 0; i < texts.length; i++) {
-          db()
-            .query(
-              "INSERT INTO knowledge (id, project_id, category, title, content, confidence, created_at, updated_at, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            )
-            .run(
-              `local-${i}`,
-              pid,
-              "test",
-              `Entry ${i}`,
-              texts[i],
-              1.0,
-              now,
-              now,
-              toBlob(vecs[i]),
-            );
-        }
-
-        const [queryVec] = await embed(["database schema changes"], "query");
-        const results = vectorSearch(queryVec, 3);
-
-        expect(results.length).toBe(3);
-        // The PostgreSQL entry should be most relevant
-        expect(results[0].id).toBe("local-0");
-        expect(results[0].similarity).toBeGreaterThan(0.3);
-      }),
-    60_000,
-  );
+    expect(results.length).toBe(3);
+    // The PostgreSQL entry should be most relevant
+    expect(results[0].id).toBe("local-0");
+    expect(results[0].similarity).toBeGreaterThan(0.3);
+  }, 60_000);
 });
 
 describe("LocalProvider worker thread", () => {
-  test(
-    "embed produces Float32Array vectors with 768 dimensions through worker",
-    () =>
-      withLocalModel(async () => {
-        const [vec] = await embed(["test query via worker"], "query");
-        expect(vec).toBeInstanceOf(Float32Array);
-        expect(vec.length).toBe(768);
-        const norm = Array.from(vec).reduce((sum, v) => sum + v * v, 0);
-        expect(norm).toBeGreaterThan(0);
-      }),
-    60_000,
-  );
+  beforeAll(() => {
+    assertLocalModelAvailable();
+  });
 
-  test(
-    "concurrent embed() calls are serialized correctly",
-    () =>
-      withLocalModel(async () => {
-        const promises = Array.from({ length: 5 }, (_, i) =>
-          embed([`concurrent test ${i}`], "document"),
-        );
-        const results = await Promise.all(promises);
-        expect(results).toHaveLength(5);
-        for (const [vec] of results) {
-          expect(vec).toBeInstanceOf(Float32Array);
-          expect(vec.length).toBe(768);
-        }
-      }),
-    60_000,
-  );
+  test("embed produces Float32Array vectors with 768 dimensions through worker", async () => {
+    const [vec] = await embed(["test query via worker"], "query");
+    expect(vec).toBeInstanceOf(Float32Array);
+    expect(vec.length).toBe(768);
+    const norm = Array.from(vec).reduce((sum, v) => sum + v * v, 0);
+    expect(norm).toBeGreaterThan(0);
+  }, 60_000);
 
-  test(
-    "query embed interleaved with document batch resolves correctly",
-    () =>
-      withLocalModel(async () => {
-        const docPromise = embed(
-          Array.from({ length: 5 }, (_, i) => `document text ${i}`),
-          "document",
-        );
-        const queryPromise = embed(["urgent query"], "query");
+  test("concurrent embed() calls are serialized correctly", async () => {
+    const promises = Array.from({ length: 5 }, (_, i) =>
+      embed([`concurrent test ${i}`], "document"),
+    );
+    const results = await Promise.all(promises);
+    expect(results).toHaveLength(5);
+    for (const [vec] of results) {
+      expect(vec).toBeInstanceOf(Float32Array);
+      expect(vec.length).toBe(768);
+    }
+  }, 60_000);
 
-        const [docs, [queryVec]] = await Promise.all([
-          docPromise,
-          queryPromise,
-        ]);
-        expect(docs).toHaveLength(5);
-        for (const vec of docs) {
-          expect(vec).toBeInstanceOf(Float32Array);
-          expect(vec.length).toBe(768);
-        }
-        expect(queryVec).toBeInstanceOf(Float32Array);
-        expect(queryVec.length).toBe(768);
-      }),
-    60_000,
-  );
+  test("query embed interleaved with document batch resolves correctly", async () => {
+    const docPromise = embed(
+      Array.from({ length: 5 }, (_, i) => `document text ${i}`),
+      "document",
+    );
+    const queryPromise = embed(["urgent query"], "query");
+
+    const [docs, [queryVec]] = await Promise.all([docPromise, queryPromise]);
+    expect(docs).toHaveLength(5);
+    for (const vec of docs) {
+      expect(vec).toBeInstanceOf(Float32Array);
+      expect(vec.length).toBe(768);
+    }
+    expect(queryVec).toBeInstanceOf(Float32Array);
+    expect(queryVec.length).toBe(768);
+  }, 60_000);
 
   afterAll(async () => {
     await _shutdownAndDisable();
