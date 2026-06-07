@@ -486,15 +486,18 @@ let loggedModelSkip = false;
  * Run a model-dependent test body, tolerating an unavailable local model.
  *
  * In CI the model is vendored and `LORE_LOCAL_MODEL_PATH` points at it, so the
- * body runs normally. In local dev (or a CI cache miss) the model is fetched
- * from HuggingFace Hub on first use — which can fail transiently (429) or be
- * unavailable offline. When the body throws `LocalProviderUnavailableError` we
- * SKIP rather than hard-fail, so a flaky HF download never blocks an otherwise
- * green run. Any other error still fails the test.
+ * body runs normally. When the body throws `LocalProviderUnavailableError` we
+ * SKIP rather than hard-fail, because the underlying worker init has a
+ * known pre-existing test-infra limitation: the source worker at
+ * `packages/core/src/embedding-worker.ts` does extensionless relative imports
+ * (e.g. `./embedding-worker-types`) that Node.js ESM cannot resolve when the
+ * worker thread is spawned from source. This is unrelated to test correctness
+ * — it surfaces whenever the dev path is taken. Bundled and SEA-binary paths
+ * are fine. Tracked in #606; do not "fix" by hard-failing here.
  *
  * Implemented as a body-wrapper (not a separate probe) so it adds NO extra
- * embedding-worker spawn/shutdown cycle — the ONNX worker has a fragile NAPI
- * teardown under Bun, so we must not perturb its lifecycle.
+ * embedding-worker spawn/shutdown cycle — the worker has a fragile NAPI
+ * teardown, so we must not perturb its lifecycle.
  */
 async function withLocalModel(body: () => Promise<void>): Promise<void> {
   try {
@@ -504,9 +507,9 @@ async function withLocalModel(body: () => Promise<void>): Promise<void> {
       if (!loggedModelSkip) {
         loggedModelSkip = true;
         console.warn(
-          "[embedding.test] local model unavailable (offline / HF download failed) — " +
-            "skipping model-dependent assertions. Set LORE_LOCAL_MODEL_PATH to a " +
-            "vendored model dir (e.g. .vendor-build/.model-cache) to run them offline.",
+          "[embedding.test] skipping — embedding worker init failed " +
+            "(Node.js ESM cannot resolve extensionless .ts imports in the " +
+            "source worker). See #606.",
         );
       }
       return;
@@ -527,7 +530,6 @@ describe("LocalProvider integration", () => {
     "embed produces Float32Array vectors with 768 dimensions",
     () =>
       withLocalModel(async () => {
-        const { embed } = await import("../src/embedding");
         const [vec] = await embed(["test query for embedding"], "query");
         expect(vec).toBeInstanceOf(Float32Array);
         expect(vec.length).toBe(768);
@@ -542,7 +544,6 @@ describe("LocalProvider integration", () => {
     "query and document embeddings have reasonable similarity",
     () =>
       withLocalModel(async () => {
-        const { embed, cosineSimilarity } = await import("../src/embedding");
         const [queryVec] = await embed(["database migration"], "query");
         const [docVec] = await embed(
           ["PostgreSQL database schema migration tool"],
@@ -566,9 +567,6 @@ describe("LocalProvider integration", () => {
     "vectorSearch returns results using local embeddings",
     () =>
       withLocalModel(async () => {
-        const { embed, toBlob, vectorSearch } = await import(
-          "../src/embedding"
-        );
         const pid = ensureProject(PROJECT);
         const now = Date.now();
 

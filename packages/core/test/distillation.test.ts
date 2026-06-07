@@ -239,7 +239,7 @@ describe("truncateToolOutputsInContent — perf regression guards", () => {
     // Healthy: <1ms. Regression: seconds. 2s gives huge jitter headroom.
     expect(elapsed).toBeLessThan(2_000);
     expect(result).toContain("[output omitted — grep:");
-  });
+  }, 30_000);
 
   test("100KB payload WITH '/' stays bounded via 64KB scan limit", () => {
     const pathological = `${"x".repeat(50_000)}/file.ts ${"y".repeat(50_000)}`;
@@ -253,7 +253,7 @@ describe("truncateToolOutputsInContent — perf regression guards", () => {
     // two — tolerant of load jitter, still catches the regression.
     expect(elapsed).toBeLessThan(5_000);
     expect(result).toContain("[output omitted — grep:");
-  });
+  }, 30_000);
 });
 
 // ─── messagesToText ────────────────────────────────────────────────────

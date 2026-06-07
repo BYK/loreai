@@ -249,9 +249,12 @@ export const LorePlugin: Plugin = async (ctx) => {
     };
 
     // Startup banner — visible in stderr so silent failures are obvious.
+    // Suppressed in test env to keep vitest output clean.
     if (!processInitDone) {
       const projectPath = discoverWorkspaceRoot(ctx.worktree || ctx.directory);
-      process.stderr.write(`[lore] active: ${projectPath}\n`);
+      if (process.env.NODE_ENV !== "test") {
+        process.stderr.write(`[lore] active: ${projectPath}\n`);
+      }
 
       if (loreActive) {
         // Install the fetch interceptor once per process. It transparently

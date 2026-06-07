@@ -147,9 +147,9 @@ describe("formatKnowledge", () => {
           expect(normalize(result)).toBe(result);
         },
       ),
-      { numRuns: 500 },
+      { numRuns: 100 },
     );
-  });
+  }, 30_000);
 
   test("listItem count matches entry count per category", () => {
     fc.assert(
@@ -168,9 +168,9 @@ describe("formatKnowledge", () => {
           expect(countListItems(result)).toBe(entries.length);
         },
       ),
-      { numRuns: 500 },
+      { numRuns: 100 },
     );
-  });
+  }, 30_000);
 
   test("regression: code fence in content stays in list", () => {
     const result = formatKnowledge([

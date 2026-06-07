@@ -75,8 +75,11 @@ jobs:
       # Build all packages so tests can resolve workspace dependencies
       - run: pnpm run build
 
-      # Bundle @loreai/gateway for tests (build.ts only creates dev shims)
-      - run: pnpm --filter @loreai/gateway run bundle
+      # Note: the @loreai/gateway bundle is built by the root `pretest`
+      # hook that runs before `pnpm test` (see package.json). No pre-test
+      # bundle step needed here. The later "Build npm bundle" step (with
+      # SENTRY_AUTH_TOKEN) rebuilds the bundle for sourcemap upload and
+      # binary smoke tests.
 
       # Restore the vendored embedding model so tests use a local model
       # instead of downloading from HuggingFace Hub (avoids transient 429s).
@@ -101,6 +104,10 @@ jobs:
       - name: Test
         run: pnpm test
         env:
+          # Silence the ~85-line "ExperimentalWarning: SQLite is an experimental
+          # feature" noise from node:sqlite — emitted once per worker fork in
+          # vitest's threads pool. Doesn't suppress real test failures.
+          NODE_NO_WARNINGS: 1
           # Point the local embedding provider at the vendored model cache root
           # (transformers.js resolves <root>/<modelId>/...). Keeps the test run
           # off HuggingFace Hub. See packages/core/src/embedding-vendor.ts.
@@ -201,8 +208,8 @@ jobs:
           kill $SERVER_PID
           wait $SERVER_PID 2>/dev/null || true
 
-      - name: Smoke-test bundle exports
-        run: pnpm test packages/gateway/test/bundle-exports.test.ts
+      # Note: the bundle-exports test runs as part of the main `pnpm test`
+      # step above (discovered via vitest.config.ts). No need to re-run it.
 
       # -----------------------------------------------------------------
       # CLI: standalone binary build + smoke test

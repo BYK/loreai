@@ -6,7 +6,12 @@
  * - The CJS Node bundle uses node:sqlite (not bun:sqlite)
  * - The imported module exports the expected public API
  *
- * Requires `pnpm run build` to have been run first. Skipped otherwise.
+ * Requires the bundle (`pnpm --filter @loreai/gateway run bundle`) to have
+ * been built. The root `pretest` script runs the bundle automatically before
+ * `pnpm test`, so this test runs in every environment (local + CI). The
+ * skipIf guard is defensive — it should never trigger in normal use, but
+ * ensures a missing bundle is reported as a skip rather than a confusing
+ * file-not-found assertion failure.
  */
 import { describe, test, expect } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
