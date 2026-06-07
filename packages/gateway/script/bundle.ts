@@ -379,3 +379,4 @@ console.log(`  dist/embedding-worker.cjs — embedding worker CJS (Node.js)`);
 console.log(`  dist/embedding-worker.js  — embedding worker ESM (Bun)`);
 console.log(`  dist/bin.cjs              — CLI wrapper`);
 console.log(`  dist/index.d.cts          — type declarations`);
+# trigger CI
