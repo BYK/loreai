@@ -935,7 +935,7 @@ footer {
 @media(max-width:900px){
   html, body { overflow-x: hidden; width: 100%; -webkit-text-size-adjust: 100%; }
 
-  nav { padding: .8rem 1.2rem; }
+  .top-nav { padding: .8rem 1.2rem; }
   .nav-links { display: none; }
   .nav-btn { padding: .5rem 1rem; font-size: .65rem; }
 
