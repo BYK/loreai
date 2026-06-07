@@ -2,7 +2,7 @@ import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
 
 const prNumber = process.env.PR_NUMBER;
-const base = prNumber ? `/_preview/pr-${prNumber}` : "/";
+const base = prNumber ? `/_preview/pr-${prNumber}/` : "/";
 
 export default defineConfig({
   site: "https://withlore.ai",
@@ -16,12 +16,15 @@ export default defineConfig({
   integrations: [
     starlight({
       title: "Lore",
+      components: {
+        Header: "./src/components/SiteHeader.astro",
+      },
       logo: {
         src: "./public/brand-mark.svg",
         alt: "Lore.AI",
         replacesTitle: true,
       },
-      favicon: "/favicon.svg",
+      favicon: `${base}favicon.svg`,
       customCss: ["./src/styles/starlight.css"],
       pagefind: false,
       lastUpdated: false,
@@ -42,23 +45,18 @@ export default defineConfig({
             { label: "Architecture", slug: "docs/architecture" },
           ],
         },
-        {
-          label: "Site",
-          items: [
-            { label: "Home", link: "/" },
-            { label: "Why Lore", link: "/different.html" },
-            { label: "Blog", link: "/blog.html" },
-          ],
-        },
       ],
       head: [
         {
           tag: "link",
-          attrs: { rel: "icon", href: "/favicon.ico", sizes: "any" },
+          attrs: { rel: "icon", href: `${base}favicon.ico`, sizes: "any" },
         },
         {
           tag: "link",
-          attrs: { rel: "apple-touch-icon", href: "/apple-touch-icon.png" },
+          attrs: {
+            rel: "apple-touch-icon",
+            href: `${base}apple-touch-icon.png`,
+          },
         },
       ],
     }),
