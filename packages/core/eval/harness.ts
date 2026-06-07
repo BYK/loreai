@@ -214,7 +214,7 @@ async function startLiveGateway(): Promise<GatewayHandle> {
 
   // NO replay interceptor — requests go to real upstream
   const config = loadConfig();
-  const server = startServer(config);
+  const server = await startServer(config);
   const baseURL = `http://127.0.0.1:${server.port}`;
 
   console.log(`  Live gateway started at ${baseURL} (db: ${dbPath})`);

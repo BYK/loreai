@@ -82,7 +82,7 @@ export async function startGateway(): Promise<GatewayHandle> {
   await resetPipelineState();
 
   const config = loadConfig();
-  const server = startServer(config);
+  const server = await startServer(config);
   const baseURL = `http://127.0.0.1:${server.port}`;
 
   console.log(`  Gateway started at ${baseURL} (db: ${dbPath})`);

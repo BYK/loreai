@@ -504,7 +504,7 @@ export async function startServer(config: GatewayConfig): Promise<{
     .map((s) => serverReadyPromises.get(s))
     .filter((p): p is Promise<void> => p !== undefined);
 
-  return {
+  const result = {
     stop: () => {
       for (const s of servers) s.close();
     },
@@ -512,6 +512,29 @@ export async function startServer(config: GatewayConfig): Promise<{
     hosts: config.hosts,
     ready: Promise.all(readyPromises).then(() => {}),
   };
+
+  // Defensive: startServer() is async, so callers must use `await`.
+  // If someone writes `const server = startServer(config)` (missing await),
+  // `server` is a Promise — accessing .port/.hosts returns undefined,
+  // producing cryptic errors like "Failed to parse URL from
+  // http://127.0.0.1:undefined/health" (LOREAI-GATEWAY-1Z).
+  // These property traps turn the silent undefined into a loud, actionable
+  // error message. They're defined on the specific Promise instance, not
+  // on Promise.prototype, so they only affect this call site.
+  const promise = Promise.resolve(result);
+  for (const prop of ["port", "hosts", "ready", "stop"] as const) {
+    Object.defineProperty(promise, prop, {
+      get() {
+        throw new TypeError(
+          `startServer() is async — use \`const server = await startServer(config)\` ` +
+            `before accessing .${prop}`,
+        );
+      },
+      configurable: true,
+    });
+  }
+
+  return promise;
 }
 
 // ---------------------------------------------------------------------------

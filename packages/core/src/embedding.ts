@@ -323,19 +323,23 @@ class LocalProvider implements EmbeddingProvider {
         this.worker = new Worker(workerSource, opts);
       } else {
         // npm bundle / dev path: point at a sibling worker file.
+        // CJS uses __filename (always defined); ESM uses import.meta.url.
         let workerUrl: string | URL;
-        const selfUrl =
-          typeof import.meta.url === "string" ? import.meta.url : undefined;
-        if (selfUrl) {
-          workerUrl = new URL(
-            `./embedding-worker${selfUrl.endsWith(".ts") ? ".ts" : ".js"}`,
-            selfUrl,
-          );
-        } else {
+        if (typeof __filename === "string") {
           const { pathToFileURL } = await import("node:url");
           workerUrl = new URL(
             "./embedding-worker.cjs",
             pathToFileURL(__filename),
+          );
+        } else {
+          // ESM (Bun, tsx): resolve worker relative to this module's URL.
+          // Use indirect access via Function to avoid esbuild's static
+          // "empty-import-meta" warning in CJS output — this branch is
+          // unreachable in CJS since __filename is always defined there.
+          const selfUrl = new Function("return import.meta.url")() as string;
+          workerUrl = new URL(
+            `./embedding-worker${selfUrl.endsWith(".ts") ? ".ts" : ".js"}`,
+            selfUrl,
           );
         }
         this.worker = new Worker(workerUrl, {
@@ -981,6 +985,7 @@ export function embedKnowledgeEntry(
         .run(toBlob(vec), id);
     })
     .catch((err) => {
+      if (err instanceof LocalProviderUnavailableError) return;
       log.error("embedding failed for knowledge entry", id, ":", err);
     });
 }
@@ -1018,6 +1023,7 @@ export function embedEntity(
         .run(toBlob(vec), id);
     })
     .catch((err) => {
+      if (err instanceof LocalProviderUnavailableError) return;
       log.error("embedding failed for entity", id, ":", err);
     });
 }
@@ -1036,6 +1042,7 @@ export function embedDistillation(id: string, observations: string): void {
         .run(toBlob(vec), id);
     })
     .catch((err) => {
+      if (err instanceof LocalProviderUnavailableError) return;
       log.error("embedding failed for distillation", id, ":", err);
     });
 }
@@ -1059,6 +1066,7 @@ export function embedTemporalMessage(id: string, content: string): void {
         .run(toBlob(vec), id);
     })
     .catch((err) => {
+      if (err instanceof LocalProviderUnavailableError) return;
       log.error("embedding failed for temporal message", id, ":", err);
     });
 }
@@ -1383,13 +1391,17 @@ export async function backfillEmbeddings(): Promise<number> {
         embedded++;
       }
     } catch (err) {
-      // log.error sends to Sentry via captureException
+      // Provider shutdown / unavailability is expected graceful degradation,
+      // not a bug — check before log.error so captureException doesn't fire
+      // and create Sentry noise (LOREAI-GATEWAY-Q).
+      if (err instanceof LocalProviderUnavailableError) {
+        log.info("embedding backfill stopped: provider unavailable");
+        break;
+      }
       log.error(
         `embedding backfill batch failed (${batch.length} items):`,
         err,
       );
-      // Provider is dead — no point retrying remaining batches.
-      if (err instanceof LocalProviderUnavailableError) break;
     }
     // No yieldToEventLoop() needed — embed() is truly async (worker thread).
   }
@@ -1451,13 +1463,19 @@ export async function backfillDistillationEmbeddings(): Promise<number> {
         embedded++;
       }
     } catch (err) {
-      // log.error sends to Sentry via captureException
+      // Provider shutdown / unavailability is expected graceful degradation,
+      // not a bug — check before log.error so captureException doesn't fire
+      // and create Sentry noise (LOREAI-GATEWAY-Q).
+      if (err instanceof LocalProviderUnavailableError) {
+        log.info(
+          "distillation embedding backfill stopped: provider unavailable",
+        );
+        break;
+      }
       log.error(
         `distillation embedding backfill batch failed (${batch.length} items):`,
         err,
       );
-      // Provider is dead — no point retrying remaining batches.
-      if (err instanceof LocalProviderUnavailableError) break;
     }
 
     if (embedded >= nextProgressAt) {
@@ -1536,13 +1554,17 @@ export async function backfillEntityEmbeddings(): Promise<number> {
         embedded++;
       }
     } catch (err) {
-      // log.error sends to Sentry via captureException
+      // Provider shutdown / unavailability is expected graceful degradation,
+      // not a bug — check before log.error so captureException doesn't fire
+      // and create Sentry noise (LOREAI-GATEWAY-Q).
+      if (err instanceof LocalProviderUnavailableError) {
+        log.info("entity embedding backfill stopped: provider unavailable");
+        break;
+      }
       log.error(
         `entity embedding backfill batch failed (${batch.length} items):`,
         err,
       );
-      // Provider is dead — no point retrying remaining batches.
-      if (err instanceof LocalProviderUnavailableError) break;
     }
     // No yieldToEventLoop() needed — embed() is truly async (worker thread).
   }

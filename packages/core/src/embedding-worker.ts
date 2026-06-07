@@ -162,6 +162,22 @@ async function ensurePipeline(): Promise<void> {
         device: "cpu",
       })) as unknown as FeatureExtractionPipeline;
 
+      // Guard against Callable pattern failure: @huggingface/transformers
+      // uses Object.setPrototypeOf(closure, new.target.prototype) in the
+      // Callable base class to make pipeline instances callable. Under
+      // esbuild CJS bundling + Node v24, this pattern can break — the
+      // pipeline object is truthy but not a function, causing "pipe is not
+      // a function" on every subsequent inference (LOREAI-GATEWAY-10).
+      // Detect at construction time and fail fast with a descriptive error.
+      if (typeof pipe !== "function") {
+        const actualType = typeof pipe;
+        pipe = null;
+        throw new Error(
+          `pipeline() returned a non-callable ${actualType} — ` +
+            `Callable pattern broken (Node ${process.versions.node})`,
+        );
+      }
+
       // Stash a reference to the pipeline's tokenizer for token-level
       // truncation during OOM retries.
       tokenizer = (pipe as unknown as { tokenizer: typeof tokenizer })

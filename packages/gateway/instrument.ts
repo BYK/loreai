@@ -155,6 +155,17 @@ if (sentryEnabled && !Sentry.isInitialized()) {
     tracesSampleRate: 1.0,
     enableLogs: true,
 
+    // Disable the NodeFetch integration. In the esbuild CJS bundle, the
+    // vendored undici code inside @sentry/node has 100+ `let` declarations
+    // that get flattened into a single scope. The NodeFetch integration
+    // registers a `diagnostics_channel` hook during init() that fires
+    // synchronously on the first fetch() — but the hook's callback
+    // accesses variables that are still in the Temporal Dead Zone because
+    // the Sentry sub-module's lazy wrapper hasn't fully evaluated yet.
+    // This causes "Cannot access '_e' before initialization" (LOREAI-GATEWAY-1J).
+    // The gateway does its own upstream fetch tracing, so no functionality is lost.
+    integrations: (defaults) => defaults.filter((i) => i.name !== "NodeFetch"),
+
     // Drop transient network errors that are not actionable bugs.
     // Each exception in the chain is tested independently so a real bug
     // wrapping a transient cause isn't accidentally silenced.
