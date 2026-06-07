@@ -27,11 +27,11 @@ All test runs are captured with:
 
 ```bash
 # Red phase
-bun test <test-file> --bail 2>&1 | tee quality/results/BUG-NNN.red.log
+vitest run <test-file> --bail 2>&1 | tee quality/results/BUG-NNN.red.log
 echo "EXIT_CODE=$?" >> quality/results/BUG-NNN.red.log
 
 # Green phase (after applying fix)
-bun test <test-file> --bail 2>&1 | tee quality/results/BUG-NNN.green.log
+vitest run <test-file> --bail 2>&1 | tee quality/results/BUG-NNN.green.log
 echo "EXIT_CODE=$?" >> quality/results/BUG-NNN.green.log
 ```
 
@@ -344,7 +344,7 @@ For each BUG-NNN:
 ```bash
 # 1. Write the regression test (add to existing test file or create new)
 # 2. Red phase — run test against CURRENT code
-bun test <test-file> -t "<test-name>" --bail 2>&1 | tee quality/results/BUG-NNN.red.log
+vitest run <test-file> -t "<test-name>" --bail 2>&1 | tee quality/results/BUG-NNN.red.log
 echo "EXIT_CODE=$?" >> quality/results/BUG-NNN.red.log
 
 # 3. Verify red: exit code should be non-zero (test FAILED)
@@ -353,14 +353,14 @@ echo "EXIT_CODE=$?" >> quality/results/BUG-NNN.red.log
 # 4. Apply minimal fix patch to the source file(s)
 
 # 5. Green phase — run same test against FIXED code
-bun test <test-file> -t "<test-name>" --bail 2>&1 | tee quality/results/BUG-NNN.green.log
+vitest run <test-file> -t "<test-name>" --bail 2>&1 | tee quality/results/BUG-NNN.green.log
 echo "EXIT_CODE=$?" >> quality/results/BUG-NNN.green.log
 
 # 6. Verify green: exit code should be 0 (test PASSED)
 #    If exit code is non-zero, verdict = "green failed" — fix is incomplete
 
 # 7. Run full test suite to check for regressions
-bun test 2>&1 | tee quality/results/BUG-NNN.regression.log
+vitest run 2>&1 | tee quality/results/BUG-NNN.regression.log
 
 # 8. Revert fix (we're only verifying, not shipping)
 #    OR: keep fixes if Phase 6 will integrate them

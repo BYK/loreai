@@ -547,26 +547,26 @@ Integration test groups verifying end-to-end behavior across Lore's gateway, cor
 
 ```bash
 # From workspace root
-bun test                                          # runs all existing tests
-bun test packages/gateway/test/                   # gateway integration tests
-bun test packages/core/test/                      # core unit/integration tests
+vitest run                                          # runs all existing tests
+vitest run packages/gateway/test/                   # gateway integration tests
+vitest run packages/core/test/                      # core unit/integration tests
 ```
 
 ### Running specific groups
 
 ```bash
 # Group 2: Anthropic tool round-trip
-bun test packages/gateway/test/pipeline-tools.test.ts
+vitest run packages/gateway/test/pipeline-tools.test.ts
 
 # Group 5: Streaming errors
-bun test packages/gateway/test/openai-responses-stream.test.ts
+vitest run packages/gateway/test/openai-responses-stream.test.ts
 
 # Group 6: Session identification
-bun test packages/gateway/test/session.test.ts
+vitest run packages/gateway/test/session.test.ts
 
 # Group 7: Recall
-bun test packages/gateway/test/recall.test.ts
-bun test packages/gateway/test/recall-stream.test.ts
+vitest run packages/gateway/test/recall.test.ts
+vitest run packages/gateway/test/recall-stream.test.ts
 ```
 
 ### Results
