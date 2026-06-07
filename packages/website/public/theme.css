@@ -102,10 +102,12 @@ a {
 }
 
 .logo {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: .5rem;
+  gap: 0.6rem;
   color: var(--c0);
+  text-decoration: none;
+  line-height: 1;
   transition: color 0.3s ease;
 }
 
@@ -119,16 +121,41 @@ a {
   display: block;
 }
 
+/* When the Logo component is rendered with theme="auto", it emits two
+ * <img> elements and CSS swaps between them based on [data-theme]. */
+.logo-img-light {
+  display: none;
+}
+:root[data-theme="light"] .logo-img-dark {
+  display: none;
+}
+:root[data-theme="light"] .logo-img-light {
+  display: block;
+}
+
 .logo-text {
   font-family: var(--serif);
+  font-style: italic;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+/* The Logo component's HTML text only — scoped to avoid clobbering the
+ * hero's <text class="logo-text"> which has its own font-size attribute. */
+a.logo .logo-text {
+  font-size: 2rem;
+  color: inherit;
 }
 
 .logo-dot {
-  width: 6px;
-  height: 6px;
-  background: var(--g3);
-  border-radius: 50%;
-  animation: pulse 3s ease-in-out infinite;
+  color: var(--g5);
+}
+
+:root[data-theme="light"] .logo-text {
+  color: var(--g0);
+}
+:root[data-theme="light"] .logo-dot {
+  color: var(--g2);
 }
 
 @keyframes pulse {

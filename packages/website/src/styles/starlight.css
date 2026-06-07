@@ -26,8 +26,46 @@ html[data-theme="light"] {
   --sl-color-black: #f7f2e8;
 }
 
-.site-title img {
+/* Logo (Logo.astro) — light/dark image swap and theme-aware text colors */
+.logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--sl-color-white);
+  text-decoration: none;
+  line-height: 1;
+}
+.logo-img {
+  height: 40px;
+  width: auto;
+  display: block;
   max-height: 2.8rem;
+}
+.logo-img-light {
+  display: none;
+}
+:root[data-theme="light"] .logo-img-dark {
+  display: none;
+}
+:root[data-theme="light"] .logo-img-light {
+  display: block;
+}
+.logo-text {
+  font-family: "Playfair Display", Georgia, serif;
+  font-style: italic;
+  font-weight: 400;
+  font-size: 1.5rem;
+  letter-spacing: 0;
+  color: var(--sl-color-white);
+}
+.logo-dot {
+  color: #8fba96;
+}
+:root[data-theme="light"] .logo-text {
+  color: var(--sl-color-black);
+}
+:root[data-theme="light"] .logo-dot {
+  color: #3d6644;
 }
 
 .hero h1,

@@ -1,5 +1,6 @@
 ---
 import siteJs from "../scripts/site.js?raw";
+import Logo from "../components/Logo.astro";
 ---
 <!DOCTYPE html>
 <html lang="en">
@@ -9,7 +10,6 @@ import siteJs from "../scripts/site.js?raw";
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Why Lore — What Makes Lore Different</title>
   <meta name="description" content="Why choose Lore: a local-first, fair source proxy that unifies shared context and long-term memory for any AI agent — no platform lock-in." />
-  <link rel="icon" href="favicon.ico" sizes="any">
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
   <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
@@ -28,9 +28,7 @@ import siteJs from "../scripts/site.js?raw";
   <!-- NAV -->
   <nav class="top-nav">
     <div class="nav-left">
-      <a href="index.html" class="logo">
-        <img src="brand-mark.svg?v=6" alt="Lore.AI" style="height: 78px; width: auto; display: block;" />
-      </a>
+      <Logo theme="dark" size={64} />
     </div>
     <div class="nav-right">
       <ul class="nav-links">

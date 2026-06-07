@@ -1,5 +1,6 @@
 ---
 import "../styles/blog.css";
+import Logo from "../components/Logo.astro";
 
 const {
   title = "Lore Blog",
@@ -14,9 +15,9 @@ const {
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>{title} | Lore</title>
     <meta name="description" content={description} />
-    <link rel="icon" href={`${import.meta.env.BASE_URL}favicon.ico`} sizes="any" />
     <link rel="icon" type="image/svg+xml" href={`${import.meta.env.BASE_URL}favicon.svg`} />
-    <link rel="apple-touch-icon" href={`${import.meta.env.BASE_URL}apple-touch-icon.png`} />
+    <link rel="icon" type="image/png" sizes="32x32" href={`${import.meta.env.BASE_URL}favicon-32.png`} />
+    <link rel="apple-touch-icon" sizes="180x180" href={`${import.meta.env.BASE_URL}apple-touch-icon.png`} />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -27,9 +28,7 @@ const {
   </head>
   <body class="blog-body">
     <header class="blog-nav">
-      <a href={import.meta.env.BASE_URL} class="blog-brand" aria-label="Lore home">
-        <img src={`${import.meta.env.BASE_URL}brand-mark.svg`} alt="Lore.AI" />
-      </a>
+      <Logo theme="dark" size={48} />
       <nav aria-label="Primary navigation">
         <a href={`${import.meta.env.BASE_URL}docs.html`}>Docs</a>
         <a href={`${import.meta.env.BASE_URL}blog.html`}>Blog</a>

@@ -3,9 +3,9 @@ import config from "virtual:starlight/user-config";
 
 import LanguageSelect from "virtual:starlight/components/LanguageSelect";
 import Search from "virtual:starlight/components/Search";
-import SiteTitle from "virtual:starlight/components/SiteTitle";
 import SocialIcons from "virtual:starlight/components/SocialIcons";
 import ThemeSelect from "virtual:starlight/components/ThemeSelect";
+import Logo from "./Logo.astro";
 
 /**
  * Render the `Search` component if Pagefind is enabled or the default search component has been overridden.
@@ -29,7 +29,7 @@ const navLinks = [
 
 <div class="header">
   <div class="title-wrapper sl-flex">
-    <SiteTitle />
+    <Logo theme="auto" size={40} />
   </div>
   <nav class="site-nav sl-flex print:hidden" aria-label="Site navigation">
     <ul>

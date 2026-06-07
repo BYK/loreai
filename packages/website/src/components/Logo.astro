@@ -1,0 +1,61 @@
+---
+import loreai from "../assets/logo/loreai.svg";
+import loreaiDark from "../assets/logo/loreai-dark.svg";
+
+interface Props {
+  /** "auto" = render both variants, CSS swaps based on [data-theme]. */
+  /** "dark" = cream logo on dark nav (public marketing pages). */
+  /** "light" = dark green logo on cream background. */
+  theme?: "auto" | "dark" | "light";
+  /** Image height in px. */
+  size?: number;
+}
+
+const { theme = "auto", size = 56 } = Astro.props;
+const base = import.meta.env.BASE_URL;
+---
+
+<a
+  href={`${base}index.html`}
+  class="logo"
+  data-theme={theme}
+  aria-label="Lore.AI — home"
+>
+  {theme === "auto" && (
+    <>
+      <img
+        src={loreai.src}
+        class="logo-img logo-img-light"
+        alt=""
+        width={size}
+        height={size}
+      />
+      <img
+        src={loreaiDark.src}
+        class="logo-img logo-img-dark"
+        alt=""
+        width={size}
+        height={size}
+      />
+    </>
+  )}
+  {theme === "light" && (
+    <img
+      src={loreai.src}
+      class="logo-img"
+      alt=""
+      width={size}
+      height={size}
+    />
+  )}
+  {theme === "dark" && (
+    <img
+      src={loreaiDark.src}
+      class="logo-img"
+      alt=""
+      width={size}
+      height={size}
+    />
+  )}
+  <span class="logo-text">Lore<span class="logo-dot">.</span>AI</span>
+</a>

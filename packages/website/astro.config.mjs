@@ -1,5 +1,6 @@
 import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
+import { faviconAssets } from "./integrations/favicon-assets";
 
 const prNumber = process.env.PR_NUMBER;
 const base = prNumber ? `/_preview/pr-${prNumber}/` : "/";
@@ -14,19 +15,16 @@ export default defineConfig({
     format: "file",
   },
   integrations: [
+    faviconAssets(),
     starlight({
       title: "Lore",
       components: {
         Header: "./src/components/SiteHeader.astro",
         MobileMenuFooter: "./src/components/MobileMenuFooter.astro",
       },
-      logo: {
-        light: "./public/brand-mark-light.svg",
-        dark: "./public/brand-mark.svg",
-        alt: "Lore.AI",
-        replacesTitle: true,
-      },
-      favicon: `${base}favicon.svg`,
+      // No `logo` config — SiteHeader.astro renders our <Logo> component
+      // (image + HTML text) directly, so Starlight's default SiteTitle is
+      // never used.
       customCss: ["./src/styles/starlight.css"],
       pagefind: false,
       lastUpdated: false,
@@ -51,12 +49,26 @@ export default defineConfig({
       head: [
         {
           tag: "link",
-          attrs: { rel: "icon", href: `${base}favicon.ico`, sizes: "any" },
+          attrs: {
+            rel: "icon",
+            type: "image/svg+xml",
+            href: `${base}favicon.svg`,
+          },
+        },
+        {
+          tag: "link",
+          attrs: {
+            rel: "icon",
+            type: "image/png",
+            sizes: "32x32",
+            href: `${base}favicon-32.png`,
+          },
         },
         {
           tag: "link",
           attrs: {
             rel: "apple-touch-icon",
+            sizes: "180x180",
             href: `${base}apple-touch-icon.png`,
           },
         },
