@@ -405,15 +405,18 @@ class LocalProvider implements EmbeddingProvider {
       });
 
       // Worker crash / exit — reject all in-flight requests.
+      // Null out `this.worker` in both handlers so the `?.` optional chaining
+      // in embed() prevents postMessage on a terminated Worker (LOREAI-GATEWAY-1T).
       this.worker.on("error", (err: Error) => {
         this.workerInitError = err.message;
         this.workerReady = false;
+        this.worker = null;
+        this.initPromise = null;
         log.error("embedding worker crashed:", err);
         for (const [, p] of this.pendingRequests) {
           p.reject(new LocalProviderUnavailableError(err));
         }
         this.pendingRequests.clear();
-        this.updateWorkerRef();
       });
 
       this.worker.on("exit", (code) => {
@@ -428,6 +431,8 @@ class LocalProvider implements EmbeddingProvider {
           localProviderKnownBroken = true;
         }
         this.workerReady = false;
+        this.worker = null;
+        this.initPromise = null;
         for (const [, p] of this.pendingRequests) {
           p.reject(
             new LocalProviderUnavailableError(
@@ -436,7 +441,6 @@ class LocalProvider implements EmbeddingProvider {
           );
         }
         this.pendingRequests.clear();
-        this.updateWorkerRef();
       });
 
       this.workerReady = true;
@@ -484,13 +488,26 @@ class LocalProvider implements EmbeddingProvider {
     return new Promise<Float32Array[]>((resolve, reject) => {
       this.pendingRequests.set(id, { resolve, reject });
       this.updateWorkerRef();
-      this.worker?.postMessage({
-        type: "embed",
-        id,
-        texts: prefixed,
-        inputType,
-        priority,
-      } satisfies WorkerInbound);
+      try {
+        this.worker?.postMessage({
+          type: "embed",
+          id,
+          texts: prefixed,
+          inputType,
+          priority,
+        } satisfies WorkerInbound);
+      } catch {
+        // Worker may have been terminated between ensureWorker() and here
+        // (race with process.exit(1) in the worker thread). Clean up and
+        // reject with the expected error type so callers degrade gracefully.
+        this.pendingRequests.delete(id);
+        this.updateWorkerRef();
+        reject(
+          new LocalProviderUnavailableError(
+            "embedding worker terminated before request could be sent",
+          ),
+        );
+      }
     });
   }
 
@@ -519,7 +536,13 @@ class LocalProvider implements EmbeddingProvider {
 
     return new Promise<void>((resolve) => {
       worker.on("exit", () => resolve());
-      worker.postMessage({ type: "shutdown" } satisfies WorkerInbound);
+      try {
+        worker.postMessage({ type: "shutdown" } satisfies WorkerInbound);
+      } catch {
+        // Worker already exited (e.g. process.exit(1) from WASM fatal) —
+        // resolve immediately since the desired end state is already reached.
+        resolve();
+      }
     });
   }
 }
