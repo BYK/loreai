@@ -38,11 +38,12 @@ import {
 import { execSync, spawnSync } from "node:child_process";
 import { gzipSync } from "node:zlib";
 import { createRequire } from "node:module";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { PLACEHOLDER_DEBUG_ID, injectDebugId } from "./debug-id";
 import { MODEL_DIR_NAME, MODEL_FILES } from "./vendor-paths";
+import { fossilize } from "fossilize";
 
 const require = createRequire(import.meta.url);
 
@@ -579,8 +580,6 @@ async function buildBinary() {
   //   our "linux-x64"    → fossilize "linux-x64" (same)
   const fossilizeTarget = (t: CompileTarget): string =>
     t.startsWith("windows") ? t.replace("windows", "win") : t;
-  // Use fossilize's programmatic API (v0.9.0+ exposes this via the "fossilize" package entry).
-  const { fossilize } = await import("fossilize");
 
   console.log(
     `→ fossilize: ${targets.length} platform(s), ${Object.keys(manifest).length} asset(s)`,
