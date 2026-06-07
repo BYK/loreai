@@ -30,7 +30,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v4
-        with:
       - uses: actions/setup-node@v6
         with:
           node-version: '24'
@@ -55,7 +54,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v4
-        with:
       - uses: actions/setup-node@v6
         with:
           node-version: '24'
@@ -101,7 +99,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v4
-        with:
       - uses: actions/setup-node@v6
         with:
           node-version: '24'
