@@ -27,6 +27,21 @@
 import { setMaxListeners } from "node:events";
 setMaxListeners(15);
 
+// Bun doesn't implement node:util's getSystemErrorMap(). The Sentry SDK calls
+// it during processEvent() to enrich errors with system error code names. When
+// it's missing, Sentry itself crashes with "getSystemErrorMap is not a function"
+// (LOREAI-GATEWAY-1X). Provide a no-op stub so Sentry's event pipeline doesn't
+// break — the only loss is cosmetic (no OS error code labels on events).
+// Use globalThis-based patching because esbuild treats ESM namespace imports
+// as immutable and rejects property assignment on `import * as util`.
+{
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const util = require("node:util") as Record<string, unknown>;
+  if (typeof util.getSystemErrorMap !== "function") {
+    util.getSystemErrorMap = () => new Map();
+  }
+}
+
 import * as Sentry from "@sentry/bun";
 import { log } from "@loreai/core";
 import { VERSION } from "./src/cli/version";
