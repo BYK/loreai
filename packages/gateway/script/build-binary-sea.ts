@@ -31,7 +31,6 @@ import {
   linkSync,
   mkdirSync,
   readFileSync,
-  readdirSync,
   renameSync,
   unlinkSync,
   writeFileSync,
@@ -580,38 +579,14 @@ async function buildBinary() {
   //   our "linux-x64"    → fossilize "linux-x64" (same)
   const fossilizeTarget = (t: CompileTarget): string =>
     t.startsWith("windows") ? t.replace("windows", "win") : t;
-  // Use fossilize's programmatic API — cleaner, no subprocess overhead.
-  // fossilize v0.8.1 ships its implementation in dist/impl-*.js; the
-  // hash changes between versions but is stable within a lockfile.
-  // Imported dynamically here since this is a build script.
-  const fossilizeDist = join(
-    dirname(require.resolve("fossilize/package.json")),
-    "dist",
-  );
-  const implFile = readdirSync(fossilizeDist).find((f) =>
-    /^impl-.+\.js$/.test(f),
-  );
-  if (!implFile) {
-    console.error("✗ fossilize: no impl-*.js found in dist/");
-    process.exit(1);
-  }
-  const fossilizeImplPath = join(fossilizeDist, implFile);
-  const { default: fossilize } = await import(
-    pathToFileURL(fossilizeImplPath).href
-  );
+  // Use fossilize's programmatic API (v0.9.0+ exposes this via the "fossilize" package entry).
+  const { fossilize } = await import("fossilize");
 
   console.log(
     `→ fossilize: ${targets.length} platform(s), ${Object.keys(manifest).length} asset(s)`,
   );
-  const fossilizeContext = {
-    process,
-    os: require("node:os"),
-    fs: require("node:fs"),
-    path: require("node:path"),
-  };
   try {
-    await fossilize.call(
-      fossilizeContext,
+    await fossilize(
       {
         nodeVersion: "lts",
         platforms: targets.map(fossilizeTarget),
