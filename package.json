@@ -38,5 +38,8 @@
     "ip-address": "10.2.0",
     "fast-xml-parser": "5.7.3",
     "@huggingface/hub": "2.11.0"
-  }
+  },
+  "workspaces": [
+    "packages/*"
+  ]
 }
