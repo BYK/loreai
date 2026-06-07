@@ -31,6 +31,7 @@ import {
   linkSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   renameSync,
   unlinkSync,
   writeFileSync,
@@ -38,7 +39,7 @@ import {
 import { execSync, spawnSync } from "node:child_process";
 import { gzipSync } from "node:zlib";
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { PLACEHOLDER_DEBUG_ID, injectDebugId } from "./debug-id";
@@ -579,39 +580,52 @@ async function buildBinary() {
   //   our "linux-x64"    → fossilize "linux-x64" (same)
   const fossilizeTarget = (t: CompileTarget): string =>
     t.startsWith("windows") ? t.replace("windows", "win") : t;
-  // Use fossilize's programmatic API
-  // Resolve fossilize's implementation dynamically to avoid hardcoded pnpm store path
-  const gatewayRequire = createRequire(`${packageDir}/`);
-  const fossilizePkgDir = dirname(
-    gatewayRequire.resolve("fossilize/package.json"),
+  // Use fossilize's programmatic API — cleaner, no subprocess overhead.
+  // fossilize v0.8.1 ships its implementation in dist/impl-*.js; the
+  // hash changes between versions but is stable within a lockfile.
+  // Imported dynamically here since this is a build script.
+  const fossilizeDist = join(
+    dirname(require.resolve("fossilize/package.json")),
+    "dist",
   );
-  // @ts-ignore - fossilize doesn't have proper typedefs but works at runtime
-  const fossilize = require(join(fossilizePkgDir, "dist", "impl-7RS2FY5C.js"));
-  
+  const implFile = readdirSync(fossilizeDist).find((f) =>
+    /^impl-.+\.js$/.test(f),
+  );
+  if (!implFile) {
+    console.error("✗ fossilize: no impl-*.js found in dist/");
+    process.exit(1);
+  }
+  const fossilizeImplPath = join(fossilizeDist, implFile);
+  const { default: fossilize } = await import(
+    pathToFileURL(fossilizeImplPath).href
+  );
+
+  console.log(
+    `→ fossilize: ${targets.length} platform(s), ${Object.keys(manifest).length} asset(s)`,
+  );
   const fossilizeContext = {
     process,
     os: require("node:os"),
     fs: require("node:fs"),
     path: require("node:path"),
   };
-  const fossilizeFlags = {
-    nodeVersion: "lts",
-    platforms: targets.map(fossilizeTarget),
-    noBundle: true,
-    holePunch: true,
-    outputName: "lore",
-    outDir: distBinDir,
-    assetManifest: manifestPath,
-    // Don't sign here - we'll handle signing/renaming manually like before
-    sign: false,
-    concurrencyLimit: 3,
-  };
-
-  console.log(
-    `→ fossilize: ${targets.length} platform(s), ${Object.keys(manifest).length} asset(s)`,
-  );
   try {
-    await fossilize.default.call(fossilizeContext, fossilizeFlags, bundlePath);
+    await fossilize.call(
+      fossilizeContext,
+      {
+        nodeVersion: "lts",
+        platforms: targets.map(fossilizeTarget),
+        noBundle: true,
+        holePunch: true,
+        outputName: "lore",
+        outDir: distBinDir,
+        cacheDir: join(packageDir, ".node-cache"),
+        assetManifest: manifestPath,
+        sign: false,
+        concurrencyLimit: 3,
+      },
+      bundlePath,
+    );
   } catch (err) {
     console.error("✗ fossilize failed:", err);
     process.exit(1);
