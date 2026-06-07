@@ -1697,6 +1697,31 @@ export type EntityDedupFeedbackSource =
 const MIN_ENTITY_CALIBRATION_SAMPLES = 20;
 /** Only record auto-signals for pairs with similarity >= this floor. */
 const ENTITY_AUTO_SIGNAL_MIN_SIMILARITY = 0.8;
+/**
+ * Return a Set of "nameA\x1fnameB" keys for entity pairs that have been
+ * explicitly dismissed (accepted=0) via the dashboard. Both orderings are
+ * included so callers can do a single `has()` check.
+ *
+ * Dismissals are name-based; renaming an entity resets its dismiss state
+ * (the old names won't match), which is the correct behavior since the
+ * entity's identity has changed.
+ */
+export function getDismissedEntityPairs(): Set<string> {
+  const rows = db()
+    .query(
+      `SELECT entry_a_title, entry_b_title FROM dedup_feedback
+       WHERE kind = 'entity' AND accepted = 0 AND source = 'dashboard'
+         AND project_id IS NULL`,
+    )
+    .all() as Array<{ entry_a_title: string; entry_b_title: string }>;
+  const dismissed = new Set<string>();
+  for (const r of rows) {
+    dismissed.add(`${r.entry_a_title}\x1f${r.entry_b_title}`);
+    dismissed.add(`${r.entry_b_title}\x1f${r.entry_a_title}`);
+  }
+  return dismissed;
+}
+
 /** Max auto-signal pairs to record per dedup run (closest to threshold). */
 const ENTITY_AUTO_SIGNAL_MAX_PAIRS = 50;
 /** Max feedback rows to keep per project (prevents unbounded growth). */

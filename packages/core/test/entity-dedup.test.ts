@@ -281,4 +281,32 @@ describe("entity dedup — adaptive calibration (kind='entity')", () => {
     expect(entities.loadEntityCalibratedThreshold(pid)).toBeCloseTo(0.876, 5);
     expect(getKV(`entity_dedup_threshold:${pid}`)).toContain("0.876");
   });
+
+  test("getDismissedEntityPairs returns both orderings for dashboard rejects", () => {
+    // Record a dashboard dismiss
+    entities.recordEntityDedupFeedback({
+      projectId: null,
+      entryATitle: "Alice",
+      entryBTitle: "Bob",
+      similarity: 0.87,
+      accepted: false,
+      source: "dashboard",
+    });
+    // Record a non-dashboard reject (should NOT appear)
+    entities.recordEntityDedupFeedback({
+      projectId: null,
+      entryATitle: "Carol",
+      entryBTitle: "Dave",
+      similarity: 0.88,
+      accepted: false,
+      source: "cli_interactive",
+    });
+
+    const dismissed = entities.getDismissedEntityPairs();
+    // Both orderings present for the dashboard dismiss
+    expect(dismissed.has("Alice\x1fBob")).toBe(true);
+    expect(dismissed.has("Bob\x1fAlice")).toBe(true);
+    // CLI reject NOT included
+    expect(dismissed.has("Carol\x1fDave")).toBe(false);
+  });
 });

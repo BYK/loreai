@@ -2797,7 +2797,16 @@ async function pageEntities(): Promise<string> {
       const dupes = await entities.deduplicateEntities(undefined, {
         dryRun: true,
       });
-      const clusters = [...dupes.merged, ...dupes.suggested];
+      // Filter out pairs the user has already dismissed via the dashboard.
+      const dismissed = entities.getDismissedEntityPairs();
+      const clusters = [...dupes.merged, ...dupes.suggested]
+        .map((c) => ({
+          ...c,
+          merged: c.merged.filter(
+            (m) => !dismissed.has(`${m.name}\x1f${c.surviving.name}`),
+          ),
+        }))
+        .filter((c) => c.merged.length > 0);
       if (clusters.length > 0) {
         const pairCount = clusters.reduce((n, c) => n + c.merged.length, 0);
         body += `<div class="banner" style="border:1px solid #d0a000;background:#fffbe6;padding:12px 16px;border-radius:6px;margin:12px 0;">`;
