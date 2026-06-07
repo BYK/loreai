@@ -2,6 +2,7 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
+    "types": ["bun"],
     "paths": {
       "@loreai/core": ["../core/src/index.ts"]
     }

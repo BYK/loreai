@@ -3,5 +3,6 @@
   "compilerOptions": {
     "noEmit": true
   },
-  "include": ["src", "test", "script"]
+  "include": ["src", "test", "script"],
+  "exclude": ["src/db/driver.bun.ts"]
 }

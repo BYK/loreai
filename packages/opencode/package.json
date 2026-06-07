@@ -26,7 +26,8 @@
   },
   "devDependencies": {
     "@opencode-ai/plugin": "^1.1.39",
-    "@opencode-ai/sdk": "^1.1.39"
+    "@opencode-ai/sdk": "^1.1.39",
+    "@types/bun": "^1.2.0"
   },
   "files": [
     "src/",
