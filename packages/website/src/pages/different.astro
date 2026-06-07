@@ -1,6 +1,5 @@
 ---
-import fs from "node:fs";
-const siteJs = fs.readFileSync("src/scripts/site.js", "utf-8");
+import siteJs from "../scripts/site.js?raw";
 ---
 <!DOCTYPE html>
 <html lang="en">
