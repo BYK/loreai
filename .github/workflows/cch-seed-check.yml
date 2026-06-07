@@ -38,9 +38,11 @@ jobs:
         run: |
           if [ -n "${{ inputs.force-version }}" ]; then
             VERSION="${{ inputs.force-version }}"
-            echo "needs-extraction=true" >> "$GITHUB_OUTPUT"
-            echo "latest-version=$VERSION" >> "$GITHUB_OUTPUT"
-            echo "missing-versions=[\"$VERSION\"]" >> "$GITHUB_OUTPUT"
+            {
+              echo "needs-extraction=true"
+              echo "latest-version=$VERSION"
+              echo "missing-versions=[\"$VERSION\"]"
+            } >> "$GITHUB_OUTPUT"
             echo "Force extraction for version: $VERSION"
           else
             # check-cc-version.ts exits 1 if extraction is needed
@@ -52,22 +54,28 @@ jobs:
             echo "Raw output: $result"
 
             if [ $exit_code -eq 0 ]; then
-              echo "needs-extraction=false" >> "$GITHUB_OUTPUT"
-              echo "latest-version=" >> "$GITHUB_OUTPUT"
-              echo "missing-versions=[]" >> "$GITHUB_OUTPUT"
+              {
+                echo "needs-extraction=false"
+                echo "latest-version="
+                echo "missing-versions=[]"
+              } >> "$GITHUB_OUTPUT"
               echo "All versions have known seeds"
             else
               latest=$(echo "$result" | jq -r '.latestVersion // empty')
               missing=$(echo "$result" | jq -c '.missingVersions // []')
               if [ -n "$latest" ] && [ "$missing" != "[]" ]; then
-                echo "needs-extraction=true" >> "$GITHUB_OUTPUT"
-                echo "latest-version=$latest" >> "$GITHUB_OUTPUT"
-                echo "missing-versions=$missing" >> "$GITHUB_OUTPUT"
+                {
+                  echo "needs-extraction=true"
+                  echo "latest-version=$latest"
+                  echo "missing-versions=$missing"
+                } >> "$GITHUB_OUTPUT"
                 echo "Missing versions: $missing"
               else
-                echo "needs-extraction=false" >> "$GITHUB_OUTPUT"
-                echo "latest-version=" >> "$GITHUB_OUTPUT"
-                echo "missing-versions=[]" >> "$GITHUB_OUTPUT"
+                {
+                  echo "needs-extraction=false"
+                  echo "latest-version="
+                  echo "missing-versions=[]"
+                } >> "$GITHUB_OUTPUT"
                 echo "Check failed but no versions to extract"
               fi
             fi

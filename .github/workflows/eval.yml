@@ -82,9 +82,9 @@ jobs:
       - name: Post summary
         if: always()
         run: |
-          LATEST=$(ls -t packages/core/eval/results/*.jsonl 2>/dev/null | head -1)
+          LATEST=$(find packages/core/eval/results/ -maxdepth 1 -name '*.jsonl' -printf '%T@\t%p\n' 2>/dev/null | sort -rn | head -1 | cut -f2)
           if [ -n "$LATEST" ]; then
-            pnpm tsx packages/core/eval/run.ts --summarize "$LATEST" >> $GITHUB_STEP_SUMMARY
+            pnpm tsx packages/core/eval/run.ts --summarize "$LATEST" >> "$GITHUB_STEP_SUMMARY"
           fi
 
   eval-auto-memory:

@@ -169,7 +169,7 @@ jobs:
           while IFS= read -r target; do
             # Escape special regex chars in target name
             escaped=$(printf '%s' "$target" | sed 's/[][().\*^$?+{}|/]/\\&/g')
-            body=$(echo "$body" | sed "s/- \[ \] ${escaped}/- [x] ${escaped}/")
+            body="${body//- \[ \] ${escaped}/- [x] ${escaped}}"
           done <<< "$published_targets"
 
           gh issue edit "${{ github.event.issue.number }}" --body "$body"

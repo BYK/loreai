@@ -53,6 +53,25 @@ jobs:
         if: github.event_name == 'push'
         run: echo "code=true" >> "$GITHUB_OUTPUT"
 
+  # ---------------------------------------------------------------------------
+  # Lint GitHub Actions workflow files (catches schema errors, empty `with:`
+  # blocks, expression type mismatches, invalid action inputs, etc.)
+  # Runs unconditionally — sub-second, no Node/pnpm deps, and workflow bugs
+  # should never slip through regardless of which files changed.
+  # ---------------------------------------------------------------------------
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install actionlint
+        run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+      - name: Lint workflow files
+        # -shellcheck="" disables shellcheck integration — the existing
+        # run: blocks have cosmetic shellcheck findings (SC2086, SC2129,
+        # SC2035, SC2012) that are not bugs. The value of actionlint is
+        # in workflow schema validation, not shell style.
+        run: ./actionlint -color
+
   test:
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
@@ -712,7 +731,7 @@ jobs:
             --artifact-type application/vnd.lore.cli.nightly \
             --annotation "org.opencontainers.image.source=https://github.com/BYK/loreai" \
             --annotation "version=${VERSION}" \
-            *.gz
+            ./*.gz
 
       - name: Tag versioned nightly
         # Create an immutable versioned tag via zero-copy oras tag.
@@ -768,8 +787,8 @@ jobs:
           eval oras push "${REPO}:patch-${VERSION}" \
             --artifact-type application/vnd.lore.cli.patch \
             --annotation "from-version=${PREV_VERSION}" \
-            ${ANNOTATIONS} \
-            ${PATCH_FILES}
+            "${ANNOTATIONS}" \
+            "${PATCH_FILES}"
 
           echo "Pushed patch manifest: patch-${VERSION} (from ${PREV_VERSION})"
 
@@ -903,11 +922,15 @@ jobs:
   ci-status:
     name: CI Status
     if: always()
-    needs: [changes, test, binary-smoke-native]
+    needs: [changes, test, binary-smoke-native, actionlint]
     runs-on: ubuntu-latest
     steps:
       - name: Check CI result
         run: |
+          if [ "${{ needs.actionlint.result }}" != "success" ]; then
+            echo "::error::actionlint job did not succeed (result: ${{ needs.actionlint.result }})"
+            exit 1
+          fi
           if [ "${{ needs.changes.outputs.code }}" == "true" ]; then
             if [ "${{ needs.test.result }}" != "success" ]; then
               echo "::error::test job did not succeed (result: ${{ needs.test.result }})"
