@@ -192,7 +192,6 @@ function resolveIsOpenAI(
  *  credentials only work against the session's endpoint. */
 function resolveTarget(
   upstreams: { anthropic: string; openai: string },
-  providerID: string,
   isOpenAI: boolean,
   upstreamOverride?: string,
 ): ProviderTarget {
@@ -381,12 +380,7 @@ export function createGatewayLLMClient(
       }
       const upstreamOverride = opts?.upstreamUrl;
       const isOpenAI = resolveIsOpenAI(model.providerID, upstreamOverride);
-      const target = resolveTarget(
-        upstreams,
-        model.providerID,
-        isOpenAI,
-        upstreamOverride,
-      );
+      const target = resolveTarget(upstreams, isOpenAI, upstreamOverride);
       const maxTokens = opts?.maxTokens ?? 8192;
 
       // Defense-in-depth: detect API key / provider mismatch before making
