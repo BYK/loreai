@@ -9,6 +9,7 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.cts",
+      "bun": "./dist/index.bun.js",
       "require": "./dist/index.cjs",
       "default": "./dist/index.cjs"
     }
@@ -33,6 +34,7 @@
     "dist/bin.cjs",
     "dist/embedding-worker.cjs",
     "dist/embedding-worker.js",
+    "dist/index.bun.js",
     "dist/index.cjs",
     "dist/index.d.cts"
   ],

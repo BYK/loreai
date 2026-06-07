@@ -9,11 +9,13 @@
   "exports": {
     ".": {
       "types": "./dist/types/index.d.ts",
+      "bun": "./dist/bun/index.js",
       "default": "./dist/node/index.js"
     }
   },
   "imports": {
     "#db/driver": {
+      "bun": "./src/db/driver.bun.ts",
       "default": "./src/db/driver.node.ts"
     }
   },
