@@ -186,6 +186,8 @@ async function _detect(input: {
       session: input.sessionID,
       scope: "project",
       confidence: 0.8, // moderate — auto-extracted, not user-stated
+      workerProviderID: model?.providerID,
+      workerModelID: model?.modelID,
     });
     log.info(`pattern echo created preference: "${pattern.title}"`);
     lastExtraction.set(input.sessionID, Date.now());

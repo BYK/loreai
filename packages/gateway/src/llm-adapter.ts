@@ -35,6 +35,7 @@ import {
 import { recordWorkerCost } from "./cost-tracker";
 import { upstreamFetch } from "./fetch";
 import { extractJSONFromSSE } from "./translate/types";
+import { recordWorkerFailure } from "./worker-health";
 
 // ---------------------------------------------------------------------------
 // Worker call tracking
@@ -403,6 +404,11 @@ export function createGatewayLLMClient(
       const cred = getAuth(opts?.sessionID, model.providerID);
       if (!cred) {
         log.warn("no auth credentials available for worker call");
+        recordWorkerFailure(
+          opts?.sessionID ?? "_unknown",
+          opts?.workerID ?? "unknown",
+          "no-auth",
+        );
         return null;
       }
       const upstreamOverride = opts?.upstreamUrl;
@@ -425,11 +431,21 @@ export function createGatewayLLMClient(
           log.warn(
             `worker protocol mismatch: ${target.protocol} target with non-Anthropic API key — skipping (model=${model.modelID}, worker=${opts?.workerID ?? "unknown"})`,
           );
+          recordWorkerFailure(
+            opts?.sessionID ?? "_unknown",
+            opts?.workerID ?? "unknown",
+            "protocol-mismatch",
+          );
           return null;
         }
         if (target.protocol === "openai" && isAnthropicKey) {
           log.warn(
             `worker protocol mismatch: ${target.protocol} target with Anthropic API key — skipping (model=${model.modelID}, worker=${opts?.workerID ?? "unknown"})`,
+          );
+          recordWorkerFailure(
+            opts?.sessionID ?? "_unknown",
+            opts?.workerID ?? "unknown",
+            "protocol-mismatch",
           );
           return null;
         }
@@ -568,6 +584,10 @@ export function createGatewayLLMClient(
                   span.setAttribute("lore.retry.final_status", finalStatus);
                 }
 
+                // Worker succeeded — clear any prior failure state for this session.
+                if (opts?.sessionID) {
+                  recordWorkerSuccess(opts.sessionID);
+                }
                 return parsed.text;
               }
 
@@ -577,6 +597,11 @@ export function createGatewayLLMClient(
 
                 // Mark session credential stale so resolveAuth() falls through to global
                 if (opts?.sessionID) {
+                  recordWorkerFailure(
+                    opts.sessionID,
+                    opts?.workerID ?? "unknown",
+                    "auth-rejected",
+                  );
                   markAuthStale(opts.sessionID);
                 }
 
@@ -652,6 +677,11 @@ export function createGatewayLLMClient(
                   `worker upstream request failed: ${response.status} ${response.statusText} — ${text}`,
                 );
                 span.setStatus({ code: 2, message: `HTTP ${response.status}` });
+                recordWorkerFailure(
+                  opts?.sessionID ?? "_unknown",
+                  opts?.workerID ?? "unknown",
+                  "upstream-error",
+                );
                 return null;
               }
 

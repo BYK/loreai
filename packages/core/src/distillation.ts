@@ -673,6 +673,10 @@ function storeDistillation(input: {
   rCompression?: number;
   cNorm?: number;
   callType?: "batch" | "direct";
+  /** Worker model providerID that produced this distillation. v35 attribution. */
+  workerProviderID?: string;
+  /** Worker model ID that produced this distillation. v35 attribution. */
+  workerModelID?: string;
 }): string {
   const pid = ensureProject(input.projectPath);
   const id = crypto.randomUUID();
@@ -680,8 +684,8 @@ function storeDistillation(input: {
   const tokens = Math.ceil(input.observations.length / 3);
   db()
     .query(
-      `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, created_at, r_compression, c_norm, call_type)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, created_at, r_compression, c_norm, call_type, worker_provider_id, worker_model_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -697,6 +701,8 @@ function storeDistillation(input: {
       input.rCompression ?? null,
       input.cNorm ?? null,
       input.callType ?? null,
+      input.workerProviderID ?? null,
+      input.workerModelID ?? null,
     );
   return id;
 }
@@ -823,6 +829,11 @@ export async function run(input: {
    *  triggers at this count instead of `cfg.distillation.metaThreshold`.
    *  Used by the urgent-distillation path to consolidate earlier under bust pressure. */
   metaThresholdOverride?: number;
+  /** Optional hook for the gateway to record worker health events. When the
+   *  LLM call returns null (no response), the hook is called with a categorical
+   *  reason. The gateway uses this to escalate to Sentry / dashboard after
+   *  sustained failure. Core does not depend on the gateway's types. */
+  workerHealth?: { recordFailure(reason: string): void };
 }): Promise<{ rounds: number; distilled: number }> {
   return distillLimiter.get(input.sessionID)(() => runInner(input));
 }
@@ -850,6 +861,8 @@ async function runInner(input: {
   callType?: "batch" | "direct";
   /** Override the meta-distillation gen-0 threshold (see run()). */
   metaThresholdOverride?: number;
+  /** See run() — optional gateway worker-health hook. */
+  workerHealth?: { recordFailure(reason: string): void };
 }): Promise<{ rounds: number; distilled: number }> {
   // Reset orphaned messages (marked distilled by a deleted/migrated distillation)
   const orphans = resetOrphans(input.projectPath, input.sessionID);
@@ -900,6 +913,7 @@ async function runInner(input: {
           model: input.model,
           urgent: input.urgent,
           callType: input.callType,
+          workerHealth: input.workerHealth,
         });
         if (result) {
           distilled += segment.length;
@@ -928,6 +942,7 @@ async function runInner(input: {
         model: input.model,
         urgent: input.urgent,
         callType: input.callType,
+        workerHealth: input.workerHealth,
       });
       rounds++;
     }
@@ -949,6 +964,7 @@ async function distillSegment(input: {
   model?: { providerID: string; modelID: string };
   urgent?: boolean;
   callType?: "batch" | "direct";
+  workerHealth?: { recordFailure(reason: string): void };
 }): Promise<DistillationResult | null> {
   const prior = latestObservations(input.projectPath, input.sessionID);
   const text = messagesToText(input.messages);
@@ -1004,10 +1020,16 @@ async function distillSegment(input: {
       temperature: 0,
     },
   );
-  if (!responseText) return null;
+  if (!responseText) {
+    input.workerHealth?.recordFailure("no-response");
+    return null;
+  }
 
   const result = parseDistillationResult(responseText);
-  if (!result) return null;
+  if (!result) {
+    input.workerHealth?.recordFailure("parse-error");
+    return null;
+  }
 
   // Compute context health metrics before storing.
   const distilledTokens = Math.ceil(result.observations.length / 3);
@@ -1045,6 +1067,8 @@ async function distillSegment(input: {
       rCompression: rComp,
       cNorm,
       callType: input.callType,
+      workerProviderID: input.model?.providerID,
+      workerModelID: input.model?.modelID,
     });
     temporal.markDistilled(input.messages.map((m) => m.id));
     db().exec("COMMIT");
@@ -1100,6 +1124,8 @@ async function distillSegment(input: {
           content: pat.content,
           session: input.sessionID,
           scope: "project",
+          workerProviderID: input.model?.providerID,
+          workerModelID: input.model?.modelID,
         });
       } catch {
         // Dedup guard in ltm.create() handles duplicates — swallow errors
@@ -1136,6 +1162,8 @@ async function distillSegment(input: {
               session: input.sessionID,
               scope: "project",
               confidence: 0.8,
+              workerProviderID: input.model?.providerID,
+              workerModelID: input.model?.modelID,
             });
             log.info(
               `action tag '${tag}' found in ${sessionCount} sessions — created preference`,
@@ -1165,6 +1193,8 @@ async function distillSegment(input: {
             session: input.sessionID,
             scope: "project",
             confidence: 0.75,
+            workerProviderID: input.model?.providerID,
+            workerModelID: input.model?.modelID,
           });
           log.info(
             `tool-failure gotcha: ${stat.tool}/${stat.error_type} in ${stat.session_count} sessions — created gotcha`,
@@ -1197,6 +1227,7 @@ export async function metaDistill(input: {
   model?: { providerID: string; modelID: string };
   urgent?: boolean;
   callType?: "batch" | "direct";
+  workerHealth?: { recordFailure(reason: string): void };
 }): Promise<DistillationResult | null> {
   return distillLimiter.get(input.sessionID)(() => metaDistillInner(input));
 }
@@ -1208,6 +1239,7 @@ async function metaDistillInner(input: {
   model?: { providerID: string; modelID: string };
   urgent?: boolean;
   callType?: "batch" | "direct";
+  workerHealth?: { recordFailure(reason: string): void };
 }): Promise<DistillationResult | null> {
   const existing = loadGen0(input.projectPath, input.sessionID);
 
@@ -1256,10 +1288,16 @@ async function metaDistillInner(input: {
     maxTokens,
     temperature: 0,
   });
-  if (!responseText) return null;
+  if (!responseText) {
+    input.workerHealth?.recordFailure("no-response");
+    return null;
+  }
 
   const result = parseDistillationResult(responseText);
-  if (!result) return null;
+  if (!result) {
+    input.workerHealth?.recordFailure("parse-error");
+    return null;
+  }
 
   // Store the meta-distillation at generation N+1, where N is the highest
   // generation in the merged inputs OR the prior meta's generation, whichever
@@ -1290,6 +1328,8 @@ async function metaDistillInner(input: {
       sourceIDs: allSourceIDs,
       generation: maxGen + 1,
       callType: input.callType,
+      workerProviderID: input.model?.providerID,
+      workerModelID: input.model?.modelID,
     });
     // Archive only the consolidated gen-0 distillations — recent segments
     // kept via recentSegmentsToKeep remain non-archived in the prefix.
@@ -1319,6 +1359,8 @@ async function metaDistillInner(input: {
           content: pat.content,
           session: input.sessionID,
           scope: "project",
+          workerProviderID: input.model?.providerID,
+          workerModelID: input.model?.modelID,
         });
       } catch {
         // Dedup guard in ltm.create() handles duplicates — swallow errors
@@ -1326,7 +1368,7 @@ async function metaDistillInner(input: {
     }
     if (patterns.length > 0) {
       log.info(
-        `pattern extraction: ${patterns.length} entries from meta-distillation`,
+        `distill pattern extraction: ${patterns.length} entries from segment`,
       );
     }
   }

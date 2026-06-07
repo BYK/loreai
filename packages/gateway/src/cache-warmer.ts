@@ -38,6 +38,7 @@ import type {
 } from "./translate/types";
 import { decompressBody } from "./cache-analytics";
 import { resolveAuth, authHeaders, markAuthStale } from "./auth";
+import { recordWorkerFailure } from "./worker-health";
 import { resignBody } from "./cch";
 import { resolveUpstreamRoute } from "./config";
 import { getModelEntrySync } from "./worker-model";
@@ -1347,6 +1348,7 @@ export async function executeWarmup(
     log.warn(
       `cache-warmer: no auth for session=${state.sessionID.slice(0, 16)}, skipping`,
     );
+    recordWorkerFailure(state.sessionID, "cache-warmer", "no-auth");
     return noResult;
   }
 
@@ -1392,6 +1394,7 @@ export async function executeWarmup(
       if (response.status === 401 || response.status === 403) {
         authDisabledSessions.add(state.sessionID);
         markAuthStale(state.sessionID);
+        recordWorkerFailure(state.sessionID, "cache-warmer", "auth-rejected");
         log.warn(
           `cache-warmer: auth error ${response.status} — disabling warmup for ` +
             `session=${state.sessionID.slice(0, 16)} until fresh credential`,

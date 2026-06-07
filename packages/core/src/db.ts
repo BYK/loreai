@@ -992,6 +992,23 @@ const MIGRATIONS: string[] = [
   ALTER TABLE entities ADD COLUMN embedding BLOB;
   ALTER TABLE dedup_feedback ADD COLUMN kind TEXT NOT NULL DEFAULT 'knowledge';
   `,
+  `
+  -- Version 35: Worker source attribution. Records which model produced
+  -- each distillation row and each knowledge entry so audits, cost
+  -- attribution, and cross-provider analytics are possible without joining
+  -- through temporal_messages. Nullable for backward compatibility — pre-v35
+  -- rows stay NULL. The dedicated columns (not the existing knowledge.metadata
+  -- JSON blob) are used because dedicated columns are indexable and trivially
+  -- queryable; the metadata blob stays available for other per-entry data.
+  ALTER TABLE distillations ADD COLUMN worker_provider_id TEXT;
+  ALTER TABLE distillations ADD COLUMN worker_model_id TEXT;
+  ALTER TABLE knowledge ADD COLUMN worker_provider_id TEXT;
+  ALTER TABLE knowledge ADD COLUMN worker_model_id TEXT;
+  CREATE INDEX IF NOT EXISTS idx_distillation_worker
+    ON distillations(worker_provider_id, worker_model_id);
+  CREATE INDEX IF NOT EXISTS idx_knowledge_worker
+    ON knowledge(worker_provider_id, worker_model_id);
+  `,
 ];
 
 /** Return the resolved path of the SQLite database file. */
@@ -1246,6 +1263,19 @@ function recoverMissingObjects(database: Database) {
     .all() as Array<{ name: string }>;
   if (!cols.some((c) => c.name === "call_type")) {
     database.exec("ALTER TABLE distillations ADD COLUMN call_type TEXT;");
+  }
+  // Version 35: worker source attribution. The first ALTER may have applied
+  // while a sibling ALTER in the same migration was skipped; recover each
+  // column independently.
+  for (const table of ["distillations", "knowledge"] as const) {
+    const tcols = database.query(`PRAGMA table_info(${table})`).all() as Array<{
+      name: string;
+    }>;
+    for (const col of ["worker_provider_id", "worker_model_id"]) {
+      if (!tcols.some((c) => c.name === col)) {
+        database.exec(`ALTER TABLE ${table} ADD COLUMN ${col} TEXT;`);
+      }
+    }
   }
 }
 

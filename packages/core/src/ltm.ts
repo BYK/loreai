@@ -49,16 +49,20 @@ export type KnowledgeEntry = {
   source_user_id: string | null;
   source_entry_id: string | null;
   last_accessed_at: number | null;
+  // Worker source attribution (v35): which model produced this entry.
+  // Nullable for backward compatibility with pre-v35 rows.
+  worker_provider_id: string | null;
+  worker_model_id: string | null;
 };
 
 /** Columns to select for KnowledgeEntry — excludes the embedding BLOB
  *  (4KB per entry) which is only needed by vectorSearch() in embedding.ts. */
 const KNOWLEDGE_COLS =
-  "id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at, metadata, created_by, updated_by, sensitivity, promotion_status, promoted_at, approval_status, approved_by, approved_at, source_user_id, source_entry_id, last_accessed_at";
+  "id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at, metadata, created_by, updated_by, sensitivity, promotion_status, promoted_at, approval_status, approved_by, approved_at, source_user_id, source_entry_id, last_accessed_at, worker_provider_id, worker_model_id";
 
 /** Same columns with table alias prefix for use in JOIN queries. */
 const KNOWLEDGE_COLS_K =
-  "k.id, k.project_id, k.category, k.title, k.content, k.source_session, k.cross_project, k.confidence, k.created_at, k.updated_at, k.metadata, k.created_by, k.updated_by, k.sensitivity, k.promotion_status, k.promoted_at, k.approval_status, k.approved_by, k.approved_at, k.source_user_id, k.source_entry_id, k.last_accessed_at";
+  "k.id, k.project_id, k.category, k.title, k.content, k.source_session, k.cross_project, k.confidence, k.created_at, k.updated_at, k.metadata, k.created_by, k.updated_by, k.sensitivity, k.promotion_status, k.promoted_at, k.approval_status, k.approved_by, k.approved_at, k.source_user_id, k.source_entry_id, k.last_accessed_at, k.worker_provider_id, k.worker_model_id";
 
 export function create(input: {
   projectPath?: string;
@@ -76,6 +80,10 @@ export function create(input: {
   createdBy?: string;
   /** Sensitivity classification — guides auto-promotion decisions. Default 'normal'. */
   sensitivity?: Sensitivity;
+  /** Worker model providerID that produced this entry (curator / pattern-extract). */
+  workerProviderID?: string;
+  /** Worker model ID that produced this entry. */
+  workerModelID?: string;
 }): string {
   const pid =
     input.scope === "project" && input.projectPath
@@ -154,8 +162,8 @@ export function create(input: {
     input.confidence != null ? Math.max(0, Math.min(1, input.confidence)) : 1.0;
   db()
     .query(
-      `INSERT INTO knowledge (id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at, created_by, sensitivity)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO knowledge (id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at, created_by, sensitivity, worker_provider_id, worker_model_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -170,6 +178,8 @@ export function create(input: {
       now,
       input.createdBy ?? null,
       input.sensitivity ?? "normal",
+      input.workerProviderID ?? null,
+      input.workerModelID ?? null,
     );
 
   // Fire-and-forget: embed for vector search (errors logged, never thrown)
@@ -768,6 +778,8 @@ export async function forSession(
         source_user_id: null,
         source_entry_id: null,
         last_accessed_at: null,
+        worker_provider_id: null,
+        worker_model_id: null,
       });
       used += cost;
     }
@@ -1052,6 +1064,32 @@ export function get(id: string): KnowledgeEntry | null {
   return db()
     .query(`SELECT ${KNOWLEDGE_COLS} FROM knowledge WHERE id = ?`)
     .get(id) as KnowledgeEntry | null;
+}
+
+/**
+ * Read the worker source attribution for a knowledge entry. Returns null for
+ * legacy entries created before v35 (no attribution recorded) or for entries
+ * imported from outside the worker pipeline (manual `.lore.md` edits, etc).
+ *
+ * Use this in the dashboard's knowledge-entry detail view to surface the
+ * model that produced the entry, and in cost/quality analytics.
+ */
+export function getWorkerSource(
+  id: string,
+): { providerID: string; modelID: string } | null {
+  const row = db()
+    .query(
+      "SELECT worker_provider_id, worker_model_id FROM knowledge WHERE id = ?",
+    )
+    .get(id) as {
+    worker_provider_id: string | null;
+    worker_model_id: string | null;
+  } | null;
+  if (!row || !row.worker_provider_id || !row.worker_model_id) return null;
+  return {
+    providerID: row.worker_provider_id,
+    modelID: row.worker_model_id,
+  };
 }
 
 /**
