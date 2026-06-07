@@ -184,6 +184,11 @@ else
   fi
 fi
 
+# Remove macOS quarantine attribute if present (allows execution of downloaded binary)
+if [[ "$os" == "darwin" ]]; then
+  xattr -d com.apple.quarantine "$tmp_binary" 2>/dev/null || true
+fi
+
 chmod +x "$tmp_binary"
 
 # Quick sanity check

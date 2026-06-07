@@ -33,9 +33,7 @@
     "README.md",
     "LICENSE"
   ],
-  "engines": {
-    "bun": ">=1.2.0"
-  },
+  "engines": {},
   "repository": {
     "type": "git",
     "url": "git+https://github.com/BYK/loreai.git",
