@@ -803,5 +803,234 @@ describe("entities", () => {
       expect(rels.length).toBe(1);
       expect(rels[0].other_name).toBe("MergeOther");
     });
+
+    test("merge transfers non-overlapping aliases from source to target", () => {
+      const target = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "TargetPerson",
+        aliases: [
+          { type: "email", value: "target@example.com", source: "auto" },
+        ],
+      });
+      const source = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "SourcePerson",
+        aliases: [
+          { type: "github", value: "source-gh", source: "curator" },
+          { type: "slack", value: "source-slack", source: "curator" },
+        ],
+      });
+
+      entities.merge(target.id, source.id);
+
+      expect(entities.get(source.id)).toBeNull();
+      const updated = entities.getWithAliases(target.id)!;
+      const aliasValues = updated.aliases.map((a) => a.alias_value);
+      // Original target aliases preserved
+      expect(aliasValues).toContain("TargetPerson");
+      expect(aliasValues).toContain("target@example.com");
+      // Source aliases transferred
+      expect(aliasValues).toContain("source-gh");
+      expect(aliasValues).toContain("source-slack");
+      expect(aliasValues).toContain("SourcePerson");
+    });
+
+    test("merge handles overlapping alias (same type+value) without data loss", () => {
+      const target = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "TargetDup",
+        aliases: [{ type: "github", value: "shared-handle", source: "auto" }],
+      });
+      const source = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "SourceDup",
+        aliases: [
+          { type: "github", value: "shared-handle", source: "curator" },
+          { type: "slack", value: "unique-slack", source: "curator" },
+        ],
+      });
+
+      entities.merge(target.id, source.id);
+
+      expect(entities.get(source.id)).toBeNull();
+      const updated = entities.getWithAliases(target.id)!;
+      const aliasValues = updated.aliases.map((a) => a.alias_value);
+      // Shared alias preserved (not duplicated, not lost)
+      expect(aliasValues).toContain("shared-handle");
+      // Unique source alias transferred
+      expect(aliasValues).toContain("unique-slack");
+      expect(aliasValues).toContain("SourceDup");
+      // No duplicate github:shared-handle entries
+      const githubAliases = updated.aliases.filter(
+        (a) => a.alias_type === "github" && a.alias_value === "shared-handle",
+      );
+      expect(githubAliases.length).toBe(1);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // mergeSelfPersonDuplicates
+  // ---------------------------------------------------------------------------
+
+  describe("mergeSelfPersonDuplicates", () => {
+    // Helper: insert a person entity directly via SQL to bypass create()'s
+    // canonical-name dedup (which would merge into the existing self entity).
+    // This simulates the real scenario where the curator creates a person
+    // before the self entity exists, or with a name variant that differs.
+    // In the real world, the curator creates a "person" entity for the user
+    // (often with a different name variant) before or alongside the self entity.
+    // create() deduplicates by canonical_name (case-insensitive) regardless of
+    // entity_type, so same-name entities are already handled at creation time.
+    // mergeSelfPersonDuplicates() catches the cases where names differ but
+    // aliases overlap (e.g., same email) or the person's canonical name matches
+    // one of the self entity's alias values.
+
+    test("merges person whose canonical name matches a self alias", () => {
+      // Curator created "person" with a name variant
+      const person = entities.create({
+        entityType: "person",
+        canonicalName: "Alice",
+        crossProject: true,
+      });
+      // Self entity has full name but "Alice" as a nickname alias
+      const self = entities.create({
+        entityType: "self",
+        canonicalName: "Alice Smith",
+        aliases: [{ type: "nickname", value: "Alice", source: "config" }],
+        crossProject: true,
+      });
+
+      const selfEntity = entities.getWithAliases(self.id)!;
+      const count = entities.mergeSelfPersonDuplicates(selfEntity);
+
+      expect(count).toBe(1);
+      expect(entities.get(person.id)).toBeNull(); // person absorbed
+      expect(entities.get(self.id)).not.toBeNull(); // self preserved
+    });
+
+    test("merges person with overlapping alias value", () => {
+      // Person created first — owns the github alias
+      const person = entities.create({
+        entityType: "person",
+        canonicalName: "A. Smith",
+        aliases: [{ type: "github", value: "alicesmith", source: "curator" }],
+        crossProject: true,
+      });
+      // Self entity created later — also has the same github handle
+      const self = entities.create({
+        entityType: "self",
+        canonicalName: "Alice Smith",
+        aliases: [{ type: "nickname", value: "alicesmith", source: "config" }],
+        crossProject: true,
+      });
+
+      const selfEntity = entities.getWithAliases(self.id)!;
+      const count = entities.mergeSelfPersonDuplicates(selfEntity);
+
+      expect(count).toBe(1);
+      expect(entities.get(person.id)).toBeNull();
+    });
+
+    test("does not merge unrelated person entities", () => {
+      const person = entities.create({
+        entityType: "person",
+        canonicalName: "Bob",
+        crossProject: true,
+      });
+      const self = entities.create({
+        entityType: "self",
+        canonicalName: "Alice",
+        crossProject: true,
+      });
+
+      const selfEntity = entities.getWithAliases(self.id)!;
+      const count = entities.mergeSelfPersonDuplicates(selfEntity);
+
+      expect(count).toBe(0);
+      expect(entities.get(person.id)).not.toBeNull(); // Bob still exists
+    });
+
+    test("merges multiple matching person entities", () => {
+      // Person matching by canonical name → self nickname alias
+      const person1 = entities.create({
+        entityType: "person",
+        canonicalName: "Ali",
+        crossProject: true,
+      });
+      // Person matching by github alias → self nickname alias
+      const person2 = entities.create({
+        entityType: "person",
+        canonicalName: "A. Smith",
+        aliases: [{ type: "github", value: "asmith42", source: "curator" }],
+        crossProject: true,
+      });
+      // Unrelated person — should NOT be merged
+      const bob = entities.create({
+        entityType: "person",
+        canonicalName: "Bob",
+        crossProject: true,
+      });
+      // Self entity with aliases matching both persons
+      const self = entities.create({
+        entityType: "self",
+        canonicalName: "Alice Smith",
+        aliases: [
+          { type: "nickname", value: "Ali", source: "config" },
+          { type: "nickname", value: "asmith42", source: "config" },
+        ],
+        crossProject: true,
+      });
+
+      const selfEntity = entities.getWithAliases(self.id)!;
+      const count = entities.mergeSelfPersonDuplicates(selfEntity);
+
+      expect(count).toBe(2);
+      expect(entities.get(person1.id)).toBeNull();
+      expect(entities.get(person2.id)).toBeNull();
+      expect(entities.get(bob.id)).not.toBeNull(); // Bob untouched
+    });
+
+    test("preserves aliases from absorbed person entity", () => {
+      // Person with extra aliases
+      const person = entities.create({
+        entityType: "person",
+        canonicalName: "Ali",
+        aliases: [
+          { type: "github", value: "alice-gh", source: "curator" },
+          { type: "slack", value: "alice-slack", source: "curator" },
+        ],
+        crossProject: true,
+      });
+      // Self entity — "Ali" nickname matches person's canonical name
+      const self = entities.create({
+        entityType: "self",
+        canonicalName: "Alice Smith",
+        aliases: [{ type: "nickname", value: "Ali", source: "config" }],
+        crossProject: true,
+      });
+
+      // Verify person was actually created separately
+      expect(person.created).toBe(true);
+      expect(entities.get(person.id)).not.toBeNull();
+      const personAliases = entities.getWithAliases(person.id)!.aliases;
+      expect(personAliases.map((a) => a.alias_value)).toContain("alice-gh");
+
+      const selfEntity = entities.getWithAliases(self.id)!;
+      const count = entities.mergeSelfPersonDuplicates(selfEntity);
+      expect(count).toBe(1);
+
+      // Person should be deleted
+      expect(entities.get(person.id)).toBeNull();
+
+      // Re-fetch self with aliases
+      const updated = entities.getWithAliases(self.id)!;
+      const aliasValues = updated.aliases.map((a) => a.alias_value);
+      expect(aliasValues).toContain("alice-gh");
+      expect(aliasValues).toContain("alice-slack");
+    });
   });
 });

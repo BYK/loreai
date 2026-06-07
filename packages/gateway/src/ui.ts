@@ -443,6 +443,9 @@ nav a { font-size: 0.9em; }
 .stat .label { font-size: 0.8em; color: var(--fg3); text-transform: uppercase; }
 .stat .value { font-size: 1.4em; font-weight: 600; }
 .stat .value .total { font-size: 0.7em; font-weight: 400; color: var(--fg3); }
+.stat-filter { cursor: pointer; transition: border-color 0.15s; user-select: none; }
+.stat-filter:hover { border-color: var(--accent); }
+.stat-filter.active { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent); }
 table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 0.9em; }
 th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
 th { background: var(--bg2); font-weight: 600; font-size: 0.85em; color: var(--fg2); text-transform: uppercase; }
@@ -893,6 +896,8 @@ document.addEventListener("DOMContentLoaded",function(){
     var wrapper=input.closest(".table-filter");
     var table=wrapper.nextElementSibling;
     if(!table||table.tagName!=="TABLE")return;
+    // Skip tables with custom filter logic (e.g. entity stat-filter)
+    if(table.dataset.customFilter!==undefined)return;
     var countEl=wrapper.querySelector(".count");
     var allRows=Array.from(table.querySelectorAll("tr")).filter(function(r){return!r.querySelector("th");});
     input.addEventListener("input",function(){
@@ -943,6 +948,55 @@ document.addEventListener("DOMContentLoaded",function(){
       if(countEl)countEl.textContent=shown+"/"+allRows.filter(function(r){return!r.dataset.parent;}).length;
     });
   });
+  // Stat-card type filter (entity list page): clicking a stat card filters the
+  // table to show only entities of that type; clicking again (or "Total") clears.
+  // Composes with the text filter above — both must pass for a row to be visible.
+  (function(){
+    var stats=document.querySelectorAll(".stat-filter");
+    if(!stats.length)return;
+    var statsContainer=stats[0].parentElement;
+    var table=statsContainer?statsContainer.parentElement.querySelector("table[data-table-id]"):null;
+    if(!table)return;
+    var allRows=Array.from(table.querySelectorAll("tr")).filter(function(r){return!r.querySelector("th");});
+    var textInput=statsContainer.parentElement.querySelector(".table-filter input");
+    var countEl=statsContainer.parentElement.querySelector(".table-filter .count");
+    var activeType=null;
+    function applyFilters(){
+      var q=textInput?textInput.value.toLowerCase():"";
+      var shown=0;var total=allRows.length;
+      allRows.forEach(function(r){
+        var typeMatch=!activeType||r.dataset.entityType===activeType;
+        var textMatch=!q||r.textContent.toLowerCase().indexOf(q)!==-1;
+        var show=typeMatch&&textMatch;
+        r.style.display=show?"":"none";
+        if(show)shown++;
+      });
+      if(countEl){
+        if(q||activeType)countEl.textContent=shown+"/"+total;
+        else countEl.textContent="";
+      }
+    }
+    stats.forEach(function(stat){
+      stat.addEventListener("click",function(){
+        var type=stat.dataset.typeFilter;
+        if(type==="all"||activeType===type){
+          activeType=null;
+          stats.forEach(function(s){s.classList.remove("active");});
+        }else{
+          activeType=type;
+          stats.forEach(function(s){s.classList.remove("active");});
+          stat.classList.add("active");
+        }
+        applyFilters();
+      });
+    });
+    // Override the text filter to use combined logic when a type filter is active
+    if(textInput){
+      textInput.addEventListener("input",function(){
+        applyFilters();
+      });
+    }
+  })();
   // Chat message filter (session page only)
   var chatSearch=document.getElementById("chat-search");
   var chatContainer=document.getElementById("chat-container");
@@ -2759,7 +2813,14 @@ async function pageEntities(): Promise<string> {
             body += `<span><a href="/ui/entities/${esc(m.id)}">${esc(truncate(m.name, 40))}</a> → <a href="/ui/entities/${esc(c.surviving.id)}">${esc(truncate(c.surviving.name, 40))}</a></span>`;
             body += `<span class="muted" style="color:#888;">[sim: ${m.similarity.toFixed(3)}]</span>`;
             body += `<form method="POST" action="/ui/api/merge/entity/${esc(c.surviving.id)}/${esc(m.id)}" style="display:inline;" onsubmit="return confirm('Merge &quot;${esc(m.name)}&quot; into &quot;${esc(c.surviving.name)}&quot;?');">`;
+            body += `<input type="hidden" name="similarity" value="${m.similarity}">`;
+            body += `<input type="hidden" name="nameA" value="${esc(m.name)}">`;
+            body += `<input type="hidden" name="nameB" value="${esc(c.surviving.name)}">`;
             body += `<button type="submit" style="font-size:12px;padding:2px 8px;">Merge</button>`;
+            body += `</form>`;
+            body += `<form method="POST" action="/ui/api/dismiss/entity/${esc(m.id)}/${esc(c.surviving.id)}" style="display:inline;">`;
+            body += `<input type="hidden" name="similarity" value="${m.similarity}">`;
+            body += `<button type="submit" style="font-size:12px;padding:2px 8px;" title="Not duplicates — don\u2019t suggest again">Dismiss</button>`;
             body += `</form>`;
             body += `</div>`;
           }
@@ -2775,17 +2836,19 @@ async function pageEntities(): Promise<string> {
     }
   }
 
-  // Type breakdown stats
+  // Type breakdown stats — fold "self" into "person" (there's at most one self
+  // entity so a separate stat is noise; mirrors formatForPrompt() grouping).
   const types: Record<string, number> = {};
   for (const e of all) {
-    types[e.entity_type] = (types[e.entity_type] || 0) + 1;
+    const displayType = e.entity_type === "self" ? "person" : e.entity_type;
+    types[displayType] = (types[displayType] || 0) + 1;
   }
   body += `<div class="stats">
-    <div class="stat"><div class="label">Total</div><div class="value">${all.length}</div></div>`;
+    <div class="stat stat-filter" data-type-filter="all"><div class="label">Total</div><div class="value">${all.length}</div></div>`;
   for (const [type, count] of Object.entries(types).sort(
     (a, b) => b[1] - a[1],
   )) {
-    body += `<div class="stat"><div class="label">${esc(type)}</div><div class="value">${count}</div></div>`;
+    body += `<div class="stat stat-filter" data-type-filter="${esc(type)}"><div class="label">${esc(type)}</div><div class="value">${count}</div></div>`;
   }
   body += `</div>`;
 
@@ -2801,14 +2864,15 @@ async function pageEntities(): Promise<string> {
   }
 
   body += `<div class="table-filter"><input type="text" placeholder="Filter entities\u2026"><span class="count"></span></div>
-  <table data-table-id="entities">
+  <table data-table-id="entities" data-custom-filter>
     <tr><th data-sort="text">Type</th><th data-sort="text">Name</th><th data-sort="num">Aliases</th><th data-sort="num">Knowledge</th><th data-sort="text">Cross</th><th data-sort="date" data-default-sort="desc">Updated</th></tr>`;
   for (const e of all) {
     const aliasCount = e.aliases.filter(
       (a) => a.alias_value !== e.canonical_name,
     ).length;
     const knowledgeCount = knowledgeCounts.get(e.id) ?? 0;
-    body += `<tr>
+    const rowType = e.entity_type === "self" ? "person" : e.entity_type;
+    body += `<tr data-entity-type="${esc(rowType)}">
       <td>${badge(e.entity_type)}</td>
       <td><a href="/ui/entities/${esc(e.id)}">${esc(truncate(e.canonical_name, 50))}</a></td>
       <td>${aliasCount}</td>
@@ -3077,19 +3141,60 @@ export async function handleUIRequest(
     if (mergeEntity) {
       const target = entities.get(mergeEntity.targetId);
       const source = entities.get(mergeEntity.sourceId);
-      if (
+      // Allow same-type merges + self↔person (self is conceptually a person)
+      const selfPersonSet = new Set(["self", "person"]);
+      const typesCompatible =
         target &&
         source &&
-        target.id !== source.id &&
-        target.entity_type === source.entity_type
-      ) {
+        (target.entity_type === source.entity_type ||
+          (selfPersonSet.has(target.entity_type) &&
+            selfPersonSet.has(source.entity_type)));
+      if (target && source && target.id !== source.id && typesCompatible) {
+        // Parse form data before merge — source entity is deleted by merge().
+        const formData = await req.formData();
+        const similarity = Number.parseFloat(
+          (formData.get("similarity") as string) || "",
+        );
         entities.merge(target.id, source.id);
-        // NOTE: We intentionally do NOT record calibration feedback here
-        // because the dashboard does not have the real pairwise similarity
-        // score. Recording a fake similarity (e.g. 1.0) would corrupt the
-        // adaptive threshold calibrator. Calibration data is only recorded
-        // from the CLI (`--yes` / `--interactive`) and from the curator's
-        // auto-dedup sweep where real cosine similarities are available.
+        // Record accept feedback — the similarity score is the real cosine
+        // value from the dedup dry-run, passed through as a hidden form field.
+        if (Number.isFinite(similarity)) {
+          entities.recordEntityDedupFeedback({
+            projectId: null,
+            entryATitle:
+              (formData.get("nameA") as string) || source.canonical_name,
+            entryBTitle:
+              (formData.get("nameB") as string) || target.canonical_name,
+            similarity,
+            accepted: true,
+            source: "dashboard",
+          });
+        }
+      }
+      return redirect("/ui/entities");
+    }
+
+    // Dismiss entity merge suggestion: record reject feedback (#462)
+    const dismissEntity = matchRoute(
+      pathname,
+      "/ui/api/dismiss/entity/:entityAId/:entityBId",
+    );
+    if (dismissEntity) {
+      const entityA = entities.get(dismissEntity.entityAId);
+      const entityB = entities.get(dismissEntity.entityBId);
+      const formData = await req.formData();
+      const similarity = Number.parseFloat(
+        (formData.get("similarity") as string) || "",
+      );
+      if (Number.isFinite(similarity) && entityA && entityB) {
+        entities.recordEntityDedupFeedback({
+          projectId: null,
+          entryATitle: entityA.canonical_name,
+          entryBTitle: entityB.canonical_name,
+          similarity,
+          accepted: false,
+          source: "dashboard",
+        });
       }
       return redirect("/ui/entities");
     }

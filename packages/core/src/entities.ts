@@ -410,7 +410,7 @@ export function ensureSelfEntity(
     }
     // Only re-embed when the name or alias set actually changed.
     if (changed) reembedEntity(existing.id);
-    return getSelfEntity();
+    return finalizeSelfEntity(getSelfEntity()!);
   }
 
   // Create self entity
@@ -437,7 +437,74 @@ export function ensureSelfEntity(
     crossProject: true,
   });
 
-  return result.id ? getSelfEntity() : null;
+  const created = result.id ? getSelfEntity() : null;
+  return created ? finalizeSelfEntity(created) : null;
+}
+
+/**
+ * After ensuring the self entity exists, check for "person" entities that
+ * share a canonical name or alias with the self entity and merge them in.
+ * This handles the case where the LLM curator created a "person" entity for
+ * the user (it cannot create "self" type) before or alongside the self entity.
+ */
+function finalizeSelfEntity(self: EntityWithAliases): EntityWithAliases {
+  const count = mergeSelfPersonDuplicates(self);
+  if (count > 0) {
+    log.info(
+      `merged ${count} person entit${count === 1 ? "y" : "ies"} into self entity`,
+    );
+    return getSelfEntity()!; // re-fetch with merged aliases
+  }
+  return self;
+}
+
+/**
+ * Find "person" entities whose canonical name or alias values overlap with the
+ * self entity's aliases, and merge them into the self entity.
+ * Exported for testing.
+ *
+ * NOTE: The alias set used for matching is captured once before the loop and
+ * is NOT refreshed after each merge. This means transitive overlaps (person A
+ * has alias X → merges into self → self now has alias Y from A → person B has
+ * alias Y) require a second pass to converge. Since `ensureSelfEntity` runs on
+ * every curator invocation, this converges naturally across sessions.
+ */
+export function mergeSelfPersonDuplicates(
+  selfEntity: EntityWithAliases,
+): number {
+  // Collect all self alias values (lowercased) including canonical_name
+  const selfAliasValues = new Set<string>();
+  selfAliasValues.add(selfEntity.canonical_name.toLowerCase());
+  for (const a of selfEntity.aliases) {
+    selfAliasValues.add(a.alias_value.toLowerCase());
+  }
+
+  // Find all "person" entities
+  const persons = db()
+    .query(`SELECT ${ENTITY_COLS} FROM entities WHERE entity_type = 'person'`)
+    .all() as Entity[];
+
+  // For each person, check canonical_name or alias overlap
+  let mergedCount = 0;
+  for (const person of persons) {
+    if (selfAliasValues.has(person.canonical_name.toLowerCase())) {
+      merge(selfEntity.id, person.id); // absorb person into self
+      mergedCount++;
+      continue;
+    }
+    // Check alias overlap
+    const personAliases = db()
+      .query("SELECT alias_value FROM entity_aliases WHERE entity_id = ?")
+      .all(person.id) as Array<{ alias_value: string }>;
+    const hasOverlap = personAliases.some((a) =>
+      selfAliasValues.has(a.alias_value.toLowerCase()),
+    );
+    if (hasOverlap) {
+      merge(selfEntity.id, person.id);
+      mergedCount++;
+    }
+  }
+  return mergedCount;
 }
 
 // ---------------------------------------------------------------------------
@@ -849,36 +916,18 @@ export function merge(targetId: string, sourceId: string): void {
   const d = db();
   d.exec("BEGIN IMMEDIATE");
   try {
-    // Move aliases from source to target (skip duplicates via OR IGNORE)
-    const sourceAliases = d
-      .query(
-        "SELECT alias_type, alias_value, source FROM entity_aliases WHERE entity_id = ?",
-      )
-      .all(sourceId) as Array<{
-      alias_type: string;
-      alias_value: string;
-      source: string | null;
-    }>;
-
-    for (const a of sourceAliases) {
-      try {
-        d.query(
-          `INSERT INTO entity_aliases (id, entity_id, alias_type, alias_value, source, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-        ).run(
-          uuidv7(),
-          targetId,
-          a.alias_type,
-          a.alias_value,
-          a.source,
-          Date.now(),
-        );
-      } catch (e: unknown) {
-        // UNIQUE constraint — alias already exists on target, skip
-        if (!(e instanceof Error && /UNIQUE constraint/i.test(e.message)))
-          throw e;
-      }
-    }
+    // Move aliases from source to target. The UNIQUE(alias_type, alias_value)
+    // constraint is table-wide, so we UPDATE entity_id rather than
+    // INSERT+DELETE — the source still owns the row and INSERT would always
+    // conflict. Aliases that already exist on the target (same type+value)
+    // are dropped via OR IGNORE + cleanup.
+    d.query(
+      `UPDATE OR IGNORE entity_aliases SET entity_id = ?, created_at = ?
+       WHERE entity_id = ?`,
+    ).run(targetId, Date.now(), sourceId);
+    // Clean up any source aliases left behind (OR IGNORE skipped them because
+    // target already has the same alias_type+alias_value pair)
+    d.query("DELETE FROM entity_aliases WHERE entity_id = ?").run(sourceId);
 
     // Move knowledge_entity_refs from source to target
     d.query(
@@ -1642,7 +1691,8 @@ export async function deduplicateEntities(
 export type EntityDedupFeedbackSource =
   | "auto_dedup"
   | "cli_yes"
-  | "cli_interactive";
+  | "cli_interactive"
+  | "dashboard";
 
 const MIN_ENTITY_CALIBRATION_SAMPLES = 20;
 /** Only record auto-signals for pairs with similarity >= this floor. */
