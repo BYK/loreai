@@ -6,6 +6,7 @@
  * cleanup, and consolidation cooldown removal.
  */
 import { describe, test, expect, beforeEach } from "vitest";
+import { protocolOfProviderID } from "../src/pipeline";
 import { resetPipelineState } from "../src/pipeline";
 import {
   setSessionAuth,
@@ -464,5 +465,47 @@ describe("startIdleScheduler", () => {
     );
     stop();
     expect(typeof stop).toBe("function");
+  });
+});
+
+describe("protocolOfProviderID — worker URL injection guard", () => {
+  test("bare 'anthropic' maps to anthropic protocol", () => {
+    expect(protocolOfProviderID("anthropic")).toBe("anthropic");
+  });
+
+  test("vendor-prefixed anthropic providers map to anthropic", () => {
+    expect(protocolOfProviderID("minimax/anthropic")).toBe("anthropic");
+    expect(protocolOfProviderID("minimax-coding-plan/anthropic")).toBe(
+      "anthropic",
+    );
+    expect(protocolOfProviderID("openrouter/anthropic")).toBe("anthropic");
+  });
+
+  test("bare 'openai' maps to openai protocol", () => {
+    expect(protocolOfProviderID("openai")).toBe("openai");
+  });
+
+  test("vendor-prefixed openai providers (e.g. nvidia, github-copilot) map to openai", () => {
+    expect(protocolOfProviderID("nvidia")).toBe("openai");
+    expect(protocolOfProviderID("openrouter/openai")).toBe("openai");
+    expect(protocolOfProviderID("github-copilot")).toBe("openai");
+  });
+
+  test("'openai-responses' maps to openai-responses protocol", () => {
+    expect(protocolOfProviderID("openai-responses")).toBe("openai-responses");
+  });
+
+  test("unknown provider IDs default to openai protocol (most permissive fallback)", () => {
+    expect(protocolOfProviderID("google")).toBe("openai");
+    expect(protocolOfProviderID("mistral")).toBe("openai");
+    expect(protocolOfProviderID("xai")).toBe("openai");
+    expect(protocolOfProviderID("")).toBe("openai");
+  });
+
+  test("'openai-responses' substring check takes precedence over 'openai' (more specific wins)", () => {
+    expect(protocolOfProviderID("openai-responses")).toBe("openai-responses");
+    expect(protocolOfProviderID("vendor/openai-responses")).toBe(
+      "openai-responses",
+    );
   });
 });

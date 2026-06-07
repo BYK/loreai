@@ -3768,3 +3768,176 @@ describe("gradient — error-state tool outputs are estimated (not flat 20)", ()
     expect(estimate).toBeGreaterThan(1000);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Atomic tool_use/tool_result pair — eviction must not split the pair
+// ---------------------------------------------------------------------------
+//
+// Regression: the role-alternation guard at tryFit() handled the case where
+// the prefix/raw boundary landed on an assistant (back-to-back assistants).
+// The symmetric case — boundary landing on a user with a `tool: "result"`
+// residual whose issuing assistant was evicted — was unhandled and produced
+// an orphan tool_result that the wire format rejects. Fix moves cutoff
+// backward to keep the assistant.
+
+describe("gradient — atomic tool_use/tool_result pair (no orphan on eviction)", () => {
+  const SID = "sess-orphan-pair";
+  const PID = "/test/gradient/project-orphan";
+  let projectId: string;
+
+  // Helper: assistant message with a completed tool part (tool_use).
+  function makeToolAssistant(
+    id: string,
+    toolName: string,
+    callID: string,
+    output: string,
+    sessionID = SID,
+  ): LoreMessageWithParts {
+    const base = makeMsg(id, "assistant", "", sessionID);
+    return {
+      info: base.info,
+      parts: [
+        {
+          id: `tool-${id}`,
+          sessionID,
+          messageID: id,
+          type: "tool",
+          tool: toolName,
+          callID,
+          state: {
+            status: "completed",
+            input: { path: "test.ts" },
+            output,
+            title: toolName,
+            metadata: {},
+            time: { start: Date.now(), end: Date.now() },
+          },
+          time: { start: Date.now(), end: Date.now() },
+        } as LorePart,
+      ],
+    };
+  }
+
+  // Helper: user message with a residual `tool: "result"` part (the kind that
+  // `resolveToolResults` was supposed to strip but didn't, in practice).
+  function makeToolResultUser(
+    id: string,
+    callID: string,
+    output: string,
+    sessionID = SID,
+  ): LoreMessageWithParts {
+    const base = makeMsg(id, "user", "", sessionID);
+    return {
+      info: base.info,
+      parts: [
+        {
+          id: `tool-${id}`,
+          sessionID,
+          messageID: id,
+          type: "tool",
+          tool: "result",
+          callID,
+          state: {
+            status: "completed",
+            input: {},
+            output,
+            title: "result",
+            metadata: {},
+            time: { start: Date.now(), end: Date.now() },
+          },
+          time: { start: Date.now(), end: Date.now() },
+        } as LorePart,
+      ],
+    };
+  }
+
+  beforeAll(() => {
+    projectId = ensureProject(PID);
+  });
+
+  beforeEach(() => {
+    resetCalibration(SID);
+    resetPrefixCache(SID);
+    resetRawWindowCache(SID);
+    resetDistillationSnapshot(SID);
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0);
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(projectId);
+  });
+
+  test("raw window after eviction has no orphan tool_result user message", () => {
+    // Seed a distillation so the gradient runs in prefix mode (layer >= 1).
+    db()
+      .query(
+        `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "dist-orphan-pair",
+        projectId,
+        SID,
+        "",
+        "[]",
+        "x".repeat(500),
+        "[]",
+        0,
+        170,
+        0,
+        Date.now(),
+      );
+
+    // Conversation pattern with the tool_use/tool_result pair split across
+    // the assistant→user boundary. Two turns of (a-X, u-r-X) pairs.
+    //
+    //   [u-0, a-0(tool_use_0), u-r-0(tool_result_0), u-1, a-1(tool_use_1), u-r-1(tool_result_1), u-final]
+    //
+    // Context/output are sized so the layer-1 raw budget (~700 tokens) is
+    // just large enough to keep u-r-1 alone but not a-1+u-r-1 together.
+    // The backward scan sets cutoff = 5, leaving u-r-1 at the boundary
+    // with a-1 evicted. The symmetric orphan guard must move cutoff
+    // backward to keep a-1 — otherwise u-r-1 is an orphan tool_result.
+    setModelLimits({ context: 4_300, output: 2_000 });
+    const messages: LoreMessageWithParts[] = [
+      makeMsg("u-0", "user", "preamble", SID),
+      makeToolAssistant("a-0", "read", "call-0", "x".repeat(1500), SID),
+      makeToolResultUser("u-r-0", "call-0", "x".repeat(1500), SID),
+      makeMsg("u-1", "user", "step 1 done", SID),
+      makeToolAssistant("a-1", "read", "call-1", "x".repeat(1500), SID),
+      makeToolResultUser("u-r-1", "call-1", "x".repeat(1500), SID),
+      makeMsg("u-final", "user", "final turn", SID),
+    ];
+
+    const result = transform({
+      messages,
+      projectPath: PID,
+      sessionID: SID,
+    });
+
+    // Gradient must be active (the conversation overflows the 3.5K context).
+    expect(result.layer).toBeGreaterThanOrEqual(1);
+
+    // Collect callIDs that appear in assistant messages in the result.
+    const assistantCallIDs = new Set<string>();
+    for (const m of result.messages) {
+      if (m.info.role !== "assistant") continue;
+      for (const part of m.parts) {
+        if (isToolPart(part) && part.callID) {
+          assistantCallIDs.add(part.callID);
+        }
+      }
+    }
+
+    // Core assertion: every user tool_result in the result must reference
+    // an assistant tool_use with the same callID. A user `tool: "result"`
+    // part without a matching assistant tool_use is an orphan that the
+    // wire format rejects.
+    for (const m of result.messages) {
+      if (m.info.role !== "user") continue;
+      for (const part of m.parts) {
+        if (isToolPart(part) && part.callID) {
+          expect(assistantCallIDs.has(part.callID)).toBe(true);
+        }
+      }
+    }
+  });
+});

@@ -2419,6 +2419,35 @@ function tryFit(input: {
     }
   }
 
+  // Symmetric guard: a tool_use/tool_result pair is atomic at the gradient
+  // boundary. The role-alternation guard above only handles the case where
+  // the first kept message is an assistant. The other case — first kept is a
+  // user with a tool_result whose issuing assistant was just evicted — is
+  // equally broken: it produces an orphan tool_result that the wire format
+  // rejects ("tool_use ids were found without tool_result blocks immediately
+  // after"). Move cutoff backward to keep the issuing assistant.
+  //
+  // Note: this may re-include an assistant that the role-alternation guard
+  // just skipped, producing back-to-back assistants with the prefix. This
+  // is intentional — loreMessagesToGateway coalesces adjacent same-role
+  // messages, and if the re-included assistant causes a budget overrun the
+  // caller (`tryFitStage` / `transformInner`) re-checks via
+  // `fitsWithSafetyMargin()` and escalates to the next layer (which strips
+  // tool outputs to make room). The alternative — orphan tool_result — is a
+  // hard upstream 400.
+  if (
+    cutoff > 0 &&
+    cutoff < olderMessages.length &&
+    olderMessages[cutoff].info.role === "user" &&
+    olderMessages[cutoff].parts.some(
+      (p) => isToolPart(p) && p.tool === "result",
+    ) &&
+    olderMessages[cutoff - 1].info.role === "assistant"
+  ) {
+    olderTokens += estimateMessage(olderMessages[cutoff - 1]);
+    cutoff--;
+  }
+
   const rawMessages = [...olderMessages.slice(cutoff), ...currentTurn];
   const rawTokens = olderTokens + currentTurnTokens;
 
