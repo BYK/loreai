@@ -279,14 +279,15 @@ export function translateAnthropicStreamToOpenAI(
             case "message_stop": {
               // Build usage from accumulator
               const resp = accumulator.getResponse();
+              const ru = resp.usage ?? { inputTokens: 0, outputTokens: 0 };
               const usage: Record<string, unknown> = {
-                prompt_tokens: resp.usage.inputTokens,
-                completion_tokens: resp.usage.outputTokens,
-                total_tokens: resp.usage.inputTokens + resp.usage.outputTokens,
+                prompt_tokens: ru.inputTokens,
+                completion_tokens: ru.outputTokens,
+                total_tokens: ru.inputTokens + ru.outputTokens,
               };
-              if (resp.usage.cacheReadInputTokens != null) {
+              if (ru.cacheReadInputTokens != null) {
                 usage.prompt_tokens_details = {
-                  cached_tokens: resp.usage.cacheReadInputTokens,
+                  cached_tokens: ru.cacheReadInputTokens,
                 };
               }
 

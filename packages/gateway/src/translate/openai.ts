@@ -11,7 +11,7 @@ import type {
   GatewayResponse,
   GatewayTool,
 } from "./types";
-import { blocksToText, forwardClientHeaders } from "./types";
+import { blocksToText, forwardClientHeaders, ZERO_USAGE } from "./types";
 import { extractAuth } from "../auth";
 
 // ---------------------------------------------------------------------------
@@ -304,6 +304,7 @@ export function buildOpenAIResponse(
 }
 
 function buildOpenAINonStreamResponse(resp: GatewayResponse): Response {
+  const usage = resp.usage ?? ZERO_USAGE;
   const _chunks: unknown[] = [];
   let content = "";
   const toolCalls: Array<Record<string, unknown>> = [];
@@ -346,13 +347,13 @@ function buildOpenAINonStreamResponse(resp: GatewayResponse): Response {
       },
     ],
     usage: {
-      prompt_tokens: resp.usage.inputTokens,
-      completion_tokens: resp.usage.outputTokens,
-      total_tokens: resp.usage.inputTokens + resp.usage.outputTokens,
-      ...(resp.usage.cacheReadInputTokens != null
+      prompt_tokens: usage.inputTokens,
+      completion_tokens: usage.outputTokens,
+      total_tokens: usage.inputTokens + usage.outputTokens,
+      ...(usage.cacheReadInputTokens != null
         ? {
             prompt_tokens_details: {
-              cached_tokens: resp.usage.cacheReadInputTokens,
+              cached_tokens: usage.cacheReadInputTokens,
             },
           }
         : {}),

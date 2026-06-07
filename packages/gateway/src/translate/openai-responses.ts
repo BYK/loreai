@@ -18,7 +18,7 @@ import type {
   GatewayResponse,
   GatewayTool,
 } from "./types";
-import { blocksToText, forwardClientHeaders } from "./types";
+import { blocksToText, forwardClientHeaders, ZERO_USAGE } from "./types";
 import { extractAuth } from "../auth";
 
 // ---------------------------------------------------------------------------
@@ -421,6 +421,7 @@ export function buildOpenAIResponsesResponse(
 function buildOpenAIResponsesNonStreamResponse(
   resp: GatewayResponse,
 ): Response {
+  const usage = resp.usage ?? ZERO_USAGE;
   const output: Array<Record<string, unknown>> = [];
   let textContent = "";
   const functionCalls: Array<Record<string, unknown>> = [];
@@ -466,13 +467,13 @@ function buildOpenAIResponsesNonStreamResponse(
     status: mapStopReasonToStatus(resp.stopReason),
     output,
     usage: {
-      input_tokens: resp.usage.inputTokens,
-      output_tokens: resp.usage.outputTokens,
-      total_tokens: resp.usage.inputTokens + resp.usage.outputTokens,
-      ...(resp.usage.cacheReadInputTokens != null
+      input_tokens: usage.inputTokens,
+      output_tokens: usage.outputTokens,
+      total_tokens: usage.inputTokens + usage.outputTokens,
+      ...(usage.cacheReadInputTokens != null
         ? {
             prompt_tokens_details: {
-              cached_tokens: resp.usage.cacheReadInputTokens,
+              cached_tokens: usage.cacheReadInputTokens,
             },
           }
         : {}),
@@ -502,6 +503,7 @@ function mapStopReasonToStatus(reason: string): string {
 }
 
 function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
+  const usage = resp.usage ?? ZERO_USAGE;
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream({
@@ -720,13 +722,13 @@ function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
             })
             .filter(Boolean),
           usage: {
-            input_tokens: resp.usage.inputTokens,
-            output_tokens: resp.usage.outputTokens,
-            total_tokens: resp.usage.inputTokens + resp.usage.outputTokens,
-            ...(resp.usage.cacheReadInputTokens != null
+            input_tokens: usage.inputTokens,
+            output_tokens: usage.outputTokens,
+            total_tokens: usage.inputTokens + usage.outputTokens,
+            ...(usage.cacheReadInputTokens != null
               ? {
                   prompt_tokens_details: {
-                    cached_tokens: resp.usage.cacheReadInputTokens,
+                    cached_tokens: usage.cacheReadInputTokens,
                   },
                 }
               : {}),

@@ -652,14 +652,15 @@ export function translateAnthropicStreamToResponses(
 
               const finalStatus = mapStatusFromStopReason(resp.stopReason);
 
+              const ru = resp.usage ?? { inputTokens: 0, outputTokens: 0 };
               const usageData: Record<string, unknown> = {
-                input_tokens: resp.usage.inputTokens,
-                output_tokens: resp.usage.outputTokens,
-                total_tokens: resp.usage.inputTokens + resp.usage.outputTokens,
+                input_tokens: ru.inputTokens,
+                output_tokens: ru.outputTokens,
+                total_tokens: ru.inputTokens + ru.outputTokens,
               };
-              if (resp.usage.cacheReadInputTokens != null) {
+              if (ru.cacheReadInputTokens != null) {
                 usageData.prompt_tokens_details = {
-                  cached_tokens: resp.usage.cacheReadInputTokens,
+                  cached_tokens: ru.cacheReadInputTokens,
                 };
               }
 

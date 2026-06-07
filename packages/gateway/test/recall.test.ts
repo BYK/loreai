@@ -1161,12 +1161,12 @@ describe("replaceRecallWithMarker", () => {
 
   test("preserves non-content fields", () => {
     const resp = makeResponse([makeRecallToolUse()]);
-    resp.usage.inputTokens = 999;
+    if (resp.usage) resp.usage.inputTokens = 999;
 
     const replaced = replaceRecallWithMarker(resp);
     expect(replaced.id).toBe(resp.id);
     expect(replaced.model).toBe(resp.model);
     expect(replaced.stopReason).toBe(resp.stopReason);
-    expect(replaced.usage.inputTokens).toBe(999);
+    expect(replaced.usage?.inputTokens).toBe(999);
   });
 });

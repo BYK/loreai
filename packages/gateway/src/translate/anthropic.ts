@@ -12,7 +12,7 @@ import type {
   GatewayResponse,
   GatewayTool,
 } from "./types";
-import { forwardClientHeaders } from "./types";
+import { forwardClientHeaders, ZERO_USAGE } from "./types";
 import { extractAuth, authHeaders } from "../auth";
 
 // ---------------------------------------------------------------------------
@@ -567,16 +567,17 @@ export function parseAnthropicResponseJSON(
 export function buildAnthropicNonStreamResponse(
   resp: GatewayResponse,
 ): unknown {
+  const u = resp.usage ?? ZERO_USAGE;
   const usage: Record<string, number> = {
-    input_tokens: resp.usage.inputTokens,
-    output_tokens: resp.usage.outputTokens,
+    input_tokens: u.inputTokens,
+    output_tokens: u.outputTokens,
   };
 
-  if (resp.usage.cacheReadInputTokens != null) {
-    usage.cache_read_input_tokens = resp.usage.cacheReadInputTokens;
+  if (u.cacheReadInputTokens != null) {
+    usage.cache_read_input_tokens = u.cacheReadInputTokens;
   }
-  if (resp.usage.cacheCreationInputTokens != null) {
-    usage.cache_creation_input_tokens = resp.usage.cacheCreationInputTokens;
+  if (u.cacheCreationInputTokens != null) {
+    usage.cache_creation_input_tokens = u.cacheCreationInputTokens;
   }
 
   return {

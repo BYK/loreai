@@ -105,8 +105,8 @@ describe("accumulateResponsesSSEStream", () => {
     expect(result.content[0].type).toBe("text");
     expect(result.content[0]).toEqual({ type: "text", text: "Hello world!" });
     expect(result.stopReason).toBe("end_turn");
-    expect(result.usage.inputTokens).toBe(15);
-    expect(result.usage.outputTokens).toBe(5);
+    expect(result.usage?.inputTokens).toBe(15);
+    expect(result.usage?.outputTokens).toBe(5);
   });
 
   test("accumulates function call from arguments delta", async () => {
@@ -470,9 +470,9 @@ describe("accumulateResponsesSSEStream", () => {
     ]);
 
     const result = await accumulateResponsesSSEStream(response);
-    expect(result.usage.inputTokens).toBe(100);
-    expect(result.usage.outputTokens).toBe(10);
-    expect(result.usage.cacheReadInputTokens).toBe(80);
+    expect(result.usage?.inputTokens).toBe(100);
+    expect(result.usage?.outputTokens).toBe(10);
+    expect(result.usage?.cacheReadInputTokens).toBe(80);
   });
 
   test("cacheReadInputTokens is undefined when no cached_tokens in usage", async () => {
@@ -499,7 +499,7 @@ describe("accumulateResponsesSSEStream", () => {
     ]);
 
     const result = await accumulateResponsesSSEStream(response);
-    expect(result.usage.inputTokens).toBe(50);
-    expect(result.usage.cacheReadInputTokens).toBeUndefined();
+    expect(result.usage?.inputTokens).toBe(50);
+    expect(result.usage?.cacheReadInputTokens).toBeUndefined();
   });
 });

@@ -218,6 +218,17 @@ export type GatewayUsage = {
   cacheCreationInputTokens?: number;
 };
 
+/**
+ * Zero-value usage — used as a safe fallback when `resp.usage` is undefined
+ * at runtime (e.g. vLLM or partial responses from OpenAI-compatible providers).
+ */
+export const ZERO_USAGE: GatewayUsage = {
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadInputTokens: 0,
+  cacheCreationInputTokens: 0,
+};
+
 /** Accumulated response from the upstream provider. */
 export type GatewayResponse = {
   id: string;
@@ -225,7 +236,12 @@ export type GatewayResponse = {
   content: GatewayContentBlock[];
   /** Provider stop reason (e.g. `end_turn`, `stop`, `tool_use`, `length`). */
   stopReason: string;
-  usage: GatewayUsage;
+  /**
+   * Token usage from the upstream provider. Optional because some providers
+   * (vLLM, partial responses) may omit it entirely at runtime even though
+   * accumulators always try to populate it.
+   */
+  usage?: GatewayUsage;
 };
 
 // ---------------------------------------------------------------------------

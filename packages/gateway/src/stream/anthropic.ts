@@ -458,6 +458,7 @@ export function createStreamAccumulator(options?: {
  * interception) and needs to emit a well-formed Anthropic stream.
  */
 export function buildSSEMessageStart(response: GatewayResponse): string {
+  const u = response.usage ?? { inputTokens: 0, outputTokens: 0 };
   const message = {
     type: "message_start",
     message: {
@@ -469,15 +470,14 @@ export function buildSSEMessageStart(response: GatewayResponse): string {
       stop_reason: null,
       stop_sequence: null,
       usage: {
-        input_tokens: response.usage.inputTokens,
+        input_tokens: u.inputTokens,
         output_tokens: 1,
-        ...(response.usage.cacheReadInputTokens != null
-          ? { cache_read_input_tokens: response.usage.cacheReadInputTokens }
+        ...(u.cacheReadInputTokens != null
+          ? { cache_read_input_tokens: u.cacheReadInputTokens }
           : {}),
-        ...(response.usage.cacheCreationInputTokens != null
+        ...(u.cacheCreationInputTokens != null
           ? {
-              cache_creation_input_tokens:
-                response.usage.cacheCreationInputTokens,
+              cache_creation_input_tokens: u.cacheCreationInputTokens,
             }
           : {}),
       },
@@ -686,11 +686,12 @@ export function createRecallAwareAccumulator(
         return null;
       // Scale based on total accumulated in the inner accumulator
       const innerResp = inner.getResponse();
+      const iu = innerResp.usage ?? { inputTokens: 0, outputTokens: 0 };
       const scaled = scaleUsageForClient({
-        input_tokens: innerResp.usage.inputTokens,
+        input_tokens: iu.inputTokens,
         output_tokens: deltaUsage.output_tokens,
-        cache_read_input_tokens: innerResp.usage.cacheReadInputTokens,
-        cache_creation_input_tokens: innerResp.usage.cacheCreationInputTokens,
+        cache_read_input_tokens: iu.cacheReadInputTokens,
+        cache_creation_input_tokens: iu.cacheCreationInputTokens,
       });
       return JSON.stringify({
         ...parsed,

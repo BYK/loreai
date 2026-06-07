@@ -554,8 +554,8 @@ describe("buildCompactionResponse", () => {
     );
     expect(response.stopReason).toBeTypeOf("string");
     expect(response.usage).toBeDefined();
-    expect(response.usage.inputTokens).toBeTypeOf("number");
-    expect(response.usage.outputTokens).toBeTypeOf("number");
+    expect(response.usage?.inputTokens).toBeTypeOf("number");
+    expect(response.usage?.outputTokens).toBeTypeOf("number");
   });
 
   test("has correct stop reason", () => {
@@ -566,14 +566,14 @@ describe("buildCompactionResponse", () => {
   test("has reasonable token estimate", () => {
     const summary = "A".repeat(400); // 400 chars → ~100 tokens at 4 chars/token
     const response = buildCompactionResponse("s1", summary, "model-1");
-    expect(response.usage.outputTokens).toBe(100);
-    expect(response.usage.inputTokens).toBe(0);
+    expect(response.usage?.outputTokens).toBe(100);
+    expect(response.usage?.inputTokens).toBe(0);
   });
 
   test("token estimate rounds up", () => {
     const summary = "ABC"; // 3 chars → ceil(3/4) = 1 token
     const response = buildCompactionResponse("s1", summary, "model-1");
-    expect(response.usage.outputTokens).toBe(1);
+    expect(response.usage?.outputTokens).toBe(1);
   });
 
   test("response ID starts with msg_lore_compact_", () => {
