@@ -2203,7 +2203,17 @@ async function accumulateNonStreamResponse(
   upstreamResponse: Response,
   protocol: "anthropic" | "openai" | "openai-responses" = "anthropic",
 ): Promise<GatewayResponse> {
-  const json = (await upstreamResponse.json()) as Record<string, unknown>;
+  // Some providers (e.g. DeepSeek) return SSE-formatted responses even when
+  // stream: false was sent. Detect this via content-type and extract the JSON
+  // payload from the SSE data lines instead of calling response.json() which
+  // would throw a SyntaxError on "data: {...}" prefixed text.
+  const ct = upstreamResponse.headers.get("content-type") ?? "";
+  let json: Record<string, unknown>;
+  if (ct.includes("text/event-stream")) {
+    json = await extractJSONFromSSE(upstreamResponse);
+  } else {
+    json = (await upstreamResponse.json()) as Record<string, unknown>;
+  }
 
   switch (protocol) {
     case "openai":
@@ -2213,6 +2223,39 @@ async function accumulateNonStreamResponse(
     default:
       return accumulateAnthropicNonStreamJSON(json);
   }
+}
+
+/**
+ * Extract a JSON payload from an SSE response body.
+ *
+ * Reads all `data: ` lines, ignoring `data: [DONE]` sentinel, and returns
+ * the **last** non-sentinel data payload as parsed JSON. This handles the
+ * common case where a provider returns a complete response as SSE despite
+ * stream: false — the final `data:` line contains the full response object.
+ */
+async function extractJSONFromSSE(
+  response: Response,
+): Promise<Record<string, unknown>> {
+  const text = await response.text();
+  const lines = text.split("\n");
+  let lastPayload: string | null = null;
+
+  for (const line of lines) {
+    if (line.startsWith("data: ")) {
+      const payload = line.slice(6).trim();
+      if (payload && payload !== "[DONE]") {
+        lastPayload = payload;
+      }
+    }
+  }
+
+  if (!lastPayload) {
+    throw new Error(
+      "upstream returned SSE but no data payload found — expected JSON in data: lines",
+    );
+  }
+
+  return JSON.parse(lastPayload) as Record<string, unknown>;
 }
 
 // Anthropic non-stream JSON → GatewayResponse: use shared parseAnthropicResponseJSON

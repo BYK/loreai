@@ -332,6 +332,7 @@ function buildOpenAIWorkerRequest(
     body: JSON.stringify({
       model: model.modelID,
       max_completion_tokens: maxTokens,
+      stream: false,
       ...(temperature != null && { temperature }),
       messages,
     }),
@@ -521,13 +522,31 @@ export function createGatewayLLMClient(
               finalStatus = response.status;
 
               if (response.ok) {
-                const rawData = await response.json();
+                // Guard: some providers return SSE even when stream: false
+                // was sent. Extract JSON from the data: lines instead.
+                const ct = response.headers.get("content-type") ?? "";
+                let rawData: unknown;
+                if (ct.includes("text/event-stream")) {
+                  const text = await response.text();
+                  let lastPayload: string | null = null;
+                  for (const line of text.split("\n")) {
+                    if (line.startsWith("data: ")) {
+                      const p = line.slice(6).trim();
+                      if (p && p !== "[DONE]") lastPayload = p;
+                    }
+                  }
+                  rawData = lastPayload ? JSON.parse(lastPayload) : {};
+                } else {
+                  rawData = await response.json();
+                }
 
                 // Parse response based on provider
                 const parsed =
                   target.protocol === "openai"
                     ? parseOpenAIResponse(rawData as OpenAIChatResponse)
-                    : parseAnthropicResponse(rawData);
+                    : parseAnthropicResponse(
+                        rawData as Parameters<typeof parseAnthropicResponse>[0],
+                      );
 
                 // Set usage attributes on the span
                 if (parsed.usage) {
