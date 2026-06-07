@@ -20,7 +20,8 @@ export default defineConfig({
         Header: "./src/components/SiteHeader.astro",
       },
       logo: {
-        src: "./public/brand-mark.svg",
+        light: "./public/brand-mark-light.svg",
+        dark: "./public/brand-mark.svg",
         alt: "Lore.AI",
         replacesTitle: true,
       },
