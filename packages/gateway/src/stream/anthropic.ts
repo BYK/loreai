@@ -11,10 +11,11 @@
  * All functions are pure (no side effects) except `parseSSEStream` which is
  * an async generator consuming a byte stream.
  */
-import type {
-  GatewayContentBlock,
-  GatewayResponse,
-  GatewayUsage,
+import {
+  ZERO_USAGE,
+  type GatewayContentBlock,
+  type GatewayResponse,
+  type GatewayUsage,
 } from "../translate/types";
 import { scaleUsageForClient } from "../compaction";
 
@@ -458,7 +459,7 @@ export function createStreamAccumulator(options?: {
  * interception) and needs to emit a well-formed Anthropic stream.
  */
 export function buildSSEMessageStart(response: GatewayResponse): string {
-  const u = response.usage ?? { inputTokens: 0, outputTokens: 0 };
+  const u = response.usage ?? ZERO_USAGE;
   const message = {
     type: "message_start",
     message: {
@@ -686,7 +687,7 @@ export function createRecallAwareAccumulator(
         return null;
       // Scale based on total accumulated in the inner accumulator
       const innerResp = inner.getResponse();
-      const iu = innerResp.usage ?? { inputTokens: 0, outputTokens: 0 };
+      const iu = innerResp.usage ?? ZERO_USAGE;
       const scaled = scaleUsageForClient({
         input_tokens: iu.inputTokens,
         output_tokens: deltaUsage.output_tokens,

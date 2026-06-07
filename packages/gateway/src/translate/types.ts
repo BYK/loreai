@@ -221,13 +221,56 @@ export type GatewayUsage = {
 /**
  * Zero-value usage — used as a safe fallback when `resp.usage` is undefined
  * at runtime (e.g. vLLM or partial responses from OpenAI-compatible providers).
+ *
+ * INVARIANT: Must only contain required fields (inputTokens, outputTokens).
+ * Do NOT add cacheReadInputTokens or cacheCreationInputTokens here — their
+ * *presence* (even as 0) makes downstream `!= null` guards emit cache fields
+ * in the wire response when no caching actually occurred. This invariant is
+ * enforced by a test in translate-types.test.ts.
  */
-export const ZERO_USAGE: GatewayUsage = {
+export const ZERO_USAGE: GatewayUsage = Object.freeze({
   inputTokens: 0,
   outputTokens: 0,
-  cacheReadInputTokens: 0,
-  cacheCreationInputTokens: 0,
-};
+});
+
+/**
+ * Extract a JSON payload from an SSE response body.
+ *
+ * Some providers (e.g. DeepSeek) return SSE-formatted responses even when
+ * `stream: false` was sent. This function reads all `data: ` lines, ignores
+ * the `data: [DONE]` sentinel, and returns the **last** non-sentinel data
+ * payload as parsed JSON. The final `data:` line contains the full response
+ * object in this scenario.
+ *
+ * NOTE: This does not handle the SSE spec's multiline `data:` continuation
+ * (consecutive `data:` lines joined by `\n`). In practice, providers that
+ * return a complete non-streaming response as SSE always send the JSON
+ * object on a single `data:` line.
+ */
+export async function extractJSONFromSSE(
+  response: Response,
+): Promise<Record<string, unknown>> {
+  const text = await response.text();
+  const lines = text.split("\n");
+  let lastPayload: string | null = null;
+
+  for (const line of lines) {
+    if (line.startsWith("data: ")) {
+      const payload = line.slice(6).trim();
+      if (payload && payload !== "[DONE]") {
+        lastPayload = payload;
+      }
+    }
+  }
+
+  if (!lastPayload) {
+    throw new Error(
+      "upstream returned SSE but no data payload found — expected JSON in data: lines",
+    );
+  }
+
+  return JSON.parse(lastPayload) as Record<string, unknown>;
+}
 
 /** Accumulated response from the upstream provider. */
 export type GatewayResponse = {

@@ -14,10 +14,11 @@
  * Reuses `parseSSEStream` from the Anthropic stream module since the
  * underlying SSE wire format is the same.
  */
-import type {
-  GatewayContentBlock,
-  GatewayResponse,
-  GatewayUsage,
+import {
+  ZERO_USAGE,
+  type GatewayContentBlock,
+  type GatewayResponse,
+  type GatewayUsage,
 } from "../translate/types";
 import { parseSSEStream, createStreamAccumulator } from "./anthropic";
 
@@ -652,7 +653,7 @@ export function translateAnthropicStreamToResponses(
 
               const finalStatus = mapStatusFromStopReason(resp.stopReason);
 
-              const ru = resp.usage ?? { inputTokens: 0, outputTokens: 0 };
+              const ru = resp.usage ?? ZERO_USAGE;
               const usageData: Record<string, unknown> = {
                 input_tokens: ru.inputTokens,
                 output_tokens: ru.outputTokens,

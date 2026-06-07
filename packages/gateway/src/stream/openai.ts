@@ -17,6 +17,7 @@
  * events, and `createStreamAccumulator` to build the internal GatewayResponse
  * (for pipeline post-processing that may read it).
  */
+import { ZERO_USAGE } from "../translate/types";
 import { parseSSEStream, createStreamAccumulator } from "./anthropic";
 
 // ---------------------------------------------------------------------------
@@ -279,7 +280,7 @@ export function translateAnthropicStreamToOpenAI(
             case "message_stop": {
               // Build usage from accumulator
               const resp = accumulator.getResponse();
-              const ru = resp.usage ?? { inputTokens: 0, outputTokens: 0 };
+              const ru = resp.usage ?? ZERO_USAGE;
               const usage: Record<string, unknown> = {
                 prompt_tokens: ru.inputTokens,
                 completion_tokens: ru.outputTokens,

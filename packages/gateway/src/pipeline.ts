@@ -72,6 +72,7 @@ import type {
 } from "./translate/types";
 import {
   blocksToText,
+  extractJSONFromSSE,
   forwardClientHeaders,
   ZERO_USAGE,
 } from "./translate/types";
@@ -2227,39 +2228,6 @@ async function accumulateNonStreamResponse(
     default:
       return accumulateAnthropicNonStreamJSON(json);
   }
-}
-
-/**
- * Extract a JSON payload from an SSE response body.
- *
- * Reads all `data: ` lines, ignoring `data: [DONE]` sentinel, and returns
- * the **last** non-sentinel data payload as parsed JSON. This handles the
- * common case where a provider returns a complete response as SSE despite
- * stream: false — the final `data:` line contains the full response object.
- */
-async function extractJSONFromSSE(
-  response: Response,
-): Promise<Record<string, unknown>> {
-  const text = await response.text();
-  const lines = text.split("\n");
-  let lastPayload: string | null = null;
-
-  for (const line of lines) {
-    if (line.startsWith("data: ")) {
-      const payload = line.slice(6).trim();
-      if (payload && payload !== "[DONE]") {
-        lastPayload = payload;
-      }
-    }
-  }
-
-  if (!lastPayload) {
-    throw new Error(
-      "upstream returned SSE but no data payload found — expected JSON in data: lines",
-    );
-  }
-
-  return JSON.parse(lastPayload) as Record<string, unknown>;
 }
 
 // Anthropic non-stream JSON → GatewayResponse: use shared parseAnthropicResponseJSON

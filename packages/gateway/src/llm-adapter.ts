@@ -34,6 +34,7 @@ import {
 } from "./sentry";
 import { recordWorkerCost } from "./cost-tracker";
 import { upstreamFetch } from "./fetch";
+import { extractJSONFromSSE } from "./translate/types";
 
 // ---------------------------------------------------------------------------
 // Worker call tracking
@@ -525,20 +526,9 @@ export function createGatewayLLMClient(
                 // Guard: some providers return SSE even when stream: false
                 // was sent. Extract JSON from the data: lines instead.
                 const ct = response.headers.get("content-type") ?? "";
-                let rawData: unknown;
-                if (ct.includes("text/event-stream")) {
-                  const text = await response.text();
-                  let lastPayload: string | null = null;
-                  for (const line of text.split("\n")) {
-                    if (line.startsWith("data: ")) {
-                      const p = line.slice(6).trim();
-                      if (p && p !== "[DONE]") lastPayload = p;
-                    }
-                  }
-                  rawData = lastPayload ? JSON.parse(lastPayload) : {};
-                } else {
-                  rawData = await response.json();
-                }
+                const rawData = ct.includes("text/event-stream")
+                  ? await extractJSONFromSSE(response)
+                  : await response.json();
 
                 // Parse response based on provider
                 const parsed =
