@@ -310,6 +310,17 @@ export interface LLMClient {
        * (OpenCode, Pi) ignore it.
        */
       upstreamUrl?: string;
+      /**
+       * Wire protocol for the upstream endpoint. When set, the adapter
+       * uses this protocol for request/response formatting instead of
+       * inferring it from the provider ID. Threaded from the session's
+       * UpstreamSnapshot by the gateway to ensure workers use the same
+       * wire format as the owning session.
+       *
+       * Only the gateway adapter honors this field; other adapters
+       * (OpenCode, Pi) ignore it.
+       */
+      protocol?: "anthropic" | "openai" | "openai-responses";
     },
   ): Promise<string | null>;
 }

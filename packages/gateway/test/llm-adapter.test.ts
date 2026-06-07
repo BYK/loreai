@@ -3,6 +3,7 @@ import {
   backoffMs,
   maxRetriesFor,
   normalizeOpenAIUsage,
+  resolveWorkerProtocol,
   AUTH_ERROR_CODES,
 } from "../src/llm-adapter";
 
@@ -267,5 +268,48 @@ describe("AUTH_ERROR_CODES", () => {
     expect(AUTH_ERROR_CODES.has(200)).toBe(false);
     expect(AUTH_ERROR_CODES.has(400)).toBe(false);
     expect(AUTH_ERROR_CODES.has(404)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveWorkerProtocol
+// ---------------------------------------------------------------------------
+
+describe("resolveWorkerProtocol", () => {
+  // Priority 1: explicit protocol from UpstreamSnapshot wins
+  test("explicit 'anthropic' wins over route table", () => {
+    expect(resolveWorkerProtocol("openai", "anthropic")).toBe("anthropic");
+  });
+
+  test("explicit 'openai' wins over route table", () => {
+    expect(resolveWorkerProtocol("anthropic", "openai")).toBe("openai");
+  });
+
+  test("explicit 'openai-responses' collapses to 'openai'", () => {
+    expect(resolveWorkerProtocol("anthropic", "openai-responses")).toBe(
+      "openai",
+    );
+  });
+
+  // Priority 2: route table lookup
+  test("anthropic provider resolves to 'anthropic' via route table", () => {
+    expect(resolveWorkerProtocol("anthropic")).toBe("anthropic");
+  });
+
+  test("openai provider resolves to 'openai' via route table", () => {
+    expect(resolveWorkerProtocol("openai")).toBe("openai");
+  });
+
+  test("deepseek provider resolves to 'openai' via route table", () => {
+    expect(resolveWorkerProtocol("deepseek")).toBe("openai");
+  });
+
+  // Priority 3: default for aggregators/unknown providers
+  test("opencode (protocol: null) defaults to 'anthropic'", () => {
+    expect(resolveWorkerProtocol("opencode")).toBe("anthropic");
+  });
+
+  test("unknown provider defaults to 'anthropic'", () => {
+    expect(resolveWorkerProtocol("some-unknown-provider")).toBe("anthropic");
   });
 });

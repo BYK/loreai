@@ -4,12 +4,19 @@
  * running inside the gateway process.
  *
  * Supports both Anthropic Messages API and OpenAI Chat Completions API.
- * The wire protocol is resolved from the provider route registry:
- *   - Anthropic-protocol providers → POST /v1/messages
- *   - OpenAI-protocol providers   → POST /v1/chat/completions
+ * The wire protocol is determined by explicit protocol from the session's
+ * UpstreamSnapshot (threaded via opts.protocol), with fallback to the
+ * provider route registry (PROVIDER_ROUTES) and a safe default of
+ * "anthropic" for unknown/aggregator providers:
+ *   - Anthropic protocol → POST /v1/messages
+ *   - OpenAI protocol    → POST /v1/chat/completions
+ *
+ * Protocol is decoupled from provider identity — proxy/aggregator
+ * providers (e.g. OpenCode Zen) that have protocol=null in the route
+ * table receive their protocol from the session snapshot instead.
  *
  * Retry logic, Sentry instrumentation, worker call tracking, and error
- * handling are shared across both providers.
+ * handling are shared across both protocols.
  */
 
 import type { LLMClient } from "@loreai/core";
@@ -160,55 +167,71 @@ export function normalizeOpenAIUsage(
 // Provider-specific request builders
 // ---------------------------------------------------------------------------
 
-/** Upstream URL + provider name for a resolved provider. */
+/** Wire protocol for worker requests (openai-responses collapsed to openai). */
+type WorkerProtocol = "anthropic" | "openai";
+
+/** Upstream URL, wire protocol, and provider label for a resolved target. */
 type ProviderTarget = {
   url: string;
+  protocol: WorkerProtocol;
+  /** Provider label for Sentry spans and logging. */
   providerName: string;
 };
 
 /**
- * Determine whether a provider uses the OpenAI wire protocol.
- * Checks the provider route registry (PROVIDER_ROUTES) for the wire
- * protocol. Falls back to name-based heuristic for unregistered providers.
- * When an upstream override is active, the route's protocol is the source
- * of truth — the override URL accepts the provider's native format.
+ * Resolve the wire protocol for a worker request.
+ *
+ * Priority:
+ *  1. Explicit protocol from caller (threaded from UpstreamSnapshot)
+ *  2. Route table lookup via PROVIDER_ROUTES
+ *  3. Default: "anthropic" (safest — most aggregators speak Anthropic)
+ *
+ * `openai-responses` is collapsed to `"openai"` because workers only
+ * use simple prompt→response via Chat Completions, not the Responses API.
  */
-function resolveIsOpenAI(
+export function resolveWorkerProtocol(
   providerID: string,
-  _upstreamOverride?: string,
-): boolean {
+  explicit?: "anthropic" | "openai" | "openai-responses",
+): WorkerProtocol {
+  // 1. Explicit protocol from caller (threaded from UpstreamSnapshot)
+  if (explicit) {
+    return explicit === "anthropic" ? "anthropic" : "openai";
+  }
+  // 2. Route table lookup
   const route = resolveProviderRoute(providerID);
   if (route?.protocol) {
-    return route.protocol === "openai" || route.protocol === "openai-responses";
+    return route.protocol === "anthropic" ? "anthropic" : "openai";
   }
-  // Proxy/aggregator (protocol=null) or unknown provider: fall back to
-  // name-based heuristic. Anthropic is the only known non-OpenAI provider.
-  return providerID !== "anthropic";
+  // 3. Default: anthropic (safest for unknown/aggregator providers)
+  return "anthropic";
 }
 
-/** Resolve upstream target based on model provider.
+/** Resolve upstream target URL and protocol.
  *  When `upstreamOverride` is set, the request routes to that URL instead
  *  of the default — used for same-provider routing where the session's
  *  credentials only work against the session's endpoint. */
 function resolveTarget(
   upstreams: { anthropic: string; openai: string },
-  isOpenAI: boolean,
+  protocol: WorkerProtocol,
   upstreamOverride?: string,
 ): ProviderTarget {
   if (upstreamOverride) {
     return {
       url: upstreamOverride.replace(/\/$/, ""),
-      providerName: isOpenAI ? "openai" : "anthropic",
+      protocol,
+      providerName: protocol,
     };
   }
-  if (isOpenAI) {
+  if (protocol === "openai") {
     return {
       url: upstreams.openai.replace(/\/$/, ""),
+      protocol,
       providerName: "openai",
     };
   }
   return {
     url: upstreams.anthropic.replace(/\/$/, ""),
+    protocol,
     providerName: "anthropic",
   };
 }
@@ -356,8 +379,10 @@ function parseOpenAIResponse(data: OpenAIChatResponse): {
  * Create an LLMClient that sends single-turn prompts to the appropriate provider.
  *
  * Routes to Anthropic Messages API or OpenAI Chat Completions API based on
- * `model.providerID`. Retry logic, Sentry instrumentation, and error handling
- * are shared across both providers.
+ * the resolved wire protocol (explicit `opts.protocol` from the session's
+ * UpstreamSnapshot, then provider route table, then default "anthropic").
+ * Retry logic, Sentry instrumentation, and error handling are shared across
+ * both protocols.
  *
  * @param upstreams     Base URLs for each provider
  * @param getAuth       Callback to resolve auth credentials (per-session → global fallback)
@@ -379,8 +404,8 @@ export function createGatewayLLMClient(
         return null;
       }
       const upstreamOverride = opts?.upstreamUrl;
-      const isOpenAI = resolveIsOpenAI(model.providerID, upstreamOverride);
-      const target = resolveTarget(upstreams, isOpenAI, upstreamOverride);
+      const protocol = resolveWorkerProtocol(model.providerID, opts?.protocol);
+      const target = resolveTarget(upstreams, protocol, upstreamOverride);
       const maxTokens = opts?.maxTokens ?? 8192;
 
       // Defense-in-depth: detect API key / provider mismatch before making
@@ -394,41 +419,42 @@ export function createGatewayLLMClient(
       // session's credentials regardless of the provider prefix.
       if (cred.scheme === "api-key" && !hasDedicatedKey && !upstreamOverride) {
         const isAnthropicKey = cred.value.startsWith("sk-ant-");
-        if (target.providerName === "anthropic" && !isAnthropicKey) {
+        if (target.protocol === "anthropic" && !isAnthropicKey) {
           log.warn(
-            `worker provider mismatch: ${target.providerName} target with non-Anthropic API key — skipping (model=${model.modelID}, worker=${opts?.workerID ?? "unknown"})`,
+            `worker protocol mismatch: ${target.protocol} target with non-Anthropic API key — skipping (model=${model.modelID}, worker=${opts?.workerID ?? "unknown"})`,
           );
           return null;
         }
-        if (target.providerName === "openai" && isAnthropicKey) {
+        if (target.protocol === "openai" && isAnthropicKey) {
           log.warn(
-            `worker provider mismatch: ${target.providerName} target with Anthropic API key — skipping (model=${model.modelID}, worker=${opts?.workerID ?? "unknown"})`,
+            `worker protocol mismatch: ${target.protocol} target with Anthropic API key — skipping (model=${model.modelID}, worker=${opts?.workerID ?? "unknown"})`,
           );
           return null;
         }
       }
 
-      // Build provider-specific request
-      let req = isOpenAI
-        ? buildOpenAIWorkerRequest(
-            target,
-            cred,
-            model,
-            system,
-            user,
-            maxTokens,
-            opts?.temperature,
-          )
-        : buildAnthropicWorkerRequest(
-            target,
-            cred,
-            model,
-            system,
-            user,
-            maxTokens,
-            opts?.sessionID,
-            opts?.temperature,
-          );
+      // Build protocol-specific request
+      let req =
+        target.protocol === "openai"
+          ? buildOpenAIWorkerRequest(
+              target,
+              cred,
+              model,
+              system,
+              user,
+              maxTokens,
+              opts?.temperature,
+            )
+          : buildAnthropicWorkerRequest(
+              target,
+              cred,
+              model,
+              system,
+              user,
+              maxTokens,
+              opts?.sessionID,
+              opts?.temperature,
+            );
 
       // Track this call so temporal capture can skip it
       const callID = `gw-worker-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -498,9 +524,10 @@ export function createGatewayLLMClient(
                 const rawData = await response.json();
 
                 // Parse response based on provider
-                const parsed = isOpenAI
-                  ? parseOpenAIResponse(rawData as OpenAIChatResponse)
-                  : parseAnthropicResponse(rawData);
+                const parsed =
+                  target.protocol === "openai"
+                    ? parseOpenAIResponse(rawData as OpenAIChatResponse)
+                    : parseAnthropicResponse(rawData);
 
                 // Set usage attributes on the span
                 if (parsed.usage) {
@@ -553,26 +580,27 @@ export function createGatewayLLMClient(
                   log.info(
                     `worker auth error ${response.status}, credential refreshed — retrying: ${text.slice(0, 200)}`,
                   );
-                  req = isOpenAI
-                    ? buildOpenAIWorkerRequest(
-                        target,
-                        freshCred,
-                        model,
-                        system,
-                        user,
-                        maxTokens,
-                        opts?.temperature,
-                      )
-                    : buildAnthropicWorkerRequest(
-                        target,
-                        freshCred,
-                        model,
-                        system,
-                        user,
-                        maxTokens,
-                        opts?.sessionID,
-                        opts?.temperature,
-                      );
+                  req =
+                    target.protocol === "openai"
+                      ? buildOpenAIWorkerRequest(
+                          target,
+                          freshCred,
+                          model,
+                          system,
+                          user,
+                          maxTokens,
+                          opts?.temperature,
+                        )
+                      : buildAnthropicWorkerRequest(
+                          target,
+                          freshCred,
+                          model,
+                          system,
+                          user,
+                          maxTokens,
+                          opts?.sessionID,
+                          opts?.temperature,
+                        );
                   retryCount++;
                   continue;
                 }

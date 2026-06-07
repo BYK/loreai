@@ -889,26 +889,6 @@ async function initIfNeeded(
   log.info(`gateway pipeline initialized: ${projectPath}`);
 }
 
-/**
- * Map a `providerID` string to its wire-protocol family. Provider IDs follow
- * the convention `{vendor}/{family}` (e.g. `minimax/anthropic`,
- * `github-copilot`, `openrouter/openai`). The substring check is deliberate:
- * a provider that ships an "anthropic"-shaped API is wire-compatible with
- * Anthropic regardless of the vendor prefix.
- *
- * Order matters: `"openai-responses"` is checked before `"anthropic"` so the
- * more-specific match wins (both contain `"openai"` as a substring).
- *
- * @internal Exported for tests.
- */
-export function protocolOfProviderID(
-  providerID: string,
-): "anthropic" | "openai" | "openai-responses" {
-  if (providerID.includes("openai-responses")) return "openai-responses";
-  if (providerID.includes("anthropic")) return "anthropic";
-  return "openai";
-}
-
 function getLLMClient(config: GatewayConfig): LLMClient {
   if (!llmClient) {
     const cfg = loreConfig();
@@ -950,46 +930,25 @@ function getLLMClient(config: GatewayConfig): LLMClient {
       { dedicatedWorkerKey: !!workerApiKey },
     );
 
-    // Session-aware wrapper: automatically inject the session's upstream URL
-    // so worker calls route through the same proxy/aggregator (e.g. OpenCode
-    // Zen) as the owning session. Without this, sessions behind a proxy would
-    // have their workers route directly to the provider API with the wrong
-    // credentials (the proxy's key, not the provider's).
-    //
-    // When the session has used multiple providers (e.g. Anthropic + MiniMax),
     // Workers always use the same provider as the session. Route worker
-    // calls through the session's upstream URL so they use the session's
-    // credentials and endpoint. When a dedicated worker API key is set
-    // (LORE_WORKER_API_KEY), skip URL injection — the worker uses its own
-    // credentials and default upstream.
+    // calls through the session's upstream URL and wire protocol so they
+    // use the session's credentials, endpoint, and request format. The
+    // protocol from the UpstreamSnapshot is the source of truth — it was
+    // resolved at conversation-turn time and correctly handles aggregator
+    // providers (e.g. OpenCode Zen) whose route has protocol=null.
     //
-    // Protocol-compatibility guard: only inject the session's URL when the
-    // worker's model wire protocol matches the session's protocol. A session
-    // on an OpenAI-only endpoint (e.g. Nvidia's integrate.api.nvidia.com)
-    // must NOT receive a worker whose model is Anthropic-format — the URL
-    // won't have a `/v1/messages` route and the request 404s. Mismatched
-    // workers fall through to their own provider config.
+    // When a dedicated worker API key is set (LORE_WORKER_API_KEY), skip
+    // injection — the worker uses its own credentials and default upstream.
     const inner: LLMClient = {
       async prompt(system, user, opts) {
         if (opts?.sessionID && !opts.upstreamUrl && !workerApiKey) {
           const state = sessions.get(opts.sessionID);
-          const session = state?.lastUpstream;
-          if (session?.url && session.protocol) {
-            const workerProviderID =
-              opts?.model?.providerID ?? defaultModel.providerID;
-            if (protocolOfProviderID(workerProviderID) === session.protocol) {
-              return rawClient.prompt(system, user, {
-                ...opts,
-                upstreamUrl: session.url,
-              });
-            }
-            log.info(
-              `worker protocol mismatch: session=${session.protocol} ` +
-                `worker=${workerProviderID}/` +
-                `${opts?.model?.modelID ?? defaultModel.modelID} ` +
-                `sessionID=${opts.sessionID.slice(0, 16)} — ` +
-                `worker will use its own provider config`,
-            );
+          if (state?.lastUpstream?.url) {
+            return rawClient.prompt(system, user, {
+              ...opts,
+              upstreamUrl: state.lastUpstream.url,
+              protocol: state.lastUpstream.protocol,
+            });
           }
         }
         return rawClient.prompt(system, user, opts);
