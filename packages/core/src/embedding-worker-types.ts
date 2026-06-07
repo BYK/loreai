@@ -103,6 +103,11 @@ export function isOomError(msg: string): boolean {
  * thread's `on("exit")` handler marks the provider as broken.
  */
 export function isWasmFatalError(msg: string): boolean {
+  // Recognize the wrapper prefix the worker adds before process.exit(1).
+  // The main thread receives "WASM fatal error (worker exiting): <raw>"
+  // and must classify it as fatal to create LocalProviderUnavailableError
+  // instead of a plain Error in the on("message") handler.
+  if (/WASM fatal error/i.test(msg)) return true;
   // WASM abort() — "Aborted(). Build with -sASSERTIONS for more info."
   if (/\bAborted\b/i.test(msg)) return true;
   // RuntimeError from WASM (e.g. "unreachable", "memory access out of bounds")
