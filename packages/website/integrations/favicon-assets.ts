@@ -52,7 +52,9 @@ async function generate(root: string): Promise<void> {
 
   const svgResult = svgoOptimize(raw, svgoConfig);
   if (!("data" in svgResult)) {
-    throw new Error(`[favicon-assets] SVGO produced no output for ${sourcePath}`);
+    throw new Error(
+      `[favicon-assets] SVGO produced no output for ${sourcePath}`,
+    );
   }
   const optimizedSvg = svgResult.data;
   await writeFile(resolve(publicDir, FAVICON_SVG), optimizedSvg);
