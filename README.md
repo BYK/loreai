@@ -387,7 +387,7 @@ bun packages/core/eval/run.ts --mode live --scenarios mega-cli-refactor
 
 ## How we got here
 
-**v1 — structured distillation.** The initial version used Nuum's `{ narrative, facts }` JSON format. It worked well for single-session preference recall but *regressed* on multi-session and temporal reasoning — the structured format was too rigid and lost temporal context.
+**v1 — structured distillation.** The initial version used Lore's `{ narrative, facts }` JSON format. It worked well for single-session preference recall but *regressed* on multi-session and temporal reasoning — the structured format was too rigid and lost temporal context.
 
 **v2 — observation logs.** Switching to Mastra's observer/reflector architecture with plain-text timestamped observation logs was the breakthrough. Dated event logs preserve temporal relationships that structured JSON destroys.
 
@@ -403,7 +403,7 @@ bun packages/core/eval/run.ts --mode live --scenarios mega-cli-refactor
 
 To use a local clone instead of the published packages:
 
-- **OpenCode**: `{ "plugin": ["file:///absolute/path/to/opencode-lore"] }`
+- **OpenCode**: `{ "plugin": ["file:///absolute/path/to/lore"] }`
 - **Pi**: symlink the built package into `~/.pi/agent/extensions/`, or add a local path to `~/.pi/settings.json` `packages`
 
 Contributors editing prompts in `packages/core/src/prompt.ts` or the

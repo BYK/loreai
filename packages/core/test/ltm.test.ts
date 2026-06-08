@@ -114,9 +114,9 @@ describe("ltm", () => {
 
   describe("search: FTS sanitization and fallback", () => {
     test("search does not throw on hyphenated query", () => {
-      // "opencode-nuum" previously crashed with: no such column: nuum
+      // "opencode-test" previously crashed with: no such column: test
       expect(() =>
-        ltm.search({ query: "opencode-nuum", projectPath: PROJECT }),
+        ltm.search({ query: "opencode-test", projectPath: PROJECT }),
       ).not.toThrow();
       expect(() =>
         ltm.search({ query: "three-tier", projectPath: PROJECT }),

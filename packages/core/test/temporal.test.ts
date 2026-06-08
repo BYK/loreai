@@ -350,8 +350,8 @@ describe("temporal", () => {
     });
 
     test("hyphenated terms: dash stripped, not treated as NOT operator", () => {
-      // "opencode-nuum" would crash FTS5 as "opencode NOT nuum"
-      expect(ftsQuery("opencode-nuum")).toBe("opencode* nuum*");
+      // "opencode-test" would crash FTS5 as "opencode NOT test"
+      expect(ftsQuery("opencode-test")).toBe("opencode* test*");
       expect(ftsQuery("three-tier")).toBe("three* tier*");
     });
 
@@ -372,7 +372,7 @@ describe("temporal", () => {
     test("search does not throw on hyphenated query", () => {
       // These previously crashed with SQLiteError
       expect(() =>
-        temporal.search({ projectPath: PROJECT, query: "opencode-nuum" }),
+        temporal.search({ projectPath: PROJECT, query: "opencode-test" }),
       ).not.toThrow();
       expect(() =>
         temporal.search({ projectPath: PROJECT, query: "three-tier" }),

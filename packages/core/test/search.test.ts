@@ -18,7 +18,7 @@ describe("search", () => {
     });
 
     test("hyphenated terms: dash stripped, not treated as NOT operator", () => {
-      expect(ftsQuery("opencode-nuum")).toBe("opencode* nuum*");
+      expect(ftsQuery("opencode-test")).toBe("opencode* test*");
       expect(ftsQuery("three-tier")).toBe("three* tier*");
     });
 

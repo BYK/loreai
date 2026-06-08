@@ -1,6 +1,6 @@
 # Quality Playbook — Phase 1 Exploration Findings
 
-**Project:** opencode-lore (Lore)
+**Project:** lore
 **Date:** 2026-05-16
 **Skill version:** v1.5.6
 

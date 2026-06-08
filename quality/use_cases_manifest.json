@@ -2,7 +2,7 @@
   "schema_version": "1.0",
   "skill_version": "1.5.6",
   "generated_at": "2026-05-16T16:10:00Z",
-  "project": "opencode-lore",
+  "project": "lore",
   "use_cases": [
     {
       "id": "UC-01",

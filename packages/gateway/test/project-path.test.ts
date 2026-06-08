@@ -34,8 +34,8 @@ describe("inferProjectPath", () => {
   });
 
   test("extracts path from Working directory line", () => {
-    const system = `Working directory: /home/byk/Code/opencode-lore\nOther stuff`;
-    expect(inferProjectPath(system)).toBe("/home/byk/Code/opencode-lore");
+    const system = `Working directory: /Users/dev/my-project\nOther stuff`;
+    expect(inferProjectPath(system)).toBe("/Users/dev/my-project");
   });
 
   test("extracts path from working directory (lowercase w)", () => {
@@ -49,8 +49,8 @@ describe("inferProjectPath", () => {
   });
 
   test("extracts directory from AGENTS.md path reference", () => {
-    const system = `Instructions from: /home/byk/Code/opencode-lore/AGENTS.md`;
-    expect(inferProjectPath(system)).toBe("/home/byk/Code/opencode-lore");
+    const system = `Instructions from: /Users/dev/my-project/AGENTS.md`;
+    expect(inferProjectPath(system)).toBe("/Users/dev/my-project");
   });
 
   test("extracts directory from .lore.md path reference", () => {
