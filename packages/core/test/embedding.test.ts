@@ -1,5 +1,4 @@
 import {
-  afterAll,
   afterEach,
   describe,
   test,
@@ -18,7 +17,6 @@ import {
   vectorSearch,
   vectorSearchEntities,
   checkConfigChange,
-  _shutdownAndDisable,
   _saveAndClearProvider,
   _restoreProvider,
   embed,
@@ -500,12 +498,19 @@ function assertLocalModelAvailable(): void {
   }
 }
 
-describe("LocalProvider integration", () => {
-  const PROJECT = "/test/embedding/local";
-
-  beforeAll(() => {
+const localModelAvailable = (() => {
+  try {
     assertLocalModelAvailable();
-  });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+const describeLocalProvider = localModelAvailable ? describe : describe.skip;
+
+describeLocalProvider("LocalProvider integration", () => {
+  const PROJECT = "/test/embedding/local";
 
   beforeEach(() => {
     const pid = ensureProject(PROJECT);
@@ -581,11 +586,7 @@ describe("LocalProvider integration", () => {
   }, 60_000);
 });
 
-describe("LocalProvider worker thread", () => {
-  beforeAll(() => {
-    assertLocalModelAvailable();
-  });
-
+describeLocalProvider("LocalProvider worker thread", () => {
   test("embed produces Float32Array vectors with 768 dimensions through worker", async () => {
     const [vec] = await embed(["test query via worker"], "query");
     expect(vec).toBeInstanceOf(Float32Array);
@@ -622,10 +623,6 @@ describe("LocalProvider worker thread", () => {
     expect(queryVec).toBeInstanceOf(Float32Array);
     expect(queryVec.length).toBe(768);
   }, 60_000);
-
-  afterAll(async () => {
-    await _shutdownAndDisable();
-  });
 });
 
 describe("checkConfigChange", () => {
@@ -690,9 +687,4 @@ describe("checkConfigChange", () => {
       .get() as { embedding: Buffer | null };
     expect(row.embedding).toBeNull();
   });
-});
-
-// ── Global cleanup ──────────────────────────────────────────────────────
-afterAll(async () => {
-  await _shutdownAndDisable();
 });

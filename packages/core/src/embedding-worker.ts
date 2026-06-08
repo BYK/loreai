@@ -26,7 +26,7 @@ import type {
   WorkerOutbound,
   WorkerInitData,
   EmbedRequest,
-} from "./embedding-worker-types";
+} from "./embedding-worker-types.js";
 
 // ---------------------------------------------------------------------------
 // workerData
@@ -240,7 +240,7 @@ async function drain(): Promise<void> {
   if (processing) return;
   processing = true;
 
-  while (queue.length > 0) {
+  while (queue.length > 0 && !shutdownRequested) {
     const req = queue.shift();
     if (!req) break;
     await processEmbed(req);
@@ -325,6 +325,7 @@ async function runInference(texts: string[]): Promise<Float32Array[]> {
 }
 
 async function processEmbed(req: EmbedRequest): Promise<void> {
+  inflight++;
   try {
     await ensurePipeline();
 
@@ -407,12 +408,29 @@ async function processEmbed(req: EmbedRequest): Promise<void> {
         : raw;
       post({ type: "error", id: req.id, error: msg });
     }
+  } finally {
+    inflight--;
+    maybeExit();
   }
 }
 
 // ---------------------------------------------------------------------------
-// Message handling
+// Shutdown handling
 // ---------------------------------------------------------------------------
+
+let inflight = 0;
+let shutdownRequested = false;
+
+function maybeExit(): void {
+  if (shutdownRequested && inflight === 0) {
+    // Deferred process.exit(0) lets any pending setImmediate / microtask
+    // callbacks (e.g. onnxruntime-node NAPI result conversion) complete
+    // before we tear down the V8 isolate.  A plain port.close() is not
+    // sufficient: native NAPI handles can keep the event loop alive
+    // indefinitely.
+    setTimeout(() => process.exit(0), 0);
+  }
+}
 
 function post(msg: WorkerOutbound): void {
   port.postMessage(msg);
@@ -421,10 +439,14 @@ function post(msg: WorkerOutbound): void {
 port.on("message", (msg: WorkerInbound) => {
   switch (msg.type) {
     case "embed":
-      enqueue(msg);
+      if (!shutdownRequested) {
+        enqueue(msg);
+      }
       break;
     case "shutdown":
-      process.exit(0);
+      shutdownRequested = true;
+      queue.length = 0; // Drop queued (not in-flight) requests.
+      maybeExit();
       break;
   }
 });

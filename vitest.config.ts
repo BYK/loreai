@@ -13,7 +13,7 @@ export default defineConfig({
     setupFiles: ["./packages/core/test/setup.ts"],
     // Environment
     environment: "node",
-    pool: "threads",
+    pool: "forks",
     // Timeouts — generous for gateway startup and LLM operations
     testTimeout: 300_000, // 5 min per test
     hookTimeout: 300_000,
