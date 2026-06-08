@@ -77,6 +77,13 @@ const sentryNodePlugin: esbuild.Plugin = {
   },
 };
 
+// ESM/CJS interop shim: see script/import-meta-url.js for rationale.
+// Injected into every CJS esbuild call so the static `import.meta.url`
+// token in source can be safely rewritten via `define` without triggering
+// the `empty-import-meta` warning. ESM builds don't need this — esbuild
+// emits a real `import.meta` for them.
+const importMetaUrlShim = join(packageDir, "script", "import-meta-url.js");
+
 await esbuild.build({
   entryPoints: [join(packageDir, "src/index.ts")],
   bundle: true,
@@ -92,8 +99,14 @@ await esbuild.build({
   logLevel: "info",
   legalComments: "none",
   plugins: [sentryNodePlugin],
+  // Inject ESM/CJS interop shim so `import.meta.url` can be rewritten
+  // via `define` (the static `import.meta` token would otherwise be
+  // dropped to empty in CJS output, triggering esbuild's
+  // `empty-import-meta` warning).
+  inject: [importMetaUrlShim],
   // Build-time constants
   define: {
+    "import.meta.url": "import_meta_url",
     LORE_CLI_VERSION: JSON.stringify(pkg.version),
     __SENTRY_DEBUG_ID__: JSON.stringify(PLACEHOLDER_DEBUG_ID),
   },
@@ -147,6 +160,10 @@ await esbuild.build({
   minify: true,
   logLevel: "info",
   legalComments: "none",
+  inject: [importMetaUrlShim],
+  define: {
+    "import.meta.url": "import_meta_url",
+  },
 });
 
 // ---------------------------------------------------------------------------

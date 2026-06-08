@@ -342,10 +342,13 @@ class LocalProvider implements EmbeddingProvider {
           );
         } else {
           // ESM (Bun, tsx): resolve worker relative to this module's URL.
-          // Use indirect access via Function to avoid esbuild's static
-          // "empty-import-meta" warning in CJS output — this branch is
-          // unreachable in CJS since __filename is always defined there.
-          const selfUrl = new Function("return import.meta.url")() as string;
+          // In CJS bundles the gateway build script (script/bundle.ts)
+          // rewrites `import.meta.url` to an injected `import_meta_url`
+          // shim — see packages/gateway/script/import-meta-url.js. This
+          // branch is unreachable in CJS at runtime since __filename is
+          // always defined there, but the shim keeps the source natural
+          // and silences esbuild's `empty-import-meta` static warning.
+          const selfUrl = import.meta.url;
           workerUrl = new URL(
             `./embedding-worker${selfUrl.endsWith(".ts") ? ".ts" : ".js"}`,
             selfUrl,

@@ -37,8 +37,12 @@ export { _cli } from "./cli/main";
 
 // Direct execution detection: only auto-start when this module is the entry
 // point. CJS path uses __filename (always defined). ESM path uses
-// import.meta.url via a dynamic expression that esbuild can't statically
-// analyze, avoiding the "empty-import-meta" warning in CJS output.
+// import.meta.url. In CJS bundles the gateway build script (script/bundle.ts)
+// rewrites `import.meta.url` to an injected `import_meta_url` shim — see
+// packages/gateway/script/import-meta-url.js. This branch is unreachable
+// in CJS at runtime since __filename is always defined there, but the shim
+// keeps the source natural and silences esbuild's `empty-import-meta` static
+// warning.
 const isMainModule = (() => {
   try {
     // CJS bundles and Node.js CJS: __filename is always defined.
@@ -46,12 +50,7 @@ const isMainModule = (() => {
       return process.argv[1] === __filename;
     }
     // ESM (Bun, tsx): derive __filename from import.meta.url.
-    // Dynamic property access prevents esbuild from warning about
-    // import.meta usage in CJS output — this branch is unreachable
-    // in CJS anyway since __filename is always defined there.
-    const meta = import.meta as unknown as Record<string, unknown>;
-    const url = meta.url;
-    return typeof url === "string" && process.argv[1] === fileURLToPath(url);
+    return process.argv[1] === fileURLToPath(import.meta.url);
   } catch {
     return false;
   }

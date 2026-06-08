@@ -116,12 +116,15 @@ export function isWasmFatalError(msg: string): boolean {
   // These are model-init-time OOMs, not input-size-driven, so truncation
   // retries cannot help. Treat as fatal to stop the event storm.
   if (isOomError(msg)) return true;
-  // Pipeline Callable pattern broken — @huggingface/transformers uses
-  // Object.setPrototypeOf to make pipeline instances callable. Under
-  // esbuild CJS + Node v24, this can fail silently — the pipeline object
-  // is truthy but not a function, so every subsequent inference attempt
-  // throws "pipe is not a function" (LOREAI-GATEWAY-10). Treating this
-  // as fatal stops the 346-event storm by marking the provider broken.
+  // Callable-pattern failure safety net (LOREAI-GATEWAY-10):
+  // @huggingface/transformers uses Object.setPrototypeOf to make pipeline
+  // instances callable. Under esbuild CJS + Node v24, this can fail
+  // silently — the pipeline object is truthy but not a function. The
+  // primary fix is the `typeof pipe !== "function"` guard in
+  // embedding-worker.ts that throws at construction time, so the worker
+  // exits cleanly on first init. This regex is a backstop for any code
+  // path where the guard didn't fire — classify the failure as fatal so
+  // the main thread marks the provider broken and stops retrying.
   if (/is not a function/.test(msg)) return true;
   return false;
 }
