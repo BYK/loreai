@@ -2,9 +2,9 @@
   <title id="t">Lore.AI</title>
   <desc id="d">Lore.AI lily mark — monochrome adaptive favicon.</desc>
   <style>
-    .lily, .dot { fill: #000000; }
+    .lily { fill: #000000; }
     @media (prefers-color-scheme: dark) {
-      .lily, .dot { fill: #ffffff; }
+      .lily { fill: #ffffff; }
     }
   </style>
   <g transform="translate(0 8) scale(0.1)">
@@ -27,7 +27,7 @@
 <path d="M0 0 C2.875 -0.125 2.875 -0.125 6 0 C6.66 0.66 7.32 1.32 8 2 C7.625 5.125 7.625 5.125 7 8 C4.688 8.688 4.688 8.688 2 9 C0.125 7.938 0.125 7.938 -1 6 C-0.688 2.812 -0.688 2.812 0 0 Z " class="lily" transform="translate(362,454)"/>
 <path d="M0 0 C1.65 0.33 3.3 0.66 5 1 C5 2.32 5 3.64 5 5 C4.34 5.33 4.34 5.33 1 7 C0.34 6.34 -0.32 5.68 -1 5 C-0.625 2.375 -0.625 2.375 0 0 Z " class="lily" transform="translate(331,471)"/>
   </g>
-  <g class="dot">
+  <g class="lily">
     <circle cx="29" cy="7" r="2.9"/>
     <circle cx="43" cy="21" r="3.9"/>
   </g>
