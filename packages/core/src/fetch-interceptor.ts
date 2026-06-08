@@ -164,11 +164,10 @@ export function installFetchInterceptor(
       // intercepted — that means the X-Lore-* context headers won't be
       // injected, and the gateway will fall back to inference/cwd. Warn
       // once per unique (host, path) so the operator can extend the path
-      // patterns if a new provider slips through. Local hosts are
-      // already excluded from this branch, so the warning only fires
-      // for remote LLM endpoints that genuinely should have been
-      // intercepted but weren't (e.g., a new provider path we don't know
-      // about yet).
+      // patterns if a new provider slips through. Only warn for paths
+      // that look like LLM API endpoints (contain keywords like v1,
+      // messages, chat, completions, responses, embeddings) to avoid
+      // noise from arbitrary HTTPS calls (npm registry, GitHub API, etc.).
       try {
         const parsed = new URL(url);
         const host = parsed.hostname;
@@ -178,9 +177,14 @@ export function installFetchInterceptor(
           host !== "127.0.0.1" &&
           host !== "0.0.0.0" &&
           host !== "::1" &&
-          !url.startsWith(config.gatewayBase)
+          host !== "[::1]" &&
+          !url.startsWith(config.gatewayBase) &&
+          // Only warn for paths that look like LLM API endpoints —
+          // require the full endpoint suffix, not bare "/v1" (which would
+          // false-positive on Stripe, GitHub, npm, etc.).
+          /\/(messages|chat\/completions|responses)(\/|$)/.test(parsed.pathname)
         ) {
-          const warnKey = `${host}${parsed.pathname}`;
+          const warnKey = `${parsed.host}${parsed.pathname}`;
           if (!warnedPaths.has(warnKey)) {
             warnedPaths.add(warnKey);
             log.warn(

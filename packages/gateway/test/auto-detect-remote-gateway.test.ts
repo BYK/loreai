@@ -33,8 +33,8 @@ function applyRemoteGatewayOverrides(
     config.remoteGatewayAutoDetected = false;
   } else if (
     opts.local === undefined &&
-    !process.env.LORE_REMOTE_GATEWAY &&
-    !process.env.LORE_HOSTED_MODE
+    !("LORE_REMOTE_GATEWAY" in process.env) &&
+    !("LORE_HOSTED_MODE" in process.env)
   ) {
     // No --local, no explicit env vars. loadConfig() may have set
     // remoteGateway via bind-address auto-detection — preserve that.
@@ -212,6 +212,22 @@ describe("loadConfig — remoteGateway auto-detection (B1)", () => {
     expect(config.remoteGateway).toBe(true);
     expect(config.remoteGatewayAutoDetected).toBe(false);
   });
+
+  test("LORE_REMOTE_GATEWAY=0 + non-loopback bind → remoteGateway=false (explicit disable wins over auto-detect)", () => {
+    process.env.LORE_REMOTE_GATEWAY = "0";
+    process.env.LORE_LISTEN_HOST = "100.107.38.38";
+    const config = loadConfig();
+    expect(config.remoteGateway).toBe(false);
+    expect(config.remoteGatewayAutoDetected).toBe(false);
+  });
+
+  test("LORE_HOSTED_MODE=0 + non-loopback bind → remoteGateway=false (explicit disable wins over auto-detect)", () => {
+    process.env.LORE_HOSTED_MODE = "0";
+    process.env.LORE_LISTEN_HOST = "100.107.38.38";
+    const config = loadConfig();
+    expect(config.remoteGateway).toBe(false);
+    expect(config.remoteGatewayAutoDetected).toBe(false);
+  });
 });
 
 describe("startGateway remote-gateway override (B5)", () => {
@@ -268,11 +284,19 @@ describe("startGateway remote-gateway override (B5)", () => {
     expect(config.remoteGatewayAutoDetected).toBe(false);
   });
 
-  test("LORE_REMOTE_GATEWAY=0 + lore start → remoteGateway=false (env var wins over command default)", () => {
+  test("LORE_REMOTE_GATEWAY=0 + lore start + loopback bind → remoteGateway=false (env var wins over command default)", () => {
     process.env.LORE_REMOTE_GATEWAY = "0";
     process.env.LORE_LISTEN_HOST = "127.0.0.1";
     const config = applyRemoteGatewayOverrides(loadConfig(), {});
     expect(config.remoteGateway).toBe(false);
+  });
+
+  test("LORE_REMOTE_GATEWAY=0 + lore start + non-loopback bind → remoteGateway=false (explicit disable wins over auto-detect AND command default)", () => {
+    process.env.LORE_REMOTE_GATEWAY = "0";
+    process.env.LORE_LISTEN_HOST = "100.107.38.38";
+    const config = applyRemoteGatewayOverrides(loadConfig(), {});
+    expect(config.remoteGateway).toBe(false);
+    expect(config.remoteGatewayAutoDetected).toBe(false);
   });
 
   test("LORE_REMOTE_GATEWAY=1 + lore start --local → remoteGateway=false (--local wins over env var)", () => {

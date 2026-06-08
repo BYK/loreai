@@ -18,4 +18,4 @@
 // avoid adding a static `import` that esbuild might try to optimize.
 //
 // See: https://github.com/BYK/fossilize/blob/main/import-meta-url.js
-export var import_meta_url = require("node:url").pathToFileURL(__filename);
+export var import_meta_url = require("node:url").pathToFileURL(__filename).href;

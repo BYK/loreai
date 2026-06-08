@@ -122,13 +122,17 @@ export function loadConfig(): GatewayConfig {
   const hosts = parseHosts(env.LORE_LISTEN_HOST);
   const remoteGatewayEnv = isTruthy(env.LORE_REMOTE_GATEWAY);
   const hostedModeEnv = isTruthy(env.LORE_HOSTED_MODE);
-  // Auto-detect when neither explicit flag is set: a non-loopback bind
-  // address strongly implies the gateway is serving remote clients (Tailscale,
-  // LAN, `0.0.0.0`, public IP). This prevents the "lore-config" bug from
-  // re-emerging on long-running server deployments that forgot to set
-  // `LORE_REMOTE_GATEWAY=1`. Explicit env vars always win.
+  // Auto-detect when neither env var is DEFINED (not just truthy): a
+  // non-loopback bind address strongly implies the gateway is serving remote
+  // clients (Tailscale, LAN, `0.0.0.0`, public IP). This prevents the
+  // "lore-config" bug from re-emerging on long-running server deployments
+  // that forgot to set `LORE_REMOTE_GATEWAY=1`.
+  // IMPORTANT: check for `in` (defined), not truthiness. `LORE_REMOTE_GATEWAY=0`
+  // is an explicit disable — auto-detection must NOT override it.
+  const remoteGatewayDefined = "LORE_REMOTE_GATEWAY" in env;
+  const hostedModeDefined = "LORE_HOSTED_MODE" in env;
   const autoDetected =
-    !remoteGatewayEnv && !hostedModeEnv && hasNonLoopbackHost(hosts);
+    !remoteGatewayDefined && !hostedModeDefined && hasNonLoopbackHost(hosts);
   return {
     port: parsePort(env.LORE_LISTEN_PORT, DEFAULT_PORT),
     portExplicit: !!env.LORE_LISTEN_PORT,

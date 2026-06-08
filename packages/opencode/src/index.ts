@@ -144,11 +144,10 @@ const projectState = new Map<
   { projectPath: string; gitRemote: string; lastSeenAt: number }
 >();
 
-/** Cached git remote URL — computed once per process. */
-let cachedGitRemote: string | undefined;
-
-/** Stale-entry threshold: 1 hour. */
-const SESSION_STATE_TTL_MS = 60 * 60 * 1000;
+/** Stale-entry threshold: 24 hours. Generous to avoid re-running
+ * `getGitRemote()` when a user resumes after sleep/long break.
+ * Each entry is ~200 bytes — even 100 projects would be 20 KB. */
+const SESSION_STATE_TTL_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Drop project entries that haven't been seen in SESSION_STATE_TTL_MS to
@@ -219,20 +218,22 @@ export const LorePlugin: Plugin = async (ctx) => {
     }
   }
 
-  // Cache the git remote URL once per process (computed lazily on first call).
-  // Avoids spawning `git remote -v` on every turn.
-  if (cachedGitRemote === undefined) {
-    const projectPath = discoverWorkspaceRoot(ctx.worktree || ctx.directory);
-    cachedGitRemote = getGitRemote(projectPath) ?? "";
-  }
-
   // Compute and register THIS project's state. The Map is keyed by
   // `ctx.project.id` so concurrent projects in the same process (e.g.,
   // worktrees opened in parallel) don't clobber each other.
   const thisProjectPath = discoverWorkspaceRoot(ctx.worktree || ctx.directory);
+
+  // Resolve git remote per-project. Re-use the cached value when the same
+  // project is seen again (avoids spawning `git remote -v` every turn).
+  const existingState = projectState.get(ctx.project.id);
+  const thisGitRemote =
+    existingState?.projectPath === thisProjectPath
+      ? existingState.gitRemote
+      : (getGitRemote(thisProjectPath) ?? "");
+
   projectState.set(ctx.project.id, {
     projectPath: thisProjectPath,
-    gitRemote: cachedGitRemote,
+    gitRemote: thisGitRemote,
     lastSeenAt: Date.now(),
   });
   reapStaleProjectState();
@@ -242,7 +243,7 @@ export const LorePlugin: Plugin = async (ctx) => {
   // for fetches that arrive without a known session ID (e.g., direct
   // SDK fetches that skip the plugin's chat.headers hook).
   currentProjectPath = thisProjectPath;
-  currentGitRemote = cachedGitRemote;
+  currentGitRemote = thisGitRemote;
 
   try {
     const hooks: Hooks = {
@@ -290,8 +291,8 @@ export const LorePlugin: Plugin = async (ctx) => {
         if (thisProjectPath) {
           output.headers["x-lore-project"] = thisProjectPath;
         }
-        if (cachedGitRemote) {
-          output.headers["x-lore-git-remote"] = cachedGitRemote;
+        if (thisGitRemote) {
+          output.headers["x-lore-git-remote"] = thisGitRemote;
         }
         // Inject provider ID so the gateway uses provider-based routing
         // (correct protocol + upstream URL) instead of model-prefix guessing.

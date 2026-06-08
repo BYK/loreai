@@ -113,8 +113,8 @@ export async function startGateway(
     config.remoteGatewayAutoDetected = false;
   } else if (
     opts.local === undefined &&
-    !process.env.LORE_REMOTE_GATEWAY &&
-    !process.env.LORE_HOSTED_MODE
+    !("LORE_REMOTE_GATEWAY" in process.env) &&
+    !("LORE_HOSTED_MODE" in process.env)
   ) {
     // No --local, no explicit env vars. loadConfig() may have set
     // remoteGateway via bind-address auto-detection — preserve that.
