@@ -34,6 +34,7 @@ import {
 import type { LLMClient } from "@loreai/core";
 import {
   recordWorkerFailure,
+  recordWorkerSuccess,
   type FailureReason,
   type WorkerID,
 } from "./worker-health";
@@ -41,10 +42,16 @@ import {
 function makeWorkerHealth(
   sessionID: string,
   workerID: WorkerID,
-): { recordFailure(reason: string): void } {
+): {
+  recordFailure(reason: string): void;
+  recordSuccess(): void;
+} {
   return {
     recordFailure(reason: string) {
       recordWorkerFailure(sessionID, workerID, reason as FailureReason);
+    },
+    recordSuccess() {
+      recordWorkerSuccess(sessionID);
     },
   };
 }

@@ -833,7 +833,10 @@ export async function run(input: {
    *  LLM call returns null (no response), the hook is called with a categorical
    *  reason. The gateway uses this to escalate to Sentry / dashboard after
    *  sustained failure. Core does not depend on the gateway's types. */
-  workerHealth?: { recordFailure(reason: string): void };
+  workerHealth?: {
+    recordFailure(reason: string): void;
+    recordSuccess(): void;
+  };
 }): Promise<{ rounds: number; distilled: number }> {
   return distillLimiter.get(input.sessionID)(() => runInner(input));
 }
@@ -862,7 +865,10 @@ async function runInner(input: {
   /** Override the meta-distillation gen-0 threshold (see run()). */
   metaThresholdOverride?: number;
   /** See run() — optional gateway worker-health hook. */
-  workerHealth?: { recordFailure(reason: string): void };
+  workerHealth?: {
+    recordFailure(reason: string): void;
+    recordSuccess(): void;
+  };
 }): Promise<{ rounds: number; distilled: number }> {
   // Reset orphaned messages (marked distilled by a deleted/migrated distillation)
   const orphans = resetOrphans(input.projectPath, input.sessionID);
@@ -964,7 +970,10 @@ async function distillSegment(input: {
   model?: { providerID: string; modelID: string };
   urgent?: boolean;
   callType?: "batch" | "direct";
-  workerHealth?: { recordFailure(reason: string): void };
+  workerHealth?: {
+    recordFailure(reason: string): void;
+    recordSuccess(): void;
+  };
 }): Promise<DistillationResult | null> {
   const prior = latestObservations(input.projectPath, input.sessionID);
   const text = messagesToText(input.messages);
@@ -1030,6 +1039,7 @@ async function distillSegment(input: {
     input.workerHealth?.recordFailure("parse-error");
     return null;
   }
+  input.workerHealth?.recordSuccess();
 
   // Compute context health metrics before storing.
   const distilledTokens = Math.ceil(result.observations.length / 3);
@@ -1227,7 +1237,10 @@ export async function metaDistill(input: {
   model?: { providerID: string; modelID: string };
   urgent?: boolean;
   callType?: "batch" | "direct";
-  workerHealth?: { recordFailure(reason: string): void };
+  workerHealth?: {
+    recordFailure(reason: string): void;
+    recordSuccess(): void;
+  };
 }): Promise<DistillationResult | null> {
   return distillLimiter.get(input.sessionID)(() => metaDistillInner(input));
 }
@@ -1239,7 +1252,10 @@ async function metaDistillInner(input: {
   model?: { providerID: string; modelID: string };
   urgent?: boolean;
   callType?: "batch" | "direct";
-  workerHealth?: { recordFailure(reason: string): void };
+  workerHealth?: {
+    recordFailure(reason: string): void;
+    recordSuccess(): void;
+  };
 }): Promise<DistillationResult | null> {
   const existing = loadGen0(input.projectPath, input.sessionID);
 
@@ -1298,6 +1314,7 @@ async function metaDistillInner(input: {
     input.workerHealth?.recordFailure("parse-error");
     return null;
   }
+  input.workerHealth?.recordSuccess();
 
   // Store the meta-distillation at generation N+1, where N is the highest
   // generation in the merged inputs OR the prior meta's generation, whichever
@@ -1368,7 +1385,7 @@ async function metaDistillInner(input: {
     }
     if (patterns.length > 0) {
       log.info(
-        `distill pattern extraction: ${patterns.length} entries from segment`,
+        `distill pattern extraction: ${patterns.length} entries from meta-distillation`,
       );
     }
   }

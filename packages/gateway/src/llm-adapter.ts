@@ -584,10 +584,13 @@ export function createGatewayLLMClient(
                   span.setAttribute("lore.retry.final_status", finalStatus);
                 }
 
-                // Worker succeeded — clear any prior failure state for this session.
-                if (opts?.sessionID) {
-                  recordWorkerSuccess(opts.sessionID);
-                }
+                // NOTE: We intentionally do NOT call recordWorkerSuccess() here.
+                // The LLM adapter only knows the transport succeeded; the core
+                // distillation/curator pipeline knows whether the response was
+                // actually parseable and usable. Recording success at the
+                // transport layer would clear failure state before the parse
+                // step can record "parse-error", making sustained parse
+                // failures invisible to the health ladder.
                 return parsed.text;
               }
 

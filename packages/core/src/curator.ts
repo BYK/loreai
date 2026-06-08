@@ -422,7 +422,10 @@ export async function run(input: {
   model?: { providerID: string; modelID: string };
   /** Optional gateway worker-health hook — called when the LLM call returns
    *  null. The gateway uses this to escalate to Sentry after sustained failure. */
-  workerHealth?: { recordFailure(reason: string): void };
+  workerHealth?: {
+    recordFailure(reason: string): void;
+    recordSuccess(): void;
+  };
 }): Promise<{
   created: number;
   updated: number;
@@ -469,7 +472,10 @@ async function runInner(input: {
   projectPath: string;
   sessionID: string;
   model?: { providerID: string; modelID: string };
-  workerHealth?: { recordFailure(reason: string): void };
+  workerHealth?: {
+    recordFailure(reason: string): void;
+    recordSuccess(): void;
+  };
 }): Promise<{
   created: number;
   updated: number;
@@ -620,6 +626,8 @@ async function runInner(input: {
       relationsCreated: 0,
     };
   }
+
+  input.workerHealth?.recordSuccess();
 
   const response = parseResponse(responseText);
 
@@ -866,7 +874,10 @@ export async function consolidate(input: {
   projectPath: string;
   sessionID: string;
   model?: { providerID: string; modelID: string };
-  workerHealth?: { recordFailure(reason: string): void };
+  workerHealth?: {
+    recordFailure(reason: string): void;
+    recordSuccess(): void;
+  };
 }): Promise<{ updated: number; deleted: number }> {
   const cfg = config();
   if (!cfg.curator.enabled) return { updated: 0, deleted: 0 };
@@ -941,6 +952,8 @@ export async function consolidate(input: {
     input.workerHealth?.recordFailure("no-response");
     return { updated: 0, deleted: 0 };
   }
+
+  input.workerHealth?.recordSuccess();
 
   const ops = parseOps(responseText);
   const result = applyOps(ops, {

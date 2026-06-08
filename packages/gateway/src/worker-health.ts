@@ -155,13 +155,20 @@ export function recordWorkerFailure(
   const t = now();
   let entry = state.get(sessionID);
 
-  // Initialize or rotate the sliding window. If the previous failure is
-  // outside the window, reset the counter but keep firstFailureAt.
-  if (!entry || t - entry.lastFailureAt > FAILURE_WINDOW_MS) {
-    if (entry && t - entry.lastFailureAt > SESSION_TTL_MS) {
-      // Stale entry past full TTL — fresh start.
-      state.delete(sessionID);
-    }
+  // Initialize or rotate the sliding window.
+  //
+  // Two axes to reconcile:
+  //  - Sliding window (FAILURE_WINDOW_MS = 5m): the counter that triggers the
+  //    first Sentry alert. Reset on entry to the new window.
+  //  - Sustained duration (RESPONSE_MESSAGE_THRESHOLD_MS = 30m,
+  //    CRITICAL_THRESHOLD_MS = 60m): measured from firstFailureAt. MUST be
+  //    preserved across window rotations, otherwise a session that fails every
+  //    4 minutes would never accumulate to 30/60 minutes of sustained outage.
+  //
+  // The full TTL (SESSION_TTL_MS = 1h) is the eviction bound — once the gap
+  // since lastFailureAt exceeds it, the session is considered fully recovered
+  // and we start fresh (including resetting firstFailureAt).
+  if (!entry) {
     entry = {
       sessionID,
       firstFailureAt: t,
@@ -171,6 +178,25 @@ export function recordWorkerFailure(
       workerIDs: new Set(),
     };
     state.set(sessionID, entry);
+  } else if (t - entry.lastFailureAt > SESSION_TTL_MS) {
+    // Stale entry past full TTL — fully recovered. Start fresh.
+    state.delete(sessionID);
+    entry = {
+      sessionID,
+      firstFailureAt: t,
+      lastFailureAt: t,
+      failureCount: 0,
+      reasons: new Set(),
+      workerIDs: new Set(),
+    };
+    state.set(sessionID, entry);
+  } else if (t - entry.lastFailureAt > FAILURE_WINDOW_MS) {
+    // New sliding window within the same sustained outage: reset the counter
+    // and reason/worker sets, but KEEP firstFailureAt so the 30m/60m
+    // sustained thresholds continue to accumulate.
+    entry.failureCount = 0;
+    entry.reasons = new Set();
+    entry.workerIDs = new Set();
   }
 
   entry.failureCount++;
