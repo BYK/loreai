@@ -53,9 +53,10 @@ async function generate(root: string): Promise<void> {
   if (!("data" in svgResult)) {
     throw new Error(`[favicon-assets] SVGO produced no output for ${sourcePath}`);
   }
-  await writeFile(resolve(publicDir, FAVICON_SVG), svgResult.data);
+  const optimizedSvg = svgResult.data;
+  await writeFile(resolve(publicDir, FAVICON_SVG), optimizedSvg);
 
-  const rasterInput = Buffer.from(raw);
+  const rasterInput = Buffer.from(optimizedSvg);
   for (const { file, size } of PNG_TARGETS) {
     await sharp(rasterInput, { density: 384 })
       .resize(size, size, {
