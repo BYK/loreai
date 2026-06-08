@@ -1,12 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="-3 4 52 52" role="img" aria-labelledby="t d">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 4 50 50" role="img" aria-labelledby="t d">
   <title id="t">Lore.AI</title>
   <desc id="d">Lore.AI lily mark — adaptive color for light and dark color-schemes.</desc>
   <style>
-    .lily { fill: #1a3320; }
-    .dot { fill: #5a8f63; }
+    .lily { fill: #0a1a10; }
+    .dot { fill: #2d5e38; }
     @media (prefers-color-scheme: dark) {
-      .lily { fill: #f7f2e8; }
-      .dot { fill: #bff7c9; }
+      .lily { fill: #ffffff; }
+      .dot { fill: #7debb0; }
     }
   </style>
   <g transform="translate(0 8) scale(0.1)">
