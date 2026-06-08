@@ -38,6 +38,9 @@ const svgoConfig = {
           // Keep <title>/<desc> for a11y.
           removeTitle: false,
           removeDesc: false,
+          // Don't inline <style> rules — the favicon uses
+          // @media (prefers-color-scheme) which breaks when inlined.
+          inlineStyles: false,
         },
       },
     },
