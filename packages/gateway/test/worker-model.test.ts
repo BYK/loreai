@@ -639,6 +639,148 @@ describe("getWorkerModel", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Dynamic cheaper-model discovery (warm models.dev cache)
+// ---------------------------------------------------------------------------
+
+describe("dynamic cheaper-model discovery", () => {
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    resetWorkerModelState();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    resetWorkerModelState();
+  });
+
+  test("finds cheaper same-provider model from models.dev cache", async () => {
+    // Warm the cache with a custom provider that has an expensive + cheap model
+    globalThis.fetch = vi.fn(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            anthropic: {
+              api: "https://api.anthropic.com/v1",
+              models: DEFAULT_ANTHROPIC_MODELS,
+            },
+            "custom-provider": {
+              api: "https://api.custom.com/v1",
+              models: {
+                "expensive-model": {
+                  id: "expensive-model",
+                  cost: { input: 10, output: 30, cache_read: 1 },
+                  limit: { context: 200_000, output: 64_000 },
+                },
+                "cheap-model": {
+                  id: "cheap-model",
+                  cost: { input: 0.5, output: 2, cache_read: 0.05 },
+                  limit: { context: 200_000, output: 64_000 },
+                },
+              },
+            },
+          }),
+          { status: 200 },
+        ),
+      ),
+    ) as unknown as typeof fetch;
+
+    await fetchModelData();
+
+    const result = getWorkerModel({
+      providerID: "custom-provider",
+      model: "expensive-model",
+    });
+
+    expect(result).toBeDefined();
+    expect(result!.providerID).toBe("custom-provider");
+    // Should pick the cheaper model, not echo the expensive session model
+    expect(result!.modelID).toBe("cheap-model");
+  });
+
+  test("selects zero-cost model as cheapest alternative", async () => {
+    globalThis.fetch = vi.fn(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            anthropic: {
+              api: "https://api.anthropic.com/v1",
+              models: DEFAULT_ANTHROPIC_MODELS,
+            },
+            "free-provider": {
+              api: "https://api.free.com/v1",
+              models: {
+                "paid-model": {
+                  id: "paid-model",
+                  cost: { input: 5, output: 15, cache_read: 0.5 },
+                  limit: { context: 200_000, output: 64_000 },
+                },
+                "free-model": {
+                  id: "free-model",
+                  cost: { input: 0, output: 0, cache_read: 0 },
+                  limit: { context: 100_000, output: 32_000 },
+                },
+              },
+            },
+          }),
+          { status: 200 },
+        ),
+      ),
+    ) as unknown as typeof fetch;
+
+    await fetchModelData();
+
+    const result = getWorkerModel({
+      providerID: "free-provider",
+      model: "paid-model",
+    });
+
+    expect(result).toBeDefined();
+    expect(result!.providerID).toBe("free-provider");
+    expect(result!.modelID).toBe("free-model");
+  });
+
+  test("echoes session model when no cheaper alternative exists", async () => {
+    globalThis.fetch = vi.fn(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            anthropic: {
+              api: "https://api.anthropic.com/v1",
+              models: DEFAULT_ANTHROPIC_MODELS,
+            },
+            "single-model-provider": {
+              api: "https://api.single.com/v1",
+              models: {
+                "only-model": {
+                  id: "only-model",
+                  cost: { input: 3, output: 10, cache_read: 0.3 },
+                  limit: { context: 200_000, output: 64_000 },
+                },
+              },
+            },
+          }),
+          { status: 200 },
+        ),
+      ),
+    ) as unknown as typeof fetch;
+
+    await fetchModelData();
+
+    const result = getWorkerModel({
+      providerID: "single-model-provider",
+      model: "only-model",
+    });
+
+    expect(result).toBeDefined();
+    expect(result!.providerID).toBe("single-model-provider");
+    // No cheaper model → echoes session model
+    expect(result!.modelID).toBe("only-model");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // resetWorkerModelState
 // ---------------------------------------------------------------------------
 

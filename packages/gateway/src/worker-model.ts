@@ -389,7 +389,7 @@ function findCheaperSameProviderModel(
   for (const modelId of providerModelIds) {
     if (modelId === sessionModelID) continue;
     const entry = cachedModelData.get(modelId);
-    if (!entry?.cost?.input) continue;
+    if (entry?.cost?.input == null) continue;
     // Must be cheaper than the session model AND cheaper than any
     // candidate we've found so far
     if (entry.cost.input < cheapestCost) {
