@@ -127,7 +127,16 @@ await esbuild.build({
   target: "esnext",
   platform: "node",
   conditions: ["bun"],
-  external: ["bun:*", "node:*", "onnxruntime-node", "sharp"],
+  // @loreai/core MUST be external in the Bun ESM bundle. When the gateway
+  // runs in-process alongside the OpenCode plugin, both must share a single
+  // module instance of @loreai/core — specifically the _originalFetch
+  // variable in fetch-interceptor.ts. If core is bundled into the gateway,
+  // installFetchInterceptor() (called by the plugin) sets _originalFetch
+  // on the plugin's copy while getOriginalFetch() (called by the gateway)
+  // reads from the bundled copy (always null → returns globalThis.fetch =
+  // the interceptor). This creates an infinite request loop: gateway →
+  // interceptor → gateway → interceptor → …
+  external: ["bun:*", "node:*", "onnxruntime-node", "sharp", "@loreai/core"],
   outfile: join(distDir, "index.bun.js"),
   sourcemap: false,
   minify: true,
