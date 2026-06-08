@@ -13,16 +13,19 @@ Commands:
   run [command] [args...]  Start gateway and launch an AI agent (default)
                            Extra arguments are forwarded to the launched agent
   start               Start the gateway server (without launching an agent)
-                      Hosted mode is ON by default; use --local to disable
+                       Hosted mode is ON by default; use --local to disable.
+                       Remote-gateway mode is also ON by default for long-running
+                       setups — path-less sessions route to per-session buckets
+                       so unrelated projects never merge onto the gateway cwd.
   setup [app]         Configure an AI app to route through lore
-                      Supported: codex
+                       Supported: codex
   logs                Show lore activity log
   import              Import knowledge from prior AI agent conversations
   data <subcommand>   Manage stored data (list, show, clear, delete)
   recall <query>      Search project memory from the command line
   entity <subcommand> Manage the entity registry (list, show, add, merge)
   upgrade [version]   Update lore to the latest (or specified) version
-                      Flags: --check, --force, --offline, --channel <ch>
+                       Flags: --check, --force, --offline, --channel <ch>
   help                Show this help text
 
 Options:
@@ -31,7 +34,8 @@ Options:
                       (default: 127.0.0.1, env: LORE_LISTEN_HOST)
   -r, --remote <url>  Use a remote gateway instead of starting a local one
                       (env: LORE_REMOTE_URL)
-  -l, --local         Disable hosted mode for \`lore start\` (keep FS ops active)
+  -l, --local         Disable hosted mode AND remote-gateway mode for
+                      \`lore start\` (keep FS ops active; bucket cwd fallback)
                       (env: LORE_HOSTED_MODE=0)
   -d, --debug         Enable debug logging (env: LORE_DEBUG=1)
   -v, --version       Print version and exit
@@ -135,6 +139,9 @@ Environment variables:
   LORE_REMOTE_URL               Remote gateway URL for \`lore run\` (overridden by --remote)
   LORE_HOSTED_MODE              Hosted mode — disables FS ops on client-controlled paths
                                 ON by default for \`lore start\`; set to 0 to disable
+  LORE_REMOTE_GATEWAY           Remote-gateway mode — bucket path-less sessions per-session
+                                ON by default for \`lore start\`; also auto-enabled when bind
+                                address is non-loopback (e.g. Tailscale, LAN, 0.0.0.0)
   LORE_DEBUG                    Enable debug logging (1 or true)
   LORE_NO_UPDATE_CHECK          Disable background update checks (set to 1)
 `.trimStart();

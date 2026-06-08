@@ -100,6 +100,31 @@ export async function startGateway(
   }
   // else: LORE_HOSTED_MODE env var was set — loadConfig() already handled it.
 
+  // Remote-gateway mode follows the same layering as hosted mode:
+  // `--local` opts out, explicit env vars win, and `lore start` (the
+  // long-running-gateway command) defaults to `remoteGateway = true`
+  // because running a long-lived gateway is a strong signal that other
+  // machines are going to talk to it. `loadConfig()` already applied
+  // explicit env vars and bind-address auto-detection; here we only
+  // upgrade the default for `lore start` when nothing else set it.
+  if (opts.local === true) {
+    // --local flag always disables remote mode, mirroring hosted mode.
+    config.remoteGateway = false;
+    config.remoteGatewayAutoDetected = false;
+  } else if (
+    opts.local === undefined &&
+    !process.env.LORE_REMOTE_GATEWAY &&
+    !process.env.LORE_HOSTED_MODE
+  ) {
+    // No --local, no explicit env vars. loadConfig() may have set
+    // remoteGateway via bind-address auto-detection — preserve that.
+    // Otherwise, this is `lore start` — default to remote mode.
+    if (!config.remoteGateway) {
+      config.remoteGateway = true;
+      config.remoteGatewayCommandDefault = true;
+    }
+  }
+
   // Build the list of ports to try.
   // Explicit port: single attempt, fail hard on conflict.
   // Default: 3207 → 5673 → 0 (OS-assigned random).
@@ -220,6 +245,33 @@ export async function commandStart(opts: StartOptions): Promise<never> {
 
   if (!opts.quiet) {
     const localAddr = addrs[0];
+    // Surface remote-gateway mode status with a clear, actionable log.
+    // Helps the user verify that the lore-config bucketing fix is active
+    // (so unrelated sessions won't merge onto this gateway's cwd).
+    if (config.remoteGateway) {
+      const reason = process.env.LORE_REMOTE_GATEWAY
+        ? "LORE_REMOTE_GATEWAY=1"
+        : process.env.LORE_HOSTED_MODE
+          ? "LORE_HOSTED_MODE=1"
+          : config.remoteGatewayAutoDetected
+            ? `non-loopback bind (${config.hosts.join(",")})`
+            : config.remoteGatewayCommandDefault
+              ? "`lore start` default (long-running gateway)"
+              : "explicit";
+      console.log(
+        `[lore] remote gateway mode ACTIVE (${reason}) — path-less sessions route to /__lore_unattributed__/<sessionID> instead of cwd`,
+      );
+      if (config.remoteGatewayCommandDefault) {
+        console.log(
+          `[lore]   pass \`--local\` or set LORE_REMOTE_GATEWAY=0 to disable for local dev`,
+        );
+      }
+    } else {
+      console.log(
+        `[lore] remote gateway mode OFF (cwd fallback active) — set LORE_REMOTE_GATEWAY=1 for long-running/remote setups`,
+      );
+    }
+    console.log("");
     console.log(
       `[lore] Model routing: claude-* → Anthropic, nvidia/* → Nvidia NIM, gpt-* → OpenAI, …`,
     );
@@ -258,6 +310,9 @@ export async function commandStart(opts: StartOptions): Promise<never> {
     );
     console.log(
       `  LORE_HOSTED_MODE        Hosted mode — disable FS ops on client-controlled paths (current: ${config.hostedMode}, default for \`lore start\`: true)`,
+    );
+    console.log(
+      `  LORE_REMOTE_GATEWAY     Remote-gateway mode — bucket path-less sessions per-session (current: ${config.remoteGateway}, default for \`lore start\`: true, pass --local to disable)`,
     );
   }
   // Block until signal

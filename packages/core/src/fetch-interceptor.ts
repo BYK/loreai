@@ -24,12 +24,45 @@ export type FetchInterceptorConfig = {
 
 /**
  * LLM API path patterns that should be intercepted.
+ *
  * These are the standard paths used by Anthropic, OpenAI Chat Completions,
- * and OpenAI Responses API endpoints. Some providers prefix with /api
- * (e.g., OpenRouter uses /api/v1/chat/completions).
+ * and OpenAI Responses API endpoints, plus common aggregator variants:
+ *  - `/v1/...` — Anthropic, OpenAI, most direct providers
+ *  - `/api/v1/...` — OpenRouter, some self-hosted gateways
+ *  - `/api/...` — older / non-standard providers
+ *  - `/openai/v1/...`, `/anthropic/v1/...` — proxy providers
+ *
+ * Each pattern matches the path suffix `/messages`, `/chat/completions`,
+ * or `/responses` (the canonical LLM API endpoints). The leading prefix
+ * is intentionally permissive — the URL's hostname already restricts which
+ * providers we can see, and an over-narrow pattern here is what caused
+ * the Onur "lore-config" bug to recur for some users whose providers
+ * used a non-standard path prefix.
  */
-const LLM_API_PATH_PATTERN =
-  /\/v1\/(messages|chat\/completions|responses)(\/.*)?$/;
+const LLM_API_PATH_PATTERNS: RegExp[] = [
+  // Standard: /v1/{messages,chat/completions,responses}[/...]
+  /\/v1\/(messages|chat\/completions|responses)(\/.*)?$/,
+  // Aggregator: /api/v1/... (OpenRouter, some self-hosted)
+  /\/api\/v1\/(messages|chat\/completions|responses)(\/.*)?$/,
+  // Generic: /api/... for providers that don't follow v1 convention
+  /\/api\/(messages|chat\/completions|responses)(\/.*)?$/,
+  // Proxy paths: /openai/v1/..., /anthropic/v1/...
+  /\/(?:openai|anthropic)\/v1\/(messages|chat\/completions|responses)(\/.*)?$/,
+];
+
+/** True when the URL path matches any known LLM API path pattern. */
+function matchesLLMApiPath(pathname: string): boolean {
+  for (const pattern of LLM_API_PATH_PATTERNS) {
+    if (pattern.test(pathname)) return true;
+  }
+  return false;
+}
+
+/**
+ * Set of `${host}${pathname}` strings we've already warned about (avoids
+ * log spam on every request to a non-intercepted LLM endpoint).
+ */
+const warnedPaths = new Set<string>();
 
 /**
  * Determine whether a fetch request should be intercepted and rerouted
@@ -53,11 +86,14 @@ export function shouldIntercept(url: string, gatewayBase: string): boolean {
       host === "localhost" ||
       host === "127.0.0.1" ||
       host === "0.0.0.0" ||
-      host === "::1" // URL.hostname strips brackets from IPv6
+      // URL.hostname KEEPS brackets on IPv6 addresses (unlike the WHATWG
+      // URL spec we expected). Treat "[::1]" the same as "::1".
+      host === "::1" ||
+      host === "[::1]"
     )
       return false;
     // Intercept known LLM API paths only
-    return LLM_API_PATH_PATTERN.test(parsed.pathname);
+    return matchesLLMApiPath(parsed.pathname);
   } catch {
     return false;
   }
@@ -124,16 +160,53 @@ export function installFetchInterceptor(
           : input.url;
 
     if (!shouldIntercept(url, config.gatewayBase)) {
+      // Detect the case where a remote LLM endpoint is NOT being
+      // intercepted — that means the X-Lore-* context headers won't be
+      // injected, and the gateway will fall back to inference/cwd. Warn
+      // once per unique (host, path) so the operator can extend the path
+      // patterns if a new provider slips through. Local hosts are
+      // already excluded from this branch, so the warning only fires
+      // for remote LLM endpoints that genuinely should have been
+      // intercepted but weren't (e.g., a new provider path we don't know
+      // about yet).
+      try {
+        const parsed = new URL(url);
+        const host = parsed.hostname;
+        if (
+          host &&
+          host !== "localhost" &&
+          host !== "127.0.0.1" &&
+          host !== "0.0.0.0" &&
+          host !== "::1" &&
+          !url.startsWith(config.gatewayBase)
+        ) {
+          const warnKey = `${host}${parsed.pathname}`;
+          if (!warnedPaths.has(warnKey)) {
+            warnedPaths.add(warnKey);
+            log.warn(
+              `fetch-interceptor: ${parsed.host}${parsed.pathname} matched no LLM API pattern — request bypassing Lore gateway. Add a pattern in fetch-interceptor.ts if this is an LLM endpoint.`,
+            );
+          }
+        }
+      } catch {
+        // ignore URL parse errors — we're already in the non-intercept branch
+      }
       return originalFetch(input, init);
     }
 
-    // Rewrite URL to gateway, keeping only the /v1/... API path.
+    // Rewrite URL to gateway, keeping the canonical /v1/... API path.
     // Provider base paths vary (e.g., openrouter.ai uses /api/v1/...,
-    // Anthropic uses /v1/...). The gateway only routes /v1/... paths,
-    // so we extract just that portion. The full original URL (including
-    // any prefix) is passed via X-Lore-Upstream-URL.
+    // Anthropic uses /v1/..., some providers use /openai/v1/...). The
+    // gateway only routes /v1/... paths, so we extract just that portion.
+    // The full original URL (including any prefix) is passed via
+    // X-Lore-Upstream-URL so the gateway can forward to the correct host.
     const upstream = new URL(url);
     const gateway = new URL(config.gatewayBase);
+    // Find the LAST occurrence of any known canonical path segment
+    // (matches "/v1/" in /v1/..., /api/v1/..., /openai/v1/..., etc.).
+    // Falls back to the full pathname when the URL doesn't contain /v1/
+    // (e.g., a /api/... path) — the gateway may still route it if a
+    // provider-specific mapping is in place.
     const v1Idx = upstream.pathname.lastIndexOf("/v1/");
     const apiPath =
       v1Idx >= 0 ? upstream.pathname.slice(v1Idx) : upstream.pathname;
