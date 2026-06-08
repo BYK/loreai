@@ -1,12 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 4 50 50" role="img" aria-labelledby="t d">
   <title id="t">Lore.AI</title>
-  <desc id="d">Lore.AI lily mark — adaptive color for light and dark color-schemes.</desc>
+  <desc id="d">Lore.AI lily mark — monochrome adaptive favicon.</desc>
   <style>
-    .lily { fill: #0a1a10; }
-    .dot { fill: #2d5e38; }
+    .lily, .dot { fill: #000000; }
     @media (prefers-color-scheme: dark) {
-      .lily { fill: #ffffff; }
-      .dot { fill: #7debb0; }
+      .lily, .dot { fill: #ffffff; }
     }
   </style>
   <g transform="translate(0 8) scale(0.1)">
