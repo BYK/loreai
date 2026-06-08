@@ -596,34 +596,41 @@ describe("getWorkerModel", () => {
     expect(result!.modelID).toContain("sonnet");
   });
 
-  test("unknown provider returns undefined — prevents cross-provider pollution", () => {
-    // MiniMax, xAI, Mistral, NVIDIA, Google — no WORKER_DEFAULTS entry
+  test("unknown provider echoes session model — same provider is always safe", () => {
+    // MiniMax, xAI, Mistral, NVIDIA, Google — no WORKER_DEFAULTS entry.
+    // The session model is echoed because it's on the same provider (same
+    // URL, credentials). The pipeline's cross-provider guard handles the
+    // race condition if the provider switches mid-flight.
     const result = getWorkerModel({
       providerID: "minimax-coding-plan",
       model: "MiniMax-M3",
     });
-    expect(result).toBeUndefined();
+    expect(result).toBeDefined();
+    expect(result!.providerID).toBe("minimax-coding-plan");
+    expect(result!.modelID).toBe("MiniMax-M3");
   });
 
-  test("unknown provider with expensive model returns undefined", () => {
+  test("unknown provider with expensive model echoes session model (or finds cheaper via models.dev)", () => {
     const result = getWorkerModel({
       providerID: "google",
       model: "gemini-3.1-pro",
     });
-    expect(result).toBeUndefined();
+    expect(result).toBeDefined();
+    expect(result!.providerID).toBe("google");
   });
 
-  test("unknown provider with cheap model returns undefined via fallback guard", () => {
-    // A free/cheap model on an unknown provider should still return undefined
-    // — the hasKnownDefaults guard at the fallback chain catches this
+  test("unknown provider with cheap model echoes session model", () => {
     const result = getWorkerModel({
       providerID: "some-unknown-provider",
       model: "cheap-model:free",
     });
-    expect(result).toBeUndefined();
+    expect(result).toBeDefined();
+    expect(result!.providerID).toBe("some-unknown-provider");
+    expect(result!.modelID).toBe("cheap-model:free");
   });
 
   test("unknown provider with no session model returns undefined", () => {
+    // No session model to echo — undefined is correct
     const result = getWorkerModel({
       providerID: "xai",
     });

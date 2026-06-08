@@ -25,8 +25,10 @@ import { upstreamFetch } from "./fetch";
  */
 const MODELS_DEV_API = "https://models.dev/api.json";
 
-/** Cached models.dev data: model entries for all supported providers. */
+/** Cached models.dev data: model entries keyed by modelID (all providers). */
 let cachedModelData: Map<string, ModelsDevEntry> | null = null;
+/** Cached provider → model IDs index for same-provider cheaper-model lookup. */
+let cachedProviderModels: Map<string, string[]> | null = null;
 /** Cached provider routing data extracted from the models.dev response. */
 let cachedProviderRoutes: Map<string, ProviderRoute> | null = null;
 let cachedModelDataAt = 0;
@@ -190,45 +192,59 @@ export function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
 
       const data = (await response.json()) as ModelsDevResponse;
       const modelData = new Map<string, ModelsDevEntry>();
-
-      for (const providerName of SUPPORTED_PROVIDERS) {
-        const providerModels = data[providerName]?.models;
-        if (!providerModels) {
-          log.warn(`models.dev API: no ${providerName} provider found`);
-          continue;
-        }
-
-        for (const [modelId, entry] of Object.entries(providerModels)) {
-          const e: ModelsDevEntry = { ...entry, id: modelId };
-          // Compute cache_write cost if not provided (typically 1.25× input price)
-          if (e.cost && e.cost.cache_write == null && e.cost.input != null) {
-            e.cost.cache_write = e.cost.input * 1.25;
-          }
-          modelData.set(modelId, e);
-        }
-      }
-
-      // Extract provider routing data from the full response.
-      // Each provider entry may have `api` (base URL) and `npm` (SDK package).
+      const providerModelsIndex = new Map<string, string[]>();
       const providerRoutes = new Map<string, ProviderRoute>();
+      const loadedProviders: string[] = [];
+
+      // Iterate ALL providers in the response — not just a hardcoded
+      // subset. This ensures model pricing data is available for any
+      // provider the user connects (MiniMax, Google, xAI, etc.), enabling
+      // cost-aware worker model selection on unknown providers.
       for (const [providerID, providerData] of Object.entries(data)) {
         if (!providerData || typeof providerData !== "object") continue;
+
+        // Extract model pricing data + build provider→models index
+        const providerModels = providerData.models;
+        if (providerModels && typeof providerModels === "object") {
+          const modelIds: string[] = [];
+          for (const [modelId, entry] of Object.entries(providerModels)) {
+            const e: ModelsDevEntry = { ...entry, id: modelId };
+            // Compute cache_write cost if not provided (typically 1.25× input price)
+            if (e.cost && e.cost.cache_write == null && e.cost.input != null) {
+              e.cost.cache_write = e.cost.input * 1.25;
+            }
+            modelData.set(modelId, e);
+            modelIds.push(modelId);
+          }
+          providerModelsIndex.set(providerID, modelIds);
+          loadedProviders.push(providerID);
+        }
+
+        // Extract provider routing data (base URL + protocol)
         const api = providerData.api;
         const npm = providerData.npm;
-        if (!api || typeof api !== "string") continue;
-        // Derive protocol from npm package name.
-        const protocol = npmToProtocol(npm);
-        // Strip trailing /v1 — gateway appends /v1/messages or /v1/chat/completions.
-        const url = api.replace(/\/v1\/?$/, "");
-        providerRoutes.set(providerID, { url, protocol });
+        if (api && typeof api === "string") {
+          const protocol = npmToProtocol(npm);
+          // Strip trailing /v1 — gateway appends /v1/messages or /v1/chat/completions.
+          const url = api.replace(/\/v1\/?$/, "");
+          providerRoutes.set(providerID, { url, protocol });
+        }
       }
-      cachedProviderRoutes = providerRoutes;
 
+      // Warn if core providers are missing (likely API change)
+      for (const required of SUPPORTED_PROVIDERS) {
+        if (!loadedProviders.includes(required)) {
+          log.warn(`models.dev API: no ${required} provider found`);
+        }
+      }
+
+      cachedProviderRoutes = providerRoutes;
+      cachedProviderModels = providerModelsIndex;
       cachedModelData = modelData;
       cachedModelDataAt = Date.now();
 
       log.info(
-        `models.dev: loaded data for ${modelData.size} models across ${SUPPORTED_PROVIDERS.join(", ")}`,
+        `models.dev: loaded data for ${modelData.size} models across ${loadedProviders.length} providers`,
       );
       return modelData;
     } catch (e) {
@@ -337,9 +353,59 @@ export function getModelEntrySync(modelID: string): ModelsDevEntry {
 /** Clear cached data (for testing). */
 export function clearModelDataCache(): void {
   cachedModelData = null;
+  cachedProviderModels = null;
   cachedProviderRoutes = null;
   cachedModelDataAt = 0;
   inflightFetch = null;
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic cheaper-model discovery
+// ---------------------------------------------------------------------------
+
+/**
+ * Find a cheaper model from the same provider using models.dev pricing data.
+ *
+ * For providers without hardcoded WORKER_DEFAULTS (Google, MiniMax, xAI, etc.),
+ * this searches the cached models.dev data for a model that:
+ *   1. Belongs to the same provider
+ *   2. Costs less than the session model (input price)
+ *   3. Has the lowest input cost among candidates (cheapest available)
+ *   4. Is not the session model itself
+ *
+ * Returns the model ID of the cheapest alternative, or undefined if none found.
+ */
+function findCheaperSameProviderModel(
+  providerID: string,
+  sessionModelID: string,
+  sessionInputCost: number,
+): string | undefined {
+  const providerModelIds = cachedProviderModels?.get(providerID);
+  if (!providerModelIds || !cachedModelData) return undefined;
+
+  let cheapestId: string | undefined;
+  let cheapestCost = sessionInputCost;
+
+  for (const modelId of providerModelIds) {
+    if (modelId === sessionModelID) continue;
+    const entry = cachedModelData.get(modelId);
+    if (!entry?.cost?.input) continue;
+    // Must be cheaper than the session model AND cheaper than any
+    // candidate we've found so far
+    if (entry.cost.input < cheapestCost) {
+      cheapestCost = entry.cost.input;
+      cheapestId = modelId;
+    }
+  }
+
+  if (cheapestId) {
+    log.info(
+      `dynamic worker model: ${providerID}/${cheapestId} ($${cheapestCost}/M) ` +
+        `instead of ${sessionModelID} ($${sessionInputCost}/M)`,
+    );
+  }
+
+  return cheapestId;
 }
 
 // ---------------------------------------------------------------------------
@@ -490,13 +556,23 @@ export function getWorkerModel(session?: {
             modelID: mapping.modelID,
           };
         }
-        // Unknown providers (Google, xAI, Mistral, NVIDIA, etc.): no cheaper
-        // validated model available. Return undefined to skip background work
-        // rather than risk cross-provider pollution when the session switches
-        // providers mid-flight (the wrapper resolves URL lazily from
-        // state.lastUpstream, which may have changed since getWorkerModel()
-        // was called). See: LOREAI-GATEWAY-2A.
-        if (!mapping) return undefined;
+        // Unknown providers: try to find a cheaper model from the same
+        // provider using models.dev pricing data. This enables cost-aware
+        // worker selection for Google, xAI, MiniMax, etc. without needing
+        // hardcoded WORKER_DEFAULTS entries.
+        if (!mapping && cachedModelData) {
+          const cheaper = findCheaperSameProviderModel(
+            effectiveProvider,
+            effectiveModelID,
+            inputCost,
+          );
+          if (cheaper) {
+            costAwareDefault = {
+              providerID: effectiveProvider,
+              modelID: cheaper,
+            };
+          }
+        }
       }
     }
   }
@@ -504,17 +580,16 @@ export function getWorkerModel(session?: {
   // Build the fallback model (used when no cost-aware default or config
   // override applies). Priority:
   //   1. Config model from .lore.json
-  //   2. Session model — but ONLY when the provider has a WORKER_DEFAULTS
-  //      entry (known-good providers). For unknown providers, echoing the
-  //      session model is dangerous: the wrapper resolves URL lazily from
-  //      state.lastUpstream which may have switched providers since this
-  //      function was called. Cross-provider model names → 404.
+  //   2. Session model (same provider, same URL, same credentials — always
+  //      safe). For unknown providers this echoes the session model as-is;
+  //      for known providers with cheap models it also echoes. The pipeline
+  //      wrapper's cross-provider guard (pipeline.ts) handles the race
+  //      condition when the session switches providers mid-flight.
   //   3. Provider's default worker model (WORKER_DEFAULTS)
   //   4. undefined → skip background work
-  const hasKnownDefaults = effectiveProvider in WORKER_DEFAULTS;
   const fallback: { providerID: string; modelID: string } | undefined =
     cfg.model ??
-    (sessionModelID && hasKnownDefaults
+    (sessionModelID
       ? { providerID: effectiveProvider, modelID: sessionModelID }
       : undefined) ??
     WORKER_DEFAULTS[effectiveProvider];
