@@ -627,9 +627,11 @@ async function runInner(input: {
     };
   }
 
-  input.workerHealth?.recordSuccess();
-
   const response = parseResponse(responseText);
+  // Record success only AFTER parsing — parseResponse() silently swallows
+  // malformed JSON into empty ops. Recording success before parse would clear
+  // the health state, making sustained parse failures invisible.
+  input.workerHealth?.recordSuccess();
 
   // Gate entry creation when at or above maxEntries to prevent the ratchet
   // effect: curation creates entries → count exceeds limit → consolidation
@@ -953,9 +955,9 @@ export async function consolidate(input: {
     return { updated: 0, deleted: 0 };
   }
 
-  input.workerHealth?.recordSuccess();
-
   const ops = parseOps(responseText);
+  // Record success after parsing (see runInner for rationale).
+  input.workerHealth?.recordSuccess();
   const result = applyOps(ops, {
     projectPath: input.projectPath,
     sessionID: input.sessionID,

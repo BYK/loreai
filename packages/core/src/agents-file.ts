@@ -483,6 +483,8 @@ function _importEntries(entries: ParsedFileEntry[], projectPath: string): void {
             ltm.update(fuzzyMatch.id, { content: entry.content });
           }
         } else {
+          // No workerProviderID/workerModelID — these are user-authored
+          // entries imported from .lore.md, not worker-produced.
           ltm.create({
             projectPath,
             category: entry.category,

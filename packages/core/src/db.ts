@@ -1266,7 +1266,9 @@ function recoverMissingObjects(database: Database) {
   }
   // Version 35: worker source attribution. The first ALTER may have applied
   // while a sibling ALTER in the same migration was skipped; recover each
-  // column independently.
+  // column independently. Also recover the composite indexes which are
+  // unreachable after a partial ALTER failure (database.exec stops at the
+  // first error in a multi-statement string, skipping subsequent CREATEs).
   for (const table of ["distillations", "knowledge"] as const) {
     const tcols = database.query(`PRAGMA table_info(${table})`).all() as Array<{
       name: string;
@@ -1277,6 +1279,12 @@ function recoverMissingObjects(database: Database) {
       }
     }
   }
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_distillation_worker
+      ON distillations(worker_provider_id, worker_model_id);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_worker
+      ON knowledge(worker_provider_id, worker_model_id);
+  `);
 }
 
 /**

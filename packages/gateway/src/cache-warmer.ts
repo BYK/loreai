@@ -38,7 +38,7 @@ import type {
 } from "./translate/types";
 import { decompressBody } from "./cache-analytics";
 import { resolveAuth, authHeaders, markAuthStale } from "./auth";
-import { recordWorkerFailure } from "./worker-health";
+import { recordWorkerFailure, recordWorkerSuccess } from "./worker-health";
 import { resignBody } from "./cch";
 import { resolveUpstreamRoute } from "./config";
 import { getModelEntrySync } from "./worker-model";
@@ -1486,6 +1486,9 @@ export async function executeWarmup(
 
     // Check circuit breaker
     checkCircuitBreaker(result);
+
+    // Clear worker-health failure state on successful warmup.
+    recordWorkerSuccess(state.sessionID);
 
     return result;
   } catch (e) {

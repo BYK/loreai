@@ -32,29 +32,7 @@ import {
   curatorLimiter,
 } from "@loreai/core";
 import type { LLMClient } from "@loreai/core";
-import {
-  recordWorkerFailure,
-  recordWorkerSuccess,
-  type FailureReason,
-  type WorkerID,
-} from "./worker-health";
-
-function makeWorkerHealth(
-  sessionID: string,
-  workerID: WorkerID,
-): {
-  recordFailure(reason: string): void;
-  recordSuccess(): void;
-} {
-  return {
-    recordFailure(reason: string) {
-      recordWorkerFailure(sessionID, workerID, reason as FailureReason);
-    },
-    recordSuccess() {
-      recordWorkerSuccess(sessionID);
-    },
-  };
-}
+import { makeWorkerHealth } from "./worker-health";
 import type { GatewayConfig } from "./config";
 import type { SessionState } from "./translate/types";
 import { getWorkerModel, getModelEntrySync } from "./worker-model";

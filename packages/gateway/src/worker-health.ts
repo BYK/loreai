@@ -72,7 +72,6 @@ export type SessionHealth = {
   workerIDs: Set<WorkerID | string>;
   alertSentAt?: number; // last Sentry message timestamp (debounce)
   exceptionSentAt?: number; // last Sentry exception timestamp (per-hour cap)
-  recoveredAt?: number; // last time state was cleared by a success
 };
 
 /** State of the worker health for a session. Used in response headers. */
@@ -387,6 +386,29 @@ export function getWorkerHealth(): Array<{
     });
   }
   return result;
+}
+
+/**
+ * Build the adapter that core passes around as `input.workerHealth`.
+ * The core's `recordFailure` accepts a free-form string; the gateway's typed
+ * `FailureReason` enum drives Sentry tags and metrics. This adapter casts the
+ * string to a `FailureReason` for downstream consumers.
+ */
+export function makeWorkerHealth(
+  sessionID: string,
+  workerID: WorkerID | string,
+): {
+  recordFailure(reason: string): void;
+  recordSuccess(): void;
+} {
+  return {
+    recordFailure(reason: string) {
+      recordWorkerFailure(sessionID, workerID, reason as FailureReason);
+    },
+    recordSuccess() {
+      recordWorkerSuccess(sessionID);
+    },
+  };
 }
 
 /**
