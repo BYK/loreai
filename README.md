@@ -8,7 +8,7 @@
 
 Your AI forgets decisions, loses file paths, and undoes its own work. Lore gives it shared context across projects, tools, and providers — no context files to maintain, no workflow changes. Every new session starts with the relevant facts and gets a fresh injection after the first turn.
 
-Lore is a transparent LLM proxy that gives any AI agent shared context — across tools, projects, and teams. The memory that compounds. Context management and long-term memory aren't separate problems: they're one continuous pipeline. Distillation feeds the gradient context manager, which feeds the knowledge curator, which feeds `.lore.md`, and with Lore Cloud *(coming soon)*, your team.
+Lore is a transparent LLM proxy that gives any AI agent shared context — across tools, projects, and teams. The memory that compounds. Context management and long-term memory aren't separate problems: they're one continuous pipeline. Distillation feeds the gradient context manager, which feeds the knowledge curator, which feeds `.lore.md`, and with Folk Lore *(coming soon)*, your team.
 
 Built on [Sanity's Nuum](https://www.sanity.io/blog/how-we-solved-the-agent-memory-problem) memory architecture and [Mastra's Observational Memory](https://mastra.ai/research/observational-memory) research. The core idea: coding agents need **distillation, not summarization** — preserving file paths, error messages, and exact decisions rather than narrative summaries that lose the details agents need to keep working.
 
@@ -37,7 +37,7 @@ Once Lore is active, you should notice:
 - **Free on-device vector search** — Nomic Embed v1.5 runs locally with zero API cost. Hybrid architecture fuses vector similarity with BM25 keyword search and LLM-powered query expansion for best-of-both-worlds recall.
 - **Works with any provider** — `lore run` auto-detects Claude Code, OpenCode, Pi, and Codex. Cursor, Copilot, Windsurf, and any other Anthropic/OpenAI-compatible tool work by pointing their base URL at the gateway. Switch providers freely; your memory stays.*
 - **Import your history** — Lore imports conversations from Claude Code, Codex, Aider, Cline, Continue, OpenCode, and Pi, extracting knowledge from your existing sessions so your AI starts with context from day one.
-- **Team knowledge with Lore Cloud** — shared memory across your team, managed centrally. *(Coming soon.)*
+- **Team knowledge with Folk Lore** — shared memory across your team, managed centrally. *(Coming soon.)*
 
 <sub>* Any provider accessible via an OpenAI or Anthropic-compatible API.</sub>
 
