@@ -56,9 +56,7 @@ async function generate(root: string): Promise<void> {
   const svgRaw = await readFile(resolve(logoDir, SOURCE), "utf8");
   const svgResult = svgoOptimize(svgRaw, svgoConfig);
   if (!("data" in svgResult)) {
-    throw new Error(
-      `[favicon-assets] SVGO produced no output for ${SOURCE}`,
-    );
+    throw new Error(`[favicon-assets] SVGO produced no output for ${SOURCE}`);
   }
   await writeFile(resolve(publicDir, FAVICON_SVG), svgResult.data);
 
