@@ -14,6 +14,7 @@
 import type { AstroIntegration } from "astro";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import sharp from "sharp";
 import { optimize as svgoOptimize } from "svgo";
 
@@ -94,7 +95,7 @@ export function faviconAssets(): AstroIntegration {
     name: "favicon-assets",
     hooks: {
       "astro:config:setup": async ({ config }) => {
-        await generate(config.root.pathname);
+        await generate(fileURLToPath(config.root));
       },
     },
   };

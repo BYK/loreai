@@ -158,20 +158,6 @@ a.logo .logo-text {
   color: var(--g2);
 }
 
-@keyframes pulse {
-
-  0%,
-  100% {
-    opacity: 1;
-    transform: scale(1)
-  }
-
-  50% {
-    opacity: .5;
-    transform: scale(.7)
-  }
-}
-
 .nav-links {
   display: flex;
   gap: 2.2rem;
