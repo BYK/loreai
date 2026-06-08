@@ -686,6 +686,9 @@ describe("dynamic cheaper-model discovery", () => {
       ),
     ) as unknown as typeof fetch;
 
+    // Defensive reset: a background refresh from another test can
+    // repopulate the cache between beforeEach and this point.
+    resetWorkerModelState();
     await fetchModelData();
 
     const result = getWorkerModel({
@@ -729,6 +732,7 @@ describe("dynamic cheaper-model discovery", () => {
       ),
     ) as unknown as typeof fetch;
 
+    resetWorkerModelState();
     await fetchModelData();
 
     const result = getWorkerModel({
@@ -766,6 +770,7 @@ describe("dynamic cheaper-model discovery", () => {
       ),
     ) as unknown as typeof fetch;
 
+    resetWorkerModelState();
     await fetchModelData();
 
     const result = getWorkerModel({
