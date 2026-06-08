@@ -607,7 +607,12 @@ async function runInner(input: {
     crossSessionContext +
     actionTagContext +
     toolFailureContext;
-  const model = input.model ?? cfg.model;
+  // Pass the explicit worker model through — never fall back to cfg.model
+  // which is the project/session model and may be from a different provider
+  // than the worker's upstream URL. Cross-provider model names → 404.
+  // When model is undefined, the gateway's cross-provider guard validates
+  // or skips the call before the adapter's defaultModel is used.
+  const model = input.model;
   const responseText = await input.llm.prompt(CURATOR_SYSTEM, userContent, {
     model,
     workerID: "lore-curator",
@@ -937,7 +942,12 @@ export async function consolidate(input: {
     entries: entriesForPrompt,
     targetMax: batchTarget,
   });
-  const model = input.model ?? cfg.model;
+  // Pass the explicit worker model through — never fall back to cfg.model
+  // which is the project/session model and may be from a different provider
+  // than the worker's upstream URL. Cross-provider model names → 404.
+  // When model is undefined, the gateway's cross-provider guard validates
+  // or skips the call before the adapter's defaultModel is used.
+  const model = input.model;
   const responseText = await input.llm.prompt(
     CONSOLIDATION_SYSTEM,
     userContent,

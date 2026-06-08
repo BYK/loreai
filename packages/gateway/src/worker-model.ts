@@ -491,7 +491,12 @@ export function getWorkerModel(session?: {
           };
         }
         // Unknown providers (Google, xAI, Mistral, NVIDIA, etc.): no cheaper
-        // validated model available — fall through to use session model as-is.
+        // validated model available. Return undefined to skip background work
+        // rather than risk cross-provider pollution when the session switches
+        // providers mid-flight (the wrapper resolves URL lazily from
+        // state.lastUpstream, which may have changed since getWorkerModel()
+        // was called). See: LOREAI-GATEWAY-2A.
+        if (!mapping) return undefined;
       }
     }
   }
@@ -499,12 +504,17 @@ export function getWorkerModel(session?: {
   // Build the fallback model (used when no cost-aware default or config
   // override applies). Priority:
   //   1. Config model from .lore.json
-  //   2. Session model (actual model from the last API request)
+  //   2. Session model — but ONLY when the provider has a WORKER_DEFAULTS
+  //      entry (known-good providers). For unknown providers, echoing the
+  //      session model is dangerous: the wrapper resolves URL lazily from
+  //      state.lastUpstream which may have switched providers since this
+  //      function was called. Cross-provider model names → 404.
   //   3. Provider's default worker model (WORKER_DEFAULTS)
   //   4. undefined → skip background work
+  const hasKnownDefaults = effectiveProvider in WORKER_DEFAULTS;
   const fallback: { providerID: string; modelID: string } | undefined =
     cfg.model ??
-    (sessionModelID
+    (sessionModelID && hasKnownDefaults
       ? { providerID: effectiveProvider, modelID: sessionModelID }
       : undefined) ??
     WORKER_DEFAULTS[effectiveProvider];

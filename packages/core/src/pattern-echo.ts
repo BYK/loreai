@@ -157,7 +157,12 @@ async function _detect(input: {
     echoCount: cluster.distinctSessions,
   });
 
-  const model = input.model ?? config().model;
+  // Pass the explicit worker model through — never fall back to config().model
+  // which is the project/session model and may be from a different provider
+  // than the worker's upstream URL. Cross-provider model names → 404.
+  // When model is undefined, the gateway's cross-provider guard validates
+  // or skips the call before the adapter's defaultModel is used.
+  const model = input.model;
   const responseText = await input.llm.prompt(
     PATTERN_ECHO_SYSTEM,
     userContent,

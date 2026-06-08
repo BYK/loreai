@@ -56,6 +56,7 @@ export type FailureReason =
   | "no-auth"
   | "auth-rejected"
   | "protocol-mismatch"
+  | "cross-provider"
   | "upstream-error"
   | "no-response"
   | "parse-error"

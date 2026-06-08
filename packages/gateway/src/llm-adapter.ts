@@ -422,10 +422,35 @@ export function createGatewayLLMClient(
       // distinguished by prefix, so only API keys are checked.
       // Skip when LORE_WORKER_API_KEY is set — the user deliberately chose
       // a cross-provider credential/model combination.
-      // Also skip when an upstream override is active — the session routes
-      // through a proxy/aggregator (e.g. OpenCode Zen) that accepts the
+      // Also skip when an upstream override points to a known
+      // proxy/aggregator (e.g. OpenCode Zen, OpenRouter) that accepts the
       // session's credentials regardless of the provider prefix.
-      if (cred.scheme === "api-key" && !hasDedicatedKey && !upstreamOverride) {
+      // DO NOT skip for direct provider URLs (api.anthropic.com,
+      // api.openai.com) — the mismatch check is still needed there.
+      let shouldCheckProtocolMismatch = true;
+      if (upstreamOverride) {
+        try {
+          const hostname = new URL(upstreamOverride).hostname;
+          // Only skip the check for proxy/aggregator hosts — direct
+          // provider URLs still need the mismatch guard.
+          // Only Anthropic and OpenAI are checked because they're the
+          // only providers whose API key prefixes are distinguishable
+          // (sk-ant- vs sk-). Other providers use bearer tokens or
+          // non-standard key formats this prefix check can't validate.
+          const isDirectProvider =
+            hostname === "api.anthropic.com" || hostname === "api.openai.com";
+          if (!isDirectProvider) {
+            shouldCheckProtocolMismatch = false;
+          }
+        } catch {
+          // Malformed URL — run the check to be safe.
+        }
+      }
+      if (
+        cred.scheme === "api-key" &&
+        !hasDedicatedKey &&
+        shouldCheckProtocolMismatch
+      ) {
         const isAnthropicKey = cred.value.startsWith("sk-ant-");
         if (target.protocol === "anthropic" && !isAnthropicKey) {
           log.warn(
@@ -644,7 +669,11 @@ export function createGatewayLLMClient(
 
                 // No fresh credential or retry also failed — alert and bail
                 log.error(
-                  `worker upstream auth error: ${response.status} ${response.statusText} — ${text}`,
+                  `worker upstream auth error: ${response.status} ${response.statusText}` +
+                    ` — url=${target.url} model=${model.providerID}/${model.modelID}` +
+                    ` cred=${cred.scheme} worker=${opts?.workerID ?? "unknown"}` +
+                    ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}` +
+                    ` — ${text}`,
                 );
                 Sentry.captureException(
                   new Error(
@@ -677,7 +706,11 @@ export function createGatewayLLMClient(
               if (!TRANSIENT_CODES.has(response.status)) {
                 const text = await response.text().catch(() => "(no body)");
                 log.error(
-                  `worker upstream request failed: ${response.status} ${response.statusText} — ${text}`,
+                  `worker upstream request failed: ${response.status} ${response.statusText}` +
+                    ` — url=${target.url} model=${model.providerID}/${model.modelID}` +
+                    ` cred=${cred.scheme} worker=${opts?.workerID ?? "unknown"}` +
+                    ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}` +
+                    ` — ${text}`,
                 );
                 span.setStatus({ code: 2, message: `HTTP ${response.status}` });
                 recordWorkerFailure(
@@ -725,7 +758,11 @@ export function createGatewayLLMClient(
               // Exhausted retries — log, capture Sentry error, enrich span
               const text = await response.text().catch(() => "(no body)");
               log.error(
-                `worker upstream request failed after ${maxRetries + 1} attempts: ${response.status} ${response.statusText} — ${text}`,
+                `worker upstream request failed after ${maxRetries + 1} attempts: ${response.status} ${response.statusText}` +
+                  ` — url=${target.url} model=${model.providerID}/${model.modelID}` +
+                  ` cred=${cred.scheme} worker=${opts?.workerID ?? "unknown"}` +
+                  ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}` +
+                  ` — ${text}`,
               );
 
               // Capture as Sentry error for alerting

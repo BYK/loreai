@@ -157,7 +157,7 @@ import {
 } from "./auth";
 import type { UpstreamInterceptor } from "./recorder";
 import { startIdleScheduler, buildIdleWorkHandler } from "./idle";
-import { makeWorkerHealth } from "./worker-health";
+import { makeWorkerHealth, recordWorkerFailure } from "./worker-health";
 import {
   getWorkerModel,
   resetWorkerModelState,
@@ -945,13 +945,51 @@ function getLLMClient(config: GatewayConfig): LLMClient {
     //
     // When a dedicated worker API key is set (LORE_WORKER_API_KEY), skip
     // injection — the worker uses its own credentials and default upstream.
+    //
+    // CROSS-PROVIDER GUARD: The model was resolved at idle-handler start
+    // from state.lastUpstream, but the URL is resolved HERE (lazily) from
+    // the CURRENT state.lastUpstream. If the user switched providers
+    // between those two points, the model and URL come from different
+    // providers → 404. Detect this and re-resolve the worker model from
+    // the current upstream. See: LOREAI-GATEWAY-2A.
     const inner: LLMClient = {
       async prompt(system, user, opts) {
         if (opts?.sessionID && !opts.upstreamUrl && !workerApiKey) {
           const state = sessions.get(opts.sessionID);
           if (state?.lastUpstream?.url) {
+            // Cross-provider guard: if the model's provider doesn't match
+            // the current upstream provider, re-resolve to avoid sending
+            // e.g. MiniMax-M3 to api.anthropic.com.
+            //
+            // When opts.model is undefined, the rawClient will use
+            // defaultModel (hardcoded at construction time, typically
+            // Anthropic). We must also guard against THAT mismatch —
+            // otherwise an unknown-provider session (MiniMax, xAI, etc.)
+            // gets the Anthropic defaultModel sent to its upstream URL.
+            let effectiveOpts = opts;
+            const modelProvider =
+              opts?.model?.providerID ?? defaultModel.providerID;
+            const upstreamProvider = state.lastUpstream.providerID;
+            if (upstreamProvider && modelProvider !== upstreamProvider) {
+              const reResolved = getWorkerModel(state.lastUpstream);
+              if (reResolved) {
+                effectiveOpts = { ...opts, model: reResolved };
+              } else {
+                // Can't resolve a valid worker model for the current
+                // provider — skip this call rather than send cross-provider.
+                log.warn(
+                  `worker cross-provider guard: model=${modelProvider}/${opts?.model?.modelID ?? defaultModel.modelID} vs upstream=${upstreamProvider} — skipping (worker=${opts?.workerID ?? "unknown"}, session=${opts.sessionID})`,
+                );
+                recordWorkerFailure(
+                  opts.sessionID,
+                  opts?.workerID ?? "unknown",
+                  "cross-provider",
+                );
+                return null;
+              }
+            }
             return rawClient.prompt(system, user, {
-              ...opts,
+              ...effectiveOpts,
               upstreamUrl: state.lastUpstream.url,
               protocol: state.lastUpstream.protocol,
             });
@@ -3871,9 +3909,16 @@ async function handleConversationTurn(
   // --- Compaction anomaly detection ---
   // If we reach here (normal turn) with a large message count drop, the client
   // performed compaction that slipped past both structural and pattern detection.
+  // Skip for sub-agent sessions (small context by design) and tool-less
+  // requests (title-gen, summarization agents that resume with fresh context).
   const prevMsgCount = sessionState.messageCount;
   const currMsgCount = req.messages.length;
-  if (prevMsgCount > 10 && currMsgCount < prevMsgCount * 0.5) {
+  if (
+    prevMsgCount > 10 &&
+    currMsgCount < prevMsgCount * 0.5 &&
+    !sessionState.isSubagent &&
+    req.tools.length > 0
+  ) {
     log.warn(
       `compaction anomaly: session=${sessionID.slice(0, 16)} ` +
         `messages dropped ${prevMsgCount}→${currMsgCount}. ` +

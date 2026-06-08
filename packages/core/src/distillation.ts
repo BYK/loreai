@@ -1013,7 +1013,12 @@ async function distillSegment(input: {
     toolFailures,
   });
 
-  const model = input.model ?? config().model;
+  // Pass the explicit worker model through — never fall back to config().model
+  // which is the project/session model and may be from a different provider
+  // than the worker's upstream URL. Cross-provider model names → 404.
+  // When model is undefined, the gateway's cross-provider guard (pipeline.ts)
+  // validates or skips the call before the adapter's defaultModel is used.
+  const model = input.model;
   const sourceTokens = input.messages.reduce((sum, m) => sum + m.tokens, 0);
   const maxTokens = distillTokenBudget(sourceTokens);
   const responseText = await input.llm.prompt(
@@ -1292,7 +1297,12 @@ async function metaDistillInner(input: {
 
   const userContent = recursiveUser(toConsolidate, priorMeta?.observations);
 
-  const model = input.model ?? cfg.model;
+  // Pass the explicit worker model through — never fall back to cfg.model
+  // which is the project/session model and may be from a different provider
+  // than the worker's upstream URL. Cross-provider model names → 404.
+  // When model is undefined, the gateway's cross-provider guard validates
+  // or skips the call before the adapter's defaultModel is used.
+  const model = input.model;
   const inputTokens = Math.ceil(userContent.length / 3);
   const maxTokens = workerTokenBudget(inputTokens, 0.25, 1024, 8192);
   const responseText = await input.llm.prompt(RECURSIVE_SYSTEM, userContent, {
