@@ -4,8 +4,9 @@
  * artifacts — the integration writes favicon.svg, favicon-32.png, and
  * apple-touch-icon.png into public/ on every `astro dev` and `astro build`.
  *
- * Source of truth: src/assets/logo/loreai-dark.svg (cream on transparent —
- * the only variant that reads well on both light and dark browser tabs).
+ * Source of truth: src/assets/logo/favicon.svg (cream lily on a dark ink
+ * rounded square — reads on both light and dark browser tabs, including
+ * Safari's white tab background and Chrome's dark tab background).
  */
 import type { AstroIntegration } from "astro";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -13,7 +14,7 @@ import { resolve } from "node:path";
 import sharp from "sharp";
 import { optimize as svgoOptimize } from "svgo";
 
-const SOURCE = "loreai-dark.svg";
+const SOURCE = "favicon.svg";
 const FAVICON_SVG = "favicon.svg";
 const PNG_TARGETS = [
   { file: "favicon-32.png", size: 32 },
