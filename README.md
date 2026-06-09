@@ -22,6 +22,8 @@ The manual alternative is writing context files by hand — key technical learni
 
 Other tools try to solve this in halves. Memory-only tools store past conversations but don't manage the context window — your AI still gets compacted mid-session. Context-only tools compress history but nothing is learned from the compression — start a new session and you're back to zero.
 
+Built-in memory features go a step further — they store facts about your codebase. But storing facts isn't memory architecture: without compression, context management, active recall, or portability, it's a clipboard that expires. Facts accumulate. Knowledge compounds. Only one scales.
+
 Recent research on AI self-improvement identifies two fundamental levers: **harness updates** (changing what context the model sees) and **weight updates** (retraining the model). [Meta-Harness](https://arxiv.org/abs/2603.28052) (Lee et al., 2026) proved that *what information you store, retrieve, and present to a model* matters as much as the model itself — and that richer access to prior experience enables automated improvement. [SIA](https://arxiv.org/abs/2605.27276) (Hebbar et al., 2026) showed harness updates and weight updates occupy distinct change spaces, with harness improvements concentrating on the infrastructure that shapes how the model searches and acts. Lore is this infrastructure for coding agents — a system that continuously improves the context your agent sees, session after session.
 
 Lore treats context management and memory as the same problem. Distillation, knowledge curation, cross-session recall, and `.lore.md` export — all in one pipeline. You keep coding. Lore keeps the context.

@@ -824,6 +824,50 @@ h1 em::after {
 
 .cmp-yes { color: var(--g2); font-weight: 500; }
 
+/* SPECTRUM (used by different.html) */
+.spectrum-bar {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 2rem;
+  align-items: start;
+}
+
+.spectrum-end { padding: 0 .5rem; }
+.spectrum-left { text-align: right; }
+.spectrum-right { text-align: left; }
+
+.spectrum-label {
+  display: block;
+  font-family: var(--serif);
+  font-size: 1.15rem;
+  font-weight: 400;
+  color: var(--mid);
+  margin-bottom: .8rem;
+}
+
+.spectrum-list {
+  list-style: none;
+  font-size: .86rem;
+  color: var(--mid);
+  line-height: 2;
+}
+
+.spectrum-arrow {
+  padding-top: .35rem;
+  min-width: 120px;
+}
+
+@media(max-width:900px) {
+  .spectrum-bar {
+    grid-template-columns: 1fr;
+    gap: 1rem;
+    text-align: center;
+  }
+  .spectrum-left, .spectrum-right { text-align: center; }
+  .spectrum-arrow { display: flex; justify-content: center; transform: rotate(90deg); min-width: auto; }
+  .spectrum-list { font-size: .82rem; }
+}
+
 /* CTA */
 .cta {
   padding: 9rem 3rem;

@@ -56,11 +56,11 @@ import Logo from "../components/Logo.astro";
       </div>
       <h1 class="sr">What makes Lore <em>different</em></h1>
       <p class="hero-desc sr" style="max-width: 60ch; margin: 0 auto 2.5rem;">
-        Lots of tools now promise "agent memory." Most solve one half of the problem, or bolt memory onto a
-        single tool or cloud platform you have to adopt. Lore takes a different approach: it's a local-first,
-        fair source proxy — <em>the memory that compounds</em> — that treats shared context and long-term
-        memory as <em>one</em> pipeline —
-        for whatever agent you already use.
+        Every AI coding tool now has "memory." But that word means very different things.
+        Some store facts. Lore builds <em>compounding knowledge</em> — a local-first, fair source engine
+        that treats context management and long-term memory as <em>one</em> pipeline, for whatever
+        agent you already use. Facts accumulate. Knowledge compounds.
+        <strong style="color:var(--g1);">Only one scales.</strong>
       </p>
       <div class="hero-actions sr" style="justify-content: center;">
         <a href="index.html#waitlist" class="btn-fill">
@@ -91,8 +91,7 @@ import Logo from "../components/Logo.astro";
         <p class="step-b">Most memory tools store and retrieve, but leave your context window to the agent's own
           compaction — so it still loses track mid-session. Most context tools compress history but learn
           nothing from it. In Lore, compression <em>is</em> the memory pipeline: distillation feeds the
-          gradient context manager, which feeds the knowledge curator, which feeds
-          <code class="code-inline">.lore.md</code>.
+          gradient context manager, which feeds the knowledge curator, which feeds your project's knowledge base.
           One system, not two bolted together.</p>
       </div>
       <div class="step sr">
@@ -178,33 +177,160 @@ import Logo from "../components/Logo.astro";
     </p>
   </section>
 
+  <!-- DEPTH OF MEMORY -->
+  <section class="how" id="depth">
+    <div class="sec-hd">
+      <div>
+        <p class="eyebrow sr">The depth question</p>
+        <h2 class="sec-title sr">Not all memory is <em>created equal</em></h2>
+      </div>
+      <p class="sec-sub sr">The spectrum runs from simple fact storage to full memory architecture.
+        Where your tool sits determines what breaks first.</p>
+    </div>
+
+    <!-- Spectrum visualization -->
+    <div class="spectrum sr" style="max-width:1100px;margin:0 auto 5rem;">
+      <div class="spectrum-bar">
+        <div class="spectrum-end spectrum-left">
+          <span class="spectrum-label">Fact Storage</span>
+          <ul class="spectrum-list">
+            <li>Store key-value facts</li>
+            <li>Inject into prompt</li>
+            <li>TTL-based expiry</li>
+            <li>No search or recall</li>
+            <li>Locked to one tool</li>
+          </ul>
+        </div>
+        <div class="spectrum-arrow">
+          <svg viewBox="0 0 200 12" fill="none" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:12px;">
+            <line x1="0" y1="6" x2="190" y2="6" stroke="var(--g4)" stroke-width="1.5" stroke-dasharray="6 4"/>
+            <polygon points="190,1 200,6 190,11" fill="var(--g3)"/>
+          </svg>
+        </div>
+        <div class="spectrum-end spectrum-right">
+          <span class="spectrum-label" style="color:var(--g1);">Memory Architecture</span>
+          <ul class="spectrum-list" style="color:var(--g1);">
+            <li>Three tiers: temporal, distillation, knowledge</li>
+            <li>Cost-aware gradient context management</li>
+            <li>Archive, not delete</li>
+            <li>Active recall across multiple search sources</li>
+            <li>Relevance-scored injection per turn</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <!-- Scenarios -->
+    <div class="steps">
+      <div class="step sr">
+        <div class="step-n">01</div>
+        <h3 class="step-t">The <em>context cliff</em></h3>
+        <p class="step-b">At 200K tokens, fact-injection memory is still dumping everything into the prompt —
+          competing with your actual conversation for space. A memory architecture manages compression layers:
+          full fidelity for recent work, intelligent distillation for older context, knowledge extraction for
+          durable insights. Lore's gradient context manager tracks real API token counts and model pricing to
+          decide <em>what</em> to surface <em>when</em> — not "inject everything and hope."</p>
+      </div>
+      <div class="step sr">
+        <div class="step-n">02</div>
+        <h3 class="step-t">The <em>return</em> moment</h3>
+        <p class="step-b">You haven't touched the billing service in 6 weeks. Fact-based memory has expired your
+          context — 28 days unused, gone. Architectural memory has compressed 47 sessions into a distilled
+          summary, preserved your "NEVER change the payment retry logic" directive, and kept the architectural
+          decisions searchable. You pick up exactly where you left off.</p>
+      </div>
+      <div class="step sr">
+        <div class="step-n">03</div>
+        <h3 class="step-t">The <em>multi-tool</em> reality</h3>
+        <p class="step-b">You use Claude Code for complex refactors and another tool for quick fixes. Fact-based
+          memory only works inside one of them — switch tools and start over. Lore sits on the API wire:
+          one local database, shared across every tool and every provider. Your memory is yours,
+          not theirs.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ACTIVE CONTEXT -->
+  <section class="features" id="context-engine">
+    <div class="sec-hd" style="max-width:1100px;margin:0 auto 3rem;">
+      <div>
+        <p class="eyebrow sr">The engine</p>
+        <h2 class="sec-title sr">Active context management, <em>not passive injection</em></h2>
+      </div>
+      <p class="sec-sub sr">Most memory systems dump facts into the system prompt. Lore manages
+        the full context window — cost-aware, cache-optimized, calibrated in real time.</p>
+    </div>
+    <div class="bento">
+      <div class="bc bc-2 sr">
+        <p class="bc-tag">Cost-aware</p>
+        <h3 class="bc-t">Compression only when it pays for itself</h3>
+        <p class="bc-b">Lore compares the cost of busting the prompt cache against the cost of continuing
+          at current size — using real model pricing. It only compresses when the economics justify it.
+          Background work runs on cheaper models via batch APIs at up to 50% off.</p>
+      </div>
+      <div class="bc bc-1 sr">
+        <p class="bc-tag">Gradient</p>
+        <h3 class="bc-t">Progressive compression, not a cliff</h3>
+        <p class="bc-b">A 4-layer system from full passthrough to emergency compression,
+          calibrated dynamically from real API token counts. Each layer preserves the prompt cache
+          as long as possible — no more "compaction wiped everything" moments. The longer you work,
+          the bigger the advantage: +70% average recall over compaction at 2.3M tokens.</p>
+      </div>
+      <div class="bc bc-1 sr">
+        <p class="bc-tag">Relevance-scored</p>
+        <h3 class="bc-t">The right knowledge at the right turn</h3>
+        <p class="bc-b">Lore doesn't dump everything into the system prompt. On the first turn, only
+          unconditional preferences are injected. After the first response, Lore reads the actual conversation
+          and scores every knowledge entry against it — using vector similarity (local Nomic embeddings) or
+          BM25 keyword matching — then injects only what's relevant. The injection is diff-pinned: it only
+          updates when content changes materially, preserving the prompt cache.</p>
+      </div>
+      <div class="bc bc-2 sr">
+        <p class="bc-tag">Active recall</p>
+        <h3 class="bc-t">The agent searches its own memory</h3>
+        <p class="bc-b">Passive memory waits to be injected. Lore gives your agent a <code class="code-inline">recall</code>
+          tool that searches knowledge entries, distillation observations, raw conversation messages,
+          and cross-project knowledge in parallel — fused with reciprocal rank scoring
+          and LLM-powered query expansion. Your agent reaches for context when it needs it.</p>
+      </div>
+    </div>
+  </section>
+
   <!-- PORTABILITY -->
   <section class="features" id="portability" style="background:var(--c0);">
+    <div class="sec-hd" style="max-width:1100px;margin:0 auto 3rem;">
+      <div>
+        <p class="eyebrow sr">Ownership</p>
+        <h2 class="sec-title sr">Your data, <em>your machine</em></h2>
+      </div>
+      <p class="sec-sub sr">No cloud dependency. No vendor lock-in. A local database you own
+        and a fair source engine you can read.</p>
+    </div>
     <div class="bento">
       <div class="bc bc-1 sr">
         <p class="bc-tag">Ownership</p>
-        <h3 class="bc-t">Your memory is a file you can read</h3>
-        <p class="bc-b">Curated knowledge is exported to
-          <code class="code-inline">.lore.md</code>
-          (or AGENTS.md) in your own repository — human-readable markdown, version-controlled with your code,
-          reviewable in a pull request. Stop using Lore tomorrow and you still have everything it learned,
-          in plain text. That's portability you can verify, not just a promise to export.</p>
+        <h3 class="bc-t">Your data lives on your machine</h3>
+        <p class="bc-b">Messages, distillations, knowledge, and on-device embeddings live in a local SQLite
+          database you own — not a vendor's cloud. Nothing leaves your machine unless you choose to share it.
+          Stop using Lore tomorrow and your data is still there, in an open format. That's portability you
+          can verify, not a promise to export.</p>
       </div>
       <div class="bc bc-2 sr">
         <p class="bc-tag">No lock-in</p>
         <h3 class="bc-t">Where the commitment lives matters</h3>
         <p class="bc-b">Every memory system asks for <em>some</em> commitment. With a hosted platform, it's at
           the platform layer — route your agents through it or get nothing. With Lore, it's a one-line base-URL
-          change you can undo at any time, and the data never leaves your machine unless you choose to share it.
-          Switch providers, switch tools, switch laptops — your memory comes with you.</p>
+          change you can undo at any time. Switch providers, switch tools, switch laptops — one local database
+          travels with you.</p>
       </div>
       <div class="bc bc-3 sr">
         <div>
           <p class="bc-tag">Proven where it's hardest</p>
           <h3 class="bc-t">The advantage grows with the session</h3>
-          <p class="bc-b">On a real 5-day, 2.3M-token coding session, Lore scored 4.0/5 on recall versus 2.4/5
-            for compaction — 2.6x more perfect answers. The early-session details that lossy summaries destroy
-            are exactly what Lore's three-tier memory preserves. The longer you work, the bigger the gap.</p>
+          <p class="bc-b">On a real 5-day, 2.3M-token coding session, Lore averaged 4.0/5 on recall versus 2.4/5
+            for compaction (+70%), with 2.6x more perfect answers (13/20 vs 5/20). The early-session details
+            that lossy summaries destroy are exactly what Lore's three-tier memory preserves. The longer you
+            work, the bigger the gap.</p>
         </div>
         <div class="code-block">
           <code><span class="ck"># One line. Any agent.</span><br><span class="cv">$</span> lore run<br><br><span class="ck"># Local engine. Your data stays</span><br><span class="ck"># on your machine.</span></code>
@@ -213,11 +339,11 @@ import Logo from "../components/Logo.astro";
     </div>
     <p class="sec-sub sr" style="max-width:1100px;margin:1.5rem auto 0;text-align:left;font-size:.82rem;opacity:.85;border-left:2px solid var(--g4);padding-left:1rem;">
       <strong style="color:var(--g1);font-weight:500;">What "portable" really means.</strong>
-      Some tools describe their memory as "self-hosted" or "portable" — but that usually refers to where the data
-      <em>artifacts</em> are stored, not whether you can use them on your own. Those artifacts are in the vendor's
-      format, produced and read by the vendor's engine. With Lore, portability means the knowledge itself is
-      human-readable markdown in your repo — readable and usable even if you stop using Lore entirely. Owning the
-      bytes isn't the same as being able to read them.
+      Some tools describe their memory as "portable" — but that usually means you can host the storage yourself,
+      not that you can use the data without their engine. With Lore, the engine is fair source and the database
+      is local SQLite — an open format any tool can read. Curated knowledge is also exported to
+      <code class="code-inline">.lore.md</code> in your repo as human-readable markdown, but the real value is the
+      local engine and the database you own.
     </p>
   </section>
 
@@ -228,30 +354,30 @@ import Logo from "../components/Logo.astro";
         <p class="eyebrow sr">Teams</p>
         <h2 class="sec-title sr">Team memory, <em>without</em> giving up the local-first model</h2>
       </div>
-      <p class="sec-sub sr">Because knowledge lives in
-        <code class="code-inline">.lore.md</code>
-        in your repo, sharing it is just git — today.</p>
+      <p class="sec-sub sr">Individual memory works today. Team memory is coming with Folk Lore — built
+        on the same local-first engine.</p>
     </div>
     <div class="steps">
       <div class="step sr">
         <div class="step-n">01</div>
-        <h3 class="step-t">Share via the tools you already have</h3>
-        <p class="step-b">A teammate clones the repo and Lore imports the committed
-          <code class="code-inline">.lore.md</code>.
-          Shared conventions, gotchas, and decisions travel with the codebase — no extra service required.</p>
+        <h3 class="step-t">Local-first, team-ready</h3>
+        <p class="step-b">Every developer's Lore instance builds project knowledge locally. Folk Lore will connect
+          these instances — shared conventions, gotchas, and decisions traveling across the team without anyone
+          giving up local ownership of their data.</p>
       </div>
       <div class="step sr">
         <div class="step-n">02</div>
-        <h3 class="step-t">Reviewable, like code</h3>
-        <p class="step-b">Knowledge changes show up in diffs and pull requests. Your team approves what becomes
-          shared memory the same way it approves any other change — with full history and the ability to roll back.</p>
+        <h3 class="step-t">Knowledge promotion and access controls</h3>
+        <p class="step-b">Not all knowledge should be shared equally. Folk Lore will add promotion workflows,
+          team-scoped visibility, and approval gates — so your team controls what becomes shared memory,
+          who can see it, and how it evolves.</p>
       </div>
       <div class="step sr">
         <div class="step-n">03</div>
-        <h3 class="step-t">Folk Lore when you want it</h3>
-        <p class="step-b">For centrally-managed, multi-user shared memory with approval workflows, Folk Lore is
-          coming. It's an option layered on top of the local-first core — not a platform you have to adopt to get
-          value today.</p>
+        <h3 class="step-t">Integrates with the tools you already use</h3>
+        <p class="step-b">Folk Lore will connect to your existing team structure — GitHub Teams, repo collaborators,
+          org permissions. No parallel management system to maintain. Your team's AI memory governed by the
+          same people and processes that govern your code.</p>
       </div>
     </div>
   </section>
