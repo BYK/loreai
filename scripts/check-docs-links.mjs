@@ -154,7 +154,7 @@ process.on("SIGTERM", () => {
 });
 
 try {
-  await waitForServer(`http://127.0.0.1:${port}/docs/`, 15000);
+  await waitForServer(`http://127.0.0.1:${port}/docs/`, 60000);
   console.log("[check-links] server ready, running linkinator...");
 
   const linkResult = spawnSync(
