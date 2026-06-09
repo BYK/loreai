@@ -207,9 +207,10 @@ export const AGENTS: AgentDef[] = [
         OPENAI_BASE_URL: `${url}/v1`,
         HERMES_INFERENCE_PROVIDER: "custom",
       };
-      // Expose project path & git remote as env vars so Hermes can map
-      // them to custom headers if supported in the future.  The gateway
-      // resolves the project from system-prompt inference and cwd for now.
+      // Expose project path & git remote as env vars so downstream
+      // agents can map them to custom headers if supported in the future.
+      // The gateway resolves the project from system-prompt inference and
+      // cwd for now.
       env.LORE_PROJECT = cwd;
       const remote = safeRemote(cwd);
       if (remote) env.LORE_GIT_REMOTE = remote;

@@ -78,22 +78,6 @@ function readDescriptionAbove(source: string, line: number): string {
       i--;
       continue;
     }
-    if (trimmed.startsWith("/**")) {
-      // JSDoc opener directly above the use site — collect forward
-      // through the matching `*/` close.
-      block.unshift(text);
-      i--;
-      while (i >= 0 && !lines[i]?.trim().endsWith("*/")) {
-        block.unshift(lines[i] ?? "");
-        i--;
-        budget--;
-      }
-      if (i >= 0) {
-        block.unshift(lines[i] ?? "");
-        i--;
-      }
-      break;
-    }
     if (trimmed.endsWith("*/")) {
       // Walk back to the comment opener
       block.unshift(text);
@@ -319,14 +303,6 @@ function collectEntries(): Map<string, EnvVarEntry> {
       for (const match of line.matchAll(localRegex)) {
         const name = match[0].split(".").pop() ?? "";
         if (!name.startsWith("LORE_")) continue;
-        // Skip CLI help-text lines that mention the env var inside a
-        // backtick string template — they aren't real use sites, and
-        // picking them as the "first use" buries the actual functional
-        // JSDoc which lives further down. The pattern: the env-var
-        // name appears literally as a non-interpolated substring of a
-        // backtick-delimited string. A real use site always reads
-        // `process.env.LORE_X` / `env.LORE_X` — never the bare
-        // `LORE_X` literal.
         // Skip CLI help-text lines: these reference the env var as a
         // bare `LORE_X` literal in a backtick template AND as a real
         // `process.env.LORE_X` / `env.LORE_X` access in a `${...}`

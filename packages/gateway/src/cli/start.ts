@@ -21,7 +21,7 @@ export interface StartOptions {
   remoteUrl?: string;
   /**
    * When true, disables hosted mode even for `lore start`.
-   * CLI: `--local` / `-l`. Env: `LORE_HOSTED_MODE=0`.
+   * CLI: `--local` / `-l`.
    */
   local?: boolean;
 }

@@ -147,8 +147,13 @@ const preview = spawn(
     "--port",
     String(port),
   ],
-  { stdio: ["ignore", "pipe", "pipe"], detached: false },
+  // stdout ignored (we don't need its output); stderr piped for
+  // diagnostics but drained immediately to avoid filling the pipe
+  // buffer and blocking the process.
+  { stdio: ["ignore", "ignore", "pipe"], detached: false },
 );
+// Drain stderr so astro preview never blocks on a full pipe buffer.
+preview.stderr.resume();
 
 const cleanup = () => {
   try {

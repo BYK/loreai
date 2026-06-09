@@ -1031,7 +1031,7 @@ jobs:
   ci-status:
     name: CI Status
     if: always()
-    needs: [changes, test, binary-smoke-native, check-docs, actionlint]
+    needs: [changes, test, binary-smoke-native, check-docs, check-links, actionlint]
     runs-on: ubuntu-latest
     steps:
       - name: Check CI result
@@ -1057,6 +1057,12 @@ jobs:
           checkDocsResult="${{ needs.check-docs.result }}"
           if [ "$checkDocsResult" == "failure" ] || [ "$checkDocsResult" == "cancelled" ]; then
             echo "::error::check-docs did not succeed (result: $checkDocsResult)"
+            exit 1
+          fi
+          # check-links follows the same self-gating pattern as check-docs.
+          checkLinksResult="${{ needs.check-links.result }}"
+          if [ "$checkLinksResult" == "failure" ] || [ "$checkLinksResult" == "cancelled" ]; then
+            echo "::error::check-links did not succeed (result: $checkLinksResult)"
             exit 1
           fi
           echo "CI passed (code=${{ needs.changes.outputs.code }})"

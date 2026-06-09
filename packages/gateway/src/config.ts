@@ -147,6 +147,16 @@ export function loadConfig(): GatewayConfig {
    * the `lore start` default. Env: `LORE_REMOTE_GATEWAY=1`.
    */
   const remoteGatewayEnv = isTruthy(env.LORE_REMOTE_GATEWAY);
+  /**
+   * Hosted / remote mode. When set to `1`, the gateway disables all
+   * filesystem operations that use client-controlled paths (`.lore.json`
+   * loading, `.lore.md` import/export, `getGitRemote()`) to prevent
+   * untrusted clients from influencing gateway behavior via crafted
+   * paths. Implies remote-gateway mode (per-session bucketing). Use
+   * this for multi-tenant hosted deployments where the gateway
+   * serves agents on other machines. CLI: `--local` / `-l` forces
+   * hosted mode OFF. Env: `LORE_HOSTED_MODE=1`.
+   */
   const hostedModeEnv = isTruthy(env.LORE_HOSTED_MODE);
   // Auto-detect when neither env var is DEFINED (not just truthy): a
   // non-loopback bind address strongly implies the gateway is serving remote
