@@ -368,6 +368,17 @@ function setupOpencode(baseUrl: string): void {
   console.log(
     `[lore] Make sure the gateway is running (lore start) before using OpenCode.`,
   );
+  console.log(`[lore]`);
+  console.log(
+    `[lore] Optional: install the @loreai/opencode plugin for transparent per-session`,
+  );
+  console.log(
+    `[lore] routing, auto project-path injection, and per-session cost rollups:`,
+  );
+  console.log(`[lore]   npm install -g @loreai/opencode`);
+  console.log(
+    `[lore]   Then add "@loreai/opencode" to the "plugin" array in ${configPath}.`,
+  );
 }
 
 // ---------------------------------------------------------------------------
