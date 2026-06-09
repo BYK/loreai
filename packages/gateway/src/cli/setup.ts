@@ -32,11 +32,6 @@ interface PluginSpec {
   /** npm package name (e.g. `@loreai/opencode`) */
   npmPackage: string;
   /**
-   * Path to the agent's plugin array in its config (e.g. `["plugin"]`).
-   * The plugin is appended if absent, kept in place if present.
-   */
-  registerConfigPath: string[];
-  /**
    * Apply the plugin to the parsed config (mutates the config in place).
    * Returns true if the config was modified.
    */
@@ -63,7 +58,6 @@ interface AppSetup {
  */
 export const opencodePluginSpec: PluginSpec = {
   npmPackage: "@loreai/opencode",
-  registerConfigPath: ["plugin"],
   apply: (config) => {
     const existing = config.plugin;
     if (Array.isArray(existing) && existing.includes("@loreai/opencode")) {
@@ -547,8 +541,8 @@ function setupOpencode(baseUrl: string, noPlugin: boolean): void {
     return;
   }
 
-  if (opencodePluginSpec) {
-    installPlugin(opencodePluginSpec, configPath);
+  if (!installPlugin(opencodePluginSpec, configPath)) {
+    process.exitCode = 1;
   }
 }
 

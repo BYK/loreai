@@ -498,9 +498,8 @@ describe("updateClaudeCodeSettings", () => {
 // ---------------------------------------------------------------------------
 
 describe("opencodePluginSpec", () => {
-  test("has expected package name and registration target", () => {
+  test("has expected package name", () => {
     expect(opencodePluginSpec.npmPackage).toBe("@loreai/opencode");
-    expect(opencodePluginSpec.registerConfigPath).toEqual(["plugin"]);
   });
 
   test("adds plugin to empty config", () => {
