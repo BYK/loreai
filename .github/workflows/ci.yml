@@ -40,6 +40,8 @@ jobs:
               - 'pnpm-lock.yaml'
               - 'pnpm-workspace.yaml'
               - 'tsconfig*.json'
+              - 'vitest.config.ts'
+              - 'vitest.evals.config.ts'
               - 'package.json'
               - 'biome.json'
               - '.craft.yml'
