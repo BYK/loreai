@@ -13,6 +13,7 @@
  */
 import type { AstroIntegration } from "astro";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
@@ -26,7 +27,14 @@ const PNG_TARGETS = [
   { file: "apple-touch-icon.png", size: 180 },
 ] as const;
 
-const OG_IMAGE = "og-image.png";
+// OG image is content-hashed at build time so the URL changes whenever
+// the image changes. This busts CDN/validator caches automatically —
+// no upstream can serve a stale version, because the URL is different
+// for every distinct image content. The hash sidecar
+// (src/generated/og-image.json) lets the Astro components import the
+// current filename as a normal TS module.
+const OG_IMAGE_PREFIX = "og-image";
+const OG_IMAGE_EXTENSION = "png";
 const OG_WIDTH = 1200;
 const OG_HEIGHT = 630;
 const OG_LOGO_HEIGHT = 140;
@@ -44,6 +52,12 @@ const OG_BG_COLOR = "#1a3320";
 const OG_HEADLINE_COLOR = "#f5efe1"; // cream (site's --g5)
 const OG_TAGLINE_COLOR = "#d8e4d8"; // bright sage, higher contrast than --g2
 const OG_CTA_COLOR = "#a8c8a8"; // mid sage, draws the eye last
+
+// Path to the JSON sidecar that exposes the current hashed filename to
+// Astro components. Lives in src/ so Astro bundles it (no runtime fetch,
+// no public-cache problem). Gitignored — regenerated on every build.
+const OG_IMAGE_MANIFEST = "src/generated/og-image.json";
+const OG_IMAGE_MANIFEST_DIR = "src/generated";
 
 const svgoConfig = {
   multipass: true,
@@ -69,6 +83,19 @@ const svgoConfig = {
     "cleanupIds",
   ],
 };
+
+/**
+ * Hash the OG image and write it as og-image-{hash}.png into public/.
+ * The hash is content-derived, so any change to the image produces a
+ * new URL — no upstream cache (CDN, validator, scraper) can serve a
+ * stale version of the wrong image.
+ */
+async function writeOgImage(publicDir: string, buf: Buffer): Promise<string> {
+  const hash = createHash("sha256").update(buf).digest("hex").slice(0, 8);
+  const file = `${OG_IMAGE_PREFIX}-${hash}.${OG_IMAGE_EXTENSION}`;
+  await writeFile(resolve(publicDir, file), buf);
+  return file;
+}
 
 async function generate(root: string): Promise<void> {
   const logoDir = resolve(root, "src/assets/logo");
@@ -108,7 +135,7 @@ async function generate(root: string): Promise<void> {
       .toFile(resolve(publicDir, file));
   }
 
-  // 3. Generate og-image.png (1200×630) — dark background, cream lily logo
+  // 3. Generate the OG image (1200×630) — dark background, cream lily logo
   //    top-left, and a headline + tagline (CTA) below it. We build the
   //    entire image as a single SVG (background rect, logo image, text
   //    elements) and rasterize once via sharp. Text is rendered using
@@ -147,10 +174,23 @@ async function generate(root: string): Promise<void> {
     </svg>
   `);
 
-  await sharp(fullSvg, { density: 384 })
+  const ogBuffer = await sharp(fullSvg, { density: 384 })
     .resize(OG_WIDTH, OG_HEIGHT)
     .png({ compressionLevel: 9, effort: 10 })
-    .toFile(resolve(publicDir, OG_IMAGE));
+    .toBuffer();
+
+  const ogFilename = await writeOgImage(publicDir, ogBuffer);
+
+  // Write a tiny JSON sidecar that exposes the current hashed filename
+  // to Astro components as a normal TS module. Lives in src/ so Astro
+  // bundles it (no public-cache problem). Gitignored — regenerated on
+  // every build alongside the PNG itself.
+  const generatedDir = resolve(root, OG_IMAGE_MANIFEST_DIR);
+  await mkdir(generatedDir, { recursive: true });
+  await writeFile(
+    resolve(root, OG_IMAGE_MANIFEST),
+    `${JSON.stringify({ filename: ogFilename }, null, 2)}\n`,
+  );
 }
 
 export function faviconAssets(): AstroIntegration {
@@ -162,4 +202,25 @@ export function faviconAssets(): AstroIntegration {
       },
     },
   };
+}
+
+/**
+ * Eagerly generate the favicon + OG assets and return the OG image's
+ * hashed filename. astro.config.mjs calls this at the top of the file
+ * so the Starlight `head` array (which is evaluated synchronously at
+ * config-load time) can reference the same hashed URL that the rest
+ * of the build uses.
+ */
+export async function generateAssetsEagerly(
+  root: string,
+): Promise<{ ogFilename: string }> {
+  await generate(root);
+  // The manifest file is now on disk — re-read it instead of plumbing
+  // the value back, since astro.config.mjs may be loaded before/after
+  // the integration hook depending on how astro evaluates the config.
+  const { readFile } = await import("node:fs/promises");
+  const manifest = JSON.parse(
+    await readFile(resolve(root, OG_IMAGE_MANIFEST), "utf8"),
+  );
+  return { ogFilename: manifest.filename };
 }

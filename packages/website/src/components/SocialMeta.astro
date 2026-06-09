@@ -1,4 +1,6 @@
 ---
+import ogImageManifest from "../generated/og-image.json";
+
 interface Props {
   title: string;
   description: string;
@@ -18,7 +20,10 @@ const {
 } = Astro.props;
 
 const canonicalUrl = `${site}${base}${path}`;
-const imageUrl = `${site}${base}og-image.png`;
+// OG image URL is content-hashed at build time — see
+// integrations/favicon-assets.ts. The hash busts CDN/validator caches
+// automatically, since the URL changes whenever the image does.
+const imageUrl = `${site}${base}${ogImageManifest.filename}`;
 ---
 
 <!-- Open Graph -->

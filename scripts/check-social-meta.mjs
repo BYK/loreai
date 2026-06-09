@@ -36,7 +36,10 @@ import { join, relative, resolve } from "node:path";
 const SITE_ROOT = resolve(import.meta.dirname, "..");
 const DIST_DIR = join(SITE_ROOT, "packages/website/dist");
 const PUBLIC_DIR = join(SITE_ROOT, "packages/website/public");
-const OG_IMAGE = "og-image.png";
+// The OG image is content-hashed at build time (e.g. `og-image-abc12345.png`)
+// to bust CDN/validator caches — see integrations/favicon-assets.ts.
+// We discover the current filename from public/ rather than hardcoding it.
+const OG_IMAGE_GLOB = /^og-image-[a-f0-9]+\.png$/;
 const OG_WIDTH = 1200;
 const OG_HEIGHT = 630;
 const SITE = "https://withlore.ai";
@@ -78,6 +81,28 @@ function ensureBuilt() {
 		console.error("[check-social] site build failed");
 		process.exit(1);
 	}
+}
+
+/**
+ * Find the current content-hashed OG image filename in public/.
+ * Throws if zero or multiple matches — both indicate a build problem.
+ */
+function findOgImageFilename() {
+	const entries = readdirSync(PUBLIC_DIR);
+	const matches = entries.filter((e) => OG_IMAGE_GLOB.test(e));
+	if (matches.length === 0) {
+		throw new Error(
+			`no og-image-*.png in ${relative(SITE_ROOT, PUBLIC_DIR)} — did the favicon-assets integration run?`,
+		);
+	}
+	if (matches.length > 1) {
+		console.warn(
+			`[check-social] note: ${matches.length} og-image-*.png files in public/ (older builds leaked): ${matches.join(", ")}`,
+		);
+	}
+	// Use the freshest (highest hash, since hashes are non-deterministic; the
+	// most recently written file is what the current build emitted).
+	return matches.sort().pop();
 }
 
 function listHtmlFiles(dir) {
@@ -140,7 +165,7 @@ function classifyPage(relPath) {
 	return "website";
 }
 
-function validatePage(filePath) {
+function validatePage(filePath, expectedImage) {
 	const errors = [];
 	const html = readFileSync(filePath, "utf8");
 	const relPath = relative(DIST_DIR, filePath);
@@ -169,8 +194,7 @@ function validatePage(filePath) {
 		}
 	}
 
-	// Image URL must point at og-image.png on the site origin.
-	const expectedImage = `${SITE}/${OG_IMAGE}`;
+	// Image URL must point at the (hashed) og-image on the site origin.
 	if (og["og:image"] && og["og:image"] !== expectedImage) {
 		errors.push(
 			`og:image should be "${expectedImage}" (got "${og["og:image"]}")`,
@@ -225,9 +249,9 @@ function validatePage(filePath) {
 	return { relPath, errors };
 }
 
-function validateOgImage() {
+function validateOgImage(filename) {
 	const errors = [];
-	const imagePath = join(PUBLIC_DIR, OG_IMAGE);
+	const imagePath = join(PUBLIC_DIR, filename);
 	if (!existsSync(imagePath)) {
 		errors.push(`${relative(SITE_ROOT, imagePath)} does not exist`);
 		return errors;
@@ -265,12 +289,16 @@ function validateOgImage() {
 function main() {
 	ensureBuilt();
 
-	const imageErrors = validateOgImage();
+	const ogFilename = findOgImageFilename();
+
+	const imageErrors = validateOgImage(ogFilename);
 	if (imageErrors.length > 0) {
 		console.error("[check-social] FAIL: OG image is wrong:");
 		for (const err of imageErrors) console.error(`  - ${err}`);
 		process.exit(1);
 	}
+
+	const expectedImage = `${SITE}/${ogFilename}`;
 
 	const files = listHtmlFiles(DIST_DIR);
 	if (files.length === 0) {
@@ -280,7 +308,7 @@ function main() {
 
 	const allErrors = [];
 	for (const file of files) {
-		const { relPath, errors } = validatePage(file);
+		const { relPath, errors } = validatePage(file, expectedImage);
 		if (errors.length > 0) {
 			allErrors.push({ relPath, errors });
 		}
