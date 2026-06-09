@@ -623,14 +623,16 @@ export function createGatewayLLMClient(
               if (AUTH_ERROR_CODES.has(response.status)) {
                 const text = await response.text().catch(() => "(no body)");
 
-                // Mark session credential stale so resolveAuth() falls through to global
+                // Mark this provider's credential stale so resolveAuth()
+                // falls through to global — but only for THIS provider,
+                // not other providers on the same session.
                 if (opts?.sessionID) {
                   recordWorkerFailure(
                     opts.sessionID,
                     opts?.workerID ?? "unknown",
                     "auth-rejected",
                   );
-                  markAuthStale(opts.sessionID);
+                  markAuthStale(opts.sessionID, model.providerID);
                 }
 
                 // Re-resolve: credential may have been refreshed by a concurrent client request

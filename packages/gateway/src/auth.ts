@@ -112,7 +112,11 @@ export function setSessionAuth(
   // Also keep the _default slot in sync with the latest credential so
   // callers that don't pass a providerID still get a reasonable result.
   if (key !== "_default") byProvider.set("_default", cred);
-  staleSessionAuth.delete(sessionID); // Fresh credential clears staleness
+  // Fresh credential clears staleness for this specific provider.
+  // Also clear _default when a named provider refreshes, since _default
+  // tracks the latest-used provider.
+  clearProviderStale(sessionID, key);
+  if (key !== "_default") clearProviderStale(sessionID, "_default");
 }
 
 /**
@@ -135,36 +139,75 @@ export function getSessionAuth(
 /** Delete a session's credentials (for eviction). */
 export function deleteSessionAuth(sessionID: string): void {
   sessionAuth.delete(sessionID);
-  staleSessionAuth.delete(sessionID);
+  clearAuthStale(sessionID);
 }
 
 // ---------------------------------------------------------------------------
-// Staleness tracking (per-session)
+// Staleness tracking (per-session, per-provider)
 // ---------------------------------------------------------------------------
 
 /**
- * Session IDs whose stored credential returned a 401/403.
+ * Per-session, per-provider staleness registry. Outer key is session ID,
+ * inner set contains provider IDs whose credentials returned 401/403.
  *
  * Tracked separately from AuthCredential to keep the type clean (follows
  * batch-queue's `disabledBatchSessions` pattern). Not persisted — on
  * process restart, the first client request provides fresh credentials.
- * Cleared automatically when `setSessionAuth()` stores a new credential.
+ * Cleared per-provider when `setSessionAuth()` stores a new credential.
+ *
+ * Per-provider granularity prevents cross-contamination: a 401 from
+ * MiniMax should not poison the Anthropic credential for the same session.
  */
-const staleSessionAuth = new Set<string>();
+const staleSessionAuth = new Map<string, Set<string>>();
 
-/** Mark a session's credential as stale (401/403 received). */
-export function markAuthStale(sessionID: string): void {
-  staleSessionAuth.add(sessionID);
+/**
+ * Mark a session's credential as stale (401/403 received).
+ *
+ * @param providerID - When provided, only the specific provider's credential
+ *   is marked stale. When omitted, marks the `_default` slot (backward compat).
+ */
+export function markAuthStale(sessionID: string, providerID?: string): void {
+  let providers = staleSessionAuth.get(sessionID);
+  if (!providers) {
+    providers = new Set();
+    staleSessionAuth.set(sessionID, providers);
+  }
+  providers.add(providerID || "_default");
+  // Also mark _default stale when a named provider is marked, since
+  // _default tracks the latest-used provider (mirrors setSessionAuth's
+  // dual-clear on refresh). Without this, resolveAuth(sid) without
+  // providerID would return the stale credential via _default.
+  if (providerID && providerID !== "_default") providers.add("_default");
 }
 
-/** Check if a session's credential is marked stale. */
-export function isAuthStale(sessionID: string): boolean {
-  return staleSessionAuth.has(sessionID);
+/**
+ * Check if a session's credential is marked stale.
+ *
+ * @param providerID - When provided, checks only that provider. When omitted,
+ *   returns true if ANY provider for the session is stale (used by idle.ts
+ *   for session-level skip decisions).
+ */
+export function isAuthStale(sessionID: string, providerID?: string): boolean {
+  const providers = staleSessionAuth.get(sessionID);
+  if (!providers) return false;
+  if (providerID) return providers.has(providerID);
+  return providers.size > 0;
 }
 
-/** Clear staleness for a session (fresh credential arrived). */
+/** Clear staleness for a session (eviction cleanup). */
 export function clearAuthStale(sessionID: string): void {
   staleSessionAuth.delete(sessionID);
+}
+
+/**
+ * Clear staleness for a specific (session, provider) pair.
+ * Called when `setSessionAuth()` stores a fresh credential.
+ */
+function clearProviderStale(sessionID: string, providerID: string): void {
+  const providers = staleSessionAuth.get(sessionID);
+  if (!providers) return;
+  providers.delete(providerID);
+  if (providers.size === 0) staleSessionAuth.delete(sessionID);
 }
 
 // ---------------------------------------------------------------------------
@@ -192,8 +235,8 @@ export function getLastSeenAuth(): AuthCredential | null {
  *    When `providerID` is also given, returns the credential stored for
  *    that specific provider — preventing cross-contamination when a session
  *    uses multiple providers (e.g. Anthropic + MiniMax).
- *    Skips stale credentials (401/403 received) so the global fallback
- *    can provide a potentially-refreshed token.
+ *    Skips credentials whose specific provider is marked stale (401/403)
+ *    so the global fallback can provide a potentially-refreshed token.
  * 2. Fall back to the global `lastSeenAuth` (for cold-start or callers
  *    that don't pass a session ID).
  * 3. If the global fallback holds the same value as the stale session
@@ -208,7 +251,11 @@ export function resolveAuth(
 ): AuthCredential | null {
   if (sessionID) {
     const cred = getSessionAuth(sessionID, providerID);
-    if (cred && !staleSessionAuth.has(sessionID)) return cred;
+    // Check staleness for the specific provider being requested.
+    // A stale MiniMax credential should NOT cause the Anthropic credential
+    // to be skipped (or vice versa).
+    const staleKey = providerID || "_default";
+    if (cred && !isAuthStale(sessionID, staleKey)) return cred;
 
     // Global fallback — but guard against returning the same stale token.
     // In single-session OAuth setups, session and global hold the exact
@@ -231,3 +278,7 @@ export function _resetAuthForTest(): void {
   staleSessionAuth.clear();
   lastSeenAuth = null;
 }
+
+// Re-export for documentation — staleSessionAuth is Map<sessionID, Set<providerID>>.
+// Invariant: markAuthStale(sid, pid) only poisons resolveAuth(sid, pid),
+// NOT resolveAuth(sid, otherPid). Cross-provider credential poisoning is a bug.

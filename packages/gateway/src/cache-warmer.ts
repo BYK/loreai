@@ -1394,7 +1394,7 @@ export async function executeWarmup(
       // a fresh credential arrives. Prevents unbounded 401 spam every 30s.
       if (response.status === 401 || response.status === 403) {
         authDisabledSessions.add(state.sessionID);
-        markAuthStale(state.sessionID);
+        markAuthStale(state.sessionID, state.lastUpstream?.providerID);
         recordWorkerFailure(state.sessionID, "cache-warmer", "auth-rejected");
         log.warn(
           `cache-warmer: auth error ${response.status} — disabling warmup for ` +

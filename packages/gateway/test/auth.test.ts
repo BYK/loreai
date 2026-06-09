@@ -29,6 +29,10 @@ const bearerCred2: AuthCredential = {
   value: "tok-session-xyz",
 };
 const apiKeyCred: AuthCredential = { scheme: "api-key", value: "sk-test-key" };
+const minimaxCred: AuthCredential = {
+  scheme: "api-key",
+  value: "sk-cp-minimax-key",
+};
 
 // ---------------------------------------------------------------------------
 // Staleness tracking
@@ -39,7 +43,7 @@ describe("markAuthStale / isAuthStale", () => {
     expect(isAuthStale("sess-1")).toBe(false);
   });
 
-  test("marks a session as stale", () => {
+  test("marks a session as stale (no providerID → _default)", () => {
     markAuthStale("sess-1");
     expect(isAuthStale("sess-1")).toBe(true);
   });
@@ -55,6 +59,24 @@ describe("markAuthStale / isAuthStale", () => {
     markAuthStale("sess-1");
     expect(isAuthStale("sess-1")).toBe(true);
   });
+
+  test("staleness is per-provider within a session", () => {
+    markAuthStale("sess-1", "minimax");
+    // Session-level: any provider stale → true
+    expect(isAuthStale("sess-1")).toBe(true);
+    // Provider-level: only minimax is stale
+    expect(isAuthStale("sess-1", "minimax")).toBe(true);
+    expect(isAuthStale("sess-1", "anthropic")).toBe(false);
+  });
+
+  test("multiple providers can be stale independently", () => {
+    markAuthStale("sess-1", "minimax");
+    markAuthStale("sess-1", "anthropic");
+    expect(isAuthStale("sess-1", "minimax")).toBe(true);
+    expect(isAuthStale("sess-1", "anthropic")).toBe(true);
+    expect(isAuthStale("sess-1", "openai")).toBe(false);
+    expect(isAuthStale("sess-1")).toBe(true);
+  });
 });
 
 describe("clearAuthStale", () => {
@@ -63,6 +85,15 @@ describe("clearAuthStale", () => {
     expect(isAuthStale("sess-1")).toBe(true);
     clearAuthStale("sess-1");
     expect(isAuthStale("sess-1")).toBe(false);
+  });
+
+  test("clears all providers for a session", () => {
+    markAuthStale("sess-1", "minimax");
+    markAuthStale("sess-1", "anthropic");
+    clearAuthStale("sess-1");
+    expect(isAuthStale("sess-1")).toBe(false);
+    expect(isAuthStale("sess-1", "minimax")).toBe(false);
+    expect(isAuthStale("sess-1", "anthropic")).toBe(false);
   });
 
   test("clearing a non-stale session is a no-op", () => {
@@ -80,6 +111,21 @@ describe("setSessionAuth clears staleness", () => {
     // Setting a new credential should clear staleness
     setSessionAuth("sess-1", bearerCred2);
     expect(isAuthStale("sess-1")).toBe(false);
+  });
+
+  test("setting credential for one provider clears only that provider", () => {
+    setSessionAuth("sess-1", bearerCred, "anthropic");
+    setSessionAuth("sess-1", minimaxCred, "minimax");
+    markAuthStale("sess-1", "anthropic");
+    markAuthStale("sess-1", "minimax");
+
+    // Refresh only anthropic
+    setSessionAuth("sess-1", bearerCred2, "anthropic");
+    expect(isAuthStale("sess-1", "anthropic")).toBe(false);
+    // minimax should still be stale
+    expect(isAuthStale("sess-1", "minimax")).toBe(true);
+    // Session-level: still stale (minimax)
+    expect(isAuthStale("sess-1")).toBe(true);
   });
 });
 
@@ -172,5 +218,75 @@ describe("resolveAuth with staleness", () => {
 
     // Now returns the fresh session credential
     expect(resolveAuth("sess-1")).toEqual(bearerCred2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-provider staleness isolation (cross-provider credential poisoning fix)
+// ---------------------------------------------------------------------------
+
+describe("resolveAuth per-provider staleness", () => {
+  test("stale MiniMax does not poison Anthropic credential", () => {
+    // Session uses both Anthropic and MiniMax
+    setSessionAuth("sess-1", apiKeyCred, "anthropic");
+    setSessionAuth("sess-1", minimaxCred, "minimax");
+    setLastSeenAuth(apiKeyCred);
+
+    // MiniMax goes stale (e.g. cache-warmer 401)
+    markAuthStale("sess-1", "minimax");
+
+    // Anthropic credential should still resolve normally
+    expect(resolveAuth("sess-1", "anthropic")).toEqual(apiKeyCred);
+    // MiniMax should fall through to global
+    expect(resolveAuth("sess-1", "minimax")).toEqual(apiKeyCred);
+  });
+
+  test("stale Anthropic does not poison MiniMax credential", () => {
+    setSessionAuth("sess-1", apiKeyCred, "anthropic");
+    setSessionAuth("sess-1", minimaxCred, "minimax");
+    setLastSeenAuth(apiKeyCred);
+
+    markAuthStale("sess-1", "anthropic");
+
+    // MiniMax credential should still resolve
+    expect(resolveAuth("sess-1", "minimax")).toEqual(minimaxCred);
+    // Anthropic falls through to global (same value → null)
+    expect(resolveAuth("sess-1", "anthropic")).toBe(null);
+  });
+
+  test("marking named provider stale also marks _default stale", () => {
+    setSessionAuth("sess-1", minimaxCred, "minimax");
+    // _default was set to minimaxCred by setSessionAuth's dual-write
+    setLastSeenAuth(apiKeyCred);
+
+    // Mark only minimax stale — should automatically mark _default too,
+    // since _default tracks the latest-used provider.
+    markAuthStale("sess-1", "minimax");
+
+    // _default should be stale (auto-marked)
+    expect(isAuthStale("sess-1", "_default")).toBe(true);
+    // No providerID → checks _default → stale → falls through to global
+    expect(resolveAuth("sess-1")).toEqual(apiKeyCred);
+  });
+
+  test("refreshing one provider clears only that provider staleness", () => {
+    setSessionAuth("sess-1", apiKeyCred, "anthropic");
+    setSessionAuth("sess-1", minimaxCred, "minimax");
+    setLastSeenAuth(apiKeyCred);
+
+    markAuthStale("sess-1", "anthropic");
+    markAuthStale("sess-1", "minimax");
+
+    // Refresh only anthropic — clears anthropic + _default staleness
+    setSessionAuth("sess-1", bearerCred2, "anthropic");
+
+    // Anthropic is fresh — resolves to new credential
+    expect(resolveAuth("sess-1", "anthropic")).toEqual(bearerCred2);
+    // MiniMax still stale — falls through to global
+    expect(resolveAuth("sess-1", "minimax")).toEqual(apiKeyCred);
+    // _default was cleared by setSessionAuth refresh
+    expect(isAuthStale("sess-1", "_default")).toBe(false);
+    // But session-level still stale (minimax)
+    expect(isAuthStale("sess-1")).toBe(true);
   });
 });
