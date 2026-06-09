@@ -29,13 +29,21 @@ const PNG_TARGETS = [
 const OG_IMAGE = "og-image.png";
 const OG_WIDTH = 1200;
 const OG_HEIGHT = 630;
-const OG_LOGO_HEIGHT = 180;
+const OG_LOGO_HEIGHT = 140;
 // Headline + tagline baked into the OG image so social previews show a
-// scannable, click-driving message rather than a bare logo. The "Use with
-// any agent" line doubles as a CTA — pointing at the proxy that runs
+// scannable, click-driving message rather than a bare logo. The "Any
+// agent" line doubles as a CTA — pointing at the proxy that runs
 // alongside any AI agent (Claude Code, Codex, Pi, OpenCode, etc.).
 const OG_HEADLINE = "Shared context for AI agents";
 const OG_TAGLINE = "Local-first. Any agent. Zero setup.";
+const OG_CTA = "→ withlore.ai";
+// Dark green background (site's --g0) and high-contrast text colors.
+// The tagline uses a brighter sage than the brand --g2 so it stays
+// legible against the dark background without being harsh.
+const OG_BG_COLOR = "#1a3320";
+const OG_HEADLINE_COLOR = "#f5efe1"; // cream (site's --g5)
+const OG_TAGLINE_COLOR = "#d8e4d8"; // bright sage, higher contrast than --g2
+const OG_CTA_COLOR = "#a8c8a8"; // mid sage, draws the eye last
 
 const svgoConfig = {
   multipass: true,
@@ -114,22 +122,28 @@ async function generate(root: string): Promise<void> {
          xmlns:xlink="http://www.w3.org/1999/xlink"
          width="${OG_WIDTH}" height="${OG_HEIGHT}">
       <!-- Dark background -->
-      <rect width="${OG_WIDTH}" height="${OG_HEIGHT}" fill="#1a3320" />
-      <!-- Logo top-left -->
+      <rect width="${OG_WIDTH}" height="${OG_HEIGHT}" fill="${OG_BG_COLOR}" />
+      <!-- Logo top-left, well-clear of the headline below -->
       <image xlink:href="${logoDataUri}"
-             x="80" y="80" height="${OG_LOGO_HEIGHT}" />
-      <!-- Headline — cream, bold, 72px sans-serif -->
-      <text x="80" y="400"
+             x="80" y="90" height="${OG_LOGO_HEIGHT}" />
+      <!-- Headline — cream, bold, 72px, well below the logo -->
+      <text x="80" y="370"
             font-family="Arial, Helvetica, sans-serif"
             font-size="72"
             font-weight="700"
-            fill="#f5efe1">${OG_HEADLINE}</text>
-      <!-- Tagline (CTA) — sage, medium, 36px sans-serif -->
-      <text x="80" y="470"
+            fill="${OG_HEADLINE_COLOR}">${OG_HEADLINE}</text>
+      <!-- Tagline — bright sage, medium, 40px -->
+      <text x="80" y="430"
             font-family="Arial, Helvetica, sans-serif"
-            font-size="36"
+            font-size="40"
             font-weight="500"
-            fill="#b8c9b8">${OG_TAGLINE}</text>
+            fill="${OG_TAGLINE_COLOR}">${OG_TAGLINE}</text>
+      <!-- CTA — mid sage, points at the site URL -->
+      <text x="80" y="520"
+            font-family="Arial, Helvetica, sans-serif"
+            font-size="32"
+            font-weight="600"
+            fill="${OG_CTA_COLOR}">${OG_CTA}</text>
     </svg>
   `);
 
