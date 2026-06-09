@@ -13,7 +13,14 @@
     "onlyBuiltDependencies": [
       "esbuild",
       "sharp"
-    ]
+    ],
+    "overrides": {
+      "basic-ftp": "5.3.1",
+      "ip-address": "10.2.0",
+      "fast-xml-parser": "5.7.3",
+      "@huggingface/hub": "2.11.0",
+      "yaml": ">=2.8.3"
+    }
   },
   "scripts": {
     "typecheck": "pnpm -r run typecheck",
@@ -47,12 +54,6 @@
     "url": "git+https://github.com/BYK/loreai.git"
   },
   "author": "BYK",
-  "overrides": {
-    "basic-ftp": "5.3.1",
-    "ip-address": "10.2.0",
-    "fast-xml-parser": "5.7.3",
-    "@huggingface/hub": "2.11.0"
-  },
   "workspaces": [
     "packages/*"
   ]
