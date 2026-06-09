@@ -4,6 +4,10 @@
  * Currently supports:
  *   - codex: writes `openai_base_url` and `model_auto_compact_token_limit`
  *     to `~/.codex/config.toml`
+ *   - opencode: writes `provider.openai.options.baseURL` to
+ *     `~/.config/opencode/opencode.json`
+ *   - claude-code: writes `env.ANTHROPIC_BASE_URL` and `env.DISABLE_AUTO_COMPACT`
+ *     to `~/.claude/settings.json`
  *
  * The command auto-detects installed apps when no argument is given,
  * or accepts an explicit app name (e.g. `lore setup codex`).
@@ -31,6 +35,16 @@ const SUPPORTED_APPS: AppSetup[] = [
     agentName: "codex",
     displayName: "Codex",
     run: (baseUrl) => setupCodex(baseUrl),
+  },
+  {
+    agentName: "opencode",
+    displayName: "OpenCode",
+    run: (baseUrl) => setupOpencode(baseUrl),
+  },
+  {
+    agentName: "claude-code",
+    displayName: "Claude Code",
+    run: (baseUrl) => setupClaudeCode(baseUrl),
   },
 ];
 
@@ -219,6 +233,202 @@ function setupCodex(baseUrl: string): void {
   console.log(`[lore]`);
   console.log(
     `[lore] Make sure the gateway is running (lore start) before using Codex.`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// JSON config updater
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse JSON config, returning `{}` for missing files and an empty object
+ * for syntactically invalid files (with a warning). Callers should
+ * validate the resulting object structure before use.
+ */
+export function readJsonConfig(path: string): Record<string, unknown> {
+  try {
+    const raw = readFileSync(path, "utf8");
+    return JSON.parse(raw) as Record<string, unknown>;
+  } catch (e: unknown) {
+    const err = e as NodeJS.ErrnoException;
+    if (err.code === "ENOENT") return {};
+    console.warn(
+      `[lore] Warning: could not parse ${path} as JSON (${err.message}). Starting with empty config.`,
+    );
+    return {};
+  }
+}
+
+/**
+ * Update (or create) a JSON config file by deep-merging `updates` into the
+ * top-level object. Preserves all other keys, arrays, and nested objects.
+ *
+ * For object values, recursively merges. For primitive/array values, replaces
+ * (which matches the behavior we need for `env.ANTHROPIC_BASE_URL` and
+ * `provider.<id>.options.baseURL` — both should be string-typed).
+ *
+ * Writes a 2-space indented JSON file with a trailing newline.
+ */
+export function updateJsonConfig(
+  path: string,
+  updates: Record<string, unknown>,
+): void {
+  const existing = readJsonConfig(path);
+  const merged = deepMerge(existing, updates);
+  writeFileSync(path, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
+}
+
+/**
+ * Recursively merge `b` into `a` (mutates `a` for object targets).
+ * Object values are merged key-by-key; all other values are replaced.
+ */
+function deepMerge(
+  a: Record<string, unknown>,
+  b: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...a };
+  for (const [key, bVal] of Object.entries(b)) {
+    const aVal = out[key];
+    if (
+      aVal !== null &&
+      aVal !== undefined &&
+      typeof aVal === "object" &&
+      !Array.isArray(aVal) &&
+      bVal !== null &&
+      typeof bVal === "object" &&
+      !Array.isArray(bVal)
+    ) {
+      out[key] = deepMerge(
+        aVal as Record<string, unknown>,
+        bVal as Record<string, unknown>,
+      );
+    } else {
+      out[key] = bVal;
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// opencode setup
+// ---------------------------------------------------------------------------
+
+/** Path to the OpenCode user-level config file. */
+export function opencodeConfigPath(): string {
+  return join(homedir(), ".config", "opencode", "opencode.json");
+}
+
+/**
+ * Update (or create) the OpenCode user-level `opencode.json` to route the
+ * built-in `openai` provider through the Lore gateway, and disable
+ * OpenCode's built-in auto-compaction.
+ *
+ * Strategy:
+ * - Sets `provider.openai.options.baseURL` to the gateway URL (must include
+ *   `/v1` — OpenAI SDK convention used by OpenCode's OpenAI provider).
+ * - Sets `compaction.auto` to `false` so the Lore gradient context manager
+ *   and distillation pipeline are the source of truth.
+ * - Deep-merges with the existing config; preserves user-set custom
+ *   providers, themes, keybinds, and other settings.
+ * - Idempotent: running twice produces the same result.
+ */
+export function updateOpencodeConfig(
+  config: Record<string, unknown>,
+  baseUrl: string,
+): Record<string, unknown> {
+  return deepMerge(config, {
+    provider: {
+      openai: {
+        options: {
+          baseURL: baseUrl,
+        },
+      },
+    },
+    compaction: {
+      auto: false,
+    },
+  });
+}
+
+function setupOpencode(baseUrl: string): void {
+  const configPath = opencodeConfigPath();
+  const configDir = join(homedir(), ".config", "opencode");
+
+  mkdirSync(configDir, { recursive: true });
+
+  const existing = readJsonConfig(configPath);
+  const updated = updateOpencodeConfig(existing, baseUrl);
+  writeFileSync(configPath, `${JSON.stringify(updated, null, 2)}\n`, "utf8");
+
+  console.log(`[lore] OpenCode configured to use Lore gateway.`);
+  console.log(`[lore]   provider.openai.options.baseURL = "${baseUrl}"`);
+  console.log(`[lore]   compaction.auto = false (auto-compaction disabled)`);
+  console.log(`[lore]   Config: ${configPath}`);
+  console.log(`[lore]`);
+  console.log(
+    `[lore] Make sure the gateway is running (lore start) before using OpenCode.`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// claude-code setup
+// ---------------------------------------------------------------------------
+
+/** Path to the Claude Code user-level settings file. */
+export function claudeCodeSettingsPath(): string {
+  return join(homedir(), ".claude", "settings.json");
+}
+
+/**
+ * Update (or create) the Claude Code user-level `settings.json` to route
+ * through the Lore gateway.
+ *
+ * Strategy:
+ * - Sets `env.ANTHROPIC_BASE_URL` to the gateway URL (NOT including `/v1` —
+ *   Claude Code appends `/v1/messages` itself per the Anthropic SDK
+ *   convention).
+ * - Sets `env.DISABLE_AUTO_COMPACT` to `"1"` so the Lore gradient
+ *   context manager and distillation pipeline are the source of truth.
+ * - Deep-merges with the existing settings; preserves permissions,
+ *   hooks, model overrides, and other env vars.
+ * - Idempotent: running twice produces the same result.
+ */
+export function updateClaudeCodeSettings(
+  config: Record<string, unknown>,
+  gatewayUrl: string,
+): Record<string, unknown> {
+  return deepMerge(config, {
+    env: {
+      ANTHROPIC_BASE_URL: gatewayUrl,
+      DISABLE_AUTO_COMPACT: "1",
+    },
+  });
+}
+
+function setupClaudeCode(baseUrl: string): void {
+  const configPath = claudeCodeSettingsPath();
+  const configDir = join(homedir(), ".claude");
+
+  mkdirSync(configDir, { recursive: true });
+
+  // Strip the /v1 suffix — Claude Code appends /v1/messages itself.
+  const anthropicBaseUrl = baseUrl.endsWith("/v1")
+    ? baseUrl.slice(0, -3)
+    : baseUrl;
+
+  const existing = readJsonConfig(configPath);
+  const updated = updateClaudeCodeSettings(existing, anthropicBaseUrl);
+  writeFileSync(configPath, `${JSON.stringify(updated, null, 2)}\n`, "utf8");
+
+  console.log(`[lore] Claude Code configured to use Lore gateway.`);
+  console.log(`[lore]   env.ANTHROPIC_BASE_URL = "${anthropicBaseUrl}"`);
+  console.log(
+    `[lore]   env.DISABLE_AUTO_COMPACT = "1" (auto-compaction disabled)`,
+  );
+  console.log(`[lore]   Config: ${configPath}`);
+  console.log(`[lore]`);
+  console.log(
+    `[lore] Make sure the gateway is running (lore start) before using Claude Code.`,
   );
 }
 
