@@ -272,25 +272,64 @@ function renderObject(name: string, schema: ZodTypeAny, depth = 0): string {
 // Page assembly
 // ---------------------------------------------------------------------------
 
+/**
+ * Hand-curated frontmatter + intro section. Edit this when the intro text
+ * changes; the rest of the page is generated.
+ *
+ * The HTML comment between the frontmatter and the intro is invisible to
+ * Starlight's renderer but serves as a "do not edit" marker for future
+ * contributors — the table below is auto-generated.
+ */
+const PAGE_HEADER =
+  `---
+title: Configuration reference
+description: Complete reference for every field in .lore.json, the env vars that override them, and the configuration file location.
+sidebar:
+  order: 4
+---
+
+<!-- Auto-generated from packages/core/src/config.ts. Hand-edit the header above; the reference below regenerates via pnpm generate:docs. Do not hand-edit field tables. -->
+
+Lore's configuration has three layers, in order of precedence (highest first):
+
+1. **Environment variables** (the LORE_* family — see the env-vars reference page) — process-level overrides, used by the gateway CLI and runtime.
+2. The .lore.json file in the project root — per-project, JSONC-parseable, the primary config surface for memory behavior, budget, distillation, search, knowledge, and cross-project settings. This page documents it.
+3. **Built-in defaults** — every field is optional; the Zod schema supplies safe defaults for anything you omit.
+
+## Where .lore.json lives
+
+The gateway looks for the .lore.json file in a single location:
+
+- The **project root** — the directory the gateway was launched from, identified by the .lore.json file at its top level.
+
+If no .lore.json is found, the gateway uses all defaults (every field is optional). In **hosted mode** (env var LORE_HOSTED_MODE=1), .lore.json is not read at all — a crafted file on a client-controlled path could alter gateway behavior, so the gateway uses the defaults to prevent tampering. Hosted-mode deployments should configure Lore through other means (admin-controlled env vars, fixed configuration baked into the deployment).
+
+The file is **JSONC** (JSON with // line comments and slash-star block comments, plus trailing commas). Example:
+
+` +
+  "```jsonc" +
+  `
+{
+  // Use a cheaper worker model for distillation
+  "workerModel": { "providerID": "anthropic", "modelID": "claude-3-5-haiku-latest" },
+  "curator": { "enabled": true, "maxEntries": 30 },
+}
+` +
+  "```" +
+  `
+
+## How to override a single field
+
+The cleanest way to override a single field is via env var if Lore reads it, or by adding the field to .lore.json in the project root. See the env-vars reference page for the env-var override path; everything else is here in the .lore.json reference below.
+`;
+
 function renderPage(): string {
   const lines: string[] = [];
-  lines.push("---");
-  lines.push("title: Configuration reference");
-  lines.push(
-    "description: Complete reference for every field in .lore.json, generated from the Zod schema.",
-  );
-  lines.push("sidebar:");
-  lines.push("  order: 4");
-  lines.push("---");
-  lines.push("");
-  lines.push(
-    "This page is auto-generated from the Zod schema in `packages/core/src/config.ts`. " +
-      "If you change the schema, run `pnpm run generate:docs` to regenerate this file.",
-  );
+  lines.push(PAGE_HEADER);
   lines.push("");
 
   // Index of top-level keys
-  lines.push("## Top-level keys");
+  lines.push("## Field reference");
   lines.push("");
   const topShape = getShape(LoreConfig);
   if (!topShape) {

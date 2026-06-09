@@ -52,7 +52,10 @@ jobs:
             docs:
               - 'packages/website/**'
               - 'scripts/generate-config-docs.ts'
+              - 'scripts/generate-env-docs.ts'
               - 'packages/core/src/config.ts'
+              - 'packages/gateway/src/**/*.ts'
+              - 'packages/core/src/**/*.ts'
 
       # Force code=true on main/release pushes — these always run full CI.
       # dorny/paths-filter only matters for PRs.

@@ -58,7 +58,10 @@ export default defineConfig({
         },
         {
           label: "Reference",
-          items: [{ label: "Configuration", slug: "docs/configuration" }],
+          items: [
+            { label: "Configuration", slug: "docs/configuration" },
+            { label: "Environment variables", slug: "docs/environment" },
+          ],
         },
       ],
       head: [
