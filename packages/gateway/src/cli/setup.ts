@@ -5,13 +5,15 @@
  *   - codex: writes `openai_base_url` and `model_auto_compact_token_limit`
  *     to `~/.codex/config.toml`
  *   - opencode: writes `provider.openai.options.baseURL` to
- *     `~/.config/opencode/opencode.json`
+ *     `~/.config/opencode/opencode.json` and installs the
+ *     `@loreai/opencode` plugin (unless `--no-plugin`)
  *   - claude-code: writes `env.ANTHROPIC_BASE_URL` and `env.DISABLE_AUTO_COMPACT`
  *     to `~/.claude/settings.json`
  *
  * The command auto-detects installed apps when no argument is given,
  * or accepts an explicit app name (e.g. `lore setup codex`).
  */
+import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -21,32 +23,194 @@ import { detectAgents } from "./agents";
 // Supported apps and their setup handlers
 // ---------------------------------------------------------------------------
 
+/**
+ * Optional plugin install for an app. When set, `lore setup <app>` will
+ * install the npm package and register it in the agent's config unless
+ * the user passes `--no-plugin`.
+ */
+interface PluginSpec {
+  /** npm package name (e.g. `@loreai/opencode`) */
+  npmPackage: string;
+  /**
+   * Path to the agent's plugin array in its config (e.g. `["plugin"]`).
+   * The plugin is appended if absent, kept in place if present.
+   */
+  registerConfigPath: string[];
+  /**
+   * Apply the plugin to the parsed config (mutates the config in place).
+   * Returns true if the config was modified.
+   */
+  apply: (config: Record<string, unknown>) => boolean;
+}
+
 interface AppSetup {
   /** Internal identifier matching AgentDef.name */
   agentName: string;
   /** Human-readable name */
   displayName: string;
-  /** Run the setup for this app */
-  run: (baseUrl: string) => void;
+  /** Run the setup for this app. `noPlugin` is true when the user passed --no-plugin. */
+  run: (baseUrl: string, noPlugin: boolean) => void;
+  /** Optional plugin install + registration */
+  plugin?: PluginSpec;
 }
+
+/**
+ * OpenCode plugin spec: installs `@loreai/opencode` and adds it to the
+ * `plugin` array of `~/.config/opencode/opencode.json`.
+ *
+ * Defined before SUPPORTED_APPS so it can be referenced by the opencode
+ * entry without a forward-reference.
+ */
+export const opencodePluginSpec: PluginSpec = {
+  npmPackage: "@loreai/opencode",
+  registerConfigPath: ["plugin"],
+  apply: (config) => {
+    const existing = config.plugin;
+    if (Array.isArray(existing) && existing.includes("@loreai/opencode")) {
+      return false;
+    }
+    if (Array.isArray(existing)) {
+      existing.push("@loreai/opencode");
+    } else {
+      config.plugin = ["@loreai/opencode"];
+    }
+    return true;
+  },
+};
 
 const SUPPORTED_APPS: AppSetup[] = [
   {
     agentName: "codex",
     displayName: "Codex",
     run: (baseUrl) => setupCodex(baseUrl),
+    // No Lore plugin for Codex — the gateway URL + DISABLE_AUTO_COMPACT in
+    // the TOML is the full integration. There's no plugin host in Codex.
   },
   {
     agentName: "opencode",
     displayName: "OpenCode",
-    run: (baseUrl) => setupOpencode(baseUrl),
+    run: (baseUrl, noPlugin) => setupOpencode(baseUrl, noPlugin),
+    plugin: opencodePluginSpec,
   },
   {
     agentName: "claude-code",
     displayName: "Claude Code",
     run: (baseUrl) => setupClaudeCode(baseUrl),
+    // No Lore plugin for Claude Code — Anthropic controls the API surface
+    // and there's no plugin host. The ANTHROPIC_BASE_URL env var is the
+    // only integration point.
   },
 ];
+
+// ---------------------------------------------------------------------------
+// Plugin install + registration
+// ---------------------------------------------------------------------------
+
+/**
+ * Check whether an npm package is already installed globally.
+ * Uses `npm ls -g --json` and looks for the package in the dependency tree.
+ * Returns true if installed at any version, false otherwise.
+ */
+function isNpmPackageInstalled(npmPackage: string): boolean {
+  try {
+    const out = execFileSync(
+      "npm",
+      ["ls", "-g", npmPackage, "--json", "--depth=0"],
+      {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      },
+    );
+    const parsed = JSON.parse(out) as {
+      dependencies?: Record<string, unknown>;
+    };
+    return Boolean(parsed.dependencies?.[npmPackage]);
+  } catch {
+    // `npm ls` exits non-zero when the package isn't found. That's the
+    // common case here, so we treat any error as "not installed."
+    return false;
+  }
+}
+
+/**
+ * Run `npm install -g <package>` and stream stdout/stderr to the user.
+ * Returns true on success, false on failure (with a helpful error message
+ * already printed). Never throws.
+ */
+function runNpmInstall(npmPackage: string): boolean {
+  console.log(`[lore] Running: npm install -g ${npmPackage}`);
+  try {
+    execFileSync("npm", ["install", "-g", npmPackage], {
+      stdio: "inherit",
+    });
+    return true;
+  } catch (e) {
+    console.error(`[lore] npm install failed.`);
+    if (e instanceof Error) {
+      // npm exits with a non-zero status; the error message is usually
+      // a generic "Command failed" without useful context, so we point
+      // the user at the likely causes.
+      console.error(
+        `[lore] If you need to skip the plugin install (CI, air-gapped, or no npm on PATH),`,
+      );
+      console.error(
+        `[lore] re-run with --no-plugin: lore setup <app> --no-plugin`,
+      );
+    }
+    return false;
+  }
+}
+
+/**
+ * Apply the plugin's config registration and write the result back to disk.
+ * `configPath` is the path the user-facing handler writes to (so the
+ * plugin registration is in the same file the user just inspected).
+ */
+function applyPluginRegistration(
+  spec: PluginSpec,
+  configPath: string,
+  config: Record<string, unknown>,
+): boolean {
+  const modified = spec.apply(config);
+  if (!modified) {
+    console.log(`[lore] Plugin "${spec.npmPackage}" already registered.`);
+    return false;
+  }
+  writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  return true;
+}
+
+/**
+ * Install a plugin (if not already installed) and register it in the
+ * agent's config file. Never throws; returns true on full success,
+ * false if the install or registration step failed.
+ *
+ * Called by `setupOpencode` after writing the gateway URL to the config.
+ * The config file the user-facing handler just wrote is the one we
+ * re-read, register the plugin into, and write back.
+ */
+function installPlugin(spec: PluginSpec, configPath: string): boolean {
+  console.log(`[lore] Plugin: ${spec.npmPackage}`);
+
+  if (!isNpmPackageInstalled(spec.npmPackage)) {
+    console.log(`[lore]   not installed globally — installing…`);
+    if (!runNpmInstall(spec.npmPackage)) {
+      return false;
+    }
+  } else {
+    console.log(`[lore]   already installed globally.`);
+  }
+
+  // Re-read the config the user-facing handler just wrote, register the
+  // plugin, and write it back. We do this AFTER the install so a failed
+  // install doesn't leave the user with a half-configured setup.
+  const config = readJsonConfig(configPath);
+  const registered = applyPluginRegistration(spec, configPath, config);
+  if (registered) {
+    console.log(`[lore]   registered in: ${configPath}`);
+  }
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // Gateway URL normalization
@@ -350,7 +514,7 @@ export function updateOpencodeConfig(
   });
 }
 
-function setupOpencode(baseUrl: string): void {
+function setupOpencode(baseUrl: string, noPlugin: boolean): void {
   const configPath = opencodeConfigPath();
   const configDir = join(homedir(), ".config", "opencode");
 
@@ -368,17 +532,24 @@ function setupOpencode(baseUrl: string): void {
   console.log(
     `[lore] Make sure the gateway is running (lore start) before using OpenCode.`,
   );
-  console.log(`[lore]`);
-  console.log(
-    `[lore] Optional: install the @loreai/opencode plugin for transparent per-session`,
-  );
-  console.log(
-    `[lore] routing, auto project-path injection, and per-session cost rollups:`,
-  );
-  console.log(`[lore]   npm install -g @loreai/opencode`);
-  console.log(
-    `[lore]   Then add "@loreai/opencode" to the "plugin" array in ${configPath}.`,
-  );
+
+  if (noPlugin) {
+    console.log(`[lore]`);
+    console.log(
+      `[lore] Skipped @loreai/opencode plugin install (--no-plugin).`,
+    );
+    console.log(
+      `[lore] To install later: npm install -g @loreai/opencode, then add`,
+    );
+    console.log(
+      `[lore] "@loreai/opencode" to the "plugin" array in ${configPath}.`,
+    );
+    return;
+  }
+
+  if (opencodePluginSpec) {
+    installPlugin(opencodePluginSpec, configPath);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -453,6 +624,7 @@ export async function commandSetup(
 ): Promise<void> {
   const remoteUrl = values.remote as string | undefined;
   const port = values.port ? Number(values.port) : undefined;
+  const noPlugin = values.noPlugin === true;
 
   let baseUrl: string;
   try {
@@ -488,7 +660,7 @@ export async function commandSetup(
       );
     }
 
-    app.run(baseUrl);
+    app.run(baseUrl, noPlugin);
     return;
   }
 
@@ -512,6 +684,6 @@ export async function commandSetup(
   }
 
   for (const app of setupTargets) {
-    app.run(baseUrl);
+    app.run(baseUrl, noPlugin);
   }
 }

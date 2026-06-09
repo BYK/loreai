@@ -5,6 +5,7 @@ import {
   setTopLevelKey,
   updateOpencodeConfig,
   updateClaudeCodeSettings,
+  opencodePluginSpec,
 } from "../src/cli/setup";
 
 // ---------------------------------------------------------------------------
@@ -489,5 +490,57 @@ describe("updateClaudeCodeSettings", () => {
     const first = updateClaudeCodeSettings({}, "http://127.0.0.1:3207");
     const second = updateClaudeCodeSettings(first, "http://127.0.0.1:3207");
     expect(second).toEqual(first);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// opencodePluginSpec
+// ---------------------------------------------------------------------------
+
+describe("opencodePluginSpec", () => {
+  test("has expected package name and registration target", () => {
+    expect(opencodePluginSpec.npmPackage).toBe("@loreai/opencode");
+    expect(opencodePluginSpec.registerConfigPath).toEqual(["plugin"]);
+  });
+
+  test("adds plugin to empty config", () => {
+    const config: Record<string, unknown> = {};
+    const modified = opencodePluginSpec.apply(config);
+    expect(modified).toBe(true);
+    expect(config.plugin).toEqual(["@loreai/opencode"]);
+  });
+
+  test("appends to existing plugin array (idempotent within a single apply)", () => {
+    const config: Record<string, unknown> = {
+      plugin: ["@opencode-ai/plugin", "@other/plugin"],
+    };
+    const modified = opencodePluginSpec.apply(config);
+    expect(modified).toBe(true);
+    expect(config.plugin).toEqual([
+      "@opencode-ai/plugin",
+      "@other/plugin",
+      "@loreai/opencode",
+    ]);
+  });
+
+  test("is a no-op when plugin is already registered", () => {
+    const config: Record<string, unknown> = {
+      plugin: ["@loreai/opencode", "@other/plugin"],
+    };
+    const modified = opencodePluginSpec.apply(config);
+    expect(modified).toBe(false);
+    expect(config.plugin).toEqual(["@loreai/opencode", "@other/plugin"]);
+  });
+
+  test("replaces non-array plugin field with an array", () => {
+    // The `plugin` field should be an array, but if a user somehow
+    // has a string there (typo, manual edit), we replace it with an
+    // array containing just our plugin. This is conservative — we
+    // don't try to preserve a non-array value because the OpenCode
+    // config schema requires an array.
+    const config: Record<string, unknown> = { plugin: "not-an-array" };
+    const modified = opencodePluginSpec.apply(config);
+    expect(modified).toBe(true);
+    expect(config.plugin).toEqual(["@loreai/opencode"]);
   });
 });

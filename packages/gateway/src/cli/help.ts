@@ -38,6 +38,9 @@ Options:
                       \`lore start\` (keep FS ops active; bucket cwd fallback)
                       (env: LORE_HOSTED_MODE=0)
   -d, --debug         Enable debug logging (env: LORE_DEBUG=1)
+      --no-plugin     Skip auto-install of the @loreai/<app> plugin
+                      for \`lore setup <app>\` (use on CI, air-gapped
+                      networks, or when npm is not on PATH)
   -v, --version       Print version and exit
   -h, --help          Show this help text
 
@@ -111,6 +114,7 @@ Examples:
   lore setup                    # Auto-detect and configure installed apps
   lore setup codex              # Configure Codex to use lore
   lore setup codex -r http://remote:3207  # Configure Codex with a remote gateway
+  lore setup opencode --no-plugin  # Configure OpenCode without installing the @loreai/opencode plugin
   lore upgrade                  # Upgrade to latest version
   lore upgrade --check          # Check for updates without installing
   lore upgrade --force          # Force re-download even if up to date
