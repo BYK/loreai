@@ -1,11 +1,17 @@
 ---
 import "../styles/blog.css";
 import Logo from "../components/Logo.astro";
+import SocialMeta from "../components/SocialMeta.astro";
 
 const {
   title = "Lore Blog",
   description = "Product notes, engineering updates, and memory architecture deep dives from Lore.",
 } = Astro.props;
+
+const base = import.meta.env.BASE_URL;
+const rawPath = Astro.url.pathname;
+const path = rawPath.startsWith(base) ? rawPath.slice(base.length) : rawPath.replace(/^\//, "");
+const ogType = path === "blog.html" ? "website" : "article";
 ---
 
 <!DOCTYPE html>
@@ -15,6 +21,12 @@ const {
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>{title} | Lore</title>
     <meta name="description" content={description} />
+    <SocialMeta
+      title={`${title} | Lore`}
+      description={description}
+      path={path}
+      type={ogType}
+    />
     <link rel="icon" type="image/svg+xml" href={`${import.meta.env.BASE_URL}favicon.svg`} />
     <link rel="icon" type="image/png" sizes="32x32" href={`${import.meta.env.BASE_URL}favicon-32.png`} />
     <link rel="apple-touch-icon" sizes="180x180" href={`${import.meta.env.BASE_URL}apple-touch-icon.png`} />

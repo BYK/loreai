@@ -26,6 +26,11 @@ const PNG_TARGETS = [
   { file: "apple-touch-icon.png", size: 180 },
 ] as const;
 
+const OG_IMAGE = "og-image.png";
+const OG_WIDTH = 1200;
+const OG_HEIGHT = 630;
+const OG_LOGO_HEIGHT = 280;
+
 const svgoConfig = {
   multipass: true,
   js2svg: { pretty: false },
@@ -88,6 +93,28 @@ async function generate(root: string): Promise<void> {
       })
       .toFile(resolve(publicDir, file));
   }
+
+  // 3. Generate og-image.png (1200×630) — dark background + cream lily logo
+  const logoForOg = await sharp(rasterInput, { density: 384 })
+    .resize({
+      height: OG_LOGO_HEIGHT,
+      fit: "contain",
+      background: { r: 0, g: 0, b: 0, alpha: 0 },
+    })
+    .png()
+    .toBuffer();
+
+  await sharp({
+    create: {
+      width: OG_WIDTH,
+      height: OG_HEIGHT,
+      channels: 4,
+      background: { r: 26, g: 51, b: 32, alpha: 255 }, // #1a3320 (site's --g0)
+    },
+  })
+    .composite([{ input: logoForOg, gravity: "centre" }])
+    .png({ compressionLevel: 9, effort: 10 })
+    .toFile(resolve(publicDir, OG_IMAGE));
 }
 
 export function faviconAssets(): AstroIntegration {

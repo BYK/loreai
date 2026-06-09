@@ -91,6 +91,101 @@ export default defineConfig({
             href: `${base}apple-touch-icon.png`,
           },
         },
+        // Open Graph
+        {
+          tag: "meta",
+          attrs: {
+            property: "og:title",
+            content: "Lore Documentation",
+          },
+        },
+        {
+          tag: "meta",
+          attrs: {
+            property: "og:description",
+            content:
+              "Install, operate, and understand Lore's local-first memory layer for AI coding agents.",
+          },
+        },
+        {
+          tag: "meta",
+          attrs: {
+            property: "og:image",
+            content: `https://withlore.ai${base}og-image.png`,
+          },
+        },
+        {
+          tag: "meta",
+          attrs: {
+            property: "og:image:width",
+            content: "1200",
+          },
+        },
+        {
+          tag: "meta",
+          attrs: {
+            property: "og:image:height",
+            content: "630",
+          },
+        },
+        {
+          tag: "meta",
+          attrs: {
+            property: "og:image:alt",
+            content: "Lore.AI — Shared Context for AI Agents",
+          },
+        },
+        {
+          tag: "meta",
+          attrs: {
+            property: "og:type",
+            content: "website",
+          },
+        },
+        {
+          tag: "meta",
+          attrs: {
+            property: "og:site_name",
+            content: "Lore.AI",
+          },
+        },
+        // Twitter Card
+        {
+          tag: "meta",
+          attrs: {
+            name: "twitter:card",
+            content: "summary_large_image",
+          },
+        },
+        {
+          tag: "meta",
+          attrs: {
+            name: "twitter:title",
+            content: "Lore Documentation",
+          },
+        },
+        {
+          tag: "meta",
+          attrs: {
+            name: "twitter:description",
+            content:
+              "Install, operate, and understand Lore's local-first memory layer for AI coding agents.",
+          },
+        },
+        {
+          tag: "meta",
+          attrs: {
+            name: "twitter:image",
+            content: `https://withlore.ai${base}og-image.png`,
+          },
+        },
+        {
+          tag: "meta",
+          attrs: {
+            name: "twitter:site",
+            content: "@withLoreAI",
+          },
+        },
       ],
     }),
   ],
