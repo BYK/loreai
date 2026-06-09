@@ -101,58 +101,40 @@ async function generate(root: string): Promise<void> {
   }
 
   // 3. Generate og-image.png (1200×630) — dark background, cream lily logo
-  //    top-left, and a headline + tagline (CTA) below it. Text is built
-  //    into an SVG and rasterized so we get clean type without needing to
-  //    bundle a font.
-  const logoForOg = await sharp(rasterInput, { density: 384 })
-    .resize({
-      height: OG_LOGO_HEIGHT,
-      fit: "contain",
-      background: { r: 0, g: 0, b: 0, alpha: 0 },
-    })
-    .png()
-    .toBuffer();
+  //    top-left, and a headline + tagline (CTA) below it. We build the
+  //    entire image as a single SVG (background rect, logo image, text
+  //    elements) and rasterize once via sharp. Text is rendered using
+  //    web-safe SVG <text> attributes (font-family, font-size, font-weight
+  //    as separate attributes) — the `font:` shorthand inside a <style>
+  //    block isn't reliably parsed by librsvg.
+  const logoDataUri = `data:image/svg+xml;base64,${rasterInput.toString("base64")}`;
 
-  // SVG with the headline + tagline baked in. The font stack ends with
-  // generic sans-serif so the rasterizer falls back gracefully on any
-  // system — Inter, SF Pro, Segoe UI, Roboto, Helvetica, etc.
-  const textSvg = Buffer.from(`
-    <svg xmlns="http://www.w3.org/2000/svg" width="${OG_WIDTH}" height="${OG_HEIGHT}">
-      <style>
-        .headline {
-          font: 700 64px -apple-system, BlinkMacSystemFont, "Segoe UI",
-            Roboto, "Helvetica Neue", Arial, sans-serif;
-          fill: #f5efe1;
-        }
-        .tagline {
-          font: 500 32px -apple-system, BlinkMacSystemFont, "Segoe UI",
-            Roboto, "Helvetica Neue", Arial, sans-serif;
-          fill: #b8c9b8;
-        }
-      </style>
-      <text x="80" y="200" class="headline">${OG_HEADLINE}</text>
-      <text x="80" y="260" class="tagline">${OG_TAGLINE}</text>
+  const fullSvg = Buffer.from(`
+    <svg xmlns="http://www.w3.org/2000/svg"
+         xmlns:xlink="http://www.w3.org/1999/xlink"
+         width="${OG_WIDTH}" height="${OG_HEIGHT}">
+      <!-- Dark background -->
+      <rect width="${OG_WIDTH}" height="${OG_HEIGHT}" fill="#1a3320" />
+      <!-- Logo top-left -->
+      <image xlink:href="${logoDataUri}"
+             x="80" y="80" height="${OG_LOGO_HEIGHT}" />
+      <!-- Headline — cream, bold, 72px sans-serif -->
+      <text x="80" y="400"
+            font-family="Arial, Helvetica, sans-serif"
+            font-size="72"
+            font-weight="700"
+            fill="#f5efe1">${OG_HEADLINE}</text>
+      <!-- Tagline (CTA) — sage, medium, 36px sans-serif -->
+      <text x="80" y="470"
+            font-family="Arial, Helvetica, sans-serif"
+            font-size="36"
+            font-weight="500"
+            fill="#b8c9b8">${OG_TAGLINE}</text>
     </svg>
   `);
-  const textRaster = await sharp(textSvg)
-    .resize(OG_WIDTH, OG_HEIGHT)
-    .png()
-    .toBuffer();
 
-  await sharp({
-    create: {
-      width: OG_WIDTH,
-      height: OG_HEIGHT,
-      channels: 4,
-      background: { r: 26, g: 51, b: 32, alpha: 255 }, // #1a3320 (site's --g0)
-    },
-  })
-    .composite([
-      // Logo top-left
-      { input: logoForOg, top: 80, left: 80 },
-      // Headline + tagline below logo
-      { input: textRaster, top: 0, left: 0 },
-    ])
+  await sharp(fullSvg, { density: 384 })
+    .resize(OG_WIDTH, OG_HEIGHT)
     .png({ compressionLevel: 9, effort: 10 })
     .toFile(resolve(publicDir, OG_IMAGE));
 }
