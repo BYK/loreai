@@ -428,8 +428,12 @@ describe("updateOpencodeConfig", () => {
   });
 
   test("replaces baseURL when re-run with a different value", () => {
-    const first = updateOpencodeConfig({}, "http://old:3207/v1");
-    const second = updateOpencodeConfig(first, "http://new:3207/v1");
+    const first = updateOpencodeConfig({}, "http://old:3207/v1") as {
+      provider?: { openai?: { options?: { baseURL?: string } } };
+    };
+    const second = updateOpencodeConfig(first, "http://new:3207/v1") as {
+      provider?: { openai?: { options?: { baseURL?: string } } };
+    };
     expect(second.provider?.openai?.options?.baseURL).toBe(
       "http://new:3207/v1",
     );
@@ -455,7 +459,9 @@ describe("updateClaudeCodeSettings", () => {
     // The setupClaudeCode wrapper strips /v1 before calling, but the
     // helper itself accepts whatever the caller passes. The wrapper
     // contract is what matters here.
-    const result = updateClaudeCodeSettings({}, "http://127.0.0.1:3207/v1");
+    const result = updateClaudeCodeSettings({}, "http://127.0.0.1:3207/v1") as {
+      env?: { ANTHROPIC_BASE_URL?: string };
+    };
     // We document the wrapper strips /v1; the helper does not.
     // This test documents the helper's raw behavior.
     expect(result.env?.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:3207/v1");
