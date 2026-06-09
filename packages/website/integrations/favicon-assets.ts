@@ -37,7 +37,6 @@ const OG_IMAGE_PREFIX = "og-image";
 const OG_IMAGE_EXTENSION = "png";
 const OG_WIDTH = 1200;
 const OG_HEIGHT = 630;
-const OG_LOGO_HEIGHT = 140;
 // Headline + tagline baked into the OG image so social previews show a
 // scannable, click-driving message rather than a bare logo. The "Any
 // agent" line doubles as a CTA — pointing at the proxy that runs
@@ -47,11 +46,12 @@ const OG_TAGLINE = "Local-first. Any agent. Zero setup.";
 const OG_CTA = "→ withlore.ai";
 // Dark green background (site's --g0) and high-contrast text colors.
 // The tagline uses a brighter sage than the brand --g2 so it stays
-// legible against the dark background without being harsh.
+// legible against the dark background without being harsh. The CTA
+// reuses the headline cream so it competes for attention rather than
+// blending into the sage palette.
 const OG_BG_COLOR = "#1a3320";
 const OG_HEADLINE_COLOR = "#f5efe1"; // cream (site's --g5)
 const OG_TAGLINE_COLOR = "#d8e4d8"; // bright sage, higher contrast than --g2
-const OG_CTA_COLOR = "#a8c8a8"; // mid sage, draws the eye last
 
 // Path to the JSON sidecar that exposes the current hashed filename to
 // Astro components. Lives in src/ so Astro bundles it (no runtime fetch,
@@ -135,14 +135,29 @@ async function generate(root: string): Promise<void> {
       .toFile(resolve(publicDir, file));
   }
 
-  // 3. Generate the OG image (1200×630) — dark background, cream lily logo
-  //    top-left, and a headline + tagline (CTA) below it. We build the
-  //    entire image as a single SVG (background rect, logo image, text
-  //    elements) and rasterize once via sharp. Text is rendered using
-  //    web-safe SVG <text> attributes (font-family, font-size, font-weight
-  //    as separate attributes) — the `font:` shorthand inside a <style>
-  //    block isn't reliably parsed by librsvg.
+  // 3. Generate the OG image (1200×630) — a centered "logotype" layout:
+  //    logo to the left of the headline on the same axis, tagline below,
+  //    CTA at the bottom. This reads as a single composed unit rather
+  //    than two disconnected elements. Built as a single SVG and
+  //    rasterized via sharp; text uses individual font-* attributes
+  //    (librsvg drops the `font:` shorthand inside <style> blocks).
   const logoDataUri = `data:image/svg+xml;base64,${rasterInput.toString("base64")}`;
+
+  // Vertical center for the logo + headline group, with tagline and CTA
+  // stacked below. 80px of padding on left/right matches social card
+  // safe-area conventions (Twitter crops ~5% off each side).
+  const padX = 80;
+  const logoSize = 200;
+  const headlineSize = 76;
+  const taglineSize = 38;
+  const ctaSize = 40;
+
+  // Group vertical layout (top of group = logo top):
+  //   y=200          logo top
+  //   y=305 (baseline of headline aligned to logo center)
+  //   y=370          tagline baseline
+  //   y=470          CTA baseline
+  const groupTopY = 200;
 
   const fullSvg = Buffer.from(`
     <svg xmlns="http://www.w3.org/2000/svg"
@@ -150,27 +165,27 @@ async function generate(root: string): Promise<void> {
          width="${OG_WIDTH}" height="${OG_HEIGHT}">
       <!-- Dark background -->
       <rect width="${OG_WIDTH}" height="${OG_HEIGHT}" fill="${OG_BG_COLOR}" />
-      <!-- Logo top-left, well-clear of the headline below -->
+      <!-- Logo on the left of the headline — feels like a logotype -->
       <image xlink:href="${logoDataUri}"
-             x="80" y="90" height="${OG_LOGO_HEIGHT}" />
-      <!-- Headline — cream, bold, 72px, well below the logo -->
-      <text x="80" y="370"
+             x="${padX}" y="${groupTopY}" height="${logoSize}" />
+      <!-- Headline — cream, bold, sits to the right of the logo -->
+      <text x="${padX + logoSize + 36}" y="${groupTopY + 110}"
             font-family="Arial, Helvetica, sans-serif"
-            font-size="72"
+            font-size="${headlineSize}"
             font-weight="700"
             fill="${OG_HEADLINE_COLOR}">${OG_HEADLINE}</text>
-      <!-- Tagline — bright sage, medium, 40px -->
-      <text x="80" y="430"
+      <!-- Tagline — bright sage, full width below the group -->
+      <text x="${padX}" y="${groupTopY + 200}"
             font-family="Arial, Helvetica, sans-serif"
-            font-size="40"
+            font-size="${taglineSize}"
             font-weight="500"
             fill="${OG_TAGLINE_COLOR}">${OG_TAGLINE}</text>
-      <!-- CTA — mid sage, points at the site URL -->
-      <text x="80" y="520"
+      <!-- CTA — cream, large + bold so it competes with the headline -->
+      <text x="${padX}" y="${groupTopY + 290}"
             font-family="Arial, Helvetica, sans-serif"
-            font-size="32"
-            font-weight="600"
-            fill="${OG_CTA_COLOR}">${OG_CTA}</text>
+            font-size="${ctaSize}"
+            font-weight="700"
+            fill="${OG_HEADLINE_COLOR}">${OG_CTA}</text>
     </svg>
   `);
 
