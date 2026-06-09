@@ -45,6 +45,21 @@ export default defineConfig({
             { label: "Architecture", slug: "docs/architecture" },
           ],
         },
+        {
+          label: "Guides",
+          items: [
+            { label: "OpenCode", slug: "docs/guides/with-opencode" },
+            { label: "Pi", slug: "docs/guides/with-pi" },
+            { label: "Claude Code", slug: "docs/guides/with-claude-code" },
+            { label: "Codex", slug: "docs/guides/with-codex" },
+            { label: "Custom upstreams", slug: "docs/guides/custom-upstreams" },
+            { label: "Local inference", slug: "docs/guides/local-inference" },
+          ],
+        },
+        {
+          label: "Reference",
+          items: [{ label: "Configuration", slug: "docs/configuration" }],
+        },
       ],
       head: [
         {

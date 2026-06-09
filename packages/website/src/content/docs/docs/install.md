@@ -17,7 +17,9 @@ Then launch Lore with your detected coding agent:
 lore run
 ```
 
-Lore auto-detects supported tools such as Claude Code, OpenCode, Pi, and Codex. You can also run the gateway directly with npm:
+Lore auto-detects Claude Code, OpenCode, Pi, Codex, and Hermes Agent when you run `lore run`. For harness-specific setup, see the Guides section.
+
+You can also run the gateway directly with npm:
 
 ```bash
 npx @loreai/gateway

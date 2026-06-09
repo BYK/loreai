@@ -115,4 +115,74 @@ describe("Codex agent cliArgs", () => {
     const args = codex.cliArgs?.("http://127.0.0.1:3207", "/tmp/test");
     expect(args).toContain("model_auto_compact_token_limit=999999999");
   });
+
+  describe("with LORE_UPSTREAM_EXTRA_HEADERS set", () => {
+    let saved: string | undefined;
+    beforeEach(() => {
+      saved = process.env.LORE_UPSTREAM_EXTRA_HEADERS;
+      delete process.env.LORE_UPSTREAM_EXTRA_HEADERS;
+    });
+    afterEach(() => {
+      if (saved !== undefined) {
+        process.env.LORE_UPSTREAM_EXTRA_HEADERS = saved;
+      } else {
+        delete process.env.LORE_UPSTREAM_EXTRA_HEADERS;
+      }
+    });
+
+    test("injects openai_provider_headers TOML map when set", () => {
+      const codex = AGENTS.find((a) => a.name === "codex");
+      if (!codex) throw new Error("codex agent not registered");
+      process.env.LORE_UPSTREAM_EXTRA_HEADERS =
+        "X-Corp-Token: abc\nX-Tenant: acme";
+      const args = codex.cliArgs?.("http://127.0.0.1:3207", "/tmp/test");
+      // Find the openai_provider_headers -c pair
+      const providerHeadersIdx = args?.findIndex(
+        (a) => typeof a === "string" && a.startsWith("openai_provider_headers"),
+      );
+      expect(providerHeadersIdx).toBeGreaterThan(0);
+      const prev = args?.[providerHeadersIdx! - 1];
+      expect(prev).toBe("-c");
+      const tomlLine = args?.[providerHeadersIdx!];
+      expect(tomlLine).toContain("X-Corp-Token");
+      expect(tomlLine).toContain("abc");
+      expect(tomlLine).toContain("X-Tenant");
+      expect(tomlLine).toContain("acme");
+    });
+
+    test("escapes quotes in header values", () => {
+      const codex = AGENTS.find((a) => a.name === "codex");
+      if (!codex) throw new Error("codex agent not registered");
+      process.env.LORE_UPSTREAM_EXTRA_HEADERS = 'X-Quoted: a"b';
+      const args = codex.cliArgs?.("http://127.0.0.1:3207", "/tmp/test");
+      const idx = args?.findIndex(
+        (a) => typeof a === "string" && a.startsWith("openai_provider_headers"),
+      );
+      expect(idx).toBeGreaterThan(0);
+      // TOML basic string: embedded " is escaped
+      expect(args?.[idx!]).toContain('\\"');
+    });
+
+    test("omits openai_provider_headers when env is empty", () => {
+      const codex = AGENTS.find((a) => a.name === "codex");
+      if (!codex) throw new Error("codex agent not registered");
+      process.env.LORE_UPSTREAM_EXTRA_HEADERS = "";
+      const args = codex.cliArgs?.("http://127.0.0.1:3207", "/tmp/test");
+      const hasProviderHeaders = args?.some(
+        (a) => typeof a === "string" && a.startsWith("openai_provider_headers"),
+      );
+      expect(hasProviderHeaders).toBe(false);
+    });
+
+    test("omits openai_provider_headers when env is whitespace-only", () => {
+      const codex = AGENTS.find((a) => a.name === "codex");
+      if (!codex) throw new Error("codex agent not registered");
+      process.env.LORE_UPSTREAM_EXTRA_HEADERS = "   \n\n  ";
+      const args = codex.cliArgs?.("http://127.0.0.1:3207", "/tmp/test");
+      const hasProviderHeaders = args?.some(
+        (a) => typeof a === "string" && a.startsWith("openai_provider_headers"),
+      );
+      expect(hasProviderHeaders).toBe(false);
+    });
+  });
 });

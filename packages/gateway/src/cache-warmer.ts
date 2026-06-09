@@ -1326,6 +1326,7 @@ function extractFirstUserText(bodyJson: string): string {
 export async function executeWarmup(
   state: SessionState,
   profile: CacheWarmingProfile,
+  upstreamExtraHeaders: Record<string, string> = {},
 ): Promise<WarmupResult> {
   const noResult: WarmupResult = {
     ok: false,
@@ -1364,6 +1365,13 @@ export async function executeWarmup(
   const betaHeader = state.lastUpstream?.headers["anthropic-beta"];
   if (betaHeader) {
     headers["anthropic-beta"] = betaHeader;
+  }
+
+  // Apply user-supplied LORE_UPSTREAM_EXTRA_HEADERS as the final overlay so
+  // corporate-proxy / LiteLLM / Cloudflare AI Gateway / service-account
+  // scenarios work for cache-warming calls too.
+  for (const [key, value] of Object.entries(upstreamExtraHeaders)) {
+    headers[key] = value;
   }
 
   // Re-sign the cch billing header. The cch hash covers the entire

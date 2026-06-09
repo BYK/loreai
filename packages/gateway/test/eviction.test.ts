@@ -42,6 +42,7 @@ function makeConfig(overrides?: Partial<GatewayConfig>): GatewayConfig {
     debug: false,
     hostedMode: false,
     remoteGateway: false,
+    upstreamExtraHeaders: {},
     ...overrides,
   };
 }

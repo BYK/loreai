@@ -1,0 +1,210 @@
+---
+title: Configuration reference
+description: Complete reference for every field in .lore.json, generated from the Zod schema.
+sidebar:
+  order: 4
+---
+
+This page is auto-generated from the Zod schema in `packages/core/src/config.ts`. If you change the schema, run `pnpm run generate:docs` to regenerate this file.
+
+## Top-level keys
+
+- [`model`](#model) — Default session model. When omitted, Lore uses the model from the first client request.
+- [`workerModel`](#workerModel) — Background-worker model for distillation, curation, and query expansion. Same-provider invariant: workers MUST use the same provider as the session.
+- [`budget`](#budget) — Context-window budget fractions. Sum plus LTM ≈ 1.0.
+- [`idleResumeMinutes`](#idleResumeMinutes) — Minutes of inactivity after which Lore refreshes the byte-identity caches on resume (upstream prompt cache is cold). 5 = matches Anthropic's default-tier TTL. Set to 60 for extended (1h) cache tier. 0 to disable. Default: 5.
+- [`distillation`](#distillation) — Distillation pipeline tuning (segment size, thresholds, tool-output truncation).
+- [`knowledge`](#knowledge) — Long-term knowledge (curator, entity injection) controls.
+- [`curator`](#curator) — Curator scheduling and consolidation thresholds.
+- [`pruning`](#pruning) — Storage retention and emergency-pruning thresholds.
+- [`search`](#search) — Recall and search pipeline tuning: FTS weights, query expansion, vector boost, embeddings, and output formatting.
+- [`cache`](#cache) — Anthropic prompt cache TTL and speculative warming.
+- [`workspaces`](#workspaces) — Workspace sub-project paths or globs (relative to `.lore.json`). Imported into the root knowledge base on startup. Supports literal paths and single-level globs (e.g. "packages/*").
+- [`crossProject`](#crossProject) — Include cross-project knowledge in compaction summaries and auto-promote knowledge that recurs across 3+ projects. Default: true.
+- [`agentsFile`](#agentsFile) — AGENTS.md export/import configuration.
+- [`user`](#user) — User identity for the self-entity. Falls back to git config user.name / user.email if omitted.
+
+## `model`
+
+Default session model. When omitted, Lore uses the model from the first client request.
+
+| Field | Type | Default | Constraints | Description |
+|---|---|---|---|---|
+| `providerID` | string | — |  | Provider ID (e.g. 'anthropic', 'openai'). |
+| `modelID` | string | — |  | Model identifier within the provider. |
+
+
+## `workerModel`
+
+Background-worker model for distillation, curation, and query expansion. Same-provider invariant: workers MUST use the same provider as the session.
+
+| Field | Type | Default | Constraints | Description |
+|---|---|---|---|---|
+| `providerID` | string | — |  | Provider ID for the worker model. |
+| `modelID` | string | — |  | Model identifier within the provider. |
+
+
+## `budget`
+
+Context-window budget fractions. Sum plus LTM ≈ 1.0.
+
+| Field | Type | Default | Constraints | Description |
+|---|---|---|---|---|
+| `distilled` | number | `0.25` | min 0.05, max 0.5 | Fraction of usable context for distilled prefix. Default: 0.25. |
+| `raw` | number | `0.4` | min 0.1, max 0.7 | Fraction of usable context for the recent raw window (un-distilled). Default: 0.4. |
+| `output` | number | `0.25` | min 0.1, max 0.5 | Fraction of usable context reserved for model output. Default: 0.25. |
+| `ltm` | number | `0.05` | min 0.02, max 0.3 | Max fraction of usable context reserved for context-bound LTM system-prompt injection. Default: 0.05 (5%). |
+| `preferenceLtm` | number | `0.02` | min 0.01, max 0.1 | Fraction of usable context for stable LTM (preferences). Independent of `ltm`. Default: 0.02 (2%). |
+| `targetCacheReadCostPerTurn` | number | `0.1` | min 0 | Per-turn cache-read cost target in dollars. Controls when layer 0 escalates to layer 1. Default: 0.10. Set to 0 to disable cost-aware capping. |
+| `maxLayer0Tokens` | number | — | min 0 | Direct override for the layer-0 token cap. 0 = disabled (use full context). Default: undefined (use cost-aware auto). |
+| `targetBustCost` | number | `1` | min 0 | @deprecated Ignored. Tier-based bust-vs-continue replaces static cap. |
+| `maxContextTokens` | number | — | min 0 | @deprecated Ignored. Tier-based bust-vs-continue replaces static cap. |
+
+
+## `idleResumeMinutes`
+
+Minutes of inactivity after which Lore refreshes the byte-identity caches on resume (upstream prompt cache is cold). 5 = matches Anthropic's default-tier TTL. Set to 60 for extended (1h) cache tier. 0 to disable. Default: 5.
+
+
+## `distillation`
+
+Distillation pipeline tuning (segment size, thresholds, tool-output truncation).
+
+| Field | Type | Default | Constraints | Description |
+|---|---|---|---|---|
+| `minMessages` | number | `5` | min 3 | Minimum number of messages before a segment is eligible for distillation. Default: 5. |
+| `minSegmentTokens` | number | `64` | min 16 | Minimum tokens for a segment to be worth distilling. Default: 64. |
+| `maxSegmentTokens` | number | `16384` | min 256 | Maximum tokens per distillation segment before splitting. Default: 16384. |
+| `metaThreshold` | number | `20` | min 3 | Number of gen-0 segments that triggers meta-distillation. Default: 20. |
+| `toolOutputMaxChars` | number | `4000` | min 0 | Max chars per tool output for distillation input. Set to 0 to disable truncation. Default: 4000. |
+| `recentSegmentsToKeep` | number | `5` | min 0 | Number of most-recent gen-0 segments to keep un-archived when meta-distillation fires. Default: 5. |
+
+
+## `knowledge`
+
+Long-term knowledge (curator, entity injection) controls.
+
+| Field | Type | Default | Constraints | Description |
+|---|---|---|---|---|
+| `enabled` | boolean | `true` |  | Enable long-term knowledge storage and system-prompt injection. When false, the curator is disabled but recall and context management remain active. Default: true. |
+| `maxEntityInject` | number | `30` | min 0 | Max entities to inject into the agent system prompt. Set to 0 to disable. Default: 30. |
+
+
+## `curator`
+
+Curator scheduling and consolidation thresholds.
+
+| Field | Type | Default | Constraints | Description |
+|---|---|---|---|---|
+| `enabled` | boolean | `true` |  | Enable the curator (knowledge extraction from conversation). Default: true. |
+| `onIdle` | boolean | `true` |  | Run the curator on session idle (in addition to turn-based). Default: true. |
+| `afterTurns` | number | `3` | min 1 | Minimum turns between curator runs. Default: 3. |
+| `maxEntries` | number | `25` | min 10 | Max knowledge entries per project before consolidation. Default: 25. |
+
+
+## `pruning`
+
+Storage retention and emergency-pruning thresholds.
+
+| Field | Type | Default | Constraints | Description |
+|---|---|---|---|---|
+| `retention` | number | `120` | min 1 | Days to keep distilled temporal messages before pruning. Default: 120. |
+| `maxStorage` | number | `1024` | min 50 | Max total temporal_messages storage in MB before emergency pruning. Default: 1024 (1 GB). |
+
+
+## `search`
+
+Recall and search pipeline tuning: FTS weights, query expansion, vector boost, embeddings, and output formatting.
+
+| Field | Type | Default | Constraints | Description |
+|---|---|---|---|---|
+| `ftsWeights` | object | `{"title":6,"content":2,"category":3}` |  | BM25 column weights for knowledge FTS5 [title, content, category]. |
+| `recallLimit` | number | `10` | min 1, max 50 | Max results per source in recall tool before fusion. Default: 10. |
+| `queryExpansion` | boolean | `true` |  | Enable LLM-based query expansion (2-3 alternative phrasings) for the recall tool. Guarded by a 3s timeout. Default: true. |
+| `vectorBoostWeight` | number | `1.5` | min 1, max 5 | RRF weight multiplier for vector search lists (when query has enough terms). Set to 1.0 to disable. Default: 1.5. |
+| `vectorBoostMinTerms` | number | `2` | min 1, max 10 | Minimum meaningful query terms (after stopword removal) to activate vector boost. Default: 2. |
+| `embeddings` | object | `{"enabled":true,"provider":"local","model":"nomic-ai/nomic-embed-text-v1.5","dimensions":768}` |  | Vector embedding search provider, model, and dimensions. |
+| `recall` | object | `{"charBudget":12000,"relevanceFloor":0.15,"maxResults":15}` |  | Recall output formatting and result-count limits. |
+
+### `search.ftsWeights`
+
+BM25 column weights for knowledge FTS5 [title, content, category].
+
+| Field | Type | Default | Constraints | Description |
+|---|---|---|---|---|
+| `title` | number | `6` | min 0 | BM25 weight for the entry title column. Default: 6.0. |
+| `content` | number | `2` | min 0 | BM25 weight for the entry content column. Default: 2.0. |
+| `category` | number | `3` | min 0 | BM25 weight for the entry category column. Default: 3.0. |
+
+### `search.embeddings`
+
+Vector embedding search provider, model, and dimensions.
+
+| Field | Type | Default | Constraints | Description |
+|---|---|---|---|---|
+| `enabled` | boolean | `true` |  | Enable vector embedding search. Set to false to explicitly disable. Default: true. |
+| `provider` | enum | `"local"` |  | Embedding provider. "local" (no API key, on-device), "voyage" (VOYAGE_API_KEY), "openai" (OPENAI_API_KEY). Default: "local". |
+| `model` | string | `"nomic-ai/nomic-embed-text-v1.5"` |  | Model ID for the embedding provider. Default depends on provider. |
+| `dimensions` | number | `768` | min 64, max 2048 | Embedding dimensions. Default: 768 (local) / 1024 (voyage) / 1536 (openai). Local Nomic v1.5 supports Matryoshka: 64, 128, 256, 512, 768. |
+
+### `search.recall`
+
+Recall output formatting and result-count limits.
+
+| Field | Type | Default | Constraints | Description |
+|---|---|---|---|---|
+| `charBudget` | number | `12000` | min 2000, max 20000 | Total character budget for recall output (~3K tokens at 12000 chars). Default: 12000. |
+| `relevanceFloor` | number | `0.15` | min 0, max 1 | Minimum RRF score (relative to top) to keep. Set to 0 to disable. Default: 0.15. |
+| `maxResults` | number | `15` | min 3, max 30 | Max results to show in recall output. Default: 15. |
+
+
+## `cache`
+
+Anthropic prompt cache TTL and speculative warming.
+
+| Field | Type | Default | Constraints | Description |
+|---|---|---|---|---|
+| `conversationTTL` | enum | `"auto"` |  | Conversation cache breakpoint TTL. "5m" (Anthropic standard), "1h" (extended tier, 2× write cost), "auto" (auto-upgrade based on cold-cache rate). Default: "auto". |
+| `warming` | object | `{"enabled":true}` |  | Speculative cache warming (keepalive requests before TTL expiry). |
+
+### `cache.warming`
+
+Speculative cache warming (keepalive requests before TTL expiry).
+
+| Field | Type | Default | Constraints | Description |
+|---|---|---|---|---|
+| `enabled` | boolean | `true` |  | Enable cache warming. Default: true. |
+| `minReturnProbability` | number | — | min 0, max 1 | Override return probability threshold below which warming is skipped. Default: auto-derived from cost ratio. |
+
+
+## `workspaces`
+
+Workspace sub-project paths or globs (relative to `.lore.json`). Imported into the root knowledge base on startup. Supports literal paths and single-level globs (e.g. "packages/*").
+
+
+## `crossProject`
+
+Include cross-project knowledge in compaction summaries and auto-promote knowledge that recurs across 3+ projects. Default: true.
+
+
+## `agentsFile`
+
+AGENTS.md export/import configuration.
+
+| Field | Type | Default | Constraints | Description |
+|---|---|---|---|---|
+| `enabled` | boolean | `true` |  | Disable all AGENTS.md export/import behaviour. Default: true. |
+| `path` | string | `"AGENTS.md"` |  | Path to the agents file, relative to the project root. Default: 'AGENTS.md'. |
+
+
+## `user`
+
+User identity for the self-entity. Falls back to git config user.name / user.email if omitted.
+
+| Field | Type | Default | Constraints | Description |
+|---|---|---|---|---|
+| `name` | string | — |  | Display name. Overrides git config user.name. |
+| `email` | string | — |  | Email address. Overrides git config user.email. |
+| `aliases` | array<{ type, value }> | `[]` |  | Additional aliases for the self entity. |
+| `metadata` | Record<string, unknown> | — |  | Metadata for the self entity (description, role, notes, etc.). |
+

@@ -192,6 +192,11 @@ async function handleModelsPassthrough(
     // Anthropic requires the version header
     const anthropicVersion = req.headers.get("anthropic-version");
     if (anthropicVersion) headers["anthropic-version"] = anthropicVersion;
+    // Apply user-supplied LORE_UPSTREAM_EXTRA_HEADERS (corporate proxies,
+    // Cloudflare AI Gateway auth, etc.) as a final overlay.
+    for (const [key, value] of Object.entries(config.upstreamExtraHeaders)) {
+      headers[key] = value;
+    }
 
     const upstream = await upstreamFetch(
       `${config.upstreamAnthropic}/v1/models`,

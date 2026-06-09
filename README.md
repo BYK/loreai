@@ -37,7 +37,7 @@ Once Lore is active, you should notice:
 - **Decisions stick** — the curator preserves the "why" behind every choice. A future session won't "helpfully" refactor your workaround back to the broken approach.
 - **Your AI learns from experience** — patterns, gotchas, and architectural decisions are automatically curated across sessions and exported to `.lore.md`. Five distinct feedback loops — behavioral pattern detection, semantic clustering, instruction capture, LLM-mediated curation, and adaptive calibration — compound across sessions. Project-specific knowledge and global preferences follow you everywhere.
 - **Free on-device vector search** — Nomic Embed v1.5 runs locally with zero API cost. Hybrid architecture fuses vector similarity with BM25 keyword search and LLM-powered query expansion for best-of-both-worlds recall.
-- **Works with any provider** — `lore run` auto-detects Claude Code, OpenCode, Pi, and Codex. Cursor, Copilot, Windsurf, and any other Anthropic/OpenAI-compatible tool work by pointing their base URL at the gateway. Switch providers freely; your memory stays.*
+- **Works with any provider** — `lore run` auto-detects Claude Code, OpenCode, Pi, and Codex. Any other Anthropic/OpenAI-compatible tool works by pointing its base URL at the gateway. Switch providers freely; your memory stays.*
 - **Import your history** — Lore imports conversations from Claude Code, Codex, Aider, Cline, Continue, OpenCode, and Pi, extracting knowledge from your existing sessions so your AI starts with context from day one.
 - **Team knowledge with Folk Lore** — shared memory across your team, managed centrally. *(Coming soon.)*
 

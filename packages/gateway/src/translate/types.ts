@@ -576,6 +576,13 @@ const GATEWAY_MANAGED_HEADERS = new Set([
  * specific ones like `anthropic-beta`, `OpenAI-Organization`, etc.) on the
  * request to the gateway. This function extracts them for forwarding to the
  * upstream, filtering out headers the gateway sets itself.
+ *
+ * User-supplied `extraHeaders` (from `LORE_UPSTREAM_EXTRA_HEADERS`) are
+ * applied separately at the end of each request builder so they overlay
+ * both the forwarded client headers AND the gateway-reconstructed auth
+ * (`x-api-key` / `Authorization`). This is intentional: a corporate-proxy
+ * or service-account scenario needs to override the session's credential
+ * for the upstream call.
  */
 export function forwardClientHeaders(
   rawHeaders: Record<string, string>,
@@ -588,4 +595,25 @@ export function forwardClientHeaders(
     }
   }
   return forwarded;
+}
+
+/**
+ * Apply user-supplied `LORE_UPSTREAM_EXTRA_HEADERS` as a final overlay on a
+ * built upstream `headers` object. Keys are already lowercased by
+ * `parseCurlHeaders`. Empty input is a no-op.
+ *
+ * Used by every upstream-headers construction site (anthropic/openai/openai-
+ * responses builders, the upstream snapshot in `pipeline.ts`, and the
+ * passthrough endpoints in `server.ts` / `cache-warmer.ts` /
+ * `passthroughResponsesCompact`) to keep precedence consistent:
+ * client-forwarded headers → gateway-managed overlay → user extras.
+ */
+export function applyUpstreamExtraHeaders(
+  headers: Record<string, string>,
+  extras?: Record<string, string>,
+): void {
+  if (!extras) return;
+  for (const [key, value] of Object.entries(extras)) {
+    headers[key] = value;
+  }
 }

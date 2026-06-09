@@ -44,6 +44,17 @@ function safeRemote(cwd: string): string | null {
 }
 
 /**
+ * Quote a string value for safe embedding inside a TOML basic string literal.
+ * Escapes backslashes and double quotes, drops control characters. Used for
+ * `LORE_UPSTREAM_EXTRA_HEADERS` value-pass-through to Codex via `-c`.
+ */
+function tomlQuote(value: string): string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional control-character sanitization
+  const cleaned = value.replace(/[\x00-\x1f\x7f]/g, "");
+  return `"${cleaned.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+/**
  * Append a header to ANTHROPIC_CUSTOM_HEADERS (curl-style format:
  * "Name: Value" newline-separated).
  */
@@ -107,17 +118,43 @@ export const AGENTS: AgentDef[] = [
       if (remote) env.LORE_GIT_REMOTE = remote;
       return env;
     },
-    cliArgs: (url) => [
-      // Override the built-in OpenAI provider's base URL to route through the
-      // Lore gateway. Uses `-c` so the change is per-invocation only — it does
-      // not affect Codex's persisted config or session scoping.
-      "-c",
-      `openai_base_url="${url}/v1"`,
-      // Disable Codex auto-compaction — Lore manages context via its own
-      // gradient context manager and distillation pipeline.
-      "-c",
-      "model_auto_compact_token_limit=999999999",
-    ],
+    cliArgs: (url) => {
+      const args = [
+        // Override the built-in OpenAI provider's base URL to route through the
+        // Lore gateway. Uses `-c` so the change is per-invocation only — it does
+        // not affect Codex's persisted config or session scoping.
+        "-c",
+        `openai_base_url="${url}/v1"`,
+        // Disable Codex auto-compaction — Lore manages context via its own
+        // gradient context manager and distillation pipeline.
+        "-c",
+        "model_auto_compact_token_limit=999999999",
+      ];
+      // Forward LORE_UPSTREAM_EXTRA_HEADERS to Codex via the
+      // `openai_provider_headers` config key (TOML map of header name → value).
+      // Codex appends these to every outbound request to the OpenAI-compatible
+      // upstream, which now points at the Lore gateway. The gateway reads the
+      // same env var and re-injects them on the actual upstream call — this
+      // is a belt-and-suspenders pass-through so a user with a custom
+      // corporate proxy gets headers on both hops.
+      const extraRaw = process.env.LORE_UPSTREAM_EXTRA_HEADERS;
+      if (extraRaw) {
+        const pairs: string[] = [];
+        for (const rawLine of extraRaw.split(/\r?\n/)) {
+          const line = rawLine.trim();
+          if (!line) continue;
+          const colonIdx = line.indexOf(":");
+          if (colonIdx <= 0) continue;
+          const name = line.slice(0, colonIdx).trim();
+          const value = line.slice(colonIdx + 1).trim();
+          if (name) pairs.push(`${name} = ${tomlQuote(value)}`);
+        }
+        if (pairs.length) {
+          args.push("-c", `openai_provider_headers = { ${pairs.join(", ")} }`);
+        }
+      }
+      return args;
+    },
   },
   {
     name: "pi",

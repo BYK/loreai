@@ -304,6 +304,44 @@ export const LorePlugin: Plugin = async (ctx) => {
         if (providerID) {
           output.headers["x-lore-provider"] = providerID;
         }
+        // For local/self-hosted providers (vllm, ollama, llamacpp, etc.),
+        // forward LORE_UPSTREAM_<PROVIDER> as the x-lore-upstream-url header
+        // so the gateway can route the request to the user's local server.
+        // Convention matches the Pi plugin's registerProviders() block.
+        if (providerID) {
+          const envKey = `LORE_UPSTREAM_${providerID.toUpperCase().replace(/-/g, "_")}`;
+          const upstream = process.env[envKey];
+          if (upstream && !output.headers["x-lore-upstream-url"]) {
+            output.headers["x-lore-upstream-url"] = upstream;
+          }
+        }
+        // Forward LORE_UPSTREAM_EXTRA_HEADERS values as literal headers so
+        // corporate proxies / LiteLLM / Cloudflare AI Gateway get the
+        // required auth/team-routing tokens on every call. The gateway
+        // applies the same env var on its side as a safety net (so the
+        // headers are present even when the plugin is bypassed).
+        const extrasRaw = process.env.LORE_UPSTREAM_EXTRA_HEADERS;
+        if (extrasRaw) {
+          for (const rawLine of extrasRaw.split(/\r?\n/)) {
+            const line = rawLine.trim();
+            if (!line) continue;
+            const colonIdx = line.indexOf(":");
+            if (colonIdx <= 0) continue;
+            const name = line.slice(0, colonIdx).trim();
+            const value = line.slice(colonIdx + 1).trim();
+            if (name) {
+              // Don't clobber headers the gateway already manages.
+              const lower = name.toLowerCase();
+              if (
+                !lower.startsWith("x-lore-") &&
+                lower !== "x-api-key" &&
+                lower !== "authorization"
+              ) {
+                output.headers[name] = value;
+              }
+            }
+          }
+        }
       },
     };
 

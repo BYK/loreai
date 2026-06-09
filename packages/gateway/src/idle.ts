@@ -217,7 +217,7 @@ export function startIdleScheduler(
       if (!shouldWarm(state, profile, blendedHist, now)) continue;
 
       warmupInProgress.add(sessionID);
-      executeWarmup(state, profile)
+      executeWarmup(state, profile, config.upstreamExtraHeaders)
         .then((result) => emitWarmupMetric(state, result))
         .catch((e) =>
           log.error(

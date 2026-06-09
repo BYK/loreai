@@ -12,7 +12,11 @@ import type {
   GatewayResponse,
   GatewayTool,
 } from "./types";
-import { forwardClientHeaders, ZERO_USAGE } from "./types";
+import {
+  applyUpstreamExtraHeaders,
+  forwardClientHeaders,
+  ZERO_USAGE,
+} from "./types";
 import { extractAuth, authHeaders } from "../auth";
 
 // ---------------------------------------------------------------------------

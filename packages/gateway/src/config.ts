@@ -110,6 +110,23 @@ export interface GatewayConfig {
    * address. Surfaced in the gateway boot log. Internal.
    */
   remoteGatewayCommandDefault?: boolean;
+  /**
+   * Extra HTTP headers to inject on every upstream call (corporate proxies,
+   * Cloudflare AI Gateway's `cf-aig-authorization`, LiteLLM team-routing
+   * tokens, audit/logging tracing headers, etc.).
+   *
+   * Parsed from the curl-style env var `LORE_UPSTREAM_EXTRA_HEADERS` — newline-
+   * separated `Name: Value` pairs, the same convention Anthropic's SDK uses
+   * for `ANTHROPIC_CUSTOM_HEADERS`. Keys are lowercased; values are
+   * whitespace-trimmed. Empty / malformed lines are skipped with a warning.
+   *
+   * Precedence (highest wins): gateway-managed headers (`x-api-key`,
+   * `Authorization`, `x-lore-*`) > these user-supplied extras > client
+   * forwarded headers. This means a user-supplied `Authorization: Bearer
+   * svc-token` overrides the session's credential — useful for routing
+   * worker calls or routing sessions to a service account.
+   */
+  upstreamExtraHeaders: Record<string, string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +174,7 @@ export function loadConfig(): GatewayConfig {
     workerUpstream: env.LORE_WORKER_UPSTREAM
       ? trimTrailingSlash(env.LORE_WORKER_UPSTREAM)
       : undefined,
+    upstreamExtraHeaders: parseCurlHeaders(env.LORE_UPSTREAM_EXTRA_HEADERS),
     // Hosted mode is always a remote gateway (no shared filesystem with clients).
     // Auto-detect from bind address when neither flag is explicitly set.
     remoteGateway: remoteGatewayEnv || hostedModeEnv || autoDetected,
@@ -701,4 +719,52 @@ export function hasNonLoopbackHost(hosts: string[]): boolean {
 
 function trimTrailingSlash(url: string): string {
   return url.replace(/\/+$/, "");
+}
+
+/**
+ * Parse curl-style multi-line header blocks into a `Record<string, string>`.
+ *
+ * Accepts the same format Anthropic's SDK uses for `ANTHROPIC_CUSTOM_HEADERS`
+ * and `OpenAI-Organization`-style env-var header lists: one `Name: Value`
+ * per line, separated by `\n`. Keys are lowercased and trimmed; values are
+ * trimmed. Empty lines and malformed lines (no colon) are skipped with a
+ * warning logged to stderr. Returns `{}` when the input is empty/undefined.
+ *
+ * Header names are validated to contain only printable ASCII (RFC 7230
+ * token chars) and a leading non-whitespace colon is required. Values may
+ * contain any printable ASCII excluding CR/LF (already split by the line
+ * separator). Sanitization strips control characters defensively to
+ * prevent header injection if a value happens to contain stray bytes.
+ */
+export function parseCurlHeaders(
+  input: string | undefined,
+): Record<string, string> {
+  if (!input) return {};
+  const out: Record<string, string> = {};
+  for (const rawLine of input.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const colonIdx = line.indexOf(":");
+    if (colonIdx <= 0) {
+      console.error(
+        `[lore] warning: ignoring malformed LORE_UPSTREAM_EXTRA_HEADERS line: ${JSON.stringify(line)}`,
+      );
+      continue;
+    }
+    const rawName = line.slice(0, colonIdx).trim();
+    const rawValue = line.slice(colonIdx + 1).trim();
+    // Header name: RFC 7230 token = visible ASCII + a few separators.
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional control-character sanitization
+    const name = rawName.replace(/[\x00-\x1f\x7f]/g, "");
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional control-character sanitization
+    const value = rawValue.replace(/[\x00-\x1f\x7f]/g, "").trim();
+    if (!name || !/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name)) {
+      console.error(
+        `[lore] warning: ignoring invalid header name in LORE_UPSTREAM_EXTRA_HEADERS: ${JSON.stringify(rawName)}`,
+      );
+      continue;
+    }
+    out[name.toLowerCase()] = value;
+  }
+  return out;
 }

@@ -26,6 +26,7 @@ jobs:
       pull-requests: read
     outputs:
       code: ${{ steps.force.outputs.code || steps.filter.outputs.code }}
+      docs: ${{ steps.filter.outputs.docs }}
     steps:
       - uses: actions/checkout@v6
 
@@ -45,6 +46,13 @@ jobs:
               - '.github/workflows/ci.yml'
               - '.github/workflows/publish.yml'
               - '.github/workflows/release.yml'
+            # Docs-only changes still need check-docs to run (so the
+            # generator reflects config-schema updates), but skip the
+            # heavy test/binary jobs.
+            docs:
+              - 'packages/website/**'
+              - 'scripts/generate-config-docs.ts'
+              - 'packages/core/src/config.ts'
 
       # Force code=true on main/release pushes — these always run full CI.
       # dorny/paths-filter only matters for PRs.
@@ -404,7 +412,41 @@ jobs:
             !packages/gateway/dist-bin/*.gz
 
   # ---------------------------------------------------------------------------
-  # Native smoke tests for non-Linux binaries.
+  # Doc-generation drift check.
+  #
+  # Runs `pnpm run check:docs`, which invokes
+  # `scripts/generate-config-docs.ts --check` to diff the generated
+  # `packages/website/src/content/docs/docs/configuration.md` against the
+  # current Zod schema. Fails if the committed file is stale.
+  #
+  # Runs on any change to the schema, the generator, the website, or the
+  # `ci.yml` itself (via the `docs` paths-filter). Skipped for
+  # unrelated changes.
+  # ---------------------------------------------------------------------------
+
+  check-docs:
+    name: Check generated docs
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-tags: true
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+      - run: pnpm install --frozen-lockfile
+      # The generator imports from the workspace, so we need the workspace
+      # built once. The build step is cheap (no native binaries) and
+      # guarantees `packages/core/dist` exists for the import.
+      - run: pnpm --filter @loreai/core run build
+      - run: pnpm run check:docs
+
+  # ---------------------------------------------------------------------------
+  # Cross-platform native binary smoke tests.
   #
   # The test job above only builds and runs the linux-x64 binary. Cross-
   # compiled darwin / windows binaries can't be exercised on a Linux
@@ -957,7 +999,7 @@ jobs:
   ci-status:
     name: CI Status
     if: always()
-    needs: [changes, test, binary-smoke-native, actionlint]
+    needs: [changes, test, binary-smoke-native, check-docs, actionlint]
     runs-on: ubuntu-latest
     steps:
       - name: Check CI result
@@ -976,5 +1018,13 @@ jobs:
               echo "::error::binary-smoke-native did not succeed (result: $result)"
               exit 1
             fi
+          fi
+          # check-docs is required whenever it ran (it self-gates on
+          # code-or-docs path filter). When skipped (unrelated change),
+          # the result is "skipped" which we treat as success.
+          checkDocsResult="${{ needs.check-docs.result }}"
+          if [ "$checkDocsResult" == "failure" ] || [ "$checkDocsResult" == "cancelled" ]; then
+            echo "::error::check-docs did not succeed (result: $checkDocsResult)"
+            exit 1
           fi
           echo "CI passed (code=${{ needs.changes.outputs.code }})"

@@ -71,6 +71,7 @@ import type {
   UpstreamSnapshot,
 } from "./translate/types";
 import {
+  applyUpstreamExtraHeaders,
   blocksToText,
   extractJSONFromSSE,
   forwardClientHeaders,
@@ -1805,6 +1806,12 @@ async function forwardToUpstream(
     body = result.body;
   }
 
+  // Apply user-supplied LORE_UPSTREAM_EXTRA_HEADERS as the final overlay so
+  // corporate proxies, LiteLLM team-routing tokens, Cloudflare AI Gateway
+  // auth, and service-account scenarios can override any header — including
+  // the gateway-reconstructed `x-api-key` / `Authorization`.
+  applyUpstreamExtraHeaders(headers, config.upstreamExtraHeaders);
+
   let serializedBody = JSON.stringify(body);
 
   // Re-sign the billing header cch after body reconstruction.
@@ -2969,6 +2976,15 @@ function postResponse(
       model: req.model,
       headers: forwardClientHeaders(req.rawHeaders),
     };
+    // Apply LORE_UPSTREAM_EXTRA_HEADERS to the snapshot so cache-warming
+    // and other session-level follow-up requests inherit the user-supplied
+    // extra headers. (The per-request `forwardToUpstream` already overlays
+    // extras on the actual upstream call — this keeps the snapshot in sync
+    // for any consumer that reads it back.)
+    applyUpstreamExtraHeaders(
+      upstreamSnapshot.headers,
+      config.upstreamExtraHeaders,
+    );
     // Detect provider switch: if the model or provider changed, the cached
     // warmup body is stale (different model field at byte 10). Clear it to
     // avoid false cache-bust warnings ("early divergence at byte 10") and
@@ -3655,6 +3671,11 @@ async function passthroughResponsesCompact(
   // Forward OpenAI-specific headers
   const openAiBeta = rawHeaders["openai-beta"];
   if (openAiBeta) headers["openai-beta"] = openAiBeta;
+
+  // Apply user-supplied LORE_UPSTREAM_EXTRA_HEADERS as a final overlay so
+  // corporate proxies / LiteLLM team-routing tokens / Cloudflare AI Gateway
+  // / service-account scenarios work for compaction-passthrough calls too.
+  applyUpstreamExtraHeaders(headers, config.upstreamExtraHeaders);
 
   try {
     const upstream = await upstreamFetch(upstreamUrl, {
