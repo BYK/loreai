@@ -581,17 +581,58 @@ describe("search", () => {
         ["code", 0.5],
         ["v8", 5.0],
       ]);
+      // 4 terms, minTerms=2 → 2 AND steps + OR = 3 entries
       const cascade = ftsQueryRelaxed("code V8 deploy engine", 2, weights);
-      // Unknown terms ("deploy", "engine") should be dropped first,
-      // then known terms in IDF order ("code" before "V8")
-      // First step drops one unknown term
+      expect(cascade.length).toBe(3);
+
+      // Drop order should be: unknowns first (by length), then knowns (by IDF).
+      // "deploy"(6) and "engine"(6) are unknown, same length — either can be first.
+      // "code"(IDF=0.5) is known but common — dropped after unknowns.
+      // "V8"(IDF=5.0) is known and rare — kept longest.
+      //
+      // Step 0: drop 1 unknown → 3 terms remain, must include V8 and code
       expect(cascade[0]).toContain("V8*");
       expect(cascade[0]).toContain("code*");
-      // Last AND step (before OR) should keep the two known terms
-      expect(cascade[cascade.length - 2]).toContain("V8*");
-      expect(cascade[cascade.length - 2]).toContain("code*");
-      expect(cascade[cascade.length - 2]).not.toContain("deploy*");
-      expect(cascade[cascade.length - 2]).not.toContain("engine*");
+      // Step 1: drop both unknowns → only known terms remain
+      expect(cascade[1]).toContain("V8*");
+      expect(cascade[1]).toContain("code*");
+      expect(cascade[1]).not.toContain("deploy*");
+      expect(cascade[1]).not.toContain("engine*");
+      // Step 2: full OR (all terms)
+      expect(cascade[2]).toContain(" OR ");
+    });
+
+    test("with weights, full drop order: unknowns by length, then knowns by IDF", () => {
+      // 6 terms: 3 known (code=0.5, build=1.0, v8=5.0), 3 unknown (ax, deploy, zz)
+      const weights = new Map([
+        ["code", 0.5],
+        ["build", 1.0],
+        ["v8", 5.0],
+      ]);
+      // minTerms=2 → 4 AND steps + OR = 5 entries
+      const cascade = ftsQueryRelaxed("code build V8 ax deploy zz", 2, weights);
+      expect(cascade.length).toBe(5);
+
+      // Expected drop order (sorted to front → dropped first):
+      // 1. "ax" (unknown, length 2) — shortest unknown
+      // 2. "zz" (unknown, length 2) — same length, stable-sort preserves input order
+      // 3. "deploy" (unknown, length 6) — longest unknown
+      // 4. "code" (known, IDF=0.5) — lowest IDF
+      // Then kept: "build" (IDF=1.0), "V8" (IDF=5.0)
+
+      // After all 4 drops, only "build" and "V8" should remain (last AND step)
+      const lastAnd = cascade[cascade.length - 2]; // second-to-last is last AND
+      expect(lastAnd).toContain("V8*");
+      expect(lastAnd).toContain("build*");
+      expect(lastAnd).not.toContain("code*");
+      expect(lastAnd).not.toContain("ax*");
+      expect(lastAnd).not.toContain("deploy*");
+      expect(lastAnd).not.toContain("zz*");
+
+      // V8 should survive in ALL AND steps (it's highest IDF, never dropped)
+      for (let i = 0; i < cascade.length - 1; i++) {
+        expect(cascade[i]).toContain("V8*");
+      }
     });
 
     test("with weights, all-unknown terms fall back to length heuristic", () => {
