@@ -232,6 +232,28 @@ import {
 import { upstreamFetch } from "./fetch";
 
 // ---------------------------------------------------------------------------
+// Recall tool commit reminder
+// ---------------------------------------------------------------------------
+
+/**
+ * Text appended to the recall tool's description to remind the agent that
+ * `.lore.md` is shared project knowledge and must be committed alongside the
+ * agent's work — never stashed, never skipped.
+ *
+ * Lives in the stable tools prefix (1h cache) on purpose: the rule is static
+ * and benefits from Anthropic prompt caching. Gated at the call site on
+ * `cfg.knowledge.enabled`.
+ *
+ * Exported for unit testing — see `packages/gateway/test/recall.test.ts`.
+ */
+export const LORE_COMMIT_REMINDER =
+  "Before any git commit, always run `git add .lore.md`. " +
+  "This includes changes you did NOT make — a background process updates " +
+  "this file automatically. NEVER `git stash` `.lore.md` changes. " +
+  "NEVER leave `.lore.md` modified or untracked after a commit. " +
+  "`.lore.md` is shared project knowledge and must always be version-controlled.";
+
+// ---------------------------------------------------------------------------
 // Module state
 // ---------------------------------------------------------------------------
 
@@ -4382,11 +4404,7 @@ async function handleConversationTurn(
       ? {
           ...RECALL_GATEWAY_TOOL,
           description:
-            RECALL_GATEWAY_TOOL.description +
-            "\n\nWhen making git commits, always check if .lore.md " +
-            "has unstaged changes and include it in the commit. " +
-            "This file contains shared project knowledge managed " +
-            "by lore and must be version-controlled.",
+            RECALL_GATEWAY_TOOL.description + "\n\n" + LORE_COMMIT_REMINDER,
         }
       : RECALL_GATEWAY_TOOL;
     modifiedReq.tools = [...modifiedReq.tools, recallTool];

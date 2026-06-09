@@ -9,6 +9,7 @@
  *  - Response stripping
  */
 import { describe, test, expect } from "vitest";
+import { LORE_COMMIT_REMINDER } from "../src/pipeline";
 import {
   RECALL_GATEWAY_TOOL,
   RECALL_TOOL_NAME,
@@ -110,6 +111,28 @@ describe("RECALL_GATEWAY_TOOL", () => {
     expect(props).toHaveProperty("query");
     expect(props).toHaveProperty("scope");
     expect(schema.required).toEqual(["query"]);
+  });
+});
+
+describe("LORE_COMMIT_REMINDER", () => {
+  test("instructs `git add .lore.md` as a concrete pre-commit step", () => {
+    expect(LORE_COMMIT_REMINDER).toContain("git add .lore.md");
+  });
+
+  test("explicitly forbids `git stash` on .lore.md", () => {
+    expect(LORE_COMMIT_REMINDER).toContain("NEVER `git stash` `.lore.md`");
+  });
+
+  test("clarifies that background changes must also be committed", () => {
+    expect(LORE_COMMIT_REMINDER).toContain("changes you did NOT make");
+  });
+
+  test("does not contain the old soft wording (regression guard)", () => {
+    expect(LORE_COMMIT_REMINDER).not.toContain("always check if .lore.md");
+  });
+
+  test("does not start with whitespace (separator belongs at call site)", () => {
+    expect(LORE_COMMIT_REMINDER).toMatch(/^\S/);
   });
 });
 
