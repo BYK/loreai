@@ -254,19 +254,40 @@ describe("resolveAuth per-provider staleness", () => {
     expect(resolveAuth("sess-1", "anthropic")).toBe(null);
   });
 
-  test("marking named provider stale also marks _default stale", () => {
+  test("marking named provider stale marks _default when _default holds same credential", () => {
     setSessionAuth("sess-1", minimaxCred, "minimax");
     // _default was set to minimaxCred by setSessionAuth's dual-write
     setLastSeenAuth(apiKeyCred);
 
     // Mark only minimax stale — should automatically mark _default too,
-    // since _default tracks the latest-used provider.
+    // since _default currently holds the same credential as minimax.
     markAuthStale("sess-1", "minimax");
 
-    // _default should be stale (auto-marked)
+    // _default should be stale (auto-marked — same credential)
     expect(isAuthStale("sess-1", "_default")).toBe(true);
     // No providerID → checks _default → stale → falls through to global
     expect(resolveAuth("sess-1")).toEqual(apiKeyCred);
+  });
+
+  test("marking named provider stale does NOT mark _default when another provider was set last", () => {
+    // MiniMax set first, then Anthropic set last → _default = anthropic
+    setSessionAuth("sess-1", minimaxCred, "minimax");
+    setSessionAuth("sess-1", apiKeyCred, "anthropic");
+    setLastSeenAuth(bearerCred);
+
+    // Mark minimax stale — _default points to anthropic (different cred),
+    // so _default should NOT be marked stale.
+    markAuthStale("sess-1", "minimax");
+
+    expect(isAuthStale("sess-1", "minimax")).toBe(true);
+    // _default should NOT be stale — it holds the anthropic credential
+    expect(isAuthStale("sess-1", "_default")).toBe(false);
+    // resolveAuth without providerID returns _default (anthropic) — not stale
+    expect(resolveAuth("sess-1")).toEqual(apiKeyCred);
+    // Anthropic also not stale
+    expect(resolveAuth("sess-1", "anthropic")).toEqual(apiKeyCred);
+    // MiniMax stale → falls to global
+    expect(resolveAuth("sess-1", "minimax")).toEqual(bearerCred);
   });
 
   test("refreshing one provider clears only that provider staleness", () => {

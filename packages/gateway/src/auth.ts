@@ -173,11 +173,23 @@ export function markAuthStale(sessionID: string, providerID?: string): void {
     staleSessionAuth.set(sessionID, providers);
   }
   providers.add(providerID || "_default");
-  // Also mark _default stale when a named provider is marked, since
-  // _default tracks the latest-used provider (mirrors setSessionAuth's
-  // dual-clear on refresh). Without this, resolveAuth(sid) without
-  // providerID would return the stale credential via _default.
-  if (providerID && providerID !== "_default") providers.add("_default");
+  // Also mark _default stale when it currently holds the same credential
+  // as the provider being marked. This prevents resolveAuth(sid) without
+  // providerID from returning a stale credential via _default.
+  // Only poisons _default when it actually points to the stale provider —
+  // if another provider was set more recently, _default is left alone.
+  if (providerID && providerID !== "_default") {
+    const byProvider = sessionAuth.get(sessionID);
+    const providerCred = byProvider?.get(providerID);
+    const defaultCred = byProvider?.get("_default");
+    if (
+      providerCred &&
+      defaultCred &&
+      providerCred.value === defaultCred.value
+    ) {
+      providers.add("_default");
+    }
+  }
 }
 
 /**
