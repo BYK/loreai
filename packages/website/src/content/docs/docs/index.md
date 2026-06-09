@@ -25,6 +25,6 @@ Lore is a local-first memory layer for AI coding agents. It captures conversatio
 
 ## Site Sections
 
-- [Home](index.html) introduces the product and waitlist.
+- [Home](index.html) introduces the product and Folk Lore early access signup.
 - [Why Lore](different.html) compares Lore to memory-only and context-only approaches.
 - [Blog](blog.html) is ready for essays, release notes, and engineering writeups.
