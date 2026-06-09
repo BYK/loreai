@@ -52,6 +52,7 @@ export default defineConfig({
             { label: "Pi", slug: "docs/guides/with-pi" },
             { label: "Claude Code", slug: "docs/guides/with-claude-code" },
             { label: "Codex", slug: "docs/guides/with-codex" },
+            { label: "Setup command", slug: "docs/setup" },
             { label: "Custom upstreams", slug: "docs/guides/custom-upstreams" },
             { label: "Local inference", slug: "docs/guides/local-inference" },
           ],

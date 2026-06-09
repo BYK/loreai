@@ -19,6 +19,8 @@ lore run
 
 Lore auto-detects Claude Code, OpenCode, Pi, Codex, and Hermes Agent when you run `lore run`. For harness-specific setup, see the Guides section.
 
+If you'd rather configure Codex manually (for the Codex Desktop app, or to run `codex` without going through `lore run`), run [`lore setup codex`](./setup/) once — it writes `~/.codex/config.toml` with the gateway URL and the no-auto-compact override. See the [Setup command](./setup/) page for the full reference.
+
 You can also run the gateway directly with npm:
 
 ```bash

@@ -41,35 +41,7 @@ Both overrides are per-invocation — they do not affect Codex's persisted `conf
 
 ## Manual setup (CLI)
 
-If you'd rather start the gateway yourself and launch Codex directly, edit `~/.codex/config.toml`:
-
-```toml
-[model]
-auto_compact_token_limit = 999999999
-
-[providers.openai]
-base_url = "http://127.0.0.1:3207/v1"
-```
-
-Start the gateway and Codex in separate terminals:
-
-```bash
-# Terminal 1
-lore start
-
-# Terminal 2
-codex
-```
-
-## Codex Desktop app
-
-The Codex Desktop app does not accept `-c` CLI overrides at launch and has no obvious way to inject a custom `openai_base_url` through its UI. The recommended setup is to point the Desktop app at a `config.toml` that routes through the Lore gateway.
-
-1. Start the Lore gateway in the background (via `lore start` or a system service).
-2. Edit or create `~/.codex/config.toml` with the snippet above.
-3. Launch the Codex Desktop app and verify the request log shows requests going to `127.0.0.1:3207` instead of `api.openai.com`.
-
-If the Desktop app overwrites or ignores your `config.toml`, run the gateway under a system service manager (`systemd`, `launchd`, etc.) so the URL stays stable, and consider using a session-scoped override file at `~/.codex/sessions/<session-id>/config.toml` if the Desktop app supports per-session configs.
+If you'd rather start the gateway yourself and launch Codex directly — or if you're setting up the Codex Desktop app, which doesn't accept `-c` CLI overrides — run [`lore setup codex`](../setup/) once. It writes the right `~/.codex/config.toml` for both the CLI and the Desktop app, and supports `-r <url>` for remote gateways. See the [Setup command](../setup/) page for the full command reference.
 
 ## Custom upstream headers
 
@@ -82,6 +54,7 @@ The Codex plugin reads `LORE_UPSTREAM_EXTRA_HEADERS` from your environment and f
 
 ## Next steps
 
+- [Setup command](../setup/) — `lore setup codex` for manual/Desktop configuration and remote gateways.
 - [Architecture](../architecture/) — how temporal storage, distillation, and the gradient context manager fit together.
 - [Configuration](../configuration/) — full reference for `.lore.json`.
 - [Custom upstreams](./custom-upstreams/) — corporate proxies, LiteLLM, Cloudflare AI Gateway.
