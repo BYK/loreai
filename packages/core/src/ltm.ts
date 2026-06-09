@@ -987,6 +987,9 @@ export function searchScored(input: {
   query: string;
   projectPath?: string;
   limit?: number;
+  /** IDF weights from `termIDF()` — when provided, the relaxed cascade
+   *  drops common terms first instead of short ones. */
+  termWeights?: Map<string, number>;
 }): ScoredKnowledgeEntry[] {
   const limit = input.limit ?? 20;
 
@@ -1007,14 +1010,18 @@ export function searchScored(input: {
        ORDER BY rank LIMIT ?`;
 
   try {
-    return runRelaxedSearch(input.query, (matchExpr) => {
-      const params = pid
-        ? [title, content, category, matchExpr, pid, limit]
-        : [title, content, category, matchExpr, limit];
-      return db()
-        .query(ftsSQL)
-        .all(...params) as ScoredKnowledgeEntry[];
-    });
+    return runRelaxedSearch(
+      input.query,
+      (matchExpr) => {
+        const params = pid
+          ? [title, content, category, matchExpr, pid, limit]
+          : [title, content, category, matchExpr, limit];
+        return db()
+          .query(ftsSQL)
+          .all(...params) as ScoredKnowledgeEntry[];
+      },
+      input.termWeights,
+    );
   } catch {
     return [];
   }
@@ -1030,6 +1037,9 @@ export function searchScoredOtherProjects(input: {
   query: string;
   excludeProjectPath: string;
   limit?: number;
+  /** IDF weights from `termIDF()` — when provided, the relaxed cascade
+   *  drops common terms first instead of short ones. */
+  termWeights?: Map<string, number>;
 }): ScoredKnowledgeEntry[] {
   const limit = input.limit ?? 10;
 
@@ -1049,12 +1059,16 @@ export function searchScoredOtherProjects(input: {
      ORDER BY rank LIMIT ?`;
 
   try {
-    return runRelaxedSearch(input.query, (matchExpr) => {
-      const params = [title, content, category, matchExpr, excludePid, limit];
-      return db()
-        .query(ftsSQL)
-        .all(...params) as ScoredKnowledgeEntry[];
-    });
+    return runRelaxedSearch(
+      input.query,
+      (matchExpr) => {
+        const params = [title, content, category, matchExpr, excludePid, limit];
+        return db()
+          .query(ftsSQL)
+          .all(...params) as ScoredKnowledgeEntry[];
+      },
+      input.termWeights,
+    );
   } catch {
     return [];
   }

@@ -154,6 +154,88 @@ export function filterTerms(raw: string): string[] {
   return words.filter((w) => w.length > 1 && !STOPWORDS.has(w.toLowerCase()));
 }
 
+// ---------------------------------------------------------------------------
+// Term importance via IDF (Inverse Document Frequency)
+// ---------------------------------------------------------------------------
+
+/**
+ * FTS5 tables to probe for document frequency counts. Each table contributes
+ * to the IDF estimate. Querying multiple tables produces a corpus-wide signal
+ * rather than a single-source bias.
+ */
+const IDF_FTS_TABLES = [
+  "knowledge_fts",
+  "distillation_fts",
+  "temporal_fts",
+] as const;
+
+/**
+ * Estimate term importance via inverse document frequency across FTS5 tables.
+ *
+ * For each filtered term, counts how many rows match `<term>*` across the
+ * three FTS5 tables (knowledge, distillation, temporal). Terms appearing in
+ * fewer documents get higher IDF scores — they are more discriminative.
+ *
+ * Returns a Map<string, number> where the key is the **lowercased** term and
+ * the value is `log(1 + totalDocs / (1 + termDocs))`. Higher = rarer = more
+ * important. Terms not found in any table get the maximum score.
+ * Callers must use `.get(term.toLowerCase())` to look up weights.
+ *
+ * This is intentionally a rough estimate — FTS5 MATCH with a prefix query is
+ * fast (uses the index), but the count is approximate because prefix matching
+ * can overcount. Good enough for ranking which terms to keep vs drop.
+ *
+ * @param raw  The raw query string (filtered through `filterTerms()` internally)
+ */
+export function termIDF(raw: string): Map<string, number> {
+  const terms = filterTerms(raw);
+  if (!terms.length) return new Map();
+
+  const database = db();
+  const weights = new Map<string, number>();
+
+  // Estimate total corpus size (sum of row counts across tables).
+  // Use a rough count — exact count is expensive and unnecessary for IDF.
+  let totalDocs = 0;
+  for (const table of IDF_FTS_TABLES) {
+    try {
+      const row = database
+        .query(`SELECT count(*) as cnt FROM ${table}`)
+        .get() as { cnt: number } | null;
+      totalDocs += row?.cnt ?? 0;
+    } catch {
+      // Table might not exist in test environments — skip it.
+    }
+  }
+  // Floor at 1 to avoid division by zero.
+  totalDocs = Math.max(totalDocs, 1);
+
+  // Deduplicate terms (case-insensitive) to avoid redundant queries.
+  const seen = new Set<string>();
+  for (const term of terms) {
+    const key = term.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    let termDocs = 0;
+    for (const table of IDF_FTS_TABLES) {
+      try {
+        const row = database
+          .query(`SELECT count(*) as cnt FROM ${table} WHERE ${table} MATCH ?`)
+          .get(`${term}*`) as { cnt: number } | null;
+        termDocs += row?.cnt ?? 0;
+      } catch {
+        // MATCH can fail for certain inputs — treat as zero hits.
+      }
+    }
+
+    // Standard IDF with +1 smoothing to avoid log(0) and division by zero.
+    weights.set(key, Math.log(1 + totalDocs / (1 + termDocs)));
+  }
+
+  return weights;
+}
+
 /**
  * Build an FTS5 MATCH expression using AND semantics (implicit AND via space).
  *
@@ -181,11 +263,19 @@ export function ftsQueryOr(raw: string): string {
  * Build a cascade of progressively relaxed FTS5 queries.
  *
  * For N terms, produces up to (N - minTerms) queries, each dropping one more
- * term (least significant first — shortest terms dropped first as a rough
- * proxy for specificity). The final entry is always the full OR query.
+ * term (least significant first). The final entry is always the full OR query.
+ *
+ * Term drop order:
+ * - When `termWeights` is provided (IDF map from `termIDF()`), terms with the
+ *   lowest weight (most common / least discriminative) are dropped first. This
+ *   keeps rare, specific terms like "V8", "SEA", "PKCE" longer in the cascade
+ *   instead of dropping them early due to short length.
+ * - When `termWeights` is absent, falls back to length ascending (shortest
+ *   terms dropped first) as a rough proxy for specificity. This preserves
+ *   backward compatibility for callers that don't compute IDF.
  *
  * Example for 6 terms with minTerms=3:
- *   [0] 5-of-6 AND (drop shortest term)
+ *   [0] 5-of-6 AND (drop least important term)
  *   [1] 4-of-6 AND
  *   [2] 3-of-6 AND
  *   [3] full OR (all 6 terms)
@@ -195,7 +285,11 @@ export function ftsQueryOr(raw: string): string {
  * results. This avoids the AND→OR cliff that produces massive low-quality
  * result sets.
  */
-export function ftsQueryRelaxed(raw: string, minTerms = 3): string[] {
+export function ftsQueryRelaxed(
+  raw: string,
+  minTerms = 3,
+  termWeights?: Map<string, number>,
+): string[] {
   const terms = filterTerms(raw);
   if (!terms.length) return [EMPTY_QUERY];
 
@@ -204,8 +298,31 @@ export function ftsQueryRelaxed(raw: string, minTerms = 3): string[] {
   // Not enough terms for progressive relaxation — just OR.
   if (terms.length <= minTerms) return [orQuery];
 
-  // Sort by length ascending — shortest (least specific) terms dropped first.
-  const ranked = [...terms].sort((a, b) => a.length - b.length);
+  // Sort by importance ascending — least important terms dropped first.
+  // With IDF weights: low IDF = common/unimportant → dropped first.
+  // Without weights: short length = rough proxy for low specificity → dropped first.
+  //
+  // When termWeights is provided but a term has no entry (e.g. LLM-expanded
+  // queries introduce tokens not in the original IDF map), fall back to the
+  // length heuristic for that term — avoids treating unknown terms as weight 0
+  // (which would always drop them first, even if they're discriminative).
+  const ranked = [...terms].sort((a, b) => {
+    if (termWeights) {
+      const wa = termWeights.get(a.toLowerCase());
+      const wb = termWeights.get(b.toLowerCase());
+      // Both have IDF weights → sort by weight (lower = less important → dropped first)
+      if (wa !== undefined && wb !== undefined) {
+        if (wa !== wb) return wa - wb;
+        return a.length - b.length; // tie-break by length
+      }
+      // One or both missing: unknown terms (likely LLM-generated filler) sort
+      // to the front (dropped first), known terms sort to the back (kept longest).
+      if (wa !== undefined && wb === undefined) return 1; // a known, b unknown → drop b first
+      if (wa === undefined && wb !== undefined) return -1; // a unknown, b known → drop a first
+      return a.length - b.length; // both unknown → length heuristic
+    }
+    return a.length - b.length;
+  });
 
   const cascade: string[] = [];
   for (let drop = 1; drop <= terms.length - minTerms; drop++) {
@@ -221,13 +338,16 @@ export function ftsQueryRelaxed(raw: string, minTerms = 3): string[] {
  * query that produces results. Falls back through progressively looser AND
  * queries before trying full OR.
  *
- * @param raw     The original query string
- * @param runner  A function that takes an FTS5 MATCH expression and returns results
- * @returns       The results from the first cascade step that produced matches
+ * @param raw          The original query string
+ * @param runner       A function that takes an FTS5 MATCH expression and returns results
+ * @param termWeights  Optional IDF weights from `termIDF()` — when provided, the
+ *                     relaxed cascade drops common terms first instead of short ones
+ * @returns            The results from the first cascade step that produced matches
  */
 export function runRelaxedSearch<T>(
   raw: string,
   runner: (matchExpr: string) => T[],
+  termWeights?: Map<string, number>,
 ): T[] {
   // First try exact AND (all terms)
   const q = ftsQuery(raw);
@@ -236,8 +356,9 @@ export function runRelaxedSearch<T>(
   const andResults = runner(q);
   if (andResults.length) return andResults;
 
-  // Try progressively relaxed queries
-  const cascade = ftsQueryRelaxed(raw);
+  // Try progressively relaxed queries — with IDF weights, the cascade keeps
+  // rare/discriminative terms longer instead of dropping them early.
+  const cascade = ftsQueryRelaxed(raw, 3, termWeights);
   for (const relaxed of cascade) {
     if (relaxed === EMPTY_QUERY) continue;
     const results = runner(relaxed);
@@ -384,6 +505,7 @@ export function exactTermMatchRank<T>(
 
 import { QUERY_EXPANSION_SYSTEM } from "./prompt";
 import * as log from "./log";
+import { db } from "./db";
 import type { LLMClient } from "./types";
 
 /**

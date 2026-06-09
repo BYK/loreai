@@ -360,6 +360,18 @@ export const LoreConfig = z.object({
         .describe(
           "Enable LLM-based query expansion (2-3 alternative phrasings) for the recall tool. Guarded by a 3s timeout. Default: true.",
         ),
+      /** Max query terms (after stopword removal) for LLM expansion to activate.
+       *  Queries longer than this skip expansion — they already have high
+       *  specificity and expansion tends to introduce noise that dilutes precision.
+       *  Entity-based expansion always runs regardless of this cap. Default: 8. */
+      queryExpansionMaxTerms: z
+        .number()
+        .min(2)
+        .max(20)
+        .default(8)
+        .describe(
+          "Max query terms (after stopword removal) for LLM expansion. Longer queries skip expansion. Default: 8.",
+        ),
       /** RRF weight multiplier for vector search lists. Applied when the query
        *  has >= `vectorBoostMinTerms` meaningful terms (after stopword removal).
        *  Boosts semantic/vector results relative to keyword-based BM25 lists.
@@ -475,6 +487,7 @@ export const LoreConfig = z.object({
       ftsWeights: { title: 6.0, content: 2.0, category: 3.0 },
       recallLimit: 10,
       queryExpansion: true,
+      queryExpansionMaxTerms: 8,
       vectorBoostWeight: 1.5,
       vectorBoostMinTerms: 2,
       embeddings: {

@@ -27,6 +27,7 @@ import {
   ftsQuery,
   reciprocalRankFusion,
   runRelaxedSearch,
+  termIDF,
 } from "./search";
 import { inline } from "./markdown";
 
@@ -160,6 +161,9 @@ function searchDistillationsScored(input: {
   query: string;
   sessionID?: string;
   limit?: number;
+  /** IDF weights from `termIDF()` — when provided, the relaxed cascade
+   *  drops common terms first instead of short ones. */
+  termWeights?: Map<string, number>;
 }): ScoredDistillation[] {
   const pid = ensureProject(input.projectPath);
   const limit = input.limit ?? 10;
@@ -179,14 +183,18 @@ function searchDistillationsScored(input: {
        ORDER BY rank LIMIT ?`;
 
   try {
-    return runRelaxedSearch(input.query, (matchExpr) => {
-      const params = input.sessionID
-        ? [matchExpr, pid, input.sessionID, limit]
-        : [matchExpr, pid, limit];
-      return db()
-        .query(ftsSQL)
-        .all(...params) as ScoredDistillation[];
-    });
+    return runRelaxedSearch(
+      input.query,
+      (matchExpr) => {
+        const params = input.sessionID
+          ? [matchExpr, pid, input.sessionID, limit]
+          : [matchExpr, pid, limit];
+        return db()
+          .query(ftsSQL)
+          .all(...params) as ScoredDistillation[];
+      },
+      input.termWeights,
+    );
   } catch {
     // FTS5 failed — fall back to LIKE search with synthetic rank
     return searchDistillationsLike({
@@ -506,9 +514,26 @@ export async function searchRecall(
     return [];
   }
 
-  // Optional query expansion: generate alternative phrasings via LLM.
+  const queryTerms = filterTerms(query);
+  const queryTermCount = queryTerms.length;
+
+  // Compute IDF weights for the original query terms. Used by the relaxed
+  // cascade to drop common/generic terms first instead of short ones — keeps
+  // discriminative terms like "V8", "SEA", "PKCE" in the cascade longer.
+  const idfWeights = termIDF(query);
+
+  // Optional LLM query expansion: generate alternative phrasings.
+  // Skip for long queries (> queryExpansionMaxTerms) — they already have high
+  // specificity and expansion introduces noise that dilutes precision (e.g.
+  // a 14-term technical query gets tangential LLM expansions that accumulate
+  // enough RRF score to displace the correct result).
+  const expansionMaxTerms = searchConfig?.queryExpansionMaxTerms ?? 8;
   let queries = [query];
-  if (searchConfig?.queryExpansion && llm) {
+  if (
+    searchConfig?.queryExpansion &&
+    llm &&
+    queryTermCount <= expansionMaxTerms
+  ) {
     try {
       queries = await expandQuery(llm, query, undefined, sessionID);
     } catch (err) {
@@ -519,6 +544,7 @@ export async function searchRecall(
   // Entity-aware query expansion: detect entity references in the query
   // and add all known aliases as additional search queries. This ensures
   // "what did Seylan say?" finds results referencing "@seylancinar" or email.
+  // Always runs regardless of term count — entity aliases are fast and targeted.
   try {
     const entityExpansions = entities.expandQueryWithEntities(query);
     if (entityExpansions.length > 0) {
@@ -535,7 +561,6 @@ export async function searchRecall(
 
   // Determine vector boost weight: for queries with enough meaningful terms,
   // boost vector search lists so semantic similarity outweighs keyword noise.
-  const queryTermCount = filterTerms(query).length;
   const vectorWeight =
     queryTermCount >= (searchConfig?.vectorBoostMinTerms ?? 3)
       ? (searchConfig?.vectorBoostWeight ?? 1.5)
@@ -565,7 +590,12 @@ export async function searchRecall(
     if (knowledgeEnabled && scope !== "session") {
       try {
         knowledgeResults.push(
-          ...ltm.searchScored({ query: q, projectPath, limit }),
+          ...ltm.searchScored({
+            query: q,
+            projectPath,
+            limit,
+            termWeights: idfWeights,
+          }),
         );
       } catch (err) {
         log.error("recall: knowledge search failed:", err);
@@ -581,6 +611,7 @@ export async function searchRecall(
             query: q,
             sessionID: scope === "session" ? sessionID : undefined,
             limit,
+            termWeights: idfWeights,
           }),
         );
       } catch (err) {
@@ -597,6 +628,7 @@ export async function searchRecall(
             query: q,
             sessionID: scope === "session" ? sessionID : undefined,
             limit,
+            termWeights: idfWeights,
           }),
         );
       } catch (err) {
@@ -814,6 +846,7 @@ export async function searchRecall(
         query,
         projectPath,
         limit,
+        termWeights: idfWeights,
       });
       if (latResults.length) {
         allRrfLists.push({
@@ -837,6 +870,7 @@ export async function searchRecall(
         query,
         excludeProjectPath: projectPath,
         limit,
+        termWeights: idfWeights,
       });
       if (crossProjectResults.length) {
         allRrfLists.push({

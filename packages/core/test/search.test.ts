@@ -1,7 +1,8 @@
-import { describe, test, expect } from "vitest";
+import { describe, test, expect, beforeEach } from "vitest";
 import {
   ftsQuery,
   ftsQueryOr,
+  ftsQueryRelaxed,
   filterTerms,
   STOPWORDS,
   EMPTY_QUERY,
@@ -9,7 +10,9 @@ import {
   reciprocalRankFusion,
   extractTopTerms,
   exactTermMatchRank,
+  termIDF,
 } from "../src/search";
+import { db, ensureProject } from "../src/db";
 
 describe("search", () => {
   describe("ftsQuery (AND semantics)", () => {
@@ -517,6 +520,204 @@ describe("search", () => {
       expect(terms).toContain("database");
       expect(terms).toContain("migration");
       expect(terms).not.toContain("what"); // stopword
+    });
+  });
+
+  describe("ftsQueryRelaxed", () => {
+    test("produces cascade of progressively relaxed AND queries ending with OR", () => {
+      const cascade = ftsQueryRelaxed("alpha beta gamma delta");
+      // 4 terms, minTerms=3: drop 1 term → 3-of-4 AND, then full OR
+      expect(cascade.length).toBe(2);
+      // Last entry is always the full OR
+      expect(cascade[cascade.length - 1]).toContain(" OR ");
+    });
+
+    test("returns just OR for terms <= minTerms", () => {
+      const cascade = ftsQueryRelaxed("alpha beta gamma");
+      expect(cascade.length).toBe(1);
+      expect(cascade[0]).toBe("alpha* OR beta* OR gamma*");
+    });
+
+    test("empty query returns EMPTY_QUERY", () => {
+      const cascade = ftsQueryRelaxed("");
+      expect(cascade).toEqual([EMPTY_QUERY]);
+    });
+
+    test("without weights, drops shortest terms first", () => {
+      // Terms by length: "V8" (2), "CLI" (3), "Node" (4), "Sentry" (6), "snapshot" (8)
+      const cascade = ftsQueryRelaxed("V8 CLI Node Sentry snapshot");
+      // First step drops "V8" (shortest); second drops "V8","CLI"; etc.
+      // cascade[0] = 4-of-5 AND (dropped V8)
+      expect(cascade[0]).not.toContain("V8*");
+      expect(cascade[0]).toContain("CLI*");
+      expect(cascade[0]).toContain("snapshot*");
+    });
+
+    test("with weights, drops lowest-weight (most common) terms first", () => {
+      // Simulate IDF: "code" is very common (low IDF=0.5), "V8" is rare (high IDF=5.0)
+      const weights = new Map([
+        ["code", 0.5],
+        ["build", 1.0],
+        ["node", 2.0],
+        ["v8", 5.0],
+        ["sea", 4.5],
+      ]);
+      const cascade = ftsQueryRelaxed("code build Node V8 SEA", 3, weights);
+      // First step drops "code" (lowest IDF=0.5), NOT "V8" (shortest but highest IDF)
+      expect(cascade[0]).not.toContain("code*");
+      expect(cascade[0]).toContain("V8*");
+      expect(cascade[0]).toContain("SEA*");
+      expect(cascade[0]).toContain("Node*");
+      // Second step also drops "build" (next lowest IDF=1.0)
+      expect(cascade[1]).not.toContain("build*");
+      expect(cascade[1]).toContain("V8*");
+      expect(cascade[1]).toContain("SEA*");
+    });
+
+    test("with weights, unknown terms are dropped before known terms", () => {
+      // Only "code" and "v8" have IDF weights; "deploy" and "engine" are unknown
+      // (simulates LLM-expanded query with terms not in original IDF map)
+      const weights = new Map([
+        ["code", 0.5],
+        ["v8", 5.0],
+      ]);
+      const cascade = ftsQueryRelaxed("code V8 deploy engine", 2, weights);
+      // Unknown terms ("deploy", "engine") should be dropped first,
+      // then known terms in IDF order ("code" before "V8")
+      // First step drops one unknown term
+      expect(cascade[0]).toContain("V8*");
+      expect(cascade[0]).toContain("code*");
+      // Last AND step (before OR) should keep the two known terms
+      expect(cascade[cascade.length - 2]).toContain("V8*");
+      expect(cascade[cascade.length - 2]).toContain("code*");
+      expect(cascade[cascade.length - 2]).not.toContain("deploy*");
+      expect(cascade[cascade.length - 2]).not.toContain("engine*");
+    });
+
+    test("with weights, all-unknown terms fall back to length heuristic", () => {
+      // Provide weights map but none of the terms are in it
+      const weights = new Map([["unrelated", 3.0]]);
+      const cascade = ftsQueryRelaxed("alpha beta gamma delta", 3, weights);
+      // Should behave like no-weights: drop shortest first
+      expect(cascade.length).toBe(2); // 1 AND step + OR
+      // "beta" (4 chars) is shortest, dropped first
+      expect(cascade[0]).not.toContain("beta*");
+      expect(cascade[0]).toContain("alpha*");
+      expect(cascade[0]).toContain("gamma*");
+      expect(cascade[0]).toContain("delta*");
+    });
+
+    test("with weights, tie-breaks by length when IDF is equal", () => {
+      const weights = new Map([
+        ["ab", 2.0],
+        ["abcdef", 2.0],
+        ["xyz", 3.0],
+      ]);
+      const cascade = ftsQueryRelaxed("ab abcdef xyz", 2, weights);
+      // "ab" and "abcdef" have same IDF — "ab" is shorter, dropped first
+      expect(cascade[0]).not.toContain("ab*");
+      // But it should contain the longer one
+      expect(cascade[0]).toContain("abcdef*");
+      expect(cascade[0]).toContain("xyz*");
+    });
+  });
+
+  describe("termIDF", () => {
+    const IDF_PROJECT = "/test/search/idf";
+
+    beforeEach(() => {
+      // Seed knowledge entries with varying term frequency.
+      // "database" appears in 3 entries (common), "PKCE" in 1 (rare).
+      const pid = ensureProject(IDF_PROJECT);
+      const now = Date.now();
+
+      // Clean up any prior test data
+      db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+
+      for (const [id, title, content] of [
+        [
+          "idf-1",
+          "Database setup",
+          "Configure the PostgreSQL database for production",
+        ],
+        [
+          "idf-2",
+          "Database migration",
+          "Run database migration scripts before deploy",
+        ],
+        ["idf-3", "Auth flow", "Use database-backed sessions with OAuth PKCE"],
+        [
+          "idf-4",
+          "Build pipeline",
+          "V8 snapshot for Node SEA binary distribution",
+        ],
+      ] as const) {
+        db()
+          .query(
+            `INSERT OR REPLACE INTO knowledge (id, project_id, category, title, content, confidence, created_at, updated_at)
+             VALUES (?, ?, 'decision', ?, ?, 1.0, ?, ?)`,
+          )
+          .run(id, pid, title, content, now, now);
+      }
+    });
+
+    test("returns Map with IDF scores for each term", () => {
+      const weights = termIDF("database PKCE V8");
+      expect(weights).toBeInstanceOf(Map);
+      expect(weights.has("database")).toBe(true);
+      expect(weights.has("pkce")).toBe(true);
+      expect(weights.has("v8")).toBe(true);
+    });
+
+    test("rare terms get higher IDF than common terms", () => {
+      const weights = termIDF("database PKCE");
+      const dbWeight = weights.get("database") ?? 0;
+      const pkceWeight = weights.get("pkce") ?? 0;
+      // "PKCE" appears in fewer docs than "database" → higher IDF
+      expect(pkceWeight).toBeGreaterThan(dbWeight);
+    });
+
+    test("very rare terms get higher IDF than somewhat rare terms", () => {
+      const weights = termIDF("database V8 PKCE");
+      const v8Weight = weights.get("v8") ?? 0;
+      const dbWeight = weights.get("database") ?? 0;
+      // "V8" appears in 1 entry, "database" in 3 → V8 has higher IDF
+      expect(v8Weight).toBeGreaterThan(dbWeight);
+    });
+
+    test("returns empty Map for empty query", () => {
+      const weights = termIDF("");
+      expect(weights.size).toBe(0);
+    });
+
+    test("returns empty Map for all-stopword query", () => {
+      const weights = termIDF("the with from");
+      expect(weights.size).toBe(0);
+    });
+
+    test("deduplicates terms case-insensitively", () => {
+      const weights = termIDF("Database database DATABASE");
+      // Should have only one entry for "database"
+      expect(weights.size).toBe(1);
+      expect(weights.has("database")).toBe(true);
+    });
+
+    test("all IDF values are positive", () => {
+      const weights = termIDF("database PKCE V8 build");
+      for (const [, idf] of weights) {
+        expect(idf).toBeGreaterThan(0);
+      }
+    });
+
+    test("produces positive values even with empty corpus (no seeded data)", () => {
+      // Query terms that don't exist in any FTS table — totalDocs may be
+      // near-zero but floored to 1. Formula: log(1 + 1/(1+0)) = log(2) ≈ 0.693
+      const weights = termIDF("xyznonexistent qqqqnotfound");
+      expect(weights.size).toBe(2);
+      for (const [, idf] of weights) {
+        expect(idf).toBeGreaterThan(0);
+        expect(Number.isFinite(idf)).toBe(true);
+      }
     });
   });
 });

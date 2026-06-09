@@ -308,6 +308,9 @@ export function searchScored(input: {
   query: string;
   projectPath: string;
   limit?: number;
+  /** IDF weights from `termIDF()` — when provided, the relaxed cascade
+   *  drops common terms first instead of short ones. */
+  termWeights?: Map<string, number>;
 }): ScoredLatSection[] {
   const limit = input.limit ?? 10;
 
@@ -327,6 +330,7 @@ export function searchScored(input: {
       input.query,
       (matchExpr) =>
         db().query(ftsSQL).all(matchExpr, pid, limit) as ScoredLatSection[],
+      input.termWeights,
     );
   } catch {
     return [];

@@ -151,6 +151,7 @@ Recall and search pipeline tuning: FTS weights, query expansion, vector boost, e
 | `ftsWeights` | object | `{"title":6,"content":2,"category":3}` |  | BM25 column weights for knowledge FTS5 [title, content, category]. |
 | `recallLimit` | number | `10` | min 1, max 50 | Max results per source in recall tool before fusion. Default: 10. |
 | `queryExpansion` | boolean | `true` |  | Enable LLM-based query expansion (2-3 alternative phrasings) for the recall tool. Guarded by a 3s timeout. Default: true. |
+| `queryExpansionMaxTerms` | number | `8` | min 2, max 20 | Max query terms (after stopword removal) for LLM expansion. Longer queries skip expansion. Default: 8. |
 | `vectorBoostWeight` | number | `1.5` | min 1, max 5 | RRF weight multiplier for vector search lists (when query has enough terms). Set to 1.0 to disable. Default: 1.5. |
 | `vectorBoostMinTerms` | number | `2` | min 1, max 10 | Minimum meaningful query terms (after stopword removal) to activate vector boost. Default: 2. |
 | `embeddings` | object | `{"enabled":true,"provider":"local","model":"nomic-ai/nomic-embed-text-v1.5","dimensions":768}` |  | Vector embedding search provider, model, and dimensions. |

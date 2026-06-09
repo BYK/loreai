@@ -516,6 +516,9 @@ export function searchScored(input: {
   query: string;
   sessionID?: string;
   limit?: number;
+  /** IDF weights from `termIDF()` — when provided, the relaxed cascade
+   *  drops common terms first instead of short ones. */
+  termWeights?: Map<string, number>;
 }): ScoredTemporalMessage[] {
   const pid = ensureProject(input.projectPath);
   const limit = input.limit ?? 20;
@@ -531,14 +534,18 @@ export function searchScored(input: {
        ORDER BY rank LIMIT ?`;
 
   try {
-    return runRelaxedSearch(input.query, (matchExpr) => {
-      const params = input.sessionID
-        ? [matchExpr, pid, input.sessionID, limit]
-        : [matchExpr, pid, limit];
-      return db()
-        .query(ftsSQL)
-        .all(...params) as ScoredTemporalMessage[];
-    });
+    return runRelaxedSearch(
+      input.query,
+      (matchExpr) => {
+        const params = input.sessionID
+          ? [matchExpr, pid, input.sessionID, limit]
+          : [matchExpr, pid, limit];
+        return db()
+          .query(ftsSQL)
+          .all(...params) as ScoredTemporalMessage[];
+      },
+      input.termWeights,
+    );
   } catch {
     return [];
   }
