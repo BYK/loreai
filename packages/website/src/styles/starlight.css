@@ -62,7 +62,12 @@ html[data-theme="light"] {
   color: #8fba96;
 }
 :root[data-theme="light"] .logo-text {
-  color: var(--sl-color-black);
+  /* Hardcoded dark green: this site inverts Starlight's color
+     convention, so --sl-color-black is the cream background, not
+     the foreground text. Without this override the logo would be
+     cream on cream on the docs page (invisible except for the
+     dot). Matches the marketing-page light-theme logo. */
+  color: #1a3320;
 }
 :root[data-theme="light"] .logo-dot {
   color: #3d6644;

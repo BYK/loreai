@@ -5,7 +5,7 @@ sidebar:
   order: 2
 ---
 
-Lore treats context management and memory as one pipeline. The same `gradient.ts` engine that decides what to put in the prompt also decides when to distill, when to compress, and when to bust the cache — balancing detail preservation against cost on every turn.
+Lore treats context management and memory as one pipeline. The same gradient engine that decides what to put in the prompt also decides when to distill, when to compress, and when to bust the cache — balancing detail preservation against cost on every turn.
 
 ## Three-tier memory
 
