@@ -2,6 +2,17 @@ import { defineConfig } from "vitest/config";
 import path from "node:path";
 
 export default defineConfig({
+  // Alias @loreai/core and @loreai/gateway for test imports.
+  // MUST be at the top level of the vite config — putting this under
+  // `test.resolve.alias` does NOT work (vite's resolver is a top-level
+  // option, not a test.* option). The previous placement silently
+  // resolved to the stale dist build, masking real test failures.
+  resolve: {
+    alias: {
+      "@loreai/core": path.resolve(__dirname, "packages/core/src"),
+      "@loreai/gateway": path.resolve(__dirname, "packages/gateway/src"),
+    },
+  },
   test: {
     // Run all packages' tests
     include: [
@@ -34,13 +45,6 @@ export default defineConfig({
         "**/script/**",
         "**/dist/**",
       ],
-    },
-    // Alias @loreai/core and @loreai/gateway for test imports
-    resolve: {
-      alias: {
-        "@loreai/core": path.resolve(__dirname, "packages/core/src"),
-        "@loreai/gateway": path.resolve(__dirname, "packages/gateway/src"),
-      },
     },
   },
 });
