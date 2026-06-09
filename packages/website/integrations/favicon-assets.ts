@@ -135,29 +135,31 @@ async function generate(root: string): Promise<void> {
       .toFile(resolve(publicDir, file));
   }
 
-  // 3. Generate the OG image (1200×630) — a centered "logotype" layout:
-  //    logo to the left of the headline on the same axis, tagline below,
-  //    CTA at the bottom. This reads as a single composed unit rather
-  //    than two disconnected elements. Built as a single SVG and
-  //    rasterized via sharp; text uses individual font-* attributes
+  // 3. Generate the OG image (1200×630) — vertical stack:
+  //    small logo top-left, headline below (full-width, no overlap),
+  //    tagline below that, CTA at the bottom. Built as a single SVG
+  //    and rasterized via sharp; text uses individual font-* attributes
   //    (librsvg drops the `font:` shorthand inside <style> blocks).
   const logoDataUri = `data:image/svg+xml;base64,${rasterInput.toString("base64")}`;
 
-  // Vertical center for the logo + headline group, with tagline and CTA
-  // stacked below. 80px of padding on left/right matches social card
-  // safe-area conventions (Twitter crops ~5% off each side).
-  const padX = 80;
-  const logoSize = 200;
-  const headlineSize = 76;
-  const taglineSize = 38;
+  // Safe-area padding matches social card conventions (Twitter/Facebook
+  // crop ~5% off each side). Logo is small and isolated in the upper
+  // left, headline gets the visual weight of the card.
+  const padX = 90;
+  const logoSize = 100;
+  const headlineSize = 64;
+  const taglineSize = 36;
   const ctaSize = 40;
 
-  // Group vertical layout (top of group = logo top):
-  //   y=200          logo top
-  //   y=305 (baseline of headline aligned to logo center)
+  // Vertical layout (all in px from top of canvas):
+  //   y=70           logo top
+  //   y=290          headline baseline (well below logo)
   //   y=370          tagline baseline
-  //   y=470          CTA baseline
-  const groupTopY = 200;
+  //   y=510          CTA baseline
+  const logoY = 70;
+  const headlineY = 290;
+  const taglineY = 370;
+  const ctaY = 510;
 
   const fullSvg = Buffer.from(`
     <svg xmlns="http://www.w3.org/2000/svg"
@@ -165,23 +167,30 @@ async function generate(root: string): Promise<void> {
          width="${OG_WIDTH}" height="${OG_HEIGHT}">
       <!-- Dark background -->
       <rect width="${OG_WIDTH}" height="${OG_HEIGHT}" fill="${OG_BG_COLOR}" />
-      <!-- Logo on the left of the headline — feels like a logotype -->
-      <image xlink:href="${logoDataUri}"
-             x="${padX}" y="${groupTopY}" height="${logoSize}" />
-      <!-- Headline — cream, bold, sits to the right of the logo -->
-      <text x="${padX + logoSize + 36}" y="${groupTopY + 110}"
+      <!-- Logo top-left, wrapped in a <g transform> because sharp's
+           librsvg backend silently ignores x/y on <image> elements
+           with data: URIs. We also have to set BOTH width and height
+           explicitly: when only height is set, librsvg computes the
+           proportional width from the source viewBox and centers the
+           image horizontally. -->
+      <g transform="translate(${padX}, ${logoY})">
+        <image xlink:href="${logoDataUri}"
+               width="${logoSize}" height="${logoSize}" />
+      </g>
+      <!-- Headline — cream, bold, full-width (no logo overlap) -->
+      <text x="${padX}" y="${headlineY}"
             font-family="Arial, Helvetica, sans-serif"
             font-size="${headlineSize}"
             font-weight="700"
             fill="${OG_HEADLINE_COLOR}">${OG_HEADLINE}</text>
-      <!-- Tagline — bright sage, full width below the group -->
-      <text x="${padX}" y="${groupTopY + 200}"
+      <!-- Tagline — bright sage, medium -->
+      <text x="${padX}" y="${taglineY}"
             font-family="Arial, Helvetica, sans-serif"
             font-size="${taglineSize}"
             font-weight="500"
             fill="${OG_TAGLINE_COLOR}">${OG_TAGLINE}</text>
-      <!-- CTA — cream, large + bold so it competes with the headline -->
-      <text x="${padX}" y="${groupTopY + 290}"
+      <!-- CTA — cream, bold; the click-driving element -->
+      <text x="${padX}" y="${ctaY}"
             font-family="Arial, Helvetica, sans-serif"
             font-size="${ctaSize}"
             font-weight="700"
