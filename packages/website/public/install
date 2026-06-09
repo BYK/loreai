@@ -186,6 +186,12 @@ fi
 
 chmod +x "$tmp_binary"
 
+# macOS: remove quarantine flag so the binary can execute without
+# Gatekeeper blocking it. Curl may set this attribute on downloads.
+if [[ "$os" == "darwin" ]]; then
+  xattr -d com.apple.quarantine "$tmp_binary" 2>/dev/null || true
+fi
+
 # Quick sanity check
 if ! "$tmp_binary" --version >/dev/null 2>&1; then
   die "Downloaded binary failed sanity check. Platform: ${os}-${arch}"
