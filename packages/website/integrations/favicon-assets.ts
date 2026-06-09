@@ -29,7 +29,13 @@ const PNG_TARGETS = [
 const OG_IMAGE = "og-image.png";
 const OG_WIDTH = 1200;
 const OG_HEIGHT = 630;
-const OG_LOGO_HEIGHT = 280;
+const OG_LOGO_HEIGHT = 180;
+// Headline + tagline baked into the OG image so social previews show a
+// scannable, click-driving message rather than a bare logo. The "Use with
+// any agent" line doubles as a CTA — pointing at the proxy that runs
+// alongside any AI agent (Claude Code, Codex, Pi, OpenCode, etc.).
+const OG_HEADLINE = "Shared context for AI agents";
+const OG_TAGLINE = "Local-first. Any agent. Zero setup.";
 
 const svgoConfig = {
   multipass: true,
@@ -94,13 +100,42 @@ async function generate(root: string): Promise<void> {
       .toFile(resolve(publicDir, file));
   }
 
-  // 3. Generate og-image.png (1200×630) — dark background + cream lily logo
+  // 3. Generate og-image.png (1200×630) — dark background, cream lily logo
+  //    top-left, and a headline + tagline (CTA) below it. Text is built
+  //    into an SVG and rasterized so we get clean type without needing to
+  //    bundle a font.
   const logoForOg = await sharp(rasterInput, { density: 384 })
     .resize({
       height: OG_LOGO_HEIGHT,
       fit: "contain",
       background: { r: 0, g: 0, b: 0, alpha: 0 },
     })
+    .png()
+    .toBuffer();
+
+  // SVG with the headline + tagline baked in. The font stack ends with
+  // generic sans-serif so the rasterizer falls back gracefully on any
+  // system — Inter, SF Pro, Segoe UI, Roboto, Helvetica, etc.
+  const textSvg = Buffer.from(`
+    <svg xmlns="http://www.w3.org/2000/svg" width="${OG_WIDTH}" height="${OG_HEIGHT}">
+      <style>
+        .headline {
+          font: 700 64px -apple-system, BlinkMacSystemFont, "Segoe UI",
+            Roboto, "Helvetica Neue", Arial, sans-serif;
+          fill: #f5efe1;
+        }
+        .tagline {
+          font: 500 32px -apple-system, BlinkMacSystemFont, "Segoe UI",
+            Roboto, "Helvetica Neue", Arial, sans-serif;
+          fill: #b8c9b8;
+        }
+      </style>
+      <text x="80" y="200" class="headline">${OG_HEADLINE}</text>
+      <text x="80" y="260" class="tagline">${OG_TAGLINE}</text>
+    </svg>
+  `);
+  const textRaster = await sharp(textSvg)
+    .resize(OG_WIDTH, OG_HEIGHT)
     .png()
     .toBuffer();
 
@@ -112,7 +147,12 @@ async function generate(root: string): Promise<void> {
       background: { r: 26, g: 51, b: 32, alpha: 255 }, // #1a3320 (site's --g0)
     },
   })
-    .composite([{ input: logoForOg, gravity: "centre" }])
+    .composite([
+      // Logo top-left
+      { input: logoForOg, top: 80, left: 80 },
+      // Headline + tagline below logo
+      { input: textRaster, top: 0, left: 0 },
+    ])
     .png({ compressionLevel: 9, effort: 10 })
     .toFile(resolve(publicDir, OG_IMAGE));
 }

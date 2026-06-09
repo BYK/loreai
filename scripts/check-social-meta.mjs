@@ -97,9 +97,11 @@ function listHtmlFiles(dir) {
 	return results.sort();
 }
 
-// ---------------------------------------------------------------------------
-// Tag extraction
-// ---------------------------------------------------------------------------
+// Social previews truncate descriptions around 125 characters on most
+// platforms (X, Facebook, LinkedIn) and even sooner on mobile. 200 is the
+// absolute upper bound — over that, Twitter drops the description entirely.
+const MAX_DESCRIPTION_LENGTH = 200;
+const RECOMMENDED_DESCRIPTION_LENGTH = 160;
 
 function extractTags(html) {
 	// We pull every <meta ...> tag and key by property (OG) or name (Twitter).
@@ -149,6 +151,22 @@ function validatePage(filePath) {
 	}
 	for (const tag of REQUIRED_TWITTER_TAGS) {
 		if (!twitter[tag]) errors.push(`missing <meta name="${tag}">`);
+	}
+
+	// Description length. Social previews truncate around 125 chars;
+	// 200 is the hard upper bound. Warn over the recommended, fail over
+	// the max.
+	if (og["og:description"]) {
+		const len = og["og:description"].length;
+		if (len > MAX_DESCRIPTION_LENGTH) {
+			errors.push(
+				`og:description is ${len} chars (max ${MAX_DESCRIPTION_LENGTH}; some platforms will drop it)`,
+			);
+		} else if (len > RECOMMENDED_DESCRIPTION_LENGTH) {
+			errors.push(
+				`og:description is ${len} chars (recommended ≤ ${RECOMMENDED_DESCRIPTION_LENGTH} so it doesn't truncate in social previews)`,
+			);
+		}
 	}
 
 	// Image URL must point at og-image.png on the site origin.
