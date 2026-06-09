@@ -410,7 +410,7 @@ export function ensureSelfEntity(
     }
     // Only re-embed when the name or alias set actually changed.
     if (changed) reembedEntity(existing.id);
-    return finalizeSelfEntity(getSelfEntity()!);
+    return finalizeSelfEntity(getSelfEntity() ?? missingSelfEntity());
   }
 
   // Create self entity
@@ -453,9 +453,23 @@ function finalizeSelfEntity(self: EntityWithAliases): EntityWithAliases {
     log.info(
       `merged ${count} person entit${count === 1 ? "y" : "ies"} into self entity`,
     );
-    return getSelfEntity()!; // re-fetch with merged aliases
+    return getSelfEntity() ?? missingSelfEntity(); // re-fetch with merged aliases
   }
   return self;
+}
+
+/**
+ * Self-entity invariant violation: getSelfEntity() returned null
+ * from a code path that assumes it always exists. The self entity
+ * is created on first call to ensureSelfEntity() and persists for
+ * the lifetime of the process; this only triggers if the DB is
+ * unexpectedly empty mid-operation. Throw so the call site sees a
+ * real error rather than a silent null deref.
+ */
+function missingSelfEntity(): never {
+  throw new Error(
+    "self entity invariant violation: getSelfEntity() returned null",
+  );
 }
 
 /**

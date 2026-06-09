@@ -581,9 +581,9 @@ describe("getWorkerModel", () => {
       model: "claude-opus-4-6",
     });
     expect(result).toBeDefined();
-    expect(result!.providerID).toBe("anthropic");
+    expect(result?.providerID).toBe("anthropic");
     // Should downgrade to sonnet for cost savings
-    expect(result!.modelID).toContain("sonnet");
+    expect(result?.modelID).toContain("sonnet");
   });
 
   test("known provider (anthropic) with cheap model echoes session model (no downgrade)", () => {
@@ -592,8 +592,8 @@ describe("getWorkerModel", () => {
       model: "claude-sonnet-4-6",
     });
     expect(result).toBeDefined();
-    expect(result!.providerID).toBe("anthropic");
-    expect(result!.modelID).toContain("sonnet");
+    expect(result?.providerID).toBe("anthropic");
+    expect(result?.modelID).toContain("sonnet");
   });
 
   test("unknown provider echoes session model — same provider is always safe", () => {
@@ -606,8 +606,8 @@ describe("getWorkerModel", () => {
       model: "MiniMax-M3",
     });
     expect(result).toBeDefined();
-    expect(result!.providerID).toBe("minimax-coding-plan");
-    expect(result!.modelID).toBe("MiniMax-M3");
+    expect(result?.providerID).toBe("minimax-coding-plan");
+    expect(result?.modelID).toBe("MiniMax-M3");
   });
 
   test("unknown provider with expensive model echoes session model (or finds cheaper via models.dev)", () => {
@@ -616,7 +616,7 @@ describe("getWorkerModel", () => {
       model: "gemini-3.1-pro",
     });
     expect(result).toBeDefined();
-    expect(result!.providerID).toBe("google");
+    expect(result?.providerID).toBe("google");
   });
 
   test("unknown provider with cheap model echoes session model", () => {
@@ -625,8 +625,8 @@ describe("getWorkerModel", () => {
       model: "cheap-model:free",
     });
     expect(result).toBeDefined();
-    expect(result!.providerID).toBe("some-unknown-provider");
-    expect(result!.modelID).toBe("cheap-model:free");
+    expect(result?.providerID).toBe("some-unknown-provider");
+    expect(result?.modelID).toBe("cheap-model:free");
   });
 
   test("unknown provider with no session model returns undefined", () => {
@@ -697,9 +697,9 @@ describe("dynamic cheaper-model discovery", () => {
     });
 
     expect(result).toBeDefined();
-    expect(result!.providerID).toBe("custom-provider");
+    expect(result?.providerID).toBe("custom-provider");
     // Should pick the cheaper model, not echo the expensive session model
-    expect(result!.modelID).toBe("cheap-model");
+    expect(result?.modelID).toBe("cheap-model");
   });
 
   test("selects zero-cost model as cheapest alternative", async () => {
@@ -741,8 +741,8 @@ describe("dynamic cheaper-model discovery", () => {
     });
 
     expect(result).toBeDefined();
-    expect(result!.providerID).toBe("free-provider");
-    expect(result!.modelID).toBe("free-model");
+    expect(result?.providerID).toBe("free-provider");
+    expect(result?.modelID).toBe("free-model");
   });
 
   test("echoes session model when no cheaper alternative exists", async () => {
@@ -779,9 +779,9 @@ describe("dynamic cheaper-model discovery", () => {
     });
 
     expect(result).toBeDefined();
-    expect(result!.providerID).toBe("single-model-provider");
+    expect(result?.providerID).toBe("single-model-provider");
     // No cheaper model → echoes session model
-    expect(result!.modelID).toBe("only-model");
+    expect(result?.modelID).toBe("only-model");
   });
 });
 
