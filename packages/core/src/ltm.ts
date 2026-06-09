@@ -1099,7 +1099,7 @@ export function getWorkerSource(
     worker_provider_id: string | null;
     worker_model_id: string | null;
   } | null;
-  if (!row || !row.worker_provider_id || !row.worker_model_id) return null;
+  if (!row?.worker_provider_id || !row.worker_model_id) return null;
   return {
     providerID: row.worker_provider_id,
     modelID: row.worker_model_id,

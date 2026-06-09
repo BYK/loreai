@@ -14,7 +14,6 @@
  */
 
 import { db, ensureProject } from "./db";
-import { config } from "./config";
 import * as embedding from "./embedding";
 import * as ltm from "./ltm";
 import * as log from "./log";

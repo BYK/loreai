@@ -29,16 +29,15 @@ export class Database extends DatabaseSync {
     let entry = map.get(sql);
     if (!entry) {
       const stmt = this.prepare(sql);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       entry = {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        // biome-ignore lint/suspicious/noExplicitAny: node:sqlite prepare().all() accepts variadic args
         all: (...args: any[]) => stmt.all(...args) as Record<string, unknown>[],
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        // biome-ignore lint/suspicious/noExplicitAny: node:sqlite prepare().get() accepts variadic args
         get: (...args: any[]) => {
           const result = stmt.get(...args) as Record<string, unknown> | null;
           return result ?? null;
         },
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        // biome-ignore lint/suspicious/noExplicitAny: node:sqlite prepare().run() accepts variadic args
         run: (...args: any[]) =>
           stmt.run(...args) as { changes: number; lastInsertRowid: bigint },
       };

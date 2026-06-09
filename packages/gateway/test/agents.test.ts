@@ -141,9 +141,10 @@ describe("Codex agent cliArgs", () => {
         (a) => typeof a === "string" && a.startsWith("openai_provider_headers"),
       );
       expect(providerHeadersIdx).toBeGreaterThan(0);
-      const prev = args?.[providerHeadersIdx! - 1];
+      const idx = providerHeadersIdx as number;
+      const prev = args?.[idx - 1];
       expect(prev).toBe("-c");
-      const tomlLine = args?.[providerHeadersIdx!];
+      const tomlLine = args?.[idx];
       expect(tomlLine).toContain("X-Corp-Token");
       expect(tomlLine).toContain("abc");
       expect(tomlLine).toContain("X-Tenant");
@@ -160,7 +161,7 @@ describe("Codex agent cliArgs", () => {
       );
       expect(idx).toBeGreaterThan(0);
       // TOML basic string: embedded " is escaped
-      expect(args?.[idx!]).toContain('\\"');
+      expect(args?.[idx as number]).toContain('\\"');
     });
 
     test("omits openai_provider_headers when env is empty", () => {

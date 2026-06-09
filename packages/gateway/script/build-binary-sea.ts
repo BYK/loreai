@@ -299,14 +299,9 @@ function sentryBunToNodePlugin(): esbuild.Plugin {
 // Sentry sourcemap upload
 // ---------------------------------------------------------------------------
 
-function uploadSentrySourcemap(
-  stagingDirPath: string,
-  mapPath: string,
-): void {
+function uploadSentrySourcemap(stagingDirPath: string, mapPath: string): void {
   if (process.env.SENTRY_AUTH_TOKEN) {
-    console.log(
-      `  Uploading sourcemap to Sentry (release: ${pkg.version})...`,
-    );
+    console.log(`  Uploading sourcemap to Sentry (release: ${pkg.version})...`);
     try {
       execSync(
         [
@@ -358,7 +353,7 @@ async function runFossilize(
   targets: CompileTarget[],
   bundlePath: string,
   manifestPath: string,
-  stagingDirPath: string,
+  _stagingDirPath: string,
 ): Promise<void> {
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
 

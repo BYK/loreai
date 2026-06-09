@@ -1,11 +1,4 @@
-import {
-  afterEach,
-  describe,
-  test,
-  expect,
-  beforeAll,
-  beforeEach,
-} from "vitest";
+import { afterEach, describe, test, expect, beforeEach } from "vitest";
 import { existsSync } from "node:fs";
 import { db, ensureProject } from "../src/db";
 import { LOCAL_MODEL_PATH_ENV } from "../src/embedding-vendor";

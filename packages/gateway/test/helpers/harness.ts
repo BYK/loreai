@@ -95,7 +95,7 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
       const db = new DatabaseSync(dbPath, { readOnly: true });
       try {
         const stmt = db.prepare(sql);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        // biome-ignore lint/suspicious/noExplicitAny: node:sqlite stmt.all() accepts variadic args
         return stmt.all(...((params ?? []) as any)) as T[];
       } finally {
         db.close();

@@ -4481,8 +4481,7 @@ async function handleConversationTurn(
       cfg.knowledge.enabled && cfg.loreFile.enabled
         ? {
             ...RECALL_GATEWAY_TOOL,
-            description:
-              RECALL_GATEWAY_TOOL.description + "\n\n" + LORE_COMMIT_REMINDER,
+            description: `${RECALL_GATEWAY_TOOL.description}\n\n${LORE_COMMIT_REMINDER}`,
           }
         : RECALL_GATEWAY_TOOL;
     modifiedReq.tools = [...modifiedReq.tools, recallTool];

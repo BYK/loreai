@@ -1022,6 +1022,7 @@ describe("entities", () => {
       // Verify person was actually created separately
       expect(person.created).toBe(true);
       expect(entities.get(person.id)).not.toBeNull();
+      // biome-ignore lint/style/noNonNullAssertion: entity was just created above
       const personAliases = entities.getWithAliases(person.id)!.aliases;
       expect(personAliases.map((a) => a.alias_value)).toContain("alice-gh");
 

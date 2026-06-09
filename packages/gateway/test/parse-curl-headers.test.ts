@@ -96,7 +96,6 @@ describe("parseCurlHeaders", () => {
     const origError = console.error;
     console.error = () => {};
     try {
-      // biome-ignore lint/suspicious/noControlCharactersInRegex: testing sanitization
       const result = parseCurlHeaders("X Bad: x\nX\x00Bad: y");
       // The whitespace name parses as "X Bad" but fails the RFC 7230 token
       // check, so it's rejected. The control-char name is sanitized to
@@ -112,7 +111,6 @@ describe("parseCurlHeaders", () => {
     const origError = console.error;
     console.error = () => {};
     try {
-      // biome-ignore lint/suspicious/noControlCharactersInRegex: testing sanitization
       const result = parseCurlHeaders("X-Inject: a\x00b\x01c");
       // Value has control chars stripped, leaving "abc"
       expect(result["x-inject"]).toBe("abc");

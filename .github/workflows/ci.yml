@@ -709,7 +709,7 @@ jobs:
       - name: Build darwin-arm64 binary from staging
         run: |
           pnpm --filter @loreai/gateway run build:binary:sea \
-            --from-staging packages/gateway/.sea-staging \
+            --from-staging .sea-staging \
             --platforms darwin-arm64 --release
           echo "--- Darwin binary: ---"
           ls -la packages/gateway/dist-bin/
@@ -735,6 +735,8 @@ jobs:
           echo "codesign -v: passed"
           SIG_INFO=$(codesign -d --verbose=2 "$BIN" 2>&1)
           echo "$SIG_INFO"
+          # Verify the binary has SOME signature (ad-hoc or certificate).
+          # Update this check if switching to a real Apple Developer certificate.
           echo "$SIG_INFO" | grep -q "Signature=adhoc" \
             || (echo "::error::Binary is not ad-hoc signed — will fail on Apple Silicon"; exit 1)
           echo "Ad-hoc signature verified"
