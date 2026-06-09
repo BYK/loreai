@@ -51,6 +51,7 @@ The cleanest way to override a single field is via env var if Lore reads it, or 
 - [`workspaces`](#workspaces) — Workspace sub-project paths or globs (relative to `.lore.json`). Imported into the root knowledge base on startup. Supports literal paths and single-level globs (e.g. "packages/*").
 - [`crossProject`](#crossProject) — Include cross-project knowledge in compaction summaries and auto-promote knowledge that recurs across 3+ projects. Default: true.
 - [`agentsFile`](#agentsFile) — AGENTS.md export/import configuration.
+- [`loreFile`](#loreFile) — `.lore.md` export/import configuration.
 - [`user`](#user) — User identity for the self-entity. Falls back to git config user.name / user.email if omitted.
 
 ## `model`
@@ -224,6 +225,15 @@ AGENTS.md export/import configuration.
 |---|---|---|---|---|
 | `enabled` | boolean | `true` |  | Disable all AGENTS.md export/import behaviour. Default: true. |
 | `path` | string | `"AGENTS.md"` |  | Path to the agents file, relative to the project root. Default: 'AGENTS.md'. |
+
+
+## `loreFile`
+
+`.lore.md` export/import configuration.
+
+| Field | Type | Default | Constraints | Description |
+|---|---|---|---|---|
+| `enabled` | boolean | `true` |  | Set to false to disable `.lore.md` export/import. When disabled, `.lore.md` is not written, startup skips the `.lore.md` import branch, the recall tool omits the .lore.md commit reminder, and the file watcher ignores `.lore.md`. Knowledge stays in the database and is still injected into the system prompt via LTM. Pair with `agentsFile.enabled=true` to keep sharing knowledge via an inline section in AGENTS.md. Default: true. |
 
 
 ## `user`

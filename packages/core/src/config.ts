@@ -585,9 +585,15 @@ export const LoreConfig = z.object({
        *  Knowledge stays in the database and is still injected into the system
        *  prompt via LTM. Pair with `agentsFile.enabled=true` to keep sharing
        *  knowledge via an inline section in AGENTS.md. Default: true. */
-      enabled: z.boolean().default(true),
+      enabled: z
+        .boolean()
+        .default(true)
+        .describe(
+          "Set to false to disable `.lore.md` export/import. When disabled, `.lore.md` is not written, startup skips the `.lore.md` import branch, the recall tool omits the .lore.md commit reminder, and the file watcher ignores `.lore.md`. Knowledge stays in the database and is still injected into the system prompt via LTM. Pair with `agentsFile.enabled=true` to keep sharing knowledge via an inline section in AGENTS.md. Default: true.",
+        ),
     })
-    .default({ enabled: true }),
+    .default({ enabled: true })
+    .describe("`.lore.md` export/import configuration."),
   /** User identity for the self-entity. When provided, creates/updates a "self" entity
    *  with this information. If omitted, falls back to git config user.name / user.email. */
   user: z
