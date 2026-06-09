@@ -329,6 +329,8 @@ jobs:
         with:
           name: sea-staging
           path: packages/gateway/.sea-staging/
+          # .sea-staging is a dot-prefixed (hidden) directory
+          include-hidden-files: true
 
       # -----------------------------------------------------------------
       # Release: build all packages + pack tarballs + multi-platform binaries
