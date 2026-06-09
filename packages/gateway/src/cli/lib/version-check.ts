@@ -352,6 +352,11 @@ export function shouldSuppressNotification(args: string[]): boolean {
 
 /**
  * Check if update checking is disabled via environment variable.
+ * When set to `1`, the CLI does not phone home to GitHub for the
+ * latest released version and does not print "new version
+ * available" notifications. Use this in CI, air-gapped
+ * environments, or when you've pinned a version and don't want
+ * the upgrade hint. Env: `LORE_NO_UPDATE_CHECK=1`.
  */
 function isUpdateCheckDisabled(): boolean {
   return process.env.LORE_NO_UPDATE_CHECK === "1";

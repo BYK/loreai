@@ -137,6 +137,15 @@ export interface GatewayConfig {
 export function loadConfig(): GatewayConfig {
   const env = process.env;
   const hosts = parseHosts(env.LORE_LISTEN_HOST);
+  /**
+   * Explicitly marks this gateway as a remote / multi-tenant one.
+   * When set to `1`, the gateway assumes a per-user bucketing model
+   * — sessions are isolated by API key + project path instead of
+   * merging onto the gateway's cwd. This is the highest-priority
+   * signal in the 4-layer remote-gateway auto-detection: it
+   * overrides `LORE_HOSTED_MODE`, non-loopback bind detection, and
+   * the `lore start` default. Env: `LORE_REMOTE_GATEWAY=1`.
+   */
   const remoteGatewayEnv = isTruthy(env.LORE_REMOTE_GATEWAY);
   const hostedModeEnv = isTruthy(env.LORE_HOSTED_MODE);
   // Auto-detect when neither env var is DEFINED (not just truthy): a
@@ -160,6 +169,13 @@ export function loadConfig(): GatewayConfig {
     upstreamOpenAI: trimTrailingSlash(
       env.LORE_UPSTREAM_OPENAI || "https://api.openai.com",
     ),
+    /**
+     * Idle timeout in seconds. After this many seconds with no active
+     * request, the gateway stops the per-session in-memory cache
+     * warmer and distillation loop to free resources. State is
+     * preserved in the DB so a new request resumes from where the
+     * session left off. Default: 60. Env: `LORE_IDLE_TIMEOUT`.
+     */
     idleTimeoutSeconds: parsePositiveInt(env.LORE_IDLE_TIMEOUT, 60),
     sessionEvictionTimeoutSeconds: parseNonNegativeInt(
       env.LORE_SESSION_EVICTION_TIMEOUT,

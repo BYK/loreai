@@ -1011,7 +1011,18 @@ const MIGRATIONS: string[] = [
   `,
 ];
 
-/** Return the resolved path of the SQLite database file. */
+/**
+ * Resolved path of the SQLite database file. Reads
+ * `LORE_DB_PATH` first; falls back to `${dataDir}/lore.db`
+ * (typically `~/.local/share/lore/lore.db`).
+ *
+ * The test preload (`packages/core/test/setup.ts`) sets
+ * `LORE_DB_PATH` to a temp directory so tests never touch the
+ * production DB. Setting it to a non-existent path will create
+ * the file on first use. The gateway itself does not set this —
+ * it expects a stable location for the DB so the SQLite WAL
+ * and FTS5 indices persist across restarts. Env: `LORE_DB_PATH`.
+ */
 export function dbPath(): string {
   const envPath = process.env.LORE_DB_PATH;
   if (envPath) return envPath;

@@ -1026,6 +1026,15 @@ function getLLMClient(config: GatewayConfig): LLMClient {
 
     // Wrap with batch queue for 50% cost savings on non-urgent worker calls.
     // Enabled by default — disable via LORE_BATCH_DISABLED=1.
+    /**
+     * Disables the batch-queue wrapper for non-urgent worker calls
+     * (distillation, curation, embedding). With batching on, the
+     * gateway groups these calls and submits them via the Anthropic
+     * Message Batches API for ~50% cost savings. Set
+     * `LORE_BATCH_DISABLED=1` to bypass batching and dispatch each
+     * call immediately (useful for low-latency debugging or when the
+     * upstream rejects batch submissions). Env: `LORE_BATCH_DISABLED=1`.
+     */
     const batchDisabled = process.env.LORE_BATCH_DISABLED === "1";
     if (Sentry.isInitialized()) {
       Sentry.setTag("batch_enabled", String(!batchDisabled));

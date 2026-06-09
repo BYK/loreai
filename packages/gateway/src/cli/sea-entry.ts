@@ -65,8 +65,16 @@ if (vendorEnabled) {
   // ~/.lore/embeddings-vendored/v{VERSION}-{TARGET}/<MODEL_DIR_NAME>/.
   // The layout matches HuggingFace repo structure that transformers.js
   // expects.
-  const target =
-    process.env.LORE_TARGET ?? `${process.platform}-${process.arch}`;
+  /**
+   * Platform target string used to locate the vendored embedding
+   * model directory when running the SEA (single executable)
+   * binary. Format: `${platform}-${arch}` (e.g. `darwin-arm64`,
+   * `linux-x64`). Defaults to the current host. Override this to
+   * pre-warm the embedding model cache on a machine of one
+   * platform and run the binary on another (CI cross-builds, OCI
+   * images). Env: `LORE_TARGET=<platform>-<arch>`.
+   */
+  const target = process.env.LORE_TARGET ?? `${process.platform}-${process.arch}`;
   const vendorRoot = join(
     homedir(),
     ".lore",

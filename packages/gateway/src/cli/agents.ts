@@ -113,8 +113,24 @@ export const AGENTS: AgentDef[] = [
       // `-c` CLI overrides (see cliArgs below). We still expose LORE_PROJECT /
       // LORE_GIT_REMOTE for env_http_headers mapping if the user configures a
       // custom provider with env_http_headers in their config.toml.
+      /**
+       * Project path the gateway exports to the spawned Codex CLI. Set
+       * on the child process so a user-defined `env_http_headers` in
+       * `~/.codex/config.toml` can map it to a custom header. The
+       * gateway itself does not read this env var; it only sets it
+       * for downstream consumption.
+       */
       const env: Record<string, string> = { LORE_PROJECT: cwd };
       const remote = safeRemote(cwd);
+      /**
+       * Git remote URL (e.g. `git@github.com:org/repo.git`) of the
+       * project the spawned Codex CLI is operating in. Exported by
+       * the gateway so a user-defined `env_http_headers` in
+       * `~/.codex/config.toml` can map it to a custom header for
+       * upstream telemetry. Set only when `git remote get-url origin`
+       * returns a value; the gateway does not read this env var
+       * itself.
+       */
       if (remote) env.LORE_GIT_REMOTE = remote;
       return env;
     },

@@ -78,6 +78,22 @@ function readDescriptionAbove(source: string, line: number): string {
       i--;
       continue;
     }
+    if (trimmed.startsWith("/**")) {
+      // JSDoc opener directly above the use site — collect forward
+      // through the matching `*/` close.
+      block.unshift(text);
+      i--;
+      while (i >= 0 && !lines[i]?.trim().endsWith("*/")) {
+        block.unshift(lines[i] ?? "");
+        i--;
+        budget--;
+      }
+      if (i >= 0) {
+        block.unshift(lines[i] ?? "");
+        i--;
+      }
+      break;
+    }
     if (trimmed.endsWith("*/")) {
       // Walk back to the comment opener
       block.unshift(text);
@@ -115,6 +131,40 @@ function readDescriptionAbove(source: string, line: number): string {
  * sentence (the one right after the env-var name mention).
  */
 function readDescriptionByName(source: string, name: string): string | null {
+  return searchJSDocForEnvVar(source, name);
+}
+
+/**
+ * Project-wide JSDoc search. When the per-file search above fails
+ * (the env var's first use is in a different file from where its
+ * JSDoc lives — common when the var is read in a help-text log
+ * line but documented at the actual functional use), fall back to
+ * searching every other source file in the project. Returns the
+ * first JSDoc that both mentions the name and includes an
+ * "Env: LORE_X" / "env var" marker (the most specific signal that
+ * the JSDoc is about the env var, not just incidentally mentions
+ * the name).
+ */
+function readDescriptionByNameProjectWide(
+  name: string,
+  excludeFile: string,
+  allFiles: string[],
+): string | null {
+  for (const file of allFiles) {
+    if (file === excludeFile) continue;
+    let source: string;
+    try {
+      source = readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    const found = searchJSDocForEnvVar(source, name);
+    if (found) return found;
+  }
+  return null;
+}
+
+function searchJSDocForEnvVar(source: string, name: string): string | null {
   // Find every comment block in the file; check if it mentions the name.
   // JSDoc blocks end with `*/`. We capture each `/** ... */` block.
   // matchAll is used instead of .exec() to avoid the lastIndex-reset
@@ -206,6 +256,14 @@ function extractParser(line: string): string | null {
 
 /** Map a file path to a subsystem name. */
 function subsystemOf(file: string): string {
+  // Core package source lives outside the gateway src tree, so a
+  // bare `relative(GATEWAY_SRC, file)` would yield a leading ".."
+  // segment and render as a `## ..` header. Resolve the package
+  // root first and dispatch on which package the file belongs to.
+  const coreSrc = join(REPO_ROOT, "packages/core/src");
+  if (file.startsWith(coreSrc + sep)) {
+    return "Memory engine (`@loreai/core`)";
+  }
   const rel = relative(GATEWAY_SRC, file).split(sep);
   const top = rel[0] ?? "";
   switch (top) {
@@ -232,25 +290,6 @@ function subsystemOf(file: string): string {
     case "instrument.ts":
     case "hosted-config.ts":
       return "Auth + billing + observability";
-    case "db":
-    case "storage":
-    case "log.ts":
-    case "markdown.ts":
-    case "prompt.ts":
-    case "entities.ts":
-    case "curator.ts":
-    case "distillation.ts":
-    case "pattern-extract.ts":
-    case "temporal.ts":
-    case "gradient.ts":
-    case "search.ts":
-    case "recall.ts":
-    case "ltm.ts":
-    case "embedding.ts":
-    case "agent-file":
-    case "agents-file.ts":
-    case "config.ts-1":
-      return "Memory engine (`@loreai/core`)";
     default:
       return top.replace(/\.ts$/, "");
   }
@@ -280,16 +319,44 @@ function collectEntries(): Map<string, EnvVarEntry> {
       for (const match of line.matchAll(localRegex)) {
         const name = match[0].split(".").pop() ?? "";
         if (!name.startsWith("LORE_")) continue;
+        // Skip CLI help-text lines that mention the env var inside a
+        // backtick string template — they aren't real use sites, and
+        // picking them as the "first use" buries the actual functional
+        // JSDoc which lives further down. The pattern: the env-var
+        // name appears literally as a non-interpolated substring of a
+        // backtick-delimited string. A real use site always reads
+        // `process.env.LORE_X` / `env.LORE_X` — never the bare
+        // `LORE_X` literal.
+        // Skip CLI help-text lines: these reference the env var as a
+        // bare `LORE_X` literal in a backtick template AND as a real
+        // `process.env.LORE_X` / `env.LORE_X` access in a `${...}`
+        // interpolation. The bare-literal form is the label that
+        // appears before the parens; picking this line as "first use"
+        // buries the real functional JSDoc further down. A genuine
+        // use site never has the env var as a bare literal — it's
+        // always prefixed with `process.env.` or `env.`. We test for
+        // a bare occurrence by requiring the preceding character to
+        // NOT be `.` (which would make it part of `process.env.LORE_X`).
+        if (
+          line.includes("`") &&
+          new RegExp(`(?<!\\.)\\b${name}\\b`).test(line)
+        ) {
+          continue;
+        }
         if (entries.has(name)) continue; // dedupe — first use site wins
         const aboveDesc = readDescriptionAbove(source, i + 1);
         const byNameDesc = aboveDesc
           ? null
           : readDescriptionByName(source, name);
+        const projectWideDesc =
+          aboveDesc || byNameDesc
+            ? null
+            : readDescriptionByNameProjectWide(name, file, files);
         const entry: EnvVarEntry = {
           name,
           file,
           line: i + 1,
-          description: aboveDesc || byNameDesc || "",
+          description: aboveDesc || byNameDesc || projectWideDesc || "",
           defaultValue: extractDefaultValue(line, name),
           parser: extractParser(line),
         };
@@ -330,8 +397,9 @@ function renderPage(): string {
   lines.push("");
   lines.push(
     "Every env var the gateway reads. Default values are extracted from the source (look for the " +
-      "`||` / `??` / `parseXxx(env.LORE_X, DEFAULT)` pattern at the first use site). The `Subsystem` " +
-      "column is the source file; click through to read the full JSDoc.",
+      "`||` / `??` / `parseXxx(env.LORE_X, DEFAULT)` pattern at the first use site) and shown under " +
+      "the variable name when set. The parser used to coerce the raw string is also shown under the " +
+      "variable name when present.",
   );
   lines.push("");
   lines.push(
@@ -354,15 +422,25 @@ function renderPage(): string {
     list.sort((a, b) => a.name.localeCompare(b.name));
     lines.push(`## ${sub}`);
     lines.push("");
-    lines.push("| Variable | Default | Parser | Description |");
-    lines.push("|---|---|---|---|");
+    // Two-column layout: Variable (with Default + Parser as sub-lines
+    // when set) and Description. This keeps the description column
+    // wide for prose and prevents the table from exceeding the
+    // viewport on long entries (the previous 4-column layout
+    // produced a horizontal scroll on every long description).
+    lines.push("| Variable | Description |");
+    lines.push("|---|---|");
     for (const e of list) {
-      const def = e.defaultValue ? `\`${e.defaultValue}\`` : "—";
-      const parser = e.parser ? `\`${e.parser}\`` : "—";
+      const meta: string[] = [];
+      if (e.defaultValue) meta.push(`**Default:** \`${e.defaultValue}\``);
+      if (e.parser) meta.push(`**Parser:** \`${e.parser}\``);
+      const variableCell =
+        meta.length > 0
+          ? `\`${e.name}\`<br>${meta.join("<br>")}`
+          : `\`${e.name}\``;
       const desc = (e.description || "_no description in source_")
         .replace(/\|/g, "\\|")
         .replace(/\n/g, " ");
-      lines.push(`| \`${e.name}\` | ${def} | ${parser} | ${desc} |`);
+      lines.push(`| ${variableCell} | ${desc} |`);
     }
     lines.push("");
   }
