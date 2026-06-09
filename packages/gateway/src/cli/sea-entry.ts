@@ -74,7 +74,8 @@ if (vendorEnabled) {
    * platform and run the binary on another (CI cross-builds, OCI
    * images). Env: `LORE_TARGET=<platform>-<arch>`.
    */
-  const target = process.env.LORE_TARGET ?? `${process.platform}-${process.arch}`;
+  const target =
+    process.env.LORE_TARGET ?? `${process.platform}-${process.arch}`;
   const vendorRoot = join(
     homedir(),
     ".lore",
