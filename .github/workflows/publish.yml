@@ -55,10 +55,13 @@ jobs:
           node-version: 24
           registry-url: 'https://registry.npmjs.org'
 
+      # Pin to a specific Craft version to avoid upstream regressions.
+      # Craft 2.26.6+ hangs during artifact extraction — see #648.
       - name: Install Craft
+        env:
+          CRAFT_VERSION: '2.26.5'
         run: |
-          CRAFT_URL=$(curl -fsSL https://api.github.com/repos/getsentry/craft/releases/latest \
-            | jq -r '.assets[] | select(.name == "craft") | .browser_download_url')
+          CRAFT_URL="https://github.com/getsentry/craft/releases/download/${CRAFT_VERSION}/craft"
           sudo curl -fsSL -o /usr/local/bin/craft "$CRAFT_URL"
           sudo chmod +x /usr/local/bin/craft
 
