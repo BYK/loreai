@@ -345,6 +345,18 @@ h1 em::after {
   flex-wrap: wrap;
 }
 
+.hero-folklore {
+  margin-top: 1.4rem;
+  font-size: .8rem;
+  color: var(--mid);
+}
+.hero-folklore a {
+  color: var(--mid);
+  border-bottom: 1px solid var(--g4);
+  transition: color .2s;
+}
+.hero-folklore a:hover { color: var(--g1); }
+
 .btn-fill {
   display: inline-flex;
   align-items: center;
