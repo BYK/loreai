@@ -13,7 +13,7 @@ sidebar:
 - **Codex CLI without `lore run`** — if you'd rather start the gateway yourself and launch Codex directly (for example, in a long-running dev workflow where you don't want `lore run` to manage the gateway lifecycle), `lore setup codex` writes the same config.
 - **Remote gateway** — `lore setup codex -r http://remote:3207` writes a `config.toml` pointing at a non-default gateway URL, useful when the gateway runs on a different machine (Tailscale, LAN, a hosted deployment) and you want the local Codex client to talk to it.
 
-If you're using `lore run` with a CLI-based agent that reads env vars (OpenCode, Pi, Claude Code, Hermes Agent), you do **not** need `lore setup` — `lore run` injects the right env vars into the child process at launch.
+If you're using `lore run` with a CLI-based agent that reads env vars (OpenCode, Pi, Claude Code, Hermes Agent), you do **not** need `lore setup` — `lore run` injects the right env vars into the child process at launch. Codex is the exception on two counts: the Codex CLI does not read `OPENAI_BASE_URL` from env (only from `config.toml` or `-c` overrides), and Codex Desktop has no way to inject `-c` at all. `lore setup codex` writes the persistent config both need.
 
 ## Usage
 
@@ -24,7 +24,7 @@ lore setup codex -p 8080       # Configure Codex to talk to a gateway on a non-d
 lore setup codex -r http://remote:3207  # Configure Codex for a remote gateway
 ```
 
-If no app is given, `lore setup` scans `$PATH` for supported apps and configures whichever ones it finds. If nothing matches, it prints the supported app list and exits with a non-zero status — it never modifies a config file unless it found a matching installed app (or you passed an app name explicitly).
+If no app is given, `lore setup` scans `$PATH` for supported apps and configures whichever ones it finds. If nothing matches, it prints the supported app list and exits with a non-zero status — it never modifies a config file unless it found a matching installed app. When you pass an explicit app name, `setup` proceeds even if the binary is missing on `$PATH` (prints a warning and writes the config anyway). This is intentional so you can pre-configure Codex on a workstation where the binary lives elsewhere, or write the config before installing the binary.
 
 If the named app isn't installed (for example, `lore setup codex` on a machine without the Codex binary), the command prints a warning and proceeds with the configuration. The intent is to let you set up Codex on a workstation where the binary lives elsewhere, or to pre-configure before installing the binary.
 
@@ -36,7 +36,7 @@ If the named app isn't installed (for example, `lore setup codex` on a machine w
 
 `openai_base_url` is set to the gateway's `baseUrl`, normalized to end with `/v1` (required by Codex). The port defaults to `3207` (the first entry in `DEFAULT_PORTS`); override with `-p` or `-r`.
 
-`model_auto_compact_token_limit = 999999999` disables Codex's built-in auto-compaction so Lore's gradient context manager and distillation pipeline can do their job. If you re-run `lore setup`, this value is restored if you've changed it.
+`model_auto_compact_token_limit = 999999999` disables Codex's built-in auto-compaction so Lore's gradient context manager and distillation pipeline can do their job. Re-running `lore setup` resets this value to `999999999` — any custom value you set is overwritten.
 
 To remove the configuration and restore Codex's default behavior, delete the relevant lines from `~/.codex/config.toml` or run `git checkout -- ~/.codex/config.toml` if you keep the file under version control.
 
@@ -50,9 +50,11 @@ lore start
 
 In a second terminal, run Codex (or launch the Codex Desktop app). In the gateway's request log you should see requests originating from `127.0.0.1` with `model` set to your configured Codex model. If you see requests going to `api.openai.com` instead, the `config.toml` write was overridden — check that no other tool (Codex's own first-run wizard, a system service, a different shell profile) is writing to the file after `lore setup` runs.
 
+A quick check for override-by-another-tool: `stat -c '%y' ~/.codex/config.toml`. If the mtime updates after the next Codex Desktop launch and you didn't change anything, another tool is touching the file.
+
 ## Per-harness notes
 
-- **Codex Desktop** — `lore setup codex` is the **only** way to route the Desktop app through Lore (the app does not honor `-c` CLI overrides at launch). Run it once, leave the gateway running via `lore start` (or a system service), and the Desktop app routes correctly.
+- **Codex Desktop** — `lore setup codex` is the **only** way to route the Desktop app through Lore (the app does not honor `-c` CLI overrides at launch). Run it once, leave the gateway running via `lore start` (or a system service), and the Desktop app routes correctly. If the Desktop app overwrites or ignores your `config.toml`, run the gateway under a system service manager (`systemd`, `launchd`, etc.) so the URL stays stable. Check Codex's docs for a session-scoped override file at `~/.codex/sessions/<session-id>/config.toml` if your Codex version supports it.
 - **Codex CLI** — `lore run codex` is simpler than `lore setup codex` because it manages the gateway lifecycle and passes `-c` overrides per-invocation (no persisted config). Use `lore setup` only when you want to launch Codex without `lore run`.
 
 ## Next steps

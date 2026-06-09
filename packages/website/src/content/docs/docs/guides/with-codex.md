@@ -5,7 +5,7 @@ sidebar:
   order: 4
 ---
 
-[Codex](https://github.com/openai/codex) is OpenAI's terminal-based AI coding agent. Lore's gateway is the recommended way to run Codex with persistent memory and gradient context management.
+[Codex](https://github.com/openai/codex) is OpenAI's terminal-based AI coding agent. Lore's gateway is the recommended way to run Codex with persistent memory and gradient context management. For CLI users, `lore run` is the simplest path. For the Codex Desktop app — which can't accept `-c` CLI overrides — see [Setup command](../setup/).
 
 The Codex CLI is a Rust binary that does NOT read `OPENAI_BASE_URL` from the environment. Provider routing is done exclusively via `~/.codex/config.toml` or `-c` CLI overrides. The gateway uses `-c` overrides when launched via `lore run` so you do not have to edit the config file by hand.
 
