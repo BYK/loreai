@@ -1065,6 +1065,7 @@ export function computeWarmingSnapshot(
     state.lastUpstream?.model,
     state.lastUpstream?.protocol,
     state.resolvedConversationTTL,
+    state.lastUpstream?.url,
   );
   const ttlMs = profile?.ttlMs ?? 300_000;
   const warmupMarginMs = profile?.warmupMarginMs ?? 45_000;
