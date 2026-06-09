@@ -348,6 +348,24 @@ jobs:
       # exists even when the test-job's build:binary call was skipped on
       # PR runs. No additional vendor step needed here.
 
+      # rcodesign is needed to ad-hoc sign macOS binaries when cross-
+      # compiling on Linux. Without it, darwin binaries are unsigned and
+      # cannot execute on Apple Silicon.
+      # NOTE: Keep in sync with the identical step in build-nightly-binaries.
+      - name: Install rcodesign (macOS cross-signing)
+        if: startsWith(github.ref, 'refs/heads/release/')
+        run: |
+          RCODESIGN_VERSION="0.29.0"
+          RCODESIGN_SHA256="dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002"
+          TARBALL="apple-codesign-${RCODESIGN_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL -o "/tmp/${TARBALL}" \
+            "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${RCODESIGN_VERSION}/${TARBALL}"
+          echo "${RCODESIGN_SHA256}  /tmp/${TARBALL}" | sha256sum -c -
+          tar -xzf "/tmp/${TARBALL}" -C /usr/local/bin --strip-components=1 \
+            "apple-codesign-${RCODESIGN_VERSION}-x86_64-unknown-linux-musl/rcodesign"
+          rm "/tmp/${TARBALL}"
+          rcodesign --version
+
       - name: Build release binaries (all platforms)
         if: startsWith(github.ref, 'refs/heads/release/')
         run: |
@@ -518,6 +536,23 @@ jobs:
         with:
           path: .node-cache
           key: fossilize-${{ hashFiles('packages/gateway/script/build-binary-sea.ts') }}
+
+      # rcodesign is needed to ad-hoc sign macOS binaries when cross-
+      # compiling on Linux. Without it, darwin binaries are unsigned and
+      # cannot execute on Apple Silicon.
+      # NOTE: Keep in sync with the identical step in the test job (release builds).
+      - name: Install rcodesign (macOS cross-signing)
+        run: |
+          RCODESIGN_VERSION="0.29.0"
+          RCODESIGN_SHA256="dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002"
+          TARBALL="apple-codesign-${RCODESIGN_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL -o "/tmp/${TARBALL}" \
+            "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${RCODESIGN_VERSION}/${TARBALL}"
+          echo "${RCODESIGN_SHA256}  /tmp/${TARBALL}" | sha256sum -c -
+          tar -xzf "/tmp/${TARBALL}" -C /usr/local/bin --strip-components=1 \
+            "apple-codesign-${RCODESIGN_VERSION}-x86_64-unknown-linux-musl/rcodesign"
+          rm "/tmp/${TARBALL}"
+          rcodesign --version
 
       - name: Build all platform binaries
         run: |
