@@ -160,7 +160,6 @@ function formatType(schema: ZodTypeAny): string {
   if (enumValues) {
     return enumValues.map((v) => `"${v}"`).join(" \\| ");
   }
-  const typeName = getTypeName(schema);
   // Unwrap optional/default wrappers for the type label
   const inner = unwrap(schema);
   const innerTypeName = getTypeName(inner);

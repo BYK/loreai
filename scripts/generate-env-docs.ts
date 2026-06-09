@@ -117,12 +117,14 @@ function readDescriptionAbove(source: string, line: number): string {
 function readDescriptionByName(source: string, name: string): string | null {
   // Find every comment block in the file; check if it mentions the name.
   // JSDoc blocks end with `*/`. We capture each `/** ... */` block.
+  // matchAll is used instead of .exec() to avoid the lastIndex-reset
+  // infinite loop that happens when exec() returns null (lastIndex
+  // resets to 0, the next call finds a match again, forever).
   const blockRe = /\/\*\*([\s\S]*?)\*\//g;
-  let match: RegExpExecArray | null;
   const candidates: { block: string; idx: number }[] = [];
-  while ((match = blockRe.exec(source)) !== null) {
+  for (const match of source.matchAll(blockRe)) {
     if (match[1]?.includes(name)) {
-      candidates.push({ block: match[1] ?? "", idx: match.index });
+      candidates.push({ block: match[1] ?? "", idx: match.index ?? 0 });
     }
   }
   if (candidates.length === 0) return null;
@@ -272,10 +274,10 @@ function collectEntries(): Map<string, EnvVarEntry> {
     const lines = source.split("\n");
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i] ?? "";
-      // Reset regex state (global flag is stateful on .exec)
       const localRegex = new RegExp(VAR_NAME_REGEX.source, "g");
-      let match: RegExpExecArray | null;
-      while ((match = localRegex.exec(line)) !== null) {
+      // matchAll avoids the lastIndex infinite loop that bites
+      // single-line .exec() patterns when there's no match.
+      for (const match of line.matchAll(localRegex)) {
         const name = match[0].split(".").pop() ?? "";
         if (!name.startsWith("LORE_")) continue;
         if (entries.has(name)) continue; // dedupe — first use site wins
