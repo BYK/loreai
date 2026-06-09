@@ -76,6 +76,16 @@ const { values: flags } = parseArgs({
      *  require a network download on first use.
      *  Useful for iteration speed during local dev. */
     "no-vendor": { type: "boolean", default: false },
+    /** Run esbuild + asset staging only — skip fossilize and everything
+     *  after it. The .sea-staging/ directory is the output artifact,
+     *  suitable for transfer to another machine (e.g. macOS) where
+     *  fossilize runs natively for V8 code cache + native codesign.
+     *  Sentry sourcemap upload still runs in this mode. */
+    "prepare-only": { type: "boolean", default: false },
+    /** Skip esbuild — reuse a pre-built .sea-staging/ directory
+     *  (e.g. downloaded as a CI artifact from a --prepare-only run).
+     *  Runs fossilize, gzip, and rename steps only. */
+    "from-staging": { type: "string" },
   },
   allowPositionals: false,
   strict: true,
@@ -286,11 +296,175 @@ function sentryBunToNodePlugin(): esbuild.Plugin {
 }
 
 // ---------------------------------------------------------------------------
+// Sentry sourcemap upload
+// ---------------------------------------------------------------------------
+
+function uploadSentrySourcemap(
+  stagingDirPath: string,
+  mapPath: string,
+): void {
+  if (process.env.SENTRY_AUTH_TOKEN) {
+    console.log(
+      `  Uploading sourcemap to Sentry (release: ${pkg.version})...`,
+    );
+    try {
+      execSync(
+        [
+          "npx",
+          "sentry",
+          "sourcemap",
+          "upload",
+          // Sourcemap lives in .sea-staging/ (produced by esbuild
+          // with sourcemap:"linked"). The final binary embeds the
+          // debug ID that links errors back to this map.
+          `${stagingDirPath}/`,
+          "--release",
+          pkg.version,
+          "--org",
+          "byk",
+          "--project",
+          "loreai-gateway",
+          "--url-prefix",
+          "~/sea-staging/",
+        ].join(" "),
+        { cwd: packageDir, stdio: "inherit" },
+      );
+      console.log("✓ Sourcemap uploaded to Sentry");
+      // Delete the .map file after upload — it's not needed in the
+      // staging artifact and would waste transfer bandwidth.
+      try {
+        unlinkSync(mapPath);
+        console.log("✓ Sourcemap deleted (uploaded to Sentry)");
+      } catch {
+        // best-effort
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`⚠ Sourcemap upload failed: ${msg}`);
+    }
+  } else {
+    console.log("  No SENTRY_AUTH_TOKEN — skipping sourcemap upload");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Fossilize: SEA binary creation, gzip, rename
+// ---------------------------------------------------------------------------
+
+const fossilizeTarget = (t: CompileTarget): string =>
+  t.startsWith("windows") ? t.replace("windows", "win") : t;
+
+async function runFossilize(
+  targets: CompileTarget[],
+  bundlePath: string,
+  manifestPath: string,
+  stagingDirPath: string,
+): Promise<void> {
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+
+  console.log(
+    `→ fossilize: ${targets.length} platform(s), ${Object.keys(manifest).length} asset(s)`,
+  );
+  try {
+    await fossilize(
+      {
+        nodeVersion: "lts",
+        platforms: targets.map(fossilizeTarget),
+        noBundle: true,
+        holePunch: true,
+        outputName: "lore",
+        outDir: distBinDir,
+        cacheDir: join(packageDir, ".node-cache"),
+        assetManifest: manifestPath,
+        sign: false,
+        concurrencyLimit: 3,
+      },
+      bundlePath,
+    );
+  } catch (err) {
+    console.error("✗ fossilize failed:", err);
+    process.exit(1);
+  }
+
+  // fossilize creates output files with its own platform naming
+  // (e.g. lore-win-x64 for our windows-x64). Verify the expected
+  // paths exist, then rename to our naming convention for CI
+  // compatibility (CI expects lore-windows-x64.exe).
+  for (const target of targets) {
+    const fTarget = fossilizeTarget(target);
+    const ext = fTarget.startsWith("win") ? ".exe" : "";
+    const fossilizePath = join(distBinDir, `lore-${fTarget}${ext}`);
+    if (!existsSync(fossilizePath)) {
+      console.error(
+        `✗ expected output not found: ${fossilizePath}. Check fossilize logs.`,
+      );
+      process.exit(1);
+    }
+    if (fTarget !== target) {
+      const ourPath = join(distBinDir, `lore-${target}${ext}`);
+      renameSync(fossilizePath, ourPath);
+      console.log(`✓ Binary: ${ourPath} (was ${fossilizePath})`);
+    } else {
+      console.log(`✓ Binary: ${fossilizePath}`);
+    }
+  }
+
+  // gzip (if --release)
+  if (flags.release) {
+    for (const target of targets) {
+      const ext = target.startsWith("windows") ? ".exe" : "";
+      const binaryPath = join(distBinDir, `lore-${target}${ext}`);
+      const raw = readFileSync(binaryPath);
+      const compressed = gzipSync(raw, { level: 6 });
+      const gzPath = `${binaryPath}.gz`;
+      writeFileSync(gzPath, compressed);
+      const ratio = ((compressed.length / raw.length) * 100).toFixed(1);
+      console.log(
+        `✓ gzip: ${gzPath} (${(compressed.length / 1024 / 1024).toFixed(1)}MB, ${ratio}% of original)`,
+      );
+    }
+  }
+
+  console.log(
+    `\n✓ Binary build complete: ${targets.map((t) => `lore-${t}`).join(", ")} (v${pkg.version})`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main pipeline
 // ---------------------------------------------------------------------------
 
 async function buildBinary() {
   const targets = parseTargets();
+
+  // --from-staging: skip esbuild, reuse a pre-built staging directory.
+  // Jump straight to fossilize + gzip + rename.
+  if (flags["from-staging"]) {
+    const externalStaging = flags["from-staging"];
+    if (!existsSync(externalStaging)) {
+      console.error(`✗ --from-staging dir not found: ${externalStaging}`);
+      process.exit(1);
+    }
+    const manifestPath = join(externalStaging, "asset-manifest.json");
+    if (!existsSync(manifestPath)) {
+      console.error(
+        `✗ asset-manifest.json not found in staging dir: ${externalStaging}`,
+      );
+      process.exit(1);
+    }
+    const bundlePath = join(externalStaging, "sea-entry.cjs");
+    if (!existsSync(bundlePath)) {
+      console.error(
+        `✗ sea-entry.cjs not found in staging dir: ${externalStaging}`,
+      );
+      process.exit(1);
+    }
+    console.log(`→ Using pre-built staging: ${externalStaging}`);
+    mkdirSync(distBinDir, { recursive: true });
+    await runFossilize(targets, bundlePath, manifestPath, externalStaging);
+    return;
+  }
+
   const firstTarget = targets[0];
   let vendorModelDir: string | null = null;
   if (targets.length === 1 && firstTarget) {
@@ -571,137 +745,25 @@ async function buildBinary() {
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
 
   // -------------------------------------------------------------------------
-  // Step 4: Run fossilize
+  // Sentry sourcemap upload (runs before fossilize — the .map file lives
+  // in stagingDir, not the final binary dir)
   // -------------------------------------------------------------------------
-  // fossilize uses Node.js archive naming which differs from our
-  // VALID_TARGETS on some platforms:
-  //   our "windows-x64"  → fossilize "win-x64"
-  //   our "darwin-arm64" → fossilize "darwin-arm64" (same)
-  //   our "linux-x64"    → fossilize "linux-x64" (same)
-  const fossilizeTarget = (t: CompileTarget): string =>
-    t.startsWith("windows") ? t.replace("windows", "win") : t;
+  uploadSentrySourcemap(stagingDir, mapPath);
 
-  console.log(
-    `→ fossilize: ${targets.length} platform(s), ${Object.keys(manifest).length} asset(s)`,
-  );
-  try {
-    await fossilize(
-      {
-        nodeVersion: "lts",
-        platforms: targets.map(fossilizeTarget),
-        noBundle: true,
-        holePunch: true,
-        outputName: "lore",
-        outDir: distBinDir,
-        cacheDir: join(packageDir, ".node-cache"),
-        assetManifest: manifestPath,
-        sign: false,
-        concurrencyLimit: 3,
-      },
-      bundlePath,
+  // --prepare-only: stop here. The staging dir is the output artifact
+  // for transfer to another machine (e.g. macOS for native fossilize).
+  if (flags["prepare-only"]) {
+    console.log(
+      `\n✓ Staging prepared: ${stagingDir}\n` +
+        `  Use --from-staging ${stagingDir} on the target machine to run fossilize.`,
     );
-  } catch (err) {
-    console.error("✗ fossilize failed:", err);
-    process.exit(1);
-  }
-
-  // fossilize creates output files with its own platform naming
-  // (e.g. lore-win-x64 for our windows-x64). Verify the expected
-  // paths exist, then rename to our naming convention for CI
-  // compatibility (CI expects lore-windows-x64.exe).
-  for (const target of targets) {
-    const fossilizePlat = fossilizeTarget(target);
-    const ext = fossilizePlat.startsWith("win") ? ".exe" : "";
-    const fossilizePath = join(distBinDir, `lore-${fossilizePlat}${ext}`);
-    if (!existsSync(fossilizePath)) {
-      console.error(
-        `✗ expected output not found: ${fossilizePath}. Check fossilize logs.`,
-      );
-      process.exit(1);
-    }
-    if (fossilizePlat !== target) {
-      const ourPath = join(distBinDir, `lore-${target}${ext}`);
-      renameSync(fossilizePath, ourPath);
-      console.log(`✓ Binary: ${ourPath} (was ${fossilizePath})`);
-    } else {
-      console.log(`✓ Binary: ${fossilizePath}`);
-    }
+    return;
   }
 
   // -------------------------------------------------------------------------
-  // Step 5: gzip (if --release)
+  // Steps 4-5: fossilize + gzip + rename
   // -------------------------------------------------------------------------
-  if (flags.release) {
-    for (const target of targets) {
-      const ext = target.startsWith("windows") ? ".exe" : "";
-      const binaryPath = join(distBinDir, `lore-${target}${ext}`);
-      const raw = readFileSync(binaryPath);
-      const compressed = gzipSync(raw, { level: 6 });
-      const gzPath = `${binaryPath}.gz`;
-      writeFileSync(gzPath, compressed);
-      const ratio = ((compressed.length / raw.length) * 100).toFixed(1);
-      console.log(
-        `✓ gzip: ${gzPath} (${(compressed.length / 1024 / 1024).toFixed(1)}MB, ${ratio}% of original)`,
-      );
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // Step 6: Upload sourcemap to Sentry
-  // -------------------------------------------------------------------------
-  let uploaded = false;
-  if (process.env.SENTRY_AUTH_TOKEN) {
-    console.log(`  Uploading sourcemap to Sentry (release: ${pkg.version})...`);
-    try {
-      execSync(
-        [
-          "npx",
-          "sentry",
-          "sourcemap",
-          "upload",
-          // Sourcemap lives in .sea-staging/ (produced by esbuild
-          // with sourcemap:"linked"). The final binary embeds the
-          // debug ID that links errors back to this map.
-          `${stagingDir}/`,
-          "--release",
-          pkg.version,
-          "--org",
-          "byk",
-          "--project",
-          "loreai-gateway",
-          "--url-prefix",
-          "~/sea-staging/",
-        ].join(" "),
-        { cwd: packageDir, stdio: "inherit" },
-      );
-      uploaded = true;
-      console.log("✓ Sourcemap uploaded to Sentry");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`⚠ Sourcemap upload failed: ${msg}`);
-    }
-  } else {
-    console.log("  No SENTRY_AUTH_TOKEN — skipping sourcemap upload");
-  }
-
-  // -------------------------------------------------------------------------
-  // Step 7: Cleanup intermediates
-  // -------------------------------------------------------------------------
-  // Preserve bundle + worker for debugging — fossilize has already
-  // consumed them, and removing them would force a full rebuild on
-  // every run. CI cleans the staging dir at job start.
-  if (uploaded) {
-    try {
-      unlinkSync(mapPath);
-      console.log("✓ Sourcemap deleted (uploaded to Sentry)");
-    } catch {
-      // best-effort
-    }
-  }
-
-  console.log(
-    `\n✓ Binary build complete: ${targets.map((t) => `lore-${t}`).join(", ")} (v${pkg.version})`,
-  );
+  await runFossilize(targets, bundlePath, manifestPath, stagingDir);
 }
 
 await buildBinary();

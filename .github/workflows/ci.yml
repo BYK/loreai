@@ -310,6 +310,26 @@ jobs:
           name: lore-linux-x64
           path: packages/gateway/dist-bin/lore-linux-x64
 
+      # Prepare platform-independent staging dir for cross-platform builds.
+      # The linux-x64 build above already ran esbuild and populated
+      # .sea-staging/, but we run --prepare-only explicitly to make the
+      # intent clear and ensure the staging dir is complete for darwin-arm64.
+      - name: Prepare staging for cross-platform builds
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          pnpm --filter @loreai/gateway run build:binary:sea \
+            --platforms darwin-arm64 --prepare-only
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          FOSSILIZE_CACHE_DIR: ${{ github.workspace }}/.node-cache
+
+      - name: Upload staging artifact
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: actions/upload-artifact@v7
+        with:
+          name: sea-staging
+          path: packages/gateway/.sea-staging/
+
       # -----------------------------------------------------------------
       # Release: build all packages + pack tarballs + multi-platform binaries
       # -----------------------------------------------------------------
@@ -604,8 +624,8 @@ jobs:
         if: steps.vendor-cache.outputs.cache-hit != 'true'
         run: pnpm tsx packages/gateway/script/vendor-embeddings.ts
 
-      # Cache fossilize's downloaded Node.js binaries (~200 MB across 4
-      # platforms) so nightly builds don't re-download on every run.
+      # Cache fossilize's downloaded Node.js binaries so nightly builds
+      # don't re-download on every run.
       - name: Cache fossilize Node binaries
         id: fossilize-cache
         uses: actions/cache@v5
@@ -613,27 +633,12 @@ jobs:
           path: .node-cache
           key: fossilize-${{ hashFiles('packages/gateway/script/build-binary-sea.ts') }}
 
-      # rcodesign is needed to ad-hoc sign macOS binaries when cross-
-      # compiling on Linux. Without it, darwin binaries are unsigned and
-      # cannot execute on Apple Silicon.
-      # NOTE: Keep in sync with the identical step in the test job (release builds).
-      - name: Install rcodesign (macOS cross-signing)
-        run: |
-          RCODESIGN_VERSION="0.29.0"
-          RCODESIGN_SHA256="dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002"
-          TARBALL="apple-codesign-${RCODESIGN_VERSION}-x86_64-unknown-linux-musl.tar.gz"
-          curl -fsSL -o "/tmp/${TARBALL}" \
-            "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${RCODESIGN_VERSION}/${TARBALL}"
-          echo "${RCODESIGN_SHA256}  /tmp/${TARBALL}" | sha256sum -c -
-          tar -xzf "/tmp/${TARBALL}" -C /usr/local/bin --strip-components=1 \
-            "apple-codesign-${RCODESIGN_VERSION}-x86_64-unknown-linux-musl/rcodesign"
-          rm "/tmp/${TARBALL}"
-          rcodesign --version
-
-      - name: Build all platform binaries
+      # darwin-arm64 is built natively on macOS (build-nightly-darwin job)
+      # to get V8 code cache + native codesign.
+      - name: Build platform binaries
         run: |
           pnpm --filter @loreai/gateway run build:binary:sea \
-            --platforms "darwin-arm64,linux-arm64,linux-x64,windows-x64" \
+            --platforms "linux-arm64,linux-x64,windows-x64" \
             --release
           echo "--- Nightly binaries: ---"
           ls -la packages/gateway/dist-bin/
@@ -655,9 +660,102 @@ jobs:
             packages/gateway/dist-bin/lore-*
             !packages/gateway/dist-bin/*.gz
 
+  # ---------------------------------------------------------------------------
+  # Nightly: build darwin-arm64 natively on macOS
+  #
+  # Cross-compiling darwin on Linux requires rcodesign (ad-hoc signing) and
+  # cannot produce V8 code cache. Building natively on macOS gets both a
+  # real codesign and a V8 snapshot, and lets us smoke-test the actual
+  # shipped binary.
+  # ---------------------------------------------------------------------------
+
+  build-nightly-darwin:
+    name: Build Nightly Darwin
+    needs: [changes, test]
+    if: >-
+      needs.changes.outputs.code == 'true' &&
+      github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Set nightly version
+        run: |
+          jq --arg v "${{ needs.test.outputs.nightly-version }}" '.version = $v' \
+            packages/gateway/package.json > packages/gateway/package.json.tmp
+          mv packages/gateway/package.json.tmp packages/gateway/package.json
+          echo "Building nightly version: ${{ needs.test.outputs.nightly-version }}"
+
+      - name: Download staging artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: sea-staging
+          path: packages/gateway/.sea-staging/
+
+      - name: Cache fossilize Node binaries
+        uses: actions/cache@v5
+        with:
+          path: .node-cache
+          key: fossilize-darwin-arm64-${{ hashFiles('packages/gateway/script/build-binary-sea.ts') }}
+
+      - name: Build darwin-arm64 binary from staging
+        run: |
+          pnpm --filter @loreai/gateway run build:binary:sea \
+            --from-staging packages/gateway/.sea-staging \
+            --platforms darwin-arm64 --release
+          echo "--- Darwin binary: ---"
+          ls -la packages/gateway/dist-bin/
+        env:
+          FOSSILIZE_CACHE_DIR: ${{ github.workspace }}/.node-cache
+
+      - name: Smoke-test
+        run: |
+          BIN="./packages/gateway/dist-bin/lore-darwin-arm64"
+          "$BIN" --version
+          info=$("$BIN" --print-vendor-info)
+          echo "Vendor info: $info"
+          echo "$info" | jq -e '.target == "darwin-arm64" and .localModelPath != null and .version != null' \
+            || (echo "::error::vendor not embedded in darwin-arm64 binary"; exit 1)
+          "$BIN" --check-embeddings \
+            || (echo "::error::--check-embeddings failed in darwin-arm64 binary"; exit 1)
+
+      - name: Verify code signature
+        run: |
+          BIN="./packages/gateway/dist-bin/lore-darwin-arm64"
+          echo "--- Code signature verification ---"
+          codesign -v --strict "$BIN"
+          echo "codesign -v: passed"
+          SIG_INFO=$(codesign -d --verbose=2 "$BIN" 2>&1)
+          echo "$SIG_INFO"
+          echo "$SIG_INFO" | grep -q "Signature=adhoc" \
+            || (echo "::error::Binary is not ad-hoc signed — will fail on Apple Silicon"; exit 1)
+          echo "Ad-hoc signature verified"
+
+      - name: Upload compressed artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-darwin-gz
+          path: packages/gateway/dist-bin/*.gz
+
+      - name: Upload uncompressed artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-darwin-raw
+          path: |
+            packages/gateway/dist-bin/lore-*
+            !packages/gateway/dist-bin/*.gz
+
   generate-patches:
     name: Generate Delta Patches
-    needs: [changes, test, build-nightly-binaries]
+    needs: [changes, test, build-nightly-binaries, build-nightly-darwin]
     if: >-
       needs.changes.outputs.code == 'true' &&
       github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -692,10 +790,22 @@ jobs:
           name: nightly-binaries-raw
           path: new-binaries
 
+      - name: Download darwin binary
+        uses: actions/download-artifact@v8
+        with:
+          name: nightly-darwin-raw
+          path: new-binaries
+
       - name: Download current compressed binaries
         uses: actions/download-artifact@v8
         with:
           name: nightly-binaries-gz
+          path: new-binaries
+
+      - name: Download darwin compressed binary
+        uses: actions/download-artifact@v8
+        with:
+          name: nightly-darwin-gz
           path: new-binaries
 
       - name: Download previous nightly binaries from GHCR
@@ -790,7 +900,7 @@ jobs:
 
   publish-nightly:
     name: Publish Nightly to GHCR
-    needs: [changes, test, build-nightly-binaries, generate-patches]
+    needs: [changes, test, build-nightly-binaries, build-nightly-darwin, generate-patches]
     if: >-
       needs.changes.outputs.code == 'true' &&
       github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -802,10 +912,22 @@ jobs:
           name: nightly-binaries-gz
           path: artifacts
 
+      - name: Download darwin compressed artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: nightly-darwin-gz
+          path: artifacts
+
       - name: Download uncompressed artifacts (for SHA-256 computation)
         uses: actions/download-artifact@v8
         with:
           name: nightly-binaries-raw
+          path: binaries
+
+      - name: Download darwin uncompressed artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: nightly-darwin-raw
           path: binaries
 
       - name: Download patch artifacts
