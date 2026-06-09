@@ -449,6 +449,35 @@ jobs:
       - run: pnpm run check:docs
 
   # ---------------------------------------------------------------------------
+  # Docs link integrity.
+  #
+  # Builds the docs site, serves it on a local port, and runs linkinator
+  # against it to catch broken internal relative links. Only real broken
+  # links fail the job — known linkinator false positives (its
+  # clean-URL resolution bug) are filtered by the wrapper script.
+  #
+  # Runs on any change to the website, docs content, or the link-checker
+  # script itself. Skipped for unrelated changes.
+  # ---------------------------------------------------------------------------
+
+  check-links:
+    name: Check docs links
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-tags: true
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run check:links
+
+  # ---------------------------------------------------------------------------
   # Cross-platform native binary smoke tests.
   #
   # The test job above only builds and runs the linux-x64 binary. Cross-
