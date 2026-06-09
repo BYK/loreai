@@ -561,7 +561,7 @@ export const LoreConfig = z.object({
         .boolean()
         .default(true)
         .describe(
-          "Disable all AGENTS.md export/import behaviour. Default: true.",
+          "Enable AGENTS.md export/import behaviour. Set to false to disable. Default: true.",
         ),
       /** Path to the agents file, relative to the project root. */
       path: z

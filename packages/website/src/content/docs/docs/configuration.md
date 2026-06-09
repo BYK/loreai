@@ -223,7 +223,7 @@ AGENTS.md export/import configuration.
 
 | Field | Type | Default | Constraints | Description |
 |---|---|---|---|---|
-| `enabled` | boolean | `true` |  | Disable all AGENTS.md export/import behaviour. Default: true. |
+| `enabled` | boolean | `true` |  | Enable AGENTS.md export/import behaviour. Set to false to disable. Default: true. |
 | `path` | string | `"AGENTS.md"` |  | Path to the agents file, relative to the project root. Default: 'AGENTS.md'. |
 
 
