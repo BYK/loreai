@@ -66,7 +66,11 @@ function waitForServer(url, timeoutMs) {
   return new Promise((resolve, reject) => {
     const tick = async () => {
       try {
-        const res = await fetch(url, { method: "HEAD" });
+        // GET (not HEAD): some static preview servers don't support
+        // HEAD and stall the request. We only care that the server
+        // responds with anything that's not a 5xx — the linkinator
+        // pass that follows is what actually exercises the routes.
+        const res = await fetch(url, { redirect: "manual" });
         if (res.status < 500) return resolve();
       } catch {
         // not yet
@@ -132,7 +136,17 @@ const port = await findFreePort();
 console.log(`[check-links] starting preview server on port ${port}...`);
 const preview = spawn(
   "pnpm",
-  ["--filter", "@loreai/website", "exec", "astro", "preview", "--port", String(port)],
+  [
+    "--filter",
+    "@loreai/website",
+    "exec",
+    "astro",
+    "preview",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    String(port),
+  ],
   { stdio: ["ignore", "pipe", "pipe"], detached: false },
 );
 
