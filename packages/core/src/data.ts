@@ -23,6 +23,7 @@ import {
 import { getGitRemote } from "./git";
 import * as ltm from "./ltm";
 import * as agentsFile from "./agents-file";
+import { config as loreConfig } from "./config";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -526,10 +527,14 @@ export function clearProject(projectPath: string): ClearResult {
     throw e;
   }
 
-  // Regenerate .lore.md (will be empty/minimal after clearing knowledge)
+  // Regenerate or delete .lore.md depending on toggle
   if (existsSync(projectPath)) {
     try {
-      agentsFile.exportLoreFile(projectPath);
+      if (loreConfig().loreFile.enabled) {
+        agentsFile.exportLoreFile(projectPath);
+      } else {
+        agentsFile.deleteLoreFile(projectPath);
+      }
     } catch {
       // Non-fatal: project dir may not be writable
     }
@@ -693,10 +698,14 @@ export function clearKnowledge(projectPath: string): number {
   invalidateProjectsCache();
   invalidateGlobalStatsCache();
 
-  // Regenerate .lore.md
+  // Regenerate or delete .lore.md depending on toggle
   if (existsSync(projectPath)) {
     try {
-      agentsFile.exportLoreFile(projectPath);
+      if (loreConfig().loreFile.enabled) {
+        agentsFile.exportLoreFile(projectPath);
+      } else {
+        agentsFile.deleteLoreFile(projectPath);
+      }
     } catch {
       // Non-fatal
     }

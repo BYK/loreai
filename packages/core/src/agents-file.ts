@@ -14,6 +14,7 @@ import {
   writeFileSync,
   mkdirSync,
   statSync,
+  unlinkSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { db, ensureProject } from "./db";
@@ -29,6 +30,7 @@ import {
   unescapeMarkdown,
 } from "./markdown";
 import { isHostedMode } from "./hosted";
+import { config as loreConfig } from "./config";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -407,6 +409,70 @@ export function exportToFile(input: {
   writeFileSync(input.filePath, result, "utf8");
 }
 
+/**
+ * Write the full knowledge section inline into the agents file (AGENTS.md /
+ * CLAUDE.md), preserving all non-lore content. Use this when `.lore.md` is
+ * disabled but the user still wants AGENTS.md to carry project knowledge.
+ */
+export function exportInlineToAgentsFile(input: {
+  projectPath: string;
+  filePath: string;
+}): void {
+  if (isHostedMode()) return;
+  if (!loreConfig().agentsFile.enabled) return;
+
+  const sectionBody = buildSection(input.projectPath);
+  const newSection = `${LORE_SECTION_START}\n${sectionBody}${LORE_SECTION_END}\n`;
+
+  let fileContent = "";
+  if (existsSync(input.filePath)) {
+    fileContent = readFileSync(input.filePath, "utf8");
+  }
+
+  const { before, after } = splitFile(fileContent);
+
+  // Reuse the same layout logic as exportToFile for consistency.
+  const prefix = before.trimEnd();
+  const prefixWithSep = prefix.length > 0 ? `${prefix}\n\n` : "";
+  const suffix = after.trimStart();
+  const suffixWithSep = suffix.length > 0 ? `\n${suffix}` : "";
+
+  const result = prefixWithSep + newSection + suffixWithSep;
+
+  // Skip write if content hash matches cached hash (DB state unchanged).
+  const hash = hashSection(newSection);
+  const cached = getCache(input.filePath);
+  if (cached && cached.hash === hash) return;
+
+  try {
+    mkdirSync(dirname(input.filePath), { recursive: true });
+    writeFileSync(input.filePath, result, "utf8");
+    const { mtimeMs } = statSync(input.filePath);
+    setCache(input.filePath, { mtimeMs, hash });
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw e;
+  }
+}
+
+/**
+ * Delete `.lore.md` from the project root if it exists. Used by clear commands
+ * to prevent stale content from being re-imported when the user has disabled
+ * `.lore.md` via `loreFile.enabled = false`.
+ */
+export function deleteLoreFile(projectPath: string): boolean {
+  if (isHostedMode()) return false;
+  const fp = join(projectPath, LORE_FILE);
+  if (!existsSync(fp)) return false;
+  try {
+    unlinkSync(fp);
+    clearLoreFileCache(projectPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // shouldImport
 // ---------------------------------------------------------------------------
@@ -570,6 +636,7 @@ export function loreFileExists(projectPath: string): boolean {
  */
 export function exportLoreFile(projectPath: string): void {
   if (isHostedMode()) return;
+  if (!loreConfig().loreFile.enabled) return;
 
   const sectionBody = buildSection(projectPath);
   const content = `${LORE_FILE_HEADER}\n${sectionBody}`;

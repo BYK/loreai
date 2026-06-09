@@ -63,6 +63,39 @@ describe("LoreConfig — knowledge schema", () => {
   });
 });
 
+describe("LoreConfig — loreFile schema", () => {
+  test("loreFile defaults: enabled=true", () => {
+    const cfg = LoreConfig.parse({});
+    expect(cfg.loreFile.enabled).toBe(true);
+  });
+
+  test("loreFile.enabled can be set to false", () => {
+    const cfg = LoreConfig.parse({ loreFile: { enabled: false } });
+    expect(cfg.loreFile.enabled).toBe(false);
+  });
+
+  test("loreFile section is optional — omitting it uses defaults", () => {
+    const cfg = LoreConfig.parse({ curator: { enabled: false } });
+    expect(cfg.loreFile.enabled).toBe(true);
+  });
+
+  test("loreFile and agentsFile are independent", () => {
+    const both = LoreConfig.parse({
+      loreFile: { enabled: false },
+      agentsFile: { enabled: true },
+    });
+    expect(both.loreFile.enabled).toBe(false);
+    expect(both.agentsFile.enabled).toBe(true);
+
+    const neither = LoreConfig.parse({
+      loreFile: { enabled: false },
+      agentsFile: { enabled: false },
+    });
+    expect(neither.loreFile.enabled).toBe(false);
+    expect(neither.agentsFile.enabled).toBe(false);
+  });
+});
+
 describe("LoreConfig — curator schema", () => {
   test("curator defaults: enabled=true, onIdle=true, afterTurns=3, maxEntries=25", () => {
     const cfg = LoreConfig.parse({});

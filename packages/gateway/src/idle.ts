@@ -22,6 +22,7 @@ import {
   config as loreConfig,
   exportToFile,
   exportLoreFile,
+  exportInlineToAgentsFile,
   saveSessionCosts,
   saveSessionTracking,
   saveGradientState,
@@ -640,17 +641,24 @@ export function buildIdleWorkHandler(
       log.error("idle pruning error:", e);
     }
 
-    // 5. Knowledge export (.lore.md + optional agents file pointer)
+    // 5. Knowledge export (.lore.md + optional agents file)
     if (cfg.knowledge.enabled) {
       try {
         const entries = ltm.forProject(projectPath, false);
         if (entries.length > 0) {
-          if (cfg.agentsFile.enabled) {
+          if (cfg.loreFile.enabled && cfg.agentsFile.enabled) {
+            // Default: .lore.md + AGENTS.md pointer
             const filePath = join(projectPath, cfg.agentsFile.path);
             exportToFile({ projectPath, filePath });
-          } else {
+          } else if (cfg.loreFile.enabled) {
+            // .lore.md only
             exportLoreFile(projectPath);
+          } else if (cfg.agentsFile.enabled) {
+            // Inline knowledge in AGENTS.md (no .lore.md)
+            const filePath = join(projectPath, cfg.agentsFile.path);
+            exportInlineToAgentsFile({ projectPath, filePath });
           }
+          // else: both disabled — no markdown file
         }
       } catch (e) {
         log.error("idle knowledge export error:", e);

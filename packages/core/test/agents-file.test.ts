@@ -1,4 +1,11 @@
-import { describe, test, expect, beforeEach, afterAll } from "vitest";
+import {
+  describe,
+  test,
+  expect,
+  beforeEach,
+  afterEach,
+  afterAll,
+} from "vitest";
 import { fileURLToPath } from "node:url";
 import {
   mkdirSync,
@@ -17,6 +24,8 @@ import {
   LORE_FILE,
   exportToFile,
   exportLoreFile,
+  exportInlineToAgentsFile,
+  deleteLoreFile,
   importFromFile,
   importLoreFile,
   shouldImport,
@@ -25,6 +34,7 @@ import {
   clearLoreFileCache,
   parseEntriesFromSection,
 } from "../src/agents-file";
+import { load } from "../src/config";
 
 // ---------------------------------------------------------------------------
 // Test fixtures
@@ -1654,3 +1664,104 @@ describe("lore file cache optimization", () => {
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+// ---------------------------------------------------------------------------
+// loreFile.enabled toggle
+// ---------------------------------------------------------------------------
+
+describe("loreFile.enabled toggle", () => {
+  /** Helper: write .lore.json to TMP_DIR and load it into the global config. */
+  async function setConfig(overrides: Record<string, unknown>) {
+    writeFileSync(
+      join(TMP_DIR, ".lore.json"),
+      JSON.stringify(overrides),
+      "utf8",
+    );
+    await load(TMP_DIR);
+  }
+
+  /** Helper: seed a knowledge entry so exports have content. */
+  function seedEntry(id = TEST_UUIDS[0]) {
+    const pid = ensureProject(PROJECT);
+    db()
+      .query(
+        `INSERT OR REPLACE INTO knowledge (id, project_id, category, title, content, confidence, created_at, updated_at)
+         VALUES (?, ?, 'decision', 'Test entry', 'Test content', 1.0, datetime('now'), datetime('now'))`,
+      )
+      .run(id, pid);
+  }
+
+  // Reset config to defaults after each test in this block.
+  afterEach(async () => {
+    if (existsSync(join(TMP_DIR, ".lore.json"))) {
+      rmSync(join(TMP_DIR, ".lore.json"));
+    }
+    await load(TMP_DIR);
+  });
+
+  test("exportLoreFile writes .lore.md when loreFile.enabled=true (default)", async () => {
+    await setConfig({});
+    seedEntry();
+    exportLoreFile(PROJECT);
+    expect(existsSync(LORE_FILE_PATH)).toBe(true);
+    const content = readFileSync(LORE_FILE_PATH, "utf8");
+    expect(content).toContain("Test entry");
+  });
+
+  test("exportLoreFile is a no-op when loreFile.enabled=false", async () => {
+    await setConfig({ loreFile: { enabled: false } });
+    seedEntry();
+    exportLoreFile(PROJECT);
+    expect(existsSync(LORE_FILE_PATH)).toBe(false);
+  });
+
+  test("exportInlineToAgentsFile writes inline section when agentsFile.enabled=true", async () => {
+    await setConfig({
+      loreFile: { enabled: false },
+      agentsFile: { enabled: true },
+    });
+    seedEntry();
+    exportInlineToAgentsFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
+    expect(existsSync(AGENTS_FILE)).toBe(true);
+    const content = readFileSync(AGENTS_FILE, "utf8");
+    expect(content).toContain(LORE_SECTION_START);
+    expect(content).toContain("Test entry");
+    // Should NOT contain the pointer text (that's exportToFile's job)
+    expect(content).not.toContain("see [`.lore.md`](.lore.md)");
+  });
+
+  test("exportInlineToAgentsFile preserves non-lore content in AGENTS.md", async () => {
+    await setConfig({
+      loreFile: { enabled: false },
+      agentsFile: { enabled: true },
+    });
+    seedEntry();
+    writeFile("# My Project\n\nSome hand-written content.\n");
+    exportInlineToAgentsFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
+    const content = readFileSync(AGENTS_FILE, "utf8");
+    expect(content).toContain("# My Project");
+    expect(content).toContain("Some hand-written content.");
+    expect(content).toContain("Test entry");
+  });
+
+  test("exportInlineToAgentsFile is a no-op when agentsFile.enabled=false", async () => {
+    await setConfig({
+      loreFile: { enabled: false },
+      agentsFile: { enabled: false },
+    });
+    seedEntry();
+    exportInlineToAgentsFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
+    expect(existsSync(AGENTS_FILE)).toBe(false);
+  });
+
+  test("deleteLoreFile removes the file and returns true when it exists", () => {
+    writeFileSync(LORE_FILE_PATH, "stale content", "utf8");
+    expect(deleteLoreFile(PROJECT)).toBe(true);
+    expect(existsSync(LORE_FILE_PATH)).toBe(false);
+  });
+
+  test("deleteLoreFile returns false when the file does not exist", () => {
+    expect(existsSync(LORE_FILE_PATH)).toBe(false);
+    expect(deleteLoreFile(PROJECT)).toBe(false);
+  });
+});

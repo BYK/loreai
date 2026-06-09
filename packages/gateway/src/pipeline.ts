@@ -635,7 +635,7 @@ function tryImportKnowledge(projectPath: string): boolean {
   if (!cfg.knowledge.enabled) return false;
 
   try {
-    if (loreFileExists(projectPath)) {
+    if (cfg.loreFile.enabled && loreFileExists(projectPath)) {
       if (shouldImportLoreFile(projectPath)) {
         importLoreFile(projectPath);
         log.info("imported knowledge from .lore.md");
@@ -677,6 +677,7 @@ function startKnowledgeFileWatcher(projectPath: string): () => void {
   const { join } = require("node:path") as typeof import("node:path");
   const { watch, existsSync } = require("node:fs") as typeof import("node:fs");
 
+  const cfg = loreConfig();
   const watchers: import("node:fs").FSWatcher[] = [];
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   const DEBOUNCE_MS = 500;
@@ -690,20 +691,21 @@ function startKnowledgeFileWatcher(projectPath: string): () => void {
     }, DEBOUNCE_MS);
   };
 
-  // Watch .lore.md
-  const loreFilePath = join(projectPath, LORE_FILE);
-  if (existsSync(loreFilePath)) {
-    try {
-      const w = watch(loreFilePath, onFileChange);
-      w.on("error", () => {}); // suppress — file may be deleted
-      watchers.push(w);
-    } catch {
-      // watch not supported (rare) — fall back to session-start checks only
+  // Watch .lore.md (gated on loreFile.enabled)
+  if (cfg.loreFile.enabled) {
+    const loreFilePath = join(projectPath, LORE_FILE);
+    if (existsSync(loreFilePath)) {
+      try {
+        const w = watch(loreFilePath, onFileChange);
+        w.on("error", () => {}); // suppress — file may be deleted
+        watchers.push(w);
+      } catch {
+        // watch not supported (rare) — fall back to session-start checks only
+      }
     }
   }
 
   // Watch agents file (AGENTS.md etc.) as fallback
-  const cfg = loreConfig();
   if (cfg.agentsFile.enabled) {
     const agentsFilePath = join(projectPath, cfg.agentsFile.path);
     if (existsSync(agentsFilePath)) {
@@ -731,7 +733,7 @@ function startKnowledgeFileWatcher(projectPath: string): () => void {
       },
     },
   ];
-  if (cfg.workspaces.length > 0) {
+  if (cfg.loreFile.enabled && cfg.workspaces.length > 0) {
     const subDirs = resolveWorkspaces(projectPath, cfg.workspaces);
     for (const subDir of subDirs) {
       const subLoreFile = join(subDir, LORE_FILE);
@@ -4445,13 +4447,14 @@ async function handleConversationTurn(
     // Build the recall tool with git reminder baked into its description.
     // This keeps the reminder in the stable tools prefix (1h cache) rather
     // than the volatile system prompt.
-    const recallTool = cfg.knowledge.enabled
-      ? {
-          ...RECALL_GATEWAY_TOOL,
-          description:
-            RECALL_GATEWAY_TOOL.description + "\n\n" + LORE_COMMIT_REMINDER,
-        }
-      : RECALL_GATEWAY_TOOL;
+    const recallTool =
+      cfg.knowledge.enabled && cfg.loreFile.enabled
+        ? {
+            ...RECALL_GATEWAY_TOOL,
+            description:
+              RECALL_GATEWAY_TOOL.description + "\n\n" + LORE_COMMIT_REMINDER,
+          }
+        : RECALL_GATEWAY_TOOL;
     modifiedReq.tools = [...modifiedReq.tools, recallTool];
   }
 

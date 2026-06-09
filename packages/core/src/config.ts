@@ -285,6 +285,21 @@ export const LoreConfig = z.object({
       path: z.string().default("AGENTS.md"),
     })
     .default({ enabled: true, path: "AGENTS.md" }),
+  loreFile: z
+    .object({
+      /** Set to false to disable `.lore.md` export/import. When disabled:
+       *  - `.lore.md` is not written by the idle knowledge exporter.
+       *  - Startup import skips the `.lore.md` branch and ignores any stale
+       *    `.lore.md` on disk.
+       *  - The recall tool description omits the "include .lore.md in commits"
+       *    reminder.
+       *  - The file watcher no longer watches `.lore.md` (root or sub-projects).
+       *  Knowledge stays in the database and is still injected into the system
+       *  prompt via LTM. Pair with `agentsFile.enabled=true` to keep sharing
+       *  knowledge via an inline section in AGENTS.md. Default: true. */
+      enabled: z.boolean().default(true),
+    })
+    .default({ enabled: true }),
   /** User identity for the self-entity. When provided, creates/updates a "self" entity
    *  with this information. If omitted, falls back to git config user.name / user.email. */
   user: z

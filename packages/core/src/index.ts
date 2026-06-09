@@ -158,6 +158,8 @@ export {
   importFromFile,
   exportToFile,
   exportLoreFile,
+  exportInlineToAgentsFile,
+  deleteLoreFile,
   importLoreFile,
   shouldImportLoreFile,
   loreFileExists,
