@@ -1,4 +1,12 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+
+// Bridge: upstreamFetch now uses undici's own fetch (not globalThis.fetch),
+// so tests that mock globalThis.fetch need this shim to intercept calls.
+vi.mock("../src/fetch", () => ({
+  upstreamFetch: (...args: Parameters<typeof fetch>) =>
+    globalThis.fetch(...args),
+}));
+
 import {
   fetchModelData,
   getModelEntry,

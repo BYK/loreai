@@ -64,6 +64,7 @@
     "@sentry/bun": "^10.52.0",
     "@types/bun": "^1.2.0",
     "@types/semver": "^7.7.1",
-    "fossilize": "^0.9.2"
+    "fossilize": "^0.9.2",
+    "undici": "^7.27.2"
   }
 }

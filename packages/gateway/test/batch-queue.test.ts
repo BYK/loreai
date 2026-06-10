@@ -8,8 +8,15 @@
  *  - Fallback to synchronous on batch API errors
  *  - Shutdown drains the queue
  */
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { createBatchLLMClient } from "../src/batch-queue";
+
+// Bridge: upstreamFetch now uses undici's own fetch (not globalThis.fetch),
+// so tests that mock globalThis.fetch need this shim to intercept calls.
+vi.mock("../src/fetch", () => ({
+  upstreamFetch: (...args: Parameters<typeof fetch>) =>
+    globalThis.fetch(...args),
+}));
 import type { LLMClient } from "@loreai/core";
 import type { AuthCredential } from "../src/auth";
 

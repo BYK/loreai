@@ -95,6 +95,9 @@ importers:
       fossilize:
         specifier: ^0.9.2
         version: 0.9.2
+      undici:
+        specifier: ^7.27.2
+        version: 7.27.2
 
   packages/opencode:
     dependencies:
