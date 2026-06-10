@@ -116,7 +116,7 @@ export default defineConfig({
           attrs: {
             property: "og:description",
             content:
-              "Install, operate, and understand Lore's local-first memory layer for AI coding agents.",
+              "Install, operate, and understand Lore's local-first context management and long-term memory for AI coding agents.",
           },
         },
         {
@@ -181,7 +181,7 @@ export default defineConfig({
           attrs: {
             name: "twitter:description",
             content:
-              "Install, operate, and understand Lore's local-first memory layer for AI coding agents.",
+              "Install, operate, and understand Lore's local-first context management and long-term memory for AI coding agents.",
           },
         },
         {
