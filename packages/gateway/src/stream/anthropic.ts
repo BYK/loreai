@@ -649,14 +649,27 @@ export function buildKeepaliveCompactionStream(
         emit(formatSSEEvent("ping", JSON.stringify({ type: "ping" })));
       }, pingMs);
 
-      let text = "";
+      let text: string;
       try {
         text = (await summaryPromise) ?? "";
-      } catch {
-        text = "";
-      } finally {
+      } catch (e) {
+        // The summary genuinely failed (e.g. a DB error mid-compaction). Do
+        // NOT emit a normal `message_stop` — a complete-but-empty turn would
+        // be treated by the client as a *successful* empty compaction and wipe
+        // its context. Instead, error the stream: the truncated SSE (no
+        // message_stop) signals failure, so the client keeps its history and
+        // can retry. (A null/empty *resolution* below is different — that means
+        // there is genuinely nothing to compact, for which an empty turn is
+        // correct.)
         clearPing();
+        try {
+          controller.error(e instanceof Error ? e : new Error(String(e)));
+        } catch {
+          // Controller already closed (client disconnected) — nothing to do.
+        }
+        return;
       }
+      clearPing();
 
       emit(
         formatSSEEvent(

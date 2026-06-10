@@ -83,7 +83,7 @@ describe("buildKeepaliveCompactionStream", () => {
     expect(body).toContain("[DONE]");
   });
 
-  test("a rejected summary promise still terminates the stream cleanly", async () => {
+  test("a rejected summary errors the stream (no message_stop) so the client keeps context", async () => {
     const rejecting = new Promise<string | null>((_, rej) => {
       setTimeout(() => rej(new Error("boom")), 5);
     });
@@ -93,9 +93,10 @@ describe("buildKeepaliveCompactionStream", () => {
       rejecting,
       50,
     );
-    const body = await readAll(resp);
-    expect(body).toContain("event: message_start");
-    expect(body).toContain("event: message_stop");
-    expect(body).toContain('"text":""');
+    // The stream errors after the opening events — reading it must reject, and
+    // the client never sees a `message_stop`, so it treats compaction as failed
+    // (keeps its full history) rather than as a successful empty summary.
+    // (A null *resolution* is different — see the empty-turn test above.)
+    await expect(readAll(resp)).rejects.toThrow("boom");
   });
 });
