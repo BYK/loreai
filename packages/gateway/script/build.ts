@@ -51,6 +51,15 @@ async function buildLibrary() {
   mkdirSync(distDir, { recursive: true });
 
   const shims: Array<[string, string]> = [
+    // The "bun" export condition (./dist/index.bun.js) is what the
+    // @loreai/opencode plugin loads when it starts the gateway in-process
+    // under Bun. Point it at current source so a workspace/dev checkout can
+    // never run a stale bundle: when source changes (e.g. a renamed export),
+    // the in-process gateway picks it up immediately instead of failing with
+    // "Export named '…' not found". @loreai/core stays a separate workspace
+    // module (bundle.ts keeps it external), so the plugin and gateway still
+    // share a single core instance — see bundle.ts for why that matters.
+    ["index.bun.js", 'export * from "../src/index.ts";\n'],
     [
       "embedding-worker.js",
       'export * from "../../core/src/embedding-worker.ts";\n',

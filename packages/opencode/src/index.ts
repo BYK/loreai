@@ -110,10 +110,16 @@ async function startInProcess(): Promise<string | null> {
     return url;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    lastGatewayStartError = msg;
     log.info("failed to start gateway in-process:", msg);
     return null;
   }
 }
+
+// Captures the underlying reason the in-process gateway failed to start so
+// the user-facing error can include the real cause (port conflict, DB lock,
+// stale build, etc.) instead of just "Ensure @loreai/gateway is installed."
+let lastGatewayStartError: string | null = null;
 
 // Process-wide initialization state — shared across all sessions.
 // The plugin function is called once per OpenCode session/project, but
@@ -210,9 +216,17 @@ export const LorePlugin: Plugin = async (ctx) => {
       process.env.NODE_ENV === "test" ||
       process.argv.some((a) => a.includes(".test."));
     if (!inTestEnv) {
-      const msg =
-        "Lore failed to start — memory features are unavailable. " +
-        "Ensure @loreai/gateway is installed.";
+      const base = "Lore failed to start — memory features are unavailable.";
+      const msg = lastGatewayStartError
+        ? `${base} Gateway error: ${lastGatewayStartError}` +
+          (/not found|not exported|cannot find module/i.test(
+            lastGatewayStartError,
+          )
+            ? " — this looks like a stale build; rebuild with" +
+              " `pnpm --filter @loreai/gateway run bundle`" +
+              " (or `run build` for a dev checkout)."
+            : "")
+        : `${base} Ensure @loreai/gateway is installed.`;
       process.stderr.write(`[lore] ERROR: ${msg}\n`);
       log.error(msg);
     }
