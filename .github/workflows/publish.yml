@@ -58,8 +58,10 @@ jobs:
       # runner Node (22.x) ships npm 10.x — upgrade explicitly. (Regression:
       # this step was dropped in the Craft 2.26.9 bump assuming the default Node
       # would already ship npm 11.x; it does not.)
+      # `sudo` because the global prefix is /usr/local (root-owned) — same as
+      # the Craft install step below.
       - name: Upgrade npm for OIDC trusted publishing
-        run: npm install -g npm@latest
+        run: sudo npm install -g npm@latest
 
       # Pin to a specific Craft version to avoid upstream regressions.
       - name: Install Craft
