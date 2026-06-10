@@ -379,10 +379,10 @@ The eval suite is open source in `packages/core/eval/`. Run it yourself:
 
 ```bash
 # 400K inflated scenario
-bun packages/core/eval/run.ts --mode live --inflate 400000
+npx tsx packages/core/eval/run.ts --mode live --inflate 400000
 
 # 2.3M mega-session (real session, no inflation needed)
-bun packages/core/eval/run.ts --mode live --scenarios mega-cli-refactor
+npx tsx packages/core/eval/run.ts --mode live --scenarios mega-cli-refactor
 ```
 
 **Cost:** Lore's memory layer runs at minimal additional cost — background distillation and curation use batch APIs (50% off on supported providers) and cheaper models. Local on-device embeddings (Nomic Embed v1.5) mean zero API cost for vector search. Predictive cache warming reduces expensive cache rebuilds.

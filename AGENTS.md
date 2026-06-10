@@ -8,8 +8,8 @@ For long-term knowledge entries managed by [lore](https://github.com/BYK/loreai)
 
 Lore is a **three-tier memory architecture** for AI coding agents. It intercepts LLM API calls (as a transparent proxy or native plugin), distills conversation history into compressed summaries, and extracts long-term knowledge entries that persist across sessions.
 
-**Runtime:** Bun (development/tests) and Node.js >= 22.5 (production npm bundles).
-**Language:** TypeScript (monorepo with `bun workspaces`).
+**Runtime:** Node.js >= 22.5 (development/tests/production).
+**Language:** TypeScript (monorepo with `pnpm workspaces`).
 **Database:** SQLite with WAL mode, FTS5 full-text search. Stored at `~/.local/share/lore/lore.db`.
 
 ## Monorepo Structure
@@ -144,15 +144,15 @@ recall tool (searchRecall) ----------------> Tool response to agent
 ## Build & Test
 
 ```bash
-bun install          # install all workspace dependencies
-bun test             # run all tests (uses bunfig.toml preload for test DB isolation)
-bun run typecheck    # typecheck all packages
-bun run lint         # Biome lint + format check (CI-gated); `bun run lint:fix` to autofix
-bun run format       # apply Biome formatting
-bun run build        # build all packages (esbuild bundles)
+pnpm install         # install all workspace dependencies
+pnpm test            # run all tests via Vitest (uses packages/core/test/setup.ts for DB isolation)
+pnpm run typecheck   # typecheck all packages
+pnpm run lint        # Biome lint + format check (CI-gated); `pnpm run lint:fix` to autofix
+pnpm run format      # apply Biome formatting
+pnpm run build       # build all packages (esbuild bundles)
 ```
 
-- Tests use a temporary SQLite DB (via `packages/core/test/setup.ts` preload) — never the production DB
+- Tests use a temporary SQLite DB (via `packages/core/test/setup.ts` Vitest setup file) — never the production DB
 - Gateway build: `packages/gateway/script/build.ts` produces CJS bundle; `script/bundle.ts` creates standalone binary
 - Core build: `packages/core/script/build.ts` produces Node.js-compatible CJS output
 

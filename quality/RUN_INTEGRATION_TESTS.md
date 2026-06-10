@@ -7,8 +7,8 @@ Integration test groups verifying end-to-end behavior across Lore's gateway, cor
 
 ## Prerequisites
 
-- Bun runtime installed (test runner)
-- All workspace dependencies installed (`bun install`)
+- Node.js >= 22.5 installed
+- All workspace dependencies installed (`pnpm install`)
 - No production database used — tests use `packages/core/test/setup.ts` preload for DB isolation
 - Environment: `NODE_ENV=test`, `LORE_HOSTED_MODE=0`
 - Upstream API mocks: use `packages/gateway/test/helpers/harness.ts` test harness where available

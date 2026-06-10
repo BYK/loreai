@@ -14,7 +14,7 @@ This package is host-agnostic. It doesn't ship a user-facing extension on its ow
 ```bash
 npm install @loreai/core
 # or
-bun add @loreai/core
+pnpm add @loreai/core
 ```
 
 You only need to install this directly if you're building a new adapter. End users install one of the host packages above.
