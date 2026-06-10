@@ -1488,7 +1488,7 @@ describe("run() expansion guard and tiny-segment handling", () => {
     // counts (the gpt-5.5 no-auth runaway). The adapter is now the single
     // owner of transport-failure attribution; the core must stay silent.
     insertTemporalMessages(6, 200);
-    const llm = makeStubLLM(null); // prompt() resolves to "" (empty)
+    const llm = makeStubLLM(null); // prompt() returns "" (null → ""), falsy
     const reasons: string[] = [];
     const workerHealth = {
       recordFailure: (reason: string) => reasons.push(reason),

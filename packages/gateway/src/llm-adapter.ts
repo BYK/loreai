@@ -660,15 +660,19 @@ export function createGatewayLLMClient(
               if (AUTH_ERROR_CODES.has(response.status)) {
                 const text = await response.text().catch(() => "(no body)");
 
+                // Always record the auth failure so the worker-health ladder
+                // sees it even for session-less paths (the adapter is the
+                // single owner of transport-failure attribution).
+                recordWorkerFailure(
+                  opts?.sessionID ?? "_unknown",
+                  opts?.workerID ?? "unknown",
+                  "auth-rejected",
+                );
                 // Mark this provider's credential stale so resolveAuth()
                 // falls through to global — but only for THIS provider,
-                // not other providers on the same session.
+                // not other providers on the same session. Requires a real
+                // session ID (staleness is per-session state).
                 if (opts?.sessionID) {
-                  recordWorkerFailure(
-                    opts.sessionID,
-                    opts?.workerID ?? "unknown",
-                    "auth-rejected",
-                  );
                   markAuthStale(opts.sessionID, model.providerID);
                 }
 
