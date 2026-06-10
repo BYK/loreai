@@ -2204,7 +2204,7 @@ async function cmdReground(
     }
   }
 
-  let resp: { dryRun: boolean; results: RebuildResult[] };
+  let resp: { dryRun: boolean; cancelled?: boolean; results: RebuildResult[] };
   try {
     resp = await remotePost(baseUrl, "/api/v1/entities/rebuild", body);
   } catch (e) {
@@ -2253,7 +2253,7 @@ async function cmdReground(
     deduped += r.dedupMerged;
   }
   console.log(
-    `\nDone: ${total} entities created (${people} people), ${rels} relation(s), ` +
+    `\n${resp.cancelled ? "Cancelled" : "Done"}: ${total} entities created (${people} people), ${rels} relation(s), ` +
       `${merged} folded into self, ${deduped} deduped across ${resp.results.length} project(s).`,
   );
 }

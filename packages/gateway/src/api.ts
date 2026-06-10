@@ -444,6 +444,13 @@ async function handleImportExtract(
 }
 
 /**
+ * Tracks the in-flight entity rebuild so a separate cancel request can abort it
+ * between batches/projects. Single active rebuild at a time (local dashboard);
+ * a new rebuild supersedes any stale controller.
+ */
+let activeRebuildAbort: AbortController | null = null;
+
+/**
  * POST /api/v1/entities/rebuild — re-derive entities from distillation history.
  *
  * Body: { git_remote?, path?, all?, dryRun?, model? }. Provide a project
@@ -510,19 +517,43 @@ async function handleEntityRebuild(
     projectPaths = [projectPath];
   }
 
-  const results = [];
-  for (const projectPath of projectPaths) {
-    results.push(
-      await entityRebuild.rebuildEntitiesFromHistory({
-        llm,
-        projectPath,
-        model: defaultModel,
-        dryRun: body.dryRun ?? false,
-      }),
-    );
+  const abort = new AbortController();
+  activeRebuildAbort = abort;
+  try {
+    const results = [];
+    for (const projectPath of projectPaths) {
+      if (abort.signal.aborted) break;
+      results.push(
+        await entityRebuild.rebuildEntitiesFromHistory({
+          llm,
+          projectPath,
+          model: defaultModel,
+          dryRun: body.dryRun ?? false,
+          signal: abort.signal,
+        }),
+      );
+    }
+    return jsonResponse({
+      dryRun: body.dryRun ?? false,
+      cancelled: abort.signal.aborted,
+      results,
+    });
+  } finally {
+    if (activeRebuildAbort === abort) activeRebuildAbort = null;
   }
+}
 
-  return jsonResponse({ dryRun: body.dryRun ?? false, results });
+/**
+ * POST /api/v1/entities/rebuild/cancel — abort the in-flight rebuild (if any).
+ * The running rebuild stops at the next batch/project boundary.
+ */
+function handleEntityRebuildCancel(): Response {
+  if (isHostedMode()) {
+    return errorResponse(403, "forbidden", "Not available in hosted mode.");
+  }
+  const cancelled = activeRebuildAbort !== null;
+  activeRebuildAbort?.abort();
+  return jsonResponse({ cancelled });
 }
 
 function handleImportHistory(url: URL): Response {
@@ -705,6 +736,11 @@ export async function handleAPIRequest(
     // POST /api/v1/import/extract
     if (pathname === "/api/v1/import/extract") {
       return await handleImportExtract(req, config);
+    }
+
+    // POST /api/v1/entities/rebuild/cancel — abort the in-flight rebuild
+    if (pathname === "/api/v1/entities/rebuild/cancel") {
+      return handleEntityRebuildCancel();
     }
 
     // POST /api/v1/entities/rebuild — re-derive entities from history

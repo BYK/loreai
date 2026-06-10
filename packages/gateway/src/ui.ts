@@ -948,34 +948,48 @@ document.addEventListener("DOMContentLoaded",function(){
       if(countEl)countEl.textContent=shown+"/"+allRows.filter(function(r){return!r.dataset.parent;}).length;
     });
   });
-  // Stat-card type filter (entity list page): clicking a stat card filters the
-  // table to show only entities of that type; clicking again (or "Total") clears.
-  // Composes with the text filter above — both must pass for a row to be visible.
+  // Stat-card type filter (entity + knowledge list pages): clicking a stat card
+  // filters the associated table(s) to rows of that type; clicking again (or
+  // "Total") clears. The stats container's data-filter-key names the row dataset
+  // key to match (e.g. "entityType" or "category"). Governs ALL custom-filter
+  // tables in the same page body, each composing with its own text filter.
   (function(){
     var stats=document.querySelectorAll(".stat-filter");
     if(!stats.length)return;
     var statsContainer=stats[0].parentElement;
-    var table=statsContainer?statsContainer.parentElement.querySelector("table[data-table-id]"):null;
-    if(!table)return;
-    var allRows=Array.from(table.querySelectorAll("tr")).filter(function(r){return!r.querySelector("th");});
-    var textInput=statsContainer.parentElement.querySelector(".table-filter input");
-    var countEl=statsContainer.parentElement.querySelector(".table-filter .count");
+    var scope=statsContainer?statsContainer.parentElement:null;
+    if(!scope)return;
+    var filterKey=statsContainer.dataset.filterKey||"entityType";
+    var tables=Array.from(scope.querySelectorAll("table[data-table-id][data-custom-filter]"));
+    if(!tables.length)return;
     var activeType=null;
-    function applyFilters(){
-      var q=textInput?textInput.value.toLowerCase():"";
-      var shown=0;var total=allRows.length;
-      allRows.forEach(function(r){
-        var typeMatch=!activeType||r.dataset.entityType===activeType;
+    // Per-table context: its rows, own text input, and count element.
+    var contexts=tables.map(function(table){
+      var rows=Array.from(table.querySelectorAll("tr")).filter(function(r){return!r.querySelector("th");});
+      var wrapper=table.previousElementSibling;
+      var isFilterWrap=wrapper&&wrapper.classList&&wrapper.classList.contains("table-filter");
+      return {
+        rows:rows,
+        input:isFilterWrap?wrapper.querySelector("input"):null,
+        countEl:isFilterWrap?wrapper.querySelector(".count"):null,
+      };
+    });
+    function applyOne(ctx){
+      var q=ctx.input?ctx.input.value.toLowerCase():"";
+      var shown=0;var total=ctx.rows.length;
+      ctx.rows.forEach(function(r){
+        var typeMatch=!activeType||r.dataset[filterKey]===activeType;
         var textMatch=!q||r.textContent.toLowerCase().indexOf(q)!==-1;
         var show=typeMatch&&textMatch;
         r.style.display=show?"":"none";
         if(show)shown++;
       });
-      if(countEl){
-        if(q||activeType)countEl.textContent=shown+"/"+total;
-        else countEl.textContent="";
+      if(ctx.countEl){
+        if(q||activeType)ctx.countEl.textContent=shown+"/"+total;
+        else ctx.countEl.textContent="";
       }
     }
+    function applyAll(){contexts.forEach(applyOne);}
     stats.forEach(function(stat){
       stat.addEventListener("click",function(){
         var type=stat.dataset.typeFilter;
@@ -987,15 +1001,13 @@ document.addEventListener("DOMContentLoaded",function(){
           stats.forEach(function(s){s.classList.remove("active");});
           stat.classList.add("active");
         }
-        applyFilters();
+        applyAll();
       });
     });
-    // Override the text filter to use combined logic when a type filter is active
-    if(textInput){
-      textInput.addEventListener("input",function(){
-        applyFilters();
-      });
-    }
+    // Each table's own text input composes with the active type filter.
+    contexts.forEach(function(ctx){
+      if(ctx.input){ctx.input.addEventListener("input",function(){applyOne(ctx);});}
+    });
   })();
   // Chat message filter (session page only)
   var chatSearch=document.getElementById("chat-search");
@@ -1682,7 +1694,7 @@ function renderKnowledgeTable(
     ? `<th data-sort="num">Recalls</th>`
     : "";
   let out = `<div class="table-filter"><input type="text" placeholder="Filter knowledge\u2026"><span class="count"></span></div>
-  <table data-table-id="${esc(opts.tableId)}">
+  <table data-table-id="${esc(opts.tableId)}" data-custom-filter>
     <tr><th data-sort="text">Category</th><th data-sort="text">Title</th><th data-sort="text">Source Project</th><th data-sort="num">Confidence</th>${recallsHeader}<th data-sort="date" data-default-sort="desc">Updated</th></tr>`;
   for (const e of entries) {
     const projName = e.project_id ? projectName(e.project_id) : null;
@@ -1692,7 +1704,7 @@ function renderKnowledgeTable(
     const recallsCell = opts.showRecalls
       ? `<td>${transferCounts.get(e.id) ?? 0}</td>`
       : "";
-    out += `<tr>
+    out += `<tr data-category="${esc(e.category)}">
       <td>${badge(e.category)}</td>
       <td><a href="/ui/knowledge/${esc(e.id)}">${esc(truncate(e.title, 60))}</a></td>
       <td>${projDisplay}</td>
@@ -1739,14 +1751,17 @@ function pageUserKnowledge(): string {
       cats[e.category] = (cats[e.category] || 0) + 1;
     for (const e of projectEntries)
       cats[e.category] = (cats[e.category] || 0) + 1;
-    body += `<div class="stats">
-      <div class="stat"><div class="label">Total</div><div class="value">${total}</div></div>
+    // Category cards are clickable filters (data-filter-key tells the shared
+    // stat-filter handler to match rows by data-category). "Total" clears the
+    // filter; the scope counts are informational only.
+    body += `<div class="stats" data-filter-key="category">
+      <div class="stat stat-filter" data-type-filter="all"><div class="label">Total</div><div class="value">${total}</div></div>
       <div class="stat"><div class="label">Cross-project</div><div class="value">${crossEntries.length}</div></div>
       <div class="stat"><div class="label">Project-scoped</div><div class="value">${projectEntries.length}</div></div>`;
     for (const [cat, count] of Object.entries(cats).sort(
       (a, b) => b[1] - a[1],
     )) {
-      body += `<div class="stat"><div class="label">${esc(cat)}</div><div class="value">${count}</div></div>`;
+      body += `<div class="stat stat-filter" data-type-filter="${esc(cat)}"><div class="label">${esc(cat)}</div><div class="value">${count}</div></div>`;
     }
     body += `</div>`;
   }
@@ -2843,32 +2858,59 @@ async function pageEntities(): Promise<string> {
   body += `<h1>Entities (${all.length})</h1>`;
 
   // Re-derive entities from distillation history (recovery after data loss).
-  // Client-side fetch to the REST endpoint so the long-running LLM work runs in
-  // the gateway (which holds upstream + auth). Shown even when the list is empty
-  // — that is exactly the case where recovery is most useful.
-  body += `<div class="banner" style="border:1px solid #5b8def;background:#eef3ff;padding:12px 16px;border-radius:6px;margin:12px 0;">
-    <strong>Re-derive entities from history</strong>
-    <div class="muted" style="color:#555;margin:4px 0 8px;">Rebuild people, tools, and services the curator detected in past sessions — useful after entities were lost or merged away. Runs an LLM extraction over your distillation history (may take a while and incur cost).</div>
+  // Tucked behind a <details> so it isn't a prominent CTA — it's a recovery
+  // tool. Client-side fetch to the REST endpoint so the long-running LLM work
+  // runs in the gateway (which holds upstream + auth). The Cancel button aborts
+  // both the client wait and the server-side run (via the cancel endpoint).
+  body += `<details class="banner" style="border:1px solid var(--border);background:var(--bg2);padding:10px 14px;border-radius:6px;margin:12px 0;">
+    <summary style="cursor:pointer;user-select:none;">Not seeing some entries?</summary>
+    <div class="muted" style="color:var(--fg3);margin:8px 0;">Re-derive people, tools, and services the curator detected in past sessions — useful after entities were lost or merged away. Runs an LLM extraction over your distillation history (may take a while and incur cost).</div>
     <button type="button" onclick="loreRebuildEntities(true)" style="font-size:13px;padding:4px 10px;">Preview (dry run)</button>
     <button type="button" onclick="loreRebuildEntities(false)" style="font-size:13px;padding:4px 10px;">Rebuild all</button>
-    <span id="lore-rebuild-status" class="muted" style="color:#555;"></span>
-  </div>
+    <button type="button" id="lore-rebuild-cancel" onclick="loreRebuildCancel()" style="font-size:13px;padding:4px 10px;display:none;">Cancel</button>
+    <span id="lore-rebuild-status" class="muted" style="color:var(--fg3);"></span>
+  </details>
   <script>
+  var loreRebuildRunning=false;
+  function loreRebuildSetRunning(running){
+    loreRebuildRunning=running;
+    var c=document.getElementById('lore-rebuild-cancel');
+    if(c){c.style.display=running?'':'none';c.disabled=false;}
+    document.querySelectorAll('[onclick^="loreRebuildEntities"]').forEach(function(b){b.disabled=running;});
+  }
+  function loreRebuildCancel(){
+    if(!loreRebuildRunning)return;
+    var s=document.getElementById('lore-rebuild-status');
+    if(s)s.textContent=' Cancelling\\u2026 (finishing the current batch)';
+    var c=document.getElementById('lore-rebuild-cancel');
+    if(c)c.disabled=true;
+    // Server stops at the next batch/project boundary and returns partial
+    // results; the pending fetch below resolves and re-enables the buttons.
+    fetch('/api/v1/entities/rebuild/cancel',{method:'POST'}).catch(function(){});
+  }
   function loreRebuildEntities(dry){
+    if(loreRebuildRunning)return;
     if(!dry && !confirm('Re-derive entities across ALL projects from history? This runs LLM extraction and may take a while and incur cost.')) return;
     var s=document.getElementById('lore-rebuild-status');
-    s.textContent=' Working\\u2026 (this can take a while)';
+    loreRebuildSetRunning(true);
+    if(s)s.textContent=' Working\\u2026 (this can take a while)';
     fetch('/api/v1/entities/rebuild',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({all:true,dryRun:dry})})
       .then(function(r){return r.json();})
       .then(function(d){
+        loreRebuildSetRunning(false);
+        if(!s)return;
         if(d.error){s.textContent=' Error: '+((d.error&&d.error.message)||'failed');return;}
         var res=d.results||[];
         var people=0,total=0,detected=0;
         res.forEach(function(x){people+=x.personsCreated||0;total+=(x.personsCreated||0)+(x.orgsCreated||0)+(x.otherCreated||0);detected+=x.detected||0;});
-        if(d.dryRun){s.textContent=' Dry run: '+detected+' mention(s) detected across '+res.length+' project(s). Click "Rebuild all" to apply.';}
+        if(d.cancelled){s.textContent=' Cancelled after '+res.length+' project(s) ('+total+' entities created). Reload to view.';}
+        else if(d.dryRun){s.textContent=' Dry run: '+detected+' mention(s) detected across '+res.length+' project(s). Click "Rebuild all" to apply.';}
         else{s.textContent=' Done: '+total+' entities created ('+people+' people) across '+res.length+' project(s). Reload to view.';}
       })
-      .catch(function(e){s.textContent=' Error: '+e;});
+      .catch(function(e){
+        loreRebuildSetRunning(false);
+        if(s)s.textContent=' Error: '+e;
+      });
   }
   </script>`;
 

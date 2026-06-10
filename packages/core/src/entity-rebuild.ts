@@ -40,6 +40,8 @@ export type EntityRebuildResult = {
   mergedIntoSelf: number;
   /** Near-duplicate entities merged by the embedding dedup sweep. */
   dedupMerged: number;
+  /** True if the run was cancelled (via the abort signal) before completing. */
+  cancelled?: boolean;
   /** Populated on dry runs: candidate entities the LLM would create. */
   candidates?: Array<{ type: EntityType; name: string }>;
 };
@@ -89,6 +91,8 @@ export async function rebuildEntitiesFromHistory(input: {
   model?: { providerID: string; modelID: string };
   dryRun?: boolean;
   sessionID?: string;
+  /** Abort signal — checked between batches to stop early on cancellation. */
+  signal?: AbortSignal;
 }): Promise<EntityRebuildResult> {
   const { llm, projectPath } = input;
   const dryRun = input.dryRun ?? false;
@@ -126,6 +130,11 @@ export async function rebuildEntitiesFromHistory(input: {
   const detectedEntities: DetectedEntity[] = [];
   const detectedRelations: DetectedRelation[] = [];
   for (const batch of batches) {
+    // Cancellation: stop before issuing the next (costly) LLM call.
+    if (input.signal?.aborted) {
+      result.cancelled = true;
+      return result;
+    }
     const user = entityExtractUser({ observations: batch, entityContext });
     let text: string | null = null;
     try {
@@ -148,6 +157,14 @@ export async function rebuildEntitiesFromHistory(input: {
     detectedRelations.push(...parsed.relations);
   }
   result.detected = detectedEntities.length;
+
+  // Cancellation that arrived during the last batch's LLM call lands here (the
+  // loop-top check only catches it before subsequent batches). Bail before any
+  // writes so a cancel is always a clean no-op for this project.
+  if (input.signal?.aborted) {
+    result.cancelled = true;
+    return result;
+  }
 
   if (dryRun) {
     // Dedupe candidate names for a cleaner preview.

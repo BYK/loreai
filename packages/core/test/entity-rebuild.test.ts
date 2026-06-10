@@ -203,6 +203,90 @@ describe("entity-rebuild", () => {
     expect(result.personsCreated).toBe(0);
   });
 
+  test("stops without writing when the signal is already aborted", async () => {
+    insertDistillation("Carol worked on the deploy.");
+    let called = false;
+    const llm: LLMClient = {
+      prompt: async () => {
+        called = true;
+        return JSON.stringify({
+          entities: [{ type: "person", canonical_name: "Carol" }],
+          relations: [],
+        });
+      },
+    };
+
+    const result = await rebuildEntitiesFromHistory({
+      llm,
+      projectPath: PROJECT,
+      dryRun: false,
+      signal: AbortSignal.abort(),
+    });
+
+    expect(result.cancelled).toBe(true);
+    expect(called).toBe(false); // no LLM call issued
+    expect(result.personsCreated).toBe(0);
+    expect(entities.listAll().length).toBe(0); // nothing written
+  });
+
+  test("stops mid-loop on cancellation, skipping remaining batches and writes", async () => {
+    // Two ~36K-char observations → two separate batches (cap is 48K).
+    const big = "Carol worked on the deploy. ".repeat(1300);
+    insertDistillation(big);
+    insertDistillation(big);
+
+    const controller = new AbortController();
+    let calls = 0;
+    const llm: LLMClient = {
+      prompt: async () => {
+        calls++;
+        controller.abort(); // cancel after the first batch completes
+        return JSON.stringify({
+          entities: [{ type: "person", canonical_name: "Carol" }],
+          relations: [],
+        });
+      },
+    };
+
+    const result = await rebuildEntitiesFromHistory({
+      llm,
+      projectPath: PROJECT,
+      dryRun: false,
+      signal: controller.signal,
+    });
+
+    expect(result.batches).toBe(2);
+    expect(calls).toBe(1); // second batch never issued
+    expect(result.cancelled).toBe(true);
+    expect(entities.listAll().length).toBe(0); // nothing written
+  });
+
+  test("skips writes when cancellation arrives during the final batch", async () => {
+    insertDistillation("Carol shipped the release.");
+    const controller = new AbortController();
+    const llm: LLMClient = {
+      prompt: async () => {
+        controller.abort(); // abort during the only batch
+        return JSON.stringify({
+          entities: [{ type: "person", canonical_name: "Carol" }],
+          relations: [],
+        });
+      },
+    };
+
+    const result = await rebuildEntitiesFromHistory({
+      llm,
+      projectPath: PROJECT,
+      dryRun: false,
+      signal: controller.signal,
+    });
+
+    expect(result.cancelled).toBe(true);
+    expect(result.personsCreated).toBe(0);
+    // The post-loop signal check prevents the write phase from running.
+    expect(entities.listAll().length).toBe(0);
+  });
+
   test("handles LLM throwing an error gracefully (skips batch)", async () => {
     insertDistillation("Content that causes an error.");
     const llm: LLMClient = {
