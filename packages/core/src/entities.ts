@@ -127,6 +127,22 @@ const CROSS_PROJECT_TYPES: ReadonlySet<EntityType> = new Set([
   "tool",
 ]);
 
+/**
+ * Alias types that uniquely identify a *person*. Used to gate self/person
+ * merging: only these may trigger an absorb-into-self. Shared, non-identity
+ * aliases (`url`, `domain`) routinely co-occur on unrelated colleagues — e.g.
+ * everyone on a team shares `github.com/org` or `sentry.io` — so matching on
+ * them would over-merge real people into the self entity and delete them.
+ */
+const IDENTITY_ALIAS_TYPES: ReadonlySet<AliasType> = new Set([
+  "name",
+  "email",
+  "github",
+  "slack",
+  "phone",
+  "nickname",
+]);
+
 /** Columns to SELECT for Entity — avoids pulling unnecessary data. */
 const ENTITY_COLS =
   "id, project_id, entity_type, canonical_name, metadata, cross_project, created_at, updated_at";
@@ -473,24 +489,31 @@ function missingSelfEntity(): never {
 }
 
 /**
- * Find "person" entities whose canonical name or alias values overlap with the
- * self entity's aliases, and merge them into the self entity.
- * Exported for testing.
+ * Find "person" entities that are genuinely the *same individual* as the self
+ * entity and merge them in. Exported for testing.
  *
- * NOTE: The alias set used for matching is captured once before the loop and
- * is NOT refreshed after each merge. This means transitive overlaps (person A
- * has alias X → merges into self → self now has alias Y from A → person B has
- * alias Y) require a second pass to converge. Since `ensureSelfEntity` runs on
- * every curator invocation, this converges naturally across sessions.
+ * Matching is restricted to IDENTITY_ALIAS_TYPES (name/email/github/slack/
+ * phone/nickname) plus the canonical name. Non-identity aliases (`url`,
+ * `domain`) are deliberately ignored: they are shared across whole teams, so
+ * matching on them would absorb (and delete) unrelated colleagues. The self
+ * entity's match set is likewise built from identity aliases only.
+ *
+ * NOTE: The match set is captured once before the loop and is NOT refreshed
+ * after each merge. Transitive overlaps (person A → self gains A's alias →
+ * person B matches that alias) need a second pass to converge; since
+ * `ensureSelfEntity` runs on every curator invocation this converges across
+ * sessions.
  */
 export function mergeSelfPersonDuplicates(
   selfEntity: EntityWithAliases,
 ): number {
-  // Collect all self alias values (lowercased) including canonical_name
-  const selfAliasValues = new Set<string>();
-  selfAliasValues.add(selfEntity.canonical_name.toLowerCase());
+  // Collect self identity values (lowercased): canonical_name + identity aliases.
+  const selfIdentityValues = new Set<string>();
+  selfIdentityValues.add(selfEntity.canonical_name.toLowerCase());
   for (const a of selfEntity.aliases) {
-    selfAliasValues.add(a.alias_value.toLowerCase());
+    if (IDENTITY_ALIAS_TYPES.has(a.alias_type)) {
+      selfIdentityValues.add(a.alias_value.toLowerCase());
+    }
   }
 
   // Find all "person" entities
@@ -498,25 +521,51 @@ export function mergeSelfPersonDuplicates(
     .query(`SELECT ${ENTITY_COLS} FROM entities WHERE entity_type = 'person'`)
     .all() as Entity[];
 
-  // For each person, check canonical_name or alias overlap
+  // For each person, check for an identity match against self.
   let mergedCount = 0;
   for (const person of persons) {
-    if (selfAliasValues.has(person.canonical_name.toLowerCase())) {
-      merge(selfEntity.id, person.id); // absorb person into self
-      mergedCount++;
-      continue;
+    let matched: string | null = null;
+    if (selfIdentityValues.has(person.canonical_name.toLowerCase())) {
+      matched = `name:${person.canonical_name}`;
+    } else {
+      // Check identity-typed alias overlap only.
+      const personAliases = db()
+        .query(
+          "SELECT alias_type, alias_value FROM entity_aliases WHERE entity_id = ?",
+        )
+        .all(person.id) as Array<{
+        alias_type: AliasType;
+        alias_value: string;
+      }>;
+      const hit = personAliases.find(
+        (a) =>
+          IDENTITY_ALIAS_TYPES.has(a.alias_type) &&
+          selfIdentityValues.has(a.alias_value.toLowerCase()),
+      );
+      if (hit) matched = `${hit.alias_type}:${hit.alias_value}`;
     }
-    // Check alias overlap
-    const personAliases = db()
-      .query("SELECT alias_value FROM entity_aliases WHERE entity_id = ?")
-      .all(person.id) as Array<{ alias_value: string }>;
-    const hasOverlap = personAliases.some((a) =>
-      selfAliasValues.has(a.alias_value.toLowerCase()),
+    if (matched === null) continue;
+
+    // Audit before the row disappears: log + record a feedback row so the
+    // self/person merge has a durable, queryable trail (these merges leave no
+    // other history). source='self_merge' is excluded from threshold calibration.
+    log.info(
+      `merging person "${person.canonical_name}" into self entity (matched ${matched})`,
     );
-    if (hasOverlap) {
-      merge(selfEntity.id, person.id);
-      mergedCount++;
+    try {
+      recordEntityDedupFeedback({
+        projectId: null,
+        entryATitle: selfEntity.canonical_name,
+        entryBTitle: person.canonical_name,
+        similarity: 1.0,
+        accepted: true,
+        source: "self_merge",
+      });
+    } catch (err) {
+      log.warn("self_merge audit record failed (non-fatal):", err);
     }
+    merge(selfEntity.id, person.id); // absorb person into self
+    mergedCount++;
   }
   return mergedCount;
 }
@@ -1706,7 +1755,10 @@ export type EntityDedupFeedbackSource =
   | "auto_dedup"
   | "cli_yes"
   | "cli_interactive"
-  | "dashboard";
+  | "dashboard"
+  // Audit-only: a person entity absorbed into the self entity. Excluded from
+  // threshold calibration (it is tautological — always similarity 1.0).
+  | "self_merge";
 
 const MIN_ENTITY_CALIBRATION_SAMPLES = 20;
 /** Only record auto-signals for pairs with similarity >= this floor. */
@@ -1833,12 +1885,12 @@ export function getEntityDedupFeedback(
     projectId !== null
       ? db()
           .query(
-            "SELECT similarity, accepted, source FROM dedup_feedback WHERE kind = 'entity' AND project_id = ? ORDER BY similarity",
+            "SELECT similarity, accepted, source FROM dedup_feedback WHERE kind = 'entity' AND source != 'self_merge' AND project_id = ? ORDER BY similarity",
           )
           .all(projectId)
       : db()
           .query(
-            "SELECT similarity, accepted, source FROM dedup_feedback WHERE kind = 'entity' AND project_id IS NULL ORDER BY similarity",
+            "SELECT similarity, accepted, source FROM dedup_feedback WHERE kind = 'entity' AND source != 'self_merge' AND project_id IS NULL ORDER BY similarity",
           )
           .all()
   ) as Array<{ similarity: number; accepted: number; source: string }>;
@@ -1855,19 +1907,21 @@ export function getEntityDedupFeedbackCount(projectId: string | null): number {
     projectId !== null
       ? db()
           .query(
-            "SELECT COUNT(*) as cnt FROM dedup_feedback WHERE kind = 'entity' AND project_id = ?",
+            "SELECT COUNT(*) as cnt FROM dedup_feedback WHERE kind = 'entity' AND source != 'self_merge' AND project_id = ?",
           )
           .get(projectId)
       : db()
           .query(
-            "SELECT COUNT(*) as cnt FROM dedup_feedback WHERE kind = 'entity' AND project_id IS NULL",
+            "SELECT COUNT(*) as cnt FROM dedup_feedback WHERE kind = 'entity' AND source != 'self_merge' AND project_id IS NULL",
           )
           .get()
   ) as { cnt: number } | null;
   return row?.cnt ?? 0;
 }
 
-/** Prune old entity feedback rows, keeping the most recent rows. */
+/** Prune old entity feedback rows, keeping the most recent rows.
+ *  self_merge audit rows are excluded — they must not be pruned so the
+ *  absorb trail remains durable and queryable. */
 export function pruneEntityDedupFeedback(projectId: string | null): void {
   const count = getEntityDedupFeedbackCount(projectId);
   if (count <= MAX_ENTITY_FEEDBACK_ROWS_PER_PROJECT) return;
@@ -1876,7 +1930,7 @@ export function pruneEntityDedupFeedback(projectId: string | null): void {
     db()
       .query(
         `DELETE FROM dedup_feedback WHERE id IN (
-           SELECT id FROM dedup_feedback WHERE kind = 'entity' AND project_id = ?
+           SELECT id FROM dedup_feedback WHERE kind = 'entity' AND source != 'self_merge' AND project_id = ?
            ORDER BY created_at ASC LIMIT ?
          )`,
       )
@@ -1885,7 +1939,7 @@ export function pruneEntityDedupFeedback(projectId: string | null): void {
     db()
       .query(
         `DELETE FROM dedup_feedback WHERE id IN (
-           SELECT id FROM dedup_feedback WHERE kind = 'entity' AND project_id IS NULL
+           SELECT id FROM dedup_feedback WHERE kind = 'entity' AND source != 'self_merge' AND project_id IS NULL
            ORDER BY created_at ASC LIMIT ?
          )`,
       )

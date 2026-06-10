@@ -18,6 +18,7 @@ export * as embedding from "./embedding";
 export * as embeddingVendor from "./embedding-vendor";
 export * as latReader from "./lat-reader";
 export * as entities from "./entities";
+export * as entityRebuild from "./entity-rebuild";
 export * as patternExtract from "./pattern-extract";
 export * as instructionDetect from "./instruction-detect";
 export * as log from "./log";

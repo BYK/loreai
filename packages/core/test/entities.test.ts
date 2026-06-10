@@ -13,6 +13,7 @@ function cleanup() {
   d.exec("DELETE FROM knowledge_entity_refs");
   d.exec("DELETE FROM entity_aliases");
   d.exec("DELETE FROM entities");
+  d.exec("DELETE FROM dedup_feedback");
 }
 
 describe("entities", () => {
@@ -1040,6 +1041,75 @@ describe("entities", () => {
       const aliasValues = updated.aliases.map((a) => a.alias_value);
       expect(aliasValues).toContain("alice-gh");
       expect(aliasValues).toContain("alice-slack");
+    });
+
+    test("does NOT merge a colleague sharing only a non-identity (url/domain) alias", () => {
+      // Reproduces the over-merge bug: a colleague who merely shares the
+      // company domain/repo URL with the user must NOT be absorbed into self.
+      // The literal value "acme.io" is shared across different alias TYPES,
+      // which is allowed by the table-wide UNIQUE(alias_type, alias_value).
+      const colleague = entities.create({
+        entityType: "person",
+        canonicalName: "Carol",
+        aliases: [{ type: "url", value: "acme.io", source: "curator" }],
+        crossProject: true,
+      });
+      const self = entities.create({
+        entityType: "self",
+        canonicalName: "Alice Smith",
+        aliases: [
+          { type: "email", value: "alice@acme.io", source: "auto" },
+          { type: "domain", value: "acme.io", source: "auto" },
+        ],
+        crossProject: true,
+      });
+
+      // biome-ignore lint/style/noNonNullAssertion: getWithAliases() returns null for missing entities
+      const selfEntity = entities.getWithAliases(self.id)!;
+      const count = entities.mergeSelfPersonDuplicates(selfEntity);
+
+      expect(count).toBe(0);
+      expect(entities.get(colleague.id)).not.toBeNull(); // colleague preserved
+    });
+
+    test("records a self_merge audit row in dedup_feedback on absorb", () => {
+      const person = entities.create({
+        entityType: "person",
+        canonicalName: "Ali",
+        crossProject: true,
+      });
+      const self = entities.create({
+        entityType: "self",
+        canonicalName: "Alice Smith",
+        aliases: [{ type: "nickname", value: "Ali", source: "config" }],
+        crossProject: true,
+      });
+
+      // biome-ignore lint/style/noNonNullAssertion: getWithAliases() returns null for missing entities
+      const selfEntity = entities.getWithAliases(self.id)!;
+      const count = entities.mergeSelfPersonDuplicates(selfEntity);
+      expect(count).toBe(1);
+      expect(entities.get(person.id)).toBeNull();
+
+      const rows = db()
+        .query(
+          "SELECT entry_a_title, entry_b_title, source, accepted, similarity FROM dedup_feedback WHERE kind = 'entity' AND source = 'self_merge'",
+        )
+        .all() as Array<{
+        entry_a_title: string;
+        entry_b_title: string;
+        source: string;
+        accepted: number;
+        similarity: number;
+      }>;
+      expect(rows.length).toBe(1);
+      expect(rows[0].entry_a_title).toBe("Alice Smith");
+      expect(rows[0].entry_b_title).toBe("Ali");
+      expect(rows[0].accepted).toBe(1);
+      expect(rows[0].similarity).toBe(1.0);
+
+      // Audit rows must NOT count toward dedup threshold calibration.
+      expect(entities.getEntityDedupFeedbackCount(null)).toBe(0);
     });
   });
 });

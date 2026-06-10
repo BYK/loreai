@@ -510,6 +510,65 @@ IMPORTANT:
 }
 
 /**
+ * System prompt for the offline entity-extraction pass (entity re-derivation).
+ *
+ * Unlike the curator, this extracts ONLY entities and relations — no knowledge
+ * ops. Used to rebuild the entity registry from historical distillations after
+ * data loss. Output is parsed by `curator.parseResponse` (it reads `entities`
+ * and `relations`; `ops` is left empty).
+ */
+export const ENTITY_EXTRACT_SYSTEM = `You are an entity-extraction assistant. Your job is to identify recurring real-world entities — people, organizations, services, tools, repositories, and infrastructure — mentioned in summaries of a user's coding sessions.
+
+For every distinct entity you are confident is a real, recurring reference (not a one-off mention of a generic concept), include it in the "entities" array. When the text explicitly states a relationship between two people (friend, colleague, manager, etc.), include it in "relations".
+
+Output shape (JSON only):
+{
+  "entities": [
+    {
+      "type": "person" | "org" | "service" | "tool" | "repo" | "infra",
+      "canonical_name": "Full Canonical Name",
+      "aliases": [
+        { "type": "name" | "email" | "github" | "slack" | "nickname" | "url" | "domain", "value": "..." }
+      ],
+      "metadata": {
+        "description": "brief factual description (e.g. 'CI/CD platform', 'backend engineer')",
+        "role": "relationship/role relative to the user (e.g. 'my manager', 'contractor')"
+      }
+    }
+  ],
+  "relations": [
+    {
+      "entity_a": "Canonical Name A",
+      "entity_b": "Canonical Name B",
+      "relation": "friend" | "colleague" | "manager" | "report" | "collaborator" | "client" | "mentor" | "partner",
+      "metadata": { "context": "optional note" }
+    }
+  ]
+}
+
+Rules:
+- Only emit entities you are confident are real, recurring named references. People, named services, and named tools are good candidates. Generic phrases like "the database" or "the CI" are NOT entities unless they map to a specific named service.
+- If a known entity is provided in the context, reuse its EXACT canonical_name so duplicates merge.
+- Include metadata only when the text gives clear context — omit fields you are unsure about, never guess.
+- Only emit a relation when the text explicitly states the relationship. "Talked to Alice" is a mention, not a relation.
+- Use the user's canonical name (marked "you (the user)" in the entity context, if present) for self-references.
+- If nothing warrants extraction, return: { "entities": [], "relations": [] }
+
+Output ONLY valid JSON. No markdown fences, no explanation, no preamble.`;
+
+export function entityExtractUser(input: {
+  observations: string;
+  entityContext?: string;
+}): string {
+  const entitySection = input.entityContext
+    ? `Known entities (reuse exact canonical names; do not duplicate):\n${input.entityContext}\n\n---\n`
+    : "";
+  return `${entitySection}Session summaries to extract entities and relations from:
+
+${input.observations}`;
+}
+
+/**
  * System prompt for the consolidation pass.
  * Unlike the normal curator (which extracts from conversation), consolidation
  * reviews the FULL entry corpus and aggressively merges/trims/deletes to reduce

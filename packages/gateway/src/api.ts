@@ -17,6 +17,7 @@ import {
   temporal,
   embedding,
   conversationImport,
+  entityRebuild,
   runRecall,
   config as loreConfig,
   resolveProjectByRemoteOrPath,
@@ -442,6 +443,88 @@ async function handleImportExtract(
   return jsonResponse(result);
 }
 
+/**
+ * POST /api/v1/entities/rebuild — re-derive entities from distillation history.
+ *
+ * Body: { git_remote?, path?, all?, dryRun?, model? }. Provide a project
+ * (git_remote or path) OR `all: true` to process every project with history.
+ * `dryRun: true` returns the candidate entities without writing.
+ *
+ * Blocked in hosted mode — this triggers LLM calls that incur real cost and
+ * should only run on the operator's own gateway, not from untrusted callers.
+ */
+async function handleEntityRebuild(
+  req: Request,
+  config: GatewayConfig,
+): Promise<Response> {
+  if (isHostedMode()) {
+    return errorResponse(
+      403,
+      "forbidden",
+      "Entity rebuild is not available in hosted mode (triggers LLM calls with cost).",
+    );
+  }
+  const body = await parseBody<{
+    git_remote?: string;
+    path?: string;
+    all?: boolean;
+    dryRun?: boolean;
+    model?: { providerID: string; modelID: string };
+  }>(req);
+
+  const cfg = loreConfig();
+  const defaultModel = body.model ??
+    cfg.model ?? {
+      providerID: "anthropic",
+      modelID: "claude-sonnet-4-6",
+    };
+
+  let llm: LLMClient;
+  try {
+    llm = getAPILLMClient(config);
+  } catch {
+    return errorResponse(
+      503,
+      "service_unavailable",
+      "No LLM client available for entity rebuild",
+    );
+  }
+
+  // Resolve the set of project paths to process.
+  let projectPaths: string[];
+  if (body.all) {
+    projectPaths = data
+      .listProjects()
+      .filter((p) => p.distillation_count > 0)
+      .map((p) => p.path);
+  } else {
+    const projectId = resolveProjectByRemoteOrPath(body.git_remote, body.path);
+    const projectPath = projectId ? getProjectPathById(projectId) : body.path;
+    if (!projectPath) {
+      return errorResponse(
+        404,
+        "not_found",
+        "Project not found. Provide git_remote, path, or all=true.",
+      );
+    }
+    projectPaths = [projectPath];
+  }
+
+  const results = [];
+  for (const projectPath of projectPaths) {
+    results.push(
+      await entityRebuild.rebuildEntitiesFromHistory({
+        llm,
+        projectPath,
+        model: defaultModel,
+        dryRun: body.dryRun ?? false,
+      }),
+    );
+  }
+
+  return jsonResponse({ dryRun: body.dryRun ?? false, results });
+}
+
 function handleImportHistory(url: URL): Response {
   const project = resolveProject(url);
   if (!project) {
@@ -622,6 +705,11 @@ export async function handleAPIRequest(
     // POST /api/v1/import/extract
     if (pathname === "/api/v1/import/extract") {
       return await handleImportExtract(req, config);
+    }
+
+    // POST /api/v1/entities/rebuild — re-derive entities from history
+    if (pathname === "/api/v1/entities/rebuild") {
+      return await handleEntityRebuild(req, config);
     }
 
     // POST /api/v1/import/record

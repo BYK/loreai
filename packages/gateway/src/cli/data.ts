@@ -1963,6 +1963,7 @@ Subcommands:
   merge                 Scan git remotes and merge duplicate projects
   consolidate           Merge "(unattributed)" buckets into matched real projects
   recover               Re-import knowledge from .lore.md / AGENTS.md files
+  reground-entities     Re-derive entities (people, tools, ...) from history (needs a running gateway)
   dedup                 Find and remove duplicate knowledge entries (all projects)
   reindex               Rebuild embedding vectors (after model/config change)
   rerank                Re-score preference confidence by directive strength
@@ -1997,6 +1998,9 @@ Examples:
   lore data consolidate --json             # machine-readable plan (dryRun:true unless --yes)
   lore data recover                        # re-import from .lore.md / AGENTS.md
   lore data recover --yes                  # skip confirmation
+  lore data reground-entities --dry-run    # preview entities re-derived from history (current project)
+  lore data reground-entities --project .  # apply for current project (prompts to confirm)
+  lore data reground-entities --all --yes  # re-derive across all projects with history
   lore data dedup                          # dry-run: show duplicate clusters
   lore data dedup --yes                    # apply: remove duplicates
   lore data dedup --interactive            # accept/reject each cluster interactively
@@ -2130,6 +2134,130 @@ async function cmdConsolidate(
   console.log(`\nConsolidated ${merged} bucket(s).`);
 }
 
+type RebuildResult = {
+  projectPath: string;
+  scannedDistillations: number;
+  batches: number;
+  detected: number;
+  personsCreated: number;
+  orgsCreated: number;
+  otherCreated: number;
+  relationsCreated: number;
+  mergedIntoSelf: number;
+  dedupMerged: number;
+  candidates?: Array<{ type: string; name: string }>;
+};
+
+/**
+ * Re-derive entities (people, orgs, services, tools) from a project's
+ * distillation history. Delegates to the gateway's REST endpoint because the
+ * extraction needs a worker LLM — only the running gateway holds the upstream
+ * + auth. Resolves the gateway via LORE_REMOTE_URL, else the local port file.
+ */
+async function cmdReground(
+  _args: string[],
+  flags: Record<string, unknown>,
+): Promise<void> {
+  const asJson = !!flags.json;
+  const dryRun = !!flags["dry-run"];
+  const all = !!flags.all;
+  const skipConfirm = !!flags.yes;
+
+  // Resolve a reachable gateway: explicit remote, else the local running one.
+  let baseUrl = getRemoteUrl();
+  if (!baseUrl) {
+    const { readPortFile } = await import("../portfile");
+    const port = readPortFile();
+    if (port) baseUrl = `http://127.0.0.1:${port}`;
+  }
+  if (!baseUrl) {
+    console.error(
+      "Error: entity rebuild needs a running gateway (it makes LLM calls).\n" +
+        "Start one with `lore` (or `lore start`), or set LORE_REMOTE_URL.",
+    );
+    process.exit(1);
+    return;
+  }
+
+  // Build request body.
+  const body: Record<string, unknown> = { dryRun };
+  if (all) {
+    body.all = true;
+  } else {
+    const projectPath = resolve((flags.project as string) ?? process.cwd());
+    const { getGitRemote, normalizeRemoteUrl } = await import("@loreai/core");
+    const gitRemote = getGitRemote(projectPath);
+    if (gitRemote) body.git_remote = normalizeRemoteUrl(gitRemote) ?? gitRemote;
+    body.path = projectPath;
+  }
+
+  // Confirm the apply path (LLM cost). Dry runs write nothing, so skip confirm.
+  if (!dryRun && !skipConfirm) {
+    const scope = all ? "ALL projects with history" : (body.path as string);
+    const confirmed = await confirm(
+      `\nRe-derive entities from distillation history for:\n  ${scope}\n` +
+        `This runs LLM extraction over the history (may take a while and incur cost).`,
+    );
+    if (!confirmed) {
+      console.log("Cancelled.");
+      return;
+    }
+  }
+
+  let resp: { dryRun: boolean; results: RebuildResult[] };
+  try {
+    resp = await remotePost(baseUrl, "/api/v1/entities/rebuild", body);
+  } catch (e) {
+    console.error(`Error: ${(e as Error).message}`);
+    process.exit(1);
+    return;
+  }
+
+  if (asJson) {
+    console.log(JSON.stringify(resp, null, 2));
+    return;
+  }
+
+  if (resp.dryRun) {
+    for (const r of resp.results) {
+      console.log(`\n${r.projectPath}`);
+      console.log(
+        `  scanned ${r.scannedDistillations} distillations in ${r.batches} batch(es); ${r.detected} mention(s) detected`,
+      );
+      const cands = r.candidates ?? [];
+      if (cands.length === 0) {
+        console.log("  no entities detected");
+      } else {
+        for (const c of cands) console.log(`  - [${c.type}] ${c.name}`);
+      }
+    }
+    console.log("\nDry run — nothing was written. Re-run with --yes to apply.");
+    return;
+  }
+
+  let people = 0;
+  let total = 0;
+  let merged = 0;
+  let deduped = 0;
+  let rels = 0;
+  for (const r of resp.results) {
+    console.log(`\n${r.projectPath}`);
+    console.log(
+      `  created ${r.personsCreated} person, ${r.orgsCreated} org, ${r.otherCreated} other; ` +
+        `${r.relationsCreated} relation(s); ${r.mergedIntoSelf} folded into self; ${r.dedupMerged} deduped`,
+    );
+    people += r.personsCreated;
+    total += r.personsCreated + r.orgsCreated + r.otherCreated;
+    rels += r.relationsCreated;
+    merged += r.mergedIntoSelf;
+    deduped += r.dedupMerged;
+  }
+  console.log(
+    `\nDone: ${total} entities created (${people} people), ${rels} relation(s), ` +
+      `${merged} folded into self, ${deduped} deduped across ${resp.results.length} project(s).`,
+  );
+}
+
 export async function commandData(
   positionals: string[],
   values: Record<string, unknown>,
@@ -2158,6 +2286,9 @@ export async function commandData(
       break;
     case "recover":
       await cmdRecover(subArgs, values);
+      break;
+    case "reground-entities":
+      await cmdReground(subArgs, values);
       break;
     case "dedup":
       await cmdDedup(subArgs, values);

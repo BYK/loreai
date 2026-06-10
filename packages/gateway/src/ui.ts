@@ -1671,55 +1671,113 @@ function pageProject(projectId: string): string | null {
   return layout(project.name ?? "Project", body);
 }
 
-function pageUserKnowledge(): string {
-  const entries = ltm.crossProject();
-
-  let body = breadcrumb([
-    { label: "Dashboard", href: "/ui" },
-    { label: "Knowledge" },
-  ]);
-  body += `<h1>User Knowledge (${entries.length})</h1>`;
-
-  if (!entries.length) {
-    body += `<p class="empty">No cross-project or global knowledge entries found. These are created automatically when the curator identifies knowledge worth sharing across projects.</p>`;
-    return layout("User Knowledge", body);
-  }
-
-  // Category breakdown stats
-  const cats: Record<string, number> = {};
-  for (const e of entries) {
-    cats[e.category] = (cats[e.category] || 0) + 1;
-  }
-  body += `<div class="stats">
-    <div class="stat"><div class="label">Total</div><div class="value">${entries.length}</div></div>`;
-  for (const [cat, count] of Object.entries(cats).sort((a, b) => b[1] - a[1])) {
-    body += `<div class="stat"><div class="label">${esc(cat)}</div><div class="value">${count}</div></div>`;
-  }
-  body += `</div>`;
-
-  // Batch-load cross-project transfer counts (#506) to avoid N+1 queries.
-  const transferCounts = ltm.transferCounts();
-
-  body += `<div class="table-filter"><input type="text" placeholder="Filter knowledge\u2026"><span class="count"></span></div>
-  <table data-table-id="user-knowledge">
-    <tr><th data-sort="text">Category</th><th data-sort="text">Title</th><th data-sort="text">Source Project</th><th data-sort="num">Confidence</th><th data-sort="num">Recalls</th><th data-sort="date" data-default-sort="desc">Updated</th></tr>`;
+/** Render a sortable/filterable knowledge table. `showRecalls` adds the
+ *  cross-project transfer-count column (only meaningful for shared entries). */
+function renderKnowledgeTable(
+  entries: ltm.KnowledgeEntry[],
+  transferCounts: Map<string, number>,
+  opts: { tableId: string; showRecalls: boolean },
+): string {
+  const recallsHeader = opts.showRecalls
+    ? `<th data-sort="num">Recalls</th>`
+    : "";
+  let out = `<div class="table-filter"><input type="text" placeholder="Filter knowledge\u2026"><span class="count"></span></div>
+  <table data-table-id="${esc(opts.tableId)}">
+    <tr><th data-sort="text">Category</th><th data-sort="text">Title</th><th data-sort="text">Source Project</th><th data-sort="num">Confidence</th>${recallsHeader}<th data-sort="date" data-default-sort="desc">Updated</th></tr>`;
   for (const e of entries) {
     const projName = e.project_id ? projectName(e.project_id) : null;
     const projDisplay = e.project_id
       ? `<a href="/ui/projects/${esc(e.project_id)}">${esc(projName ?? "(unknown)")}</a>`
       : "(global)";
-    body += `<tr>
+    const recallsCell = opts.showRecalls
+      ? `<td>${transferCounts.get(e.id) ?? 0}</td>`
+      : "";
+    out += `<tr>
       <td>${badge(e.category)}</td>
       <td><a href="/ui/knowledge/${esc(e.id)}">${esc(truncate(e.title, 60))}</a></td>
       <td>${projDisplay}</td>
       <td>${e.confidence.toFixed(2)}</td>
-      <td>${transferCounts.get(e.id) ?? 0}</td>
+      ${recallsCell}
       <td>${timeAgo(e.updated_at)}</td>
     </tr>`;
   }
-  body += `</table>`;
+  out += `</table>`;
+  return out;
+}
 
-  return layout("User Knowledge", body);
+function pageUserKnowledge(): string {
+  // Soft cap on the project-scoped table so very large DBs stay responsive.
+  const PROJECT_SOFT_CAP = 500;
+
+  const crossEntries = ltm.crossProject();
+  const crossIds = new Set(crossEntries.map((e) => e.id));
+  // All project-scoped entries: every confidence-visible entry that isn't
+  // already shown in the cross-project/global section above.
+  const projectEntries = ltm
+    .all()
+    .filter(
+      (e) =>
+        !crossIds.has(e.id) && e.project_id !== null && e.cross_project !== 1,
+    )
+    .sort((a, b) => b.updated_at - a.updated_at);
+
+  const total = crossEntries.length + projectEntries.length;
+
+  let body = breadcrumb([
+    { label: "Dashboard", href: "/ui" },
+    { label: "Knowledge" },
+  ]);
+  body += `<h1>Knowledge (${total})</h1>`;
+
+  // Batch-load cross-project transfer counts (#506) to avoid N+1 queries.
+  const transferCounts = ltm.transferCounts();
+
+  // Combined category breakdown stats (across both scopes)
+  if (total > 0) {
+    const cats: Record<string, number> = {};
+    for (const e of crossEntries)
+      cats[e.category] = (cats[e.category] || 0) + 1;
+    for (const e of projectEntries)
+      cats[e.category] = (cats[e.category] || 0) + 1;
+    body += `<div class="stats">
+      <div class="stat"><div class="label">Total</div><div class="value">${total}</div></div>
+      <div class="stat"><div class="label">Cross-project</div><div class="value">${crossEntries.length}</div></div>
+      <div class="stat"><div class="label">Project-scoped</div><div class="value">${projectEntries.length}</div></div>`;
+    for (const [cat, count] of Object.entries(cats).sort(
+      (a, b) => b[1] - a[1],
+    )) {
+      body += `<div class="stat"><div class="label">${esc(cat)}</div><div class="value">${count}</div></div>`;
+    }
+    body += `</div>`;
+  }
+
+  // Section 1 — Cross-project & global (shared across projects)
+  body += `<h2>Cross-project &amp; Global (${crossEntries.length})</h2>`;
+  if (!crossEntries.length) {
+    body += `<p class="empty">No cross-project or global knowledge entries yet. These are created automatically when the curator identifies knowledge worth sharing across projects.</p>`;
+  } else {
+    body += renderKnowledgeTable(crossEntries, transferCounts, {
+      tableId: "user-knowledge-cross",
+      showRecalls: true,
+    });
+  }
+
+  // Section 2 — Project-scoped (also visible on each project's page)
+  body += `<h2>Project Knowledge (${projectEntries.length})</h2>`;
+  if (!projectEntries.length) {
+    body += `<p class="empty">No project-scoped knowledge found.</p>`;
+  } else {
+    const shown = projectEntries.slice(0, PROJECT_SOFT_CAP);
+    if (projectEntries.length > PROJECT_SOFT_CAP) {
+      body += `<p class="empty">Showing the ${PROJECT_SOFT_CAP} most recently updated of ${projectEntries.length} entries. Open a project to see all of its knowledge.</p>`;
+    }
+    body += renderKnowledgeTable(shown, transferCounts, {
+      tableId: "user-knowledge-project",
+      showRecalls: false,
+    });
+  }
+
+  return layout("Knowledge", body);
 }
 
 function pageKnowledge(id: string): string | null {
@@ -2783,6 +2841,36 @@ async function pageEntities(): Promise<string> {
     { label: "Entities" },
   ]);
   body += `<h1>Entities (${all.length})</h1>`;
+
+  // Re-derive entities from distillation history (recovery after data loss).
+  // Client-side fetch to the REST endpoint so the long-running LLM work runs in
+  // the gateway (which holds upstream + auth). Shown even when the list is empty
+  // — that is exactly the case where recovery is most useful.
+  body += `<div class="banner" style="border:1px solid #5b8def;background:#eef3ff;padding:12px 16px;border-radius:6px;margin:12px 0;">
+    <strong>Re-derive entities from history</strong>
+    <div class="muted" style="color:#555;margin:4px 0 8px;">Rebuild people, tools, and services the curator detected in past sessions — useful after entities were lost or merged away. Runs an LLM extraction over your distillation history (may take a while and incur cost).</div>
+    <button type="button" onclick="loreRebuildEntities(true)" style="font-size:13px;padding:4px 10px;">Preview (dry run)</button>
+    <button type="button" onclick="loreRebuildEntities(false)" style="font-size:13px;padding:4px 10px;">Rebuild all</button>
+    <span id="lore-rebuild-status" class="muted" style="color:#555;"></span>
+  </div>
+  <script>
+  function loreRebuildEntities(dry){
+    if(!dry && !confirm('Re-derive entities across ALL projects from history? This runs LLM extraction and may take a while and incur cost.')) return;
+    var s=document.getElementById('lore-rebuild-status');
+    s.textContent=' Working\\u2026 (this can take a while)';
+    fetch('/api/v1/entities/rebuild',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({all:true,dryRun:dry})})
+      .then(function(r){return r.json();})
+      .then(function(d){
+        if(d.error){s.textContent=' Error: '+((d.error&&d.error.message)||'failed');return;}
+        var res=d.results||[];
+        var people=0,total=0,detected=0;
+        res.forEach(function(x){people+=x.personsCreated||0;total+=(x.personsCreated||0)+(x.orgsCreated||0)+(x.otherCreated||0);detected+=x.detected||0;});
+        if(d.dryRun){s.textContent=' Dry run: '+detected+' mention(s) detected across '+res.length+' project(s). Click "Rebuild all" to apply.';}
+        else{s.textContent=' Done: '+total+' entities created ('+people+' people) across '+res.length+' project(s). Reload to view.';}
+      })
+      .catch(function(e){s.textContent=' Error: '+e;});
+  }
+  </script>`;
 
   if (!all.length) {
     body += `<p class="empty">No entities found. Entities are created automatically when the curator detects recurring people, services, tools, and other named references in conversations.</p>`;

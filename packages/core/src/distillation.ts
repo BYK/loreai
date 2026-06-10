@@ -664,6 +664,40 @@ export function loadForSession(
   }));
 }
 
+/**
+ * Load ALL distillations for a project across every session, oldest first.
+ *
+ * Used by offline reprocessing (e.g. entity re-derivation) that needs the
+ * full project history rather than a single session's prefix. `includeArchived`
+ * defaults to true here because archived gen-0 segments carry the richest
+ * detail (specific people, tools), which is exactly what recovery passes want.
+ */
+export function loadForProject(
+  projectPath: string,
+  includeArchived = true,
+): Distillation[] {
+  const pid = ensureProject(projectPath);
+  const sql = includeArchived
+    ? "SELECT id, project_id, session_id, observations, source_ids, generation, token_count, created_at, r_compression, c_norm FROM distillations WHERE project_id = ? ORDER BY created_at ASC"
+    : "SELECT id, project_id, session_id, observations, source_ids, generation, token_count, created_at, r_compression, c_norm FROM distillations WHERE project_id = ? AND archived = 0 ORDER BY created_at ASC";
+  const rows = db().query(sql).all(pid) as Array<{
+    id: string;
+    project_id: string;
+    session_id: string;
+    observations: string;
+    source_ids: string;
+    generation: number;
+    token_count: number;
+    created_at: number;
+    r_compression: number | null;
+    c_norm: number | null;
+  }>;
+  return rows.map((r) => ({
+    ...r,
+    source_ids: parseSourceIds(r.source_ids),
+  }));
+}
+
 function storeDistillation(input: {
   projectPath: string;
   sessionID: string;
