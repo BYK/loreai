@@ -11,7 +11,14 @@ import {
 } from "../src/config";
 import { resolveSessionProjectPath } from "../src/pipeline";
 import type { SessionState } from "../src/translate/types";
-import { ensureProject, projectId, ltm } from "@loreai/core";
+import {
+  ensureProject,
+  projectId,
+  ltm,
+  saveSessionTracking,
+  loadSessionTracking,
+  type LoadedSessionTracking,
+} from "@loreai/core";
 
 // ---------------------------------------------------------------------------
 // inferProjectPath
@@ -630,5 +637,127 @@ describe("resolveSessionProjectPath", () => {
       localCfg,
     );
     expect(state.gitRemote).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v36: restart continuity — persisted project binding rehydration
+//
+// getOrCreateSession() is private, so these tests reconstruct the exact seed it
+// builds from loadSessionTracking() (see pipeline.ts getOrCreateSession), then
+// drive the rehydrated state through the public resolveSessionProjectPath() to
+// assert the no-split invariant: a persisted confident binding must NOT be
+// downgraded by a path-less first post-restart turn.
+// ---------------------------------------------------------------------------
+
+describe("restart continuity: persisted project binding", () => {
+  const localCfg = { remoteGateway: false } as GatewayConfig;
+  const remoteCfg = { remoteGateway: true } as GatewayConfig;
+
+  // Mirrors the project-binding seed inside getOrCreateSession(): a persisted
+  // confident binding wins over the current request path; a persisted
+  // provisional binding is resumed; otherwise fall back to the request seed.
+  function rehydrateSeed(
+    sessionID: string,
+    persisted: LoadedSessionTracking | null,
+    reqPath: string,
+    reqSource: "header" | "inferred" | "cwd",
+  ): SessionState {
+    const persistedConfident =
+      !!persisted?.projectPath && persisted.projectPathProvisional === false;
+    const persistedProvisional =
+      !!persisted?.projectPath && persisted.projectPathProvisional === true;
+    return {
+      sessionID,
+      projectPath:
+        persistedConfident || persistedProvisional
+          ? (persisted?.projectPath as string)
+          : reqPath,
+      projectPathProvisional: persistedConfident
+        ? false
+        : persistedProvisional
+          ? true
+          : reqSource === "cwd",
+    } as Partial<SessionState> as SessionState;
+  }
+
+  test("confident binding survives restart (rehydrated from DB)", () => {
+    const sid = `restart-confident-${crypto.randomUUID()}`;
+    saveSessionTracking(sid, {
+      projectPath: "/home/me/real",
+      projectPathProvisional: false,
+    });
+    // Simulate restart: in-memory state is gone; rehydrate from DB with a
+    // path-less first turn (cwd).
+    const persisted = loadSessionTracking(sid);
+    const state = rehydrateSeed(sid, persisted, process.cwd(), "cwd");
+    expect(state.projectPath).toBe("/home/me/real");
+    expect(state.projectPathProvisional).toBe(false);
+  });
+
+  test("path-less first post-restart turn does NOT downgrade confident binding", () => {
+    const sid = `restart-nodowngrade-${crypto.randomUUID()}`;
+    saveSessionTracking(sid, {
+      projectPath: "/home/me/real",
+      projectPathProvisional: false,
+    });
+    const persisted = loadSessionTracking(sid);
+    const state = rehydrateSeed(sid, persisted, process.cwd(), "cwd");
+    const result = resolveSessionProjectPath(
+      { path: process.cwd(), source: "cwd" },
+      state,
+      localCfg,
+    );
+    expect(result).toBe("/home/me/real");
+    expect(state.projectPath).toBe("/home/me/real");
+    expect(state.projectPathProvisional).toBe(false);
+  });
+
+  test("provisional binding resumes the same bucket and still self-heals", () => {
+    const sid = `restart-provisional-${crypto.randomUUID()}`;
+    const bucket = unattributedBucketPath(sid);
+    saveSessionTracking(sid, {
+      projectPath: bucket,
+      projectPathProvisional: true,
+    });
+    const persisted = loadSessionTracking(sid);
+    // Restart, path-less turn: resumes the same provisional bucket.
+    const state = rehydrateSeed(sid, persisted, process.cwd(), "cwd");
+    expect(state.projectPath).toBe(bucket);
+    expect(state.projectPathProvisional).toBe(true);
+    // A later confident header turn rebinds to the real project.
+    const result = resolveSessionProjectPath(
+      { path: "/home/me/real", source: "header" },
+      state,
+      remoteCfg,
+    );
+    expect(result).toBe("/home/me/real");
+    expect(state.projectPathProvisional).toBe(false);
+  });
+
+  test("no persisted binding falls back to legacy request-seed behavior", () => {
+    const sid = `restart-legacy-${crypto.randomUUID()}`;
+    // No prior save → loadSessionTracking returns null.
+    const persisted = loadSessionTracking(sid);
+    expect(persisted).toBeNull();
+    const cwdState = rehydrateSeed(sid, persisted, process.cwd(), "cwd");
+    expect(cwdState.projectPathProvisional).toBe(true);
+    const headerState = rehydrateSeed(sid, persisted, "/home/me/x", "header");
+    expect(headerState.projectPathProvisional).toBe(false);
+    expect(headerState.projectPath).toBe("/home/me/x");
+  });
+
+  test("legacy DB row (binding never written) rehydrates as no-binding", () => {
+    const sid = `restart-legacyrow-${crypto.randomUUID()}`;
+    // Row exists but the v36 binding columns were never written.
+    saveSessionTracking(sid, { messageCount: 3 });
+    const persisted = loadSessionTracking(sid);
+    expect(persisted?.projectPath).toBeNull();
+    expect(persisted?.projectPathProvisional).toBe(true);
+    // With a NULL persisted path, the seed uses the current request — a cwd
+    // turn stays provisional (no false confidence inherited from the default).
+    const state = rehydrateSeed(sid, persisted, process.cwd(), "cwd");
+    expect(state.projectPath).toBe(process.cwd());
+    expect(state.projectPathProvisional).toBe(true);
   });
 });

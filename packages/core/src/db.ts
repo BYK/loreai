@@ -1009,6 +1009,25 @@ const MIGRATIONS: string[] = [
   CREATE INDEX IF NOT EXISTS idx_knowledge_worker
     ON knowledge(worker_provider_id, worker_model_id);
   `,
+  `
+  -- Version 36: Persist the session's resolved project binding so a gateway
+  -- restart does not re-resolve (and potentially split) the project_id.
+  -- Without this, a previously-confident session whose first post-restart turn
+  -- lacks X-Lore-Project (and an inferable prompt) re-binds provisionally to
+  -- cwd / an unattributed bucket, and its new temporal rows + distillations land
+  -- under a different project_id than the pre-restart half until a later
+  -- confident turn self-heals.
+  -- project_path: the project path the session is bound to. NULL for pre-v36
+  -- rows and sessions that never got a binding.
+  -- project_path_provisional: 1 = provisional (cwd fallback / unattributed
+  -- bucket), 0 = confident (header/inferred). Persisting BOTH lets restart
+  -- distinguish a confident binding (must not be downgraded by a path-less turn)
+  -- from a provisional one (may still be overwritten/self-healed). The
+  -- NOT NULL DEFAULT 1 is the safe default: never falsely claims confidence for
+  -- legacy / INSERT-OR-IGNORE rows.
+  ALTER TABLE session_state ADD COLUMN project_path TEXT;
+  ALTER TABLE session_state ADD COLUMN project_path_provisional INTEGER NOT NULL DEFAULT 1;
+  `,
 ];
 
 /**
@@ -1296,6 +1315,22 @@ function recoverMissingObjects(database: Database) {
     CREATE INDEX IF NOT EXISTS idx_knowledge_worker
       ON knowledge(worker_provider_id, worker_model_id);
   `);
+  // Version 36: session project binding. Recover each column independently in
+  // case a partial ALTER (e.g. the first succeeded, the second was skipped on a
+  // prior failure) left the table missing a column.
+  {
+    const scols = database
+      .query("PRAGMA table_info(session_state)")
+      .all() as Array<{ name: string }>;
+    if (!scols.some((c) => c.name === "project_path")) {
+      database.exec("ALTER TABLE session_state ADD COLUMN project_path TEXT;");
+    }
+    if (!scols.some((c) => c.name === "project_path_provisional")) {
+      database.exec(
+        "ALTER TABLE session_state ADD COLUMN project_path_provisional INTEGER NOT NULL DEFAULT 1;",
+      );
+    }
+  }
 }
 
 /**
@@ -1898,6 +1933,9 @@ export type SessionTrackingState = {
   // v26: sub-agent parent–child relationships
   parentSessionId?: string | null;
   isSubagent?: boolean;
+  // v36: project binding (survives restart so the project_id never splits)
+  projectPath?: string | null;
+  projectPathProvisional?: boolean;
 };
 
 /**
@@ -2013,6 +2051,15 @@ export function saveSessionTracking(
     sets.push("is_subagent = ?");
     vals.push(state.isSubagent ? 1 : 0);
   }
+  // v36: project binding
+  if (state.projectPath !== undefined) {
+    sets.push("project_path = ?");
+    vals.push(state.projectPath);
+  }
+  if (state.projectPathProvisional !== undefined) {
+    sets.push("project_path_provisional = ?");
+    vals.push(state.projectPathProvisional ? 1 : 0);
+  }
 
   // Update only the specified columns
   db()
@@ -2048,6 +2095,9 @@ export type LoadedSessionTracking = {
   // v26: sub-agent parent–child relationships
   parentSessionId: string | null;
   isSubagent: boolean;
+  // v36: project binding
+  projectPath: string | null;
+  projectPathProvisional: boolean;
 };
 
 /**
@@ -2065,7 +2115,8 @@ export function loadSessionTracking(
               resolved_conversation_ttl, warmup_state,
               dynamic_context_cap, bust_rate_ema, inter_bust_interval_ema,
               last_layer, last_known_input, last_turn_at, last_bust_at,
-              parent_session_id, is_subagent
+              parent_session_id, is_subagent,
+              project_path, project_path_provisional
        FROM session_state WHERE session_id = ?`,
     )
     .get(sessionID) as {
@@ -2091,6 +2142,8 @@ export function loadSessionTracking(
     last_bust_at: number;
     parent_session_id: string | null;
     is_subagent: number;
+    project_path: string | null;
+    project_path_provisional: number;
   } | null;
   if (!row) return null;
   return {
@@ -2116,6 +2169,8 @@ export function loadSessionTracking(
     lastBustAt: row.last_bust_at,
     parentSessionId: row.parent_session_id,
     isSubagent: row.is_subagent === 1,
+    projectPath: row.project_path,
+    projectPathProvisional: row.project_path_provisional === 1,
   };
 }
 

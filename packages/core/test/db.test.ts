@@ -49,7 +49,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(35);
+    expect(row.version).toBe(36);
   });
 
   test("entities table has embedding column (migration v34)", () => {
@@ -931,6 +931,54 @@ describe("db", () => {
     expect(loaded?.lastKnownInput).toBe(0);
     expect(loaded?.lastTurnAt).toBe(0);
     expect(loaded?.lastBustAt).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // v36: project binding persistence (restart continuity)
+  // -------------------------------------------------------------------------
+
+  test("session_state has v36 project binding columns", () => {
+    const cols = db().query("PRAGMA table_info(session_state)").all() as Array<{
+      name: string;
+    }>;
+    const names = cols.map((c) => c.name);
+    expect(names).toContain("project_path");
+    expect(names).toContain("project_path_provisional");
+  });
+
+  test("saveSessionTracking v36 project binding round-trip", () => {
+    const sid = `test-v36-binding-${crypto.randomUUID()}`;
+    saveSessionTracking(sid, {
+      projectPath: "/home/me/proj",
+      projectPathProvisional: false,
+    });
+    const loaded = loadSessionTracking(sid);
+    expect(loaded?.projectPath).toBe("/home/me/proj");
+    expect(loaded?.projectPathProvisional).toBe(false);
+  });
+
+  test("saveSessionTracking v36 partial update preserves project binding", () => {
+    const sid = `test-v36-partial-${crypto.randomUUID()}`;
+    saveSessionTracking(sid, {
+      projectPath: "/home/me/proj",
+      projectPathProvisional: false,
+    });
+    // A later save that omits the binding must NOT clobber it.
+    saveSessionTracking(sid, { messageCount: 7 });
+    const loaded = loadSessionTracking(sid);
+    expect(loaded?.messageCount).toBe(7);
+    expect(loaded?.projectPath).toBe("/home/me/proj");
+    expect(loaded?.projectPathProvisional).toBe(false);
+  });
+
+  test("saveSessionTracking v36 defaults: legacy row has no binding", () => {
+    const sid = `test-v36-defaults-${crypto.randomUUID()}`;
+    // Row created without ever writing the binding (pre-v36 / INSERT OR IGNORE).
+    saveSessionTracking(sid, { messageCount: 1 });
+    const loaded = loadSessionTracking(sid);
+    expect(loaded?.projectPath).toBeNull();
+    // Default flag is provisional (1) — never falsely claims confidence.
+    expect(loaded?.projectPathProvisional).toBe(true);
   });
 
   // -------------------------------------------------------------------------

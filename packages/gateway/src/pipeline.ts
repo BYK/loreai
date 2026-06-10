@@ -1234,15 +1234,38 @@ function getOrCreateSession(
   if (!state) {
     // Restore persisted tracking state from DB (survives process restarts)
     const persisted = loadSessionTracking(sessionID);
+    // Project binding (v36): a persisted binding must survive restart so the
+    // session's project_id never splits. A persisted CONFIDENT binding wins
+    // over the current request's path — otherwise a path-less first
+    // post-restart turn would downgrade it to a provisional cwd/bucket and
+    // strand the pre-restart rows under a different project_id. A persisted
+    // PROVISIONAL binding is resumed (same path) so self-heal keeps targeting
+    // the exact bucket where earlier rows were stored.
+    //
+    // ORDERING DEPENDENCY: callers MUST invoke getOrCreateSession() →
+    // resolveSessionProjectPath() → the per-turn saveSessionTracking() in that
+    // order. The rehydrated confident binding below is what makes
+    // resolveSessionProjectPath()'s `hasConfident` short-circuit keep the known
+    // path on a path-less turn; reordering these breaks restart continuity.
+    const persistedConfident =
+      !!persisted?.projectPath && persisted.projectPathProvisional === false;
+    const persistedProvisional =
+      !!persisted?.projectPath && persisted.projectPathProvisional === true;
     state = {
       sessionID,
-      projectPath,
       // A freshly-seeded path from the cwd fallback is NOT a confident binding.
       // Mark it provisional so a later header/inferred turn can overwrite it
       // (and self-heal any rows stored under the provisional path). Only
-      // header/inferred seeds are confident. `projectPath` itself is not
-      // persisted in session_state, so this is purely in-memory bootstrap.
-      projectPathProvisional: pathSource === "cwd",
+      // header/inferred seeds are confident.
+      projectPath:
+        persistedConfident || persistedProvisional
+          ? (persisted?.projectPath as string)
+          : projectPath,
+      projectPathProvisional: persistedConfident
+        ? false
+        : persistedProvisional
+          ? true
+          : pathSource === "cwd",
       fingerprint: persisted?.fingerprint || "",
       lastRequestTime: Date.now(),
       lastUserTurnTime: 0,
@@ -3363,6 +3386,11 @@ async function handleCompaction(
     sessionState,
     config,
   );
+  // NOTE: the project binding is NOT persisted here — compaction never changes
+  // the binding, and the preceding normal turn already persisted it. A restart
+  // between the last normal turn and a compaction-only turn rehydrates the
+  // binding from the prior save, which is always present (compaction requires
+  // accumulated context that implies at least one normal turn happened first).
 
   // Initialize the project AFTER path correction so we never create a row for
   // the gateway's cwd / an unattributed bucket from a path-less probe request.
@@ -3996,10 +4024,16 @@ async function handleConversationTurn(
   sessionState.messageCount = currMsgCount;
   // Batched save: messageCount + turnsSinceCuration + consecutiveTextOnlyTurns
   // together to avoid multiple DB writes per turn.
+  // Also persist the project binding (v36): this runs AFTER
+  // resolveSessionProjectPath() above, so it captures the post-resolution
+  // binding — including a provisional→confident transition from self-heal —
+  // letting a gateway restart rehydrate the exact project_id and never split it.
   saveSessionTracking(sessionID, {
     messageCount: currMsgCount,
     turnsSinceCuration: sessionState.turnsSinceCuration,
     consecutiveTextOnlyTurns: sessionState.consecutiveTextOnlyTurns,
+    projectPath: sessionState.projectPath || null,
+    projectPathProvisional: sessionState.projectPathProvisional === true,
   });
 
   // Track session model for worker model discovery
