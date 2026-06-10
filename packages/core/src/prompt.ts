@@ -629,6 +629,11 @@ function formatOneDistillation(d: {
   return `(${meta})\n${d.observations.trim()}`;
 }
 
+// TODO: COMPACT_SUMMARY_TEMPLATE and buildCompactPrompt are dead code since
+// compaction switched to offline assembly from distillations (PR #672). The
+// template + prompt were used by the now-removed `lore-compact` LLM call.
+// Remove in a follow-up cleanup PR.
+//
 // Strict Markdown skeleton for the /compact session summary. Task-oriented
 // sections so the next agent starting from the compacted context has a clear
 // "where am I, what's next, what's blocked" briefing. Derived from upstream

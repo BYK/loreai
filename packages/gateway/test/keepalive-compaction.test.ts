@@ -26,10 +26,10 @@ describe("buildKeepaliveCompactionStream", () => {
       "msg_test",
       "model-x",
       pending,
-      5,
+      10, // 10ms ping interval
     );
-    // Resolve after enough time for several 5ms pings to fire.
-    setTimeout(() => resolve("THE SUMMARY"), 50);
+    // Resolve after enough time for several pings to fire.
+    setTimeout(() => resolve("THE SUMMARY"), 200);
     const body = await readAll(resp);
 
     expect(resp.headers.get("content-type")).toBe("text/event-stream");
@@ -69,10 +69,10 @@ describe("buildKeepaliveCompactionStream", () => {
       "msg_x",
       "model-x",
       pending,
-      5,
+      10, // 10ms ping interval
     );
     const openaiResp = translateAnthropicStreamToOpenAI(anthropicSSE);
-    setTimeout(() => resolve("TRANSLATED SUMMARY"), 40);
+    setTimeout(() => resolve("TRANSLATED SUMMARY"), 200);
     const body = await readAll(openaiResp);
 
     // OpenAI chat.completion chunks carry the text in delta.content; pings are

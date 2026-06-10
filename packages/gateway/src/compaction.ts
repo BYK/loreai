@@ -69,7 +69,7 @@ function lastUserText(req: GatewayRequest): string {
 }
 
 /** Rough token estimate: ~4 characters per token. */
-function estimateTokens(text: string): number {
+export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 

@@ -3313,6 +3313,10 @@ export async function generateCompactionSummary(opts: {
   // 3. Assemble the compaction summary deterministically from Lore's memory —
   //    no LLM. Include any still-undistilled messages verbatim so the recent
   //    tail is never lost if distillation could not bring everything current.
+  //    Note: a concurrent client turn could store new temporal messages between
+  //    step 1 (distillation) and this read — those messages appear in both the
+  //    summary tail AND the next conversation turn. This is benign duplication,
+  //    not data loss, and the window is narrow (active concurrent turns only).
   return assembleOfflineCompaction({
     previousSummary,
     distillations,
@@ -3361,10 +3365,10 @@ async function handleCompaction(
   // cached pre-compaction warmup body is stale regardless of how this resolves.
   sessionState.cacheAnalytics.lastRequestBody = null;
 
-  // Kick off summary generation. This makes at most one LLM call (urgent
-  // distillation of the undistilled remainder, if any) and then assembles the
-  // summary deterministically from Lore's memory — it (almost) never returns
-  // null, so the upstream passthrough fallback is now a rare last resort.
+  // Kick off summary generation: at most one LLM call (urgent distillation
+  // of the undistilled remainder, if any), then deterministic assembly from
+  // Lore's memory. Returns null only when there is genuinely nothing to
+  // compact (brand-new session, no history, no knowledge).
   const summaryPromise = generateCompactionSummary({
     projectPath,
     sessionID,
@@ -3376,15 +3380,30 @@ async function handleCompaction(
   if (req.stream) {
     // Open the SSE stream immediately and emit keep-alive `ping`s while the
     // summary is computed (the remainder-distillation may ride out a 429), so
-    // the client connection never hits a read-timeout. Always Anthropic SSE —
-    // wrap for OpenAI-protocol clients (their translators skip pings).
+    // the client connection never hits a read-timeout. The Response must be
+    // returned without awaiting so the pings flow to the client progressively.
+    //
+    // Null safety: assembleOfflineCompaction returns null only for a brand-new
+    // session with zero history — in that case an empty assistant turn is
+    // correct (there's nothing to compact, so "replacing context with nothing"
+    // is accurate). We log a warning for observability.
+    const loggedPromise = summaryPromise.then((s) => {
+      if (s == null) {
+        log.warn(
+          `compaction summary empty (streaming) for session ${sessionID.slice(0, 16)}`,
+        );
+      }
+      return s;
+    });
     const id = `msg_lore_compact_${crypto.randomUUID().slice(0, 8)}`;
     const anthropicSSE = buildKeepaliveCompactionStream(
       id,
       req.model,
-      summaryPromise,
+      loggedPromise,
       COMPACT_KEEPALIVE_PING_MS,
     );
+    // Always Anthropic SSE — wrap for OpenAI-protocol clients (their
+    // translators skip pings).
     if (req.protocol === "openai") {
       return translateAnthropicStreamToOpenAI(anthropicSSE);
     }
@@ -3394,9 +3413,8 @@ async function handleCompaction(
     return anthropicSSE;
   }
 
-  // Non-streaming clients have no SSE channel to ping — await the summary and
-  // return JSON. Fall back to upstream passthrough only when there is genuinely
-  // nothing to compact (no distillations, no pending messages, no knowledge).
+  // Non-streaming clients: await the summary and return JSON. Fall back to
+  // upstream passthrough only when there is genuinely nothing to compact.
   const summary = await summaryPromise;
   if (summary == null) {
     log.warn(

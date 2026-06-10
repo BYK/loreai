@@ -17,7 +17,7 @@ import {
   type GatewayResponse,
   type GatewayUsage,
 } from "../translate/types";
-import { scaleUsageForClient } from "../compaction";
+import { scaleUsageForClient, estimateTokens } from "../compaction";
 
 // ---------------------------------------------------------------------------
 // SSE formatting
@@ -680,7 +680,7 @@ export function buildKeepaliveCompactionStream(
           JSON.stringify({
             type: "message_delta",
             delta: { stop_reason: "end_turn", stop_sequence: null },
-            usage: { output_tokens: Math.ceil(text.length / 3) },
+            usage: { output_tokens: estimateTokens(text) },
           }),
         ),
       );
