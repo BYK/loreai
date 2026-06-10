@@ -33,7 +33,7 @@ import {
   curatorLimiter,
 } from "@loreai/core";
 import type { LLMClient } from "@loreai/core";
-import { makeWorkerHealth } from "./worker-health";
+import { makeWorkerHealth, allowWorkerProbe } from "./worker-health";
 import type { GatewayConfig } from "./config";
 import type { SessionState } from "./translate/types";
 import { getWorkerModel, getModelEntrySync } from "./worker-model";
@@ -466,6 +466,13 @@ export function buildIdleWorkHandler(
     const cfg = loreConfig();
     const model = getWorkerModel(state.lastUpstream);
 
+    // Worker circuit breaker: when this session's background workers have been
+    // failing for a sustained period, skip the LLM-calling steps (distillation,
+    // curation, consolidation) and allow only a periodic probe — prevents the
+    // idle scheduler from re-driving a dead upstream every tick. Local steps
+    // (pruning, export, lat refresh, cost metrics) are unaffected.
+    const allowWorker = allowWorkerProbe(sessionID);
+
     // 1. Distillation — force-distill ALL pending messages on idle, even
     // below minMessages. The cache is going cold; aggressive distillation
     // now means a smaller context on the next turn via post-idle compact.
@@ -477,7 +484,7 @@ export function buildIdleWorkHandler(
           ? ("direct" as const)
           : ("batch" as const);
       const pending = temporal.undistilledCount(projectPath, sessionID);
-      if (pending > 0) {
+      if (allowWorker && pending > 0) {
         await distillation.run({
           llm,
           projectPath,
@@ -501,7 +508,7 @@ export function buildIdleWorkHandler(
         cfg.distillation.metaThreshold,
       );
       const g0 = distillation.gen0Count(projectPath, sessionID);
-      if (g0 >= metaThreshold) {
+      if (allowWorker && g0 >= metaThreshold) {
         await distillation.metaDistill({
           llm,
           projectPath,
@@ -517,7 +524,7 @@ export function buildIdleWorkHandler(
 
     // 2. Curation — cost-aware frequency: on expensive worker models, curate
     //    less often (same multiplier as the inline path in pipeline.ts).
-    if (cfg.knowledge.enabled && cfg.curator.onIdle) {
+    if (allowWorker && cfg.knowledge.enabled && cfg.curator.onIdle) {
       try {
         const workerModelID = model?.modelID ?? "unknown";
         const modelInputCost =
@@ -562,7 +569,7 @@ export function buildIdleWorkHandler(
     //    Cooldown: skip if we already attempted consolidation for this project
     //    with the same entry count within the last hour — avoids wasting
     //    Sonnet calls when the LLM correctly concludes all entries are unique.
-    if (cfg.knowledge.enabled) {
+    if (allowWorker && cfg.knowledge.enabled) {
       try {
         const entries = ltm.forProject(projectPath, false);
         if (entries.length > cfg.curator.maxEntries) {

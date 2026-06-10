@@ -158,7 +158,11 @@ import {
 } from "./auth";
 import type { UpstreamInterceptor } from "./recorder";
 import { startIdleScheduler, buildIdleWorkHandler } from "./idle";
-import { makeWorkerHealth, recordWorkerFailure } from "./worker-health";
+import {
+  makeWorkerHealth,
+  recordWorkerFailure,
+  allowWorkerProbe,
+} from "./worker-health";
 import {
   getWorkerModel,
   resetWorkerModelState,
@@ -3109,6 +3113,13 @@ function scheduleBackgroundWork(
   // Urgent distillation is exempt (it unblocks the next user turn).
   const quotaPaused = isQuotaPaused(resolveAuth(sessionID));
 
+  // Worker circuit breaker: when background workers have been failing for a
+  // sustained period, stop hammering the upstream every turn — allow only a
+  // periodic probe so a recovered upstream is detected without burning
+  // thousands of futile calls (Sentry: runaway lore-distill failure counts).
+  // Urgent distillation below is intentionally exempt — it unblocks the user.
+  const workerThrottled = !allowWorkerProbe(sessionID);
+
   // Check if urgent distillation is needed (gradient flagged it).
   // Mark urgent: true so these bypass the batch queue — the gradient is
   // in overflow and needs the result before the next user turn.
@@ -3137,7 +3148,7 @@ function scheduleBackgroundWork(
         metaThresholdOverride,
       })
       .catch((e) => log.error("background distillation failed:", e));
-  } else if (!isBackgroundPaused() && !quotaPaused) {
+  } else if (!isBackgroundPaused() && !quotaPaused && !workerThrottled) {
     // Incremental distillation and curation are non-urgent — skip when the
     // circuit breaker is active to reduce API pressure. These are also gated
     // by runBackground() which checks isBackgroundPaused(), but the early
@@ -3171,7 +3182,8 @@ function scheduleBackgroundWork(
   // that exceeds the diff pinning threshold invalidates tools + messages.
   // Also gated by circuit breaker — curation is never urgent.
   // Quota-paused accounts skip curation too (non-urgent background work).
-  if (isBackgroundPaused() || quotaPaused) return;
+  // Worker-throttled sessions (sustained worker failure) skip it as well.
+  if (isBackgroundPaused() || quotaPaused || workerThrottled) return;
 
   const modelInputCost =
     getModelEntrySync(

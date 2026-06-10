@@ -103,6 +103,23 @@ const SESSION_TTL_MS = 60 * 60 * 1000; // 1 hour
 /** How often the TTL sweep runs. */
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
+/**
+ * Sustained failure duration after which the circuit breaker opens. Aligned
+ * with the user-facing "degraded" threshold: once we've been failing this
+ * long, the upstream is genuinely down (not a transient blip), so callers
+ * should stop hammering it every turn and probe only periodically.
+ */
+const CIRCUIT_OPEN_THRESHOLD_MS = RESPONSE_MESSAGE_THRESHOLD_MS; // 30 minutes
+
+/**
+ * While the circuit is open, allow at most one worker probe per this interval.
+ * Because every failed probe refreshes `lastFailureAt`, gating on the age of
+ * the last failure throttles attempts to roughly one per interval — turning a
+ * runaway (thousands of failures/hour) into a slow heartbeat that still
+ * detects recovery.
+ */
+const CIRCUIT_PROBE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -224,28 +241,30 @@ export function recordWorkerFailure(
     !entry.alertSentAt || t - entry.alertSentAt > ALERT_COOLDOWN_MS;
   if (shouldAlert) {
     entry.alertSentAt = t;
-    Sentry.captureMessage(
-      `Worker health degraded for session ${sessionID.slice(0, 16)}`,
-      {
-        level: "error",
-        tags: {
-          worker_id: workerID,
-          reason,
-          session_id: sessionID,
-          failure_count: String(entry.failureCount),
-        },
-        contexts: {
-          worker_health: {
-            sessionID,
-            workerIDs: [...entry.workerIDs],
-            reasons: [...entry.reasons],
-            failureCount: entry.failureCount,
-            firstFailureAt: entry.firstFailureAt,
-            lastFailureAt: entry.lastFailureAt,
-          },
+    // Stable message + fingerprint so Sentry groups all degradations of a
+    // given worker into ONE issue. The session ID / counts vary per event and
+    // MUST live in tags+contexts only — embedding them in the message text
+    // spawns a new Sentry issue per session (LOREAI-GATEWAY worker-health noise).
+    Sentry.captureMessage("Worker health degraded", {
+      level: "error",
+      fingerprint: ["worker-health-degraded", workerID],
+      tags: {
+        worker_id: workerID,
+        reason,
+        session_id: sessionID,
+        failure_count: String(entry.failureCount),
+      },
+      contexts: {
+        worker_health: {
+          sessionID,
+          workerIDs: [...entry.workerIDs],
+          reasons: [...entry.reasons],
+          failureCount: entry.failureCount,
+          firstFailureAt: entry.firstFailureAt,
+          lastFailureAt: entry.lastFailureAt,
         },
       },
-    );
+    });
   }
 
   // Critical escalation: sustained 1h+ of failure → Sentry exception.
@@ -256,14 +275,20 @@ export function recordWorkerFailure(
       !entry.exceptionSentAt || t - entry.exceptionSentAt > 60 * 60 * 1000;
     if (shouldException) {
       entry.exceptionSentAt = t;
-      const err = new Error(
-        `Worker health critical: ${entry.failureCount} failures sustained for ${formatDuration(sustainedMs)} on session ${sessionID}`,
-      );
+      // Stable Error message + fingerprint so Sentry groups all critical
+      // outages of a given worker into ONE issue. The previous message
+      // embedded the failure count, duration, AND session ID, so EVERY event
+      // was a unique issue (dozens of one-off LOREAI-GATEWAY issues). The
+      // varying detail lives in tags+contexts below.
+      const err = new Error("Worker health critical: sustained worker failure");
       Sentry.captureException(err, {
+        fingerprint: ["worker-health-critical", workerID],
         tags: {
           worker_id: workerID,
           reason,
           session_id: sessionID,
+          failure_count: String(entry.failureCount),
+          sustained: formatDuration(sustainedMs),
         },
         contexts: {
           worker_health: {
@@ -297,14 +322,48 @@ export function recordWorkerSuccess(sessionID: string): void {
     log.info(
       `[worker-health] session ${sessionID.slice(0, 16)} recovered (was degraded, now healthy)`,
     );
-    Sentry.captureMessage(
-      `Worker health recovered for session ${sessionID.slice(0, 16)}`,
-      {
-        level: "info",
-        tags: { session_id: sessionID },
-      },
-    );
+    // Recovery is a GOOD event — record it as a breadcrumb (forensic context
+    // for any later event in this scope) rather than a captured message, which
+    // would otherwise spawn its own Sentry issue per session (noise).
+    Sentry.addBreadcrumb({
+      category: "worker-health",
+      level: "info",
+      message: "Worker health recovered",
+      data: { session_id: sessionID },
+    });
   }
+}
+
+/**
+ * Circuit breaker: decide whether a non-urgent background worker should be
+ * allowed to run for this session right now.
+ *
+ * Returns `true` when the session is healthy, when sustained failure hasn't
+ * yet crossed {@link CIRCUIT_OPEN_THRESHOLD_MS} (circuit closed), or when the
+ * circuit is open but enough time has elapsed since the last failure to allow
+ * a single recovery probe. Returns `false` while the circuit is open and
+ * within the probe cooldown.
+ *
+ * Pure read-only predicate (no side effects): the throttle clock is the
+ * existing `lastFailureAt`, which {@link recordWorkerFailure} refreshes on
+ * every failure. So a failed probe pushes the next allowed probe out by
+ * {@link CIRCUIT_PROBE_INTERVAL_MS}, and a success ({@link recordWorkerSuccess})
+ * clears the entry entirely, closing the circuit.
+ *
+ * Callers MUST only gate *non-urgent* background work with this. Urgent
+ * distillation and blocking compaction are intentionally exempt — starving
+ * them harms the user more than a futile retry costs.
+ */
+export function allowWorkerProbe(sessionID: string): boolean {
+  const entry = state.get(sessionID);
+  if (!entry) return true; // healthy — no recorded failures
+
+  const t = now();
+  // Circuit closed: failures haven't been sustained long enough to throttle.
+  if (t - entry.firstFailureAt < CIRCUIT_OPEN_THRESHOLD_MS) return true;
+
+  // Circuit open: allow a probe only once the last failure is old enough.
+  return t - entry.lastFailureAt >= CIRCUIT_PROBE_INTERVAL_MS;
 }
 
 /**
