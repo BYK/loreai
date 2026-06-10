@@ -8,6 +8,7 @@ dist-vendor/
 .node-cache/
 local_cache/
 *.tgz
+coverage/
 *.db
 *.db-journal
 *.db-wal

@@ -34,16 +34,26 @@ export default defineConfig({
       SENTRY_ENABLED: "0",
       LORE_DEBUG: "0",
     },
-    // Coverage is optional and run separately
+    // Coverage is optional and run separately. `lcov` is required for the
+    // Codecov upload in CI; text/json/html are kept for local inspection.
     coverage: {
       provider: "v8",
-      reporter: ["text", "json", "html"],
+      reporter: ["text", "json", "html", "lcov"],
       exclude: [
         "**/*.test.ts",
         "**/test/setup.ts",
         "**/test/helpers/**",
         "**/script/**",
         "**/dist/**",
+        // Non-tested / non-source packages — keep them out of the report so
+        // they don't drag down or pollute patch coverage. Only core, gateway,
+        // and opencode have tests.
+        "packages/website/**",
+        "packages/pi/**",
+        "**/eval/**",
+        "**/*.eval.ts",
+        "*.config.ts",
+        "scripts/**",
       ],
     },
   },

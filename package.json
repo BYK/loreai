@@ -46,6 +46,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.16",
+    "@vitest/coverage-v8": "^4.1.8",
     "esbuild": "^0.25.12",
     "fast-check": "^4.5.3",
     "linkinator": "^7.6.1",

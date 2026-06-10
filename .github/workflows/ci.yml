@@ -48,6 +48,7 @@ jobs:
               - '.github/workflows/ci.yml'
               - '.github/workflows/publish.yml'
               - '.github/workflows/release.yml'
+              - 'codecov.yml'
             # Docs-only changes still need check-docs to run (so the
             # generator reflects config-schema updates), but skip the
             # heavy test/binary jobs.
@@ -89,6 +90,15 @@ jobs:
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    # Override the workflow-default permissions (contents: read, packages: write)
+    # to also grant what the Codecov upload step needs to post PR comments and
+    # commit statuses. A job-level block REPLACES the default, so the inherited
+    # perms are re-listed here.
+    permissions:
+      contents: read
+      pull-requests: write
+      statuses: write
+      actions: read
     outputs:
       nightly-version: ${{ steps.nightly.outputs.version }}
     steps:
@@ -134,7 +144,10 @@ jobs:
         run: pnpm run lint
 
       - name: Test
-        run: pnpm test
+        # `--` forwards `--coverage` to the underlying `vitest run` while still
+        # triggering the `pretest` hook (gateway bundle). Produces
+        # ./coverage/lcov.info for the Codecov upload below.
+        run: pnpm test -- --coverage
         env:
           # Silence the ~85-line "ExperimentalWarning: SQLite is an experimental
           # feature" noise from node:sqlite — emitted once per worker fork in
@@ -144,6 +157,19 @@ jobs:
           # (transformers.js resolves <root>/<modelId>/...). Keeps the test run
           # off HuggingFace Hub. See packages/core/src/embedding-vendor.ts.
           LORE_LOCAL_MODEL_PATH: ${{ github.workspace }}/.vendor-build/.model-cache
+
+      # Upload coverage to Codecov. Uses Sentry's fork with the standard
+      # GITHUB_TOKEN (no CODECOV_TOKEN secret needed). `informational-patch` is
+      # true on push events so the 80% patch gate only BLOCKS on pull requests;
+      # on main/release pushes it reports without failing. Patch target (80%)
+      # and project-informational status are configured in codecov.yml.
+      - name: Coverage Report
+        if: '!cancelled()'
+        uses: getsentry/codecov-action@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          files: ./coverage/lcov.info
+          informational-patch: ${{ github.event_name == 'push' }}
 
       # Compute nightly version once, pass as job output to downstream jobs.
       # Only on main pushes — PRs and release branches don't get nightly versions.
