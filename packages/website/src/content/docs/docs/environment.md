@@ -45,7 +45,7 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 | Variable | Description |
 |---|---|
 | `LORE_DAILY_BUDGET` | Get the effective daily budget in USD. Resolution priority: 1. `LORE_DAILY_BUDGET` env var (override for automation / CI) 2. DB-persisted value from `kv_meta` (set via UI) 3. 0 (disabled) |
-| `LORE_MAX_RETRIES` | Number of retries for a worker upstream call before giving up (the call then returns null and the caller falls back). Override with the LORE_MAX_RETRIES env var. |
+| `LORE_MAX_RETRIES` | Number of times a worker upstream call retries a transient failure before falling back to the caller's own handling (default: 8). Override with the LORE_MAX_RETRIES env var. |
 | `LORE_WORKER_MODEL` | Env var override — highest priority. Useful for global worker model configuration without per-project .lore.json (e.g. routing all workers to MiniMax). Format: "providerID/modelID" or just "modelID" (defaults to anthropic provider). |
 
 ## Pipeline + idle work

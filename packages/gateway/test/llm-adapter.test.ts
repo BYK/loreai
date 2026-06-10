@@ -1,4 +1,11 @@
-import { describe, test, expect, afterEach } from "vitest";
+import { describe, test, expect, afterEach, vi } from "vitest";
+
+// Mock the upstream fetch wrapper so the adapter's retry loop is driven by our
+// stubbed responses regardless of whether a fetch interceptor is installed
+// (stubbing globalThis.fetch alone would silently break if `getOriginalFetch`
+// had captured the real fetch).
+vi.mock("../src/fetch", () => ({ upstreamFetch: vi.fn() }));
+
 import {
   backoffMs,
   createGatewayLLMClient,
@@ -11,6 +18,7 @@ import {
   getConsecutiveTrips,
   resetBackgroundLimiter,
 } from "../src/background-limiter";
+import { upstreamFetch } from "../src/fetch";
 
 // ---------------------------------------------------------------------------
 // maxRetriesFor — unified policy (modeled on Claude Code's single budget)
@@ -260,15 +268,49 @@ describe("resolveWorkerProtocol", () => {
 });
 
 // ---------------------------------------------------------------------------
+// resolveMaxRetries (via maxRetriesFor) — LORE_MAX_RETRIES parsing edge cases
+// ---------------------------------------------------------------------------
+
+describe("LORE_MAX_RETRIES env parsing", () => {
+  const original = process.env.LORE_MAX_RETRIES;
+  afterEach(() => {
+    if (original === undefined) delete process.env.LORE_MAX_RETRIES;
+    else process.env.LORE_MAX_RETRIES = original;
+  });
+
+  test("defaults to 8 when unset", () => {
+    delete process.env.LORE_MAX_RETRIES;
+    expect(maxRetriesFor()).toBe(8);
+  });
+
+  test("honors a valid positive integer", () => {
+    process.env.LORE_MAX_RETRIES = "3";
+    expect(maxRetriesFor()).toBe(3);
+  });
+
+  test("truncates a float via parseInt", () => {
+    process.env.LORE_MAX_RETRIES = "5.9";
+    expect(maxRetriesFor()).toBe(5);
+  });
+
+  test("falls back to default for 0, negative, empty, and non-numeric (never disables retries)", () => {
+    for (const bad of ["0", "-1", "", "abc", "Infinity"]) {
+      process.env.LORE_MAX_RETRIES = bad;
+      expect(maxRetriesFor()).toBe(8);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Circuit breaker: a 429 trips the breaker once per call, even when urgent
 // ---------------------------------------------------------------------------
 
 describe("worker 429 trips the circuit breaker (urgent included)", () => {
-  const realFetch = globalThis.fetch;
+  const mockFetch = vi.mocked(upstreamFetch);
   const realMaxRetries = process.env.LORE_MAX_RETRIES;
 
   afterEach(() => {
-    globalThis.fetch = realFetch;
+    mockFetch.mockReset();
     if (realMaxRetries === undefined) delete process.env.LORE_MAX_RETRIES;
     else process.env.LORE_MAX_RETRIES = realMaxRetries;
   });
@@ -279,17 +321,16 @@ describe("worker 429 trips the circuit breaker (urgent included)", () => {
     process.env.LORE_MAX_RETRIES = "3";
     resetBackgroundLimiter();
 
-    let fetchCalls = 0;
-    globalThis.fetch = (async () => {
-      fetchCalls++;
-      return new Response(
-        JSON.stringify({
-          type: "error",
-          error: { type: "rate_limit_error", message: "Error" },
-        }),
-        { status: 429, headers: { "retry-after": "0" } },
-      );
-    }) as unknown as typeof globalThis.fetch;
+    mockFetch.mockImplementation(
+      async () =>
+        new Response(
+          JSON.stringify({
+            type: "error",
+            error: { type: "rate_limit_error", message: "Error" },
+          }),
+          { status: 429, headers: { "retry-after": "0" } },
+        ),
+    );
 
     const client = createGatewayLLMClient(
       {
@@ -307,7 +348,7 @@ describe("worker 429 trips the circuit breaker (urgent included)", () => {
 
     // Exhausted → null (caller falls back), all attempts made, breaker tripped once.
     expect(result).toBeNull();
-    expect(fetchCalls).toBe(4); // maxRetries(3) + 1
+    expect(mockFetch).toHaveBeenCalledTimes(4); // maxRetries(3) + 1
     expect(getConsecutiveTrips()).toBe(1);
   });
 });

@@ -9,8 +9,9 @@
  * Note: auto-import extraction (`import-auto.ts`) is NOT wrapped here —
  * it creates its own LLM client and runs sequentially per-process.
  * The circuit breaker still provides protection for import because
- * `tripCircuitBreaker` is called from `llm-adapter.ts` on any
- * non-urgent 429, and import uses the same adapter.
+ * `tripCircuitBreaker` is called from `llm-adapter.ts` on any 429
+ * (urgent included — an urgent call keeps retrying but still pauses
+ * other background work), and import uses the same adapter.
  *
  * Also provides a circuit breaker that trips on upstream 429 responses,
  * pausing all background work for the Retry-After period. This prevents
@@ -59,8 +60,9 @@ export function isBackgroundPaused(): boolean {
 }
 
 /**
- * Trip the circuit breaker. Called when any background LLM call
- * receives a 429. Pauses all background work with escalating backoff.
+ * Trip the circuit breaker. Called when any LLM worker call receives a 429
+ * (urgent calls included — they keep retrying themselves but still pause
+ * other background work). Pauses all background work with escalating backoff.
  *
  * When `retryAfterSeconds` is provided (from Retry-After header), the
  * pause duration is the greater of the server-guided value and the

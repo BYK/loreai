@@ -73,18 +73,38 @@ export const AUTH_ERROR_CODES = new Set([401, 403]);
 const BASE_DELAY_MS = 500;
 const MAX_DELAY_MS = 32_000;
 
+// Why we retry rather than bail fast on rate limits (kept as a line comment so
+// the env-docs generator scrapes only the concise JSDoc below, not this prose):
+// Worker calls share the session's credential and (usually) model, so a 429 the
+// worker hits is the same 429 the client's own request would hit — bailing
+// early doesn't let the client "continue", it just discards Lore's enriched
+// output and hands the identical wait to the client. So we ride out transient
+// 429s here (honoring Retry-After). The fall-back path is the last-resort
+// safety net for *non-shared* failures (a Lore-specific worker error, or a
+// worker-model-only 429/529) and for surfacing a sustained outage rather than
+// holding the client's connection open indefinitely. Raw conversation data is
+// never lost on fall-back: turns are already in temporal storage,
+// distillation/curation retry on the next idle pass, and compaction forwards
+// the client's native compaction. The total hold is bounded (~MAX_DELAY_MS ×
+// retries) to stay under typical client read-timeouts; SSE keep-alive
+// heartbeats (a follow-up) would let us wait out longer windows.
 /**
- * Number of retries for a worker upstream call before giving up (the call
- * then returns null and the caller falls back). Override with the
+ * Number of times a worker upstream call retries a transient failure before
+ * falling back to the caller's own handling (default: 8). Override with the
  * LORE_MAX_RETRIES env var.
  */
 const DEFAULT_MAX_RETRIES = 8;
 
+/**
+ * Resolve the retry budget. `LORE_MAX_RETRIES` overrides the default; values
+ * that are non-numeric, negative, or zero fall back to the default (we never
+ * silently disable retries — that would contradict the "ride it out" policy).
+ */
 function resolveMaxRetries(): number {
   const env = process.env.LORE_MAX_RETRIES;
   if (env) {
     const n = Number.parseInt(env, 10);
-    if (Number.isFinite(n) && n >= 0) return n;
+    if (Number.isFinite(n) && n >= 1) return n;
   }
   return DEFAULT_MAX_RETRIES;
 }
@@ -528,6 +548,10 @@ export function createGatewayLLMClient(
             // Trip the circuit breaker at most once per call so a multi-retry
             // 429 loop doesn't runaway-escalate the breaker's backoff schedule.
             let breakerTripped = false;
+            // Resolve the retry budget once per call (not per attempt) — the
+            // value can't change mid-loop and re-reading the env each iteration
+            // is wasteful.
+            const maxRetries = maxRetriesFor();
 
             // Retry loop for transient errors (429, 5xx)
             for (let attempt = 0; ; attempt++) {
@@ -543,7 +567,6 @@ export function createGatewayLLMClient(
                 });
               } catch (e) {
                 // Network/fetch error — retry if attempts remain
-                const maxRetries = maxRetriesFor();
                 if (attempt < maxRetries) {
                   const delay = backoffMs(attempt, null);
                   retryCount++;
@@ -740,7 +763,6 @@ export function createGatewayLLMClient(
                 tripCircuitBreaker(pauseSec);
               }
 
-              const maxRetries = maxRetriesFor(response.status);
               if (attempt < maxRetries) {
                 const retryAfter = parseRetryAfter(response);
                 const delay = backoffMs(attempt, retryAfter);
@@ -758,13 +780,16 @@ export function createGatewayLLMClient(
                 continue;
               }
 
-              // Exhausted retries — log, capture Sentry error, enrich span.
-              // Urgent calls (compaction, query expansion) have a graceful
-              // caller-side fallback — e.g. handleCompaction forwards the
-              // client's own compaction upstream — so their exhaustion is
-              // harmless. Log it at `warn` (hidden unless LORE_DEBUG) to avoid
-              // alarming red `[lore]` noise; background exhaustion stays at
-              // `error` since it can indicate a sustained problem.
+              // Exhausted retries — fall back, log, capture Sentry, enrich span.
+              // Urgent calls (compaction, query expansion) hand control back to
+              // a caller that degrades gracefully without losing data — e.g.
+              // handleCompaction forwards the client's own compaction upstream.
+              // On a shared-quota 429 that fallback will hit the same limit and
+              // the client handles it, so our exhaustion here is not itself a
+              // failure to surface loudly. Log it at `warn` (hidden unless
+              // LORE_DEBUG) to avoid alarming red `[lore]` noise; non-urgent
+              // background exhaustion stays at `error` since it can indicate a
+              // sustained problem worth investigating.
               const text = await response.text().catch(() => "(no body)");
               const exhaustionMsg =
                 `worker upstream request failed after ${maxRetries + 1} attempts: ${response.status} ${response.statusText}` +
