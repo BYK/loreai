@@ -622,7 +622,9 @@ async function runInner(input: {
     temperature: 0,
   });
   if (!responseText) {
-    input.workerHealth?.recordFailure("no-response");
+    // Transport failure / empty completion already recorded by the LLM
+    // adapter (single owner of transport-failure attribution) — avoid
+    // double-counting here.
     return {
       created: 0,
       updated: 0,
@@ -961,7 +963,9 @@ export async function consolidate(input: {
     },
   );
   if (!responseText) {
-    input.workerHealth?.recordFailure("no-response");
+    // Transport failure / empty completion already recorded by the LLM
+    // adapter (single owner of transport-failure attribution) — avoid
+    // double-counting here.
     return { updated: 0, deleted: 0 };
   }
 

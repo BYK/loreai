@@ -640,7 +640,20 @@ export function createGatewayLLMClient(
                 // transport layer would clear failure state before the parse
                 // step can record "parse-error", making sustained parse
                 // failures invisible to the health ladder.
-                return parsed.text;
+                if (parsed.text) return parsed.text;
+
+                // Transport succeeded but the model returned no usable text.
+                // Record as no-response here so the adapter is the single
+                // owner of transport-failure attribution — core workers no
+                // longer record on a null return (which double-counted, e.g.
+                // a no-auth failure was logged by both the adapter AND the
+                // distiller). Sustained empty completions still escalate.
+                recordWorkerFailure(
+                  opts?.sessionID ?? "_unknown",
+                  opts?.workerID ?? "unknown",
+                  "no-response",
+                );
+                return null;
               }
 
               // --- Auth error: 401/403 — mark stale, re-resolve, retry once ---
@@ -836,12 +849,25 @@ export function createGatewayLLMClient(
               }
               span.setAttribute("lore.retry.final_status", finalStatus);
               span.setStatus({ code: 2, message: `HTTP exhausted retries` });
+              recordWorkerFailure(
+                opts?.sessionID ?? "_unknown",
+                opts?.workerID ?? "unknown",
+                response.status === 429 ? "rate-limit" : "upstream-error",
+              );
               return null;
             }
           },
         );
       } catch (e) {
         log.error("worker prompt failed:", e);
+        // Network/timeout error — no response was received. Record here so the
+        // adapter remains the single owner of transport-failure attribution
+        // (core workers no longer record on a null return).
+        recordWorkerFailure(
+          opts?.sessionID ?? "_unknown",
+          opts?.workerID ?? "unknown",
+          "no-response",
+        );
         return null;
       } finally {
         activeWorkerCalls.delete(callID);

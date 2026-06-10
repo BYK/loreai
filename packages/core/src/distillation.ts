@@ -1035,7 +1035,9 @@ async function distillSegment(input: {
     },
   );
   if (!responseText) {
-    input.workerHealth?.recordFailure("no-response");
+    // Transport failure / empty completion is already recorded by the LLM
+    // adapter (single owner of transport-failure attribution) — recording
+    // here too would double-count (e.g. a no-auth failure logged twice).
     return null;
   }
 
@@ -1315,7 +1317,9 @@ async function metaDistillInner(input: {
     temperature: 0,
   });
   if (!responseText) {
-    input.workerHealth?.recordFailure("no-response");
+    // Transport failure / empty completion is already recorded by the LLM
+    // adapter (single owner of transport-failure attribution) — recording
+    // here too would double-count (e.g. a no-auth failure logged twice).
     return null;
   }
 

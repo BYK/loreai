@@ -1481,6 +1481,35 @@ describe("run() expansion guard and tiny-segment handling", () => {
     db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
   });
 
+  test("empty LLM response does NOT record no-response in core (adapter owns it)", async () => {
+    // Regression: a null/empty worker response used to be recorded as
+    // "no-response" by BOTH the LLM adapter (on the failing call) and the
+    // distiller here — double-counting and inflating worker-health failure
+    // counts (the gpt-5.5 no-auth runaway). The adapter is now the single
+    // owner of transport-failure attribution; the core must stay silent.
+    insertTemporalMessages(6, 200);
+    const llm = makeStubLLM(null); // prompt() resolves to "" (empty)
+    const reasons: string[] = [];
+    const workerHealth = {
+      recordFailure: (reason: string) => reasons.push(reason),
+      recordSuccess: () => {},
+    };
+
+    await run({
+      llm,
+      projectPath: RUN_PROJECT,
+      sessionID: RUN_SESSION,
+      force: true,
+      workerHealth,
+    });
+
+    // LLM was called and returned empty — but core recorded NO failure
+    // (neither no-response nor anything else); the adapter would have.
+    expect(llm.prompts.length).toBeGreaterThan(0);
+    expect(reasons).not.toContain("no-response");
+    expect(reasons).toHaveLength(0);
+  });
+
   test("expansion guard: discards distillation when output > expansion limit, marks messages distilled", async () => {
     // Insert 6 messages × 200 tokens = 1200 tokens (above minSegmentTokens=64)
     const ids = insertTemporalMessages(6, 200);
