@@ -166,6 +166,15 @@ import SocialMeta from "../components/SocialMeta.astro";
               <span class="cmp-yes">across</span> tools and providers — your constant, not theirs.</td>
           </tr>
           <tr>
+            <th>Self-hosted memory stacks<br><span style="font-weight:300;color:var(--mid);font-size:.86em;">vector DB + workers as separate services</span></th>
+            <td>Powerful hybrid retrieval, fully local, no cloud.</td>
+            <td>A cluster to stand up and maintain — a vector database, a queue or worker, extra runtimes — and
+              often bound to a single agent.</td>
+            <td class="cmp-lore">Lore does the same hybrid recall (vector + keyword + RRF)
+              <span class="cmp-yes">embedded</span> in one process — no services to run, and it works with any
+              agent.</td>
+          </tr>
+          <tr>
             <th>Cloud agent platforms<br><span style="font-weight:300;color:var(--mid);font-size:.86em;">memory inside a hosted control plane</span></th>
             <td>Org-wide retrieval and governance for fleets of agents run on the platform.</td>
             <td>Memory exists for agents run <em>through</em> the platform; the engine is hosted and closed.
@@ -299,6 +308,48 @@ import SocialMeta from "../components/SocialMeta.astro";
           tool that searches knowledge entries, distillation observations, raw conversation messages,
           and cross-project knowledge in parallel — fused with reciprocal rank scoring
           and LLM-powered query expansion. Your agent reaches for context when it needs it.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- COST -->
+  <section class="how" id="cost">
+    <div class="sec-hd">
+      <div>
+        <p class="eyebrow sr">The cost story</p>
+        <h2 class="sec-title sr">Memory that <em>pays for itself</em></h2>
+      </div>
+      <p class="sec-sub sr">A memory layer that makes extra LLM calls can quietly cost more than it saves.
+        Lore is engineered the other way — every optimization is gated on real model pricing.</p>
+    </div>
+    <div class="steps">
+      <div class="step sr">
+        <div class="step-n">01</div>
+        <h3 class="step-t">No compaction, <em>no cache bust</em></h3>
+        <p class="step-b">This is the big one. Every compaction destroys the entire prompt cache, so the next
+          turn re-writes tens of thousands of tokens at full price. Lore's gradient compression never triggers
+          a compaction — your prompt cache stays intact, turn after turn. Lore also caches in layers, the way a
+          Dockerfile does: order the stable parts first and a change later never rebuilds them. Stable
+          preferences sit in a long-lived 1-hour cache block at 10&times; cheaper reads; the live conversation
+          rides the short-lived cache that follows — so editing the conversation never invalidates your
+          preferences, just as touching your source doesn't reinstall your dependencies. The quality win and
+          the cost win are the same mechanism.</p>
+      </div>
+      <div class="step sr">
+        <div class="step-n">02</div>
+        <h3 class="step-t">Warm across long tool calls — only when it pays</h3>
+        <p class="step-b">Long-running tool calls and idle gaps are where prompt caches expire, and a cold cache
+          means an expensive rebuild on the next turn. Lore runs survival analysis on your inter-turn timing to
+          keep the cache warm across those gaps with near-zero keepalive requests — and only when the expected
+          savings beat the cost. A circuit breaker disables warming entirely if the math ever stops working.</p>
+      </div>
+      <div class="step sr">
+        <div class="step-n">03</div>
+        <h3 class="step-t">Cheaper by default, and <em>capped</em></h3>
+        <p class="step-b">Background distillation and curation run at half price through batch APIs when
+          available, on cheaper worker models A/B-tested for parity. You can set a daily spend cap — background
+          work throttles as you approach it. And Lore reuses the plan you already have, including Claude
+          Pro/Max, so memory doesn't show up as a surprise line item.</p>
       </div>
     </div>
   </section>

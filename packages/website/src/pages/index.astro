@@ -9,11 +9,11 @@ import SocialMeta from "../components/SocialMeta.astro";
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Lore.AI — Shared Context for AI Agents</title>
-  <meta name="description" content="Shared context that compounds for AI agents. Local-first, fair source, zero context files to maintain." />
+  <title>Lore.AI — Shared context that never gets compacted</title>
+  <meta name="description" content="Lore unifies context-window management and long-term memory for AI agents in one local-first pipeline — infinite sessions, compounding knowledge, shared across tools and providers. No Docker, no cloud." />
   <SocialMeta
-    title="Lore.AI — Shared Context for AI Agents"
-    description="Shared context that compounds for AI agents. Local-first, fair source, zero context files."
+    title="Lore.AI — Shared context that never gets compacted"
+    description="Context-window management and long-term memory for AI agents — one local-first pipeline. Infinite sessions, compounding knowledge, shared across your tools."
     path="index.html"
   />
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
@@ -70,13 +70,12 @@ import SocialMeta from "../components/SocialMeta.astro";
         Lore. The memory that compounds.
       </div>
       <h1 class="sr">
-        Stop re-explaining<br>
-        your project to<br>
-        <em>your AI.</em>
+        Stop re-explaining.<br>
+        <em>Stop losing the thread.</em>
       </h1>
-      <p class="hero-desc sr">Your team's memory, in every session. Lore gives AI agents persistent shared context — capturing
-        decisions, file paths, and patterns across sessions lasting days and hundreds of turns.
-        No context files to maintain. No workflow changes.</p>
+      <p class="hero-desc sr">Your AI never starts over. Lore keeps sessions coherent for days and millions of
+        tokens — no lossy summary that wipes your file paths and decisions — and turns every session into
+        compounding memory across tools, providers, and (soon) your team. No context files. No workflow changes.</p>
       <div class="hero-install sr">
         <div class="install-block" onclick="navigator.clipboard.writeText('curl -fsSL https://withlore.ai/install | bash').then(()=>{this.querySelector('.install-copied').classList.add('show');setTimeout(()=>this.querySelector('.install-copied').classList.remove('show'),2000)})">
           <code><span class="install-prompt">$</span> curl -fsSL https://withlore.ai/install | bash</code>
@@ -344,18 +343,20 @@ import SocialMeta from "../components/SocialMeta.astro";
     <div class="bento" style="margin-top:1rem">
       <div class="bc bc-2 sr">
         <p class="bc-tag">Cost</p>
-        <h3 class="bc-t">Sessions as long as you want</h3>
+        <h3 class="bc-t">Longer sessions, lower bills</h3>
         <p class="bc-b">Work for days, hundreds of turns, millions of tokens — memory stays sharp.
-          Tested on a real 5-day, 2.3M-token session. Background distillation
-          and curation run at 50% off via batch APIs on cheaper models. Predictive cache warming
-          avoids the expensive cache rebuilds that compaction triggers on every turn.</p>
+          Tested on a real 5-day, 2.3M-token session. And it costs less: avoiding compaction means your prompt
+          cache is never busted, cache warming spans long-running tool calls only when it pays, background work
+          runs at half price via batch APIs, and you can set a daily spend cap.
+          <a href="different.html#cost" style="border-bottom:1px solid var(--g4);color:var(--g2)">See the cost story &rarr;</a></p>
       </div>
       <div class="bc bc-1 sr">
         <p class="bc-tag">Search</p>
         <h3 class="bc-t">Free on-device vector search</h3>
-        <p class="bc-b">Nomic Embed v1.5 runs locally — zero API cost, zero latency. Hybrid architecture
-          fuses vector similarity with BM25 keyword search for best-of-both-worlds recall. LLM-powered
-          query expansion finds what you mean, not just what you typed.</p>
+        <p class="bc-b">Nomic Embed v1.5 runs in-process — zero API cost, zero latency, and no separate
+          vector database or background services to deploy and babysit. Hybrid architecture fuses vector
+          similarity with BM25 keyword search for best-of-both-worlds recall, and LLM-powered query expansion
+          finds what you mean, not just what you typed.</p>
       </div>
       <div class="bc bc-2 sr">
         <p class="bc-tag">Knowledge</p>

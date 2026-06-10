@@ -42,7 +42,7 @@ const OG_HEIGHT = 630;
 // agent" line doubles as a CTA — pointing at the proxy that runs
 // alongside any AI agent (Claude Code, Codex, Pi, OpenCode, etc.).
 const OG_HEADLINE = "Shared context for AI agents";
-const OG_TAGLINE = "Local-first. Any agent. Zero setup.";
+const OG_TAGLINE = "Local-first. Any agent. Never compacted.";
 const OG_CTA = "→ withlore.ai";
 // Dark green background (site's --g0) and high-contrast text colors.
 // The tagline uses a brighter sage than the brand --g2 so it stays
