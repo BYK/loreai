@@ -49,7 +49,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(36);
+    expect(row.version).toBe(37);
   });
 
   test("entities table has embedding column (migration v34)", () => {

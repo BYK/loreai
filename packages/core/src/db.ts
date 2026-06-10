@@ -1028,17 +1028,7 @@ const MIGRATIONS: string[] = [
   ALTER TABLE session_state ADD COLUMN project_path TEXT;
   ALTER TABLE session_state ADD COLUMN project_path_provisional INTEGER NOT NULL DEFAULT 1;
   `,
-  `
-  -- Version 37: Persist compaction-anomaly-pending flag across gateway
-  -- restarts. When the post-response handler detects a 50%+ drop in
-  -- message count (client-side compaction), it sets this flag so the
-  -- next request's scheduleBackgroundWork() can trigger urgent
-  -- distillation — the dropped messages are still in the temporal
-  -- store and need to be distilled before the next distill pass picks
-  -- up a stale snapshot. Without persistence, a gateway restart
-  -- between the anomaly and the next turn would lose the signal.
-  ALTER TABLE session_state ADD COLUMN compaction_anomaly_pending INTEGER NOT NULL DEFAULT 0;
-  `,
+  `ALTER TABLE session_state ADD COLUMN compaction_anomaly_pending INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 /**
@@ -2064,7 +2054,6 @@ export function saveSessionTracking(
     sets.push("is_subagent = ?");
     vals.push(state.isSubagent ? 1 : 0);
   }
-<<<<<<< HEAD
   // v36: project binding
   if (state.projectPath !== undefined) {
     sets.push("project_path = ?");
@@ -2114,7 +2103,6 @@ export type LoadedSessionTracking = {
   // v26: sub-agent parent–child relationships
   parentSessionId: string | null;
   isSubagent: boolean;
-<<<<<<< HEAD
   // v36: project binding
   projectPath: string | null;
   projectPathProvisional: boolean;
