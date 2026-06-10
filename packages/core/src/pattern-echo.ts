@@ -181,6 +181,21 @@ async function _detect(input: {
   const pattern = parsePatternResponse(responseText);
   if (!pattern) return;
 
+  // Pre-check: ltm.create()'s dedup guard silently returns the existing ID
+  // when a matching title exists — the caller can't distinguish "inserted"
+  // from "deduped". Skip both the create and the misleading "created
+  // preference" log when the title already exists, matching the fix in
+  // distillation.ts for the same class of log noise.
+  const projectId = ensureProject(input.projectPath);
+  const existingPattern = db()
+    .query(
+      `SELECT id FROM knowledge
+       WHERE project_id = ? AND LOWER(title) = LOWER(?)
+       AND category = 'preference' AND confidence > 0 LIMIT 1`,
+    )
+    .get(projectId, pattern.title) as { id: string } | null;
+  if (existingPattern) return;
+
   try {
     ltm.create({
       projectPath: input.projectPath,

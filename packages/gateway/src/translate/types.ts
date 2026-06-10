@@ -492,6 +492,13 @@ export type SessionState = {
   /** Set true when session state changes that need periodic flush to DB.
    *  Consumed by the 30s idle tick — only dirty sessions are flushed. */
   _dirty?: boolean;
+
+  /** Set true by the post-response processing when a client-side compaction
+   *  dropped the message count by 50%+ (compaction anomaly). Consumed by
+   *  scheduleBackgroundWork on the next turn to trigger urgent distillation
+   *  — without this, the dropped context is lost from the Lore-side view
+   *  (temporal storage) and never gets distilled. One-shot. */
+  compactionAnomalyPending?: boolean;
 };
 
 // ---------------------------------------------------------------------------

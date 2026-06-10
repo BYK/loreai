@@ -32,6 +32,7 @@ import {
   setForceMinLayer,
   computeLayer0Cap,
   setCachePricing,
+  distillLimiter,
   recordCacheUsage,
   calibrate,
   getLastTransformedCount,
@@ -382,6 +383,7 @@ export async function resetPipelineState(): Promise<void> {
   initialized = false;
   sessions.clear();
   cwdWarned.clear();
+  subagentParentPendingLogged.clear();
   headerSessionIndex.clear();
   ltmSessionCache.clear();
   ltmPinnedText.clear();
@@ -412,6 +414,12 @@ const sessions = new Map<string, SessionState>();
 
 /** Sessions that have already logged the cwd-fallback warning (dedup). */
 const cwdWarned = new Set<string>();
+
+/** (sessionID + parentClientId) pairs that have already logged the unresolved
+ *  subagent-parent warning. Without dedup, a child agent with an unresolvable
+ *  parent (Tier 3 fingerprint) fires the same "pending" log on every turn —
+ *  50+ identical lines per session. Cleared on session eviction. */
+const subagentParentPendingLogged = new Set<string>();
 
 /** Read-only access to live session states (for dashboard rendering). */
 export function getActiveSessions(): ReadonlyMap<string, SessionState> {
@@ -918,6 +926,13 @@ async function initIfNeeded(
         ltmPinnedText.delete(sessionID);
         stableLtmCache.delete(sessionID);
         cwdWarned.delete(sessionID);
+        // Clear subagent parent-pending dedup entries for this session —
+        // keys are `${sessionID}:${parentClientId}`, so filter by prefix.
+        for (const key of subagentParentPendingLogged) {
+          if (key.startsWith(`${sessionID}:`)) {
+            subagentParentPendingLogged.delete(key);
+          }
+        }
       },
     );
   }
@@ -1315,6 +1330,13 @@ function getOrCreateSession(
       if (persisted.parentSessionId) {
         state.parentSessionId = persisted.parentSessionId;
       }
+    }
+
+    // Restore compaction anomaly pending flag (v36) — triggers urgent
+    // distillation on next turn after a client-side compaction dropped
+    // message count by 50%+. Survives gateway restarts.
+    if (persisted?.compactionAnomalyPending) {
+      state.compactionAnomalyPending = true;
     }
 
     // Restore LTM cache/pin from DB
@@ -3144,9 +3166,10 @@ function scheduleBackgroundWork(
   // Urgent distillation below is intentionally exempt — it unblocks the user.
   const workerThrottled = !allowWorkerProbe(sessionID);
 
-  // Check if urgent distillation is needed (gradient flagged it).
-  // Mark urgent: true so these bypass the batch queue — the gradient is
-  // in overflow and needs the result before the next user turn.
+  // Check if urgent distillation is needed (gradient flagged it OR a
+  // compaction anomaly was detected on the previous turn). Mark urgent: true
+  // so these bypass the batch queue — the gradient is in overflow (or the
+  // client just compacted) and needs the result before the next user turn.
   // Under bust pressure (3+ consecutive busts), lower the meta-distillation
   // threshold to consolidate gen-0 segments earlier — shrinks the distilled
   // prefix before the session becomes unsustainable.
@@ -3155,7 +3178,16 @@ function scheduleBackgroundWork(
   // degraded/overflowing context window for up to 10 minutes (max breaker
   // duration) is worse than one API call with its own tight retry budget
   // (MAX_RETRIES_URGENT = 2, 1-4s backoff).
-  if (needsUrgentDistillation(sessionState.sessionID)) {
+  const urgentFromGradient = needsUrgentDistillation(sessionState.sessionID);
+  const urgentFromCompaction = sessionState.compactionAnomalyPending === true;
+  if (urgentFromCompaction) {
+    // Consume the one-shot flag immediately so the next non-compaction
+    // turn doesn't re-trigger urgent distillation. Persisted with the
+    // session-tracking save below.
+    sessionState.compactionAnomalyPending = false;
+    saveSessionTracking(sessionID, { compactionAnomalyPending: false });
+  }
+  if (urgentFromGradient || urgentFromCompaction) {
     const busts = getConsecutiveBusts(sessionState.sessionID);
     const lowered = computeMetaThreshold(busts, cfg.distillation.metaThreshold);
     const metaThresholdOverride =
@@ -3179,24 +3211,33 @@ function scheduleBackgroundWork(
     // check here avoids unnecessary token counting and model lookups.
     // Idle-time work in idle.ts also uses runBackground(), so under sustained
     // rate pressure everything defers until the breaker naturally expires.
-    const pendingTokens = temporal.undistilledTokens(projectPath, sessionID);
-    if (pendingTokens >= cfg.distillation.maxSegmentTokens) {
-      log.info(
-        `incremental distillation: ${pendingTokens} undistilled tokens in ${sessionID.slice(0, 16)}`,
-      );
-      runBackground(
-        () =>
-          distillation.run({
-            llm,
-            projectPath,
-            sessionID,
-            model,
-            skipMeta: true,
-            callType: batchQueueEnabled ? "batch" : "direct",
-            workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
-          }),
-        `incremental-distill session=${sessionID.slice(0, 16)}`,
-      ).catch((e) => log.error("background distillation failed:", e));
+    //
+    // Coalesce: if a distillation is already in-flight or queued for THIS
+    // session (distillLimiter is per-session p-limit(1)), skip scheduling
+    // another. The in-flight run will pick up the newly-arrived tokens on
+    // its next segment pass, and queuing duplicates just starves the global
+    // p-limit(2) background slot — distillations getting blocked behind
+    // each other in the global queue.
+    if (!distillLimiter.isBusy(sessionID)) {
+      const pendingTokens = temporal.undistilledTokens(projectPath, sessionID);
+      if (pendingTokens >= cfg.distillation.maxSegmentTokens) {
+        log.info(
+          `incremental distillation: ${pendingTokens} undistilled tokens in ${sessionID.slice(0, 16)}`,
+        );
+        runBackground(
+          () =>
+            distillation.run({
+              llm,
+              projectPath,
+              sessionID,
+              model,
+              skipMeta: true,
+              callType: batchQueueEnabled ? "batch" : "direct",
+              workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
+            }),
+          `incremental-distill session=${sessionID.slice(0, 16)}`,
+        ).catch((e) => log.error("background distillation failed:", e));
+      }
     }
   }
 
@@ -3952,9 +3993,16 @@ async function handleConversationTurn(
         // Parent may use Tier 3 (fingerprint) identification, or hasn't made
         // its first request yet. Persist isSubagent but leave parentSessionId
         // null — subsequent requests will re-attempt resolution.
-        log.info(
-          `session ${sessionID.slice(0, 16)}: subagent parent resolution pending for client ID ${parentClientId.slice(0, 16)}`,
-        );
+        // Dedup the log: a child agent with an unresolvable parent fires this
+        // branch on every turn. Without dedup, a single parent-less agent
+        // produces 50+ identical log lines per session.
+        const pendingKey = `${sessionID}:${parentClientId}`;
+        if (!subagentParentPendingLogged.has(pendingKey)) {
+          subagentParentPendingLogged.add(pendingKey);
+          log.info(
+            `session ${sessionID.slice(0, 16)}: subagent parent resolution pending for client ID ${parentClientId.slice(0, 16)}`,
+          );
+        }
         saveSessionTracking(sessionID, { isSubagent: true });
       }
     }
@@ -4032,6 +4080,12 @@ async function handleConversationTurn(
         `messages dropped ${prevMsgCount}→${currMsgCount}. ` +
         `Client may have compacted outside gateway control.`,
     );
+    // Flag the session for urgent distillation on the next turn. The messages
+    // that just dropped out of the client's view are still in our temporal
+    // store and need to be distilled before any further distillation run
+    // picks up a stale snapshot — otherwise the dropped context is silently
+    // lost from the Lore-side view.
+    sessionState.compactionAnomalyPending = true;
   }
 
   // Update message count for proximity matching & structural compaction detection.

@@ -1171,10 +1171,24 @@ async function distillSegment(input: {
             .get(pid, tagPattern) as { cnt: number } | null;
           const sessionCount = rows?.cnt ?? 0;
           if (sessionCount >= 3) {
+            const prefTitle = tagToTitle(tag);
+            // Pre-check: same dedup-silent return issue as the gotcha branch
+            // above — ltm.create() returns the existing ID on dedup but
+            // doesn't tell the caller. Skip the create + log when an entry
+            // with this title already exists so we don't fire a misleading
+            // "created preference" log on every distill run.
+            const existingPref = db()
+              .query(
+                `SELECT id FROM knowledge
+                 WHERE project_id = ? AND LOWER(title) = LOWER(?)
+                 AND category = 'preference' AND confidence > 0 LIMIT 1`,
+              )
+              .get(pid, prefTitle) as { id: string } | null;
+            if (existingPref) continue;
             ltm.create({
               projectPath: input.projectPath,
               category: "preference",
-              title: tagToTitle(tag),
+              title: prefTitle,
               content: `Behavioral pattern detected across ${sessionCount} sessions (action: ${tag}). The user consistently demonstrates this behavior.`,
               session: input.sessionID,
               scope: "project",
@@ -1199,13 +1213,33 @@ async function distillSegment(input: {
       const failureStats = toolTrace.toolFailureStats(input.projectPath, {
         minSessions: GOTCHA_MIN_SESSIONS,
       });
+      const gotchaProjectId = ensureProject(input.projectPath);
       for (const stat of failureStats) {
         if (stat.failure_count < GOTCHA_MIN_FAILURES) continue;
+        const gotchaTitle = toolTrace.toolGotchaTitle(
+          stat.tool,
+          stat.error_type,
+        );
+        // Pre-check for an existing gotcha with the same title. ltm.create()
+        // dedups via the same title check, but it returns the existing ID
+        // silently — the caller can't tell whether a row was inserted or an
+        // existing one was updated. Without this pre-check, the "created
+        // gotcha" log below fires on every distill run, even when dedup
+        // collapsed the call (43+ identical lines in production for a single
+        // persistent webfetch failure pattern).
+        const existingGotcha = db()
+          .query(
+            `SELECT id FROM knowledge
+             WHERE project_id = ? AND LOWER(title) = LOWER(?) AND category = 'gotcha'
+             AND confidence > 0 LIMIT 1`,
+          )
+          .get(gotchaProjectId, gotchaTitle) as { id: string } | null;
+        if (existingGotcha) continue;
         try {
           ltm.create({
             projectPath: input.projectPath,
             category: "gotcha",
-            title: toolTrace.toolGotchaTitle(stat.tool, stat.error_type),
+            title: gotchaTitle,
             content: toolTrace.toolGotchaContent(stat),
             session: input.sessionID,
             scope: "project",
