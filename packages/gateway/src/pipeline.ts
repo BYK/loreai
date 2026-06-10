@@ -42,7 +42,6 @@ import {
   getConsecutiveBusts,
   effectiveMetaThreshold as computeMetaThreshold,
   formatKnowledge,
-  buildCompactPrompt,
   shouldImportLoreFile,
   importLoreFile,
   loreFileExists,
@@ -104,6 +103,7 @@ import {
   LORE_AGENT_HEADER,
   extractPreviousSummary,
   buildCompactionResponse,
+  assembleOfflineCompaction,
   scaleUsageForClient,
 } from "./compaction";
 import {
@@ -131,6 +131,7 @@ import {
   createRecallAwareAccumulator,
   parseSSEStream,
   buildSSETextResponse,
+  buildKeepaliveCompactionStream,
   formatSSEEvent,
   type StreamAccumulator,
   type RecallAwareAccumulator,
@@ -3243,9 +3244,19 @@ function scheduleBackgroundWork(
 // ---------------------------------------------------------------------------
 
 /**
- * Generate a compaction summary for a session. Force-distills any pending
- * messages, loads existing distillation summaries, builds a knowledge block,
- * and calls the LLM to produce a compaction summary.
+ * Interval between keep-alive `ping` events sent on the compaction SSE stream
+ * while the summary is being generated. Anthropic itself sends periodic pings
+ * on long-running streams; this keeps the client connection from timing out
+ * while we (possibly) distill the remainder under a rate limit.
+ */
+const COMPACT_KEEPALIVE_PING_MS = 15_000;
+
+/**
+ * Generate a compaction summary for a session, assembled deterministically
+ * from Lore's own memory (distillations + long-term knowledge + the prior
+ * summary). The only LLM work is urgently distilling any undistilled
+ * remainder first; there is no dedicated "compaction" LLM call. Returns null
+ * only when there is genuinely nothing to compact.
  *
  * This is the core logic shared by both:
  *  - `handleCompaction` (HTTP-intercepted compaction from Claude Code / OpenCode)
@@ -3260,26 +3271,31 @@ export async function generateCompactionSummary(opts: {
 }): Promise<string | null> {
   const { projectPath, sessionID, config, previousSummary, sessionUpstream } =
     opts;
-  const llm = getLLMClient(config);
 
-  // 1. Force-distill all undistilled messages.
-  // Mark urgent: true — client is blocking on the compaction response.
-  const model = getWorkerModel(sessionUpstream);
-  await distillation.run({
-    llm,
-    projectPath,
-    sessionID,
-    model,
-    force: true,
-    urgent: true,
-    callType: "direct",
-    workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
-  });
+  // 1. Bring distillations current. Compaction does NOT make a dedicated
+  //    "compaction" LLM call anymore — its only LLM work is distilling the
+  //    undistilled remainder. When everything is already distilled this is
+  //    skipped entirely (instant, zero-cost compaction). When not, we distill
+  //    urgently; the caller's keep-alive stream holds the client connection
+  //    open during any rate-limit wait. A distillation failure is non-fatal:
+  //    step 3 assembles from whatever distillations exist plus the raw tail.
+  if (temporal.undistilledCount(projectPath, sessionID) > 0) {
+    const llm = getLLMClient(config);
+    const model = getWorkerModel(sessionUpstream);
+    await distillation.run({
+      llm,
+      projectPath,
+      sessionID,
+      model,
+      force: true,
+      urgent: true,
+      callType: "direct",
+      workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
+    });
+  }
 
-  // 2. Load distillation summaries
+  // 2. Load distillation summaries + long-term knowledge.
   const distillations = distillation.loadForSession(projectPath, sessionID);
-
-  // 3. Build knowledge block
   const cfg = loreConfig();
   const entries = cfg.knowledge.enabled
     ? ltm.forProject(projectPath, cfg.crossProject)
@@ -3294,47 +3310,17 @@ export async function generateCompactionSummary(opts: {
       )
     : "";
 
-  // 4. Build the compact prompt
-  const compactPrompt = buildCompactPrompt({
-    hasDistillations: distillations.length > 0,
-    knowledge,
+  // 3. Assemble the compaction summary deterministically from Lore's memory —
+  //    no LLM. Include any still-undistilled messages verbatim so the recent
+  //    tail is never lost if distillation could not bring everything current.
+  return assembleOfflineCompaction({
     previousSummary,
+    distillations,
+    knowledge,
+    undistilled: temporal
+      .undistilled(projectPath, sessionID)
+      .map((m) => ({ role: m.role, content: m.content })),
   });
-
-  // 5. Build context with distillation summaries
-  let context = "";
-  if (distillations.length > 0) {
-    context =
-      `## Lore Pre-computed Session Summaries\n\n` +
-      `The following ${distillations.length} summary chunk(s) were pre-computed ` +
-      `from the conversation history. Use these as the authoritative source.\n\n` +
-      distillations
-        .map(
-          (d, i) =>
-            `### Chunk ${i + 1}${d.generation > 0 ? " (consolidated)" : ""}\n${d.observations}`,
-        )
-        .join("\n\n");
-  }
-
-  // 6. Generate the compaction summary via LLM
-  const userContent = context
-    ? `${context}\n\n---\n\n${compactPrompt}`
-    : compactPrompt;
-
-  const compactInputTokens = Math.ceil(userContent.length / 3);
-  const compactMaxTokens = Math.max(
-    2048,
-    Math.min(Math.ceil(compactInputTokens * 0.5), 20_000),
-  );
-  const summaryText = await llm.prompt(compactPrompt, userContent, {
-    model: getWorkerModel(sessionUpstream),
-    workerID: "lore-compact",
-    urgent: true,
-    maxTokens: compactMaxTokens,
-    temperature: 0,
-  });
-
-  return summaryText ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -3371,7 +3357,15 @@ async function handleCompaction(
   setSentryLightContext({ model: req.model, projectPath });
   log.info(`compaction intercepted for session ${sessionID.slice(0, 16)}`);
 
-  const summary = await generateCompactionSummary({
+  // Post-compaction the client sends an entirely different message set, so the
+  // cached pre-compaction warmup body is stale regardless of how this resolves.
+  sessionState.cacheAnalytics.lastRequestBody = null;
+
+  // Kick off summary generation. This makes at most one LLM call (urgent
+  // distillation of the undistilled remainder, if any) and then assembles the
+  // summary deterministically from Lore's memory — it (almost) never returns
+  // null, so the upstream passthrough fallback is now a rare last resort.
+  const summaryPromise = generateCompactionSummary({
     projectPath,
     sessionID,
     config,
@@ -3379,28 +3373,18 @@ async function handleCompaction(
     sessionUpstream: sessionState.lastUpstream,
   });
 
-  // If Lore's own summary generation failed (rate limits, auth issues, etc.),
-  // fall back to forwarding the original compaction request to the upstream API
-  // so the client still gets a proper compaction response.
-  if (summary == null) {
-    log.warn(
-      `compaction summary generation failed for session ${sessionID.slice(0, 16)} — falling back to upstream`,
-    );
-    // Compaction still happens (upstream), so post-compaction messages will
-    // differ — clear the stale warmup body to avoid false cache bust signals.
-    sessionState.cacheAnalytics.lastRequestBody = null;
-    return await handlePassthrough(req, config);
-  }
-
-  const resp = buildCompactionResponse(sessionID, summary, req.model);
-
-  // Clear the cached warmup body — post-compaction the client will send
-  // entirely different messages, so the pre-compaction body is stale.
-  sessionState.cacheAnalytics.lastRequestBody = null;
-
   if (req.stream) {
-    // streamHttpResponse always emits Anthropic SSE — wrap for OpenAI clients.
-    const anthropicSSE = streamHttpResponse(resp);
+    // Open the SSE stream immediately and emit keep-alive `ping`s while the
+    // summary is computed (the remainder-distillation may ride out a 429), so
+    // the client connection never hits a read-timeout. Always Anthropic SSE —
+    // wrap for OpenAI-protocol clients (their translators skip pings).
+    const id = `msg_lore_compact_${crypto.randomUUID().slice(0, 8)}`;
+    const anthropicSSE = buildKeepaliveCompactionStream(
+      id,
+      req.model,
+      summaryPromise,
+      COMPACT_KEEPALIVE_PING_MS,
+    );
     if (req.protocol === "openai") {
       return translateAnthropicStreamToOpenAI(anthropicSSE);
     }
@@ -3409,6 +3393,18 @@ async function handleCompaction(
     }
     return anthropicSSE;
   }
+
+  // Non-streaming clients have no SSE channel to ping — await the summary and
+  // return JSON. Fall back to upstream passthrough only when there is genuinely
+  // nothing to compact (no distillations, no pending messages, no knowledge).
+  const summary = await summaryPromise;
+  if (summary == null) {
+    log.warn(
+      `compaction summary empty for session ${sessionID.slice(0, 16)} — falling back to upstream`,
+    );
+    return await handlePassthrough(req, config);
+  }
+  const resp = buildCompactionResponse(sessionID, summary, req.model);
   return nonStreamHttpResponse(resp, req.protocol, req.stream);
 }
 

@@ -7,6 +7,7 @@ import {
   isMetaRequest,
   LORE_AGENT_HEADER,
   buildCompactionResponse,
+  assembleOfflineCompaction,
   COMPACTION_SYSTEM_PATTERNS,
   COMPACTION_USER_PATTERNS,
 } from "../src/compaction";
@@ -590,6 +591,97 @@ describe("buildCompactionResponse", () => {
   test("passes through model name unchanged", () => {
     const response = buildCompactionResponse("s1", "text", "gpt-4o-2024-05-13");
     expect(response.model).toBe("gpt-4o-2024-05-13");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// assembleOfflineCompaction
+// ---------------------------------------------------------------------------
+
+describe("assembleOfflineCompaction", () => {
+  test("returns null when there is nothing to compact", () => {
+    expect(assembleOfflineCompaction({ distillations: [] })).toBeNull();
+    expect(
+      assembleOfflineCompaction({
+        distillations: [],
+        previousSummary: "  ",
+        knowledge: "",
+        undistilled: [],
+      }),
+    ).toBeNull();
+  });
+
+  test("assembles distillation observations in order with segment headings", () => {
+    const out = assembleOfflineCompaction({
+      distillations: [
+        { observations: "First segment notes", generation: 0 },
+        { observations: "Consolidated notes", generation: 1 },
+      ],
+    });
+    expect(out).not.toBeNull();
+    expect(out).toContain("# Session Summary");
+    expect(out).toContain("### Segment 1");
+    expect(out).toContain("First segment notes");
+    expect(out).toContain("### Segment 2 (consolidated)");
+    expect(out).toContain("Consolidated notes");
+    // Order preserved
+    const text = out ?? "";
+    expect(text.indexOf("First segment notes")).toBeLessThan(
+      text.indexOf("Consolidated notes"),
+    );
+  });
+
+  test("carries the previous summary forward verbatim", () => {
+    const out = assembleOfflineCompaction({
+      previousSummary: "PRIOR SUMMARY TEXT",
+      distillations: [{ observations: "obs", generation: 0 }],
+    });
+    expect(out).toContain("## Earlier summary");
+    expect(out).toContain("PRIOR SUMMARY TEXT");
+  });
+
+  test("includes the still-undistilled tail (capped) so it is never lost", () => {
+    const out = assembleOfflineCompaction({
+      distillations: [{ observations: "obs", generation: 0 }],
+      undistilled: [
+        { role: "user", content: "latest question" },
+        { role: "assistant", content: "latest answer" },
+      ],
+    });
+    expect(out).toContain("## Recent activity (not yet summarized)");
+    expect(out).toContain("**user**: latest question");
+    expect(out).toContain("**assistant**: latest answer");
+  });
+
+  test("truncates a large raw tail with an omission marker", () => {
+    const big = "x".repeat(6000);
+    const out = assembleOfflineCompaction({
+      distillations: [],
+      undistilled: [
+        { role: "user", content: big },
+        { role: "user", content: "should be omitted" },
+      ],
+    });
+    expect(out).not.toBeNull();
+    expect(out).toContain("…(remaining recent messages omitted)");
+  });
+
+  test("works from distillations even when knowledge and prior summary are absent", () => {
+    const out = assembleOfflineCompaction({
+      distillations: [{ observations: "only obs", generation: 0 }],
+      knowledge: "",
+    });
+    expect(out).toContain("only obs");
+    expect(out).not.toContain("## Earlier summary");
+  });
+
+  test("appends the knowledge block when present", () => {
+    const out = assembleOfflineCompaction({
+      distillations: [{ observations: "obs", generation: 0 }],
+      knowledge: "## Long-term Knowledge\n### Pattern\n* **X**: Y.",
+    });
+    expect(out).toContain("## Long-term Knowledge");
+    expect(out).toContain("**X**: Y.");
   });
 });
 

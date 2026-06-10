@@ -1,0 +1,101 @@
+import { describe, test, expect } from "vitest";
+import { buildKeepaliveCompactionStream } from "../src/stream/anthropic";
+import { translateAnthropicStreamToOpenAI } from "../src/stream/openai";
+
+async function readAll(resp: Response): Promise<string> {
+  const stream = resp.body;
+  if (!stream) throw new Error("response has no body");
+  const reader = stream.getReader();
+  const dec = new TextDecoder();
+  let out = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    out += dec.decode(value, { stream: true });
+  }
+  return out;
+}
+
+describe("buildKeepaliveCompactionStream", () => {
+  test("emits ping heartbeats while pending, then the summary content", async () => {
+    let resolve!: (s: string | null) => void;
+    const pending = new Promise<string | null>((r) => {
+      resolve = r;
+    });
+    const resp = buildKeepaliveCompactionStream(
+      "msg_test",
+      "model-x",
+      pending,
+      5,
+    );
+    // Resolve after enough time for several 5ms pings to fire.
+    setTimeout(() => resolve("THE SUMMARY"), 50);
+    const body = await readAll(resp);
+
+    expect(resp.headers.get("content-type")).toBe("text/event-stream");
+    expect(body).toContain("event: message_start");
+    expect(body).toContain("event: content_block_start");
+    expect(body).toContain("event: ping");
+    expect(body).toContain("THE SUMMARY");
+    expect(body).toContain("event: content_block_stop");
+    expect(body).toContain("event: message_delta");
+    expect(body).toContain("event: message_stop");
+    // Heartbeats precede the resolved content.
+    expect(body.indexOf("event: ping")).toBeLessThan(
+      body.indexOf("THE SUMMARY"),
+    );
+  });
+
+  test("null summary yields a well-formed empty assistant turn", async () => {
+    const resp = buildKeepaliveCompactionStream(
+      "msg_test2",
+      "model-x",
+      Promise.resolve(null),
+      50,
+    );
+    const body = await readAll(resp);
+    expect(body).toContain("event: message_start");
+    expect(body).toContain("event: content_block_delta");
+    expect(body).toContain('"text":""');
+    expect(body).toContain("event: message_stop");
+  });
+
+  test("translates cleanly to OpenAI SSE (pings dropped, summary preserved)", async () => {
+    let resolve!: (s: string | null) => void;
+    const pending = new Promise<string | null>((r) => {
+      resolve = r;
+    });
+    const anthropicSSE = buildKeepaliveCompactionStream(
+      "msg_x",
+      "model-x",
+      pending,
+      5,
+    );
+    const openaiResp = translateAnthropicStreamToOpenAI(anthropicSSE);
+    setTimeout(() => resolve("TRANSLATED SUMMARY"), 40);
+    const body = await readAll(openaiResp);
+
+    // OpenAI chat.completion chunks carry the text in delta.content; pings are
+    // not a valid OpenAI event and must be dropped by the translator.
+    expect(body).toContain("chat.completion.chunk");
+    expect(body).toContain("TRANSLATED SUMMARY");
+    expect(body).not.toContain("event: ping");
+    expect(body).toContain("[DONE]");
+  });
+
+  test("a rejected summary promise still terminates the stream cleanly", async () => {
+    const rejecting = new Promise<string | null>((_, rej) => {
+      setTimeout(() => rej(new Error("boom")), 5);
+    });
+    const resp = buildKeepaliveCompactionStream(
+      "msg_test3",
+      "model-x",
+      rejecting,
+      50,
+    );
+    const body = await readAll(resp);
+    expect(body).toContain("event: message_start");
+    expect(body).toContain("event: message_stop");
+    expect(body).toContain('"text":""');
+  });
+});

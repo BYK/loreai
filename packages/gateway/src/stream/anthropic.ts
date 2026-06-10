@@ -584,6 +584,129 @@ export function buildSSETextResponse(
   return events.join("");
 }
 
+/**
+ * Build a *live* compaction SSE `Response` that emits keep-alive `ping` events
+ * while `summaryPromise` is still pending, then streams the summary text once
+ * it resolves.
+ *
+ * This lets the gateway hold the client connection open during a long
+ * compaction wait (e.g. urgent distillation of the remainder riding out a 429)
+ * without the client hitting a read-timeout. `ping` is a first-class event in
+ * Anthropic's streaming protocol — clients (and our openai/openai-responses
+ * translators) skip it — so the heartbeats are protocol-safe.
+ *
+ * The event lifecycle is always well-formed:
+ *   message_start → content_block_start → ping* → content_block_delta →
+ *   content_block_stop → message_delta → message_stop
+ *
+ * If `summaryPromise` resolves to `null` (nothing to compact) or rejects, an
+ * empty assistant turn is emitted so the stream still terminates cleanly.
+ */
+export function buildKeepaliveCompactionStream(
+  id: string,
+  model: string,
+  summaryPromise: Promise<string | null>,
+  pingMs: number,
+): Response {
+  const enc = new TextEncoder();
+  const messageStart = buildSSEMessageStart({
+    id,
+    model,
+    content: [],
+    stopReason: "end_turn",
+    usage: ZERO_USAGE,
+  });
+
+  let pingTimer: ReturnType<typeof setInterval> | null = null;
+  const clearPing = () => {
+    if (pingTimer) clearInterval(pingTimer);
+    pingTimer = null;
+  };
+
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const emit = (s: string) => {
+        try {
+          controller.enqueue(enc.encode(s));
+        } catch {
+          // Controller already closed (client disconnected) — ignore.
+        }
+      };
+
+      emit(messageStart);
+      emit(
+        formatSSEEvent(
+          "content_block_start",
+          JSON.stringify({
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "text", text: "" },
+          }),
+        ),
+      );
+
+      pingTimer = setInterval(() => {
+        emit(formatSSEEvent("ping", JSON.stringify({ type: "ping" })));
+      }, pingMs);
+
+      let text = "";
+      try {
+        text = (await summaryPromise) ?? "";
+      } catch {
+        text = "";
+      } finally {
+        clearPing();
+      }
+
+      emit(
+        formatSSEEvent(
+          "content_block_delta",
+          JSON.stringify({
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "text_delta", text },
+          }),
+        ),
+      );
+      emit(
+        formatSSEEvent(
+          "content_block_stop",
+          JSON.stringify({ type: "content_block_stop", index: 0 }),
+        ),
+      );
+      emit(
+        formatSSEEvent(
+          "message_delta",
+          JSON.stringify({
+            type: "message_delta",
+            delta: { stop_reason: "end_turn", stop_sequence: null },
+            usage: { output_tokens: Math.ceil(text.length / 3) },
+          }),
+        ),
+      );
+      emit(
+        formatSSEEvent(
+          "message_stop",
+          JSON.stringify({ type: "message_stop" }),
+        ),
+      );
+      controller.close();
+    },
+    cancel() {
+      clearPing();
+    },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    },
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Recall-aware stream accumulator
 // ---------------------------------------------------------------------------

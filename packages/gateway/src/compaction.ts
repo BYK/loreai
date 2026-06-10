@@ -358,6 +358,101 @@ export function isMetaRequest(req: GatewayRequest): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Offline compaction assembly
+// ---------------------------------------------------------------------------
+
+/**
+ * Assemble a compaction summary deterministically from Lore's own memory —
+ * no LLM call. The distillation observations are already prose summaries of
+ * conversation segments (Lore's compressed history), so concatenating them in
+ * order, plus the prior compacted summary and the long-term knowledge block,
+ * produces a usable summary on its own.
+ *
+ * This deliberately does NOT follow the LLM `COMPACT_SUMMARY_TEMPLATE`
+ * (Goal / Progress / Decisions / …) — that shaping requires the model. The
+ * raw assembly is intentionally accepted as "good enough": it preserves the
+ * salient compressed history without depending on the rate-limited compaction
+ * LLM call.
+ *
+ * @returns the assembled markdown summary, or `null` when there is genuinely
+ *   nothing to compact (no prior summary, no distillations, no pending
+ *   messages, no knowledge).
+ */
+export function assembleOfflineCompaction(input: {
+  /** Prior `/compact` output, carried forward verbatim when present. */
+  previousSummary?: string;
+  /** Distillation rows for the session, oldest-first. */
+  distillations: Array<{ observations: string; generation: number }>;
+  /** Long-term knowledge block (already formatted markdown), if any. */
+  knowledge?: string;
+  /**
+   * Any still-undistilled messages — included verbatim (truncated) as a
+   * trailing "recent activity" section so the conversation tail is never lost
+   * if distillation could not bring everything current (e.g. a sustained 429).
+   */
+  undistilled?: Array<{ role: string; content: string }>;
+}): string | null {
+  const { distillations } = input;
+  const prevTrimmed = input.previousSummary?.trim() ?? "";
+  const knowledgeTrimmed = input.knowledge?.trim() ?? "";
+  const tail = input.undistilled ?? [];
+
+  const hasDistillations = distillations.length > 0;
+  const hasUndistilled = tail.length > 0;
+  const hasPrev = prevTrimmed.length > 0;
+  const hasKnowledge = knowledgeTrimmed.length > 0;
+  if (!hasDistillations && !hasUndistilled && !hasPrev && !hasKnowledge) {
+    return null;
+  }
+
+  const sections: string[] = ["# Session Summary"];
+
+  if (hasPrev) {
+    sections.push(`## Earlier summary\n\n${prevTrimmed}`);
+  }
+
+  if (hasDistillations) {
+    const chunks = distillations.map((d, i) => {
+      const label =
+        d.generation > 0
+          ? `### Segment ${i + 1} (consolidated)`
+          : `### Segment ${i + 1}`;
+      return `${label}\n${d.observations.trim()}`;
+    });
+    sections.push(`## Conversation history\n\n${chunks.join("\n\n")}`);
+  }
+
+  if (hasUndistilled) {
+    // Cap the raw tail so an un-distilled burst can't bloat the summary.
+    const MAX_RAW_CHARS = 4000;
+    const lines: string[] = [];
+    let used = 0;
+    for (const m of tail) {
+      const text = m.content.trim();
+      if (!text) continue;
+      const entry = `- **${m.role}**: ${text}`;
+      if (used + entry.length > MAX_RAW_CHARS) {
+        lines.push("- …(remaining recent messages omitted)");
+        break;
+      }
+      lines.push(entry);
+      used += entry.length;
+    }
+    if (lines.length > 0) {
+      sections.push(
+        `## Recent activity (not yet summarized)\n\n${lines.join("\n")}`,
+      );
+    }
+  }
+
+  if (hasKnowledge) {
+    sections.push(knowledgeTrimmed);
+  }
+
+  return sections.join("\n\n");
+}
+
+// ---------------------------------------------------------------------------
 // buildCompactionResponse
 // ---------------------------------------------------------------------------
 
