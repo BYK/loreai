@@ -2125,6 +2125,31 @@ function formatSearchResult(tagged: TaggedResult, score?: number): string {
         ${idLink("lat", s.id)}
       </li>`;
     }
+    case "entity": {
+      const e = tagged.item;
+      const aliases = Array.from(
+        new Set(
+          e.aliases
+            .map((a) => a.alias_value)
+            .filter((v) => v !== e.canonical_name),
+        ),
+      );
+      const aliasStr = aliases.length
+        ? ` <span class="meta">aka ${esc(aliases.join(", "))}</span>`
+        : "";
+      let relStr = "";
+      try {
+        const rels = entities.formatRelationsForPrompt(e.id);
+        if (rels) relStr = ` <span class="meta">${esc(rels)}</span>`;
+      } catch {
+        // relations are best-effort
+      }
+      return `<li class="result-item">
+        ${scoreStr}${badge(e.entity_type)}
+        <strong><a href="/ui/entities/${esc(e.id)}">${esc(e.canonical_name)}</a></strong>${aliasStr}${relStr}
+        ${idLink("e", e.id)}
+      </li>`;
+    }
   }
 }
 

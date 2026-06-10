@@ -47,6 +47,10 @@ type Distillation = {
 
 export type ScoredDistillation = Distillation & { rank: number };
 
+/** An entity result. `rank` mirrors the other scored sources for type parity;
+ *  RRF fuses by list position, not by this value. */
+export type ScoredEntity = entities.EntityWithAliases & { rank: number };
+
 export type RecallScope = "all" | "session" | "project" | "knowledge";
 
 export type RecallInput = {
@@ -86,7 +90,8 @@ export type TaggedResult =
     }
   | { source: "distillation"; item: ScoredDistillation }
   | { source: "temporal"; item: temporal.ScoredTemporalMessage }
-  | { source: "lat-section"; item: latReader.ScoredLatSection };
+  | { source: "lat-section"; item: latReader.ScoredLatSection }
+  | { source: "entity"; item: ScoredEntity };
 
 export type ScoredTaggedResult = { item: TaggedResult; score: number };
 
@@ -106,6 +111,10 @@ function getTaggedText(tagged: TaggedResult): string {
       return tagged.item.content;
     case "lat-section":
       return `${tagged.item.heading} ${tagged.item.content}`;
+    case "entity":
+      return `${tagged.item.canonical_name} ${tagged.item.aliases
+        .map((a) => a.alias_value)
+        .join(" ")}`;
   }
 }
 
@@ -122,6 +131,8 @@ function taggedResultKey(r: TaggedResult): string {
       return `t:${r.item.id}`;
     case "lat-section":
       return `lat:${r.item.id}`;
+    case "entity":
+      return `e:${r.item.id}`;
   }
 }
 
@@ -252,6 +263,7 @@ function truncateAtSentence(text: string, maxChars: number): string {
 const SOURCE_WEIGHT: Record<TaggedResult["source"], number> = {
   knowledge: 1.0,
   "cross-knowledge": 1.0,
+  entity: 0.9,
   "lat-section": 0.9,
   distillation: 0.8,
   temporal: 0.8,
@@ -265,15 +277,17 @@ const TIER_NAMES = ["Strong Matches", "Supporting", "Peripheral"] as const;
 
 /** Source display order within a tier. */
 const SOURCE_ORDER: Record<TaggedResult["source"], number> = {
-  knowledge: 0,
-  "cross-knowledge": 1,
-  "lat-section": 2,
-  distillation: 3,
-  temporal: 4,
+  entity: 0,
+  knowledge: 1,
+  "cross-knowledge": 2,
+  "lat-section": 3,
+  distillation: 4,
+  temporal: 5,
 };
 
 /** Human-readable source group labels for sub-headers. */
 const SOURCE_LABELS: Record<TaggedResult["source"], string> = {
+  entity: "People & Entities",
   knowledge: "Knowledge",
   "cross-knowledge": "Cross-Project",
   "lat-section": "Reference",
@@ -388,6 +402,52 @@ function formatFusedResults(
   return lines.join("\n");
 }
 
+/**
+ * Build the compact human-readable pieces of an entity summary used for recall
+ * rendering: deduped aliases, a role/description blurb from metadata, and
+ * resolved relations (e.g. "partner of Burak Yigit Kaya").
+ */
+function entitySummaryParts(item: entities.EntityWithAliases): {
+  aliasesText: string;
+  metaText: string;
+  relationsText: string;
+} {
+  const uniqueAliases = Array.from(
+    new Set(
+      item.aliases
+        .map((a) => a.alias_value)
+        .filter((v) => v !== item.canonical_name),
+    ),
+  );
+  const aliasesText = uniqueAliases.length
+    ? `aka ${uniqueAliases.join(", ")}`
+    : "";
+
+  let metaText = "";
+  try {
+    const meta = item.metadata
+      ? (JSON.parse(item.metadata) as Record<string, unknown>)
+      : null;
+    if (meta && typeof meta === "object") {
+      const bits: string[] = [];
+      if (typeof meta.role === "string") bits.push(meta.role);
+      if (typeof meta.description === "string") bits.push(meta.description);
+      metaText = bits.join("; ");
+    }
+  } catch {
+    // malformed metadata JSON — skip
+  }
+
+  let relationsText = "";
+  try {
+    relationsText = entities.formatRelationsForPrompt(item.id);
+  } catch {
+    // non-fatal — relations are best-effort
+  }
+
+  return { aliasesText, metaText, relationsText };
+}
+
 /** Get the full content length of a tagged result (before truncation). */
 function getFullContentLength(tagged: TaggedResult): number {
   switch (tagged.source) {
@@ -400,6 +460,15 @@ function getFullContentLength(tagged: TaggedResult): number {
       return tagged.item.content.length;
     case "lat-section":
       return tagged.item.heading.length + tagged.item.content.length;
+    case "entity": {
+      const p = entitySummaryParts(tagged.item);
+      return (
+        tagged.item.canonical_name.length +
+        p.aliasesText.length +
+        p.metaText.length +
+        p.relationsText.length
+      );
+    }
   }
 }
 
@@ -480,6 +549,20 @@ function renderResultLine(tagged: TaggedResult, charBudget: number): string {
       const content = truncateAtSentence(fullText, contentBudget);
       const wasTruncated = fullText.length > contentBudget;
       return `- ${heading}${content}${wasTruncated ? ` (${id})` : ""}`;
+    }
+    case "entity": {
+      const e = tagged.item;
+      const typeLabel =
+        e.entity_type === "self" ? "person, you" : e.entity_type;
+      const head = `**${inline(e.canonical_name)}** (${typeLabel})`;
+      const { aliasesText, metaText, relationsText } = entitySummaryParts(e);
+      const detailFull = [aliasesText, metaText, relationsText]
+        .filter(Boolean)
+        .join(" \u2014 ");
+      const detailBudget = Math.max(40, charBudget - head.length - 2);
+      const detail = truncateAtSentence(inline(detailFull), detailBudget);
+      const wasTruncated = inline(detailFull).length > detailBudget;
+      return `- ${head}${detail ? `: ${detail}` : ""}${wasTruncated ? ` (${id})` : ""}`;
     }
   }
 }
@@ -834,6 +917,42 @@ export async function searchRecall(
           });
         }
       }
+
+      // Entity vector search — semantic match on entity name/alias embeddings.
+      // Same `e:` key as the FTS list so RRF merges (boosting entities that
+      // match both lexically and semantically).
+      if (scope === "all" || scope === "project") {
+        // vectorSearchEntities is NOT project-scoped, so apply the same
+        // visibility predicate entities.search() uses — otherwise a semantic
+        // match could leak another project's project-scoped repo/infra entity.
+        const entPid = ensureProject(projectPath);
+        const entityVectorHits = embedding.vectorSearchEntities(
+          queryVec,
+          limit,
+        );
+        const entityVectorTagged: TaggedResult[] = entityVectorHits
+          .map((hit): TaggedResult | null => {
+            const ent = entities.getWithAliases(hit.id);
+            if (!ent) return null;
+            const visible =
+              ent.project_id === entPid ||
+              ent.project_id === null ||
+              ent.cross_project === 1;
+            if (!visible) return null;
+            return {
+              source: "entity",
+              item: { ...ent, rank: -hit.similarity },
+            };
+          })
+          .filter((r): r is TaggedResult => r !== null);
+        if (entityVectorTagged.length) {
+          allRrfLists.push({
+            items: entityVectorTagged,
+            key: (r) => `e:${r.item.id}`,
+            weight: vectorWeight,
+          });
+        }
+      }
     } catch (err) {
       log.info("recall: vector search failed:", err);
     }
@@ -889,6 +1008,28 @@ export async function searchRecall(
       }
     } catch (err) {
       log.info("recall: cross-project knowledge search failed:", err);
+    }
+  }
+
+  // Entity search — surface matching people/orgs/services/tools (with their
+  // aliases + relations) as first-class results. Identity questions ("who is
+  // Seylan?", "what's our CI?") are answered directly instead of only via the
+  // alias query-expansion above. Cross-session/cross-project, so excluded from
+  // "session" and "knowledge" scopes.
+  if (scope === "all" || scope === "project") {
+    try {
+      const entityResults = entities.search({ query, projectPath, limit });
+      if (entityResults.length) {
+        allRrfLists.push({
+          items: entityResults.map((item, i) => ({
+            source: "entity" as const,
+            item: { ...item, rank: i },
+          })),
+          key: (r) => `e:${r.item.id}`,
+        });
+      }
+    } catch (err) {
+      log.info("recall: entity search failed (non-fatal):", err);
     }
   }
 
@@ -975,8 +1116,11 @@ export async function searchRecall(
   // score to clear the relevance floor.
   //
   // Priority: primary (original query BM25 + recency) and supplemental
-  // (vector, lat.md, cross-project, quality, exact-match) are high-value.
-  // Expanded-query BM25 lists are lowest priority — trim those first.
+  // (vector, lat.md, cross-project, entity FTS + entity vector, quality,
+  // exact-match) are high-value and always kept — only expanded-query BM25
+  // lists are trimmed. Note: keeping all supplemental lists means the final
+  // count can slightly exceed MAX_RRF_LISTS when primary+supplemental alone
+  // already do; the cap only bounds how many expanded-query lists survive.
   const MAX_RRF_LISTS = 14;
   if (allRrfLists.length > MAX_RRF_LISTS) {
     // Layout: [0..primaryListEnd) = primary, [primaryListEnd..perQueryEnd) = expanded, [perQueryEnd..) = supplemental
@@ -1011,7 +1155,7 @@ export async function searchRecall(
  *
  * IDs use the format `prefix:uuid` where prefix is one of:
  *   k: (knowledge), xk: (cross-knowledge), d: (distillation),
- *   t: (temporal), lat: (lat-section).
+ *   t: (temporal), lat: (lat-section), e: (entity).
  */
 export function recallById(id: string): string {
   const colonIdx = id.indexOf(":");
@@ -1077,6 +1221,22 @@ export function recallById(id: string): string {
         ``,
         `${inline(row.content)}`,
       ].join("\n");
+    }
+    case "e": {
+      const ent = entities.getWithAliases(rawId);
+      if (!ent) return `No entry found for id: ${id}`;
+      const lines = [
+        `## Recall Detail: ${id}`,
+        ``,
+        `#### People & Entities`,
+        entities.formatForPrompt([ent]),
+      ];
+      // formatForPrompt only renders relations relative to a self entity in the
+      // passed array; for a single non-self entity it omits them — append
+      // explicitly so the drill-down isn't less informative than the summary.
+      const relations = entities.formatRelationsForPrompt(rawId);
+      if (relations) lines.push(``, `Relations: ${relations}`);
+      return lines.join("\n");
     }
     default:
       return `Unknown source prefix "${prefix}" in id: ${id}`;
@@ -1149,7 +1309,7 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
 
 /** Standard tool description reused verbatim by each host adapter. */
 export const RECALL_TOOL_DESCRIPTION =
-  "Search your persistent memory for this project. Your visible context is a trimmed window — older messages, decisions, and details may not be visible to you even within the current session. Use this tool whenever you need information that isn't in your current context: file paths, past decisions, user preferences, prior approaches, or anything from earlier in this conversation or previous sessions. Always prefer recall over assuming you don't have the information. Searches long-term knowledge, distilled history, and raw message archives." +
+  "Search your persistent memory for this project. Your visible context is a trimmed window — older messages, decisions, and details may not be visible to you even within the current session. Use this tool whenever you need information that isn't in your current context: file paths, past decisions, user preferences, prior approaches, the people/services/tools the user works with, or anything from earlier in this conversation or previous sessions. Always prefer recall over assuming you don't have the information. Searches long-term knowledge, known entities (people, orgs, services, tools — with their aliases and relationships), distilled history, and raw message archives." +
   '\n\nYour context contains references in the format (prefix:id) — e.g. (d:abc123) for distillations, (t:abc123) for messages. These appear in distillation headers, tool result placeholders, and truncated recall results. Pass any such ID to this tool\'s `id` parameter to retrieve the full original content. Distillations marked "lossy" have lost specific details — use the ID to drill down.' +
   '\n\nNever write recall status text (like "📚 Searching…" or "📚 Fetching…") yourself — these are injected by the system automatically when you use this tool.';
 
@@ -1159,5 +1319,5 @@ export const RECALL_PARAM_DESCRIPTIONS = {
     "What to search for — be specific. Include keywords, file names, or concepts.",
   scope:
     "Search scope: 'all' (default) searches everything, 'session' searches current session only, 'project' searches all sessions in this project, 'knowledge' searches only long-term knowledge.",
-  id: "Fetch full content of a specific result by its source-prefixed ID (e.g. 'k:abc123', 'd:abc123', 't:abc123'). These IDs appear throughout your context: in distillation headers, tool result placeholders, and truncated recall results. When id is provided, query is ignored.",
+  id: "Fetch full content of a specific result by its source-prefixed ID (e.g. 'k:abc123', 'd:abc123', 't:abc123', 'e:abc123' for an entity). These IDs appear throughout your context: in distillation headers, tool result placeholders, and truncated recall results. When id is provided, query is ignored.",
 };
