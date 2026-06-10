@@ -1,172 +1,117 @@
-import { describe, test, expect } from "vitest";
+import { describe, test, expect, afterEach } from "vitest";
 import {
   backoffMs,
+  createGatewayLLMClient,
   maxRetriesFor,
   normalizeOpenAIUsage,
   resolveWorkerProtocol,
   AUTH_ERROR_CODES,
 } from "../src/llm-adapter";
+import {
+  getConsecutiveTrips,
+  resetBackgroundLimiter,
+} from "../src/background-limiter";
 
 // ---------------------------------------------------------------------------
-// maxRetriesFor — background (default)
+// maxRetriesFor — unified policy (modeled on Claude Code's single budget)
 // ---------------------------------------------------------------------------
 
-describe("maxRetriesFor (background)", () => {
-  test("returns 3 for 429 (rate limit)", () => {
-    expect(maxRetriesFor(429)).toBe(3);
-  });
-
-  test("returns 3 for 5xx", () => {
-    expect(maxRetriesFor(500)).toBe(3);
-    expect(maxRetriesFor(502)).toBe(3);
-    expect(maxRetriesFor(503)).toBe(3);
-    expect(maxRetriesFor(529)).toBe(3);
-  });
-
-  test("returns 3 for null (network error)", () => {
-    expect(maxRetriesFor(null)).toBe(3);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// maxRetriesFor — urgent (synchronous, blocking the SSE response)
-// ---------------------------------------------------------------------------
-
-describe("maxRetriesFor (urgent)", () => {
-  test("returns 2 regardless of status — short budget for blocking calls", () => {
-    expect(maxRetriesFor(429, true)).toBe(2);
-    expect(maxRetriesFor(500, true)).toBe(2);
-    expect(maxRetriesFor(503, true)).toBe(2);
-    expect(maxRetriesFor(null, true)).toBe(2);
+describe("maxRetriesFor (unified policy)", () => {
+  test("returns the default budget (8) regardless of status or urgency", () => {
+    expect(maxRetriesFor()).toBe(8);
+    expect(maxRetriesFor(429)).toBe(8);
+    expect(maxRetriesFor(500)).toBe(8);
+    expect(maxRetriesFor(502)).toBe(8);
+    expect(maxRetriesFor(503)).toBe(8);
+    expect(maxRetriesFor(529)).toBe(8);
+    expect(maxRetriesFor(null)).toBe(8);
   });
 });
 
 // ---------------------------------------------------------------------------
-// backoffMs — Retry-After
+// backoffMs — Retry-After (honored exactly, capped at MAX_DELAY_MS = 32s)
 // ---------------------------------------------------------------------------
 
 describe("backoffMs — with Retry-After", () => {
-  test("background: caps Retry-After at 120s", () => {
-    expect(backoffMs(0, 300_000, 429)).toBe(120_000);
-    expect(backoffMs(2, 200_000, 500)).toBe(120_000);
+  test("honors small Retry-After exactly (no jitter on the server-hint path)", () => {
+    expect(backoffMs(0, 1000)).toBe(1000);
+    expect(backoffMs(3, 5000)).toBe(5000);
+    expect(backoffMs(0, 100)).toBe(100);
   });
 
-  test("urgent: caps Retry-After at 8s", () => {
-    expect(backoffMs(0, 60_000, 429, true)).toBe(8_000);
-    expect(backoffMs(0, 120_000, 429, true)).toBe(8_000);
+  test("honors Retry-After right up to the 32s cap", () => {
+    expect(backoffMs(0, 32_000)).toBe(32_000);
   });
 
-  test("urgent: honors small Retry-After exactly (under cap)", () => {
-    expect(backoffMs(0, 1000, 429, true)).toBe(1000);
-    expect(backoffMs(0, 5000, 429, true)).toBe(5000);
-  });
-
-  test("background: honors small Retry-After values exactly", () => {
-    expect(backoffMs(0, 1000, 429)).toBe(1000);
-    expect(backoffMs(0, 100, 500)).toBe(100);
-  });
-
-  test("Retry-After honored regardless of status code", () => {
-    expect(backoffMs(0, 10_000, 500)).toBe(10_000);
-    expect(backoffMs(0, 10_000, null)).toBe(10_000);
+  test("caps Retry-After at 32s regardless of attempt", () => {
+    expect(backoffMs(0, 60_000)).toBe(32_000);
+    expect(backoffMs(2, 300_000)).toBe(32_000);
   });
 });
 
 // ---------------------------------------------------------------------------
-// backoffMs — 429 without Retry-After
+// backoffMs — exponential backoff with jitter (no Retry-After)
 // ---------------------------------------------------------------------------
 
-describe("backoffMs — 429 without Retry-After", () => {
-  test("background uses wide spacing: 60s, 120s, 180s (capped 180s)", () => {
-    expect(backoffMs(0, null, 429)).toBe(60_000);
-    expect(backoffMs(1, null, 429)).toBe(120_000);
-    expect(backoffMs(2, null, 429)).toBe(180_000);
-    expect(backoffMs(3, null, 429)).toBe(180_000);
-  });
-
-  test("urgent uses aggressive exponential: 1s, 2s, 4s (capped 4s)", () => {
-    expect(backoffMs(0, null, 429, true)).toBe(1000);
-    expect(backoffMs(1, null, 429, true)).toBe(2000);
-    expect(backoffMs(2, null, 429, true)).toBe(4000);
-    expect(backoffMs(3, null, 429, true)).toBe(4000);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// backoffMs — 5xx without Retry-After
-// ---------------------------------------------------------------------------
-
-describe("backoffMs — 5xx without Retry-After", () => {
-  test("background: 1s, 2s, 4s, 8s (capped 8s)", () => {
-    expect(backoffMs(0, null, 500)).toBe(1000);
-    expect(backoffMs(1, null, 500)).toBe(2000);
-    expect(backoffMs(2, null, 500)).toBe(4000);
-    expect(backoffMs(3, null, 500)).toBe(8000);
-    expect(backoffMs(10, null, 502)).toBe(8000);
-  });
-
-  test("urgent: 1s, 2s, 4s (capped 4s) — tighter than background", () => {
-    expect(backoffMs(0, null, 500, true)).toBe(1000);
-    expect(backoffMs(1, null, 500, true)).toBe(2000);
-    expect(backoffMs(2, null, 500, true)).toBe(4000);
-    expect(backoffMs(10, null, 502, true)).toBe(4000);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// backoffMs — network errors (null status)
-// ---------------------------------------------------------------------------
-
-describe("backoffMs — network errors", () => {
-  test("background uses 1s, 2s, 4s exponential", () => {
-    expect(backoffMs(0, null, null)).toBe(1000);
-    expect(backoffMs(1, null, null)).toBe(2000);
-    expect(backoffMs(2, null, null)).toBe(4000);
-  });
-
-  test("urgent uses the same exponential capped 4s", () => {
-    expect(backoffMs(0, null, null, true)).toBe(1000);
-    expect(backoffMs(1, null, null, true)).toBe(2000);
-    expect(backoffMs(2, null, null, true)).toBe(4000);
-    expect(backoffMs(5, null, null, true)).toBe(4000);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Total worst-case budget (regression guard for the OpenCode-hang report)
-// ---------------------------------------------------------------------------
-
-describe("worst-case urgent budget", () => {
-  test("urgent 429 with Retry-After: 60 stays under ~25s end-to-end", () => {
-    // 2 retries × max 8s honored from Retry-After = 16s of waits total.
-    // Per-attempt fetch latency is bounded by Anthropic's own server timeout
-    // (~10s on rate-limit reject), so total ≤ ~25s. This is the ceiling that
-    // prevents OpenCode's SSE stream from looking hung.
-    let total = 0;
-    for (let attempt = 0; attempt < maxRetriesFor(429, true); attempt++) {
-      total += backoffMs(attempt, 60_000, 429, true);
+describe("backoffMs — exponential backoff without Retry-After", () => {
+  test("ramps 0.5s → 32s (capped), each within [base, 1.25*base)", () => {
+    const cases: Array<[number, number]> = [
+      [0, 500],
+      [1, 1000],
+      [2, 2000],
+      [3, 4000],
+      [4, 8000],
+      [5, 16_000],
+      [6, 32_000],
+      [10, 32_000], // capped
+    ];
+    for (const [attempt, base] of cases) {
+      const delay = backoffMs(attempt, null);
+      expect(delay).toBeGreaterThanOrEqual(base);
+      expect(delay).toBeLessThan(base * 1.25);
     }
-    expect(total).toBeLessThanOrEqual(16_000);
   });
 
-  test("background 429 with Retry-After: 60 budgets up to ~3min", () => {
-    // 3 retries × 60s (Retry-After honored, under 120s cap) = 180s.
-    // Reduced from 5×60s to lower API pressure on tight-quota environments.
+  test("jitter makes repeated delays non-constant", () => {
+    const samples = new Set(
+      Array.from({ length: 25 }, () => backoffMs(3, null)),
+    );
+    expect(samples.size).toBeGreaterThan(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unified retry budget (regression guard for the OpenCode-hang report)
+// ---------------------------------------------------------------------------
+
+describe("unified retry budget", () => {
+  test("first retry is sub-second — no 60s background first-wait (hang regression)", () => {
+    // The old urgent/background split made urgent calls (compaction) inherit a
+    // 60s background first-wait, which looked like a hang. The unified policy's
+    // first retry without Retry-After is ~0.5s + jitter.
+    const first = backoffMs(0, null);
+    expect(first).toBeGreaterThanOrEqual(500);
+    expect(first).toBeLessThan(700); // 500 + up to 25% jitter
+  });
+
+  test("429 with Retry-After: 60 — every wait capped at 32s", () => {
+    // 8 retries × 32s cap = 256s ceiling. Server hint honored, no jitter.
     let total = 0;
     for (let attempt = 0; attempt < maxRetriesFor(429); attempt++) {
-      total += backoffMs(attempt, 60_000, 429);
+      total += backoffMs(attempt, 60_000);
     }
-    expect(total).toBe(180_000); // 3 retries × 60s
+    expect(total).toBe(256_000);
   });
 
-  test("background 429 without Retry-After: total up to ~6min", () => {
-    // Without server-guided Retry-After, backoff is wider: 60+120+180 = 360s.
-    // Intentionally generous to ride out rate-limit windows without hammering.
+  test("429 without Retry-After: bounded exponential sum", () => {
+    // 0.5 + 1 + 2 + 4 + 8 + 16 + 32 + 32 = 95.5s of base delay, + jitter.
     let total = 0;
     for (let attempt = 0; attempt < maxRetriesFor(429); attempt++) {
-      total += backoffMs(attempt, null, 429);
+      total += backoffMs(attempt, null);
     }
-    expect(total).toBe(360_000); // 60s + 120s + 180s
+    const base = 500 + 1000 + 2000 + 4000 + 8000 + 16_000 + 32_000 + 32_000;
+    expect(total).toBeGreaterThanOrEqual(base);
+    expect(total).toBeLessThan(base * 1.25);
   });
 });
 
@@ -311,5 +256,58 @@ describe("resolveWorkerProtocol", () => {
 
   test("unknown provider defaults to 'anthropic'", () => {
     expect(resolveWorkerProtocol("some-unknown-provider")).toBe("anthropic");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Circuit breaker: a 429 trips the breaker once per call, even when urgent
+// ---------------------------------------------------------------------------
+
+describe("worker 429 trips the circuit breaker (urgent included)", () => {
+  const realFetch = globalThis.fetch;
+  const realMaxRetries = process.env.LORE_MAX_RETRIES;
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    if (realMaxRetries === undefined) delete process.env.LORE_MAX_RETRIES;
+    else process.env.LORE_MAX_RETRIES = realMaxRetries;
+  });
+
+  test("urgent 429 storm trips the breaker exactly once across the retry loop", async () => {
+    // Small budget + Retry-After: 0 → retries are instant, so the loop runs
+    // to exhaustion without real waits.
+    process.env.LORE_MAX_RETRIES = "3";
+    resetBackgroundLimiter();
+
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      return new Response(
+        JSON.stringify({
+          type: "error",
+          error: { type: "rate_limit_error", message: "Error" },
+        }),
+        { status: 429, headers: { "retry-after": "0" } },
+      );
+    }) as unknown as typeof globalThis.fetch;
+
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.anthropic.com",
+        openai: "https://api.openai.com",
+      },
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      { providerID: "anthropic", modelID: "claude-test" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      urgent: true,
+      workerID: "lore-compact",
+    });
+
+    // Exhausted → null (caller falls back), all attempts made, breaker tripped once.
+    expect(result).toBeNull();
+    expect(fetchCalls).toBe(4); // maxRetries(3) + 1
+    expect(getConsecutiveTrips()).toBe(1);
   });
 });

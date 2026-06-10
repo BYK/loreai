@@ -54,32 +54,44 @@ const TRANSIENT_CODES = new Set([429, 500, 502, 503, 529]);
 /** HTTP status codes indicating permanent auth failure. */
 export const AUTH_ERROR_CODES = new Set([401, 403]);
 
-/** Max retries by error category for **background** (non-urgent) calls. */
-const MAX_RETRIES_RATE_LIMIT = 3; // 429s: ~6 min with wider spacing to reduce API pressure
-const MAX_RETRIES_SERVER = 3; // 5xx: fast retries
+/**
+ * Unified retry policy (modeled on Claude Code's `getRetryDelay`).
+ *
+ * A single policy governs every worker call — urgent or background, 429 or
+ * 5xx, Anthropic or any OpenAI-compatible provider. We deliberately do NOT
+ * bifurcate retry timing by urgency: the early retries are fast (sub-second),
+ * so a transient blip clears quickly without the old 60s background first-wait
+ * that made urgent calls (compaction) "hang", while the cap + jitter keep a
+ * sustained 429 storm from hammering the API. Aggregate pressure is managed
+ * centrally by the circuit breaker (see `background-limiter.ts`), which now
+ * trips on any 429 — so per-call wide spacing is no longer needed.
+ *
+ * Server `Retry-After` is always honored (capped at MAX_DELAY_MS so a
+ * pathological header can't wait unbounded). Without a header we use
+ * exponential backoff with jitter: 0.5s, 1s, 2s, 4s, 8s, 16s, 32s, 32s…
+ */
+const BASE_DELAY_MS = 500;
+const MAX_DELAY_MS = 32_000;
+
+/** Default retry budget, overridable via LORE_MAX_RETRIES. */
+const DEFAULT_MAX_RETRIES = 8;
+
+function resolveMaxRetries(): number {
+  const env = process.env.LORE_MAX_RETRIES;
+  if (env) {
+    const n = Number.parseInt(env, 10);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return DEFAULT_MAX_RETRIES;
+}
 
 /**
- * Max retries for **urgent** calls — synchronous worker work that the
- * client is awaiting (compaction, query expansion, overflow distillation).
- * Tight budget so a 429 storm cannot turn the SSE response into a multi-
- * minute hang. The user-visible "Lore made OpenCode hang" symptom that
- * motivated splitting these budgets came from urgent calls inheriting the
- * background-worker retry timing. 2 retries × ~3s max = ~6s ceiling.
+ * Max retries for a worker call. A single budget regardless of status code or
+ * urgency (the `_status` parameter is retained for call-site readability and
+ * potential future tuning).
  */
-const MAX_RETRIES_URGENT = 2;
-
-/** Cap Retry-After server hints separately for urgent vs background calls.
- *  Urgent paths cannot afford a 60-120s pause even if the server asks. */
-const RETRY_AFTER_CAP_URGENT_MS = 8_000;
-const RETRY_AFTER_CAP_BACKGROUND_MS = 120_000;
-
-export function maxRetriesFor(
-  status: number | null,
-  urgent: boolean = false,
-): number {
-  if (urgent) return MAX_RETRIES_URGENT;
-  if (status === 429) return MAX_RETRIES_RATE_LIMIT;
-  return MAX_RETRIES_SERVER;
+export function maxRetriesFor(_status: number | null = null): number {
+  return resolveMaxRetries();
 }
 
 /** Parse the Retry-After header into milliseconds, or null if absent/invalid. */
@@ -94,36 +106,18 @@ export function parseRetryAfter(response: Response): number | null {
 }
 
 /**
- * Compute delay for a retry attempt.
- * - Always honor Retry-After when present, capped per-mode (urgent: 8s, bg: 120s)
- * - 429 without Retry-After:
- *    - urgent: 1s, 2s, 4s (capped 4s)
- *    - background: 60s, 120s, 180s (wider spacing to reduce pressure on
- *      tight-quota environments like Claude Max)
- * - 5xx: aggressive 1s, 2s, 4s (capped 8s) — same for urgent and background
+ * Compute delay for a retry attempt (0-based) using the unified policy.
+ * - Honor Retry-After when present, capped at MAX_DELAY_MS.
+ * - Otherwise exponential backoff with 0-25% jitter:
+ *   min(BASE_DELAY_MS * 2^attempt, MAX_DELAY_MS) + jitter.
  */
 export function backoffMs(
   attempt: number,
   retryAfterMs: number | null,
-  status: number | null,
-  urgent: boolean = false,
 ): number {
-  // Always honor Retry-After from server, but cap tighter for urgent calls
-  if (retryAfterMs != null) {
-    const cap = urgent
-      ? RETRY_AFTER_CAP_URGENT_MS
-      : RETRY_AFTER_CAP_BACKGROUND_MS;
-    return Math.min(retryAfterMs, cap);
-  }
-
-  // Urgent path: aggressive exponential regardless of status
-  if (urgent) return Math.min(1000 * 2 ** attempt, 4000);
-
-  // 429 without Retry-After: wide spacing to give rate limits time to recover
-  if (status === 429) return Math.min(60_000 + attempt * 60_000, 180_000);
-
-  // 5xx: aggressive exponential backoff
-  return Math.min(1000 * 2 ** attempt, 8000);
+  if (retryAfterMs != null) return Math.min(retryAfterMs, MAX_DELAY_MS);
+  const base = Math.min(BASE_DELAY_MS * 2 ** attempt, MAX_DELAY_MS);
+  return base + Math.random() * 0.25 * base;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -527,6 +521,9 @@ export function createGatewayLLMClient(
             let totalDelayMs = 0;
             let lastRetryAfterMs: number | null = null;
             let finalStatus = 0;
+            // Trip the circuit breaker at most once per call so a multi-retry
+            // 429 loop doesn't runaway-escalate the breaker's backoff schedule.
+            let breakerTripped = false;
 
             // Retry loop for transient errors (429, 5xx)
             for (let attempt = 0; ; attempt++) {
@@ -542,9 +539,9 @@ export function createGatewayLLMClient(
                 });
               } catch (e) {
                 // Network/fetch error — retry if attempts remain
-                const maxRetries = maxRetriesFor(null, urgent);
+                const maxRetries = maxRetriesFor();
                 if (attempt < maxRetries) {
-                  const delay = backoffMs(attempt, null, null, urgent);
+                  const delay = backoffMs(attempt, null);
                   retryCount++;
                   totalDelayMs += delay;
                   log.warn(
@@ -723,10 +720,15 @@ export function createGatewayLLMClient(
                 return null;
               }
 
-              // Transient error — retry if attempts remain
-              // Trip the global circuit breaker on non-urgent 429s so other
-              // background work pauses instead of piling on more requests.
-              if (response.status === 429 && !urgent) {
+              // Transient error — retry if attempts remain.
+              // Trip the global circuit breaker on ANY 429 (urgent included) so
+              // background work pauses instead of piling on more requests while
+              // this call rides out the rate limit. The urgent call itself is
+              // not gated by the breaker, so it keeps retrying. Trip at most
+              // once per call to avoid runaway escalation of the backoff
+              // schedule across a multi-retry loop.
+              if (response.status === 429 && !breakerTripped) {
+                breakerTripped = true;
                 const cbRetryAfter = parseRetryAfter(response);
                 const pauseSec = cbRetryAfter
                   ? Math.ceil(cbRetryAfter / 1000)
@@ -734,15 +736,10 @@ export function createGatewayLLMClient(
                 tripCircuitBreaker(pauseSec);
               }
 
-              const maxRetries = maxRetriesFor(response.status, urgent);
+              const maxRetries = maxRetriesFor(response.status);
               if (attempt < maxRetries) {
                 const retryAfter = parseRetryAfter(response);
-                const delay = backoffMs(
-                  attempt,
-                  retryAfter,
-                  response.status,
-                  urgent,
-                );
+                const delay = backoffMs(attempt, retryAfter);
                 retryCount++;
                 totalDelayMs += delay;
                 if (retryAfter != null) lastRetryAfterMs = retryAfter;
@@ -757,15 +754,25 @@ export function createGatewayLLMClient(
                 continue;
               }
 
-              // Exhausted retries — log, capture Sentry error, enrich span
+              // Exhausted retries — log, capture Sentry error, enrich span.
+              // Urgent calls (compaction, query expansion) have a graceful
+              // caller-side fallback — e.g. handleCompaction forwards the
+              // client's own compaction upstream — so their exhaustion is
+              // harmless. Log it at `warn` (hidden unless LORE_DEBUG) to avoid
+              // alarming red `[lore]` noise; background exhaustion stays at
+              // `error` since it can indicate a sustained problem.
               const text = await response.text().catch(() => "(no body)");
-              log.error(
+              const exhaustionMsg =
                 `worker upstream request failed after ${maxRetries + 1} attempts: ${response.status} ${response.statusText}` +
-                  ` — url=${target.url} model=${model.providerID}/${model.modelID}` +
-                  ` cred=${cred.scheme} worker=${opts?.workerID ?? "unknown"}` +
-                  ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}` +
-                  ` — ${text}`,
-              );
+                ` — url=${target.url} model=${model.providerID}/${model.modelID}` +
+                ` cred=${cred.scheme} worker=${opts?.workerID ?? "unknown"}` +
+                ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}` +
+                ` — ${text}`;
+              if (urgent) {
+                log.warn(exhaustionMsg);
+              } else {
+                log.error(exhaustionMsg);
+              }
 
               // Capture as Sentry error for alerting
               Sentry.captureException(
