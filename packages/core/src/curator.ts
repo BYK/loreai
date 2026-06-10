@@ -281,7 +281,11 @@ export function applyOps(
         content,
         session: input.sessionID,
         scope: op.scope,
-        crossProject: op.crossProject ?? true,
+        // Default to project-scoped. Cross-project sharing must be an explicit,
+        // deliberate choice by the curator — defaulting to true caused
+        // project-specific engineering directives to leak into every project's
+        // injected context (see plan: cross-project knowledge leak).
+        crossProject: op.crossProject ?? false,
         confidence: op.confidence,
         workerProviderID: input.workerModel?.providerID,
         workerModelID: input.workerModel?.modelID,

@@ -1,6 +1,7 @@
 import { describe, test, expect } from "vitest";
 import {
   inferProjectPath,
+  inferProjectPathDetailed,
   getProjectPath,
   extractGitRemoteHeader,
   extractProjectHeader,
@@ -165,6 +166,41 @@ describe("inferProjectPath", () => {
 });
 
 // ---------------------------------------------------------------------------
+// inferProjectPathDetailed — authoritative vs. weak (misattribution guard)
+// ---------------------------------------------------------------------------
+
+describe("inferProjectPathDetailed", () => {
+  test("cwd / Working directory / *.md matches are authoritative", () => {
+    expect(inferProjectPathDetailed('"cwd": "/home/u/p"')).toEqual({
+      path: "/home/u/p",
+      authoritative: true,
+    });
+    expect(inferProjectPathDetailed("Working directory: /home/u/p")).toEqual({
+      path: "/home/u/p",
+      authoritative: true,
+    });
+    expect(
+      inferProjectPathDetailed("Instructions from: /home/u/p/AGENTS.md"),
+    ).toEqual({ path: "/home/u/p", authoritative: true });
+  });
+
+  test("generic /home or /Users matches are NON-authoritative", () => {
+    expect(inferProjectPathDetailed("see /home/u/generic here")).toEqual({
+      path: "/home/u/generic",
+      authoritative: false,
+    });
+    expect(inferProjectPathDetailed("see /Users/u/generic here")).toEqual({
+      path: "/Users/u/generic",
+      authoritative: false,
+    });
+  });
+
+  test("returns null when nothing matches", () => {
+    expect(inferProjectPathDetailed("no paths here")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // getProjectPath
 // ---------------------------------------------------------------------------
 
@@ -194,6 +230,24 @@ describe("getProjectPath", () => {
     expect(result.path).toBe(process.cwd());
     expect(result.source).toBe("cwd");
     expect(result.gitRemote).toBeUndefined();
+  });
+
+  test("does NOT confidently infer from a bare /home path in embedded content", () => {
+    // A generic /home path with no authoritative marker could be a stray path
+    // inside tool output / file contents referencing another project. It must
+    // NOT bind as a confident "inferred" source (which would trigger a merge).
+    const result = getProjectPath(
+      "Tool output: file /home/user/other-project/src/x.ts was read",
+      {},
+    );
+    expect(result.source).toBe("cwd");
+    expect(result.path).toBe(process.cwd());
+  });
+
+  test("still confidently infers from an authoritative Working directory marker", () => {
+    const result = getProjectPath("Working directory: /home/user/real", {});
+    expect(result.source).toBe("inferred");
+    expect(result.path).toBe("/home/user/real");
   });
 
   test("ignores empty X-Lore-Project header", () => {
@@ -596,6 +650,71 @@ describe("resolveSessionProjectPath", () => {
       projectPath: realPath,
     });
     expect(moved.length).toBeGreaterThan(0);
+  });
+
+  // --- self-heal merge guard (cross-project contamination prevention) ---
+
+  test("does NOT merge two distinct real projects lacking a shared git remote", () => {
+    const sid = `noMerge-${crypto.randomUUID()}`;
+    const oldPath = `/test/merge/old-${crypto.randomUUID()}`;
+    const newPath = `/test/merge/new-${crypto.randomUUID()}`;
+    const oldId = ensureProject(oldPath);
+    const secretTitle = `old-project-secret-${crypto.randomUUID()}`;
+    ltm.create({
+      projectPath: oldPath,
+      scope: "project",
+      category: "gotcha",
+      title: secretTitle,
+      content: "knowledge that must not migrate into an unrelated project",
+    });
+
+    // A confident turn learns a DIFFERENT real path with no corroborating
+    // git remote. The session re-binds, but the old project must NOT be merged
+    // (which would permanently alias oldPath → newId and leak its knowledge).
+    const state = provisionalState(sid, oldPath);
+    const result = resolveSessionProjectPath(
+      { path: newPath, source: "header" },
+      state,
+      localCfg,
+    );
+
+    expect(result).toBe(newPath);
+    expect(state.projectPathProvisional).toBe(false); // healed (re-bound)
+    // Old project row survives, still owns its knowledge.
+    expect(projectId(oldPath)).toBe(oldId);
+    const stillThere = ltm.forProject(oldPath, false);
+    expect(stillThere.some((e) => e.title === secretTitle)).toBe(true);
+    // New project is a distinct row — no aliasing happened.
+    expect(projectId(newPath)).not.toBe(oldId);
+  });
+
+  test("DOES merge when the provisional path is a synthetic unattributed bucket", () => {
+    const sid = `bucketMerge-${crypto.randomUUID()}`;
+    const bucket = unattributedBucketPath(sid);
+    const realPath = `/test/merge/real-${crypto.randomUUID()}`;
+    const bucketId = ensureProject(bucket);
+    ltm.create({
+      projectPath: bucket,
+      scope: "project",
+      category: "gotcha",
+      title: `bucket-finding-${sid}`,
+      content: "learned during a path-less probe turn",
+    });
+
+    const state = provisionalState(sid, bucket);
+    const result = resolveSessionProjectPath(
+      { path: realPath, source: "header" },
+      state,
+      localCfg,
+    );
+
+    expect(result).toBe(realPath);
+    // Bucket merged into the real project: bucket row gone, knowledge moved.
+    const realId = projectId(realPath);
+    expect(realId).toBeDefined();
+    expect(realId).not.toBe(bucketId);
+    const moved = ltm.forProject(realPath, false);
+    expect(moved.some((e) => e.title === `bucket-finding-${sid}`)).toBe(true);
   });
 
   // --- gitRemote caching (unchanged behavior) ---

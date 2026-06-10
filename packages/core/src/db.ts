@@ -1029,6 +1029,25 @@ const MIGRATIONS: string[] = [
   ALTER TABLE session_state ADD COLUMN project_path_provisional INTEGER NOT NULL DEFAULT 1;
   `,
   `ALTER TABLE session_state ADD COLUMN compaction_anomaly_pending INTEGER NOT NULL DEFAULT 0;`,
+  `
+  -- Version 38: Repair over-eager cross-project marking.
+  -- The curator historically defaulted crossProject to TRUE, so project-specific
+  -- engineering knowledge (architecture, paths, gotchas, directives) was stored
+  -- with cross_project = 1 and leaked into every other project's injected
+  -- context. Demote those rows back to project scope.
+  -- Conservatively preserve genuinely-global knowledge:
+  --   * project_id IS NULL  → user-level / scope:"global" entries (kept cross).
+  --   * promotion_status = 'promoted' → auto-promoted across >=3 projects, i.e.
+  --     it earned cross-project status (kept cross).
+  -- Only curator-default-marked, project-owned rows (promotion_status IS NULL)
+  -- are demoted.
+  UPDATE knowledge
+     SET cross_project = 0,
+         updated_at = (CAST(strftime('%s','now') AS INTEGER) * 1000)
+   WHERE cross_project = 1
+     AND project_id IS NOT NULL
+     AND promotion_status IS NULL;
+  `,
 ];
 
 /**
@@ -1595,6 +1614,14 @@ export function projectPath(id: string): string | null {
     path: string;
   } | null;
   return row?.path ?? null;
+}
+
+/** Look up a project's normalized git remote by its internal ID, or null. */
+export function projectGitRemote(id: string): string | null {
+  const row = db()
+    .query("SELECT git_remote FROM projects WHERE id = ?")
+    .get(id) as { git_remote: string | null } | null;
+  return row?.git_remote ?? null;
 }
 
 /** Look up a project's display name by its internal ID. */

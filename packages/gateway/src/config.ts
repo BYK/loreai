@@ -514,21 +514,43 @@ const PROJECT_PATH_PATTERNS: RegExp[] = [
 ];
 
 /**
+ * Number of leading entries in `PROJECT_PATH_PATTERNS` that are *authoritative*
+ * — i.e. they describe the agent's actual workspace via an unambiguous
+ * structural marker (`cwd` field, "Working directory:" line, or a
+ * CLAUDE/AGENTS/.lore.md file path). The remaining (generic `/home`/`/Users`)
+ * pattern is NON-authoritative: it matches any home path mentioned anywhere,
+ * including embedded tool output or file contents that reference a DIFFERENT
+ * project. A match from that pattern alone must NOT confidently (re)bind the
+ * session — it is the project-misattribution vector behind cross-project leaks.
+ */
+const AUTHORITATIVE_PATTERN_COUNT = 3;
+
+export type InferredProjectPath = { path: string; authoritative: boolean };
+
+/**
  * Try to extract a project path from the system prompt content.
  *
  * Claude Code includes absolute paths in its system prompt (CLAUDE.md
  * content, tool definitions, working directory references). Returns the
  * extracted path or `null` if nothing looks like a project directory.
  */
-export function inferProjectPath(systemPrompt: string): string | null {
-  for (const pattern of PROJECT_PATH_PATTERNS) {
-    const match = pattern.exec(systemPrompt);
+export function inferProjectPathDetailed(
+  systemPrompt: string,
+): InferredProjectPath | null {
+  for (let i = 0; i < PROJECT_PATH_PATTERNS.length; i++) {
+    const match = PROJECT_PATH_PATTERNS[i].exec(systemPrompt);
     if (match?.[1]) {
       // Strip trailing slashes for consistency
-      return match[1].replace(/\/+$/, "") || null;
+      const path = match[1].replace(/\/+$/, "");
+      if (!path) return null;
+      return { path, authoritative: i < AUTHORITATIVE_PATTERN_COUNT };
     }
   }
   return null;
+}
+
+export function inferProjectPath(systemPrompt: string): string | null {
+  return inferProjectPathDetailed(systemPrompt)?.path ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -591,9 +613,18 @@ export function getProjectPath(
   const headerPath = extractProjectHeader(headers);
   if (headerPath) return { path: headerPath, source: "header", gitRemote };
 
-  // 2. Infer from system prompt content
-  const inferred = inferProjectPath(systemPrompt);
-  if (inferred) return { path: inferred, source: "inferred", gitRemote };
+  // 2. Infer from system prompt content. Only AUTHORITATIVE inferences (a cwd
+  //    field, "Working directory:" line, or CLAUDE/AGENTS/.lore.md path) are
+  //    trusted to confidently bind the session. A match from the generic
+  //    /home|/Users catch-all could be a stray path inside embedded tool output
+  //    or file contents referencing another project — trusting it would
+  //    misattribute the session and can trigger a destructive cross-project
+  //    self-heal merge. Such weak matches fall through to the cwd fallback
+  //    (provisional), which never merges.
+  const inferred = inferProjectPathDetailed(systemPrompt);
+  if (inferred?.authoritative) {
+    return { path: inferred.path, source: "inferred", gitRemote };
+  }
 
   // 3. Fall back to gateway's own cwd (with workspace root discovery)
   return {

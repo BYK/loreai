@@ -266,17 +266,25 @@ export const LorePlugin: Plugin = async (ctx) => {
       config: async (input) => {
         const cfg = input as Record<string, unknown>;
         cfg.compaction = { auto: false, prune: false };
+        // `mode: "subagent"` is REQUIRED for `hidden` to take effect: OpenCode
+        // defaults agents to `mode: "all"` (visible in BOTH the primary Tab
+        // picker and the @-mention/skill list) and only honors `hidden: true`
+        // for subagent-mode agents. Without it these internal workers leak into
+        // every host project's agent/skill picker.
         cfg.agent = {
           ...(cfg.agent as Record<string, unknown> | undefined),
           "lore-distill": {
+            mode: "subagent",
             hidden: true,
             description: "Lore memory distillation worker",
           },
           "lore-curator": {
+            mode: "subagent",
             hidden: true,
             description: "Lore knowledge curator worker",
           },
           "lore-query-expand": {
+            mode: "subagent",
             hidden: true,
             description: "Lore query expansion worker",
           },

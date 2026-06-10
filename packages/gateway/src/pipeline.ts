@@ -17,7 +17,9 @@ import {
   config as loreConfig,
   ensureProject,
   projectId,
+  projectGitRemote,
   mergeProjectInternal,
+  isUnattributedProjectPath,
   temporal,
   ltm,
   distillation,
@@ -1223,6 +1225,33 @@ function reattributeProvisionalProject(
     // Ensure the destination project row exists before merging into it.
     const toId = ensureProject(toPath, undefined, gitRemote);
     if (fromId === toId) return true;
+
+    // Merging permanently aliases `fromPath` → `toId` (db registers a
+    // project_path_aliases row). That is only safe when we are confident the
+    // two paths are the SAME logical project. Corroborate before merging:
+    //   (a) `fromPath` is a synthetic per-session unattributed bucket — it is
+    //       session-private, so folding it into the real project is always safe.
+    //   (b) the two project rows share a git remote — strong evidence they are
+    //       the same repo (worktree / re-clone / cwd-vs-header path skew).
+    // Otherwise these are two DISTINCT real on-disk paths linked only by a
+    // (possibly mis-)inferred path. Re-bind the session to the new path but do
+    // NOT merge — a stray inferred path must never fold one real project's
+    // knowledge into another's (which would then leak via on-disk .lore.md
+    // export). The orphaned provisional rows can still be reconciled later by
+    // `lore data consolidate` when a shared git remote is known.
+    const fromRemote = projectGitRemote(fromId);
+    const toRemote = gitRemote ?? projectGitRemote(toId);
+    const remotesMatch = !!fromRemote && !!toRemote && fromRemote === toRemote;
+    const corroborated = isUnattributedProjectPath(fromPath) || remotesMatch;
+    if (!corroborated) {
+      log.warn(
+        `self-heal: NOT merging ${fromPath} → ${toPath} — distinct real ` +
+          `projects with no shared git remote; re-binding session only to ` +
+          `avoid cross-project contamination.`,
+      );
+      return true; // session re-binds to toPath; provisional rows stay put
+    }
+
     mergeProjectInternal(fromId, toId);
     log.info(
       `self-heal: re-attributed provisional project ${fromPath} → ${toPath}`,

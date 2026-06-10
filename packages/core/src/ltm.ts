@@ -416,6 +416,35 @@ const NO_CONTEXT_FALLBACK_CAP = 10;
 const PROJECT_SAFETY_NET = 5;
 
 /**
+ * Classify an entry from the cross-project pool relative to the current project:
+ *  - "global": `project_id IS NULL` — a user-level entry with no home project
+ *    (e.g. `scope:"global"` preferences). Universally applicable.
+ *  - "own":    `project_id === pid` — this project's own entry that also carries
+ *    `cross_project = 1`. It belongs here.
+ *  - "foreign": `cross_project = 1` owned by a DIFFERENT project. Sharing it is
+ *    only ever appropriate when it relevance-matches the current session.
+ */
+function crossEntryClass(
+  entry: KnowledgeEntry,
+  pid: string,
+): "global" | "own" | "foreign" {
+  if (entry.project_id === null) return "global";
+  if (entry.project_id === pid) return "own";
+  return "foreign";
+}
+
+/**
+ * Whether a cross-pool entry may be injected WITHOUT a relevance match.
+ * Globals and this project's own entries are always eligible; foreign
+ * cross-project entries are not — they must earn injection through relevance
+ * scoring. This is the guard that stops one project's knowledge (e.g. lore's
+ * own engineering directives) from leaking into every other project's context.
+ */
+function isBlanketEligible(entry: KnowledgeEntry, pid: string): boolean {
+  return crossEntryClass(entry, pid) !== "foreign";
+}
+
+/**
  * Score entries by FTS5 BM25 relevance to session context.
  *
  * Uses OR semantics (not AND-then-OR) because we're scoring ALL candidates
@@ -563,7 +592,27 @@ export async function forSession(
   const isPreferenceOnly =
     categoryFilter?.length === 1 && categoryFilter[0] === "preference";
   if (isPreferenceOnly) {
-    const allPrefs = [...projectEntries, ...crossEntries];
+    // Blanket-inject only the user's own directives: project-local prefs
+    // (Pool 1), true globals (`project_id IS NULL`), and this project's own
+    // cross-marked prefs. FOREIGN cross-project prefs (owned by a different
+    // project) are NOT blanket-injected — otherwise one project's preferences
+    // leak into every project. They re-enter only when they relevance-match the
+    // caller-provided context hint; with no hint we cannot establish relevance
+    // on this cheap path, so they are dropped.
+    const blanketPrefs = [
+      ...projectEntries,
+      ...crossEntries.filter((e) => isBlanketEligible(e, pid)),
+    ];
+    const foreignPrefs = crossEntries.filter((e) => !isBlanketEligible(e, pid));
+    let relevantForeign: KnowledgeEntry[] = [];
+    if (foreignPrefs.length && options?.contextHint?.trim()) {
+      const ftsScores = scoreEntriesFTS(options.contextHint);
+      relevantForeign = foreignPrefs.filter(
+        (e) => (ftsScores.get(e.id) ?? 0) > 0,
+      );
+    }
+
+    const allPrefs = [...blanketPrefs, ...relevantForeign];
     allPrefs.sort((a, b) =>
       a.confidence !== b.confidence
         ? b.confidence - a.confidence
@@ -691,11 +740,15 @@ export async function forSession(
       ftsScores,
     ));
   } else {
-    // No session context — fall back to top entries by confidence, capped
+    // No session context — fall back to top entries by confidence, capped.
+    // For the cross pool, only blanket-eligible entries (globals + this
+    // project's own) qualify; foreign cross-project entries are withheld since
+    // there is no context to establish their relevance.
     scoredProject = projectEntries
       .slice(0, NO_CONTEXT_FALLBACK_CAP)
       .map((entry) => ({ entry, score: entry.confidence }));
     scoredCross = crossEntries
+      .filter((e) => isBlanketEligible(e, pid))
       .slice(0, NO_CONTEXT_FALLBACK_CAP)
       .map((entry) => ({ entry, score: entry.confidence }));
   }

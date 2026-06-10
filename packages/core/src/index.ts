@@ -69,6 +69,7 @@ export {
   projectId,
   projectName,
   projectPath,
+  projectGitRemote,
   resolveProjectByRemoteOrPath,
   mergeProjectInternal,
   UNATTRIBUTED_PROJECT_PREFIX,

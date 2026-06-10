@@ -375,8 +375,9 @@ CROSS-REFERENCES between entries:
 - Example: "Uses the gradient system [[019c904b-791e-772a-ab2b-93ac892a960c]] for context management."
 
 crossProject flag:
-- Default is true — most useful knowledge is worth sharing across projects
-- Set crossProject to false for things that are meaningless outside this specific repo (e.g. a config path, a project-local naming convention that conflicts with your usual style)
+- Default is FALSE — knowledge is project-scoped unless you have a concrete reason to share it.
+- Set crossProject to true ONLY for genuinely universal *user* preferences that hold regardless of which repo you are in (e.g. tooling/style/workflow habits like "prefers pnpm over npm", "wants conventional-commit messages", "never add emojis").
+- Keep crossProject false for anything tied to THIS project: architecture, file paths, naming conventions, migrations, gotchas, decisions, and engineering directives specific to this codebase. These must never leak into other projects.
 
 Confidence values (0.0–1.0) — determines injection priority when budget is tight:
 - 1.0: Unconditional directive — user used "NEVER", "ALWAYS", "from now on", or similarly
@@ -400,7 +401,7 @@ Produce a JSON array of operations:
     "title": "Short descriptive title",
     "content": "Concise knowledge entry — under 150 words",
     "scope": "project" | "global",
-    "crossProject": true,
+    "crossProject": false,
     "confidence": 1.0
   },
   {

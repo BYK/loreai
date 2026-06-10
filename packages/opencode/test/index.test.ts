@@ -71,20 +71,35 @@ describe("LorePlugin config hook", () => {
 
       const agents = cfg.agent as Record<
         string,
-        { hidden: boolean; description: string }
+        { mode?: string; hidden: boolean; description: string }
       >;
       expect(agents["lore-distill"]).toEqual({
+        mode: "subagent",
         hidden: true,
         description: "Lore memory distillation worker",
       });
       expect(agents["lore-curator"]).toEqual({
+        mode: "subagent",
         hidden: true,
         description: "Lore knowledge curator worker",
       });
       expect(agents["lore-query-expand"]).toEqual({
+        mode: "subagent",
         hidden: true,
         description: "Lore query expansion worker",
       });
+
+      // `hidden` is only honored by OpenCode for subagent-mode agents; assert
+      // every internal worker is explicitly mode:"subagent" (not "all"/"primary")
+      // so it never surfaces in the host project's agent/skill picker.
+      for (const name of [
+        "lore-distill",
+        "lore-curator",
+        "lore-query-expand",
+      ]) {
+        expect(agents[name].mode).toBe("subagent");
+        expect(agents[name].hidden).toBe(true);
+      }
     } finally {
       cleanup();
     }
