@@ -90,8 +90,8 @@ importers:
         specifier: ^7.7.1
         version: 7.7.1
       fossilize:
-        specifier: ^0.9.1
-        version: 0.9.1
+        specifier: ^0.9.2
+        version: 0.9.2
 
   packages/opencode:
     dependencies:
@@ -2292,8 +2292,8 @@ packages:
     resolution: {integrity: sha512-buewHzMvYL29jdeQTVILecSaZKnt/RJWjoZCF5OW60Z67/GmSLBkOFM7qh1PI3zFNtJbaZL5eQu1vLfazOwj4g==}
     engines: {node: '>=12.20.0'}
 
-  fossilize@0.9.1:
-    resolution: {integrity: sha512-lnO/gVpAe9M6SHEVxSwK4C+DbJXse1gADUzXIOPygKwaX5K5g6scOG6ovE4iOeLel65827ZcvRqdfVbu+WVXlw==}
+  fossilize@0.9.2:
+    resolution: {integrity: sha512-tiCkn2JtQJNV3kQ8IcETb8lGZuXqzL3lrOKL6x0kNt+xLNBumPa9mEY3Gm2TtZWwTSW5VlrWVb8ovmJJgiuo2Q==}
     engines: {node: '>=18'}
     hasBin: true
 
@@ -6118,7 +6118,7 @@ snapshots:
     dependencies:
       fetch-blob: 3.2.0
 
-  fossilize@0.9.1:
+  fossilize@0.9.2:
     dependencies:
       '@stricli/auto-complete': 1.2.7
       '@stricli/core': 1.2.7
