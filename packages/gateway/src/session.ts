@@ -5,9 +5,9 @@
  *
  *  **Tier 1 — Known headers** (immediate match):
  *    `x-lore-session-id` (Lore plugins: OpenCode, Pi — stable, deterministic),
- *    `x-claude-code-session-id` (Claude Code), `x-session-affinity`
- *    (OpenCode native — volatile, regenerated on restart). Checked in
- *    priority order; stable headers win over volatile ones.
+ *    `x-claude-code-session-id` (Claude Code), `x-session-id` (generic
+ *    session ID, e.g. OpenCode v1.17+), `x-session-affinity` (OpenCode,
+ *    legacy name). Checked in priority order; first match wins.
  *
  *  **Tier 2 — Learned headers** (bootstrapped via fingerprint):
  *    During the first few fingerprinted turns, collect candidate `x-`
@@ -229,31 +229,16 @@ export const MESSAGE_COUNT_PROXIMITY_THRESHOLD = 20;
 // ---------------------------------------------------------------------------
 
 /**
- * Client type for behavioral decisions (e.g. max_tokens sizing).
+ * Detect whether the request originates from Claude Code.
  *
- * - "claude-code": manages its own max_tokens (32K for modern models)
- * - "opencode": uses x-session-affinity, currently sends no max_tokens
- * - "generic": unknown client
+ * Claude Code sends `x-claude-code-session-id` on every request. Callers
+ * should additionally check `hasBillingHeader()` on the system prompt to
+ * catch edge cases (e.g. Claude Code OAuth without the session header).
  */
-export type ClientType = "claude-code" | "opencode" | "generic";
-
-/**
- * Detect the client type from request headers.
- *
- * Detection hierarchy:
- *  1. x-claude-code-session-id → "claude-code"
- *  2. x-session-affinity → "opencode"
- *  3. absence of all → "generic"
- *
- * For edge cases (Claude Code OAuth without session header), callers can
- * additionally check hasBillingHeader() on the system prompt.
- */
-export function detectClientType(
+export function isClaudeCodeClient(
   rawHeaders: Record<string, string>,
-): ClientType {
-  if (rawHeaders["x-claude-code-session-id"]) return "claude-code";
-  if (rawHeaders["x-session-affinity"]) return "opencode";
-  return "generic";
+): boolean {
+  return !!rawHeaders["x-claude-code-session-id"];
 }
 
 // ---------------------------------------------------------------------------
@@ -267,7 +252,8 @@ export function detectClientType(
 export const KNOWN_SESSION_HEADERS = [
   "x-lore-session-id", // Lore plugins (stable, deterministic) — checked first
   "x-claude-code-session-id", // Claude Code (UUID, persists for CLI session)
-  "x-session-affinity", // OpenCode  (nanoid, volatile — regenerated on restart)
+  "x-session-id", // Generic session ID (e.g. OpenCode v1.17+, stable per session)
+  "x-session-affinity", // OpenCode (stable session ID, legacy name)
 ] as const;
 
 /**

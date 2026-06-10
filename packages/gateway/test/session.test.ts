@@ -366,6 +366,17 @@ describe("extractKnownSessionHeader", () => {
     });
   });
 
+  test("extracts x-session-id", () => {
+    const result = extractKnownSessionHeader({
+      "x-session-id": "ses_abc123def",
+      "content-type": "application/json",
+    });
+    expect(result).toEqual({
+      sessionId: "ses_abc123def",
+      headerName: "x-session-id",
+    });
+  });
+
   test("extracts x-session-affinity", () => {
     const result = extractKnownSessionHeader({
       "x-session-affinity": "ses_abc123def",
@@ -377,10 +388,11 @@ describe("extractKnownSessionHeader", () => {
     });
   });
 
-  test("prefers x-lore-session-id over x-claude-code-session-id and x-session-affinity", () => {
+  test("prefers x-lore-session-id over all others", () => {
     const result = extractKnownSessionHeader({
       "x-lore-session-id": "stable-lore-id",
       "x-claude-code-session-id": "claude-uuid",
+      "x-session-id": "opencode-id",
       "x-session-affinity": "opencode-id",
     });
     expect(result).toEqual({
@@ -389,14 +401,26 @@ describe("extractKnownSessionHeader", () => {
     });
   });
 
-  test("prefers x-claude-code-session-id over x-session-affinity", () => {
+  test("prefers x-claude-code-session-id over x-session-id and x-session-affinity", () => {
     const result = extractKnownSessionHeader({
       "x-claude-code-session-id": "claude-uuid",
+      "x-session-id": "opencode-id",
       "x-session-affinity": "opencode-id",
     });
     expect(result).toEqual({
       sessionId: "claude-uuid",
       headerName: "x-claude-code-session-id",
+    });
+  });
+
+  test("prefers x-session-id over x-session-affinity", () => {
+    const result = extractKnownSessionHeader({
+      "x-session-id": "standard-id",
+      "x-session-affinity": "legacy-id",
+    });
+    expect(result).toEqual({
+      sessionId: "standard-id",
+      headerName: "x-session-id",
     });
   });
 
@@ -411,6 +435,7 @@ describe("extractKnownSessionHeader", () => {
   test("ignores empty header values", () => {
     const result = extractKnownSessionHeader({
       "x-claude-code-session-id": "",
+      "x-session-id": "",
       "x-session-affinity": "valid-id",
     });
     expect(result).toEqual({

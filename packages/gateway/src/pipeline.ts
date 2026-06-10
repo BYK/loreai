@@ -181,7 +181,7 @@ import {
   hasBillingHeader,
   resignBody,
 } from "./cch";
-import { detectClientType } from "./session";
+import { isClaudeCodeClient } from "./session";
 import { analyzeCacheTurn, categorizeBust } from "./cache-analytics";
 import {
   recordGap,
@@ -1403,7 +1403,7 @@ function getOrCreateSession(
  *
  * Uses a multi-tier strategy:
  *  1. **Known headers** — `x-lore-session-id` (stable, checked first),
- *     `x-claude-code-session-id`, `x-session-affinity`.
+ *     `x-claude-code-session-id`, `x-session-id`, `x-session-affinity`.
  *     Immediate match, survives compaction & model changes.
  *  1a. **Cross-header migration** — when the primary known header is new
  *     (e.g. plugin upgrade), checks lower-priority headers for an existing
@@ -4222,12 +4222,12 @@ async function handleConversationTurn(
   }
 
   // --- 4c. Dynamic max_tokens sizing for non-Claude-Code clients ---
-  // Claude Code manages its own max_tokens (32K for modern models). Non-CC
-  // clients (OpenCode, generic) often send low/missing values (defaults to
-  // 4096 in ingress parsing). Apply a hybrid headroom + history algorithm
-  // that tightens from the 32K ceiling based on actual output patterns.
-  const clientType = detectClientType(req.rawHeaders);
-  const isCC = clientType === "claude-code" || hasBillingHeader(req.system);
+  // Claude Code manages its own max_tokens (32K for modern models). Other
+  // clients often send low/missing values (defaults to 4096 in ingress
+  // parsing). Apply a hybrid headroom + history algorithm that tightens
+  // from the 32K ceiling based on actual output patterns.
+  const isCC =
+    isClaudeCodeClient(req.rawHeaders) || hasBillingHeader(req.system);
   if (!isCC) {
     const computed = computeMaxTokens(
       modelSpec.output,
@@ -4239,7 +4239,7 @@ async function handleConversationTurn(
     if (req.maxTokens !== computed) {
       log.info(
         `max_tokens: ${req.maxTokens} → ${computed} ` +
-          `(client=${clientType}, ema=${sessionState.outputTokensEMA ?? "none"}, ` +
+          `(ema=${sessionState.outputTokensEMA ?? "none"}, ` +
           `lastStop=${sessionState.lastStopReason ?? "none"})`,
       );
       req.maxTokens = computed;

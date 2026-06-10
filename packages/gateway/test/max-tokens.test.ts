@@ -1,6 +1,6 @@
 import { describe, test, expect } from "vitest";
 import { computeMaxTokens } from "../src/pipeline";
-import { detectClientType } from "../src/session";
+import { isClaudeCodeClient } from "../src/session";
 import { hasBillingHeader } from "../src/cch";
 
 // ---------------------------------------------------------------------------
@@ -148,34 +148,26 @@ describe("computeMaxTokens", () => {
 });
 
 // ---------------------------------------------------------------------------
-// detectClientType
+// isClaudeCodeClient
 // ---------------------------------------------------------------------------
 
-describe("detectClientType", () => {
-  test("detects Claude Code via x-claude-code-session-id header", () => {
+describe("isClaudeCodeClient", () => {
+  test("returns true when x-claude-code-session-id is present", () => {
     expect(
-      detectClientType({ "x-claude-code-session-id": "abc-123-uuid" }),
-    ).toBe("claude-code");
+      isClaudeCodeClient({ "x-claude-code-session-id": "abc-123-uuid" }),
+    ).toBe(true);
   });
 
-  test("detects OpenCode via x-session-affinity header", () => {
-    expect(detectClientType({ "x-session-affinity": "nano-id-value" })).toBe(
-      "opencode",
+  test("returns false for other session headers", () => {
+    expect(isClaudeCodeClient({ "x-session-affinity": "nano-id-value" })).toBe(
+      false,
     );
+    expect(isClaudeCodeClient({ "x-session-id": "ses_abc123" })).toBe(false);
   });
 
-  test("returns generic when no known headers", () => {
-    expect(detectClientType({})).toBe("generic");
-    expect(detectClientType({ "x-custom-header": "value" })).toBe("generic");
-  });
-
-  test("Claude Code wins when both headers present", () => {
-    expect(
-      detectClientType({
-        "x-claude-code-session-id": "abc",
-        "x-session-affinity": "def",
-      }),
-    ).toBe("claude-code");
+  test("returns false when no known headers", () => {
+    expect(isClaudeCodeClient({})).toBe(false);
+    expect(isClaudeCodeClient({ "x-custom-header": "value" })).toBe(false);
   });
 });
 
