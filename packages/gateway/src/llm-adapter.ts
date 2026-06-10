@@ -73,7 +73,11 @@ export const AUTH_ERROR_CODES = new Set([401, 403]);
 const BASE_DELAY_MS = 500;
 const MAX_DELAY_MS = 32_000;
 
-/** Default retry budget, overridable via LORE_MAX_RETRIES. */
+/**
+ * Number of retries for a worker upstream call before giving up (the call
+ * then returns null and the caller falls back). Override with the
+ * LORE_MAX_RETRIES env var.
+ */
 const DEFAULT_MAX_RETRIES = 8;
 
 function resolveMaxRetries(): number {
