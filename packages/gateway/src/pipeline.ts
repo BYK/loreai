@@ -1332,7 +1332,7 @@ function getOrCreateSession(
       }
     }
 
-    // Restore compaction anomaly pending flag (v36) — triggers urgent
+    // Restore compaction anomaly pending flag (v37) — triggers urgent
     // distillation on next turn after a client-side compaction dropped
     // message count by 50%+. Survives gateway restarts.
     if (persisted?.compactionAnomalyPending) {
@@ -4102,6 +4102,12 @@ async function handleConversationTurn(
     consecutiveTextOnlyTurns: sessionState.consecutiveTextOnlyTurns,
     projectPath: sessionState.projectPath || null,
     projectPathProvisional: sessionState.projectPathProvisional === true,
+    // v37: persist the compaction anomaly flag so a gateway restart between
+    // detection (this turn) and consumption (next turn's scheduleBackgroundWork)
+    // doesn't lose the urgent-distillation signal.
+    ...(sessionState.compactionAnomalyPending
+      ? { compactionAnomalyPending: true }
+      : {}),
   });
 
   // Track session model for worker model discovery
