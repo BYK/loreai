@@ -7,7 +7,7 @@
  *
  * - Old binary: read fully into memory (mmap is a Bun-specific optimization
  *   without a Node.js equivalent — readFileSync is the cross-runtime option)
- * - Diff/extra blocks: streamed via `DecompressionStream('zstd')`
+ * - Diff/extra blocks: streamed via `node:zlib` `createZstdDecompress()`
  * - Output: written incrementally to disk via `node:fs` createWriteStream
  * - Integrity: SHA-256 computed inline via `node:crypto` createHash
  *
@@ -28,7 +28,8 @@ import { constants, copyFileSync, createWriteStream } from "node:fs";
 import { readFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { zstdDecompressSync } from "node:zlib";
+import { Readable } from "node:stream";
+import { createZstdDecompress, zstdDecompressSync } from "node:zlib";
 
 /** TRDIFF10 header magic bytes */
 const TRDIFF10_MAGIC = "TRDIFF10";
@@ -152,28 +153,26 @@ class BufferedStreamReader {
 }
 
 /**
- * Create a streaming zstd decompressor from a compressed buffer.
+ * Create a streaming reader over a zstd-compressed buffer.
+ *
+ * Node's WHATWG `DecompressionStream` does NOT support "zstd" (only
+ * deflate/deflate-raw/gzip). We use node:zlib's streaming
+ * `createZstdDecompress()` Duplex and adapt its readable side to a Web
+ * ReadableStream so BufferedStreamReader's reader interface is unchanged.
+ *
+ * The compressed data is fully buffered (passed via `.end()`), but
+ * decompressed output is produced incrementally as
+ * `BufferedStreamReader.read()` pulls, avoiding a single contiguous
+ * decompressed allocation up front.
  */
 function createZstdStreamReader(compressed: Uint8Array): BufferedStreamReader {
-  const input = new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(compressed);
-      controller.close();
-    },
-  });
-
-  // Bun supports 'zstd' but the standard CompressionFormat type doesn't include it.
-  // The double cast works around TypeScript's strict WritableStream<BufferSource>
-  // vs WritableStream<Uint8Array> mismatch in DecompressionStream.
-  const decompressed = input.pipeThrough(
-    new DecompressionStream("zstd" as "deflate") as unknown as TransformStream<
-      Uint8Array,
-      Uint8Array
-    >,
-  );
-
+  const decompressor = createZstdDecompress();
+  decompressor.end(compressed);
+  const webStream = Readable.toWeb(
+    decompressor,
+  ) as unknown as ReadableStream<Uint8Array>;
   return new BufferedStreamReader(
-    decompressed.getReader() as ReadableStreamDefaultReader<Uint8Array>,
+    webStream.getReader() as ReadableStreamDefaultReader<Uint8Array>,
   );
 }
 
