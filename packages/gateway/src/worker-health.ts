@@ -104,12 +104,16 @@ const SESSION_TTL_MS = 60 * 60 * 1000; // 1 hour
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 /**
- * Sustained failure duration after which the circuit breaker opens. Aligned
- * with the user-facing "degraded" threshold: once we've been failing this
- * long, the upstream is genuinely down (not a transient blip), so callers
- * should stop hammering it every turn and probe only periodically.
+ * Sustained failure duration after which the circuit breaker opens. Once we've
+ * been failing this long the upstream is genuinely down (not a transient blip),
+ * so callers should stop hammering it every turn and probe only periodically.
+ *
+ * Independent of (but currently equal to) {@link RESPONSE_MESSAGE_THRESHOLD_MS}:
+ * "when to stop hammering the upstream" is a distinct concern from "when to
+ * warn the user", so they get their own constants even though both are 30m
+ * today — changing one for UX reasons must not silently change the other.
  */
-const CIRCUIT_OPEN_THRESHOLD_MS = RESPONSE_MESSAGE_THRESHOLD_MS; // 30 minutes
+const CIRCUIT_OPEN_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes
 
 /**
  * While the circuit is open, allow at most one worker probe per this interval.
@@ -353,6 +357,13 @@ export function recordWorkerSuccess(sessionID: string): void {
  * Callers MUST only gate *non-urgent* background work with this. Urgent
  * distillation and blocking compaction are intentionally exempt — starving
  * them harms the user more than a futile retry costs.
+ *
+ * Note: those exempt paths omit the `workerHealth` hook entirely, so they are
+ * invisible to the breaker — they neither open/extend it (their failures
+ * aren't recorded) nor close it (no `recordWorkerSuccess`). Recovery is
+ * therefore detected only by the periodic non-urgent probe this gate lets
+ * through, which DOES carry the hook; recovery latency is bounded by
+ * {@link CIRCUIT_PROBE_INTERVAL_MS}.
  */
 export function allowWorkerProbe(sessionID: string): boolean {
   const entry = state.get(sessionID);

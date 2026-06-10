@@ -191,6 +191,8 @@ describe("worker-health", () => {
     test("critical alert uses stable Error message + fingerprint", () => {
       // Keep failures within the 5-min window (no reset) so firstFailureAt
       // stays put while sustained duration crosses the 60-min threshold.
+      // 17 failures × 4 min = 68 min elapsed > 60-min CRITICAL_THRESHOLD_MS,
+      // so the captureException fires on the failure at the 60-min mark.
       let t = 1_000_000;
       for (let i = 0; i <= 16; i++) {
         _setNowForTest(() => t);
@@ -273,6 +275,36 @@ describe("worker-health", () => {
 
       recordWorkerSuccess("s1");
       expect(allowWorkerProbe("s1")).toBe(true);
+    });
+
+    test("long gap since last failure allows a probe even while open", () => {
+      // After the circuit opens, a long stretch with no new failures means
+      // the next attempt is always allowed (probe interval long-since passed),
+      // so a recovered upstream is re-probed rather than starved forever.
+      const t0 = 1_000_000;
+      _setNowForTest(() => t0);
+      recordWorkerFailure("s1", "lore-distill", "no-response");
+      _setNowForTest(() => t0 + 31 * 60 * 1000);
+      recordWorkerFailure("s1", "lore-distill", "no-response");
+      expect(allowWorkerProbe("s1")).toBe(false); // just failed → cooldown
+
+      // 61 min after the last failure — well past the 5-min probe interval.
+      _setNowForTest(() => t0 + 31 * 60 * 1000 + 61 * 60 * 1000);
+      expect(allowWorkerProbe("s1")).toBe(true);
+    });
+
+    test("breaker is per-session, spanning workers (one circuit per session)", () => {
+      // Failures attributed to different workers in the same session share one
+      // circuit — when the upstream is down, distill failures gate curation too.
+      const t0 = 1_000_000;
+      _setNowForTest(() => t0);
+      recordWorkerFailure("s1", "lore-distill", "no-response");
+      _setNowForTest(() => t0 + 31 * 60 * 1000);
+      recordWorkerFailure("s1", "lore-curator", "no-response");
+      // Circuit is open for the whole session regardless of which worker asks.
+      expect(allowWorkerProbe("s1")).toBe(false);
+      // A different session is unaffected.
+      expect(allowWorkerProbe("s2")).toBe(true);
     });
   });
 });
