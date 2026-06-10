@@ -30,6 +30,7 @@
     "typecheck": "pnpm -r run typecheck",
     "test": "vitest run",
     "pretest": "pnpm --filter @loreai/gateway run bundle",
+    "test:coverage": "pnpm --filter @loreai/gateway run bundle && vitest run --coverage",
     "build": "pnpm -r run build",
     "site:dev": "pnpm --filter '@loreai/website' dev",
     "site:build": "pnpm --filter '@loreai/website' build",

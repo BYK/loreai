@@ -144,10 +144,12 @@ jobs:
         run: pnpm run lint
 
       - name: Test
-        # `--` forwards `--coverage` to the underlying `vitest run` while still
-        # triggering the `pretest` hook (gateway bundle). Produces
+        # Runs the gateway bundle (needed by tests) then `vitest run --coverage`.
+        # `--coverage` is baked into the script rather than forwarded via
+        # `pnpm test -- --coverage`, because pnpm does NOT forward args past the
+        # `test` lifecycle script — the flag was silently dropped. Produces
         # ./coverage/lcov.info for the Codecov upload below.
-        run: pnpm test -- --coverage
+        run: pnpm run test:coverage
         env:
           # Silence the ~85-line "ExperimentalWarning: SQLite is an experimental
           # feature" noise from node:sqlite — emitted once per worker fork in
