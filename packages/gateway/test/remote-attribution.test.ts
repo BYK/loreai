@@ -64,11 +64,20 @@ describe("remote gateway: path-less session attribution", () => {
       ],
     });
 
-    const r1 = await harness.chat(pathlessBody("alpha project question one"));
+    // Suppress the harness default x-lore-project header — this test
+    // intentionally sends path-less requests.
+    const noProject = { "x-lore-project": "" };
+    const r1 = await harness.chat(
+      pathlessBody("alpha project question one"),
+      "test-key",
+      noProject,
+    );
     expect(r1.status).toBe(200);
     await r1.text();
     const r2 = await harness.chat(
       pathlessBody("beta project totally different"),
+      "test-key",
+      noProject,
     );
     expect(r2.status).toBe(200);
     await r2.text();

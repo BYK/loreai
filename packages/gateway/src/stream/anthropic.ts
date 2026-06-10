@@ -720,6 +720,107 @@ export function buildKeepaliveCompactionStream(
   });
 }
 
+/**
+ * Build a complete SSE event sequence for a synthetic tool_use response.
+ *
+ * Generates the full Anthropic streaming lifecycle for a single tool_use block
+ * with `stop_reason: "tool_use"`:
+ *   message_start -> content_block_start (tool_use) -> content_block_delta
+ *   (input_json_delta) -> content_block_stop -> message_delta -> message_stop
+ *
+ * Used by the synthetic-tool primitive to short-circuit the first turn and
+ * return a gateway-generated tool_use that the client harness must execute.
+ */
+export function buildSSEToolUseResponse(
+  id: string,
+  model: string,
+  toolUse: { id: string; name: string; input: unknown },
+): string {
+  const events: string[] = [];
+
+  // message_start
+  events.push(
+    formatSSEEvent(
+      "message_start",
+      JSON.stringify({
+        type: "message_start",
+        message: {
+          id,
+          type: "message",
+          role: "assistant",
+          content: [],
+          model,
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 0, output_tokens: 1 },
+        },
+      }),
+    ),
+  );
+
+  // content_block_start — tool_use (input starts empty)
+  events.push(
+    formatSSEEvent(
+      "content_block_start",
+      JSON.stringify({
+        type: "content_block_start",
+        index: 0,
+        content_block: {
+          type: "tool_use",
+          id: toolUse.id,
+          name: toolUse.name,
+          input: {},
+        },
+      }),
+    ),
+  );
+
+  // content_block_delta — full input in one delta
+  events.push(
+    formatSSEEvent(
+      "content_block_delta",
+      JSON.stringify({
+        type: "content_block_delta",
+        index: 0,
+        delta: {
+          type: "input_json_delta",
+          partial_json: JSON.stringify(toolUse.input),
+        },
+      }),
+    ),
+  );
+
+  // content_block_stop
+  events.push(
+    formatSSEEvent(
+      "content_block_stop",
+      JSON.stringify({
+        type: "content_block_stop",
+        index: 0,
+      }),
+    ),
+  );
+
+  // message_delta — stop_reason is "tool_use"
+  events.push(
+    formatSSEEvent(
+      "message_delta",
+      JSON.stringify({
+        type: "message_delta",
+        delta: { stop_reason: "tool_use", stop_sequence: null },
+        usage: { output_tokens: 0 },
+      }),
+    ),
+  );
+
+  // message_stop
+  events.push(
+    formatSSEEvent("message_stop", JSON.stringify({ type: "message_stop" })),
+  );
+
+  return events.join("");
+}
+
 // ---------------------------------------------------------------------------
 // Recall-aware stream accumulator
 // ---------------------------------------------------------------------------

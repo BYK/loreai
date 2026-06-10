@@ -134,6 +134,7 @@ import {
   createRecallAwareAccumulator,
   parseSSEStream,
   buildSSETextResponse,
+  buildSSEToolUseResponse,
   buildKeepaliveCompactionStream,
   formatSSEEvent,
   type StreamAccumulator,
@@ -239,6 +240,15 @@ import {
   isRecallMarker,
 } from "./recall";
 import { upstreamFetch } from "./fetch";
+import {
+  findReadTool,
+  findShellTool,
+  buildSyntheticToolUseBlock,
+  captureSyntheticToolResult,
+  stripSyntheticRoundTrips,
+  parseResolveProjectResult,
+  type ResolveProjectResult,
+} from "./synthetic-tools";
 
 // ---------------------------------------------------------------------------
 // Recall tool commit reminder
@@ -1264,6 +1274,114 @@ function reattributeProvisionalProject(
     );
     return false;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Synthetic project-resolution helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Apply the result of a synthetic project-resolution probe to the session.
+ *
+ * Mirrors Branch A of `resolveSessionProjectPath`: if we got a confident
+ * signal (git remote or client-side root), bind the session, reattribute
+ * any provisional data, and clear the provisional flag. Never throws.
+ *
+ * Returns the (possibly updated) projectPath for the caller to use.
+ */
+function applySyntheticResolution(
+  sessionState: SessionState,
+  resolved: ResolveProjectResult,
+  currentProjectPath: string,
+): string {
+  try {
+    const { root, gitRemote } = resolved;
+    if (!root && !gitRemote) return currentProjectPath; // nothing useful — no-op
+
+    const newPath = root ?? currentProjectPath;
+    const previous = sessionState.projectPath;
+    const wasProvisional = sessionState.projectPathProvisional === true;
+
+    if (wasProvisional && previous && previous !== newPath) {
+      reattributeProvisionalProject(previous, newPath, gitRemote);
+    }
+
+    sessionState.projectPath = newPath;
+    // Only clear provisional when we have a real client-side root (from
+    // shell probe) or a git remote (from either probe). A remote alone
+    // is sufficient for consolidation-based reconciliation.
+    if (root || gitRemote) {
+      sessionState.projectPathProvisional = false;
+    }
+
+    if (gitRemote) {
+      sessionState.gitRemote = gitRemote;
+    }
+
+    if (gitRemote || root) {
+      ensureProject(newPath, undefined, gitRemote);
+    }
+
+    log.info(
+      `synthetic-resolve: bound session ${sessionState.sessionID.slice(0, 16)} → ` +
+        `path=${newPath}${gitRemote ? ` remote=${gitRemote}` : ""}`,
+    );
+    return newPath;
+  } catch (e) {
+    // applySyntheticResolution must NEVER throw into the live request.
+    log.warn("synthetic-resolve: applySyntheticResolution failed:", e);
+    return currentProjectPath;
+  }
+}
+
+/**
+ * Build an HTTP Response containing a single synthetic tool_use block.
+ *
+ * The client harness sees this as a normal assistant response with
+ * `stop_reason: "tool_use"` and MUST execute the tool. The gateway controls
+ * the entire response — no upstream call is made.
+ *
+ * Supports both streaming (Anthropic SSE → translated for OpenAI clients)
+ * and non-streaming paths.
+ */
+function syntheticToolUseResponse(
+  req: GatewayRequest,
+  block: GatewayToolUseBlock,
+): Response {
+  const resp: GatewayResponse = {
+    id: `msg_lore_syn_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`,
+    model: req.model,
+    content: [block],
+    stopReason: "tool_use",
+    usage: ZERO_USAGE,
+  };
+
+  if (req.stream) {
+    // Build Anthropic SSE, then translate if the client speaks OpenAI.
+    const sseBody = buildSSEToolUseResponse(resp.id, resp.model, {
+      id: block.id,
+      name: block.name,
+      input: block.input,
+    });
+    const anthropicSSE = new Response(sseBody, {
+      status: 200,
+      headers: {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        connection: "keep-alive",
+      },
+    });
+    if (req.protocol === "openai") {
+      return translateAnthropicStreamToOpenAI(anthropicSSE);
+    }
+    if (req.protocol === "openai-responses") {
+      return translateAnthropicStreamToResponses(anthropicSSE);
+    }
+    return anthropicSSE;
+  }
+
+  // Non-streaming: use the existing format builders.
+  return nonStreamHttpResponse(resp, req.protocol);
 }
 
 // ---------------------------------------------------------------------------
@@ -3977,11 +4095,61 @@ async function handleConversationTurn(
     pathResult.path,
     pathResult.source,
   );
-  const projectPath = resolveSessionProjectPath(
-    pathResult,
-    sessionState,
-    config,
-  );
+  let projectPath = resolveSessionProjectPath(pathResult, sessionState, config);
+
+  // --- Synthetic project-resolution: capture a returning tool_result ---
+  // If we previously injected a synthetic tool_use for project detection,
+  // capture the client's tool_result, parse it, and bind the project before
+  // initIfNeeded runs (so the project row targets the corrected path).
+  if (
+    (sessionState.syntheticResolveState === "readPending" ||
+      sessionState.syntheticResolveState === "shellPending") &&
+    sessionState.syntheticResolveToolUseId
+  ) {
+    const captured = captureSyntheticToolResult(
+      req,
+      sessionState.syntheticResolveToolUseId,
+    );
+    if (captured && sessionState.syntheticResolveKind) {
+      const resolved = captured.isError
+        ? {}
+        : parseResolveProjectResult(
+            sessionState.syntheticResolveKind,
+            captured.text,
+          );
+      // Apply the resolution — bind the project by remote and/or root.
+      projectPath = applySyntheticResolution(
+        sessionState,
+        resolved,
+        projectPath,
+      );
+      // Strip the synthetic round-trip from the conversation so the LLM
+      // never sees it and it's excluded from temporal storage.
+      stripSyntheticRoundTrips(req);
+
+      // Escalation: read probe yielded no remote → try shell next.
+      const stillWeak = sessionState.projectPathProvisional === true;
+      sessionState.syntheticResolveStage =
+        sessionState.syntheticResolveKind === "read"
+          ? "readTried"
+          : "shellTried";
+      if (stillWeak && sessionState.syntheticResolveKind === "read") {
+        // Re-eligible for a shell probe on this same turn's injection phase.
+        sessionState.syntheticResolveState = "none";
+      } else {
+        sessionState.syntheticResolveState = "done";
+      }
+    } else {
+      // No tool_result arrived (non-agentic client or skipped) — give up.
+      sessionState.syntheticResolveState = "done";
+    }
+    sessionState.syntheticResolveToolUseId = undefined;
+    sessionState.syntheticResolveKind = undefined;
+  }
+
+  // Also strip any stale synthetic blocks that might echo back from the
+  // conversation history (belt-and-suspenders — prevents leaking upstream).
+  stripSyntheticRoundTrips(req);
 
   // Initialize the project AFTER path correction so a path-less probe request
   // never creates a project row for the gateway's cwd or an unattributed
@@ -4634,6 +4802,47 @@ async function handleConversationTurn(
           }
         : RECALL_GATEWAY_TOOL;
     modifiedReq.tools = [...modifiedReq.tools, recallTool];
+  }
+
+  // --- 8c. Synthetic project-resolution: inject probe if eligible ---
+  // When the session has a weak/provisional binding AND we haven't exhausted
+  // our probe attempts, short-circuit the turn with a synthetic tool_use
+  // targeting the client's own read or shell tool.
+  //
+  // Only fires on REMOTE gateways — for local gateways, process.cwd() is
+  // the real project directory (cwd is "weak but correct"), so injecting
+  // a probe would add latency for no benefit.
+  {
+    const weakBinding = sessionState.projectPathProvisional === true;
+    const resolveState = sessionState.syntheticResolveState ?? "none";
+    const eligible =
+      weakBinding &&
+      config.remoteGateway &&
+      resolveState === "none" &&
+      modifiedReq.tools.length > 0;
+
+    if (eligible) {
+      const stage = sessionState.syntheticResolveStage;
+      // Stage 1: prefer read (safer). Stage 2 (after readTried): shell only.
+      const readTarget = stage ? null : findReadTool(modifiedReq.tools);
+      const target = readTarget ?? findShellTool(modifiedReq.tools);
+      if (target) {
+        const block = buildSyntheticToolUseBlock(target);
+        sessionState.syntheticResolveState =
+          target.kind === "read" ? "readPending" : "shellPending";
+        sessionState.syntheticResolveToolUseId = block.id;
+        sessionState.syntheticResolveKind = target.kind;
+        log.info(
+          `synthetic-resolve: injecting ${target.kind} probe ` +
+            `(tool=${target.toolName}) for session ${sessionID.slice(0, 16)}`,
+        );
+        // SHORT-CIRCUIT: do NOT forward upstream. Return our own tool_use
+        // response so the client harness executes the probe locally.
+        return syntheticToolUseResponse(req, block);
+      }
+      // No usable tool — give up permanently for this session.
+      sessionState.syntheticResolveState = "done";
+    }
   }
 
   // --- 9. Forward to upstream ---

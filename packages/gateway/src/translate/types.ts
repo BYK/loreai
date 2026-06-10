@@ -479,6 +479,29 @@ export type SessionState = {
    *  multiple providers within the same conversation. */
   upstreamByProvider: Map<string, UpstreamSnapshot>;
 
+  // --- Synthetic project-resolution probe ---
+
+  /**
+   * State machine for synthetic project-resolution probes. Bounded: ≤2
+   * probes per session (read then shell).
+   *
+   * Transitions:
+   *   undefined/"none" ──(read tool? emit read probe)──> "readPending"
+   *   undefined/"none" ──(no read, shell tool? emit shell)──> "shellPending"
+   *   undefined/"none" ──(no usable tool)──> "done"
+   *   "readPending" ──(remote parsed)──> "done"
+   *   "readPending" ──(no remote, shell tool? emit shell)──> "shellPending"
+   *   "readPending" ──(no remote, no shell / no result)──> "done"
+   *   "shellPending" ──(parsed | no result)──> "done"
+   */
+  syntheticResolveState?: "none" | "readPending" | "shellPending" | "done";
+  /** The synthetic tool_use ID we minted (to match the returning tool_result). */
+  syntheticResolveToolUseId?: string;
+  /** Which probe kind is currently pending (to parse the result correctly). */
+  syntheticResolveKind?: "read" | "shell";
+  /** Tracks which stages have been attempted. Bounds escalation. */
+  syntheticResolveStage?: "readTried" | "shellTried";
+
   // --- Amnesia mode ---
 
   /** When true, temporal storage and background work (distillation, curation)

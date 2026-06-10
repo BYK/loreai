@@ -30,7 +30,11 @@ export interface Harness {
   /** Path to the isolated temp DB */
   dbPath: string;
   /** Send a POST /v1/messages request, return the raw Response */
-  chat(requestBody: unknown, apiKey?: string): Promise<Response>;
+  chat(
+    requestBody: unknown,
+    apiKey?: string,
+    extraHeaders?: Record<string, string>,
+  ): Promise<Response>;
   /** Query the temporal DB directly via a read-only SQLite connection */
   queryDB<T = Record<string, unknown>>(sql: string, params?: unknown[]): T[];
   /** Stop the gateway and clean up */
@@ -110,6 +114,7 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
   async function chat(
     requestBody: unknown,
     apiKey = "test-key",
+    extraHeaders?: Record<string, string>,
   ): Promise<Response> {
     return fetch(`${baseURL}/v1/messages`, {
       method: "POST",
@@ -117,6 +122,12 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
         "content-type": "application/json",
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
+        // Provide a confident project binding by default so the synthetic
+        // project-resolution probe is never triggered in harness-based tests.
+        // Tests that intentionally test path-less sessions can override this
+        // via extraHeaders (set to empty string to suppress).
+        "x-lore-project": process.cwd(),
+        ...extraHeaders,
       },
       body: JSON.stringify(requestBody),
     });
