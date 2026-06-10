@@ -5536,6 +5536,14 @@ export async function handleRequest(
   config: GatewayConfig,
 ): Promise<Response> {
   try {
+    // Guard against malformed invocations (e.g. fuzzers / direct module calls
+    // that pass an undefined or header-less request). The real server path
+    // always supplies a fully-formed GatewayRequest; bailing out cleanly here
+    // avoids a TypeError on `req.rawHeaders` deeper in the pipeline.
+    if (!req?.rawHeaders) {
+      return errorResponse(400, "Malformed request: missing headers");
+    }
+
     // Capture auth credentials early for background workers
     const earlyAuth = extractAuth(req.rawHeaders);
     if (earlyAuth) {

@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeEach } from "vitest";
 import {
+  extractAuth,
   setSessionAuth,
   getSessionAuth,
   deleteSessionAuth,
@@ -33,6 +34,38 @@ const minimaxCred: AuthCredential = {
   scheme: "api-key",
   value: "sk-cp-minimax-key",
 };
+
+// ---------------------------------------------------------------------------
+// Header extraction
+// ---------------------------------------------------------------------------
+
+describe("extractAuth", () => {
+  test("extracts x-api-key as api-key credential", () => {
+    expect(extractAuth({ "x-api-key": "sk-123" })).toEqual({
+      scheme: "api-key",
+      value: "sk-123",
+    });
+  });
+
+  test("extracts Bearer token as bearer credential", () => {
+    expect(extractAuth({ authorization: "Bearer tok-abc" })).toEqual({
+      scheme: "bearer",
+      value: "tok-abc",
+    });
+  });
+
+  test("returns null when no auth headers present", () => {
+    expect(extractAuth({})).toBeNull();
+  });
+
+  // Regression: a fuzzer (/opt/audit/fuzz-exports.js) called extractAuth()
+  // with undefined, triggering "Cannot read properties of undefined
+  // (reading 'x-api-key')" (Sentry LOREAI-GATEWAY-28). Guard returns null.
+  test("returns null for null/undefined headers instead of throwing", () => {
+    expect(extractAuth(null)).toBeNull();
+    expect(extractAuth(undefined)).toBeNull();
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Staleness tracking

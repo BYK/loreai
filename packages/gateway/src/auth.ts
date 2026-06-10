@@ -34,8 +34,10 @@ export type AuthCredential =
  * Returns `null` if neither is present.
  */
 export function extractAuth(
-  headers: Record<string, string>,
+  headers: Record<string, string> | null | undefined,
 ): AuthCredential | null {
+  if (!headers) return null;
+
   const apiKey = headers["x-api-key"] || headers["X-Api-Key"];
   if (apiKey) return { scheme: "api-key", value: apiKey };
 
