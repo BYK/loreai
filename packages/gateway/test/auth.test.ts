@@ -9,6 +9,8 @@ import {
   markAuthStale,
   isAuthStale,
   clearAuthStale,
+  markGlobalAuthStale,
+  isGlobalAuthStale,
   _resetAuthForTest,
   type AuthCredential,
 } from "../src/auth";
@@ -287,38 +289,37 @@ describe("resolveAuth per-provider staleness", () => {
     expect(resolveAuth("sess-1", "anthropic")).toBe(null);
   });
 
-  test("marking named provider stale marks _default when _default holds same credential", () => {
+  test("named provider does NOT contaminate _default slot", () => {
+    // Storing a named provider credential must NOT set _default — this
+    // prevents cross-contamination (e.g. MiniMax key leaking to Anthropic
+    // workers that resolve auth without a providerID).
     setSessionAuth("sess-1", minimaxCred, "minimax");
-    // _default was set to minimaxCred by setSessionAuth's dual-write
     setLastSeenAuth(apiKeyCred);
 
-    // Mark only minimax stale — should automatically mark _default too,
-    // since _default currently holds the same credential as minimax.
-    markAuthStale("sess-1", "minimax");
-
-    // _default should be stale (auto-marked — same credential)
-    expect(isAuthStale("sess-1", "_default")).toBe(true);
-    // No providerID → checks _default → stale → falls through to global
+    // _default was never set (no dual-write), so resolveAuth without
+    // providerID falls through to global.
+    expect(getSessionAuth("sess-1")).toBe(null);
     expect(resolveAuth("sess-1")).toEqual(apiKeyCred);
+
+    // minimax credential resolves correctly via its providerID
+    expect(resolveAuth("sess-1", "minimax")).toEqual(minimaxCred);
   });
 
-  test("marking named provider stale does NOT mark _default when another provider was set last", () => {
-    // MiniMax set first, then Anthropic set last → _default = anthropic
+  test("marking named provider stale does not affect _default when _default was set independently", () => {
+    // _default set via legacy caller (no providerID), then a named provider set separately
+    setSessionAuth("sess-1", apiKeyCred); // sets _default
     setSessionAuth("sess-1", minimaxCred, "minimax");
-    setSessionAuth("sess-1", apiKeyCred, "anthropic");
     setLastSeenAuth(bearerCred);
 
-    // Mark minimax stale — _default points to anthropic (different cred),
+    // Mark minimax stale — _default holds apiKeyCred (different),
     // so _default should NOT be marked stale.
     markAuthStale("sess-1", "minimax");
 
     expect(isAuthStale("sess-1", "minimax")).toBe(true);
-    // _default should NOT be stale — it holds the anthropic credential
+    // _default should NOT be stale — it holds a different credential
     expect(isAuthStale("sess-1", "_default")).toBe(false);
-    // resolveAuth without providerID returns _default (anthropic) — not stale
+    // resolveAuth without providerID returns _default — not stale
     expect(resolveAuth("sess-1")).toEqual(apiKeyCred);
-    // Anthropic also not stale
-    expect(resolveAuth("sess-1", "anthropic")).toEqual(apiKeyCred);
     // MiniMax stale → falls to global
     expect(resolveAuth("sess-1", "minimax")).toEqual(bearerCred);
   });
@@ -331,16 +332,95 @@ describe("resolveAuth per-provider staleness", () => {
     markAuthStale("sess-1", "anthropic");
     markAuthStale("sess-1", "minimax");
 
-    // Refresh only anthropic — clears anthropic + _default staleness
+    // Refresh only anthropic — clears anthropic staleness
     setSessionAuth("sess-1", bearerCred2, "anthropic");
 
     // Anthropic is fresh — resolves to new credential
     expect(resolveAuth("sess-1", "anthropic")).toEqual(bearerCred2);
     // MiniMax still stale — falls through to global
     expect(resolveAuth("sess-1", "minimax")).toEqual(apiKeyCred);
-    // _default was cleared by setSessionAuth refresh
+    // _default was never set (named providers don't dual-write to _default)
     expect(isAuthStale("sess-1", "_default")).toBe(false);
     // But session-level still stale (minimax)
     expect(isAuthStale("sess-1")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Global auth staleness (session-less worker protection)
+// ---------------------------------------------------------------------------
+
+describe("global auth staleness", () => {
+  test("global auth is not stale by default", () => {
+    expect(isGlobalAuthStale()).toBe(false);
+  });
+
+  test("markGlobalAuthStale prevents resolveAuth(undefined) from returning stale token", () => {
+    setLastSeenAuth(bearerCred);
+    expect(resolveAuth()).toEqual(bearerCred);
+
+    // Session-less worker gets 401 → marks global stale
+    markGlobalAuthStale();
+    expect(isGlobalAuthStale()).toBe(true);
+
+    // resolveAuth(undefined) should return null — the token is rejected
+    expect(resolveAuth()).toBe(null);
+  });
+
+  test("setLastSeenAuth with a fresh credential clears global staleness", () => {
+    setLastSeenAuth(bearerCred);
+    markGlobalAuthStale();
+    expect(resolveAuth()).toBe(null);
+
+    // A new client request arrives with a different token
+    setLastSeenAuth(bearerCred2);
+    expect(isGlobalAuthStale()).toBe(false);
+    expect(resolveAuth()).toEqual(bearerCred2);
+  });
+
+  test("setLastSeenAuth with the same credential does NOT clear global staleness", () => {
+    setLastSeenAuth(bearerCred);
+    markGlobalAuthStale();
+
+    // Same expired token re-set — staleness persists
+    setLastSeenAuth(bearerCred);
+    expect(isGlobalAuthStale()).toBe(true);
+    expect(resolveAuth()).toBe(null);
+  });
+
+  test("global staleness does not affect session-level auth resolution", () => {
+    setSessionAuth("sess-1", apiKeyCred);
+    setLastSeenAuth(bearerCred);
+    markGlobalAuthStale();
+
+    // Session-level auth resolves normally — global staleness is irrelevant
+    expect(resolveAuth("sess-1")).toEqual(apiKeyCred);
+    // Session-less path is blocked
+    expect(resolveAuth()).toBe(null);
+  });
+
+  test("stale session + stale global returns null (both exhausted)", () => {
+    // Realistic scenario: session-less worker poisons global, then session
+    // worker's credential also goes stale (e.g. OAuth token expired).
+    setSessionAuth("sess-1", bearerCred);
+    setLastSeenAuth(bearerCred2);
+
+    // Session-less worker 401 → global stale
+    markGlobalAuthStale();
+    // Session worker 401 → session stale
+    markAuthStale("sess-1");
+
+    // Both paths exhausted — must return null, not the stale token
+    expect(resolveAuth("sess-1")).toBe(null);
+    expect(resolveAuth()).toBe(null);
+  });
+
+  test("_resetAuthForTest clears global staleness", () => {
+    setLastSeenAuth(bearerCred);
+    markGlobalAuthStale();
+    expect(isGlobalAuthStale()).toBe(true);
+
+    _resetAuthForTest();
+    expect(isGlobalAuthStale()).toBe(false);
   });
 });

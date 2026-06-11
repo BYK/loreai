@@ -111,20 +111,23 @@ export function setSessionAuth(
   }
   const key = providerID || "_default";
   byProvider.set(key, cred);
-  // Also keep the _default slot in sync with the latest credential so
-  // callers that don't pass a providerID still get a reasonable result.
-  if (key !== "_default") byProvider.set("_default", cred);
+  // Only set _default when no explicit providerID was given (legacy callers).
+  // When a named provider stores its credential (e.g. "minimax"), do NOT
+  // overwrite _default — that causes cross-contamination: a MiniMax API key
+  // stored as _default would be returned for Anthropic workers that resolve
+  // auth without a providerID, causing 401 storms.
   // Fresh credential clears staleness for this specific provider.
-  // Also clear _default when a named provider refreshes, since _default
-  // tracks the latest-used provider.
   clearProviderStale(sessionID, key);
-  if (key !== "_default") clearProviderStale(sessionID, "_default");
 }
 
 /**
  * Look up a credential for a session. When `providerID` is given, returns
- * the credential stored for that specific provider; otherwise returns the
- * most-recently-stored credential (the `_default` slot).
+ * ONLY the credential stored for that specific provider — never falls back
+ * to `_default`. This prevents cross-contamination: a MiniMax key stored
+ * under "minimax" must not be returned when "anthropic" is requested.
+ *
+ * When `providerID` is omitted, returns the `_default` slot (legacy callers
+ * that don't track provider context).
  */
 export function getSessionAuth(
   sessionID: string,
@@ -133,7 +136,7 @@ export function getSessionAuth(
   const byProvider = sessionAuth.get(sessionID);
   if (!byProvider) return null;
   if (providerID) {
-    return byProvider.get(providerID) ?? byProvider.get("_default") ?? null;
+    return byProvider.get(providerID) ?? null;
   }
   return byProvider.get("_default") ?? null;
 }
@@ -230,12 +233,46 @@ function clearProviderStale(sessionID: string, providerID: string): void {
 
 let lastSeenAuth: AuthCredential | null = null;
 
+/**
+ * When true, the global `lastSeenAuth` has been rejected by an upstream
+ * provider (401/403) and no session-level credential refresh has cleared it.
+ * Prevents session-less workers from hammering with a permanently-stale token.
+ *
+ * Reset when `setLastSeenAuth()` stores a fresh credential (a new client
+ * request arrived with valid auth).
+ */
+let globalAuthStale = false;
+
 export function setLastSeenAuth(cred: AuthCredential): void {
+  // A fresh credential clears global staleness — a new client request
+  // arrived, so the token may be valid again.
+  if (!lastSeenAuth || lastSeenAuth.value !== cred.value) {
+    globalAuthStale = false;
+  }
   lastSeenAuth = cred;
 }
 
 export function getLastSeenAuth(): AuthCredential | null {
+  if (globalAuthStale) return null;
   return lastSeenAuth;
+}
+
+/**
+ * Mark the global fallback credential as stale. Called when a session-less
+ * worker (no sessionID) receives a 401/403 — since there's no session to
+ * attach staleness to, we mark the global credential directly.
+ *
+ * This prevents runaway 401 storms from session-less workers (e.g.
+ * entity-rebuild) that would otherwise keep resolving the same expired
+ * token on every retry.
+ */
+export function markGlobalAuthStale(): void {
+  globalAuthStale = true;
+}
+
+/** Check if the global fallback is marked stale. */
+export function isGlobalAuthStale(): boolean {
+  return globalAuthStale;
 }
 
 // ---------------------------------------------------------------------------
@@ -291,6 +328,7 @@ export function _resetAuthForTest(): void {
   sessionAuth.clear();
   staleSessionAuth.clear();
   lastSeenAuth = null;
+  globalAuthStale = false;
 }
 
 // Re-export for documentation — staleSessionAuth is Map<sessionID, Set<providerID>>.

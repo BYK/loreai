@@ -23,7 +23,7 @@ import type { LLMClient } from "@loreai/core";
 import { log } from "@loreai/core";
 import * as Sentry from "@sentry/bun";
 import type { AuthCredential } from "./auth";
-import { authHeaders, markAuthStale } from "./auth";
+import { authHeaders, markAuthStale, markGlobalAuthStale } from "./auth";
 import { tripCircuitBreaker } from "./background-limiter";
 import { resolveProviderRoute } from "./config";
 import { buildBillingBlock, buildOAuthWorkerHeaders, signBody } from "./cch";
@@ -674,6 +674,13 @@ export function createGatewayLLMClient(
                 // session ID (staleness is per-session state).
                 if (opts?.sessionID) {
                   markAuthStale(opts.sessionID, model.providerID);
+                } else {
+                  // Session-less worker (e.g. entity-rebuild) — mark the
+                  // global fallback as stale so resolveAuth(undefined)
+                  // returns null instead of the same rejected token.
+                  // Without this, session-less workers hammer indefinitely
+                  // because markAuthStale requires a sessionID.
+                  markGlobalAuthStale();
                 }
 
                 // Re-resolve: credential may have been refreshed by a concurrent client request
@@ -863,7 +870,14 @@ export function createGatewayLLMClient(
           },
         );
       } catch (e) {
-        log.error("worker prompt failed:", e);
+        // Client disconnect / abort is benign — downgrade from error to info
+        // to avoid Sentry noise from normal connection lifecycle events.
+        const isAbort = e instanceof DOMException && e.name === "AbortError";
+        if (isAbort) {
+          log.info("worker prompt aborted (client disconnect or shutdown)");
+        } else {
+          log.error("worker prompt failed:", e);
+        }
         // Network/timeout error — no response was received. Record here so the
         // adapter remains the single owner of transport-failure attribution
         // (core workers no longer record on a null return).

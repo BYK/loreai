@@ -25,6 +25,14 @@ import { log } from "@loreai/core";
 /** Global concurrency cap for background (non-urgent) LLM work. */
 const BACKGROUND_CONCURRENCY = 2;
 
+/**
+ * Maximum pending tasks in the queue. Beyond this, new submissions are
+ * rejected immediately. Prevents unbounded queue growth when many sessions
+ * schedule background work simultaneously — tasks will be re-generated
+ * on the next idle tick.
+ */
+const MAX_PENDING_QUEUE = 50;
+
 const limiter = pLimit(BACKGROUND_CONCURRENCY);
 
 // ---------------------------------------------------------------------------
@@ -132,6 +140,16 @@ export async function runBackground<T>(
     if (label) {
       log.info(
         `background work skipped (circuit breaker, ${remainingPauseSeconds()}s remaining): ${label}`,
+      );
+    }
+    return undefined;
+  }
+  // Reject when queue is full to prevent unbounded growth — tasks will be
+  // re-generated on the next idle tick.
+  if (limiter.pendingCount >= MAX_PENDING_QUEUE) {
+    if (label) {
+      log.info(
+        `background work skipped (queue full, ${limiter.pendingCount} pending): ${label}`,
       );
     }
     return undefined;

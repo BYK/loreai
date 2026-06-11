@@ -297,16 +297,16 @@ describe("findReadTool", () => {
       CLAUDE_GREP,
     ]);
     expect(r).not.toBeNull();
-    expect(r!.toolName).toBe("Read");
-    expect(r!.pathParam).toBe("file_path");
-    expect(r!.extraRequired).toEqual({});
+    expect(r?.toolName).toBe("Read");
+    expect(r?.pathParam).toBe("file_path");
+    expect(r?.extraRequired).toEqual({});
   });
 
   test("OpenCode: read with filePath", () => {
     const r = findReadTool([OPENCODE_READ, OPENCODE_BASH]);
     expect(r).not.toBeNull();
-    expect(r!.toolName).toBe("read");
-    expect(r!.pathParam).toBe("filePath");
+    expect(r?.toolName).toBe("read");
+    expect(r?.pathParam).toBe("filePath");
   });
 
   test("Pi: read with path", () => {
@@ -319,8 +319,8 @@ describe("findReadTool", () => {
       PI_LS,
     ]);
     expect(r).not.toBeNull();
-    expect(r!.toolName).toBe("read");
-    expect(r!.pathParam).toBe("path");
+    expect(r?.toolName).toBe("read");
+    expect(r?.pathParam).toBe("path");
   });
 
   test("Hermes: read_file with path", () => {
@@ -331,30 +331,30 @@ describe("findReadTool", () => {
       HERMES_READ_TERMINAL,
     ]);
     expect(r).not.toBeNull();
-    expect(r!.toolName).toBe("read_file");
-    expect(r!.pathParam).toBe("path");
+    expect(r?.toolName).toBe("read_file");
+    expect(r?.pathParam).toBe("path");
   });
 
   test("Cline: read_file with path", () => {
     const r = findReadTool([CLINE_READ, CLINE_EXEC, CLINE_WRITE, CLINE_SEARCH]);
     expect(r).not.toBeNull();
-    expect(r!.toolName).toBe("read_file");
-    expect(r!.pathParam).toBe("path");
+    expect(r?.toolName).toBe("read_file");
+    expect(r?.pathParam).toBe("path");
   });
 
   test("Gemini: read_file with file_path", () => {
     const r = findReadTool([GEMINI_READ, GEMINI_SHELL, GEMINI_WRITE]);
     expect(r).not.toBeNull();
-    expect(r!.toolName).toBe("read_file");
-    expect(r!.pathParam).toBe("file_path");
+    expect(r?.toolName).toBe("read_file");
+    expect(r?.pathParam).toBe("file_path");
   });
 
   test("OpenHands file_editor as fallback reader (command enum with view)", () => {
     const r = findReadTool([OPENHANDS_FILE_EDITOR, OPENHANDS_TERMINAL]);
     expect(r).not.toBeNull();
-    expect(r!.toolName).toBe("file_editor");
-    expect(r!.pathParam).toBe("path");
-    expect(r!.extraRequired).toEqual({ command: "view" });
+    expect(r?.toolName).toBe("file_editor");
+    expect(r?.pathParam).toBe("path");
+    expect(r?.extraRequired).toEqual({ command: "view" });
   });
 
   test("plain reader preferred over file_editor fallback", () => {
@@ -363,8 +363,8 @@ describe("findReadTool", () => {
     ]);
     const r = findReadTool([OPENHANDS_FILE_EDITOR, plainRead]);
     expect(r).not.toBeNull();
-    expect(r!.toolName).toBe("read_file");
-    expect(r!.extraRequired).toEqual({});
+    expect(r?.toolName).toBe("read_file");
+    expect(r?.extraRequired).toEqual({});
   });
 
   test("Codex: no read tool returns null", () => {
@@ -375,20 +375,20 @@ describe("findReadTool", () => {
   test("MCP namespaced read_file matches", () => {
     const r = findReadTool([MCP_FS_READ]);
     expect(r).not.toBeNull();
-    expect(r!.toolName).toBe("mcp__filesystem__read_file");
-    expect(r!.pathParam).toBe("path");
+    expect(r?.toolName).toBe("mcp__filesystem__read_file");
+    expect(r?.pathParam).toBe("path");
   });
 
   test("slash-namespaced read matches", () => {
     const r = findReadTool([SLASH_NS_READ]);
     expect(r).not.toBeNull();
-    expect(r!.pathParam).toBe("path");
+    expect(r?.pathParam).toBe("path");
   });
 
   test("dot-namespaced Read matches", () => {
     const r = findReadTool([DOT_NS_READ]);
     expect(r).not.toBeNull();
-    expect(r!.pathParam).toBe("file_path");
+    expect(r?.pathParam).toBe("file_path");
   });
 
   test("rejects write tool (has content)", () => {
@@ -439,79 +439,79 @@ describe("findShellTool", () => {
   test("Claude Code: Bash with command", () => {
     const r = findShellTool([CLAUDE_BASH, CLAUDE_READ]);
     expect(r).not.toBeNull();
-    expect(r!.toolName).toBe("Bash");
-    expect(r!.commandParam).toBe("command");
-    expect(r!.commandIsArray).toBe(false);
-    expect(r!.extraRequired).toEqual({});
+    expect(r?.toolName).toBe("Bash");
+    expect(r?.commandParam).toBe("command");
+    expect(r?.commandIsArray).toBe(false);
+    expect(r?.extraRequired).toEqual({});
   });
 
   test("OpenCode: bash with command + required description", () => {
     const r = findShellTool([OPENCODE_BASH, OPENCODE_READ]);
     expect(r).not.toBeNull();
-    expect(r!.toolName).toBe("bash");
-    expect(r!.commandParam).toBe("command");
-    expect(r!.extraRequired).toHaveProperty("description");
-    expect(typeof r!.extraRequired.description).toBe("string");
+    expect(r?.toolName).toBe("bash");
+    expect(r?.commandParam).toBe("command");
+    expect(r?.extraRequired).toHaveProperty("description");
+    expect(typeof r?.extraRequired.description).toBe("string");
   });
 
   test("Pi: bash with command", () => {
     const r = findShellTool([PI_BASH]);
     expect(r).not.toBeNull();
-    expect(r!.toolName).toBe("bash");
-    expect(r!.commandParam).toBe("command");
+    expect(r?.toolName).toBe("bash");
+    expect(r?.commandParam).toBe("command");
   });
 
   test("Hermes: terminal with command", () => {
     const r = findShellTool([HERMES_TERMINAL]);
     expect(r).not.toBeNull();
-    expect(r!.toolName).toBe("terminal");
-    expect(r!.commandParam).toBe("command");
+    expect(r?.toolName).toBe("terminal");
+    expect(r?.commandParam).toBe("command");
   });
 
   test("Cline: execute_command with command + required requires_approval", () => {
     const r = findShellTool([CLINE_EXEC]);
     expect(r).not.toBeNull();
-    expect(r!.toolName).toBe("execute_command");
-    expect(r!.commandParam).toBe("command");
-    expect(r!.extraRequired).toEqual({ requires_approval: false });
+    expect(r?.toolName).toBe("execute_command");
+    expect(r?.commandParam).toBe("command");
+    expect(r?.extraRequired).toEqual({ requires_approval: false });
   });
 
   test("Gemini: run_shell_command with command", () => {
     const r = findShellTool([GEMINI_SHELL]);
     expect(r).not.toBeNull();
-    expect(r!.toolName).toBe("run_shell_command");
-    expect(r!.commandParam).toBe("command");
+    expect(r?.toolName).toBe("run_shell_command");
+    expect(r?.commandParam).toBe("command");
   });
 
   test("OpenHands: terminal with command", () => {
     const r = findShellTool([OPENHANDS_TERMINAL]);
     expect(r).not.toBeNull();
-    expect(r!.toolName).toBe("terminal");
-    expect(r!.commandParam).toBe("command");
+    expect(r?.toolName).toBe("terminal");
+    expect(r?.commandParam).toBe("command");
   });
 
   test("Codex: exec_command with cmd", () => {
     const r = findShellTool([CODEX_EXEC]);
     expect(r).not.toBeNull();
-    expect(r!.toolName).toBe("exec_command");
-    expect(r!.commandParam).toBe("cmd");
-    expect(r!.commandIsArray).toBe(false);
+    expect(r?.toolName).toBe("exec_command");
+    expect(r?.commandParam).toBe("cmd");
+    expect(r?.commandIsArray).toBe(false);
   });
 
   test("Codex classic: shell with command (array)", () => {
     const r = findShellTool([CODEX_SHELL_ARRAY]);
     expect(r).not.toBeNull();
-    expect(r!.toolName).toBe("shell");
-    expect(r!.commandParam).toBe("command");
-    expect(r!.commandIsArray).toBe(true);
+    expect(r?.toolName).toBe("shell");
+    expect(r?.commandParam).toBe("command");
+    expect(r?.commandIsArray).toBe(true);
   });
 
   test("Cline SDK: run_commands with commands (array)", () => {
     const r = findShellTool([CLINE_SDK_RUN]);
     expect(r).not.toBeNull();
-    expect(r!.toolName).toBe("run_commands");
-    expect(r!.commandParam).toBe("commands");
-    expect(r!.commandIsArray).toBe(true);
+    expect(r?.toolName).toBe("run_commands");
+    expect(r?.commandParam).toBe("commands");
+    expect(r?.commandIsArray).toBe(true);
   });
 
   test("rejects execute_code (code is not in cmd allowlist)", () => {

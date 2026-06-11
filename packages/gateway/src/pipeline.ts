@@ -2444,7 +2444,15 @@ function buildStreamingResponse(
         onComplete(response);
         safeClose();
       } catch (err) {
-        log.error("streaming pipeline error:", err);
+        // Client disconnect / abort is benign — downgrade from error to info
+        // to avoid Sentry noise from normal connection lifecycle events.
+        const isAbort =
+          err instanceof DOMException && err.name === "AbortError";
+        if (isAbort) {
+          log.info("streaming pipeline aborted (client disconnect)");
+        } else {
+          log.error("streaming pipeline error:", err);
+        }
         try {
           controller.error(err);
         } catch {
@@ -5961,7 +5969,13 @@ export async function handleRequest(
   } catch (err) {
     const message =
       err instanceof Error ? err.message : "Unknown gateway error";
-    log.error("pipeline error:", err);
+    // Client disconnect / abort is benign — downgrade from error to info.
+    const isAbort = err instanceof DOMException && err.name === "AbortError";
+    if (isAbort) {
+      log.info("pipeline aborted (client disconnect)");
+    } else {
+      log.error("pipeline error:", err);
+    }
     return errorResponse(502, message);
   }
 }
