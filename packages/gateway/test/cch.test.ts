@@ -5,6 +5,7 @@ import {
   captureBillingPrefix,
   captureSessionHeaders,
   buildBillingBlock,
+  buildCodexWorkerHeaders,
   buildOAuthWorkerHeaders,
   deleteBillingPrefix,
   validateSeed,
@@ -920,5 +921,77 @@ describe("deleteBillingPrefix clears header snapshots", () => {
 
     // After deletion: returns null
     expect(buildOAuthWorkerHeaders(SID_A)).toBeNull();
+  });
+});
+
+describe("captureSessionHeaders — Codex (ChatGPT) headers", () => {
+  test("captures Codex headers for ANY session (no billing flag needed)", () => {
+    captureSessionHeaders("codex-sess", {
+      "chatgpt-account-id": "acct-xyz",
+      originator: "pi",
+      "openai-beta": "responses=experimental",
+    });
+
+    const headers = buildCodexWorkerHeaders("codex-sess");
+    expect(headers).not.toBeNull();
+    expect(headers?.["chatgpt-account-id"]).toBe("acct-xyz");
+    expect(headers?.originator).toBe("pi");
+    expect(headers?.["OpenAI-Beta"]).toBe("responses=experimental");
+    expect(headers?.session_id).toBe("codex-sess");
+    expect(headers?.["x-client-request-id"]).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
+  });
+
+  test("preserves previously-captured headers across turns (merge, not wipe)", () => {
+    // Turn 1 carries the full Codex fingerprint.
+    captureSessionHeaders("codex-sess", {
+      "chatgpt-account-id": "acct-xyz",
+      originator: "pi",
+      "openai-beta": "responses=experimental",
+    });
+    // Turn 2 omits some headers — must NOT clear the earlier capture.
+    captureSessionHeaders("codex-sess", { "chatgpt-account-id": "acct-xyz" });
+
+    const headers = buildCodexWorkerHeaders("codex-sess");
+    expect(headers?.originator).toBe("pi");
+    expect(headers?.["OpenAI-Beta"]).toBe("responses=experimental");
+  });
+
+  test("does not regress the Anthropic billing path for billing sessions", () => {
+    captureBillingPrefix(SID_A, BILLING_SYSTEM);
+    captureSessionHeaders(SID_A, {
+      "anthropic-beta": "beta-x",
+      "user-agent": "ua-x",
+      // A billing session that also (hypothetically) carries a codex header.
+      "chatgpt-account-id": "acct-mixed",
+    });
+
+    // Anthropic replay still works...
+    expect(buildOAuthWorkerHeaders(SID_A)?.["anthropic-beta"]).toBe("beta-x");
+    // ...and the codex header is independently available.
+    expect(buildCodexWorkerHeaders(SID_A)?.["chatgpt-account-id"]).toBe(
+      "acct-mixed",
+    );
+  });
+});
+
+describe("buildCodexWorkerHeaders", () => {
+  test("returns null when sessionID is undefined", () => {
+    expect(buildCodexWorkerHeaders(undefined)).toBeNull();
+  });
+
+  test("returns null when no Codex account-id was observed", () => {
+    // A session with no Codex headers (or only originator) yields nothing —
+    // a loud failure is correct over a malformed call.
+    captureSessionHeaders("codex-sess", { originator: "pi" });
+    expect(buildCodexWorkerHeaders("codex-sess")).toBeNull();
+  });
+
+  test("generates a unique x-client-request-id per call", () => {
+    captureSessionHeaders("codex-sess", { "chatgpt-account-id": "acct-xyz" });
+    const h1 = buildCodexWorkerHeaders("codex-sess");
+    const h2 = buildCodexWorkerHeaders("codex-sess");
+    expect(h1?.["x-client-request-id"]).not.toBe(h2?.["x-client-request-id"]);
   });
 });

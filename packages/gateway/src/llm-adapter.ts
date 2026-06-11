@@ -268,7 +268,10 @@ function resolveTarget(
     return {
       url: upstreamOverride.replace(/\/$/, ""),
       protocol,
-      providerName: protocol,
+      // Use the friendly provider label for codex; otherwise the protocol is a
+      // reasonable span label for an override target.
+      providerName:
+        protocol === "openai-codex-responses" ? "openai-codex" : protocol,
     };
   }
   if (protocol === "openai-codex-responses") {

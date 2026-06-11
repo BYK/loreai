@@ -40,9 +40,9 @@ describe("parseOpenAICodexRequest", () => {
     expect(req.codex).toBe(true);
   });
 
-  test("captures Codex control fields into extras", () => {
+  test("captures Codex control fields into extras (store is forced, not captured)", () => {
     const req = parseOpenAICodexRequest(codexBody, {});
-    expect(req.extras?.store).toBe(false);
+    // `store` is NOT captured — the builder always forces store:false.
     expect(req.extras?.include).toEqual(["reasoning.encrypted_content"]);
     expect(req.extras?.prompt_cache_key).toBe("sess-123");
     expect(req.extras?.text).toEqual({ verbosity: "low" });
@@ -55,7 +55,6 @@ describe("parseOpenAICodexRequest", () => {
     const req = parseOpenAIResponsesRequest(codexBody, {});
     expect(req.codex).toBeUndefined();
     // Codex control fields must NOT leak into normal openai-responses parsing.
-    expect(req.extras?.store).toBeUndefined();
     expect(req.extras?.include).toBeUndefined();
     expect(req.extras?.prompt_cache_key).toBeUndefined();
     expect(req.extras?.tool_choice).toBeUndefined();

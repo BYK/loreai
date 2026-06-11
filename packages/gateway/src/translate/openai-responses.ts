@@ -120,9 +120,9 @@ export function parseOpenAICodexRequest(
   const raw = (body ?? {}) as Record<string, unknown>;
   if (!req.extras) req.extras = {};
   const extras = req.extras;
-  if (typeof raw.store === "boolean") {
-    extras.store = raw.store;
-  }
+  // NOTE: `store` is intentionally NOT captured — the upstream builder forces
+  // `store: false` for all Codex requests (ChatGPT rejects `store: true`), so
+  // echoing the client's value would be dead state.
   if (raw.include !== undefined) {
     extras.include = raw.include;
   }

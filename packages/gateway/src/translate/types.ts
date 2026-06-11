@@ -204,10 +204,10 @@ export type GatewayRequest = {
     truncation?: unknown;
     /**
      * Codex (ChatGPT) control fields. Preserved verbatim so the upstream
-     * `/backend-api/codex/responses` call keeps Codex's required semantics —
-     * notably `store: false`, which ChatGPT Codex rejects when set to `true`.
+     * `/backend-api/codex/responses` call keeps Codex's semantics. `store` is
+     * deliberately absent — the builder always forces `store: false` (ChatGPT
+     * rejects `store: true`), so echoing the client value would be dead state.
      */
-    store?: boolean;
     include?: unknown;
     prompt_cache_key?: string;
     text?: unknown;
