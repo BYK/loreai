@@ -30,8 +30,11 @@ export function parseShutdownDeadline(
 }
 
 /**
- * Hard cap on how long `shutdown()` may run before we force-exit. Override with
- * `LORE_SHUTDOWN_TIMEOUT_MS`.
+ * Hard cap (ms) on how long graceful shutdown may run before the gateway
+ * force-exits, so Ctrl+C can never hang. Override with the
+ * `LORE_SHUTDOWN_TIMEOUT_MS` env var (default 4000). Invalid / non-positive /
+ * non-finite values fall back to the default — the timeout can never be
+ * disabled.
  */
 export const SHUTDOWN_DEADLINE_MS: number = parseShutdownDeadline(
   process.env.LORE_SHUTDOWN_TIMEOUT_MS,
