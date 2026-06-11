@@ -1,0 +1,79 @@
+name: Docs Deploy
+
+# Production deploy of the website to GitHub Pages. Kept in its own workflow
+# (separate from docs-preview.yml) so it never shares a trigger with the
+# PR-preview runs. A merge to main fires both a `push: main` event and a
+# `pull_request: closed` event; when both lived in docs-preview.yml, GitHub
+# would nondeterministically cancel one of the two runs from the same merge.
+# If the cancelled one happened to be the production deploy, the live site
+# silently went stale and the main commit showed a ✗. Isolating the deploy
+# here guarantees it always runs to completion on merge.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/website/**'
+      - '.github/workflows/docs-deploy.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: docs-deploy-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build website
+        run: pnpm --filter '@loreai/website' build
+
+      - name: Ensure .nojekyll at gh-pages root
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git fetch origin gh-pages:gh-pages 2>/dev/null; then
+            if git show gh-pages:.nojekyll &>/dev/null; then
+              echo ".nojekyll already exists at gh-pages root"
+            else
+              echo "Adding .nojekyll to existing gh-pages branch"
+              git checkout gh-pages
+              touch .nojekyll
+              git add .nojekyll
+              git commit -m "Add .nojekyll to disable Jekyll processing"
+              git push origin gh-pages
+              git checkout "$GITHUB_SHA"
+            fi
+          else
+            echo "Creating gh-pages branch with .nojekyll"
+            git checkout --orphan gh-pages
+            git rm -rf .
+            touch .nojekyll
+            git add .nojekyll
+            git commit -m "Initialize gh-pages with .nojekyll"
+            git push origin gh-pages
+            git checkout "$GITHUB_SHA"
+          fi
+
+      - name: Deploy to GitHub Pages
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: packages/website/dist
+          branch: gh-pages
+          clean-exclude: _preview
+          force: false
