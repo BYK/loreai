@@ -6,7 +6,6 @@
  *  - How to detect it (binary name on PATH)
  *  - What env vars to set so it talks through the gateway
  */
-import { execFileSync } from "node:child_process";
 import { getGitRemote } from "@loreai/core";
 import { whichSync } from "./lib/which";
 
@@ -71,36 +70,28 @@ function appendCustomHeader(
 }
 
 /**
- * Name of the opencode plugin package. The plugin's `config` hook
- * (packages/opencode/src/index.ts:applyLoreProviderConfig) iterates over
- * `cfg.provider` and pins `options.baseURL = ${gatewayBase}/v1` for every
- * provider — the only general mechanism for routing opencode through the
- * gateway, since opencode's `resolveSDK()` always passes `options.baseURL`
- * to the @ai-sdk factory (bypassing `OPENAI_BASE_URL`/`ANTHROPIC_BASE_URL`)
- * and most other @ai-sdk providers have no baseURL env var at all.
+ * Partial opencode config injected via `OPENCODE_CONFIG_CONTENT` when
+ * launching opencode through `lore run`. Ensures the @loreai/opencode
+ * plugin is loaded — its `config` hook (`applyLoreProviderConfig`)
+ * iterates `cfg.provider` and pins `options.baseURL = ${gatewayBase}/v1`
+ * for every provider. This is the only general mechanism for routing
+ * opencode through the gateway: opencode's `resolveSDK()` always passes
+ * `options.baseURL` to the @ai-sdk factory (bypassing env vars like
+ * `OPENAI_BASE_URL`/`ANTHROPIC_BASE_URL`), and most @ai-sdk providers
+ * have no baseURL env var at all.
+ *
+ * If the plugin isn't installed, opencode handles the failure gracefully
+ * (logs a warning, continues without the plugin). If the user's config
+ * already registers the plugin, opencode's `deduplicatePluginOrigins`
+ * prevents double-loading.
+ *
+ * `OPENCODE_CONFIG_CONTENT` is deep-merged with the user's existing
+ * opencode.json (config.ts:461-468), preserving API keys, model
+ * selections, and other settings.
  */
-const OPENCODE_PLUGIN_PACKAGE = "@loreai/opencode";
-
-/**
- * Check if the @loreai/opencode plugin is installed globally.
- * Returns true if installed at any version, false otherwise.
- */
-function isOpencodePluginInstalled(): boolean {
-  try {
-    const out = execFileSync(
-      "npm",
-      ["ls", "-g", OPENCODE_PLUGIN_PACKAGE, "--json", "--depth=0"],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-    );
-    const parsed = JSON.parse(out) as {
-      dependencies?: Record<string, unknown>;
-    };
-    return Boolean(parsed.dependencies?.[OPENCODE_PLUGIN_PACKAGE]);
-  } catch {
-    // `npm ls` exits non-zero when the package isn't found.
-    return false;
-  }
-}
+const OPENCODE_PLUGIN_CONFIG = JSON.stringify({
+  plugin: ["@loreai/opencode"],
+});
 
 export const AGENTS: AgentDef[] = [
   {
@@ -222,34 +213,9 @@ export const AGENTS: AgentDef[] = [
     displayName: "OpenCode",
     binary: "opencode",
     detect: () => whichSync("opencode"),
-    envVars: (_url, _cwd): Record<string, string> => {
-      // OpenCode's `resolveSDK()` always passes `options.baseURL` to the
-      // @ai-sdk factory, bypassing `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL`
-      // env vars, and most other @ai-sdk providers have no baseURL env var
-      // at all. The only general mechanism to route ALL provider calls
-      // through the gateway is the @loreai/opencode plugin — its
-      // `config` hook iterates `cfg.provider` and pins `options.baseURL`
-      // for every provider (including custom user providers and future
-      // opencode versions).
-      //
-      // If the plugin is installed, inject the plugin entry via
-      // `OPENCODE_CONFIG_CONTENT` (opencode deep-merges it with the user's
-      // existing opencode.json — config.ts:461-468). This ensures the
-      // plugin is loaded even if the user hasn't run `lore setup opencode`
-      // first. If the plugin isn't installed, warn the user to run
-      // `lore setup opencode` — baseURL pinning won't happen without it.
-      if (!isOpencodePluginInstalled()) {
-        process.stderr.write(
-          "[lore] WARNING: @loreai/opencode plugin not installed — provider calls will not be routed through the gateway. Run `lore setup opencode` to install.\n",
-        );
-        return {};
-      }
-      return {
-        OPENCODE_CONFIG_CONTENT: JSON.stringify({
-          plugin: [OPENCODE_PLUGIN_PACKAGE],
-        }),
-      };
-    },
+    envVars: (_url, _cwd) => ({
+      OPENCODE_CONFIG_CONTENT: OPENCODE_PLUGIN_CONFIG,
+    }),
   },
   {
     name: "hermes",

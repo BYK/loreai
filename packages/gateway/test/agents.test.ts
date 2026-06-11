@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { AGENTS } from "../src/cli/agents";
 
 // ---------------------------------------------------------------------------
@@ -72,80 +72,32 @@ describe("Claude Code agent envVars", () => {
 // OpenCode agent
 // ---------------------------------------------------------------------------
 
-// The launcher shells out to `npm ls -g` to check whether the
-// @loreai/opencode plugin is installed. Mock `node:child_process.execFileSync`
-// at the module level (vi.spyOn can't redefine built-in module exports).
-let mockedInstalled = true;
-vi.mock("node:child_process", async () => {
-  const actual =
-    await vi.importActual<typeof import("node:child_process")>(
-      "node:child_process",
-    );
-  return {
-    ...actual,
-    execFileSync: ((_cmd: string, _args: readonly string[]) => {
-      if (mockedInstalled) {
-        return Buffer.from(
-          JSON.stringify({ dependencies: { "@loreai/opencode": {} } }),
-        );
-      }
-      // `npm ls` exits non-zero when the package isn't found; the launcher
-      // treats that as "not installed".
-      throw new Error("not found");
-    }) as typeof actual.execFileSync,
-  };
-});
-
 describe("OpenCode agent envVars", () => {
   const opencode = AGENTS.find((a) => a.name === "opencode");
   if (!opencode) throw new Error("opencode agent not registered");
 
-  // Capture stderr to assert the warning when the plugin is missing.
-  let savedStderrWrite: typeof process.stderr.write;
-  let stderrOutput: string;
-
-  beforeEach(() => {
-    mockedInstalled = true;
-    savedStderrWrite = process.stderr.write.bind(process.stderr);
-    stderrOutput = "";
-    process.stderr.write = ((chunk: string | Uint8Array) => {
-      stderrOutput += typeof chunk === "string" ? chunk : chunk.toString();
-      return true;
-    }) as typeof process.stderr.write;
-  });
-
-  afterEach(() => {
-    process.stderr.write = savedStderrWrite;
-  });
-
-  test("injects @loreai/opencode plugin entry via OPENCODE_CONFIG_CONTENT when installed", () => {
-    mockedInstalled = true;
+  test("injects @loreai/opencode plugin entry via OPENCODE_CONFIG_CONTENT", () => {
     const env = opencode.envVars("http://127.0.0.1:3207", "/tmp/test");
     expect(env.OPENCODE_CONFIG_CONTENT).toBeDefined();
-    const parsed = JSON.parse(env.OPENCODE_CONFIG_CONTENT as string) as {
+    const parsed = JSON.parse(env.OPENCODE_CONFIG_CONTENT) as {
       plugin: string[];
     };
     expect(parsed.plugin).toEqual(["@loreai/opencode"]);
     // The plugin handles baseURL pinning for all providers at runtime via
-    // cfg.provider iteration — no hardcoded list in the env var.
+    // cfg.provider iteration — no hardcoded provider list in the env var.
     expect(parsed).not.toHaveProperty("provider");
-    // No warning emitted.
-    expect(stderrOutput).toBe("");
   });
 
   test("does NOT set OPENAI_BASE_URL or ANTHROPIC_BASE_URL (opencode bypasses them)", () => {
-    mockedInstalled = true;
     const env = opencode.envVars("http://127.0.0.1:3207", "/tmp/test");
     expect(env.OPENAI_BASE_URL).toBeUndefined();
     expect(env.ANTHROPIC_BASE_URL).toBeUndefined();
   });
 
-  test("returns empty env and emits a warning when the plugin is not installed", () => {
-    mockedInstalled = false;
-    const env = opencode.envVars("http://127.0.0.1:3207", "/tmp/test");
-    expect(env).toEqual({});
-    expect(stderrOutput).toContain("@loreai/opencode");
-    expect(stderrOutput).toContain("lore setup opencode");
+  test("OPENCODE_CONFIG_CONTENT is the same regardless of gateway URL (plugin resolves gateway at runtime)", () => {
+    const env1 = opencode.envVars("http://127.0.0.1:3207", "/tmp/test");
+    const env2 = opencode.envVars("http://192.168.1.50:5673", "/tmp/test");
+    expect(env1.OPENCODE_CONFIG_CONTENT).toBe(env2.OPENCODE_CONFIG_CONTENT);
   });
 });
 
