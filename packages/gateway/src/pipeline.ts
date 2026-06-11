@@ -168,6 +168,7 @@ import {
   makeWorkerHealth,
   recordWorkerFailure,
   allowWorkerProbe,
+  isWorkerCreditPaused,
 } from "./worker-health";
 import {
   getWorkerModel,
@@ -3370,6 +3371,10 @@ function scheduleBackgroundWork(
   const llm = getLLMClient(config);
   const cfg = loreConfig();
   const model = getWorkerModel(sessionState.lastUpstream);
+  // Provider the worker will call — used to scope the circuit-breaker check so
+  // a 429 from a DIFFERENT provider doesn't pause this session's background
+  // work. Undefined when the worker model can't be resolved (→ global breaker).
+  const workerProviderID = model?.providerID;
 
   // When the OAuth account is near quota exhaustion, skip non-urgent
   // background work to preserve remaining entitlement for user-facing turns.
@@ -3381,7 +3386,12 @@ function scheduleBackgroundWork(
   // periodic probe so a recovered upstream is detected without burning
   // thousands of futile calls (Sentry: runaway lore-distill failure counts).
   // Urgent distillation below is intentionally exempt — it unblocks the user.
-  const workerThrottled = !allowWorkerProbe(sessionID);
+  // Also throttle sessions soft-paused by an upstream credit/billing state
+  // (HTTP 402) — retrying the failing provider every turn just wastes calls;
+  // a probe is allowed periodically (see isWorkerCreditPaused) to detect a
+  // credit top-up.
+  const workerThrottled =
+    !allowWorkerProbe(sessionID) || isWorkerCreditPaused(sessionID);
 
   // Check if urgent distillation is needed (gradient flagged it OR a
   // compaction anomaly was detected on the previous turn). Mark urgent: true
@@ -3421,7 +3431,11 @@ function scheduleBackgroundWork(
         metaThresholdOverride,
       })
       .catch((e) => log.error("background distillation failed:", e));
-  } else if (!isBackgroundPaused() && !quotaPaused && !workerThrottled) {
+  } else if (
+    !isBackgroundPaused(workerProviderID) &&
+    !quotaPaused &&
+    !workerThrottled
+  ) {
     // Incremental distillation and curation are non-urgent — skip when the
     // circuit breaker is active to reduce API pressure. These are also gated
     // by runBackground() which checks isBackgroundPaused(), but the early
@@ -3453,6 +3467,7 @@ function scheduleBackgroundWork(
               workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
             }),
           `incremental-distill session=${sessionID.slice(0, 16)}`,
+          workerProviderID,
         ).catch((e) => log.error("background distillation failed:", e));
       }
     }
@@ -3465,7 +3480,8 @@ function scheduleBackgroundWork(
   // Also gated by circuit breaker — curation is never urgent.
   // Quota-paused accounts skip curation too (non-urgent background work).
   // Worker-throttled sessions (sustained worker failure) skip it as well.
-  if (isBackgroundPaused() || quotaPaused || workerThrottled) return;
+  if (isBackgroundPaused(workerProviderID) || quotaPaused || workerThrottled)
+    return;
 
   const modelInputCost =
     getModelEntrySync(
@@ -3498,6 +3514,7 @@ function scheduleBackgroundWork(
             }),
         ),
       `in-flight-curation session=${sessionID.slice(0, 16)}`,
+      workerProviderID,
     )
       .then((result) => {
         if (!result) return; // skipped by circuit breaker

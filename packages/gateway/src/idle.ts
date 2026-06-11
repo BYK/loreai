@@ -33,7 +33,11 @@ import {
   curatorLimiter,
 } from "@loreai/core";
 import type { LLMClient } from "@loreai/core";
-import { makeWorkerHealth, allowWorkerProbe } from "./worker-health";
+import {
+  makeWorkerHealth,
+  allowWorkerProbe,
+  isWorkerCreditPaused,
+} from "./worker-health";
 import type { GatewayConfig } from "./config";
 import type { SessionState } from "./translate/types";
 import { getWorkerModel, getModelEntrySync } from "./worker-model";
@@ -51,7 +55,11 @@ import {
   MIN_INPUT_TOKENS_FOR_WARMING,
 } from "./cache-warmer";
 import * as Sentry from "@sentry/bun";
-import { runBackground } from "./background-limiter";
+import {
+  runBackground,
+  scaleBackgroundConcurrency,
+  shouldShedLowPriority,
+} from "./background-limiter";
 import {
   isAuthStale,
   resolveAuth,
@@ -129,6 +137,11 @@ export function startIdleScheduler(
     const now = Date.now();
     const timeoutMs = config.idleTimeoutSeconds * 1000;
 
+    // Scale background concurrency to the live session count before scheduling
+    // this tick's work. The idle scheduler owns the sessions Map, so doing it
+    // here keeps background-limiter free of session-state imports.
+    scaleBackgroundConcurrency(sessions.size);
+
     // --- Idle work (distillation, curation, etc.) ---
     for (const [sessionID, state] of sessions) {
       if (inProgress.has(sessionID)) continue;
@@ -145,14 +158,43 @@ export function startIdleScheduler(
       // arrives via setSessionAuth(), which clears the stale flag.
       if (isAuthStale(sessionID) && !resolveAuth(sessionID)) continue;
 
+      // Skip sessions soft-paused due to an upstream credit/billing state
+      // (HTTP 402). Expected account state, not an outage — retrying every
+      // 30s just wastes calls. A probe is allowed once per circuit interval
+      // (see isWorkerCreditPaused) so a credit top-up recovers automatically.
+      if (isWorkerCreditPaused(sessionID)) continue;
+
       // Skip background work for OAuth accounts near quota exhaustion — preserve
       // remaining entitlement for user-facing conversation turns.
       if (isQuotaPaused(resolveAuth(sessionID))) continue;
 
+      // Coalesce with any distillation/curation already in-flight OR queued for
+      // this session. The per-session p-limit(1) pools (distillLimiter/
+      // curatorLimiter) are the durable dedup signal — they persist across
+      // ticks, unlike the local inProgress Set which clears the instant
+      // runBackground returns (even on an immediate queue-full skip). Without
+      // this, every idle session re-floods the global FIFO every 30s, crowding
+      // out one-shot incremental-distill/curation work.
+      if (
+        distillLimiter.isBusy(sessionID) ||
+        curatorLimiter.isBusy(sessionID)
+      ) {
+        continue;
+      }
+
+      // Idle work is regenerated every 30s — under queue pressure, shed it so
+      // FIFO slots stay reserved for one-shot hot-path work (pipeline.ts).
+      // Dropping idle work is safe.
+      if (shouldShedLowPriority()) continue;
+
       inProgress.add(sessionID);
+      // Scope the circuit-breaker check to the provider this session's worker
+      // will call — a 429 from a different provider must not pause this work.
+      const idleProviderID = getWorkerModel(state.lastUpstream)?.providerID;
       runBackground(
         () => doIdleWork(sessionID, state),
         `idle session=${sessionID.slice(0, 16)}`,
+        idleProviderID,
       )
         .catch((e) =>
           log.error(`idle work failed for session ${sessionID}:`, e),

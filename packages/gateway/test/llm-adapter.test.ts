@@ -1,10 +1,18 @@
-import { describe, test, expect, afterEach, vi } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 
 // Mock the upstream fetch wrapper so the adapter's retry loop is driven by our
 // stubbed responses regardless of whether a fetch interceptor is installed
 // (stubbing globalThis.fetch alone would silently break if `getOriginalFetch`
 // had captured the real fetch).
 vi.mock("../src/fetch", () => ({ upstreamFetch: vi.fn() }));
+vi.mock("../src/worker-health", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/worker-health")>();
+  return {
+    ...actual,
+    recordWorkerFailure: vi.fn(actual.recordWorkerFailure),
+    markWorkerPaused: vi.fn(actual.markWorkerPaused),
+  };
+});
 
 import {
   backoffMs,
@@ -20,6 +28,7 @@ import {
 } from "../src/background-limiter";
 import { upstreamFetch } from "../src/fetch";
 import { clearAllCosts, getSessionCosts } from "../src/cost-tracker";
+import { recordWorkerFailure, markWorkerPaused } from "../src/worker-health";
 
 // ---------------------------------------------------------------------------
 // maxRetriesFor — unified policy (modeled on Claude Code's single budget)
@@ -347,10 +356,13 @@ describe("worker 429 trips the circuit breaker (urgent included)", () => {
       workerID: "lore-compact",
     });
 
-    // Exhausted → null (caller falls back), all attempts made, breaker tripped once.
+    // Exhausted → null (caller falls back), all attempts made, breaker tripped
+    // once — scoped to the provider that 429'd (anthropic here).
     expect(result).toBeNull();
     expect(mockFetch).toHaveBeenCalledTimes(4); // maxRetries(3) + 1
-    expect(getConsecutiveTrips()).toBe(1);
+    expect(getConsecutiveTrips("anthropic")).toBe(1);
+    // A different provider's breaker is unaffected by anthropic's 429.
+    expect(getConsecutiveTrips("openrouter")).toBe(0);
   });
 });
 
@@ -478,5 +490,95 @@ describe("createGatewayLLMClient.prompt", () => {
 
     expect(text).toBeNull();
     expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HTTP 402: insufficient credit — no Sentry escalation, soft-pause
+// ---------------------------------------------------------------------------
+
+describe("worker 402 insufficient credit handling", () => {
+  const mockFetch = vi.mocked(upstreamFetch);
+  const mockRecordFailure = vi.mocked(recordWorkerFailure);
+  const mockMarkPaused = vi.mocked(markWorkerPaused);
+
+  beforeEach(() => {
+    // Clear accumulated calls from prior describe blocks (429 tests etc.)
+    mockRecordFailure.mockClear();
+    mockMarkPaused.mockClear();
+  });
+
+  afterEach(() => {
+    mockFetch.mockReset();
+  });
+
+  test("402 returns null, calls markWorkerPaused, and does NOT call recordWorkerFailure", async () => {
+    mockFetch.mockImplementation(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              message: "requires more credits",
+              code: 402,
+            },
+          }),
+          { status: 402, statusText: "Payment Required" },
+        ),
+    );
+
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.anthropic.com",
+        openai: "https://api.openai.com",
+      },
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      // Use "anthropic" provider to match the upstreams map and avoid
+      // protocol-mismatch. The 402 behavior is provider-agnostic.
+      { providerID: "anthropic", modelID: "claude-test" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      workerID: "lore-distill",
+      sessionID: "sess-402-test",
+    });
+
+    // 402 is non-retried — only one fetch attempt.
+    expect(result).toBeNull();
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    // Soft-pause the session so we stop retrying every turn.
+    expect(mockMarkPaused).toHaveBeenCalledWith("sess-402-test");
+    // Critically: recordWorkerFailure must NOT be called — that's what
+    // escalates to Sentry after 3 hits, and 402 is an expected account state.
+    expect(mockRecordFailure).not.toHaveBeenCalled();
+  });
+
+  test("402 without sessionID logs but does not call markWorkerPaused", async () => {
+    mockFetch.mockImplementation(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: { message: "requires more credits", code: 402 },
+          }),
+          { status: 402, statusText: "Payment Required" },
+        ),
+    );
+
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.anthropic.com",
+        openai: "https://api.openai.com",
+      },
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      { providerID: "anthropic", modelID: "claude-test" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      workerID: "lore-distill",
+      // no sessionID — session-less worker
+    });
+
+    expect(result).toBeNull();
+    expect(mockMarkPaused).not.toHaveBeenCalled();
+    expect(mockRecordFailure).not.toHaveBeenCalled();
   });
 });

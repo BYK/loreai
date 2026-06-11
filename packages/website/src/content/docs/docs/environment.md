@@ -11,6 +11,12 @@ Every env var the gateway reads. Default values are extracted from the source (l
 
 Env vars override `.lore.json` for the same setting. To override a `.lore.json` field, look for the corresponding `LORE_*` variable in this table — not all fields are env-var overridable; most budget, distillation, and search tuning fields require a config file change.
 
+## background-limiter
+
+| Variable | Description |
+|---|---|
+| `LORE_BACKGROUND_CONCURRENCY` | Resolve the upper bound for background concurrency. `LORE_BACKGROUND_CONCURRENCY` is a hard ceiling override (escape hatch for large multi-tenant hosts); otherwise the built-in MAX applies. Clamped to a sane [1, 32]. |
+
 ## CLI / `lore` command
 
 | Variable | Description |
