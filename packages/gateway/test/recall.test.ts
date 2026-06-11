@@ -112,6 +112,14 @@ describe("RECALL_GATEWAY_TOOL", () => {
     expect(props).toHaveProperty("scope");
     expect(schema.required).toEqual(["query"]);
   });
+
+  test("instructs resolving named references via recall before exploring", () => {
+    // Recall-first directive: the agent must resolve a named project/repo/
+    // person/service reference against memory before filesystem exploration.
+    expect(RECALL_GATEWAY_TOOL.description).toContain(
+      "before searching the filesystem",
+    );
+  });
 });
 
 describe("LORE_COMMIT_REMINDER", () => {

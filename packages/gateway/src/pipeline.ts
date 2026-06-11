@@ -22,6 +22,7 @@ import {
   isUnattributedProjectPath,
   temporal,
   ltm,
+  entities,
   distillation,
   curator,
   log,
@@ -489,16 +490,16 @@ const ltmPinnedText = new Map<
 >();
 
 /**
- * Stable LTM (preference entries) per session — injected as system[1]
- * with a 1h cache breakpoint. Computed once per session and pinned for ≥1h
- * even through curation changes, so the Anthropic prompt cache prefix
+ * Stable LTM (preference entries) + known entities per session — injected as
+ * system[1] with a 1h cache breakpoint. Computed once per session and pinned
+ * for ≥1h even through curation changes, so the Anthropic prompt cache prefix
  * (system[0] host prompt + system[1] stable LTM) stays warm across turns
  * and sessions.
  *
  * Only rebuilt on new session start (cache miss). NOT invalidated by
  * curation, idle resume, or Layer 4 emergency — the stale preferences
  * are kept to preserve the 1h cache investment. On process restart the
- * cache is recomputed (cheap, preferences are small).
+ * cache is recomputed (cheap, preferences + the capped entity list are small).
  */
 const stableLtmCache = new Map<
   string,
@@ -4539,11 +4540,13 @@ async function handleConversationTurn(
         sessionID != null && !temporal.hasMessages(projectPath, sessionID);
       const contextHint = lastUserTextTrimmed(req);
 
-      // --- system[1]: Stable LTM (preferences) ---
+      // --- system[1]: Stable LTM (preferences) + known entities ---
       // Computed once per session and pinned for ≥1h. NOT invalidated by
       // curation — even if a preference changes, we keep the cached version
       // so the Anthropic 1h prompt cache prefix stays warm.
-      // Uses a dedicated budget independent of context-bound LTM.
+      // Uses a dedicated budget independent of context-bound LTM. The known-
+      // entities block is folded in here (not system[2]) so it is available on
+      // turn 1.
       let stable = stableLtmCache.get(sessionID);
       if (!stable) {
         const prefEntries = await ltm.forSession(
@@ -4555,20 +4558,50 @@ async function handleConversationTurn(
             ...(contextHint ? { contextHint } : {}),
           },
         );
-        if (prefEntries.length) {
-          const formatted = formatKnowledge(
-            prefEntries.map((e) => ({
-              category: e.category,
-              title: e.title,
-              content: e.content,
-            })),
-            prefBudget,
-          );
-          if (formatted) {
-            const tokenCount = Math.ceil(formatted.length / 3);
-            stable = { formatted, tokenCount };
-            stableLtmCache.set(sessionID, stable);
+        const prefText = prefEntries.length
+          ? formatKnowledge(
+              prefEntries.map((e) => ({
+                category: e.category,
+                title: e.title,
+                content: e.content,
+              })),
+              prefBudget,
+            )
+          : "";
+
+        // Known-entities block — folded into the stable system[1] block so it
+        // is present from turn 1 (system[2] is deferred to turn 2+, but the
+        // user may reference an entity on their very first message). Visibility
+        // is intentionally conservative: entitiesForSession() returns only the
+        // current project's + genuinely-global (cross_project) entities. Other
+        // projects' repos are NOT injected here — that would re-introduce the
+        // cross-project context leak repaired by DB migration 38. Those are
+        // discoverable on demand via the recall tool instead, which is why the
+        // caveat line below points the agent at recall for names not shown.
+        let entitiesText = "";
+        if (cfg.knowledge.maxEntityInject > 0) {
+          try {
+            const sessionEntities = entities.entitiesForSession(
+              projectPath,
+              cfg.knowledge.maxEntityInject,
+            );
+            if (sessionEntities.length) {
+              const formattedEntities =
+                entities.formatForPrompt(sessionEntities);
+              if (formattedEntities) {
+                entitiesText = `${formattedEntities}\n\n(Partial list — use the recall tool to resolve any name not shown here, including repositories, people, or services from your other projects.)`;
+              }
+            }
+          } catch (err) {
+            log.warn("entity injection failed (non-fatal):", err);
           }
+        }
+
+        const formatted = [prefText, entitiesText].filter(Boolean).join("\n\n");
+        if (formatted) {
+          const tokenCount = Math.ceil(formatted.length / 3);
+          stable = { formatted, tokenCount };
+          stableLtmCache.set(sessionID, stable);
         }
       }
       stableLtmText = stable?.formatted;

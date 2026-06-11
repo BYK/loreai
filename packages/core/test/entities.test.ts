@@ -627,6 +627,96 @@ describe("entities", () => {
   });
 
   // ---------------------------------------------------------------------------
+  // searchCrossProjectRepos — cross-project repo discovery
+  // ---------------------------------------------------------------------------
+
+  describe("searchCrossProjectRepos", () => {
+    const OTHER = "/test/entities/other-project";
+
+    test("finds a repo owned by another project", () => {
+      const repo = entities.create({
+        projectPath: OTHER,
+        entityType: "repo",
+        canonicalName: "sentry-cli-typescript",
+      });
+      const results = entities.searchCrossProjectRepos({
+        query: "sentry-cli-typescript",
+        excludeProjectPath: PROJECT,
+      });
+      expect(results.map((e) => e.id)).toContain(repo.id);
+    });
+
+    test("excludes the excluded project's own repos", () => {
+      const own = entities.create({
+        projectPath: PROJECT,
+        entityType: "repo",
+        canonicalName: "homerepo",
+      });
+      const results = entities.searchCrossProjectRepos({
+        query: "homerepo",
+        excludeProjectPath: PROJECT,
+      });
+      expect(results.map((e) => e.id)).not.toContain(own.id);
+    });
+
+    test("excludes infra entities from other projects", () => {
+      entities.create({
+        projectPath: OTHER,
+        entityType: "infra",
+        canonicalName: "prod-database",
+      });
+      const results = entities.searchCrossProjectRepos({
+        query: "prod-database",
+        excludeProjectPath: PROJECT,
+      });
+      expect(results.length).toBe(0);
+    });
+
+    test("excludes non-repo entities (person) from other projects", () => {
+      entities.create({
+        projectPath: OTHER,
+        entityType: "person",
+        canonicalName: "Zelda",
+      });
+      const results = entities.searchCrossProjectRepos({
+        query: "Zelda",
+        excludeProjectPath: PROJECT,
+      });
+      expect(results.length).toBe(0);
+    });
+
+    test("matches a repo by alias too", () => {
+      const repo = entities.create({
+        projectPath: OTHER,
+        entityType: "repo",
+        canonicalName: "Backend Monorepo",
+        aliases: [{ type: "name", value: "backend-mono" }],
+      });
+      const results = entities.searchCrossProjectRepos({
+        query: "backend-mono",
+        excludeProjectPath: PROJECT,
+      });
+      expect(results.map((e) => e.id)).toContain(repo.id);
+    });
+
+    test("excludes global repo entities (project_id IS NULL)", () => {
+      // Global entities are already returned by the standard search() via its
+      // project_id IS NULL predicate — searchCrossProjectRepos must NOT
+      // double-surface them.
+      entities.create({
+        // no projectPath → project_id IS NULL
+        entityType: "repo",
+        canonicalName: "global-shared-repo",
+      });
+      const results = entities.searchCrossProjectRepos({
+        query: "global-shared-repo",
+        excludeProjectPath: PROJECT,
+      });
+      expect(results.length).toBe(0);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Curator integration: parseResponse + applyOps
   // ---------------------------------------------------------------------------
 

@@ -89,23 +89,57 @@ describe("recall — entity source", () => {
     expect(detail).toContain("No entry found");
   });
 
-  test("does not leak another project's project-scoped entity", async () => {
-    // A `repo` entity defaults to project-scoped (cross_project = 0). Created in
-    // OTHER_PROJECT, it must not surface when recalling from PROJECT.
+  test("does not leak another project's project-scoped infra entity", async () => {
+    // `infra` entities (servers, queues, buckets) are project-specific and stay
+    // project-scoped (cross_project = 0) even in "all" scope — they must never
+    // surface across projects.
     const OTHER_PROJECT = "/test/recall-entity/other";
     ensureProject(OTHER_PROJECT);
     entities.create({
       projectPath: OTHER_PROJECT,
-      entityType: "repo",
-      canonicalName: "secretrepo",
+      entityType: "infra",
+      canonicalName: "secretserver",
     });
 
     const results = await searchRecall({
-      query: "secretrepo",
+      query: "secretserver",
       projectPath: PROJECT,
       scope: "all",
     });
     expect(results.some((x) => x.item.source === "entity")).toBe(false);
+  });
+
+  test("surfaces another project's repo entity in 'all' scope only", async () => {
+    // `repo` entities default to project-scoped, but a repo the user references
+    // by name from another project must be discoverable via recall in the
+    // default "all" scope (cross-project repo discovery). Narrower scopes keep
+    // the project-scoped visibility guard.
+    const OTHER_PROJECT = "/test/recall-entity/other-repo";
+    ensureProject(OTHER_PROJECT);
+    const repo = entities.create({
+      projectPath: OTHER_PROJECT,
+      entityType: "repo",
+      canonicalName: "sentry-cli-typescript",
+    });
+
+    const all = await searchRecall({
+      query: "sentry-cli-typescript",
+      projectPath: PROJECT,
+      scope: "all",
+    });
+    const hit = all.find((x) => x.item.source === "entity");
+    expect(hit).toBeDefined();
+    if (hit && hit.item.source === "entity") {
+      expect(hit.item.item.id).toBe(repo.id);
+    }
+
+    // "project" scope must NOT surface another project's repo.
+    const proj = await searchRecall({
+      query: "sentry-cli-typescript",
+      projectPath: PROJECT,
+      scope: "project",
+    });
+    expect(proj.some((x) => x.item.source === "entity")).toBe(false);
   });
 
   test("excludes entities from 'knowledge' and 'session' scopes", async () => {

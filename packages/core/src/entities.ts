@@ -967,6 +967,79 @@ export function search(input: {
   return withAliases(merged.slice(0, limit));
 }
 
+/**
+ * Search `repo` entities owned by *other* projects, by FTS5 on canonical name
+ * and alias values. Used by recall's "all" scope to resolve cross-project
+ * repository references (e.g. "the sentry-cli typescript project" mentioned
+ * while working in a different repo).
+ *
+ * `repo` entities default to project scope (cross_project = 0) and are
+ * therefore filtered out by the standard `search()` visibility predicate, so a
+ * repo owned by another project is otherwise invisible. This complements
+ * `search()` rather than replacing it; the current project's own repos + all
+ * cross-project entities are still handled there.
+ *
+ * `infra` entities are intentionally excluded — they are project-specific
+ * (servers, queues, buckets) and would be noise/confusion across projects.
+ */
+export function searchCrossProjectRepos(input: {
+  query: string;
+  excludeProjectPath: string;
+  limit?: number;
+}): EntityWithAliases[] {
+  const limit = input.limit ?? 20;
+  const fts = ftsQueryOr(input.query);
+  if (fts === EMPTY_QUERY) return [];
+
+  const pid = ensureProject(input.excludeProjectPath);
+
+  // cross_project = 0: only project-scoped repos. Repos already marked
+  // cross_project = 1 are returned by the standard search() via its
+  // cross_project predicate — including them here would double-boost them in
+  // RRF fusion. This keeps the two search paths strictly complementary.
+  const nameMatches = db()
+    .query(
+      `SELECT ${ENTITY_COLS_E}
+       FROM entities e
+       JOIN entities_fts f ON f.rowid = e.rowid
+       WHERE entities_fts MATCH ?
+         AND e.entity_type = 'repo'
+         AND e.cross_project = 0
+         AND e.project_id IS NOT NULL
+         AND e.project_id != ?
+       ORDER BY rank
+       LIMIT ?`,
+    )
+    .all(fts, pid, limit) as Entity[];
+
+  const aliasMatches = db()
+    .query(
+      `SELECT DISTINCT ${ENTITY_COLS_E}
+       FROM entities e
+       JOIN entity_aliases a ON a.entity_id = e.id
+       JOIN entity_aliases_fts af ON af.rowid = a.rowid
+       WHERE entity_aliases_fts MATCH ?
+         AND e.entity_type = 'repo'
+         AND e.cross_project = 0
+         AND e.project_id IS NOT NULL
+         AND e.project_id != ?
+       ORDER BY rank
+       LIMIT ?`,
+    )
+    .all(fts, pid, limit) as Entity[];
+
+  // Merge and dedupe (preserve name-match ordering first)
+  const seen = new Set<string>();
+  const merged: Entity[] = [];
+  for (const e of [...nameMatches, ...aliasMatches]) {
+    if (seen.has(e.id)) continue;
+    seen.add(e.id);
+    merged.push(e);
+  }
+
+  return withAliases(merged.slice(0, limit));
+}
+
 // ---------------------------------------------------------------------------
 // Merge
 // ---------------------------------------------------------------------------

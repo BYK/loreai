@@ -924,7 +924,11 @@ export async function searchRecall(
       if (scope === "all" || scope === "project") {
         // vectorSearchEntities is NOT project-scoped, so apply the same
         // visibility predicate entities.search() uses — otherwise a semantic
-        // match could leak another project's project-scoped repo/infra entity.
+        // match could leak another project's project-scoped infra entity.
+        // Exception: in "all" scope, cross-project `repo` entities ARE admitted
+        // (mirrors the FTS cross-project repo discovery below), so a repo the
+        // user references by name from another project resolves semantically
+        // too. `infra` stays project-scoped.
         const entPid = ensureProject(projectPath);
         const entityVectorHits = embedding.vectorSearchEntities(
           queryVec,
@@ -937,7 +941,8 @@ export async function searchRecall(
             const visible =
               ent.project_id === entPid ||
               ent.project_id === null ||
-              ent.cross_project === 1;
+              ent.cross_project === 1 ||
+              (scope === "all" && ent.entity_type === "repo");
             if (!visible) return null;
             return {
               source: "entity",
@@ -1030,6 +1035,33 @@ export async function searchRecall(
       }
     } catch (err) {
       log.info("recall: entity search failed (non-fatal):", err);
+    }
+  }
+
+  // Cross-project repository discovery — only in "all" scope. `repo` entities
+  // are project-scoped (cross_project = 0) and deliberately excluded from the
+  // entity visibility predicate above (FTS) and at recall.ts vector block, so a
+  // repo owned by another project — one the user references by name while
+  // working elsewhere — is otherwise unreachable. Surface those here. Same
+  // `e:` key as the entity list so RRF merges them. `infra` stays excluded.
+  if (scope === "all") {
+    try {
+      const crossRepos = entities.searchCrossProjectRepos({
+        query,
+        excludeProjectPath: projectPath,
+        limit,
+      });
+      if (crossRepos.length) {
+        allRrfLists.push({
+          items: crossRepos.map((item, i) => ({
+            source: "entity" as const,
+            item: { ...item, rank: i },
+          })),
+          key: (r) => `e:${r.item.id}`,
+        });
+      }
+    } catch (err) {
+      log.info("recall: cross-project repo search failed (non-fatal):", err);
     }
   }
 
@@ -1309,7 +1341,7 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
 
 /** Standard tool description reused verbatim by each host adapter. */
 export const RECALL_TOOL_DESCRIPTION =
-  "Search your persistent memory for this project. Your visible context is a trimmed window — older messages, decisions, and details may not be visible to you even within the current session. Use this tool whenever you need information that isn't in your current context: file paths, past decisions, user preferences, prior approaches, the people/services/tools the user works with, or anything from earlier in this conversation or previous sessions. Always prefer recall over assuming you don't have the information. Searches long-term knowledge, known entities (people, orgs, services, tools — with their aliases and relationships), distilled history, and raw message archives." +
+  "Search your persistent memory for this project. Your visible context is a trimmed window — older messages, decisions, and details may not be visible to you even within the current session. Use this tool whenever you need information that isn't in your current context: file paths, past decisions, user preferences, prior approaches, the people/services/tools the user works with, or anything from earlier in this conversation or previous sessions. Always prefer recall over assuming you don't have the information. When the user refers to a project, repository, person, service, or tool by name — especially one not already visible in your context — call recall to resolve it before searching the filesystem or assuming you must explore. Searches long-term knowledge, known entities (people, orgs, services, tools — with their aliases and relationships), distilled history, and raw message archives." +
   '\n\nYour context contains references in the format (prefix:id) — e.g. (d:abc123) for distillations, (t:abc123) for messages. These appear in distillation headers, tool result placeholders, and truncated recall results. Pass any such ID to this tool\'s `id` parameter to retrieve the full original content. Distillations marked "lossy" have lost specific details — use the ID to drill down.' +
   '\n\nNever write recall status text (like "📚 Searching…" or "📚 Fetching…") yourself — these are injected by the system automatically when you use this tool.';
 
