@@ -19,10 +19,18 @@
  *    reading the response body incrementally hangs forever (verified on Bun
  *    1.3.14, OpenCode's embedded runtime). So under Bun we must use the native
  *    fetch (`getOriginalFetch()` — captured before the interceptor patched it),
- *    which streams correctly. To remove Bun's own 300s cap we pass Bun's
- *    `timeout: false` option (undocumented in Bun's typings but verified
- *    empirically on Bun 1.3.14; if silently ignored, the pre-existing 300s
- *    default remains — not a regression).
+ *    which streams correctly.
+ *
+ *    **Known limitation**: Bun hardcodes a ~5-minute fetch timeout that ignores
+ *    `AbortSignal.timeout()` values longer than the cap (oven-sh/bun#16682,
+ *    still open). There is no runtime-level workaround on Bun 1.3.14 — the
+ *    `timeout: false` option suggested in some issues does not reliably disable
+ *    the cap. For extremely long generations (>5 min, p99.9), the gateway's
+ *    existing SSE keepalive infrastructure (see `buildKeepaliveCompactionStream`
+ *    in stream/anthropic.ts) can be extended to emit periodic `ping` events on
+ *    the client-facing stream, which would keep that leg alive even if the
+ *    upstream leg is re-established. In practice, p99 generation is ~90s, so
+ *    this affects only rare reasoning-heavy turns.
  *
  * `undici` is imported lazily (and only on the Node path) so it is never
  * evaluated under Bun and can be marked `external` in the Bun esbuild bundle.
@@ -66,12 +74,10 @@ export async function upstreamFetch(
 ): Promise<Response> {
   if (isBun) {
     // Bun: native fetch streams correctly (real undici hangs on Bun's
-    // incremental stream reads). `timeout: false` aims to disable Bun's default
-    // 300s fetch timeout (undocumented but empirically verified on Bun 1.3.14).
-    return getOriginalFetch()(input, {
-      ...init,
-      timeout: false,
-    } as RequestInit);
+    // incremental stream reads). Bun's ~5-min hardcoded fetch timeout
+    // (oven-sh/bun#16682) cannot be disabled on Bun 1.3.14 — see module
+    // JSDoc for the known limitation and mitigation path.
+    return getOriginalFetch()(input, init);
   }
 
   // Node: undici with disabled body/header timeouts. undici's fetch types
