@@ -134,22 +134,23 @@ export async function startGateway(
 
   for (const candidatePort of portsToTry) {
     config.port = candidatePort;
-    // startServer() is async — it binds each host sequentially so the
-    // OS-assigned port (when port=0) is shared across hosts. The
-    // returned `ready` promise is the same one startServer already
-    // awaited internally; awaiting it here is a no-op for the first
-    // server but still lets EADDRINUSE bubble up.
-    const server = await startServer(config);
+    let server: Awaited<ReturnType<typeof startServer>> | undefined;
     try {
-      await server.ready;
+      // startServer() binds each host and awaits the OS bind internally, so an
+      // EADDRINUSE rejection surfaces from THIS await (not from `server.ready`).
+      // It MUST be inside the try so the catch below can probe for and reuse an
+      // existing lore gateway instead of crashing.
+      server = await startServer(config);
+      await server.ready; // already resolved by startServer; kept for clarity
       const actualPort = server.port;
 
       // Write port file so plugins can discover us (even on random port).
       writePortFile(actualPort);
 
+      const boundServer = server;
       const shutdown = async () => {
         console.error("[lore] Shutting down…");
-        server.stop();
+        boundServer.stop();
         removePortFile(actualPort);
         await resetPipelineState();
         // Shut down the embedding worker thread gracefully. Done after
@@ -170,7 +171,9 @@ export async function startGateway(
       // Clean up any successfully-bound servers before retrying.
       // In multi-host configs, some hosts may have bound before another
       // failed with EADDRINUSE — stop them to avoid leaking FDs.
-      server.stop();
+      // `server` is undefined when startServer() itself rejected (the common
+      // EADDRINUSE case), in which case there is nothing to stop here.
+      server?.stop();
 
       const msg = e instanceof Error ? e.message : String(e);
       if (!(/port\b.*\bin use/i.test(msg) || /EADDRINUSE/i.test(msg))) {

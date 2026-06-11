@@ -442,66 +442,74 @@ export async function startServer(config: GatewayConfig): Promise<{
   // await each bind; Array#map can't await, hence the for-of loop.
   const servers: Server[] = [];
   let resolvedPort = config.port;
-  for (const host of config.hosts) {
-    const s = createHttpServer(async (nodeReq, nodeRes) => {
-      await handleNodeRequest(nodeReq, nodeRes, fetch, host, resolvedPort);
-    });
-    // LLM streaming responses can be very long-lived — disable Node's
-    // default timeouts (request/headers/keep-alive/socket) that would
-    // otherwise kill idle streaming connections. 0 means "no timeout".
-    s.requestTimeout = 0;
-    s.headersTimeout = 0;
-    s.keepAliveTimeout = 0;
-    s.timeout = 0;
-    // HTTP/1.1 Upgrade requests bypass the request handler entirely in
-    // node:http — they're dispatched as a separate 'upgrade' event on the
-    // server. The fetch handler's WS check never runs for these, so we
-    // install a dedicated listener that writes a 426 + closes the socket.
-    // Mirrors the `isWebSocketUpgrade` rejection in the fetch handler.
-    s.on("upgrade", (req, socket) => {
-      if (config.debug) {
-        console.error(
-          `[lore] rejecting WebSocket upgrade for ${req.url ?? "/"} (HTTP-only gateway)`,
-        );
-      }
-      const url = req.url ?? "/";
-      const body = JSON.stringify({
-        type: "error",
-        error: {
-          type: "websocket_not_supported",
-          message: `WebSocket transport is not supported for ${url}; use HTTP.`,
-        },
+  try {
+    for (const host of config.hosts) {
+      const s = createHttpServer(async (nodeReq, nodeRes) => {
+        await handleNodeRequest(nodeReq, nodeRes, fetch, host, resolvedPort);
       });
-      // `socket.end(data)` flushes the response, then signals EOF — the
-      // client receives the 426 cleanly. Using `socket.destroy()` races
-      // the response: undici/Bun fetch sees ECONNRESET before parsing the
-      // body and the caller gets a network error instead of a 426.
-      socket.end(
-        "HTTP/1.1 426 Upgrade Required\r\n" +
-          "Content-Type: application/json\r\n" +
-          `Content-Length: ${Buffer.byteLength(body)}\r\n` +
-          "Connection: close\r\n" +
-          "Access-Control-Allow-Origin: *\r\n" +
-          "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n" +
-          "Access-Control-Allow-Headers: *\r\n" +
-          "Access-Control-Max-Age: 86400\r\n" +
-          "\r\n" +
-          body,
-      );
-    });
+      // LLM streaming responses can be very long-lived — disable Node's
+      // default timeouts (request/headers/keep-alive/socket) that would
+      // otherwise kill idle streaming connections. 0 means "no timeout".
+      s.requestTimeout = 0;
+      s.headersTimeout = 0;
+      s.keepAliveTimeout = 0;
+      s.timeout = 0;
+      // HTTP/1.1 Upgrade requests bypass the request handler entirely in
+      // node:http — they're dispatched as a separate 'upgrade' event on the
+      // server. The fetch handler's WS check never runs for these, so we
+      // install a dedicated listener that writes a 426 + closes the socket.
+      // Mirrors the `isWebSocketUpgrade` rejection in the fetch handler.
+      s.on("upgrade", (req, socket) => {
+        if (config.debug) {
+          console.error(
+            `[lore] rejecting WebSocket upgrade for ${req.url ?? "/"} (HTTP-only gateway)`,
+          );
+        }
+        const url = req.url ?? "/";
+        const body = JSON.stringify({
+          type: "error",
+          error: {
+            type: "websocket_not_supported",
+            message: `WebSocket transport is not supported for ${url}; use HTTP.`,
+          },
+        });
+        // `socket.end(data)` flushes the response, then signals EOF — the
+        // client receives the 426 cleanly. Using `socket.destroy()` races
+        // the response: undici/Bun fetch sees ECONNRESET before parsing the
+        // body and the caller gets a network error instead of a 426.
+        socket.end(
+          "HTTP/1.1 426 Upgrade Required\r\n" +
+            "Content-Type: application/json\r\n" +
+            `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+            "Connection: close\r\n" +
+            "Access-Control-Allow-Origin: *\r\n" +
+            "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n" +
+            "Access-Control-Allow-Headers: *\r\n" +
+            "Access-Control-Max-Age: 86400\r\n" +
+            "\r\n" +
+            body,
+        );
+      });
 
-    const { ready } = bindServer(s, host, resolvedPort);
-    // Wait for the first bind so we learn the OS-assigned port (when
-    // resolvedPort started as 0). Subsequent hosts then bind to the
-    // same port to share it.
-    await ready;
-    if (resolvedPort === 0) {
-      const addr = s.address();
-      if (addr && typeof addr === "object") {
-        resolvedPort = addr.port;
+      const { ready } = bindServer(s, host, resolvedPort);
+      // Wait for the first bind so we learn the OS-assigned port (when
+      // resolvedPort started as 0). Subsequent hosts then bind to the
+      // same port to share it.
+      await ready;
+      if (resolvedPort === 0) {
+        const addr = s.address();
+        if (addr && typeof addr === "object") {
+          resolvedPort = addr.port;
+        }
       }
+      servers.push(s);
     }
-    servers.push(s);
+  } catch (e) {
+    // A later host failed to bind (e.g. EADDRINUSE) after earlier hosts
+    // already bound — close the successfully-bound servers so we don't leak
+    // file descriptors, then re-throw for startGateway() to handle.
+    for (const s of servers) s.close();
+    throw e;
   }
 
   // Collect all ready promises so startGateway() can await them.
