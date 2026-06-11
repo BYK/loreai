@@ -76,25 +76,52 @@ describe("OpenCode agent envVars", () => {
   const opencode = AGENTS.find((a) => a.name === "opencode");
   if (!opencode) throw new Error("opencode agent not registered");
 
-  test("sets OPENAI_BASE_URL with /v1 suffix", () => {
+  test("does NOT set OPENAI_BASE_URL or ANTHROPIC_BASE_URL (opencode bypasses them)", () => {
+    // opencode's resolveSDK() always passes options.baseURL to the
+    // @ai-sdk factory, and loadOptionalSetting() only consults the env
+    // var when the factory receives an undefined baseURL — so these env
+    // vars are never read. The launcher uses OPENCODE_CONFIG_CONTENT
+    // instead.
     const env = opencode.envVars("http://127.0.0.1:3207", "/tmp/test");
-    expect(env.OPENAI_BASE_URL).toBe("http://127.0.0.1:3207/v1");
+    expect(env.OPENAI_BASE_URL).toBeUndefined();
+    expect(env.ANTHROPIC_BASE_URL).toBeUndefined();
   });
 
-  test("sets ANTHROPIC_BASE_URL with /v1 suffix", () => {
-    // Regression: without this, OpenCode can derive the Anthropic baseURL
-    // from OPENAI_BASE_URL (stripping /v1), which sends the SDK to
-    // `http://127.0.0.1:3207/messages` (no /v1) and gets a 404 from the
-    // gateway. Pinning it here with /v1 makes the SDK append /messages
-    // and hit the correct route.
+  test("sets OPENCODE_CONFIG_CONTENT with baseURL pinned for every provider", () => {
     const env = opencode.envVars("http://127.0.0.1:3207", "/tmp/test");
-    expect(env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:3207/v1");
+    expect(env.OPENCODE_CONFIG_CONTENT).toBeDefined();
+    const parsed = JSON.parse(env.OPENCODE_CONFIG_CONTENT as string) as {
+      provider: Record<string, { options: { baseURL: string } }>;
+    };
+    // Spot-check a representative sample — the full list is asserted in the
+    // OPENCODE_PROVIDER_IDS test below.
+    for (const id of [
+      "anthropic",
+      "openai",
+      "google",
+      "mistral",
+      "groq",
+      "cohere",
+      "xai",
+      "cerebras",
+      "openrouter",
+    ]) {
+      expect(parsed.provider[id]?.options?.baseURL).toBe(
+        "http://127.0.0.1:3207/v1",
+      );
+    }
   });
 
-  test("reflects custom port and host in both base URLs", () => {
+  test("reflects custom port and host in every provider's baseURL", () => {
     const env = opencode.envVars("http://192.168.1.50:5673", "/tmp/test");
-    expect(env.OPENAI_BASE_URL).toBe("http://192.168.1.50:5673/v1");
-    expect(env.ANTHROPIC_BASE_URL).toBe("http://192.168.1.50:5673/v1");
+    const parsed = JSON.parse(env.OPENCODE_CONFIG_CONTENT as string) as {
+      provider: Record<string, { options: { baseURL: string } }>;
+    };
+    for (const id of Object.keys(parsed.provider)) {
+      expect(parsed.provider[id].options.baseURL).toBe(
+        "http://192.168.1.50:5673/v1",
+      );
+    }
   });
 });
 

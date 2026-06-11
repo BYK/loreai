@@ -24,16 +24,23 @@ import {
 const KNOWN_GATEWAY_PORTS = [3207, 5673];
 
 /**
- * Pin the Anthropic provider's baseURL to the Lore gateway. Without this,
- * OpenCode may derive the Anthropic baseURL from `OPENAI_BASE_URL` (stripping
- * `/v1` for Anthropic protocol), which sends the SDK to
+ * Pin every opencode provider's `options.baseURL` to the Lore gateway.
+ * Without this, opencode can derive the Anthropic baseURL from
+ * `OPENAI_BASE_URL` (stripping `/v1`), sending the SDK to
  * `http://host/messages` (no /v1) — the gateway only routes `/v1/messages`,
  * and the fetch interceptor skips 127.0.0.1 to avoid loops, so the call
- * lands as a bare `/messages` 404. Setting `${gatewayBase}/v1` here makes
- * the SDK append `/messages` and hit the correct route.
+ * lands as a bare `/messages` 404. Worse, the `OPENAI_BASE_URL` /
+ * `ANTHROPIC_BASE_URL` env vars are bypassed by opencode's `resolveSDK()`
+ * (it always passes `options.baseURL` to the @ai-sdk factory, and the
+ * @ai-sdk `loadOptionalSetting()` only consults the env var when the
+ * factory receives an undefined `baseURL`). Every other @ai-sdk provider
+ * (google, mistral, groq, cohere, xai, perplexity, togetherai, vercel,
+ * alibaba, deepinfra, gateway, openrouter, cerebras, etc.) has NO
+ * baseURL env var at all. Iterating over `cfg.provider` is the only
+ * universal lever.
  *
- * Deep-merges so user-set keys under `provider.anthropic` (custom headers,
- * model overrides, etc.) are preserved.
+ * Deep-merges per-provider so user-set keys under `provider.<id>` (custom
+ * headers, model overrides, etc.) are preserved.
  *
  * Exported for direct testing — the config hook delegates here so unit tests
  * can verify the merge logic without spinning up a real gateway (the
@@ -44,23 +51,21 @@ export function applyLoreProviderConfig(
   gatewayBase: string,
 ): void {
   if (!gatewayBase) return;
-  const anthropicBase = `${gatewayBase}/v1`;
+  const baseUrl = `${gatewayBase}/v1`;
   const existingProvider = (cfg.provider ?? {}) as Record<string, unknown>;
-  const existingAnthropic = (existingProvider.anthropic ?? {}) as Record<
-    string,
-    unknown
-  >;
-  const existingOptions = (existingAnthropic.options ?? {}) as Record<
-    string,
-    unknown
-  >;
-  cfg.provider = {
-    ...existingProvider,
-    anthropic: {
-      ...existingAnthropic,
-      options: { ...existingOptions, baseURL: anthropicBase },
-    },
-  };
+  const pinned: Record<string, unknown> = {};
+  for (const [id, provider] of Object.entries(existingProvider)) {
+    if (!provider || typeof provider !== "object") continue;
+    const p = provider as Record<string, unknown>;
+    const existingOptions = (p.options ?? {}) as Record<string, unknown>;
+    pinned[id] = {
+      ...p,
+      options: { ...existingOptions, baseURL: baseUrl },
+    };
+  }
+  if (Object.keys(pinned).length > 0) {
+    cfg.provider = { ...existingProvider, ...pinned };
+  }
 }
 
 /**

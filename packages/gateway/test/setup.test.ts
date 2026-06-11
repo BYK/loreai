@@ -383,25 +383,42 @@ describe("setTopLevelKey", () => {
 // ---------------------------------------------------------------------------
 
 describe("updateOpencodeConfig", () => {
-  test("sets provider.openai.options.baseURL, provider.anthropic.options.baseURL, and disables compaction on empty config", () => {
+  test("sets baseURL for every known provider and disables compaction on empty config", () => {
     const result = updateOpencodeConfig({}, "http://127.0.0.1:3207/v1");
-    expect(result).toEqual({
-      provider: {
-        openai: {
-          options: {
-            baseURL: "http://127.0.0.1:3207/v1",
-          },
-        },
-        anthropic: {
-          options: {
-            baseURL: "http://127.0.0.1:3207/v1",
-          },
-        },
-      },
-      compaction: {
-        auto: false,
-      },
-    });
+    const provider = result.provider as Record<
+      string,
+      { options: { baseURL: string } }
+    >;
+    // Every provider gets the same baseURL — this is the "divert ALL calls"
+    // guarantee. Spot-check a representative sample across the bundled +
+    // custom provider list.
+    const expected = [
+      "anthropic",
+      "openai",
+      "google",
+      "google-vertex",
+      "azure",
+      "amazon-bedrock",
+      "mistral",
+      "groq",
+      "cohere",
+      "xai",
+      "cerebras",
+      "perplexity",
+      "togetherai",
+      "vercel",
+      "alibaba",
+      "deepinfra",
+      "openai-compatible",
+      "openrouter",
+      "github-copilot",
+    ];
+    for (const id of expected) {
+      expect(provider[id]?.options?.baseURL).toBe("http://127.0.0.1:3207/v1");
+    }
+    // And the full list is at least 20 providers.
+    expect(Object.keys(provider).length).toBeGreaterThanOrEqual(20);
+    expect(result.compaction).toEqual({ auto: false });
   });
 
   test("preserves existing user settings (custom providers, themes, keybinds)", () => {
@@ -425,17 +442,6 @@ describe("updateOpencodeConfig", () => {
     expect(provider.anthropic.options.defaultHeaders).toEqual({
       "X-Custom": "value",
     });
-    expect(result.provider).toEqual({
-      anthropic: {
-        options: {
-          baseURL: "http://127.0.0.1:3207/v1",
-          defaultHeaders: { "X-Custom": "value" },
-        },
-      },
-      openai: {
-        options: { baseURL: "http://127.0.0.1:3207/v1" },
-      },
-    });
   });
 
   test("is idempotent", () => {
@@ -444,25 +450,25 @@ describe("updateOpencodeConfig", () => {
     expect(second).toEqual(first);
   });
 
-  test("replaces baseURL on both providers when re-run with a different value", () => {
-    const first = updateOpencodeConfig({}, "http://old:3207/v1") as {
-      provider?: {
-        openai?: { options?: { baseURL?: string } };
-        anthropic?: { options?: { baseURL?: string } };
-      };
-    };
-    const second = updateOpencodeConfig(first, "http://new:3207/v1") as {
-      provider?: {
-        openai?: { options?: { baseURL?: string } };
-        anthropic?: { options?: { baseURL?: string } };
-      };
-    };
-    expect(second.provider?.openai?.options?.baseURL).toBe(
-      "http://new:3207/v1",
+  test("replaces baseURL on every provider when re-run with a different value", () => {
+    const first = updateOpencodeConfig({}, "http://old:3207/v1");
+    const second = updateOpencodeConfig(first, "http://new:3207/v1");
+    const firstProvider = first.provider as Record<
+      string,
+      { options: { baseURL: string } }
+    >;
+    const secondProvider = second.provider as Record<
+      string,
+      { options: { baseURL: string } }
+    >;
+    // Same set of providers
+    expect(Object.keys(secondProvider).sort()).toEqual(
+      Object.keys(firstProvider).sort(),
     );
-    expect(second.provider?.anthropic?.options?.baseURL).toBe(
-      "http://new:3207/v1",
-    );
+    // Every baseURL updated
+    for (const id of Object.keys(secondProvider)) {
+      expect(secondProvider[id].options.baseURL).toBe("http://new:3207/v1");
+    }
   });
 });
 

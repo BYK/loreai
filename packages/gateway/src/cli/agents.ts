@@ -69,6 +69,73 @@ function appendCustomHeader(
   env[envKey] = existing ? `${existing}\n${header}` : header;
 }
 
+/**
+ * All OpenCode provider IDs that accept a `baseURL` in their options.
+ *
+ * Sourced from opencode's `BUNDLED_PROVIDERS` (provider.ts:108-135) plus the
+ * `custom()` dispatch table (provider.ts:169-953). Every one of these
+ * providers' factories accepts a `baseURL` option, and opencode's
+ * `resolveSDK()` always passes that option through — so setting
+ * `options.baseURL` here routes every chat call through the Lore gateway.
+ *
+ * Order matches the provider.ts declaration for readability.
+ */
+export const OPENCODE_PROVIDER_IDS = [
+  // Bundled @ai-sdk providers
+  "amazon-bedrock",
+  "anthropic",
+  "azure",
+  "google",
+  "google-vertex",
+  "google-vertex-anthropic",
+  "openai",
+  "openai-compatible",
+  "openrouter",
+  "xai",
+  "mistral",
+  "groq",
+  "deepinfra",
+  "cerebras",
+  "cohere",
+  "gateway",
+  "togetherai",
+  "perplexity",
+  "vercel",
+  "alibaba",
+  // Custom providers
+  "opencode",
+  "azure-cognitive-services",
+  "github-copilot",
+  "sap-ai-core",
+  "gitlab",
+  "cloudflare-workers-ai",
+  "cloudflare-ai-gateway",
+  "snowflake-cortex",
+  "llmgateway",
+  "nvidia",
+  "kilo",
+  "zenmux",
+  "venice",
+] as const;
+
+/**
+ * Build a partial opencode config that pins `options.baseURL` for every
+ * known provider to `${gatewayUrl}/v1`. Serialized to JSON for
+ * `OPENCODE_CONFIG_CONTENT`, which opencode deep-merges with the user's
+ * existing config (config.ts:461-468) — so API keys, model selections,
+ * headers, and other provider options are preserved.
+ */
+export function buildOpencodeProviderConfig(
+  gatewayUrl: string,
+): Record<string, unknown> {
+  const baseUrl = `${gatewayUrl}/v1`;
+  const providerConfig: Record<string, { options: { baseURL: string } }> = {};
+  for (const id of OPENCODE_PROVIDER_IDS) {
+    providerConfig[id] = { options: { baseURL: baseUrl } };
+  }
+  return { provider: providerConfig };
+}
+
 export const AGENTS: AgentDef[] = [
   {
     name: "claude-code",
@@ -189,21 +256,33 @@ export const AGENTS: AgentDef[] = [
     displayName: "OpenCode",
     binary: "opencode",
     detect: () => whichSync("opencode"),
-    envVars: (url, _cwd) => ({
-      OPENAI_BASE_URL: `${url}/v1`,
-      // Pin the Anthropic baseURL to the gateway with /v1. Without this,
-      // OpenCode can derive the Anthropic baseURL from OPENAI_BASE_URL
-      // (stripping /v1 for Anthropic protocol), which sends the SDK to
-      // `http://127.0.0.1:3207/messages` — the gateway only routes
-      // `/v1/messages`, and the fetch interceptor skips 127.0.0.1 to avoid
-      // loops, so the call lands as a bare `/messages` 404. Setting
-      // ANTHROPIC_BASE_URL to `${url}/v1` here makes the SDK append
-      // `/messages` and hit the correct route, even if the plugin is not
-      // installed or loaded (e.g. LORE_DISABLED=1).
-      ANTHROPIC_BASE_URL: `${url}/v1`,
-      // OpenCode's @loreai/opencode plugin handles git remote header
-      // injection via chat.headers hook.
-    }),
+    envVars: (url, _cwd) => {
+      // OpenCode's `resolveSDK()` (packages/opencode/src/provider/provider.ts)
+      // computes `baseURL` from `provider.options.baseURL ?? model.api.url`
+      // and ALWAYS passes it to the @ai-sdk factory — which means the
+      // `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` env vars are bypassed
+      // (the @ai-sdk providers' loadOptionalSetting() only consults the
+      // env var when the factory receives an undefined `baseURL`, and
+      // opencode never sends undefined). Every other @ai-sdk provider
+      // (google, mistral, groq, cohere, xai, perplexity, togetherai,
+      // vercel, alibaba, deepinfra, gateway, openrouter, cerebras, etc.)
+      // has NO baseURL env var at all.
+      //
+      // The only way to route ALL provider calls through the gateway when
+      // launching opencode is to inject config via `OPENCODE_CONFIG_CONTENT`,
+      // which opencode deep-merges with the user's existing config
+      // (config.ts:461-468) — so API keys, model selections, and other
+      // provider settings are preserved. We pin `options.baseURL` for every
+      // bundled + custom provider so every chat call hits the gateway.
+      const opencodeConfigContent = JSON.stringify(
+        buildOpencodeProviderConfig(url),
+      );
+      return {
+        OPENCODE_CONFIG_CONTENT: opencodeConfigContent,
+        // OpenCode's @loreai/opencode plugin handles git remote header
+        // injection via chat.headers hook.
+      };
+    },
   },
   {
     name: "hermes",
