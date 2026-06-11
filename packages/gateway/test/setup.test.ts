@@ -383,11 +383,16 @@ describe("setTopLevelKey", () => {
 // ---------------------------------------------------------------------------
 
 describe("updateOpencodeConfig", () => {
-  test("sets provider.openai.options.baseURL and disables compaction on empty config", () => {
+  test("sets provider.openai.options.baseURL, provider.anthropic.options.baseURL, and disables compaction on empty config", () => {
     const result = updateOpencodeConfig({}, "http://127.0.0.1:3207/v1");
     expect(result).toEqual({
       provider: {
         openai: {
+          options: {
+            baseURL: "http://127.0.0.1:3207/v1",
+          },
+        },
+        anthropic: {
           options: {
             baseURL: "http://127.0.0.1:3207/v1",
           },
@@ -405,16 +410,27 @@ describe("updateOpencodeConfig", () => {
       keybinds: { leader: "ctrl+x" },
       provider: {
         anthropic: {
-          options: { baseURL: "https://example.com" },
+          options: { defaultHeaders: { "X-Custom": "value" } },
         },
       },
     };
     const result = updateOpencodeConfig(existing, "http://127.0.0.1:3207/v1");
     expect(result.theme).toBe("dark");
     expect(result.keybinds).toEqual({ leader: "ctrl+x" });
+    // anthropic.options is deep-merged — baseURL is set, defaultHeaders preserved
+    const provider = result.provider as {
+      anthropic: { options: Record<string, unknown> };
+    };
+    expect(provider.anthropic.options.baseURL).toBe("http://127.0.0.1:3207/v1");
+    expect(provider.anthropic.options.defaultHeaders).toEqual({
+      "X-Custom": "value",
+    });
     expect(result.provider).toEqual({
       anthropic: {
-        options: { baseURL: "https://example.com" },
+        options: {
+          baseURL: "http://127.0.0.1:3207/v1",
+          defaultHeaders: { "X-Custom": "value" },
+        },
       },
       openai: {
         options: { baseURL: "http://127.0.0.1:3207/v1" },
@@ -428,14 +444,23 @@ describe("updateOpencodeConfig", () => {
     expect(second).toEqual(first);
   });
 
-  test("replaces baseURL when re-run with a different value", () => {
+  test("replaces baseURL on both providers when re-run with a different value", () => {
     const first = updateOpencodeConfig({}, "http://old:3207/v1") as {
-      provider?: { openai?: { options?: { baseURL?: string } } };
+      provider?: {
+        openai?: { options?: { baseURL?: string } };
+        anthropic?: { options?: { baseURL?: string } };
+      };
     };
     const second = updateOpencodeConfig(first, "http://new:3207/v1") as {
-      provider?: { openai?: { options?: { baseURL?: string } } };
+      provider?: {
+        openai?: { options?: { baseURL?: string } };
+        anthropic?: { options?: { baseURL?: string } };
+      };
     };
     expect(second.provider?.openai?.options?.baseURL).toBe(
+      "http://new:3207/v1",
+    );
+    expect(second.provider?.anthropic?.options?.baseURL).toBe(
       "http://new:3207/v1",
     );
   });

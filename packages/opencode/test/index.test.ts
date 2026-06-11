@@ -1,6 +1,6 @@
 import { describe, test, expect } from "vitest";
 import { fileURLToPath } from "node:url";
-import { LorePlugin } from "../src/index";
+import { LorePlugin, applyLoreProviderConfig } from "../src/index";
 import type { Plugin } from "@opencode-ai/plugin";
 
 /**
@@ -122,6 +122,71 @@ describe("LorePlugin config hook", () => {
     } finally {
       cleanup();
     }
+  });
+
+  test("pins provider.anthropic.options.baseURL to the gateway (with /v1)", async () => {
+    // Regression test for the /messages-vs-/v1/messages 404: OpenCode can
+    // derive the Anthropic baseURL from OPENAI_BASE_URL (stripping /v1),
+    // which would send the SDK to `http://host/messages` (no /v1) and get
+    // a 404 from the gateway. The plugin must pin it to `${gatewayBase}/v1`
+    // so the SDK appends /messages and hits the correct route.
+    const cfg: Record<string, unknown> = {};
+    applyLoreProviderConfig(cfg, "http://127.0.0.1:3207");
+
+    const provider = cfg.provider as Record<string, unknown>;
+    const anthropic = provider.anthropic as Record<string, unknown>;
+    const options = anthropic.options as Record<string, unknown>;
+    expect(options.baseURL).toBe("http://127.0.0.1:3207/v1");
+  });
+
+  test("preserves existing anthropic provider options (e.g. custom headers)", () => {
+    const cfg: Record<string, unknown> = {
+      provider: {
+        anthropic: {
+          options: {
+            defaultHeaders: { "X-Custom": "value" },
+          },
+        },
+      },
+    };
+    applyLoreProviderConfig(cfg, "http://127.0.0.1:3207");
+
+    const provider = cfg.provider as Record<string, unknown>;
+    const anthropic = provider.anthropic as Record<string, unknown>;
+    const options = anthropic.options as Record<string, unknown>;
+    // baseURL was pinned
+    expect(options.baseURL).toBe("http://127.0.0.1:3207/v1");
+    // Custom headers preserved by deep-merge
+    expect(options.defaultHeaders).toEqual({ "X-Custom": "value" });
+  });
+
+  test("is a no-op when gatewayBase is empty (test env / startup failure)", () => {
+    // In NODE_ENV=test the plugin's init skips gateway start, so
+    // gatewayBase is "". We must not overwrite the user's provider config
+    // with a broken "/v1" value in that case.
+    const cfg: Record<string, unknown> = {};
+    applyLoreProviderConfig(cfg, "");
+    expect(cfg.provider).toBeUndefined();
+  });
+
+  test("preserves existing non-anthropic provider entries (e.g. openai)", () => {
+    const cfg: Record<string, unknown> = {
+      provider: {
+        openai: { options: { baseURL: "http://other-host/v1" } },
+      },
+    };
+    applyLoreProviderConfig(cfg, "http://127.0.0.1:3207");
+
+    const provider = cfg.provider as Record<string, unknown>;
+    // openai preserved
+    expect(provider.openai).toEqual({
+      options: { baseURL: "http://other-host/v1" },
+    });
+    // anthropic pinned
+    const anthropic = provider.anthropic as Record<string, unknown>;
+    expect((anthropic.options as Record<string, unknown>).baseURL).toBe(
+      "http://127.0.0.1:3207/v1",
+    );
   });
 });
 

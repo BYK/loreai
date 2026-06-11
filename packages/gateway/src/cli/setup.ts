@@ -478,12 +478,20 @@ export function opencodeConfigPath(): string {
 
 /**
  * Update (or create) the OpenCode user-level `opencode.json` to route the
- * built-in `openai` provider through the Lore gateway, and disable
- * OpenCode's built-in auto-compaction.
+ * built-in `openai` and `anthropic` providers through the Lore gateway,
+ * and disable OpenCode's built-in auto-compaction.
  *
  * Strategy:
  * - Sets `provider.openai.options.baseURL` to the gateway URL (must include
  *   `/v1` — OpenAI SDK convention used by OpenCode's OpenAI provider).
+ * - Sets `provider.anthropic.options.baseURL` to the same URL. Without this,
+ *   OpenCode can derive the Anthropic baseURL from `OPENAI_BASE_URL` with
+ *   `/v1` stripped, causing the Anthropic SDK to call
+ *   `http://127.0.0.1:3207/messages` — the gateway only routes
+ *   `/v1/messages`, and the fetch interceptor skips 127.0.0.1 to avoid
+ *   loops, so the call lands as a bare `/messages` 404. Pinning the
+ *   Anthropic baseURL here (with `/v1`) makes the SDK append `/messages`
+ *   and hit the correct route.
  * - Sets `compaction.auto` to `false` so the Lore gradient context manager
  *   and distillation pipeline are the source of truth.
  * - Deep-merges with the existing config; preserves user-set custom
@@ -497,6 +505,11 @@ export function updateOpencodeConfig(
   return deepMerge(config, {
     provider: {
       openai: {
+        options: {
+          baseURL: baseUrl,
+        },
+      },
+      anthropic: {
         options: {
           baseURL: baseUrl,
         },
@@ -520,6 +533,7 @@ function setupOpencode(baseUrl: string, noPlugin: boolean): void {
 
   console.log(`[lore] OpenCode configured to use Lore gateway.`);
   console.log(`[lore]   provider.openai.options.baseURL = "${baseUrl}"`);
+  console.log(`[lore]   provider.anthropic.options.baseURL = "${baseUrl}"`);
   console.log(`[lore]   compaction.auto = false (auto-compaction disabled)`);
   console.log(`[lore]   Config: ${configPath}`);
   console.log(`[lore]`);

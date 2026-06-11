@@ -69,6 +69,36 @@ describe("Claude Code agent envVars", () => {
 });
 
 // ---------------------------------------------------------------------------
+// OpenCode agent
+// ---------------------------------------------------------------------------
+
+describe("OpenCode agent envVars", () => {
+  const opencode = AGENTS.find((a) => a.name === "opencode");
+  if (!opencode) throw new Error("opencode agent not registered");
+
+  test("sets OPENAI_BASE_URL with /v1 suffix", () => {
+    const env = opencode.envVars("http://127.0.0.1:3207", "/tmp/test");
+    expect(env.OPENAI_BASE_URL).toBe("http://127.0.0.1:3207/v1");
+  });
+
+  test("sets ANTHROPIC_BASE_URL with /v1 suffix", () => {
+    // Regression: without this, OpenCode can derive the Anthropic baseURL
+    // from OPENAI_BASE_URL (stripping /v1), which sends the SDK to
+    // `http://127.0.0.1:3207/messages` (no /v1) and gets a 404 from the
+    // gateway. Pinning it here with /v1 makes the SDK append /messages
+    // and hit the correct route.
+    const env = opencode.envVars("http://127.0.0.1:3207", "/tmp/test");
+    expect(env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:3207/v1");
+  });
+
+  test("reflects custom port and host in both base URLs", () => {
+    const env = opencode.envVars("http://192.168.1.50:5673", "/tmp/test");
+    expect(env.OPENAI_BASE_URL).toBe("http://192.168.1.50:5673/v1");
+    expect(env.ANTHROPIC_BASE_URL).toBe("http://192.168.1.50:5673/v1");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Codex agent
 // ---------------------------------------------------------------------------
 

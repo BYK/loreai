@@ -191,6 +191,16 @@ export const AGENTS: AgentDef[] = [
     detect: () => whichSync("opencode"),
     envVars: (url, _cwd) => ({
       OPENAI_BASE_URL: `${url}/v1`,
+      // Pin the Anthropic baseURL to the gateway with /v1. Without this,
+      // OpenCode can derive the Anthropic baseURL from OPENAI_BASE_URL
+      // (stripping /v1 for Anthropic protocol), which sends the SDK to
+      // `http://127.0.0.1:3207/messages` — the gateway only routes
+      // `/v1/messages`, and the fetch interceptor skips 127.0.0.1 to avoid
+      // loops, so the call lands as a bare `/messages` 404. Setting
+      // ANTHROPIC_BASE_URL to `${url}/v1` here makes the SDK append
+      // `/messages` and hit the correct route, even if the plugin is not
+      // installed or loaded (e.g. LORE_DISABLED=1).
+      ANTHROPIC_BASE_URL: `${url}/v1`,
       // OpenCode's @loreai/opencode plugin handles git remote header
       // injection via chat.headers hook.
     }),

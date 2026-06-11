@@ -24,6 +24,46 @@ import {
 const KNOWN_GATEWAY_PORTS = [3207, 5673];
 
 /**
+ * Pin the Anthropic provider's baseURL to the Lore gateway. Without this,
+ * OpenCode may derive the Anthropic baseURL from `OPENAI_BASE_URL` (stripping
+ * `/v1` for Anthropic protocol), which sends the SDK to
+ * `http://host/messages` (no /v1) — the gateway only routes `/v1/messages`,
+ * and the fetch interceptor skips 127.0.0.1 to avoid loops, so the call
+ * lands as a bare `/messages` 404. Setting `${gatewayBase}/v1` here makes
+ * the SDK append `/messages` and hit the correct route.
+ *
+ * Deep-merges so user-set keys under `provider.anthropic` (custom headers,
+ * model overrides, etc.) are preserved.
+ *
+ * Exported for direct testing — the config hook delegates here so unit tests
+ * can verify the merge logic without spinning up a real gateway (the
+ * surrounding `LorePlugin` skips gateway start in `NODE_ENV=test`).
+ */
+export function applyLoreProviderConfig(
+  cfg: Record<string, unknown>,
+  gatewayBase: string,
+): void {
+  if (!gatewayBase) return;
+  const anthropicBase = `${gatewayBase}/v1`;
+  const existingProvider = (cfg.provider ?? {}) as Record<string, unknown>;
+  const existingAnthropic = (existingProvider.anthropic ?? {}) as Record<
+    string,
+    unknown
+  >;
+  const existingOptions = (existingAnthropic.options ?? {}) as Record<
+    string,
+    unknown
+  >;
+  cfg.provider = {
+    ...existingProvider,
+    anthropic: {
+      ...existingAnthropic,
+      options: { ...existingOptions, baseURL: anthropicBase },
+    },
+  };
+}
+
+/**
  * Check if the Lore gateway is reachable at the given base URL.
  * Short timeout so this doesn't delay OpenCode startup noticeably.
  */
@@ -289,6 +329,9 @@ export const LorePlugin: Plugin = async (ctx) => {
             description: "Lore query expansion worker",
           },
         };
+        // Pin the Anthropic provider's baseURL to the gateway. See
+        // applyLoreProviderConfig for the full rationale.
+        applyLoreProviderConfig(cfg, gatewayBase);
       },
 
       tool: {},
