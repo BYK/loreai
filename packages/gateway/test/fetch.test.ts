@@ -1,8 +1,9 @@
 import { describe, test, expect, vi, afterEach } from "vitest";
+import { createServer, type Server } from "node:http";
 
 /**
  * upstreamFetch chooses its transport by runtime:
- *  - Bun  → native fetch (getOriginalFetch) + `timeout: false`, never undici.
+ *  - Bun  → node:https (no hardcoded timeout cap), never undici.
  *  - Node → undici fetch with a body/header-timeout-disabled dispatcher.
  *
  * `isBun` is evaluated at module load, so each test sets `globalThis.Bun`,
@@ -20,38 +21,96 @@ describe("upstreamFetch runtime split", () => {
     }
     vi.resetModules();
     vi.restoreAllMocks();
-    vi.doUnmock("@loreai/core");
     vi.doUnmock("undici");
   });
 
-  test("Bun: uses native fetch (getOriginalFetch) and never imports undici", async () => {
-    (globalThis as { Bun?: unknown }).Bun = { version: "1.3.14" };
-    vi.resetModules();
-
-    const nativeFetch = vi.fn(
-      async (_input: RequestInfo | URL, _init?: RequestInit) =>
-        new Response("ok"),
-    );
-    vi.doMock("@loreai/core", () => ({ getOriginalFetch: () => nativeFetch }));
-
-    const undiciLoaded = vi.fn();
-    vi.doMock("undici", () => {
-      undiciLoaded();
-      return { fetch: vi.fn(), Agent: class {} };
+  test("Bun: uses node:http(s) and never imports undici", async () => {
+    // Stand up a tiny HTTP server that returns a known body
+    const server: Server = await new Promise((resolve) => {
+      const s = createServer((req, res) => {
+        res.writeHead(200, {
+          "content-type": "text/plain",
+          "x-test": "from-server",
+        });
+        res.end("hello from node:http");
+      });
+      s.listen(0, () => resolve(s));
     });
+    const port = (server.address() as { port: number }).port;
 
-    const { upstreamFetch } = await import("../src/fetch");
-    const res = await upstreamFetch("https://api.example.com/v1/messages", {
-      method: "POST",
-      body: "{}",
+    try {
+      (globalThis as { Bun?: unknown }).Bun = { version: "1.3.14" };
+      vi.resetModules();
+
+      const undiciLoaded = vi.fn();
+      vi.doMock("undici", () => {
+        undiciLoaded();
+        return { fetch: vi.fn(), Agent: class {} };
+      });
+
+      const { upstreamFetch } = await import("../src/fetch");
+      const res = await upstreamFetch(`http://localhost:${port}/test`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt: "hi" }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("x-test")).toBe("from-server");
+      expect(await res.text()).toBe("hello from node:http");
+      // undici must never be loaded under Bun.
+      expect(undiciLoaded).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  test("Bun: streams response body incrementally", async () => {
+    // SSE-style streaming server
+    const server: Server = await new Promise((resolve) => {
+      const s = createServer((req, res) => {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        let n = 0;
+        const iv = setInterval(() => {
+          n++;
+          res.write(`event: ping\ndata: {"seq":${n}}\n\n`);
+          if (n >= 3) {
+            clearInterval(iv);
+            res.end();
+          }
+        }, 50);
+      });
+      s.listen(0, () => resolve(s));
     });
+    const port = (server.address() as { port: number }).port;
 
-    expect(await res.text()).toBe("ok");
-    expect(nativeFetch).toHaveBeenCalledTimes(1);
-    const init = nativeFetch.mock.calls[0][1];
-    expect(init?.method).toBe("POST");
-    // undici must never be loaded under Bun.
-    expect(undiciLoaded).not.toHaveBeenCalled();
+    try {
+      (globalThis as { Bun?: unknown }).Bun = { version: "1.3.14" };
+      vi.resetModules();
+      vi.doMock("undici", () => ({
+        fetch: vi.fn(),
+        Agent: class {},
+      }));
+
+      const { upstreamFetch } = await import("../src/fetch");
+      const res = await upstreamFetch(`http://localhost:${port}/stream`);
+      expect(res.status).toBe(200);
+
+      // Read the body incrementally via the standard ReadableStream API
+      const reader = res.body!.getReader();
+      const chunks: string[] = [];
+      const decoder = new TextDecoder();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(decoder.decode(value, { stream: true }));
+      }
+      const body = chunks.join("");
+      expect(body).toContain('{"seq":1}');
+      expect(body).toContain('{"seq":3}');
+    } finally {
+      server.close();
+    }
   });
 
   test("Node: uses undici fetch with a timeout-disabled dispatcher", async () => {
@@ -69,11 +128,6 @@ describe("upstreamFetch runtime split", () => {
       }
     }
     vi.doMock("undici", () => ({ fetch: undiciFetch, Agent: FakeAgent }));
-    vi.doMock("@loreai/core", () => ({
-      getOriginalFetch: () => {
-        throw new Error("Node path must not use native fetch");
-      },
-    }));
 
     const { upstreamFetch } = await import("../src/fetch");
     await upstreamFetch("https://api.example.com/v1/messages", {

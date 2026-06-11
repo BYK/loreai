@@ -17,25 +17,19 @@
  *
  *  - **Bun**: real undici@7 does NOT work under Bun for *streaming* responses —
  *    reading the response body incrementally hangs forever (verified on Bun
- *    1.3.14, OpenCode's embedded runtime). So under Bun we must use the native
- *    fetch (`getOriginalFetch()` — captured before the interceptor patched it),
- *    which streams correctly.
- *
- *    **Known limitation**: Bun hardcodes a ~5-minute fetch timeout that ignores
- *    `AbortSignal.timeout()` values longer than the cap (oven-sh/bun#16682,
- *    still open). There is no runtime-level workaround on Bun 1.3.14 — the
- *    `timeout: false` option suggested in some issues does not reliably disable
- *    the cap. For extremely long generations (>5 min, p99.9), the gateway's
- *    existing SSE keepalive infrastructure (see `buildKeepaliveCompactionStream`
- *    in stream/anthropic.ts) can be extended to emit periodic `ping` events on
- *    the client-facing stream, which would keep that leg alive even if the
- *    upstream leg is re-established. In practice, p99 generation is ~90s, so
- *    this affects only rare reasoning-heavy turns.
+ *    1.3.14, OpenCode's embedded runtime). Bun's native `fetch` streams
+ *    correctly but hardcodes a ~5-minute inactivity timeout (oven-sh/bun#16682)
+ *    that cannot be disabled. So under Bun we use **`node:https.request()`**
+ *    via Bun's Node compat layer, which has no such timeout cap (verified:
+ *    survives 310s of total silence where native fetch dies at 300s). The
+ *    response is wrapped in a standard Web API `Response` with a streaming
+ *    `ReadableStream` body.
  *
  * `undici` is imported lazily (and only on the Node path) so it is never
  * evaluated under Bun and can be marked `external` in the Bun esbuild bundle.
  */
-import { getOriginalFetch } from "@loreai/core";
+import * as https from "node:https";
+import * as http from "node:http";
 
 type UndiciModule = typeof import("undici");
 type UndiciHandles = {
@@ -63,6 +57,98 @@ async function getUndici(): Promise<UndiciHandles> {
 }
 
 /**
+ * Make an HTTP(S) request using Node's `node:https`/`node:http` modules and
+ * return a standard Web API `Response` with a streaming `ReadableStream` body.
+ *
+ * Used under Bun where native `fetch` has a hardcoded ~5-min inactivity timeout
+ * (oven-sh/bun#16682) that kills long LLM generations mid-stream. Bun's Node
+ * compat layer for `node:https` does NOT have this timeout cap (verified on
+ * Bun 1.3.14: survives 310s of total silence; native fetch TimeoutErrors at
+ * 300s). Also bypasses the fetch interceptor (no `globalThis.fetch` involved).
+ */
+function nodeHttpFetch(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const url = new URL(typeof input === "string" ? input : input.toString());
+    const isHttps = url.protocol === "https:";
+    const mod = isHttps ? https : http;
+
+    const headers: Record<string, string> = {};
+    if (init?.headers) {
+      // RequestInit headers can be HeadersInit (Headers, string[][], Record)
+      if (init.headers instanceof Headers) {
+        init.headers.forEach((v, k) => {
+          headers[k] = v;
+        });
+      } else if (Array.isArray(init.headers)) {
+        for (const [k, v] of init.headers) {
+          headers[k] = v;
+        }
+      } else {
+        Object.assign(headers, init.headers);
+      }
+    }
+
+    const req = mod.request(
+      url,
+      {
+        method: init?.method ?? "GET",
+        headers,
+      },
+      (res) => {
+        const status = res.statusCode ?? 0;
+        const responseHeaders = new Headers();
+        for (const [key, value] of Object.entries(res.headers)) {
+          if (value === undefined) continue;
+          if (Array.isArray(value)) {
+            for (const v of value) responseHeaders.append(key, v);
+          } else {
+            responseHeaders.set(key, value);
+          }
+        }
+
+        // Wrap the Node readable stream as a Web ReadableStream for the
+        // Response body. This gives callers the same streaming API they'd get
+        // from fetch() (response.body.getReader(), for await...of, etc.).
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            res.on("data", (chunk: Buffer) => {
+              controller.enqueue(new Uint8Array(chunk));
+            });
+            res.on("end", () => {
+              controller.close();
+            });
+            res.on("error", (err) => {
+              controller.error(err);
+            });
+          },
+          cancel() {
+            res.destroy();
+          },
+        });
+
+        resolve(
+          new Response(body, {
+            status,
+            statusText: res.statusMessage ?? "",
+            headers: responseHeaders,
+          }),
+        );
+      },
+    );
+
+    req.on("error", reject);
+
+    if (init?.body) {
+      req.write(init.body);
+    }
+    req.end();
+  });
+}
+
+/**
  * Fetch function for the gateway's upstream LLM calls.
  *
  * Bypasses the plugin's fetch interceptor and disables the runtime's default
@@ -73,11 +159,10 @@ export async function upstreamFetch(
   init?: RequestInit,
 ): Promise<Response> {
   if (isBun) {
-    // Bun: native fetch streams correctly (real undici hangs on Bun's
-    // incremental stream reads). Bun's ~5-min hardcoded fetch timeout
-    // (oven-sh/bun#16682) cannot be disabled on Bun 1.3.14 — see module
-    // JSDoc for the known limitation and mitigation path.
-    return getOriginalFetch()(input, init);
+    // Bun: use node:https which has no hardcoded timeout cap under Bun's Node
+    // compat layer (verified: survives 310s silence; native fetch dies at 300s).
+    // Also bypasses the fetch interceptor (no globalThis.fetch involved).
+    return nodeHttpFetch(input, init);
   }
 
   // Node: undici with disabled body/header timeouts. undici's fetch types
