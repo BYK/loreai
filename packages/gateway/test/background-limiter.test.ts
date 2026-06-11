@@ -197,4 +197,43 @@ describe("background-limiter", () => {
     expect(getConsecutiveTrips()).toBe(0);
     expect(isBackgroundPaused()).toBe(false);
   });
+
+  // ---------------------------------------------------------------------------
+  // Queue depth cap
+  // ---------------------------------------------------------------------------
+
+  test("rejects new tasks when queue is full", async () => {
+    let resolve!: () => void;
+    const blocker = new Promise<void>((r) => {
+      resolve = r;
+    });
+
+    // Fill both concurrency slots
+    const active1 = runBackground(() => blocker);
+    const active2 = runBackground(() => blocker);
+
+    // Queue up to the limit (MAX_PENDING_QUEUE = 50)
+    const queued: Promise<unknown>[] = [];
+    for (let i = 0; i < 50; i++) {
+      queued.push(runBackground(async () => `task-${i}`, `task-${i}`));
+    }
+
+    // Allow event loop to process submissions
+    await new Promise((r) => setTimeout(r, 10));
+    expect(backgroundLimiterStats().pendingCount).toBe(50);
+
+    // The 51st submission should be rejected (returns undefined immediately)
+    const overflow = await runBackground(
+      async () => "should-not-run",
+      "overflow-task",
+    );
+    expect(overflow).toBeUndefined();
+
+    // Pending count should NOT have increased
+    expect(backgroundLimiterStats().pendingCount).toBe(50);
+
+    // Clean up — release everything
+    resolve();
+    await Promise.all([active1, active2, ...queued]);
+  });
 });

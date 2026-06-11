@@ -19,6 +19,7 @@ import {
   resetBackgroundLimiter,
 } from "../src/background-limiter";
 import { upstreamFetch } from "../src/fetch";
+import { clearAllCosts, getSessionCosts } from "../src/cost-tracker";
 
 // ---------------------------------------------------------------------------
 // maxRetriesFor — unified policy (modeled on Claude Code's single budget)
@@ -350,5 +351,132 @@ describe("worker 429 trips the circuit breaker (urgent included)", () => {
     expect(result).toBeNull();
     expect(mockFetch).toHaveBeenCalledTimes(4); // maxRetries(3) + 1
     expect(getConsecutiveTrips()).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createGatewayLLMClient.prompt() — request building, success, and guards
+// ---------------------------------------------------------------------------
+
+describe("createGatewayLLMClient.prompt", () => {
+  const mockFetch = vi.mocked(upstreamFetch);
+
+  const UPSTREAMS = {
+    anthropic: "https://api.anthropic.com",
+    openai: "https://api.openai.com",
+  };
+
+  afterEach(() => {
+    mockFetch.mockReset();
+    clearAllCosts();
+    resetBackgroundLimiter();
+  });
+
+  function anthropicResponse() {
+    return new Response(
+      JSON.stringify({
+        content: [{ type: "text", text: "hello from worker" }],
+        model: "claude-test",
+        usage: { input_tokens: 10, output_tokens: 5 },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }
+
+  test("Anthropic success returns text and records worker cost", async () => {
+    mockFetch.mockResolvedValue(anthropicResponse());
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      { providerID: "anthropic", modelID: "claude-test" },
+    );
+
+    const text = await client.prompt("system", "user", {
+      sessionID: "sess-1",
+      workerID: "lore-distill",
+    });
+
+    expect(text).toBe("hello from worker");
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    // Anthropic Messages endpoint + usage recorded into the distillation bucket.
+    expect(mockFetch.mock.calls[0][0]).toContain("/v1/messages");
+    expect(getSessionCosts("sess-1")?.workers.distillation.calls).toBe(1);
+  });
+
+  test("OpenAI success returns text via the chat-completions endpoint", async () => {
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { content: "hi from openai" } }],
+          model: "gpt-test",
+          usage: { prompt_tokens: 8, completion_tokens: 4 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "sk-openai-test" }),
+      { providerID: "openai", modelID: "gpt-test" },
+    );
+
+    const text = await client.prompt("system", "user", {
+      workerID: "lore-curator",
+    });
+
+    expect(text).toBe("hi from openai");
+    expect(mockFetch.mock.calls[0][0]).toContain("/chat/completions");
+  });
+
+  test("returns null without calling upstream when no auth is available", async () => {
+    const client = createGatewayLLMClient(UPSTREAMS, () => null, {
+      providerID: "anthropic",
+      modelID: "claude-test",
+    });
+
+    const text = await client.prompt("system", "user", {
+      workerID: "lore-distill",
+    });
+
+    expect(text).toBeNull();
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  test("skips the request on a provider/key protocol mismatch", async () => {
+    // Anthropic target but an OpenAI-style key → mismatch guard returns null
+    // before any upstream call.
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "sk-openai-not-anthropic" }),
+      { providerID: "anthropic", modelID: "claude-test" },
+    );
+
+    const text = await client.prompt("system", "user", {
+      workerID: "lore-distill",
+    });
+
+    expect(text).toBeNull();
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  test("returns null on a 401 auth error (no credential change)", async () => {
+    mockFetch.mockResolvedValue(
+      new Response(JSON.stringify({ error: { message: "unauthorized" } }), {
+        status: 401,
+      }),
+    );
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      { providerID: "anthropic", modelID: "claude-test" },
+    );
+
+    // No sessionID → markAuthStale is skipped; static cred → no retry.
+    const text = await client.prompt("system", "user", {
+      workerID: "lore-distill",
+    });
+
+    expect(text).toBeNull();
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 });

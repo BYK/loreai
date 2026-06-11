@@ -414,9 +414,17 @@ export async function startServer(config: GatewayConfig): Promise<{
         return withCors(await Promise.race([uiPromise, timeoutPromise]));
       }
 
-      // GET / — redirect to dashboard
+      // GET / — redirect to dashboard. Build the redirect manually instead of
+      // via Response.redirect(), whose headers are immutable: withCors() would
+      // throw "immutable" while adding CORS headers and the root path would 500
+      // instead of redirecting.
       if (method === "GET" && pathname === "/") {
-        return withCors(Response.redirect(new URL("/ui", url), 302));
+        return withCors(
+          new Response(null, {
+            status: 302,
+            headers: { location: new URL("/ui", url).toString() },
+          }),
+        );
       }
 
       // 404 for everything else

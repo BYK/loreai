@@ -1438,6 +1438,15 @@ export const ENTITY_AUTO_MERGE_THRESHOLD = 0.92;
 const ENTITY_NAME_JACCARD_THRESHOLD = 0.5;
 /** Small additive boost applied to a pair's score when a softer signal fires. */
 const ENTITY_SIGNAL_BOOST = 0.05;
+/**
+ * Score assigned when one canonical name is a proper subset of the other
+ * ("Seylan" ⊂ "Seylan Çinar Kaya"). Deliberately in the *suggestion* band
+ * ([ENTITY_EMBEDDING_DEDUP_THRESHOLD, ENTITY_AUTO_MERGE_THRESHOLD)) — name
+ * containment surfaces a candidate for the user to confirm but never
+ * auto-merges, because a bare first name is ambiguous ("John" ⊂ both
+ * "John Smith" and "John Doe").
+ */
+const ENTITY_NAME_CONTAINMENT_SCORE = 0.9;
 
 /** A cluster of duplicate entities sharing one survivor. */
 export type EntityDedupCluster = {
@@ -1469,6 +1478,26 @@ function nameJaccard(a: string, b: string): number {
   const intersection = [...wa].filter((w) => wb.has(w)).length;
   const union = new Set([...wa, ...wb]).size;
   return union === 0 ? 0 : intersection / union;
+}
+
+/**
+ * True when one canonical name's word set is a non-empty *proper* subset of the
+ * other's — e.g. "Seylan" ⊂ "Seylan Çinar Kaya", "GitHub Actions" ⊂ "GitHub
+ * Actions CI". Catches first-name/full-name (and prefix/abbreviation) duplicates
+ * that Jaccard misses: its denominator is inflated by the longer name's extra
+ * tokens (1/3 for "Seylan" vs "Seylan Çinar Kaya"), keeping it under the 0.5
+ * boost threshold. Order-independent.
+ */
+function nameContainment(a: string, b: string): boolean {
+  const wa = new Set(filterTerms(a).map((w) => w.toLowerCase()));
+  const wb = new Set(filterTerms(b).map((w) => w.toLowerCase()));
+  if (wa.size === 0 || wb.size === 0) return false;
+  if (wa.size === wb.size) return false; // equal size → identical handled by Jaccard
+  const [small, large] = wa.size < wb.size ? [wa, wb] : [wb, wa];
+  for (const w of small) {
+    if (!large.has(w)) return false;
+  }
+  return true;
 }
 
 /**
@@ -1607,6 +1636,13 @@ export async function deduplicateEntities(
           }
         }
 
+      // Name containment ("Seylan" ⊂ "Seylan Çinar Kaya") — a strong signal
+      // that Jaccard structurally misses. Suggestion-only (never force-merge).
+      const containment = nameContainment(
+        entry.canonical_name,
+        other.canonical_name,
+      );
+
       // Combined score: cosine, lifted by softer signals.
       let score = similarity;
       if (jaccard >= ENTITY_NAME_JACCARD_THRESHOLD) {
@@ -1614,6 +1650,12 @@ export async function deduplicateEntities(
         score += ENTITY_SIGNAL_BOOST;
       }
       if (sharedKnowledge) score += ENTITY_SIGNAL_BOOST;
+      // Lift containment pairs into the suggestion band — applied via max (no
+      // additive boost) so name containment alone can't reach the auto-merge
+      // threshold and silently fold ambiguous first-name matches.
+      if (containment) {
+        score = Math.max(score, ENTITY_NAME_CONTAINMENT_SCORE);
+      }
       score = Math.min(score, 1);
 
       // Record raw cosine for calibration (cosine only; > 0) and combined
@@ -1627,7 +1669,10 @@ export async function deduplicateEntities(
         pairScores.set(pk, aliasOverlap ? 1 : score);
       }
 
-      const isNeighbor = aliasOverlap || score >= dedupThreshold;
+      // Containment always qualifies as a neighbor (so it surfaces even when a
+      // project's calibrated threshold sits above the containment score), but
+      // never as a force-merge.
+      const isNeighbor = aliasOverlap || containment || score >= dedupThreshold;
       if (isNeighbor) {
         neighbors.push({
           id: other.id,

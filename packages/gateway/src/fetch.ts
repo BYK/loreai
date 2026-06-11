@@ -6,52 +6,80 @@
  * LLM API calls through the gateway. The gateway's own upstream calls
  * must bypass this interception to avoid an infinite loop.
  *
- * This module uses undici's own `fetch` instead of `globalThis.fetch` so
- * the gateway can configure timeouts independently of Node's built-in
- * fetch (which provides no configuration surface — its internal undici
- * dispatcher is isolated and unaffected by `setGlobalDispatcher` from
- * npm). A shared {@link upstreamDispatcher} disables `bodyTimeout` and
- * `headersTimeout` (both default to 300s in undici) so LLM streaming
- * responses from slow/reasoning models aren't killed mid-generation.
+ * Both Node and Bun default `fetch` to a ~5-minute (300s) timeout that severs
+ * long LLM generations mid-stream. They need different fixes, because the two
+ * runtimes' fetch implementations are very different:
  *
- * This also naturally bypasses the fetch interceptor: the interceptor
- * patches `globalThis.fetch`, but undici's `fetch` is a separate
- * function that is not affected by that patch.
+ *  - **Node**: the built-in fetch (undici) caps `bodyTimeout`/`headersTimeout`
+ *    at 300s and exposes no configuration surface. We use undici's own `fetch`
+ *    with a dispatcher that disables both timeouts. This also bypasses the
+ *    interceptor (undici's fetch is a separate function from `globalThis.fetch`).
  *
- * When no interceptor is installed (standalone gateway, CLI), this
- * falls back to `globalThis.fetch` for non-upstream calls — but
- * `upstreamFetch` always uses undici's fetch.
+ *  - **Bun**: real undici@7 does NOT work under Bun for *streaming* responses —
+ *    reading the response body incrementally hangs forever (verified on Bun
+ *    1.3.14, OpenCode's embedded runtime). So under Bun we must use the native
+ *    fetch (`getOriginalFetch()` — captured before the interceptor patched it),
+ *    which streams correctly. To remove Bun's own 300s cap we pass Bun's
+ *    `timeout: false` option (undocumented in Bun's typings but verified
+ *    empirically on Bun 1.3.14; if silently ignored, the pre-existing 300s
+ *    default remains — not a regression).
+ *
+ * `undici` is imported lazily (and only on the Node path) so it is never
+ * evaluated under Bun and can be marked `external` in the Bun esbuild bundle.
  */
-import { fetch as undiciFetch, Agent } from "undici";
+import { getOriginalFetch } from "@loreai/core";
+
+type UndiciModule = typeof import("undici");
+type UndiciHandles = {
+  fetch: UndiciModule["fetch"];
+  dispatcher: InstanceType<UndiciModule["Agent"]>;
+};
+
+/** True when running under the Bun runtime (OpenCode in-process plugin). */
+const isBun = typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
+
+/** Memoized undici fetch + shared timeout-disabled dispatcher (Node path only). */
+let undiciHandles: UndiciHandles | null = null;
 
 /**
- * Shared undici dispatcher with disabled body/header timeouts.
- *
- * Node's built-in fetch (undici) defaults to `bodyTimeout`/`headersTimeout`
- * of 300 000 ms (5 minutes). For an LLM proxy this is a hard cap on
- * generation time — heavy/reasoning models that think for >5 min get their
- * upstream connection killed mid-stream. The gateway's own inbound server
- * timeouts are already disabled (server.ts:452–455); this extends the same
- * policy to outbound upstream calls. Genuinely stuck upstreams are still
- * caught by the retry/circuit-breaker logic in llm-adapter.ts.
+ * Lazily load undici and build a dispatcher with body/header timeouts disabled.
+ * Referencing `import("undici")` only here keeps undici out of the Bun bundle
+ * (it is marked external there and the Bun path never calls this).
  */
-const upstreamDispatcher = new Agent({ bodyTimeout: 0, headersTimeout: 0 });
+async function getUndici(): Promise<UndiciHandles> {
+  if (undiciHandles) return undiciHandles;
+  const undici = await import("undici");
+  const dispatcher = new undici.Agent({ bodyTimeout: 0, headersTimeout: 0 });
+  undiciHandles = { fetch: undici.fetch, dispatcher };
+  return undiciHandles;
+}
 
 /**
- * Fetch function that bypasses the plugin's fetch interceptor and uses
- * undici directly with disabled timeouts for LLM upstream calls.
+ * Fetch function for the gateway's upstream LLM calls.
+ *
+ * Bypasses the plugin's fetch interceptor and disables the runtime's default
+ * 300s fetch timeout so slow/reasoning models aren't killed mid-generation.
  */
-export function upstreamFetch(
+export async function upstreamFetch(
   input: RequestInfo | URL,
   init?: RequestInit,
 ): Promise<Response> {
-  // undici's fetch types diverge from the global Web API types (Headers,
-  // Request, Response) but are runtime-compatible. Cast through unknown
-  // to bridge the compile-time gap without losing the return type.
+  if (isBun) {
+    // Bun: native fetch streams correctly (real undici hangs on Bun's
+    // incremental stream reads). `timeout: false` aims to disable Bun's default
+    // 300s fetch timeout (undocumented but empirically verified on Bun 1.3.14).
+    return getOriginalFetch()(input, {
+      ...init,
+      timeout: false,
+    } as RequestInit);
+  }
+
+  // Node: undici with disabled body/header timeouts. undici's fetch types
+  // diverge from the global Web API types but are runtime-compatible — cast
+  // through unknown to bridge the compile-time gap.
+  const { fetch: undiciFetch, dispatcher } = await getUndici();
   return undiciFetch(
-    input as Parameters<typeof undiciFetch>[0],
-    { ...init, dispatcher: upstreamDispatcher } as Parameters<
-      typeof undiciFetch
-    >[1],
+    input as Parameters<UndiciModule["fetch"]>[0],
+    { ...init, dispatcher } as Parameters<UndiciModule["fetch"]>[1],
   ) as unknown as Promise<Response>;
 }

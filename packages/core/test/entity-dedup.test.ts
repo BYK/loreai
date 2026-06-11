@@ -203,6 +203,81 @@ describe("entity dedup — deduplicateEntities()", () => {
     expect(entities.get(rich)).not.toBeNull();
     expect(entities.get(sparse)).toBeNull();
   });
+
+  // --- Name containment signal (first-name ⊂ full-name) ---
+
+  test("name containment ('Seylan' ⊂ 'Seylan Çinar Kaya') is SUGGESTED, not merged", async () => {
+    // No aliases, no embeddings — containment must be the sole signal, and it
+    // must only suggest (the user confirms), never auto-merge.
+    const a = makeEntity({ name: "Seylan" });
+    const b = makeEntity({ name: "Seylan Çinar Kaya" });
+    // Pin equal timestamps so the survivor tiebreaker is deterministic across
+    // platforms. The survivor *direction* is timing-dependent (most aliases →
+    // most recent → shortest name) and is NOT what this test asserts — only
+    // that the pair is suggested, not merged. (Without this, both creates can
+    // land in the same millisecond on fast CI, flipping the survivor to the
+    // shorter "Seylan" — the flake that failed on main.)
+    db()
+      .query("UPDATE entities SET updated_at = 1000 WHERE id IN (?, ?)")
+      .run(a, b);
+    const r = await entities.deduplicateEntities(PROJECT, { dryRun: true });
+    expect(r.merged).toHaveLength(0);
+    expect(r.suggested).toHaveLength(1);
+    const cluster = r.suggested[0];
+    const ids = [
+      cluster.surviving.id,
+      ...cluster.merged.map((m) => m.id),
+    ].sort();
+    expect(ids).toEqual([a, b].sort());
+    // Both names are represented in the cluster (survivor direction not asserted).
+    const names = [
+      cluster.surviving.name,
+      ...cluster.merged.map((m) => m.name),
+    ].sort();
+    expect(names).toEqual(["Seylan", "Seylan Çinar Kaya"].sort());
+  });
+
+  test("multi-token prefix ⊂ full name is suggested", async () => {
+    makeEntity({ name: "GitHub Actions" });
+    makeEntity({ name: "GitHub Actions CI" });
+    const r = await entities.deduplicateEntities(PROJECT, { dryRun: true });
+    expect(r.merged).toHaveLength(0);
+    expect(r.suggested).toHaveLength(1);
+  });
+
+  test("same-size distinct names are NOT suggested via containment", async () => {
+    // "John Smith" vs "John Doe": equal token count, share only "john" →
+    // Jaccard 1/3 (< 0.5), no containment, no embeddings → no candidate.
+    makeEntity({ name: "John Smith" });
+    makeEntity({ name: "John Doe" });
+    const r = await entities.deduplicateEntities(PROJECT, { dryRun: true });
+    expect(r.merged).toHaveLength(0);
+    expect(r.suggested).toHaveLength(0);
+  });
+
+  test("containment never auto-merges even on apply (dryRun:false)", async () => {
+    const a = makeEntity({ name: "Seylan" });
+    const b = makeEntity({ name: "Seylan Çinar Kaya" });
+    const r = await entities.deduplicateEntities(PROJECT, { dryRun: false });
+    expect(r.merged).toHaveLength(0);
+    // Both entities survive — nothing was silently merged.
+    expect(entities.get(a)).not.toBeNull();
+    expect(entities.get(b)).not.toBeNull();
+  });
+
+  test("containment still suggests when the calibrated threshold exceeds 0.9", async () => {
+    // A high threshold (> ENTITY_NAME_CONTAINMENT_SCORE) would drop the pair if
+    // it relied on `score >= threshold`; the explicit `|| containment` neighbor
+    // qualification keeps it as a suggestion.
+    makeEntity({ name: "Seylan" });
+    makeEntity({ name: "Seylan Çinar Kaya" });
+    const r = await entities.deduplicateEntities(PROJECT, {
+      dryRun: true,
+      threshold: 0.95,
+    });
+    expect(r.merged).toHaveLength(0);
+    expect(r.suggested).toHaveLength(1);
+  });
 });
 
 describe("entity dedup — adaptive calibration (kind='entity')", () => {
