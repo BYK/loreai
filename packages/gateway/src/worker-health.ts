@@ -130,6 +130,16 @@ const CIRCUIT_PROBE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 const state: Map<string, SessionHealth> = new Map();
 
+/**
+ * Sessions soft-paused due to an upstream credit/billing state (HTTP 402,
+ * e.g. OpenRouter "requires more credits"). Distinct from the failure-ladder
+ * circuit in `state`: this is an *expected* account state, not an outage, so
+ * it carries NO Sentry escalation. Cleared on the session's next successful
+ * worker call. A single probe is allowed per CIRCUIT_PROBE_INTERVAL_MS so a
+ * credit top-up recovers automatically without spamming the upstream.
+ */
+const creditPaused: Map<string, { lastProbe: number }> = new Map();
+
 let sweepTimer: ReturnType<typeof setInterval> | null = null;
 
 /** Injectable time source — tests can override. */
@@ -143,11 +153,49 @@ export function _setNowForTest(fn: () => number): void {
 /** Internal accessor for tests. Resets the global state. */
 export function _resetForTest(): void {
   state.clear();
+  creditPaused.clear();
   if (sweepTimer) {
     clearInterval(sweepTimer);
     sweepTimer = null;
   }
   now = () => Date.now();
+}
+
+// ---------------------------------------------------------------------------
+// Credit pause (HTTP 402) — soft, non-escalating worker pause
+// ---------------------------------------------------------------------------
+
+/**
+ * Soft-pause a session's background workers due to an upstream credit/billing
+ * state (HTTP 402). Idempotent — re-marking an already-paused session does not
+ * reset its probe cadence. Does NOT feed the failure ladder, so it never
+ * escalates to Sentry.
+ */
+export function markWorkerPaused(sessionID: string): void {
+  if (!creditPaused.has(sessionID)) {
+    creditPaused.set(sessionID, { lastProbe: now() });
+  }
+}
+
+/**
+ * Whether a session is currently credit-paused. Allows one probe per
+ * CIRCUIT_PROBE_INTERVAL_MS (returning `false` for that single call and
+ * advancing the probe clock) so a credit top-up recovers automatically.
+ */
+export function isWorkerCreditPaused(sessionID: string): boolean {
+  const entry = creditPaused.get(sessionID);
+  if (!entry) return false;
+  const t = now();
+  if (t - entry.lastProbe >= CIRCUIT_PROBE_INTERVAL_MS) {
+    entry.lastProbe = t; // allow one probe through, then resume pausing
+    return false;
+  }
+  return true;
+}
+
+/** Clear a session's credit pause (e.g. after a successful worker call). */
+export function clearWorkerPaused(sessionID: string): void {
+  creditPaused.delete(sessionID);
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +364,11 @@ export function recordWorkerFailure(
  * alert state.
  */
 export function recordWorkerSuccess(sessionID: string): void {
+  // A successful call clears any credit pause (e.g. user topped up). Must run
+  // before the early return below: credit-paused sessions have no failure-
+  // ladder `state` entry (402 never calls recordWorkerFailure).
+  creditPaused.delete(sessionID);
+
   const entry = state.get(sessionID);
   if (!entry) return;
 
@@ -487,6 +540,7 @@ export function makeWorkerHealth(
  */
 export function clearAll(): void {
   state.clear();
+  creditPaused.clear();
   if (sweepTimer) {
     clearInterval(sweepTimer);
     sweepTimer = null;

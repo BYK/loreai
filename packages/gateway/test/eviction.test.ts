@@ -5,7 +5,7 @@
  * involvement — to verify the full eviction pipeline: guards, persistence,
  * cleanup, and consolidation cooldown removal.
  */
-import { describe, test, expect, beforeEach } from "vitest";
+import { describe, test, expect, beforeEach, vi } from "vitest";
 import { resetPipelineState } from "../src/pipeline";
 import {
   setSessionAuth,
@@ -465,5 +465,55 @@ describe("startIdleScheduler", () => {
     );
     stop();
     expect(typeof stop).toBe("function");
+  });
+
+  test("coalesces idle work while the session's distillLimiter is busy", async () => {
+    let release: () => void = () => {};
+    vi.useFakeTimers();
+    try {
+      distillLimiter.clear();
+      const config = makeConfig();
+      const sessionID = "idle-coalesce-session";
+      const sessions = new Map<string, SessionState>();
+      // Idle: lastRequestTime well past the idle timeout, no tool_use.
+      sessions.set(
+        sessionID,
+        makeSessionState({
+          sessionID,
+          lastRequestTime: Date.now() - 10 * 60 * 1000,
+          lastStopReason: "end_turn",
+        }),
+      );
+
+      // Occupy the per-session distill limiter with a blocking task — this is
+      // the durable "already working" signal the idle loop must coalesce on.
+      const blocker = new Promise<void>((r) => {
+        release = r;
+      });
+      void distillLimiter.get(sessionID)(() => blocker);
+      expect(distillLimiter.isBusy(sessionID)).toBe(true);
+
+      let idleRuns = 0;
+      const stop = startIdleScheduler(config, sessions, async () => {
+        idleRuns++;
+      });
+
+      // Two scheduler ticks (30s each) — neither should run idle work because
+      // the distill limiter is busy across both ticks.
+      await vi.advanceTimersByTimeAsync(31_000);
+      await vi.advanceTimersByTimeAsync(31_000);
+      expect(idleRuns).toBe(0);
+
+      // Free the limiter; the next tick may schedule work.
+      release();
+      await vi.advanceTimersByTimeAsync(31_000);
+      expect(idleRuns).toBeGreaterThanOrEqual(1);
+
+      stop();
+    } finally {
+      release();
+      vi.useRealTimers();
+      distillLimiter.clear();
+    }
   });
 });

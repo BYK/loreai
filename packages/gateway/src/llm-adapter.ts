@@ -35,7 +35,7 @@ import {
 import { recordWorkerCost } from "./cost-tracker";
 import { upstreamFetch } from "./fetch";
 import { extractJSONFromSSE } from "./translate/types";
-import { recordWorkerFailure } from "./worker-health";
+import { recordWorkerFailure, markWorkerPaused } from "./worker-health";
 
 // ---------------------------------------------------------------------------
 // Worker call tracking
@@ -53,6 +53,14 @@ const TRANSIENT_CODES = new Set([429, 500, 502, 503, 529]);
 
 /** HTTP status codes indicating permanent auth failure. */
 export const AUTH_ERROR_CODES = new Set([401, 403]);
+
+/**
+ * Provider "payment required / out of credit" codes (e.g. OpenRouter 402
+ * "requires more credits"). An expected account state, NOT an infrastructure
+ * outage: suppress Sentry escalation, do not count toward the worker-health
+ * failure ladder, and soft-pause the session so we stop retrying every turn.
+ */
+const INSUFFICIENT_CREDIT_CODES = new Set([402]);
 
 /**
  * Unified retry policy (modeled on Claude Code's `getRetryDelay`).
@@ -752,6 +760,40 @@ export function createGatewayLLMClient(
                 return null;
               }
 
+              // --- Insufficient credit: 402 — expected account state ---
+              // (e.g. OpenRouter "requires more credits"). NOT an outage:
+              //  • log.warn (no Error object) so it does NOT auto-forward to
+              //    Sentry;
+              //  • intentionally NO recordWorkerFailure — that ladder is what
+              //    escalates to Sentry after 3 hits, and 402 must not;
+              //  • markWorkerPaused soft-pauses this session's background work
+              //    so the distiller/curator stop retrying every turn (a probe
+              //    is allowed once per circuit interval to detect a top-up).
+              if (INSUFFICIENT_CREDIT_CODES.has(response.status)) {
+                const text = await response.text().catch(() => "(no body)");
+                log.warn(
+                  `worker upstream insufficient credit: ${response.status} ${response.statusText}` +
+                    ` — model=${model.providerID}/${model.modelID}` +
+                    ` worker=${opts?.workerID ?? "unknown"}` +
+                    ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}` +
+                    ` — ${text.slice(0, 200)}`,
+                );
+                if (opts?.sessionID) {
+                  markWorkerPaused(opts.sessionID);
+                } else {
+                  // Session-less workers (e.g. entity-rebuild) can't be paused
+                  // per-session — log so it's visible but don't escalate.
+                  log.warn(
+                    `worker upstream insufficient credit (session-less, no pause): ${response.status}`,
+                  );
+                }
+                span.setStatus({
+                  code: 2,
+                  message: `HTTP ${response.status} credit`,
+                });
+                return null;
+              }
+
               // Non-transient error — fail immediately, no retry
               if (!TRANSIENT_CODES.has(response.status)) {
                 const text = await response.text().catch(() => "(no body)");
@@ -772,19 +814,20 @@ export function createGatewayLLMClient(
               }
 
               // Transient error — retry if attempts remain.
-              // Trip the global circuit breaker on ANY 429 (urgent included) so
-              // background work pauses instead of piling on more requests while
-              // this call rides out the rate limit. The urgent call itself is
-              // not gated by the breaker, so it keeps retrying. Trip at most
-              // once per call to avoid runaway escalation of the backoff
-              // schedule across a multi-retry loop.
+              // Trip the circuit breaker for THIS provider on ANY 429 (urgent
+              // included) so background work targeting the same provider pauses
+              // instead of piling on more requests while this call rides out
+              // the rate limit. Work routed to other providers keeps draining.
+              // The urgent call itself is not gated by the breaker, so it keeps
+              // retrying. Trip at most once per call to avoid runaway
+              // escalation of the backoff schedule across a multi-retry loop.
               if (response.status === 429 && !breakerTripped) {
                 breakerTripped = true;
                 const cbRetryAfter = parseRetryAfter(response);
                 const pauseSec = cbRetryAfter
                   ? Math.ceil(cbRetryAfter / 1000)
                   : undefined;
-                tripCircuitBreaker(pauseSec);
+                tripCircuitBreaker(pauseSec, model.providerID);
               }
 
               if (attempt < maxRetries) {
