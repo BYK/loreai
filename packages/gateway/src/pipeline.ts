@@ -84,6 +84,7 @@ import type { GatewayConfig } from "./config";
 import {
   getProjectPath,
   extractGitRemoteHeader,
+  extractProjectHeader,
   resolveUpstreamRoute,
   extractUpstreamUrlHeader,
   extractProviderHeader,
@@ -183,7 +184,7 @@ import {
   hasBillingHeader,
   resignBody,
 } from "./cch";
-import { isClaudeCodeClient } from "./session";
+import { isClaudeCodeClient, isRotationEligible } from "./session";
 import { analyzeCacheTurn, categorizeBust } from "./cache-analytics";
 import {
   recordGap,
@@ -1701,38 +1702,71 @@ async function identifySession(
     }
 
     // --- Tier 1b: Header value rotation detection ---
-    // The header name is known but the value is new (e.g. OpenCode restarted
-    // and regenerated its nanoid). Before creating a new session, check if
-    // exactly one existing session was previously identified via the SAME
-    // header name. If so, this is a client restart — resume the old session
-    // and re-index the new header value.
-    const predecessor = findRotationPredecessor(
-      known.headerName,
-      known.sessionId,
-      headerSessionIndex,
-      (sid) => {
-        // Session may be in memory or only in DB (after gateway restart).
-        const inMemory = sessions.get(sid);
-        if (inMemory) {
-          return {
-            sid,
-            isSubagent: !!inMemory.isSubagent,
-            lastActiveAt: inMemory.lastRequestTime,
-          };
+    // Only for headers whose values may change on a client restart while the
+    // logical session continues (e.g. OpenCode's x-session-affinity nanoid).
+    // Headers like x-claude-code-session-id mint a fresh value per
+    // *conversation* — a new value is always a genuinely new session, and
+    // merging would collapse distinct conversations (and their projects) into
+    // one, causing cross-project contamination on remote/multi-client gateways.
+    const predecessor = !isRotationEligible(known.headerName)
+      ? null
+      : findRotationPredecessor(
+          known.headerName,
+          known.sessionId,
+          headerSessionIndex,
+          (sid) => {
+            // Session may be in memory or only in DB (after gateway restart).
+            const inMemory = sessions.get(sid);
+            if (inMemory) {
+              return {
+                sid,
+                isSubagent: !!inMemory.isSubagent,
+                lastActiveAt: inMemory.lastRequestTime,
+              };
+            }
+            // Lightweight DB check for recency and subagent status.
+            const persisted = loadSessionTracking(sid);
+            if (!persisted) return null; // orphaned index entry
+            return {
+              sid,
+              isSubagent: persisted.isSubagent,
+              // lastTurnAt=0 means gradient never ran yet — session is new,
+              // treat as recently active (not infinitely stale).
+              lastActiveAt:
+                persisted.lastTurnAt > 0 ? persisted.lastTurnAt : Date.now(),
+            };
+          },
+        );
+
+    // Fix 2 (defense in depth): even for a rotation-eligible header, never
+    // re-home a session onto a DIFFERENT confident project. If the incoming
+    // request carries an explicit X-Lore-Project that disagrees with the
+    // predecessor's bound project, this is not a benign restart — treat it as
+    // a genuinely new session to avoid cross-project contamination.
+    if (predecessor) {
+      const incomingProject = extractProjectHeader(headers);
+      if (incomingProject) {
+        const predTracking = loadSessionTracking(predecessor.sid);
+        const predProject = predTracking?.projectPath;
+        const predConfident =
+          !!predProject && predTracking?.projectPathProvisional === false;
+        if (predConfident && predProject !== incomingProject) {
+          log.warn(
+            `session rotation refused (${known.headerName}): incoming project ` +
+              `${incomingProject} differs from predecessor ${predecessor.sid.slice(0, 16)} ` +
+              `project ${predProject} — creating a new session instead of merging.`,
+          );
+          const sessionID = generateSessionID();
+          headerSessionIndex.set(indexKey, sessionID);
+          // The old predecessor's index entry is intentionally preserved — the
+          // old session is still valid and may receive requests with its nanoid.
+          // It will age out via ROTATION_MAX_AGE_MS naturally. If another new
+          // nanoid arrives later, the old entry creates an ambiguity (multiple
+          // predecessors) → findRotationPredecessor returns null → new session.
+          return { sessionID, isNew: true, tier: 1 };
         }
-        // Lightweight DB check for recency and subagent status.
-        const persisted = loadSessionTracking(sid);
-        if (!persisted) return null; // orphaned index entry
-        return {
-          sid,
-          isSubagent: persisted.isSubagent,
-          // lastTurnAt=0 means gradient never ran yet — session is new,
-          // treat as recently active (not infinitely stale).
-          lastActiveAt:
-            persisted.lastTurnAt > 0 ? persisted.lastTurnAt : Date.now(),
-        };
-      },
-    );
+      }
+    }
 
     if (predecessor) {
       // Resume the old session with the new header value.
@@ -4423,9 +4457,18 @@ async function handleConversationTurn(
   // preserving the prompt cache prefix.
   stripContextWarnings(req.messages);
 
+  // Per-turn attribution diagnostics. Surfacing source/header/mode here makes
+  // session-identity and project-binding bugs (e.g. the Tier 1b rotation merge,
+  // or a hosted gateway falling back to its own cwd) immediately visible in
+  // `LORE_DEBUG=1` logs instead of requiring a DB autopsy.
   log.info(
     `turn: session=${sessionID.slice(0, 16)} messages=${req.messages.length} ` +
-      `model=${req.model} stream=${req.stream} new=${isNew} tier=${tier}`,
+      `model=${req.model} stream=${req.stream} new=${isNew} tier=${tier} ` +
+      `source=${pathResult.source} ` +
+      `hdrProject=${req.rawHeaders["x-lore-project"] ? "present" : "absent"} ` +
+      `provisional=${sessionState.projectPathProvisional === true} ` +
+      `remoteGateway=${config.remoteGateway} hosted=${isHostedMode()} ` +
+      `project=${projectPath}`,
   );
 
   // --- 4. Set model limits ---
