@@ -136,7 +136,19 @@ await esbuild.build({
   // reads from the bundled copy (always null → returns globalThis.fetch =
   // the interceptor). This creates an infinite request loop: gateway →
   // interceptor → gateway → interceptor → …
-  external: ["bun:*", "node:*", "onnxruntime-node", "sharp", "@loreai/core"],
+  //
+  // `undici` is external (and lazily imported only on the Node path in
+  // fetch.ts) so it is never bundled or evaluated under Bun — real undici@7
+  // hangs on streaming response reads under Bun, so the Bun path uses native
+  // fetch instead and never touches undici.
+  external: [
+    "bun:*",
+    "node:*",
+    "undici",
+    "onnxruntime-node",
+    "sharp",
+    "@loreai/core",
+  ],
   outfile: join(distDir, "index.bun.js"),
   sourcemap: false,
   minify: true,
