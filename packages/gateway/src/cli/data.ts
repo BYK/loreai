@@ -6,6 +6,8 @@
  *   show <type> <id>      Show full detail for an entry
  *   clear [options]       Clear data for a project or wipe the database
  *   delete <type> <id>    Delete a single entry (type: knowledge, session, distillation, project)
+ *   move <type> <id..>    Move session(s) or knowledge to another project (--to required)
+ *   split                 Auto-suggest & move mis-grouped sessions to correct projects
  *
  * When `LORE_REMOTE_URL` is set, most subcommands delegate to the remote
  * gateway REST API instead of accessing the local database.
@@ -1946,6 +1948,487 @@ async function resolveRemoteProject(
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Move / reassign sessions and knowledge between projects
+// ---------------------------------------------------------------------------
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Resolve a `--to` flag value to a project path. Accepts a UUID (resolved
+ * via the DB) or a filesystem path.
+ */
+async function resolveTargetPath(rawTo: string): Promise<string> {
+  if (UUID_RE.test(rawTo)) {
+    const { projectPath: getProjectPathById } = await import("@loreai/core");
+    const p = getProjectPathById(rawTo);
+    if (!p) {
+      console.error(`Error: No project found for UUID: ${rawTo}`);
+      process.exit(1);
+    }
+    return p;
+  }
+  return resolve(rawTo);
+}
+
+async function cmdMove(
+  args: string[],
+  flags: Record<string, unknown>,
+): Promise<void> {
+  const remote = getRemoteUrl();
+  if (remote) return cmdMoveRemote(remote, args, flags);
+
+  const { data } = await import("@loreai/core");
+  const type = args[0];
+  const rawIds = args.slice(1);
+  const skipConfirm = !!flags.yes;
+  const asJson = !!flags.json;
+  const dryRun = !!flags["dry-run"];
+  const rawTo = flags.to as string | undefined;
+  const projectPath = resolve((flags.project as string) ?? process.cwd());
+
+  if (!rawTo) {
+    console.error(
+      "Error: --to <path|UUID> is required. Specify the target project.",
+    );
+    process.exit(1);
+  }
+
+  if (!rawIds.length) {
+    console.error(
+      `Error: Missing <id> argument(s). Usage: lore data move ${type ?? "session"} <id...> --to <target>`,
+    );
+    process.exit(1);
+  }
+
+  switch (type) {
+    case "session": {
+      const { ensureProject } = await import("@loreai/core");
+      const sourceProjectId = ensureProject(projectPath);
+      const targetPath = await resolveTargetPath(rawTo);
+      const includeChildren = flags["no-children"] !== true;
+
+      // Resolve session IDs via prefix matching
+      const allSessions = data.listSessions(projectPath, 10000);
+      const resolved: string[] = [];
+      for (const rawId of rawIds) {
+        const match = allSessions.find((s) => s.session_id.startsWith(rawId));
+        if (!match) {
+          console.error(`Session not found (prefix: ${rawId})`);
+          process.exit(1);
+        }
+        resolved.push(match.session_id);
+      }
+
+      if (asJson && dryRun) {
+        console.log(
+          JSON.stringify(
+            {
+              dryRun: true,
+              from: projectPath,
+              to: targetPath,
+              sessions: resolved.map((sid) => {
+                const s = allSessions.find((x) => x.session_id === sid)!;
+                return {
+                  session_id: sid,
+                  messages: s.message_count,
+                  distillations: s.distillation_count,
+                };
+              }),
+            },
+            null,
+            2,
+          ),
+        );
+        return;
+      }
+
+      if (!asJson) {
+        console.log(`\nMove ${resolved.length} session(s):`);
+        console.log(`  from: ${projectPath}`);
+        console.log(`  to:   ${targetPath}`);
+        console.log(`  include children: ${includeChildren}`);
+        for (const sid of resolved) {
+          const s = allSessions.find((x) => x.session_id === sid);
+          console.log(
+            `  - ${sid.slice(0, 12)}  (${s?.message_count ?? "?"} msgs, ${s?.distillation_count ?? "?"} distillations)`,
+          );
+        }
+      }
+
+      if (dryRun) {
+        console.log("\nDry run — no changes made.");
+        return;
+      }
+
+      if (!skipConfirm) {
+        const confirmed = await confirm(
+          `\nMove ${resolved.length} session(s) to ${targetPath}?`,
+        );
+        if (!confirmed) {
+          console.log("Cancelled.");
+          return;
+        }
+      }
+
+      const result = data.moveSessions(resolved, sourceProjectId, targetPath, {
+        includeChildren,
+      });
+
+      if (asJson) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(
+          `\nMoved: ${result.sessions_moved} sessions, ` +
+            `${result.messages_moved} messages, ` +
+            `${result.distillations_moved} distillations, ` +
+            `${result.tool_calls_moved} tool calls, ` +
+            `${result.knowledge_moved} knowledge entries.`,
+        );
+      }
+      break;
+    }
+
+    case "knowledge": {
+      const rawId = rawIds[0];
+      const targetPath = await resolveTargetPath(rawTo);
+      const id = data.resolveId("knowledge", rawId) ?? rawId;
+
+      if (!skipConfirm && !dryRun) {
+        const confirmed = await confirm(
+          `\nMove knowledge entry ${id.slice(0, 12)}... to ${targetPath}?`,
+        );
+        if (!confirmed) {
+          console.log("Cancelled.");
+          return;
+        }
+      }
+
+      if (dryRun) {
+        console.log(
+          `Would move knowledge ${id.slice(0, 12)}... to ${targetPath}`,
+        );
+        return;
+      }
+
+      if (data.reassignKnowledge(id, targetPath)) {
+        console.log(`Moved knowledge entry ${id} to ${targetPath}`);
+      } else {
+        console.error(`Knowledge entry not found: ${rawId}`);
+        process.exit(1);
+      }
+      break;
+    }
+
+    default:
+      console.error(
+        `Unknown type "${type ?? "(none)"}". Use: session, knowledge`,
+      );
+      process.exit(1);
+  }
+}
+
+async function cmdMoveRemote(
+  remote: string,
+  args: string[],
+  flags: Record<string, unknown>,
+): Promise<void> {
+  const type = args[0];
+  const rawIds = args.slice(1);
+  const skipConfirm = !!flags.yes;
+  const rawTo = flags.to as string | undefined;
+  const projectPath = resolve((flags.project as string) ?? process.cwd());
+
+  if (!rawTo) {
+    console.error(
+      "Error: --to <path|UUID> is required. Specify the target project.",
+    );
+    process.exit(1);
+  }
+
+  if (!rawIds.length) {
+    console.error(
+      `Error: Missing <id> argument(s). Usage: lore data move ${type ?? "session"} <id...> --to <target>`,
+    );
+    process.exit(1);
+  }
+
+  switch (type) {
+    case "session": {
+      const sourceProjectId = await resolveRemoteProject(remote, projectPath);
+      if (!sourceProjectId) {
+        console.error(`No project found for path: ${projectPath}`);
+        process.exit(1);
+      }
+
+      // Resolve target: UUID or path
+      let toProject: { id?: string; path?: string };
+      if (UUID_RE.test(rawTo)) {
+        toProject = { id: rawTo };
+      } else {
+        toProject = { path: resolve(rawTo) };
+      }
+
+      if (!skipConfirm) {
+        const confirmed = await confirm(
+          `\nMove ${rawIds.length} session(s) to ${rawTo}?`,
+        );
+        if (!confirmed) {
+          console.log("Cancelled.");
+          return;
+        }
+      }
+
+      const result = await remotePost<{
+        sessions_moved: number;
+        messages_moved: number;
+        distillations_moved: number;
+        tool_calls_moved: number;
+        knowledge_moved: number;
+      }>(remote, "/api/v1/sessions/move", {
+        session_ids: rawIds,
+        from_project_id: sourceProjectId,
+        to_project: toProject,
+        include_children: flags["no-children"] !== true,
+      });
+
+      console.log(
+        `Moved: ${result.sessions_moved} sessions, ` +
+          `${result.messages_moved} messages, ` +
+          `${result.distillations_moved} distillations, ` +
+          `${result.tool_calls_moved} tool calls, ` +
+          `${result.knowledge_moved} knowledge entries.`,
+      );
+      break;
+    }
+
+    case "knowledge": {
+      const rawId = rawIds[0];
+
+      let toProject: { id?: string; path?: string };
+      if (UUID_RE.test(rawTo)) {
+        toProject = { id: rawTo };
+      } else {
+        toProject = { path: resolve(rawTo) };
+      }
+
+      if (!skipConfirm) {
+        const confirmed = await confirm(
+          `\nMove knowledge entry ${rawId} to ${rawTo}?`,
+        );
+        if (!confirmed) {
+          console.log("Cancelled.");
+          return;
+        }
+      }
+
+      await remotePost(
+        remote,
+        `/api/v1/knowledge/${encodeURIComponent(rawId)}/move`,
+        { to_project: toProject },
+      );
+      console.log(`Moved knowledge entry: ${rawId}`);
+      break;
+    }
+
+    default:
+      console.error(
+        `Unknown type "${type ?? "(none)"}". Use: session, knowledge`,
+      );
+      process.exit(1);
+  }
+}
+
+/**
+ * Auto-suggest planner: scan sessions in a project, suggest target projects
+ * by scanning stored message content for project path patterns.
+ * Mirrors `cmdConsolidate` conventions (dry-run default, --yes to apply).
+ */
+async function cmdSplit(
+  _args: string[],
+  flags: Record<string, unknown>,
+): Promise<void> {
+  const remote = getRemoteUrl();
+  if (remote) {
+    console.error(
+      "Error: split is not supported in remote mode (needs direct DB access for content scanning).",
+    );
+    process.exit(1);
+  }
+
+  const { data, ensureProject } = await import("@loreai/core");
+  const { suggestProjectsForSessions } = await import("../suggest");
+
+  const skipConfirm = !!flags.yes;
+  const asJson = !!flags.json;
+  const dryRun = !!flags["dry-run"] || !skipConfirm;
+  const minConfidence = (flags["min-confidence"] as string) ?? "high";
+  const projectPath = resolve((flags.project as string) ?? process.cwd());
+
+  const sourceProjectId = ensureProject(projectPath);
+  const sessions = data.listSessions(projectPath, 10000);
+
+  if (!sessions.length) {
+    if (!asJson) console.log("No sessions found in project.");
+    return;
+  }
+
+  // Suggest targets for all sessions
+  const suggestions = suggestProjectsForSessions(
+    sessions.map((s) => s.session_id),
+    sourceProjectId,
+    projectPath,
+  );
+
+  // Group by suggested target
+  type PlanEntry = {
+    targetId: string;
+    targetName: string | null;
+    targetPath: string | null;
+    sessions: Array<{
+      sessionId: string;
+      messages: number;
+      confidence: "high" | "low";
+    }>;
+  };
+  const planMap = new Map<string, PlanEntry>();
+  const unresolved: Array<{ sessionId: string; messages: number }> = [];
+
+  for (let i = 0; i < suggestions.length; i++) {
+    const s = suggestions[i];
+    const sess = sessions[i];
+    if (
+      !s.suggestedProjectId ||
+      !s.confidence ||
+      (minConfidence === "high" && s.confidence !== "high")
+    ) {
+      unresolved.push({
+        sessionId: sess.session_id,
+        messages: sess.message_count,
+      });
+      continue;
+    }
+    let entry = planMap.get(s.suggestedProjectId);
+    if (!entry) {
+      entry = {
+        targetId: s.suggestedProjectId,
+        targetName: s.suggestedProjectName,
+        targetPath: s.suggestedProjectPath,
+        sessions: [],
+      };
+      planMap.set(s.suggestedProjectId, entry);
+    }
+    entry.sessions.push({
+      sessionId: sess.session_id,
+      messages: sess.message_count,
+      confidence: s.confidence,
+    });
+  }
+
+  const plans = [...planMap.values()];
+
+  if (asJson) {
+    console.log(
+      JSON.stringify(
+        {
+          dryRun,
+          source: projectPath,
+          plans: plans.map((p) => ({
+            target: p.targetName ?? p.targetPath,
+            targetId: p.targetId,
+            sessions: p.sessions.map((s) => ({
+              session_id: s.sessionId.slice(0, 12),
+              messages: s.messages,
+              confidence: s.confidence,
+            })),
+          })),
+          unresolved: unresolved.map((u) => ({
+            session_id: u.sessionId.slice(0, 12),
+            messages: u.messages,
+          })),
+        },
+        null,
+        2,
+      ),
+    );
+  } else {
+    console.log(`\nSource project: ${projectPath}`);
+    console.log(`Total sessions: ${sessions.length}`);
+    console.log(`  with suggestion: ${sessions.length - unresolved.length}`);
+    console.log(`  unresolved: ${unresolved.length}\n`);
+
+    for (const plan of plans) {
+      console.log(
+        `  → ${plan.targetName ?? plan.targetPath} (${plan.sessions.length} sessions)`,
+      );
+      for (const s of plan.sessions) {
+        console.log(
+          `      ${s.sessionId.slice(0, 12)}  ${s.messages} msgs  [${s.confidence}]`,
+        );
+      }
+    }
+    if (unresolved.length) {
+      console.log(`\n  ? Unresolved (${unresolved.length} sessions):`);
+      for (const u of unresolved) {
+        console.log(
+          `      ${u.sessionId.slice(0, 12)}  ${u.messages} msgs  → use "lore data move session <id> --to <target>"`,
+        );
+      }
+    }
+  }
+
+  if (plans.length === 0) {
+    if (!asJson)
+      console.log(
+        "\nNo confident suggestions found. Use `lore data move session <id> --to <target>` to move manually.",
+      );
+    return;
+  }
+
+  if (dryRun) {
+    if (!asJson) {
+      console.log(
+        `\nDry run — no changes made. Re-run with --yes to move ${plans.reduce((n, p) => n + p.sessions.length, 0)} session(s).`,
+      );
+    }
+    return;
+  }
+
+  // Apply
+  let totalMoved = 0;
+  for (const plan of plans) {
+    if (!plan.targetPath) continue;
+    try {
+      const result = data.moveSessions(
+        plan.sessions.map((s) => s.sessionId),
+        sourceProjectId,
+        plan.targetPath,
+      );
+      totalMoved += result.sessions_moved;
+      if (!asJson) {
+        console.log(
+          `\n  ✓ Moved ${result.sessions_moved} session(s) → ${plan.targetName ?? plan.targetPath}` +
+            ` (${result.messages_moved} msgs, ${result.distillations_moved} distillations, ${result.knowledge_moved} knowledge)`,
+        );
+      }
+    } catch (e) {
+      console.error(
+        `  ✗ Failed to move to ${plan.targetName ?? plan.targetPath}: ${(e as Error).message}`,
+      );
+    }
+  }
+
+  if (!asJson) {
+    console.log(`\nSplit complete: ${totalMoved} session(s) moved.`);
+    if (unresolved.length) {
+      console.log(
+        `${unresolved.length} unresolved session(s) remain — use "lore data move session <id> --to <target>".`,
+      );
+    }
+  }
+}
+
 // Main dispatch
 // ---------------------------------------------------------------------------
 
@@ -1960,6 +2443,8 @@ Subcommands:
   show <type> <id>      Show full detail for an entry
   clear [options]       Clear data for a project or wipe the database
   delete <type> <id>    Delete a single entry (type: knowledge, session, distillation, project)
+  move <type> <id..>    Move session(s) or knowledge to another project (--to required)
+  split                 Auto-suggest & move mis-grouped sessions to correct projects
   merge                 Scan git remotes and merge duplicate projects
   consolidate           Merge "(unattributed)" buckets into matched real projects
   recover               Re-import knowledge from .lore.md / AGENTS.md files
@@ -1974,6 +2459,12 @@ Options:
   --json                Output JSON instead of table
   --yes, -y             Skip confirmation for destructive operations
   --interactive, -i     Interactive mode for dedup (accept/reject per cluster)
+  --dry-run             Preview only (no mutations)
+
+Move options:
+  --to <path|UUID>      Target project for move/reassign (required for move)
+  --no-children         Don't include sub-agent child sessions in the move
+  --min-confidence      Minimum confidence for split suggestions (high|low, default: high)
 
 Clear options:
   --knowledge           Clear only knowledge entries
@@ -1991,6 +2482,11 @@ Examples:
   lore data delete knowledge abc12345
   lore data delete session abc12345-6789
   lore data delete project /path/to/project  # delete project and ALL its data
+  lore data move session abc123 --to /path/to/project   # move a session
+  lore data move session abc123 def456 --to <UUID>     # move multiple sessions
+  lore data move knowledge abc123 --to /path/to/project  # reassign a knowledge entry
+  lore data split --project /wrong/project             # dry-run: suggest moves
+  lore data split --project /wrong/project --yes       # apply confident suggestions
   lore data merge                          # scan & merge git duplicates
   lore data merge --yes                    # skip confirmation
   lore data consolidate                    # dry-run: show "(unattributed)" buckets & matches
@@ -2277,6 +2773,12 @@ export async function commandData(
       break;
     case "delete":
       await cmdDelete(subArgs, values);
+      break;
+    case "move":
+      await cmdMove(subArgs, values);
+      break;
+    case "split":
+      await cmdSplit(subArgs, values);
       break;
     case "merge":
       await cmdMerge(subArgs, values);

@@ -439,6 +439,23 @@ export function getActiveSessions(): ReadonlyMap<string, SessionState> {
 }
 
 /**
+ * Re-bind an active session's project path after a manual move/reassign.
+ *
+ * Updates the in-memory `SessionState` so the live dashboard immediately
+ * reflects the new project without requiring a gateway restart. A no-op
+ * when the session is not currently active (DB-only move is sufficient).
+ */
+export function rebindActiveSession(
+  sessionId: string,
+  newProjectPath: string,
+): void {
+  const sess = sessions.get(sessionId);
+  if (!sess) return;
+  sess.projectPath = newProjectPath;
+  sess.projectPathProvisional = false;
+}
+
+/**
  * Reverse lookup: maps header-based session ID values to internal session IDs.
  * Key: `headerName:headerValue` (e.g. `x-claude-code-session-id:uuid-1234`).
  * Value: internal session ID (the key in `sessions`).

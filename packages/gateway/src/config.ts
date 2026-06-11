@@ -497,7 +497,7 @@ export function extractProviderHeader(
  * Each pattern captures the directory portion (no trailing filename when
  * possible). Ordered from most-specific to most-general.
  */
-const PROJECT_PATH_PATTERNS: RegExp[] = [
+export const PROJECT_PATH_PATTERNS: RegExp[] = [
   // "cwd": "/path/to/project" (JSON-style in tool definitions).
   // Accepts any absolute path — the surrounding structure (key + quotes)
   // provides enough specificity to avoid false positives.
@@ -523,7 +523,7 @@ const PROJECT_PATH_PATTERNS: RegExp[] = [
  * project. A match from that pattern alone must NOT confidently (re)bind the
  * session — it is the project-misattribution vector behind cross-project leaks.
  */
-const AUTHORITATIVE_PATTERN_COUNT = 3;
+export const AUTHORITATIVE_PATTERN_COUNT = 3;
 
 export type InferredProjectPath = { path: string; authoritative: boolean };
 

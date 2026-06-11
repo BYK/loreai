@@ -284,6 +284,126 @@ async function handleClearProject(
   return jsonResponse(data.clearProject(projectPath));
 }
 
+/**
+ * Resolve a target project from a `to_project` body field.
+ * Accepts `{ id: "uuid" }`, `{ git_remote: "..." }`, or `{ path: "..." }`.
+ */
+function resolveTargetProject(
+  toProject: { id?: string; git_remote?: string; path?: string } | undefined,
+): string | null {
+  if (!toProject) return null;
+  if (toProject.id) {
+    return getProjectPathById(toProject.id);
+  }
+  if (toProject.git_remote || toProject.path) {
+    const id = resolveProjectByRemoteOrPath(
+      toProject.git_remote,
+      toProject.path,
+    );
+    if (id) return getProjectPathById(id);
+    // If not found by remote/path but a path was given, use it directly
+    // (ensureProject will create the project row).
+    if (toProject.path) return toProject.path;
+  }
+  return null;
+}
+
+async function handleMoveSessions(req: Request): Promise<Response> {
+  type MoveBody = {
+    session_ids: string[];
+    from_project_id: string;
+    to_project?: { id?: string; git_remote?: string; path?: string };
+    include_children?: boolean;
+  };
+  let body: MoveBody;
+  try {
+    body = await parseBody<MoveBody>(req);
+  } catch {
+    return errorResponse(400, "invalid_request", "Invalid request body");
+  }
+
+  if (!body.session_ids?.length || !body.from_project_id || !body.to_project) {
+    return errorResponse(
+      400,
+      "invalid_request",
+      "Required: session_ids (array), from_project_id, to_project ({ id | git_remote | path })",
+    );
+  }
+
+  const targetPath = resolveTargetProject(body.to_project);
+  if (!targetPath) {
+    return errorResponse(
+      400,
+      "invalid_request",
+      "Could not resolve target project from to_project",
+    );
+  }
+
+  const result = data.moveSessions(
+    body.session_ids,
+    body.from_project_id,
+    targetPath,
+    { includeChildren: body.include_children },
+  );
+
+  // Update in-memory active session bindings so the live dashboard
+  // reflects the move immediately — use the expanded list (includes
+  // BFS-expanded children) rather than the user-supplied IDs.
+  try {
+    const { rebindActiveSession } = await import("./pipeline");
+    for (const sid of result.movedSessionIds) {
+      rebindActiveSession(sid, targetPath);
+    }
+  } catch {
+    // Best-effort — pipeline may not be loaded in all contexts.
+  }
+
+  return jsonResponse(result);
+}
+
+async function handleMoveKnowledge(
+  req: Request,
+  knowledgeId: string,
+): Promise<Response> {
+  type MoveKnowledgeBody = {
+    to_project?: { id?: string; git_remote?: string; path?: string };
+  };
+  let body: MoveKnowledgeBody;
+  try {
+    body = await parseBody<MoveKnowledgeBody>(req);
+  } catch {
+    return errorResponse(400, "invalid_request", "Invalid request body");
+  }
+
+  if (!body.to_project) {
+    return errorResponse(
+      400,
+      "invalid_request",
+      "Required: to_project ({ id | git_remote | path })",
+    );
+  }
+
+  const targetPath = resolveTargetProject(body.to_project);
+  if (!targetPath) {
+    return errorResponse(
+      400,
+      "invalid_request",
+      "Could not resolve target project from to_project",
+    );
+  }
+
+  const resolvedId = data.resolveId("knowledge", knowledgeId) ?? knowledgeId;
+  const success = data.reassignKnowledge(resolvedId, targetPath);
+  if (!success) {
+    return errorResponse(
+      404,
+      "not_found",
+      `Knowledge entry not found: ${knowledgeId}`,
+    );
+  }
+  return jsonResponse({ moved: true, id: resolvedId });
+}
+
 function handleMergeProjects(): Response {
   if (isHostedMode()) {
     return errorResponse(
@@ -753,7 +873,18 @@ export async function handleAPIRequest(
       return await handleImportRecord(req);
     }
 
+    // POST /api/v1/sessions/move — move sessions between projects
+    if (pathname === "/api/v1/sessions/move") {
+      return await handleMoveSessions(req);
+    }
+
     // Parameterized routes
+
+    // POST /api/v1/knowledge/:id/move — reassign a knowledge entry
+    params = matchRoute(pathname, "/api/v1/knowledge/:id/move");
+    if (params) {
+      return await handleMoveKnowledge(req, params.id);
+    }
 
     // POST /api/v1/projects/:id/clear
     params = matchRoute(pathname, "/api/v1/projects/:id/clear");

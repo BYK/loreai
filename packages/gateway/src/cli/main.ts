@@ -102,6 +102,19 @@ const OPTIONS = {
   n: { type: "string" as const },
   lines: { type: "string" as const },
   path: { type: "boolean" as const },
+  // `lore data move` flags
+  to: { type: "string" as const },
+  project: { type: "string" as const },
+  limit: { type: "string" as const },
+  json: { type: "boolean" as const },
+  "dry-run": { type: "boolean" as const },
+  "no-children": { type: "boolean" as const },
+  "min-confidence": { type: "string" as const },
+  // `lore data clear` flags
+  knowledge: { type: "boolean" as const },
+  temporal: { type: "boolean" as const },
+  distillations: { type: "boolean" as const },
+  all: { type: "boolean" as const },
   // `lore start --local` — disable hosted mode (keep FS ops active)
   local: { type: "boolean" as const, short: "l" },
   // Hidden diagnostic: prints the vendored-model registration set by

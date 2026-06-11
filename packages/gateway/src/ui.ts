@@ -18,6 +18,7 @@ import {
   log,
   projectName,
   projectId as lookupProjectId,
+  projectPath as getProjectPathById,
   isUnattributedProjectPath,
   renderMarkdown,
   loadParentChildMap,
@@ -38,7 +39,7 @@ import {
   getCostRate,
   type SessionCosts,
 } from "./cost-tracker";
-import { getActiveSessions } from "./pipeline";
+import { getActiveSessions, rebindActiveSession } from "./pipeline";
 import {
   computeWarmingSnapshot,
   getCircuitBreakerStatus,
@@ -1592,7 +1593,7 @@ function pageProject(projectId: string): string | null {
     body += `<p class="empty">No knowledge entries.</p>`;
   }
 
-  // Sessions section — with sub-agent tree grouping
+  // Sessions section — with sub-agent tree grouping and bulk-move support
   body += `<h2>Sessions (${sessions.length})</h2>`;
   if (sessions.length) {
     const pMap = loadParentChildMap();
@@ -1617,8 +1618,12 @@ function pageProject(projectId: string): string | null {
       return parentId === undefined || !sessNodeMap.has(parentId);
     });
 
+    // Other projects for the move-to dropdown
+    const otherProjects = projects.filter((p) => p.id !== projectId);
+
+    body += `<form method="POST" action="/ui/api/move/sessions/${esc(projectId)}">`;
     body += `<table data-table-id="project-sessions">
-      <tr><th>Session</th><th data-sort="num">Messages</th><th data-sort="num">Distilled</th><th data-sort="num">Distillations</th><th data-sort="date" data-default-sort="desc">Last Activity</th></tr>`;
+      <tr><th style="width:30px"><input type="checkbox" id="select-all-sessions" title="Select all"></th><th>Session</th><th data-sort="num">Messages</th><th data-sort="num">Distilled</th><th data-sort="num">Distillations</th><th data-sort="date" data-default-sort="desc">Last Activity</th></tr>`;
 
     function renderProjSession(s: SessNode, parentSid?: string): void {
       const isChild = parentSid != null;
@@ -1635,6 +1640,7 @@ function pageProject(projectId: string): string | null {
         ? ` class="subagent-row" data-parent="${esc(parentSidValue)}"`
         : "";
       body += `<tr${trAttrs}>
+        <td><input type="checkbox" name="sessionIds" value="${esc(s.session_id)}"></td>
         <td>${toggle}${prefix}<a href="/ui/sessions/${esc(projectId)}/${esc(s.session_id)}">${esc(s.session_id.slice(0, 12))}</a>${childCount}</td>
         <td>${s.message_count}</td>
         <td>${s.distilled_count}</td>
@@ -1650,6 +1656,21 @@ function pageProject(projectId: string): string | null {
     }
 
     body += `</table>`;
+
+    // Bulk move controls (below the table, inside the form)
+    if (otherProjects.length) {
+      body += `<div style="margin:8px 0;display:flex;gap:8px;align-items:center">
+        <span style="font-size:0.9em;color:var(--fg2)">Move selected to:</span>
+        <select name="target" style="padding:4px 8px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);color:var(--fg);font-size:0.85em">
+          <option value="">— select project —</option>
+          ${otherProjects.map((p) => `<option value="${esc(p.id)}">${esc(p.name ?? p.path)}</option>`).join("")}
+        </select>
+        <button type="submit" class="btn btn-primary" onclick="return this.form.target.value ? confirm('Move selected sessions?') : (alert('Select a target project first'), false)">Move</button>
+      </div>`;
+    }
+    body += `</form>`;
+    // Select-all checkbox toggle
+    body += `<script>document.getElementById('select-all-sessions')?.addEventListener('change',function(e){document.querySelectorAll('input[name=sessionIds]').forEach(function(c){c.checked=e.target.checked})})</script>`;
   } else {
     body += `<p class="empty">No sessions.</p>`;
   }
@@ -1850,6 +1871,22 @@ function pageKnowledge(id: string): string | null {
   }
 
   body += `<h2>Content</h2>${md(entry.content)}`;
+
+  // Move to another project
+  const allProjects = data.listProjects();
+  const knowledgeOtherProjects = allProjects.filter(
+    (p) => p.id !== entry.project_id,
+  );
+  if (knowledgeOtherProjects.length) {
+    body += `<form method="POST" action="/ui/api/move/knowledge/${esc(entry.id)}" style="margin:12px 0;display:flex;gap:8px;align-items:center">
+      <span style="font-size:0.9em;color:var(--fg2)">Move to:</span>
+      <select name="target" style="padding:4px 8px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);color:var(--fg);font-size:0.85em">
+        <option value="">— select project —</option>
+        ${knowledgeOtherProjects.map((p) => `<option value="${esc(p.id)}">${esc(p.name ?? p.path)}</option>`).join("")}
+      </select>
+      <button type="submit" class="btn btn-primary" onclick="return this.form.target.value ? confirm('Move this knowledge entry?') : (alert('Select a target project first'), false)">Move</button>
+    </form>`;
+  }
 
   body += `<div class="actions">
     ${deleteForm(`/ui/api/delete/knowledge/${esc(entry.id)}`, "Delete Entry", "Delete this knowledge entry?")}
@@ -3414,6 +3451,51 @@ export async function handleUIRequest(
         data.deleteSession(project.path, delSession.sessionId);
       }
       return redirect(`/ui/projects/${delSession.projectId}`);
+    }
+
+    // Move sessions to another project (bulk or single)
+    const moveSessions = matchRoute(
+      pathname,
+      "/ui/api/move/sessions/:projectId",
+    );
+    if (moveSessions) {
+      const formData = await req.formData();
+      const targetProjectId = formData.get("target") as string;
+      const sessionIds = formData.getAll("sessionIds") as string[];
+      const targetPath = targetProjectId
+        ? getProjectPathById(targetProjectId)
+        : null;
+      if (targetPath && sessionIds.length) {
+        const moveResult = data.moveSessions(
+          sessionIds,
+          moveSessions.projectId,
+          targetPath,
+        );
+        // Rebind all moved sessions (including BFS-expanded children).
+        for (const sid of moveResult.movedSessionIds) {
+          rebindActiveSession(sid, targetPath);
+        }
+      }
+      return redirect(`/ui/projects/${moveSessions.projectId}`);
+    }
+
+    // Move knowledge entry to another project
+    const moveKnowledge = matchRoute(pathname, "/ui/api/move/knowledge/:id");
+    if (moveKnowledge) {
+      const formData = await req.formData();
+      const targetProjectId = formData.get("target") as string;
+      const targetPath = targetProjectId
+        ? getProjectPathById(targetProjectId)
+        : null;
+      if (targetPath) {
+        data.reassignKnowledge(moveKnowledge.id, targetPath);
+      }
+      // Redirect to the entry's updated page
+      const entry = ltm.get(moveKnowledge.id);
+      if (entry?.project_id) {
+        return redirect(`/ui/projects/${entry.project_id}`);
+      }
+      return redirect(`/ui/knowledge/${moveKnowledge.id}`);
     }
 
     // Delete distillation

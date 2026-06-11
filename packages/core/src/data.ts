@@ -14,11 +14,14 @@ import {
   db,
   ensureProject,
   projectId,
+  projectPath as getProjectPathById,
   close,
   dbPath,
   mergeProjectInternal,
   repoNameFromRemote,
   onProjectMutation,
+  loadParentChildMap,
+  invalidateParentChildCache,
 } from "./db";
 import { getGitRemote } from "./git";
 import * as ltm from "./ltm";
@@ -816,6 +819,263 @@ export function deleteSession(
   invalidateGlobalStatsCache();
 
   return { messages_deleted: msgCount, distillations_deleted: distCount };
+}
+
+// ---------------------------------------------------------------------------
+// Session move / reassign
+// ---------------------------------------------------------------------------
+
+export type MoveSessionsResult = {
+  sessions_moved: number;
+  messages_moved: number;
+  distillations_moved: number;
+  tool_calls_moved: number;
+  knowledge_moved: number;
+  /** Full list of session IDs that were moved (including BFS-expanded children).
+   *  Callers use this to rebind in-memory active session states. */
+  movedSessionIds: string[];
+};
+
+/**
+ * Move one or more sessions from one project to another.
+ *
+ * Re-points `temporal_messages`, `distillations`, `tool_calls`, and
+ * `session_state` for the given session IDs from `fromProjectId` to the
+ * project at `toProjectPath` (created via `ensureProject` if needed).
+ *
+ * Knowledge entries linked by `source_session` are also moved. Knowledge
+ * with `source_session = NULL` is NOT touched — use `reassignKnowledge()`
+ * for those.
+ *
+ * By default, sub-agent child sessions (linked via `parent_session_id`)
+ * are expanded and included. Pass `{ includeChildren: false }` to move
+ * only the explicitly listed sessions.
+ */
+export function moveSessions(
+  sessionIds: string[],
+  fromProjectId: string,
+  toProjectPath: string,
+  opts?: { includeChildren?: boolean; gitRemote?: string },
+): MoveSessionsResult {
+  const emptyResult: MoveSessionsResult = {
+    sessions_moved: 0,
+    messages_moved: 0,
+    distillations_moved: 0,
+    tool_calls_moved: 0,
+    knowledge_moved: 0,
+    movedSessionIds: [],
+  };
+
+  if (!sessionIds.length) return emptyResult;
+
+  const toId = ensureProject(toProjectPath, undefined, opts?.gitRemote);
+
+  // Same project → idempotent no-op.
+  if (fromProjectId === toId) return emptyResult;
+
+  // Expand to include sub-agent children unless explicitly opted out.
+  let allIds = [...new Set(sessionIds)];
+  if (opts?.includeChildren !== false) {
+    const parentChildMap = loadParentChildMap();
+    // Build a reverse map: parent → children
+    const childrenOf = new Map<string, string[]>();
+    for (const [childId, parentId] of parentChildMap) {
+      let children = childrenOf.get(parentId);
+      if (!children) {
+        children = [];
+        childrenOf.set(parentId, children);
+      }
+      children.push(childId);
+    }
+    // BFS to collect all descendants of the requested sessions.
+    const expanded = new Set(allIds);
+    const queue = [...allIds];
+    while (queue.length > 0) {
+      const current = queue.pop()!;
+      const children = childrenOf.get(current);
+      if (children) {
+        for (const child of children) {
+          if (!expanded.has(child)) {
+            expanded.add(child);
+            queue.push(child);
+          }
+        }
+      }
+    }
+    allIds = [...expanded];
+  }
+
+  const database = db();
+  const placeholders = allIds.map(() => "?").join(",");
+
+  // Count rows before the UPDATE (FTS triggers inflate stmt.changes).
+  // Also count distinct sessions that actually have data in the source
+  // project — the expanded allIds may include sessions that don't exist
+  // in this project, and we must not overcount.
+  const sessionCount = (
+    database
+      .query(
+        `SELECT COUNT(DISTINCT session_id) as c FROM temporal_messages WHERE project_id = ? AND session_id IN (${placeholders})`,
+      )
+      .get(fromProjectId, ...allIds) as { c: number }
+  ).c;
+
+  const msgCount = (
+    database
+      .query(
+        `SELECT COUNT(*) as c FROM temporal_messages WHERE project_id = ? AND session_id IN (${placeholders})`,
+      )
+      .get(fromProjectId, ...allIds) as { c: number }
+  ).c;
+
+  const distCount = (
+    database
+      .query(
+        `SELECT COUNT(*) as c FROM distillations WHERE project_id = ? AND session_id IN (${placeholders})`,
+      )
+      .get(fromProjectId, ...allIds) as { c: number }
+  ).c;
+
+  const toolCount = (
+    database
+      .query(
+        `SELECT COUNT(*) as c FROM tool_calls WHERE project_id = ? AND session_id IN (${placeholders})`,
+      )
+      .get(fromProjectId, ...allIds) as { c: number }
+  ).c;
+
+  const knowledgeCount = (
+    database
+      .query(
+        `SELECT COUNT(*) as c FROM knowledge WHERE project_id = ? AND source_session IN (${placeholders})`,
+      )
+      .get(fromProjectId, ...allIds) as { c: number }
+  ).c;
+
+  // Collect IDs of knowledge entries being moved (needed for
+  // knowledge_transfers cleanup).
+  const movedKnowledgeIds = (
+    database
+      .query(
+        `SELECT id FROM knowledge WHERE project_id = ? AND source_session IN (${placeholders})`,
+      )
+      .all(fromProjectId, ...allIds) as Array<{ id: string }>
+  ).map((r) => r.id);
+
+  // All mutations in a single transaction.
+  database.query("BEGIN IMMEDIATE").run();
+  try {
+    database
+      .query(
+        `UPDATE temporal_messages SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
+      )
+      .run(toId, fromProjectId, ...allIds);
+
+    database
+      .query(
+        `UPDATE distillations SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
+      )
+      .run(toId, fromProjectId, ...allIds);
+
+    database
+      .query(
+        `UPDATE tool_calls SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
+      )
+      .run(toId, fromProjectId, ...allIds);
+
+    // Re-bind session_state to the target project path (confident, not provisional).
+    database
+      .query(
+        `UPDATE session_state SET project_path = ?, project_path_provisional = 0 WHERE session_id IN (${placeholders})`,
+      )
+      .run(toProjectPath, ...allIds);
+
+    // Move knowledge entries linked by source_session.
+    database
+      .query(
+        `UPDATE knowledge SET project_id = ? WHERE project_id = ? AND source_session IN (${placeholders})`,
+      )
+      .run(toId, fromProjectId, ...allIds);
+
+    // Clean up knowledge_transfers that became self-referential after the
+    // move: an entry whose project_id is now toId, recalled in toId.
+    // This mirrors the self-referential cleanup in mergeProjectInternal().
+    if (movedKnowledgeIds.length > 0) {
+      const kPlaceholders = movedKnowledgeIds.map(() => "?").join(",");
+      database
+        .query(
+          `DELETE FROM knowledge_transfers
+           WHERE recalled_in_project_id = ?
+             AND knowledge_id IN (${kPlaceholders})`,
+        )
+        .run(toId, ...movedKnowledgeIds);
+    }
+
+    database.query("COMMIT").run();
+  } catch (e) {
+    database.query("ROLLBACK").run();
+    throw e;
+  }
+
+  invalidateProjectsCache();
+  invalidateGlobalStatsCache();
+  invalidateParentChildCache();
+
+  return {
+    sessions_moved: sessionCount,
+    messages_moved: msgCount,
+    distillations_moved: distCount,
+    tool_calls_moved: toolCount,
+    knowledge_moved: knowledgeCount,
+    movedSessionIds: allIds,
+  };
+}
+
+/**
+ * Reassign a single knowledge entry to a different project.
+ *
+ * Useful for curator/aggregate entries with `source_session = NULL` that
+ * were not automatically moved by `moveSessions()`.
+ *
+ * Returns `true` on success, `false` if the entry does not exist.
+ */
+export function reassignKnowledge(
+  knowledgeId: string,
+  toProjectPath: string,
+  opts?: { gitRemote?: string },
+): boolean {
+  const entry = ltm.get(knowledgeId);
+  if (!entry) return false;
+
+  const toId = ensureProject(toProjectPath, undefined, opts?.gitRemote);
+  if (entry.project_id === toId) return true; // already there
+
+  const oldProjectId = entry.project_id;
+  db()
+    .query("UPDATE knowledge SET project_id = ? WHERE id = ?")
+    .run(toId, knowledgeId);
+
+  invalidateProjectsCache();
+  invalidateGlobalStatsCache();
+
+  // Best-effort: re-export .lore.md for both old and new projects.
+  // Guard with existsSync for central/remote setups where paths may not
+  // exist on the gateway host's filesystem.
+  try {
+    if (toProjectPath && existsSync(toProjectPath)) {
+      agentsFile.exportLoreFile(toProjectPath);
+    }
+    if (oldProjectId) {
+      const oldPath = getProjectPathById(oldProjectId);
+      if (oldPath && existsSync(oldPath)) {
+        agentsFile.exportLoreFile(oldPath);
+      }
+    }
+  } catch {
+    // Best-effort — don't fail the reassignment if .lore.md export fails.
+  }
+
+  return true;
 }
 
 /**
