@@ -15,18 +15,27 @@ import { safeExit } from "./exit";
 const DEFAULT_SHUTDOWN_DEADLINE_MS = 4000;
 
 /**
- * Hard cap on how long `shutdown()` may run before we force-exit. Override with
- * `LORE_SHUTDOWN_TIMEOUT_MS`. Invalid / non-positive / non-finite values fall
- * back to the default (mirrors the `LORE_MAX_RETRIES` parsing convention so a
- * typo can never *disable* the safety net).
+ * Parse a shutdown-deadline value (ms). Invalid / non-positive / non-finite
+ * values fall back to `fallback` — mirrors the `LORE_MAX_RETRIES` parsing
+ * convention so a typo can never *disable* the safety net. Exported for tests.
  */
-export const SHUTDOWN_DEADLINE_MS: number = (() => {
-  const raw = process.env.LORE_SHUTDOWN_TIMEOUT_MS;
-  if (!raw) return DEFAULT_SHUTDOWN_DEADLINE_MS;
+export function parseShutdownDeadline(
+  raw: string | undefined,
+  fallback: number = DEFAULT_SHUTDOWN_DEADLINE_MS,
+): number {
+  if (!raw) return fallback;
   const n = Number(raw);
-  if (!Number.isFinite(n) || n <= 0) return DEFAULT_SHUTDOWN_DEADLINE_MS;
+  if (!Number.isFinite(n) || n <= 0) return fallback;
   return n;
-})();
+}
+
+/**
+ * Hard cap on how long `shutdown()` may run before we force-exit. Override with
+ * `LORE_SHUTDOWN_TIMEOUT_MS`.
+ */
+export const SHUTDOWN_DEADLINE_MS: number = parseShutdownDeadline(
+  process.env.LORE_SHUTDOWN_TIMEOUT_MS,
+);
 
 const SIGNAL_NUMBERS: Record<string, number> = {
   SIGHUP: 1,
@@ -77,16 +86,20 @@ export async function runShutdownWithDeadline(
 }
 
 /**
- * Install SIGINT/SIGTERM handlers for a command that *directly owns* teardown
- * (i.e. no child agent to forward to — `lore start`, `lore run` with no agent).
+ * Build the SIGINT/SIGTERM handler for a command that *directly owns* teardown
+ * (no child agent — `lore start`, `lore run` with no agent).
  *
  *   - First signal:  run `shutdown()` deadline-bounded, then exit.
  *   - Second signal: force an immediate exit (don't wait for the in-flight
  *     graceful shutdown). This is what makes repeated Ctrl+C responsive.
+ *
+ * Exported for testing; prefer `installSignalShutdown` at call sites.
  */
-export function installSignalShutdown(shutdown: () => Promise<void>): void {
+export function makeSignalShutdownHandler(
+  shutdown: () => Promise<void>,
+): (signal: NodeJS.Signals) => Promise<void> {
   let count = 0;
-  const handle = async (signal: NodeJS.Signals): Promise<void> => {
+  return async (signal: NodeJS.Signals): Promise<void> => {
     count++;
     const code = signalExitCode(signal);
     if (count >= 2) {
@@ -96,6 +109,41 @@ export function installSignalShutdown(shutdown: () => Promise<void>): void {
     await runShutdownWithDeadline(shutdown);
     safeExit(code);
   };
+}
+
+/** Install the direct-owns-teardown signal handler (see makeSignalShutdownHandler). */
+export function installSignalShutdown(shutdown: () => Promise<void>): void {
+  const handle = makeSignalShutdownHandler(shutdown);
   process.on("SIGINT", () => void handle("SIGINT"));
   process.on("SIGTERM", () => void handle("SIGTERM"));
+}
+
+/**
+ * Build the SIGINT/SIGTERM handler for `lore run <agent>`: forward the first
+ * signal to the child (whose exit then drives gateway teardown) and force-exit
+ * on a second interrupt so the user is never stuck on a hung child/shutdown.
+ *
+ * Exported for testing; prefer `installChildSignalForwarding` at call sites.
+ */
+export function makeChildForwardHandler(child: {
+  kill: (signal: NodeJS.Signals) => void;
+}): (signal: NodeJS.Signals) => void {
+  let count = 0;
+  return (signal: NodeJS.Signals): void => {
+    count++;
+    if (count >= 2) {
+      console.error("[lore] Received second interrupt — forcing exit.");
+      safeExit(signalExitCode(signal));
+    }
+    child.kill(signal);
+  };
+}
+
+/** Install the forward-to-child signal handler (see makeChildForwardHandler). */
+export function installChildSignalForwarding(child: {
+  kill: (signal: NodeJS.Signals) => void;
+}): void {
+  const handle = makeChildForwardHandler(child);
+  process.on("SIGINT", () => handle("SIGINT"));
+  process.on("SIGTERM", () => handle("SIGTERM"));
 }

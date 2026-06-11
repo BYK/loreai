@@ -13,6 +13,7 @@ import { detectAgents, AGENTS, type DetectedAgent } from "./agents";
 import { safeExit } from "./exit";
 import {
   installSignalShutdown,
+  installChildSignalForwarding,
   runShutdownWithDeadline,
   signalExitCode,
 } from "./shutdown";
@@ -230,17 +231,7 @@ export async function commandRun(
   // Forward the first signal to the child (its `exit` handler then drives
   // gateway teardown); a second interrupt forces an immediate exit so the user
   // is never stuck waiting on a hung child or shutdown.
-  let signalCount = 0;
-  const onSignal = (signal: NodeJS.Signals) => {
-    signalCount++;
-    if (signalCount >= 2) {
-      console.error("[lore] Received second interrupt — forcing exit.");
-      safeExit(signalExitCode(signal));
-    }
-    child.kill(signal);
-  };
-  process.on("SIGINT", () => onSignal("SIGINT"));
-  process.on("SIGTERM", () => onSignal("SIGTERM"));
+  installChildSignalForwarding(child);
 
   // Wait for child to exit, then tear down gateway (only if we own it)
   return new Promise<void>((_resolve) => {
