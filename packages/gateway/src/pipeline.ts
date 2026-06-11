@@ -2099,6 +2099,19 @@ function buildStreamingResponse(
   let cancelled = false;
   let activeReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
 
+  // --- Keepalive ping timer ---
+  // Emits SSE `ping` events on the client-facing stream when no upstream
+  // events arrive for KEEPALIVE_INACTIVITY_MS. This prevents Bun's hardcoded
+  // ~5-min fetch timeout (oven-sh/bun#16682) from killing the client↔gateway
+  // connection during long thinking pauses, recall execution, or follow-up
+  // requests. `ping` is a first-class no-op event in Anthropic's SSE protocol
+  // and is explicitly skipped by the OpenAI/Responses stream translators.
+  const KEEPALIVE_INACTIVITY_MS = 30_000; // 30s — well under Bun's ~5-min cap
+  const pingEvent = encoder.encode(
+    formatSSEEvent("ping", JSON.stringify({ type: "ping" })),
+  );
+  let keepaliveTimer: ReturnType<typeof setTimeout> | null = null;
+
   const stream = new ReadableStream({
     async start(controller) {
       // Guard helpers for client-disconnect safety
@@ -2121,6 +2134,23 @@ function buildStreamingResponse(
         }
       };
 
+      /** Reset the keepalive inactivity timer. Call on every upstream event. */
+      const resetKeepalive = (): void => {
+        if (keepaliveTimer) clearTimeout(keepaliveTimer);
+        keepaliveTimer = setTimeout(function tick() {
+          if (cancelled) return;
+          safeEnqueue(pingEvent);
+          // Re-arm: keep pinging every KEEPALIVE_INACTIVITY_MS until an
+          // upstream event arrives (which calls resetKeepalive) or the
+          // stream closes (which calls clearKeepalive).
+          keepaliveTimer = setTimeout(tick, KEEPALIVE_INACTIVITY_MS);
+        }, KEEPALIVE_INACTIVITY_MS);
+      };
+      const clearKeepalive = (): void => {
+        if (keepaliveTimer) clearTimeout(keepaliveTimer);
+        keepaliveTimer = null;
+      };
+
       try {
         // Parse and forward upstream SSE events
         if (!upstreamResponse.body) {
@@ -2141,7 +2171,9 @@ function buildStreamingResponse(
         let warningBlockIndex = 0; // incremented past thinking blocks
         const warningOffset = warningText ? 1 : 0;
 
+        resetKeepalive();
         for await (const { event, data } of parseSSEStream(reader)) {
+          resetKeepalive(); // upstream is alive — reset inactivity timer
           const forwarded = accumulator.processEvent(event, data);
           if (forwarded) {
             // --- Warning injection: skip thinking blocks, inject before first text/tool block ---
@@ -2284,7 +2316,10 @@ function buildStreamingResponse(
                 }),
               ),
             ].join("");
-            if (!safeEnqueue(encoder.encode(syntheticMarker))) return;
+            if (!safeEnqueue(encoder.encode(syntheticMarker))) {
+              clearKeepalive();
+              return;
+            }
 
             if (currentAccum.hasOtherTools()) {
               // Mixed tools — forward held-back events, close stream
@@ -2299,6 +2334,7 @@ function buildStreamingResponse(
               }
 
               const markerResp = replaceRecallWithMarker(currentResp);
+              clearKeepalive();
               onComplete(markerResp);
               safeClose();
               return;
@@ -2352,6 +2388,7 @@ function buildStreamingResponse(
                 safeEnqueue(encoder.encode(heldBack));
               }
               const markerResp = replaceRecallWithMarker(currentResp);
+              clearKeepalive();
               onComplete(markerResp);
               safeClose();
               return;
@@ -2369,6 +2406,7 @@ function buildStreamingResponse(
                 safeEnqueue(encoder.encode(heldBack));
               }
               const markerResp = replaceRecallWithMarker(currentResp);
+              clearKeepalive();
               onComplete(markerResp);
               safeClose();
               return;
@@ -2394,6 +2432,7 @@ function buildStreamingResponse(
               event: contEvent,
               data: contData,
             } of parseSSEStream(contReader)) {
+              resetKeepalive(); // continuation stream alive — reset timer
               const forwarded = contAccum.processEvent(contEvent, contData);
               if (forwarded) {
                 // Forward non-recall, non-held-back events to client.
@@ -2433,6 +2472,7 @@ function buildStreamingResponse(
             const markerResp = replaceRecallWithMarker(
               contAccum.hasRecall() ? contAccum.getResponse() : currentResp,
             );
+            clearKeepalive();
             onComplete(markerResp);
             safeClose();
             return;
@@ -2440,10 +2480,12 @@ function buildStreamingResponse(
         }
 
         // No recall — normal path
+        clearKeepalive();
         const response = accumulator.getResponse();
         onComplete(response);
         safeClose();
       } catch (err) {
+        clearKeepalive();
         // Client disconnect / abort is benign — downgrade from error to info
         // to avoid Sentry noise from normal connection lifecycle events.
         const isAbort =
@@ -2461,6 +2503,8 @@ function buildStreamingResponse(
       }
     },
     cancel() {
+      if (keepaliveTimer) clearTimeout(keepaliveTimer);
+      keepaliveTimer = null;
       cancelled = true;
       try {
         activeReader?.cancel();

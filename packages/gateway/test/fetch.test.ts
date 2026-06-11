@@ -24,15 +24,13 @@ describe("upstreamFetch runtime split", () => {
     vi.doUnmock("undici");
   });
 
-  test("Bun: uses native fetch with timeout:false and never imports undici", async () => {
+  test("Bun: uses native fetch (getOriginalFetch) and never imports undici", async () => {
     (globalThis as { Bun?: unknown }).Bun = { version: "1.3.14" };
     vi.resetModules();
 
     const nativeFetch = vi.fn(
-      async (
-        _input: RequestInfo | URL,
-        _init?: RequestInit & { timeout?: unknown },
-      ) => new Response("ok"),
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response("ok"),
     );
     vi.doMock("@loreai/core", () => ({ getOriginalFetch: () => nativeFetch }));
 
@@ -52,7 +50,6 @@ describe("upstreamFetch runtime split", () => {
     expect(nativeFetch).toHaveBeenCalledTimes(1);
     const init = nativeFetch.mock.calls[0][1];
     expect(init?.method).toBe("POST");
-    expect(init?.timeout).toBe(false);
     // undici must never be loaded under Bun.
     expect(undiciLoaded).not.toHaveBeenCalled();
   });
