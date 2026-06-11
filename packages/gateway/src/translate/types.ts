@@ -406,6 +406,14 @@ export type SessionState = {
   messageCount: number;
   /** Turns since last curation run — triggers background curation. */
   turnsSinceCuration: number;
+  /** True while a background curation has been scheduled for this session but
+   *  has not yet entered curatorLimiter (i.e. still waiting in the global
+   *  background queue). `curatorLimiter.isBusy` only flips once the task
+   *  executes, so under a saturated global queue it stays false between
+   *  scheduling and execution — this synchronous flag closes that window so
+   *  subsequent turns don't re-schedule duplicate curations. Set before
+   *  runBackground(), cleared in its .finally(). Transient (not persisted). */
+  curationScheduled?: boolean;
   /** Stored recall results for marker-based round-trip expansion. */
   recallStore: RecallStore;
   /** Cache analytics — request body prefix comparison + API cache fields. */

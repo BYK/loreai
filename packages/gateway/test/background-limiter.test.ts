@@ -457,10 +457,11 @@ describe("background-limiter", () => {
       expect(backgroundLimiterStats().pendingCount).toBe(30);
 
       // Session count alone would yield ceil(1 * 1.5) = 2, but queue pressure
-      // (30/50 = 0.6) boosts to ceil(12 * 0.6) = 8.
+      // (30/50 = 0.6) boosts to ceil(12 * 0.6) = 8. p-limit resumes queued
+      // tasks immediately when concurrency is raised, so exactly 8 become active.
       scaleBackgroundConcurrency(1);
       await new Promise((r) => setTimeout(r, 10));
-      expect(backgroundLimiterStats().activeCount).toBeGreaterThan(2);
+      expect(backgroundLimiterStats().activeCount).toBe(8);
 
       resolve();
       await Promise.all([active1, active2, ...queued]);

@@ -3533,19 +3533,29 @@ function scheduleBackgroundWork(
     modelInputCost >= 5 ? 3 : modelInputCost >= 1 ? 2 : 1;
   const effectiveAfterTurns = cfg.curator.afterTurns * curationMultiplier;
 
-  // Coalesce: skip scheduling curation when one is already in-flight or queued
-  // for THIS session (curatorLimiter is per-session p-limit(1)). Without this,
-  // `turnsSinceCuration` stays at/above the threshold (it is only reset in the
-  // `.then()` after a run completes — see below), so every subsequent turn
-  // re-schedules curation, flooding the background queue with duplicates that
-  // are shed at queue-full. Mirrors the incremental-distill guard above and the
-  // idle-path guard in idle.ts.
+  // Coalesce: skip scheduling curation when one is already scheduled, queued,
+  // or in-flight for THIS session. Without this, `turnsSinceCuration` stays
+  // at/above the threshold (it is only reset in the `.then()` after a run
+  // completes — see below), so every subsequent turn re-schedules curation,
+  // flooding the background queue with duplicates that are shed at queue-full.
+  //
+  // Two signals are required:
+  //  - `curationScheduled` (synchronous): set BEFORE runBackground() and
+  //    cleared in .finally(). `curatorLimiter` is only entered when the task
+  //    actually executes inside curator.run(), so under a saturated global
+  //    queue `isBusy` stays false between scheduling and execution — this flag
+  //    closes that window deterministically.
+  //  - `curatorLimiter.isBusy` (durable across ticks): also covers the
+  //    idle-path curation (idle.ts) which doesn't set curationScheduled.
+  // Mirrors the incremental-distill guard above and the idle-path guard.
   if (
     cfg.knowledge.enabled &&
     cfg.curator.onIdle &&
     sessionState.turnsSinceCuration >= effectiveAfterTurns &&
+    !sessionState.curationScheduled &&
     !curatorLimiter.isBusy(sessionID)
   ) {
+    sessionState.curationScheduled = true;
     runBackground(
       () =>
         Sentry.startSpan(
@@ -3583,7 +3593,10 @@ function scheduleBackgroundWork(
           emitCurationMetrics({ ...result, trigger: "in-flight" });
         }
       })
-      .catch((e) => log.error("background curation failed:", e));
+      .catch((e) => log.error("background curation failed:", e))
+      .finally(() => {
+        sessionState.curationScheduled = false;
+      });
   }
 }
 
