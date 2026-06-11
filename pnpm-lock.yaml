@@ -11,6 +11,11 @@ overrides:
   '@huggingface/hub': 2.11.0
   yaml: '>=2.8.3'
 
+patchedDependencies:
+  '@sentry/node@10.56.0':
+    hash: 885a8f837b9ae328d8e5ae59ab745caca04f00a4ad32b31ba6c1ffb9913802cd
+    path: patches/@sentry__node@10.56.0.patch
+
 importers:
 
   .:
@@ -5163,7 +5168,7 @@ snapshots:
   '@sentry/bun@10.56.0':
     dependencies:
       '@sentry/core': 10.56.0
-      '@sentry/node': 10.56.0
+      '@sentry/node': 10.56.0(patch_hash=885a8f837b9ae328d8e5ae59ab745caca04f00a4ad32b31ba6c1ffb9913802cd)
     transitivePeerDependencies:
       - '@opentelemetry/exporter-trace-otlp-http'
       - supports-color
@@ -5182,7 +5187,7 @@ snapshots:
       '@opentelemetry/sdk-trace-base': 2.7.1(@opentelemetry/api@1.9.1)
       '@opentelemetry/semantic-conventions': 1.41.1
 
-  '@sentry/node@10.56.0':
+  '@sentry/node@10.56.0(patch_hash=885a8f837b9ae328d8e5ae59ab745caca04f00a4ad32b31ba6c1ffb9913802cd)':
     dependencies:
       '@opentelemetry/api': 1.9.1
       '@opentelemetry/core': 2.7.1(@opentelemetry/api@1.9.1)

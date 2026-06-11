@@ -37,6 +37,7 @@ jobs:
             code:
               - 'packages/**'
               - 'scripts/**'
+              - 'patches/**'
               - 'pnpm-lock.yaml'
               - 'pnpm-workspace.yaml'
               - 'tsconfig*.json'
@@ -561,6 +562,31 @@ jobs:
       # The script will build the site itself if dist/ is missing — keeps
       # the job self-contained and mirrors the local dev experience.
       - run: pnpm run check:social
+
+  # ---------------------------------------------------------------------------
+  # Sentry pnpm patch integrity.
+  #
+  # Verifies the @sentry/node patch correctly strips unused integration
+  # modules. Catches silent regressions on Sentry version bumps that would
+  # re-inflate the bundle with dead code.
+  # ---------------------------------------------------------------------------
+
+  check-patches:
+    name: Check Sentry patches
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-tags: true
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run check:patches
 
   # ---------------------------------------------------------------------------
   # Cross-platform native binary smoke tests.
@@ -1220,7 +1246,7 @@ jobs:
   ci-status:
     name: CI Status
     if: always()
-    needs: [changes, test, binary-smoke-native, check-docs, check-links, check-social, actionlint]
+    needs: [changes, test, binary-smoke-native, check-docs, check-links, check-social, check-patches, actionlint]
     runs-on: ubuntu-latest
     steps:
       - name: Check CI result
@@ -1258,6 +1284,12 @@ jobs:
           checkSocialResult="${{ needs.check-social.result }}"
           if [ "$checkSocialResult" == "failure" ] || [ "$checkSocialResult" == "cancelled" ]; then
             echo "::error::check-social did not succeed (result: $checkSocialResult)"
+            exit 1
+          fi
+          # check-patches follows the same self-gating pattern.
+          checkPatchesResult="${{ needs.check-patches.result }}"
+          if [ "$checkPatchesResult" == "failure" ] || [ "$checkPatchesResult" == "cancelled" ]; then
+            echo "::error::check-patches did not succeed (result: $checkPatchesResult)"
             exit 1
           fi
           echo "CI passed (code=${{ needs.changes.outputs.code }})"

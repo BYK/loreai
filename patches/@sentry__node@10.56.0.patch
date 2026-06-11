@@ -1,0 +1,304 @@
+diff --git a/build/cjs/index.js b/build/cjs/index.js
+index 71a882dfe9b388a360c8bfc21060a515b166d740..f55f4d204789d19acd3ce32e4f5841c306e89e29 100644
+--- a/build/cjs/index.js
++++ b/build/cjs/index.js
+@@ -2,41 +2,6 @@ Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
+ 
+ const http = require('./integrations/http.js');
+ const index$n = require('./integrations/node-fetch/index.js');
+-const index$5 = require('./integrations/fs/index.js');
+-const express = require('./integrations/tracing/express.js');
+-const index$4 = require('./integrations/tracing/fastify/index.js');
+-const index$a = require('./integrations/tracing/graphql/index.js');
+-const index$d = require('./integrations/tracing/kafka/index.js');
+-const index$i = require('./integrations/tracing/lrumemoizer/index.js');
+-const index$j = require('./integrations/tracing/mongo/index.js');
+-const index$k = require('./integrations/tracing/mongoose/index.js');
+-const index$m = require('./integrations/tracing/mysql/index.js');
+-const index$l = require('./integrations/tracing/mysql2/index.js');
+-const index$r = require('./integrations/tracing/redis/index.js');
+-const index$p = require('./integrations/tracing/postgres/index.js');
+-const postgresjs = require('./integrations/tracing/postgresjs.js');
+-const index$q = require('./integrations/tracing/prisma/index.js');
+-const index$b = require('./integrations/tracing/hapi/index.js');
+-const index$c = require('./integrations/tracing/hono/index.js');
+-const index$f = require('./integrations/tracing/koa/index.js');
+-const index$2 = require('./integrations/tracing/connect/index.js');
+-const index$e = require('./integrations/tracing/knex/index.js');
+-const index$s = require('./integrations/tracing/tedious/index.js');
+-const index$6 = require('./integrations/tracing/genericPool/index.js');
+-const index$3 = require('./integrations/tracing/dataloader/index.js');
+-const index = require('./integrations/tracing/amqplib/index.js');
+-const index$t = require('./integrations/tracing/vercelai/index.js');
+-const index$o = require('./integrations/tracing/openai/index.js');
+-const index$1 = require('./integrations/tracing/anthropic-ai/index.js');
+-const index$9 = require('./integrations/tracing/google-genai/index.js');
+-const index$g = require('./integrations/tracing/langchain/index.js');
+-const index$h = require('./integrations/tracing/langgraph/index.js');
+-const launchDarkly = require('./integrations/featureFlagShims/launchDarkly.js');
+-const openFeature = require('./integrations/featureFlagShims/openFeature.js');
+-const statsig = require('./integrations/featureFlagShims/statsig.js');
+-const unleash = require('./integrations/featureFlagShims/unleash.js');
+-const growthbook = require('./integrations/featureFlagShims/growthbook.js');
+-const firebase = require('./integrations/tracing/firebase/firebase.js');
+ const index$8 = require('./sdk/index.js');
+ const initOtel = require('./sdk/initOtel.js');
+ const index$7 = require('./integrations/tracing/index.js');
+@@ -48,49 +13,6 @@ const nodeCore = require('@sentry/node-core');
+ 
+ exports.httpIntegration = http.httpIntegration;
+ exports.nativeNodeFetchIntegration = index$n.nativeNodeFetchIntegration;
+-exports.fsIntegration = index$5.fsIntegration;
+-exports.expressIntegration = express.expressIntegration;
+-exports.setupExpressErrorHandler = express.setupExpressErrorHandler;
+-exports.fastifyIntegration = index$4.fastifyIntegration;
+-exports.setupFastifyErrorHandler = index$4.setupFastifyErrorHandler;
+-exports.graphqlIntegration = index$a.graphqlIntegration;
+-exports.kafkaIntegration = index$d.kafkaIntegration;
+-exports.lruMemoizerIntegration = index$i.lruMemoizerIntegration;
+-exports.mongoIntegration = index$j.mongoIntegration;
+-exports.mongooseIntegration = index$k.mongooseIntegration;
+-exports.mysqlIntegration = index$m.mysqlIntegration;
+-exports.mysql2Integration = index$l.mysql2Integration;
+-exports.redisIntegration = index$r.redisIntegration;
+-exports.postgresIntegration = index$p.postgresIntegration;
+-exports.postgresJsIntegration = postgresjs.postgresJsIntegration;
+-exports.prismaIntegration = index$q.prismaIntegration;
+-exports.hapiIntegration = index$b.hapiIntegration;
+-exports.setupHapiErrorHandler = index$b.setupHapiErrorHandler;
+-exports.honoIntegration = index$c.honoIntegration;
+-exports.setupHonoErrorHandler = index$c.setupHonoErrorHandler;
+-exports.koaIntegration = index$f.koaIntegration;
+-exports.setupKoaErrorHandler = index$f.setupKoaErrorHandler;
+-exports.connectIntegration = index$2.connectIntegration;
+-exports.setupConnectErrorHandler = index$2.setupConnectErrorHandler;
+-exports.knexIntegration = index$e.knexIntegration;
+-exports.tediousIntegration = index$s.tediousIntegration;
+-exports.genericPoolIntegration = index$6.genericPoolIntegration;
+-exports.dataloaderIntegration = index$3.dataloaderIntegration;
+-exports.amqplibIntegration = index.amqplibIntegration;
+-exports.vercelAIIntegration = index$t.vercelAIIntegration;
+-exports.openAIIntegration = index$o.openAIIntegration;
+-exports.anthropicAIIntegration = index$1.anthropicAIIntegration;
+-exports.googleGenAIIntegration = index$9.googleGenAIIntegration;
+-exports.langChainIntegration = index$g.langChainIntegration;
+-exports.langGraphIntegration = index$h.langGraphIntegration;
+-exports.buildLaunchDarklyFlagUsedHandler = launchDarkly.buildLaunchDarklyFlagUsedHandlerShim;
+-exports.launchDarklyIntegration = launchDarkly.launchDarklyIntegrationShim;
+-exports.OpenFeatureIntegrationHook = openFeature.OpenFeatureIntegrationHookShim;
+-exports.openFeatureIntegration = openFeature.openFeatureIntegrationShim;
+-exports.statsigIntegration = statsig.statsigIntegrationShim;
+-exports.unleashIntegration = unleash.unleashIntegrationShim;
+-exports.growthbookIntegration = growthbook.growthbookIntegrationShim;
+-exports.firebaseIntegration = firebase.firebaseIntegration;
+ exports.getDefaultIntegrations = index$8.getDefaultIntegrations;
+ exports.getDefaultIntegrationsWithoutPerformance = index$8.getDefaultIntegrationsWithoutPerformance;
+ exports.init = index$8.init;
+diff --git a/build/cjs/integrations/tracing/index.js b/build/cjs/integrations/tracing/index.js
+index d1ee09059e71035652cf718b262be8762232af17..9e2af23247bc0beced0f441c072316227c785de9 100644
+--- a/build/cjs/integrations/tracing/index.js
++++ b/build/cjs/integrations/tracing/index.js
+@@ -1,98 +1,13 @@
+ Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
+ 
+ const http = require('../http.js');
+-const index$g = require('./amqplib/index.js');
+-const index$k = require('./anthropic-ai/index.js');
+-const index = require('./connect/index.js');
+-const express = require('./express.js');
+-const index$1 = require('./fastify/index.js');
+-const firebase = require('./firebase/firebase.js');
+-const index$f = require('./genericPool/index.js');
+-const index$l = require('./google-genai/index.js');
+-const index$c = require('./graphql/index.js');
+-const index$2 = require('./hapi/index.js');
+-const index$3 = require('./hono/index.js');
+-const index$4 = require('./kafka/index.js');
+-const index$5 = require('./koa/index.js');
+-const index$h = require('./langchain/index.js');
+-const index$m = require('./langgraph/index.js');
+-const index$6 = require('./lrumemoizer/index.js');
+-const index$7 = require('./mongo/index.js');
+-const index$8 = require('./mongoose/index.js');
+-const index$9 = require('./mysql/index.js');
+-const index$a = require('./mysql2/index.js');
+-const index$j = require('./openai/index.js');
+-const index$b = require('./postgres/index.js');
+-const postgresjs = require('./postgresjs.js');
+-const index$n = require('./prisma/index.js');
+-const index$d = require('./redis/index.js');
+-const index$e = require('./tedious/index.js');
+-const index$i = require('./vercelai/index.js');
+ 
+ function getAutoPerformanceIntegrations() {
+-  return [
+-    express.expressIntegration(),
+-    index$1.fastifyIntegration(),
+-    index$c.graphqlIntegration(),
+-    index$3.honoIntegration(),
+-    index$7.mongoIntegration(),
+-    index$8.mongooseIntegration(),
+-    index$9.mysqlIntegration(),
+-    index$a.mysql2Integration(),
+-    index$d.redisIntegration(),
+-    index$b.postgresIntegration(),
+-    index$n.prismaIntegration(),
+-    index$2.hapiIntegration(),
+-    index$5.koaIntegration(),
+-    index.connectIntegration(),
+-    index$e.tediousIntegration(),
+-    index$f.genericPoolIntegration(),
+-    index$4.kafkaIntegration(),
+-    index$g.amqplibIntegration(),
+-    index$6.lruMemoizerIntegration(),
+-    // AI providers
+-    // LangChain must come first to disable AI provider integrations before they instrument
+-    index$h.langChainIntegration(),
+-    index$m.langGraphIntegration(),
+-    index$i.vercelAIIntegration(),
+-    index$j.openAIIntegration(),
+-    index$k.anthropicAIIntegration(),
+-    index$l.googleGenAIIntegration(),
+-    postgresjs.postgresJsIntegration(),
+-    firebase.firebaseIntegration()
+-  ];
++  return [];
+ }
+ function getOpenTelemetryInstrumentationToPreload() {
+   return [
+-    http.instrumentSentryHttp,
+-    express.instrumentExpress,
+-    index.instrumentConnect,
+-    index$1.instrumentFastify,
+-    index$1.instrumentFastifyV3,
+-    index$2.instrumentHapi,
+-    index$3.instrumentHono,
+-    index$4.instrumentKafka,
+-    index$5.instrumentKoa,
+-    index$6.instrumentLruMemoizer,
+-    index$7.instrumentMongo,
+-    index$8.instrumentMongoose,
+-    index$9.instrumentMysql,
+-    index$a.instrumentMysql2,
+-    index$b.instrumentPostgres,
+-    index$2.instrumentHapi,
+-    index$c.instrumentGraphql,
+-    index$d.instrumentRedis,
+-    index$e.instrumentTedious,
+-    index$f.instrumentGenericPool,
+-    index$g.instrumentAmqplib,
+-    index$h.instrumentLangChain,
+-    index$i.instrumentVercelAi,
+-    index$j.instrumentOpenAi,
+-    postgresjs.instrumentPostgresJs,
+-    firebase.instrumentFirebase,
+-    index$k.instrumentAnthropicAi,
+-    index$l.instrumentGoogleGenAI,
+-    index$m.instrumentLangGraph
++    http.instrumentSentryHttp
+   ];
+ }
+ 
+diff --git a/build/esm/integrations/tracing/index.js b/build/esm/integrations/tracing/index.js
+index b157367ae87d3e628fdf624ea0d4be7440a9e01e..3820f0f98df86c0aa0938a18530b8654321b5823 100644
+--- a/build/esm/integrations/tracing/index.js
++++ b/build/esm/integrations/tracing/index.js
+@@ -1,96 +1,11 @@
+ import { instrumentSentryHttp } from '../http.js';
+-import { instrumentAmqplib, amqplibIntegration } from './amqplib/index.js';
+-import { instrumentAnthropicAi, anthropicAIIntegration } from './anthropic-ai/index.js';
+-import { instrumentConnect, connectIntegration } from './connect/index.js';
+-import { instrumentExpress, expressIntegration } from './express.js';
+-import { instrumentFastify, instrumentFastifyV3, fastifyIntegration } from './fastify/index.js';
+-import { instrumentFirebase, firebaseIntegration } from './firebase/firebase.js';
+-import { instrumentGenericPool, genericPoolIntegration } from './genericPool/index.js';
+-import { instrumentGoogleGenAI, googleGenAIIntegration } from './google-genai/index.js';
+-import { instrumentGraphql, graphqlIntegration } from './graphql/index.js';
+-import { instrumentHapi, hapiIntegration } from './hapi/index.js';
+-import { instrumentHono, honoIntegration } from './hono/index.js';
+-import { instrumentKafka, kafkaIntegration } from './kafka/index.js';
+-import { instrumentKoa, koaIntegration } from './koa/index.js';
+-import { instrumentLangChain, langChainIntegration } from './langchain/index.js';
+-import { instrumentLangGraph, langGraphIntegration } from './langgraph/index.js';
+-import { instrumentLruMemoizer, lruMemoizerIntegration } from './lrumemoizer/index.js';
+-import { instrumentMongo, mongoIntegration } from './mongo/index.js';
+-import { instrumentMongoose, mongooseIntegration } from './mongoose/index.js';
+-import { instrumentMysql, mysqlIntegration } from './mysql/index.js';
+-import { instrumentMysql2, mysql2Integration } from './mysql2/index.js';
+-import { instrumentOpenAi, openAIIntegration } from './openai/index.js';
+-import { instrumentPostgres, postgresIntegration } from './postgres/index.js';
+-import { instrumentPostgresJs, postgresJsIntegration } from './postgresjs.js';
+-import { prismaIntegration } from './prisma/index.js';
+-import { instrumentRedis, redisIntegration } from './redis/index.js';
+-import { instrumentTedious, tediousIntegration } from './tedious/index.js';
+-import { instrumentVercelAi, vercelAIIntegration } from './vercelai/index.js';
+ 
+ function getAutoPerformanceIntegrations() {
+-  return [
+-    expressIntegration(),
+-    fastifyIntegration(),
+-    graphqlIntegration(),
+-    honoIntegration(),
+-    mongoIntegration(),
+-    mongooseIntegration(),
+-    mysqlIntegration(),
+-    mysql2Integration(),
+-    redisIntegration(),
+-    postgresIntegration(),
+-    prismaIntegration(),
+-    hapiIntegration(),
+-    koaIntegration(),
+-    connectIntegration(),
+-    tediousIntegration(),
+-    genericPoolIntegration(),
+-    kafkaIntegration(),
+-    amqplibIntegration(),
+-    lruMemoizerIntegration(),
+-    // AI providers
+-    // LangChain must come first to disable AI provider integrations before they instrument
+-    langChainIntegration(),
+-    langGraphIntegration(),
+-    vercelAIIntegration(),
+-    openAIIntegration(),
+-    anthropicAIIntegration(),
+-    googleGenAIIntegration(),
+-    postgresJsIntegration(),
+-    firebaseIntegration()
+-  ];
++  return [];
+ }
+ function getOpenTelemetryInstrumentationToPreload() {
+   return [
+-    instrumentSentryHttp,
+-    instrumentExpress,
+-    instrumentConnect,
+-    instrumentFastify,
+-    instrumentFastifyV3,
+-    instrumentHapi,
+-    instrumentHono,
+-    instrumentKafka,
+-    instrumentKoa,
+-    instrumentLruMemoizer,
+-    instrumentMongo,
+-    instrumentMongoose,
+-    instrumentMysql,
+-    instrumentMysql2,
+-    instrumentPostgres,
+-    instrumentHapi,
+-    instrumentGraphql,
+-    instrumentRedis,
+-    instrumentTedious,
+-    instrumentGenericPool,
+-    instrumentAmqplib,
+-    instrumentLangChain,
+-    instrumentVercelAi,
+-    instrumentOpenAi,
+-    instrumentPostgresJs,
+-    instrumentFirebase,
+-    instrumentAnthropicAi,
+-    instrumentGoogleGenAI,
+-    instrumentLangGraph
++    instrumentSentryHttp
+   ];
+ }
+ 
