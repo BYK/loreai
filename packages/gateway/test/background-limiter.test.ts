@@ -342,8 +342,8 @@ describe("background-limiter", () => {
       else process.env[ENV_KEY] = savedEnv;
     });
 
-    test("scales up with active session count (0.5 per session)", async () => {
-      scaleBackgroundConcurrency(8); // ceil(8 * 0.5) = 4
+    test("scales up with active session count (1.5 per session)", async () => {
+      scaleBackgroundConcurrency(2); // ceil(2 * 1.5) = 3
       // Run more tasks than the cap and observe max concurrency.
       let maxConcurrent = 0;
       let current = 0;
@@ -357,7 +357,7 @@ describe("background-limiter", () => {
       );
       await Promise.all(tasks);
       expect(maxConcurrent).toBeGreaterThan(2);
-      expect(maxConcurrent).toBeLessThanOrEqual(4);
+      expect(maxConcurrent).toBeLessThanOrEqual(3);
     });
 
     test("never drops below the minimum of 2", () => {
@@ -417,8 +417,8 @@ describe("background-limiter", () => {
     });
 
     test("scales back down when sessions go away", () => {
-      scaleBackgroundConcurrency(20); // up to 10
-      scaleBackgroundConcurrency(2); // back down to 2 (ceil(1) -> min 2)
+      scaleBackgroundConcurrency(20); // up to 12 (clamped)
+      scaleBackgroundConcurrency(1); // back down to 2 (ceil(1.5) -> 2)
       // Only 2 slots active now: third task queues.
       let resolve!: () => void;
       const blocker = new Promise<void>((r) => {
@@ -436,6 +436,34 @@ describe("background-limiter", () => {
           done();
         }, 10);
       });
+    });
+
+    test("load-aware: boosts toward MAX when queue saturated despite low session count", async () => {
+      // Pin concurrency low so submissions pile up in the queue.
+      _setConcurrencyForTest(2);
+      let resolve!: () => void;
+      const blocker = new Promise<void>((r) => {
+        resolve = r;
+      });
+      const active1 = runBackground(() => blocker);
+      const active2 = runBackground(() => blocker);
+
+      // 30 pending > LOAD_BOOST_THRESHOLD (0.5) * MAX_PENDING_QUEUE (50) = 25.
+      const queued: Promise<unknown>[] = [];
+      for (let i = 0; i < 30; i++) {
+        queued.push(runBackground(() => blocker, `q-${i}`));
+      }
+      await new Promise((r) => setTimeout(r, 10));
+      expect(backgroundLimiterStats().pendingCount).toBe(30);
+
+      // Session count alone would yield ceil(1 * 1.5) = 2, but queue pressure
+      // (30/50 = 0.6) boosts to ceil(12 * 0.6) = 8.
+      scaleBackgroundConcurrency(1);
+      await new Promise((r) => setTimeout(r, 10));
+      expect(backgroundLimiterStats().activeCount).toBeGreaterThan(2);
+
+      resolve();
+      await Promise.all([active1, active2, ...queued]);
     });
   });
 

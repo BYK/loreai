@@ -40,11 +40,13 @@ const MIN_BACKGROUND_CONCURRENCY = 2;
 const MAX_BACKGROUND_CONCURRENCY = 12;
 
 /**
- * Background LLM ops allowed per active session (rounded up). Not every
- * session has pending background work simultaneously, so a fractional
- * factor keeps the cap proportional without over-provisioning. Tunable.
+ * Background LLM ops allowed per active session (rounded up). Heavy sessions
+ * (large contexts, every-turn incremental distillation + curation) produce
+ * more background work than the old 0.5 assumed, so the queue saturated and
+ * shed non-disposable hot-path work. 1.5 gives heavy sessions enough drain
+ * capacity while still clamping to MAX_BACKGROUND_CONCURRENCY. Tunable.
  */
-const CONCURRENCY_PER_SESSION = 0.5;
+const CONCURRENCY_PER_SESSION = 1.5;
 
 /**
  * Resolve the upper bound for background concurrency. `LORE_BACKGROUND_CONCURRENCY`
@@ -76,6 +78,13 @@ const MAX_PENDING_QUEUE = 50;
  * `pipeline.ts`, which submits unconditionally.
  */
 const LOW_PRIORITY_SHED_THRESHOLD = 0.5;
+
+/**
+ * Queue-pressure fraction (pending / MAX_PENDING_QUEUE) above which load-aware
+ * scaling overrides the session-count heuristic and scales toward MAX. Guards
+ * against under-provisioning when a few heavy sessions saturate the queue.
+ */
+const LOAD_BOOST_THRESHOLD = 0.5;
 
 const limiter = pLimit(MIN_BACKGROUND_CONCURRENCY);
 
@@ -293,15 +302,28 @@ export async function runBackground<T>(
  * naturally drains down to the lower cap when sessions go away.
  */
 export function scaleBackgroundConcurrency(activeSessions: number): void {
-  const want = Math.ceil(Math.max(0, activeSessions) * CONCURRENCY_PER_SESSION);
-  const next = Math.min(
-    Math.max(want, MIN_BACKGROUND_CONCURRENCY),
-    resolveMaxConcurrency(),
+  const max = resolveMaxConcurrency();
+  const bySessions = Math.ceil(
+    Math.max(0, activeSessions) * CONCURRENCY_PER_SESSION,
   );
+
+  // Load-aware boost: the per-session heuristic under-provisions when a few
+  // heavy sessions saturate the queue (each produces more background work than
+  // CONCURRENCY_PER_SESSION assumes). When pending depth crosses the threshold,
+  // scale toward MAX proportional to queue pressure so the backlog drains.
+  const queuePressure = limiter.pendingCount / MAX_PENDING_QUEUE;
+  const byLoad =
+    queuePressure >= LOAD_BOOST_THRESHOLD
+      ? Math.ceil(max * Math.min(queuePressure, 1))
+      : 0;
+
+  const want = Math.max(bySessions, byLoad);
+  const next = Math.min(Math.max(want, MIN_BACKGROUND_CONCURRENCY), max);
   if (limiter.concurrency !== next) {
     limiter.concurrency = next;
     log.info(
-      `background concurrency scaled to ${next} (active sessions=${activeSessions})`,
+      `background concurrency scaled to ${next} ` +
+        `(active sessions=${activeSessions}, pending=${limiter.pendingCount})`,
     );
   }
 }
