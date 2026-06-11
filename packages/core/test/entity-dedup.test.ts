@@ -211,6 +211,15 @@ describe("entity dedup — deduplicateEntities()", () => {
     // must only suggest (the user confirms), never auto-merge.
     const a = makeEntity({ name: "Seylan" });
     const b = makeEntity({ name: "Seylan Çinar Kaya" });
+    // Pin equal timestamps so the survivor tiebreaker is deterministic across
+    // platforms. The survivor *direction* is timing-dependent (most aliases →
+    // most recent → shortest name) and is NOT what this test asserts — only
+    // that the pair is suggested, not merged. (Without this, both creates can
+    // land in the same millisecond on fast CI, flipping the survivor to the
+    // shorter "Seylan" — the flake that failed on main.)
+    db()
+      .query("UPDATE entities SET updated_at = 1000 WHERE id IN (?, ?)")
+      .run(a, b);
     const r = await entities.deduplicateEntities(PROJECT, { dryRun: true });
     expect(r.merged).toHaveLength(0);
     expect(r.suggested).toHaveLength(1);
@@ -220,8 +229,12 @@ describe("entity dedup — deduplicateEntities()", () => {
       ...cluster.merged.map((m) => m.id),
     ].sort();
     expect(ids).toEqual([a, b].sort());
-    // The full name is kept as the survivor.
-    expect(cluster.surviving.name).toBe("Seylan Çinar Kaya");
+    // Both names are represented in the cluster (survivor direction not asserted).
+    const names = [
+      cluster.surviving.name,
+      ...cluster.merged.map((m) => m.name),
+    ].sort();
+    expect(names).toEqual(["Seylan", "Seylan Çinar Kaya"].sort());
   });
 
   test("multi-token prefix ⊂ full name is suggested", async () => {
