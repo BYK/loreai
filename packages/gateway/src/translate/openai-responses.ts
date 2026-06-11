@@ -81,9 +81,45 @@ export function parseOpenAIResponsesRequest(
   if (raw.truncation !== undefined) {
     extras.truncation = raw.truncation;
   }
-  // Codex (ChatGPT) control fields — preserved verbatim for the upstream
-  // `/backend-api/codex/responses` call. Harmless for non-Codex callers (they
-  // simply won't be present in the body).
+
+  return {
+    protocol: "openai-responses",
+    model,
+    system,
+    messages,
+    tools,
+    stream,
+    maxTokens,
+    metadata: {},
+    rawHeaders: {
+      ...headers,
+      "x-api-key": headers["x-api-key"] ?? "",
+    },
+    extras,
+  };
+}
+
+/**
+ * Parse a Pi `openai-codex` request. The wire format is the OpenAI Responses
+ * API, so we reuse `parseOpenAIResponsesRequest` for the shared parsing and add
+ * the Codex-specific delta on top:
+ *   - flag the request as Codex (steers the upstream URL + `store:false`)
+ *   - capture Codex control fields (`store`, `include`, `prompt_cache_key`,
+ *     `text`, `tool_choice`, `parallel_tool_calls`, `service_tier`).
+ *
+ * These fields are captured ONLY here (not in the shared base parser) so normal
+ * `openai-responses` callers keep their existing upstream body untouched.
+ */
+export function parseOpenAICodexRequest(
+  body: unknown,
+  headers: Record<string, string>,
+): GatewayRequest {
+  const req = parseOpenAIResponsesRequest(body, headers);
+  req.codex = true;
+
+  const raw = (body ?? {}) as Record<string, unknown>;
+  if (!req.extras) req.extras = {};
+  const extras = req.extras;
   if (typeof raw.store === "boolean") {
     extras.store = raw.store;
   }
@@ -106,36 +142,6 @@ export function parseOpenAIResponsesRequest(
     extras.service_tier = raw.service_tier;
   }
 
-  return {
-    protocol: "openai-responses",
-    model,
-    system,
-    messages,
-    tools,
-    stream,
-    maxTokens,
-    metadata: {},
-    rawHeaders: {
-      ...headers,
-      "x-api-key": headers["x-api-key"] ?? "",
-    },
-    extras,
-  };
-}
-
-/**
- * Parse a Pi `openai-codex` request. The wire format is the OpenAI Responses
- * API, so we reuse `parseOpenAIResponsesRequest` and only flag the result as
- * Codex. The flag steers the upstream URL (`/backend-api/codex/responses`) and
- * the preservation of Codex control fields (`store`, `include`, …) in the
- * upstream body builder.
- */
-export function parseOpenAICodexRequest(
-  body: unknown,
-  headers: Record<string, string>,
-): GatewayRequest {
-  const req = parseOpenAIResponsesRequest(body, headers);
-  req.codex = true;
   return req;
 }
 
@@ -387,30 +393,36 @@ export function buildOpenAIResponsesUpstreamRequest(
       body.truncation = req.extras.truncation;
     }
     // Codex (ChatGPT) control fields — re-emit verbatim so the upstream keeps
-    // Codex's required semantics. `store` MUST pass through (ChatGPT Codex
-    // rejects `store: true`; the gateway sends full history as `input` so
-    // `store: false` is also semantically correct here).
-    if (req.extras.store !== undefined) {
-      body.store = req.extras.store;
+    // Codex's required semantics. Only applies to Codex requests; normal
+    // `openai-responses` callers never populate these.
+    if (req.codex) {
+      if (req.extras.include !== undefined) {
+        body.include = req.extras.include;
+      }
+      if (req.extras.prompt_cache_key !== undefined) {
+        body.prompt_cache_key = req.extras.prompt_cache_key;
+      }
+      if (req.extras.text !== undefined) {
+        body.text = req.extras.text;
+      }
+      if (req.extras.tool_choice !== undefined) {
+        body.tool_choice = req.extras.tool_choice;
+      }
+      if (req.extras.parallel_tool_calls !== undefined) {
+        body.parallel_tool_calls = req.extras.parallel_tool_calls;
+      }
+      if (req.extras.service_tier !== undefined) {
+        body.service_tier = req.extras.service_tier;
+      }
     }
-    if (req.extras.include !== undefined) {
-      body.include = req.extras.include;
-    }
-    if (req.extras.prompt_cache_key !== undefined) {
-      body.prompt_cache_key = req.extras.prompt_cache_key;
-    }
-    if (req.extras.text !== undefined) {
-      body.text = req.extras.text;
-    }
-    if (req.extras.tool_choice !== undefined) {
-      body.tool_choice = req.extras.tool_choice;
-    }
-    if (req.extras.parallel_tool_calls !== undefined) {
-      body.parallel_tool_calls = req.extras.parallel_tool_calls;
-    }
-    if (req.extras.service_tier !== undefined) {
-      body.service_tier = req.extras.service_tier;
-    }
+  }
+
+  // Codex REQUIRES `store: false` (ChatGPT rejects `store: true`). The gateway
+  // sends the full conversation as `input` and never relies on server-side
+  // response storage, so forcing it is also semantically correct. Enforced
+  // gateway-side rather than trusting the client to always send it.
+  if (req.codex) {
+    body.store = false;
   }
 
   return {

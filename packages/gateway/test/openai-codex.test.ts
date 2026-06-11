@@ -51,9 +51,16 @@ describe("parseOpenAICodexRequest", () => {
     expect(req.extras?.service_tier).toBe("priority");
   });
 
-  test("base parser does NOT set the codex flag", () => {
+  test("base parser does NOT set the codex flag or capture control fields", () => {
     const req = parseOpenAIResponsesRequest(codexBody, {});
     expect(req.codex).toBeUndefined();
+    // Codex control fields must NOT leak into normal openai-responses parsing.
+    expect(req.extras?.store).toBeUndefined();
+    expect(req.extras?.include).toBeUndefined();
+    expect(req.extras?.prompt_cache_key).toBeUndefined();
+    expect(req.extras?.tool_choice).toBeUndefined();
+    expect(req.extras?.parallel_tool_calls).toBeUndefined();
+    expect(req.extras?.service_tier).toBeUndefined();
   });
 });
 
@@ -69,7 +76,7 @@ describe("buildOpenAIResponsesUpstreamRequest (codex)", () => {
     expect(result.url).toBe("https://chatgpt.com/backend-api/codex/responses");
   });
 
-  test("preserves Codex control fields (store stays false)", () => {
+  test("preserves Codex control fields and forces store:false", () => {
     const req = parseOpenAICodexRequest(codexBody, {});
     const result = buildOpenAIResponsesUpstreamRequest(
       req,
@@ -83,6 +90,16 @@ describe("buildOpenAIResponsesUpstreamRequest (codex)", () => {
     expect(body.tool_choice).toBe("auto");
     expect(body.parallel_tool_calls).toBe(true);
     expect(body.service_tier).toBe("priority");
+  });
+
+  test("forces store:false even when the client omits store", () => {
+    const { store: _omit, ...noStore } = codexBody;
+    const req = parseOpenAICodexRequest(noStore, {});
+    const result = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://chatgpt.com/backend-api",
+    );
+    expect((result.body as Record<string, unknown>).store).toBe(false);
   });
 
   test("forwards Codex auth + headers", () => {
@@ -113,8 +130,13 @@ describe("buildOpenAIResponsesUpstreamRequest (codex)", () => {
     // Non-codex still hits /v1/responses.
     expect(result.url).toBe("https://api.openai.com/v1/responses");
     const body = result.body as Record<string, unknown>;
-    // Control fields ARE captured (harmless), but the URL must NOT change.
-    expect(body.store).toBe(false);
+    // Codex control fields must NOT be emitted for normal openai-responses.
+    expect(body.store).toBeUndefined();
+    expect(body.include).toBeUndefined();
+    expect(body.prompt_cache_key).toBeUndefined();
+    expect(body.tool_choice).toBeUndefined();
+    expect(body.parallel_tool_calls).toBeUndefined();
+    expect(body.service_tier).toBeUndefined();
   });
 });
 

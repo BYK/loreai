@@ -309,6 +309,12 @@ type SessionHeaderSnapshot = {
   anthropicBeta?: string;
   /** The user-agent header from the last conversation turn. */
   userAgent?: string;
+  /** Codex (ChatGPT) `chatgpt-account-id` from the last conversation turn. */
+  chatgptAccountId?: string;
+  /** Codex `originator` header (e.g. "pi"). */
+  originator?: string;
+  /** Codex `OpenAI-Beta` header (e.g. "responses=experimental"). */
+  openaiBeta?: string;
 };
 
 const sessionHeaderSnapshots = new Map<string, SessionHeaderSnapshot>();
@@ -324,16 +330,34 @@ export function captureSessionHeaders(
   sessionID: string,
   rawHeaders: Record<string, string>,
 ): void {
-  // Only capture for sessions that have billing headers
-  if (!sessionNeedsBilling.get(sessionID)) return;
+  // Codex (ChatGPT) account/originator headers must be replayed on worker
+  // calls to the `/codex/responses` backend. Capture them for ANY session
+  // (Codex sessions don't set the Anthropic billing flag). Cheap: only stored
+  // when present.
+  const accountId =
+    rawHeaders["chatgpt-account-id"] || rawHeaders["Chatgpt-Account-Id"];
+  const originator = rawHeaders.originator || rawHeaders.Originator;
+  const openaiBeta = rawHeaders["openai-beta"] || rawHeaders["OpenAI-Beta"];
 
-  const snapshot: SessionHeaderSnapshot = {};
+  const hasCodexHeaders = !!(accountId || originator || openaiBeta);
 
-  const beta = rawHeaders["anthropic-beta"] || rawHeaders["Anthropic-Beta"];
-  if (beta) snapshot.anthropicBeta = beta;
+  // Anthropic billing-header replay is gated to billing sessions (unchanged).
+  if (!sessionNeedsBilling.get(sessionID) && !hasCodexHeaders) return;
 
-  const ua = rawHeaders["user-agent"] || rawHeaders["User-Agent"];
-  if (ua) snapshot.userAgent = ua;
+  const snapshot: SessionHeaderSnapshot =
+    sessionHeaderSnapshots.get(sessionID) ?? {};
+
+  if (sessionNeedsBilling.get(sessionID)) {
+    const beta = rawHeaders["anthropic-beta"] || rawHeaders["Anthropic-Beta"];
+    if (beta) snapshot.anthropicBeta = beta;
+
+    const ua = rawHeaders["user-agent"] || rawHeaders["User-Agent"];
+    if (ua) snapshot.userAgent = ua;
+  }
+
+  if (accountId) snapshot.chatgptAccountId = accountId;
+  if (originator) snapshot.originator = originator;
+  if (openaiBeta) snapshot.openaiBeta = openaiBeta;
 
   sessionHeaderSnapshots.set(sessionID, snapshot);
 }
@@ -366,6 +390,38 @@ export function buildOAuthWorkerHeaders(
       snapshot?.userAgent || `claude-cli/${WORKER_VERSION} (external, sdk-cli)`,
     "anthropic-dangerous-direct-browser-access": "true",
     "x-client-request-id": randomUUID(),
+  };
+}
+
+/**
+ * Build extra HTTP headers for an `openai-codex` worker request, replaying the
+ * Codex (ChatGPT) fingerprint sniffed from the session's conversation turns.
+ *
+ * ChatGPT's `/backend-api/codex/responses` endpoint requires:
+ * - `chatgpt-account-id`: the account ID (also embeddable from the JWT, but the
+ *   client sends it explicitly — replay the observed value).
+ * - `originator`: the client originator (e.g. "pi").
+ * - `OpenAI-Beta`: `responses=experimental`.
+ * - `session_id` / `x-client-request-id`: a stable per-session correlation id.
+ *
+ * Returns null when no Codex headers were ever observed for the session (the
+ * caller then has nothing to add — the request will likely be rejected, which
+ * is the correct loud failure rather than a silent malformed call).
+ */
+export function buildCodexWorkerHeaders(
+  sessionID: string | undefined,
+): Record<string, string> | null {
+  if (!sessionID) return null;
+  const snapshot = sessionHeaderSnapshots.get(sessionID);
+  if (!snapshot?.chatgptAccountId) return null;
+
+  const requestID = randomUUID();
+  return {
+    "chatgpt-account-id": snapshot.chatgptAccountId,
+    originator: snapshot.originator || "codex",
+    "OpenAI-Beta": snapshot.openaiBeta || "responses=experimental",
+    session_id: sessionID,
+    "x-client-request-id": requestID,
   };
 }
 

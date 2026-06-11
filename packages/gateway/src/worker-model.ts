@@ -446,6 +446,14 @@ const WORKER_DEFAULTS: Record<
     modelID: "gpt-5.4-mini",
     alreadyCheap: (id) => id.includes("mini") || id.includes("nano"),
   },
+  // Codex (ChatGPT): the backend serves cheaper models on the same endpoint.
+  // gpt-5.1-codex-mini ($0.25/$2) vs gpt-5.5 ($5/$30) — ~20x cheaper input,
+  // same provider, same OAuth credential, same /codex/responses endpoint.
+  "openai-codex": {
+    providerID: "openai-codex",
+    modelID: "gpt-5.1-codex-mini",
+    alreadyCheap: (id) => id.includes("mini") || id.includes("spark"),
+  },
   // GitHub Copilot proxies multiple providers — match by model ID prefix
   "github-copilot": {
     providerID: "github-copilot",

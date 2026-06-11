@@ -29,6 +29,7 @@ import {
 import { upstreamFetch } from "../src/fetch";
 import { clearAllCosts, getSessionCosts } from "../src/cost-tracker";
 import { recordWorkerFailure, markWorkerPaused } from "../src/worker-health";
+import { captureSessionHeaders } from "../src/cch";
 
 // ---------------------------------------------------------------------------
 // maxRetriesFor — unified policy (modeled on Claude Code's single budget)
@@ -275,6 +276,19 @@ describe("resolveWorkerProtocol", () => {
   test("unknown provider defaults to 'anthropic'", () => {
     expect(resolveWorkerProtocol("some-unknown-provider")).toBe("anthropic");
   });
+
+  // openai-codex must use the Responses API — never collapse to Chat Completions.
+  test("openai-codex resolves to 'openai-codex-responses' regardless of hint", () => {
+    expect(resolveWorkerProtocol("openai-codex", "openai-responses")).toBe(
+      "openai-codex-responses",
+    );
+    expect(resolveWorkerProtocol("openai-codex", "openai")).toBe(
+      "openai-codex-responses",
+    );
+    expect(resolveWorkerProtocol("openai-codex")).toBe(
+      "openai-codex-responses",
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -438,6 +452,57 @@ describe("createGatewayLLMClient.prompt", () => {
 
     expect(text).toBe("hi from openai");
     expect(mockFetch.mock.calls[0][0]).toContain("/chat/completions");
+  });
+
+  test("openai-codex worker calls the Responses endpoint with store:false + Codex headers", async () => {
+    // Seed the per-session Codex fingerprint as a real conversation turn would.
+    captureSessionHeaders("sess-codex", {
+      "chatgpt-account-id": "acct-xyz",
+      originator: "pi",
+      "openai-beta": "responses=experimental",
+    });
+
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          output: [
+            {
+              type: "message",
+              content: [{ type: "output_text", text: "codex worker reply" }],
+            },
+          ],
+          model: "gpt-5.1-codex-mini",
+          usage: { input_tokens: 12, output_tokens: 3 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "jwt-token" }),
+      { providerID: "openai-codex", modelID: "gpt-5.1-codex-mini" },
+    );
+
+    const text = await client.prompt("system", "user", {
+      sessionID: "sess-codex",
+      workerID: "lore-distill",
+      // Session upstream override (chatgpt backend) + responses protocol hint.
+      upstreamUrl: "https://chatgpt.com/backend-api",
+      protocol: "openai-responses",
+    });
+
+    expect(text).toBe("codex worker reply");
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toBe("https://chatgpt.com/backend-api/codex/responses");
+    const headers = init?.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer jwt-token");
+    expect(headers["chatgpt-account-id"]).toBe("acct-xyz");
+    expect(headers.originator).toBe("pi");
+    const body = JSON.parse(init?.body as string) as Record<string, unknown>;
+    expect(body.store).toBe(false);
+    expect(body.model).toBe("gpt-5.1-codex-mini");
+    expect(Array.isArray(body.input)).toBe(true);
   });
 
   test("returns null without calling upstream when no auth is available", async () => {

@@ -26,7 +26,12 @@ import type { AuthCredential } from "./auth";
 import { authHeaders, markAuthStale, markGlobalAuthStale } from "./auth";
 import { tripCircuitBreaker } from "./background-limiter";
 import { resolveProviderRoute } from "./config";
-import { buildBillingBlock, buildOAuthWorkerHeaders, signBody } from "./cch";
+import {
+  buildBillingBlock,
+  buildCodexWorkerHeaders,
+  buildOAuthWorkerHeaders,
+  signBody,
+} from "./cch";
 import {
   setGenAiUsageAttributes,
   emitCostMetric,
@@ -195,8 +200,16 @@ export function normalizeOpenAIUsage(
 // Provider-specific request builders
 // ---------------------------------------------------------------------------
 
-/** Wire protocol for worker requests (openai-responses collapsed to openai). */
-type WorkerProtocol = "anthropic" | "openai";
+/**
+ * Wire protocol for worker requests.
+ *
+ * `openai-responses` is collapsed to `"openai"` (Chat Completions) for normal
+ * OpenAI providers — workers do simple prompt→response and the Chat Completions
+ * endpoint is simpler/cheaper. The one exception is `openai-codex`: ChatGPT's
+ * `/backend-api` serves ONLY the Responses API (`/codex/responses`), so it gets
+ * a dedicated `"openai-codex-responses"` worker protocol that speaks Responses.
+ */
+type WorkerProtocol = "anthropic" | "openai" | "openai-codex-responses";
 
 /** Upstream URL, wire protocol, and provider label for a resolved target. */
 type ProviderTarget = {
@@ -214,13 +227,21 @@ type ProviderTarget = {
  *  2. Route table lookup via PROVIDER_ROUTES
  *  3. Default: "anthropic" (safest — most aggregators speak Anthropic)
  *
- * `openai-responses` is collapsed to `"openai"` because workers only
- * use simple prompt→response via Chat Completions, not the Responses API.
+ * `openai-responses` is collapsed to `"openai"` because workers only use
+ * simple prompt→response via Chat Completions, not the Responses API — EXCEPT
+ * for `openai-codex`, whose ChatGPT backend serves only the Responses API and
+ * therefore maps to `"openai-codex-responses"`.
  */
 export function resolveWorkerProtocol(
   providerID: string,
   explicit?: "anthropic" | "openai" | "openai-responses",
 ): WorkerProtocol {
+  // openai-codex MUST use the Responses API — its backend has no Chat
+  // Completions endpoint. This takes precedence over the explicit hint
+  // (which would otherwise collapse openai-responses → openai).
+  if (providerID === "openai-codex") {
+    return "openai-codex-responses";
+  }
   // 1. Explicit protocol from caller (threaded from UpstreamSnapshot)
   if (explicit) {
     return explicit === "anthropic" ? "anthropic" : "openai";
@@ -248,6 +269,17 @@ function resolveTarget(
       url: upstreamOverride.replace(/\/$/, ""),
       protocol,
       providerName: protocol,
+    };
+  }
+  if (protocol === "openai-codex-responses") {
+    // Codex has no static default upstream — it always arrives via the
+    // session's upstream override (chatgpt.com/backend-api). Fall back to the
+    // provider route URL if present.
+    const route = resolveProviderRoute("openai-codex");
+    return {
+      url: (route?.url ?? upstreams.openai).replace(/\/$/, ""),
+      protocol,
+      providerName: "openai-codex",
     };
   }
   if (protocol === "openai") {
@@ -367,6 +399,53 @@ function buildOpenAIWorkerRequest(
   };
 }
 
+/**
+ * Build an OpenAI **Responses API** worker request for `openai-codex`.
+ *
+ * ChatGPT's `/backend-api` serves only the Responses API, so worker calls use
+ * the same wire format as the foreground turn: `instructions` + `input` items,
+ * `store: false` (required), and the sniffed Codex fingerprint headers.
+ */
+function buildCodexWorkerRequest(
+  target: ProviderTarget,
+  cred: AuthCredential,
+  model: { providerID: string; modelID: string },
+  system: string,
+  user: string,
+  maxTokens: number,
+  sessionID?: string,
+  temperature?: number,
+): { url: string; headers: Record<string, string>; body: string } {
+  const codexHeaders = buildCodexWorkerHeaders(sessionID) ?? {};
+
+  return {
+    // target.url is the ChatGPT backend base (e.g. https://chatgpt.com/backend-api);
+    // Codex serves the Responses API at `/codex/responses`.
+    url: `${target.url}/codex/responses`,
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(cred),
+      ...codexHeaders,
+    },
+    body: JSON.stringify({
+      model: model.modelID,
+      // Codex REQUIRES store:false (rejects store:true).
+      store: false,
+      stream: false,
+      max_output_tokens: maxTokens,
+      ...(temperature != null && { temperature }),
+      instructions: system,
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: user }],
+        },
+      ],
+    }),
+  };
+}
+
 /** Extract text response from an Anthropic Messages API response. */
 function parseAnthropicResponse(data: {
   content?: Array<{ type: string; text?: string }>;
@@ -398,6 +477,120 @@ function parseOpenAIResponse(data: OpenAIChatResponse): {
     usage: data.usage ? normalizeOpenAIUsage(data.usage) : null,
     model: data.model ?? null,
   };
+}
+
+/**
+ * Extract text from an OpenAI **Responses API** non-streaming response (used by
+ * the `openai-codex` worker path). Text lives in `output[].content[].text` for
+ * `output_text` parts; usage uses `input_tokens`/`output_tokens`.
+ */
+function parseResponsesWorkerResponse(data: {
+  output?: Array<{
+    type?: string;
+    content?: Array<{ type?: string; text?: string }>;
+  }>;
+  output_text?: string;
+  usage?: { input_tokens?: number; output_tokens?: number };
+  model?: string;
+}): {
+  text: string | null;
+  usage: AnthropicUsage | null;
+  model: string | null;
+} {
+  // Prefer the convenience `output_text` aggregate when present; otherwise
+  // concatenate text parts from message output items.
+  let text: string | null =
+    typeof data.output_text === "string" ? data.output_text : null;
+  if (text === null && Array.isArray(data.output)) {
+    const parts: string[] = [];
+    for (const item of data.output) {
+      if (!Array.isArray(item.content)) continue;
+      for (const part of item.content) {
+        if (part?.type === "output_text" && typeof part.text === "string") {
+          parts.push(part.text);
+        }
+      }
+    }
+    if (parts.length > 0) text = parts.join("");
+  }
+
+  const usage: AnthropicUsage | null = data.usage
+    ? {
+        input_tokens: data.usage.input_tokens ?? 0,
+        output_tokens: data.usage.output_tokens ?? 0,
+      }
+    : null;
+
+  return { text, usage, model: data.model ?? null };
+}
+
+/**
+ * Dispatch to the correct worker request builder for a resolved target.
+ * Single source of truth so adding a protocol touches exactly one place.
+ */
+function buildWorkerRequest(
+  target: ProviderTarget,
+  cred: AuthCredential,
+  model: { providerID: string; modelID: string },
+  system: string,
+  user: string,
+  maxTokens: number,
+  sessionID?: string,
+  temperature?: number,
+): { url: string; headers: Record<string, string>; body: string } {
+  switch (target.protocol) {
+    case "openai-codex-responses":
+      return buildCodexWorkerRequest(
+        target,
+        cred,
+        model,
+        system,
+        user,
+        maxTokens,
+        sessionID,
+        temperature,
+      );
+    case "openai":
+      return buildOpenAIWorkerRequest(
+        target,
+        cred,
+        model,
+        system,
+        user,
+        maxTokens,
+        temperature,
+      );
+    default:
+      return buildAnthropicWorkerRequest(
+        target,
+        cred,
+        model,
+        system,
+        user,
+        maxTokens,
+        sessionID,
+        temperature,
+      );
+  }
+}
+
+/** Dispatch to the correct worker response parser for a resolved target. */
+function parseWorkerResponse(
+  protocol: WorkerProtocol,
+  rawData: unknown,
+): { text: string | null; usage: AnthropicUsage | null; model: string | null } {
+  switch (protocol) {
+    case "openai-codex-responses":
+      return parseResponsesWorkerResponse(
+        rawData as Parameters<typeof parseResponsesWorkerResponse>[0],
+      );
+    case "openai":
+      return parseOpenAIResponse(rawData as OpenAIChatResponse);
+    default:
+      return parseAnthropicResponse(
+        rawData as Parameters<typeof parseAnthropicResponse>[0],
+      );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -503,27 +696,16 @@ export function createGatewayLLMClient(
       }
 
       // Build protocol-specific request
-      let req =
-        target.protocol === "openai"
-          ? buildOpenAIWorkerRequest(
-              target,
-              cred,
-              model,
-              system,
-              user,
-              maxTokens,
-              opts?.temperature,
-            )
-          : buildAnthropicWorkerRequest(
-              target,
-              cred,
-              model,
-              system,
-              user,
-              maxTokens,
-              opts?.sessionID,
-              opts?.temperature,
-            );
+      let req = buildWorkerRequest(
+        target,
+        cred,
+        model,
+        system,
+        user,
+        maxTokens,
+        opts?.sessionID,
+        opts?.temperature,
+      );
 
       // Track this call so temporal capture can skip it
       const callID = `gw-worker-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -603,13 +785,8 @@ export function createGatewayLLMClient(
                   ? await extractJSONFromSSE(response)
                   : await response.json();
 
-                // Parse response based on provider
-                const parsed =
-                  target.protocol === "openai"
-                    ? parseOpenAIResponse(rawData as OpenAIChatResponse)
-                    : parseAnthropicResponse(
-                        rawData as Parameters<typeof parseAnthropicResponse>[0],
-                      );
+                // Parse response based on protocol
+                const parsed = parseWorkerResponse(target.protocol, rawData);
 
                 // Set usage attributes on the span
                 if (parsed.usage) {
@@ -700,27 +877,16 @@ export function createGatewayLLMClient(
                   log.info(
                     `worker auth error ${response.status}, credential refreshed — retrying: ${text.slice(0, 200)}`,
                   );
-                  req =
-                    target.protocol === "openai"
-                      ? buildOpenAIWorkerRequest(
-                          target,
-                          freshCred,
-                          model,
-                          system,
-                          user,
-                          maxTokens,
-                          opts?.temperature,
-                        )
-                      : buildAnthropicWorkerRequest(
-                          target,
-                          freshCred,
-                          model,
-                          system,
-                          user,
-                          maxTokens,
-                          opts?.sessionID,
-                          opts?.temperature,
-                        );
+                  req = buildWorkerRequest(
+                    target,
+                    freshCred,
+                    model,
+                    system,
+                    user,
+                    maxTokens,
+                    opts?.sessionID,
+                    opts?.temperature,
+                  );
                   retryCount++;
                   continue;
                 }
