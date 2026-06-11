@@ -64,7 +64,7 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
   }
 
   // --- 3. Dynamic imports so env vars take effect before module-level code runs ---
-  const { getReplayInterceptor } = await import("../../src/recorder");
+  const { makeReplayInterceptor } = await import("./replay");
   const { setUpstreamInterceptor, resetPipelineState } = await import(
     "../../src/pipeline"
   );
@@ -79,8 +79,9 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
   closeDB();
   await resetPipelineState();
 
-  // --- 4. Wire in replay interceptor ---
-  setUpstreamInterceptor(getReplayInterceptor(opts.fixtures));
+  // --- 4. Wire in replay interceptor (streaming-aware: emits SSE for
+  // streaming turns, JSON otherwise) ---
+  setUpstreamInterceptor(makeReplayInterceptor(opts.fixtures));
 
   // --- 5. Start gateway ---
   const config = loadConfig();
