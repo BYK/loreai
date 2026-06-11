@@ -203,6 +203,68 @@ describe("entity dedup — deduplicateEntities()", () => {
     expect(entities.get(rich)).not.toBeNull();
     expect(entities.get(sparse)).toBeNull();
   });
+
+  // --- Name containment signal (first-name ⊂ full-name) ---
+
+  test("name containment ('Seylan' ⊂ 'Seylan Çinar Kaya') is SUGGESTED, not merged", async () => {
+    // No aliases, no embeddings — containment must be the sole signal, and it
+    // must only suggest (the user confirms), never auto-merge.
+    const a = makeEntity({ name: "Seylan" });
+    const b = makeEntity({ name: "Seylan Çinar Kaya" });
+    const r = await entities.deduplicateEntities(PROJECT, { dryRun: true });
+    expect(r.merged).toHaveLength(0);
+    expect(r.suggested).toHaveLength(1);
+    const cluster = r.suggested[0];
+    const ids = [
+      cluster.surviving.id,
+      ...cluster.merged.map((m) => m.id),
+    ].sort();
+    expect(ids).toEqual([a, b].sort());
+    // The full name is kept as the survivor.
+    expect(cluster.surviving.name).toBe("Seylan Çinar Kaya");
+  });
+
+  test("multi-token prefix ⊂ full name is suggested", async () => {
+    makeEntity({ name: "GitHub Actions" });
+    makeEntity({ name: "GitHub Actions CI" });
+    const r = await entities.deduplicateEntities(PROJECT, { dryRun: true });
+    expect(r.merged).toHaveLength(0);
+    expect(r.suggested).toHaveLength(1);
+  });
+
+  test("same-size distinct names are NOT suggested via containment", async () => {
+    // "John Smith" vs "John Doe": equal token count, share only "john" →
+    // Jaccard 1/3 (< 0.5), no containment, no embeddings → no candidate.
+    makeEntity({ name: "John Smith" });
+    makeEntity({ name: "John Doe" });
+    const r = await entities.deduplicateEntities(PROJECT, { dryRun: true });
+    expect(r.merged).toHaveLength(0);
+    expect(r.suggested).toHaveLength(0);
+  });
+
+  test("containment never auto-merges even on apply (dryRun:false)", async () => {
+    const a = makeEntity({ name: "Seylan" });
+    const b = makeEntity({ name: "Seylan Çinar Kaya" });
+    const r = await entities.deduplicateEntities(PROJECT, { dryRun: false });
+    expect(r.merged).toHaveLength(0);
+    // Both entities survive — nothing was silently merged.
+    expect(entities.get(a)).not.toBeNull();
+    expect(entities.get(b)).not.toBeNull();
+  });
+
+  test("containment still suggests when the calibrated threshold exceeds 0.9", async () => {
+    // A high threshold (> ENTITY_NAME_CONTAINMENT_SCORE) would drop the pair if
+    // it relied on `score >= threshold`; the explicit `|| containment` neighbor
+    // qualification keeps it as a suggestion.
+    makeEntity({ name: "Seylan" });
+    makeEntity({ name: "Seylan Çinar Kaya" });
+    const r = await entities.deduplicateEntities(PROJECT, {
+      dryRun: true,
+      threshold: 0.95,
+    });
+    expect(r.merged).toHaveLength(0);
+    expect(r.suggested).toHaveLength(1);
+  });
 });
 
 describe("entity dedup — adaptive calibration (kind='entity')", () => {
