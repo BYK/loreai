@@ -13,7 +13,7 @@ const { Content } = await render(post);
 
 <BlogLayout title={post.data.title} description={post.data.description}>
   <article class="blog-post">
-    <a class="blog-back" href={`${import.meta.env.BASE_URL}blog.html`}>Back to blog</a>
+    <a class="blog-back" href={`${import.meta.env.BASE_URL}blog/`}>Back to blog</a>
     <header>
       <p class="eyebrow">{post.data.author}</p>
       <h1>{post.data.title}</h1>

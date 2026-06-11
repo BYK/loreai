@@ -11,7 +11,7 @@ const {
 const base = import.meta.env.BASE_URL;
 const rawPath = Astro.url.pathname;
 const path = rawPath.startsWith(base) ? rawPath.slice(base.length) : rawPath.replace(/^\//, "");
-const ogType = path === "blog.html" ? "website" : "article";
+const ogType = path === "blog/" ? "website" : "article";
 ---
 
 <!DOCTYPE html>
@@ -42,9 +42,9 @@ const ogType = path === "blog.html" ? "website" : "article";
     <header class="blog-nav">
       <Logo theme="dark" size={48} />
       <nav aria-label="Primary navigation">
-        <a href={`${import.meta.env.BASE_URL}docs.html`}>Docs</a>
-        <a href={`${import.meta.env.BASE_URL}blog.html`}>Blog</a>
-        <a href={`${import.meta.env.BASE_URL}different.html`}>Why Lore</a>
+        <a href={`${import.meta.env.BASE_URL}docs/`}>Docs</a>
+        <a href={`${import.meta.env.BASE_URL}blog/`}>Blog</a>
+        <a href={`${import.meta.env.BASE_URL}different/`}>Why Lore</a>
         <a href="https://github.com/byk/loreai" target="_blank" rel="noopener noreferrer">GitHub</a>
       </nav>
     </header>

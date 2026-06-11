@@ -7,11 +7,11 @@ hero:
   tagline: Persistent memory and context management for the coding agents you already use.
   actions:
     - text: Install Lore
-      link: docs/install.html
+      link: /docs/install/
       icon: right-arrow
       variant: primary
     - text: Architecture
-      link: docs/architecture.html
+      link: /docs/architecture/
       icon: open-book
 ---
 
@@ -25,6 +25,6 @@ Lore is a local-first memory layer for AI coding agents. It captures conversatio
 
 ## Site Sections
 
-- [Home](index.html) introduces the product and Folk Lore early access signup.
-- [Why Lore](different.html) compares Lore to memory-only and context-only approaches.
-- [Blog](blog.html) is ready for essays, release notes, and engineering writeups.
+- [Home](/) introduces the product and Folk Lore early access signup.
+- [Why Lore](/different/) compares Lore to memory-only and context-only approaches.
+- [Blog](/blog/) is ready for essays, release notes, and engineering writeups.
