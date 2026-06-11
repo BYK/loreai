@@ -394,7 +394,9 @@ export function setUpstreamInterceptor(
  * instances to run sequentially in the same Bun process without leaking
  * session state or initialization flags across test suites.
  */
-export async function resetPipelineState(): Promise<void> {
+export async function resetPipelineState(opts?: {
+  fast?: boolean;
+}): Promise<void> {
   initialized = false;
   sessions.clear();
   cwdWarned.clear();
@@ -403,11 +405,16 @@ export async function resetPipelineState(): Promise<void> {
   ltmSessionCache.clear();
   ltmPinnedText.clear();
   stableLtmCache.clear();
-  // Shut down batch queue gracefully before clearing the client
+  // Shut down the batch queue before clearing the client. On process exit
+  // (`fast`), skip the synchronous LLM drain — replaying queued background
+  // prompts through retries/backoff is what made Ctrl+C hang for minutes; they
+  // resume next session. Config/test resets keep draining (default).
   if (llmClient && "shutdown" in llmClient) {
     await (
-      llmClient as LLMClient & { shutdown: () => Promise<void> }
-    ).shutdown();
+      llmClient as LLMClient & {
+        shutdown: (o?: { drainQueue?: boolean }) => Promise<void>;
+      }
+    ).shutdown({ drainQueue: !opts?.fast });
   }
   llmClient = null;
   activeInterceptor = undefined;
