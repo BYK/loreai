@@ -158,8 +158,10 @@ function extractTags(html) {
 // ---------------------------------------------------------------------------
 
 function classifyPage(relPath) {
-	// Blog posts get og:type=article; everything else is website.
-	if (relPath.startsWith("blog/") && relPath !== "blog.html") {
+	// Blog posts get og:type=article; everything else (including the blog
+	// index listing) is website. With directory-format output the listing is
+	// `blog/index.html` and posts are `blog/<slug>/index.html`.
+	if (relPath.startsWith("blog/") && relPath !== "blog/index.html") {
 		return "article";
 	}
 	return "website";
