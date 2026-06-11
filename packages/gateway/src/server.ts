@@ -5,6 +5,7 @@
  *   POST /v1/messages            → Anthropic protocol
  *   POST /v1/chat/completions    → OpenAI Chat Completions protocol
  *   POST /v1/responses           → OpenAI Responses API protocol
+ *   POST /v1/codex/responses     → Codex (ChatGPT) ingress (Responses format)
  *   POST /v1/responses/compact   → Codex compaction (Responses API)
  *   POST /v1/compact             → Explicit compaction summary (Pi plugin, etc.)
  *   GET  /v1/models              → Passthrough to upstream
@@ -22,7 +23,10 @@ import { bootstrapDailySpend, getDailyBudget } from "./cost-tracker";
 import type { GatewayRequest } from "./translate/types";
 import { parseAnthropicRequest } from "./translate/anthropic";
 import { parseOpenAIRequest } from "./translate/openai";
-import { parseOpenAIResponsesRequest } from "./translate/openai-responses";
+import {
+  parseOpenAICodexRequest,
+  parseOpenAIResponsesRequest,
+} from "./translate/openai-responses";
 import {
   handleRequest,
   handleCompactEndpoint,
@@ -287,6 +291,41 @@ async function handleOpenAIResponses(
   }
 }
 
+/**
+ * Codex (ChatGPT) ingress — `POST /v1/codex/responses`. Pi's `openai-codex`
+ * provider appends `/codex/responses` to the registered gateway baseUrl. The
+ * wire format is the OpenAI Responses API; we flag the request as Codex so the
+ * upstream is routed to `/backend-api/codex/responses` and Codex control fields
+ * (`store: false`, `include`, …) are preserved.
+ */
+async function handleOpenAICodexResponses(
+  req: Request,
+  config: GatewayConfig,
+): Promise<Response> {
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return errorResponse(400, "invalid_request_error", "Invalid JSON body");
+  }
+
+  let gatewayReq: GatewayRequest;
+  try {
+    gatewayReq = parseOpenAICodexRequest(body, headersToRecord(req.headers));
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Failed to parse request";
+    return errorResponse(400, "invalid_request_error", msg);
+  }
+
+  try {
+    return withCors(await handleRequest(gatewayReq, config));
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Pipeline error";
+    console.error(`[lore] pipeline error: ${msg}`);
+    return errorResponse(502, "api_error", `Gateway pipeline error: ${msg}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
@@ -359,6 +398,11 @@ export async function startServer(config: GatewayConfig): Promise<{
       // POST /v1/responses/compact — Codex compaction (Responses API)
       if (method === "POST" && pathname === "/v1/responses/compact") {
         return withCors(await handleResponsesCompactEndpoint(req, config));
+      }
+
+      // POST /v1/codex/responses — Codex (ChatGPT) ingress (Responses format)
+      if (method === "POST" && pathname === "/v1/codex/responses") {
+        return await handleOpenAICodexResponses(req, config);
       }
 
       // POST /v1/responses — OpenAI Responses API protocol

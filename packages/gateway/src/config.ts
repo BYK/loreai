@@ -420,6 +420,14 @@ const PROVIDER_ROUTES: Record<string, ProviderRoute> = {
     url: "https://api.openai.com",
     protocol: "openai-responses",
   },
+  // Codex (ChatGPT) — OpenAI Responses wire format on ChatGPT's backend.
+  // The upstream path (`/backend-api/codex/responses`) is appended by the
+  // Responses upstream builder when `req.codex` is set (ingress route
+  // `/v1/codex/responses`).
+  "openai-codex": {
+    url: "https://chatgpt.com/backend-api",
+    protocol: "openai-responses",
+  },
   // --- Aggregator / gateway providers (protocol: null = preserve ingress) ---
   opencode: { url: "https://opencode.ai/zen", protocol: null },
   "opencode-go": { url: "https://opencode.ai/zen/go", protocol: null },

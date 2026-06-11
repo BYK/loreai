@@ -202,7 +202,26 @@ export type GatewayRequest = {
     reasoning?: unknown;
     /** OpenAI Responses API: truncation settings. */
     truncation?: unknown;
+    /**
+     * Codex (ChatGPT) control fields. Preserved verbatim so the upstream
+     * `/backend-api/codex/responses` call keeps Codex's required semantics —
+     * notably `store: false`, which ChatGPT Codex rejects when set to `true`.
+     */
+    store?: boolean;
+    include?: unknown;
+    prompt_cache_key?: string;
+    text?: unknown;
+    tool_choice?: unknown;
+    parallel_tool_calls?: boolean;
+    service_tier?: string;
   };
+  /**
+   * Set when the request originated from Pi's `openai-codex` provider (ingress
+   * path `/v1/codex/responses`). The protocol stays `"openai-responses"`; this
+   * flag only steers the upstream URL (`/backend-api/codex/responses`) and the
+   * preservation of Codex control fields in the upstream body.
+   */
+  codex?: boolean;
 };
 
 // ---------------------------------------------------------------------------

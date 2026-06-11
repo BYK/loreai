@@ -75,6 +75,7 @@ describe("server routing", () => {
     "/v1/messages",
     "/v1/chat/completions",
     "/v1/responses",
+    "/v1/codex/responses",
   ])("POST %s with invalid JSON returns 400", async (path) => {
     const res = await fetch(`${baseURL}${path}`, {
       method: "POST",

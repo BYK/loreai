@@ -152,6 +152,13 @@ export async function accumulateResponsesSSEStream(
         break;
       }
 
+      // `response.done` / `response.incomplete` are Codex (ChatGPT) terminal
+      // variants. Pi's client normalizes them to `response.completed`, but the
+      // gateway sees the RAW upstream stream, so finalize on them here too.
+      // `resp.status` ("incomplete"/"completed"/…) drives the stop reason via
+      // `mapStatusToStopReason`.
+      case "response.done":
+      case "response.incomplete":
       case "response.completed": {
         const resp = parsed.response as Record<string, unknown> | undefined;
         if (resp) {

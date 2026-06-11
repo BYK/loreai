@@ -81,6 +81,30 @@ export function parseOpenAIResponsesRequest(
   if (raw.truncation !== undefined) {
     extras.truncation = raw.truncation;
   }
+  // Codex (ChatGPT) control fields — preserved verbatim for the upstream
+  // `/backend-api/codex/responses` call. Harmless for non-Codex callers (they
+  // simply won't be present in the body).
+  if (typeof raw.store === "boolean") {
+    extras.store = raw.store;
+  }
+  if (raw.include !== undefined) {
+    extras.include = raw.include;
+  }
+  if (typeof raw.prompt_cache_key === "string") {
+    extras.prompt_cache_key = raw.prompt_cache_key;
+  }
+  if (raw.text !== undefined) {
+    extras.text = raw.text;
+  }
+  if (raw.tool_choice !== undefined) {
+    extras.tool_choice = raw.tool_choice;
+  }
+  if (typeof raw.parallel_tool_calls === "boolean") {
+    extras.parallel_tool_calls = raw.parallel_tool_calls;
+  }
+  if (typeof raw.service_tier === "string") {
+    extras.service_tier = raw.service_tier;
+  }
 
   return {
     protocol: "openai-responses",
@@ -97,6 +121,22 @@ export function parseOpenAIResponsesRequest(
     },
     extras,
   };
+}
+
+/**
+ * Parse a Pi `openai-codex` request. The wire format is the OpenAI Responses
+ * API, so we reuse `parseOpenAIResponsesRequest` and only flag the result as
+ * Codex. The flag steers the upstream URL (`/backend-api/codex/responses`) and
+ * the preservation of Codex control fields (`store`, `include`, …) in the
+ * upstream body builder.
+ */
+export function parseOpenAICodexRequest(
+  body: unknown,
+  headers: Record<string, string>,
+): GatewayRequest {
+  const req = parseOpenAIResponsesRequest(body, headers);
+  req.codex = true;
+  return req;
 }
 
 // ---------------------------------------------------------------------------
@@ -346,10 +386,39 @@ export function buildOpenAIResponsesUpstreamRequest(
     if (req.extras.truncation !== undefined) {
       body.truncation = req.extras.truncation;
     }
+    // Codex (ChatGPT) control fields — re-emit verbatim so the upstream keeps
+    // Codex's required semantics. `store` MUST pass through (ChatGPT Codex
+    // rejects `store: true`; the gateway sends full history as `input` so
+    // `store: false` is also semantically correct here).
+    if (req.extras.store !== undefined) {
+      body.store = req.extras.store;
+    }
+    if (req.extras.include !== undefined) {
+      body.include = req.extras.include;
+    }
+    if (req.extras.prompt_cache_key !== undefined) {
+      body.prompt_cache_key = req.extras.prompt_cache_key;
+    }
+    if (req.extras.text !== undefined) {
+      body.text = req.extras.text;
+    }
+    if (req.extras.tool_choice !== undefined) {
+      body.tool_choice = req.extras.tool_choice;
+    }
+    if (req.extras.parallel_tool_calls !== undefined) {
+      body.parallel_tool_calls = req.extras.parallel_tool_calls;
+    }
+    if (req.extras.service_tier !== undefined) {
+      body.service_tier = req.extras.service_tier;
+    }
   }
 
   return {
-    url: `${upstreamBase}/v1/responses`,
+    // Codex uses ChatGPT's `/backend-api/codex/responses` endpoint; standard
+    // OpenAI Responses uses `/v1/responses`.
+    url: req.codex
+      ? `${upstreamBase}/codex/responses`
+      : `${upstreamBase}/v1/responses`,
     headers,
     body,
   };
