@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env node
 /**
  * Extract the xxHash64 seed from a Claude Code binary.
  *
@@ -6,19 +6,23 @@
  * by running the binary against a local capture server, then scans the
  * binary for the seed that satisfies all oracle pairs.
  *
+ * Runs under Node.js (>= 22.5) via built-in TypeScript type-stripping — no
+ * bundler or `tsx` required. Relative imports use explicit `.ts` extensions
+ * because native Node does not resolve extensionless module specifiers.
+ *
  * Usage:
  *   # Fully automated — download + generate oracles + extract
- *   bun run scripts/extract-cch-seed.ts --version 2.1.138
+ *   node scripts/extract-cch-seed.ts --version 2.1.138
  *
  *   # Use a local binary — generate oracles + extract
- *   bun run scripts/extract-cch-seed.ts --binary ./claude
+ *   node scripts/extract-cch-seed.ts --binary ./claude
  *
  *   # Legacy mode — use pre-captured oracle pairs
- *   bun run scripts/extract-cch-seed.ts --version 2.1.138 --oracle pairs.json
- *   bun run scripts/extract-cch-seed.ts --binary ./claude --oracle pairs.json
+ *   node scripts/extract-cch-seed.ts --version 2.1.138 --oracle pairs.json
+ *   node scripts/extract-cch-seed.ts --binary ./claude --oracle pairs.json
  *
  *   # Apply extracted seed to cch.ts
- *   bun run scripts/extract-cch-seed.ts --apply 2.1.138 0x4D659218E32A3268
+ *   node scripts/extract-cch-seed.ts --apply 2.1.138 0x4D659218E32A3268
  *
  * Oracle pairs JSON format (for --oracle):
  *   [
@@ -41,11 +45,15 @@ import {
   readFileSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { execSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { parseArgs } from "node:util";
+import { xxHash64 } from "../packages/gateway/src/xxhash.ts";
 
 // ---------------------------------------------------------------------------
 // CLI argument parsing
@@ -67,11 +75,11 @@ const { values: args, positionals } = parseArgs({
 
 if (args.help) {
   console.log(`Usage:
-  bun run scripts/extract-cch-seed.ts --version <VERSION>
-  bun run scripts/extract-cch-seed.ts --binary <path>
-  bun run scripts/extract-cch-seed.ts --version <VERSION> --oracle <pairs.json>
-  bun run scripts/extract-cch-seed.ts --apply <VERSION> <SEED_HEX>
-  bun run scripts/extract-cch-seed.ts --apply --no-pin <VERSION> <SEED_HEX>
+  node scripts/extract-cch-seed.ts --version <VERSION>
+  node scripts/extract-cch-seed.ts --binary <path>
+  node scripts/extract-cch-seed.ts --version <VERSION> --oracle <pairs.json>
+  node scripts/extract-cch-seed.ts --apply <VERSION> <SEED_HEX>
+  node scripts/extract-cch-seed.ts --apply --no-pin <VERSION> <SEED_HEX>
 
 Options:
   -v, --version   Claude Code version to download from npm (e.g. 2.1.138)
@@ -179,57 +187,64 @@ async function captureOnePair(
 ): Promise<OraclePair | null> {
   let captured: OraclePair | null = null;
 
-  const server = Bun.serve({
-    port: 0, // ephemeral port
-    async fetch(req) {
-      if (req.method === "HEAD") {
-        return new Response(null, { status: 200 });
-      }
+  const server = createServer(async (req, res) => {
+    if (req.method === "HEAD") {
+      res.writeHead(200);
+      res.end();
+      return;
+    }
 
-      const body = await req.text();
-      if (!captured) {
-        const cchMatch = body.match(/cch=([0-9a-f]{5})/);
-        if (cchMatch) {
-          const placeholder = body.replace(`cch=${cchMatch[1]}`, "cch=00000");
-          captured = { body: placeholder, cch: cchMatch[1] };
-        }
+    let body = "";
+    for await (const chunk of req) {
+      body += chunk;
+    }
+    if (!captured) {
+      const cchMatch = body.match(/cch=([0-9a-f]{5})/);
+      if (cchMatch) {
+        const placeholder = body.replace(`cch=${cchMatch[1]}`, "cch=00000");
+        captured = { body: placeholder, cch: cchMatch[1] };
       }
+    }
 
-      return Response.json(
-        {
-          type: "error",
-          error: {
-            type: "authentication_error",
-            message: "invalid x-api-key",
-          },
+    res.writeHead(401, { "content-type": "application/json" });
+    res.end(
+      JSON.stringify({
+        type: "error",
+        error: {
+          type: "authentication_error",
+          message: "invalid x-api-key",
         },
-        { status: 401 },
-      );
-    },
+      }),
+    );
   });
 
+  // Bind to an ephemeral port and read the assigned port back.
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const { port } = server.address() as AddressInfo;
+
   try {
-    const proc = Bun.spawn([binaryPath, "--print", "--bare", "-p", prompt], {
+    const proc = spawn(binaryPath, ["--print", "--bare", "-p", prompt], {
       env: {
         ...process.env,
         HOME: `${tmpDir}/home`,
         ANTHROPIC_API_KEY:
           "sk-ant-api03-fakekey1234567890abcdef1234567890abcdef1234567890abcdef",
-        ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.port}`,
+        ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`,
         DISABLE_AUTOUPDATER: "1",
         DISABLE_UPDATES: "1",
       },
       cwd: `${tmpDir}/workdir`,
-      stdout: "ignore",
-      stderr: "ignore",
+      stdio: "ignore",
     });
 
     // Wait up to 15s for the binary to make its request
     const timeout = setTimeout(() => proc.kill(), 15_000);
-    await proc.exited;
+    await new Promise<void>((resolve) => proc.on("exit", () => resolve()));
     clearTimeout(timeout);
   } finally {
-    server.stop();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 
   return captured;
@@ -310,12 +325,10 @@ function obtainBinary(version?: string, binaryPath?: string): string {
   }
 
   // Find the tarball
-  const tgzGlob = new Bun.Glob("anthropic-ai-claude-code-*-*.tgz");
-  let tgzPath = "";
-  for (const file of tgzGlob.scanSync(tmpDir)) {
-    tgzPath = `${tmpDir}/${file}`;
-    break;
-  }
+  const tgz = readdirSync(tmpDir).find((f) =>
+    /^anthropic-ai-claude-code-.*-.*\.tgz$/.test(f),
+  );
+  const tgzPath = tgz ? `${tmpDir}/${tgz}` : "";
   if (!tgzPath) {
     console.error("Could not find downloaded tarball");
     process.exit(1);
@@ -356,7 +369,7 @@ function obtainBinary(version?: string, binaryPath?: string): string {
 
 function testCandidate(seed: bigint, pairs: OraclePair[]): boolean {
   for (const pair of pairs) {
-    const hash = Bun.hash.xxHash64(pair.body, seed);
+    const hash = xxHash64(pair.body, seed);
     const cch = (hash & 0xfffffn).toString(16).padStart(5, "0");
     if (cch !== pair.cch) return false;
   }
@@ -531,7 +544,7 @@ Add this to VERSION_SEEDS in packages/gateway/src/cch.ts:
 Then update WORKER_VERSION if pinning to this version.
 
 Or run:
-  bun run scripts/extract-cch-seed.ts --apply "${version}" "0x${hex}"
+  node scripts/extract-cch-seed.ts --apply "${version}" "0x${hex}"
 ================================================================================`);
 
     // Write JSON output if requested

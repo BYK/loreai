@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env node
 /**
  * Check if recent Claude Code versions have known cch seeds.
  *
@@ -23,7 +23,7 @@ import {
   VERSION_SEEDS,
   _parseSemver,
   _compareSemver,
-} from "../packages/gateway/src/cch";
+} from "../packages/gateway/src/cch.ts";
 
 const { values: args } = parseArgs({
   args: process.argv.slice(2),

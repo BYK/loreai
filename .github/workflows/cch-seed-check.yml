@@ -47,7 +47,7 @@ jobs:
           else
             # check-cc-version.ts exits 1 if extraction is needed
             set +e
-            result=$(pnpm tsx scripts/check-cc-version.ts --json 2>&1)
+            result=$(node scripts/check-cc-version.ts --json 2>&1)
             exit_code=$?
             set -e
 
@@ -126,7 +126,7 @@ jobs:
             echo "========================================"
 
             OUTPUT="/tmp/seed-result-${VERSION}.json"
-            pnpm tsx scripts/extract-cch-seed.ts \
+            node scripts/extract-cch-seed.ts \
               --version "$VERSION" \
               --output "$OUTPUT"
 
@@ -139,10 +139,10 @@ jobs:
             # Apply: pin WORKER_VERSION only for the latest version
             if [ "$VERSION" = "$LATEST_VERSION" ]; then
               echo "Applying seed for $VERSION (pinning as WORKER_VERSION)..."
-              pnpm tsx scripts/extract-cch-seed.ts --apply "$VERSION" "$SEED"
+              node scripts/extract-cch-seed.ts --apply "$VERSION" "$SEED"
             else
               echo "Applying seed for $VERSION (backfill, no pin)..."
-              pnpm tsx scripts/extract-cch-seed.ts --apply --no-pin "$VERSION" "$SEED"
+              node scripts/extract-cch-seed.ts --apply --no-pin "$VERSION" "$SEED"
             fi
 
             EXTRACTED+=("$VERSION")
@@ -208,3 +208,44 @@ jobs:
           gh pr create \
             --title "feat(cch): add seeds for Claude Code up to ${LATEST_VERSION}" \
             --body-file /tmp/pr-body.md
+
+  notify-failure:
+    needs: [check-version, extract-seed]
+    if: always() && (needs.check-version.result == 'failure' || needs.extract-seed.result == 'failure')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: File failure issue (deduped)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          LATEST_VERSION: ${{ needs.check-version.outputs.latest-version }}
+          CHECK_RESULT: ${{ needs.check-version.result }}
+          EXTRACT_RESULT: ${{ needs.extract-seed.result }}
+        run: |
+          LABEL="cch-seed-check-failure"
+          VER="${LATEST_VERSION:-unknown}"
+          MARKER="<!-- cch-seed-check:${VER} -->"
+
+          # Dedupe: reuse an existing open issue carrying this exact marker so
+          # the 6-hourly schedule does not file a new issue on every failure.
+          # GitHub search ignores punctuation, so match the marker literally
+          # against each labelled open issue's body rather than via --search.
+          existing=$(gh issue list --state open --label "$LABEL" \
+            --json number,body \
+            --jq "map(select(.body | contains(\"$MARKER\"))) | .[0].number // empty")
+          if [ -n "$existing" ]; then
+            echo "Open issue #${existing} already tracks this failure; skipping."
+            exit 0
+          fi
+
+          # Ensure the label exists (ignore failure if already present).
+          gh label create "$LABEL" --color B60205 \
+            --description "Automated CCH seed extraction failures" 2>/dev/null || true
+
+          TITLE="CCH Seed Check failed${LATEST_VERSION:+ (v${LATEST_VERSION})}"
+          BODY=$(printf '%s\n\nThe scheduled **CCH Seed Check** workflow failed.\n\n- check-version: %s\n- extract-seed: %s\n- Run: %s\n\n_Auto-filed; deduped per latest version._' \
+            "$MARKER" "$CHECK_RESULT" "$EXTRACT_RESULT" "$RUN_URL")
+
+          gh issue create --title "$TITLE" --label "$LABEL" --body "$BODY"

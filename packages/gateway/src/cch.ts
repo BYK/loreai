@@ -30,7 +30,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { xxHash64 } from "./xxhash";
+import { xxHash64 } from "./xxhash.ts";
 
 // ---------------------------------------------------------------------------
 // Version→seed mapping
