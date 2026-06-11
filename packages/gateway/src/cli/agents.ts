@@ -69,6 +69,30 @@ function appendCustomHeader(
   env[envKey] = existing ? `${existing}\n${header}` : header;
 }
 
+/**
+ * Partial opencode config injected via `OPENCODE_CONFIG_CONTENT` when
+ * launching opencode through `lore run`. Ensures the @loreai/opencode
+ * plugin is loaded — its `config` hook (`applyLoreProviderConfig`)
+ * iterates `cfg.provider` and pins `options.baseURL = ${gatewayBase}/v1`
+ * for every provider. This is the only general mechanism for routing
+ * opencode through the gateway: opencode's `resolveSDK()` always passes
+ * `options.baseURL` to the @ai-sdk factory (bypassing env vars like
+ * `OPENAI_BASE_URL`/`ANTHROPIC_BASE_URL`), and most @ai-sdk providers
+ * have no baseURL env var at all.
+ *
+ * If the plugin isn't installed, opencode handles the failure gracefully
+ * (logs a warning, continues without the plugin). If the user's config
+ * already registers the plugin, opencode's `deduplicatePluginOrigins`
+ * prevents double-loading.
+ *
+ * `OPENCODE_CONFIG_CONTENT` is deep-merged with the user's existing
+ * opencode.json (config.ts:461-468), preserving API keys, model
+ * selections, and other settings.
+ */
+const OPENCODE_PLUGIN_CONFIG = JSON.stringify({
+  plugin: ["@loreai/opencode"],
+});
+
 export const AGENTS: AgentDef[] = [
   {
     name: "claude-code",
@@ -189,10 +213,8 @@ export const AGENTS: AgentDef[] = [
     displayName: "OpenCode",
     binary: "opencode",
     detect: () => whichSync("opencode"),
-    envVars: (url, _cwd) => ({
-      OPENAI_BASE_URL: `${url}/v1`,
-      // OpenCode's @loreai/opencode plugin handles git remote header
-      // injection via chat.headers hook.
+    envVars: (_url, _cwd) => ({
+      OPENCODE_CONFIG_CONTENT: OPENCODE_PLUGIN_CONFIG,
     }),
   },
   {

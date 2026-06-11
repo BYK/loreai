@@ -477,13 +477,73 @@ export function opencodeConfigPath(): string {
 }
 
 /**
- * Update (or create) the OpenCode user-level `opencode.json` to route the
- * built-in `openai` provider through the Lore gateway, and disable
+ * OpenCode provider IDs that get a pinned `baseURL` in the setup writer.
+ *
+ * The primary mechanism for routing opencode through the gateway is the
+ * @loreai/opencode plugin's `config` hook, which iterates `cfg.provider`
+ * at runtime — no hardcoded list needed, adapts to new opencode versions
+ * and custom user providers. The list here is a fallback for the
+ * `--no-plugin` case (user explicitly opts out of the plugin), where the
+ * setup writer must inject baseURLs directly into the persisted config.
+ *
+ * Sourced from opencode's `BUNDLED_PROVIDERS` (provider.ts:108-135) plus
+ * the `custom()` dispatch table (provider.ts:169-953). Opencode's
+ * `resolveSDK()` always passes `options.baseURL` to the @ai-sdk factory,
+ * so setting it here routes every chat call through the gateway.
+ */
+const OPENCODE_SETUP_PROVIDER_IDS = [
+  "amazon-bedrock",
+  "anthropic",
+  "azure",
+  "google",
+  "google-vertex",
+  "google-vertex-anthropic",
+  "openai",
+  "openai-compatible",
+  "openrouter",
+  "xai",
+  "mistral",
+  "groq",
+  "deepinfra",
+  "cerebras",
+  "cohere",
+  "gateway",
+  "togetherai",
+  "perplexity",
+  "vercel",
+  "alibaba",
+  "opencode",
+  "azure-cognitive-services",
+  "github-copilot",
+  "sap-ai-core",
+  "gitlab",
+  "cloudflare-workers-ai",
+  "cloudflare-ai-gateway",
+  "snowflake-cortex",
+  "llmgateway",
+  "nvidia",
+  "kilo",
+  "zenmux",
+  "venice",
+] as const;
+
+/**
+ * Update (or create) the OpenCode user-level `opencode.json` to route every
+ * bundled + custom provider through the Lore gateway, and disable
  * OpenCode's built-in auto-compaction.
  *
+ * The provider baseURLs are the `--no-plugin` fallback — the primary
+ * mechanism is the @loreai/opencode plugin's `config` hook (installed by
+ * `installPlugin` when the user doesn't pass `--no-plugin`). The plugin
+ * iterates `cfg.provider` at runtime, so it covers custom user providers
+ * and future opencode versions without code changes here.
+ *
  * Strategy:
- * - Sets `provider.openai.options.baseURL` to the gateway URL (must include
- *   `/v1` — OpenAI SDK convention used by OpenCode's OpenAI provider).
+ * - Sets `provider.<id>.options.baseURL` to the gateway URL (with `/v1`)
+ *   for every provider opencode knows about. This is necessary because
+ *   opencode's `resolveSDK()` always passes `options.baseURL` to the
+ *   @ai-sdk factory, bypassing `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL`,
+ *   and most other @ai-sdk providers have no baseURL env var at all.
  * - Sets `compaction.auto` to `false` so the Lore gradient context manager
  *   and distillation pipeline are the source of truth.
  * - Deep-merges with the existing config; preserves user-set custom
@@ -494,17 +554,15 @@ export function updateOpencodeConfig(
   config: Record<string, unknown>,
   baseUrl: string,
 ): Record<string, unknown> {
+  // `baseUrl` includes the trailing `/v1` per the setup writer's contract
+  // (matches `setup.ts:normalizeBaseUrl`).
+  const providerConfig: Record<string, { options: { baseURL: string } }> = {};
+  for (const id of OPENCODE_SETUP_PROVIDER_IDS) {
+    providerConfig[id] = { options: { baseURL: baseUrl } };
+  }
   return deepMerge(config, {
-    provider: {
-      openai: {
-        options: {
-          baseURL: baseUrl,
-        },
-      },
-    },
-    compaction: {
-      auto: false,
-    },
+    provider: providerConfig,
+    compaction: { auto: false },
   });
 }
 
@@ -519,13 +577,12 @@ function setupOpencode(baseUrl: string, noPlugin: boolean): void {
   writeFileSync(configPath, `${JSON.stringify(updated, null, 2)}\n`, "utf8");
 
   console.log(`[lore] OpenCode configured to use Lore gateway.`);
-  console.log(`[lore]   provider.openai.options.baseURL = "${baseUrl}"`);
+  console.log(
+    `[lore]   provider.<id>.options.baseURL = "${baseUrl}" (all ${OPENCODE_SETUP_PROVIDER_IDS.length} providers, --no-plugin fallback)`,
+  );
   console.log(`[lore]   compaction.auto = false (auto-compaction disabled)`);
   console.log(`[lore]   Config: ${configPath}`);
   console.log(`[lore]`);
-  console.log(
-    `[lore] Make sure the gateway is running (lore start) before using OpenCode.`,
-  );
 
   if (noPlugin) {
     console.log(`[lore]`);

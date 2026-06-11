@@ -383,20 +383,42 @@ describe("setTopLevelKey", () => {
 // ---------------------------------------------------------------------------
 
 describe("updateOpencodeConfig", () => {
-  test("sets provider.openai.options.baseURL and disables compaction on empty config", () => {
+  test("sets baseURL for every known provider and disables compaction on empty config", () => {
     const result = updateOpencodeConfig({}, "http://127.0.0.1:3207/v1");
-    expect(result).toEqual({
-      provider: {
-        openai: {
-          options: {
-            baseURL: "http://127.0.0.1:3207/v1",
-          },
-        },
-      },
-      compaction: {
-        auto: false,
-      },
-    });
+    const provider = result.provider as Record<
+      string,
+      { options: { baseURL: string } }
+    >;
+    // Every provider gets the same baseURL — this is the "divert ALL calls"
+    // guarantee. Spot-check a representative sample across the bundled +
+    // custom provider list.
+    const expected = [
+      "anthropic",
+      "openai",
+      "google",
+      "google-vertex",
+      "azure",
+      "amazon-bedrock",
+      "mistral",
+      "groq",
+      "cohere",
+      "xai",
+      "cerebras",
+      "perplexity",
+      "togetherai",
+      "vercel",
+      "alibaba",
+      "deepinfra",
+      "openai-compatible",
+      "openrouter",
+      "github-copilot",
+    ];
+    for (const id of expected) {
+      expect(provider[id]?.options?.baseURL).toBe("http://127.0.0.1:3207/v1");
+    }
+    // And the full list is at least 20 providers.
+    expect(Object.keys(provider).length).toBeGreaterThanOrEqual(20);
+    expect(result.compaction).toEqual({ auto: false });
   });
 
   test("preserves existing user settings (custom providers, themes, keybinds)", () => {
@@ -405,20 +427,20 @@ describe("updateOpencodeConfig", () => {
       keybinds: { leader: "ctrl+x" },
       provider: {
         anthropic: {
-          options: { baseURL: "https://example.com" },
+          options: { defaultHeaders: { "X-Custom": "value" } },
         },
       },
     };
     const result = updateOpencodeConfig(existing, "http://127.0.0.1:3207/v1");
     expect(result.theme).toBe("dark");
     expect(result.keybinds).toEqual({ leader: "ctrl+x" });
-    expect(result.provider).toEqual({
-      anthropic: {
-        options: { baseURL: "https://example.com" },
-      },
-      openai: {
-        options: { baseURL: "http://127.0.0.1:3207/v1" },
-      },
+    // anthropic.options is deep-merged — baseURL is set, defaultHeaders preserved
+    const provider = result.provider as {
+      anthropic: { options: Record<string, unknown> };
+    };
+    expect(provider.anthropic.options.baseURL).toBe("http://127.0.0.1:3207/v1");
+    expect(provider.anthropic.options.defaultHeaders).toEqual({
+      "X-Custom": "value",
     });
   });
 
@@ -428,16 +450,25 @@ describe("updateOpencodeConfig", () => {
     expect(second).toEqual(first);
   });
 
-  test("replaces baseURL when re-run with a different value", () => {
-    const first = updateOpencodeConfig({}, "http://old:3207/v1") as {
-      provider?: { openai?: { options?: { baseURL?: string } } };
-    };
-    const second = updateOpencodeConfig(first, "http://new:3207/v1") as {
-      provider?: { openai?: { options?: { baseURL?: string } } };
-    };
-    expect(second.provider?.openai?.options?.baseURL).toBe(
-      "http://new:3207/v1",
+  test("replaces baseURL on every provider when re-run with a different value", () => {
+    const first = updateOpencodeConfig({}, "http://old:3207/v1");
+    const second = updateOpencodeConfig(first, "http://new:3207/v1");
+    const firstProvider = first.provider as Record<
+      string,
+      { options: { baseURL: string } }
+    >;
+    const secondProvider = second.provider as Record<
+      string,
+      { options: { baseURL: string } }
+    >;
+    // Same set of providers
+    expect(Object.keys(secondProvider).sort()).toEqual(
+      Object.keys(firstProvider).sort(),
     );
+    // Every baseURL updated
+    for (const id of Object.keys(secondProvider)) {
+      expect(secondProvider[id].options.baseURL).toBe("http://new:3207/v1");
+    }
   });
 });
 

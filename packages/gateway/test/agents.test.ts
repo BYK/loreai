@@ -69,6 +69,39 @@ describe("Claude Code agent envVars", () => {
 });
 
 // ---------------------------------------------------------------------------
+// OpenCode agent
+// ---------------------------------------------------------------------------
+
+describe("OpenCode agent envVars", () => {
+  const opencode = AGENTS.find((a) => a.name === "opencode");
+  if (!opencode) throw new Error("opencode agent not registered");
+
+  test("injects @loreai/opencode plugin entry via OPENCODE_CONFIG_CONTENT", () => {
+    const env = opencode.envVars("http://127.0.0.1:3207", "/tmp/test");
+    expect(env.OPENCODE_CONFIG_CONTENT).toBeDefined();
+    const parsed = JSON.parse(env.OPENCODE_CONFIG_CONTENT) as {
+      plugin: string[];
+    };
+    expect(parsed.plugin).toEqual(["@loreai/opencode"]);
+    // The plugin handles baseURL pinning for all providers at runtime via
+    // cfg.provider iteration — no hardcoded provider list in the env var.
+    expect(parsed).not.toHaveProperty("provider");
+  });
+
+  test("does NOT set OPENAI_BASE_URL or ANTHROPIC_BASE_URL (opencode bypasses them)", () => {
+    const env = opencode.envVars("http://127.0.0.1:3207", "/tmp/test");
+    expect(env.OPENAI_BASE_URL).toBeUndefined();
+    expect(env.ANTHROPIC_BASE_URL).toBeUndefined();
+  });
+
+  test("OPENCODE_CONFIG_CONTENT is the same regardless of gateway URL (plugin resolves gateway at runtime)", () => {
+    const env1 = opencode.envVars("http://127.0.0.1:3207", "/tmp/test");
+    const env2 = opencode.envVars("http://192.168.1.50:5673", "/tmp/test");
+    expect(env1.OPENCODE_CONFIG_CONTENT).toBe(env2.OPENCODE_CONFIG_CONTENT);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Codex agent
 // ---------------------------------------------------------------------------
 

@@ -24,6 +24,9 @@
       "fast-xml-parser": "5.7.3",
       "@huggingface/hub": "2.11.0",
       "yaml": ">=2.8.3"
+    },
+    "patchedDependencies": {
+      "@sentry/node@10.56.0": "patches/@sentry__node@10.56.0.patch"
     }
   },
   "scripts": {
@@ -36,6 +39,7 @@
     "site:build": "pnpm --filter '@loreai/website' build",
     "site:preview": "pnpm --filter '@loreai/website' preview",
     "generate:docs": "tsx scripts/generate-config-docs.ts && tsx scripts/generate-env-docs.ts",
+    "check:patches": "tsx scripts/check-patches.ts",
     "check:docs": "tsx scripts/generate-config-docs.ts --check && tsx scripts/generate-env-docs.ts --check",
     "check:links": "node scripts/check-docs-links.mjs",
     "check:social": "node scripts/check-social-meta.mjs",
