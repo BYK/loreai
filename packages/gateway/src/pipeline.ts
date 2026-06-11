@@ -390,9 +390,9 @@ export function setUpstreamInterceptor(
 /**
  * Reset all module-level singleton state.
  *
- * Intended for test harnesses only — allows multiple independent gateway
- * instances to run sequentially in the same Bun process without leaking
- * session state or initialization flags across test suites.
+ * Called during gateway shutdown (with `{ fast: true }` to skip the batch-queue
+ * drain) and by test harnesses (default — drains gracefully so tests observe
+ * all side-effects).
  */
 export async function resetPipelineState(opts?: {
   fast?: boolean;

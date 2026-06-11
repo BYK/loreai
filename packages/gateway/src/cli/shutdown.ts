@@ -31,10 +31,9 @@ export function parseShutdownDeadline(
 
 /**
  * Hard cap (ms) on how long graceful shutdown may run before the gateway
- * force-exits, so Ctrl+C can never hang. Override with the
- * `LORE_SHUTDOWN_TIMEOUT_MS` env var (default 4000). Invalid / non-positive /
- * non-finite values fall back to the default — the timeout can never be
- * disabled.
+ * force-exits, so Ctrl+C can never hang. Env: `LORE_SHUTDOWN_TIMEOUT_MS`
+ * (default 4000). Invalid / non-positive / non-finite values fall back to the
+ * default — the timeout can never be disabled.
  */
 export const SHUTDOWN_DEADLINE_MS: number = parseShutdownDeadline(
   process.env.LORE_SHUTDOWN_TIMEOUT_MS,
@@ -138,7 +137,11 @@ export function makeChildForwardHandler(child: {
       console.error("[lore] Received second interrupt — forcing exit.");
       safeExit(signalExitCode(signal));
     }
-    child.kill(signal);
+    try {
+      child.kill(signal);
+    } catch {
+      // Child already gone — the exit handler will clean up.
+    }
   };
 }
 

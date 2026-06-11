@@ -149,7 +149,10 @@ export async function startGateway(
       writePortFile(actualPort);
 
       const boundServer = server;
+      let shutdownStarted = false;
       const shutdown = async () => {
+        if (shutdownStarted) return;
+        shutdownStarted = true;
         console.error("[lore] Shutting down…");
         boundServer.stop();
         removePortFile(actualPort);

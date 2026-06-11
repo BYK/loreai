@@ -599,7 +599,10 @@ export function awaitWorkerShutdown(
     // so process shutdown can't hang. Terminating is safe — all SQLite state
     // lives on the main thread; the worker is stateless.
     const killTimer = setTimeout(() => {
-      void worker.terminate().finally(finish);
+      void worker
+        .terminate()
+        .catch(() => {})
+        .finally(finish);
     }, timeoutMs);
     killTimer.unref?.();
 
