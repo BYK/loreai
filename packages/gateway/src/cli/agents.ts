@@ -6,6 +6,7 @@
  *  - How to detect it (binary name on PATH)
  *  - What env vars to set so it talks through the gateway
  */
+import { execFileSync } from "node:child_process";
 import { getGitRemote } from "@loreai/core";
 import { whichSync } from "./lib/which";
 
@@ -70,70 +71,35 @@ function appendCustomHeader(
 }
 
 /**
- * All OpenCode provider IDs that accept a `baseURL` in their options.
- *
- * Sourced from opencode's `BUNDLED_PROVIDERS` (provider.ts:108-135) plus the
- * `custom()` dispatch table (provider.ts:169-953). Every one of these
- * providers' factories accepts a `baseURL` option, and opencode's
- * `resolveSDK()` always passes that option through — so setting
- * `options.baseURL` here routes every chat call through the Lore gateway.
- *
- * Order matches the provider.ts declaration for readability.
+ * Name of the opencode plugin package. The plugin's `config` hook
+ * (packages/opencode/src/index.ts:applyLoreProviderConfig) iterates over
+ * `cfg.provider` and pins `options.baseURL = ${gatewayBase}/v1` for every
+ * provider — the only general mechanism for routing opencode through the
+ * gateway, since opencode's `resolveSDK()` always passes `options.baseURL`
+ * to the @ai-sdk factory (bypassing `OPENAI_BASE_URL`/`ANTHROPIC_BASE_URL`)
+ * and most other @ai-sdk providers have no baseURL env var at all.
  */
-export const OPENCODE_PROVIDER_IDS = [
-  // Bundled @ai-sdk providers
-  "amazon-bedrock",
-  "anthropic",
-  "azure",
-  "google",
-  "google-vertex",
-  "google-vertex-anthropic",
-  "openai",
-  "openai-compatible",
-  "openrouter",
-  "xai",
-  "mistral",
-  "groq",
-  "deepinfra",
-  "cerebras",
-  "cohere",
-  "gateway",
-  "togetherai",
-  "perplexity",
-  "vercel",
-  "alibaba",
-  // Custom providers
-  "opencode",
-  "azure-cognitive-services",
-  "github-copilot",
-  "sap-ai-core",
-  "gitlab",
-  "cloudflare-workers-ai",
-  "cloudflare-ai-gateway",
-  "snowflake-cortex",
-  "llmgateway",
-  "nvidia",
-  "kilo",
-  "zenmux",
-  "venice",
-] as const;
+const OPENCODE_PLUGIN_PACKAGE = "@loreai/opencode";
 
 /**
- * Build a partial opencode config that pins `options.baseURL` for every
- * known provider to `${gatewayUrl}/v1`. Serialized to JSON for
- * `OPENCODE_CONFIG_CONTENT`, which opencode deep-merges with the user's
- * existing config (config.ts:461-468) — so API keys, model selections,
- * headers, and other provider options are preserved.
+ * Check if the @loreai/opencode plugin is installed globally.
+ * Returns true if installed at any version, false otherwise.
  */
-export function buildOpencodeProviderConfig(
-  gatewayUrl: string,
-): Record<string, unknown> {
-  const baseUrl = `${gatewayUrl}/v1`;
-  const providerConfig: Record<string, { options: { baseURL: string } }> = {};
-  for (const id of OPENCODE_PROVIDER_IDS) {
-    providerConfig[id] = { options: { baseURL: baseUrl } };
+function isOpencodePluginInstalled(): boolean {
+  try {
+    const out = execFileSync(
+      "npm",
+      ["ls", "-g", OPENCODE_PLUGIN_PACKAGE, "--json", "--depth=0"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    );
+    const parsed = JSON.parse(out) as {
+      dependencies?: Record<string, unknown>;
+    };
+    return Boolean(parsed.dependencies?.[OPENCODE_PLUGIN_PACKAGE]);
+  } catch {
+    // `npm ls` exits non-zero when the package isn't found.
+    return false;
   }
-  return { provider: providerConfig };
 }
 
 export const AGENTS: AgentDef[] = [
@@ -256,31 +222,32 @@ export const AGENTS: AgentDef[] = [
     displayName: "OpenCode",
     binary: "opencode",
     detect: () => whichSync("opencode"),
-    envVars: (url, _cwd) => {
-      // OpenCode's `resolveSDK()` (packages/opencode/src/provider/provider.ts)
-      // computes `baseURL` from `provider.options.baseURL ?? model.api.url`
-      // and ALWAYS passes it to the @ai-sdk factory — which means the
-      // `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` env vars are bypassed
-      // (the @ai-sdk providers' loadOptionalSetting() only consults the
-      // env var when the factory receives an undefined `baseURL`, and
-      // opencode never sends undefined). Every other @ai-sdk provider
-      // (google, mistral, groq, cohere, xai, perplexity, togetherai,
-      // vercel, alibaba, deepinfra, gateway, openrouter, cerebras, etc.)
-      // has NO baseURL env var at all.
+    envVars: (_url, _cwd): Record<string, string> => {
+      // OpenCode's `resolveSDK()` always passes `options.baseURL` to the
+      // @ai-sdk factory, bypassing `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL`
+      // env vars, and most other @ai-sdk providers have no baseURL env var
+      // at all. The only general mechanism to route ALL provider calls
+      // through the gateway is the @loreai/opencode plugin — its
+      // `config` hook iterates `cfg.provider` and pins `options.baseURL`
+      // for every provider (including custom user providers and future
+      // opencode versions).
       //
-      // The only way to route ALL provider calls through the gateway when
-      // launching opencode is to inject config via `OPENCODE_CONFIG_CONTENT`,
-      // which opencode deep-merges with the user's existing config
-      // (config.ts:461-468) — so API keys, model selections, and other
-      // provider settings are preserved. We pin `options.baseURL` for every
-      // bundled + custom provider so every chat call hits the gateway.
-      const opencodeConfigContent = JSON.stringify(
-        buildOpencodeProviderConfig(url),
-      );
+      // If the plugin is installed, inject the plugin entry via
+      // `OPENCODE_CONFIG_CONTENT` (opencode deep-merges it with the user's
+      // existing opencode.json — config.ts:461-468). This ensures the
+      // plugin is loaded even if the user hasn't run `lore setup opencode`
+      // first. If the plugin isn't installed, warn the user to run
+      // `lore setup opencode` — baseURL pinning won't happen without it.
+      if (!isOpencodePluginInstalled()) {
+        process.stderr.write(
+          "[lore] WARNING: @loreai/opencode plugin not installed — provider calls will not be routed through the gateway. Run `lore setup opencode` to install.\n",
+        );
+        return {};
+      }
       return {
-        OPENCODE_CONFIG_CONTENT: opencodeConfigContent,
-        // OpenCode's @loreai/opencode plugin handles git remote header
-        // injection via chat.headers hook.
+        OPENCODE_CONFIG_CONTENT: JSON.stringify({
+          plugin: [OPENCODE_PLUGIN_PACKAGE],
+        }),
       };
     },
   },

@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { AGENTS } from "../src/cli/agents";
 
 // ---------------------------------------------------------------------------
@@ -72,56 +72,80 @@ describe("Claude Code agent envVars", () => {
 // OpenCode agent
 // ---------------------------------------------------------------------------
 
+// The launcher shells out to `npm ls -g` to check whether the
+// @loreai/opencode plugin is installed. Mock `node:child_process.execFileSync`
+// at the module level (vi.spyOn can't redefine built-in module exports).
+let mockedInstalled = true;
+vi.mock("node:child_process", async () => {
+  const actual =
+    await vi.importActual<typeof import("node:child_process")>(
+      "node:child_process",
+    );
+  return {
+    ...actual,
+    execFileSync: ((_cmd: string, _args: readonly string[]) => {
+      if (mockedInstalled) {
+        return Buffer.from(
+          JSON.stringify({ dependencies: { "@loreai/opencode": {} } }),
+        );
+      }
+      // `npm ls` exits non-zero when the package isn't found; the launcher
+      // treats that as "not installed".
+      throw new Error("not found");
+    }) as typeof actual.execFileSync,
+  };
+});
+
 describe("OpenCode agent envVars", () => {
   const opencode = AGENTS.find((a) => a.name === "opencode");
   if (!opencode) throw new Error("opencode agent not registered");
 
+  // Capture stderr to assert the warning when the plugin is missing.
+  let savedStderrWrite: typeof process.stderr.write;
+  let stderrOutput: string;
+
+  beforeEach(() => {
+    mockedInstalled = true;
+    savedStderrWrite = process.stderr.write.bind(process.stderr);
+    stderrOutput = "";
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      stderrOutput += typeof chunk === "string" ? chunk : chunk.toString();
+      return true;
+    }) as typeof process.stderr.write;
+  });
+
+  afterEach(() => {
+    process.stderr.write = savedStderrWrite;
+  });
+
+  test("injects @loreai/opencode plugin entry via OPENCODE_CONFIG_CONTENT when installed", () => {
+    mockedInstalled = true;
+    const env = opencode.envVars("http://127.0.0.1:3207", "/tmp/test");
+    expect(env.OPENCODE_CONFIG_CONTENT).toBeDefined();
+    const parsed = JSON.parse(env.OPENCODE_CONFIG_CONTENT as string) as {
+      plugin: string[];
+    };
+    expect(parsed.plugin).toEqual(["@loreai/opencode"]);
+    // The plugin handles baseURL pinning for all providers at runtime via
+    // cfg.provider iteration — no hardcoded list in the env var.
+    expect(parsed).not.toHaveProperty("provider");
+    // No warning emitted.
+    expect(stderrOutput).toBe("");
+  });
+
   test("does NOT set OPENAI_BASE_URL or ANTHROPIC_BASE_URL (opencode bypasses them)", () => {
-    // opencode's resolveSDK() always passes options.baseURL to the
-    // @ai-sdk factory, and loadOptionalSetting() only consults the env
-    // var when the factory receives an undefined baseURL — so these env
-    // vars are never read. The launcher uses OPENCODE_CONFIG_CONTENT
-    // instead.
+    mockedInstalled = true;
     const env = opencode.envVars("http://127.0.0.1:3207", "/tmp/test");
     expect(env.OPENAI_BASE_URL).toBeUndefined();
     expect(env.ANTHROPIC_BASE_URL).toBeUndefined();
   });
 
-  test("sets OPENCODE_CONFIG_CONTENT with baseURL pinned for every provider", () => {
+  test("returns empty env and emits a warning when the plugin is not installed", () => {
+    mockedInstalled = false;
     const env = opencode.envVars("http://127.0.0.1:3207", "/tmp/test");
-    expect(env.OPENCODE_CONFIG_CONTENT).toBeDefined();
-    const parsed = JSON.parse(env.OPENCODE_CONFIG_CONTENT as string) as {
-      provider: Record<string, { options: { baseURL: string } }>;
-    };
-    // Spot-check a representative sample — the full list is asserted in the
-    // OPENCODE_PROVIDER_IDS test below.
-    for (const id of [
-      "anthropic",
-      "openai",
-      "google",
-      "mistral",
-      "groq",
-      "cohere",
-      "xai",
-      "cerebras",
-      "openrouter",
-    ]) {
-      expect(parsed.provider[id]?.options?.baseURL).toBe(
-        "http://127.0.0.1:3207/v1",
-      );
-    }
-  });
-
-  test("reflects custom port and host in every provider's baseURL", () => {
-    const env = opencode.envVars("http://192.168.1.50:5673", "/tmp/test");
-    const parsed = JSON.parse(env.OPENCODE_CONFIG_CONTENT as string) as {
-      provider: Record<string, { options: { baseURL: string } }>;
-    };
-    for (const id of Object.keys(parsed.provider)) {
-      expect(parsed.provider[id].options.baseURL).toBe(
-        "http://192.168.1.50:5673/v1",
-      );
-    }
+    expect(env).toEqual({});
+    expect(stderrOutput).toContain("@loreai/opencode");
+    expect(stderrOutput).toContain("lore setup opencode");
   });
 });
 
