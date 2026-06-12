@@ -705,6 +705,8 @@ export function resetCalibration(sessionID?: string) {
   calibratedOverhead = null;
   cacheWriteCostPerToken = 0;
   cacheReadCostPerToken = 0;
+  urgentDistillationEnabled = true;
+  urgentDistillationMap.clear();
   if (sessionID) {
     saveForceMinLayer(sessionID, 0); // clear persisted state
     sessionStates.delete(sessionID);
@@ -1511,10 +1513,13 @@ type PrefixCache = {
  *
  * Cache hit  — no new rows: returns the exact same prefixMessages object
  *              (byte-identical content, prompt cache preserved).
- * Cache miss — new rows appended: renders only the delta, appends to cached
- *              text, updates cache.
- * Full reset — first call, or rows were rewritten by meta-distillation:
- *              renders everything from scratch.
+ * Warm hit   — returns the cached prefix as-is even when new gen-0 rows were
+ *              appended in the DB. Re-rendering/appending those rows would
+ *              mutate messages[1].content near the front of the prompt and
+ *              bust the warm Anthropic prompt cache.
+ * Full reset — first call, idle resume (onIdleResume clears prefixCache), or
+ *              rows were rewritten by cold-boundary meta-distillation:
+ *              renders everything from scratch and folds in accumulated rows.
  */
 function distilledPrefixCached(
   distillations: Distillation[],
@@ -1522,7 +1527,18 @@ function distilledPrefixCached(
   sessState: SessionState,
 ): { messages: MessageWithParts[]; tokens: number } {
   if (!distillations.length) {
-    sessState.prefixCache = null;
+    // Freeze the *absence* of a prefix too. If the first gen-0 distillation
+    // arrives while the conversation cache is warm, injecting synthetic
+    // messages[0/1] would be just as cache-busting as appending to an existing
+    // prefix. onIdleResume clears this empty pin so a cold turn can render it.
+    sessState.prefixCache = {
+      sessionID,
+      lastDistillationID: "",
+      rowCount: 0,
+      cachedText: "",
+      prefixMessages: [],
+      prefixTokens: 0,
+    };
     return { messages: [], tokens: 0 };
   }
 
@@ -1540,32 +1556,15 @@ function distilledPrefixCached(
         prefixCache.lastDistillationID);
 
   if (cacheValid) {
-    if (prefixCache?.lastDistillationID === lastRow.id) {
-      // No new rows — return cached prefix as-is (byte-identical for prompt cache)
-      return {
-        messages: prefixCache?.prefixMessages,
-        tokens: prefixCache?.prefixTokens,
-      };
-    }
-
-    // New rows appended — render only the delta and append to cached text
-    const newRows = distillations.slice(prefixCache?.rowCount);
-    const deltaText = formatDistillations(newRows);
-
-    if (deltaText) {
-      const fullText = `${prefixCache?.cachedText}\n\n${deltaText}`;
-      const messages = buildPrefixMessages(fullText);
-      const tokens = messages.reduce((sum, m) => sum + estimateMessage(m), 0);
-      sessState.prefixCache = {
-        sessionID,
-        lastDistillationID: lastRow.id,
-        rowCount: distillations.length,
-        cachedText: fullText,
-        prefixMessages: messages,
-        prefixTokens: tokens,
-      };
-      return { messages, tokens };
-    }
+    // Warm-session freeze: keep messages[0/1] byte-identical. New gen-0
+    // distillations accumulate in the DB but are not rendered into the prefix
+    // until a cold boundary clears prefixCache (idle resume / test reset). This
+    // trades slight memory staleness for prompt-cache stability; recall can
+    // still retrieve the newly-distilled rows if needed.
+    return {
+      messages: prefixCache.prefixMessages,
+      tokens: prefixCache.prefixTokens,
+    };
   }
 
   // Full re-render: first call or meta-distillation rewrote rows
@@ -1890,6 +1889,13 @@ export type TransformResult = {
 // Keyed by sessionID. Set by layer returns in transformInner(),
 // consumed (read + delete) by needsUrgentDistillation(sessionID).
 const urgentDistillationMap = new Map<string, boolean>();
+let urgentDistillationEnabled = true;
+
+export function setUrgentDistillationEnabledForTest(enabled: boolean): void {
+  urgentDistillationEnabled = enabled;
+  if (!enabled) urgentDistillationMap.clear();
+}
+
 export function needsUrgentDistillation(sessionID: string): boolean {
   const v = urgentDistillationMap.get(sessionID) ?? false;
   urgentDistillationMap.delete(sessionID);
@@ -2258,7 +2264,7 @@ function transformInner(input: {
     if (result && fitsWithSafetyMargin(result)) {
       // Trigger urgent distillation when: (a) higher stages always need it, or
       // (b) stage 0 with no distillations = first time in gradient mode.
-      if (sid && (s > 0 || cached.tokens === 0)) {
+      if (urgentDistillationEnabled && sid && (s > 0 || cached.tokens === 0)) {
         urgentDistillationMap.set(sid, true);
       }
       return {
@@ -2291,7 +2297,7 @@ function transformInner(input: {
   // if it alone exceeds the tail budget — layer 4 is the terminal layer
   // and must always return. Remaining budget is filled backward with older
   // messages.
-  if (sid) urgentDistillationMap.set(sid, true);
+  if (urgentDistillationEnabled && sid) urgentDistillationMap.set(sid, true);
   const nuclearDistillations = selectDistillations(distillations, 2);
   const nuclearPrefix = distilledPrefix(nuclearDistillations);
   const nuclearPrefixTokens = nuclearPrefix.reduce(

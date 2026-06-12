@@ -859,10 +859,6 @@ export async function run(input: {
   skipMeta?: boolean;
   urgent?: boolean;
   callType?: "batch" | "direct";
-  /** Override the meta-distillation gen-0 threshold. When set, meta-distillation
-   *  triggers at this count instead of `cfg.distillation.metaThreshold`.
-   *  Used by the urgent-distillation path to consolidate earlier under bust pressure. */
-  metaThresholdOverride?: number;
   /** Optional hook for the gateway to record worker health events. When the
    *  LLM call returns null (no response), the hook is called with a categorical
    *  reason. The gateway uses this to escalate to Sentry / dashboard after
@@ -896,8 +892,6 @@ async function runInner(input: {
   /** Whether the LLM call will use batch or direct pricing. Recorded on the
    *  distillation row for accurate historical cost estimates. */
   callType?: "batch" | "direct";
-  /** Override the meta-distillation gen-0 threshold (see run()). */
-  metaThresholdOverride?: number;
   /** See run() — optional gateway worker-health hook. */
   workerHealth?: {
     recordFailure(reason: string): void;
@@ -965,11 +959,7 @@ async function runInner(input: {
     // Check if meta-distillation is needed (skip when cache is warm to avoid
     // prefix cache invalidation — row IDs change after meta-distill, busting
     // the prompt cache on the next turn).
-    // Clamp override to min 2 — meta-distillation with < 2 gen-0 segments is pointless.
-    const effectiveMetaThreshold = Math.max(
-      2,
-      input.metaThresholdOverride ?? cfg.distillation.metaThreshold,
-    );
+    const effectiveMetaThreshold = Math.max(2, cfg.distillation.metaThreshold);
     if (
       !input.skipMeta &&
       gen0Count(input.projectPath, input.sessionID) >= effectiveMetaThreshold
