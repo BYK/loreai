@@ -405,6 +405,49 @@ export function findFuzzyDuplicate(input: {
   return null;
 }
 
+/**
+ * Find a SEMANTIC near-duplicate of the given title+content among existing
+ * entries (this project + cross-project), using embedding cosine similarity.
+ * Catches duplicates that `findFuzzyDuplicate` (title-word overlap) misses —
+ * e.g. the same behavioral preference auto-extracted twice with differently
+ * worded titles. Returns the closest match at or above EMBEDDING_DEDUP_THRESHOLD,
+ * or null. No-ops (returns null) when embeddings are unavailable.
+ *
+ * Used by pattern-echo to avoid re-creating a preference that is semantically
+ * already present (which would otherwise thrash with consolidation trimming).
+ */
+export async function findSemanticDuplicate(input: {
+  title: string;
+  content: string;
+  projectId: string | null;
+}): Promise<{ id: string; similarity: number } | null> {
+  if (!embedding.isAvailable()) return null;
+  let vec: Float32Array;
+  try {
+    [vec] = await embedding.embed(
+      [`${input.title}\n${input.content}`],
+      "document",
+    );
+  } catch (err) {
+    log.warn("findSemanticDuplicate: embed failed (non-fatal):", err);
+    return null;
+  }
+  // Search a few nearest neighbors, then keep only those visible to this
+  // project (same project or cross-project) — vectorSearch is global.
+  const hits = embedding.vectorSearch(vec, 10);
+  for (const hit of hits) {
+    if (hit.similarity < EMBEDDING_DEDUP_THRESHOLD) break; // sorted desc
+    const row = db()
+      .query(
+        `SELECT id FROM knowledge
+         WHERE id = ? AND (project_id = ? OR project_id IS NULL OR cross_project = 1)`,
+      )
+      .get(hit.id, input.projectId) as { id: string } | null;
+    if (row) return { id: row.id, similarity: hit.similarity };
+  }
+  return null;
+}
+
 export function forProject(
   projectPath: string,
   includeCross = true,

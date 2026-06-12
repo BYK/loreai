@@ -129,7 +129,7 @@ Curator scheduling and consolidation thresholds.
 | `enabled` | boolean | `true` |  | Enable the curator (knowledge extraction from conversation). Default: true. |
 | `onIdle` | boolean | `true` |  | Run the curator on session idle (in addition to turn-based). Default: true. |
 | `afterTurns` | number | `3` | min 1 | Minimum turns between curator runs. Default: 3. |
-| `maxEntries` | number | `25` | min 10 | Max knowledge entries per project before consolidation. Default: 25. |
+| `maxEntries` | number | `40` | min 10 | Max knowledge entries per project before consolidation. Default: 40. |
 
 
 ## `pruning`

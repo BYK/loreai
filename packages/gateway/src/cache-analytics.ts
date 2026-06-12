@@ -367,11 +367,16 @@ export function analyzeCacheTurn(
         messageCount,
       );
 
-      // Capture and log diverging byte snippets for early divergences (< 5%
-      // prefix match) to help diagnose what the client is changing (e.g.
-      // timestamps, turn counters). Snippets are also stored on the result
-      // for Sentry span enrichment.
-      if (prefixMatchPercent < 0.05) {
+      // Capture and log diverging byte snippets to help diagnose what changed
+      // (e.g. timestamps, turn counters, host-side message re-rendering).
+      // Logged for early divergences (< 5% prefix match) AND for any
+      // mid-conversation messages[N] content change — the latter is the
+      // expensive "earlier message modified" case where we need to see whether
+      // the change originates upstream (host) or in lore's own pipeline.
+      const isMidConversationMessageChange =
+        /^messages\[\d+\]/.test(divergencePoint) &&
+        !divergenceReason.startsWith("new conversation message");
+      if (prefixMatchPercent < 0.05 || isMidConversationMessageChange) {
         const start = Math.max(0, prefixMatchBytes - 20);
         const end = prefixMatchBytes + 80;
         prevSnippet = prevBody.slice(start, Math.min(prevLength, end));

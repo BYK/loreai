@@ -97,12 +97,12 @@ describe("LoreConfig — loreFile schema", () => {
 });
 
 describe("LoreConfig — curator schema", () => {
-  test("curator defaults: enabled=true, onIdle=true, afterTurns=3, maxEntries=25", () => {
+  test("curator defaults: enabled=true, onIdle=true, afterTurns=3, maxEntries=40", () => {
     const cfg = LoreConfig.parse({});
     expect(cfg.curator.enabled).toBe(true);
     expect(cfg.curator.onIdle).toBe(true);
     expect(cfg.curator.afterTurns).toBe(3);
-    expect(cfg.curator.maxEntries).toBe(25);
+    expect(cfg.curator.maxEntries).toBe(40);
   });
 
   test("curator.maxEntries can be customised", () => {

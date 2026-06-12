@@ -196,6 +196,23 @@ async function _detect(input: {
     .get(pid, pattern.title) as { id: string } | null;
   if (existingPattern) return;
 
+  // Semantic dedup: the exact-title check above misses the same behavioral
+  // preference re-extracted with differently-worded titles. Without this,
+  // pattern-echo re-creates a near-duplicate that consolidation just trimmed,
+  // thrashing the entry count and re-running consolidation every few minutes.
+  // Skip creation when a semantically-equivalent entry already exists.
+  const semanticDup = await ltm.findSemanticDuplicate({
+    title: pattern.title,
+    content: pattern.content,
+    projectId: pid,
+  });
+  if (semanticDup) {
+    log.info(
+      `pattern echo: skipping near-duplicate (sim=${semanticDup.similarity.toFixed(3)}): "${pattern.title}"`,
+    );
+    return;
+  }
+
   try {
     ltm.create({
       projectPath: input.projectPath,

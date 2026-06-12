@@ -280,16 +280,16 @@ export const LoreConfig = z.object({
         .min(1)
         .default(3)
         .describe("Minimum turns between curator runs. Default: 3."),
-      /** Max knowledge entries per project before consolidation triggers. Default: 25. */
+      /** Max knowledge entries per project before consolidation triggers. Default: 40. */
       maxEntries: z
         .number()
         .min(10)
-        .default(25)
+        .default(40)
         .describe(
-          "Max knowledge entries per project before consolidation. Default: 25.",
+          "Max knowledge entries per project before consolidation. Default: 40.",
         ),
     })
-    .default({ enabled: true, onIdle: true, afterTurns: 3, maxEntries: 25 })
+    .default({ enabled: true, onIdle: true, afterTurns: 3, maxEntries: 40 })
     .describe("Curator scheduling and consolidation thresholds."),
   pruning: z
     .object({

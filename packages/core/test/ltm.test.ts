@@ -1995,3 +1995,86 @@ describe("ltm — cross-project promotion", () => {
     expect(ltm.get(d)?.promotion_status).toBeNull();
   });
 });
+
+describe("ltm.findSemanticDuplicate", () => {
+  const PROJ = "/test/ltm/semdup";
+  let availableSpy: ReturnType<typeof vi.spyOn>;
+  let embedSpy: ReturnType<typeof vi.spyOn>;
+
+  /** Deterministic unit-norm vector for a seed (same formula as injectEmbedding). */
+  function seedVec(seed: number, dims = 768): Float32Array {
+    const vec = new Float32Array(dims);
+    for (let i = 0; i < dims; i++) vec[i] = Math.sin(seed * (i + 1) * 0.1);
+    let norm = 0;
+    for (let i = 0; i < dims; i++) norm += vec[i] * vec[i];
+    norm = Math.sqrt(norm);
+    for (let i = 0; i < dims; i++) vec[i] /= norm;
+    return vec;
+  }
+
+  function seedEntry(title: string, seed: number): string {
+    const id = ltm.create({
+      id: uuidv7(),
+      projectPath: PROJ,
+      category: "preference",
+      title,
+      content: `content for ${title}`,
+      scope: "project",
+    });
+    db()
+      .query("UPDATE knowledge SET embedding = ? WHERE id = ?")
+      .run(Buffer.from(seedVec(seed).buffer), id);
+    return id;
+  }
+
+  beforeEach(() => {
+    const pid = ensureProject(PROJ);
+    db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+    availableSpy = vi.spyOn(embedding, "isAvailable").mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    availableSpy.mockRestore();
+    embedSpy?.mockRestore();
+  });
+
+  test("returns a match when a semantically-identical entry exists (sim >= threshold)", async () => {
+    const existing = seedEntry("Always write tests after features", 7);
+    // Candidate embeds to the SAME vector → cosine 1.0 → above 0.935.
+    embedSpy = vi.spyOn(embedding, "embed").mockResolvedValue([seedVec(7)]);
+
+    const pid = ensureProject(PROJ);
+    const dup = await ltm.findSemanticDuplicate({
+      title: "Always add tests once a feature lands",
+      content: "differently worded but same behavior",
+      projectId: pid,
+    });
+    expect(dup?.id).toBe(existing);
+    expect(dup?.similarity).toBeGreaterThanOrEqual(0.935);
+  });
+
+  test("returns null when no entry is similar enough", async () => {
+    seedEntry("Use SQLite for storage", 3);
+    // Candidate embeds to a very different vector → low cosine → no match.
+    embedSpy = vi.spyOn(embedding, "embed").mockResolvedValue([seedVec(99)]);
+
+    const pid = ensureProject(PROJ);
+    const dup = await ltm.findSemanticDuplicate({
+      title: "Prefer Postgres for storage",
+      content: "unrelated wording",
+      projectId: pid,
+    });
+    expect(dup).toBeNull();
+  });
+
+  test("returns null (no-op) when embeddings are unavailable", async () => {
+    availableSpy.mockReturnValue(false);
+    const pid = ensureProject(PROJ);
+    const dup = await ltm.findSemanticDuplicate({
+      title: "anything",
+      content: "anything",
+      projectId: pid,
+    });
+    expect(dup).toBeNull();
+  });
+});
