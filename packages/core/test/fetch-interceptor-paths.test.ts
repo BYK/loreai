@@ -124,6 +124,38 @@ describe("shouldIntercept — LLM API path patterns", () => {
     });
   });
 
+  describe("Codex (ChatGPT) /codex/responses paths", () => {
+    test("matches /codex/responses on ChatGPT backend", () => {
+      expect(
+        shouldIntercept(
+          "https://chatgpt.com/backend-api/codex/responses",
+          GATEWAY,
+        ),
+      ).toBe(true);
+    });
+
+    test("matches /codex/responses with query string", () => {
+      expect(
+        shouldIntercept(
+          "https://chatgpt.com/backend-api/codex/responses?foo=bar",
+          GATEWAY,
+        ),
+      ).toBe(true);
+    });
+
+    test("matches /codex/responses on non-ChatGPT host", () => {
+      expect(
+        shouldIntercept("https://api.example.com/codex/responses", GATEWAY),
+      ).toBe(true);
+    });
+
+    test("does NOT match /codex/foo", () => {
+      expect(
+        shouldIntercept("https://chatgpt.com/backend-api/codex/foo", GATEWAY),
+      ).toBe(false);
+    });
+  });
+
   describe("Negative cases — non-LLM paths", () => {
     test("does NOT match /health", () => {
       expect(shouldIntercept("https://api.example.com/health", GATEWAY)).toBe(
