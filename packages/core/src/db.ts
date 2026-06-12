@@ -2,6 +2,7 @@ import { Database } from "#db/driver";
 import { join, dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 import { getGitRemote } from "./git";
+import { isHostedMode } from "./hosted";
 import { dataDir } from "./data-dir";
 
 /**
@@ -1468,6 +1469,40 @@ export function isUnattributedProjectPath(path: string): boolean {
 }
 
 /**
+ * Reconcile a client-supplied git remote against on-disk truth.
+ *
+ * The `x-lore-git-remote` header is only trustworthy when it AGREES with what
+ * the path actually is on disk. The "git-remote magnet" bug arose because a
+ * non-repo parent directory (e.g. `/home/byk/Code`, where a user keeps loose
+ * scripts) accepted a remote leaked from a sibling worktree's stale plugin
+ * global — becoming a bucket that swallowed every project later sending that
+ * same remote (via the alias/merge paths below).
+ *
+ * Rules:
+ *  - disk has a remote               → ALWAYS use disk's remote (a client
+ *                                       header can never override on-disk truth)
+ *  - disk has NO remote, LOCAL mode  → DROP the client remote (the path is not
+ *                                       a git repo; attaching a remote to it is
+ *                                       what creates the magnet)
+ *  - disk has NO remote, HOSTED mode → trust the client remote (the gateway
+ *                                       cannot read the client's disk, so the
+ *                                       header is the only signal — unchanged
+ *                                       legacy behavior)
+ *
+ * `getGitRemote()` is per-path cached and already returns null in hosted mode,
+ * so this adds at most one cached subprocess call.
+ */
+function resolveTrustedRemote(
+  path: string,
+  supplied?: string | null,
+): string | null {
+  const disk = getGitRemote(path); // null in hosted mode OR when not a repo
+  if (disk) return disk;
+  if (isHostedMode()) return supplied ?? null;
+  return null;
+}
+
+/**
  * Look up or create a project by filesystem path, with git-remote awareness.
  *
  * Resolution order:
@@ -1480,6 +1515,11 @@ export function isUnattributedProjectPath(path: string): boolean {
  * When a git-remote match is found (step 3), the new path is registered as
  * an alias so subsequent calls skip the subprocess. If the matched project's
  * git_remote was not yet populated (pre-v14 rows), it is backfilled lazily.
+ *
+ * A client-supplied git remote (`suppliedGitRemote`, from the
+ * `x-lore-git-remote` header) is reconciled against on-disk truth by
+ * `resolveTrustedRemote()` — it is never attached to a path that is not a git
+ * repository on a local gateway (prevents the "git-remote magnet" bug).
  */
 export function ensureProject(
   path: string,
@@ -1508,7 +1548,7 @@ export function ensureProject(
   if (existing) {
     // Lazy backfill: populate git_remote on pre-v14 rows
     if (!existing.git_remote) {
-      const resolvedRemote = suppliedGitRemote ?? getGitRemote(path);
+      const resolvedRemote = resolveTrustedRemote(path, suppliedGitRemote);
       if (resolvedRemote) {
         // Check for conflict: another project already has this git_remote.
         // If so, merge the conflicting project into this one (one-time).
@@ -1535,7 +1575,7 @@ export function ensureProject(
   if (alias) return alias.project_id;
 
   // 3. Git remote identification
-  const gitRemote = suppliedGitRemote ?? getGitRemote(path);
+  const gitRemote = resolveTrustedRemote(path, suppliedGitRemote);
   if (gitRemote) {
     const byRemote = db()
       .query("SELECT id FROM projects WHERE git_remote = ? LIMIT 1")

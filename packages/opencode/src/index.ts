@@ -180,14 +180,18 @@ let processLoreBase = "";
 // request from project A gets attributed to project B's path because a
 // sub-agent or new project init overwrote the global between turns.
 //
-// `currentProjectPath`/`currentGitRemote` are kept as fallbacks for the
-// fetch interceptor's `getHeaders()` callback, which doesn't have access
-// to the request's session ID and so can't pick the right Map entry. The
-// chat.headers hook is preferred (it sets the header directly per-request
-// using the right Map entry) — `getHeaders()` only fires when a request
-// bypasses the chat.headers hook.
-let currentProjectPath = "";
-let currentGitRemote = "";
+// `currentProject` is a fallback for the fetch interceptor's `getHeaders()`
+// callback, which doesn't have access to the request's session ID and so
+// can't pick the right Map entry. The chat.headers hook is preferred (it sets
+// the header directly per-request using the right Map entry) — `getHeaders()`
+// only fires when a request bypasses the chat.headers hook.
+//
+// The path and git remote are stored TOGETHER as a single object so the
+// fallback pair is always self-consistent: a path is never emitted with a
+// remote that was resolved for a DIFFERENT project on an earlier plugin call.
+// (Pairing a path with a foreign remote is how a non-repo dir acquired
+// another repo's remote and became a "git-remote magnet".)
+let currentProject: { path: string; gitRemote: string } | undefined;
 
 /** project.id → { projectPath, gitRemote, lastSeenAt } */
 const projectState = new Map<
@@ -301,8 +305,7 @@ export const LorePlugin: Plugin = async (ctx) => {
   // Updated on every plugin call so the most-recently-active project wins
   // for fetches that arrive without a known session ID (e.g., direct
   // SDK fetches that skip the plugin's chat.headers hook).
-  currentProjectPath = thisProjectPath;
-  currentGitRemote = thisGitRemote;
+  currentProject = { path: thisProjectPath, gitRemote: thisGitRemote };
 
   try {
     const hooks: Hooks = {
@@ -431,10 +434,13 @@ export const LorePlugin: Plugin = async (ctx) => {
           gatewayBase,
           getHeaders: () => {
             const headers: Record<string, string> = {};
-            if (currentProjectPath)
-              headers["x-lore-project"] = currentProjectPath;
-            if (currentGitRemote)
-              headers["x-lore-git-remote"] = currentGitRemote;
+            const cur = currentProject;
+            if (cur?.path) {
+              headers["x-lore-project"] = cur.path;
+              // Only emit the remote paired with the path it was resolved FOR,
+              // never a remote left over from a different project's plugin call.
+              if (cur.gitRemote) headers["x-lore-git-remote"] = cur.gitRemote;
+            }
             return headers;
           },
         });

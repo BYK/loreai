@@ -174,4 +174,31 @@ describe("OpenCode plugin — per-project state (B2)", () => {
 
     expect(output.headers["x-lore-project"]).toBe(dirA);
   });
+
+  test("a non-git project never emits x-lore-git-remote (no sibling leak)", async () => {
+    // Regression for the "git-remote magnet": a project in a non-repo dir must
+    // not carry a git remote — neither its own (none on disk) nor one leaked
+    // from a sibling project. The temp dirs are not git repos, so getGitRemote
+    // returns null and the header must be absent.
+    const dirA = makeTmp("a"); // not a git repo
+    const dirB = makeTmp("b"); // not a git repo
+
+    const hooksB = await initPluginForProject("project-b", dirB);
+    const hooksA = await initPluginForProject("project-a", dirA);
+
+    const { input, output } = buildChatHeadersInput("session-a", "coder");
+    await hooksA["chat.headers"]?.(input, output);
+
+    expect(output.headers["x-lore-project"]).toBe(dirA);
+    // No remote on a non-repo dir, and none leaked from project B.
+    expect(output.headers["x-lore-git-remote"]).toBeUndefined();
+
+    // And project B (initialized earlier) likewise carries no remote.
+    const { input: inB, output: outB } = buildChatHeadersInput(
+      "session-b",
+      "coder",
+    );
+    await hooksB["chat.headers"]?.(inB, outB);
+    expect(outB.headers["x-lore-git-remote"]).toBeUndefined();
+  });
 });
