@@ -430,7 +430,8 @@ function buildCodexWorkerRequest(
       ...codexHeaders,
     },
     // No `max_output_tokens`: ChatGPT Codex rejects it ("Unsupported parameter:
-    // max_output_tokens"). Same omission as the foreground Codex delta.
+    // max_output_tokens") and enforces its own server-side output limits. Same
+    // omission as the foreground Codex delta.
     body: JSON.stringify({
       model: model.modelID,
       // Codex REQUIRES store:false (rejects store:true).

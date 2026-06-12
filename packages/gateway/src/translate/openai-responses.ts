@@ -424,7 +424,9 @@ function applyCodexResponsesDelta(
   body: Record<string, unknown>,
   req: GatewayRequest,
 ): void {
-  // ChatGPT Codex rejects the request if this parameter is present.
+  // ChatGPT Codex rejects the request if this parameter is present
+  // ("Unsupported parameter: max_output_tokens"). There is no per-request cap
+  // to send instead — Codex enforces its own server-side output limits.
   delete body.max_output_tokens;
 
   // ChatGPT Codex rejects `store: true`.
