@@ -19,6 +19,7 @@ import {
   _computeVersionSuffix,
   _parseSemver,
   _compareSemver,
+  _cchPreimage,
 } from "../src/cch";
 import { xxHash64 } from "../src/xxhash";
 import { readFileSync } from "node:fs";
@@ -182,6 +183,56 @@ describe("signBody", () => {
     expect(a).toBe(b);
     // Both preserve their distinct content tokens untouched.
     expect(signBody(make("aaaaa"))).toContain("`cch=aaaaa`");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cchPreimage (>= 2.1.172 hash-input transform)
+// ---------------------------------------------------------------------------
+
+describe("cchPreimage", () => {
+  test("strips the model value", () => {
+    expect(_cchPreimage('{"model":"claude-opus-4-8","x":1}')).toBe(
+      '{"model":"","x":1}',
+    );
+  });
+
+  test("strips the max_tokens field with its trailing comma", () => {
+    expect(_cchPreimage('{"a":1,"max_tokens":64000,"b":2}')).toBe(
+      '{"a":1,"b":2}',
+    );
+  });
+
+  test("strips max_tokens as the last key (leading-comma fallback)", () => {
+    // Defensive: not the real binary's layout, but must stay valid JSON.
+    expect(_cchPreimage('{"a":1,"max_tokens":64000}')).toBe('{"a":1}');
+  });
+
+  test("removes exactly one comma (never both) when mid-object", () => {
+    const out = _cchPreimage('{"model":"x","max_tokens":8192,"stream":true}');
+    expect(out).toBe('{"model":"","stream":true}');
+    // No doubled or dangling commas.
+    expect(out).not.toContain(",,");
+    expect(() => JSON.parse(out)).not.toThrow();
+  });
+
+  test("strips both model value and max_tokens together", () => {
+    const body =
+      '{"model":"sonnet","max_tokens":8192,"messages":[],"stream":true}';
+    expect(_cchPreimage(body)).toBe('{"model":"","messages":[],"stream":true}');
+  });
+
+  test("is a no-op when neither field is present", () => {
+    const body = '{"system":[{"text":"cch=00000;"}],"messages":[]}';
+    expect(_cchPreimage(body)).toBe(body);
+  });
+
+  test("only strips the first model occurrence", () => {
+    // The model field is the first JSON key; a later literal must be untouched.
+    const body = '{"model":"a","note":"the model:\\"x\\" stays"}';
+    expect(_cchPreimage(body)).toBe(
+      '{"model":"","note":"the model:\\"x\\" stays"}',
+    );
   });
 });
 
@@ -1060,6 +1111,55 @@ describe("binary-verified values", () => {
 
     // And the seed for that version resolves to the captured seed.
     expect(VERSION_SEEDS["2.1.163"]).toBe(seed);
+  });
+
+  test("reproduces a real cch from Claude Code 2.1.175 (preimage transform)", () => {
+    // Ground-truth known-answer test for the >= 2.1.172 preimage change. The
+    // fixture is a RAW wire body (model value + max_tokens present) captured
+    // from the real 2.1.175 binary, with cch=00000, plus the cch the binary
+    // emitted. Hashing the raw body directly does NOT reproduce it — only
+    // hashing cchPreimage(body) (model value + max_tokens stripped) does. This
+    // pins the transform against the real binary; if it fails after touching
+    // cchPreimage/xxhash, the strip rules or PRIME64_4 likely regressed.
+    const fixture = JSON.parse(
+      readFileSync(
+        fileURLToPath(
+          new URL("./cch-oracle-2.1.175.fixture.json", import.meta.url),
+        ),
+        "utf-8",
+      ),
+    ) as { seedHex: string; cch: string; bodyBase64: string };
+
+    const seed = BigInt(fixture.seedHex);
+    // Hash the EXACT bytes (the body has multibyte UTF-8); never a string
+    // round-trip — `xxHash64(string)` UTF-8-encodes, which corrupts a latin1
+    // reconstruction. The edited fields (model/max_tokens) are pure ASCII, so a
+    // latin1 round-trip is byte-safe for applying the transform itself.
+    const rawBytes = Buffer.from(fixture.bodyBase64, "base64");
+    const rawLatin1 = rawBytes.toString("latin1");
+    expect(rawLatin1).toContain("cch=00000");
+    // The raw body still has model value + max_tokens (the wire form)...
+    expect(rawLatin1).toMatch(/"model":"[^"]+"/);
+    expect(rawLatin1).toMatch(/"max_tokens":\d+/);
+
+    // Hashing the RAW body does NOT match (proves the transform is required).
+    const rawHash = (xxHash64(new Uint8Array(rawBytes), seed) & 0xfffffn)
+      .toString(16)
+      .padStart(5, "0");
+    expect(rawHash).not.toBe(fixture.cch);
+
+    // Hashing the PREIMAGE (model value + max_tokens stripped) reproduces it.
+    const preimageBytes = Buffer.from(_cchPreimage(rawLatin1), "latin1");
+    const preimageLatin1 = preimageBytes.toString("latin1");
+    expect(preimageLatin1).toMatch(/"model":""/);
+    expect(preimageLatin1).not.toContain("max_tokens");
+    const computed = (xxHash64(new Uint8Array(preimageBytes), seed) & 0xfffffn)
+      .toString(16)
+      .padStart(5, "0");
+    expect(computed).toBe(fixture.cch);
+
+    // And the seed for that version resolves to the captured seed.
+    expect(VERSION_SEEDS["2.1.175"]).toBe(seed);
   });
 
   test("2.1.138 seed signs correctly (round-trip)", () => {

@@ -132,14 +132,41 @@ if (!args.version && !args.binary) {
 interface OraclePair {
   /**
    * Raw request-body bytes with the `cch` field set to the `cch=00000`
-   * placeholder. MUST be the exact bytes the client transmitted — never a
-   * string round-trip. The body contains multibyte UTF-8 (e.g. `→` in tool
-   * descriptions); decoding it to a JS string via `chunk.toString()` and
+   * placeholder AND the cch preimage transform applied (see `cchPreimage`).
+   * MUST be derived from the exact bytes the client transmitted — never a
+   * UTF-8 string round-trip. The body contains multibyte UTF-8 (e.g. `→` in
+   * tool descriptions); decoding it to a JS string via `chunk.toString()` and
    * re-encoding corrupts any multibyte sequence split across a TCP chunk
    * boundary (each fragment becomes U+FFFD), which makes the hash unrecoverable.
    */
   body: Uint8Array;
   cch: string;
+}
+
+/**
+ * Apply Claude Code's cch hash preimage transform to a request-body buffer.
+ *
+ * Claude Code >= 2.1.172 does NOT hash the raw wire body — it strips the
+ * `model` VALUE (`"model":"x"` → `"model":""`) and the `max_tokens` field
+ * (`"max_tokens":N,` → ``) before hashing. The seed and algorithm are
+ * unchanged; only the preimage changed (discovered via debugger capture, see
+ * quality/CCH.md). For older versions these fields-edits are no-ops, so the
+ * transform is safe to apply unconditionally.
+ *
+ * The edited fields are pure-ASCII JSON, and `latin1` is a lossless 1:1
+ * byte<->char mapping, so round-tripping the whole buffer through latin1 to run
+ * the regexes preserves every other (possibly multibyte) byte exactly.
+ *
+ * Keep in sync with `cchPreimage` in `packages/gateway/src/cch.ts`.
+ */
+function cchPreimage(body: Buffer): Buffer {
+  const s = body.toString("latin1");
+  const out = s
+    .replace(/("model":")[^"]*(")/, "$1$2")
+    // Strip `max_tokens` + exactly one adjacent comma (trailing form is what the
+    // real binary produces; leading-comma alternation is a last-key fallback).
+    .replace(/"max_tokens":\d+,|,"max_tokens":\d+/, "");
+  return Buffer.from(out, "latin1");
 }
 
 // ---------------------------------------------------------------------------
@@ -230,7 +257,11 @@ async function captureOnePair(
           const placeholder = Buffer.from(bodyBytes); // copy
           // Overwrite the 5 hex chars after "cch=" with "00000" (same length).
           Buffer.from("00000", "ascii").copy(placeholder, at + 4);
-          captured = { body: placeholder, cch: cchMatch[1] };
+          // Apply the cch preimage transform (Claude Code >= 2.1.172 strips the
+          // `model` value and `max_tokens` field before hashing — see
+          // cchPreimage in cch.ts / quality/CCH.md). For older versions these
+          // edits are no-ops, so this stays correct across all versions.
+          captured = { body: cchPreimage(placeholder), cch: cchMatch[1] };
         }
       }
     }
@@ -316,7 +347,10 @@ function loadOraclePairs(path: string): OraclePair[] {
       );
       process.exit(1);
     }
-    pairs.push({ body: Buffer.from(pair.body, "utf-8"), cch: pair.cch });
+    pairs.push({
+      body: cchPreimage(Buffer.from(pair.body, "utf-8")),
+      cch: pair.cch,
+    });
   }
 
   return pairs;

@@ -82,12 +82,23 @@ const VERSION_SEEDS: Record<string, bigint> = {
   "2.1.162": SEED_2_1_138,
   "2.1.163": SEED_2_1_138,
   "2.1.165": SEED_2_1_138,
+  "2.1.166": SEED_2_1_138,
+  "2.1.167": SEED_2_1_138,
+  "2.1.168": SEED_2_1_138,
+  "2.1.169": SEED_2_1_138,
+  "2.1.170": SEED_2_1_138,
+  // 2.1.172+ : seed UNCHANGED, but the cch hash preimage changed — the binary
+  // strips the `model` value and the `max_tokens` field before hashing. See
+  // `cchPreimage()` and quality/CCH.md. signBody() applies that transform.
+  "2.1.172": SEED_2_1_138,
+  "2.1.173": SEED_2_1_138,
+  "2.1.175": SEED_2_1_138,
   // Future versions: extract and add entries here.
   // Use `node scripts/extract-cch-seed.ts --version X.Y.Z` to extract.
 };
 
 /** Version we pin worker billing headers to (must have a known seed). */
-const WORKER_VERSION = "2.1.165";
+const WORKER_VERSION = "2.1.175";
 const WORKER_SEED = VERSION_SEEDS[WORKER_VERSION];
 if (WORKER_SEED === undefined) {
   throw new Error(`Missing CCH seed for worker version ${WORKER_VERSION}`);
@@ -139,6 +150,59 @@ const BILLING_HEADER_PREFIX = String.raw`x-anthropic-billing-header:\s*cc_versio
 const BILLING_SIGN_RE = new RegExp(`(${BILLING_HEADER_PREFIX}cch=)0{5}`);
 
 // ---------------------------------------------------------------------------
+// Hash preimage transformation
+// ---------------------------------------------------------------------------
+
+/**
+ * Strip the `model` value from a serialized body for cch hashing.
+ * `"model":"<value>"` → `"model":""`. Matches the first occurrence only.
+ */
+const MODEL_VALUE_RE = /("model":")[^"]*(")/;
+
+/**
+ * Strip the `max_tokens` field (key + integer value + one adjacent comma) from
+ * a serialized body for cch hashing.
+ *
+ * Claude Code (and our `buildAnthropicRequest`) always emit `max_tokens`
+ * mid-object — `{"model":…,"max_tokens":N,"stream":…}` — so the trailing-comma
+ * form is what the real binary strips (verified at the hash site; the preimage
+ * has no leftover comma). We still match an optional LEADING comma as a
+ * defensive fallback for the (currently-unseen) last-key position
+ * `…,"max_tokens":N}`, removing exactly one comma either way so the surrounding
+ * JSON stays well-formed. `max_tokens` is always a non-negative integer.
+ *
+ * The alternation removes exactly ONE comma: the trailing one when present
+ * (`"max_tokens":N,` — the real binary's case), otherwise a leading one
+ * (`,"max_tokens":N` — last-key fallback). It never strips both commas.
+ */
+const MAX_TOKENS_FIELD_RE = /"max_tokens":\d+,|,"max_tokens":\d+/;
+
+/**
+ * Transform a serialized request body into the exact byte sequence Claude Code
+ * (>= 2.1.172) feeds to xxHash64 when computing the `cch` billing hash.
+ *
+ * Discovered by capturing the live hash input under a debugger (see
+ * `quality/CCH.md`): the binary does NOT hash the raw wire body. It hashes the
+ * body with three edits applied:
+ *   1. `cch=<5hex>` → `cch=00000` (the placeholder; callers usually pre-apply this)
+ *   2. the `model` VALUE removed: `"model":"sonnet-4"` → `"model":""`
+ *   3. the `max_tokens` field removed: `"max_tokens":64000,` → `` (with comma)
+ *
+ * The seed (`0x4d659218e32a3268`) and algorithm (Zig-std xxHash64) are
+ * unchanged from 2.1.166; only the preimage changed. Versions ≤ 2.1.170 hashed
+ * the whole body, but we always pin WORKER_VERSION forward (≥ 2.1.172), so we
+ * always strip. Both edits are no-ops when the field is absent (e.g. test
+ * bodies or worker requests without `max_tokens`), keeping the function safe to
+ * apply unconditionally.
+ *
+ * @param body — serialized JSON request body (the wire form)
+ * @returns the byte-exact hash preimage
+ */
+function cchPreimage(body: string): string {
+  return body.replace(MODEL_VALUE_RE, "$1$2").replace(MAX_TOKENS_FIELD_RE, "");
+}
+
+// ---------------------------------------------------------------------------
 // Signing
 // ---------------------------------------------------------------------------
 
@@ -150,9 +214,11 @@ const BILLING_SIGN_RE = new RegExp(`(${BILLING_HEADER_PREFIX}cch=)0{5}`);
  * anchored to the full `x-anthropic-billing-header: …` sentinel so a bare
  * `cch=00000` literal in conversation/LTM content is never touched (it lacks
  * the sentinel prefix). Because the real header is always system[0], no
- * content can serialize before it, so first-match always targets it. The hash
- * itself is still computed over the entire body bytes (matching Claude Code's
- * algorithm).
+ * content can serialize before it, so first-match always targets it.
+ *
+ * The hash is computed over the *preimage* (model value + max_tokens stripped;
+ * see `cchPreimage`), NOT the raw body — but the placeholder is replaced in the
+ * original body so the wire form keeps `model`/`max_tokens` intact.
  *
  * If no billing header is present the body is returned unchanged — there is
  * nothing to sign, and we must never rewrite a bare content `cch=00000`.
@@ -161,7 +227,7 @@ const BILLING_SIGN_RE = new RegExp(`(${BILLING_HEADER_PREFIX}cch=)0{5}`);
  * @returns body with the billing `cch=00000` replaced by `cch=XXXXX`
  */
 export function signBody(bodyWithPlaceholder: string): string {
-  const hash = xxHash64(bodyWithPlaceholder, WORKER_SEED);
+  const hash = xxHash64(cchPreimage(bodyWithPlaceholder), WORKER_SEED);
   const cch = (hash & 0xfffffn).toString(16).padStart(5, "0");
   return bodyWithPlaceholder.replace(BILLING_SIGN_RE, `$1${cch}`);
 }
@@ -628,11 +694,16 @@ export function validateSeed(body: string): boolean | null {
     BILLING_VALIDATE_RE,
     (_m, prefix) => `${prefix}00000;`,
   );
+  // Try both preimage forms: the new (>= 2.1.172) stripped form and the legacy
+  // whole-body form (<= 2.1.170). A client on any known version then validates.
+  const preimages = [cchPreimage(bodyWithPlaceholder), bodyWithPlaceholder];
 
   for (const seed of Object.values(VERSION_SEEDS)) {
-    const hash = xxHash64(bodyWithPlaceholder, seed);
-    const ourCch = (hash & 0xfffffn).toString(16).padStart(5, "0");
-    if (ourCch === clientCch) return true;
+    for (const preimage of preimages) {
+      const hash = xxHash64(preimage, seed);
+      const ourCch = (hash & 0xfffffn).toString(16).padStart(5, "0");
+      if (ourCch === clientCch) return true;
+    }
   }
 
   return false;
@@ -658,4 +729,5 @@ export {
   computeVersionSuffix as _computeVersionSuffix,
   parseSemver as _parseSemver,
   compareSemver as _compareSemver,
+  cchPreimage as _cchPreimage,
 };

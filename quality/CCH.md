@@ -174,3 +174,74 @@ PRIME64_2's `c2b2ae`), inherited by Bun and therefore by Claude Code.
   `chunk.toString()`.
 - The seed is shared across long runs of consecutive versions, so the
   known-seed fast path almost always avoids the binary scan.
+
+## Update (Claude Code 2.1.172+): the hash preimage changed, not the seed
+
+A later "CCH Seed Check" failure (issue #731, versions 2.1.173–2.1.175) looked
+like a seed rotation but was not. The seed `0x4d659218e32a3268` and the
+algorithm (Zig-std xxHash64, non-canonical `PRIME64_4`) are **unchanged**. What
+changed is the **hash preimage**: starting in **2.1.172**, the binary no longer
+hashes the raw serialized body — it strips two fields first.
+
+### What is stripped
+The cch hash input is the serialized body with three edits:
+
+1. `cch=<5hex>` → `cch=00000` (the placeholder — unchanged from before).
+2. The **`model` value** is removed: `"model":"claude-opus-4-8"` → `"model":""`.
+3. The **`max_tokens` field** is removed: `"max_tokens":64000,` → `` (incl. comma).
+
+Everything else (message order, tools, the per-request session UUID, `thinking`,
+`stream`, etc.) is hashed as-is. Rebuilding the preimage from the wire body via
+those three edits reproduces the `cch` bit-for-bit.
+
+### How it was found (Linux x86_64, this machine)
+The byte-exact native seed scan found NONE for 2.1.175 even though the seed is
+present, which (per the warning above) pointed at a preimage mismatch rather
+than a seed change. Confirmed by:
+
+- **Static disassembly.** The cch hash function (`~0x2e06600`, base `0x200000`,
+  binary is non-PIE `EXEC`) initializes the streaming xxHash64 state at
+  `0x2e0674f` with the **precomputed accumulators** for the old seed — verified
+  numerically: `v1=seed+P1+P2`, `v2=seed+P2`, `v3=seed`, `v4=seed−P1` all match
+  `0x4d659218e32a3268`. The digest fn at `0x2917fe0` still loads the
+  non-canonical `PRIME64_4`. So seed + algorithm are intact.
+- **Runtime capture (gdb).** Breaking at the xxHash update fn (`0x2ad99c0`,
+  args `state=rdi, data=rsi, len=rdx`) filtered to the three cch call sites
+  (`0x2e06845`, `0x2e06acd`, `0x2e06b2d`) showed the body fed in three chunks:
+  `{"model":"` | `","messages":…}"},` | `"thinking":…,"stream":true}`. The
+  `model` value and the `"max_tokens":N,` segment are simply **skipped**. The
+  reconstructed preimage was byte-identical to the captured one and hashed to
+  the live `cch`.
+  - Bun's GC stops the world with `SIGPWR`/`SIGXCPU`; gdb must
+    `handle SIGPWR/SIGXCPU nostop noprint pass` or the run never completes.
+  - `ptrace_scope=1` is fine because gdb traces its own child. Bun makes inline
+    syscalls (LD_PRELOAD interposition does NOT work), but a debugger on the
+    child does.
+
+### Bisection
+2.1.166–2.1.170 = whole-body (old). 2.1.171 was never published. 2.1.172–2.1.175
+= stripped preimage. Cutover at **2.1.172**. All share the same seed.
+
+### The fix (this repo)
+- `packages/gateway/src/cch.ts`: added `cchPreimage(body)` (strip `model` value
+  + `max_tokens` field) and apply it in `signBody()` (and thus `resignBody()`)
+  and `validateSeed()` (which also tries the legacy whole-body form for old
+  clients). The placeholder is still substituted in the *original* body so the
+  wire form keeps `model`/`max_tokens`; only the hashed copy is stripped.
+- Added `VERSION_SEEDS` entries 2.1.166–2.1.175 (all the same seed) and pinned
+  `WORKER_VERSION = "2.1.175"`.
+- `scripts/extract-cch-seed.ts`: the oracle capture now applies the same byte-
+  level transform (via a `latin1` 1:1 round-trip — safe because the edited
+  fields are pure ASCII) so the known-seed fast path and binary scan validate
+  again for ≥ 2.1.172.
+- Regression test: `packages/gateway/test/cch-oracle-2.1.175.fixture.json` is a
+  **raw** wire body from the real 2.1.175 binary; the test asserts the raw body
+  does NOT reproduce the cch but `cchPreimage(body)` does.
+
+### Gotcha
+`xxHash64(string)` UTF-8-encodes its input. In production `signBody` receives a
+real JS string whose UTF-8 encoding equals the wire bytes, so that's correct.
+But when testing from captured **bytes**, hash the `Uint8Array` directly — a
+`latin1` string reconstruction passed to `xxHash64` would be re-encoded as UTF-8
+and corrupt any multibyte byte. Use latin1 only to *apply the ASCII-only
+strip*, then hash the resulting bytes.
