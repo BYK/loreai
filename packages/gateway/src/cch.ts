@@ -47,35 +47,43 @@ import { xxHash64 } from "./xxhash.ts";
  *
  * See `scripts/extract-cch-seed.ts` for the automated extraction tool.
  */
+// Named seed constants. Claude Code reuses the same xxHash64 seed across many
+// consecutive versions and only rotates it occasionally, so versions are mapped
+// to a shared named constant rather than repeating the same literal. When the
+// extraction tool finds a seed that matches an existing constant it references
+// that constant; a genuinely new seed gets its own `SEED_<version>` constant.
+const SEED_2_1_37 = 0x6e52736ac806831en;
+const SEED_2_1_138 = 0x4d659218e32a3268n;
+
 const VERSION_SEEDS: Record<string, bigint> = {
-  "2.1.37": 0x6e52736ac806831en,
-  "2.1.138": 0x4d659218e32a3268n,
-  "2.1.140": 0x4d659218e32a3268n,
-  "2.1.139": 0x4d659218e32a3268n,
-  "2.1.141": 0x4d659218e32a3268n,
-  "2.1.142": 0x4d659218e32a3268n,
-  "2.1.143": 0x4d659218e32a3268n,
-  "2.1.144": 0x4d659218e32a3268n,
-  "2.1.145": 0x4d659218e32a3268n,
-  "2.1.146": 0x4d659218e32a3268n,
-  "2.1.152": 0x4d659218e32a3268n,
-  "2.1.147": 0x4d659218e32a3268n,
-  "2.1.148": 0x4d659218e32a3268n,
-  "2.1.149": 0x4d659218e32a3268n,
-  "2.1.150": 0x4d659218e32a3268n,
-  "2.1.153": 0x4d659218e32a3268n,
-  "2.1.160": 0x4d659218e32a3268n,
-  "2.1.154": 0x4d659218e32a3268n,
-  "2.1.156": 0x4d659218e32a3268n,
-  "2.1.157": 0x4d659218e32a3268n,
-  "2.1.158": 0x4d659218e32a3268n,
-  "2.1.159": 0x4d659218e32a3268n,
-  "2.1.161": 0x4d659218e32a3268n,
-  "2.1.162": 0x4d659218e32a3268n,
-  "2.1.163": 0x4d659218e32a3268n,
-  "2.1.165": 0x4d659218e32a3268n,
+  "2.1.37": SEED_2_1_37,
+  "2.1.138": SEED_2_1_138,
+  "2.1.139": SEED_2_1_138,
+  "2.1.140": SEED_2_1_138,
+  "2.1.141": SEED_2_1_138,
+  "2.1.142": SEED_2_1_138,
+  "2.1.143": SEED_2_1_138,
+  "2.1.144": SEED_2_1_138,
+  "2.1.145": SEED_2_1_138,
+  "2.1.146": SEED_2_1_138,
+  "2.1.147": SEED_2_1_138,
+  "2.1.148": SEED_2_1_138,
+  "2.1.149": SEED_2_1_138,
+  "2.1.150": SEED_2_1_138,
+  "2.1.152": SEED_2_1_138,
+  "2.1.153": SEED_2_1_138,
+  "2.1.154": SEED_2_1_138,
+  "2.1.156": SEED_2_1_138,
+  "2.1.157": SEED_2_1_138,
+  "2.1.158": SEED_2_1_138,
+  "2.1.159": SEED_2_1_138,
+  "2.1.160": SEED_2_1_138,
+  "2.1.161": SEED_2_1_138,
+  "2.1.162": SEED_2_1_138,
+  "2.1.163": SEED_2_1_138,
+  "2.1.165": SEED_2_1_138,
   // Future versions: extract and add entries here.
-  // Use `bun run scripts/extract-cch-seed.ts --version X.Y.Z` to extract.
+  // Use `node scripts/extract-cch-seed.ts --version X.Y.Z` to extract.
 };
 
 /** Version we pin worker billing headers to (must have a known seed). */

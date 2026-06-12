@@ -54,6 +54,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { parseArgs } from "node:util";
 import { xxHash64 } from "../packages/gateway/src/xxhash.ts";
+import { VERSION_SEEDS } from "../packages/gateway/src/cch.ts";
 
 // ---------------------------------------------------------------------------
 // CLI argument parsing
@@ -441,9 +442,66 @@ function scanForSeed(binary: Buffer, pairs: OraclePair[]): bigint | null {
   return seed;
 }
 
+/**
+ * Claude Code reuses the same xxHash64 seed across long runs of consecutive
+ * versions, so before scanning the whole binary we test the seeds we already
+ * know against the freshly-captured oracle pairs. A match short-circuits the
+ * expensive 230 MB binary scan. Distinct values are tested newest-first so the
+ * most likely candidate (the current seed) is checked first.
+ */
+function tryKnownSeeds(pairs: OraclePair[]): bigint | null {
+  if (pairs.length < 2) return null; // need 2 pairs to trust a match
+
+  const distinct: bigint[] = [];
+  // Object insertion order in cch.ts is oldest→newest; reverse for newest-first.
+  for (const seed of Object.values(VERSION_SEEDS).reverse()) {
+    if (!distinct.includes(seed)) distinct.push(seed);
+  }
+  if (distinct.length === 0) return null;
+
+  console.log(
+    `\nTesting ${distinct.length} known seed(s) against oracle pairs before scanning...`,
+  );
+  for (const seed of distinct) {
+    if (testCandidate(seed, pairs)) {
+      console.log(
+        `✓ Known seed validates: 0x${seed.toString(16).padStart(16, "0")} — skipping binary scan.`,
+      );
+      return seed;
+    }
+  }
+  console.log("No known seed matched — falling back to binary scan.");
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Apply seed to cch.ts
 // ---------------------------------------------------------------------------
+
+/**
+ * Turn a version string into the identifier used for its named seed constant,
+ * e.g. "2.1.166" -> "SEED_2_1_166".
+ */
+function seedConstName(version: string): string {
+  return `SEED_${version.replace(/[^0-9a-zA-Z]+/g, "_")}`;
+}
+
+/**
+ * Find an existing `const SEED_xxx = 0x...n;` declaration whose value equals
+ * `seedLiteral` (a normalized lowercase `0x...n` string). Returns the constant
+ * name so a new version can reference it symbolically instead of repeating the
+ * literal. Returns null when the seed value is not yet defined anywhere.
+ */
+function findSeedConstantByValue(
+  content: string,
+  seedLiteral: string,
+): string | null {
+  const declRe = /const\s+(SEED_[0-9A-Za-z_]+)\s*=\s*(0x[0-9a-f]+n)\s*;/gi;
+  for (const m of content.matchAll(declRe)) {
+    if (m[2].toLowerCase() === seedLiteral) return m[1];
+  }
+  return null;
+}
 
 function applySeed(
   version: string,
@@ -452,11 +510,12 @@ function applySeed(
 ): void {
   const { pin = true } = opts;
 
-  // Normalize seed format
-  const seed = seedHex.startsWith("0x") ? seedHex : `0x${seedHex}`;
-  const seedUpper = seed
-    .replace(/0x/i, "0x")
-    .replace(/[0-9a-f]+/i, (m) => m.toUpperCase());
+  // Normalize the seed to a lowercase `0x...n` BigInt literal so it matches
+  // the existing constants in cch.ts and stays Biome-clean.
+  const rawHex = (seedHex.startsWith("0x") ? seedHex.slice(2) : seedHex)
+    .replace(/n$/i, "")
+    .toLowerCase();
+  const seedLiteral = `0x${rawHex}n`;
 
   const cchPath = new URL("../packages/gateway/src/cch.ts", import.meta.url)
     .pathname;
@@ -468,21 +527,36 @@ function applySeed(
 
   let content = readFileSync(cchPath, "utf-8");
 
-  // Check if version already exists
+  // Decide how to reference the seed value: reuse an existing named constant
+  // when the value is already defined, otherwise create a new one. This avoids
+  // repeating the same literal across the many versions that share a seed.
+  let constName = findSeedConstantByValue(content, seedLiteral);
+  if (constName) {
+    console.log(`Seed matches existing constant ${constName} — reusing it.`);
+  } else {
+    constName = seedConstName(version);
+    // Insert the new constant immediately before the VERSION_SEEDS table.
+    content = content.replace(
+      /(\nexport const VERSION_SEEDS\b)/,
+      `\nconst ${constName} = ${seedLiteral};\n$1`,
+    );
+    console.log(`New seed — added constant ${constName} = ${seedLiteral}.`);
+  }
+
+  // Insert or update the version -> constant mapping.
   if (content.includes(`"${version}"`)) {
     console.log(
       `Version ${version} already exists in VERSION_SEEDS. Updating...`,
     );
-    // Replace existing entry
     const entryRe = new RegExp(
-      `"${version.replace(/\./g, "\\.")}":\\s*0x[0-9A-Fa-f]+n`,
+      `"${version.replace(/\./g, "\\.")}":\\s*[^,\\n]+`,
     );
-    content = content.replace(entryRe, `"${version}": ${seedUpper}n`);
+    content = content.replace(entryRe, `"${version}": ${constName}`);
   } else {
-    // Add before the "Future versions" comment
+    // Add before the "Future versions" comment.
     content = content.replace(
       /(\n\s*\/\/ Future versions: extract and add entries here\.)/,
-      `\n  "${version}": ${seedUpper}n,$1`,
+      `\n  "${version}": ${constName},$1`,
     );
   }
 
@@ -496,7 +570,7 @@ function applySeed(
 
   writeFileSync(cchPath, content);
   console.log(`Updated ${cchPath}:`);
-  console.log(`  VERSION_SEEDS["${version}"] = ${seedUpper}n`);
+  console.log(`  VERSION_SEEDS["${version}"] = ${constName} (${seedLiteral})`);
   if (pin) {
     console.log(`  WORKER_VERSION = "${version}"`);
   } else {
@@ -529,8 +603,14 @@ async function main() {
     pairs = await generateOraclePairs(binaryPath, 2);
   }
 
-  // Scan
-  const seed = scanForSeed(binary, pairs);
+  // Fast path: a previously-extracted seed often still applies to the new
+  // version. Test known seeds against the oracle pairs before the full scan.
+  let seed = tryKnownSeeds(pairs);
+
+  // Slow path: scan the binary only when no known seed validated.
+  if (seed === null) {
+    seed = scanForSeed(binary, pairs);
+  }
 
   if (seed !== null) {
     const hex = seed.toString(16).padStart(16, "0").toUpperCase();
