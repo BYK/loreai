@@ -937,6 +937,182 @@ describe("ltm.forSession", () => {
 });
 
 // ---------------------------------------------------------------------------
+// REGRESSION: system[2] cache-bust via vector-scored set churn (#727).
+//
+// The cache-bust bug only manifests on the VECTOR scoring path (embeddings
+// available) when the per-turn session context shifts the similarity scores of
+// budget-boundary entries. Earlier reliability bugs (stuck distillations /
+// bricked embeddings, #713/#720/#721) accidentally masked it by forcing the
+// deterministic FTS fallback. These tests drive the real vector path with a
+// CHANGING context across turns and assert the selected SET is stable with
+// stickyIds (the fix) and churns without it (the bug it guards against).
+// ---------------------------------------------------------------------------
+
+describe("ltm.forSession — vector-path set stability (regression #727)", () => {
+  const PROJ = "/test/ltm/vector-churn";
+  const SESSION = "vector-churn-session";
+  let availableSpy: ReturnType<typeof vi.spyOn>;
+  let embedSpy: ReturnType<typeof vi.spyOn>;
+  let vectorSpy: ReturnType<typeof vi.spyOn>;
+
+  // Per-turn similarity scores keyed by entry id. Each "turn" supplies a fresh
+  // map, simulating vector scores recomputed against an evolving session
+  // context — exactly what churns the budget-boundary subset in production.
+  let currentScores: Map<string, number>;
+
+  const ids: string[] = [];
+
+  beforeEach(() => {
+    const pid = ensureProject(PROJ);
+    db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+    db().query("DELETE FROM temporal_messages WHERE project_id = ?").run(pid);
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
+    ids.length = 0;
+
+    // 8 equal-confidence project entries, each ~30 tokens. A tight budget fits
+    // only ~4, so which 4 are selected is decided purely by the (shifting)
+    // vector scores. (~30 tok: title ~11 chars + "C "*45 = 90 chars →
+    // ceil(101/3)=34 +10 overhead ≈ 44; budget below tuned to fit exactly 4.)
+    for (let i = 0; i < 8; i++) {
+      ids.push(
+        ltm.create({
+          projectPath: PROJ,
+          category: "pattern",
+          title: `Vec entry ${i}`,
+          content: "C ".repeat(45),
+          scope: "project",
+          crossProject: false,
+        }),
+      );
+    }
+
+    // Seed a session context (>20 chars) so forSession takes the scoring path.
+    db()
+      .query(
+        "INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?, 0, ?, '{}')",
+      )
+      .run(
+        "vec-msg-1",
+        pid,
+        SESSION,
+        "user",
+        "Working on the vector scoring churn reproduction across turns",
+        20,
+        Date.now(),
+      );
+
+    currentScores = new Map();
+    availableSpy = vi.spyOn(embedding, "isAvailable").mockReturnValue(true);
+    // embed() just needs to return a non-empty query vector so the vector
+    // branch proceeds; the actual scores come from the vectorSearch mock.
+    embedSpy = vi
+      .spyOn(embedding, "embed")
+      .mockResolvedValue([new Float32Array([1, 0, 0])]);
+    // vectorSearch returns the current turn's per-entry similarities.
+    vectorSpy = vi.spyOn(embedding, "vectorSearch").mockImplementation(() =>
+      [...currentScores.entries()].map(([id, similarity]) => ({
+        id,
+        similarity,
+      })),
+    );
+  });
+
+  afterEach(() => {
+    availableSpy.mockRestore();
+    embedSpy.mockRestore();
+    vectorSpy.mockRestore();
+  });
+
+  /** Assign turn-N similarity scores: a base ordering plus a perturbation that
+   *  flips the ranking near the budget boundary (entries 3 and 4). */
+  function scoresForTurn(turn: number): Map<string, number> {
+    const m = new Map<string, number>();
+    for (let i = 0; i < ids.length; i++) {
+      // Descending base score; the boundary pair (i=3,4) swaps every turn.
+      let s = 1 - i * 0.1;
+      if (turn % 2 === 1 && (i === 3 || i === 4)) {
+        s = i === 3 ? 1 - 4 * 0.1 : 1 - 3 * 0.1; // swap 3<->4
+      }
+      m.set(ids[i], s);
+    }
+    return m;
+  }
+
+  const TIGHT = 200;
+
+  test("WITHOUT stickyIds: vector scores shifting across turns churn the set (the bug)", async () => {
+    currentScores = scoresForTurn(0);
+    const turn0 = new Set(
+      (await ltm.forSession(PROJ, SESSION, TIGHT)).map((e) => e.id),
+    );
+    currentScores = scoresForTurn(1); // boundary pair swaps
+    const turn1 = new Set(
+      (await ltm.forSession(PROJ, SESSION, TIGHT)).map((e) => e.id),
+    );
+
+    // Sanity: the vector path actually selected a budget-limited subset.
+    expect(turn0.size).toBeGreaterThan(0);
+    expect(turn0.size).toBeLessThan(ids.length);
+    // The boundary swap changes the selected set — this is the churn that
+    // busted system[2] every turn before the fix.
+    expect(turn1).not.toEqual(turn0);
+  });
+
+  test("WITH stickyIds: the previously-selected set is retained despite the score swap (the fix)", async () => {
+    currentScores = scoresForTurn(0);
+    const turn0 = new Set(
+      (await ltm.forSession(PROJ, SESSION, TIGHT)).map((e) => e.id),
+    );
+
+    // Next turn: scores swap at the boundary, but feeding the prior set as
+    // stickyIds keeps the selection stable → no system[2] cache bust.
+    currentScores = scoresForTurn(1);
+    const turn1 = new Set(
+      (await ltm.forSession(PROJ, SESSION, TIGHT, { stickyIds: turn0 })).map(
+        (e) => e.id,
+      ),
+    );
+    expect(turn1).toEqual(turn0);
+
+    // And it stays stable across a third turn when fed forward again.
+    currentScores = scoresForTurn(2);
+    const turn2 = new Set(
+      (await ltm.forSession(PROJ, SESSION, TIGHT, { stickyIds: turn1 })).map(
+        (e) => e.id,
+      ),
+    );
+    expect(turn2).toEqual(turn0);
+  });
+
+  test("WITH stickyIds: a genuinely stronger new entry still displaces a sticky one", async () => {
+    // The hysteresis bonus (1.25x) must not freeze the set permanently — a new
+    // entry scoring far higher than a sticky one should still win selection.
+    currentScores = scoresForTurn(0);
+    const turn0 = new Set(
+      (await ltm.forSession(PROJ, SESSION, TIGHT)).map((e) => e.id),
+    );
+
+    // Make a currently-UNselected entry dominate, and crush a selected one.
+    const unselected = ids.find((id) => !turn0.has(id));
+    const selected = [...turn0][0];
+    expect(unselected).toBeDefined();
+    if (!unselected) throw new Error("expected an unselected entry");
+    const m = scoresForTurn(0);
+    m.set(unselected, 5.0); // overwhelmingly relevant now
+    m.set(selected, 0.01); // basically irrelevant now
+    currentScores = m;
+
+    const turn1 = new Set(
+      (await ltm.forSession(PROJ, SESSION, TIGHT, { stickyIds: turn0 })).map(
+        (e) => e.id,
+      ),
+    );
+    expect(turn1.has(unselected)).toBe(true);
+    expect(turn1.has(selected)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // ltm.pruneOversized
 // ---------------------------------------------------------------------------
 
