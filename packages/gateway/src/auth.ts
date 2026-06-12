@@ -178,6 +178,12 @@ function warnAuthKeyMismatch(
 export function deleteSessionAuth(sessionID: string): void {
   sessionAuth.delete(sessionID);
   clearAuthStale(sessionID);
+  // Drop this session's mismatch-warning dedup entries so the set doesn't grow
+  // unbounded over a long-lived gateway (keys are `${sessionID}:${lookupKey}`).
+  const prefix = `${sessionID}:`;
+  for (const key of warnedAuthKeyMismatch) {
+    if (key.startsWith(prefix)) warnedAuthKeyMismatch.delete(key);
+  }
 }
 
 // ---------------------------------------------------------------------------

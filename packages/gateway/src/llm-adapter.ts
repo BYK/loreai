@@ -43,8 +43,9 @@ import { extractJSONFromSSE } from "./translate/types";
 import {
   recordWorkerFailure,
   markWorkerPaused,
-  markWorkerIncapable,
   isWorkerIncapable,
+  recordEmptyWorkerResponse,
+  clearEmptyWorkerStreak,
 } from "./worker-health";
 
 // ---------------------------------------------------------------------------
@@ -525,11 +526,18 @@ export function parseOpenAIResponse(data: OpenAIChatResponse): {
   // reasoning body as no-response. Prefer real `content`; fall back to
   // `reasoning_content` (DeepSeek/Qwen) then `reasoning` (OpenRouter/others)
   // only when `content` is empty/missing.
+  // Guard the type: OpenAI `content` can be null or (multimodal) an array at
+  // runtime — only a non-empty string counts as real content; otherwise fall
+  // back to the reasoning fields (which must also be strings).
   const content = message?.content;
+  const reasoning =
+    typeof message?.reasoning_content === "string"
+      ? message.reasoning_content
+      : typeof message?.reasoning === "string"
+        ? message.reasoning
+        : null;
   const text =
-    content && content.length > 0
-      ? content
-      : (message?.reasoning_content ?? message?.reasoning ?? null);
+    typeof content === "string" && content.length > 0 ? content : reasoning;
   return {
     text: text ?? null,
     usage: data.usage ? normalizeOpenAIUsage(data.usage) : null,
@@ -961,7 +969,13 @@ export function createGatewayLLMClient(
                 // transport layer would clear failure state before the parse
                 // step can record "parse-error", making sustained parse
                 // failures invisible to the health ladder.
-                if (parsed.text) return parsed.text;
+                if (parsed.text) {
+                  // A usable response resets the consecutive-empty streak so a
+                  // model that recovers isn't pushed toward an incapable verdict
+                  // by old, non-consecutive empties.
+                  clearEmptyWorkerStreak(model.providerID, model.modelID);
+                  return parsed.text;
+                }
 
                 // Transport succeeded but the model returned no usable text.
                 // Log WHAT came back so an empty no-response can be classified
@@ -977,17 +991,23 @@ export function createGatewayLLMClient(
                     `— ${describeEmptyWorkerResponse(rawData)}`,
                 );
 
-                // Classify: a COMPLETE response (finish_reason not "length"/
-                // missing) that still has no usable text — even after the
-                // reasoning-field fallback — is a model CAPABILITY issue, not an
-                // outage. Mark the model worker-incapable (non-escalating) so we
-                // stop calling it instead of spamming the no-response ladder.
-                // A "length" truncation is a budget problem, not a capability
-                // one, so it stays a normal no-response (retried / budget-tuned).
-                const completedButEmpty =
-                  finishReason != null && finishReason !== "length";
-                if (completedButEmpty) {
-                  markWorkerIncapable(model.providerID, model.modelID);
+                // Classify: a COMPLETE response (finish/stop reason indicates
+                // the model finished producing — not a truncation, content
+                // filter, or tool-call) that still has no usable text, even
+                // after the reasoning-field fallback, is a model CAPABILITY
+                // signal. Budget truncations ("length"/"max_tokens"), content
+                // filtering, and tool-call stops are NOT capability facts and
+                // stay retryable no-response. We require several CONSECUTIVE
+                // such empties before marking the model incapable, so a single
+                // transient/prompt-specific empty doesn't permanently skip a
+                // capable model. recordEmptyWorkerResponse encapsulates this.
+                if (
+                  recordEmptyWorkerResponse(
+                    model.providerID,
+                    model.modelID,
+                    finishReason,
+                  )
+                ) {
                   recordWorkerFailure(
                     opts?.sessionID ?? "_unknown",
                     opts?.workerID ?? "unknown",

@@ -870,8 +870,10 @@ function loadDistillations(
   // created_at is Date.now() (ms precision); two rows written in the same
   // millisecond would otherwise have an undefined relative order across
   // queries, flipping the distilledPrefixCached validity anchor and forcing
-  // an unnecessary full prefix re-render. UUIDv7 ids are monotonic, so
-  // (created_at, id) is a stable total order.
+  // an unnecessary full prefix re-render. Distillation ids are random
+  // (crypto.randomUUID, v4), so (created_at, id) is NOT chronological for
+  // same-ms rows — but it IS a stable, deterministic total order, which is
+  // exactly what cache stability requires.
   const query = sessionID
     ? "SELECT id, observations, generation, token_count, created_at, session_id, r_compression, c_norm, source_ids FROM distillations WHERE project_id = ? AND session_id = ? AND archived = 0 ORDER BY created_at ASC, id ASC"
     : "SELECT id, observations, generation, token_count, created_at, session_id, r_compression, c_norm, source_ids FROM distillations WHERE project_id = ? AND archived = 0 ORDER BY created_at ASC, id ASC";

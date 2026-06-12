@@ -69,6 +69,34 @@ describe("parseOpenAIResponse — reasoning-model fallback", () => {
     expect(r.text).toBeNull();
   });
 
+  test("non-string content (null) falls back to reasoning, never returned as text", () => {
+    const r = parseOpenAIResponse({
+      // content null at runtime (some providers) — must not be returned as text
+      choices: [
+        {
+          message: {
+            content: null as unknown as string,
+            reasoning_content: "fallback reasoning",
+          },
+        },
+      ],
+    });
+    expect(r.text).toBe("fallback reasoning");
+  });
+
+  test("ignores a non-string reasoning field", () => {
+    const r = parseOpenAIResponse({
+      choices: [
+        {
+          message: {
+            reasoning_content: 42 as unknown as string,
+          },
+        },
+      ],
+    });
+    expect(r.text).toBeNull();
+  });
+
   test("negative: no choices returns null", () => {
     const r = parseOpenAIResponse({});
     expect(r.text).toBeNull();

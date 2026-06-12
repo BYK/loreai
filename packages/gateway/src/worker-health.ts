@@ -173,6 +173,7 @@ export function _resetForTest(): void {
   state.clear();
   creditPaused.clear();
   incapableModels.clear();
+  consecutiveEmpty.clear();
   if (sweepTimer) {
     clearInterval(sweepTimer);
     sweepTimer = null;
@@ -184,9 +185,81 @@ export function _resetForTest(): void {
 // Worker-incapable verdicts — non-escalating per-model skip
 // ---------------------------------------------------------------------------
 
+/**
+ * Consecutive complete-but-empty responses a model must produce before we
+ * conclude it is genuinely incapable. A single empty completion is often
+ * transient or prompt-specific (a one-off glitch, a refusal), so we require a
+ * small run before permanently skipping the model.
+ */
+const INCAPABLE_THRESHOLD = 3;
+
+/** Per-model count of consecutive complete-but-empty responses. */
+const consecutiveEmpty: Map<string, number> = new Map();
+
 /** Build the verdict key for a provider+model pair. */
 function modelKey(providerID: string, modelID: string): string {
   return `${providerID}/${modelID}`;
+}
+
+/**
+ * Decide whether a complete-but-empty worker response indicates a model
+ * CAPABILITY problem (vs a transient/recoverable one) based on the upstream
+ * finish/stop reason.
+ *
+ * Excluded (these are NOT capability facts, so they stay retryable no-response):
+ *  - undefined          — unknown shape; can't conclude incapacity
+ *  - "length"           — OpenAI output-budget truncation
+ *  - "max_tokens"       — Anthropic output-budget truncation (same as length)
+ *  - "content_filter"   — prompt-specific moderation, not a model trait
+ *  - "tool_calls" /
+ *    "tool_use"         — the model emitted tool calls, not text (expected)
+ *
+ * Everything else (e.g. "stop", "end_turn") with empty text after the
+ * reasoning-field fallback counts as a complete response that produced nothing
+ * usable — a capability signal.
+ */
+export function isCapabilityEmpty(finishReason: string | undefined): boolean {
+  if (finishReason == null) return false;
+  return ![
+    "length",
+    "max_tokens",
+    "content_filter",
+    "tool_calls",
+    "tool_use",
+  ].includes(finishReason);
+}
+
+/**
+ * Record a complete-but-empty worker response for a model and return true when
+ * the model should now be marked incapable (threshold of consecutive empties
+ * reached). Non-capability finish reasons (truncation, content filter, tool
+ * calls) reset the streak and never mark.
+ */
+export function recordEmptyWorkerResponse(
+  providerID: string,
+  modelID: string,
+  finishReason: string | undefined,
+): boolean {
+  const key = modelKey(providerID, modelID);
+  if (!isCapabilityEmpty(finishReason)) {
+    consecutiveEmpty.delete(key); // transient/expected — reset the streak
+    return false;
+  }
+  const n = (consecutiveEmpty.get(key) ?? 0) + 1;
+  consecutiveEmpty.set(key, n);
+  if (n >= INCAPABLE_THRESHOLD) {
+    markWorkerIncapable(providerID, modelID);
+    return true;
+  }
+  return false;
+}
+
+/** Clear the consecutive-empty streak for a model (on a usable response). */
+export function clearEmptyWorkerStreak(
+  providerID: string,
+  modelID: string,
+): void {
+  consecutiveEmpty.delete(modelKey(providerID, modelID));
 }
 
 /**
@@ -199,7 +272,8 @@ export function markWorkerIncapable(providerID: string, modelID: string): void {
   incapableModels.add(key);
   log.warn(
     `[worker-health] model ${key} marked worker-incapable — ` +
-      `it returned no usable text after the reasoning-field fallback; ` +
+      `it returned no usable text after the reasoning-field fallback ` +
+      `for ${INCAPABLE_THRESHOLD} consecutive complete responses; ` +
       `skipping background worker calls for it (data stays recallable)`,
   );
 }
