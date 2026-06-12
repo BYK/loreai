@@ -12,7 +12,7 @@ describe("curator applyOps changedEntries", () => {
           op: "create",
           category: "preference",
           title: "Delta Create Test",
-          content: "Use the volatile delta channel for new knowledge.",
+          content: "Use durable prompt deltas for new knowledge.",
           scope: "project",
         },
       ],
@@ -25,7 +25,7 @@ describe("curator applyOps changedEntries", () => {
       op: "created",
       category: "preference",
       title: "Delta Create Test",
-      content: "Use the volatile delta channel for new knowledge.",
+      content: "Use durable prompt deltas for new knowledge.",
     });
     expect(result.changedEntries[0]?.id).toBeTruthy();
   });

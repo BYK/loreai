@@ -886,9 +886,9 @@ export function shortId(uuid: string): string {
   return uuid.slice(0, 8);
 }
 
-/** Cap for the volatile knowledge-delta channel: max entries per injected message. */
+/** Cap for durable knowledge prompt deltas: max entries per injected message. */
 export const DELTA_MAX_ENTRIES = 20;
-/** Cap for the volatile knowledge-delta channel: max tokens per injected message. */
+/** Cap for durable knowledge prompt deltas: max tokens per injected message. */
 export const DELTA_TOKEN_BUDGET = 2000;
 
 export type DeltaOp = "new" | "changed" | "removed";
@@ -906,7 +906,7 @@ export type DeltaEntry = {
 };
 
 /**
- * Render a volatile knowledge-delta message. The output is byte-deterministic
+ * Render a durable knowledge prompt-delta message. The output is byte-deterministic
  * for a given input array (same order, same op prefixes, same punctuation)
  * so that, once injected, the message content is FROZEN — future changes
  * produce a new message, not a modification of this one.

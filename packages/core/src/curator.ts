@@ -230,7 +230,7 @@ function filterRelations(arr: unknown[]): DetectedRelation[] {
     });
 }
 
-/** One post-image entry surfaced to the volatile knowledge-delta channel. */
+/** One post-image entry surfaced to durable prompt deltas. */
 export type ChangedEntry =
   | {
       op: "created";
@@ -262,7 +262,7 @@ export type ChangedEntry =
  *
  * @returns Counts of applied operations AND the post-image content of
  *   each changed entry. The post-image is captured in-process (cheap) so
- *   the volatile knowledge-delta channel can render an authoritative delta
+ *   durable prompt deltas can render an authoritative update
  *   message without a re-read from the DB (which would be racy vs. parallel
  *   applyOps calls and would lose the pre-image for "changed" entries).
  */

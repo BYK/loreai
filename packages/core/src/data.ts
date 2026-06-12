@@ -503,6 +503,9 @@ export function clearProject(projectPath: string): ClearResult {
   // Delete in dependency order
   database.exec("BEGIN IMMEDIATE");
   try {
+    database
+      .query("DELETE FROM session_prompt_deltas WHERE project_id = ?")
+      .run(pid);
     // Delete session_state BEFORE temporal_messages (subquery needs the rows)
     database
       .query(
@@ -610,6 +613,9 @@ export function deleteProject(projectId: string): ClearResult | null {
 
   database.exec("BEGIN IMMEDIATE");
   try {
+    database
+      .query("DELETE FROM session_prompt_deltas WHERE project_id = ?")
+      .run(projectId);
     // Delete session_state BEFORE temporal_messages (subquery needs the rows)
     database
       .query(
@@ -804,6 +810,9 @@ export function deleteSession(
     .query("DELETE FROM tool_calls WHERE project_id = ? AND session_id = ?")
     .run(pid, sessionId);
   database
+    .query("DELETE FROM session_prompt_deltas WHERE session_id = ?")
+    .run(sessionId);
+  database
     .query(
       "DELETE FROM temporal_messages WHERE project_id = ? AND session_id = ?",
     )
@@ -891,7 +900,8 @@ export function moveSessions(
     const expanded = new Set(allIds);
     const queue = [...allIds];
     while (queue.length > 0) {
-      const current = queue.pop()!;
+      const current = queue.pop();
+      if (current === undefined) break;
       const children = childrenOf.get(current);
       if (children) {
         for (const child of children) {

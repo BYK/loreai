@@ -17,6 +17,8 @@ import {
   setLastImportAt,
   saveSessionTracking,
   loadSessionTracking,
+  appendSessionPromptDelta,
+  listSessionPromptDeltas,
   loadHeaderSessionIndex,
   getKV,
   setKV,
@@ -51,6 +53,27 @@ describe("db", () => {
       version: number;
     };
     expect(row.version).toBe(42);
+  });
+
+  test("session_prompt_deltas persist ordered selector/content rows (v42)", () => {
+    const projectID = ensureProject("/tmp/lore-prompt-deltas");
+    appendSessionPromptDelta({
+      sessionID: "delta-session",
+      projectID,
+      selector: JSON.stringify({ target: "messages", insertAt: 3 }),
+      content: JSON.stringify({ role: "user", content: [] }),
+    });
+    appendSessionPromptDelta({
+      sessionID: "delta-session",
+      projectID,
+      selector: JSON.stringify({ target: "messages", insertAt: 7 }),
+      content: JSON.stringify({ role: "user", content: [] }),
+    });
+
+    const rows = listSessionPromptDeltas("delta-session");
+    expect(rows.map((r) => r.seq)).toEqual([0, 1]);
+    expect(rows.map((r) => JSON.parse(r.selector).insertAt)).toEqual([3, 7]);
+    expect(rows.every((r) => r.projectID === projectID)).toBe(true);
   });
 
   test("knowledge_tombstones table exists (migration v40)", () => {

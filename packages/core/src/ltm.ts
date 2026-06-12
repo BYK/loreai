@@ -193,7 +193,7 @@ export function create(input: {
 /**
  * Disambiguating variant of `create()` for callers that need to know whether
  * a brand-new row was inserted vs. an existing entry was reused (dedup-merge
- * by title / cross-project / fuzzy). The volatile knowledge-delta channel
+ * by title / cross-project / fuzzy). Durable prompt deltas
  * only surfaces genuinely-new entries — dedup-merged creates are skipped from
  * the delta message so the agent doesn't see the same entry twice.
  *
