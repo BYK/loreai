@@ -475,6 +475,7 @@ describe("cache stability (e2e)", () => {
     const history: unknown[] = [];
     let sessionID = "";
     let contextID = "";
+    let largeContextID = "";
 
     for (let i = 0; i < turns.length; i++) {
       if (i === 2) setForceMinLayer(4, sessionID);
@@ -507,12 +508,27 @@ describe("cache stability (e2e)", () => {
             "Initial context-bound knowledge that should be pinned in system[2].",
           session: sessionID,
         });
+        largeContextID = ltm.create({
+          projectPath,
+          scope: "project",
+          category: "architecture",
+          title: "Large durable delta architecture",
+          content:
+            "Initial large context-bound knowledge that should be pinned before it changes. " +
+            "Initial filler. ".repeat(160),
+          session: sessionID,
+        });
       }
 
       if (i === 1) {
         ltm.update(contextID, {
           content:
             "Updated context-bound knowledge that must arrive as a durable prompt delta, not a system[2] rewrite.",
+        });
+        ltm.update(largeContextID, {
+          content:
+            "Changed huge durable delta marker that must not be silently omitted from the persisted prompt delta. " +
+            "Updated filler. ".repeat(160),
         });
       }
 
@@ -540,10 +556,13 @@ describe("cache stability (e2e)", () => {
     expect(turn3Messages).toContain(
       "Updated context-bound knowledge that must arrive as a durable prompt delta",
     );
+    expect(turn3Messages).toContain("Additional Changed Knowledge");
+    expect(turn3Messages).toContain("Changed huge durable delta marker");
     expect(turn4Messages).toContain("Lore knowledge update");
     expect(turn4Messages).toContain(
       "Updated context-bound knowledge that must arrive as a durable prompt delta",
     );
+    expect(turn4Messages).toContain("Changed huge durable delta marker");
 
     const rows = harness.queryDB<{
       seq: number;
@@ -562,6 +581,7 @@ describe("cache stability (e2e)", () => {
     expect(selector.target).toBe("messages");
     expect(Number.isInteger(selector.insertAt)).toBe(true);
     expect(rows[0].content).toContain("Updated context-bound knowledge");
+    expect(rows[0].content).toContain("Changed huge durable delta marker");
   });
 
   it("removed LTM entries are replayed as durable superseded deltas without rewriting system[2]", async () => {

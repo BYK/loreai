@@ -993,6 +993,12 @@ export function moveSessions(
       )
       .run(toId, fromProjectId, ...allIds);
 
+    database
+      .query(
+        `UPDATE session_prompt_deltas SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
+      )
+      .run(toId, fromProjectId, ...allIds);
+
     // Re-bind session_state to the target project path (confident, not provisional).
     database
       .query(

@@ -756,6 +756,7 @@ function buildKnowledgeDeltaMessage(
   removedIds: string[],
 ): GatewayMessage | null {
   if (!entries.length && !removedIds.length) return null;
+  const renderedIds: string[] = [];
   let rendered = formatKnowledge(
     entries.map((entry) => ({
       id: entry.id,
@@ -764,6 +765,7 @@ function buildKnowledgeDeltaMessage(
       content: entry.content,
     })),
     KNOWLEDGE_DELTA_TOKEN_BUDGET,
+    renderedIds,
   );
   if (!rendered && entries.length) {
     const entry = entries[0];
@@ -774,8 +776,27 @@ function buildKnowledgeDeltaMessage(
     rendered =
       `## Long-term Knowledge\n\n### ${entry.category.charAt(0).toUpperCase()}${entry.category.slice(1)}\n\n` +
       `* **${entry.title}**: ${truncated}`;
+    renderedIds.push(entry.id);
   }
   rendered ??= "";
+  const renderedIDSet = new Set(renderedIds);
+  const skipped = entries.filter((entry) => !renderedIDSet.has(entry.id));
+  const skippedRendered = skipped.length
+    ? `\n\n## Additional Changed Knowledge (truncated)\n\n${skipped
+        .slice(0, 3)
+        .map((entry) => {
+          const truncated =
+            entry.content.length > 500
+              ? `${entry.content.slice(0, 500)}...`
+              : entry.content;
+          return `* **[${entry.id.slice(0, 8)}]${entry.title}**: ${truncated}`;
+        })
+        .join("\n")}${
+        skipped.length > 3
+          ? `\n* ${skipped.length - 3} more changed entr${skipped.length - 3 === 1 ? "y" : "ies"} omitted; older pinned system[2] entries for those IDs are stale.`
+          : ""
+      }`
+    : "";
   const removals = removedIds.length
     ? `\n\n## Superseded Long-term Knowledge\n\nIgnore any older pinned system[2] entries with these IDs; they are no longer in the current selected knowledge set:\n${removedIds.map((id) => `* [${id.slice(0, 8)}]`).join("\n")}`
     : "";
@@ -787,6 +808,7 @@ function buildKnowledgeDeltaMessage(
         text:
           "[Lore knowledge update: durable prompt delta. This message is inserted by Lore and replayed byte-identically on later turns until an intentional cache reset.]\n\n" +
           rendered +
+          skippedRendered +
           removals,
       },
     ],
@@ -1978,15 +2000,16 @@ async function identifySession(
   const known = extractKnownSessionHeader(headers);
   if (known) {
     const indexKey = `${known.headerName}:${known.sessionId}`;
-    if (headerSessionIndex.size === 0) {
+    let existingSid = headerSessionIndex.get(indexKey);
+    if (!existingSid) {
       for (const entry of loadHeaderSessionIndex()) {
         headerSessionIndex.set(
           `${entry.headerName}:${entry.headerSessionId}`,
           entry.sessionId,
         );
       }
+      existingSid = headerSessionIndex.get(indexKey);
     }
-    const existingSid = headerSessionIndex.get(indexKey);
     if (existingSid) {
       // Session may only exist in DB (after gateway restart) — that's fine,
       // getOrCreateSession() will hydrate it from the session_state table.

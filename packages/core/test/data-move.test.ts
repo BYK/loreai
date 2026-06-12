@@ -6,7 +6,12 @@
  * source_session-linked knowledge entries.
  */
 import { describe, test, expect, beforeEach } from "vitest";
-import { db, ensureProject, saveSessionTracking } from "../src/db";
+import {
+  appendSessionPromptDelta,
+  db,
+  ensureProject,
+  saveSessionTracking,
+} from "../src/db";
 import * as data from "../src/data";
 
 // ---------------------------------------------------------------------------
@@ -96,6 +101,7 @@ describe("moveSessions", () => {
     database.query("DELETE FROM temporal_messages").run();
     database.query("DELETE FROM distillations").run();
     database.query("DELETE FROM tool_calls").run();
+    database.query("DELETE FROM session_prompt_deltas").run();
     database.query("DELETE FROM knowledge WHERE embedding IS NOT NULL").run();
     database.query("DELETE FROM knowledge").run();
     database.query("DELETE FROM session_state").run();
@@ -128,6 +134,35 @@ describe("moveSessions", () => {
 
     // Verify session_2 data stayed in project A
     expect(countInProject("temporal_messages", pidA)).toBe(1);
+  });
+
+  test("moves session prompt deltas between projects", () => {
+    insertMessage(pidA, SESSION_1, "msg-delta-1");
+    insertMessage(pidA, SESSION_2, "msg-delta-stay");
+    appendSessionPromptDelta({
+      sessionID: SESSION_1,
+      projectID: pidA,
+      selector: JSON.stringify({ target: "messages", insertAt: 1 }),
+      content: JSON.stringify({
+        role: "user",
+        content: [{ type: "text", text: "moved" }],
+      }),
+    });
+    appendSessionPromptDelta({
+      sessionID: SESSION_2,
+      projectID: pidA,
+      selector: JSON.stringify({ target: "messages", insertAt: 1 }),
+      content: JSON.stringify({
+        role: "user",
+        content: [{ type: "text", text: "stays" }],
+      }),
+    });
+
+    const result = data.moveSessions([SESSION_1], pidA, PROJECT_B);
+
+    expect(result.sessions_moved).toBe(1);
+    expect(countInProject("session_prompt_deltas", pidB)).toBe(1);
+    expect(countInProject("session_prompt_deltas", pidA)).toBe(1);
   });
 
   test("moves source_session-linked knowledge entries", () => {
