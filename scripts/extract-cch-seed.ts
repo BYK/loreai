@@ -49,9 +49,12 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { execSync, spawn } from "node:child_process";
+import { execSync, spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { xxHash64 } from "../packages/gateway/src/xxhash.ts";
 import { VERSION_SEEDS } from "../packages/gateway/src/cch.ts";
@@ -127,7 +130,15 @@ if (!args.version && !args.binary) {
 // ---------------------------------------------------------------------------
 
 interface OraclePair {
-  body: string;
+  /**
+   * Raw request-body bytes with the `cch` field set to the `cch=00000`
+   * placeholder. MUST be the exact bytes the client transmitted — never a
+   * string round-trip. The body contains multibyte UTF-8 (e.g. `→` in tool
+   * descriptions); decoding it to a JS string via `chunk.toString()` and
+   * re-encoding corrupts any multibyte sequence split across a TCP chunk
+   * boundary (each fragment becomes U+FFFD), which makes the hash unrecoverable.
+   */
+  body: Uint8Array;
   cch: string;
 }
 
@@ -195,15 +206,32 @@ async function captureOnePair(
       return;
     }
 
-    let body = "";
+    // Collect the raw body bytes (NEVER `body += chunk`, which UTF-8-decodes
+    // each Buffer and corrupts multibyte sequences split across chunks).
+    const chunks: Buffer[] = [];
     for await (const chunk of req) {
-      body += chunk;
+      chunks.push(chunk as Buffer);
     }
+    const bodyBytes = Buffer.concat(chunks);
+
     if (!captured) {
-      const cchMatch = body.match(/cch=([0-9a-f]{5})/);
+      // The `cch=XXXXX` field is pure ASCII, so a latin1 view is byte-exact
+      // for locating it without disturbing surrounding multibyte content.
+      // NOTE: we target the FIRST `cch=<hex>` occurrence — the billing header is
+      // the first system block, matching how Claude Code itself writes the cch.
+      const cchMatch = bodyBytes.toString("latin1").match(/cch=([0-9a-f]{5})/);
       if (cchMatch) {
-        const placeholder = body.replace(`cch=${cchMatch[1]}`, "cch=00000");
-        captured = { body: placeholder, cch: cchMatch[1] };
+        const at = bodyBytes.indexOf(
+          Buffer.from(`cch=${cchMatch[1]}`, "ascii"),
+        );
+        // `at` should always be >= 0 (the regex matched these exact bytes), but
+        // guard defensively so a miss can never corrupt the body at offset 3.
+        if (at >= 0) {
+          const placeholder = Buffer.from(bodyBytes); // copy
+          // Overwrite the 5 hex chars after "cch=" with "00000" (same length).
+          Buffer.from("00000", "ascii").copy(placeholder, at + 4);
+          captured = { body: placeholder, cch: cchMatch[1] };
+        }
       }
     }
 
@@ -261,13 +289,17 @@ function loadOraclePairs(path: string): OraclePair[] {
     process.exit(1);
   }
 
-  const pairs: OraclePair[] = JSON.parse(readFileSync(path, "utf-8"));
-  if (!Array.isArray(pairs) || pairs.length === 0) {
+  // The JSON file stores each body as a (UTF-8) string. Convert to raw bytes.
+  const raw: Array<{ body: string; cch: string }> = JSON.parse(
+    readFileSync(path, "utf-8"),
+  );
+  if (!Array.isArray(raw) || raw.length === 0) {
     console.error("Oracle file must contain a non-empty JSON array");
     process.exit(1);
   }
 
-  for (const [i, pair] of pairs.entries()) {
+  const pairs: OraclePair[] = [];
+  for (const [i, pair] of raw.entries()) {
     if (!pair.body || !pair.cch) {
       console.error(`Oracle pair ${i} missing 'body' or 'cch' field`);
       process.exit(1);
@@ -284,6 +316,7 @@ function loadOraclePairs(path: string): OraclePair[] {
       );
       process.exit(1);
     }
+    pairs.push({ body: Buffer.from(pair.body, "utf-8"), cch: pair.cch });
   }
 
   return pairs;
@@ -429,16 +462,122 @@ function scan(
   return null;
 }
 
-function scanForSeed(binary: Buffer, pairs: OraclePair[]): bigint | null {
-  // Try 8-byte aligned first (fast)
-  let seed = scan(binary, pairs, 8);
+/**
+ * Compile the bundled native scanner (scripts/cch-scan.c) with `cc -O3` into a
+ * temp dir. Returns the executable path, or null when no C compiler is present
+ * (the caller then falls back to the pure-JS scan). The compiled binary is
+ * cached for the lifetime of the process.
+ */
+let nativeScannerPath: string | null | undefined;
+function buildNativeScanner(): string | null {
+  if (nativeScannerPath !== undefined) return nativeScannerPath;
 
-  // Fall back to 1-byte aligned if needed
+  const src = join(fileURLToPath(new URL(".", import.meta.url)), "cch-scan.c");
+  if (!existsSync(src)) {
+    nativeScannerPath = null;
+    return null;
+  }
+
+  const out = join(tmpdir(), "cch-scan");
+  for (const compiler of ["cc", "gcc", "clang"]) {
+    const r = spawnSync(compiler, ["-O3", "-o", out, src], {
+      stdio: "ignore",
+    });
+    if (r.status === 0) {
+      console.log(`Compiled native scanner with ${compiler}.`);
+      nativeScannerPath = out;
+      return out;
+    }
+  }
+
+  console.log("No C compiler available — using JS scan.");
+  nativeScannerPath = null;
+  return null;
+}
+
+/**
+ * Serialize oracle pairs into the line+raw-bytes format cch-scan.c reads:
+ * "<cch-hex>\t<byte-length>\n" followed by the raw body bytes and a '\n'.
+ * Bodies are passed as bytes (never argv) to avoid any encoding/quoting issues.
+ */
+function writePairsFile(pairs: OraclePair[]): string {
+  const chunks: Buffer[] = [];
+  for (const pair of pairs) {
+    const body = Buffer.from(pair.body);
+    chunks.push(Buffer.from(`${pair.cch}\t${body.length}\n`, "ascii"));
+    chunks.push(body);
+    chunks.push(Buffer.from("\n", "ascii"));
+  }
+  const path = join(tmpdir(), "cch-scan-pairs.txt");
+  writeFileSync(path, Buffer.concat(chunks));
+  return path;
+}
+
+/**
+ * Run the native scanner over the binary at `binaryPath`. Returns the matching
+ * seed, null when the scanner ran but found nothing, or `undefined` when the
+ * native path is unavailable (so the caller falls back to the JS scan).
+ */
+function nativeScan(
+  binaryPath: string,
+  pairs: OraclePair[],
+  alignment: number,
+): bigint | null | undefined {
+  const scanner = buildNativeScanner();
+  if (!scanner) return undefined;
+
+  const pairsFile = writePairsFile(pairs);
+  const label = alignment === 8 ? "8-byte aligned" : "1-byte aligned";
+  console.log(`\nNative scan (${label})...`);
+  const start = performance.now();
+  const r = spawnSync(scanner, [binaryPath, String(alignment), pairsFile], {
+    encoding: "utf-8",
+    maxBuffer: 1 << 20,
+  });
+  const elapsed = (performance.now() - start) / 1000;
+
+  if (r.status !== 0) {
+    console.warn(
+      `Native scanner failed (${r.status}): ${r.stderr?.trim() ?? ""} — falling back to JS.`,
+    );
+    return undefined;
+  }
+
+  const out = (r.stdout ?? "").trim();
+  const m = out.match(/^SEED (0x[0-9a-f]+)$/);
+  if (m) {
+    const seed = BigInt(m[1]);
+    console.log(
+      `✓ Native scan found seed in ${elapsed.toFixed(1)}s: 0x${seed.toString(16).padStart(16, "0")}`,
+    );
+    return seed;
+  }
+  console.log(`Native scan complete in ${elapsed.toFixed(1)}s: no match.`);
+  return null;
+}
+
+function scanForSeed(
+  binaryPath: string,
+  binary: Buffer,
+  pairs: OraclePair[],
+): bigint | null {
+  // Native scan first (orders of magnitude faster than the JS loop). 8-byte
+  // aligned, then 1-byte aligned. `undefined` means the native path was
+  // unavailable, so fall back to the JS scan; `null` means it ran and found
+  // nothing (no point repeating the same work in JS).
+  const native8 = nativeScan(binaryPath, pairs, 8);
+  if (native8 !== undefined) {
+    if (native8 !== null) return native8;
+    const native1 = nativeScan(binaryPath, pairs, 1);
+    if (native1 !== undefined) return native1;
+  }
+
+  // Pure-JS fallback (no compiler available or native path errored).
+  let seed = scan(binary, pairs, 8);
   if (seed === null) {
     console.log("\nFalling back to 1-byte aligned scan...");
     seed = scan(binary, pairs, 1);
   }
-
   return seed;
 }
 
@@ -609,7 +748,7 @@ async function main() {
 
   // Slow path: scan the binary only when no known seed validated.
   if (seed === null) {
-    seed = scanForSeed(binary, pairs);
+    seed = scanForSeed(binaryPath, binary, pairs);
   }
 
   if (seed !== null) {

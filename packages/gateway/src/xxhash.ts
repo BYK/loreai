@@ -1,21 +1,37 @@
 /**
- * xxHash64 — non-cryptographic 64-bit hash.
+ * Claude Code's `cch` hash — xxHash64 as implemented by Zig's std library.
  *
- * Pure-JS implementation of Yann Collet's xxHash64 algorithm. The CLI uses
- * it to replicate Claude Code's `cch` billing header, which is computed
- * by an xxHash64 of the request body (see [[cch.ts]] for the consumer).
+ * This replicates Claude Code's `cch` billing-header hash (see [[cch.ts]] for
+ * the consumer). Claude Code runs on Bun, whose `Bun.hash.xxHash64` calls
+ * `std.hash.XxHash64` from Zig's standard library. That implementation has a
+ * NON-CANONICAL PRIME64_4: Zig std uses `0x85ebca77c2b2ae63`, whereas the
+ * reference xxHash64 (Cyan4973) uses `0x85ebca6b3b7b36ef`. (The Zig value looks
+ * like a historical transcription slip — it reuses byte runs from PRIME64_1's
+ * `85ebca87` and PRIME64_2's `c2b2ae`.) Every other prime, the round function,
+ * and the finalization match the reference.
  *
- * Reference: https://github.com/Cyan4973/xxHash (BSD-2-Clause)
+ * Consequence: cch output is NOT bit-compatible with canonical xxHash64
+ * libraries — only with Zig std / Bun. This is why generic xxhash libraries
+ * never reproduce the `cch`. Verified two ways: (1) Zig std source
+ * (lib/std/hash/xxhash.zig defines `prime_4 = 0x85EBCA77C2B2AE63`), and
+ * (2) disassembly of the Bun binary's finalization routine + end-to-end
+ * replay against live request bodies captured at the sendto(2) syscall.
  *
- * Bun exposes the same algorithm as `Bun.hash.xxHash64(data, seed)` which
- * returns a `bigint`. This module is the Node-compatible replacement so
- * the same code runs under both runtimes without any `Bun.*` reference.
+ * PRIME64_4 only participates in `mergeRound` and the 8-byte tail, so the
+ * bulk-stripe accumulators match canonical xxHash64 — only the finalized digest
+ * differs. DO NOT "correct" PRIME64_4 to the canonical value; that would
+ * silently break cch signing.
+ *
+ * Reference (base algorithm): https://github.com/Cyan4973/xxHash (BSD-2-Clause)
+ * Zig std (the actual variant): ziglang/zig lib/std/hash/xxhash.zig
  */
 
 const PRIME64_1 = 0x9e3779b185ebca87n;
 const PRIME64_2 = 0xc2b2ae3d27d4eb4fn;
 const PRIME64_3 = 0x165667b19e3779f9n;
-const PRIME64_4 = 0x85ebca6b3b7b36efn;
+// Zig-std value (matches Bun). Canonical xxHash64 is 0x85ebca6b3b7b36ef.
+// See the module doc comment above — do not "fix" this.
+const PRIME64_4 = 0x85ebca77c2b2ae63n;
 const PRIME64_5 = 0x27d4eb2f165667c5n;
 
 /**
@@ -70,11 +86,16 @@ function toBytes(data: string | Uint8Array): Uint8Array {
 }
 
 /**
- * Compute the 64-bit xxHash of `data` seeded with `seed`.
+ * Compute Claude Code's `cch` hash of `data` seeded with `seed`.
  *
- * @param data - Bytes (or UTF-8 string) to hash
+ * This is xxHash64 with the tampered PRIME64_4 (see module doc). The result is
+ * intentionally NOT equal to standard `Bun.hash.xxHash64` / canonical xxHash64.
+ *
+ * @param data - Bytes (or UTF-8 string) to hash. NOTE: strings are UTF-8
+ *   encoded; callers handling raw request bodies must pass bytes to avoid
+ *   corrupting multibyte sequences.
  * @param seed - Optional 64-bit seed; defaults to 0
- * @returns 64-bit hash as a bigint (matches Bun.hash.xxHash64)
+ * @returns 64-bit hash as a bigint
  */
 export function xxHash64(
   data: string | Uint8Array,

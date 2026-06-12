@@ -21,6 +21,8 @@ import {
   _compareSemver,
 } from "../src/cch";
 import { xxHash64 } from "../src/xxhash";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const SID_A = "sess-a";
 const SID_B = "sess-b";
@@ -725,10 +727,37 @@ describe("binary-verified values", () => {
     expect(_computeVersionSuffix("hello")).toBe(suffix);
   });
 
-  test("2.1.138 seed signs correctly (oracle pair 1)", () => {
-    // Verified: body with "hello" prompt signed by Claude Code 2.1.138 → cch=54175
-    // We can't reproduce the exact body here (it includes system-reminder etc.)
-    // but we verify the seed is non-zero and produces valid output
+  test("reproduces a real cch captured from the Claude Code binary", () => {
+    // Ground-truth known-answer test. The fixture is a real request body
+    // (with cch=00000) captured from the Claude Code 2.1.163 binary at the
+    // sendto(2) syscall, plus the cch that binary actually emitted. This is the
+    // ONLY test that pins our hash to a value produced by the real binary — a
+    // self-consistency sign/verify roundtrip would pass with ANY PRIME64_4, so
+    // it would not catch a regression to the canonical constant. If this fails
+    // after touching xxhash.ts, the PRIME64_4 tweak was likely reverted.
+    const fixture = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL("./cch-oracle.fixture.json", import.meta.url)),
+        "utf-8",
+      ),
+    ) as { seedHex: string; cch: string; bodyBase64: string };
+
+    const seed = BigInt(fixture.seedHex);
+    // Hash the EXACT bytes (the body contains multibyte UTF-8), never a string
+    // round-trip.
+    const body = Buffer.from(fixture.bodyBase64, "base64");
+    expect(body.includes(Buffer.from("cch=00000"))).toBe(true);
+
+    const computed = (xxHash64(new Uint8Array(body), seed) & 0xfffffn)
+      .toString(16)
+      .padStart(5, "0");
+    expect(computed).toBe(fixture.cch);
+
+    // And the seed for that version resolves to the captured seed.
+    expect(VERSION_SEEDS["2.1.163"]).toBe(seed);
+  });
+
+  test("2.1.138 seed signs correctly (round-trip)", () => {
     const seed = VERSION_SEEDS["2.1.138"];
     expect(seed).toBeDefined();
     expect(seed).not.toBe(0n);
