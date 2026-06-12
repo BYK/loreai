@@ -723,6 +723,31 @@ function changedLtmEntries(
   });
 }
 
+function removedLtmEntryIds(
+  previousKeys: string[] | undefined,
+  nextKeys: string[] | undefined,
+): string[] {
+  const nextIDs = entryKeyIds(nextKeys);
+  return Array.from(entryKeyIds(previousKeys)).filter((id) => !nextIDs.has(id));
+}
+
+function hasMaterialLtmDelta(input: {
+  entries: Array<{
+    id: string;
+    category: string;
+    title: string;
+    content: string;
+  }>;
+  previousKeys: string[] | undefined;
+  nextKeys: string[] | undefined;
+}): boolean {
+  return (
+    changedLtmEntries(input.entries, input.previousKeys, input.nextKeys)
+      .length > 0 ||
+    removedLtmEntryIds(input.previousKeys, input.nextKeys).length > 0
+  );
+}
+
 function buildKnowledgeDeltaMessage(
   entries: Array<{
     id: string;
@@ -730,8 +755,9 @@ function buildKnowledgeDeltaMessage(
     title: string;
     content: string;
   }>,
+  removedIds: string[],
 ): GatewayMessage | null {
-  if (!entries.length) return null;
+  if (!entries.length && !removedIds.length) return null;
   let rendered = formatKnowledge(
     entries.map((entry) => ({
       id: entry.id,
@@ -741,7 +767,7 @@ function buildKnowledgeDeltaMessage(
     })),
     KNOWLEDGE_DELTA_TOKEN_BUDGET,
   );
-  if (!rendered) {
+  if (!rendered && entries.length) {
     const entry = entries[0];
     const truncated =
       entry.content.length > 900
@@ -751,6 +777,10 @@ function buildKnowledgeDeltaMessage(
       `## Long-term Knowledge\n\n### ${entry.category.charAt(0).toUpperCase()}${entry.category.slice(1)}\n\n` +
       `* **${entry.title}**: ${truncated}`;
   }
+  rendered ??= "";
+  const removals = removedIds.length
+    ? `\n\n## Superseded Long-term Knowledge\n\nIgnore any older pinned system[2] entries with these IDs; they are no longer in the current selected knowledge set:\n${removedIds.map((id) => `* [${id.slice(0, 8)}]`).join("\n")}`
+    : "";
   return {
     role: "user",
     content: [
@@ -758,7 +788,8 @@ function buildKnowledgeDeltaMessage(
         type: "text",
         text:
           "[Lore knowledge update: durable prompt delta. This message is inserted by Lore and replayed byte-identically on later turns until an intentional cache reset.]\n\n" +
-          rendered,
+          rendered +
+          removals,
       },
     ],
   };
@@ -782,7 +813,10 @@ function appendKnowledgePromptDelta(input: {
     input.previousKeys,
     input.nextKeys,
   );
-  const message = buildKnowledgeDeltaMessage(entries);
+  const message = buildKnowledgeDeltaMessage(
+    entries,
+    removedLtmEntryIds(input.previousKeys, input.nextKeys),
+  );
   if (!message) return false;
 
   appendSessionPromptDelta({
@@ -1944,6 +1978,14 @@ async function identifySession(
   const known = extractKnownSessionHeader(headers);
   if (known) {
     const indexKey = `${known.headerName}:${known.sessionId}`;
+    if (headerSessionIndex.size === 0) {
+      for (const entry of loadHeaderSessionIndex()) {
+        headerSessionIndex.set(
+          `${entry.headerName}:${entry.headerSessionId}`,
+          entry.sessionId,
+        );
+      }
+    }
     const existingSid = headerSessionIndex.get(indexKey);
     if (existingSid) {
       // Session may only exist in DB (after gateway restart) — that's fine,
@@ -2039,6 +2081,10 @@ async function identifySession(
           );
           const sessionID = generateSessionID();
           headerSessionIndex.set(indexKey, sessionID);
+          saveSessionTracking(sessionID, {
+            headerSessionId: known.sessionId,
+            headerName: known.headerName,
+          });
           // The old predecessor's index entry is intentionally preserved — the
           // old session is still valid and may receive requests with its nanoid.
           // It will age out via ROTATION_MAX_AGE_MS naturally. If another new
@@ -2077,6 +2123,10 @@ async function identifySession(
     // Genuinely new session — no predecessor or ambiguous concurrent sessions.
     const sessionID = generateSessionID();
     headerSessionIndex.set(indexKey, sessionID);
+    saveSessionTracking(sessionID, {
+      headerSessionId: known.sessionId,
+      headerName: known.headerName,
+    });
     return { sessionID, isNew: true, tier: 1 };
   }
 
@@ -5104,8 +5154,11 @@ async function handleConversationTurn(
             pinned &&
             cachedKeys &&
             freshContextEntries &&
-            changedLtmEntries(freshContextEntries, pinned.entryKeys, cachedKeys)
-              .length > 0
+            hasMaterialLtmDelta({
+              entries: freshContextEntries,
+              previousKeys: pinned.entryKeys,
+              nextKeys: cachedKeys,
+            })
           ) {
             // Material LTM changed mid-session. Do NOT rewrite system[2]: it is
             // before the conversation cache breakpoint, so changing it would
@@ -5280,8 +5333,11 @@ async function handleConversationTurn(
             });
           } else if (
             pinned &&
-            changedLtmEntries(contextEntries, pinned.entryKeys, entryKeys)
-              .length > 0
+            hasMaterialLtmDelta({
+              entries: contextEntries,
+              previousKeys: pinned.entryKeys,
+              nextKeys: entryKeys,
+            })
           ) {
             // Material LTM changed during emergency refresh. Preserve the exact
             // cached system[2] bytes and surface the change as a durable prompt
@@ -5337,7 +5393,18 @@ async function handleConversationTurn(
         if (pinned) {
           // No fresh context-bound entries were selected, but removing an
           // already-cached system[2] block would still bust the prefix. Keep the
-          // existing pin byte-for-byte until an intentional cache reset.
+          // existing pin byte-for-byte and append a durable removal delta so the
+          // model knows the older pinned entries are superseded.
+          pendingKnowledgeDelta = {
+            previousKeys: pinned.entryKeys,
+            nextKeys: [],
+            entries: [],
+          };
+          ltmPinnedText.set(sessionID, {
+            formatted: pinned.formatted,
+            tokenCount: pinned.tokenCount,
+            entryKeys: [],
+          });
           ltmSessionCache.delete(sessionID);
           ltmSessionCache.set(sessionID, {
             formatted: pinned.formatted,
@@ -5348,6 +5415,9 @@ async function handleConversationTurn(
           saveSessionTracking(sessionID, {
             ltmCacheText: pinned.formatted,
             ltmCacheTokens: pinned.tokenCount,
+            ltmPinText: pinned.formatted,
+            ltmPinTokens: pinned.tokenCount,
+            ltmPinKeys: JSON.stringify([]),
           });
           log.info(
             "Context-bound LTM refresh returned no entries; preserving existing pinned system[2] for session",

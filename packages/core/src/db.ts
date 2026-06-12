@@ -2420,8 +2420,9 @@ export function loadHeaderSessionIndex(): Array<{
   const rows = db()
     .query(
       `SELECT session_id, header_session_id, header_name
-       FROM session_state
-       WHERE header_session_id IS NOT NULL AND header_name IS NOT NULL`,
+        FROM session_state
+        WHERE header_session_id IS NOT NULL AND header_name IS NOT NULL
+        ORDER BY updated_at ASC`,
     )
     .all() as Array<{
     session_id: string;

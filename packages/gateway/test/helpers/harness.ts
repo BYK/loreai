@@ -44,6 +44,8 @@ export interface Harness {
    * cache on. Use this to assert cache-prefix stability across turns.
    */
   upstreamBodies(): string[];
+  /** Clear in-memory pipeline/core state while preserving the temp DB/server. */
+  restartPipeline(): Promise<void>;
   /** Stop the gateway and clean up */
   teardown(): void;
 }
@@ -91,14 +93,19 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
   // request body lore sends each turn (for cache-stability assertions). ---
   const capturedBodies: string[] = [];
   const replay = makeReplayInterceptor(opts.fixtures);
-  setUpstreamInterceptor(async (requestBody, model, wasStreaming, makeReal) => {
-    capturedBodies.push(
-      typeof requestBody === "string"
-        ? requestBody
-        : JSON.stringify(requestBody),
+  function installReplayInterceptor() {
+    setUpstreamInterceptor(
+      async (requestBody, model, wasStreaming, makeReal) => {
+        capturedBodies.push(
+          typeof requestBody === "string"
+            ? requestBody
+            : JSON.stringify(requestBody),
+        );
+        return replay(requestBody, model, wasStreaming, makeReal);
+      },
     );
-    return replay(requestBody, model, wasStreaming, makeReal);
-  });
+  }
+  installReplayInterceptor();
 
   // --- 5. Start gateway ---
   const config = loadConfig();
@@ -175,5 +182,19 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
     return capturedBodies.slice();
   }
 
-  return { baseURL, dbPath, chat, queryDB, upstreamBodies, teardown };
+  async function restartPipeline(): Promise<void> {
+    closeDB();
+    await resetPipelineState({ fast: true });
+    installReplayInterceptor();
+  }
+
+  return {
+    baseURL,
+    dbPath,
+    chat,
+    queryDB,
+    upstreamBodies,
+    restartPipeline,
+    teardown,
+  };
 }

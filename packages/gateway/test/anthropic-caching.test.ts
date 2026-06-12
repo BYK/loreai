@@ -236,7 +236,7 @@ describe("buildAnthropicRequest — conversation caching", () => {
     });
   });
 
-  test("synthetic knowledge-delta message becomes the conversation breakpoint", () => {
+  test("durable knowledge-delta message before the tail does not take the breakpoint", () => {
     const req = makeRequest({
       messages: [
         {
@@ -252,9 +252,13 @@ describe("buildAnthropicRequest — conversation caching", () => {
           content: [
             {
               type: "text",
-              text: "[System Notification - Knowledge Update]\n+ NEW [019eb1c4] preference: Prefer cache-stable deltas",
+              text: "[Lore knowledge update: durable prompt delta.]\n\nPrefer cache-stable deltas",
             },
           ],
+        },
+        {
+          role: "user",
+          content: [{ type: "text", text: "Continue with the current task." }],
         },
       ],
     });
@@ -268,14 +272,18 @@ describe("buildAnthropicRequest — conversation caching", () => {
     const priorUser = messages[0];
     const priorAssistant = messages[1];
     const delta = messages[2];
-    if (!priorUser || !priorAssistant || !delta) {
-      throw new Error("expected three messages");
+    const currentUser = messages[3];
+    if (!priorUser || !priorAssistant || !delta || !currentUser) {
+      throw new Error("expected four messages");
     }
 
     expect(priorUser.content[0]?.cache_control).toBeUndefined();
     expect(priorAssistant.content[0]?.cache_control).toBeUndefined();
     expect(delta.role).toBe("user");
-    expect(delta.content[0]?.cache_control).toEqual({ type: "ephemeral" });
+    expect(delta.content[0]?.cache_control).toBeUndefined();
+    expect(currentUser.content[0]?.cache_control).toEqual({
+      type: "ephemeral",
+    });
   });
 
   test("no-op when messages array is empty", () => {

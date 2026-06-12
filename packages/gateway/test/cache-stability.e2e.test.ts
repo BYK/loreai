@@ -501,6 +501,13 @@ describe("cache stability (e2e)", () => {
             "Updated context-bound knowledge that must arrive as a durable prompt delta, not a system[2] rewrite.",
         });
       }
+
+      if (i === 2) {
+        // Simulate a gateway restart after the durable delta was persisted but
+        // before the next request. The next turn must reconstruct the same
+        // upstream prompt from session_prompt_deltas, not in-memory state.
+        await harness.restartPipeline();
+      }
     }
 
     const bodies = harness.upstreamBodies();
@@ -541,6 +548,86 @@ describe("cache stability (e2e)", () => {
     expect(selector.target).toBe("messages");
     expect(Number.isInteger(selector.insertAt)).toBe(true);
     expect(rows[0].content).toContain("Updated context-bound knowledge");
+  });
+
+  it("removed LTM entries are replayed as durable superseded deltas without rewriting system[2]", async () => {
+    const turns = Array.from({ length: 4 }, (_, i) => ({
+      userMessage: `Removal delta turn ${i}: continue the work.`,
+      assistantText: `Removal delta response ${i}.`,
+    }));
+    harness = await createHarness({
+      fixtures: makeConversationFixtures(turns),
+    });
+
+    const projectPath = `/tmp/lore-cache-stability-removal-${Date.now()}`;
+    const headers = {
+      "x-lore-project": projectPath,
+      "x-lore-session-id": `cache-stability-removal-client-${Date.now()}`,
+    };
+
+    const { ltm, setForceMinLayer } = await import("@loreai/core");
+    const history: unknown[] = [];
+    let sessionID = "";
+    let contextID = "";
+
+    for (let i = 0; i < turns.length; i++) {
+      if (i === 2) setForceMinLayer(4, sessionID);
+      const resp = await harness.chat(
+        makeBody(turns[i].userMessage, history),
+        "test-key",
+        headers,
+      );
+      expect(resp.status).toBe(200);
+      await resp.json();
+
+      history.push({ role: "user", content: turns[i].userMessage });
+      history.push({
+        role: "assistant",
+        content: [{ type: "text", text: turns[i].assistantText }],
+      });
+
+      if (i === 0) {
+        const rows = harness.queryDB<{ session_id: string }>(
+          "SELECT session_id FROM session_state ORDER BY updated_at DESC LIMIT 1",
+        );
+        sessionID = rows[0]?.session_id ?? "";
+        expect(sessionID).not.toBe("");
+        contextID = ltm.create({
+          projectPath,
+          scope: "project",
+          category: "gotcha",
+          title: "Removed durable delta gotcha",
+          content:
+            "Context-bound knowledge that will be removed without rewriting system[2].",
+          session: sessionID,
+        });
+      }
+
+      if (i === 1) ltm.remove(contextID);
+
+      if (i === 2) await harness.restartPipeline();
+    }
+
+    const bodies = harness.upstreamBodies();
+    expect(bodies.length).toBe(turns.length);
+    const steadySystem = systemBlocks(bodies[1]);
+    expect(systemBlocks(bodies[2])).toEqual(steadySystem);
+    expect(systemBlocks(bodies[3])).toEqual(steadySystem);
+
+    const turn3Messages = serializedMessages(bodies[2]);
+    const turn4Messages = serializedMessages(bodies[3]);
+    expect(turn3Messages).toContain("Superseded Long-term Knowledge");
+    expect(turn3Messages).toContain(contextID.slice(0, 8));
+    expect(turn4Messages).toContain("Superseded Long-term Knowledge");
+    expect(turn4Messages).toContain(contextID.slice(0, 8));
+
+    const rows = harness.queryDB<{ content: string }>(
+      "SELECT content FROM session_prompt_deltas WHERE session_id = ? ORDER BY seq",
+      [sessionID],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].content).toContain("Superseded Long-term Knowledge");
+    expect(rows[0].content).toContain(contextID.slice(0, 8));
   });
 
   it("cached system blocks stay byte-stable across gradient compression layers", async () => {
