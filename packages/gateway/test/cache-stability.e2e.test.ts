@@ -160,4 +160,65 @@ describe("cache stability (e2e)", () => {
       ).toBe(steady);
     }
   });
+
+  it("system block stays byte-stable as the compression layer changes turn-to-turn (#741)", async () => {
+    // Regression for #741: a per-turn "context health" note used to be appended
+    // to system[2] with layer-dependent wording (compressed / aggressively
+    // compressed / emergency compressed). Because system[2] has no cache_control
+    // of its own, ANY change to the layer (e.g. 1→2→3) rewrote system[2] that
+    // turn and busted the cached prefix. The note has been removed, so the
+    // system block must now stay byte-identical even as the layer changes.
+    //
+    // We drive the layer deterministically with setForceMinLayer (one-shot per
+    // transform), re-arming it before each turn. The harness shares the
+    // @loreai/core singleton with the gateway, so the forced layer is honored.
+    // Note: the gradient's sticky-layer hysteresis blocks DOWN transitions, so
+    // the observed layer escalates 1→2→3 then holds — escalation alone is a
+    // sufficient trigger for the original bust (the note's wording changed at
+    // each step). The negative assertion below would have caught it.
+    const { setForceMinLayer } = await import("@loreai/core");
+
+    const turns = Array.from({ length: 6 }, (_, i) => ({
+      userMessage: `Step ${i}: keep working with enough detail to grow the body.`,
+      assistantText: `Acknowledged step ${i}.`,
+    }));
+    // Force the minimum layer up across turns (0,1,2,3,…). Turn 0 stays at
+    // layer 0 so system[2] is established normally on turn 1, then the layer
+    // escalates while the system block must remain byte-identical.
+    const forcedLayers = [0, 1, 2, 3, 3, 3] as const;
+
+    harness = await createHarness({
+      fixtures: makeConversationFixtures(turns),
+    });
+
+    const history: unknown[] = [];
+    for (let i = 0; i < turns.length; i++) {
+      // Re-arm the one-shot force before each turn's transform fires.
+      if (forcedLayers[i] >= 1) setForceMinLayer(forcedLayers[i]);
+      await harness.chat(makeBody(turns[i].userMessage, history));
+      history.push({ role: "user", content: turns[i].userMessage });
+      history.push({
+        role: "assistant",
+        content: [{ type: "text", text: turns[i].assistantText }],
+      });
+    }
+
+    const bodies = harness.upstreamBodies().map(normalizeBodyForComparison);
+    const systems = bodies.map((b) => {
+      const parsed = JSON.parse(b) as { system?: unknown };
+      return JSON.stringify(parsed.system ?? null);
+    });
+
+    // From turn 2 (index 1) onward — where system[2] is established and the
+    // forced layer starts oscillating — the system block must never change.
+    const steady = systems[1];
+    for (let i = 2; i < systems.length; i++) {
+      expect(
+        systems[i],
+        `system block changed between turn ${i} and ${i + 1} while forcing ` +
+          `layer ${forcedLayers[i]} (prev ${forcedLayers[i - 1]}) — a layer ` +
+          `oscillation must not bust the cached system prefix (#741)`,
+      ).toBe(steady);
+    }
+  });
 });

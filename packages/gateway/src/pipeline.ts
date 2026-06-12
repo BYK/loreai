@@ -5095,35 +5095,16 @@ async function handleConversationTurn(
     }
   }
 
-  // --- 7c. Context health note ---
-  // When the gradient compresses context (layer 1+), append a brief note to
-  // the context-bound LTM block (system[2]) so the AI knows its context is
-  // managed and can use the recall tool for details no longer visible.
-  // This rides system[2] which already changes per-turn — no cache impact on
-  // the stable prefix (system[0]+[1]).
-  if (result.layer >= 1 && ltmText) {
-    const layerDesc =
-      result.layer === 1
-        ? "compressed"
-        : result.layer === 2
-          ? "aggressively compressed"
-          : result.layer >= 3
-            ? "emergency compressed"
-            : "compressed";
-    ltmText +=
-      `\n\n[Context health: conversation history is ${layerDesc}. ` +
-      `Distilled observations above are lossy summaries — specific details ` +
-      `(exact error messages, rejected alternatives, file paths, numerical values) ` +
-      `are likely omitted. Use recall to verify any specific claim before answering ` +
-      `questions about what happened, what was considered, or what the exact values were.]`;
-  } else if (result.layer >= 1 && !ltmText) {
-    ltmText =
-      `[Context health: conversation history is compressed. ` +
-      `Distilled observations above are lossy summaries — specific details ` +
-      `(exact error messages, rejected alternatives, file paths, numerical values) ` +
-      `are likely omitted. Use recall to verify any specific claim before answering ` +
-      `questions about what happened, what was considered, or what the exact values were.]`;
-  }
+  // --- 7c. (removed) Context health note ---
+  // Previously a per-turn "Context health" note was appended to system[2] when
+  // the gradient compressed context (layer ≥1). Its wording varied by layer,
+  // which busted the conversation cache on every layer oscillation (1→2→1)
+  // because system[2] has no cache_control of its own. The note was also
+  // largely redundant with the per-distillation "lossy" tags and the recall
+  // tool description. Its one unique signal (verify omitted specifics —
+  // rejected alternatives, exact errors, file paths, numbers — via recall) now
+  // lives statically in RECALL_TOOL_DESCRIPTION, which never busts the cache.
+  // See issue #741.
 
   // --- 7d. Unsustainable conversation warning ---
   // When 5+ consecutive cache busts are detected, flag for response-side injection.
