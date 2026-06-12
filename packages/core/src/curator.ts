@@ -308,7 +308,11 @@ export function applyOps(
       // tryCreate() distinguishes genuine new inserts from dedup-merged
       // creates. Only genuine inserts surface in the delta channel — the
       // agent must not see a "new" entry whose id was reused by a dedup hit.
-      const { id, created: wasCreated } = ltm.tryCreate({
+      const {
+        id,
+        created: wasCreated,
+        previousContent,
+      } = ltm.tryCreate({
         projectPath: op.scope === "project" ? input.projectPath : undefined,
         category: op.category,
         title: op.title,
@@ -325,10 +329,23 @@ export function applyOps(
         workerModelID: input.workerModel?.modelID,
       });
       if (!wasCreated) {
-        // Dedup-merged into an existing entry — not a real create. Still
-        // call this a "no-op" so the `created` count stays honest, but
-        // don't surface it in the delta (the existing entry may already be
-        // in the pinned block).
+        // Dedup-merged into an existing entry — not a real create, but the
+        // existing row was updated in place and may already be pinned in the
+        // prompt cache. Surface it as an update so session LTM caches are
+        // invalidated and durable prompt deltas can replay the new bytes.
+        const entry = ltm.get(id);
+        if (entry) {
+          idsToSync.push(id);
+          changedEntries.push({
+            op: "updated",
+            id,
+            category: entry.category,
+            title: entry.title,
+            content: entry.content,
+            prevContent: previousContent ?? entry.content,
+          });
+          updated++;
+        }
         continue;
       }
       idsToSync.push(id);

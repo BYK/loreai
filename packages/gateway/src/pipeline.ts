@@ -5114,6 +5114,31 @@ async function handleConversationTurn(
               ltmDirty = true;
             }
           }
+
+          const pinned = ltmPinnedText.get(sessionID);
+          if (!cached && pinned) {
+            // The fresh selection is empty, but removing the pinned system[2]
+            // block would still bust the cached prefix. Preserve the exact
+            // bytes and append a durable removal delta instead.
+            pendingKnowledgeDelta = {
+              previousKeys: pinned.entryKeys,
+              nextKeys: [],
+              entries: [],
+            };
+            cached = {
+              formatted: pinned.formatted,
+              tokenCount: pinned.tokenCount,
+            };
+            cachedKeys = [];
+            ltmSessionCache.set(sessionID, cached);
+            ltmPinnedText.set(sessionID, {
+              formatted: pinned.formatted,
+              tokenCount: pinned.tokenCount,
+              entryKeys: [],
+            });
+            ltmDirty = true;
+            pinDirty = true;
+          }
         }
 
         if (cached) {

@@ -205,6 +205,7 @@ export function create(input: {
 export function tryCreate(input: Parameters<typeof create>[0]): {
   id: string;
   created: boolean;
+  previousContent?: string;
 } {
   // Use the same dedup logic as create(): a return value where the id
   // matches an existing row means we hit a dedup branch. We probe for the
@@ -219,30 +220,30 @@ export function tryCreate(input: Parameters<typeof create>[0]): {
       pid !== null
         ? db()
             .query(
-              "SELECT id FROM knowledge WHERE project_id = ? AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+              "SELECT id, content FROM knowledge WHERE project_id = ? AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
             )
             .get(pid, input.title)
         : db()
             .query(
-              "SELECT id FROM knowledge WHERE project_id IS NULL AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+              "SELECT id, content FROM knowledge WHERE project_id IS NULL AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
             )
             .get(input.title)
-    ) as { id: string } | null;
+    ) as { id: string; content: string } | null;
 
     if (existing) {
       // Dedup hit on exact match — do NOT count as a new create.
       const id = create(input);
-      return { id, created: false };
+      return { id, created: false, previousContent: existing.content };
     }
 
     const crossExisting = db()
       .query(
-        "SELECT id FROM knowledge WHERE cross_project = 1 AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+        "SELECT id, content FROM knowledge WHERE cross_project = 1 AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
       )
-      .get(input.title) as { id: string } | null;
+      .get(input.title) as { id: string; content: string } | null;
     if (crossExisting) {
       const id = create(input);
-      return { id, created: false };
+      return { id, created: false, previousContent: crossExisting.content };
     }
 
     const fuzzyMatch = findFuzzyDuplicate({
@@ -250,8 +251,9 @@ export function tryCreate(input: Parameters<typeof create>[0]): {
       projectId: pid,
     });
     if (fuzzyMatch) {
+      const previous = get(fuzzyMatch.id);
       const id = create(input);
-      return { id, created: false };
+      return { id, created: false, previousContent: previous?.content };
     }
   }
 

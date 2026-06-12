@@ -644,6 +644,75 @@ describe("cache stability (e2e)", () => {
     expect(rows[0].content).toContain(contextID.slice(0, 8));
   });
 
+  it("normal LTM refresh preserves system[2] and emits durable removal deltas", async () => {
+    const turns = Array.from({ length: 4 }, (_, i) => ({
+      userMessage: `Normal removal delta turn ${i}: continue the work.`,
+      assistantText: `Normal removal delta response ${i}.`,
+    }));
+    harness = await createHarness({
+      fixtures: makeConversationFixtures(turns),
+    });
+
+    const projectPath = `/tmp/lore-cache-stability-normal-removal-${Date.now()}`;
+    const headers = {
+      "x-lore-project": projectPath,
+      "x-lore-session-id": `cache-stability-normal-removal-client-${Date.now()}`,
+    };
+
+    const { ltm, setLastTurnAtForTest } = await import("@loreai/core");
+    const history: unknown[] = [];
+    let sessionID = "";
+    let contextID = "";
+
+    for (let i = 0; i < turns.length; i++) {
+      const resp = await harness.chat(
+        makeBody(turns[i].userMessage, history),
+        "test-key",
+        headers,
+      );
+      expect(resp.status).toBe(200);
+      await resp.json();
+
+      history.push({ role: "user", content: turns[i].userMessage });
+      history.push({
+        role: "assistant",
+        content: [{ type: "text", text: turns[i].assistantText }],
+      });
+
+      if (i === 0) {
+        const rows = harness.queryDB<{ session_id: string }>(
+          "SELECT session_id FROM session_state ORDER BY updated_at DESC LIMIT 1",
+        );
+        sessionID = rows[0]?.session_id ?? "";
+        expect(sessionID).not.toBe("");
+        contextID = ltm.create({
+          projectPath,
+          scope: "project",
+          category: "gotcha",
+          title: "Normal removed durable delta gotcha",
+          content:
+            "Context-bound knowledge removed during normal refresh must not rewrite system[2].",
+          session: sessionID,
+        });
+      }
+
+      if (i === 1) {
+        ltm.remove(contextID);
+        setLastTurnAtForTest(sessionID, Date.now() - 10 * 60_000);
+      }
+    }
+
+    const bodies = harness.upstreamBodies();
+    expect(bodies.length).toBe(turns.length);
+    const steadySystem = systemBlocks(bodies[1]);
+    expect(systemBlocks(bodies[2])).toEqual(steadySystem);
+    expect(systemBlocks(bodies[3])).toEqual(steadySystem);
+
+    const turn3Messages = serializedMessages(bodies[2]);
+    expect(turn3Messages).toContain("Superseded Long-term Knowledge");
+    expect(turn3Messages).toContain(contextID.slice(0, 8));
+  });
+
   it("cached system blocks stay byte-stable across gradient compression layers", async () => {
     // Regression guardrail for the #741 class of bugs: when the gradient
     // compresses context (layers 1-4), the cached system prefix (system[0] host

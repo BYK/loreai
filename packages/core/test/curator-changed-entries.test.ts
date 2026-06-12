@@ -30,7 +30,7 @@ describe("curator applyOps changedEntries", () => {
     expect(result.changedEntries[0]?.id).toBeTruthy();
   });
 
-  test("skips createdEntries for dedup-merged creates", () => {
+  test("reports dedup-merged creates as updated entries", () => {
     const id = ltm.create({
       projectPath: PROJECT,
       category: "preference",
@@ -53,7 +53,17 @@ describe("curator applyOps changedEntries", () => {
     );
 
     expect(result.created).toBe(0);
-    expect(result.changedEntries).toEqual([]);
+    expect(result.updated).toBe(1);
+    expect(result.changedEntries).toEqual([
+      expect.objectContaining({
+        op: "updated",
+        id,
+        category: "preference",
+        title: "Dedup Delta Test",
+        content: "updated by dedup",
+        prevContent: "original",
+      }),
+    ]);
     expect(ltm.get(id)?.content).toBe("updated by dedup");
   });
 
