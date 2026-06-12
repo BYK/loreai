@@ -155,7 +155,7 @@ Recall and search pipeline tuning: FTS weights, query expansion, vector boost, e
 | `vectorBoostWeight` | number | `1.5` | min 1, max 5 | RRF weight multiplier for vector search lists (when query has enough terms). Set to 1.0 to disable. Default: 1.5. |
 | `vectorBoostMinTerms` | number | `2` | min 1, max 10 | Minimum meaningful query terms (after stopword removal) to activate vector boost. Default: 2. |
 | `embeddings` | object | `{"enabled":true,"provider":"local","model":"nomic-ai/nomic-embed-text-v1.5","dimensions":768}` |  | Vector embedding search provider, model, and dimensions. |
-| `recall` | object | `{"charBudget":12000,"relevanceFloor":0.15,"maxResults":15}` |  | Recall output formatting and result-count limits. |
+| `recall` | object | `{"charBudget":12000,"relevanceFloor":0.15,"maxResults":15,"absoluteFloor":0}` |  | Recall output formatting and result-count limits. |
 
 ### `search.ftsWeights`
 
@@ -187,6 +187,7 @@ Recall output formatting and result-count limits.
 | `charBudget` | number | `12000` | min 2000, max 20000 | Total character budget for recall output (~3K tokens at 12000 chars). Default: 12000. |
 | `relevanceFloor` | number | `0.15` | min 0, max 1 | Minimum RRF score (relative to top) to keep. Set to 0 to disable. Default: 0.15. |
 | `maxResults` | number | `15` | min 3, max 30 | Max results to show in recall output. Default: 15. |
+| `absoluteFloor` | number | `0` | min 0 | Absolute RRF score floor; drops weak matches even via the keep-3 backfill. Default: 0 (disabled). |
 
 
 ## `cache`
