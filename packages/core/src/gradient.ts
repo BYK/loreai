@@ -535,6 +535,43 @@ export function consumeCameOutOfIdle(sessionID: string): boolean {
 // fallback for callers that don't have a session ID.
 let ltmTokensFallback = 0;
 
+/**
+ * Snapshot of all model-derived budget inputs for a single transform.
+ *
+ * These values were previously only mutable module globals set per-request by
+ * the host. Because the host does async work (ltm.forSession awaits) BETWEEN
+ * setting them and calling transform(), a concurrently-running request for a
+ * DIFFERENT model could clobber the globals on the single-threaded event loop,
+ * so the transform read the wrong model's caps/pricing (the cross-model
+ * contamination seen as l0cap flipping 200000 ↔ 3571428 and layer thrash).
+ *
+ * Passing a ModelBudget to transform() makes the per-request values atomic:
+ * transform() applies them synchronously right before the (fully synchronous)
+ * transformInner, so no other request can interleave between apply and use.
+ * The setters remain for tests and legacy callers.
+ */
+export type ModelBudget = {
+  contextLimit: number;
+  outputReserved: number;
+  maxLayer0Tokens: number;
+  cacheWriteCostPerToken: number;
+  cacheReadCostPerToken: number;
+};
+
+/**
+ * Atomically apply a per-request model budget to the module globals. Called at
+ * the very top of transform() (synchronous path) so the values cannot be
+ * clobbered by a concurrent request before the transform reads them.
+ */
+function applyModelBudget(budget: ModelBudget): void {
+  setModelLimits({
+    context: budget.contextLimit,
+    output: budget.outputReserved,
+  });
+  setMaxLayer0Tokens(budget.maxLayer0Tokens);
+  setCachePricing(budget.cacheWriteCostPerToken, budget.cacheReadCostPerToken);
+}
+
 export function setModelLimits(limits: { context: number; output: number }) {
   contextLimit = limits.context || 200_000;
   // NOTE: this cap of 32K matches what @ai-sdk/anthropic sends as max_tokens for
@@ -829,9 +866,15 @@ function loadDistillations(
   sessionID?: string,
 ): Distillation[] {
   const pid = ensureProject(projectPath);
+  // id tie-break — never let same-ms rows reorder and bust the cache.
+  // created_at is Date.now() (ms precision); two rows written in the same
+  // millisecond would otherwise have an undefined relative order across
+  // queries, flipping the distilledPrefixCached validity anchor and forcing
+  // an unnecessary full prefix re-render. UUIDv7 ids are monotonic, so
+  // (created_at, id) is a stable total order.
   const query = sessionID
-    ? "SELECT id, observations, generation, token_count, created_at, session_id, r_compression, c_norm, source_ids FROM distillations WHERE project_id = ? AND session_id = ? AND archived = 0 ORDER BY created_at ASC"
-    : "SELECT id, observations, generation, token_count, created_at, session_id, r_compression, c_norm, source_ids FROM distillations WHERE project_id = ? AND archived = 0 ORDER BY created_at ASC";
+    ? "SELECT id, observations, generation, token_count, created_at, session_id, r_compression, c_norm, source_ids FROM distillations WHERE project_id = ? AND session_id = ? AND archived = 0 ORDER BY created_at ASC, id ASC"
+    : "SELECT id, observations, generation, token_count, created_at, session_id, r_compression, c_norm, source_ids FROM distillations WHERE project_id = ? AND archived = 0 ORDER BY created_at ASC, id ASC";
   const params = sessionID ? [pid, sessionID] : [pid];
   const rows = db()
     .query(query)
@@ -2382,7 +2425,18 @@ export function transform(input: {
   messages: MessageWithParts[];
   projectPath: string;
   sessionID?: string;
+  /**
+   * Per-request model budget. When provided, applied atomically here so the
+   * transform reads THIS request's model caps/pricing — never a concurrently
+   * running request's. Omit to use whatever the module globals currently hold
+   * (legacy/test path).
+   */
+  budget?: ModelBudget;
 }): TransformResult {
+  // Apply the per-request budget synchronously before transformInner so no
+  // other request can clobber the globals between here and the transform.
+  if (input.budget) applyModelBudget(input.budget);
+
   const result = transformInner(input);
 
   // Sanitize non-terminal tool parts before the window reaches the SDK.

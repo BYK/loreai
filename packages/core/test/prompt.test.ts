@@ -3,6 +3,7 @@ import {
   buildCompactPrompt,
   COMPACT_SUMMARY_TEMPLATE,
   recursiveUser,
+  formatDistillations,
 } from "../src/prompt";
 
 // All required section headings emitted by COMPACT_SUMMARY_TEMPLATE. Pinning
@@ -220,5 +221,56 @@ describe("recursiveUser", () => {
     expect(out).toContain("<previous-meta-summary>");
     expect(out).toContain("PRIOR_META");
     expect(out).toContain("New observation segments to merge");
+  });
+});
+
+describe("formatDistillations — rolling-summary block ordering (RC4)", () => {
+  // The in-context structure is meta-distillations THEN normal distillations.
+  // Once a distillation is meta-distilled it is removed from the in-context
+  // prefix (archived → not loaded), so the meta block stays stable above while
+  // NEW gen-0 distillations created afterwards append to the normal block
+  // below. This test locks in that meta (generation > 0) always renders before
+  // recent (generation === 0).
+  test("meta block renders before the recent/normal block", () => {
+    const out = formatDistillations([
+      // intentionally pass recent before meta to prove ordering is by
+      // generation, not input order
+      { observations: "RECENT gen-0 work", generation: 0, id: "r1" },
+      { observations: "META summarized work", generation: 1, id: "m1" },
+    ]);
+    expect(out).toContain("### Earlier Work (summarized)");
+    expect(out).toContain("### Recent Work (distilled)");
+    expect(out.indexOf("META summarized work")).toBeLessThan(
+      out.indexOf("RECENT gen-0 work"),
+    );
+    // And the meta heading precedes the recent heading.
+    expect(out.indexOf("### Earlier Work (summarized)")).toBeLessThan(
+      out.indexOf("### Recent Work (distilled)"),
+    );
+  });
+
+  test("new gen-0 distillation appends below a stable meta block", () => {
+    const meta = { observations: "META state", generation: 2, id: "m1" };
+    const before = formatDistillations([meta]);
+    // A fresh gen-0 distillation arrives after the meta-distillation.
+    const after = formatDistillations([
+      meta,
+      { observations: "NEW gen-0 after meta", generation: 0, id: "r1" },
+    ]);
+    // The meta block bytes are unchanged and remain at the top; the new gen-0
+    // content is appended below in the recent section.
+    expect(after.startsWith(before.split("\n\n### Recent")[0])).toBe(true);
+    expect(after).toContain("NEW gen-0 after meta");
+    expect(after.indexOf("META state")).toBeLessThan(
+      after.indexOf("NEW gen-0 after meta"),
+    );
+  });
+
+  test("only meta present: no recent section emitted", () => {
+    const out = formatDistillations([
+      { observations: "only meta", generation: 1, id: "m1" },
+    ]);
+    expect(out).toContain("### Earlier Work (summarized)");
+    expect(out).not.toContain("### Recent Work (distilled)");
   });
 });

@@ -61,7 +61,14 @@ export type FailureReason =
   | "no-response"
   | "parse-error"
   | "rate-limit"
-  | "circuit-breaker";
+  | "circuit-breaker"
+  // Non-escalating: a specific provider+model consistently returns no usable
+  // text even after the reasoning-field fallback (e.g. a free aggregator model
+  // that only emits reasoning, or refuses the observer prompt). This is a
+  // capability limitation of the model, NOT an outage — it must not drive the
+  // degraded/critical Sentry ladder or the circuit breaker. We record it for
+  // visibility and cache the verdict so we stop calling that model.
+  | "worker-incapable";
 
 /** Snapshot of a session's worker health, suitable for the dashboard. */
 export type SessionHealth = {
@@ -140,6 +147,17 @@ const state: Map<string, SessionHealth> = new Map();
  */
 const creditPaused: Map<string, { lastProbe: number }> = new Map();
 
+/**
+ * Provider+model verdicts for models that consistently return no usable worker
+ * output even after the reasoning-field fallback. Keyed by `${providerID}/${modelID}`.
+ * Once a model is marked incapable, callers skip worker LLM calls for it
+ * (distillation/curation simply defer; the raw data stays recallable). This is
+ * a process-lifetime cache — a verdict is a stable capability fact, not a
+ * transient outage, so it is intentionally NOT TTL-evicted. Cleared only on
+ * process restart or `_resetForTest`.
+ */
+const incapableModels: Set<string> = new Set();
+
 let sweepTimer: ReturnType<typeof setInterval> | null = null;
 
 /** Injectable time source — tests can override. */
@@ -154,11 +172,44 @@ export function _setNowForTest(fn: () => number): void {
 export function _resetForTest(): void {
   state.clear();
   creditPaused.clear();
+  incapableModels.clear();
   if (sweepTimer) {
     clearInterval(sweepTimer);
     sweepTimer = null;
   }
   now = () => Date.now();
+}
+
+// ---------------------------------------------------------------------------
+// Worker-incapable verdicts — non-escalating per-model skip
+// ---------------------------------------------------------------------------
+
+/** Build the verdict key for a provider+model pair. */
+function modelKey(providerID: string, modelID: string): string {
+  return `${providerID}/${modelID}`;
+}
+
+/**
+ * Mark a provider+model as incapable of producing usable worker output, so
+ * future worker calls for it are skipped. Idempotent. Logs once per model.
+ */
+export function markWorkerIncapable(providerID: string, modelID: string): void {
+  const key = modelKey(providerID, modelID);
+  if (incapableModels.has(key)) return;
+  incapableModels.add(key);
+  log.warn(
+    `[worker-health] model ${key} marked worker-incapable — ` +
+      `it returned no usable text after the reasoning-field fallback; ` +
+      `skipping background worker calls for it (data stays recallable)`,
+  );
+}
+
+/** True when a provider+model has been marked worker-incapable. */
+export function isWorkerIncapable(
+  providerID: string,
+  modelID: string,
+): boolean {
+  return incapableModels.has(modelKey(providerID, modelID));
 }
 
 // ---------------------------------------------------------------------------
@@ -222,6 +273,19 @@ export function recordWorkerFailure(
   reason: FailureReason,
 ): void {
   const t = now();
+
+  // worker-incapable is a model capability fact, not an outage. Never let it
+  // drive the degraded/critical Sentry ladder or the circuit breaker — that
+  // would spam alerts for a model that is simply unsuitable for worker calls.
+  // It is recorded (warn) for visibility; the verdict cache (markWorkerIncapable)
+  // is what actually stops further calls.
+  if (reason === "worker-incapable") {
+    log.warn(
+      `[worker-health] ${workerID} skipped (worker-incapable) for session=${sessionID.slice(0, 16)}`,
+    );
+    return;
+  }
+
   let entry = state.get(sessionID);
 
   // Initialize or rotate the sliding window.

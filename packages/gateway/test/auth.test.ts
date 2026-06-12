@@ -1,4 +1,5 @@
-import { describe, test, expect, beforeEach } from "vitest";
+import { describe, test, expect, beforeEach, vi } from "vitest";
+import { log } from "@loreai/core";
 import {
   extractAuth,
   setSessionAuth,
@@ -134,6 +135,46 @@ describe("clearAuthStale", () => {
   test("clearing a non-stale session is a no-op", () => {
     clearAuthStale("sess-1");
     expect(isAuthStale("sess-1")).toBe(false);
+  });
+});
+
+describe("getSessionAuth store-key vs lookup-key mismatch warning", () => {
+  test("warns once when explicit-provider lookup misses but other keys exist", () => {
+    const warnSpy = vi.spyOn(log, "warn").mockImplementation(() => {});
+    try {
+      // Credential stored under "_default" (header-less store) ...
+      setSessionAuth("sess-mismatch", bearerCred);
+      // ... but the worker looks it up by an explicit provider it doesn't match.
+      expect(getSessionAuth("sess-mismatch", "opencode")).toBeNull();
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0]?.[0]).toContain("opencode");
+      // Deduped: a second identical miss does not re-warn.
+      expect(getSessionAuth("sess-mismatch", "opencode")).toBeNull();
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  test("does NOT warn when the explicit-provider lookup hits", () => {
+    const warnSpy = vi.spyOn(log, "warn").mockImplementation(() => {});
+    try {
+      setSessionAuth("sess-ok", bearerCred, "opencode");
+      expect(getSessionAuth("sess-ok", "opencode")).toEqual(bearerCred);
+      expect(warnSpy).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  test("does NOT warn when the session has no credentials at all", () => {
+    const warnSpy = vi.spyOn(log, "warn").mockImplementation(() => {});
+    try {
+      expect(getSessionAuth("sess-empty", "opencode")).toBeNull();
+      expect(warnSpy).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });
 

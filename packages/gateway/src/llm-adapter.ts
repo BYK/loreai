@@ -40,7 +40,12 @@ import {
 import { recordWorkerCost } from "./cost-tracker";
 import { upstreamFetch } from "./fetch";
 import { extractJSONFromSSE } from "./translate/types";
-import { recordWorkerFailure, markWorkerPaused } from "./worker-health";
+import {
+  recordWorkerFailure,
+  markWorkerPaused,
+  markWorkerIncapable,
+  isWorkerIncapable,
+} from "./worker-health";
 
 // ---------------------------------------------------------------------------
 // Worker call tracking
@@ -109,6 +114,21 @@ const MAX_DELAY_MS = 32_000;
 const DEFAULT_MAX_RETRIES = 8;
 
 /**
+ * Default output budget for a worker call when the caller does not specify one.
+ *
+ * Reasoning models (DeepSeek, Qwen-thinking, Nemotron, MiniMax — common on free
+ * aggregator tiers) count hidden reasoning tokens against `max_completion_tokens`
+ * / `max_tokens`. With too small a budget the model can spend the entire
+ * allowance on reasoning and emit an EMPTY `content`/`text` block
+ * (`finish_reason:"length"`), which previously surfaced as an opaque
+ * `no-response`. We give workers reasoning headroom so a distillation/curation
+ * call has room for both the reasoning pass and the visible answer. This is a
+ * cap, not a charge: non-reasoning models still only emit (and bill for) the
+ * tokens they actually produce.
+ */
+const DEFAULT_WORKER_MAX_TOKENS = 16384;
+
+/**
  * Resolve the retry budget. `LORE_MAX_RETRIES` overrides the default; values
  * that are non-numeric, negative, or zero fall back to the default (we never
  * silently disable retries — that would contradict the "ride it out" policy).
@@ -167,7 +187,20 @@ function sleep(ms: number): Promise<void> {
 
 /** OpenAI Chat Completions response shape (subset we need). */
 type OpenAIChatResponse = {
-  choices?: Array<{ message?: { content?: string } }>;
+  choices?: Array<{
+    message?: {
+      content?: string;
+      // Reasoning models (DeepSeek, Qwen-thinking, Nemotron, MiniMax, etc.)
+      // commonly served on aggregators like OpenCode Zen put their answer in a
+      // reasoning field and leave `content` empty/null. We read these as a
+      // fallback so worker calls to such models are not misclassified as
+      // empty/no-response. `reasoning_content` is the DeepSeek/Qwen field;
+      // `reasoning` is the OpenRouter/others field.
+      reasoning_content?: string;
+      reasoning?: string;
+    };
+    finish_reason?: string;
+  }>;
   model?: string;
   usage?: {
     prompt_tokens?: number;
@@ -451,8 +484,8 @@ function buildCodexWorkerRequest(
 }
 
 /** Extract text response from an Anthropic Messages API response. */
-function parseAnthropicResponse(data: {
-  content?: Array<{ type: string; text?: string }>;
+export function parseAnthropicResponse(data: {
+  content?: Array<{ type: string; text?: string; thinking?: string }>;
   model?: string;
   usage?: AnthropicUsage;
 }): {
@@ -463,21 +496,42 @@ function parseAnthropicResponse(data: {
   const textBlock = data.content?.find(
     (b) => b.type === "text" && typeof b.text === "string",
   );
+  // reasoning models put the answer in reasoning fields — never treat a present
+  // reasoning body as no-response. When an aggregator proxies a reasoning model
+  // through the Anthropic shape and emits only a `thinking` block (no `text`
+  // block), fall back to the thinking text rather than returning null.
+  let text = textBlock?.text ?? null;
+  if (text === null) {
+    const thinkingBlock = data.content?.find(
+      (b) => b.type === "thinking" && typeof b.thinking === "string",
+    );
+    text = thinkingBlock?.thinking ?? null;
+  }
   return {
-    text: textBlock?.text ?? null,
+    text,
     usage: data.usage ?? null,
     model: data.model ?? null,
   };
 }
 
 /** Extract text response from an OpenAI Chat Completions response. */
-function parseOpenAIResponse(data: OpenAIChatResponse): {
+export function parseOpenAIResponse(data: OpenAIChatResponse): {
   text: string | null;
   usage: AnthropicUsage | null;
   model: string | null;
 } {
+  const message = data.choices?.[0]?.message;
+  // reasoning models put the answer in reasoning fields — never treat a present
+  // reasoning body as no-response. Prefer real `content`; fall back to
+  // `reasoning_content` (DeepSeek/Qwen) then `reasoning` (OpenRouter/others)
+  // only when `content` is empty/missing.
+  const content = message?.content;
+  const text =
+    content && content.length > 0
+      ? content
+      : (message?.reasoning_content ?? message?.reasoning ?? null);
   return {
-    text: data.choices?.[0]?.message?.content ?? null,
+    text: text ?? null,
     usage: data.usage ? normalizeOpenAIUsage(data.usage) : null,
     model: data.model ?? null,
   };
@@ -597,6 +651,76 @@ function parseWorkerResponse(
   }
 }
 
+/**
+ * Summarize an upstream worker response body for diagnostics when the parser
+ * found no usable text. Reports which fields were present (content vs the
+ * reasoning/thinking fallbacks), the finish_reason, and a truncated body
+ * sample — without dumping the full (potentially large) payload. This lets us
+ * classify an empty `no-response` as a genuinely empty completion, a
+ * reasoning-field shape we don't read, or a truncation (`finish_reason:
+ * "length"`), instead of an opaque failure.
+ */
+/**
+ * Best-effort extraction of the upstream finish/stop reason from a worker
+ * response body (OpenAI `choices[0].finish_reason` or Anthropic `stop_reason`).
+ * Used to distinguish a *complete* empty response (model capability issue) from
+ * a *truncated* one (`length` — a budget problem, not a capability one).
+ */
+function extractFinishReason(rawData: unknown): string | undefined {
+  try {
+    const d = rawData as {
+      choices?: Array<{ finish_reason?: string }>;
+      stop_reason?: string;
+    };
+    return d.choices?.[0]?.finish_reason ?? d.stop_reason ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function describeEmptyWorkerResponse(rawData: unknown): string {
+  const fields: string[] = [];
+  let finishReason: string | undefined;
+  try {
+    const d = rawData as {
+      choices?: Array<{
+        message?: {
+          content?: unknown;
+          reasoning_content?: unknown;
+          reasoning?: unknown;
+        };
+        finish_reason?: string;
+      }>;
+      content?: Array<{ type?: string }>;
+    };
+    const msg = d.choices?.[0]?.message;
+    if (msg) {
+      if (typeof msg.content === "string" && msg.content.length > 0)
+        fields.push("content");
+      if (typeof msg.reasoning_content === "string")
+        fields.push("reasoning_content");
+      if (typeof msg.reasoning === "string") fields.push("reasoning");
+      finishReason = d.choices?.[0]?.finish_reason;
+    }
+    if (Array.isArray(d.content)) {
+      for (const b of d.content) if (b.type) fields.push(`block:${b.type}`);
+    }
+  } catch {
+    // ignore — best-effort introspection
+  }
+  let sample = "";
+  try {
+    sample = JSON.stringify(rawData).slice(0, 300);
+  } catch {
+    sample = "(unserializable)";
+  }
+  return (
+    `fields=[${fields.join(",") || "none"}]` +
+    ` finish_reason=${finishReason ?? "n/a"}` +
+    ` body=${sample}`
+  );
+}
+
 // ---------------------------------------------------------------------------
 // LLMClient factory
 // ---------------------------------------------------------------------------
@@ -624,6 +748,14 @@ export function createGatewayLLMClient(
   return {
     async prompt(system, user, opts) {
       const model = opts?.model ?? defaultModel;
+
+      // Skip models already known to produce no usable worker output. This is
+      // a capability verdict (not an outage): the call would just waste a round
+      // trip and re-fail. Distillation/curation defer; data stays recallable.
+      if (isWorkerIncapable(model.providerID, model.modelID)) {
+        return null;
+      }
+
       const cred = getAuth(opts?.sessionID, model.providerID);
       if (!cred) {
         log.warn("no auth credentials available for worker call");
@@ -637,7 +769,7 @@ export function createGatewayLLMClient(
       const upstreamOverride = opts?.upstreamUrl;
       const protocol = resolveWorkerProtocol(model.providerID, opts?.protocol);
       const target = resolveTarget(upstreams, protocol, upstreamOverride);
-      const maxTokens = opts?.maxTokens ?? 8192;
+      const maxTokens = opts?.maxTokens ?? DEFAULT_WORKER_MAX_TOKENS;
 
       // Defense-in-depth: detect API key / provider mismatch before making
       // a doomed request. Anthropic keys start with "sk-ant-"; OpenAI keys
@@ -832,6 +964,38 @@ export function createGatewayLLMClient(
                 if (parsed.text) return parsed.text;
 
                 // Transport succeeded but the model returned no usable text.
+                // Log WHAT came back so an empty no-response can be classified
+                // (genuinely empty vs an unread field shape vs a length
+                // truncation) instead of being opaque. The raw body is
+                // otherwise discarded here.
+                const finishReason = extractFinishReason(rawData);
+                log.warn(
+                  `worker empty response (HTTP ${response.status}, ct=${ct || "?"}) ` +
+                    `— model=${model.providerID}/${model.modelID} ` +
+                    `worker=${opts?.workerID ?? "unknown"} ` +
+                    `session=${opts?.sessionID?.slice(0, 16) ?? "none"} ` +
+                    `— ${describeEmptyWorkerResponse(rawData)}`,
+                );
+
+                // Classify: a COMPLETE response (finish_reason not "length"/
+                // missing) that still has no usable text — even after the
+                // reasoning-field fallback — is a model CAPABILITY issue, not an
+                // outage. Mark the model worker-incapable (non-escalating) so we
+                // stop calling it instead of spamming the no-response ladder.
+                // A "length" truncation is a budget problem, not a capability
+                // one, so it stays a normal no-response (retried / budget-tuned).
+                const completedButEmpty =
+                  finishReason != null && finishReason !== "length";
+                if (completedButEmpty) {
+                  markWorkerIncapable(model.providerID, model.modelID);
+                  recordWorkerFailure(
+                    opts?.sessionID ?? "_unknown",
+                    opts?.workerID ?? "unknown",
+                    "worker-incapable",
+                  );
+                  return null;
+                }
+
                 // Record as no-response here so the adapter is the single
                 // owner of transport-failure attribution — core workers no
                 // longer record on a null return (which double-counted, e.g.

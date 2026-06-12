@@ -12,6 +12,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { log } from "@loreai/core";
 
 // ---------------------------------------------------------------------------
 // AuthCredential type
@@ -136,9 +137,41 @@ export function getSessionAuth(
   const byProvider = sessionAuth.get(sessionID);
   if (!byProvider) return null;
   if (providerID) {
-    return byProvider.get(providerID) ?? null;
+    const cred = byProvider.get(providerID) ?? null;
+    // Diagnostic: an explicit-provider lookup MISS while the session holds
+    // credentials under OTHER keys is the store-key vs lookup-key mismatch
+    // footgun — the credential was stored under extractProviderHeader(...)
+    // (pipeline) but the worker resolves by model.providerID. When they
+    // disagree the worker silently gets null → no-auth, with no 401 to
+    // explain it. Surface it (once per session+lookup-key) so it is never
+    // silent. Stored keys include "_default" for header-less callers.
+    if (cred === null && byProvider.size > 0) {
+      warnAuthKeyMismatch(sessionID, providerID, [...byProvider.keys()]);
+    }
+    return cred;
   }
   return byProvider.get("_default") ?? null;
+}
+
+/** Dedup guard so the mismatch warning fires once per session+lookup-key. */
+const warnedAuthKeyMismatch = new Set<string>();
+
+function warnAuthKeyMismatch(
+  sessionID: string,
+  lookupKey: string,
+  storedKeys: string[],
+): void {
+  const dedup = `${sessionID}:${lookupKey}`;
+  if (warnedAuthKeyMismatch.has(dedup)) return;
+  warnedAuthKeyMismatch.add(dedup);
+  log.warn(
+    `[auth] session=${sessionID.slice(0, 16)} worker lookup for provider ` +
+      `"${lookupKey}" found no credential, but the session has credentials ` +
+      `under [${storedKeys.join(", ")}]. Store-key vs lookup-key mismatch — ` +
+      `background workers will get no-auth for this provider. The credential ` +
+      `is stored under extractProviderHeader(req.rawHeaders); the worker ` +
+      `resolves by model.providerID. These must agree.`,
+  );
 }
 
 /** Delete a session's credentials (for eviction). */
@@ -327,6 +360,7 @@ export function resolveAuth(
 export function _resetAuthForTest(): void {
   sessionAuth.clear();
   staleSessionAuth.clear();
+  warnedAuthKeyMismatch.clear();
   lastSeenAuth = null;
   globalAuthStale = false;
 }

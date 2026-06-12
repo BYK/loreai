@@ -4617,36 +4617,61 @@ async function handleConversationTurn(
       `project=${projectPath}`,
   );
 
-  // --- 4. Set model limits ---
+  // --- 4. Resolve this request's model budget ---
+  // Snapshot ALL model-derived budget inputs into one object keyed to THIS
+  // request's model. The host does async work (ltm.forSession awaits) between
+  // here and the gradient transform; passing this snapshot to transform()
+  // applies it atomically there, so a concurrently-running request for a
+  // different model can't clobber the values mid-flight (the cross-model
+  // contamination that flipped l0cap 200000 ↔ 3571428 and thrashed layers).
   const modelSpec = getModelSpec(req.model);
-  setModelLimits({ context: modelSpec.context, output: modelSpec.output });
+  const cfg = loreConfig();
 
   // Cost-aware layer-0 cap: explicit config wins > cost formula > disabled.
-  const cfg = loreConfig();
+  // never inherit another model's layer-0 cap: when this model has no
+  // cacheReadCost we resolve to 0 (disabled), NOT whatever the previous
+  // request left in the global.
+  let layer0Cap = 0;
   if (cfg.budget.maxLayer0Tokens !== undefined) {
-    setMaxLayer0Tokens(cfg.budget.maxLayer0Tokens);
+    layer0Cap = cfg.budget.maxLayer0Tokens;
   } else if (
     modelSpec.cacheReadCost &&
     cfg.budget.targetCacheReadCostPerTurn > 0
   ) {
-    setMaxLayer0Tokens(
-      computeLayer0Cap(
-        cfg.budget.targetCacheReadCostPerTurn,
-        modelSpec.cacheReadCost,
-      ),
+    layer0Cap = computeLayer0Cap(
+      cfg.budget.targetCacheReadCostPerTurn,
+      modelSpec.cacheReadCost,
     );
   }
 
-  // Set cache pricing for tier-based bust-vs-continue decisions in gradient.ts.
+  // Cache pricing for tier-based bust-vs-continue decisions in gradient.ts.
   // Anthropic charges 2× cache_write for 1h TTL — adjust so shouldCompress()
-  // uses the actual write cost when deciding whether to bust the cache.
+  // uses the actual write cost. When the model has no pricing data, resolve to
+  // 0/0 (conservative: do-not-compress) rather than the previous model's price.
+  let cacheWriteCostPerToken = 0;
+  let cacheReadCostPerToken = 0;
   if (modelSpec.cacheWriteCost && modelSpec.cacheReadCost) {
-    const effectiveCacheWriteCost =
+    cacheWriteCostPerToken =
       sessionState.resolvedConversationTTL === "1h"
         ? modelSpec.cacheWriteCost * 2
         : modelSpec.cacheWriteCost;
-    setCachePricing(effectiveCacheWriteCost, modelSpec.cacheReadCost);
+    cacheReadCostPerToken = modelSpec.cacheReadCost;
   }
+
+  const modelBudget = {
+    contextLimit: modelSpec.context,
+    outputReserved: modelSpec.output,
+    maxLayer0Tokens: layer0Cap,
+    cacheWriteCostPerToken,
+    cacheReadCostPerToken,
+  };
+
+  // Also apply to the module globals now, so any gradient helper invoked
+  // BEFORE transform() (and outside the atomic transform path) reads this
+  // request's values. transform() re-applies modelBudget atomically.
+  setModelLimits({ context: modelSpec.context, output: modelSpec.output });
+  setMaxLayer0Tokens(layer0Cap);
+  setCachePricing(cacheWriteCostPerToken, cacheReadCostPerToken);
 
   // --- 4c. Dynamic max_tokens sizing for non-Claude-Code clients ---
   // Claude Code manages its own max_tokens (32K for modern models). Other
@@ -4953,6 +4978,10 @@ async function handleConversationTurn(
     messages: loreMessages,
     projectPath,
     sessionID,
+    // Apply this request's model budget atomically inside transform — see the
+    // ModelBudget snapshot above. Prevents a concurrent request for a different
+    // model from clobbering caps/pricing during the intervening ltm awaits.
+    budget: modelBudget,
   });
 
   // Drop trailing pure-text assistant messages to prevent prefill errors

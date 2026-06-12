@@ -29,12 +29,15 @@ import {
   setLastTurnAtForTest,
   recordCacheUsage,
   setCachePricing,
+  setMaxLayer0Tokens,
+  getCachePricing,
   shouldCompress,
   isFreeWriteSession,
   getTier,
   selectDistillations,
   exportDedupDecisions,
   importDedupDecisions,
+  type ModelBudget,
 } from "../src/gradient";
 import type { LoreMessage, LorePart, LoreMessageWithParts } from "../src/types";
 import { isToolPart, isTextPart } from "../src/types";
@@ -3104,6 +3107,86 @@ describe("gradient — distillation snapshot caching", () => {
       .join();
     expect(allText).toContain("Post-idle observation");
   });
+
+  // Regression: loadDistillations orders by (created_at, id). Two rows written
+  // in the same millisecond must render in a stable, deterministic order across
+  // repeated DB reads — otherwise the rendered prefix bytes flip between turns
+  // and bust the Anthropic prompt cache. See the id tie-break in
+  // loadDistillations (gradient.ts).
+  test("same-millisecond distillation rows render in stable id order", () => {
+    const projectPath = `/test/${PID_KEY}`;
+
+    // Insert two rows with the SAME created_at but ids whose ascending order is
+    // the OPPOSITE of insertion order. Without the id tie-break, SQLite's order
+    // among equal created_at values is undefined and can differ per query.
+    const sameTs = Date.now();
+    function insertAt(id: string, observations: string): void {
+      db()
+        .query(
+          `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          projectId,
+          SID,
+          "",
+          "[]",
+          observations,
+          "[]",
+          0,
+          Math.ceil(observations.length / 3),
+          0,
+          sameTs,
+        );
+    }
+    // id "aaaa…" sorts before "bbbb…"; insert bbbb first so insertion order
+    // and id order disagree.
+    insertAt(
+      "bbbbbbbb-0000-0000-0000-000000000002",
+      "- ZZZ second-by-id observation",
+    );
+    insertAt(
+      "aaaaaaaa-0000-0000-0000-000000000001",
+      "- AAA first-by-id observation",
+    );
+
+    const messages = Array.from({ length: 16 }, (_, i) =>
+      makeMsg(
+        `tiebreak-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "X".repeat(1_000),
+        SID,
+      ),
+    );
+
+    function renderPrefix(): string {
+      // Clear the in-memory snapshot + prefix cache so each call performs a
+      // fresh DB read through loadDistillations (the ordering under test).
+      resetDistillationSnapshot(SID);
+      resetPrefixCache(SID);
+      setForceMinLayer(1, SID);
+      const result = transform({ messages, projectPath, sessionID: SID });
+      return result.messages
+        .map((m) => m.parts.map((p) => ("text" in p ? p.text : "")).join())
+        .join();
+    }
+
+    const first = renderPrefix();
+    const second = renderPrefix();
+    const third = renderPrefix();
+
+    // Deterministic across repeated reads.
+    expect(second).toBe(first);
+    expect(third).toBe(first);
+
+    // Both observations present, ordered by id ascending (AAA before ZZZ).
+    expect(first).toContain("AAA first-by-id observation");
+    expect(first).toContain("ZZZ second-by-id observation");
+    expect(first.indexOf("AAA first-by-id observation")).toBeLessThan(
+      first.indexOf("ZZZ second-by-id observation"),
+    );
+  });
 });
 
 describe("gradient — sanitizeToolParts determinism", () => {
@@ -4146,5 +4229,132 @@ describe("gradient — atomic tool_use/tool_result pair (no orphan on eviction)"
         }
       }
     }
+  });
+});
+
+describe("gradient — per-session model budget (RC2: cross-model contamination)", () => {
+  const SID_A = "budget-sess-anthropic";
+  const SID_B = "budget-sess-free";
+  const PROJECT_B = "/test/gradient/budget";
+
+  beforeEach(() => {
+    resetCalibration(SID_A);
+    resetCalibration(SID_B);
+    resetPrefixCache(SID_A);
+    resetPrefixCache(SID_B);
+    resetRawWindowCache(SID_A);
+    resetRawWindowCache(SID_B);
+    resetDistillationSnapshot(SID_A);
+    resetDistillationSnapshot(SID_B);
+  });
+
+  // Anthropic-like budget: 200K context, real cache pricing.
+  const anthropicBudget: ModelBudget = {
+    contextLimit: 200_000,
+    outputReserved: 32_000,
+    maxLayer0Tokens: 200_000,
+    cacheWriteCostPerToken: 0.00000375,
+    cacheReadCostPerToken: 0.0000003,
+  };
+  // Free-zen-like budget: huge context, near-zero cache pricing → huge l0cap.
+  const freeBudget: ModelBudget = {
+    contextLimit: 1_000_000,
+    outputReserved: 32_000,
+    maxLayer0Tokens: 3_571_428,
+    cacheWriteCostPerToken: 0.000000028,
+    cacheReadCostPerToken: 0.000000028,
+  };
+
+  function smallMessages(sid: string) {
+    return [
+      makeMsg("bm-u1", "user", "hello", sid),
+      makeMsg("bm-a1", "assistant", "hi there", sid),
+    ];
+  }
+
+  test("budget passed to transform wins over clobbered globals", () => {
+    // Simulate a concurrent request for the FREE model clobbering the globals
+    // (this is what happens during the intervening ltm awaits in the host).
+    setModelLimits({
+      context: freeBudget.contextLimit,
+      output: freeBudget.outputReserved,
+    });
+    setMaxLayer0Tokens(freeBudget.maxLayer0Tokens);
+    setCachePricing(
+      freeBudget.cacheWriteCostPerToken,
+      freeBudget.cacheReadCostPerToken,
+    );
+
+    // Now run a transform for the ANTHROPIC session, passing its own budget.
+    // The result must reflect the 200K context (usable ≈ 200K − reserved − …),
+    // NOT the free model's 1M context the globals were left holding.
+    const result = transform({
+      messages: smallMessages(SID_A),
+      projectPath: PROJECT_B,
+      sessionID: SID_A,
+      budget: anthropicBudget,
+    });
+
+    // usable = contextLimit − outputReserved − overhead − ltm. With a 200K
+    // context it must be far below the 1M-context value the clobbered globals
+    // would have produced.
+    expect(result.usable).toBeLessThan(200_000);
+    expect(result.usable).toBeGreaterThan(100_000);
+
+    // And the pricing the transform used is the anthropic one (applied atomically).
+    expect(getCachePricing().read).toBeCloseTo(
+      anthropicBudget.cacheReadCostPerToken,
+      12,
+    );
+  });
+
+  test("interleaved transforms keep each session's own budget", () => {
+    const a = transform({
+      messages: smallMessages(SID_A),
+      projectPath: PROJECT_B,
+      sessionID: SID_A,
+      budget: anthropicBudget,
+    });
+    const b = transform({
+      messages: smallMessages(SID_B),
+      projectPath: PROJECT_B,
+      sessionID: SID_B,
+      budget: freeBudget,
+    });
+
+    // The free session sees a far larger usable budget than the anthropic one.
+    expect(b.usable).toBeGreaterThan(a.usable);
+    // Re-running A after B must still yield A's (smaller) budget, not B's.
+    const a2 = transform({
+      messages: smallMessages(SID_A),
+      projectPath: PROJECT_B,
+      sessionID: SID_A,
+      budget: anthropicBudget,
+    });
+    expect(a2.usable).toBe(a.usable);
+  });
+
+  test("a model with no cache pricing resolves to 0/0 (no stale inheritance)", () => {
+    // Prime globals with real pricing from a previous (anthropic) request.
+    setCachePricing(
+      anthropicBudget.cacheWriteCostPerToken,
+      anthropicBudget.cacheReadCostPerToken,
+    );
+
+    // A model with no pricing data must NOT inherit the previous price.
+    const noPriceBudget: ModelBudget = {
+      contextLimit: 128_000,
+      outputReserved: 32_000,
+      maxLayer0Tokens: 0, // disabled — never inherit another model's cap
+      cacheWriteCostPerToken: 0,
+      cacheReadCostPerToken: 0,
+    };
+    transform({
+      messages: smallMessages(SID_B),
+      projectPath: PROJECT_B,
+      sessionID: SID_B,
+      budget: noPriceBudget,
+    });
+    expect(getCachePricing()).toEqual({ write: 0, read: 0 });
   });
 });

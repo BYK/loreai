@@ -10,6 +10,8 @@ import {
   markWorkerPaused,
   isWorkerCreditPaused,
   clearWorkerPaused,
+  markWorkerIncapable,
+  isWorkerIncapable,
   _resetForTest,
   _setNowForTest,
   type FailureReason,
@@ -387,6 +389,43 @@ describe("worker-health", () => {
       expect(allowWorkerProbe("s1")).toBe(true); // failure circuit untouched
       expect(Sentry.captureMessage).not.toHaveBeenCalled();
       expect(Sentry.captureException).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("worker-incapable verdict", () => {
+    test("mark + query a model as incapable", () => {
+      expect(isWorkerIncapable("opencode", "mimo-v2.5-free")).toBe(false);
+      markWorkerIncapable("opencode", "mimo-v2.5-free");
+      expect(isWorkerIncapable("opencode", "mimo-v2.5-free")).toBe(true);
+    });
+
+    test("verdict is scoped per provider+model", () => {
+      markWorkerIncapable("opencode", "mimo-v2.5-free");
+      expect(isWorkerIncapable("opencode", "mimo-v2.5-free")).toBe(true);
+      // Different model on same provider is unaffected.
+      expect(isWorkerIncapable("opencode", "deepseek-v4-flash-free")).toBe(
+        false,
+      );
+      // Same model name on a different provider is unaffected.
+      expect(isWorkerIncapable("anthropic", "mimo-v2.5-free")).toBe(false);
+    });
+
+    test("recording worker-incapable does NOT escalate the failure ladder", () => {
+      // Even many worker-incapable records must never open the failure circuit
+      // or trigger Sentry — it's a capability fact, not an outage.
+      for (let i = 0; i < 10; i++) {
+        recordWorkerFailure("s1", "lore-distill", "worker-incapable");
+      }
+      expect(getStatus("s1")).toBe("healthy");
+      expect(allowWorkerProbe("s1")).toBe(true);
+      expect(Sentry.captureMessage).not.toHaveBeenCalled();
+      expect(Sentry.captureException).not.toHaveBeenCalled();
+    });
+
+    test("_resetForTest clears incapable verdicts", () => {
+      markWorkerIncapable("opencode", "mimo-v2.5-free");
+      _resetForTest();
+      expect(isWorkerIncapable("opencode", "mimo-v2.5-free")).toBe(false);
     });
   });
 });
