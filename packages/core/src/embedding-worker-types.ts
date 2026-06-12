@@ -129,6 +129,25 @@ export function isWasmFatalError(msg: string): boolean {
   return false;
 }
 
+/**
+ * Detect a corrupt / incomplete model file on disk. The most common cause is a
+ * truncated HF Hub download (e.g. a 137MB ONNX model where only 87MB was written
+ * before the connection dropped): the file header parses but the protobuf body
+ * is incomplete, so ONNX reports "Protobuf parsing failed" / "Load model …
+ * failed". Unlike OOM or WASM aborts (environmental, non-recoverable in-process),
+ * these are recoverable: deleting the cached file and re-downloading fixes them.
+ * The worker uses this to self-heal a bad download instead of bricking embeddings
+ * until the next manual intervention.
+ */
+export function isCorruptModelError(msg: string): boolean {
+  if (/protobuf parsing failed/i.test(msg)) return true;
+  if (/load model .* failed/i.test(msg)) return true;
+  if (/failed to load model|invalid model|corrupt/i.test(msg)) return true;
+  // ONNX deserialization errors surface as "ModelProto" / "deserialize" failures.
+  if (/modelproto|deserializ/i.test(msg)) return true;
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // workerData contract
 // ---------------------------------------------------------------------------

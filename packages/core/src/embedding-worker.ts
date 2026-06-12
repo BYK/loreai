@@ -80,6 +80,23 @@ function isWasmFatalError(msg: string): boolean {
   return false;
 }
 
+/**
+ * Detect a corrupt / incomplete model file on disk. The most common cause is a
+ * truncated HF Hub download (e.g. a 137MB ONNX model that only got 87MB written
+ * before the connection dropped): the file header parses but the protobuf body
+ * is incomplete, so ONNX reports "Protobuf parsing failed" / "Load model …
+ * failed". These are recoverable by deleting the cached file and re-downloading,
+ * unlike OOM or WASM aborts which are environmental.
+ */
+function isCorruptModelError(msg: string): boolean {
+  if (/protobuf parsing failed/i.test(msg)) return true;
+  if (/load model .* failed/i.test(msg)) return true;
+  if (/failed to load model|invalid model|corrupt/i.test(msg)) return true;
+  // ONNX deserialization errors surface as "ModelProto" / "deserialize" failures.
+  if (/modelproto|deserializ/i.test(msg)) return true;
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Model lifecycle — lazy init on first embed request
 // ---------------------------------------------------------------------------
@@ -138,74 +155,37 @@ async function ensurePipeline(): Promise<void> {
 
   if (!initPromise) {
     initPromise = (async () => {
-      const transformers = await import("@huggingface/transformers");
-      const { pipeline, env, layer_norm } = transformers;
-
-      // Configure transformers.js environment
-      env.allowRemoteModels = !vendorModel;
-      env.allowLocalModels = true;
-
-      if (vendorModel) {
-        // Binary mode: point at pre-extracted model files on disk.
-        env.localModelPath = vendorModel.localModelPath;
-        env.allowRemoteModels = false;
+      try {
+        await loadPipeline();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // Self-heal a corrupt / truncated model download: in npm mode the model
+        // is auto-fetched into transformers.js's HF cache, so a dropped download
+        // leaves a truncated file that bricks embeddings permanently. Delete the
+        // cached model and retry the download ONCE. Skipped for vendored binaries
+        // (the model ships in the binary — re-downloading isn't appropriate and
+        // the path is read-only).
+        if (!vendorModel && isCorruptModelError(msg)) {
+          const healed = await purgeCachedModel();
+          if (healed) {
+            // Diagnostic only — do NOT post `init-error` here. The main thread
+            // treats `init-error` as a permanent break (sets
+            // localProviderKnownBroken=true), which would brick the provider
+            // even though we're about to retry successfully. Only the .catch
+            // below (a genuine final failure) may post init-error.
+            console.warn(
+              `[embedding-worker] model corrupt (${msg}); purged cache, retrying download once`,
+            );
+            // Retry once. If this throws, it propagates to the .catch below and
+            // marks the worker permanently failed.
+            await loadPipeline();
+          } else {
+            throw err;
+          }
+        } else {
+          throw err;
+        }
       }
-
-      // Force single-threaded WASM execution to avoid Bun's buggy
-      // shared-memory/pthread WASM paths. The threaded build uses
-      // `new WebAssembly.Memory({shared:true})` which triggers open Bun bugs:
-      //   - oven-sh/bun#25677: SharedArrayBuffer writes invisible to workers
-      //   - oven-sh/bun#31158: SIGPWR storm with native threads + WASM
-      //   - oven-sh/bun#18145: $bunfs + WASM Aborted() in --compile binaries
-      // Single-thread avoids all three. The ~2× batch speed advantage of
-      // threading is batch-only (single-text is identical) and lore's workload
-      // is incremental single-text embeds, so no practical throughput loss.
-      //
-      // Access the ONNX WASM config via the env object exposed by transformers.js.
-      // `env.backends.onnx.wasm` is the ORT WebAssemblyFlags interface.
-      const wasmEnv = (env as Record<string, unknown>).backends as
-        | { onnx?: { wasm?: { numThreads?: number; proxy?: boolean } } }
-        | undefined;
-      if (wasmEnv?.onnx?.wasm) {
-        wasmEnv.onnx.wasm.numThreads = 1;
-        wasmEnv.onnx.wasm.proxy = false;
-      }
-
-      // Create feature-extraction pipeline with ONNX quantized model.
-      // dtype: 'q8' selects the INT8 quantized ONNX variant (model_quantized.onnx)
-      // which is ~137MB for Nomic v1.5 vs ~547MB for the full FP32 model.
-      //
-      // device: "cpu" — in npm mode, transformers.js uses onnxruntime-node
-      // (native CPU). In the compiled binary, onnxruntime-node is redirected
-      // to onnxruntime-web by the build plugin, which handles "cpu" via its
-      // WASM+SIMD backend (API-compatible, ~2x faster on batch workloads).
-      pipe = (await pipeline("feature-extraction", modelId, {
-        dtype: "q8",
-        device: "cpu",
-      })) as unknown as FeatureExtractionPipeline;
-
-      // Guard against Callable pattern failure: @huggingface/transformers
-      // uses Object.setPrototypeOf(closure, new.target.prototype) in the
-      // Callable base class to make pipeline instances callable. Under
-      // esbuild CJS bundling + Node v24, this pattern can break — the
-      // pipeline object is truthy but not a function, causing "pipe is not
-      // a function" on every subsequent inference (LOREAI-GATEWAY-10).
-      // Detect at construction time and fail fast with a descriptive error.
-      if (typeof pipe !== "function") {
-        const actualType = typeof pipe;
-        pipe = null;
-        throw new Error(
-          `pipeline() returned a non-callable ${actualType} — ` +
-            `Callable pattern broken (Node ${process.versions.node})`,
-        );
-      }
-
-      // Stash a reference to the pipeline's tokenizer for token-level
-      // truncation during OOM retries.
-      tokenizer = (pipe as unknown as { tokenizer: typeof tokenizer })
-        .tokenizer;
-
-      layerNormFn = layer_norm as typeof layerNormFn;
     })().catch((err) => {
       initFailed = true;
       initError = err instanceof Error ? err.message : String(err);
@@ -218,6 +198,112 @@ async function ensurePipeline(): Promise<void> {
 
   await initPromise;
   if (!pipe) throw new Error("pipeline init completed but pipe is null");
+}
+
+/**
+ * Load (or reload) the transformers.js feature-extraction pipeline into the
+ * module-level `pipe`/`tokenizer`/`layerNormFn`. Extracted from `ensurePipeline`
+ * so it can be retried after a corrupt-model purge. Throws on any failure.
+ */
+async function loadPipeline(): Promise<void> {
+  const transformers = await import("@huggingface/transformers");
+  const { pipeline, env, layer_norm } = transformers;
+
+  // Configure transformers.js environment
+  env.allowRemoteModels = !vendorModel;
+  env.allowLocalModels = true;
+
+  if (vendorModel) {
+    // Binary mode: point at pre-extracted model files on disk.
+    env.localModelPath = vendorModel.localModelPath;
+    env.allowRemoteModels = false;
+  }
+
+  // Force single-threaded WASM execution to avoid Bun's buggy
+  // shared-memory/pthread WASM paths. The threaded build uses
+  // `new WebAssembly.Memory({shared:true})` which triggers open Bun bugs:
+  //   - oven-sh/bun#25677: SharedArrayBuffer writes invisible to workers
+  //   - oven-sh/bun#31158: SIGPWR storm with native threads + WASM
+  //   - oven-sh/bun#18145: $bunfs + WASM Aborted() in --compile binaries
+  // Single-thread avoids all three. The ~2× batch speed advantage of
+  // threading is batch-only (single-text is identical) and lore's workload
+  // is incremental single-text embeds, so no practical throughput loss.
+  //
+  // Access the ONNX WASM config via the env object exposed by transformers.js.
+  // `env.backends.onnx.wasm` is the ORT WebAssemblyFlags interface.
+  const wasmEnv = (env as Record<string, unknown>).backends as
+    | { onnx?: { wasm?: { numThreads?: number; proxy?: boolean } } }
+    | undefined;
+  if (wasmEnv?.onnx?.wasm) {
+    wasmEnv.onnx.wasm.numThreads = 1;
+    wasmEnv.onnx.wasm.proxy = false;
+  }
+
+  // Create feature-extraction pipeline with ONNX quantized model.
+  // dtype: 'q8' selects the INT8 quantized ONNX variant (model_quantized.onnx)
+  // which is ~137MB for Nomic v1.5 vs ~547MB for the full FP32 model.
+  //
+  // device: "cpu" — in npm mode, transformers.js uses onnxruntime-node
+  // (native CPU). In the compiled binary, onnxruntime-node is redirected
+  // to onnxruntime-web by the build plugin, which handles "cpu" via its
+  // WASM+SIMD backend (API-compatible, ~2x faster on batch workloads).
+  pipe = (await pipeline("feature-extraction", modelId, {
+    dtype: "q8",
+    device: "cpu",
+  })) as unknown as FeatureExtractionPipeline;
+
+  // Guard against Callable pattern failure: @huggingface/transformers
+  // uses Object.setPrototypeOf(closure, new.target.prototype) in the
+  // Callable base class to make pipeline instances callable. Under
+  // esbuild CJS bundling + Node v24, this pattern can break — the
+  // pipeline object is truthy but not a function, causing "pipe is not
+  // a function" on every subsequent inference (LOREAI-GATEWAY-10).
+  // Detect at construction time and fail fast with a descriptive error.
+  if (typeof pipe !== "function") {
+    const actualType = typeof pipe;
+    pipe = null;
+    throw new Error(
+      `pipeline() returned a non-callable ${actualType} — ` +
+        `Callable pattern broken (Node ${process.versions.node})`,
+    );
+  }
+
+  // Stash a reference to the pipeline's tokenizer for token-level
+  // truncation during OOM retries.
+  tokenizer = (pipe as unknown as { tokenizer: typeof tokenizer }).tokenizer;
+
+  layerNormFn = layer_norm as typeof layerNormFn;
+}
+
+/**
+ * Delete the cached model directory for `modelId` so transformers.js re-downloads
+ * it on the next pipeline() call. Used to recover from a corrupt / truncated
+ * download. Returns true if a cache directory was found and removed (i.e. a retry
+ * is worthwhile), false otherwise (nothing to purge → retrying would be futile).
+ *
+ * Only safe in npm mode: the HF cache lives under `env.cacheDir` and the model
+ * resolves to `<cacheDir>/<modelId>/`. Never called for vendored binaries.
+ */
+async function purgeCachedModel(): Promise<boolean> {
+  try {
+    const { env } = await import("@huggingface/transformers");
+    const cacheDir = (env as { cacheDir?: string }).cacheDir;
+    if (!cacheDir) return false;
+    const { rm, stat } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    // transformers.js resolves files at <cacheDir>/<modelId>/<file>.
+    const modelDir = join(cacheDir, ...modelId.split("/"));
+    try {
+      await stat(modelDir);
+    } catch {
+      return false; // nothing cached to purge
+    }
+    await rm(modelDir, { recursive: true, force: true });
+    return true;
+  } catch {
+    // If we can't resolve/remove the cache, retrying the download is pointless.
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
