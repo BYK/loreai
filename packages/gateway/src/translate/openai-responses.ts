@@ -327,7 +327,7 @@ export function buildOpenAIResponsesUpstreamRequest(
     stream: req.stream,
   };
 
-  if (req.maxTokens) {
+  if (req.maxTokens && !req.codex) {
     body.max_output_tokens = req.maxTokens;
   }
 

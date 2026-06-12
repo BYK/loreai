@@ -502,6 +502,7 @@ describe("createGatewayLLMClient.prompt", () => {
     const body = JSON.parse(init?.body as string) as Record<string, unknown>;
     expect(body.store).toBe(false);
     expect(body.model).toBe("gpt-5.1-codex-mini");
+    expect(body.max_output_tokens).toBeUndefined();
     expect(Array.isArray(body.input)).toBe(true);
   });
 

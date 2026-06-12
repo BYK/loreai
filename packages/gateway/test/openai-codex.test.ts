@@ -91,6 +91,20 @@ describe("buildOpenAIResponsesUpstreamRequest (codex)", () => {
     expect(body.service_tier).toBe("priority");
   });
 
+  test("does not emit unsupported max_output_tokens for Codex", () => {
+    const req = parseOpenAICodexRequest(
+      { ...codexBody, max_output_tokens: 1234 },
+      {},
+    );
+    const result = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://chatgpt.com/backend-api",
+    );
+    const body = result.body as Record<string, unknown>;
+    expect(req.maxTokens).toBe(1234);
+    expect(body.max_output_tokens).toBeUndefined();
+  });
+
   test("forces store:false even when the client omits store", () => {
     const { store: _omit, ...noStore } = codexBody;
     const req = parseOpenAICodexRequest(noStore, {});

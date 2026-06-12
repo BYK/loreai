@@ -415,7 +415,6 @@ function buildCodexWorkerRequest(
   model: { providerID: string; modelID: string },
   system: string,
   user: string,
-  maxTokens: number,
   sessionID?: string,
   temperature?: number,
 ): { url: string; headers: Record<string, string>; body: string } {
@@ -435,7 +434,6 @@ function buildCodexWorkerRequest(
       // Codex REQUIRES store:false (rejects store:true).
       store: false,
       stream: false,
-      max_output_tokens: maxTokens,
       ...(temperature != null && { temperature }),
       instructions: system,
       input: [
@@ -549,7 +547,6 @@ function buildWorkerRequest(
         model,
         system,
         user,
-        maxTokens,
         sessionID,
         temperature,
       );
