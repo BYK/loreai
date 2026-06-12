@@ -95,6 +95,15 @@ export type TaggedResult =
 
 export type ScoredTaggedResult = { item: TaggedResult; score: number };
 
+/**
+ * Multiplier applied to the fused score of raw/archived history (`temporal`
+ * and `distillation` sources) that belongs to a session OTHER than the current
+ * one, under non-session scopes. Keeps cross-session raw history reachable when
+ * it is strongly relevant, but prevents weak keyword overlap from injecting
+ * unrelated prior-session content into a fresh session.
+ */
+const CROSS_SESSION_RAW_PENALTY = 0.5;
+
 // ---------------------------------------------------------------------------
 // Tagged result helpers (used by exact-match boost + formatting)
 // ---------------------------------------------------------------------------
@@ -226,6 +235,11 @@ const DEFAULT_FORMAT_CONFIG = {
   charBudget: 12000,
   relevanceFloor: 0.15,
   maxResults: 15,
+  // Absolute RRF score floor. Unlike `relevanceFloor` (relative to the top
+  // result), this drops results whose absolute fused score is too low to be
+  // trustworthy — preventing weak cross-session archives from being force-
+  // injected when nothing in the project is genuinely relevant. 0 disables it.
+  absoluteFloor: 0,
 };
 
 type FormatConfig = typeof DEFAULT_FORMAT_CONFIG;
@@ -319,12 +333,26 @@ function formatFusedResults(
 
   const totalFound = results.length;
   const topScore = results[0].score;
-  const scoreFloor = topScore * config.relevanceFloor;
+  // Combine the relative floor (topScore * relevanceFloor) with an absolute
+  // floor so weak matches are dropped even when the whole result set is weak.
+  const scoreFloor = Math.max(
+    topScore * config.relevanceFloor,
+    config.absoluteFloor,
+  );
 
-  // Step 1: Score-based cutoff + hard cap. Always keep at least 3.
+  // Step 1: Score-based cutoff + hard cap. Backfill to 3 results only with
+  // items that still clear the ABSOLUTE floor, so we never force-inject
+  // content that is weak in absolute terms (e.g. stale cross-session archives
+  // surfaced by an off-topic recall query).
   let kept = results.filter((r) => r.score >= scoreFloor);
   kept = kept.slice(0, config.maxResults);
-  if (kept.length < 3) kept = results.slice(0, Math.min(3, results.length));
+  if (kept.length < 3) {
+    kept = results
+      .filter((r) => r.score >= config.absoluteFloor)
+      .slice(0, Math.min(3, results.length));
+  }
+
+  if (!kept.length) return "No results found for this query.";
 
   // Step 2: Assign tiers based on relative score.
   const tiered: TieredResult[] = kept.map((r) => ({
@@ -1167,7 +1195,25 @@ export async function searchRecall(
     allRrfLists.push(...primary, ...expanded.slice(0, budget), ...supplemental);
   }
 
-  const fused = reciprocalRankFusion<TaggedResult>(allRrfLists);
+  let fused = reciprocalRankFusion<TaggedResult>(allRrfLists);
+
+  // Demote cross-session raw/archived history. Under `scope="all"`/`"project"`
+  // the temporal and distillation searches span the whole project, so raw
+  // conversation and archived gen-0 distillations from prior, unrelated
+  // sessions can surface on weak keyword overlap and derail a new session.
+  // Knowledge / entities / lat-sections are intentionally cross-session and are
+  // never penalized. Same-session results are never penalized either.
+  if (scope !== "session" && sessionID) {
+    fused = fused
+      .map((r) => {
+        if (r.item.source !== "temporal" && r.item.source !== "distillation") {
+          return r;
+        }
+        if (r.item.item.session_id === sessionID) return r;
+        return { ...r, score: r.score * CROSS_SESSION_RAW_PENALTY };
+      })
+      .sort((a, b) => b.score - a.score);
+  }
 
   // Cap output: return at most 3x the per-source limit. With 7+ RRF sources
   // each contributing up to `limit` items, uncapped output can be huge (89+
@@ -1319,6 +1365,8 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
     relevanceFloor:
       recallCfg?.relevanceFloor ?? DEFAULT_FORMAT_CONFIG.relevanceFloor,
     maxResults: recallCfg?.maxResults ?? DEFAULT_FORMAT_CONFIG.maxResults,
+    absoluteFloor:
+      recallCfg?.absoluteFloor ?? DEFAULT_FORMAT_CONFIG.absoluteFloor,
   });
 
   // Surface structured tool-failure stats for debugging. Appended outside the

@@ -479,8 +479,25 @@ export const LoreConfig = z.object({
             .max(30)
             .default(15)
             .describe("Max results to show in recall output. Default: 15."),
+          /** Absolute (not relative) RRF score floor. Results below this are
+           *  dropped even when they are the top result and even by the
+           *  "keep at least 3" backfill. Prevents weak cross-session archives
+           *  from being injected when nothing is genuinely relevant. Default:
+           *  0 (disabled). */
+          absoluteFloor: z
+            .number()
+            .min(0)
+            .default(0)
+            .describe(
+              "Absolute RRF score floor; drops weak matches even via the keep-3 backfill. Default: 0 (disabled).",
+            ),
         })
-        .default({ charBudget: 12000, relevanceFloor: 0.15, maxResults: 15 })
+        .default({
+          charBudget: 12000,
+          relevanceFloor: 0.15,
+          maxResults: 15,
+          absoluteFloor: 0,
+        })
         .describe("Recall output formatting and result-count limits."),
     })
     .default({
@@ -496,7 +513,12 @@ export const LoreConfig = z.object({
         model: "nomic-ai/nomic-embed-text-v1.5",
         dimensions: 768,
       },
-      recall: { charBudget: 12000, relevanceFloor: 0.15, maxResults: 15 },
+      recall: {
+        charBudget: 12000,
+        relevanceFloor: 0.15,
+        maxResults: 15,
+        absoluteFloor: 0,
+      },
     })
     .describe(
       "Recall and search pipeline tuning: FTS weights, query expansion, vector boost, embeddings, and output formatting.",
