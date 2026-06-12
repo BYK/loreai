@@ -217,9 +217,28 @@ describe("inferDivergenceReason", () => {
     );
   });
 
-  test("system prompt — stable LTM block", () => {
+  test("system prompt — system[1] divergence on turn 2 is the system[2] insertion", () => {
+    // The turn-2 transient: context-bound LTM (system[2]) is injected for the
+    // first time, shifting the array boundary so the byte diff lands at system[1].
+    expect(
+      inferDivergenceReason("system[1].text", 12000, 12500, undefined, 2),
+    ).toBe(
+      "stable LTM pinned — context-bound LTM (system[2]) first injected on turn 2 (expected, not a real system[1] change)",
+    );
+  });
+
+  test("system prompt — system[1] divergence after turn 2 is ambiguous (not over-claimed)", () => {
+    // After turn 2 we can't cheaply tell a real preference re-curation from a
+    // block insertion (body delta is dominated by message growth), so we report
+    // the honest ambiguous wording rather than asserting a specific cause.
+    expect(
+      inferDivergenceReason("system[1].text", 12000, 12500, undefined, 5),
+    ).toBe(
+      "stable LTM block diverged (preference re-curation or system-block insertion)",
+    );
+    // Same when the turn is unknown.
     expect(inferDivergenceReason("system[1].text", 100, 100)).toBe(
-      "stable LTM changed (preferences — should be rare, pinned >=1h)",
+      "stable LTM block diverged (preference re-curation or system-block insertion)",
     );
   });
 

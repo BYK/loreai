@@ -242,12 +242,14 @@ function isObjectKeyPosition(json: string, offset: number): boolean {
  *  - messages mid-conversation → "earlier message modified" (distillation rewrite)
  *
  * @param messageCount - total messages in the current request (for end-detection)
+ * @param turn - 1-based turn number (for disambiguating the turn-2 system[2] insertion)
  */
 export function inferDivergenceReason(
   path: string,
   prevLength: number,
   currLength: number,
   messageCount?: number,
+  turn?: number,
 ): string {
   if (path === "<end>") {
     return currLength > prevLength
@@ -264,8 +266,23 @@ export function inferDivergenceReason(
   //  bare "system" = plain string system prompt (no array structure)
   if (path === "system[0]" || path.startsWith("system[0]"))
     return "host system prompt changed";
-  if (path === "system[1]" || path.startsWith("system[1]"))
-    return "stable LTM changed (preferences — should be rare, pinned >=1h)";
+  if (path === "system[1]" || path.startsWith("system[1]")) {
+    // A divergence reported at system[1] is ambiguous: it can mean either
+    // (a) the system array GREW — context-bound LTM (system[2]) is injected
+    // for the first time on turn 2, so the byte diff lands at the ]→,
+    // boundary right after system[1] even though system[1] is byte-identical,
+    // or (b) system[1]'s own content genuinely changed (preference re-curation).
+    // We cannot cheaply tell these apart from byte lengths alone: at a system[1]
+    // divergence EVERYTHING after it differs (incl. the whole messages array),
+    // so a body-size delta is dominated by message growth, not the inserted
+    // block. The one reliable signal is the turn number: the system[2] insertion
+    // is deterministically a turn-2 transient (block absent on turn 1, present
+    // from turn 2). Use that; fall back to the honest ambiguous wording when the
+    // turn is unknown.
+    if (turn === 2)
+      return "stable LTM pinned — context-bound LTM (system[2]) first injected on turn 2 (expected, not a real system[1] change)";
+    return "stable LTM block diverged (preference re-curation or system-block insertion)";
+  }
   if (path === "system[2]" || path.startsWith("system[2]"))
     return "context-bound LTM changed (non-preference entries re-ranked)";
   if (path === "system" || path.startsWith("system"))
@@ -377,6 +394,7 @@ export function analyzeCacheTurn(
         prevLength,
         currLength,
         messageCount,
+        analytics.turnCount,
       );
 
       // Capture and log diverging byte snippets to help diagnose what changed
