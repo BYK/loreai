@@ -20,13 +20,25 @@ import {
   STANDARD_TOOLS,
   DEFAULT_MODEL,
   DEFAULT_SYSTEM,
+  makeFixtureEntry,
   makeConversationFixtures,
 } from "./helpers/fixtures";
+import { inflateSession } from "../../core/eval/inflate";
+import type {
+  ContentPart,
+  ConversationTurn,
+  SessionTranscript,
+} from "../../core/eval/types";
 import {
   findDivergenceOffset,
   mapOffsetToJsonPath,
   normalizeBodyForComparison,
 } from "../src/cache-analytics";
+import type { FixtureEntry } from "../src/recorder";
+import type {
+  GatewayContentBlock,
+  GatewayMessage,
+} from "../src/translate/types";
 
 function makeBody(
   userMessage: string,
@@ -65,9 +77,209 @@ function isTailDivergence(path: string): boolean {
   );
 }
 
+/**
+ * Extract the cached system-prefix blocks from a serialized upstream body.
+ *
+ * The 3-block system prompt (system[0] host prompt, system[1] stable LTM,
+ * system[2] context-bound LTM) sits before the conversation breakpoint and is
+ * what Anthropic keys its prompt cache on. We compare these blocks directly
+ * (rather than freezing the whole `system` array) so the assertion stays valid
+ * even if a future change appends a NON-cached trailing block after the
+ * breakpoint.
+ */
+function systemBlocks(body: string): string[] {
+  const parsed = JSON.parse(normalizeBodyForComparison(body)) as {
+    system?: unknown;
+  };
+  const sys = parsed.system;
+  if (typeof sys === "string") return [sys];
+  if (Array.isArray(sys)) return sys.map((b) => JSON.stringify(b));
+  return [];
+}
+
+function textTurn(
+  role: "user" | "assistant",
+  text: string,
+  tokens = Math.ceil(text.length / 4),
+): ConversationTurn {
+  return { role, content: [{ type: "text", text }], tokens };
+}
+
+function toGatewayBlock(part: ContentPart): GatewayContentBlock {
+  switch (part.type) {
+    case "text":
+      return { type: "text", text: part.text };
+    case "tool_use":
+      return {
+        type: "tool_use",
+        id: part.id,
+        name: part.name,
+        input: part.input,
+      };
+    case "tool_result":
+      return {
+        type: "tool_result",
+        toolUseId: part.tool_use_id,
+        content: [{ type: "text", text: part.content }],
+        isError: part.is_error,
+      };
+  }
+}
+
+function toGatewayMessage(turn: ConversationTurn): GatewayMessage {
+  return {
+    role: turn.role,
+    content: turn.content.map(toGatewayBlock),
+  };
+}
+
+function makeInflatedSession(projectPath: string): SessionTranscript {
+  let seed = 744;
+  const rng = () => {
+    seed |= 0;
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const importantBlob =
+    "Remember that cache-stability validation must keep system blocks byte-stable. ".repeat(
+      45,
+    );
+  const base: SessionTranscript = {
+    id: "cache-stability-compressed-session",
+    label: "Cache stability compressed session",
+    projectPath,
+    turns: [
+      textTurn("user", `Start the cache stability work. ${importantBlob}`),
+      textTurn(
+        "assistant",
+        "I'll set up the test harness and memory fixtures.",
+      ),
+      textTurn(
+        "user",
+        `Add realistic inflated context around tool-heavy work. ${importantBlob}`,
+      ),
+      textTurn("assistant", "Inflated context is ready."),
+      textTurn(
+        "user",
+        `Now simulate mid-session knowledge updates. ${importantBlob}`,
+      ),
+      textTurn("assistant", "Knowledge update simulation is ready."),
+      textTurn(
+        "user",
+        `Force gradient layer transitions and inspect upstream bodies. ${importantBlob}`,
+      ),
+      textTurn("assistant", "Layer transition checks are wired."),
+    ],
+    metadata: {
+      totalTokens: 8_000,
+      description: "Synthetic cache-stability session before inflation",
+    },
+  };
+
+  return inflateSession(
+    base,
+    48_000,
+    new Set(["cache", "stability"]),
+    1_700_000_000_000,
+    rng,
+  );
+}
+
+function makeInflatedFixtures(callCount: number): FixtureEntry[] {
+  return Array.from({ length: callCount }, (_, i) =>
+    makeFixtureEntry({
+      seq: i,
+      requestMessages: [],
+      responseText: `scripted compressed response ${i}`,
+      model: DEFAULT_MODEL,
+      inputTokens: 25_000 + i * 12_000,
+      outputTokens: 50,
+    }),
+  );
+}
+
+function makeGatewayBody(messages: GatewayMessage[]): Record<string, unknown> {
+  return {
+    model: DEFAULT_MODEL,
+    max_tokens: 1024,
+    stream: false,
+    system: DEFAULT_SYSTEM,
+    messages,
+    tools: STANDARD_TOOLS,
+  };
+}
+
+function userTurnIndices(turns: ConversationTurn[], limit: number): number[] {
+  const indices: number[] = [];
+  for (let i = 0; i < turns.length && indices.length < limit; i++) {
+    if (turns[i].role === "user") indices.push(i);
+  }
+  return indices;
+}
+
+/** Read the gradient layer the session was last transformed at. The test
+ *  harness shares the @loreai/core gradient singleton with the in-process
+ *  gateway, so this reflects the layer the most recent turn actually used. */
+async function observedLayer(sessionID: string): Promise<number> {
+  const { getLastLayer } = await import("../../core/src/gradient");
+  return getLastLayer(sessionID);
+}
+
+async function seedMemory(projectPath: string, sessionID: string) {
+  const { db, ensureProject, ltm } = await import("@loreai/core");
+  const projectID = ensureProject(projectPath);
+  const preferenceID = ltm.create({
+    projectPath,
+    scope: "project",
+    category: "preference",
+    title: "Cache test preference",
+    content:
+      "Prefer preserving prompt-cache prefixes over eager mid-session preference refreshes.",
+    session: sessionID,
+  });
+  const contextID = ltm.create({
+    projectPath,
+    scope: "project",
+    category: "gotcha",
+    title: "Compressed cache stability gotcha",
+    content:
+      "When gradient compression is active, system[2] must remain byte-stable unless the pinned entry set genuinely changes.",
+    session: sessionID,
+  });
+
+  for (let i = 0; i < 6; i++) {
+    db()
+      .query(
+        `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        `dist-cache-stability-${i}`,
+        projectID,
+        sessionID,
+        `Narrative ${i}`,
+        "[]",
+        `Observation ${i}: ${"compressed history summary ".repeat(80)}`,
+        "[]",
+        0,
+        600,
+        0,
+        Date.now() + i,
+      );
+  }
+
+  return { preferenceID, contextID };
+}
+
 describe("cache stability (e2e)", () => {
   let harness: Harness;
-  afterEach(() => harness?.teardown());
+  afterEach(async () => {
+    const { resetCalibration } = await import("../../core/src/gradient");
+    resetCalibration();
+    await harness?.teardown();
+  });
 
   it("system prefix stays byte-stable across the steady state (turn 2+)", async () => {
     // Turn 1→2 legitimately introduces system[2] (context-bound LTM is deferred
@@ -219,6 +431,145 @@ describe("cache stability (e2e)", () => {
           `layer ${forcedLayers[i]} (prev ${forcedLayers[i - 1]}) — a layer ` +
           `oscillation must not bust the cached system prefix (#741)`,
       ).toBe(steady);
+    }
+  });
+
+  it("cached system blocks stay byte-stable across gradient compression layers", async () => {
+    // Regression guardrail for the #741 class of bugs: when the gradient
+    // compresses context (layers 1-4), the cached system prefix (system[0] host
+    // prompt, system[1] stable LTM, system[2] context-bound LTM) must NOT churn
+    // turn-to-turn or as the compression layer changes. (#741 was a per-turn
+    // "context health" note appended to system[2] whose wording varied by layer
+    // — removed in #746 — that busted the conversation cache on every layer
+    // oscillation.) This drives a real gateway over an inflated history that
+    // forces compression and fabricates the LTM/distillation prefix directly
+    // (no live model, no eval judge).
+    const prevIdleTimeout = process.env.LORE_IDLE_TIMEOUT;
+    process.env.LORE_IDLE_TIMEOUT = "3600"; // keep idle workers from firing
+    try {
+      const projectPath = `/tmp/lore-cache-stability-compressed-${Date.now()}`;
+      const clientSessionID = `cache-stability-client-${Date.now()}`;
+      const session = makeInflatedSession(projectPath);
+      const indices = userTurnIndices(session.turns, 8);
+      expect(indices.length).toBeGreaterThanOrEqual(8);
+
+      harness = await createHarness({
+        fixtures: makeInflatedFixtures(indices.length),
+      });
+
+      const {
+        calibrate,
+        resetCalibration,
+        setForceMinLayer,
+        setUrgentDistillationEnabledForTest,
+      } = await import("../../core/src/gradient");
+      resetCalibration();
+      // Silence the urgent-distillation worker: it can't run with a fake API key
+      // and would otherwise retry-loop (protocol-mismatch) during replay.
+      setUrgentDistillationEnabledForTest(false);
+      calibrate(0);
+
+      const headers = {
+        "x-lore-project": projectPath,
+        "x-lore-session-id": clientSessionID,
+      };
+      const history: GatewayMessage[] = [];
+      let callIndex = 0;
+      let sessionID = "";
+      let seeded: Awaited<ReturnType<typeof seedMemory>> | undefined;
+      let peakLayer = 0;
+      // Force a MINIMUM layer each turn (setForceMinLayer is one-shot). The
+      // gradient's sticky-layer hysteresis blocks downward moves, so the
+      // effective observed sequence escalates and holds rather than oscillating
+      // back down — escalation across 1→4 is sufficient to exercise the bug.
+      const forcedMinLayers = [1, 2, 1, 3, 4, 2, 1] as const;
+
+      for (const turn of session.turns) {
+        history.push(toGatewayMessage(turn));
+        if (turn.role !== "user") continue;
+
+        if (callIndex > 0) {
+          setForceMinLayer(forcedMinLayers[callIndex - 1], sessionID);
+        }
+
+        const resp = await harness.chat(
+          makeGatewayBody(history),
+          "test-key",
+          headers,
+        );
+        expect(resp.status).toBe(200);
+        await resp.json();
+
+        if (callIndex === 0) {
+          const rows = harness.queryDB<{ session_id: string }>(
+            "SELECT session_id FROM session_state ORDER BY updated_at DESC LIMIT 1",
+          );
+          sessionID = rows[0]?.session_id ?? "";
+          expect(sessionID).not.toBe("");
+          seeded = await seedMemory(projectPath, sessionID);
+        } else {
+          peakLayer = Math.max(peakLayer, await observedLayer(sessionID));
+        }
+
+        // Raw LTM writes mid-session: these mutate the knowledge DB but, by
+        // design, do NOT invalidate the warm per-session LTM cache/pin (only
+        // idle refresh or in-flight curation do — both off here). So the
+        // already-pinned system[1]/system[2] must stay byte-stable; new/updated
+        // knowledge is deferred to the next cold boundary. This asserts a raw
+        // write can't leak into the cached prefix.
+        if (callIndex === 5 && seeded) {
+          const { ltm } = await import("@loreai/core");
+          ltm.update(seeded.preferenceID, {
+            content:
+              "Updated preference that must not rewrite the warm stable LTM block mid-session.",
+          });
+          ltm.update(seeded.contextID, {
+            content:
+              "Updated context-bound knowledge that must stay deferred while the warm pin is active.",
+          });
+          ltm.create({
+            projectPath,
+            scope: "project",
+            category: "architecture",
+            title: "New mid-session cache note",
+            content:
+              "Newly fabricated knowledge must not be injected into an already-pinned warm system block.",
+            session: sessionID,
+          });
+        }
+
+        callIndex++;
+        if (callIndex >= indices.length) break;
+      }
+
+      // Guard against silent degradation: if a future calibration change let
+      // the inflated history fit at layer 0, this test would stop exercising
+      // compression entirely. Require it to have reached an aggressive layer.
+      expect(
+        peakLayer,
+        `expected the inflated history to drive the gradient into a high ` +
+          `compression layer, but the peak observed layer was ${peakLayer}`,
+      ).toBeGreaterThanOrEqual(3);
+
+      const bodies = harness.upstreamBodies();
+      expect(bodies.length).toBe(indices.length);
+
+      // Steady state begins on turn 2 (index 1), where system[2] is first
+      // established. From there, every cached system block must be byte-
+      // identical on every subsequent (compressed) turn — across layer
+      // escalation and the mid-session LTM writes.
+      const steadyBlocks = systemBlocks(bodies[1]);
+      for (let i = 2; i < bodies.length; i++) {
+        expect(
+          systemBlocks(bodies[i]),
+          `cached system blocks changed on turn ${i + 1} (forced min-layer ` +
+            `${forcedMinLayers[i - 1] ?? "n/a"}) — a compression-layer change or ` +
+            `mid-session LTM write must not bust the cached system prefix (#741)`,
+        ).toEqual(steadyBlocks);
+      }
+    } finally {
+      if (prevIdleTimeout === undefined) delete process.env.LORE_IDLE_TIMEOUT;
+      else process.env.LORE_IDLE_TIMEOUT = prevIdleTimeout;
     }
   });
 });

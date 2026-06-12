@@ -705,6 +705,8 @@ export function resetCalibration(sessionID?: string) {
   calibratedOverhead = null;
   cacheWriteCostPerToken = 0;
   cacheReadCostPerToken = 0;
+  urgentDistillationEnabled = true;
+  urgentDistillationMap.clear();
   if (sessionID) {
     saveForceMinLayer(sessionID, 0); // clear persisted state
     sessionStates.delete(sessionID);
@@ -1890,6 +1892,13 @@ export type TransformResult = {
 // Keyed by sessionID. Set by layer returns in transformInner(),
 // consumed (read + delete) by needsUrgentDistillation(sessionID).
 const urgentDistillationMap = new Map<string, boolean>();
+let urgentDistillationEnabled = true;
+
+export function setUrgentDistillationEnabledForTest(enabled: boolean): void {
+  urgentDistillationEnabled = enabled;
+  if (!enabled) urgentDistillationMap.clear();
+}
+
 export function needsUrgentDistillation(sessionID: string): boolean {
   const v = urgentDistillationMap.get(sessionID) ?? false;
   urgentDistillationMap.delete(sessionID);
@@ -2258,7 +2267,7 @@ function transformInner(input: {
     if (result && fitsWithSafetyMargin(result)) {
       // Trigger urgent distillation when: (a) higher stages always need it, or
       // (b) stage 0 with no distillations = first time in gradient mode.
-      if (sid && (s > 0 || cached.tokens === 0)) {
+      if (urgentDistillationEnabled && sid && (s > 0 || cached.tokens === 0)) {
         urgentDistillationMap.set(sid, true);
       }
       return {
@@ -2291,7 +2300,7 @@ function transformInner(input: {
   // if it alone exceeds the tail budget — layer 4 is the terminal layer
   // and must always return. Remaining budget is filled backward with older
   // messages.
-  if (sid) urgentDistillationMap.set(sid, true);
+  if (urgentDistillationEnabled && sid) urgentDistillationMap.set(sid, true);
   const nuclearDistillations = selectDistillations(distillations, 2);
   const nuclearPrefix = distilledPrefix(nuclearDistillations);
   const nuclearPrefixTokens = nuclearPrefix.reduce(
