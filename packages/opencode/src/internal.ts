@@ -5,11 +5,13 @@
  * (`./index.ts`). OpenCode's legacy plugin loader treats EVERY function
  * exported from a plugin module as a plugin instance and invokes it (see
  * `getServerPlugin`/`getLegacyPlugins` in opencode's plugin loader). Exporting
- * these helpers from the entry module caused them to be invoked as plugins,
- * pushing `undefined` into the host's hooks array and crashing the host with
- * `undefined is not an object (evaluating 'A.event')` on the first event
- * dispatch. Keeping them in a separate module means the entry module exposes
- * only the plugin function itself, while tests can still import them here.
+ * these helpers from the entry module caused them to be invoked as plugins and
+ * their return values pushed into the host's hooks array:
+ * `applyLoreProviderConfig` returns `undefined`, so the host crashed on the
+ * first hook dispatch with `undefined is not an object (evaluating 'A.event')`
+ * (the `?.` guards the `.event` property, not the `undefined` hook element).
+ * Keeping them in a separate module means the entry module exposes only the
+ * plugin function itself, while tests can still import them here.
  */
 
 /**

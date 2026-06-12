@@ -235,29 +235,33 @@ describe("LorePlugin hooks", () => {
 
 describe("plugin entry module export shape", () => {
   // Regression guard for the v1.17.4 crash (`undefined is not an object
-  // (evaluating 'A.event')`). OpenCode's legacy plugin loader treats EVERY
-  // function exported from the entry module as a plugin and invokes it
-  // (`getServerPlugin`/`getLegacyPlugins`), pushing the (often `undefined`)
-  // return value into the host hooks array. Leaking helper exports like
-  // `applyLoreProviderConfig`/`probeGateway` therefore crashed the host on the
-  // first event dispatch. The entry module must export ONLY the plugin
-  // function (named + default, pointing at the same reference).
-  test("exports only the plugin function (named + default, same ref)", async () => {
+  // (evaluating 'A.event')`). OpenCode's legacy plugin loader iterates
+  // `Object.values(mod)` (`getLegacyPlugins`/`getServerPlugin`): every
+  // FUNCTION export is invoked as a plugin (and its return value pushed into
+  // the host hooks array — `applyLoreProviderConfig` returned `undefined`,
+  // which then crashed the dispatch loops), and every NON-function export
+  // makes the loader throw `Plugin export is not a function`, dropping the
+  // plugin entirely. So the entry module must export ONLY the plugin (the
+  // named `LorePlugin` and the same-reference `default`) — nothing else.
+  test("exports only the plugin (LorePlugin + same-ref default)", async () => {
     const mod = (await import("../src/index")) as Record<string, unknown>;
 
     // The default export must be the LorePlugin function reference.
     expect(typeof mod.default).toBe("function");
     expect(mod.default).toBe(mod.LorePlugin);
 
-    // Simulate getLegacyPlugins: dedupe function-typed exports by reference.
-    const functionExports = Object.entries(mod).filter(
-      ([, value]) => typeof value === "function",
-    );
-    const uniqueFns = new Set(functionExports.map(([, value]) => value));
+    // The ONLY export keys allowed are `LorePlugin` and `default`. Any other
+    // export — function OR not — breaks the legacy loader (functions get
+    // invoked as bogus plugins; non-functions make it throw). This is the
+    // strict guard: it catches both failure modes, including a future
+    // `export const FOO = ...` that a function-only filter would miss.
+    expect(Object.keys(mod).sort()).toEqual(["LorePlugin", "default"]);
 
-    // After dedup there must be exactly ONE plugin function. Any extra
-    // distinct function export would be invoked as a plugin by the host and
-    // could push `undefined` into the hooks array.
+    // Belt-and-suspenders: simulate getLegacyPlugins' reference dedup so the
+    // host invokes exactly one plugin function (the named + default pair).
+    const uniqueFns = new Set<unknown>(
+      Object.values(mod).filter((value) => typeof value === "function"),
+    );
     expect(uniqueFns.size).toBe(1);
     expect(uniqueFns.has(mod.LorePlugin)).toBe(true);
   });

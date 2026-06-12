@@ -280,7 +280,7 @@ export const LorePlugin: Plugin = async (ctx) => {
           },
         };
         // Pin the Anthropic provider's baseURL to the gateway. See
-        // applyLoreProviderConfig for the full rationale.
+        // applyLoreProviderConfig in ./internal.ts for the full rationale.
         applyLoreProviderConfig(cfg, gatewayBase);
       },
 
@@ -403,4 +403,10 @@ export const LorePlugin: Plugin = async (ctx) => {
   }
 };
 
+// WARNING: do NOT add any other export to this module. OpenCode's legacy
+// plugin loader invokes every FUNCTION export as a plugin (pushing its return
+// value into the host hooks array) and THROWS on any non-function export,
+// dropping the plugin entirely. Keep helpers in ./internal.ts. This module
+// must export only LorePlugin + this same-reference default. Guarded by the
+// "plugin entry module export shape" test in test/index.test.ts.
 export default LorePlugin;
