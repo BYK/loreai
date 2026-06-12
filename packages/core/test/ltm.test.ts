@@ -1084,31 +1084,49 @@ describe("ltm.forSession — vector-path set stability (regression #727)", () =>
     expect(turn2).toEqual(turn0);
   });
 
-  test("WITH stickyIds: a genuinely stronger new entry still displaces a sticky one", async () => {
-    // The hysteresis bonus (1.25x) must not freeze the set permanently — a new
-    // entry scoring far higher than a sticky one should still win selection.
-    currentScores = scoresForTurn(0);
-    const turn0 = new Set(
-      (await ltm.forSession(PROJ, SESSION, TIGHT)).map((e) => e.id),
-    );
+  // The hysteresis bonus is multiplicative (STICKY_RELEVANCE_BONUS = 1.25): a
+  // sticky entry at raw score s keeps its slot unless a contender out-scores
+  // s × 1.25. These two tests pin that threshold from both sides at the budget
+  // boundary (the weakest selected sticky entry, index 3, vs the first dropped
+  // entry, index 4), so the test would fail if the constant were changed.
+  //
+  // Layout: entries 0–2 score high (always selected), 3 is the boundary sticky
+  // entry (raw 0.40), 4 is the contender. Budget fits exactly 4.
+  function boundaryScores(contenderScore: number): Map<string, number> {
+    const m = new Map<string, number>();
+    m.set(ids[0], 0.9);
+    m.set(ids[1], 0.8);
+    m.set(ids[2], 0.7);
+    m.set(ids[3], 0.4); // sticky boundary entry → effective 0.4 × 1.25 = 0.50
+    m.set(ids[4], contenderScore); // non-sticky contender
+    for (let i = 5; i < ids.length; i++) m.set(ids[i], 0.05);
+    return m;
+  }
 
-    // Make a currently-UNselected entry dominate, and crush a selected one.
-    const unselected = ids.find((id) => !turn0.has(id));
-    const selected = [...turn0][0];
-    expect(unselected).toBeDefined();
-    if (!unselected) throw new Error("expected an unselected entry");
-    const m = scoresForTurn(0);
-    m.set(unselected, 5.0); // overwhelmingly relevant now
-    m.set(selected, 0.01); // basically irrelevant now
-    currentScores = m;
-
-    const turn1 = new Set(
-      (await ltm.forSession(PROJ, SESSION, TIGHT, { stickyIds: turn0 })).map(
+  test("WITH stickyIds: a contender below the 1.25x threshold does NOT displace a sticky entry", async () => {
+    const sticky = new Set([ids[0], ids[1], ids[2], ids[3]]);
+    // Contender 0.46 > sticky raw 0.40, but < 0.40 × 1.25 = 0.50 → entry 3 holds.
+    currentScores = boundaryScores(0.46);
+    const got = new Set(
+      (await ltm.forSession(PROJ, SESSION, TIGHT, { stickyIds: sticky })).map(
         (e) => e.id,
       ),
     );
-    expect(turn1.has(unselected)).toBe(true);
-    expect(turn1.has(selected)).toBe(false);
+    expect(got.has(ids[3])).toBe(true);
+    expect(got.has(ids[4])).toBe(false);
+  });
+
+  test("WITH stickyIds: a contender above the 1.25x threshold DOES displace a sticky entry", async () => {
+    const sticky = new Set([ids[0], ids[1], ids[2], ids[3]]);
+    // Contender 0.55 > 0.40 × 1.25 = 0.50 → entry 4 wins, entry 3 drops out.
+    currentScores = boundaryScores(0.55);
+    const got = new Set(
+      (await ltm.forSession(PROJ, SESSION, TIGHT, { stickyIds: sticky })).map(
+        (e) => e.id,
+      ),
+    );
+    expect(got.has(ids[4])).toBe(true);
+    expect(got.has(ids[3])).toBe(false);
   });
 });
 
