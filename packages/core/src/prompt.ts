@@ -784,8 +784,21 @@ function estimateTokens(text: string): number {
 }
 
 export function formatKnowledge(
-  entries: Array<{ category: string; title: string; content: string }>,
+  entries: Array<{
+    category: string;
+    title: string;
+    content: string;
+    id?: string;
+  }>,
   maxTokens?: number,
+  /**
+   * Optional out-param: when provided, it is populated with the `id`s of the
+   * entries that were actually rendered (after budget packing). Callers that
+   * pin the rendered text (system[2] diff-pin) use this to compute a key set
+   * that exactly matches the rendered output, so re-ranking the same set never
+   * busts the cache while a genuine selection change always re-pins.
+   */
+  outIncludedIds?: string[],
 ): string {
   if (!entries.length) return "";
 
@@ -807,6 +820,12 @@ export function formatKnowledge(
     if (!included.length) return "";
   }
 
+  if (outIncludedIds) {
+    for (const e of included) {
+      if (e.id !== undefined) outIncludedIds.push(e.id);
+    }
+  }
+
   const grouped: Record<string, Array<{ title: string; content: string }>> = {};
   for (const e of included) {
     let group = grouped[e.category];
@@ -817,8 +836,16 @@ export function formatKnowledge(
     group.push(e);
   }
 
+  // Canonical layout: relevance ranking decides *selection* (which entries fit
+  // the budget above); the rendered *order* is fixed — categories alphabetically,
+  // entries alphabetically by title within each category. This makes the output
+  // byte-stable for a stable selected set, so re-ranking the same entries does
+  // not churn system[2] text and bust the prompt cache.
   const children: Root["children"] = [h(2, "Long-term Knowledge")];
-  for (const [category, items] of Object.entries(grouped)) {
+  const categories = Object.keys(grouped).sort();
+  for (const category of categories) {
+    const items = grouped[category];
+    items.sort((a, b) => (a.title < b.title ? -1 : a.title > b.title ? 1 : 0));
     children.push(h(3, category.charAt(0).toUpperCase() + category.slice(1)));
     children.push(
       ul(

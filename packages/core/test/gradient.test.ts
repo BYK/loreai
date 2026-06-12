@@ -3071,14 +3071,34 @@ describe("tier-based context management", () => {
       expect(shouldCompress(2_000_000, 100_000, 0)).toBe(true);
     });
 
-    test("does not compress after 5 consecutive busts", () => {
-      // Even when compression would be economical, stop after 5 busts
-      expect(shouldCompress(2_000_000, 100_000, 5)).toBe(false);
-      expect(shouldCompress(2_000_000, 100_000, 10)).toBe(false);
+    test("sustained bust prices continue at WRITE cost (compresses to stop growth)", () => {
+      // In a sustained-bust regime (>=5 busts) the "continue" path is paying
+      // cache WRITE cost on the whole context every turn, not the cheap read
+      // cost. So continueCost is priced with write:
+      //   continueCost = 2M × $6.25/M = $12.50
+      //   bustCost     = 100K × $6.25/M = $0.625
+      //   0.625 < 0.85 × 12.50 = 10.6 → compress (break the growth loop)
+      expect(shouldCompress(2_000_000, 100_000, 5)).toBe(true);
+      expect(shouldCompress(2_000_000, 100_000, 10)).toBe(true);
     });
 
-    test("compresses with 4 or fewer consecutive busts", () => {
+    test("sustained bust still refuses when compression isn't cheaper than rewriting", () => {
+      // When compressed size is close to current size, writing the compressed
+      // context is NOT cheaper than continuing — even at the write rate.
+      //   continueCost = 250K × $6.25/M = $1.5625
+      //   bustCost     = 240K × $6.25/M = $1.50
+      //   1.50 < 0.85 × 1.5625 = 1.328 → false (don't compress)
+      expect(shouldCompress(250_000, 240_000, 5)).toBe(false);
+    });
+
+    test("below the sustained-bust threshold uses the cheap read cost", () => {
+      // 4 busts → not sustained → continue priced at READ cost.
+      //   continueCost = 2M × $0.50/M = $1.00
+      //   bustCost     = 100K × $6.25/M = $0.625
+      //   0.625 < 0.85 × 1.00 = 0.85 → compress
       expect(shouldCompress(2_000_000, 100_000, 4)).toBe(true);
+      // A modestly-grown context at 0 busts: continue is cheap → don't compress.
+      expect(shouldCompress(250_000, 150_000, 0)).toBe(false);
     });
 
     test("falls back to conservative (do NOT compress) when no pricing", () => {

@@ -1049,6 +1049,15 @@ const MIGRATIONS: string[] = [
      AND project_id IS NOT NULL
      AND promotion_status IS NULL;
   `,
+  `
+  -- Version 39: Reorder-tolerant LTM diff-pin.
+  -- Stores the identity of the entry SET (and per-entry content hash) that the
+  -- pinned system[2] text was rendered from. The pin is reused verbatim when the
+  -- selected entry-ID set is identical (any order) and no entry's content
+  -- changed, eliminating cache busts from pure re-ranking. NULL for pre-v39 rows
+  -- (treated as "unknown set" → the first post-upgrade turn re-pins once).
+  ALTER TABLE session_state ADD COLUMN ltm_pin_keys TEXT;
+  `,
 ];
 
 /**
@@ -1350,6 +1359,10 @@ function recoverMissingObjects(database: Database) {
       database.exec(
         "ALTER TABLE session_state ADD COLUMN project_path_provisional INTEGER NOT NULL DEFAULT 1;",
       );
+    }
+    // Version 39: reorder-tolerant LTM diff-pin entry-set keys.
+    if (!scols.some((c) => c.name === "ltm_pin_keys")) {
+      database.exec("ALTER TABLE session_state ADD COLUMN ltm_pin_keys TEXT;");
     }
   }
 }
@@ -1983,6 +1996,8 @@ export type SessionTrackingState = {
   ltmCacheTokens?: number | null;
   ltmPinText?: string | null;
   ltmPinTokens?: number | null;
+  /** JSON array of sorted "id:hash(title+content)" keys for the pinned entry set (v39). */
+  ltmPinKeys?: string | null;
   // v24: session identity
   fingerprint?: string;
   headerSessionId?: string | null;
@@ -2060,6 +2075,10 @@ export function saveSessionTracking(
   if (state.ltmPinTokens !== undefined) {
     sets.push("ltm_pin_tokens = ?");
     vals.push(state.ltmPinTokens);
+  }
+  if (state.ltmPinKeys !== undefined) {
+    sets.push("ltm_pin_keys = ?");
+    vals.push(state.ltmPinKeys);
   }
   // v24: session identity
   if (state.fingerprint !== undefined) {
@@ -2152,6 +2171,8 @@ export type LoadedSessionTracking = {
   ltmCacheTokens: number | null;
   ltmPinText: string | null;
   ltmPinTokens: number | null;
+  // v39: reorder-tolerant pin entry-set keys (JSON)
+  ltmPinKeys: string | null;
   // v24: session identity
   fingerprint: string;
   headerSessionId: string | null;
@@ -2188,6 +2209,7 @@ export function loadSessionTracking(
       `SELECT last_curated_at, message_count, turns_since_curation,
               consecutive_text_only_turns,
               ltm_cache_text, ltm_cache_tokens, ltm_pin_text, ltm_pin_tokens,
+              ltm_pin_keys,
               fingerprint, header_session_id, header_name,
               resolved_conversation_ttl, warmup_state,
               dynamic_context_cap, bust_rate_ema, inter_bust_interval_ema,
@@ -2206,6 +2228,7 @@ export function loadSessionTracking(
     ltm_cache_tokens: number | null;
     ltm_pin_text: string | null;
     ltm_pin_tokens: number | null;
+    ltm_pin_keys: string | null;
     fingerprint: string;
     header_session_id: string | null;
     header_name: string | null;
@@ -2234,6 +2257,7 @@ export function loadSessionTracking(
     ltmCacheTokens: row.ltm_cache_tokens,
     ltmPinText: row.ltm_pin_text,
     ltmPinTokens: row.ltm_pin_tokens,
+    ltmPinKeys: row.ltm_pin_keys,
     fingerprint: row.fingerprint,
     headerSessionId: row.header_session_id,
     headerName: row.header_name,

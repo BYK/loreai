@@ -50,7 +50,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(38);
+    expect(row.version).toBe(39);
   });
 
   test("entities table has embedding column (migration v34)", () => {
@@ -848,6 +848,13 @@ describe("db", () => {
     expect(names).toContain("consecutive_text_only_turns");
   });
 
+  test("session_state has ltm_pin_keys column (migration v39)", () => {
+    const cols = db().query("PRAGMA table_info(session_state)").all() as Array<{
+      name: string;
+    }>;
+    expect(cols.map((c) => c.name)).toContain("ltm_pin_keys");
+  });
+
   test("saveSessionTracking and loadSessionTracking round-trip", () => {
     const sid = `test-tracking-${crypto.randomUUID()}`;
     saveSessionTracking(sid, {
@@ -858,6 +865,7 @@ describe("db", () => {
       ltmCacheTokens: 100,
       ltmPinText: "pinned LTM text",
       ltmPinTokens: 90,
+      ltmPinKeys: JSON.stringify(["a:1", "b:2"]),
     });
     const loaded = loadSessionTracking(sid);
     expect(loaded).not.toBeNull();
@@ -868,6 +876,7 @@ describe("db", () => {
     expect(loaded?.ltmCacheTokens).toBe(100);
     expect(loaded?.ltmPinText).toBe("pinned LTM text");
     expect(loaded?.ltmPinTokens).toBe(90);
+    expect(loaded?.ltmPinKeys).toBe(JSON.stringify(["a:1", "b:2"]));
   });
 
   test("saveSessionTracking partial update preserves other fields", () => {

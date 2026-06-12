@@ -415,6 +415,27 @@ describe("ltm.forSession", () => {
     expect(found?.cross_project).toBe(0);
   });
 
+  test("deterministic ordering — equal-score entries keep a stable order (fix B)", async () => {
+    // Many entries with identical confidence and no distinguishing session
+    // context → equal/near-equal scores. Without the id tiebreak these reorder
+    // turn-to-turn and churn system[2]. With it, two calls produce identical
+    // ordering, so the rendered set is byte-stable.
+    for (let i = 0; i < 8; i++) {
+      ltm.create({
+        projectPath: PROJ,
+        category: "pattern",
+        title: `Equal pattern ${i}`,
+        content: "Neutral content with no session-context keywords.",
+        scope: "project",
+        crossProject: false,
+      });
+    }
+
+    const first = await ltm.forSession(PROJ, SESSION, 10_000);
+    const second = await ltm.forSession(PROJ, SESSION, 10_000);
+    expect(first.map((e) => e.id)).toEqual(second.map((e) => e.id));
+  });
+
   test("respects token budget — stops adding entries when budget exhausted", async () => {
     // Create many project entries
     for (let i = 0; i < 10; i++) {

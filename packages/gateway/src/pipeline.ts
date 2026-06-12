@@ -490,14 +490,73 @@ const ltmSessionCache = new Map<
 
 /**
  * Pinned context-bound LTM text per session — the text currently being
- * injected as system[2]. When ltmSessionCache is invalidated and
- * recomputed, we compare the new text against the pin. Only update if
- * >5% character difference to avoid cache busts from minor re-ranking.
+ * injected as system[2]. When ltmSessionCache is invalidated and recomputed,
+ * we compare the *selected entry set* against the pin: if the set of entry IDs
+ * is identical (any order) and no entry's content changed, the pinned text is
+ * reused verbatim so the system[2] cache prefix stays warm. Re-pinning happens
+ * only when the selected set changes or an entry's content changes.
+ *
+ * `entryKeys` is the sorted array of `"<id>:<hash(title+content)>"` keys for
+ * the entries the pinned text was rendered from. `undefined` means the pin
+ * predates entry-key tracking (legacy/restored rows) — treated as "unknown
+ * set", which forces a one-time re-pin on the next turn.
  */
 const ltmPinnedText = new Map<
   string,
-  { formatted: string; tokenCount: number }
+  { formatted: string; tokenCount: number; entryKeys?: string[] }
 >();
+
+/**
+ * FNV-1a 32-bit hash of a string, returned as a short hex string. Used to
+ * detect per-entry content changes cheaply without storing full text. A
+ * collision would at worst suppress one legitimate re-pin (the curator's next
+ * content edit re-rolls the hash), so a 32-bit hash is acceptable here.
+ */
+export function fnv1a(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  return h.toString(16);
+}
+
+/**
+ * Compute the sorted entry-key array for a set of context-bound LTM entries.
+ * Each key is `"<id>:<hash(title+content)>"`. Sorted so order is canonical:
+ * the same set of entries always produces the same key array regardless of
+ * ranking order, which is exactly the property the reorder-tolerant pin needs.
+ *
+ * When `renderedIds` is provided, only those entries (the ones that survived
+ * budget packing in formatKnowledge and are actually in the rendered text) are
+ * keyed — so the key set always matches the rendered string byte-for-byte.
+ */
+export function ltmEntryKeys(
+  entries: Array<{ id: string; title: string; content: string }>,
+  renderedIds?: Iterable<string>,
+): string[] {
+  let source = entries;
+  if (renderedIds) {
+    const allow = new Set(renderedIds);
+    source = entries.filter((e) => allow.has(e.id));
+  }
+  return source
+    .map((e) => `${e.id}:${fnv1a(`${e.title}\x1f${e.content}`)}`)
+    .sort();
+}
+
+/** True when two sorted entry-key arrays are element-wise identical. */
+export function sameEntryKeys(
+  a: string[] | undefined,
+  b: string[] | undefined,
+): boolean {
+  if (!a || !b) return false;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
 
 /**
  * Stable LTM (preference entries) + known entities per session — injected as
@@ -515,53 +574,6 @@ const stableLtmCache = new Map<
   string,
   { formatted: string; tokenCount: number }
 >();
-
-/**
- * Measure character-level difference between two strings as a ratio (0..1).
- * Samples characters at regular intervals across the full string length to
- * detect interior changes, not just prefix/suffix differences.
- *
- * For short strings (≤1000 chars) compares every character. For longer
- * strings samples up to 1000 evenly-spaced positions for O(1) cost.
- */
-function textDiffRatio(a: string, b: string): number {
-  if (a === b) return 0;
-  if (!a || !b) return 1;
-
-  const maxLen = Math.max(a.length, b.length);
-  const minLen = Math.min(a.length, b.length);
-
-  // Length difference accounts for part of the diff
-  const lengthDiff = maxLen - minLen;
-
-  // Sample up to 1000 positions across the overlapping region
-  const sampleCount = Math.min(minLen, 1000);
-  const step = sampleCount < minLen ? minLen / sampleCount : 1;
-  let mismatches = 0;
-  for (let i = 0; i < sampleCount; i++) {
-    const idx = Math.floor(i * step);
-    if (a[idx] !== b[idx]) mismatches++;
-  }
-
-  // Extrapolate mismatch rate to the full overlapping region + length diff
-  const mismatchRate = sampleCount > 0 ? mismatches / sampleCount : 0;
-  const estimatedMismatches = mismatchRate * minLen + lengthDiff;
-  return Math.min(1, estimatedMismatches / maxLen);
-}
-
-/**
- * Cost-aware diff threshold for LTM diff-pinning. More expensive models
- * tolerate larger diffs before busting the cache prefix, since each bust
- * costs more. Used by both step-6 (normal turn) and step-7b (Layer 4
- * refresh) to keep the threshold in sync.
- */
-function ltmDiffThreshold(inputCostPerMillion?: number): number {
-  const base = 0.05;
-  const cost = inputCostPerMillion ?? 3;
-  if (cost >= 5) return Math.min(base * 3, 0.2); // opus: 15%
-  if (cost >= 1) return Math.min(base * 2, 0.15); // sonnet: 10%
-  return base; // haiku: 5%
-}
 
 /** Cached LLM client for background workers. */
 let llmClient: LLMClient | null = null;
@@ -1522,9 +1534,24 @@ function getOrCreateSession(
       });
     }
     if (persisted?.ltmPinText != null && persisted.ltmPinTokens != null) {
+      let entryKeys: string[] | undefined;
+      if (persisted.ltmPinKeys != null) {
+        try {
+          const parsed = JSON.parse(persisted.ltmPinKeys);
+          if (
+            Array.isArray(parsed) &&
+            parsed.every((k) => typeof k === "string")
+          ) {
+            entryKeys = parsed;
+          }
+        } catch {
+          // Corrupt pin keys — leave undefined so the next turn re-pins once.
+        }
+      }
       ltmPinnedText.set(sessionID, {
         formatted: persisted.ltmPinText,
         tokenCount: persisted.ltmPinTokens,
+        ...(entryKeys ? { entryKeys } : {}),
       });
     }
     sessions.set(sessionID, state);
@@ -4700,6 +4727,12 @@ async function handleConversationTurn(
       // scoring. On turn 1, only stable LTM (preferences) is injected.
       if (!isFirstTurn) {
         let cached = ltmSessionCache.get(sessionID);
+        // Entry-set keys for the *freshly computed* selection. Only populated
+        // on the recompute path (when ltmSessionCache was cold/invalidated) —
+        // that's the only path where re-ranking can churn the text. On the
+        // warm-cache path the text is unchanged, so byte equality with the pin
+        // suffices and keys aren't needed.
+        let cachedKeys: string[] | undefined;
 
         if (!cached) {
           // Full context-bound budget — preferences have their own dedicated budget.
@@ -4715,17 +4748,21 @@ async function handleConversationTurn(
             },
           );
           if (contextEntries.length) {
+            const renderedIds: string[] = [];
             const formatted = formatKnowledge(
               contextEntries.map((e) => ({
                 category: e.category,
                 title: e.title,
                 content: e.content,
+                id: e.id,
               })),
               contextBudget,
+              renderedIds,
             );
             if (formatted) {
               const tokenCount = Math.ceil(formatted.length / 3);
               cached = { formatted, tokenCount };
+              cachedKeys = ltmEntryKeys(contextEntries, renderedIds);
               ltmSessionCache.set(sessionID, cached);
               ltmDirty = true;
             }
@@ -4733,23 +4770,31 @@ async function handleConversationTurn(
         }
 
         if (cached) {
-          // Content-diff pinning: only update the injected LTM text if the
-          // new content differs by more than a threshold from what's currently
-          // pinned. This prevents cache busts from minor re-ranking after
-          // background curation/consolidation invalidates the LTM cache.
+          // Reorder-tolerant diff-pinning: reuse the pinned system[2] text
+          // whenever the *selected entry set* is unchanged (same entry IDs,
+          // any order; same per-entry content). Pure re-ranking by
+          // forSession() must never bust the cache. Re-pin only when the
+          // selected set changes, an entry's content changed (curator update),
+          // or there is no pin yet. See ltmPinnedText docs.
           const pinned = ltmPinnedText.get(sessionID);
-          if (
-            pinned &&
-            textDiffRatio(pinned.formatted, cached.formatted) <
-              ltmDiffThreshold(modelSpec.inputCostPerMillion)
-          ) {
-            // Near-identical — keep the pinned text to preserve cache prefix
+          const setUnchanged = cachedKeys
+            ? // Recompute path: compare entry-key sets.
+              sameEntryKeys(pinned?.entryKeys, cachedKeys)
+            : // Warm-cache path (no fresh entries): the text didn't change, so
+              // byte equality against the pin is sufficient.
+              pinned != null && pinned.formatted === cached.formatted;
+
+          if (pinned && setUnchanged) {
+            // Same entry set (or identical text) — keep the pinned text to
+            // preserve the cache prefix. Zero bust on pure re-ranking.
             ltmText = pinned.formatted;
           } else {
-            // Substantially different or first injection — pin the new text
-            ltmPinnedText.set(sessionID, cached);
+            // Set changed, content changed, or first injection — pin the new
+            // text along with its entry-key identity.
+            const newPin = { ...cached, entryKeys: cachedKeys };
+            ltmPinnedText.set(sessionID, newPin);
             pinDirty = true;
-            ltmText = cached.formatted;
+            ltmText = newPin.formatted;
           }
         }
       }
@@ -4781,7 +4826,13 @@ async function handleConversationTurn(
             }
           : {}),
         ...(pinDirty && pinned
-          ? { ltmPinText: pinned.formatted, ltmPinTokens: pinned.tokenCount }
+          ? {
+              ltmPinText: pinned.formatted,
+              ltmPinTokens: pinned.tokenCount,
+              ltmPinKeys: pinned.entryKeys
+                ? JSON.stringify(pinned.entryKeys)
+                : null,
+            }
           : {}),
       });
     }
@@ -4838,43 +4889,43 @@ async function handleConversationTurn(
       let refreshed = false;
 
       if (contextEntries.length) {
+        const renderedIds: string[] = [];
         const formatted = formatKnowledge(
           contextEntries.map((e) => ({
             category: e.category,
             title: e.title,
             content: e.content,
+            id: e.id,
           })),
           contextBudget,
+          renderedIds,
         );
 
         if (formatted) {
           const tokenCount = Math.ceil(formatted.length / 3);
+          const entryKeys = ltmEntryKeys(contextEntries, renderedIds);
           // Always update the cache with freshly ranked entries.
           ltmSessionCache.delete(sessionID);
           ltmSessionCache.set(sessionID, { formatted, tokenCount });
 
-          // Apply diff-pinning: on consecutive Layer 4 turns, system[2]
-          // stability matters because system[0]+[1] ARE still cache reads
-          // at 1h TTL. Only update the pin if the new text differs
-          // substantially — same threshold as step 6.
+          // Reorder-tolerant diff-pinning: on consecutive Layer 4 turns,
+          // system[2] stability matters because system[0]+[1] ARE still cache
+          // reads at 1h TTL. Reuse the pin whenever the selected entry set is
+          // unchanged (same IDs + content, any order) — same policy as step 6.
           const pinned = ltmPinnedText.get(sessionID);
 
-          if (
-            pinned &&
-            textDiffRatio(pinned.formatted, formatted) <
-              ltmDiffThreshold(modelSpec.inputCostPerMillion)
-          ) {
-            // Near-identical — keep the pinned text to preserve cache prefix
+          if (pinned && sameEntryKeys(pinned.entryKeys, entryKeys)) {
+            // Same entry set — keep the pinned text to preserve cache prefix
             ltmText = pinned.formatted;
             setLtmTokens(stableTokens + pinned.tokenCount, sessionID);
             saveSessionTracking(sessionID, {
               ltmCacheText: formatted,
               ltmCacheTokens: tokenCount,
-              // pin unchanged — don't write ltmPinText/ltmPinTokens
+              // pin unchanged — don't write ltmPinText/ltmPinTokens/ltmPinKeys
             });
           } else {
-            // Substantially different or first Layer 4 turn — pin the new text
-            ltmPinnedText.set(sessionID, { formatted, tokenCount });
+            // Set changed or first Layer 4 turn — pin the new text + identity
+            ltmPinnedText.set(sessionID, { formatted, tokenCount, entryKeys });
             ltmText = formatted;
             setLtmTokens(stableTokens + tokenCount, sessionID);
             saveSessionTracking(sessionID, {
@@ -4882,6 +4933,7 @@ async function handleConversationTurn(
               ltmCacheTokens: tokenCount,
               ltmPinText: formatted,
               ltmPinTokens: tokenCount,
+              ltmPinKeys: JSON.stringify(entryKeys),
             });
           }
           refreshed = true;
@@ -4904,6 +4956,7 @@ async function handleConversationTurn(
           ltmCacheTokens: null,
           ltmPinText: null,
           ltmPinTokens: null,
+          ltmPinKeys: null,
         });
         log.info(
           "Context-bound LTM cleared on emergency layer (Layer 4) — stable LTM preserved for session",

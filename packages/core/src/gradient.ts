@@ -124,10 +124,26 @@ export function isFreeWriteSession(sessionID: string): boolean {
   );
 }
 
+/** Consecutive-bust count at/above which a session is in a "sustained-bust
+ *  regime": the prompt cache is being rewritten nearly every turn, so the
+ *  "continue" path is paying cache *write* cost — not the cheap read cost the
+ *  tier gate normally assumes. */
+const SUSTAINED_BUST_THRESHOLD = 5;
+
 /**
  * Decide whether compression is economical at a tier boundary.
  *
- * @param currentTokens   - expected input tokens if we stay at the current layer
+ * The core comparison is bustCost (write the compressed context once) vs
+ * continueCost (keep sending the full context each turn). Normally "continue"
+ * is a cheap cache *read*, so growing the context is fine. But when the session
+ * is in a sustained-bust regime (`consecutiveBusts >= SUSTAINED_BUST_THRESHOLD`),
+ * the full context is being *written* every turn anyway — so "continue" costs
+ * write, not read. In that regime we price continueCost at the write rate,
+ * which makes compression economical precisely when it's needed (growth-driven
+ * busts), instead of refusing to compress and letting the context grow
+ * unbounded.
+ *
+ * @param currentTokens    - expected input tokens if we stay at the current layer
  * @param compressedTokens - expected tokens after compression
  * @param consecutiveBusts - how many turns in a row we've busted the cache
  * @param opts.threshold   - bust cost must be < threshold × continue cost (default 0.85)
@@ -142,24 +158,39 @@ export function shouldCompress(
 ): boolean {
   const { threshold = 0.85, freeWrite = false } = opts ?? {};
 
-  // Rolling bust detection: if we've been busting 5+ turns in a row,
-  // stop trying to compress — it's clearly not helping.
-  // Applies even to free-write sessions to prevent compress→overflow loops.
-  if (consecutiveBusts >= 5) return false;
-
   // Free-write cache (or no cache): compression never incurs a write cost.
-  // Always compress at tier boundaries — there's no economic downside.
-  if (freeWrite) return true;
+  // Always compress at tier boundaries — there's no economic downside — EXCEPT
+  // after a sustained run of busts, where repeated free compression that keeps
+  // overflowing is just churn (compress→overflow loop). This guard applies to
+  // free-write sessions only; paid-cache sessions are handled by the
+  // write-cost repricing below (Fix C).
+  if (freeWrite) {
+    return consecutiveBusts < SUSTAINED_BUST_THRESHOLD;
+  }
 
   // If no pricing data, fall back to conservative: do NOT compress.
   // Compression busts the cache, which is expensive. Without pricing data
   // we can't prove it's worthwhile, so err on the side of keeping the cache.
   if (cacheWriteCostPerToken <= 0 || cacheReadCostPerToken <= 0) return false;
 
-  const bustCost = compressedTokens * cacheWriteCostPerToken;
-  const continueCost = currentTokens * cacheReadCostPerToken;
+  const sustainedBust = consecutiveBusts >= SUSTAINED_BUST_THRESHOLD;
 
-  // Compress only if the bust cost is meaningfully less than continuing
+  const bustCost = compressedTokens * cacheWriteCostPerToken;
+  // In a sustained-bust regime the "continue" path is paying cache *write*
+  // cost on the whole context every turn, not the cheap read cost. Price it
+  // accordingly so the gate reflects reality. Otherwise use the read rate.
+  const continuePerToken = sustainedBust
+    ? cacheWriteCostPerToken
+    : cacheReadCostPerToken;
+  const continueCost = currentTokens * continuePerToken;
+
+  // Compress only if the bust cost is meaningfully less than continuing.
+  // Note: we deliberately do NOT short-circuit to "never compress" on a high
+  // bust count anymore. Structural system[2] busts (the historical cause of
+  // runaway bust counts) are eliminated by the reorder-tolerant LTM pin, so a
+  // sustained bust now indicates raw-window growth — exactly the case where
+  // compressing (writing once) is cheaper than continuing to rewrite the whole
+  // grown context every turn.
   return bustCost < threshold * continueCost;
 }
 
