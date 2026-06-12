@@ -503,6 +503,8 @@ describe("createGatewayLLMClient.prompt", () => {
     expect(body.store).toBe(false);
     expect(body.model).toBe("gpt-5.1-codex-mini");
     expect(Array.isArray(body.input)).toBe(true);
+    // ChatGPT Codex rejects max_output_tokens — worker calls must omit it.
+    expect(body.max_output_tokens).toBeUndefined();
   });
 
   test("returns null without calling upstream when no auth is available", async () => {

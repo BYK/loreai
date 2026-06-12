@@ -101,6 +101,39 @@ describe("buildOpenAIResponsesUpstreamRequest (codex)", () => {
     expect((result.body as Record<string, unknown>).store).toBe(false);
   });
 
+  // Regression (#715 follow-up): ChatGPT Codex rejects max_output_tokens
+  // ("Unsupported parameter: max_output_tokens"). It must never be emitted for
+  // Codex, even though the parser still records req.maxTokens for budgeting.
+  test("never emits max_output_tokens for Codex", () => {
+    const req = parseOpenAICodexRequest(
+      { ...codexBody, max_output_tokens: 1234 },
+      {},
+    );
+    expect(req.maxTokens).toBe(1234);
+    const result = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://chatgpt.com/backend-api",
+    );
+    expect(
+      (result.body as Record<string, unknown>).max_output_tokens,
+    ).toBeUndefined();
+  });
+
+  // Guard the inverse: standard OpenAI Responses MUST still emit it.
+  test("non-codex Responses still emits max_output_tokens", () => {
+    const req = parseOpenAIResponsesRequest(
+      { ...codexBody, max_output_tokens: 1234 },
+      {},
+    );
+    const result = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://api.openai.com",
+    );
+    expect((result.body as Record<string, unknown>).max_output_tokens).toBe(
+      1234,
+    );
+  });
+
   test("forwards Codex auth + headers", () => {
     const req = parseOpenAICodexRequest(codexBody, {
       authorization: "Bearer jwt-token",

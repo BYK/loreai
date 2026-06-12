@@ -415,7 +415,6 @@ function buildCodexWorkerRequest(
   model: { providerID: string; modelID: string },
   system: string,
   user: string,
-  maxTokens: number,
   sessionID?: string,
   temperature?: number,
 ): { url: string; headers: Record<string, string>; body: string } {
@@ -430,12 +429,13 @@ function buildCodexWorkerRequest(
       ...authHeaders(cred),
       ...codexHeaders,
     },
+    // No `max_output_tokens`: ChatGPT Codex rejects it ("Unsupported parameter:
+    // max_output_tokens"). Same omission as the foreground Codex delta.
     body: JSON.stringify({
       model: model.modelID,
       // Codex REQUIRES store:false (rejects store:true).
       store: false,
       stream: false,
-      max_output_tokens: maxTokens,
       ...(temperature != null && { temperature }),
       instructions: system,
       input: [
@@ -543,13 +543,13 @@ function buildWorkerRequest(
 ): { url: string; headers: Record<string, string>; body: string } {
   switch (target.protocol) {
     case "openai-codex-responses":
+      // Codex omits max_output_tokens (rejected by ChatGPT) — no maxTokens arg.
       return buildCodexWorkerRequest(
         target,
         cred,
         model,
         system,
         user,
-        maxTokens,
         sessionID,
         temperature,
       );
