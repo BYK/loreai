@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import {
   signBody,
   resignBody,
@@ -935,6 +935,15 @@ describe("billing-header first-block invariant", () => {
   /** Capture warnings emitted via the core log sink. */
   let warnings: string[];
 
+  /** Silent sink restored after each test so we don't leak capture into
+   *  other test files sharing the (global) log sink. */
+  const silentSink = {
+    info: () => {},
+    warn: () => {},
+    error: () => {},
+    captureException: () => {},
+  };
+
   beforeEach(() => {
     warnings = [];
     log.registerSink({
@@ -943,6 +952,10 @@ describe("billing-header first-block invariant", () => {
       error: () => {},
       captureException: () => {},
     });
+  });
+
+  afterEach(() => {
+    log.registerSink(silentSink);
   });
 
   /** Build a body with the real billing header as the FIRST system block. */
