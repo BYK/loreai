@@ -103,15 +103,35 @@ const WORKER_SALT = "59cf53e54c78";
 const CCH_PLACEHOLDER = "cch=00000";
 
 /**
- * Matches the `cch=00000` placeholder ONLY when it sits inside a billing
- * header (i.e. immediately preceded by `cc_entrypoint=<value>; `). This
- * prevents `signBody` from rewriting a `cch=00000` that happens to appear in
- * arbitrary system / LTM / message content — which would silently mutate the
- * cached prefix every turn and bust the entire prompt cache.
+ * The full billing-header sentinel as it appears in a serialized JSON body:
  *
- * Capture group 1 is the `cc_entrypoint=...; ` prefix so it can be preserved.
+ *   x-anthropic-billing-header: cc_version=<semver>.<suffix>; cc_entrypoint=<x>; cch=<value>;
+ *
+ * We anchor every cch / cc_version rewrite to this whole shape rather than to
+ * a bare `cc_entrypoint=…;` or `cch=…;` fragment. This makes the rewrite
+ * STRUCTURAL, not positional: a token in system / LTM / message content can
+ * only be mistaken for the header if it reproduces the entire header verbatim
+ * (the same self-referential class that caused the original incident — an LTM
+ * entry documenting the header format). The fragment-anchored form was
+ * defeated by content that serializes *before* the real header.
+ *
+ * Capture groups:
+ *   1 = `x-anthropic-billing-header: ` prefix + `cc_version=` up to the suffix
+ *       (everything before the 3-hex suffix, preserved verbatim)
+ *   — handled per-call; see BILLING_HEADER_SIGN_RE / BILLING_HEADER_RESIGN_RE.
+ *
+ * The value classes are intentionally permissive (`[^;]*`) for cc_version /
+ * cc_entrypoint so we tolerate client variations, but the cch field is pinned
+ * to its exact shape (5 hex for a signed value, `00000` for the placeholder).
  */
-const BILLING_PLACEHOLDER_RE = /(cc_entrypoint=[^;]*;\s*)cch=0{5}/;
+const BILLING_HEADER_PREFIX = String.raw`x-anthropic-billing-header:\s*cc_version=[^;]*;\s*cc_entrypoint=[^;]*;\s*`;
+
+/**
+ * Matches the billing header ending in the `cch=00000` placeholder. Group 1
+ * is the entire header up to and including `cch=` so it is preserved on
+ * replace; the `00000` is swapped for the computed hash.
+ */
+const BILLING_SIGN_RE = new RegExp(`(${BILLING_HEADER_PREFIX}cch=)0{5}`);
 
 // ---------------------------------------------------------------------------
 // Signing
@@ -122,9 +142,13 @@ const BILLING_PLACEHOLDER_RE = /(cc_entrypoint=[^;]*;\s*)cch=0{5}/;
  * Returns the body with the placeholder replaced by the computed hash.
  *
  * Only the billing-header placeholder is rewritten: the replacement is
- * anchored to the `cc_entrypoint=...; ` prefix so a `cch=00000` literal in
- * conversation/LTM content is never touched. The hash itself is still
+ * anchored to the full `x-anthropic-billing-header: …` sentinel so a
+ * `cch=00000` literal in conversation/LTM content is never touched, regardless
+ * of where it serializes relative to the header. The hash itself is still
  * computed over the entire body bytes (matching Claude Code's algorithm).
+ *
+ * If no billing header is present the body is returned unchanged — there is
+ * nothing to sign, and we must never rewrite a bare content `cch=00000`.
  *
  * @param bodyWithPlaceholder — JSON string containing a billing `cch=00000`
  * @returns body with the billing `cch=00000` replaced by `cch=XXXXX`
@@ -132,13 +156,7 @@ const BILLING_PLACEHOLDER_RE = /(cc_entrypoint=[^;]*;\s*)cch=0{5}/;
 export function signBody(bodyWithPlaceholder: string): string {
   const hash = xxHash64(bodyWithPlaceholder, WORKER_SEED);
   const cch = (hash & 0xfffffn).toString(16).padStart(5, "0");
-  if (BILLING_PLACEHOLDER_RE.test(bodyWithPlaceholder)) {
-    return bodyWithPlaceholder.replace(BILLING_PLACEHOLDER_RE, `$1cch=${cch}`);
-  }
-  // Fallback for callers/tests that pass a bare placeholder with no billing
-  // header context (e.g. `{"text":"cch=00000;"}`): replace the first literal
-  // occurrence, preserving prior behavior.
-  return bodyWithPlaceholder.replace(CCH_PLACEHOLDER, `cch=${cch}`);
+  return bodyWithPlaceholder.replace(BILLING_SIGN_RE, `$1${cch}`);
 }
 
 /**
@@ -164,23 +182,33 @@ function computeVersionSuffix(firstUserMessage: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Regex matching a billing header's cch field in a serialized JSON body.
- * The cch value is exactly 5 hex chars followed by a semicolon, and it must
- * be anchored to the `cc_entrypoint=...; ` prefix so we only ever match the
- * billing header — never a `cch=XXXXX;` token that appears inside LTM /
- * system / message content. Matching a content token would rewrite it every
- * turn and bust the entire prompt cache.
+ * Matches a full client-signed billing header in a serialized JSON body and
+ * captures every variable field so cc_version AND cch can be rewritten in a
+ * single anchored pass:
  *
- * Capture group 1 is the `cc_entrypoint=...; ` prefix (preserved on replace);
- * group 2 is the 5-hex cch value.
+ *   group 1 = cc_version base (MAJOR.MINOR.PATCH)
+ *   group 2 = cc_version suffix (3 hex)
+ *   group 3 = cc_entrypoint value
+ *   group 4 = cch value (5 hex)
+ *
+ * Anchored to the full `x-anthropic-billing-header:` sentinel so neither field
+ * can be matched against a `cc_version=…;` / `cch=…;` token that appears in
+ * LTM / system / message content — even if that content serializes BEFORE the
+ * real header. Matching content would rewrite it every turn and bust the
+ * entire prompt cache (the original incident's failure mode).
  */
-const CCH_IN_BODY_RE = /(cc_entrypoint=[^;]*;\s*)cch=([0-9a-fA-F]{5});/;
+const BILLING_RESIGN_RE =
+  /x-anthropic-billing-header:\s*cc_version=(\d+\.\d+\.\d+)\.([0-9a-f]{3});\s*cc_entrypoint=([^;]*);\s*cch=([0-9a-fA-F]{5});/;
 
 /**
- * Regex matching the cc_version field in a billing header.
- * Format: cc_version=MAJOR.MINOR.PATCH.SUFFIX (suffix is 3 hex chars).
+ * Matches a full signed billing header for validation. Group 1 is the whole
+ * header up to and including `cch=` (preserved on replace); group 2 is the
+ * 5-hex signed value. Anchored so a content `cch=…;` token is never validated
+ * in place of the real header.
  */
-const CC_VERSION_RE = /cc_version=(\d+\.\d+\.\d+)\.([0-9a-f]{3});/;
+const BILLING_VALIDATE_RE = new RegExp(
+  `(${BILLING_HEADER_PREFIX}cch=)([0-9a-fA-F]{5});`,
+);
 
 /**
  * Re-sign a serialized request body that contains a client-signed billing
@@ -189,11 +217,10 @@ const CC_VERSION_RE = /cc_version=(\d+\.\d+\.\d+)\.([0-9a-f]{3});/;
  * wrappers, message transforms) — invalidating the client's original cch.
  *
  * The function:
- *   1. Detects `cch=XXXXX` in the serialized body — returns unchanged if absent
- *   2. Replaces `cc_version=X.Y.Z.abc` with our worker version + recomputed suffix
- *   3. Replaces `cch=XXXXX` with `cch=00000` placeholder
- *   4. Hashes with our known seed → compute new cch
- *   5. Replaces `cch=00000` with the computed value
+ *   1. Detects a full billing header — returns unchanged if absent
+ *   2. Rewrites cc_version (worker version + recomputed suffix) AND cch
+ *      (→ placeholder) in a single anchored pass over the header
+ *   3. Hashes the resulting body with our known seed and stamps the cch
  *
  * @param serializedBody — JSON string after JSON.stringify(body)
  * @param firstUserMessage — text of the first user message (for version suffix)
@@ -203,24 +230,25 @@ export function resignBody(
   serializedBody: string,
   firstUserMessage: string,
 ): string {
-  // Quick check: no billing header → return unchanged
-  if (!CCH_IN_BODY_RE.test(serializedBody)) {
+  // Quick check: no billing header → return unchanged. Anchored match ensures
+  // a content cch=/cc_version= token never qualifies.
+  if (!BILLING_RESIGN_RE.test(serializedBody)) {
     return serializedBody;
   }
 
-  let body = serializedBody;
-
-  // Step 1: Replace cc_version with our worker version + recomputed suffix.
-  // The suffix depends on chars[4,7,20] from the first user message.
+  // Step 1+2: in a single anchored replace, swap cc_version for our worker
+  // version + recomputed suffix and reset cch to the placeholder. cc_entrypoint
+  // (group 3) is preserved verbatim. The suffix depends on chars[4,7,20] of the
+  // first user message.
   const suffix = computeVersionSuffix(firstUserMessage);
-  body = body.replace(CC_VERSION_RE, `cc_version=${WORKER_VERSION}.${suffix};`);
+  const body = serializedBody.replace(
+    BILLING_RESIGN_RE,
+    (_m, _base, _suf, entrypoint) =>
+      `x-anthropic-billing-header: cc_version=${WORKER_VERSION}.${suffix};` +
+      ` cc_entrypoint=${entrypoint}; ${CCH_PLACEHOLDER};`,
+  );
 
-  // Step 2: Replace the billing header's existing cch with the placeholder.
-  // Anchored to the cc_entrypoint prefix so a cch= token in content is left
-  // untouched (preserving prefix-cache stability).
-  body = body.replace(CCH_IN_BODY_RE, `$1${CCH_PLACEHOLDER};`);
-
-  // Step 3: Hash and replace placeholder with computed value
+  // Step 3: Hash and replace placeholder with computed value (anchored).
   return signBody(body);
 }
 
@@ -575,15 +603,18 @@ export function resolveSeed(version: string): {
  * @returns null if no cch found, true if a seed matches, false if none match
  */
 export function validateSeed(body: string): boolean | null {
-  // Anchor to the billing header so a cch= token in content can't be
-  // mistaken for the signed billing cch.
-  const cchMatch = body.match(CCH_IN_BODY_RE);
+  // Anchor to the full billing header so a cch= token in content can't be
+  // mistaken for the signed billing cch. Group 1 = entire header up to and
+  // including `cch=` (preserved); group 2 = the 5-hex signed value. cc_version
+  // is intentionally left as-received — we validate the signature as sent.
+  const cchMatch = body.match(BILLING_VALIDATE_RE);
   if (!cchMatch) return null;
 
   const clientCch = cchMatch[2].toLowerCase();
+  // Group 1 already ends with `cch=`, so only the value + `;` follow.
   const bodyWithPlaceholder = body.replace(
-    CCH_IN_BODY_RE,
-    `$1${CCH_PLACEHOLDER};`,
+    BILLING_VALIDATE_RE,
+    (_m, prefix) => `${prefix}00000;`,
   );
 
   for (const seed of Object.values(VERSION_SEEDS)) {
