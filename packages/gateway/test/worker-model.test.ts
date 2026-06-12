@@ -347,8 +347,63 @@ describe("ensureModelDataReady", () => {
     await ensureModelDataReady(50);
     const elapsed = Date.now() - start;
 
-    expect(elapsed).toBeLessThan(2_000); // returned via the 50ms timeout
+    // Tight bound: must be governed by the 50ms timeout, not some other path.
+    expect(elapsed).toBeLessThan(500);
     // Data not loaded (fetch never resolved) — caller falls back gracefully.
+    expect(isModelDataLoaded()).toBe(false);
+  });
+
+  test("on fetch failure, leaves data unloaded so a later turn can retry (retry-next-request)", async () => {
+    // HTTP 500 — fetchModelData must NOT cache an empty map; cachedModelData
+    // stays null so isModelDataLoaded() is false and the next attempt retries.
+    const failSpy = vi.fn(() =>
+      Promise.resolve(new Response("upstream boom", { status: 500 })),
+    );
+    globalThis.fetch = failSpy as unknown as typeof fetch;
+
+    await ensureModelDataReady(50);
+    expect(isModelDataLoaded()).toBe(false);
+    expect(failSpy.mock.calls.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("recovers on a later attempt after an earlier failure", async () => {
+    globalThis.fetch = vi.fn(() =>
+      Promise.resolve(new Response("boom", { status: 500 })),
+    ) as unknown as typeof fetch;
+    await ensureModelDataReady(50);
+    expect(isModelDataLoaded()).toBe(false);
+
+    // Bypass the per-attempt cooldown for this isolated test, then succeed.
+    clearModelDataCache();
+    globalThis.fetch = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), {
+          status: 200,
+        }),
+      ),
+    ) as unknown as typeof fetch;
+
+    await ensureModelDataReady(2_000);
+    expect(isModelDataLoaded()).toBe(true);
+    expect(getModelEntrySync("claude-opus-4-6").limit?.context).toBe(1_000_000);
+  });
+
+  test("does not re-pay the wait every call during a sustained outage (cooldown)", async () => {
+    // Fetch hangs forever (outage). The first call pays the timeout; the
+    // immediate next call must short-circuit on the cooldown (no new fetch,
+    // near-instant) so every turn doesn't block for `timeoutMs`.
+    const hangSpy = vi.fn(() => new Promise(() => {}));
+    globalThis.fetch = hangSpy as unknown as typeof fetch;
+
+    await ensureModelDataReady(50); // first: pays the wait, kicks off fetch
+    const callsAfterFirst = hangSpy.mock.calls.length;
+
+    const start = Date.now();
+    await ensureModelDataReady(50); // second: cooldown short-circuit
+    const elapsed = Date.now() - start;
+
+    expect(elapsed).toBeLessThan(20); // did not wait again
+    expect(hangSpy.mock.calls.length).toBe(callsAfterFirst); // no new fetch
     expect(isModelDataLoaded()).toBe(false);
   });
 });

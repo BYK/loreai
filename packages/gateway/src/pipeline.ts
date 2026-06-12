@@ -4631,6 +4631,10 @@ async function handleConversationTurn(
   // this turn's budget from fallback pricing/limits (wrong l0cap/usable for one
   // turn). Wait briefly for real data; bounded so a slow/unreachable models.dev
   // never hangs the request (falls back to the same fallback path as before).
+  // INVARIANT: this await must stay immediately before getModelSpec — it exists
+  // to make the budget below read real model data, not fallback. (Secondary
+  // getModelEntrySync sites — worker selection, cost metrics — intentionally
+  // keep using the sync fallback on the very first turn; they self-correct.)
   await ensureModelDataReady();
   const modelSpec = getModelSpec(req.model);
   const cfg = loreConfig();
