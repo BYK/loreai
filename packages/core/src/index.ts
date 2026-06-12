@@ -162,6 +162,7 @@ export {
   exportLoreFile,
   exportInlineToAgentsFile,
   deleteLoreFile,
+  removeLoreSectionFromFile,
   importLoreFile,
   shouldImportLoreFile,
   loreFileExists,

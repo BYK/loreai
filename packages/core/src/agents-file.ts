@@ -105,14 +105,19 @@ function setCache(fp: string, entry: LoreFileCache): void {
     .run(key, value, value);
 }
 
+/** Clear the cached mtime/hash for an arbitrary agents/lore file path. */
+function clearCache(fp: string): void {
+  db()
+    .query("DELETE FROM kv_meta WHERE key = ?")
+    .run(CACHE_PREFIX + fp);
+}
+
 /**
  * Clear the cached mtime/hash for a project's `.lore.md`.
  * Useful in tests or after data wipes to force a full re-check.
  */
 export function clearLoreFileCache(projectPath: string): void {
-  db()
-    .query("DELETE FROM kv_meta WHERE key = ?")
-    .run(CACHE_PREFIX + join(projectPath, LORE_FILE));
+  clearCache(join(projectPath, LORE_FILE));
 }
 
 // ---------------------------------------------------------------------------
@@ -467,6 +472,39 @@ export function deleteLoreFile(projectPath: string): boolean {
   try {
     unlinkSync(fp);
     clearLoreFileCache(projectPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Strip lore's managed section (pointer or inline knowledge) from an agents
+ * file (AGENTS.md / CLAUDE.md), preserving all surrounding user content. Used
+ * when a project drops to zero knowledge entries so the file doesn't keep a
+ * dangling pointer to a deleted `.lore.md` or a stale inline knowledge list.
+ *
+ * Returns true if the file was modified (or removed). If, after removing the
+ * section, no user content remains, the file is deleted entirely.
+ */
+export function removeLoreSectionFromFile(filePath: string): boolean {
+  if (isHostedMode()) return false;
+  if (!existsSync(filePath)) return false;
+
+  const fileContent = readFileSync(filePath, "utf8");
+  const { before, after, section } = splitFile(fileContent);
+  // No lore section present → nothing to strip.
+  if (section === null) return false;
+
+  const remainder = `${before.trimEnd()}\n${after.trimStart()}`.trim();
+  try {
+    if (remainder.length === 0) {
+      // The file was lore-only — remove it entirely.
+      unlinkSync(filePath);
+    } else {
+      writeFileSync(filePath, `${remainder}\n`, "utf8");
+    }
+    clearCache(filePath);
     return true;
   } catch {
     return false;

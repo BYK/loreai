@@ -2548,6 +2548,7 @@ async function cmdExport(
     exportLoreFile,
     exportInlineToAgentsFile,
     deleteLoreFile,
+    removeLoreSectionFromFile,
   } = await import("@loreai/core");
   const cfg = loreConfig();
 
@@ -2559,35 +2560,43 @@ async function cmdExport(
   }
 
   const entries = ltm.forProject(projectPath, false);
-  const written: string[] = [];
+  const agentsFilePath = join(projectPath, cfg.agentsFile.path);
 
   if (entries.length === 0) {
-    // No knowledge for this project — remove a stale .lore.md so it can't
-    // re-import deleted entries from git.
-    if (cfg.loreFile.enabled) {
-      const removed = deleteLoreFile(projectPath);
-      console.log(
-        removed
-          ? `No knowledge for ${projectPath} — removed stale .lore.md.`
-          : `No knowledge for ${projectPath} — nothing to export.`,
-      );
+    // No knowledge for this project — fully reconcile the on-disk files so no
+    // stale entries remain to be re-imported from git. This must cover EVERY
+    // config combination, not just .lore.md: a dangling AGENTS.md pointer (to a
+    // now-deleted .lore.md) or a stale inline AGENTS.md knowledge section would
+    // otherwise survive — exactly the drift this command exists to fix.
+    const cleaned: string[] = [];
+    if (cfg.loreFile.enabled && deleteLoreFile(projectPath)) {
+      cleaned.push(join(projectPath, ".lore.md"));
+    }
+    // Strip lore's section from the agents file (pointer in the default config,
+    // inline knowledge in the agentsFile-only config). Preserves user content.
+    if (cfg.agentsFile.enabled && removeLoreSectionFromFile(agentsFilePath)) {
+      cleaned.push(agentsFilePath);
+    }
+    if (cleaned.length) {
+      console.log(`No knowledge for ${projectPath} — cleaned stale file(s):`);
+      for (const f of cleaned) console.log(`  ${f}`);
+      console.log("Commit the change(s) to keep git in sync.");
     } else {
       console.log(`No knowledge for ${projectPath} — nothing to export.`);
     }
     return;
   }
 
+  const written: string[] = [];
   if (cfg.loreFile.enabled && cfg.agentsFile.enabled) {
-    const filePath = join(projectPath, cfg.agentsFile.path);
-    exportToFile({ projectPath, filePath });
-    written.push(join(projectPath, ".lore.md"), filePath);
+    exportToFile({ projectPath, filePath: agentsFilePath });
+    written.push(join(projectPath, ".lore.md"), agentsFilePath);
   } else if (cfg.loreFile.enabled) {
     exportLoreFile(projectPath);
     written.push(join(projectPath, ".lore.md"));
   } else if (cfg.agentsFile.enabled) {
-    const filePath = join(projectPath, cfg.agentsFile.path);
-    exportInlineToAgentsFile({ projectPath, filePath });
-    written.push(filePath);
+    exportInlineToAgentsFile({ projectPath, filePath: agentsFilePath });
+    written.push(agentsFilePath);
   } else {
     console.log(
       "Both loreFile and agentsFile are disabled in config — nothing written.",
