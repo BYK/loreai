@@ -2836,6 +2836,7 @@ describe("gradient — distillation snapshot caching", () => {
   const SID = "distill-snapshot-sess";
   const PID_KEY = "distill-snapshot-project";
   let projectId: string;
+  let createdCounter = 0;
 
   function insertDistillation(opts: {
     sessionID: string;
@@ -2859,15 +2860,16 @@ describe("gradient — distillation snapshot caching", () => {
         0,
         Math.ceil(opts.observations.length / 3),
         opts.archived ?? 0,
-        Date.now(),
+        Date.now() + createdCounter++,
       );
     return id;
   }
 
   beforeAll(() => {
     projectId = ensureProject(`/test/${PID_KEY}`);
-    // Small context to force gradient mode (layer 1+)
-    setModelLimits({ context: 5_000, output: 1_000 });
+    // Wide enough to avoid emergency Layer 4; tests explicitly force Layer 1
+    // where the warm distilled-prefix cache is used.
+    setModelLimits({ context: 50_000, output: 1_000 });
     calibrate(0);
   });
 
@@ -2876,6 +2878,7 @@ describe("gradient — distillation snapshot caching", () => {
     resetPrefixCache(SID);
     resetRawWindowCache(SID);
     resetDistillationSnapshot(SID);
+    createdCounter = 0;
     db().query("DELETE FROM distillations WHERE project_id = ?").run(projectId);
   });
 
@@ -2904,6 +2907,7 @@ describe("gradient — distillation snapshot caching", () => {
     );
 
     const projectPath = `/test/${PID_KEY}`;
+    setForceMinLayer(1, SID);
     const result1 = transform({ messages, projectPath, sessionID: SID });
     expect(result1.layer).toBeGreaterThanOrEqual(1);
 
@@ -2914,6 +2918,7 @@ describe("gradient — distillation snapshot caching", () => {
     });
 
     // Same messages (same last user message) — should get cached snapshot
+    setForceMinLayer(1, SID);
     const result2 = transform({ messages, projectPath, sessionID: SID });
     expect(result2.layer).toBeGreaterThanOrEqual(1);
 
@@ -2937,7 +2942,7 @@ describe("gradient — distillation snapshot caching", () => {
     expect(text1).not.toContain("should NOT be consumed");
   });
 
-  test("new user message triggers distillation refresh", () => {
+  test("new gen-0 rows do not rewrite the warm distilled prefix at a turn boundary", () => {
     insertDistillation({
       sessionID: SID,
       observations: "- First observation",
@@ -2946,6 +2951,7 @@ describe("gradient — distillation snapshot caching", () => {
     const projectPath = `/test/${PID_KEY}`;
 
     // First call with user msg u-0
+    setForceMinLayer(1, SID);
     const messages1 = Array.from({ length: 16 }, (_, i) =>
       makeMsg(
         `ref-${i}`,
@@ -2960,6 +2966,7 @@ describe("gradient — distillation snapshot caching", () => {
       sessionID: SID,
     });
     expect(result1.layer).toBeGreaterThanOrEqual(1);
+    expect(inspectSessionState(SID)?.hasPrefixCache).toBe(true);
 
     // Insert a new distillation row
     insertDistillation({
@@ -2967,11 +2974,15 @@ describe("gradient — distillation snapshot caching", () => {
       observations: "- Second observation after turn boundary",
     });
 
-    // Append a NEW user message — this is a turn boundary, should refresh
+    // Append a NEW user message — this is a turn boundary, so the DB snapshot
+    // refreshes, but the rendered prefix remains frozen while the session is
+    // warm. Rendering the appended gen-0 row here would rewrite messages[1]
+    // near the prompt front and bust the Anthropic cache.
     const messages2 = [
       ...messages1,
       makeMsg("ref-new-user", "user", "New question from the user", SID),
     ];
+    setForceMinLayer(1, SID);
     const result2 = transform({
       messages: messages2,
       projectPath,
@@ -2979,11 +2990,71 @@ describe("gradient — distillation snapshot caching", () => {
     });
     expect(result2.layer).toBeGreaterThanOrEqual(1);
 
-    // The prefix should now contain the new distillation
+    // The new row is visible in the DB but must NOT be rendered into the warm
+    // prefix. It will be folded in after onIdleResume clears prefixCache.
     const allText = result2.messages
       .map((m) => m.parts.map((p) => ("text" in p ? p.text : "")).join())
       .join();
-    expect(allText).toContain("Second observation");
+    expect(allText).toContain("First observation");
+    expect(allText).not.toContain("Second observation");
+  });
+
+  test("first gen-0 row is also deferred when the warm session had no prefix", () => {
+    const projectPath = `/test/${PID_KEY}`;
+    const messages1 = Array.from({ length: 16 }, (_, i) =>
+      makeMsg(
+        `first-row-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "X".repeat(1_000),
+        SID,
+      ),
+    );
+
+    setForceMinLayer(1, SID);
+    const result1 = transform({
+      messages: messages1,
+      projectPath,
+      sessionID: SID,
+    });
+    expect(result1.layer).toBeGreaterThanOrEqual(1);
+    expect(inspectSessionState(SID)?.hasPrefixCache).toBe(true);
+    expect(
+      result1.messages.some((m) => m.info.id === "lore-distilled-assistant"),
+    ).toBe(false);
+
+    insertDistillation({
+      sessionID: SID,
+      observations: "- First warm-row observation that must wait for idle",
+    });
+
+    const messages2 = [
+      ...messages1,
+      makeMsg("first-row-new-user", "user", "Next warm turn", SID),
+    ];
+    setForceMinLayer(1, SID);
+    const warm = transform({
+      messages: messages2,
+      projectPath,
+      sessionID: SID,
+    });
+    const warmText = warm.messages
+      .map((m) => m.parts.map((p) => ("text" in p ? p.text : "")).join())
+      .join();
+    expect(warmText).not.toContain("First warm-row observation");
+
+    setLastTurnAtForTest(SID, Date.now() - 600_000);
+    expect(onIdleResume(SID, 60_000).triggered).toBe(true);
+
+    setForceMinLayer(1, SID);
+    const cold = transform({
+      messages: messages2,
+      projectPath,
+      sessionID: SID,
+    });
+    const coldText = cold.messages
+      .map((m) => m.parts.map((p) => ("text" in p ? p.text : "")).join())
+      .join();
+    expect(coldText).toContain("First warm-row observation");
   });
 
   test("onIdleResume clears distillation snapshot", () => {
@@ -3003,6 +3074,7 @@ describe("gradient — distillation snapshot caching", () => {
         SID,
       ),
     );
+    setForceMinLayer(1, SID);
     transform({ messages, projectPath, sessionID: SID });
 
     // Verify snapshot exists via inspectSessionState
@@ -3025,6 +3097,7 @@ describe("gradient — distillation snapshot caching", () => {
     expect(state2?.distillationSnapshot).toBeNull();
 
     // Next transform should pick up the new distillation (same user messages — but snapshot was cleared)
+    setForceMinLayer(1, SID);
     const result = transform({ messages, projectPath, sessionID: SID });
     const allText = result.messages
       .map((m) => m.parts.map((p) => ("text" in p ? p.text : "")).join())
