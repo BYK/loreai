@@ -50,7 +50,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(40);
+    expect(row.version).toBe(41);
   });
 
   test("knowledge_tombstones table exists (migration v40)", () => {
@@ -877,6 +877,7 @@ describe("db", () => {
       ltmPinText: "pinned LTM text",
       ltmPinTokens: 90,
       ltmPinKeys: JSON.stringify(["a:1", "b:2"]),
+      dedupDecisions: JSON.stringify([["m1:p1", true]]),
     });
     const loaded = loadSessionTracking(sid);
     expect(loaded).not.toBeNull();
@@ -888,6 +889,7 @@ describe("db", () => {
     expect(loaded?.ltmPinText).toBe("pinned LTM text");
     expect(loaded?.ltmPinTokens).toBe(90);
     expect(loaded?.ltmPinKeys).toBe(JSON.stringify(["a:1", "b:2"]));
+    expect(loaded?.dedupDecisions).toBe(JSON.stringify([["m1:p1", true]]));
   });
 
   test("saveSessionTracking partial update preserves other fields", () => {

@@ -377,6 +377,13 @@ type SessionState = {
    * marginal value mid-chain since the model already has raw messages.
    */
   distillationSnapshot: DistillationSnapshot | null;
+  /**
+   * Cross-turn dedup decisions, keyed by "<messageID>:<partID>" → wasCollapsed.
+   * Keeps deduplicateToolOutputs() stable as the conversation grows: a tool
+   * output already sent (full or collapsed) keeps that form so the prompt cache
+   * isn't busted by a newly-appended later duplicate flipping an early message.
+   */
+  dedupDecisions: Map<string, boolean>;
 };
 
 function makeSessionState(): SessionState {
@@ -400,6 +407,7 @@ function makeSessionState(): SessionState {
     zeroCacheWriteTurns: 0,
 
     distillationSnapshot: null,
+    dedupDecisions: new Map(),
   };
 }
 
@@ -492,6 +500,9 @@ export function onIdleResume(
   state.prefixCache = null;
   state.rawWindowCache = null;
   state.distillationSnapshot = null;
+  // Cache is cold after idle eviction — a fresh window will be rebuilt, so the
+  // stable-dedup memo can reset too (its purpose is warm-cache stability).
+  state.dedupDecisions.clear();
   state.cameOutOfIdle = true;
   state.postIdleCompact = !skipCompact;
   return { triggered: true, idleMs };
@@ -1098,6 +1109,16 @@ function dedupAnnotation(
 export function deduplicateToolOutputs(
   messages: MessageWithParts[],
   currentTurnIdx: number,
+  /**
+   * Optional per-session memo of prior collapse decisions, keyed by
+   * `"<messageID>:<partID>"` → wasCollapsed. Makes dedup STABLE across turns:
+   * once a tool output has been sent (full or collapsed) it keeps that form, so
+   * a newly-appended later duplicate can't retroactively flip an already-cached
+   * earlier message and bust the prompt cache. Caller persists this map across
+   * transform() calls (per session). When omitted, dedup is stateless (legacy
+   * behavior — still correct, just not cross-turn-stable).
+   */
+  stableDecisions?: Map<string, boolean>,
 ): MessageWithParts[] {
   // Track latest occurrence: contentKey → latest message index
   const contentLatest = new Map<string, number>();
@@ -1181,8 +1202,29 @@ export function deduplicateToolOutputs(
         }
       }
 
-      // Keep if this is both the latest content AND not covered by a later read
-      if (isLatestContent && !coveredByLater) return part;
+      // Cross-turn stability: if we already decided this exact tool part's
+      // fate on a prior turn, honor it verbatim. A part sent full stays full;
+      // a part collapsed stays collapsed. This prevents a newly-appended later
+      // duplicate from retroactively collapsing an already-cached earlier
+      // message (which would change its bytes and bust the prompt cache).
+      const decisionKey = stableDecisions
+        ? `${msg.info.id}:${part.id}`
+        : undefined;
+      const priorCollapsed = decisionKey
+        ? stableDecisions?.get(decisionKey)
+        : undefined;
+
+      // Fresh decision: keep if this is both the latest content AND not covered
+      // by a later read. A prior decision (when present) overrides this.
+      const freshKeep = isLatestContent && !coveredByLater;
+      const collapse = priorCollapsed ?? !freshKeep;
+
+      if (decisionKey && priorCollapsed === undefined) {
+        // Record the first-seen decision so it sticks on later turns.
+        stableDecisions?.set(decisionKey, collapse);
+      }
+
+      if (!collapse) return part;
 
       // This is a duplicate — replace with compact annotation.
       // Drop structured `blocks` — the content is being compressed away.
@@ -1544,6 +1586,43 @@ function distilledPrefixCached(
     prefixTokens: tokens,
   };
   return { messages, tokens };
+}
+
+/**
+ * Serialize the cross-turn dedup decision memo for a session to a JSON string,
+ * so the host can persist it (survives gateway restarts). Returns null when the
+ * session has no recorded decisions.
+ */
+export function exportDedupDecisions(sessionID: string): string | null {
+  const state = sessionStates.get(sessionID);
+  if (!state || state.dedupDecisions.size === 0) return null;
+  return JSON.stringify(Array.from(state.dedupDecisions.entries()));
+}
+
+/**
+ * Restore a previously-persisted dedup decision memo into a session's state.
+ * Ignores malformed input (the memo is an optimization — a bad blob just means
+ * the first post-restart turn re-derives decisions). Does not overwrite an
+ * already-populated in-memory memo.
+ */
+export function importDedupDecisions(sessionID: string, json: string): void {
+  const state = getSessionState(sessionID);
+  if (state.dedupDecisions.size > 0) return;
+  try {
+    const parsed = JSON.parse(json);
+    if (!Array.isArray(parsed)) return;
+    for (const entry of parsed) {
+      if (
+        Array.isArray(entry) &&
+        typeof entry[0] === "string" &&
+        typeof entry[1] === "boolean"
+      ) {
+        state.dedupDecisions.set(entry[0], entry[1]);
+      }
+    }
+  } catch {
+    // Corrupt blob — start fresh.
+  }
 }
 
 // For testing only — reset prefix cache state for a specific session (or all)
@@ -2083,7 +2162,14 @@ function transformInner(input: {
   // ones with compact annotations. This can save thousands of tokens for sessions
   // with repeated file reads, potentially avoiding escalation to higher layers.
   const turnStart = currentTurnStart(input.messages);
-  const dedupMessages = deduplicateToolOutputs(input.messages, turnStart);
+  // Pass the per-session decision memo so dedup stays byte-stable across turns
+  // (an already-sent output keeps its full/collapsed form). Only when we have a
+  // session to scope the memo to.
+  const dedupMessages = deduplicateToolOutputs(
+    input.messages,
+    turnStart,
+    sid ? sessState.dedupDecisions : undefined,
+  );
 
   const distillations = sid
     ? loadDistillationsCached(input.projectPath, sid, input.messages, sessState)

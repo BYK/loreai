@@ -116,6 +116,8 @@ export {
   shouldCompress,
   getTier,
   recordCacheUsage,
+  exportDedupDecisions,
+  importDedupDecisions,
   needsUrgentDistillation,
   calibrate,
   setLtmTokens,

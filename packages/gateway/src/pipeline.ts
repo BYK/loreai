@@ -38,6 +38,8 @@ import {
   distillLimiter,
   curatorLimiter,
   recordCacheUsage,
+  exportDedupDecisions,
+  importDedupDecisions,
   calibrate,
   getLastTransformedCount,
   getLastTransformEstimate,
@@ -405,6 +407,7 @@ export async function resetPipelineState(opts?: {
   headerSessionIndex.clear();
   ltmSessionCache.clear();
   ltmPinnedText.clear();
+  lastSavedDedupDecisions.clear();
   stableLtmCache.clear();
   // Shut down the batch queue before clearing the client. On process exit
   // (`fast`), skip the synchronous LLM drain — replaying queued background
@@ -505,6 +508,12 @@ const ltmPinnedText = new Map<
   string,
   { formatted: string; tokenCount: number; entryKeys?: string[] }
 >();
+
+/**
+ * Last-persisted serialized dedup-decision memo per session — a change guard so
+ * we only write `dedup_decisions` to the DB on turns where it actually changed.
+ */
+const lastSavedDedupDecisions = new Map<string, string | undefined>();
 
 /**
  * FNV-1a 32-bit hash of a string, returned as a short hex string. Used to
@@ -992,6 +1001,7 @@ async function initIfNeeded(
         }
         ltmSessionCache.delete(sessionID);
         ltmPinnedText.delete(sessionID);
+        lastSavedDedupDecisions.delete(sessionID);
         stableLtmCache.delete(sessionID);
         cwdWarned.delete(sessionID);
         // Clear subagent parent-pending dedup entries for this session —
@@ -1569,6 +1579,11 @@ function getOrCreateSession(
         tokenCount: persisted.ltmPinTokens,
         ...(entryKeys ? { entryKeys } : {}),
       });
+    }
+    // Restore the cross-turn dedup decision memo so the first post-restart turn
+    // doesn't flip an already-cached message's full/collapsed form (v41).
+    if (persisted?.dedupDecisions) {
+      importDedupDecisions(sessionID, persisted.dedupDecisions);
     }
     sessions.set(sessionID, state);
   }
@@ -4894,6 +4909,17 @@ async function handleConversationTurn(
     const hasToolParts = last.parts.some((p) => p.type === "tool");
     if (hasToolParts) break;
     result.messages.pop();
+  }
+
+  // Persist the cross-turn dedup decision memo when it changed, so the stable
+  // full/collapsed form of each tool output survives a gateway restart (v41).
+  // Cheap change-guard avoids a DB write on turns where dedup didn't run.
+  {
+    const serialized = exportDedupDecisions(sessionID);
+    if (serialized !== lastSavedDedupDecisions.get(sessionID)) {
+      lastSavedDedupDecisions.set(sessionID, serialized ?? undefined);
+      saveSessionTracking(sessionID, { dedupDecisions: serialized });
+    }
   }
 
   // --- 7b. LTM refresh on emergency layer ---

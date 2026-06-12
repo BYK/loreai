@@ -1075,6 +1075,15 @@ const MIGRATIONS: string[] = [
   CREATE INDEX IF NOT EXISTS idx_knowledge_tombstones_project
     ON knowledge_tombstones (project_id);
   `,
+  `
+  -- Version 41: Cross-turn dedup decisions.
+  -- JSON map of "<messageID>:<partID>" -> wasCollapsed, recording whether each
+  -- tool output was sent full or collapsed. Persisted so the decision survives
+  -- a gateway restart: without it, the first post-restart turn re-derives dedup
+  -- from scratch and may flip an already-cached message (full <-> collapsed),
+  -- busting the prompt cache once. NULL for pre-v41 rows / sessions.
+  ALTER TABLE session_state ADD COLUMN dedup_decisions TEXT;
+  `,
 ];
 
 /**
@@ -1387,6 +1396,12 @@ function recoverMissingObjects(database: Database) {
     // Version 39: reorder-tolerant LTM diff-pin entry-set keys.
     if (!scols.some((c) => c.name === "ltm_pin_keys")) {
       database.exec("ALTER TABLE session_state ADD COLUMN ltm_pin_keys TEXT;");
+    }
+    // Version 41: cross-turn dedup decisions.
+    if (!scols.some((c) => c.name === "dedup_decisions")) {
+      database.exec(
+        "ALTER TABLE session_state ADD COLUMN dedup_decisions TEXT;",
+      );
     }
   }
 }
@@ -2022,6 +2037,8 @@ export type SessionTrackingState = {
   ltmPinTokens?: number | null;
   /** JSON array of sorted "id:hash(title+content)" keys for the pinned entry set (v39). */
   ltmPinKeys?: string | null;
+  /** JSON map of "<messageID>:<partID>" -> wasCollapsed for stable dedup (v41). */
+  dedupDecisions?: string | null;
   // v24: session identity
   fingerprint?: string;
   headerSessionId?: string | null;
@@ -2103,6 +2120,10 @@ export function saveSessionTracking(
   if (state.ltmPinKeys !== undefined) {
     sets.push("ltm_pin_keys = ?");
     vals.push(state.ltmPinKeys);
+  }
+  if (state.dedupDecisions !== undefined) {
+    sets.push("dedup_decisions = ?");
+    vals.push(state.dedupDecisions);
   }
   // v24: session identity
   if (state.fingerprint !== undefined) {
@@ -2197,6 +2218,7 @@ export type LoadedSessionTracking = {
   ltmPinTokens: number | null;
   // v39: reorder-tolerant pin entry-set keys (JSON)
   ltmPinKeys: string | null;
+  dedupDecisions: string | null;
   // v24: session identity
   fingerprint: string;
   headerSessionId: string | null;
@@ -2233,7 +2255,7 @@ export function loadSessionTracking(
       `SELECT last_curated_at, message_count, turns_since_curation,
               consecutive_text_only_turns,
               ltm_cache_text, ltm_cache_tokens, ltm_pin_text, ltm_pin_tokens,
-              ltm_pin_keys,
+              ltm_pin_keys, dedup_decisions,
               fingerprint, header_session_id, header_name,
               resolved_conversation_ttl, warmup_state,
               dynamic_context_cap, bust_rate_ema, inter_bust_interval_ema,
@@ -2253,6 +2275,7 @@ export function loadSessionTracking(
     ltm_pin_text: string | null;
     ltm_pin_tokens: number | null;
     ltm_pin_keys: string | null;
+    dedup_decisions: string | null;
     fingerprint: string;
     header_session_id: string | null;
     header_name: string | null;
@@ -2282,6 +2305,7 @@ export function loadSessionTracking(
     ltmPinText: row.ltm_pin_text,
     ltmPinTokens: row.ltm_pin_tokens,
     ltmPinKeys: row.ltm_pin_keys,
+    dedupDecisions: row.dedup_decisions,
     fingerprint: row.fingerprint,
     headerSessionId: row.header_session_id,
     headerName: row.header_name,
