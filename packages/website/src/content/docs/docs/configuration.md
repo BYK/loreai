@@ -128,7 +128,7 @@ Curator scheduling and consolidation thresholds.
 |---|---|---|---|---|
 | `enabled` | boolean | `true` |  | Enable the curator (knowledge extraction from conversation). Default: true. |
 | `onIdle` | boolean | `true` |  | Run the curator on session idle (in addition to turn-based). Default: true. |
-| `inFlight` | boolean | `false` |  | Run the curator mid-conversation (turn-based), not just on idle. Default: false — mid-session curation changes the knowledge base, which rewrites the context-bound LTM block (system[2]) and busts the prompt cache for the rest of a large conversation. Deferring curation to idle makes that rewrite free (the cache is cold then). |
+| `inFlight` | boolean | `false` |  | Run the curator mid-conversation (turn-based), not just on idle. Default: false. WARNING: only enable on free-write / non-caching providers (e.g. MiniMax). On cache-sensitive providers (Anthropic), mid-session curation changes the knowledge base, which rewrites the context-bound LTM block (system[2]) and busts the prompt cache for the rest of a large conversation (a single change can re-write hundreds of thousands of cached tokens). Deferring curation to idle makes that rewrite free (the cache is cold then). Where cache writes are free this is harmless and yields fresher knowledge sooner. |
 | `afterTurns` | number | `3` | min 1 | Minimum turns between curator runs. Default: 3. |
 | `maxEntries` | number | `40` | min 10 | Max knowledge entries per project before consolidation. Default: 40. |
 

@@ -280,10 +280,14 @@ export const LoreConfig = z.object({
         .default(false)
         .describe(
           "Run the curator mid-conversation (turn-based), not just on idle. " +
-            "Default: false — mid-session curation changes the knowledge base, " +
-            "which rewrites the context-bound LTM block (system[2]) and busts " +
-            "the prompt cache for the rest of a large conversation. Deferring " +
-            "curation to idle makes that rewrite free (the cache is cold then).",
+            "Default: false. WARNING: only enable on free-write / non-caching " +
+            "providers (e.g. MiniMax). On cache-sensitive providers (Anthropic), " +
+            "mid-session curation changes the knowledge base, which rewrites the " +
+            "context-bound LTM block (system[2]) and busts the prompt cache for " +
+            "the rest of a large conversation (a single change can re-write " +
+            "hundreds of thousands of cached tokens). Deferring curation to idle " +
+            "makes that rewrite free (the cache is cold then). Where cache writes " +
+            "are free this is harmless and yields fresher knowledge sooner.",
         ),
       afterTurns: z
         .number()

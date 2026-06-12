@@ -554,6 +554,45 @@ export function ltmEntryKeys(
     .sort();
 }
 
+/** system[1] (stable LTM) cache breakpoint TTL in ms. Once an idle gap exceeds
+ *  this, that prefix is cold and can be rebuilt with fresh preferences for free. */
+export const STABLE_LTM_TTL_MS = 3_600_000; // 1h — matches the system[1] cache_control
+
+/**
+ * Decide whether in-flight (turn-based) curation should run this turn.
+ * Off by default (`curator.inFlight === false`): mid-session curation rewrites
+ * system[2] and busts the prompt cache. Pure/testable.
+ */
+export function shouldRunInFlightCuration(input: {
+  knowledgeEnabled: boolean;
+  inFlight: boolean;
+  turnsSinceCuration: number;
+  effectiveAfterTurns: number;
+  curationScheduled: boolean;
+  curatorBusy: boolean;
+}): boolean {
+  return (
+    input.knowledgeEnabled &&
+    input.inFlight &&
+    input.turnsSinceCuration >= input.effectiveAfterTurns &&
+    !input.curationScheduled &&
+    !input.curatorBusy
+  );
+}
+
+/**
+ * Decide whether the stable LTM block (system[1]: preferences + entities) should
+ * be refreshed on an idle resume. Only when the idle gap exceeds the system[1]
+ * 1h cache TTL — that prefix is then cold, so rebuilding it with freshly-curated
+ * preferences costs nothing. Shorter gaps keep it pinned. Pure/testable.
+ */
+export function shouldRefreshStableLtm(
+  idleTriggered: boolean,
+  idleMs: number,
+): boolean {
+  return idleTriggered && idleMs >= STABLE_LTM_TTL_MS;
+}
+
 /**
  * Extract the entry-ID portion ("<id>" before the ":") from a sorted entry-key
  * array. Used to feed the previous turn's selected set back into forSession()
@@ -3612,11 +3651,14 @@ function scheduleBackgroundWork(
   // (idle.ts), where the cache is cold so the rewrite is free. `turnsSinceCuration`
   // keeps accumulating during the active conversation and fires on the next idle.
   if (
-    cfg.knowledge.enabled &&
-    cfg.curator.inFlight &&
-    sessionState.turnsSinceCuration >= effectiveAfterTurns &&
-    !sessionState.curationScheduled &&
-    !curatorLimiter.isBusy(sessionID)
+    shouldRunInFlightCuration({
+      knowledgeEnabled: cfg.knowledge.enabled,
+      inFlight: cfg.curator.inFlight,
+      turnsSinceCuration: sessionState.turnsSinceCuration,
+      effectiveAfterTurns,
+      curationScheduled: !!sessionState.curationScheduled,
+      curatorBusy: curatorLimiter.isBusy(sessionID),
+    })
   ) {
     sessionState.curationScheduled = true;
     runBackground(
@@ -4668,11 +4710,9 @@ async function handleConversationTurn(
     // costs nothing. (Lore promotes long-running sessions; without this they
     // would keep using stale preferences indefinitely.) A shorter idle gap
     // leaves system[1] warm, so we keep it pinned to preserve the 1h cache.
-    const STABLE_LTM_TTL_MS = 3_600_000; // 1h — matches the system[1] breakpoint
-    let refreshedStable = false;
-    if (idleResult.idleMs >= STABLE_LTM_TTL_MS) {
+    const refreshedStable = shouldRefreshStableLtm(true, idleResult.idleMs);
+    if (refreshedStable) {
       stableLtmCache.delete(sessionID);
-      refreshedStable = true;
     }
     log.info(
       `session idle ${Math.round(idleResult.idleMs / 60_000)}min — refreshing caches` +
