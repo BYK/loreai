@@ -9,6 +9,8 @@ vi.mock("../src/fetch", () => ({
 
 import {
   fetchModelData,
+  ensureModelDataReady,
+  isModelDataLoaded,
   getModelEntry,
   getModelEntrySync,
   getWorkerModel,
@@ -281,6 +283,73 @@ describe("fetchModelData", () => {
     const data = await fetchModelData();
     expect(data.size).toBe(1); // Only OpenAI, no Anthropic
     expect(data.get("gpt-5.4")?.cost?.input).toBe(2.5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ensureModelDataReady / isModelDataLoaded (cold-start race)
+// ---------------------------------------------------------------------------
+
+describe("ensureModelDataReady", () => {
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    clearModelDataCache();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    resetWorkerModelState();
+  });
+
+  test("loads model data when not yet cached", async () => {
+    expect(isModelDataLoaded()).toBe(false);
+    globalThis.fetch = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), {
+          status: 200,
+        }),
+      ),
+    ) as unknown as typeof fetch;
+
+    await ensureModelDataReady();
+
+    expect(isModelDataLoaded()).toBe(true);
+    // Subsequent synchronous lookups now see real data, not fallback.
+    expect(getModelEntrySync("claude-opus-4-6").limit?.context).toBe(1_000_000);
+  });
+
+  test("returns immediately without fetching when already loaded", async () => {
+    const fetchSpy = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify(buildModelsDevResponse(DEFAULT_MODELS)), {
+          status: 200,
+        }),
+      ),
+    );
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    await ensureModelDataReady(); // first load
+    const callsAfterLoad = fetchSpy.mock.calls.length;
+
+    await ensureModelDataReady(); // should be a no-op (data already cached)
+    expect(fetchSpy.mock.calls.length).toBe(callsAfterLoad);
+  });
+
+  test("resolves within the timeout even if the fetch never completes (never hangs)", async () => {
+    // Fetch hangs forever — ensureModelDataReady must still resolve via timeout.
+    globalThis.fetch = vi.fn(
+      () => new Promise(() => {}),
+    ) as unknown as typeof fetch;
+
+    const start = Date.now();
+    await ensureModelDataReady(50);
+    const elapsed = Date.now() - start;
+
+    expect(elapsed).toBeLessThan(2_000); // returned via the 50ms timeout
+    // Data not loaded (fetch never resolved) — caller falls back gracefully.
+    expect(isModelDataLoaded()).toBe(false);
   });
 });
 

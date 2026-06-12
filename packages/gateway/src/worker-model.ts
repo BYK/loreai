@@ -350,6 +350,40 @@ export function getModelEntrySync(modelID: string): ModelsDevEntry {
   return fallbackEntry(modelID);
 }
 
+/** True when models.dev data has been loaded into the in-memory cache. */
+export function isModelDataLoaded(): boolean {
+  return cachedModelData !== null;
+}
+
+/**
+ * Best-effort wait for models.dev data to be available before a synchronous
+ * getModelSpec/getModelEntrySync lookup. Returns immediately if data is already
+ * loaded; otherwise kicks off (or joins) the fetch and waits at most
+ * `timeoutMs`, then resolves regardless so the caller never hangs on a slow or
+ * unreachable models.dev. This closes the cold-start race where the FIRST
+ * request after a restart computes its budget from fallback pricing/limits
+ * (e.g. l0cap=80000 instead of the model's real cap) before the fire-and-forget
+ * pre-warm resolves. After the first success the 1h cache serves everyone.
+ */
+export async function ensureModelDataReady(timeoutMs = 2_000): Promise<void> {
+  if (cachedModelData !== null) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      fetchModelData(),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+        // Don't let the timeout timer keep the event loop alive.
+        timer.unref?.();
+      }),
+    ]);
+  } catch {
+    // fetchModelData handles its own errors; never let this block the request.
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /** Clear cached data (for testing). */
 export function clearModelDataCache(): void {
   cachedModelData = null;

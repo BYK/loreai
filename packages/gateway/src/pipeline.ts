@@ -176,6 +176,7 @@ import {
   getWorkerModel,
   resetWorkerModelState,
   fetchModelData,
+  ensureModelDataReady,
   getModelEntrySync,
   lookupProviderRoute,
 } from "./worker-model";
@@ -4624,6 +4625,13 @@ async function handleConversationTurn(
   // applies it atomically there, so a concurrently-running request for a
   // different model can't clobber the values mid-flight (the cross-model
   // contamination that flipped l0cap 200000 ↔ 3571428 and thrashed layers).
+  //
+  // Close the cold-start race: the very first request after a restart can land
+  // before the fire-and-forget models.dev pre-warm resolves, which would size
+  // this turn's budget from fallback pricing/limits (wrong l0cap/usable for one
+  // turn). Wait briefly for real data; bounded so a slow/unreachable models.dev
+  // never hangs the request (falls back to the same fallback path as before).
+  await ensureModelDataReady();
   const modelSpec = getModelSpec(req.model);
   const cfg = loreConfig();
 
