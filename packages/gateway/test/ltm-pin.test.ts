@@ -8,7 +8,12 @@
  * re-ranking. See packages/gateway/src/pipeline.ts.
  */
 import { describe, test, expect } from "vitest";
-import { fnv1a, ltmEntryKeys, sameEntryKeys } from "../src/pipeline";
+import {
+  entryKeyIds,
+  fnv1a,
+  ltmEntryKeys,
+  sameEntryKeys,
+} from "../src/pipeline";
 
 type Entry = { id: string; title: string; content: string };
 
@@ -56,6 +61,25 @@ describe("ltmEntryKeys", () => {
   test("restricts keys to rendered ids when provided", () => {
     // B was dropped by budget packing — only a and c rendered.
     expect(ltmEntryKeys([A, B, C], ["a", "c"])).toEqual(ltmEntryKeys([A, C]));
+  });
+});
+
+describe("entryKeyIds", () => {
+  test("extracts the id portion from entry keys (sticky-set hint)", () => {
+    const keys = ltmEntryKeys([A, B, C]); // "<id>:<hash>" sorted
+    expect(entryKeyIds(keys)).toEqual(new Set(["a", "b", "c"]));
+  });
+
+  test("returns empty set for undefined", () => {
+    expect(entryKeyIds(undefined)).toEqual(new Set());
+  });
+
+  test("handles ids containing no colon defensively", () => {
+    expect(entryKeyIds(["plainid"])).toEqual(new Set(["plainid"]));
+  });
+
+  test("uses last colon so UUID-with-colon ids survive (hash is last segment)", () => {
+    expect(entryKeyIds(["a:b:c:deadbeef"])).toEqual(new Set(["a:b:c"]));
   });
 });
 

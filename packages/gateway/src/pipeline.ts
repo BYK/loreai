@@ -545,6 +545,22 @@ export function ltmEntryKeys(
     .sort();
 }
 
+/**
+ * Extract the entry-ID portion ("<id>" before the ":") from a sorted entry-key
+ * array. Used to feed the previous turn's selected set back into forSession()
+ * as a stability hint (stickyIds) so the budget-boundary selection doesn't
+ * churn turn-to-turn.
+ */
+export function entryKeyIds(keys: string[] | undefined): Set<string> {
+  const ids = new Set<string>();
+  if (!keys) return ids;
+  for (const k of keys) {
+    const idx = k.lastIndexOf(":");
+    ids.add(idx === -1 ? k : k.slice(0, idx));
+  }
+  return ids;
+}
+
 /** True when two sorted entry-key arrays are element-wise identical. */
 export function sameEntryKeys(
   a: string[] | undefined,
@@ -4737,6 +4753,13 @@ async function handleConversationTurn(
         if (!cached) {
           // Full context-bound budget — preferences have their own dedicated budget.
           const contextBudget = ltmBudget;
+          // Feed the previously-pinned entry set back in as a stability hint so
+          // per-turn relevance re-scoring doesn't churn the budget-boundary
+          // selection (which would bust the system[2] cache). New/removed/
+          // genuinely-more-relevant entries still change the set.
+          const stickyIds = entryKeyIds(
+            ltmPinnedText.get(sessionID)?.entryKeys,
+          );
           // Exclude preferences — they're already in system[1]
           const contextEntries = await ltm.forSession(
             projectPath,
@@ -4745,6 +4768,7 @@ async function handleConversationTurn(
             {
               excludeCategories: ["preference"],
               ...(contextHint ? { contextHint } : {}),
+              ...(stickyIds.size ? { stickyIds } : {}),
             },
           );
           if (contextEntries.length) {
@@ -4788,6 +4812,18 @@ async function handleConversationTurn(
             // Same entry set (or identical text) — keep the pinned text to
             // preserve the cache prefix. Zero bust on pure re-ranking.
             ltmText = pinned.formatted;
+            // Keep the session cache in lock-step with the pin so the persisted
+            // ltmCacheText never diverges from ltmPinText. Otherwise a restart
+            // would reload cache=freshText / pin=oldText, and the warm-cache
+            // byte-equality check would spuriously re-pin (one needless bust)
+            // and drop entryKeys. (Addresses review finding S1.)
+            if (cachedKeys && cached.formatted !== pinned.formatted) {
+              ltmSessionCache.set(sessionID, {
+                formatted: pinned.formatted,
+                tokenCount: pinned.tokenCount,
+              });
+              ltmDirty = true;
+            }
           } else {
             // Set changed, content changed, or first injection — pin the new
             // text along with its entry-key identity.
@@ -4877,6 +4913,9 @@ async function handleConversationTurn(
       const contextBudget = ltmBudget;
       const stableTokens = stableLtmCache.get(sessionID)?.tokenCount ?? 0;
       const contextHint = lastUserTextTrimmed(req);
+      // Stability hint: keep the previously-pinned set sticky so consecutive
+      // Layer-4 turns don't churn the selection (see step-6).
+      const stickyIds = entryKeyIds(ltmPinnedText.get(sessionID)?.entryKeys);
       const contextEntries = await ltm.forSession(
         projectPath,
         sessionID,
@@ -4884,6 +4923,7 @@ async function handleConversationTurn(
         {
           excludeCategories: ["preference"],
           ...(contextHint ? { contextHint } : {}),
+          ...(stickyIds.size ? { stickyIds } : {}),
         },
       );
       let refreshed = false;

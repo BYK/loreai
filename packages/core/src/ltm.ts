@@ -517,7 +517,27 @@ export type ForSessionOptions = {
    *  Mutually exclusive with `categories` — if both are provided,
    *  `categories` (include) wins. */
   excludeCategories?: (KnowledgeCategory | (string & {}))[];
+  /**
+   * IDs of entries that were selected on the PREVIOUS turn (the currently
+   * pinned system[2] set). These receive a relevance hysteresis bonus so they
+   * stay selected across turns unless a genuinely stronger entry displaces
+   * them or they are removed. Without this, vector scores re-computed against
+   * the evolving per-turn session context churn the budget-boundary subset
+   * every turn — each a real set change that busts the prompt cache. The bonus
+   * is multiplicative and modest, so a clearly more-relevant new entry still
+   * wins, but ties and minor fluctuations don't reshuffle the selected set.
+   */
+  stickyIds?: Set<string>;
 };
+
+/**
+ * Multiplicative relevance bonus applied to entries already selected on the
+ * previous turn (see ForSessionOptions.stickyIds). Tuned so a previously-shown
+ * entry keeps its slot against minor score fluctuations, but a new entry that
+ * scores >25% higher can still displace it — selection stays relevance-driven,
+ * just with anti-churn hysteresis.
+ */
+const STICKY_RELEVANCE_BONUS = 1.25;
 
 /**
  * Build a relevance-ranked, budget-capped list of knowledge entries for injection
@@ -760,6 +780,18 @@ export async function forSession(
   // the structural "map" that makes specific gotchas/decisions interpretable
   // — without them, a gotcha about a subsystem is harder to contextualize.
   const allScored = [...scoredProject, ...scoredCross];
+
+  // Set-stabilization hysteresis: boost entries that were selected last turn so
+  // the budget-boundary subset doesn't churn turn-to-turn (which would bust the
+  // system[2] prompt cache). Applied uniformly across all scoring paths. A new
+  // entry must out-score a sticky one by >(STICKY_RELEVANCE_BONUS-1) to displace
+  // it, so selection stays relevance-driven but resists minor fluctuations.
+  if (options?.stickyIds?.size) {
+    for (const s of allScored) {
+      if (options.stickyIds.has(s.entry.id)) s.score *= STICKY_RELEVANCE_BONUS;
+    }
+  }
+
   // Deterministic ordering: sort by score DESC, then by entry id ASC as a
   // stable tiebreak. Without the id tiebreak, equal/near-equal scores (or float
   // micro-variations from re-embedding the evolving session context) reorder

@@ -2025,7 +2025,9 @@ function transformInner(input: {
       distilledBudget,
       rawBudget,
       refreshLtm: false,
-      unsustainable: sid ? getSessionState(sid).consecutiveBusts >= 5 : false,
+      unsustainable: sid
+        ? getSessionState(sid).consecutiveBusts >= SUSTAINED_BUST_THRESHOLD
+        : false,
     };
   }
 
@@ -2180,7 +2182,9 @@ function transformInner(input: {
         distilledBudget,
         rawBudget,
         refreshLtm: false,
-        unsustainable: sid ? getSessionState(sid).consecutiveBusts >= 5 : false,
+        unsustainable: sid
+          ? getSessionState(sid).consecutiveBusts >= SUSTAINED_BUST_THRESHOLD
+          : false,
       };
     }
   }
@@ -2257,7 +2261,7 @@ function transformInner(input: {
   const nuclearRawTokens = olderTokens + currentTurnTokens;
 
   const unsustainable = sid
-    ? getSessionState(sid).consecutiveBusts >= 5
+    ? getSessionState(sid).consecutiveBusts >= SUSTAINED_BUST_THRESHOLD
     : false;
 
   return {
