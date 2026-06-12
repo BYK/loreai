@@ -22,6 +22,7 @@ import {
   _cchPreimage,
 } from "../src/cch";
 import { xxHash64 } from "../src/xxhash";
+import { log } from "@loreai/core";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -923,6 +924,117 @@ describe("resignBody", () => {
       new RegExp(`cc_version=${WORKER_VERSION}\\.[0-9a-f]{3};`),
     );
     expect(validateSeed(resigned)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// First-block invariant verification (Sentry early-warning)
+// ---------------------------------------------------------------------------
+
+describe("billing-header first-block invariant", () => {
+  /** Capture warnings emitted via the core log sink. */
+  let warnings: string[];
+
+  beforeEach(() => {
+    warnings = [];
+    log.registerSink({
+      info: () => {},
+      warn: (msg) => warnings.push(msg),
+      error: () => {},
+      captureException: () => {},
+    });
+  });
+
+  /** Build a body with the real billing header as the FIRST system block. */
+  const headerFirst = (extraBlocks: string[] = []) =>
+    JSON.stringify({
+      system: [
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.165.abc; cc_entrypoint=cli; cch=00000;",
+        },
+        ...extraBlocks.map((text) => ({ type: "text", text })),
+      ],
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+  test("does NOT warn when the billing header is the first occurrence (signBody)", () => {
+    signBody(headerFirst(["docs: `cch=00000` example"]));
+    expect(warnings).toHaveLength(0);
+  });
+
+  test("WARNS when content reproduces the FULL sentinel, even sorted after the real header", () => {
+    // Conservative invariant: any second `x-anthropic-billing-header:` marker is
+    // a hazard. Signing still succeeds (real header is first), but we surface it
+    // because we can't robustly guarantee first-match hit the real one.
+    signBody(
+      headerFirst([
+        "docs: `x-anthropic-billing-header: cc_version=2.1.0.aaa; cc_entrypoint=cli; cch=00000;`",
+      ]),
+    );
+    expect(warnings.length).toBeGreaterThan(0);
+    expect(warnings[0]).toContain("billing-header markers");
+  });
+
+  test("does NOT warn when content has a cch= token but NOT the full sentinel", () => {
+    // A bare `cch=00000` / `cc_entrypoint=…` fragment in content is NOT a
+    // duplicate marker, so it must not trip the guard (no false positives on
+    // the common case — e.g. the LTM entry from the original incident).
+    signBody(
+      headerFirst([
+        "gotcha: CCH_PLACEHOLDER = `cch=00000`; cc_entrypoint=cli appears here",
+      ]),
+    );
+    expect(warnings).toHaveLength(0);
+  });
+
+  test("WARNS when a sentinel-shaped block serializes BEFORE the real header (signBody)", () => {
+    // Simulates the dangerous reorder: a content block reproducing the full
+    // sentinel is placed first, the real header second. first-match would
+    // target the content block → cache-bust risk → must alert.
+    const body = JSON.stringify({
+      system: [
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.0.aaa; cc_entrypoint=cli; cch=00000;",
+        },
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.165.abc; cc_entrypoint=cli; cch=00000;",
+        },
+      ],
+      messages: [{ role: "user", content: "hi" }],
+    });
+    signBody(body);
+    expect(warnings.length).toBeGreaterThan(0);
+    expect(warnings[0]).toContain("first-block invariant violated");
+    expect(warnings[0]).toContain("signBody");
+  });
+
+  test("WARNS when a sentinel-shaped block serializes BEFORE the real header (resignBody)", () => {
+    const body = JSON.stringify({
+      system: [
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.0.aaa; cc_entrypoint=cli; cch=aaaaa;",
+        },
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.165.abc; cc_entrypoint=cli; cch=bbbbb;",
+        },
+      ],
+      messages: [{ role: "user", content: "hi there friend" }],
+    });
+    resignBody(body, "hi there friend");
+    expect(
+      warnings.some((w) => w.includes("first-block invariant violated")),
+    ).toBe(true);
+    expect(warnings.some((w) => w.includes("resignBody"))).toBe(true);
+  });
+
+  test("does NOT warn for a no-billing-header body", () => {
+    signBody('{"system":[{"type":"text","text":"no header here"}]}');
+    expect(warnings).toHaveLength(0);
   });
 });
 

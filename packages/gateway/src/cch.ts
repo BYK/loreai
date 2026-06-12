@@ -30,6 +30,8 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
+import { log } from "@loreai/core";
+import * as Sentry from "@sentry/bun";
 import { xxHash64 } from "./xxhash.ts";
 
 // ---------------------------------------------------------------------------
@@ -203,6 +205,67 @@ function cchPreimage(body: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// First-block invariant verification
+// ---------------------------------------------------------------------------
+
+/**
+ * The literal billing-header marker. The real header always starts with this;
+ * we count occurrences to detect ambiguity.
+ */
+const BILLING_MARKER = "x-anthropic-billing-header:";
+
+/**
+ * Verify the invariant the anchored signer relies on: the body contains
+ * exactly ONE `x-anthropic-billing-header:` marker.
+ *
+ * Both `signBody` and `resignBody` use first-match `.replace()` and trust that
+ * the single match is the real header (always system[0], nothing precedes it).
+ * That trust is only safe when the marker is unique. If a second sentinel
+ * appears — e.g. an LTM entry reproducing the whole header, or Anthropic
+ * reordering/duplicating system blocks — first-match could stamp the wrong
+ * token and bust the entire prompt cache. We can't tell the real header from a
+ * content copy by position alone, so any duplication is treated as a hazard.
+ *
+ * In practice this should never fire. When it does we surface it to Sentry as
+ * an early warning. Report-only: signing proceeds unchanged (the real header is
+ * still overwhelmingly likely to be first, so signing remains correct today).
+ *
+ * @param body — the serialized body being signed
+ * @param caller — "signBody" | "resignBody" for the alert fingerprint
+ */
+function verifyBillingHeaderUnique(body: string, caller: string): void {
+  const markerCount = body.split(BILLING_MARKER).length - 1;
+  if (markerCount <= 1) {
+    return; // unique (or absent) — invariant holds.
+  }
+
+  log.warn(
+    `cch: billing-header first-block invariant violated in ${caller} ` +
+      `(found ${markerCount} billing-header markers; expected 1) — ` +
+      `first-match may sign the wrong token and bust the prompt cache`,
+  );
+  if (Sentry.isInitialized()) {
+    Sentry.captureException(
+      new Error(
+        "cch: multiple billing-header sentinels in request body (cache-bust risk)",
+      ),
+      {
+        fingerprint: [
+          "LOREAI-GATEWAY",
+          "cch-billing-header-not-unique",
+          caller,
+        ],
+        extra: {
+          caller,
+          markerCount,
+          bodyLength: body.length,
+        },
+      },
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Signing
 // ---------------------------------------------------------------------------
 
@@ -227,6 +290,11 @@ function cchPreimage(body: string): string {
  * @returns body with the billing `cch=00000` replaced by `cch=XXXXX`
  */
 export function signBody(bodyWithPlaceholder: string): string {
+  if (!BILLING_SIGN_RE.test(bodyWithPlaceholder)) {
+    return bodyWithPlaceholder; // no billing placeholder to sign
+  }
+  verifyBillingHeaderUnique(bodyWithPlaceholder, "signBody");
+
   const hash = xxHash64(cchPreimage(bodyWithPlaceholder), WORKER_SEED);
   const cch = (hash & 0xfffffn).toString(16).padStart(5, "0");
   return bodyWithPlaceholder.replace(BILLING_SIGN_RE, `$1${cch}`);
@@ -313,6 +381,7 @@ export function resignBody(
   if (!BILLING_RESIGN_RE.test(serializedBody)) {
     return serializedBody;
   }
+  verifyBillingHeaderUnique(serializedBody, "resignBody");
 
   // Step 1+2: in a single anchored replace, swap cc_version for our worker
   // version + recomputed suffix and reset cch to the placeholder. cc_entrypoint
