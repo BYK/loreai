@@ -1194,9 +1194,11 @@ async function initIfNeeded(
   } catch (e) {
     log.info("metric backfill failed:", e);
   }
-  embedding.runStartupBackfill().catch((e) => {
-    log.error("embedding backfill failed:", e);
-  });
+  if (process.env.NODE_ENV !== "test") {
+    embedding.runStartupBackfill().catch((e) => {
+      log.error("embedding backfill failed:", e);
+    });
+  }
 
   // Index lat.md/ directory sections (content-hash-based, skips unchanged files).
   try {
