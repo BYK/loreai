@@ -7,6 +7,9 @@ import {
   getStatus,
   getDegradationWarning,
   getWorkerHealth,
+  markWorkerPaused,
+  isWorkerCreditPaused,
+  clearWorkerPaused,
   _resetForTest,
   _setNowForTest,
   type FailureReason,
@@ -305,6 +308,85 @@ describe("worker-health", () => {
       expect(allowWorkerProbe("s1")).toBe(false);
       // A different session is unaffected.
       expect(allowWorkerProbe("s2")).toBe(true);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Credit pause (HTTP 402)
+  // ---------------------------------------------------------------------------
+
+  describe("credit pause (402)", () => {
+    const PROBE_INTERVAL_MS = 5 * 60 * 1000;
+
+    test("markWorkerPaused pauses the session", () => {
+      expect(isWorkerCreditPaused("s1")).toBe(false);
+      markWorkerPaused("s1");
+      expect(isWorkerCreditPaused("s1")).toBe(true);
+      // Other sessions are unaffected.
+      expect(isWorkerCreditPaused("s2")).toBe(false);
+    });
+
+    test("re-marking does not reset the probe clock (idempotent)", () => {
+      const t0 = 2_000_000;
+      _setNowForTest(() => t0);
+      markWorkerPaused("s1");
+
+      // Advance to just before the probe interval, then re-mark.
+      _setNowForTest(() => t0 + PROBE_INTERVAL_MS - 1);
+      markWorkerPaused("s1"); // no-op — already paused
+      expect(isWorkerCreditPaused("s1")).toBe(true);
+
+      // Crossing the original interval still allows a probe.
+      _setNowForTest(() => t0 + PROBE_INTERVAL_MS);
+      expect(isWorkerCreditPaused("s1")).toBe(false);
+    });
+
+    test("allows one probe per CIRCUIT_PROBE_INTERVAL_MS, then re-pauses", () => {
+      const t0 = 3_000_000;
+      _setNowForTest(() => t0);
+      markWorkerPaused("s1");
+      expect(isWorkerCreditPaused("s1")).toBe(true);
+
+      // Before the interval: still paused.
+      _setNowForTest(() => t0 + PROBE_INTERVAL_MS - 1);
+      expect(isWorkerCreditPaused("s1")).toBe(true);
+
+      // At the interval: one probe allowed (returns false once)...
+      _setNowForTest(() => t0 + PROBE_INTERVAL_MS);
+      expect(isWorkerCreditPaused("s1")).toBe(false);
+      // ...and immediately re-pauses for the next interval.
+      expect(isWorkerCreditPaused("s1")).toBe(true);
+    });
+
+    test("recordWorkerSuccess clears the credit pause", () => {
+      markWorkerPaused("s1");
+      expect(isWorkerCreditPaused("s1")).toBe(true);
+      // Note: no failure-ladder entry exists for a credit-paused session.
+      recordWorkerSuccess("s1");
+      expect(isWorkerCreditPaused("s1")).toBe(false);
+    });
+
+    test("clearWorkerPaused clears the pause", () => {
+      markWorkerPaused("s1");
+      expect(isWorkerCreditPaused("s1")).toBe(true);
+      clearWorkerPaused("s1");
+      expect(isWorkerCreditPaused("s1")).toBe(false);
+    });
+
+    test("_resetForTest clears all credit pauses", () => {
+      markWorkerPaused("s1");
+      markWorkerPaused("s2");
+      _resetForTest();
+      expect(isWorkerCreditPaused("s1")).toBe(false);
+      expect(isWorkerCreditPaused("s2")).toBe(false);
+    });
+
+    test("does not feed the failure ladder (no Sentry escalation)", () => {
+      // Many credit pauses must never open the failure circuit.
+      for (let i = 0; i < 10; i++) markWorkerPaused("s1");
+      expect(allowWorkerProbe("s1")).toBe(true); // failure circuit untouched
+      expect(Sentry.captureMessage).not.toHaveBeenCalled();
+      expect(Sentry.captureException).not.toHaveBeenCalled();
     });
   });
 });

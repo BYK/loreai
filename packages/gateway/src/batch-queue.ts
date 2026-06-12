@@ -621,7 +621,10 @@ export function createBatchLLMClient(
   getAuth: (sessionID?: string, providerID?: string) => AuthCredential | null,
   defaultModel: { providerID: string; modelID: string },
   batchConfig?: BatchQueueConfig,
-): LLMClient & { shutdown: () => Promise<void>; stats: () => BatchStats } {
+): LLMClient & {
+  shutdown: (opts?: { drainQueue?: boolean }) => Promise<void>;
+  stats: () => BatchStats;
+} {
   const flushIntervalMs =
     batchConfig?.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
   const maxQueueSize = batchConfig?.maxQueueSize ?? DEFAULT_MAX_QUEUE_SIZE;
@@ -1120,19 +1123,33 @@ export function createBatchLLMClient(
      * 3. Switch to synchronous mode for future calls
      * 4. DON'T wait for inflight batches — they resolve eventually or expire
      */
-    async shutdown(): Promise<void> {
+    async shutdown(opts?: { drainQueue?: boolean }): Promise<void> {
       shuttingDown = true;
       if (flushTimer) {
         clearInterval(flushTimer);
         flushTimer = null;
       }
 
-      // Flush remaining items synchronously (batch API might not finish before process exits)
+      // `drainQueue` defaults to true (config/test resets drain gracefully).
+      // On process exit it is false: replaying queued background prompts as
+      // live LLM calls (with retries/backoff) is what made Ctrl+C hang for
+      // minutes. Resolve them with null instead — callers handle null
+      // gracefully and the work resumes next session.
+      const drainQueue = opts?.drainQueue !== false;
       if (queue.length > 0) {
-        log.info(
-          `batch shutdown: processing ${queue.length} remaining items synchronously`,
-        );
-        await fallbackAll(queue.splice(0));
+        if (drainQueue) {
+          log.info(
+            `batch shutdown: processing ${queue.length} remaining items synchronously`,
+          );
+          await fallbackAll(queue.splice(0));
+        } else {
+          log.info(
+            `batch shutdown: dropping ${queue.length} queued items (fast exit)`,
+          );
+          for (const item of queue.splice(0)) {
+            item.resolve(null);
+          }
+        }
       }
 
       // Clean up inflight poll timers (batches will expire naturally)

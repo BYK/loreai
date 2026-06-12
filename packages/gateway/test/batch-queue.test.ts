@@ -379,6 +379,37 @@ describe("BatchLLMClient", () => {
     expect(s.totalFallback).toBe(2);
   });
 
+  test("shutdown({ drainQueue: false }) drops queued items without calling inner (fast process exit)", async () => {
+    const inner = createMockLLMClient();
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      getTestAuth,
+      DEFAULT_MODEL,
+      {
+        flushIntervalMs: 60_000,
+        maxQueueSize: 100,
+      },
+    );
+
+    const p1 = client.prompt("sys", "msg1", { workerID: "lore-distill" });
+    const p2 = client.prompt("sys", "msg2", { workerID: "lore-curator" });
+    expect(client.stats().queued).toBe(2);
+
+    // Fast exit: queued background prompts must NOT be replayed as live LLM
+    // calls (that retry/backoff path is what made Ctrl+C hang for minutes).
+    await client.shutdown({ drainQueue: false });
+
+    // Promises resolve with null; inner client never touched.
+    expect(await p1).toBeNull();
+    expect(await p2).toBeNull();
+    expect(inner.calls).toHaveLength(0);
+
+    const s = client.stats();
+    expect(s.totalFallback).toBe(0);
+    expect(s.queued).toBe(0);
+  });
+
   test("after shutdown, new calls go directly to inner client", async () => {
     const inner = createMockLLMClient();
     const client = createBatchLLMClient(

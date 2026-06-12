@@ -1,5 +1,5 @@
 import { describe, test, expect, afterAll } from "vitest";
-import { probeGateway } from "../src/index";
+import { probeGateway } from "../src/internal";
 
 /**
  * Smoke tests for the in-process gateway startup.

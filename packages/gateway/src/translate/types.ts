@@ -202,7 +202,26 @@ export type GatewayRequest = {
     reasoning?: unknown;
     /** OpenAI Responses API: truncation settings. */
     truncation?: unknown;
+    /**
+     * Codex (ChatGPT) control fields. Preserved verbatim so the upstream
+     * `/backend-api/codex/responses` call keeps Codex's semantics. `store` is
+     * deliberately absent — the builder always forces `store: false` (ChatGPT
+     * rejects `store: true`), so echoing the client value would be dead state.
+     */
+    include?: unknown;
+    prompt_cache_key?: string;
+    text?: unknown;
+    tool_choice?: unknown;
+    parallel_tool_calls?: boolean;
+    service_tier?: string;
   };
+  /**
+   * Set when the request originated from Pi's `openai-codex` provider (ingress
+   * path `/v1/codex/responses`). The protocol stays `"openai-responses"`; this
+   * flag only steers the upstream URL (`/backend-api/codex/responses`) and the
+   * preservation of Codex control fields in the upstream body.
+   */
+  codex?: boolean;
 };
 
 // ---------------------------------------------------------------------------
@@ -406,6 +425,14 @@ export type SessionState = {
   messageCount: number;
   /** Turns since last curation run — triggers background curation. */
   turnsSinceCuration: number;
+  /** True while a background curation has been scheduled for this session but
+   *  has not yet entered curatorLimiter (i.e. still waiting in the global
+   *  background queue). `curatorLimiter.isBusy` only flips once the task
+   *  executes, so under a saturated global queue it stays false between
+   *  scheduling and execution — this synchronous flag closes that window so
+   *  subsequent turns don't re-schedule duplicate curations. Set before
+   *  runBackground(), cleared in its .finally(). Transient (not persisted). */
+  curationScheduled?: boolean;
   /** Stored recall results for marker-based round-trip expansion. */
   recallStore: RecallStore;
   /** Cache analytics — request body prefix comparison + API cache fields. */

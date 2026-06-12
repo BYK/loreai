@@ -11,6 +11,12 @@ import { startGateway, probeGateway, type StartOptions } from "./start";
 import { loadConfig } from "../config";
 import { detectAgents, AGENTS, type DetectedAgent } from "./agents";
 import { safeExit } from "./exit";
+import {
+  installSignalShutdown,
+  installChildSignalForwarding,
+  runShutdownWithDeadline,
+  signalExitCode,
+} from "./shutdown";
 import { maybeAutoImport } from "./import-auto";
 import { discoverWorkspaceRoot } from "@loreai/core";
 
@@ -208,15 +214,7 @@ export async function commandRun(
     console.log(`[lore]   export ANTHROPIC_BASE_URL=${gatewayUrl}`);
 
     if (owned) {
-      let shuttingDown = false;
-      const onSignal = async () => {
-        if (shuttingDown) return;
-        shuttingDown = true;
-        await shutdown();
-        safeExit(0);
-      };
-      process.on("SIGINT", () => onSignal());
-      process.on("SIGTERM", () => onSignal());
+      installSignalShutdown(shutdown);
     }
 
     // Block forever
@@ -230,26 +228,19 @@ export async function commandRun(
 
   const child = launchChild(target);
 
-  // Forward signals to child
-  const forwardSignal = (signal: NodeJS.Signals) => {
-    child.kill(signal);
-  };
-  process.on("SIGINT", () => forwardSignal("SIGINT"));
-  process.on("SIGTERM", () => forwardSignal("SIGTERM"));
+  // Forward the first signal to the child (its `exit` handler then drives
+  // gateway teardown); a second interrupt forces an immediate exit so the user
+  // is never stuck waiting on a hung child or shutdown.
+  installChildSignalForwarding(child);
 
   // Wait for child to exit, then tear down gateway (only if we own it)
   return new Promise<void>((_resolve) => {
     child.on("exit", async (code, signal) => {
-      if (owned) await shutdown();
+      // Deadline-bounded so a slow shutdown step can't hang the process.
+      if (owned) await runShutdownWithDeadline(shutdown);
       // Exit with the child's code (or 128 + signal number for signal deaths)
       if (signal) {
-        const SIGNAL_CODES: Record<string, number> = {
-          SIGHUP: 1,
-          SIGINT: 2,
-          SIGQUIT: 3,
-          SIGTERM: 15,
-        };
-        safeExit(128 + (SIGNAL_CODES[signal] ?? 1));
+        safeExit(signalExitCode(signal));
       }
       safeExit(code ?? 0);
     });
@@ -258,7 +249,7 @@ export async function commandRun(
       console.error(
         `[lore] Failed to launch ${target.command}: ${err.message}`,
       );
-      if (owned) await shutdown();
+      if (owned) await runShutdownWithDeadline(shutdown);
       safeExit(1);
     });
   });

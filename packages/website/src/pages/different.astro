@@ -2,6 +2,8 @@
 import siteJs from "../scripts/site.js?raw";
 import Logo from "../components/Logo.astro";
 import SocialMeta from "../components/SocialMeta.astro";
+
+const base = import.meta.env.BASE_URL;
 ---
 <!DOCTYPE html>
 <html lang="en">
@@ -14,17 +16,17 @@ import SocialMeta from "../components/SocialMeta.astro";
   <SocialMeta
     title="Why Lore — What Makes Lore Different"
     description="A local-first, fair source proxy with shared context and long-term memory for any AI agent. No lock-in."
-    path="different.html"
+    path="different/"
   />
-  <link rel="icon" type="image/svg+xml" href="favicon.svg">
-  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
-  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
+  <link rel="icon" type="image/svg+xml" href={`${base}favicon.svg`}>
+  <link rel="icon" type="image/png" sizes="32x32" href={`${base}favicon-32.png`}>
+  <link rel="apple-touch-icon" sizes="180x180" href={`${base}apple-touch-icon.png`}>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link
     href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;1,400;1,500&family=DM+Sans:wght@200;300;400;500;700&display=swap"
     rel="stylesheet" />
-  <link rel="stylesheet" href="theme.css" />
+  <link rel="stylesheet" href={`${base}theme.css`} />
 </head>
 
 <body>
@@ -38,19 +40,19 @@ import SocialMeta from "../components/SocialMeta.astro";
     </div>
     <div class="nav-right">
       <ul class="nav-links">
-        <li><a href="index.html#problem">The Problem</a></li>
-        <li><a href="index.html#how">How It Works</a></li>
-        <li><a href="index.html#features">Features</a></li>
-        <li><a href="different.html">Why Lore</a></li>
-        <li><a href="docs.html">Docs</a></li>
-        <li><a href="blog.html">Blog</a></li>
-        <li><a href="index.html#waitlist">Folk Lore</a></li>
+        <li><a href={`${base}#problem`}>The Problem</a></li>
+        <li><a href={`${base}#how`}>How It Works</a></li>
+        <li><a href={`${base}#features`}>Features</a></li>
+        <li><a href={`${base}different/`}>Why Lore</a></li>
+        <li><a href={`${base}docs/`}>Docs</a></li>
+        <li><a href={`${base}blog/`}>Blog</a></li>
+        <li><a href={`${base}#waitlist`}>Folk Lore</a></li>
       </ul>
       <div class="nav-socials" aria-label="Social links">
         <a href="https://x.com/withLoreAI" target="_blank" rel="noopener noreferrer" class="social-link" aria-label="Lore.AI on X"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18.901 1.153h3.68l-8.04 9.19L24 22.846h-7.406l-5.8-7.584-6.638 7.584H.474l8.6-9.83L0 1.154h7.594l5.243 6.932ZM17.61 20.644h2.039L6.486 3.24H4.298Z" /></svg></a>
         <a href="https://github.com/byk/loreai" target="_blank" rel="noopener noreferrer" class="social-link" aria-label="Lore.AI on GitHub"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.043-1.61-4.043-1.61-.546-1.387-1.333-1.757-1.333-1.757-1.09-.745.083-.73.083-.73 1.205.085 1.84 1.237 1.84 1.237 1.07 1.835 2.807 1.305 3.492.998.108-.776.418-1.305.762-1.605-2.665-.3-5.467-1.332-5.467-5.93 0-1.31.468-2.38 1.235-3.22-.123-.303-.535-1.523.118-3.176 0 0 1.008-.322 3.3 1.23a11.48 11.48 0 0 1 3.003-.404c1.02.005 2.045.138 3.003.404 2.29-1.552 3.295-1.23 3.295-1.23.655 1.653.243 2.873.12 3.176.77.84 1.233 1.91 1.233 3.22 0 4.61-2.807 5.625-5.48 5.922.43.372.823 1.102.823 2.222 0 1.605-.015 2.898-.015 3.293 0 .32.218.695.825.577C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" /></svg></a>
       </div>
-      <a href="docs.html" class="nav-btn">Get Started</a>
+      <a href={`${base}docs/`} class="nav-btn">Get Started</a>
     </div>
   </nav>
 
@@ -70,7 +72,7 @@ import SocialMeta from "../components/SocialMeta.astro";
         <strong style="color:var(--g1);">Only one scales.</strong>
       </p>
       <div class="hero-actions sr" style="justify-content: center;">
-        <a href="docs.html" class="btn-fill">
+        <a href={`${base}docs/`} class="btn-fill">
           Get Started
           <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8">
             <path d="M2 7h10M7 2l5 5-5 5" />
@@ -78,7 +80,7 @@ import SocialMeta from "../components/SocialMeta.astro";
         </a>
         <a href="https://github.com/byk/loreai" target="_blank" rel="noopener noreferrer" class="btn-ghost">View Repository</a>
       </div>
-      <p class="hero-folklore sr" style="text-align: center;">Building with a team? <a href="index.html#waitlist"><strong>Folk Lore</strong> — shared team memory, coming soon &rarr;</a></p>
+      <p class="hero-folklore sr" style="text-align: center;">Building with a team? <a href={`${base}#waitlist`}><strong>Folk Lore</strong> — shared team memory, coming soon &rarr;</a></p>
     </div>
   </section>
 
@@ -473,7 +475,7 @@ import SocialMeta from "../components/SocialMeta.astro";
 
   <footer>
     <div class="foot-bottom">
-      <p>© 2026 Lore.AI · FSL-1.1-Apache-2.0 · <a href="index.html" style="border-bottom:1px solid rgba(196,221,199,.3)">Home</a></p>
+      <p>© 2026 Lore.AI · FSL-1.1-Apache-2.0 · <a href={base} style="border-bottom:1px solid rgba(196,221,199,.3)">Home</a></p>
     </div>
   </footer>
 

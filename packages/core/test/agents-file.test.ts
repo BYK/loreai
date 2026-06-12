@@ -133,6 +133,8 @@ beforeEach(() => {
   }
   // Clear lore file cache entries to ensure test isolation
   db().query("DELETE FROM kv_meta WHERE key LIKE 'lore_file_cache:%'").run();
+  // Clear tombstones so deletes in one test don't block creates in another
+  db().query("DELETE FROM knowledge_tombstones").run();
   // Reset the agents file and .lore.md
   if (existsSync(AGENTS_FILE)) rmSync(AGENTS_FILE);
   if (existsSync(LORE_FILE_PATH)) rmSync(LORE_FILE_PATH);
@@ -1271,6 +1273,42 @@ describe("importLoreFile", () => {
     expect(entry).not.toBeNull();
     expect(entry?.title).toBe("Auth strategy");
     expect(entry?.content).toBe("OAuth2 with PKCE");
+  });
+
+  test("does NOT resurrect an entry deleted via ltm.remove() (anti-thrash tombstone)", () => {
+    // Reproduces the consolidation thrash: an entry is exported to .lore.md,
+    // then the curator deletes it (ltm.remove → tombstone). A subsequent
+    // import of the still-stale .lore.md must NOT re-create it, otherwise the
+    // next consolidation deletes it again — an infinite delete/recreate loop
+    // that busts the prompt cache every cycle.
+    const keepId = ltm.create({
+      projectPath: PROJECT,
+      category: "decision",
+      title: "Keep me",
+      content: "Stays",
+      scope: "project",
+    });
+    const dropId = ltm.create({
+      projectPath: PROJECT,
+      category: "gotcha",
+      title: "Delete me",
+      content: "Consolidation removes this",
+      scope: "project",
+    });
+    exportLoreFile(PROJECT); // .lore.md now lists BOTH entries
+
+    // Curator consolidation deletes the entry from the DB (tombstones it).
+    ltm.remove(dropId);
+    expect(ltm.get(dropId)).toBeNull();
+
+    // A turn re-imports the stale .lore.md (still lists dropId).
+    clearLoreFileCache(PROJECT);
+    importLoreFile(PROJECT);
+
+    // The deleted entry must stay gone; the kept entry is unaffected.
+    expect(ltm.get(dropId)).toBeNull();
+    expect(ltm.isTombstoned(dropId)).toBe(true);
+    expect(ltm.get(keepId)).not.toBeNull();
   });
 
   test("updates content when .lore.md has been edited", () => {

@@ -8,6 +8,8 @@ import {
   fingerprintMessages,
   extractKnownSessionHeader,
   findRotationPredecessor,
+  isRotationEligible,
+  KNOWN_SESSION_HEADERS,
   ROTATION_MAX_AGE_MS,
   isSessionHeaderName,
   isIdLikeValue,
@@ -1030,5 +1032,63 @@ describe("findRotationPredecessor", () => {
     );
 
     expect(result).toBeNull();
+  });
+});
+
+// ===========================================================================
+// Tier 1b: rotation eligibility gate (regression for cross-conversation merge)
+// ===========================================================================
+//
+// THE BUG (proven via live reproduction against a remote gateway): Claude Code
+// mints a FRESH `x-claude-code-session-id` UUID per *conversation*, not per
+// process. Tier 1b "header value rotation" treated a new value as a client
+// restart and merged the new conversation into the single existing session,
+// rebinding its project. Two distinct conversations (even on different
+// machines/users) collapsed into one session → cross-project contamination and
+// memory leakage. Only OpenCode's legacy `x-session-affinity` nanoid actually
+// rotates on restart, so ONLY it may be rotation-eligible.
+
+describe("isRotationEligible", () => {
+  test("x-session-affinity IS rotation-eligible (OpenCode nanoid restarts)", () => {
+    expect(isRotationEligible("x-session-affinity")).toBe(true);
+  });
+
+  test("x-claude-code-session-id is NOT rotation-eligible (fresh UUID per conversation)", () => {
+    // This is the exact regression guard: a new claude-code session id must
+    // never be treated as a rotation of an existing session.
+    expect(isRotationEligible("x-claude-code-session-id")).toBe(false);
+  });
+
+  test("x-lore-session-id is NOT rotation-eligible (stable, deterministic)", () => {
+    expect(isRotationEligible("x-lore-session-id")).toBe(false);
+  });
+
+  test("x-session-id is NOT rotation-eligible (stable per session)", () => {
+    expect(isRotationEligible("x-session-id")).toBe(false);
+  });
+
+  test("unknown header names are NOT rotation-eligible", () => {
+    expect(isRotationEligible("x-some-random-header")).toBe(false);
+    expect(isRotationEligible("")).toBe(false);
+    expect(isRotationEligible("authorization")).toBe(false);
+  });
+
+  test("exactly one known session header is rotation-eligible", () => {
+    const eligible = KNOWN_SESSION_HEADERS.filter(isRotationEligible);
+    expect(eligible).toEqual(["x-session-affinity"]);
+  });
+
+  test("every rotation-eligible header is also a known session header", () => {
+    // Guards against adding a rotation-eligible header that the identifier
+    // tier wouldn't even match — keeps the two lists consistent.
+    for (const name of KNOWN_SESSION_HEADERS.filter(isRotationEligible)) {
+      expect(KNOWN_SESSION_HEADERS).toContain(name);
+    }
+  });
+
+  test("rotation eligibility is case-sensitive (headers are pre-lowercased)", () => {
+    // Header keys are lowercased by the fetch Headers API before lookup, so
+    // the gate intentionally only matches the lowercase canonical form.
+    expect(isRotationEligible("X-Session-Affinity")).toBe(false);
   });
 });

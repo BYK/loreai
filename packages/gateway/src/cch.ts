@@ -30,7 +30,9 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { xxHash64 } from "./xxhash";
+import { log } from "@loreai/core";
+import * as Sentry from "@sentry/bun";
+import { xxHash64 } from "./xxhash.ts";
 
 // ---------------------------------------------------------------------------
 // Version→seed mapping
@@ -47,39 +49,58 @@ import { xxHash64 } from "./xxhash";
  *
  * See `scripts/extract-cch-seed.ts` for the automated extraction tool.
  */
+// Named seed constants. Claude Code reuses the same xxHash64 seed across many
+// consecutive versions and only rotates it occasionally, so versions are mapped
+// to a shared named constant rather than repeating the same literal. When the
+// extraction tool finds a seed that matches an existing constant it references
+// that constant; a genuinely new seed gets its own `SEED_<version>` constant.
+const SEED_2_1_37 = 0x6e52736ac806831en;
+const SEED_2_1_138 = 0x4d659218e32a3268n;
+
 const VERSION_SEEDS: Record<string, bigint> = {
-  "2.1.37": 0x6e52736ac806831en,
-  "2.1.138": 0x4d659218e32a3268n,
-  "2.1.140": 0x4d659218e32a3268n,
-  "2.1.139": 0x4d659218e32a3268n,
-  "2.1.141": 0x4d659218e32a3268n,
-  "2.1.142": 0x4d659218e32a3268n,
-  "2.1.143": 0x4d659218e32a3268n,
-  "2.1.144": 0x4d659218e32a3268n,
-  "2.1.145": 0x4d659218e32a3268n,
-  "2.1.146": 0x4d659218e32a3268n,
-  "2.1.152": 0x4d659218e32a3268n,
-  "2.1.147": 0x4d659218e32a3268n,
-  "2.1.148": 0x4d659218e32a3268n,
-  "2.1.149": 0x4d659218e32a3268n,
-  "2.1.150": 0x4d659218e32a3268n,
-  "2.1.153": 0x4d659218e32a3268n,
-  "2.1.160": 0x4d659218e32a3268n,
-  "2.1.154": 0x4d659218e32a3268n,
-  "2.1.156": 0x4d659218e32a3268n,
-  "2.1.157": 0x4d659218e32a3268n,
-  "2.1.158": 0x4d659218e32a3268n,
-  "2.1.159": 0x4d659218e32a3268n,
-  "2.1.161": 0x4d659218e32a3268n,
-  "2.1.162": 0x4d659218e32a3268n,
-  "2.1.163": 0x4d659218e32a3268n,
-  "2.1.165": 0x4d659218e32a3268n,
+  "2.1.37": SEED_2_1_37,
+  "2.1.138": SEED_2_1_138,
+  "2.1.139": SEED_2_1_138,
+  "2.1.140": SEED_2_1_138,
+  "2.1.141": SEED_2_1_138,
+  "2.1.142": SEED_2_1_138,
+  "2.1.143": SEED_2_1_138,
+  "2.1.144": SEED_2_1_138,
+  "2.1.145": SEED_2_1_138,
+  "2.1.146": SEED_2_1_138,
+  "2.1.147": SEED_2_1_138,
+  "2.1.148": SEED_2_1_138,
+  "2.1.149": SEED_2_1_138,
+  "2.1.150": SEED_2_1_138,
+  "2.1.152": SEED_2_1_138,
+  "2.1.153": SEED_2_1_138,
+  "2.1.154": SEED_2_1_138,
+  "2.1.156": SEED_2_1_138,
+  "2.1.157": SEED_2_1_138,
+  "2.1.158": SEED_2_1_138,
+  "2.1.159": SEED_2_1_138,
+  "2.1.160": SEED_2_1_138,
+  "2.1.161": SEED_2_1_138,
+  "2.1.162": SEED_2_1_138,
+  "2.1.163": SEED_2_1_138,
+  "2.1.165": SEED_2_1_138,
+  "2.1.166": SEED_2_1_138,
+  "2.1.167": SEED_2_1_138,
+  "2.1.168": SEED_2_1_138,
+  "2.1.169": SEED_2_1_138,
+  "2.1.170": SEED_2_1_138,
+  // 2.1.172+ : seed UNCHANGED, but the cch hash preimage changed — the binary
+  // strips the `model` value and the `max_tokens` field before hashing. See
+  // `cchPreimage()` and quality/CCH.md. signBody() applies that transform.
+  "2.1.172": SEED_2_1_138,
+  "2.1.173": SEED_2_1_138,
+  "2.1.175": SEED_2_1_138,
   // Future versions: extract and add entries here.
-  // Use `bun run scripts/extract-cch-seed.ts --version X.Y.Z` to extract.
+  // Use `node scripts/extract-cch-seed.ts --version X.Y.Z` to extract.
 };
 
 /** Version we pin worker billing headers to (must have a known seed). */
-const WORKER_VERSION = "2.1.165";
+const WORKER_VERSION = "2.1.175";
 const WORKER_SEED = VERSION_SEEDS[WORKER_VERSION];
 if (WORKER_SEED === undefined) {
   throw new Error(`Missing CCH seed for worker version ${WORKER_VERSION}`);
@@ -94,6 +115,156 @@ const WORKER_SALT = "59cf53e54c78";
 
 const CCH_PLACEHOLDER = "cch=00000";
 
+/**
+ * The full billing-header sentinel as it appears in a serialized JSON body:
+ *
+ *   x-anthropic-billing-header: cc_version=<semver>.<suffix>; cc_entrypoint=<x>; cch=<value>;
+ *
+ * We anchor every cch / cc_version rewrite to this whole shape rather than to
+ * a bare `cc_entrypoint=…;` or `cch=…;` fragment. A token in system / LTM /
+ * message content can only be mistaken for the header if it reproduces the
+ * ENTIRE `x-anthropic-billing-header: …` sentinel verbatim — a far narrower
+ * surface than the bare `cch=`/`cc_entrypoint=` fragment the original fix
+ * caught, which was defeated by content (an LTM entry documenting the header
+ * format) serializing before the real header.
+ *
+ * Residual: these regexes are first-match, so a content block that reproduces
+ * the whole sentinel AND serializes *before* the real header would still be
+ * rewritten. In practice the real billing header is always the FIRST system
+ * block (the worker prepends it via `buildBillingBlock`; Claude Code emits it
+ * as system[0], which `BILLING_HEADER_RE` enforces with a `^` anchor), and
+ * nothing in a serialized body precedes system[0] except the JSON envelope —
+ * so no content can sort before it. The two-sentinel ordering is covered by a
+ * regression test that locks in "real header (first block) wins".
+ *
+ * The value classes are intentionally permissive (`[^;]*`) for cc_version /
+ * cc_entrypoint so we tolerate client variations (e.g. a missing 3-hex version
+ * suffix), but the cch field is pinned to its exact shape (5 hex for a signed
+ * value, `00000` for the placeholder).
+ */
+const BILLING_HEADER_PREFIX = String.raw`x-anthropic-billing-header:\s*cc_version=[^;]*;\s*cc_entrypoint=[^;]*;\s*`;
+
+/**
+ * Matches the billing header ending in the `cch=00000` placeholder. Group 1
+ * is the entire header up to and including `cch=` so it is preserved on
+ * replace; the `00000` is swapped for the computed hash.
+ */
+const BILLING_SIGN_RE = new RegExp(`(${BILLING_HEADER_PREFIX}cch=)0{5}`);
+
+// ---------------------------------------------------------------------------
+// Hash preimage transformation
+// ---------------------------------------------------------------------------
+
+/**
+ * Strip the `model` value from a serialized body for cch hashing.
+ * `"model":"<value>"` → `"model":""`. Matches the first occurrence only.
+ */
+const MODEL_VALUE_RE = /("model":")[^"]*(")/;
+
+/**
+ * Strip the `max_tokens` field (key + integer value + one adjacent comma) from
+ * a serialized body for cch hashing.
+ *
+ * Claude Code (and our `buildAnthropicRequest`) always emit `max_tokens`
+ * mid-object — `{"model":…,"max_tokens":N,"stream":…}` — so the trailing-comma
+ * form is what the real binary strips (verified at the hash site; the preimage
+ * has no leftover comma). We still match an optional LEADING comma as a
+ * defensive fallback for the (currently-unseen) last-key position
+ * `…,"max_tokens":N}`, removing exactly one comma either way so the surrounding
+ * JSON stays well-formed. `max_tokens` is always a non-negative integer.
+ *
+ * The alternation removes exactly ONE comma: the trailing one when present
+ * (`"max_tokens":N,` — the real binary's case), otherwise a leading one
+ * (`,"max_tokens":N` — last-key fallback). It never strips both commas.
+ */
+const MAX_TOKENS_FIELD_RE = /"max_tokens":\d+,|,"max_tokens":\d+/;
+
+/**
+ * Transform a serialized request body into the exact byte sequence Claude Code
+ * (>= 2.1.172) feeds to xxHash64 when computing the `cch` billing hash.
+ *
+ * Discovered by capturing the live hash input under a debugger (see
+ * `quality/CCH.md`): the binary does NOT hash the raw wire body. It hashes the
+ * body with three edits applied:
+ *   1. `cch=<5hex>` → `cch=00000` (the placeholder; callers usually pre-apply this)
+ *   2. the `model` VALUE removed: `"model":"sonnet-4"` → `"model":""`
+ *   3. the `max_tokens` field removed: `"max_tokens":64000,` → `` (with comma)
+ *
+ * The seed (`0x4d659218e32a3268`) and algorithm (Zig-std xxHash64) are
+ * unchanged from 2.1.166; only the preimage changed. Versions ≤ 2.1.170 hashed
+ * the whole body, but we always pin WORKER_VERSION forward (≥ 2.1.172), so we
+ * always strip. Both edits are no-ops when the field is absent (e.g. test
+ * bodies or worker requests without `max_tokens`), keeping the function safe to
+ * apply unconditionally.
+ *
+ * @param body — serialized JSON request body (the wire form)
+ * @returns the byte-exact hash preimage
+ */
+function cchPreimage(body: string): string {
+  return body.replace(MODEL_VALUE_RE, "$1$2").replace(MAX_TOKENS_FIELD_RE, "");
+}
+
+// ---------------------------------------------------------------------------
+// First-block invariant verification
+// ---------------------------------------------------------------------------
+
+/**
+ * The literal billing-header marker. The real header always starts with this;
+ * we count occurrences to detect ambiguity.
+ */
+const BILLING_MARKER = "x-anthropic-billing-header:";
+
+/**
+ * Verify the invariant the anchored signer relies on: the body contains
+ * exactly ONE `x-anthropic-billing-header:` marker.
+ *
+ * Both `signBody` and `resignBody` use first-match `.replace()` and trust that
+ * the single match is the real header (always system[0], nothing precedes it).
+ * That trust is only safe when the marker is unique. If a second sentinel
+ * appears — e.g. an LTM entry reproducing the whole header, or Anthropic
+ * reordering/duplicating system blocks — first-match could stamp the wrong
+ * token and bust the entire prompt cache. We can't tell the real header from a
+ * content copy by position alone, so any duplication is treated as a hazard.
+ *
+ * In practice this should never fire. When it does we surface it to Sentry as
+ * an early warning. Report-only: signing proceeds unchanged (the real header is
+ * still overwhelmingly likely to be first, so signing remains correct today).
+ *
+ * @param body — the serialized body being signed
+ * @param caller — "signBody" | "resignBody" for the alert fingerprint
+ */
+function verifyBillingHeaderUnique(body: string, caller: string): void {
+  const markerCount = body.split(BILLING_MARKER).length - 1;
+  if (markerCount <= 1) {
+    return; // unique (or absent) — invariant holds.
+  }
+
+  log.warn(
+    `cch: billing-header first-block invariant violated in ${caller} ` +
+      `(found ${markerCount} billing-header markers; expected 1) — ` +
+      `first-match may sign the wrong token and bust the prompt cache`,
+  );
+  if (Sentry.isInitialized()) {
+    Sentry.captureException(
+      new Error(
+        "cch: multiple billing-header sentinels in request body (cache-bust risk)",
+      ),
+      {
+        fingerprint: [
+          "LOREAI-GATEWAY",
+          "cch-billing-header-not-unique",
+          caller,
+        ],
+        extra: {
+          caller,
+          markerCount,
+          bodyLength: body.length,
+        },
+      },
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Signing
 // ---------------------------------------------------------------------------
@@ -102,13 +273,31 @@ const CCH_PLACEHOLDER = "cch=00000";
  * Compute the `cch` hash for a JSON request body containing `cch=00000`.
  * Returns the body with the placeholder replaced by the computed hash.
  *
- * @param bodyWithPlaceholder — JSON string containing `cch=00000`
- * @returns body with `cch=00000` replaced by `cch=XXXXX`
+ * Only the billing-header placeholder is rewritten: the replacement is
+ * anchored to the full `x-anthropic-billing-header: …` sentinel so a bare
+ * `cch=00000` literal in conversation/LTM content is never touched (it lacks
+ * the sentinel prefix). Because the real header is always system[0], no
+ * content can serialize before it, so first-match always targets it.
+ *
+ * The hash is computed over the *preimage* (model value + max_tokens stripped;
+ * see `cchPreimage`), NOT the raw body — but the placeholder is replaced in the
+ * original body so the wire form keeps `model`/`max_tokens` intact.
+ *
+ * If no billing header is present the body is returned unchanged — there is
+ * nothing to sign, and we must never rewrite a bare content `cch=00000`.
+ *
+ * @param bodyWithPlaceholder — JSON string containing a billing `cch=00000`
+ * @returns body with the billing `cch=00000` replaced by `cch=XXXXX`
  */
 export function signBody(bodyWithPlaceholder: string): string {
-  const hash = xxHash64(bodyWithPlaceholder, WORKER_SEED);
+  if (!BILLING_SIGN_RE.test(bodyWithPlaceholder)) {
+    return bodyWithPlaceholder; // no billing placeholder to sign
+  }
+  verifyBillingHeaderUnique(bodyWithPlaceholder, "signBody");
+
+  const hash = xxHash64(cchPreimage(bodyWithPlaceholder), WORKER_SEED);
   const cch = (hash & 0xfffffn).toString(16).padStart(5, "0");
-  return bodyWithPlaceholder.replace(CCH_PLACEHOLDER, `cch=${cch}`);
+  return bodyWithPlaceholder.replace(BILLING_SIGN_RE, `$1${cch}`);
 }
 
 /**
@@ -134,18 +323,38 @@ function computeVersionSuffix(firstUserMessage: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Regex matching a billing header's cch field in a serialized JSON body.
- * The cch value is exactly 5 hex chars followed by a semicolon.
- * Used to detect conversation turns that need re-signing after body
- * reconstruction by buildAnthropicRequest.
+ * Matches a full client-signed billing header in a serialized JSON body so
+ * cc_version AND cch can be rewritten in a single anchored pass. We rewrite the
+ * whole `cc_version=…;` and `cch=…;` segments wholesale (we don't need to
+ * preserve the client's version/suffix — they're replaced with the worker's),
+ * so only cc_entrypoint is captured for preservation:
+ *
+ *   group 1 = cc_entrypoint value (preserved verbatim)
+ *
+ * The cc_version value class is permissive: the suffix is optional and
+ * case-insensitive (`cc_version=[^;]*`) so a client header that omits the
+ * 3-hex suffix still re-signs rather than silently passing through a stale
+ * cch (which upstream would reject). The cch value is pinned to its signed
+ * shape (5 hex, case-insensitive).
+ *
+ * Anchored to the full `x-anthropic-billing-header:` sentinel so neither field
+ * can be matched against a `cc_version=…;` / `cch=…;` token that appears in
+ * LTM / system / message content — even if that content serializes BEFORE the
+ * real header. Matching content would rewrite it every turn and bust the
+ * entire prompt cache (the original incident's failure mode).
  */
-const CCH_IN_BODY_RE = /cch=([0-9a-fA-F]{5});/;
+const BILLING_RESIGN_RE =
+  /x-anthropic-billing-header:\s*cc_version=[^;]*;\s*cc_entrypoint=([^;]*);\s*cch=[0-9a-fA-F]{5};/;
 
 /**
- * Regex matching the cc_version field in a billing header.
- * Format: cc_version=MAJOR.MINOR.PATCH.SUFFIX (suffix is 3 hex chars).
+ * Matches a full signed billing header for validation. Group 1 is the whole
+ * header up to and including `cch=` (preserved on replace); group 2 is the
+ * 5-hex signed value. Anchored so a content `cch=…;` token is never validated
+ * in place of the real header.
  */
-const CC_VERSION_RE = /cc_version=(\d+\.\d+\.\d+)\.([0-9a-f]{3});/;
+const BILLING_VALIDATE_RE = new RegExp(
+  `(${BILLING_HEADER_PREFIX}cch=)([0-9a-fA-F]{5});`,
+);
 
 /**
  * Re-sign a serialized request body that contains a client-signed billing
@@ -154,11 +363,10 @@ const CC_VERSION_RE = /cc_version=(\d+\.\d+\.\d+)\.([0-9a-f]{3});/;
  * wrappers, message transforms) — invalidating the client's original cch.
  *
  * The function:
- *   1. Detects `cch=XXXXX` in the serialized body — returns unchanged if absent
- *   2. Replaces `cc_version=X.Y.Z.abc` with our worker version + recomputed suffix
- *   3. Replaces `cch=XXXXX` with `cch=00000` placeholder
- *   4. Hashes with our known seed → compute new cch
- *   5. Replaces `cch=00000` with the computed value
+ *   1. Detects a full billing header — returns unchanged if absent
+ *   2. Rewrites cc_version (worker version + recomputed suffix) AND cch
+ *      (→ placeholder) in a single anchored pass over the header
+ *   3. Hashes the resulting body with our known seed and stamps the cch
  *
  * @param serializedBody — JSON string after JSON.stringify(body)
  * @param firstUserMessage — text of the first user message (for version suffix)
@@ -168,22 +376,26 @@ export function resignBody(
   serializedBody: string,
   firstUserMessage: string,
 ): string {
-  // Quick check: no billing header → return unchanged
-  if (!CCH_IN_BODY_RE.test(serializedBody)) {
+  // Quick check: no billing header → return unchanged. Anchored match ensures
+  // a content cch=/cc_version= token never qualifies.
+  if (!BILLING_RESIGN_RE.test(serializedBody)) {
     return serializedBody;
   }
+  verifyBillingHeaderUnique(serializedBody, "resignBody");
 
-  let body = serializedBody;
-
-  // Step 1: Replace cc_version with our worker version + recomputed suffix.
-  // The suffix depends on chars[4,7,20] from the first user message.
+  // Step 1+2: in a single anchored replace, swap cc_version for our worker
+  // version + recomputed suffix and reset cch to the placeholder. cc_entrypoint
+  // (group 1) is preserved verbatim. The suffix depends on chars[4,7,20] of the
+  // first user message.
   const suffix = computeVersionSuffix(firstUserMessage);
-  body = body.replace(CC_VERSION_RE, `cc_version=${WORKER_VERSION}.${suffix};`);
+  const body = serializedBody.replace(
+    BILLING_RESIGN_RE,
+    (_m, entrypoint) =>
+      `x-anthropic-billing-header: cc_version=${WORKER_VERSION}.${suffix};` +
+      ` cc_entrypoint=${entrypoint}; ${CCH_PLACEHOLDER};`,
+  );
 
-  // Step 2: Replace existing cch with placeholder
-  body = body.replace(CCH_IN_BODY_RE, `${CCH_PLACEHOLDER};`);
-
-  // Step 3: Hash and replace placeholder with computed value
+  // Step 3: Hash and replace placeholder with computed value (anchored).
   return signBody(body);
 }
 
@@ -309,6 +521,12 @@ type SessionHeaderSnapshot = {
   anthropicBeta?: string;
   /** The user-agent header from the last conversation turn. */
   userAgent?: string;
+  /** Codex (ChatGPT) `chatgpt-account-id` from the last conversation turn. */
+  chatgptAccountId?: string;
+  /** Codex `originator` header (e.g. "pi"). */
+  originator?: string;
+  /** Codex `OpenAI-Beta` header (e.g. "responses=experimental"). */
+  openaiBeta?: string;
 };
 
 const sessionHeaderSnapshots = new Map<string, SessionHeaderSnapshot>();
@@ -324,16 +542,34 @@ export function captureSessionHeaders(
   sessionID: string,
   rawHeaders: Record<string, string>,
 ): void {
-  // Only capture for sessions that have billing headers
-  if (!sessionNeedsBilling.get(sessionID)) return;
+  // Codex (ChatGPT) account/originator headers must be replayed on worker
+  // calls to the `/codex/responses` backend. Capture them for ANY session
+  // (Codex sessions don't set the Anthropic billing flag). Cheap: only stored
+  // when present.
+  const accountId =
+    rawHeaders["chatgpt-account-id"] || rawHeaders["Chatgpt-Account-Id"];
+  const originator = rawHeaders.originator || rawHeaders.Originator;
+  const openaiBeta = rawHeaders["openai-beta"] || rawHeaders["OpenAI-Beta"];
 
-  const snapshot: SessionHeaderSnapshot = {};
+  const hasCodexHeaders = !!(accountId || originator || openaiBeta);
 
-  const beta = rawHeaders["anthropic-beta"] || rawHeaders["Anthropic-Beta"];
-  if (beta) snapshot.anthropicBeta = beta;
+  // Anthropic billing-header replay is gated to billing sessions (unchanged).
+  if (!sessionNeedsBilling.get(sessionID) && !hasCodexHeaders) return;
 
-  const ua = rawHeaders["user-agent"] || rawHeaders["User-Agent"];
-  if (ua) snapshot.userAgent = ua;
+  const snapshot: SessionHeaderSnapshot =
+    sessionHeaderSnapshots.get(sessionID) ?? {};
+
+  if (sessionNeedsBilling.get(sessionID)) {
+    const beta = rawHeaders["anthropic-beta"] || rawHeaders["Anthropic-Beta"];
+    if (beta) snapshot.anthropicBeta = beta;
+
+    const ua = rawHeaders["user-agent"] || rawHeaders["User-Agent"];
+    if (ua) snapshot.userAgent = ua;
+  }
+
+  if (accountId) snapshot.chatgptAccountId = accountId;
+  if (originator) snapshot.originator = originator;
+  if (openaiBeta) snapshot.openaiBeta = openaiBeta;
 
   sessionHeaderSnapshots.set(sessionID, snapshot);
 }
@@ -366,6 +602,38 @@ export function buildOAuthWorkerHeaders(
       snapshot?.userAgent || `claude-cli/${WORKER_VERSION} (external, sdk-cli)`,
     "anthropic-dangerous-direct-browser-access": "true",
     "x-client-request-id": randomUUID(),
+  };
+}
+
+/**
+ * Build extra HTTP headers for an `openai-codex` worker request, replaying the
+ * Codex (ChatGPT) fingerprint sniffed from the session's conversation turns.
+ *
+ * ChatGPT's `/backend-api/codex/responses` endpoint requires:
+ * - `chatgpt-account-id`: the account ID (also embeddable from the JWT, but the
+ *   client sends it explicitly — replay the observed value).
+ * - `originator`: the client originator (e.g. "pi").
+ * - `OpenAI-Beta`: `responses=experimental`.
+ * - `session_id` / `x-client-request-id`: a stable per-session correlation id.
+ *
+ * Returns null when no Codex headers were ever observed for the session (the
+ * caller then has nothing to add — the request will likely be rejected, which
+ * is the correct loud failure rather than a silent malformed call).
+ */
+export function buildCodexWorkerHeaders(
+  sessionID: string | undefined,
+): Record<string, string> | null {
+  if (!sessionID) return null;
+  const snapshot = sessionHeaderSnapshots.get(sessionID);
+  if (!snapshot?.chatgptAccountId) return null;
+
+  const requestID = randomUUID();
+  return {
+    "chatgpt-account-id": snapshot.chatgptAccountId,
+    originator: snapshot.originator || "codex",
+    "OpenAI-Beta": snapshot.openaiBeta || "responses=experimental",
+    session_id: sessionID,
+    "x-client-request-id": requestID,
   };
 }
 
@@ -482,19 +750,29 @@ export function resolveSeed(version: string): {
  * @returns null if no cch found, true if a seed matches, false if none match
  */
 export function validateSeed(body: string): boolean | null {
-  const cchMatch = body.match(/cch=([0-9a-fA-F]{5});/);
+  // Anchor to the full billing header so a cch= token in content can't be
+  // mistaken for the signed billing cch. Group 1 = entire header up to and
+  // including `cch=` (preserved); group 2 = the 5-hex signed value. cc_version
+  // is intentionally left as-received — we validate the signature as sent.
+  const cchMatch = body.match(BILLING_VALIDATE_RE);
   if (!cchMatch) return null;
 
-  const clientCch = cchMatch[1].toLowerCase();
+  const clientCch = cchMatch[2].toLowerCase();
+  // Group 1 already ends with `cch=`, so only the value + `;` follow.
   const bodyWithPlaceholder = body.replace(
-    `cch=${cchMatch[1]}`,
-    CCH_PLACEHOLDER,
+    BILLING_VALIDATE_RE,
+    (_m, prefix) => `${prefix}00000;`,
   );
+  // Try both preimage forms: the new (>= 2.1.172) stripped form and the legacy
+  // whole-body form (<= 2.1.170). A client on any known version then validates.
+  const preimages = [cchPreimage(bodyWithPlaceholder), bodyWithPlaceholder];
 
   for (const seed of Object.values(VERSION_SEEDS)) {
-    const hash = xxHash64(bodyWithPlaceholder, seed);
-    const ourCch = (hash & 0xfffffn).toString(16).padStart(5, "0");
-    if (ourCch === clientCch) return true;
+    for (const preimage of preimages) {
+      const hash = xxHash64(preimage, seed);
+      const ourCch = (hash & 0xfffffn).toString(16).padStart(5, "0");
+      if (ourCch === clientCch) return true;
+    }
   }
 
   return false;
@@ -520,4 +798,5 @@ export {
   computeVersionSuffix as _computeVersionSuffix,
   parseSemver as _parseSemver,
   compareSemver as _compareSemver,
+  cchPreimage as _cchPreimage,
 };

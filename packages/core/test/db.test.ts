@@ -26,6 +26,7 @@ import {
   isUnattributedProjectPath,
   UNATTRIBUTED_PROJECT_PREFIX,
 } from "../src/db";
+import { enableHostedMode, _resetHostedModeForTest } from "../src/hosted";
 
 describe("db", () => {
   test("initializes and creates tables", () => {
@@ -49,7 +50,18 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(38);
+    expect(row.version).toBe(41);
+  });
+
+  test("knowledge_tombstones table exists (migration v40)", () => {
+    const names = (
+      db().query("PRAGMA table_info(knowledge_tombstones)").all() as Array<{
+        name: string;
+      }>
+    ).map((c) => c.name);
+    expect(names).toContain("id");
+    expect(names).toContain("project_id");
+    expect(names).toContain("deleted_at");
   });
 
   test("entities table has embedding column (migration v34)", () => {
@@ -433,59 +445,139 @@ describe("db", () => {
     expect(id2).toBe(id1);
   });
 
-  test("ensureProject with supplied gitRemote groups different paths", () => {
-    // Create a project with an explicit git remote (simulates a remote gateway
-    // receiving the X-Lore-Git-Remote header from a client).
-    const id1 = ensureProject(
-      "/test/supplied-remote/path-a",
-      undefined,
-      "github.com/test/supplied-remote-repo",
-    );
+  // A client-supplied git remote is only trusted in HOSTED mode (the gateway
+  // can't read the client's disk). In local mode it is reconciled against the
+  // on-disk repo and DROPPED for non-repo paths — see the dedicated
+  // "git-remote magnet guard" block below.
+  describe("supplied gitRemote (hosted mode)", () => {
+    beforeEach(() => {
+      enableHostedMode();
+    });
+    afterEach(() => {
+      _resetHostedModeForTest();
+    });
 
-    // Verify the git_remote was stored
-    const row = db()
-      .query("SELECT git_remote FROM projects WHERE id = ?")
-      .get(id1) as { git_remote: string | null };
-    expect(row.git_remote).toBe("github.com/test/supplied-remote-repo");
+    test("groups different paths via supplied remote", () => {
+      // Simulates a remote/hosted gateway receiving the X-Lore-Git-Remote
+      // header from a client — the path is on the client's disk, not ours.
+      const id1 = ensureProject(
+        "/test/supplied-remote/path-a",
+        undefined,
+        "github.com/test/supplied-remote-repo",
+      );
 
-    // A different path with the same supplied git remote should resolve
-    // to the same project (via step 3: git remote match) and register
-    // the new path as an alias.
-    const id2 = ensureProject(
-      "/test/supplied-remote/path-b",
-      undefined,
-      "github.com/test/supplied-remote-repo",
-    );
-    expect(id2).toBe(id1);
+      const row = db()
+        .query("SELECT git_remote FROM projects WHERE id = ?")
+        .get(id1) as { git_remote: string | null };
+      expect(row.git_remote).toBe("github.com/test/supplied-remote-repo");
 
-    // Verify the alias was registered for O(1) future lookups
-    const alias = db()
-      .query("SELECT project_id FROM project_path_aliases WHERE path = ?")
-      .get("/test/supplied-remote/path-b") as { project_id: string } | null;
-    expect(alias).not.toBeNull();
-    expect(alias?.project_id).toBe(id1);
+      // A different path with the same supplied git remote resolves to the
+      // same project (step 3 git-remote match) and registers an alias.
+      const id2 = ensureProject(
+        "/test/supplied-remote/path-b",
+        undefined,
+        "github.com/test/supplied-remote-repo",
+      );
+      expect(id2).toBe(id1);
+
+      const alias = db()
+        .query("SELECT project_id FROM project_path_aliases WHERE path = ?")
+        .get("/test/supplied-remote/path-b") as { project_id: string } | null;
+      expect(alias).not.toBeNull();
+      expect(alias?.project_id).toBe(id1);
+    });
+
+    test("backfills existing project", () => {
+      const id1 = ensureProject("/test/backfill-remote/original");
+      const rowBefore = db()
+        .query("SELECT git_remote FROM projects WHERE id = ?")
+        .get(id1) as { git_remote: string | null };
+      expect(rowBefore.git_remote).toBeNull();
+
+      const id2 = ensureProject(
+        "/test/backfill-remote/original",
+        undefined,
+        "github.com/test/backfill-repo",
+      );
+      expect(id2).toBe(id1);
+
+      const rowAfter = db()
+        .query("SELECT git_remote FROM projects WHERE id = ?")
+        .get(id1) as { git_remote: string | null };
+      expect(rowAfter.git_remote).toBe("github.com/test/backfill-repo");
+    });
   });
 
-  test("ensureProject with supplied gitRemote backfills existing project", () => {
-    // Create a project without a git remote (simulates pre-v14 or local-only)
-    const id1 = ensureProject("/test/backfill-remote/original");
-    const rowBefore = db()
-      .query("SELECT git_remote FROM projects WHERE id = ?")
-      .get(id1) as { git_remote: string | null };
-    expect(rowBefore.git_remote).toBeNull();
+  // Regression: the "git-remote magnet" bug. A non-repo path (e.g. a parent
+  // dir full of loose scripts) must NEVER acquire a client-supplied remote on
+  // a LOCAL gateway, or it becomes a bucket that swallows every project later
+  // sending that same remote.
+  describe("git-remote magnet guard (local mode)", () => {
+    afterEach(() => {
+      _resetHostedModeForTest();
+    });
 
-    // Re-visit with a supplied git remote — should backfill the remote
-    const id2 = ensureProject(
-      "/test/backfill-remote/original",
-      undefined,
-      "github.com/test/backfill-repo",
-    );
-    expect(id2).toBe(id1);
+    test("does NOT attach a client remote to a non-repo path", () => {
+      // Local mode (hosted OFF by default). /test/... is not a git repo, so
+      // getGitRemote() returns null → the supplied remote must be dropped.
+      const id = ensureProject(
+        "/test/magnet/non-repo-a",
+        undefined,
+        "github.com/BYK/loreai",
+      );
+      const row = db()
+        .query("SELECT git_remote FROM projects WHERE id = ?")
+        .get(id) as { git_remote: string | null };
+      expect(row.git_remote).toBeNull();
+    });
 
-    const rowAfter = db()
-      .query("SELECT git_remote FROM projects WHERE id = ?")
-      .get(id1) as { git_remote: string | null };
-    expect(rowAfter.git_remote).toBe("github.com/test/backfill-repo");
+    test("a non-repo path cannot become a magnet for same-remote paths", () => {
+      // First non-repo path with a supplied remote (dropped → no remote).
+      const idA = ensureProject(
+        "/test/magnet/non-repo-b",
+        undefined,
+        "github.com/BYK/somerepo",
+      );
+      // A second, unrelated non-repo path sending the SAME remote must get its
+      // OWN project — NOT be aliased into the first.
+      const idB = ensureProject(
+        "/test/magnet/non-repo-c",
+        undefined,
+        "github.com/BYK/somerepo",
+      );
+      expect(idB).not.toBe(idA);
+      const aliased = db()
+        .query("SELECT project_id FROM project_path_aliases WHERE path = ?")
+        .get("/test/magnet/non-repo-c") as { project_id: string } | null;
+      expect(aliased).toBeNull();
+    });
+
+    test("does NOT backfill a client remote onto an existing non-repo row", () => {
+      const id = ensureProject("/test/magnet/backfill-non-repo");
+      // Re-visit with a supplied remote — local + non-repo → must stay null.
+      ensureProject(
+        "/test/magnet/backfill-non-repo",
+        undefined,
+        "github.com/BYK/loreai",
+      );
+      const row = db()
+        .query("SELECT git_remote FROM projects WHERE id = ?")
+        .get(id) as { git_remote: string | null };
+      expect(row.git_remote).toBeNull();
+    });
+
+    test("still trusts the supplied remote in hosted mode (can't read disk)", () => {
+      enableHostedMode();
+      const id = ensureProject(
+        "/test/magnet/hosted-non-repo",
+        undefined,
+        "github.com/BYK/loreai",
+      );
+      const row = db()
+        .query("SELECT git_remote FROM projects WHERE id = ?")
+        .get(id) as { git_remote: string | null };
+      expect(row.git_remote).toBe("github.com/BYK/loreai");
+    });
   });
 
   test("ensureProject with supplied gitRemote=null falls through to create", () => {
@@ -767,6 +859,13 @@ describe("db", () => {
     expect(names).toContain("consecutive_text_only_turns");
   });
 
+  test("session_state has ltm_pin_keys column (migration v39)", () => {
+    const cols = db().query("PRAGMA table_info(session_state)").all() as Array<{
+      name: string;
+    }>;
+    expect(cols.map((c) => c.name)).toContain("ltm_pin_keys");
+  });
+
   test("saveSessionTracking and loadSessionTracking round-trip", () => {
     const sid = `test-tracking-${crypto.randomUUID()}`;
     saveSessionTracking(sid, {
@@ -777,6 +876,8 @@ describe("db", () => {
       ltmCacheTokens: 100,
       ltmPinText: "pinned LTM text",
       ltmPinTokens: 90,
+      ltmPinKeys: JSON.stringify(["a:1", "b:2"]),
+      dedupDecisions: JSON.stringify([["m1:p1", true]]),
     });
     const loaded = loadSessionTracking(sid);
     expect(loaded).not.toBeNull();
@@ -787,6 +888,8 @@ describe("db", () => {
     expect(loaded?.ltmCacheTokens).toBe(100);
     expect(loaded?.ltmPinText).toBe("pinned LTM text");
     expect(loaded?.ltmPinTokens).toBe(90);
+    expect(loaded?.ltmPinKeys).toBe(JSON.stringify(["a:1", "b:2"]));
+    expect(loaded?.dedupDecisions).toBe(JSON.stringify([["m1:p1", true]]));
   });
 
   test("saveSessionTracking partial update preserves other fields", () => {

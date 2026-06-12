@@ -53,6 +53,23 @@ describe("ltm", () => {
     expect(entry?.cross_project).toBe(1);
   });
 
+  test("remove() tombstones the UUID; clearTombstone() lifts it", () => {
+    const id = ltm.create({
+      projectPath: PROJECT,
+      category: "gotcha",
+      title: "Tombstone target",
+      content: "Will be deleted",
+      scope: "project",
+    });
+    expect(ltm.isTombstoned(id)).toBe(false);
+    ltm.remove(id);
+    expect(ltm.get(id)).toBeNull();
+    // The UUID is now tombstoned so a stale .lore.md can't resurrect it.
+    expect(ltm.isTombstoned(id)).toBe(true);
+    ltm.clearTombstone(id);
+    expect(ltm.isTombstoned(id)).toBe(false);
+  });
+
   test("update knowledge entry", () => {
     const id = ltm.create({
       projectPath: PROJECT,
@@ -413,6 +430,58 @@ describe("ltm.forSession", () => {
     expect(found).toBeDefined();
     // It must be the project-specific entry (cross_project = 0)
     expect(found?.cross_project).toBe(0);
+  });
+
+  test("deterministic ordering — equal-score entries keep a stable order (fix B)", async () => {
+    // Many entries with identical confidence and no distinguishing session
+    // context → equal/near-equal scores. Without the id tiebreak these reorder
+    // turn-to-turn and churn system[2]. With it, two calls produce identical
+    // ordering, so the rendered set is byte-stable.
+    for (let i = 0; i < 8; i++) {
+      ltm.create({
+        projectPath: PROJ,
+        category: "pattern",
+        title: `Equal pattern ${i}`,
+        content: "Neutral content with no session-context keywords.",
+        scope: "project",
+        crossProject: false,
+      });
+    }
+
+    const first = await ltm.forSession(PROJ, SESSION, 10_000);
+    const second = await ltm.forSession(PROJ, SESSION, 10_000);
+    expect(first.map((e) => e.id)).toEqual(second.map((e) => e.id));
+  });
+
+  test("stickyIds keeps previously-selected entries when budget is tight (fix: set-stabilization)", async () => {
+    // 10 equal-confidence entries (~50 tokens each) but a budget that fits ~4.
+    // Which 4 get selected is otherwise score-order-dependent; with stickyIds,
+    // the previously-selected set is retained across turns.
+    const ids: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      ids.push(
+        ltm.create({
+          projectPath: PROJ,
+          category: "pattern",
+          title: `Tight pattern ${i}`,
+          content: "B ".repeat(150),
+          scope: "project",
+          crossProject: false,
+        }),
+      );
+    }
+
+    const TIGHT = 250;
+    const firstSel = await ltm.forSession(PROJ, SESSION, TIGHT);
+    const firstIds = new Set(firstSel.map((e) => e.id));
+    expect(firstIds.size).toBeGreaterThan(0);
+    expect(firstIds.size).toBeLessThan(10);
+
+    // Next turn, pass the prior selection as stickyIds → identical set retained.
+    const secondSel = await ltm.forSession(PROJ, SESSION, TIGHT, {
+      stickyIds: firstIds,
+    });
+    expect(new Set(secondSel.map((e) => e.id))).toEqual(firstIds);
   });
 
   test("respects token budget — stops adding entries when budget exhausted", async () => {
@@ -864,6 +933,200 @@ describe("ltm.forSession", () => {
     // The React entry should appear — either via FTS5 fallback or vector scoring
     const titles = result.map((e) => e.title);
     expect(titles).toContain("React useState returns stale state");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// REGRESSION: system[2] cache-bust via vector-scored set churn (#727).
+//
+// The cache-bust bug only manifests on the VECTOR scoring path (embeddings
+// available) when the per-turn session context shifts the similarity scores of
+// budget-boundary entries. Earlier reliability bugs (stuck distillations /
+// bricked embeddings, #713/#720/#721) accidentally masked it by forcing the
+// deterministic FTS fallback. These tests drive the real vector path with a
+// CHANGING context across turns and assert the selected SET is stable with
+// stickyIds (the fix) and churns without it (the bug it guards against).
+// ---------------------------------------------------------------------------
+
+describe("ltm.forSession — vector-path set stability (regression #727)", () => {
+  const PROJ = "/test/ltm/vector-churn";
+  const SESSION = "vector-churn-session";
+  let availableSpy: ReturnType<typeof vi.spyOn>;
+  let embedSpy: ReturnType<typeof vi.spyOn>;
+  let vectorSpy: ReturnType<typeof vi.spyOn>;
+
+  // Per-turn similarity scores keyed by entry id. Each "turn" supplies a fresh
+  // map, simulating vector scores recomputed against an evolving session
+  // context — exactly what churns the budget-boundary subset in production.
+  let currentScores: Map<string, number>;
+
+  const ids: string[] = [];
+
+  beforeEach(() => {
+    const pid = ensureProject(PROJ);
+    db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+    db().query("DELETE FROM temporal_messages WHERE project_id = ?").run(pid);
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
+    ids.length = 0;
+
+    // 8 equal-confidence project entries, each ~30 tokens. A tight budget fits
+    // only ~4, so which 4 are selected is decided purely by the (shifting)
+    // vector scores. (~30 tok: title ~11 chars + "C "*45 = 90 chars →
+    // ceil(101/3)=34 +10 overhead ≈ 44; budget below tuned to fit exactly 4.)
+    for (let i = 0; i < 8; i++) {
+      ids.push(
+        ltm.create({
+          projectPath: PROJ,
+          category: "pattern",
+          title: `Vec entry ${i}`,
+          content: "C ".repeat(45),
+          scope: "project",
+          crossProject: false,
+        }),
+      );
+    }
+
+    // Seed a session context (>20 chars) so forSession takes the scoring path.
+    db()
+      .query(
+        "INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?, 0, ?, '{}')",
+      )
+      .run(
+        "vec-msg-1",
+        pid,
+        SESSION,
+        "user",
+        "Working on the vector scoring churn reproduction across turns",
+        20,
+        Date.now(),
+      );
+
+    currentScores = new Map();
+    availableSpy = vi.spyOn(embedding, "isAvailable").mockReturnValue(true);
+    // embed() just needs to return a non-empty query vector so the vector
+    // branch proceeds; the actual scores come from the vectorSearch mock.
+    embedSpy = vi
+      .spyOn(embedding, "embed")
+      .mockResolvedValue([new Float32Array([1, 0, 0])]);
+    // vectorSearch returns the current turn's per-entry similarities.
+    vectorSpy = vi.spyOn(embedding, "vectorSearch").mockImplementation(() =>
+      [...currentScores.entries()].map(([id, similarity]) => ({
+        id,
+        similarity,
+      })),
+    );
+  });
+
+  afterEach(() => {
+    availableSpy.mockRestore();
+    embedSpy.mockRestore();
+    vectorSpy.mockRestore();
+  });
+
+  /** Assign turn-N similarity scores: a base ordering plus a perturbation that
+   *  flips the ranking near the budget boundary (entries 3 and 4). */
+  function scoresForTurn(turn: number): Map<string, number> {
+    const m = new Map<string, number>();
+    for (let i = 0; i < ids.length; i++) {
+      // Descending base score; the boundary pair (i=3,4) swaps every turn.
+      let s = 1 - i * 0.1;
+      if (turn % 2 === 1 && (i === 3 || i === 4)) {
+        s = i === 3 ? 1 - 4 * 0.1 : 1 - 3 * 0.1; // swap 3<->4
+      }
+      m.set(ids[i], s);
+    }
+    return m;
+  }
+
+  const TIGHT = 200;
+
+  test("WITHOUT stickyIds: vector scores shifting across turns churn the set (the bug)", async () => {
+    currentScores = scoresForTurn(0);
+    const turn0 = new Set(
+      (await ltm.forSession(PROJ, SESSION, TIGHT)).map((e) => e.id),
+    );
+    currentScores = scoresForTurn(1); // boundary pair swaps
+    const turn1 = new Set(
+      (await ltm.forSession(PROJ, SESSION, TIGHT)).map((e) => e.id),
+    );
+
+    // Sanity: the vector path actually selected a budget-limited subset.
+    expect(turn0.size).toBeGreaterThan(0);
+    expect(turn0.size).toBeLessThan(ids.length);
+    // The boundary swap changes the selected set — this is the churn that
+    // busted system[2] every turn before the fix.
+    expect(turn1).not.toEqual(turn0);
+  });
+
+  test("WITH stickyIds: the previously-selected set is retained despite the score swap (the fix)", async () => {
+    currentScores = scoresForTurn(0);
+    const turn0 = new Set(
+      (await ltm.forSession(PROJ, SESSION, TIGHT)).map((e) => e.id),
+    );
+
+    // Next turn: scores swap at the boundary, but feeding the prior set as
+    // stickyIds keeps the selection stable → no system[2] cache bust.
+    currentScores = scoresForTurn(1);
+    const turn1 = new Set(
+      (await ltm.forSession(PROJ, SESSION, TIGHT, { stickyIds: turn0 })).map(
+        (e) => e.id,
+      ),
+    );
+    expect(turn1).toEqual(turn0);
+
+    // And it stays stable across a third turn when fed forward again.
+    currentScores = scoresForTurn(2);
+    const turn2 = new Set(
+      (await ltm.forSession(PROJ, SESSION, TIGHT, { stickyIds: turn1 })).map(
+        (e) => e.id,
+      ),
+    );
+    expect(turn2).toEqual(turn0);
+  });
+
+  // The hysteresis bonus is multiplicative (STICKY_RELEVANCE_BONUS = 1.25): a
+  // sticky entry at raw score s keeps its slot unless a contender out-scores
+  // s × 1.25. These two tests pin that threshold from both sides at the budget
+  // boundary (the weakest selected sticky entry, index 3, vs the first dropped
+  // entry, index 4), so the test would fail if the constant were changed.
+  //
+  // Layout: entries 0–2 score high (always selected), 3 is the boundary sticky
+  // entry (raw 0.40), 4 is the contender. Budget fits exactly 4.
+  function boundaryScores(contenderScore: number): Map<string, number> {
+    const m = new Map<string, number>();
+    m.set(ids[0], 0.9);
+    m.set(ids[1], 0.8);
+    m.set(ids[2], 0.7);
+    m.set(ids[3], 0.4); // sticky boundary entry → effective 0.4 × 1.25 = 0.50
+    m.set(ids[4], contenderScore); // non-sticky contender
+    for (let i = 5; i < ids.length; i++) m.set(ids[i], 0.05);
+    return m;
+  }
+
+  test("WITH stickyIds: a contender below the 1.25x threshold does NOT displace a sticky entry", async () => {
+    const sticky = new Set([ids[0], ids[1], ids[2], ids[3]]);
+    // Contender 0.46 > sticky raw 0.40, but < 0.40 × 1.25 = 0.50 → entry 3 holds.
+    currentScores = boundaryScores(0.46);
+    const got = new Set(
+      (await ltm.forSession(PROJ, SESSION, TIGHT, { stickyIds: sticky })).map(
+        (e) => e.id,
+      ),
+    );
+    expect(got.has(ids[3])).toBe(true);
+    expect(got.has(ids[4])).toBe(false);
+  });
+
+  test("WITH stickyIds: a contender above the 1.25x threshold DOES displace a sticky entry", async () => {
+    const sticky = new Set([ids[0], ids[1], ids[2], ids[3]]);
+    // Contender 0.55 > 0.40 × 1.25 = 0.50 → entry 4 wins, entry 3 drops out.
+    currentScores = boundaryScores(0.55);
+    const got = new Set(
+      (await ltm.forSession(PROJ, SESSION, TIGHT, { stickyIds: sticky })).map(
+        (e) => e.id,
+      ),
+    );
+    expect(got.has(ids[4])).toBe(true);
+    expect(got.has(ids[3])).toBe(false);
   });
 });
 
@@ -1730,5 +1993,88 @@ describe("ltm — cross-project promotion", () => {
     // Low-confidence entry untouched
     expect(ltm.get(d)?.cross_project).toBe(0);
     expect(ltm.get(d)?.promotion_status).toBeNull();
+  });
+});
+
+describe("ltm.findSemanticDuplicate", () => {
+  const PROJ = "/test/ltm/semdup";
+  let availableSpy: ReturnType<typeof vi.spyOn>;
+  let embedSpy: ReturnType<typeof vi.spyOn>;
+
+  /** Deterministic unit-norm vector for a seed (same formula as injectEmbedding). */
+  function seedVec(seed: number, dims = 768): Float32Array {
+    const vec = new Float32Array(dims);
+    for (let i = 0; i < dims; i++) vec[i] = Math.sin(seed * (i + 1) * 0.1);
+    let norm = 0;
+    for (let i = 0; i < dims; i++) norm += vec[i] * vec[i];
+    norm = Math.sqrt(norm);
+    for (let i = 0; i < dims; i++) vec[i] /= norm;
+    return vec;
+  }
+
+  function seedEntry(title: string, seed: number): string {
+    const id = ltm.create({
+      id: uuidv7(),
+      projectPath: PROJ,
+      category: "preference",
+      title,
+      content: `content for ${title}`,
+      scope: "project",
+    });
+    db()
+      .query("UPDATE knowledge SET embedding = ? WHERE id = ?")
+      .run(Buffer.from(seedVec(seed).buffer), id);
+    return id;
+  }
+
+  beforeEach(() => {
+    const pid = ensureProject(PROJ);
+    db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+    availableSpy = vi.spyOn(embedding, "isAvailable").mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    availableSpy.mockRestore();
+    embedSpy?.mockRestore();
+  });
+
+  test("returns a match when a semantically-identical entry exists (sim >= threshold)", async () => {
+    const existing = seedEntry("Always write tests after features", 7);
+    // Candidate embeds to the SAME vector → cosine 1.0 → above 0.935.
+    embedSpy = vi.spyOn(embedding, "embed").mockResolvedValue([seedVec(7)]);
+
+    const pid = ensureProject(PROJ);
+    const dup = await ltm.findSemanticDuplicate({
+      title: "Always add tests once a feature lands",
+      content: "differently worded but same behavior",
+      projectId: pid,
+    });
+    expect(dup?.id).toBe(existing);
+    expect(dup?.similarity).toBeGreaterThanOrEqual(0.935);
+  });
+
+  test("returns null when no entry is similar enough", async () => {
+    seedEntry("Use SQLite for storage", 3);
+    // Candidate embeds to a very different vector → low cosine → no match.
+    embedSpy = vi.spyOn(embedding, "embed").mockResolvedValue([seedVec(99)]);
+
+    const pid = ensureProject(PROJ);
+    const dup = await ltm.findSemanticDuplicate({
+      title: "Prefer Postgres for storage",
+      content: "unrelated wording",
+      projectId: pid,
+    });
+    expect(dup).toBeNull();
+  });
+
+  test("returns null (no-op) when embeddings are unavailable", async () => {
+    availableSpy.mockReturnValue(false);
+    const pid = ensureProject(PROJ);
+    const dup = await ltm.findSemanticDuplicate({
+      title: "anything",
+      content: "anything",
+      projectId: pid,
+    });
+    expect(dup).toBeNull();
   });
 });

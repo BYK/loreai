@@ -1,10 +1,18 @@
-import { describe, test, expect, afterEach, vi } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 
 // Mock the upstream fetch wrapper so the adapter's retry loop is driven by our
 // stubbed responses regardless of whether a fetch interceptor is installed
 // (stubbing globalThis.fetch alone would silently break if `getOriginalFetch`
 // had captured the real fetch).
 vi.mock("../src/fetch", () => ({ upstreamFetch: vi.fn() }));
+vi.mock("../src/worker-health", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/worker-health")>();
+  return {
+    ...actual,
+    recordWorkerFailure: vi.fn(actual.recordWorkerFailure),
+    markWorkerPaused: vi.fn(actual.markWorkerPaused),
+  };
+});
 
 import {
   backoffMs,
@@ -20,6 +28,8 @@ import {
 } from "../src/background-limiter";
 import { upstreamFetch } from "../src/fetch";
 import { clearAllCosts, getSessionCosts } from "../src/cost-tracker";
+import { recordWorkerFailure, markWorkerPaused } from "../src/worker-health";
+import { captureSessionHeaders } from "../src/cch";
 
 // ---------------------------------------------------------------------------
 // maxRetriesFor — unified policy (modeled on Claude Code's single budget)
@@ -266,6 +276,19 @@ describe("resolveWorkerProtocol", () => {
   test("unknown provider defaults to 'anthropic'", () => {
     expect(resolveWorkerProtocol("some-unknown-provider")).toBe("anthropic");
   });
+
+  // openai-codex must use the Responses API — never collapse to Chat Completions.
+  test("openai-codex resolves to 'openai-codex-responses' regardless of hint", () => {
+    expect(resolveWorkerProtocol("openai-codex", "openai-responses")).toBe(
+      "openai-codex-responses",
+    );
+    expect(resolveWorkerProtocol("openai-codex", "openai")).toBe(
+      "openai-codex-responses",
+    );
+    expect(resolveWorkerProtocol("openai-codex")).toBe(
+      "openai-codex-responses",
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -347,10 +370,13 @@ describe("worker 429 trips the circuit breaker (urgent included)", () => {
       workerID: "lore-compact",
     });
 
-    // Exhausted → null (caller falls back), all attempts made, breaker tripped once.
+    // Exhausted → null (caller falls back), all attempts made, breaker tripped
+    // once — scoped to the provider that 429'd (anthropic here).
     expect(result).toBeNull();
     expect(mockFetch).toHaveBeenCalledTimes(4); // maxRetries(3) + 1
-    expect(getConsecutiveTrips()).toBe(1);
+    expect(getConsecutiveTrips("anthropic")).toBe(1);
+    // A different provider's breaker is unaffected by anthropic's 429.
+    expect(getConsecutiveTrips("openrouter")).toBe(0);
   });
 });
 
@@ -428,6 +454,59 @@ describe("createGatewayLLMClient.prompt", () => {
     expect(mockFetch.mock.calls[0][0]).toContain("/chat/completions");
   });
 
+  test("openai-codex worker calls the Responses endpoint with store:false + Codex headers", async () => {
+    // Seed the per-session Codex fingerprint as a real conversation turn would.
+    captureSessionHeaders("sess-codex", {
+      "chatgpt-account-id": "acct-xyz",
+      originator: "pi",
+      "openai-beta": "responses=experimental",
+    });
+
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          output: [
+            {
+              type: "message",
+              content: [{ type: "output_text", text: "codex worker reply" }],
+            },
+          ],
+          model: "gpt-5.1-codex-mini",
+          usage: { input_tokens: 12, output_tokens: 3 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "jwt-token" }),
+      { providerID: "openai-codex", modelID: "gpt-5.1-codex-mini" },
+    );
+
+    const text = await client.prompt("system", "user", {
+      sessionID: "sess-codex",
+      workerID: "lore-distill",
+      // Session upstream override (chatgpt backend) + responses protocol hint.
+      upstreamUrl: "https://chatgpt.com/backend-api",
+      protocol: "openai-responses",
+    });
+
+    expect(text).toBe("codex worker reply");
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toBe("https://chatgpt.com/backend-api/codex/responses");
+    const headers = init?.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer jwt-token");
+    expect(headers["chatgpt-account-id"]).toBe("acct-xyz");
+    expect(headers.originator).toBe("pi");
+    const body = JSON.parse(init?.body as string) as Record<string, unknown>;
+    expect(body.store).toBe(false);
+    expect(body.model).toBe("gpt-5.1-codex-mini");
+    expect(Array.isArray(body.input)).toBe(true);
+    // ChatGPT Codex rejects max_output_tokens — worker calls must omit it.
+    expect(body.max_output_tokens).toBeUndefined();
+  });
+
   test("returns null without calling upstream when no auth is available", async () => {
     const client = createGatewayLLMClient(UPSTREAMS, () => null, {
       providerID: "anthropic",
@@ -478,5 +557,95 @@ describe("createGatewayLLMClient.prompt", () => {
 
     expect(text).toBeNull();
     expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HTTP 402: insufficient credit — no Sentry escalation, soft-pause
+// ---------------------------------------------------------------------------
+
+describe("worker 402 insufficient credit handling", () => {
+  const mockFetch = vi.mocked(upstreamFetch);
+  const mockRecordFailure = vi.mocked(recordWorkerFailure);
+  const mockMarkPaused = vi.mocked(markWorkerPaused);
+
+  beforeEach(() => {
+    // Clear accumulated calls from prior describe blocks (429 tests etc.)
+    mockRecordFailure.mockClear();
+    mockMarkPaused.mockClear();
+  });
+
+  afterEach(() => {
+    mockFetch.mockReset();
+  });
+
+  test("402 returns null, calls markWorkerPaused, and does NOT call recordWorkerFailure", async () => {
+    mockFetch.mockImplementation(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              message: "requires more credits",
+              code: 402,
+            },
+          }),
+          { status: 402, statusText: "Payment Required" },
+        ),
+    );
+
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.anthropic.com",
+        openai: "https://api.openai.com",
+      },
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      // Use "anthropic" provider to match the upstreams map and avoid
+      // protocol-mismatch. The 402 behavior is provider-agnostic.
+      { providerID: "anthropic", modelID: "claude-test" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      workerID: "lore-distill",
+      sessionID: "sess-402-test",
+    });
+
+    // 402 is non-retried — only one fetch attempt.
+    expect(result).toBeNull();
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    // Soft-pause the session so we stop retrying every turn.
+    expect(mockMarkPaused).toHaveBeenCalledWith("sess-402-test");
+    // Critically: recordWorkerFailure must NOT be called — that's what
+    // escalates to Sentry after 3 hits, and 402 is an expected account state.
+    expect(mockRecordFailure).not.toHaveBeenCalled();
+  });
+
+  test("402 without sessionID logs but does not call markWorkerPaused", async () => {
+    mockFetch.mockImplementation(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: { message: "requires more credits", code: 402 },
+          }),
+          { status: 402, statusText: "Payment Required" },
+        ),
+    );
+
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.anthropic.com",
+        openai: "https://api.openai.com",
+      },
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      { providerID: "anthropic", modelID: "claude-test" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      workerID: "lore-distill",
+      // no sessionID — session-less worker
+    });
+
+    expect(result).toBeNull();
+    expect(mockMarkPaused).not.toHaveBeenCalled();
+    expect(mockRecordFailure).not.toHaveBeenCalled();
   });
 });

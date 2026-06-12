@@ -22,7 +22,7 @@ const posts = (await getCollection("blog"))
         <time datetime={post.data.pubDate.toISOString()}>
           {post.data.pubDate.toLocaleDateString("en", { month: "long", day: "numeric", year: "numeric" })}
         </time>
-        <h2><a href={`${import.meta.env.BASE_URL}blog/${post.id}.html`}>{post.data.title}</a></h2>
+        <h2><a href={`${import.meta.env.BASE_URL}blog/${post.id}/`}>{post.data.title}</a></h2>
         <p>{post.data.description}</p>
         {post.data.tags.length > 0 && (
           <ul aria-label="Tags">

@@ -251,10 +251,36 @@ export function isClaudeCodeClient(
  */
 export const KNOWN_SESSION_HEADERS = [
   "x-lore-session-id", // Lore plugins (stable, deterministic) — checked first
-  "x-claude-code-session-id", // Claude Code (UUID, persists for CLI session)
+  "x-claude-code-session-id", // Claude Code (fresh UUID per conversation — never rotates)
   "x-session-id", // Generic session ID (e.g. OpenCode v1.17+, stable per session)
-  "x-session-affinity", // OpenCode (stable session ID, legacy name)
+  "x-session-affinity", // OpenCode (nanoid, regenerated on process restart — MAY rotate)
 ] as const;
+
+/**
+ * Headers whose values may change on a client process restart while the
+ * logical session remains the same (e.g. OpenCode regenerates its nanoid).
+ * Tier 1b rotation detection ONLY applies to these headers — a new value on
+ * a non-rotation-eligible header (like `x-claude-code-session-id`, which
+ * mints a fresh UUID per *conversation*) always means a genuinely new session
+ * and must never merge into an existing one.
+ *
+ * INVARIANT: on a remote/multi-client gateway, merging distinct conversations
+ * into one session causes cross-project contamination and data leakage. Only
+ * add a header here if a new value is provably a restart, never a new
+ * conversation.
+ */
+const ROTATION_ELIGIBLE_HEADERS: ReadonlySet<string> = new Set([
+  "x-session-affinity", // OpenCode legacy: nanoid regenerated on process restart
+]);
+
+/**
+ * Returns true if Tier 1b rotation detection should be attempted for the
+ * given known session header. A new value on a non-eligible header is
+ * always a genuinely new session.
+ */
+export function isRotationEligible(headerName: string): boolean {
+  return ROTATION_ELIGIBLE_HEADERS.has(headerName);
+}
 
 /**
  * Extract a session ID from known headers (Tier 1).

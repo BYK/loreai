@@ -29,6 +29,12 @@ import {
  *  embedding calls but bounded enough to avoid minutes-long hangs. */
 const EMBED_TIMEOUT_MS = 10_000;
 
+/** Max time to wait for the worker to exit cooperatively on shutdown before
+ *  force-terminating it. The worker drops queued work immediately but must
+ *  finish any in-flight, uninterruptible single-threaded ONNX inference batch
+ *  before it can exit — without this cap that could block process exit. */
+const WORKER_SHUTDOWN_TIMEOUT_MS = 1_500;
+
 /**
  * Safe per-text character limit for local ONNX inference. The Nomic v1.5 model
  * supports up to 8192 tokens, but ONNX runtime OOMs on inputs near that ceiling
@@ -542,6 +548,9 @@ class LocalProvider implements EmbeddingProvider {
     this.workerReady = false;
     this.workerInitError = null;
     this.initPromise = null;
+    // Don't let a mid-backfill ref keep the event loop alive while we wait for
+    // the worker to exit.
+    worker.unref();
 
     // Reject any in-flight requests with LocalProviderUnavailableError so
     // fire-and-forget callers' catch blocks handle it the same way as other
@@ -551,17 +560,61 @@ class LocalProvider implements EmbeddingProvider {
     }
     this.pendingRequests.clear();
 
-    return new Promise<void>((resolve) => {
-      worker.on("exit", () => resolve());
-      try {
-        worker.postMessage({ type: "shutdown" } satisfies WorkerInbound);
-      } catch {
-        // Worker already exited (e.g. process.exit(1) from WASM fatal) —
-        // resolve immediately since the desired end state is already reached.
-        resolve();
-      }
-    });
+    return awaitWorkerShutdown(worker, WORKER_SHUTDOWN_TIMEOUT_MS);
   }
+}
+
+/** Minimal worker surface needed to shut a worker down — lets tests inject a
+ *  fake worker without spawning a real thread. */
+export interface ShutdownableWorker {
+  on(event: "exit", listener: () => void): unknown;
+  postMessage(value: WorkerInbound): void;
+  terminate(): Promise<number>;
+}
+
+/**
+ * Ask a worker to exit cooperatively, but never wait longer than `timeoutMs`:
+ * on timeout, force-`terminate()` it. Resolves once the worker has exited (or
+ * been terminated), or immediately if `postMessage` throws (already gone).
+ *
+ * Exported (underscore-free name is fine; it's a real helper) so the bounded
+ * shutdown can be unit-tested with a fake worker — the real failure mode is a
+ * worker stuck in an uninterruptible single-threaded ONNX inference batch that
+ * never emits "exit", which would otherwise hang process shutdown.
+ */
+export function awaitWorkerShutdown(
+  worker: ShutdownableWorker,
+  timeoutMs: number,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(killTimer);
+      resolve();
+    };
+    // Hard cap: if the worker is mid-inference (an uninterruptible
+    // single-threaded ONNX batch) and never emits "exit", force-terminate it
+    // so process shutdown can't hang. Terminating is safe — all SQLite state
+    // lives on the main thread; the worker is stateless.
+    const killTimer = setTimeout(() => {
+      void worker
+        .terminate()
+        .catch(() => {})
+        .finally(finish);
+    }, timeoutMs);
+    killTimer.unref?.();
+
+    worker.on("exit", finish);
+    try {
+      worker.postMessage({ type: "shutdown" } satisfies WorkerInbound);
+    } catch {
+      // Worker already exited (e.g. process.exit(1) from WASM fatal) —
+      // resolve immediately since the desired end state is already reached.
+      finish();
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------

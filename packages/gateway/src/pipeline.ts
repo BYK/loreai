@@ -40,7 +40,10 @@ import {
   computeLayer0Cap,
   setCachePricing,
   distillLimiter,
+  curatorLimiter,
   recordCacheUsage,
+  exportDedupDecisions,
+  importDedupDecisions,
   calibrate,
   getLastTransformedCount,
   getLastTransformEstimate,
@@ -90,6 +93,7 @@ import type { GatewayConfig } from "./config";
 import {
   getProjectPath,
   extractGitRemoteHeader,
+  extractProjectHeader,
   resolveUpstreamRoute,
   extractUpstreamUrlHeader,
   extractProviderHeader,
@@ -174,6 +178,7 @@ import {
   makeWorkerHealth,
   recordWorkerFailure,
   allowWorkerProbe,
+  isWorkerCreditPaused,
 } from "./worker-health";
 import {
   getWorkerModel,
@@ -189,7 +194,7 @@ import {
   hasBillingHeader,
   resignBody,
 } from "./cch";
-import { isClaudeCodeClient } from "./session";
+import { isClaudeCodeClient, isRotationEligible } from "./session";
 import { analyzeCacheTurn, categorizeBust } from "./cache-analytics";
 import {
   recordGap,
@@ -394,11 +399,13 @@ export function setUpstreamInterceptor(
 /**
  * Reset all module-level singleton state.
  *
- * Intended for test harnesses only — allows multiple independent gateway
- * instances to run sequentially in the same Bun process without leaking
- * session state or initialization flags across test suites.
+ * Called during gateway shutdown (with `{ fast: true }` to skip the batch-queue
+ * drain) and by test harnesses (default — drains gracefully so tests observe
+ * all side-effects).
  */
-export async function resetPipelineState(): Promise<void> {
+export async function resetPipelineState(opts?: {
+  fast?: boolean;
+}): Promise<void> {
   initialized = false;
   sessions.clear();
   cwdWarned.clear();
@@ -406,12 +413,18 @@ export async function resetPipelineState(): Promise<void> {
   headerSessionIndex.clear();
   ltmSessionCache.clear();
   ltmPinnedText.clear();
+  lastSavedDedupDecisions.clear();
   stableLtmCache.clear();
-  // Shut down batch queue gracefully before clearing the client
+  // Shut down the batch queue before clearing the client. On process exit
+  // (`fast`), skip the synchronous LLM drain — replaying queued background
+  // prompts through retries/backoff is what made Ctrl+C hang for minutes; they
+  // resume next session. Config/test resets keep draining (default).
   if (llmClient && "shutdown" in llmClient) {
     await (
-      llmClient as LLMClient & { shutdown: () => Promise<void> }
-    ).shutdown();
+      llmClient as LLMClient & {
+        shutdown: (o?: { drainQueue?: boolean }) => Promise<void>;
+      }
+    ).shutdown({ drainQueue: !opts?.fast });
   }
   llmClient = null;
   activeInterceptor = undefined;
@@ -486,13 +499,20 @@ const ltmSessionCache = new Map<
 
 /**
  * Pinned context-bound LTM text per session — the text currently being
- * injected as system[2]. When ltmSessionCache is invalidated and
- * recomputed, we compare the new text against the pin. Only update if
- * >5% character difference to avoid cache busts from minor re-ranking.
+ * injected as system[2]. When ltmSessionCache is invalidated and recomputed,
+ * we compare the *selected entry set* against the pin: if the set of entry IDs
+ * is identical (any order) and no entry's content changed, the pinned text is
+ * reused verbatim so the system[2] cache prefix stays warm. Re-pinning happens
+ * only when the selected set changes or an entry's content changes.
+ *
+ * `entryKeys` is the sorted array of `"<id>:<hash(title+content)>"` keys for
+ * the entries the pinned text was rendered from. `undefined` means the pin
+ * predates entry-key tracking (legacy/restored rows) — treated as "unknown
+ * set", which forces a one-time re-pin on the next turn.
  */
 const ltmPinnedText = new Map<
   string,
-  { formatted: string; tokenCount: number }
+  { formatted: string; tokenCount: number; entryKeys?: string[] }
 >();
 
 /**
@@ -503,17 +523,6 @@ const ltmPinnedText = new Map<
  * The content of this queue is rendered into a synthetic user message on the
  * next turn and then cleared. The injected delta message is frozen — once
  * in the conversation, its bytes never change.
- *
- * Structure:
- *   pending: Array<{
- *     op: "new" | "changed" | "removed";
- *     id: string;
- *     category: string;
- *     title: string;
- *     content: string; // new/changed content, or for "removed" the content being removed
- *     ts: number; // when this change was added to the queue
- *   }>
- *   pendingRebuild: boolean; // set when pending grows past DELTA_MAX_ENTRIES * 1.5
  */
 const ltmDeltaState = new Map<
   string,
@@ -531,6 +540,119 @@ const ltmDeltaState = new Map<
 >();
 
 /**
+ * Last-persisted serialized dedup-decision memo per session — a change guard so
+ * we only write `dedup_decisions` to the DB on turns where it actually changed.
+ */
+const lastSavedDedupDecisions = new Map<string, string | undefined>();
+
+/**
+ * FNV-1a 32-bit hash of a string, returned as a short hex string. Used to
+ * detect per-entry content changes cheaply without storing full text. A
+ * collision would at worst suppress one legitimate re-pin (the curator's next
+ * content edit re-rolls the hash), so a 32-bit hash is acceptable here.
+ */
+export function fnv1a(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  return h.toString(16);
+}
+
+/**
+ * Compute the sorted entry-key array for a set of context-bound LTM entries.
+ * Each key is `"<id>:<hash(title+content)>"`. Sorted so order is canonical:
+ * the same set of entries always produces the same key array regardless of
+ * ranking order, which is exactly the property the reorder-tolerant pin needs.
+ *
+ * When `renderedIds` is provided, only those entries (the ones that survived
+ * budget packing in formatKnowledge and are actually in the rendered text) are
+ * keyed — so the key set always matches the rendered string byte-for-byte.
+ */
+export function ltmEntryKeys(
+  entries: Array<{ id: string; title: string; content: string }>,
+  renderedIds?: Iterable<string>,
+): string[] {
+  let source = entries;
+  if (renderedIds) {
+    const allow = new Set(renderedIds);
+    source = entries.filter((e) => allow.has(e.id));
+  }
+  return source
+    .map((e) => `${e.id}:${fnv1a(`${e.title}\x1f${e.content}`)}`)
+    .sort();
+}
+
+/** system[1] (stable LTM) cache breakpoint TTL in ms. Once an idle gap exceeds
+ *  this, that prefix is cold and can be rebuilt with fresh preferences for free. */
+export const STABLE_LTM_TTL_MS = 3_600_000; // 1h — matches the system[1] cache_control
+
+/**
+ * Decide whether in-flight (turn-based) curation should run this turn.
+ * Off by default (`curator.inFlight === false`): mid-session curation rewrites
+ * system[2] and busts the prompt cache. Pure/testable.
+ */
+export function shouldRunInFlightCuration(input: {
+  knowledgeEnabled: boolean;
+  inFlight: boolean;
+  turnsSinceCuration: number;
+  effectiveAfterTurns: number;
+  curationScheduled: boolean;
+  curatorBusy: boolean;
+}): boolean {
+  return (
+    input.knowledgeEnabled &&
+    input.inFlight &&
+    input.turnsSinceCuration >= input.effectiveAfterTurns &&
+    !input.curationScheduled &&
+    !input.curatorBusy
+  );
+}
+
+/**
+ * Decide whether the stable LTM block (system[1]: preferences + entities) should
+ * be refreshed on an idle resume. Only when the idle gap exceeds the system[1]
+ * 1h cache TTL — that prefix is then cold, so rebuilding it with freshly-curated
+ * preferences costs nothing. Shorter gaps keep it pinned. Pure/testable.
+ */
+export function shouldRefreshStableLtm(
+  idleTriggered: boolean,
+  idleMs: number,
+): boolean {
+  return idleTriggered && idleMs >= STABLE_LTM_TTL_MS;
+}
+
+/**
+ * Extract the entry-ID portion ("<id>" before the ":") from a sorted entry-key
+ * array. Used to feed the previous turn's selected set back into forSession()
+ * as a stability hint (stickyIds) so the budget-boundary selection doesn't
+ * churn turn-to-turn.
+ */
+export function entryKeyIds(keys: string[] | undefined): Set<string> {
+  const ids = new Set<string>();
+  if (!keys) return ids;
+  for (const k of keys) {
+    const idx = k.lastIndexOf(":");
+    ids.add(idx === -1 ? k : k.slice(0, idx));
+  }
+  return ids;
+}
+
+/** True when two sorted entry-key arrays are element-wise identical. */
+export function sameEntryKeys(
+  a: string[] | undefined,
+  b: string[] | undefined,
+): boolean {
+  if (!a || !b) return false;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+/**
  * Stable LTM (preference entries) + known entities per session — injected as
  * system[1] with a 1h cache breakpoint. Computed once per session and pinned
  * for ≥1h even through curation changes, so the Anthropic prompt cache prefix
@@ -546,53 +668,6 @@ const stableLtmCache = new Map<
   string,
   { formatted: string; tokenCount: number }
 >();
-
-/**
- * Measure character-level difference between two strings as a ratio (0..1).
- * Samples characters at regular intervals across the full string length to
- * detect interior changes, not just prefix/suffix differences.
- *
- * For short strings (≤1000 chars) compares every character. For longer
- * strings samples up to 1000 evenly-spaced positions for O(1) cost.
- */
-function textDiffRatio(a: string, b: string): number {
-  if (a === b) return 0;
-  if (!a || !b) return 1;
-
-  const maxLen = Math.max(a.length, b.length);
-  const minLen = Math.min(a.length, b.length);
-
-  // Length difference accounts for part of the diff
-  const lengthDiff = maxLen - minLen;
-
-  // Sample up to 1000 positions across the overlapping region
-  const sampleCount = Math.min(minLen, 1000);
-  const step = sampleCount < minLen ? minLen / sampleCount : 1;
-  let mismatches = 0;
-  for (let i = 0; i < sampleCount; i++) {
-    const idx = Math.floor(i * step);
-    if (a[idx] !== b[idx]) mismatches++;
-  }
-
-  // Extrapolate mismatch rate to the full overlapping region + length diff
-  const mismatchRate = sampleCount > 0 ? mismatches / sampleCount : 0;
-  const estimatedMismatches = mismatchRate * minLen + lengthDiff;
-  return Math.min(1, estimatedMismatches / maxLen);
-}
-
-/**
- * Cost-aware diff threshold for LTM diff-pinning. More expensive models
- * tolerate larger diffs before busting the cache prefix, since each bust
- * costs more. Used by both step-6 (normal turn) and step-7b (Layer 4
- * refresh) to keep the threshold in sync.
- */
-function ltmDiffThreshold(inputCostPerMillion?: number): number {
-  const base = 0.05;
-  const cost = inputCostPerMillion ?? 3;
-  if (cost >= 5) return Math.min(base * 3, 0.2); // opus: 15%
-  if (cost >= 1) return Math.min(base * 2, 0.15); // sonnet: 10%
-  return base; // haiku: 5%
-}
 
 /**
  * Add changed knowledge entries to the volatile knowledge-delta channel.
@@ -687,7 +762,6 @@ function addToPending(
 
   state.pending.sort((a, b) => a.ts - b.ts);
 }
-
 /** Cached LLM client for background workers. */
 let llmClient: LLMClient | null = null;
 /** Whether the batch queue wrapper is active (set once in getLLMClient). */
@@ -1103,6 +1177,7 @@ async function initIfNeeded(
         ltmSessionCache.delete(sessionID);
         ltmPinnedText.delete(sessionID);
         ltmDeltaState.delete(sessionID);
+        lastSavedDedupDecisions.delete(sessionID);
         stableLtmCache.delete(sessionID);
         cwdWarned.delete(sessionID);
         // Clear subagent parent-pending dedup entries for this session —
@@ -1661,9 +1736,24 @@ function getOrCreateSession(
       });
     }
     if (persisted?.ltmPinText != null && persisted.ltmPinTokens != null) {
+      let entryKeys: string[] | undefined;
+      if (persisted.ltmPinKeys != null) {
+        try {
+          const parsed = JSON.parse(persisted.ltmPinKeys);
+          if (
+            Array.isArray(parsed) &&
+            parsed.every((k) => typeof k === "string")
+          ) {
+            entryKeys = parsed;
+          }
+        } catch {
+          // Corrupt pin keys — leave undefined so the next turn re-pins once.
+        }
+      }
       ltmPinnedText.set(sessionID, {
         formatted: persisted.ltmPinText,
         tokenCount: persisted.ltmPinTokens,
+        ...(entryKeys ? { entryKeys } : {}),
       });
     }
     if (persisted?.ltmDeltaJson) {
@@ -1699,6 +1789,12 @@ function getOrCreateSession(
           `corrupt LTM delta state for session ${sessionID.slice(0, 16)}, starting fresh`,
         );
       }
+    }
+
+    // Restore the cross-turn dedup decision memo so the first post-restart turn
+    // doesn't flip an already-cached message's full/collapsed form (v41).
+    if (persisted?.dedupDecisions) {
+      importDedupDecisions(sessionID, persisted.dedupDecisions);
     }
     sessions.set(sessionID, state);
   }
@@ -1884,38 +1980,71 @@ async function identifySession(
     }
 
     // --- Tier 1b: Header value rotation detection ---
-    // The header name is known but the value is new (e.g. OpenCode restarted
-    // and regenerated its nanoid). Before creating a new session, check if
-    // exactly one existing session was previously identified via the SAME
-    // header name. If so, this is a client restart — resume the old session
-    // and re-index the new header value.
-    const predecessor = findRotationPredecessor(
-      known.headerName,
-      known.sessionId,
-      headerSessionIndex,
-      (sid) => {
-        // Session may be in memory or only in DB (after gateway restart).
-        const inMemory = sessions.get(sid);
-        if (inMemory) {
-          return {
-            sid,
-            isSubagent: !!inMemory.isSubagent,
-            lastActiveAt: inMemory.lastRequestTime,
-          };
+    // Only for headers whose values may change on a client restart while the
+    // logical session continues (e.g. OpenCode's x-session-affinity nanoid).
+    // Headers like x-claude-code-session-id mint a fresh value per
+    // *conversation* — a new value is always a genuinely new session, and
+    // merging would collapse distinct conversations (and their projects) into
+    // one, causing cross-project contamination on remote/multi-client gateways.
+    const predecessor = !isRotationEligible(known.headerName)
+      ? null
+      : findRotationPredecessor(
+          known.headerName,
+          known.sessionId,
+          headerSessionIndex,
+          (sid) => {
+            // Session may be in memory or only in DB (after gateway restart).
+            const inMemory = sessions.get(sid);
+            if (inMemory) {
+              return {
+                sid,
+                isSubagent: !!inMemory.isSubagent,
+                lastActiveAt: inMemory.lastRequestTime,
+              };
+            }
+            // Lightweight DB check for recency and subagent status.
+            const persisted = loadSessionTracking(sid);
+            if (!persisted) return null; // orphaned index entry
+            return {
+              sid,
+              isSubagent: persisted.isSubagent,
+              // lastTurnAt=0 means gradient never ran yet — session is new,
+              // treat as recently active (not infinitely stale).
+              lastActiveAt:
+                persisted.lastTurnAt > 0 ? persisted.lastTurnAt : Date.now(),
+            };
+          },
+        );
+
+    // Fix 2 (defense in depth): even for a rotation-eligible header, never
+    // re-home a session onto a DIFFERENT confident project. If the incoming
+    // request carries an explicit X-Lore-Project that disagrees with the
+    // predecessor's bound project, this is not a benign restart — treat it as
+    // a genuinely new session to avoid cross-project contamination.
+    if (predecessor) {
+      const incomingProject = extractProjectHeader(headers);
+      if (incomingProject) {
+        const predTracking = loadSessionTracking(predecessor.sid);
+        const predProject = predTracking?.projectPath;
+        const predConfident =
+          !!predProject && predTracking?.projectPathProvisional === false;
+        if (predConfident && predProject !== incomingProject) {
+          log.warn(
+            `session rotation refused (${known.headerName}): incoming project ` +
+              `${incomingProject} differs from predecessor ${predecessor.sid.slice(0, 16)} ` +
+              `project ${predProject} — creating a new session instead of merging.`,
+          );
+          const sessionID = generateSessionID();
+          headerSessionIndex.set(indexKey, sessionID);
+          // The old predecessor's index entry is intentionally preserved — the
+          // old session is still valid and may receive requests with its nanoid.
+          // It will age out via ROTATION_MAX_AGE_MS naturally. If another new
+          // nanoid arrives later, the old entry creates an ambiguity (multiple
+          // predecessors) → findRotationPredecessor returns null → new session.
+          return { sessionID, isNew: true, tier: 1 };
         }
-        // Lightweight DB check for recency and subagent status.
-        const persisted = loadSessionTracking(sid);
-        if (!persisted) return null; // orphaned index entry
-        return {
-          sid,
-          isSubagent: persisted.isSubagent,
-          // lastTurnAt=0 means gradient never ran yet — session is new,
-          // treat as recently active (not infinitely stale).
-          lastActiveAt:
-            persisted.lastTurnAt > 0 ? persisted.lastTurnAt : Date.now(),
-        };
-      },
-    );
+      }
+    }
 
     if (predecessor) {
       // Resume the old session with the new header value.
@@ -3553,6 +3682,10 @@ function scheduleBackgroundWork(
   const llm = getLLMClient(config);
   const cfg = loreConfig();
   const model = getWorkerModel(sessionState.lastUpstream);
+  // Provider the worker will call — used to scope the circuit-breaker check so
+  // a 429 from a DIFFERENT provider doesn't pause this session's background
+  // work. Undefined when the worker model can't be resolved (→ global breaker).
+  const workerProviderID = model?.providerID;
 
   // When the OAuth account is near quota exhaustion, skip non-urgent
   // background work to preserve remaining entitlement for user-facing turns.
@@ -3564,7 +3697,12 @@ function scheduleBackgroundWork(
   // periodic probe so a recovered upstream is detected without burning
   // thousands of futile calls (Sentry: runaway lore-distill failure counts).
   // Urgent distillation below is intentionally exempt — it unblocks the user.
-  const workerThrottled = !allowWorkerProbe(sessionID);
+  // Also throttle sessions soft-paused by an upstream credit/billing state
+  // (HTTP 402) — retrying the failing provider every turn just wastes calls;
+  // a probe is allowed periodically (see isWorkerCreditPaused) to detect a
+  // credit top-up.
+  const workerThrottled =
+    !allowWorkerProbe(sessionID) || isWorkerCreditPaused(sessionID);
 
   // Check if urgent distillation is needed (gradient flagged it OR a
   // compaction anomaly was detected on the previous turn). Mark urgent: true
@@ -3604,7 +3742,11 @@ function scheduleBackgroundWork(
         metaThresholdOverride,
       })
       .catch((e) => log.error("background distillation failed:", e));
-  } else if (!isBackgroundPaused() && !quotaPaused && !workerThrottled) {
+  } else if (
+    !isBackgroundPaused(workerProviderID) &&
+    !quotaPaused &&
+    !workerThrottled
+  ) {
     // Incremental distillation and curation are non-urgent — skip when the
     // circuit breaker is active to reduce API pressure. These are also gated
     // by runBackground() which checks isBackgroundPaused(), but the early
@@ -3636,6 +3778,7 @@ function scheduleBackgroundWork(
               workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
             }),
           `incremental-distill session=${sessionID.slice(0, 16)}`,
+          workerProviderID,
         ).catch((e) => log.error("background distillation failed:", e));
       }
     }
@@ -3648,7 +3791,8 @@ function scheduleBackgroundWork(
   // Also gated by circuit breaker — curation is never urgent.
   // Quota-paused accounts skip curation too (non-urgent background work).
   // Worker-throttled sessions (sustained worker failure) skip it as well.
-  if (isBackgroundPaused() || quotaPaused || workerThrottled) return;
+  if (isBackgroundPaused(workerProviderID) || quotaPaused || workerThrottled)
+    return;
 
   const modelInputCost =
     getModelEntrySync(
@@ -3658,11 +3802,37 @@ function scheduleBackgroundWork(
     modelInputCost >= 5 ? 3 : modelInputCost >= 1 ? 2 : 1;
   const effectiveAfterTurns = cfg.curator.afterTurns * curationMultiplier;
 
+  // Coalesce: skip scheduling curation when one is already scheduled, queued,
+  // or in-flight for THIS session. Without this, `turnsSinceCuration` stays
+  // at/above the threshold (it is only reset in the `.then()` after a run
+  // completes — see below), so every subsequent turn re-schedules curation,
+  // flooding the background queue with duplicates that are shed at queue-full.
+  //
+  // Two signals are required:
+  //  - `curationScheduled` (synchronous): set BEFORE runBackground() and
+  //    cleared in .finally(). `curatorLimiter` is only entered when the task
+  //    actually executes inside curator.run(), so under a saturated global
+  //    queue `isBusy` stays false between scheduling and execution — this flag
+  //    closes that window deterministically.
+  //  - `curatorLimiter.isBusy` (durable across ticks): also covers the
+  //    idle-path curation (idle.ts) which doesn't set curationScheduled.
+  // Mirrors the incremental-distill guard above and the idle-path guard.
+  // In-flight (turn-based) curation is OFF by default: changing the knowledge
+  // base mid-conversation rewrites system[2] (context-bound LTM) and busts the
+  // prompt cache for the rest of a large session. Curation still runs on idle
+  // (idle.ts), where the cache is cold so the rewrite is free. `turnsSinceCuration`
+  // keeps accumulating during the active conversation and fires on the next idle.
   if (
-    cfg.knowledge.enabled &&
-    cfg.curator.onIdle &&
-    sessionState.turnsSinceCuration >= effectiveAfterTurns
+    shouldRunInFlightCuration({
+      knowledgeEnabled: cfg.knowledge.enabled,
+      inFlight: cfg.curator.inFlight,
+      turnsSinceCuration: sessionState.turnsSinceCuration,
+      effectiveAfterTurns,
+      curationScheduled: !!sessionState.curationScheduled,
+      curatorBusy: curatorLimiter.isBusy(sessionID),
+    })
   ) {
+    sessionState.curationScheduled = true;
     runBackground(
       () =>
         Sentry.startSpan(
@@ -3681,6 +3851,7 @@ function scheduleBackgroundWork(
             }),
         ),
       `in-flight-curation session=${sessionID.slice(0, 16)}`,
+      workerProviderID,
     )
       .then((result) => {
         if (!result) return; // skipped by circuit breaker
@@ -3714,7 +3885,10 @@ function scheduleBackgroundWork(
           }
         }
       })
-      .catch((e) => log.error("background curation failed:", e));
+      .catch((e) => log.error("background curation failed:", e))
+      .finally(() => {
+        sessionState.curationScheduled = false;
+      });
   }
 }
 
@@ -4622,9 +4796,18 @@ async function handleConversationTurn(
   // preserving the prompt cache prefix.
   stripContextWarnings(req.messages);
 
+  // Per-turn attribution diagnostics. Surfacing source/header/mode here makes
+  // session-identity and project-binding bugs (e.g. the Tier 1b rotation merge,
+  // or a hosted gateway falling back to its own cwd) immediately visible in
+  // `LORE_DEBUG=1` logs instead of requiring a DB autopsy.
   log.info(
     `turn: session=${sessionID.slice(0, 16)} messages=${req.messages.length} ` +
-      `model=${req.model} stream=${req.stream} new=${isNew} tier=${tier}`,
+      `model=${req.model} stream=${req.stream} new=${isNew} tier=${tier} ` +
+      `source=${pathResult.source} ` +
+      `hdrProject=${req.rawHeaders["x-lore-project"] ? "present" : "absent"} ` +
+      `provisional=${sessionState.projectPathProvisional === true} ` +
+      `remoteGateway=${config.remoteGateway} hosted=${isHostedMode()} ` +
+      `project=${projectPath}`,
   );
 
   // --- 4. Set model limits ---
@@ -4711,8 +4894,19 @@ async function handleConversationTurn(
       ltmCacheTokens: null,
       ltmDeltaJson: null,
     });
+    // Refresh the stable LTM block (system[1]: preferences + entities) too, but
+    // ONLY when the idle gap exceeds system[1]'s own 1h cache TTL — i.e. that
+    // prefix is already cold, so rebuilding it with freshly-curated preferences
+    // costs nothing. (Lore promotes long-running sessions; without this they
+    // would keep using stale preferences indefinitely.) A shorter idle gap
+    // leaves system[1] warm, so we keep it pinned to preserve the 1h cache.
+    const refreshedStable = shouldRefreshStableLtm(true, idleResult.idleMs);
+    if (refreshedStable) {
+      stableLtmCache.delete(sessionID);
+    }
     log.info(
       `session idle ${Math.round(idleResult.idleMs / 60_000)}min — refreshing caches` +
+        (refreshedStable ? " (incl. stable LTM — 1h cold)" : "") +
         (cacheWarm ? " (cache warm — skipping compact)" : ""),
     );
   }
@@ -4813,10 +5007,23 @@ async function handleConversationTurn(
       // scoring. On turn 1, only stable LTM (preferences) is injected.
       if (!isFirstTurn) {
         let cached = ltmSessionCache.get(sessionID);
+        // Entry-set keys for the *freshly computed* selection. Only populated
+        // on the recompute path (when ltmSessionCache was cold/invalidated) —
+        // that's the only path where re-ranking can churn the text. On the
+        // warm-cache path the text is unchanged, so byte equality with the pin
+        // suffices and keys aren't needed.
+        let cachedKeys: string[] | undefined;
 
         if (!cached) {
           // Full context-bound budget — preferences have their own dedicated budget.
           const contextBudget = ltmBudget;
+          // Feed the previously-pinned entry set back in as a stability hint so
+          // per-turn relevance re-scoring doesn't churn the budget-boundary
+          // selection (which would bust the system[2] cache). New/removed/
+          // genuinely-more-relevant entries still change the set.
+          const stickyIds = entryKeyIds(
+            ltmPinnedText.get(sessionID)?.entryKeys,
+          );
           // Exclude preferences — they're already in system[1]
           const contextEntries = await ltm.forSession(
             projectPath,
@@ -4825,9 +5032,11 @@ async function handleConversationTurn(
             {
               excludeCategories: ["preference"],
               ...(contextHint ? { contextHint } : {}),
+              ...(stickyIds.size ? { stickyIds } : {}),
             },
           );
           if (contextEntries.length) {
+            const renderedIds: string[] = [];
             const formatted = formatKnowledge(
               contextEntries.map((e) => ({
                 id: e.id,
@@ -4836,10 +5045,12 @@ async function handleConversationTurn(
                 content: e.content,
               })),
               contextBudget,
+              renderedIds,
             );
             if (formatted) {
               const tokenCount = Math.ceil(formatted.length / 3);
               cached = { formatted, tokenCount };
+              cachedKeys = ltmEntryKeys(contextEntries, renderedIds);
               ltmSessionCache.set(sessionID, cached);
               ltmDirty = true;
             }
@@ -4847,23 +5058,43 @@ async function handleConversationTurn(
         }
 
         if (cached) {
-          // Content-diff pinning: only update the injected LTM text if the
-          // new content differs by more than a threshold from what's currently
-          // pinned. This prevents cache busts from minor re-ranking after
-          // background curation/consolidation invalidates the LTM cache.
+          // Reorder-tolerant diff-pinning: reuse the pinned system[2] text
+          // whenever the *selected entry set* is unchanged (same entry IDs,
+          // any order; same per-entry content). Pure re-ranking by
+          // forSession() must never bust the cache. Re-pin only when the
+          // selected set changes, an entry's content changed (curator update),
+          // or there is no pin yet. See ltmPinnedText docs.
           const pinned = ltmPinnedText.get(sessionID);
-          if (
-            pinned &&
-            textDiffRatio(pinned.formatted, cached.formatted) <
-              ltmDiffThreshold(modelSpec.inputCostPerMillion)
-          ) {
-            // Near-identical — keep the pinned text to preserve cache prefix
+          const setUnchanged = cachedKeys
+            ? // Recompute path: compare entry-key sets.
+              sameEntryKeys(pinned?.entryKeys, cachedKeys)
+            : // Warm-cache path (no fresh entries): the text didn't change, so
+              // byte equality against the pin is sufficient.
+              pinned != null && pinned.formatted === cached.formatted;
+
+          if (pinned && setUnchanged) {
+            // Same entry set (or identical text) — keep the pinned text to
+            // preserve the cache prefix. Zero bust on pure re-ranking.
             ltmText = pinned.formatted;
+            // Keep the session cache in lock-step with the pin so the persisted
+            // ltmCacheText never diverges from ltmPinText. Otherwise a restart
+            // would reload cache=freshText / pin=oldText, and the warm-cache
+            // byte-equality check would spuriously re-pin (one needless bust)
+            // and drop entryKeys. (Addresses review finding S1.)
+            if (cachedKeys && cached.formatted !== pinned.formatted) {
+              ltmSessionCache.set(sessionID, {
+                formatted: pinned.formatted,
+                tokenCount: pinned.tokenCount,
+              });
+              ltmDirty = true;
+            }
           } else {
-            // Substantially different or first injection — pin the new text
-            ltmPinnedText.set(sessionID, cached);
+            // Set changed, content changed, or first injection — pin the new
+            // text along with its entry-key identity.
+            const newPin = { ...cached, entryKeys: cachedKeys };
+            ltmPinnedText.set(sessionID, newPin);
             pinDirty = true;
-            ltmText = cached.formatted;
+            ltmText = newPin.formatted;
           }
         }
       }
@@ -4895,7 +5126,13 @@ async function handleConversationTurn(
             }
           : {}),
         ...(pinDirty && pinned
-          ? { ltmPinText: pinned.formatted, ltmPinTokens: pinned.tokenCount }
+          ? {
+              ltmPinText: pinned.formatted,
+              ltmPinTokens: pinned.tokenCount,
+              ltmPinKeys: pinned.entryKeys
+                ? JSON.stringify(pinned.entryKeys)
+                : null,
+            }
           : {}),
       });
     }
@@ -4947,6 +5184,17 @@ async function handleConversationTurn(
     result.messages.pop();
   }
 
+  // Persist the cross-turn dedup decision memo when it changed, so the stable
+  // full/collapsed form of each tool output survives a gateway restart (v41).
+  // Cheap change-guard avoids a DB write on turns where dedup didn't run.
+  {
+    const serialized = exportDedupDecisions(sessionID);
+    if (serialized !== lastSavedDedupDecisions.get(sessionID)) {
+      lastSavedDedupDecisions.set(sessionID, serialized ?? undefined);
+      saveSessionTracking(sessionID, { dedupDecisions: serialized });
+    }
+  }
+
   // --- 7b. LTM refresh on emergency layer ---
   // Layer 4 (emergency/transient reset) signals that the context was fully
   // reset. Re-run forSession() to re-rank context-bound entries by relevance
@@ -4964,6 +5212,9 @@ async function handleConversationTurn(
       const contextBudget = ltmBudget;
       const stableTokens = stableLtmCache.get(sessionID)?.tokenCount ?? 0;
       const contextHint = lastUserTextTrimmed(req);
+      // Stability hint: keep the previously-pinned set sticky so consecutive
+      // Layer-4 turns don't churn the selection (see step-6).
+      const stickyIds = entryKeyIds(ltmPinnedText.get(sessionID)?.entryKeys);
       const contextEntries = await ltm.forSession(
         projectPath,
         sessionID,
@@ -4971,11 +5222,13 @@ async function handleConversationTurn(
         {
           excludeCategories: ["preference"],
           ...(contextHint ? { contextHint } : {}),
+          ...(stickyIds.size ? { stickyIds } : {}),
         },
       );
       let refreshed = false;
 
       if (contextEntries.length) {
+        const renderedIds: string[] = [];
         const formatted = formatKnowledge(
           contextEntries.map((e) => ({
             id: e.id,
@@ -4984,36 +5237,34 @@ async function handleConversationTurn(
             content: e.content,
           })),
           contextBudget,
+          renderedIds,
         );
 
         if (formatted) {
           const tokenCount = Math.ceil(formatted.length / 3);
+          const entryKeys = ltmEntryKeys(contextEntries, renderedIds);
           // Always update the cache with freshly ranked entries.
           ltmSessionCache.delete(sessionID);
           ltmSessionCache.set(sessionID, { formatted, tokenCount });
 
-          // Apply diff-pinning: on consecutive Layer 4 turns, system[2]
-          // stability matters because system[0]+[1] ARE still cache reads
-          // at 1h TTL. Only update the pin if the new text differs
-          // substantially — same threshold as step 6.
+          // Reorder-tolerant diff-pinning: on consecutive Layer 4 turns,
+          // system[2] stability matters because system[0]+[1] ARE still cache
+          // reads at 1h TTL. Reuse the pin whenever the selected entry set is
+          // unchanged (same IDs + content, any order) — same policy as step 6.
           const pinned = ltmPinnedText.get(sessionID);
 
-          if (
-            pinned &&
-            textDiffRatio(pinned.formatted, formatted) <
-              ltmDiffThreshold(modelSpec.inputCostPerMillion)
-          ) {
-            // Near-identical — keep the pinned text to preserve cache prefix
+          if (pinned && sameEntryKeys(pinned.entryKeys, entryKeys)) {
+            // Same entry set — keep the pinned text to preserve cache prefix
             ltmText = pinned.formatted;
             setLtmTokens(stableTokens + pinned.tokenCount, sessionID);
             saveSessionTracking(sessionID, {
               ltmCacheText: formatted,
               ltmCacheTokens: tokenCount,
-              // pin unchanged — don't write ltmPinText/ltmPinTokens
+              // pin unchanged — don't write ltmPinText/ltmPinTokens/ltmPinKeys
             });
           } else {
-            // Substantially different or first Layer 4 turn — pin the new text
-            ltmPinnedText.set(sessionID, { formatted, tokenCount });
+            // Set changed or first Layer 4 turn — pin the new text + identity
+            ltmPinnedText.set(sessionID, { formatted, tokenCount, entryKeys });
             ltmText = formatted;
             setLtmTokens(stableTokens + tokenCount, sessionID);
             saveSessionTracking(sessionID, {
@@ -5021,6 +5272,7 @@ async function handleConversationTurn(
               ltmCacheTokens: tokenCount,
               ltmPinText: formatted,
               ltmPinTokens: tokenCount,
+              ltmPinKeys: JSON.stringify(entryKeys),
             });
           }
           refreshed = true;
@@ -5043,6 +5295,7 @@ async function handleConversationTurn(
           ltmCacheTokens: null,
           ltmPinText: null,
           ltmPinTokens: null,
+          ltmPinKeys: null,
         });
         log.info(
           "Context-bound LTM cleared on emergency layer (Layer 4) — stable LTM preserved for session",
@@ -5057,35 +5310,16 @@ async function handleConversationTurn(
     }
   }
 
-  // --- 7c. Context health note ---
-  // When the gradient compresses context (layer 1+), append a brief note to
-  // the context-bound LTM block (system[2]) so the AI knows its context is
-  // managed and can use the recall tool for details no longer visible.
-  // This rides system[2] which already changes per-turn — no cache impact on
-  // the stable prefix (system[0]+[1]).
-  if (result.layer >= 1 && ltmText) {
-    const layerDesc =
-      result.layer === 1
-        ? "compressed"
-        : result.layer === 2
-          ? "aggressively compressed"
-          : result.layer >= 3
-            ? "emergency compressed"
-            : "compressed";
-    ltmText +=
-      `\n\n[Context health: conversation history is ${layerDesc}. ` +
-      `Distilled observations above are lossy summaries — specific details ` +
-      `(exact error messages, rejected alternatives, file paths, numerical values) ` +
-      `are likely omitted. Use recall to verify any specific claim before answering ` +
-      `questions about what happened, what was considered, or what the exact values were.]`;
-  } else if (result.layer >= 1 && !ltmText) {
-    ltmText =
-      `[Context health: conversation history is compressed. ` +
-      `Distilled observations above are lossy summaries — specific details ` +
-      `(exact error messages, rejected alternatives, file paths, numerical values) ` +
-      `are likely omitted. Use recall to verify any specific claim before answering ` +
-      `questions about what happened, what was considered, or what the exact values were.]`;
-  }
+  // --- 7c. (removed) Context health note ---
+  // Previously a per-turn "Context health" note was appended to system[2] when
+  // the gradient compressed context (layer ≥1). Its wording varied by layer,
+  // which busted the conversation cache on every layer oscillation (1→2→1)
+  // because system[2] has no cache_control of its own. The note was also
+  // largely redundant with the per-distillation "lossy" tags and the recall
+  // tool description. Its one unique signal (verify omitted specifics —
+  // rejected alternatives, exact errors, file paths, numbers — via recall) now
+  // lives statically in RECALL_TOOL_DESCRIPTION, which never busts the cache.
+  // See issue #741.
 
   // --- 7d. Unsustainable conversation warning ---
   // When 5+ consecutive cache busts are detected, flag for response-side injection.

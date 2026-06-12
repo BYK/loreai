@@ -490,6 +490,20 @@ describe("normalizeBodyForComparison", () => {
     expect(normalizeBodyForComparison(body)).toBe("cch=__; some text cch=__;");
   });
 
+  test("normalizes backtick/quote-terminated cch= tokens in content", () => {
+    // Markdown code span (`` `cch=2d825` ``) and quoted forms previously
+    // slipped past the `;`-only pattern, producing false-positive divergence.
+    expect(normalizeBodyForComparison("note: `cch=2d825` end")).toBe(
+      "note: `cch=__` end",
+    );
+    expect(normalizeBodyForComparison('"cch=64ee6"')).toBe('"cch=__"');
+    // Two turns with different content hashes normalize identically → no
+    // false-positive divergence.
+    expect(normalizeBodyForComparison("x `cch=2d825` y")).toBe(
+      normalizeBodyForComparison("x `cch=928b9` y"),
+    );
+  });
+
   test("normalizes cc_version suffix to fixed placeholder", () => {
     const body =
       '{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.37.5a7; cc_entrypoint=cli; cch=__;\\nYou are Claude Code"}]}';

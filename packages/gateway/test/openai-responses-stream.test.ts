@@ -502,4 +502,59 @@ describe("accumulateResponsesSSEStream", () => {
     expect(result.usage?.inputTokens).toBe(50);
     expect(result.usage?.cacheReadInputTokens).toBeUndefined();
   });
+
+  test("finalizes on Codex `response.done` terminal event", async () => {
+    const response = buildSSEResponse([
+      {
+        event: "response.output_text.delta",
+        data: {
+          type: "response.output_text.delta",
+          output_index: 0,
+          content_index: 0,
+          delta: "Hi",
+        },
+      },
+      {
+        // Codex (ChatGPT) emits `response.done` instead of `response.completed`.
+        event: "response.done",
+        data: {
+          type: "response.done",
+          response: {
+            id: "resp_codex",
+            model: "gpt-5.5",
+            status: "completed",
+            usage: { input_tokens: 30, output_tokens: 2 },
+          },
+        },
+      },
+    ]);
+
+    const result = await accumulateResponsesSSEStream(response);
+    expect(result.id).toBe("resp_codex");
+    expect(result.model).toBe("gpt-5.5");
+    expect(result.stopReason).toBe("end_turn");
+    expect(result.usage?.inputTokens).toBe(30);
+    expect(result.usage?.outputTokens).toBe(2);
+  });
+
+  test("maps Codex `response.incomplete` to max_tokens stop reason", async () => {
+    const response = buildSSEResponse([
+      {
+        event: "response.incomplete",
+        data: {
+          type: "response.incomplete",
+          response: {
+            id: "resp_inc",
+            model: "gpt-5.5",
+            status: "incomplete",
+            usage: { input_tokens: 40, output_tokens: 100 },
+          },
+        },
+      },
+    ]);
+
+    const result = await accumulateResponsesSSEStream(response);
+    expect(result.stopReason).toBe("max_tokens");
+    expect(result.usage?.outputTokens).toBe(100);
+  });
 });

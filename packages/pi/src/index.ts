@@ -83,6 +83,12 @@ const OPENAI_PROVIDERS = [
   "vercel-ai-gateway",
   // openai-responses API
   "openai",
+  // Codex (ChatGPT) — OpenAI Responses wire format. Registered with the
+  // standard `${gatewayBase}/v1` baseUrl; the Codex provider appends
+  // `/codex/responses` itself, landing on the gateway's `/v1/codex/responses`
+  // route. The Codex WSS attempt targets the same baseUrl and is rejected by
+  // the HTTP-only gateway, so Pi falls back to SSE through Lore (no bypass).
+  "openai-codex",
   // Local / self-hosted (OpenAI-compatible)
   "vllm",
   "llamacpp",
@@ -377,6 +383,17 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
         if (!res.ok) {
           // Gateway returned an error — fall back to Pi's default compaction.
           const errBody = await res.text().catch(() => "");
+          // A 404 `session_not_found` is expected when this session was never
+          // routed through Lore (e.g. a provider Lore doesn't proxy, or a
+          // websocket-only transport that bypassed the gateway). That's not a
+          // failure — log it quietly and let Pi's default compaction run.
+          if (res.status === 404 && errBody.includes("session_not_found")) {
+            console.info(
+              "pi: lore compaction unavailable — this session was not routed " +
+                "through Lore; falling back to Pi compaction.",
+            );
+            return undefined;
+          }
           console.error(
             `pi: compaction endpoint returned ${res.status}: ${errBody}`,
           );

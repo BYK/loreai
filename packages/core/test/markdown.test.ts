@@ -235,6 +235,53 @@ describe("formatKnowledge", () => {
     // Both should produce the same number of items
     expect(countListItems(all)).toBe(countListItems(budgeted));
   });
+
+  test("canonical layout — output is byte-stable regardless of input order", () => {
+    const entries = [
+      { category: "gotcha", title: "Zeta gotcha", content: "z" },
+      { category: "decision", title: "Bravo decision", content: "b" },
+      { category: "decision", title: "Alpha decision", content: "a" },
+      { category: "pattern", title: "Mid pattern", content: "m" },
+    ];
+    const reversed = [...entries].reverse();
+    const shuffled = [entries[2], entries[0], entries[3], entries[1]];
+    const out = formatKnowledge(entries);
+    expect(formatKnowledge(reversed)).toBe(out);
+    expect(formatKnowledge(shuffled)).toBe(out);
+  });
+
+  test("canonical layout — categories alphabetical, titles alphabetical within", () => {
+    const out = formatKnowledge([
+      { category: "pattern", title: "Bravo", content: "b" },
+      { category: "decision", title: "Zeta", content: "z" },
+      { category: "decision", title: "Alpha", content: "a" },
+    ]);
+    // "Decision" section before "Pattern" section
+    expect(out.indexOf("### Decision")).toBeLessThan(
+      out.indexOf("### Pattern"),
+    );
+    // Within Decision: Alpha before Zeta
+    expect(out.indexOf("Alpha")).toBeLessThan(out.indexOf("Zeta"));
+  });
+
+  test("outIncludedIds reports rendered entry ids after budget packing", () => {
+    const included: string[] = [];
+    formatKnowledge(
+      [
+        { category: "pattern", title: "Small", content: "x", id: "s" },
+        {
+          category: "pattern",
+          title: "Huge",
+          content: "Y".repeat(10_000),
+          id: "h",
+        },
+      ],
+      200,
+      included,
+    );
+    expect(included).toContain("s");
+    expect(included).not.toContain("h");
+  });
 });
 
 // ---------------------------------------------------------------------------

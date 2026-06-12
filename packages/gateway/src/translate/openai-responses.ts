@@ -99,6 +99,52 @@ export function parseOpenAIResponsesRequest(
   };
 }
 
+/**
+ * Parse a Pi `openai-codex` request. The wire format is the OpenAI Responses
+ * API, so we reuse `parseOpenAIResponsesRequest` for the shared parsing and add
+ * the Codex-specific delta on top:
+ *   - flag the request as Codex (steers the upstream URL + `store:false`)
+ *   - capture Codex control fields (`store`, `include`, `prompt_cache_key`,
+ *     `text`, `tool_choice`, `parallel_tool_calls`, `service_tier`).
+ *
+ * These fields are captured ONLY here (not in the shared base parser) so normal
+ * `openai-responses` callers keep their existing upstream body untouched.
+ */
+export function parseOpenAICodexRequest(
+  body: unknown,
+  headers: Record<string, string>,
+): GatewayRequest {
+  const req = parseOpenAIResponsesRequest(body, headers);
+  req.codex = true;
+
+  const raw = (body ?? {}) as Record<string, unknown>;
+  if (!req.extras) req.extras = {};
+  const extras = req.extras;
+  // NOTE: `store` is intentionally NOT captured — the upstream builder forces
+  // `store: false` for all Codex requests (ChatGPT rejects `store: true`), so
+  // echoing the client's value would be dead state.
+  if (raw.include !== undefined) {
+    extras.include = raw.include;
+  }
+  if (typeof raw.prompt_cache_key === "string") {
+    extras.prompt_cache_key = raw.prompt_cache_key;
+  }
+  if (raw.text !== undefined) {
+    extras.text = raw.text;
+  }
+  if (raw.tool_choice !== undefined) {
+    extras.tool_choice = raw.tool_choice;
+  }
+  if (typeof raw.parallel_tool_calls === "boolean") {
+    extras.parallel_tool_calls = raw.parallel_tool_calls;
+  }
+  if (typeof raw.service_tier === "string") {
+    extras.service_tier = raw.service_tier;
+  }
+
+  return req;
+}
+
 // ---------------------------------------------------------------------------
 // Input item parsing
 // ---------------------------------------------------------------------------
@@ -348,11 +394,58 @@ export function buildOpenAIResponsesUpstreamRequest(
     }
   }
 
-  return {
-    url: `${upstreamBase}/v1/responses`,
-    headers,
-    body,
-  };
+  // Codex (ChatGPT) is the OpenAI Responses wire format plus a small, cohesive
+  // delta. Keep ALL Codex-specific differences in `applyCodexResponsesDelta`
+  // (and the worker-side `buildCodexWorkerRequest`) so the shared builder stays
+  // Codex-agnostic and nobody has to sprinkle `req.codex` checks inline.
+  if (req.codex) {
+    applyCodexResponsesDelta(body, req);
+    return { url: `${upstreamBase}/codex/responses`, headers, body };
+  }
+
+  return { url: `${upstreamBase}/v1/responses`, headers, body };
+}
+
+/**
+ * Mutate a standard OpenAI Responses body into a Codex (ChatGPT) body. This is
+ * the single home for every Codex-vs-Responses difference:
+ *
+ *  - REMOVE `max_output_tokens`: ChatGPT's `/codex/responses` rejects it
+ *    outright ("Unsupported parameter: max_output_tokens").
+ *  - FORCE `store: false`: ChatGPT rejects `store: true`; the gateway sends the
+ *    full conversation as `input` and never relies on server-side storage, so
+ *    this is also semantically correct. Enforced gateway-side, not trusted from
+ *    the client.
+ *  - RE-EMIT the Codex control fields captured by `parseOpenAICodexRequest`
+ *    (`include`, `prompt_cache_key`, `text`, `tool_choice`,
+ *    `parallel_tool_calls`, `service_tier`).
+ */
+function applyCodexResponsesDelta(
+  body: Record<string, unknown>,
+  req: GatewayRequest,
+): void {
+  // ChatGPT Codex rejects the request if this parameter is present
+  // ("Unsupported parameter: max_output_tokens"). There is no per-request cap
+  // to send instead — Codex enforces its own server-side output limits.
+  delete body.max_output_tokens;
+
+  // ChatGPT Codex rejects `store: true`.
+  body.store = false;
+
+  const extras = req.extras;
+  if (!extras) return;
+  if (extras.include !== undefined) body.include = extras.include;
+  if (extras.prompt_cache_key !== undefined) {
+    body.prompt_cache_key = extras.prompt_cache_key;
+  }
+  if (extras.text !== undefined) body.text = extras.text;
+  if (extras.tool_choice !== undefined) body.tool_choice = extras.tool_choice;
+  if (extras.parallel_tool_calls !== undefined) {
+    body.parallel_tool_calls = extras.parallel_tool_calls;
+  }
+  if (extras.service_tier !== undefined) {
+    body.service_tier = extras.service_tier;
+  }
 }
 
 function buildResponsesInput(

@@ -124,10 +124,26 @@ export function isFreeWriteSession(sessionID: string): boolean {
   );
 }
 
+/** Consecutive-bust count at/above which a session is in a "sustained-bust
+ *  regime": the prompt cache is being rewritten nearly every turn, so the
+ *  "continue" path is paying cache *write* cost — not the cheap read cost the
+ *  tier gate normally assumes. */
+const SUSTAINED_BUST_THRESHOLD = 5;
+
 /**
  * Decide whether compression is economical at a tier boundary.
  *
- * @param currentTokens   - expected input tokens if we stay at the current layer
+ * The core comparison is bustCost (write the compressed context once) vs
+ * continueCost (keep sending the full context each turn). Normally "continue"
+ * is a cheap cache *read*, so growing the context is fine. But when the session
+ * is in a sustained-bust regime (`consecutiveBusts >= SUSTAINED_BUST_THRESHOLD`),
+ * the full context is being *written* every turn anyway — so "continue" costs
+ * write, not read. In that regime we price continueCost at the write rate,
+ * which makes compression economical precisely when it's needed (growth-driven
+ * busts), instead of refusing to compress and letting the context grow
+ * unbounded.
+ *
+ * @param currentTokens    - expected input tokens if we stay at the current layer
  * @param compressedTokens - expected tokens after compression
  * @param consecutiveBusts - how many turns in a row we've busted the cache
  * @param opts.threshold   - bust cost must be < threshold × continue cost (default 0.85)
@@ -142,24 +158,39 @@ export function shouldCompress(
 ): boolean {
   const { threshold = 0.85, freeWrite = false } = opts ?? {};
 
-  // Rolling bust detection: if we've been busting 5+ turns in a row,
-  // stop trying to compress — it's clearly not helping.
-  // Applies even to free-write sessions to prevent compress→overflow loops.
-  if (consecutiveBusts >= 5) return false;
-
   // Free-write cache (or no cache): compression never incurs a write cost.
-  // Always compress at tier boundaries — there's no economic downside.
-  if (freeWrite) return true;
+  // Always compress at tier boundaries — there's no economic downside — EXCEPT
+  // after a sustained run of busts, where repeated free compression that keeps
+  // overflowing is just churn (compress→overflow loop). This guard applies to
+  // free-write sessions only; paid-cache sessions are handled by the
+  // write-cost repricing below (Fix C).
+  if (freeWrite) {
+    return consecutiveBusts < SUSTAINED_BUST_THRESHOLD;
+  }
 
   // If no pricing data, fall back to conservative: do NOT compress.
   // Compression busts the cache, which is expensive. Without pricing data
   // we can't prove it's worthwhile, so err on the side of keeping the cache.
   if (cacheWriteCostPerToken <= 0 || cacheReadCostPerToken <= 0) return false;
 
-  const bustCost = compressedTokens * cacheWriteCostPerToken;
-  const continueCost = currentTokens * cacheReadCostPerToken;
+  const sustainedBust = consecutiveBusts >= SUSTAINED_BUST_THRESHOLD;
 
-  // Compress only if the bust cost is meaningfully less than continuing
+  const bustCost = compressedTokens * cacheWriteCostPerToken;
+  // In a sustained-bust regime the "continue" path is paying cache *write*
+  // cost on the whole context every turn, not the cheap read cost. Price it
+  // accordingly so the gate reflects reality. Otherwise use the read rate.
+  const continuePerToken = sustainedBust
+    ? cacheWriteCostPerToken
+    : cacheReadCostPerToken;
+  const continueCost = currentTokens * continuePerToken;
+
+  // Compress only if the bust cost is meaningfully less than continuing.
+  // Note: we deliberately do NOT short-circuit to "never compress" on a high
+  // bust count anymore. Structural system[2] busts (the historical cause of
+  // runaway bust counts) are eliminated by the reorder-tolerant LTM pin, so a
+  // sustained bust now indicates raw-window growth — exactly the case where
+  // compressing (writing once) is cheaper than continuing to rewrite the whole
+  // grown context every turn.
   return bustCost < threshold * continueCost;
 }
 
@@ -346,6 +377,13 @@ type SessionState = {
    * marginal value mid-chain since the model already has raw messages.
    */
   distillationSnapshot: DistillationSnapshot | null;
+  /**
+   * Cross-turn dedup decisions, keyed by "<messageID>:<partID>" → wasCollapsed.
+   * Keeps deduplicateToolOutputs() stable as the conversation grows: a tool
+   * output already sent (full or collapsed) keeps that form so the prompt cache
+   * isn't busted by a newly-appended later duplicate flipping an early message.
+   */
+  dedupDecisions: Map<string, boolean>;
 };
 
 function makeSessionState(): SessionState {
@@ -369,6 +407,7 @@ function makeSessionState(): SessionState {
     zeroCacheWriteTurns: 0,
 
     distillationSnapshot: null,
+    dedupDecisions: new Map(),
   };
 }
 
@@ -461,6 +500,9 @@ export function onIdleResume(
   state.prefixCache = null;
   state.rawWindowCache = null;
   state.distillationSnapshot = null;
+  // Cache is cold after idle eviction — a fresh window will be rebuilt, so the
+  // stable-dedup memo can reset too (its purpose is warm-cache stability).
+  state.dedupDecisions.clear();
   state.cameOutOfIdle = true;
   state.postIdleCompact = !skipCompact;
   return { triggered: true, idleMs };
@@ -1067,6 +1109,16 @@ function dedupAnnotation(
 export function deduplicateToolOutputs(
   messages: MessageWithParts[],
   currentTurnIdx: number,
+  /**
+   * Optional per-session memo of prior collapse decisions, keyed by
+   * `"<messageID>:<partID>"` → wasCollapsed. Makes dedup STABLE across turns:
+   * once a tool output has been sent (full or collapsed) it keeps that form, so
+   * a newly-appended later duplicate can't retroactively flip an already-cached
+   * earlier message and bust the prompt cache. Caller persists this map across
+   * transform() calls (per session). When omitted, dedup is stateless (legacy
+   * behavior — still correct, just not cross-turn-stable).
+   */
+  stableDecisions?: Map<string, boolean>,
 ): MessageWithParts[] {
   // Track latest occurrence: contentKey → latest message index
   const contentLatest = new Map<string, number>();
@@ -1150,8 +1202,29 @@ export function deduplicateToolOutputs(
         }
       }
 
-      // Keep if this is both the latest content AND not covered by a later read
-      if (isLatestContent && !coveredByLater) return part;
+      // Cross-turn stability: if we already decided this exact tool part's
+      // fate on a prior turn, honor it verbatim. A part sent full stays full;
+      // a part collapsed stays collapsed. This prevents a newly-appended later
+      // duplicate from retroactively collapsing an already-cached earlier
+      // message (which would change its bytes and bust the prompt cache).
+      const decisionKey = stableDecisions
+        ? `${msg.info.id}:${part.id}`
+        : undefined;
+      const priorCollapsed = decisionKey
+        ? stableDecisions?.get(decisionKey)
+        : undefined;
+
+      // Fresh decision: keep if this is both the latest content AND not covered
+      // by a later read. A prior decision (when present) overrides this.
+      const freshKeep = isLatestContent && !coveredByLater;
+      const collapse = priorCollapsed ?? !freshKeep;
+
+      if (decisionKey && priorCollapsed === undefined) {
+        // Record the first-seen decision so it sticks on later turns.
+        stableDecisions?.set(decisionKey, collapse);
+      }
+
+      if (!collapse) return part;
 
       // This is a duplicate — replace with compact annotation.
       // Drop structured `blocks` — the content is being compressed away.
@@ -1513,6 +1586,43 @@ function distilledPrefixCached(
     prefixTokens: tokens,
   };
   return { messages, tokens };
+}
+
+/**
+ * Serialize the cross-turn dedup decision memo for a session to a JSON string,
+ * so the host can persist it (survives gateway restarts). Returns null when the
+ * session has no recorded decisions.
+ */
+export function exportDedupDecisions(sessionID: string): string | null {
+  const state = sessionStates.get(sessionID);
+  if (!state || state.dedupDecisions.size === 0) return null;
+  return JSON.stringify(Array.from(state.dedupDecisions.entries()));
+}
+
+/**
+ * Restore a previously-persisted dedup decision memo into a session's state.
+ * Ignores malformed input (the memo is an optimization — a bad blob just means
+ * the first post-restart turn re-derives decisions). Does not overwrite an
+ * already-populated in-memory memo.
+ */
+export function importDedupDecisions(sessionID: string, json: string): void {
+  const state = getSessionState(sessionID);
+  if (state.dedupDecisions.size > 0) return;
+  try {
+    const parsed = JSON.parse(json);
+    if (!Array.isArray(parsed)) return;
+    for (const entry of parsed) {
+      if (
+        Array.isArray(entry) &&
+        typeof entry[0] === "string" &&
+        typeof entry[1] === "boolean"
+      ) {
+        state.dedupDecisions.set(entry[0], entry[1]);
+      }
+    }
+  } catch {
+    // Corrupt blob — start fresh.
+  }
 }
 
 // For testing only — reset prefix cache state for a specific session (or all)
@@ -1994,7 +2104,9 @@ function transformInner(input: {
       distilledBudget,
       rawBudget,
       refreshLtm: false,
-      unsustainable: sid ? getSessionState(sid).consecutiveBusts >= 5 : false,
+      unsustainable: sid
+        ? getSessionState(sid).consecutiveBusts >= SUSTAINED_BUST_THRESHOLD
+        : false,
     };
   }
 
@@ -2050,7 +2162,14 @@ function transformInner(input: {
   // ones with compact annotations. This can save thousands of tokens for sessions
   // with repeated file reads, potentially avoiding escalation to higher layers.
   const turnStart = currentTurnStart(input.messages);
-  const dedupMessages = deduplicateToolOutputs(input.messages, turnStart);
+  // Pass the per-session decision memo so dedup stays byte-stable across turns
+  // (an already-sent output keeps its full/collapsed form). Only when we have a
+  // session to scope the memo to.
+  const dedupMessages = deduplicateToolOutputs(
+    input.messages,
+    turnStart,
+    sid ? sessState.dedupDecisions : undefined,
+  );
 
   const distillations = sid
     ? loadDistillationsCached(input.projectPath, sid, input.messages, sessState)
@@ -2149,7 +2268,9 @@ function transformInner(input: {
         distilledBudget,
         rawBudget,
         refreshLtm: false,
-        unsustainable: sid ? getSessionState(sid).consecutiveBusts >= 5 : false,
+        unsustainable: sid
+          ? getSessionState(sid).consecutiveBusts >= SUSTAINED_BUST_THRESHOLD
+          : false,
       };
     }
   }
@@ -2226,7 +2347,7 @@ function transformInner(input: {
   const nuclearRawTokens = olderTokens + currentTurnTokens;
 
   const unsustainable = sid
-    ? getSessionState(sid).consecutiveBusts >= 5
+    ? getSessionState(sid).consecutiveBusts >= SUSTAINED_BUST_THRESHOLD
     : false;
 
   return {

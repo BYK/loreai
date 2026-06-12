@@ -75,15 +75,21 @@ async function apiJSON<T = unknown>(
 
 /** Create a project + knowledge entry directly via core APIs for test setup. */
 async function seedProject() {
-  const { ensureProject } = await import("@loreai/core");
+  const { ensureProject, db } = await import("@loreai/core");
   const { ltm } = await import("@loreai/core");
 
-  const projectPath = `/test/api/${Date.now()}`;
-  const projectId = ensureProject(
-    projectPath,
-    "test-project",
-    "git@github.com:test/repo.git",
-  );
+  // Stable path so repeated seedProject() calls reuse ONE project (previously
+  // this dedup happened via the shared git remote; ensureProject now refuses a
+  // client remote on a non-repo local path, so we anchor on the path instead).
+  const projectPath = `/test/api/project`;
+  const projectId = ensureProject(projectPath, "test-project");
+  // Attach a git remote directly. `ensureProject` deliberately refuses to
+  // accept a client-supplied remote for a non-repo path on a local gateway
+  // (the "git-remote magnet" guard), so we stamp it via SQL to model a project
+  // that already carries a remote — what these resolution tests need.
+  db()
+    .query("UPDATE projects SET git_remote = ? WHERE id = ?")
+    .run("git@github.com:test/repo.git", projectId);
 
   const knowledgeId = ltm.create({
     projectPath,

@@ -47,9 +47,21 @@ export function decompressBody(compressed: Uint8Array): string {
  * variable-width replacements are safe (offsets stay aligned across turns).
  */
 
-/** Claude Code content-cache hash: changes every turn. */
-const CCH_PATTERN = /cch=[0-9a-fA-F]+;/g;
-const CCH_REPLACEMENT = "cch=__;";
+/**
+ * Claude Code content-cache hash: changes every turn.
+ *
+ * Matches the billing-header form (`cch=abcde;`) AND content occurrences that
+ * appear as markdown code spans or quoted text (`` `cch=abcde` ``,
+ * `"cch=abcde"`) or bare/whitespace-terminated tokens. These content tokens
+ * are NOT real upstream cache busts (Anthropic strips `cch=` before computing
+ * its cache key), but if left un-normalized they produce false-positive
+ * `messages[N]`/`system[N]` divergence in this analytics comparison.
+ *
+ * The trailing terminator (`;`, backtick, quote, whitespace, or end) is kept
+ * out of the match so it is preserved and byte offsets stay aligned.
+ */
+const CCH_PATTERN = /cch=[0-9a-fA-F]+(?=[;`"'\s\\]|$)/g;
+const CCH_REPLACEMENT = "cch=__";
 
 /**
  * Claude Code version suffix: 3 hex chars derived from
@@ -367,11 +379,16 @@ export function analyzeCacheTurn(
         messageCount,
       );
 
-      // Capture and log diverging byte snippets for early divergences (< 5%
-      // prefix match) to help diagnose what the client is changing (e.g.
-      // timestamps, turn counters). Snippets are also stored on the result
-      // for Sentry span enrichment.
-      if (prefixMatchPercent < 0.05) {
+      // Capture and log diverging byte snippets to help diagnose what changed
+      // (e.g. timestamps, turn counters, host-side message re-rendering).
+      // Logged for early divergences (< 5% prefix match) AND for any
+      // mid-conversation messages[N] content change — the latter is the
+      // expensive "earlier message modified" case where we need to see whether
+      // the change originates upstream (host) or in lore's own pipeline.
+      const isMidConversationMessageChange =
+        /^messages\[\d+\]/.test(divergencePoint) &&
+        !divergenceReason.startsWith("new conversation message");
+      if (prefixMatchPercent < 0.05 || isMidConversationMessageChange) {
         const start = Math.max(0, prefixMatchBytes - 20);
         const end = prefixMatchBytes + 80;
         prevSnippet = prevBody.slice(start, Math.min(prevLength, end));

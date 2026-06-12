@@ -21,10 +21,11 @@ export default defineConfig({
   site: "https://withlore.ai",
   base,
   output: "static",
+  trailingSlash: "always",
   outDir: "./dist",
   publicDir: "./public",
   build: {
-    format: "file",
+    format: "directory",
   },
   integrations: [
     faviconAssets(),

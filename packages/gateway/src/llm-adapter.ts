@@ -26,7 +26,12 @@ import type { AuthCredential } from "./auth";
 import { authHeaders, markAuthStale, markGlobalAuthStale } from "./auth";
 import { tripCircuitBreaker } from "./background-limiter";
 import { resolveProviderRoute } from "./config";
-import { buildBillingBlock, buildOAuthWorkerHeaders, signBody } from "./cch";
+import {
+  buildBillingBlock,
+  buildCodexWorkerHeaders,
+  buildOAuthWorkerHeaders,
+  signBody,
+} from "./cch";
 import {
   setGenAiUsageAttributes,
   emitCostMetric,
@@ -35,7 +40,7 @@ import {
 import { recordWorkerCost } from "./cost-tracker";
 import { upstreamFetch } from "./fetch";
 import { extractJSONFromSSE } from "./translate/types";
-import { recordWorkerFailure } from "./worker-health";
+import { recordWorkerFailure, markWorkerPaused } from "./worker-health";
 
 // ---------------------------------------------------------------------------
 // Worker call tracking
@@ -53,6 +58,14 @@ const TRANSIENT_CODES = new Set([429, 500, 502, 503, 529]);
 
 /** HTTP status codes indicating permanent auth failure. */
 export const AUTH_ERROR_CODES = new Set([401, 403]);
+
+/**
+ * Provider "payment required / out of credit" codes (e.g. OpenRouter 402
+ * "requires more credits"). An expected account state, NOT an infrastructure
+ * outage: suppress Sentry escalation, do not count toward the worker-health
+ * failure ladder, and soft-pause the session so we stop retrying every turn.
+ */
+const INSUFFICIENT_CREDIT_CODES = new Set([402]);
 
 /**
  * Unified retry policy (modeled on Claude Code's `getRetryDelay`).
@@ -187,8 +200,16 @@ export function normalizeOpenAIUsage(
 // Provider-specific request builders
 // ---------------------------------------------------------------------------
 
-/** Wire protocol for worker requests (openai-responses collapsed to openai). */
-type WorkerProtocol = "anthropic" | "openai";
+/**
+ * Wire protocol for worker requests.
+ *
+ * `openai-responses` is collapsed to `"openai"` (Chat Completions) for normal
+ * OpenAI providers — workers do simple prompt→response and the Chat Completions
+ * endpoint is simpler/cheaper. The one exception is `openai-codex`: ChatGPT's
+ * `/backend-api` serves ONLY the Responses API (`/codex/responses`), so it gets
+ * a dedicated `"openai-codex-responses"` worker protocol that speaks Responses.
+ */
+type WorkerProtocol = "anthropic" | "openai" | "openai-codex-responses";
 
 /** Upstream URL, wire protocol, and provider label for a resolved target. */
 type ProviderTarget = {
@@ -206,13 +227,21 @@ type ProviderTarget = {
  *  2. Route table lookup via PROVIDER_ROUTES
  *  3. Default: "anthropic" (safest — most aggregators speak Anthropic)
  *
- * `openai-responses` is collapsed to `"openai"` because workers only
- * use simple prompt→response via Chat Completions, not the Responses API.
+ * `openai-responses` is collapsed to `"openai"` because workers only use
+ * simple prompt→response via Chat Completions, not the Responses API — EXCEPT
+ * for `openai-codex`, whose ChatGPT backend serves only the Responses API and
+ * therefore maps to `"openai-codex-responses"`.
  */
 export function resolveWorkerProtocol(
   providerID: string,
   explicit?: "anthropic" | "openai" | "openai-responses",
 ): WorkerProtocol {
+  // openai-codex MUST use the Responses API — its backend has no Chat
+  // Completions endpoint. This takes precedence over the explicit hint
+  // (which would otherwise collapse openai-responses → openai).
+  if (providerID === "openai-codex") {
+    return "openai-codex-responses";
+  }
   // 1. Explicit protocol from caller (threaded from UpstreamSnapshot)
   if (explicit) {
     return explicit === "anthropic" ? "anthropic" : "openai";
@@ -239,7 +268,21 @@ function resolveTarget(
     return {
       url: upstreamOverride.replace(/\/$/, ""),
       protocol,
-      providerName: protocol,
+      // Use the friendly provider label for codex; otherwise the protocol is a
+      // reasonable span label for an override target.
+      providerName:
+        protocol === "openai-codex-responses" ? "openai-codex" : protocol,
+    };
+  }
+  if (protocol === "openai-codex-responses") {
+    // Codex has no static default upstream — it always arrives via the
+    // session's upstream override (chatgpt.com/backend-api). Fall back to the
+    // provider route URL if present.
+    const route = resolveProviderRoute("openai-codex");
+    return {
+      url: (route?.url ?? upstreams.openai).replace(/\/$/, ""),
+      protocol,
+      providerName: "openai-codex",
     };
   }
   if (protocol === "openai") {
@@ -359,6 +402,54 @@ function buildOpenAIWorkerRequest(
   };
 }
 
+/**
+ * Build an OpenAI **Responses API** worker request for `openai-codex`.
+ *
+ * ChatGPT's `/backend-api` serves only the Responses API, so worker calls use
+ * the same wire format as the foreground turn: `instructions` + `input` items,
+ * `store: false` (required), and the sniffed Codex fingerprint headers.
+ */
+function buildCodexWorkerRequest(
+  target: ProviderTarget,
+  cred: AuthCredential,
+  model: { providerID: string; modelID: string },
+  system: string,
+  user: string,
+  sessionID?: string,
+  temperature?: number,
+): { url: string; headers: Record<string, string>; body: string } {
+  const codexHeaders = buildCodexWorkerHeaders(sessionID) ?? {};
+
+  return {
+    // target.url is the ChatGPT backend base (e.g. https://chatgpt.com/backend-api);
+    // Codex serves the Responses API at `/codex/responses`.
+    url: `${target.url}/codex/responses`,
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(cred),
+      ...codexHeaders,
+    },
+    // No `max_output_tokens`: ChatGPT Codex rejects it ("Unsupported parameter:
+    // max_output_tokens") and enforces its own server-side output limits. Same
+    // omission as the foreground Codex delta.
+    body: JSON.stringify({
+      model: model.modelID,
+      // Codex REQUIRES store:false (rejects store:true).
+      store: false,
+      stream: false,
+      ...(temperature != null && { temperature }),
+      instructions: system,
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: user }],
+        },
+      ],
+    }),
+  };
+}
+
 /** Extract text response from an Anthropic Messages API response. */
 function parseAnthropicResponse(data: {
   content?: Array<{ type: string; text?: string }>;
@@ -390,6 +481,120 @@ function parseOpenAIResponse(data: OpenAIChatResponse): {
     usage: data.usage ? normalizeOpenAIUsage(data.usage) : null,
     model: data.model ?? null,
   };
+}
+
+/**
+ * Extract text from an OpenAI **Responses API** non-streaming response (used by
+ * the `openai-codex` worker path). Text lives in `output[].content[].text` for
+ * `output_text` parts; usage uses `input_tokens`/`output_tokens`.
+ */
+function parseResponsesWorkerResponse(data: {
+  output?: Array<{
+    type?: string;
+    content?: Array<{ type?: string; text?: string }>;
+  }>;
+  output_text?: string;
+  usage?: { input_tokens?: number; output_tokens?: number };
+  model?: string;
+}): {
+  text: string | null;
+  usage: AnthropicUsage | null;
+  model: string | null;
+} {
+  // Prefer the convenience `output_text` aggregate when present; otherwise
+  // concatenate text parts from message output items.
+  let text: string | null =
+    typeof data.output_text === "string" ? data.output_text : null;
+  if (text === null && Array.isArray(data.output)) {
+    const parts: string[] = [];
+    for (const item of data.output) {
+      if (!Array.isArray(item.content)) continue;
+      for (const part of item.content) {
+        if (part?.type === "output_text" && typeof part.text === "string") {
+          parts.push(part.text);
+        }
+      }
+    }
+    if (parts.length > 0) text = parts.join("");
+  }
+
+  const usage: AnthropicUsage | null = data.usage
+    ? {
+        input_tokens: data.usage.input_tokens ?? 0,
+        output_tokens: data.usage.output_tokens ?? 0,
+      }
+    : null;
+
+  return { text, usage, model: data.model ?? null };
+}
+
+/**
+ * Dispatch to the correct worker request builder for a resolved target.
+ * Single source of truth so adding a protocol touches exactly one place.
+ */
+function buildWorkerRequest(
+  target: ProviderTarget,
+  cred: AuthCredential,
+  model: { providerID: string; modelID: string },
+  system: string,
+  user: string,
+  maxTokens: number,
+  sessionID?: string,
+  temperature?: number,
+): { url: string; headers: Record<string, string>; body: string } {
+  switch (target.protocol) {
+    case "openai-codex-responses":
+      // Codex omits max_output_tokens (rejected by ChatGPT) — no maxTokens arg.
+      return buildCodexWorkerRequest(
+        target,
+        cred,
+        model,
+        system,
+        user,
+        sessionID,
+        temperature,
+      );
+    case "openai":
+      return buildOpenAIWorkerRequest(
+        target,
+        cred,
+        model,
+        system,
+        user,
+        maxTokens,
+        temperature,
+      );
+    default:
+      return buildAnthropicWorkerRequest(
+        target,
+        cred,
+        model,
+        system,
+        user,
+        maxTokens,
+        sessionID,
+        temperature,
+      );
+  }
+}
+
+/** Dispatch to the correct worker response parser for a resolved target. */
+function parseWorkerResponse(
+  protocol: WorkerProtocol,
+  rawData: unknown,
+): { text: string | null; usage: AnthropicUsage | null; model: string | null } {
+  switch (protocol) {
+    case "openai-codex-responses":
+      return parseResponsesWorkerResponse(
+        rawData as Parameters<typeof parseResponsesWorkerResponse>[0],
+      );
+    case "openai":
+      return parseOpenAIResponse(rawData as OpenAIChatResponse);
+    default:
+      return parseAnthropicResponse(
+        rawData as Parameters<typeof parseAnthropicResponse>[0],
+      );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -495,27 +700,16 @@ export function createGatewayLLMClient(
       }
 
       // Build protocol-specific request
-      let req =
-        target.protocol === "openai"
-          ? buildOpenAIWorkerRequest(
-              target,
-              cred,
-              model,
-              system,
-              user,
-              maxTokens,
-              opts?.temperature,
-            )
-          : buildAnthropicWorkerRequest(
-              target,
-              cred,
-              model,
-              system,
-              user,
-              maxTokens,
-              opts?.sessionID,
-              opts?.temperature,
-            );
+      let req = buildWorkerRequest(
+        target,
+        cred,
+        model,
+        system,
+        user,
+        maxTokens,
+        opts?.sessionID,
+        opts?.temperature,
+      );
 
       // Track this call so temporal capture can skip it
       const callID = `gw-worker-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -595,13 +789,8 @@ export function createGatewayLLMClient(
                   ? await extractJSONFromSSE(response)
                   : await response.json();
 
-                // Parse response based on provider
-                const parsed =
-                  target.protocol === "openai"
-                    ? parseOpenAIResponse(rawData as OpenAIChatResponse)
-                    : parseAnthropicResponse(
-                        rawData as Parameters<typeof parseAnthropicResponse>[0],
-                      );
+                // Parse response based on protocol
+                const parsed = parseWorkerResponse(target.protocol, rawData);
 
                 // Set usage attributes on the span
                 if (parsed.usage) {
@@ -692,27 +881,16 @@ export function createGatewayLLMClient(
                   log.info(
                     `worker auth error ${response.status}, credential refreshed — retrying: ${text.slice(0, 200)}`,
                   );
-                  req =
-                    target.protocol === "openai"
-                      ? buildOpenAIWorkerRequest(
-                          target,
-                          freshCred,
-                          model,
-                          system,
-                          user,
-                          maxTokens,
-                          opts?.temperature,
-                        )
-                      : buildAnthropicWorkerRequest(
-                          target,
-                          freshCred,
-                          model,
-                          system,
-                          user,
-                          maxTokens,
-                          opts?.sessionID,
-                          opts?.temperature,
-                        );
+                  req = buildWorkerRequest(
+                    target,
+                    freshCred,
+                    model,
+                    system,
+                    user,
+                    maxTokens,
+                    opts?.sessionID,
+                    opts?.temperature,
+                  );
                   retryCount++;
                   continue;
                 }
@@ -752,6 +930,40 @@ export function createGatewayLLMClient(
                 return null;
               }
 
+              // --- Insufficient credit: 402 — expected account state ---
+              // (e.g. OpenRouter "requires more credits"). NOT an outage:
+              //  • log.warn (no Error object) so it does NOT auto-forward to
+              //    Sentry;
+              //  • intentionally NO recordWorkerFailure — that ladder is what
+              //    escalates to Sentry after 3 hits, and 402 must not;
+              //  • markWorkerPaused soft-pauses this session's background work
+              //    so the distiller/curator stop retrying every turn (a probe
+              //    is allowed once per circuit interval to detect a top-up).
+              if (INSUFFICIENT_CREDIT_CODES.has(response.status)) {
+                const text = await response.text().catch(() => "(no body)");
+                log.warn(
+                  `worker upstream insufficient credit: ${response.status} ${response.statusText}` +
+                    ` — model=${model.providerID}/${model.modelID}` +
+                    ` worker=${opts?.workerID ?? "unknown"}` +
+                    ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}` +
+                    ` — ${text.slice(0, 200)}`,
+                );
+                if (opts?.sessionID) {
+                  markWorkerPaused(opts.sessionID);
+                } else {
+                  // Session-less workers (e.g. entity-rebuild) can't be paused
+                  // per-session — log so it's visible but don't escalate.
+                  log.warn(
+                    `worker upstream insufficient credit (session-less, no pause): ${response.status}`,
+                  );
+                }
+                span.setStatus({
+                  code: 2,
+                  message: `HTTP ${response.status} credit`,
+                });
+                return null;
+              }
+
               // Non-transient error — fail immediately, no retry
               if (!TRANSIENT_CODES.has(response.status)) {
                 const text = await response.text().catch(() => "(no body)");
@@ -772,19 +984,20 @@ export function createGatewayLLMClient(
               }
 
               // Transient error — retry if attempts remain.
-              // Trip the global circuit breaker on ANY 429 (urgent included) so
-              // background work pauses instead of piling on more requests while
-              // this call rides out the rate limit. The urgent call itself is
-              // not gated by the breaker, so it keeps retrying. Trip at most
-              // once per call to avoid runaway escalation of the backoff
-              // schedule across a multi-retry loop.
+              // Trip the circuit breaker for THIS provider on ANY 429 (urgent
+              // included) so background work targeting the same provider pauses
+              // instead of piling on more requests while this call rides out
+              // the rate limit. Work routed to other providers keeps draining.
+              // The urgent call itself is not gated by the breaker, so it keeps
+              // retrying. Trip at most once per call to avoid runaway
+              // escalation of the backoff schedule across a multi-retry loop.
               if (response.status === 429 && !breakerTripped) {
                 breakerTripped = true;
                 const cbRetryAfter = parseRetryAfter(response);
                 const pauseSec = cbRetryAfter
                   ? Math.ceil(cbRetryAfter / 1000)
                   : undefined;
-                tripCircuitBreaker(pauseSec);
+                tripCircuitBreaker(pauseSec, model.providerID);
               }
 
               if (attempt < maxRetries) {

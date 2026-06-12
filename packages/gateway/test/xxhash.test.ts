@@ -1,25 +1,48 @@
 /**
  * xxHash64 unit tests.
  *
- * Verifies the pure-JS implementation against known test vectors from
- * the canonical xxHash reference (https://github.com/Cyan4973/xxHash).
- * The gateway uses xxHash64 to replicate Claude Code's `cch` billing
- * header — bit-identical output is required for billing validation.
+ * NOTE: this is the Zig-std / Bun flavour of xxHash64 (PRIME64_4 =
+ * 0x85ebca77c2b2ae63, not the canonical 0x85ebca6b3b7b36ef — see xxhash.ts).
+ * Empty/short inputs that never touch PRIME64_4 still match canonical
+ * xxHash64, but any input that reaches `mergeRound` (>= 32 bytes) or the
+ * 8-byte tail diverges from the reference. The known-answer vector below pins
+ * the Zig-std behaviour so the constant can never silently regress to the
+ * canonical value (which would break `cch` signing).
  */
 import { describe, test, expect } from "vitest";
 import { xxHash64 } from "../src/xxhash";
 
 describe("xxHash64", () => {
   // -----------------------------------------------------------------------
-  // Canonical test vectors (seed = 0)
+  // Vectors that do not touch PRIME64_4 (short path: seed + PRIME64_5),
+  // so they still match canonical xxHash64.
   // -----------------------------------------------------------------------
 
-  test("empty string → 0xef46db3751d8e999", () => {
+  test("empty string → 0xef46db3751d8e999 (no PRIME64_4 used)", () => {
     expect(xxHash64("")).toBe(0xef46db3751d8e999n);
   });
 
   test("empty Uint8Array → same as empty string", () => {
     expect(xxHash64(new Uint8Array(0))).toBe(0xef46db3751d8e999n);
+  });
+
+  // -----------------------------------------------------------------------
+  // Known-answer vector for the tampered PRIME64_4. This >32-byte input goes
+  // through the merge rounds + tail (both use PRIME64_4), so the value below
+  // ONLY holds for Claude Code's variant (0x85ebca77c2b2ae63), not canonical
+  // xxHash64. Reverting PRIME64_4 to 0x85ebca6b3b7b36ef breaks this.
+  // -----------------------------------------------------------------------
+
+  test("cch variant known-answer (>32 bytes, exercises modified PRIME64_4)", () => {
+    // 40 ASCII bytes, seed 0. This input goes through the merge rounds + tail,
+    // both of which use PRIME64_4, so the result depends on the tampered value.
+    const input = "the quick brown fox jumps over lazy dogs";
+    const h = xxHash64(input, 0n);
+    // Zig-std / Bun value (PRIME64_4 = 0x85ebca77c2b2ae63):
+    expect(h).toBe(0xddce373c30463e70n);
+    // Canonical xxHash64 (PRIME64_4 = 0x85ebca6b3b7b36ef) produces this instead.
+    // Asserting we are NOT the canonical value guards against a silent revert.
+    expect(h).not.toBe(0xb7529595415c156an);
   });
 
   // -----------------------------------------------------------------------

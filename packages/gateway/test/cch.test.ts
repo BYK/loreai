@@ -1,10 +1,11 @@
-import { describe, test, expect, beforeEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import {
   signBody,
   resignBody,
   captureBillingPrefix,
   captureSessionHeaders,
   buildBillingBlock,
+  buildCodexWorkerHeaders,
   buildOAuthWorkerHeaders,
   deleteBillingPrefix,
   validateSeed,
@@ -18,8 +19,12 @@ import {
   _computeVersionSuffix,
   _parseSemver,
   _compareSemver,
+  _cchPreimage,
 } from "../src/cch";
 import { xxHash64 } from "../src/xxhash";
+import { log } from "@loreai/core";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const SID_A = "sess-a";
 const SID_B = "sess-b";
@@ -33,6 +38,23 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("signBody", () => {
+  /**
+   * Build a body whose system prompt carries a real billing header with the
+   * `cch=00000` placeholder, plus an arbitrary `extra` payload to vary the
+   * hash input. signBody only signs a genuine billing header, so the
+   * placeholder must live inside one.
+   */
+  const billingBody = (extra: string) =>
+    JSON.stringify({
+      system: [
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.37.fbe; cc_entrypoint=cli; cch=00000;",
+        },
+      ],
+      messages: [{ role: "user", content: extra }],
+    });
+
   test("replaces cch=00000 with a 5-char hex hash", () => {
     const body = JSON.stringify({
       model: "claude-sonnet-4-20250514",
@@ -51,13 +73,8 @@ describe("signBody", () => {
   });
 
   test("produces different hashes for different bodies", () => {
-    const body1 =
-      '{"system":[{"type":"text","text":"cch=00000;"}],"messages":[{"role":"user","content":"hello"}]}';
-    const body2 =
-      '{"system":[{"type":"text","text":"cch=00000;"}],"messages":[{"role":"user","content":"world"}]}';
-
-    const cch1 = signBody(body1).match(/cch=([0-9a-f]{5})/)?.[1];
-    const cch2 = signBody(body2).match(/cch=([0-9a-f]{5})/)?.[1];
+    const cch1 = signBody(billingBody("hello")).match(/cch=([0-9a-f]{5})/)?.[1];
+    const cch2 = signBody(billingBody("world")).match(/cch=([0-9a-f]{5})/)?.[1];
 
     expect(cch1).toBeDefined();
     expect(cch2).toBeDefined();
@@ -65,17 +82,158 @@ describe("signBody", () => {
   });
 
   test("produces deterministic output for the same input", () => {
-    const body = '{"text":"cch=00000;","data":"stable"}';
+    const body = billingBody("stable");
     expect(signBody(body)).toEqual(signBody(body));
   });
 
   test("zero-pads short hashes to 5 chars", () => {
     for (let i = 0; i < 20; i++) {
-      const body = `{"text":"cch=00000;","i":${i}}`;
-      const match = signBody(body).match(/cch=([0-9a-f]+);/);
+      const signed = signBody(billingBody(`i${i}`));
+      const match = signed.match(/cch=([0-9a-f]+);/);
       expect(match).not.toBeNull();
       expect(match?.[1]).toHaveLength(5);
     }
+  });
+
+  test("is a no-op when no billing header is present (structural anchor)", () => {
+    // Reviewer #3: the bare-placeholder fallback re-introduced the original
+    // bug. signBody must NEVER rewrite a content cch=00000 with no header.
+    const body =
+      '{"system":[{"type":"text","text":"docs: `cch=00000`"}],"messages":[]}';
+    expect(signBody(body)).toBe(body);
+  });
+
+  test("signs the billing header even when content cch=00000 sorts FIRST", () => {
+    // Reviewer #1: content documenting the header (serialized before it) must
+    // not steal the signature. The content placeholder stays; the header is
+    // signed.
+    const body = JSON.stringify({
+      system: [
+        {
+          type: "text",
+          text: "LTM doc: cc_entrypoint=cli; cch=00000 (example)",
+        },
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.37.fbe; cc_entrypoint=cli; cch=00000;",
+        },
+      ],
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const signed = signBody(body);
+    // Content placeholder preserved verbatim.
+    expect(signed).toContain("cc_entrypoint=cli; cch=00000 (example)");
+    // Billing header signed with a real hash.
+    expect(signed).toMatch(
+      /x-anthropic-billing-header: cc_version=2\.1\.37\.fbe; cc_entrypoint=cli; cch=[0-9a-f]{5};/,
+    );
+  });
+
+  test("does NOT rewrite a cch=00000 token in system/LTM content (cache-bust regression)", () => {
+    // Regression for the self-referential cache bust: an LTM entry whose text
+    // literally contains `cch=00000` must be left untouched, otherwise system[N]
+    // bytes change every turn and bust the entire prompt cache.
+    const body = JSON.stringify({
+      model: "claude-opus-4-8",
+      system: [
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.165.abc; cc_entrypoint=cli; cch=00000;",
+        },
+        {
+          type: "text",
+          // LTM content documenting the placeholder — contains cch=00000.
+          text: "CCH_PLACEHOLDER = `cch=00000` (cch.ts:103); signBody() replaces it.",
+        },
+      ],
+      messages: [{ role: "user", content: "hello" }],
+    });
+
+    const signed = signBody(body);
+    // The LTM content placeholder must be preserved verbatim.
+    expect(signed).toContain("CCH_PLACEHOLDER = `cch=00000`");
+    // Exactly one cch=00000 (the content one) should remain; the billing
+    // header's was rewritten to a real hash.
+    const placeholderCount = signed.split("cch=00000").length - 1;
+    expect(placeholderCount).toBe(1);
+    // The billing header carries a real signed hash.
+    const billing = JSON.parse(signed).system[0].text as string;
+    expect(billing).toMatch(/cc_entrypoint=cli; cch=[0-9a-f]{5};/);
+    expect(billing).not.toContain("cch=00000");
+  });
+
+  test("signing is stable across turns when only content cch changes", () => {
+    // Two turns where the billing header is identical but the (irrelevant)
+    // content cch token differs — the billing cch must be identical, proving
+    // content tokens don't leak into the signature target.
+    const make = (contentCch: string) =>
+      JSON.stringify({
+        model: "claude-opus-4-8",
+        system: [
+          {
+            type: "text",
+            text: "x-anthropic-billing-header: cc_version=2.1.165.abc; cc_entrypoint=cli; cch=00000;",
+          },
+          { type: "text", text: `note: \`cch=${contentCch}\`` },
+        ],
+        messages: [{ role: "user", content: "same" }],
+      });
+
+    const a = signBody(make("11111"));
+    const b = signBody(make("11111"));
+    expect(a).toBe(b);
+    // Both preserve their distinct content tokens untouched.
+    expect(signBody(make("aaaaa"))).toContain("`cch=aaaaa`");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cchPreimage (>= 2.1.172 hash-input transform)
+// ---------------------------------------------------------------------------
+
+describe("cchPreimage", () => {
+  test("strips the model value", () => {
+    expect(_cchPreimage('{"model":"claude-opus-4-8","x":1}')).toBe(
+      '{"model":"","x":1}',
+    );
+  });
+
+  test("strips the max_tokens field with its trailing comma", () => {
+    expect(_cchPreimage('{"a":1,"max_tokens":64000,"b":2}')).toBe(
+      '{"a":1,"b":2}',
+    );
+  });
+
+  test("strips max_tokens as the last key (leading-comma fallback)", () => {
+    // Defensive: not the real binary's layout, but must stay valid JSON.
+    expect(_cchPreimage('{"a":1,"max_tokens":64000}')).toBe('{"a":1}');
+  });
+
+  test("removes exactly one comma (never both) when mid-object", () => {
+    const out = _cchPreimage('{"model":"x","max_tokens":8192,"stream":true}');
+    expect(out).toBe('{"model":"","stream":true}');
+    // No doubled or dangling commas.
+    expect(out).not.toContain(",,");
+    expect(() => JSON.parse(out)).not.toThrow();
+  });
+
+  test("strips both model value and max_tokens together", () => {
+    const body =
+      '{"model":"sonnet","max_tokens":8192,"messages":[],"stream":true}';
+    expect(_cchPreimage(body)).toBe('{"model":"","messages":[],"stream":true}');
+  });
+
+  test("is a no-op when neither field is present", () => {
+    const body = '{"system":[{"text":"cch=00000;"}],"messages":[]}';
+    expect(_cchPreimage(body)).toBe(body);
+  });
+
+  test("only strips the first model occurrence", () => {
+    // The model field is the first JSON key; a later literal must be untouched.
+    const body = '{"model":"a","note":"the model:\\"x\\" stays"}';
+    expect(_cchPreimage(body)).toBe(
+      '{"model":"","note":"the model:\\"x\\" stays"}',
+    );
   });
 });
 
@@ -565,6 +723,332 @@ describe("resignBody", () => {
     expect(resigned).toMatch(/cch=[0-9a-f]{5};/);
     expect(validateSeed(resigned)).toBe(true);
   });
+
+  test("does NOT rewrite a cch=XXXXX; token in content (cache-bust regression)", () => {
+    // A conversation turn whose LTM/system or message content contains a
+    // `cch=XXXXX;` token must keep that token byte-for-byte across re-signing,
+    // otherwise the cached prefix changes every turn.
+    const body = JSON.stringify({
+      model: "claude-opus-4-8",
+      system: [
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.35.abc; cc_entrypoint=cli; cch=deadb;",
+          cache_control: { type: "ephemeral", ttl: "1h" },
+        },
+        {
+          type: "text",
+          // Content token with the exact 5-hex-plus-semicolon shape.
+          text: "gotcha: CCH_IN_BODY_RE = /cch=([0-9a-fA-F]{5});/ matched cch=2d825; here",
+        },
+      ],
+      messages: [{ role: "user", content: "explain caching" }],
+    });
+
+    const resigned = resignBody(body, "explain caching");
+    // Content token preserved verbatim.
+    expect(resigned).toContain("cch=2d825;");
+    // Billing header re-signed (client value gone, valid worker hash present).
+    expect(resigned).not.toContain("cch=deadb");
+    expect(validateSeed(resigned)).toBe(true);
+    // Re-signing twice is idempotent for the content token (stable prefix).
+    expect(resignBody(resigned, "explain caching")).toContain("cch=2d825;");
+  });
+
+  test("leaves the body unchanged when only content cch= tokens exist (no billing header)", () => {
+    // No billing header present — resignBody must be a pure no-op even though
+    // content contains cch= tokens.
+    const body = JSON.stringify({
+      model: "claude-opus-4-8",
+      system: [{ type: "text", text: "note: `cch=12345` and cch=67890;" }],
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(resignBody(body, "hi")).toBe(body);
+  });
+
+  test("ignores a content `cc_entrypoint=…; cch=…;` fragment that sorts BEFORE the header", () => {
+    // Reviewer #1: an LTM entry documenting the header format (containing
+    // `cc_entrypoint=cli; cch=…;`) serialized before the real header must NOT
+    // steal the rewrite. Fragment-anchoring was defeated by exactly this.
+    const body = JSON.stringify({
+      model: "claude-opus-4-8",
+      system: [
+        {
+          type: "text",
+          // Looks like a header fragment but lacks the full sentinel prefix.
+          text: "gotcha doc: format is `cc_entrypoint=cli; cch=aaaaa;` — note the suffix",
+        },
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.35.abc; cc_entrypoint=cli; cch=deadb;",
+          cache_control: { type: "ephemeral", ttl: "1h" },
+        },
+      ],
+      messages: [{ role: "user", content: "explain caching" }],
+    });
+
+    const resigned = resignBody(body, "explain caching");
+    // The documented fragment is preserved verbatim.
+    expect(resigned).toContain("`cc_entrypoint=cli; cch=aaaaa;`");
+    // Only the real header was re-signed.
+    expect(resigned).not.toContain("cch=deadb");
+    expect(validateSeed(resigned)).toBe(true);
+    // Stable across turns: the content fragment never changes.
+    expect(resignBody(resigned, "explain caching")).toContain(
+      "`cc_entrypoint=cli; cch=aaaaa;`",
+    );
+  });
+
+  test("ignores a content `cc_version=…;` token that sorts BEFORE the header (reviewer #2)", () => {
+    // Reviewer #2: the cc_version rewrite was fully unanchored. A content
+    // `cc_version=2.1.35.abc;` before the header must be left untouched, else
+    // it is rewritten every turn → cache bust.
+    const body = JSON.stringify({
+      model: "claude-opus-4-8",
+      system: [
+        {
+          type: "text",
+          text: "changelog: bumped cc_version=2.1.35.abc; in the client header",
+        },
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.35.abc; cc_entrypoint=cli; cch=deadb;",
+          cache_control: { type: "ephemeral", ttl: "1h" },
+        },
+      ],
+      messages: [{ role: "user", content: "explain caching" }],
+    });
+
+    const resigned = resignBody(body, "explain caching");
+    // The content cc_version token is preserved verbatim (NOT rewritten to
+    // the worker version).
+    expect(resigned).toContain(
+      "changelog: bumped cc_version=2.1.35.abc; in the client header",
+    );
+    // The header's cc_version WAS rewritten to the worker version.
+    expect(resigned).toMatch(
+      new RegExp(
+        `x-anthropic-billing-header: cc_version=${WORKER_VERSION}\\.[0-9a-f]{3}; cc_entrypoint=cli; cch=[0-9a-f]{5};`,
+      ),
+    );
+    expect(validateSeed(resigned)).toBe(true);
+    // Idempotent: content token stays stable across re-signs.
+    expect(resignBody(resigned, "explain caching")).toContain(
+      "changelog: bumped cc_version=2.1.35.abc; in the client header",
+    );
+  });
+
+  test("preserves a non-default cc_entrypoint value", () => {
+    // The single-pass rewrite must keep cc_entrypoint verbatim.
+    const body = JSON.stringify({
+      model: "claude-opus-4-8",
+      system: [
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.35.abc; cc_entrypoint=vscode; cch=deadb;",
+        },
+      ],
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const resigned = resignBody(body, "hi");
+    expect(resigned).toContain("cc_entrypoint=vscode;");
+    expect(validateSeed(resigned)).toBe(true);
+  });
+
+  test("the real header (first system block) wins over a full-sentinel doc block after it", () => {
+    // Review #1 residual: even if an LTM entry reproduces the WHOLE sentinel,
+    // the real header is always system[0] and nothing serializes before it, so
+    // first-match targets the real header. The doc block (which carries a
+    // placeholder) is left as-is.
+    const body = JSON.stringify({
+      system: [
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.35.abc; cc_entrypoint=cli; cch=deadb;",
+          cache_control: { type: "ephemeral", ttl: "1h" },
+        },
+        {
+          type: "text",
+          // LTM doc reproducing the full sentinel with the placeholder.
+          text: "docs: header looks like `x-anthropic-billing-header: cc_version=2.1.0.aaa; cc_entrypoint=cli; cch=00000;`",
+        },
+      ],
+      messages: [{ role: "user", content: "explain caching" }],
+    });
+    const resigned = resignBody(body, "explain caching");
+    // The doc block's placeholder is untouched (still 00000).
+    expect(resigned).toContain(
+      "`x-anthropic-billing-header: cc_version=2.1.0.aaa; cc_entrypoint=cli; cch=00000;`",
+    );
+    // The real header was re-signed and validates.
+    expect(resigned).not.toContain("cch=deadb");
+    expect(validateSeed(resigned)).toBe(true);
+  });
+
+  test("re-signs a client header WITHOUT a 3-hex version suffix (no silent skip → no 401)", () => {
+    // Review #2: a suffix-less header must still re-sign rather than pass the
+    // stale client cch through (which upstream rejects).
+    const body = JSON.stringify({
+      system: [
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.165; cc_entrypoint=cli; cch=deadb;",
+        },
+      ],
+      messages: [{ role: "user", content: "hi there friend" }],
+    });
+    const resigned = resignBody(body, "hi there friend");
+    expect(resigned).not.toContain("cch=deadb");
+    expect(resigned).toMatch(
+      new RegExp(
+        `cc_version=${WORKER_VERSION}\\.[0-9a-f]{3}; cc_entrypoint=cli;`,
+      ),
+    );
+    expect(validateSeed(resigned)).toBe(true);
+  });
+
+  test("re-signs a client header with an UPPERCASE version suffix and cch", () => {
+    // Review #3: casing tolerance — uppercase suffix/cch must not silently skip.
+    const body = JSON.stringify({
+      system: [
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.163.7C7; cc_entrypoint=cli; cch=DEADB;",
+        },
+      ],
+      messages: [{ role: "user", content: "hi there friend" }],
+    });
+    const resigned = resignBody(body, "hi there friend");
+    expect(resigned).not.toContain("cch=DEADB");
+    expect(resigned).toMatch(
+      new RegExp(`cc_version=${WORKER_VERSION}\\.[0-9a-f]{3};`),
+    );
+    expect(validateSeed(resigned)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// First-block invariant verification (Sentry early-warning)
+// ---------------------------------------------------------------------------
+
+describe("billing-header first-block invariant", () => {
+  /** Capture warnings emitted via the core log sink. */
+  let warnings: string[];
+
+  /** Silent sink restored after each test so we don't leak capture into
+   *  other test files sharing the (global) log sink. */
+  const silentSink = {
+    info: () => {},
+    warn: () => {},
+    error: () => {},
+    captureException: () => {},
+  };
+
+  beforeEach(() => {
+    warnings = [];
+    log.registerSink({
+      info: () => {},
+      warn: (msg) => warnings.push(msg),
+      error: () => {},
+      captureException: () => {},
+    });
+  });
+
+  afterEach(() => {
+    log.registerSink(silentSink);
+  });
+
+  /** Build a body with the real billing header as the FIRST system block. */
+  const headerFirst = (extraBlocks: string[] = []) =>
+    JSON.stringify({
+      system: [
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.165.abc; cc_entrypoint=cli; cch=00000;",
+        },
+        ...extraBlocks.map((text) => ({ type: "text", text })),
+      ],
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+  test("does NOT warn when the billing header is the first occurrence (signBody)", () => {
+    signBody(headerFirst(["docs: `cch=00000` example"]));
+    expect(warnings).toHaveLength(0);
+  });
+
+  test("WARNS when content reproduces the FULL sentinel, even sorted after the real header", () => {
+    // Conservative invariant: any second `x-anthropic-billing-header:` marker is
+    // a hazard. Signing still succeeds (real header is first), but we surface it
+    // because we can't robustly guarantee first-match hit the real one.
+    signBody(
+      headerFirst([
+        "docs: `x-anthropic-billing-header: cc_version=2.1.0.aaa; cc_entrypoint=cli; cch=00000;`",
+      ]),
+    );
+    expect(warnings.length).toBeGreaterThan(0);
+    expect(warnings[0]).toContain("billing-header markers");
+  });
+
+  test("does NOT warn when content has a cch= token but NOT the full sentinel", () => {
+    // A bare `cch=00000` / `cc_entrypoint=…` fragment in content is NOT a
+    // duplicate marker, so it must not trip the guard (no false positives on
+    // the common case — e.g. the LTM entry from the original incident).
+    signBody(
+      headerFirst([
+        "gotcha: CCH_PLACEHOLDER = `cch=00000`; cc_entrypoint=cli appears here",
+      ]),
+    );
+    expect(warnings).toHaveLength(0);
+  });
+
+  test("WARNS when a sentinel-shaped block serializes BEFORE the real header (signBody)", () => {
+    // Simulates the dangerous reorder: a content block reproducing the full
+    // sentinel is placed first, the real header second. first-match would
+    // target the content block → cache-bust risk → must alert.
+    const body = JSON.stringify({
+      system: [
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.0.aaa; cc_entrypoint=cli; cch=00000;",
+        },
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.165.abc; cc_entrypoint=cli; cch=00000;",
+        },
+      ],
+      messages: [{ role: "user", content: "hi" }],
+    });
+    signBody(body);
+    expect(warnings.length).toBeGreaterThan(0);
+    expect(warnings[0]).toContain("first-block invariant violated");
+    expect(warnings[0]).toContain("signBody");
+  });
+
+  test("WARNS when a sentinel-shaped block serializes BEFORE the real header (resignBody)", () => {
+    const body = JSON.stringify({
+      system: [
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.0.aaa; cc_entrypoint=cli; cch=aaaaa;",
+        },
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.165.abc; cc_entrypoint=cli; cch=bbbbb;",
+        },
+      ],
+      messages: [{ role: "user", content: "hi there friend" }],
+    });
+    resignBody(body, "hi there friend");
+    expect(
+      warnings.some((w) => w.includes("first-block invariant violated")),
+    ).toBe(true);
+    expect(warnings.some((w) => w.includes("resignBody"))).toBe(true);
+  });
+
+  test("does NOT warn for a no-billing-header body", () => {
+    signBody('{"system":[{"type":"text","text":"no header here"}]}');
+    expect(warnings).toHaveLength(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -724,10 +1208,86 @@ describe("binary-verified values", () => {
     expect(_computeVersionSuffix("hello")).toBe(suffix);
   });
 
-  test("2.1.138 seed signs correctly (oracle pair 1)", () => {
-    // Verified: body with "hello" prompt signed by Claude Code 2.1.138 → cch=54175
-    // We can't reproduce the exact body here (it includes system-reminder etc.)
-    // but we verify the seed is non-zero and produces valid output
+  test("reproduces a real cch captured from the Claude Code binary", () => {
+    // Ground-truth known-answer test. The fixture is a real request body
+    // (with cch=00000) captured from the Claude Code 2.1.163 binary at the
+    // sendto(2) syscall, plus the cch that binary actually emitted. This is the
+    // ONLY test that pins our hash to a value produced by the real binary — a
+    // self-consistency sign/verify roundtrip would pass with ANY PRIME64_4, so
+    // it would not catch a regression to the canonical constant. If this fails
+    // after touching xxhash.ts, the PRIME64_4 tweak was likely reverted.
+    const fixture = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL("./cch-oracle.fixture.json", import.meta.url)),
+        "utf-8",
+      ),
+    ) as { seedHex: string; cch: string; bodyBase64: string };
+
+    const seed = BigInt(fixture.seedHex);
+    // Hash the EXACT bytes (the body contains multibyte UTF-8), never a string
+    // round-trip.
+    const body = Buffer.from(fixture.bodyBase64, "base64");
+    expect(body.includes(Buffer.from("cch=00000"))).toBe(true);
+
+    const computed = (xxHash64(new Uint8Array(body), seed) & 0xfffffn)
+      .toString(16)
+      .padStart(5, "0");
+    expect(computed).toBe(fixture.cch);
+
+    // And the seed for that version resolves to the captured seed.
+    expect(VERSION_SEEDS["2.1.163"]).toBe(seed);
+  });
+
+  test("reproduces a real cch from Claude Code 2.1.175 (preimage transform)", () => {
+    // Ground-truth known-answer test for the >= 2.1.172 preimage change. The
+    // fixture is a RAW wire body (model value + max_tokens present) captured
+    // from the real 2.1.175 binary, with cch=00000, plus the cch the binary
+    // emitted. Hashing the raw body directly does NOT reproduce it — only
+    // hashing cchPreimage(body) (model value + max_tokens stripped) does. This
+    // pins the transform against the real binary; if it fails after touching
+    // cchPreimage/xxhash, the strip rules or PRIME64_4 likely regressed.
+    const fixture = JSON.parse(
+      readFileSync(
+        fileURLToPath(
+          new URL("./cch-oracle-2.1.175.fixture.json", import.meta.url),
+        ),
+        "utf-8",
+      ),
+    ) as { seedHex: string; cch: string; bodyBase64: string };
+
+    const seed = BigInt(fixture.seedHex);
+    // Hash the EXACT bytes (the body has multibyte UTF-8); never a string
+    // round-trip — `xxHash64(string)` UTF-8-encodes, which corrupts a latin1
+    // reconstruction. The edited fields (model/max_tokens) are pure ASCII, so a
+    // latin1 round-trip is byte-safe for applying the transform itself.
+    const rawBytes = Buffer.from(fixture.bodyBase64, "base64");
+    const rawLatin1 = rawBytes.toString("latin1");
+    expect(rawLatin1).toContain("cch=00000");
+    // The raw body still has model value + max_tokens (the wire form)...
+    expect(rawLatin1).toMatch(/"model":"[^"]+"/);
+    expect(rawLatin1).toMatch(/"max_tokens":\d+/);
+
+    // Hashing the RAW body does NOT match (proves the transform is required).
+    const rawHash = (xxHash64(new Uint8Array(rawBytes), seed) & 0xfffffn)
+      .toString(16)
+      .padStart(5, "0");
+    expect(rawHash).not.toBe(fixture.cch);
+
+    // Hashing the PREIMAGE (model value + max_tokens stripped) reproduces it.
+    const preimageBytes = Buffer.from(_cchPreimage(rawLatin1), "latin1");
+    const preimageLatin1 = preimageBytes.toString("latin1");
+    expect(preimageLatin1).toMatch(/"model":""/);
+    expect(preimageLatin1).not.toContain("max_tokens");
+    const computed = (xxHash64(new Uint8Array(preimageBytes), seed) & 0xfffffn)
+      .toString(16)
+      .padStart(5, "0");
+    expect(computed).toBe(fixture.cch);
+
+    // And the seed for that version resolves to the captured seed.
+    expect(VERSION_SEEDS["2.1.175"]).toBe(seed);
+  });
+
+  test("2.1.138 seed signs correctly (round-trip)", () => {
     const seed = VERSION_SEEDS["2.1.138"];
     expect(seed).toBeDefined();
     expect(seed).not.toBe(0n);
@@ -920,5 +1480,77 @@ describe("deleteBillingPrefix clears header snapshots", () => {
 
     // After deletion: returns null
     expect(buildOAuthWorkerHeaders(SID_A)).toBeNull();
+  });
+});
+
+describe("captureSessionHeaders — Codex (ChatGPT) headers", () => {
+  test("captures Codex headers for ANY session (no billing flag needed)", () => {
+    captureSessionHeaders("codex-sess", {
+      "chatgpt-account-id": "acct-xyz",
+      originator: "pi",
+      "openai-beta": "responses=experimental",
+    });
+
+    const headers = buildCodexWorkerHeaders("codex-sess");
+    expect(headers).not.toBeNull();
+    expect(headers?.["chatgpt-account-id"]).toBe("acct-xyz");
+    expect(headers?.originator).toBe("pi");
+    expect(headers?.["OpenAI-Beta"]).toBe("responses=experimental");
+    expect(headers?.session_id).toBe("codex-sess");
+    expect(headers?.["x-client-request-id"]).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
+  });
+
+  test("preserves previously-captured headers across turns (merge, not wipe)", () => {
+    // Turn 1 carries the full Codex fingerprint.
+    captureSessionHeaders("codex-sess", {
+      "chatgpt-account-id": "acct-xyz",
+      originator: "pi",
+      "openai-beta": "responses=experimental",
+    });
+    // Turn 2 omits some headers — must NOT clear the earlier capture.
+    captureSessionHeaders("codex-sess", { "chatgpt-account-id": "acct-xyz" });
+
+    const headers = buildCodexWorkerHeaders("codex-sess");
+    expect(headers?.originator).toBe("pi");
+    expect(headers?.["OpenAI-Beta"]).toBe("responses=experimental");
+  });
+
+  test("does not regress the Anthropic billing path for billing sessions", () => {
+    captureBillingPrefix(SID_A, BILLING_SYSTEM);
+    captureSessionHeaders(SID_A, {
+      "anthropic-beta": "beta-x",
+      "user-agent": "ua-x",
+      // A billing session that also (hypothetically) carries a codex header.
+      "chatgpt-account-id": "acct-mixed",
+    });
+
+    // Anthropic replay still works...
+    expect(buildOAuthWorkerHeaders(SID_A)?.["anthropic-beta"]).toBe("beta-x");
+    // ...and the codex header is independently available.
+    expect(buildCodexWorkerHeaders(SID_A)?.["chatgpt-account-id"]).toBe(
+      "acct-mixed",
+    );
+  });
+});
+
+describe("buildCodexWorkerHeaders", () => {
+  test("returns null when sessionID is undefined", () => {
+    expect(buildCodexWorkerHeaders(undefined)).toBeNull();
+  });
+
+  test("returns null when no Codex account-id was observed", () => {
+    // A session with no Codex headers (or only originator) yields nothing —
+    // a loud failure is correct over a malformed call.
+    captureSessionHeaders("codex-sess", { originator: "pi" });
+    expect(buildCodexWorkerHeaders("codex-sess")).toBeNull();
+  });
+
+  test("generates a unique x-client-request-id per call", () => {
+    captureSessionHeaders("codex-sess", { "chatgpt-account-id": "acct-xyz" });
+    const h1 = buildCodexWorkerHeaders("codex-sess");
+    const h2 = buildCodexWorkerHeaders("codex-sess");
+    expect(h1?.["x-client-request-id"]).not.toBe(h2?.["x-client-request-id"]);
   });
 });

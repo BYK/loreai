@@ -330,6 +330,9 @@ export function maybeFetchQuota(sessionID: string, cred: AuthCredential): void {
   void runBackground(
     () => fetchQuotaDeduped(cred, sessionID),
     `quota fp=${fp.slice(0, 8)}`,
+    // Quota fetch is gated to Anthropic-OAuth sessions (isAnthropicOAuthSession
+    // above), so scope the breaker check to Anthropic.
+    "anthropic",
   )
     .then((snap) => {
       // Success → hold the full 5-minute cooldown. (undefined = skipped by the

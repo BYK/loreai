@@ -37,6 +37,13 @@ export interface Harness {
   ): Promise<Response>;
   /** Query the temporal DB directly via a read-only SQLite connection */
   queryDB<T = Record<string, unknown>>(sql: string, params?: unknown[]): T[];
+  /**
+   * The exact request bodies lore sent UPSTREAM (to the model), one per turn,
+   * in order. This is the post-transform body (system blocks, LTM, cch,
+   * gradient window) — i.e. exactly what Anthropic would see and key its prompt
+   * cache on. Use this to assert cache-prefix stability across turns.
+   */
+  upstreamBodies(): string[];
   /** Stop the gateway and clean up */
   teardown(): void;
 }
@@ -80,8 +87,18 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
   await resetPipelineState();
 
   // --- 4. Wire in replay interceptor (streaming-aware: emits SSE for
-  // streaming turns, JSON otherwise) ---
-  setUpstreamInterceptor(makeReplayInterceptor(opts.fixtures));
+  // streaming turns, JSON otherwise), wrapped to capture the exact upstream
+  // request body lore sends each turn (for cache-stability assertions). ---
+  const capturedBodies: string[] = [];
+  const replay = makeReplayInterceptor(opts.fixtures);
+  setUpstreamInterceptor(async (requestBody, model, wasStreaming, makeReal) => {
+    capturedBodies.push(
+      typeof requestBody === "string"
+        ? requestBody
+        : JSON.stringify(requestBody),
+    );
+    return replay(requestBody, model, wasStreaming, makeReal);
+  });
 
   // --- 5. Start gateway ---
   const config = loadConfig();
@@ -154,5 +171,9 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
     }
   }
 
-  return { baseURL, dbPath, chat, queryDB, teardown };
+  function upstreamBodies(): string[] {
+    return capturedBodies.slice();
+  }
+
+  return { baseURL, dbPath, chat, queryDB, upstreamBodies, teardown };
 }

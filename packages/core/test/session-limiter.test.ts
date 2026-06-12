@@ -144,6 +144,41 @@ describe("session-limiter", () => {
     await pd;
   });
 
+  test("curation debounce: isBusy stays true across a queued duplicate (re-schedule guard)", async () => {
+    // Models the pipeline.ts curation guard: while a curation run is in-flight
+    // OR queued for a session, `!curatorLimiter.isBusy(sessionID)` must be false
+    // so subsequent turns do NOT re-schedule a duplicate. turnsSinceCuration is
+    // only reset after a real run completes, so the limiter is the durable
+    // dedup signal that prevents per-turn re-flooding of the background queue.
+    const sid = "curation-session";
+    expect(curatorLimiter.isBusy(sid)).toBe(false);
+
+    let resolveRun: (() => void) | undefined;
+    const runBlocker = new Promise<void>((r) => {
+      resolveRun = r;
+    });
+    const limiter = curatorLimiter.get(sid);
+
+    // First (real) curation starts and stays in-flight.
+    const first = limiter(async () => {
+      await runBlocker;
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(curatorLimiter.isBusy(sid)).toBe(true);
+
+    // A duplicate scheduled while busy would queue behind it — isBusy remains
+    // true, so the pipeline guard short-circuits and never schedules it.
+    const duplicate = limiter(async () => {
+      /* would be a wasted curation */
+    });
+    expect(curatorLimiter.isBusy(sid)).toBe(true);
+
+    resolveRun?.();
+    await Promise.all([first, duplicate]);
+    // Only once both drain does the session free up again.
+    expect(curatorLimiter.isBusy(sid)).toBe(false);
+  });
+
   test("clear removes all limiters", () => {
     distillLimiter.get("a");
     distillLimiter.get("b");

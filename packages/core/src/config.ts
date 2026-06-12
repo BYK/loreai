@@ -275,21 +275,41 @@ export const LoreConfig = z.object({
         .describe(
           "Run the curator on session idle (in addition to turn-based). Default: true.",
         ),
+      inFlight: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Run the curator mid-conversation (turn-based), not just on idle. " +
+            "Default: false. WARNING: only enable on free-write / non-caching " +
+            "providers (e.g. MiniMax). On cache-sensitive providers (Anthropic), " +
+            "mid-session curation changes the knowledge base, which rewrites the " +
+            "context-bound LTM block (system[2]) and busts the prompt cache for " +
+            "the rest of a large conversation (a single change can re-write " +
+            "hundreds of thousands of cached tokens). Deferring curation to idle " +
+            "makes that rewrite free (the cache is cold then). Where cache writes " +
+            "are free this is harmless and yields fresher knowledge sooner.",
+        ),
       afterTurns: z
         .number()
         .min(1)
         .default(3)
         .describe("Minimum turns between curator runs. Default: 3."),
-      /** Max knowledge entries per project before consolidation triggers. Default: 25. */
+      /** Max knowledge entries per project before consolidation triggers. Default: 40. */
       maxEntries: z
         .number()
         .min(10)
-        .default(25)
+        .default(40)
         .describe(
-          "Max knowledge entries per project before consolidation. Default: 25.",
+          "Max knowledge entries per project before consolidation. Default: 40.",
         ),
     })
-    .default({ enabled: true, onIdle: true, afterTurns: 3, maxEntries: 25 })
+    .default({
+      enabled: true,
+      onIdle: true,
+      inFlight: false,
+      afterTurns: 3,
+      maxEntries: 40,
+    })
     .describe("Curator scheduling and consolidation thresholds."),
   pruning: z
     .object({
@@ -479,8 +499,25 @@ export const LoreConfig = z.object({
             .max(30)
             .default(15)
             .describe("Max results to show in recall output. Default: 15."),
+          /** Absolute (not relative) RRF score floor. Results below this are
+           *  dropped even when they are the top result and even by the
+           *  "keep at least 3" backfill. Prevents weak cross-session archives
+           *  from being injected when nothing is genuinely relevant. Default:
+           *  0 (disabled). */
+          absoluteFloor: z
+            .number()
+            .min(0)
+            .default(0)
+            .describe(
+              "Absolute RRF score floor; drops weak matches even via the keep-3 backfill. Default: 0 (disabled).",
+            ),
         })
-        .default({ charBudget: 12000, relevanceFloor: 0.15, maxResults: 15 })
+        .default({
+          charBudget: 12000,
+          relevanceFloor: 0.15,
+          maxResults: 15,
+          absoluteFloor: 0,
+        })
         .describe("Recall output formatting and result-count limits."),
     })
     .default({
@@ -496,7 +533,12 @@ export const LoreConfig = z.object({
         model: "nomic-ai/nomic-embed-text-v1.5",
         dimensions: 768,
       },
-      recall: { charBudget: 12000, relevanceFloor: 0.15, maxResults: 15 },
+      recall: {
+        charBudget: 12000,
+        relevanceFloor: 0.15,
+        maxResults: 15,
+        absoluteFloor: 0,
+      },
     })
     .describe(
       "Recall and search pipeline tuning: FTS weights, query expansion, vector boost, embeddings, and output formatting.",

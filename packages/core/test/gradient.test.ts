@@ -33,6 +33,8 @@ import {
   isFreeWriteSession,
   getTier,
   selectDistillations,
+  exportDedupDecisions,
+  importDedupDecisions,
 } from "../src/gradient";
 import type { LoreMessage, LorePart, LoreMessageWithParts } from "../src/types";
 import { isToolPart, isTextPart } from "../src/types";
@@ -1846,6 +1848,75 @@ function getToolOutput(part: LorePart): string | undefined {
 describe("deduplicateToolOutputs", () => {
   const LARGE_CONTENT = "x".repeat(800); // above DEDUP_MIN_CHARS (600)
 
+  test("cross-turn stability: an already-shown earlier output is NOT retroactively collapsed by a newly-appended duplicate", () => {
+    // Reproduces the messages[N] cache-bust: on turn N an early read has no
+    // later duplicate so it is sent FULL. On turn N+1 the user triggers the
+    // same read again (appended at the tail). dedup must NOT now collapse the
+    // early read — doing so changes the content of an already-cached message
+    // position and busts the prompt cache every time a file is re-read.
+    const readA = (id: string) =>
+      makeMsgWithTool(
+        id,
+        "assistant",
+        "read_file",
+        '{"path":"src/foo.ts"}',
+        LARGE_CONTENT,
+      );
+
+    // Shared per-session decision memo (as transform threads sessState.dedupDecisions).
+    const memo = new Map<string, boolean>();
+
+    // Turn N window: the early read at index 1 has no later duplicate.
+    const turnN = [
+      makeMsg("u1", "user", "read file A"),
+      readA("a1"),
+      makeMsg("u2", "user", "thanks"), // current turn
+    ];
+    const outN = deduplicateToolOutputs(turnN, 2, memo);
+    // Index 1 is sent in full on turn N.
+    expect(getToolOutput(outN[1].parts[0])).toBe(LARGE_CONTENT);
+
+    // Turn N+1: same conversation plus a NEW later duplicate read appended.
+    const turnN1 = [
+      makeMsg("u1", "user", "read file A"),
+      readA("a1"), // SAME early message — already cached on turn N
+      makeMsg("u2", "user", "thanks"),
+      makeMsg("u3", "user", "read file A again"),
+      readA("a3"), // new duplicate appended this turn
+      makeMsg("u4", "user", "ok"), // current turn
+    ];
+    const outN1 = deduplicateToolOutputs(turnN1, 5, memo);
+
+    // The early read at index 1 was already shown FULL on turn N; it must stay
+    // full so its cached bytes don't change. (Regression guard for the
+    // messages[N] window-content cache bust.)
+    expect(getToolOutput(outN1[1].parts[0])).toBe(LARGE_CONTENT);
+  });
+
+  test("stateless (no memo) preserves legacy behavior: later duplicate collapses the earlier read", () => {
+    const readA = (id: string) =>
+      makeMsgWithTool(
+        id,
+        "assistant",
+        "read_file",
+        '{"path":"src/foo.ts"}',
+        LARGE_CONTENT,
+      );
+    const msgs = [
+      makeMsg("u1", "user", "read file A"),
+      readA("a1"),
+      makeMsg("u3", "user", "read again"),
+      readA("a3"),
+      makeMsg("u4", "user", "ok"), // current turn
+    ];
+    // No memo passed → stateless: earlier read collapses (latest kept).
+    const out = deduplicateToolOutputs(msgs, 4);
+    expect(getToolOutput(out[1].parts[0])).toContain(
+      "earlier read of src/foo.ts",
+    );
+    expect(getToolOutput(out[3].parts[0])).toBe(LARGE_CONTENT);
+  });
+
   test("deduplicates identical tool outputs, keeps latest", () => {
     const msgs = [
       makeMsg("u1", "user", "read file A"),
@@ -2071,6 +2142,49 @@ describe("deduplicateToolOutputs", () => {
 
     // Third (latest) should be intact
     expect(getToolOutput(result[5].parts[0])).toBe(LARGE_CONTENT);
+  });
+});
+
+describe("dedup decision persistence (export/import round-trip)", () => {
+  const SID = "dedup-persist-session";
+
+  beforeEach(() => {
+    resetCalibration(SID);
+  });
+
+  test("export returns null when no decisions recorded", () => {
+    expect(exportDedupDecisions(SID)).toBeNull();
+  });
+
+  test("import then export round-trips the memo", () => {
+    const blob = JSON.stringify([
+      ["m1:p1", true],
+      ["m2:p2", false],
+    ]);
+    importDedupDecisions(SID, blob);
+    const out = exportDedupDecisions(SID);
+    expect(out).not.toBeNull();
+    // Order-independent comparison.
+    expect(new Map(JSON.parse(out as string))).toEqual(
+      new Map([
+        ["m1:p1", true],
+        ["m2:p2", false],
+      ]),
+    );
+  });
+
+  test("import ignores a corrupt blob (memo stays empty)", () => {
+    importDedupDecisions(SID, "{not json");
+    expect(exportDedupDecisions(SID)).toBeNull();
+  });
+
+  test("import does not overwrite an already-populated memo", () => {
+    importDedupDecisions(SID, JSON.stringify([["m1:p1", true]]));
+    // Second import (e.g. a stale restore) must not clobber live decisions.
+    importDedupDecisions(SID, JSON.stringify([["m9:p9", false]]));
+    const out = new Map(JSON.parse(exportDedupDecisions(SID) as string));
+    expect(out.has("m1:p1")).toBe(true);
+    expect(out.has("m9:p9")).toBe(false);
   });
 });
 
@@ -3071,14 +3185,34 @@ describe("tier-based context management", () => {
       expect(shouldCompress(2_000_000, 100_000, 0)).toBe(true);
     });
 
-    test("does not compress after 5 consecutive busts", () => {
-      // Even when compression would be economical, stop after 5 busts
-      expect(shouldCompress(2_000_000, 100_000, 5)).toBe(false);
-      expect(shouldCompress(2_000_000, 100_000, 10)).toBe(false);
+    test("sustained bust prices continue at WRITE cost (compresses to stop growth)", () => {
+      // In a sustained-bust regime (>=5 busts) the "continue" path is paying
+      // cache WRITE cost on the whole context every turn, not the cheap read
+      // cost. So continueCost is priced with write:
+      //   continueCost = 2M × $6.25/M = $12.50
+      //   bustCost     = 100K × $6.25/M = $0.625
+      //   0.625 < 0.85 × 12.50 = 10.6 → compress (break the growth loop)
+      expect(shouldCompress(2_000_000, 100_000, 5)).toBe(true);
+      expect(shouldCompress(2_000_000, 100_000, 10)).toBe(true);
     });
 
-    test("compresses with 4 or fewer consecutive busts", () => {
+    test("sustained bust still refuses when compression isn't cheaper than rewriting", () => {
+      // When compressed size is close to current size, writing the compressed
+      // context is NOT cheaper than continuing — even at the write rate.
+      //   continueCost = 250K × $6.25/M = $1.5625
+      //   bustCost     = 240K × $6.25/M = $1.50
+      //   1.50 < 0.85 × 1.5625 = 1.328 → false (don't compress)
+      expect(shouldCompress(250_000, 240_000, 5)).toBe(false);
+    });
+
+    test("below the sustained-bust threshold uses the cheap read cost", () => {
+      // 4 busts → not sustained → continue priced at READ cost.
+      //   continueCost = 2M × $0.50/M = $1.00
+      //   bustCost     = 100K × $6.25/M = $0.625
+      //   0.625 < 0.85 × 1.00 = 0.85 → compress
       expect(shouldCompress(2_000_000, 100_000, 4)).toBe(true);
+      // A modestly-grown context at 0 busts: continue is cheap → don't compress.
+      expect(shouldCompress(250_000, 150_000, 0)).toBe(false);
     });
 
     test("falls back to conservative (do NOT compress) when no pricing", () => {

@@ -2,6 +2,7 @@ import { Database } from "#db/driver";
 import { join, dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 import { getGitRemote } from "./git";
+import { isHostedMode } from "./hosted";
 import { dataDir } from "./data-dir";
 
 /**
@@ -1049,7 +1050,42 @@ const MIGRATIONS: string[] = [
      AND promotion_status IS NULL;
   `,
   `
-  -- Version 39: Volatile knowledge-delta channel (issue #740).
+  -- Version 39: Reorder-tolerant LTM diff-pin.
+  -- Stores the identity of the entry SET (and per-entry content hash) that the
+  -- pinned system[2] text was rendered from. The pin is reused verbatim when the
+  -- selected entry-ID set is identical (any order) and no entry's content
+  -- changed, eliminating cache busts from pure re-ranking. NULL for pre-v39 rows
+  -- (treated as "unknown set" → the first post-upgrade turn re-pins once).
+  ALTER TABLE session_state ADD COLUMN ltm_pin_keys TEXT;
+  `,
+  `
+  -- Version 40: Knowledge tombstones.
+  -- Records UUIDs of knowledge entries that were intentionally deleted (by the
+  -- curator's consolidation, or manual deletion). Without this, a stale
+  -- .lore.md that still lists a deleted entry would resurrect it via the
+  -- import "unknown UUID -> create" path, and the next consolidation would
+  -- delete it again — a thrash loop that invalidates the LTM cache and busts
+  -- the prompt cache every cycle. importLoreFile() consults this table and
+  -- refuses to re-create a tombstoned UUID.
+  CREATE TABLE IF NOT EXISTS knowledge_tombstones (
+    id         TEXT PRIMARY KEY,
+    project_id TEXT,
+    deleted_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_knowledge_tombstones_project
+    ON knowledge_tombstones (project_id);
+  `,
+  `
+  -- Version 41: Cross-turn dedup decisions.
+  -- JSON map of "<messageID>:<partID>" -> wasCollapsed, recording whether each
+  -- tool output was sent full or collapsed. Persisted so the decision survives
+  -- a gateway restart: without it, the first post-restart turn re-derives dedup
+  -- from scratch and may flip an already-cached message (full <-> collapsed),
+  -- busting the prompt cache once. NULL for pre-v41 rows / sessions.
+  ALTER TABLE session_state ADD COLUMN dedup_decisions TEXT;
+  `,
+  `
+  -- Version 42: Volatile knowledge-delta channel (issue #740).
   -- Persist the per-session knowledge-delta pending queue so the volatile
   -- channel survives process restarts. Stores a JSON-serialized array of
   -- {op, id, category, title, content, ts} entries that have accumulated
@@ -1314,6 +1350,13 @@ function recoverMissingObjects(database: Database) {
     );
     CREATE INDEX IF NOT EXISTS idx_knowledge_transfers_recalled_in
       ON knowledge_transfers (recalled_in_project_id);
+    CREATE TABLE IF NOT EXISTS knowledge_tombstones (
+      id         TEXT PRIMARY KEY,
+      project_id TEXT,
+      deleted_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_knowledge_tombstones_project
+      ON knowledge_tombstones (project_id);
   `);
 
   // Recover missing columns from partial migration runs.
@@ -1359,6 +1402,16 @@ function recoverMissingObjects(database: Database) {
     if (!scols.some((c) => c.name === "project_path_provisional")) {
       database.exec(
         "ALTER TABLE session_state ADD COLUMN project_path_provisional INTEGER NOT NULL DEFAULT 1;",
+      );
+    }
+    // Version 39: reorder-tolerant LTM diff-pin entry-set keys.
+    if (!scols.some((c) => c.name === "ltm_pin_keys")) {
+      database.exec("ALTER TABLE session_state ADD COLUMN ltm_pin_keys TEXT;");
+    }
+    // Version 41: cross-turn dedup decisions.
+    if (!scols.some((c) => c.name === "dedup_decisions")) {
+      database.exec(
+        "ALTER TABLE session_state ADD COLUMN dedup_decisions TEXT;",
       );
     }
   }
@@ -1479,6 +1532,40 @@ export function isUnattributedProjectPath(path: string): boolean {
 }
 
 /**
+ * Reconcile a client-supplied git remote against on-disk truth.
+ *
+ * The `x-lore-git-remote` header is only trustworthy when it AGREES with what
+ * the path actually is on disk. The "git-remote magnet" bug arose because a
+ * non-repo parent directory (e.g. `/home/byk/Code`, where a user keeps loose
+ * scripts) accepted a remote leaked from a sibling worktree's stale plugin
+ * global — becoming a bucket that swallowed every project later sending that
+ * same remote (via the alias/merge paths below).
+ *
+ * Rules:
+ *  - disk has a remote               → ALWAYS use disk's remote (a client
+ *                                       header can never override on-disk truth)
+ *  - disk has NO remote, LOCAL mode  → DROP the client remote (the path is not
+ *                                       a git repo; attaching a remote to it is
+ *                                       what creates the magnet)
+ *  - disk has NO remote, HOSTED mode → trust the client remote (the gateway
+ *                                       cannot read the client's disk, so the
+ *                                       header is the only signal — unchanged
+ *                                       legacy behavior)
+ *
+ * `getGitRemote()` is per-path cached and already returns null in hosted mode,
+ * so this adds at most one cached subprocess call.
+ */
+function resolveTrustedRemote(
+  path: string,
+  supplied?: string | null,
+): string | null {
+  const disk = getGitRemote(path); // null in hosted mode OR when not a repo
+  if (disk) return disk;
+  if (isHostedMode()) return supplied ?? null;
+  return null;
+}
+
+/**
  * Look up or create a project by filesystem path, with git-remote awareness.
  *
  * Resolution order:
@@ -1491,6 +1578,11 @@ export function isUnattributedProjectPath(path: string): boolean {
  * When a git-remote match is found (step 3), the new path is registered as
  * an alias so subsequent calls skip the subprocess. If the matched project's
  * git_remote was not yet populated (pre-v14 rows), it is backfilled lazily.
+ *
+ * A client-supplied git remote (`suppliedGitRemote`, from the
+ * `x-lore-git-remote` header) is reconciled against on-disk truth by
+ * `resolveTrustedRemote()` — it is never attached to a path that is not a git
+ * repository on a local gateway (prevents the "git-remote magnet" bug).
  */
 export function ensureProject(
   path: string,
@@ -1519,7 +1611,7 @@ export function ensureProject(
   if (existing) {
     // Lazy backfill: populate git_remote on pre-v14 rows
     if (!existing.git_remote) {
-      const resolvedRemote = suppliedGitRemote ?? getGitRemote(path);
+      const resolvedRemote = resolveTrustedRemote(path, suppliedGitRemote);
       if (resolvedRemote) {
         // Check for conflict: another project already has this git_remote.
         // If so, merge the conflicting project into this one (one-time).
@@ -1546,7 +1638,7 @@ export function ensureProject(
   if (alias) return alias.project_id;
 
   // 3. Git remote identification
-  const gitRemote = suppliedGitRemote ?? getGitRemote(path);
+  const gitRemote = resolveTrustedRemote(path, suppliedGitRemote);
   if (gitRemote) {
     const byRemote = db()
       .query("SELECT id FROM projects WHERE git_remote = ? LIMIT 1")
@@ -1954,6 +2046,10 @@ export type SessionTrackingState = {
   ltmCacheTokens?: number | null;
   ltmPinText?: string | null;
   ltmPinTokens?: number | null;
+  /** JSON array of sorted "id:hash(title+content)" keys for the pinned entry set (v39). */
+  ltmPinKeys?: string | null;
+  /** JSON map of "<messageID>:<partID>" -> wasCollapsed for stable dedup (v41). */
+  dedupDecisions?: string | null;
   // v24: session identity
   fingerprint?: string;
   headerSessionId?: string | null;
@@ -2033,6 +2129,14 @@ export function saveSessionTracking(
   if (state.ltmPinTokens !== undefined) {
     sets.push("ltm_pin_tokens = ?");
     vals.push(state.ltmPinTokens);
+  }
+  if (state.ltmPinKeys !== undefined) {
+    sets.push("ltm_pin_keys = ?");
+    vals.push(state.ltmPinKeys);
+  }
+  if (state.dedupDecisions !== undefined) {
+    sets.push("dedup_decisions = ?");
+    vals.push(state.dedupDecisions);
   }
   // v24: session identity
   if (state.fingerprint !== undefined) {
@@ -2130,6 +2234,9 @@ export type LoadedSessionTracking = {
   ltmCacheTokens: number | null;
   ltmPinText: string | null;
   ltmPinTokens: number | null;
+  // v39: reorder-tolerant pin entry-set keys (JSON)
+  ltmPinKeys: string | null;
+  dedupDecisions: string | null;
   // v24: session identity
   fingerprint: string;
   headerSessionId: string | null;
@@ -2168,6 +2275,7 @@ export function loadSessionTracking(
       `SELECT last_curated_at, message_count, turns_since_curation,
               consecutive_text_only_turns,
               ltm_cache_text, ltm_cache_tokens, ltm_pin_text, ltm_pin_tokens,
+              ltm_pin_keys, dedup_decisions,
               fingerprint, header_session_id, header_name,
               resolved_conversation_ttl, warmup_state,
               dynamic_context_cap, bust_rate_ema, inter_bust_interval_ema,
@@ -2187,6 +2295,8 @@ export function loadSessionTracking(
     ltm_cache_tokens: number | null;
     ltm_pin_text: string | null;
     ltm_pin_tokens: number | null;
+    ltm_pin_keys: string | null;
+    dedup_decisions: string | null;
     fingerprint: string;
     header_session_id: string | null;
     header_name: string | null;
@@ -2216,6 +2326,8 @@ export function loadSessionTracking(
     ltmCacheTokens: row.ltm_cache_tokens,
     ltmPinText: row.ltm_pin_text,
     ltmPinTokens: row.ltm_pin_tokens,
+    ltmPinKeys: row.ltm_pin_keys,
+    dedupDecisions: row.dedup_decisions,
     fingerprint: row.fingerprint,
     headerSessionId: row.header_session_id,
     headerName: row.header_name,

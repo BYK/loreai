@@ -8,12 +8,13 @@
  *   delete <type> <id>    Delete a single entry (type: knowledge, session, distillation, project)
  *   move <type> <id..>    Move session(s) or knowledge to another project (--to required)
  *   split                 Auto-suggest & move mis-grouped sessions to correct projects
+ *   export                Regenerate .lore.md / AGENTS.md from the DB for a project
  *
  * When `LORE_REMOTE_URL` is set, most subcommands delegate to the remote
  * gateway REST API instead of accessing the local database.
  */
 import { createInterface } from "node:readline";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import {
   getRemoteUrl,
   projectQueryParams,
@@ -2447,6 +2448,7 @@ Subcommands:
   split                 Auto-suggest & move mis-grouped sessions to correct projects
   merge                 Scan git remotes and merge duplicate projects
   consolidate           Merge "(unattributed)" buckets into matched real projects
+  export                Regenerate .lore.md / AGENTS.md from the DB for a project
   recover               Re-import knowledge from .lore.md / AGENTS.md files
   reground-entities     Re-derive entities (people, tools, ...) from history (needs a running gateway)
   dedup                 Find and remove duplicate knowledge entries (all projects)
@@ -2492,6 +2494,8 @@ Examples:
   lore data consolidate                    # dry-run: show "(unattributed)" buckets & matches
   lore data consolidate --yes              # apply: merge matched buckets into real projects
   lore data consolidate --json             # machine-readable plan (dryRun:true unless --yes)
+  lore data export                         # regenerate .lore.md for current project from the DB
+  lore data export --project /path         # regenerate for a specific project
   lore data recover                        # re-import from .lore.md / AGENTS.md
   lore data recover --yes                  # skip confirmation
   lore data reground-entities --dry-run    # preview entities re-derived from history (current project)
@@ -2515,6 +2519,100 @@ Examples:
  * project (re-pointing all rows). Buckets with no confident match are reported
  * but left intact (they remain a clearly-labelled cross-project memory source).
  */
+/**
+ * `lore data export [--project <path>]` — regenerate the on-disk knowledge
+ * file(s) from the current DB state for a single project. Useful when the
+ * file has drifted from the DB (e.g. stale entries that consolidation/tombstones
+ * removed from the DB but still linger in a committed .lore.md), without
+ * waiting for the idle exporter or running a destructive `clear`.
+ *
+ * Respects the same loreFile/agentsFile config the idle exporter uses.
+ */
+async function cmdExport(
+  _args: string[],
+  flags: Record<string, unknown>,
+): Promise<void> {
+  if (getRemoteUrl()) {
+    console.error(
+      "Error: export is not supported in remote mode (requires local filesystem access).",
+    );
+    process.exit(1);
+  }
+
+  const projectPath = resolve((flags.project as string) ?? process.cwd());
+
+  const {
+    config: loreConfig,
+    ltm,
+    exportToFile,
+    exportLoreFile,
+    exportInlineToAgentsFile,
+    deleteLoreFile,
+    removeLoreSectionFromFile,
+  } = await import("@loreai/core");
+  const cfg = loreConfig();
+
+  if (!cfg.knowledge.enabled) {
+    console.error(
+      "Error: knowledge is disabled in config — nothing to export.",
+    );
+    process.exit(1);
+  }
+
+  const entries = ltm.forProject(projectPath, false);
+  const agentsFilePath = join(projectPath, cfg.agentsFile.path);
+
+  if (entries.length === 0) {
+    // No knowledge for this project — fully reconcile the on-disk files so no
+    // stale entries remain to be re-imported from git. This must cover EVERY
+    // config combination, not just .lore.md: a dangling AGENTS.md pointer (to a
+    // now-deleted .lore.md) or a stale inline AGENTS.md knowledge section would
+    // otherwise survive — exactly the drift this command exists to fix.
+    const cleaned: string[] = [];
+    if (cfg.loreFile.enabled && deleteLoreFile(projectPath)) {
+      cleaned.push(join(projectPath, ".lore.md"));
+    }
+    // Strip lore's section from the agents file (pointer in the default config,
+    // inline knowledge in the agentsFile-only config). Preserves user content.
+    if (cfg.agentsFile.enabled && removeLoreSectionFromFile(agentsFilePath)) {
+      cleaned.push(agentsFilePath);
+    }
+    if (cleaned.length) {
+      console.log(`No knowledge for ${projectPath} — cleaned stale file(s):`);
+      for (const f of cleaned) console.log(`  ${f}`);
+      console.log("Commit the change(s) to keep git in sync.");
+    } else {
+      console.log(`No knowledge for ${projectPath} — nothing to export.`);
+    }
+    return;
+  }
+
+  const written: string[] = [];
+  if (cfg.loreFile.enabled && cfg.agentsFile.enabled) {
+    exportToFile({ projectPath, filePath: agentsFilePath });
+    written.push(join(projectPath, ".lore.md"), agentsFilePath);
+  } else if (cfg.loreFile.enabled) {
+    exportLoreFile(projectPath);
+    written.push(join(projectPath, ".lore.md"));
+  } else if (cfg.agentsFile.enabled) {
+    exportInlineToAgentsFile({ projectPath, filePath: agentsFilePath });
+    written.push(agentsFilePath);
+  } else {
+    console.log(
+      "Both loreFile and agentsFile are disabled in config — nothing written.",
+    );
+    return;
+  }
+
+  console.log(
+    `Exported ${entries.length} knowledge ${entries.length === 1 ? "entry" : "entries"} for ${projectPath}:`,
+  );
+  for (const f of written) console.log(`  ${f}`);
+  console.log(
+    "Commit the regenerated file(s) to keep git in sync and prevent re-import of stale entries.",
+  );
+}
+
 async function cmdConsolidate(
   _args: string[],
   flags: Record<string, unknown>,
@@ -2785,6 +2883,9 @@ export async function commandData(
       break;
     case "consolidate":
       await cmdConsolidate(subArgs, values);
+      break;
+    case "export":
+      await cmdExport(subArgs, values);
       break;
     case "recover":
       await cmdRecover(subArgs, values);

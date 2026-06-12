@@ -604,6 +604,28 @@ describe("getWorkerModel", () => {
     expect(result?.modelID).toContain("sonnet");
   });
 
+  test("openai-codex with expensive model downgrades to gpt-5.1-codex-mini", () => {
+    // gpt-5.5 is expensive ($5/M) → cost-aware default kicks in. Same provider,
+    // same /codex/responses endpoint, ~20x cheaper input.
+    const result = getWorkerModel({
+      providerID: "openai-codex",
+      model: "gpt-5.5",
+    });
+    expect(result).toBeDefined();
+    expect(result?.providerID).toBe("openai-codex");
+    expect(result?.modelID).toBe("gpt-5.1-codex-mini");
+  });
+
+  test("openai-codex with already-cheap model echoes it (no downgrade)", () => {
+    const result = getWorkerModel({
+      providerID: "openai-codex",
+      model: "gpt-5.1-codex-mini",
+    });
+    expect(result).toBeDefined();
+    expect(result?.providerID).toBe("openai-codex");
+    expect(result?.modelID).toBe("gpt-5.1-codex-mini");
+  });
+
   test("unknown provider echoes session model — same provider is always safe", () => {
     // MiniMax, xAI, Mistral, NVIDIA, Google — no WORKER_DEFAULTS entry.
     // The session model is echoed because it's on the same provider (same

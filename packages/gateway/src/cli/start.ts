@@ -9,6 +9,7 @@ import { resetPipelineState } from "../pipeline";
 import { writePortFile, removePortFile } from "../portfile";
 import { embedding } from "@loreai/core";
 import { safeExit } from "./exit";
+import { installSignalShutdown } from "./shutdown";
 
 export interface StartOptions {
   port?: number;
@@ -148,11 +149,17 @@ export async function startGateway(
       writePortFile(actualPort);
 
       const boundServer = server;
+      let shutdownStarted = false;
       const shutdown = async () => {
+        if (shutdownStarted) return;
+        shutdownStarted = true;
         console.error("[lore] Shutting down…");
         boundServer.stop();
         removePortFile(actualPort);
-        await resetPipelineState();
+        // `fast`: skip the synchronous batch-queue LLM drain on process exit —
+        // replaying queued background prompts through retries is what made
+        // Ctrl+C hang for minutes. They resume next session.
+        await resetPipelineState({ fast: true });
         // Shut down the embedding worker thread gracefully. Done after
         // resetPipelineState (which clears sessions/timers) but before
         // safeExit — gives the worker time to exit cleanly via its
@@ -318,17 +325,8 @@ export async function commandStart(opts: StartOptions): Promise<never> {
       `  LORE_REMOTE_GATEWAY     Remote-gateway mode — bucket path-less sessions per-session (current: ${config.remoteGateway}, default for \`lore start\`: true, pass --local to disable)`,
     );
   }
-  // Block until signal
-  let shuttingDown = false;
-  const onSignal = async () => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    await shutdown();
-    safeExit(0);
-  };
-
-  process.on("SIGINT", () => onSignal());
-  process.on("SIGTERM", () => onSignal());
+  // Block until signal — bounded shutdown + force-exit on a second interrupt.
+  installSignalShutdown(shutdown);
 
   // Keep the process alive (the HTTP server already does this, but be explicit)
   return new Promise(() => {});

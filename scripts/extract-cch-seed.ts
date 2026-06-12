@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env node
 /**
  * Extract the xxHash64 seed from a Claude Code binary.
  *
@@ -6,19 +6,23 @@
  * by running the binary against a local capture server, then scans the
  * binary for the seed that satisfies all oracle pairs.
  *
+ * Runs under Node.js (>= 22.5) via built-in TypeScript type-stripping — no
+ * bundler or `tsx` required. Relative imports use explicit `.ts` extensions
+ * because native Node does not resolve extensionless module specifiers.
+ *
  * Usage:
  *   # Fully automated — download + generate oracles + extract
- *   bun run scripts/extract-cch-seed.ts --version 2.1.138
+ *   node scripts/extract-cch-seed.ts --version 2.1.138
  *
  *   # Use a local binary — generate oracles + extract
- *   bun run scripts/extract-cch-seed.ts --binary ./claude
+ *   node scripts/extract-cch-seed.ts --binary ./claude
  *
  *   # Legacy mode — use pre-captured oracle pairs
- *   bun run scripts/extract-cch-seed.ts --version 2.1.138 --oracle pairs.json
- *   bun run scripts/extract-cch-seed.ts --binary ./claude --oracle pairs.json
+ *   node scripts/extract-cch-seed.ts --version 2.1.138 --oracle pairs.json
+ *   node scripts/extract-cch-seed.ts --binary ./claude --oracle pairs.json
  *
  *   # Apply extracted seed to cch.ts
- *   bun run scripts/extract-cch-seed.ts --apply 2.1.138 0x4D659218E32A3268
+ *   node scripts/extract-cch-seed.ts --apply 2.1.138 0x4D659218E32A3268
  *
  * Oracle pairs JSON format (for --oracle):
  *   [
@@ -41,11 +45,19 @@ import {
   readFileSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { execSync } from "node:child_process";
+import { execSync, spawn, spawnSync } from "node:child_process";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { xxHash64 } from "../packages/gateway/src/xxhash.ts";
+import { VERSION_SEEDS } from "../packages/gateway/src/cch.ts";
 
 // ---------------------------------------------------------------------------
 // CLI argument parsing
@@ -67,11 +79,11 @@ const { values: args, positionals } = parseArgs({
 
 if (args.help) {
   console.log(`Usage:
-  bun run scripts/extract-cch-seed.ts --version <VERSION>
-  bun run scripts/extract-cch-seed.ts --binary <path>
-  bun run scripts/extract-cch-seed.ts --version <VERSION> --oracle <pairs.json>
-  bun run scripts/extract-cch-seed.ts --apply <VERSION> <SEED_HEX>
-  bun run scripts/extract-cch-seed.ts --apply --no-pin <VERSION> <SEED_HEX>
+  node scripts/extract-cch-seed.ts --version <VERSION>
+  node scripts/extract-cch-seed.ts --binary <path>
+  node scripts/extract-cch-seed.ts --version <VERSION> --oracle <pairs.json>
+  node scripts/extract-cch-seed.ts --apply <VERSION> <SEED_HEX>
+  node scripts/extract-cch-seed.ts --apply --no-pin <VERSION> <SEED_HEX>
 
 Options:
   -v, --version   Claude Code version to download from npm (e.g. 2.1.138)
@@ -118,8 +130,43 @@ if (!args.version && !args.binary) {
 // ---------------------------------------------------------------------------
 
 interface OraclePair {
-  body: string;
+  /**
+   * Raw request-body bytes with the `cch` field set to the `cch=00000`
+   * placeholder AND the cch preimage transform applied (see `cchPreimage`).
+   * MUST be derived from the exact bytes the client transmitted — never a
+   * UTF-8 string round-trip. The body contains multibyte UTF-8 (e.g. `→` in
+   * tool descriptions); decoding it to a JS string via `chunk.toString()` and
+   * re-encoding corrupts any multibyte sequence split across a TCP chunk
+   * boundary (each fragment becomes U+FFFD), which makes the hash unrecoverable.
+   */
+  body: Uint8Array;
   cch: string;
+}
+
+/**
+ * Apply Claude Code's cch hash preimage transform to a request-body buffer.
+ *
+ * Claude Code >= 2.1.172 does NOT hash the raw wire body — it strips the
+ * `model` VALUE (`"model":"x"` → `"model":""`) and the `max_tokens` field
+ * (`"max_tokens":N,` → ``) before hashing. The seed and algorithm are
+ * unchanged; only the preimage changed (discovered via debugger capture, see
+ * quality/CCH.md). For older versions these fields-edits are no-ops, so the
+ * transform is safe to apply unconditionally.
+ *
+ * The edited fields are pure-ASCII JSON, and `latin1` is a lossless 1:1
+ * byte<->char mapping, so round-tripping the whole buffer through latin1 to run
+ * the regexes preserves every other (possibly multibyte) byte exactly.
+ *
+ * Keep in sync with `cchPreimage` in `packages/gateway/src/cch.ts`.
+ */
+function cchPreimage(body: Buffer): Buffer {
+  const s = body.toString("latin1");
+  const out = s
+    .replace(/("model":")[^"]*(")/, "$1$2")
+    // Strip `max_tokens` + exactly one adjacent comma (trailing form is what the
+    // real binary produces; leading-comma alternation is a last-key fallback).
+    .replace(/"max_tokens":\d+,|,"max_tokens":\d+/, "");
+  return Buffer.from(out, "latin1");
 }
 
 // ---------------------------------------------------------------------------
@@ -179,57 +226,85 @@ async function captureOnePair(
 ): Promise<OraclePair | null> {
   let captured: OraclePair | null = null;
 
-  const server = Bun.serve({
-    port: 0, // ephemeral port
-    async fetch(req) {
-      if (req.method === "HEAD") {
-        return new Response(null, { status: 200 });
-      }
+  const server = createServer(async (req, res) => {
+    if (req.method === "HEAD") {
+      res.writeHead(200);
+      res.end();
+      return;
+    }
 
-      const body = await req.text();
-      if (!captured) {
-        const cchMatch = body.match(/cch=([0-9a-f]{5})/);
-        if (cchMatch) {
-          const placeholder = body.replace(`cch=${cchMatch[1]}`, "cch=00000");
-          captured = { body: placeholder, cch: cchMatch[1] };
+    // Collect the raw body bytes (NEVER `body += chunk`, which UTF-8-decodes
+    // each Buffer and corrupts multibyte sequences split across chunks).
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) {
+      chunks.push(chunk as Buffer);
+    }
+    const bodyBytes = Buffer.concat(chunks);
+
+    if (!captured) {
+      // The `cch=XXXXX` field is pure ASCII, so a latin1 view is byte-exact
+      // for locating it without disturbing surrounding multibyte content.
+      // NOTE: we target the FIRST `cch=<hex>` occurrence — the billing header is
+      // the first system block, matching how Claude Code itself writes the cch.
+      const cchMatch = bodyBytes.toString("latin1").match(/cch=([0-9a-f]{5})/);
+      if (cchMatch) {
+        const at = bodyBytes.indexOf(
+          Buffer.from(`cch=${cchMatch[1]}`, "ascii"),
+        );
+        // `at` should always be >= 0 (the regex matched these exact bytes), but
+        // guard defensively so a miss can never corrupt the body at offset 3.
+        if (at >= 0) {
+          const placeholder = Buffer.from(bodyBytes); // copy
+          // Overwrite the 5 hex chars after "cch=" with "00000" (same length).
+          Buffer.from("00000", "ascii").copy(placeholder, at + 4);
+          // Apply the cch preimage transform (Claude Code >= 2.1.172 strips the
+          // `model` value and `max_tokens` field before hashing — see
+          // cchPreimage in cch.ts / quality/CCH.md). For older versions these
+          // edits are no-ops, so this stays correct across all versions.
+          captured = { body: cchPreimage(placeholder), cch: cchMatch[1] };
         }
       }
+    }
 
-      return Response.json(
-        {
-          type: "error",
-          error: {
-            type: "authentication_error",
-            message: "invalid x-api-key",
-          },
+    res.writeHead(401, { "content-type": "application/json" });
+    res.end(
+      JSON.stringify({
+        type: "error",
+        error: {
+          type: "authentication_error",
+          message: "invalid x-api-key",
         },
-        { status: 401 },
-      );
-    },
+      }),
+    );
   });
 
+  // Bind to an ephemeral port and read the assigned port back.
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const { port } = server.address() as AddressInfo;
+
   try {
-    const proc = Bun.spawn([binaryPath, "--print", "--bare", "-p", prompt], {
+    const proc = spawn(binaryPath, ["--print", "--bare", "-p", prompt], {
       env: {
         ...process.env,
         HOME: `${tmpDir}/home`,
         ANTHROPIC_API_KEY:
           "sk-ant-api03-fakekey1234567890abcdef1234567890abcdef1234567890abcdef",
-        ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.port}`,
+        ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`,
         DISABLE_AUTOUPDATER: "1",
         DISABLE_UPDATES: "1",
       },
       cwd: `${tmpDir}/workdir`,
-      stdout: "ignore",
-      stderr: "ignore",
+      stdio: "ignore",
     });
 
     // Wait up to 15s for the binary to make its request
     const timeout = setTimeout(() => proc.kill(), 15_000);
-    await proc.exited;
+    await new Promise<void>((resolve) => proc.on("exit", () => resolve()));
     clearTimeout(timeout);
   } finally {
-    server.stop();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 
   return captured;
@@ -245,13 +320,17 @@ function loadOraclePairs(path: string): OraclePair[] {
     process.exit(1);
   }
 
-  const pairs: OraclePair[] = JSON.parse(readFileSync(path, "utf-8"));
-  if (!Array.isArray(pairs) || pairs.length === 0) {
+  // The JSON file stores each body as a (UTF-8) string. Convert to raw bytes.
+  const raw: Array<{ body: string; cch: string }> = JSON.parse(
+    readFileSync(path, "utf-8"),
+  );
+  if (!Array.isArray(raw) || raw.length === 0) {
     console.error("Oracle file must contain a non-empty JSON array");
     process.exit(1);
   }
 
-  for (const [i, pair] of pairs.entries()) {
+  const pairs: OraclePair[] = [];
+  for (const [i, pair] of raw.entries()) {
     if (!pair.body || !pair.cch) {
       console.error(`Oracle pair ${i} missing 'body' or 'cch' field`);
       process.exit(1);
@@ -268,6 +347,10 @@ function loadOraclePairs(path: string): OraclePair[] {
       );
       process.exit(1);
     }
+    pairs.push({
+      body: cchPreimage(Buffer.from(pair.body, "utf-8")),
+      cch: pair.cch,
+    });
   }
 
   return pairs;
@@ -310,12 +393,10 @@ function obtainBinary(version?: string, binaryPath?: string): string {
   }
 
   // Find the tarball
-  const tgzGlob = new Bun.Glob("anthropic-ai-claude-code-*-*.tgz");
-  let tgzPath = "";
-  for (const file of tgzGlob.scanSync(tmpDir)) {
-    tgzPath = `${tmpDir}/${file}`;
-    break;
-  }
+  const tgz = readdirSync(tmpDir).find((f) =>
+    /^anthropic-ai-claude-code-.*-.*\.tgz$/.test(f),
+  );
+  const tgzPath = tgz ? `${tmpDir}/${tgz}` : "";
   if (!tgzPath) {
     console.error("Could not find downloaded tarball");
     process.exit(1);
@@ -356,7 +437,7 @@ function obtainBinary(version?: string, binaryPath?: string): string {
 
 function testCandidate(seed: bigint, pairs: OraclePair[]): boolean {
   for (const pair of pairs) {
-    const hash = Bun.hash.xxHash64(pair.body, seed);
+    const hash = xxHash64(pair.body, seed);
     const cch = (hash & 0xfffffn).toString(16).padStart(5, "0");
     if (cch !== pair.cch) return false;
   }
@@ -415,22 +496,185 @@ function scan(
   return null;
 }
 
-function scanForSeed(binary: Buffer, pairs: OraclePair[]): bigint | null {
-  // Try 8-byte aligned first (fast)
-  let seed = scan(binary, pairs, 8);
+/**
+ * Compile the bundled native scanner (scripts/cch-scan.c) with `cc -O3` into a
+ * temp dir. Returns the executable path, or null when no C compiler is present
+ * (the caller then falls back to the pure-JS scan). The compiled binary is
+ * cached for the lifetime of the process.
+ */
+let nativeScannerPath: string | null | undefined;
+function buildNativeScanner(): string | null {
+  if (nativeScannerPath !== undefined) return nativeScannerPath;
 
-  // Fall back to 1-byte aligned if needed
+  const src = join(fileURLToPath(new URL(".", import.meta.url)), "cch-scan.c");
+  if (!existsSync(src)) {
+    nativeScannerPath = null;
+    return null;
+  }
+
+  const out = join(tmpdir(), "cch-scan");
+  for (const compiler of ["cc", "gcc", "clang"]) {
+    const r = spawnSync(compiler, ["-O3", "-o", out, src], {
+      stdio: "ignore",
+    });
+    if (r.status === 0) {
+      console.log(`Compiled native scanner with ${compiler}.`);
+      nativeScannerPath = out;
+      return out;
+    }
+  }
+
+  console.log("No C compiler available — using JS scan.");
+  nativeScannerPath = null;
+  return null;
+}
+
+/**
+ * Serialize oracle pairs into the line+raw-bytes format cch-scan.c reads:
+ * "<cch-hex>\t<byte-length>\n" followed by the raw body bytes and a '\n'.
+ * Bodies are passed as bytes (never argv) to avoid any encoding/quoting issues.
+ */
+function writePairsFile(pairs: OraclePair[]): string {
+  const chunks: Buffer[] = [];
+  for (const pair of pairs) {
+    const body = Buffer.from(pair.body);
+    chunks.push(Buffer.from(`${pair.cch}\t${body.length}\n`, "ascii"));
+    chunks.push(body);
+    chunks.push(Buffer.from("\n", "ascii"));
+  }
+  const path = join(tmpdir(), "cch-scan-pairs.txt");
+  writeFileSync(path, Buffer.concat(chunks));
+  return path;
+}
+
+/**
+ * Run the native scanner over the binary at `binaryPath`. Returns the matching
+ * seed, null when the scanner ran but found nothing, or `undefined` when the
+ * native path is unavailable (so the caller falls back to the JS scan).
+ */
+function nativeScan(
+  binaryPath: string,
+  pairs: OraclePair[],
+  alignment: number,
+): bigint | null | undefined {
+  const scanner = buildNativeScanner();
+  if (!scanner) return undefined;
+
+  const pairsFile = writePairsFile(pairs);
+  const label = alignment === 8 ? "8-byte aligned" : "1-byte aligned";
+  console.log(`\nNative scan (${label})...`);
+  const start = performance.now();
+  const r = spawnSync(scanner, [binaryPath, String(alignment), pairsFile], {
+    encoding: "utf-8",
+    maxBuffer: 1 << 20,
+  });
+  const elapsed = (performance.now() - start) / 1000;
+
+  if (r.status !== 0) {
+    console.warn(
+      `Native scanner failed (${r.status}): ${r.stderr?.trim() ?? ""} — falling back to JS.`,
+    );
+    return undefined;
+  }
+
+  const out = (r.stdout ?? "").trim();
+  const m = out.match(/^SEED (0x[0-9a-f]+)$/);
+  if (m) {
+    const seed = BigInt(m[1]);
+    console.log(
+      `✓ Native scan found seed in ${elapsed.toFixed(1)}s: 0x${seed.toString(16).padStart(16, "0")}`,
+    );
+    return seed;
+  }
+  console.log(`Native scan complete in ${elapsed.toFixed(1)}s: no match.`);
+  return null;
+}
+
+function scanForSeed(
+  binaryPath: string,
+  binary: Buffer,
+  pairs: OraclePair[],
+): bigint | null {
+  // Native scan first (orders of magnitude faster than the JS loop). 8-byte
+  // aligned, then 1-byte aligned. `undefined` means the native path was
+  // unavailable, so fall back to the JS scan; `null` means it ran and found
+  // nothing (no point repeating the same work in JS).
+  const native8 = nativeScan(binaryPath, pairs, 8);
+  if (native8 !== undefined) {
+    if (native8 !== null) return native8;
+    const native1 = nativeScan(binaryPath, pairs, 1);
+    if (native1 !== undefined) return native1;
+  }
+
+  // Pure-JS fallback (no compiler available or native path errored).
+  let seed = scan(binary, pairs, 8);
   if (seed === null) {
     console.log("\nFalling back to 1-byte aligned scan...");
     seed = scan(binary, pairs, 1);
   }
-
   return seed;
+}
+
+/**
+ * Claude Code reuses the same xxHash64 seed across long runs of consecutive
+ * versions, so before scanning the whole binary we test the seeds we already
+ * know against the freshly-captured oracle pairs. A match short-circuits the
+ * expensive 230 MB binary scan. Distinct values are tested newest-first so the
+ * most likely candidate (the current seed) is checked first.
+ */
+function tryKnownSeeds(pairs: OraclePair[]): bigint | null {
+  if (pairs.length < 2) return null; // need 2 pairs to trust a match
+
+  const distinct: bigint[] = [];
+  // Object insertion order in cch.ts is oldest→newest; reverse for newest-first.
+  for (const seed of Object.values(VERSION_SEEDS).reverse()) {
+    if (!distinct.includes(seed)) distinct.push(seed);
+  }
+  if (distinct.length === 0) return null;
+
+  console.log(
+    `\nTesting ${distinct.length} known seed(s) against oracle pairs before scanning...`,
+  );
+  for (const seed of distinct) {
+    if (testCandidate(seed, pairs)) {
+      console.log(
+        `✓ Known seed validates: 0x${seed.toString(16).padStart(16, "0")} — skipping binary scan.`,
+      );
+      return seed;
+    }
+  }
+  console.log("No known seed matched — falling back to binary scan.");
+  return null;
 }
 
 // ---------------------------------------------------------------------------
 // Apply seed to cch.ts
 // ---------------------------------------------------------------------------
+
+/**
+ * Turn a version string into the identifier used for its named seed constant,
+ * e.g. "2.1.166" -> "SEED_2_1_166".
+ */
+function seedConstName(version: string): string {
+  return `SEED_${version.replace(/[^0-9a-zA-Z]+/g, "_")}`;
+}
+
+/**
+ * Find an existing `const SEED_xxx = 0x...n;` declaration whose value equals
+ * `seedLiteral` (a normalized lowercase `0x...n` string). Returns the constant
+ * name so a new version can reference it symbolically instead of repeating the
+ * literal. Returns null when the seed value is not yet defined anywhere.
+ */
+function findSeedConstantByValue(
+  content: string,
+  seedLiteral: string,
+): string | null {
+  const declRe = /const\s+(SEED_[0-9A-Za-z_]+)\s*=\s*(0x[0-9a-f]+n)\s*;/gi;
+  for (const m of content.matchAll(declRe)) {
+    if (m[2].toLowerCase() === seedLiteral) return m[1];
+  }
+  return null;
+}
 
 function applySeed(
   version: string,
@@ -439,11 +683,12 @@ function applySeed(
 ): void {
   const { pin = true } = opts;
 
-  // Normalize seed format
-  const seed = seedHex.startsWith("0x") ? seedHex : `0x${seedHex}`;
-  const seedUpper = seed
-    .replace(/0x/i, "0x")
-    .replace(/[0-9a-f]+/i, (m) => m.toUpperCase());
+  // Normalize the seed to a lowercase `0x...n` BigInt literal so it matches
+  // the existing constants in cch.ts and stays Biome-clean.
+  const rawHex = (seedHex.startsWith("0x") ? seedHex.slice(2) : seedHex)
+    .replace(/n$/i, "")
+    .toLowerCase();
+  const seedLiteral = `0x${rawHex}n`;
 
   const cchPath = new URL("../packages/gateway/src/cch.ts", import.meta.url)
     .pathname;
@@ -455,21 +700,36 @@ function applySeed(
 
   let content = readFileSync(cchPath, "utf-8");
 
-  // Check if version already exists
+  // Decide how to reference the seed value: reuse an existing named constant
+  // when the value is already defined, otherwise create a new one. This avoids
+  // repeating the same literal across the many versions that share a seed.
+  let constName = findSeedConstantByValue(content, seedLiteral);
+  if (constName) {
+    console.log(`Seed matches existing constant ${constName} — reusing it.`);
+  } else {
+    constName = seedConstName(version);
+    // Insert the new constant immediately before the VERSION_SEEDS table.
+    content = content.replace(
+      /(\nexport const VERSION_SEEDS\b)/,
+      `\nconst ${constName} = ${seedLiteral};\n$1`,
+    );
+    console.log(`New seed — added constant ${constName} = ${seedLiteral}.`);
+  }
+
+  // Insert or update the version -> constant mapping.
   if (content.includes(`"${version}"`)) {
     console.log(
       `Version ${version} already exists in VERSION_SEEDS. Updating...`,
     );
-    // Replace existing entry
     const entryRe = new RegExp(
-      `"${version.replace(/\./g, "\\.")}":\\s*0x[0-9A-Fa-f]+n`,
+      `"${version.replace(/\./g, "\\.")}":\\s*[^,\\n]+`,
     );
-    content = content.replace(entryRe, `"${version}": ${seedUpper}n`);
+    content = content.replace(entryRe, `"${version}": ${constName}`);
   } else {
-    // Add before the "Future versions" comment
+    // Add before the "Future versions" comment.
     content = content.replace(
       /(\n\s*\/\/ Future versions: extract and add entries here\.)/,
-      `\n  "${version}": ${seedUpper}n,$1`,
+      `\n  "${version}": ${constName},$1`,
     );
   }
 
@@ -483,7 +743,7 @@ function applySeed(
 
   writeFileSync(cchPath, content);
   console.log(`Updated ${cchPath}:`);
-  console.log(`  VERSION_SEEDS["${version}"] = ${seedUpper}n`);
+  console.log(`  VERSION_SEEDS["${version}"] = ${constName} (${seedLiteral})`);
   if (pin) {
     console.log(`  WORKER_VERSION = "${version}"`);
   } else {
@@ -516,8 +776,14 @@ async function main() {
     pairs = await generateOraclePairs(binaryPath, 2);
   }
 
-  // Scan
-  const seed = scanForSeed(binary, pairs);
+  // Fast path: a previously-extracted seed often still applies to the new
+  // version. Test known seeds against the oracle pairs before the full scan.
+  let seed = tryKnownSeeds(pairs);
+
+  // Slow path: scan the binary only when no known seed validated.
+  if (seed === null) {
+    seed = scanForSeed(binaryPath, binary, pairs);
+  }
 
   if (seed !== null) {
     const hex = seed.toString(16).padStart(16, "0").toUpperCase();
@@ -531,7 +797,7 @@ Add this to VERSION_SEEDS in packages/gateway/src/cch.ts:
 Then update WORKER_VERSION if pinning to this version.
 
 Or run:
-  bun run scripts/extract-cch-seed.ts --apply "${version}" "0x${hex}"
+  node scripts/extract-cch-seed.ts --apply "${version}" "0x${hex}"
 ================================================================================`);
 
     // Write JSON output if requested
