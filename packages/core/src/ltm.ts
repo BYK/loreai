@@ -236,9 +236,41 @@ export function update(
 }
 
 export function remove(id: string) {
+  // Record a tombstone BEFORE deleting so a stale .lore.md re-import can't
+  // resurrect this UUID (which would thrash with the next consolidation pass —
+  // delete → re-import recreates → delete again, busting the prompt cache each
+  // cycle). Capture the project_id while the row still exists.
+  const row = db()
+    .query("SELECT project_id FROM knowledge WHERE id = ?")
+    .get(id) as { project_id: string | null } | null;
+  if (row) {
+    db()
+      .query(
+        `INSERT INTO knowledge_tombstones (id, project_id, deleted_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET deleted_at = excluded.deleted_at`,
+      )
+      .run(id, row.project_id, Date.now());
+  }
   // Clean up transfer metrics before deleting the entry (no FK CASCADE).
   db().query("DELETE FROM knowledge_transfers WHERE knowledge_id = ?").run(id);
   db().query("DELETE FROM knowledge WHERE id = ?").run(id);
+}
+
+/** True when the given knowledge UUID was previously deleted (tombstoned). */
+export function isTombstoned(id: string): boolean {
+  const row = db()
+    .query("SELECT 1 FROM knowledge_tombstones WHERE id = ?")
+    .get(id) as { 1: number } | null;
+  return row != null;
+}
+
+/**
+ * Clear a tombstone for the given UUID — called when an entry is legitimately
+ * (re-)created with that exact UUID, so a future delete can tombstone it again.
+ */
+export function clearTombstone(id: string): void {
+  db().query("DELETE FROM knowledge_tombstones WHERE id = ?").run(id);
 }
 
 // ---------------------------------------------------------------------------

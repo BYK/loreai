@@ -53,6 +53,23 @@ describe("ltm", () => {
     expect(entry?.cross_project).toBe(1);
   });
 
+  test("remove() tombstones the UUID; clearTombstone() lifts it", () => {
+    const id = ltm.create({
+      projectPath: PROJECT,
+      category: "gotcha",
+      title: "Tombstone target",
+      content: "Will be deleted",
+      scope: "project",
+    });
+    expect(ltm.isTombstoned(id)).toBe(false);
+    ltm.remove(id);
+    expect(ltm.get(id)).toBeNull();
+    // The UUID is now tombstoned so a stale .lore.md can't resurrect it.
+    expect(ltm.isTombstoned(id)).toBe(true);
+    ltm.clearTombstone(id);
+    expect(ltm.isTombstoned(id)).toBe(false);
+  });
+
   test("update knowledge entry", () => {
     const id = ltm.create({
       projectPath: PROJECT,

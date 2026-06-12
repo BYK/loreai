@@ -50,7 +50,18 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(39);
+    expect(row.version).toBe(40);
+  });
+
+  test("knowledge_tombstones table exists (migration v40)", () => {
+    const names = (
+      db().query("PRAGMA table_info(knowledge_tombstones)").all() as Array<{
+        name: string;
+      }>
+    ).map((c) => c.name);
+    expect(names).toContain("id");
+    expect(names).toContain("project_id");
+    expect(names).toContain("deleted_at");
   });
 
   test("entities table has embedding column (migration v34)", () => {

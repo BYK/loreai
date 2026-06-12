@@ -845,7 +845,12 @@ export function formatKnowledge(
   const categories = Object.keys(grouped).sort();
   for (const category of categories) {
     const items = grouped[category];
-    items.sort((a, b) => (a.title < b.title ? -1 : a.title > b.title ? 1 : 0));
+    // Sort by title, then content as a deterministic tiebreak so two entries
+    // with identical titles don't render in input-dependent (churning) order.
+    items.sort((a, b) => {
+      if (a.title !== b.title) return a.title < b.title ? -1 : 1;
+      return a.content < b.content ? -1 : a.content > b.content ? 1 : 0;
+    });
     children.push(h(3, category.charAt(0).toUpperCase() + category.slice(1)));
     children.push(
       ul(

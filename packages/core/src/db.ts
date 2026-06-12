@@ -1058,6 +1058,23 @@ const MIGRATIONS: string[] = [
   -- (treated as "unknown set" → the first post-upgrade turn re-pins once).
   ALTER TABLE session_state ADD COLUMN ltm_pin_keys TEXT;
   `,
+  `
+  -- Version 40: Knowledge tombstones.
+  -- Records UUIDs of knowledge entries that were intentionally deleted (by the
+  -- curator's consolidation, or manual deletion). Without this, a stale
+  -- .lore.md that still lists a deleted entry would resurrect it via the
+  -- import "unknown UUID -> create" path, and the next consolidation would
+  -- delete it again — a thrash loop that invalidates the LTM cache and busts
+  -- the prompt cache every cycle. importLoreFile() consults this table and
+  -- refuses to re-create a tombstoned UUID.
+  CREATE TABLE IF NOT EXISTS knowledge_tombstones (
+    id         TEXT PRIMARY KEY,
+    project_id TEXT,
+    deleted_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_knowledge_tombstones_project
+    ON knowledge_tombstones (project_id);
+  `,
 ];
 
 /**
@@ -1313,6 +1330,13 @@ function recoverMissingObjects(database: Database) {
     );
     CREATE INDEX IF NOT EXISTS idx_knowledge_transfers_recalled_in
       ON knowledge_transfers (recalled_in_project_id);
+    CREATE TABLE IF NOT EXISTS knowledge_tombstones (
+      id         TEXT PRIMARY KEY,
+      project_id TEXT,
+      deleted_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_knowledge_tombstones_project
+      ON knowledge_tombstones (project_id);
   `);
 
   // Recover missing columns from partial migration runs.

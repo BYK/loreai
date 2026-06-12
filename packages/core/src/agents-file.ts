@@ -530,6 +530,7 @@ function _importEntries(entries: ParsedFileEntry[], projectPath: string): void {
         if (existing.content !== entry.content) {
           ltm.update(entry.id, { content: entry.content });
         }
+      } else if (ltm.isTombstoned(entry.id)) {
       } else {
         // Unknown UUID — entry came from another machine.
         // Check for a fuzzy title match before creating — prevents duplicates
