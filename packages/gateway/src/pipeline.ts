@@ -11,7 +11,11 @@
  *  2. Meta requests (title gen, summaries, etc.) → forwarded transparently, no Lore processing.
  *  3. Normal conversation turns → full pipeline.
  */
-import type { LoreMessageWithParts, LLMClient } from "@loreai/core";
+import type {
+  LoreMessageWithParts,
+  LLMClient,
+  ChangedEntry,
+} from "@loreai/core";
 import {
   load,
   config as loreConfig,
@@ -46,6 +50,8 @@ import {
   getConsecutiveBusts,
   effectiveMetaThreshold as computeMetaThreshold,
   formatKnowledge,
+  formatKnowledgeDelta,
+  DELTA_MAX_ENTRIES,
   shouldImportLoreFile,
   importLoreFile,
   loreFileExists,
@@ -490,6 +496,41 @@ const ltmPinnedText = new Map<
 >();
 
 /**
+ * Volatile knowledge-delta channel per session.
+ *
+ * This is the flush queue for changed knowledge entries (new/changed/deleted)
+ * that have been applied since the last time the pending set was flushed.
+ * The content of this queue is rendered into a synthetic user message on the
+ * next turn and then cleared. The injected delta message is frozen — once
+ * in the conversation, its bytes never change.
+ *
+ * Structure:
+ *   pending: Array<{
+ *     op: "new" | "changed" | "removed";
+ *     id: string;
+ *     category: string;
+ *     title: string;
+ *     content: string; // new/changed content, or for "removed" the content being removed
+ *     ts: number; // when this change was added to the queue
+ *   }>
+ *   pendingRebuild: boolean; // set when pending grows past DELTA_MAX_ENTRIES * 1.5
+ */
+const ltmDeltaState = new Map<
+  string,
+  {
+    pending: Array<{
+      op: "new" | "changed" | "removed";
+      id: string;
+      category: string;
+      title: string;
+      content: string;
+      ts: number;
+    }>;
+    pendingRebuild: boolean;
+  }
+>();
+
+/**
  * Stable LTM (preference entries) + known entities per session — injected as
  * system[1] with a 1h cache breakpoint. Computed once per session and pinned
  * for ≥1h even through curation changes, so the Anthropic prompt cache prefix
@@ -551,6 +592,100 @@ function ltmDiffThreshold(inputCostPerMillion?: number): number {
   if (cost >= 5) return Math.min(base * 3, 0.2); // opus: 15%
   if (cost >= 1) return Math.min(base * 2, 0.15); // sonnet: 10%
   return base; // haiku: 5%
+}
+
+/**
+ * Add changed knowledge entries to the volatile knowledge-delta channel.
+ *
+ * This is called by the curator's `.then()` callback when knowledge is
+ * created/updated/deleted. The entries are appended to the session's
+ * `ltmDeltaState.pending` queue. The delta will be flushed into a
+ * synthetic user message on the next turn. This ensures the delta content
+ * is deterministic and frozen once injected.
+ */
+function addToPending(
+  sessionID: string,
+  result: {
+    created: number;
+    updated: number;
+    deleted: number;
+    changedEntries?: ChangedEntry[];
+  },
+): void {
+  const deltaState = ltmDeltaState.get(sessionID);
+  if (!deltaState) {
+    ltmDeltaState.set(sessionID, { pending: [], pendingRebuild: false });
+  }
+  const state = ltmDeltaState.get(sessionID);
+  if (!state) return;
+
+  if (!result.changedEntries?.length) return;
+
+  for (const e of result.changedEntries) {
+    const existingIndex = state.pending.findIndex((x) => x.id === e.id);
+
+    if (e.op === "created") {
+      const pendingEntry = {
+        op: "new",
+        id: e.id,
+        category: e.category,
+        title: e.title,
+        content: e.content,
+        ts: Date.now(),
+      } as const;
+      if (existingIndex >= 0) {
+        state.pending[existingIndex] = pendingEntry;
+      } else {
+        state.pending.push(pendingEntry);
+      }
+    } else if (e.op === "updated") {
+      if (existingIndex >= 0) {
+        state.pending[existingIndex] = {
+          ...state.pending[existingIndex],
+          op: "changed",
+          category: e.category,
+          title: e.title,
+          content: e.content,
+          ts: Date.now(),
+        };
+      } else {
+        state.pending.push({
+          op: "changed",
+          id: e.id,
+          category: e.category,
+          title: e.title,
+          content: e.content,
+          ts: Date.now(),
+        });
+      }
+    } else if (e.op === "deleted") {
+      if (existingIndex >= 0) {
+        state.pending[existingIndex] = {
+          ...state.pending[existingIndex],
+          op: "removed",
+          category: e.category,
+          title: e.title,
+          content: e.prevContent,
+          ts: Date.now(),
+        };
+      } else {
+        state.pending.push({
+          op: "removed",
+          id: e.id,
+          category: e.category,
+          title: e.title,
+          content: e.prevContent,
+          ts: Date.now(),
+        });
+      }
+    }
+
+    if (state.pending.length > DELTA_MAX_ENTRIES * 1.5) {
+      state.pendingRebuild = true;
+    }
+  }
+
+  state.pending.sort((a, b) => a.ts - b.ts);
 }
 
 /** Cached LLM client for background workers. */
@@ -940,7 +1075,20 @@ async function initIfNeeded(
   // session whose lastRequestTime exceeds the idle timeout.
   if (config && !stopIdleScheduler) {
     const llm = getLLMClient(config);
-    const idleHandler = buildIdleWorkHandler(llm);
+    const idleHandler = buildIdleWorkHandler(llm, (sessionID, result) => {
+      if (result.changedEntries?.length) {
+        addToPending(sessionID, {
+          created: 0,
+          updated: 0,
+          deleted: 0,
+          changedEntries: result.changedEntries,
+        });
+        const state = ltmDeltaState.get(sessionID);
+        saveSessionTracking(sessionID, {
+          ltmDeltaJson: state ? JSON.stringify(state.pending) : null,
+        });
+      }
+    });
     stopIdleScheduler = startIdleScheduler(
       config,
       sessions,
@@ -954,6 +1102,7 @@ async function initIfNeeded(
         }
         ltmSessionCache.delete(sessionID);
         ltmPinnedText.delete(sessionID);
+        ltmDeltaState.delete(sessionID);
         stableLtmCache.delete(sessionID);
         cwdWarned.delete(sessionID);
         // Clear subagent parent-pending dedup entries for this session —
@@ -1516,6 +1665,40 @@ function getOrCreateSession(
         formatted: persisted.ltmPinText,
         tokenCount: persisted.ltmPinTokens,
       });
+    }
+    if (persisted?.ltmDeltaJson) {
+      try {
+        const pending = JSON.parse(persisted.ltmDeltaJson);
+        if (Array.isArray(pending)) {
+          ltmDeltaState.set(sessionID, {
+            pending: pending.filter(
+              (
+                e,
+              ): e is {
+                op: "new" | "changed" | "removed";
+                id: string;
+                category: string;
+                title: string;
+                content: string;
+                ts: number;
+              } =>
+                e &&
+                typeof e === "object" &&
+                (e.op === "new" || e.op === "changed" || e.op === "removed") &&
+                typeof e.id === "string" &&
+                typeof e.category === "string" &&
+                typeof e.title === "string" &&
+                typeof e.content === "string" &&
+                typeof e.ts === "number",
+            ),
+            pendingRebuild: false,
+          });
+        }
+      } catch {
+        log.warn(
+          `corrupt LTM delta state for session ${sessionID.slice(0, 16)}, starting fresh`,
+        );
+      }
     }
     sessions.set(sessionID, state);
   }
@@ -3503,7 +3686,12 @@ function scheduleBackgroundWork(
         if (!result) return; // skipped by circuit breaker
         sessionState.turnsSinceCuration = 0;
         saveSessionTracking(sessionID, { turnsSinceCuration: 0 });
-        if (result.created > 0 || result.updated > 0 || result.deleted > 0) {
+        if (
+          result.created > 0 ||
+          result.updated > 0 ||
+          result.deleted > 0 ||
+          result.changedEntries?.length > 0
+        ) {
           // Invalidate LTM cache only when curation actually changed entries
           ltmSessionCache.delete(sessionID);
           saveSessionTracking(sessionID, {
@@ -3514,6 +3702,16 @@ function scheduleBackgroundWork(
             `curation: ${result.created} created, ${result.updated} updated, ${result.deleted} deleted`,
           );
           emitCurationMetrics({ ...result, trigger: "in-flight" });
+          // Volatile knowledge-delta channel: add changed entries to the pending queue.
+          // The delta will be flushed as a synthetic user message on the next turn.
+          addToPending(sessionID, result);
+          // If we received changed entries (from the delta channel), persist them.
+          if (result.changedEntries?.length > 0) {
+            const state = ltmDeltaState.get(sessionID);
+            if (!state) return;
+            const json = JSON.stringify(state.pending);
+            saveSessionTracking(sessionID, { ltmDeltaJson: json });
+          }
         }
       })
       .catch((e) => log.error("background curation failed:", e));
@@ -3584,6 +3782,7 @@ export async function generateCompactionSummary(opts: {
   const knowledge = entries.length
     ? formatKnowledge(
         entries.map((e) => ({
+          id: e.id,
           category: e.category,
           title: e.title,
           content: e.content,
@@ -4506,9 +4705,11 @@ async function handleConversationTurn(
   sessionState.lastTurnWasIdle = idleResult.triggered;
   if (idleResult.triggered) {
     ltmSessionCache.delete(sessionID);
+    ltmDeltaState.delete(sessionID);
     saveSessionTracking(sessionID, {
       ltmCacheText: null,
       ltmCacheTokens: null,
+      ltmDeltaJson: null,
     });
     log.info(
       `session idle ${Math.round(idleResult.idleMs / 60_000)}min — refreshing caches` +
@@ -4561,6 +4762,7 @@ async function handleConversationTurn(
         const prefText = prefEntries.length
           ? formatKnowledge(
               prefEntries.map((e) => ({
+                id: e.id,
                 category: e.category,
                 title: e.title,
                 content: e.content,
@@ -4628,6 +4830,7 @@ async function handleConversationTurn(
           if (contextEntries.length) {
             const formatted = formatKnowledge(
               contextEntries.map((e) => ({
+                id: e.id,
                 category: e.category,
                 title: e.title,
                 content: e.content,
@@ -4701,6 +4904,30 @@ async function handleConversationTurn(
     consumeCameOutOfIdle(sessionID);
   }
 
+  // --- 6b. Knowledge-delta channel: flush pending changes into synthetic message ---
+  // Flush the pending set (populated by the curator's .then() callback) as a
+  // new synthetic user message. The delta message is frozen — its content
+  // will never change, so the prefix up to the previous last message stays
+  // cache-warm (system[0]+[1] untouched).
+  let deltaText: string | undefined;
+  const deltaState = ltmDeltaState.get(sessionID);
+  const pendingEntries = deltaState?.pending ?? [];
+  if (deltaState && pendingEntries.length) {
+    deltaText = formatKnowledgeDelta(
+      pendingEntries.map((e) => ({
+        op: e.op,
+        id: e.id,
+        category: e.category,
+        title: e.title,
+        content: e.content,
+      })),
+    );
+    // CLEAR pending — the delta is now frozen in the conversation.
+    // The injected delta message lives in req.messages from this turn forward.
+    deltaState.pending = [];
+    saveSessionTracking(sessionID, { ltmDeltaJson: null });
+  }
+
   // --- 7. Gradient transform on messages ---
   const loreMessages = gatewayMessagesToLore(req.messages, sessionID);
   resolveToolResults(loreMessages);
@@ -4751,6 +4978,7 @@ async function handleConversationTurn(
       if (contextEntries.length) {
         const formatted = formatKnowledge(
           contextEntries.map((e) => ({
+            id: e.id,
             category: e.category,
             title: e.title,
             content: e.content,
@@ -4878,8 +5106,19 @@ async function handleConversationTurn(
   // loreMessagesToGateway reconstructs tool_result blocks from assistant's
   // completed/error tool parts; removeOrphanedToolResults is a safety net
   // that catches any remaining orphaned tool_result references.
-  const transformedMessages = loreMessagesToGateway(result.messages);
+  let transformedMessages = loreMessagesToGateway(result.messages);
   removeOrphanedToolResults(transformedMessages);
+
+  // --- 8c. Append volatile knowledge-delta message (synthetic user message) ---
+  if (deltaText) {
+    // Append a NEW synthetic user message carrying the delta.
+    // The conversation-cache breakpoint (placed on the last block of the last
+    // message by buildAnthropicRequest) moves onto this message.
+    transformedMessages = [
+      ...transformedMessages,
+      { role: "user", content: [{ type: "text", text: deltaText }] },
+    ];
+  }
 
   const modifiedReq: GatewayRequest = {
     ...req,

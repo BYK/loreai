@@ -236,6 +236,48 @@ describe("buildAnthropicRequest — conversation caching", () => {
     });
   });
 
+  test("synthetic knowledge-delta message becomes the conversation breakpoint", () => {
+    const req = makeRequest({
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: "Implement feature" }],
+        },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "Implemented." }],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "[System Notification - Knowledge Update]\n+ NEW [019eb1c4] preference: Prefer cache-stable deltas",
+            },
+          ],
+        },
+      ],
+    });
+
+    const body = getBody(req, { cacheConversation: true });
+    const messages = body.messages as Array<{
+      role: string;
+      content: Array<Record<string, unknown>>;
+    }>;
+
+    const priorUser = messages[0];
+    const priorAssistant = messages[1];
+    const delta = messages[2];
+    if (!priorUser || !priorAssistant || !delta) {
+      throw new Error("expected three messages");
+    }
+
+    expect(priorUser.content[0]?.cache_control).toBeUndefined();
+    expect(priorAssistant.content[0]?.cache_control).toBeUndefined();
+    expect(delta.role).toBe("user");
+    expect(delta.content[0]?.cache_control).toEqual({ type: "ephemeral" });
+  });
+
   test("no-op when messages array is empty", () => {
     const req = makeRequest({ messages: [] });
     const body = getBody(req, { cacheConversation: true });

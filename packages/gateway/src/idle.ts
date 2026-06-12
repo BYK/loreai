@@ -32,7 +32,7 @@ import {
   distillLimiter,
   curatorLimiter,
 } from "@loreai/core";
-import type { LLMClient } from "@loreai/core";
+import type { ChangedEntry, LLMClient } from "@loreai/core";
 import { makeWorkerHealth, allowWorkerProbe } from "./worker-health";
 import type { GatewayConfig } from "./config";
 import type { SessionState } from "./translate/types";
@@ -460,6 +460,10 @@ export function touchSession(
  */
 export function buildIdleWorkHandler(
   llm: LLMClient,
+  onKnowledgeChanged?: (
+    sessionID: string,
+    result: { changedEntries?: ChangedEntry[] },
+  ) => void,
 ): (sessionID: string, state: SessionState) => Promise<void> {
   return async (sessionID: string, state: SessionState) => {
     const projectPath = state.projectPath;
@@ -555,6 +559,7 @@ export function buildIdleWorkHandler(
               `idle curation: ${result.created} created, ${result.updated} updated, ${result.deleted} deleted`,
             );
             emitCurationMetrics({ ...result, trigger: "idle" });
+            onKnowledgeChanged?.(sessionID, result);
             // Entry count changed — clear consolidation cooldown so it
             // retries with fresh data on the next idle tick.
             consolidationCooldown.delete(projectPath);

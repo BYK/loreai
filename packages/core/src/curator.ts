@@ -230,12 +230,41 @@ function filterRelations(arr: unknown[]): DetectedRelation[] {
     });
 }
 
+/** One post-image entry surfaced to the volatile knowledge-delta channel. */
+export type ChangedEntry =
+  | {
+      op: "created";
+      id: string;
+      category: string;
+      title: string;
+      content: string;
+    }
+  | {
+      op: "updated";
+      id: string;
+      category: string;
+      title: string;
+      content: string;
+      prevContent: string;
+    }
+  | {
+      op: "deleted";
+      id: string;
+      category: string;
+      title: string;
+      prevContent: string;
+    };
+
 /**
  * Apply a list of curator ops (create/update/delete) to the knowledge DB,
  * and optionally create detected entities and relations.
  * Shared by both the live curator and the conversation import system.
  *
- * @returns Counts of applied operations.
+ * @returns Counts of applied operations AND the post-image content of
+ *   each changed entry. The post-image is captured in-process (cheap) so
+ *   the volatile knowledge-delta channel can render an authoritative delta
+ *   message without a re-read from the DB (which would be racy vs. parallel
+ *   applyOps calls and would lose the pre-image for "changed" entries).
  */
 export function applyOps(
   ops: CuratorOp[],
@@ -257,12 +286,14 @@ export function applyOps(
   deleted: number;
   entitiesCreated: number;
   relationsCreated: number;
+  changedEntries: ChangedEntry[];
 } {
   let created = 0;
   let updated = 0;
   let deleted = 0;
   let entitiesCreated = 0;
   const idsToSync: string[] = [];
+  const changedEntries: ChangedEntry[] = [];
 
   for (const op of ops) {
     if (op.op === "create") {
@@ -274,7 +305,10 @@ export function applyOps(
           ? op.content.slice(0, MAX_ENTRY_CONTENT_LENGTH) +
             " [truncated — entry too long]"
           : op.content;
-      const id = ltm.create({
+      // tryCreate() distinguishes genuine new inserts from dedup-merged
+      // creates. Only genuine inserts surface in the delta channel — the
+      // agent must not see a "new" entry whose id was reused by a dedup hit.
+      const { id, created: wasCreated } = ltm.tryCreate({
         projectPath: op.scope === "project" ? input.projectPath : undefined,
         category: op.category,
         title: op.title,
@@ -290,7 +324,21 @@ export function applyOps(
         workerProviderID: input.workerModel?.providerID,
         workerModelID: input.workerModel?.modelID,
       });
+      if (!wasCreated) {
+        // Dedup-merged into an existing entry — not a real create. Still
+        // call this a "no-op" so the `created` count stays honest, but
+        // don't surface it in the delta (the existing entry may already be
+        // in the pinned block).
+        continue;
+      }
       idsToSync.push(id);
+      changedEntries.push({
+        op: "created",
+        id,
+        category: op.category,
+        title: op.title,
+        content,
+      });
       created++;
     } else if (op.op === "update") {
       const entry = ltm.get(op.id);
@@ -301,6 +349,7 @@ export function applyOps(
           const pid = ensureProject(input.projectPath);
           if (entry.project_id !== pid) continue;
         }
+        const prevContent = entry.content;
         const content =
           op.content !== undefined &&
           op.content.length > MAX_ENTRY_CONTENT_LENGTH
@@ -309,6 +358,14 @@ export function applyOps(
             : op.content;
         ltm.update(op.id, { content, confidence: op.confidence });
         if (op.content !== undefined) idsToSync.push(op.id);
+        changedEntries.push({
+          op: "updated",
+          id: op.id,
+          category: entry.category,
+          title: entry.title,
+          content: content ?? prevContent,
+          prevContent,
+        });
         updated++;
       }
     } else if (op.op === "delete") {
@@ -319,6 +376,13 @@ export function applyOps(
           const pid = ensureProject(input.projectPath);
           if (entry.project_id !== pid) continue;
         }
+        changedEntries.push({
+          op: "deleted",
+          id: op.id,
+          category: entry.category,
+          title: entry.title,
+          prevContent: entry.content,
+        });
         ltm.remove(op.id);
         deleted++;
       }
@@ -399,7 +463,14 @@ export function applyOps(
     }
   }
 
-  return { created, updated, deleted, entitiesCreated, relationsCreated };
+  return {
+    created,
+    updated,
+    deleted,
+    entitiesCreated,
+    relationsCreated,
+    changedEntries,
+  };
 }
 
 // Track which messages we've already curated — per session to prevent
@@ -436,6 +507,7 @@ export async function run(input: {
   deleted: number;
   entitiesCreated: number;
   relationsCreated: number;
+  changedEntries: ChangedEntry[];
 }> {
   const cfg = config();
   if (!cfg.curator.enabled)
@@ -445,6 +517,7 @@ export async function run(input: {
       deleted: 0,
       entitiesCreated: 0,
       relationsCreated: 0,
+      changedEntries: [],
     };
 
   // Skip-if-busy: curation is periodic, not accumulative. If a curation is
@@ -465,6 +538,7 @@ export async function run(input: {
       deleted: 0,
       entitiesCreated: 0,
       relationsCreated: 0,
+      changedEntries: [],
     };
   }
 
@@ -486,6 +560,7 @@ async function runInner(input: {
   deleted: number;
   entitiesCreated: number;
   relationsCreated: number;
+  changedEntries: ChangedEntry[];
 }> {
   const cfg = config();
 
@@ -526,6 +601,7 @@ async function runInner(input: {
         deleted: 0,
         entitiesCreated: 0,
         relationsCreated: 0,
+        changedEntries: [],
       };
     text = recentDistillations.map((d) => d.observations).join("\n\n");
   }
@@ -635,6 +711,7 @@ async function runInner(input: {
       deleted: 0,
       entitiesCreated: 0,
       relationsCreated: 0,
+      changedEntries: [],
     };
   }
 

@@ -784,7 +784,12 @@ function estimateTokens(text: string): number {
 }
 
 export function formatKnowledge(
-  entries: Array<{ category: string; title: string; content: string }>,
+  entries: Array<{
+    id?: string;
+    category: string;
+    title: string;
+    content: string;
+  }>,
   maxTokens?: number,
 ): string {
   if (!entries.length) return "";
@@ -798,7 +803,10 @@ export function formatKnowledge(
     let used = HEADER_OVERHEAD;
     const fitting: typeof entries = [];
     for (const e of entries) {
-      const cost = estimateTokens(e.title + e.content) + 10; // per-entry bullet overhead
+      const cost =
+        estimateTokens(e.title + e.content) +
+        (e.id ? ID_PREFIX_OVERHEAD : 0) +
+        10; // per-entry bullet overhead
       if (used + cost > maxTokens) continue; // skip; keep trying smaller entries
       fitting.push(e);
       used += cost;
@@ -807,7 +815,10 @@ export function formatKnowledge(
     if (!included.length) return "";
   }
 
-  const grouped: Record<string, Array<{ title: string; content: string }>> = {};
+  const grouped: Record<
+    string,
+    Array<{ title: string; content: string; id?: string }>
+  > = {};
   for (const e of included) {
     let group = grouped[e.category];
     if (!group) {
@@ -822,14 +833,116 @@ export function formatKnowledge(
     children.push(h(3, category.charAt(0).toUpperCase() + category.slice(1)));
     children.push(
       ul(
-        items.map((i) =>
-          liph(strong(inline(i.title)), t(`: ${inline(i.content)}`)),
-        ),
+        items.map((i) => {
+          const titleText = i.id
+            ? `${inline(`[${shortId(i.id)}] `)}${inline(i.title)}`
+            : inline(i.title);
+          return liph(strong(titleText), t(`: ${inline(i.content)}`));
+        }),
       ),
     );
   }
 
   return serialize(root(...children));
+}
+
+/**
+ * Per-entry char-cost overhead for the `[xxxxxxxx] ` ID prefix that
+ * `formatKnowledge` emits when an entry has an `id`. Used by the budget
+ * packer (above) to keep the token estimate honest.
+ */
+const ID_PREFIX_OVERHEAD = 12;
+
+/** First 8 chars of a UUID — the short, stable handle the delta channel references. */
+export function shortId(uuid: string): string {
+  return uuid.slice(0, 8);
+}
+
+/** Cap for the volatile knowledge-delta channel: max entries per injected message. */
+export const DELTA_MAX_ENTRIES = 20;
+/** Cap for the volatile knowledge-delta channel: max tokens per injected message. */
+export const DELTA_TOKEN_BUDGET = 2000;
+
+export type DeltaOp = "new" | "changed" | "removed";
+
+export type DeltaEntry = {
+  op: DeltaOp;
+  id: string;
+  category: string;
+  title: string;
+  /**
+   * New (post-op) content for "new" and "changed"; for "removed" entries this
+   * is the *previous* content so the agent can see what was deleted.
+   */
+  content: string;
+};
+
+/**
+ * Render a volatile knowledge-delta message. The output is byte-deterministic
+ * for a given input array (same order, same op prefixes, same punctuation)
+ * so that, once injected, the message content is FROZEN — future changes
+ * produce a new message, not a modification of this one.
+ *
+ * Returns "" when `entries` is empty so the caller can skip injection.
+ *
+ * Greedy packing in `new → changed → removed` order, capped at
+ * `DELTA_MAX_ENTRIES` entries and `DELTA_TOKEN_BUDGET` tokens. If the cap
+ * truncates, a summary line is appended.
+ */
+export function formatKnowledgeDelta(entries: DeltaEntry[]): string {
+  if (!entries.length) return "";
+
+  const opRank: Record<DeltaOp, number> = { new: 0, changed: 1, removed: 2 };
+  const sorted = entries
+    .map((entry, index) => ({ entry, index }))
+    .sort(
+      (a, b) => opRank[a.entry.op] - opRank[b.entry.op] || a.index - b.index,
+    )
+    .map(({ entry }) => entry);
+
+  // Greedy pack: process entries in deterministic new → changed → removed
+  // order, preserving caller order within each group.
+  const included: DeltaEntry[] = [];
+  const HEADER_OVERHEAD =
+    "[System Notification - Knowledge Update]\n" +
+    "The following entries supersede any conflicting entries in the system prompt's " +
+    "Long-term Knowledge section AND any earlier delta messages with the same short ID.\n\n";
+  const EPILOGUE = "\n\nUse the recall tool for full content of any entry.";
+  let used = estimateTokens(HEADER_OVERHEAD + EPILOGUE);
+
+  for (const e of sorted) {
+    if (included.length >= DELTA_MAX_ENTRIES) break;
+    const symbol =
+      e.op === "new" ? "+ NEW" : e.op === "changed" ? "~ CHANGED" : "- REMOVED";
+    const body = e.op === "removed" ? "" : `\n  ${e.content}`;
+    const line = `${symbol} [${shortId(e.id)}] ${e.category}: ${e.title}${body}`;
+    const cost = estimateTokens(line);
+    if (used + cost > DELTA_TOKEN_BUDGET) break;
+    included.push(e);
+    used += cost;
+  }
+
+  const omitted = sorted.length - included.length;
+  let body = included
+    .map((e) => {
+      const symbol =
+        e.op === "new"
+          ? "+ NEW"
+          : e.op === "changed"
+            ? "~ CHANGED"
+            : "- REMOVED";
+      if (e.op === "removed") {
+        return `${symbol} [${shortId(e.id)}] ${e.category}: ${e.title}`;
+      }
+      return `${symbol} [${shortId(e.id)}] ${e.category}: ${e.title}\n  ${e.content}`;
+    })
+    .join("\n");
+
+  if (omitted > 0) {
+    body += `\n\n(+${omitted} more changes; use the recall tool to inspect.)`;
+  }
+
+  return HEADER_OVERHEAD + body + EPILOGUE;
 }
 
 // ---------------------------------------------------------------------------

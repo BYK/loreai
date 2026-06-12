@@ -190,6 +190,76 @@ export function create(input: {
   return id;
 }
 
+/**
+ * Disambiguating variant of `create()` for callers that need to know whether
+ * a brand-new row was inserted vs. an existing entry was reused (dedup-merge
+ * by title / cross-project / fuzzy). The volatile knowledge-delta channel
+ * only surfaces genuinely-new entries — dedup-merged creates are skipped from
+ * the delta message so the agent doesn't see the same entry twice.
+ *
+ * Returns the entry id and a boolean `created` flag. When `created` is false,
+ * the entry already existed and was updated in place (content/confidence
+ * forwarded). The boolean does NOT cover post-create dedup sweeps (those run
+ * asynchronously after a curator pass).
+ */
+export function tryCreate(input: Parameters<typeof create>[0]): {
+  id: string;
+  created: boolean;
+} {
+  // Use the same dedup logic as create(): a return value where the id
+  // matches an existing row means we hit a dedup branch. We probe for the
+  // existence of the title BEFORE calling create() to know which branch fired.
+  const pid =
+    input.scope === "project" && input.projectPath
+      ? ensureProject(input.projectPath)
+      : null;
+
+  if (!input.id) {
+    const existing = (
+      pid !== null
+        ? db()
+            .query(
+              "SELECT id FROM knowledge WHERE project_id = ? AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+            )
+            .get(pid, input.title)
+        : db()
+            .query(
+              "SELECT id FROM knowledge WHERE project_id IS NULL AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+            )
+            .get(input.title)
+    ) as { id: string } | null;
+
+    if (existing) {
+      // Dedup hit on exact match — do NOT count as a new create.
+      const id = create(input);
+      return { id, created: false };
+    }
+
+    const crossExisting = db()
+      .query(
+        "SELECT id FROM knowledge WHERE cross_project = 1 AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+      )
+      .get(input.title) as { id: string } | null;
+    if (crossExisting) {
+      const id = create(input);
+      return { id, created: false };
+    }
+
+    const fuzzyMatch = findFuzzyDuplicate({
+      title: input.title,
+      projectId: pid,
+    });
+    if (fuzzyMatch) {
+      const id = create(input);
+      return { id, created: false };
+    }
+  }
+
+  // No dedup hit — call create() to actually insert. The id is fresh.
+  const id = create(input);
+  return { id, created: true };
+}
+
 export function update(
   id: string,
   input: {

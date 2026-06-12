@@ -1048,6 +1048,17 @@ const MIGRATIONS: string[] = [
      AND project_id IS NOT NULL
      AND promotion_status IS NULL;
   `,
+  `
+  -- Version 39: Volatile knowledge-delta channel (issue #740).
+  -- Persist the per-session knowledge-delta pending queue so the volatile
+  -- channel survives process restarts. Stores a JSON-serialized array of
+  -- {op, id, category, title, content, ts} entries that have accumulated
+  -- since the last time the knowledge-delta message was flushed (or since
+  -- the pinned block was last rebuilt, whichever is more recent).
+  -- The pending queue is cleared on cold-idle resume (1h+) alongside the
+  -- pinned-block rebuild, and the column is rewritten on every curator run.
+  ALTER TABLE session_state ADD COLUMN ltm_delta_json TEXT;
+  `,
 ];
 
 /**
@@ -1966,6 +1977,8 @@ export type SessionTrackingState = {
   projectPathProvisional?: boolean;
   // v37: compaction anomaly pending flag
   compactionAnomalyPending?: boolean;
+  // v39: volatile knowledge-delta channel pending queue
+  ltmDeltaJson?: string | null;
 };
 
 /**
@@ -2095,6 +2108,11 @@ export function saveSessionTracking(
     sets.push("compaction_anomaly_pending = ?");
     vals.push(state.compactionAnomalyPending ? 1 : 0);
   }
+  // v39: knowledge-delta pending queue
+  if (state.ltmDeltaJson !== undefined) {
+    sets.push("ltm_delta_json = ?");
+    vals.push(state.ltmDeltaJson);
+  }
 
   // Update only the specified columns
   db()
@@ -2135,6 +2153,8 @@ export type LoadedSessionTracking = {
   projectPathProvisional: boolean;
   // v37: compaction anomaly pending flag
   compactionAnomalyPending: boolean;
+  // v39: knowledge-delta pending queue (JSON blob; null if not yet persisted)
+  ltmDeltaJson: string | null;
 };
 
 /**
@@ -2154,7 +2174,8 @@ export function loadSessionTracking(
               last_layer, last_known_input, last_turn_at, last_bust_at,
               parent_session_id, is_subagent,
               project_path, project_path_provisional,
-              compaction_anomaly_pending
+              compaction_anomaly_pending,
+              ltm_delta_json
        FROM session_state WHERE session_id = ?`,
     )
     .get(sessionID) as {
@@ -2183,6 +2204,7 @@ export function loadSessionTracking(
     project_path: string | null;
     project_path_provisional: number;
     compaction_anomaly_pending: number;
+    ltm_delta_json: string | null;
   } | null;
   if (!row) return null;
   return {
@@ -2211,6 +2233,7 @@ export function loadSessionTracking(
     projectPath: row.project_path,
     projectPathProvisional: row.project_path_provisional === 1,
     compactionAnomalyPending: row.compaction_anomaly_pending === 1,
+    ltmDeltaJson: row.ltm_delta_json,
   };
 }
 
