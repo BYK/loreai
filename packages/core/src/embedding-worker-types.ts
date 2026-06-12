@@ -138,14 +138,80 @@ export function isWasmFatalError(msg: string): boolean {
  * these are recoverable: deleting the cached file and re-downloading fixes them.
  * The worker uses this to self-heal a bad download instead of bricking embeddings
  * until the next manual intervention.
+ *
+ * IMPORTANT: this gates a destructive purge + re-download. A false positive on a
+ * transient *download* failure (401/403/404/network) would cause a
+ * purge→redownload→fail→purge loop that never converges and hammers the Hub. So
+ * we explicitly exclude auth/HTTP-status/network errors, and only treat an
+ * ONNX-side *parse/deserialize* failure of an already-downloaded file as corrupt
+ * (the "load model … failed" branch additionally requires a parse signal).
  */
 export function isCorruptModelError(msg: string): boolean {
+  // Exclude transient download/auth/network failures — these are NOT on-disk
+  // corruption and must not trigger a purge (would loop forever). Covers the
+  // real transformers.js download-failure strings ("Unauthorized access to
+  // file", "Could not locate file") and common network errors. HTTP status
+  // codes are matched only in an explicit status/error context to avoid hitting
+  // arbitrary 3-digit numbers in paths/sizes.
+  if (
+    /unauthorized|forbidden|access to file|could not (locate|find)|network|fetch failed|econnreset|etimedout|enotfound|en.*not.*found/i.test(
+      msg,
+    )
+  ) {
+    return false;
+  }
+  if (/\b(?:status|error|http)\b[^.]*\b(?:40[1349]|4\d\d|5\d\d)\b/i.test(msg)) {
+    return false;
+  }
   if (/protobuf parsing failed/i.test(msg)) return true;
-  if (/load model .* failed/i.test(msg)) return true;
-  if (/failed to load model|invalid model|corrupt/i.test(msg)) return true;
+  // ONNX "load model … failed" only counts as corruption when accompanied by a
+  // parse/deserialize signal — a bare "load model failed" can be a download/IO
+  // error, which the exclusion above already filters but we keep this tight.
+  if (/load model .*failed.*(protobuf|pars|deserial|modelproto)/i.test(msg))
+    return true;
+  if (/failed to load model .*(protobuf|pars|deserial|corrupt)/i.test(msg))
+    return true;
+  if (/invalid model|corrupt(ed)? model|model .*corrupt/i.test(msg))
+    return true;
   // ONNX deserialization errors surface as "ModelProto" / "deserialize" failures.
   if (/modelproto|deserializ/i.test(msg)) return true;
   return false;
+}
+
+/**
+ * Resolve the on-disk cache directory for a model, given transformers.js's
+ * `env.cacheDir` and the HF model id. transformers.js stores files at
+ * `<cacheDir>/<modelId>/<file>` (e.g.
+ * `<cacheDir>/nomic-ai/nomic-embed-text-v1.5/onnx/model_quantized.onnx`), so the
+ * model's directory is `<cacheDir>/<...modelId segments>`. Pure (no fs access)
+ * so it can be unit-tested; the worker passes the result to an `rm(recursive)`.
+ *
+ * Returns null when inputs are unusable (empty cacheDir/modelId), signalling the
+ * caller that there is nothing safe to purge.
+ */
+export function resolveModelCacheDir(
+  cacheDir: string | undefined | null,
+  modelId: string,
+): string | null {
+  if (!cacheDir || !modelId) return null;
+  const segments = modelId.split("/").filter((s) => s.length > 0);
+  if (segments.length === 0) return null;
+  const base = cacheDir.replace(/[/\\]+$/, "");
+  return `${base}/${segments.join("/")}`;
+}
+
+/**
+ * Decide whether a failed pipeline init should trigger the self-heal path
+ * (purge cached model + retry download once). Heal only when the model is NOT
+ * vendored (npm mode — re-downloadable) AND the error indicates on-disk
+ * corruption. Vendored binaries ship a read-only model that must not be deleted.
+ * Pure predicate, extracted for testability.
+ */
+export function shouldHealCorruptModel(
+  isVendored: boolean,
+  errorMessage: string,
+): boolean {
+  return !isVendored && isCorruptModelError(errorMessage);
 }
 
 // ---------------------------------------------------------------------------

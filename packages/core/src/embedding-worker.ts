@@ -81,20 +81,49 @@ function isWasmFatalError(msg: string): boolean {
 }
 
 /**
- * Detect a corrupt / incomplete model file on disk. The most common cause is a
- * truncated HF Hub download (e.g. a 137MB ONNX model that only got 87MB written
- * before the connection dropped): the file header parses but the protobuf body
- * is incomplete, so ONNX reports "Protobuf parsing failed" / "Load model …
- * failed". These are recoverable by deleting the cached file and re-downloading,
- * unlike OOM or WASM aborts which are environmental.
+ * Detect a corrupt / incomplete model file on disk (truncated HF download →
+ * "Protobuf parsing failed"). Gates a destructive purge + re-download, so it
+ * MUST exclude transient download/auth/network failures (else a 401/network
+ * error loops purge→redownload→fail forever). Inlined copy of the canonical
+ * `isCorruptModelError` in embedding-worker-types.ts — keep in sync.
  */
 function isCorruptModelError(msg: string): boolean {
+  if (
+    /unauthorized|forbidden|access to file|could not (locate|find)|network|fetch failed|econnreset|etimedout|enotfound|en.*not.*found/i.test(
+      msg,
+    )
+  ) {
+    return false;
+  }
+  if (/\b(?:status|error|http)\b[^.]*\b(?:40[1349]|4\d\d|5\d\d)\b/i.test(msg)) {
+    return false;
+  }
   if (/protobuf parsing failed/i.test(msg)) return true;
-  if (/load model .* failed/i.test(msg)) return true;
-  if (/failed to load model|invalid model|corrupt/i.test(msg)) return true;
+  if (/load model .*failed.*(protobuf|pars|deserial|modelproto)/i.test(msg))
+    return true;
+  if (/failed to load model .*(protobuf|pars|deserial|corrupt)/i.test(msg))
+    return true;
+  if (/invalid model|corrupt(ed)? model|model .*corrupt/i.test(msg))
+    return true;
   // ONNX deserialization errors surface as "ModelProto" / "deserialize" failures.
   if (/modelproto|deserializ/i.test(msg)) return true;
   return false;
+}
+
+/**
+ * Resolve `<cacheDir>/<...modelId>` — the dir transformers.js caches a model in.
+ * Inlined copy of the canonical `resolveModelCacheDir` in
+ * embedding-worker-types.ts — keep in sync. Returns null when unusable.
+ */
+function resolveModelCacheDir(
+  cacheDir: string | undefined | null,
+  id: string,
+): string | null {
+  if (!cacheDir || !id) return null;
+  const segments = id.split("/").filter((s) => s.length > 0);
+  if (segments.length === 0) return null;
+  const base = cacheDir.replace(/[/\\]+$/, "");
+  return `${base}/${segments.join("/")}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -288,11 +317,9 @@ async function purgeCachedModel(): Promise<boolean> {
   try {
     const { env } = await import("@huggingface/transformers");
     const cacheDir = (env as { cacheDir?: string }).cacheDir;
-    if (!cacheDir) return false;
+    const modelDir = resolveModelCacheDir(cacheDir, modelId);
+    if (!modelDir) return false;
     const { rm, stat } = await import("node:fs/promises");
-    const { join } = await import("node:path");
-    // transformers.js resolves files at <cacheDir>/<modelId>/<file>.
-    const modelDir = join(cacheDir, ...modelId.split("/"));
     try {
       await stat(modelDir);
     } catch {
