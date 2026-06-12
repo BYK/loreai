@@ -347,9 +347,7 @@ function formatFusedResults(
   let kept = results.filter((r) => r.score >= scoreFloor);
   kept = kept.slice(0, config.maxResults);
   if (kept.length < 3) {
-    kept = results
-      .filter((r) => r.score >= config.absoluteFloor)
-      .slice(0, Math.min(3, results.length));
+    kept = results.filter((r) => r.score >= config.absoluteFloor).slice(0, 3);
   }
 
   if (!kept.length) return "No results found for this query.";

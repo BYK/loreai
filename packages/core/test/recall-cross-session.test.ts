@@ -10,6 +10,7 @@ const OTHER_SESSION = "other-session";
 
 function cleanup() {
   db().exec("DELETE FROM temporal_messages");
+  db().exec("DELETE FROM distillations");
 }
 
 function seedTemporal(
@@ -27,24 +28,56 @@ function seedTemporal(
   return id;
 }
 
+function seedDistillation(
+  sessionID: string,
+  observations: string,
+  createdAt: number,
+): string {
+  const pid = ensureProject(PROJECT);
+  const id = uuidv7();
+  db()
+    .query(
+      `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      id,
+      pid,
+      sessionID,
+      "",
+      "[]",
+      observations,
+      "[]",
+      0,
+      Math.ceil(observations.length / 3),
+      0,
+      createdAt,
+    );
+  return id;
+}
+
 describe("recall — cross-session raw history demotion", () => {
   beforeEach(() => {
     cleanup();
     ensureProject(PROJECT);
   });
 
-  test("same-session raw history outranks an equally-matching other-session row", async () => {
-    // Identical distinctive content in two different sessions. Without the
-    // cross-session penalty their fused scores would tie (or the older/other
-    // one could win on recency); with the penalty the current session wins.
+  // Uses scope="project" deliberately: the pre-existing session-affinity boost
+  // only runs under scope="all", so "project" isolates the cross-session
+  // penalty as the *only* thing differentiating same- vs other-session rows.
+  // This test fails if CROSS_SESSION_RAW_PENALTY is set to 1.0 (disabled).
+  test("penalizes a cross-session temporal row below an equal current-session row", async () => {
+    // Identical distinctive content in two sessions, the OTHER one newer so
+    // recency does not favor the current session. Only the penalty can make
+    // the current-session row win.
     const now = Date.now();
-    const otherId = seedTemporal(
-      OTHER_SESSION,
+    const currentId = seedTemporal(
+      CURRENT_SESSION,
       "xyzzy plugh frobnicate widget investigation",
       now - 10_000,
     );
-    const currentId = seedTemporal(
-      CURRENT_SESSION,
+    const otherId = seedTemporal(
+      OTHER_SESSION,
       "xyzzy plugh frobnicate widget investigation",
       now,
     );
@@ -53,11 +86,11 @@ describe("recall — cross-session raw history demotion", () => {
       query: "xyzzy plugh frobnicate widget",
       projectPath: PROJECT,
       sessionID: CURRENT_SESSION,
-      scope: "all",
+      scope: "project",
     });
 
     const temporal = results.filter((r) => r.item.source === "temporal");
-    expect(temporal.length).toBeGreaterThanOrEqual(2);
+    expect(temporal.length).toBe(2);
 
     const currentRank = temporal.findIndex(
       (r) => r.item.source === "temporal" && r.item.item.id === currentId,
@@ -65,15 +98,53 @@ describe("recall — cross-session raw history demotion", () => {
     const otherRank = temporal.findIndex(
       (r) => r.item.source === "temporal" && r.item.item.id === otherId,
     );
-    expect(currentRank).toBeGreaterThanOrEqual(0);
-    expect(otherRank).toBeGreaterThanOrEqual(0);
-    // Current-session result must come first.
-    expect(currentRank).toBeLessThan(otherRank);
+    // The current-session row must rank first purely due to the penalty.
+    // (The other row is NEWER, so without the penalty recency would rank it
+    // first — this assertion fails if CROSS_SESSION_RAW_PENALTY is 1.0.)
+    expect(currentRank).toBe(0);
+    expect(otherRank).toBe(1);
 
-    // The other-session row's fused score must be strictly lower (penalized).
+    // The other-session row is demoted: its score is meaningfully lower than
+    // the current row's, consistent with the 0.5 multiplier (allow slack for
+    // small RRF rank differences across recency-biased lists).
     const currentScore = temporal[currentRank].score;
     const otherScore = temporal[otherRank].score;
-    expect(otherScore).toBeLessThan(currentScore);
+    expect(otherScore).toBeLessThan(currentScore * 0.6);
+  });
+
+  // Same isolation for the distillation source (the riskier session_id access).
+  test("penalizes a cross-session distillation below an equal current-session one", async () => {
+    const now = Date.now();
+    const currentId = seedDistillation(
+      CURRENT_SESSION,
+      "blorptron quffle zindar marker observation",
+      now - 10_000,
+    );
+    const otherId = seedDistillation(
+      OTHER_SESSION,
+      "blorptron quffle zindar marker observation",
+      now,
+    );
+
+    const results = await searchRecall({
+      query: "blorptron quffle zindar marker",
+      projectPath: PROJECT,
+      sessionID: CURRENT_SESSION,
+      scope: "project",
+    });
+
+    const dist = results.filter((r) => r.item.source === "distillation");
+    expect(dist.length).toBe(2);
+
+    const currentRank = dist.findIndex(
+      (r) => r.item.source === "distillation" && r.item.item.id === currentId,
+    );
+    const otherRank = dist.findIndex(
+      (r) => r.item.source === "distillation" && r.item.item.id === otherId,
+    );
+    expect(currentRank).toBe(0);
+    expect(otherRank).toBe(1);
+    expect(dist[otherRank].score).toBeLessThan(dist[currentRank].score * 0.6);
   });
 
   test("cross-session penalty is NOT applied under session scope", async () => {
@@ -99,6 +170,30 @@ describe("recall — cross-session raw history demotion", () => {
     expect(
       temporal[0].item.source === "temporal" && temporal[0].item.item.id,
     ).toBe(currentId);
+  });
+
+  // A cross-session row is demoted but NOT removed — it still surfaces when it
+  // is the only match. Guards against the penalty being mistaken for a filter.
+  test("a demoted cross-session row still surfaces when it is the only match", async () => {
+    const otherId = seedTemporal(
+      OTHER_SESSION,
+      "snarfblat wibble cromulent token",
+      Date.now(),
+    );
+
+    const results = await searchRecall({
+      query: "snarfblat wibble cromulent",
+      projectPath: PROJECT,
+      sessionID: CURRENT_SESSION,
+      scope: "all",
+    });
+
+    const temporal = results.filter((r) => r.item.source === "temporal");
+    expect(
+      temporal.some(
+        (r) => r.item.source === "temporal" && r.item.item.id === otherId,
+      ),
+    ).toBe(true);
   });
 });
 
@@ -132,9 +227,12 @@ describe("recall — absolute relevance floor", () => {
     expect(md).toContain("No results found");
   });
 
-  test("default absoluteFloor (0) keeps matching results", async () => {
+  test("default absoluteFloor (0) is a no-op — even a cross-session match is kept", async () => {
+    // Seed ONLY a cross-session row: it is penalized (score halved) but must
+    // still appear under the default config, proving absoluteFloor=0 does not
+    // filter anything.
     seedTemporal(
-      CURRENT_SESSION,
+      OTHER_SESSION,
       "thaumaturgy obscure tangential remark",
       Date.now(),
     );
