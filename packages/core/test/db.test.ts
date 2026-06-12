@@ -50,7 +50,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(41);
+    expect(row.version).toBe(42);
   });
 
   test("knowledge_tombstones table exists (migration v40)", () => {
