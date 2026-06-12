@@ -47,9 +47,21 @@ export function decompressBody(compressed: Uint8Array): string {
  * variable-width replacements are safe (offsets stay aligned across turns).
  */
 
-/** Claude Code content-cache hash: changes every turn. */
-const CCH_PATTERN = /cch=[0-9a-fA-F]+;/g;
-const CCH_REPLACEMENT = "cch=__;";
+/**
+ * Claude Code content-cache hash: changes every turn.
+ *
+ * Matches the billing-header form (`cch=abcde;`) AND content occurrences that
+ * appear as markdown code spans or quoted text (`` `cch=abcde` ``,
+ * `"cch=abcde"`) or bare/whitespace-terminated tokens. These content tokens
+ * are NOT real upstream cache busts (Anthropic strips `cch=` before computing
+ * its cache key), but if left un-normalized they produce false-positive
+ * `messages[N]`/`system[N]` divergence in this analytics comparison.
+ *
+ * The trailing terminator (`;`, backtick, quote, whitespace, or end) is kept
+ * out of the match so it is preserved and byte offsets stay aligned.
+ */
+const CCH_PATTERN = /cch=[0-9a-fA-F]+(?=[;`"'\s\\]|$)/g;
+const CCH_REPLACEMENT = "cch=__";
 
 /**
  * Claude Code version suffix: 3 hex chars derived from

@@ -80,6 +80,63 @@ describe("signBody", () => {
       expect(match?.[1]).toHaveLength(5);
     }
   });
+
+  test("does NOT rewrite a cch=00000 token in system/LTM content (cache-bust regression)", () => {
+    // Regression for the self-referential cache bust: an LTM entry whose text
+    // literally contains `cch=00000` must be left untouched, otherwise system[N]
+    // bytes change every turn and bust the entire prompt cache.
+    const body = JSON.stringify({
+      model: "claude-opus-4-8",
+      system: [
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.165.abc; cc_entrypoint=cli; cch=00000;",
+        },
+        {
+          type: "text",
+          // LTM content documenting the placeholder — contains cch=00000.
+          text: "CCH_PLACEHOLDER = `cch=00000` (cch.ts:103); signBody() replaces it.",
+        },
+      ],
+      messages: [{ role: "user", content: "hello" }],
+    });
+
+    const signed = signBody(body);
+    // The LTM content placeholder must be preserved verbatim.
+    expect(signed).toContain("CCH_PLACEHOLDER = `cch=00000`");
+    // Exactly one cch=00000 (the content one) should remain; the billing
+    // header's was rewritten to a real hash.
+    const placeholderCount = signed.split("cch=00000").length - 1;
+    expect(placeholderCount).toBe(1);
+    // The billing header carries a real signed hash.
+    const billing = JSON.parse(signed).system[0].text as string;
+    expect(billing).toMatch(/cc_entrypoint=cli; cch=[0-9a-f]{5};/);
+    expect(billing).not.toContain("cch=00000");
+  });
+
+  test("signing is stable across turns when only content cch changes", () => {
+    // Two turns where the billing header is identical but the (irrelevant)
+    // content cch token differs — the billing cch must be identical, proving
+    // content tokens don't leak into the signature target.
+    const make = (contentCch: string) =>
+      JSON.stringify({
+        model: "claude-opus-4-8",
+        system: [
+          {
+            type: "text",
+            text: "x-anthropic-billing-header: cc_version=2.1.165.abc; cc_entrypoint=cli; cch=00000;",
+          },
+          { type: "text", text: `note: \`cch=${contentCch}\`` },
+        ],
+        messages: [{ role: "user", content: "same" }],
+      });
+
+    const a = signBody(make("11111"));
+    const b = signBody(make("11111"));
+    expect(a).toBe(b);
+    // Both preserve their distinct content tokens untouched.
+    expect(signBody(make("aaaaa"))).toContain("`cch=aaaaa`");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -567,6 +624,48 @@ describe("resignBody", () => {
     expect(resigned).not.toContain("cch=abcde");
     expect(resigned).toMatch(/cch=[0-9a-f]{5};/);
     expect(validateSeed(resigned)).toBe(true);
+  });
+
+  test("does NOT rewrite a cch=XXXXX; token in content (cache-bust regression)", () => {
+    // A conversation turn whose LTM/system or message content contains a
+    // `cch=XXXXX;` token must keep that token byte-for-byte across re-signing,
+    // otherwise the cached prefix changes every turn.
+    const body = JSON.stringify({
+      model: "claude-opus-4-8",
+      system: [
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.35.abc; cc_entrypoint=cli; cch=deadb;",
+          cache_control: { type: "ephemeral", ttl: "1h" },
+        },
+        {
+          type: "text",
+          // Content token with the exact 5-hex-plus-semicolon shape.
+          text: "gotcha: CCH_IN_BODY_RE = /cch=([0-9a-fA-F]{5});/ matched cch=2d825; here",
+        },
+      ],
+      messages: [{ role: "user", content: "explain caching" }],
+    });
+
+    const resigned = resignBody(body, "explain caching");
+    // Content token preserved verbatim.
+    expect(resigned).toContain("cch=2d825;");
+    // Billing header re-signed (client value gone, valid worker hash present).
+    expect(resigned).not.toContain("cch=deadb");
+    expect(validateSeed(resigned)).toBe(true);
+    // Re-signing twice is idempotent for the content token (stable prefix).
+    expect(resignBody(resigned, "explain caching")).toContain("cch=2d825;");
+  });
+
+  test("leaves the body unchanged when only content cch= tokens exist (no billing header)", () => {
+    // No billing header present — resignBody must be a pure no-op even though
+    // content contains cch= tokens.
+    const body = JSON.stringify({
+      model: "claude-opus-4-8",
+      system: [{ type: "text", text: "note: `cch=12345` and cch=67890;" }],
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(resignBody(body, "hi")).toBe(body);
   });
 });
 

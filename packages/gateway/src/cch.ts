@@ -102,6 +102,17 @@ const WORKER_SALT = "59cf53e54c78";
 
 const CCH_PLACEHOLDER = "cch=00000";
 
+/**
+ * Matches the `cch=00000` placeholder ONLY when it sits inside a billing
+ * header (i.e. immediately preceded by `cc_entrypoint=<value>; `). This
+ * prevents `signBody` from rewriting a `cch=00000` that happens to appear in
+ * arbitrary system / LTM / message content — which would silently mutate the
+ * cached prefix every turn and bust the entire prompt cache.
+ *
+ * Capture group 1 is the `cc_entrypoint=...; ` prefix so it can be preserved.
+ */
+const BILLING_PLACEHOLDER_RE = /(cc_entrypoint=[^;]*;\s*)cch=0{5}/;
+
 // ---------------------------------------------------------------------------
 // Signing
 // ---------------------------------------------------------------------------
@@ -110,12 +121,23 @@ const CCH_PLACEHOLDER = "cch=00000";
  * Compute the `cch` hash for a JSON request body containing `cch=00000`.
  * Returns the body with the placeholder replaced by the computed hash.
  *
- * @param bodyWithPlaceholder — JSON string containing `cch=00000`
- * @returns body with `cch=00000` replaced by `cch=XXXXX`
+ * Only the billing-header placeholder is rewritten: the replacement is
+ * anchored to the `cc_entrypoint=...; ` prefix so a `cch=00000` literal in
+ * conversation/LTM content is never touched. The hash itself is still
+ * computed over the entire body bytes (matching Claude Code's algorithm).
+ *
+ * @param bodyWithPlaceholder — JSON string containing a billing `cch=00000`
+ * @returns body with the billing `cch=00000` replaced by `cch=XXXXX`
  */
 export function signBody(bodyWithPlaceholder: string): string {
   const hash = xxHash64(bodyWithPlaceholder, WORKER_SEED);
   const cch = (hash & 0xfffffn).toString(16).padStart(5, "0");
+  if (BILLING_PLACEHOLDER_RE.test(bodyWithPlaceholder)) {
+    return bodyWithPlaceholder.replace(BILLING_PLACEHOLDER_RE, `$1cch=${cch}`);
+  }
+  // Fallback for callers/tests that pass a bare placeholder with no billing
+  // header context (e.g. `{"text":"cch=00000;"}`): replace the first literal
+  // occurrence, preserving prior behavior.
   return bodyWithPlaceholder.replace(CCH_PLACEHOLDER, `cch=${cch}`);
 }
 
@@ -143,11 +165,16 @@ function computeVersionSuffix(firstUserMessage: string): string {
 
 /**
  * Regex matching a billing header's cch field in a serialized JSON body.
- * The cch value is exactly 5 hex chars followed by a semicolon.
- * Used to detect conversation turns that need re-signing after body
- * reconstruction by buildAnthropicRequest.
+ * The cch value is exactly 5 hex chars followed by a semicolon, and it must
+ * be anchored to the `cc_entrypoint=...; ` prefix so we only ever match the
+ * billing header — never a `cch=XXXXX;` token that appears inside LTM /
+ * system / message content. Matching a content token would rewrite it every
+ * turn and bust the entire prompt cache.
+ *
+ * Capture group 1 is the `cc_entrypoint=...; ` prefix (preserved on replace);
+ * group 2 is the 5-hex cch value.
  */
-const CCH_IN_BODY_RE = /cch=([0-9a-fA-F]{5});/;
+const CCH_IN_BODY_RE = /(cc_entrypoint=[^;]*;\s*)cch=([0-9a-fA-F]{5});/;
 
 /**
  * Regex matching the cc_version field in a billing header.
@@ -188,8 +215,10 @@ export function resignBody(
   const suffix = computeVersionSuffix(firstUserMessage);
   body = body.replace(CC_VERSION_RE, `cc_version=${WORKER_VERSION}.${suffix};`);
 
-  // Step 2: Replace existing cch with placeholder
-  body = body.replace(CCH_IN_BODY_RE, `${CCH_PLACEHOLDER};`);
+  // Step 2: Replace the billing header's existing cch with the placeholder.
+  // Anchored to the cc_entrypoint prefix so a cch= token in content is left
+  // untouched (preserving prefix-cache stability).
+  body = body.replace(CCH_IN_BODY_RE, `$1${CCH_PLACEHOLDER};`);
 
   // Step 3: Hash and replace placeholder with computed value
   return signBody(body);
@@ -546,13 +575,15 @@ export function resolveSeed(version: string): {
  * @returns null if no cch found, true if a seed matches, false if none match
  */
 export function validateSeed(body: string): boolean | null {
-  const cchMatch = body.match(/cch=([0-9a-fA-F]{5});/);
+  // Anchor to the billing header so a cch= token in content can't be
+  // mistaken for the signed billing cch.
+  const cchMatch = body.match(CCH_IN_BODY_RE);
   if (!cchMatch) return null;
 
-  const clientCch = cchMatch[1].toLowerCase();
+  const clientCch = cchMatch[2].toLowerCase();
   const bodyWithPlaceholder = body.replace(
-    `cch=${cchMatch[1]}`,
-    CCH_PLACEHOLDER,
+    CCH_IN_BODY_RE,
+    `$1${CCH_PLACEHOLDER};`,
   );
 
   for (const seed of Object.values(VERSION_SEEDS)) {
