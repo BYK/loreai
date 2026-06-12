@@ -69,12 +69,18 @@ function divergencePath(prev: string, curr: string): string {
   return mapOffsetToJsonPath(c, offset);
 }
 
-/** True when a divergence path points at the conversation tail (a message),
- *  not at a system block — i.e. an acceptable, cache-friendly change. */
+/** True when a divergence path points at raw conversation messages, not at a
+ *  cached prefix message. `messages[0/1]` are lore's synthetic distilled
+ *  prefix when gradient compression is active, so accepting all messages[N]
+ *  paths (as #748 originally did) misses meta-distillation prefix rewrites.
+ *  Raw-message window shifts at messages[2+] are still allowed by this broad
+ *  guardrail; cache-analytics has narrower hit-rate checks for those. */
 function isTailDivergence(path: string): boolean {
-  return (
-    path === "<end>" || path === "<identical>" || /^messages\[\d+\]/.test(path)
-  );
+  if (path === "<end>" || path === "<identical>") return true;
+  const match = path.match(/^messages\[(\d+)\]/);
+  if (!match) return false;
+  const idx = Number(match[1]);
+  return idx > 1;
 }
 
 /**
@@ -279,6 +285,15 @@ describe("cache stability (e2e)", () => {
     const { resetCalibration } = await import("../../core/src/gradient");
     resetCalibration();
     await harness?.teardown();
+  });
+
+  it("guard rejects synthetic distilled-prefix message rewrites", () => {
+    // Regression for the gap in #748: accepting every messages[N] divergence
+    // lets meta-distillation rewrites at messages[0/1] pass as "tail" growth.
+    expect(isTailDivergence("messages[0].content")).toBe(false);
+    expect(isTailDivergence("messages[1].content[0].text")).toBe(false);
+    expect(isTailDivergence("messages[2].content[0].text")).toBe(true);
+    expect(isTailDivergence("<end>")).toBe(true);
   });
 
   it("system prefix stays byte-stable across the steady state (turn 2+)", async () => {

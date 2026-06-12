@@ -46,8 +46,6 @@ import {
   onIdleResume,
   consumeCameOutOfIdle,
   needsUrgentDistillation,
-  getConsecutiveBusts,
-  effectiveMetaThreshold as computeMetaThreshold,
   formatKnowledge,
   shouldImportLoreFile,
   importLoreFile,
@@ -3536,10 +3534,6 @@ function scheduleBackgroundWork(
   // compaction anomaly was detected on the previous turn). Mark urgent: true
   // so these bypass the batch queue — the gradient is in overflow (or the
   // client just compacted) and needs the result before the next user turn.
-  // Under bust pressure (3+ consecutive busts), lower the meta-distillation
-  // threshold to consolidate gen-0 segments earlier — shrinks the distilled
-  // prefix before the session becomes unsustainable.
-  //
   // Note: urgent distillation is NOT gated by isBackgroundPaused() — a
   // degraded/overflowing context window for up to 10 minutes (max breaker
   // duration) is worse than one API call with its own tight retry budget
@@ -3554,10 +3548,6 @@ function scheduleBackgroundWork(
     saveSessionTracking(sessionID, { compactionAnomalyPending: false });
   }
   if (urgentFromGradient || urgentFromCompaction) {
-    const busts = getConsecutiveBusts(sessionState.sessionID);
-    const lowered = computeMetaThreshold(busts, cfg.distillation.metaThreshold);
-    const metaThresholdOverride =
-      lowered < cfg.distillation.metaThreshold ? lowered : undefined;
     distillation
       .run({
         llm,
@@ -3567,7 +3557,12 @@ function scheduleBackgroundWork(
         force: true,
         urgent: true,
         callType: "direct",
-        metaThresholdOverride,
+        // Never run meta-distillation while the conversation cache is warm.
+        // Meta archives gen-0 rows and creates a gen-1 row, rewriting the
+        // synthetic distilled prefix at messages[0/1] on the next turn. That
+        // early-message rewrite is a real prompt-cache bust. Idle-time meta in
+        // idle.ts remains enabled because the cache is already cold there.
+        skipMeta: true,
       })
       .catch((e) => log.error("background distillation failed:", e));
   } else if (
