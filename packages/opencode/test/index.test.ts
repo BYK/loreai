@@ -1,6 +1,7 @@
 import { describe, test, expect } from "vitest";
 import { fileURLToPath } from "node:url";
-import { LorePlugin, applyLoreProviderConfig } from "../src/index";
+import { LorePlugin } from "../src/index";
+import { applyLoreProviderConfig } from "../src/internal";
 import type { Plugin } from "@opencode-ai/plugin";
 
 /**
@@ -229,5 +230,35 @@ describe("LorePlugin hooks", () => {
     } finally {
       cleanup();
     }
+  });
+});
+
+describe("plugin entry module export shape", () => {
+  // Regression guard for the v1.17.4 crash (`undefined is not an object
+  // (evaluating 'A.event')`). OpenCode's legacy plugin loader treats EVERY
+  // function exported from the entry module as a plugin and invokes it
+  // (`getServerPlugin`/`getLegacyPlugins`), pushing the (often `undefined`)
+  // return value into the host hooks array. Leaking helper exports like
+  // `applyLoreProviderConfig`/`probeGateway` therefore crashed the host on the
+  // first event dispatch. The entry module must export ONLY the plugin
+  // function (named + default, pointing at the same reference).
+  test("exports only the plugin function (named + default, same ref)", async () => {
+    const mod = (await import("../src/index")) as Record<string, unknown>;
+
+    // The default export must be the LorePlugin function reference.
+    expect(typeof mod.default).toBe("function");
+    expect(mod.default).toBe(mod.LorePlugin);
+
+    // Simulate getLegacyPlugins: dedupe function-typed exports by reference.
+    const functionExports = Object.entries(mod).filter(
+      ([, value]) => typeof value === "function",
+    );
+    const uniqueFns = new Set(functionExports.map(([, value]) => value));
+
+    // After dedup there must be exactly ONE plugin function. Any extra
+    // distinct function export would be invoked as a plugin by the host and
+    // could push `undefined` into the hooks array.
+    expect(uniqueFns.size).toBe(1);
+    expect(uniqueFns.has(mod.LorePlugin)).toBe(true);
   });
 });
