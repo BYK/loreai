@@ -108,21 +108,26 @@ const CCH_PLACEHOLDER = "cch=00000";
  *   x-anthropic-billing-header: cc_version=<semver>.<suffix>; cc_entrypoint=<x>; cch=<value>;
  *
  * We anchor every cch / cc_version rewrite to this whole shape rather than to
- * a bare `cc_entrypoint=…;` or `cch=…;` fragment. This makes the rewrite
- * STRUCTURAL, not positional: a token in system / LTM / message content can
- * only be mistaken for the header if it reproduces the entire header verbatim
- * (the same self-referential class that caused the original incident — an LTM
- * entry documenting the header format). The fragment-anchored form was
- * defeated by content that serializes *before* the real header.
+ * a bare `cc_entrypoint=…;` or `cch=…;` fragment. A token in system / LTM /
+ * message content can only be mistaken for the header if it reproduces the
+ * ENTIRE `x-anthropic-billing-header: …` sentinel verbatim — a far narrower
+ * surface than the bare `cch=`/`cc_entrypoint=` fragment the original fix
+ * caught, which was defeated by content (an LTM entry documenting the header
+ * format) serializing before the real header.
  *
- * Capture groups:
- *   1 = `x-anthropic-billing-header: ` prefix + `cc_version=` up to the suffix
- *       (everything before the 3-hex suffix, preserved verbatim)
- *   — handled per-call; see BILLING_HEADER_SIGN_RE / BILLING_HEADER_RESIGN_RE.
+ * Residual: these regexes are first-match, so a content block that reproduces
+ * the whole sentinel AND serializes *before* the real header would still be
+ * rewritten. In practice the real billing header is always the FIRST system
+ * block (the worker prepends it via `buildBillingBlock`; Claude Code emits it
+ * as system[0], which `BILLING_HEADER_RE` enforces with a `^` anchor), and
+ * nothing in a serialized body precedes system[0] except the JSON envelope —
+ * so no content can sort before it. The two-sentinel ordering is covered by a
+ * regression test that locks in "real header (first block) wins".
  *
  * The value classes are intentionally permissive (`[^;]*`) for cc_version /
- * cc_entrypoint so we tolerate client variations, but the cch field is pinned
- * to its exact shape (5 hex for a signed value, `00000` for the placeholder).
+ * cc_entrypoint so we tolerate client variations (e.g. a missing 3-hex version
+ * suffix), but the cch field is pinned to its exact shape (5 hex for a signed
+ * value, `00000` for the placeholder).
  */
 const BILLING_HEADER_PREFIX = String.raw`x-anthropic-billing-header:\s*cc_version=[^;]*;\s*cc_entrypoint=[^;]*;\s*`;
 
@@ -142,10 +147,12 @@ const BILLING_SIGN_RE = new RegExp(`(${BILLING_HEADER_PREFIX}cch=)0{5}`);
  * Returns the body with the placeholder replaced by the computed hash.
  *
  * Only the billing-header placeholder is rewritten: the replacement is
- * anchored to the full `x-anthropic-billing-header: …` sentinel so a
- * `cch=00000` literal in conversation/LTM content is never touched, regardless
- * of where it serializes relative to the header. The hash itself is still
- * computed over the entire body bytes (matching Claude Code's algorithm).
+ * anchored to the full `x-anthropic-billing-header: …` sentinel so a bare
+ * `cch=00000` literal in conversation/LTM content is never touched (it lacks
+ * the sentinel prefix). Because the real header is always system[0], no
+ * content can serialize before it, so first-match always targets it. The hash
+ * itself is still computed over the entire body bytes (matching Claude Code's
+ * algorithm).
  *
  * If no billing header is present the body is returned unchanged — there is
  * nothing to sign, and we must never rewrite a bare content `cch=00000`.
@@ -182,14 +189,19 @@ function computeVersionSuffix(firstUserMessage: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Matches a full client-signed billing header in a serialized JSON body and
- * captures every variable field so cc_version AND cch can be rewritten in a
- * single anchored pass:
+ * Matches a full client-signed billing header in a serialized JSON body so
+ * cc_version AND cch can be rewritten in a single anchored pass. We rewrite the
+ * whole `cc_version=…;` and `cch=…;` segments wholesale (we don't need to
+ * preserve the client's version/suffix — they're replaced with the worker's),
+ * so only cc_entrypoint is captured for preservation:
  *
- *   group 1 = cc_version base (MAJOR.MINOR.PATCH)
- *   group 2 = cc_version suffix (3 hex)
- *   group 3 = cc_entrypoint value
- *   group 4 = cch value (5 hex)
+ *   group 1 = cc_entrypoint value (preserved verbatim)
+ *
+ * The cc_version value class is permissive: the suffix is optional and
+ * case-insensitive (`cc_version=[^;]*`) so a client header that omits the
+ * 3-hex suffix still re-signs rather than silently passing through a stale
+ * cch (which upstream would reject). The cch value is pinned to its signed
+ * shape (5 hex, case-insensitive).
  *
  * Anchored to the full `x-anthropic-billing-header:` sentinel so neither field
  * can be matched against a `cc_version=…;` / `cch=…;` token that appears in
@@ -198,7 +210,7 @@ function computeVersionSuffix(firstUserMessage: string): string {
  * entire prompt cache (the original incident's failure mode).
  */
 const BILLING_RESIGN_RE =
-  /x-anthropic-billing-header:\s*cc_version=(\d+\.\d+\.\d+)\.([0-9a-f]{3});\s*cc_entrypoint=([^;]*);\s*cch=([0-9a-fA-F]{5});/;
+  /x-anthropic-billing-header:\s*cc_version=[^;]*;\s*cc_entrypoint=([^;]*);\s*cch=[0-9a-fA-F]{5};/;
 
 /**
  * Matches a full signed billing header for validation. Group 1 is the whole
@@ -238,12 +250,12 @@ export function resignBody(
 
   // Step 1+2: in a single anchored replace, swap cc_version for our worker
   // version + recomputed suffix and reset cch to the placeholder. cc_entrypoint
-  // (group 3) is preserved verbatim. The suffix depends on chars[4,7,20] of the
+  // (group 1) is preserved verbatim. The suffix depends on chars[4,7,20] of the
   // first user message.
   const suffix = computeVersionSuffix(firstUserMessage);
   const body = serializedBody.replace(
     BILLING_RESIGN_RE,
-    (_m, _base, _suf, entrypoint) =>
+    (_m, entrypoint) =>
       `x-anthropic-billing-header: cc_version=${WORKER_VERSION}.${suffix};` +
       ` cc_entrypoint=${entrypoint}; ${CCH_PLACEHOLDER};`,
   );

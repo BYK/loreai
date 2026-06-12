@@ -787,7 +787,7 @@ describe("resignBody", () => {
   });
 
   test("preserves a non-default cc_entrypoint value", () => {
-    // The single-pass rewrite must keep cc_entrypoint (group 3) verbatim.
+    // The single-pass rewrite must keep cc_entrypoint verbatim.
     const body = JSON.stringify({
       model: "claude-opus-4-8",
       system: [
@@ -800,6 +800,77 @@ describe("resignBody", () => {
     });
     const resigned = resignBody(body, "hi");
     expect(resigned).toContain("cc_entrypoint=vscode;");
+    expect(validateSeed(resigned)).toBe(true);
+  });
+
+  test("the real header (first system block) wins over a full-sentinel doc block after it", () => {
+    // Review #1 residual: even if an LTM entry reproduces the WHOLE sentinel,
+    // the real header is always system[0] and nothing serializes before it, so
+    // first-match targets the real header. The doc block (which carries a
+    // placeholder) is left as-is.
+    const body = JSON.stringify({
+      system: [
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.35.abc; cc_entrypoint=cli; cch=deadb;",
+          cache_control: { type: "ephemeral", ttl: "1h" },
+        },
+        {
+          type: "text",
+          // LTM doc reproducing the full sentinel with the placeholder.
+          text: "docs: header looks like `x-anthropic-billing-header: cc_version=2.1.0.aaa; cc_entrypoint=cli; cch=00000;`",
+        },
+      ],
+      messages: [{ role: "user", content: "explain caching" }],
+    });
+    const resigned = resignBody(body, "explain caching");
+    // The doc block's placeholder is untouched (still 00000).
+    expect(resigned).toContain(
+      "`x-anthropic-billing-header: cc_version=2.1.0.aaa; cc_entrypoint=cli; cch=00000;`",
+    );
+    // The real header was re-signed and validates.
+    expect(resigned).not.toContain("cch=deadb");
+    expect(validateSeed(resigned)).toBe(true);
+  });
+
+  test("re-signs a client header WITHOUT a 3-hex version suffix (no silent skip → no 401)", () => {
+    // Review #2: a suffix-less header must still re-sign rather than pass the
+    // stale client cch through (which upstream rejects).
+    const body = JSON.stringify({
+      system: [
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.165; cc_entrypoint=cli; cch=deadb;",
+        },
+      ],
+      messages: [{ role: "user", content: "hi there friend" }],
+    });
+    const resigned = resignBody(body, "hi there friend");
+    expect(resigned).not.toContain("cch=deadb");
+    expect(resigned).toMatch(
+      new RegExp(
+        `cc_version=${WORKER_VERSION}\\.[0-9a-f]{3}; cc_entrypoint=cli;`,
+      ),
+    );
+    expect(validateSeed(resigned)).toBe(true);
+  });
+
+  test("re-signs a client header with an UPPERCASE version suffix and cch", () => {
+    // Review #3: casing tolerance — uppercase suffix/cch must not silently skip.
+    const body = JSON.stringify({
+      system: [
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.163.7C7; cc_entrypoint=cli; cch=DEADB;",
+        },
+      ],
+      messages: [{ role: "user", content: "hi there friend" }],
+    });
+    const resigned = resignBody(body, "hi there friend");
+    expect(resigned).not.toContain("cch=DEADB");
+    expect(resigned).toMatch(
+      new RegExp(`cc_version=${WORKER_VERSION}\\.[0-9a-f]{3};`),
+    );
     expect(validateSeed(resigned)).toBe(true);
   });
 });
