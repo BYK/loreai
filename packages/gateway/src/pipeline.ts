@@ -3606,9 +3606,14 @@ function scheduleBackgroundWork(
   //  - `curatorLimiter.isBusy` (durable across ticks): also covers the
   //    idle-path curation (idle.ts) which doesn't set curationScheduled.
   // Mirrors the incremental-distill guard above and the idle-path guard.
+  // In-flight (turn-based) curation is OFF by default: changing the knowledge
+  // base mid-conversation rewrites system[2] (context-bound LTM) and busts the
+  // prompt cache for the rest of a large session. Curation still runs on idle
+  // (idle.ts), where the cache is cold so the rewrite is free. `turnsSinceCuration`
+  // keeps accumulating during the active conversation and fires on the next idle.
   if (
     cfg.knowledge.enabled &&
-    cfg.curator.onIdle &&
+    cfg.curator.inFlight &&
     sessionState.turnsSinceCuration >= effectiveAfterTurns &&
     !sessionState.curationScheduled &&
     !curatorLimiter.isBusy(sessionID)
@@ -4657,8 +4662,21 @@ async function handleConversationTurn(
       ltmCacheText: null,
       ltmCacheTokens: null,
     });
+    // Refresh the stable LTM block (system[1]: preferences + entities) too, but
+    // ONLY when the idle gap exceeds system[1]'s own 1h cache TTL — i.e. that
+    // prefix is already cold, so rebuilding it with freshly-curated preferences
+    // costs nothing. (Lore promotes long-running sessions; without this they
+    // would keep using stale preferences indefinitely.) A shorter idle gap
+    // leaves system[1] warm, so we keep it pinned to preserve the 1h cache.
+    const STABLE_LTM_TTL_MS = 3_600_000; // 1h — matches the system[1] breakpoint
+    let refreshedStable = false;
+    if (idleResult.idleMs >= STABLE_LTM_TTL_MS) {
+      stableLtmCache.delete(sessionID);
+      refreshedStable = true;
+    }
     log.info(
       `session idle ${Math.round(idleResult.idleMs / 60_000)}min — refreshing caches` +
+        (refreshedStable ? " (incl. stable LTM — 1h cold)" : "") +
         (cacheWarm ? " (cache warm — skipping compact)" : ""),
     );
   }
