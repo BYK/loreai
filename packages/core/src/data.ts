@@ -9,7 +9,8 @@
  * being spread across ltm/temporal/distillation modules.
  */
 
-import { statSync, unlinkSync, existsSync } from "node:fs";
+import { statSync, unlinkSync, existsSync, rmSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
 import {
   db,
   ensureProject,
@@ -187,6 +188,32 @@ export function listSessions(
        LIMIT ?`,
     )
     .all(pid, pid, limit) as SessionSummary[];
+}
+
+/**
+ * Return the session's CONFIDENTLY-bound project path, or `null`.
+ *
+ * Reads `session_state.project_path` only when `project_path_provisional = 0`
+ * (i.e. the session was bound from a header or an authoritative system-prompt
+ * inference, not a cwd fallback or synthetic bucket). This is the strongest
+ * available signal for re-attributing a mis-grouped session — it reflects what
+ * the gateway already resolved for that conversation. Returns `null` when the
+ * session is unknown, has no bound path, or is only provisionally bound.
+ */
+export function getSessionConfidentProjectPath(
+  sessionId: string,
+): string | null {
+  const row = db()
+    .query(
+      "SELECT project_path, project_path_provisional FROM session_state WHERE session_id = ?",
+    )
+    .get(sessionId) as
+    | { project_path: string | null; project_path_provisional: number }
+    | undefined;
+  if (!row || !row.project_path || row.project_path_provisional !== 0) {
+    return null;
+  }
+  return row.project_path;
 }
 
 /** List distillations for a project (optionally filtered by session). */
@@ -844,6 +871,85 @@ export type MoveSessionsResult = {
    *  Callers use this to rebind in-memory active session states. */
   movedSessionIds: string[];
 };
+
+/**
+ * Take a CONSISTENT backup of the live database via SQLite `VACUUM INTO`.
+ *
+ * Unlike `cp`, `VACUUM INTO` reads through the same connection inside a
+ * transaction, so it captures a coherent snapshot even while the gateway is
+ * writing (WAL pages are merged into the copy). The source DB and its
+ * `-wal`/`-shm` files are NEVER touched — this is read-only with respect to
+ * live data. Returns the absolute path of the backup file.
+ *
+ * Use this before any destructive maintenance (e.g. `lore data split --yes`)
+ * so a mistake is always recoverable. Callers must NEVER delete the live
+ * `-wal`/`-shm` files or `cp` over a live DB — let SQLite manage them.
+ */
+export function backupDatabase(destPath?: string): string {
+  const src = dbPath();
+  const dest =
+    destPath ??
+    `${src}.backup-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  // Never let the backup target collide with the live DB — the cleanup below
+  // would otherwise delete the live file and its WAL/SHM. Guards the exported
+  // API against a caller passing the live path.
+  if (resolvePath(dest) === resolvePath(src)) {
+    throw new Error(
+      `backupDatabase: destination must differ from the live DB path (${src})`,
+    );
+  }
+  // VACUUM INTO refuses to overwrite an existing file; clear any stale target
+  // (and its sidecar files) first. We only ever remove files WE are creating.
+  for (const suffix of ["", "-wal", "-shm"]) {
+    try {
+      rmSync(`${dest}${suffix}`, { force: true });
+    } catch {
+      // best-effort cleanup of our own target
+    }
+  }
+  db().query("VACUUM INTO ?").run(dest);
+  return dest;
+}
+
+/** Result of a post-mutation database integrity validation. */
+export type IntegrityResult = {
+  ok: boolean;
+  integrity: string;
+  /** knowledge row count vs knowledge_fts row count (must match). */
+  knowledgeFtsMatch: boolean;
+  messageCount: number;
+};
+
+/**
+ * Validate database integrity after a maintenance mutation: SQLite
+ * `integrity_check`, knowledge/FTS parity, and total message count (the caller
+ * compares this against a pre-mutation count to assert nothing was lost).
+ */
+export function validateDatabaseIntegrity(): IntegrityResult {
+  const integrity =
+    (
+      db().query("PRAGMA integrity_check").get() as
+        | { integrity_check: string }
+        | undefined
+    )?.integrity_check ?? "unknown";
+  const kn = (db()
+    .query(
+      "SELECT (SELECT COUNT(*) FROM knowledge) AS a, (SELECT COUNT(*) FROM knowledge_fts) AS b",
+    )
+    .get() as { a: number; b: number } | undefined) ?? { a: 0, b: 0 };
+  const messageCount =
+    (
+      db().query("SELECT COUNT(*) AS c FROM temporal_messages").get() as
+        | { c: number }
+        | undefined
+    )?.c ?? 0;
+  return {
+    ok: integrity === "ok" && kn.a === kn.b,
+    integrity,
+    knowledgeFtsMatch: kn.a === kn.b,
+    messageCount,
+  };
+}
 
 /**
  * Move one or more sessions from one project to another.

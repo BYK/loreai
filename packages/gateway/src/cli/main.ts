@@ -110,6 +110,7 @@ const OPTIONS = {
   "dry-run": { type: "boolean" as const },
   "no-children": { type: "boolean" as const },
   "min-confidence": { type: "string" as const },
+  "no-backup": { type: "boolean" as const },
   // `lore data clear` flags
   knowledge: { type: "boolean" as const },
   temporal: { type: "boolean" as const },

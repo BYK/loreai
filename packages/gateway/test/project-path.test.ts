@@ -18,6 +18,8 @@ import {
   ltm,
   saveSessionTracking,
   loadSessionTracking,
+  enableHostedMode,
+  _resetHostedModeForTest,
   type LoadedSessionTracking,
 } from "@loreai/core";
 
@@ -205,14 +207,50 @@ describe("inferProjectPathDetailed", () => {
 // ---------------------------------------------------------------------------
 
 describe("getProjectPath", () => {
-  test("prefers X-Lore-Project header over system prompt inference", () => {
+  // Conflict matrix: header vs authoritative system-prompt inference.
+  // An authoritative inference (the request's own working directory) is the
+  // strongest per-request truth and OVERRIDES a conflicting (stale/static)
+  // X-Lore-Project header.
+
+  test("authoritative inference OVERRIDES a conflicting header (the fix)", () => {
     const result = getProjectPath(
       `Working directory: /home/user/inferred-project`,
-      { "x-lore-project": "/home/user/explicit-project" },
+      { "x-lore-project": "/home/user/stale-header-project" },
     );
-    expect(result.path).toBe("/home/user/explicit-project");
+    expect(result.path).toBe("/home/user/inferred-project");
+    expect(result.source).toBe("inferred");
+    expect(result.overrodeHeaderPath).toBe("/home/user/stale-header-project");
+  });
+
+  test("header that AGREES with the inference → no override flag", () => {
+    const result = getProjectPath(`Working directory: /home/user/proj`, {
+      "x-lore-project": "/home/user/proj",
+    });
+    expect(result.path).toBe("/home/user/proj");
+    expect(result.overrodeHeaderPath).toBeUndefined();
+  });
+
+  test("header WINS when there is no authoritative inference (plugin case)", () => {
+    // Legit OpenCode/Pi clients send a correct header alongside a system
+    // prompt with no inferable working directory — the header must still bind.
+    const result = getProjectPath("You are a helpful assistant.", {
+      "x-lore-project": "/home/user/plugin-project",
+    });
+    expect(result.path).toBe("/home/user/plugin-project");
     expect(result.source).toBe("header");
-    expect(result.gitRemote).toBeUndefined();
+    expect(result.overrodeHeaderPath).toBeUndefined();
+  });
+
+  test("a WEAK (/home catch-all) inference must NOT override a header", () => {
+    // A bare /home path in embedded content is non-authoritative; the header
+    // must win and no override is flagged.
+    const result = getProjectPath(
+      `see /home/user/some-other-thing in the logs`,
+      { "x-lore-project": "/home/user/real-project" },
+    );
+    expect(result.path).toBe("/home/user/real-project");
+    expect(result.source).toBe("header");
+    expect(result.overrodeHeaderPath).toBeUndefined();
   });
 
   test("falls back to inferProjectPath when no header", () => {
@@ -715,6 +753,128 @@ describe("resolveSessionProjectPath", () => {
     expect(realId).not.toBe(bucketId);
     const moved = ltm.forProject(realPath, false);
     expect(moved.some((e) => e.title === `bucket-finding-${sid}`)).toBe(true);
+  });
+
+  // --- confidentlyWrong: re-bind an already-confident session bound to a
+  // stale header path, WITHOUT merging (cross-project safety) ---
+
+  test("re-binds a confident session off a stale header path without merging", () => {
+    const sid = `staleHdr-${crypto.randomUUID()}`;
+    const stalePath = `/test/stale/magnet-${crypto.randomUUID()}`;
+    const realPath = `/test/stale/real-${crypto.randomUUID()}`;
+    const staleId = ensureProject(stalePath);
+    const secretTitle = `magnet-secret-${crypto.randomUUID()}`;
+    ltm.create({
+      projectPath: stalePath,
+      scope: "project",
+      category: "gotcha",
+      title: secretTitle,
+      content: "knowledge wrongly collected under the stale-header magnet",
+    });
+
+    // Session was CONFIDENTLY bound to the stale header path (provisional=0).
+    const state = confidentState(stalePath);
+    state.sessionID = sid;
+    // A new turn: authoritative inference contradicts the stale header.
+    const result = resolveSessionProjectPath(
+      {
+        path: realPath,
+        source: "inferred",
+        overrodeHeaderPath: stalePath,
+      },
+      state,
+      remoteCfg,
+    );
+
+    expect(result).toBe(realPath);
+    expect(state.projectPath).toBe(realPath);
+    expect(state.projectPathProvisional).toBe(false);
+    // No merge: stale project survives and keeps its (mis-collected) knowledge;
+    // a human runs `lore data split` to redistribute it later.
+    expect(projectId(stalePath)).toBe(staleId);
+    expect(projectId(realPath)).not.toBe(staleId);
+    const stillThere = ltm.forProject(stalePath, false);
+    expect(stillThere.some((e) => e.title === secretTitle)).toBe(true);
+  });
+
+  test("confident re-bind DOES merge when a shared git remote corroborates", () => {
+    // A supplied git remote is only trusted (persisted) in hosted mode — the
+    // central-gateway scenario this fix targets.
+    enableHostedMode();
+    const sid = `staleHdrMerge-${crypto.randomUUID()}`;
+    const stalePath = `/test/stale/magnet2-${crypto.randomUUID()}`;
+    const realPath = `/test/stale/real2-${crypto.randomUUID()}`;
+    const remote = `github.com/onur/nutri-${crypto.randomUUID()}`;
+    ensureProject(stalePath, undefined, remote);
+    const title = `merge-finding-${sid}`;
+    ltm.create({
+      projectPath: stalePath,
+      scope: "project",
+      category: "gotcha",
+      title,
+      content: "should migrate because the git remote matches",
+    });
+
+    const state = confidentState(stalePath);
+    state.sessionID = sid;
+    const result = resolveSessionProjectPath(
+      {
+        path: realPath,
+        source: "inferred",
+        gitRemote: remote,
+        overrodeHeaderPath: stalePath,
+      },
+      state,
+      remoteCfg,
+    );
+
+    expect(result).toBe(realPath);
+    // With a shared git remote, ensureProject(realPath, remote) resolves to the
+    // SAME project as the stale path (same repo) — so the knowledge is unified
+    // under the real path (corroborated merge), not stranded.
+    const realId = projectId(realPath);
+    expect(realId).toBeDefined();
+    const moved = ltm.forProject(realPath, false);
+    expect(moved.some((e) => e.title === title)).toBe(true);
+    _resetHostedModeForTest();
+  });
+
+  test("does NOT re-bind a confident session when previous !== overrodeHeaderPath", () => {
+    // The guard only fires when the session is bound to the EXACT stale header
+    // path. If it's confidently bound to something else, a header/inference
+    // change must not silently re-point or merge.
+    const sid = `noRebind-${crypto.randomUUID()}`;
+    const boundPath = `/test/norebind/bound-${crypto.randomUUID()}`;
+    const headerPath = `/test/norebind/header-${crypto.randomUUID()}`;
+    const inferredPath = `/test/norebind/inferred-${crypto.randomUUID()}`;
+    const boundId = ensureProject(boundPath);
+    const title = `bound-secret-${crypto.randomUUID()}`;
+    ltm.create({
+      projectPath: boundPath,
+      scope: "project",
+      category: "gotcha",
+      title,
+      content: "must stay put — guard must not fire",
+    });
+
+    const state = confidentState(boundPath);
+    state.sessionID = sid;
+    // overrodeHeaderPath (headerPath) does NOT equal the current binding.
+    resolveSessionProjectPath(
+      {
+        path: inferredPath,
+        source: "inferred",
+        overrodeHeaderPath: headerPath,
+      },
+      state,
+      remoteCfg,
+    );
+
+    // The session re-binds to the new confident inference (normal behavior),
+    // but the OLD bound project must NOT be merged away.
+    expect(projectId(boundPath)).toBe(boundId);
+    const stillThere = ltm.forProject(boundPath, false);
+    expect(stillThere.some((e) => e.title === title)).toBe(true);
   });
 
   // --- gitRemote caching (unchanged behavior) ---

@@ -404,6 +404,7 @@ export async function resetPipelineState(opts?: {
   initialized = false;
   sessions.clear();
   cwdWarned.clear();
+  staleHeaderWarned.clear();
   subagentParentPendingLogged.clear();
   headerSessionIndex.clear();
   ltmSessionCache.clear();
@@ -441,6 +442,9 @@ const sessions = new Map<string, SessionState>();
 
 /** Sessions that have already logged the cwd-fallback warning (dedup). */
 const cwdWarned = new Set<string>();
+
+/** Sessions that have already logged the stale-header conflict warning (dedup). */
+const staleHeaderWarned = new Set<string>();
 
 /** (sessionID + parentClientId) pairs that have already logged the unresolved
  *  subagent-parent warning. Without dedup, a child agent with an unresolvable
@@ -1275,6 +1279,7 @@ async function initIfNeeded(
         lastSavedDedupDecisions.delete(sessionID);
         stableLtmCache.delete(sessionID);
         cwdWarned.delete(sessionID);
+        staleHeaderWarned.delete(sessionID);
         // Clear subagent parent-pending dedup entries for this session —
         // keys are `${sessionID}:${parentClientId}`, so filter by prefix.
         for (const key of subagentParentPendingLogged) {
@@ -1479,6 +1484,26 @@ export function resolveSessionProjectPath(
     const previous = sessionState.projectPath;
     const wasProvisional = sessionState.projectPathProvisional === true;
 
+    // A stale/static `X-Lore-Project` header was overridden by an authoritative
+    // inference (config.ts getProjectPath set `overrodeHeaderPath`). Warn once
+    // per session so the misconfiguration is observable in the logs — a fixed
+    // header (e.g. baked into ANTHROPIC_CUSTOM_HEADERS) collapses unrelated
+    // projects together, which is otherwise silent.
+    if (
+      result.overrodeHeaderPath &&
+      !staleHeaderWarned.has(sessionState.sessionID)
+    ) {
+      staleHeaderWarned.add(sessionState.sessionID);
+      console.error(
+        `[lore] warning: session ${sessionState.sessionID.slice(0, 16)} sent ` +
+          `X-Lore-Project header "${result.overrodeHeaderPath}" but its system ` +
+          `prompt's working directory is "${projectPath}" — trusting the ` +
+          `inferred path. A stale/static X-Lore-Project header (e.g. a fixed ` +
+          `ANTHROPIC_CUSTOM_HEADERS) causes unrelated projects to collapse into ` +
+          `one. Remove the static header or set it per-project.`,
+      );
+    }
+
     // Self-heal: if the session was previously bound to a provisional path
     // (cwd fallback or synthetic bucket) under which rows may already be
     // stored, migrate those rows into the real project now that we know it.
@@ -1486,8 +1511,30 @@ export function resolveSessionProjectPath(
     // a transient failure (e.g. SQLITE_BUSY from a separate process) would
     // permanently strand the bucket data with no retry. Keeping the flag set
     // lets the next confident turn re-attempt.
+    //
+    // `confidentlyWrong`: the session is currently CONFIDENTLY bound (not
+    // provisional) to the EXACT path a stale header just tried to assert, and
+    // an authoritative inference now contradicts it. This is the only case
+    // where we re-point an already-confident binding — gated tightly on
+    // `previous === result.overrodeHeaderPath` so a normal header/inference
+    // change can never trigger it. The re-attribution itself is merge-safe:
+    // `reattributeProvisionalProject` only folds rows when corroborated (shared
+    // git remote or synthetic bucket); for distinct real projects it re-binds
+    // the session WITHOUT merging, so a stale header can never leak one
+    // project's data into another.
+    const confidentlyWrong =
+      !wasProvisional &&
+      !!previous &&
+      !!result.overrodeHeaderPath &&
+      previous === result.overrodeHeaderPath &&
+      previous !== projectPath;
+
     let healed = true;
-    if (wasProvisional && previous && previous !== projectPath) {
+    if (
+      (wasProvisional || confidentlyWrong) &&
+      previous &&
+      previous !== projectPath
+    ) {
       healed = reattributeProvisionalProject(
         previous,
         projectPath,

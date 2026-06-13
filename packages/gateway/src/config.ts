@@ -572,6 +572,15 @@ export type ProjectPathResult = {
   source: ProjectPathSource;
   /** Normalized git remote URL from `X-Lore-Git-Remote` header, if provided. */
   gitRemote?: string;
+  /**
+   * Set when an `X-Lore-Project` header was present but OVERRIDDEN by an
+   * authoritative system-prompt inference that disagreed with it. Carries the
+   * (rejected) header path so the session layer can detect and correct an
+   * existing confident binding to a stale/static header — and so the gateway
+   * can log a one-time warning about the misconfiguration. Absent when the
+   * header agreed with (or matched) the inference, or when no header was sent.
+   */
+  overrodeHeaderPath?: string;
 };
 
 /**
@@ -617,22 +626,41 @@ export function getProjectPath(
   // Extract git remote from header (independent of path resolution).
   const gitRemote = extractGitRemoteHeader(headers);
 
-  // 1. Explicit header override (sanitized)
   const headerPath = extractProjectHeader(headers);
-  if (headerPath) return { path: headerPath, source: "header", gitRemote };
 
-  // 2. Infer from system prompt content. Only AUTHORITATIVE inferences (a cwd
-  //    field, "Working directory:" line, or CLAUDE/AGENTS/.lore.md path) are
-  //    trusted to confidently bind the session. A match from the generic
-  //    /home|/Users catch-all could be a stray path inside embedded tool output
-  //    or file contents referencing another project — trusting it would
-  //    misattribute the session and can trigger a destructive cross-project
-  //    self-heal merge. Such weak matches fall through to the cwd fallback
-  //    (provisional), which never merges.
+  // Infer from system prompt content. Only AUTHORITATIVE inferences (a cwd
+  // field, "Working directory:" line, or CLAUDE/AGENTS/.lore.md path) are
+  // trusted to confidently bind the session. A match from the generic
+  // /home|/Users catch-all could be a stray path inside embedded tool output
+  // or file contents referencing another project — trusting it would
+  // misattribute the session and can trigger a destructive cross-project
+  // self-heal merge. Such weak matches are treated as ABSENT here (they never
+  // override a header and fall through to the cwd fallback, which never merges).
   const inferred = inferProjectPathDetailed(systemPrompt);
+
+  // 1. Authoritative per-request inference is the STRONGEST signal — it
+  //    describes the agent's actual workspace for THIS exact request. A header
+  //    is a per-client/per-environment constant that can go stale (e.g. a fixed
+  //    `ANTHROPIC_CUSTOM_HEADERS` baked into a shell profile). When the two
+  //    conflict, trust the request's own working directory and flag the
+  //    overridden header so the session layer can correct a stale binding.
   if (inferred?.authoritative) {
+    if (headerPath && headerPath !== inferred.path) {
+      return {
+        path: inferred.path,
+        source: "inferred",
+        gitRemote,
+        overrodeHeaderPath: headerPath,
+      };
+    }
+    // Header agrees with the inference, or no header was sent.
     return { path: inferred.path, source: "inferred", gitRemote };
   }
+
+  // 2. No authoritative inference — an explicit header wins if present. This
+  //    protects legitimate clients (OpenCode/Pi plugins) that send a correct
+  //    header alongside a system prompt with no inferable working directory.
+  if (headerPath) return { path: headerPath, source: "header", gitRemote };
 
   // 3. Fall back to gateway's own cwd (with workspace root discovery)
   return {

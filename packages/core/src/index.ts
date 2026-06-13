@@ -109,7 +109,11 @@ export {
   getGitUser,
   clearGitUserCache,
 } from "./git";
-export { enableHostedMode, isHostedMode } from "./hosted";
+export {
+  enableHostedMode,
+  isHostedMode,
+  _resetHostedModeForTest,
+} from "./hosted";
 export {
   transform,
   setModelLimits,

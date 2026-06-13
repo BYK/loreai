@@ -2261,6 +2261,122 @@ async function cmdMoveRemote(
   }
 }
 
+type SplitPlanSession = {
+  sessionId: string;
+  messages: number;
+  confidence: "high" | "low";
+  tier: "session_state" | "path" | "git_remote" | null;
+  /** Set true during interactive review when the operator chooses to skip. */
+  skip?: boolean;
+};
+
+type SplitPlanEntry = {
+  targetId: string;
+  targetName: string | null;
+  targetPath: string | null;
+  sessions: SplitPlanSession[];
+};
+
+/**
+ * Pull the first few REAL user messages of a session (skipping tool results,
+ * session markers, and system-reminders) plus, when `expand` is set, a larger
+ * window. Gives the reviewer real context instead of one truncated line.
+ */
+function splitSessionPreview(
+  bySession: (p: string, s: string) => Array<{ content: string }>,
+  projectPath: string,
+  sessionId: string,
+  expand: boolean,
+): string[] {
+  let rows: Array<{ content: string }>;
+  try {
+    rows = bySession(projectPath, sessionId);
+  } catch {
+    return ["(could not load messages)"];
+  }
+  const maxMsgs = expand ? 12 : 4;
+  const maxLen = expand ? 1200 : 400;
+  const out: string[] = [];
+  for (const r of rows) {
+    if (out.length >= maxMsgs) break;
+    const c = (r.content ?? "").trim();
+    if (
+      !c ||
+      c.startsWith("[tool:result]") ||
+      c.startsWith("<session>") ||
+      c.startsWith("{") ||
+      c.startsWith("<task-notification>") ||
+      c.startsWith("<system-reminder>")
+    ) {
+      continue;
+    }
+    // Unwrap a system-reminder-wrapped prompt if present.
+    const m = c.match(/The user (?:sent|asked)[^:]*:\s*([\s\S]{4,})/i);
+    const text = (m ? m[1] : c).replace(/\s+/g, " ").trim();
+    if (text.length > 3) out.push(text.slice(0, maxLen));
+  }
+  return out.length ? out : ["(no user-authored messages found)"];
+}
+
+/**
+ * Interactive review of a split plan (item 2). For each planned session, shows
+ * richer context and lets the operator keep, skip, or expand the view.
+ */
+async function reviewSplitPlan(
+  plans: SplitPlanEntry[],
+  projectPath: string,
+): Promise<void> {
+  const { createInterface } = await import("node:readline");
+  const { temporal } = await import("@loreai/core");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const ask = (q: string) => new Promise<string>((res) => rl.question(q, res));
+
+  const items: Array<{ plan: SplitPlanEntry; sess: SplitPlanSession }> = [];
+  for (const plan of plans)
+    for (const sess of plan.sessions) items.push({ plan, sess });
+
+  console.log(`\n=== interactive review (${items.length} sessions) ===`);
+  console.log(
+    `For each: [Enter]=keep (move as planned), [s]=skip (leave in source), [e]=expand, [q]=quit review\n`,
+  );
+
+  let i = 0;
+  for (const { plan, sess } of items) {
+    i++;
+    let expand = false;
+    for (;;) {
+      console.log(
+        `\n[${i}/${items.length}] session ${sess.sessionId.slice(0, 14)} ` +
+          `(${sess.messages} msgs, ${sess.confidence}, via ${sess.tier ?? "?"})`,
+      );
+      console.log(`   → planned target: ${plan.targetName ?? plan.targetPath}`);
+      const preview = splitSessionPreview(
+        temporal.bySession,
+        projectPath,
+        sess.sessionId,
+        expand,
+      );
+      for (const line of preview) console.log(`     | ${line}`);
+      const ans = (await ask("   keep/skip/expand/quit [k/s/e/q]: "))
+        .trim()
+        .toLowerCase();
+      if (ans === "e") {
+        expand = true;
+        continue;
+      }
+      if (ans === "q") {
+        rl.close();
+        return;
+      }
+      if (ans === "s") {
+        sess.skip = true;
+      }
+      break;
+    }
+  }
+  rl.close();
+}
+
 /**
  * Auto-suggest planner: scan sessions in a project, suggest target projects
  * by scanning stored message content for project path patterns.
@@ -2284,6 +2400,8 @@ async function cmdSplit(
   const skipConfirm = !!flags.yes;
   const asJson = !!flags.json;
   const dryRun = !!flags["dry-run"] || !skipConfirm;
+  const interactive = !!flags.interactive;
+  const noBackup = !!flags["no-backup"];
   const minConfidence = (flags["min-confidence"] as string) ?? "high";
   const projectPath = resolve((flags.project as string) ?? process.cwd());
 
@@ -2303,17 +2421,7 @@ async function cmdSplit(
   );
 
   // Group by suggested target
-  type PlanEntry = {
-    targetId: string;
-    targetName: string | null;
-    targetPath: string | null;
-    sessions: Array<{
-      sessionId: string;
-      messages: number;
-      confidence: "high" | "low";
-    }>;
-  };
-  const planMap = new Map<string, PlanEntry>();
+  const planMap = new Map<string, SplitPlanEntry>();
   const unresolved: Array<{ sessionId: string; messages: number }> = [];
 
   for (let i = 0; i < suggestions.length; i++) {
@@ -2344,6 +2452,7 @@ async function cmdSplit(
       sessionId: sess.session_id,
       messages: sess.message_count,
       confidence: s.confidence,
+      tier: s.tier,
     });
   }
 
@@ -2410,13 +2519,55 @@ async function cmdSplit(
   if (dryRun) {
     if (!asJson) {
       console.log(
-        `\nDry run — no changes made. Re-run with --yes to move ${plans.reduce((n, p) => n + p.sessions.length, 0)} session(s).`,
+        `\nDry run — no changes made. Re-run with --yes to move ${plans.reduce((n, p) => n + p.sessions.length, 0)} session(s).` +
+          ` Add -i/--interactive to review each session before moving.`,
       );
     }
     return;
   }
 
-  // Apply
+  // --- Interactive review (item 2): let the operator inspect and confirm/skip
+  // each planned session, with richer context than a single truncated line. ---
+  if (interactive && !asJson) {
+    await reviewSplitPlan(plans, projectPath);
+    // Drop any sessions the reviewer skipped (marked `skip = true`).
+    for (let i = plans.length - 1; i >= 0; i--) {
+      plans[i].sessions = plans[i].sessions.filter((s) => !s.skip);
+      if (plans[i].sessions.length === 0) plans.splice(i, 1);
+    }
+    if (plans.length === 0) {
+      console.log("\nAll sessions skipped — nothing to move.");
+      return;
+    }
+  }
+
+  // --- Mandatory backup before ANY write (item 3) ---
+  // Always snapshot via VACUUM INTO first so a mistake is recoverable. We never
+  // touch the live -wal/-shm files or cp over a live DB; SQLite manages them.
+  let backupPath: string | null = null;
+  if (!noBackup) {
+    try {
+      backupPath = data.backupDatabase();
+      if (!asJson) console.log(`\nBackup written: ${backupPath}`);
+    } catch (e) {
+      console.error(
+        `\n  ✗ Backup failed — aborting before any changes: ${(e as Error).message}`,
+      );
+      console.error(
+        `    (re-run with --no-backup to skip the backup at your own risk)`,
+      );
+      process.exit(1);
+    }
+  } else if (!asJson) {
+    console.log(
+      "\n⚠ --no-backup: skipping the pre-write backup. Data loss is not recoverable.",
+    );
+  }
+
+  const before = data.validateDatabaseIntegrity();
+
+  // Apply. moveSessions wraps each move in its own transaction; the live
+  // gateway (if running against the same DB) is serialized by SQLite WAL.
   let totalMoved = 0;
   for (const plan of plans) {
     if (!plan.targetPath) continue;
@@ -2440,8 +2591,27 @@ async function cmdSplit(
     }
   }
 
+  // --- Validate after apply (item 3): integrity + no message loss + FTS parity ---
+  const after = data.validateDatabaseIntegrity();
+  const messagesPreserved = after.messageCount === before.messageCount;
+  if (!after.ok || !messagesPreserved) {
+    console.error(
+      `\n  ✗ VALIDATION FAILED after split: integrity=${after.integrity}, ` +
+        `messages ${before.messageCount}→${after.messageCount} ` +
+        `(${messagesPreserved ? "preserved" : "CHANGED"}), ` +
+        `knowledge/fts ${after.knowledgeFtsMatch ? "ok" : "MISMATCH"}. ` +
+        (backupPath
+          ? `Restore the pre-split backup if needed: ${backupPath}`
+          : `No backup was taken (--no-backup) — manual recovery required.`),
+    );
+    process.exit(1);
+  }
+
   if (!asJson) {
-    console.log(`\nSplit complete: ${totalMoved} session(s) moved.`);
+    console.log(
+      `\nSplit complete: ${totalMoved} session(s) moved. ` +
+        `Validation OK (integrity=${after.integrity}, messages preserved).`,
+    );
     if (unresolved.length) {
       console.log(
         `${unresolved.length} unresolved session(s) remain — use "lore data move session <id> --to <target>".`,
@@ -2487,6 +2657,10 @@ Move options:
   --to <path|UUID>      Target project for move/reassign (required for move)
   --no-children         Don't include sub-agent child sessions in the move
   --min-confidence      Minimum confidence for split suggestions (high|low, default: high)
+
+Split options:
+  -i, --interactive     Review each session (keep/skip/expand) before moving
+  --no-backup           Skip the mandatory pre-write DB backup (NOT recommended)
 
 Clear options:
   --knowledge           Clear only knowledge entries
