@@ -486,6 +486,79 @@ describe("dedup — feedback recording", () => {
       "Entry title beta for titles test",
     );
   });
+
+  test("getDismissedKnowledgePairs returns dashboard-dismissed pairs (both orderings)", () => {
+    const pid = ensureProject(PROJECT);
+    // A dashboard "Dismiss" records accepted=false, source=dashboard.
+    ltm.recordDedupFeedback({
+      projectId: pid,
+      entryATitle: "Title A",
+      entryBTitle: "Title B",
+      similarity: 0.95,
+      accepted: false,
+      source: "dashboard",
+    });
+
+    const dismissed = ltm.getDismissedKnowledgePairs();
+    // Both orderings present so a single has() check works regardless of order.
+    expect(dismissed.has("Title A\x1fTitle B")).toBe(true);
+    expect(dismissed.has("Title B\x1fTitle A")).toBe(true);
+  });
+
+  test("getDismissedKnowledgePairs ignores accepted and non-dashboard rows", () => {
+    const pid = ensureProject(PROJECT);
+    // Accepted dashboard merge — not a dismissal.
+    ltm.recordDedupFeedback({
+      projectId: pid,
+      entryATitle: "Accepted A",
+      entryBTitle: "Accepted B",
+      similarity: 0.96,
+      accepted: true,
+      source: "dashboard",
+    });
+    // Rejected but via CLI — not a dashboard dismissal.
+    ltm.recordDedupFeedback({
+      projectId: pid,
+      entryATitle: "Cli A",
+      entryBTitle: "Cli B",
+      similarity: 0.96,
+      accepted: false,
+      source: "cli_interactive",
+    });
+
+    const dismissed = ltm.getDismissedKnowledgePairs();
+    expect(dismissed.has("Accepted A\x1fAccepted B")).toBe(false);
+    expect(dismissed.has("Cli A\x1fCli B")).toBe(false);
+  });
+
+  test("knowledge feedback queries exclude entity-kind rows", () => {
+    const pid = ensureProject(PROJECT);
+    // Knowledge feedback (default kind='knowledge').
+    ltm.recordDedupFeedback({
+      projectId: pid,
+      entryATitle: "K A",
+      entryBTitle: "K B",
+      similarity: 0.95,
+      accepted: true,
+      source: "cli_yes",
+    });
+    // Simulate an entity dedup feedback row sharing the same project_id.
+    db()
+      .query(
+        `INSERT INTO dedup_feedback
+           (project_id, entry_a_title, entry_b_title, similarity, accepted, source, kind, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'entity', ?)`,
+      )
+      .run(pid, "E A", "E B", 0.99, 1, "dashboard", Date.now());
+
+    // Calibration helpers must see only the knowledge row.
+    expect(ltm.getDedupFeedbackCount(pid)).toBe(1);
+    const feedback = ltm.getDedupFeedback(pid);
+    expect(feedback).toHaveLength(1);
+    expect(feedback[0].similarity).toBeCloseTo(0.95, 2);
+    // Dismissed-pairs (knowledge-only) must not surface the entity pair.
+    expect(ltm.getDismissedKnowledgePairs().has("E A\x1fE B")).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------

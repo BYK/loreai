@@ -1738,7 +1738,7 @@ function renderKnowledgeTable(
   return out;
 }
 
-function pageUserKnowledge(): string {
+async function pageUserKnowledge(): Promise<string> {
   // Soft cap on the project-scoped table so very large DBs stay responsive.
   const PROJECT_SOFT_CAP = 500;
 
@@ -1761,6 +1761,119 @@ function pageUserKnowledge(): string {
     { label: "Knowledge" },
   ]);
   body += `<h1>Knowledge (${total})</h1>`;
+
+  // Merge suggestions: surface duplicate knowledge entries as a dry-run banner,
+  // mirroring the entity dedup banner in pageEntities(). Covers both global
+  // (cross-project) entries and per-project entries. Only computed when
+  // embeddings are available; non-fatal — failures just omit the section.
+  if (embedding.isAvailable() && total >= 2) {
+    try {
+      // Each candidate pair: the merged (source) entry, the surviving entry,
+      // the similarity score, and the scope label for display.
+      type DedupCandidate = {
+        sourceId: string;
+        sourceTitle: string;
+        survivingId: string;
+        survivingTitle: string;
+        similarity: number;
+        scope: string;
+      };
+      const candidates: DedupCandidate[] = [];
+
+      const collect = (
+        result: Awaited<ReturnType<typeof ltm.deduplicate>>,
+        scope: string,
+      ) => {
+        for (const cluster of result.clusters) {
+          for (const m of cluster.merged) {
+            const pk = ltm.dedupPairKey(cluster.surviving.id, m.id);
+            const sim = result.pairSimilarities.get(pk);
+            candidates.push({
+              sourceId: m.id,
+              sourceTitle: m.title,
+              survivingId: cluster.surviving.id,
+              survivingTitle: cluster.surviving.title,
+              similarity: sim ?? 0,
+              scope,
+            });
+          }
+        }
+      };
+
+      // Global / cross-project entries (project_id IS NULL).
+      collect(await ltm.deduplicateGlobal({ dryRun: true }), "Global");
+
+      // Per-project entries. Each ltm.deduplicate() loads embeddings and does
+      // an O(n²) pairwise sweep, so bound the work on this hot dashboard page:
+      //  - skip projects with < 2 entries (dedup needs a pair — returns empty),
+      //  - skip synthetic /test/ paths that may have leaked (ensureProject
+      //    would throw on them),
+      //  - scan only the MAX_DEDUP_PROJECTS most knowledge-dense projects so a
+      //    user with many projects doesn't pay N full sweeps on every load.
+      // Each call is non-fatal.
+      const MAX_DEDUP_PROJECTS = 25;
+      const scanProjects = data
+        .listProjects()
+        .filter((p) => !/^\/test\//.test(p.path) && p.knowledge_count >= 2)
+        .sort((a, b) => b.knowledge_count - a.knowledge_count)
+        .slice(0, MAX_DEDUP_PROJECTS);
+      for (const p of scanProjects) {
+        try {
+          collect(
+            await ltm.deduplicate(p.path, { dryRun: true }),
+            p.name ?? p.path,
+          );
+        } catch (err) {
+          log.warn(
+            `knowledge dedup suggestions failed for "${p.name ?? p.path}" (non-fatal):`,
+            err,
+          );
+        }
+      }
+
+      // Drop pairs the user has already dismissed via the dashboard.
+      const dismissed = ltm.getDismissedKnowledgePairs();
+      const pairs = candidates.filter(
+        (c) =>
+          !dismissed.has(`${c.sourceTitle}\x1f${c.survivingTitle}`) &&
+          c.sourceId !== c.survivingId,
+      );
+
+      if (pairs.length > 0) {
+        body += `<div class="banner" style="border:1px solid #d0a000;background:#fffbe6;padding:12px 16px;border-radius:6px;margin:12px 0;">`;
+        body += `<strong>${pairs.length} possible duplicate knowledge ${pairs.length === 1 ? "entry" : "entries"} found.</strong> Review and merge below, or run <code>lore data dedup</code>.`;
+        body += `<div style="margin-top:10px;display:flex;flex-direction:column;gap:8px;">`;
+        const MAX_SUGGESTIONS = 25;
+        let shown = 0;
+        for (const c of pairs) {
+          if (shown >= MAX_SUGGESTIONS) break;
+          shown++;
+          body += `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">`;
+          body += `<span><a href="/ui/knowledge/${esc(c.sourceId)}">${esc(truncate(c.sourceTitle, 40))}</a> → <a href="/ui/knowledge/${esc(c.survivingId)}">${esc(truncate(c.survivingTitle, 40))}</a></span>`;
+          body += `<span class="muted" style="color:#888;">[${esc(c.scope)}, sim: ${c.similarity.toFixed(3)}]</span>`;
+          body += `<form method="POST" action="/ui/api/merge/knowledge/${esc(c.survivingId)}/${esc(c.sourceId)}" style="display:inline;" onsubmit="return confirm('Merge &quot;${esc(c.sourceTitle)}&quot; into &quot;${esc(c.survivingTitle)}&quot;?');">`;
+          body += `<input type="hidden" name="similarity" value="${c.similarity}">`;
+          body += `<input type="hidden" name="titleA" value="${esc(c.sourceTitle)}">`;
+          body += `<input type="hidden" name="titleB" value="${esc(c.survivingTitle)}">`;
+          body += `<button type="submit" style="font-size:12px;padding:2px 8px;">Merge</button>`;
+          body += `</form>`;
+          body += `<form method="POST" action="/ui/api/dismiss/knowledge/${esc(c.survivingId)}/${esc(c.sourceId)}" style="display:inline;">`;
+          body += `<input type="hidden" name="similarity" value="${c.similarity}">`;
+          body += `<input type="hidden" name="titleA" value="${esc(c.sourceTitle)}">`;
+          body += `<input type="hidden" name="titleB" value="${esc(c.survivingTitle)}">`;
+          body += `<button type="submit" style="font-size:12px;padding:2px 8px;" title="Not duplicates — don\u2019t suggest again">Dismiss</button>`;
+          body += `</form>`;
+          body += `</div>`;
+        }
+        if (pairs.length > shown) {
+          body += `<span class="muted" style="color:#888;">…and ${pairs.length - shown} more. Use <code>lore data dedup</code>.</span>`;
+        }
+        body += `</div></div>`;
+      }
+    } catch (err) {
+      log.warn("knowledge dedup suggestions failed (non-fatal):", err);
+    }
+  }
 
   // Batch-load cross-project transfer counts (#506) to avoid N+1 queries.
   const transferCounts = ltm.transferCounts();
@@ -3241,7 +3354,7 @@ export async function handleUIRequest(
 
     // User knowledge list (cross-project + global entries)
     if (pathname === "/ui/knowledge") {
-      return htmlResponse(pageUserKnowledge());
+      return htmlResponse(await pageUserKnowledge());
     }
 
     // Knowledge detail
@@ -3398,6 +3511,65 @@ export async function handleUIRequest(
         });
       }
       return redirect("/ui/entities");
+    }
+
+    // Merge knowledge entries (dedup suggestion): keep surviving, remove source.
+    const mergeKnowledge = matchRoute(
+      pathname,
+      "/ui/api/merge/knowledge/:survivingId/:sourceId",
+    );
+    if (mergeKnowledge) {
+      const surviving = ltm.get(mergeKnowledge.survivingId);
+      const source = ltm.get(mergeKnowledge.sourceId);
+      if (surviving && source && surviving.id !== source.id) {
+        // Parse form data before removal — source entry is deleted below.
+        const formData = await req.formData();
+        const similarity = Number.parseFloat(
+          (formData.get("similarity") as string) || "",
+        );
+        ltm.remove(source.id);
+        if (Number.isFinite(similarity) && similarity > 0) {
+          // Feedback is title-based and project-scoped to the surviving entry
+          // (null for global/cross-project entries) — matches dedup calibration.
+          ltm.recordDedupFeedback({
+            projectId: surviving.project_id,
+            entryATitle: (formData.get("titleA") as string) || source.title,
+            entryBTitle: (formData.get("titleB") as string) || surviving.title,
+            similarity,
+            accepted: true,
+            source: "dashboard",
+          });
+        }
+      }
+      return redirect("/ui/knowledge");
+    }
+
+    // Dismiss knowledge merge suggestion: record reject feedback.
+    const dismissKnowledge = matchRoute(
+      pathname,
+      "/ui/api/dismiss/knowledge/:survivingId/:sourceId",
+    );
+    if (dismissKnowledge) {
+      const surviving = ltm.get(dismissKnowledge.survivingId);
+      const source = ltm.get(dismissKnowledge.sourceId);
+      const formData = await req.formData();
+      const similarity = Number.parseFloat(
+        (formData.get("similarity") as string) || "",
+      );
+      const titleA = (formData.get("titleA") as string) || source?.title || "";
+      const titleB =
+        (formData.get("titleB") as string) || surviving?.title || "";
+      if (Number.isFinite(similarity) && titleA && titleB) {
+        ltm.recordDedupFeedback({
+          projectId: surviving?.project_id ?? null,
+          entryATitle: titleA,
+          entryBTitle: titleB,
+          similarity,
+          accepted: false,
+          source: "dashboard",
+        });
+      }
+      return redirect("/ui/knowledge");
     }
 
     // Update entity metadata

@@ -413,6 +413,15 @@ describe("db", () => {
   });
 
   test("ensureProject deduplicates via git_remote", () => {
+    // Guard: this test inserts a synthetic /test/... project path via raw SQL,
+    // which bypasses ensureProject()'s production-DB guard. If LORE_DB_PATH is
+    // not set, we'd be writing into the real production DB — fail loudly rather
+    // than leaking a /test/... row that later breaks `lore data dedup`.
+    if (!process.env.LORE_DB_PATH) {
+      throw new Error(
+        "test DB not isolated: LORE_DB_PATH must be set (see packages/core/test/setup.ts)",
+      );
+    }
     // Manually insert a project with a git_remote
     const id1 = crypto.randomUUID();
     db()

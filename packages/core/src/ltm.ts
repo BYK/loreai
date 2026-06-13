@@ -1937,7 +1937,11 @@ export function promoteCrossProject(opts?: {
 // Dedup feedback & adaptive threshold calibration
 // ---------------------------------------------------------------------------
 
-export type DedupFeedbackSource = "auto_dedup" | "cli_yes" | "cli_interactive";
+export type DedupFeedbackSource =
+  | "auto_dedup"
+  | "cli_yes"
+  | "cli_interactive"
+  | "dashboard";
 
 const MIN_CALIBRATION_SAMPLES = 20;
 const DEFAULT_EMBEDDING_DEDUP_THRESHOLD = EMBEDDING_DEDUP_THRESHOLD;
@@ -1970,6 +1974,29 @@ export function recordDedupFeedback(input: {
       input.source,
       Date.now(),
     );
+}
+
+/**
+ * Return a Set of "titleA\x1ftitleB" keys for knowledge pairs that have been
+ * explicitly dismissed (accepted=0) via the dashboard. Both orderings are
+ * included so callers can do a single `has()` check.
+ *
+ * Mirrors entities.getDismissedEntityPairs() but for kind='knowledge'.
+ * Dismissals are title-based; renaming an entry resets its dismiss state.
+ */
+export function getDismissedKnowledgePairs(): Set<string> {
+  const rows = db()
+    .query(
+      `SELECT entry_a_title, entry_b_title FROM dedup_feedback
+       WHERE kind = 'knowledge' AND accepted = 0 AND source = 'dashboard'`,
+    )
+    .all() as Array<{ entry_a_title: string; entry_b_title: string }>;
+  const dismissed = new Set<string>();
+  for (const r of rows) {
+    dismissed.add(`${r.entry_a_title}\x1f${r.entry_b_title}`);
+    dismissed.add(`${r.entry_b_title}\x1f${r.entry_a_title}`);
+  }
+  return dismissed;
 }
 
 /**
@@ -2086,16 +2113,18 @@ export function recordAutoSignals(
 export function getDedupFeedback(
   projectId: string | null,
 ): Array<{ similarity: number; accepted: boolean; source: string }> {
+  // Scope to kind='knowledge' so entity dedup feedback (kind='entity') never
+  // pollutes knowledge threshold calibration (mirrors entities.ts).
   const rows = (
     projectId !== null
       ? db()
           .query(
-            "SELECT similarity, accepted, source FROM dedup_feedback WHERE project_id = ? ORDER BY similarity",
+            "SELECT similarity, accepted, source FROM dedup_feedback WHERE kind = 'knowledge' AND project_id = ? ORDER BY similarity",
           )
           .all(projectId)
       : db()
           .query(
-            "SELECT similarity, accepted, source FROM dedup_feedback WHERE project_id IS NULL ORDER BY similarity",
+            "SELECT similarity, accepted, source FROM dedup_feedback WHERE kind = 'knowledge' AND project_id IS NULL ORDER BY similarity",
           )
           .all()
   ) as Array<{ similarity: number; accepted: number; source: string }>;
@@ -2112,12 +2141,12 @@ export function getDedupFeedbackCount(projectId: string | null): number {
     projectId !== null
       ? db()
           .query(
-            "SELECT COUNT(*) as cnt FROM dedup_feedback WHERE project_id = ?",
+            "SELECT COUNT(*) as cnt FROM dedup_feedback WHERE kind = 'knowledge' AND project_id = ?",
           )
           .get(projectId)
       : db()
           .query(
-            "SELECT COUNT(*) as cnt FROM dedup_feedback WHERE project_id IS NULL",
+            "SELECT COUNT(*) as cnt FROM dedup_feedback WHERE kind = 'knowledge' AND project_id IS NULL",
           )
           .get()
   ) as { cnt: number } | null;
@@ -2141,7 +2170,7 @@ export function pruneDedupFeedback(projectId: string | null): void {
     db()
       .query(
         `DELETE FROM dedup_feedback WHERE id IN (
-           SELECT id FROM dedup_feedback WHERE project_id = ?
+           SELECT id FROM dedup_feedback WHERE kind = 'knowledge' AND project_id = ?
            ORDER BY created_at ASC LIMIT ?
          )`,
       )
@@ -2150,7 +2179,7 @@ export function pruneDedupFeedback(projectId: string | null): void {
     db()
       .query(
         `DELETE FROM dedup_feedback WHERE id IN (
-           SELECT id FROM dedup_feedback WHERE project_id IS NULL
+           SELECT id FROM dedup_feedback WHERE kind = 'knowledge' AND project_id IS NULL
            ORDER BY created_at ASC LIMIT ?
          )`,
       )

@@ -919,11 +919,15 @@ async function cmdDedup(
     process.exit(1);
   }
 
-  // Determine which projects to process
+  // Determine which projects to process. Skip synthetic test paths (/test/...)
+  // that may have leaked into the production DB via raw-SQL test inserts —
+  // ensureProject() refuses to resolve them (db.ts guard) and would otherwise
+  // abort the entire dedup run for one bad row.
   const projects = explicitProject
     ? [{ path: explicitProject, name: explicitProject }]
     : data
         .listProjects()
+        .filter((p) => !/^\/test\//.test(p.path))
         .map((p) => ({ path: p.path, name: p.name ?? p.path }));
 
   if (projects.length === 0) {
@@ -992,7 +996,15 @@ async function cmdDedup(
   }> = [];
 
   for (const project of projects) {
-    const result = await ltm.deduplicate(project.path, { dryRun: !apply });
+    let result: Awaited<ReturnType<typeof ltm.deduplicate>>;
+    try {
+      result = await ltm.deduplicate(project.path, { dryRun: !apply });
+    } catch (err) {
+      console.error(
+        `Warning: skipping project "${project.name}": ${err instanceof Error ? err.message : String(err)}`,
+      );
+      continue;
+    }
     if (result.clusters.length > 0) {
       allResults.push({ name: project.name, path: project.path, result });
       grandTotalRemoved += result.totalRemoved;
@@ -1093,7 +1105,15 @@ async function cmdDedupInteractive(
   const allClusters: ProjectCluster[] = [];
 
   for (const project of projects) {
-    const result = await ltm.deduplicate(project.path, { dryRun: true });
+    let result: Awaited<ReturnType<typeof ltm.deduplicate>>;
+    try {
+      result = await ltm.deduplicate(project.path, { dryRun: true });
+    } catch (err) {
+      console.error(
+        `Warning: skipping project "${project.name}": ${err instanceof Error ? err.message : String(err)}`,
+      );
+      continue;
+    }
     for (const cluster of result.clusters) {
       allClusters.push({
         projectName: project.name,
