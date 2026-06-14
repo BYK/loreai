@@ -23,6 +23,9 @@ Commands:
   import              Import knowledge from prior AI agent conversations
   data <subcommand>   Manage stored data (list, show, clear, delete)
   recall <query>      Search project memory from the command line
+  login               Sign in to your Folk Lore account (GitHub or --email)
+  logout              Sign out and clear the local session
+  whoami              Show the signed-in Folk Lore account
   entity <subcommand> Manage the entity registry (list, show, add, merge)
   upgrade [version]   Update lore to the latest (or specified) version
                        Flags: --check, --force, --offline, --channel <ch>
@@ -97,6 +100,17 @@ Recall options:
   --limit <n>                   Max results (default: 10)
   --json                        Output JSON instead of markdown
 
+Account (login / whoami):
+  --no-browser                  login: force the headless GitHub flow — show a
+                                QR/URL and paste the code back. Auto-enabled
+                                over SSH / headless / CI (env: LORE_NO_BROWSER=1)
+  --email <address>             Sign in with an email OTP code instead of GitHub
+                                (requires custom SMTP — not available on the
+                                Supabase free tier's default email provider)
+  --verify                      whoami: round-trip to the server to verify
+                                the session is still valid
+  --json                        whoami: also print account details as JSON
+
 Examples:
   lore                          # Auto-detect agent and launch with gateway
   lore run claude               # Launch Claude Code through the gateway
@@ -134,6 +148,11 @@ Examples:
   lore logs -n 100              # Show last 100 lines
   lore logs --path              # Print log file path
   lore recall "error handling"  # Search project memory from CLI
+  lore login                    # Sign in to Folk Lore with GitHub (browser)
+  lore login --no-browser       # Headless GitHub sign-in (SSH / remote box)
+  lore login --email me@x.com   # Sign in with an email OTP code (needs SMTP)
+  lore whoami                   # Show the signed-in account
+  lore logout                   # Sign out
 
 Environment variables:
   LORE_LISTEN_PORT              Gateway port (overridden by --port)
@@ -148,6 +167,8 @@ Environment variables:
                                 address is non-loopback (e.g. Tailscale, LAN, 0.0.0.0)
   LORE_DEBUG                    Enable debug logging (1 or true)
   LORE_NO_UPDATE_CHECK          Disable background update checks (set to 1)
+  SUPABASE_URL                  Override the Folk Lore Supabase project URL
+  SUPABASE_ANON_KEY             Override the Supabase publishable key
 `.trimStart();
 
 export function printHelp(): void {

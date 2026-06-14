@@ -2497,6 +2497,49 @@ export function setKV(key: string, value: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// Team / sync config store (team_config table)
+//
+// A generic key/value store reserved for team-sync credentials and sync state
+// (e.g. the persisted Supabase auth session, sync watermarks). Created by
+// migration v29. Distinct from kv_meta (plugin state) and metadata
+// (installation-scoped values) so sync data can be cleared independently on
+// logout without touching unrelated state.
+// ---------------------------------------------------------------------------
+
+/** Get a team_config value by key. Returns null if not found. */
+export function getTeamConfig(key: string): string | null {
+  const row = db()
+    .query("SELECT value FROM team_config WHERE key = ?")
+    .get(key) as { value: string } | null;
+  return row?.value ?? null;
+}
+
+/** Set a team_config value (upsert). */
+export function setTeamConfig(key: string, value: string): void {
+  db()
+    .query(
+      "INSERT INTO team_config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?",
+    )
+    .run(key, value, value);
+}
+
+/** Delete a team_config value. No-op if the key does not exist. */
+export function deleteTeamConfig(key: string): void {
+  db().query("DELETE FROM team_config WHERE key = ?").run(key);
+}
+
+/** Return all team_config entries as a plain object. */
+export function getAllTeamConfig(): Record<string, string> {
+  const rows = db().query("SELECT key, value FROM team_config").all() as Array<{
+    key: string;
+    value: string;
+  }>;
+  const out: Record<string, string> = {};
+  for (const row of rows) out[row.key] = row.value;
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Installation metadata (metadata table)
 // ---------------------------------------------------------------------------
 

@@ -118,6 +118,10 @@ const OPTIONS = {
   all: { type: "boolean" as const },
   // `lore start --local` — disable hosted mode (keep FS ops active)
   local: { type: "boolean" as const, short: "l" },
+  // `lore login` / `lore whoami` flags
+  email: { type: "string" as const },
+  verify: { type: "boolean" as const },
+  "no-browser": { type: "boolean" as const },
   // Hidden diagnostic: prints the vendored-model registration set by
   // the binary build wrapper (or "none" in npm mode). Used by CI to verify
   // the embed-asset pipeline actually wired up. Not in help text.
@@ -307,6 +311,24 @@ export async function _cli(): Promise<void> {
         break;
       }
 
+      case "login": {
+        const { commandLogin } = await import("./login");
+        await commandLogin(rest, values as Record<string, unknown>);
+        break;
+      }
+
+      case "logout": {
+        const { commandLogout } = await import("./login");
+        await commandLogout();
+        break;
+      }
+
+      case "whoami": {
+        const { commandWhoami } = await import("./login");
+        await commandWhoami(rest, values as Record<string, unknown>);
+        break;
+      }
+
       case "logs": {
         const { commandLogs } = await import("./logs");
         await commandLogs(rest, values as Record<string, unknown>);
@@ -354,6 +376,9 @@ export async function _cli(): Promise<void> {
               "setup",
               "data",
               "recall",
+              "login",
+              "logout",
+              "whoami",
               "logs",
               "import",
               "entity",

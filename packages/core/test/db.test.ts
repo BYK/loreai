@@ -22,6 +22,10 @@ import {
   loadHeaderSessionIndex,
   getKV,
   setKV,
+  getTeamConfig,
+  setTeamConfig,
+  deleteTeamConfig,
+  getAllTeamConfig,
   addDailyCost,
   getDailyCostTotals,
   getDailyCostForDay,
@@ -1167,6 +1171,69 @@ describe("db", () => {
     expect(getKV("kv_upsert")).toBe("first");
     setKV("kv_upsert", "second");
     expect(getKV("kv_upsert")).toBe("second");
+  });
+
+  // -------------------------------------------------------------------------
+  // team_config helpers (team_config table — sync credentials & state)
+  // -------------------------------------------------------------------------
+
+  describe("team_config helpers", () => {
+    test("team_config table exists (migration v29)", () => {
+      const tables = db()
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
+        )
+        .all() as Array<{ name: string }>;
+      expect(tables.map((t) => t.name)).toContain("team_config");
+    });
+
+    test("getTeamConfig returns null for unknown key", () => {
+      expect(getTeamConfig("nonexistent_team_key")).toBeNull();
+    });
+
+    test("setTeamConfig and getTeamConfig round-trip", () => {
+      setTeamConfig("tc_key", "tc_value");
+      expect(getTeamConfig("tc_key")).toBe("tc_value");
+    });
+
+    test("setTeamConfig upserts on conflict", () => {
+      setTeamConfig("tc_upsert", "first");
+      expect(getTeamConfig("tc_upsert")).toBe("first");
+      setTeamConfig("tc_upsert", "second");
+      expect(getTeamConfig("tc_upsert")).toBe("second");
+    });
+
+    test("deleteTeamConfig removes the key", () => {
+      setTeamConfig("tc_delete", "gone-soon");
+      expect(getTeamConfig("tc_delete")).toBe("gone-soon");
+      deleteTeamConfig("tc_delete");
+      expect(getTeamConfig("tc_delete")).toBeNull();
+    });
+
+    test("deleteTeamConfig is a no-op for unknown key", () => {
+      expect(() => deleteTeamConfig("tc_never_existed")).not.toThrow();
+    });
+
+    test("getAllTeamConfig returns all entries as an object", () => {
+      // Start clean so the assertion is deterministic regardless of test order.
+      for (const key of Object.keys(getAllTeamConfig())) deleteTeamConfig(key);
+      setTeamConfig("tc_a", "1");
+      setTeamConfig("tc_b", "2");
+      expect(getAllTeamConfig()).toEqual({ tc_a: "1", tc_b: "2" });
+    });
+
+    test("team_config is JSON-session friendly (stores a serialized blob)", () => {
+      const session = {
+        access_token: "at",
+        refresh_token: "rt",
+        expires_at: 123,
+        user_id: "u1",
+      };
+      setTeamConfig("supabase.session", JSON.stringify(session));
+      expect(JSON.parse(getTeamConfig("supabase.session") ?? "null")).toEqual(
+        session,
+      );
+    });
   });
 
   test("BUG-001: saveForceMinLayer(sid, 0) preserves other session_state columns", () => {

@@ -1,0 +1,23 @@
+# Supabase project config for Folk Lore.
+#
+# Link this directory to the live project once:
+#   supabase link --project-ref jlwxsrmvomocgngbxmcf
+# Then apply migrations with:
+#   supabase db push
+#
+# Auth providers (GitHub OAuth + email magic-link/OTP) are configured in the
+# Supabase dashboard, not here — see supabase/README.md.
+
+project_id = "jlwxsrmvomocgngbxmcf"
+
+[auth]
+# CLI sign-in uses a loopback `…/callback` redirect for the GitHub OAuth flow.
+# Path-aware wildcards are required (a bare host won't match the `/callback`
+# path). NOTE: this only governs the local `supabase start` stack — the hosted
+# project's redirect allow-list is set in the dashboard (see README step 3).
+additional_redirect_urls = ["http://127.0.0.1:*/**", "http://127.0.0.1/**"]
+
+[auth.email]
+# Email magic-link / OTP sign-in for non-GitHub users. The OTP code path
+# requires `{{ .Token }}` in the Magic Link email template (dashboard).
+enable_signup = true
