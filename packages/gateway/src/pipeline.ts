@@ -659,7 +659,105 @@ function parseDeltaMessage(raw: string): GatewayMessage | null {
   }
 }
 
-function applySessionPromptDeltas(
+/**
+ * Anthropic requires every `tool_use` block to be immediately followed by its
+ * matching `tool_result` block in the next message. Inserting a synthetic
+ * delta message between such a pair orphans the `tool_use` and triggers a 400
+ * ("tool_use ids were found without tool_result blocks immediately after").
+ *
+ * Returns an insert index (clamped to [0, messages.length]) that never lands
+ * between an assistant `tool_use` and the following user `tool_result`. When
+ * the desired index would split a pair, it walks backward past the issuing
+ * assistant so the pair stays adjacent (placing the delta before, rather than
+ * inside, the tool turn).
+ *
+ * @internal Exported for tests.
+ */
+export function safeDeltaInsertIndex(
+  messages: GatewayMessage[],
+  desired: number,
+): number {
+  let idx = Math.max(0, Math.min(desired, messages.length));
+  // While the message at `idx` is a user message carrying a tool_result whose
+  // matching tool_use is on the immediately-preceding assistant, the boundary
+  // at `idx` is inside an atomic pair — move before the assistant.
+  while (idx > 0 && idx < messages.length) {
+    const here = messages[idx];
+    const prev = messages[idx - 1];
+    const splitsPair =
+      here?.role === "user" &&
+      prev?.role === "assistant" &&
+      here.content.some((b) => b.type === "tool_result") &&
+      prev.content.some((b) => b.type === "tool_use");
+    if (!splitsPair) break;
+    idx -= 1;
+  }
+  return idx;
+}
+
+/**
+ * Tool-pairing 400: Anthropic rejects when a `tool_use` block is not
+ * immediately followed by its `tool_result` ("tool_use ids were found without
+ * tool_result blocks immediately after"). The gateway forwards the 400 body to
+ * the client, which surfaces it as "tool use concurrency" — otherwise invisible
+ * to us. This captures diagnostics so the class is measurable.
+ *
+ * Privacy: counts / layer / model / 16-char session prefix ONLY — never any
+ * message content (honors the "NO gen_ai.input.messages" proxy posture).
+ *
+ * @internal Exported for tests.
+ */
+export function captureToolPairing400(input: {
+  status: number;
+  errorBody: string;
+  messages: GatewayMessage[];
+  layer: number;
+  model: string;
+  sessionID: string;
+}): boolean {
+  // Match the specific Anthropic phrasing to avoid false-positiving on other
+  // 400s that merely mention tools (e.g. malformed tool schema).
+  const isToolPairing400 =
+    input.status === 400 &&
+    input.errorBody.includes("tool_use") &&
+    input.errorBody.includes("without") &&
+    input.errorBody.includes("tool_result");
+  if (!isToolPairing400) return false;
+  if (!Sentry.isInitialized()) return true;
+
+  let toolUseCount = 0;
+  let toolResultCount = 0;
+  for (const m of input.messages) {
+    for (const b of m.content) {
+      if (b.type === "tool_use") toolUseCount++;
+      else if (b.type === "tool_result") toolResultCount++;
+    }
+  }
+  Sentry.captureException(
+    new Error("tool-pairing 400 (tool_use/tool_result concurrency)"),
+    {
+      tags: {
+        error_class: "tool_pairing_400",
+        gradient_layer: String(input.layer),
+        model: input.model,
+      },
+      contexts: {
+        tool_pairing: {
+          layer: input.layer,
+          tool_use_count: toolUseCount,
+          tool_result_count: toolResultCount,
+          message_count: input.messages.length,
+          session_id_prefix: input.sessionID.slice(0, 16),
+          concurrency_class: true,
+        },
+      },
+    },
+  );
+  return true;
+}
+
+/** @internal Exported for tests. */
+export function applySessionPromptDeltas(
   messages: GatewayMessage[],
   sessionID: string,
 ): GatewayMessage[] {
@@ -690,8 +788,17 @@ function applySessionPromptDeltas(
 
   for (const { selector, message } of parsed) {
     // Selector positions are defined against the transformed upstream message
-    // array at the time the delta is created. Re-inserting at the same index on
-    // subsequent turns preserves byte-identical prefixes across process restarts.
+    // array at the time the delta is created (where they were already made
+    // tool-pair-safe via safeDeltaInsertIndex). Re-inserting at the SAME index
+    // on subsequent turns is intentional: #747 requires the delta to stay at a
+    // byte-identical position to preserve the conversation prompt cache.
+    //
+    // We deliberately do NOT re-run safeDeltaInsertIndex here — a layout-
+    // dependent adjustment at replay would move the delta across turns and bust
+    // the very cache prefix it exists to protect. In the rare case a later
+    // turn's layout makes this persisted index split a tool pair,
+    // removeOrphanedToolResults (run after this function on the wire array) is
+    // the hard guarantee that no orphaned tool_use/tool_result reaches the API.
     const insertAt = Math.min(selector.insertAt, out.length);
     out.splice(insertAt, 0, message);
   }
@@ -2855,6 +2962,16 @@ function buildStreamingResponse(
                   `recall follow-up upstream ${streamingFollowUp.status ?? "?"}`,
                 ),
               );
+              captureToolPairing400({
+                status: streamingFollowUp.status ?? 0,
+                errorBody: streamingFollowUp.detail,
+                messages: currentModifiedReq.messages,
+                // Layer is not in scope on the streaming recall continuation;
+                // -1 signals "unknown" while still tagging the error class.
+                layer: -1,
+                model: currentModifiedReq.model,
+                sessionID: recallContext.sessionState.sessionID,
+              });
               const heldBack = currentAccum.heldBackEvents();
               if (heldBack) {
                 safeEnqueue(encoder.encode(heldBack));
@@ -5685,7 +5802,15 @@ async function handleConversationTurn(
   }
 
   if (pendingKnowledgeDelta) {
-    const insertAt = Math.max(0, modifiedReq.messages.length - 1);
+    // Place the durable delta near the tail, but never between an
+    // assistant(tool_use) and its user(tool_result) — inserting there orphans
+    // the tool_use and triggers an Anthropic 400 (#747 regression). The index
+    // is computed once here, made tool-pair-safe, and persisted; replay reuses
+    // it verbatim to keep the delta byte-position-stable for the prompt cache.
+    const insertAt = safeDeltaInsertIndex(
+      modifiedReq.messages,
+      Math.max(0, modifiedReq.messages.length - 1),
+    );
     appendKnowledgePromptDelta({
       sessionID,
       projectPath,
@@ -5697,6 +5822,16 @@ async function handleConversationTurn(
     modifiedReq.messages,
     sessionID,
   );
+  // Hard guarantee: deltas are spliced into the wire array AFTER the orphan
+  // safety net (step 8) and persisted indices are replayed verbatim, so a
+  // later turn whose layout differs from the delta's creation turn could place
+  // a delta adjacent to a tool turn. Re-running the safety net ensures no
+  // orphaned tool_use/tool_result ever reaches the API. Note this is a
+  // last-ditch net: if it fires it strips the orphaned tool_use, which rewrites
+  // a historical assistant message and busts the cache from that point — strictly
+  // better than a hard 400, but it should essentially never fire given the
+  // creation-time placement above.
+  removeOrphanedToolResults(modifiedReq.messages);
 
   // --- 9. Forward to upstream ---
   // Enable prompt caching for conversation turns with layered breakpoints:
@@ -5886,6 +6021,15 @@ async function handleConversationTurn(
       );
     }
 
+    captureToolPairing400({
+      status: upstreamResponse.status,
+      errorBody,
+      messages: modifiedReq.messages,
+      layer: result.layer,
+      model: req.model,
+      sessionID,
+    });
+
     genAiSpan.setStatus({
       code: 2,
       message: `HTTP ${upstreamResponse.status}`,
@@ -6016,6 +6160,16 @@ async function handleConversationTurn(
           `recall follow-up upstream error: ${jsonFollowUp.status ?? "?"} ${jsonFollowUp.detail}`,
           new Error(`recall follow-up upstream ${jsonFollowUp.status ?? "?"}`),
         );
+        captureToolPairing400({
+          status: jsonFollowUp.status ?? 0,
+          errorBody: jsonFollowUp.detail,
+          messages: currentModifiedReq.messages,
+          // `result` here is the recall string (shadowed); the transform layer
+          // is not in scope on the recall continuation. -1 signals "unknown".
+          layer: -1,
+          model: currentModifiedReq.model,
+          sessionID: sessionState.sessionID,
+        });
         // Fall back to response with marker (no continuation)
         markerResp.usage = cumulativeUsage;
         postResponse(
