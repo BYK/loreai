@@ -98,11 +98,21 @@ const POLL_INTERVAL_MS = 30_000;
  */
 const consolidationCooldown = new Map<
   string,
-  { attemptedAt: number; entryCount: number }
+  { attemptedAt: number; entryCount: number; topCategoryCount: number }
 >();
 
 /** 1 hour cooldown before retrying consolidation with the same entry count. */
 const CONSOLIDATION_COOLDOWN_MS = 60 * 60 * 1000;
+
+/**
+ * Per-category entry count that triggers consolidation even when the GLOBAL
+ * count is below maxEntries. The global trigger structurally misses single-
+ * category bloat: a category (notably `preference`, which the curator re-mints
+ * and re-phrases each session) can swell to dozens while the total stays under
+ * maxEntries, so consolidation never fires and the duplicates inject into the
+ * always-pinned system[1] block every session. This catches that case.
+ */
+const PER_CATEGORY_CONSOLIDATION_THRESHOLD = 12;
 
 /**
  * Sub-agent sessions are ephemeral (1-3 turns) — evict them faster than
@@ -645,19 +655,45 @@ export function buildIdleWorkHandler(
     if (allowWorker && cfg.knowledge.enabled) {
       try {
         const entries = ltm.forProject(projectPath, false);
-        if (entries.length > cfg.curator.maxEntries) {
+        // Per-category bloat check counts PROJECT-SCOPED entries only — matching
+        // what category-focused consolidation will actually merge (it excludes
+        // cross-project entries to avoid one project deleting a globally-shared
+        // preference). Global-preference duplicates are prevented at create time
+        // by dedupePreferenceCreates instead.
+        const catCounts = new Map<string, number>();
+        for (const e of entries) {
+          catCounts.set(e.category, (catCounts.get(e.category) ?? 0) + 1);
+        }
+        let topCategory = "";
+        let topCategoryCount = 0;
+        for (const [cat, n] of catCounts) {
+          if (n > topCategoryCount) {
+            topCategoryCount = n;
+            topCategory = cat;
+          }
+        }
+        const globalOver = entries.length > cfg.curator.maxEntries;
+        const categoryOver =
+          topCategoryCount > PER_CATEGORY_CONSOLIDATION_THRESHOLD;
+        if (globalOver || categoryOver) {
           const cooldown = consolidationCooldown.get(projectPath);
           const now = Date.now();
+          // Cooldown is keyed on the global count; include the top-category
+          // count so a category-only trigger still re-attempts as it grows.
+          const cooldownKey = entries.length;
           if (
             cooldown &&
-            cooldown.entryCount === entries.length &&
+            cooldown.entryCount === cooldownKey &&
+            cooldown.topCategoryCount === topCategoryCount &&
             now - cooldown.attemptedAt < CONSOLIDATION_COOLDOWN_MS
           ) {
             // Cooldown active — skip to avoid wasting Sonnet calls on
             // repeated consolidation attempts that produce no changes.
           } else {
             log.info(
-              `entry count ${entries.length} exceeds maxEntries ${cfg.curator.maxEntries} — running consolidation`,
+              globalOver
+                ? `entry count ${entries.length} exceeds maxEntries ${cfg.curator.maxEntries} — running consolidation`
+                : `category "${topCategory}" count ${topCategoryCount} exceeds per-category threshold ${PER_CATEGORY_CONSOLIDATION_THRESHOLD} — running consolidation`,
             );
             const beforeCount = entries.length;
             const result = await Sentry.startSpan(
@@ -672,6 +708,12 @@ export function buildIdleWorkHandler(
                   projectPath,
                   sessionID,
                   model,
+                  // Category-focused mode when only the per-category threshold
+                  // is exceeded (global count still under maxEntries) — merges
+                  // the bloated category's near-duplicates directly.
+                  ...(!globalOver && categoryOver
+                    ? { focusCategory: topCategory }
+                    : {}),
                   workerHealth: makeWorkerHealth(sessionID, "lore-curator"),
                 }),
             );
@@ -692,6 +734,7 @@ export function buildIdleWorkHandler(
               consolidationCooldown.set(projectPath, {
                 attemptedAt: Date.now(),
                 entryCount: beforeCount,
+                topCategoryCount,
               });
               log.info(
                 `consolidation produced no changes — cooldown active for 1h ` +

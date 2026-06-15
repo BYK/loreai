@@ -295,6 +295,72 @@ describe("ltm — crossProject defaults and dedup", () => {
   });
 });
 
+describe("ltm.findSemanticDuplicate — preference-specific threshold", () => {
+  const PROJ = "/test/ltm/semdup-threshold";
+  let availableSpy: ReturnType<typeof vi.spyOn>;
+  let embedSpy: ReturnType<typeof vi.spyOn>;
+  let vectorSpy: ReturnType<typeof vi.spyOn>;
+  let existingId = "";
+
+  beforeEach(() => {
+    const pid = ensureProject(PROJ);
+    db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+    existingId = ltm.create({
+      projectPath: PROJ,
+      category: "preference",
+      title: "Always document invariants as code comments",
+      content: "Document load-bearing invariants inline in source.",
+      scope: "project",
+    });
+
+    availableSpy = vi.spyOn(embedding, "isAvailable").mockReturnValue(true);
+    embedSpy = vi
+      .spyOn(embedding, "embed")
+      .mockResolvedValue([new Float32Array([1, 0, 0])]);
+    // The existing entry scores 0.90 cosine vs the incoming paraphrase — a
+    // realistic near-duplicate-preference similarity: above the new 0.88
+    // preference threshold, but BELOW the conservative global 0.935.
+    vectorSpy = vi
+      .spyOn(embedding, "vectorSearch")
+      .mockImplementation(() => [{ id: existingId, similarity: 0.9 }]);
+  });
+
+  afterEach(() => {
+    availableSpy.mockRestore();
+    embedSpy.mockRestore();
+    vectorSpy.mockRestore();
+  });
+
+  test("default (global 0.935) threshold does NOT match a 0.90 paraphrase", async () => {
+    const dup = await ltm.findSemanticDuplicate({
+      title: "Always write invariants as inline code comments",
+      content: "Put design rationale and invariants in the source.",
+      projectId: ensureProject(PROJ),
+    });
+    expect(dup).toBeNull();
+  });
+
+  test("PREFERENCE_DEDUP_THRESHOLD (0.88) DOES match the 0.90 paraphrase", async () => {
+    const dup = await ltm.findSemanticDuplicate({
+      title: "Always write invariants as inline code comments",
+      content: "Put design rationale and invariants in the source.",
+      projectId: ensureProject(PROJ),
+      threshold: ltm.PREFERENCE_DEDUP_THRESHOLD,
+    });
+    expect(dup).not.toBeNull();
+    expect(dup?.id).toBe(existingId);
+    expect(dup?.similarity).toBeCloseTo(0.9, 5);
+  });
+
+  test("PREFERENCE_DEDUP_THRESHOLD is below the global dedup cutoff", () => {
+    // Guards the invariant that the preference cutoff is intentionally looser
+    // (so paraphrases collapse) but still > 0 — a revert to the global value
+    // would make the dedup test above fail.
+    expect(ltm.PREFERENCE_DEDUP_THRESHOLD).toBeLessThan(0.935);
+    expect(ltm.PREFERENCE_DEDUP_THRESHOLD).toBeGreaterThan(0.5);
+  });
+});
+
 describe("ltm — UUIDv7 IDs", () => {
   const PROJ = "/test/ltm/uuidv7";
 

@@ -16,6 +16,7 @@
 import { db, ensureProject } from "./db";
 import * as temporal from "./temporal";
 import * as embedding from "./embedding";
+import * as ltm from "./ltm";
 import { filterTerms, ftsQueryOr, EMPTY_QUERY } from "./search";
 import * as log from "./log";
 
@@ -310,11 +311,43 @@ export async function detectAndFormat(input: {
     threshold: input.threshold,
   });
 
-  if (repeated.length) {
+  // Drop instructions already captured as a preference entry, so the curator is
+  // not re-prompted to re-create them every run (re-observation loop →
+  // near-duplicate preference mints). Uses embedding similarity at the
+  // preference threshold; no-ops when embeddings are unavailable (keeps all).
+  const pid = ensureProject(input.projectPath);
+  const novel: RepeatedInstruction[] = [];
+  for (const r of repeated) {
+    let alreadyCaptured = false;
+    if (embedding.isAvailable()) {
+      try {
+        const dup = await ltm.findSemanticDuplicate({
+          title: r.instruction,
+          content: r.instruction,
+          projectId: pid,
+          threshold: ltm.PREFERENCE_DEDUP_THRESHOLD,
+        });
+        // Only suppress when the matched entry is actually a preference.
+        if (dup) {
+          const entry = ltm.get(dup.id);
+          alreadyCaptured = entry?.category === "preference";
+        }
+      } catch (err) {
+        log.warn(
+          "instruction-detect: preference-match check failed (non-fatal):",
+          err,
+        );
+      }
+    }
+    if (!alreadyCaptured) novel.push(r);
+  }
+
+  if (novel.length) {
     log.info(
-      `instruction-detect: ${repeated.length} repeated instruction(s) found across sessions`,
+      `instruction-detect: ${novel.length} novel repeated instruction(s) found across sessions ` +
+        `(${repeated.length - novel.length} already captured as preferences)`,
     );
   }
 
-  return formatForCurator(repeated);
+  return formatForCurator(novel);
 }

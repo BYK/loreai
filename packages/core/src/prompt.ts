@@ -608,6 +608,28 @@ extracting new knowledge, only consolidating existing knowledge.
 
 Output ONLY valid JSON. No markdown fences, no explanation, no preamble.`;
 
+/**
+ * Merge-oriented consolidation prompt for the category-focused path. Unlike the
+ * trim-to-target CONSOLIDATION_SYSTEM, this instructs the model to merge only
+ * genuine semantic DUPLICATES (paraphrases of the same rule) within one
+ * category — with NO numeric eviction target — so it never force-deletes
+ * distinct entries. Returning an empty array IS acceptable here (means nothing
+ * was a true duplicate).
+ */
+export const CONSOLIDATION_MERGE_SYSTEM = `You are a long-term memory curator. You are given all knowledge entries of a SINGLE category that has grown bloated with near-duplicates. Your ONLY job is to merge genuine duplicates.
+
+RULES:
+1. Find groups of entries that express the SAME underlying rule/fact, just phrased differently (paraphrases). For each such group, pick ONE survivor, "update" it to the clearest concise wording (under 150 words), and "delete" the others.
+2. Do NOT merge entries that are merely related or about the same area but make DISTINCT points. Two different rules are NOT duplicates even if they share words. Opposing rules (e.g. "always use tabs" vs "always use spaces") are NEVER duplicates — never merge them.
+3. There is NO target count. If nothing is a true duplicate, return an empty array — that is correct and acceptable.
+4. Never invent new knowledge; only "update" survivors and "delete" true duplicates.
+
+OUTPUT: A JSON array of "update" and "delete" ops only (may be empty). No "create" ops.
+- "update": { "op": "update", "id": "...", "content": "concise merged wording" }
+- "delete": { "op": "delete", "id": "...", "reason": "duplicate of <survivor id>" }
+
+Output ONLY valid JSON. No markdown fences, no explanation, no preamble.`;
+
 export function consolidationUser(input: {
   entries: Array<{
     id: string;
@@ -616,11 +638,23 @@ export function consolidationUser(input: {
     content: string;
   }>;
   targetMax: number;
+  /** "trim" (default): reduce to targetMax via merge+evict. "merge-duplicates":
+   *  merge true paraphrases only, no eviction target (focus-category path). */
+  mode?: "trim" | "merge-duplicates";
 }): string {
   const count = input.entries.length;
   const listed = input.entries
     .map((e) => `- [${e.id}] (${e.category}) ${e.title}: ${e.content}`)
     .join("\n");
+
+  if (input.mode === "merge-duplicates") {
+    return `Knowledge entries in the "${input.entries[0]?.category ?? "?"}" category (${count} total). Merge only genuine duplicates (paraphrases of the same rule); leave distinct entries untouched:
+
+${listed}
+
+Produce update/delete ops to merge true duplicates. If none are duplicates, return [].`;
+  }
+
   const excess = count - input.targetMax;
   return `Current knowledge entries (${count} total, target max: ${input.targetMax}, must remove at least ${excess}):
 

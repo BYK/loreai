@@ -15,9 +15,11 @@ import {
   CURATOR_SYSTEM,
   curatorUser,
   CONSOLIDATION_SYSTEM,
+  CONSOLIDATION_MERGE_SYSTEM,
   consolidationUser,
 } from "./prompt";
 import * as toolTrace from "./tool-trace";
+import { tagToTitle } from "./pattern-extract";
 import { detectAndFormat } from "./instruction-detect";
 import { curatorLimiter } from "./session-limiter";
 import type { LLMClient } from "./types";
@@ -562,6 +564,86 @@ export async function run(input: {
   return curatorLimiter.get(input.sessionID)(() => runInner(input));
 }
 
+/**
+ * Collapse near-duplicate `preference` create ops into update ops before they
+ * reach applyOps. For each `op:"create"` with category `preference`, look up a
+ * semantic duplicate (embedding cosine ≥ PREFERENCE_DEDUP_THRESHOLD, looser than
+ * the global dedup cutoff because the curator re-phrases the same rule every
+ * session). On a hit, rewrite the op to `{op:"update", id, content, confidence}`
+ * so the existing entry is refreshed in place instead of a paraphrase being
+ * minted — preventing system[1] preference bloat. Non-preference ops and ops
+ * with no semantic match pass through unchanged. No-ops when embeddings are
+ * unavailable (findSemanticDuplicate returns null).
+ */
+export async function dedupePreferenceCreates(
+  ops: CuratorOp[],
+  projectPath: string,
+): Promise<CuratorOp[]> {
+  if (!embedding.isAvailable()) return ops;
+  const pid = ensureProject(projectPath);
+  // Track ids already matched this batch so two paraphrases in the SAME op list
+  // don't both redirect onto the same existing entry (the second would clobber
+  // the first's content). ACCEPTED LIMITATION: the second paraphrase then falls
+  // through as a normal create, so two same-rule paraphrases emitted in ONE
+  // curator batch still yield two entries this turn. The per-category
+  // consolidation trigger merges that residual on a later idle pass; in practice
+  // the curator rarely emits two paraphrases of one rule in a single batch.
+  const claimed = new Set<string>();
+  const out: CuratorOp[] = [];
+  for (const op of ops) {
+    if (op.op !== "create" || op.category !== "preference" || !op.title) {
+      out.push(op);
+      continue;
+    }
+    let dup: { id: string; similarity: number } | null = null;
+    try {
+      dup = await ltm.findSemanticDuplicate({
+        title: op.title,
+        content: op.content,
+        projectId: op.scope === "global" ? null : pid,
+        threshold: ltm.PREFERENCE_DEDUP_THRESHOLD,
+      });
+    } catch (err) {
+      log.warn(
+        "preference dedup: findSemanticDuplicate failed (non-fatal):",
+        err,
+      );
+    }
+    const existing = dup && !claimed.has(dup.id) ? ltm.get(dup.id) : null;
+    // Guard: a project-scoped create must NOT mutate a globally-shared
+    // (cross-project) preference — that would let one project overwrite a
+    // preference visible to all projects. Let it fall through as a normal
+    // project-scoped create instead. (A global create may still update a global
+    // match; a project create may update a same-project match.)
+    const wouldMutateGlobalFromProject =
+      existing != null &&
+      op.scope !== "global" &&
+      (existing.cross_project === 1 || existing.project_id == null);
+    if (existing && !wouldMutateGlobalFromProject) {
+      claimed.add(existing.id);
+      // Keep the richer text: don't let a terser paraphrase degrade a more
+      // detailed existing entry. Only adopt the new content when it is at least
+      // as long (a fuller restatement); otherwise refresh confidence only.
+      const keepNewContent =
+        (op.content?.length ?? 0) >= (existing.content?.length ?? 0);
+      log.info(
+        `curation: collapsing near-duplicate preference into existing entry ` +
+          `${existing.id.slice(0, 8)} (sim=${dup?.similarity.toFixed(3)}, ` +
+          `content=${keepNewContent ? "new" : "kept"}): "${op.title}"`,
+      );
+      out.push({
+        op: "update",
+        id: existing.id,
+        ...(keepNewContent ? { content: op.content } : {}),
+        confidence: op.confidence,
+      });
+    } else {
+      out.push(op);
+    }
+  }
+  return out;
+}
+
 async function runInner(input: {
   llm: LLMClient;
   projectPath: string;
@@ -751,7 +833,17 @@ async function runInner(input: {
     );
   }
 
-  const result = applyOps(response.ops, {
+  // Pre-pass: collapse near-duplicate `preference` creates into updates.
+  // The curator re-observes the same behavioral rule each session and re-phrases
+  // it ("document invariants in code" stated 3 ways), producing paraphrases that
+  // ltm.create()'s title-only dedup misses. Preferences inject into the
+  // always-pinned system[1] block, so duplicates are the most costly. Use
+  // embedding similarity at a preference-specific (looser) threshold to redirect
+  // a near-dup create onto the existing entry. Async embedding work lives here
+  // (runInner is async) so applyOps can stay synchronous.
+  const ops = await dedupePreferenceCreates(response.ops, input.projectPath);
+
+  const result = applyOps(ops, {
     projectPath: input.projectPath,
     sessionID: input.sessionID,
     skipCreate: atLimit,
@@ -854,6 +946,30 @@ async function runInner(input: {
 // ---------------------------------------------------------------------------
 
 /**
+ * True if a non-zero-confidence knowledge entry with this exact (case-folded)
+ * title already exists for the project in the given category. Used to suppress
+ * behavioral-signal lines for patterns the curator has ALREADY captured — so it
+ * is not re-prompted every run to re-create the same preference/gotcha (the
+ * re-observation → near-duplicate-mint loop). Mirrors the title check ltm.create
+ * uses, so "already captured" here means "would dedup-merge on create".
+ */
+function hasKnowledgeTitle(
+  projectId: string,
+  category: string,
+  title: string,
+): boolean {
+  return (
+    db()
+      .query(
+        `SELECT id FROM knowledge
+         WHERE project_id = ? AND LOWER(title) = LOWER(?)
+         AND category = ? AND confidence > 0 LIMIT 1`,
+      )
+      .get(projectId, title, category) != null
+  );
+}
+
+/**
  * Scan distillation observations for action tags and count their occurrence
  * across distinct sessions. Returns a compact summary like:
  *
@@ -862,9 +978,10 @@ async function runInner(input: {
  *    - [corrected-style] appeared in 3 sessions"
  *
  * This helps the curator recognize implicit preferences from repeated behavior
- * without the noise of full recall results.
+ * without the noise of full recall results. Tags already captured as preference
+ * entries are filtered out so the curator is not re-prompted to re-create them.
  */
-function buildActionTagContext(
+export function buildActionTagContext(
   projectPath: string,
   currentSessionID: string,
 ): string {
@@ -895,9 +1012,14 @@ function buildActionTagContext(
     }
   }
 
-  // Filter to tags that appeared in 2+ sessions (emerging patterns)
+  // Filter to tags that appeared in 2+ sessions (emerging patterns), AND that
+  // are not already captured as a preference entry — otherwise the curator is
+  // re-prompted to re-create the same preference on every run (re-observation
+  // loop → near-duplicate mints). tagToTitle maps a tag to the canonical
+  // preference title the distiller/curator would create for it.
   const significant = [...tagSessions.entries()]
     .filter(([, sessions]) => sessions.size >= 2)
+    .filter(([tag]) => !hasKnowledgeTitle(pid, "preference", tagToTitle(tag)))
     .sort((a, b) => b[1].size - a[1].size);
 
   if (!significant.length) return "";
@@ -923,10 +1045,22 @@ function buildToolFailureContext(
   projectPath: string,
   currentSessionID: string,
 ): string {
-  const stats = toolTrace.toolFailureStats(projectPath, {
-    minSessions: 2,
-    excludeSessionID: currentSessionID,
-  });
+  const pid = ensureProject(projectPath);
+  const stats = toolTrace
+    .toolFailureStats(projectPath, {
+      minSessions: 2,
+      excludeSessionID: currentSessionID,
+    })
+    // Drop failures already captured as a gotcha entry so the curator is not
+    // re-prompted to re-create them every run (re-observation loop).
+    .filter(
+      (s) =>
+        !hasKnowledgeTitle(
+          pid,
+          "gotcha",
+          toolTrace.toolGotchaTitle(s.tool, s.error_type),
+        ),
+    );
   if (!stats.length) return "";
 
   const lines = stats
@@ -981,6 +1115,16 @@ export async function consolidate(input: {
   projectPath: string;
   sessionID: string;
   model?: { providerID: string; modelID: string };
+  /**
+   * When set, consolidate a single bloated category (e.g. "preference") even
+   * though the GLOBAL entry count is under maxEntries. Sends all PROJECT-SCOPED
+   * entries of that category (cross-project/global entries are EXCLUDED for
+   * deletion safety — one project must not delete a globally-shared preference)
+   * to the LLM so it can merge paraphrased near-duplicates that the
+   * confidence-tail batched mode would never surface. Used by the per-category
+   * consolidation trigger.
+   */
+  focusCategory?: string;
   workerHealth?: {
     recordFailure(reason: string): void;
     recordSuccess(): void;
@@ -988,6 +1132,23 @@ export async function consolidate(input: {
 }): Promise<{ updated: number; deleted: number }> {
   const cfg = config();
   if (!cfg.curator.enabled) return { updated: 0, deleted: 0 };
+
+  // Category-focused mode: bypass the global-count gate and merge one bloated
+  // category. Only send PROJECT-SCOPED entries to the consolidator — never
+  // cross-project (global) ones. applyOps' project guard treats global
+  // (project_id=NULL) rows as freely mutable/deletable, so a single project's
+  // consolidation could otherwise delete a preference shared across ALL
+  // projects. Excluding them mirrors the global path's includeCross=false
+  // safety. (Global-preference dedup is handled at create time by
+  // dedupePreferenceCreates, which redirects onto the existing global entry.)
+  if (input.focusCategory) {
+    const projectScoped = ltm.forProject(input.projectPath, false);
+    const catEntries = projectScoped.filter(
+      (e) => e.category === input.focusCategory,
+    );
+    if (catEntries.length < 2) return { updated: 0, deleted: 0 };
+    return consolidateEntries(input, catEntries);
+  }
 
   // Intentionally excludes cross-project entries (includeCross=false).
   // Consolidation should only merge/trim project-scoped entries — cross-project
@@ -1038,9 +1199,58 @@ export async function consolidate(input: {
     );
   }
 
+  return runConsolidationPrompt(input, entriesForPrompt, batchTarget);
+}
+
+/**
+ * Consolidate an explicit set of entries (a single bloated category) by merging
+ * GENUINE DUPLICATES only — no numeric eviction target. Uses the merge-oriented
+ * prompt so distinct entries are never force-deleted (unlike the global trim
+ * path). Bypasses the lowest-confidence batched selection (which never surfaces
+ * high-confidence preference dups).
+ */
+async function consolidateEntries(
+  input: Parameters<typeof consolidate>[0],
+  entries: Array<{
+    id: string;
+    category: string;
+    title: string;
+    content: string;
+  }>,
+): Promise<{ updated: number; deleted: number }> {
+  const entriesForPrompt = entries.map((e) => ({
+    id: e.id,
+    category: e.category,
+    title: e.title,
+    content: e.content,
+  }));
+  log.info(
+    `consolidation: category-focused — evaluating ${entries.length} "${entries[0]?.category}" entries for near-duplicate merge`,
+  );
+  return runConsolidationPrompt(input, entriesForPrompt, 0, "merge-duplicates");
+}
+
+/**
+ * Shared tail of consolidate(): build the prompt, call the LLM, apply the
+ * returned merge/delete ops. Never creates (skipCreate). Used by both the
+ * global-count trim path ("trim") and the category-focused merge path
+ * ("merge-duplicates").
+ */
+async function runConsolidationPrompt(
+  input: Parameters<typeof consolidate>[0],
+  entriesForPrompt: Array<{
+    id: string;
+    category: string;
+    title: string;
+    content: string;
+  }>,
+  targetMax: number,
+  mode: "trim" | "merge-duplicates" = "trim",
+): Promise<{ updated: number; deleted: number }> {
   const userContent = consolidationUser({
     entries: entriesForPrompt,
-    targetMax: batchTarget,
+    targetMax,
+    mode,
   });
   // Pass the explicit worker model through — never fall back to cfg.model
   // which is the project/session model and may be from a different provider
@@ -1049,7 +1259,9 @@ export async function consolidate(input: {
   // or skips the call before the adapter's defaultModel is used.
   const model = input.model;
   const responseText = await input.llm.prompt(
-    CONSOLIDATION_SYSTEM,
+    mode === "merge-duplicates"
+      ? CONSOLIDATION_MERGE_SYSTEM
+      : CONSOLIDATION_SYSTEM,
     userContent,
     {
       model,

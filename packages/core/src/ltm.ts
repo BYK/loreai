@@ -386,6 +386,16 @@ const FUZZY_DEDUP_MIN_OVERLAP = 4;
  *  - <0.92: mixed or unrelated entries */
 const EMBEDDING_DEDUP_THRESHOLD = 0.935;
 
+/** Cosine cutoff for deduping `preference` entries at create time. Lower than
+ *  the global 0.935 because preferences are behavioral directives the LLM
+ *  curator re-observes and re-phrases every session ("document invariants in
+ *  code" stated 3 ways), producing paraphrases that cluster ~0.85–0.92 — below
+ *  the conservative global threshold yet clearly the same rule. Scoped to a
+ *  single category (preferences inject into the always-pinned system[1] block,
+ *  so duplicates are the most costly), so the looser cutoff cannot false-merge
+ *  distinct architecture/gotcha entries. */
+export const PREFERENCE_DEDUP_THRESHOLD = 0.88;
+
 // --- Cross-project auto-promotion thresholds (issue #498) ---
 /** A semantic cluster must span at least this many distinct projects to
  *  qualify its members for cross-project promotion. */
@@ -492,8 +502,16 @@ export async function findSemanticDuplicate(input: {
   title: string;
   content: string;
   projectId: string | null;
+  /**
+   * Cosine-similarity cutoff. Defaults to EMBEDDING_DEDUP_THRESHOLD (0.935),
+   * tuned high to avoid false-merging distinct same-subsystem entries. Callers
+   * deduping a single category where paraphrase is common (e.g. preferences)
+   * may pass a lower, category-specific threshold (see PREFERENCE_DEDUP_THRESHOLD).
+   */
+  threshold?: number;
 }): Promise<{ id: string; similarity: number } | null> {
   if (!embedding.isAvailable()) return null;
+  const threshold = input.threshold ?? EMBEDDING_DEDUP_THRESHOLD;
   let vec: Float32Array;
   try {
     [vec] = await embedding.embed(
@@ -508,7 +526,7 @@ export async function findSemanticDuplicate(input: {
   // project (same project or cross-project) — vectorSearch is global.
   const hits = embedding.vectorSearch(vec, 10);
   for (const hit of hits) {
-    if (hit.similarity < EMBEDDING_DEDUP_THRESHOLD) break; // sorted desc
+    if (hit.similarity < threshold) break; // sorted desc
     const row = db()
       .query(
         `SELECT id FROM knowledge
