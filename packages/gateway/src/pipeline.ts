@@ -936,6 +936,16 @@ function getModelSpec(model: string): ModelSpec {
 const MAX_TOKENS_FLOOR = 8192;
 const MAX_TOKENS_BUFFER = 1000;
 const MAX_TOKENS_EMA_MULTIPLIER = 3;
+/**
+ * Minimum room reserved for visible output (text + tool calls) on top of the
+ * extended-thinking budget. For Anthropic, `max_tokens` is the COMBINED cap on
+ * thinking + visible output, and the API requires `max_tokens > budget_tokens`.
+ * If the cap is sized without accounting for the thinking budget, a deep-think
+ * turn can consume the entire allowance on reasoning, hit `stop_reason:"length"`
+ * mid-thought, and emit no text/tool call — the turn "stops" with nothing
+ * rendered and the agent loop exits with no auto-recovery.
+ */
+const THINKING_OUTPUT_HEADROOM = 8192;
 
 /**
  * Compute a right-sized `max_tokens` value for a conversation turn using
@@ -945,6 +955,12 @@ const MAX_TOKENS_EMA_MULTIPLIER = 3;
  * - Turns 2+: 3× output EMA, clamped by context headroom and ceiling.
  * - After truncation (`stop_reason: "length"`): jumps back to ceiling.
  *
+ * When extended thinking is enabled (`thinkingBudget > 0`), the result is
+ * floored at `thinkingBudget + THINKING_OUTPUT_HEADROOM` so reasoning never
+ * starves the visible output. Anthropic requires `max_tokens > budget_tokens`;
+ * a low output EMA (e.g. after a run of short tool-call turns) would otherwise
+ * collapse the cap to `MAX_TOKENS_FLOOR`, truncating thinking-heavy turns.
+ *
  * Exported for testing.
  */
 export function computeMaxTokens(
@@ -953,32 +969,44 @@ export function computeMaxTokens(
   outputEMA: number | undefined,
   lastStopReason: string | undefined,
   lastInputTokens: number | undefined,
+  thinkingBudget?: number,
 ): number {
   const ceiling = Math.min(modelOutput, 32_000);
 
-  // Turn 1: no history — use ceiling (matches Claude Code default)
-  if (outputEMA == null) return ceiling;
+  // Extended thinking: max_tokens must leave room for visible output ON TOP of
+  // the thinking budget (Anthropic counts both against max_tokens and requires
+  // max_tokens > budget_tokens). This raises the effective floor — but never
+  // above the model's hard output limit.
+  const baseFloor =
+    thinkingBudget && thinkingBudget > 0
+      ? thinkingBudget + THINKING_OUTPUT_HEADROOM
+      : MAX_TOKENS_FLOOR;
+  const floor = Math.min(baseFloor, modelOutput);
+
+  // Turn 1: no history — use ceiling (matches Claude Code default), but never
+  // below the thinking floor.
+  if (outputEMA == null) return Math.max(ceiling, floor);
 
   // Headroom: how much output the context can afford given last known input
   const estimatedInput = lastInputTokens ?? 0;
   const headroom = Math.max(
-    MAX_TOKENS_FLOOR,
+    floor,
     modelContext - estimatedInput - MAX_TOKENS_BUFFER,
   );
 
   // History: 3× recent output EMA — generous multiplier to absorb spikes
-  let adaptive = Math.max(
-    MAX_TOKENS_FLOOR,
-    MAX_TOKENS_EMA_MULTIPLIER * outputEMA,
-  );
+  let adaptive = Math.max(floor, MAX_TOKENS_EMA_MULTIPLIER * outputEMA);
 
   // Safety: if last turn was truncated, jump to ceiling
   if (lastStopReason === "length") {
     adaptive = ceiling;
   }
 
-  // Clamp: history within headroom, within ceiling
-  return Math.min(headroom, Math.max(adaptive, MAX_TOKENS_FLOOR), ceiling);
+  // Clamp: history within headroom, within ceiling; never below the floor.
+  return Math.max(
+    floor,
+    Math.min(headroom, Math.max(adaptive, floor), ceiling),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -4996,20 +5024,49 @@ async function handleConversationTurn(
   const isCC =
     isClaudeCodeClient(req.rawHeaders) || hasBillingHeader(req.system);
   if (!isCC) {
-    const computed = computeMaxTokens(
-      modelSpec.output,
-      modelSpec.context,
-      sessionState.outputTokensEMA,
-      sessionState.lastStopReason,
-      sessionState.lastInputTokens,
-    );
-    if (req.maxTokens !== computed) {
+    // Anthropic extended thinking arrives as `metadata.thinking =
+    // { type: "enabled", budget_tokens: N }` (not a KNOWN_BODY_FIELD, so it
+    // lands in metadata). Extract the budget so max_tokens leaves room above it
+    // — otherwise a low output EMA collapses the cap to the floor and truncates
+    // thinking-heavy turns mid-reasoning.
+    const thinkingMeta = req.metadata?.thinking as
+      | { type?: string; budget_tokens?: number }
+      | undefined;
+    const thinkingBudget =
+      thinkingMeta?.type === "enabled" &&
+      typeof thinkingMeta.budget_tokens === "number" &&
+      thinkingMeta.budget_tokens > 0
+        ? thinkingMeta.budget_tokens
+        : undefined;
+    // Unsatisfiable budget: if the thinking budget alone meets or exceeds the
+    // model's hard output limit, no rewrite can produce a valid
+    // `max_tokens > budget_tokens` (Anthropic 400s otherwise). The request is
+    // the client's responsibility — leave its max_tokens untouched rather than
+    // rewrite it into an invalid value.
+    if (thinkingBudget !== undefined && modelSpec.output <= thinkingBudget) {
       log.info(
-        `max_tokens: ${req.maxTokens} → ${computed} ` +
-          `(ema=${sessionState.outputTokensEMA ?? "none"}, ` +
-          `lastStop=${sessionState.lastStopReason ?? "none"})`,
+        `max_tokens: leaving client value ${req.maxTokens} untouched ` +
+          `(thinkingBudget=${thinkingBudget} >= modelOutput=${modelSpec.output})`,
       );
-      req.maxTokens = computed;
+    } else {
+      const computed = computeMaxTokens(
+        modelSpec.output,
+        modelSpec.context,
+        sessionState.outputTokensEMA,
+        sessionState.lastStopReason,
+        sessionState.lastInputTokens,
+        thinkingBudget,
+      );
+      if (req.maxTokens !== computed) {
+        log.info(
+          `max_tokens: ${req.maxTokens} → ${computed} ` +
+            `(ema=${sessionState.outputTokensEMA ?? "none"}, ` +
+            `lastStop=${sessionState.lastStopReason ?? "none"}` +
+            (thinkingBudget ? `, thinkingBudget=${thinkingBudget}` : "") +
+            `)`,
+        );
+        req.maxTokens = computed;
+      }
     }
   }
 
