@@ -59,9 +59,9 @@ let outputReserved = 32_000;
 //   continueCost = currentSize   × cacheReadCostPerToken
 // If bustCost ≥ threshold × continueCost, don't compress — reads are cheap.
 //
-// Rolling bust detection: if 5+ consecutive turns bust the cache, stop trying
-// to compress — something structural is causing busts, and compression just
-// adds cost on top.
+// Rolling bust detection: once SUSTAINED_BUST_THRESHOLD consecutive turns bust
+// the cache, stop trying to compress — something structural is causing busts,
+// and compression just adds cost on top.
 // ---------------------------------------------------------------------------
 
 /** Tier boundary tokens. Configurable for testing. */
@@ -127,8 +127,15 @@ export function isFreeWriteSession(sessionID: string): boolean {
 /** Consecutive-bust count at/above which a session is in a "sustained-bust
  *  regime": the prompt cache is being rewritten nearly every turn, so the
  *  "continue" path is paying cache *write* cost — not the cheap read cost the
- *  tier gate normally assumes. */
-const SUSTAINED_BUST_THRESHOLD = 5;
+ *  tier gate normally assumes.
+ *
+ *  Kept low (2): at large context windows a single full cache bust rewrites
+ *  hundreds of thousands of tokens at ~12.5× the read price, so even two
+ *  consecutive full busts is already too expensive to keep paying. A low
+ *  threshold makes shouldCompress() reprice "continue" at the write rate
+ *  sooner (compressing earlier instead of letting the context grow), and
+ *  surfaces the unsustainable-conversation warning promptly. */
+const SUSTAINED_BUST_THRESHOLD = 2;
 
 /**
  * Decide whether compression is economical at a tier boundary.
@@ -353,8 +360,9 @@ type SessionState = {
   /** Consecutive turns at layer >= 2. When >= 3, log a compaction hint. */
   consecutiveHighLayer: number;
   /** Consecutive turns where the cache was busted (>50% writes).
-   *  Used for rolling bust detection: after 5+ consecutive busts, stop
-   *  trying to compress and warn that the conversation is unsustainable. */
+   *  Used for rolling bust detection: once consecutiveBusts reaches
+   *  SUSTAINED_BUST_THRESHOLD, stop trying to compress and warn that the
+   *  conversation is unsustainable. */
   consecutiveBusts: number;
   /** Consecutive turns where the upstream reported zero cache_creation_input_tokens.
    *  After >= NO_CACHE_WRITE_THRESHOLD turns, the session is treated as "free-write" —
@@ -1706,6 +1714,16 @@ export function resetDistillationSnapshot(sessionID?: string) {
 //
 // Reset conditions: session changes, or layer escalates to 2+ (the pinned
 // window was too large even with stripping — something genuinely changed).
+//
+// When the pinned window overflows and we must rescan, we evict down to
+// RAW_WINDOW_EVICT_TARGET of rawBudget rather than re-pinning right at the
+// ceiling. A window re-pinned exactly at the budget ceiling overflows again
+// after the next ~2 messages, degrading the pin into a per-turn sliding window
+// that busts the prompt cache on every turn (the boundary marches forward ~2
+// messages/turn). Evicting a chunk leaves headroom so the boundary stays stable
+// for many turns between evictions, trading a little retained history for a
+// large reduction in cache-write cost.
+const RAW_WINDOW_EVICT_TARGET = 0.75;
 
 type RawWindowCache = {
   sessionID: string;
@@ -1838,13 +1856,25 @@ function tryFitStable(input: {
     );
   }
 
-  // Normal backward scan to find the tightest fitting cutoff.
+  // Normal backward scan to find the tightest fitting cutoff. Evict down to a
+  // chunk below the ceiling (rawFillBudget) so the re-pinned boundary has
+  // headroom and won't overflow again on the next turn — preventing the
+  // per-turn boundary march that busts the cache. The current-turn escalation
+  // guard inside tryFit still uses the full rawBudget.
+  //
+  // Edge case: when the current turn alone is larger than rawFillBudget
+  // (i.e. > 75% of rawBudget), the older-message fill collapses to ~0 and the
+  // window keeps only the current turn — so a session whose every turn is that
+  // large can still march. That's an extreme regime (the old full-budget rescan
+  // also degraded, just at the 100% boundary); higher layers (tool stripping)
+  // take over when even the current turn doesn't fit the full rawBudget.
   const result = tryFit({
     messages: input.messages,
     prefix: input.prefix,
     prefixTokens: input.prefixTokens,
     distilledBudget: input.distilledBudget,
     rawBudget: input.rawBudget,
+    rawFillBudget: Math.floor(input.rawBudget * RAW_WINDOW_EVICT_TARGET),
     strip: "none",
   });
 
@@ -1924,9 +1954,10 @@ export type TransformResult = {
   // relevance scoring. Set on Layer 4 (emergency) where the context is
   // fully reset and mid-session knowledge may have changed relevance.
   refreshLtm: boolean;
-  /** When set, the conversation is growing unsustainably — 5+ consecutive
-   *  cache busts detected. The pipeline should inject a warning message
-   *  advising the user to compact or start a new conversation. */
+  /** When set, the conversation is growing unsustainably —
+   *  SUSTAINED_BUST_THRESHOLD+ consecutive cache busts detected. The pipeline
+   *  should inject a warning message advising the user to compact or start a
+   *  new conversation. */
   unsustainable?: boolean;
 };
 
@@ -2222,7 +2253,7 @@ function transformInner(input: {
         distilledBudget,
         rawBudget,
         refreshLtm: false,
-        unsustainable: busts >= 5,
+        unsustainable: busts >= SUSTAINED_BUST_THRESHOLD,
       };
     }
   }
@@ -2564,6 +2595,16 @@ function tryFit(input: {
   rawBudget: number;
   strip: "none" | "old-tools" | "all-tools";
   protectedTurns?: number;
+  /**
+   * Optional target budget for the backward fill of OLDER messages. Defaults to
+   * `rawBudget`. The current-turn escalation guard always uses the full
+   * `rawBudget` (a turn that doesn't fit must still escalate), but the older-
+   * message fill can target a smaller budget so the chosen window leaves
+   * headroom below the ceiling. Used by tryFitStable's rescan path to evict in
+   * a chunk (so the re-pinned boundary doesn't sit right at the ceiling and
+   * overflow again next turn).
+   */
+  rawFillBudget?: number;
 }): Omit<
   TransformResult,
   "layer" | "usable" | "distilledBudget" | "rawBudget" | "refreshLtm"
@@ -2590,8 +2631,13 @@ function tryFit(input: {
 
   // Walk backwards through older messages (before the current turn),
   // filling the remaining budget after reserving space for the current turn.
+  // The fill targets `rawFillBudget` (defaults to rawBudget); callers can pass a
+  // smaller value to evict in a chunk and leave headroom below the ceiling. The
+  // current turn is always reserved against the full rawBudget (already checked
+  // above), so clamp so the older-fill target can't go negative.
   const olderMessages = input.messages.slice(0, turnStart);
-  const remainingBudget = input.rawBudget - currentTurnTokens;
+  const fillBudget = input.rawFillBudget ?? input.rawBudget;
+  const remainingBudget = Math.max(0, fillBudget - currentTurnTokens);
   let olderTokens = 0;
   let cutoff = olderMessages.length; // default: include none of the older messages
   const protectedTurns = input.protectedTurns ?? 0;

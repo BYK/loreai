@@ -6,9 +6,14 @@ import {
   mapOffsetToJsonPath,
   inferDivergenceReason,
   analyzeCacheTurn,
+  categorizeBust,
   normalizeBodyForComparison,
 } from "../src/cache-analytics";
-import type { CacheAnalytics, GatewayUsage } from "../src/translate/types";
+import type {
+  CacheAnalytics,
+  CacheTurnAnalysis,
+  GatewayUsage,
+} from "../src/translate/types";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -670,5 +675,102 @@ describe("analyzeCacheTurn — cch normalization", () => {
 
     expect(result.divergencePoint).toBe("<identical>");
     expect(result.divergenceReason).toBe("request bodies are identical");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// categorizeBust — previously had ZERO test coverage. This classifier is the
+// telemetry oracle that distinguishes a raw-window march ("window-shift") from
+// other bust causes; the layer-1 pin-march bug escaped because nothing tested it.
+// ---------------------------------------------------------------------------
+
+describe("categorizeBust", () => {
+  function makeAnalysis(
+    overrides: Partial<CacheTurnAnalysis> = {},
+  ): CacheTurnAnalysis {
+    // A full cache bust (cacheRead=0, cacheCreation>0) on a steady-state turn,
+    // so categorizeBust classifies by divergence location.
+    return {
+      turn: 5,
+      cacheRead: 0,
+      cacheCreation: 100_000,
+      inputTokens: 2,
+      cacheHitRate: 0,
+      prefixMatchBytes: 0,
+      prefixMatchPercent: 0,
+      divergencePoint: "messages[42].content[0].text",
+      divergenceReason: "",
+      prevSnippet: undefined,
+      currSnippet: undefined,
+      ...overrides,
+    };
+  }
+
+  test("classifies a mid-history message divergence as window-shift", () => {
+    // messages[idx>1] divergence on a full bust = raw window eviction shifted
+    // message positions — the exact signature of the layer-1 pin march.
+    expect(
+      categorizeBust(
+        makeAnalysis({ divergencePoint: "messages[42].content[0].text" }),
+        false,
+      ),
+    ).toBe("window-shift");
+    expect(
+      categorizeBust(makeAnalysis({ divergencePoint: "messages[2]" }), false),
+    ).toBe("window-shift");
+  });
+
+  test("classifies an early-message divergence as prefix-rewrite", () => {
+    // messages[0/1] are the synthetic distilled prefix → meta-distillation rewrite.
+    expect(
+      categorizeBust(makeAnalysis({ divergencePoint: "messages[0]" }), false),
+    ).toBe("prefix-rewrite");
+    expect(
+      categorizeBust(
+        makeAnalysis({ divergencePoint: "messages[1].content[0].text" }),
+        false,
+      ),
+    ).toBe("prefix-rewrite");
+  });
+
+  test("classifies system/tools divergences distinctly", () => {
+    expect(
+      categorizeBust(makeAnalysis({ divergencePoint: "system[2]" }), false),
+    ).toBe("system-change");
+    expect(
+      categorizeBust(makeAnalysis({ divergencePoint: "tools[0].name" }), false),
+    ).toBe("tools-change");
+  });
+
+  test("does not classify a cache-hit turn as a window-shift", () => {
+    // cacheRead > 0 → incremental append, never a bust regardless of divergence.
+    expect(
+      categorizeBust(
+        makeAnalysis({
+          cacheRead: 50_000,
+          cacheCreation: 1_000,
+          divergencePoint: "messages[42].content[0].text",
+        }),
+        false,
+      ),
+    ).toBe("incremental");
+  });
+
+  test("post-idle cold cache is idle-resume, not window-shift", () => {
+    expect(
+      categorizeBust(
+        makeAnalysis({ divergencePoint: "messages[42].content[0].text" }),
+        true,
+      ),
+    ).toBe("idle-resume");
+  });
+
+  test("first turn is never a bust", () => {
+    expect(
+      categorizeBust(
+        makeAnalysis({ turn: 1, divergencePoint: "<first-turn>" }),
+        false,
+      ),
+    ).toBe("first-turn");
   });
 });

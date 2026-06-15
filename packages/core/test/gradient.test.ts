@@ -500,6 +500,82 @@ describe("gradient — lazy raw window eviction (Approach B)", () => {
     calibrate(0);
     resetRawWindowCache();
   });
+
+  test("raw window boundary stays pinned across many growing turns at the budget ceiling", () => {
+    // Regression for the layer-1 per-turn cache-bust march (session
+    // 0AVWKugtmhBKqLOX9): when the raw window sits AT the rawBudget ceiling,
+    // each turn's ~2 new messages overflow the 15% pin hysteresis. Before the
+    // chunked-eviction fix, tryFitStable re-pinned right back at the ceiling
+    // with the boundary advanced ~2 messages — so the start boundary marched
+    // forward EVERY turn, busting the prompt cache each time. With the fix, an
+    // overflow evicts a chunk (down to RAW_WINDOW_EVICT_TARGET of budget),
+    // leaving headroom so the boundary holds for many turns between steps.
+    resetRawWindowCache();
+    // context=20000, output=4000 → usable=16000, rawBudget=floor(16000*0.4)=6400.
+    // Each 1000-char message ≈ 354 tokens (1000/3 + 20). ~18 raw msgs saturate
+    // the budget (18×354=6372 ≤ 6400), so the window sits at the ceiling.
+    setModelLimits({ context: 20_000, output: 4_000 });
+    calibrate(0);
+
+    const SESS = "pin-ceiling-march";
+    // Start with a saturated conversation so gradient fires at layer 1 and the
+    // raw window is pinned right at the ceiling.
+    const msgs = Array.from({ length: 40 }, (_, i) =>
+      makeMsg(
+        `march-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "A".repeat(1_000),
+        SESS,
+      ),
+    );
+
+    const r0 = transform({
+      messages: msgs,
+      projectPath: PROJECT,
+      sessionID: SESS,
+    });
+    expect(r0.layer).toBe(1);
+
+    const firstRawId = (r: { messages: typeof msgs }) =>
+      r.messages.find((m) => m.info.sessionID === SESS)?.info.id;
+
+    // Simulate 12 consecutive turns, each appending a user+assistant pair sized
+    // so a single turn's growth (~1374 tokens ≈ 21% of the 6400 budget) exceeds
+    // the 15% pin hysteresis on its own. Pre-fix, that means the pin overflows
+    // and re-pins at the ceiling EVERY turn → boundary advances every turn.
+    const boundaries: (string | undefined)[] = [firstRawId(r0)];
+    for (let turn = 0; turn < 12; turn++) {
+      msgs.push(
+        makeMsg(`march-u-${turn}`, "user", "A".repeat(2_000), SESS),
+        makeMsg(`march-a-${turn}`, "assistant", "A".repeat(2_000), SESS),
+      );
+      const r = transform({
+        messages: msgs,
+        projectPath: PROJECT,
+        sessionID: SESS,
+      });
+      expect(r.layer).toBe(1);
+      boundaries.push(firstRawId(r));
+    }
+
+    // Count how many turns advanced the boundary. A marching boundary (the bug)
+    // advances on every one of the 12 turns. With chunked eviction the boundary
+    // holds for several turns between steps (~25% headroom / ~21% growth).
+    let advances = 0;
+    for (let i = 1; i < boundaries.length; i++) {
+      if (boundaries[i] !== boundaries[i - 1]) advances++;
+    }
+    // Strong guard: pre-fix advances ≈ 12 (every turn); post-fix ≤ 6 (chunked
+    // steps with headroom). The bound cleanly separates the two regimes.
+    expect(advances).toBeLessThanOrEqual(6);
+    // Sanity: the pin must actually hold for some turns (not a sliding window).
+    expect(advances).toBeLessThan(10);
+
+    // Reset
+    setModelLimits({ context: 5_000, output: 1_000 });
+    calibrate(0);
+    resetRawWindowCache();
+  });
 });
 
 describe("gradient — LTM budget coordination", () => {
@@ -3342,13 +3418,13 @@ describe("tier-based context management", () => {
     });
 
     test("sustained bust prices continue at WRITE cost (compresses to stop growth)", () => {
-      // In a sustained-bust regime (>=5 busts) the "continue" path is paying
-      // cache WRITE cost on the whole context every turn, not the cheap read
-      // cost. So continueCost is priced with write:
+      // In a sustained-bust regime (>=SUSTAINED_BUST_THRESHOLD=2 busts) the
+      // "continue" path is paying cache WRITE cost on the whole context every
+      // turn, not the cheap read cost. So continueCost is priced with write:
       //   continueCost = 2M × $6.25/M = $12.50
       //   bustCost     = 100K × $6.25/M = $0.625
       //   0.625 < 0.85 × 12.50 = 10.6 → compress (break the growth loop)
-      expect(shouldCompress(2_000_000, 100_000, 5)).toBe(true);
+      expect(shouldCompress(2_000_000, 100_000, 2)).toBe(true);
       expect(shouldCompress(2_000_000, 100_000, 10)).toBe(true);
     });
 
@@ -3358,15 +3434,15 @@ describe("tier-based context management", () => {
       //   continueCost = 250K × $6.25/M = $1.5625
       //   bustCost     = 240K × $6.25/M = $1.50
       //   1.50 < 0.85 × 1.5625 = 1.328 → false (don't compress)
-      expect(shouldCompress(250_000, 240_000, 5)).toBe(false);
+      expect(shouldCompress(250_000, 240_000, 2)).toBe(false);
     });
 
     test("below the sustained-bust threshold uses the cheap read cost", () => {
-      // 4 busts → not sustained → continue priced at READ cost.
+      // 1 bust → below threshold (2) → not sustained → continue priced at READ.
       //   continueCost = 2M × $0.50/M = $1.00
       //   bustCost     = 100K × $6.25/M = $0.625
       //   0.625 < 0.85 × 1.00 = 0.85 → compress
-      expect(shouldCompress(2_000_000, 100_000, 4)).toBe(true);
+      expect(shouldCompress(2_000_000, 100_000, 1)).toBe(true);
       // A modestly-grown context at 0 busts: continue is cheap → don't compress.
       expect(shouldCompress(250_000, 150_000, 0)).toBe(false);
     });
@@ -3453,8 +3529,9 @@ describe("tier-based context management", () => {
       // messages, so expectedInput == lastKnownInput == 635K.
       calibrate(635_000, SESSION, msgs.length);
 
-      // Drive the cache into a sustained-bust regime (>=5 consecutive busts):
-      // every turn is ~93% cache write, exactly like the runaway logs.
+      // Drive the cache into a sustained-bust regime (well past
+      // SUSTAINED_BUST_THRESHOLD): every turn is ~93% cache write, exactly like
+      // the runaway logs.
       for (let i = 0; i < 6; i++) {
         recordCacheUsage(440_000, 34_813, 2, SESSION);
       }
@@ -3680,9 +3757,9 @@ describe("tier-based context management", () => {
       );
     });
 
-    test("returns false with freeWrite when busts >= 5", () => {
-      // Even free compression shouldn't run if it's not helping
-      expect(shouldCompress(250_000, 150_000, 5, { freeWrite: true })).toBe(
+    test("returns false with freeWrite at/above the sustained-bust threshold", () => {
+      // Even free compression shouldn't run if it's not helping (>= threshold=2)
+      expect(shouldCompress(250_000, 150_000, 2, { freeWrite: true })).toBe(
         false,
       );
       expect(shouldCompress(250_000, 150_000, 10, { freeWrite: true })).toBe(
@@ -3690,8 +3767,9 @@ describe("tier-based context management", () => {
       );
     });
 
-    test("returns true with freeWrite at 4 busts", () => {
-      expect(shouldCompress(250_000, 150_000, 4, { freeWrite: true })).toBe(
+    test("returns true with freeWrite below the sustained-bust threshold", () => {
+      // 1 bust < threshold (2) → free compression still runs
+      expect(shouldCompress(250_000, 150_000, 1, { freeWrite: true })).toBe(
         true,
       );
     });

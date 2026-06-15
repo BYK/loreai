@@ -110,6 +110,25 @@ function serializedMessages(body: string): string {
   return JSON.stringify(parsed.messages ?? null);
 }
 
+/**
+ * Find the START of the raw window in a serialized upstream body: the first
+ * message whose text contains `marker` (our test messages embed a unique marker
+ * per message; the synthetic distilled prefix does not). Returns the marker
+ * substring of that first raw message — a stable identifier for the raw-window
+ * start boundary. Used to detect a marching boundary across turns.
+ */
+function firstRawWindowMarker(body: string, marker: RegExp): string | null {
+  const parsed = JSON.parse(normalizeBodyForComparison(body)) as {
+    messages?: Array<{ content?: unknown }>;
+  };
+  for (const msg of parsed.messages ?? []) {
+    const text = JSON.stringify(msg.content ?? "");
+    const m = text.match(marker);
+    if (m) return m[0];
+  }
+  return null;
+}
+
 function textTurn(
   role: "user" | "assistant",
   text: string,
@@ -866,6 +885,175 @@ describe("cache stability (e2e)", () => {
             `mid-session LTM write must not bust the cached system prefix (#741)`,
         ).toEqual(steadyBlocks);
       }
+    } finally {
+      if (prevIdleTimeout === undefined) delete process.env.LORE_IDLE_TIMEOUT;
+      else process.env.LORE_IDLE_TIMEOUT = prevIdleTimeout;
+    }
+  });
+
+  it("raw-window start boundary does not march every turn across compressed turns", async () => {
+    // Regression for the layer-1 raw-window pin march (session 0AVWKugtmhBKqLOX9):
+    // once a large session compresses at layer 1 and the raw window sits at the
+    // rawBudget ceiling, the pin must NOT re-pin at the ceiling and advance the
+    // window START boundary ~2 messages every turn (which busts the prompt cache
+    // mid-history every turn). The chunked-eviction fix evicts below the ceiling
+    // so the boundary holds for many turns between steps.
+    //
+    // This is the gateway-level analogue of the core unit regression: we drive a
+    // real multi-turn conversation through the gateway, then inspect each
+    // UPSTREAM body and track the FIRST raw-window message (identified by its
+    // unique marker). A marching boundary advances that first marker on (nearly)
+    // every turn; the fix holds it for stretches. We avoid the full-body
+    // divergence oracle here because at layer 1 it cannot distinguish legitimate
+    // tail growth (high message index) from a real mid-history march.
+    const prevIdleTimeout = process.env.LORE_IDLE_TIMEOUT;
+    process.env.LORE_IDLE_TIMEOUT = "3600"; // keep idle workers from firing
+    try {
+      const projectPath = `/tmp/lore-window-march-${Date.now()}`;
+      const clientSessionID = `window-march-client-${Date.now()}`;
+
+      // Force a low layer-0 cap via project .lore.json so a ~125K session
+      // compresses to layer 1 (the raw-window pin path) deterministically —
+      // without depending on models.dev pricing being warm in the test. The
+      // pipeline calls config.load(projectPath) per request, so this is honored.
+      const { mkdirSync, writeFileSync } = await import("node:fs");
+      mkdirSync(projectPath, { recursive: true });
+      writeFileSync(
+        `${projectPath}/.lore.json`,
+        JSON.stringify({ budget: { maxLayer0Tokens: 40000 } }),
+      );
+
+      // Large messages so the raw window overflows rawBudget and the gradient
+      // pins a layer-1 SUB-window at the ceiling. Each message ≈ 8K tokens
+      // (~24K chars), so a single user+assistant pair (~16K tokens) is a large
+      // fraction of rawBudget — enough that one turn's growth trips the pin's
+      // 15% hysteresis on its own. Pre-fix that forces a re-pin at the ceiling
+      // and a boundary advance EVERY turn; the fix evicts a chunk so the
+      // boundary holds for many turns between steps.
+      const big = (label: string) =>
+        `${label} ${"lorem ipsum dolor ".repeat(1_350)}`;
+      const TOTAL_TURNS = 14;
+      const BASE_PAIRS = 14; // ~28 base messages × ~8K ≈ 224K → well over budget
+
+      const fixtures = Array.from({ length: TOTAL_TURNS }, (_, i) =>
+        makeFixtureEntry({
+          seq: i,
+          requestMessages: [],
+          responseText: big(`assistant reply ${i}`),
+          model: DEFAULT_MODEL,
+          // Realistic growing large input so calibrate() tracks the true body
+          // size and the gradient pins a real layer-1 sub-window.
+          inputTokens: 120_000 + i * 8_000,
+          outputTokens: 1_200,
+        }),
+      );
+
+      harness = await createHarness({ fixtures });
+
+      const {
+        calibrate,
+        resetCalibration,
+        setUrgentDistillationEnabledForTest,
+      } = await import("../../core/src/gradient");
+      resetCalibration();
+      setUrgentDistillationEnabledForTest(false);
+      calibrate(0);
+
+      const headers = {
+        "x-lore-project": projectPath,
+        "x-lore-session-id": clientSessionID,
+      };
+
+      const history: GatewayMessage[] = [];
+      for (let i = 0; i < BASE_PAIRS; i++) {
+        history.push(
+          toGatewayMessage(textTurn("user", big(`baseuser${i}end`))),
+        );
+        history.push(
+          toGatewayMessage(textTurn("assistant", big(`baseasst${i}end`))),
+        );
+      }
+
+      let sessionID = "";
+      let peakLayer = 0;
+      const observedLayers: number[] = [];
+      for (let turn = 0; turn < TOTAL_TURNS; turn++) {
+        history.push(
+          toGatewayMessage(textTurn("user", big(`turnuser${turn}end`))),
+        );
+        const resp = await harness.chat(
+          makeGatewayBody(history),
+          "test-key",
+          headers,
+        );
+        expect(resp.status).toBe(200);
+        await resp.json();
+        history.push(
+          toGatewayMessage(textTurn("assistant", big(`turnasst${turn}end`))),
+        );
+
+        if (turn === 0) {
+          const rows = harness.queryDB<{ session_id: string }>(
+            "SELECT session_id FROM session_state ORDER BY updated_at DESC LIMIT 1",
+          );
+          sessionID = rows[0]?.session_id ?? "";
+          expect(sessionID).not.toBe("");
+        } else {
+          const layer = await observedLayer(sessionID);
+          peakLayer = Math.max(peakLayer, layer);
+          observedLayers.push(layer);
+        }
+      }
+
+      // The raw-window pin (tryFitStable) runs ONLY at layer 1 (stage 0); higher
+      // layers use plain tryFit and reset the pin. So this test is only a valid
+      // guard if the session is actually transformed AT layer 1. Assert the
+      // steady-state turns sat at layer 1 — not layer 0 (no compression, no pin)
+      // and not escalated to 2+ (different code path). If a future budget change
+      // moved this session off layer 1, the test must fail loudly rather than
+      // silently stop guarding the pin march.
+      const layer1Turns = observedLayers.filter((l) => l === 1).length;
+      expect(
+        layer1Turns,
+        `expected most steady-state turns at layer 1 (raw-window pin path), but ` +
+          `observed layers were ${JSON.stringify(observedLayers)} (peak ${peakLayer})`,
+      ).toBeGreaterThanOrEqual(Math.ceil(observedLayers.length / 2));
+
+      const bodies = harness.upstreamBodies();
+      expect(bodies.length).toBe(TOTAL_TURNS);
+
+      // Track the FIRST raw-window message marker per turn. Markers look like
+      // "baseuser12end" / "turnuser3end" / "baseasst5end".
+      const markerRe = /(?:base|turn)(?:user|asst)\d+end/;
+      const boundaries = bodies.map((b) => firstRawWindowMarker(b, markerRe));
+      // All turns must have located a raw-window start (sanity).
+      expect(boundaries.every((b) => b !== null)).toBe(true);
+
+      // Count boundary advances and holds across steady-state turns (from turn 2
+      // / index 1, after the layer-1 distilled prefix is established).
+      let advances = 0;
+      let holds = 0;
+      let comparisons = 0;
+      for (let i = 2; i < boundaries.length; i++) {
+        comparisons++;
+        if (boundaries[i] !== boundaries[i - 1]) advances++;
+        else holds++;
+      }
+      // The bug is a boundary that marches on EVERY steady-state turn: it advances
+      // every turn and never holds (the raw window is re-pinned at the ceiling, so
+      // each turn's growth re-evicts). The chunked-eviction fix leaves headroom so
+      // the boundary holds on at least some turns. Assert at least one held turn —
+      // a per-turn march has zero holds, so this fails pre-fix (verified) and the
+      // bound is robust to the harness's coarse per-turn step size.
+      const detail =
+        `advanced on ${advances}/${comparisons} steady-state turns (holds=${holds}, ` +
+        `boundaries=${JSON.stringify(boundaries)})`;
+      expect(
+        holds,
+        `raw-window start boundary marched on every steady-state turn — ${detail}. ` +
+          `The layer-1 pin must hold the boundary on at least some turns, evicting ` +
+          `only in occasional chunks (regression: per-turn window march).`,
+      ).toBeGreaterThan(0);
     } finally {
       if (prevIdleTimeout === undefined) delete process.env.LORE_IDLE_TIMEOUT;
       else process.env.LORE_IDLE_TIMEOUT = prevIdleTimeout;

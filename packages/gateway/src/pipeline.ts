@@ -5782,7 +5782,8 @@ async function handleConversationTurn(
   // See issue #741.
 
   // --- 7d. Unsustainable conversation warning ---
-  // When 5+ consecutive cache busts are detected, flag for response-side injection.
+  // When a sustained run of consecutive cache busts is detected (gradient's
+  // SUSTAINED_BUST_THRESHOLD), flag for response-side injection.
   // The warning is injected into the assistant response (not the user message) so:
   //  1. The user can actually see it (not hidden in <system-reminder> tags)
   //  2. No modification to user messages → no cache prefix divergence
@@ -5790,7 +5791,7 @@ async function handleConversationTurn(
   const unsustainable = result.unsustainable;
   if (unsustainable) {
     log.warn(
-      `session ${sessionID}: unsustainable conversation detected (5+ consecutive cache busts). ` +
+      `session ${sessionID}: unsustainable conversation detected (sustained consecutive cache busts). ` +
         `Warning will be prepended to response.`,
     );
   }
