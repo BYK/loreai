@@ -1011,10 +1011,12 @@ describe("worker beta capability validation", () => {
     // Use a 1M-capable model (opus) so the capability filter KEEPS the beta —
     // then simulate the real scenario where the model supports 1M but the
     // SUBSCRIPTION isn't entitled, so Anthropic still 400s. The runtime
-    // beta-stripped retry is what recovers.
+    // beta-stripped retry is what recovers. The sniffed beta also carries the
+    // OAuth gate (oauth-2025-04-20) which MUST survive the retry — stripping it
+    // would turn the recoverable 400 into a 401.
     captureBillingPrefix("sess-400-beta", BILLING_SYSTEM);
     captureSessionHeaders("sess-400-beta", {
-      "anthropic-beta": "context-1m-2025-08-07",
+      "anthropic-beta": "oauth-2025-04-20,context-1m-2025-08-07",
     });
 
     const client = createGatewayLLMClient(
@@ -1031,8 +1033,13 @@ describe("worker beta capability validation", () => {
 
     expect(result).toBe("recovered");
     expect(mockFetch).toHaveBeenCalledTimes(2);
-    // First attempt carried the beta; retry dropped it.
+    // First attempt carried the long-context beta.
     expect(betaOf(0)).toContain("context-1m");
-    expect(betaOf(1)).toBeUndefined();
+    expect(betaOf(0)).toContain("oauth-2025-04-20");
+    // Retry dropped ONLY the long-context beta — the OAuth gate is preserved
+    // (stripping it would 401 the retry).
+    expect(betaOf(1)).toBeDefined();
+    expect(betaOf(1)).not.toContain("context-1m");
+    expect(betaOf(1)).toContain("oauth-2025-04-20");
   });
 });

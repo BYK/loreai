@@ -109,24 +109,24 @@ describe("worker cross-provider routing matrix (structural guard)", () => {
           : "api.openai.com";
 
       test(`worker=${wp.providerID} on ${sessionProvider} session never collides with the other direct provider`, async () => {
-        // A credential EXISTS for the worker model's provider (so routing is
-        // possible) AND for the session provider (the global/foreign cred).
+        // Provide a VALID, correctly-prefixed credential for the worker model's
+        // provider so routing genuinely succeeds (not skipped by the protocol-
+        // mismatch prefix guard) — this keeps the positive assertion below
+        // non-vacuous. anthropic → sk-ant-; openai → sk- (non-ant); third
+        // parties use a generic key (their host is exempt from the prefix
+        // guard). The session/global cred is a foreign Anthropic key.
+        const workerKey =
+          wp.providerID === "anthropic"
+            ? "sk-ant-worker"
+            : wp.providerID === "openai"
+              ? "sk-openai-worker"
+              : "worker-key";
         const client = createGatewayLLMClient(
           UPSTREAMS,
-          (_sid, providerID) => {
-            if (providerID === wp.providerID) {
-              // Use an Anthropic-prefixed key only for anthropic; a generic key
-              // otherwise. The prefix guard must not reject valid foreign keys.
-              return {
-                scheme: "api-key",
-                value:
-                  wp.providerID === "anthropic"
-                    ? "sk-ant-worker"
-                    : "worker-key",
-              };
-            }
-            return { scheme: "api-key", value: "sk-ant-session" };
-          },
+          (_sid, providerID) =>
+            providerID === wp.providerID
+              ? { scheme: "api-key", value: workerKey }
+              : { scheme: "api-key", value: "sk-ant-session" },
           { providerID: sessionProvider, modelID: "session-model" },
         );
 
@@ -152,13 +152,13 @@ describe("worker cross-provider routing matrix (structural guard)", () => {
           }
         }
 
-        // Positive expectation: known providers route to their own host;
-        // unknown providers fail closed (no upstream request at all).
+        // Positive expectation (NON-vacuous): a routable provider with a valid
+        // credential MUST make exactly one upstream call, to its OWN host. If a
+        // regression makes such a provider fail closed (zero calls) or route to
+        // a foreign host, this fails. Unknown/unroutable providers fail closed.
         if (wp.ownHost) {
-          // Some call was made and it was to the worker provider's own host.
-          if (mockFetch.mock.calls.length > 0) {
-            expect(String(mockFetch.mock.calls[0][0])).toContain(wp.ownHost);
-          }
+          expect(mockFetch).toHaveBeenCalledTimes(1);
+          expect(String(mockFetch.mock.calls[0][0])).toContain(wp.ownHost);
         } else {
           expect(mockFetch).not.toHaveBeenCalled();
         }

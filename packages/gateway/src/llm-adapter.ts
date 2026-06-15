@@ -75,22 +75,53 @@ export const AUTH_ERROR_CODES = new Set([401, 403]);
 const INSUFFICIENT_CREDIT_CODES = new Set([402]);
 
 /**
- * Does this header set carry an `anthropic-beta` (case-insensitive)?
+ * Matches the long-context (1M) beta token family, e.g.
+ * `context-1m-2025-08-07`. The date suffix changes over time, so match the
+ * `context-1m` stem (optionally followed by `-<suffix>`), anchored on a
+ * trimmed token so it can't match a substring inside another beta name.
  */
-function hasBetaHeader(headers: Record<string, string>): boolean {
-  return Object.keys(headers).some((k) => k.toLowerCase() === "anthropic-beta");
+const LONG_CONTEXT_BETA_RE = /^context-1m(?:-.*)?$/;
+
+/** Minimum model context window (tokens) required to keep a `context-1m` beta. */
+const LONG_CONTEXT_MIN_WINDOW = 1_000_000;
+
+/**
+ * Does this header set carry an `anthropic-beta` whose value contains a
+ * long-context (`context-1m`) token? Only the long-context beta is a plausible
+ * cause of the "beta not available for this subscription" 400 on worker calls,
+ * so the retry fallback is gated on its presence — we never strip betas (and
+ * lose the OAuth gate) for an unrelated 400.
+ */
+function hasLongContextBeta(headers: Record<string, string>): boolean {
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === "anthropic-beta" && /context-1m/i.test(v)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
- * Return a copy of the headers with every `anthropic-beta` entry removed.
- * Used as a runtime fallback when a 400 looks beta-related.
+ * Return a copy of the headers with ONLY the long-context (`context-1m`) beta
+ * token removed from `anthropic-beta`, preserving every other beta — crucially
+ * `oauth-2025-04-20`, which OAuth/bearer worker calls require to authenticate.
+ * Stripping the whole header would turn a recoverable beta-400 into a 401 on
+ * OAuth sessions. If removing the long-context token leaves no betas, the
+ * header is dropped entirely. Used as a runtime fallback on a beta-related 400.
  */
 function stripBetaHeaders(
   headers: Record<string, string>,
 ): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(headers)) {
-    if (k.toLowerCase() === "anthropic-beta") continue;
+    if (k.toLowerCase() === "anthropic-beta") {
+      const kept = v
+        .split(",")
+        .map((t) => t.trim())
+        .filter((t) => t.length > 0 && !LONG_CONTEXT_BETA_RE.test(t));
+      if (kept.length > 0) out[k] = kept.join(",");
+      continue;
+    }
     out[k] = v;
   }
   return out;
@@ -351,11 +382,20 @@ function resolveTarget(
   modelProviderID: string,
   overrideProviderID?: string,
 ): ProviderTarget & { routeUnavailable?: boolean } {
-  // Honor the session override ONLY when the worker model belongs to the same
-  // provider as the override endpoint. Otherwise the override is a foreign
-  // endpoint for this model and MUST NOT be used.
-  const overrideMatchesModel =
-    !overrideProviderID || overrideProviderID === modelProviderID;
+  // Honor the session override ONLY when we have positive evidence it belongs
+  // to this worker model's provider:
+  //  - overrideProviderID matches the model's provider (the normal case), OR
+  //  - overrideProviderID is unknown AND the model provider does NOT have its
+  //    own distinct provider route (so there's no safer endpoint to prefer —
+  //    e.g. the model provider IS the override's, or it's an aggregator).
+  // When overrideProviderID is unknown but the model HAS its own route (e.g.
+  // minimax → api.minimax.io), we do NOT trust the foreign override — we route
+  // by the model's own provider below. This fails safe: a future caller that
+  // sets `upstreamUrl` without `upstreamProviderID` cannot silently re-open the
+  // cross-provider collusion (the production minimax→Anthropic 401 loop).
+  const overrideMatchesModel = overrideProviderID
+    ? overrideProviderID === modelProviderID
+    : resolveProviderRoute(modelProviderID)?.url == null;
   if (upstreamOverride && overrideMatchesModel) {
     return {
       url: upstreamOverride.replace(/\/$/, ""),
@@ -506,17 +546,6 @@ function buildAnthropicWorkerRequest(
     body,
   };
 }
-
-/**
- * Matches the long-context (1M) beta token family, e.g.
- * `context-1m-2025-08-07`. The date suffix changes over time, so match the
- * `context-1m` stem (optionally followed by `-<suffix>`), anchored on a
- * trimmed token so it can't match a substring inside another beta name.
- */
-const LONG_CONTEXT_BETA_RE = /^context-1m(?:-.*)?$/;
-
-/** Minimum model context window (tokens) required to keep a `context-1m` beta. */
-const LONG_CONTEXT_MIN_WINDOW = 1_000_000;
 
 /**
  * Drop beta tokens that the selected worker model cannot honor. Currently
@@ -924,7 +953,20 @@ export function createGatewayLLMClient(
         return null;
       }
       const upstreamOverride = opts?.upstreamUrl;
-      const protocol = resolveWorkerProtocol(model.providerID, opts?.protocol);
+      // The explicit protocol hint comes from the SESSION's upstream. Only
+      // honor it when the worker model belongs to the same provider as the
+      // session — otherwise it's the wrong wire protocol for this model (e.g.
+      // an "anthropic" hint applied to an openai worker model). For a
+      // cross-provider worker, derive the protocol from the model's OWN
+      // provider route instead. This keeps protocol, URL, and credential all
+      // consistent with the worker model's provider.
+      const sameProviderAsSession =
+        !opts?.upstreamProviderID ||
+        opts.upstreamProviderID === model.providerID;
+      const protocol = resolveWorkerProtocol(
+        model.providerID,
+        sameProviderAsSession ? opts?.protocol : undefined,
+      );
       const target = resolveTarget(
         upstreams,
         protocol,
@@ -1336,18 +1378,19 @@ export function createGatewayLLMClient(
                 // and replayed onto a worker call to a non-1M model like
                 // haiku). The upfront capability check (buildWorkerRequest)
                 // should already strip incompatible betas, but this is the
-                // runtime safety net: retry ONCE with all beta headers removed
-                // before giving up. Bounded to a single retry to avoid a loop.
+                // runtime safety net: retry ONCE with the long-context beta
+                // removed (preserving oauth-2025-04-20 et al. so OAuth calls
+                // still authenticate) before giving up. Bounded to one retry.
                 if (
                   response.status === 400 &&
                   !betaStripped &&
-                  hasBetaHeader(req.headers) &&
+                  hasLongContextBeta(req.headers) &&
                   isBetaRelated400(text)
                 ) {
                   betaStripped = true;
                   req = { ...req, headers: stripBetaHeaders(req.headers) };
                   log.warn(
-                    `worker 400 looks beta-related — retrying once without beta headers ` +
+                    `worker 400 looks long-context-beta-related — retrying once without the context-1m beta ` +
                       `(model=${model.providerID}/${model.modelID}, worker=${opts?.workerID ?? "unknown"}): ${text.slice(0, 160)}`,
                   );
                   retryCount++;
