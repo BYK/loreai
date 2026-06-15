@@ -35,94 +35,51 @@ The supported agents reach the proxy through one of three mechanisms:
 
 ## How context and knowledge flow through Lore
 
-Once a request lands in the gateway, two flows kick off in parallel: a **request path** that runs on every LLM call and shapes the prompt, and a **knowledge path** that runs on an idle tick (every 30s) and consolidates the conversation into long-term memory. The diagram below shows both. Solid arrows are synchronous within a single request; dotted arrows are async, decoupled from any specific turn.
+Once a request lands in the gateway, two flows kick off in parallel: a **request path** that runs on every LLM call and shapes the prompt, and a **knowledge path** that runs on an idle tick and consolidates the conversation into long-term memory. The diagram below ties both flows to a single formula — the six things every LLM call sees, regardless of what triggered it:
+
+**System + LTM + Meta-Distillations + Distillations + Delta Updates + Conversation**
 
 ```mermaid
-flowchart TB
-    subgraph Sources["Sources"]
-        S1["LLM traffic from agent"]
-        S2[".lore.md / AGENTS.md<br/>startup + file watcher"]
-        S3["lore import CLI<br/>7 providers, one-time history"]
+flowchart LR
+    subgraph Tiers["Sources — three-tier memory"]
+        direction TB
+        T1["Tier 1 — Temporal<br/>raw messages"]
+        T2["Tier 2 — Distillation<br/>gen-0 + gen-1+"]
+        T3["Tier 3 — LTM<br/>curated knowledge"]
     end
 
-    subgraph Ingress["Ingress"]
-        I1["Protocol parser<br/>Anthropic / OpenAI / Responses / Codex"]
+    G["Gradient context manager<br/>L0–L4 · cost-aware caps<br/>3-block system prompt"]:::gradient
+
+    subgraph Formula["The formula — what the model sees"]
+        direction TB
+        S0["System<br/>(harness rules, base)"]:::prompt
+        L["LTM<br/>(pinned entries)"]:::pinned
+        M["Meta-Distillations<br/>(gen-1+ summaries)"]:::distill
+        D["Distillations<br/>(gen-0 observations)"]:::distill
+        DU["Delta Updates<br/>(volatile channel)"]:::tail
+        C["Conversation<br/>(raw tail)"]:::tail
     end
 
-    subgraph T1["Tier 1 — Temporal storage"]
-        TT["temporal.store"]
-        DB1[("temporal_messages<br/>+ FTS5")]
-    end
+    T1 --> C
+    T1 -. "volatile" .-> DU
+    T2 --> M
+    T2 --> D
+    T3 --> L
+    Base["Lore identity<br/>(system base)"]:::neutral --> S0
+    G --> Formula
+    Tiers --> G
 
-    subgraph Realtime["Real-time request path"]
-        G0["L0 passthrough"]
-        G1["L1 distilled prefix + raw tail"]
-        G2["L2 strip old tool outputs"]
-        G3["L3 strip all tool outputs"]
-        G4["L4 emergency"]
-        SP["3-block system prompt<br/>system 0/1/2 + cache_control"]
-        RC["recall tool · 6 RRF sources"]
-        UP["Upstream LLM call"]
-        Resp["Response to agent"]
-    end
+    Formula --> Call[Upstream LLM call]
 
-    subgraph T2["Tier 2 — Distillation"]
-        DR["distillation.run"]
-        OB["LLM observer · gen-0"]
-        DB2[("distillations gen-0<br/>archived")]
-        MD["metaDistill"]
-        DB3[("distillations gen-1+")]
-    end
-
-    subgraph T3["Tier 3 — Long-term knowledge"]
-        CR["curator.run · LLM"]
-        PE["pattern-extract · regex"]
-        DB4[("knowledge + entities")]
-        EX["exportLoreFile"]
-        F4[".lore.md +<br/>AGENTS.md pointer"]
-    end
-
-    S1 --> I1
-    S2 -. "startup / on edit" .-> DB4
-    S3 -. "one-time" .-> DB4
-
-    I1 --> TT
-    TT --> DB1
-    I1 --> G0
-    G0 --> G1 --> G2 --> G3 --> G4
-    G4 --> SP
-    SP --> RC
-    RC --> UP
-    UP --> Resp
-
-    DB1 -. "idle · in-flight" .-> DR
-    DR --> OB
-    OB --> DB2
-    DB2 --> MD
-    MD --> DB3
-    DB2 -. "prefix for L1+" .-> G1
-
-    DB1 -. "periodic" .-> CR
-    OB -. "periodic" .-> CR
-    CR --> DB4
-    PE --> DB4
-    DB4 --> EX
-    EX --> F4
-    DB4 -. "forSession · hybrid vector + FTS5" .-> SP
-
-    classDef t1 fill:#c4ddc7,stroke:#1a3320,color:#1a3320
-    classDef t2 fill:#8fba96,stroke:#1a3320,color:#1a3320
-    classDef t3 fill:#5a8f63,stroke:#fff
-    classDef rt fill:#f7f2e8,stroke:#5a8f63,color:#1a3320
-    classDef src fill:#ececec,stroke:#888,color:#333
-    class TT,DB1 t1
-    class DR,OB,DB2,MD,DB3 t2
-    class CR,PE,DB4,EX,F4 t3
-    class G0,G1,G2,G3,G4,SP,RC,UP,Resp rt
-    class S1,S2,S3,I1 src
+    classDef gradient fill:#c4ddc7,stroke:#1a3320,stroke-width:2px,color:#1a3320
+    classDef neutral fill:#ececec,stroke:#888,color:#333
+    classDef prompt fill:#f7f2e8,stroke:#5a8f63,color:#1a3320
+    classDef pinned fill:#8fba96,stroke:#1a3320,color:#1a3320
+    classDef distill fill:#c4ddc7,stroke:#1a3320,color:#1a3320
+    classDef tail fill:#ececec,stroke:#888,color:#333
 ```
 
-The two paths converge at the upstream call: the request path assembles the prompt that the model actually sees (gradient-compressed messages + a 3-block system prompt with the most relevant knowledge entries + the recall tool), and the knowledge path quietly feeds the inputs that make that prompt useful in the first place. The sections below walk through each tier and each layer in detail.
+The formula's six parts map to specific prompt blocks: **System** lives in `system[0]` (cache-stable base), **LTM** in `system[2]` (frozen pin baseline — see the [LTM pin invariant](#the-ltm-pin-frozen-baseline) below), **Meta-Distillations** and **Distillations** together make up `system[1]` (the distilled prefix, the cache-write anchor for new turns), and **Delta Updates** and **Conversation** live in the conversation tail (volatile, ID-referenced, not cache-stable). The gradient's job is to compose these six pieces within the context-window budget on every turn. The next diagram zooms in on that composition.
 
 ## Three-tier memory
 
@@ -138,6 +95,52 @@ Conversation segments are distilled into observation logs by an LLM observer. Di
 
 Durable project facts — decisions, patterns, preferences, gotchas — are curated into long-term memory. The curator is an LLM call that runs on idle or after a configurable number of turns. Curated knowledge can be exported to `.lore.md` and reviewed in pull requests, so team knowledge moves with the code, not in a private database.
 
+#### Long-term knowledge structure
+
+The LTM table stores five categories of curated entries, each available in two scopes — **per-project** (the default, scoped to the working directory) and **cross-project** (`cross_project: true`, available across every project the gateway sees). The recall tool searches per-project first and falls back to cross-project results when scope is `all`. **Entities** are a sibling concept: a knowledge graph (canonical names, aliases, relations) maintained by the sync engine, not an LTM category. The recall tool searches them alongside LTM, distillations, and temporal messages.
+
+```mermaid
+flowchart LR
+    subgraph PerProject["Per-project (knowledge)"]
+        direction TB
+        P1[Decisions]:::cat
+        P2[Patterns]:::cat
+        P3[Preferences]:::cat
+        P4[Architecture]:::cat
+        P5[Gotchas]:::cat
+    end
+
+    subgraph Cross["Cross-project (cross_project=true)"]
+        direction TB
+        C1[Decisions]:::cross
+        C2[Patterns]:::cross
+        C3[Preferences]:::cross
+        C4[Architecture]:::cross
+        C5[Gotchas]:::cross
+    end
+
+    subgraph Entities["Entities (sync engine)"]
+        direction TB
+        E1[Canonical names]:::ent
+        E2[Aliases]:::ent
+        E3[Relations]:::ent
+    end
+
+    Sources["curator · pattern-extract · file import"]:::src --> PerProject
+    Sources --> Cross
+    Sources --> Entities
+
+    Search["recall tool<br/>(parallel search)"]:::search --> PerProject
+    Search --> Cross
+    Search --> Entities
+
+    classDef cat fill:#c4ddc7,stroke:#1a3320,color:#1a3320
+    classDef cross fill:#8fba96,stroke:#1a3320,color:#1a3320
+    classDef ent fill:#f7f2e8,stroke:#5a8f63,color:#1a3320
+    classDef src fill:#ececec,stroke:#888,color:#333
+    classDef search fill:#c4ddc7,stroke:#1a3320,stroke-width:2px,color:#1a3320
+```
+
 ## Gradient context manager
 
 The gradient context manager is what makes Lore different from a summarization wrapper. It is a four-layer system that decides — on **every turn** — how much of each tier to include in the next request, balancing detail preservation against prompt-cache cost.
@@ -150,6 +153,47 @@ The gradient context manager is what makes Lore different from a summarization w
 | **3** | Distilled prefix + raw window with all tool outputs stripped + only the 5 most-recent gen-0 distillations retained | Emergency compression. The 5 most recent gen-0 segments retain full detail in the prefix; older distillations are consolidated by the meta-distillation pass. |
 
 The escalation between layers is automatic. The 0→1 boundary is driven by **cost-aware context management** (see below); the 1→2 and 2→3 boundaries are driven by token-fit. There is also a per-session `forceMinLayer` floor, persisted to SQLite, that survives process restarts — when the upstream API returns "prompt is too long", the error handler sets it to the layer that fit, and the next turn starts at that layer.
+
+The diagram below shows how the four layers collapse into the 3-block system prompt — the structure the LLM actually sees. The L0–L4 layers are an *escalation ladder*: only one is active per turn, chosen by the cost-aware cap and token fit. The 3-block system prompt is the *output* of the active layer.
+
+```mermaid
+flowchart TB
+    L0["L0 passthrough<br/>full raw window<br/>cheapest per turn"]:::layer
+    L1["L1 distilled prefix + raw tail<br/>when raw no longer fits"]:::layer
+    L2["L2 strip old tool outputs<br/>last 2 turns protected"]:::layer
+    L3["L3 strip all tool outputs<br/>+ 5 most recent gen-0 in prefix"]:::layer
+    L4["L4 emergency<br/>maxed out"]:::layer
+
+    L0 --> Compose
+    L1 --> Compose
+    L2 --> Compose
+    L3 --> Compose
+    L4 --> Compose
+
+    Compose["3-block system prompt + tail<br/>(the formula)"]:::compose
+
+    subgraph Formula["System + LTM + Meta-Distillations + Distillations + Delta Updates + Conversation"]
+        direction TB
+        S0["system[0] · System<br/>(base, cache-stable)"]:::sys
+        S1["system[1] · Meta-Distillations + Distillations<br/>(distilled prefix, cache-write anchor)"]:::sys
+        S2["system[2] · LTM pin<br/>(frozen baseline, cache-stable)"]:::sys
+        DU["tail · Delta Updates<br/>(volatile, ID-referenced)"]:::tail
+        C["tail · Conversation<br/>(raw messages)"]:::tail
+    end
+
+    Compose --> Formula
+    Formula --> LLM["Upstream LLM call"]:::ext
+
+    classDef layer fill:#f7f2e8,stroke:#5a8f63,color:#1a3320
+    classDef compose fill:#c4ddc7,stroke:#1a3320,stroke-width:2px,color:#1a3320
+    classDef sys fill:#8fba96,stroke:#1a3320,color:#1a3320
+    classDef tail fill:#ececec,stroke:#888,color:#333
+    classDef ext fill:#ececec,stroke:#888,color:#333
+```
+
+#### The LTM pin frozen-baseline
+
+`system[2]` is a **pin**: the set of LTM entry keys rendered into the first system-block is captured at the moment the pin is first established and held constant for the rest of the session. Later turns re-render the *same* entry keys — even as new entries are added, edited, or curated out of the top-K — so the system-block bytes are byte-stable and the upstream prompt cache stays hot. The current rendered set advances on every turn; the pin does not. This is what makes the LTM pin cache-stable: advancing the baseline on every turn would drop earlier supersessions from the coalesced seq-0 row, busting the cache every turn and paying the cache-write price on top.
 
 ## Cost-aware context management
 
@@ -224,6 +268,41 @@ The recall tool is the escape hatch when neither the in-context prefix nor the g
 - **LLM-based query expansion** generates 2-3 alternative phrasings of the query before search, guarded by a 3-second timeout.
 
 Results are fused with reciprocal rank fusion (RRF) and re-ranked. A query-expansion-aware boost is applied to vector results when the query has enough terms (≥2 after stopword removal) — single-term queries stay on BM25 because that's where it wins.
+
+The diagram below shows the recall pipeline. **Vector search is per-source, not a separate stage** — each of the five main sources runs both an FTS5 query and an embedding query, and both lists feed the same RRF. Cross-project LTM and `lat.md` sections are FTS-only because embeddings only cover per-project rows; they're marked with `*` in the diagram.
+
+```mermaid
+flowchart TB
+    Q["recall('query')"]:::ext
+    Q --> Expand["Pre-stage<br/>• LLM query expansion (short queries, config-gated)<br/>• Entity-aware alias expansion (always)"]:::stage
+    Expand --> Search
+
+    subgraph Search["Parallel search — each source: FTS5 + vector*"]
+        direction LR
+        LTM["LTM (knowledge)<br/>FTS5 + vec"]:::src
+        Dist["Distillations<br/>(gen-0 + gen-1+)<br/>FTS5 + vec"]:::src
+        Temp["Temporal messages<br/>FTS5 + vec"]:::src
+        Ent["Entities<br/>FTS5 + vec"]:::src
+        Cross["Cross-project LTM<br/>FTS5 only*"]:::src
+    end
+
+    Search --> RRF["RRF fusion<br/>(12+ lists)"]:::stage
+    RRF --> Rank["Hybrid rank + budget cap"]:::stage
+    Rank --> Out["Tool result markdown<br/>injected via tool_use"]:::stage
+
+    Out --> Map["source_id maps back to raw:"]:::map
+    Map --> D["d:* → distillation → temporal_messages"]
+    Map --> T["t:* → temporal_messages (raw conversation)"]
+    Map --> K["k:* → knowledge (standalone, no raw)"]
+    Map --> E["e:* → entity (canonical + aliases)"]
+
+    classDef ext fill:#ececec,stroke:#888,color:#333
+    classDef stage fill:#c4ddc7,stroke:#1a3320,color:#1a3320
+    classDef src fill:#f7f2e8,stroke:#5a8f63,color:#1a3320
+    classDef map fill:#8fba96,stroke:#1a3320,color:#1a3320
+```
+
+`*` Cross-project LTM and `lat.md` sections are FTS-only — embeddings only cover per-project rows. The recall tool downweights cross-project LTM BM25 (factor 0.6) when session-specific results exist, so current-session context ranks above general cross-project knowledge.
 
 ## What this means in practice
 
