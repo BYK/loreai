@@ -260,7 +260,15 @@ export function startIdleScheduler(
 
       warmupInProgress.add(sessionID);
       executeWarmup(state, profile, config.upstreamExtraHeaders)
-        .then((result) => emitWarmupMetric(state, result))
+        .then((result) => {
+          // executeWarmup mutates state.warmup (lastWarmupAt, totalWarmups,
+          // lastWarmupRefreshTokens). The periodic flush below skips
+          // non-dirty sessions, so without this the warmup counters/refresh
+          // tokens would be lost on eviction/restart. Mark dirty on a real
+          // ping so the next tick persists them.
+          if (result.ok) state._dirty = true;
+          emitWarmupMetric(state, result);
+        })
         .catch((e) =>
           log.error(
             `cache-warmer: warmup failed session=${sessionID.slice(0, 16)}:`,
@@ -401,6 +409,24 @@ export function evictIdleSessions(
     } catch (e) {
       log.warn(
         `session eviction: gradient persistence failed for ${sessionID.slice(0, 16)}:`,
+        e,
+      );
+    }
+
+    // Persist cache-warming state (resolvedConversationTTL + warmup blob)
+    // before eviction. The periodic flush also writes this, but eviction can
+    // fire between a warmup's .then() (which sets lastWarmupRefreshTokens +
+    // totalWarmups) and the next 30s tick — without this, an evicted session
+    // loses its warmup refresh credit and the resume path would deny a
+    // legitimate hit (phantom-guard false negative).
+    try {
+      saveSessionTracking(sessionID, {
+        resolvedConversationTTL: state.resolvedConversationTTL ?? "5m",
+        warmupState: state.warmup ? JSON.stringify(state.warmup) : null,
+      });
+    } catch (e) {
+      log.warn(
+        `session eviction: warmup-state persistence failed for ${sessionID.slice(0, 16)}:`,
         e,
       );
     }

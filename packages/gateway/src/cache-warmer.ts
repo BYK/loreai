@@ -35,6 +35,7 @@ import type {
   InterTurnHistogram,
   WarmupResult,
   SessionState,
+  WarmupState,
 } from "./translate/types";
 import { decompressBody } from "./cache-analytics";
 import { resolveAuth, authHeaders, markAuthStale } from "./auth";
@@ -1492,6 +1493,16 @@ export async function executeWarmup(
     state.warmup.lastWarmupAt = Date.now();
     state.warmup.warmupCount++;
     state.warmup.totalWarmups = (state.warmup.totalWarmups ?? 0) + 1;
+    // 🔴 Record the cache prefix this warmup actually refreshed. Savings on
+    // the returning turn MUST be credited against THIS count (the tokens the
+    // warmup kept alive), NEVER the returning turn's cacheReadInputTokens —
+    // tool-use continuations / breakpoint shifts report a far smaller read,
+    // undercounting savings ~10×. The read portion is the kept-alive prefix
+    // even on a partial warmup (the written portion was a cost, not a save,
+    // already booked via recordWarmupCost). A non-zero value also marks THIS
+    // session as the warmup's payer (see WarmupState invariant), gating hit
+    // attribution to prevent phantom savings.
+    state.warmup.lastWarmupRefreshTokens = cacheReadTokens;
 
     // Check circuit breaker
     checkCircuitBreaker(result);
@@ -1507,6 +1518,63 @@ export async function executeWarmup(
     );
     return noResult;
   }
+}
+
+/** Outcome of attributing a returning turn against a prior warmup. */
+export type WarmupHitOutcome = {
+  /** True if this turn was credited as a confirmed warmup hit. */
+  hit: boolean;
+  /** Cache-read tokens credited for the hit's savings (0 when no hit). */
+  creditedTokens: number;
+};
+
+/**
+ * Decide whether a returning turn is a warmup hit and, if so, how many
+ * tokens to credit for savings. Pure + side-effect free so the cost-critical
+ * accounting can be unit-tested without standing up the full pipeline.
+ *
+ * 🔴 Phantom-savings guard (Bug A): a hit/savings is ONLY attributed when
+ * THIS session actually fired & paid for the warmup. Proof of payment is
+ * `lastWarmupRefreshTokens > 0` (set only by this session's executeWarmup)
+ * AND `totalWarmups > 0`. `lastWarmupAt` alone is insufficient — it can ride
+ * along in a restored/inherited warmupState blob, booking savings against a
+ * session whose warmup cost lives elsewhere.
+ *
+ * 🔴 Savings token source (Bug B): when a hit is credited, the caller MUST
+ * use `creditedTokens` (the prefix the warmup refreshed), NOT the returning
+ * turn's cacheReadInputTokens — which is often ~10× smaller (tool-use
+ * continuation / breakpoint shift).
+ *
+ * This function MUTATES `warmup`: it consumes the warmup by zeroing
+ * `lastWarmupAt` and `lastWarmupRefreshTokens` (a warmup benefits only the
+ * first returning turn) and increments `warmupHits` on a confirmed hit. It
+ * also scrubs a stale/inherited `lastWarmupAt` that lacks proof of payment.
+ */
+export function creditWarmupHit(
+  warmup: WarmupState | undefined,
+  sinceWarmupMs: number,
+  ttlMs: number,
+): WarmupHitOutcome {
+  const noHit: WarmupHitOutcome = { hit: false, creditedTokens: 0 };
+  if (!warmup?.lastWarmupAt) return noHit;
+
+  const refreshTokens = warmup.lastWarmupRefreshTokens ?? 0;
+  const paidForWarmup = (warmup.totalWarmups ?? 0) > 0 && refreshTokens > 0;
+
+  // Consume the warmup unconditionally — it can only benefit the FIRST
+  // returning turn, so clear the markers regardless of the outcome.
+  warmup.lastWarmupAt = 0;
+  warmup.lastWarmupRefreshTokens = 0;
+
+  // Stale/inherited lastWarmupAt without proof of payment: scrubbed above,
+  // record NO hit (prevents phantom savings).
+  if (!paidForWarmup) return noHit;
+
+  // Returned too late — cache already expired, no benefit.
+  if (sinceWarmupMs >= ttlMs) return noHit;
+
+  warmup.warmupHits++;
+  return { hit: true, creditedTokens: refreshTokens };
 }
 
 // ---------------------------------------------------------------------------

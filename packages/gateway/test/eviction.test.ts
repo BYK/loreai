@@ -20,6 +20,7 @@ import {
   inspectSessionState,
   distillLimiter,
   curatorLimiter,
+  loadSessionTracking,
 } from "@loreai/core";
 import { startIdleScheduler, evictIdleSessions } from "../src/idle";
 import { loadConfig } from "../src/config";
@@ -439,6 +440,49 @@ describe("evictIdleSessions", () => {
     expect(evicted).toBe(5);
     expect(sessions.size).toBe(1);
     expect(sessions.has("active")).toBe(true);
+  });
+
+  test("persists warmup state on eviction so refresh credit survives", () => {
+    // Regression: eviction previously persisted only cost + gradient state,
+    // never the warmup blob. A warmup that completed between its .then()
+    // (setting lastWarmupRefreshTokens + totalWarmups) and the next 30s flush
+    // would lose its refresh credit on eviction, causing the resume path to
+    // deny a legitimate hit (phantom-guard false negative).
+    const sessionID = "evict-warmup-persist";
+    const sessions = new Map<string, SessionState>();
+    sessions.set(
+      sessionID,
+      makeSessionState({
+        sessionID,
+        lastRequestTime: Date.now() - 2_000_000,
+        resolvedConversationTTL: "5m",
+        warmup: {
+          lastWarmupAt: Date.now() - 10_000,
+          warmupCount: 1,
+          totalWarmups: 3,
+          warmupHits: 1,
+          disabled: false,
+          lastWarmupRefreshTokens: 168_000,
+        },
+      }),
+    );
+
+    const config = makeConfig({ sessionEvictionTimeoutSeconds: 1800 });
+    const evicted = evictIdleSessions(
+      config,
+      sessions,
+      EMPTY_SET,
+      EMPTY_SET,
+      Date.now(),
+    );
+    expect(evicted).toBe(1);
+
+    const persisted = loadSessionTracking(sessionID);
+    expect(persisted?.warmupState).toBeTruthy();
+    const blob = JSON.parse(persisted?.warmupState as string);
+    expect(blob.lastWarmupRefreshTokens).toBe(168_000);
+    expect(blob.totalWarmups).toBe(3);
+    expect(persisted?.resolvedConversationTTL).toBe("5m");
   });
 });
 

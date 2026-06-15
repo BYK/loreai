@@ -867,6 +867,21 @@ export function recordWarmupHit(
   ttl?: "5m" | "1h",
 ): void {
   const costs = getOrCreate(sessionID);
+  // 🔴 Phantom-savings observability backstop (Bug A): a session should only
+  // record warmup savings if it also booked a warmup COST (recordWarmupCost
+  // ran for this sid). Savings without a matching cost is the phantom
+  // attribution signature. We only WARN (not drop) here because warmup.calls
+  // is an in-memory counter that resets on gateway restart — a legitimate
+  // hit whose cost was booked in a prior process would false-negative. The
+  // authoritative guard is the pipeline caller (creditWarmupHit), which gates
+  // on the persisted lastWarmupRefreshTokens proving this session paid.
+  if (costs.workers.warmup.calls === 0) {
+    log.warn(
+      `cost-tracker: warmup-hit for session=${sessionID.slice(0, 16)} ` +
+        `with zero in-process warmup cost — verify not phantom (Bug A) ` +
+        `or a cross-restart attribution.`,
+    );
+  }
   const pricing = getPricingSync(model);
   // Anthropic doubles cache_write pricing for 1h TTL
   const cacheWriteRate =

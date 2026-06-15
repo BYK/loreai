@@ -75,6 +75,7 @@ import type {
   GatewayToolResultBlock,
   SessionState,
   UpstreamSnapshot,
+  WarmupState,
 } from "./translate/types";
 import {
   applyUpstreamExtraHeaders,
@@ -199,6 +200,7 @@ import {
   recordGlobalGap,
   resolveProfile as resolveWarmingProfile,
   clearWarmupAuthDisabled,
+  creditWarmupHit,
 } from "./cache-warmer";
 import {
   setSentryRequestContext,
@@ -2045,7 +2047,18 @@ function getOrCreateSession(
     }
     if (persisted?.warmupState) {
       try {
-        state.warmup = JSON.parse(persisted.warmupState);
+        const restored = JSON.parse(persisted.warmupState) as WarmupState;
+        state.warmup = restored;
+        // 🔴 Phantom-savings defense-in-depth (Bug A): a persisted blob
+        // represents a warmup THIS sid fired, so its refresh credit is valid
+        // only if totalWarmups>0. If the blob is inconsistent (lastWarmupAt /
+        // lastWarmupRefreshTokens set but totalWarmups===0 — e.g. an old
+        // corrupt row or an inherited blob), drop the credit so no phantom
+        // hit can be booked on the next turn.
+        if ((state.warmup.totalWarmups ?? 0) === 0) {
+          state.warmup.lastWarmupAt = 0;
+          state.warmup.lastWarmupRefreshTokens = 0;
+        }
       } catch {
         log.warn(
           `corrupt warmup state for session ${sessionID.slice(0, 16)}, starting fresh`,
@@ -3842,35 +3855,41 @@ function postResponse(
     if (sessionState.lastRequestTime > 0) {
       let warmupHitThisTurn = false;
 
-      // Track warmup hit: user returned after we warmed the cache.
-      // A warmup can only benefit the FIRST turn after it fires — clear
-      // lastWarmupAt unconditionally so subsequent turns are not attributed.
+      // Track warmup hit: user returned after THIS session warmed the cache.
+      // creditWarmupHit consumes the warmup (clears lastWarmupAt + refresh
+      // tokens), guards against phantom savings (Bug A: only credits when this
+      // session paid for the warmup), and returns the prefix the warmup
+      // refreshed for savings (Bug B: NOT the returning turn's smaller read).
       if (sessionState.warmup?.lastWarmupAt) {
         const ttlMs =
           sessionState.resolvedConversationTTL === "1h" ? 3_600_000 : 300_000;
         const sinceWarmup = now - sessionState.warmup.lastWarmupAt;
-        sessionState.warmup.lastWarmupAt = 0;
-        if (sinceWarmup < ttlMs) {
+        const outcome = creditWarmupHit(
+          sessionState.warmup,
+          sinceWarmup,
+          ttlMs,
+        );
+        if (outcome.hit) {
           warmupHitThisTurn = true;
-          sessionState.warmup.warmupHits++;
           emitWarmupHitMetric(
             sessionState.lastUpstream?.model ?? req.model,
             sessionState.resolvedConversationTTL ?? "5m",
           );
-          // Record counterfactual savings: without warming, these cache
-          // reads would have been full cache writes.
-          const cacheRead = usage.cacheReadInputTokens ?? 0;
-          if (cacheRead > 0) {
+          // Record counterfactual savings against the prefix the WARMUP
+          // refreshed — without warming these reads would have been a full
+          // cache write.
+          if (outcome.creditedTokens > 0) {
             recordWarmupHit(
               sessionID,
               req.model,
-              cacheRead,
+              outcome.creditedTokens,
               sessionState.resolvedConversationTTL ?? "5m",
             );
           }
           log.info(
             `cache-warmer: HIT session=${sessionID.slice(0, 16)} ` +
-              `user returned ${(sinceWarmup / 1000).toFixed(0)}s after warmup`,
+              `user returned ${(sinceWarmup / 1000).toFixed(0)}s after warmup ` +
+              `(refreshed=${outcome.creditedTokens} tokens)`,
           );
         }
       }

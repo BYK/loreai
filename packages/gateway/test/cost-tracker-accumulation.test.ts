@@ -144,6 +144,23 @@ describe("counterfactual savings", () => {
     expect(c.counterfactual.ttlHits).toBe(1);
     expect(c.counterfactual.ttlSavings).toBeCloseTo(3.75 - 0.3);
   });
+
+  // NOTE: the Bug B regression guard (that the pipeline credits the warmup's
+  // refreshed prefix, NOT the returning turn's smaller read) lives in
+  // cache-warmer.test.ts → `creditWarmupHit` (asserts creditedTokens equals
+  // the warmup's lastWarmupRefreshTokens). This test only pins the savings
+  // FORMULA so a miscredited token count produces a visibly wrong dollar
+  // amount downstream.
+  test("warmup savings scale linearly with the credited token count", () => {
+    recordWarmupHit("big", MODEL, 1_000_000); // full warmup prefix
+    recordWarmupHit("small", MODEL, 100_000); // a tiny (wrong) returning read
+    const big = costsFor("big").counterfactual.warmupSavings;
+    const small = costsFor("small").counterfactual.warmupSavings;
+    // per-token saving = (cache_write − cache_read); ratio tracks token ratio
+    expect(big).toBeCloseTo((3.75 - 0.3) * 1.0);
+    expect(small).toBeCloseTo((3.75 - 0.3) * 0.1);
+    expect(big / small).toBeCloseTo(10, 1);
+  });
 });
 
 describe("totals", () => {

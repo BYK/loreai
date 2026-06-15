@@ -577,6 +577,21 @@ export type WarmupState = {
   disabled: boolean;
   /** User explicitly requested keep-warm via /lore:warm:keep command. Bypasses survival analysis. */
   forceKeepWarm?: boolean;
+  /**
+   * cache_read tokens the LAST warmup actually refreshed (from the warmup
+   * response usage). Used to credit savings against the prefix the warmup
+   * paid to keep alive — NOT the returning turn's (often ~10× smaller)
+   * cacheReadInputTokens. Set by executeWarmup on success; consumed (zeroed
+   * with lastWarmupAt) when a hit is credited.
+   *
+   * 🔴 INVARIANT: this is ONLY ever non-zero on a session that itself fired
+   * the warmup (executeWarmup ran with this session's ID). It is NEVER
+   * inherited across session-identity changes (rotation refusal / new
+   * session) — restore scrubs it when totalWarmups===0. A non-zero value is
+   * therefore proof THIS session paid for the warmup, which gates hit
+   * attribution to prevent phantom savings.
+   */
+  lastWarmupRefreshTokens?: number;
 };
 
 /** Result from a warmup request — used for circuit breaker and metrics. */

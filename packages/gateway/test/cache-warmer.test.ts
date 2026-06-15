@@ -24,12 +24,14 @@ import {
   TOOL_CALL_MAX_CYCLES,
   HISTOGRAM_BINS,
   BREAK_FLOOR_MS,
+  creditWarmupHit,
   _resetForTest,
 } from "../src/cache-warmer";
 import type {
   SessionState,
   CacheAnalytics,
   WarmupResult,
+  WarmupState,
 } from "../src/translate/types";
 import { compressBody } from "../src/cache-analytics";
 
@@ -2393,5 +2395,80 @@ describe("warmup auth-disabled sessions", () => {
     _resetForTest();
     expect(isWarmupAuthDisabled("sess-1")).toBe(false);
     expect(isWarmupAuthDisabled("sess-2")).toBe(false);
+  });
+});
+
+describe("creditWarmupHit", () => {
+  /** Build a warmup state with sensible defaults for the payer case. */
+  function makeWarmup(overrides: Partial<WarmupState> = {}): WarmupState {
+    return {
+      lastWarmupAt: 1000,
+      warmupCount: 1,
+      totalWarmups: 1,
+      warmupHits: 0,
+      disabled: false,
+      lastWarmupRefreshTokens: 168_000,
+      ...overrides,
+    };
+  }
+
+  test("credits a hit using the warmup's refreshed prefix tokens (Bug B)", () => {
+    const warmup = makeWarmup({ lastWarmupRefreshTokens: 168_000 });
+    const outcome = creditWarmupHit(warmup, 30_000, 300_000);
+    expect(outcome.hit).toBe(true);
+    // Savings must be credited against the prefix the WARMUP refreshed,
+    // NOT a (smaller) returning-turn read.
+    expect(outcome.creditedTokens).toBe(168_000);
+    expect(warmup.warmupHits).toBe(1);
+  });
+
+  test("consumes the warmup — clears lastWarmupAt and refresh tokens", () => {
+    const warmup = makeWarmup();
+    creditWarmupHit(warmup, 30_000, 300_000);
+    expect(warmup.lastWarmupAt).toBe(0);
+    expect(warmup.lastWarmupRefreshTokens).toBe(0);
+    // A second attempt on the consumed warmup is a no-op (no double credit).
+    const second = creditWarmupHit(warmup, 30_000, 300_000);
+    expect(second.hit).toBe(false);
+    expect(warmup.warmupHits).toBe(1);
+  });
+
+  test("no hit when the return came after TTL expired", () => {
+    const warmup = makeWarmup();
+    const outcome = creditWarmupHit(warmup, 400_000, 300_000);
+    expect(outcome.hit).toBe(false);
+    expect(outcome.creditedTokens).toBe(0);
+    expect(warmup.warmupHits).toBe(0);
+    // Still consumed (markers cleared) so it can't linger.
+    expect(warmup.lastWarmupAt).toBe(0);
+  });
+
+  test("phantom guard: no hit when totalWarmups is 0 (Bug A)", () => {
+    // lastWarmupAt set (e.g. inherited/restored blob) but the session never
+    // fired a warmup itself → no proof of payment → no savings.
+    const warmup = makeWarmup({ totalWarmups: 0, warmupHits: 0 });
+    const outcome = creditWarmupHit(warmup, 30_000, 300_000);
+    expect(outcome.hit).toBe(false);
+    expect(outcome.creditedTokens).toBe(0);
+    expect(warmup.warmupHits).toBe(0);
+    // The stale marker is scrubbed so it can't accrue phantom hits later.
+    expect(warmup.lastWarmupAt).toBe(0);
+    expect(warmup.lastWarmupRefreshTokens).toBe(0);
+  });
+
+  test("phantom guard: no hit when lastWarmupRefreshTokens is missing (Bug A)", () => {
+    // Old blob without the refresh-token field (undefined → no proof).
+    const warmup = makeWarmup({ lastWarmupRefreshTokens: undefined });
+    const outcome = creditWarmupHit(warmup, 30_000, 300_000);
+    expect(outcome.hit).toBe(false);
+    expect(warmup.warmupHits).toBe(0);
+    expect(warmup.lastWarmupAt).toBe(0);
+  });
+
+  test("no-op when warmup state is undefined or lastWarmupAt is 0", () => {
+    expect(creditWarmupHit(undefined, 30_000, 300_000).hit).toBe(false);
+    const warmup = makeWarmup({ lastWarmupAt: 0 });
+    expect(creditWarmupHit(warmup, 30_000, 300_000).hit).toBe(false);
+    expect(warmup.warmupHits).toBe(0);
   });
 });
