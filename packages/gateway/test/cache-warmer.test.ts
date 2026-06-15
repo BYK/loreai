@@ -26,6 +26,7 @@ import {
   HISTOGRAM_BINS,
   BREAK_FLOOR_MS,
   creditWarmupHit,
+  computeWarmingSnapshot,
   _resetForTest,
 } from "../src/cache-warmer";
 import type {
@@ -1736,7 +1737,11 @@ describe("shouldWarm tool-call warming", () => {
         lastWarmupAt: 0,
         warmupCount: maxCyc,
         totalWarmups: maxCyc,
-        warmupHits: 0,
+        // warmupHits must clear BOTH the Bug C evidence gate (>=1) AND the
+        // session ROI hit-rate guard (>=25% of totalWarmups) so the false
+        // here is produced by the cycle cap, not an earlier guard.
+        // maxCyc=11 → need >=3 hits (3/11≈27%); use 4 for headroom.
+        warmupHits: 4,
         disabled: false,
       },
     });
@@ -1777,15 +1782,19 @@ describe("shouldWarm tool-call warming", () => {
 
   test("tool-call warming stops at TOOL_CALL_MAX_CYCLES even across TTL windows", () => {
     const now = Date.now();
-    // 14.5 min — in 3rd 5m window's warmup margin (14:15-15:00)
-    // With TOOL_CALL_MAX_CYCLES=2 and warmupCount=2, this should be rejected.
+    // 9.5 min — in the 2nd 5m window's warmup margin (9:15-10:00) and UNDER
+    // MAX_TOOL_CALL_WARMING_MS (10min) so the max-duration cap does NOT fire.
+    // With TOOL_CALL_MAX_CYCLES=2 and warmupCount=2, the cycle cap rejects.
     const state = makeToolCallState({
-      lastRequestTime: now - 870_000,
+      lastRequestTime: now - 570_000,
       warmup: {
-        lastWarmupAt: now - 270_000, // past cooldown
+        lastWarmupAt: now - 270_000, // past cooldown (255s)
         warmupCount: TOOL_CALL_MAX_CYCLES,
         totalWarmups: TOOL_CALL_MAX_CYCLES,
-        warmupHits: 0,
+        // warmupHits>=1 bypasses the Bug C evidence gate so the false here
+        // is produced by the cycle cap, not the gate (keeps this test
+        // discriminating for TOOL_CALL_MAX_CYCLES).
+        warmupHits: 1,
         disabled: false,
       },
     });
@@ -1905,6 +1914,67 @@ describe("shouldWarm tool-call warming", () => {
 
   test("Bug C: evidence gate keys on the documented constant", () => {
     expect(TOOL_CALL_MIN_HITS_FOR_CONTINUATION).toBe(1);
+  });
+
+  test("Bug C: dashboard snapshot reports the evidence-gate reason", () => {
+    const now = Date.now();
+    // Same shape as the "second cycle blocked" case: warmupCount=1,
+    // warmupHits=0 → the snapshot's notWarmingReason must mirror shouldWarm
+    // and surface the evidence gate (not the cycle cap or cooldown).
+    const state = makeToolCallState({
+      lastRequestTime: now - 270_000,
+      warmup: {
+        lastWarmupAt: now - 270_000,
+        warmupCount: 1,
+        totalWarmups: 1,
+        warmupHits: 0,
+        disabled: false,
+      },
+    });
+    const snap = computeWarmingSnapshot(state, now);
+    expect(snap.shouldWarmNow).toBe(false);
+    expect(snap.notWarmingReason).toBe(
+      "Tool call: no confirmed hits yet (continuation gated after first probe)",
+    );
+  });
+
+  test("Bug C: snapshot does NOT report the gate reason once a hit exists", () => {
+    const now = Date.now();
+    // warmupHits>=1 → gate bypassed; snapshot must warm (or report a
+    // different reason), proving the mirror branch is hit-gated correctly.
+    const state = makeToolCallState({
+      lastRequestTime: now - 270_000,
+      warmup: {
+        lastWarmupAt: now - 270_000,
+        warmupCount: 1,
+        totalWarmups: 2,
+        warmupHits: 1,
+        disabled: false,
+      },
+    });
+    const snap = computeWarmingSnapshot(state, now);
+    expect(snap.shouldWarmNow).toBe(true);
+    expect(snap.notWarmingReason).toBeNull();
+  });
+
+  test("Bug C: snapshot falls through to cycle-cap reason past the gate branch", () => {
+    const now = Date.now();
+    // warmupHits clears both the gate (>=1) and the ROI guard, but the cycle
+    // cap is hit → the mirror's evidence-gate else-if must be FALSE and the
+    // reason must be the cycle cap (exercises the gate branch's false side).
+    const state = makeToolCallState({
+      lastRequestTime: now - 570_000, // 9.5min, under MAX_TOOL_CALL_WARMING_MS
+      warmup: {
+        lastWarmupAt: now - 270_000, // past cooldown
+        warmupCount: TOOL_CALL_MAX_CYCLES,
+        totalWarmups: TOOL_CALL_MAX_CYCLES,
+        warmupHits: TOOL_CALL_MAX_CYCLES, // 100% hit rate → clears ROI guard
+        disabled: false,
+      },
+    });
+    const snap = computeWarmingSnapshot(state, now);
+    expect(snap.shouldWarmNow).toBe(false);
+    expect(snap.notWarmingReason).toContain("cycle cap reached");
   });
 });
 
