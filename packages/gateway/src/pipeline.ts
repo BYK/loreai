@@ -180,6 +180,7 @@ import {
   fetchModelData,
   ensureModelDataReady,
   getModelEntrySync,
+  isModelDataLoaded,
   lookupProviderRoute,
 } from "./worker-model";
 import * as Sentry from "@sentry/bun";
@@ -5044,9 +5045,19 @@ async function handleConversationTurn(
     // the client's responsibility — leave its max_tokens untouched rather than
     // rewrite it into an invalid value.
     if (thinkingBudget !== undefined && modelSpec.output <= thinkingBudget) {
-      log.info(
+      // When models.dev data isn't loaded, modelSpec.output is the fallback
+      // (8192) — likely understating the model's true output limit and making
+      // a legitimate thinking budget look unsatisfiable. Surface that at WARN so
+      // a cold-cache/outage misfire is visible (vs. a genuinely invalid budget).
+      const onFallback = !isModelDataLoaded();
+      const logFn = onFallback ? log.warn : log.info;
+      logFn(
         `max_tokens: leaving client value ${req.maxTokens} untouched ` +
-          `(thinkingBudget=${thinkingBudget} >= modelOutput=${modelSpec.output})`,
+          `(thinkingBudget=${thinkingBudget} >= modelOutput=${modelSpec.output}` +
+          (onFallback
+            ? "; model data not loaded — using fallback limits"
+            : "") +
+          `)`,
       );
     } else {
       const computed = computeMaxTokens(
