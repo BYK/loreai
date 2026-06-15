@@ -2625,6 +2625,10 @@ async function forwardToUpstream(
   // (busting the prompt cache), and trip the verifyBillingHeaderUnique warning.
   // The real header is always system[0] (Claude Code emits it there; the worker
   // prepends it), so a content copy can never be at offset 0 of req.system.
+  // NOTE: this intentionally uses hasBillingHeader ALONE — unlike the `isCC`
+  // size heuristic (`isClaudeCodeClient(...) || hasBillingHeader(...)`). Re-
+  // signing REQUIRES the header to actually be embedded in system[0]; without
+  // it there is literally nothing to sign, so the OR form would be wrong here.
   if (effectiveProtocol === "anthropic" && hasBillingHeader(req.system)) {
     const firstUserMsg = req.messages.find((m) => m.role === "user");
     const firstUserText = firstUserMsg?.content.find(

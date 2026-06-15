@@ -1132,49 +1132,26 @@ describe("cache stability (e2e)", () => {
         "expected the quoted sentinel to be present in the upstream body",
       ).toBe(true);
 
-      // 1) No re-sign happened: the quoted cch value (cch=1a2b3) must survive
-      //    untouched. resignBody would have rewritten it to a recomputed hash.
-      for (let i = 0; i < bodies.length; i++) {
-        expect(
-          bodies[i].includes("cch=1a2b3;"),
-          `turn ${i + 1}: quoted content cch was rewritten — resignBody ran on ` +
-            `an api-key session and mutated conversation content`,
-        ).toBe(true);
-      }
-
-      // 2) No invariant-violation warning fired (the symptom in journalctl).
+      // The meaningful, non-vacuous signal: the verifyBillingHeaderUnique
+      // warning (the exact symptom seen in journalctl) must NOT fire. This runs
+      // inside resignBody on the serialized body, so it is observable here even
+      // though the replay interceptor captures the PRE-resign body object (and
+      // therefore can't directly witness the cch rewrite — see the cch.test.ts
+      // unit tests for the byte-level resign behaviour). Verified to FAIL on
+      // revert: without the gate the warning fires once per turn (4 markers).
       expect(
         warnings.filter((w) => w.includes("first-block invariant violated")),
         "the billing-header invariant warning fired for an api-key session " +
           "whose content merely quotes the sentinel",
       ).toHaveLength(0);
 
-      // 3) Cache stability: the quoted sentinel TEXT inside the earliest
-      //    message must be byte-identical across turns (resignBody rewriting it
-      //    per turn was the underlying cache-bust). We compare the text only —
-      //    the per-turn cache_control breakpoint legitimately moves to the last
-      //    prefix block and is masked here, since that is normal caching, not a
-      //    re-sign mutation. messages[0] is the first user turn.
-      const firstUserText = bodies.map((b) => {
-        const parsed = JSON.parse(b) as {
-          messages?: Array<{
-            content?: Array<{ type?: string; text?: string }>;
-          }>;
-        };
-        const block = parsed.messages?.[0]?.content?.[0];
-        return block?.text ?? null;
-      });
-      // Guard: the extracted text actually contains the unmodified quoted cch.
-      expect(
-        firstUserText[0]?.includes("cch=1a2b3;"),
-        "expected to extract the quoted sentinel text from the first message",
-      ).toBe(true);
-      for (let i = 1; i < firstUserText.length; i++) {
+      // Sanity guard: the quoted sentinel reached the captured (pre-resign)
+      // body verbatim, confirming the precondition the warning check relies on.
+      for (let i = 0; i < bodies.length; i++) {
         expect(
-          firstUserText[i],
-          `turn ${i + 1}: the first user message text (containing the quoted ` +
-            `sentinel) changed vs turn 1 — re-signing busted the cached prefix`,
-        ).toBe(firstUserText[0]);
+          bodies[i].includes("cch=1a2b3;"),
+          `turn ${i + 1}: quoted sentinel missing from captured body`,
+        ).toBe(true);
       }
     } finally {
       log.registerSink(silentSink);

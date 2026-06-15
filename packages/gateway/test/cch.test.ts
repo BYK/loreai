@@ -1087,6 +1087,67 @@ describe("hasBillingHeader (re-sign gate)", () => {
     expect(hasBillingHeader("You are a helpful assistant.")).toBe(false);
     expect(hasBillingHeader("")).toBe(false);
   });
+
+  // The pipeline gate is `hasBillingHeader(req.system) && resignBody(body, …)`.
+  // These two tests exercise that exact chain at a level where the cch rewrite
+  // is observable (the e2e replay harness intercepts the PRE-resign body object,
+  // so it cannot witness the rewrite — only the absence of the warning). They
+  // assert the gate's decision drives the correct resign outcome.
+  //
+  // `applyGate` mirrors pipeline.ts forwardToUpstream exactly: re-sign only when
+  // the real header is at system[0].
+  const applyGate = (
+    system: string,
+    serializedBody: string,
+    firstUser: string,
+  ) =>
+    hasBillingHeader(system)
+      ? resignBody(serializedBody, firstUser)
+      : serializedBody;
+
+  test("gate PASSES for a real OAuth header → body is re-signed to a valid worker cch", () => {
+    // req.system is the string with the header at offset 0 (Claude Code OAuth).
+    const system =
+      "x-anthropic-billing-header: cc_version=2.1.0.aaa; cc_entrypoint=cli; cch=00000;\nYou are Claude Code.";
+    // The serialized body carries the same header (as system[0].text) with the
+    // client's placeholder cch.
+    const serializedBody = JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1024,
+      system: [{ type: "text", text: system }],
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    });
+
+    const out = applyGate(system, serializedBody, "hi");
+
+    expect(out).not.toBe(serializedBody); // re-signing happened
+    expect(out).not.toContain("cch=00000"); // placeholder rewritten
+    expect(out).toMatch(
+      new RegExp(`cc_version=${WORKER_VERSION}\\.[0-9a-f]{3};`),
+    );
+    expect(validateSeed(out)).toBe(true); // valid worker signature
+  });
+
+  test("gate SKIPS for an api-key session whose content quotes the sentinel → body untouched", () => {
+    // req.system is the host prompt (NO header at offset 0); the sentinel only
+    // appears inside message content.
+    const system = "You are a helpful assistant.";
+    const quoted =
+      "x-anthropic-billing-header: cc_version=2.1.0.aaa; cc_entrypoint=cli; cch=1a2b3;";
+    const serializedBody = JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1024,
+      system: [{ type: "text", text: system }],
+      messages: [
+        { role: "user", content: [{ type: "text", text: `Edit: ${quoted}` }] },
+      ],
+    });
+
+    const out = applyGate(system, serializedBody, `Edit: ${quoted}`);
+
+    expect(out).toBe(serializedBody); // untouched — gate skipped resignBody
+    expect(out).toContain("cch=1a2b3;"); // quoted content cch preserved
+  });
 });
 
 // ---------------------------------------------------------------------------
