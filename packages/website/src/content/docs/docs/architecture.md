@@ -9,41 +9,22 @@ Lore treats context management and memory as one pipeline. The same gradient eng
 
 ## Where Lore fits in the stack
 
-Lore is a **transparent HTTP proxy** that sits between a coding agent and its upstream LLM provider. Every supported agent — Claude Code, Codex, OpenCode, Pi, or Hermes — already speaks one of the standard LLM HTTP APIs (Anthropic's `/v1/messages`, OpenAI's `/v1/chat/completions` and `/v1/responses`, Codex's `/v1/codex/responses`). Lore redirects those requests to its own gateway, where the conversation is parsed, persisted, and transformed before being forwarded to the real upstream. The agent never knows it's there.
+Lore is a **transparent HTTP proxy** that sits between an AI harness and its upstream LLM provider. Every supported harness — Claude Code, Codex, OpenCode, Pi, or Hermes — already speaks one of the standard LLM HTTP APIs (Anthropic's `/v1/messages`, OpenAI's `/v1/chat/completions` and `/v1/responses`, Codex's `/v1/codex/responses`). Lore redirects those requests to its own gateway, where the conversation is parsed, persisted, and transformed before being forwarded to the real upstream. The agent never knows it's there.
 
-This position is deliberate. It means Lore is **agent-agnostic by construction** — any new agent that uses one of those HTTP APIs gets the full memory pipeline for free, with no per-agent SDK. It also means every conversation is captured exactly once, at the only place where it exists as structured LLM traffic: the request itself.
+This position is deliberate. It means Lore is **agent-agnostic by construction** — any new harness that uses one of those HTTP APIs gets the full memory pipeline for free, with no per-harness SDK. It also means every conversation is captured exactly once, at the only place where it exists as structured LLM traffic: the request itself.
+
+Existing AI harnesses are also **closed ecosystems**: Claude Code, Codex, and the others don't expose their internals to plugins in a way that lets an external tool actively manage context mid-conversation. Sitting at the HTTP boundary — the one place these harnesses must cross to talk to a model — is the only viable integration point that works with every harness, current and future. It's also the only way to stay portable: switching harnesses doesn't lose your memory, because Lore lives below them, not inside.
 
 ```mermaid
-flowchart TD
-    User([Developer]) --> Agent["Coding Agent<br/>Claude Code · Codex · OpenCode · Pi · Hermes"]
-
-    Agent -->|"LLM API request"| Adapter{How Lore gets the request}
-
-    Adapter -->|"Plugin + fetch interceptor"| P1["@loreai/opencode<br/>@loreai/pi"]
-    Adapter -->|"Env var / CLI flag"| P2["ANTHROPIC_BASE_URL<br/>OPENAI_BASE_URL · codex -c<br/>gateway/src/cli/agents.ts"]
-
-    P1 --> Gateway
-    P2 --> Gateway
-
-    subgraph Lore["Lore Gateway — sits in the LLM data path"]
-        direction TB
-        Gateway["HTTP proxy · :3207<br/>/v1/messages · /v1/chat/completions<br/>/v1/responses · /v1/codex/responses"]
-        Gateway --> Parse["Protocol parser"]
-        Parse --> Engine["Memory engine<br/>Tier 1 · Tier 2 · Tier 3 · Gradient"]
-        Engine --> Transform["Provider-agnostic transformer<br/>gradient.transform"]
-    end
-
-    Transform -->|"Lore-shaped request"| Upstream["Upstream LLM provider<br/>Anthropic · OpenAI · vLLM · Ollama"]
-    Upstream -->|"Response"| Transform
-
-    Engine -. "idle 30s · in-flight" .-> SQLite[("SQLite + FTS5<br/>~/.local/share/lore/lore.db")]
+flowchart LR
+    User([User]) --> Harness["AI Harness"]
+    Harness --> Gateway["Lore Gateway"]
+    Gateway --> Upstream["Upstream LLM Provider"]
 
     classDef lore fill:#c4ddc7,stroke:#1a3320,stroke-width:2px,color:#1a3320
-    classDef agent fill:#f7f2e8,stroke:#5a8f63,color:#1a3320
     classDef ext fill:#ececec,stroke:#888,color:#333
-    class Gateway,Parse,Engine,Transform,SQLite lore
-    class Agent,User,Adapter,P1,P2 agent
-    class Upstream ext
+    class Gateway lore
+    class User,Harness,Upstream ext
 ```
 
 The supported agents reach the proxy through one of three mechanisms:
