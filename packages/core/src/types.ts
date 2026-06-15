@@ -311,6 +311,20 @@ export interface LLMClient {
        */
       upstreamUrl?: string;
       /**
+       * Provider ID that the `upstreamUrl` override belongs to (the owning
+       * session's provider). The gateway adapter uses this to enforce
+       * cross-provider safety: the session `upstreamUrl` is only honored when
+       * the worker model's provider matches this. When they differ, the worker
+       * model is routed by its OWN provider route instead of being sent to the
+       * session's (foreign) endpoint. Prevents the production class of bug
+       * where a configured cross-provider `workerModel` (e.g. minimax) was sent
+       * to the session's Anthropic endpoint with the Anthropic credential.
+       *
+       * Only the gateway adapter honors this field; other adapters
+       * (OpenCode, Pi) ignore it.
+       */
+      upstreamProviderID?: string;
+      /**
        * Wire protocol for the upstream endpoint. When set, the adapter
        * uses this protocol for request/response formatting instead of
        * inferring it from the provider ID. Threaded from the session's

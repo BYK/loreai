@@ -347,6 +347,19 @@ export function resolveAuth(
     const staleKey = providerID || "_default";
     if (cred && !isAuthStale(sessionID, staleKey)) return cred;
 
+    // CROSS-PROVIDER GUARD: when a SPECIFIC providerID is requested and this
+    // session has no credential for it, do NOT borrow the global fallback —
+    // it belongs to whatever provider the session authenticated with, NOT the
+    // requested one. Returning it produces the exact production bug: a worker
+    // configured for `minimax` borrows the session's Anthropic key and gets
+    // sent off as a doomed cross-provider request (401 "invalid x-api-key"
+    // loop). The global fallback is only safe for provider-agnostic callers
+    // (no providerID) and for cold-start when the session genuinely has no
+    // provider-specific store yet.
+    if (providerID && !cred && sessionHasProviderStore(sessionID)) {
+      return null;
+    }
+
     // Global fallback — but guard against returning the same stale token.
     // In single-session OAuth setups, session and global hold the exact
     // same expired bearer token. Returning it would cause callers to make
@@ -356,6 +369,22 @@ export function resolveAuth(
     return global;
   }
   return getLastSeenAuth();
+}
+
+/**
+ * Whether a session has any provider-specific credential stored (i.e. the
+ * gateway has observed at least one real authenticated turn for it). Used by
+ * `resolveAuth` to decide that a missing credential for a SPECIFIC provider is
+ * a genuine "this provider isn't authenticated here" signal — not a cold-start
+ * — so the global (foreign-provider) fallback must be suppressed.
+ */
+function sessionHasProviderStore(sessionID: string): boolean {
+  const byProvider = sessionAuth.get(sessionID);
+  if (!byProvider) return false;
+  for (const key of byProvider.keys()) {
+    if (key !== "_default") return true;
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------

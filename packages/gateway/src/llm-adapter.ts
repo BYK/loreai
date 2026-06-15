@@ -47,6 +47,7 @@ import {
   recordEmptyWorkerResponse,
   clearEmptyWorkerStreak,
 } from "./worker-health";
+import { getModelEntrySync } from "./worker-model";
 
 // ---------------------------------------------------------------------------
 // Worker call tracking
@@ -72,6 +73,44 @@ export const AUTH_ERROR_CODES = new Set([401, 403]);
  * failure ladder, and soft-pause the session so we stop retrying every turn.
  */
 const INSUFFICIENT_CREDIT_CODES = new Set([402]);
+
+/**
+ * Does this header set carry an `anthropic-beta` (case-insensitive)?
+ */
+function hasBetaHeader(headers: Record<string, string>): boolean {
+  return Object.keys(headers).some((k) => k.toLowerCase() === "anthropic-beta");
+}
+
+/**
+ * Return a copy of the headers with every `anthropic-beta` entry removed.
+ * Used as a runtime fallback when a 400 looks beta-related.
+ */
+function stripBetaHeaders(
+  headers: Record<string, string>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === "anthropic-beta") continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * Heuristic: does a 400 body indicate the request used a beta feature the
+ * model/subscription doesn't support? Matches Anthropic's long-context and
+ * generic beta-availability errors (e.g. "The long context beta is not yet
+ * available for this subscription", "... beta is not available", "unsupported
+ * beta"). Conservative — only triggers the one-shot beta-stripped retry.
+ */
+function isBetaRelated400(body: string): boolean {
+  return (
+    /\bbeta\b/i.test(body) &&
+    /\b(not\s+(yet\s+)?available|unsupported|not\s+enabled|invalid)\b/i.test(
+      body,
+    )
+  );
+}
 
 /**
  * Unified retry policy (modeled on Claude Code's `getRetryDelay`).
@@ -289,16 +328,35 @@ export function resolveWorkerProtocol(
   return "anthropic";
 }
 
-/** Resolve upstream target URL and protocol.
- *  When `upstreamOverride` is set, the request routes to that URL instead
- *  of the default — used for same-provider routing where the session's
- *  credentials only work against the session's endpoint. */
+/**
+ * Resolve upstream target URL and protocol for a worker model.
+ *
+ * CROSS-PROVIDER SAFETY: the `upstreamOverride` (the session's endpoint) is
+ * ONLY honored when the worker model's provider matches the session/override
+ * provider. A session endpoint belongs to provider A; sending provider B's
+ * model there with provider A's credential is the exact misconfig that caused
+ * the production 401 loop (minimax model → api.anthropic.com). When the worker
+ * model's provider differs, we route by the model's OWN provider route table
+ * (`resolveProviderRoute`) and ignore the session override. If the model's
+ * provider has no route URL, `routeUrl` is null and the caller must fail closed
+ * rather than fall back to a foreign endpoint.
+ *
+ * @param modelProviderID  The worker model's provider (authoritative for routing)
+ * @param overrideProviderID  The session/override provider, if known
+ */
 function resolveTarget(
   upstreams: { anthropic: string; openai: string },
   protocol: WorkerProtocol,
-  upstreamOverride?: string,
-): ProviderTarget {
-  if (upstreamOverride) {
+  upstreamOverride: string | undefined,
+  modelProviderID: string,
+  overrideProviderID?: string,
+): ProviderTarget & { routeUnavailable?: boolean } {
+  // Honor the session override ONLY when the worker model belongs to the same
+  // provider as the override endpoint. Otherwise the override is a foreign
+  // endpoint for this model and MUST NOT be used.
+  const overrideMatchesModel =
+    !overrideProviderID || overrideProviderID === modelProviderID;
+  if (upstreamOverride && overrideMatchesModel) {
     return {
       url: upstreamOverride.replace(/\/$/, ""),
       protocol,
@@ -308,15 +366,48 @@ function resolveTarget(
         protocol === "openai-codex-responses" ? "openai-codex" : protocol,
     };
   }
-  if (protocol === "openai-codex-responses") {
-    // Codex has no static default upstream — it always arrives via the
-    // session's upstream override (chatgpt.com/backend-api). Fall back to the
-    // provider route URL if present.
-    const route = resolveProviderRoute("openai-codex");
+
+  // Cross-provider (or no override): route by the worker model's OWN provider.
+  // This is what sends a minimax worker to api.minimax.io instead of colluding
+  // with the session's Anthropic endpoint.
+  // No usable session override for this model — route by the worker model's
+  // OWN provider. This covers both (a) a cross-provider override that doesn't
+  // match the model, and (b) no override at all. The default anthropic/openai
+  // endpoints (below) are ONLY for the two providers they actually belong to;
+  // a foreign provider (minimax, xai, ...) must use its route or fail closed,
+  // never silently land on api.anthropic.com.
+  const isCrossProviderOverride = !!upstreamOverride && !overrideMatchesModel;
+  const isDefaultProvider =
+    modelProviderID === "anthropic" || modelProviderID === "openai";
+  if (isCrossProviderOverride || !isDefaultProvider) {
+    if (protocol === "openai-codex-responses") {
+      // Codex has no static default upstream — fall back to its provider route.
+      const route = resolveProviderRoute("openai-codex");
+      if (route?.url) {
+        return {
+          url: route.url.replace(/\/$/, ""),
+          protocol,
+          providerName: "openai-codex",
+        };
+      }
+    } else {
+      const route = resolveProviderRoute(modelProviderID);
+      if (route?.url) {
+        return {
+          url: route.url.replace(/\/$/, ""),
+          protocol,
+          providerName: modelProviderID,
+        };
+      }
+    }
+    // No route URL for this provider (unknown, or a local provider needing an
+    // explicit LORE_UPSTREAM_<PROVIDER>). Signal the caller to fail closed —
+    // we must NOT fall back to a foreign default endpoint.
     return {
-      url: (route?.url ?? upstreams.openai).replace(/\/$/, ""),
+      url: "",
       protocol,
-      providerName: "openai-codex",
+      providerName: modelProviderID,
+      routeUnavailable: true,
     };
   }
   if (protocol === "openai") {
@@ -391,16 +482,74 @@ function buildAnthropicWorkerRequest(
   // Anthropic may reject worker calls with 401 even when the token is valid.
   const oauthHeaders = buildOAuthWorkerHeaders(sessionID);
 
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "anthropic-version": "2023-06-01",
+    ...authHeaders(cred),
+    ...oauthHeaders,
+  };
+
+  // Capability-aware beta filtering (primary defense against the long-context
+  // 400 loop). The client's `anthropic-beta` is replayed verbatim onto worker
+  // calls, but a sniffed `context-1m` long-context beta is meaningless — and
+  // rejected with a 400 — for a worker model that doesn't support a 1M context
+  // window (e.g. claude-haiku-4-5, whose limit is 200K and will likely never
+  // support 1M). Requesting 1M on such a model is a logical error, so we drop
+  // the long-context beta unless the SELECTED worker model actually supports
+  // a 1M+ context window. (A runtime 400-retry-without-beta fallback in the
+  // retry loop covers any beta we couldn't validate here.)
+  applyModelBetaCapabilityFilter(headers, model.modelID);
+
   return {
     url: `${target.url}/v1/messages`,
-    headers: {
-      "Content-Type": "application/json",
-      "anthropic-version": "2023-06-01",
-      ...authHeaders(cred),
-      ...oauthHeaders,
-    },
+    headers,
     body,
   };
+}
+
+/**
+ * Matches the long-context (1M) beta token family, e.g.
+ * `context-1m-2025-08-07`. The date suffix changes over time, so match the
+ * `context-1m` stem (optionally followed by `-<suffix>`), anchored on a
+ * trimmed token so it can't match a substring inside another beta name.
+ */
+const LONG_CONTEXT_BETA_RE = /^context-1m(?:-.*)?$/;
+
+/** Minimum model context window (tokens) required to keep a `context-1m` beta. */
+const LONG_CONTEXT_MIN_WINDOW = 1_000_000;
+
+/**
+ * Drop beta tokens that the selected worker model cannot honor. Currently
+ * removes the long-context (`context-1m`) beta when the model's context window
+ * is below 1M — requesting 1M context on, e.g., haiku is a logical error that
+ * Anthropic rejects with a 400. Mutates `headers` in place. Other betas are
+ * preserved. If stripping leaves no betas, the header is removed entirely.
+ */
+function applyModelBetaCapabilityFilter(
+  headers: Record<string, string>,
+  modelID: string,
+): void {
+  const betaKey = Object.keys(headers).find(
+    (k) => k.toLowerCase() === "anthropic-beta",
+  );
+  if (!betaKey) return;
+  const betaValue = headers[betaKey];
+  if (!betaValue || !/context-1m/i.test(betaValue)) return;
+
+  // Look up the model's real context window (models.dev-backed, with a
+  // conservative fallback table). Unknown models default to 200K.
+  const contextWindow = getModelEntrySync(modelID).limit?.context ?? 200_000;
+  if (contextWindow >= LONG_CONTEXT_MIN_WINDOW) return; // model supports 1M
+
+  const kept = betaValue
+    .split(",")
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0 && !LONG_CONTEXT_BETA_RE.test(t));
+  if (kept.length > 0) {
+    headers[betaKey] = kept.join(",");
+  } else {
+    delete headers[betaKey];
+  }
 }
 
 /**
@@ -776,8 +925,34 @@ export function createGatewayLLMClient(
       }
       const upstreamOverride = opts?.upstreamUrl;
       const protocol = resolveWorkerProtocol(model.providerID, opts?.protocol);
-      const target = resolveTarget(upstreams, protocol, upstreamOverride);
+      const target = resolveTarget(
+        upstreams,
+        protocol,
+        upstreamOverride,
+        model.providerID,
+        opts?.upstreamProviderID,
+      );
       const maxTokens = opts?.maxTokens ?? DEFAULT_WORKER_MAX_TOKENS;
+
+      // Cross-provider fail-closed: the worker model's provider has no route
+      // URL (unknown provider, or a local provider missing its explicit
+      // upstream). We must NOT fall back to the session's foreign endpoint —
+      // that's the exact collusion that caused the minimax→Anthropic 401 loop.
+      // Skip the call, record it, and soft-pause so it doesn't re-fire.
+      if (target.routeUnavailable || !target.url) {
+        log.warn(
+          `worker cross-provider: no route for model provider="${model.providerID}" ` +
+            `(model=${model.modelID}, worker=${opts?.workerID ?? "unknown"}, ` +
+            `session=${opts?.sessionID?.slice(0, 16) ?? "none"}) — skipping`,
+        );
+        recordWorkerFailure(
+          opts?.sessionID ?? "_unknown",
+          opts?.workerID ?? "unknown",
+          "cross-provider",
+        );
+        if (opts?.sessionID) markWorkerPaused(opts.sessionID);
+        return null;
+      }
 
       // Defense-in-depth: detect API key / provider mismatch before making
       // a doomed request. Anthropic keys start with "sk-ant-"; OpenAI keys
@@ -785,29 +960,21 @@ export function createGatewayLLMClient(
       // distinguished by prefix, so only API keys are checked.
       // Skip when LORE_WORKER_API_KEY is set — the user deliberately chose
       // a cross-provider credential/model combination.
-      // Also skip when an upstream override points to a known
-      // proxy/aggregator (e.g. OpenCode Zen, OpenRouter) that accepts the
-      // session's credentials regardless of the provider prefix.
-      // DO NOT skip for direct provider URLs (api.anthropic.com,
-      // api.openai.com) — the mismatch check is still needed there.
-      let shouldCheckProtocolMismatch = true;
-      if (upstreamOverride) {
-        try {
-          const hostname = new URL(upstreamOverride).hostname;
-          // Only skip the check for proxy/aggregator hosts — direct
-          // provider URLs still need the mismatch guard.
-          // Only Anthropic and OpenAI are checked because they're the
-          // only providers whose API key prefixes are distinguishable
-          // (sk-ant- vs sk-). Other providers use bearer tokens or
-          // non-standard key formats this prefix check can't validate.
-          const isDirectProvider =
-            hostname === "api.anthropic.com" || hostname === "api.openai.com";
-          if (!isDirectProvider) {
-            shouldCheckProtocolMismatch = false;
-          }
-        } catch {
-          // Malformed URL — run the check to be safe.
-        }
+      // The check is keyed off the RESOLVED TARGET host (not the raw
+      // override): after cross-provider routing the target may be the model's
+      // own endpoint (e.g. api.minimax.io) where an `sk-`-prefixed key is
+      // perfectly valid and must NOT be rejected as an "Anthropic mismatch".
+      // Only the two direct providers whose key prefixes are distinguishable
+      // (api.anthropic.com / api.openai.com) get the prefix check; everything
+      // else (aggregators, minimax, bearer tokens) is exempt.
+      let shouldCheckProtocolMismatch = false;
+      try {
+        const targetHost = new URL(target.url).hostname;
+        shouldCheckProtocolMismatch =
+          targetHost === "api.anthropic.com" || targetHost === "api.openai.com";
+      } catch {
+        // Malformed target URL — leave the check off (the route resolution
+        // above already failed closed for unroutable providers).
       }
       if (
         cred.scheme === "api-key" &&
@@ -882,6 +1049,9 @@ export function createGatewayLLMClient(
             // Trip the circuit breaker at most once per call so a multi-retry
             // 429 loop doesn't runaway-escalate the breaker's backoff schedule.
             let breakerTripped = false;
+            // Strip beta headers at most once per call (runtime fallback for a
+            // beta-related 400 — see the non-transient block below).
+            let betaStripped = false;
             // Resolve the retry budget once per call (not per attempt) — the
             // value can't change mid-loop and re-reading the env each iteration
             // is wasteful.
@@ -1111,6 +1281,14 @@ export function createGatewayLLMClient(
                   code: 2,
                   message: `HTTP ${response.status} auth`,
                 });
+                // Soft-pause so a persistent auth failure doesn't re-fire on
+                // every idle tick + turn. The per-provider staleness above
+                // does NOT stop the loop for a cross-provider 401 (the key is
+                // valid for its real provider, so it's never marked stale) —
+                // the pause is the robust backstop. isWorkerCreditPaused()
+                // still lets one probe through per 5 min so a refreshed
+                // credential recovers automatically. Urgent calls are exempt.
+                if (opts?.sessionID) markWorkerPaused(opts.sessionID);
                 return null;
               }
 
@@ -1151,6 +1329,31 @@ export function createGatewayLLMClient(
               // Non-transient error — fail immediately, no retry
               if (!TRANSIENT_CODES.has(response.status)) {
                 const text = await response.text().catch(() => "(no body)");
+
+                // 400 + a beta-related complaint → the request carries a beta
+                // header the model/subscription doesn't support (e.g. a
+                // `context-1m` long-context beta sniffed from the client turn
+                // and replayed onto a worker call to a non-1M model like
+                // haiku). The upfront capability check (buildWorkerRequest)
+                // should already strip incompatible betas, but this is the
+                // runtime safety net: retry ONCE with all beta headers removed
+                // before giving up. Bounded to a single retry to avoid a loop.
+                if (
+                  response.status === 400 &&
+                  !betaStripped &&
+                  hasBetaHeader(req.headers) &&
+                  isBetaRelated400(text)
+                ) {
+                  betaStripped = true;
+                  req = { ...req, headers: stripBetaHeaders(req.headers) };
+                  log.warn(
+                    `worker 400 looks beta-related — retrying once without beta headers ` +
+                      `(model=${model.providerID}/${model.modelID}, worker=${opts?.workerID ?? "unknown"}): ${text.slice(0, 160)}`,
+                  );
+                  retryCount++;
+                  continue;
+                }
+
                 log.error(
                   `worker upstream request failed: ${response.status} ${response.statusText}` +
                     ` — url=${target.url} model=${model.providerID}/${model.modelID}` +
@@ -1164,6 +1367,11 @@ export function createGatewayLLMClient(
                   opts?.workerID ?? "unknown",
                   "upstream-error",
                 );
+                // Soft-pause: a non-transient 4xx for a worker re-sending the
+                // same content is permanent. Stops the re-fire-every-turn loop;
+                // isWorkerCreditPaused() still probes once per 5 min so a fixed
+                // request recovers. Urgent calls are pause-exempt.
+                if (opts?.sessionID) markWorkerPaused(opts.sessionID);
                 return null;
               }
 

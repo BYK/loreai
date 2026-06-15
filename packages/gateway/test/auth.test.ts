@@ -281,6 +281,39 @@ describe("resolveAuth with staleness", () => {
     expect(resolveAuth("sess-1")).toEqual(bearerCred2);
   });
 
+  // -------------------------------------------------------------------------
+  // Cross-provider fallback guard (production 401-loop regression)
+  // -------------------------------------------------------------------------
+
+  test("does NOT borrow the global credential for a provider the session never authenticated", () => {
+    // Session authenticated ONLY with Anthropic (stored under "anthropic").
+    setSessionAuth("sess-1", apiKeyCred, "anthropic");
+    // Global fallback holds that same Anthropic key.
+    setLastSeenAuth(apiKeyCred);
+
+    // A worker configured for "minimax" must NOT get the Anthropic key — that
+    // produced the production cross-provider 401 loop. Fail closed (null).
+    expect(resolveAuth("sess-1", "minimax")).toBe(null);
+    // The legitimate provider still resolves correctly.
+    expect(resolveAuth("sess-1", "anthropic")).toEqual(apiKeyCred);
+  });
+
+  test("returns the provider's own credential when the session has it", () => {
+    setSessionAuth("sess-1", apiKeyCred, "anthropic");
+    setSessionAuth("sess-1", minimaxCred, "minimax");
+    setLastSeenAuth(apiKeyCred);
+
+    expect(resolveAuth("sess-1", "minimax")).toEqual(minimaxCred);
+    expect(resolveAuth("sess-1", "anthropic")).toEqual(apiKeyCred);
+  });
+
+  test("still allows global fallback for cold-start sessions with no provider store", () => {
+    // No setSessionAuth at all — a cold-start worker before the first turn's
+    // credential was registered. The global fallback is still legitimate here.
+    setLastSeenAuth(apiKeyCred);
+    expect(resolveAuth("sess-cold", "anthropic")).toEqual(apiKeyCred);
+  });
+
   test("re-resolves to session credential after staleness cleared", () => {
     setSessionAuth("sess-1", bearerCred);
     setLastSeenAuth(apiKeyCred);

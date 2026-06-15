@@ -29,7 +29,12 @@ import {
 import { upstreamFetch } from "../src/fetch";
 import { clearAllCosts, getSessionCosts } from "../src/cost-tracker";
 import { recordWorkerFailure, markWorkerPaused } from "../src/worker-health";
-import { captureSessionHeaders } from "../src/cch";
+import { captureSessionHeaders, captureBillingPrefix } from "../src/cch";
+
+// Claude Code billing-header system prompt — marks a session as an OAuth
+// billing session so worker calls replay its sniffed anthropic-beta header.
+const BILLING_SYSTEM =
+  "x-anthropic-billing-header: cc_version=2.1.177.00c; cc_entrypoint=cli; cch=a55d7;";
 
 // ---------------------------------------------------------------------------
 // maxRetriesFor — unified policy (modeled on Claude Code's single budget)
@@ -647,5 +652,387 @@ describe("worker 402 insufficient credit handling", () => {
     expect(result).toBeNull();
     expect(mockMarkPaused).not.toHaveBeenCalled();
     expect(mockRecordFailure).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cross-provider collusion guard
+//
+// REGRESSION: production incident where a configured `workerModel:
+// minimax/MiniMax-M2.7` was sent to https://api.anthropic.com with the
+// session's Anthropic api-key, producing a 401 "invalid x-api-key" loop with
+// no backoff (auth errors don't retry) — 175 of 200 worker errors, pinning a
+// CPU core across multiple sessions.
+//
+// INVARIANT (must hold forever): a worker model's provider MUST match BOTH
+//  (a) the upstream URL the request is sent to, AND
+//  (b) the credential used.
+// A worker call may NEVER send provider A's model to provider B's endpoint, and
+// MUST fail closed (skip + record "cross-provider", no upstream request) when a
+// matching route/credential is unavailable.
+// ---------------------------------------------------------------------------
+
+describe("cross-provider collusion guard", () => {
+  const mockFetch = vi.mocked(upstreamFetch);
+  const mockRecordFailure = vi.mocked(recordWorkerFailure);
+
+  const UPSTREAMS = {
+    anthropic: "https://api.anthropic.com",
+    openai: "https://api.openai.com",
+  };
+
+  beforeEach(() => {
+    mockRecordFailure.mockClear();
+  });
+
+  afterEach(() => {
+    mockFetch.mockReset();
+    clearAllCosts();
+    resetBackgroundLimiter();
+  });
+
+  // The core regression: minimax model + Anthropic api-key (the exact prod
+  // misconfig). It must NOT reach api.anthropic.com. Either it routes to
+  // minimax's own endpoint (only if a minimax credential exists) or it fails
+  // closed — but it must never collude provider A's model with provider B's
+  // direct endpoint.
+  test("NEVER sends a minimax model to api.anthropic.com with an Anthropic key", async () => {
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: { message: "invalid x-api-key" } }),
+        { status: 401 },
+      ),
+    );
+
+    // getAuth simulates production: no minimax credential, only the Anthropic
+    // key is known (returned for any provider via the global fallback today).
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "sk-ant-anthropic-key" }),
+      { providerID: "anthropic", modelID: "claude-haiku-4-5" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      sessionID: "sess-xprov",
+      workerID: "lore-distill",
+      model: { providerID: "minimax", modelID: "MiniMax-M2.7" },
+    });
+
+    expect(result).toBeNull();
+    // The invariant: if any upstream call was made, it must NOT be to the
+    // Anthropic direct endpoint with the minimax model.
+    for (const call of mockFetch.mock.calls) {
+      const url = String(call[0]);
+      expect(url).not.toContain("api.anthropic.com");
+    }
+  });
+
+  test("fails closed (skip + record cross-provider, no fetch) when no matching credential", async () => {
+    // getAuth returns null for the minimax provider (no minimax credential) —
+    // the post-fix resolveAuth behavior. The call must be skipped entirely.
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      (_sid, providerID) =>
+        providerID === "minimax"
+          ? null
+          : { scheme: "api-key", value: "sk-ant-anthropic-key" },
+      { providerID: "anthropic", modelID: "claude-haiku-4-5" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      sessionID: "sess-xprov-2",
+      workerID: "lore-distill",
+      model: { providerID: "minimax", modelID: "MiniMax-M2.7" },
+    });
+
+    expect(result).toBeNull();
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(mockRecordFailure).toHaveBeenCalledWith(
+      "sess-xprov-2",
+      "lore-distill",
+      expect.stringMatching(/cross-provider|no-auth/),
+    );
+  });
+
+  test("routes a minimax model to the minimax endpoint when a minimax credential exists", async () => {
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          content: [{ type: "text", text: "minimax reply" }],
+          model: "MiniMax-M2.7",
+          usage: { input_tokens: 5, output_tokens: 2 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    // A real minimax credential is available for the minimax provider.
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      (_sid, providerID) =>
+        providerID === "minimax"
+          ? { scheme: "api-key", value: "minimax-secret-key" }
+          : { scheme: "api-key", value: "sk-ant-anthropic-key" },
+      { providerID: "anthropic", modelID: "claude-haiku-4-5" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      sessionID: "sess-xprov-3",
+      workerID: "lore-distill",
+      model: { providerID: "minimax", modelID: "MiniMax-M2.7" },
+    });
+
+    expect(result).toBe("minimax reply");
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const url = String(mockFetch.mock.calls[0][0]);
+    // minimax PROVIDER_ROUTES url is https://api.minimax.io/anthropic
+    expect(url).toContain("api.minimax.io");
+    expect(url).not.toContain("api.anthropic.com");
+  });
+
+  test("soft-pauses on a non-transient 400 so it stops re-firing every turn", async () => {
+    const mockMarkPaused = vi.mocked(markWorkerPaused);
+    mockMarkPaused.mockClear();
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: { message: "bad request, model not found" } }),
+        { status: 400 },
+      ),
+    );
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      { providerID: "anthropic", modelID: "claude-test" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      sessionID: "sess-400-pause",
+      workerID: "lore-distill",
+    });
+
+    expect(result).toBeNull();
+    expect(mockFetch).toHaveBeenCalledTimes(1); // no retry
+    expect(mockMarkPaused).toHaveBeenCalledWith("sess-400-pause");
+  });
+
+  test("soft-pauses on a persistent 401 auth error (cross-provider key-valid-but-wrong loop)", async () => {
+    const mockMarkPaused = vi.mocked(markWorkerPaused);
+    mockMarkPaused.mockClear();
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: { message: "invalid x-api-key" } }),
+        { status: 401 },
+      ),
+    );
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      { providerID: "anthropic", modelID: "claude-test" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      sessionID: "sess-401-pause",
+      workerID: "lore-distill",
+    });
+
+    expect(result).toBeNull();
+    expect(mockMarkPaused).toHaveBeenCalledWith("sess-401-pause");
+  });
+
+  test("does not let a session upstreamUrl override re-home a different provider's model", async () => {
+    // Session is Anthropic (upstreamUrl=api.anthropic.com) but the worker model
+    // is minimax. The session override must NOT be applied to the minimax model.
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          content: [{ type: "text", text: "ok" }],
+          model: "MiniMax-M2.7",
+          usage: { input_tokens: 5, output_tokens: 2 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      (_sid, providerID) =>
+        providerID === "minimax"
+          ? { scheme: "api-key", value: "minimax-secret-key" }
+          : { scheme: "api-key", value: "sk-ant-anthropic-key" },
+      { providerID: "anthropic", modelID: "claude-haiku-4-5" },
+    );
+
+    await client.prompt("system", "user", {
+      sessionID: "sess-xprov-4",
+      workerID: "lore-distill",
+      model: { providerID: "minimax", modelID: "MiniMax-M2.7" },
+      // The session's Anthropic endpoint — must be IGNORED for a minimax model.
+      upstreamUrl: "https://api.anthropic.com",
+      protocol: "anthropic",
+    });
+
+    for (const call of mockFetch.mock.calls) {
+      expect(String(call[0])).not.toContain("api.anthropic.com");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Beta-vs-model capability validation + runtime 400-retry-without-beta
+//
+// The client's `anthropic-beta` (incl. a `context-1m` long-context beta) is
+// replayed onto worker calls. A 1M beta is a logical error for a model whose
+// context window is < 1M (e.g. claude-haiku-4-5, 200K) and Anthropic rejects it
+// with a 400. We (1) validate betas against the selected model's capability
+// matrix and drop incompatible ones up front, and (2) as a runtime safety net,
+// retry once with all beta headers removed on a beta-related 400.
+// ---------------------------------------------------------------------------
+
+describe("worker beta capability validation", () => {
+  const mockFetch = vi.mocked(upstreamFetch);
+
+  const UPSTREAMS = {
+    anthropic: "https://api.anthropic.com",
+    openai: "https://api.openai.com",
+  };
+
+  afterEach(() => {
+    mockFetch.mockReset();
+    clearAllCosts();
+    resetBackgroundLimiter();
+  });
+
+  function betaOf(callIndex: number): string | undefined {
+    const init = mockFetch.mock.calls[callIndex]?.[1];
+    const headers = init?.headers as Record<string, string> | undefined;
+    if (!headers) return undefined;
+    const key = Object.keys(headers).find(
+      (k) => k.toLowerCase() === "anthropic-beta",
+    );
+    return key ? headers[key] : undefined;
+  }
+
+  test("drops the context-1m beta for a sub-1M model (haiku) but keeps other betas", async () => {
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          content: [{ type: "text", text: "ok" }],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    // Mark the session as a billing/OAuth session and seed a sniffed beta that
+    // includes context-1m alongside legitimate betas.
+    captureBillingPrefix("sess-haiku-beta", BILLING_SYSTEM);
+    captureSessionHeaders("sess-haiku-beta", {
+      "anthropic-beta":
+        "oauth-2025-04-20,context-1m-2025-08-07,fine-grained-tool-streaming-2025-05-14",
+    });
+
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "oauth-token" }),
+      { providerID: "anthropic", modelID: "claude-haiku-4-5" },
+    );
+
+    await client.prompt("system", "user", {
+      sessionID: "sess-haiku-beta",
+      workerID: "lore-distill",
+      model: { providerID: "anthropic", modelID: "claude-haiku-4-5" },
+    });
+
+    const beta = betaOf(0);
+    expect(beta).toBeDefined();
+    expect(beta).not.toContain("context-1m");
+    // Other betas preserved.
+    expect(beta).toContain("oauth-2025-04-20");
+    expect(beta).toContain("fine-grained-tool-streaming-2025-05-14");
+  });
+
+  test("keeps the context-1m beta for a 1M-capable model (opus)", async () => {
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          content: [{ type: "text", text: "ok" }],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    captureBillingPrefix("sess-opus-beta", BILLING_SYSTEM);
+    captureSessionHeaders("sess-opus-beta", {
+      "anthropic-beta": "oauth-2025-04-20,context-1m-2025-08-07",
+    });
+
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "oauth-token" }),
+      { providerID: "anthropic", modelID: "claude-opus-4-8" },
+    );
+
+    await client.prompt("system", "user", {
+      sessionID: "sess-opus-beta",
+      workerID: "lore-distill",
+      model: { providerID: "anthropic", modelID: "claude-opus-4-8" },
+    });
+
+    // opus-4 has a 1M context window in the fallback table → beta retained.
+    expect(betaOf(0)).toContain("context-1m");
+  });
+
+  test("retries once without beta headers on a beta-related 400, then succeeds", async () => {
+    let call = 0;
+    mockFetch.mockImplementation(async () => {
+      call++;
+      if (call === 1) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              type: "invalid_request_error",
+              message:
+                "The long context beta is not yet available for this subscription.",
+            },
+          }),
+          { status: 400 },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          content: [{ type: "text", text: "recovered" }],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    // Use a 1M-capable model (opus) so the capability filter KEEPS the beta —
+    // then simulate the real scenario where the model supports 1M but the
+    // SUBSCRIPTION isn't entitled, so Anthropic still 400s. The runtime
+    // beta-stripped retry is what recovers.
+    captureBillingPrefix("sess-400-beta", BILLING_SYSTEM);
+    captureSessionHeaders("sess-400-beta", {
+      "anthropic-beta": "context-1m-2025-08-07",
+    });
+
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "oauth-token" }),
+      { providerID: "anthropic", modelID: "claude-opus-4-8" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      sessionID: "sess-400-beta",
+      workerID: "lore-distill",
+      model: { providerID: "anthropic", modelID: "claude-opus-4-8" },
+    });
+
+    expect(result).toBe("recovered");
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    // First attempt carried the beta; retry dropped it.
+    expect(betaOf(0)).toContain("context-1m");
+    expect(betaOf(1)).toBeUndefined();
   });
 });

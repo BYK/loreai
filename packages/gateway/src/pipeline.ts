@@ -173,6 +173,7 @@ import {
   recordWorkerFailure,
   allowWorkerProbe,
   isWorkerCreditPaused,
+  getDegradationWarning,
 } from "./worker-health";
 import {
   getWorkerModel,
@@ -296,8 +297,30 @@ const CONTEXT_WARNING_TEXT =
   `it has exceeded the context limit 5+ times in a row and compression cannot keep up. ` +
   `Consider running /compact or starting a new conversation.\n\n---\n\n`;
 
-/** Insert the context warning text block into a response, after any leading thinking blocks. */
-function injectContextWarning(resp: GatewayResponse): GatewayResponse {
+/**
+ * Build the worker-degradation warning text (or null if the session's
+ * background workers are healthy / not yet sustained-failing). Reuses the
+ * CONTEXT_WARNING_MARKER so it is stripped on the next turn like the
+ * unsustainable-conversation warning, preserving the prompt cache prefix.
+ *
+ * This is the user-visible signal that distillation/curation/cache-warming
+ * are failing — so degradation (context bloat, no LTM growth) is never silent.
+ */
+function buildWorkerDegradationWarning(sessionID: string): string | null {
+  const warning = getDegradationWarning(sessionID);
+  if (!warning) return null;
+  return `${CONTEXT_WARNING_MARKER} ${warning}\n\n---\n\n`;
+}
+
+/**
+ * Insert a warning text block into a response, after any leading thinking
+ * blocks. Defaults to the unsustainable-conversation text; pass `text` to
+ * inject a different marker'd warning (e.g. worker degradation).
+ */
+function injectContextWarning(
+  resp: GatewayResponse,
+  text: string = CONTEXT_WARNING_TEXT,
+): GatewayResponse {
   // Insert after thinking blocks to preserve the expected block ordering
   // (thinking first, then text). Clients may inspect the first block's type
   // to determine if extended thinking is active.
@@ -311,7 +334,7 @@ function injectContextWarning(resp: GatewayResponse): GatewayResponse {
   const content = [...resp.content];
   content.splice(insertIdx, 0, {
     type: "text" as const,
-    text: CONTEXT_WARNING_TEXT,
+    text,
   });
   return { ...resp, content };
 }
@@ -1523,9 +1546,18 @@ function getLLMClient(config: GatewayConfig): LLMClient {
                 return null;
               }
             }
+            // Thread the session's provider so the adapter can enforce
+            // cross-provider safety: it only honors `upstreamUrl` when the
+            // (possibly re-resolved) worker model's provider matches
+            // `upstreamProviderID`. If a configured `workerModel` re-resolves
+            // to a DIFFERENT provider than the session (the production
+            // minimax-on-Anthropic case), the adapter routes by the worker
+            // model's own provider route — or fails closed if it has none —
+            // instead of sending it to the session's foreign endpoint.
             return rawClient.prompt(system, user, {
               ...effectiveOpts,
               upstreamUrl: state.lastUpstream.url,
+              upstreamProviderID: upstreamProvider,
               protocol: state.lastUpstream.protocol,
             });
           }
@@ -5795,6 +5827,26 @@ async function handleConversationTurn(
     );
   }
 
+  // Worker-degradation warning: surfaced when background workers (distillation,
+  // curation, cache-warming) have been failing for a sustained period, so the
+  // user is told instead of silently losing compression/LTM. Reuses the same
+  // marker-based response injection as the unsustainable warning. The
+  // unsustainable warning takes precedence when both apply (it's the more
+  // urgent, actionable signal); we never inject two warning blocks.
+  const workerWarningText = unsustainable
+    ? undefined
+    : buildWorkerDegradationWarning(sessionID);
+  if (workerWarningText) {
+    log.warn(
+      `session ${sessionID}: worker degradation detected — warning will be prepended to response.`,
+    );
+  }
+  // A single combined flag/text drives all injection sites below.
+  const warningText: string | undefined = unsustainable
+    ? CONTEXT_WARNING_TEXT
+    : (workerWarningText ?? undefined);
+  const shouldInjectWarning = !!warningText;
+
   // --- 8. Build the modified request ---
   // Reconstruct GatewayMessages from the transformed Lore messages.
   // loreMessagesToGateway reconstructs tool_result blocks from assistant's
@@ -6169,7 +6221,9 @@ async function handleConversationTurn(
           genAiSpan,
         );
         return nonStreamHttpResponse(
-          unsustainable ? injectContextWarning(markerResp) : markerResp,
+          shouldInjectWarning
+            ? injectContextWarning(markerResp, warningText)
+            : markerResp,
           req.protocol,
           req.stream,
           { "x-lore-recall-invoked": "true" },
@@ -6216,7 +6270,9 @@ async function handleConversationTurn(
           genAiSpan,
         );
         return nonStreamHttpResponse(
-          unsustainable ? injectContextWarning(markerResp) : markerResp,
+          shouldInjectWarning
+            ? injectContextWarning(markerResp, warningText)
+            : markerResp,
           req.protocol,
           req.stream,
           { "x-lore-recall-invoked": "true" },
@@ -6249,7 +6305,9 @@ async function handleConversationTurn(
           genAiSpan,
         );
         return nonStreamHttpResponse(
-          unsustainable ? injectContextWarning(markerResp) : markerResp,
+          shouldInjectWarning
+            ? injectContextWarning(markerResp, warningText)
+            : markerResp,
           req.protocol,
           req.stream,
           { "x-lore-recall-invoked": "true" },
@@ -6298,7 +6356,9 @@ async function handleConversationTurn(
     const recallHeaders =
       recallDepth > 0 ? { "x-lore-recall-invoked": "true" } : undefined;
     return nonStreamHttpResponse(
-      unsustainable ? injectContextWarning(currentResp) : currentResp,
+      shouldInjectWarning
+        ? injectContextWarning(currentResp, warningText)
+        : currentResp,
       req.protocol,
       req.stream,
       recallHeaders,
@@ -6335,7 +6395,7 @@ async function handleConversationTurn(
       hasRecallTool
         ? { modifiedReq, config, sessionState, cacheOptions }
         : undefined,
-      unsustainable ? CONTEXT_WARNING_TEXT : undefined,
+      warningText,
     );
     // Translate to client's wire format if needed. When the upstream is
     // Anthropic but the client speaks OpenAI, wrap the Anthropic SSE stream.
