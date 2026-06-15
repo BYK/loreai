@@ -13,7 +13,7 @@
  *     per-target binary.
  *
  * Usage:
- *   bun run packages/gateway/script/vendor-embeddings.ts
+ *   tsx packages/gateway/script/vendor-embeddings.ts
  */
 
 import {

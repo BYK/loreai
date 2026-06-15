@@ -20,9 +20,12 @@
  * Linux x64/arm64 and Windows x64). Intel Macs and Windows-arm64 are
  * intentionally not supported (see `vendor-paths.ts:18`).
  *
+ * Runs under Node (via tsx) — no Bun runtime required.
+ *
  * Example:
- *   bun run script/build-binary-sea.ts -- --platforms linux-x64
- *   bun run script/build-binary-sea.ts -- --platforms "darwin-arm64,linux-arm64,linux-x64,windows-x64" --release
+ *   tsx script/build-binary-sea.ts --platforms linux-x64
+ *   tsx script/build-binary-sea.ts --platforms "darwin-arm64,linux-arm64,linux-x64,windows-x64" --release
+ *   (or via the package script: `pnpm run build:binary:sea -- --platforms linux-x64`)
  */
 import * as esbuild from "esbuild";
 import {
@@ -163,9 +166,12 @@ function prepareVendorModelCache(target: CompileTarget): string | null {
   console.log(
     `  Vendor: missing model artefacts — running vendor-embeddings.ts`,
   );
+  // Run under Node (via tsx) — no Bun runtime required. tsx is resolved from
+  // node_modules so this works regardless of cwd / PATH.
+  const tsxCli = require.resolve("tsx/cli");
   const result = spawnSync(
-    "bun",
-    ["run", join(packageDir, "script/vendor-embeddings.ts")],
+    process.execPath,
+    [tsxCli, join(packageDir, "script/vendor-embeddings.ts")],
     { stdio: "inherit", cwd: repoRoot },
   );
   if (result.status !== 0) {

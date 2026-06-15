@@ -7,7 +7,7 @@
  * integration tests without hitting the real Anthropic API.
  *
  * Usage:
- *   bun run packages/gateway/script/record-session.ts [output-file]
+ *   tsx packages/gateway/script/record-session.ts [output-file]
  *
  * Default output:
  *   packages/gateway/test/fixtures/recorded-<timestamp>.ndjson
@@ -21,7 +21,7 @@
  *   LORE_DEBUG          — set to "1" to enable request logging
  *
  * After recording, use the fixture for replay tests:
- *   bun test packages/gateway/test/replay.test.ts FIXTURE=<file>
+ *   FIXTURE=<file> npx vitest run packages/gateway/test/replay.test.ts
  */
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";

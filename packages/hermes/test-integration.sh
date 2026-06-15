@@ -58,7 +58,7 @@ if command -v lore &>/dev/null || command -v lore-gateway &>/dev/null; then
 else
   fail "lore binary not found on PATH"
   echo "  Install: curl -fsSL https://withlore.ai/install | bash"
-  echo "  Or build from this repo: bun run build && export PATH=\$PWD/packages/gateway/dist:\$PATH"
+  echo "  Or build from this repo: pnpm run build && export PATH=\$PWD/packages/gateway/dist:\$PATH"
   exit 1
 fi
 

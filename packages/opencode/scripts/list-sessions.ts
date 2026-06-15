@@ -2,7 +2,7 @@
  * List sessions in lore's temporal storage with distillation status.
  *
  * Usage:
- *   bun run scripts/list-sessions.ts [--project <path>] [--all]
+ *   tsx scripts/list-sessions.ts [--project <path>] [--all]
  *
  * Options:
  *   --project <path>  Filter to a specific project path (substring match).

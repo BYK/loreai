@@ -6,7 +6,7 @@
  * instance and verifies responses end-to-end.
  *
  * Usage:
- *   bun run packages/gateway/script/smoke-test.ts
+ *   tsx packages/gateway/script/smoke-test.ts
  *
  * Prerequisites:
  *   - ANTHROPIC_API_KEY env var, or key stored in

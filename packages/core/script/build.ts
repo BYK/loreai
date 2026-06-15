@@ -11,8 +11,10 @@
  * TypeScript declarations (.d.ts) are emitted separately by `tsc` below.
  * esbuild alone can't produce declarations.
  *
- * Runs under either Bun (during `bun run build`) or Node; the build itself is
- * runtime-agnostic (esbuild is a plain npm package).
+ * The build runs under Node (via tsx, e.g. `pnpm run build`) — it does not
+ * require the Bun runtime. esbuild is a plain npm package, so the build is
+ * runtime-agnostic; the dist/bun target is produced via esbuild's
+ * `conditions: ["bun"]`, not by running under Bun.
  */
 import * as esbuild from "esbuild";
 import { rmSync, mkdirSync, cpSync, existsSync } from "node:fs";

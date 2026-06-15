@@ -7,8 +7,8 @@
  * dist-tag that lacks a seed, and reports them for extraction.
  *
  * Usage:
- *   bun run scripts/check-cc-version.ts          # human-readable output
- *   bun run scripts/check-cc-version.ts --json    # machine-readable JSON
+ *   tsx scripts/check-cc-version.ts          # human-readable output
+ *   tsx scripts/check-cc-version.ts --json    # machine-readable JSON
  *
  * JSON output includes:
  *   - latestVersion: the latest dist-tag version (becomes WORKER_VERSION)
@@ -35,7 +35,7 @@ const { values: args } = parseArgs({
 
 if (args.help) {
   console.log(`Usage:
-  bun run scripts/check-cc-version.ts [--json]
+  tsx scripts/check-cc-version.ts [--json]
 
 Checks if recent Claude Code versions on npm have known cch seeds.
 Exits 0 if all versions are known, 1 if any needs extraction.
@@ -138,9 +138,7 @@ async function main() {
       for (const v of uniqueMissing) {
         console.log(`  ✗ ${v}`);
       }
-      console.log(
-        `\nRun: bun run scripts/extract-cch-seed.ts --version <VERSION>`,
-      );
+      console.log(`\nRun: tsx scripts/extract-cch-seed.ts --version <VERSION>`);
     } else {
       console.log("All published versions have known seeds.");
     }

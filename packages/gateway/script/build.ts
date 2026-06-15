@@ -3,16 +3,21 @@
  *
  * Two build modes:
  *
- *   1. `bun run script/build.ts` (default)
+ *   1. `tsx script/build.ts` (default; via `pnpm run build`)
  *      Produces dist/index.js — publishable ESM bundle for npm.
  *      @loreai/core is external (workspace dep, installed alongside).
  *
- *   2. `bun run script/build.ts --binary`
+ *   2. `tsx script/build.ts --binary` (via `pnpm run build:binary`)
  *      Delegates to `script/build-binary-sea.ts` which produces a
  *      standalone Node SEA binary via fossilize. The legacy Bun
  *      `--compile` pipeline was removed in #551 in favor of Node SEA
  *      because Bun's WASM engine has unfixed bugs that cause ONNX
  *      embedding OOM on all platforms (oven-sh/bun#18145, #25677, #31158).
+ *
+ * Lore's build pipeline runs entirely under Node (via tsx) — it never
+ * requires the Bun runtime. (The `bun` export condition / dist/index.bun.js
+ * artifact still exists for the @loreai/opencode plugin, which runs under
+ * Bun; it is produced by esbuild here, not by Bun.)
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -45,7 +50,7 @@ const { values: flags } = parseArgs({
 
 async function buildLibrary() {
   // Create lightweight dev shims so workspace consumers can resolve
-  // the "bun" export condition without running the full `bun run bundle`.
+  // the "bun" export condition without running the full `pnpm run bundle`.
   // Real bundle builds (bundle.ts) wipe dist/ first, so these shims
   // never interfere with production artifacts.
   mkdirSync(distDir, { recursive: true });
@@ -81,7 +86,7 @@ async function buildLibrary() {
   }
 
   console.log(
-    "✓ @loreai/gateway: dev shims ready (use `bun run bundle` for npm build)",
+    "✓ @loreai/gateway: dev shims ready (use `pnpm run bundle` for npm build)",
   );
 }
 
@@ -96,10 +101,16 @@ if (flags.binary) {
   if (flags.release) args.push("--release");
   if (flags["no-vendor"]) args.push("--no-vendor");
 
+  // Run the SEA build script under Node (via tsx) — Lore's build pipeline
+  // never requires the Bun runtime. tsx is resolved from node_modules so this
+  // works regardless of cwd / PATH.
   const { spawnSync } = await import("node:child_process");
+  const { createRequire } = await import("node:module");
+  const require = createRequire(import.meta.url);
+  const tsxCli = require.resolve("tsx/cli");
   const result = spawnSync(
-    "bun",
-    ["run", join(here, "build-binary-sea.ts"), ...args],
+    process.execPath,
+    [tsxCli, join(here, "build-binary-sea.ts"), ...args],
     {
       cwd: packageDir,
       stdio: "inherit",
