@@ -22,6 +22,7 @@ import {
   MIN_WARMUPS_FOR_ROI_CHECK,
   MIN_RETURN_PROBABILITY_FLOOR,
   TOOL_CALL_MAX_CYCLES,
+  TOOL_CALL_MIN_HITS_FOR_CONTINUATION,
   HISTOGRAM_BINS,
   BREAK_FLOOR_MS,
   creditWarmupHit,
@@ -1840,6 +1841,70 @@ describe("shouldWarm tool-call warming", () => {
 
     // warmup?.disabled is undefined, !undefined is true → enters fast path
     expect(shouldWarm(state, profile, hist, now)).toBe(true);
+  });
+
+  // --- Bug C: evidence gate on tool-call continuation cycles ---
+
+  test("Bug C: first warmup of a break is allowed even with zero hits", () => {
+    const now = Date.now();
+    // cyclesSpent (warmupCount) === 0 → the irreducible probe is funded.
+    const state = makeToolCallState({
+      lastRequestTime: now - 270_000,
+      warmup: {
+        lastWarmupAt: 0,
+        warmupCount: 0,
+        totalWarmups: 0,
+        warmupHits: 0,
+        disabled: false,
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+    expect(shouldWarm(state, profile, hist, now)).toBe(true);
+  });
+
+  test("Bug C: second cycle blocked when session has zero confirmed hits", () => {
+    const now = Date.now();
+    // warmupCount=1 (already probed this break), warmupHits=0 → block. This is
+    // the {2:14} waste cluster: warmup #1 fired, no hit, #2 must not fire.
+    // lastWarmupAt is 270s ago (> 255s cooldown) so only the evidence gate
+    // can produce false here.
+    const state = makeToolCallState({
+      lastRequestTime: now - 270_000,
+      warmup: {
+        lastWarmupAt: now - 270_000,
+        warmupCount: 1,
+        totalWarmups: 1,
+        warmupHits: 0,
+        disabled: false,
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+  });
+
+  test("Bug C: second cycle allowed once session has a confirmed hit", () => {
+    const now = Date.now();
+    // warmupCount=1 but warmupHits>=1 → session has proven it lands hits, so
+    // it retains full TOOL_CALL_MAX_CYCLES coverage (no slow-tool regression).
+    const state = makeToolCallState({
+      lastRequestTime: now - 270_000,
+      warmup: {
+        lastWarmupAt: now - 270_000,
+        warmupCount: 1,
+        totalWarmups: 2,
+        warmupHits: 1,
+        disabled: false,
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+    expect(shouldWarm(state, profile, hist, now)).toBe(true);
+  });
+
+  test("Bug C: evidence gate keys on the documented constant", () => {
+    expect(TOOL_CALL_MIN_HITS_FOR_CONTINUATION).toBe(1);
   });
 });
 

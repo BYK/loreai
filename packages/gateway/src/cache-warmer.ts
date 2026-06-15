@@ -99,6 +99,16 @@ export const MAX_TOOL_CALL_WARMING_MS = 10 * 60 * 1000;
  *  at 5m TTL, sufficient for 95%+ of tool calls. */
 export const TOOL_CALL_MAX_CYCLES = 2;
 
+/** Lifetime confirmed warmup hits required before a SECOND (or later) cycle
+ *  is funded within a single tool-call break. The first warmup of each break
+ *  is always allowed (the irreducible probe that learns whether a slow tool
+ *  returns within TTL). Subsequent cycles in the same break are gated on
+ *  evidence: if this session has never recorded a hit, keep-warming is
+ *  empirically pure waste. Empirically (Jun 2026): 74 zero-hit tool-call
+ *  warmups across 24 sessions, all at <=5 lifetime warmups — the existing
+ *  MIN_WARMUPS_FOR_ROI_CHECK=5 guard let nearly all of them through. */
+export const TOOL_CALL_MIN_HITS_FOR_CONTINUATION = 1;
+
 /** Max uncached warmup responses before the global circuit breaker trips. */
 const CIRCUIT_BREAKER_MAX_FAILURES = 3;
 
@@ -822,6 +832,24 @@ export function shouldWarm(
       cacheMissCostPerMTok,
     );
     const cyclesSpent = state.warmup?.warmupCount ?? 0;
+
+    // 🔴 Evidence gate (Bug C): ALWAYS fund the first warmup of a break
+    // (cyclesSpent === 0 — the probe that learns if this slow tool returns
+    // within TTL), but NEVER fund a second-or-later cycle for a session that
+    // has produced zero confirmed hits over its lifetime. This is where the
+    // observed waste lived: 66 of 74 zero-hit warmups occurred at <=5 lifetime
+    // warmups, below MIN_WARMUPS_FOR_ROI_CHECK, so the hit-rate guard above
+    // never engaged. warmupHits is lifetime (durable across breaks), so a
+    // session that has ever landed a hit keeps full TOOL_CALL_MAX_CYCLES
+    // coverage. cyclesSpent (warmupCount) is per-break (reset on return in
+    // pipeline.ts), so the first probe of every new break is always funded.
+    if (
+      cyclesSpent >= 1 &&
+      (state.warmup?.warmupHits ?? 0) < TOOL_CALL_MIN_HITS_FOR_CONTINUATION
+    ) {
+      return false;
+    }
+
     // Tool-call-specific cap: most tools complete in <10min (2 cycles at 5m TTL)
     const effectiveMax = Math.min(maxCycles, TOOL_CALL_MAX_CYCLES);
     if (cyclesSpent >= effectiveMax) return false;
@@ -1170,6 +1198,12 @@ export function computeWarmingSnapshot(
           100
         ).toFixed(0);
         notWarmingReason = `Tool call: session hit rate too low (${hitRate}% < ${(MIN_SESSION_HIT_RATE * 100).toFixed(0)}%)`;
+      } else if (
+        (state.warmup?.warmupCount ?? 0) >= 1 &&
+        (state.warmup?.warmupHits ?? 0) < TOOL_CALL_MIN_HITS_FOR_CONTINUATION
+      ) {
+        notWarmingReason =
+          "Tool call: no confirmed hits yet (continuation gated after first probe)";
       } else {
         const maxCyc = maxProfitableCycles(
           profile.cacheReadCostPerMTok,
