@@ -79,3 +79,19 @@ html[data-theme="light"] {
   font-family: "Playfair Display", Georgia, serif;
   font-weight: 400;
 }
+
+/* Mermaid diagrams (architecture page). Center, contain, and let wide
+   graphs scroll horizontally on narrow viewports without overflowing the
+   prose column. */
+.mermaid {
+  display: block;
+  text-align: center;
+  margin: 1.5rem auto;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.mermaid svg {
+  display: inline-block;
+  max-width: 100%;
+  height: auto;
+}

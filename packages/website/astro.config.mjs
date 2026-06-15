@@ -206,6 +206,38 @@ export default defineConfig({
             content: "@withLoreAI",
           },
         },
+        // Mermaid (architecture diagrams). Loaded from jsdelivr ESM build
+        // and rendered client-side. Starlight's expressive-code wraps
+        // fenced code blocks in styled <div>s without preserving line
+        // breaks in textContent, so we extract the source per-line from
+        // the .ec-line divs and call mermaid.render() directly. Mermaid's
+        // "neutral" theme is a safe default for both light and dark
+        // Starlight themes; theme-aware switching (reading
+        // document.documentElement.dataset.theme) is a follow-up.
+        {
+          tag: "script",
+          attrs: { type: "module" },
+          content: [
+            'import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";',
+            'mermaid.initialize({ startOnLoad: false, theme: "neutral", securityLevel: "loose", fontFamily: "var(--sl-font)" });',
+            'const blocks = document.querySelectorAll(\'pre[data-language="mermaid"]\');',
+            "for (const pre of blocks) {",
+            "  const source = Array.from(pre.querySelectorAll('.ec-line')).map((l) => l.textContent).join('\\n');",
+            "  if (!source.trim()) continue;",
+            "  const id = 'mermaid-' + Math.random().toString(36).slice(2, 9);",
+            "  try {",
+            "    const { svg } = await mermaid.render(id, source);",
+            "    const wrap = document.createElement('div');",
+            "    wrap.className = 'mermaid';",
+            "    wrap.innerHTML = svg;",
+            "    pre.replaceWith(wrap);",
+            "  } catch (err) {",
+            "    console.error('Mermaid render failed:', err);",
+            "    pre.textContent = source;",
+            "  }",
+            "}",
+          ].join("\n"),
+        },
       ],
     }),
   ],

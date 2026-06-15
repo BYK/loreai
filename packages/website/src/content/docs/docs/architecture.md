@@ -7,6 +7,142 @@ sidebar:
 
 Lore treats context management and memory as one pipeline. The same gradient engine that decides what to put in the prompt also decides when to distill, when to compress, and when to bust the cache — balancing detail preservation against cost on every turn.
 
+## Where Lore fits in the stack
+
+Lore is a **transparent HTTP proxy** that sits between a coding agent and its upstream LLM provider. Every supported agent — Claude Code, Codex, OpenCode, Pi, or Hermes — already speaks one of the standard LLM HTTP APIs (Anthropic's `/v1/messages`, OpenAI's `/v1/chat/completions` and `/v1/responses`, Codex's `/v1/codex/responses`). Lore redirects those requests to its own gateway, where the conversation is parsed, persisted, and transformed before being forwarded to the real upstream. The agent never knows it's there.
+
+This position is deliberate. It means Lore is **agent-agnostic by construction** — any new agent that uses one of those HTTP APIs gets the full memory pipeline for free, with no per-agent SDK. It also means every conversation is captured exactly once, at the only place where it exists as structured LLM traffic: the request itself.
+
+```mermaid
+flowchart TD
+    User([Developer]) --> Agent["Coding Agent<br/>Claude Code · Codex · OpenCode · Pi · Hermes"]
+
+    Agent -->|"LLM API request"| Adapter{How Lore gets the request}
+
+    Adapter -->|"Plugin + fetch interceptor"| P1["@loreai/opencode<br/>@loreai/pi"]
+    Adapter -->|"Env var / CLI flag"| P2["ANTHROPIC_BASE_URL<br/>OPENAI_BASE_URL · codex -c<br/>gateway/src/cli/agents.ts"]
+
+    P1 --> Gateway
+    P2 --> Gateway
+
+    subgraph Lore["Lore Gateway — sits in the LLM data path"]
+        direction TB
+        Gateway["HTTP proxy · :3207<br/>/v1/messages · /v1/chat/completions<br/>/v1/responses · /v1/codex/responses"]
+        Gateway --> Parse["Protocol parser"]
+        Parse --> Engine["Memory engine<br/>Tier 1 · Tier 2 · Tier 3 · Gradient"]
+        Engine --> Transform["Provider-agnostic transformer<br/>gradient.transform"]
+    end
+
+    Transform -->|"Lore-shaped request"| Upstream["Upstream LLM provider<br/>Anthropic · OpenAI · vLLM · Ollama"]
+    Upstream -->|"Response"| Transform
+
+    Engine -. "idle 30s · in-flight" .-> SQLite[("SQLite + FTS5<br/>~/.local/share/lore/lore.db")]
+
+    classDef lore fill:#c4ddc7,stroke:#1a3320,stroke-width:2px,color:#1a3320
+    classDef agent fill:#f7f2e8,stroke:#5a8f63,color:#1a3320
+    classDef ext fill:#ececec,stroke:#888,color:#333
+    class Gateway,Parse,Engine,Transform,SQLite lore
+    class Agent,User,Adapter,P1,P2 agent
+    class Upstream ext
+```
+
+The supported agents reach the proxy through one of three mechanisms:
+
+- **OpenCode and Pi** ship dedicated plugins (`@loreai/opencode`, `@loreai/pi`) that install a fetch interceptor and pin each provider's `baseURL` to the local gateway.
+- **Claude Code, Codex, and Hermes** are auto-detected by `lore run` (`gateway/src/cli/agents.ts`), which sets the right env var (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`) or CLI flag (`codex -c openai_base_url=...`) for that agent's SDK.
+- **Anything else** that reads `baseURL` from environment can be pointed at the gateway manually.
+
+## How context and knowledge flow through Lore
+
+Once a request lands in the gateway, two flows kick off in parallel: a **request path** that runs on every LLM call and shapes the prompt, and a **knowledge path** that runs on an idle tick (every 30s) and consolidates the conversation into long-term memory. The diagram below shows both. Solid arrows are synchronous within a single request; dotted arrows are async, decoupled from any specific turn.
+
+```mermaid
+flowchart TB
+    subgraph Sources["Sources"]
+        S1["LLM traffic from agent"]
+        S2[".lore.md / AGENTS.md<br/>startup + file watcher"]
+        S3["lore import CLI<br/>7 providers, one-time history"]
+    end
+
+    subgraph Ingress["Ingress"]
+        I1["Protocol parser<br/>Anthropic / OpenAI / Responses / Codex"]
+    end
+
+    subgraph T1["Tier 1 — Temporal storage"]
+        TT["temporal.store"]
+        DB1[("temporal_messages<br/>+ FTS5")]
+    end
+
+    subgraph Realtime["Real-time request path"]
+        G0["L0 passthrough"]
+        G1["L1 distilled prefix + raw tail"]
+        G2["L2 strip old tool outputs"]
+        G3["L3 strip all tool outputs"]
+        G4["L4 emergency"]
+        SP["3-block system prompt<br/>system 0/1/2 + cache_control"]
+        RC["recall tool · 6 RRF sources"]
+        UP["Upstream LLM call"]
+        Resp["Response to agent"]
+    end
+
+    subgraph T2["Tier 2 — Distillation"]
+        DR["distillation.run"]
+        OB["LLM observer · gen-0"]
+        DB2[("distillations gen-0<br/>archived")]
+        MD["metaDistill"]
+        DB3[("distillations gen-1+")]
+    end
+
+    subgraph T3["Tier 3 — Long-term knowledge"]
+        CR["curator.run · LLM"]
+        PE["pattern-extract · regex"]
+        DB4[("knowledge + entities")]
+        EX["exportLoreFile"]
+        F4[".lore.md +<br/>AGENTS.md pointer"]
+    end
+
+    S1 --> I1
+    S2 -. "startup / on edit" .-> DB4
+    S3 -. "one-time" .-> DB4
+
+    I1 --> TT
+    TT --> DB1
+    I1 --> G0
+    G0 --> G1 --> G2 --> G3 --> G4
+    G4 --> SP
+    SP --> RC
+    RC --> UP
+    UP --> Resp
+
+    DB1 -. "idle · in-flight" .-> DR
+    DR --> OB
+    OB --> DB2
+    DB2 --> MD
+    MD --> DB3
+    DB2 -. "prefix for L1+" .-> G1
+
+    DB1 -. "periodic" .-> CR
+    OB -. "periodic" .-> CR
+    CR --> DB4
+    PE --> DB4
+    DB4 --> EX
+    EX --> F4
+    DB4 -. "forSession · hybrid vector + FTS5" .-> SP
+
+    classDef t1 fill:#c4ddc7,stroke:#1a3320,color:#1a3320
+    classDef t2 fill:#8fba96,stroke:#1a3320,color:#1a3320
+    classDef t3 fill:#5a8f63,stroke:#fff
+    classDef rt fill:#f7f2e8,stroke:#5a8f63,color:#1a3320
+    classDef src fill:#ececec,stroke:#888,color:#333
+    class TT,DB1 t1
+    class DR,OB,DB2,MD,DB3 t2
+    class CR,PE,DB4,EX,F4 t3
+    class G0,G1,G2,G3,G4,SP,RC,UP,Resp rt
+    class S1,S2,S3,I1 src
+```
+
+The two paths converge at the upstream call: the request path assembles the prompt that the model actually sees (gradient-compressed messages + a 3-block system prompt with the most relevant knowledge entries + the recall tool), and the knowledge path quietly feeds the inputs that make that prompt useful in the first place. The sections below walk through each tier and each layer in detail.
+
 ## Three-tier memory
 
 ### Tier 1 — Temporal storage
