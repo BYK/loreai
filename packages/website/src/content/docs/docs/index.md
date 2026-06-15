@@ -7,11 +7,11 @@ hero:
   tagline: Persistent memory and context management for the coding agents you already use.
   actions:
     - text: Install Lore
-      link: /docs/install/
+      link: install/
       icon: right-arrow
       variant: primary
     - text: Architecture
-      link: /docs/architecture/
+      link: architecture/
       icon: open-book
 ---
 
