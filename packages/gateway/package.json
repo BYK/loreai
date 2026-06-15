@@ -38,7 +38,9 @@
     "dist/embedding-worker.js",
     "dist/index.bun.js",
     "dist/index.cjs",
-    "dist/index.d.cts"
+    "dist/index.d.cts",
+    "dist/ort-wasm-simd-threaded.mjs",
+    "dist/ort-wasm-simd-threaded.wasm"
   ],
   "engines": {
     "node": ">=22.15"

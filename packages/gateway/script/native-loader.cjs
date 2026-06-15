@@ -19,12 +19,16 @@
  *       (`ort-wasm-simd-threaded.mjs` and `ort-wasm-simd-threaded.wasm`)
  *       from SEA assets to a stable tmp dir on disk.
  *    b. Register their paths on `globalThis.__LORE_VENDOR_WASM_PATHS__`
- *       so the bundled `transformers.js` (patched via `binaryExternalsPlugin`)
- *       can load them without going to the CDN fallback.
+ *       so the bundled `transformers.js` (patched via the shared
+ *       `ortWebRedirectPlugin` in `ort-web-plugin.ts`) can load them
+ *       without going to the CDN fallback.
  *
  * 2. If NOT running inside a SEA (npm CJS bundle, dev mode, tests):
- *    Do nothing — `transformers.js` uses the CDN fallback for WASM
- *    (the npm path) or the local file system (with `LORE_LOCAL_MODEL_PATH`).
+ *    Do nothing. The npm CJS bundle handles WASM itself — it ships
+ *    `ort-wasm-simd-threaded.{mjs,wasm}` in `dist/` and `embedding-worker.ts`
+ *    registers `globalThis.__LORE_NPM_WASM_PATHS__` at runtime (also patched
+ *    away from the CDN by `ortWebRedirectPlugin`). Dev/test use the real
+ *    native `onnxruntime-node` from `node_modules`.
  *
  * The extraction uses a per-pid tmp dir, so each process gets a
  * fresh copy. The OS reaps /tmp on reboot, so disk leaks are

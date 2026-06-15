@@ -18,6 +18,7 @@
  */
 import * as esbuild from "esbuild";
 import {
+  copyFileSync,
   rmSync,
   mkdirSync,
   writeFileSync,
@@ -29,9 +30,11 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { PLACEHOLDER_DEBUG_ID, injectDebugId } from "./debug-id";
+import { findOrtWebDir, ortWebRedirectPlugin } from "./ort-web-plugin";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const packageDir = dirname(here);
+const repoRoot = dirname(dirname(packageDir));
 const distDir = join(packageDir, "dist");
 
 // Read version from package.json for build-time injection
@@ -175,7 +178,17 @@ await esbuild.build({
   target: "node22",
   platform: "node",
   conditions: ["node"],
-  external: ["onnxruntime-node", "sharp"],
+  // onnxruntime-node is redirected to onnxruntime-web (WASM) by the plugin so
+  // the npm bundle has no native-module dependency. The WASM runtime files are
+  // copied into dist/ below and located at runtime via __LORE_NPM_WASM_PATHS__
+  // (set in embedding-worker.ts). sharp is stubbed by the plugin.
+  plugins: [
+    ortWebRedirectPlugin({
+      repoRoot,
+      wasmPathsExpr:
+        "globalThis.__LORE_NPM_WASM_PATHS__ || ONNX_ENV.wasm.wasmPaths",
+    }),
+  ],
   outfile: join(distDir, "embedding-worker.cjs"),
   sourcemap: false,
   minify: true,
@@ -200,13 +213,55 @@ await esbuild.build({
   target: "esnext",
   platform: "node",
   conditions: ["bun"],
-  external: ["bun:*", "node:*", "onnxruntime-node", "sharp"],
+  external: ["bun:*", "node:*"],
+  // Same onnxruntime-node → onnxruntime-web redirect as the CJS worker, for
+  // consistency and defense-in-depth. NOTE: this is NOT the worker the
+  // opencode/pi (Bun) path actually loads — under Bun, the gateway bundle
+  // keeps @loreai/core external (see the index.bun.js build above), so
+  // LocalProvider runs from core's own dist and spawns core's
+  // dist/bun/embedding-worker.js (which still uses the native onnxruntime-node
+  // that ships as a non-optional dep of @huggingface/transformers in a
+  // raw-deps install). This gateway-side ESM worker only matters if the
+  // gateway's own Bun bundle is run as a standalone worker host. The bug
+  // (#763) is on the dist-only CJS path → embedding-worker.cjs (fixed above).
+  plugins: [
+    ortWebRedirectPlugin({
+      repoRoot,
+      wasmPathsExpr:
+        "globalThis.__LORE_NPM_WASM_PATHS__ || ONNX_ENV.wasm.wasmPaths",
+    }),
+  ],
   outfile: join(distDir, "embedding-worker.js"),
   sourcemap: false,
   minify: true,
   logLevel: "info",
   legalComments: "none",
 });
+
+// ---------------------------------------------------------------------------
+// Ship onnxruntime-web WASM runtime next to the worker bundles
+// ---------------------------------------------------------------------------
+// The worker bundles redirect onnxruntime-node → onnxruntime-web (WASM). At
+// runtime, embedding-worker.ts sets __LORE_NPM_WASM_PATHS__ to these sibling
+// files so transformers.js loads the WASM locally instead of from the jsdelivr
+// CDN (wrong variant + requires network). Must stay in sync with the `files`
+// array in package.json and the runtime block in embedding-worker.ts.
+//
+// We ship the UNPATCHED ort-wasm-simd-threaded.mjs (unlike the SEA binary,
+// which patches its pthread spawn to a no-op). This is safe ONLY because the
+// worker forces numThreads=1 (embedding-worker.ts), so ort-web takes the
+// single-thread path and never calls its pthread `new Worker(...)` — which
+// would otherwise crash under Node, where the worker has no global `Worker`.
+// If numThreads ever changes, patch the copied .mjs the way build-binary-sea
+// does, or this becomes a latent crash.
+
+const ortWebDir = findOrtWebDir(repoRoot);
+for (const wasmFile of [
+  "ort-wasm-simd-threaded.mjs",
+  "ort-wasm-simd-threaded.wasm",
+]) {
+  copyFileSync(join(ortWebDir, "dist", wasmFile), join(distDir, wasmFile));
+}
 
 // ---------------------------------------------------------------------------
 // Debug ID injection + sourcemap upload
@@ -415,5 +470,6 @@ console.log(`  dist/index.cjs            — CJS bundle (Node.js, node:sqlite)`)
 console.log(`  dist/index.bun.js         — ESM bundle (Bun, bun:sqlite)`);
 console.log(`  dist/embedding-worker.cjs — embedding worker CJS (Node.js)`);
 console.log(`  dist/embedding-worker.js  — embedding worker ESM (Bun)`);
+console.log(`  dist/ort-wasm-simd-threaded.{mjs,wasm} — ONNX WASM runtime`);
 console.log(`  dist/bin.cjs              — CLI wrapper`);
 console.log(`  dist/index.d.cts          — type declarations`);

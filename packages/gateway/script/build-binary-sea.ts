@@ -43,6 +43,7 @@ import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { PLACEHOLDER_DEBUG_ID, injectDebugId } from "./debug-id";
 import { MODEL_DIR_NAME, MODEL_FILES } from "./vendor-paths";
+import { findOrtWebDir, ortWebRedirectPlugin } from "./ort-web-plugin";
 import { fossilize } from "fossilize";
 
 const require = createRequire(import.meta.url);
@@ -183,93 +184,17 @@ function prepareVendorModelCache(target: CompileTarget): string | null {
 // ---------------------------------------------------------------------------
 // esbuild: onnxruntime-node → onnxruntime-web (WASM) redirect
 // ---------------------------------------------------------------------------
-
-/** Resolve the onnxruntime-web package directory using Node's module
- *  resolution. onnxruntime-web is a transitive dep of
- *  @huggingface/transformers → we resolve from @loreai/core (which
- *  has transformers as a direct dep), then from transformers to
- *  onnxruntime-web. Works with any package manager layout (bun, pnpm,
- *  npm) because it uses require.resolve, not filesystem scanning. */
-function findOrtWebDir(): string {
-  const coreDir = join(repoRoot, "packages", "core");
-  const coreRequire = createRequire(`${coreDir}/`);
-  // Step 1: find @huggingface/transformers
-  const tfEntry = coreRequire.resolve("@huggingface/transformers");
-  let tfDir = dirname(tfEntry);
-  while (tfDir !== "/" && !existsSync(join(tfDir, "package.json"))) {
-    tfDir = dirname(tfDir);
-  }
-  // Step 2: from transformers, find onnxruntime-web
-  const tfRequire = createRequire(`${tfDir}/`);
-  const ortEntry = tfRequire.resolve("onnxruntime-web");
-  let ortDir = dirname(ortEntry);
-  while (ortDir !== "/" && !existsSync(join(ortDir, "package.json"))) {
-    ortDir = dirname(ortDir);
-  }
-  return ortDir;
-}
-
-/**
- * esbuild plugin that:
- * 1. Stubs `sharp` (vision models, unused for text embeddings).
- * 2. Redirects `onnxruntime-node` → `onnxruntime-web`'s Node entry
- *    (`dist/ort.node.min.mjs`). The WASM runtime is API-compatible.
- * 3. Resolves transitive deps from Bun's `.bun/` store.
- * 4. Patches transformers.js to read WASM paths from globalThis
- *    (`__LORE_VENDOR_WASM_PATHS__`) instead of the CDN fallback.
- */
+// The onnxruntime-node → onnxruntime-web redirect + transformers.js wasmPaths
+// patch live in the shared ./ort-web-plugin module (also used by bundle.ts).
+// The binary path vendors the WASM as SEA assets and sets
+// __LORE_VENDOR_WASM_PATHS__ on globalThis (via native-loader.cjs) before the
+// worker evaluates, so the wasmPaths replacement reads from that global.
 function binaryExternalsPlugin(): esbuild.Plugin {
-  const ortWebDir = findOrtWebDir();
-  const ortWebNodeEntry = join(ortWebDir, "dist", "ort.node.min.mjs");
-  const ortWebPkgJson = join(ortWebDir, "package.json");
-  const ortWebPkg = JSON.parse(readFileSync(ortWebPkgJson, "utf8")) as {
-    main: string;
-  };
-  // Resolve `onnxruntime-web` to its dist/ort.node.min.mjs (matching the
-  // redirect for onnxruntime-node). This ensures the bundled code
-  // imports the same Node-targeted entry regardless of which name it uses.
-  const ortWebMainEntry = join(ortWebDir, ortWebPkg.main);
-
-  return {
-    name: "binary-externals",
-    setup(build) {
-      // Stub sharp as an empty module.
-      build.onResolve({ filter: /^sharp$/ }, (args) => ({
-        path: args.path,
-        namespace: "empty-module",
-      }));
-      build.onLoad({ filter: /.*/, namespace: "empty-module" }, () => ({
-        contents: "module.exports = {};",
-        loader: "js",
-      }));
-
-      // Redirect onnxruntime-node → onnxruntime-web's Node.js entry.
-      build.onResolve({ filter: /^onnxruntime-node$/ }, () => ({
-        path: ortWebNodeEntry,
-      }));
-
-      // Also redirect onnxruntime-web → the same Node-targeted entry
-      // (in case transformers.js or anything else imports it directly).
-      build.onResolve({ filter: /^onnxruntime-web$/ }, () => ({
-        path: ortWebMainEntry,
-      }));
-
-      // Patch transformers.js onnx.js to read wasmPaths from globalThis
-      // instead of the CDN URL. The binary's native-loader.cjs sets
-      // __LORE_VENDOR_WASM_PATHS__ = { mjs, wasm } before the worker
-      // evaluates. transformers.js checks `!ONNX_ENV.wasm.wasmPaths`
-      // and falls back to a CDN URL — we replace that fallback with a
-      // globalThis read.
-      build.onLoad({ filter: /transformers\.node\.mjs$/ }, (args) => {
-        let src = readFileSync(args.path, "utf8");
-        src = src.replace(
-          /ONNX_ENV\.wasm\.wasmPaths\s*=\s*`https:\/\/cdn\.jsdelivr\.net[^`]*`;/,
-          "ONNX_ENV.wasm.wasmPaths = globalThis.__LORE_VENDOR_WASM_PATHS__ || ONNX_ENV.wasm.wasmPaths;",
-        );
-        return { contents: src, loader: "js", resolveDir: dirname(args.path) };
-      });
-    },
-  };
+  return ortWebRedirectPlugin({
+    repoRoot,
+    wasmPathsExpr:
+      "globalThis.__LORE_VENDOR_WASM_PATHS__ || ONNX_ENV.wasm.wasmPaths",
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -651,7 +576,7 @@ async function buildBinary() {
   // --asset-manifest. The manifest's `entry.file` field is the asset
   // key, and `entry.src` (or `file` path) is where fossilize reads
   // the bytes from.
-  const ortWebDir = findOrtWebDir();
+  const ortWebDir = findOrtWebDir(repoRoot);
   const wasmMjsPath = join(ortWebDir, "dist", "ort-wasm-simd-threaded.mjs");
   const wasmBinPath = join(ortWebDir, "dist", "ort-wasm-simd-threaded.wasm");
 

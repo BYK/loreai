@@ -235,6 +235,37 @@ async function ensurePipeline(): Promise<void> {
  * so it can be retried after a corrupt-model purge. Throws on any failure.
  */
 async function loadPipeline(): Promise<void> {
+  // npm/dev path: the bundled worker redirects onnxruntime-node →
+  // onnxruntime-web (WASM) and the gateway bundle ships the WASM runtime
+  // (ort-wasm-simd-threaded.{mjs,wasm}) next to this file in dist/. Point
+  // transformers.js' patched wasmPaths read at those sibling files so the
+  // WASM loads locally instead of from the jsdelivr CDN (wrong variant +
+  // requires network). The binary path sets __LORE_VENDOR_WASM_PATHS__ via
+  // native-loader.cjs instead, so we only act when neither global is set and
+  // we're not in vendored (binary) mode. Guarded by existsSync so dev/test
+  // (which run the raw .ts with the real native onnxruntime-node and have no
+  // sibling WASM) are unaffected — the block is simply inert there.
+  const globals = globalThis as Record<string, unknown>;
+  if (
+    !vendorModel &&
+    !globals.__LORE_VENDOR_WASM_PATHS__ &&
+    !globals.__LORE_NPM_WASM_PATHS__ &&
+    typeof __filename === "string"
+  ) {
+    const { dirname, join } = await import("node:path");
+    const { pathToFileURL } = await import("node:url");
+    const { existsSync } = await import("node:fs");
+    const distDir = dirname(__filename);
+    const wasmMjs = join(distDir, "ort-wasm-simd-threaded.mjs");
+    const wasmBin = join(distDir, "ort-wasm-simd-threaded.wasm");
+    if (existsSync(wasmMjs) && existsSync(wasmBin)) {
+      globals.__LORE_NPM_WASM_PATHS__ = {
+        mjs: pathToFileURL(wasmMjs).href,
+        wasm: wasmBin,
+      };
+    }
+  }
+
   const transformers = await import("@huggingface/transformers");
   const { pipeline, env, layer_norm } = transformers;
 
