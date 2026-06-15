@@ -584,16 +584,85 @@ describe("gradient — LTM budget coordination", () => {
     calibrate(0); // zero overhead for these tests
   });
 
-  test("getLtmBudget returns fraction of usable context", () => {
+  test("getLtmBudget returns fraction of usable context, quantized to LTM_BUDGET_STEP", () => {
     // usable = 10_000 - 2_000 - 0 (overhead) = 8_000
-    // ltm fraction 0.10 → 800 tokens
+    // ltm fraction 0.10 → raw 800 → quantized to nearest 8_000 step, floored at
+    // one step so LTM is never disabled on small-context models → 8_000.
     const budget = getLtmBudget(0.1);
-    expect(budget).toBe(800);
+    expect(budget).toBe(8_000);
   });
 
-  test("getLtmBudget respects different fractions", () => {
-    expect(getLtmBudget(0.25)).toBe(2_000);
-    expect(getLtmBudget(0.05)).toBe(400);
+  test("getLtmBudget respects different fractions (quantized, never below one step)", () => {
+    // raw 2_000 → rounds to 0 step but floored to one step (8_000).
+    expect(getLtmBudget(0.25)).toBe(8_000);
+    // raw 400 → floored to one step (8_000).
+    expect(getLtmBudget(0.05)).toBe(8_000);
+  });
+
+  test("getLtmBudget returns 0 only when there is no usable budget", () => {
+    setModelLimits({ context: 1_000, output: 1_000 }); // usable = 0
+    calibrate(0);
+    expect(getLtmBudget(0.1)).toBe(0);
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0);
+  });
+
+  test("getLtmBudget is STABLE across per-turn overhead wobble (no LTM set churn)", () => {
+    // Regression for the LTM-delta-churn cache bust: `usable` is derived from
+    // the per-turn calibrated-overhead EMA, which wobbles every turn. If
+    // getLtmBudget passes that wobble straight through, the ltm.forSession
+    // packing boundary moves every turn → the selected LTM set changes → a new
+    // durable prompt-delta is appended into the cached message prefix → the
+    // prompt cache busts every turn. The budget must be QUANTIZED so normal
+    // overhead wobble does not move it.
+    //
+    // Large context (1M) so the absolute overhead swing is production-scale.
+    setModelLimits({ context: 1_000_000, output: 32_000 });
+    resetCalibration();
+
+    const SID = "ltm-budget-wobble-sess";
+    // Seed lastTransformEstimate via a real transform so calibrate() has a
+    // baseline to compare actualInput against.
+    const msgs = Array.from({ length: 4 }, (_, i) =>
+      makeMsg(`wobble-${i}`, i % 2 === 0 ? "user" : "assistant", "hello", SID),
+    );
+    transform({ messages: msgs, projectPath: PROJECT, sessionID: SID });
+
+    // Drive several turns whose real input swings by tens of thousands of
+    // tokens (exactly what production showed: usable swinging 940K↔797K). Each
+    // calibrate() call moves calibratedOverhead, hence `usable`, hence the raw
+    // (un-quantized) LTM budget.
+    const wobblingInputs = [
+      120_000, 260_000, 130_000, 280_000, 140_000, 250_000, 135_000,
+    ];
+    const budgets = new Set<number>();
+    for (const input of wobblingInputs) {
+      // Re-seed the transform estimate each turn so calibrate has a baseline
+      // and the overhead (actualInput - estimate) genuinely varies.
+      transform({ messages: msgs, projectPath: PROJECT, sessionID: SID });
+      calibrate(input, SID, msgs.length);
+      budgets.add(getLtmBudget(0.05));
+    }
+
+    // The fix quantizes the budget so all these wobbling turns collapse to a
+    // tiny number of distinct values. Pre-fix, every turn yields a different
+    // budget (one per distinct overhead) → set churn. We require the budget to
+    // take at most 2 distinct values across 7 wildly-varying-overhead turns.
+    expect(
+      budgets.size,
+      `LTM budget changed ${budgets.size} times across overhead wobble ` +
+        `(values=${[...budgets].join(",")}). A wobbling budget moves the ` +
+        `forSession packing boundary and churns the pinned LTM set every turn ` +
+        `(regression: LTM-delta-churn cache bust). The budget must be quantized.`,
+    ).toBeLessThanOrEqual(2);
+
+    // Restore the shared test baseline: resetCalibration() alone leaves
+    // calibratedOverhead null → getLtmBudget falls back to FIRST_TURN_OVERHEAD
+    // (15K), which would zero out usable for the small-context tests that
+    // follow. calibrate(0) pins overhead to 0 like the other tests expect.
+    resetCalibration();
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0);
   });
 
   test("setLtmTokens / getLtmTokens round-trip", () => {

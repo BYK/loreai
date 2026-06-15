@@ -2294,6 +2294,38 @@ export function appendSessionPromptDelta(input: {
     );
 }
 
+/**
+ * Upsert a SINGLE coalesced prompt delta for a session, pinned to sentinel
+ * `seq = 0`, replacing any prior value in place.
+ *
+ * Unlike `appendSessionPromptDelta` (which appends a new row at MAX(seq)+1 each
+ * call), this keeps exactly one durable-delta row per session. The knowledge
+ * delta describes the CURRENT selected-vs-pinned state, so it must REPLACE the
+ * previous delta, not accumulate alongside it. Accumulating rows (each at a
+ * different insertAt as the conversation grew) inserts a new synthetic message
+ * into the cached prefix every time the knowledge set changes, shifting all
+ * later messages and busting the prompt cache. Coalescing into one row at a
+ * frozen insertAt keeps the message prefix byte-stable until the delta's
+ * CONTENT genuinely changes (one bust per real change, not a growing cascade).
+ */
+export function upsertSessionPromptDelta(input: {
+  sessionID: string;
+  projectID: string;
+  selector: string;
+  content: string;
+}): void {
+  db()
+    .query(
+      `INSERT INTO session_prompt_deltas (session_id, seq, project_id, selector, content)
+       VALUES (?, 0, ?, ?, ?)
+       ON CONFLICT(session_id, seq) DO UPDATE SET
+         project_id = excluded.project_id,
+         selector   = excluded.selector,
+         content    = excluded.content`,
+    )
+    .run(input.sessionID, input.projectID, input.selector, input.content);
+}
+
 export function listSessionPromptDeltas(
   sessionID: string,
 ): SessionPromptDelta[] {

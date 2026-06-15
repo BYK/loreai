@@ -604,6 +604,209 @@ describe("cache stability (e2e)", () => {
     expect(rows[0].content).toContain("Changed huge durable delta marker");
   });
 
+  it("coalesces MULTIPLE successive knowledge changes into ONE position-stable delta row", async () => {
+    // Regression for the durable-delta accumulation that busts the cache every
+    // turn: pre-fix, EACH material knowledge-set change appended a NEW
+    // session_prompt_deltas row (seq 0,1,2,...) at a DIFFERENT insertAt (the
+    // tail had grown). Replaying all of them inserts a new synthetic message
+    // into the cached prefix every change → shifts later messages → prompt-cache
+    // bust. The coalescing fix keeps exactly ONE row (seq 0) at a FROZEN
+    // insertAt, replaced in place, so the message prefix is byte-stable until
+    // the delta CONTENT changes.
+    const turns = Array.from({ length: 6 }, (_, i) => ({
+      userMessage: `Coalesce turn ${i}: keep working.`,
+      assistantText: `Coalesce response ${i}.`,
+    }));
+    harness = await createHarness({
+      fixtures: makeConversationFixtures(turns),
+    });
+
+    const projectPath = `/tmp/lore-cache-coalesce-${Date.now()}`;
+    const clientSessionID = `cache-coalesce-client-${Date.now()}`;
+    const headers = {
+      "x-lore-project": projectPath,
+      "x-lore-session-id": clientSessionID,
+    };
+
+    const { ltm, setForceMinLayer } = await import("@loreai/core");
+    const history: unknown[] = [];
+    let sessionID = "";
+    let ctxID = "";
+
+    for (let i = 0; i < turns.length; i++) {
+      // Force emergency LTM refresh from turn 2 on, so each turn re-evaluates
+      // the selected set and emits a delta when it changed.
+      if (i >= 2 && sessionID) setForceMinLayer(4, sessionID);
+      const resp = await harness.chat(
+        makeBody(turns[i].userMessage, history),
+        "test-key",
+        headers,
+      );
+      expect(resp.status).toBe(200);
+      await resp.json();
+      history.push({ role: "user", content: turns[i].userMessage });
+      history.push({
+        role: "assistant",
+        content: [{ type: "text", text: turns[i].assistantText }],
+      });
+
+      if (i === 0) {
+        const rows = harness.queryDB<{ session_id: string }>(
+          "SELECT session_id FROM session_state ORDER BY updated_at DESC LIMIT 1",
+        );
+        sessionID = rows[0]?.session_id ?? "";
+        expect(sessionID).not.toBe("");
+        ctxID = ltm.create({
+          projectPath,
+          scope: "project",
+          category: "gotcha",
+          title: "Coalesce gotcha",
+          content: "Initial coalesce knowledge pinned in system[2].",
+          session: sessionID,
+        });
+      }
+      // Mutate the pinned entry on MULTIPLE successive turns → multiple material
+      // changes. Pre-fix this appends one delta row per change.
+      if (i === 1) ltm.update(ctxID, { content: "First change to coalesce." });
+      if (i === 2) ltm.update(ctxID, { content: "Second change to coalesce." });
+      if (i === 3) ltm.update(ctxID, { content: "Third change to coalesce." });
+    }
+
+    const rows = harness.queryDB<{ seq: number; selector: string }>(
+      "SELECT seq, selector FROM session_prompt_deltas WHERE session_id = ? ORDER BY seq",
+      [sessionID],
+    );
+
+    // The core coalescing guarantee: exactly ONE durable-delta row, at sentinel
+    // seq 0, regardless of how many successive knowledge changes occurred.
+    expect(
+      rows.length,
+      `expected exactly one coalesced delta row after multiple knowledge ` +
+        `changes, got ${rows.length} (seqs=${rows.map((r) => r.seq).join(",")}) ` +
+        `— accumulating rows shifts the cached prefix and busts the cache`,
+    ).toBe(1);
+    expect(rows[0].seq).toBe(0);
+  });
+
+  it("coalesced delta is CUMULATIVE: two entries superseded on different turns both stay in the single row", async () => {
+    // Regression for the coalescing correctness BLOCKER (B1): the durable delta
+    // is an incremental diff. If the coalesced (replaced) row were computed
+    // against the ROLLING pin baseline, a later turn's supersession would
+    // OVERWRITE the row and DROP an earlier turn's supersession — leaving a
+    // stale entry pinned in system[2] with no correcting delta. The pin must
+    // keep its baseline FROZEN at the bytes rendered into system[2], so the
+    // single row always describes the full cumulative frozen→current delta.
+    //
+    // Mirrors the proven single-removal test mechanism (force layer 4 + restart
+    // so the pin reloads its frozen baseline from the DB), but removes TWO
+    // distinct entries on TWO different turns.
+    const turns = Array.from({ length: 7 }, (_, i) => ({
+      userMessage: `Cumulative turn ${i}: continue.`,
+      assistantText: `Cumulative response ${i}.`,
+    }));
+    harness = await createHarness({
+      fixtures: makeConversationFixtures(turns),
+    });
+
+    const projectPath = `/tmp/lore-cache-cumulative-${Date.now()}`;
+    const clientSessionID = `cache-cumulative-client-${Date.now()}`;
+    const headers = {
+      "x-lore-project": projectPath,
+      "x-lore-session-id": clientSessionID,
+    };
+
+    const { ltm, setForceMinLayer } = await import("@loreai/core");
+    const history: unknown[] = [];
+    let sessionID = "";
+    let idA = "";
+    let idB = "";
+
+    for (let i = 0; i < turns.length; i++) {
+      // Force emergency LTM refresh from turn 2 on (where the durable-delta path
+      // lives), matching the single-removal test.
+      if (i >= 2 && sessionID) setForceMinLayer(4, sessionID);
+      const resp = await harness.chat(
+        makeBody(turns[i].userMessage, history),
+        "test-key",
+        headers,
+      );
+      expect(resp.status).toBe(200);
+      await resp.json();
+      history.push({ role: "user", content: turns[i].userMessage });
+      history.push({
+        role: "assistant",
+        content: [{ type: "text", text: turns[i].assistantText }],
+      });
+
+      if (i === 0) {
+        const rows = harness.queryDB<{ session_id: string }>(
+          "SELECT session_id FROM session_state ORDER BY updated_at DESC LIMIT 1",
+        );
+        sessionID = rows[0]?.session_id ?? "";
+        expect(sessionID).not.toBe("");
+        // Create BOTH entries on turn 0 (before the pin freezes at turn 1), so
+        // the frozen system[2] baseline contains both. We count superseded
+        // BULLETS (not id prefixes) so same-ms UUIDv7 8-char-prefix collision is
+        // irrelevant.
+        idA = ltm.create({
+          projectPath,
+          scope: "project",
+          category: "gotcha",
+          title: "Cumulative entry A",
+          content: "Entry A pinned in system[2] before removal. ".repeat(8),
+          session: sessionID,
+        });
+        idB = ltm.create({
+          projectPath,
+          scope: "project",
+          category: "gotcha",
+          title: "Cumulative entry B",
+          content: "Entry B pinned in system[2] before removal. ".repeat(8),
+          session: sessionID,
+        });
+      }
+
+      // Supersede A on turn 2, then restart (pin reloads frozen baseline from
+      // DB), then supersede B on turn 4. Pre-fix (rolling baseline + coalesce),
+      // the turn-4 delta drops A's supersession.
+      if (i === 2) ltm.remove(idA);
+      if (i === 3) await harness.restartPipeline();
+      if (i === 4) ltm.remove(idB);
+    }
+
+    const rows = harness.queryDB<{ seq: number; content: string }>(
+      "SELECT seq, content FROM session_prompt_deltas WHERE session_id = ? ORDER BY seq",
+      [sessionID],
+    );
+    expect(rows).toHaveLength(1);
+
+    const content = rows[0].content;
+    expect(content).toContain("Superseded Long-term Knowledge");
+    // The superseded section renders one `* [<id8>]` bullet per removed entry.
+    // (UUIDv7's first 8 hex chars are a coarse time prefix shared by entries
+    // created within the same ~49-day window, so we count BULLETS rather than
+    // match specific ids.) With the frozen-baseline fix the coalesced row
+    // describes the full cumulative delta → BOTH removals → 2 bullets. Pre-fix
+    // (rolling baseline + replace), the turn-4 row holds only B's removal → 1.
+    // content is a serialized GatewayMessage; extract the text and count bullets.
+    const text = (
+      JSON.parse(content) as { content: Array<{ text?: string }> }
+    ).content
+      .map((b) => b.text ?? "")
+      .join("");
+    const supersededSection = text.slice(
+      text.indexOf("## Superseded Long-term Knowledge"),
+    );
+    const bulletCount = (supersededSection.match(/\n\* \[/g) ?? []).length;
+    expect(
+      bulletCount,
+      `coalesced delta superseded ${bulletCount} entr${bulletCount === 1 ? "y" : "ies"}, ` +
+        `expected 2 (both A removed on turn 2 and B removed on turn 4). A count ` +
+        `of 1 means a later supersession overwrote an earlier one in the single ` +
+        `coalesced row (B1 regression). Content: ${content}`,
+    ).toBe(2);
+  });
+
   it("removed LTM entries are replayed as durable superseded deltas without rewriting system[2]", async () => {
     const turns = Array.from({ length: 4 }, (_, i) => ({
       userMessage: `Removal delta turn ${i}: continue the work.`,

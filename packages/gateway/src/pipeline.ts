@@ -57,7 +57,7 @@ import {
   embedding,
   saveSessionTracking,
   loadSessionTracking,
-  appendSessionPromptDelta,
+  upsertSessionPromptDelta,
   listSessionPromptDeltas,
   loadHeaderSessionIndex,
   isHostedMode,
@@ -916,7 +916,16 @@ function buildKnowledgeDeltaMessage(
   }
   rendered ??= "";
   const renderedIDSet = new Set(renderedIds);
-  const skipped = entries.filter((entry) => !renderedIDSet.has(entry.id));
+  // Sort the overflow ("Additional Changed Knowledge") deterministically by id
+  // before slicing. `entries` arrives in forSession() ranking order, which is
+  // volatile per turn (relevance scoring), so an unsorted slice could pick a
+  // different 3 entries / different order across turns → a byte-different delta
+  // even when nothing materially changed → a needless cache bust. The primary
+  // `rendered` section is already order-stabilized by formatKnowledge; this
+  // makes the overflow section byte-stable too.
+  const skipped = entries
+    .filter((entry) => !renderedIDSet.has(entry.id))
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const skippedRendered = skipped.length
     ? `\n\n## Additional Changed Knowledge (truncated)\n\n${skipped
         .slice(0, 3)
@@ -975,14 +984,35 @@ function appendKnowledgePromptDelta(input: {
   );
   if (!message) return false;
 
-  appendSessionPromptDelta({
+  // Coalesce into a SINGLE durable-delta row (sentinel seq 0), replacing any
+  // prior delta in place rather than appending a new row each time the
+  // knowledge set changes. Appending accumulated rows at ever-larger insertAt
+  // positions, inserting a new synthetic message into the cached prefix every
+  // change → shifting all later messages → busting the prompt cache. One
+  // coalesced row at a FROZEN insertAt keeps the message prefix byte-stable
+  // until the delta's content genuinely changes.
+  //
+  // Freeze the position: reuse the already-persisted insertAt if a delta row
+  // exists, so the durable delta does not migrate as the conversation grows
+  // (which would itself shift the prefix and bust the cache). Only compute a
+  // fresh insertAt the first time.
+  const existing = listSessionPromptDeltas(input.sessionID).find(
+    (d) => d.seq === 0,
+  );
+  let insertAt = input.insertAt;
+  if (existing) {
+    const prevSelector = parseMessageInsertSelector(existing.selector);
+    if (prevSelector) insertAt = prevSelector.insertAt;
+  }
+
+  upsertSessionPromptDelta({
     sessionID: input.sessionID,
     projectID: ensureProject(input.projectPath),
-    selector: JSON.stringify({ target: "messages", insertAt: input.insertAt }),
+    selector: JSON.stringify({ target: "messages", insertAt }),
     content: JSON.stringify(message),
   });
   log.info(
-    `prompt-delta: appended knowledge update for session ${input.sessionID.slice(0, 16)} (${entries.length} entr${entries.length === 1 ? "y" : "ies"})`,
+    `prompt-delta: upserted knowledge update for session ${input.sessionID.slice(0, 16)} (${entries.length} entr${entries.length === 1 ? "y" : "ies"}, insertAt=${insertAt})`,
   );
   return true;
 }
@@ -5457,7 +5487,10 @@ async function handleConversationTurn(
           if (!cached && pinned) {
             // The fresh selection is empty, but removing the pinned system[2]
             // block would still bust the cached prefix. Preserve the exact
-            // bytes and append a durable removal delta instead.
+            // bytes and append a durable removal delta instead. Keep entryKeys
+            // frozen at the baseline (not []) so the coalesced delta describes
+            // the full frozen→current (empty) supersession — see the Layer-1
+            // material-delta note.
             pendingKnowledgeDelta = {
               previousKeys: pinned.entryKeys,
               nextKeys: [],
@@ -5472,7 +5505,7 @@ async function handleConversationTurn(
             ltmPinnedText.set(sessionID, {
               formatted: pinned.formatted,
               tokenCount: pinned.tokenCount,
-              entryKeys: [],
+              entryKeys: pinned.entryKeys,
             });
             ltmDirty = true;
             pinDirty = true;
@@ -5524,6 +5557,18 @@ async function handleConversationTurn(
             // before the conversation cache breakpoint, so changing it would
             // throw away the cached prefix. Keep the exact pinned bytes and
             // append a durable prompt delta at the conversation tail instead.
+            //
+            // CRITICAL: keep `entryKeys` frozen at the baseline that matches the
+            // pinned `formatted` bytes — do NOT advance it to cachedKeys. The
+            // durable delta is coalesced into a single row that is REPLACED each
+            // turn, so it must describe the CUMULATIVE delta between the frozen
+            // system[2] bytes and the current selection. If we advanced the
+            // baseline, the next turn's delta would only describe that turn's
+            // increment and the coalesced row would silently drop earlier
+            // supersessions (leaving stale entries pinned in system[2] with no
+            // correcting delta). The diff is recomputed from the frozen baseline
+            // every turn → re-upserting the same (frozen, current) pair yields
+            // byte-identical content (idempotent, no extra cache bust).
             pendingKnowledgeDelta = {
               previousKeys: pinned.entryKeys,
               nextKeys: cachedKeys,
@@ -5532,7 +5577,7 @@ async function handleConversationTurn(
             ltmPinnedText.set(sessionID, {
               formatted: pinned.formatted,
               tokenCount: pinned.tokenCount,
-              entryKeys: cachedKeys,
+              entryKeys: pinned.entryKeys,
             });
             ltmSessionCache.set(sessionID, {
               formatted: pinned.formatted,
@@ -5706,15 +5751,23 @@ async function handleConversationTurn(
             // Material LTM changed during emergency refresh. Preserve the exact
             // cached system[2] bytes and surface the change as a durable prompt
             // delta instead of rewriting the pre-breakpoint system block.
+            //
+            // CRITICAL: keep `entryKeys` frozen at the baseline matching the
+            // pinned bytes — do NOT advance to the current `entryKeys`. The
+            // coalesced durable delta is replaced each turn, so it must describe
+            // the CUMULATIVE delta from the frozen system[2] to the current
+            // selection; advancing the baseline would drop earlier supersessions
+            // from the single row. (See the matching note on the Layer-1 path.)
+            const frozenKeys = pinned.entryKeys;
             pendingKnowledgeDelta = {
-              previousKeys: pinned.entryKeys,
+              previousKeys: frozenKeys,
               nextKeys: entryKeys,
               entries: contextEntries,
             };
             ltmPinnedText.set(sessionID, {
               formatted: pinned.formatted,
               tokenCount: pinned.tokenCount,
-              entryKeys,
+              entryKeys: frozenKeys,
             });
             ltmSessionCache.delete(sessionID);
             ltmSessionCache.set(sessionID, {
@@ -5728,7 +5781,7 @@ async function handleConversationTurn(
               ltmCacheTokens: pinned.tokenCount,
               ltmPinText: pinned.formatted,
               ltmPinTokens: pinned.tokenCount,
-              ltmPinKeys: JSON.stringify(entryKeys),
+              ltmPinKeys: JSON.stringify(frozenKeys),
             });
           } else {
             // First Layer 4 injection — pin the new text + identity. There is no
@@ -5759,15 +5812,23 @@ async function handleConversationTurn(
           // already-cached system[2] block would still bust the prefix. Keep the
           // existing pin byte-for-byte and append a durable removal delta so the
           // model knows the older pinned entries are superseded.
+          //
+          // CRITICAL: keep entryKeys FROZEN at the baseline matching the pinned
+          // bytes — do NOT wipe to []. The coalesced durable delta is replaced
+          // each turn and must describe the full cumulative frozen→current
+          // (empty) supersession. Wiping the baseline to [] here (in memory AND
+          // persisted) makes the next turn compute previous=[]→next=[] = no
+          // removals, dropping every earlier supersession from the single row.
+          const frozenKeys = pinned.entryKeys;
           pendingKnowledgeDelta = {
-            previousKeys: pinned.entryKeys,
+            previousKeys: frozenKeys,
             nextKeys: [],
             entries: [],
           };
           ltmPinnedText.set(sessionID, {
             formatted: pinned.formatted,
             tokenCount: pinned.tokenCount,
-            entryKeys: [],
+            entryKeys: frozenKeys,
           });
           ltmSessionCache.delete(sessionID);
           ltmSessionCache.set(sessionID, {
@@ -5781,7 +5842,7 @@ async function handleConversationTurn(
             ltmCacheTokens: pinned.tokenCount,
             ltmPinText: pinned.formatted,
             ltmPinTokens: pinned.tokenCount,
-            ltmPinKeys: JSON.stringify([]),
+            ltmPinKeys: JSON.stringify(frozenKeys),
           });
           log.info(
             "Context-bound LTM refresh returned no entries; preserving existing pinned system[2] for session",

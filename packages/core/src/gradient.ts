@@ -96,6 +96,18 @@ let maxLayer0Tokens = 0;
 
 const MIN_LAYER0_FLOOR = 40_000;
 
+/** Quantization step for the LTM token budget (getLtmBudget). The budget is
+ *  derived from `usable`, which wobbles every turn via the per-turn overhead
+ *  EMA; snapping it to this step keeps the budget — and therefore the
+ *  ltm.forSession() greedy entry-packing boundary — stable across normal
+ *  wobble, so the selected entry set (and thus the pinned system[2] block) only
+ *  changes when knowledge genuinely changes. Without this, the lowest-ranked
+ *  pinned entry drops/re-enters as the budget drifts, churning the set and
+ *  appending a durable prompt-delta into the cached prefix every turn (a cache
+ *  bust). Sized to absorb typical per-turn overhead drift on high-context
+ *  models. */
+const LTM_BUDGET_STEP = 8_000;
+
 /** Consecutive zero-cache-write turns before treating the session as free-write. */
 const NO_CACHE_WRITE_THRESHOLD = 3;
 
@@ -642,7 +654,19 @@ export function getLtmTokens(sessionID?: string): number {
 export function getLtmBudget(ltmFraction: number): number {
   const overhead = calibratedOverhead ?? FIRST_TURN_OVERHEAD;
   const usable = Math.max(0, contextLimit - outputReserved - overhead);
-  return Math.floor(usable * ltmFraction);
+  // Quantize to a coarse step so per-turn `usable` wobble (overhead EMA drift)
+  // does not move the ltm.forSession() packing boundary and churn the pinned
+  // LTM set every turn. See LTM_BUDGET_STEP.
+  //
+  // Round to the NEAREST step (not floor) so the budget never collapses to 0
+  // when the raw budget is below one step (small-context models): a raw budget
+  // under half a step rounds up to one full step rather than to zero, and the
+  // common large-context case (raw >> step) is unaffected. This keeps the
+  // budget stable across wobble while never disabling LTM.
+  const raw = Math.floor(usable * ltmFraction);
+  if (raw <= 0) return 0;
+  const quantized = Math.round(raw / LTM_BUDGET_STEP) * LTM_BUDGET_STEP;
+  return Math.max(LTM_BUDGET_STEP, quantized);
 }
 
 /** Returns the token budget for stable LTM (preferences). Independent of context-bound LTM budget. */

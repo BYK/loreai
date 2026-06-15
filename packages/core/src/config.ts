@@ -258,8 +258,24 @@ export const LoreConfig = z.object({
         .describe(
           "Max entities to inject into the agent system prompt. Set to 0 to disable. Default: 30.",
         ),
+      /** Auto-create `gotcha` knowledge entries from recurring tool failures
+       *  (same tool + error type across multiple sessions). Default false:
+       *  these entries are usually environmental noise (agent/tool flakiness,
+       *  not codebase facts), and minting them mid-session churns the selected
+       *  LTM set, which can bust the prompt cache. Opt in to surface recurring
+       *  tool-failure patterns as knowledge. */
+      autoToolFailureGotchas: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Auto-create gotcha entries from recurring tool failures. Default false (noisy; can churn the LTM cache).",
+        ),
     })
-    .default({ enabled: true, maxEntityInject: 30 })
+    .default({
+      enabled: true,
+      maxEntityInject: 30,
+      autoToolFailureGotchas: false,
+    })
     .describe("Long-term knowledge (curator, entity injection) controls."),
   curator: z
     .object({

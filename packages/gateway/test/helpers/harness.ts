@@ -10,9 +10,10 @@
  *   const resp = await harness.chat(body);
  *   harness.teardown();
  */
-import { unlinkSync, existsSync } from "node:fs";
+import { unlinkSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import type { FixtureEntry } from "../../src/recorder";
+import type { SimulatedCacheTurn } from "./simulated-cache";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -22,6 +23,27 @@ export interface HarnessOptions {
   fixtures: FixtureEntry[];
   /** Override any config values */
   configOverrides?: Partial<{ port: number; debug: boolean }>;
+  /**
+   * Compute realistic prompt-cache usage (cache_read / cache_creation) from the
+   * actual upstream body prefix-stability and inject it into each replayed
+   * response — so the gateway's own cache oracles (categorizeBust,
+   * recordCacheUsage, calibrate) see production-faithful numbers instead of the
+   * static zero-cache usage that replay fixtures otherwise report. Required for
+   * any test that asserts on cache busts. Drive NON-streaming turns when using
+   * this (the simulated cache only re-stamps JSON responses). Read the per-turn
+   * trace via `harness.cacheTurns()`.
+   */
+  simulateCache?: boolean;
+  /**
+   * Optional budget config written into a project `.lore.json` so a session can
+   * reach a target compression layer deterministically (e.g.
+   * `{ maxLayer0Tokens: 40000 }` to force layer-1 compression). Written into
+   * `projectPath` (defaults to the harness project dir); the pipeline calls
+   * config.load(projectPath) per request, so it is honored.
+   */
+  budget?: { maxLayer0Tokens?: number };
+  /** Project path to bind requests to (and where `budget` .lore.json is written). */
+  projectPath?: string;
 }
 
 export interface Harness {
@@ -44,6 +66,13 @@ export interface Harness {
    * cache on. Use this to assert cache-prefix stability across turns.
    */
   upstreamBodies(): string[];
+  /**
+   * Per-turn simulated cache observations (only populated when the harness was
+   * created with `simulateCache: true`). Each entry reports the prefix-match and
+   * the cache_read / cache_creation tokens that were injected into that turn's
+   * response — the same numbers the gateway's bust oracles consumed.
+   */
+  cacheTurns(): SimulatedCacheTurn[];
   /** Clear in-memory pipeline/core state while preserving the temp DB/server. */
   restartPipeline(): Promise<void>;
   /** Stop the gateway and clean up */
@@ -74,6 +103,7 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
 
   // --- 3. Dynamic imports so env vars take effect before module-level code runs ---
   const { makeReplayInterceptor } = await import("./replay");
+  const { withSimulatedCache } = await import("./simulated-cache");
   const { setUpstreamInterceptor, resetPipelineState } = await import(
     "../../src/pipeline"
   );
@@ -92,7 +122,13 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
   // streaming turns, JSON otherwise), wrapped to capture the exact upstream
   // request body lore sends each turn (for cache-stability assertions). ---
   const capturedBodies: string[] = [];
-  const replay = makeReplayInterceptor(opts.fixtures);
+  const baseReplay = makeReplayInterceptor(opts.fixtures);
+  // Optionally wrap the replay so each response carries cache usage computed
+  // from real prompt-prefix stability — see simulated-cache.ts for why this is
+  // required for any test that asserts on cache busts.
+  const { interceptor: replay, turns: simCacheTurns } = opts.simulateCache
+    ? withSimulatedCache(baseReplay)
+    : { interceptor: baseReplay, turns: [] as SimulatedCacheTurn[] };
   function installReplayInterceptor() {
     setUpstreamInterceptor(
       async (requestBody, model, wasStreaming, makeReal) => {
@@ -106,6 +142,21 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
     );
   }
   installReplayInterceptor();
+
+  // --- 4b. Optional per-project budget config (written before server start so
+  // the first request's config.load(projectPath) picks it up). ---
+  const projectPath = opts.projectPath ?? process.cwd();
+  if (opts.budget) {
+    try {
+      mkdirSync(projectPath, { recursive: true });
+      writeFileSync(
+        `${projectPath}/.lore.json`,
+        JSON.stringify({ budget: opts.budget }),
+      );
+    } catch {
+      // best-effort; tests that need this will fail loudly on the layer assertion
+    }
+  }
 
   // --- 5. Start gateway ---
   const config = loadConfig();
@@ -151,7 +202,7 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
         // project-resolution probe is never triggered in harness-based tests.
         // Tests that intentionally test path-less sessions can override this
         // via extraHeaders (set to empty string to suppress).
-        "x-lore-project": process.cwd(),
+        "x-lore-project": projectPath,
         ...extraHeaders,
       },
       body: JSON.stringify(requestBody),
@@ -182,6 +233,10 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
     return capturedBodies.slice();
   }
 
+  function cacheTurns(): SimulatedCacheTurn[] {
+    return simCacheTurns.slice();
+  }
+
   async function restartPipeline(): Promise<void> {
     closeDB();
     await resetPipelineState({ fast: true });
@@ -194,6 +249,7 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
     chat,
     queryDB,
     upstreamBodies,
+    cacheTurns,
     restartPipeline,
     teardown,
   };
