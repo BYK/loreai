@@ -2615,7 +2615,17 @@ async function forwardToUpstream(
   // ordering, cache_control wrappers, toAnthropicBlock transforms) which
   // invalidates the client's original cch signature. resignBody detects
   // billing headers and re-signs with our known seed + version.
-  if (effectiveProtocol === "anthropic") {
+  //
+  // 🔴 Gate on hasBillingHeader(req.system): only re-sign when a REAL Claude
+  // Code OAuth billing header is present as system[0] (the `^`-anchored
+  // BILLING_HEADER_RE). Without this gate, resignBody is reached for ALL
+  // anthropic-protocol turns — including api-key sessions whose CONTENT quotes
+  // the sentinel verbatim (e.g. editing cch.ts / cch.test.ts). resignBody
+  // would then content-match that quoted sentinel, rewrite its cch every turn
+  // (busting the prompt cache), and trip the verifyBillingHeaderUnique warning.
+  // The real header is always system[0] (Claude Code emits it there; the worker
+  // prepends it), so a content copy can never be at offset 0 of req.system.
+  if (effectiveProtocol === "anthropic" && hasBillingHeader(req.system)) {
     const firstUserMsg = req.messages.find((m) => m.role === "user");
     const firstUserText = firstUserMsg?.content.find(
       (b) => b.type === "text" && "text" in b,

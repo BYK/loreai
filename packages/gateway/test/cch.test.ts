@@ -2,6 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import {
   signBody,
   resignBody,
+  hasBillingHeader,
   captureBillingPrefix,
   captureSessionHeaders,
   buildBillingBlock,
@@ -1048,6 +1049,43 @@ describe("billing-header first-block invariant", () => {
   test("does NOT warn for a no-billing-header body", () => {
     signBody('{"system":[{"type":"text","text":"no header here"}]}');
     expect(warnings).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hasBillingHeader — the pipeline re-sign gate
+// ---------------------------------------------------------------------------
+
+describe("hasBillingHeader (re-sign gate)", () => {
+  // The conversation-turn re-sign path (pipeline.ts forwardToUpstream) gates
+  // resignBody on hasBillingHeader(req.system). This is the predicate that
+  // distinguishes a REAL Claude Code OAuth session (header at system[0]) from
+  // an api-key session whose CONTENT merely quotes the sentinel. The `^` anchor
+  // is load-bearing: without the gate, content-quoted sentinels are content-
+  // matched by resignBody, rewritten every turn, and trip the invariant warning.
+  const REAL_HEADER =
+    "x-anthropic-billing-header: cc_version=2.1.175.abc; cc_entrypoint=cli; cch=1a2b3;";
+
+  test("true when the real billing header is at the START of the system prompt", () => {
+    expect(hasBillingHeader(REAL_HEADER)).toBe(true);
+    // The real header is system[0]; subsequent host-prompt text follows it.
+    expect(hasBillingHeader(`${REAL_HEADER}\nYou are Claude Code.`)).toBe(true);
+  });
+
+  test("false when the sentinel is quoted in content (not at offset 0)", () => {
+    // The api-key user's scenario: editing cch.ts / cch.test.ts injects the
+    // sentinel verbatim into message/system content, but never at system[0].
+    expect(
+      hasBillingHeader(`You are Claude Code.\n\nExample: ${REAL_HEADER}`),
+    ).toBe(false);
+    expect(hasBillingHeader(`Help me edit this code: ${REAL_HEADER}`)).toBe(
+      false,
+    );
+  });
+
+  test("false for a system prompt with no billing header at all", () => {
+    expect(hasBillingHeader("You are a helpful assistant.")).toBe(false);
+    expect(hasBillingHeader("")).toBe(false);
   });
 });
 
