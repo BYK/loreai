@@ -1962,6 +1962,14 @@ function transformInner(input: {
   // Usable = full context minus output reservation minus fixed overhead (system + tools)
   // minus LTM tokens already injected into the system prompt this turn.
   // Read LTM tokens from per-session state to avoid cross-session contamination.
+  //
+  // NOTE: `usable` is sensitive to BOTH `contextLimit` (set per-turn from the
+  // model spec, which can climb as models.dev data warms from a cold fallback)
+  // and `overhead` (a shared EMA from calibrate()). Anything derived as a
+  // fraction of `usable` — e.g. distilled/raw budgets — therefore scales with a
+  // large context window. Downstream economic decisions must not treat such a
+  // budget as the real compressed size (see the tier gate's compressedEstimate
+  // clamp below).
   const sessLtmTokens = sid ? sessState.ltmTokens : ltmTokensFallback;
   const usableRaw = Math.max(
     0,
@@ -2178,7 +2186,20 @@ function transformInner(input: {
     // For compression, estimate the compressed size as the layer-1 budget
     // (distilled + raw fractions). This is a rough upper bound — actual
     // compressed output may be smaller.
-    const compressedEstimate = distilledBudget + rawBudget;
+    //
+    // Clamp to layer0Ceiling (the cost-aware layer-0 cap, ~l0cap): the raw
+    // distilled+raw budget is scaled off `usable`, which for high-context
+    // models (e.g. a 1M-token opus → usable ~957K) inflates the estimate to
+    // ~0.65*usable (~620K) — far larger than what compression actually yields
+    // (it targets layer0Ceiling, ~200K). Feeding the inflated figure to
+    // shouldCompress() makes bustCost dwarf continueCost, so the gate refuses
+    // to compress every turn — even under sustained-bust write-rate repricing —
+    // and the raw context grows unbounded until the hard ceiling. Clamping to
+    // the real compression target makes the economics reflect reality.
+    const compressedEstimate = Math.min(
+      distilledBudget + rawBudget,
+      layer0Ceiling,
+    );
     if (
       !shouldCompress(Math.round(layer0Input), compressedEstimate, busts, {
         freeWrite,

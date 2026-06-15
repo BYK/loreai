@@ -3377,6 +3377,141 @@ describe("tier-based context management", () => {
       // so err on the side of keeping the cache (don't bust).
       expect(shouldCompress(250_000, 150_000, 0)).toBe(false);
     });
+
+    test("realistic compressed target compresses where inflated estimate would not", () => {
+      // Regression for the "growing unsustainably" runaway (session
+      // 0AVWKugtmhBKqLOX9 / ses_14b9bf3d4ffe…): on a high-context model the
+      // tier gate fed shouldCompress() a compressedEstimate scaled off `usable`
+      // (~0.65*usable). For a 1M-token model usable≈957K, so the estimate was
+      // ~620K — but compression actually targets l0cap (~200K). With the
+      // INFLATED estimate, even sustained-bust write-rate repricing refuses to
+      // compress; with the REAL target it correctly compresses.
+      const current = 635_000; // observed grown context
+      const inflated = 620_000; // distilledBudget+rawBudget ≈ 0.65 * 957K usable
+      const realTarget = 200_000; // layer0Ceiling (what compression yields)
+
+      // Sustained-bust regime (>=5): continue is priced at the WRITE rate.
+      //   continueCost = 635K × $6.25/M = $3.969
+      //   inflated  bustCost = 620K × $6.25/M = $3.875  → 3.875 < 0.85*3.969=3.374? NO → don't compress
+      //   real      bustCost = 200K × $6.25/M = $1.25   → 1.25  < 3.374           ? YES → compress
+      expect(shouldCompress(current, inflated, 5)).toBe(false);
+      expect(shouldCompress(current, realTarget, 5)).toBe(true);
+    });
+  });
+
+  describe("tier gate — clamps compressedEstimate to the real compression target", () => {
+    const SESSION = "tier-gate-clamp-sess";
+
+    beforeEach(() => {
+      resetCalibration(SESSION);
+      resetPrefixCache();
+      resetRawWindowCache();
+      // High-context model (e.g. a 1M-token opus): usable ≈ 968K, so the naive
+      // distilled+raw budget (~0.65*usable ≈ 629K) is far larger than what
+      // compression actually produces.
+      setModelLimits({ context: 1_000_000, output: 32_000 });
+      // Cost-aware layer-0 cap (the real compression target). min(maxInput, this)
+      // → layer0Ceiling = 200K, the value the runaway session logged as l0cap.
+      setMaxLayer0Tokens(200_000);
+      // Anthropic opus pricing: write=$6.25/M, read=$0.50/M (write ~12.5× read).
+      setCachePricing(6.25 / 1_000_000, 0.5 / 1_000_000);
+    });
+
+    afterAll(() => {
+      // Restore the suite-wide defaults so later describe blocks are unaffected.
+      setModelLimits({ context: 10_000, output: 2_000 });
+      setMaxLayer0Tokens(0);
+      setCachePricing(0, 0);
+      resetCalibration(SESSION);
+      // resetCalibration sets calibratedOverhead = null (→ FIRST_TURN_OVERHEAD
+      // fallback). The suite baseline (top-level beforeAll) is calibrate(0) =
+      // zero overhead, so restore that to avoid leaking a 15K overhead default
+      // into any later test that relies on the baseline.
+      calibrate(0);
+    });
+
+    test("compresses a sustained-bust runaway instead of layer-0 passthrough", () => {
+      // A handful of small messages — their token count is irrelevant because we
+      // drive the SIZE via calibration below (mirrors a real long session whose
+      // exact input is known from the API).
+      const msgs = Array.from({ length: 8 }, (_, i) =>
+        makeMsg(
+          `clamp-${i}`,
+          i % 2 === 0 ? "user" : "assistant",
+          "x".repeat(200),
+          SESSION,
+        ),
+      );
+
+      // Calibrate the session directly to a large grown input, WITHOUT a prior
+      // transform. This is critical: calibrate() only updates the (shared)
+      // overhead EMA when a previous transform estimate exists (lastTransform-
+      // Estimate > 0). With no prior transform that branch is skipped, so
+      // `usable` stays at the model's true ~968K instead of collapsing — which
+      // is exactly the high-context condition that triggers the bug. Passing
+      // messageCount = msgs.length means the calibrated path sees zero "new"
+      // messages, so expectedInput == lastKnownInput == 635K.
+      calibrate(635_000, SESSION, msgs.length);
+
+      // Drive the cache into a sustained-bust regime (>=5 consecutive busts):
+      // every turn is ~93% cache write, exactly like the runaway logs.
+      for (let i = 0; i < 6; i++) {
+        recordCacheUsage(440_000, 34_813, 2, SESSION);
+      }
+      expect(
+        inspectSessionState(SESSION)?.consecutiveBusts,
+      ).toBeGreaterThanOrEqual(5);
+
+      const result = transform({
+        messages: msgs,
+        projectPath: PROJECT,
+        sessionID: SESSION,
+      });
+
+      // Guard the scenario actually exercises the tier gate (not the overhead-
+      // collapsed path that masked the bug originally). At the decision turn
+      // `usable` must be near the full model context (~968K), so the UN-clamped
+      // distilled+raw budget (~0.65*usable ≈ 620K) genuinely exceeds the clamp
+      // target (layer0Ceiling = 200K). If usable here collapses (e.g. overhead
+      // pollution), the test would pass for the wrong reason — so assert it.
+      expect(result.usable).toBeGreaterThan(900_000);
+      expect(result.distilledBudget + result.rawBudget).toBeGreaterThan(
+        300_000,
+      );
+
+      // Before the fix: the gate fed shouldCompress() the un-clamped ~620K
+      // estimate; bustCost (620K×write) dwarfed continueCost even under
+      // sustained-bust write-rate repricing, so it STAYED at layer 0 and grew
+      // unbounded. After clamping compressedEstimate to layer0Ceiling (200K),
+      // the economics flip and the gate compresses (layer >= 1). This assertion
+      // FAILS on revert of the one-line fix (verified).
+      expect(result.layer).toBeGreaterThanOrEqual(1);
+    });
+
+    test("small session still passes through layer 0 (no over-compression)", () => {
+      // A genuinely small session (well under layer0Ceiling) must not be
+      // compressed — the clamp only affects the gate's economic estimate, not
+      // the passthrough decision for sessions that comfortably fit.
+      const msgs = Array.from({ length: 6 }, (_, i) =>
+        makeMsg(
+          `small-${i}`,
+          i % 2 === 0 ? "user" : "assistant",
+          "y".repeat(100),
+          SESSION,
+        ),
+      );
+
+      transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
+      // Tiny calibrated input — well below layer0Ceiling (200K).
+      calibrate(5_000, SESSION, msgs.length);
+
+      const result = transform({
+        messages: msgs,
+        projectPath: PROJECT,
+        sessionID: SESSION,
+      });
+      expect(result.layer).toBe(0);
+    });
   });
 
   describe("recordCacheUsage — consecutive bust tracking", () => {
