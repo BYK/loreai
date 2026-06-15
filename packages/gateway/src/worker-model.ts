@@ -590,9 +590,16 @@ export function getWorkerModel(session?: {
   const sessionProviderID = session?.providerID;
   const sessionModelID = session?.model;
 
-  // Effective provider: explicit config > session > anthropic default.
+  // Effective provider: explicit config > session. Do NOT silently default to
+  // "anthropic": fabricating an Anthropic worker for a session whose provider
+  // is non-Anthropic (or unknown) produces a doomed cross-provider call — the
+  // session's foreign key looked up under "anthropic" misses (→ no-auth, after
+  // #776's fail-closed guard) or, worse, an anthropic worker is built for a
+  // MiniMax/OpenRouter session. When neither config nor session names a
+  // provider, we have no safe target → skip background work (return undefined).
   const effectiveProvider =
-    cfg.model?.providerID ?? sessionProviderID ?? "anthropic";
+    cfg.model?.providerID ?? sessionProviderID ?? undefined;
+  if (!effectiveProvider) return undefined;
 
   // Effective session model: config > session snapshot > provider default.
   const effectiveModelID = cfg.model?.modelID ?? sessionModelID ?? undefined;

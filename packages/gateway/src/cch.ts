@@ -590,6 +590,22 @@ export function captureSessionHeaders(
  * client fingerprint as conversation turns, avoiding 401 rejections from
  * Anthropic's OAuth validation.
  */
+/**
+ * The `user-agent` to send on worker requests. Anthropic-compat providers
+ * (e.g. MiniMax) reject requests that lack a recognized user-agent with a
+ * generic auth-failure ("login fail: carry the API secret key in X-Api-Key"),
+ * even when the key and host are correct — the conversation path works only
+ * because it forwards the client's user-agent. Replay the session's sniffed
+ * user-agent (captured in sessionHeaderSnapshots), falling back to a Claude
+ * Code-style UA. Returns a value for ANY session, not just OAuth/billing ones.
+ */
+export function workerUserAgent(sessionID: string | undefined): string {
+  const sniffed = sessionID
+    ? sessionHeaderSnapshots.get(sessionID)?.userAgent
+    : undefined;
+  return sniffed || `claude-cli/${WORKER_VERSION} (external, sdk-cli)`;
+}
+
 export function buildOAuthWorkerHeaders(
   sessionID: string | undefined,
 ): Record<string, string> | null {

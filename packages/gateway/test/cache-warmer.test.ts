@@ -7,6 +7,7 @@ import {
   blendHistograms,
   prepareAnthropicWarmupBody,
   buildAnthropicProfile,
+  resolveProfile,
   shouldWarm,
   checkCircuitBreaker,
   isCircuitBreakerTripped,
@@ -923,6 +924,86 @@ describe("shouldWarm", () => {
 // ---------------------------------------------------------------------------
 // Profile building
 // ---------------------------------------------------------------------------
+
+describe("resolveProfile — Anthropic first-party host gate (cross-provider 401 fix)", () => {
+  test("returns a profile for an Anthropic-first-party session", () => {
+    const profile = resolveProfile(
+      "claude-sonnet-4-20250514",
+      "anthropic",
+      "5m",
+      "https://api.anthropic.com",
+    );
+    expect(profile).not.toBeNull();
+    expect(profile?.upstreamUrl).toBe("https://api.anthropic.com/v1/messages");
+  });
+
+  test("WARMS a header-less Claude Code session (empty-string upstreamBase falls through to the model route)", () => {
+    // 🔴 Production input: Claude Code CLI/Desktop send no x-lore-upstream-url,
+    // so lastUpstream.url === "" (pipeline.ts). The gate must coalesce "" to the
+    // model route (api.anthropic.com) and STILL warm — otherwise warming is
+    // silently disabled for the flagship agent. (Guards the ?? vs || bug.)
+    const profile = resolveProfile(
+      "claude-sonnet-4-20250514",
+      "anthropic",
+      "5m",
+      "",
+    );
+    expect(profile).not.toBeNull();
+    expect(profile?.upstreamUrl).toBe("https://api.anthropic.com/v1/messages");
+  });
+
+  test("WARMS a header-less Claude Code session (undefined upstreamBase falls through to the model route)", () => {
+    const profile = resolveProfile(
+      "claude-sonnet-4-20250514",
+      "anthropic",
+      "5m",
+      undefined,
+    );
+    expect(profile).not.toBeNull();
+    expect(profile?.upstreamUrl).toBe("https://api.anthropic.com/v1/messages");
+  });
+
+  test("WARMS a proxied Anthropic session (providerID 'anthropic' even when host is not api.anthropic.com)", () => {
+    // LORE_UPSTREAM_ANTHROPIC / LiteLLM / Cloudflare AI Gateway: real Anthropic
+    // caching through a proxy host. providerID identifies it as Anthropic so
+    // warming is preserved despite the non-first-party host.
+    const profile = resolveProfile(
+      "claude-sonnet-4-20250514",
+      "anthropic",
+      "5m",
+      "https://my-litellm-proxy.example.com",
+      "anthropic",
+    );
+    expect(profile).not.toBeNull();
+  });
+
+  test("SKIPS a MiniMax (anthropic-compat) session — never warms a foreign host", () => {
+    // MiniMax reports protocol:"anthropic" but its host is api.minimax.io.
+    // Pre-fix the warmer fell back to api.anthropic.com and sent the MiniMax
+    // key there → 401 "invalid x-api-key". It must skip instead.
+    const profile = resolveProfile(
+      "MiniMax-M3",
+      "anthropic",
+      "5m",
+      "https://api.minimax.io/anthropic",
+      "minimax-coding-plan",
+    );
+    expect(profile).toBeNull();
+  });
+
+  test("SKIPS when the upstream host is unknown (no upstreamBase, unroutable model) — fails closed, never api.anthropic.com fallback", () => {
+    // No upstreamBase and a model with no route prefix → must NOT silently warm
+    // against api.anthropic.com with whatever credential the session holds.
+    const profile = resolveProfile("MiniMax-M3", "anthropic", "5m");
+    expect(profile).toBeNull();
+  });
+
+  test("SKIPS non-anthropic protocols", () => {
+    expect(
+      resolveProfile("gpt-5", "openai", "5m", "https://api.openai.com"),
+    ).toBeNull();
+  });
+});
 
 describe("buildAnthropicProfile", () => {
   test("5m TTL has correct parameters", () => {

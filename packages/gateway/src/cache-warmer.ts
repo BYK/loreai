@@ -689,6 +689,11 @@ export function buildAnthropicProfile(
   ttl: "5m" | "1h",
   upstreamBase?: string,
 ): CacheWarmingProfile {
+  const route = resolveUpstreamRoute(model);
+  // || (not ??): an empty-string upstreamBase (header-less Anthropic sessions)
+  // must coalesce to the model route, not produce a base of "".
+  const base = upstreamBase || route?.url || "https://api.anthropic.com";
+
   const entry = getModelEntrySync(model);
   const cacheReadCost =
     entry.cost?.cache_read ?? (entry.cost?.input ?? 3) * 0.1;
@@ -702,36 +707,71 @@ export function buildAnthropicProfile(
   // For 1h TTL: warm in the last 5m (55:00–60:00)
   const warmupMarginMs = ttl === "1h" ? 300_000 : 45_000;
 
-  const route = resolveUpstreamRoute(model);
-  const base = upstreamBase ?? route?.url ?? "https://api.anthropic.com";
-
   return {
     ttlMs,
     cacheReadCostPerMTok: cacheReadCost,
     cacheMissCostPerMTok: cacheWriteCost,
     warmupMarginMs,
     prepareWarmupBody: prepareAnthropicWarmupBody,
-    upstreamUrl: `${base}/v1/messages`,
+    upstreamUrl: `${base.replace(/\/$/, "")}/v1/messages`,
   };
+}
+
+/**
+ * True only for Anthropic's first-party API host. Anthropic-compatible
+ * providers (MiniMax `api.minimax.io/anthropic`, Fireworks, Kimi, …) report
+ * `protocol:"anthropic"` but do NOT support Anthropic prompt-cache warming and
+ * reject the session's foreign key if sent to api.anthropic.com. Cache warming
+ * is gated to this host (see resolveProfile).
+ */
+function isAnthropicFirstPartyHost(url: string): boolean {
+  try {
+    return new URL(url).host === "api.anthropic.com";
+  } catch {
+    return false;
+  }
 }
 
 /**
  * Resolve a warming profile for a session.
  *
  * Returns null if warming is not applicable (unknown provider, warming
- * disabled, etc.).
+ * disabled, or a non-Anthropic-first-party host).
  */
 export function resolveProfile(
   model: string | undefined,
   protocol: "anthropic" | "openai" | "openai-responses" | undefined,
   ttl: "5m" | "1h" | undefined,
   upstreamBase?: string,
+  providerID?: string,
 ): CacheWarmingProfile | null {
   if (!model || !protocol) return null;
 
-  // Only Anthropic for now — OpenAI has automatic prefix caching
-  // with no explicit warming API
+  // Only Anthropic protocol for now — OpenAI has automatic prefix caching with
+  // no explicit warming API.
   if (protocol !== "anthropic") return null;
+
+  // 🔴 Gate on Anthropic IDENTITY, not just the wire protocol. Anthropic-compat
+  // providers (MiniMax, Fireworks, Kimi) report protocol:"anthropic" but
+  // warming them sends the session's foreign api-key to api.anthropic.com (the
+  // buildAnthropicProfile fallback) → 401 "invalid x-api-key" loop, and they
+  // don't honor cache_control warming anyway. Accept the session as Anthropic
+  // when EITHER:
+  //   (a) its explicit providerID is "anthropic" — preserves warming for
+  //       Anthropic routed through a proxy (LORE_UPSTREAM_ANTHROPIC / LiteLLM /
+  //       Cloudflare AI Gateway), where the host is not api.anthropic.com; OR
+  //   (b) the host the warmup would hit IS api.anthropic.com — covers the
+  //       header-less flagship case (Claude Code CLI/Desktop send no
+  //       x-lore-provider / x-lore-upstream-url, so providerID is undefined and
+  //       lastUpstream.url is "").
+  // Use || (not ??) so an EMPTY-STRING upstreamBase coalesces to the model route
+  // (api.anthropic.com) instead of leaving warmupHost = "" → wrongly skipped.
+  const route = resolveUpstreamRoute(model);
+  const warmupHost = upstreamBase || route?.url;
+  const isAnthropic =
+    providerID === "anthropic" ||
+    (!!warmupHost && isAnthropicFirstPartyHost(warmupHost));
+  if (!isAnthropic) return null;
 
   return buildAnthropicProfile(model, ttl ?? "5m", upstreamBase);
 }
@@ -1095,6 +1135,10 @@ export function computeWarmingSnapshot(
     state.lastUpstream?.protocol,
     state.resolvedConversationTTL,
     state.lastUpstream?.url,
+    // Match the live warming path (idle.ts) so the dashboard snapshot doesn't
+    // under-report a profile for proxied-Anthropic sessions (providerID
+    // "anthropic" + non-first-party host).
+    state.lastUpstream?.providerID,
   );
   const ttlMs = profile?.ttlMs ?? 300_000;
   const warmupMarginMs = profile?.warmupMarginMs ?? 45_000;

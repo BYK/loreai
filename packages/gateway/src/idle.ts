@@ -262,6 +262,12 @@ export function startIdleScheduler(
         state.lastUpstream?.model,
         state.lastUpstream?.protocol,
         state.resolvedConversationTTL,
+        // Pass the session's real upstream URL + providerID so the warmer warms
+        // only true-Anthropic sessions (first-party host OR providerID
+        // "anthropic", incl. proxied Anthropic) and never sends a compat
+        // provider's key to api.anthropic.com (MiniMax 401 loop).
+        state.lastUpstream?.url,
+        state.lastUpstream?.providerID,
       );
       if (!profile) continue;
 

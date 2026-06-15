@@ -166,6 +166,34 @@ describe("worker cross-provider routing matrix (structural guard)", () => {
     }
   }
 
+  test("anthropic worker request carries a user-agent (MiniMax rejects UA-less requests with a 401)", async () => {
+    // A MiniMax session: worker routes to api.minimax.io with the MiniMax key.
+    // Without a user-agent, MiniMax's anthropic-compat endpoint rejects the
+    // request with a generic auth failure even though key+host are correct.
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "mm-worker-key" }),
+      { providerID: "minimax", modelID: "MiniMax-M2.7" },
+    );
+
+    await client.prompt("system", "user", {
+      sessionID: "sess-minimax-ua",
+      workerID: "lore-curator",
+      model: { providerID: "minimax", modelID: "MiniMax-M2.7" },
+      upstreamUrl: "https://api.minimax.io/anthropic",
+      upstreamProviderID: "minimax",
+      protocol: "anthropic",
+    });
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const opts = mockFetch.mock.calls[0][1] as {
+      headers: Record<string, string>;
+    };
+    const headerKeys = Object.keys(opts.headers).map((k) => k.toLowerCase());
+    expect(headerKeys).toContain("user-agent");
+    expect(opts.headers["user-agent"]).toBeTruthy();
+  });
+
   test("an unknown worker-model provider with no route ALWAYS fails closed (never falls back to a direct endpoint)", async () => {
     const client = createGatewayLLMClient(
       UPSTREAMS,

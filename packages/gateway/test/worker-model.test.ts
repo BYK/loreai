@@ -790,6 +790,21 @@ describe("getWorkerModel", () => {
     });
     expect(result).toBeUndefined();
   });
+
+  test("no session provider (and no config model) returns undefined — never fabricates an anthropic worker", () => {
+    // Regression: previously effectiveProvider defaulted to "anthropic" when the
+    // session provider was absent, fabricating an Anthropic worker for a session
+    // whose real provider is non-Anthropic/unknown. That worker then looked up
+    // the session's foreign credential under "anthropic" → no-auth (or a doomed
+    // cross-provider 401). With no provider evidence, background work must SKIP.
+    const result = getWorkerModel({ model: "some-model" });
+    expect(result).toBeUndefined();
+  });
+
+  test("empty session object returns undefined — no provider to target", () => {
+    const result = getWorkerModel({});
+    expect(result).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------

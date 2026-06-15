@@ -30,6 +30,7 @@ import {
   buildBillingBlock,
   buildCodexWorkerHeaders,
   buildOAuthWorkerHeaders,
+  workerUserAgent,
   signBody,
 } from "./cch";
 import {
@@ -525,6 +526,11 @@ function buildAnthropicWorkerRequest(
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "anthropic-version": "2023-06-01",
+    // Replay a user-agent on every worker request. Anthropic-compat providers
+    // (MiniMax) reject UA-less requests with a generic auth failure even when
+    // the key/host are correct — the conversation path works only because it
+    // forwards the client UA. oauthHeaders (billing sessions) may override this.
+    "user-agent": workerUserAgent(sessionID),
     ...authHeaders(cred),
     ...oauthHeaders,
   };
