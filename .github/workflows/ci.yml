@@ -1243,10 +1243,41 @@ jobs:
   # Reports success when either (a) all code jobs passed or (b) they were
   # legitimately skipped because only docs changed.
   # ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # Sync engine integration tests against a REAL Postgres + PostgREST stack.
+  #
+  # The unit suite mocks PostgREST; these run the actual migrations, RLS,
+  # triggers, CHECK constraints, and the real push/pull engine over supabase-js.
+  # GitHub's ubuntu runners ship Docker, so the harness can stand up disposable
+  # postgres:16-alpine + postgrest containers. Gated by LORE_INTEGRATION=1.
+  # ---------------------------------------------------------------------------
+  sync-integration:
+    name: Sync integration (real Postgres)
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - run: pnpm install --frozen-lockfile
+      # Pre-pull images so the per-test timeout covers only container startup.
+      - name: Pre-pull container images
+        run: |
+          docker pull postgres:16-alpine
+          docker pull postgrest/postgrest:v12.2.3
+      - name: Run sync integration tests
+        run: pnpm exec vitest run packages/gateway/test/sync-security.integration.test.ts packages/gateway/test/sync-engine.integration.test.ts
+        env:
+          LORE_INTEGRATION: '1'
+          NODE_NO_WARNINGS: '1'
+
   ci-status:
     name: CI Status
     if: always()
-    needs: [changes, test, binary-smoke-native, check-docs, check-links, check-social, check-patches, actionlint]
+    needs: [changes, test, binary-smoke-native, check-docs, check-links, check-social, check-patches, actionlint, sync-integration]
     runs-on: ubuntu-latest
     steps:
       - name: Check CI result
@@ -1291,5 +1322,14 @@ jobs:
           if [ "$checkPatchesResult" == "failure" ] || [ "$checkPatchesResult" == "cancelled" ]; then
             echo "::error::check-patches did not succeed (result: $checkPatchesResult)"
             exit 1
+          fi
+          # sync-integration is required whenever code changed (self-gates on the
+          # code path filter); "skipped" on unrelated changes is treated as pass.
+          if [ "${{ needs.changes.outputs.code }}" == "true" ]; then
+            syncItResult="${{ needs.sync-integration.result }}"
+            if [ "$syncItResult" != "success" ]; then
+              echo "::error::sync-integration did not succeed (result: $syncItResult)"
+              exit 1
+            fi
           fi
           echo "CI passed (code=${{ needs.changes.outputs.code }})"

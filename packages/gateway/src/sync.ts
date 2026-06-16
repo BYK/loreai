@@ -184,9 +184,12 @@ async function pushEntry(
     payload.content_hash = hash;
     payload.revision = revision;
   }
-  const { error } = await client
-    .from(table)
-    .upsert(payload, { onConflict: idColumns(table).join(",") });
+  // The REMOTE primary key is composite — (owner_user_id, <idColumns>) — so the
+  // ON CONFLICT target must include owner_user_id (the local PK is just
+  // idColumns). owner_user_id is filled by the column's auth.uid() default.
+  const { error } = await client.from(table).upsert(payload, {
+    onConflict: ["owner_user_id", ...idColumns(table)].join(","),
+  });
 
   if (error) {
     const kind = classifyPushError(error);
