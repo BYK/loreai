@@ -24,7 +24,9 @@
       "fast-xml-parser": "5.7.3",
       "@huggingface/hub": "2.11.0",
       "yaml": ">=2.8.3",
-      "esbuild": ">=0.28.1"
+      "esbuild": ">=0.28.1",
+      "@opentelemetry/core": ">=2.8.0",
+      "protobufjs": ">=7.6.3"
     },
     "patchedDependencies": {
       "@sentry/node@10.56.0": "patches/@sentry__node@10.56.0.patch"
