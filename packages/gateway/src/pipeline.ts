@@ -749,6 +749,37 @@ export function shouldResetDeltaOnCompression(
   return curLayer !== prevLayer || outOfIdle;
 }
 
+/**
+ * Re-anchor an existing seq-0 durable delta (same content) to a fresh, tool-
+ * pair-safe near-tail index in the current (post-reshuffle) message array, so a
+ * frozen absolute insertAt isn't replayed at a position that no longer matches
+ * the array layout. Returns the recomputed insertAt, or null when there is no
+ * delta to re-anchor.
+ *
+ * @internal Exported for tests (covers the call-site behavior — passing the
+ * post-compact array and persisting a recomputed index — that the predicate
+ * alone does not exercise).
+ */
+export function reanchorExistingDelta(
+  sessionID: string,
+  projectPath: string,
+  messages: GatewayMessage[],
+): number | null {
+  const existing = listSessionPromptDeltas(sessionID).find((d) => d.seq === 0);
+  if (!existing) return null;
+  const reInsertAt = safeDeltaInsertIndex(
+    messages,
+    Math.max(0, messages.length - 1),
+  );
+  upsertSessionPromptDelta({
+    sessionID,
+    projectID: ensureProject(projectPath),
+    selector: JSON.stringify({ target: "messages", insertAt: reInsertAt }),
+    content: existing.content,
+  });
+  return reInsertAt;
+}
+
 export function safeDeltaInsertIndex(
   messages: GatewayMessage[],
   desired: number,
@@ -6074,21 +6105,22 @@ async function handleConversationTurn(
     }
   }
 
-  // Reset the durable delta on a cache-busting compression. The delta's
-  // persisted insertAt is a frozen absolute index into the gradient-transformed
-  // array; when the gradient compresses (layer change), that array reshuffles
-  // and the once-safe index can drift into a tool_use/tool_result pair. A
-  // compressing turn busts the prompt cache anyway, so we recompute the delta
-  // (position + content) THIS turn rather than replaying a stale index. This
-  // keeps the conversation coherent (the compressed request still carries an
-  // accurate, correctly-placed delta) and stops removeOrphanedToolResults from
-  // destructively stripping a real tool pair every subsequent turn.
-  // Reset the delta on a layer change OR a post-idle compact: both reshuffle
-  // the gradient-transformed array. The post-idle case stays at the same layer
-  // (a steady layer-1 session resumes at layer 1), so the layer comparison
-  // alone misses it — `lastTurnWasIdle` covers that same-layer reshuffle so the
-  // frozen absolute insertAt isn't replayed into a differently-shaped array
-  // (the false "unsustainable conversation" cache-bust on a tier-0 session).
+  // Reset the durable delta when the gradient-transformed array reshuffles.
+  // The delta's persisted insertAt is a frozen absolute index into that array;
+  // when it reshuffles, the once-safe index can drift into a tool_use/
+  // tool_result pair (or simply onto a different message), busting the prompt
+  // cache. On such a turn we recompute the delta (position + content) THIS turn
+  // rather than replaying a stale index — keeping the request coherent and
+  // stopping removeOrphanedToolResults from destructively stripping a real tool
+  // pair every subsequent turn.
+  //
+  // Two events reshuffle the array: (1) a LAYER CHANGE (entering/escalating/
+  // de-escalating compression), and (2) a POST-IDLE COMPACT, which rebuilds the
+  // array (the distilled prefix grows, the raw window is rebuilt) while STAYING
+  // at the same layer — a steady layer-1 session resumes at layer 1. The layer
+  // comparison alone misses (2), so `lastTurnWasIdle` covers that same-layer
+  // reshuffle (the false "unsustainable conversation" cache-bust on a tier-0
+  // post-idle session, which #786's layer-only check did not catch).
   const deltaCompressed = shouldResetDeltaOnCompression(
     sessionState.lastDeltaLayer ?? 0,
     result.layer,
@@ -6103,25 +6135,13 @@ async function handleConversationTurn(
     } else {
       // No new knowledge this turn, but the array reshuffled: re-anchor the
       // EXISTING delta (same content) to a fresh tool-pair-safe near-tail index
-      // so it doesn't replay at a drifted position. Delete + re-persist with a
-      // recomputed insertAt.
-      const existing = listSessionPromptDeltas(sessionID).find(
-        (d) => d.seq === 0,
+      // so it doesn't replay at a drifted position.
+      const reInsertAt = reanchorExistingDelta(
+        sessionID,
+        projectPath,
+        modifiedReq.messages,
       );
-      if (existing) {
-        const reInsertAt = safeDeltaInsertIndex(
-          modifiedReq.messages,
-          Math.max(0, modifiedReq.messages.length - 1),
-        );
-        upsertSessionPromptDelta({
-          sessionID,
-          projectID: ensureProject(projectPath),
-          selector: JSON.stringify({
-            target: "messages",
-            insertAt: reInsertAt,
-          }),
-          content: existing.content,
-        });
+      if (reInsertAt !== null) {
         log.info(
           `prompt-delta: re-anchored durable delta for session ${sessionID.slice(0, 16)} after compression (layer ${sessionState.lastDeltaLayer ?? 0}→${result.layer}, insertAt=${reInsertAt})`,
         );
