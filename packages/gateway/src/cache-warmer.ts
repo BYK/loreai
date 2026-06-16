@@ -678,7 +678,52 @@ export function prepareAnthropicWarmupBody(storedBody: string): string {
   // Strip structured output format (incompatible with max_tokens: 0)
   delete body.output_config;
 
+  // Ensure a cache breakpoint is present. The stored body comes from
+  // cache-analytics' normalized copy, which strips `cache_control` markers (so
+  // breakpoint movement doesn't pollute divergence analysis). Without a
+  // breakpoint the warmup writes NOTHING to the cache — silently neutering
+  // every warmup — so we re-add one on the last content block of the last
+  // message (Anthropic's standard placement, and what the real turns used).
+  ensureCacheBreakpoint(body);
+
   return JSON.stringify(body);
+}
+
+/**
+ * Re-attach an ephemeral `cache_control` breakpoint to the last content block
+ * of the last message if the body has none. Idempotent: a body that already
+ * carries any breakpoint is left untouched.
+ */
+function ensureCacheBreakpoint(body: {
+  messages?: Array<{ content?: unknown }>;
+}): void {
+  const messages = body.messages;
+  if (!Array.isArray(messages) || messages.length === 0) return;
+
+  // If any block anywhere already has a breakpoint, do nothing.
+  const hasBreakpoint = messages.some(
+    (m) =>
+      Array.isArray(m?.content) &&
+      m.content.some(
+        (b: unknown) =>
+          typeof b === "object" && b !== null && "cache_control" in b,
+      ),
+  );
+  if (hasBreakpoint) return;
+
+  // Find the last message with an array content holding at least one block.
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const content = messages[i]?.content;
+    if (Array.isArray(content) && content.length > 0) {
+      const lastBlock = content[content.length - 1];
+      if (typeof lastBlock === "object" && lastBlock !== null) {
+        (lastBlock as { cache_control?: unknown }).cache_control = {
+          type: "ephemeral",
+        };
+      }
+      return;
+    }
+  }
 }
 
 /**

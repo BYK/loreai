@@ -573,6 +573,57 @@ describe("normalizeBodyForComparison", () => {
     expect(a).toBe(b);
     expect(b).toBe(c);
   });
+
+  test("strips the moving cache_control ephemeral breakpoint", () => {
+    // Anthropic clients place an ephemeral cache breakpoint on the LAST
+    // cacheable block; it advances to the newest message every turn. Left
+    // un-normalized, the byte at the previous breakpoint's position always
+    // differs from the next turn's body, producing a false-positive
+    // mid-conversation divergence (observed on session 1PgnnnH43rJVO5nyX).
+    const body =
+      '{"messages":[{"role":"assistant","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}';
+    expect(normalizeBodyForComparison(body)).toBe(
+      '{"messages":[{"role":"assistant","content":[{"type":"text","text":"hi"}]}]}',
+    );
+  });
+
+  test("append-only turns differing only by a moved breakpoint normalize identically up to the new tail", () => {
+    // Turn N: breakpoint on the last (assistant) message.
+    const prev =
+      '{"messages":[' +
+      '{"role":"user","content":[{"type":"text","text":"q1"}]},' +
+      '{"role":"assistant","content":[{"type":"text","text":"a1","cache_control":{"type":"ephemeral"}}]}' +
+      "]}";
+    // Turn N+1: breakpoint moved to the newly-appended message; the old
+    // message no longer carries the marker.
+    const curr =
+      '{"messages":[' +
+      '{"role":"user","content":[{"type":"text","text":"q1"}]},' +
+      '{"role":"assistant","content":[{"type":"text","text":"a1"}]},' +
+      '{"role":"user","content":[{"type":"text","text":"q2","cache_control":{"type":"ephemeral"}}]}' +
+      "]}";
+    const nPrev = normalizeBodyForComparison(prev);
+    const nCurr = normalizeBodyForComparison(curr);
+    // After normalization, the entire previous body up to its closing brackets
+    // must be a byte-identical prefix of the current body — i.e. the only
+    // change is the genuine append, NOT a mid-conversation edit at the old
+    // breakpoint position. (prev ends with the array+object close `]}` that
+    // curr replaces with `,{...new message...}]}`.)
+    const prevPrefix = nPrev.slice(0, nPrev.length - "]}".length);
+    expect(nCurr.startsWith(prevPrefix)).toBe(true);
+    // The first real divergence is therefore at or after message index 1's
+    // end — never inside messages[0] or messages[1] content (the false
+    // "earlier message modified at position N" mislabel).
+    const offset = findDivergenceOffset(nPrev, nCurr);
+    expect(offset).toBeGreaterThanOrEqual(prevPrefix.length);
+    // The divergence must NOT fall inside an early message's CONTENT (the
+    // false "earlier message modified at position N" mislabel). A structural
+    // boundary after message 1 is fine; an edit inside messages[0/1].content
+    // is not.
+    const path = mapOffsetToJsonPath(nCurr, offset);
+    expect(path.startsWith("messages[0].content")).toBe(false);
+    expect(path.startsWith("messages[1].content")).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------

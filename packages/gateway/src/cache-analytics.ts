@@ -80,10 +80,37 @@ const CC_VERSION_SUFFIX_REPLACEMENT = "$1.___;";
  */
 const TOP_LEVEL_MAX_TOKENS = /^(\{"model":"[^"]+","max_tokens":)\d+/;
 
+/**
+ * Anthropic prompt-cache breakpoint marker. Clients place an ephemeral
+ * `cache_control` on the LAST cacheable block; it advances to the newest
+ * message every turn. Left in place, the byte at the previous breakpoint's
+ * position always differs from the next turn's body (marker removed there,
+ * present elsewhere), producing a false-positive mid-conversation divergence
+ * even when the upstream prompt-cache prefix is fully intact.
+ *
+ * Removing the marker from BOTH the stored (previous) and current bodies makes
+ * breakpoint movement invisible to the prefix comparison. Matches an optional
+ * leading comma so the surrounding JSON stays well-formed, and tolerates an
+ * optional `ttl` field (extended-cache tier).
+ */
+// Match the whole `cache_control` object regardless of inner key order
+// (e.g. `{"type":"ephemeral"}` or `{"ttl":"1h","type":"ephemeral"}`). The
+// optional leading comma keeps surrounding JSON well-formed in the common case
+// where the marker is a trailing property. Edge case: if `cache_control` were
+// the FIRST key of its object, the trailing comma would be left behind
+// (`{,"text":…}`) — harmless here because (a) Anthropic always appends the
+// marker as the last property of a content block, and (b) this normalized
+// string is only ever byte-compared against another normalized string, never
+// re-parsed or sent upstream (the wire body is never modified by analytics).
+const CACHE_CONTROL_PATTERN =
+  /,?"cache_control":\{[^{}]*"type":"ephemeral"[^{}]*\}/g;
+const CACHE_CONTROL_REPLACEMENT = "";
+
 export function normalizeBodyForComparison(body: string): string {
   return body
     .replace(CCH_PATTERN, CCH_REPLACEMENT)
     .replace(CC_VERSION_SUFFIX_PATTERN, CC_VERSION_SUFFIX_REPLACEMENT)
+    .replace(CACHE_CONTROL_PATTERN, CACHE_CONTROL_REPLACEMENT)
     .replace(TOP_LEVEL_MAX_TOKENS, "$10");
 }
 

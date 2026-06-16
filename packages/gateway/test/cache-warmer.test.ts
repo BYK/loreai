@@ -36,7 +36,10 @@ import type {
   WarmupResult,
   WarmupState,
 } from "../src/translate/types";
-import { compressBody } from "../src/cache-analytics";
+import {
+  compressBody,
+  normalizeBodyForComparison,
+} from "../src/cache-analytics";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -391,6 +394,82 @@ describe("prepareAnthropicWarmupBody", () => {
     expect(result.system[0].cache_control).toBeDefined();
     expect(result.tools).toHaveLength(1);
     expect(result.messages).toHaveLength(3);
+  });
+
+  // Integration: the warmer's ONLY body source is cache-analytics'
+  // `lastRequestBody`, which is stored AFTER `normalizeBodyForComparison`
+  // (cache-analytics strips `cache_control` markers so breakpoint movement
+  // doesn't pollute divergence analysis). A warmup with no breakpoint writes
+  // NOTHING to the cache — silently neutering warmups while the result
+  // classifier still reports success. The warmer must re-add a breakpoint.
+  test("re-adds a cache breakpoint after analytics normalization strips it", () => {
+    const wireBody = JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 16384,
+      stream: true,
+      system: [{ type: "text", text: "you are a helpful assistant" }],
+      tools: [{ name: "bash", description: "run", input_schema: {} }],
+      messages: [
+        { role: "user", content: [{ type: "text", text: "q1" }] },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "a1", cache_control: { type: "ephemeral" } },
+          ],
+        },
+      ],
+    });
+
+    // Reproduce the real storage path: cache-analytics normalizes before
+    // persisting, which removes the breakpoint.
+    const stored = normalizeBodyForComparison(wireBody);
+    expect(stored).not.toContain("cache_control");
+
+    const fromStore = JSON.parse(prepareAnthropicWarmupBody(stored));
+
+    // Exactly one breakpoint must be present so the warmup actually writes the
+    // cache, placed on the last content block of the last message.
+    const breakpoints = (fromStore.messages as Array<{ content: unknown[] }>)
+      .flatMap((m) => m.content)
+      .filter(
+        (b) =>
+          typeof b === "object" &&
+          b !== null &&
+          "cache_control" in (b as object),
+      );
+    expect(breakpoints).toHaveLength(1);
+    const lastMsg = fromStore.messages[fromStore.messages.length - 1];
+    const lastBlock = lastMsg.content[lastMsg.content.length - 1];
+    expect(lastBlock.cache_control).toEqual({ type: "ephemeral" });
+  });
+
+  test("does not add a second breakpoint when one already survives", () => {
+    const body = JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 100,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "hi", cache_control: { type: "ephemeral" } },
+          ],
+        },
+        { role: "assistant", content: [{ type: "text", text: "yo" }] },
+      ],
+    });
+    const result = JSON.parse(prepareAnthropicWarmupBody(body));
+    const breakpoints = (result.messages as Array<{ content: unknown[] }>)
+      .flatMap((m) => m.content)
+      .filter(
+        (b) =>
+          typeof b === "object" &&
+          b !== null &&
+          "cache_control" in (b as object),
+      );
+    expect(breakpoints).toHaveLength(1);
+    expect(result.messages[0].content[0].cache_control).toEqual({
+      type: "ephemeral",
+    });
   });
 });
 
