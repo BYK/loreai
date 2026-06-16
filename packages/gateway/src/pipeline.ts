@@ -474,6 +474,11 @@ export async function resetPipelineState(opts?: {
     stopIdleScheduler();
     stopIdleScheduler = null;
   }
+  if (stopSyncScheduler) {
+    // Awaits a final best-effort push so local changes reach the server on exit.
+    await stopSyncScheduler();
+    stopSyncScheduler = null;
+  }
   _lastSeenSessionModel = null;
   resetWorkerModelState();
   resetBackgroundLimiter();
@@ -1147,6 +1152,7 @@ let batchQueueEnabled = false;
 
 /** Cleanup function for the idle scheduler timer. */
 let stopIdleScheduler: (() => void) | null = null;
+let stopSyncScheduler: (() => Promise<void>) | null = null;
 
 /** Cleanup function for the .lore.md / agents-file watcher. */
 let stopFileWatcher: (() => void) | null = null;
@@ -1584,6 +1590,12 @@ async function initIfNeeded(
         }
       },
     );
+  }
+
+  // Start background cloud sync (no-op until the user runs `lore sync enable`).
+  if (!stopSyncScheduler) {
+    const { startSyncScheduler } = await import("./sync");
+    stopSyncScheduler = startSyncScheduler();
   }
 
   log.info(`gateway pipeline initialized: ${projectPath}`);

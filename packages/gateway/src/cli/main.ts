@@ -329,6 +329,12 @@ export async function _cli(): Promise<void> {
         break;
       }
 
+      case "sync": {
+        const { commandSync } = await import("./sync-cmd");
+        await commandSync(rest, values as Record<string, unknown>);
+        break;
+      }
+
       case "logs": {
         const { commandLogs } = await import("./logs");
         await commandLogs(rest, values as Record<string, unknown>);
@@ -379,6 +385,7 @@ export async function _cli(): Promise<void> {
               "login",
               "logout",
               "whoami",
+              "sync",
               "logs",
               "import",
               "entity",
