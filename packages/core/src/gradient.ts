@@ -2348,12 +2348,54 @@ function transformInner(input: {
     // Otherwise use the cached prefix (Approach C, byte-identical for cache).
     let stagePrefix = cached.messages;
     let stagePrefixTokens = cached.tokens;
+    let stageDistillations = distillations;
     if (
       stage.distLimit !== Infinity &&
       distillations.length > stage.distLimit
     ) {
-      const trimmed = selectDistillations(distillations, stage.distLimit);
-      stagePrefix = distilledPrefix(trimmed);
+      stageDistillations = selectDistillations(distillations, stage.distLimit);
+      stagePrefix = distilledPrefix(stageDistillations);
+      stagePrefixTokens = stagePrefix.reduce(
+        (sum, m) => sum + estimateMessage(m),
+        0,
+      );
+    }
+
+    // Budget-aware prefix trim: if the rendered prefix still exceeds this
+    // stage's distilled budget, drop gen-0 distillations (selectDistillations
+    // always preserves meta/gen>=1) until it fits — instead of handing tryFit
+    // an over-budget prefix, which returns null and escalates the layer. A
+    // meta-distillation rewrite forces a full re-render (cacheValid=false) whose
+    // size can blow past every stage's budget, falling through to emergency
+    // Layer 4 even when the session has ample headroom (the distilled-prefix
+    // front-bust). Trimming keeps the session at a compressed layer (1-3) with
+    // the prefix PRESENT, so messages[0] stays byte-stable across turns.
+    // NOTE: on a STEADY warm turn (unchanged budget) the cached prefix already
+    // fits, so this block does not fire and messages[0/1] stay byte-identical.
+    // It CAN fire on the warm path when stageDistBudget contracts below the
+    // frozen prefix (usable / LTM / overhead-EMA drift) — re-rendering a smaller
+    // prefix and busting the front once. That is still strictly better than the
+    // pre-fix behavior in that case, which fell through to emergency Layer 4 and
+    // then thrashed 0<->4 (a front-bust every other turn); here we re-stabilize
+    // at a compressed layer immediately. Edge case: if even meta (gen>=1) entries
+    // alone exceed the budget, the search converges to an empty prefix (dropping
+    // meta) rather than escalating — preferable to a Layer-4 fallthrough.
+    if (stagePrefixTokens > stageDistBudget && stageDistillations.length > 0) {
+      let lo = 0;
+      let hi = stageDistillations.length;
+      // Largest count whose rendered prefix fits stageDistBudget (binary search).
+      while (lo < hi) {
+        const mid = Math.ceil((lo + hi) / 2);
+        const candidate = selectDistillations(stageDistillations, mid);
+        const tokens = distilledPrefix(candidate).reduce(
+          (sum, m) => sum + estimateMessage(m),
+          0,
+        );
+        if (tokens <= stageDistBudget) lo = mid;
+        else hi = mid - 1;
+      }
+      const fitted = selectDistillations(stageDistillations, lo);
+      stagePrefix = distilledPrefix(fitted);
       stagePrefixTokens = stagePrefix.reduce(
         (sum, m) => sum + estimateMessage(m),
         0,

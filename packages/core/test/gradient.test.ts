@@ -1948,6 +1948,214 @@ describe("gradient — calibration oscillation fix", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Distilled-prefix front-bust: spurious Layer 4 + 0<->4 thrash
+// ---------------------------------------------------------------------------
+// When a meta-distillation rewrite forces a full prefix re-render, the rendered
+// distilled prefix can exceed a compression stage's distilled budget. The
+// compression loop only trims distillations when stage.distLimit is finite
+// (stages 1 & 2 have distLimit=Infinity), so an over-budget prefix makes tryFit
+// return null at every stage → fallthrough to emergency Layer 4 — even though
+// the session has huge headroom (tokens << usable). The NEXT turn then drops to
+// Layer 0 (the sticky guard excludes lastLayer===4), the prefix VANISHES from
+// messages[0], and the prompt cache front-busts. Two fixes:
+//   (i)  budget-aware prefix trim: land at Layer <= 3 instead of 4
+//   (ii) sticky guard covers a prior Layer-4 turn (pinned to <= 3, never 4)
+describe("gradient — distilled-prefix front-bust (spurious Layer 4 + thrash)", () => {
+  const SID = "prefix-frontbust-sess";
+  const PID_KEY = "prefix-frontbust-project";
+  let projectId: string;
+  let createdCounter = 0;
+
+  function insertDistillation(observations: string, generation = 0): string {
+    const id = crypto.randomUUID();
+    db()
+      .query(
+        `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        projectId,
+        SID,
+        "",
+        "[]",
+        observations,
+        "[]",
+        generation,
+        Math.ceil(observations.length / 3),
+        0,
+        Date.now() + createdCounter++,
+      );
+    return id;
+  }
+
+  beforeAll(() => {
+    projectId = ensureProject(`/test/${PID_KEY}`);
+  });
+
+  beforeEach(() => {
+    resetCalibration(SID);
+    resetPrefixCache(SID);
+    resetRawWindowCache(SID);
+    resetDistillationSnapshot(SID);
+    createdCounter = 0;
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(projectId);
+    // usable ≈ 96K (context 100K - output 4K). distilledBudget = usable*0.25 ≈ 24K.
+    // We'll seed a distillation set whose rendered prefix exceeds 24K so stages
+    // 1 & 2 (distLimit=Infinity, no trim) overflow.
+    setModelLimits({ context: 100_000, output: 4_000 });
+    calibrate(0);
+  });
+
+  afterAll(() => {
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0);
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(projectId);
+  });
+
+  /** Seed N gen-0 distillations, each ~big tokens, so the full prefix is large. */
+  function seedLargeDistillations(count: number, charsEach: number) {
+    for (let i = 0; i < count; i++) {
+      insertDistillation(`Distillation ${i}: ${"o".repeat(charsEach)}`);
+    }
+  }
+
+  /**
+   * A conversation large enough to FORCE compression (Layer >= 1) but whose raw
+   * window comfortably fits a compressed stage's raw budget. This mirrors the
+   * production case: the session is in gradient mode (raw too big for Layer 0),
+   * and the distilled PREFIX size — not the raw — is what determines the layer.
+   * ~140 msgs × ~900 chars ≈ 140 × 225 tokens ≈ 31K raw > usable*0.55 stage cap?
+   * No — sized so raw fits stage budgets, leaving the prefix as the deciding factor.
+   */
+  function largeRawConversation(): LoreMessageWithParts[] {
+    const msgs = Array.from({ length: 80 }, (_, i) =>
+      makeMsg(
+        `fb-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "r".repeat(900),
+        SID,
+      ),
+    );
+    msgs.push(makeMsg("fb-final", "user", "next step", SID));
+    return msgs;
+  }
+
+  /**
+   * Drive the production trigger: a post-idle-compact turn (onIdleResume sets
+   * postIdleCompact → effectiveMinLayer>=1 AND a tight rawBudget=usable*0.2),
+   * combined with a freshly re-rendered, over-budget distilled prefix. On the
+   * current code the over-budget prefix fails tryFit at every stage (stages 1&2
+   * never trim — distLimit=Infinity) → fallthrough to emergency Layer 4.
+   */
+  function transformPostIdle(
+    messages: LoreMessageWithParts[],
+  ): ReturnType<typeof transform> {
+    setLastTurnAtForTest(SID, Date.now() - 10 * 60_000);
+    onIdleResume(SID, 5 * 60_000);
+    return transform({
+      messages,
+      projectPath: `/test/${PID_KEY}`,
+      sessionID: SID,
+    });
+  }
+
+  test("over-budget re-rendered prefix on a post-idle turn lands at Layer <= 3, NOT emergency Layer 4", () => {
+    // ~30 distillations × ~3000 chars ≈ 30 × 1000 tokens ≈ 30K rendered prefix,
+    // exceeding distilledBudget (usable*0.25 ≈ 24K) and the post-idle tight budget.
+    seedLargeDistillations(40, 12000);
+
+    const r = transformPostIdle(largeRawConversation());
+
+    // Current (buggy) code: stages 1 & 2 don't trim (distLimit=Infinity), stage 3
+    // trims to 5 but usable*0.15 may still overflow → fallthrough to Layer 4.
+    // Fixed: budget-aware trim keeps it compressed at Layer <= 3, prefix present.
+    expect(r.layer).toBeGreaterThanOrEqual(1);
+    expect(r.layer).toBeLessThanOrEqual(3);
+  });
+
+  test("an oversized distilled prefix never escalates to emergency Layer 4 (root cause of the thrash)", () => {
+    // A prefix far larger than any stage budget. Before the fix this fell
+    // through every stage (stages 1&2 never trim) → emergency Layer 4. With the
+    // budget-aware trim it must compress at Layer 1-3 instead — eliminating the
+    // spurious Layer 4 that (production: 23 of 24 L4 turns over 6 days) drove the
+    // 0<->4 front-bust oscillation. The single genuine context overflow is a
+    // separate, isolated path and is not exercised here.
+    seedLargeDistillations(40, 12000); // ~160K rendered — exceeds everything
+    const r1 = transformPostIdle(largeRawConversation());
+    expect(r1.layer).toBeGreaterThanOrEqual(1);
+    expect(r1.layer).toBeLessThanOrEqual(3);
+  });
+
+  test("keeps the distilled prefix PRESENT across consecutive compressed turns (no 0-drop thrash)", () => {
+    // The oscillation was: compressed turn (prefix present) -> next turn drops
+    // to Layer 0 (prefix vanishes) -> bust. With spurious Layer 4 gone, the
+    // session stays at Layer 1-3 where the existing sticky guard holds the floor.
+    seedLargeDistillations(40, 12000);
+    const r1 = transformPostIdle(largeRawConversation());
+    expect(r1.layer).toBeGreaterThanOrEqual(1);
+    calibrate(estimateMessages(r1.messages), SID, r1.messages.length);
+
+    // A subsequent steady-state turn (still large) must remain compressed —
+    // the prefix stays present at messages[0]/[1], so the front does not bust.
+    const r2 = transform({
+      messages: [
+        ...largeRawConversation(),
+        makeMsg("fb-step", "assistant", "more work", SID),
+      ],
+      projectPath: `/test/${PID_KEY}`,
+      sessionID: SID,
+    });
+    expect(r2.layer).toBeGreaterThanOrEqual(1);
+  });
+
+  test("steady warm turn (unchanged budget) keeps the distilled prefix byte-identical (no trim-induced bust)", () => {
+    // A prefix that COMFORTABLY fits the budget. On a steady warm turn the
+    // budget-aware trim must NOT fire (the cached prefix already fits), so
+    // messages[0]/[1] stay byte-identical and the prompt cache is preserved.
+    seedLargeDistillations(2, 600); // small prefix, well under distilledBudget
+    const conv = largeRawConversation();
+    // Post-idle forces compression (Layer >= 1) so the prefix is injected.
+    const r1 = transformPostIdle(conv);
+    expect(r1.layer).toBeGreaterThanOrEqual(1);
+    calibrate(estimateMessages(r1.messages), SID, r1.messages.length);
+
+    const prefix1 = JSON.stringify([r1.messages[0], r1.messages[1]]);
+
+    // Next steady-state turn, same budget — the prefix must be byte-identical.
+    const r2 = transform({
+      messages: [...conv, makeMsg("warm-step", "assistant", "ok", SID)],
+      projectPath: `/test/${PID_KEY}`,
+      sessionID: SID,
+    });
+    expect(r2.layer).toBeGreaterThanOrEqual(1);
+    const prefix2 = JSON.stringify([r2.messages[0], r2.messages[1]]);
+    expect(prefix2).toBe(prefix1);
+  });
+
+  test("RELEASES to Layer 0 after a genuine compaction (prefix-floor must not trap a small session)", () => {
+    seedLargeDistillations(40, 12000);
+    const r1 = transformPostIdle(largeRawConversation());
+    expect(r1.layer).toBeGreaterThanOrEqual(1);
+    calibrate(estimateMessages(r1.messages), SID, r1.messages.length);
+
+    // Genuine compaction: tiny conversation + tiny prefix → must sit at Layer 0.
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(projectId);
+    seedLargeDistillations(1, 200);
+    const r2 = transform({
+      messages: [
+        makeMsg("c-1", "user", "fresh", SID),
+        makeMsg("c-2", "assistant", "ok", SID),
+        makeMsg("c-3", "user", "go", SID),
+      ],
+      projectPath: `/test/${PID_KEY}`,
+      sessionID: SID,
+    });
+    expect(r2.layer).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Content-aware deduplication tests
 // ---------------------------------------------------------------------------
 
