@@ -37,8 +37,53 @@ supabase db push
 Migrations are plain SQL, applied in filename order:
 
 - `0001_accounts.sql` — `public.profiles` (one row per auth user) + RLS +
-  auto-provision trigger on `auth.users` insert. **Accounts only**; the sync
-  tables (knowledge / entities / …) land in a later migration.
+  auto-provision trigger on `auth.users` insert.
+- `0002_sync_basic.sql` — Basic-tier sync tables (`knowledge`, `entities`,
+  `entity_aliases`, `entity_relations`, `knowledge_entity_refs`) mirroring the
+  local SQLite schema, with `owner_user_id`/`content_hash`/`revision`/
+  `is_deleted`/server-stamped `updated_at`, RLS scoped to the owner, and
+  per-owner+updated_at pull-cursor indexes.
+- `0003_sync_limits.sql` — anti-abuse for the direct-PostgREST write model.
+  Clients write to the REST API directly, so limits are enforced **in-DB**
+  (RLS only governs ownership, not volume/size):
+  - `profiles.tier` + a tunable `plan_limits(tier, table_name → max_rows)` table.
+  - `BEFORE INSERT` quota trigger per table (free: knowledge ≤ 500, entities ≤
+    30, aliases ≤ 300, relations ≤ 300, refs ≤ 2000; pro generous; null =
+    unlimited). `SECURITY DEFINER` so it reads tier/limits past RLS.
+  - `CHECK` constraints capping per-field size (title ≤ 512, content ≤ 8192, …).
+  Per-request RATE limiting is intentionally deferred to an edge layer / hosted
+  backend (paid tiers); these caps bound storage + cardinality + payload, which
+  is what stops "sync my entire history" on the free tier. Distillations and raw
+  conversation logs are paid-tier-only and are NOT in the Basic synced set.
+- `0004_sync_hardening.sql` — security hardening (adversarial-review fixes):
+  - **`profiles.tier` is not user-writable** — column-scoped `GRANT UPDATE
+    (display_name, github_login, email)` (excludes `tier`) + a BEFORE UPDATE
+    trigger rejecting any non-service-role `tier` change. (Otherwise a user
+    could `PATCH /profiles {tier:'pro'}` and defeat all quotas.)
+  - **Every user-controlled TEXT column is size-capped** (not just the obvious
+    ones) — row-count caps alone don't bound storage; an uncapped column let a
+    30-row user store 30×~1GB blobs.
+  - **DML `GRANT`s to `authenticated`** so PostgREST actually works (RLS is the
+    2nd gate; without a table grant every call is denied). Landed in the SAME
+    migration as the tier lock so write-access never precedes the guard.
+  - **Quota counts LIVE rows only and skips when the PK exists**, so an at-cap
+    user can still UPDATE / soft-delete (incl. the deletes that free quota) via
+    the `ON CONFLICT DO UPDATE` write path.
+
+Known residual (documented, acceptable for free-tier abuse-prevention): the
+quota check is `count(*)` then compare with no lock, so concurrent inserts can
+overshoot a cap by ~N per burst (soft cap, not hard). Add a per-(user,table)
+advisory lock if a hard cap is ever required.
+
+## Conflict resolution (last-writer-to-remote-wins)
+
+The gateway syncs push-then-pull. When the same row was changed on two machines
+before either pulled, the engine resolves **remote-wins**: the row already on the
+server is kept, and the local edit is overwritten. To avoid silent data loss, the
+discarded local row is preserved in the local `sync_conflicts` table
+(`local_content` = JSON of the overwritten row), so a conflicting edit is
+recoverable rather than destroyed. This is a deliberate, documented policy for the
+Basic tier; richer merge strategies can come later.
 
 ## Dashboard configuration (one-time, not in code)
 
