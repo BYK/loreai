@@ -1,6 +1,6 @@
 import { Database } from "#db/driver";
 import { join, dirname } from "node:path";
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 import { getGitRemote } from "./git";
 import { isHostedMode } from "./hosted";
 import { dataDir } from "./data-dir";
@@ -1101,6 +1101,51 @@ const MIGRATIONS: string[] = [
   CREATE INDEX IF NOT EXISTS idx_session_prompt_deltas_project
     ON session_prompt_deltas (project_id);
   `,
+  `
+  -- Version 43: Logical-sync change tracking (Basic tier — knowledge + entity graph).
+  --
+  -- The outbox is a monotonic append-only queue of local row changes to push to
+  -- the remote. The CAPTURE TRIGGERS are NOT defined here — they are created as
+  -- per-connection TEMP triggers in installSyncCapture() (db()). This is
+  -- deliberate: apply-suppression must be CONNECTION-scoped (the gateway and a
+  -- 'lore' CLI share one DB file; a shared persisted "applying" flag would let
+  -- one process suppress the other's legitimate captures -> silent data loss).
+  -- A main-schema trigger cannot reference a TEMP table, so temp triggers (which
+  -- can) gate on a connection-local temp table instead. content_hash / revision
+  -- are computed in JS by the sync engine (SQLite has no hash function) and
+  -- tracked per-row in sync_state. row_id for the composite-key join table
+  -- knowledge_entity_refs is knowledge_id || char(31) || entity_id.
+
+  CREATE TABLE IF NOT EXISTS sync_outbox (
+    seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+    table_name TEXT NOT NULL,
+    row_id     TEXT NOT NULL,
+    op         TEXT NOT NULL,        -- 'upsert' | 'delete'
+    changed_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_sync_outbox_table_row
+    ON sync_outbox (table_name, row_id);
+  CREATE INDEX IF NOT EXISTS idx_sync_outbox_table_seq
+    ON sync_outbox (table_name, seq);
+
+  CREATE TABLE IF NOT EXISTS sync_state (
+    table_name        TEXT NOT NULL,
+    row_id            TEXT NOT NULL,
+    content_hash      TEXT,          -- hash of the row's semantic content at last sync
+    revision          INTEGER NOT NULL DEFAULT 0,
+    remote_updated_at TEXT,          -- remote server timestamp last applied (per-row pull cursor)
+    PRIMARY KEY (table_name, row_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS sync_conflicts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    table_name    TEXT NOT NULL,
+    row_id        TEXT NOT NULL,
+    detected_at   INTEGER NOT NULL,
+    resolution    TEXT,
+    local_content TEXT   -- JSON of the discarded local row (recoverable after LWW)
+  );
+  `,
 ];
 
 /**
@@ -1145,6 +1190,15 @@ export function db(): Database {
     }
     const dir = dataDir();
     mkdirSync(dir, { recursive: true });
+    // Owner-only data dir: the DB (and its -wal/-shm sidecars, which hold
+    // recent un-checkpointed writes incl. the auth session) live here and
+    // contain bearer credentials. Tightening the dir to 0700 closes the
+    // practical window even before the per-file chmod below.
+    try {
+      chmodSync(dir, 0o700);
+    } catch {
+      // non-POSIX filesystem / platform
+    }
     path = join(dir, "lore.db");
   }
   // Both `bun:sqlite` and `node:sqlite` create the file by default if it doesn't
@@ -1157,6 +1211,15 @@ export function db(): Database {
   // module-level singleton must remain undefined so the next db() call
   // retries initialization instead of returning an un-migrated handle.
   const database = new Database(path);
+  // The DB stores bearer credentials (the Supabase auth session / refresh
+  // token in team_config) — make it owner-only so another local user/process
+  // can't read it. Best-effort: chmod is a no-op / may throw on Windows & some
+  // FUSE mounts, which is fine (those don't honor POSIX modes anyway).
+  try {
+    chmodSync(path, 0o600);
+  } catch {
+    // ignore — non-POSIX filesystem / platform
+  }
   database.exec("PRAGMA journal_mode = WAL");
   database.exec("PRAGMA foreign_keys = ON");
   // Retry for up to 5s when another connection holds the write lock (e.g.
@@ -1167,8 +1230,97 @@ export function db(): Database {
   // instead of accumulating a free-page list that bloats the file.
   database.exec("PRAGMA auto_vacuum = INCREMENTAL");
   migrate(database);
+  installSyncCapture(database);
   instance = database;
   return instance;
+}
+
+// ---------------------------------------------------------------------------
+// Per-connection sync change-capture (logical-sync engine, v43)
+// ---------------------------------------------------------------------------
+
+/**
+ * Install this connection's sync change-capture: a connection-local TEMP table
+ * `_sync_applying` plus TEMP triggers that enqueue (table, row_id, op) into
+ * `sync_outbox` on every INSERT/UPDATE/DELETE of a synced table.
+ *
+ * Why per-connection TEMP (not persistent triggers + a shared flag): the
+ * gateway and a `lore` CLI invocation share one DB file. Apply-suppression must
+ * be CONNECTION-scoped — a shared persisted "applying" flag would let one
+ * process suppress the other process's legitimate captures, silently losing
+ * changes from the push queue. A main-schema trigger cannot reference a TEMP
+ * table; a TEMP trigger can. Capture is gated by the shared user setting
+ * `team_config 'sync.enabled'='1'` AND an empty `_sync_applying` (this
+ * connection is not mid-apply). Row count in `_sync_applying` is a re-entrant
+ * depth counter (see `withSyncApplying`).
+ *
+ * Idempotent (`IF NOT EXISTS`); runs on every `db()` init so it survives a
+ * dropped trigger (unlike `recoverMissingObjects`, which only restores tables).
+ */
+function installSyncCapture(database: Database) {
+  database.exec(
+    "CREATE TEMP TABLE IF NOT EXISTS _sync_applying (marker INTEGER)",
+  );
+  const gate =
+    "(SELECT value FROM team_config WHERE key='sync.enabled')='1' " +
+    "AND NOT EXISTS (SELECT 1 FROM temp._sync_applying)";
+  const ts = "CAST(strftime('%s','now') AS INTEGER)*1000";
+  const ops = [
+    ["INSERT", "ins", "new", "upsert"],
+    ["UPDATE", "upd", "new", "upsert"],
+    ["DELETE", "del", "old", "delete"],
+  ] as const;
+  let sql = "";
+  for (const t of [
+    "knowledge",
+    "entities",
+    "entity_aliases",
+    "entity_relations",
+  ]) {
+    for (const [evt, suffix, ref, op] of ops) {
+      sql += `
+        CREATE TEMP TRIGGER IF NOT EXISTS ${t}_outbox_${suffix}
+        AFTER ${evt} ON ${t} WHEN (${gate})
+        BEGIN
+          INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
+          VALUES ('${t}', ${ref}.id, '${op}', ${ts});
+        END;`;
+    }
+  }
+  // Join table: composite row_id (knowledge_id || char(31) || entity_id),
+  // insert/delete only (no updatable columns).
+  sql += `
+    CREATE TEMP TRIGGER IF NOT EXISTS knowledge_entity_refs_outbox_ins
+    AFTER INSERT ON knowledge_entity_refs WHEN (${gate})
+    BEGIN
+      INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
+      VALUES ('knowledge_entity_refs', new.knowledge_id || char(31) || new.entity_id, 'upsert', ${ts});
+    END;
+    CREATE TEMP TRIGGER IF NOT EXISTS knowledge_entity_refs_outbox_del
+    AFTER DELETE ON knowledge_entity_refs WHEN (${gate})
+    BEGIN
+      INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
+      VALUES ('knowledge_entity_refs', old.knowledge_id || char(31) || old.entity_id, 'delete', ${ts});
+    END;`;
+  database.exec(sql);
+}
+
+/**
+ * Run `fn` with THIS connection's sync change-capture suppressed, so applying
+ * pulled remote rows is not re-enqueued for push (push<->pull echo guard).
+ * Re-entrant: the suppression is a depth counter (row count in the per-connection
+ * `_sync_applying` temp table), so nested calls don't prematurely re-enable
+ * capture, and a failing `fn` still decrements exactly one level.
+ */
+export function withSyncApplying<T>(fn: () => T): T {
+  db().exec("INSERT INTO temp._sync_applying (marker) VALUES (1)");
+  try {
+    return fn();
+  } finally {
+    db().exec(
+      "DELETE FROM temp._sync_applying WHERE rowid = (SELECT MAX(rowid) FROM temp._sync_applying)",
+    );
+  }
 }
 
 // Index of the migration that performs a one-time VACUUM.
@@ -1363,6 +1515,37 @@ function recoverMissingObjects(database: Database) {
     );
     CREATE INDEX IF NOT EXISTS idx_knowledge_tombstones_project
       ON knowledge_tombstones (project_id);
+    -- Sync change-tracking (v43). NOTE: the per-table outbox TRIGGERS are NOT
+    -- recreated here (same limitation as the FTS triggers) — only the tables.
+    -- A missing trigger means changes aren't captured until the next full
+    -- reconcile, which the sync engine performs on enable.
+    CREATE TABLE IF NOT EXISTS sync_outbox (
+      seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+      table_name TEXT NOT NULL,
+      row_id     TEXT NOT NULL,
+      op         TEXT NOT NULL,
+      changed_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_sync_outbox_table_row
+      ON sync_outbox (table_name, row_id);
+    CREATE INDEX IF NOT EXISTS idx_sync_outbox_table_seq
+      ON sync_outbox (table_name, seq);
+    CREATE TABLE IF NOT EXISTS sync_state (
+      table_name        TEXT NOT NULL,
+      row_id            TEXT NOT NULL,
+      content_hash      TEXT,
+      revision          INTEGER NOT NULL DEFAULT 0,
+      remote_updated_at TEXT,
+      PRIMARY KEY (table_name, row_id)
+    );
+    CREATE TABLE IF NOT EXISTS sync_conflicts (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      table_name    TEXT NOT NULL,
+      row_id        TEXT NOT NULL,
+      detected_at   INTEGER NOT NULL,
+      resolution    TEXT,
+      local_content TEXT
+    );
   `);
 
   // Recover missing columns from partial migration runs.
