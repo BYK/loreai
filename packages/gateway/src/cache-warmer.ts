@@ -125,6 +125,19 @@ export const MIN_WARMUPS_FOR_ROI_CHECK = 5;
  *  1 in 4 warmups must result in a confirmed user return. */
 export const MIN_SESSION_HIT_RATE = 0.25;
 
+/** Minimum cache-WRITE efficiency (cacheRead / (cacheRead + cacheWrite), from
+ *  each warmup's own response) to continue warming. Below this, the warmup is
+ *  writing far more than it reuses — e.g. a large, actively-growing session
+ *  whose full-body warm refreshes only the ~37K stable prefix (efficiency ~6%)
+ *  while writing ~550K every time. Distinct from MIN_SESSION_HIT_RATE, which
+ *  measures user-return probability, not write efficiency. */
+export const MIN_WRITE_EFFICIENCY = 0.2;
+/** Minimum number of recorded warmup-efficiency samples before the
+ *  write-efficiency gate engages (avoid acting on one noisy sample). */
+export const MIN_WARMUPS_FOR_EFFICIENCY_CHECK = 3;
+/** Rolling window size for per-session warmup write-efficiency samples. */
+export const WRITE_EFFICIENCY_WINDOW = 5;
+
 /** Minimum total input tokens (input + cache_read + cache_creation) before
  *  warming is eligible. Below this threshold the absolute savings per hit
  *  are too small to justify the risk of wasted warmups. At 50K tokens with
@@ -839,6 +852,34 @@ export function resolveProfile(
  *  - Initial commitment (first TTL window): full ROI analysis
  *  - Continuation (subsequent windows): check break-even cap + re-evaluate
  */
+/**
+ * Chronically-low cache-WRITE efficiency guard. Returns true when the session
+ * has enough warmup-efficiency samples AND their average is below
+ * MIN_WRITE_EFFICIENCY — i.e. the full-body warm keeps re-writing a prefix that
+ * won't survive to the next real turn (large/growing session), wasting spend
+ * the return-rate guard cannot detect. Returns false (do not block) when there
+ * are too few samples to judge.
+ */
+export function warmupWriteEfficiencyTooLow(
+  warmup: WarmupState | undefined,
+): boolean {
+  const samples = warmup?.writeEfficiencySamples ?? [];
+  if (samples.length < MIN_WARMUPS_FOR_EFFICIENCY_CHECK) return false;
+  const avg = samples.reduce((a, b) => a + b, 0) / samples.length;
+  return avg < MIN_WRITE_EFFICIENCY;
+}
+
+/** Human-readable dashboard reason for the write-efficiency gate. */
+export function warmupWriteEfficiencyReason(
+  warmup: WarmupState | undefined,
+): string {
+  const samples = warmup?.writeEfficiencySamples ?? [];
+  const avg = samples.length
+    ? (samples.reduce((a, b) => a + b, 0) / samples.length) * 100
+    : 0;
+  return `Write efficiency too low (${avg.toFixed(0)}% < ${(MIN_WRITE_EFFICIENCY * 100).toFixed(0)}%) — full-body warm refreshes only a small stable prefix`;
+}
+
 export function shouldWarm(
   state: SessionState,
   profile: CacheWarmingProfile,
@@ -918,6 +959,20 @@ export function shouldWarm(
     );
     const cyclesSpent = state.warmup?.warmupCount ?? 0;
 
+    // Write-efficiency guard: stop warming a large/growing session whose
+    // full-body warms refresh only a tiny stable prefix (chronically low
+    // cacheRead/(read+write)). Independent of the return-rate guard above.
+    // 🔴 Gated on `cyclesSpent >= 1`: the FIRST warmup of every break
+    // (cyclesSpent === 0) must ALWAYS be funded — it is the irreducible probe
+    // that REFRESHES writeEfficiencySamples. writeEfficiencySamples is lifetime/
+    // durable (not reset per-break, persists across restart), so blocking the
+    // first probe on stale samples would permanently lock out a session whose
+    // prefix has since re-stabilized (it could never record a fresh, higher
+    // sample). Matches the evidence-gate invariant below.
+    if (cyclesSpent >= 1 && warmupWriteEfficiencyTooLow(state.warmup)) {
+      return false;
+    }
+
     // 🔴 Evidence gate (Bug C): ALWAYS fund the first warmup of a break
     // (cyclesSpent === 0 — the probe that learns if this slow tool returns
     // within TTL), but NEVER fund a second-or-later cycle for a session that
@@ -975,6 +1030,10 @@ export function shouldWarm(
     const hitRate = (state.warmup?.warmupHits ?? 0) / lifetime;
     if (hitRate < MIN_SESSION_HIT_RATE) return false;
   }
+  // Write-efficiency guard: stop warming a large/growing session whose
+  // full-body warms refresh only a tiny stable prefix (chronically low
+  // cacheRead/(read+write)). Independent of the return-rate guard above.
+  if (warmupWriteEfficiencyTooLow(state.warmup)) return false;
 
   // Compute commitment model signals
   const survivalAtIdle = survivalFunction(blendedHist, elapsed);
@@ -1288,6 +1347,13 @@ export function computeWarmingSnapshot(
         ).toFixed(0);
         notWarmingReason = `Tool call: session hit rate too low (${hitRate}% < ${(MIN_SESSION_HIT_RATE * 100).toFixed(0)}%)`;
       } else if (
+        // Mirror shouldWarm: the efficiency gate skips the first probe of a
+        // break (cyclesSpent===0), so the snapshot must too.
+        (state.warmup?.warmupCount ?? 0) >= 1 &&
+        warmupWriteEfficiencyTooLow(state.warmup)
+      ) {
+        notWarmingReason = warmupWriteEfficiencyReason(state.warmup);
+      } else if (
         (state.warmup?.warmupCount ?? 0) >= 1 &&
         (state.warmup?.warmupHits ?? 0) < TOOL_CALL_MIN_HITS_FOR_CONTINUATION
       ) {
@@ -1332,6 +1398,8 @@ export function computeWarmingSnapshot(
         100
       ).toFixed(0);
       notWarmingReason = `Session hit rate too low (${hitRate}% < ${(MIN_SESSION_HIT_RATE * 100).toFixed(0)}% after ${state.warmup?.totalWarmups} warmups)`;
+    } else if (warmupWriteEfficiencyTooLow(state.warmup)) {
+      notWarmingReason = warmupWriteEfficiencyReason(state.warmup);
     } else if (isFirstWindow && idleMs < ttlMs - warmupMarginMs) {
       notWarmingReason = "Cache still fresh";
     } else if (pReturns <= thresholdVal) {
@@ -1626,6 +1694,22 @@ export async function executeWarmup(
     // session as the warmup's payer (see WarmupState invariant), gating hit
     // attribution to prevent phantom savings.
     state.warmup.lastWarmupRefreshTokens = cacheReadTokens;
+
+    // Record this warmup's cache-WRITE efficiency = read / (read + write) into
+    // a bounded rolling window. A chronically low average means the full-body
+    // warm is mostly re-writing a prefix that won't survive to the next real
+    // turn (large/growing session); shouldWarm uses it to stop wasteful warming.
+    // Skip when the denominator is 0 (uncached/error — no signal).
+    if (cacheReadTokens + cacheCreationTokens > 0) {
+      const efficiency =
+        cacheReadTokens / (cacheReadTokens + cacheCreationTokens);
+      const samples = state.warmup.writeEfficiencySamples ?? [];
+      samples.push(efficiency);
+      if (samples.length > WRITE_EFFICIENCY_WINDOW) {
+        samples.splice(0, samples.length - WRITE_EFFICIENCY_WINDOW);
+      }
+      state.warmup.writeEfficiencySamples = samples;
+    }
 
     // Check circuit breaker
     checkCircuitBreaker(result);

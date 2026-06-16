@@ -9,6 +9,10 @@ import {
   buildAnthropicProfile,
   resolveProfile,
   shouldWarm,
+  warmupWriteEfficiencyTooLow,
+  MIN_WRITE_EFFICIENCY,
+  MIN_WARMUPS_FOR_EFFICIENCY_CHECK,
+  WRITE_EFFICIENCY_WINDOW,
   checkCircuitBreaker,
   isCircuitBreakerTripped,
   isWarmupAuthDisabled,
@@ -585,6 +589,57 @@ describe("circuit breaker", () => {
 // shouldWarm decision function
 // ---------------------------------------------------------------------------
 
+describe("warmupWriteEfficiencyTooLow", () => {
+  test("false when fewer than the minimum samples (insufficient evidence)", () => {
+    const samples = Array(MIN_WARMUPS_FOR_EFFICIENCY_CHECK - 1).fill(0.01);
+    expect(
+      warmupWriteEfficiencyTooLow({
+        lastWarmupAt: 0,
+        warmupCount: 0,
+        totalWarmups: samples.length,
+        warmupHits: 0,
+        disabled: false,
+        writeEfficiencySamples: samples,
+      }),
+    ).toBe(false);
+  });
+
+  test("true when avg efficiency is below the threshold over enough samples", () => {
+    expect(
+      warmupWriteEfficiencyTooLow({
+        lastWarmupAt: 0,
+        warmupCount: 0,
+        totalWarmups: 3,
+        warmupHits: 0,
+        disabled: false,
+        writeEfficiencySamples: [0.06, 0.06, 0.06],
+      }),
+    ).toBe(true);
+  });
+
+  test("false when avg efficiency is at/above the threshold", () => {
+    const atThreshold = MIN_WRITE_EFFICIENCY + 0.01;
+    expect(
+      warmupWriteEfficiencyTooLow({
+        lastWarmupAt: 0,
+        warmupCount: 0,
+        totalWarmups: 3,
+        warmupHits: 0,
+        disabled: false,
+        writeEfficiencySamples: [atThreshold, atThreshold, atThreshold],
+      }),
+    ).toBe(false);
+  });
+
+  test("false for undefined warmup / no samples", () => {
+    expect(warmupWriteEfficiencyTooLow(undefined)).toBe(false);
+  });
+
+  test("window size constant is positive (rolling window bounded)", () => {
+    expect(WRITE_EFFICIENCY_WINDOW).toBeGreaterThan(0);
+  });
+});
+
 describe("shouldWarm", () => {
   beforeEach(() => {
     _resetForTest();
@@ -678,6 +733,62 @@ describe("shouldWarm", () => {
     for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
 
     expect(shouldWarm(state, profile, hist, now)).toBe(false);
+  });
+
+  test("returns FALSE when write-efficiency is chronically low, even with a perfect return rate", () => {
+    // Regression: a large/growing session reliably returns (return-rate ~1.0,
+    // passes MIN_SESSION_HIT_RATE) but each full-body warm refreshes only the
+    // ~37K stable prefix (efficiency ~6%) while writing ~550K — pure waste. The
+    // return-rate guard cannot see this; the write-efficiency guard must block.
+    const now = Date.now();
+    const state = makeSessionState({
+      lastRequestTime: now - 270_000,
+      warmup: {
+        lastWarmupAt: 0,
+        warmupCount: 0,
+        totalWarmups: 10,
+        warmupHits: 10, // perfect RETURN rate — return-guard would pass
+        disabled: false,
+        writeEfficiencySamples: [0.06, 0.06, 0.06, 0.08, 0.06], // ~6% WRITE efficiency
+      },
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+  });
+
+  test("returns TRUE when write-efficiency is healthy (gate does not over-block)", () => {
+    const now = Date.now();
+    const state = makeSessionState({
+      lastRequestTime: now - 270_000,
+      warmup: {
+        lastWarmupAt: 0,
+        warmupCount: 0,
+        totalWarmups: 10,
+        warmupHits: 10,
+        disabled: false,
+        writeEfficiencySamples: [0.9, 0.85, 0.95, 0.88, 0.92], // healthy
+      },
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(true);
   });
 
   test("returns false when session has too few turns", () => {
@@ -1854,6 +1965,46 @@ describe("shouldWarm tool-call warming", () => {
     expect(shouldWarm(state, profile, hist, now)).toBe(false);
   });
 
+  test("ALWAYS funds the FIRST warmup of a break (cyclesSpent=0) even when write-efficiency is chronically low", () => {
+    // 🔴 The first probe of every break refreshes writeEfficiencySamples (which
+    // is lifetime/durable). Blocking it on stale low samples would permanently
+    // lock the session out (it could never record a fresh sample). The
+    // efficiency gate must be skipped when warmupCount===0.
+    const now = Date.now();
+    const state = makeToolCallState({
+      warmup: {
+        lastWarmupAt: 0,
+        warmupCount: 0, // first probe of THIS break
+        totalWarmups: 10,
+        warmupHits: 10,
+        disabled: false,
+        writeEfficiencySamples: [0.06, 0.06, 0.06, 0.06, 0.06], // chronically low
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(true);
+  });
+
+  test("BLOCKS a continuation warmup (cyclesSpent>=1) when write-efficiency is chronically low", () => {
+    const now = Date.now();
+    const state = makeToolCallState({
+      warmup: {
+        lastWarmupAt: 0,
+        warmupCount: 1, // continuation within the break
+        totalWarmups: 10,
+        warmupHits: 10,
+        disabled: false,
+        writeEfficiencySamples: [0.06, 0.06, 0.06, 0.06, 0.06],
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+  });
+
   test("returns false after MAX_TOOL_CALL_WARMING_MS exceeded", () => {
     const now = Date.now();
     // 35 min — past 30 min cap, in warmup margin of some TTL window
@@ -2115,6 +2266,24 @@ describe("shouldWarm tool-call warming", () => {
     const snap = computeWarmingSnapshot(state, now);
     expect(snap.shouldWarmNow).toBe(true);
     expect(snap.notWarmingReason).toBeNull();
+  });
+
+  test("snapshot reports the write-efficiency reason when chronically low (continuation)", () => {
+    const now = Date.now();
+    const state = makeToolCallState({
+      lastRequestTime: now - 270_000,
+      warmup: {
+        lastWarmupAt: now - 270_000, // past cooldown
+        warmupCount: 1, // continuation — past the first-probe carve-out
+        totalWarmups: 10,
+        warmupHits: 10, // clears the return-rate guard
+        disabled: false,
+        writeEfficiencySamples: [0.06, 0.06, 0.06, 0.06, 0.06],
+      },
+    });
+    const snap = computeWarmingSnapshot(state, now);
+    expect(snap.shouldWarmNow).toBe(false);
+    expect(snap.notWarmingReason).toContain("Write efficiency too low");
   });
 
   test("Bug C: snapshot falls through to cycle-cap reason past the gate branch", () => {

@@ -1,4 +1,5 @@
-import { describe, test, expect } from "vitest";
+import { describe, test, expect, vi, afterEach } from "vitest";
+import { log } from "@loreai/core";
 import {
   compressBody,
   decompressBody,
@@ -303,6 +304,64 @@ describe("inferDivergenceReason", () => {
 // ---------------------------------------------------------------------------
 // analyzeCacheTurn — integration
 // ---------------------------------------------------------------------------
+
+describe("analyzeCacheTurn — early-divergence log noise gating", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  // Two bodies that diverge at an EARLY message (mid-conversation message
+  // change), so isMidConversationMessageChange is true. The only difference
+  // between the two scenarios below is the API cache hit-rate.
+  const bodyA = JSON.stringify({
+    model: "opus",
+    messages: [
+      { role: "user", content: "first message original" },
+      { role: "assistant", content: "reply one" },
+      { role: "user", content: "second" },
+    ],
+  });
+  const bodyB = JSON.stringify({
+    model: "opus",
+    messages: [
+      { role: "user", content: "first message CHANGED EARLY" },
+      { role: "assistant", content: "reply one" },
+      { role: "user", content: "second" },
+    ],
+  });
+
+  function earlyDivergenceLogs(infoSpy: ReturnType<typeof vi.spyOn>): number {
+    return infoSpy.mock.calls.filter((c: unknown[]) =>
+      String(c[0]).includes("early divergence at byte"),
+    ).length;
+  }
+
+  test("does NOT log the divergence snippet at INFO when the cache hit-rate is high (normal tail growth)", () => {
+    const analytics = makeCacheAnalytics();
+    const infoSpy = vi.spyOn(log, "info").mockImplementation(() => {});
+    // high hit-rate: cacheRead dominates → ~99%
+    const highHit = makeUsage({
+      inputTokens: 2,
+      cacheReadInputTokens: 100_000,
+      cacheCreationInputTokens: 500,
+    });
+    analyzeCacheTurn(analytics, bodyA, highHit);
+    analyzeCacheTurn(analytics, bodyB, highHit);
+    expect(earlyDivergenceLogs(infoSpy)).toBe(0);
+  });
+
+  test("DOES log the divergence snippet at INFO when the cache hit-rate is low (real bust)", () => {
+    const analytics = makeCacheAnalytics();
+    const infoSpy = vi.spyOn(log, "info").mockImplementation(() => {});
+    // low hit-rate: cacheCreation dominates → big bust
+    const lowHit = makeUsage({
+      inputTokens: 2,
+      cacheReadInputTokens: 5_000,
+      cacheCreationInputTokens: 200_000,
+    });
+    analyzeCacheTurn(analytics, bodyA, lowHit);
+    analyzeCacheTurn(analytics, bodyB, lowHit);
+    expect(earlyDivergenceLogs(infoSpy)).toBeGreaterThan(0);
+  });
+});
 
 describe("analyzeCacheTurn", () => {
   test("first turn — no comparison, stores body", () => {

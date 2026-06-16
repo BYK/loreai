@@ -106,6 +106,10 @@ const CACHE_CONTROL_PATTERN =
   /,?"cache_control":\{[^{}]*"type":"ephemeral"[^{}]*\}/g;
 const CACHE_CONTROL_REPLACEMENT = "";
 
+/** API cache hit-rate below which an "early divergence" is logged at INFO (a
+ *  real bust worth surfacing) rather than DEBUG (normal tail-growth noise). */
+const LOW_HIT_FOR_DIVERGENCE_LOG = 0.5;
+
 export function normalizeBodyForComparison(body: string): string {
   return body
     .replace(CCH_PATTERN, CCH_REPLACEMENT)
@@ -433,7 +437,18 @@ export function analyzeCacheTurn(
       const isMidConversationMessageChange =
         /^messages\[\d+\]/.test(divergencePoint) &&
         !divergenceReason.startsWith("new conversation message");
-      if (prefixMatchPercent < 0.05 || isMidConversationMessageChange) {
+      // Most mid-conversation divergences are NORMAL tail growth: the previous
+      // turn's body simply ended where this turn appends new messages, and the
+      // API still reports a near-100% cache hit. Only surface the snippet when
+      // it correlates with an ACTUAL cache bust (low hit-rate) or a genuine
+      // early prefix divergence; the high-hit tail-growth case is pure noise
+      // (the logger has no debug level, so we suppress it rather than spam INFO).
+      const isRealBust =
+        cacheHitRate < LOW_HIT_FOR_DIVERGENCE_LOG || prefixMatchPercent < 0.05;
+      if (
+        (prefixMatchPercent < 0.05 || isMidConversationMessageChange) &&
+        isRealBust
+      ) {
         const start = Math.max(0, prefixMatchBytes - 20);
         const end = prefixMatchBytes + 80;
         prevSnippet = prevBody.slice(start, Math.min(prevLength, end));

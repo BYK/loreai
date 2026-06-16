@@ -20,7 +20,11 @@ vi.mock("../src/fetch", () => ({
     globalThis.fetch(...args),
 }));
 
-import { executeWarmup, buildAnthropicProfile } from "../src/cache-warmer";
+import {
+  executeWarmup,
+  buildAnthropicProfile,
+  WRITE_EFFICIENCY_WINDOW,
+} from "../src/cache-warmer";
 import { setSessionAuth, _resetAuthForTest } from "../src/auth";
 import { clearAllCosts } from "../src/cost-tracker";
 import { compressBody } from "../src/cache-analytics";
@@ -144,5 +148,72 @@ describe("executeWarmup → lastWarmupRefreshTokens (Bug B producer)", () => {
     // refresh credit must be 0 so creditWarmupHit later denies a bogus hit.
     expect(state.warmup?.lastWarmupRefreshTokens).toBe(0);
     expect(state.warmup?.totalWarmups).toBe(1);
+  });
+});
+
+describe("executeWarmup → writeEfficiencySamples (efficiency gate producer)", () => {
+  test("records read/(read+write) efficiency on a partial warmup", async () => {
+    globalThis.fetch = fetchReturningUsage({
+      input_tokens: 5,
+      cache_read_input_tokens: 30_000,
+      cache_creation_input_tokens: 470_000, // 30k/(30k+470k) = 0.06
+    }) as unknown as typeof fetch;
+
+    const state = makeState();
+    const profile = buildAnthropicProfile(MODEL, "5m");
+    await executeWarmup(state, profile);
+
+    const samples = state.warmup?.writeEfficiencySamples ?? [];
+    expect(samples).toHaveLength(1);
+    expect(samples[0]).toBeCloseTo(0.06, 2);
+  });
+
+  test("records 1.0 on a perfect refresh (cacheWrite=0) — keeps the average healthy", async () => {
+    globalThis.fetch = fetchReturningUsage({
+      input_tokens: 5,
+      cache_read_input_tokens: 168_000,
+      cache_creation_input_tokens: 0,
+    }) as unknown as typeof fetch;
+
+    const state = makeState();
+    const profile = buildAnthropicProfile(MODEL, "5m");
+    await executeWarmup(state, profile);
+
+    const samples = state.warmup?.writeEfficiencySamples ?? [];
+    expect(samples).toHaveLength(1);
+    expect(samples[0]).toBe(1);
+  });
+
+  test("does NOT record a sample when read+write is 0 (no signal)", async () => {
+    globalThis.fetch = fetchReturningUsage({
+      input_tokens: 5,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    }) as unknown as typeof fetch;
+
+    const state = makeState();
+    const profile = buildAnthropicProfile(MODEL, "5m");
+    await executeWarmup(state, profile);
+
+    expect(state.warmup?.writeEfficiencySamples ?? []).toHaveLength(0);
+  });
+
+  test("rolling window is capped at WRITE_EFFICIENCY_WINDOW (oldest evicted)", async () => {
+    globalThis.fetch = fetchReturningUsage({
+      input_tokens: 5,
+      cache_read_input_tokens: 30_000,
+      cache_creation_input_tokens: 470_000,
+    }) as unknown as typeof fetch;
+
+    const profile = buildAnthropicProfile(MODEL, "5m");
+    const state = makeState();
+    // Fire more warmups than the window size; cooldown is bypassed because
+    // executeWarmup itself does not gate on cooldown (shouldWarm does).
+    for (let i = 0; i < WRITE_EFFICIENCY_WINDOW + 3; i++) {
+      await executeWarmup(state, profile);
+    }
+    expect(state.warmup?.writeEfficiencySamples ?? []).toHaveLength(
+      WRITE_EFFICIENCY_WINDOW,
+    );
   });
 });
