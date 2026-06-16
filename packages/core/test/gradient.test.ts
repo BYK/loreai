@@ -3658,6 +3658,52 @@ describe("tier-based context management", () => {
       });
       expect(result.layer).toBe(0);
     });
+
+    test("over-cap session that bypasses compression STILL reports unsustainable", () => {
+      // The tier-gate bypass returns at layer 0 but for a genuinely over-cap
+      // conversation (it merely declined to compress because the bust cost
+      // wasn't justified). That path MUST keep surfacing the warning — it is a
+      // real exhaustion signal, distinct from the cap-fitting passthrough which
+      // hardcodes unsustainable:false. This locks the intentional distinction
+      // so a future refactor can't silently collapse the two layer-0 returns.
+      const msgs = Array.from({ length: 8 }, (_, i) =>
+        makeMsg(
+          `bypass-${i}`,
+          i % 2 === 0 ? "user" : "assistant",
+          "z".repeat(200),
+          SESSION,
+        ),
+      );
+
+      // Large grown input, over the 200K layer-0 cap (see beforeEach).
+      calibrate(635_000, SESSION, msgs.length);
+
+      // No pricing data → shouldCompress() conservatively returns false, so the
+      // tier gate bypasses compression and returns at layer 0 while over-cap.
+      setCachePricing(0, 0);
+
+      // Sustained-bust regime.
+      for (let i = 0; i < 4; i++) {
+        recordCacheUsage(440_000, 34_813, 2, SESSION);
+      }
+      expect((inspectSessionState(SESSION)?.consecutiveBusts ?? 0) >= 2).toBe(
+        true,
+      );
+
+      const result = transform({
+        messages: msgs,
+        projectPath: PROJECT,
+        sessionID: SESSION,
+      });
+
+      // Bypassed compression → layer 0, but genuinely over the cap (tier >= 1)…
+      expect(result.layer).toBe(0);
+      expect(getTier(result.totalTokens)).toBeGreaterThanOrEqual(1);
+      // …so the warning MUST still fire (unlike the cap-fitting passthrough).
+      expect(result.unsustainable).toBe(true);
+      // Restore pricing for sibling tests.
+      setCachePricing(6.25 / 1_000_000, 0.5 / 1_000_000);
+    });
   });
 
   describe("recordCacheUsage — consecutive bust tracking", () => {
@@ -3701,6 +3747,53 @@ describe("tier-based context management", () => {
       // Zero usage — no change
       recordCacheUsage(0, 0, 0, SID);
       expect(inspectSessionState(SID)?.consecutiveBusts).toBe(1);
+    });
+  });
+
+  describe("unsustainable gating — only fires when genuinely over the layer-0 cap", () => {
+    // Regression for false "unsustainable conversation" warnings on a small
+    // (tier-0) session that fits layer 0 with headroom. The bug surfaced when a
+    // sub-cap session accumulated consecutive cache busts from a structural
+    // cause (stale prompt-delta position post-idle) — consecutiveBusts climbed
+    // unbounded and the warning fired every turn even though the conversation
+    // was trivially sustainable. unsustainable must be gated on real context
+    // exhaustion (tier >= 1 / over the layer-0 cap), not on the bust count alone.
+    const SID = "unsustainable-gate-sess";
+
+    beforeEach(() => {
+      resetCalibration(SID);
+      setModelLimits({ context: 10_000, output: 2_000 });
+      calibrate(0);
+    });
+
+    afterAll(() => {
+      setModelLimits({ context: 10_000, output: 2_000 });
+      calibrate(0);
+    });
+
+    test("tier-0 layer-0 passthrough never reports unsustainable, even after sustained busts", () => {
+      const messages = [
+        makeMsg("u-1", "user", "Hello", SID),
+        makeMsg("u-2", "assistant", "Hi", SID),
+      ];
+
+      // Force a sustained-bust regime (>= SUSTAINED_BUST_THRESHOLD = 2).
+      recordCacheUsage(100_000, 0, 3, SID);
+      recordCacheUsage(100_000, 0, 3, SID);
+      recordCacheUsage(100_000, 0, 3, SID);
+      expect((inspectSessionState(SID)?.consecutiveBusts ?? 0) >= 2).toBe(true);
+
+      const result = transform({
+        messages,
+        projectPath: PROJECT,
+        sessionID: SID,
+      });
+
+      // Small conversation: layer 0, tier 0 — genuinely sustainable.
+      expect(result.layer).toBe(0);
+      expect(getTier(result.totalTokens)).toBe(0);
+      // The signal must NOT fire for a sub-cap conversation.
+      expect(result.unsustainable).toBe(false);
     });
   });
 

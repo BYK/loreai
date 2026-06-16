@@ -1983,6 +1983,10 @@ export type TransformResult = {
    *  should inject a warning message advising the user to compact or start a
    *  new conversation. */
   unsustainable?: boolean;
+  /** Number of consecutive cache busts detected for this session at the time
+   *  of this transform. Surfaced so the pipeline can report the actual count in
+   *  the unsustainable-conversation warning instead of a hardcoded figure. */
+  consecutiveBusts?: number;
 };
 
 // Per-session urgent distillation tracking.
@@ -2218,9 +2222,14 @@ function transformInner(input: {
       distilledBudget,
       rawBudget,
       refreshLtm: false,
-      unsustainable: sid
-        ? getSessionState(sid).consecutiveBusts >= SUSTAINED_BUST_THRESHOLD
-        : false,
+      // Layer-0 passthrough means the conversation fits the layer-0 cap with
+      // headroom — it is sustainable by definition. Never surface the
+      // unsustainable warning here even under a sustained bust count: at this
+      // layer busts come from structural causes (e.g. a prompt-delta whose
+      // position drifted after a post-idle recompression), not from genuine
+      // context growth. Gating on the cap-fit prevents the false-positive
+      // warning observed on tier-0 sessions.
+      unsustainable: false,
     };
   }
 
@@ -2278,6 +2287,7 @@ function transformInner(input: {
         rawBudget,
         refreshLtm: false,
         unsustainable: busts >= SUSTAINED_BUST_THRESHOLD,
+        consecutiveBusts: busts,
       };
     }
   }
@@ -2398,6 +2408,7 @@ function transformInner(input: {
         unsustainable: sid
           ? getSessionState(sid).consecutiveBusts >= SUSTAINED_BUST_THRESHOLD
           : false,
+        consecutiveBusts: sid ? getSessionState(sid).consecutiveBusts : 0,
       };
     }
   }
@@ -2473,9 +2484,8 @@ function transformInner(input: {
   const nuclearRaw = [...olderMessages, ...currentTurn];
   const nuclearRawTokens = olderTokens + currentTurnTokens;
 
-  const unsustainable = sid
-    ? getSessionState(sid).consecutiveBusts >= SUSTAINED_BUST_THRESHOLD
-    : false;
+  const busts = sid ? getSessionState(sid).consecutiveBusts : 0;
+  const unsustainable = busts >= SUSTAINED_BUST_THRESHOLD;
 
   return {
     messages: [...nuclearPrefix, ...nuclearRaw],
@@ -2488,6 +2498,7 @@ function transformInner(input: {
     rawBudget,
     refreshLtm: true,
     unsustainable,
+    consecutiveBusts: busts,
   };
 }
 
