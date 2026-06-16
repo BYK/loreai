@@ -58,6 +58,7 @@ import {
   saveSessionTracking,
   loadSessionTracking,
   upsertSessionPromptDelta,
+  deleteSessionPromptDelta,
   listSessionPromptDeltas,
   loadHeaderSessionIndex,
   isHostedMode,
@@ -692,30 +693,69 @@ function parseDeltaMessage(raw: string): GatewayMessage | null {
  * ("tool_use ids were found without tool_result blocks immediately after").
  *
  * Returns an insert index (clamped to [0, messages.length]) that never lands
- * between an assistant `tool_use` and the following user `tool_result`. When
- * the desired index would split a pair, it walks backward past the issuing
- * assistant so the pair stays adjacent (placing the delta before, rather than
- * inside, the tool turn).
+ * immediately after an assistant `tool_use`. Anthropic requires every
+ * `tool_use` to be followed immediately by its `tool_result`; a delta inserted
+ * right after the assistant breaks that adjacency and is rejected with a
+ * tool-pairing 400 (#747). The desired index is walked backward past the
+ * issuing assistant in two cases:
+ *
+ *  1. The boundary at `idx` sits between an assistant(tool_use) and the
+ *     following user(tool_result) — a completed pair (mid-history split).
+ *  2. The boundary at `idx` immediately follows an assistant(tool_use) whose
+ *     result is NOT present at `idx` — a PENDING/in-flight tool call (the agent
+ *     is mid-tool-execution, the tail ends with a dangling tool_use, or the
+ *     result lives elsewhere). Inserting here would orphan the tool_use.
+ *
+ * Both reduce to the same rule: never let `messages[idx-1]` be an
+ * assistant(tool_use) — walk before it.
  *
  * @internal Exported for tests.
  */
+/**
+ * Decide whether the durable knowledge-delta must be reset (deleted +
+ * recomputed) on THIS turn because the gradient compressed the conversation.
+ *
+ * The delta's persisted `insertAt` is a frozen absolute index into the
+ * gradient-transformed message array. That array is non-stationary: when the
+ * gradient compresses (raw-window eviction / layer escalation), the content at
+ * each absolute index shifts, so a once-tool-pair-safe index can drift into a
+ * tool_use/tool_result pair. A compressing turn ALSO busts the conversation
+ * prompt cache anyway, so this is the right moment to throw the stale delta
+ * away and recompute a fresh, tool-pair-safe, near-tail position — paying the
+ * (already-incurred) bust once instead of destructively stripping a real tool
+ * pair every subsequent turn.
+ *
+ * Layer-only predicate: a compressing turn is any turn at a compressed layer
+ * (>= 1) whose layer DIFFERS from the previous turn (entering, escalating, or
+ * de-escalating compression — all reshuffle the array). A stable layer
+ * (prev === cur) returns false here; steady-state-at-layer-1 raw-window slide
+ * is handled by the caller's additional raw-window-repin check. Layer 0
+ * (passthrough) never compresses.
+ *
+ * @internal Exported for tests.
+ */
+export function shouldResetDeltaOnCompression(
+  prevLayer: number,
+  curLayer: number,
+): boolean {
+  return curLayer >= 1 && curLayer !== prevLayer;
+}
+
 export function safeDeltaInsertIndex(
   messages: GatewayMessage[],
   desired: number,
 ): number {
   let idx = Math.max(0, Math.min(desired, messages.length));
-  // While the message at `idx` is a user message carrying a tool_result whose
-  // matching tool_use is on the immediately-preceding assistant, the boundary
-  // at `idx` is inside an atomic pair — move before the assistant.
-  while (idx > 0 && idx < messages.length) {
-    const here = messages[idx];
+  // Walk backward while the immediately-preceding message is an assistant
+  // carrying a tool_use. This covers both a completed pair (the tool_result is
+  // at idx) AND a pending tool call (no tool_result follows yet) — in either
+  // case the delta must go BEFORE the assistant, never after its tool_use.
+  while (idx > 0) {
     const prev = messages[idx - 1];
-    const splitsPair =
-      here?.role === "user" &&
+    const prevHasToolUse =
       prev?.role === "assistant" &&
-      here.content.some((b) => b.type === "tool_result") &&
       prev.content.some((b) => b.type === "tool_use");
-    if (!splitsPair) break;
+    if (!prevHasToolUse) break;
     idx -= 1;
   }
   return idx;
@@ -819,13 +859,23 @@ export function applySessionPromptDeltas(
     // on subsequent turns is intentional: #747 requires the delta to stay at a
     // byte-identical position to preserve the conversation prompt cache.
     //
-    // We deliberately do NOT re-run safeDeltaInsertIndex here — a layout-
-    // dependent adjustment at replay would move the delta across turns and bust
-    // the very cache prefix it exists to protect. In the rare case a later
-    // turn's layout makes this persisted index split a tool pair,
-    // removeOrphanedToolResults (run after this function on the wire array) is
-    // the hard guarantee that no orphaned tool_use/tool_result reaches the API.
-    const insertAt = Math.min(selector.insertAt, out.length);
+    // We re-run safeDeltaInsertIndex ONLY as a tool-pair guard, not a general
+    // re-placement: when the persisted index still points at a safe boundary
+    // (the common case) it returns the index unchanged → byte-identical replay,
+    // preserving the cache exactly as before. But the conversation grows and the
+    // raw-window/distilled-prefix boundary below the delta slides, so a once-safe
+    // absolute index can later land BETWEEN an assistant(tool_use) and its
+    // user(tool_result). Previously the splice went in anyway and
+    // removeOrphanedToolResults DESTRUCTIVELY stripped both blocks every turn —
+    // silently deleting a real tool call from history (and firing on every turn,
+    // not "rarely" as assumed). Nudging to the nearest safe boundary preserves
+    // the tool pair. The nudge is deterministic and layout-stable turn-over-turn
+    // (the messages below the delta are themselves stable until they change), so
+    // it does not introduce per-turn churn; at worst it shifts ONCE when the
+    // split first appears — strictly better than rewriting two historical
+    // messages every turn.
+    const clamped = Math.min(selector.insertAt, out.length);
+    const insertAt = safeDeltaInsertIndex(out, clamped);
     out.splice(insertAt, 0, message);
   }
   return out;
@@ -6016,12 +6066,61 @@ async function handleConversationTurn(
     }
   }
 
+  // Reset the durable delta on a cache-busting compression. The delta's
+  // persisted insertAt is a frozen absolute index into the gradient-transformed
+  // array; when the gradient compresses (layer change), that array reshuffles
+  // and the once-safe index can drift into a tool_use/tool_result pair. A
+  // compressing turn busts the prompt cache anyway, so we recompute the delta
+  // (position + content) THIS turn rather than replaying a stale index. This
+  // keeps the conversation coherent (the compressed request still carries an
+  // accurate, correctly-placed delta) and stops removeOrphanedToolResults from
+  // destructively stripping a real tool pair every subsequent turn.
+  const deltaCompressed = shouldResetDeltaOnCompression(
+    sessionState.lastDeltaLayer ?? 0,
+    result.layer,
+  );
+  if (deltaCompressed) {
+    if (pendingKnowledgeDelta) {
+      // New knowledge delta is being produced this turn anyway — drop the stale
+      // row so appendKnowledgePromptDelta computes a FRESH insertAt below
+      // (no persisted row to reuse) instead of re-freezing the drifted index.
+      deleteSessionPromptDelta(sessionID);
+    } else {
+      // No new knowledge this turn, but the array reshuffled: re-anchor the
+      // EXISTING delta (same content) to a fresh tool-pair-safe near-tail index
+      // so it doesn't replay at a drifted position. Delete + re-persist with a
+      // recomputed insertAt.
+      const existing = listSessionPromptDeltas(sessionID).find(
+        (d) => d.seq === 0,
+      );
+      if (existing) {
+        const reInsertAt = safeDeltaInsertIndex(
+          modifiedReq.messages,
+          Math.max(0, modifiedReq.messages.length - 1),
+        );
+        upsertSessionPromptDelta({
+          sessionID,
+          projectID: ensureProject(projectPath),
+          selector: JSON.stringify({
+            target: "messages",
+            insertAt: reInsertAt,
+          }),
+          content: existing.content,
+        });
+        log.info(
+          `prompt-delta: re-anchored durable delta for session ${sessionID.slice(0, 16)} after compression (layer ${sessionState.lastDeltaLayer ?? 0}→${result.layer}, insertAt=${reInsertAt})`,
+        );
+      }
+    }
+  }
+
   if (pendingKnowledgeDelta) {
     // Place the durable delta near the tail, but never between an
     // assistant(tool_use) and its user(tool_result) — inserting there orphans
     // the tool_use and triggers an Anthropic 400 (#747 regression). The index
-    // is computed once here, made tool-pair-safe, and persisted; replay reuses
-    // it verbatim to keep the delta byte-position-stable for the prompt cache.
+    // is computed tool-pair-safe and persisted; replay reuses it verbatim to
+    // keep the delta byte-position-stable for the prompt cache until the next
+    // compression resets it.
     const insertAt = safeDeltaInsertIndex(
       modifiedReq.messages,
       Math.max(0, modifiedReq.messages.length - 1),
@@ -6033,6 +6132,9 @@ async function handleConversationTurn(
       ...pendingKnowledgeDelta,
     });
   }
+  // Track the layer that produced the current delta placement so the next turn
+  // can detect a compression-driven reshuffle.
+  sessionState.lastDeltaLayer = result.layer;
   modifiedReq.messages = applySessionPromptDeltas(
     modifiedReq.messages,
     sessionID,

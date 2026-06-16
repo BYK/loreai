@@ -90,6 +90,7 @@ export {
   loadSessionTracking,
   appendSessionPromptDelta,
   upsertSessionPromptDelta,
+  deleteSessionPromptDelta,
   listSessionPromptDeltas,
   loadHeaderSessionIndex,
   loadParentChildMap,

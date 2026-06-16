@@ -2326,6 +2326,23 @@ export function upsertSessionPromptDelta(input: {
     .run(input.sessionID, input.projectID, input.selector, input.content);
 }
 
+/**
+ * Delete all persisted prompt-delta rows for a session.
+ *
+ * Used when the gradient compresses (a cache-busting layer change): the
+ * durable delta's `insertAt` is a frozen absolute index into the
+ * gradient-transformed message array, which is non-stationary — compression
+ * reshuffles what sits at each index, so a once-safe index can drift into a
+ * tool_use/tool_result pair. Rather than tracking/validating the frozen index,
+ * we delete the row on compression so the same turn recomputes the delta
+ * (position + content) fresh against the new array. No-op when no rows exist.
+ */
+export function deleteSessionPromptDelta(sessionID: string): void {
+  db()
+    .query("DELETE FROM session_prompt_deltas WHERE session_id = ?")
+    .run(sessionID);
+}
+
 export function listSessionPromptDeltas(
   sessionID: string,
 ): SessionPromptDelta[] {

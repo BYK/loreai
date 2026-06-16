@@ -443,6 +443,10 @@ export type SessionState = {
   /** Rolling window of recent turns' cold-cache status for auto-TTL upgrade.
    *  true = cold cache (full bust), false = cache hit. */
   coldCacheWindow?: boolean[];
+  /** Gradient layer used on the previous turn that emitted/placed the durable
+   *  knowledge-delta. Used to detect a cache-busting compression (layer change)
+   *  so the stale frozen delta index is reset + recomputed that turn. */
+  lastDeltaLayer?: number;
   /** Resolved conversation TTL for this session ("5m" | "1h"). Updated by
    *  the auto-upgrade logic each turn. */
   resolvedConversationTTL?: "5m" | "1h";

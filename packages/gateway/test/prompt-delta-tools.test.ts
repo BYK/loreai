@@ -108,18 +108,21 @@ describe("safeDeltaInsertIndex — never splits a tool_use/tool_result pair", ()
 });
 
 describe("persisted delta + backstop never orphans a tool pair on the wire", () => {
-  // applySessionPromptDeltas replays a persisted index VERBATIM (byte-position
-  // stable for the prompt cache — #747). If a later turn's layout makes that
-  // index land between a tool_use/tool_result pair, the production pipeline's
-  // removeOrphanedToolResults backstop (run right after) is the hard guarantee
-  // that no orphan reaches the API. This test mirrors that exact sequence.
-  test("stale persisted index splitting a pair is repaired by the backstop", () => {
+  // applySessionPromptDeltas replays a persisted index, nudging it to the
+  // nearest tool-pair-safe boundary (#747 byte-position stability is preserved
+  // for safe indices; only an index that WOULD split a pair is moved). If a
+  // later turn's layout makes the stored index land between a
+  // tool_use/tool_result pair, the delta is placed BEFORE the assistant so the
+  // pair stays intact — instead of relying on removeOrphanedToolResults to
+  // destructively strip the (real) tool call every turn.
+  test("stale persisted index splitting a pair is nudged so the tool pair survives", () => {
     const sessionID = `delta-tools-${Date.now()}`;
     const projectID = ensureProject(`/tmp/lore-delta-tools-${Date.now()}`);
 
     // Persist a delta whose stored insertAt (2) lands between the tool_use and
     // its tool_result for THIS turn's layout (a layout that differs from the
-    // delta's creation turn — exactly the cross-turn drift case).
+    // delta's creation turn — exactly the cross-turn drift case seen in prod
+    // where a frozen insertAt became mid-pair as the conversation grew).
     appendSessionPromptDelta({
       sessionID,
       projectID,
@@ -136,12 +139,32 @@ describe("persisted delta + backstop never orphans a tool pair on the wire", () 
       user(toolResult("X")),
     ];
 
-    // Production sequence: apply deltas (verbatim index), then the backstop.
+    // Production sequence: apply deltas (now tool-pair-safe), then the backstop.
     const out = applySessionPromptDeltas(messages, sessionID);
+    const beforeBackstop = JSON.stringify(out);
     removeOrphanedToolResults(out);
 
-    // The wire array must be orphan-free regardless of where the delta landed.
+    // The wire array must be orphan-free...
     assertNoOrphanedTools(out);
+    // ...AND the tool pair must SURVIVE (not be stripped): the backstop is a
+    // no-op because applySessionPromptDeltas already placed the delta safely.
+    expect(JSON.stringify(out)).toBe(beforeBackstop);
+    expect(out.some((m) => m.content.some((b) => b.type === "tool_use"))).toBe(
+      true,
+    );
+    expect(
+      out.some((m) => m.content.some((b) => b.type === "tool_result")),
+    ).toBe(true);
+    // The delta landed BEFORE the assistant(tool_use), not between the pair.
+    const deltaIdx = out.findIndex((m) =>
+      m.content.some(
+        (b) => b.type === "text" && b.text === "Lore knowledge update",
+      ),
+    );
+    const toolUseIdx = out.findIndex((m) =>
+      m.content.some((b) => b.type === "tool_use"),
+    );
+    expect(deltaIdx).toBeLessThan(toolUseIdx);
   });
 
   test("replay is byte-position stable: a non-splitting persisted index is not moved", () => {
