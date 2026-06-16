@@ -294,14 +294,16 @@ let initialized = false;
 // --- Context warning marker for unsustainable conversations ---
 // Injected into the response (assistant message) so the user can see it.
 // Stripped from incoming requests on subsequent turns to preserve cache prefix.
-const CONTEXT_WARNING_MARKER = "[lore:context-warning]";
+export const CONTEXT_WARNING_MARKER = "[lore:context-warning]";
 
 /**
  * Build the unsustainable-conversation warning, reporting the ACTUAL number of
  * consecutive cache busts rather than a hardcoded figure. `count` falls back to
  * generic wording when unknown/zero.
+ *
+ * @internal Exported for tests.
  */
-function contextWarningText(count?: number): string {
+export function contextWarningText(count?: number): string {
   const times =
     count && count > 0 ? `${count} times in a row` : "several times in a row";
   return (
@@ -361,8 +363,10 @@ function injectContextWarning(
  * Only checks the first non-thinking content block of each assistant message —
  * that's where injectContextWarning() inserts it. This avoids false positives
  * if the model happens to echo the marker in its own output.
+ *
+ * @internal Exported for tests.
  */
-function stripContextWarnings(messages: GatewayMessage[]): void {
+export function stripContextWarnings(messages: GatewayMessage[]): void {
   for (const msg of messages) {
     if (msg.role !== "assistant") continue;
     // Find the first non-thinking block (mirrors injectContextWarning insertion point)
