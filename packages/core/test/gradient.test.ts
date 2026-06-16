@@ -27,6 +27,7 @@ import {
   consumeCameOutOfIdle,
   inspectSessionState,
   setLastTurnAtForTest,
+  prefixPresentFloorApplies,
   recordCacheUsage,
   setCachePricing,
   setMaxLayer0Tokens,
@@ -738,13 +739,17 @@ describe("gradient — force escalation (reactive error recovery)", () => {
     });
     // Despite tiny messages, force min layer should push to at least layer 2
     expect(result.layer).toBeGreaterThanOrEqual(2);
-    // After one use, the flag is consumed — next call should behave normally
+    // After one use, the forceMinLayer flag is consumed (proven directly below).
+    // The resulting layer drops from the forced 2 to 1 — NOT back to 0 — because
+    // the prefix-present floor holds a once-compressed session at Layer >= 1
+    // (prefixPresentFloorApplies). The 2→1 drop proves the flag was consumed.
+    expect(loadForceMinLayer("force-sess")).toBe(0);
     const result2 = transform({
       messages,
       projectPath: PROJECT,
       sessionID: "force-sess",
     });
-    expect(result2.layer).toBe(0);
+    expect(result2.layer).toBe(1);
   });
 
   test("forceMinLayer is one-shot — cleared after single use", () => {
@@ -752,21 +757,25 @@ describe("gradient — force escalation (reactive error recovery)", () => {
       makeMsg("os-1", "user", "test", "oneshot-sess"),
       makeMsg("os-2", "assistant", "ok", "oneshot-sess"),
     ];
-    setForceMinLayer(1, "oneshot-sess");
-    // First call consumes the flag
+    setForceMinLayer(2, "oneshot-sess");
+    // First call consumes the flag (forces layer >= 2).
     const r1 = transform({
       messages,
       projectPath: PROJECT,
       sessionID: "oneshot-sess",
     });
-    expect(r1.layer).toBeGreaterThanOrEqual(1);
-    // Second call — no flag, tiny messages → layer 0
+    expect(r1.layer).toBeGreaterThanOrEqual(2);
+    // Flag is consumed (one-shot) — proven directly.
+    expect(loadForceMinLayer("oneshot-sess")).toBe(0);
+    // Second call — no flag. The layer drops from 2, but the prefix-present
+    // floor holds it at 1 (a once-compressed session never re-enters Layer 0
+    // absent a genuine compaction). The 2→1 drop confirms the flag was consumed.
     const r2 = transform({
       messages,
       projectPath: PROJECT,
       sessionID: "oneshot-sess",
     });
-    expect(r2.layer).toBe(0);
+    expect(r2.layer).toBe(1);
   });
 
   test("resetCalibration clears forceMinLayer", () => {
@@ -824,13 +833,15 @@ describe("gradient — forceMinLayer persistence (restart survival)", () => {
     // One-shot: consumed — DB should be cleared
     expect(loadForceMinLayer(SID)).toBe(0);
 
-    // Next call should be layer 0 (tiny messages, no escalation)
+    // Next call: the forced flag is gone, but the prefix-present floor holds a
+    // once-compressed session at Layer 1 (no re-entry to Layer 0 absent a
+    // genuine compaction). The 2→1 drop confirms the flag was consumed.
     const result2 = transform({
       messages,
       projectPath: PROJECT,
       sessionID: SID,
     });
-    expect(result2.layer).toBe(0);
+    expect(result2.layer).toBe(1);
   });
 
   test("setForceMinLayer writes to DB and transform consumes it", () => {
@@ -2152,6 +2163,167 @@ describe("gradient — distilled-prefix front-bust (spurious Layer 4 + thrash)",
       sessionID: SID,
     });
     expect(r2.layer).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// No Layer-0 re-entry once compressed (prefix-present floor)
+// ---------------------------------------------------------------------------
+// Once a session has compressed (reached Layer >= 1, injecting the distilled
+// prefix at messages[0]/[1]), it must NOT drop back to Layer 0 on a later turn —
+// that vanishes the prefix and front-busts the cache. The existing sticky guard
+// only covers lastLayer 1-3 while calibrated; this floor also covers a prior
+// Layer-4 turn and survives a process restart (calibrated=false). It still
+// RELEASES on a genuine compaction (the host shrank the conversation).
+//
+// The floor decision is `prefixPresentFloorApplies`, a pure predicate. We test
+// it directly (a full truth table — discriminating: any revert of the predicate
+// flips at least one case). The predicate's WIRING into transform() (pinning the
+// layer UP to >= 1) is proven by the repurposed `forceMinLayer` tests below,
+// which now assert a once-compressed session holds at Layer 1 (2->1) instead of
+// returning to Layer 0. The two transform-level guards here cover the other
+// direction — that the floor does NOT over-apply: a genuine compaction still
+// releases to Layer 0, and a never-compressed small session stays at Layer 0.
+describe("gradient — prefixPresentFloorApplies (no Layer-0 re-entry predicate)", () => {
+  test("never compressed (lastLayer 0) → floor does NOT apply", () => {
+    expect(prefixPresentFloorApplies(0, 100, 0)).toBe(false);
+    expect(prefixPresentFloorApplies(0, 5, 100)).toBe(false);
+    expect(prefixPresentFloorApplies(0, 100, 50)).toBe(false);
+  });
+
+  test("compressed (lastLayer 1-4) + growing/steady conversation → floor applies", () => {
+    for (const layer of [1, 2, 3, 4]) {
+      // count unknown yet (fresh process)
+      expect(prefixPresentFloorApplies(layer, 500, 0)).toBe(true);
+      // conversation grew
+      expect(prefixPresentFloorApplies(layer, 600, 500)).toBe(true);
+      // conversation steady (equal — NOT a shrink)
+      expect(prefixPresentFloorApplies(layer, 500, 500)).toBe(true);
+    }
+  });
+
+  test("covers lastLayer === 4 (the strong sticky guard's `<= 3` excludes it)", () => {
+    expect(prefixPresentFloorApplies(4, 500, 400)).toBe(true);
+  });
+
+  test("genuine compaction (messages shrank below the known window) → floor RELEASES", () => {
+    expect(prefixPresentFloorApplies(1, 3, 500)).toBe(false);
+    expect(prefixPresentFloorApplies(4, 10, 760)).toBe(false);
+  });
+
+  test("shrink is ignored when the window size is not yet known (count 0)", () => {
+    // Fresh process: lastKnownMessageCount=0 must NOT be read as a compaction —
+    // rely on the DB-restored lastLayer to hold the floor until the live count is set.
+    expect(prefixPresentFloorApplies(1, 1, 0)).toBe(true);
+  });
+});
+
+describe("gradient — prefix-present floor: transform-level guards", () => {
+  const SID = "prefix-floor-guard-sess";
+  const PID_KEY = "prefix-floor-guard-project";
+  let projectId: string;
+  let createdCounter = 0;
+
+  function seedDistillations(count: number, charsEach: number) {
+    for (let i = 0; i < count; i++) {
+      const id = crypto.randomUUID();
+      db()
+        .query(
+          `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          projectId,
+          SID,
+          "",
+          "[]",
+          `Distillation ${i}: ${"o".repeat(charsEach)}`,
+          "[]",
+          0,
+          Math.ceil(charsEach / 3),
+          0,
+          Date.now() + createdCounter++,
+        );
+    }
+  }
+
+  function largeRawConversation(): LoreMessageWithParts[] {
+    const msgs = Array.from({ length: 80 }, (_, i) =>
+      makeMsg(
+        `g-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "r".repeat(900),
+        SID,
+      ),
+    );
+    msgs.push(makeMsg("g-final", "user", "step", SID));
+    return msgs;
+  }
+
+  beforeAll(() => {
+    projectId = ensureProject(`/test/${PID_KEY}`);
+  });
+
+  beforeEach(() => {
+    resetCalibration(SID);
+    resetPrefixCache(SID);
+    resetRawWindowCache(SID);
+    resetDistillationSnapshot(SID);
+    createdCounter = 0;
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(projectId);
+    db().query("DELETE FROM session_state WHERE session_id = ?").run(SID);
+    setModelLimits({ context: 100_000, output: 4_000 });
+    calibrate(0);
+  });
+
+  afterAll(() => {
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0);
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(projectId);
+    db().query("DELETE FROM session_state WHERE session_id = ?").run(SID);
+  });
+
+  test("the floor does NOT trap a genuinely compacted session (releases to Layer 0)", () => {
+    // Compress once (post-idle forces Layer >= 1, setting lastKnownMessageCount).
+    seedDistillations(3, 1500);
+    const conv = largeRawConversation();
+    setLastTurnAtForTest(SID, Date.now() - 10 * 60_000);
+    onIdleResume(SID, 5 * 60_000);
+    const r1 = transform({
+      messages: conv,
+      projectPath: `/test/${PID_KEY}`,
+      sessionID: SID,
+    });
+    expect(r1.layer).toBeGreaterThanOrEqual(1);
+    calibrate(estimateMessages(r1.messages), SID, r1.messages.length);
+
+    // Genuine compaction: 3 tiny messages, far below the known window.
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(projectId);
+    seedDistillations(1, 150);
+    const r2 = transform({
+      messages: [
+        makeMsg("g-c1", "user", "fresh", SID),
+        makeMsg("g-c2", "assistant", "ok", SID),
+        makeMsg("g-c3", "user", "go", SID),
+      ],
+      projectPath: `/test/${PID_KEY}`,
+      sessionID: SID,
+    });
+    expect(r2.layer).toBe(0);
+  });
+
+  test("a never-compressed small session sits at Layer 0 (floor does not over-apply)", () => {
+    const r = transform({
+      messages: [
+        makeMsg("g-s1", "user", "hello", SID),
+        makeMsg("g-s2", "assistant", "hi", SID),
+        makeMsg("g-s3", "user", "go", SID),
+      ],
+      projectPath: `/test/${PID_KEY}`,
+      sessionID: SID,
+    });
+    expect(r.layer).toBe(0);
   });
 });
 
