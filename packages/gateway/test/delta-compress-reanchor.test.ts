@@ -126,9 +126,28 @@ describe("shouldResetDeltaOnCompression — layer-transition predicate", () => {
     expect(shouldResetDeltaOnCompression(0, 1)).toBe(true);
   });
 
-  test("FALSE stable within layer 1 (1,1): caller handles raw-window repin separately", () => {
+  test("FALSE stable within layer 1 (1,1) on an ordinary turn", () => {
     expect(typeof shouldResetDeltaOnCompression).toBe("function");
     expect(shouldResetDeltaOnCompression(1, 1)).toBe(false);
+    expect(shouldResetDeltaOnCompression(1, 1, false)).toBe(false);
+  });
+
+  test("TRUE stable within layer 1 (1,1) when the turn came OUT OF IDLE", () => {
+    // A post-idle compact rebuilds the array while staying at layer 1 — a
+    // same-layer reshuffle the layer comparison misses. The idle flag must
+    // force a reset so the frozen absolute insertAt isn't replayed into the
+    // differently-shaped post-idle array (the steady-layer-1 cache-bust).
+    expect(shouldResetDeltaOnCompression(1, 1, true)).toBe(true);
+  });
+
+  test("FALSE out-of-idle at passthrough (0,0,true): nothing to reset when not compressed", () => {
+    // Layer 0 never carries a compression delta; an idle resume at layer 0 must
+    // not trigger a reset.
+    expect(shouldResetDeltaOnCompression(0, 0, true)).toBe(false);
+  });
+
+  test("TRUE out-of-idle at a higher compressed layer (2,2,true)", () => {
+    expect(shouldResetDeltaOnCompression(2, 2, true)).toBe(true);
   });
 
   test("TRUE escalated (1,2)", () => {

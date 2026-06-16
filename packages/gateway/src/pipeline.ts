@@ -728,17 +728,25 @@ function parseDeltaMessage(raw: string): GatewayMessage | null {
  * Layer-only predicate: a compressing turn is any turn at a compressed layer
  * (>= 1) whose layer DIFFERS from the previous turn (entering, escalating, or
  * de-escalating compression — all reshuffle the array). A stable layer
- * (prev === cur) returns false here; steady-state-at-layer-1 raw-window slide
- * is handled by the caller's additional raw-window-repin check. Layer 0
- * (passthrough) never compresses.
+ * (prev === cur) returns false here. Layer 0 (passthrough) never compresses.
+ *
+ * Same-layer reshuffle: a post-idle compact rebuilds the array (the distilled
+ * prefix grows, the raw window is rebuilt) while STAYING at the same layer — a
+ * steady layer-1 session resumes at layer 1. That movement is not a layer
+ * change, so the layer comparison alone misses it and the frozen absolute
+ * insertAt is replayed into a differently-shaped array, busting the prompt
+ * cache. `outOfIdle` captures that case: any compressed-layer (>= 1) turn that
+ * came out of idle also resets the delta.
  *
  * @internal Exported for tests.
  */
 export function shouldResetDeltaOnCompression(
   prevLayer: number,
   curLayer: number,
+  outOfIdle = false,
 ): boolean {
-  return curLayer >= 1 && curLayer !== prevLayer;
+  if (curLayer < 1) return false;
+  return curLayer !== prevLayer || outOfIdle;
 }
 
 export function safeDeltaInsertIndex(
@@ -6075,9 +6083,16 @@ async function handleConversationTurn(
   // keeps the conversation coherent (the compressed request still carries an
   // accurate, correctly-placed delta) and stops removeOrphanedToolResults from
   // destructively stripping a real tool pair every subsequent turn.
+  // Reset the delta on a layer change OR a post-idle compact: both reshuffle
+  // the gradient-transformed array. The post-idle case stays at the same layer
+  // (a steady layer-1 session resumes at layer 1), so the layer comparison
+  // alone misses it — `lastTurnWasIdle` covers that same-layer reshuffle so the
+  // frozen absolute insertAt isn't replayed into a differently-shaped array
+  // (the false "unsustainable conversation" cache-bust on a tier-0 session).
   const deltaCompressed = shouldResetDeltaOnCompression(
     sessionState.lastDeltaLayer ?? 0,
     result.layer,
+    sessionState.lastTurnWasIdle ?? false,
   );
   if (deltaCompressed) {
     if (pendingKnowledgeDelta) {
