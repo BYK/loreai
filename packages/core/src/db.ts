@@ -1237,11 +1237,10 @@ export function db(): Database {
   // TEMP-trigger setup queries are never traced / re-entrant, and (b) the
   // singleton is only assigned a fully-migrated handle (see invariant above).
   // The Proxy is transparent when no tracer is registered (see db/traced.ts).
-  // Set LORE_NO_DB_TRACING=1 to bypass it entirely.
-  instance =
-    process.env.LORE_NO_DB_TRACING === "1"
-      ? database
-      : tracedDatabase(database);
+
+  // LORE_NO_DB_TRACING=1 returns the raw connection instead of the query-tracing Proxy (disables automatic per-query DB spans).
+  const dbTracingDisabled = process.env.LORE_NO_DB_TRACING === "1";
+  instance = dbTracingDisabled ? database : tracedDatabase(database);
   return instance;
 }
 
