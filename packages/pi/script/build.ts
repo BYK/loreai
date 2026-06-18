@@ -8,7 +8,7 @@
  *
  * - `@loreai/gateway` — started in-process via dynamic import; published
  *   separately so users benefit from gateway updates without a pi republish.
- * - `@mariozechner/*` — Pi bundles these internally and injects them via
+ * - `@earendil-works/*` — Pi bundles these internally and injects them via
  *   jiti's virtualModules when loading extensions. Bundling our own copies
  *   would break: jiti resolves imports to the virtual modules, but if we
  *   inline a copy in our bundle, code that depends on module identity
@@ -31,8 +31,8 @@ mkdirSync(distDir, { recursive: true });
 const external = [
   "node:*",
   "@loreai/gateway",
-  "@mariozechner/pi-coding-agent",
-  "@mariozechner/pi-tui",
+  "@earendil-works/pi-coding-agent",
+  "@earendil-works/pi-tui",
 ];
 
 await esbuild.build({

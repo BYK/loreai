@@ -27,7 +27,7 @@ import type {
   ExtensionAPI,
   SessionBeforeCompactEvent,
   SessionStartEvent,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 
 // Pi doesn't re-export these event result types at the top level — inline their
 // minimal shape here to avoid depending on an internal package path.

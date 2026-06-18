@@ -3,7 +3,7 @@
   "version": "0.33.0",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
-  "description": "Lore memory engine as a Pi (@mariozechner/pi-coding-agent) extension",
+  "description": "Lore memory engine as a Pi (@earendil-works/pi-coding-agent) extension",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -26,15 +26,15 @@
     "@loreai/gateway": "workspace:*"
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*"
   },
   "peerDependenciesMeta": {
-    "@mariozechner/pi-coding-agent": {
+    "@earendil-works/pi-coding-agent": {
       "optional": true
     }
   },
   "devDependencies": {
-    "@mariozechner/pi-coding-agent": "^0.73.1"
+    "@earendil-works/pi-coding-agent": "^0.79.1"
   },
   "files": [
     "src/",
