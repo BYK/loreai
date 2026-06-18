@@ -17,6 +17,7 @@ import {
   distillation,
   curator,
   ltm,
+  ensureProject,
   latReader,
   log,
   config as loreConfig,
@@ -93,16 +94,64 @@ const POLL_INTERVAL_MS = 30_000;
  * (e.g. all entries are genuinely unique), we record the attempt so the
  * idle scheduler doesn't retry every 30s — which wastes Sonnet calls.
  *
- * Keyed by projectPath. Cleared when entry count changes (new curation
- * creates/deletes entries) so consolidation retries with fresh data.
+ * Keyed by resolved PROJECT ID (not the raw session/worktree path): N worktrees
+ * of one repo resolve to a single canonical project via ensureProject(), and
+ * ltm.forProject() operates on that shared knowledge set. Keying by raw path
+ * gave each worktree its own cooldown bucket guarding the same entries, so
+ * consolidation ran N× redundantly (bug: the consolidation retry storm).
  */
 const consolidationCooldown = new Map<
   string,
   { attemptedAt: number; entryCount: number; topCategoryCount: number }
 >();
 
+/**
+ * Projects with an in-flight consolidation LLM call (keyed by resolved project
+ * ID). The cooldown is checked before the `await` and set after it returns, so
+ * without this guard concurrent idle sessions for the same project all pass the
+ * gate before any sets the cooldown → thundering herd. Set before the await,
+ * cleared in a `finally`.
+ */
+const consolidationInProgress = new Set<string>();
+
 /** 1 hour cooldown before retrying consolidation with the same entry count. */
-const CONSOLIDATION_COOLDOWN_MS = 60 * 60 * 1000;
+export const CONSOLIDATION_COOLDOWN_MS = 60 * 60 * 1000;
+
+/**
+ * Entry-count growth (since the last no-op consolidation) required to re-attempt
+ * early, before the cooldown window elapses. A no-op consolidation means the LLM
+ * found nothing to merge; only genuinely NEW entries create fresh merge
+ * candidates. A decrease (eviction/delete) or trivial churn does not — so the
+ * cooldown stays sticky against the count oscillation seen at a saturated cap.
+ */
+export const CONSOLIDATION_REATTEMPT_GROWTH = 3;
+
+/**
+ * Pure decision: is consolidation still on cooldown for this project?
+ *
+ * Returns true (skip) when a prior no-op attempt is still within the cooldown
+ * window AND the knowledge set has not materially grown since. Returns false
+ * (allow) when there is no prior attempt, the window has elapsed, or new merge
+ * candidates have appeared (global count grew past the reattempt threshold, or
+ * the top category grew).
+ */
+export function consolidationCooldownActive(
+  cooldown:
+    | { attemptedAt: number; entryCount: number; topCategoryCount: number }
+    | undefined,
+  now: number,
+  entryCount: number,
+  topCategoryCount: number,
+): boolean {
+  if (!cooldown) return false;
+  if (now - cooldown.attemptedAt >= CONSOLIDATION_COOLDOWN_MS) return false;
+  // Re-attempt early only when knowledge GREW (new merge candidates). A
+  // decrease yields no new opportunity, so the prior verdict still stands.
+  if (entryCount > cooldown.entryCount + CONSOLIDATION_REATTEMPT_GROWTH)
+    return false;
+  if (topCategoryCount > cooldown.topCategoryCount) return false;
+  return true;
+}
 
 /**
  * Per-category entry count that triggers consolidation even when the GLOBAL
@@ -471,16 +520,19 @@ export function evictIdleSessions(
     // Remove from the main sessions map last
     sessions.delete(sessionID);
 
-    // Clean up project-scoped cooldowns if no other session uses this project
+    // Clean up project-scoped consolidation state when no remaining session
+    // resolves to the same canonical project (worktrees share one project ID).
+    const evictedProjectId = ensureProject(state.projectPath);
     let projectStillActive = false;
     for (const [, s] of sessions) {
-      if (s.projectPath === state.projectPath) {
+      if (ensureProject(s.projectPath) === evictedProjectId) {
         projectStillActive = true;
         break;
       }
     }
     if (!projectStillActive) {
-      consolidationCooldown.delete(state.projectPath);
+      consolidationCooldown.delete(evictedProjectId);
+      consolidationInProgress.delete(evictedProjectId);
     }
 
     // GC the shared quota cache only when no remaining session uses this
@@ -551,6 +603,10 @@ export function buildIdleWorkHandler(
 ): (sessionID: string, state: SessionState) => Promise<void> {
   return async (sessionID: string, state: SessionState) => {
     const projectPath = state.projectPath;
+    // Resolve the raw worktree/session path to the canonical project ID so the
+    // consolidation cooldown / in-flight guard collapse across worktrees of the
+    // same repo (they share one knowledge set via ltm.forProject()).
+    const projectId = ensureProject(projectPath);
     const cfg = loreConfig();
     const model = getWorkerModel(state.lastUpstream);
 
@@ -644,9 +700,10 @@ export function buildIdleWorkHandler(
             );
             emitCurationMetrics({ ...result, trigger: "idle" });
             onKnowledgeChanged?.(sessionID, result);
-            // Entry count changed — clear consolidation cooldown so it
-            // retries with fresh data on the next idle tick.
-            consolidationCooldown.delete(projectPath);
+            // NOTE: intentionally do NOT clear the consolidation cooldown here.
+            // At a saturated cap, curation churns entries every sweep; clearing
+            // on any change defeated the cooldown entirely. consolidationCooldown-
+            // Active() instead re-attempts only when the set materially GROWS.
           }
         }
       } catch (e) {
@@ -682,19 +739,22 @@ export function buildIdleWorkHandler(
         const categoryOver =
           topCategoryCount > PER_CATEGORY_CONSOLIDATION_THRESHOLD;
         if (globalOver || categoryOver) {
-          const cooldown = consolidationCooldown.get(projectPath);
+          const cooldown = consolidationCooldown.get(projectId);
           const now = Date.now();
-          // Cooldown is keyed on the global count; include the top-category
-          // count so a category-only trigger still re-attempts as it grows.
-          const cooldownKey = entries.length;
+          // Skip when (a) a no-op attempt is still sticky (see helper), or
+          // (b) another idle session for this project already has a
+          // consolidation in flight — the cooldown is set only AFTER the await,
+          // so without this guard concurrent sessions all pass the gate.
           if (
-            cooldown &&
-            cooldown.entryCount === cooldownKey &&
-            cooldown.topCategoryCount === topCategoryCount &&
-            now - cooldown.attemptedAt < CONSOLIDATION_COOLDOWN_MS
+            consolidationCooldownActive(
+              cooldown,
+              now,
+              entries.length,
+              topCategoryCount,
+            ) ||
+            consolidationInProgress.has(projectId)
           ) {
-            // Cooldown active — skip to avoid wasting Sonnet calls on
-            // repeated consolidation attempts that produce no changes.
+            // Skip — avoid the consolidation retry storm.
           } else {
             log.info(
               globalOver
@@ -702,50 +762,55 @@ export function buildIdleWorkHandler(
                 : `category "${topCategory}" count ${topCategoryCount} exceeds per-category threshold ${PER_CATEGORY_CONSOLIDATION_THRESHOLD} — running consolidation`,
             );
             const beforeCount = entries.length;
-            const result = await Sentry.startSpan(
-              {
-                name: "lore.consolidation",
-                op: "lore.curation",
-                attributes: { trigger: "consolidation" },
-              },
-              () =>
-                curator.consolidate({
-                  llm,
-                  projectPath,
-                  sessionID,
-                  model,
-                  // Category-focused mode when only the per-category threshold
-                  // is exceeded (global count still under maxEntries) — merges
-                  // the bloated category's near-duplicates directly.
-                  ...(!globalOver && categoryOver
-                    ? { focusCategory: topCategory }
-                    : {}),
-                  workerHealth: makeWorkerHealth(sessionID, "lore-curator"),
-                }),
-            );
-            if (result.updated > 0 || result.deleted > 0) {
-              log.info(
-                `consolidation: ${result.updated} updated, ${result.deleted} deleted`,
+            consolidationInProgress.add(projectId);
+            try {
+              const result = await Sentry.startSpan(
+                {
+                  name: "lore.consolidation",
+                  op: "lore.curation",
+                  attributes: { trigger: "consolidation" },
+                },
+                () =>
+                  curator.consolidate({
+                    llm,
+                    projectPath,
+                    sessionID,
+                    model,
+                    // Category-focused mode when only the per-category threshold
+                    // is exceeded (global count still under maxEntries) — merges
+                    // the bloated category's near-duplicates directly.
+                    ...(!globalOver && categoryOver
+                      ? { focusCategory: topCategory }
+                      : {}),
+                    workerHealth: makeWorkerHealth(sessionID, "lore-curator"),
+                  }),
               );
-              emitCurationMetrics({
-                created: 0,
-                ...result,
-                trigger: "consolidation",
-              });
-              // Consolidation made progress — clear cooldown so it can retry
-              consolidationCooldown.delete(projectPath);
-            } else {
-              // Consolidation produced no changes — enter cooldown to prevent
-              // retry storm (the LLM thinks all entries are unique).
-              consolidationCooldown.set(projectPath, {
-                attemptedAt: Date.now(),
-                entryCount: beforeCount,
-                topCategoryCount,
-              });
-              log.info(
-                `consolidation produced no changes — cooldown active for 1h ` +
-                  `(${beforeCount} entries in ${projectPath})`,
-              );
+              if (result.updated > 0 || result.deleted > 0) {
+                log.info(
+                  `consolidation: ${result.updated} updated, ${result.deleted} deleted`,
+                );
+                emitCurationMetrics({
+                  created: 0,
+                  ...result,
+                  trigger: "consolidation",
+                });
+                // Consolidation made progress — clear cooldown so it can retry
+                consolidationCooldown.delete(projectId);
+              } else {
+                // Consolidation produced no changes — enter cooldown to prevent
+                // retry storm (the LLM thinks all entries are unique).
+                consolidationCooldown.set(projectId, {
+                  attemptedAt: Date.now(),
+                  entryCount: beforeCount,
+                  topCategoryCount,
+                });
+                log.info(
+                  `consolidation produced no changes — cooldown active for 1h ` +
+                    `(${beforeCount} entries in ${projectPath})`,
+                );
+              }
+            } finally {
+              consolidationInProgress.delete(projectId);
             }
           }
         }

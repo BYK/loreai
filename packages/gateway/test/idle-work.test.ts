@@ -12,7 +12,13 @@ import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildIdleWorkHandler, touchSession } from "../src/idle";
+import {
+  buildIdleWorkHandler,
+  touchSession,
+  consolidationCooldownActive,
+  CONSOLIDATION_COOLDOWN_MS,
+  CONSOLIDATION_REATTEMPT_GROWTH,
+} from "../src/idle";
 import { recordConversationCost, clearAllCosts } from "../src/cost-tracker";
 import { resetPipelineState } from "../src/pipeline";
 import { ltm, loadSessionCosts } from "@loreai/core";
@@ -91,6 +97,78 @@ describe("touchSession", () => {
   test("is a no-op for an unknown session", () => {
     const sessions = new Map<string, SessionState>();
     expect(() => touchSession(sessions, "nope")).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// consolidationCooldownActive (pure decision — no LLM, no DB)
+// ---------------------------------------------------------------------------
+
+describe("consolidationCooldownActive", () => {
+  const now = 1_000_000_000_000;
+  const fresh = (
+    over: Partial<{
+      attemptedAt: number;
+      entryCount: number;
+      topCategoryCount: number;
+    }> = {},
+  ) => ({
+    attemptedAt: now,
+    entryCount: 50,
+    topCategoryCount: 14,
+    ...over,
+  });
+
+  test("no prior cooldown → not active (allowed to run)", () => {
+    expect(consolidationCooldownActive(undefined, now, 50, 14)).toBe(false);
+  });
+
+  test("within the window with flat counts → active (sticky skip)", () => {
+    const cd = fresh();
+    expect(consolidationCooldownActive(cd, now + 60_000, 50, 14)).toBe(true);
+  });
+
+  test("stays sticky when the entry count DECREASES (eviction/delete)", () => {
+    // A decrease yields no new merge candidate, so the prior "nothing to
+    // merge" verdict still holds — must not re-trigger.
+    const cd = fresh({ entryCount: 50 });
+    expect(consolidationCooldownActive(cd, now + 60_000, 49, 14)).toBe(true);
+  });
+
+  test("stays sticky on small growth (<= reattempt threshold)", () => {
+    const cd = fresh({ entryCount: 50 });
+    expect(
+      consolidationCooldownActive(
+        cd,
+        now + 60_000,
+        50 + CONSOLIDATION_REATTEMPT_GROWTH,
+        14,
+      ),
+    ).toBe(true);
+  });
+
+  test("re-attempts when the entry count GROWS past the threshold", () => {
+    const cd = fresh({ entryCount: 50 });
+    expect(
+      consolidationCooldownActive(
+        cd,
+        now + 60_000,
+        50 + CONSOLIDATION_REATTEMPT_GROWTH + 1,
+        14,
+      ),
+    ).toBe(false);
+  });
+
+  test("re-attempts when the top category grows", () => {
+    const cd = fresh({ topCategoryCount: 14 });
+    expect(consolidationCooldownActive(cd, now + 60_000, 50, 15)).toBe(false);
+  });
+
+  test("expires after the cooldown window elapses", () => {
+    const cd = fresh();
+    expect(
+      consolidationCooldownActive(cd, now + CONSOLIDATION_COOLDOWN_MS, 50, 14),
+    ).toBe(false);
   });
 });
 
