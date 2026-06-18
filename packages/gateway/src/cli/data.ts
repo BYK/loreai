@@ -2644,6 +2644,7 @@ Subcommands:
   dedup                 Find and remove duplicate knowledge entries (all projects)
   reindex               Rebuild embedding vectors (after model/config change)
   rerank                Re-score preference confidence by directive strength
+  cache-stats           Show cache-bust counters (system[0] cache-alignment gate)
 
 Options:
   --project <path>      Target project directory (default: current directory)
@@ -2698,6 +2699,8 @@ Examples:
   lore data dedup                          # dry-run: show duplicate clusters
   lore data dedup --yes                    # apply: remove duplicates
   lore data dedup --interactive            # accept/reject each cluster interactively
+  lore data cache-stats                    # cache-bust tally + system[0] relocatable share (all projects)
+  lore data cache-stats --project .        # scope the cache-bust gate to one project
   lore data dedup --project /path/to/project
   lore data reindex                        # rebuild all embedding vectors
   lore data rerank                         # re-score preference confidence
@@ -3046,6 +3049,76 @@ async function cmdReground(
   );
 }
 
+/**
+ * `lore data cache-stats [--project <path>]` — read the durable cache-bust
+ * counters (issue #791 measure-first gate). Prints the per-cause tally plus a
+ * summary highlighting the share of busts (and write-token cost) attributable
+ * to a RELOCATABLE dynamic span in system[0] (the agent-owned host prompt) —
+ * the headline number for the rare-vs-material decision.
+ */
+async function cmdCacheStats(
+  _args: string[],
+  flags: Record<string, unknown>,
+): Promise<void> {
+  if (getRemoteUrl()) {
+    console.error(
+      "Error: cache-stats reads local counters only (not supported in remote mode).",
+    );
+    process.exit(1);
+  }
+
+  const { getCacheBustStats, summarizeCacheBustStats, ensureProject } =
+    await import("@loreai/core");
+
+  let projectID: string | undefined;
+  let scopeLabel = "all projects";
+  if (flags.project) {
+    const projectPath = resolve(flags.project as string);
+    projectID = ensureProject(projectPath);
+    scopeLabel = projectPath;
+  }
+
+  const stats = getCacheBustStats(projectID);
+  if (!stats.length) {
+    console.log(`No cache-bust stats recorded yet (${scopeLabel}).`);
+    return;
+  }
+
+  console.log(`Cache-bust stats (${scopeLabel})\n`);
+  printTable(
+    ["CAUSE", "RELOCATABLE", "TURNS", "WRITE_TOKENS"],
+    stats.map((s) => [
+      s.cause,
+      s.relocatable ? "yes" : "no",
+      String(s.turns),
+      String(s.writeTokens),
+    ]),
+    [22, 12, 10, 14],
+  );
+
+  // Gate summary. The headline arithmetic lives in summarizeCacheBustStats
+  // (pure, unit-tested in core) so the decision math is not buried in CLI glue.
+  const g = summarizeCacheBustStats(stats);
+  const pct = (n: number, d: number) =>
+    d > 0 ? `${((n / d) * 100).toFixed(1)}%` : "0.0%";
+
+  console.log(`\nGate (issue #791):`);
+  console.log(`  total turns:           ${g.totalTurns}`);
+  console.log(
+    `  busts:                 ${g.bustTurns} (${pct(g.bustTurns, g.totalTurns)} of turns, ${g.bustTokens} write tokens)`,
+  );
+  console.log(
+    `  system[0] host busts:  ${g.hostTurns} (${pct(g.hostTurns, g.bustTurns)} of busts, ${g.hostTokens} write tokens)`,
+  );
+  console.log(
+    `    relocatable:         ${g.relocatableTurns} (${pct(g.relocatableTurns, g.bustTurns)} of busts, ${g.relocatableTokens} write tokens)`,
+  );
+  console.log(
+    `\n  verdict hint: relocatable system[0] busts = ${pct(g.relocatableTurns, g.bustTurns)} of busts / ${g.relocatableTokens} write tokens.` +
+      ` Low on both → close as not-worth-it; material → build relocation.`,
+  );
+}
+
 export async function commandData(
   positionals: string[],
   values: Record<string, unknown>,
@@ -3095,6 +3168,9 @@ export async function commandData(
       break;
     case "rerank":
       await cmdRerank();
+      break;
+    case "cache-stats":
+      await cmdCacheStats(subArgs, values);
       break;
     case "help":
     case undefined:

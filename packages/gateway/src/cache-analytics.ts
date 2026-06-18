@@ -135,6 +135,92 @@ export function findDivergenceOffset(a: string, b: string): number {
 }
 
 // ---------------------------------------------------------------------------
+// Relocatable-span classification (issue #791 — measure-first gate)
+// ---------------------------------------------------------------------------
+
+/**
+ * Value patterns for "relocatable" dynamic content — the class of span that a
+ * CacheAligner-style optimization could move out of the cached prefix into a
+ * dynamic tail without changing semantics (display dates/times/timestamps/IDs).
+ *
+ * Known agent volatile tokens (cch, cc_version suffix, top-level max_tokens,
+ * cache_control) are already stripped by normalizeBodyForComparison BEFORE any
+ * comparison, so these patterns only ever see the RESIDUAL divergence.
+ *
+ * Patterns are intentionally NUMERIC/structural-shaped (a date/time/uuid/long-
+ * digit-run), NOT label-shaped. This is a deliberate PRECISION-over-recall
+ * choice: the gate's whole job is to separate relocatable dynamic content from
+ * genuine prose rewrites, so a false "relocatable" is worse than a miss — it
+ * would inflate the very number that drives the build-vs-close decision.
+ *
+ * In particular we do NOT match bare day-of-week / month NAMES (e.g. "Monday",
+ * "March"): those collide with ordinary English words ("Maybe", "Marketing",
+ * "Decision", "Janitor", "August"), which would misclassify a host-prompt
+ * rewrite as relocatable. Agents emit dates in ISO/numeric form anyway
+ * ("Today's date: 2025-06-18"), which the numeric patterns below cover. A
+ * human-readable date whose only changed token is a bare month/day name is
+ * intentionally treated as a (rare) miss rather than risk a prose false match.
+ */
+const RELOCATABLE_SPAN_PATTERNS: RegExp[] = [
+  /\d{4}-\d{2}-\d{2}/, // ISO date (2024-12-15)
+  /\d{1,2}\/\d{1,2}\/\d{2,4}/, // slash date (12/15/2024)
+  /\d{1,2}:\d{2}(?::\d{2})?/, // clock time (09:30[:15])
+  /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i, // UUID
+  /\d{6,}/, // long digit run (epoch / counter)
+];
+
+/** Chars that belong to a single "value token" (used to expand a minimal diff
+ *  out to its enclosing token before pattern-testing). */
+const TOKEN_CHAR = /[0-9A-Za-z:/_.-]/;
+
+/**
+ * Decide whether the divergence between two strings (or local windows around a
+ * divergence) is a RELOCATABLE dynamic span.
+ *
+ * The minimal byte diff is often a single char (e.g. `2024-12-1[5→6]`), so we
+ * first locate the changed region (between the common prefix and common suffix)
+ * and EXPAND it outward to token boundaries, then test the full changed token
+ * against {@link RELOCATABLE_SPAN_PATTERNS}.
+ *
+ * Pure/deterministic; never touches the wire body. Returns false for identical
+ * inputs and for prose-only changes.
+ *
+ * NOTE: callers should pass a bounded window centered on the FIRST divergence
+ * (not whole bodies) so an unrelated tail change can't smuggle a date into the
+ * tested region.
+ */
+export function classifyRelocatableSpan(prev: string, curr: string): boolean {
+  if (prev === curr) return false;
+  const plen = prev.length;
+  const clen = curr.length;
+
+  // Common prefix.
+  const maxPrefix = Math.min(plen, clen);
+  let p = 0;
+  while (p < maxPrefix && prev[p] === curr[p]) p++;
+
+  // Common suffix (cannot overlap the shared prefix in either string).
+  let s = 0;
+  const maxSuffix = Math.min(plen - p, clen - p);
+  while (s < maxSuffix && prev[plen - 1 - s] === curr[clen - 1 - s]) s++;
+
+  // Changed region in curr is [p, clen - s). Expand to enclosing token.
+  let left = p;
+  while (left > 0 && TOKEN_CHAR.test(curr[left - 1])) left--;
+  let right = clen - s;
+  while (right < clen && TOKEN_CHAR.test(curr[right])) right++;
+
+  const token = curr.slice(left, right);
+  if (!token) return false;
+  return RELOCATABLE_SPAN_PATTERNS.some((re) => re.test(token));
+}
+
+/** Window (in bytes) sliced on each side of a divergence offset before running
+ *  {@link classifyRelocatableSpan}. Large enough to contain a date/uuid token
+ *  with surrounding context; small enough to exclude unrelated tail changes. */
+const RELOCATABLE_WINDOW = 80;
+
+// ---------------------------------------------------------------------------
 // Semantic location mapping
 // ---------------------------------------------------------------------------
 
@@ -407,6 +493,9 @@ export function analyzeCacheTurn(
   let divergenceReason = "first turn — no previous request to compare";
   let prevSnippet: string | undefined;
   let currSnippet: string | undefined;
+  // system[0] cache-alignment measurement (issue #791).
+  let system0Bust = false;
+  let relocatable = false;
 
   // Normalize the current body for comparison: strip volatile client metadata
   // (e.g. Claude Code's per-turn `cch=XXXXX;` hash) so it doesn't pollute
@@ -433,6 +522,22 @@ export function analyzeCacheTurn(
         messageCount,
         analytics.turnCount,
       );
+
+      // system[0] cache-alignment measurement (issue #791): when the first
+      // divergence lands in the agent-owned host prompt, decide whether the
+      // changed span is relocatable dynamic content (a date/timestamp/uuid)
+      // vs a genuine prompt rewrite. Computed from a bounded window centered
+      // on the divergence — INDEPENDENT of the INFO-log snippet gate below —
+      // so it is captured for every system[0] divergence, not just logged ones.
+      system0Bust = divergencePoint.startsWith("system[0]");
+      if (system0Bust) {
+        const wStart = Math.max(0, prefixMatchBytes - RELOCATABLE_WINDOW);
+        const wEnd = prefixMatchBytes + RELOCATABLE_WINDOW;
+        relocatable = classifyRelocatableSpan(
+          prevBody.slice(wStart, wEnd),
+          normalizedBody.slice(wStart, wEnd),
+        );
+      }
 
       // Capture and log diverging byte snippets to help diagnose what changed
       // (e.g. timestamps, turn counters, host-side message re-rendering).
@@ -499,11 +604,19 @@ export function analyzeCacheTurn(
     divergenceReason,
     prevSnippet,
     currSnippet,
+    system0Bust,
+    relocatable,
   };
 
   // Log structured analysis
   if (analytics.turnCount > 1) {
     const bustStr = cacheRead === 0 && cacheCreation > 0 ? " [BUST]" : "";
+    // issue #791: surface relocatable system[0] busts in the per-turn line.
+    const sys0Str = system0Bust
+      ? relocatable
+        ? " [SYSTEM0-RELOCATABLE]"
+        : " [SYSTEM0]"
+      : "";
     const sidStr = sessionID ? ` session=${sessionID.slice(0, 16)}` : "";
     log.info(
       `cache-analytics:${sidStr} turn=${result.turn}` +
@@ -512,7 +625,8 @@ export function analyzeCacheTurn(
         ` prefixMatch=${(result.prefixMatchPercent * 100).toFixed(1)}%` +
         ` (${prefixMatchBytes}/${analytics.lastRequestBodyLength}B)` +
         ` divergence="${divergencePoint}" reason="${divergenceReason}"` +
-        bustStr,
+        bustStr +
+        sys0Str,
     );
 
     // Warn on dramatic cache hit rate drops (e.g. 99% → 23%) to help
@@ -541,7 +655,8 @@ export function analyzeCacheTurn(
 /** Cache event categories for telemetry. */
 export type CacheBustCause =
   | "first-turn" // session's first request (unavoidable)
-  | "system-change" // divergence in system blocks (LTM update)
+  | "system-host-change" // divergence in system[0]: agent-owned host prompt (CacheAligner target — issue #791)
+  | "system-ltm-change" // divergence in system[1]/[2]: lore's own LTM blocks (already managed by 3-block pinning)
   | "tools-change" // tool definitions changed
   | "prefix-rewrite" // distilled prefix content changed (meta-distillation)
   | "window-shift" // raw window eviction changed message positions
@@ -580,8 +695,16 @@ export function categorizeBust(
     if (divergencePoint === "<identical>") return "unknown"; // shouldn't happen with a bust
     if (divergencePoint === "<start>" || divergencePoint === "<root>")
       return "prefix-rewrite";
+    // Split host (system[0]) from lore's own LTM (system[1]/[2]). system[0] is
+    // the agent-owned host prompt and the only CacheAligner relocation target
+    // (issue #791); everything else under "system" is lore-managed churn.
+    // NOTE: a bare "system" path (top-level STRING system prompt) maps to
+    // system-ltm-change, slightly under-counting host busts — but that path
+    // only occurs in the no-cache fallback (host+LTM concatenated into one
+    // string), which is not the cached-prefix scenario the gate measures.
+    if (divergencePoint.startsWith("system[0]")) return "system-host-change";
     if (divergencePoint === "system" || divergencePoint.startsWith("system"))
-      return "system-change";
+      return "system-ltm-change";
     if (divergencePoint === "tools" || divergencePoint.startsWith("tools"))
       return "tools-change";
 

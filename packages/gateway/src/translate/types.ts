@@ -359,6 +359,15 @@ export type CacheTurnAnalysis = {
   prevSnippet?: string;
   /** Short snippet of current body around the divergence point. */
   currSnippet?: string;
+
+  // --- system[0] cache-alignment measurement (issue #791) ---
+  /** True when the first divergence is inside system[0] (the agent-owned host
+   *  prompt) — distinct from lore's own system[1]/[2] LTM churn. */
+  system0Bust: boolean;
+  /** True when a system[0] divergence is a relocatable dynamic span
+   *  (date/time/uuid/...): the class a CacheAligner could move to a tail.
+   *  Always false unless system0Bust is true. */
+  relocatable: boolean;
 };
 
 /** Per-session cache analytics state. */

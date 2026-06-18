@@ -16,6 +16,7 @@ import {
   load,
   config as loreConfig,
   ensureProject,
+  recordCacheBustObservation,
   findSessionStatesByFingerprint,
   countMatchingTemporalIds,
   projectId,
@@ -3967,7 +3968,17 @@ function postResponse(
         bustCause,
         usage.cacheCreationInputTokens ?? 0,
         resp.model,
+        turnAnalysis.relocatable,
       );
+      // Persist a durable counter so the issue #791 "is system[0] dynamic
+      // content a material cache-bust cause?" gate survives gateway restarts
+      // (the in-memory analytics reset every restart). Passive telemetry only.
+      recordCacheBustObservation({
+        projectID: ensureProject(projectPath),
+        cause: bustCause,
+        relocatable: turnAnalysis.relocatable,
+        writeTokens: usage.cacheCreationInputTokens ?? 0,
+      });
       sessionState.lastTurnWasIdle = false; // consumed
 
       // Track cold-cache turns for auto-TTL upgrade (rolling 20-turn window)

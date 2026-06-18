@@ -8,6 +8,7 @@ import {
   inferDivergenceReason,
   analyzeCacheTurn,
   categorizeBust,
+  classifyRelocatableSpan,
   normalizeBodyForComparison,
 } from "../src/cache-analytics";
 import type {
@@ -826,6 +827,8 @@ describe("categorizeBust", () => {
       divergenceReason: "",
       prevSnippet: undefined,
       currSnippet: undefined,
+      system0Bust: false,
+      relocatable: false,
       ...overrides,
     };
   }
@@ -859,11 +862,35 @@ describe("categorizeBust", () => {
 
   test("classifies system/tools divergences distinctly", () => {
     expect(
-      categorizeBust(makeAnalysis({ divergencePoint: "system[2]" }), false),
-    ).toBe("system-change");
-    expect(
       categorizeBust(makeAnalysis({ divergencePoint: "tools[0].name" }), false),
     ).toBe("tools-change");
+  });
+
+  test("splits host (system[0]) vs LTM (system[1]/[2]) system busts", () => {
+    // system[0] = agent-owned host prompt — the CacheAligner relocation target.
+    expect(
+      categorizeBust(
+        makeAnalysis({ divergencePoint: "system[0].text" }),
+        false,
+      ),
+    ).toBe("system-host-change");
+    expect(
+      categorizeBust(makeAnalysis({ divergencePoint: "system[0]" }), false),
+    ).toBe("system-host-change");
+    // system[1]/[2] = lore's own LTM blocks — already managed by 3-block pinning.
+    expect(
+      categorizeBust(
+        makeAnalysis({ divergencePoint: "system[1].text" }),
+        false,
+      ),
+    ).toBe("system-ltm-change");
+    expect(
+      categorizeBust(makeAnalysis({ divergencePoint: "system[2]" }), false),
+    ).toBe("system-ltm-change");
+    // Bare "system" (non-array string prompt) → treated as LTM-side / generic.
+    expect(
+      categorizeBust(makeAnalysis({ divergencePoint: "system" }), false),
+    ).toBe("system-ltm-change");
   });
 
   test("does not classify a cache-hit turn as a window-shift", () => {
@@ -896,5 +923,163 @@ describe("categorizeBust", () => {
         false,
       ),
     ).toBe("first-turn");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// classifyRelocatableSpan — the measure-first gate's relocatability oracle
+// (issue #791). Given the diverging region between two bodies/windows, decides
+// whether the CHANGED token is a relocatable dynamic span (date/time/uuid/...)
+// vs a genuine prose/structural change. Known volatile tokens (cch, cc_version,
+// max_tokens, cache_control) are already normalized out BEFORE this runs, so
+// this classifies the residual divergence only.
+// ---------------------------------------------------------------------------
+
+describe("classifyRelocatableSpan", () => {
+  test("ISO date change is relocatable", () => {
+    expect(
+      classifyRelocatableSpan(
+        'text":"Current Date: 2024-12-15 — be helpful"',
+        'text":"Current Date: 2024-12-16 — be helpful"',
+      ),
+    ).toBe(true);
+  });
+
+  test("date change where only one digit differs expands to the full token", () => {
+    // The minimal byte diff is "5"→"6"; the classifier must expand to the full
+    // "2024-12-16" token before testing, otherwise the ISO pattern won't match.
+    expect(
+      classifyRelocatableSpan("at 2024-12-15 end", "at 2024-12-16 end"),
+    ).toBe(true);
+  });
+
+  test("slash date change is relocatable", () => {
+    expect(classifyRelocatableSpan("on 12/15/2024 x", "on 12/16/2024 x")).toBe(
+      true,
+    );
+  });
+
+  test("clock time change is relocatable", () => {
+    expect(classifyRelocatableSpan("at 09:30 today", "at 11:45 today")).toBe(
+      true,
+    );
+  });
+
+  test("a BARE day-of-week name change is NOT relocatable (precision)", () => {
+    // "Monday"→"Tuesday" with no numeric date component is indistinguishable
+    // from a prose word swap; matching it risks false positives ("Maybe",
+    // "Marketing"). Deliberately treated as a miss — agents emit numeric dates.
+    expect(classifyRelocatableSpan("is Monday now", "is Tuesday now")).toBe(
+      false,
+    );
+  });
+
+  test("a BARE month name change is NOT relocatable (precision)", () => {
+    // "January"→"February" alone would also match prose like "March"/"Mayor";
+    // numeric date forms are covered by the ISO/slash patterns instead.
+    expect(classifyRelocatableSpan("in January here", "in February here")).toBe(
+      false,
+    );
+  });
+
+  test("UUID change is relocatable", () => {
+    expect(
+      classifyRelocatableSpan(
+        "id abcdef12-3456-7890-abcd-ef1234567890 x",
+        "id abcdef12-3456-7890-abcd-ef1234567891 x",
+      ),
+    ).toBe(true);
+  });
+
+  test("long digit run (epoch/counter) change is relocatable", () => {
+    expect(classifyRelocatableSpan("ts 1700000000 x", "ts 1700000600 x")).toBe(
+      true,
+    );
+  });
+
+  test("prose word change is NOT relocatable", () => {
+    expect(
+      classifyRelocatableSpan("You are helpful.", "You are concise."),
+    ).toBe(false);
+  });
+
+  test("prose words that look like month prefixes are NOT relocatable", () => {
+    // Regression guard: a greedy month-name pattern would match these; the
+    // gate must not count host-prompt prose rewrites as relocatable.
+    expect(classifyRelocatableSpan("a Decision now", "a Choice now")).toBe(
+      false,
+    );
+    expect(
+      classifyRelocatableSpan("do Marketing work", "do Janitor work"),
+    ).toBe(false);
+    expect(classifyRelocatableSpan("say Maybe today", "say Never today")).toBe(
+      false,
+    );
+  });
+
+  test("identical input is not relocatable", () => {
+    expect(classifyRelocatableSpan("same text", "same text")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// analyzeCacheTurn — system0Bust / relocatable enrichment (issue #791)
+// ---------------------------------------------------------------------------
+
+describe("analyzeCacheTurn — system[0] relocatability fields", () => {
+  function body(date: string, system1?: string): string {
+    const system: Array<{ type: string; text: string }> = [
+      { type: "text", text: `Host prompt. Today: ${date}` },
+    ];
+    if (system1 !== undefined) system.push({ type: "text", text: system1 });
+    return JSON.stringify({
+      model: "claude-3",
+      max_tokens: 1000,
+      system,
+      messages: [{ role: "user", content: "hi" }],
+    });
+  }
+
+  test("flags a relocatable system[0] date bust", () => {
+    const analytics = makeCacheAnalytics();
+    // Turn 1: seed prior body (first turn never compares).
+    analyzeCacheTurn(
+      analytics,
+      body("2024-12-15"),
+      makeUsage({ cacheReadInputTokens: 0, cacheCreationInputTokens: 5000 }),
+    );
+    // Turn 2: only the system[0] date changed → full bust.
+    const result = analyzeCacheTurn(
+      analytics,
+      body("2024-12-16"),
+      makeUsage({ cacheReadInputTokens: 0, cacheCreationInputTokens: 5000 }),
+    );
+    expect(result.divergencePoint.startsWith("system[0]")).toBe(true);
+    expect(result.system0Bust).toBe(true);
+    expect(result.relocatable).toBe(true);
+  });
+
+  test("does not flag a system[1] (LTM) change as system0/relocatable", () => {
+    const analytics = makeCacheAnalytics();
+    analyzeCacheTurn(
+      analytics,
+      body("2024-12-15", "Pref: use tabs"),
+      makeUsage({ cacheReadInputTokens: 0, cacheCreationInputTokens: 5000 }),
+    );
+    const result = analyzeCacheTurn(
+      analytics,
+      body("2024-12-15", "Pref: use spaces"),
+      makeUsage({ cacheReadInputTokens: 0, cacheCreationInputTokens: 5000 }),
+    );
+    expect(result.divergencePoint.startsWith("system[1]")).toBe(true);
+    expect(result.system0Bust).toBe(false);
+    expect(result.relocatable).toBe(false);
+  });
+
+  test("defaults system0Bust/relocatable to false on the first turn", () => {
+    const analytics = makeCacheAnalytics();
+    const result = analyzeCacheTurn(analytics, body("2024-12-15"), makeUsage());
+    expect(result.system0Bust).toBe(false);
+    expect(result.relocatable).toBe(false);
   });
 });

@@ -185,6 +185,10 @@ export function setCacheAnalyticsAttributes(
   span.setAttribute("lore.cache.divergence_point", analysis.divergencePoint);
   span.setAttribute("lore.cache.divergence_reason", analysis.divergenceReason);
   span.setAttribute("lore.cache.bust_cause", bustCause);
+  // system[0] cache-alignment measurement (issue #791): is this a host-prompt
+  // (system[0]) divergence, and does the changed span look relocatable?
+  span.setAttribute("lore.cache.system0_bust", analysis.system0Bust);
+  span.setAttribute("lore.cache.relocatable", analysis.relocatable);
 
   // Include diverging byte snippets for early divergences — these are from the
   // system prompt prefix (client env info), not user conversation content.
@@ -211,16 +215,18 @@ export function emitCacheBustMetric(
   cause: string,
   writeTokens: number,
   model: string,
+  /** issue #791: whether a system[0] divergence looked relocatable. */
+  relocatable = false,
 ): void {
   if (!Sentry.isInitialized()) return;
 
   Sentry.metrics.count("lore.cache_bust", 1, {
-    attributes: { cause, model },
+    attributes: { cause, model, relocatable },
   });
 
   if (writeTokens > 0) {
     Sentry.metrics.distribution("lore.cache_bust_tokens", writeTokens, {
-      attributes: { cause, model },
+      attributes: { cause, model, relocatable },
       unit: "token",
     });
   }

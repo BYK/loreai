@@ -1181,6 +1181,26 @@ const MIGRATIONS: string[] = [
   -- the store as JSON lets expansion stay byte-stable across restarts.
   ALTER TABLE session_state ADD COLUMN recall_store TEXT;
   `,
+  `
+  -- Version 47: Cache-bust measurement counters (issue #791 measure-first gate).
+  -- Durable per-(project, cause, relocatable) tallies so the question "is
+  -- system[0] dynamic content a MATERIAL cache-bust cause?" can be answered from
+  -- real data. The in-memory CacheAnalytics state (turnCount/bustCount) resets on
+  -- every gateway restart, so aggregating the rare-vs-material decision requires
+  -- a persisted counter. This is PASSIVE telemetry only — it never influences the
+  -- bytes sent upstream. relocatable is 0/1 (only meaningful when cause is
+  -- 'system-host-change'); write_tokens sums cache_creation tokens so the cost
+  -- magnitude (not just the count) of each cause is visible.
+  CREATE TABLE IF NOT EXISTS cache_bust_stats (
+    project_id   TEXT NOT NULL,
+    cause        TEXT NOT NULL,
+    relocatable  INTEGER NOT NULL,
+    turns        INTEGER NOT NULL DEFAULT 0,
+    write_tokens INTEGER NOT NULL DEFAULT 0,
+    updated_at   INTEGER NOT NULL,
+    PRIMARY KEY (project_id, cause, relocatable)
+  );
+  `,
 ];
 
 /**
@@ -2708,6 +2728,153 @@ export function listSessionPromptDeltas(
     selector: row.selector,
     content: row.content,
   }));
+}
+
+// ---------------------------------------------------------------------------
+// Cache-bust measurement counters (issue #791 — measure-first gate)
+// ---------------------------------------------------------------------------
+
+/** A durable per-(project, cause, relocatable) cache-bust tally. */
+export type CacheBustStat = {
+  projectID: string;
+  /** A CacheBustCause value (gateway-owned string). */
+  cause: string;
+  /** Whether the (system[0]) divergence looked relocatable. */
+  relocatable: boolean;
+  /** Number of observed turns for this key. */
+  turns: number;
+  /** Summed cache_creation (write) tokens for this key. */
+  writeTokens: number;
+  /** Last update time (epoch ms). */
+  updatedAt: number;
+};
+
+/**
+ * Record a single per-turn cache-bust observation, accumulating into the
+ * durable counter for (project, cause, relocatable). Increments `turns` by 1
+ * and adds `writeTokens` to the running total. Passive telemetry only — never
+ * affects the upstream request.
+ */
+export function recordCacheBustObservation(input: {
+  projectID: string;
+  cause: string;
+  relocatable: boolean;
+  writeTokens: number;
+}): void {
+  db()
+    .query(
+      `INSERT INTO cache_bust_stats
+         (project_id, cause, relocatable, turns, write_tokens, updated_at)
+       VALUES (?, ?, ?, 1, ?, ?)
+       ON CONFLICT(project_id, cause, relocatable) DO UPDATE SET
+         turns        = turns + 1,
+         write_tokens = write_tokens + excluded.write_tokens,
+         updated_at   = excluded.updated_at`,
+    )
+    .run(
+      input.projectID,
+      input.cause,
+      input.relocatable ? 1 : 0,
+      Math.max(0, Math.trunc(input.writeTokens)),
+      Date.now(),
+    );
+}
+
+/**
+ * Read cache-bust counters, optionally scoped to one project. Ordered by
+ * `turns` descending (most-frequent cause first).
+ */
+export function getCacheBustStats(projectID?: string): CacheBustStat[] {
+  const rows = (
+    projectID
+      ? db()
+          .query(
+            `SELECT project_id, cause, relocatable, turns, write_tokens, updated_at
+               FROM cache_bust_stats
+              WHERE project_id = ?
+              ORDER BY turns DESC`,
+          )
+          .all(projectID)
+      : db()
+          .query(
+            `SELECT project_id, cause, relocatable, turns, write_tokens, updated_at
+               FROM cache_bust_stats
+              ORDER BY turns DESC`,
+          )
+          .all()
+  ) as Array<{
+    project_id: string;
+    cause: string;
+    relocatable: number;
+    turns: number;
+    write_tokens: number;
+    updated_at: number;
+  }>;
+
+  return rows.map((row) => ({
+    projectID: row.project_id,
+    cause: row.cause,
+    relocatable: row.relocatable === 1,
+    turns: row.turns,
+    writeTokens: row.write_tokens,
+    updatedAt: row.updated_at,
+  }));
+}
+
+/** Aggregated view of cache-bust counters for the issue #791 gate readout. */
+export type CacheBustSummary = {
+  /** All observed turns (every cause, including non-busts). */
+  totalTurns: number;
+  /** Turns that were genuine cache busts (excludes incremental / first-turn). */
+  bustTurns: number;
+  /** Summed write tokens across bust turns. */
+  bustTokens: number;
+  /** Bust turns whose divergence was in system[0] (host prompt). */
+  hostTurns: number;
+  /** Summed write tokens across system[0] host busts. */
+  hostTokens: number;
+  /** System[0] host busts whose changed span looked relocatable. */
+  relocatableTurns: number;
+  /** Summed write tokens across relocatable system[0] busts. */
+  relocatableTokens: number;
+};
+
+/** Causes that are NOT genuine cache busts (excluded from the bust denominator). */
+const NON_BUST_CAUSES = new Set(["incremental", "first-turn"]);
+
+/**
+ * Reduce raw per-(cause, relocatable) counters into the gate summary. Pure —
+ * no I/O — so the headline arithmetic that drives the build-vs-close decision
+ * is unit-testable independent of the DB and CLI.
+ */
+export function summarizeCacheBustStats(
+  stats: CacheBustStat[],
+): CacheBustSummary {
+  const out: CacheBustSummary = {
+    totalTurns: 0,
+    bustTurns: 0,
+    bustTokens: 0,
+    hostTurns: 0,
+    hostTokens: 0,
+    relocatableTurns: 0,
+    relocatableTokens: 0,
+  };
+  for (const s of stats) {
+    out.totalTurns += s.turns;
+    if (!NON_BUST_CAUSES.has(s.cause)) {
+      out.bustTurns += s.turns;
+      out.bustTokens += s.writeTokens;
+    }
+    if (s.cause === "system-host-change") {
+      out.hostTurns += s.turns;
+      out.hostTokens += s.writeTokens;
+      if (s.relocatable) {
+        out.relocatableTurns += s.turns;
+        out.relocatableTokens += s.writeTokens;
+      }
+    }
+  }
+  return out;
 }
 
 /**
