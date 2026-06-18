@@ -116,6 +116,15 @@ const NO_CACHE_WRITE_THRESHOLD = 3;
 const FREE_WRITE_LAYER0_FRACTION = 0.65;
 
 /**
+ * On uncalibrated turns, multiply the chars/3 estimate to approximate the real
+ * token count. chars/3 undercounts by ~1.68x on real data, but the overhead EMA
+ * captures most of the gap; 1.5 provides a safe margin. Module-scoped so the
+ * layer-0 sizing helper (and isLargeColdStart) share one definition with the
+ * transform path.
+ */
+const UNCALIBRATED_SAFETY = 1.5;
+
+/**
  * True when the session's upstream has reported zero cache_creation_input_tokens
  * for at least {@link NO_CACHE_WRITE_THRESHOLD} consecutive turns.  Covers both
  * free-write-cache providers (e.g. MiniMax passive caching) and non-caching
@@ -455,6 +464,10 @@ function getSessionState(sessionID: string): SessionState {
     if (persisted && persisted.lastTurnAt > 0) {
       state.lastLayer = persisted.lastLayer as SafetyLayer;
       state.lastKnownInput = persisted.lastKnownInput;
+      // v43: restore the last-sent message count so the calibrated-delta
+      // estimate identifies only genuinely-new messages on the resume turn
+      // (without it, the whole conversation looks new → over-escalation). (#796)
+      state.lastKnownMessageCount = persisted.lastKnownMessageCount;
       state.lastTurnAt = persisted.lastTurnAt;
       // Don't restore consecutiveBusts from DB — it's a short-term rolling
       // signal that must rebuild from live API responses in the current process.
@@ -831,6 +844,7 @@ export function inspectSessionState(sessionID: string): {
   distillationSnapshot: DistillationSnapshot | null;
   consecutiveBusts: number;
   zeroCacheWriteTurns: number;
+  lastKnownMessageCount: number;
 } | null {
   const state = sessionStates.get(sessionID);
   if (!state) return null;
@@ -843,6 +857,7 @@ export function inspectSessionState(sessionID: string): {
     distillationSnapshot: state.distillationSnapshot,
     consecutiveBusts: state.consecutiveBusts,
     zeroCacheWriteTurns: state.zeroCacheWriteTurns,
+    lastKnownMessageCount: state.lastKnownMessageCount,
   };
 }
 
@@ -900,6 +915,7 @@ export function saveGradientState(sessionID: string): void {
   saveSessionTracking(sessionID, {
     lastLayer: state.lastLayer,
     lastKnownInput: state.lastKnownInput,
+    lastKnownMessageCount: state.lastKnownMessageCount,
     lastTurnAt: state.lastTurnAt,
     // Repurpose the dead dynamicContextCap column (v24, always 0 now)
     // to persist consecutiveBusts — avoids a new DB migration.
@@ -2035,6 +2051,82 @@ export function needsUrgentDistillation(sessionID: string): boolean {
   return v;
 }
 
+/**
+ * Layer-0 sizing for a given expected input. Single source of truth shared by
+ * transformInner() (the layer decision) and isLargeColdStart() (the pipeline's
+ * turn-1 LTM-injection decision) so the two never diverge. Reads the
+ * module-global model limits set per-request by the host before transform().
+ * (issue #796)
+ */
+function layer0Bounds(
+  expectedInput: number,
+  calibrated: boolean,
+  sid: string | undefined,
+): { layer0Input: number; layer0Ceiling: number } {
+  const maxInput = contextLimit - outputReserved;
+  // chars/3 undercounts by ~1.63x on real sessions — without this an
+  // uncalibrated session estimated at 146K passes Layer 0 but actually costs
+  // 214K → overflow.
+  const layer0Input = calibrated
+    ? expectedInput
+    : expectedInput * UNCALIBRATED_SAFETY;
+  // Cost-aware cap: smaller of the API limit and the cost-derived cap
+  // (0 = disabled → pure maxInput).
+  let layer0Ceiling =
+    maxLayer0Tokens > 0 ? Math.min(maxInput, maxLayer0Tokens) : maxInput;
+  // Cold-cache awareness: the entire context is a cache WRITE on an
+  // uncalibrated turn — tighten the cap to 70% to reduce cold-write cost.
+  if (!calibrated && layer0Ceiling < maxInput) {
+    layer0Ceiling = Math.floor(layer0Ceiling * 0.7);
+  }
+  // Free-write / non-caching: no expensive write to avoid → compress earlier.
+  if (sid && isFreeWriteSession(sid)) {
+    layer0Ceiling = Math.min(
+      layer0Ceiling,
+      Math.floor(maxInput * FREE_WRITE_LAYER0_FRACTION),
+    );
+  }
+  return { layer0Input, layer0Ceiling };
+}
+
+/**
+ * Will an uncalibrated (first-sight) session of this size be forced to skip
+ * Layer-0 passthrough and compress on its cold turn? Pure, read-only.
+ *
+ * Used by the gateway pipeline to decide whether to inject context-bound LTM
+ * (system[2]) on turn 1 for an already-large resumed session instead of
+ * deferring to turn 2. Returns false once the session is calibrated
+ * (lastKnownInput > 0) — by then the normal per-turn logic applies.
+ *
+ * Shares layer0Bounds() with transformInner, so the caller can make the two
+ * agree EXACTLY: pass `ltmTokens` = the LTM tokens that will be set for this
+ * turn when system[2] is NOT injected (i.e. the stable/preference block only).
+ * Then on a "not large" result the pipeline skips system[2] and calls
+ * setLtmTokens(stableOnly), so transformInner's expectedInput equals the value
+ * tested here — no decision-vs-compression drift band. (#796)
+ */
+export function isLargeColdStart(input: {
+  messages: MessageWithParts[];
+  sessionID?: string;
+  /** Override the session's in-flight LTM token count (see docstring). */
+  ltmTokens?: number;
+}): boolean {
+  const sid = input.sessionID ?? input.messages[0]?.info.sessionID;
+  const sessState = sid ? getSessionState(sid) : makeSessionState();
+  if (sessState.lastKnownInput > 0) return false;
+  const overhead = getOverhead();
+  const sessLtmTokens =
+    input.ltmTokens ?? (sid ? sessState.ltmTokens : ltmTokensFallback);
+  const expectedInput =
+    estimateMessages(input.messages) + overhead + sessLtmTokens;
+  const { layer0Input, layer0Ceiling } = layer0Bounds(
+    expectedInput,
+    false,
+    sid,
+  );
+  return layer0Input > layer0Ceiling;
+}
+
 function transformInner(input: {
   messages: MessageWithParts[];
   projectPath: string;
@@ -2094,11 +2186,6 @@ function transformInner(input: {
   // from the real tokenizer — so tryFit output must be validated with a safety
   // multiplier before being used.
   const calibrated = sessState.lastKnownInput > 0;
-
-  // On uncalibrated turns, apply this multiplier to tryFit's estimated total to
-  // approximate the real token count. chars/3 undercounts by ~1.68x on real data,
-  // but overhead EMA captures most of the gap. 1.5 provides a safe margin.
-  const UNCALIBRATED_SAFETY = 1.5;
 
   // Hard ceiling: never allow layer-0 passthrough within 5% of maxInput,
   // regardless of calibration accuracy or economic analysis.  The estimation
@@ -2238,32 +2325,26 @@ function transformInner(input: {
     expectedInput = messageTokens + overhead + sessLtmTokens;
   }
 
-  // When uncalibrated, apply safety multiplier to the layer-0 decision too.
-  // chars/3 undercounts by ~1.63x on real sessions — without this, a session
-  // estimated at 146K passes layer 0 but actually costs 214K → overflow.
-  const layer0Input = calibrated
-    ? expectedInput
-    : expectedInput * UNCALIBRATED_SAFETY;
+  // Layer-0 sizing (input estimate + ceiling). Extracted to layer0Bounds() so
+  // the pipeline's turn-1 LTM decision (isLargeColdStart) shares ONE definition
+  // with the layer choice here — a disagreement would re-introduce a bust. (#796)
+  const { layer0Input, layer0Ceiling } = layer0Bounds(
+    expectedInput,
+    calibrated,
+    sid,
+  );
 
-  // Cost-aware layer-0 cap: use the smaller of the API limit and the cost-derived
-  // cap. When maxLayer0Tokens is 0 (disabled), fall back to pure maxInput.
-  let layer0Ceiling =
-    maxLayer0Tokens > 0 ? Math.min(maxInput, maxLayer0Tokens) : maxInput;
-
-  // Cold-cache awareness: on the first turn (uncalibrated = no prior API data),
-  // the entire context is a cache WRITE at 12.5× the cache-read price. Use 70%
-  // of the normal cap to reduce the cold-write cost.
-  if (!calibrated && layer0Ceiling < maxInput) {
-    layer0Ceiling = Math.floor(layer0Ceiling * 0.7);
-  }
-
-  // Free-write cache / non-caching: no expensive cache writes to avoid, so
-  // compress earlier to leave headroom for tool-heavy turns.
-  if (sid && isFreeWriteSession(sid)) {
-    layer0Ceiling = Math.min(
-      layer0Ceiling,
-      Math.floor(maxInput * FREE_WRITE_LAYER0_FRACTION),
-    );
+  // First-sight large session → skip the Layer-0 cold full-write. An
+  // uncalibrated session already over the Layer-0 ceiling is a resumed
+  // conversation Lore hasn't tracked in-process. Passing it through at Layer 0
+  // writes the entire raw body on a cold cache; the next (calibrated) turn then
+  // re-windows to Layer 1 (a second full write), and LTM injection adds a third
+  // (system[2]) bust. Compressing now collapses all of that into the single
+  // unavoidable cold write. Mirrors postIdleCompact's "cache write regardless"
+  // rationale: the tier gate's continue-at-Layer-0 economics assume a WARM
+  // cache, which does not exist on a cold turn. (issue #796)
+  if (!calibrated && layer0Input > layer0Ceiling) {
+    effectiveMinLayer = Math.max(effectiveMinLayer, 1) as SafetyLayer;
   }
 
   if (

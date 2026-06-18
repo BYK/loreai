@@ -38,6 +38,9 @@ import {
   selectDistillations,
   exportDedupDecisions,
   importDedupDecisions,
+  isLargeColdStart,
+  saveGradientState,
+  evictSession,
   type ModelBudget,
 } from "../src/gradient";
 import type { LoreMessage, LorePart, LoreMessageWithParts } from "../src/types";
@@ -5111,5 +5114,175 @@ describe("gradient — per-session model budget (RC2: cross-model contamination)
       budget: noPriceBudget,
     });
     expect(getCachePricing()).toEqual({ write: 0, read: 0 });
+  });
+});
+
+// ===========================================================================
+// Issue #796: restart-proof calibration + cold-start large-session handling
+// ===========================================================================
+
+describe("issue #796: lastKnownMessageCount persistence", () => {
+  test("persists to DB via saveGradientState and restores after eviction", () => {
+    const sid = `lkmc-${crypto.randomUUID()}`;
+    resetCalibration(sid);
+    setModelLimits({ context: 10_000, output: 2_000 });
+    // calibrate() records lastKnownInput + lastKnownMessageCount in memory.
+    calibrate(50_000, sid, 250);
+    // lastTurnAt > 0 is the proxy that gates the atomic restore in getSessionState.
+    setLastTurnAtForTest(sid, Date.now());
+    saveGradientState(sid);
+
+    // Simulate restart: drop the in-memory state.
+    evictSession(sid);
+    expect(inspectSessionState(sid)).toBeNull();
+
+    // Any getSessionState-driven call restores from DB; setLtmTokens is benign.
+    setLtmTokens(0, sid);
+    expect(inspectSessionState(sid)?.lastKnownMessageCount).toBe(250);
+
+    // Reset shared baseline.
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0);
+  });
+});
+
+describe("issue #796: isLargeColdStart + cold-start force-compress", () => {
+  // Build N messages with enough text to exceed a low Layer-0 ceiling.
+  function bulk(sessionID: string, n: number, pad: string) {
+    return Array.from({ length: n }, (_, i) =>
+      makeMsg(
+        `${sessionID}-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        `Message ${i}: ${pad}`,
+        sessionID,
+      ),
+    );
+  }
+
+  function configureLowCeiling() {
+    // maxInput = 5000, usable = 5000, rawBudget = 2000.
+    setModelLimits({ context: 6_000, output: 1_000 });
+    calibrate(0); // zero overhead
+    setMaxLayer0Tokens(500); // ceiling base 500, uncalibrated ×0.7 = 350
+    setCachePricing(0, 0); // no pricing → shouldCompress() = false (tier gate keeps Layer 0)
+  }
+
+  function resetBaseline() {
+    setModelLimits({ context: 10_000, output: 2_000 });
+    setMaxLayer0Tokens(0);
+    calibrate(0);
+  }
+
+  test("isLargeColdStart is true for a large uncalibrated session", () => {
+    configureLowCeiling();
+    const sid = `cold-large-${crypto.randomUUID()}`;
+    const messages = bulk(sid, 30, "padding text to take up token space here");
+    // Precondition: clearly over the ~350 ceiling after the ×1.5 uncalibrated factor.
+    expect(estimateMessages(messages)).toBeGreaterThan(500);
+    expect(isLargeColdStart({ messages, sessionID: sid })).toBe(true);
+    resetBaseline();
+  });
+
+  test("isLargeColdStart is false for a small uncalibrated session", () => {
+    configureLowCeiling();
+    const sid = `cold-small-${crypto.randomUUID()}`;
+    const messages = [
+      makeMsg(`${sid}-1`, "user", "hi", sid),
+      makeMsg(`${sid}-2`, "assistant", "hello", sid),
+    ];
+    expect(isLargeColdStart({ messages, sessionID: sid })).toBe(false);
+    resetBaseline();
+  });
+
+  test("isLargeColdStart is false once the session is calibrated, even when large", () => {
+    configureLowCeiling();
+    const sid = `cold-calibrated-${crypto.randomUUID()}`;
+    const messages = bulk(sid, 30, "padding text to take up token space here");
+    // Calibrate the session (lastKnownInput > 0) — no longer a cold start.
+    calibrate(50_000, sid, 30);
+    expect(isLargeColdStart({ messages, sessionID: sid })).toBe(false);
+    resetBaseline();
+  });
+
+  test("isLargeColdStart honors the ltmTokens hint (Part A/B alignment)", () => {
+    // A small session that is NOT a cold start on its own becomes one once the
+    // about-to-be-injected LTM tokens push it over the ceiling. The pipeline
+    // passes the stable-LTM token count as this hint so the turn-1 LTM decision
+    // matches what the gradient transform will see. (#796)
+    configureLowCeiling();
+    const sid = `cold-ltm-hint-${crypto.randomUUID()}`;
+    const messages = [
+      makeMsg(`${sid}-1`, "user", "hi", sid),
+      makeMsg(`${sid}-2`, "assistant", "hello", sid),
+    ];
+    // Without the hint: tiny → not a cold start.
+    expect(isLargeColdStart({ messages, sessionID: sid })).toBe(false);
+    // With a large LTM hint: now over the ceiling → cold start. If the param
+    // were ignored, this would still be false.
+    expect(
+      isLargeColdStart({ messages, sessionID: sid, ltmTokens: 1000 }),
+    ).toBe(true);
+    resetBaseline();
+  });
+
+  test("transform forces layer >= 1 for a large uncalibrated session (would be Layer 0 without the fix)", () => {
+    configureLowCeiling();
+    const sid = `cold-force-${crypto.randomUUID()}`;
+    const messages = bulk(sid, 30, "padding text to take up token space here");
+    // Sanity: the tier gate would otherwise pass this through at Layer 0 (no
+    // pricing → shouldCompress() = false). The cold-start force-compress flips it.
+    const result = transform({
+      messages,
+      projectPath: PROJECT,
+      sessionID: sid,
+    });
+    expect(result.layer).toBeGreaterThanOrEqual(1);
+    resetBaseline();
+  });
+
+  test("transform stays at Layer 0 for a small uncalibrated session (no over-fire)", () => {
+    configureLowCeiling();
+    const sid = `cold-small-pass-${crypto.randomUUID()}`;
+    const messages = [
+      makeMsg(`${sid}-1`, "user", "hi", sid),
+      makeMsg(`${sid}-2`, "assistant", "hello", sid),
+    ];
+    const result = transform({
+      messages,
+      projectPath: PROJECT,
+      sessionID: sid,
+    });
+    expect(result.layer).toBe(0);
+    resetBaseline();
+  });
+
+  // Scope: this validates gradient-level agreement at EQUAL ltm tokens (neither
+  // call injects LTM between them). The pipeline closes the remaining
+  // decision-vs-compression band by passing setLtmTokens's stable count as the
+  // isLargeColdStart `ltmTokens` hint — exercised by the "honors the ltmTokens
+  // hint" test above. (#796)
+  test("isLargeColdStart agrees with transform's layer decision (drift guard)", () => {
+    configureLowCeiling();
+    for (const [n, pad] of [
+      [30, "padding text to take up token space here"],
+      [2, ""],
+    ] as const) {
+      const sid = `cold-agree-${n}-${crypto.randomUUID()}`;
+      const messages =
+        n === 2
+          ? [
+              makeMsg(`${sid}-1`, "user", "hi", sid),
+              makeMsg(`${sid}-2`, "assistant", "ok", sid),
+            ]
+          : bulk(sid, n, pad);
+      const predicted = isLargeColdStart({ messages, sessionID: sid });
+      const result = transform({
+        messages,
+        projectPath: PROJECT,
+        sessionID: sid,
+      });
+      expect(predicted).toBe(result.layer >= 1);
+    }
+    resetBaseline();
   });
 });

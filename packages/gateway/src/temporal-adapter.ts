@@ -37,7 +37,7 @@ import { blocksToText } from "./translate/types";
  * Same message at the same position produces the same ID across requests,
  * which is critical for gradient prefix fingerprinting and cache-bust detection.
  */
-function deterministicID(
+export function deterministicID(
   role: string,
   index: number,
   content: GatewayContentBlock[],

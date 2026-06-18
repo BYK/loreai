@@ -16,6 +16,8 @@ import {
   load,
   config as loreConfig,
   ensureProject,
+  findSessionStatesByFingerprint,
+  countMatchingTemporalIds,
   projectId,
   projectGitRemote,
   mergeProjectInternal,
@@ -27,6 +29,7 @@ import {
   curator,
   log,
   transform,
+  isLargeColdStart,
   setModelLimits,
   setLtmTokens,
   getLtmBudget,
@@ -151,6 +154,7 @@ import {
   gatewayMessagesToLore,
   updateAssistantMessageTokens,
   resolveToolResults,
+  deterministicID,
 } from "./temporal-adapter";
 import { createGatewayLLMClient } from "./llm-adapter";
 import { createBatchLLMClient } from "./batch-queue";
@@ -2363,9 +2367,116 @@ export function stripContextMarkers(messages: GatewayMessage[]): void {
   }
 }
 
+/** How many leading messages to probe for content-hash overlap when adopting a
+ *  resumed session after a restart (Tier 3b, issue #796). */
+const ADOPT_PROBE_MESSAGES = 16;
+/** Minimum confirmed user-message overlap to adopt a fingerprint-matched
+ *  candidate — requires evidence beyond the (fingerprint-implied) first message. */
+const ADOPT_MIN_OVERLAP = 2;
+
+/**
+ * Restart-proof session adoption (issue #796). Recovers a prior session for a
+ * resumed conversation from its persisted fingerprint, CONFIRMS it by
+ * content-hash overlap of the leading USER messages, and ADOPTS its id so the
+ * conversation inherits the prior distillations, gradient calibration, and LTM
+ * pin. Returns the adopted session (isNew=false) or null when no candidate is
+ * confidently confirmed.
+ *
+ * Confirmation uses user messages only: temporal storage persists user messages
+ * with position-stable deterministic IDs, while assistant responses are stored
+ * under a synthetic index-0 ID — so only user messages are a reliable
+ * cross-restart match signal. The project_id scope of the overlap query also
+ * enforces same-project (a cross-project fingerprint twin yields zero overlap).
+ * Subagent status must match, and a fork guard rejects a count that dropped far
+ * below the candidate's stored count.
+ *
+ * Called from BOTH mint paths: the Tier-1 path (known header present but its
+ * value is new — the opencode restart case; `known` is rebound to the adopted
+ * sid for a future Tier-1 fast path) and the Tier-3 path (no known header).
+ */
+async function adoptByFingerprint(input: {
+  req: GatewayRequest;
+  headers: Record<string, string>;
+  projectPath: string;
+  known: { headerName: string; sessionId: string } | null;
+  msgCount: number;
+}): Promise<{ sessionID: string; isNew: false; tier: 3 } | null> {
+  const { req, headers, projectPath, known, msgCount } = input;
+  if (!projectPath) return null;
+
+  const cred = extractAuth(req.rawHeaders);
+  const fingerprint = await fingerprintMessages(
+    req.messages.map((m) => ({ role: m.role, content: m.content })),
+    { authSuffix: cred ? authFingerprint(cred) : "" },
+  );
+
+  const reqIsSubagent = !!headers["x-parent-session-id"];
+  const candidates = findSessionStatesByFingerprint(fingerprint).filter(
+    (c) => (c.is_subagent === 1) === reqIsSubagent,
+  );
+  if (candidates.length === 0) return null;
+
+  // Hash the leading user messages by their absolute index (the only
+  // position-stable IDs in temporal storage). NOTE: identifySession runs before
+  // stripContextMarkers, so these IDs (and the fingerprint above) are computed
+  // from UN-stripped content, while stored IDs are post-strip. Adoption thus
+  // assumes the LEADING user messages are marker-free; a `[lore:...]` marker in
+  // an early message only lowers overlap (graceful miss → no adoption), never a
+  // false positive. The primary target (opencode x-lore-session-id) sends no
+  // such markers, and marker clients carry them on the latest turn only.
+  const probeIDs: string[] = [];
+  let probedUsers = 0;
+  const probeLimit = Math.min(req.messages.length, ADOPT_PROBE_MESSAGES);
+  for (let i = 0; i < probeLimit; i++) {
+    const m = req.messages[i];
+    if (m.role !== "user") continue;
+    probedUsers++;
+    probeIDs.push(deterministicID(m.role, i, m.content));
+  }
+  if (probeIDs.length < ADOPT_MIN_OVERLAP) return null;
+
+  const pid = ensureProject(projectPath);
+  const minOverlap = Math.max(ADOPT_MIN_OVERLAP, Math.ceil(probedUsers * 0.5));
+  let best: { sid: string; overlap: number; countDiff: number } | null = null;
+  for (const c of candidates) {
+    // Fork guard (mirrors the in-memory Tier-3 scan): a count that dropped far
+    // below the stored count is a fork, not a resume.
+    if (msgCount - c.message_count < -MESSAGE_COUNT_PROXIMITY_THRESHOLD) {
+      continue;
+    }
+    const overlap = countMatchingTemporalIds(pid, c.session_id, probeIDs);
+    if (overlap < minOverlap) continue;
+    const countDiff = Math.abs(msgCount - c.message_count);
+    if (
+      !best ||
+      overlap > best.overlap ||
+      (overlap === best.overlap && countDiff < best.countDiff)
+    ) {
+      best = { sid: c.session_id, overlap, countDiff };
+    }
+  }
+  if (!best) return null;
+
+  // When a known header is present, rebind it → adopted sid so future turns
+  // identify via the Tier 1 fast path (and stop re-confirming overlap).
+  if (known) {
+    headerSessionIndex.set(`${known.headerName}:${known.sessionId}`, best.sid);
+    saveSessionTracking(best.sid, {
+      headerSessionId: known.sessionId,
+      headerName: known.headerName,
+    });
+  }
+  log.info(
+    `adopted prior session ${best.sid.slice(0, 16)} for resumed conversation ` +
+      `(overlap=${best.overlap}/${probedUsers}` +
+      `${known ? `, header=${known.headerName}` : ""})`,
+  );
+  return { sessionID: best.sid, isNew: false, tier: 3 };
+}
+
 async function identifySession(
   req: GatewayRequest,
-  _projectPath: string,
+  projectPath: string,
 ): Promise<{ sessionID: string; isNew: boolean; tier: 1 | 2 | 2.5 | 3 }> {
   const headers = req.rawHeaders;
 
@@ -2521,6 +2632,20 @@ async function identifySession(
       return { sessionID: predecessor.sid, isNew: false, tier: 1 };
     }
 
+    // --- Tier 1 → 3b: restart-proof adoption ---
+    // The known header value is new and rotation found no predecessor. Before
+    // minting a fresh session, try to adopt a prior session for this same
+    // conversation (resumed after a restart under a new x-lore-session-id) via
+    // its persisted fingerprint + content-hash overlap. (issue #796)
+    const adopted = await adoptByFingerprint({
+      req,
+      headers,
+      projectPath,
+      known,
+      msgCount: req.messages.length,
+    });
+    if (adopted) return adopted;
+
     // Genuinely new session — no predecessor or ambiguous concurrent sessions.
     const sessionID = generateSessionID();
     headerSessionIndex.set(indexKey, sessionID);
@@ -2613,6 +2738,21 @@ async function identifySession(
     }
     return { sessionID: bestMatch.sid, isNew: false, tier: 3 };
   }
+
+  // --- Tier 3b: DB-backed fingerprint adoption (restart-proof) ---
+  // The in-memory scan above is empty after a restart, so it can never rematch
+  // a resumed conversation. For a header-less client, recover + adopt the prior
+  // session from its persisted fingerprint, confirmed by content overlap. (The
+  // header-bearing case — e.g. opencode's x-lore-session-id — is handled in the
+  // Tier 1 mint path above.) (issue #796)
+  const adopted = await adoptByFingerprint({
+    req,
+    headers,
+    projectPath,
+    known: null,
+    msgCount,
+  });
+  if (adopted) return adopted;
 
   // No matching session → create new.
   const sessionID = generateSessionID();
@@ -5455,6 +5595,12 @@ async function handleConversationTurn(
     );
   }
 
+  // Build the Lore message array once (resolved) — shared by the turn-1 LTM
+  // decision below (isLargeColdStart) and the gradient transform in step 7, so
+  // both see identical input and agree on whether this cold session compresses.
+  const loreMessages = gatewayMessagesToLore(req.messages, sessionID);
+  resolveToolResults(loreMessages);
+
   // --- 6. LTM injection (3-block system prompt for cache efficiency) ---
   // system[0]: Host prompt              [no cache_control]
   // system[1]: Stable LTM (preferences) [cache_control: 1h] — pinned ≥1h
@@ -5558,10 +5704,33 @@ async function handleConversationTurn(
       }
       stableLtmText = stable?.formatted;
 
+      // Fallback for a genuinely-new but already-large session (no prior session
+      // to adopt — e.g. a transcript imported from another machine): the gradient
+      // will compress it on turn 1 (see gradient.isLargeColdStart), so inject
+      // context-bound LTM (system[2]) NOW instead of deferring to turn 2,
+      // collapsing the turn-2 system[2] bust and the turn-3 Layer 0→1 bust into
+      // the single cold write. Pass the stable-LTM token count as the ltm hint:
+      // when this returns false we skip system[2] and setLtmTokens(stableOnly),
+      // so the gradient transform sees the SAME expectedInput tested here — no
+      // decision-vs-compression drift band. (Adopted/resumed sessions are
+      // calibrated, so this is false for them — the restored pin handles
+      // system[2].) (issue #796)
+      const largeColdStart =
+        isFirstTurn &&
+        isLargeColdStart({
+          messages: loreMessages,
+          sessionID,
+          ltmTokens: stable?.tokenCount ?? 0,
+        });
+
       // --- system[2]: Context-bound LTM (non-preference entries) ---
       // Deferred to turn 2+ when real session context exists for relevance
-      // scoring. On turn 1, only stable LTM (preferences) is injected.
-      if (!isFirstTurn) {
+      // scoring. On turn 1, only stable LTM (preferences) is injected — EXCEPT
+      // for an already-large cold start (largeColdStart), where we inject now so
+      // LTM + the turn-1 compression are decided together (relevance scoring
+      // still works: contextHint comes from the incoming request, not temporal
+      // storage). (issue #796)
+      if (!isFirstTurn || largeColdStart) {
         let cached = ltmSessionCache.get(sessionID);
         // Entry-set keys for the *freshly computed* selection. Only populated
         // on the recompute path (when ltmSessionCache was cold/invalidated) —
@@ -5778,9 +5947,8 @@ async function handleConversationTurn(
   }
 
   // --- 7. Gradient transform on messages ---
-  const loreMessages = gatewayMessagesToLore(req.messages, sessionID);
-  resolveToolResults(loreMessages);
-
+  // loreMessages was built + resolved once before the LTM block (step 6) so the
+  // turn-1 LTM decision and this transform share identical input. Reuse it.
   const result = transform({
     messages: loreMessages,
     projectPath,

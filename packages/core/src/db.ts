@@ -1147,6 +1147,16 @@ const MIGRATIONS: string[] = [
     local_content TEXT   -- JSON of the discarded local row (recoverable after LWW)
   );
   `,
+  `
+  -- Version 44: persist lastKnownMessageCount for restart-proof calibration.
+  -- The gradient's calibrated-delta estimate needs the message count that was
+  -- sent last turn (to identify only genuinely-new messages). last_known_input
+  -- and last_layer already persist; without the count, an adopted/resumed
+  -- session after a restart is "calibrated" but treats the whole conversation
+  -- as new, over-estimating expectedInput and over-escalating the layer for one
+  -- turn. Persisting it makes the resume turn accurate. (issue #796)
+  ALTER TABLE session_state ADD COLUMN last_known_message_count INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 /**
@@ -1610,6 +1620,12 @@ function recoverMissingObjects(database: Database) {
     if (!scols.some((c) => c.name === "dedup_decisions")) {
       database.exec(
         "ALTER TABLE session_state ADD COLUMN dedup_decisions TEXT;",
+      );
+    }
+    // Version 44: persisted last-known message count for restart-proof calibration.
+    if (!scols.some((c) => c.name === "last_known_message_count")) {
+      database.exec(
+        "ALTER TABLE session_state ADD COLUMN last_known_message_count INTEGER NOT NULL DEFAULT 0;",
       );
     }
   }
@@ -2337,6 +2353,8 @@ export type SessionTrackingState = {
   interBustIntervalEMA?: number;
   lastLayer?: number;
   lastKnownInput?: number;
+  /** v43: messages sent last turn — for restart-proof calibrated-delta estimation. */
+  lastKnownMessageCount?: number;
   lastTurnAt?: number;
   lastBustAt?: number;
   // v26: sub-agent parent–child relationships
@@ -2453,6 +2471,10 @@ export function saveSessionTracking(
     sets.push("last_known_input = ?");
     vals.push(state.lastKnownInput);
   }
+  if (state.lastKnownMessageCount !== undefined) {
+    sets.push("last_known_message_count = ?");
+    vals.push(state.lastKnownMessageCount);
+  }
   if (state.lastTurnAt !== undefined) {
     sets.push("last_turn_at = ?");
     vals.push(state.lastTurnAt);
@@ -2516,6 +2538,8 @@ export type LoadedSessionTracking = {
   interBustIntervalEMA: number;
   lastLayer: number;
   lastKnownInput: number;
+  /** v43: messages sent last turn (0 for pre-v43 / never-calibrated rows). */
+  lastKnownMessageCount: number;
   lastTurnAt: number;
   lastBustAt: number;
   // v26: sub-agent parent–child relationships
@@ -2653,7 +2677,8 @@ export function loadSessionTracking(
               fingerprint, header_session_id, header_name,
               resolved_conversation_ttl, warmup_state,
               dynamic_context_cap, bust_rate_ema, inter_bust_interval_ema,
-              last_layer, last_known_input, last_turn_at, last_bust_at,
+              last_layer, last_known_input, last_known_message_count,
+              last_turn_at, last_bust_at,
               parent_session_id, is_subagent,
               project_path, project_path_provisional,
               compaction_anomaly_pending
@@ -2680,6 +2705,7 @@ export function loadSessionTracking(
     inter_bust_interval_ema: number;
     last_layer: number;
     last_known_input: number;
+    last_known_message_count: number;
     last_turn_at: number;
     last_bust_at: number;
     parent_session_id: string | null;
@@ -2710,6 +2736,7 @@ export function loadSessionTracking(
     interBustIntervalEMA: row.inter_bust_interval_ema,
     lastLayer: row.last_layer,
     lastKnownInput: row.last_known_input,
+    lastKnownMessageCount: row.last_known_message_count,
     lastTurnAt: row.last_turn_at,
     lastBustAt: row.last_bust_at,
     parentSessionId: row.parent_session_id,
@@ -2718,6 +2745,66 @@ export function loadSessionTracking(
     projectPathProvisional: row.project_path_provisional === 1,
     compactionAnomalyPending: row.compaction_anomaly_pending === 1,
   };
+}
+
+/**
+ * Find persisted sessions whose stored fingerprint matches `fingerprint`.
+ *
+ * Restart-proof session adoption (issue #796): after a process restart the
+ * in-memory session index is empty, so the Tier-3 fingerprint scan (which only
+ * iterates memory) can never rematch a resumed conversation. This DB-backed
+ * lookup recovers candidate sessions by their persisted fingerprint. The empty
+ * fingerprint ('' — the default for untracked rows) never matches, so
+ * uninitialized rows are excluded.
+ */
+export function findSessionStatesByFingerprint(
+  fingerprint: string,
+): Array<{ session_id: string; message_count: number; is_subagent: number }> {
+  if (!fingerprint) return [];
+  return db()
+    .query(
+      `SELECT session_id, message_count, is_subagent
+         FROM session_state
+        WHERE fingerprint = ? AND fingerprint != ''`,
+    )
+    .all(fingerprint) as Array<{
+    session_id: string;
+    message_count: number;
+    is_subagent: number;
+  }>;
+}
+
+/**
+ * Count how many of `ids` exist as temporal messages in (projectId, sessionId).
+ *
+ * Confirms a fingerprint-matched adoption candidate by content overlap: temporal
+ * message IDs are deterministic content hashes, so a genuinely-resumed
+ * conversation reproduces the same IDs for its (index-stable) leading messages.
+ * The project_id predicate also enforces same-project — a cross-project
+ * fingerprint twin yields zero overlap. `ids` is chunked to stay under SQLite's
+ * bound-variable limit. (issue #796)
+ */
+export function countMatchingTemporalIds(
+  projectId: string,
+  sessionId: string,
+  ids: string[],
+): number {
+  if (ids.length === 0) return 0;
+  // < SQLite's 999 bound-variable ceiling, leaving headroom for the 2 fixed params.
+  const CHUNK = 800;
+  let total = 0;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => "?").join(",");
+    const row = db()
+      .query(
+        `SELECT COUNT(*) AS n FROM temporal_messages
+          WHERE project_id = ? AND session_id = ? AND id IN (${placeholders})`,
+      )
+      .get(projectId, sessionId, ...chunk) as { n: number };
+    total += row.n;
+  }
+  return total;
 }
 
 /**

@@ -89,6 +89,8 @@ export {
   type DailyCostBucket,
   saveSessionTracking,
   loadSessionTracking,
+  findSessionStatesByFingerprint,
+  countMatchingTemporalIds,
   appendSessionPromptDelta,
   upsertSessionPromptDelta,
   deleteSessionPromptDelta,
@@ -158,6 +160,7 @@ export {
   getConsecutiveBusts,
   BUST_PRESSURE_THRESHOLD,
   effectiveMetaThreshold,
+  isLargeColdStart,
 } from "./gradient";
 export {
   formatKnowledge,

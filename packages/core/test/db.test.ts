@@ -17,6 +17,8 @@ import {
   setLastImportAt,
   saveSessionTracking,
   loadSessionTracking,
+  findSessionStatesByFingerprint,
+  countMatchingTemporalIds,
   appendSessionPromptDelta,
   listSessionPromptDeltas,
   loadHeaderSessionIndex,
@@ -56,7 +58,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(43);
+    expect(row.version).toBe(44);
   });
 
   test("session_prompt_deltas persist ordered selector/content rows (v42)", () => {
@@ -914,6 +916,7 @@ describe("db", () => {
       ltmPinTokens: 90,
       ltmPinKeys: JSON.stringify(["a:1", "b:2"]),
       dedupDecisions: JSON.stringify([["m1:p1", true]]),
+      lastKnownMessageCount: 137,
     });
     const loaded = loadSessionTracking(sid);
     expect(loaded).not.toBeNull();
@@ -926,6 +929,8 @@ describe("db", () => {
     expect(loaded?.ltmPinTokens).toBe(90);
     expect(loaded?.ltmPinKeys).toBe(JSON.stringify(["a:1", "b:2"]));
     expect(loaded?.dedupDecisions).toBe(JSON.stringify([["m1:p1", true]]));
+    // v43: persisted for accurate calibrated-delta estimation after restart.
+    expect(loaded?.lastKnownMessageCount).toBe(137);
   });
 
   test("saveSessionTracking partial update preserves other fields", () => {
@@ -1499,6 +1504,129 @@ describe("db", () => {
       const names = idx.map((i) => i.name);
       expect(names).toContain("idx_tool_calls_project_tool_status");
       expect(names).toContain("idx_tool_calls_project_session");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Migration v43: persist lastKnownMessageCount + restart-proof session
+  // adoption helpers (issue #796)
+  // -------------------------------------------------------------------------
+
+  describe("session adoption helpers (v43)", () => {
+    test("session_state has last_known_message_count column", () => {
+      const cols = db()
+        .query("PRAGMA table_info(session_state)")
+        .all() as Array<{ name: string }>;
+      expect(cols.map((c) => c.name)).toContain("last_known_message_count");
+    });
+
+    test("recoverMissingObjects re-adds last_known_message_count when missing", () => {
+      const d = db();
+      d.exec("ALTER TABLE session_state DROP COLUMN last_known_message_count");
+      expect(
+        (
+          d.query("PRAGMA table_info(session_state)").all() as Array<{
+            name: string;
+          }>
+        ).some((c) => c.name === "last_known_message_count"),
+      ).toBe(false);
+
+      close();
+      const fresh = db();
+      expect(
+        (
+          fresh.query("PRAGMA table_info(session_state)").all() as Array<{
+            name: string;
+          }>
+        ).some((c) => c.name === "last_known_message_count"),
+      ).toBe(true);
+    });
+
+    test("findSessionStatesByFingerprint returns only matching non-empty fingerprints", () => {
+      const sidA = `adopt-a-${crypto.randomUUID()}`;
+      const sidB = `adopt-b-${crypto.randomUUID()}`;
+      const sidOther = `adopt-other-${crypto.randomUUID()}`;
+      const sidEmpty = `adopt-empty-${crypto.randomUUID()}`;
+      const fp = `fp-${crypto.randomUUID().slice(0, 8)}`;
+      saveSessionTracking(sidA, { fingerprint: fp, messageCount: 100 });
+      saveSessionTracking(sidB, {
+        fingerprint: fp,
+        messageCount: 200,
+        isSubagent: true,
+      });
+      saveSessionTracking(sidOther, {
+        fingerprint: `other-${crypto.randomUUID().slice(0, 8)}`,
+        messageCount: 50,
+      });
+      // Empty fingerprint must never be returned (default for untracked rows).
+      saveSessionTracking(sidEmpty, { fingerprint: "", messageCount: 10 });
+
+      const got = findSessionStatesByFingerprint(fp);
+      const bySid = new Map(got.map((r) => [r.session_id, r]));
+      expect(bySid.has(sidA)).toBe(true);
+      expect(bySid.has(sidB)).toBe(true);
+      expect(bySid.has(sidOther)).toBe(false);
+      expect(bySid.has(sidEmpty)).toBe(false);
+      expect(bySid.get(sidA)?.message_count).toBe(100);
+      expect(bySid.get(sidB)?.is_subagent).toBe(1);
+      expect(bySid.get(sidA)?.is_subagent).toBe(0);
+
+      // Empty query never matches the empty-fingerprint rows.
+      expect(findSessionStatesByFingerprint("")).toEqual([]);
+    });
+
+    test("countMatchingTemporalIds counts only same-project, same-session ids", () => {
+      const pidA = ensureProject(`/tmp/adopt-overlap-a-${crypto.randomUUID()}`);
+      const pidB = ensureProject(`/tmp/adopt-overlap-b-${crypto.randomUUID()}`);
+      const sess = `ov-sess-${crypto.randomUUID()}`;
+      const ins = (pid: string, sid: string, id: string) =>
+        db()
+          .query(
+            `INSERT INTO temporal_messages
+               (id, project_id, session_id, role, content, tokens, distilled, created_at)
+             VALUES (?, ?, ?, 'user', 'x', 1, 0, 1000)`,
+          )
+          .run(id, pid, sid);
+      ins(pidA, sess, "m1");
+      ins(pidA, sess, "m2");
+      ins(pidA, sess, "m3");
+      ins(pidA, "other-sess", "m9"); // same project, different session
+      ins(pidB, sess, "mb"); // different project, same session id
+
+      // 2 of the 3 probed ids exist in (pidA, sess); "x" does not.
+      expect(countMatchingTemporalIds(pidA, sess, ["m1", "m2", "x"])).toBe(2);
+      // Different session → no overlap.
+      expect(countMatchingTemporalIds(pidA, "other-sess", ["m1", "m2"])).toBe(
+        0,
+      );
+      // Different project → no overlap.
+      expect(countMatchingTemporalIds(pidB, sess, ["m1", "m2", "m3"])).toBe(0);
+      // Empty id list → 0, no query error.
+      expect(countMatchingTemporalIds(pidA, sess, [])).toBe(0);
+    });
+
+    test("countMatchingTemporalIds chunks id lists beyond the SQLite variable limit", () => {
+      const pid = ensureProject(`/tmp/adopt-chunk-${crypto.randomUUID()}`);
+      const sess = `chunk-sess-${crypto.randomUUID()}`;
+      const real: string[] = [];
+      for (let i = 0; i < 5; i++) {
+        const id = `real-${i}`;
+        real.push(id);
+        db()
+          .query(
+            `INSERT INTO temporal_messages
+               (id, project_id, session_id, role, content, tokens, distilled, created_at)
+             VALUES (?, ?, ?, 'user', 'x', 1, 0, 1000)`,
+          )
+          .run(id, pid, sess);
+      }
+      // 1200 ids (>999 SQLite bound-variable limit) — must not throw and must
+      // count only the 5 that exist.
+      const ids = [
+        ...real,
+        ...Array.from({ length: 1195 }, (_, i) => `fake-${i}`),
+      ];
+      expect(countMatchingTemporalIds(pid, sess, ids)).toBe(5);
     });
   });
 
