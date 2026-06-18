@@ -54,10 +54,12 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.16",
+    "@types/pg": "^8.11.10",
     "@vitest/coverage-v8": "^4.1.8",
     "esbuild": "^0.28.1",
     "fast-check": "^4.5.3",
     "linkinator": "^7.6.1",
+    "pg": "^8.13.1",
     "tsx": "^4.22.3",
     "typescript": "^5.8.0",
     "vitest": "^4.1.7",

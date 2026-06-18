@@ -26,6 +26,7 @@ Commands:
   login               Sign in to your Folk Lore account (GitHub or --email)
   logout              Sign out and clear the local session
   whoami              Show the signed-in Folk Lore account
+  sync <subcommand>   Cloud-sync knowledge + entities (enable, disable, status, now)
   entity <subcommand> Manage the entity registry (list, show, add, merge)
   upgrade [version]   Update lore to the latest (or specified) version
                        Flags: --check, --force, --offline, --channel <ch>
@@ -153,6 +154,9 @@ Examples:
   lore login --email me@x.com   # Sign in with an email OTP code (needs SMTP)
   lore whoami                   # Show the signed-in account
   lore logout                   # Sign out
+  lore sync enable              # Turn on cloud sync of knowledge + entities
+  lore sync status              # Show sync state + pending local changes
+  lore sync now                 # Push local changes then pull remote changes
 
 Environment variables:
   LORE_LISTEN_PORT              Gateway port (overridden by --port)

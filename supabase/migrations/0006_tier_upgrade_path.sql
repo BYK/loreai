@@ -1,0 +1,14 @@
+-- Migration 0006 — restore the legitimate tier-upgrade path (pen-test MEDIUM).
+--
+-- 0004 revoked UPDATE on profiles from `authenticated` and re-granted only the
+-- safe columns; 0005's guard_profile_tier exempts `service_role` from the tier
+-- lock. But `service_role` was never granted UPDATE on profiles, so the intended
+-- "payment webhook upgrades the user to pro via the service-role key" path
+-- failed permission-denied. Grant it explicitly. (The guard trigger still blocks
+-- everyone except service_role, and `authenticated` still cannot touch `tier`.)
+--
+-- This is the ONLY role allowed to change tier — it bypasses RLS, is never
+-- exposed to clients, and is used solely by trusted server-side billing code.
+-- SELECT is needed alongside UPDATE so `UPDATE ... WHERE id = ...` can resolve
+-- the target row.
+grant select, update on public.profiles to service_role;

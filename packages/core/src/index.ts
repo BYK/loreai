@@ -11,6 +11,7 @@
 
 export * as temporal from "./temporal";
 export * as ltm from "./ltm";
+export * as syncData from "./sync-data";
 export * as data from "./data";
 export * as distillation from "./distillation";
 export * as curator from "./curator";
