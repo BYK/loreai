@@ -106,6 +106,8 @@ export {
   getMeta,
   setMeta,
   getInstanceId,
+  runUpsert,
+  withTransaction,
   close,
 } from "./db";
 export {

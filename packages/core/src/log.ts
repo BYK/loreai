@@ -37,6 +37,14 @@ export interface LogSink {
   warn(message: string, attrs?: Record<string, unknown>): void;
   error(message: string, attrs?: Record<string, unknown>): void;
   captureException(err: unknown): void;
+  /**
+   * Optional DB-query tracer. When provided, the DB layer's tracing Proxy
+   * (see `db/traced.ts`) routes every `get`/`run`/`all` execution through this
+   * hook so the host can wrap it in a span (e.g. `Sentry.startSpan`). Keeping
+   * this on the sink — rather than importing `@sentry/*` into core — preserves
+   * the invariant that `@loreai/core` has zero Sentry dependencies.
+   */
+  withDbSpan?<T>(sql: string, fn: () => T): T;
 }
 
 let sink: LogSink | null = null;
@@ -44,6 +52,20 @@ let sink: LogSink | null = null;
 /** Register an external log sink. Only one sink is supported at a time. */
 export function registerSink(s: LogSink): void {
   sink = s;
+}
+
+/**
+ * Route a DB query execution through the registered tracer, if any.
+ *
+ * 🔴 INVARIANT: when no sink (or no `withDbSpan`) is registered — the common
+ * case for the CLI, tests, and the Pi extension — this is a transparent
+ * pass-through: it calls `fn()` exactly once and returns its value verbatim,
+ * with no wrapping and no behavioral change. The DB Proxy may call this on
+ * every query, so the no-tracer path must stay allocation-free beyond one
+ * optional-chain check.
+ */
+export function traceDbQuery<T>(sql: string, fn: () => T): T {
+  return sink?.withDbSpan ? sink.withDbSpan(sql, fn) : fn();
 }
 
 // ---------------------------------------------------------------------------

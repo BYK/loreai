@@ -196,5 +196,18 @@ if (sentryEnabled && !Sentry.isInitialized()) {
       }
     },
     captureException: (err) => Sentry.captureException(err),
+    // Per-query DB tracing. `onlyIfParent: true` means a span is only created
+    // when there is an active parent (e.g. an in-flight request transaction),
+    // so background/idle DB churn adds no orphan transactions or cost.
+    withDbSpan: (sql, fn) =>
+      Sentry.startSpan(
+        {
+          name: sql,
+          op: "db",
+          attributes: { "db.system": "sqlite", "db.statement": sql },
+          onlyIfParent: true,
+        },
+        fn,
+      ),
   });
 }

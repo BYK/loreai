@@ -4,6 +4,7 @@ import { mkdirSync } from "node:fs";
 import { getGitRemote } from "./git";
 import { isHostedMode } from "./hosted";
 import { dataDir } from "./data-dir";
+import { tracedDatabase } from "./db/traced";
 
 /**
  * Callback fired when project rows are created or mutated (merge, rename, etc.).
@@ -1167,7 +1168,15 @@ export function db(): Database {
   // instead of accumulating a free-page list that bloats the file.
   database.exec("PRAGMA auto_vacuum = INCREMENTAL");
   migrate(database);
-  instance = database;
+  // Wrap the connection in the query-tracing Proxy AFTER migrate() succeeds, so
+  // (a) migration queries are never traced / re-entrant, and (b) the singleton
+  // is only assigned a fully-migrated handle (see invariant above). The Proxy
+  // is transparent when no tracer is registered (see db/traced.ts). Set
+  // LORE_NO_DB_TRACING=1 to bypass it entirely.
+  instance =
+    process.env.LORE_NO_DB_TRACING === "1"
+      ? database
+      : tracedDatabase(database);
   return instance;
 }
 
@@ -1512,6 +1521,82 @@ export function close() {
   if (instance) {
     instance.close();
     instance = undefined;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Centralized query helpers
+//
+// Small, runtime-agnostic helpers that remove duplicated inline SQL. They use
+// the local `db()` accessor (no handle passing — matches lore convention) and
+// therefore live here, in the DB module, rather than a separate file (a
+// separate file would create a `db.ts ↔ helpers` import cycle since the KV
+// setters below call `runUpsert`).
+// ---------------------------------------------------------------------------
+
+/**
+ * Build and run an `INSERT ... ON CONFLICT(...) DO UPDATE` upsert from a plain
+ * row object. Centralizes the hand-written upsert SQL duplicated across the KV
+ * stores and other call sites.
+ *
+ * @param table - Target table name (must be a trusted constant — interpolated).
+ * @param row - Column→value map to insert. Keys are interpolated as column
+ *   names, so they must be trusted constants, never user input.
+ * @param conflictColumns - Columns forming the conflict target (PK/unique).
+ * @param opts.excludeFromUpdate - Columns to set only on INSERT and leave
+ *   untouched on UPDATE (e.g. `created_at`).
+ *
+ * When every column is part of the conflict target there is nothing to update,
+ * so the statement degrades to `ON CONFLICT(...) DO NOTHING` (idempotent).
+ */
+export function runUpsert(
+  table: string,
+  row: Record<string, unknown>,
+  conflictColumns: string[],
+  opts: { excludeFromUpdate?: string[] } = {},
+): void {
+  const columns = Object.keys(row);
+  if (columns.length === 0) {
+    throw new Error(`runUpsert: no columns provided for table "${table}"`);
+  }
+  const values = columns.map((c) => row[c]);
+  const placeholders = columns.map(() => "?").join(", ");
+
+  const conflict = new Set(conflictColumns);
+  const exclude = new Set(opts.excludeFromUpdate ?? []);
+  const updatable = columns.filter((c) => !conflict.has(c) && !exclude.has(c));
+
+  const conflictClause = conflictColumns.join(", ");
+  const action =
+    updatable.length === 0
+      ? "DO NOTHING"
+      : `DO UPDATE SET ${updatable.map((c) => `${c} = excluded.${c}`).join(", ")}`;
+
+  const sql = `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${placeholders}) ON CONFLICT(${conflictClause}) ${action}`;
+  db()
+    .query(sql)
+    .run(...values);
+}
+
+/**
+ * Run `fn` inside a `BEGIN IMMEDIATE` transaction, committing on success and
+ * rolling back (then re-throwing) on error. Returns the callback's value.
+ *
+ * Uses manual `exec()` rather than the driver's `.transaction()` because
+ * `bun:sqlite` and `node:sqlite` expose incompatible transaction APIs (see the
+ * note in distillation.ts). `BEGIN IMMEDIATE` acquires the write lock up front
+ * to avoid lock-upgrade deadlocks under concurrent access.
+ */
+export function withTransaction<T>(fn: () => T): T {
+  const d = db();
+  d.exec("BEGIN IMMEDIATE");
+  try {
+    const result = fn();
+    d.exec("COMMIT");
+    return result;
+  } catch (e) {
+    d.exec("ROLLBACK");
+    throw e;
   }
 }
 
@@ -2538,11 +2623,7 @@ export function getKV(key: string): string | null {
 
 /** Set a kv_meta value (upsert). */
 export function setKV(key: string, value: string): void {
-  db()
-    .query(
-      "INSERT INTO kv_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?",
-    )
-    .run(key, value, value);
+  runUpsert("kv_meta", { key, value }, ["key"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -2565,11 +2646,7 @@ export function getTeamConfig(key: string): string | null {
 
 /** Set a team_config value (upsert). */
 export function setTeamConfig(key: string, value: string): void {
-  db()
-    .query(
-      "INSERT INTO team_config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?",
-    )
-    .run(key, value, value);
+  runUpsert("team_config", { key, value }, ["key"]);
 }
 
 /** Delete a team_config value. No-op if the key does not exist. */
@@ -2602,11 +2679,7 @@ export function getMeta(key: string): string | null {
 
 /** Set a metadata value (upsert). */
 export function setMeta(key: string, value: string): void {
-  db()
-    .query(
-      "INSERT INTO metadata (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = ?",
-    )
-    .run(key, value, Date.now(), value, Date.now());
+  runUpsert("metadata", { key, value, updated_at: Date.now() }, ["key"]);
 }
 
 /**
