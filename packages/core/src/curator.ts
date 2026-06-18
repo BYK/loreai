@@ -708,7 +708,12 @@ async function runInner(input: {
   // preferences created in earlier sessions (preferences default to
   // crossProject: true, so excluding them makes them invisible).
   // A project guard in applyOps prevents mutating entries from foreign projects.
-  const existing = ltm.forProject(input.projectPath, true);
+  // forCurator() token-budgets this set so curator LLM cost stops scaling with
+  // stored count (cross-project entries are always kept; see forCurator docs).
+  const existing = ltm.forCurator(
+    input.projectPath,
+    cfg.curator.contextTokenBudget,
+  );
   const existingForPrompt = existing.map((e) => ({
     id: e.id,
     category: e.category,

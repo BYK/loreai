@@ -105,11 +105,22 @@ describe("LoreConfig — curator schema", () => {
     expect(cfg.curator.inFlight).toBe(false);
     expect(cfg.curator.afterTurns).toBe(3);
     expect(cfg.curator.maxEntries).toBe(40);
+    expect(cfg.curator.contextTokenBudget).toBe(20000);
   });
 
   test("curator.maxEntries can be customised", () => {
     const cfg = LoreConfig.parse({ curator: { maxEntries: 30 } });
     expect(cfg.curator.maxEntries).toBe(30);
+  });
+
+  test("curator.contextTokenBudget can be customised (min 2000)", () => {
+    expect(
+      LoreConfig.parse({ curator: { contextTokenBudget: 8000 } }).curator
+        .contextTokenBudget,
+    ).toBe(8000);
+    expect(() =>
+      LoreConfig.parse({ curator: { contextTokenBudget: 500 } }),
+    ).toThrow();
   });
 
   test("curator.maxEntries minimum is 10", () => {

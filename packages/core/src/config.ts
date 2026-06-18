@@ -318,6 +318,17 @@ export const LoreConfig = z.object({
         .describe(
           "Max knowledge entries per project before consolidation. Default: 40.",
         ),
+      /** Token budget for the curator's existing-entries context. Default: 20000. */
+      contextTokenBudget: z
+        .number()
+        .min(2000)
+        .default(20000)
+        .describe(
+          "Token budget for the existing-entries context sent to the curator " +
+            "each run. Bounds curator LLM cost so it stops scaling with stored " +
+            "entry count; a generous safety ceiling that only trims pathological " +
+            "sets (cross-project entries are always kept). Default: 20000.",
+        ),
     })
     .default({
       enabled: true,
@@ -325,6 +336,7 @@ export const LoreConfig = z.object({
       inFlight: false,
       afterTurns: 3,
       maxEntries: 40,
+      contextTokenBudget: 20000,
     })
     .describe("Curator scheduling and consolidation thresholds."),
   pruning: z

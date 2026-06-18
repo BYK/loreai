@@ -563,6 +563,84 @@ export function forProject(
     .all(pid) as KnowledgeEntry[];
 }
 
+/**
+ * Relevance floor: entries at or below this confidence are filtered out of
+ * `forProject()` (it requires `confidence > 0.2`), so they are invisible to
+ * injection, curation, and consolidation — pure dead weight.
+ */
+export const DEAD_CONFIDENCE_FLOOR = 0.2;
+
+/**
+ * Hard-delete a project's "dead" entries — those that have decayed to/below the
+ * relevance floor (`confidence <= DEAD_CONFIDENCE_FLOOR`). They contribute
+ * nothing (already filtered everywhere) and only bloat the row count and the
+ * curator's existing-entries context. `remove()` tombstones each id so a stale
+ * `.lore.md` re-import can't resurrect it. Restricted to PROJECT-SCOPED rows:
+ * cross-project/global entries are shared and must not be reaped by one project.
+ * Returns the pruned entries (for op-log / metrics).
+ */
+export function pruneDeadEntries(projectPath: string): KnowledgeEntry[] {
+  const pid = ensureProject(projectPath);
+  const dead = db()
+    .query(
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge
+       WHERE project_id = ? AND confidence <= ?`,
+    )
+    .all(pid, DEAD_CONFIDENCE_FLOOR) as KnowledgeEntry[];
+  for (const e of dead) remove(e.id);
+  return dead;
+}
+
+/** Token cost of one entry as the curator prompt renders it (see curatorUser). */
+function curatorEntryTokens(e: KnowledgeEntry): number {
+  return estimateTokens(`[${e.id}] (${e.category}) ${e.title}: ${e.content}`);
+}
+
+/**
+ * Budget the curator's "existing entries" context so curator LLM cost stops
+ * scaling with stored count. Returns the entries the curator may update / delete
+ * / dedup against, packed into `maxTokens` by priority:
+ *
+ *   1. ALL cross-project / global entries — shared and few; they must stay
+ *      visible so a project can update them and avoid re-minting duplicates.
+ *   2. Project-scoped entries in `forProject` rank order (confidence DESC,
+ *      updated_at DESC), packed greedily until the budget is exhausted.
+ *
+ * When everything fits (the common case) the full set is returned unchanged.
+ * Dropped entries are the lowest-confidence / stalest project-scoped ones —
+ * least likely to be re-observed this session; the curator's post-create
+ * embedding dedup sweep backstops any duplicate minted for an unseen entry.
+ * Result preserves `forProject` ordering for determinism.
+ */
+export function forCurator(
+  projectPath: string,
+  maxTokens: number,
+): KnowledgeEntry[] {
+  const all = forProject(projectPath, true);
+  let total = 0;
+  for (const e of all) total += curatorEntryTokens(e);
+  if (total <= maxTokens) return all;
+
+  const keep = new Set<string>();
+  let used = 0;
+  // Pass 1: pin all cross-project / global entries (always visible).
+  for (const e of all) {
+    if (e.cross_project === 1 || e.project_id === null) {
+      keep.add(e.id);
+      used += curatorEntryTokens(e);
+    }
+  }
+  // Pass 2: pack project-scoped entries by rank until the budget is full.
+  for (const e of all) {
+    if (e.cross_project === 1 || e.project_id === null) continue;
+    const cost = curatorEntryTokens(e);
+    if (used + cost > maxTokens) continue;
+    keep.add(e.id);
+    used += cost;
+  }
+  return all.filter((e) => keep.has(e.id));
+}
+
 type Scored = { entry: KnowledgeEntry; score: number };
 
 /** BM25 column weights for knowledge_fts: title, content, category.

@@ -711,7 +711,24 @@ export function buildIdleWorkHandler(
       }
     }
 
-    // 3. Consolidation — runs after curation so new entries are counted.
+    // 3. Prune dead knowledge — hard-delete entries that have decayed to/below
+    //    the relevance floor (already invisible everywhere). Local DB-only step,
+    //    so it runs regardless of allowWorker. Keeps the row count and the
+    //    curator's existing-entries context lean.
+    if (cfg.knowledge.enabled) {
+      try {
+        const pruned = ltm.pruneDeadEntries(projectPath);
+        if (pruned.length > 0) {
+          log.info(
+            `pruned ${pruned.length} dead knowledge entries (<= relevance floor)`,
+          );
+        }
+      } catch (e) {
+        log.error("idle dead-entry prune error:", e);
+      }
+    }
+
+    // 4. Consolidation — runs after curation so new entries are counted.
     //    Cooldown: skip if we already attempted consolidation for this project
     //    with the same entry count within the last hour — avoids wasting
     //    Sonnet calls when the LLM correctly concludes all entries are unique.
@@ -819,7 +836,7 @@ export function buildIdleWorkHandler(
       }
     }
 
-    // 4. Temporal pruning
+    // 5. Temporal pruning
     try {
       const { ttlDeleted, capDeleted } = temporal.prune({
         projectPath,
@@ -835,7 +852,7 @@ export function buildIdleWorkHandler(
       log.error("idle pruning error:", e);
     }
 
-    // 5. Knowledge export (.lore.md + optional agents file)
+    // 6. Knowledge export (.lore.md + optional agents file)
     if (cfg.knowledge.enabled) {
       try {
         const entries = ltm.forProject(projectPath, false);
@@ -859,7 +876,7 @@ export function buildIdleWorkHandler(
       }
     }
 
-    // 6. Dead reference cleanup
+    // 7. Dead reference cleanup
     if (cfg.knowledge.enabled) {
       try {
         const cleaned = ltm.cleanDeadRefs();
@@ -871,17 +888,17 @@ export function buildIdleWorkHandler(
       }
     }
 
-    // 7. lat.md refresh
+    // 8. lat.md refresh
     try {
       latReader.refresh(projectPath);
     } catch (e) {
       log.error("idle lat-reader refresh error:", e);
     }
 
-    // 8. Emit session cost/savings metrics to Sentry
+    // 9. Emit session cost/savings metrics to Sentry
     emitSessionCostMetrics(sessionID);
 
-    // 9. Persist live session cost snapshot to DB so historical estimates
+    // 10. Persist live session cost snapshot to DB so historical estimates
     //    include all worker costs, avoided compactions, cache warming,
     //    1h TTL, and batch API savings after restart.
     try {
