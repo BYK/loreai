@@ -34,6 +34,7 @@ import type {
   GatewayToolUseBlock,
   GatewayMessage,
   RecallStore,
+  StoredRecall,
 } from "./translate/types";
 
 // ---------------------------------------------------------------------------
@@ -141,6 +142,45 @@ export function parseRecallMarker(
     query: match[2],
     scope: labelToScope(match[1]),
   };
+}
+
+/**
+ * Serialize a recall store to JSON for cross-restart persistence.
+ *
+ * The store is in-memory per session; without persistence a gateway restart
+ * loses it, so historical recall markers can no longer be expanded into their
+ * tool_use + tool_result pair and instead leak upstream as raw marker TEXT —
+ * rewriting that (deep) assistant message and busting the prompt cache
+ * (ses_14b9bf3d… incident). Persisting + restoring keeps expansion byte-stable.
+ */
+export function serializeRecallStore(store: RecallStore): string {
+  return JSON.stringify([...store.entries()]);
+}
+
+/** Restore a recall store from its JSON form. Tolerant of corrupt/old blobs. */
+export function deserializeRecallStore(json: string): RecallStore {
+  const store: RecallStore = new Map();
+  try {
+    const entries = JSON.parse(json);
+    if (!Array.isArray(entries)) return store;
+    for (const entry of entries) {
+      if (
+        Array.isArray(entry) &&
+        entry.length === 2 &&
+        typeof entry[0] === "string" &&
+        entry[1] &&
+        typeof entry[1] === "object" &&
+        typeof (entry[1] as StoredRecall).toolUseId === "string" &&
+        typeof (entry[1] as StoredRecall).result === "string"
+      ) {
+        store.set(entry[0], entry[1] as StoredRecall);
+      }
+    }
+  } catch {
+    // Corrupt blob — start empty (markers fall back to raw text; recoverable
+    // once the recall re-executes).
+  }
+  return store;
 }
 
 /** Derive a store key from query + scope, or from id for detail lookups. */

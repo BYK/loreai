@@ -1,5 +1,9 @@
 import { describe, test, expect } from "vitest";
-import { extractPatterns } from "../src/pattern-extract";
+import {
+  extractActionTags,
+  extractPatterns,
+  isKnownActionTag,
+} from "../src/pattern-extract";
 
 describe("extractPatterns", () => {
   // -----------------------------------------------------------------------
@@ -590,5 +594,60 @@ describe("extractPatterns", () => {
       // "Go" is only 2 chars — too short to be a reliable extraction
       expect(results).toHaveLength(0);
     });
+  });
+});
+
+describe("extractActionTags", () => {
+  test("matches a single-segment action tag", () => {
+    expect(extractActionTags("The user [requested-tests] here.")).toEqual([
+      "requested-tests",
+    ]);
+  });
+
+  test("matches a multi-segment action tag", () => {
+    expect(
+      extractActionTags("Observed [requested-error-handling] behavior."),
+    ).toEqual(["requested-error-handling"]);
+  });
+
+  test("deduplicates repeated tags", () => {
+    expect(
+      extractActionTags("[corrected-style] then later [corrected-style]"),
+    ).toEqual(["corrected-style"]);
+  });
+
+  test("does NOT match a single-letter character range like [a-z]", () => {
+    // Regression for the ses_14b9bf3d… incident: `[a-z]` in code/prose was
+    // matched as a tag "a-z" → tagToTitle → garbage preference titled "A Z"
+    // that polluted system[1] and busted the cache when later deleted.
+    expect(extractActionTags("matches any char in the [a-z] range")).toEqual(
+      [],
+    );
+  });
+
+  test("does NOT match short character ranges like [a-f] or [0-9-like] artifacts", () => {
+    expect(extractActionTags("hex digits [a-f] are valid")).toEqual([]);
+    expect(extractActionTags("a [x-y] mapping")).toEqual([]);
+  });
+
+  test("does not match tags with a single-char segment", () => {
+    // e.g. "[requested-x]" — the trailing single-char segment is almost
+    // certainly an artifact, not a real action tag.
+    expect(extractActionTags("see [requested-x] note")).toEqual([]);
+  });
+});
+
+describe("isKnownActionTag", () => {
+  test("returns true for curated action tags", () => {
+    expect(isKnownActionTag("requested-tests")).toBe(true);
+    expect(isKnownActionTag("enforced-workflow")).toBe(true);
+  });
+
+  test("returns false for unknown / fabricated tags", () => {
+    // The title-case fallback in tagToTitle manufactures a title for ANY tag;
+    // minting must be gated on this allow-list so spurious regex matches never
+    // become knowledge entries.
+    expect(isKnownActionTag("a-z")).toBe(false);
+    expect(isKnownActionTag("foo-bar")).toBe(false);
   });
 });

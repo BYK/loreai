@@ -31,6 +31,8 @@ import {
   expandRecallMarkers,
   cleanupRecallStore,
   replaceRecallWithMarker,
+  serializeRecallStore,
+  deserializeRecallStore,
 } from "../src/recall";
 import type {
   GatewayResponse,
@@ -304,6 +306,76 @@ describe("parseRecallMarker", () => {
     expect(parseRecallMarker("hello world")).toBeNull();
     expect(parseRecallMarker("[Searching memory...]")).toBeNull();
     expect(parseRecallMarker("")).toBeNull();
+  });
+
+  test("parses a query containing double quotes without truncating (#cache-bust)", () => {
+    // Regression for the ses_14b9bf3d… recall rewrite: the lazy `(.+?)` query
+    // capture stopped at the first `"`, so a query containing quotes parsed to a
+    // DIFFERENT string than was stored under. expandRecallMarkers then missed the
+    // store, left the raw marker upstream, and rewrote that historical assistant
+    // message (tool_use → text) — a deep-history prompt-cache bust.
+    const marker = buildRecallMarker('how to use "async" patterns', "project");
+    expect(parseRecallMarker(marker)).toEqual({
+      query: 'how to use "async" patterns',
+      scope: "project",
+    });
+  });
+
+  test("build → parse round-trips an arbitrary query (store key stays stable)", () => {
+    for (const query of [
+      'sync tiers "pro" max distillations',
+      'a query with a trailing quote"',
+      'nested "a" and "b" quotes',
+      "plain query",
+    ]) {
+      const parsed = parseRecallMarker(buildRecallMarker(query, "all"));
+      expect(parsed?.query).toBe(query);
+      expect(parsed?.scope).toBe("all");
+    }
+  });
+});
+
+describe("serializeRecallStore / deserializeRecallStore", () => {
+  test("round-trips a populated store (cross-restart persistence, v46)", () => {
+    const store: RecallStore = new Map([
+      [
+        'all:sync tiers "pro" max',
+        {
+          toolUseId: "toolu_1",
+          input: { query: 'sync tiers "pro" max', scope: "all" },
+          position: 2,
+          result: "## Results\n\n* entry one\n* entry two",
+        },
+      ],
+      [
+        "id:k:abc123",
+        {
+          toolUseId: "toolu_2",
+          input: { query: "", scope: "all", id: "k:abc123" },
+          position: 0,
+          result: "detail body",
+        },
+      ],
+    ]);
+    const restored = deserializeRecallStore(serializeRecallStore(store));
+    expect(restored).toEqual(store);
+  });
+
+  test("deserialize tolerates corrupt / empty blobs", () => {
+    expect(deserializeRecallStore("not json").size).toBe(0);
+    expect(deserializeRecallStore("{}").size).toBe(0);
+    expect(deserializeRecallStore("[]").size).toBe(0);
+    // Entries missing required fields are dropped, valid ones kept.
+    const mixed = JSON.stringify([
+      ["bad", { toolUseId: 123 }],
+      [
+        "good",
+        { toolUseId: "t", input: { query: "q" }, position: 0, result: "r" },
+      ],
+    ]);
+    const restored = deserializeRecallStore(mixed);
+    expect(restored.size).toBe(1);
+    expect(restored.get("good")?.result).toBe("r");
   });
 });
 

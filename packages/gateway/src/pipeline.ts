@@ -254,6 +254,8 @@ import {
   cleanupRecallStore,
   replaceRecallWithMarker,
   isRecallMarker,
+  serializeRecallStore,
+  deserializeRecallStore,
 } from "./recall";
 import { upstreamFetch } from "./fetch";
 import {
@@ -610,8 +612,11 @@ export function ltmEntryKeys(
     .sort();
 }
 
-/** system[1] (stable LTM) cache breakpoint TTL in ms. Once an idle gap exceeds
- *  this, that prefix is cold and can be rebuilt with fresh preferences for free. */
+/** system[1] (stable LTM) cache breakpoint TTL in ms. Documents the 1h
+ *  `cache_control` TTL carried by the system[1] block. As of v45 system[1] is
+ *  frozen for the session's life and never recomputed mid-session, so an idle
+ *  gap past this TTL re-warms the SAME frozen bytes rather than rebuilding from
+ *  the live knowledge table (which used to bust the prefix on curator deletes). */
 export const STABLE_LTM_TTL_MS = 3_600_000; // 1h — matches the system[1] cache_control
 
 /**
@@ -634,19 +639,6 @@ export function shouldRunInFlightCuration(input: {
     !input.curationScheduled &&
     !input.curatorBusy
   );
-}
-
-/**
- * Decide whether the stable LTM block (system[1]: preferences + entities) should
- * be refreshed on an idle resume. Only when the idle gap exceeds the system[1]
- * 1h cache TTL — that prefix is then cold, so rebuilding it with freshly-curated
- * preferences costs nothing. Shorter gaps keep it pinned. Pure/testable.
- */
-export function shouldRefreshStableLtm(
-  idleTriggered: boolean,
-  idleMs: number,
-): boolean {
-  return idleTriggered && idleMs >= STABLE_LTM_TTL_MS;
 }
 
 /**
@@ -2211,6 +2203,22 @@ function getOrCreateSession(
         tokenCount: persisted.ltmCacheTokens,
       });
     }
+    // Restore the frozen stable LTM block (system[1]) so it replays
+    // byte-identically across process restarts and idle resumes — never
+    // recomputed from the live knowledge table mid-session (v45). This is what
+    // prevents a curator/consolidation delete from busting the cached prefix.
+    if (persisted?.stableLtmText != null && persisted.stableLtmTokens != null) {
+      stableLtmCache.set(sessionID, {
+        formatted: persisted.stableLtmText,
+        tokenCount: persisted.stableLtmTokens,
+      });
+    }
+    // Restore the recall store (v46) so historical recall markers still expand
+    // to their original tool_use + tool_result pair after a restart, instead of
+    // leaking upstream as raw marker text and rewriting that message.
+    if (persisted?.recallStore != null) {
+      state.recallStore = deserializeRecallStore(persisted.recallStore);
+    }
     if (persisted?.ltmPinText != null && persisted.ltmPinTokens != null) {
       let entryKeys: string[] | undefined;
       if (persisted.ltmPinKeys != null) {
@@ -3224,6 +3232,13 @@ function buildStreamingResponse(
               position,
               result,
             });
+            // Persist the store (v46) so the marker still expands byte-identically
+            // after a gateway restart instead of leaking raw marker text upstream.
+            saveSessionTracking(recallContext.sessionState.sessionID, {
+              recallStore: serializeRecallStore(
+                recallContext.sessionState.recallStore,
+              ),
+            });
 
             // Emit marker text block in place of the suppressed recall block
             const markerText = buildRecallMarker(input.query, scope, input.id);
@@ -3926,6 +3941,10 @@ function postResponse(
     // --- Cache analytics + bust cause telemetry ---
     // Run BEFORE genAiSpan.end() so we can enrich the span with
     // divergence diagnostics (divergence point, prefix match, bust cause).
+    // Capture the idle-resume flag up front: it is consumed (set false) inside
+    // the block below but is still needed afterwards by recordCacheUsage so a
+    // cold-cache re-warm is not counted as a consecutive bust.
+    const turnWasIdleResume = sessionState.lastTurnWasIdle ?? false;
     if (requestBody) {
       const turnAnalysis = analyzeCacheTurn(
         sessionState.cacheAnalytics,
@@ -3934,10 +3953,7 @@ function postResponse(
         sessionID,
         sessionState.messageCount,
       );
-      const bustCause = categorizeBust(
-        turnAnalysis,
-        sessionState.lastTurnWasIdle ?? false,
-      );
+      const bustCause = categorizeBust(turnAnalysis, turnWasIdleResume);
       if (genAiSpan) {
         setCacheAnalyticsAttributes(
           genAiSpan,
@@ -3971,11 +3987,16 @@ function postResponse(
     }
 
     // --- Consecutive bust tracking for tier-based decisions ---
+    // Pass the current turn's idle-resume flag so a cold-cache re-warm (cache
+    // legitimately expired during the user's pause) is not counted as a
+    // consecutive bust — that produced false "unsustainable" warnings on bursty
+    // sessions whose turns are spaced beyond the conversation cache TTL.
     recordCacheUsage(
       usage.cacheCreationInputTokens ?? 0,
       usage.cacheReadInputTokens ?? 0,
       usage.inputTokens ?? 0,
       sessionState.sessionID,
+      turnWasIdleResume,
     );
 
     // Capture previous stop reason before it's overwritten below (line ~1667).
@@ -5578,19 +5599,15 @@ async function handleConversationTurn(
       ltmCacheText: null,
       ltmCacheTokens: null,
     });
-    // Refresh the stable LTM block (system[1]: preferences + entities) too, but
-    // ONLY when the idle gap exceeds system[1]'s own 1h cache TTL — i.e. that
-    // prefix is already cold, so rebuilding it with freshly-curated preferences
-    // costs nothing. (Lore promotes long-running sessions; without this they
-    // would keep using stale preferences indefinitely.) A shorter idle gap
-    // leaves system[1] warm, so we keep it pinned to preserve the 1h cache.
-    const refreshedStable = shouldRefreshStableLtm(true, idleResult.idleMs);
-    if (refreshedStable) {
-      stableLtmCache.delete(sessionID);
-    }
+    // NOTE: the stable LTM block (system[1]: preferences + entities) is
+    // deliberately NOT refreshed here (v45). It is frozen for the session's life
+    // and replayed byte-identically — recomputing it from the live knowledge
+    // table on idle resume is what let a curator/consolidation delete change the
+    // "stable" prefix and bust the whole prompt cache (ses_14b9bf3d… incident).
+    // Re-warming after the 1h breakpoint expires re-sends the same frozen bytes;
+    // newly-curated preferences are picked up by the NEXT session, not mid-session.
     log.info(
       `session idle ${Math.round(idleResult.idleMs / 60_000)}min — refreshing caches` +
-        (refreshedStable ? " (incl. stable LTM — 1h cold)" : "") +
         (cacheWarm ? " (cache warm — skipping compact)" : ""),
     );
   }
@@ -5696,11 +5713,26 @@ async function handleConversationTurn(
         }
 
         const formatted = [prefText, entitiesText].filter(Boolean).join("\n\n");
-        if (formatted) {
-          const tokenCount = Math.ceil(formatted.length / 3);
-          stable = { formatted, tokenCount };
-          stableLtmCache.set(sessionID, stable);
-        }
+        // Freeze this baseline durably (v45) — INCLUDING an empty result. The
+        // in-memory cache is lost on process restart / session eviction;
+        // persisting lets getOrCreateSession restore the exact bytes so system[1]
+        // is never recomputed from the live knowledge table mid-session (which is
+        // what let a consolidation delete bust the cached prefix — ses_14b9bf3d…
+        // incident). Caching even the EMPTY baseline matters: a session that
+        // starts with no preferences/entities must stay system[1]-absent for its
+        // life — otherwise a preference minted mid-session (curator/pattern-
+        // extract) would make system[1] appear, growing the array and busting the
+        // prefix once. An empty `formatted` is falsy at the assembly site
+        // (anthropic.ts `if (stableLtm)`), so freezing "" keeps system[1] absent
+        // rather than injecting an empty block; new preferences surface next
+        // session. This compute path only runs once per session (cache miss).
+        const tokenCount = formatted ? Math.ceil(formatted.length / 3) : 0;
+        stable = { formatted, tokenCount };
+        stableLtmCache.set(sessionID, stable);
+        saveSessionTracking(sessionID, {
+          stableLtmText: formatted,
+          stableLtmTokens: tokenCount,
+        });
       }
       stableLtmText = stable?.formatted;
 
@@ -6633,6 +6665,11 @@ async function handleConversationTurn(
         input,
         position,
         result,
+      });
+      // Persist the store (v46) so the marker still expands byte-identically
+      // after a gateway restart instead of leaking raw marker text upstream.
+      saveSessionTracking(sessionState.sessionID, {
+        recallStore: serializeRecallStore(sessionState.recallStore),
       });
 
       const markerResp = replaceRecallWithMarker(currentResp);

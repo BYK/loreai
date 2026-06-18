@@ -7,11 +7,7 @@
  * actual gating logic is unit-tested (not just the config default).
  */
 import { describe, test, expect } from "vitest";
-import {
-  shouldRunInFlightCuration,
-  shouldRefreshStableLtm,
-  STABLE_LTM_TTL_MS,
-} from "../src/pipeline";
+import { shouldRunInFlightCuration, STABLE_LTM_TTL_MS } from "../src/pipeline";
 
 describe("shouldRunInFlightCuration", () => {
   const base = {
@@ -58,23 +54,12 @@ describe("shouldRunInFlightCuration", () => {
   });
 });
 
-describe("shouldRefreshStableLtm", () => {
-  test("refreshes when idle gap exceeds the 1h system[1] TTL", () => {
-    expect(shouldRefreshStableLtm(true, STABLE_LTM_TTL_MS)).toBe(true);
-    expect(shouldRefreshStableLtm(true, STABLE_LTM_TTL_MS + 60_000)).toBe(true);
-  });
-
-  test("does NOT refresh when system[1] is still warm (gap < 1h)", () => {
-    // A 5-minute idle resume cools the conversation cache but NOT the pinned
-    // 1h system[1] block — keep it pinned to preserve the cache investment.
-    expect(shouldRefreshStableLtm(true, 5 * 60_000)).toBe(false);
-    expect(shouldRefreshStableLtm(true, STABLE_LTM_TTL_MS - 1)).toBe(false);
-  });
-
-  test("does NOT refresh when there was no idle resume at all", () => {
-    expect(shouldRefreshStableLtm(false, STABLE_LTM_TTL_MS * 10)).toBe(false);
-  });
-
+describe("stable LTM (system[1]) is frozen for the session's life (v44)", () => {
+  // The old shouldRefreshStableLtm() idle-recompute was removed: system[1] is
+  // now persisted and replayed byte-identically, so a curator/consolidation
+  // delete can never change the cached prefix mid-session (ses_14b9bf3d…
+  // incident). The TTL constant is retained to document the 1h system[1]
+  // cache_control breakpoint.
   test("STABLE_LTM_TTL_MS matches the 1h system[1] cache breakpoint", () => {
     expect(STABLE_LTM_TTL_MS).toBe(3_600_000);
   });

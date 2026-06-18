@@ -298,21 +298,27 @@ export function inferDivergenceReason(
   if (path === "system[0]" || path.startsWith("system[0]"))
     return "host system prompt changed";
   if (path === "system[1]" || path.startsWith("system[1]")) {
-    // A divergence reported at system[1] is ambiguous: it can mean either
-    // (a) the system array GREW — context-bound LTM (system[2]) is injected
-    // for the first time on turn 2, so the byte diff lands at the ]→,
-    // boundary right after system[1] even though system[1] is byte-identical,
-    // or (b) system[1]'s own content genuinely changed (preference re-curation).
-    // We cannot cheaply tell these apart from byte lengths alone: at a system[1]
-    // divergence EVERYTHING after it differs (incl. the whole messages array),
-    // so a body-size delta is dominated by message growth, not the inserted
-    // block. The one reliable signal is the turn number: the system[2] insertion
-    // is deterministically a turn-2 transient (block absent on turn 1, present
-    // from turn 2). Use that; fall back to the honest ambiguous wording when the
-    // turn is unknown.
-    if (turn === 2)
-      return "stable LTM pinned — context-bound LTM (system[2]) first injected on turn 2 (expected, not a real system[1] change)";
-    return "stable LTM block diverged (preference re-curation or system-block insertion)";
+    // The PATH SUFFIX reliably disambiguates the two very different system[1]
+    // divergence cases (the old turn===2-only heuristic conflated them and hid
+    // the ses_14b9bf3d… incident, where consolidation deleted entries that were
+    // in the frozen system[1]):
+    //
+    //  (a) BARE "system[1]" — the system array GREW: context-bound LTM
+    //      (system[2]) is injected for the first time, so the first differing
+    //      byte lands at the array boundary (`]`→`,`) right after system[1]
+    //      while system[1] itself is byte-identical. mapOffsetToJsonPath reports
+    //      the array-frame path with no inner key (no ".text"). On turn 2 this
+    //      is the expected one-shot transient; otherwise it is a structural
+    //      block-insertion shift.
+    //  (b) "system[1].text" (any sub-path) — system[1]'s OWN content changed
+    //      (preference re-curation/consolidation add/remove/edit). This busts
+    //      the entire prefix and is a REAL bust regardless of turn number.
+    if (path === "system[1]") {
+      if (turn === 2)
+        return "stable LTM array grew — context-bound LTM (system[2]) first injected on turn 2 (expected, not a real system[1] change)";
+      return "stable LTM block boundary shifted (system-block insertion)";
+    }
+    return "stable LTM block content changed (preference re-curation/consolidation — prefix bust)";
   }
   if (path === "system[2]" || path.startsWith("system[2]"))
     return "context-bound LTM changed (non-preference entries re-ranked)";

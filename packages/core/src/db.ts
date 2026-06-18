@@ -1157,6 +1157,30 @@ const MIGRATIONS: string[] = [
   -- turn. Persisting it makes the resume turn accurate. (issue #796)
   ALTER TABLE session_state ADD COLUMN last_known_message_count INTEGER NOT NULL DEFAULT 0;
   `,
+  `
+  -- Version 45: Durably pin the stable LTM block (system[1]: preferences +
+  -- entities) per session. Previously system[1] lived only in an in-memory
+  -- cache (stableLtmCache) and was recomputed from the live knowledge table on
+  -- idle-resume >=1h, session eviction, or process restart. A curator/
+  -- consolidation delete or update mid-session then silently changed the
+  -- "stable" prefix, busting the whole prompt cache (ses_14b9bf3d… incident).
+  -- Persisting the frozen text lets system[1] be replayed byte-identically for
+  -- the session's life — only a brand-new session computes it fresh.
+  ALTER TABLE session_state ADD COLUMN stable_ltm_text TEXT;
+  ALTER TABLE session_state ADD COLUMN stable_ltm_tokens INTEGER;
+  `,
+  `
+  -- Version 46: Persist the per-session recall store across restarts. The recall
+  -- "Marker and Expand" strategy keeps executed recall results in an in-memory
+  -- Map (sessionState.recallStore) keyed by query/scope; on each turn the marker
+  -- text in history is expanded back into the original tool_use + tool_result
+  -- pair. The Map was in-memory only, so a gateway restart lost it: historical
+  -- recall markers could no longer be expanded and leaked upstream as raw marker
+  -- TEXT — rewriting that (deep) assistant message tool_use→text and busting the
+  -- prompt cache mid-history (ses_14b9bf3d… incident, messages[549]). Persisting
+  -- the store as JSON lets expansion stay byte-stable across restarts.
+  ALTER TABLE session_state ADD COLUMN recall_store TEXT;
+  `,
 ];
 
 /**
@@ -2338,6 +2362,13 @@ export type SessionTrackingState = {
   ltmPinTokens?: number | null;
   /** JSON array of sorted "id:hash(title+content)" keys for the pinned entry set (v39). */
   ltmPinKeys?: string | null;
+  /** Frozen stable LTM block (system[1]: preferences + entities), pinned for the
+   *  session's life so curator/consolidation changes never bust the prefix (v45). */
+  stableLtmText?: string | null;
+  stableLtmTokens?: number | null;
+  /** JSON-serialized recall store (marker→result map) so recall markers expand
+   *  byte-identically across process restarts (v46). */
+  recallStore?: string | null;
   /** JSON map of "<messageID>:<partID>" -> wasCollapsed for stable dedup (v41). */
   dedupDecisions?: string | null;
   // v24: session identity
@@ -2423,6 +2454,18 @@ export function saveSessionTracking(
   if (state.ltmPinKeys !== undefined) {
     sets.push("ltm_pin_keys = ?");
     vals.push(state.ltmPinKeys);
+  }
+  if (state.stableLtmText !== undefined) {
+    sets.push("stable_ltm_text = ?");
+    vals.push(state.stableLtmText);
+  }
+  if (state.stableLtmTokens !== undefined) {
+    sets.push("stable_ltm_tokens = ?");
+    vals.push(state.stableLtmTokens);
+  }
+  if (state.recallStore !== undefined) {
+    sets.push("recall_store = ?");
+    vals.push(state.recallStore);
   }
   if (state.dedupDecisions !== undefined) {
     sets.push("dedup_decisions = ?");
@@ -2524,6 +2567,11 @@ export type LoadedSessionTracking = {
   ltmPinTokens: number | null;
   // v39: reorder-tolerant pin entry-set keys (JSON)
   ltmPinKeys: string | null;
+  // v45: frozen stable LTM block (system[1])
+  stableLtmText: string | null;
+  stableLtmTokens: number | null;
+  // v46: persisted recall store (marker→result map, JSON)
+  recallStore: string | null;
   dedupDecisions: string | null;
   // v24: session identity
   fingerprint: string;
@@ -2673,7 +2721,8 @@ export function loadSessionTracking(
       `SELECT last_curated_at, message_count, turns_since_curation,
               consecutive_text_only_turns,
               ltm_cache_text, ltm_cache_tokens, ltm_pin_text, ltm_pin_tokens,
-              ltm_pin_keys, dedup_decisions,
+              ltm_pin_keys, stable_ltm_text, stable_ltm_tokens, recall_store,
+              dedup_decisions,
               fingerprint, header_session_id, header_name,
               resolved_conversation_ttl, warmup_state,
               dynamic_context_cap, bust_rate_ema, inter_bust_interval_ema,
@@ -2694,6 +2743,9 @@ export function loadSessionTracking(
     ltm_pin_text: string | null;
     ltm_pin_tokens: number | null;
     ltm_pin_keys: string | null;
+    stable_ltm_text: string | null;
+    stable_ltm_tokens: number | null;
+    recall_store: string | null;
     dedup_decisions: string | null;
     fingerprint: string;
     header_session_id: string | null;
@@ -2725,6 +2777,9 @@ export function loadSessionTracking(
     ltmPinText: row.ltm_pin_text,
     ltmPinTokens: row.ltm_pin_tokens,
     ltmPinKeys: row.ltm_pin_keys,
+    stableLtmText: row.stable_ltm_text,
+    stableLtmTokens: row.stable_ltm_tokens,
+    recallStore: row.recall_store,
     dedupDecisions: row.dedup_decisions,
     fingerprint: row.fingerprint,
     headerSessionId: row.header_session_id,

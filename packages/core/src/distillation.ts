@@ -8,6 +8,7 @@ import * as log from "./log";
 import {
   extractPatterns,
   extractActionTags,
+  isKnownActionTag,
   tagToTitle,
 } from "./pattern-extract";
 import * as toolTrace from "./tool-trace";
@@ -1185,6 +1186,12 @@ async function distillSegment(input: {
     if (tags.length > 0) {
       const pid = ensureProject(input.projectPath);
       for (const tag of tags) {
+        // Only mint preferences for curated tags we have a deliberate canonical
+        // title for. `tagToTitle` title-cases any string, so without this gate a
+        // spurious regex match becomes a garbage entry (e.g. "A Z" from a literal
+        // `[a-z]` range) that pollutes system[1] and busts the prompt cache when
+        // later deleted by consolidation (ses_14b9bf3d… incident).
+        if (!isKnownActionTag(tag)) continue;
         try {
           const tagPattern = `%[${tag}]%`;
           const rows = db()

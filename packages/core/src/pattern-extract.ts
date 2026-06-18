@@ -188,8 +188,17 @@ export function extractPatterns(observations: string): ExtractedPattern[] {
 // Action tag extraction and cross-session counting
 // ---------------------------------------------------------------------------
 
-/** Regex to match action tags like [requested-tests], [corrected-style], etc. */
-const ACTION_TAG_RE = /\[([a-z]+-[a-z-]+)\]/g;
+/**
+ * Regex to match action tags like [requested-tests], [corrected-style], etc.
+ *
+ * Every kebab segment must be >=2 chars. This deliberately excludes literal
+ * single-letter character ranges that appear in code/prose — e.g. `[a-z]`,
+ * `[a-f]` — which the old `/\[([a-z]+-[a-z-]+)\]/g` matched as a tag "a-z" and
+ * turned into a garbage preference titled "A Z" (ses_14b9bf3d… cache-bust
+ * incident: such junk pollutes system[1] and busts the prompt cache when later
+ * deleted by consolidation).
+ */
+const ACTION_TAG_RE = /\[([a-z]{2,}(?:-[a-z]{2,})+)\]/g;
 
 /**
  * Extract action tags from distillation observation text.
@@ -217,6 +226,18 @@ const TAG_TITLE_MAP: Record<string, string> = {
   "enforced-workflow":
     "Follow the established git workflow (branch, PR, review)",
 };
+
+/**
+ * Whether a tag is a curated, known action tag (present in TAG_TITLE_MAP).
+ *
+ * Minting preference entries must be gated on this: `tagToTitle` manufactures a
+ * title-cased fallback for ANY string, so without an allow-list a spurious
+ * regex match (e.g. a stray `[foo-bar]`) would become a knowledge entry. Only
+ * tags we have a deliberate canonical title for are real behavioral signals.
+ */
+export function isKnownActionTag(tag: string): boolean {
+  return Object.hasOwn(TAG_TITLE_MAP, tag);
+}
 
 /**
  * Generate a preference title from a tag name.

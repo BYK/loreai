@@ -249,6 +249,7 @@ export function recordCacheUsage(
   cacheRead: number,
   inputTokens: number,
   sessionID?: string,
+  isIdleResume = false,
 ): void {
   if (!sessionID) return;
   const state = getSessionState(sessionID);
@@ -261,7 +262,18 @@ export function recordCacheUsage(
     const bustRatio = cacheWrite / total;
     const prev = state.consecutiveBusts;
     if (bustRatio > 0.5) {
-      state.consecutiveBusts++;
+      // Idle-resume re-warms are EXPECTED cold-cache writes, NOT sustained
+      // growth: when the user pauses longer than the conversation cache TTL the
+      // cache legitimately expires, so the next turn re-warms it (a write-heavy
+      // "bust"). Counting these toward consecutiveBusts produces false
+      // "unsustainable conversation" warnings on bursty sessions whose turns are
+      // spaced beyond the TTL — every threshold-crossing bust in the
+      // ses_14b9bf3d… incident followed an 11m–2h idle gap past the 5m TTL.
+      // HOLD the counter on an idle resume: neither advance toward the threshold
+      // nor erase a genuine prior run (a real warm-window bust that preceded the
+      // idle is still real). A genuine cache HIT (ratio <= 0.5) below still
+      // resets, even on an idle resume.
+      if (!isIdleResume) state.consecutiveBusts++;
     } else {
       state.consecutiveBusts = 0;
     }
@@ -270,6 +282,12 @@ export function recordCacheUsage(
         `bust-tracker: session=${sessionID.slice(0, 16)} ratio=${bustRatio.toFixed(3)}` +
           ` (write=${cacheWrite} read=${cacheRead} uncached=${inputTokens})` +
           ` busts=${prev}→${state.consecutiveBusts}`,
+      );
+    } else if (isIdleResume && bustRatio > 0.5) {
+      log.info(
+        `bust-tracker: session=${sessionID.slice(0, 16)} idle-resume re-warm` +
+          ` ratio=${bustRatio.toFixed(3)} (write=${cacheWrite} read=${cacheRead}` +
+          ` uncached=${inputTokens}) — not counted (busts held at ${state.consecutiveBusts})`,
       );
     }
 

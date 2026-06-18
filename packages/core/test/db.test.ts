@@ -58,7 +58,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(44);
+    expect(row.version).toBe(46);
   });
 
   test("session_prompt_deltas persist ordered selector/content rows (v42)", () => {
@@ -915,6 +915,9 @@ describe("db", () => {
       ltmPinText: "pinned LTM text",
       ltmPinTokens: 90,
       ltmPinKeys: JSON.stringify(["a:1", "b:2"]),
+      stableLtmText: "frozen stable LTM text",
+      stableLtmTokens: 77,
+      recallStore: JSON.stringify([["all:q", { toolUseId: "t1" }]]),
       dedupDecisions: JSON.stringify([["m1:p1", true]]),
       lastKnownMessageCount: 137,
     });
@@ -928,9 +931,36 @@ describe("db", () => {
     expect(loaded?.ltmPinText).toBe("pinned LTM text");
     expect(loaded?.ltmPinTokens).toBe(90);
     expect(loaded?.ltmPinKeys).toBe(JSON.stringify(["a:1", "b:2"]));
+    expect(loaded?.stableLtmText).toBe("frozen stable LTM text");
+    expect(loaded?.stableLtmTokens).toBe(77);
+    expect(loaded?.recallStore).toBe(
+      JSON.stringify([["all:q", { toolUseId: "t1" }]]),
+    );
     expect(loaded?.dedupDecisions).toBe(JSON.stringify([["m1:p1", true]]));
     // v43: persisted for accurate calibrated-delta estimation after restart.
     expect(loaded?.lastKnownMessageCount).toBe(137);
+  });
+
+  test("stable LTM (system[1]) freeze round-trips and survives partial updates (v45)", () => {
+    const sid = `test-stable-ltm-${crypto.randomUUID()}`;
+    saveSessionTracking(sid, {
+      stableLtmText: "## Long-term Knowledge\n\n* pref A\n* pref B",
+      stableLtmTokens: 123,
+    });
+    expect(loadSessionTracking(sid)?.stableLtmText).toBe(
+      "## Long-term Knowledge\n\n* pref A\n* pref B",
+    );
+    expect(loadSessionTracking(sid)?.stableLtmTokens).toBe(123);
+
+    // A later unrelated update must NOT clobber the frozen stable LTM — this is
+    // what guarantees the system[1] prefix replays byte-identically.
+    saveSessionTracking(sid, { messageCount: 9 });
+    const loaded = loadSessionTracking(sid);
+    expect(loaded?.messageCount).toBe(9);
+    expect(loaded?.stableLtmText).toBe(
+      "## Long-term Knowledge\n\n* pref A\n* pref B",
+    );
+    expect(loaded?.stableLtmTokens).toBe(123);
   });
 
   test("saveSessionTracking partial update preserves other fields", () => {

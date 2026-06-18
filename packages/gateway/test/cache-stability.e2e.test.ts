@@ -887,6 +887,175 @@ describe("cache stability (e2e)", () => {
     expect(rows[0].content).toContain(contextID.slice(0, 8));
   });
 
+  it("frozen system[1] survives a mid-session preference DELETE across a restart (ses_14b9bf3d… incident)", async () => {
+    // Regression for the ses_14b9bf3d… cache-bust incident. system[1] (stable
+    // LTM: preferences) used to live ONLY in an in-memory cache and be recomputed
+    // from the live knowledge table whenever that cache went cold (idle resume
+    // >=1h, session eviction, process restart). An idle consolidation deleted 25
+    // entries mid-session; the next (post-idle) turn recomputed system[1] WITHOUT
+    // them, changing the "stable" prefix and busting ~356K tokens of prompt cache.
+    //
+    // The fix (v45) persists the frozen system[1] text to session_state and
+    // replays it byte-identically — never recomputing from the live DB
+    // mid-session. This test reproduces the exact sequence: freeze system[1] with
+    // a preference present, DELETE it, restart the gateway (drops the in-memory
+    // cache), and assert the next turn's system[1] is byte-identical (restored
+    // from the persisted pin, not recomputed from the now-deleted-entry DB).
+    const turns = Array.from({ length: 3 }, (_, i) => ({
+      userMessage: `Stable-pref turn ${i}: continue the work.`,
+      assistantText: `Stable-pref response ${i}.`,
+    }));
+    harness = await createHarness({
+      fixtures: makeConversationFixtures(turns),
+    });
+
+    const projectPath = `/tmp/lore-stable-pref-freeze-${Date.now()}`;
+    const headers = {
+      "x-lore-project": projectPath,
+      "x-lore-session-id": `stable-pref-client-${Date.now()}`,
+    };
+
+    const { ltm } = await import("@loreai/core");
+
+    // Pre-seed TWO project-scoped preferences BEFORE the first turn so both are
+    // present in system[1] when it freezes on turn 1.
+    const prefA = ltm.create({
+      projectPath,
+      scope: "project",
+      category: "preference",
+      title: "Aaa first stable preference",
+      content:
+        "Always keep the system[1] prefix byte-stable for the session's life.",
+    });
+    ltm.create({
+      projectPath,
+      scope: "project",
+      category: "preference",
+      title: "Bbb second stable preference",
+      content: "Prefer durable pins over mid-session recomputation.",
+    });
+
+    const history: unknown[] = [];
+    let sessionID = "";
+    for (let i = 0; i < turns.length; i++) {
+      const resp = await harness.chat(
+        makeBody(turns[i].userMessage, history),
+        "test-key",
+        headers,
+      );
+      expect(resp.status).toBe(200);
+      await resp.json();
+      history.push({ role: "user", content: turns[i].userMessage });
+      history.push({
+        role: "assistant",
+        content: [{ type: "text", text: turns[i].assistantText }],
+      });
+
+      if (i === 0) {
+        const rows = harness.queryDB<{ session_id: string }>(
+          "SELECT session_id FROM session_state ORDER BY updated_at DESC LIMIT 1",
+        );
+        sessionID = rows[0]?.session_id ?? "";
+        expect(sessionID).not.toBe("");
+      }
+
+      if (i === 1) {
+        // Mid-session: a consolidation/curator delete removes a pinned
+        // preference, then the gateway restarts (drops the in-memory stable LTM
+        // cache). This is the exact ses_14b9bf3d… sequence.
+        ltm.remove(prefA);
+        await harness.restartPipeline();
+      }
+    }
+
+    const bodies = harness.upstreamBodies();
+    expect(bodies.length).toBe(turns.length);
+
+    const sys1 = (b: string) => systemBlocks(b)[1];
+    // Sanity: the deleted preference WAS rendered into the frozen system[1].
+    expect(sys1(bodies[0])).toContain("Aaa first stable preference");
+    // The invariant: turn 3 (post-delete, post-restart) replays the SAME frozen
+    // system[1] bytes as turn 1 — restored from the persisted pin, not recomputed
+    // from the now-deleted-entry knowledge table.
+    expect(
+      sys1(bodies[2]),
+      "system[1] changed after a mid-session preference delete + restart — it " +
+        "was recomputed from the live knowledge table instead of replaying the " +
+        "persisted frozen pin (this is the ses_14b9bf3d… prefix bust)",
+    ).toBe(sys1(bodies[0]));
+  });
+
+  it("an EMPTY system[1] is frozen too: a preference minted mid-session does not appear (no array-grow bust)", async () => {
+    // Point-4 gap from the adversarial review: a session that starts with no
+    // preferences/entities has an empty system[1] (the cache breakpoint falls on
+    // the host block). Before the empty-baseline freeze, the compute path skipped
+    // caching when `formatted` was empty, so it recomputed every turn — and the
+    // moment the curator/pattern-extract minted a preference mid-session, system[1]
+    // appeared, growing the system array and busting the prefix once. Freezing the
+    // empty baseline keeps system[1] absent for the session's life (new prefs
+    // surface next session).
+    const turns = Array.from({ length: 3 }, (_, i) => ({
+      userMessage: `Empty-stable turn ${i}: continue the work.`,
+      assistantText: `Empty-stable response ${i}.`,
+    }));
+    harness = await createHarness({
+      fixtures: makeConversationFixtures(turns),
+    });
+
+    const projectPath = `/tmp/lore-empty-stable-${Date.now()}`;
+    const headers = {
+      "x-lore-project": projectPath,
+      "x-lore-session-id": `empty-stable-client-${Date.now()}`,
+    };
+
+    const { ltm } = await import("@loreai/core");
+    const history: unknown[] = [];
+    for (let i = 0; i < turns.length; i++) {
+      const resp = await harness.chat(
+        makeBody(turns[i].userMessage, history),
+        "test-key",
+        headers,
+      );
+      expect(resp.status).toBe(200);
+      await resp.json();
+      history.push({ role: "user", content: turns[i].userMessage });
+      history.push({
+        role: "assistant",
+        content: [{ type: "text", text: turns[i].assistantText }],
+      });
+
+      // After the empty baseline is frozen on turn 1, mint a project preference
+      // mid-session. With the freeze it must NOT appear as a new system[1] block.
+      if (i === 0) {
+        ltm.create({
+          projectPath,
+          scope: "project",
+          category: "preference",
+          title: "Mid-session minted preference",
+          content:
+            "This preference was minted after the empty system[1] baseline froze.",
+        });
+      }
+    }
+
+    const bodies = harness.upstreamBodies().map(normalizeBodyForComparison);
+    const systems = bodies.map((b) => {
+      const parsed = JSON.parse(b) as { system?: unknown };
+      return JSON.stringify(parsed.system ?? null);
+    });
+    // The full system array must be byte-identical across all turns: the minted
+    // preference does not grow the array (frozen empty system[1]).
+    for (let i = 1; i < systems.length; i++) {
+      expect(
+        systems[i],
+        `system array changed on turn ${i + 1} after a mid-session preference ` +
+          `mint — the empty system[1] baseline was not frozen (array-grow bust)`,
+      ).toBe(systems[0]);
+    }
+    // And the minted preference's title must NOT have leaked into the prompt.
+    expect(bodies[2]).not.toContain("Mid-session minted preference");
+  });
+
   it("normal LTM refresh preserves system[2] and emits durable removal deltas", async () => {
     const turns = Array.from({ length: 4 }, (_, i) => ({
       userMessage: `Normal removal delta turn ${i}: continue the work.`,

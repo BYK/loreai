@@ -4131,6 +4131,50 @@ describe("tier-based context management", () => {
       recordCacheUsage(0, 0, 0, SID);
       expect(inspectSessionState(SID)?.consecutiveBusts).toBe(1);
     });
+
+    // Regression for the ses_14b9bf3d… false "unsustainable" warning: a bursty
+    // session whose turns are spaced beyond the conversation cache TTL re-warms a
+    // legitimately-cold cache on every resume (a write-heavy "bust"). Those
+    // idle-resume re-warms are EXPECTED, not sustained growth, and must not push
+    // the counter toward SUSTAINED_BUST_THRESHOLD.
+    test("idle-resume re-warm does NOT increment consecutive busts", () => {
+      recordCacheUsage(100_000, 0, 3, SID, true);
+      expect(inspectSessionState(SID)?.consecutiveBusts).toBe(0);
+    });
+
+    test("two idle-resume re-warms stay below the unsustainable threshold", () => {
+      recordCacheUsage(100_000, 0, 3, SID, true);
+      recordCacheUsage(100_000, 0, 3, SID, true);
+      // Without the idle guard these two cold re-warms would read as "2
+      // consecutive busts" and trip the unsustainable warning.
+      expect(inspectSessionState(SID)?.consecutiveBusts).toBe(0);
+    });
+
+    test("idle-resume holds (does not erase) a genuine prior bust run", () => {
+      // A real warm-cache bust happened first.
+      recordCacheUsage(100_000, 0, 3, SID);
+      expect(inspectSessionState(SID)?.consecutiveBusts).toBe(1);
+      // Then an idle resume re-warms: hold the counter — neither advance toward
+      // the threshold nor wipe the genuine prior bust.
+      recordCacheUsage(100_000, 0, 3, SID, true);
+      expect(inspectSessionState(SID)?.consecutiveBusts).toBe(1);
+    });
+
+    test("a genuine (non-idle) bust after an idle re-warm still increments", () => {
+      recordCacheUsage(100_000, 0, 3, SID, true); // idle — held at 0
+      recordCacheUsage(100_000, 0, 3, SID); // genuine warm-window bust
+      recordCacheUsage(100_000, 0, 3, SID); // genuine warm-window bust
+      expect(inspectSessionState(SID)?.consecutiveBusts).toBe(2);
+    });
+
+    test("idle-resume cache HIT still resets the counter", () => {
+      recordCacheUsage(100_000, 0, 3, SID);
+      recordCacheUsage(100_000, 0, 3, SID);
+      expect(inspectSessionState(SID)?.consecutiveBusts).toBe(2);
+      // A genuine cache hit on an idle resume is still a hit — reset.
+      recordCacheUsage(1_000, 90_000, 3, SID, true);
+      expect(inspectSessionState(SID)?.consecutiveBusts).toBe(0);
+    });
   });
 
   describe("unsustainable gating — only fires when genuinely over the layer-0 cap", () => {
