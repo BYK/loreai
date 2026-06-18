@@ -17,6 +17,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { CLAUDE_CODE_FIRST_PARTY_ENV } from "../cch";
 import { detectAgents } from "./agents";
 
 // ---------------------------------------------------------------------------
@@ -622,6 +623,13 @@ export function claudeCodeSettingsPath(): string {
  *   convention).
  * - Sets `env.DISABLE_AUTO_COMPACT` to `"1"` so the Lore gradient
  *   context manager and distillation pipeline are the source of truth.
+ * - Sets `env._CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` to `"1"` so Claude Code
+ *   >= 2.1.181 keeps emitting the `cch` billing field even though
+ *   ANTHROPIC_BASE_URL points at the local gateway rather than
+ *   `api.anthropic.com` (the gateway is a transparent proxy to the first-party
+ *   API; without this the client suppresses `cch` and the gateway cannot
+ *   re-sign the billing header). Mirrors the `lore run` path in
+ *   `agents.ts`. See quality/CCH.md.
  * - Deep-merges with the existing settings; preserves permissions,
  *   hooks, model overrides, and other env vars.
  * - Idempotent: running twice produces the same result.
@@ -634,6 +642,7 @@ export function updateClaudeCodeSettings(
     env: {
       ANTHROPIC_BASE_URL: gatewayUrl,
       DISABLE_AUTO_COMPACT: "1",
+      [CLAUDE_CODE_FIRST_PARTY_ENV]: "1",
     },
   });
 }
@@ -657,6 +666,9 @@ function setupClaudeCode(baseUrl: string): void {
   console.log(`[lore]   env.ANTHROPIC_BASE_URL = "${anthropicBaseUrl}"`);
   console.log(
     `[lore]   env.DISABLE_AUTO_COMPACT = "1" (auto-compaction disabled)`,
+  );
+  console.log(
+    `[lore]   env.${CLAUDE_CODE_FIRST_PARTY_ENV} = "1" (keeps cch billing flowing through the gateway)`,
   );
   console.log(`[lore]   Config: ${configPath}`);
   console.log(`[lore]`);

@@ -34,6 +34,19 @@ import { log } from "@loreai/core";
 import * as Sentry from "@sentry/bun";
 import { xxHash64 } from "./xxhash.ts";
 
+/**
+ * Claude Code (>= 2.1.181) only emits the `cch` billing field when it believes
+ * it is talking to the first-party API — it checks that ANTHROPIC_BASE_URL's
+ * host is exactly `api.anthropic.com` (or unset), otherwise it suppresses `cch`
+ * entirely. Setting this env var to a truthy value forces the first-party
+ * assumption. The Lore gateway is a transparent proxy to the first-party API,
+ * so any process it points at the gateway (Claude Code launched via `lore run`
+ * or configured via `lore setup`, and the seed extractor's capture server)
+ * must set this so `cch` keeps flowing. See quality/CCH.md.
+ */
+export const CLAUDE_CODE_FIRST_PARTY_ENV =
+  "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL";
+
 // ---------------------------------------------------------------------------
 // Version→seed mapping
 // ---------------------------------------------------------------------------

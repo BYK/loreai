@@ -7,6 +7,7 @@
  *  - What env vars to set so it talks through the gateway
  */
 import { getGitRemote } from "@loreai/core";
+import { CLAUDE_CODE_FIRST_PARTY_ENV } from "../cch";
 import { whichSync } from "./lib/which";
 
 // ---------------------------------------------------------------------------
@@ -105,14 +106,17 @@ export const AGENTS: AgentDef[] = [
         DISABLE_AUTO_COMPACT: "1",
         // Claude Code >= 2.1.181 only emits the `cch` billing field when it
         // believes it is talking to the first-party API: it suppresses `cch`
-        // unless ANTHROPIC_BASE_URL's host is exactly `api.anthropic.com`.
-        // We point ANTHROPIC_BASE_URL at the local gateway, which IS a
-        // transparent proxy to that first-party API, so without this override
-        // the client sends NO `cch` and the gateway's resignBody cannot
-        // re-sign the billing header it modifies. Force the first-party
-        // assumption so cch keeps flowing. See quality/CCH.md (#801). NEVER
-        // remove this for the Claude Code agent.
-        _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL: "1",
+        // unless ANTHROPIC_BASE_URL's host is exactly `api.anthropic.com`. We
+        // point ANTHROPIC_BASE_URL at the local gateway (a transparent proxy to
+        // that first-party API), so without this the client sends NO `cch` and
+        // the gateway's resignBody cannot re-sign the billing header it
+        // modifies. Forcing the first-party assumption is correct here and safe
+        // to apply unconditionally: `cch` is a no-op for non-OAuth sessions,
+        // OAuth tokens already flow to the gateway today, and the only other
+        // effect (enabling `traceparent` propagation) carries non-secret W3C
+        // trace IDs already covered by the gateway's header forwarding. See
+        // quality/CCH.md (first-party gate). NEVER remove this for Claude Code.
+        [CLAUDE_CODE_FIRST_PARTY_ENV]: "1",
       };
       // Inject project path so the gateway knows which project this session
       // belongs to, regardless of system prompt format.

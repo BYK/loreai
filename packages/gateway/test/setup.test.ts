@@ -483,8 +483,19 @@ describe("updateClaudeCodeSettings", () => {
       env: {
         ANTHROPIC_BASE_URL: "http://127.0.0.1:3207",
         DISABLE_AUTO_COMPACT: "1",
+        _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL: "1",
       },
     });
+  });
+
+  test("sets the first-party override so >= 2.1.181 keeps emitting cch", () => {
+    // Mirrors the `lore run` path (agents.ts): a persistent `lore setup` config
+    // must also force the first-party assumption, or 2.1.181+ suppresses `cch`
+    // when ANTHROPIC_BASE_URL points at the gateway. See quality/CCH.md.
+    const result = updateClaudeCodeSettings({}, "http://127.0.0.1:3207") as {
+      env?: { _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL?: string };
+    };
+    expect(result.env?._CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL).toBe("1");
   });
 
   test("strips trailing /v1 from the Anthropic base URL", () => {
@@ -514,6 +525,7 @@ describe("updateClaudeCodeSettings", () => {
       OTHER_VAR: "value",
       ANTHROPIC_BASE_URL: "http://127.0.0.1:3207",
       DISABLE_AUTO_COMPACT: "1",
+      _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL: "1",
     });
   });
 

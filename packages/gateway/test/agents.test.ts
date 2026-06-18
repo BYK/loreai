@@ -70,9 +70,16 @@ describe("Claude Code agent envVars", () => {
   test("forces first-party assumption so >= 2.1.181 keeps emitting cch", () => {
     // Claude Code 2.1.181 suppresses the `cch` billing field unless it believes
     // it is talking to api.anthropic.com. The gateway is a transparent proxy to
-    // that API, so we must force the first-party assumption (see #801).
+    // that API, so we must force the first-party assumption (see quality/CCH.md).
     const env = claude.envVars("http://127.0.0.1:3207", "/tmp/test");
     expect(env._CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL).toBe("1");
+  });
+
+  test("first-party override is set regardless of gateway URL or cwd", () => {
+    const env1 = claude.envVars("http://127.0.0.1:3207", "/tmp/test");
+    const env2 = claude.envVars("http://192.168.1.50:5673", "/home/user/proj");
+    expect(env1._CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL).toBe("1");
+    expect(env2._CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL).toBe("1");
   });
 });
 

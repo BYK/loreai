@@ -291,11 +291,32 @@ scan of the binary found the still-present `cch=00000` template and the
 JS revealed the `qu()` first-party gate above. Setting the env override made
 `cch` reappear, and the captured pairs hashed to the known seed bit-for-bit.
 
-### Gotcha / follow-up (gateway runtime — not changed here)
-The same gate affects the **gateway at runtime**: `lore` launches Claude Code with
-`ANTHROPIC_BASE_URL` pointed at the gateway (localhost), so a 2.1.181+ client's
-`qu()` is false and it sends **no `cch`**. `resignBody`'s regex requires a
-`cch=[0-9a-fA-F]{5};` segment, so it will not match such a client's body. The
-likely fix is to set `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1` in the
-`claude-code` agent `envVars` (`packages/gateway/src/cli/agents.ts`) so clients
-keep emitting `cch` for the gateway to re-sign. Tracked separately from #801.
+### Gateway runtime: keep clients emitting `cch` through the gateway
+The same gate affects the **gateway at runtime**: `lore` points Claude Code's
+`ANTHROPIC_BASE_URL` at the gateway (localhost), so a 2.1.181+ client's `qu()` is
+false and it sends **no `cch`**. `resignBody`'s regex requires a
+`cch=[0-9a-fA-F]{5};` segment, so it cannot re-sign such a client's body.
+
+Fixed by setting `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1` on **both** paths
+that route Claude Code through the gateway (the env var name is centralized as
+`CLAUDE_CODE_FIRST_PARTY_ENV` in `packages/gateway/src/cch.ts`):
+
+- `lore run` — the `claude-code` agent `envVars` (`packages/gateway/src/cli/agents.ts`).
+- `lore setup claude-code` — the `~/.claude/settings.json` `env` block
+  (`updateClaudeCodeSettings` in `packages/gateway/src/cli/setup.ts`).
+
+The gateway is a transparent proxy to the first-party API, so forcing the
+first-party assumption is correct. It is safe to apply unconditionally: `cch` is
+a no-op for non-OAuth sessions, OAuth tokens already flow to the gateway today,
+and the only other effect (enabling `traceparent` propagation) carries
+non-secret W3C trace IDs the gateway already forwards. Claude Code Desktop (when
+it lands; not yet on main) writes its own `settings.json` and will need the same
+key.
+
+**Remaining hardening (tracked in #807):** the gateway has no *defensive*
+fallback for a billing header that arrives without `cch` (e.g. a manually
+launched client). `BILLING_HEADER_RE` / `captureBillingPrefix` require a `cch=`
+segment, so such a body passes through unsigned **and** the session is never
+marked as needing OAuth billing (worker calls then lose their billing header).
+The env-var fix prevents this for all `lore`-managed launches; a belt-and-braces
+fix would inject `cch=00000;` and sign when a billing header lacks `cch`.
