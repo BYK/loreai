@@ -66,6 +66,14 @@ describe("Claude Code agent envVars", () => {
     const env = claude.envVars("http://127.0.0.1:3207", "/tmp/test");
     expect(env.DISABLE_AUTO_COMPACT).toBe("1");
   });
+
+  test("forces first-party assumption so >= 2.1.181 keeps emitting cch", () => {
+    // Claude Code 2.1.181 suppresses the `cch` billing field unless it believes
+    // it is talking to api.anthropic.com. The gateway is a transparent proxy to
+    // that API, so we must force the first-party assumption (see #801).
+    const env = claude.envVars("http://127.0.0.1:3207", "/tmp/test");
+    expect(env._CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL).toBe("1");
+  });
 });
 
 // ---------------------------------------------------------------------------

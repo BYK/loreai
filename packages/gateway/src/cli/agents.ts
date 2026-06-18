@@ -103,6 +103,16 @@ export const AGENTS: AgentDef[] = [
       const env: Record<string, string> = {
         ANTHROPIC_BASE_URL: url,
         DISABLE_AUTO_COMPACT: "1",
+        // Claude Code >= 2.1.181 only emits the `cch` billing field when it
+        // believes it is talking to the first-party API: it suppresses `cch`
+        // unless ANTHROPIC_BASE_URL's host is exactly `api.anthropic.com`.
+        // We point ANTHROPIC_BASE_URL at the local gateway, which IS a
+        // transparent proxy to that first-party API, so without this override
+        // the client sends NO `cch` and the gateway's resignBody cannot
+        // re-sign the billing header it modifies. Force the first-party
+        // assumption so cch keeps flowing. See quality/CCH.md (#801). NEVER
+        // remove this for the Claude Code agent.
+        _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL: "1",
       };
       // Inject project path so the gateway knows which project this session
       // belongs to, regardless of system prompt format.
