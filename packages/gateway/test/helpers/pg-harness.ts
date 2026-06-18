@@ -19,7 +19,13 @@ import { promisify } from "node:util";
 import { Client, type ClientConfig } from "pg";
 
 const exec = promisify(execFile);
-const JWT_SECRET = "lore-integration-test-jwt-secret-min-32-bytes-long";
+// Test-only HS256 secret: signs tokens for the throwaway local Postgres only.
+// Not a prod secret (prod uses Supabase GoTrue's own secret) and never shipped
+// (test/** is excluded from the published package). Env-overridable to make the
+// test-only nature explicit.
+const JWT_SECRET =
+  process.env.LORE_TEST_JWT_SECRET ??
+  "lore-integration-test-jwt-secret-min-32-bytes-long";
 
 function b64url(buf: Buffer | string): string {
   return Buffer.from(buf)

@@ -99,8 +99,11 @@ beforeEach(async () => {
     setKV(`sync.push.${m.table}`, "0");
     setKV(`sync.pull.${m.table}`, "0|");
   }
-  // Fresh REMOTE state too (admin connection bypasses RLS) — otherwise rows
-  // accumulate across tests and the cursor-reset pulls re-fetch all of them.
+  // Fresh REMOTE state too. This uses the raw admin connection (superuser,
+  // bypasses RLS) intentionally — it's test teardown, not a client path; the
+  // transactional asUser()/runAs() helpers still SET ROLE for the actual tests.
+  // Otherwise rows accumulate across tests and the cursor-reset pulls re-fetch
+  // all of them.
   for (const t of [
     "knowledge_entity_refs",
     "knowledge",

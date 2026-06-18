@@ -9,8 +9,17 @@
  *   LORE_INTEGRATION=1 pnpm exec vitest run packages/gateway/test/sync-security.integration.test.ts
  */
 import { execFileSync } from "node:child_process";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { type PgHarness, startPgHarness } from "./helpers/pg-harness";
+
+/** Free-tier defaults (mirror supabase/migrations/0003) — restored after quota tests. */
+const FREE_LIMITS: Record<string, number> = {
+  knowledge: 500,
+  entities: 30,
+  entity_aliases: 300,
+  entity_relations: 300,
+  knowledge_entity_refs: 2000,
+};
 
 // Skip decision must be known at COLLECTION time (before beforeAll), so the
 // Docker probe is synchronous here.
@@ -168,13 +177,24 @@ describe.skipIf(gate())("sync migrations — tier is server-only", () => {
 
 describe.skipIf(gate())("sync migrations — quota + anti-abuse", () => {
   // plan_limits is admin/migration-managed (no client role may write it), so
-  // tune the cap via the raw admin connection.
+  // tune the cap via the raw admin connection. Restored after each test
+  // (afterEach below) so cap mutations never leak across tests / test order.
   async function setCap(table: string, n: number) {
     await h.client.query(
       "update public.plan_limits set max_rows=$1 where tier='free' and table_name=$2",
       [n, table],
     );
   }
+
+  afterEach(async () => {
+    if (gate()) return;
+    for (const [table, n] of Object.entries(FREE_LIMITS)) {
+      await h.client.query(
+        "update public.plan_limits set max_rows=$1 where tier='free' and table_name=$2",
+        [n, table],
+      );
+    }
+  });
 
   it("blocks inserts past the free-tier row cap", async () => {
     const a = await h.createUser();
