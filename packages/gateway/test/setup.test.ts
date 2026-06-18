@@ -1,11 +1,15 @@
-import { describe, test, expect } from "vitest";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
-  updateCodexConfig,
   normalizeBaseUrl,
-  setTopLevelKey,
-  updateOpencodeConfig,
-  updateClaudeCodeSettings,
   opencodePluginSpec,
+  setTopLevelKey,
+  setupClaudeCodeDesktop,
+  updateClaudeCodeSettings,
+  updateCodexConfig,
+  updateOpencodeConfig,
 } from "../src/cli/setup";
 
 // ---------------------------------------------------------------------------
@@ -572,5 +576,199 @@ describe("opencodePluginSpec", () => {
     const modified = opencodePluginSpec.apply(config);
     expect(modified).toBe(true);
     expect(config.plugin).toEqual(["@loreai/opencode"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// setupClaudeCodeDesktop
+// ---------------------------------------------------------------------------
+
+// 🔴 ESM module namespaces are not configurable, so `vi.spyOn(fs, ...)` fails.
+// We mock `node:child_process` with a hoisted factory so `execFileSync` (used
+// by setupClaudeCodeDesktop's Windows `setx` path) is a controllable mock. The
+// existing setup tests in this file do not exercise the npm-install paths that
+// also use execFileSync, so a module-wide mock is safe here.
+const { execFileSyncMock } = vi.hoisted(() => ({
+  execFileSyncMock: vi.fn(() => Buffer.from("")),
+}));
+vi.mock("node:child_process", async (importActual) => {
+  const actual = await importActual<typeof import("node:child_process")>();
+  return { ...actual, execFileSync: execFileSyncMock };
+});
+
+// 🔴 Mock the desktop detector so the "detected" / "not detected" guidance
+// branches are exercised deterministically on every runner (CI has no Desktop
+// installed). Default: not installed; individual tests override per case.
+const { isClaudeDesktopInstalledMock } = vi.hoisted(() => ({
+  isClaudeDesktopInstalledMock: vi.fn<() => string | null>(() => null),
+}));
+vi.mock("../src/cli/lib/desktop-detect", () => ({
+  isClaudeDesktopInstalled: isClaudeDesktopInstalledMock,
+}));
+
+describe("setupClaudeCodeDesktop", () => {
+  // Capture console.log so we can assert on the printed guidance.
+  let logLines: string[];
+  let logSpy: ReturnType<typeof vi.spyOn>;
+  let savedPlatform: NodeJS.Platform;
+  let savedHome: string | undefined;
+  let savedUserProfile: string | undefined;
+
+  beforeEach(() => {
+    logLines = [];
+    logSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation((...args: unknown[]) => {
+        logLines.push(args.map(String).join(" "));
+      });
+    savedPlatform = process.platform;
+    execFileSyncMock.mockClear();
+    isClaudeDesktopInstalledMock.mockReset();
+    isClaudeDesktopInstalledMock.mockReturnValue(null);
+  });
+
+  afterEach(() => {
+    logSpy.mockRestore();
+    Object.defineProperty(process, "platform", {
+      value: savedPlatform,
+      configurable: true,
+    });
+    if (savedHome !== undefined) process.env.HOME = savedHome;
+    else delete process.env.HOME;
+    if (savedUserProfile !== undefined) {
+      process.env.USERPROFILE = savedUserProfile;
+    } else {
+      delete process.env.USERPROFILE;
+    }
+  });
+
+  // 🔴 These tests must NEVER write to the user's real ~/.claude/settings.json.
+  // withTempHome redirects HOME/USERPROFILE to a fresh mkdtempSync dir so that
+  // claudeCodeSettingsPath() (via node:os homedir(), which reads $HOME on Unix
+  // and %USERPROFILE% on Windows) resolves into throwaway space. We set both so
+  // the redirect holds regardless of the mocked process.platform. The fixture
+  // returns the temp dir so tests can read the written settings.json back.
+  function withTempHome<T>(fn: (dir: string) => T): T {
+    savedHome = process.env.HOME;
+    savedUserProfile = process.env.USERPROFILE;
+    const dir = mkdtempSync(join(tmpdir(), "lore-cc-desktop-"));
+    process.env.HOME = dir;
+    process.env.USERPROFILE = dir;
+    try {
+      return fn(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  function readWrittenSettings(dir: string): {
+    env: { ANTHROPIC_BASE_URL: string; DISABLE_AUTO_COMPACT: string };
+  } {
+    const path = join(dir, ".claude", "settings.json");
+    return JSON.parse(readFileSync(path, "utf8"));
+  }
+
+  test("on linux: prints 'not available' and skips in-app env guidance", () => {
+    Object.defineProperty(process, "platform", {
+      value: "linux",
+      configurable: true,
+    });
+    withTempHome((dir) => {
+      setupClaudeCodeDesktop("http://127.0.0.1:3207/v1");
+      const out = logLines.join("\n");
+      expect(out).toContain(
+        "Claude Code Desktop is not available on this platform",
+      );
+      expect(out).toContain("Use the Claude Code CLI instead");
+      expect(out).not.toContain("anthropics/claude-code#67619");
+      // 🔴 The early return on linux means the desktop-detection branch never
+      // runs — so neither the "detected" nor the "not detected" guidance is
+      // printed. This assertion is what makes the test discriminate the early
+      // return (without it the test passes even if the return is removed, since
+      // isClaudeDesktopInstalled() is null on a linux runner anyway).
+      expect(out).not.toContain("Claude Code Desktop was not detected");
+      // The settings.json write still happens (CLI fallback).
+      expect(readWrittenSettings(dir).env.ANTHROPIC_BASE_URL).toBe(
+        "http://127.0.0.1:3207",
+      );
+    });
+  });
+
+  test("on mac with Desktop detected: settings.json primary + in-app fallback (bug #67619)", () => {
+    Object.defineProperty(process, "platform", {
+      value: "darwin",
+      configurable: true,
+    });
+    isClaudeDesktopInstalledMock.mockReturnValue(
+      "/Applications/Claude.app/Contents/MacOS/Claude",
+    );
+    withTempHome((dir) => {
+      setupClaudeCodeDesktop("http://127.0.0.1:3207/v1");
+      const out = logLines.join("\n");
+      // 🔴 Reframed messaging: settings.json is the PRIMARY path; the in-app
+      // editor is the FALLBACK for builds hitting bug #67619.
+      expect(out).toContain("Desktop app detected at:");
+      expect(out).toContain("primary path");
+      expect(out).toContain("FALLBACK");
+      expect(out).toContain("anthropics/claude-code#67619");
+      expect(out).toContain("ANTHROPIC_BASE_URL=http://127.0.0.1:3207");
+      expect(out).toContain("DISABLE_AUTO_COMPACT=1");
+      expect(out).toContain("Local environment dropdown");
+      // settings.json write is always attempted (the primary, automated path).
+      expect(readWrittenSettings(dir).env.ANTHROPIC_BASE_URL).toBe(
+        "http://127.0.0.1:3207",
+      );
+    });
+  });
+
+  test("on mac without Desktop: prints install guidance, still writes settings.json", () => {
+    Object.defineProperty(process, "platform", {
+      value: "darwin",
+      configurable: true,
+    });
+    isClaudeDesktopInstalledMock.mockReturnValue(null);
+    withTempHome((dir) => {
+      setupClaudeCodeDesktop("http://127.0.0.1:3207/v1");
+      const out = logLines.join("\n");
+      expect(out).toContain("Claude Code Desktop was not detected");
+      expect(out).toContain("https://claude.com/download");
+      expect(out).not.toContain("Desktop app detected at:");
+      expect(readWrittenSettings(dir).env.ANTHROPIC_BASE_URL).toBe(
+        "http://127.0.0.1:3207",
+      );
+    });
+  });
+
+  test("on windows: attempts setx for dev/preview servers", () => {
+    Object.defineProperty(process, "platform", {
+      value: "win32",
+      configurable: true,
+    });
+    withTempHome((dir) => {
+      setupClaudeCodeDesktop("http://127.0.0.1:3207/v1");
+      // execFileSync is mocked module-wide; assert setx invoked with the argv
+      // array form (injection-safe), not a shell string.
+      expect(execFileSyncMock).toHaveBeenCalledWith(
+        "setx",
+        ["ANTHROPIC_BASE_URL", "http://127.0.0.1:3207"],
+        expect.anything(),
+      );
+      expect(readWrittenSettings(dir).env.ANTHROPIC_BASE_URL).toBe(
+        "http://127.0.0.1:3207",
+      );
+    });
+  });
+
+  test("always writes ~/.claude/settings.json with /v1 stripped", () => {
+    Object.defineProperty(process, "platform", {
+      value: "darwin",
+      configurable: true,
+    });
+    withTempHome((dir) => {
+      setupClaudeCodeDesktop("http://127.0.0.1:3207/v1");
+      const parsed = readWrittenSettings(dir);
+      expect(parsed.env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:3207");
+      expect(parsed.env.DISABLE_AUTO_COMPACT).toBe("1");
+    });
   });
 });

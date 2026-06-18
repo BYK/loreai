@@ -77,18 +77,38 @@ async function resolveLaunchTarget(
   if (cmdArgs.length > 0) {
     const env: Record<string, string> = {};
     const prependArgs: string[] = [];
+    // Match by agent name OR binary so shorthand like `lore claude-code-desktop`
+    // resolves to the correct agent even when `agent.binary` is a placeholder
+    // string (the desktop agent's static `binary` may be `claude-code-desktop`
+    // when the app isn't installed; resolution via `agent.detect()` then yields
+    // the real launcher path).
+    const matchedByName = AGENTS.find((a) => a.name === cmdArgs[0]);
+    const matchedByBinary = AGENTS.find((a) => a.binary === cmdArgs[0]);
+    const matchedAgent = matchedByName ?? matchedByBinary;
     for (const agent of AGENTS) {
       // Env vars are safe to merge from all agents (unused vars are harmless).
       Object.assign(env, agent.envVars(gatewayUrl, projectDir));
       // CLI args are agent-specific (e.g. Codex's `-c` flag) — only inject
       // them for the agent that matches the explicit command to avoid passing
       // unrecognized flags to other agents.
-      if (agent.cliArgs && agent.binary === cmdArgs[0]) {
+      if (matchedAgent === agent && agent.cliArgs) {
         prependArgs.push(...agent.cliArgs(gatewayUrl, projectDir));
       }
     }
+    // 🔴 Spawn-command resolution. When the command matches an agent by NAME
+    // (e.g. the `claude-code-desktop` shorthand, whose `binary` is a
+    // placeholder), resolve the real launcher path via `detect()` — falling
+    // back to the literal token if the app isn't found so the user gets a
+    // clear "command not found" from `spawn()`. When the command matches an
+    // agent by BINARY (the existing `lore run codex` / `lore run claude`
+    // path), spawn the literal token exactly as before so PATH resolution and
+    // shell semantics are unchanged — this preserves prior behavior for the
+    // built-in PATH-based agents.
+    const spawnCommand = matchedByName
+      ? (matchedByName.detect() ?? cmdArgs[0])
+      : cmdArgs[0];
     return {
-      command: cmdArgs[0],
+      command: spawnCommand,
       args: [...prependArgs, ...cmdArgs.slice(1), ...extraArgs],
       env,
     };

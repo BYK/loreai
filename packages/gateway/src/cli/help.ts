@@ -18,7 +18,7 @@ Commands:
                        setups — path-less sessions route to per-session buckets
                        so unrelated projects never merge onto the gateway cwd.
   setup [app]         Configure an AI app to route through lore
-                       Supported: codex, opencode, claude-code
+                       Supported: codex, opencode, claude-code, claude-code-desktop
   logs                Show lore activity log
   import              Import knowledge from prior AI agent conversations
   data <subcommand>   Manage stored data (list, show, clear, delete)

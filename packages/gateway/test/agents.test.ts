@@ -1,5 +1,18 @@
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AGENTS } from "../src/cli/agents";
+
+// 🔴 ESM module namespaces are not configurable, so we mock node:fs with a
+// hoisted factory that overrides only `existsSync`. Everything else passes
+// through via importActual so unrelated fs callers are unaffected. Used by the
+// "Claude Code Desktop agent detect" block to make detection deterministic.
+const { existsSyncMock } = vi.hoisted(() => ({
+  existsSyncMock: vi.fn<(p: unknown) => boolean>(() => false),
+}));
+vi.mock("node:fs", async (importActual) => {
+  const actual = await importActual<typeof import("node:fs")>();
+  return { ...actual, existsSync: existsSyncMock };
+});
 
 // ---------------------------------------------------------------------------
 // Claude Code agent
@@ -218,5 +231,171 @@ describe("Codex agent cliArgs", () => {
       );
       expect(hasProviderHeaders).toBe(false);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Claude Code Desktop agent
+// ---------------------------------------------------------------------------
+
+describe("Claude Code Desktop agent envVars", () => {
+  const desktop = AGENTS.find((a) => a.name === "claude-code-desktop");
+  if (!desktop) throw new Error("claude-code-desktop agent not registered");
+
+  // appendCustomHeader reads env[key] ?? process.env[key] to merge with
+  // existing headers. Save and restore to avoid test pollution.
+  let savedHeaders: string | undefined;
+  beforeEach(() => {
+    savedHeaders = process.env.ANTHROPIC_CUSTOM_HEADERS;
+    delete process.env.ANTHROPIC_CUSTOM_HEADERS;
+  });
+  afterEach(() => {
+    if (savedHeaders !== undefined) {
+      process.env.ANTHROPIC_CUSTOM_HEADERS = savedHeaders;
+    } else {
+      delete process.env.ANTHROPIC_CUSTOM_HEADERS;
+    }
+  });
+
+  test("injects X-Lore-Project in ANTHROPIC_CUSTOM_HEADERS", () => {
+    const env = desktop.envVars(
+      "http://127.0.0.1:3207",
+      "/home/user/my-project",
+    );
+    expect(env.ANTHROPIC_CUSTOM_HEADERS).toContain(
+      "X-Lore-Project: /home/user/my-project",
+    );
+  });
+
+  test("does NOT set ANTHROPIC_BASE_URL (Desktop reads it from settings.json)", () => {
+    // 🔴 The Desktop's spawned `claude` child reads ANTHROPIC_BASE_URL from
+    // ~/.claude/settings.json, not from this process's env. Setting it here
+    // would be useless — see setup.ts guidance and upstream bug
+    // anthropics/claude-code#67619.
+    const env = desktop.envVars("http://127.0.0.1:3207", "/tmp/test");
+    expect(env.ANTHROPIC_BASE_URL).toBeUndefined();
+  });
+
+  test("does NOT set DISABLE_AUTO_COMPACT (written to settings.json instead)", () => {
+    // 🔴 The Desktop's spawned child does not inherit our env vars, so setting
+    // DISABLE_AUTO_COMPACT here is useless. `lore setup claude-code-desktop`
+    // writes it to settings.json.
+    const env = desktop.envVars("http://127.0.0.1:3207", "/tmp/test");
+    expect(env.DISABLE_AUTO_COMPACT).toBeUndefined();
+  });
+
+  test("preserves user-set ANTHROPIC_CUSTOM_HEADERS", () => {
+    process.env.ANTHROPIC_CUSTOM_HEADERS = "X-Custom: user-value";
+    const env = desktop.envVars("http://127.0.0.1:3207", "/tmp/test");
+    const headers = env.ANTHROPIC_CUSTOM_HEADERS ?? "";
+    expect(headers).toContain("X-Custom: user-value");
+    expect(headers).toContain("X-Lore-Project: /tmp/test");
+  });
+});
+
+describe("Claude Code Desktop agent detect + binary", () => {
+  // 🔴 Mock node:fs `existsSync` so detection is deterministic on every runner
+  // (CI has no Claude.app, so an unmocked test would never exercise the
+  // "installed" branch). We pass through the rest of node:fs via importActual
+  // so unrelated callers (e.g. git remote lookups) are unaffected.
+  let savedPlatform: NodeJS.Platform;
+  let savedLocalAppData: string | undefined;
+
+  beforeEach(() => {
+    savedPlatform = process.platform;
+    savedLocalAppData = process.env.LOCALAPPDATA;
+    existsSyncMock.mockReset();
+  });
+  afterEach(() => {
+    Object.defineProperty(process, "platform", {
+      value: savedPlatform,
+      configurable: true,
+    });
+    if (savedLocalAppData !== undefined) {
+      process.env.LOCALAPPDATA = savedLocalAppData;
+    } else {
+      delete process.env.LOCALAPPDATA;
+    }
+  });
+
+  test("returns null on linux regardless of filesystem", async () => {
+    Object.defineProperty(process, "platform", {
+      value: "linux",
+      configurable: true,
+    });
+    existsSyncMock.mockReturnValue(true); // even if something exists
+    const { isClaudeDesktopInstalled } = await import(
+      "../src/cli/lib/desktop-detect"
+    );
+    expect(isClaudeDesktopInstalled()).toBeNull();
+    expect(existsSyncMock).not.toHaveBeenCalled();
+  });
+
+  test("returns the macOS launcher path when /Applications/Claude.app exists", async () => {
+    Object.defineProperty(process, "platform", {
+      value: "darwin",
+      configurable: true,
+    });
+    const expected = "/Applications/Claude.app/Contents/MacOS/Claude";
+    existsSyncMock.mockImplementation((p: unknown) => p === expected);
+    const { isClaudeDesktopInstalled } = await import(
+      "../src/cli/lib/desktop-detect"
+    );
+    expect(isClaudeDesktopInstalled()).toBe(expected);
+  });
+
+  test("returns null on macOS when the app is absent", async () => {
+    Object.defineProperty(process, "platform", {
+      value: "darwin",
+      configurable: true,
+    });
+    existsSyncMock.mockReturnValue(false);
+    const { isClaudeDesktopInstalled } = await import(
+      "../src/cli/lib/desktop-detect"
+    );
+    expect(isClaudeDesktopInstalled()).toBeNull();
+  });
+
+  test("returns the Windows launcher path under %LOCALAPPDATA%", async () => {
+    Object.defineProperty(process, "platform", {
+      value: "win32",
+      configurable: true,
+    });
+    process.env.LOCALAPPDATA = "C:\\Users\\me\\AppData\\Local";
+    // desktop-detect.ts builds candidates via node:path `join`, whose
+    // separator depends on the host running the test — so compute the expected
+    // path the same way instead of hardcoding backslashes.
+    const expected = join(
+      "C:\\Users\\me\\AppData\\Local",
+      "Programs",
+      "Claude",
+      "Claude.exe",
+    );
+    existsSyncMock.mockImplementation((p: unknown) => p === expected);
+    const { isClaudeDesktopInstalled } = await import(
+      "../src/cli/lib/desktop-detect"
+    );
+    expect(isClaudeDesktopInstalled()).toBe(expected);
+  });
+
+  test("returns null on Windows when LOCALAPPDATA is unset", async () => {
+    Object.defineProperty(process, "platform", {
+      value: "win32",
+      configurable: true,
+    });
+    delete process.env.LOCALAPPDATA;
+    existsSyncMock.mockReturnValue(true);
+    const { isClaudeDesktopInstalled } = await import(
+      "../src/cli/lib/desktop-detect"
+    );
+    expect(isClaudeDesktopInstalled()).toBeNull();
+  });
+
+  test("agent.binary is the stable placeholder (never the launcher path)", () => {
+    // 🔴 binary is a constant placeholder; the real path comes from detect().
+    // This guards against regressing back to a module-load-resolved binary.
+    const desktop = AGENTS.find((a) => a.name === "claude-code-desktop");
+    if (!desktop) throw new Error("claude-code-desktop agent not registered");
+    expect(desktop.binary).toBe("claude-code-desktop");
   });
 });

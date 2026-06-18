@@ -7,6 +7,7 @@
  *  - What env vars to set so it talks through the gateway
  */
 import { getGitRemote } from "@loreai/core";
+import { isClaudeDesktopInstalled } from "./lib/desktop-detect";
 import { whichSync } from "./lib/which";
 
 // ---------------------------------------------------------------------------
@@ -114,6 +115,50 @@ export const AGENTS: AgentDef[] = [
       );
       // Inject git remote via ANTHROPIC_CUSTOM_HEADERS so the remote gateway
       // can identify the project by git remote without filesystem access.
+      const remote = safeRemote(cwd);
+      if (remote) {
+        appendCustomHeader(
+          env,
+          "ANTHROPIC_CUSTOM_HEADERS",
+          "X-Lore-Git-Remote",
+          remote,
+        );
+      }
+      return env;
+    },
+  },
+  {
+    name: "claude-code-desktop",
+    displayName: "Claude Code (Desktop)",
+    // 🔴 `binary` is a STABLE placeholder, NOT the launcher path. The real
+    // launcher path is always resolved at runtime via `detect()` (run.ts
+    // prefers the matched-by-name agent's `detect()` result). Keeping `binary`
+    // constant means:
+    //  (1) the `lore claude-code-desktop` shorthand match in main.ts is stable
+    //      whether or not the app is installed (main.ts matches by name OR
+    //      binary), and
+    //  (2) no filesystem I/O or `process.platform` coupling at module load
+    //      (AGENTS is a shared singleton imported before tests can mock the
+    //      platform).
+    // 🔴 NEVER add `ANTHROPIC_BASE_URL` here: the Desktop's spawned `claude`
+    // child reads it from `~/.claude/settings.json` (written by
+    // `lore setup claude-code-desktop`), not from this process's env. The
+    // in-app Local env editor is a manual fallback for builds hitting upstream
+    // bug anthropics/claude-code#67619.
+    binary: "claude-code-desktop",
+    detect: () => isClaudeDesktopInstalled(),
+    envVars: (_url, cwd) => {
+      // 🔴 No `ANTHROPIC_BASE_URL` — see binary comment above. We only inject
+      // the same custom headers as `claude-code` so that, if the user chooses
+      // to add them in the in-app env editor, the gateway still attributes the
+      // session to the right project / git remote.
+      const env: Record<string, string> = {};
+      appendCustomHeader(
+        env,
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "X-Lore-Project",
+        cwd,
+      );
       const remote = safeRemote(cwd);
       if (remote) {
         appendCustomHeader(

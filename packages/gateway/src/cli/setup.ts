@@ -9,6 +9,9 @@
  *     `@loreai/opencode` plugin (unless `--no-plugin`)
  *   - claude-code: writes `env.ANTHROPIC_BASE_URL` and `env.DISABLE_AUTO_COMPACT`
  *     to `~/.claude/settings.json`
+ *   - claude-code-desktop: writes the same `~/.claude/settings.json` (the
+ *     documented path the Desktop honors) plus, on Windows, `setx
+ *     ANTHROPIC_BASE_URL`; prints in-app Local env editor values as a fallback
  *
  * The command auto-detects installed apps when no argument is given,
  * or accepts an explicit app name (e.g. `lore setup codex`).
@@ -18,6 +21,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { detectAgents } from "./agents";
+import { isClaudeDesktopInstalled } from "./lib/desktop-detect";
 
 // ---------------------------------------------------------------------------
 // Supported apps and their setup handlers
@@ -93,6 +97,16 @@ const SUPPORTED_APPS: AppSetup[] = [
     // No Lore plugin for Claude Code — Anthropic controls the API surface
     // and there's no plugin host. The ANTHROPIC_BASE_URL env var is the
     // only integration point.
+  },
+  {
+    agentName: "claude-code-desktop",
+    displayName: "Claude Code (Desktop)",
+    run: (baseUrl) => setupClaudeCodeDesktop(baseUrl),
+    // The Desktop's Code tab reads ANTHROPIC_BASE_URL from
+    // ~/.claude/settings.json (the documented path, written here). The
+    // in-app Local env editor is a manual fallback for builds hitting
+    // anthropics/claude-code#67619 — it is safeStorage-encrypted and cannot
+    // be written by an external tool.
   },
 ];
 
@@ -662,6 +676,150 @@ function setupClaudeCode(baseUrl: string): void {
   console.log(`[lore]`);
   console.log(
     `[lore] Make sure the gateway is running (lore start) before using Claude Code.`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// claude-code-desktop setup
+// ---------------------------------------------------------------------------
+
+/**
+ * Configure the Claude Code Desktop app to route through the Lore gateway.
+ *
+ * PRIMARY (automated): write `~/.claude/settings.json` `env` — the only
+ * documented, plaintext, user-writable surface the Desktop honors for Claude
+ * sessions (the model API traffic Lore cares about).
+ *
+ * 🔴 NEVER attempt to write the Desktop's in-app Local env editor store: it is
+ * Electron `safeStorage`-encrypted under Claude.app's OS-keychain identity
+ * (macOS) / DPAPI (Windows) and cannot be written by an external tool. The
+ * in-app editor is a manual fallback only.
+ */
+export function setupClaudeCodeDesktop(baseUrl: string): void {
+  const configPath = claudeCodeSettingsPath();
+  const configDir = join(homedir(), ".claude");
+  mkdirSync(configDir, { recursive: true });
+
+  // Strip the /v1 suffix — Claude Code appends /v1/messages itself.
+  const anthropicBaseUrl = baseUrl.endsWith("/v1")
+    ? baseUrl.slice(0, -3)
+    : baseUrl;
+
+  const existing = readJsonConfig(configPath);
+  const updated = updateClaudeCodeSettings(existing, anthropicBaseUrl);
+  writeFileSync(configPath, `${JSON.stringify(updated, null, 2)}\n`, "utf8");
+
+  console.log(`[lore] Claude Code (Desktop) configured.`);
+  console.log(`[lore]   Wrote settings: ${configPath}`);
+  console.log(`[lore]   env.ANTHROPIC_BASE_URL = "${anthropicBaseUrl}"`);
+  console.log(`[lore]   env.DISABLE_AUTO_COMPACT = "1"`);
+  console.log(`[lore]`);
+
+  // The Desktop is macOS + Windows only. Any other platform (linux, freebsd,
+  // etc.) gets a hard "not available" message and an early return — the
+  // detection / in-app-editor guidance below only makes sense where a Desktop
+  // build actually exists.
+  if (process.platform !== "darwin" && process.platform !== "win32") {
+    console.log(
+      `[lore] Claude Code Desktop is not available on this platform.`,
+    );
+    console.log(`[lore] Use the Claude Code CLI instead: lore run claude-code`);
+    return;
+  }
+
+  // WINDOWS SECONDARY (automated): also set the user-level env var so
+  // dev/preview servers (which do NOT read settings.json) inherit the base
+  // URL. macOS has no equivalent — the Desktop only reads an allowlisted set
+  // of vars from the shell profile, so shell exports are unreliable and
+  // intentionally NOT attempted here.
+  if (process.platform === "win32") {
+    trySetWindowsUserEnv("ANTHROPIC_BASE_URL", anthropicBaseUrl);
+  }
+
+  // Desktop-app detection branch (fallback guidance).
+  const desktopPath = isClaudeDesktopInstalled();
+  if (desktopPath) {
+    printClaudeDesktopInstallGuidance(anthropicBaseUrl, desktopPath);
+  } else {
+    printClaudeDesktopMissingGuidance();
+  }
+}
+
+/**
+ * Best-effort `setx VAR value` on Windows so dev/preview servers inherit the
+ * gateway URL. Never throws — prints a hint on failure so the user can run it
+ * manually. `setx` persists to the user environment (HKCU\Environment) and
+ * takes effect for newly-launched processes (existing ones must restart).
+ */
+function trySetWindowsUserEnv(name: string, value: string): void {
+  try {
+    // 🔴 Use execFileSync (argv array), NOT a shell string, to avoid command
+    // injection via the value. `setx` is on PATH on all Windows.
+    execFileSync("setx", [name, value], { stdio: "ignore" });
+    console.log(`[lore]   Set Windows user env: ${name}=${value}`);
+    console.log(
+      `[lore]   (restart any open Desktop / terminals to pick it up)`,
+    );
+    console.log(`[lore]`);
+  } catch {
+    console.log(`[lore] Could not set the Windows user env var automatically.`);
+    console.log(`[lore] Run this manually to cover dev/preview servers:`);
+    console.log(`[lore]   setx ${name} "${value}"`);
+    console.log(`[lore]`);
+  }
+}
+
+/**
+ * Print the in-app env-editor FALLBACK instructions for a user with the
+ * Desktop installed. settings.json (written above) is the primary path; the
+ * in-app editor is only needed if a given Desktop build hits bug #67619, or to
+ * cover dev/preview servers on macOS. Cannot be automated (safeStorage).
+ */
+function printClaudeDesktopInstallGuidance(
+  anthropicBaseUrl: string,
+  desktopPath: string,
+): void {
+  console.log(`[lore] Desktop app detected at: ${desktopPath}`);
+  console.log(`[lore]`);
+  console.log(
+    `[lore] settings.json (written above) is the primary path and should be`,
+  );
+  console.log(`[lore] honored by the Desktop's Code tab.`);
+  console.log(`[lore]`);
+  // 🔴 Be explicit about the upstream bug so the user knows when the in-app
+  // editor fallback is needed. Do NOT claim settings.json is broken — it is
+  // the documented path; the bug is version/state-dependent.
+  console.log(
+    `[lore] FALLBACK: if the Code tab does not pick up settings.json (upstream`,
+  );
+  console.log(
+    `[lore] bug anthropics/claude-code#67619), set the values in the Desktop's`,
+  );
+  console.log(
+    `[lore] in-app Local environment dropdown (this also covers dev/preview`,
+  );
+  console.log(`[lore] servers):`);
+  console.log(`[lore]`);
+  console.log(`[lore]   1. Open Claude Code Desktop`);
+  console.log(
+    `[lore]   2. Open the Local environment dropdown (gear icon) in the taskbar`,
+  );
+  console.log(`[lore]   3. Add these two env vars (one per line):`);
+  console.log(`[lore]        ANTHROPIC_BASE_URL=${anthropicBaseUrl}`);
+  console.log(`[lore]        DISABLE_AUTO_COMPACT=1`);
+  console.log(
+    `[lore]   4. Restart the Desktop app for changes to take effect.`,
+  );
+}
+
+/**
+ * Print the "Desktop not installed" message with install instructions.
+ */
+function printClaudeDesktopMissingGuidance(): void {
+  console.log(`[lore] Claude Code Desktop was not detected on this machine.`);
+  console.log(`[lore] To install it, see https://claude.com/download`);
+  console.log(
+    `[lore] After installing, re-run: lore setup claude-code-desktop`,
   );
 }
 

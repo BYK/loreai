@@ -53,6 +53,31 @@ Every Claude Code conversation is captured in Lore's three-tier memory. Distilla
 
 Your project knowledge (`.lore.md`, `AGENTS.md`, the SQLite database at `~/.local/share/lore/lore.db`) is shared across every supported harness. Switching from Claude Code to Pi or OpenCode on the same project preserves curated knowledge, distillations, and the AGENTS.md sync.
 
+## Desktop app
+
+The Claude Code Desktop app is an Electron app (macOS + Windows) that wraps the same `claude` CLI in a GUI. For local Code sessions, the Desktop spawns the `claude` CLI as a child process and reads `ANTHROPIC_BASE_URL` from `~/.claude/settings.json` — the same file the CLI uses.
+
+**Setup:**
+
+```bash
+lore setup claude-code-desktop
+```
+
+This writes `~/.claude/settings.json` with `env.ANTHROPIC_BASE_URL` and `env.DISABLE_AUTO_COMPACT` — the documented path the Desktop's Code tab honors for Claude sessions. On Windows it also runs `setx ANTHROPIC_BASE_URL …` so dev/preview servers inherit the gateway URL too. Restart the Desktop app afterward.
+
+**Fallback — in-app Local env editor.** If your Desktop build does not pick up `settings.json` (upstream bug [anthropics/claude-code#67619](https://github.com/anthropics/claude-code/issues/67619)), or you want dev/preview servers covered on macOS, set the values in the Desktop's in-app Local env editor: open the environment dropdown in the prompt box → hover **Local** → click the gear icon → add (one per line):
+
+```
+ANTHROPIC_BASE_URL=http://127.0.0.1:3207
+DISABLE_AUTO_COMPACT=1
+```
+
+Restart the Desktop app. These values are stored encrypted (Electron `safeStorage`), so Lore cannot write them for you — this step is manual.
+
+**Linux note:** The Desktop app is not available on Linux. Use the `claude` CLI through `lore run` (see the Install / Manual setup sections above).
+
+**Verifying the route:** Start `lore start` in one terminal, then open the Desktop. The gateway dashboard at `http://127.0.0.1:3207/ui` will show incoming requests from the Desktop. If the dashboard stays empty, `settings.json` wasn't picked up — apply the in-app env editor fallback above and restart the Desktop.
+
 ## Next steps
 
 - [Architecture](../architecture/) — how temporal storage, distillation, and the gradient context manager fit together.

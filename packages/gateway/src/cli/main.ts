@@ -373,8 +373,12 @@ export async function _cli(): Promise<void> {
         // This allows `lore claude` as shorthand for `lore run claude`.
         {
           const { AGENTS } = await import("./agents");
-          const knownBinaries = AGENTS.map((a) => a.binary);
-          if (!knownBinaries.includes(command)) {
+          // Match by agent NAME or binary. Some agents (e.g.
+          // claude-code-desktop) use a placeholder `binary` and resolve the
+          // real launcher path at runtime via `detect()`, so the name is the
+          // only stable shorthand token for them.
+          const knownAgentTokens = AGENTS.flatMap((a) => [a.name, a.binary]);
+          if (!knownAgentTokens.includes(command)) {
             // Not a known agent — likely a typo. Show a helpful error.
             const knownCommands = [
               "start",
@@ -391,7 +395,7 @@ export async function _cli(): Promise<void> {
               "entity",
               "upgrade",
               "help",
-              ...knownBinaries,
+              ...knownAgentTokens,
             ];
             // "Did you mean?" — use Levenshtein distance for robust matching
             function levenshtein(a: string, b: string): number {
