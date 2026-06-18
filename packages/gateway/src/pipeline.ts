@@ -1231,6 +1231,11 @@ const THINKING_OUTPUT_HEADROOM = 8192;
  * a low output EMA (e.g. after a run of short tool-call turns) would otherwise
  * collapse the cap to `MAX_TOKENS_FLOOR`, truncating thinking-heavy turns.
  *
+ * When thinking is active but no budget was declared (`thinkingActive` —
+ * thinking-by-default models like claude-opus-4-8 emit thinking blocks without
+ * a `thinking` request param, so the budget is unknowable), the floor is raised
+ * to the soft ceiling so the same EMA collapse can't truncate mid-thought.
+ *
  * Exported for testing.
  */
 export function computeMaxTokens(
@@ -1240,17 +1245,26 @@ export function computeMaxTokens(
   lastStopReason: string | undefined,
   lastInputTokens: number | undefined,
   thinkingBudget?: number,
+  thinkingActive?: boolean,
 ): number {
   const ceiling = Math.min(modelOutput, 32_000);
 
   // Extended thinking: max_tokens must leave room for visible output ON TOP of
   // the thinking budget (Anthropic counts both against max_tokens and requires
   // max_tokens > budget_tokens). This raises the effective floor — but never
-  // above the model's hard output limit.
-  const baseFloor =
-    thinkingBudget && thinkingBudget > 0
-      ? thinkingBudget + THINKING_OUTPUT_HEADROOM
-      : MAX_TOKENS_FLOOR;
+  // above the model's hard output limit. Two signals, in priority order:
+  //   1. thinkingBudget (explicit `thinking` param) → budget + headroom.
+  //   2. thinkingActive (structural — thinking blocks present but no declared
+  //      budget) → reserve the full soft ceiling, since the budget is unknowable
+  //      and a low EMA must not be allowed to collapse the cap mid-thought.
+  let baseFloor: number;
+  if (thinkingBudget && thinkingBudget > 0) {
+    baseFloor = thinkingBudget + THINKING_OUTPUT_HEADROOM;
+  } else if (thinkingActive) {
+    baseFloor = ceiling;
+  } else {
+    baseFloor = MAX_TOKENS_FLOOR;
+  }
   const floor = Math.min(baseFloor, modelOutput);
 
   // Turn 1: no history — use ceiling (matches Claude Code default), but never
@@ -1277,6 +1291,34 @@ export function computeMaxTokens(
     floor,
     Math.min(headroom, Math.max(adaptive, floor), ceiling),
   );
+}
+
+/**
+ * True when the request carries extended-thinking content — i.e. an assistant
+ * message contains a `thinking` block.
+ *
+ * Thinking-by-default reasoning models (e.g. claude-opus-4-8) emit thinking
+ * blocks WITHOUT sending an explicit `thinking` request param, so
+ * `req.metadata.thinking` is absent and the budget can't be read. The presence
+ * of thinking blocks in the conversation is direct evidence the model is
+ * reasoning, so `max_tokens` must still reserve headroom — otherwise the
+ * EMA-based down-rewrite collapses the cap to `MAX_TOKENS_FLOOR` and truncates
+ * mid-thought (the turn emits no visible output and the agent loop exits).
+ *
+ * Scans newest-first and returns on the first hit; the latest assistant turn
+ * almost always carries the signal, so this is effectively O(1) in practice.
+ *
+ * Exported for testing.
+ */
+export function requestHasThinking(messages: GatewayMessage[]): boolean {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role !== "assistant") continue;
+    for (const block of msg.content) {
+      if (block.type === "thinking") return true;
+    }
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -5542,6 +5584,13 @@ async function handleConversationTurn(
       thinkingMeta.budget_tokens > 0
         ? thinkingMeta.budget_tokens
         : undefined;
+    // Structural fallback: thinking-by-default models (e.g. claude-opus-4-8)
+    // emit thinking blocks WITHOUT an explicit `thinking` param, so the budget
+    // above is undefined. Detect active reasoning from the request's thinking
+    // blocks so the rewrite still reserves headroom and doesn't truncate the
+    // turn at the end of a thinking block.
+    const thinkingActive =
+      thinkingBudget !== undefined || requestHasThinking(req.messages);
     // Unsatisfiable budget: if the thinking budget alone meets or exceeds the
     // model's hard output limit, no rewrite can produce a valid
     // `max_tokens > budget_tokens` (Anthropic 400s otherwise). The request is
@@ -5570,13 +5619,18 @@ async function handleConversationTurn(
         sessionState.lastStopReason,
         sessionState.lastInputTokens,
         thinkingBudget,
+        thinkingActive,
       );
       if (req.maxTokens !== computed) {
         log.info(
           `max_tokens: ${req.maxTokens} → ${computed} ` +
             `(ema=${sessionState.outputTokensEMA ?? "none"}, ` +
             `lastStop=${sessionState.lastStopReason ?? "none"}` +
-            (thinkingBudget ? `, thinkingBudget=${thinkingBudget}` : "") +
+            (thinkingBudget
+              ? `, thinkingBudget=${thinkingBudget}`
+              : thinkingActive
+                ? ", thinking=active(no budget)"
+                : "") +
             `)`,
         );
         req.maxTokens = computed;

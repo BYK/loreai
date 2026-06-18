@@ -1,7 +1,8 @@
 import { describe, test, expect } from "vitest";
-import { computeMaxTokens } from "../src/pipeline";
+import { computeMaxTokens, requestHasThinking } from "../src/pipeline";
 import { isClaudeCodeClient } from "../src/session";
 import { hasBillingHeader } from "../src/cch";
+import type { GatewayMessage } from "../src/translate/types";
 
 // ---------------------------------------------------------------------------
 // computeMaxTokens
@@ -285,6 +286,126 @@ describe("computeMaxTokens", () => {
       10_000,
     );
     expect(result).toBeGreaterThanOrEqual(10_000 + 8192);
+  });
+
+  test("thinking active without explicit budget floors at ceiling", () => {
+    // The claude-opus-4-8 regression: thinking-by-default models emit thinking
+    // blocks WITHOUT a `thinking` param, so no budget is declared. A low
+    // tool-use EMA would collapse the cap to 8192 and truncate mid-thought;
+    // the structural `thinkingActive` flag floors at the 32K soft ceiling.
+    expect(
+      computeMaxTokens(
+        MODEL_OUTPUT,
+        MODEL_CONTEXT,
+        200,
+        "tool_use",
+        50_000,
+        undefined,
+        true,
+      ),
+    ).toBe(32_000);
+  });
+
+  test("thinking active (no budget) is clamped by a small model output limit", () => {
+    // 16K-output model → ceiling 16K → floor 16K
+    expect(
+      computeMaxTokens(
+        16_000,
+        200_000,
+        200,
+        "tool_use",
+        50_000,
+        undefined,
+        true,
+      ),
+    ).toBe(16_000);
+  });
+
+  test("explicit thinking budget takes precedence over the active flag", () => {
+    // budget 10_000 → floor 18_192 (budget + headroom), NOT the 32K ceiling.
+    expect(
+      computeMaxTokens(
+        MODEL_OUTPUT,
+        MODEL_CONTEXT,
+        200,
+        "tool_use",
+        50_000,
+        10_000,
+        true,
+      ),
+    ).toBe(18_192);
+  });
+
+  test("thinking active flag false → legacy floor 8192", () => {
+    // Explicit `false` must behave identically to the legacy (undefined) path.
+    expect(
+      computeMaxTokens(
+        MODEL_OUTPUT,
+        MODEL_CONTEXT,
+        1000,
+        "tool_use",
+        50_000,
+        undefined,
+        false,
+      ),
+    ).toBe(
+      computeMaxTokens(MODEL_OUTPUT, MODEL_CONTEXT, 1000, "tool_use", 50_000),
+    );
+  });
+
+  test("thinking active (no budget) is honored under tight context headroom", () => {
+    // input 195_000 → raw headroom 4_000, but the ceiling floor (32K) wins —
+    // truncating a thinking turn is worse than over-reserving output.
+    expect(
+      computeMaxTokens(
+        MODEL_OUTPUT,
+        MODEL_CONTEXT,
+        200,
+        "tool_use",
+        195_000,
+        undefined,
+        true,
+      ),
+    ).toBe(32_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// requestHasThinking
+// ---------------------------------------------------------------------------
+
+describe("requestHasThinking", () => {
+  test("true when an assistant message contains a thinking block", () => {
+    const messages: GatewayMessage[] = [
+      { role: "user", content: [{ type: "text", text: "hi" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "reasoning…" },
+          { type: "text", text: "answer" },
+        ],
+      },
+    ];
+    expect(requestHasThinking(messages)).toBe(true);
+  });
+
+  test("false when no assistant message has a thinking block", () => {
+    const messages: GatewayMessage[] = [
+      { role: "user", content: [{ type: "text", text: "hi" }] },
+      { role: "assistant", content: [{ type: "text", text: "answer" }] },
+    ];
+    expect(requestHasThinking(messages)).toBe(false);
+  });
+
+  test("ignores text content on user messages (only assistant thinking counts)", () => {
+    const messages: GatewayMessage[] = [
+      { role: "user", content: [{ type: "text", text: "thinking about it" }] },
+    ];
+    expect(requestHasThinking(messages)).toBe(false);
+  });
+
+  test("empty message list → false", () => {
+    expect(requestHasThinking([])).toBe(false);
   });
 });
 
