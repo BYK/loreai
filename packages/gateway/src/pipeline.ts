@@ -1308,6 +1308,11 @@ export function computeMaxTokens(
  * Scans newest-first and returns on the first hit; the latest assistant turn
  * almost always carries the signal, so this is effectively O(1) in practice.
  *
+ * Also detects `redacted_thinking`, which Anthropic returns when reasoning is
+ * flagged for safety. It has no dedicated `GatewayContentBlock` member, so
+ * `toGatewayBlock` carries it as an `opaque` passthrough — but it still means
+ * the model is reasoning, so a redacted-only turn must not collapse the cap.
+ *
  * Exported for testing.
  */
 export function requestHasThinking(messages: GatewayMessage[]): boolean {
@@ -1316,6 +1321,9 @@ export function requestHasThinking(messages: GatewayMessage[]): boolean {
     if (msg.role !== "assistant") continue;
     for (const block of msg.content) {
       if (block.type === "thinking") return true;
+      if (block.type === "opaque" && block.raw.type === "redacted_thinking") {
+        return true;
+      }
     }
   }
   return false;

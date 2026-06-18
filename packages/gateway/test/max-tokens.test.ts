@@ -389,6 +389,37 @@ describe("requestHasThinking", () => {
     expect(requestHasThinking(messages)).toBe(true);
   });
 
+  test("true for an assistant redacted_thinking (opaque) block", () => {
+    // Anthropic returns redacted_thinking when reasoning is safety-flagged;
+    // toGatewayBlock carries it as an opaque passthrough. It still means the
+    // model is reasoning, so a redacted-only turn must be detected.
+    const messages: GatewayMessage[] = [
+      {
+        role: "assistant",
+        content: [
+          { type: "opaque", raw: { type: "redacted_thinking", data: "…" } },
+          { type: "text", text: "answer" },
+        ],
+      },
+    ];
+    expect(requestHasThinking(messages)).toBe(true);
+  });
+
+  test("false for an unrelated opaque block (e.g. an image)", () => {
+    const messages: GatewayMessage[] = [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "opaque",
+            raw: { type: "image", source: { type: "base64", data: "…" } },
+          },
+        ],
+      },
+    ];
+    expect(requestHasThinking(messages)).toBe(false);
+  });
+
   test("false when no assistant message has a thinking block", () => {
     const messages: GatewayMessage[] = [
       { role: "user", content: [{ type: "text", text: "hi" }] },
