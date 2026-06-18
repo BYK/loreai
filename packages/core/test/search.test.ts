@@ -17,21 +17,21 @@ import { db, ensureProject } from "../src/db";
 describe("search", () => {
   describe("ftsQuery (AND semantics)", () => {
     test("plain words get prefix wildcard with implicit AND", () => {
-      expect(ftsQuery("OAuth PKCE flow")).toBe("OAuth* PKCE* flow*");
+      expect(ftsQuery("OAuth PKCE flow")).toBe('"OAuth"* "PKCE"* "flow"*');
     });
 
     test("hyphenated terms: dash stripped, not treated as NOT operator", () => {
-      expect(ftsQuery("opencode-test")).toBe("opencode* test*");
-      expect(ftsQuery("three-tier")).toBe("three* tier*");
+      expect(ftsQuery("opencode-test")).toBe('"opencode"* "test"*');
+      expect(ftsQuery("three-tier")).toBe('"three"* "tier"*');
     });
 
     test("dot in domain name: dot stripped, tokens preserved", () => {
-      expect(ftsQuery("sanity.io")).toBe("sanity* io*");
+      expect(ftsQuery("sanity.io")).toBe('"sanity"* "io"*');
     });
 
     test("other punctuation stripped", () => {
       // "what's the fix?" → "what" is stopword, "s" is single char, "the" is stopword → only "fix"
-      expect(ftsQuery("what's the fix?")).toBe("fix*");
+      expect(ftsQuery("what's the fix?")).toBe('"fix"*');
     });
 
     test("empty string returns empty sentinel", () => {
@@ -44,19 +44,21 @@ describe("search", () => {
 
     test("single-character tokens are dropped", () => {
       // "I" is single char, "a" is single char
-      expect(ftsQuery("I found a bug")).toBe("found* bug*");
+      expect(ftsQuery("I found a bug")).toBe('"found"* "bug"*');
     });
 
     test("2-char tokens are preserved (DB, CI, IO, PR)", () => {
-      expect(ftsQuery("DB migration")).toBe("DB* migration*");
-      expect(ftsQuery("CI pipeline")).toBe("CI* pipeline*");
-      expect(ftsQuery("IO error")).toBe("IO* error*");
-      expect(ftsQuery("PR review")).toBe("PR* review*");
+      expect(ftsQuery("DB migration")).toBe('"DB"* "migration"*');
+      expect(ftsQuery("CI pipeline")).toBe('"CI"* "pipeline"*');
+      expect(ftsQuery("IO error")).toBe('"IO"* "error"*');
+      expect(ftsQuery("PR review")).toBe('"PR"* "review"*');
     });
 
     test("stopwords are removed", () => {
       // "the" and "with" are stopwords
-      expect(ftsQuery("the database with indexes")).toBe("database* indexes*");
+      expect(ftsQuery("the database with indexes")).toBe(
+        '"database"* "indexes"*',
+      );
     });
 
     test("all-stopword query returns empty sentinel", () => {
@@ -74,11 +76,11 @@ describe("search", () => {
 
     test("preserves case of original tokens", () => {
       // FTS5 handles case-insensitive matching internally via unicode61 tokenizer
-      expect(ftsQuery("SQLite FTS5")).toBe("SQLite* FTS5*");
+      expect(ftsQuery("SQLite FTS5")).toBe('"SQLite"* "FTS5"*');
     });
 
     test("underscores preserved as word chars", () => {
-      expect(ftsQuery("my_variable")).toBe("my_variable*");
+      expect(ftsQuery("my_variable")).toBe('"my_variable"*');
     });
   });
 
@@ -94,7 +96,7 @@ describe("search", () => {
     });
 
     test("ftsQuery builds a valid prefix query from Turkish terms", () => {
-      expect(ftsQuery("değişiklik yap")).toBe("değişiklik* yap*");
+      expect(ftsQuery("değişiklik yap")).toBe('"değişiklik"* "yap"*');
     });
 
     test("punctuation around Turkish words is still stripped", () => {
@@ -111,11 +113,13 @@ describe("search", () => {
 
   describe("ftsQueryOr (OR semantics)", () => {
     test("plain words joined with OR", () => {
-      expect(ftsQueryOr("OAuth PKCE flow")).toBe("OAuth* OR PKCE* OR flow*");
+      expect(ftsQueryOr("OAuth PKCE flow")).toBe(
+        '"OAuth"* OR "PKCE"* OR "flow"*',
+      );
     });
 
     test("same filtering as ftsQuery", () => {
-      expect(ftsQueryOr("what's the fix?")).toBe("fix*");
+      expect(ftsQueryOr("what's the fix?")).toBe('"fix"*');
     });
 
     test("empty string returns empty sentinel", () => {
@@ -128,12 +132,63 @@ describe("search", () => {
 
     test("stopwords removed, remaining terms OR'd", () => {
       expect(ftsQueryOr("the database with indexes")).toBe(
-        "database* OR indexes*",
+        '"database"* OR "indexes"*',
       );
     });
 
     test("single term produces no OR", () => {
-      expect(ftsQueryOr("database")).toBe("database*");
+      expect(ftsQueryOr("database")).toBe('"database"*');
+    });
+  });
+
+  describe("FTS5 keyword injection (regression)", () => {
+    test("quotes keyword tokens so they are not parsed as operators", () => {
+      // "and"/"near" are not stopwords, so an uppercase AND would otherwise
+      // become an FTS5 operator → `fts5: syntax error near "AND"`. Regression
+      // for the instruction-detect FTS failure. Quoting each term as "term"*
+      // neutralizes the entire keyword-injection class.
+      expect(ftsQueryOr("rebase AND merge")).toBe(
+        '"rebase"* OR "AND"* OR "merge"*',
+      );
+      expect(ftsQuery("rebase AND merge")).toBe('"rebase"* "AND"* "merge"*');
+    });
+
+    test("keyword-bearing queries execute against fts5 without syntax error", () => {
+      // Proves the quoted expression actually parses against the fts5 engine.
+      // Uses a connection-local `temp.` table so the shared test DB schema is
+      // untouched; the pre-DROP + try/finally DROP keep it leak-safe even if a
+      // prior run aborted before its finally.
+      const d = db();
+      d.exec("DROP TABLE IF EXISTS temp._kw_fts");
+      d.exec("CREATE VIRTUAL TABLE temp._kw_fts USING fts5(body)");
+      try {
+        d.query("INSERT INTO temp._kw_fts(body) VALUES (?)").run(
+          "always rebase and merge then run lint and commit",
+        );
+        // `AND` survives filterTerms ("and" is not a stopword) and would,
+        // unquoted, be parsed as an FTS5 operator. Exercise BOTH builders:
+        // the OR-join (bareword raises `syntax error near "AND"`) and the
+        // implicit-AND join (bareword raises `syntax error near "*"`). Each
+        // throws on revert to bareword tokens, so both are discriminating.
+        // (`NOT`/`OR` lowercase to stopwords and are dropped before the
+        // builder; `NEAR` is only an operator before `(`, which filterTerms
+        // strips — neither would discriminate here.)
+        const exprs = [
+          ftsQueryOr("rebase AND merge"),
+          ftsQuery("rebase AND merge"),
+        ];
+        for (const expr of exprs) {
+          // FTS5 MATCH requires the bare (unqualified) table name as its left
+          // operand — `temp._kw_fts MATCH ?` raises "no such column".
+          expect(() =>
+            d
+              .query("SELECT rowid FROM temp._kw_fts WHERE _kw_fts MATCH ?")
+              .all(expr),
+          ).not.toThrow();
+        }
+      } finally {
+        d.exec("DROP TABLE temp._kw_fts");
+      }
     });
   });
 
@@ -535,7 +590,7 @@ describe("search", () => {
     test("returns just OR for terms <= minTerms", () => {
       const cascade = ftsQueryRelaxed("alpha beta gamma");
       expect(cascade.length).toBe(1);
-      expect(cascade[0]).toBe("alpha* OR beta* OR gamma*");
+      expect(cascade[0]).toBe('"alpha"* OR "beta"* OR "gamma"*');
     });
 
     test("empty query returns EMPTY_QUERY", () => {
@@ -548,9 +603,9 @@ describe("search", () => {
       const cascade = ftsQueryRelaxed("V8 CLI Node Sentry snapshot");
       // First step drops "V8" (shortest); second drops "V8","CLI"; etc.
       // cascade[0] = 4-of-5 AND (dropped V8)
-      expect(cascade[0]).not.toContain("V8*");
-      expect(cascade[0]).toContain("CLI*");
-      expect(cascade[0]).toContain("snapshot*");
+      expect(cascade[0]).not.toContain('"V8"*');
+      expect(cascade[0]).toContain('"CLI"*');
+      expect(cascade[0]).toContain('"snapshot"*');
     });
 
     test("with weights, drops lowest-weight (most common) terms first", () => {
@@ -564,14 +619,14 @@ describe("search", () => {
       ]);
       const cascade = ftsQueryRelaxed("code build Node V8 SEA", 3, weights);
       // First step drops "code" (lowest IDF=0.5), NOT "V8" (shortest but highest IDF)
-      expect(cascade[0]).not.toContain("code*");
-      expect(cascade[0]).toContain("V8*");
-      expect(cascade[0]).toContain("SEA*");
-      expect(cascade[0]).toContain("Node*");
+      expect(cascade[0]).not.toContain('"code"*');
+      expect(cascade[0]).toContain('"V8"*');
+      expect(cascade[0]).toContain('"SEA"*');
+      expect(cascade[0]).toContain('"Node"*');
       // Second step also drops "build" (next lowest IDF=1.0)
-      expect(cascade[1]).not.toContain("build*");
-      expect(cascade[1]).toContain("V8*");
-      expect(cascade[1]).toContain("SEA*");
+      expect(cascade[1]).not.toContain('"build"*');
+      expect(cascade[1]).toContain('"V8"*');
+      expect(cascade[1]).toContain('"SEA"*');
     });
 
     test("with weights, unknown terms are dropped before known terms", () => {
@@ -591,13 +646,13 @@ describe("search", () => {
       // "V8"(IDF=5.0) is known and rare — kept longest.
       //
       // Step 0: drop 1 unknown → 3 terms remain, must include V8 and code
-      expect(cascade[0]).toContain("V8*");
-      expect(cascade[0]).toContain("code*");
+      expect(cascade[0]).toContain('"V8"*');
+      expect(cascade[0]).toContain('"code"*');
       // Step 1: drop both unknowns → only known terms remain
-      expect(cascade[1]).toContain("V8*");
-      expect(cascade[1]).toContain("code*");
-      expect(cascade[1]).not.toContain("deploy*");
-      expect(cascade[1]).not.toContain("engine*");
+      expect(cascade[1]).toContain('"V8"*');
+      expect(cascade[1]).toContain('"code"*');
+      expect(cascade[1]).not.toContain('"deploy"*');
+      expect(cascade[1]).not.toContain('"engine"*');
       // Step 2: full OR (all terms)
       expect(cascade[2]).toContain(" OR ");
     });
@@ -622,16 +677,16 @@ describe("search", () => {
 
       // After all 4 drops, only "build" and "V8" should remain (last AND step)
       const lastAnd = cascade[cascade.length - 2]; // second-to-last is last AND
-      expect(lastAnd).toContain("V8*");
-      expect(lastAnd).toContain("build*");
-      expect(lastAnd).not.toContain("code*");
-      expect(lastAnd).not.toContain("ax*");
-      expect(lastAnd).not.toContain("deploy*");
-      expect(lastAnd).not.toContain("zz*");
+      expect(lastAnd).toContain('"V8"*');
+      expect(lastAnd).toContain('"build"*');
+      expect(lastAnd).not.toContain('"code"*');
+      expect(lastAnd).not.toContain('"ax"*');
+      expect(lastAnd).not.toContain('"deploy"*');
+      expect(lastAnd).not.toContain('"zz"*');
 
       // V8 should survive in ALL AND steps (it's highest IDF, never dropped)
       for (let i = 0; i < cascade.length - 1; i++) {
-        expect(cascade[i]).toContain("V8*");
+        expect(cascade[i]).toContain('"V8"*');
       }
     });
 
@@ -642,10 +697,10 @@ describe("search", () => {
       // Should behave like no-weights: drop shortest first
       expect(cascade.length).toBe(2); // 1 AND step + OR
       // "beta" (4 chars) is shortest, dropped first
-      expect(cascade[0]).not.toContain("beta*");
-      expect(cascade[0]).toContain("alpha*");
-      expect(cascade[0]).toContain("gamma*");
-      expect(cascade[0]).toContain("delta*");
+      expect(cascade[0]).not.toContain('"beta"*');
+      expect(cascade[0]).toContain('"alpha"*');
+      expect(cascade[0]).toContain('"gamma"*');
+      expect(cascade[0]).toContain('"delta"*');
     });
 
     test("with weights, tie-breaks by length when IDF is equal", () => {
@@ -656,10 +711,10 @@ describe("search", () => {
       ]);
       const cascade = ftsQueryRelaxed("ab abcdef xyz", 2, weights);
       // "ab" and "abcdef" have same IDF — "ab" is shorter, dropped first
-      expect(cascade[0]).not.toContain("ab*");
+      expect(cascade[0]).not.toContain('"ab"*');
       // But it should contain the longer one
-      expect(cascade[0]).toContain("abcdef*");
-      expect(cascade[0]).toContain("xyz*");
+      expect(cascade[0]).toContain('"abcdef"*');
+      expect(cascade[0]).toContain('"xyz"*');
     });
   });
 

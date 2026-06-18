@@ -222,7 +222,7 @@ export function termIDF(raw: string): Map<string, number> {
       try {
         const row = database
           .query(`SELECT count(*) as cnt FROM ${table} WHERE ${table} MATCH ?`)
-          .get(`${term}*`) as { cnt: number } | null;
+          .get(ftsToken(term)) as { cnt: number } | null;
         termDocs += row?.cnt ?? 0;
       } catch {
         // MATCH can fail for certain inputs — treat as zero hits.
@@ -237,6 +237,27 @@ export function termIDF(raw: string): Map<string, number> {
 }
 
 /**
+ * Render a single filtered term as an FTS5 prefix token.
+ *
+ * CRITICAL: the term is wrapped in double quotes BEFORE the `*` prefix
+ * operator. Without quoting, a bareword that is an uppercase FTS5 keyword
+ * (AND, OR, NOT, NEAR) is parsed as a query *operator* rather than a search
+ * token — e.g. `run* OR AND* OR tests*` raises
+ * `fts5: syntax error near "AND"`. Quoting forces FTS5 to treat the token as a
+ * string literal, neutralizing the entire keyword-injection class regardless
+ * of which terms survive stopword filtering (today only `or`/`not` are caught,
+ * via STOPWORDS — `and`/`near` are not). `filterTerms()` strips everything
+ * except \p{L}\p{N}_, so a term can never contain a quote in practice; we
+ * still double any `"` defensively in case that contract changes.
+ *
+ * Quoting is semantically identical to the bareword form for ordinary tokens:
+ * `"foo"*` and `foo*` match the same rows (incl. snake_case and non-ASCII).
+ */
+function ftsToken(term: string): string {
+  return `"${term.replace(/"/g, '""')}"*`;
+}
+
+/**
  * Build an FTS5 MATCH expression using AND semantics (implicit AND via space).
  *
  * Returns `""` (match-nothing sentinel) when no meaningful terms remain after
@@ -245,7 +266,7 @@ export function termIDF(raw: string): Map<string, number> {
 export function ftsQuery(raw: string): string {
   const terms = filterTerms(raw);
   if (!terms.length) return EMPTY_QUERY;
-  return terms.map((w) => `${w}*`).join(" ");
+  return terms.map(ftsToken).join(" ");
 }
 
 /**
@@ -256,7 +277,7 @@ export function ftsQuery(raw: string): string {
 export function ftsQueryOr(raw: string): string {
   const terms = filterTerms(raw);
   if (!terms.length) return EMPTY_QUERY;
-  return terms.map((w) => `${w}*`).join(" OR ");
+  return terms.map(ftsToken).join(" OR ");
 }
 
 /**
@@ -293,7 +314,7 @@ export function ftsQueryRelaxed(
   const terms = filterTerms(raw);
   if (!terms.length) return [EMPTY_QUERY];
 
-  const orQuery = terms.map((w) => `${w}*`).join(" OR ");
+  const orQuery = terms.map(ftsToken).join(" OR ");
 
   // Not enough terms for progressive relaxation — just OR.
   if (terms.length <= minTerms) return [orQuery];
@@ -327,7 +348,7 @@ export function ftsQueryRelaxed(
   const cascade: string[] = [];
   for (let drop = 1; drop <= terms.length - minTerms; drop++) {
     const kept = ranked.slice(drop);
-    cascade.push(kept.map((w) => `${w}*`).join(" "));
+    cascade.push(kept.map(ftsToken).join(" "));
   }
   cascade.push(orQuery);
   return cascade;

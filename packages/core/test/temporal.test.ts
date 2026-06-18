@@ -346,23 +346,23 @@ describe("temporal", () => {
 
   describe("ftsQuery sanitization", () => {
     test("plain words get prefix wildcard", () => {
-      expect(ftsQuery("OAuth PKCE flow")).toBe("OAuth* PKCE* flow*");
+      expect(ftsQuery("OAuth PKCE flow")).toBe('"OAuth"* "PKCE"* "flow"*');
     });
 
     test("hyphenated terms: dash stripped, not treated as NOT operator", () => {
       // "opencode-test" would crash FTS5 as "opencode NOT test"
-      expect(ftsQuery("opencode-test")).toBe("opencode* test*");
-      expect(ftsQuery("three-tier")).toBe("three* tier*");
+      expect(ftsQuery("opencode-test")).toBe('"opencode"* "test"*');
+      expect(ftsQuery("three-tier")).toBe('"three"* "tier"*');
     });
 
     test("dot in domain name: dot stripped, not treated as column filter", () => {
       // "sanity.io" would crash FTS5 as column-filter syntax
-      expect(ftsQuery("sanity.io")).toBe("sanity* io*");
+      expect(ftsQuery("sanity.io")).toBe('"sanity"* "io"*');
     });
 
     test("other punctuation stripped, stopwords and single chars removed", () => {
       // "what" is stopword, "s" is single char, "the" is stopword — only "fix" survives
-      expect(ftsQuery("what's the fix?")).toBe("fix*");
+      expect(ftsQuery("what's the fix?")).toBe('"fix"*');
     });
 
     test("empty string returns sentinel", () => {
