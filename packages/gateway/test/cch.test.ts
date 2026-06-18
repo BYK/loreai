@@ -9,6 +9,7 @@ import {
   buildCodexWorkerHeaders,
   buildOAuthWorkerHeaders,
   deleteBillingPrefix,
+  isClaudeCodeOAuthSession,
   validateSeed,
   resolveSeed,
   _resetForTest,
@@ -990,6 +991,20 @@ describe("billing-header first-block invariant", () => {
     expect(warnings[0]).toContain("billing-header markers");
   });
 
+  test("WARNS when content reproduces a cch-LESS full sentinel after the real header (issue #807)", () => {
+    // The cch-optional regexes (issue #807) widen the matchable surface: a
+    // cch-less full sentinel in content is now a second marker. Signing still
+    // targets the real header (first block), but the duplicate must surface the
+    // early-warning rather than silently risk a wrong-token sign / cache bust.
+    signBody(
+      headerFirst([
+        "docs: `x-anthropic-billing-header: cc_version=2.1.0.aaa; cc_entrypoint=cli;`",
+      ]),
+    );
+    expect(warnings.length).toBeGreaterThan(0);
+    expect(warnings[0]).toContain("billing-header markers");
+  });
+
   test("does NOT warn when content has a cch= token but NOT the full sentinel", () => {
     // A bare `cch=00000` / `cc_entrypoint=…` fragment in content is NOT a
     // duplicate marker, so it must not trip the guard (no false positives on
@@ -1651,5 +1666,140 @@ describe("buildCodexWorkerHeaders", () => {
     const h1 = buildCodexWorkerHeaders("codex-sess");
     const h2 = buildCodexWorkerHeaders("codex-sess");
     expect(h1?.["x-client-request-id"]).not.toBe(h2?.["x-client-request-id"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cch-less billing header (issue #807)
+// ---------------------------------------------------------------------------
+
+describe("cch-less billing header (issue #807)", () => {
+  // Claude Code >= 2.1.181 only emits the `cch` field when it believes it is
+  // talking to the first-party API. A client launched WITHOUT
+  // _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1 (i.e. not via `lore run`/`lore
+  // setup`) sends a billing header whose `cch=…;` segment is entirely absent.
+  // The gateway must still detect it, mark the OAuth session, and inject +
+  // sign a placeholder when re-signing.
+  const CCHLESS_HEADER =
+    "x-anthropic-billing-header: cc_version=2.1.181.abc; cc_entrypoint=cli;";
+  const CCH_HEADER =
+    "x-anthropic-billing-header: cc_version=2.1.181.abc; cc_entrypoint=cli; cch=1a2b3;";
+
+  // (a) Detection -----------------------------------------------------------
+
+  test("hasBillingHeader is TRUE for a cch-less header at system start", () => {
+    expect(hasBillingHeader(CCHLESS_HEADER)).toBe(true);
+  });
+
+  test("hasBillingHeader is TRUE for a cch-less header followed by host prompt", () => {
+    expect(hasBillingHeader(`${CCHLESS_HEADER}\nYou are Claude Code.`)).toBe(
+      true,
+    );
+  });
+
+  test("hasBillingHeader still TRUE for a cch-bearing header (regression anchor)", () => {
+    expect(hasBillingHeader(CCH_HEADER)).toBe(true);
+  });
+
+  test("hasBillingHeader is FALSE when a cch-less sentinel is quoted in content", () => {
+    // Not at offset 0 → the ^ anchor rejects it (api-key session editing cch.ts).
+    expect(
+      hasBillingHeader(`You are Claude Code.\n\nExample: ${CCHLESS_HEADER}`),
+    ).toBe(false);
+  });
+
+  // (b) OAuth session marking ----------------------------------------------
+
+  test("captureBillingPrefix marks the OAuth session for a cch-less header", () => {
+    expect(captureBillingPrefix(SID_A, CCHLESS_HEADER)).toBe(true);
+    expect(isClaudeCodeOAuthSession(SID_A)).toBe(true);
+    expect(buildBillingBlock(SID_A, "Summarize this.")).not.toBeNull();
+    expect(buildOAuthWorkerHeaders(SID_A)).not.toBeNull();
+  });
+
+  // (c) Re-signing ----------------------------------------------------------
+
+  test("resignBody injects a placeholder and signs a cch-less header", () => {
+    const body = JSON.stringify({
+      model: "claude-opus-4-8",
+      max_tokens: 8192,
+      system: [
+        {
+          type: "text",
+          text: CCHLESS_HEADER,
+          cache_control: { type: "ephemeral", ttl: "1h" },
+        },
+        { type: "text", text: "You are a helpful assistant." },
+      ],
+      messages: [{ role: "user", content: "explain caching please" }],
+    });
+
+    const resigned = resignBody(body, "explain caching please");
+    // A real signed cch was produced (not the placeholder, not absent).
+    expect(resigned).not.toContain("cch=00000");
+    expect(resigned).toMatch(/cch=[0-9a-f]{5};/);
+    // cc_version rewritten to the worker version + 3-hex suffix.
+    expect(resigned).toMatch(
+      new RegExp(`cc_version=${WORKER_VERSION}\\.[0-9a-f]{3};`),
+    );
+    // cc_entrypoint preserved.
+    expect(resigned).toContain("cc_entrypoint=cli;");
+    // Validates against our known seed.
+    expect(validateSeed(resigned)).toBe(true);
+  });
+
+  test("resignBody preserves a non-default cc_entrypoint on a cch-less header", () => {
+    const body = JSON.stringify({
+      system: [
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.181.abc; cc_entrypoint=vscode;",
+        },
+      ],
+      messages: [{ role: "user", content: "hi there friend" }],
+    });
+    const resigned = resignBody(body, "hi there friend");
+    expect(resigned).toContain("cc_entrypoint=vscode;");
+    expect(validateSeed(resigned)).toBe(true);
+  });
+
+  test("resignBody cch-bearing path still validates (regression anchor)", () => {
+    const body = JSON.stringify({
+      system: [{ type: "text", text: CCH_HEADER }],
+      messages: [{ role: "user", content: "hi there friend" }],
+    });
+    const resigned = resignBody(body, "hi there friend");
+    expect(resigned).not.toContain("cch=1a2b3");
+    expect(validateSeed(resigned)).toBe(true);
+  });
+
+  test("resignBody is a no-op when a cch-less sentinel only appears in content (no real header)", () => {
+    // No full `x-anthropic-billing-header:` sentinel anywhere → pure no-op.
+    const body = JSON.stringify({
+      system: [{ type: "text", text: "note: header is `cc_entrypoint=cli;`" }],
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(resignBody(body, "hi")).toBe(body);
+  });
+
+  // (d) Pipeline-gate simulation -------------------------------------------
+
+  test("pipeline gate re-signs a cch-less header at system[0] to a valid worker cch", () => {
+    const system = `${CCHLESS_HEADER}\nYou are Claude Code.`;
+    const serializedBody = JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1024,
+      system: [{ type: "text", text: system }],
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    });
+    // Mirror pipeline.ts forwardToUpstream: re-sign only when the real header
+    // is at system[0].
+    const out = hasBillingHeader(system)
+      ? resignBody(serializedBody, "hi")
+      : serializedBody;
+
+    expect(out).not.toBe(serializedBody); // gate fired → re-signed
+    expect(out).toMatch(/cch=[0-9a-f]{5};/);
+    expect(validateSeed(out)).toBe(true);
   });
 });

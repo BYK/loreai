@@ -360,9 +360,18 @@ function computeVersionSuffix(firstUserMessage: string): string {
  * LTM / system / message content — even if that content serializes BEFORE the
  * real header. Matching content would rewrite it every turn and bust the
  * entire prompt cache (the original incident's failure mode).
+ *
+ * The trailing `cch=…;` segment is OPTIONAL: Claude Code >= 2.1.181 omits it
+ * entirely when it does not assume a first-party base URL (no
+ * `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1`, e.g. a client launched outside
+ * `lore run`/`lore setup`). When absent the replacement still emits the
+ * `cch=00000;` placeholder, which `signBody` then signs — so a cch-less header
+ * is re-signed exactly like a cch-bearing one (issue #807). The greedy optional
+ * group consumes ` cch=<5hex>;` when present, so the cch-bearing match is
+ * byte-identical to before.
  */
 const BILLING_RESIGN_RE =
-  /x-anthropic-billing-header:\s*cc_version=[^;]*;\s*cc_entrypoint=([^;]*);\s*cch=[0-9a-fA-F]{5};/;
+  /x-anthropic-billing-header:\s*cc_version=[^;]*;\s*cc_entrypoint=([^;]*);(?:\s*cch=[0-9a-fA-F]{5};)?/;
 
 /**
  * Matches a full signed billing header for validation. Group 1 is the whole
@@ -405,6 +414,12 @@ export function resignBody(
   // version + recomputed suffix and reset cch to the placeholder. cc_entrypoint
   // (group 1) is preserved verbatim. The suffix depends on chars[4,7,20] of the
   // first user message.
+  //
+  // The replacement ALWAYS emits `${CCH_PLACEHOLDER};` whether or not the client
+  // header carried a `cch=…;` segment — cch-less headers (Claude Code >= 2.1.181
+  // launched without _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL) get the
+  // placeholder injected here, so signBody (below) always has something to sign
+  // (issue #807).
   const suffix = computeVersionSuffix(firstUserMessage);
   const body = serializedBody.replace(
     BILLING_RESIGN_RE,
@@ -421,9 +436,17 @@ export function resignBody(
 // Per-session bearer-token registry
 // ---------------------------------------------------------------------------
 
-/** Regex to detect a billing header in a system prompt. */
+/**
+ * Regex to detect a billing header in a system prompt. The trailing `cch=…;`
+ * segment is OPTIONAL: Claude Code >= 2.1.181 omits `cch` when it does not
+ * assume a first-party base URL (no `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1`),
+ * but the header is still a real Claude Code OAuth billing header that must mark
+ * the session and gate re-signing (issue #807). The `^` anchor is load-bearing —
+ * only a real header at system[0] matches; a content-quoted sentinel (never at
+ * offset 0) is correctly rejected.
+ */
 const BILLING_HEADER_RE =
-  /^x-anthropic-billing-header:\s*cc_version=[^;]+;\s*cc_entrypoint=[^;]+;\s*cch=[0-9a-fA-F]+;/;
+  /^x-anthropic-billing-header:\s*cc_version=[^;]+;\s*cc_entrypoint=[^;]+;(?:\s*cch=[0-9a-fA-F]+;)?/;
 
 /** Check if a system prompt contains the Claude Code billing header. */
 export function hasBillingHeader(system: string): boolean {
