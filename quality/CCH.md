@@ -245,3 +245,57 @@ But when testing from captured **bytes**, hash the `Uint8Array` directly — a
 `latin1` string reconstruction passed to `xxHash64` would be re-encoded as UTF-8
 and corrupt any multibyte byte. Use latin1 only to *apply the ASCII-only
 strip*, then hash the resulting bytes.
+
+## Update (Claude Code 2.1.181): the `cch` is now gated to the first-party base URL
+
+The "CCH Seed Check" failure for **2.1.181** (issue #801) was **not** a seed or
+preimage change — both are unchanged (`0x4d659218e32a3268`, the Zig-std
+xxHash64 with the stripped `model`/`max_tokens` preimage). The extractor's oracle
+capture simply got **0 pairs**: the binary now refuses to emit `cch` at all when
+it does not believe it is talking to the first-party API.
+
+### Root cause
+The attribution-header builder in 2.1.181 emits the `cch=00000` segment only
+when `kr() === "firstParty" && qu()` (or `kr() === "vertex"`):
+
+```js
+let o = kr(),                                         // provider: firstParty/bedrock/vertex/…
+    s = o === "firstParty" && qu() || o === "vertex" ? " cch=00000;" : "";
+function qu(){ if (qe._CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL) return true; return uln(); }
+function uln(){ let e = process.env.ANTHROPIC_BASE_URL; if (!e) return true; return C7e(e); }
+function C7e(e){ try { return ["api.anthropic.com"].includes(new URL(e).host); } catch { return false; } }
+```
+
+So `cch` is written only when `ANTHROPIC_BASE_URL` is unset, its host is exactly
+`api.anthropic.com`, or the internal env override is set. The seed extractor (and
+the lore gateway) point `ANTHROPIC_BASE_URL` at a `127.0.0.1` server, so `qu()`
+returns false and the billing header comes out as
+`cc_version=2.1.181.fdb; cc_entrypoint=sdk-cli;` — **no `cch`**. 2.1.173 had no
+such gate (it emitted `cch` for any base URL), which is why capture worked before.
+
+### The fix (extractor)
+`scripts/extract-cch-seed.ts` now sets **`_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1`**
+in the capture spawn env, which forces `qu()` true so the binary writes `cch`
+even for the localhost capture server. With this, 2.1.178, 2.1.179 and 2.1.181 all
+capture 2 oracle pairs that validate against `SEED_2_1_138` (`0x4d659218e32a3268`).
+The capture spawn also pipes stdout/stderr (was `stdio: "ignore"`) and prints the
+binary's output + exit reason on a failed capture, so the next regression is
+diagnosable straight from the CI log instead of an opaque "Failed to capture".
+`CCH_DEBUG=1` adds the binary's `--debug` output.
+
+### How it was found (Linux x86_64)
+A capture against a local server showed the binary **did** send
+`POST /v1/messages` (6 retries on the 401) but with no `cch` in the body. A string
+scan of the binary found the still-present `cch=00000` template and the
+`cc_version=${n}; cc_entrypoint=${r};${…}` builder; disassembling the surrounding
+JS revealed the `qu()` first-party gate above. Setting the env override made
+`cch` reappear, and the captured pairs hashed to the known seed bit-for-bit.
+
+### Gotcha / follow-up (gateway runtime — not changed here)
+The same gate affects the **gateway at runtime**: `lore` launches Claude Code with
+`ANTHROPIC_BASE_URL` pointed at the gateway (localhost), so a 2.1.181+ client's
+`qu()` is false and it sends **no `cch`**. `resignBody`'s regex requires a
+`cch=[0-9a-fA-F]{5};` segment, so it will not match such a client's body. The
+likely fix is to set `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1` in the
+`claude-code` agent `envVars` (`packages/gateway/src/cli/agents.ts`) so clients
+keep emitting `cch` for the gateway to re-sign. Tracked separately from #801.

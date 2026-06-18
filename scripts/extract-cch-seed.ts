@@ -179,6 +179,11 @@ const PROMPTS = [
   "explain quantum computing in one sentence",
 ];
 
+// How long to wait for the binary to make its `/v1/messages` request before
+// killing it. Bare-mode startup is fast, but cold-starting a 230 MB binary in
+// CI can be slow, so allow generous headroom.
+const CAPTURE_TIMEOUT_MS = 30_000;
+
 async function generateOraclePairs(
   binaryPath: string,
   count: number = 2,
@@ -284,27 +289,74 @@ async function captureOnePair(
   });
   const { port } = server.address() as AddressInfo;
 
+  // Capture the binary's stdout+stderr so a failed capture can explain itself.
+  // Bounded so a chatty `--debug` run can't blow up memory.
+  let output = "";
+  const appendOutput = (buf: Buffer) => {
+    output = (output + buf.toString("utf-8")).slice(-8192);
+  };
+
+  // Enable the binary's own debug logging on demand (CCH_DEBUG=1) so a capture
+  // failure can be diagnosed from CI logs without noise on the happy path.
+  const cliArgs = ["--print", "--bare", "-p", prompt];
+  if (process.env.CCH_DEBUG) cliArgs.push("--debug");
+
+  let exitInfo = "unknown";
   try {
-    const proc = spawn(binaryPath, ["--print", "--bare", "-p", prompt], {
+    const proc = spawn(binaryPath, cliArgs, {
       env: {
         ...process.env,
         HOME: `${tmpDir}/home`,
         ANTHROPIC_API_KEY:
           "sk-ant-api03-fakekey1234567890abcdef1234567890abcdef1234567890abcdef",
         ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`,
+        // Claude Code >= 2.1.181 only emits the `cch` billing field when it
+        // believes it is talking to the first-party API: `qu()` returns false
+        // unless ANTHROPIC_BASE_URL's host is exactly `api.anthropic.com` (or
+        // unset). Our capture server runs on 127.0.0.1, so without this override
+        // the binary sends NO `cch` at all and extraction fails (issue #801).
+        // This internal env var forces the first-party assumption so the cch is
+        // still written for the localhost capture server. NEVER remove it.
+        _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL: "1",
         DISABLE_AUTOUPDATER: "1",
         DISABLE_UPDATES: "1",
       },
       cwd: `${tmpDir}/workdir`,
-      stdio: "ignore",
+      // Pipe stdout/stderr (instead of "ignore") so the binary's output is
+      // available for diagnostics when no `cch` is captured.
+      stdio: ["ignore", "pipe", "pipe"],
     });
+    proc.stdout?.on("data", appendOutput);
+    proc.stderr?.on("data", appendOutput);
 
-    // Wait up to 15s for the binary to make its request
-    const timeout = setTimeout(() => proc.kill(), 15_000);
-    await new Promise<void>((resolve) => proc.on("exit", () => resolve()));
+    // Wait for the binary to make its request, then kill it on timeout.
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      proc.kill();
+    }, CAPTURE_TIMEOUT_MS);
+    const [code, signal] = await new Promise<[number | null, string | null]>(
+      (resolve) => proc.on("exit", (c, s) => resolve([c, s])),
+    );
     clearTimeout(timeout);
+    exitInfo = timedOut
+      ? `timed out after ${CAPTURE_TIMEOUT_MS / 1000}s (killed)`
+      : `exit code=${code} signal=${signal}`;
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+
+  // Surface the binary's output when capture failed — otherwise the failure is
+  // invisible (the binary ran but no `cch` was seen). This is the single most
+  // useful signal for diagnosing future capture regressions.
+  if (!captured) {
+    console.error(`    Binary did not yield a cch (${exitInfo}).`);
+    const trimmed = output.trim();
+    console.error(
+      trimmed
+        ? `    --- binary output (last ${trimmed.length} chars) ---\n${trimmed}`
+        : "    (binary produced no stdout/stderr)",
+    );
   }
 
   return captured;
