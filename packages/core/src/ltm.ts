@@ -604,6 +604,26 @@ export function pruneDeadEntries(projectPath: string): KnowledgeEntry[] {
   return dead;
 }
 
+/**
+ * Global counterpart of `pruneDeadEntries`: reap dead rows across ALL projects
+ * in a single pass. The per-project version only runs for the active session's
+ * project on its idle tick, so dead entries in projects nobody is currently
+ * working in linger indefinitely (invisible, but counted). A periodic global
+ * sweep clears those. Same safety rule applies — only EXCLUSIVELY project-owned
+ * rows (`cross_project = 0`) are eligible; shared/global knowledge is never
+ * touched. `remove()` tombstones each id. Returns the pruned entries.
+ */
+export function pruneDeadEntriesAllProjects(): KnowledgeEntry[] {
+  const dead = db()
+    .query(
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge
+       WHERE cross_project = 0 AND confidence <= ?`,
+    )
+    .all(DEAD_CONFIDENCE_FLOOR) as KnowledgeEntry[];
+  for (const e of dead) remove(e.id);
+  return dead;
+}
+
 /** Token cost of one entry as the curator prompt renders it (see curatorUser). */
 function curatorEntryTokens(e: KnowledgeEntry): number {
   return estimateTokens(`[${e.id}] (${e.category}) ${e.title}: ${e.content}`);

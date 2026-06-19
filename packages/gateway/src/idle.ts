@@ -88,6 +88,16 @@ import {
 const POLL_INTERVAL_MS = 30_000;
 
 /**
+ * How often the scheduler runs the GLOBAL dead-knowledge sweep
+ * (`pruneDeadEntriesAllProjects`). The per-session idle pass only prunes the
+ * active session's project, so dead entries in projects nobody is currently
+ * working in would linger. This backstop reaps them across all projects on a
+ * slow cadence (the work is a single local query that returns nothing most
+ * ticks). In-memory gate; the first tick after startup runs it once.
+ */
+export const GLOBAL_DEAD_SWEEP_INTERVAL_MS = 60 * 60 * 1000; // 1h
+
+/**
  * Cooldown tracking for knowledge consolidation.
  *
  * When consolidation runs but fails to reduce entries below maxEntries
@@ -194,6 +204,10 @@ export function startIdleScheduler(
 ): () => void {
   const inProgress = new Set<string>();
   const warmupInProgress = new Set<string>();
+  // In-memory gate for the global dead-knowledge sweep. Starts at 0 so the first
+  // tick after startup runs it once (catches entries that decayed while the
+  // gateway was down), then at most once per GLOBAL_DEAD_SWEEP_INTERVAL_MS.
+  let lastGlobalDeadSweepAt = 0;
 
   const timer = setInterval(() => {
     const now = Date.now();
@@ -203,6 +217,26 @@ export function startIdleScheduler(
     // this tick's work. The idle scheduler owns the sessions Map, so doing it
     // here keeps background-limiter free of session-state imports.
     scaleBackgroundConcurrency(sessions.size);
+
+    // Global dead-knowledge sweep — interval-gated backstop for entries in
+    // projects with no active session (the per-session pass only prunes the
+    // active project). Knowledge-gated; cheap local query; never throws out.
+    if (
+      loreConfig().knowledge.enabled &&
+      now - lastGlobalDeadSweepAt >= GLOBAL_DEAD_SWEEP_INTERVAL_MS
+    ) {
+      lastGlobalDeadSweepAt = now;
+      try {
+        const pruned = ltm.pruneDeadEntriesAllProjects();
+        if (pruned.length > 0) {
+          log.info(
+            `global sweep: pruned ${pruned.length} dead knowledge entries across all projects`,
+          );
+        }
+      } catch (e) {
+        log.error("global dead-entry sweep error:", e);
+      }
+    }
 
     // --- Idle work (distillation, curation, etc.) ---
     for (const [sessionID, state] of sessions) {

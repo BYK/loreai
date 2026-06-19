@@ -100,6 +100,88 @@ describe("ltm.pruneDeadEntries", () => {
 });
 
 // ---------------------------------------------------------------------------
+// pruneDeadEntriesAllProjects (global sweep)
+// ---------------------------------------------------------------------------
+
+describe("ltm.pruneDeadEntriesAllProjects", () => {
+  beforeEach(clearKnowledge);
+
+  test("reaps dead project-owned entries across ALL projects, preserving live and shared ones", () => {
+    const deadHere = ltm.create({
+      projectPath: PROJECT,
+      category: "gotcha",
+      title: "Dead here",
+      content: "x",
+      scope: "project",
+    });
+    const deadThere = ltm.create({
+      projectPath: OTHER,
+      category: "gotcha",
+      title: "Dead there",
+      content: "y",
+      scope: "project",
+    });
+    ltm.update(deadHere, { confidence: 0.0 });
+    ltm.update(deadThere, { confidence: 0.1 });
+
+    const liveHere = ltm.create({
+      projectPath: PROJECT,
+      category: "gotcha",
+      title: "Live here",
+      content: "z",
+      scope: "project",
+    });
+    // A promoted (cross_project=1, kept origin project_id) dead entry — shared.
+    const promotedDead = ltm.create({
+      projectPath: OTHER,
+      category: "preference",
+      title: "Promoted dead",
+      content: "p",
+      scope: "project",
+    });
+    db()
+      .query(
+        "UPDATE knowledge SET cross_project = 1, confidence = 0.0 WHERE id = ?",
+      )
+      .run(promotedDead);
+    // A true global (project_id NULL) dead entry — shared.
+    const globalDead = ltm.create({
+      category: "preference",
+      title: "Global dead",
+      content: "g",
+      scope: "global",
+      crossProject: true,
+    });
+    ltm.update(globalDead, { confidence: 0.0 });
+
+    const pruned = ltm.pruneDeadEntriesAllProjects();
+
+    // Both project-owned dead entries (in different projects) are reaped.
+    expect(pruned.map((e) => e.id).sort()).toEqual(
+      [deadHere, deadThere].sort(),
+    );
+    expect(ltm.get(deadHere)).toBeNull();
+    expect(ltm.get(deadThere)).toBeNull();
+    expect(ltm.isTombstoned(deadHere)).toBe(true);
+    // Live and shared (promoted / global) entries are untouched.
+    expect(ltm.get(liveHere)).not.toBeNull();
+    expect(ltm.get(promotedDead)).not.toBeNull();
+    expect(ltm.get(globalDead)).not.toBeNull();
+  });
+
+  test("is a no-op when there are no dead entries", () => {
+    ltm.create({
+      projectPath: PROJECT,
+      category: "gotcha",
+      title: "Healthy",
+      content: "x",
+      scope: "project",
+    });
+    expect(ltm.pruneDeadEntriesAllProjects()).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // forCurator (token-budgeted existing-entries context)
 // ---------------------------------------------------------------------------
 
