@@ -736,11 +736,14 @@ export function decayProject(
   if (now - lastDecay < DECAY_INTERVAL_MS) return 0; // interval gate
 
   const cutoff = now - DECAY_GRACE_MS;
+  // cross_project = 0: a promoted entry keeps its origin project_id, so a single
+  // project must not decay shared knowledge it merely originated (it may be
+  // actively used — and reinforced — in OTHER projects). (Seer review, PR #816.)
   const res = db()
     .query(
       `UPDATE knowledge
        SET confidence = MAX(0, confidence - ?)
-       WHERE project_id = ?
+       WHERE project_id = ? AND cross_project = 0
          AND COALESCE(last_reinforced_at, updated_at) < ?`,
     )
     .run(DECAY_STEP, pid, cutoff) as { changes?: number | bigint };
@@ -755,8 +758,10 @@ export function decayProject(
  * entries — ranked by confidence ASC, then last_reinforced_at ASC (least
  * confident, then least-recently reinforced). Confidence is the decayed value
  * (the decay pass mutates it in place), so this evicts what the lifecycle has
- * already judged least valuable. Cross-project/global entries are never evicted
- * by a single project. `remove()` tombstones each id. Returns the evicted rows
+ * already judged least valuable. Only EXCLUSIVELY project-owned rows
+ * (`cross_project = 0`) are eligible — a promoted entry keeps its origin
+ * project_id, so a single project must never evict shared knowledge (Seer
+ * review, PR #816). `remove()` tombstones each id. Returns the evicted rows
  * (for the changed-entries / delta channel).
  *
  * Only considers LIVE entries (`confidence > DEAD_CONFIDENCE_FLOOR`) — the same
@@ -778,7 +783,7 @@ export function evictLowestValue(
   const victims = db()
     .query(
       `SELECT ${KNOWLEDGE_COLS} FROM knowledge
-       WHERE project_id = ? AND confidence > ?
+       WHERE project_id = ? AND cross_project = 0 AND confidence > ?
        ORDER BY confidence ASC, COALESCE(last_reinforced_at, updated_at) ASC
        LIMIT ?`,
     )

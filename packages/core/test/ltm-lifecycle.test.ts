@@ -155,6 +155,25 @@ describe("ltm.decayProject", () => {
     ltm.decayProject(PROJECT, base + ltm.DECAY_GRACE_MS + 60_000);
     expect(ltm.get(other)?.confidence).toBe(1.0);
   });
+
+  test("never decays a promoted cross-project entry that kept its origin project_id (Seer #816)", () => {
+    const base = Date.now();
+    const promoted = ltm.create({
+      projectPath: PROJECT,
+      category: "preference",
+      title: "Promoted shared",
+      content: "x",
+      scope: "project",
+    });
+    // Promote in place (origin project_id retained) and backdate reinforcement.
+    db()
+      .query(
+        "UPDATE knowledge SET cross_project = 1, last_reinforced_at = 1000 WHERE id = ?",
+      )
+      .run(promoted);
+    ltm.decayProject(PROJECT, base + ltm.DECAY_GRACE_MS + 60_000);
+    expect(ltm.get(promoted)?.confidence).toBe(1.0); // shared knowledge untouched
+  });
 });
 
 describe("ltm.evictLowestValue", () => {
@@ -248,7 +267,7 @@ describe("ltm.evictLowestValue", () => {
     expect(ltm.get(dead)).not.toBeNull(); // dead entry untouched
   });
 
-  test("count <= 0 is a no-op; never evicts cross-project entries", () => {
+  test("count <= 0 is a no-op; never evicts global or promoted cross-project entries", () => {
     const g = ltm.create({
       category: "preference",
       title: "Global",
@@ -257,6 +276,18 @@ describe("ltm.evictLowestValue", () => {
       crossProject: true,
       confidence: 0.1,
     });
+    // Promoted-in-place: cross_project = 1 while keeping this project's id.
+    const promoted = ltm.create({
+      projectPath: PROJECT,
+      category: "preference",
+      title: "Promoted shared",
+      content: "p",
+      scope: "project",
+      confidence: 0.25,
+    });
+    db()
+      .query("UPDATE knowledge SET cross_project = 1 WHERE id = ?")
+      .run(promoted);
     ltm.create({
       projectPath: PROJECT,
       category: "gotcha",
@@ -266,9 +297,12 @@ describe("ltm.evictLowestValue", () => {
       confidence: 0.9,
     });
     expect(ltm.evictLowestValue(PROJECT, 0)).toHaveLength(0);
-    // Even though the global entry is the lowest confidence, it is never a victim.
+    // Both the global and the promoted entry are lower confidence than "Proj",
+    // yet neither is ever a victim — shared knowledge is protected (Seer #816).
     const evicted = ltm.evictLowestValue(PROJECT, 5);
     expect(evicted.some((e) => e.id === g)).toBe(false);
+    expect(evicted.some((e) => e.id === promoted)).toBe(false);
     expect(ltm.get(g)).not.toBeNull();
+    expect(ltm.get(promoted)).not.toBeNull();
   });
 });
