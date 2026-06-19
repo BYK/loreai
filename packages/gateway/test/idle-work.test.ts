@@ -209,6 +209,85 @@ describe("buildIdleWorkHandler", () => {
     expect(files.some((f) => f === "AGENTS.md" || f === ".lore.md")).toBe(true);
   });
 
+  test("runs consolidation when a category is over threshold, then the cooldown skips the next tick", async () => {
+    const llm = makeLLM(); // prompt() returns null → consolidation is a no-op
+    const handler = buildIdleWorkHandler(llm);
+    const projectPath = makeProjectDir();
+    // Seed enough single-category entries to exceed the per-category
+    // consolidation threshold (12) AND the global cap (40) on this branch.
+    for (let i = 0; i < 61; i++) {
+      ltm.create({
+        projectPath,
+        category: "preference",
+        title: `Pref ${i}`,
+        content: `Preference number ${i} content.`,
+        scope: "project",
+      });
+    }
+    const state = makeSessionState({
+      sessionID: "idle-consolidate",
+      projectPath,
+      turnsSinceCuration: 0, // keep curation from firing — isolate consolidation
+    });
+    const prompt = llm.prompt as ReturnType<typeof vi.fn>;
+
+    // First idle tick: over threshold → consolidation runs and calls the LLM.
+    // The no-op completion arms the cooldown.
+    await handler("idle-consolidate", state);
+    const callsAfterFirst = prompt.mock.calls.length;
+    expect(callsAfterFirst).toBeGreaterThan(0);
+
+    // Second idle tick: entry count unchanged → cooldown is active → the
+    // consolidation block is skipped, so the LLM is not called again.
+    await handler("idle-consolidate", state);
+    expect(prompt.mock.calls.length).toBe(callsAfterFirst);
+  });
+
+  test("consolidation that makes progress deletes the entry and clears the cooldown", async () => {
+    const projectPath = makeProjectDir();
+    // 60 full-confidence entries plus one low-confidence target. The target
+    // (lowest confidence) is always in the consolidation set on every branch —
+    // whether the global batched path (lowest-confidence tail) or the
+    // category-focused path (whole category) is taken.
+    for (let i = 0; i < 60; i++) {
+      ltm.create({
+        projectPath,
+        category: "preference",
+        title: `Keep ${i}`,
+        content: `Preference number ${i} content.`,
+        scope: "project",
+      });
+    }
+    const targetId = ltm.create({
+      projectPath,
+      category: "preference",
+      title: "Merge me",
+      content: "A near-duplicate preference the consolidator removes.",
+      scope: "project",
+      confidence: 0.3,
+    });
+    // LLM returns a consolidation delete op for the target → result.deleted > 0
+    // → the "made progress" branch (clears the cooldown).
+    const llm: LLMClient = {
+      prompt: vi.fn(async () =>
+        JSON.stringify({
+          ops: [{ op: "delete", id: targetId, reason: "dup" }],
+        }),
+      ),
+    };
+    const handler = buildIdleWorkHandler(llm);
+    const state = makeSessionState({
+      sessionID: "idle-consolidate-progress",
+      projectPath,
+      turnsSinceCuration: 0,
+    });
+
+    await handler("idle-consolidate-progress", state);
+
+    expect(llm.prompt).toHaveBeenCalled();
+    expect(ltm.get(targetId)).toBeNull(); // consolidation deleted it
+  });
+
   test("persists the session cost snapshot when conversation cost exists", async () => {
     const llm = makeLLM();
     const handler = buildIdleWorkHandler(llm);
