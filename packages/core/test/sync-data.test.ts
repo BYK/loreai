@@ -184,6 +184,40 @@ describe("contentHash", () => {
     );
     expect(h2).not.toBe(h1);
   });
+
+  test("changes when confidence changes (decay must propagate to sync)", () => {
+    // decayProject lowers confidence without bumping updated_at; the content
+    // hash must still change so the row is pushed to other clients.
+    insertKnowledge("k1", "T", "C");
+    const h1 = contentHash(
+      "knowledge",
+      getRowById("knowledge", "k1") as Record<string, unknown>,
+    );
+    db().query("UPDATE knowledge SET confidence = 0.5 WHERE id='k1'").run();
+    const h2 = contentHash(
+      "knowledge",
+      getRowById("knowledge", "k1") as Record<string, unknown>,
+    );
+    expect(h2).not.toBe(h1);
+  });
+
+  test("stable when only last_reinforced_at changes (injection must not churn sync)", () => {
+    // markInjected fires every turn on the hot path; it must not alter the hash
+    // or every injected entry would be re-pushed each turn.
+    insertKnowledge("k1", "T", "C");
+    const h1 = contentHash(
+      "knowledge",
+      getRowById("knowledge", "k1") as Record<string, unknown>,
+    );
+    db()
+      .query("UPDATE knowledge SET last_reinforced_at = ? WHERE id='k1'")
+      .run(now() + 12345);
+    const h2 = contentHash(
+      "knowledge",
+      getRowById("knowledge", "k1") as Record<string, unknown>,
+    );
+    expect(h2).toBe(h1);
+  });
 });
 
 describe("applyRemoteUpsert / applyRemoteDelete", () => {

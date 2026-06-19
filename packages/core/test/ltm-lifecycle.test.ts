@@ -306,3 +306,41 @@ describe("ltm.evictLowestValue", () => {
     expect(ltm.get(promoted)).not.toBeNull();
   });
 });
+
+describe("preference reinforcement on injection (forSession fast path)", () => {
+  beforeEach(clearKnowledge);
+
+  test("injecting a project-scoped preference resets its decay clock so decay does not delete it while in use", async () => {
+    const id = ltm.create({
+      projectPath: PROJECT,
+      category: "preference",
+      title: "Always run the linter before committing",
+      content: "Run the linter before every commit.",
+      scope: "project",
+    });
+    // Simulate a long-unreinforced entry that WOULD decay on the next pass.
+    db()
+      .query("UPDATE knowledge SET last_reinforced_at = 1000 WHERE id = ?")
+      .run(id);
+
+    // The preference-only fast path is the ONLY injection path for preferences
+    // (context blocks pass excludeCategories: ["preference"]).
+    const injected = await ltm.forSession(PROJECT, "sess-pref", 10_000, {
+      categories: ["preference"],
+    });
+    expect(injected.some((e) => e.id === id)).toBe(true);
+
+    // Injection moved the decay clock forward without touching confidence.
+    const after = ltm.get(id);
+    expect(after?.last_reinforced_at ?? 0).toBeGreaterThan(1000);
+    expect(after?.confidence).toBe(1.0);
+
+    // A decay pass within the grace window of the injection leaves it untouched —
+    // an actively-injected preference is never aged out. (Adversarial-review fix.)
+    const decayNow =
+      (after?.last_reinforced_at as number) + ltm.DECAY_GRACE_MS - 1000;
+    ltm.decayProject(PROJECT, decayNow);
+    expect(ltm.get(id)?.confidence).toBe(1.0);
+    expect(ltm.get(id)).not.toBeNull();
+  });
+});

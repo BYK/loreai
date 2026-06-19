@@ -1048,6 +1048,21 @@ export async function forSession(
     // fast path. Preferences are typically global/cross directives rather than
     // project-origin knowledge, so counting them as cross-project "transfers"
     // would be misleading.
+    //
+    // Reinforce injected preferences (confidence lifecycle): this is the ONLY
+    // injection path for preferences (the context-block callers pass
+    // excludeCategories: ["preference"]). Without this, a project-scoped
+    // preference injected into system[1] every turn would still age out and be
+    // pruned by decayProject/pruneDeadEntries after the grace window — silently
+    // deleting an actively-used directive. Resets the decay clock only.
+    try {
+      markInjected(result.map((e) => e.id));
+    } catch (err) {
+      log.warn(
+        "forSession(preference): reinforcement failed (non-fatal):",
+        err,
+      );
+    }
     return result;
   }
 

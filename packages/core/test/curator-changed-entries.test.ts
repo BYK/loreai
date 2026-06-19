@@ -189,4 +189,44 @@ describe("curator enforceEntryCap (soft-cap eviction)", () => {
       [lowA, lowB].sort(),
     );
   });
+
+  test("promoted cross-project entries are counted toward the cap but evicted from owned rows only (converges)", () => {
+    reset();
+    // 3 exclusively-owned + 2 promoted-in-place (cross_project=1, same project_id).
+    const owned = [0.9, 0.5, 0.7].map((c, i) =>
+      ltm.create({
+        projectPath: CAP_PROJECT,
+        category: "gotcha",
+        title: `Owned ${i}`,
+        content: "x",
+        scope: "project",
+        confidence: c,
+      }),
+    );
+    const promoted = [0.4, 0.45].map((c, i) => {
+      const id = ltm.create({
+        projectPath: CAP_PROJECT,
+        category: "preference",
+        title: `Promoted ${i}`,
+        content: "p",
+        scope: "project",
+        confidence: c,
+      });
+      db().query("UPDATE knowledge SET cross_project = 1 WHERE id = ?").run(id);
+      return id;
+    });
+
+    // forProject counts all 5 (project_id matches, confidence > 0.2) → overBy=2.
+    const result = { deleted: 0, changedEntries: [] as ChangedEntry[] };
+    const evicted = enforceEntryCap(CAP_PROJECT, 3, result);
+
+    // Eviction draws ONLY from owned rows (the two lowest-confidence owned),
+    // never the promoted/shared ones; the live count converges to the cap.
+    expect(evicted).toBe(2);
+    expect(promoted.every((id) => ltm.get(id) !== null)).toBe(true);
+    expect(ltm.get(owned[0])).not.toBeNull(); // 0.9 survives
+    expect(ltm.get(owned[1])).toBeNull(); // 0.5 evicted
+    expect(ltm.get(owned[2])).toBeNull(); // 0.7 evicted
+    expect(ltm.forProject(CAP_PROJECT, false)).toHaveLength(3);
+  });
 });
