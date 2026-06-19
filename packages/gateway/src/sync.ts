@@ -184,11 +184,11 @@ async function pushEntry(
     payload.content_hash = hash;
     payload.revision = revision;
   }
-  // The REMOTE primary key is composite — (owner_user_id, <idColumns>) — so the
-  // ON CONFLICT target must include owner_user_id (the local PK is just
-  // idColumns). owner_user_id is filled by the column's auth.uid() default.
+  // The REMOTE primary key is composite — (scope_id, <idColumns>) — so the
+  // ON CONFLICT target must include scope_id (the local PK is just idColumns).
+  // scope_id is filled by the column's auth.uid() default (v1: scope = user).
   const { error } = await client.from(table).upsert(payload, {
-    onConflict: ["owner_user_id", ...idColumns(table)].join(","),
+    onConflict: ["scope_id", ...idColumns(table)].join(","),
   });
 
   if (error) {
@@ -520,7 +520,8 @@ export function startSyncScheduler(
 
 /** Synced columns that live only on the remote — stripped before local apply. */
 const REMOTE_ONLY_COLS = new Set([
-  "owner_user_id",
+  "scope_id",
+  "author_id",
   "content_hash",
   "revision",
   "is_deleted",

@@ -186,7 +186,7 @@ describe.skipIf(SKIP)("sync engine ↔ real Postgres/PostgREST", () => {
     // pushed row carries the locally-NOT-NULL columns like sensitivity).
     await h.asUser(uid, (c) =>
       c.query(
-        `insert into public.knowledge (id, owner_user_id, category, title, content, sensitivity, content_hash, revision)
+        `insert into public.knowledge (id, scope_id, category, title, content, sensitivity, content_hash, revision)
          values ('kb',$1,'pattern','T','from-device-B','normal','h',1)`,
         [uid],
       ),
@@ -203,7 +203,7 @@ describe.skipIf(SKIP)("sync engine ↔ real Postgres/PostgREST", () => {
     // Insert 5 rows at one server timestamp; all must arrive (keyset).
     await h.asUser(uid, (c) =>
       c.query(
-        `insert into public.knowledge (id, owner_user_id, category, title, content, sensitivity, content_hash, revision, updated_at)
+        `insert into public.knowledge (id, scope_id, category, title, content, sensitivity, content_hash, revision, updated_at)
          select 'm'||g, $1, 'pattern','T','c'||g, 'normal', 'h'||g, 1, now()
          from generate_series(0,4) g`,
         [uid],

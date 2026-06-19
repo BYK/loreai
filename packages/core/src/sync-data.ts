@@ -50,8 +50,8 @@ export interface SyncTableMeta {
    * which is a curated subset of the local schema. Push/hash use ONLY these —
    * sending a local-only column (e.g. knowledge.promoted_at, worker_model_id)
    * is a PostgREST PGRST204 and would break sync for the whole table. Sync-
-   * management columns (owner_user_id/content_hash/revision/is_deleted) are
-   * added separately and are NOT listed here.
+   * management columns (scope_id/author_id/content_hash/revision/is_deleted) are
+   * server-derived or added separately and are NOT listed here.
    */
   syncColumns: string[];
 }
