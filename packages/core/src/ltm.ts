@@ -759,6 +759,12 @@ export function decayProject(
  * by a single project. `remove()` tombstones each id. Returns the evicted rows
  * (for the changed-entries / delta channel).
  *
+ * Only considers LIVE entries (`confidence > DEAD_CONFIDENCE_FLOOR`) — the same
+ * set `forProject` counts. Callers (enforceEntryCap) compute `count` from the
+ * live count over the cap, so eviction must draw from the same population or it
+ * would reap already-dead entries (handled by pruneDeadEntries) without reducing
+ * the live count, under-enforcing the cap. (Seer review, PR #816.)
+ *
  * Self-correcting at the cap: a freshly-created entry less confident than every
  * incumbent sorts to the tail and evicts itself, so weak new knowledge never
  * displaces stronger existing knowledge.
@@ -772,11 +778,11 @@ export function evictLowestValue(
   const victims = db()
     .query(
       `SELECT ${KNOWLEDGE_COLS} FROM knowledge
-       WHERE project_id = ?
+       WHERE project_id = ? AND confidence > ?
        ORDER BY confidence ASC, COALESCE(last_reinforced_at, updated_at) ASC
        LIMIT ?`,
     )
-    .all(pid, count) as KnowledgeEntry[];
+    .all(pid, DEAD_CONFIDENCE_FLOOR, count) as KnowledgeEntry[];
   for (const e of victims) remove(e.id);
   return victims;
 }

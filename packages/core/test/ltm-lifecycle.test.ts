@@ -223,6 +223,31 @@ describe("ltm.evictLowestValue", () => {
     expect(evicted.map((e) => e.id)).toEqual([older]);
   });
 
+  test("never evicts dead (<= floor) entries — they belong to pruneDeadEntries, and evicting them would not reduce the live count (Seer #816)", () => {
+    const dead = ltm.create({
+      projectPath: PROJECT,
+      category: "gotcha",
+      title: "Dead",
+      content: "x",
+      scope: "project",
+    });
+    ltm.update(dead, { confidence: 0.1 }); // below the 0.2 relevance floor
+    const liveLow = ltm.create({
+      projectPath: PROJECT,
+      category: "gotcha",
+      title: "LiveLow",
+      content: "y",
+      scope: "project",
+      confidence: 0.5,
+    });
+
+    // enforceEntryCap counts only live entries, so a request to evict 1 must
+    // remove the lowest LIVE entry — not the cheaper dead one.
+    const evicted = ltm.evictLowestValue(PROJECT, 1);
+    expect(evicted.map((e) => e.id)).toEqual([liveLow]);
+    expect(ltm.get(dead)).not.toBeNull(); // dead entry untouched
+  });
+
   test("count <= 0 is a no-op; never evicts cross-project entries", () => {
     const g = ltm.create({
       category: "preference",
