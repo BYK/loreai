@@ -131,7 +131,7 @@ Curator scheduling and consolidation thresholds.
 | `onIdle` | boolean | `true` |  | Run the curator on session idle (in addition to turn-based). Default: true. |
 | `inFlight` | boolean | `false` |  | Run the curator mid-conversation (turn-based), not just on idle. Default: false. WARNING: only enable on free-write / non-caching providers (e.g. MiniMax). On cache-sensitive providers (Anthropic), mid-session curation changes the knowledge base, which rewrites the context-bound LTM block (system[2]) and busts the prompt cache for the rest of a large conversation (a single change can re-write hundreds of thousands of cached tokens). Deferring curation to idle makes that rewrite free (the cache is cold then). Where cache writes are free this is harmless and yields fresher knowledge sooner. |
 | `afterTurns` | number | `3` | min 1 | Minimum turns between curator runs. Default: 3. |
-| `maxEntries` | number | `40` | min 10 | Max knowledge entries per project before consolidation. Default: 40. |
+| `maxEntries` | number | `200` | min 10 | Per-project knowledge entry ceiling. A generous backstop, not a quality gate: injection is already token-budget-capped, and the confidence lifecycle (decay + reinforcement) governs what stays. When exceeded, the lowest-value entries are evicted. Default: 200. |
 | `contextTokenBudget` | number | `20000` | min 2000 | Token budget for the existing-entries context sent to the curator each run. Bounds curator LLM cost so it stops scaling with stored entry count; a generous safety ceiling that only trims pathological sets (cross-project entries are always kept). Default: 20000. |
 
 
