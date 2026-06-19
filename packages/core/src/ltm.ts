@@ -739,14 +739,20 @@ export function decayProject(
   // cross_project = 0: a promoted entry keeps its origin project_id, so a single
   // project must not decay shared knowledge it merely originated (it may be
   // actively used — and reinforced — in OTHER projects). (Seer review, PR #816.)
+  // confidence > floor: only decay still-LIVE entries. Already-dead rows
+  // (<= floor) are invisible everywhere and reaped by pruneDeadEntries; matching
+  // them here would re-apply a no-op MAX(0, …) and inflate the returned/logged
+  // count with rows whose confidence didn't actually change. (Seer review.)
   const res = db()
     .query(
       `UPDATE knowledge
        SET confidence = MAX(0, confidence - ?)
-       WHERE project_id = ? AND cross_project = 0
+       WHERE project_id = ? AND cross_project = 0 AND confidence > ?
          AND COALESCE(last_reinforced_at, updated_at) < ?`,
     )
-    .run(DECAY_STEP, pid, cutoff) as { changes?: number | bigint };
+    .run(DECAY_STEP, pid, DEAD_CONFIDENCE_FLOOR, cutoff) as {
+    changes?: number | bigint;
+  };
   db()
     .query("UPDATE projects SET last_decay_at = ? WHERE id = ?")
     .run(now, pid);

@@ -156,6 +156,37 @@ describe("ltm.decayProject", () => {
     expect(ltm.get(other)?.confidence).toBe(1.0);
   });
 
+  test("does not count (or touch) already-dead entries below the floor (Seer #816 count accuracy)", () => {
+    const base = Date.now();
+    const live = ltm.create({
+      projectPath: PROJECT,
+      category: "gotcha",
+      title: "Live stale",
+      content: "x",
+      scope: "project",
+    });
+    const dead = ltm.create({
+      projectPath: PROJECT,
+      category: "gotcha",
+      title: "Dead stale",
+      content: "y",
+      scope: "project",
+    });
+    // dead is below the relevance floor; both are long-unreinforced.
+    db().query("UPDATE knowledge SET confidence = 0.15 WHERE id = ?").run(dead);
+
+    const decayed = ltm.decayProject(
+      PROJECT,
+      base + ltm.DECAY_GRACE_MS + 60_000,
+    );
+
+    // Only the live entry is decayed and counted; the dead one is left for
+    // pruneDeadEntries and excluded from the count.
+    expect(decayed).toBe(1);
+    expect(ltm.get(live)?.confidence).toBeCloseTo(1.0 - ltm.DECAY_STEP, 5);
+    expect(ltm.get(dead)?.confidence).toBe(0.15);
+  });
+
   test("never decays a promoted cross-project entry that kept its origin project_id (Seer #816)", () => {
     const base = Date.now();
     const promoted = ltm.create({
