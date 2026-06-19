@@ -1201,6 +1201,22 @@ const MIGRATIONS: string[] = [
     PRIMARY KEY (project_id, cause, relocatable)
   );
   `,
+  `
+  -- Version 48: Knowledge confidence lifecycle (reinforcement clock + decay).
+  -- last_reinforced_at records when an entry's relevance was last CONFIRMED —
+  -- injected into a prompt, recalled, or re-confirmed by the curator. The idle
+  -- decay pass lowers confidence for entries unreinforced past a grace window,
+  -- so unused knowledge ages out below the relevance floor (and is then pruned)
+  -- while genuinely useful (regularly-injected) knowledge never decays. Backfill
+  -- existing rows to updated_at so they start with a sane "last seen" time.
+  --
+  -- projects.last_decay_at gates the decay pass to once per interval, making the
+  -- per-pass decrement rate-stable regardless of how often the idle scheduler
+  -- fires (a per-tick decrement would depend on session activity).
+  ALTER TABLE knowledge ADD COLUMN last_reinforced_at INTEGER;
+  UPDATE knowledge SET last_reinforced_at = updated_at WHERE last_reinforced_at IS NULL;
+  ALTER TABLE projects ADD COLUMN last_decay_at INTEGER;
+  `,
 ];
 
 /**

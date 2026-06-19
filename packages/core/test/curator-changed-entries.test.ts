@@ -1,5 +1,7 @@
 import { describe, expect, test } from "vitest";
-import { applyOps } from "../src/curator";
+import { applyOps, enforceEntryCap } from "../src/curator";
+import type { ChangedEntry } from "../src/curator";
+import { db, ensureProject } from "../src/db";
 import * as ltm from "../src/ltm";
 
 const PROJECT = "/tmp/lore-curator-delta/project";
@@ -119,5 +121,72 @@ describe("curator applyOps changedEntries", () => {
       }),
     ]);
     expect(ltm.get(id)).toBeNull();
+  });
+});
+
+describe("curator enforceEntryCap (soft-cap eviction)", () => {
+  const CAP_PROJECT = "/tmp/lore-curator-cap/project";
+
+  function reset() {
+    const pid = ensureProject(CAP_PROJECT);
+    db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+  }
+
+  test("no-op when at or under the cap", () => {
+    reset();
+    for (let i = 0; i < 3; i++) {
+      ltm.create({
+        projectPath: CAP_PROJECT,
+        category: "gotcha",
+        title: `Under ${i}`,
+        content: "x",
+        scope: "project",
+      });
+    }
+    const result = { deleted: 0, changedEntries: [] as ChangedEntry[] };
+    expect(enforceEntryCap(CAP_PROJECT, 3, result)).toBe(0);
+    expect(result.deleted).toBe(0);
+    expect(ltm.forProject(CAP_PROJECT, false)).toHaveLength(3);
+  });
+
+  test("evicts the lowest-value tail down to the cap and records deletes", () => {
+    reset();
+    const high = ltm.create({
+      projectPath: CAP_PROJECT,
+      category: "gotcha",
+      title: "Keep high",
+      content: "x",
+      scope: "project",
+      confidence: 0.9,
+    });
+    const lowA = ltm.create({
+      projectPath: CAP_PROJECT,
+      category: "gotcha",
+      title: "Evict A",
+      content: "x",
+      scope: "project",
+      confidence: 0.3,
+    });
+    const lowB = ltm.create({
+      projectPath: CAP_PROJECT,
+      category: "gotcha",
+      title: "Evict B",
+      content: "x",
+      scope: "project",
+      confidence: 0.4,
+    });
+
+    const result = { deleted: 0, changedEntries: [] as ChangedEntry[] };
+    const evicted = enforceEntryCap(CAP_PROJECT, 1, result);
+
+    expect(evicted).toBe(2);
+    expect(result.deleted).toBe(2);
+    // Highest-value entry survives; the two lowest are gone.
+    expect(ltm.get(high)).not.toBeNull();
+    expect(ltm.get(lowA)).toBeNull();
+    expect(ltm.get(lowB)).toBeNull();
+    expect(result.changedEntries.map((e) => e.id).sort()).toEqual(
+      [lowA, lowB].sort(),
+    );
   });
 });

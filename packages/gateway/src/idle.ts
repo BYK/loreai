@@ -154,14 +154,17 @@ export function consolidationCooldownActive(
 }
 
 /**
- * Per-category entry count that triggers consolidation even when the GLOBAL
- * count is below maxEntries. The global trigger structurally misses single-
- * category bloat: a category (notably `preference`, which the curator re-mints
- * and re-phrases each session) can swell to dozens while the total stays under
- * maxEntries, so consolidation never fires and the duplicates inject into the
- * always-pinned system[1] block every session. This catches that case.
+ * Per-category consolidation trigger, proportional to the global cap so it
+ * scales with `maxEntries` instead of being a magic constant. The global
+ * trigger structurally misses single-category bloat: a category (notably
+ * `preference`, which the curator re-mints and re-phrases each session) can
+ * swell while the total stays under maxEntries, so consolidation never fires and
+ * the near-duplicates inject into the always-pinned system[1] block. Preserves
+ * the historical 12/40 = 0.3 ratio (→ 60 at the default maxEntries of 200).
  */
-const PER_CATEGORY_CONSOLIDATION_THRESHOLD = 12;
+export function perCategoryThreshold(maxEntries: number): number {
+  return Math.ceil(maxEntries * 0.3);
+}
 
 /**
  * Sub-agent sessions are ephemeral (1-3 turns) — evict them faster than
@@ -711,12 +714,17 @@ export function buildIdleWorkHandler(
       }
     }
 
-    // 3. Prune dead knowledge — hard-delete entries that have decayed to/below
-    //    the relevance floor (already invisible everywhere). Local DB-only step,
-    //    so it runs regardless of allowWorker. Keeps the row count and the
-    //    curator's existing-entries context lean.
+    // 3. Knowledge confidence lifecycle (local DB-only, runs regardless of
+    //    allowWorker). Decay first — lower confidence for entries unreinforced
+    //    past the grace window (interval-gated to once/24h per project) — then
+    //    prune anything that has reached the relevance floor. Keeps the row
+    //    count and the curator's existing-entries context lean.
     if (cfg.knowledge.enabled) {
       try {
+        const decayed = ltm.decayProject(projectPath);
+        if (decayed > 0) {
+          log.info(`decayed ${decayed} unreinforced knowledge entries`);
+        }
         const pruned = ltm.pruneDeadEntries(projectPath);
         if (pruned.length > 0) {
           log.info(
@@ -724,7 +732,7 @@ export function buildIdleWorkHandler(
           );
         }
       } catch (e) {
-        log.error("idle dead-entry prune error:", e);
+        log.error("idle knowledge-lifecycle error:", e);
       }
     }
 
@@ -752,9 +760,9 @@ export function buildIdleWorkHandler(
             topCategory = cat;
           }
         }
+        const categoryThreshold = perCategoryThreshold(cfg.curator.maxEntries);
         const globalOver = entries.length > cfg.curator.maxEntries;
-        const categoryOver =
-          topCategoryCount > PER_CATEGORY_CONSOLIDATION_THRESHOLD;
+        const categoryOver = topCategoryCount > categoryThreshold;
         if (globalOver || categoryOver) {
           const cooldown = consolidationCooldown.get(projectId);
           const now = Date.now();
@@ -776,7 +784,7 @@ export function buildIdleWorkHandler(
             log.info(
               globalOver
                 ? `entry count ${entries.length} exceeds maxEntries ${cfg.curator.maxEntries} — running consolidation`
-                : `category "${topCategory}" count ${topCategoryCount} exceeds per-category threshold ${PER_CATEGORY_CONSOLIDATION_THRESHOLD} — running consolidation`,
+                : `category "${topCategory}" count ${topCategoryCount} exceeds per-category threshold ${categoryThreshold} — running consolidation`,
             );
             const beforeCount = entries.length;
             consolidationInProgress.add(projectId);

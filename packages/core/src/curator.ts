@@ -825,18 +825,12 @@ async function runInner(input: {
   // the health state, making sustained parse failures invisible.
   input.workerHealth?.recordSuccess();
 
-  // Gate entry creation when at or above maxEntries to prevent the ratchet
-  // effect: curation creates entries → count exceeds limit → consolidation
-  // can't reduce (all unique) → curation creates more → count grows forever.
-  // When at the limit, only allow update/delete ops. Creates are allowed
-  // again once consolidation (or manual deletion) brings count below limit.
-  const currentEntries = ltm.forProject(input.projectPath, false);
-  const atLimit = currentEntries.length >= cfg.curator.maxEntries;
-  if (atLimit && response.ops.some((op) => op.op === "create")) {
-    log.info(
-      `curation: skipping creates (${currentEntries.length} entries >= maxEntries ${cfg.curator.maxEntries})`,
-    );
-  }
+  // Soft cap (v48): admit creates even at the limit, then evict the lowest-VALUE
+  // tail back down to maxEntries below (see post-applyOps eviction). This breaks
+  // the old ratchet (creates frozen at the cap → consolidation can't reduce a
+  // genuinely-unique set → knowledge base frozen) without relying on an LLM merge
+  // that will never succeed. Eviction ranks by decayed confidence, so a create
+  // weaker than every incumbent self-evicts and nothing valuable is displaced.
 
   // Pre-pass: collapse near-duplicate `preference` creates into updates.
   // The curator re-observes the same behavioral rule each session and re-phrases
@@ -851,7 +845,7 @@ async function runInner(input: {
   const result = applyOps(ops, {
     projectPath: input.projectPath,
     sessionID: input.sessionID,
-    skipCreate: atLimit,
+    skipCreate: false, // soft cap: admit creates, evict the lowest-value tail below
     detectedEntities: response.entities,
     detectedRelations: response.relations,
     workerModel: input.model,
@@ -938,6 +932,19 @@ async function runInner(input: {
     } catch (err) {
       log.warn("post-curation entity dedup failed (non-fatal):", err);
     }
+  }
+
+  // Soft-cap enforcement: after creates and the dedup sweeps settle the count,
+  // evict the lowest-value project-scoped entries back down to maxEntries.
+  const evictedCount = enforceEntryCap(
+    input.projectPath,
+    cfg.curator.maxEntries,
+    result,
+  );
+  if (evictedCount > 0) {
+    log.info(
+      `curation: cap reached (${cfg.curator.maxEntries}) — evicted ${evictedCount} lowest-value entries`,
+    );
   }
 
   const now = Date.now();
@@ -1101,6 +1108,40 @@ export function resetCurationTracker(sessionID?: string) {
  * and the idle scheduler runs subsequent passes as the count drops.
  */
 const CONSOLIDATION_BATCH_SIZE = 50;
+
+/**
+ * Soft-cap enforcement (the eviction half of the decoupled create-gate). When a
+ * project exceeds `maxEntries`, evict the lowest-VALUE project-scoped entries
+ * (decayed confidence, then least-recently reinforced) back down to the cap, and
+ * fold the evictions into `result` (deletes + changedEntries) so session LTM
+ * caches / durable deltas stay consistent — exactly as consolidation deletes do.
+ *
+ * The knowledge base can always admit new high-value knowledge; the confidence
+ * lifecycle (decay + reinforcement) decides what leaves. A freshly-created entry
+ * weaker than every incumbent self-evicts (evictLowestValue ranks it to the
+ * tail), so weak new knowledge never displaces stronger existing knowledge.
+ * Returns the number of entries evicted. Exported for testing.
+ */
+export function enforceEntryCap(
+  projectPath: string,
+  maxEntries: number,
+  result: { deleted: number; changedEntries: ChangedEntry[] },
+): number {
+  const overBy = ltm.forProject(projectPath, false).length - maxEntries;
+  if (overBy <= 0) return 0;
+  const evicted = ltm.evictLowestValue(projectPath, overBy);
+  for (const e of evicted) {
+    result.changedEntries.push({
+      op: "deleted",
+      id: e.id,
+      category: e.category,
+      title: e.title,
+      prevContent: e.content,
+    });
+  }
+  result.deleted += evicted.length;
+  return evicted.length;
+}
 
 /**
  * Consolidation pass: reviews project entries and merges/trims/deletes

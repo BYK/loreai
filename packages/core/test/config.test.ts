@@ -97,14 +97,14 @@ describe("LoreConfig — loreFile schema", () => {
 });
 
 describe("LoreConfig — curator schema", () => {
-  test("curator defaults: enabled=true, onIdle=true, inFlight=false, afterTurns=3, maxEntries=40", () => {
+  test("curator defaults: enabled=true, onIdle=true, inFlight=false, afterTurns=3, maxEntries=200", () => {
     const cfg = LoreConfig.parse({});
     expect(cfg.curator.enabled).toBe(true);
     expect(cfg.curator.onIdle).toBe(true);
     // Off by default: mid-session curation rewrites system[2] and busts cache.
     expect(cfg.curator.inFlight).toBe(false);
     expect(cfg.curator.afterTurns).toBe(3);
-    expect(cfg.curator.maxEntries).toBe(40);
+    expect(cfg.curator.maxEntries).toBe(200);
     expect(cfg.curator.contextTokenBudget).toBe(20000);
   });
 

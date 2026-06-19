@@ -53,16 +53,20 @@ export type KnowledgeEntry = {
   // Nullable for backward compatibility with pre-v35 rows.
   worker_provider_id: string | null;
   worker_model_id: string | null;
+  // Confidence lifecycle (v48): when relevance was last confirmed (injected,
+  // recalled, or curator-reconfirmed). The decay pass uses this to age out
+  // unreinforced entries. Nullable for pre-v48 rows (backfilled to updated_at).
+  last_reinforced_at: number | null;
 };
 
 /** Columns to select for KnowledgeEntry — excludes the embedding BLOB
  *  (4KB per entry) which is only needed by vectorSearch() in embedding.ts. */
 const KNOWLEDGE_COLS =
-  "id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at, metadata, created_by, updated_by, sensitivity, promotion_status, promoted_at, approval_status, approved_by, approved_at, source_user_id, source_entry_id, last_accessed_at, worker_provider_id, worker_model_id";
+  "id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at, metadata, created_by, updated_by, sensitivity, promotion_status, promoted_at, approval_status, approved_by, approved_at, source_user_id, source_entry_id, last_accessed_at, worker_provider_id, worker_model_id, last_reinforced_at";
 
 /** Same columns with table alias prefix for use in JOIN queries. */
 const KNOWLEDGE_COLS_K =
-  "k.id, k.project_id, k.category, k.title, k.content, k.source_session, k.cross_project, k.confidence, k.created_at, k.updated_at, k.metadata, k.created_by, k.updated_by, k.sensitivity, k.promotion_status, k.promoted_at, k.approval_status, k.approved_by, k.approved_at, k.source_user_id, k.source_entry_id, k.last_accessed_at, k.worker_provider_id, k.worker_model_id";
+  "k.id, k.project_id, k.category, k.title, k.content, k.source_session, k.cross_project, k.confidence, k.created_at, k.updated_at, k.metadata, k.created_by, k.updated_by, k.sensitivity, k.promotion_status, k.promoted_at, k.approval_status, k.approved_by, k.approved_at, k.source_user_id, k.source_entry_id, k.last_accessed_at, k.worker_provider_id, k.worker_model_id, k.last_reinforced_at";
 
 export function create(input: {
   projectPath?: string;
@@ -162,8 +166,8 @@ export function create(input: {
     input.confidence != null ? Math.max(0, Math.min(1, input.confidence)) : 1.0;
   db()
     .query(
-      `INSERT INTO knowledge (id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at, created_by, sensitivity, worker_provider_id, worker_model_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO knowledge (id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at, created_by, sensitivity, worker_provider_id, worker_model_id, last_reinforced_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -180,6 +184,7 @@ export function create(input: {
       input.sensitivity ?? "normal",
       input.workerProviderID ?? null,
       input.workerModelID ?? null,
+      now, // last_reinforced_at — a fresh entry starts its decay clock now
     );
 
   // Fire-and-forget: embed for vector search (errors logged, never thrown)
@@ -291,8 +296,13 @@ export function update(
     sets.push("sensitivity = ?");
     params.push(input.sensitivity);
   }
+  const now = Date.now();
   sets.push("updated_at = ?");
-  params.push(Date.now());
+  params.push(now);
+  // Any update is a re-confirmation (curator edit, dedup-merge, .lore.md import)
+  // → reset the decay clock so a freshly-touched entry never ages out (v48).
+  sets.push("last_reinforced_at = ?");
+  params.push(now);
   params.push(id);
   db()
     .query(`UPDATE knowledge SET ${sets.join(", ")} WHERE id = ?`)
@@ -653,6 +663,122 @@ export function forCurator(
     used += cost;
   }
   return all.filter((e) => keep.has(e.id));
+}
+
+// ---------------------------------------------------------------------------
+// Confidence lifecycle (v48): reinforcement, decay, value-based eviction
+// ---------------------------------------------------------------------------
+
+/** Confidence boost applied when an entry is explicitly re-confirmed. */
+export const REINFORCE_STEP = 0.05;
+/** Min interval between decay passes per project (rate-stable decrement). */
+export const DECAY_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24h
+/** An entry must be unreinforced for this long before it starts decaying. */
+export const DECAY_GRACE_MS = 7 * 24 * 60 * 60 * 1000; // 7d
+/** Confidence removed per decay pass for an unreinforced entry. */
+export const DECAY_STEP = 0.1;
+
+/**
+ * Mark entries as injected into a prompt this turn: reset the decay clock
+ * WITHOUT changing confidence. Selection by forSession means "still relevant",
+ * not "more certain" — bumping confidence every turn would re-flatten all
+ * entries to 1.0 and destroy the decay signal that makes confidence a real
+ * value ranking. Single batched UPDATE; safe to call on the hot path.
+ */
+export function markInjected(ids: string[]): void {
+  if (ids.length === 0) return;
+  const placeholders = ids.map(() => "?").join(",");
+  db()
+    .query(
+      `UPDATE knowledge SET last_reinforced_at = ? WHERE id IN (${placeholders})`,
+    )
+    .run(Date.now(), ...ids);
+}
+
+/**
+ * Reinforce an entry: adjust confidence by `delta` (clamped to [0,1]) and reset
+ * the decay clock. Positive delta = the entry was re-confirmed (curator re-saw
+ * it, a dedup-merge landed on it); a future negative delta expresses staleness
+ * (#627: a cited file changed) without deleting. Extension point for outcome
+ * reward (#497: test/build pass → boost).
+ */
+export function reinforce(id: string, delta: number = REINFORCE_STEP): void {
+  db()
+    .query(
+      `UPDATE knowledge
+       SET confidence = MAX(0, MIN(1, confidence + ?)), last_reinforced_at = ?
+       WHERE id = ?`,
+    )
+    .run(delta, Date.now(), id);
+}
+
+/**
+ * Idle decay pass for one project. Lowers confidence by DECAY_STEP for
+ * project-scoped entries that have been unreinforced (not injected / recalled /
+ * re-confirmed) for longer than DECAY_GRACE_MS, so genuinely unused knowledge
+ * ages toward the relevance floor (then `pruneDeadEntries` reaps it) while
+ * regularly-injected knowledge never decays.
+ *
+ * Gated to once per DECAY_INTERVAL_MS per project via `projects.last_decay_at`,
+ * so the per-pass decrement is rate-stable regardless of idle-tick frequency.
+ * Cross-project/global entries are never decayed by a single project. Returns
+ * the number of entries decayed (0 when the interval gate blocks the run).
+ */
+export function decayProject(
+  projectPath: string,
+  now: number = Date.now(),
+): number {
+  const pid = ensureProject(projectPath);
+  const proj = db()
+    .query("SELECT last_decay_at FROM projects WHERE id = ?")
+    .get(pid) as { last_decay_at: number | null } | null;
+  const lastDecay = proj?.last_decay_at ?? 0;
+  if (now - lastDecay < DECAY_INTERVAL_MS) return 0; // interval gate
+
+  const cutoff = now - DECAY_GRACE_MS;
+  const res = db()
+    .query(
+      `UPDATE knowledge
+       SET confidence = MAX(0, confidence - ?)
+       WHERE project_id = ?
+         AND COALESCE(last_reinforced_at, updated_at) < ?`,
+    )
+    .run(DECAY_STEP, pid, cutoff) as { changes?: number | bigint };
+  db()
+    .query("UPDATE projects SET last_decay_at = ? WHERE id = ?")
+    .run(now, pid);
+  return Number(res.changes ?? 0);
+}
+
+/**
+ * Value-based eviction backstop. Deletes the `count` lowest-VALUE project-scoped
+ * entries — ranked by confidence ASC, then last_reinforced_at ASC (least
+ * confident, then least-recently reinforced). Confidence is the decayed value
+ * (the decay pass mutates it in place), so this evicts what the lifecycle has
+ * already judged least valuable. Cross-project/global entries are never evicted
+ * by a single project. `remove()` tombstones each id. Returns the evicted rows
+ * (for the changed-entries / delta channel).
+ *
+ * Self-correcting at the cap: a freshly-created entry less confident than every
+ * incumbent sorts to the tail and evicts itself, so weak new knowledge never
+ * displaces stronger existing knowledge.
+ */
+export function evictLowestValue(
+  projectPath: string,
+  count: number,
+): KnowledgeEntry[] {
+  if (count <= 0) return [];
+  const pid = ensureProject(projectPath);
+  const victims = db()
+    .query(
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge
+       WHERE project_id = ?
+       ORDER BY confidence ASC, COALESCE(last_reinforced_at, updated_at) ASC
+       LIMIT ?`,
+    )
+    .all(pid, count) as KnowledgeEntry[];
+  for (const e of victims) remove(e.id);
+  return victims;
 }
 
 type Scored = { entry: KnowledgeEntry; score: number };
@@ -1132,6 +1258,7 @@ export async function forSession(
         last_accessed_at: null,
         worker_provider_id: null,
         worker_model_id: null,
+        last_reinforced_at: null,
       });
       used += cost;
     }
@@ -1154,6 +1281,18 @@ export async function forSession(
     }
   } catch (err) {
     log.warn("forSession: transfer recording failed (non-fatal):", err);
+  }
+
+  // --- 8. Reinforce injected entries (confidence lifecycle) ---
+  // Being selected for the prompt resets each entry's decay clock — it is "still
+  // relevant" — WITHOUT bumping confidence (that would re-flatten everything to
+  // 1.0 and destroy the decay signal). lat.md synthetics are not knowledge rows.
+  try {
+    markInjected(
+      result.filter((e) => e.category !== "lat.md").map((e) => e.id),
+    );
+  } catch (err) {
+    log.warn("forSession: reinforcement failed (non-fatal):", err);
   }
 
   return result;

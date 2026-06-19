@@ -16,6 +16,7 @@ import {
   buildIdleWorkHandler,
   touchSession,
   consolidationCooldownActive,
+  perCategoryThreshold,
   CONSOLIDATION_COOLDOWN_MS,
   CONSOLIDATION_REATTEMPT_GROWTH,
 } from "../src/idle";
@@ -169,6 +170,14 @@ describe("consolidationCooldownActive", () => {
     expect(
       consolidationCooldownActive(cd, now + CONSOLIDATION_COOLDOWN_MS, 50, 14),
     ).toBe(false);
+  });
+});
+
+describe("perCategoryThreshold", () => {
+  test("is proportional to maxEntries (0.3 ratio), preserving the historical 12/40", () => {
+    expect(perCategoryThreshold(40)).toBe(12);
+    expect(perCategoryThreshold(200)).toBe(60);
+    expect(perCategoryThreshold(100)).toBe(30);
   });
 });
 

@@ -61,16 +61,27 @@ const ROW_SEP = "\x1f";
 
 /**
  * Volatile / local-only columns never sent over the wire: BLOB `embedding`
- * (re-derived on restore) and `last_accessed_at` (per-machine access tracking).
+ * (re-derived on restore), `last_accessed_at` and `last_reinforced_at`
+ * (per-machine access / reinforcement tracking — the synced `confidence` already
+ * carries the meaningful decayed state).
  */
-const PAYLOAD_EXCLUDE = new Set(["embedding", "last_accessed_at"]);
+const PAYLOAD_EXCLUDE = new Set([
+  "embedding",
+  "last_accessed_at",
+  "last_reinforced_at",
+]);
 /**
  * Columns excluded from the content hash: the non-synced ones above plus
  * `updated_at` (a fresh timestamp is not a semantic change). Intentionally a
  * denylist of volatile/local columns; if cross-tenant dedup is ever needed,
  * switch to an explicit per-table semantic allowlist.
  */
-const HASH_EXCLUDE = new Set(["embedding", "last_accessed_at", "updated_at"]);
+const HASH_EXCLUDE = new Set([
+  "embedding",
+  "last_accessed_at",
+  "last_reinforced_at",
+  "updated_at",
+]);
 
 export const SYNCED_TABLES: Record<SyncTier, SyncTableMeta[]> = {
   basic: [

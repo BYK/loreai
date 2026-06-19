@@ -310,13 +310,16 @@ export const LoreConfig = z.object({
         .min(1)
         .default(3)
         .describe("Minimum turns between curator runs. Default: 3."),
-      /** Max knowledge entries per project before consolidation triggers. Default: 40. */
+      /** Per-project entry ceiling enforced by value-based eviction. Default: 200. */
       maxEntries: z
         .number()
         .min(10)
-        .default(40)
+        .default(200)
         .describe(
-          "Max knowledge entries per project before consolidation. Default: 40.",
+          "Per-project knowledge entry ceiling. A generous backstop, not a " +
+            "quality gate: injection is already token-budget-capped, and the " +
+            "confidence lifecycle (decay + reinforcement) governs what stays. " +
+            "When exceeded, the lowest-value entries are evicted. Default: 200.",
         ),
       /** Token budget for the curator's existing-entries context. Default: 20000. */
       contextTokenBudget: z
@@ -335,7 +338,7 @@ export const LoreConfig = z.object({
       onIdle: true,
       inFlight: false,
       afterTurns: 3,
-      maxEntries: 40,
+      maxEntries: 200,
       contextTokenBudget: 20000,
     })
     .describe("Curator scheduling and consolidation thresholds."),
