@@ -98,6 +98,14 @@ const POLL_INTERVAL_MS = 30_000;
 export const GLOBAL_DEAD_SWEEP_INTERVAL_MS = 60 * 60 * 1000; // 1h
 
 /**
+ * Max entries the global sweep reaps per tick — bounds the synchronous delete
+ * loop so a pathological mass-decay backlog can't stall the proxy event loop.
+ * When a tick fills this batch, the gate is reset so the remainder drains on the
+ * next tick (every ~30s) instead of waiting the full interval.
+ */
+const GLOBAL_DEAD_SWEEP_BATCH = 1000;
+
+/**
  * Cooldown tracking for knowledge consolidation.
  *
  * When consolidation runs but fails to reduce entries below maxEntries
@@ -225,14 +233,19 @@ export function startIdleScheduler(
       loreConfig().knowledge.enabled &&
       now - lastGlobalDeadSweepAt >= GLOBAL_DEAD_SWEEP_INTERVAL_MS
     ) {
+      // Arm the gate BEFORE the work so a throw can't cause a per-tick retry
+      // storm (matches the consolidation cooldown pattern).
       lastGlobalDeadSweepAt = now;
       try {
-        const pruned = ltm.pruneDeadEntriesAllProjects();
+        const pruned = ltm.pruneDeadEntriesAllProjects(GLOBAL_DEAD_SWEEP_BATCH);
         if (pruned.length > 0) {
           log.info(
             `global sweep: pruned ${pruned.length} dead knowledge entries across all projects`,
           );
         }
+        // Filled the batch → more dead rows likely remain; drain on the next
+        // tick instead of waiting the full interval (re-open the gate).
+        if (pruned.length >= GLOBAL_DEAD_SWEEP_BATCH) lastGlobalDeadSweepAt = 0;
       } catch (e) {
         log.error("global dead-entry sweep error:", e);
       }

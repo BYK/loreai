@@ -589,4 +589,39 @@ describe("startIdleScheduler", () => {
       vi.useRealTimers();
     }
   });
+
+  test("the global sweep is interval-gated: a second tick within the hour does not re-run", async () => {
+    vi.useFakeTimers();
+    try {
+      const stop = startIdleScheduler(
+        makeConfig(),
+        new Map<string, SessionState>(),
+        async () => {},
+      );
+      // First tick runs the sweep and arms the 1h gate.
+      await vi.advanceTimersByTimeAsync(31_000);
+
+      // A new zombie appears AFTER the first sweep.
+      const id = ltm.create({
+        projectPath: "/test/idle/global-sweep-gate",
+        category: "gotcha",
+        title: "Late zombie",
+        content: "x",
+        scope: "project",
+      });
+      ltm.update(id, { confidence: 0 });
+
+      // Another tick within the interval must NOT sweep (gate still active).
+      await vi.advanceTimersByTimeAsync(31_000);
+      expect(ltm.get(id)).not.toBeNull();
+
+      // Once the interval elapses, the next tick reaps it.
+      await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+      expect(ltm.get(id)).toBeNull();
+
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

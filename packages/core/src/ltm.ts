@@ -612,14 +612,18 @@ export function pruneDeadEntries(projectPath: string): KnowledgeEntry[] {
  * sweep clears those. Same safety rule applies — only EXCLUSIVELY project-owned
  * rows (`cross_project = 0`) are eligible; shared/global knowledge is never
  * touched. `remove()` tombstones each id. Returns the pruned entries.
+ *
+ * `limit` bounds the per-pass delete count so a future mass-decay can never run
+ * an unbounded synchronous delete loop on the caller's event loop; the caller
+ * re-runs until the backlog clears. The default `-1` is SQLite's "no limit".
  */
-export function pruneDeadEntriesAllProjects(): KnowledgeEntry[] {
+export function pruneDeadEntriesAllProjects(limit = -1): KnowledgeEntry[] {
   const dead = db()
     .query(
       `SELECT ${KNOWLEDGE_COLS} FROM knowledge
-       WHERE cross_project = 0 AND confidence <= ?`,
+       WHERE cross_project = 0 AND confidence <= ? LIMIT ?`,
     )
-    .all(DEAD_CONFIDENCE_FLOOR) as KnowledgeEntry[];
+    .all(DEAD_CONFIDENCE_FLOOR, limit) as KnowledgeEntry[];
   for (const e of dead) remove(e.id);
   return dead;
 }

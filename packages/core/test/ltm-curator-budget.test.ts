@@ -179,6 +179,25 @@ describe("ltm.pruneDeadEntriesAllProjects", () => {
     });
     expect(ltm.pruneDeadEntriesAllProjects()).toHaveLength(0);
   });
+
+  test("respects the per-pass limit, draining the backlog over multiple calls", () => {
+    for (let i = 0; i < 5; i++) {
+      const id = ltm.create({
+        projectPath: PROJECT,
+        category: "gotcha",
+        title: `Dead ${i}`,
+        content: "x",
+        scope: "project",
+      });
+      ltm.update(id, { confidence: 0.0 });
+    }
+    // First bounded pass reaps at most `limit`; the rest survive for later passes.
+    expect(ltm.pruneDeadEntriesAllProjects(2)).toHaveLength(2);
+    expect(ltm.pruneDeadEntriesAllProjects(2)).toHaveLength(2);
+    // Remainder drains; then it's a no-op.
+    expect(ltm.pruneDeadEntriesAllProjects(2)).toHaveLength(1);
+    expect(ltm.pruneDeadEntriesAllProjects(2)).toHaveLength(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
