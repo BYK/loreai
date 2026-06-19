@@ -548,6 +548,28 @@ describe("profiles (pull-only mirror)", () => {
     ).toBe(false);
   });
 
+  test("a local profiles row does NOT wedge the outbox prune floor at 0", async () => {
+    // Pre-populate the mirror, THEN enable: reconcile/seedOutbox must not enqueue
+    // profiles. If they did, pushOnce would skip the (never-advancing) profiles
+    // entry, pinning minCursor=0 and permanently disabling outbox pruning for ALL
+    // tables. Pushing knowledge must still reclaim its outbox rows.
+    db()
+      .query(
+        "INSERT INTO profiles (id, tier, created_at, updated_at) VALUES ('u1','pro',?,?)",
+      )
+      .run(now(), now());
+    syncData.enableSync("basic");
+    insertKnowledge("k1", "hello");
+    await pushOnce(makeClient() as never);
+    expect(
+      syncData.readOutbox(0, 1000).filter((e) => e.table_name === "knowledge")
+        .length,
+    ).toBe(0); // pruned — not wedged by a profiles entry
+    expect(
+      syncData.readOutbox(0).some((e) => e.table_name === "profiles"),
+    ).toBe(false);
+  });
+
   test("pullOnce mirrors the remote row and resolves the plan tier", async () => {
     syncData.enableSync("basic");
     seedRemoteProfile("pro", 2_000_000);

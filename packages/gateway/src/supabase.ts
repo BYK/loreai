@@ -20,7 +20,12 @@ import {
   type Session,
   type SupabaseClient,
 } from "@supabase/supabase-js";
-import { deleteTeamConfig, getTeamConfig, setTeamConfig } from "@loreai/core";
+import {
+  deleteTeamConfig,
+  getTeamConfig,
+  setTeamConfig,
+  syncData,
+} from "@loreai/core";
 
 /** Public project URL. Build-time default → Folk Lore's project; env override. */
 export const SUPABASE_URL =
@@ -68,12 +73,24 @@ export function loadPersistedSession(): PersistedSession | null {
 
 /** Persist (or replace) the auth session. */
 export function persistSession(session: PersistedSession): void {
+  const prev = loadPersistedSession();
+  // Account switch (different user_id) — drop the previous user's pulled profile
+  // mirror so currentTier() can't report the prior account's tier and the new
+  // account's profile is re-pulled fresh. A token refresh (same user_id) keeps
+  // the mirror intact.
+  if (prev && prev.user_id !== session.user_id) {
+    syncData.clearProfileMirror();
+  }
   setTeamConfig(SESSION_KEY, JSON.stringify(session));
 }
 
 /** Remove any persisted session (logout). */
 export function clearSession(): void {
   deleteTeamConfig(SESSION_KEY);
+  // The mirrored plan tier is server-authoritative; it must not survive a
+  // sign-out (otherwise currentTier() would keep reporting the logged-out
+  // user's tier until a future login + pull).
+  syncData.clearProfileMirror();
 }
 
 /** True when a session is persisted locally. Does NOT verify with the server. */

@@ -82,9 +82,12 @@ export async function pushOnce(client: SupabaseClient): Promise<SyncResult> {
   // the lowest such cursor) — the outbox is otherwise append-only. A table with
   // no entries must NOT pin the floor at its cursor 0, which would block all
   // pruning forever (the common case: a project with knowledge but no relations).
+  // Pull-only tables are never pushed, so their cursor never advances past 0 —
+  // exclude them too (defense-in-depth: nothing should enqueue them, but if a
+  // stray entry existed it must not wedge the prune floor at 0).
   const cursors = syncData
     .syncedTables("basic")
-    .filter((m) => syncData.hasOutboxEntries(m.table))
+    .filter((m) => !m.pullOnly && syncData.hasOutboxEntries(m.table))
     .map((m) => Number(getKV(pushKey(m.table)) ?? "0"));
   if (cursors.length > 0) {
     const minCursor = Math.min(...cursors);

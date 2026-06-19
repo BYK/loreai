@@ -18,6 +18,7 @@ vi.mock("@supabase/supabase-js", () => ({
   },
 }));
 
+import { db, syncData } from "@loreai/core";
 import {
   clearSession,
   getAuthedClient,
@@ -177,5 +178,44 @@ describe("getAuthedClient / getCurrentUser", () => {
       error: { message: "bad jwt" },
     });
     expect(await getCurrentUser({ verify: true })).toBeNull();
+  });
+});
+
+describe("profile mirror lifecycle (tier must not leak across sessions)", () => {
+  function seedProfile(tier: string): void {
+    db()
+      .query(
+        "INSERT INTO profiles (id, tier, created_at, updated_at) VALUES ('u-mirror', ?, ?, ?)",
+      )
+      .run(tier, Date.now(), Date.now());
+  }
+
+  beforeEach(() => {
+    db().exec("DELETE FROM profiles");
+    clearSession();
+    db().exec("DELETE FROM profiles"); // clearSession also clears it — reset again
+  });
+
+  test("clearSession() drops the pulled profile mirror (no tier residue after logout)", () => {
+    persistSession(SAMPLE);
+    seedProfile("pro");
+    expect(syncData.currentTier()).toBe("pro");
+    clearSession();
+    expect(syncData.currentTier()).toBe("free");
+  });
+
+  test("persistSession() clears the mirror on an account switch (different user_id)", () => {
+    persistSession(SAMPLE); // user-123
+    seedProfile("pro");
+    expect(syncData.currentTier()).toBe("pro");
+    persistSession({ ...SAMPLE, user_id: "user-999" });
+    expect(syncData.currentTier()).toBe("free"); // prior account's tier dropped
+  });
+
+  test("persistSession() KEEPS the mirror on a token refresh (same user_id)", () => {
+    persistSession(SAMPLE);
+    seedProfile("pro");
+    persistSession({ ...SAMPLE, access_token: "at-refreshed" });
+    expect(syncData.currentTier()).toBe("pro"); // refresh must not wipe the tier
   });
 });

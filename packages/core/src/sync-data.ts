@@ -20,6 +20,7 @@ import {
   db,
   deleteTeamConfig,
   getTeamConfig,
+  setKV,
   setTeamConfig,
   withSyncApplying,
 } from "./db";
@@ -211,10 +212,30 @@ export function syncedTables(tier: SyncTier = "basic"): SyncTableMeta[] {
  * propagates here on the next pull (no bespoke "did I become pro?" path).
  */
 export function currentTier(): string {
+  // INVARIANT: the mirror holds AT MOST the currently-authenticated user's row.
+  // `clearProfileMirror()` is called on logout and on account switch, so a stale
+  // OR foreign account's tier can never linger here — making this unqualified
+  // `LIMIT 1` deterministic and safe (RLS already guarantees a pull returns only
+  // the caller's own profile, so the network path never adds a second row).
   const row = db().query("SELECT tier FROM profiles LIMIT 1").get() as
     | { tier?: string }
     | undefined;
   return row?.tier ?? "free";
+}
+
+/**
+ * Drop the pulled `profiles` mirror (row + its sync_state + pull cursor). Called
+ * when the authenticated identity changes — logout or account switch — so the
+ * server-authoritative plan tier can never survive a sign-out or leak across
+ * accounts (see `currentTier`'s single-row invariant). The next sync re-pulls
+ * the current account's profile from scratch.
+ */
+export function clearProfileMirror(): void {
+  db().exec("DELETE FROM profiles");
+  db().query("DELETE FROM sync_state WHERE table_name = 'profiles'").run();
+  // Reset the pull cursor so the (new) account's profile is re-pulled from the
+  // start rather than skipped by a cursor inherited from the previous account.
+  setKV("sync.pull.profiles", "0|");
 }
 
 function meta(table: string): SyncTableMeta {
@@ -412,6 +433,10 @@ function rowIdExpr(m: SyncTableMeta): string {
 export function seedOutbox(tier: SyncTier = "basic"): void {
   const now = Date.now();
   for (const m of syncedTables(tier)) {
+    // Pull-only tables are never pushed — enqueuing them would create outbox
+    // entries that pushOnce skips forever, pinning their push cursor at 0 and
+    // (via the prune floor) permanently disabling outbox pruning for ALL tables.
+    if (m.pullOnly) continue;
     const idExpr = rowIdExpr(m);
     db()
       .query(
@@ -437,6 +462,9 @@ export function reconcile(tier: SyncTier = "basic"): void {
   const now = Date.now();
   seedOutbox(tier);
   for (const m of syncedTables(tier)) {
+    // Pull-only tables are never pushed (see seedOutbox) — also skip the
+    // delete-tombstone reconciliation so no `profiles` outbox entry is created.
+    if (m.pullOnly) continue;
     const idExpr = rowIdExpr(m);
     db()
       .query(

@@ -1,9 +1,17 @@
 import { describe, test, expect, beforeEach } from "vitest";
-import { db, ensureProject, setTeamConfig, deleteTeamConfig } from "../src/db";
+import {
+  db,
+  ensureProject,
+  getKV,
+  setKV,
+  setTeamConfig,
+  deleteTeamConfig,
+} from "../src/db";
 import {
   applyRemoteDelete,
   applyRemoteUpsert,
   classifyRemoteRow,
+  clearProfileMirror,
   contentHash,
   currentTier,
   disableSync,
@@ -209,6 +217,36 @@ describe("profiles pull-only mirror", () => {
     expect(currentTier()).toBe("pro");
     const row = getRowById("profiles", "u1") as Record<string, unknown>;
     expect(row.github_login).toBe("octocat");
+  });
+
+  test("seedOutbox/reconcile NEVER enqueue a pull-only table with a local row (prune-floor wedge guard)", () => {
+    // The mirror already holds a row (e.g. pulled in a prior session) BEFORE
+    // sync is (re-)enabled — the disable→enable path the capture-trigger
+    // exclusion does NOT cover. Enqueuing it would create an entry pushOnce
+    // skips forever, pinning the prune floor at 0 for ALL tables.
+    insertProfile("u1", "pro");
+    seedOutbox();
+    expect(outboxFor("profiles")).toHaveLength(0);
+    enableSync(); // reconcile path (seed + delete-tombstone reconciliation)
+    expect(outboxFor("profiles")).toHaveLength(0);
+  });
+
+  test("clearProfileMirror drops the row, its sync_state, and resets the pull cursor", () => {
+    insertProfile("u1", "pro");
+    setSyncState("profiles", "u1", {
+      content_hash: null,
+      revision: 0,
+      remote_updated_at: "x",
+    });
+    setKV("sync.pull.profiles", "999|u1");
+    expect(currentTier()).toBe("pro");
+
+    clearProfileMirror();
+
+    expect(currentTier()).toBe("free");
+    expect(getRowById("profiles", "u1")).toBeNull();
+    expect(getSyncState("profiles", "u1")).toBeNull();
+    expect(getKV("sync.pull.profiles")).toBe("0|");
   });
 });
 
