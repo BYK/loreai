@@ -50,6 +50,29 @@ describe("ltm.pruneDeadEntries", () => {
     expect(ltm.get(alive)).not.toBeNull();
   });
 
+  test("never prunes a promoted cross-project entry that kept its origin project_id (Seer #815)", () => {
+    // Promotion (promoteCrossProject) flips cross_project = 1 in place, keeping
+    // the origin project_id. A decayed promoted entry must NOT be reaped by its
+    // origin project — that would delete shared knowledge for everyone.
+    const promoted = ltm.create({
+      projectPath: PROJECT,
+      category: "preference",
+      title: "Promoted shared",
+      content: "x",
+      scope: "project",
+    });
+    db()
+      .query(
+        "UPDATE knowledge SET cross_project = 1, confidence = 0.1 WHERE id = ?",
+      )
+      .run(promoted);
+
+    const pruned = ltm.pruneDeadEntries(PROJECT);
+
+    expect(pruned).toHaveLength(0);
+    expect(ltm.get(promoted)).not.toBeNull();
+  });
+
   test("never touches other-project or cross-project (global) dead entries", () => {
     const otherDead = ltm.create({
       projectPath: OTHER,

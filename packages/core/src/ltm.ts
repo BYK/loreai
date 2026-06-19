@@ -575,8 +575,11 @@ export const DEAD_CONFIDENCE_FLOOR = 0.2;
  * relevance floor (`confidence <= DEAD_CONFIDENCE_FLOOR`). They contribute
  * nothing (already filtered everywhere) and only bloat the row count and the
  * curator's existing-entries context. `remove()` tombstones each id so a stale
- * `.lore.md` re-import can't resurrect it. Restricted to PROJECT-SCOPED rows:
- * cross-project/global entries are shared and must not be reaped by one project.
+ * `.lore.md` re-import can't resurrect it. Restricted to EXCLUSIVELY
+ * project-owned rows (`cross_project = 0`): a cross-project entry keeps its
+ * origin `project_id` after promotion (promoteCrossProject flips the flag in
+ * place), so filtering on `project_id` alone would let a single project delete
+ * shared knowledge if its confidence decayed (Seer review, PR #815).
  * Returns the pruned entries (for op-log / metrics).
  */
 export function pruneDeadEntries(projectPath: string): KnowledgeEntry[] {
@@ -584,7 +587,7 @@ export function pruneDeadEntries(projectPath: string): KnowledgeEntry[] {
   const dead = db()
     .query(
       `SELECT ${KNOWLEDGE_COLS} FROM knowledge
-       WHERE project_id = ? AND confidence <= ?`,
+       WHERE project_id = ? AND cross_project = 0 AND confidence <= ?`,
     )
     .all(pid, DEAD_CONFIDENCE_FLOOR) as KnowledgeEntry[];
   for (const e of dead) remove(e.id);
