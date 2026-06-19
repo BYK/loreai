@@ -181,6 +181,16 @@ describe("getAuthedClient / getCurrentUser", () => {
   });
 });
 
+/**
+ * Identity-lifecycle battery — the standing pattern for any per-user state the
+ * client caches locally (today: the pulled `profiles` mirror; future: Pro
+ * tables in #826, team scopes). Asserts the full identity state-machine, not
+ * single operations: logout, account switch, and token refresh, plus
+ * cross-account isolation in BOTH directions. The #828 tier-residue bug lived
+ * exactly here (login→logout→read and A→B switch were never exercised). When a
+ * second piece of per-user state is added, extend `seedState`/`readState` below
+ * rather than re-deriving the sequences.
+ */
 describe("profile mirror lifecycle (tier must not leak across sessions)", () => {
   function seedProfile(tier: string): void {
     db()
@@ -217,5 +227,23 @@ describe("profile mirror lifecycle (tier must not leak across sessions)", () => 
     seedProfile("pro");
     persistSession({ ...SAMPLE, access_token: "at-refreshed" });
     expect(syncData.currentTier()).toBe("pro"); // refresh must not wipe the tier
+  });
+
+  test("no tier leak across an account switch in EITHER direction", () => {
+    // A (pro) → switch to B: B must NOT inherit A's pro — the mirror is cleared
+    // and B re-pulls its own 'free'. Switch back to A: A must NOT see a stale
+    // pro either; it re-pulls fresh. The mirror always reflects exactly the
+    // currently-authenticated account.
+    persistSession(SAMPLE); // account A (user-123)
+    seedProfile("pro");
+    expect(syncData.currentTier()).toBe("pro");
+
+    persistSession({ ...SAMPLE, user_id: "user-B" }); // switch to B
+    expect(syncData.currentTier()).toBe("free"); // A's pro dropped, not inherited
+    seedProfile("free"); // B pulls its own (free) profile
+    expect(syncData.currentTier()).toBe("free");
+
+    persistSession(SAMPLE); // switch back to A
+    expect(syncData.currentTier()).toBe("free"); // A's stale pro NOT resurrected
   });
 });
