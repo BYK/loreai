@@ -213,9 +213,11 @@ describe("buildIdleWorkHandler", () => {
     const llm = makeLLM(); // prompt() returns null → consolidation is a no-op
     const handler = buildIdleWorkHandler(llm);
     const projectPath = makeProjectDir();
-    // Seed enough single-category entries to exceed the per-category
-    // consolidation threshold (12) AND the global cap (40) on this branch.
-    for (let i = 0; i < 61; i++) {
+    // Seed one category well past the per-category consolidation threshold so
+    // the consolidation block fires regardless of the threshold/cap values on
+    // whichever branch of the stack runs this (they grow up the stack). 75
+    // comfortably clears the largest per-category threshold in the stack.
+    for (let i = 0; i < 75; i++) {
       ltm.create({
         projectPath,
         category: "preference",
@@ -245,11 +247,12 @@ describe("buildIdleWorkHandler", () => {
 
   test("consolidation that makes progress deletes the entry and clears the cooldown", async () => {
     const projectPath = makeProjectDir();
-    // 60 full-confidence entries plus one low-confidence target. The target
-    // (lowest confidence) is always in the consolidation set on every branch —
-    // whether the global batched path (lowest-confidence tail) or the
+    // 74 full-confidence entries plus one low-confidence target (75 total, well
+    // past the largest per-category threshold in the stack). The target, being
+    // the lowest confidence, is always in the consolidation set on every branch
+    // — whether the global batched path (lowest-confidence tail) or the
     // category-focused path (whole category) is taken.
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 74; i++) {
       ltm.create({
         projectPath,
         category: "preference",
