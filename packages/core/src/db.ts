@@ -1217,6 +1217,25 @@ const MIGRATIONS: string[] = [
   UPDATE knowledge SET last_reinforced_at = updated_at WHERE last_reinforced_at IS NULL;
   ALTER TABLE projects ADD COLUMN last_decay_at INTEGER;
   `,
+  `
+  -- Version 49: local mirror of the remote 'profiles' row (pull-only sync).
+  -- The remote profiles table (supabase/migrations/0001 + tier from 0003) is
+  -- server-authoritative account data the client may only READ — billing flips
+  -- 'tier' (free→pro) via service_role; the client never writes it. This single-
+  -- row mirror is populated by the sync PULL path (pull-only: no outbox capture
+  -- trigger, never pushed) so the gateway can resolve the user's plan tier
+  -- locally (currentTier()) without a round-trip. timestamps are epoch ms (the
+  -- pull path converts the remote timestamptz to ms, same as every synced table).
+  CREATE TABLE IF NOT EXISTS profiles (
+    id           TEXT PRIMARY KEY,
+    tier         TEXT NOT NULL DEFAULT 'free',
+    github_login TEXT,
+    display_name TEXT,
+    email        TEXT,
+    created_at   INTEGER,
+    updated_at   INTEGER
+  );
+  `,
 ];
 
 /**

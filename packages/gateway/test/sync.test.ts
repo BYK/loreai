@@ -273,6 +273,7 @@ beforeEach(() => {
   db().exec("DELETE FROM temp._sync_applying");
   db().exec("DELETE FROM knowledge");
   db().exec("DELETE FROM entities");
+  db().exec("DELETE FROM profiles");
   db().exec("DELETE FROM sync_outbox");
   db().exec("DELETE FROM sync_state");
   db().exec("DELETE FROM sync_conflicts");
@@ -282,6 +283,7 @@ beforeEach(() => {
     "entity_aliases",
     "entity_relations",
     "knowledge_entity_refs",
+    "profiles",
   ]) {
     setKV(`sync.push.${t}`, "0");
     setKV(`sync.pull.${t}`, "0|");
@@ -511,6 +513,69 @@ describe("pullOnce", () => {
       .query("SELECT local_content FROM sync_conflicts WHERE row_id='kc'")
       .get() as { local_content: string };
     expect(JSON.parse(row.local_content).content).toBe("local-edit");
+  });
+});
+
+describe("profiles (pull-only mirror)", () => {
+  function seedRemoteProfile(tier: string, atMs: number): void {
+    // Remote profiles has NO content_hash/revision/owner column — it is
+    // server-authoritative and unversioned (mirrors supabase 0001 + tier 0003).
+    tableRows("profiles").push({
+      id: "u1",
+      tier,
+      github_login: "octocat",
+      display_name: "Octo Cat",
+      email: "octo@cat.dev",
+      created_at: new Date(atMs).toISOString(),
+      updated_at: new Date(atMs).toISOString(),
+    } as never);
+  }
+
+  test("pushOnce never uploads profiles (pull-only, no capture)", async () => {
+    syncData.enableSync("basic");
+    // Even a direct local write can't be pushed: there's no capture trigger and
+    // pushOnce skips pull-only tables.
+    db()
+      .query(
+        "INSERT INTO profiles (id, tier, created_at, updated_at) VALUES ('u1','pro',?,?)",
+      )
+      .run(now(), now());
+    const r = await pushOnce(makeClient() as never);
+    expect(r.pushed).toBe(0);
+    expect(tableRows("profiles")).toHaveLength(0);
+    expect(
+      syncData.readOutbox(0).some((e) => e.table_name === "profiles"),
+    ).toBe(false);
+  });
+
+  test("pullOnce mirrors the remote row and resolves the plan tier", async () => {
+    syncData.enableSync("basic");
+    seedRemoteProfile("pro", 2_000_000);
+    const r = await pullOnce(makeClient() as never);
+    expect(r.pulled).toBe(1);
+    expect(syncData.currentTier()).toBe("pro");
+    expect(syncData.getRowById("profiles", "u1")?.github_login).toBe("octocat");
+  });
+
+  test("a billing-driven tier flip propagates on the next pull WITHOUT a conflict", async () => {
+    syncData.enableSync("basic");
+    seedRemoteProfile("free", 2_000_000);
+    await pullOnce(makeClient() as never);
+    expect(syncData.currentTier()).toBe("free");
+
+    // service_role flips tier → updated_at bumps. Re-pull must take it cleanly:
+    // a pull-only row can never be a "conflict" (the client never writes it).
+    const rows = tableRows("profiles");
+    rows[0].tier = "pro";
+    rows[0].updated_at = new Date(3_000_000).toISOString();
+    const r = await pullOnce(makeClient() as never);
+    expect(syncData.currentTier()).toBe("pro");
+    expect(r.conflicts).toBe(0);
+    expect(
+      db().query("SELECT COUNT(*) n FROM sync_conflicts").get() as {
+        n: number;
+      },
+    ).toEqual({ n: 0 });
   });
 });
 

@@ -46,6 +46,15 @@ export interface SyncTableMeta {
    */
   versioned?: boolean;
   /**
+   * Pull-only: the remote row is server-authoritative and the client may only
+   * READ it (e.g. `profiles`, whose `tier` is billing-controlled via
+   * service_role). Pull-only tables get NO local change-capture trigger (see
+   * `installSyncCapture` in db.ts — its table list deliberately excludes them),
+   * are never enqueued in the outbox, and `pushOnce` skips them; `pullOnce`
+   * includes them. Defaults to false.
+   */
+  pullOnly?: boolean;
+  /**
    * The data columns that exist on the REMOTE table (supabase/migrations/0002),
    * which is a curated subset of the local schema. Push/hash use ONLY these —
    * sending a local-only column (e.g. knowledge.promoted_at, worker_model_id)
@@ -157,6 +166,27 @@ export const SYNCED_TABLES: Record<SyncTier, SyncTableMeta[]> = {
       versioned: false, // join table has no content_hash/revision columns
       syncColumns: ["knowledge_id", "entity_id"],
     },
+    {
+      // Pull-only mirror of the server-authoritative account row. The client
+      // reads its plan `tier` (and profile fields) but never writes them — the
+      // remote RLS is select/update-own and `tier` is service_role-locked
+      // (supabase/migrations/0004). No content_hash/revision remotely, so
+      // versioned:false (the pull path classifies by remote updated_at).
+      table: "profiles",
+      idColumns: ["id"],
+      ftsTables: [],
+      versioned: false,
+      pullOnly: true,
+      syncColumns: [
+        "id",
+        "tier",
+        "github_login",
+        "display_name",
+        "email",
+        "created_at",
+        "updated_at",
+      ],
+    },
   ],
   pro: [],
   max: [],
@@ -168,6 +198,23 @@ for (const t of SYNCED_TABLES.basic) META_BY_TABLE.set(t.table, t);
 /** The synced table set for a tier (only `basic` is populated today). */
 export function syncedTables(tier: SyncTier = "basic"): SyncTableMeta[] {
   return SYNCED_TABLES[tier];
+}
+
+/**
+ * The user's PLAN tier (billing-controlled: 'free' | 'pro' | …) read from the
+ * local pull-only `profiles` mirror. NOTE: this is distinct from `SyncTier`
+ * (basic/pro/max — which table SET to sync); a future mapping turns a plan tier
+ * into a SyncTier when Pro sync (issue #826/D) lands.
+ *
+ * Returns 'free' when no profile row has been pulled yet (unauthenticated or
+ * pre-first-sync). Billing flips `tier` server-side via service_role; it
+ * propagates here on the next pull (no bespoke "did I become pro?" path).
+ */
+export function currentTier(): string {
+  const row = db().query("SELECT tier FROM profiles LIMIT 1").get() as
+    | { tier?: string }
+    | undefined;
+  return row?.tier ?? "free";
 }
 
 function meta(table: string): SyncTableMeta {

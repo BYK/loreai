@@ -88,6 +88,7 @@ beforeEach(async () => {
     "entity_aliases",
     "entity_relations",
     "entities",
+    "profiles",
     "sync_outbox",
     "sync_state",
     "sync_conflicts",
@@ -97,7 +98,14 @@ beforeEach(async () => {
   db().exec("DELETE FROM temp._sync_applying");
   for (const m of syncData.syncedTables("basic")) {
     setKV(`sync.push.${m.table}`, "0");
-    setKV(`sync.pull.${m.table}`, "0|");
+    // Pull-only tables (profiles) always have an ambient remote row (auto-created
+    // for the test user). Park their pull cursor far ahead so unrelated tests
+    // don't pull the unchanged profile into their r.pulled total; the dedicated
+    // profile tests reset this to "0|" to opt in.
+    setKV(
+      `sync.pull.${m.table}`,
+      m.pullOnly ? `${Date.now() + 31_536_000_000}|` : "0|",
+    );
   }
   // Fresh REMOTE state too. This uses the raw admin connection (superuser,
   // bypasses RLS) intentionally — it's test teardown, not a client path; the
@@ -197,6 +205,46 @@ describe.skipIf(SKIP)("sync engine ↔ real Postgres/PostgREST", () => {
     expect(syncData.getRowById("knowledge", "kb")?.content).toBe(
       "from-device-B",
     );
+  });
+
+  it("pulls the account profile (exactly one row, RLS-scoped) and resolves tier", async () => {
+    // handle_new_user auto-created the profile at tier 'free'. Normalize in case
+    // a prior test flipped it (tests share one uid/profile).
+    await h.asService((c) =>
+      c.query("update public.profiles set tier='free' where id=$1", [uid]),
+    );
+    setKV("sync.pull.profiles", "0|"); // opt in to pulling the profile
+    syncData.enableSync("basic");
+    const r = await pullOnce(clientFor(uid));
+    // RLS is select-where-id=auth.uid() → exactly the caller's single row.
+    const n = (
+      db().query("SELECT COUNT(*) n FROM profiles").get() as { n: number }
+    ).n;
+    expect(n).toBe(1);
+    expect(r.conflicts).toBe(0);
+    expect(syncData.currentTier()).toBe("free");
+  });
+
+  it("propagates a service_role tier flip on the next pull (no conflict, never pushed)", async () => {
+    await h.asService((c) =>
+      c.query("update public.profiles set tier='free' where id=$1", [uid]),
+    );
+    setKV("sync.pull.profiles", "0|"); // opt in to pulling the profile
+    syncData.enableSync("basic");
+    await pullOnce(clientFor(uid));
+    expect(syncData.currentTier()).toBe("free");
+
+    // Billing flips tier (only service_role may — guard_profile_tier, 0004);
+    // the updated_at trigger bumps the pull cursor.
+    await h.asService((c) =>
+      c.query("update public.profiles set tier='pro' where id=$1", [uid]),
+    );
+    const r = await pullOnce(clientFor(uid));
+    expect(syncData.currentTier()).toBe("pro");
+    expect(r.conflicts).toBe(0);
+
+    // And it was never pushed back (pull-only): a push is a no-op.
+    expect((await pushOnce(clientFor(uid))).pushed).toBe(0);
   });
 
   it("pulls ALL rows when many share one updated_at (>page is internal; correctness here)", async () => {

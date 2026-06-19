@@ -5,6 +5,7 @@ import {
   applyRemoteUpsert,
   classifyRemoteRow,
   contentHash,
+  currentTier,
   disableSync,
   enableSync,
   getRowById,
@@ -43,6 +44,7 @@ beforeEach(() => {
   deleteTeamConfig("sync.enabled");
   db().exec("DELETE FROM temp._sync_applying"); // reset suppression depth
   db().exec("DELETE FROM knowledge");
+  db().exec("DELETE FROM profiles");
   db().exec("DELETE FROM sync_outbox");
   db().exec("DELETE FROM sync_state");
   db().exec("DELETE FROM sync_conflicts");
@@ -82,8 +84,10 @@ describe("v43 schema", () => {
         .all() as Array<{ name: string }>
     ).map((r) => r.name);
     for (const t of SYNCED_TABLES.basic) {
+      // Pull-only tables (e.g. profiles) are intentionally NOT captured — they
+      // are server-authoritative and must never be pushed.
       expect(triggers.some((n) => n.startsWith(`${t.table}_outbox_`))).toBe(
-        true,
+        !t.pullOnly,
       );
     }
   });
@@ -156,6 +160,55 @@ describe("enableSync", () => {
     // Second enable must not double-seed.
     enableSync();
     expect(outboxFor("knowledge")).toHaveLength(1);
+  });
+});
+
+describe("profiles pull-only mirror", () => {
+  function insertProfile(id: string, tier: string): void {
+    db()
+      .query(
+        `INSERT INTO profiles (id, tier, created_at, updated_at)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(id, tier, now(), now());
+  }
+
+  test("is registered as a pull-only, unversioned synced table", () => {
+    const p = SYNCED_TABLES.basic.find((m) => m.table === "profiles");
+    expect(p).toBeDefined();
+    expect(p?.pullOnly).toBe(true);
+    expect(p?.versioned).toBe(false);
+    expect(p?.idColumns).toEqual(["id"]);
+    expect(p?.syncColumns).toContain("tier");
+  });
+
+  test("local writes are NEVER captured to the outbox (no push), even when sync is enabled", () => {
+    enableSync();
+    insertProfile("u1", "pro");
+    db().query("UPDATE profiles SET tier = 'free' WHERE id = 'u1'").run();
+    // No capture trigger exists for profiles → nothing to ever push.
+    expect(outboxFor("profiles")).toHaveLength(0);
+  });
+
+  test("currentTier reads the mirror, defaulting to 'free' when empty", () => {
+    expect(currentTier()).toBe("free"); // no row pulled yet
+    insertProfile("u1", "pro");
+    expect(currentTier()).toBe("pro");
+  });
+
+  test("a pulled remote profiles row upserts into the local mirror", () => {
+    applyRemoteUpsert("profiles", {
+      id: "u1",
+      tier: "pro",
+      github_login: "octocat",
+      display_name: "Octo Cat",
+      email: "octo@cat.dev",
+      created_at: now(),
+      updated_at: now(),
+    });
+    expect(currentTier()).toBe("pro");
+    const row = getRowById("profiles", "u1") as Record<string, unknown>;
+    expect(row.github_login).toBe("octocat");
   });
 });
 
