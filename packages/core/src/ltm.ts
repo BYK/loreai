@@ -603,8 +603,19 @@ function curatorEntryTokens(e: KnowledgeEntry): number {
  *
  *   1. ALL cross-project / global entries — shared and few; they must stay
  *      visible so a project can update them and avoid re-minting duplicates.
- *   2. Project-scoped entries in `forProject` rank order (confidence DESC,
- *      updated_at DESC), packed greedily until the budget is exhausted.
+ *   2. Project-scoped entries are CONSIDERED in `forProject` rank order
+ *      (confidence DESC, updated_at DESC), so the highest-confidence entries are
+ *      always packed first.
+ *
+ * Pass 2 uses `continue` (not `break`) on an over-budget entry — matching the
+ * established `forSession` packer. This MAXIMISES the number of entries the
+ * curator can see (its whole job is to dedup/update against existing knowledge,
+ * so coverage minimises duplicate creation), and it never sacrifices a
+ * high-confidence entry for a low-confidence one: by the time an entry is
+ * skipped for size, every higher-ranked entry has already been packed. `break`
+ * would be strictly worse — a single oversized top entry would drop the entire
+ * remainder, so the curator could see zero existing entries and re-mint
+ * everything.
  *
  * When everything fits (the common case) the full set is returned unchanged.
  * Dropped entries are the lowest-confidence / stalest project-scoped ones —

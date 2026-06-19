@@ -144,4 +144,38 @@ describe("ltm.forCurator", () => {
     const confs = projOut.map((e) => e.confidence);
     expect(confs).toEqual([...confs].sort((a, b) => b - a));
   });
+
+  test("an oversized top-confidence entry does not starve smaller lower-confidence entries (continue, not break)", () => {
+    // The highest-confidence entry alone blows the budget. A break-on-overflow
+    // packer would drop EVERYTHING after it (curator sees nothing); the
+    // continue-on-overflow packer skips just the oversized entry and keeps the
+    // smaller ones it can still afford — maximising dedup coverage.
+    const huge = ltm.create({
+      projectPath: PROJECT,
+      category: "gotcha",
+      title: "Huge",
+      content: "h".repeat(3000), // ~1000 tokens — exceeds the budget alone
+      scope: "project",
+      confidence: 1.0,
+    });
+    const small: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      small.push(
+        ltm.create({
+          projectPath: PROJECT,
+          category: "gotcha",
+          title: `Small ${i}`,
+          content: "s".repeat(30), // ~tens of tokens each
+          scope: "project",
+          confidence: 0.9 - i * 0.01,
+        }),
+      );
+    }
+
+    const out = ltm.forCurator(PROJECT, 300);
+
+    expect(out.some((e) => e.id === huge)).toBe(false); // oversized → skipped
+    // ...but the smaller, lower-confidence entries are still visible.
+    expect(small.every((id) => out.some((e) => e.id === id))).toBe(true);
+  });
 });
