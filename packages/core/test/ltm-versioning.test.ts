@@ -146,4 +146,67 @@ describe("A2 sub-PR 1: append-only knowledge scaffolding", () => {
   test("appendVersion returns null for an unknown logical_id", () => {
     expect(ltm.appendVersion("does-not-exist")).toBeNull();
   });
+
+  test("in-place update() stays version 1 and FTS tracks the new content", () => {
+    // sub-PR 1 does NOT rewire update() onto appendVersion — it is still an
+    // in-place mutation. This guards that the current-aware triggers handle the
+    // production write path (delete old FTS + insert new) without corruption.
+    const id = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "decision",
+      title: "InPlace",
+      content: "inplaceoldtok",
+    });
+    expect(ftsHits("inplaceoldtok")).toBeGreaterThan(0);
+    ltm.update(id, { content: "inplacenewtok" });
+    const v = versions(id);
+    expect(v).toHaveLength(1); // in-place: no new version row
+    expect(v[0].version).toBe(1);
+    expect(v[0].is_current).toBe(1);
+    expect(current(id)?.content).toBe("inplacenewtok");
+    expect(ftsHits("inplaceoldtok")).toBe(0);
+    expect(ftsHits("inplacenewtok")).toBeGreaterThan(0);
+  });
+
+  test("appendVersion after a delete revives the entry (no FTS mismatch)", () => {
+    // The corruption-prone path: demoting an is_deleted=1 row must NOT issue a
+    // mismatched FTS 'delete' (the death cert was never indexed).
+    const id = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "decision",
+      title: "Revive",
+      content: "beforedeltok",
+    });
+    ltm.appendVersion(id, { isDeleted: true });
+    expect(current(id) ?? null).toBeNull();
+    expect(ftsHits("beforedeltok")).toBe(0);
+    const revived = ltm.appendVersion(id, { content: "revivedtok" });
+    expect(revived).not.toBeNull();
+    const c = current(id);
+    expect(c?.content).toBe("revivedtok");
+    expect(c?.version).toBe(3); // v1 live, v2 death-cert, v3 revived
+    expect(ftsHits("revivedtok")).toBeGreaterThan(0);
+  });
+
+  test("multi-version chain v1->v2->v3: exactly one current, only latest searchable", () => {
+    const id = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "decision",
+      title: "Chain",
+      content: "chainonetok",
+    });
+    ltm.appendVersion(id, { content: "chaintwotok" });
+    ltm.appendVersion(id, { content: "chainthreetok" });
+    const v = versions(id);
+    expect(v).toHaveLength(3);
+    expect(v.filter((x) => x.is_current === 1)).toHaveLength(1);
+    expect(current(id)?.version).toBe(3);
+    expect(current(id)?.content).toBe("chainthreetok");
+    expect(ftsHits("chainonetok")).toBe(0);
+    expect(ftsHits("chaintwotok")).toBe(0);
+    expect(ftsHits("chainthreetok")).toBeGreaterThan(0);
+  });
 });

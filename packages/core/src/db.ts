@@ -1268,6 +1268,23 @@ const MIGRATIONS: string[] = [
   -- search never returns a superseded or deleted version. Replaces the plain
   -- mirror triggers (base schema / v32). On supersession the old version's FTS
   -- row is dropped; a deleted (is_deleted=1) version is never indexed.
+  --
+  -- 🔴 PARTIAL-MIRROR CONTRACT: from here on knowledge_fts is a PARTIAL mirror of
+  -- knowledge (only current+live rows), NOT a full mirror. Harmless in THIS PR —
+  -- appendVersion() has no production caller, so every row is v1/current/live and
+  -- the mirror is still total. But once the follow-up PR wires update()/remove()
+  -- onto appendVersion(), COUNT(knowledge) > COUNT(knowledge_fts), which breaks
+  -- three full-mirror assumptions that MUST be fixed in that same PR:
+  --   1. validateDatabaseIntegrity() (data.ts) asserts the two counts are equal —
+  --      relax to COUNT(knowledge_fts) == COUNT(knowledge WHERE is_current=1 AND
+  --      is_deleted=0), else the data CLI aborts on every run.
+  --   2. rebuildFts("knowledge_fts") (sync-data.ts, run after every knowledge sync
+  --      pull) uses FTS5 'rebuild', which ignores these triggers and re-indexes
+  --      ALL versions — resurfacing superseded/deleted rows in search. Make the
+  --      knowledge_fts rebuild current-aware (delete-all + insert only current+live).
+  --   3. The remote knowledge mirror / applyRemoteUpsert sets no logical_id (the
+  --      remote has none until the sync sub-PR's migration) — backfill logical_id
+  --      on apply so pulled rows aren't NULL once logical_id-keyed reads land.
   DROP TRIGGER IF EXISTS knowledge_fts_insert;
   DROP TRIGGER IF EXISTS knowledge_fts_delete;
   DROP TRIGGER IF EXISTS knowledge_fts_update;
