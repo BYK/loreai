@@ -1852,7 +1852,11 @@ export async function executeWarmup(
           `input=${totalInput} cacheRead=${cacheReadTokens} cacheWrite=${cacheCreationTokens} ` +
           `cost=${costStr} cacheLikelyAlive=${cacheLikelyAlive} ` +
           `ageSinceCacheTouch=${ageSec}s ttl=${Math.round(profile.ttlMs / 1000)}s ` +
-          `bodyBytes=${signedBody.length}` +
+          // Buffer.byteLength gives the UTF-8 byte size actually sent over the
+          // wire; signedBody.length would count UTF-16 code units and underreport
+          // for multi-byte content (prose/code-heavy bodies — exactly the ones
+          // this diagnostic targets).
+          `bodyBytes=${Buffer.byteLength(signedBody, "utf8")}` +
           (cacheLikelyAlive
             ? " — DIVERGENCE: cache should have been live but warmup missed " +
               "(warmup body ≠ cached prefix)"
