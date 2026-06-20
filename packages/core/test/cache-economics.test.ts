@@ -156,6 +156,90 @@ describe("decideCacheStrategy — monotonicity (the crux: ongoing cost of stayin
   });
 });
 
+describe("decideCacheStrategy — exact cost arithmetic", () => {
+  test("each cost term matches the formula exactly", () => {
+    // F=200k, C=80k, r=1, w=12, p=0.5, k=2, f=4
+    const r = decide({
+      fullBodyTokens: 200_000,
+      compressedTokens: 80_000,
+      readPerToken: 1,
+      writePerToken: 12,
+      pReturn: 0.5,
+      expectedCycles: 2,
+      expectedFutureTurns: 4,
+    });
+    // holdWarm = k·F·r + p·(1+f)·F·r = 2·200000 + 0.5·5·200000
+    expect(r.holdWarmCost).toBe(2 * 200_000 + 0.5 * 5 * 200_000);
+    // coolBust = p·(C·w + f·C·r) = 0.5·(80000·12 + 4·80000)
+    expect(r.coolBustCost).toBe(0.5 * (80_000 * 12 + 4 * 80_000));
+    // coolFullWrite = p·(F·w + f·F·r) = 0.5·(200000·12 + 4·200000)
+    expect(r.coolFullWriteCost).toBe(0.5 * (200_000 * 12 + 4 * 200_000));
+  });
+});
+
+describe("decideCacheStrategy — strict-tie boundary (never pay to warm on a tie)", () => {
+  // With compressed==full, holdWarm == coolFullWrite exactly when
+  // p = k·r/(w−r). Pick r=1, w=3, k=1 ⇒ break-even p=0.5 (exact in float).
+  const tie = {
+    fullBodyTokens: 100_000,
+    compressedTokens: 100_000,
+    readPerToken: 1,
+    writePerToken: 3,
+    expectedCycles: 1,
+    expectedFutureTurns: 3,
+  };
+  test("exactly at break-even → cool-full-write (not hold-warm)", () => {
+    const r = decide({ ...tie, pReturn: 0.5 });
+    expect(r.holdWarmCost).toBe(r.coolFullWriteCost); // genuine tie
+    expect(r.strategy).toBe("cool-full-write");
+  });
+  test("just above break-even → hold-warm", () => {
+    expect(decide({ ...tie, pReturn: 0.51 }).strategy).toBe("hold-warm");
+  });
+  test("just below break-even → cool-full-write", () => {
+    expect(decide({ ...tie, pReturn: 0.49 }).strategy).toBe("cool-full-write");
+  });
+});
+
+describe("decideCacheStrategy — non-finite inputs break confidence, not the contract", () => {
+  test("undefined pricing (missing model) → confident:false, no NaN", () => {
+    const r = decide({ readPerToken: undefined as unknown as number });
+    expect(r.confident).toBe(false);
+    expect(Number.isNaN(r.holdWarmCost)).toBe(false);
+  });
+  test("NaN write pricing → confident:false", () => {
+    expect(decide({ writePerToken: Number.NaN }).confident).toBe(false);
+  });
+  test("Infinite body → confident:false", () => {
+    expect(decide({ fullBodyTokens: Number.POSITIVE_INFINITY }).confident).toBe(
+      false,
+    );
+  });
+  test("NaN compressedTokens with valid pricing → treated as no-compaction, still confident", () => {
+    // The reviewer's case: a NaN compaction figure must NOT silently suppress a
+    // genuinely-cheapest hold-warm. Treated as compressed==full ⇒ hold-warm.
+    const r = decide({
+      fullBodyTokens: 10_000,
+      compressedTokens: Number.NaN,
+      pReturn: 0.95,
+      expectedCycles: 1,
+      expectedFutureTurns: 2,
+    });
+    expect(r.confident).toBe(true);
+    expect(r.coolBustCost).toBe(r.coolFullWriteCost); // no phantom bust
+    expect(r.strategy).toBe("hold-warm");
+  });
+  test("NaN expectedCycles/futureTurns are floored to 0 (no NaN leak)", () => {
+    const r = decide({
+      expectedCycles: Number.NaN,
+      expectedFutureTurns: Number.NaN,
+    });
+    expect(r.confident).toBe(true);
+    expect(Number.isFinite(r.holdWarmCost)).toBe(true);
+    expect(Number.isFinite(r.coolBustCost)).toBe(true);
+  });
+});
+
 describe("decideCacheStrategy — input hardening", () => {
   test("compressedTokens larger than full is clamped (no phantom benefit/crash)", () => {
     const r = decide({

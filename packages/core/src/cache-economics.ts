@@ -91,7 +91,11 @@ export interface CacheEconomicsInput {
 
 export interface CacheEconomicsResult {
   strategy: CacheStrategy;
-  /** Expected cost of holding the body warm across the horizon ($). */
+  // The *Cost fields are in the SAME currency unit as the pricing inputs. The
+  // chosen `strategy` is invariant to a common scaling of read+write pricing,
+  // but these reported costs are only dollars if pricing was passed as $/token
+  // (NOT $/MTok). They are primarily for logging/telemetry.
+  /** Expected cost of holding the body warm across the horizon. */
   holdWarmCost: number;
   /** Expected cost of cooling and compacting on return ($). */
   coolBustCost: number;
@@ -106,10 +110,15 @@ export interface CacheEconomicsResult {
 }
 
 function clamp01(x: number): number {
-  if (Number.isNaN(x)) return 0;
+  if (!Number.isFinite(x)) return x > 0 ? 1 : 0; // +Inf→1, -Inf/NaN→0
   if (x < 0) return 0;
   if (x > 1) return 1;
   return x;
+}
+
+/** A finite, non-negative count; non-finite or negative inputs collapse to 0. */
+function finiteNonNeg(x: number): number {
+  return Number.isFinite(x) && x > 0 ? x : 0;
 }
 
 /**
@@ -143,12 +152,23 @@ export function decideCacheStrategy(
 ): CacheEconomicsResult {
   const { fullBodyTokens, readPerToken, writePerToken } = input;
   const pReturn = clamp01(input.pReturn);
-  const cycles = Math.max(0, input.expectedCycles);
-  const futureTurns = Math.max(0, input.expectedFutureTurns);
+  const cycles = finiteNonNeg(input.expectedCycles);
+  const futureTurns = finiteNonNeg(input.expectedFutureTurns);
 
-  // Without pricing (or with an empty body) the comparison is meaningless —
-  // signal low confidence so the caller keeps its legacy behaviour.
-  if (readPerToken <= 0 || writePerToken <= 0 || fullBodyTokens <= 0) {
+  // Without finite, positive pricing (or with a non-finite/empty body) the
+  // comparison is meaningless — signal low confidence so the caller keeps its
+  // legacy behaviour. The finiteness checks are LOAD-BEARING: a model missing
+  // from the pricing table arrives here as undefined/NaN, and `NaN <= 0` is
+  // false, so a bare `<= 0` guard would let garbage through and report it as a
+  // trustworthy decision (NaN costs → arbitrary strategy, confident:true).
+  if (
+    !Number.isFinite(readPerToken) ||
+    !Number.isFinite(writePerToken) ||
+    !Number.isFinite(fullBodyTokens) ||
+    readPerToken <= 0 ||
+    writePerToken <= 0 ||
+    fullBodyTokens <= 0
+  ) {
     return {
       strategy: "cool-full-write",
       holdWarmCost: 0,
@@ -158,12 +178,14 @@ export function decideCacheStrategy(
     };
   }
 
-  // The compacted body can never be larger than the full body. A caller that
-  // has no compaction available passes compressed == full (handled by clamp).
-  const compressed = Math.min(
-    Math.max(0, input.compressedTokens),
-    fullBodyTokens,
-  );
+  // The compacted body can never be larger than the full body. A non-finite
+  // estimate means the caller had no compaction figure — treat it as "no
+  // compaction available" (compressed === full), which collapses cool-bust into
+  // cool-full-write rather than fabricating a phantom (and falsely cheapest)
+  // bust from a NaN cost.
+  const compressed = Number.isFinite(input.compressedTokens)
+    ? Math.min(Math.max(0, input.compressedTokens), fullBodyTokens)
+    : fullBodyTokens;
 
   const holdWarmCost =
     cycles * fullBodyTokens * readPerToken +
