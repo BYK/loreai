@@ -615,10 +615,16 @@ export interface CacheSurvivalInputs {
 }
 
 /**
- * Record the gradient's own size estimate for a session's current body. Called
- * from transform() so the warmer and the bust calculator both read identical
- * full/compressed sizes from one place. `compressed === full` means "no
- * compaction available" (collapses cool-bust into cool-full-write downstream).
+ * Record the gradient's own size estimate for a session's current body.
+ *
+ * This is the WRITER side and intentionally CREATES the session state (via
+ * getSessionState) — in production the writer is transform() (which writes the
+ * fields directly) and this exported helper is used by tests. The READ
+ * accessors (getCacheStrategy / getCacheSizeSnapshot) and the warmer-facing
+ * evaluateCacheStrategy use the non-creating `sessionStates.get` so a background
+ * warmer can never materialize a phantom session. Do NOT call this from the
+ * warmer for that reason. `compressed === full` means "no compaction available"
+ * (collapses cool-bust into cool-full-write downstream).
  */
 export function setCacheSizeSnapshot(
   sessionID: string,
@@ -655,12 +661,13 @@ export function evaluateCacheStrategy(
 ): CacheEconomicsResult | null {
   const state = sessionStates.get(sessionID);
   if (!state || state.cacheSizeFull <= 0) return null;
-  const global = getCachePricing();
+  // Only fall back to the module-global pricing when no override is supplied
+  // (the override is the common path — callers SHOULD pass their own pricing).
   const result = decideCacheStrategy({
     fullBodyTokens: state.cacheSizeFull,
     compressedTokens: state.cacheSizeCompressed,
-    readPerToken: pricing?.readPerToken ?? global.read,
-    writePerToken: pricing?.writePerToken ?? global.write,
+    readPerToken: pricing?.readPerToken ?? getCachePricing().read,
+    writePerToken: pricing?.writePerToken ?? getCachePricing().write,
     pReturn: survival.pReturn,
     expectedCycles: survival.expectedCycles,
     expectedFutureTurns: survival.expectedFutureTurns,

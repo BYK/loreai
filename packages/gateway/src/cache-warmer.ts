@@ -1192,19 +1192,13 @@ export function shouldWarm(
   // Session marked dead
   if (state.warmup?.disabled) return false;
 
-  // Session-level ROI guard: after enough warmups, if the observed hit
-  // rate is chronically low, stop warming. This prevents unlimited
-  // spending across many short breaks where each individual break passes
-  // the per-break checks but the aggregate ROI is deeply negative.
-  const lifetime = state.warmup?.totalWarmups ?? 0;
-  if (lifetime >= MIN_WARMUPS_FOR_ROI_CHECK) {
-    const hitRate = (state.warmup?.warmupHits ?? 0) / lifetime;
-    if (hitRate < MIN_SESSION_HIT_RATE) return false;
-  }
-  // Write-efficiency guard: stop warming a large/growing session whose
-  // full-body warms refresh only a tiny stable prefix (chronically low
-  // cacheRead/(read+write)). Independent of the return-rate guard above.
-  if (warmupWriteEfficiencyTooLow(state.warmup)) return false;
+  // NOTE: the survival computation + the shared cache-economics SHADOW eval are
+  // intentionally hoisted ABOVE the ROI and write-efficiency guards below. Those
+  // guards stop warming exactly the large/growing sessions the shared model is
+  // meant to reclassify as cool-bust, so evaluating after them would make the
+  // shadow blind to the population it exists to measure. The hoist is purely
+  // additive (survival fns are pure; only a log is emitted) — the returned
+  // decision is unchanged because the guards still run, just after the eval.
 
   // Compute commitment model signals
   const survivalAtIdle = survivalFunction(blendedHist, elapsed);
@@ -1282,6 +1276,21 @@ export function shouldWarm(
       );
     }
   }
+
+  // Session-level ROI guard: after enough warmups, if the observed hit
+  // rate is chronically low, stop warming. This prevents unlimited
+  // spending across many short breaks where each individual break passes
+  // the per-break checks but the aggregate ROI is deeply negative.
+  // (Runs after the shadow eval above so large sessions are still measured.)
+  const lifetime = state.warmup?.totalWarmups ?? 0;
+  if (lifetime >= MIN_WARMUPS_FOR_ROI_CHECK) {
+    const hitRate = (state.warmup?.warmupHits ?? 0) / lifetime;
+    if (hitRate < MIN_SESSION_HIT_RATE) return false;
+  }
+  // Write-efficiency guard: stop warming a large/growing session whose
+  // full-body warms refresh only a tiny stable prefix (chronically low
+  // cacheRead/(read+write)). Independent of the return-rate guard above.
+  if (warmupWriteEfficiencyTooLow(state.warmup)) return false;
 
   // Determine if this is the initial commitment or a continuation
   const cyclesSpent = state.warmup?.warmupCount ?? 0;
