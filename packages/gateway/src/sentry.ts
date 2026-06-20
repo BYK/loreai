@@ -7,7 +7,7 @@
  */
 
 import * as Sentry from "@sentry/bun";
-import { getInstanceId } from "@loreai/core";
+import { getInstanceId, embedding } from "@loreai/core";
 import { createHash } from "node:crypto";
 
 // ---------------------------------------------------------------------------
@@ -519,4 +519,43 @@ export function emitCurationMetrics(result: {
       attributes: { trigger: result.trigger },
     });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Embedding worker OOM capture
+// ---------------------------------------------------------------------------
+
+/**
+ * Wire core's embedding-failure hook to Sentry. Called once at startup. The
+ * embedding worker's OOM backoff/latch events otherwise only hit stderr; this
+ * surfaces them — fingerprinted, with memory context (free memory, RSS, the
+ * cap before/after) — so a WASM-OOM thrash on a memory-constrained host is
+ * visible instead of only inferable from a coincidental crash.
+ */
+export function setupEmbeddingFailureCapture(): void {
+  embedding.setEmbeddingFailureHook((info: embedding.EmbeddingFailureInfo) => {
+    if (!Sentry.isInitialized()) return;
+    const isLatch = info.kind === "floor-latch";
+    Sentry.captureMessage(
+      isLatch
+        ? "Embedding worker OOM: degraded to FTS-only at the token floor"
+        : "Embedding worker OOM: backed off the token cap and respawned",
+      {
+        level: isLatch ? "error" : "warning",
+        // One grouped issue per kind — not one per session/event.
+        fingerprint: ["embedding-oom", info.kind],
+        contexts: {
+          embedding_oom: {
+            kind: info.kind,
+            cap_before: info.capBefore,
+            cap_after: info.capAfter,
+            batch_size: info.batchSize,
+            longest_chars: info.longestChars,
+            free_memory_bytes: info.freeMemBytes,
+            rss_bytes: info.rssBytes,
+          },
+        },
+      },
+    );
+  });
 }

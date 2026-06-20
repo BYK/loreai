@@ -25,6 +25,11 @@ export interface EmbedRequest {
   inputType: "document" | "query";
   /** "high" = recall queries (jump the queue), "normal" = backfill. */
   priority: "high" | "normal";
+  /** Per-request override of the worker's token cap. Lets the main thread
+   *  RAISE the cap (after a freemem-gated re-probe) without respawning the
+   *  worker. Falls back to the workerData cap when absent. OOM-driven cap
+   *  LOWERING still respawns (fresh heap); only upward nudges ride this. */
+  maxTokens?: number;
 }
 
 /** Ask the worker to exit cleanly. */
@@ -68,6 +73,20 @@ export interface InitError {
 export type WorkerOutbound = EmbedResult | EmbedError | InitError;
 
 // ---------------------------------------------------------------------------
+// Worker exit codes
+// ---------------------------------------------------------------------------
+
+/**
+ * Worker process exit code signalling an input-size-driven ONNX OOM that is
+ * recoverable by respawning with a lower token cap (fresh WASM heap). The main
+ * thread's `on("exit")` handler distinguishes this from a genuine fatal exit
+ * (code 1) and drives the halve-and-respawn backoff (see `LocalProvider` in
+ * embedding.ts) instead of latching the provider broken. Picked in the
+ * application-defined range, clear of Node's own conventions (0, 1, 128+n).
+ */
+export const EMBED_OOM_EXIT_CODE = 75;
+
+// ---------------------------------------------------------------------------
 // Error classification — shared between worker and main thread
 // ---------------------------------------------------------------------------
 // These functions classify ONNX/WASM error messages. Both the worker
@@ -96,10 +115,20 @@ export function isOomError(msg: string): boolean {
  *   - WASM `abort()` calls ("Aborted(). Build with -sASSERTIONS...")
  *   - WASM RuntimeError ("unreachable", "memory access out of bounds")
  *   - ONNX runtime allocation failures (opaque numeric error codes like
- *     "284792864" ≈ 271 MiB). These represent model-init allocations
- *     that cannot succeed with smaller input — retrying is futile.
+ *     "284792864" ≈ 271 MiB).
  *
- * After detecting a fatal error, the worker should exit so the main
+ * Note on OOM: numeric ORT allocation failures are predominantly
+ * *inference-time, input-size-driven* — a long sequence's O(L²) attention
+ * tensor blows the WASM heap. They are NOT model-init failures. They look
+ * unrecoverable to an *in-process* retry only because WASM linear memory
+ * never shrinks: once the first oversized allocation grows the heap, every
+ * smaller retry in the same worker also fails. The real recovery is to
+ * respawn the worker (fresh heap) at a lower token cap — driven by the
+ * `EMBED_OOM_EXIT_CODE` backoff in embedding.ts, not by in-process truncation.
+ * `isWasmFatalError` still returns true for OOM as a defensive backstop for
+ * any OOM that surfaces as a *posted* error rather than the exit-code path.
+ *
+ * After detecting a genuinely fatal error, the worker exits so the main
  * thread's `on("exit")` handler marks the provider as broken.
  */
 export function isWasmFatalError(msg: string): boolean {
@@ -113,8 +142,10 @@ export function isWasmFatalError(msg: string): boolean {
   // RuntimeError from WASM (e.g. "unreachable", "memory access out of bounds")
   if (/\bRuntimeError\b/.test(msg)) return true;
   // ONNX runtime allocation failures — opaque numeric codes (e.g. "284792864").
-  // These are model-init-time OOMs, not input-size-driven, so truncation
-  // retries cannot help. Treat as fatal to stop the event storm.
+  // Defensive backstop only: the primary OOM path exits with
+  // EMBED_OOM_EXIT_CODE and is handled by the halve-and-respawn backoff. This
+  // classifies any OOM that surfaces as a *posted* error as fatal so a stray
+  // OOM message still degrades cleanly instead of re-creating an event storm.
   if (isOomError(msg)) return true;
   // Callable-pattern failure safety net (LOREAI-GATEWAY-10):
   // @huggingface/transformers uses Object.setPrototypeOf to make pipeline
@@ -225,6 +256,14 @@ export interface WorkerInitData {
   /** Target embedding dimensions. For Nomic v1.5 with Matryoshka,
    *  this controls how many leading dims to keep (64–768). */
   dimensions: number;
+  /** Maximum input sequence length (in tokens) the worker will feed to the
+   *  model. Every batch is truncated to this ceiling (real tokenizer) before
+   *  the single inference attempt. Owned and adapted by the main thread
+   *  (LocalProvider): it starts at a memory-aware estimate and is lowered ×0.7
+   *  on each fresh-heap respawn after an OOM. Capping sequence length up-front
+   *  bounds the O(L²) attention allocation and keeps a constrained host out of
+   *  swap. */
+  maxTokens: number;
   /** Vendored model info for binary mode, or null for npm mode.
    *  In binary mode, model files are pre-extracted to a local dir
    *  and we point transformers.js at that path instead of downloading

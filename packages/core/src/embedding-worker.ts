@@ -40,21 +40,27 @@ if (!parentPort) {
 }
 const port = parentPort;
 
-const { modelId, dimensions, vendorModel } = workerData as WorkerInitData;
+const init = workerData as WorkerInitData;
+const { modelId, dimensions, vendorModel } = init;
 
 /**
- * Token ceiling used when retrying after an ONNX OOM. We don't pre-truncate
- * every request — most texts are fine at their natural length. Instead, on
- * OOM we retry with progressively halved token limits starting from this
- * value. The pipeline's built-in `truncation: true` caps at model_max_length
- * (8192 for Nomic v1.5), which is too high for ONNX to allocate safely.
+ * Main-thread-owned input token cap (see `WorkerInitData.maxTokens`). Every
+ * batch is truncated to this ceiling (real tokenizer) before the single
+ * inference attempt, bounding the O(L²) attention allocation that drives ONNX
+ * OOMs. The main thread lowers it ×0.7 and respawns this worker (fresh heap)
+ * on each OOM. Falls back to a conservative default only if an older caller
+ * omits it.
  */
-const OOM_RETRY_START_TOKENS = 4096;
+const maxTokens = init.maxTokens ?? 2048;
 
-/** Maximum number of OOM retry attempts (including the initial full-length
- *  try). On OOM the token limit halves each retry: full → 4096 → 2048 → 1024.
- *  Three truncated retries covers extreme cases. */
-const OOM_MAX_RETRIES = 3;
+/**
+ * Worker exit code signalling an input-size-driven ONNX OOM that the main
+ * thread recovers from by respawning at a lower token cap (fresh WASM heap).
+ * Inlined here — kept in sync with embedding-worker-types.ts — because the
+ * worker is spawned by Node's native resolver, which can't map "./foo.js" →
+ * "./foo.ts" for runtime (value) imports.
+ */
+const EMBED_OOM_EXIT_CODE = 75;
 
 // ---------------------------------------------------------------------------
 // Error classifiers — inlined to keep the worker self-contained.
@@ -489,67 +495,43 @@ async function processEmbed(req: EmbedRequest): Promise<void> {
   try {
     await ensurePipeline();
 
-    // Try inference at full length first. On ONNX OOM, retry with
-    // progressively halved token limits using the real tokenizer.
-    // This preserves maximum semantic content for normal texts while
-    // handling dense-token content (code, CJK, base64) adaptively.
-    //
-    // attempt 0 = original texts (no truncation)
-    // attempt 1 = truncated to 4096 tokens
-    // attempt 2 = truncated to 2048 tokens
-    // attempt 3 = truncated to 1024 tokens
-    let texts = req.texts;
-    let lastError: Error | undefined;
-
-    for (let attempt = 0; attempt <= OOM_MAX_RETRIES; attempt++) {
-      try {
-        const vectors = await runInference(texts);
-        post({ type: "result", id: req.id, vectors });
-        return;
-      } catch (err) {
-        const raw = err instanceof Error ? err.message : String(err);
-        if (!isOomError(raw) || !tokenizer) throw err;
-        lastError = err instanceof Error ? err : new Error(raw);
-
-        // If all texts are already shorter than the smallest retry ceiling
-        // (1024 tokens ≈ chars at worst-case 1:1 ratio), truncation cannot
-        // help — the OOM is a model-init/runtime allocation failure, not
-        // input-size-driven. Throw immediately to reach the fatal exit path.
-        const smallestRetryLimit =
-          OOM_RETRY_START_TOKENS >> (OOM_MAX_RETRIES - 1); // 1024
-        const longestText = Math.max(...req.texts.map((t) => t.length));
-        if (longestText <= smallestRetryLimit) {
-          throw lastError;
-        }
-
-        // OOM — truncate texts and retry with fewer tokens.
-        // attempt 0 failed at full length → retry at 4096 tokens
-        // attempt 1 failed at 4096       → retry at 2048 tokens
-        // attempt 2 failed at 2048       → retry at 1024 tokens
-        // attempt 3 failed at 1024       → loop exits, throw below
-        if (attempt < OOM_MAX_RETRIES) {
-          const maxTokens = OOM_RETRY_START_TOKENS >> attempt; // 4096, 2048, 1024
-          texts = truncateTexts(req.texts, maxTokens);
-          console.warn(
-            `[lore] ONNX OOM on attempt ${attempt + 1}, retrying with ≤${maxTokens} tokens ` +
-              `(batch=${req.texts.length}, longest≈${Math.max(...req.texts.map((t) => t.length))} chars)`,
-          );
-        }
-      }
-    }
-
-    // All retries exhausted — report the last error.
-    throw lastError ?? new Error("ONNX OOM retries exhausted");
+    // Truncate to the main-thread-owned token cap BEFORE the single inference
+    // attempt. The cap is memory-aware and is lowered ×0.7 per fresh-heap
+    // respawn (see LocalProvider in embedding.ts). We deliberately do NOT
+    // retry in-process on OOM: WASM linear memory never shrinks, so a smaller
+    // retry in this same worker allocates against an already-exhausted/
+    // fragmented heap and fails too. Instead we exit with EMBED_OOM_EXIT_CODE
+    // so the main thread respawns us (fresh heap) at a lower cap and
+    // re-submits the request.
+    // Per-request cap (an upward re-probe) overrides the workerData default.
+    const effectiveMax = req.maxTokens ?? maxTokens;
+    const texts = truncateTexts(req.texts, effectiveMax);
+    const vectors = await runInference(texts);
+    post({ type: "result", id: req.id, vectors });
   } catch (err) {
     // Don't re-post init-error — it was already sent in ensurePipeline().
     if (!initFailed) {
       const raw = err instanceof Error ? err.message : String(err);
+      const longest = Math.max(...req.texts.map((t) => t.length));
+      const effectiveMax = req.maxTokens ?? maxTokens;
 
-      // Fatal WASM errors (e.g. "Aborted()") leave the ONNX runtime in an
-      // unrecoverable state — every subsequent request would also fail,
-      // generating unbounded Sentry events. Report the error for this
-      // request and exit the worker so the main thread marks the provider
-      // as broken and stops sending work.
+      // Input-size-driven OOM → recoverable. Exit with the dedicated code so
+      // the main thread drives the halve-and-respawn backoff (fresh heap,
+      // lower cap, then re-submit). We do NOT post an error first: that would
+      // reject the request before the backoff can re-submit it. The main
+      // thread reconstructs OOM context from the pending request for telemetry.
+      if (isOomError(raw)) {
+        console.warn(
+          `[lore] ONNX OOM at ≤${effectiveMax} tokens (batch=${req.texts.length}, ` +
+            `longest≈${longest} chars) — respawning worker at a lower cap`,
+        );
+        process.exit(EMBED_OOM_EXIT_CODE);
+        return; // unreachable, but makes intent clear
+      }
+
+      // Genuine fatal WASM error (Aborted/RuntimeError/non-callable) — not
+      // input-size-driven, so respawning won't help. Report this request and
+      // exit(1) so the main thread latches the provider broken.
       if (isWasmFatalError(raw)) {
         post({
           type: "error",
@@ -560,13 +542,8 @@ async function processEmbed(req: EmbedRequest): Promise<void> {
         return; // unreachable, but makes intent clear
       }
 
-      const msg = isOomError(raw)
-        ? `ONNX runtime out of memory after ${OOM_MAX_RETRIES} retries ` +
-          `(batch=${req.texts.length}, ` +
-          `longest≈${Math.max(...req.texts.map((t) => t.length))} chars). ` +
-          `Raw: ${raw}`
-        : raw;
-      post({ type: "error", id: req.id, error: msg });
+      // Non-fatal per-request error — reject just this request, keep serving.
+      post({ type: "error", id: req.id, error: raw });
     }
   } finally {
     inflight--;

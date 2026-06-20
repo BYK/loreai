@@ -13,12 +13,25 @@
  * back silently to FTS-only when unavailable.
  */
 
+import { freemem } from "node:os";
 import { db } from "./db";
 import { config } from "./config";
 import * as log from "./log";
 import { vendorModelInfo } from "./embedding-vendor";
 import {
+  MIN_EMBED_TOKENS,
+  MODEL_MAX_TOKENS,
+  backoffEmbedCap,
+  memoryModelEmbedCap,
+  reconcileEmbedCap,
+  reprobeEmbedCap,
+  shouldReprobeEmbedCap,
+  type PersistedEmbedCap,
+} from "./embedding-cap";
+import {
+  EMBED_OOM_EXIT_CODE,
   isWasmFatalError,
+  type EmbedRequest,
   type WorkerInbound,
   type WorkerOutbound,
   type WorkerInitData,
@@ -35,16 +48,91 @@ const EMBED_TIMEOUT_MS = 10_000;
  *  before it can exit — without this cap that could block process exit. */
 const WORKER_SHUTDOWN_TIMEOUT_MS = 1_500;
 
+// ---------------------------------------------------------------------------
+// Adaptive local-embedding token cap — persistence
+// ---------------------------------------------------------------------------
+// Pure cap math (memory model, clamp, backoff, reconcile) lives in
+// embedding-cap.ts so it can be unit-tested in isolation. Here we keep only the
+// db-backed persistence and the worker-lifecycle glue.
+
+/** kv_meta key for the persisted learned cap + the free memory at learn time. */
+const EMBED_CAP_KV_KEY = "lore:embedding_cap";
+
+/** Minimum interval between upward cap re-probe checks. Throttles the freemem
+ *  read + comparison so embed() stays cheap; the cap only needs to be right
+ *  when work is actively flowing, so checking on embed() is sufficient. */
+const EMBED_REPROBE_INTERVAL_MS = 5 * 60_000;
+
+function readPersistedEmbedCap(): PersistedEmbedCap | null {
+  try {
+    const row = db()
+      .query("SELECT value FROM kv_meta WHERE key = ?")
+      .get(EMBED_CAP_KV_KEY) as { value: string } | null;
+    if (!row) return null;
+    const parsed = JSON.parse(row.value) as Partial<PersistedEmbedCap>;
+    if (
+      typeof parsed.cap !== "number" ||
+      typeof parsed.freeMemBytes !== "number"
+    ) {
+      return null;
+    }
+    return { cap: parsed.cap, freeMemBytes: parsed.freeMemBytes };
+  } catch {
+    return null;
+  }
+}
+
+function persistEmbedCap(cap: number, freeMemBytes: number = freemem()): void {
+  try {
+    const value = JSON.stringify({
+      cap,
+      freeMemBytes,
+    } satisfies PersistedEmbedCap);
+    db()
+      .query(
+        "INSERT INTO kv_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?",
+      )
+      .run(EMBED_CAP_KV_KEY, value, value);
+  } catch {
+    // Best-effort: a failure just means we re-derive the cap next start.
+  }
+}
+
 /**
- * Safe per-text character limit for local ONNX inference. The Nomic v1.5 model
- * supports up to 8192 tokens, but ONNX runtime OOMs on inputs near that ceiling
- * (error codes 284432024, 287180544, 144786472). Pre-truncating to ~4096 tokens
- * worth of characters keeps the tensor well within safe allocation bounds for
- * typical English text (~4 chars/token). For dense-token content (code, CJK,
- * base64) where the ratio is lower, the worker retries with token-level
- * truncation on OOM — see OOM_RETRY_START_TOKENS in embedding-worker.ts.
+ * Compute the token cap to (re)start a worker with. Prefers a learned,
+ * persisted cap when current free memory is close to what it was learned at —
+ * this avoids re-walking the backoff on every process restart (the "recurs on
+ * every restart" failure). Otherwise it sizes from the memory model and
+ * current free memory; a materially larger free pool lets the cap re-probe
+ * upward on restart (in lieu of continuous additive increase). Always clamped.
  */
-const LOCAL_MAX_CHARS = 4096 * 4; // ~4096 tokens × ~4 chars/token
+function computeInitialEmbedCap(): number {
+  const free = freemem();
+  return reconcileEmbedCap(
+    free,
+    readPersistedEmbedCap(),
+    memoryModelEmbedCap(free),
+  );
+}
+
+/** For tests: persist a learned embedding cap (kv_meta round-trip). */
+export function _persistEmbedCap(cap: number): void {
+  persistEmbedCap(cap);
+}
+
+/** For tests: read the persisted embedding cap (or null when absent/corrupt). */
+export function _readPersistedEmbedCap(): PersistedEmbedCap | null {
+  return readPersistedEmbedCap();
+}
+
+/**
+ * Coarse per-text character bound applied before a text is cloned across the
+ * worker boundary — only a payload-size guard. The real, memory-aware token
+ * cap is applied inside the worker (`WorkerInitData.maxTokens`). Sized at the
+ * model's max sequence length so it never caps below what a healthy host could
+ * embed.
+ */
+const LOCAL_MAX_CHARS = MODEL_MAX_TOKENS * 4; // ~8192 tokens × ~4 chars/token
 
 /**
  * Truncate a string to LOCAL_MAX_CHARS without splitting a UTF-16 surrogate pair.
@@ -56,6 +144,52 @@ function safeLocalTruncate(text: string): string {
   const code = text.charCodeAt(end - 1);
   if (code >= 0xd800 && code <= 0xdbff) end--; // don't split surrogate pair
   return text.slice(0, end);
+}
+
+// ---------------------------------------------------------------------------
+// Embedding failure telemetry hook (wired by the gateway to Sentry)
+// ---------------------------------------------------------------------------
+
+/** Context for an embedding-worker memory failure, surfaced to an optional host
+ *  telemetry hook. @loreai/core stays Sentry-free; the gateway wires this up. */
+export interface EmbeddingFailureInfo {
+  /** "oom-backoff" = recovered by lowering the cap + respawning;
+   *  "floor-latch" = hit MIN_EMBED_TOKENS and degraded to FTS-only. */
+  kind: "oom-backoff" | "floor-latch";
+  capBefore: number;
+  capAfter: number;
+  /** Number of in-flight requests at the time of the OOM. */
+  batchSize: number;
+  /** Longest input text (chars) among in-flight requests. */
+  longestChars: number;
+  freeMemBytes: number;
+  rssBytes: number;
+}
+
+let embeddingFailureHook: ((info: EmbeddingFailureInfo) => void) | null = null;
+
+/** Register a host telemetry hook fired on embedding-worker OOM backoff/latch.
+ *  Pass null to clear. The hook must not throw; errors are swallowed. */
+export function setEmbeddingFailureHook(
+  fn: ((info: EmbeddingFailureInfo) => void) | null,
+): void {
+  embeddingFailureHook = fn;
+}
+
+function fireEmbeddingFailure(
+  info: Omit<EmbeddingFailureInfo, "freeMemBytes" | "rssBytes">,
+): void {
+  const hook = embeddingFailureHook;
+  if (!hook) return;
+  try {
+    hook({
+      ...info,
+      freeMemBytes: freemem(),
+      rssBytes: process.memoryUsage().rss,
+    });
+  } catch {
+    // Telemetry must never break the embedding path.
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -265,16 +399,32 @@ class LocalProvider implements EmbeddingProvider {
     {
       resolve: (vectors: Float32Array[]) => void;
       reject: (error: Error) => void;
+      /** Original request payload, retained so it can be re-submitted to a
+       *  freshly respawned worker after an OOM backoff (fresh WASM heap). */
+      payload: EmbedRequest;
     }
   >();
   private nextRequestId = 0;
   private initPromise: Promise<void> | null = null;
   private modelId: string;
   private dimensions: number;
+  /** Memory-aware input token cap, owned by the main thread and passed to the
+   *  worker via workerData. Lowered ×0.7 per OOM respawn; persisted so restarts
+   *  start at the learned value instead of re-walking the backoff. */
+  private maxTokens: number;
+  /** Free memory (bytes) when `maxTokens` was last (re)learned. The upward
+   *  re-probe only fires when current free memory exceeds this by
+   *  EMBED_REPROBE_RATIO — i.e. when memory has genuinely recovered, which
+   *  distinguishes transient starvation from a real hardware limit. */
+  private capFreememAtLearn: number;
+  /** Timestamp (ms) of the last upward re-probe check, for throttling. */
+  private lastReprobeAt = 0;
 
   constructor(modelId: string, dimensions: number) {
     this.modelId = modelId;
     this.dimensions = dimensions;
+    this.maxTokens = computeInitialEmbedCap();
+    this.capFreememAtLearn = freemem();
   }
 
   /**
@@ -315,6 +465,7 @@ class LocalProvider implements EmbeddingProvider {
       const workerInitData: WorkerInitData = {
         modelId: this.modelId,
         dimensions: this.dimensions,
+        maxTokens: this.maxTokens,
         vendorModel: vendor ? { localModelPath: vendor.localModelPath } : null,
       };
 
@@ -442,19 +593,30 @@ class LocalProvider implements EmbeddingProvider {
       });
 
       this.worker.on("exit", (code) => {
-        if (code !== 0 && !this.workerInitError) {
-          this.workerInitError = `embedding worker exited with code ${code}`;
-          log.error(this.workerInitError, new Error(this.workerInitError));
-        }
-        // Latch the provider as permanently broken on non-zero exit so
-        // future ensureWorker() calls fast-fail instead of respawning a
-        // worker that will just OOM/crash again (event storm prevention).
-        if (code !== 0) {
-          localProviderKnownBroken = true;
-        }
         this.workerReady = false;
         this.worker = null;
         this.initPromise = null;
+
+        // Input-size-driven OOM: recover by respawning at a lower token cap on
+        // a fresh WASM heap (an in-process retry can't — WASM memory never
+        // shrinks), then re-submit the in-flight requests. Bounded: the cap
+        // backs off ×0.7 down to MIN_EMBED_TOKENS, at which point we latch
+        // FTS-only — so this can never loop unbounded (no event storm).
+        if (code === EMBED_OOM_EXIT_CODE) {
+          this.handleOomBackoff();
+          return;
+        }
+
+        // Any other non-zero exit is a genuine fatal crash — latch the
+        // provider broken so future ensureWorker() calls fast-fail instead of
+        // respawning a worker that will just crash again (event-storm guard).
+        if (code !== 0) {
+          if (!this.workerInitError) {
+            this.workerInitError = `embedding worker exited with code ${code}`;
+            log.error(this.workerInitError, new Error(this.workerInitError));
+          }
+          localProviderKnownBroken = true;
+        }
         for (const [, p] of this.pendingRequests) {
           p.reject(
             new LocalProviderUnavailableError(
@@ -486,11 +648,143 @@ class LocalProvider implements EmbeddingProvider {
     }
   }
 
+  /** Throttled upward re-probe: when free memory has recovered past
+   *  EMBED_REPROBE_RATIO × the level at which the current cap was learned, step
+   *  the cap up one notch (bounded by the memory model for the now-larger pool)
+   *  and persist. Applied via the per-request cap, so it takes effect on the
+   *  next request without respawning the worker. An optimistic step is
+   *  corrected by the OOM backoff. */
+  private maybeReprobeCap(): void {
+    const now = Date.now();
+    if (now - this.lastReprobeAt < EMBED_REPROBE_INTERVAL_MS) return;
+    this.lastReprobeAt = now;
+    const free = freemem();
+    if (!shouldReprobeEmbedCap(free, this.capFreememAtLearn)) return;
+    const next = reprobeEmbedCap(this.maxTokens, free);
+    if (next <= this.maxTokens) return;
+    const prev = this.maxTokens;
+    this.maxTokens = next;
+    this.capFreememAtLearn = free;
+    persistEmbedCap(next, free);
+    log.info(
+      `embedding cap re-probed up: ≤${prev} → ≤${next} tokens (free memory recovered)`,
+    );
+  }
+
+  /** Aggregate OOM context across in-flight requests for telemetry. We don't
+   *  know which request OOMed (the worker exits without posting), so report the
+   *  worst-case longest text and the in-flight count. */
+  private pendingOomContext(): { batchSize: number; longestChars: number } {
+    let batchSize = 0;
+    let longestChars = 0;
+    for (const [, p] of this.pendingRequests) {
+      batchSize++;
+      for (const t of p.payload.texts) {
+        if (t.length > longestChars) longestChars = t.length;
+      }
+    }
+    return { batchSize, longestChars };
+  }
+
+  /**
+   * Handle an OOM-signalled worker exit: lower the token cap ×0.7, persist it,
+   * and respawn (fresh heap) to re-run the in-flight requests. At the floor we
+   * give up and latch FTS-only. The worker is already nulled by the exit
+   * handler before this runs.
+   */
+  private handleOomBackoff(): void {
+    const capBefore = this.maxTokens;
+    const { batchSize, longestChars } = this.pendingOomContext();
+
+    if (capBefore <= MIN_EMBED_TOKENS) {
+      // Already at the floor and still OOMing → the host genuinely can't run
+      // local embeddings (system-wide exhaustion, not input size). Latch
+      // FTS-only and surface the remote-provider hint.
+      localProviderKnownBroken = true;
+      if (!localProviderErrorLogged) {
+        localProviderErrorLogged = true;
+        log.error(
+          `local embedding provider out of memory even at the ${MIN_EMBED_TOKENS}-token floor — ` +
+            `degrading to FTS-only search. Set search.embeddings.provider to 'voyage' or 'openai' ` +
+            `in .lore.json (with VOYAGE_API_KEY / OPENAI_API_KEY) for a remote provider.`,
+          new Error("embedding OOM at floor"),
+        );
+      }
+      fireEmbeddingFailure({
+        kind: "floor-latch",
+        capBefore,
+        capAfter: capBefore,
+        batchSize,
+        longestChars,
+      });
+      for (const [, p] of this.pendingRequests) {
+        p.reject(
+          new LocalProviderUnavailableError(
+            "embedding worker out of memory at the token floor",
+          ),
+        );
+      }
+      this.pendingRequests.clear();
+      return;
+    }
+
+    const free = freemem();
+    const capAfter = backoffEmbedCap(capBefore);
+    this.maxTokens = capAfter;
+    // Anchor the re-probe baseline at OOM-time free memory: only climb back up
+    // once memory has genuinely recovered (≥ EMBED_REPROBE_RATIO × this).
+    this.capFreememAtLearn = free;
+    persistEmbedCap(capAfter, free);
+    log.info(
+      `embedding worker OOM at ≤${capBefore} tokens — backing off to ≤${capAfter} ` +
+        `and respawning on a fresh heap (${batchSize} in-flight, longest≈${longestChars} chars)`,
+    );
+    fireEmbeddingFailure({
+      kind: "oom-backoff",
+      capBefore,
+      capAfter,
+      batchSize,
+      longestChars,
+    });
+
+    // Respawn and re-submit. Fire-and-forget: ensureWorker()'s own handlers
+    // reject pending if the respawn itself fails.
+    void this.resubmitPending();
+  }
+
+  /** Respawn the worker (at the already-lowered cap) and re-post every
+   *  in-flight request so the OOM backoff is transparent to callers. */
+  private async resubmitPending(): Promise<void> {
+    if (this.pendingRequests.size === 0) return;
+    try {
+      await this.ensureWorker();
+    } catch {
+      // Respawn failed — ensureWorker()'s handlers already rejected pending.
+      return;
+    }
+    const worker = this.worker;
+    if (!worker) return; // raced with another exit
+    for (const [, p] of this.pendingRequests) {
+      // Re-submit at the lowered cap so the retry doesn't re-OOM at the old one.
+      p.payload.maxTokens = this.maxTokens;
+      try {
+        worker.postMessage(p.payload satisfies WorkerInbound);
+      } catch {
+        // Worker died again between ensureWorker() and here — its exit handler
+        // drives the next backoff/latch. Leave pending in place.
+      }
+    }
+    this.updateWorkerRef();
+  }
+
   async embed(
     texts: string[],
     inputType: "document" | "query",
   ): Promise<Float32Array[]> {
     await this.ensureWorker();
+    // Opportunistically raise the cap if free memory has recovered (cheap,
+    // throttled). Takes effect via the per-request cap below — no respawn.
+    this.maybeReprobeCap();
 
     // Pre-truncate texts that exceed the safe ONNX inference limit.
     // This prevents OOM on single inputs near the model's 8192-token max.
@@ -507,17 +801,20 @@ class LocalProvider implements EmbeddingProvider {
     const priority =
       inputType === "query" && texts.length === 1 ? "high" : "normal";
 
+    const payload: EmbedRequest = {
+      type: "embed",
+      id,
+      texts: prefixed,
+      inputType,
+      priority,
+      maxTokens: this.maxTokens,
+    };
+
     return new Promise<Float32Array[]>((resolve, reject) => {
-      this.pendingRequests.set(id, { resolve, reject });
+      this.pendingRequests.set(id, { resolve, reject, payload });
       this.updateWorkerRef();
       try {
-        this.worker?.postMessage({
-          type: "embed",
-          id,
-          texts: prefixed,
-          inputType,
-          priority,
-        } satisfies WorkerInbound);
+        this.worker?.postMessage(payload satisfies WorkerInbound);
       } catch {
         // Worker may have been terminated between ensureWorker() and here
         // (race with process.exit(1) in the worker thread). Clean up and
