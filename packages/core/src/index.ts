@@ -242,3 +242,13 @@ export {
   unescapeMarkdown,
   renderMarkdown,
 } from "./markdown";
+export {
+  decideCacheStrategy,
+  strategyWantsWarming,
+  strategyWantsCompaction,
+} from "./cache-economics";
+export type {
+  CacheStrategy,
+  CacheEconomicsInput,
+  CacheEconomicsResult,
+} from "./cache-economics";
