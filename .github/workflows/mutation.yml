@@ -1,11 +1,10 @@
-name: Mutation testing (experimental)
+name: Mutation testing
 
 # Stryker mutation testing on the high-risk stateful sync modules (issue #832).
-# ADVISORY ONLY (no hard gate: stryker.config.mjs sets thresholds.break = null),
-# and currently EXPERIMENTAL: on Stryker 9.6.1 + Vitest 4.1.8 the runner reports
-# FALSE SURVIVORS (upstream stryker-mutator/stryker-js#5928; tracked in #843), so
-# the uploaded report must be hand-verified, not trusted as a verdict. Kept green
-# so it's ready the moment the runner is reliable. Runs weekly + on demand.
+# ADVISORY ONLY (no hard gate: stryker.config.mjs sets thresholds.break = null).
+# A surviving mutant is a candidate test gap — hand-verify it (apply the EXACT
+# replacement, run the test file) before acting, since some survivors are
+# equivalent mutants. Runs weekly + on demand; uploads the report as an artifact.
 on:
   schedule:
     - cron: "0 5 * * 1" # Monday 05:00 UTC
