@@ -1833,10 +1833,30 @@ export async function executeWarmup(
           `hit=${hitRate} cost=${costStr}`,
       );
     } else {
+      // cacheRead=0: the warmup wrote a fresh cache instead of refreshing an
+      // existing one. `cacheLikelyAlive` (captured before the lastWarmupAt
+      // mutation above) is the diagnostic discriminator:
+      //   - false → the cached prefix had simply expired; this is a benign cold
+      //             re-prime (and is excluded from the circuit breaker).
+      //   - true  → the cache SHOULD still have been live, so the warmup body
+      //             diverged from what the real turn cached. THIS is the genuine
+      //             "divergence" signal worth investigating (issue: warmup body
+      //             ≠ cached prefix). If this never fires in practice, every
+      //             UNCACHED warmup is pure expiry and there is no body bug.
+      const ageSec =
+        lastCacheTouch > 0
+          ? Math.round((Date.now() - lastCacheTouch) / 1000)
+          : -1;
       log.warn(
         `cache-warmer: ✗ UNCACHED session=${sid} ` +
           `input=${totalInput} cacheRead=${cacheReadTokens} cacheWrite=${cacheCreationTokens} ` +
-          `cost=${costStr} — warmup body may not match cached prefix`,
+          `cost=${costStr} cacheLikelyAlive=${cacheLikelyAlive} ` +
+          `ageSinceCacheTouch=${ageSec}s ttl=${Math.round(profile.ttlMs / 1000)}s ` +
+          `bodyBytes=${signedBody.length}` +
+          (cacheLikelyAlive
+            ? " — DIVERGENCE: cache should have been live but warmup missed " +
+              "(warmup body ≠ cached prefix)"
+            : " — expired-cache re-prime (expected)"),
       );
     }
 
