@@ -181,12 +181,17 @@ function handleListDistillations(url: URL, projectPath: string): Response {
 }
 
 function handleShowKnowledge(id: string): Response {
-  // Support prefix resolution
+  // Support prefix resolution. resolveId hits the base table, so the resolved id
+  // may be a current OR a superseded version id (or the logical_id == v1 id).
+  // Resolve to the current version via the stable logical_id (A2, #823).
   const resolvedId = data.resolveId("knowledge", id) ?? id;
-  const entry = ltm.get(resolvedId);
+  const entry =
+    ltm.get(resolvedId) ?? ltm.getByLogical(ltm.logicalIdOf(resolvedId));
   if (!entry)
     return errorResponse(404, "not_found", `Knowledge entry not found: ${id}`);
-  return jsonResponse(entry);
+  // Present the stable logical_id as the external id so a cached reference keeps
+  // resolving across version appends.
+  return jsonResponse({ ...entry, id: entry.logical_id });
 }
 
 function handleShowSession(url: URL, sessionId: string): Response {

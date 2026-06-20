@@ -66,7 +66,7 @@ describe("curator applyOps changedEntries", () => {
         prevContent: "original",
       }),
     ]);
-    expect(ltm.get(id)?.content).toBe("updated by dedup");
+    expect(ltm.getByLogical(id)?.content).toBe("updated by dedup");
   });
 
   test("returns updatedEntries with previous and new content", () => {

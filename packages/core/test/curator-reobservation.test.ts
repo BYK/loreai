@@ -120,10 +120,10 @@ describe("curator consolidate — focusCategory merge", () => {
     // Merge prompt used (not the trim/eviction prompt).
     expect(receivedSystem).toContain("merge genuine duplicates");
     expect(receivedSystem).not.toContain("target maximum");
-    // The delete was applied — B is gone, A survives.
+    // The delete was applied — B is gone, A survives (as a new appended version).
     expect(result.deleted).toBeGreaterThanOrEqual(1);
-    expect(ltm.get(bId)).toBeNull();
-    expect(ltm.get(aId)).not.toBeNull();
+    expect(ltm.getByLogical(bId)).toBeNull(); // B has no current, live version
+    expect(ltm.getByLogical(aId)).not.toBeNull();
   });
 
   test("does nothing when fewer than 2 entries in the category", async () => {

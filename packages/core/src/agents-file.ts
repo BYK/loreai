@@ -565,9 +565,11 @@ function _importEntries(entries: ParsedFileEntry[], projectPath: string): void {
       // entry.id is the <!-- lore:UUID --> marker, which is the stable logical_id.
       const existing = ltm.getByLogical(entry.id);
       if (existing) {
-        // Known entry — update only if content changed (manual edit in file)
+        // Known entry — update only if content changed (manual edit in file). Pass
+        // the resolved current row id (Seer #848): update() resolves it to the
+        // logical_id and appends a new version.
         if (existing.content !== entry.content) {
-          ltm.update(entry.id, { content: entry.content });
+          ltm.update(existing.id, { content: entry.content });
         }
       } else if (ltm.isTombstoned(entry.id)) {
       } else {

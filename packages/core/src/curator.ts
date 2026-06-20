@@ -332,10 +332,12 @@ export function applyOps(
       });
       if (!wasCreated) {
         // Dedup-merged into an existing entry — not a real create, but the
-        // existing row was updated in place and may already be pinned in the
-        // prompt cache. Surface it as an update so session LTM caches are
-        // invalidated and durable prompt deltas can replay the new bytes.
-        const entry = ltm.get(id);
+        // existing entry was updated (a content change appends a new version) and
+        // may already be pinned in the prompt cache. Surface it as an update so
+        // session LTM caches are invalidated and durable prompt deltas can replay
+        // the new bytes. `id` is the stable logical_id from tryCreate → resolve
+        // the current version via getByLogical.
+        const entry = ltm.getByLogical(id);
         if (entry) {
           idsToSync.push(id);
           changedEntries.push({
@@ -376,10 +378,13 @@ export function applyOps(
               " [truncated — entry too long]"
             : op.content;
         ltm.update(op.id, { content, confidence: op.confidence });
-        if (op.content !== undefined) idsToSync.push(op.id);
+        // Key on the stable logical_id: a content change appends a new version, so
+        // op.id is now a superseded version id. idsToSync + the delta channel must
+        // reference the logical_id to resolve the current version downstream.
+        if (op.content !== undefined) idsToSync.push(entry.logical_id);
         changedEntries.push({
           op: "updated",
-          id: op.id,
+          id: entry.logical_id,
           category: entry.category,
           title: entry.title,
           content: content ?? prevContent,
@@ -397,7 +402,7 @@ export function applyOps(
         }
         changedEntries.push({
           op: "deleted",
-          id: op.id,
+          id: entry.logical_id,
           category: entry.category,
           title: entry.title,
           prevContent: entry.content,
@@ -408,11 +413,13 @@ export function applyOps(
     }
   }
 
-  // Sync cross-references for created/updated entries
+  // Sync cross-references for created/updated entries. idsToSync holds stable
+  // logical_ids; resolve the current version for its (possibly newly-appended)
+  // content. syncRefs/syncEntityRefs key the refs on the logical_id internally.
   for (const id of idsToSync) {
     ltm.syncRefs(id);
     // Also sync entity references (detect entity mentions in content)
-    const entry = ltm.get(id);
+    const entry = ltm.getByLogical(id);
     if (entry) {
       try {
         entities.syncEntityRefs(id, entry.content);

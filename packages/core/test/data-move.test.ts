@@ -66,8 +66,8 @@ function insertKnowledge(
 ): void {
   db()
     .query(
-      `INSERT INTO knowledge (id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at)
-       VALUES (?, ?, 'pattern', 'Test Knowledge', 'test content', ?, ?, 0.8, ?, ?)`,
+      `INSERT INTO knowledge (id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at, logical_id)
+       VALUES (?, ?, 'pattern', 'Test Knowledge', 'test content', ?, ?, 0.8, ?, ?, ?)`,
     )
     .run(
       id,
@@ -76,6 +76,7 @@ function insertKnowledge(
       opts?.crossProject ? 1 : 0,
       Date.now(),
       Date.now(),
+      id, // logical_id = id, matching create()/production
     );
 }
 

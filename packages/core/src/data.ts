@@ -408,6 +408,18 @@ export function resolveId(
   table: "knowledge" | "distillations",
   prefix: string,
 ): string | null {
+  if (table === "knowledge") {
+    // A2 (#823): the id a user holds is the entry's stable logical_id; the
+    // current version's row id may differ, and the base table holds every
+    // (timestamp-prefix-sharing) version. Resolve the prefix against the
+    // logical_id of CURRENT entries so it stays unique and points at a live entry.
+    const results = db()
+      .query(
+        "SELECT DISTINCT logical_id AS id FROM knowledge_current WHERE logical_id LIKE ? LIMIT 2",
+      )
+      .all(`${prefix}%`) as Array<{ id: string }>;
+    return results.length === 1 ? results[0].id : null;
+  }
   const results = db()
     .query(`SELECT id FROM ${table} WHERE id LIKE ? LIMIT 2`)
     .all(`${prefix}%`) as Array<{ id: string }>;
@@ -503,7 +515,9 @@ export function clearProject(projectPath: string): ClearResult {
   const counts = {
     knowledge: (
       database
-        .query("SELECT COUNT(*) as c FROM knowledge WHERE project_id = ?")
+        .query(
+          "SELECT COUNT(*) as c FROM knowledge_current WHERE project_id = ?",
+        )
         .get(pid) as { c: number }
     ).c,
     temporal: (
@@ -614,7 +628,9 @@ export function deleteProject(projectId: string): ClearResult | null {
   const counts = {
     knowledge: (
       database
-        .query("SELECT COUNT(*) as c FROM knowledge WHERE project_id = ?")
+        .query(
+          "SELECT COUNT(*) as c FROM knowledge_current WHERE project_id = ?",
+        )
         .get(projectId) as { c: number }
     ).c,
     temporal: (
@@ -719,7 +735,7 @@ export function clearKnowledge(projectPath: string): number {
   const pid = ensureProject(projectPath);
   const count = (
     db()
-      .query("SELECT COUNT(*) as c FROM knowledge WHERE project_id = ?")
+      .query("SELECT COUNT(*) as c FROM knowledge_current WHERE project_id = ?")
       .get(pid) as { c: number }
   ).c;
 
@@ -786,9 +802,11 @@ export function clearDistillations(projectPath: string): number {
 
 /** Delete a single knowledge entry. Returns true if found and deleted. */
 export function deleteKnowledge(id: string): boolean {
-  const entry = ltm.get(id);
+  // id may be a current OR superseded version id (or the logical_id == v1 id).
+  // Resolve to the current entry via the stable logical_id (A2, #823).
+  const entry = ltm.get(id) ?? ltm.getByLogical(ltm.logicalIdOf(id));
   if (!entry) return false;
-  ltm.remove(id);
+  ltm.remove(entry.logical_id);
   invalidateProjectsCache();
   invalidateGlobalStatsCache();
   return true;
@@ -1070,7 +1088,7 @@ export function moveSessions(
   const knowledgeCount = (
     database
       .query(
-        `SELECT COUNT(*) as c FROM knowledge WHERE project_id = ? AND source_session IN (${placeholders})`,
+        `SELECT COUNT(*) as c FROM knowledge_current WHERE project_id = ? AND source_session IN (${placeholders})`,
       )
       .get(fromProjectId, ...allIds) as { c: number }
   ).c;
@@ -1173,16 +1191,20 @@ export function reassignKnowledge(
   toProjectPath: string,
   opts?: { gitRemote?: string },
 ): boolean {
-  const entry = ltm.get(knowledgeId);
+  // Resolve to the current entry via the stable logical_id (A2, #823).
+  const entry =
+    ltm.get(knowledgeId) ?? ltm.getByLogical(ltm.logicalIdOf(knowledgeId));
   if (!entry) return false;
 
   const toId = ensureProject(toProjectPath, undefined, opts?.gitRemote);
   if (entry.project_id === toId) return true; // already there
 
   const oldProjectId = entry.project_id;
+  // Move ALL versions of the logical entry so a multi-version entry isn't split
+  // across projects (reviewer NIT).
   db()
-    .query("UPDATE knowledge SET project_id = ? WHERE id = ?")
-    .run(toId, knowledgeId);
+    .query("UPDATE knowledge SET project_id = ? WHERE logical_id = ?")
+    .run(toId, entry.logical_id);
 
   invalidateProjectsCache();
   invalidateGlobalStatsCache();
@@ -1258,7 +1280,9 @@ export function mergeProjects(sourceId: string, targetId: string): MergeResult {
   const counts = {
     knowledge: (
       database
-        .query("SELECT COUNT(*) as c FROM knowledge WHERE project_id = ?")
+        .query(
+          "SELECT COUNT(*) as c FROM knowledge_current WHERE project_id = ?",
+        )
         .get(sourceId) as { c: number }
     ).c,
     messages: (

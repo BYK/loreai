@@ -89,9 +89,9 @@ describe("worker source attribution (v35)", () => {
         workerModelID: "MiniMax-M3",
       });
       expect(id1).toBe(id2);
-      const entry = ltm.get(id1);
+      const entry = ltm.getByLogical(id1); // dedup update() appended a new version
       expect(entry?.content).toBe("second");
-      // Attribution is preserved from the original creator
+      // Attribution is preserved from the original creator (copied forward by appendVersion)
       expect(entry?.worker_provider_id).toBe("anthropic");
       expect(entry?.worker_model_id).toBe("claude-opus-4-6");
     });

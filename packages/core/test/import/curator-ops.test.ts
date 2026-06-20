@@ -96,7 +96,7 @@ describe("applyOps", () => {
     const result = applyOps(ops, { projectPath: PROJECT_PATH });
     expect(result.updated).toBe(1);
 
-    const entry = ltm.get(id);
+    const entry = ltm.getByLogical(id); // update appended a new version
     expect(entry?.content).toBe("New improved content");
   });
 

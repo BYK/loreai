@@ -53,7 +53,7 @@ describe("ltm", () => {
     expect(entry?.cross_project).toBe(1);
   });
 
-  test("remove() tombstones the UUID; clearTombstone() lifts it", () => {
+  test("remove() appends a death-certificate version that tombstones the entry", () => {
     const id = ltm.create({
       projectPath: PROJECT,
       category: "gotcha",
@@ -63,14 +63,14 @@ describe("ltm", () => {
     });
     expect(ltm.isTombstoned(id)).toBe(false);
     ltm.remove(id);
+    // A2: delete = immutable is_deleted version (no physical DELETE). The entry is
+    // gone from the current view, and the death cert prevents .lore.md resurrection.
     expect(ltm.get(id)).toBeNull();
-    // The UUID is now tombstoned so a stale .lore.md can't resurrect it.
+    expect(ltm.getByLogical(id)).toBeNull(); // no current, live version
     expect(ltm.isTombstoned(id)).toBe(true);
-    ltm.clearTombstone(id);
-    expect(ltm.isTombstoned(id)).toBe(false);
   });
 
-  test("update knowledge entry", () => {
+  test("update knowledge entry appends a new current version", () => {
     const id = ltm.create({
       projectPath: PROJECT,
       category: "architecture",
@@ -83,9 +83,11 @@ describe("ltm", () => {
       confidence: 0.9,
     });
 
-    const entry = ltm.get(id);
+    // Content change appended a new version → resolve via the stable logical_id.
+    const entry = ltm.getByLogical(id);
     expect(entry?.content).toContain("Hono");
     expect(entry?.confidence).toBe(0.9);
+    expect(entry?.id).not.toBe(id); // the row id moved to the new version
   });
 
   test("remove knowledge entry", () => {
@@ -283,7 +285,7 @@ describe("ltm — crossProject defaults and dedup", () => {
     });
 
     expect(returnedId).toBe(crossId);
-    const entry = ltm.get(crossId);
+    const entry = ltm.getByLogical(crossId); // update() appended a new version
     expect(entry?.content).toBe("Updated content from project scope");
 
     // No duplicate should exist
@@ -1707,7 +1709,7 @@ describe("ltm — multi-user columns (v29)", () => {
       scope: "project",
     });
     ltm.update(id, { content: "Modified content", updatedBy: "user-xyz-456" });
-    const entry = ltm.get(id);
+    const entry = ltm.getByLogical(id); // content change appended a new version
     expect(entry?.content).toBe("Modified content");
     expect(entry?.updated_by).toBe("user-xyz-456");
   });
@@ -1736,7 +1738,7 @@ describe("ltm — multi-user columns (v29)", () => {
       createdBy: "user-abc-123",
     });
     ltm.update(id, { content: "Modified content" });
-    const entry = ltm.get(id);
+    const entry = ltm.getByLogical(id); // content change appended a new version
     expect(entry?.updated_by).toBeNull();
     expect(entry?.created_by).toBe("user-abc-123");
   });

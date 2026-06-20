@@ -111,19 +111,21 @@ export function create(input: {
   // the caller (importFromFile) already handles duplicate detection by UUID.
   if (!input.id) {
     // First check same project_id
+    // Return the stable logical_id (not the per-version id): update() below
+    // appends a new version, which would supersede the version id we matched.
     const existing = (
       pid !== null
         ? db()
             .query(
-              "SELECT id FROM knowledge_current WHERE project_id = ? AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+              "SELECT logical_id FROM knowledge_current WHERE project_id = ? AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
             )
             .get(pid, input.title)
         : db()
             .query(
-              "SELECT id FROM knowledge_current WHERE project_id IS NULL AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+              "SELECT logical_id FROM knowledge_current WHERE project_id IS NULL AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
             )
             .get(input.title)
-    ) as { id: string } | null;
+    ) as { logical_id: string } | null;
 
     // Build the update payload — forward confidence when the caller provided one
     // so the curator's scoring intent isn't silently dropped on dedup.
@@ -133,21 +135,21 @@ export function create(input: {
     };
 
     if (existing) {
-      update(existing.id, dedupUpdate);
-      return existing.id;
+      update(existing.logical_id, dedupUpdate);
+      return existing.logical_id;
     }
 
     // Also check cross-project entries — prevents creating project-scoped
     // duplicates of entries that already exist as cross-project knowledge.
     const crossExisting = db()
       .query(
-        "SELECT id FROM knowledge_current WHERE cross_project = 1 AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+        "SELECT logical_id FROM knowledge_current WHERE cross_project = 1 AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
       )
-      .get(input.title) as { id: string } | null;
+      .get(input.title) as { logical_id: string } | null;
 
     if (crossExisting) {
-      update(crossExisting.id, dedupUpdate);
-      return crossExisting.id;
+      update(crossExisting.logical_id, dedupUpdate);
+      return crossExisting.logical_id;
     }
 
     // Fuzzy dedup: check for title-similar entries via FTS5 + word-overlap.
@@ -159,8 +161,10 @@ export function create(input: {
       projectId: pid,
     });
     if (fuzzyMatch) {
-      update(fuzzyMatch.id, dedupUpdate);
-      return fuzzyMatch.id;
+      // findFuzzyDuplicate returns a version id; resolve to the stable logical_id.
+      const logicalId = logicalIdOf(fuzzyMatch.id);
+      update(logicalId, dedupUpdate);
+      return logicalId;
     }
   }
 
@@ -223,13 +227,6 @@ export function appendVersion(
     isDeleted?: boolean;
   } = {},
 ): string | null {
-  const cur = db()
-    .query(
-      "SELECT id FROM knowledge WHERE logical_id = ? AND is_current = 1 LIMIT 1",
-    )
-    .get(logicalId) as { id: string } | undefined;
-  if (!cur) return null;
-
   const newId = uuidv7();
   const now = Date.now();
   // Atomic insert-new + demote-old (Seer #839): a crash between the two
@@ -237,8 +234,15 @@ export function appendVersion(
   // DEMOTE FIRST, then insert — the partial UNIQUE index idx_knowledge_one_current
   // (logical_id WHERE is_current=1) is checked per-statement, so inserting a
   // second current row before demoting would violate it. The forward-copy SELECT
-  // still reads the (now-demoted) row by id. The whole pair runs in one txn.
-  withTransaction(() => {
+  // still reads the (now-demoted) row by id. The current-row lookup is INSIDE the
+  // txn so it can't race a concurrent append (no TOCTOU).
+  const ok = withTransaction(() => {
+    const cur = db()
+      .query(
+        "SELECT id FROM knowledge WHERE logical_id = ? AND is_current = 1 LIMIT 1",
+      )
+      .get(logicalId) as { id: string } | undefined;
+    if (!cur) return false;
     db().query("UPDATE knowledge SET is_current = 0 WHERE id = ?").run(cur.id);
     db()
       .query(
@@ -267,9 +271,10 @@ export function appendVersion(
         overrides.isDeleted ? 1 : 0,
         cur.id,
       );
+    return true;
   });
 
-  return newId;
+  return ok ? newId : null;
 }
 
 /**
@@ -353,12 +358,17 @@ export function update(
     sensitivity?: Sensitivity;
   },
 ) {
+  // A2 (#823): content is IMMUTABLE per version. A content change appends a new
+  // version (copying confidence/metadata forward); confidence/updated_by/
+  // sensitivity are MUTABLE metadata applied to the current version in place.
+  // `id` may be a current OR superseded version id — resolve to the logical_id.
+  const logicalId = logicalIdOf(id);
+  if (input.content !== undefined) {
+    appendVersion(logicalId, { content: input.content });
+  }
+
   const sets: string[] = [];
   const params: unknown[] = [];
-  if (input.content !== undefined) {
-    sets.push("content = ?");
-    params.push(input.content);
-  }
   if (input.confidence !== undefined) {
     // Clamp to [0.0, 1.0] — an LLM-provided value outside this range would
     // give disproportionate scoring weight (>1) or silently soft-delete (<0.2).
@@ -380,52 +390,60 @@ export function update(
   // → reset the decay clock so a freshly-touched entry never ages out (v48).
   sets.push("last_reinforced_at = ?");
   params.push(now);
-  params.push(id);
+  params.push(logicalId);
+  // Target the CURRENT version (the freshly-appended one if content changed).
   db()
-    .query(`UPDATE knowledge SET ${sets.join(", ")} WHERE id = ?`)
+    .query(
+      `UPDATE knowledge SET ${sets.join(", ")} WHERE logical_id = ? AND is_current = 1`,
+    )
     .run(...(params as [string, ...string[]]));
 
-  // Re-embed when content changes (fire-and-forget)
+  // Re-embed the new current version when content changed (fire-and-forget).
   if (embedding.isAvailable() && input.content !== undefined) {
-    const entry = get(id);
+    const entry = getByLogical(logicalId);
     if (entry) {
-      embedding.embedKnowledgeEntry(id, entry.title, input.content);
+      embedding.embedKnowledgeEntry(entry.id, entry.title, entry.content);
     }
   }
 }
 
 export function remove(id: string) {
-  // Record a tombstone BEFORE deleting so a stale .lore.md re-import can't
-  // resurrect this entry (which would thrash with the next consolidation pass —
-  // delete → re-import recreates → delete again, busting the prompt cache each
-  // cycle). The tombstone + transfer metrics key on the stable `logical_id`
-  // (which `.lore.md` markers now carry), not the per-version row id. Capture
-  // both while the row still exists.
-  const row = db()
-    .query("SELECT project_id, logical_id FROM knowledge WHERE id = ?")
-    .get(id) as { project_id: string | null; logical_id: string } | null;
-  if (row) {
-    db()
-      .query(
-        `INSERT INTO knowledge_tombstones (id, project_id, deleted_at)
-         VALUES (?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET deleted_at = excluded.deleted_at`,
-      )
-      .run(row.logical_id, row.project_id, Date.now());
-    // Clean up transfer metrics before deleting the entry (no FK CASCADE).
-    db()
-      .query("DELETE FROM knowledge_transfers WHERE knowledge_id = ?")
-      .run(row.logical_id);
-  }
-  db().query("DELETE FROM knowledge WHERE id = ?").run(id);
+  // A2 (#823): delete = append an immutable is_deleted "death-certificate"
+  // version (ordinary append, no physical DELETE). The death cert IS the
+  // tombstone + resurrection guard: knowledge_current excludes it, the FTS
+  // triggers drop its posting, and isTombstoned() detects it so a stale .lore.md
+  // re-import can't resurrect the entry. Keyed on the stable logical_id.
+  const logicalId = logicalIdOf(id);
+  if (!getByLogical(logicalId)) return; // already deleted or unknown — no-op
+  appendVersion(logicalId, { isDeleted: true });
+  // The row is NOT physically deleted, so FK ON DELETE CASCADE no longer fires —
+  // clean cross-references explicitly, all keyed on the logical_id.
+  db()
+    .query("DELETE FROM knowledge_entity_refs WHERE knowledge_id = ?")
+    .run(logicalId);
+  db()
+    .query("DELETE FROM knowledge_refs WHERE from_id = ? OR to_id = ?")
+    .run(logicalId, logicalId);
+  db()
+    .query("DELETE FROM knowledge_transfers WHERE knowledge_id = ?")
+    .run(logicalId);
 }
 
-/** True when the given knowledge UUID was previously deleted (tombstoned). */
+/** True when the entry for this logical_id was deleted (tombstoned). */
 export function isTombstoned(id: string): boolean {
-  const row = db()
+  // A2: the current version is an is_deleted death certificate.
+  const deathCert = db()
+    .query(
+      "SELECT 1 FROM knowledge WHERE logical_id = ? AND is_current = 1 AND is_deleted = 1 LIMIT 1",
+    )
+    .get(id) as { 1: number } | null;
+  if (deathCert) return true;
+  // Legacy: entries deleted before the append-only flip left a tombstone row and
+  // no death-cert version (they were physically deleted).
+  const legacy = db()
     .query("SELECT 1 FROM knowledge_tombstones WHERE id = ?")
     .get(id) as { 1: number } | null;
-  return row != null;
+  return legacy != null;
 }
 
 /**
@@ -1728,6 +1746,20 @@ export function getByLogical(logicalId: string): KnowledgeEntry | null {
 }
 
 /**
+ * Resolve any knowledge id — a current version id, a SUPERSEDED version id, or a
+ * logical_id — to its stable logical_id. Reads the BASE table (not the view) so
+ * it still resolves a superseded version; falls back to the input id if unknown
+ * (so ref writers always have a value). This is the canonical resolver the flip
+ * (update/remove/syncRefs) uses to stay correct once a version is superseded.
+ */
+export function logicalIdOf(id: string): string {
+  const row = db()
+    .query("SELECT logical_id FROM knowledge WHERE id = ?")
+    .get(id) as { logical_id: string } | null;
+  return row?.logical_id ?? id;
+}
+
+/**
  * Read the worker source attribution for a knowledge entry. Returns null for
  * legacy entries created before v35 (no attribution recorded) or for entries
  * imported from outside the worker pipeline (manual `.lore.md` edits, etc).
@@ -1789,9 +1821,10 @@ const WIKI_LINK_RE = /\[\[([^\]]+)\]\]/g;
  */
 export function resolveRef(ref: string): string | null {
   if (UUID_RE.test(ref)) {
-    // The [[uuid]] in content may be either a logical_id or a (possibly
-    // superseded) version id — resolve either way, return the stable logical_id.
-    const entry = getByLogical(ref) ?? get(ref);
+    // The [[uuid]] in content may be a logical_id or a (possibly superseded)
+    // version id — resolve via the base table, then confirm the target still has
+    // a current, non-deleted version before linking to it.
+    const entry = getByLogical(logicalIdOf(ref));
     return entry ? entry.logical_id : null;
   }
   // Title search — FTS5 best match
@@ -1819,11 +1852,12 @@ export function extractRefs(content: string): string[] {
  * Clears existing outgoing refs for this entry first.
  */
 export function syncRefs(entryId: string): number {
-  // entryId may be a current- or (post-2b) superseded version id; key the refs
-  // on the stable logical_id so they survive version appends.
-  const entry = getByLogical(entryId) ?? get(entryId);
+  // entryId may be a current OR superseded version id (the curator passes the id
+  // it read, which update() then supersedes). Resolve to the logical_id via the
+  // base table, then fetch the current version's content to extract refs from.
+  const fromLogical = logicalIdOf(entryId);
+  const entry = getByLogical(fromLogical);
   if (!entry) return 0;
-  const fromLogical = entry.logical_id;
 
   // Clear existing outgoing refs for this entry
   db().query("DELETE FROM knowledge_refs WHERE from_id = ?").run(fromLogical);

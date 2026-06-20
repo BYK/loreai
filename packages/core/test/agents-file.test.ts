@@ -608,7 +608,7 @@ describe("importFromFile — known ID tracking", () => {
 
     importFromFile({ projectPath: PROJECT, filePath: AGENTS_FILE });
 
-    const entry = ltm.get(id);
+    const entry = ltm.getByLogical(id); // import edit appended a new version
     expect(entry?.content).toContain("API keys");
   });
 
@@ -1333,7 +1333,7 @@ describe("importLoreFile", () => {
 
     importLoreFile(PROJECT);
 
-    const entry = ltm.get(id);
+    const entry = ltm.getByLogical(id); // import edit appended a new version
     expect(entry?.content).toContain("API keys");
   });
 
@@ -1505,7 +1505,7 @@ describe("migration from AGENTS.md to .lore.md", () => {
     expect(shouldImportLoreFile(PROJECT)).toBe(true);
 
     importLoreFile(PROJECT);
-    const entry = ltm.get(remoteId);
+    const entry = ltm.getByLogical(remoteId); // import edit appended a new version
     expect(entry?.content).toContain("updated");
   });
 

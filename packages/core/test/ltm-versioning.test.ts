@@ -147,10 +147,10 @@ describe("A2 sub-PR 1: append-only knowledge scaffolding", () => {
     expect(ltm.appendVersion("does-not-exist")).toBeNull();
   });
 
-  test("in-place update() stays version 1 and FTS tracks the new content", () => {
-    // sub-PR 1 does NOT rewire update() onto appendVersion — it is still an
-    // in-place mutation. This guards that the current-aware triggers handle the
-    // production write path (delete old FTS + insert new) without corruption.
+  test("update() with a content change appends an immutable new version", () => {
+    // sub-PR 2b-2b rewires update() onto appendVersion: a content change appends
+    // a new current version; the prior version is preserved (immutable, demoted)
+    // and FTS indexes only the current content.
     const id = ltm.create({
       projectPath: PROJECT,
       scope: "project",
@@ -161,11 +161,14 @@ describe("A2 sub-PR 1: append-only knowledge scaffolding", () => {
     expect(ftsHits("inplaceoldtok")).toBeGreaterThan(0);
     ltm.update(id, { content: "inplacenewtok" });
     const v = versions(id);
-    expect(v).toHaveLength(1); // in-place: no new version row
+    expect(v).toHaveLength(2); // append: a new version row
     expect(v[0].version).toBe(1);
-    expect(v[0].is_current).toBe(1);
+    expect(v[0].is_current).toBe(0); // prior version demoted...
+    expect(v[0].content).toBe("inplaceoldtok"); // ...but its content is immutable
+    expect(v[1].version).toBe(2);
+    expect(v[1].is_current).toBe(1);
     expect(current(id)?.content).toBe("inplacenewtok");
-    expect(ftsHits("inplaceoldtok")).toBe(0);
+    expect(ftsHits("inplaceoldtok")).toBe(0); // superseded content not searchable
     expect(ftsHits("inplacenewtok")).toBeGreaterThan(0);
   });
 

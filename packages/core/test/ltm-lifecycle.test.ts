@@ -11,7 +11,9 @@ function clearKnowledge() {
 }
 
 function reinforcedAt(id: string): number | null {
-  return ltm.get(id)?.last_reinforced_at ?? null;
+  // Resolve by logical_id: a content update() appends a new current version, so
+  // the decay-clock reset lives on the current version, not the original row id.
+  return ltm.getByLogical(id)?.last_reinforced_at ?? null;
 }
 
 describe("ltm reinforcement", () => {
