@@ -121,12 +121,23 @@ export function shouldReprobeEmbedCap(
 /**
  * Compute the next cap for an upward re-probe: one gentle step up (the inverse
  * of the ×0.7 backoff ≈ ×1.43), bounded by what the memory model says the now-
- * larger free pool supports. Never steps *down* — if the model ceiling is below
- * the current cap (shouldn't happen once the gate has fired), the cap is left
- * unchanged. A too-optimistic step is corrected by the OOM backoff.
+ * larger free pool supports. Never steps *down* — if the ceiling is below the
+ * current cap, the cap is left unchanged. A too-optimistic step is corrected by
+ * the OOM backoff.
+ *
+ * `knownBadCap` (the highest cap that has OOMed in this process, 0 = none) is a
+ * hard ceiling: a rising `os.freemem()` does not guarantee the WASM heap can
+ * actually grow that far (fragmentation, racing allocations), so we never
+ * re-probe *up to or past* a cap that already failed. A process restart
+ * re-evaluates from scratch and can exceed it if memory genuinely grew.
  */
-export function reprobeEmbedCap(cap: number, freeBytes: number): number {
+export function reprobeEmbedCap(
+  cap: number,
+  freeBytes: number,
+  knownBadCap = 0,
+): number {
   const stepped = Math.round(cap / EMBED_BACKOFF_FACTOR);
-  const ceiling = memoryModelEmbedCap(freeBytes);
+  let ceiling = memoryModelEmbedCap(freeBytes);
+  if (knownBadCap > 0) ceiling = Math.min(ceiling, knownBadCap - 1);
   return clampEmbedCap(Math.max(cap, Math.min(stepped, ceiling)));
 }

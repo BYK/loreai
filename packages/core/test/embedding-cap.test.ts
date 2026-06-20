@@ -177,4 +177,13 @@ describe("reprobeEmbedCap", () => {
   it("stays clamped at the model max", () => {
     expect(reprobeEmbedCap(MODEL_MAX_TOKENS, 64 * GB)).toBe(MODEL_MAX_TOKENS);
   });
+
+  it("never re-probes up to or past a known-bad cap", () => {
+    // Huge free pool would step 2000 → 2857, but 2400 OOMed before → ceiling 2399.
+    expect(reprobeEmbedCap(2000, 64 * GB, 2400)).toBe(2399);
+    // The gentle step lands below the known-bad ceiling → unaffected.
+    expect(reprobeEmbedCap(1000, 64 * GB, 5000)).toBe(Math.round(1000 / 0.7));
+    // Already at ceiling−1 → no upward movement (never re-OOMs the same cap).
+    expect(reprobeEmbedCap(2399, 64 * GB, 2400)).toBe(2399);
+  });
 });

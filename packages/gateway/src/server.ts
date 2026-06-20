@@ -357,7 +357,8 @@ export async function startServer(config: GatewayConfig): Promise<{
     bootstrapDailySpend();
   }
 
-  // Surface embedding-worker OOM backoff/latch events to Sentry (once per process).
+  // Wire embedding-worker OOM backoff/latch events to Sentry. Idempotent: the
+  // hook is assigned (not stacked), so a repeat startServer() is harmless.
   setupEmbeddingFailureCapture();
 
   // Shared fetch handler for all server instances.

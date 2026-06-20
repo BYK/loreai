@@ -419,6 +419,10 @@ class LocalProvider implements EmbeddingProvider {
   private capFreememAtLearn: number;
   /** Timestamp (ms) of the last upward re-probe check, for throttling. */
   private lastReprobeAt = 0;
+  /** Highest cap (tokens) that has OOMed in this process, or 0 if none. The
+   *  upward re-probe never climbs to or past it — a rising os.freemem() does not
+   *  prove the WASM heap can grow that far. Cleared only by a process restart. */
+  private lastOomCap = 0;
 
   constructor(modelId: string, dimensions: number) {
     this.modelId = modelId;
@@ -660,7 +664,7 @@ class LocalProvider implements EmbeddingProvider {
     this.lastReprobeAt = now;
     const free = freemem();
     if (!shouldReprobeEmbedCap(free, this.capFreememAtLearn)) return;
-    const next = reprobeEmbedCap(this.maxTokens, free);
+    const next = reprobeEmbedCap(this.maxTokens, free, this.lastOomCap);
     if (next <= this.maxTokens) return;
     const prev = this.maxTokens;
     this.maxTokens = next;
@@ -731,6 +735,10 @@ class LocalProvider implements EmbeddingProvider {
     const free = freemem();
     const capAfter = backoffEmbedCap(capBefore);
     this.maxTokens = capAfter;
+    // Remember the cap that just OOMed so the upward re-probe never climbs back
+    // to or past it within this process (a rising freemem doesn't prove the
+    // heap can grow that far).
+    this.lastOomCap = Math.max(this.lastOomCap, capBefore);
     // Anchor the re-probe baseline at OOM-time free memory: only climb back up
     // once memory has genuinely recovered (≥ EMBED_REPROBE_RATIO × this).
     this.capFreememAtLearn = free;
@@ -759,11 +767,24 @@ class LocalProvider implements EmbeddingProvider {
     try {
       await this.ensureWorker();
     } catch {
-      // Respawn failed — ensureWorker()'s handlers already rejected pending.
+      // A *synchronous* respawn failure (e.g. `new Worker(...)` throws) rejects
+      // initPromise before any worker event handler is attached, so nothing
+      // else will ever settle these requests. Reject them here to avoid a hung
+      // caller — the local embed path has no timeout. (Asynchronous spawn
+      // failures are already settled by the worker error/exit/init-error
+      // handlers, which clear the map, so this loop is then a no-op.)
+      for (const [, p] of this.pendingRequests) {
+        p.reject(
+          new LocalProviderUnavailableError(
+            "embedding worker respawn failed after OOM backoff",
+          ),
+        );
+      }
+      this.pendingRequests.clear();
       return;
     }
     const worker = this.worker;
-    if (!worker) return; // raced with another exit
+    if (!worker) return; // raced with another exit — that handler owns pending
     for (const [, p] of this.pendingRequests) {
       // Re-submit at the lowered cap so the retry doesn't re-OOM at the old one.
       p.payload.maxTokens = this.maxTokens;
