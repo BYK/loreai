@@ -1,9 +1,15 @@
-// Mutation testing — issue #832.
+// Mutation testing — issue #832. ⚠️ EXPERIMENTAL — results are NOT reliable here.
 //
 // Measures whether our tests CONSTRAIN behavior (not merely pass) on the
 // high-risk STATEFUL modules where review — not tests — caught the recent bugs
 // (sync prune-floor wedge #828, tier residue #828, decay/evict edge cases #816).
-// A surviving mutant = a line the suite does not pin = a named test gap.
+// A surviving mutant SHOULD mean a line the suite does not pin.
+//
+// ⚠️ KNOWN BUG: on Stryker 9.6.1 + Vitest 4.1.8 the runner mis-attributes test
+// results and reports FALSE SURVIVORS (upstream stryker-mutator/stryker-js#5928,
+// still reproducing on these exact versions; tracked in #843). ALWAYS hand-verify
+// a survivor (apply the mutant, run the test file) before acting on it. See
+// quality/MUTATION_TESTING.md.
 //
 // Run nightly / on-demand; NOT per-PR (slow). No hard gate while we establish a
 // baseline: `thresholds.break` is null, so the run never fails CI — we record
