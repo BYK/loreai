@@ -93,26 +93,32 @@ describe("A2 sub-PR 2b-2a: append-only invariants + partial-mirror obligations",
     expect(match("gammaword")).toBe(0); // deleted — not indexed
   });
 
-  test("decayProject and pruneOversized only touch current versions", () => {
-    const id = mk("WriteSiteEntry", "short");
-    // append a superseded version that is oversized; only the CURRENT (short) one
-    // should be exempt from pruneOversized, and the superseded must stay untouched.
-    const big = "x".repeat(5000);
-    db()
-      .query("UPDATE knowledge SET content = ? WHERE id = ? AND is_current = 0")
-      .run(big, id); // (no superseded yet — make one first)
-    const v2 = ltm.appendVersion(id, { content: big }); // current is now oversized
+  const confOf = (where: string, ...args: unknown[]) =>
+    (
+      db()
+        .query(`SELECT confidence FROM knowledge WHERE ${where}`)
+        .get(...(args as [])) as { confidence: number }
+    ).confidence;
+
+  test("pruneOversized never touches a superseded (oversized) version", () => {
+    // v1 is oversized, v2 (current) is small. Discriminating: without the
+    // is_current filter, pruneOversized would zero the superseded v1.
+    const id = mk("OversizeEntry", "x".repeat(5000));
+    const v2 = ltm.appendVersion(id, { content: "small" });
     ltm.pruneOversized(1000);
-    // current (oversized) zeroed; the v1 superseded row must NOT be touched.
-    const curConf = db()
-      .query("SELECT confidence FROM knowledge WHERE id = ?")
-      .get(v2) as { confidence: number };
-    expect(curConf.confidence).toBe(0);
-    const supConf = db()
-      .query(
-        "SELECT confidence FROM knowledge WHERE logical_id = ? AND is_current = 0",
-      )
-      .get(id) as { confidence: number };
-    expect(supConf.confidence).toBe(1.0); // untouched
+    expect(confOf("id = ?", v2)).toBe(1.0); // current is small → not oversized
+    expect(confOf("logical_id = ? AND is_current = 0", id)).toBe(1.0); // superseded → untouched
+  });
+
+  test("decayProject decays only the current version, never a superseded one", () => {
+    const id = mk("DecayEntry", "body");
+    const v2 = ltm.appendVersion(id, { content: "body2" });
+    // A future `now` makes both versions age past the decay grace window without
+    // touching timestamps; the interval gate (last_decay_at=0) also opens.
+    const future = Date.now() + 60 * 24 * 60 * 60 * 1000;
+    const decayed = ltm.decayProject(PROJECT, future);
+    expect(decayed).toBe(1); // exactly the current version
+    expect(confOf("id = ?", v2)).toBeLessThan(1.0); // current decayed
+    expect(confOf("logical_id = ? AND is_current = 0", id)).toBe(1.0); // superseded untouched
   });
 });

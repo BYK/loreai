@@ -329,6 +329,38 @@ describe("applyRemoteUpsert / applyRemoteDelete", () => {
     rebuildFts("knowledge_fts"); // must not throw
   });
 
+  test("backfills logical_id = id for a pulled knowledge row, scoped to that row only", () => {
+    // Remote has no logical_id column yet (sub-PR 3), so pulled rows land NULL;
+    // applyRemoteUpsert backfills each row's OWN id and touches nothing else.
+    setTeamConfig("sync.enabled", "1");
+    const pid = ensureProject("/tmp/lore-sync-backfill");
+    const base = { project_id: pid, category: "pattern", content: "c" };
+    applyRemoteUpsert("knowledge", {
+      id: "kA",
+      title: "A",
+      created_at: now(),
+      updated_at: now(),
+      ...base,
+    });
+    applyRemoteUpsert("knowledge", {
+      id: "kB",
+      title: "B",
+      created_at: now(),
+      updated_at: now(),
+      ...base,
+    });
+    // logical_id is not a synced column, so read it directly.
+    const logicalOf = (id: string) =>
+      (
+        db().query("SELECT logical_id FROM knowledge WHERE id = ?").get(id) as {
+          logical_id: string;
+        }
+      ).logical_id;
+    expect(logicalOf("kA")).toBe("kA"); // backfilled to its OWN id
+    expect(logicalOf("kB")).toBe("kB");
+    expect(logicalOf("kA")).not.toBe(logicalOf("kB")); // no cross-row contamination
+  });
+
   test("delete removes the row without enqueuing the outbox", () => {
     setTeamConfig("sync.enabled", "1");
     withApplying(() => insertKnowledge("kd", "T", "C"));
