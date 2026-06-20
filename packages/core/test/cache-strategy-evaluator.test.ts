@@ -1,12 +1,51 @@
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, beforeAll, describe, expect, test } from "vitest";
+import { ensureProject } from "../src/db";
 import {
+  calibrate,
   evaluateCacheStrategy,
   evictSession,
   getCacheSizeSnapshot,
   getCacheStrategy,
   setCacheSizeSnapshot,
   setCachePricing,
+  setModelLimits,
+  transform,
 } from "../src/gradient";
+import type { LoreMessage, LoreMessageWithParts } from "../src/types";
+
+const PROJECT = "/tmp/econ-evaluator-test";
+
+function makeMsg(
+  id: string,
+  role: "user" | "assistant",
+  text: string,
+  sessionID: string,
+): LoreMessageWithParts {
+  const info = {
+    id,
+    sessionID,
+    role,
+    time: { created: Date.now() },
+    ...(role === "user"
+      ? { agent: "build" }
+      : { parentID: `parent-${id}`, mode: "build", cost: 0 }),
+    modelID: "claude-sonnet-4-20250514",
+    providerID: "anthropic",
+  } as unknown as LoreMessage;
+  return {
+    info,
+    parts: [
+      {
+        id: `part-${id}`,
+        sessionID,
+        messageID: id,
+        type: "text",
+        text,
+        time: { start: Date.now(), end: Date.now() },
+      },
+    ],
+  };
+}
 
 // Per-token pricing with a 12x miss premium (read=1e-6, write=12e-6).
 const PRICING = { readPerToken: 1e-6, writePerToken: 12e-6 };
@@ -104,5 +143,51 @@ describe("cache-strategy evaluator (single entry point)", () => {
       expectedFutureTurns: 3,
     });
     expect(result?.confident).toBe(false);
+  });
+
+  test("evaluate on an unknown session creates no state entry (no leak)", () => {
+    const id = sid();
+    evaluateCacheStrategy(id, {
+      pReturn: 0.9,
+      expectedCycles: 1,
+      expectedFutureTurns: 3,
+    });
+    // A non-creating read: the warmer must never materialize a core session.
+    expect(getCacheSizeSnapshot(id)).toBeNull();
+    expect(getCacheStrategy(id)).toBeNull();
+  });
+});
+
+describe("transform writes the size snapshot end-to-end", () => {
+  beforeAll(() => {
+    ensureProject(PROJECT);
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0); // no system-prompt overhead in unit tests
+  });
+
+  test("a layer-0 transform populates getCacheSizeSnapshot (compressed === full)", () => {
+    const session = `econ-e2e-${Date.now()}`;
+    // Before any transform there is no snapshot.
+    expect(getCacheSizeSnapshot(session)).toBeNull();
+
+    const messages = [
+      makeMsg("e2e-1", "user", "Hello, how are you today?", session),
+      makeMsg("e2e-2", "assistant", "I'm ready to help.", session),
+    ];
+    const result = transform({
+      messages,
+      projectPath: PROJECT,
+      sessionID: session,
+    });
+    expect(result.layer).toBe(0);
+
+    // The transform wrote the gradient's own size estimate; with no compaction
+    // evaluated on this small layer-0 turn, compressed === full.
+    const snap = getCacheSizeSnapshot(session);
+    expect(snap).not.toBeNull();
+    expect(snap?.full).toBeGreaterThan(0);
+    expect(snap?.compressed).toBe(snap?.full);
+
+    evictSession(session);
   });
 });

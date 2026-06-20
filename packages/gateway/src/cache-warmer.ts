@@ -1261,7 +1261,11 @@ export function shouldWarm(
         writePerToken: cacheMissCostPerMTok / 1_000_000,
       },
     );
-    if (shadow?.confident) {
+    // Only log near a real warm decision (within the warmup margin of the
+    // current TTL window), not on every tick while the cache is still fresh —
+    // keeps the shadow measurement readable without dropping any decision point.
+    const inWarmupMargin = elapsed % ttlMs >= ttlMs - warmupMarginMs;
+    if (shadow?.confident && inWarmupMargin) {
       const snap = getCacheSizeSnapshot(state.sessionID);
       const apiActual =
         (state.cacheAnalytics?.lastCacheRead ?? 0) +

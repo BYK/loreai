@@ -2465,6 +2465,13 @@ function transformInner(input: {
   // from one place. Baseline assumes no compaction (compressed === full); the
   // tier gate below refines `cacheSizeCompressed` when it actually evaluates a
   // compression target.
+  //
+  // KNOWN GAP (shadow-only, PR2a): the refine ONLY fires on the layer-0 tier
+  // gate. Sessions held at layer >= 1 by the sticky/prefix-floor/post-idle/
+  // first-sight-large guards below bypass it, so for an already-compressing
+  // session `cacheSizeCompressed` stays == full and the shadow under-reports
+  // real compaction savings. Harmless while we only LOG; PR2b MUST source a real
+  // compressed target for the layer >= 1 paths before it acts on cool-bust.
   if (sid) {
     sessState.cacheSizeFull = Math.max(0, Math.round(layer0Input));
     sessState.cacheSizeCompressed = sessState.cacheSizeFull;
@@ -2547,12 +2554,11 @@ function transformInner(input: {
     );
     // Refine the shared-economics snapshot with the real compression target so
     // the warmer's cool-bust math uses the same compressed size this gate does.
-    if (sid) {
-      sessState.cacheSizeCompressed = Math.max(
-        0,
-        Math.min(compressedEstimate, sessState.cacheSizeFull),
-      );
-    }
+    // (Already inside a `… && sid` block, so the session state exists.)
+    sessState.cacheSizeCompressed = Math.max(
+      0,
+      Math.min(compressedEstimate, sessState.cacheSizeFull),
+    );
     if (
       !shouldCompress(Math.round(layer0Input), compressedEstimate, busts, {
         freeWrite,
