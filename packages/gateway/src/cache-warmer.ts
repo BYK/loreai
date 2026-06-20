@@ -266,7 +266,18 @@ export function isCircuitBreakerTripped(
   return true;
 }
 
-/** Snapshot of a bucket's circuit breaker state for dashboard rendering. */
+/**
+ * Snapshot of a bucket's circuit breaker state for dashboard rendering.
+ *
+ * Pure read — never mutates the map or persists (unlike isCircuitBreakerTripped,
+ * which prunes the entry on decay). A tripped bucket past its decay window is
+ * reported as fully recovered (tripped:false, failures:0, trippedAt:0); the
+ * stale entry is reclaimed by the idle sweep or the next isCircuitBreakerTripped
+ * call, not here. Computing decay inline (rather than calling
+ * isCircuitBreakerTripped and then re-reading the entry) avoids an
+ * order-of-operations hazard where the just-deleted entry would read back as
+ * trippedAt:0.
+ */
 export function getCircuitBreakerStatus(
   bucketKey: string,
   now: number = Date.now(),
@@ -277,13 +288,22 @@ export function getCircuitBreakerStatus(
   trippedAt: number;
 } {
   ensureCircuitBreakersLoaded();
-  const tripped = isCircuitBreakerTripped(bucketKey, now);
   const entry = circuitBreakers.get(bucketKey);
+  const decayed =
+    !!entry?.tripped && now - entry.trippedAt >= CIRCUIT_BREAKER_DECAY_MS;
+  if (!entry || decayed) {
+    return {
+      tripped: false,
+      failures: 0,
+      maxFailures: CIRCUIT_BREAKER_MAX_FAILURES,
+      trippedAt: 0,
+    };
+  }
   return {
-    tripped,
-    failures: entry?.failures ?? 0,
+    tripped: entry.tripped,
+    failures: entry.failures,
     maxFailures: CIRCUIT_BREAKER_MAX_FAILURES,
-    trippedAt: entry?.trippedAt ?? 0,
+    trippedAt: entry.tripped ? entry.trippedAt : 0,
   };
 }
 

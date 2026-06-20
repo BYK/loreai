@@ -659,6 +659,36 @@ describe("circuit breaker", () => {
     expect(getCircuitBreakerStatus(BUCKET).failures).toBe(0);
   });
 
+  test("getCircuitBreakerStatus is a pure read that handles decay on its own", () => {
+    const bad = makeWarmupResult({
+      cacheReadTokens: 0,
+      cacheCreationTokens: 50000,
+    });
+    const t0 = 9_000_000;
+    for (let i = 0; i < 3; i++) checkCircuitBreaker(bad, BUCKET, true, t0);
+
+    // In-window: reports tripped + the original trippedAt.
+    const live = getCircuitBreakerStatus(BUCKET, t0);
+    expect(live.tripped).toBe(true);
+    expect(live.trippedAt).toBe(t0);
+    expect(live.failures).toBe(3);
+
+    // Past the decay window: reported as fully recovered WITHOUT a preceding
+    // isCircuitBreakerTripped call to clear it (no reliance on a delete
+    // side-effect), and without losing the timestamp to a mid-function delete.
+    const decayed = getCircuitBreakerStatus(
+      BUCKET,
+      t0 + CIRCUIT_BREAKER_DECAY_MS,
+    );
+    expect(decayed.tripped).toBe(false);
+    expect(decayed.trippedAt).toBe(0);
+    expect(decayed.failures).toBe(0);
+
+    // It must NOT have mutated state: an in-window query still sees the trip.
+    expect(getCircuitBreakerStatus(BUCKET, t0).tripped).toBe(true);
+    expect(getCircuitBreakerSummary(t0).trippedCount).toBe(1);
+  });
+
   test("resetCircuitBreaker(bucket) clears a single bucket", () => {
     const bad = makeWarmupResult({
       cacheReadTokens: 0,
