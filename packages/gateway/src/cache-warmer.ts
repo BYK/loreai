@@ -30,6 +30,9 @@ import {
   projectId,
   getKV,
   setKV,
+  evaluateCacheStrategy,
+  strategyWantsWarming,
+  getCacheSizeSnapshot,
 } from "@loreai/core";
 import type {
   InterTurnHistogram,
@@ -139,6 +142,14 @@ export const MIN_SESSION_HIT_RATE = 0.25;
  *  while writing ~550K every time. Distinct from MIN_SESSION_HIT_RATE, which
  *  measures user-return probability, not write efficiency. */
 export const MIN_WRITE_EFFICIENCY = 0.2;
+/**
+ * Shadow-mode (PR2a) cap on the `expectedFutureTurns` proxy fed into the shared
+ * cache-economics evaluator. Until PR2b derives a principled mean-residual-life
+ * estimate, we use "turns seen so far" (a session that has run N turns is, on
+ * average, about halfway) capped here so a single very long session doesn't
+ * dominate the ongoing-cost term while we are only MEASURING. Behavior-neutral.
+ */
+export const SHADOW_FUTURE_TURNS_CAP = 50;
 /** Minimum number of recorded warmup-efficiency samples before the
  *  write-efficiency gate engages (avoid acting on one noisy sample). */
 export const MIN_WARMUPS_FOR_EFFICIENCY_CHECK = 3;
@@ -1227,6 +1238,46 @@ export function shouldWarm(
     cacheReadCostPerMTok,
     cacheMissCostPerMTok,
   );
+
+  // --- Shared cache-economics: SHADOW evaluation (measure-only, PR2a) ---
+  // Run the single core entry point and LOG the unified strategy next to the
+  // legacy decision. No behavior change: shouldWarm still returns its existing
+  // result below. This lets us watch, on real sessions, whether the shared model
+  // agrees with reality (and cross-check the gradient size estimate against the
+  // real API token count) before PR2b hands it the wheel.
+  {
+    const expectedCycles = expectedWarmupCycles(
+      blendedHist,
+      elapsed,
+      ttlMs,
+      maxCycles,
+    );
+    const expectedFutureTurns = Math.min(totalTurns, SHADOW_FUTURE_TURNS_CAP);
+    const shadow = evaluateCacheStrategy(
+      state.sessionID,
+      { pReturn: pReturns, expectedCycles, expectedFutureTurns },
+      {
+        readPerToken: cacheReadCostPerMTok / 1_000_000,
+        writePerToken: cacheMissCostPerMTok / 1_000_000,
+      },
+    );
+    if (shadow?.confident) {
+      const snap = getCacheSizeSnapshot(state.sessionID);
+      const apiActual =
+        (state.cacheAnalytics?.lastCacheRead ?? 0) +
+        (state.cacheAnalytics?.lastCacheCreation ?? 0);
+      log.info(
+        `cache-economics shadow: session=${state.sessionID.slice(0, 16)} ` +
+          `strategy=${shadow.strategy} wouldWarm=${strategyWantsWarming(shadow.strategy)} ` +
+          `gradFull=${snap?.full ?? "?"} gradCompressed=${snap?.compressed ?? "?"} ` +
+          `apiActual=${apiActual} pReturn=${pReturns.toFixed(2)} ` +
+          `cycles=${expectedCycles.toFixed(1)} futureTurns=${expectedFutureTurns} ` +
+          `costs[hold=${shadow.holdWarmCost.toFixed(4)} ` +
+          `coolBust=${shadow.coolBustCost.toFixed(4)} ` +
+          `coolFull=${shadow.coolFullWriteCost.toFixed(4)}]`,
+      );
+    }
+  }
 
   // Determine if this is the initial commitment or a continuation
   const cyclesSpent = state.warmup?.warmupCount ?? 0;

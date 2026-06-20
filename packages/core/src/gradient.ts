@@ -8,6 +8,10 @@ import {
   saveSessionTracking,
   loadSessionTracking,
 } from "./db";
+import {
+  type CacheEconomicsResult,
+  decideCacheStrategy,
+} from "./cache-economics";
 import { config } from "./config";
 import { formatDistillations } from "./prompt";
 import { normalize } from "./markdown";
@@ -431,6 +435,18 @@ type SessionState = {
    * isn't busted by a newly-appended later duplicate flipping an early message.
    */
   dedupDecisions: Map<string, boolean>;
+
+  // --- Shared cache-economics inputs/result (see cache-economics.ts) ---
+  // The single-entry-point design (evaluateCacheStrategy) reads every input for
+  // the warm-vs-compact decision from this one place and stores the one result
+  // here, so the cache warmer and the gradient bust calculator branch off an
+  // identical decision and cannot diverge.
+  /** Full-body token size from the most recent transform() (gradient's own estimate). */
+  cacheSizeFull: number;
+  /** Compacted-body token target from the most recent transform(); === cacheSizeFull when no compaction is available. */
+  cacheSizeCompressed: number;
+  /** The single stored strategy decision + when it was computed (null until first evaluated). */
+  cacheStrategy: { result: CacheEconomicsResult; decidedAt: number } | null;
 };
 
 function makeSessionState(): SessionState {
@@ -455,6 +471,9 @@ function makeSessionState(): SessionState {
 
     distillationSnapshot: null,
     dedupDecisions: new Map(),
+    cacheSizeFull: 0,
+    cacheSizeCompressed: 0,
+    cacheStrategy: null,
   };
 }
 
@@ -579,6 +598,95 @@ export function consumeCameOutOfIdle(sessionID: string): boolean {
   if (!state?.cameOutOfIdle) return false;
   state.cameOutOfIdle = false;
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Shared cache-economics: single entry point
+// ---------------------------------------------------------------------------
+
+/** Survival inputs supplied by the cache warmer for the shared strategy decision. */
+export interface CacheSurvivalInputs {
+  /** Probability the session returns within the warming horizon (0..1). */
+  pReturn: number;
+  /** Expected warmup cycles before the session resolves. */
+  expectedCycles: number;
+  /** Expected turns the resumed session runs (the "ongoing cost" horizon). */
+  expectedFutureTurns: number;
+}
+
+/**
+ * Record the gradient's own size estimate for a session's current body. Called
+ * from transform() so the warmer and the bust calculator both read identical
+ * full/compressed sizes from one place. `compressed === full` means "no
+ * compaction available" (collapses cool-bust into cool-full-write downstream).
+ */
+export function setCacheSizeSnapshot(
+  sessionID: string,
+  fullBodyTokens: number,
+  compressedTokens: number,
+): void {
+  const state = getSessionState(sessionID);
+  state.cacheSizeFull = Math.max(0, fullBodyTokens);
+  state.cacheSizeCompressed = Math.max(
+    0,
+    Math.min(compressedTokens, fullBodyTokens),
+  );
+}
+
+/**
+ * THE single entry point for the warm-vs-compact decision. Reads every input
+ * from one place — the gradient's size snapshot (set by transform), the cache
+ * pricing (module state), and the survival inputs passed in by the warmer — runs
+ * the pure decideCacheStrategy ONCE, stores the single result on the session
+ * state, and returns it. Both the cache warmer and the gradient bust calculator
+ * branch off this stored result (via getCacheStrategy) so they cannot disagree.
+ *
+ * Returns null when there is no size snapshot yet (the session has not been
+ * transformed) so callers keep their legacy behaviour.
+ */
+export function evaluateCacheStrategy(
+  sessionID: string,
+  survival: CacheSurvivalInputs,
+  // Per-token pricing. Callers SHOULD pass the session's own model pricing — the
+  // module-global getCachePricing() reflects the LAST transform's model, which
+  // can belong to a different session/model when a background warmer evaluates.
+  pricing?: { readPerToken: number; writePerToken: number },
+  now: number = Date.now(),
+): CacheEconomicsResult | null {
+  const state = sessionStates.get(sessionID);
+  if (!state || state.cacheSizeFull <= 0) return null;
+  const global = getCachePricing();
+  const result = decideCacheStrategy({
+    fullBodyTokens: state.cacheSizeFull,
+    compressedTokens: state.cacheSizeCompressed,
+    readPerToken: pricing?.readPerToken ?? global.read,
+    writePerToken: pricing?.writePerToken ?? global.write,
+    pReturn: survival.pReturn,
+    expectedCycles: survival.expectedCycles,
+    expectedFutureTurns: survival.expectedFutureTurns,
+  });
+  state.cacheStrategy = { result, decidedAt: now };
+  return result;
+}
+
+/** Read the single stored strategy decision for a session (null if never evaluated). */
+export function getCacheStrategy(
+  sessionID: string,
+): { result: CacheEconomicsResult; decidedAt: number } | null {
+  return sessionStates.get(sessionID)?.cacheStrategy ?? null;
+}
+
+/**
+ * Read the gradient's last full/compressed size estimate for a session (null if
+ * never transformed). Exposed so the warmer can log the shared sizes and
+ * cross-check the gradient estimate against the real API token count.
+ */
+export function getCacheSizeSnapshot(
+  sessionID: string,
+): { full: number; compressed: number } | null {
+  const state = sessionStates.get(sessionID);
+  if (!state || state.cacheSizeFull <= 0) return null;
+  return { full: state.cacheSizeFull, compressed: state.cacheSizeCompressed };
 }
 
 // LTM tokens injected via system transform hook this turn.
@@ -2352,6 +2460,16 @@ function transformInner(input: {
     sid,
   );
 
+  // Record the gradient's own size estimate so the shared cache-economics
+  // evaluator (and therefore the warmer) reads identical full/compressed sizes
+  // from one place. Baseline assumes no compaction (compressed === full); the
+  // tier gate below refines `cacheSizeCompressed` when it actually evaluates a
+  // compression target.
+  if (sid) {
+    sessState.cacheSizeFull = Math.max(0, Math.round(layer0Input));
+    sessState.cacheSizeCompressed = sessState.cacheSizeFull;
+  }
+
   // First-sight large session → skip the Layer-0 cold full-write. An
   // uncalibrated session already over the Layer-0 ceiling is a resumed
   // conversation Lore hasn't tracked in-process. Passing it through at Layer 0
@@ -2427,6 +2545,14 @@ function transformInner(input: {
       distilledBudget + rawBudget,
       layer0Ceiling,
     );
+    // Refine the shared-economics snapshot with the real compression target so
+    // the warmer's cool-bust math uses the same compressed size this gate does.
+    if (sid) {
+      sessState.cacheSizeCompressed = Math.max(
+        0,
+        Math.min(compressedEstimate, sessState.cacheSizeFull),
+      );
+    }
     if (
       !shouldCompress(Math.round(layer0Input), compressedEstimate, busts, {
         freeWrite,

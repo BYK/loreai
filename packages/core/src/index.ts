@@ -166,7 +166,12 @@ export {
   BUST_PRESSURE_THRESHOLD,
   effectiveMetaThreshold,
   isLargeColdStart,
+  setCacheSizeSnapshot,
+  evaluateCacheStrategy,
+  getCacheStrategy,
+  getCacheSizeSnapshot,
 } from "./gradient";
+export type { CacheSurvivalInputs } from "./gradient";
 export {
   formatKnowledge,
   formatKnowledgeDelta,

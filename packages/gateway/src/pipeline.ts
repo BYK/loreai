@@ -48,6 +48,8 @@ import {
   getLastTransformedCount,
   getLastTransformEstimate,
   onIdleResume,
+  getCacheStrategy,
+  strategyWantsWarming,
   consumeCameOutOfIdle,
   needsUrgentDistillation,
   formatKnowledge,
@@ -5684,6 +5686,19 @@ async function handleConversationTurn(
       `session idle ${Math.round(idleResult.idleMs / 60_000)}min — refreshing caches` +
         (cacheWarm ? " (cache warm — skipping compact)" : ""),
     );
+    // --- Shared cache-economics: SHADOW compaction decision (measure-only) ---
+    // Compare what the unified strategy WOULD do (skip compaction iff hold-warm)
+    // against the legacy isCacheWarm-driven skipCompact. No behavior change —
+    // onIdleResume above still used the legacy `cacheWarm`.
+    const econ = getCacheStrategy(sessionID);
+    if (econ) {
+      const wouldSkipCompact = strategyWantsWarming(econ.result.strategy);
+      log.info(
+        `cache-economics shadow (compaction): session=${sessionID.slice(0, 16)} ` +
+          `strategy=${econ.result.strategy} wouldSkipCompact=${wouldSkipCompact} ` +
+          `actualSkipCompact=${cacheWarm} strategyAgeMs=${Date.now() - econ.decidedAt}`,
+      );
+    }
   }
 
   // Build the Lore message array once (resolved) — shared by the turn-1 LTM
