@@ -13,16 +13,20 @@ import {
   assertSyncInvariants,
   classifyRemoteRow,
   clearProfileMirror,
+  clearSyncState,
   contentHash,
   currentTier,
   disableSync,
   enableSync,
   getRowById,
   getSyncState,
+  hasPendingChange,
   isSyncEnabled,
   maxOutboxSeq,
+  pickSyncColumns,
   readOutbox,
   rebuildFts,
+  reconcile,
   rowIdOf,
   seedOutbox,
   setSyncState,
@@ -47,12 +51,36 @@ function outboxFor(table: string) {
   return readOutbox(0).filter((e) => e.table_name === table);
 }
 
+function insertEntity(id: string): string {
+  const pid = ensureProject("/tmp/lore-sync-data");
+  db()
+    .query(
+      `INSERT INTO entities (id, project_id, entity_type, canonical_name, created_at, updated_at)
+       VALUES (?, ?, 'person', 'E', ?, ?)`,
+    )
+    .run(id, pid, now(), now());
+  return id;
+}
+
+// A knowledge_entity_refs row (composite PK) with its FK parents present.
+function insertJoinRow(knowledgeId: string, entityId: string): void {
+  insertKnowledge(knowledgeId, "T", "C");
+  insertEntity(entityId);
+  db()
+    .query(
+      `INSERT INTO knowledge_entity_refs (knowledge_id, entity_id) VALUES (?, ?)`,
+    )
+    .run(knowledgeId, entityId);
+}
+
 beforeEach(() => {
   // Disable capture FIRST so the table cleanup below doesn't itself enqueue
   // delete entries via the (working) outbox triggers, then clear state.
   deleteTeamConfig("sync.enabled");
   db().exec("DELETE FROM temp._sync_applying"); // reset suppression depth
+  db().exec("DELETE FROM knowledge_entity_refs");
   db().exec("DELETE FROM knowledge");
+  db().exec("DELETE FROM entities");
   db().exec("DELETE FROM profiles");
   db().exec("DELETE FROM sync_outbox");
   db().exec("DELETE FROM sync_state");
@@ -579,5 +607,109 @@ describe("assertSyncInvariants", () => {
       /unregistered table "bogus_table"/,
     );
     db().exec("DELETE FROM sync_state"); // restore clean state for afterEach
+  });
+});
+
+// Tests closing GENUINE coverage gaps surfaced by the Stryker mutation baseline
+// (#832/#840). Each was hand-verified to kill its mutant (apply the exact
+// replacement from the report, confirm the test fails). Equivalent mutants (e.g.
+// :378 pruneOutbox, :326 getRowById payload filter, :310 column sort) are
+// intentionally NOT chased — no behavioral test can distinguish them.
+describe("mutation gap coverage (#832)", () => {
+  test("classifyRemoteRow: a null remote hash never skips on an absent local row", () => {
+    // Kills `remoteHash !== null -> true`: that mutant reduces the guard to
+    // `localHash === remoteHash`, where null === null would wrongly return "skip".
+    expect(classifyRemoteRow("knowledge", "ghost", null)).toBe("apply");
+  });
+
+  test("contentHash: null and undefined columns hash to the same sentinel", () => {
+    // Kills the serializeValue null/undefined coalesce (`||`->`&&` or guard
+    // removal): both must map to the "\x00" sentinel, so the rows hash equal.
+    const a = { id: "x", title: null };
+    const b = { id: "x", title: undefined };
+    expect(contentHash("knowledge", a)).toBe(contentHash("knowledge", b));
+  });
+
+  test("contentHash is truncated to 16 hex chars", () => {
+    // Kills removal of `.slice(0, 16)` (would leave the full 64-char digest).
+    insertKnowledge("k1", "T", "C");
+    const row = getRowById("knowledge", "k1") as Record<string, unknown>;
+    expect(contentHash("knowledge", row)).toHaveLength(16);
+  });
+
+  test("an unregistered table is rejected", () => {
+    // Kills removal of the `if (!m) throw` guard in meta().
+    expect(() => rowIdOf("bogus_table", { id: "x" })).toThrow(
+      /not a synced table/,
+    );
+  });
+
+  test("pickSyncColumns omits columns absent from the row", () => {
+    // Kills `if (c in row)` -> always-copy (which adds `content: undefined`).
+    const picked = pickSyncColumns("knowledge", { id: "k", title: "T" });
+    expect(picked).toHaveProperty("id");
+    expect(picked).not.toHaveProperty("content");
+  });
+
+  test("hasPendingChange reflects outbox presence (both directions)", () => {
+    // Kills the empty-body and `!= null` -> `== null` mutants.
+    insertKnowledge("k1", "T", "C");
+    seedOutbox();
+    expect(hasPendingChange("knowledge", "k1", 0)).toBe(true);
+    expect(hasPendingChange("knowledge", "absent", 0)).toBe(false);
+  });
+
+  test("seedOutbox builds a composite row_id for the join table", () => {
+    // Kills `idColumns.length === 1` -> true (which would emit only knowledge_id).
+    insertJoinRow("k1", "e1");
+    seedOutbox();
+    const entries = outboxFor("knowledge_entity_refs");
+    expect(entries).toHaveLength(1);
+    expect(entries[0].row_id).toBe("k1\x1fe1");
+  });
+
+  test("reconcile does not tombstone the pull-only profiles table", () => {
+    // A profiles sync_state row with no live row would be delete-tombstoned for a
+    // normal table; the `if (m.pullOnly) continue` guard must skip it.
+    setSyncState("profiles", "u1", {
+      content_hash: "h",
+      revision: 1,
+      remote_updated_at: "t0",
+    });
+    reconcile();
+    expect(outboxFor("profiles")).toHaveLength(0);
+  });
+
+  test("clearSyncState removes the sync_state row", () => {
+    // Kills the empty-body mutant.
+    setSyncState("knowledge", "k1", {
+      content_hash: "h",
+      revision: 1,
+      remote_updated_at: "t0",
+    });
+    expect(getSyncState("knowledge", "k1")).not.toBeNull();
+    clearSyncState("knowledge", "k1");
+    expect(getSyncState("knowledge", "k1")).toBeNull();
+  });
+
+  test("applyRemoteUpsert on the all-PK join table uses DO NOTHING", () => {
+    // The join table has only PK columns -> nonPk is empty -> onConflict must be
+    // "DO NOTHING". Kills `nonPk.length > 0` -> always-true, which emits an
+    // invalid `DO UPDATE SET ` (empty) and throws.
+    insertKnowledge("k1", "T", "C");
+    insertEntity("e1");
+    expect(() =>
+      applyRemoteUpsert("knowledge_entity_refs", {
+        knowledge_id: "k1",
+        entity_id: "e1",
+      }),
+    ).not.toThrow();
+  });
+
+  test("isSyncEnabled is false until enabled", () => {
+    // Kills the `=== "1"` -> always-true mutant.
+    expect(isSyncEnabled()).toBe(false);
+    enableSync();
+    expect(isSyncEnabled()).toBe(true);
   });
 });
