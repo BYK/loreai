@@ -1,0 +1,40 @@
+name: Mutation testing
+
+# Stryker mutation testing on the high-risk stateful sync modules (issue #832).
+# Measures whether the suite CONSTRAINS behavior, not just passes — a surviving
+# mutant is a named test gap. Slow (~25 min) and ADVISORY ONLY (no hard gate:
+# stryker.config.mjs sets thresholds.break = null). Runs weekly + on demand; the
+# HTML/JSON report is uploaded as an artifact.
+on:
+  schedule:
+    - cron: "0 5 * * 1" # Monday 05:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mutation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The Stryker dry run executes the suite once; some gateway tests need the
+      # bundle (mirrors the `pretest` hook, which Stryker does not invoke).
+      - name: Build gateway bundle
+        run: pnpm --filter @loreai/gateway run bundle
+      - name: Run Stryker (sync modules)
+        run: pnpm exec stryker run
+      - name: Upload mutation report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mutation-report
+          path: reports/mutation/
+          retention-days: 30

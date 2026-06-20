@@ -46,3 +46,7 @@ packages/website/public/og-image-*.png
 # content-hashed filename to SocialMeta.astro via a normal TS import).
 packages/website/src/generated/
 actionlint
+
+# Mutation testing (Stryker) — issue #832
+reports/
+.stryker-tmp/
