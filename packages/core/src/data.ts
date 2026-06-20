@@ -932,6 +932,13 @@ export function validateDatabaseIntegrity(): IntegrityResult {
         | { integrity_check: string }
         | undefined
     )?.integrity_check ?? "unknown";
+  // NOTE (A2, #823): knowledge_fts is an external-content FTS5 table, so a plain
+  // `COUNT(*) FROM knowledge_fts` scans the CONTENT table (knowledge) by rowid —
+  // it returns the physical row count, NOT the indexed-posting count. So this
+  // parity stays COUNT(knowledge) === COUNT(knowledge_fts) and is unaffected by
+  // versioning (both sides count every physical version). It does NOT verify the
+  // partial index (current+live only); a real index check would use FTS5
+  // 'integrity-check' — deferred.
   const kn = (db()
     .query(
       "SELECT (SELECT COUNT(*) FROM knowledge) AS a, (SELECT COUNT(*) FROM knowledge_fts) AS b",

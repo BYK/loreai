@@ -568,11 +568,22 @@ export function applyRemoteUpsert(
       ? `DO UPDATE SET ${nonPk.map((c) => `${c}=excluded.${c}`).join(", ")}`
       : "DO NOTHING";
   const sql = `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${placeholders}) ON CONFLICT(${conflict}) ${onConflict}`;
-  withApplying(() =>
+  withApplying(() => {
     db()
       .query(sql)
-      .run(...cols.map((c) => row[c] as never)),
-  );
+      .run(...cols.map((c) => row[c] as never));
+    // A2 (#823): the remote knowledge table has no logical_id column yet (sub-PR
+    // 3 adds it), so a pulled row lands with logical_id = NULL. Backfill it to id
+    // (the v1 identity) so the local cross-reference model (refs / getByLogical)
+    // resolves the row. Idempotent: only touches NULLs, never an existing value.
+    if (table === "knowledge" && !("logical_id" in row)) {
+      db()
+        .query(
+          "UPDATE knowledge SET logical_id = id WHERE id = ? AND logical_id IS NULL",
+        )
+        .run(row.id as never);
+    }
+  });
 }
 
 /** Delete a pulled-as-removed row locally (under apply-suppression). */
@@ -588,6 +599,19 @@ export function applyRemoteDelete(table: string, rowId: string): void {
 
 /** Rebuild an external-content FTS5 index after a batch of pulled changes. */
 export function rebuildFts(ftsTable: string): void {
+  if (ftsTable === "knowledge_fts") {
+    // knowledge_fts is a PARTIAL mirror — only current, non-deleted versions are
+    // indexed (A2, #823). FTS5 'rebuild' re-indexes EVERY physical row (incl.
+    // superseded/deleted versions), which would resurface dead rows in search.
+    // Rebuild manually from the current+live set instead.
+    db().exec("INSERT INTO knowledge_fts(knowledge_fts) VALUES('delete-all')");
+    db().exec(
+      `INSERT INTO knowledge_fts(rowid, title, content, category)
+       SELECT rowid, title, content, category FROM knowledge
+        WHERE is_current = 1 AND is_deleted = 0`,
+    );
+    return;
+  }
   db().exec(`INSERT INTO ${ftsTable}(${ftsTable}) VALUES('rebuild')`);
 }
 

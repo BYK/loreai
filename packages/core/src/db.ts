@@ -1307,6 +1307,23 @@ const MIGRATIONS: string[] = [
      WHERE new.is_current = 1 AND new.is_deleted = 0;
   END;
   `,
+  `
+  -- Version 51: append-only invariants + query-plan index (A2 sub-PR 2b-2a, #823).
+  --
+  -- idx_knowledge_one_current enforces AT MOST ONE current version per logical_id
+  -- at the schema level — the core append-only invariant appendVersion() upholds
+  -- (it demotes the old current row before inserting the new one). Satisfiable on
+  -- existing data: every row is is_current=1 with a unique logical_id (== id).
+  --
+  -- idx_knowledge_project_current restores the project-scoped query plan once reads
+  -- route through knowledge_current: without it a no-stats DB picks the
+  -- non-selective idx_knowledge_current(is_current) over idx_knowledge_project
+  -- (2a review query-plan nit).
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_one_current
+    ON knowledge(logical_id) WHERE is_current = 1;
+  CREATE INDEX IF NOT EXISTS idx_knowledge_project_current
+    ON knowledge(project_id) WHERE is_current = 1 AND is_deleted = 0;
+  `,
 ];
 
 /**
@@ -1772,6 +1789,10 @@ function recoverMissingObjects(database: Database) {
   database.exec(`
     CREATE INDEX IF NOT EXISTS idx_knowledge_logical ON knowledge(logical_id, version);
     CREATE INDEX IF NOT EXISTS idx_knowledge_current ON knowledge(is_current);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_one_current
+      ON knowledge(logical_id) WHERE is_current = 1;
+    CREATE INDEX IF NOT EXISTS idx_knowledge_project_current
+      ON knowledge(project_id) WHERE is_current = 1 AND is_deleted = 0;
     CREATE VIEW IF NOT EXISTS knowledge_current AS
       SELECT k.* FROM knowledge k WHERE k.is_current = 1 AND k.is_deleted = 0;
   `);

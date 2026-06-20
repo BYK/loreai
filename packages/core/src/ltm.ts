@@ -1,5 +1,5 @@
 import { uuidv7 } from "uuidv7";
-import { db, ensureProject, getKV, setKV } from "./db";
+import { db, ensureProject, getKV, setKV, withTransaction } from "./db";
 import { config } from "./config";
 import {
   ftsQuery,
@@ -232,42 +232,42 @@ export function appendVersion(
 
   const newId = uuidv7();
   const now = Date.now();
-  // Copy the current row forward with overrides: new id, bumped version, current,
-  // original created_at preserved, updated_at = now, embedding cleared.
-  db()
-    .query(
-      `INSERT INTO knowledge (
-         id, project_id, category, title, content, source_session, cross_project,
-         confidence, created_at, updated_at, metadata, embedding, created_by,
-         updated_by, sensitivity, promotion_status, promoted_at, approval_status,
-         approved_by, approved_at, source_user_id, source_entry_id, last_accessed_at,
-         worker_provider_id, worker_model_id, last_reinforced_at,
-         logical_id, version, is_deleted, is_current)
-       SELECT
-         ?, project_id, COALESCE(?, category), COALESCE(?, title), COALESCE(?, content),
-         source_session, cross_project, confidence, created_at, ?, metadata, NULL,
-         created_by, updated_by, sensitivity, promotion_status, promoted_at,
-         approval_status, approved_by, approved_at, source_user_id, source_entry_id,
-         last_accessed_at, worker_provider_id, worker_model_id, last_reinforced_at,
-         logical_id, version + 1, ?, 1
-       FROM knowledge WHERE id = ?`,
-    )
-    .run(
-      newId,
-      overrides.category ?? null,
-      overrides.title ?? null,
-      overrides.content ?? null,
-      now,
-      overrides.isDeleted ? 1 : 0,
-      cur.id,
-    );
-
-  // Demote the prior current version (its FTS row is dropped by the trigger).
-  db()
-    .query(
-      "UPDATE knowledge SET is_current = 0 WHERE logical_id = ? AND is_current = 1 AND id != ?",
-    )
-    .run(logicalId, newId);
+  // Atomic insert-new + demote-old (Seer #839): a crash between the two
+  // statements must never leave two is_current=1 rows for one logical_id. We
+  // DEMOTE FIRST, then insert — the partial UNIQUE index idx_knowledge_one_current
+  // (logical_id WHERE is_current=1) is checked per-statement, so inserting a
+  // second current row before demoting would violate it. The forward-copy SELECT
+  // still reads the (now-demoted) row by id. The whole pair runs in one txn.
+  withTransaction(() => {
+    db().query("UPDATE knowledge SET is_current = 0 WHERE id = ?").run(cur.id);
+    db()
+      .query(
+        `INSERT INTO knowledge (
+           id, project_id, category, title, content, source_session, cross_project,
+           confidence, created_at, updated_at, metadata, embedding, created_by,
+           updated_by, sensitivity, promotion_status, promoted_at, approval_status,
+           approved_by, approved_at, source_user_id, source_entry_id, last_accessed_at,
+           worker_provider_id, worker_model_id, last_reinforced_at,
+           logical_id, version, is_deleted, is_current)
+         SELECT
+           ?, project_id, COALESCE(?, category), COALESCE(?, title), COALESCE(?, content),
+           source_session, cross_project, confidence, created_at, ?, metadata, NULL,
+           created_by, updated_by, sensitivity, promotion_status, promoted_at,
+           approval_status, approved_by, approved_at, source_user_id, source_entry_id,
+           last_accessed_at, worker_provider_id, worker_model_id, last_reinforced_at,
+           logical_id, version + 1, ?, 1
+         FROM knowledge WHERE id = ?`,
+      )
+      .run(
+        newId,
+        overrides.category ?? null,
+        overrides.title ?? null,
+        overrides.content ?? null,
+        now,
+        overrides.isDeleted ? 1 : 0,
+        cur.id,
+      );
+  });
 
   return newId;
 }
@@ -795,7 +795,7 @@ export function markInjected(ids: string[]): void {
   const placeholders = ids.map(() => "?").join(",");
   db()
     .query(
-      `UPDATE knowledge SET last_reinforced_at = ? WHERE id IN (${placeholders})`,
+      `UPDATE knowledge SET last_reinforced_at = ? WHERE is_current = 1 AND id IN (${placeholders})`,
     )
     .run(Date.now(), ...ids);
 }
@@ -812,7 +812,7 @@ export function reinforce(id: string, delta: number = REINFORCE_STEP): void {
     .query(
       `UPDATE knowledge
        SET confidence = MAX(0, MIN(1, confidence + ?)), last_reinforced_at = ?
-       WHERE id = ?`,
+       WHERE id = ? AND is_current = 1`,
     )
     .run(delta, Date.now(), id);
 }
@@ -852,7 +852,7 @@ export function decayProject(
     .query(
       `UPDATE knowledge
        SET confidence = MAX(0, confidence - ?)
-       WHERE project_id = ? AND cross_project = 0 AND confidence > ?
+       WHERE is_current = 1 AND project_id = ? AND cross_project = 0 AND confidence > ?
          AND COALESCE(last_reinforced_at, updated_at) < ?`,
     )
     .run(DECAY_STEP, pid, DEAD_CONFIDENCE_FLOOR, cutoff) as {
@@ -1766,7 +1766,7 @@ export function getWorkerSource(
 export function pruneOversized(maxLength: number): number {
   const result = db()
     .query(
-      "UPDATE knowledge SET confidence = 0, updated_at = ? WHERE LENGTH(content) > ? AND confidence > 0",
+      "UPDATE knowledge SET confidence = 0, updated_at = ? WHERE is_current = 1 AND LENGTH(content) > ? AND confidence > 0",
     )
     .run(Date.now(), maxLength);
   // node:sqlite returns `changes` as `number | bigint`; coerce for cross-runtime parity.
@@ -1864,7 +1864,7 @@ export function cascadeRefReplace(oldId: string, newId: string): number {
   const result = db()
     .query(
       `UPDATE knowledge SET content = REPLACE(content, ?, ?), updated_at = ?
-       WHERE content LIKE ?`,
+       WHERE is_current = 1 AND content LIKE ?`,
     )
     .run(oldRef, newRef, Date.now(), `%${oldRef}%`);
 
@@ -2413,7 +2413,7 @@ export function promoteCrossProject(opts?: {
     const stmt = db().query(
       `UPDATE knowledge
        SET cross_project = 1, promotion_status = 'promoted', promoted_at = ?, updated_at = ?
-       WHERE id = ?`,
+       WHERE id = ? AND is_current = 1`,
     );
     for (const id of toPromote) {
       stmt.run(now, now, id);
