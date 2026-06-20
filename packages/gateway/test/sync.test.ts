@@ -371,9 +371,10 @@ describe("pushOnce — happy path", () => {
     await pushOnce(makeClient() as never);
     db().query("DELETE FROM knowledge WHERE id='k1'").run();
     await pushOnce(makeClient() as never);
-    expect(tableRows("knowledge").find((r) => r.id === "k1")?.is_deleted).toBe(
-      true,
-    );
+    const remote = tableRows("knowledge").find((r) => r.id === "k1");
+    expect(remote?.is_deleted).toBe(true);
+    // The tombstone must carry a NULL content_hash on the wire (the contract).
+    expect(remote?.content_hash).toBeNull();
   });
 });
 
@@ -515,8 +516,10 @@ describe("pullOnce", () => {
     remoteRow.is_deleted = true;
     remoteRow.updated_at = new Date(9_000_000).toISOString(); // past the pull cursor
     expect(typeof remoteRow.content_hash).toBe("string"); // hash intact (the trap)
-    await pullOnce(makeClient() as never);
+    const r = await pullOnce(makeClient() as never);
     expect(syncData.getRowById("knowledge", "kt")).toBeNull(); // delete propagated
+    expect(r.pulled).toBe(1); // a clean apply…
+    expect(r.conflicts).toBe(0); // …not a conflict
   });
 
   test("conflict resolves remote-wins AND preserves the discarded local row", async () => {

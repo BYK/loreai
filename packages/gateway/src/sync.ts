@@ -150,9 +150,13 @@ async function pushEntry(
   const { table_name: table, row_id: rowId, op } = e;
 
   if (op === "delete") {
+    // Null the remote content_hash too, so the tombstone honors the
+    // "remoteHash is null for a tombstone" contract on the wire. The pull side
+    // (applyRemote) already treats is_deleted rows as hash-null, but this also
+    // protects un-upgraded readers during a rollout.
     const { error } = await client
       .from(table)
-      .update({ is_deleted: true })
+      .update({ is_deleted: true, content_hash: null })
       .match(decomposeId(table, rowId));
     if (error) {
       console.error(`sync: push delete ${table}/${rowId}: ${error.message}`);
