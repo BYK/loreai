@@ -15,6 +15,12 @@ import {
   WRITE_EFFICIENCY_WINDOW,
   checkCircuitBreaker,
   isCircuitBreakerTripped,
+  getCircuitBreakerStatus,
+  getCircuitBreakerSummary,
+  resetCircuitBreaker,
+  pruneExpiredCircuitBreakers,
+  warmupBucketKey,
+  CIRCUIT_BREAKER_DECAY_MS,
   isWarmupAuthDisabled,
   clearWarmupAuthDisabled,
   breakFraction,
@@ -33,6 +39,7 @@ import {
   creditWarmupHit,
   computeWarmingSnapshot,
   _resetForTest,
+  _forceReloadForTest,
 } from "../src/cache-warmer";
 import type {
   SessionState,
@@ -44,6 +51,7 @@ import {
   compressBody,
   normalizeBodyForComparison,
 } from "../src/cache-analytics";
+import { getKV, setKV } from "@loreai/core";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -482,6 +490,9 @@ describe("prepareAnthropicWarmupBody", () => {
 // ---------------------------------------------------------------------------
 
 describe("circuit breaker", () => {
+  const BUCKET = "s1\x1fclaude-sonnet-4\x1fhttps://api.anthropic.com";
+  const BUCKET_B = "s2\x1fclaude-opus-4\x1fhttps://api.anthropic.com";
+
   beforeEach(() => {
     _resetForTest();
   });
@@ -491,8 +502,8 @@ describe("circuit breaker", () => {
       cacheReadTokens: 50000,
       cacheCreationTokens: 0,
     });
-    expect(checkCircuitBreaker(result)).toBe(false);
-    expect(isCircuitBreakerTripped()).toBe(false);
+    expect(checkCircuitBreaker(result, BUCKET, true)).toBe(false);
+    expect(isCircuitBreakerTripped(BUCKET)).toBe(false);
   });
 
   test("counts uncached warmups", () => {
@@ -500,21 +511,21 @@ describe("circuit breaker", () => {
       cacheReadTokens: 0,
       cacheCreationTokens: 50000,
     });
-    expect(checkCircuitBreaker(bad)).toBe(false); // 1st failure
-    expect(checkCircuitBreaker(bad)).toBe(false); // 2nd failure
-    expect(isCircuitBreakerTripped()).toBe(false);
+    expect(checkCircuitBreaker(bad, BUCKET, true)).toBe(false); // 1st failure
+    expect(checkCircuitBreaker(bad, BUCKET, true)).toBe(false); // 2nd failure
+    expect(isCircuitBreakerTripped(BUCKET)).toBe(false);
   });
 
-  test("trips after 3 consecutive uncached warmups", () => {
+  test("trips after 3 uncached warmups", () => {
     const bad = makeWarmupResult({
       cacheReadTokens: 0,
       cacheCreationTokens: 50000,
     });
-    checkCircuitBreaker(bad); // 1
-    checkCircuitBreaker(bad); // 2
-    const tripped = checkCircuitBreaker(bad); // 3
+    checkCircuitBreaker(bad, BUCKET, true); // 1
+    checkCircuitBreaker(bad, BUCKET, true); // 2
+    const tripped = checkCircuitBreaker(bad, BUCKET, true); // 3
     expect(tripped).toBe(true);
-    expect(isCircuitBreakerTripped()).toBe(true);
+    expect(isCircuitBreakerTripped(BUCKET)).toBe(true);
   });
 
   test("resets failure count on successful read", () => {
@@ -527,15 +538,15 @@ describe("circuit breaker", () => {
       cacheCreationTokens: 0,
     });
 
-    checkCircuitBreaker(bad); // 1
-    checkCircuitBreaker(bad); // 2
-    checkCircuitBreaker(good); // reset
-    checkCircuitBreaker(bad); // 1 (restarted)
-    checkCircuitBreaker(bad); // 2
-    expect(isCircuitBreakerTripped()).toBe(false);
+    checkCircuitBreaker(bad, BUCKET, true); // 1
+    checkCircuitBreaker(bad, BUCKET, true); // 2
+    checkCircuitBreaker(good, BUCKET, true); // reset
+    checkCircuitBreaker(bad, BUCKET, true); // 1 (restarted)
+    checkCircuitBreaker(bad, BUCKET, true); // 2
+    expect(isCircuitBreakerTripped(BUCKET)).toBe(false);
   });
 
-  test("stays tripped permanently after tripping", () => {
+  test("stays tripped until decay or reset", () => {
     const bad = makeWarmupResult({
       cacheReadTokens: 0,
       cacheCreationTokens: 50000,
@@ -545,14 +556,14 @@ describe("circuit breaker", () => {
       cacheCreationTokens: 0,
     });
 
-    checkCircuitBreaker(bad);
-    checkCircuitBreaker(bad);
-    checkCircuitBreaker(bad); // tripped
-    expect(isCircuitBreakerTripped()).toBe(true);
+    checkCircuitBreaker(bad, BUCKET, true);
+    checkCircuitBreaker(bad, BUCKET, true);
+    checkCircuitBreaker(bad, BUCKET, true); // tripped
+    expect(isCircuitBreakerTripped(BUCKET)).toBe(true);
 
-    // Even good results don't un-trip
-    checkCircuitBreaker(good);
-    expect(isCircuitBreakerTripped()).toBe(true);
+    // A good result while tripped does not un-trip (short-circuits early).
+    checkCircuitBreaker(good, BUCKET, true);
+    expect(isCircuitBreakerTripped(BUCKET)).toBe(true);
   });
 
   test("does not count failed requests", () => {
@@ -561,10 +572,25 @@ describe("circuit breaker", () => {
       cacheReadTokens: 0,
       cacheCreationTokens: 0,
     });
-    checkCircuitBreaker(failed);
-    checkCircuitBreaker(failed);
-    checkCircuitBreaker(failed);
-    expect(isCircuitBreakerTripped()).toBe(false);
+    checkCircuitBreaker(failed, BUCKET, true);
+    checkCircuitBreaker(failed, BUCKET, true);
+    checkCircuitBreaker(failed, BUCKET, true);
+    expect(isCircuitBreakerTripped(BUCKET)).toBe(false);
+  });
+
+  test("non-2xx with a cache write does not count (thinking-session 400)", () => {
+    // A thinking-session warmup (max_tokens:1) is rejected with HTTP 400 →
+    // result.ok === false. Even if usage reported a write, it must be neutral.
+    const rejected = makeWarmupResult({
+      ok: false,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 50000,
+    });
+    checkCircuitBreaker(rejected, BUCKET, true);
+    checkCircuitBreaker(rejected, BUCKET, true);
+    checkCircuitBreaker(rejected, BUCKET, true);
+    expect(isCircuitBreakerTripped(BUCKET)).toBe(false);
+    expect(getCircuitBreakerStatus(BUCKET).failures).toBe(0);
   });
 
   test("partial hits (read > 0 + creation > 0) reset counter", () => {
@@ -577,11 +603,222 @@ describe("circuit breaker", () => {
       cacheCreationTokens: 20000,
     });
 
-    checkCircuitBreaker(bad); // 1
-    checkCircuitBreaker(bad); // 2
-    checkCircuitBreaker(partial); // has reads → reset
-    checkCircuitBreaker(bad); // 1
-    expect(isCircuitBreakerTripped()).toBe(false);
+    checkCircuitBreaker(bad, BUCKET, true); // 1
+    checkCircuitBreaker(bad, BUCKET, true); // 2
+    checkCircuitBreaker(partial, BUCKET, true); // has reads → reset
+    checkCircuitBreaker(bad, BUCKET, true); // 1
+    expect(isCircuitBreakerTripped(BUCKET)).toBe(false);
+  });
+
+  test("is per-bucket: tripping one bucket does not affect another", () => {
+    const bad = makeWarmupResult({
+      cacheReadTokens: 0,
+      cacheCreationTokens: 50000,
+    });
+    checkCircuitBreaker(bad, BUCKET, true);
+    checkCircuitBreaker(bad, BUCKET, true);
+    checkCircuitBreaker(bad, BUCKET, true); // BUCKET tripped
+    expect(isCircuitBreakerTripped(BUCKET)).toBe(true);
+    // A different (session, model, upstream) bucket is unaffected.
+    expect(isCircuitBreakerTripped(BUCKET_B)).toBe(false);
+  });
+
+  test("cold re-warm (cacheLikelyAlive=false) does not count as a failure", () => {
+    const bad = makeWarmupResult({
+      cacheReadTokens: 0,
+      cacheCreationTokens: 50000,
+    });
+    // Cache had expired — a fresh write is the warmer re-priming, not a fault.
+    checkCircuitBreaker(bad, BUCKET, false);
+    checkCircuitBreaker(bad, BUCKET, false);
+    checkCircuitBreaker(bad, BUCKET, false);
+    expect(isCircuitBreakerTripped(BUCKET)).toBe(false);
+    expect(getCircuitBreakerStatus(BUCKET).failures).toBe(0);
+  });
+
+  test("tripped bucket auto-decays after CIRCUIT_BREAKER_DECAY_MS", () => {
+    const bad = makeWarmupResult({
+      cacheReadTokens: 0,
+      cacheCreationTokens: 50000,
+    });
+    const t0 = 1_000_000;
+    checkCircuitBreaker(bad, BUCKET, true, t0);
+    checkCircuitBreaker(bad, BUCKET, true, t0);
+    checkCircuitBreaker(bad, BUCKET, true, t0); // tripped at t0
+    expect(isCircuitBreakerTripped(BUCKET, t0)).toBe(true);
+
+    // Just before the decay window — still tripped.
+    expect(
+      isCircuitBreakerTripped(BUCKET, t0 + CIRCUIT_BREAKER_DECAY_MS - 1),
+    ).toBe(true);
+
+    // At/after the decay window — auto-recovers and re-arms.
+    expect(isCircuitBreakerTripped(BUCKET, t0 + CIRCUIT_BREAKER_DECAY_MS)).toBe(
+      false,
+    );
+    expect(getCircuitBreakerStatus(BUCKET).failures).toBe(0);
+  });
+
+  test("resetCircuitBreaker(bucket) clears a single bucket", () => {
+    const bad = makeWarmupResult({
+      cacheReadTokens: 0,
+      cacheCreationTokens: 50000,
+    });
+    for (let i = 0; i < 3; i++) checkCircuitBreaker(bad, BUCKET, true);
+    for (let i = 0; i < 3; i++) checkCircuitBreaker(bad, BUCKET_B, true);
+    expect(isCircuitBreakerTripped(BUCKET)).toBe(true);
+    expect(isCircuitBreakerTripped(BUCKET_B)).toBe(true);
+
+    resetCircuitBreaker(BUCKET);
+    expect(isCircuitBreakerTripped(BUCKET)).toBe(false);
+    expect(isCircuitBreakerTripped(BUCKET_B)).toBe(true); // other bucket intact
+  });
+
+  test("resetCircuitBreaker() clears all buckets", () => {
+    const bad = makeWarmupResult({
+      cacheReadTokens: 0,
+      cacheCreationTokens: 50000,
+    });
+    for (let i = 0; i < 3; i++) checkCircuitBreaker(bad, BUCKET, true);
+    for (let i = 0; i < 3; i++) checkCircuitBreaker(bad, BUCKET_B, true);
+    expect(getCircuitBreakerSummary().trippedCount).toBe(2);
+
+    resetCircuitBreaker();
+    expect(getCircuitBreakerSummary().trippedCount).toBe(0);
+    expect(isCircuitBreakerTripped(BUCKET)).toBe(false);
+    expect(isCircuitBreakerTripped(BUCKET_B)).toBe(false);
+  });
+
+  test("warmupBucketKey keys by (session, model, upstream)", () => {
+    const base = makeSessionState();
+    const key = warmupBucketKey(base);
+    expect(key).toContain(base.sessionID);
+    expect(key).toContain("claude-sonnet-4-20250514");
+    expect(key).toContain("https://api.anthropic.com");
+    // Switching model yields a different bucket.
+    const switched = makeSessionState({
+      lastUpstream: {
+        url: "https://api.anthropic.com",
+        protocol: "anthropic",
+        model: "claude-opus-4-20250514",
+        headers: {},
+      },
+    });
+    expect(warmupBucketKey(switched)).not.toBe(key);
+  });
+
+  test("getCircuitBreakerSummary lists tripped buckets", () => {
+    const bad = makeWarmupResult({
+      cacheReadTokens: 0,
+      cacheCreationTokens: 50000,
+    });
+    const t0 = 2_000_000;
+    for (let i = 0; i < 3; i++) checkCircuitBreaker(bad, BUCKET, true, t0);
+    const summary = getCircuitBreakerSummary(t0);
+    expect(summary.trippedCount).toBe(1);
+    expect(summary.entries[0]?.bucket).toBe(BUCKET);
+    expect(summary.entries[0]?.trippedAt).toBe(t0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Circuit breaker persistence + legacy migration
+// ---------------------------------------------------------------------------
+
+describe("circuit breaker persistence", () => {
+  const CB_KV_KEY = "warmup_circuit_breaker";
+  const BUCKET = "sP\x1fclaude-sonnet-4\x1fhttps://api.anthropic.com";
+
+  beforeEach(() => {
+    _resetForTest();
+  });
+
+  test("legacy v1 KV ({tripped,failures}) is dropped on load", () => {
+    // Simulate the old global-breaker latch persisted by a previous build.
+    setKV(CB_KV_KEY, JSON.stringify({ tripped: true, failures: 3 }));
+    _forceReloadForTest();
+    // No bucket should be considered tripped — the stale global flag is dropped.
+    expect(getCircuitBreakerSummary().trippedCount).toBe(0);
+    // And the KV is rewritten to the empty v2 shape.
+    const raw = getKV(CB_KV_KEY);
+    expect(raw).toBeTruthy();
+    expect(JSON.parse(raw as string)).toEqual({ version: 2, buckets: {} });
+  });
+
+  test("tripped buckets persist across a reload; failure counts do not", () => {
+    const bad = makeWarmupResult({
+      cacheReadTokens: 0,
+      cacheCreationTokens: 50000,
+    });
+    // Trip BUCKET fully, and accrue a non-tripped failure on another bucket.
+    for (let i = 0; i < 3; i++) checkCircuitBreaker(bad, BUCKET, true);
+    const OTHER = "sQ\x1fm\x1fu";
+    checkCircuitBreaker(bad, OTHER, true); // 1 failure, not tripped
+
+    _forceReloadForTest();
+
+    // Tripped bucket survives.
+    expect(isCircuitBreakerTripped(BUCKET)).toBe(true);
+    // Non-tripped failure count is not persisted → starts clean.
+    expect(getCircuitBreakerStatus(OTHER).failures).toBe(0);
+  });
+
+  test("on-load decay drops buckets older than the decay window", () => {
+    const stale = Date.now() - CIRCUIT_BREAKER_DECAY_MS - 1;
+    setKV(
+      CB_KV_KEY,
+      JSON.stringify({
+        version: 2,
+        buckets: { [BUCKET]: { trippedAt: stale } },
+      }),
+    );
+    _forceReloadForTest();
+    expect(isCircuitBreakerTripped(BUCKET)).toBe(false);
+  });
+
+  test("on-load decay rewrites KV to drop stale buckets", () => {
+    const stale = Date.now() - CIRCUIT_BREAKER_DECAY_MS - 1;
+    const fresh = Date.now();
+    const FRESH_BUCKET = "sFresh\x1fm\x1fu";
+    setKV(
+      CB_KV_KEY,
+      JSON.stringify({
+        version: 2,
+        buckets: {
+          [BUCKET]: { trippedAt: stale },
+          [FRESH_BUCKET]: { trippedAt: fresh },
+        },
+      }),
+    );
+    _forceReloadForTest();
+    // Force the lazy load to run.
+    expect(isCircuitBreakerTripped(FRESH_BUCKET)).toBe(true);
+    // The persisted set no longer contains the stale bucket.
+    const persisted = JSON.parse(getKV(CB_KV_KEY) as string) as {
+      buckets: Record<string, unknown>;
+    };
+    expect(Object.keys(persisted.buckets)).toEqual([FRESH_BUCKET]);
+  });
+
+  test("pruneExpiredCircuitBreakers removes decayed tripped buckets + rewrites KV", () => {
+    const bad = makeWarmupResult({
+      cacheReadTokens: 0,
+      cacheCreationTokens: 50000,
+    });
+    const t0 = 5_000_000;
+    for (let i = 0; i < 3; i++) checkCircuitBreaker(bad, BUCKET, true, t0);
+    expect(getCircuitBreakerSummary(t0).trippedCount).toBe(1);
+
+    // Before the window: nothing pruned.
+    expect(pruneExpiredCircuitBreakers(t0 + CIRCUIT_BREAKER_DECAY_MS - 1)).toBe(
+      0,
+    );
+    // At/after the window: the dead bucket is swept and the KV shrinks.
+    expect(pruneExpiredCircuitBreakers(t0 + CIRCUIT_BREAKER_DECAY_MS)).toBe(1);
+    const persisted = JSON.parse(getKV(CB_KV_KEY) as string) as {
+      buckets: Record<string, unknown>;
+    };
+    expect(Object.keys(persisted.buckets)).toEqual([]);
   });
 });
 
@@ -864,15 +1101,6 @@ describe("shouldWarm", () => {
   });
 
   test("returns false when circuit breaker is tripped", () => {
-    // Trip the circuit breaker
-    const bad = makeWarmupResult({
-      cacheReadTokens: 0,
-      cacheCreationTokens: 50000,
-    });
-    checkCircuitBreaker(bad);
-    checkCircuitBreaker(bad);
-    checkCircuitBreaker(bad);
-
     const state = makeSessionState({
       lastRequestTime: Date.now() - 270_000,
       cacheAnalytics: {
@@ -880,6 +1108,16 @@ describe("shouldWarm", () => {
         lastRequestBody: compressBody('{"test": true}'),
       },
     });
+    // Trip the circuit breaker for THIS session's bucket.
+    const bad = makeWarmupResult({
+      cacheReadTokens: 0,
+      cacheCreationTokens: 50000,
+    });
+    const bucket = warmupBucketKey(state);
+    checkCircuitBreaker(bad, bucket, true);
+    checkCircuitBreaker(bad, bucket, true);
+    checkCircuitBreaker(bad, bucket, true);
+
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
     const hist = createHistogram();
     for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
@@ -1058,14 +1296,6 @@ describe("shouldWarm", () => {
   });
 
   test("forceKeepWarm still respects circuit breaker", () => {
-    const bad = makeWarmupResult({
-      cacheReadTokens: 0,
-      cacheCreationTokens: 50000,
-    });
-    checkCircuitBreaker(bad);
-    checkCircuitBreaker(bad);
-    checkCircuitBreaker(bad);
-
     const now = Date.now();
     const state = makeSessionState({
       lastRequestTime: now - 270_000,
@@ -1083,6 +1313,16 @@ describe("shouldWarm", () => {
       },
       messageCount: 20,
     });
+    // Trip this session's bucket.
+    const bad = makeWarmupResult({
+      cacheReadTokens: 0,
+      cacheCreationTokens: 50000,
+    });
+    const bucket = warmupBucketKey(state);
+    checkCircuitBreaker(bad, bucket, true);
+    checkCircuitBreaker(bad, bucket, true);
+    checkCircuitBreaker(bad, bucket, true);
+
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
     const hist = createHistogram();
 
@@ -2074,17 +2314,18 @@ describe("shouldWarm tool-call warming", () => {
   });
 
   test("respects circuit breaker", () => {
-    // Trip the circuit breaker
+    const now = Date.now();
+    const state = makeToolCallState({ lastRequestTime: now - 270_000 });
+    // Trip this session's bucket.
     const bad = makeWarmupResult({
       cacheReadTokens: 0,
       cacheCreationTokens: 50000,
     });
-    checkCircuitBreaker(bad);
-    checkCircuitBreaker(bad);
-    checkCircuitBreaker(bad);
+    const bucket = warmupBucketKey(state);
+    checkCircuitBreaker(bad, bucket, true);
+    checkCircuitBreaker(bad, bucket, true);
+    checkCircuitBreaker(bad, bucket, true);
 
-    const now = Date.now();
-    const state = makeToolCallState({ lastRequestTime: now - 270_000 });
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
     const hist = createHistogram();
 

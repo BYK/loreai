@@ -45,6 +45,7 @@ import { resolveUpstreamRoute } from "./config";
 import { getModelEntrySync } from "./worker-model";
 import { recordWarmupCost } from "./cost-tracker";
 import { upstreamFetch } from "./fetch";
+import { emitWarmupCircuitBreakerMetric } from "./sentry";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -109,8 +110,14 @@ export const TOOL_CALL_MAX_CYCLES = 2;
  *  MIN_WARMUPS_FOR_ROI_CHECK=5 guard let nearly all of them through. */
 export const TOOL_CALL_MIN_HITS_FOR_CONTINUATION = 1;
 
-/** Max uncached warmup responses before the global circuit breaker trips. */
+/** Max uncached warmup responses before a bucket's circuit breaker trips. */
 const CIRCUIT_BREAKER_MAX_FAILURES = 3;
+
+/** How long a tripped bucket stays disabled before auto-decaying (ms). A
+ *  transient upstream cache-key change recovers on its own within this window;
+ *  a genuinely broken bucket wastes at most a few warmups per decay period.
+ *  Buckets can also be cleared immediately via resetCircuitBreaker(). */
+export const CIRCUIT_BREAKER_DECAY_MS = 6 * 3_600_000; // 6 hours
 
 /** Gap duration floor (ms) separating "active coding turns" from "breaks".
  *  3 minutes is well past typical agent think time (10s–60s) but before
@@ -151,117 +158,250 @@ export const MIN_INPUT_TOKENS_FOR_WARMING = 50_000;
 export const MIN_RETURN_PROBABILITY_FLOOR = 0.3;
 
 // ---------------------------------------------------------------------------
-// Global circuit breaker
+// Per-bucket circuit breaker
 // ---------------------------------------------------------------------------
+//
+// A warmup "failure" is a response with cacheCreation > 0 AND cacheRead === 0
+// while the cached prefix should still have been alive (see `cacheLikelyAlive`
+// in executeWarmup) — meaning the warmup body did not match the cached prefix.
+//
+// The breaker is scoped PER BUCKET — keyed by (sessionID, model, upstreamURL) —
+// so one pathological session/model/provider can never disable warming for
+// healthy sessions. Switching model or provider mid-session lands in a separate
+// bucket. A tripped bucket auto-decays after CIRCUIT_BREAKER_DECAY_MS so a
+// transient upstream cache-key change recovers on its own; it can also be
+// cleared explicitly via resetCircuitBreaker() (/lore:warm:reset, UI button).
 
-let circuitBreakerFailures = 0;
-let circuitBreakerTripped = false;
-let circuitBreakerLoaded = false;
+type BreakerEntry = {
+  /** Consecutive uncached warmups (reset on a confirmed cache read). In-memory only. */
+  failures: number;
+  /** True once `failures` reached CIRCUIT_BREAKER_MAX_FAILURES. */
+  tripped: boolean;
+  /** ms timestamp when this bucket tripped (0 when not tripped). Drives auto-decay. */
+  trippedAt: number;
+};
+
+/** Per-bucket breaker state. Key = warmupBucketKey(state). */
+const circuitBreakers = new Map<string, BreakerEntry>();
+let circuitBreakersLoaded = false;
 
 const CB_KV_KEY = "warmup_circuit_breaker";
 
-/** Load circuit breaker state from DB on first access. */
-function ensureCircuitBreakerLoaded(): void {
-  if (circuitBreakerLoaded) return;
-  circuitBreakerLoaded = true;
+/**
+ * Compute the circuit-breaker bucket key for a session: (sessionID, model,
+ * upstreamURL). Switching model or upstream mid-session yields a distinct
+ * bucket so failures never cross-contaminate.
+ */
+export function warmupBucketKey(state: SessionState): string {
+  const model = state.lastUpstream?.model ?? "unknown";
+  const url = state.lastUpstream?.url ?? "unknown";
+  return `${state.sessionID}\x1f${model}\x1f${url}`;
+}
+
+/** Load tripped buckets from DB on first access (only tripped buckets persist). */
+function ensureCircuitBreakersLoaded(): void {
+  if (circuitBreakersLoaded) return;
+  circuitBreakersLoaded = true;
   try {
     const raw = getKV(CB_KV_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as {
-        tripped?: boolean;
-        failures?: number;
-      };
-      circuitBreakerTripped = parsed.tripped ?? false;
-      circuitBreakerFailures = parsed.failures ?? 0;
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as {
+      version?: number;
+      buckets?: Record<string, { trippedAt?: number }>;
+    };
+    // Legacy v1 shape ({tripped, failures}) carried no bucket identity. A stale
+    // global flag must NOT permanently disable per-bucket warming, so drop it
+    // (rewrite the KV to the empty v2 shape). This also auto-clears any breaker
+    // latched by the old global implementation on first run of this build.
+    if (parsed.version !== 2 || !parsed.buckets) {
+      setKV(CB_KV_KEY, JSON.stringify({ version: 2, buckets: {} }));
+      return;
     }
+    const now = Date.now();
+    let droppedStale = false;
+    for (const [bucket, entry] of Object.entries(parsed.buckets)) {
+      const trippedAt = entry.trippedAt ?? 0;
+      // Apply decay on load — drop buckets older than the decay window.
+      if (trippedAt > 0 && now - trippedAt < CIRCUIT_BREAKER_DECAY_MS) {
+        circuitBreakers.set(bucket, { failures: 0, tripped: true, trippedAt });
+      } else {
+        droppedStale = true;
+      }
+    }
+    // Shrink the persisted set across restarts when stale buckets were dropped.
+    if (droppedStale) saveCircuitBreakers();
   } catch {
-    // Corrupted value — start fresh
+    // Corrupted value — start fresh.
   }
 }
 
-/** Persist circuit breaker state to DB. */
-function saveCircuitBreaker(): void {
-  setKV(
-    CB_KV_KEY,
-    JSON.stringify({
-      tripped: circuitBreakerTripped,
-      failures: circuitBreakerFailures,
-    }),
-  );
+/** Persist only tripped buckets to DB in the v2 shape. */
+function saveCircuitBreakers(): void {
+  const buckets: Record<string, { trippedAt: number }> = {};
+  for (const [bucket, entry] of circuitBreakers) {
+    if (entry.tripped) buckets[bucket] = { trippedAt: entry.trippedAt };
+  }
+  setKV(CB_KV_KEY, JSON.stringify({ version: 2, buckets }));
 }
 
 /**
- * Check if the global circuit breaker has tripped.
+ * Check if a bucket's circuit breaker has tripped.
  *
- * Once tripped, ALL cache warming is disabled for the process lifetime.
- * This is intentionally non-recoverable — if warmups are causing cache
- * writes instead of reads, something fundamental is wrong (our assumptions
- * about cache key computation, body format, auth, etc.) and we cannot
- * afford to keep trying.
+ * Applies auto-decay: a tripped bucket older than CIRCUIT_BREAKER_DECAY_MS is
+ * cleared and re-armed, so a transient upstream cache-key change recovers on
+ * its own without a restart or manual reset.
  */
-export function isCircuitBreakerTripped(): boolean {
-  ensureCircuitBreakerLoaded();
-  return circuitBreakerTripped;
+export function isCircuitBreakerTripped(
+  bucketKey: string,
+  now: number = Date.now(),
+): boolean {
+  ensureCircuitBreakersLoaded();
+  const entry = circuitBreakers.get(bucketKey);
+  if (!entry?.tripped) return false;
+  if (now - entry.trippedAt >= CIRCUIT_BREAKER_DECAY_MS) {
+    circuitBreakers.delete(bucketKey);
+    saveCircuitBreakers();
+    return false;
+  }
+  return true;
 }
 
-/** Snapshot of circuit breaker state for dashboard rendering. */
-export function getCircuitBreakerStatus(): {
+/** Snapshot of a bucket's circuit breaker state for dashboard rendering. */
+export function getCircuitBreakerStatus(
+  bucketKey: string,
+  now: number = Date.now(),
+): {
   tripped: boolean;
   failures: number;
   maxFailures: number;
+  trippedAt: number;
 } {
-  ensureCircuitBreakerLoaded();
+  ensureCircuitBreakersLoaded();
+  const tripped = isCircuitBreakerTripped(bucketKey, now);
+  const entry = circuitBreakers.get(bucketKey);
   return {
-    tripped: circuitBreakerTripped,
-    failures: circuitBreakerFailures,
+    tripped,
+    failures: entry?.failures ?? 0,
     maxFailures: CIRCUIT_BREAKER_MAX_FAILURES,
+    trippedAt: entry?.trippedAt ?? 0,
   };
 }
 
+/** Aggregate breaker state across all buckets (for the dashboard global card). */
+export function getCircuitBreakerSummary(now: number = Date.now()): {
+  trippedCount: number;
+  entries: Array<{ bucket: string; trippedAt: number }>;
+} {
+  ensureCircuitBreakersLoaded();
+  const entries: Array<{ bucket: string; trippedAt: number }> = [];
+  for (const [bucket, entry] of circuitBreakers) {
+    if (entry.tripped && now - entry.trippedAt < CIRCUIT_BREAKER_DECAY_MS) {
+      entries.push({ bucket, trippedAt: entry.trippedAt });
+    }
+  }
+  return { trippedCount: entries.length, entries };
+}
+
 /**
- * Record a warmup result and check the circuit breaker.
+ * Drop tripped buckets that have aged past the decay window. The decay-on-read
+ * path in isCircuitBreakerTripped only fires for buckets that are re-queried;
+ * a bucket belonging to an evicted/dead session is never re-checked, so without
+ * this sweep its (persisted) tripped entry would linger until process restart.
+ * Called periodically from the idle loop to keep both the in-memory map and the
+ * persisted KV bounded. Returns the number of buckets pruned.
  *
- * A "failure" is a warmup where cacheCreationTokens > 0 AND
- * cacheReadTokens === 0 — meaning the warmup caused a fresh cache write
- * instead of refreshing an existing entry. This should never happen if
- * the warmup body matches the cached prefix.
- *
- * Returns true if the circuit breaker has tripped (warming should stop).
+ * Non-tripped failure entries are not persisted and are cleared on the next
+ * confirmed read or reset, so they are intentionally left untouched here.
  */
-export function checkCircuitBreaker(result: WarmupResult): boolean {
-  ensureCircuitBreakerLoaded();
-  if (circuitBreakerTripped) return true;
+export function pruneExpiredCircuitBreakers(now: number = Date.now()): number {
+  ensureCircuitBreakersLoaded();
+  let pruned = 0;
+  for (const [bucket, entry] of circuitBreakers) {
+    if (entry.tripped && now - entry.trippedAt >= CIRCUIT_BREAKER_DECAY_MS) {
+      circuitBreakers.delete(bucket);
+      pruned++;
+    }
+  }
+  if (pruned > 0) saveCircuitBreakers();
+  return pruned;
+}
+
+/**
+ * Record a warmup result for a bucket and check its circuit breaker.
+ *
+ * A "failure" is a warmup where cacheCreationTokens > 0 AND cacheReadTokens === 0
+ * AND the cached prefix should still have been alive (`cacheLikelyAlive`). When
+ * the cache had already expired, a fresh write is the warmer legitimately
+ * re-priming a cold cache — NOT a body/prefix mismatch — so it is neutral
+ * (neither increments nor resets the counter). Likewise non-2xx responses
+ * (`result.ok === false`, e.g. thinking-session 400s) are neutral.
+ *
+ * Returns true if the bucket's breaker is tripped (warming should stop).
+ */
+export function checkCircuitBreaker(
+  result: WarmupResult,
+  bucketKey: string,
+  cacheLikelyAlive: boolean,
+  now: number = Date.now(),
+): boolean {
+  ensureCircuitBreakersLoaded();
+  if (isCircuitBreakerTripped(bucketKey, now)) return true;
 
   if (
     result.ok &&
     result.cacheCreationTokens > 0 &&
-    result.cacheReadTokens === 0
+    result.cacheReadTokens === 0 &&
+    cacheLikelyAlive
   ) {
-    circuitBreakerFailures++;
+    const entry = circuitBreakers.get(bucketKey) ?? {
+      failures: 0,
+      tripped: false,
+      trippedAt: 0,
+    };
+    entry.failures++;
+    circuitBreakers.set(bucketKey, entry);
     log.error(
-      `cache-warmer CIRCUIT BREAKER: warmup caused uncached write ` +
-        `(${circuitBreakerFailures}/${CIRCUIT_BREAKER_MAX_FAILURES}). ` +
+      `cache-warmer CIRCUIT BREAKER: warmup caused uncached write for ` +
+        `bucket=${bucketKey.slice(0, 24)} ` +
+        `(${entry.failures}/${CIRCUIT_BREAKER_MAX_FAILURES}). ` +
         `cacheCreation=${result.cacheCreationTokens} cacheRead=${result.cacheReadTokens}`,
     );
-    saveCircuitBreaker();
-    if (circuitBreakerFailures >= CIRCUIT_BREAKER_MAX_FAILURES) {
-      circuitBreakerTripped = true;
-      saveCircuitBreaker();
+    if (entry.failures >= CIRCUIT_BREAKER_MAX_FAILURES) {
+      entry.tripped = true;
+      entry.trippedAt = now;
+      saveCircuitBreakers();
+      emitWarmupCircuitBreakerMetric();
       log.error(
-        `cache-warmer CIRCUIT BREAKER TRIPPED: ${CIRCUIT_BREAKER_MAX_FAILURES} consecutive ` +
-          `uncached warmups detected. ALL cache warming disabled for this process. ` +
-          `This indicates warmup bodies don't match the cached prefix — ` +
-          `investigate cache key computation assumptions.`,
+        `cache-warmer CIRCUIT BREAKER TRIPPED for bucket=${bucketKey.slice(0, 24)}: ` +
+          `${CIRCUIT_BREAKER_MAX_FAILURES} uncached warmups detected. Warming disabled for ` +
+          `this (session, model, upstream) until it decays in ` +
+          `${Math.round(CIRCUIT_BREAKER_DECAY_MS / 3_600_000)}h or is reset. This indicates ` +
+          `warmup bodies don't match the cached prefix — investigate cache key assumptions.`,
       );
       return true;
     }
   } else if (result.ok && result.cacheReadTokens > 0) {
-    // Successful cache read — reset the failure counter
-    circuitBreakerFailures = 0;
-    saveCircuitBreaker();
+    // Confirmed cache read — clear any accumulated (non-tripped) failures.
+    const entry = circuitBreakers.get(bucketKey);
+    if (entry && !entry.tripped) circuitBreakers.delete(bucketKey);
   }
 
-  return circuitBreakerTripped;
+  return false;
+}
+
+/**
+ * Reset the circuit breaker. Pass a bucket key to clear a single bucket, or
+ * omit to clear ALL buckets. The production recovery path — reachable via the
+ * /lore:warm:reset slash command and the POST /ui/api/warming/reset route.
+ */
+export function resetCircuitBreaker(bucketKey?: string): void {
+  ensureCircuitBreakersLoaded();
+  if (bucketKey) {
+    circuitBreakers.delete(bucketKey);
+  } else {
+    circuitBreakers.clear();
+  }
+  saveCircuitBreakers();
 }
 
 // ---------------------------------------------------------------------------
@@ -886,8 +1026,8 @@ export function shouldWarm(
   blendedHist: InterTurnHistogram,
   now: number = Date.now(),
 ): boolean {
-  // Global kill switch — always respected, even with /lore:warm:keep
-  if (circuitBreakerTripped) return false;
+  // Per-bucket kill switch — always respected, even with /lore:warm:keep.
+  if (isCircuitBreakerTripped(warmupBucketKey(state), now)) return false;
 
   // Sub-agent sessions are always exempt — they are too short-lived
   // for warming to be profitable, even with /lore:warm:keep force.
@@ -1207,8 +1347,13 @@ export type WarmingSnapshot = {
   // Decision
   shouldWarmNow: boolean;
   notWarmingReason: string | null;
-  // Circuit breaker (global, same for all sessions)
-  circuitBreaker: { tripped: boolean; failures: number; maxFailures: number };
+  // Circuit breaker for THIS session's (model, upstream) bucket.
+  circuitBreaker: {
+    tripped: boolean;
+    failures: number;
+    maxFailures: number;
+    trippedAt: number;
+  };
 };
 
 /**
@@ -1300,7 +1445,7 @@ export function computeWarmingSnapshot(
 
   let notWarmingReason: string | null = null;
   if (!warmNow) {
-    if (circuitBreakerTripped) {
+    if (isCircuitBreakerTripped(warmupBucketKey(state), now)) {
       notWarmingReason = "Circuit breaker tripped";
     } else if (state.isSubagent) {
       notWarmingReason = "Sub-agent session (ephemeral)";
@@ -1463,7 +1608,7 @@ export function computeWarmingSnapshot(
     // Decision
     shouldWarmNow: warmNow,
     notWarmingReason,
-    circuitBreaker: getCircuitBreakerStatus(),
+    circuitBreaker: getCircuitBreakerStatus(warmupBucketKey(state), now),
   };
 }
 
@@ -1528,6 +1673,20 @@ export async function executeWarmup(
 
   const { lastRequestBody } = state.cacheAnalytics;
   if (!lastRequestBody) return noResult;
+
+  // Circuit-breaker bucket + cache-liveness, captured BEFORE the warmup state
+  // mutation below overwrites lastWarmupAt. cacheRead=0 only indicates a
+  // body/prefix mismatch when the cached entry should still be alive; if the
+  // last cache write (real turn or prior warmup) is older than the breakpoint
+  // TTL, the entry expired and a fresh write is the warmer re-priming a cold
+  // cache — expected, not a fault. checkCircuitBreaker ignores those.
+  const breakerBucket = warmupBucketKey(state);
+  const lastCacheTouch = Math.max(
+    state.lastRequestTime ?? 0,
+    state.warmup?.lastWarmupAt ?? 0,
+  );
+  const cacheLikelyAlive =
+    lastCacheTouch > 0 && Date.now() - lastCacheTouch < profile.ttlMs;
 
   // Decompress the stored body
   const storedBody = decompressBody(lastRequestBody);
@@ -1711,8 +1870,8 @@ export async function executeWarmup(
       state.warmup.writeEfficiencySamples = samples;
     }
 
-    // Check circuit breaker
-    checkCircuitBreaker(result);
+    // Check circuit breaker for this (session, model, upstream) bucket.
+    checkCircuitBreaker(result, breakerBucket, cacheLikelyAlive);
 
     // Clear worker-health failure state on successful warmup.
     recordWorkerSuccess(state.sessionID);
@@ -1932,13 +2091,22 @@ export function getGlobalHistogramsSnapshot(): ReadonlyMap<
 // Test helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * @internal Drop in-memory breaker state and force the next access to re-read
+ * from the DB (exercises ensureCircuitBreakersLoaded, incl. legacy migration
+ * and on-load decay). Tests seed the KV directly, then call this.
+ */
+export function _forceReloadForTest(): void {
+  circuitBreakers.clear();
+  circuitBreakersLoaded = false;
+}
+
 /** @internal Reset module state for tests. */
 export function _resetForTest(): void {
-  circuitBreakerFailures = 0;
-  circuitBreakerTripped = false;
-  circuitBreakerLoaded = true; // Mark as loaded so it doesn't re-read stale DB state
+  circuitBreakers.clear();
+  circuitBreakersLoaded = true; // Mark as loaded so it doesn't re-read stale DB state
   try {
-    setKV(CB_KV_KEY, JSON.stringify({ tripped: false, failures: 0 }));
+    setKV(CB_KV_KEY, JSON.stringify({ version: 2, buckets: {} }));
   } catch {
     /* DB may not be available in all test contexts */
   }
