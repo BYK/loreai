@@ -42,7 +42,8 @@ import {
 import { getActiveSessions, rebindActiveSession } from "./pipeline";
 import {
   computeWarmingSnapshot,
-  getCircuitBreakerStatus,
+  getCircuitBreakerSummary,
+  resetCircuitBreaker,
   getGlobalHistogramsSnapshot,
   HISTOGRAM_BINS,
   BLEND_PSEUDOCOUNT,
@@ -2432,7 +2433,7 @@ function pageWarming(): string {
   body += `<h1>Cache Warming</h1>`;
 
   const activeSessions = getActiveSessions();
-  const cbStatus = getCircuitBreakerStatus();
+  const cbSummary = getCircuitBreakerSummary();
 
   // Build warming snapshots once — used for both stat cards and table
   const snapshotMap = new Map<string, WarmingSnapshot>();
@@ -2473,25 +2474,31 @@ function pageWarming(): string {
     <div class="stat"><div class="label">Dead</div><div class="value">${deadCount}</div></div>
     <div class="stat"><div class="label">Total Warmups</div><div class="value">${totalWarmups}</div></div>
     <div class="stat"><div class="label">Hit Rate</div><div class="value">${totalWarmups > 0 ? `${((totalHits / totalWarmups) * 100).toFixed(0)}%` : "N/A"}</div></div>
-    <div class="stat"><div class="label">Circuit Breaker</div><div class="value">${
-      cbStatus.tripped
-        ? '<span style="color:var(--danger)">TRIPPED</span>'
-        : `OK <span style="color:var(--fg3)">${cbStatus.failures}/${cbStatus.maxFailures}</span>`
+    <div class="stat"><div class="label">Tripped Buckets</div><div class="value">${
+      cbSummary.trippedCount > 0
+        ? `<span style="color:var(--danger)">${cbSummary.trippedCount}</span>`
+        : "OK"
     }</div></div>
   </div>`;
 
-  // Circuit breaker detail (if non-zero failures or tripped)
-  if (cbStatus.failures > 0 || cbStatus.tripped) {
-    const cls = cbStatus.tripped
-      ? "cb-tripped"
-      : cbStatus.failures > 1
-        ? "cb-warn"
-        : "cb-ok";
-    const pct = (cbStatus.failures / cbStatus.maxFailures) * 100;
-    body += `<div class="card ${cls}">
-      <strong>Circuit Breaker:</strong> ${cbStatus.failures}/${cbStatus.maxFailures} uncached warmups
-      <span class="cb-bar"><span class="cb-bar-fill" style="width:${pct}%"></span></span>
-      ${cbStatus.tripped ? '<strong style="color:var(--danger)">ALL WARMING DISABLED</strong>' : ""}
+  // Circuit breaker detail — list tripped (session, model, upstream) buckets
+  // and offer a reset. The breaker is per-bucket, so only the listed buckets
+  // are disabled; everything else keeps warming.
+  if (cbSummary.trippedCount > 0) {
+    const items = cbSummary.entries
+      .map((e) => {
+        const [sid, model] = e.bucket.split("\x1f");
+        const ago = formatDate(e.trippedAt);
+        return `<li><code>${esc(sid.slice(0, 16))}</code> &middot; ${esc(model ?? "unknown")} <span style="color:var(--fg3)">(tripped ${esc(ago)})</span></li>`;
+      })
+      .join("");
+    body += `<div class="card cb-tripped">
+      <strong style="color:var(--danger)">Circuit Breaker:</strong> ${cbSummary.trippedCount} bucket${cbSummary.trippedCount === 1 ? "" : "s"} disabled (uncached warmups).
+      They auto-recover after the decay window; or reset now.
+      <ul style="margin:6px 0 8px 18px">${items}</ul>
+      <form class="inline" method="POST" action="/ui/api/warming/reset">
+        <button type="submit" class="btn-sm">Reset circuit breaker</button>
+      </form>
     </div>`;
   }
 
@@ -3723,6 +3730,14 @@ export async function handleUIRequest(
         setDailyBudget(budgetVal);
       }
       return redirect("/ui/costs");
+    }
+
+    // Reset all tripped circuit-breaker buckets (re-enable warming).
+    // Matched before the :sessionId/:mode route (single-segment path).
+    if (pathname === "/ui/api/warming/reset") {
+      resetCircuitBreaker();
+      const referer = req.headers.get("referer");
+      return redirect(referer ?? "/ui/warming");
     }
 
     // Set warming mode for a live session

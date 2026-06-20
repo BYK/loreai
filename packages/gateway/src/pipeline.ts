@@ -207,6 +207,7 @@ import {
   resolveProfile as resolveWarmingProfile,
   clearWarmupAuthDisabled,
   creditWarmupHit,
+  resetCircuitBreaker,
 } from "./cache-warmer";
 import {
   setSentryRequestContext,
@@ -7327,6 +7328,8 @@ function handleAmnesiaSlashCommand(
  * `/lore:warm:stop` — disables cache warming for this session.
  * `/lore:warm:keep` — forces cache warming regardless of survival analysis.
  * `/lore:warm:auto` — returns to normal survival-analysis-driven mode.
+ * `/lore:warm:reset` — clears ALL tripped circuit-breaker buckets (re-enables
+ *   warming that was disabled after repeated uncached warmups).
  *
  * Returns a synthetic Anthropic-format response if a command was matched,
  * or null to continue normal processing.
@@ -7341,7 +7344,22 @@ function handleWarmupSlashCommand(
   const isStop = lower === "/lore:warm:stop";
   const isKeep = lower === "/lore:warm:keep";
   const isAuto = lower === "/lore:warm:auto";
-  if (!isStop && !isKeep && !isAuto) return null;
+  const isReset = lower === "/lore:warm:reset";
+  if (!isStop && !isKeep && !isAuto && !isReset) return null;
+
+  // Reset is a breaker-wide admin action — clear every tripped bucket and
+  // return immediately (it does not depend on resolving this session).
+  if (isReset) {
+    resetCircuitBreaker();
+    log.info(
+      "cache-warmer: /lore:warm:reset received — circuit breaker cleared",
+    );
+    return slashResponse(
+      req,
+      "Cache warming circuit breaker reset.",
+      `msg_lore_${Date.now()}`,
+    );
+  }
 
   // Find the session for this request (use the same header-based lookup)
   const known = extractKnownSessionHeader(req.rawHeaders);

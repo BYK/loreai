@@ -46,7 +46,13 @@ function idColumns(table: string): string[] {
 // Allowed columns per remote table (mirrors supabase/migrations/0002+). The
 // join table deliberately has NO content_hash/revision — sending them is a
 // PGRST204, which is exactly the bug this guards against.
-const SYNC_COLS = ["content_hash", "revision", "is_deleted", "owner_user_id"];
+const SYNC_COLS = [
+  "content_hash",
+  "revision",
+  "is_deleted",
+  "scope_id",
+  "author_id",
+];
 const REMOTE_COLUMNS: Record<string, Set<string>> = {
   knowledge: new Set([
     "id",
@@ -78,7 +84,8 @@ const REMOTE_COLUMNS: Record<string, Set<string>> = {
     ...SYNC_COLS,
   ]),
   knowledge_entity_refs: new Set([
-    "owner_user_id",
+    "scope_id",
+    "author_id",
     "knowledge_id",
     "entity_id",
     "is_deleted",

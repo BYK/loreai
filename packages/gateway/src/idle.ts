@@ -44,6 +44,8 @@ import type { SessionState } from "./translate/types";
 import { getWorkerModel, getModelEntrySync } from "./worker-model";
 import {
   isCircuitBreakerTripped,
+  pruneExpiredCircuitBreakers,
+  warmupBucketKey,
   isWarmupAuthDisabled,
   clearWarmupAuthDisabled,
   resolveProfile,
@@ -333,7 +335,12 @@ export function startIdleScheduler(
     );
 
     // --- Cache warming (separate from idle work — fires before TTL expiry) ---
-    if (isCircuitBreakerTripped()) return;
+    // NOTE: the circuit breaker is per-bucket (session, model, upstream), not
+    // global, so it's checked inside the loop below — a tripped bucket must
+    // never short-circuit warming for every other (healthy) session.
+    // Sweep decayed tripped buckets first so state stays bounded even for
+    // buckets whose session was evicted (never re-queried on the read path).
+    pruneExpiredCircuitBreakers(now);
 
     for (const [sessionID, state] of sessions) {
       if (warmupInProgress.has(sessionID)) continue;
@@ -369,6 +376,10 @@ export function startIdleScheduler(
         state.lastUpstream?.providerID,
       );
       if (!profile) continue;
+
+      // Skip only this session's tripped (model, upstream) bucket — other
+      // sessions/models keep warming. Auto-decays after CIRCUIT_BREAKER_DECAY_MS.
+      if (isCircuitBreakerTripped(warmupBucketKey(state), now)) continue;
 
       const blendedHist = blendedHistogramForSession(state);
       if (!shouldWarm(state, profile, blendedHist, now)) continue;

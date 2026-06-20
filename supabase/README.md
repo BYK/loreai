@@ -6,7 +6,7 @@ of the multi-DB sync architecture — see
 
 **Architecture:** a single shared multi-tenant Postgres isolated by **Row-Level
 Security** (each row scoped to its owner via `auth.uid()` — e.g. `profiles.id =
-auth.uid()` here; future sync tables use an `owner_user_id` column), not a
+auth.uid()` here; sync tables scope each row via a `scope_id` column), not a
 database per user. The local
 SQLite DB stays the source of truth on each machine; the gateway syncs rows over
 HTTP via `@supabase/supabase-js`. Identity is Supabase Auth (GitHub OAuth +
@@ -40,9 +40,10 @@ Migrations are plain SQL, applied in filename order:
   auto-provision trigger on `auth.users` insert.
 - `0002_sync_basic.sql` — Basic-tier sync tables (`knowledge`, `entities`,
   `entity_aliases`, `entity_relations`, `knowledge_entity_refs`) mirroring the
-  local SQLite schema, with `owner_user_id`/`content_hash`/`revision`/
-  `is_deleted`/server-stamped `updated_at`, RLS scoped to the owner, and
-  per-owner+updated_at pull-cursor indexes.
+  local SQLite schema, with `owner_user_id` (renamed to `scope_id` + `author_id`
+  added in 0007)/`content_hash`/`revision`/`is_deleted`/server-stamped
+  `updated_at`, RLS scoped to the owner, and per-owner+updated_at pull-cursor
+  indexes.
 - `0003_sync_limits.sql` — anti-abuse for the direct-PostgREST write model.
   Clients write to the REST API directly, so limits are enforced **in-DB**
   (RLS only governs ownership, not volume/size):
@@ -70,10 +71,18 @@ Migrations are plain SQL, applied in filename order:
     user can still UPDATE / soft-delete (incl. the deletes that free quota) via
     the `ON CONFLICT DO UPDATE` write path.
 
-Known residual (documented, acceptable for free-tier abuse-prevention): the
-quota check is `count(*)` then compare with no lock, so concurrent inserts can
-overshoot a cap by ~N per burst (soft cap, not hard). Add a per-(user,table)
-advisory lock if a hard cap is ever required.
+- `0005_sync_quota_hardening.sql` — quota TOCTOU fix (per-(user,table) advisory
+  xact lock) + gate revival UPDATEs + cap the `id` column.
+- `0006_tier_upgrade_path.sql` — `service_role` path to upgrade `profiles.tier`.
+- `0007_scope_seam.sql` — the team/org **scope seam** + a maintained usage
+  counter. Renames `owner_user_id` → `scope_id` (RLS/PK/billing axis) and adds
+  `author_id` (who wrote it; v1 `= scope_id = auth.uid()`, both enforced by RLS
+  `WITH CHECK`; `scope_id` immutable). Replaces the per-write `count(*)` quota
+  with a trigger-maintained `user_table_usage(scope_id, table_name, row_count,
+  byte_count)` counter (O(1), written only by `SECURITY DEFINER` triggers) and a
+  `plan_limits.max_bytes` budget. Counting is **physical** (every row counts
+  regardless of `is_deleted`) — abuse-proof and forward-compatible with the
+  append-only knowledge model; a hard delete (reaper/compaction) frees footprint.
 
 ## Conflict resolution (last-writer-to-remote-wins)
 
