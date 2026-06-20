@@ -755,6 +755,12 @@ class LocalProvider implements EmbeddingProvider {
       longestChars,
     });
 
+    // Clear any stale worker error so the deliberate respawn isn't fast-failed
+    // by ensureWorker() (mirrors shutdown()). The OOM exit is recoverable — a
+    // prior `error`/`init-error` could otherwise leave workerInitError set and
+    // block recovery.
+    this.workerInitError = null;
+
     // Respawn and re-submit. Fire-and-forget: ensureWorker()'s own handlers
     // reject pending if the respawn itself fails.
     void this.resubmitPending();
