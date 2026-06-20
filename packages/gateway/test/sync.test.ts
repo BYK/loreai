@@ -509,10 +509,9 @@ describe("pullOnce", () => {
     await pushOnce(makeClient() as never); // remote kt: live, content_hash set
     // Another client soft-deletes kt but the remote row KEEPS its content_hash —
     // exactly the wire shape pushEntry produces.
-    const remoteRow = tableRows("knowledge").find((r) => r.id === "kt") as Record<
-      string,
-      unknown
-    >;
+    const remoteRow = tableRows("knowledge").find(
+      (r) => r.id === "kt",
+    ) as Record<string, unknown>;
     remoteRow.is_deleted = true;
     remoteRow.updated_at = new Date(9_000_000).toISOString(); // past the pull cursor
     expect(typeof remoteRow.content_hash).toBe("string"); // hash intact (the trap)
