@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 // Shared mock handles for the Supabase client (hoisted so the vi.mock factory
 // can reference them safely).
@@ -54,6 +54,10 @@ function fakeSupabaseSession(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+// The profiles mirror is touched here via clearSession()/persistSession(); assert
+// the sync invariants hold after every test (#834).
+afterEach(() => syncData.assertSyncInvariants());
 
 describe("supabase session persistence", () => {
   beforeEach(() => {

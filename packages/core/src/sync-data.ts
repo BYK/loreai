@@ -685,3 +685,70 @@ export function enableSync(tier: SyncTier = "basic"): void {
 export function disableSync(): void {
   deleteTeamConfig(ENABLED_KEY);
 }
+
+// ---------------------------------------------------------------------------
+// Invariant self-check
+// ---------------------------------------------------------------------------
+
+/**
+ * Assert the sync engine's local invariants hold; throws an Error listing every
+ * violation. These are the load-bearing rules the #828 bugs broke — encoding
+ * them here (and calling this in tests' `afterEach`) turns every test that
+ * touches sync state into a continuous regression check, instead of trusting a
+ * comment. Pure, cheap COUNT/DISTINCT queries — safe to run after each test, and
+ * usable as a runtime diagnostic (e.g. a future `lore data check`).
+ */
+export function assertSyncInvariants(): void {
+  const violations: string[] = [];
+  const tables = syncedTables();
+
+  // 1. Pull-only tables are server-authoritative and never pushed, so an outbox
+  //    entry for one can NEVER advance its push cursor — it pins the prune floor
+  //    at 0 and disables outbox pruning for ALL tables (bug #828). Must be empty.
+  for (const m of tables) {
+    if (!m.pullOnly) continue;
+    const n = (
+      db()
+        .query("SELECT COUNT(*) AS n FROM sync_outbox WHERE table_name = ?")
+        .get(m.table) as { n: number }
+    ).n;
+    if (n > 0) {
+      violations.push(
+        `pull-only table "${m.table}" has ${n} sync_outbox entr${n === 1 ? "y" : "ies"} — prune-floor wedge (#828)`,
+      );
+    }
+  }
+
+  // 2. The profiles mirror holds AT MOST the current account's row, so
+  //    currentTier()'s unqualified LIMIT 1 is deterministic and a logged-out or
+  //    foreign account's tier can't linger (#828). clearProfileMirror() enforces
+  //    this on logout/account-switch.
+  const profileRows = (
+    db().query("SELECT COUNT(*) AS n FROM profiles").get() as { n: number }
+  ).n;
+  if (profileRows > 1) {
+    violations.push(
+      `profiles mirror holds ${profileRows} rows — must be <= 1 (currentTier single-row invariant, #828)`,
+    );
+  }
+
+  // 3. Every outbox / sync_state row references a registered synced table — a
+  //    typo or registry drift would silently strand rows the engine can't route.
+  const known = new Set(tables.map((m) => m.table));
+  for (const tbl of ["sync_outbox", "sync_state"] as const) {
+    const names = db()
+      .query(`SELECT DISTINCT table_name FROM ${tbl}`)
+      .all() as Array<{ table_name: string }>;
+    for (const { table_name } of names) {
+      if (!known.has(table_name)) {
+        violations.push(`${tbl} references unregistered table "${table_name}"`);
+      }
+    }
+  }
+
+  if (violations.length > 0) {
+    throw new Error(
+      `sync invariant violation(s):\n  - ${violations.join("\n  - ")}`,
+    );
+  }
+}

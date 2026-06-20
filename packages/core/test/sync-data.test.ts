@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
   db,
   ensureProject,
@@ -10,6 +10,7 @@ import {
 import {
   applyRemoteDelete,
   applyRemoteUpsert,
+  assertSyncInvariants,
   classifyRemoteRow,
   clearProfileMirror,
   contentHash,
@@ -57,6 +58,12 @@ beforeEach(() => {
   db().exec("DELETE FROM sync_state");
   db().exec("DELETE FROM sync_conflicts");
 });
+
+// Every test in this file leaves a state that must satisfy the sync invariants
+// (no pull-only outbox entry, profiles mirror <= 1 row, no unregistered tables).
+// Running the check in afterEach turns each test into a continuous regression
+// guard for the #828 bug classes (issue #834).
+afterEach(() => assertSyncInvariants());
 
 describe("v43 schema", () => {
   test("sync tables exist", () => {
@@ -530,5 +537,47 @@ describe("classifyRemoteRow pendingLocalChange (resurrection fix)", () => {
         pendingLocalChange: true,
       }),
     ).toBe("conflict");
+  });
+});
+
+describe("assertSyncInvariants", () => {
+  test("passes on a clean state", () => {
+    expect(() => assertSyncInvariants()).not.toThrow();
+  });
+
+  test("throws when a pull-only table has a sync_outbox entry (prune-floor wedge)", () => {
+    db()
+      .query(
+        "INSERT INTO sync_outbox (table_name, row_id, op, changed_at) VALUES ('profiles', 'u1', 'upsert', ?)",
+      )
+      .run(now());
+    expect(() => assertSyncInvariants()).toThrow(/pull-only table "profiles"/);
+    db().exec("DELETE FROM sync_outbox"); // restore clean state for afterEach
+  });
+
+  test("throws when the profiles mirror holds more than one row", () => {
+    for (const id of ["a", "b"]) {
+      db()
+        .query(
+          "INSERT INTO profiles (id, tier, created_at, updated_at) VALUES (?, 'pro', ?, ?)",
+        )
+        .run(id, now(), now());
+    }
+    expect(() => assertSyncInvariants()).toThrow(
+      /profiles mirror holds 2 rows/,
+    );
+    db().exec("DELETE FROM profiles"); // restore clean state for afterEach
+  });
+
+  test("throws when sync_state references an unregistered table", () => {
+    db()
+      .query(
+        "INSERT INTO sync_state (table_name, row_id, content_hash, revision, remote_updated_at) VALUES ('bogus_table', 'x', NULL, 0, NULL)",
+      )
+      .run();
+    expect(() => assertSyncInvariants()).toThrow(
+      /unregistered table "bogus_table"/,
+    );
+    db().exec("DELETE FROM sync_state"); // restore clean state for afterEach
   });
 });

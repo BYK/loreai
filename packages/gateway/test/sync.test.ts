@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   db,
   ensureProject,
@@ -303,6 +303,8 @@ beforeEach(() => {
   authed = true;
   clock = 1_000_000;
 });
+
+afterEach(() => syncData.assertSyncInvariants()); // #834 — continuous invariant guard
 
 describe("pushOnce — happy path", () => {
   test("uploads new rows and records sync_state", async () => {

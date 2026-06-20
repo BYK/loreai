@@ -14,7 +14,15 @@
 import { execFileSync } from "node:child_process";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { db, ensureProject, setKV, syncData } from "@loreai/core";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+} from "vitest";
 import { pullOnce, pushOnce } from "../src/sync";
 import { type PgHarness, startPgHarness } from "./helpers/pg-harness";
 
@@ -121,6 +129,11 @@ beforeEach(async () => {
   ]) {
     await h.client.query(`DELETE FROM public.${t}`);
   }
+});
+
+// Local sync invariants must hold after every real-engine round-trip too (#834).
+afterEach(() => {
+  if (!SKIP) syncData.assertSyncInvariants();
 });
 
 function insertKnowledge(id: string, content: string): void {

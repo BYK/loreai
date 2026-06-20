@@ -15,9 +15,10 @@
  * prune floor) are asserted in packages/gateway/test/sync.test.ts against the
  * real push path.
  */
-import { beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { db, deleteTeamConfig } from "../src/db";
 import {
+  assertSyncInvariants,
   enableSync,
   readOutbox,
   SYNCED_TABLES,
@@ -61,6 +62,8 @@ beforeEach(() => {
     db().exec(`DELETE FROM ${m.table}`);
   }
 });
+
+afterEach(() => assertSyncInvariants()); // #834 — continuous invariant guard
 
 describe("SYNCED_TABLES registry contract", () => {
   for (const m of SYNCED_TABLES.basic) {
