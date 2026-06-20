@@ -402,8 +402,16 @@ function applyRemote(
 ): void {
   const rowId = syncData.rowIdOf(meta.table, remote);
   const isDeleted = remote.is_deleted === true || remote.is_deleted === 1;
+  // classifyRemoteRow's contract: "remoteHash is null for a tombstone". A delete
+  // has no content to compare, so a tombstone is NEVER a content-match "skip".
+  // Honor that here regardless of the row's stored content_hash — pushEntry nulls
+  // only the LOCAL sync_state on delete, so a remote tombstone keeps its hash on
+  // the wire; without this, a cross-client / post-conflict delete whose hash still
+  // matches local content is mis-classified "skip" and silently dropped.
   const remoteHash =
-    typeof remote.content_hash === "string" ? remote.content_hash : null;
+    !isDeleted && typeof remote.content_hash === "string"
+      ? remote.content_hash
+      : null;
 
   // Unpushed local intent for this row (push runs first, but a quota-paused or
   // failed push can leave one pending) → never fast-forward over it.
