@@ -1210,7 +1210,7 @@ async function distillSegment(input: {
             // "created preference" log on every distill run.
             const existingPref = db()
               .query(
-                `SELECT id FROM knowledge
+                `SELECT id FROM knowledge_current
                  WHERE project_id = ? AND LOWER(title) = LOWER(?)
                  AND category = 'preference' AND confidence > 0 LIMIT 1`,
               )
@@ -1266,7 +1266,7 @@ async function distillSegment(input: {
           // persistent webfetch failure pattern).
           const existingGotcha = db()
             .query(
-              `SELECT id FROM knowledge
+              `SELECT id FROM knowledge_current
              WHERE project_id = ? AND LOWER(title) = LOWER(?) AND category = 'gotcha'
              AND confidence > 0 LIMIT 1`,
             )

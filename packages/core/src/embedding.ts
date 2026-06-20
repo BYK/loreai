@@ -902,7 +902,7 @@ export function vectorSearch(
   excludeCategories?: string[],
 ): VectorHit[] {
   let sql =
-    "SELECT id, embedding FROM knowledge WHERE embedding IS NOT NULL AND confidence > 0.2";
+    "SELECT id, embedding FROM knowledge_current WHERE embedding IS NOT NULL AND confidence > 0.2";
   const params: string[] = [];
   if (excludeCategories?.length) {
     sql += ` AND category NOT IN (${excludeCategories.map(() => "?").join(",")})`;
@@ -1214,7 +1214,9 @@ export function checkConfigChange(): boolean {
   // Config changed (or first run) — clear all embeddings in all tables
   if (stored) {
     const knowledgeCount = db()
-      .query("SELECT COUNT(*) as n FROM knowledge WHERE embedding IS NOT NULL")
+      .query(
+        "SELECT COUNT(*) as n FROM knowledge_current WHERE embedding IS NOT NULL",
+      )
       .get() as { n: number };
     const distillCount = db()
       .query(
@@ -1289,7 +1291,7 @@ export async function runStartupBackfill(): Promise<void> {
   const pendingKnowledge = (
     db()
       .query(
-        "SELECT COUNT(*) as n FROM knowledge WHERE embedding IS NULL AND confidence > 0.2",
+        "SELECT COUNT(*) as n FROM knowledge_current WHERE embedding IS NULL AND confidence > 0.2",
       )
       .get() as { n: number }
   ).n;
@@ -1318,13 +1320,15 @@ export async function runStartupBackfill(): Promise<void> {
   // Coverage stats — always log to stderr so the problem is visible.
   const kTotal = (
     db()
-      .query("SELECT COUNT(*) as n FROM knowledge WHERE confidence > 0.2")
+      .query(
+        "SELECT COUNT(*) as n FROM knowledge_current WHERE confidence > 0.2",
+      )
       .get() as { n: number }
   ).n;
   const kWithEmb = (
     db()
       .query(
-        "SELECT COUNT(*) as n FROM knowledge WHERE embedding IS NOT NULL AND confidence > 0.2",
+        "SELECT COUNT(*) as n FROM knowledge_current WHERE embedding IS NOT NULL AND confidence > 0.2",
       )
       .get() as { n: number }
   ).n;
@@ -1427,7 +1431,7 @@ export async function backfillEmbeddings(): Promise<number> {
 
   const rows = db()
     .query(
-      "SELECT id, title, content FROM knowledge WHERE embedding IS NULL AND confidence > 0.2",
+      "SELECT id, title, content FROM knowledge_current WHERE embedding IS NULL AND confidence > 0.2",
     )
     .all() as Array<{ id: string; title: string; content: string }>;
 

@@ -973,7 +973,7 @@ function hasKnowledgeTitle(
   return (
     db()
       .query(
-        `SELECT id FROM knowledge
+        `SELECT id FROM knowledge_current
          WHERE project_id = ? AND LOWER(title) = LOWER(?)
          AND category = ? AND confidence > 0 LIMIT 1`,
       )

@@ -111,12 +111,12 @@ export function create(input: {
       pid !== null
         ? db()
             .query(
-              "SELECT id FROM knowledge WHERE project_id = ? AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+              "SELECT id FROM knowledge_current WHERE project_id = ? AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
             )
             .get(pid, input.title)
         : db()
             .query(
-              "SELECT id FROM knowledge WHERE project_id IS NULL AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+              "SELECT id FROM knowledge_current WHERE project_id IS NULL AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
             )
             .get(input.title)
     ) as { id: string } | null;
@@ -137,7 +137,7 @@ export function create(input: {
     // duplicates of entries that already exist as cross-project knowledge.
     const crossExisting = db()
       .query(
-        "SELECT id FROM knowledge WHERE cross_project = 1 AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+        "SELECT id FROM knowledge_current WHERE cross_project = 1 AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
       )
       .get(input.title) as { id: string } | null;
 
@@ -298,12 +298,12 @@ export function tryCreate(input: Parameters<typeof create>[0]): {
       pid !== null
         ? db()
             .query(
-              "SELECT id, content FROM knowledge WHERE project_id = ? AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+              "SELECT id, content FROM knowledge_current WHERE project_id = ? AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
             )
             .get(pid, input.title)
         : db()
             .query(
-              "SELECT id, content FROM knowledge WHERE project_id IS NULL AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+              "SELECT id, content FROM knowledge_current WHERE project_id IS NULL AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
             )
             .get(input.title)
     ) as { id: string; content: string } | null;
@@ -316,7 +316,7 @@ export function tryCreate(input: Parameters<typeof create>[0]): {
 
     const crossExisting = db()
       .query(
-        "SELECT id, content FROM knowledge WHERE cross_project = 1 AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+        "SELECT id, content FROM knowledge_current WHERE cross_project = 1 AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
       )
       .get(input.title) as { id: string; content: string } | null;
     if (crossExisting) {
@@ -612,7 +612,7 @@ export async function findSemanticDuplicate(input: {
     if (hit.similarity < threshold) break; // sorted desc
     const row = db()
       .query(
-        `SELECT id FROM knowledge
+        `SELECT id FROM knowledge_current
          WHERE id = ? AND (project_id = ? OR project_id IS NULL OR cross_project = 1)`,
       )
       .get(hit.id, input.projectId) as { id: string } | null;
@@ -629,7 +629,7 @@ export function forProject(
   if (includeCross) {
     return db()
       .query(
-        `SELECT ${KNOWLEDGE_COLS} FROM knowledge
+        `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
          WHERE (project_id = ? OR (project_id IS NULL) OR (cross_project = 1))
          AND confidence > 0.2
          ORDER BY confidence DESC, updated_at DESC`,
@@ -638,7 +638,7 @@ export function forProject(
   }
   return db()
     .query(
-      `SELECT ${KNOWLEDGE_COLS} FROM knowledge
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
        WHERE project_id = ?
        AND confidence > 0.2
        ORDER BY confidence DESC, updated_at DESC`,
@@ -669,7 +669,7 @@ export function pruneDeadEntries(projectPath: string): KnowledgeEntry[] {
   const pid = ensureProject(projectPath);
   const dead = db()
     .query(
-      `SELECT ${KNOWLEDGE_COLS} FROM knowledge
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
        WHERE project_id = ? AND cross_project = 0 AND confidence <= ?`,
     )
     .all(pid, DEAD_CONFIDENCE_FLOOR) as KnowledgeEntry[];
@@ -693,7 +693,7 @@ export function pruneDeadEntries(projectPath: string): KnowledgeEntry[] {
 export function pruneDeadEntriesAllProjects(limit = -1): KnowledgeEntry[] {
   const dead = db()
     .query(
-      `SELECT ${KNOWLEDGE_COLS} FROM knowledge
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
        WHERE cross_project = 0 AND confidence <= ? LIMIT ?`,
     )
     .all(DEAD_CONFIDENCE_FLOOR, limit) as KnowledgeEntry[];
@@ -885,7 +885,7 @@ export function evictLowestValue(
   const pid = ensureProject(projectPath);
   const victims = db()
     .query(
-      `SELECT ${KNOWLEDGE_COLS} FROM knowledge
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
        WHERE project_id = ? AND cross_project = 0 AND confidence > ?
        ORDER BY confidence ASC, COALESCE(last_reinforced_at, updated_at) ASC
        LIMIT ?`,
@@ -1084,7 +1084,7 @@ export async function forSession(
   // --- 1. Load project-specific entries ---
   const projectEntries = db()
     .query(
-      `SELECT ${KNOWLEDGE_COLS} FROM knowledge
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
        WHERE project_id = ? AND cross_project = 0 AND confidence > 0.2${categoryClause}
        ORDER BY confidence DESC, updated_at DESC`,
     )
@@ -1093,7 +1093,7 @@ export async function forSession(
   // --- 2. Load cross-project candidates ---
   const crossEntries = db()
     .query(
-      `SELECT ${KNOWLEDGE_COLS} FROM knowledge
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
        WHERE (project_id IS NULL OR cross_project = 1) AND confidence > 0.2${categoryClause}
        ORDER BY confidence DESC, updated_at DESC`,
     )
@@ -1460,7 +1460,7 @@ function scoreFTS(
 export function all(): KnowledgeEntry[] {
   return db()
     .query(
-      `SELECT ${KNOWLEDGE_COLS} FROM knowledge WHERE confidence > 0.2 ORDER BY confidence DESC, updated_at DESC`,
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE confidence > 0.2 ORDER BY confidence DESC, updated_at DESC`,
     )
     .all() as KnowledgeEntry[];
 }
@@ -1469,7 +1469,7 @@ export function all(): KnowledgeEntry[] {
 export function crossProject(): KnowledgeEntry[] {
   return db()
     .query(
-      `SELECT ${KNOWLEDGE_COLS} FROM knowledge
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
        WHERE (project_id IS NULL OR cross_project = 1) AND confidence > 0.2
        ORDER BY confidence DESC, updated_at DESC`,
     )
@@ -1493,7 +1493,7 @@ export function crossProject(): KnowledgeEntry[] {
 export function rerankPreferences(): number {
   const prefs = db()
     .query(
-      `SELECT ${KNOWLEDGE_COLS} FROM knowledge WHERE category = 'preference' AND confidence = 1.0`,
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE category = 'preference' AND confidence = 1.0`,
     )
     .all() as KnowledgeEntry[];
 
@@ -1544,13 +1544,13 @@ function searchLike(input: {
     const pid = ensureProject(input.projectPath);
     return db()
       .query(
-        `SELECT ${KNOWLEDGE_COLS} FROM knowledge WHERE (project_id = ? OR project_id IS NULL OR cross_project = 1) AND confidence > 0.2 AND ${conditions} ORDER BY updated_at DESC LIMIT ?`,
+        `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE (project_id = ? OR project_id IS NULL OR cross_project = 1) AND confidence > 0.2 AND ${conditions} ORDER BY updated_at DESC LIMIT ?`,
       )
       .all(pid, ...likeParams, input.limit) as KnowledgeEntry[];
   }
   return db()
     .query(
-      `SELECT ${KNOWLEDGE_COLS} FROM knowledge WHERE confidence > 0.2 AND ${conditions} ORDER BY updated_at DESC LIMIT ?`,
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE confidence > 0.2 AND ${conditions} ORDER BY updated_at DESC LIMIT ?`,
     )
     .all(...likeParams, input.limit) as KnowledgeEntry[];
 }
@@ -1696,7 +1696,7 @@ export function searchScoredOtherProjects(input: {
 
 export function get(id: string): KnowledgeEntry | null {
   return db()
-    .query(`SELECT ${KNOWLEDGE_COLS} FROM knowledge WHERE id = ?`)
+    .query(`SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE id = ?`)
     .get(id) as KnowledgeEntry | null;
 }
 
@@ -1713,7 +1713,7 @@ export function getWorkerSource(
 ): { providerID: string; modelID: string } | null {
   const row = db()
     .query(
-      "SELECT worker_provider_id, worker_model_id FROM knowledge WHERE id = ?",
+      "SELECT worker_provider_id, worker_model_id FROM knowledge_current WHERE id = ?",
     )
     .get(id) as {
     worker_provider_id: string | null;
@@ -2070,7 +2070,7 @@ function _dedup(
     const placeholders = entryIds.map(() => "?").join(",");
     const rows = db()
       .query(
-        `SELECT id, embedding FROM knowledge WHERE embedding IS NOT NULL AND id IN (${placeholders})`,
+        `SELECT id, embedding FROM knowledge_current WHERE embedding IS NOT NULL AND id IN (${placeholders})`,
       )
       .all(...entryIds) as Array<{ id: string; embedding: Buffer }>;
     for (const row of rows) {
@@ -2222,7 +2222,7 @@ export async function deduplicateGlobal(opts?: {
   const threshold = loadCalibratedThreshold(null) ?? EMBEDDING_DEDUP_THRESHOLD;
   const entries = db()
     .query(
-      `SELECT ${KNOWLEDGE_COLS} FROM knowledge
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
        WHERE project_id IS NULL
        AND confidence > 0.2
        ORDER BY confidence DESC, updated_at DESC`,
@@ -2274,7 +2274,7 @@ export function promoteCrossProject(opts?: {
   //    bounded. Query orders by confidence DESC so the best entries survive.
   const candidates = db()
     .query(
-      `SELECT ${KNOWLEDGE_COLS} FROM knowledge
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
        WHERE project_id IS NOT NULL
        AND cross_project = 0
        AND confidence >= ?
@@ -2300,7 +2300,7 @@ export function promoteCrossProject(opts?: {
     const placeholders = ids.map(() => "?").join(",");
     const rows = db()
       .query(
-        `SELECT id, embedding FROM knowledge WHERE embedding IS NOT NULL AND id IN (${placeholders})`,
+        `SELECT id, embedding FROM knowledge_current WHERE embedding IS NOT NULL AND id IN (${placeholders})`,
       )
       .all(...ids) as Array<{ id: string; embedding: Buffer }>;
     for (const row of rows) {

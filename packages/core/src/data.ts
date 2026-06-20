@@ -136,7 +136,7 @@ export function listProjects(): ProjectSummary[] {
        FROM projects p
        LEFT JOIN (
          SELECT project_id, COUNT(*) AS cnt
-         FROM knowledge WHERE confidence > 0.2
+         FROM knowledge_current WHERE confidence > 0.2
          GROUP BY project_id
        ) k ON k.project_id = p.id
        LEFT JOIN (
@@ -429,7 +429,7 @@ export function globalStats(): GlobalStats {
     .query(
       `SELECT
         (SELECT COUNT(*) FROM projects) as project_count,
-        (SELECT COUNT(*) FROM knowledge WHERE confidence > 0.2) as knowledge_count,
+        (SELECT COUNT(*) FROM knowledge_current WHERE confidence > 0.2) as knowledge_count,
         (SELECT COUNT(DISTINCT session_id) FROM temporal_messages) as session_count,
         (SELECT COUNT(*) FROM temporal_messages) as message_count,
         (SELECT COUNT(*) FROM distillations) as distillation_count`,
@@ -474,7 +474,7 @@ export function countForProject(projectPath: string): {
   const row = db()
     .query(
       `SELECT
-        (SELECT COUNT(*) FROM knowledge WHERE project_id = ? AND confidence > 0.2) as knowledge,
+        (SELECT COUNT(*) FROM knowledge_current WHERE project_id = ? AND confidence > 0.2) as knowledge,
         (SELECT COUNT(*) FROM temporal_messages WHERE project_id = ?) as messages,
         (SELECT COUNT(*) FROM distillations WHERE project_id = ?) as distillations,
         (SELECT COUNT(DISTINCT session_id) FROM temporal_messages WHERE project_id = ?) as sessions`,
