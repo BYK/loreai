@@ -1242,6 +1242,16 @@ export function formatRelationsForPrompt(entityId: string): string {
 // Knowledge–Entity References
 // ---------------------------------------------------------------------------
 
+/** Resolve a knowledge id (current or, post-2b, a superseded version) to its
+ *  stable logical_id — the key all knowledge_entity_refs rows use (A2, #823).
+ *  No-op today: a v1 row has id == logical_id. */
+function logicalIdOf(knowledgeId: string): string {
+  const r = db()
+    .query("SELECT logical_id FROM knowledge WHERE id = ?")
+    .get(knowledgeId) as { logical_id: string } | null;
+  return r?.logical_id ?? knowledgeId;
+}
+
 /** Link a knowledge entry to an entity. */
 export function linkKnowledge(knowledgeId: string, entityId: string): void {
   try {
@@ -1250,7 +1260,7 @@ export function linkKnowledge(knowledgeId: string, entityId: string): void {
         `INSERT OR IGNORE INTO knowledge_entity_refs (knowledge_id, entity_id)
          VALUES (?, ?)`,
       )
-      .run(knowledgeId, entityId);
+      .run(logicalIdOf(knowledgeId), entityId);
   } catch (e: unknown) {
     // FK violation (entity or knowledge entry doesn't exist) — ignore
     if (e instanceof Error && /FOREIGN KEY/i.test(e.message)) {
@@ -1269,7 +1279,7 @@ export function unlinkKnowledge(knowledgeId: string, entityId: string): void {
     .query(
       "DELETE FROM knowledge_entity_refs WHERE knowledge_id = ? AND entity_id = ?",
     )
-    .run(knowledgeId, entityId);
+    .run(logicalIdOf(knowledgeId), entityId);
 }
 
 /** Get all entities referenced by a knowledge entry. */
@@ -1281,10 +1291,11 @@ export function entitiesForKnowledge(knowledgeId: string): Entity[] {
        JOIN knowledge_entity_refs r ON r.entity_id = e.id
        WHERE r.knowledge_id = ?`,
     )
-    .all(knowledgeId) as Entity[];
+    .all(logicalIdOf(knowledgeId)) as Entity[];
 }
 
-/** Get all knowledge entry IDs referencing an entity. */
+/** Get all knowledge logical_ids referencing an entity (A2: callers resolve the
+ *  current entry via ltm.getByLogical, not ltm.get). */
 export function knowledgeForEntity(entityId: string): string[] {
   const rows = db()
     .query("SELECT knowledge_id FROM knowledge_entity_refs WHERE entity_id = ?")
@@ -1429,10 +1440,15 @@ export function formatForPrompt(entities: EntityWithAliases[]): string {
  * Called after knowledge entry create/update in the curator pipeline.
  */
 export function syncEntityRefs(knowledgeId: string, content: string): number {
+  // Entity refs key on the stable logical_id (A2, #823) so they survive version
+  // appends. The FK to knowledge(id) stays satisfied because logical_id equals
+  // the never-physically-deleted first version's id.
+  const logicalId = logicalIdOf(knowledgeId);
+
   // Clear existing refs for this knowledge entry
   db()
     .query("DELETE FROM knowledge_entity_refs WHERE knowledge_id = ?")
-    .run(knowledgeId);
+    .run(logicalId);
 
   // Get all entities for fast matching
   const allEntities = db()
@@ -1479,7 +1495,7 @@ export function syncEntityRefs(knowledgeId: string, content: string): number {
         .query(
           "INSERT OR IGNORE INTO knowledge_entity_refs (knowledge_id, entity_id) VALUES (?, ?)",
         )
-        .run(knowledgeId, entityId);
+        .run(logicalId, entityId);
       count++;
     } catch (e: unknown) {
       // FK violation (entity or knowledge entry doesn't exist) — skip

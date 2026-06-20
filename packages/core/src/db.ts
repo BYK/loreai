@@ -1869,7 +1869,7 @@ export function mergeProjectInternal(sourceId: string, targetId: string): void {
     d.query(
       `DELETE FROM knowledge_transfers
         WHERE recalled_in_project_id = ?
-          AND knowledge_id IN (SELECT id FROM knowledge WHERE project_id = ?)`,
+          AND knowledge_id IN (SELECT logical_id FROM knowledge WHERE project_id = ?)`,
     ).run(targetId, targetId);
     // entity_relations references entities by FK — no project_id column to update.
     // Relations move implicitly when their parent entities move.

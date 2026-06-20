@@ -139,7 +139,7 @@ async function cmdShow(
   if (knowledgeIds.length > 0) {
     console.log(`\nLinked knowledge entries (${knowledgeIds.length}):`);
     for (const kid of knowledgeIds) {
-      const entry = ltm.get(kid);
+      const entry = ltm.getByLogical(kid); // kid is a logical_id (A2)
       if (entry) {
         console.log(
           `  [${entry.id.slice(0, 16)}] (${entry.category}) ${entry.title}`,

@@ -545,7 +545,7 @@ export function clearProject(projectPath: string): ClearResult {
     // recalled_in). Delete BEFORE knowledge so the subquery still sees the rows.
     database
       .query(
-        "DELETE FROM knowledge_transfers WHERE recalled_in_project_id = ? OR knowledge_id IN (SELECT id FROM knowledge WHERE project_id = ?)",
+        "DELETE FROM knowledge_transfers WHERE recalled_in_project_id = ? OR knowledge_id IN (SELECT logical_id FROM knowledge WHERE project_id = ?)",
       )
       .run(pid, pid);
     database.query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
@@ -657,7 +657,7 @@ export function deleteProject(projectId: string): ClearResult | null {
     // recalled_in). Delete BEFORE knowledge so the subquery still sees the rows.
     database
       .query(
-        "DELETE FROM knowledge_transfers WHERE recalled_in_project_id = ? OR knowledge_id IN (SELECT id FROM knowledge WHERE project_id = ?)",
+        "DELETE FROM knowledge_transfers WHERE recalled_in_project_id = ? OR knowledge_id IN (SELECT logical_id FROM knowledge WHERE project_id = ?)",
       )
       .run(projectId, projectId);
     database.query("DELETE FROM knowledge WHERE project_id = ?").run(projectId);
@@ -726,7 +726,7 @@ export function clearKnowledge(projectPath: string): number {
   // Clean up transfer metrics before deleting entries (no FK CASCADE).
   db()
     .query(
-      "DELETE FROM knowledge_transfers WHERE knowledge_id IN (SELECT id FROM knowledge WHERE project_id = ?)",
+      "DELETE FROM knowledge_transfers WHERE knowledge_id IN (SELECT logical_id FROM knowledge WHERE project_id = ?)",
     )
     .run(pid);
   db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
@@ -1068,15 +1068,15 @@ export function moveSessions(
       .get(fromProjectId, ...allIds) as { c: number }
   ).c;
 
-  // Collect IDs of knowledge entries being moved (needed for
-  // knowledge_transfers cleanup).
+  // Collect logical_ids of knowledge entries being moved (knowledge_transfers
+  // keys on logical_id, A2). DISTINCT because an entry may have multiple versions.
   const movedKnowledgeIds = (
     database
       .query(
-        `SELECT id FROM knowledge WHERE project_id = ? AND source_session IN (${placeholders})`,
+        `SELECT DISTINCT logical_id FROM knowledge WHERE project_id = ? AND source_session IN (${placeholders})`,
       )
-      .all(fromProjectId, ...allIds) as Array<{ id: string }>
-  ).map((r) => r.id);
+      .all(fromProjectId, ...allIds) as Array<{ logical_id: string }>
+  ).map((r) => r.logical_id);
 
   // All mutations in a single transaction.
   database.query("BEGIN IMMEDIATE").run();

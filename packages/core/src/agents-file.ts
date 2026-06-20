@@ -347,7 +347,7 @@ function buildSection(projectPath: string): string {
 
     for (let i = 0; i < sorted.length; i++) {
       if (i > 0) out.push(""); // blank line between entries for git context
-      out.push(`<!-- lore:${sorted[i].id} -->`);
+      out.push(`<!-- lore:${sorted[i].logical_id} -->`);
       // Render the bullet using remark serializer for proper markdown escaping.
       // serialize(root(ul([liph(...)]))) produces "* **Title**: content\n".
       // Trim the trailing newline since we join with \n ourselves.
@@ -562,7 +562,8 @@ function _importEntries(entries: ParsedFileEntry[], projectPath: string): void {
       if (seenIds.has(entry.id)) continue;
       seenIds.add(entry.id);
 
-      const existing = ltm.get(entry.id);
+      // entry.id is the <!-- lore:UUID --> marker, which is the stable logical_id.
+      const existing = ltm.getByLogical(entry.id);
       if (existing) {
         // Known entry — update only if content changed (manual edit in file)
         if (existing.content !== entry.content) {

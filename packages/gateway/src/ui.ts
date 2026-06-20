@@ -1724,7 +1724,7 @@ function renderKnowledgeTable(
       ? `<a href="/ui/projects/${esc(e.project_id)}">${esc(projName ?? "(unknown)")}</a>`
       : "(global)";
     const recallsCell = opts.showRecalls
-      ? `<td>${transferCounts.get(e.id) ?? 0}</td>`
+      ? `<td>${transferCounts.get(e.logical_id) ?? 0}</td>`
       : "";
     out += `<tr data-category="${esc(e.category)}">
       <td>${badge(e.category)}</td>
@@ -1958,7 +1958,7 @@ function pageKnowledge(id: string): string | null {
   body += `<div class="field"><span class="key">ID:</span> <code>${esc(entry.id)}</code></div>`;
   body += `<div class="field"><span class="key">Project ID:</span> ${esc(entry.project_id ?? "(global)")}</div>`;
   body += `<div class="field"><span class="key">Cross-project:</span> ${entry.cross_project ? "Yes" : "No"}</div>`;
-  const transfers = ltm.transfersFor(entry.id);
+  const transfers = ltm.transfersFor(entry.logical_id);
   body += `<div class="field"><span class="key">Recalled in other projects:</span> ${transfers.length}</div>`;
   body += `<div class="field"><span class="key">Source session:</span> ${esc(entry.source_session ?? "(none)")}</div>`;
   body += `<div class="field"><span class="key">Created:</span> ${formatDate(entry.created_at)}</div>`;
@@ -3314,7 +3314,7 @@ function pageEntity(id: string): string | null {
     body += `<table data-table-id="entity-knowledge">
       <tr><th data-sort="text">Category</th><th data-sort="text">Title</th></tr>`;
     for (const kid of knowledgeIds) {
-      const entry = ltm.get(kid);
+      const entry = ltm.getByLogical(kid); // kid is a logical_id (A2)
       if (entry) {
         body += `<tr>
           <td>${badge(entry.category)}</td>

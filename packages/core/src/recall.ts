@@ -1350,7 +1350,10 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
         if (tagged.source === "knowledge" && entry.cross_project !== 1)
           continue;
         if (!entry.project_id || entry.project_id === pid) continue;
-        ltm.recordTransfer({ knowledgeId: entry.id, recalledInProjectId: pid });
+        ltm.recordTransfer({
+          knowledgeId: entry.logical_id,
+          recalledInProjectId: pid,
+        });
       }
     } catch (err) {
       log.warn("recall: transfer recording failed (non-fatal):", err);

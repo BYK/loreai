@@ -27,6 +27,10 @@ export type ApprovalStatus = "auto" | "pending" | "approved" | "rejected";
 
 export type KnowledgeEntry = {
   id: string;
+  /** Stable entry identity across versions (A2, #823). For a v1/unversioned row
+   *  this equals `id`; cross-reference linkages (refs/transfers/markers) key on
+   *  this, never the per-version `id`. */
+  logical_id: string;
   project_id: string | null;
   category: string;
   title: string;
@@ -62,11 +66,11 @@ export type KnowledgeEntry = {
 /** Columns to select for KnowledgeEntry — excludes the embedding BLOB
  *  (4KB per entry) which is only needed by vectorSearch() in embedding.ts. */
 const KNOWLEDGE_COLS =
-  "id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at, metadata, created_by, updated_by, sensitivity, promotion_status, promoted_at, approval_status, approved_by, approved_at, source_user_id, source_entry_id, last_accessed_at, worker_provider_id, worker_model_id, last_reinforced_at";
+  "id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at, metadata, created_by, updated_by, sensitivity, promotion_status, promoted_at, approval_status, approved_by, approved_at, source_user_id, source_entry_id, last_accessed_at, worker_provider_id, worker_model_id, last_reinforced_at, logical_id";
 
 /** Same columns with table alias prefix for use in JOIN queries. */
 const KNOWLEDGE_COLS_K =
-  "k.id, k.project_id, k.category, k.title, k.content, k.source_session, k.cross_project, k.confidence, k.created_at, k.updated_at, k.metadata, k.created_by, k.updated_by, k.sensitivity, k.promotion_status, k.promoted_at, k.approval_status, k.approved_by, k.approved_at, k.source_user_id, k.source_entry_id, k.last_accessed_at, k.worker_provider_id, k.worker_model_id, k.last_reinforced_at";
+  "k.id, k.project_id, k.category, k.title, k.content, k.source_session, k.cross_project, k.confidence, k.created_at, k.updated_at, k.metadata, k.created_by, k.updated_by, k.sensitivity, k.promotion_status, k.promoted_at, k.approval_status, k.approved_by, k.approved_at, k.source_user_id, k.source_entry_id, k.last_accessed_at, k.worker_provider_id, k.worker_model_id, k.last_reinforced_at, k.logical_id";
 
 export function create(input: {
   projectPath?: string;
@@ -392,12 +396,14 @@ export function update(
 
 export function remove(id: string) {
   // Record a tombstone BEFORE deleting so a stale .lore.md re-import can't
-  // resurrect this UUID (which would thrash with the next consolidation pass —
+  // resurrect this entry (which would thrash with the next consolidation pass —
   // delete → re-import recreates → delete again, busting the prompt cache each
-  // cycle). Capture the project_id while the row still exists.
+  // cycle). The tombstone + transfer metrics key on the stable `logical_id`
+  // (which `.lore.md` markers now carry), not the per-version row id. Capture
+  // both while the row still exists.
   const row = db()
-    .query("SELECT project_id FROM knowledge WHERE id = ?")
-    .get(id) as { project_id: string | null } | null;
+    .query("SELECT project_id, logical_id FROM knowledge WHERE id = ?")
+    .get(id) as { project_id: string | null; logical_id: string } | null;
   if (row) {
     db()
       .query(
@@ -405,10 +411,12 @@ export function remove(id: string) {
          VALUES (?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET deleted_at = excluded.deleted_at`,
       )
-      .run(id, row.project_id, Date.now());
+      .run(row.logical_id, row.project_id, Date.now());
+    // Clean up transfer metrics before deleting the entry (no FK CASCADE).
+    db()
+      .query("DELETE FROM knowledge_transfers WHERE knowledge_id = ?")
+      .run(row.logical_id);
   }
-  // Clean up transfer metrics before deleting the entry (no FK CASCADE).
-  db().query("DELETE FROM knowledge_transfers WHERE knowledge_id = ?").run(id);
   db().query("DELETE FROM knowledge WHERE id = ?").run(id);
 }
 
@@ -1364,6 +1372,7 @@ export async function forSession(
       // Convert lat section to a synthetic KnowledgeEntry for formatKnowledge()
       result.push({
         id: section.id,
+        logical_id: section.id, // synthetic lat.md entry: its own logical identity
         project_id: section.project_id,
         category: "lat.md",
         title: `[${section.file}] ${section.heading}`,
@@ -1405,8 +1414,11 @@ export async function forSession(
       if (entry.category === "lat.md") continue;
       if (entry.cross_project !== 1) continue;
       if (!entry.project_id || entry.project_id === pid) continue;
-      if (!shouldRecordTransfer(sessionID, entry.id, pid)) continue;
-      recordTransfer({ knowledgeId: entry.id, recalledInProjectId: pid });
+      if (!shouldRecordTransfer(sessionID, entry.logical_id, pid)) continue;
+      recordTransfer({
+        knowledgeId: entry.logical_id,
+        recalledInProjectId: pid,
+      });
     }
   } catch (err) {
     log.warn("forSession: transfer recording failed (non-fatal):", err);
@@ -1701,6 +1713,33 @@ export function get(id: string): KnowledgeEntry | null {
 }
 
 /**
+ * Fetch the current entry for a stable `logical_id` (A2, #823). Cross-reference
+ * consumers (entity refs, wiki-links, `.lore.md` markers) store `logical_id`, so
+ * they must resolve back through this — `get(id)` would miss the entry once a
+ * later version supersedes the row whose `id == logical_id`. Today (v1 rows)
+ * this is identical to `get()`.
+ */
+export function getByLogical(logicalId: string): KnowledgeEntry | null {
+  return db()
+    .query(
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE logical_id = ?`,
+    )
+    .get(logicalId) as KnowledgeEntry | null;
+}
+
+/**
+ * Resolve a (possibly superseded) version-row `id` to its stable `logical_id`.
+ * Reads the BASE table, not `knowledge_current`, so it still resolves an id that
+ * points at a now-superseded version. Returns null if the id is unknown.
+ */
+export function logicalIdFor(id: string): string | null {
+  const row = db()
+    .query("SELECT logical_id FROM knowledge WHERE id = ?")
+    .get(id) as { logical_id: string } | null;
+  return row?.logical_id ?? null;
+}
+
+/**
  * Read the worker source attribution for a knowledge entry. Returns null for
  * legacy entries created before v35 (no attribution recorded) or for entries
  * imported from outside the worker pipeline (manual `.lore.md` edits, etc).
@@ -1762,12 +1801,14 @@ const WIKI_LINK_RE = /\[\[([^\]]+)\]\]/g;
  */
 export function resolveRef(ref: string): string | null {
   if (UUID_RE.test(ref)) {
-    const entry = get(ref);
-    return entry ? entry.id : null;
+    // The [[uuid]] in content may be either a logical_id or a (possibly
+    // superseded) version id — resolve either way, return the stable logical_id.
+    const entry = getByLogical(ref) ?? get(ref);
+    return entry ? entry.logical_id : null;
   }
   // Title search — FTS5 best match
   const results = search({ query: ref, limit: 1 });
-  return results.length ? results[0].id : null;
+  return results.length ? results[0].logical_id : null;
 }
 
 /**
@@ -1790,11 +1831,14 @@ export function extractRefs(content: string): string[] {
  * Clears existing outgoing refs for this entry first.
  */
 export function syncRefs(entryId: string): number {
-  const entry = get(entryId);
+  // entryId may be a current- or (post-2b) superseded version id; key the refs
+  // on the stable logical_id so they survive version appends.
+  const entry = getByLogical(entryId) ?? get(entryId);
   if (!entry) return 0;
+  const fromLogical = entry.logical_id;
 
-  // Clear existing outgoing refs
-  db().query("DELETE FROM knowledge_refs WHERE from_id = ?").run(entryId);
+  // Clear existing outgoing refs for this entry
+  db().query("DELETE FROM knowledge_refs WHERE from_id = ?").run(fromLogical);
 
   const refs = extractRefs(entry.content);
   if (!refs.length) return 0;
@@ -1805,9 +1849,9 @@ export function syncRefs(entryId: string): number {
   );
 
   for (const ref of refs) {
-    const targetId = resolveRef(ref);
-    if (targetId && targetId !== entryId) {
-      insertStmt.run(entryId, targetId);
+    const targetId = resolveRef(ref); // a logical_id
+    if (targetId && targetId !== fromLogical) {
+      insertStmt.run(fromLogical, targetId);
       synced++;
     }
   }
@@ -1855,10 +1899,12 @@ export function cascadeRefReplace(oldId: string, newId: string): number {
  */
 export function cleanDeadRefs(): number {
   // Step 1: Find orphan refs (target entry no longer exists)
+  // refs key on logical_id (A2): "dead" = a logical_id with no current,
+  // non-deleted version.
   const orphans = db()
     .query(
       `SELECT DISTINCT kr.from_id, kr.to_id FROM knowledge_refs kr
-       WHERE NOT EXISTS (SELECT 1 FROM knowledge k WHERE k.id = kr.to_id)`,
+       WHERE NOT EXISTS (SELECT 1 FROM knowledge_current k WHERE k.logical_id = kr.to_id)`,
     )
     .all() as Array<{ from_id: string; to_id: string }>;
 
@@ -1870,10 +1916,12 @@ export function cleanDeadRefs(): number {
 
   for (const ref of orphans) {
     const deadRef = `[[${ref.to_id}]]`;
+    // ref.from_id is a logical_id; strip from the current version. (2b-2: route
+    // this through appendVersion so the strip is itself an append, not a mutate.)
     const result = db()
       .query(
         `UPDATE knowledge SET content = REPLACE(content, ?, ''), updated_at = ?
-         WHERE id = ? AND content LIKE ?`,
+         WHERE logical_id = ? AND is_current = 1 AND content LIKE ?`,
       )
       .run(deadRef, now, ref.from_id, `%${deadRef}%`);
     if (result.changes > 0) cleaned++;
@@ -1882,7 +1930,7 @@ export function cleanDeadRefs(): number {
   // Step 3: Delete orphan rows from knowledge_refs
   db()
     .query(
-      "DELETE FROM knowledge_refs WHERE to_id NOT IN (SELECT id FROM knowledge)",
+      "DELETE FROM knowledge_refs WHERE to_id NOT IN (SELECT logical_id FROM knowledge_current)",
     )
     .run();
 
