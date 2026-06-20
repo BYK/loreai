@@ -1236,6 +1236,60 @@ const MIGRATIONS: string[] = [
     updated_at   INTEGER
   );
   `,
+  `
+  -- Version 50: append-only versioned knowledge — scaffolding (A2, #823).
+  --
+  -- Splits knowledge's single identity into a stable 'logical_id' (the entry)
+  -- and an immutable 'version' (a snapshot). An "update" becomes an append of a
+  -- new version (same logical_id); a "delete" becomes an immutable is_deleted=1
+  -- version (a death certificate). 'is_current' marks the latest version per
+  -- logical_id. This migration ONLY adds the scaffolding and is BEHAVIOR-NEUTRAL:
+  -- every existing row becomes its own logical_id, version 1, current, not-deleted,
+  -- so 'knowledge_current' is identical to the live set today. The ltm.ts/curator
+  -- rewrite to actually append versions (and the confidence register) lands in a
+  -- follow-up PR. confidence/last_reinforced_at intentionally remain on 'knowledge'
+  -- here (untouched) so no read/write path changes in this PR.
+  ALTER TABLE knowledge ADD COLUMN logical_id TEXT;
+  ALTER TABLE knowledge ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+  ALTER TABLE knowledge ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE knowledge ADD COLUMN is_current INTEGER NOT NULL DEFAULT 1;
+  UPDATE knowledge SET logical_id = id WHERE logical_id IS NULL;
+
+  CREATE INDEX IF NOT EXISTS idx_knowledge_logical ON knowledge(logical_id, version);
+  CREATE INDEX IF NOT EXISTS idx_knowledge_current ON knowledge(is_current);
+
+  -- The "current" projection: latest non-deleted version per logical_id. All
+  -- non-FTS reads switch to this in the follow-up PR; today it equals the live set.
+  DROP VIEW IF EXISTS knowledge_current;
+  CREATE VIEW knowledge_current AS
+    SELECT k.* FROM knowledge k WHERE k.is_current = 1 AND k.is_deleted = 0;
+
+  -- FTS becomes current-aware: index ONLY the current, non-deleted version so a
+  -- search never returns a superseded or deleted version. Replaces the plain
+  -- mirror triggers (base schema / v32). On supersession the old version's FTS
+  -- row is dropped; a deleted (is_deleted=1) version is never indexed.
+  DROP TRIGGER IF EXISTS knowledge_fts_insert;
+  DROP TRIGGER IF EXISTS knowledge_fts_delete;
+  DROP TRIGGER IF EXISTS knowledge_fts_update;
+  CREATE TRIGGER knowledge_fts_insert AFTER INSERT ON knowledge
+  WHEN new.is_current = 1 AND new.is_deleted = 0 BEGIN
+    INSERT INTO knowledge_fts(rowid, title, content, category)
+    VALUES (new.rowid, new.title, new.content, new.category);
+  END;
+  CREATE TRIGGER knowledge_fts_delete AFTER DELETE ON knowledge
+  WHEN old.is_current = 1 AND old.is_deleted = 0 BEGIN
+    INSERT INTO knowledge_fts(knowledge_fts, rowid, title, content, category)
+    VALUES('delete', old.rowid, old.title, old.content, old.category);
+  END;
+  CREATE TRIGGER knowledge_fts_update AFTER UPDATE ON knowledge BEGIN
+    INSERT INTO knowledge_fts(knowledge_fts, rowid, title, content, category)
+    SELECT 'delete', old.rowid, old.title, old.content, old.category
+     WHERE old.is_current = 1 AND old.is_deleted = 0;
+    INSERT INTO knowledge_fts(rowid, title, content, category)
+    SELECT new.rowid, new.title, new.content, new.category
+     WHERE new.is_current = 1 AND new.is_deleted = 0;
+  END;
+  `,
 ];
 
 /**
@@ -1675,6 +1729,34 @@ function recoverMissingObjects(database: Database) {
       ON distillations(worker_provider_id, worker_model_id);
     CREATE INDEX IF NOT EXISTS idx_knowledge_worker
       ON knowledge(worker_provider_id, worker_model_id);
+  `);
+  // Version 50: append-only knowledge scaffolding. Recover the version columns
+  // independently (a partial multi-ALTER may apply only some), backfill
+  // logical_id, then the indexes + the current-projection view (which depends on
+  // those columns). FTS triggers follow the same "not recovered here" rule as the
+  // other FTS triggers (restored by the v32/v50 migration or next full run).
+  {
+    const kcols = database
+      .query("PRAGMA table_info(knowledge)")
+      .all() as Array<{ name: string }>;
+    const addCol = (col: string, ddl: string) => {
+      if (!kcols.some((c) => c.name === col)) {
+        database.exec(`ALTER TABLE knowledge ADD COLUMN ${ddl};`);
+      }
+    };
+    addCol("logical_id", "logical_id TEXT");
+    addCol("version", "version INTEGER NOT NULL DEFAULT 1");
+    addCol("is_deleted", "is_deleted INTEGER NOT NULL DEFAULT 0");
+    addCol("is_current", "is_current INTEGER NOT NULL DEFAULT 1");
+    database.exec(
+      "UPDATE knowledge SET logical_id = id WHERE logical_id IS NULL;",
+    );
+  }
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_knowledge_logical ON knowledge(logical_id, version);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_current ON knowledge(is_current);
+    CREATE VIEW IF NOT EXISTS knowledge_current AS
+      SELECT k.* FROM knowledge k WHERE k.is_current = 1 AND k.is_deleted = 0;
   `);
   // Version 36: session project binding. Recover each column independently in
   // case a partial ALTER (e.g. the first succeeded, the second was skipped on a

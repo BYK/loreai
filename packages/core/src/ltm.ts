@@ -166,11 +166,12 @@ export function create(input: {
     input.confidence != null ? Math.max(0, Math.min(1, input.confidence)) : 1.0;
   db()
     .query(
-      `INSERT INTO knowledge (id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at, created_by, sensitivity, worker_provider_id, worker_model_id, last_reinforced_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO knowledge (id, logical_id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at, created_by, sensitivity, worker_provider_id, worker_model_id, last_reinforced_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
+      id, // logical_id: a fresh entry is its own logical identity (version 1)
       pid,
       input.category,
       input.title,
@@ -193,6 +194,78 @@ export function create(input: {
   }
 
   return id;
+}
+
+/**
+ * Append an immutable new version of an existing logical entry (A2, #823).
+ *
+ * Inserts a new version row (`version = current + 1`, `is_current = 1`) copying
+ * the current row forward with the given overrides, then demotes the prior
+ * current row (`is_current = 0`). A delete is `isDeleted: true` (an immutable
+ * death-certificate version — no physical DELETE). `created_at` is preserved (the
+ * entry's original creation); `updated_at` is bumped. The embedding is reset to
+ * NULL so the new content is re-embedded lazily. Returns the new version row id,
+ * or `null` if `logicalId` has no current row.
+ *
+ * Low-level seam: `ltm.update()`/`remove()` are rewired onto this in a follow-up
+ * PR — nothing calls it in production yet, so this PR changes no behavior.
+ */
+export function appendVersion(
+  logicalId: string,
+  overrides: {
+    title?: string;
+    content?: string;
+    category?: string;
+    isDeleted?: boolean;
+  } = {},
+): string | null {
+  const cur = db()
+    .query(
+      "SELECT id FROM knowledge WHERE logical_id = ? AND is_current = 1 LIMIT 1",
+    )
+    .get(logicalId) as { id: string } | undefined;
+  if (!cur) return null;
+
+  const newId = uuidv7();
+  const now = Date.now();
+  // Copy the current row forward with overrides: new id, bumped version, current,
+  // original created_at preserved, updated_at = now, embedding cleared.
+  db()
+    .query(
+      `INSERT INTO knowledge (
+         id, project_id, category, title, content, source_session, cross_project,
+         confidence, created_at, updated_at, metadata, embedding, created_by,
+         updated_by, sensitivity, promotion_status, promoted_at, approval_status,
+         approved_by, approved_at, source_user_id, source_entry_id, last_accessed_at,
+         worker_provider_id, worker_model_id, last_reinforced_at,
+         logical_id, version, is_deleted, is_current)
+       SELECT
+         ?, project_id, COALESCE(?, category), COALESCE(?, title), COALESCE(?, content),
+         source_session, cross_project, confidence, created_at, ?, metadata, NULL,
+         created_by, updated_by, sensitivity, promotion_status, promoted_at,
+         approval_status, approved_by, approved_at, source_user_id, source_entry_id,
+         last_accessed_at, worker_provider_id, worker_model_id, last_reinforced_at,
+         logical_id, version + 1, ?, 1
+       FROM knowledge WHERE id = ?`,
+    )
+    .run(
+      newId,
+      overrides.category ?? null,
+      overrides.title ?? null,
+      overrides.content ?? null,
+      now,
+      overrides.isDeleted ? 1 : 0,
+      cur.id,
+    );
+
+  // Demote the prior current version (its FTS row is dropped by the trigger).
+  db()
+    .query(
+      "UPDATE knowledge SET is_current = 0 WHERE logical_id = ? AND is_current = 1 AND id != ?",
+    )
+    .run(logicalId, newId);
+
+  return newId;
 }
 
 /**
