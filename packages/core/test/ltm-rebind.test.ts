@@ -142,6 +142,51 @@ describe("A2 sub-PR 2b-1: cross-references key on logical_id and survive version
     expect(ltm.isTombstoned(id)).toBe(true); // id == logical_id
   });
 
+  test("ref WRITES invoked with a superseded version id store the logical_id", () => {
+    const id = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "decision",
+      title: "WriteResolveEntry",
+      content: "v1 body",
+    });
+    const eid = entities.create({
+      projectPath: PROJECT,
+      entityType: "tool",
+      canonicalName: "GadgetTool",
+    }).id;
+    // Append a version so the current row id (v2) differs from the logical_id.
+    const v2 = ltm.appendVersion(id, { content: "now mentions GadgetTool" });
+    expect(v2).not.toBe(id);
+
+    // Sync refs using the CURRENT version id (v2) — both writers must resolve to
+    // the stable logical_id (id), not store the raw v2.
+    entities.syncEntityRefs(v2 as string, "now mentions GadgetTool");
+    const entRef = db()
+      .query(
+        "SELECT knowledge_id FROM knowledge_entity_refs WHERE entity_id = ?",
+      )
+      .all(eid) as Array<{ knowledge_id: string }>;
+    expect(entRef).toEqual([{ knowledge_id: id }]); // logical_id, NOT v2
+
+    // wiki-ref writer too: syncRefs(v2) must key from_id on the logical_id.
+    const target = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "decision",
+      title: "WRTarget",
+      content: "target",
+    });
+    db()
+      .query("UPDATE knowledge SET content = ? WHERE id = ?")
+      .run(`now mentions GadgetTool and [[${target}]]`, v2);
+    ltm.syncRefs(v2 as string);
+    const wikiRef = db()
+      .query("SELECT from_id, to_id FROM knowledge_refs")
+      .all() as Array<{ from_id: string; to_id: string }>;
+    expect(wikiRef).toEqual([{ from_id: id, to_id: target }]); // from_id = logical_id
+  });
+
   test(".lore.md marker is the logical_id and stays stable across an append", () => {
     const id = ltm.create({
       projectPath: PROJECT,

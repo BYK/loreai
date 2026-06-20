@@ -1728,18 +1728,6 @@ export function getByLogical(logicalId: string): KnowledgeEntry | null {
 }
 
 /**
- * Resolve a (possibly superseded) version-row `id` to its stable `logical_id`.
- * Reads the BASE table, not `knowledge_current`, so it still resolves an id that
- * points at a now-superseded version. Returns null if the id is unknown.
- */
-export function logicalIdFor(id: string): string | null {
-  const row = db()
-    .query("SELECT logical_id FROM knowledge WHERE id = ?")
-    .get(id) as { logical_id: string } | null;
-  return row?.logical_id ?? null;
-}
-
-/**
  * Read the worker source attribution for a knowledge entry. Returns null for
  * legacy entries created before v35 (no attribution recorded) or for entries
  * imported from outside the worker pipeline (manual `.lore.md` edits, etc).
@@ -1861,8 +1849,12 @@ export function syncRefs(entryId: string): number {
 
 /**
  * Cascade-replace an entry ID in all knowledge content and the refs table.
- * Used when an entry ID changes (future-proofing — current consolidation
- * uses update-in-place so IDs don't change, but the mechanism exists).
+ *
+ * OBSOLETE under the append-only model (A2, #823): refs now key on the stable
+ * `logical_id`, which never changes across version appends, so a version bump no
+ * longer changes an entry's ref identity. This mechanism only applies to a
+ * genuine logical_id remap (e.g. a dedup survivor adopting a duplicate's id) and
+ * has no production caller. Do NOT call it with per-version ids.
  */
 export function cascadeRefReplace(oldId: string, newId: string): number {
   const oldRef = `[[${oldId}]]`;
