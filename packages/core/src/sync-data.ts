@@ -706,8 +706,10 @@ export function isSyncEnabled(): boolean {
 /**
  * Enable change-capture and reconcile the outbox against current state, so both
  * first-enable (uploads pre-existing rows) and re-enable (catches edits/deletes
- * made while sync was OFF) are captured. Idempotent — `reconcile` skips rows
- * that already have a pending outbox entry.
+ * made while sync was OFF) are captured. Idempotent — `reconcile` only adds an
+ * upsert for a live row whose latest pending entry isn't already an upsert (so a
+ * row recreated after a pending delete still gets a trailing upsert; see
+ * `seedOutbox`).
  */
 export function enableSync(tier: SyncTier = "basic"): void {
   setTeamConfig(ENABLED_KEY, "1");
