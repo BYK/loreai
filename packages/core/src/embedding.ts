@@ -1694,7 +1694,9 @@ export async function runStartupBackfill(): Promise<BackfillStats> {
   const dWithEmb = (
     db()
       .query(
-        "SELECT COUNT(*) as n FROM distillations WHERE embedding IS NOT NULL AND archived = 0",
+        // Mirror dTotal's predicate (incl. observations != '') so the coverage
+        // numerator is always a subset of the denominator (never reads "11/10").
+        "SELECT COUNT(*) as n FROM distillations WHERE embedding IS NOT NULL AND archived = 0 AND observations != ''",
       )
       .get() as { n: number }
   ).n;

@@ -573,8 +573,14 @@ let eventLoopDelayHist: IntervalHistogram | null = null;
  */
 export function startResourceMonitor(): void {
   if (!Sentry.isInitialized() || eventLoopDelayHist) return;
-  eventLoopDelayHist = monitorEventLoopDelay({ resolution: 20 });
-  eventLoopDelayHist.enable();
+  try {
+    eventLoopDelayHist = monitorEventLoopDelay({ resolution: 20 });
+    eventLoopDelayHist.enable();
+  } catch {
+    // perf_hooks/monitorEventLoopDelay unavailable on this runtime — skip the
+    // loop-lag metric rather than break idle-scheduler startup.
+    eventLoopDelayHist = null;
+  }
 }
 
 /**
