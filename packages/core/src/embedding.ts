@@ -359,6 +359,23 @@ export function _markLocalProviderUnavailable(): void {
   localProviderErrorLogged = true; // suppress the info log in tests
 }
 
+/** Test seam: when set, `ensureWorker()` uses this factory instead of spawning
+ *  a real `node:worker_threads` Worker, so the OOM-recovery lifecycle (exit-75
+ *  backoff → respawn → re-submit, floor latch, synchronous respawn failure) can
+ *  be driven deterministically. Never set in production. */
+let testWorkerFactory:
+  | ((data: WorkerInitData) => import("node:worker_threads").Worker)
+  | null = null;
+
+/** For tests: install the worker factory seam above (null clears it). */
+export function _setTestWorkerFactory(
+  factory:
+    | ((data: WorkerInitData) => import("node:worker_threads").Worker)
+    | null,
+): void {
+  testWorkerFactory = factory;
+}
+
 /** True iff the local provider has been probed and found broken. */
 function localProviderKnownUnavailable(): boolean {
   return localProviderKnownBroken;
@@ -473,7 +490,11 @@ class LocalProvider implements EmbeddingProvider {
         vendorModel: vendor ? { localModelPath: vendor.localModelPath } : null,
       };
 
-      if (workerSource !== undefined) {
+      if (testWorkerFactory) {
+        // Test seam (never set in production): a deterministic fake worker so
+        // the OOM-recovery lifecycle can be exercised without a real runtime.
+        this.worker = testWorkerFactory(workerInitData);
+      } else if (workerSource !== undefined) {
         const { join } = await import("node:path");
         const { homedir } = await import("node:os");
         const opts: Record<string, unknown> = {
