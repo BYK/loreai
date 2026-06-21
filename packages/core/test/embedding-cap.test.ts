@@ -163,15 +163,19 @@ describe("reprobeEmbedCap", () => {
   });
 
   it("is bounded by the memory model for the current free pool", () => {
-    // cap 2000, ~2.7 GB free → model ≈ 2200; the ×1.43 step (2857) is capped.
+    // The ×1.43 step (2000 → 2857) is capped at the model's value for this free
+    // pool — computed dynamically below, so robust to re-calibration of K/baseline.
     const out = reprobeEmbedCap(2000, 2.7 * GB);
     expect(out).toBeGreaterThan(2000);
     expect(out).toBe(memoryModelEmbedCap(2.7 * GB));
   });
 
   it("never steps down (returns the cap unchanged if the model ceiling is lower)", () => {
-    // cap already above what 2.7 GB supports → unchanged, never reduced.
-    expect(reprobeEmbedCap(3000, 2.7 * GB)).toBe(3000);
+    // A constrained pool floors the model ceiling far below the current cap, so
+    // the cap is returned unchanged. The guard keeps this robust to a future
+    // re-calibration that might raise the 2.7 GB model value above 3000.
+    expect(memoryModelEmbedCap(1 * GB)).toBe(MIN_EMBED_TOKENS);
+    expect(reprobeEmbedCap(3000, 1 * GB)).toBe(3000);
   });
 
   it("stays clamped at the model max", () => {
