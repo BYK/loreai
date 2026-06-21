@@ -309,16 +309,28 @@ export function runDoctorDiagnostics(input: {
         },
   );
 
-  // 3. Port consistency: does any setup-routed URL match the running port?
+  // 3. Port consistency: does any setup-routed LOCAL URL match the running port?
   if (input.gatewayAlive && input.gatewayPort !== null) {
     const expected = `127.0.0.1:${input.gatewayPort}`;
     let mismatch = false;
+    let checked = 0;
     for (const inv of input.inventory) {
       for (const row of inv.rows) {
         // Only check URL-valued rows — the OpenCode plugin row has
         // routing.value = "@loreai/opencode", which is lore-routed but not a URL.
         if (row.routing.kind !== "lore") continue;
         if (!row.routing.value.startsWith("http")) continue;
+        // Skip remote gateway URLs — a remote setup intentionally points at a
+        // different host and is not a port mismatch against the local gateway.
+        try {
+          const u = new URL(row.routing.value);
+          if (u.hostname !== "127.0.0.1" && u.hostname !== "localhost") {
+            continue;
+          }
+        } catch {
+          continue;
+        }
+        checked++;
         if (!row.routing.value.includes(expected)) {
           mismatch = true;
           findings.push({
@@ -331,11 +343,11 @@ export function runDoctorDiagnostics(input: {
         }
       }
     }
-    if (!mismatch) {
+    if (!mismatch && checked > 0) {
       findings.push({
         level: "PASS",
         label: "port consistency",
-        detail: `all lore-routed URLs target port ${input.gatewayPort}`,
+        detail: `all ${checked} lore-routed local URL(s) target port ${input.gatewayPort}`,
       });
     }
   }

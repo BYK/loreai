@@ -202,22 +202,28 @@ describe("runDoctorDiagnostics (pure)", () => {
     });
     const mismatch = findings.find((f) => f.label.startsWith("port mismatch"));
     expect(mismatch).toBeUndefined();
+    // And no misleading PASS when zero URLs were checked.
+    const pass = findings.find((f) => f.label === "port consistency");
+    expect(pass).toBeUndefined();
   });
 
-  it("warns when the OpenCode plugin is registered but not installed", () => {
+  it("does NOT flag a remote gateway URL as a port mismatch", () => {
     const inventory = [
       {
-        app: "OpenCode",
-        file: "/x/.config/opencode/opencode.json",
+        app: "Claude Code",
+        file: "/x/.claude/settings.json",
         fileExists: true,
         hasBackup: false,
         rows: [
           {
-            app: "OpenCode",
-            file: "/x/.config/opencode/opencode.json",
+            app: "Claude Code",
+            file: "/x/.claude/settings.json",
             fileExists: true,
-            key: "plugin[@loreai/opencode]",
-            routing: { kind: "lore" as const, value: "@loreai/opencode" },
+            key: "env.ANTHROPIC_BASE_URL",
+            routing: {
+              kind: "lore" as const,
+              value: "http://remote:3207/v1",
+            },
           },
         ],
       },
@@ -229,9 +235,38 @@ describe("runDoctorDiagnostics (pure)", () => {
       env: {},
       opencodePluginInstalled: false,
     });
-    const plugin = findings.find((f) => f.label.startsWith("OpenCode plugin"));
-    expect(plugin?.level).toBe("WARN");
+    const mismatch = findings.find((f) => f.label.startsWith("port mismatch"));
+    expect(mismatch).toBeUndefined();
   });
+
+  it("warns when the OpenCode plugin is registered but not installed", () => {
+  const inventory = [
+    {
+      app: "OpenCode",
+      file: "/x/.config/opencode/opencode.json",
+      fileExists: true,
+      hasBackup: false,
+      rows: [
+        {
+          app: "OpenCode",
+          file: "/x/.config/opencode/opencode.json",
+          fileExists: true,
+          key: "plugin[@loreai/opencode]",
+          routing: { kind: "lore" as const, value: "@loreai/opencode" },
+        },
+      ],
+    },
+  ];
+  const findings = runDoctorDiagnostics({
+    inventory,
+    gatewayAlive: true,
+    gatewayPort: 3207,
+    env: {},
+    opencodePluginInstalled: false,
+  });
+  const plugin = findings.find((f) => f.label.startsWith("OpenCode plugin"));
+  expect(plugin?.level).toBe("WARN");
+});
 });
 
 describe("formatFinding", () => {
