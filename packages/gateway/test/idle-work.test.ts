@@ -17,6 +17,7 @@ import {
   touchSession,
   consolidationCooldownActive,
   perCategoryThreshold,
+  idleDistillInvalidatesWarmupBody,
   CONSOLIDATION_COOLDOWN_MS,
   CONSOLIDATION_REATTEMPT_GROWTH,
 } from "../src/idle";
@@ -178,6 +179,25 @@ describe("perCategoryThreshold", () => {
     expect(perCategoryThreshold(40)).toBe(12);
     expect(perCategoryThreshold(200)).toBe(60);
     expect(perCategoryThreshold(100)).toBe(30);
+  });
+});
+
+describe("idleDistillInvalidatesWarmupBody", () => {
+  test("invalidates a compressed session's stored body after a prefix mutation", () => {
+    expect(idleDistillInvalidatesWarmupBody(true, 1, true)).toBe(true);
+    expect(idleDistillInvalidatesWarmupBody(true, 3, true)).toBe(true);
+  });
+
+  test("does NOT invalidate a layer-0 (full-passthrough) session — no distilled prefix in its body", () => {
+    expect(idleDistillInvalidatesWarmupBody(true, 0, true)).toBe(false);
+  });
+
+  test("does NOT invalidate when the prefix did not mutate", () => {
+    expect(idleDistillInvalidatesWarmupBody(false, 2, true)).toBe(false);
+  });
+
+  test("does NOT invalidate when there is no stored body", () => {
+    expect(idleDistillInvalidatesWarmupBody(true, 2, false)).toBe(false);
   });
 });
 
