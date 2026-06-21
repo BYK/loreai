@@ -4162,13 +4162,12 @@ describe("tier-based context management", () => {
       db().query("DELETE FROM session_state WHERE session_id = ?").run(SID);
     });
 
-    test("layer-1 base budgets are NOT clamped to the cost cap (cache-stable window keeps headroom)", () => {
-      // The narrow fix must clamp ONLY the escalated stages (layers 2-3). The
-      // layer-1 stable-window budget (returned as result.rawBudget/distilledBudget)
-      // MUST stay at the full `usable * fraction`. Clamping it to the cost cap
-      // (an earlier over-broad fix) shrank the raw-window pin so it marched every
-      // turn and busted the cache (regression caught by cache-stability.e2e).
-      // 1M context + a deliberately LOW 40K cost cap (mirrors that e2e test).
+    test("reported base budgets (rawBudget/distilledBudget) stay full-usable-scaled, not cap-clamped", () => {
+      // The TransformResult always reports the BASE budgets (consumed by LTM
+      // packing / economics), which must scale off the full `usable`, NOT the
+      // cost cap. (This does NOT by itself prove the layer-1 STAGE window is
+      // unclamped — see the next test for that; this one guards the reported
+      // values.) 1M context + a deliberately LOW 40K cost cap.
       setModelLimits({ context: 1_000_000, output: 32_000 });
       setMaxLayer0Tokens(40_000);
       calibrate(0);
@@ -4185,10 +4184,50 @@ describe("tier-based context management", () => {
       // usable stays the full ~968K (LTM / economics read this).
       expect(result.usable).toBeGreaterThan(900_000);
       // Base budgets scale off the full usable — NOT the 40K cap (which would
-      // give rawBudget = 40K*0.4 = 16K, starving the layer-1 pin).
+      // give rawBudget = 40K*0.4 = 16K).
       expect(result.rawBudget).toBe(Math.floor(result.usable * 0.4));
       expect(result.distilledBudget).toBe(Math.floor(result.usable * 0.25));
       expect(result.rawBudget).toBeGreaterThan(40_000);
+    });
+
+    test("layer-1 STAGE window is NOT clamped to the cost cap (raw window keeps full headroom)", () => {
+      // Guards the escalation boundary `isEscalated = stageLayer > 1`: only
+      // layers 2-3 clamp their windows; layer 1 (stage 0) must keep the full
+      // `usable*0.4` raw budget so the cache-stable pin keeps eviction headroom.
+      // If the boundary were mislabeled as `>= 1`, layer 1's raw budget would
+      // collapse to `cap*0.4 = 40K*0.4 = 16K` and the window would evict most of
+      // the conversation every turn (the cache-stability.e2e regression).
+      //
+      // Unlike the reported-budget test above, this asserts on the ACTUAL built
+      // raw window (`result.rawTokens`), which is the only observable sensitive
+      // to the STAGE budget at layer 1.
+      setModelLimits({ context: 1_000_000, output: 32_000 });
+      setMaxLayer0Tokens(40_000); // ceiling so cap*0.4 = 16K << usable*0.4 ≈ 387K
+      calibrate(0);
+
+      // ~120K tokens of raw conversation: well above the would-be-clamped 16K
+      // budget, well below the unclamped ~387K budget — so the window size
+      // distinguishes clamped (≈16K) from unclamped (≈120K, all included).
+      const msgs = Array.from({ length: 80 }, (_, i) =>
+        makeMsg(
+          `l1win-${i}`,
+          i % 2 === 0 ? "user" : "assistant",
+          "x".repeat(4_500),
+          SID,
+        ),
+      );
+
+      setForceMinLayer(1, SID); // land at layer 1 (the stage-0 / pin path)
+      const result = transform({
+        messages: msgs,
+        projectPath: `/test/${PID_KEY}`,
+        sessionID: SID,
+      });
+
+      expect(result.layer).toBe(1);
+      // Unclamped: the layer-1 raw window holds the whole ~120K conversation.
+      // If layer 1 were wrongly clamped to the cap, rawTokens would be ~16K.
+      expect(result.rawTokens).toBeGreaterThan(50_000);
     });
 
     test("escalating to layer 2 on a 1M model stays bounded near the cap (does NOT grow)", () => {
