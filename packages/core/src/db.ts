@@ -1737,7 +1737,7 @@ function recoverMissingObjects(database: Database) {
       changed_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_sync_outbox_table_row
-      ON sync_outbox (table_name, row_id);
+      ON sync_outbox (table_name, row_id, seq);
     CREATE INDEX IF NOT EXISTS idx_sync_outbox_table_seq
       ON sync_outbox (table_name, seq);
     CREATE TABLE IF NOT EXISTS sync_state (
