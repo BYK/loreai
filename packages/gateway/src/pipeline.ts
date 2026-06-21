@@ -222,6 +222,7 @@ import {
   emitWarmupHitMetric,
   emitCurationMetrics,
   spanStartupBackfill,
+  captureClientAbortUnderPressure,
   type AnthropicUsage,
 } from "./sentry";
 import {
@@ -3095,6 +3096,9 @@ function buildStreamingResponse(
   const accumulator: StreamAccumulator =
     recallAccum ?? createStreamAccumulator({ scaleClientUsage: true });
   const encoder = new TextEncoder();
+  // Start of the client-facing stream — used to flag aborts that happen after
+  // a long in-flight time (a host-pressure signal; see the abort catch below).
+  const streamStartMs = Date.now();
 
   // Client-disconnect detection: shared between start() and cancel()
   let cancelled = false;
@@ -3510,6 +3514,12 @@ function buildStreamingResponse(
           err instanceof DOMException && err.name === "AbortError";
         if (isAbort) {
           log.info("streaming pipeline aborted (client disconnect)");
+          // Only surfaces to Sentry if the host was under pressure at abort time.
+          captureClientAbortUnderPressure({
+            startMs: streamStartMs,
+            route: "stream",
+            sessionID: recallContext?.sessionState.sessionID,
+          });
         } else {
           log.error("streaming pipeline error:", err);
         }
@@ -7603,6 +7613,7 @@ export async function handleRequest(
   req: GatewayRequest,
   config: GatewayConfig,
 ): Promise<Response> {
+  const requestStartMs = Date.now();
   try {
     // Guard against malformed invocations (e.g. fuzzers / direct module calls
     // that pass an undefined or header-less request). The real server path
@@ -7675,6 +7686,11 @@ export async function handleRequest(
     const isAbort = err instanceof DOMException && err.name === "AbortError";
     if (isAbort) {
       log.info("pipeline aborted (client disconnect)");
+      // Only surfaces to Sentry if the host was under pressure at abort time.
+      captureClientAbortUnderPressure({
+        startMs: requestStartMs,
+        route: "request",
+      });
     } else {
       log.error("pipeline error:", err);
     }

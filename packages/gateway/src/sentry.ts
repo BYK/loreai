@@ -9,6 +9,7 @@
 import * as Sentry from "@sentry/bun";
 import { getInstanceId, embedding } from "@loreai/core";
 import { createHash } from "node:crypto";
+import { freemem } from "node:os";
 import { monitorEventLoopDelay, type IntervalHistogram } from "node:perf_hooks";
 
 // ---------------------------------------------------------------------------
@@ -662,4 +663,78 @@ export async function spanStartupBackfill(
       span.setAttribute("rss_delta_bytes", rssAfter - rssBefore);
     },
   );
+}
+
+// ---------------------------------------------------------------------------
+// Client-abort-under-pressure capture
+// ---------------------------------------------------------------------------
+
+/** Current event-loop-delay p99 in ms — a *peek* that does NOT reset the
+ *  window (unlike emitResourceGauge). 0 when the monitor isn't running. */
+export function getEventLoopLagP99Ms(): number {
+  if (!eventLoopDelayHist) return 0;
+  try {
+    return eventLoopDelayHist.percentile(99) / 1e6;
+  } catch {
+    return 0;
+  }
+}
+
+/** A client abort is only worth a Sentry event when it coincides with host
+ *  pressure: a long in-flight time or a stalled event loop. Below these,
+ *  disconnects are normal connection lifecycle and must not be captured. */
+const ABORT_PRESSURE_INFLIGHT_MS = 10_000;
+const ABORT_PRESSURE_LAG_MS = 1_000;
+
+/** True when an abort coincides with host pressure: a long in-flight time OR a
+ *  stalled event loop. Pure (no Sentry/process state) for unit testing. */
+export function isAbortUnderPressure(
+  timeInFlightMs: number,
+  lagP99Ms: number,
+): boolean {
+  return (
+    timeInFlightMs >= ABORT_PRESSURE_INFLIGHT_MS ||
+    lagP99Ms >= ABORT_PRESSURE_LAG_MS
+  );
+}
+
+/**
+ * Capture a client-abort event ONLY when it coincides with host pressure
+ * (in-flight ≥ 10s OR event-loop p99 ≥ 1s), with memory + loop-lag context, so
+ * client disconnects can be correlated with the embedding-OOM / swap stalls
+ * that manifest upstream as ConnectTimeout. Normal aborts are dropped to avoid
+ * Sentry noise. Gated on Sentry; never throws (called from request-path catch
+ * blocks).
+ */
+export function captureClientAbortUnderPressure(ctx: {
+  startMs: number;
+  route: string;
+  sessionID?: string;
+}): void {
+  if (!Sentry.isInitialized()) return;
+  try {
+    const timeInFlightMs = Date.now() - ctx.startMs;
+    const lagP99Ms = getEventLoopLagP99Ms();
+    if (!isAbortUnderPressure(timeInFlightMs, lagP99Ms)) {
+      return; // normal abort, not under pressure
+    }
+    const mem = process.memoryUsage();
+    Sentry.captureMessage("Client abort under host pressure", {
+      level: "warning",
+      // One grouped issue per route, not one per disconnect.
+      fingerprint: ["client-abort-under-pressure", ctx.route],
+      contexts: {
+        abort_pressure: {
+          route: ctx.route,
+          session_id: ctx.sessionID ?? "unknown",
+          time_in_flight_ms: timeInFlightMs,
+          event_loop_lag_p99_ms: Math.round(lagP99Ms),
+          rss_bytes: mem.rss,
+          free_memory_bytes: freemem(),
+        },
+      },
+    });
+  } catch {
+    // Telemetry must never break the request path.
+  }
 }
