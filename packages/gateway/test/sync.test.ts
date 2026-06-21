@@ -459,6 +459,7 @@ describe("pushOnce — happy path", () => {
     syncData.enableSync("basic");
     for (let i = 0; i < 20; i++) insertEntity(`e${i}`);
     let pragma = 0;
+    let totalSpans = 0;
     const noop = () => {};
     const passthrough: log.LogSink = {
       info: noop,
@@ -469,6 +470,7 @@ describe("pushOnce — happy path", () => {
     log.registerSink({
       ...passthrough,
       withDbSpan<T>(sql: string, fn: () => T): T {
+        totalSpans++;
         if (/PRAGMA table_info\(entities\)/.test(sql)) pragma++;
         return fn();
       },
@@ -479,7 +481,11 @@ describe("pushOnce — happy path", () => {
       log.registerSink(passthrough); // restore pass-through (no withDbSpan)
     }
     expect(tableRows("entities")).toHaveLength(20); // sanity: rows really pushed
-    // 20 rows × 3 unmemoized PRAGMAs ≈ 60 before; O(1) per connection after.
+    // Non-vacuity guard: the tracing sink must actually fire — otherwise a future
+    // break in withDbSpan would silently leave pragma at 0 and pass the bound below.
+    expect(totalSpans).toBeGreaterThan(0);
+    // 20 rows × 3 unmemoized PRAGMAs ≈ 60 before; O(1) per connection after
+    // (here 0 — enableSync's seed already warmed the per-connection cache).
     expect(pragma).toBeLessThan(5);
   });
 });
