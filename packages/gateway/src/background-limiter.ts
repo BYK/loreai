@@ -322,7 +322,9 @@ export async function drainBackground(timeoutMs = 5000): Promise<void> {
   if (activeTasks.size === 0) return;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<void>((resolve) => {
+    // unref so the timer can never independently hold the event loop open.
     timer = setTimeout(resolve, timeoutMs);
+    timer.unref?.();
   });
   try {
     await Promise.race([Promise.allSettled([...activeTasks]), timeout]);
@@ -404,11 +406,17 @@ export function backgroundLimiterStats(): {
  * Note: `clearQueue()` only removes pending (queued) tasks — in-flight
  * tasks (up to the current concurrency cap) will continue to completion. Pending tasks resolve
  * as `undefined`, consistent with the circuit breaker skip behavior.
+ *
+ * `activeTasks` is cleared too so a started-but-unawaited task from one test
+ * can't pollute the next test's `drainBackground()` (the running task still
+ * finishes; we just stop tracking it). The drain itself empties this set via
+ * each task's `finally`, so this is belt-and-suspenders for test isolation.
  */
 export function resetBackgroundLimiter(): void {
   limiter.clearQueue();
   limiter.concurrency = MIN_BACKGROUND_CONCURRENCY;
   breakers.clear();
+  activeTasks.clear();
 }
 
 /**

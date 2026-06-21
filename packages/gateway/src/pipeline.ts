@@ -456,12 +456,16 @@ export function setUpstreamInterceptor(
 export async function resetPipelineState(opts?: {
   fast?: boolean;
 }): Promise<void> {
-  // Quiesce background work before tearing anything down (config reload / test
-  // teardown only — the fast process-exit path skips this to keep Ctrl+C
-  // snappy). Stop the idle scheduler FIRST so no new ticks schedule work, then
-  // await every in-flight distillation / curation / idle task. This is done
-  // while llmClient + the upstream interceptor are still live, so the drained
-  // tasks complete cleanly. The point: a late `saveSessionTracking()` write
+  // Quiesce background work before tearing anything down. Only the non-fast
+  // path drains — today that's test/eval teardown (the fast process-exit path,
+  // the sole production caller, skips this to keep Ctrl+C snappy). Stop the
+  // idle scheduler FIRST so no new ticks schedule work, then await every
+  // in-flight distillation / curation / idle task. Done while llmClient + the
+  // upstream interceptor are still live so DIRECT-callType tasks (incl. the
+  // always-scheduled urgent distillation) complete cleanly; a batch-callType
+  // task can't flush until llmClient.shutdown below, so it falls back to the
+  // bounded drain timeout (rare in tests — incremental distill/curation seldom
+  // trigger in short runs). The point: a late `saveSessionTracking()` write
   // must land in THIS process's DB, not leak into the next one's as a phantom
   // row — the cross-harness contamination behind the #859 flake. See #885.
   if (!opts?.fast) {
@@ -4585,52 +4589,59 @@ function scheduleBackgroundWork(
     })
   ) {
     sessionState.curationScheduled = true;
-    runBackground(
-      () =>
-        Sentry.startSpan(
-          {
-            name: "lore.curator",
-            op: "lore.curation",
-            attributes: { trigger: "in-flight" },
-          },
-          () =>
-            curator.run({
-              llm,
-              projectPath,
-              sessionID,
-              model,
-              workerHealth: makeWorkerHealth(sessionID, "lore-curator"),
-            }),
-        ),
-      `in-flight-curation session=${sessionID.slice(0, 16)}`,
-      workerProviderID,
-    )
-      .then((result) => {
-        if (!result) return; // skipped by circuit breaker
-        sessionState.turnsSinceCuration = 0;
-        saveSessionTracking(sessionID, { turnsSinceCuration: 0 });
-        if (
-          result.created > 0 ||
-          result.updated > 0 ||
-          result.deleted > 0 ||
-          result.changedEntries?.length > 0
-        ) {
-          // Invalidate LTM cache only when curation actually changed entries
-          ltmSessionCache.delete(sessionID);
-          saveSessionTracking(sessionID, {
-            ltmCacheText: null,
-            ltmCacheTokens: null,
-          });
-          log.info(
-            `curation: ${result.created} created, ${result.updated} updated, ${result.deleted} deleted`,
-          );
-          emitCurationMetrics({ ...result, trigger: "in-flight" });
-        }
-      })
-      .catch((e) => log.error("background curation failed:", e))
-      .finally(() => {
-        sessionState.curationScheduled = false;
-      });
+    // Track the FULL chain (not just the limiter task) so resetPipelineState's
+    // drain also awaits the post-completion saveSessionTracking writes in the
+    // .then below — those run a few microtasks after the inner task settles and
+    // would otherwise escape the drain. (Latent today since in-flight curation
+    // is off by default, but keeps the leak closed if it's ever enabled.) #885
+    trackBackground(
+      runBackground(
+        () =>
+          Sentry.startSpan(
+            {
+              name: "lore.curator",
+              op: "lore.curation",
+              attributes: { trigger: "in-flight" },
+            },
+            () =>
+              curator.run({
+                llm,
+                projectPath,
+                sessionID,
+                model,
+                workerHealth: makeWorkerHealth(sessionID, "lore-curator"),
+              }),
+          ),
+        `in-flight-curation session=${sessionID.slice(0, 16)}`,
+        workerProviderID,
+      )
+        .then((result) => {
+          if (!result) return; // skipped by circuit breaker
+          sessionState.turnsSinceCuration = 0;
+          saveSessionTracking(sessionID, { turnsSinceCuration: 0 });
+          if (
+            result.created > 0 ||
+            result.updated > 0 ||
+            result.deleted > 0 ||
+            result.changedEntries?.length > 0
+          ) {
+            // Invalidate LTM cache only when curation actually changed entries
+            ltmSessionCache.delete(sessionID);
+            saveSessionTracking(sessionID, {
+              ltmCacheText: null,
+              ltmCacheTokens: null,
+            });
+            log.info(
+              `curation: ${result.created} created, ${result.updated} updated, ${result.deleted} deleted`,
+            );
+            emitCurationMetrics({ ...result, trigger: "in-flight" });
+          }
+        })
+        .catch((e) => log.error("background curation failed:", e))
+        .finally(() => {
+          sessionState.curationScheduled = false;
+        }),
+    );
   }
 }
 
