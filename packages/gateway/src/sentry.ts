@@ -683,18 +683,28 @@ export function getEventLoopLagP99Ms(): number {
 /** A client abort is only worth a Sentry event when it coincides with host
  *  pressure: a long in-flight time or a stalled event loop. Below these,
  *  disconnects are normal connection lifecycle and must not be captured. */
-const ABORT_PRESSURE_INFLIGHT_MS = 10_000;
+/** Event-loop p99 at/above this (ms) means the loop is stalled — swap/CPU
+ *  pressure, the ConnectTimeout symptom. */
 const ABORT_PRESSURE_LAG_MS = 1_000;
+/** Free memory at/below this is critically low — the host is near swap/OOM
+ *  (the embedding worker baseline alone is ~400 MB). Coarse floor; gates a
+ *  telemetry event only, not behavior. */
+const ABORT_PRESSURE_FREEMEM_BYTES = 512 * 1024 * 1024;
 
-/** True when an abort coincides with host pressure: a long in-flight time OR a
- *  stalled event loop. Pure (no Sentry/process state) for unit testing. */
+/**
+ * True when the HOST is under pressure: the event loop is stalled OR free
+ * memory is critically low. Deliberately based on host state, not request
+ * duration — a long-lived stream cancelled on a healthy host is a normal abort,
+ * not pressure (in-flight time is recorded as context, never as the gate). Pure
+ * for unit testing.
+ */
 export function isAbortUnderPressure(
-  timeInFlightMs: number,
   lagP99Ms: number,
+  freeMemBytes: number,
 ): boolean {
   return (
-    timeInFlightMs >= ABORT_PRESSURE_INFLIGHT_MS ||
-    lagP99Ms >= ABORT_PRESSURE_LAG_MS
+    lagP99Ms >= ABORT_PRESSURE_LAG_MS ||
+    freeMemBytes <= ABORT_PRESSURE_FREEMEM_BYTES
   );
 }
 
@@ -711,12 +721,14 @@ export function captureClientAbortUnderPressure(ctx: {
   route: string;
   sessionID?: string;
 }): void {
-  if (!Sentry.isInitialized()) return;
+  // Whole body in try — even Sentry.isInitialized() must not throw out of a
+  // request-path catch and turn a clean error response into a rejected promise.
   try {
-    const timeInFlightMs = Date.now() - ctx.startMs;
+    if (!Sentry.isInitialized()) return;
     const lagP99Ms = getEventLoopLagP99Ms();
-    if (!isAbortUnderPressure(timeInFlightMs, lagP99Ms)) {
-      return; // normal abort, not under pressure
+    const freeMemBytes = freemem();
+    if (!isAbortUnderPressure(lagP99Ms, freeMemBytes)) {
+      return; // healthy host — a normal abort, not worth an event
     }
     const mem = process.memoryUsage();
     Sentry.captureMessage("Client abort under host pressure", {
@@ -727,10 +739,10 @@ export function captureClientAbortUnderPressure(ctx: {
         abort_pressure: {
           route: ctx.route,
           session_id: ctx.sessionID ?? "unknown",
-          time_in_flight_ms: timeInFlightMs,
+          time_in_flight_ms: Date.now() - ctx.startMs,
           event_loop_lag_p99_ms: Math.round(lagP99Ms),
           rss_bytes: mem.rss,
-          free_memory_bytes: freemem(),
+          free_memory_bytes: freeMemBytes,
         },
       },
     });

@@ -53,16 +53,19 @@ describe("embedding/resource instrumentation helpers", () => {
 });
 
 describe("client-abort-under-pressure", () => {
-  it("fires only above the in-flight (10s) OR loop-lag (1s) thresholds", () => {
-    // Below both → normal abort, not captured.
-    expect(isAbortUnderPressure(5_000, 500)).toBe(false);
-    expect(isAbortUnderPressure(9_999, 999)).toBe(false);
-    // In-flight threshold (boundary inclusive).
-    expect(isAbortUnderPressure(10_000, 0)).toBe(true);
-    expect(isAbortUnderPressure(60_000, 0)).toBe(true);
-    // Loop-lag threshold (boundary inclusive).
-    expect(isAbortUnderPressure(0, 1_000)).toBe(true);
-    expect(isAbortUnderPressure(0, 5_000)).toBe(true);
+  const MB = 1024 * 1024;
+  const GB = 1024 * MB;
+  it("fires only when the loop is stalled (>=1s) or free memory is critically low (<=512MB)", () => {
+    // Healthy host (fast loop, plenty of memory) → normal abort, not captured —
+    // even a long-lived stream cancellation is dropped.
+    expect(isAbortUnderPressure(200, 4 * GB)).toBe(false);
+    expect(isAbortUnderPressure(999, 513 * MB)).toBe(false);
+    // Event-loop stalled (boundary inclusive).
+    expect(isAbortUnderPressure(1_000, 8 * GB)).toBe(true);
+    expect(isAbortUnderPressure(5_000, 8 * GB)).toBe(true);
+    // Free memory critically low (boundary inclusive).
+    expect(isAbortUnderPressure(0, 512 * MB)).toBe(true);
+    expect(isAbortUnderPressure(0, 100 * MB)).toBe(true);
   });
 
   it("getEventLoopLagP99Ms returns a non-negative number", () => {

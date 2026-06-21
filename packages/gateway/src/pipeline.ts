@@ -3089,6 +3089,9 @@ function buildStreamingResponse(
   },
   /** When set, prepend a synthetic warning content block to the stream. */
   warningText?: string,
+  /** Session id, for telemetry (abort-under-pressure capture). Passed
+   *  independently of recallContext so non-recall turns are still attributable. */
+  sessionID?: string,
 ): Response {
   const recallAccum = recallContext
     ? createRecallAwareAccumulator(RECALL_TOOL_NAME, { scaleClientUsage: true })
@@ -3518,7 +3521,7 @@ function buildStreamingResponse(
           captureClientAbortUnderPressure({
             startMs: streamStartMs,
             route: "stream",
-            sessionID: recallContext?.sessionState.sessionID,
+            sessionID,
           });
         } else {
           log.error("streaming pipeline error:", err);
@@ -6964,6 +6967,7 @@ async function handleConversationTurn(
         ? { modifiedReq, config, sessionState, cacheOptions }
         : undefined,
       warningText,
+      sessionState.sessionID,
     );
     // Translate to client's wire format if needed. When the upstream is
     // Anthropic but the client speaks OpenAI, wrap the Anthropic SSE stream.
