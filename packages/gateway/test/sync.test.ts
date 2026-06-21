@@ -422,6 +422,31 @@ describe("pushOnce — happy path", () => {
     const remoteE = tableRows("entities").find((r) => r.id === "e1");
     expect(remoteE?.is_deleted).toBe(true); // delete propagated to the remote
   });
+
+  test("a content change still propagates when a STALE upsert outlived the prune floor (reconcile seed)", async () => {
+    // The upsert mirror of the tombstone case above: a row's upsert can survive
+    // pruning (floor pinned by a lower-seq table, #828). If the row is then
+    // MODIFIED while sync is OFF, reconcile must re-seed it BY CONTENT — the stale
+    // already-pushed upsert won't carry the new content and (being below the push
+    // cursor) is never re-read, so a latest-op guard would skip it and lose the edit.
+    syncData.enableSync("basic");
+    insertKnowledge("k1", "v1"); // outbox upsert@1 (knowledge)
+    insertEntity("e1"); // outbox upsert@2 (entities), canonical_name 'X'
+    await pushOnce(makeClient() as never);
+    // prune floor = min(knowledge=1, entities=2) = 1 → knowledge@1 reclaimed,
+    // entities@2 survives as the stale (already-pushed) upsert.
+    expect(
+      syncData
+        .readOutbox(0)
+        .some((e) => e.table_name === "entities" && e.row_id === "e1"),
+    ).toBe(true);
+    syncData.disableSync();
+    db().query("UPDATE entities SET canonical_name='RENAMED' WHERE id='e1'").run(); // modified while OFF
+    syncData.enableSync("basic"); // reconcile must re-seed e1 by content
+    await pushOnce(makeClient() as never);
+    const remoteE = tableRows("entities").find((r) => r.id === "e1");
+    expect(remoteE?.canonical_name).toBe("RENAMED"); // edit propagated to the remote
+  });
 });
 
 describe("BLOCKER regressions", () => {

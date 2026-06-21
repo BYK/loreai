@@ -19,6 +19,7 @@ import { createHash } from "node:crypto";
 import {
   db,
   deleteTeamConfig,
+  getKV,
   getTeamConfig,
   setKV,
   setTeamConfig,
@@ -425,44 +426,70 @@ function rowIdExpr(m: SyncTableMeta): string {
 }
 
 /**
- * Enqueue an `upsert` for every live row whose LATEST pending outbox op is not
- * already an `upsert` — i.e. rows with no pending entry, or rows whose newest
- * pending entry is a `delete`. This stays idempotent (a row already queued as an
- * upsert is not re-queued) while guaranteeing a live row always has a TRAILING
- * upsert. Without that guarantee, a row deleted-then-recreated across a sync
- * disable/enable boundary keeps only its stale (coalesced) `delete` — `seedOutbox`
- * would skip it on re-enable, the delete would push (a no-op on a row never
- * uploaded), and the live row would be silently orphaned, never synced. The push
- * path further skips rows whose `content_hash` is unchanged, so a redundant upsert
- * costs nothing.
+ * Enqueue an `upsert` for every live row whose CURRENT content isn't already
+ * correctly queued for the remote. Content-addressed, and aware of which outbox
+ * entries the push hasn't consumed yet (seq > the table's push cursor), so for
+ * each live row:
+ *  - latest UNPUSHED op is an `upsert` → skip: it already carries the current
+ *    content when pushed (getRowById), so re-enqueue would just pile up (this is
+ *    what keeps reconcile idempotent);
+ *  - latest UNPUSHED op is a `delete` → enqueue a trailing upsert: the row is live
+ *    again (recreated across a disable/enable boundary), so the delete must lose;
+ *  - no unpushed op → the remote reflects `sync_state`; enqueue only on a real
+ *    content change (`contentHash != sync_state.content_hash`), skipping unchanged
+ *    rows so reconcile doesn't churn.
+ * The "unpushed" qualifier is load-bearing: a stale already-pushed upsert can
+ * survive pruning (the prune floor was pinned by a lower-seq table, #828) and sits
+ * below the push cursor where it is NEVER re-read. A latest-op guard would treat it
+ * as "already queued" and silently drop a since-made edit; the content check sees
+ * the divergence (current content != the hash that stale upsert synced) and
+ * re-seeds it.
  */
 export function seedOutbox(tier: SyncTier = "basic"): void {
   const now = Date.now();
+  const enqueue = db().query(
+    `INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
+     VALUES (?, ?, 'upsert', ?)`,
+  );
+  // Latest pending op for a row among entries the push hasn't consumed yet. An
+  // already-pushed (seq <= cursor) entry is stale — never re-read — so excluded.
+  const latestUnpushed = db().query(
+    `SELECT op FROM sync_outbox
+      WHERE table_name = ? AND row_id = ? AND seq > ?
+      ORDER BY seq DESC LIMIT 1`,
+  );
   for (const m of syncedTables(tier)) {
     // Pull-only tables are never pushed — enqueuing them would create outbox
     // entries that pushOnce skips forever, pinning their push cursor at 0 and
     // (via the prune floor) permanently disabling outbox pruning for ALL tables.
     if (m.pullOnly) continue;
-    const idExpr = rowIdExpr(m);
-    db()
-      .query(
-        `INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
-         SELECT ?, ${idExpr}, 'upsert', ? FROM ${m.table} t
-         WHERE COALESCE(
-           (SELECT o.op FROM sync_outbox o
-            WHERE o.table_name = ? AND o.row_id = ${idExpr}
-            ORDER BY o.seq DESC LIMIT 1),
-           'none'
-         ) <> 'upsert' `,
-      )
-      .run(m.table, now, m.table);
+    const pushCursor = Number(getKV(`sync.push.${m.table}`) ?? "0");
+    const rows = db()
+      .query(`SELECT * FROM ${m.table}`)
+      .all() as Record<string, unknown>[];
+    for (const row of rows) {
+      const rowId = rowIdOf(m.table, row);
+      const pending =
+        (
+          latestUnpushed.get(m.table, rowId, pushCursor) as {
+            op: string;
+          } | null
+        )?.op ?? null;
+      if (pending === "upsert") continue; // unpushed upsert already carries it
+      if (pending === null) {
+        // No unpushed op — re-seed only when the content actually changed.
+        const synced = getSyncState(m.table, rowId)?.content_hash ?? null;
+        if (contentHash(m.table, row) === synced) continue;
+      }
+      enqueue.run(m.table, rowId, now);
+    }
   }
 }
 
 /**
  * Re-enqueue the full local delta for a tier — used on enable AND re-enable:
- *  - an upsert for every live row whose latest pending op isn't already an upsert
- *    (see seedOutbox), and
+ *  - an upsert for every live row whose current content isn't already correctly
+ *    queued (see seedOutbox), and
  *  - a `delete` tombstone for every row present in `sync_state` but no longer live
  *    whose latest pending op isn't already a `delete` (deleted while sync was OFF,
  *    which the capture triggers couldn't see). The "isn't already a delete" guard
