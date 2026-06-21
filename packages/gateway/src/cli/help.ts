@@ -25,6 +25,11 @@ Commands:
                        Supported: codex, opencode, claude-code
                        \`setup undo [app]\` reverts a previous setup (restores
                        the backup lore saved before it changed your config)
+                       \`setup status\` prints a read-only inventory of what
+                       setup has touched and where each agent is pointed
+  doctor              Diagnose routing/env conflicts: setup inventory, gateway
+                       reachability, port consistency, shell-env overrides,
+                       Bedrock/Vertex conflicts, plugin install, version
   logs                Show lore activity log
   import              Import knowledge from prior AI agent conversations
   data <subcommand>   Manage stored data (list, show, clear, delete)
@@ -142,6 +147,8 @@ Examples:
   lore setup opencode --no-plugin  # Configure OpenCode without installing the @loreai/opencode plugin
   lore setup undo               # Undo setup for all configured apps
   lore setup undo claude-code   # Undo setup for Claude Code only
+  lore setup status             # Show what setup has touched (read-only)
+  lore doctor                   # Diagnose routing/env conflicts
   lore upgrade                  # Upgrade to latest version
   lore upgrade --check          # Check for updates without installing
   lore upgrade --force          # Force re-download even if up to date

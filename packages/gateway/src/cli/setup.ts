@@ -914,6 +914,13 @@ export async function commandSetup(
     return;
   }
 
+  // `lore setup status` — read-only inventory of what setup has touched.
+  if (args[0]?.toLowerCase() === "status") {
+    const { printInventoryStatus } = await import("./inventory");
+    printInventoryStatus();
+    return;
+  }
+
   const remoteUrl = values.remote as string | undefined;
   const explicitPort = values.port ? Number(values.port) : undefined;
   const noPlugin = values.noPlugin === true;

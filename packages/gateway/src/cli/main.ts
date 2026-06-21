@@ -313,6 +313,12 @@ export async function _cli(): Promise<void> {
         break;
       }
 
+      case "doctor": {
+        const { commandDoctor } = await import("./inventory");
+        await commandDoctor();
+        break;
+      }
+
       case "data": {
         const { commandData } = await import("./data");
         await commandData(rest, values as Record<string, unknown>);
@@ -395,6 +401,7 @@ export async function _cli(): Promise<void> {
               "stop",
               "run",
               "setup",
+              "doctor",
               "data",
               "recall",
               "login",
