@@ -441,7 +441,9 @@ describe("pushOnce — happy path", () => {
         .some((e) => e.table_name === "entities" && e.row_id === "e1"),
     ).toBe(true);
     syncData.disableSync();
-    db().query("UPDATE entities SET canonical_name='RENAMED' WHERE id='e1'").run(); // modified while OFF
+    db()
+      .query("UPDATE entities SET canonical_name='RENAMED' WHERE id='e1'")
+      .run(); // modified while OFF
     syncData.enableSync("basic"); // reconcile must re-seed e1 by content
     await pushOnce(makeClient() as never);
     const remoteE = tableRows("entities").find((r) => r.id === "e1");

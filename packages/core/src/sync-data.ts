@@ -24,6 +24,7 @@ import {
   setKV,
   setTeamConfig,
   withSyncApplying,
+  withTransaction,
 } from "./db";
 
 /**
@@ -458,32 +459,39 @@ export function seedOutbox(tier: SyncTier = "basic"): void {
       WHERE table_name = ? AND row_id = ? AND seq > ?
       ORDER BY seq DESC LIMIT 1`,
   );
-  for (const m of syncedTables(tier)) {
-    // Pull-only tables are never pushed — enqueuing them would create outbox
-    // entries that pushOnce skips forever, pinning their push cursor at 0 and
-    // (via the prune floor) permanently disabling outbox pruning for ALL tables.
-    if (m.pullOnly) continue;
-    const pushCursor = Number(getKV(`sync.push.${m.table}`) ?? "0");
-    const rows = db()
-      .query(`SELECT * FROM ${m.table}`)
-      .all() as Record<string, unknown>[];
-    for (const row of rows) {
-      const rowId = rowIdOf(m.table, row);
-      const pending =
-        (
-          latestUnpushed.get(m.table, rowId, pushCursor) as {
-            op: string;
-          } | null
-        )?.op ?? null;
-      if (pending === "upsert") continue; // unpushed upsert already carries it
-      if (pending === null) {
-        // No unpushed op — re-seed only when the content actually changed.
-        const synced = getSyncState(m.table, rowId)?.content_hash ?? null;
-        if (contentHash(m.table, row) === synced) continue;
+  // One transaction for the whole seed: the per-row loop does N inserts, and
+  // without it WAL + synchronous=FULL would fsync once PER ROW — a multi-second
+  // stall on `lore sync enable` for a large knowledge base. (Safe: seedOutbox is
+  // only ever reached via enableSync, never from within another transaction.)
+  withTransaction(() => {
+    for (const m of syncedTables(tier)) {
+      // Pull-only tables are never pushed — enqueuing them would create outbox
+      // entries that pushOnce skips forever, pinning their push cursor at 0 and
+      // (via the prune floor) permanently disabling outbox pruning for ALL tables.
+      if (m.pullOnly) continue;
+      const pushCursor = Number(getKV(`sync.push.${m.table}`) ?? "0");
+      const rows = db().query(`SELECT * FROM ${m.table}`).all() as Record<
+        string,
+        unknown
+      >[];
+      for (const row of rows) {
+        const rowId = rowIdOf(m.table, row);
+        const pending =
+          (
+            latestUnpushed.get(m.table, rowId, pushCursor) as {
+              op: string;
+            } | null
+          )?.op ?? null;
+        if (pending === "upsert") continue; // unpushed upsert already carries it
+        if (pending === null) {
+          // No unpushed op — re-seed only when the content actually changed.
+          const synced = getSyncState(m.table, rowId)?.content_hash ?? null;
+          if (contentHash(m.table, row) === synced) continue;
+        }
+        enqueue.run(m.table, rowId, now);
       }
-      enqueue.run(m.table, rowId, now);
     }
-  }
+  });
 }
 
 /**
