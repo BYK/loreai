@@ -41,15 +41,18 @@ export const EMBED_MEM_FRACTION = 0.5;
  *  limit (free memory never improves → never re-probe). */
 export const EMBED_REPROBE_RATIO = 1.3;
 
-/** Approximate resident baseline (model weights + ORT runtime) subtracted from
- *  free memory before sizing the transient allocation. ~400 MB. */
-export const EMBED_MODEL_BASELINE_BYTES = 400 * 1024 * 1024;
+/** Resident baseline (nomic q8 model + ORT/WASM runtime + buffers) subtracted
+ *  from free memory before sizing the transient allocation. Measured at ~662 MB
+ *  on the bundled single-threaded WASM worker (eval/measure-embed-cap.mjs, #857)
+ *  — far above the original 400 MB guess — rounded up for cross-runtime margin. */
+export const EMBED_MODEL_BASELINE_BYTES = 680 * 1024 * 1024;
 
-/** Peak attention bytes per token²: n_heads (12) × 4 bytes/float × ~4 buffer
- *  overhead ≈ 192. The dominant inference allocation is the O(L²) attention
- *  tensor, so peakBytes ≈ K · L². Physical constants with a conservative
- *  overhead factor; the backoff corrects any residual estimation error. */
-export const EMBED_ATTENTION_BYTES_PER_TOKEN_SQ = 192;
+/** Peak attention bytes per token². The dominant inference allocation is the
+ *  O(L²) attention tensor, so footprint ≈ baseline + K·L². Measured at ~117
+ *  bytes/token² on the bundled WASM worker (eval/measure-embed-cap.mjs, #857;
+ *  R²=0.999 across L=256..4096), rounded up for margin. The backoff corrects
+ *  any residual. */
+export const EMBED_ATTENTION_BYTES_PER_TOKEN_SQ = 120;
 
 /** Free-memory ratio band within which a persisted learned cap is trusted
  *  as-is (i.e. memory is "close enough" to learn-time to skip re-converging). */
