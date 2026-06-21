@@ -720,8 +720,9 @@ function setupOpencode(baseUrl: string, noPlugin: boolean): void {
   }
 
   // Finalize the backup now that the (possibly config-rewriting) plugin install
-  // has run. `installPlugin` returns true only when it actually added the
-  // plugin to the array, so this attribution is accurate.
+  // has run. `installPlugin` returns true on full success (both npm install and
+  // registration of the plugin in the config), so `pluginInstalled && !pluginAlreadyPresent`
+  // accurately reflects whether lore actually added the plugin.
   const finalConfig = readJsonConfig(configPath);
   const backup = captureJsonBackup(existing, loreValues, {
     pluginAdded: pluginInstalled && !pluginAlreadyPresent,
