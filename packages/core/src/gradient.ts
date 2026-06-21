@@ -2367,6 +2367,15 @@ function transformInner(input: {
   // the always-returns emergency tail) instead of overflowing the model. This
   // is only the stage-loop acceptance gate (the layer-0 / tier-gate paths use
   // their own `maxInput * HARD_CEILING_MARGIN` checks against expectedInput).
+  //
+  // The layer-1 stable window is effectively bounded to ~0.65*usable (prefix
+  // 0.25 + raw 0.4), so `total * 1.5 = 0.975*usable <= maxInput` and layer 1
+  // is never falsely rejected in the normal regime. The stable-window
+  // hysteresis (up to 1.15x raw) can push the worst case to ~0.71*usable, which
+  // exceeds maxInput only when overhead+LTM is a tiny (<~6%) slice of the
+  // window — and in that regime the real (1.5x) size genuinely approaches the
+  // ceiling, so escalating one layer is the correct, safe response, not a
+  // spurious reject.
   function fitsWithSafetyMargin(
     result: { totalTokens: number } | null,
   ): boolean {
@@ -2677,22 +2686,28 @@ function transformInner(input: {
     if (effectiveMinLayer > stageLayer) continue;
 
     const stage = COMPRESSION_STAGES[s];
-    // Escalated stages (rawFrac/distFrac non-null) scale off `stageBudgetUsable`
-    // (clamped to the layer-0 cost ceiling), NOT raw `usable` — see the
-    // "Escalated-stage budget ceiling" note above. Without the clamp,
-    // `usable * 0.5` on a 1M-token model targets ~400K raw, larger than the
-    // ~200K cap that triggered compression AND larger than the layer-1 window,
-    // so escalating layers GREW the window and overflowed the model. Stage 0
-    // (layer 1, rawFrac=null) falls through to the unclamped base rawBudget /
-    // distilledBudget so the cache-stable raw-window pin keeps its full budget.
-    const stageRawBudget =
-      stage.rawFrac !== null
-        ? Math.floor(stageBudgetUsable * stage.rawFrac)
-        : rawBudget;
-    const stageDistBudget =
-      stage.distFrac !== null
-        ? Math.floor(stageBudgetUsable * stage.distFrac)
-        : distilledBudget;
+    // Budget scaling by layer:
+    //   - Layer 1 (stage 0): keep the FULL unclamped base budgets (usable*raw,
+    //     usable*distilled). The cost cap governs WHEN to compress, not the
+    //     layer-1 window size; clamping it would starve the cache-stable
+    //     raw-window pin (its chunked eviction needs headroom).
+    //   - Escalated layers (2-3): clamp BOTH raw AND distilled to the layer-0
+    //     cost ceiling (`stageBudgetUsable`). On a 1M-token model `usable*0.5`
+    //     ≈ 400K — far LARGER than the ~200K cap that triggered compression AND
+    //     larger than the layer-1 window — so escalating GREW the context until
+    //     the model overflowed (wedged session 0AVWKugtmhBKqLOX9). Both
+    //     dimensions must be clamped: clamping only raw still lets the distilled
+    //     prefix balloon to usable*0.25 (~242K on 1M), so the total would not
+    //     actually shrink toward the cap. A null fraction on an escalated stage
+    //     (e.g. layer 2's distFrac) falls back to the configured base fraction,
+    //     still clamped to the ceiling.
+    const isEscalated = stageLayer > 1;
+    const stageRawBudget = isEscalated
+      ? Math.floor(stageBudgetUsable * (stage.rawFrac ?? cfg.budget.raw))
+      : rawBudget;
+    const stageDistBudget = isEscalated
+      ? Math.floor(stageBudgetUsable * (stage.distFrac ?? cfg.budget.distilled))
+      : distilledBudget;
 
     // Determine prefix: if distLimit is finite, re-render with trimmed distillations.
     // Otherwise use the cached prefix (Approach C, byte-identical for cache).

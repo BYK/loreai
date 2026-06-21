@@ -4225,6 +4225,43 @@ describe("tier-based context management", () => {
       expect(result.usable).toBeGreaterThan(900_000);
     });
 
+    test("escalated-stage DISTILLED prefix is clamped too (layer 2 distFrac fallthrough)", () => {
+      // Layer 2 has distFrac=null, so before the fix its distilled budget fell
+      // through to the UNCLAMPED base distilledBudget = usable*0.25 (~242K on a
+      // 1M model) — letting the prefix balloon above the cap even though the raw
+      // window was clamped. The escalated stages must clamp BOTH dimensions:
+      // layer-2 distilled budget = stageBudgetUsable*0.25 = 200K*0.25 = 50K.
+      setModelLimits({ context: 1_000_000, output: 32_000 });
+      setMaxLayer0Tokens(200_000);
+      calibrate(0);
+
+      // ~150K tokens of distillate — far above the clamped 50K layer-2 distilled
+      // budget, but below the unclamped base (~242K) so a missing clamp would
+      // NOT trim it. Keep raw tiny so the window is dominated by the prefix.
+      seedDistillations(25, 18_000); // 25 × 6K tokens = 150K tokens
+      const msgs = Array.from({ length: 6 }, (_, i) =>
+        makeMsg(
+          `dist-${i}`,
+          i % 2 === 0 ? "user" : "assistant",
+          "d".repeat(500),
+          SID,
+        ),
+      );
+
+      setForceMinLayer(2, SID);
+      const result = transform({
+        messages: msgs,
+        projectPath: `/test/${PID_KEY}`,
+        sessionID: SID,
+      });
+
+      expect(result.layer).toBeGreaterThanOrEqual(2);
+      // Clamped: distilled prefix trimmed to ~50K. Pre-fix (unclamped base) it
+      // would stay ~150K (no trim, since 150K < usable*0.25 ≈ 242K).
+      expect(result.distilledTokens).toBeLessThan(100_000);
+      expect(result.usable).toBeGreaterThan(900_000);
+    });
+
     test("hard-ceiling guard: a rebuilt over-ceiling window escalates instead of shipping (calibrated)", () => {
       // Cost cap disabled on a 200K model so budgetUsable === usable === maxInput
       // (168K). A forced layer-2 window fills prefix (0.25) + raw (0.5) ≈ 0.75 ×
