@@ -2514,18 +2514,14 @@ function transformInner(input: {
     sid,
   );
 
-  // Record the gradient's own size estimate so the shared cache-economics
-  // evaluator (and therefore the warmer) reads identical full/compressed sizes
-  // from one place. Baseline assumes no compaction (compressed === full); the
-  // tier gate below refines `cacheSizeCompressed` when it actually evaluates a
-  // compression target.
-  //
-  // KNOWN GAP (shadow-only, PR2a): the refine ONLY fires on the layer-0 tier
-  // gate. Sessions held at layer >= 1 by the sticky/prefix-floor/post-idle/
-  // first-sight-large guards below bypass it, so for an already-compressing
-  // session `cacheSizeCompressed` stays == full and the shadow under-reports
-  // real compaction savings. Harmless while we only LOG; PR2b MUST source a real
-  // compressed target for the layer >= 1 paths before it acts on cool-bust.
+  // Record the gradient's own full-body size estimate so the shared cache-
+  // economics evaluator (and therefore the warmer) read identical sizes from one
+  // place. `cacheSizeCompressed` is set AUTHORITATIVELY from the actual rebuilt
+  // window at the single transform() exit (issue #881) — see transform() — so it
+  // is correct on EVERY layer path (including layer >= 1 sessions held by the
+  // sticky/prefix-floor/post-idle/first-sight-large guards, which bypass the tier
+  // gate below). Seed it to full here as the no-compaction default; the exit
+  // overwrites it with the real compressed size whenever result.layer >= 1.
   if (sid) {
     sessState.cacheSizeFull = Math.max(0, Math.round(layer0Input));
     sessState.cacheSizeCompressed = sessState.cacheSizeFull;
@@ -2606,13 +2602,13 @@ function transformInner(input: {
       distilledBudget + rawBudget,
       layer0Ceiling,
     );
-    // Refine the shared-economics snapshot with the real compression target so
-    // the warmer's cool-bust math uses the same compressed size this gate does.
-    // (Already inside a `… && sid` block, so the session state exists.)
-    sessState.cacheSizeCompressed = Math.max(
-      0,
-      Math.min(compressedEstimate, sessState.cacheSizeFull),
-    );
+    // NOTE: `cacheSizeCompressed` is NOT set here. It used to be refined to
+    // `compressedEstimate` at this point, but (a) when shouldCompress() below
+    // returns false the session stays at layer 0 with NO compaction, so leaving
+    // compressed < full wrongly implied savings, and (b) it covered only this
+    // layer-0 gate. transform() now sets it authoritatively from the actual
+    // rebuilt window on every layer path (issue #881). `compressedEstimate` is
+    // still the input to shouldCompress() (the bust-vs-continue decision).
     if (
       !shouldCompress(Math.round(layer0Input), compressedEstimate, busts, {
         freeWrite,
@@ -2947,6 +2943,22 @@ export function transform(input: {
     state.lastTransformEstimate = result.totalTokens;
     state.lastLayer = result.layer;
     state.lastWindowMessageIDs = new Set(result.messages.map((m) => m.info.id));
+
+    // Source the shared cache-economics compressed size from the ACTUAL rebuilt
+    // window (issue #881). transformInner seeds cacheSizeCompressed = cacheSizeFull
+    // (no-compaction default) and refines it only inside the layer-0 tier gate;
+    // sessions HELD at layer >= 1 by the sticky / prefix-floor / post-idle /
+    // first-sight-large guards bypass that gate, so compressed stayed == full and
+    // the evaluator under-reported real compaction savings. result.totalTokens is
+    // the real compressed body size (distilled + raw, same body-scale as the tier
+    // gate's compressedEstimate). Set it here from result.layer so EVERY path is
+    // correct: layer 0 = no compaction (compressed == full); layer >= 1 = the
+    // actual compressed window (clamped to full as a guard). Authoritative — this
+    // overwrites the transformInner seed.
+    state.cacheSizeCompressed =
+      result.layer >= 1
+        ? Math.max(0, Math.min(result.totalTokens, state.cacheSizeFull))
+        : state.cacheSizeFull;
     // Mark wall-clock for onIdleResume() — must record on every transform()
     // so the next-turn idle check has an accurate baseline. Done after the
     // result fields above so a thrown transformInner doesn't update it.

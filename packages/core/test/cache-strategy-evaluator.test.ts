@@ -190,4 +190,43 @@ describe("transform writes the size snapshot end-to-end", () => {
 
     evictSession(session);
   });
+
+  test("a layer >= 1 transform reports compressed < full (issue #881)", () => {
+    const session = `econ-e2e-compress-${Date.now()}`;
+    // Tiny context + a large UNCALIBRATED (first-turn) conversation triggers the
+    // first-sight-large path → effectiveMinLayer >= 1, which BYPASSES the layer-0
+    // tier gate. This is exactly one of the layer >= 1 paths that used to leave
+    // cacheSizeCompressed == cacheSizeFull (under-reporting compaction savings).
+    setModelLimits({ context: 2_000, output: 500 });
+    try {
+      const messages = Array.from({ length: 30 }, (_, i) =>
+        makeMsg(
+          `cmp-${i}`,
+          i % 2 === 0 ? "user" : "assistant",
+          "A".repeat(1_000),
+          session,
+        ),
+      );
+      const result = transform({
+        messages,
+        projectPath: PROJECT,
+        sessionID: session,
+      });
+      expect(result.layer).toBeGreaterThanOrEqual(1);
+
+      const snap = getCacheSizeSnapshot(session);
+      expect(snap).not.toBeNull();
+      // The fix: compressed reflects the ACTUAL rebuilt window, strictly below
+      // full. Mutation guard: sourcing it from the full size (the old layer >= 1
+      // behavior) would make these EQUAL — so `<` would fail.
+      expect(snap?.compressed).toBeLessThan(snap?.full ?? 0);
+      // ...and it is exactly the clamped actual rebuilt-window size.
+      expect(snap?.compressed).toBe(
+        Math.max(0, Math.min(result.totalTokens, snap?.full ?? 0)),
+      );
+    } finally {
+      setModelLimits({ context: 10_000, output: 2_000 });
+      evictSession(session);
+    }
+  });
 });
