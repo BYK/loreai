@@ -46,17 +46,35 @@ export function planStop(input: {
   return { action: "none" };
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** Injectable IO for the stop orchestration, so `runStop` is testable. */
+export interface StopIO {
+  readPid: () => number | null;
+  readPort: () => number | null;
+  probe: (url: string) => Promise<boolean>;
+  isAlive: (pid: number) => boolean;
+  kill: (pid: number) => void;
+  removePid: (pid: number) => void;
+  sleep: (ms: number) => Promise<void>;
+  now: () => number;
+  logInfo: (msg: string) => void;
+  logError: (msg: string) => void;
+  /** How long to wait for the signalled process to exit (ms). */
+  timeoutMs?: number;
+}
 
-export async function commandStop(): Promise<void> {
-  const pid = readPidFile();
-  const port = readPortFile();
-  const portAlive = port
-    ? await probeGateway(`http://127.0.0.1:${port}`)
-    : false;
+/**
+ * Stop orchestration: resolve the running gateway, signal it, and wait for it
+ * to exit. Returns the process exit code (0 = stopped/nothing-running,
+ * 1 = foreground or stuck). Pure of `process.exit`/real IO so it is
+ * unit-testable; `commandStop` is the thin shell that wires real IO.
+ */
+export async function runStop(io: StopIO): Promise<number> {
+  const pid = io.readPid();
+  const port = io.readPort();
+  const portAlive = port ? await io.probe(`http://127.0.0.1:${port}`) : false;
   const plan = planStop({
     pid,
-    pidAlive: pid !== null && isProcessAlive(pid),
+    pidAlive: pid !== null && io.isAlive(pid),
     port,
     portAlive,
   });
@@ -64,45 +82,62 @@ export async function commandStop(): Promise<void> {
   switch (plan.action) {
     case "signal": {
       try {
-        process.kill(plan.pid, "SIGTERM");
+        io.kill(plan.pid);
       } catch {
         // Raced with exit — fall through to cleanup.
       }
       // Wait for the process to exit (bounded a bit beyond its own shutdown
       // deadline so a clean graceful shutdown has time to finish).
-      const deadline = Date.now() + SHUTDOWN_DEADLINE_MS + 3000;
-      while (Date.now() < deadline) {
-        if (!isProcessAlive(plan.pid)) break;
-        await sleep(200);
+      const deadline = io.now() + (io.timeoutMs ?? SHUTDOWN_DEADLINE_MS + 3000);
+      while (io.now() < deadline) {
+        if (!io.isAlive(plan.pid)) break;
+        await io.sleep(200);
       }
-      if (isProcessAlive(plan.pid)) {
-        console.error(
-          `[lore] Gateway (pid ${plan.pid}) did not stop within the deadline.`,
+      if (io.isAlive(plan.pid)) {
+        io.logError(
+          `Gateway (pid ${plan.pid}) did not stop within the deadline.`,
         );
-        process.exitCode = 1;
-        return;
+        return 1;
       }
-      removePidFile(plan.pid);
-      console.log(`[lore] Gateway stopped (pid ${plan.pid}).`);
-      return;
+      io.removePid(plan.pid);
+      io.logInfo(`Gateway stopped (pid ${plan.pid}).`);
+      return 0;
     }
     case "foreground":
-      console.error(
-        `[lore] A gateway is running on port ${plan.port} but no PID file was found.`,
+      io.logError(
+        `A gateway is running on port ${plan.port} but no PID file was found.`,
       );
-      console.error(
-        `[lore] It's likely a foreground \`lore start\` — stop it with Ctrl+C in its terminal.`,
+      io.logError(
+        `It's likely a foreground \`lore start\` — stop it with Ctrl+C in its terminal.`,
       );
-      process.exitCode = 1;
-      return;
+      return 1;
     case "stale":
-      removePidFile(plan.pid);
-      console.log(
-        `[lore] No running gateway found (cleaned up stale PID file).`,
-      );
-      return;
+      io.removePid(plan.pid);
+      io.logInfo(`No running gateway found (cleaned up stale PID file).`);
+      return 0;
     case "none":
-      console.log(`[lore] No running gateway found.`);
-      return;
+      io.logInfo(`No running gateway found.`);
+      return 0;
   }
+}
+
+/** Build the real (production) IO for {@link runStop}. */
+export function realStopIO(): StopIO {
+  return {
+    readPid: readPidFile,
+    readPort: readPortFile,
+    probe: probeGateway,
+    isAlive: isProcessAlive,
+    kill: (pid) => process.kill(pid, "SIGTERM"),
+    removePid: removePidFile,
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    now: Date.now,
+    logInfo: (msg) => console.log(`[lore] ${msg}`),
+    logError: (msg) => console.error(`[lore] ${msg}`),
+  };
+}
+
+export async function commandStop(): Promise<void> {
+  const code = await runStop(realStopIO());
+  if (code !== 0) process.exitCode = code;
 }

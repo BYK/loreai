@@ -121,27 +121,85 @@ export function daemonSpawnSpec(opts: StartOptions): {
 }
 
 /**
- * Daemonize: re-spawn `lore start` detached with stdio redirected to a log
- * file, poll until the gateway is healthy, print where it's listening, and
- * exit 0. On timeout, point the user at the log file and exit non-zero.
+ * The host the daemon parent should probe. The detached child binds to
+ * `opts.hosts` (default 127.0.0.1), so a hardcoded 127.0.0.1 probe would time
+ * out when the user started with a non-loopback `--host` (e.g. a Tailscale or
+ * LAN address). Use the first configured host, falling back to loopback.
  */
-async function startDaemon(opts: StartOptions): Promise<never> {
+export function daemonProbeHost(opts: StartOptions): string {
+  const host = opts.hosts?.find((h) => h && h.length > 0);
+  return host ?? "127.0.0.1";
+}
+
+/** Injectable IO for the daemon orchestration, so `runDaemon` is testable. */
+export interface DaemonIO {
+  readPort: () => number | null;
+  probe: (url: string) => Promise<boolean>;
+  /** Spawn the detached child gateway; returns its pid (or undefined). */
+  spawnDaemon: () => number | undefined;
+  sleep: (ms: number) => Promise<void>;
+  now: () => number;
+  logInfo: (msg: string) => void;
+  logError: (msg: string) => void;
+  /** Health-poll budget in ms (default 10s). */
+  timeoutMs?: number;
+  /** Poll interval in ms (default 250). */
+  intervalMs?: number;
+}
+
+/**
+ * Daemon orchestration: reuse an already-running gateway, else spawn the
+ * detached child and poll until it's serving. Returns the process exit code
+ * (0 = healthy/reused, 1 = timed out). Pure of `process.exit` so it is
+ * unit-testable; `startDaemon` is the thin shell that wires real IO + exit.
+ */
+export async function runDaemon(
+  opts: StartOptions,
+  io: DaemonIO,
+): Promise<number> {
+  const host = daemonProbeHost(opts);
+
   // If a gateway is already up on the preferred port, don't start a second one.
-  const existingPort = readPortFile();
+  const existingPort = io.readPort();
   if (existingPort) {
-    const url = `http://127.0.0.1:${existingPort}`;
-    if (await probeGateway(url)) {
-      console.log(`[lore] Gateway already running on ${url}`);
-      console.log(`[lore] Dashboard: ${url}/ui`);
-      console.log(`[lore] Stop it with: lore stop`);
-      safeExit(0);
+    const url = `http://${host}:${existingPort}`;
+    if (await io.probe(url)) {
+      io.logInfo(`Gateway already running on ${url}`);
+      io.logInfo(`Dashboard: ${url}/ui`);
+      io.logInfo(`Stop it with: lore stop`);
+      return 0;
     }
   }
 
+  const pid = io.spawnDaemon();
+  const timeout = io.timeoutMs ?? 10_000;
+  const interval = io.intervalMs ?? 250;
+  const deadline = io.now() + timeout;
+  while (io.now() < deadline) {
+    await io.sleep(interval);
+    const port = io.readPort();
+    if (port && (await io.probe(`http://${host}:${port}`))) {
+      const url = `http://${host}:${port}`;
+      io.logInfo(`Gateway started in the background (pid ${pid})`);
+      io.logInfo(`Listening on ${url}`);
+      io.logInfo(`Dashboard: ${url}/ui`);
+      io.logInfo(`Logs: ${daemonLogPath()}`);
+      io.logInfo(`Stop it with: lore stop`);
+      return 0;
+    }
+  }
+
+  io.logError(
+    `Gateway did not become healthy within ${timeout}ms. Check the log: ${daemonLogPath()}`,
+  );
+  return 1;
+}
+
+/** Spawn the detached child gateway with stdio redirected to the log file. */
+function spawnDetachedGateway(opts: StartOptions): number | undefined {
   const logPath = daemonLogPath();
   mkdirSync(dataDir(), { recursive: true });
   const logFd = openSync(logPath, "a");
-
   const { command, args } = daemonSpawnSpec(opts);
   const child = spawn(command, args, {
     detached: true,
@@ -149,29 +207,30 @@ async function startDaemon(opts: StartOptions): Promise<never> {
     env: process.env,
   });
   child.unref();
+  return child.pid;
+}
 
-  // Poll the port file → probe, until the detached gateway is serving.
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 250));
-    const port = readPortFile();
-    if (port && (await probeGateway(`http://127.0.0.1:${port}`))) {
-      const url = `http://127.0.0.1:${port}`;
-      console.log(
-        `[lore] Gateway started in the background (pid ${child.pid})`,
-      );
-      console.log(`[lore] Listening on ${url}`);
-      console.log(`[lore] Dashboard: ${url}/ui`);
-      console.log(`[lore] Logs: ${logPath}`);
-      console.log(`[lore] Stop it with: lore stop`);
-      safeExit(0);
-    }
-  }
+/** Build the real (production) IO for {@link runDaemon}. */
+export function realDaemonIO(opts: StartOptions): DaemonIO {
+  return {
+    readPort: readPortFile,
+    probe: probeGateway,
+    spawnDaemon: () => spawnDetachedGateway(opts),
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    now: Date.now,
+    logInfo: (msg) => console.log(`[lore] ${msg}`),
+    logError: (msg) => console.error(`[lore] ${msg}`),
+  };
+}
 
-  console.error(
-    `[lore] Gateway did not become healthy within 10s. Check the log: ${logPath}`,
-  );
-  safeExit(1);
+/**
+ * Daemonize: re-spawn `lore start` detached with stdio redirected to a log
+ * file, poll until the gateway is healthy, print where it's listening, and
+ * exit. Thin shell around `runDaemon` that supplies real IO and calls
+ * `safeExit`.
+ */
+async function startDaemon(opts: StartOptions): Promise<never> {
+  safeExit(await runDaemon(opts, realDaemonIO(opts)));
 }
 
 /**
