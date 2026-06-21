@@ -2953,8 +2953,20 @@ export function transform(input: {
     // the real compressed body size (distilled + raw, same body-scale as the tier
     // gate's compressedEstimate). Set it here from result.layer so EVERY path is
     // correct: layer 0 = no compaction (compressed == full); layer >= 1 = the
-    // actual compressed window (clamped to full as a guard). Authoritative — this
-    // overwrites the transformInner seed.
+    // actual compressed window (clamped to full as a guard — hitting the clamp
+    // yields the SAFE degenerate compressed == full, never fabricated savings).
+    // Authoritative: this overwrites the transformInner seed.
+    //
+    // SCALE CAVEAT (PR2b prerequisite, NOT a bug today): `cacheSizeFull` is
+    // INPUT-scale (layer0Input — includes overhead + LTM, and is ×UNCALIBRATED_
+    // SAFETY-inflated on first-sight-large turns), while `result.totalTokens` is
+    // BODY-scale (distilled + raw). This matches the pre-existing convention (the
+    // old tier-gate refine used body-scale compressedEstimate vs input-scale full)
+    // so the full-vs-compressed RATIO over-reports savings by the overhead+LTM
+    // floor (which compaction does NOT remove). Harmless while the evaluator is
+    // shadow/log-only; PR2b MUST normalize both sides to the cache-input scale
+    // (lift compressed to body + overhead + LTM, reconcile the uncalibrated factor
+    // on full) before acting on cool-bust.
     state.cacheSizeCompressed =
       result.layer >= 1
         ? Math.max(0, Math.min(result.totalTokens, state.cacheSizeFull))
