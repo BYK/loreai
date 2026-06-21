@@ -167,6 +167,7 @@ export {
   effectiveMetaThreshold,
   isLargeColdStart,
   setCacheSizeSnapshot,
+  computeCompressedCacheSize,
   evaluateCacheStrategy,
   getCacheStrategy,
   getCacheSizeSnapshot,

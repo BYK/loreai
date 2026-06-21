@@ -445,6 +445,15 @@ type SessionState = {
   cacheSizeFull: number;
   /** Compacted-body token target from the most recent transform(); === cacheSizeFull when no compaction is available. */
   cacheSizeCompressed: number;
+  /** Non-message floor (system/tools overhead + LTM) of the most recent
+   *  transform(), in the SAME estimate basis as the message body (un-inflated).
+   *  Compaction never removes this; it is added back to the compressed body so
+   *  cacheSizeCompressed lands on the same scale as cacheSizeFull (issue #886). */
+  cacheNonBodyTokens: number;
+  /** Multiplier that maps the gradient's un-inflated (chars/3) body estimate onto
+   *  cacheSizeFull's scale: 1 when calibrated, UNCALIBRATED_SAFETY when not — the
+   *  same factor layer0Bounds applies to cacheSizeFull. (issue #886) */
+  cacheBodySafety: number;
   /** The single stored strategy decision + when it was computed (null until first evaluated). */
   cacheStrategy: { result: CacheEconomicsResult; decidedAt: number } | null;
 };
@@ -473,6 +482,8 @@ function makeSessionState(): SessionState {
     dedupDecisions: new Map(),
     cacheSizeFull: 0,
     cacheSizeCompressed: 0,
+    cacheNonBodyTokens: 0,
+    cacheBodySafety: 1,
     cacheStrategy: null,
   };
 }
@@ -612,6 +623,36 @@ export interface CacheSurvivalInputs {
   expectedCycles: number;
   /** Expected turns the resumed session runs (the "ongoing cost" horizon). */
   expectedFutureTurns: number;
+}
+
+/**
+ * Compute the cache-economics compressed size on the SAME scale as cacheSizeFull
+ * (issue #886). cacheSizeFull is INPUT-scale: it includes the non-message floor
+ * (system/tools overhead + LTM) and is ×UNCALIBRATED_SAFETY-inflated on
+ * uncalibrated turns. A compacted prompt still carries that whole floor — only
+ * the message body shrinks — so the compressed cache size is:
+ *
+ *   (nonBodyFloor + rebuiltWindowBody) × bodySafety   (clamped to full)
+ *
+ * where `rebuiltWindowBody` (result.totalTokens) and `nonBodyFloor` are the
+ * gradient's un-inflated estimates and `bodySafety` is the same factor applied to
+ * full. This keeps the full-vs-compressed DELTA = the message tokens removed by
+ * compaction (the floor cancels), with both sizes on the input scale the warmer
+ * cross-checks against the real API token count. Layer 0 = no compaction → full.
+ */
+export function computeCompressedCacheSize(
+  layer: number,
+  rebuiltWindowTokens: number,
+  nonBodyTokens: number,
+  bodySafety: number,
+  fullTokens: number,
+): number {
+  if (layer < 1) return fullTokens;
+  const compressed = Math.round(
+    (Math.max(0, nonBodyTokens) + Math.max(0, rebuiltWindowTokens)) *
+      Math.max(1, bodySafety),
+  );
+  return Math.max(0, Math.min(compressed, fullTokens));
 }
 
 /**
@@ -2525,6 +2566,14 @@ function transformInner(input: {
   if (sid) {
     sessState.cacheSizeFull = Math.max(0, Math.round(layer0Input));
     sessState.cacheSizeCompressed = sessState.cacheSizeFull;
+    // Capture the inputs transform() needs to lift the compressed size onto the
+    // same INPUT scale as cacheSizeFull (issue #886): the non-message floor
+    // (overhead + LTM, which compaction never removes) and the safety factor
+    // layer0Bounds applied to cacheSizeFull (1 when calibrated, else
+    // UNCALIBRATED_SAFETY). Stored un-inflated; transform() inflates both the
+    // floor and the rebuilt-window body together via computeCompressedCacheSize.
+    sessState.cacheNonBodyTokens = Math.max(0, overhead + sessLtmTokens);
+    sessState.cacheBodySafety = calibrated ? 1 : UNCALIBRATED_SAFETY;
   }
 
   // First-sight large session → skip the Layer-0 cold full-write. An
@@ -2945,32 +2994,25 @@ export function transform(input: {
     state.lastWindowMessageIDs = new Set(result.messages.map((m) => m.info.id));
 
     // Source the shared cache-economics compressed size from the ACTUAL rebuilt
-    // window (issue #881). transformInner seeds cacheSizeCompressed = cacheSizeFull
-    // (no-compaction default) and refines it only inside the layer-0 tier gate;
+    // window (issue #881), lifted onto the same INPUT scale as cacheSizeFull
+    // (issue #886). transformInner seeds cacheSizeCompressed = cacheSizeFull (the
+    // no-compaction default) and refined it only inside the layer-0 tier gate;
     // sessions HELD at layer >= 1 by the sticky / prefix-floor / post-idle /
-    // first-sight-large guards bypass that gate, so compressed stayed == full and
-    // the evaluator under-reported real compaction savings. result.totalTokens is
-    // the real compressed body size (distilled + raw, same body-scale as the tier
-    // gate's compressedEstimate). Set it here from result.layer so EVERY path is
-    // correct: layer 0 = no compaction (compressed == full); layer >= 1 = the
-    // actual compressed window (clamped to full as a guard — hitting the clamp
-    // yields the SAFE degenerate compressed == full, never fabricated savings).
-    // Authoritative: this overwrites the transformInner seed.
-    //
-    // SCALE CAVEAT (PR2b prerequisite, NOT a bug today): `cacheSizeFull` is
-    // INPUT-scale (layer0Input — includes overhead + LTM, and is ×UNCALIBRATED_
-    // SAFETY-inflated on first-sight-large turns), while `result.totalTokens` is
-    // BODY-scale (distilled + raw). This matches the pre-existing convention (the
-    // old tier-gate refine used body-scale compressedEstimate vs input-scale full)
-    // so the full-vs-compressed RATIO over-reports savings by the overhead+LTM
-    // floor (which compaction does NOT remove). Harmless while the evaluator is
-    // shadow/log-only; PR2b MUST normalize both sides to the cache-input scale
-    // (lift compressed to body + overhead + LTM, reconcile the uncalibrated factor
-    // on full) before acting on cool-bust. Tracked in issue #886.
-    state.cacheSizeCompressed =
-      result.layer >= 1
-        ? Math.max(0, Math.min(result.totalTokens, state.cacheSizeFull))
-        : state.cacheSizeFull;
+    // first-sight-large guards bypass that gate. We set it authoritatively here
+    // from result.layer so EVERY path is correct, and via computeCompressedCacheSize
+    // so the compressed size keeps the non-message floor (overhead + LTM, which
+    // compaction does NOT remove) and the same UNCALIBRATED_SAFETY factor as full
+    // — i.e. the full-vs-compressed delta is exactly the message tokens compaction
+    // removed, on the input scale the warmer cross-checks against apiActual.
+    // Layer 0 = no compaction (compressed == full); the clamp to full yields the
+    // SAFE degenerate (no fabricated savings) if a rebuilt window ever exceeds it.
+    state.cacheSizeCompressed = computeCompressedCacheSize(
+      result.layer,
+      result.totalTokens,
+      state.cacheNonBodyTokens,
+      state.cacheBodySafety,
+      state.cacheSizeFull,
+    );
     // Mark wall-clock for onIdleResume() — must record on every transform()
     // so the next-turn idle check has an accurate baseline. Done after the
     // result fields above so a thrown transformInner doesn't update it.

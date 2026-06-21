@@ -2,6 +2,7 @@ import { afterEach, beforeAll, describe, expect, test } from "vitest";
 import { ensureProject } from "../src/db";
 import {
   calibrate,
+  computeCompressedCacheSize,
   evaluateCacheStrategy,
   evictSession,
   getCacheSizeSnapshot,
@@ -158,6 +159,38 @@ describe("cache-strategy evaluator (single entry point)", () => {
   });
 });
 
+describe("computeCompressedCacheSize (input-scale normalization, issue #886)", () => {
+  test("layer 0 → no compaction → compressed == full", () => {
+    expect(computeCompressedCacheSize(0, 5_000, 2_000, 1.5, 100_000)).toBe(
+      100_000,
+    );
+  });
+
+  test("layer >= 1 keeps the non-message floor (overhead + LTM)", () => {
+    // calibrated (safety 1): compressed = floor + body, NOT body-only.
+    // body=8_000, floor=12_000 → 20_000 (vs the old body-only 8_000).
+    expect(computeCompressedCacheSize(1, 8_000, 12_000, 1, 200_000)).toBe(
+      20_000,
+    );
+  });
+
+  test("layer >= 1 applies the uncalibrated safety factor to floor AND body", () => {
+    // uncalibrated (safety 1.5): (floor 4_000 + body 8_000) * 1.5 = 18_000.
+    expect(computeCompressedCacheSize(2, 8_000, 4_000, 1.5, 200_000)).toBe(
+      18_000,
+    );
+  });
+
+  test("clamps to full (never fabricates savings) and floors at 0", () => {
+    expect(computeCompressedCacheSize(1, 9_999, 9_999, 1.5, 5_000)).toBe(5_000);
+    expect(computeCompressedCacheSize(1, 0, 0, 1.5, 10_000)).toBe(0);
+  });
+
+  test("treats a safety factor below 1 as 1 (never deflates below the estimate)", () => {
+    expect(computeCompressedCacheSize(1, 1_000, 500, 0.4, 100_000)).toBe(1_500);
+  });
+});
+
 describe("transform writes the size snapshot end-to-end", () => {
   beforeAll(() => {
     ensureProject(PROJECT);
@@ -216,14 +249,14 @@ describe("transform writes the size snapshot end-to-end", () => {
 
       const snap = getCacheSizeSnapshot(session);
       expect(snap).not.toBeNull();
-      // The fix: compressed reflects the ACTUAL rebuilt window, strictly below
-      // full. Mutation guard: sourcing it from the full size (the old layer >= 1
+      // #881: compressed reflects the rebuilt window, strictly below full.
+      // Mutation guard: sourcing it from the full size (the old layer >= 1
       // behavior) would make these EQUAL — so `<` would fail.
       expect(snap?.compressed).toBeLessThan(snap?.full ?? 0);
-      // ...and it is exactly the clamped actual rebuilt-window size.
-      expect(snap?.compressed).toBe(
-        Math.max(0, Math.min(result.totalTokens, snap?.full ?? 0)),
-      );
+      // #886: it is lifted onto cacheSizeFull's INPUT scale (floor + body, ×the
+      // uncalibrated safety factor), so it is STRICTLY GREATER than the raw
+      // body-only rebuilt-window size. Guards against the #881 body-only value.
+      expect(snap?.compressed).toBeGreaterThan(result.totalTokens);
     } finally {
       setModelLimits({ context: 10_000, output: 2_000 });
       evictSession(session);
