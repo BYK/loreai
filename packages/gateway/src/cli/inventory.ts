@@ -382,7 +382,7 @@ export function runDoctorDiagnostics(input: {
 
   // 6. OpenCode plugin.
   const oc = input.inventory.find((i) => i.app === "OpenCode");
-  if (oc && oc.fileExists) {
+  if (oc?.fileExists) {
     const row = oc.rows.find((r) => r.key === "plugin[@loreai/opencode]");
     const registered = row?.routing.kind === "lore";
     if (registered && !input.opencodePluginInstalled) {

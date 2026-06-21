@@ -240,33 +240,33 @@ describe("runDoctorDiagnostics (pure)", () => {
   });
 
   it("warns when the OpenCode plugin is registered but not installed", () => {
-  const inventory = [
-    {
-      app: "OpenCode",
-      file: "/x/.config/opencode/opencode.json",
-      fileExists: true,
-      hasBackup: false,
-      rows: [
-        {
-          app: "OpenCode",
-          file: "/x/.config/opencode/opencode.json",
-          fileExists: true,
-          key: "plugin[@loreai/opencode]",
-          routing: { kind: "lore" as const, value: "@loreai/opencode" },
-        },
-      ],
-    },
-  ];
-  const findings = runDoctorDiagnostics({
-    inventory,
-    gatewayAlive: true,
-    gatewayPort: 3207,
-    env: {},
-    opencodePluginInstalled: false,
+    const inventory = [
+      {
+        app: "OpenCode",
+        file: "/x/.config/opencode/opencode.json",
+        fileExists: true,
+        hasBackup: false,
+        rows: [
+          {
+            app: "OpenCode",
+            file: "/x/.config/opencode/opencode.json",
+            fileExists: true,
+            key: "plugin[@loreai/opencode]",
+            routing: { kind: "lore" as const, value: "@loreai/opencode" },
+          },
+        ],
+      },
+    ];
+    const findings = runDoctorDiagnostics({
+      inventory,
+      gatewayAlive: true,
+      gatewayPort: 3207,
+      env: {},
+      opencodePluginInstalled: false,
+    });
+    const plugin = findings.find((f) => f.label.startsWith("OpenCode plugin"));
+    expect(plugin?.level).toBe("WARN");
   });
-  const plugin = findings.find((f) => f.label.startsWith("OpenCode plugin"));
-  expect(plugin?.level).toBe("WARN");
-});
 });
 
 describe("formatFinding", () => {
