@@ -396,6 +396,32 @@ describe("pushOnce — happy path", () => {
     expect(remote?.is_deleted).not.toBe(true); // …live, not tombstoned…
     expect(remote?.content).toBe("v2"); // …with the re-created content.
   });
+
+  test("a delete still propagates when a STALE upsert outlived the row (reconcile tombstone)", async () => {
+    // A row's upsert can survive pruning when the prune floor is pinned by a
+    // lower-seq table (#828): minCursor = min push cursor across tables-with-
+    // entries, so a higher-seq table's entry isn't reclaimed. If that row is then
+    // deleted while sync is OFF, reconcile's delete-tombstone must STILL fire —
+    // otherwise the stale upsert pushes as a no-op (row gone) and the delete never
+    // reaches the remote. Symmetric to the live-row seedOutbox fix (#861).
+    syncData.enableSync("basic");
+    insertKnowledge("k1", "v1"); // outbox upsert@1 (knowledge)
+    insertEntity("e1"); // outbox upsert@2 (entities)
+    await pushOnce(makeClient() as never);
+    // prune floor = min(knowledge=1, entities=2) = 1 → knowledge@1 reclaimed,
+    // entities@2 survives as the stale upsert; both rows are now in sync_state.
+    expect(
+      syncData
+        .readOutbox(0)
+        .some((e) => e.table_name === "entities" && e.row_id === "e1"),
+    ).toBe(true);
+    syncData.disableSync();
+    db().query("DELETE FROM entities WHERE id='e1'").run(); // deleted while OFF
+    syncData.enableSync("basic"); // reconcile must tombstone e1 despite the stale upsert
+    await pushOnce(makeClient() as never);
+    const remoteE = tableRows("entities").find((r) => r.id === "e1");
+    expect(remoteE?.is_deleted).toBe(true); // delete propagated to the remote
+  });
 });
 
 describe("BLOCKER regressions", () => {

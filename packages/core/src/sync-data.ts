@@ -461,9 +461,15 @@ export function seedOutbox(tier: SyncTier = "basic"): void {
 
 /**
  * Re-enqueue the full local delta for a tier — used on enable AND re-enable:
- *  - upserts for every live row (idempotent seed; push skips unchanged ones), and
- *  - `delete` tombstones for rows present in `sync_state` but no longer live
- *    (deleted while sync was OFF, which the capture triggers couldn't see).
+ *  - an upsert for every live row whose latest pending op isn't already an upsert
+ *    (see seedOutbox), and
+ *  - a `delete` tombstone for every row present in `sync_state` but no longer live
+ *    whose latest pending op isn't already a `delete` (deleted while sync was OFF,
+ *    which the capture triggers couldn't see). The "isn't already a delete" guard
+ *    (rather than "has no pending entry") matters when a stale UPSERT outlived the
+ *    row — e.g. it survived pruning because the prune floor was pinned by a lower-
+ *    seq table (#828). Without the trailing delete, that upsert pushes as a no-op
+ *    (row gone) and the delete would never reach the remote.
  * This is why enable does NOT just seed once: it reconciles, so changes made
  * while sync was disabled are not silently dropped from the push queue.
  */
@@ -482,10 +488,12 @@ export function reconcile(tier: SyncTier = "basic"): void {
            FROM sync_state s
           WHERE s.table_name = ?
             AND NOT EXISTS (SELECT 1 FROM ${m.table} t WHERE ${idExpr} = s.row_id)
-            AND NOT EXISTS (
-              SELECT 1 FROM sync_outbox o
-               WHERE o.table_name = s.table_name AND o.row_id = s.row_id
-            )`,
+            AND COALESCE(
+              (SELECT o.op FROM sync_outbox o
+                WHERE o.table_name = s.table_name AND o.row_id = s.row_id
+                ORDER BY o.seq DESC LIMIT 1),
+              'none'
+            ) <> 'delete'`,
       )
       .run(now, m.table);
   }
