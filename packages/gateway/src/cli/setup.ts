@@ -477,11 +477,12 @@ function setupCodex(baseUrl: string): void {
   }
 
   // Capture a commented backup block from the ORIGINAL content (before lore's
-  // writes), then apply lore's changes and prepend the block.
-  const backupBlock = buildTomlBackupBlock(content, [
-    "openai_base_url",
-    "model_auto_compact_token_limit",
-  ]);
+  // writes), recording the values lore is about to set so undo can revert only
+  // if the file still holds them. Then apply lore's changes and prepend it.
+  const backupBlock = buildTomlBackupBlock(content, {
+    openai_base_url: `"${baseUrl}"`,
+    model_auto_compact_token_limit: String(CODEX_COMPACT_DISABLE_LIMIT),
+  });
   const updated = updateCodexConfig(content, baseUrl);
   const final = backupBlock
     ? prependTomlBackupBlock(updated, backupBlock)

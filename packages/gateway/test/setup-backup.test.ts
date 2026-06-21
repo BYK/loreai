@@ -212,41 +212,71 @@ describe("getTomlTopLevelValue", () => {
 });
 
 describe("TOML backup block round-trip", () => {
-  const KEYS = ["openai_base_url", "model_auto_compact_token_limit"];
+  // key → raw TOML value lore writes
+  const LORE_VALUES = {
+    openai_base_url: '"http://127.0.0.1:3299/v1"',
+    model_auto_compact_token_limit: "999999999",
+  };
 
-  it("captures prior values and unset markers", () => {
+  it("captures prior values, unset markers, and the lore-set value", () => {
     const original = 'openai_base_url = "https://api.openai.com/v1"\n';
-    const block = buildTomlBackupBlock(original, KEYS);
+    const block = buildTomlBackupBlock(original, LORE_VALUES);
     expect(block).not.toBeNull();
     expect(block).toContain(
-      '#   openai_base_url = "https://api.openai.com/v1"',
+      '#   openai_base_url = "https://api.openai.com/v1" # lore-set "http://127.0.0.1:3299/v1"',
     );
-    expect(block).toContain("#   model_auto_compact_token_limit (was unset)");
+    expect(block).toContain(
+      "#   model_auto_compact_token_limit (was unset) # lore-set 999999999",
+    );
   });
 
   it("does not build a second block when one already exists", () => {
     const original = 'openai_base_url = "https://api.openai.com/v1"\n';
-    const block = buildTomlBackupBlock(original, KEYS) as string;
+    const block = buildTomlBackupBlock(original, LORE_VALUES) as string;
     const withBlock = prependTomlBackupBlock(original, block);
-    expect(buildTomlBackupBlock(withBlock, KEYS)).toBeNull();
+    expect(buildTomlBackupBlock(withBlock, LORE_VALUES)).toBeNull();
   });
 
   it("restores prior value and deletes originally-unset keys", () => {
     const original = 'openai_base_url = "https://api.openai.com/v1"\n';
     // Real setup order: capture the block from the ORIGINAL, apply lore's
     // writes to the original, then prepend the block to the updated content.
-    const block = buildTomlBackupBlock(original, KEYS) as string;
+    const block = buildTomlBackupBlock(original, LORE_VALUES) as string;
     const updated =
-      'openai_base_url = "http://127.0.0.1:3207/v1"\nmodel_auto_compact_token_limit = 999999999\n';
+      'openai_base_url = "http://127.0.0.1:3299/v1"\nmodel_auto_compact_token_limit = 999999999\n';
     const content = prependTomlBackupBlock(updated, block);
 
     const { content: restored, summary } = restoreTomlBackup(content);
     expect(summary.hadBackup).toBe(true);
+    expect(summary.restored.sort()).toEqual([
+      "model_auto_compact_token_limit",
+      "openai_base_url",
+    ]);
     expect(restored).toContain('openai_base_url = "https://api.openai.com/v1"');
-    expect(restored).not.toContain("http://127.0.0.1:3207/v1");
+    expect(restored).not.toContain("http://127.0.0.1:3299/v1");
     // Originally-unset key is removed entirely.
     expect(restored).not.toContain("model_auto_compact_token_limit");
     // Backup block removed.
+    expect(restored).not.toContain("lore setup backup");
+  });
+
+  it("skips a value the user changed after setup (revert-only-if-unchanged)", () => {
+    const original = 'openai_base_url = "https://api.openai.com/v1"\n';
+    const block = buildTomlBackupBlock(original, LORE_VALUES) as string;
+    // The user later changed openai_base_url away from lore's value; the limit
+    // still holds lore's value.
+    const updated =
+      'openai_base_url = "http://user-changed:9999/v1"\nmodel_auto_compact_token_limit = 999999999\n';
+    const content = prependTomlBackupBlock(updated, block);
+
+    const { content: restored, summary } = restoreTomlBackup(content);
+    expect(summary.skipped).toContain("openai_base_url");
+    expect(summary.restored).toContain("model_auto_compact_token_limit");
+    // The user's value is preserved.
+    expect(restored).toContain(
+      'openai_base_url = "http://user-changed:9999/v1"',
+    );
+    // The block is still removed.
     expect(restored).not.toContain("lore setup backup");
   });
 

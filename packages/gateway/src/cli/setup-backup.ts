@@ -204,6 +204,10 @@ const TOML_BACKUP_HEADER =
   "# lore setup backup — original values (run `lore setup undo codex` to restore):";
 const TOML_BACKUP_FOOTER = "# end lore setup backup";
 const TOML_UNSET = "(was unset)";
+// Separates the (uncommentable) prior value from the value lore wrote. Restore
+// compares the current value against the lore-set value and only reverts when
+// they still match — mirroring the JSON "revert-only-if-unchanged" guarantee.
+const TOML_LORE_SET = " # lore-set ";
 
 /** Extract the raw value text of a top-level TOML key, or null if absent. */
 export function getTomlTopLevelValue(
@@ -250,22 +254,26 @@ export function deleteTomlTopLevelKey(content: string, key: string): string {
 }
 
 /**
- * Build the commented backup block for the given keys from the *original*
- * content. Returns null if a block already exists (preserve the true original)
- * or if there are no keys.
+ * Build the commented backup block from the *original* content and the values
+ * lore is about to write (`loreValues`: key → raw TOML value, e.g.
+ * `{ openai_base_url: '"http://…/v1"' }`). Each entry records the prior value
+ * (uncommentable to restore) plus the lore-set value, so undo can revert only
+ * when the file still holds lore's value. Returns null if a block already
+ * exists (preserve the true original) or there are no keys.
  */
 export function buildTomlBackupBlock(
   content: string,
-  keys: string[],
+  loreValues: Record<string, string>,
 ): string | null {
   if (content.includes(TOML_BACKUP_HEADER)) return null;
+  const keys = Object.keys(loreValues);
   if (keys.length === 0) return null;
   const lines = [TOML_BACKUP_HEADER];
   for (const key of keys) {
     const prior = getTomlTopLevelValue(content, key);
-    lines.push(
-      prior === null ? `#   ${key} ${TOML_UNSET}` : `#   ${key} = ${prior}`,
-    );
+    const priorPart =
+      prior === null ? `${key} ${TOML_UNSET}` : `${key} = ${prior}`;
+    lines.push(`#   ${priorPart}${TOML_LORE_SET}${loreValues[key]}`);
   }
   lines.push(TOML_BACKUP_FOOTER);
   return lines.join("\n");
@@ -278,8 +286,9 @@ export function prependTomlBackupBlock(content: string, block: string): string {
 
 /**
  * Restore a Codex TOML file from its commented backup block. For each recorded
- * key: restore the prior value, or delete the key if it was originally unset.
- * Removes the backup block. Returns the new content + summary.
+ * key: revert to the prior value (or delete it if originally unset) **only when
+ * the file still holds the value lore wrote** — a value the user changed after
+ * setup is left untouched and reported as skipped. Removes the backup block.
  */
 export function restoreTomlBackup(content: string): {
   content: string;
@@ -297,29 +306,45 @@ export function restoreTomlBackup(content: string): {
   while (end < lines.length && lines[end].trim() !== TOML_BACKUP_FOOTER) end++;
 
   const restored: string[] = [];
+  const skipped: string[] = [];
   const entryLines = lines.slice(start + 1, end);
   // Remove the block first so subsequent set/delete operate on clean content.
   let result = [...lines.slice(0, start), ...lines.slice(end + 1)].join("\n");
 
   for (const raw of entryLines) {
-    const body = raw.replace(/^#\s*/, "").trim();
-    if (body.endsWith(TOML_UNSET)) {
-      const key = body.slice(0, -TOML_UNSET.length).trim();
-      result = deleteTomlTopLevelKey(result, key);
-      restored.push(key);
+    const body = raw.replace(/^#\s*/, "");
+    const sepIdx = body.indexOf(TOML_LORE_SET);
+    if (sepIdx === -1) continue; // not a recognized entry line
+    const priorPart = body.slice(0, sepIdx).trim();
+    const loreValue = body.slice(sepIdx + TOML_LORE_SET.length).trim();
+
+    let key: string;
+    let priorValue: string | null;
+    if (priorPart.endsWith(TOML_UNSET)) {
+      key = priorPart.slice(0, -TOML_UNSET.length).trim();
+      priorValue = null; // was unset → undo should delete it
+    } else {
+      const eq = priorPart.indexOf("=");
+      if (eq <= 0) continue;
+      key = priorPart.slice(0, eq).trim();
+      priorValue = priorPart.slice(eq + 1).trim();
+    }
+
+    // Revert-only-if-unchanged: skip if the user changed the value after setup.
+    if (getTomlTopLevelValue(result, key) !== loreValue) {
+      skipped.push(key);
       continue;
     }
-    const eq = body.indexOf("=");
-    if (eq <= 0) continue;
-    const key = body.slice(0, eq).trim();
-    const value = body.slice(eq + 1).trim();
-    result = setTomlTopLevelKeyRaw(result, key, value);
+    result =
+      priorValue === null
+        ? deleteTomlTopLevelKey(result, key)
+        : setTomlTopLevelKeyRaw(result, key, priorValue);
     restored.push(key);
   }
 
   return {
     content: result,
-    summary: { hadBackup: true, restored, skipped: [] },
+    summary: { hadBackup: true, restored, skipped },
   };
 }
 
