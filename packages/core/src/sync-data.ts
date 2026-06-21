@@ -309,10 +309,17 @@ export function contentHash(
   table: string,
   row: Record<string, unknown>,
 ): string {
-  const cols = columns(table)
-    .filter((c) => !HASH_EXCLUDE.has(c))
-    .sort();
-  const canonical = cols
+  return hashRowColumns(columns(table), row);
+}
+
+/**
+ * Core of {@link contentHash}, given a table's already-resolved synced columns.
+ * Lets hot loops resolve the columns ONCE (the `PRAGMA table_info` in `columns`)
+ * and hash many rows without re-querying per row.
+ */
+function hashRowColumns(cols: string[], row: Record<string, unknown>): string {
+  const hashCols = cols.filter((c) => !HASH_EXCLUDE.has(c)).sort();
+  const canonical = hashCols
     .map((c) => `${c}=${serializeValue(row[c])}`)
     .join(ROW_SEP);
   return createHash("sha256").update(canonical).digest("hex").slice(0, 16);
@@ -470,6 +477,9 @@ export function seedOutbox(tier: SyncTier = "basic"): void {
       // (via the prune floor) permanently disabling outbox pruning for ALL tables.
       if (m.pullOnly) continue;
       const pushCursor = Number(getKV(`sync.push.${m.table}`) ?? "0");
+      // Resolve the synced columns ONCE per table (one PRAGMA table_info) — not
+      // per row, which is what `contentHash` would do (an N+1 on large tables).
+      const cols = columns(m.table);
       const rows = db().query(`SELECT * FROM ${m.table}`).all() as Record<
         string,
         unknown
@@ -486,7 +496,7 @@ export function seedOutbox(tier: SyncTier = "basic"): void {
         if (pending === null) {
           // No unpushed op — re-seed only when the content actually changed.
           const synced = getSyncState(m.table, rowId)?.content_hash ?? null;
-          if (contentHash(m.table, row) === synced) continue;
+          if (hashRowColumns(cols, row) === synced) continue;
         }
         enqueue.run(m.table, rowId, now);
       }
