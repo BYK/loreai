@@ -283,6 +283,20 @@ describe("TOML backup block round-trip", () => {
   it("reports no backup when the block is absent", () => {
     expect(restoreTomlBackup('model = "gpt"\n').summary.hadBackup).toBe(false);
   });
+
+  it("leaves the file untouched when the footer is missing (no data loss)", () => {
+    // A hand-edited/corrupted block with a header but no footer must NOT cause
+    // the rest of the file to be truncated (Seer #876 HIGH).
+    const block = buildTomlBackupBlock(
+      'openai_base_url = "https://api.openai.com/v1"\n',
+      LORE_VALUES,
+    ) as string;
+    const headerOnly = block.split("\n").slice(0, -1).join("\n"); // drop footer
+    const content = `${headerOnly}\nmodel = "gpt-5"\nopenai_base_url = "http://127.0.0.1:3299/v1"\n`;
+    const { content: result, summary } = restoreTomlBackup(content);
+    expect(summary.hadBackup).toBe(false);
+    expect(result).toBe(content); // byte-identical — nothing deleted
+  });
 });
 
 describe("deleteTomlTopLevelKey", () => {

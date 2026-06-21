@@ -304,6 +304,14 @@ export function restoreTomlBackup(content: string): {
   }
   let end = start;
   while (end < lines.length && lines[end].trim() !== TOML_BACKUP_FOOTER) end++;
+  if (end >= lines.length) {
+    // Footer missing (block hand-edited/corrupted). Refuse to touch the file —
+    // otherwise we'd treat the entire remainder as the block and delete it.
+    return {
+      content,
+      summary: { hadBackup: false, restored: [], skipped: [] },
+    };
+  }
 
   const restored: string[] = [];
   const skipped: string[] = [];
