@@ -1882,11 +1882,17 @@ export async function executeWarmup(
       totalInput > 0
         ? `${((cacheReadTokens / totalInput) * 100).toFixed(0)}%`
         : "N/A";
+    // Diagnostic: number of cache_control breakpoints in the body we actually
+    // sent. Real turns place several (system[1], tools, conversation); a warmup
+    // that collapsed to a single end-of-body breakpoint is the body-divergence
+    // bug. Correlating this with the outcome confirms the breakpoint-preserving
+    // fix (raw stored body) is working: UNCACHED with breakpoints=1 was the bug.
+    const breakpoints = (signedBody.match(/"cache_control"/g) ?? []).length;
 
     if (cacheReadTokens > 0 && cacheCreationTokens === 0) {
       log.info(
         `cache-warmer: ✓ refresh session=${sid} ` +
-          `input=${totalInput} cacheRead=${cacheReadTokens} hit=${hitRate} cost=${costStr}`,
+          `input=${totalInput} cacheRead=${cacheReadTokens} hit=${hitRate} breakpoints=${breakpoints} cost=${costStr}`,
       );
     } else if (cacheReadTokens > 0 && cacheCreationTokens > 0) {
       // Partial hit — some breakpoints read, some written (e.g. conversation
@@ -1894,7 +1900,7 @@ export async function executeWarmup(
       log.info(
         `cache-warmer: ~ partial session=${sid} ` +
           `input=${totalInput} cacheRead=${cacheReadTokens} cacheWrite=${cacheCreationTokens} ` +
-          `hit=${hitRate} cost=${costStr}`,
+          `hit=${hitRate} breakpoints=${breakpoints} cost=${costStr}`,
       );
     } else {
       // cacheRead=0: the warmup wrote a fresh cache instead of refreshing an
@@ -1920,7 +1926,7 @@ export async function executeWarmup(
           // wire; signedBody.length would count UTF-16 code units and underreport
           // for multi-byte content (prose/code-heavy bodies — exactly the ones
           // this diagnostic targets).
-          `bodyBytes=${Buffer.byteLength(signedBody, "utf8")}` +
+          `bodyBytes=${Buffer.byteLength(signedBody, "utf8")} breakpoints=${breakpoints}` +
           (cacheLikelyAlive
             ? " — DIVERGENCE: cache should have been live but warmup missed " +
               "(warmup body ≠ cached prefix)"

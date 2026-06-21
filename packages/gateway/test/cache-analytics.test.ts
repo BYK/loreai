@@ -397,6 +397,76 @@ describe("analyzeCacheTurn", () => {
     expect(analytics.bustCount).toBe(0);
   });
 
+  test("stores the RAW body (cache_control retained) so the warmer replays breakpoints", () => {
+    const analytics = makeCacheAnalytics();
+    const body = JSON.stringify({
+      model: "opus",
+      system: [
+        { type: "text", text: "host" },
+        {
+          type: "text",
+          text: "stableLtm",
+          cache_control: { type: "ephemeral" },
+        },
+      ],
+      tools: [{ name: "t", cache_control: { type: "ephemeral" } }],
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "hi", cache_control: { type: "ephemeral" } },
+          ],
+        },
+      ],
+    });
+
+    analyzeCacheTurn(analytics, body, makeUsage());
+
+    // The warmer replays decompressBody(lastRequestBody); it MUST see the real
+    // multi-breakpoint layout, not a normalized (stripped) body that collapses
+    // to a single end-of-body breakpoint (the cacheRead=0 bug on large sessions).
+    const compressed = analytics.lastRequestBody;
+    if (!compressed) throw new Error("lastRequestBody should be set");
+    const stored = decompressBody(compressed);
+    expect((stored.match(/"cache_control"/g) ?? []).length).toBe(3);
+    // The divergence-ratio denominator stays the NORMALIZED length (< raw).
+    expect(analytics.lastRequestBodyLength).toBeLessThan(body.length);
+  });
+
+  test("comparison normalizes on read: a cache_control-only change is not divergence", () => {
+    const analytics = makeCacheAnalytics();
+    const withCC = JSON.stringify({
+      model: "opus",
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "hello world",
+              cache_control: { type: "ephemeral" },
+            },
+          ],
+        },
+      ],
+    });
+    const withoutCC = JSON.stringify({
+      model: "opus",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hello world" }] },
+      ],
+    });
+
+    analyzeCacheTurn(analytics, withCC, makeUsage()); // stores RAW (with cc)
+    const result = analyzeCacheTurn(analytics, withoutCC, makeUsage());
+
+    // prevBody is normalized on read, so the only difference (cache_control)
+    // vanishes on both sides → identical, NOT a false divergence. (Without the
+    // normalize-on-read this would diverge at the cache_control offset.)
+    expect(result.prefixMatchPercent).toBe(1);
+    expect(result.divergencePoint).toBe("<identical>");
+  });
+
   test("identical request bodies → 100% prefix match", () => {
     const analytics = makeCacheAnalytics();
     const body = JSON.stringify({

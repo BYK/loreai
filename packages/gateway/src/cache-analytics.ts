@@ -504,7 +504,13 @@ export function analyzeCacheTurn(
 
   // Compare with previous body if available
   if (analytics.lastRequestBody !== null) {
-    const prevBody = decompressBody(analytics.lastRequestBody);
+    // lastRequestBody is stored RAW (with cache_control intact) for the warmer;
+    // normalize on read so the divergence comparison stays apples-to-apples.
+    // normalizeBodyForComparison is idempotent, so this equals the old stored
+    // normalized form byte-for-byte — the comparison result is unchanged.
+    const prevBody = normalizeBodyForComparison(
+      decompressBody(analytics.lastRequestBody),
+    );
     const prevLength = prevBody.length;
     const currLength = normalizedBody.length;
 
@@ -584,10 +590,17 @@ export function analyzeCacheTurn(
     }
   }
 
-  // Store normalized + compressed body for next turn. We store the normalized
-  // version so the next turn's comparison is apples-to-apples (both sides
-  // have volatile metadata stripped).
-  analytics.lastRequestBody = compressBody(normalizedBody);
+  // Store the RAW (as-sent) compressed body for next turn. Two consumers read
+  // it: (1) the divergence comparison above, which normalizes on read so it
+  // stays apples-to-apples; (2) the cache warmer, which REPLAYS it and must see
+  // the real `cache_control` breakpoint layout. Previously we stored the
+  // normalized body (cache_control stripped), so the warmer collapsed to a
+  // single end-of-body breakpoint (ensureCacheBreakpoint) — large multi-
+  // breakpoint sessions then never matched the cached prefix (cacheRead=0 + full
+  // rewrite every warmup). lastRequestBodyLength stays the NORMALIZED length: it
+  // is only the divergence-ratio denominator (prefixMatchBytes is measured on
+  // normalized bodies).
+  analytics.lastRequestBody = compressBody(currentBody);
   analytics.lastRequestBodyLength = normalizedBody.length;
   analytics.lastCacheRead = cacheRead;
   analytics.lastCacheCreation = cacheCreation;

@@ -408,13 +408,14 @@ describe("prepareAnthropicWarmupBody", () => {
     expect(result.messages).toHaveLength(3);
   });
 
-  // Integration: the warmer's ONLY body source is cache-analytics'
-  // `lastRequestBody`, which is stored AFTER `normalizeBodyForComparison`
-  // (cache-analytics strips `cache_control` markers so breakpoint movement
-  // doesn't pollute divergence analysis). A warmup with no breakpoint writes
-  // NOTHING to the cache — silently neutering warmups while the result
-  // classifier still reports success. The warmer must re-add a breakpoint.
-  test("re-adds a cache breakpoint after analytics normalization strips it", () => {
+  // ensureCacheBreakpoint is a DEFENSIVE fallback. cache-analytics now stores the
+  // RAW body (cache_control retained — see cache-analytics.test.ts), so the warmer
+  // normally replays the real multi-breakpoint layout. But a body that somehow
+  // arrives with NO breakpoint would write NOTHING to the cache — silently
+  // neutering the warmup while the classifier still reports success — so
+  // prepareAnthropicWarmupBody re-adds one as a safety net. This test exercises
+  // that fallback by feeding it a stripped body.
+  test("re-adds a cache breakpoint when a body has none (defensive fallback)", () => {
     const wireBody = JSON.stringify({
       model: "claude-sonnet-4-20250514",
       max_tokens: 16384,
@@ -432,8 +433,8 @@ describe("prepareAnthropicWarmupBody", () => {
       ],
     });
 
-    // Reproduce the real storage path: cache-analytics normalizes before
-    // persisting, which removes the breakpoint.
+    // Simulate a breakpoint-less body to exercise the fallback. (The normal
+    // path now stores the raw body with its breakpoints intact.)
     const stored = normalizeBodyForComparison(wireBody);
     expect(stored).not.toContain("cache_control");
 
