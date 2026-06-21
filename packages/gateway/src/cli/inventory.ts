@@ -308,10 +308,11 @@ export function runDoctorDiagnostics(input: {
     let mismatch = false;
     for (const inv of input.inventory) {
       for (const row of inv.rows) {
-        if (
-          row.routing.kind === "lore" &&
-          !row.routing.value.includes(expected)
-        ) {
+        // Only check URL-valued rows — the OpenCode plugin row has
+        // routing.value = "@loreai/opencode", which is lore-routed but not a URL.
+        if (row.routing.kind !== "lore") continue;
+        if (!row.routing.value.startsWith("http")) continue;
+        if (!row.routing.value.includes(expected)) {
           mismatch = true;
           findings.push({
             level: "WARN",

@@ -171,6 +171,37 @@ describe("runDoctorDiagnostics (pure)", () => {
     expect(mismatch?.level).toBe("WARN");
   });
 
+  it("does NOT flag the OpenCode plugin row as a port mismatch (non-URL value)", () => {
+    // The plugin row has routing.value = "@loreai/opencode" (kind: lore), which
+    // is not a URL and must not trigger the port-consistency check (Seer #892).
+    const inventory = [
+      {
+        app: "OpenCode",
+        file: "/x/.config/opencode/opencode.json",
+        fileExists: true,
+        hasBackup: false,
+        rows: [
+          {
+            app: "OpenCode",
+            file: "/x/.config/opencode/opencode.json",
+            fileExists: true,
+            key: "plugin[@loreai/opencode]",
+            routing: { kind: "lore" as const, value: "@loreai/opencode" },
+          },
+        ],
+      },
+    ];
+    const findings = runDoctorDiagnostics({
+      inventory,
+      gatewayAlive: true,
+      gatewayPort: 3207,
+      env: {},
+      opencodePluginInstalled: true,
+    });
+    const mismatch = findings.find((f) => f.label.startsWith("port mismatch"));
+    expect(mismatch).toBeUndefined();
+  });
+
   it("warns when the OpenCode plugin is registered but not installed", () => {
     const inventory = [
       {
