@@ -7,10 +7,13 @@ import {
   evictSession,
   getCacheSizeSnapshot,
   getCacheStrategy,
+  getOverhead,
   setCacheSizeSnapshot,
   setCachePricing,
+  setLtmTokens,
   setModelLimits,
   transform,
+  UNCALIBRATED_SAFETY,
 } from "../src/gradient";
 import type { LoreMessage, LoreMessageWithParts } from "../src/types";
 
@@ -259,6 +262,100 @@ describe("transform writes the size snapshot end-to-end", () => {
       expect(snap?.compressed).toBeGreaterThan(result.totalTokens);
     } finally {
       setModelLimits({ context: 10_000, output: 2_000 });
+      evictSession(session);
+    }
+  });
+
+  test("layer >= 1 carries the non-message floor (overhead + LTM) end-to-end — uncalibrated (#886)", () => {
+    const session = `econ-e2e-floor-${Date.now()}`;
+    // A NON-ZERO floor: inject LTM so transform() must add it back to compressed.
+    // (The test above has overhead=0 and no LTM, so its floor is 0 — it could not
+    // catch a regression that drops the floor capture.)
+    const ltm = 6_000;
+    setModelLimits({ context: 20_000, output: 2_000 });
+    setLtmTokens(ltm, session);
+    try {
+      const messages = Array.from({ length: 30 }, (_, i) =>
+        makeMsg(
+          `flr-${i}`,
+          i % 2 === 0 ? "user" : "assistant",
+          "A".repeat(1_000),
+          session,
+        ),
+      );
+      const result = transform({
+        messages,
+        projectPath: PROJECT,
+        sessionID: session,
+      });
+      expect(result.layer).toBeGreaterThanOrEqual(1);
+
+      const snap = getCacheSizeSnapshot(session);
+      expect(snap).not.toBeNull();
+      // Exact: transform() must feed the captured floor (overhead + LTM) and the
+      // uncalibrated safety factor into the helper. Dropping the floor capture or
+      // flipping the safety selection changes this value.
+      const expected = computeCompressedCacheSize(
+        result.layer,
+        result.totalTokens,
+        getOverhead() + ltm,
+        UNCALIBRATED_SAFETY,
+        snap?.full ?? 0,
+      );
+      expect(snap?.compressed).toBe(expected);
+      // The floor (≥ ltm) lifts compressed well above the body-only ×safety value.
+      expect(snap?.compressed).toBeGreaterThan(
+        Math.round(result.totalTokens * UNCALIBRATED_SAFETY),
+      );
+      expect(snap?.compressed).toBeLessThan(snap?.full ?? 0);
+    } finally {
+      setModelLimits({ context: 10_000, output: 2_000 });
+      setLtmTokens(0, session);
+      evictSession(session);
+    }
+  });
+
+  test("layer >= 1 uses safety=1 once calibrated — floor without inflation (#886)", () => {
+    const session = `econ-e2e-cal-${Date.now()}`;
+    const ltm = 4_000;
+    setModelLimits({ context: 20_000, output: 2_000 });
+    setLtmTokens(ltm, session);
+    try {
+      const messages = Array.from({ length: 30 }, (_, i) =>
+        makeMsg(
+          `cal-${i}`,
+          i % 2 === 0 ? "user" : "assistant",
+          "A".repeat(1_000),
+          session,
+        ),
+      );
+      // Turn 1 (uncalibrated) establishes a transform estimate, then calibrate
+      // with a real API input count flips the session to calibrated (safety = 1).
+      transform({ messages, projectPath: PROJECT, sessionID: session });
+      calibrate(40_000, session);
+
+      const result = transform({
+        messages,
+        projectPath: PROJECT,
+        sessionID: session,
+      });
+      expect(result.layer).toBeGreaterThanOrEqual(1);
+
+      const snap = getCacheSizeSnapshot(session);
+      expect(snap).not.toBeNull();
+      // Calibrated → bodySafety === 1: compressed is floor + body with NO ×1.5.
+      const expected = computeCompressedCacheSize(
+        result.layer,
+        result.totalTokens,
+        getOverhead() + ltm,
+        1,
+        snap?.full ?? 0,
+      );
+      expect(snap?.compressed).toBe(expected);
+      expect(snap?.compressed).toBeLessThan(snap?.full ?? 0);
+    } finally {
+      setModelLimits({ context: 10_000, output: 2_000 });
+      setLtmTokens(0, session);
       evictSession(session);
     }
   });

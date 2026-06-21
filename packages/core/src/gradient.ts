@@ -126,7 +126,7 @@ const FREE_WRITE_LAYER0_FRACTION = 0.65;
  * layer-0 sizing helper (and isLargeColdStart) share one definition with the
  * transform path.
  */
-const UNCALIBRATED_SAFETY = 1.5;
+export const UNCALIBRATED_SAFETY = 1.5;
 
 /**
  * True when the session's upstream has reported zero cache_creation_input_tokens
@@ -636,9 +636,19 @@ export interface CacheSurvivalInputs {
  *
  * where `rebuiltWindowBody` (result.totalTokens) and `nonBodyFloor` are the
  * gradient's un-inflated estimates and `bodySafety` is the same factor applied to
- * full. This keeps the full-vs-compressed DELTA = the message tokens removed by
- * compaction (the floor cancels), with both sizes on the input scale the warmer
- * cross-checks against the real API token count. Layer 0 = no compaction → full.
+ * full. Layer 0 = no compaction → full.
+ *
+ * EXACT for UNCALIBRATED turns: cacheSizeFull there is `(msgBody+overhead+ltm)·s`
+ * built from the SAME `overhead+ltm` expression, so the floor cancels and the
+ * delta is exactly `(msgBody−rebuiltBody)·s` (the removed message tokens).
+ * APPROXIMATE for CALIBRATED turns: cacheSizeFull is the API-measured
+ * `lastKnownInput`, whose embedded floor is the real tokenizer count, while this
+ * floor is the gradient's `overhead+ltm` estimate (and `overhead` is an EMA that
+ * already absorbs LTM + the chars/3 body undercount — the same entanglement as
+ * `usable`). The mismatch errs toward a LARGER compressed (under-reports savings;
+ * the clamp to `full` keeps it safe). Fully reconciling the calibrated basis is
+ * the remaining PR2b normalization work; harmless while the evaluator is
+ * shadow-only.
  */
 export function computeCompressedCacheSize(
   layer: number,
@@ -3001,11 +3011,12 @@ export function transform(input: {
     // first-sight-large guards bypass that gate. We set it authoritatively here
     // from result.layer so EVERY path is correct, and via computeCompressedCacheSize
     // so the compressed size keeps the non-message floor (overhead + LTM, which
-    // compaction does NOT remove) and the same UNCALIBRATED_SAFETY factor as full
-    // — i.e. the full-vs-compressed delta is exactly the message tokens compaction
-    // removed, on the input scale the warmer cross-checks against apiActual.
-    // Layer 0 = no compaction (compressed == full); the clamp to full yields the
-    // SAFE degenerate (no fabricated savings) if a rebuilt window ever exceeds it.
+    // compaction does NOT remove) and the same UNCALIBRATED_SAFETY factor as full.
+    // The full-vs-compressed delta is then the message tokens compaction removed,
+    // on the input scale the warmer cross-checks against apiActual — EXACT for
+    // uncalibrated turns, APPROXIMATE (conservative, clamp-guarded) for calibrated
+    // turns where full is API-measured (see computeCompressedCacheSize). Layer 0 =
+    // no compaction (compressed == full).
     state.cacheSizeCompressed = computeCompressedCacheSize(
       result.layer,
       result.totalTokens,
