@@ -612,6 +612,35 @@ describe("importFromFile — known ID tracking", () => {
     expect(entry?.content).toContain("API keys");
   });
 
+  test("import does not overwrite another project's private entry (foreign marker)", () => {
+    // Project A owns a private entry.
+    const aPath = join(TMP_DIR, "proj-a");
+    const idA = ltm.create({
+      projectPath: aPath,
+      scope: "project",
+      category: "decision",
+      title: "A secret",
+      content: "A-private-content",
+    });
+    // Project B's .lore.md carries A's marker with different content (a file copied
+    // between projects, or a crafted one). Importing it must NOT touch A's entry.
+    const bPath = join(TMP_DIR, "proj-b");
+    const bFile = join(TMP_DIR, "B-AGENTS.md");
+    writeFile(
+      loreSectionWithEntries([
+        {
+          id: idA,
+          category: "decision",
+          title: "A secret",
+          content: "HIJACKED",
+        },
+      ]),
+      bFile,
+    );
+    importFromFile({ projectPath: bPath, filePath: bFile });
+    expect(ltm.getByLogical(idA)?.content).toBe("A-private-content"); // untouched
+  });
+
   test("creates hand-written entries (no marker) with new UUIDs", () => {
     writeFile(
       `${LORE_SECTION_START}\n\n## Long-term Knowledge\n\n### Pattern\n\n* **Middleware pattern**: Using Hono\n\n${LORE_SECTION_END}\n`,

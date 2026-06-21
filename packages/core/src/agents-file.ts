@@ -564,6 +564,19 @@ function _importEntries(entries: ParsedFileEntry[], projectPath: string): void {
 
       // entry.id is the <!-- lore:UUID --> marker, which is the stable logical_id.
       const existing = ltm.getByLogical(entry.id);
+      // Security (A2, #823): a marker that resolves to a DIFFERENT project's
+      // project-scoped entry is foreign — e.g. a .lore.md copied between projects,
+      // or a crafted file carrying another project's UUID. Never overwrite another
+      // project's private knowledge; skip it. (Cross-project / global entries are
+      // intentionally shared, so they stay updatable.)
+      if (
+        existing &&
+        existing.cross_project === 0 &&
+        existing.project_id !== null &&
+        existing.project_id !== ensureProject(projectPath)
+      ) {
+        continue;
+      }
       if (existing) {
         // Known entry — update only if content changed (manual edit in file). Pass
         // the resolved current row id (Seer #848): update() resolves it to the

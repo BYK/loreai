@@ -1243,7 +1243,9 @@ export function recallById(id: string): string {
   switch (prefix) {
     case "k":
     case "xk": {
-      const entry = ltm.get(rawId);
+      // Resolve a current OR superseded version id / logical_id to the current
+      // entry (A2, #823) — a recalled id may be the stable logical_id.
+      const entry = ltm.get(rawId) ?? ltm.getByLogical(ltm.logicalIdOf(rawId));
       if (!entry) return `No entry found for id: ${id}`;
       return [
         `## Recall Detail: ${id}`,
