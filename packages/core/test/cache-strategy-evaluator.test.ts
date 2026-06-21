@@ -374,12 +374,11 @@ describe("transform writes the size snapshot end-to-end", () => {
       calibrate(0);
     });
 
-    test("a layer >= 1 uncalibrated session produces a balanced delta", () => {
+    test("a layer >= 1 uncalibrated session sets compressed on the input scale (floor + LTM × safety)", () => {
       const session = `econ-scale-uc-${Date.now()}`;
       const ltm = 5_000;
       setLtmTokens(ltm, session);
       try {
-        // Force layer >= 1 via first-sight-large: tiny context + large payload.
         setModelLimits({ context: 2_000, output: 500 });
         const messages = Array.from({ length: 30 }, (_, i) =>
           makeMsg(
@@ -389,53 +388,36 @@ describe("transform writes the size snapshot end-to-end", () => {
             session,
           ),
         );
-        transform({ messages, projectPath: PROJECT, sessionID: session });
+        const result = transform({
+          messages,
+          projectPath: PROJECT,
+          sessionID: session,
+        });
+        expect(result.layer).toBeGreaterThanOrEqual(1);
+
         const snap = getCacheSizeSnapshot(session);
         expect(snap).not.toBeNull();
-        expect(snap?.compressed).toBeGreaterThan(0);
+
+        // The compressed size must match the input-scale formula exactly
+        // (body + non-message floor) × uncalibrated safety, clamped to full.
+        // Reducing it to body-only (result.totalTokens) would pass every
+        // inequality (< full, > 0) but fail this exact equality — the existing
+        // floor tests prove this discriminator works against the body-only
+        // regression. The guard is the equality itself.
+        expect(snap?.compressed).toBe(
+          computeCompressedCacheSize(
+            result.layer,
+            result.totalTokens,
+            getOverhead() + ltm,
+            UNCALIBRATED_SAFETY,
+            snap?.full ?? 0,
+          ),
+        );
+        // confirm the floor is material (non-zero LTM), not vacuously body-only.
+        expect(snap?.compressed).toBeGreaterThan(
+          Math.round(result.totalTokens * UNCALIBRATED_SAFETY),
+        );
         expect(snap?.compressed).toBeLessThan(snap?.full ?? 0);
-
-        // Feed the real snapshot into the evaluator.
-        const result = evaluateCacheStrategy(
-          session,
-          { pReturn: 0.8, expectedCycles: 3, expectedFutureTurns: 10 },
-          PRICING,
-        );
-        expect(result?.confident).toBe(true);
-
-        // Full and compressed are on the same INPUT scale → the delta is the
-        // message tokens compaction removed. All three cost terms must be
-        // finite and the comparison must be order-consistent (the cheapest
-        // strategy has the lowest cost).
-        expect(Number.isFinite(result?.holdWarmCost)).toBe(true);
-        expect(Number.isFinite(result?.coolBustCost)).toBe(true);
-        expect(Number.isFinite(result?.coolFullWriteCost)).toBe(true);
-        const best = Math.min(
-          result?.holdWarmCost ?? Infinity,
-          result?.coolBustCost ?? Infinity,
-          result?.coolFullWriteCost ?? Infinity,
-        );
-        const costByStrategy = {
-          "hold-warm": result?.holdWarmCost,
-          "cool-bust": result?.coolBustCost,
-          "cool-full-write": result?.coolFullWriteCost,
-        };
-        expect(costByStrategy[result?.strategy ?? "cool-full-write"]).toBe(
-          best,
-        );
-
-        // A body-only scale bias would understate coolBustCost and make
-        // compression look falsely cheaper relative to staying large — the
-        // cool-bust should not be phantom-cheap.
-        if (result?.strategy === "cool-bust") {
-          const savings = result.coolFullWriteCost - result.coolBustCost;
-          const holdingCost =
-            result.holdWarmCost - result.coolFullWriteCost;
-          // savings ≤ full → compact ratio is bounded by the warmup cost.
-          expect(savings).toBeLessThanOrEqual(
-            Math.max(result.holdWarmCost, result.coolFullWriteCost),
-          );
-        }
       } finally {
         setModelLimits({ context: 20_000, output: 2_000 });
         setLtmTokens(0, session);
@@ -443,7 +425,7 @@ describe("transform writes the size snapshot end-to-end", () => {
       }
     });
 
-    test("a layer >= 1 calibrated session produces a balanced delta", () => {
+    test("a layer >= 1 calibrated session sets compressed on the input scale (floor + LTM, no safety inflation)", () => {
       const session = `econ-scale-c-${Date.now()}`;
       const ltm = 4_000;
       setLtmTokens(ltm, session);
@@ -457,40 +439,29 @@ describe("transform writes the size snapshot end-to-end", () => {
             session,
           ),
         );
-        // Turn 1 (uncalibrated): first-sight-large forces layer ≥ 1.
         transform({ messages, projectPath: PROJECT, sessionID: session });
-        // Calibrate: safety drops to 1 — compressed now carries the floor
-        // WITHOUT ×1.5, matching cacheSizeFull's own calibrated scale.
         calibrate(40_000, session);
-        transform({ messages, projectPath: PROJECT, sessionID: session });
+        const result = transform({
+          messages,
+          projectPath: PROJECT,
+          sessionID: session,
+        });
+        expect(result.layer).toBeGreaterThanOrEqual(1);
 
         const snap = getCacheSizeSnapshot(session);
         expect(snap).not.toBeNull();
-        expect(snap?.compressed).toBeGreaterThan(0);
+        // Calibrated → safety=1, so compressed = floor + body with NO ×1.5.
+        expect(snap?.compressed).toBe(
+          computeCompressedCacheSize(
+            result.layer,
+            result.totalTokens,
+            getOverhead() + ltm,
+            1,
+            snap?.full ?? 0,
+          ),
+        );
+        expect(snap?.compressed).toBeGreaterThan(result.totalTokens);
         expect(snap?.compressed).toBeLessThan(snap?.full ?? 0);
-
-        const result = evaluateCacheStrategy(
-          session,
-          { pReturn: 0.8, expectedCycles: 3, expectedFutureTurns: 10 },
-          PRICING,
-        );
-        expect(result?.confident).toBe(true);
-        expect(Number.isFinite(result?.holdWarmCost)).toBe(true);
-        expect(Number.isFinite(result?.coolBustCost)).toBe(true);
-        expect(Number.isFinite(result?.coolFullWriteCost)).toBe(true);
-        const best = Math.min(
-          result?.holdWarmCost ?? Infinity,
-          result?.coolBustCost ?? Infinity,
-          result?.coolFullWriteCost ?? Infinity,
-        );
-        const costByStrategy = {
-          "hold-warm": result?.holdWarmCost,
-          "cool-bust": result?.coolBustCost,
-          "cool-full-write": result?.coolFullWriteCost,
-        };
-        expect(costByStrategy[result?.strategy ?? "cool-full-write"]).toBe(
-          best,
-        );
       } finally {
         setModelLimits({ context: 20_000, output: 2_000 });
         setLtmTokens(0, session);
