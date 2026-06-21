@@ -14,6 +14,8 @@ import { commandSetup } from "../src/cli/setup";
 import {
   runDoctorDiagnostics,
   formatFinding,
+  collectInventory,
+  commandDoctor,
   type Finding,
 } from "../src/cli/inventory";
 
@@ -244,5 +246,73 @@ describe("formatFinding", () => {
     expect(text).toContain("[FAIL]");
     expect(text).toContain("gateway reachable");
     expect(text).toContain("run `lore start --bg`");
+  });
+});
+
+describe("collectInventory (integration)", () => {
+  it("returns all-three-apps inventory with missing files on a clean HOME", () => {
+    const all = collectInventory();
+    expect(all).toHaveLength(3);
+    for (const inv of all) {
+      expect(inv.fileExists).toBe(false);
+      expect(inv.rows).toEqual([]);
+      expect(inv.hasBackup).toBe(false);
+    }
+  });
+
+  it("collects lore-routed values after setup", async () => {
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    writeFileSync(
+      join(home, ".claude", "settings.json"),
+      JSON.stringify({
+        env: { ANTHROPIC_BASE_URL: "https://api.anthropic.com" },
+      }),
+    );
+    await commandSetup(["claude-code"], { port: 3299 });
+
+    const all = collectInventory();
+    const cc = all.find((i) => i.app === "Claude Code")!;
+    expect(cc.fileExists).toBe(true);
+    expect(cc.hasBackup).toBe(true);
+    const urlRow = cc.rows.find((r) => r.key === "env.ANTHROPIC_BASE_URL")!;
+    expect(urlRow.routing.kind).toBe("lore");
+    expect(urlRow.routing).toEqual({
+      kind: "lore",
+      value: "http://127.0.0.1:3299",
+    });
+  });
+
+  it("collects Codex TOML inventory after setup", async () => {
+    mkdirSync(join(home, ".codex"), { recursive: true });
+    writeFileSync(
+      join(home, ".codex", "config.toml"),
+      'openai_base_url = "https://api.openai.com/v1"\n',
+    );
+    await commandSetup(["codex"], { port: 3299 });
+
+    const all = collectInventory();
+    const codex = all.find((i) => i.app === "Codex")!;
+    expect(codex.fileExists).toBe(true);
+    expect(codex.hasBackup).toBe(true);
+    const urlRow = codex.rows.find((r) => r.key === "openai_base_url")!;
+    expect(urlRow.routing.kind).toBe("lore");
+  });
+});
+
+describe("commandDoctor (integration)", () => {
+  it("runs without throwing on a clean HOME (no gateway)", async () => {
+    await expect(commandDoctor()).resolves.toBeUndefined();
+    const out = logged();
+    expect(out).toContain("lore version");
+    expect(out).toContain("gateway reachable");
+  });
+
+  it("prints the inventory before the diagnostics", async () => {
+    await commandDoctor();
+    const out = logged();
+    const invIdx = out.indexOf("Setup inventory:");
+    const diagIdx = out.indexOf("Diagnostics:");
+    expect(invIdx).toBeGreaterThanOrEqual(0);
+    expect(diagIdx).toBeGreaterThan(invIdx);
   });
 });

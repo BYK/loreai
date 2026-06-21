@@ -141,6 +141,12 @@ export function collectClaudeCodeInventory(): AppInventory {
   return { app: "Claude Code", file, fileExists, rows, hasBackup };
 }
 
+/** Strip surrounding TOML quotes (basic string literal) from a raw value. */
+function stripTomlQuotes(v: string): string {
+  if (v.startsWith('"') && v.endsWith('"')) return v.slice(1, -1);
+  return v;
+}
+
 /** Collect inventory for Codex (TOML). Reads `~/.codex/config.toml`. */
 export function collectCodexInventory(): AppInventory {
   const file = codexConfigPath();
@@ -151,13 +157,14 @@ export function collectCodexInventory(): AppInventory {
     const content = readFileSync(file, "utf8");
     hasBackup = content.includes("lore setup backup");
     for (const key of ["openai_base_url"]) {
-      const v = getTomlTopLevelValue(content, key);
+      const raw = getTomlTopLevelValue(content, key);
+      const v = raw === null ? undefined : stripTomlQuotes(raw);
       rows.push({
         app: "Codex",
         file,
         fileExists,
         key,
-        routing: v === null ? { kind: "unset" } : classifyRoutingValue(v),
+        routing: v === undefined ? { kind: "unset" } : classifyRoutingValue(v),
       });
     }
   }
