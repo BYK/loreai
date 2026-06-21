@@ -5,7 +5,7 @@ adversarial review has repeatedly caught correctness bugs that a green test
 suite missed — skip/early-return branches, lifecycle sequences, and fan-out
 registry gaps. Institutionalizing these patterns so they compound.
 
-The review workflow (§3) is referenced from AGENTS.md.
+The review workflow (§6) is referenced from AGENTS.md.
 
 ---
 
