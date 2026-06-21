@@ -221,6 +221,7 @@ import {
   emitCacheBustMetric,
   emitWarmupHitMetric,
   emitCurationMetrics,
+  spanStartupBackfill,
   type AnthropicUsage,
 } from "./sentry";
 import {
@@ -1573,7 +1574,7 @@ async function initIfNeeded(
     log.info("metric backfill failed:", e);
   }
   if (process.env.NODE_ENV !== "test") {
-    embedding.runStartupBackfill().catch((e) => {
+    spanStartupBackfill(() => embedding.runStartupBackfill()).catch((e) => {
       log.error("embedding backfill failed:", e);
     });
   }

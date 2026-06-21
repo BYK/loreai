@@ -74,6 +74,8 @@ import {
   emitWarmupMetric,
   emitSessionCostMetrics,
   emitCurationMetrics,
+  startResourceMonitor,
+  emitResourceGauge,
 } from "./sentry";
 import {
   getSessionCosts,
@@ -219,9 +221,16 @@ export function startIdleScheduler(
   // gateway was down), then at most once per GLOBAL_DEAD_SWEEP_INTERVAL_MS.
   let lastGlobalDeadSweepAt = 0;
 
+  // Begin sampling event-loop delay for the periodic resource gauge below.
+  startResourceMonitor();
+
   const timer = setInterval(() => {
     const now = Date.now();
     const timeoutMs = config.idleTimeoutSeconds * 1000;
+
+    // Periodic process-resource + event-loop-lag gauge (~30s). Cheap, gated on
+    // Sentry being initialized, and never throws.
+    emitResourceGauge();
 
     // Scale background concurrency to the live session count before scheduling
     // this tick's work. The idle scheduler owns the sessions Map, so doing it

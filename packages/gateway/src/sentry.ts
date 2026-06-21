@@ -9,6 +9,7 @@
 import * as Sentry from "@sentry/bun";
 import { getInstanceId, embedding } from "@loreai/core";
 import { createHash } from "node:crypto";
+import { monitorEventLoopDelay, type IntervalHistogram } from "node:perf_hooks";
 
 // ---------------------------------------------------------------------------
 // Scope enrichment
@@ -558,4 +559,101 @@ export function setupEmbeddingFailureCapture(): void {
       },
     );
   });
+}
+
+// ---------------------------------------------------------------------------
+// Process resource gauge + event-loop lag (periodic, from the idle tick)
+// ---------------------------------------------------------------------------
+
+let eventLoopDelayHist: IntervalHistogram | null = null;
+
+/**
+ * Begin sampling event-loop delay. Cheap libuv-backed histogram; idempotent and
+ * a no-op when Sentry is off. Called once when the idle scheduler starts.
+ */
+export function startResourceMonitor(): void {
+  if (!Sentry.isInitialized() || eventLoopDelayHist) return;
+  eventLoopDelayHist = monitorEventLoopDelay({ resolution: 20 });
+  eventLoopDelayHist.enable();
+}
+
+/**
+ * Emit a periodic process-resource gauge — RSS / heap / external / arrayBuffers
+ * (bytes) and the event-loop-delay p99 (ms) since the previous emit. Called from
+ * the idle scheduler tick (~30s). Never throws (telemetry must not break idle).
+ */
+export function emitResourceGauge(): void {
+  if (!Sentry.isInitialized()) return;
+  try {
+    const mem = process.memoryUsage();
+    Sentry.metrics.distribution("lore.process.rss_bytes", mem.rss, {
+      unit: "byte",
+    });
+    Sentry.metrics.distribution("lore.process.heap_used_bytes", mem.heapUsed, {
+      unit: "byte",
+    });
+    Sentry.metrics.distribution("lore.process.external_bytes", mem.external, {
+      unit: "byte",
+    });
+    Sentry.metrics.distribution(
+      "lore.process.array_buffers_bytes",
+      mem.arrayBuffers,
+      { unit: "byte" },
+    );
+    if (eventLoopDelayHist) {
+      // percentile() returns nanoseconds; report milliseconds, then reset so
+      // the next emit reflects only the elapsed interval.
+      Sentry.metrics.distribution(
+        "lore.event_loop.lag_p99_ms",
+        eventLoopDelayHist.percentile(99) / 1e6,
+        { unit: "millisecond" },
+      );
+      eventLoopDelayHist.reset();
+    }
+  } catch {
+    // Telemetry must never break the idle loop.
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Startup embedding-backfill span
+// ---------------------------------------------------------------------------
+
+/**
+ * Wrap the one-shot startup embedding backfill in a Sentry span, recording how
+ * much was embedded and the RSS delta across the pass (the backfill is the
+ * prime suspect for startup memory growth). Falls back to running `run` plainly
+ * when Sentry is off. Errors propagate to the caller's existing `.catch()`.
+ */
+export async function spanStartupBackfill(
+  run: () => Promise<embedding.BackfillStats>,
+): Promise<void> {
+  if (!Sentry.isInitialized()) {
+    await run();
+    return;
+  }
+  const rssBefore = process.memoryUsage().rss;
+  await Sentry.startSpan(
+    { name: "lore.embedding.startup_backfill", op: "embedding.backfill" },
+    async (span) => {
+      const stats = await run();
+      const rssAfter = process.memoryUsage().rss;
+      span.setAttribute("knowledge_embedded", stats.knowledgeEmbedded);
+      span.setAttribute("distillation_embedded", stats.distillationEmbedded);
+      span.setAttribute("entity_embedded", stats.entityEmbedded);
+      span.setAttribute("pending_knowledge", stats.pendingKnowledge);
+      span.setAttribute("pending_distillations", stats.pendingDistillations);
+      span.setAttribute(
+        "knowledge_coverage",
+        `${stats.knowledgeWithEmbedding}/${stats.knowledgeTotal}`,
+      );
+      span.setAttribute(
+        "distillation_coverage",
+        `${stats.distillationWithEmbedding}/${stats.distillationTotal}`,
+      );
+      span.setAttribute("rss_before_bytes", rssBefore);
+      span.setAttribute("rss_after_bytes", rssAfter);
+      span.setAttribute("rss_delta_bytes", rssAfter - rssBefore);
+    },
+  );
 }

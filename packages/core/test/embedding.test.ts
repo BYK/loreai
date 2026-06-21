@@ -13,6 +13,7 @@ import {
   _saveAndClearProvider,
   _restoreProvider,
   embed,
+  runStartupBackfill,
   LocalProviderUnavailableError,
   pickRemoteFallback,
   _resetLocalProviderProbe,
@@ -170,6 +171,22 @@ describe("local provider unavailable fallback", () => {
       LocalProviderUnavailableError,
     );
     expect(isAvailable()).toBe(false);
+  });
+
+  test("runStartupBackfill returns zeroed stats when the provider is unavailable", async () => {
+    _markLocalProviderUnavailable();
+    const stats = await runStartupBackfill();
+    expect(stats).toEqual({
+      pendingKnowledge: 0,
+      pendingDistillations: 0,
+      knowledgeEmbedded: 0,
+      distillationEmbedded: 0,
+      entityEmbedded: 0,
+      knowledgeTotal: 0,
+      knowledgeWithEmbedding: 0,
+      distillationTotal: 0,
+      distillationWithEmbedding: 0,
+    });
   });
 });
 
