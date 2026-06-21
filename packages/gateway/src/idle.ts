@@ -723,7 +723,7 @@ export function buildIdleWorkHandler(
           : ("batch" as const);
       const pending = temporal.undistilledCount(projectPath, sessionID);
       if (allowWorker && pending > 0) {
-        await distillation.run({
+        const result = await distillation.run({
           llm,
           projectPath,
           sessionID,
@@ -733,8 +733,13 @@ export function buildIdleWorkHandler(
           callType,
           workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
         });
-        // force-distill creates gen-0 segments that enter the in-context prefix.
-        idlePrefixMutated = true;
+        // Only a run that actually created gen-0 segments rewrites the in-context
+        // prefix. `distilled` counts messages folded into a NEW gen-0 segment
+        // (distillation.ts:954); it stays 0 for tiny-segment absorption, worker
+        // failures, parse errors, and expansion-guard discards — which mark
+        // messages distilled WITHOUT creating gen-0, leaving the prefix (and the
+        // warmup body) unchanged. Gating on it avoids nulling a still-valid body.
+        if (result.distilled > 0) idlePrefixMutated = true;
       }
       // Meta consolidation: safe on idle because cache is already cold.
       // Run as a separate step so gen-0 segments from the force-distill
