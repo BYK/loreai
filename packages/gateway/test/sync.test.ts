@@ -6,7 +6,7 @@ import {
   setKV,
   deleteTeamConfig,
 } from "@loreai/core";
-import { syncData } from "@loreai/core";
+import { log, syncData } from "@loreai/core";
 
 // --- Fake Supabase client ----------------------------------------------------
 // In-memory per-table store with the PostgREST surface the engine uses, PLUS
@@ -448,6 +448,39 @@ describe("pushOnce — happy path", () => {
     await pushOnce(makeClient() as never);
     const remoteE = tableRows("entities").find((r) => r.id === "e1");
     expect(remoteE?.canonical_name).toBe("RENAMED"); // edit propagated to the remote
+  });
+
+  test("pushOnce resolves a table's synced columns once, not per row (no PRAGMA N+1)", async () => {
+    // pushEntry hits syncedColumns 3x per row (getRowById + contentHash +
+    // pickSyncColumns), each a `PRAGMA table_info`. Unmemoized that is an N+1 over
+    // the whole push batch. Count the PRAGMAs the push actually executes (via the
+    // DB-tracing seam, the only reliable interception — a db().query monkeypatch is
+    // shadowed by the tracing Proxy).
+    syncData.enableSync("basic");
+    for (let i = 0; i < 20; i++) insertEntity(`e${i}`);
+    let pragma = 0;
+    const noop = () => {};
+    const passthrough: log.LogSink = {
+      info: noop,
+      warn: noop,
+      error: noop,
+      captureException: noop,
+    };
+    log.registerSink({
+      ...passthrough,
+      withDbSpan<T>(sql: string, fn: () => T): T {
+        if (/PRAGMA table_info\(entities\)/.test(sql)) pragma++;
+        return fn();
+      },
+    });
+    try {
+      await pushOnce(makeClient() as never);
+    } finally {
+      log.registerSink(passthrough); // restore pass-through (no withDbSpan)
+    }
+    expect(tableRows("entities")).toHaveLength(20); // sanity: rows really pushed
+    // 20 rows × 3 unmemoized PRAGMAs ≈ 60 before; O(1) per connection after.
+    expect(pragma).toBeLessThan(5);
   });
 });
 

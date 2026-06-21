@@ -252,14 +252,37 @@ function meta(table: string): SyncTableMeta {
  * Push, hashing, and apply all use this — never the raw local column set, which
  * has local-only columns the remote rejects (PGRST204).
  */
-export function syncedColumns(table: string): string[] {
+// Memoize the synced-column list per DB connection. syncedColumns runs a
+// `PRAGMA table_info`, and is reached once per row (via contentHash /
+// pickSyncColumns / getRowById) on every push and pull — an N+1 over a batch. A
+// table's columns are fixed once migrations finish (they run on the raw connection
+// before it's ever returned by db(), so before any sync), making the result stable
+// for a connection's lifetime. Keying on the db instance auto-invalidates when the
+// connection is replaced (close()/tests). The cached array is frozen: it is shared,
+// and all callers only read it (filter/iterate), so a stray mutation is a bug.
+const syncedColumnsCache = new WeakMap<
+  object,
+  Map<string, readonly string[]>
+>();
+
+export function syncedColumns(table: string): readonly string[] {
+  const conn = db();
+  let perConn = syncedColumnsCache.get(conn);
+  if (!perConn) {
+    perConn = new Map();
+    syncedColumnsCache.set(conn, perConn);
+  }
+  const cached = perConn.get(table);
+  if (cached) return cached;
   const m = meta(table);
   const local = new Set(
     (
-      db().query(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+      conn.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
     ).map((r) => r.name),
   );
-  return m.syncColumns.filter((c) => local.has(c));
+  const result = Object.freeze(m.syncColumns.filter((c) => local.has(c)));
+  perConn.set(table, result);
+  return result;
 }
 
 /** Pick only the synced data columns from a row (for the push payload). */
@@ -275,7 +298,7 @@ export function pickSyncColumns(
 }
 
 /** Local column names of a synced table (validated against the registry). */
-function columns(table: string): string[] {
+function columns(table: string): readonly string[] {
   return syncedColumns(table);
 }
 
@@ -317,7 +340,10 @@ export function contentHash(
  * Lets hot loops resolve the columns ONCE (the `PRAGMA table_info` in `columns`)
  * and hash many rows without re-querying per row.
  */
-function hashRowColumns(cols: string[], row: Record<string, unknown>): string {
+function hashRowColumns(
+  cols: readonly string[],
+  row: Record<string, unknown>,
+): string {
   const hashCols = cols.filter((c) => !HASH_EXCLUDE.has(c)).sort();
   const canonical = hashCols
     .map((c) => `${c}=${serializeValue(row[c])}`)
