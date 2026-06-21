@@ -506,8 +506,10 @@ export function analyzeCacheTurn(
   if (analytics.lastRequestBody !== null) {
     // lastRequestBody is stored RAW (with cache_control intact) for the warmer;
     // normalize on read so the divergence comparison stays apples-to-apples.
-    // normalizeBodyForComparison is idempotent, so this equals the old stored
-    // normalized form byte-for-byte — the comparison result is unchanged.
+    // Byte-identical to the old path: both apply normalizeBodyForComparison
+    // exactly once to the same raw bytes (old: normalize-then-store; now:
+    // store-then-normalize) — so prevBody, and every value derived from it, is
+    // unchanged.
     const prevBody = normalizeBodyForComparison(
       decompressBody(analytics.lastRequestBody),
     );
@@ -592,14 +594,24 @@ export function analyzeCacheTurn(
 
   // Store the RAW (as-sent) compressed body for next turn. Two consumers read
   // it: (1) the divergence comparison above, which normalizes on read so it
-  // stays apples-to-apples; (2) the cache warmer, which REPLAYS it and must see
-  // the real `cache_control` breakpoint layout. Previously we stored the
-  // normalized body (cache_control stripped), so the warmer collapsed to a
-  // single end-of-body breakpoint (ensureCacheBreakpoint) — large multi-
-  // breakpoint sessions then never matched the cached prefix (cacheRead=0 + full
-  // rewrite every warmup). lastRequestBodyLength stays the NORMALIZED length: it
-  // is only the divergence-ratio denominator (prefixMatchBytes is measured on
-  // normalized bodies).
+  // stays apples-to-apples; (2) the cache warmer, which REPLAYS it upstream.
+  //
+  // Why raw (this fixes the large-session cacheRead=0 bug): the warmer replays
+  // exactly what it reads here. The normalized form must NEVER go upstream — it
+  // rewrites the billing header in system[0] into NON-HEX placeholders
+  // (CCH_REPLACEMENT "cch=__", CC_VERSION_SUFFIX_REPLACEMENT ".___;"; see the
+  // "never re-parsed or sent upstream" note at CACHE_CONTROL_PATTERN). Anthropic
+  // strips a VALID-hex cch/cc_version before hashing the cache key (which is why
+  // real turns hit 92-100% despite cch changing every turn), but it does NOT
+  // strip the non-hex artifacts — so the old warmup's system[0] diverged from
+  // the cached prefix BEFORE the first breakpoint => guaranteed cacheRead=0 +
+  // full rewrite. Normalization also stripped every cache_control, so the warmup
+  // additionally collapsed to one end-of-body breakpoint (ensureCacheBreakpoint)
+  // instead of the real system[1]/tools/conversation layout. Storing raw fixes
+  // BOTH: the warmer replays the exact upstream bytes (valid-hex header via
+  // resignBody + real breakpoints). lastRequestBodyLength stays the NORMALIZED
+  // length — it is only the divergence-ratio denominator (prefixMatchBytes is
+  // measured on normalized bodies).
   analytics.lastRequestBody = compressBody(currentBody);
   analytics.lastRequestBodyLength = normalizedBody.length;
   analytics.lastCacheRead = cacheRead;
