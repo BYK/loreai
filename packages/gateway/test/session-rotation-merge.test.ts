@@ -85,8 +85,16 @@ describe("Tier 1b session-merge regression (x-claude-code-session-id)", () => {
     expect(r2.status).toBe(200);
     await r2.text();
 
+    // Scope to this test's session header. Background tasks (curator / idle /
+    // gradient) call saveSessionTracking(), whose INSERT OR IGNORE writes a
+    // header-NULL row. Under parallel-suite load an in-flight background write
+    // from a prior harness can land in this harness's DB (shared db() singleton
+    // across harnesses) → a phantom row that inflates an unscoped count. Filter
+    // by header_name so we count only real rotation-relevant sessions; a genuine
+    // rotation refusal still writes a header_name row, so this never masks the
+    // bug under test. #859
     const sessions = harness.queryDB<SessionRow>(
-      "SELECT session_id, header_session_id, header_name, project_path, project_path_provisional FROM session_state ORDER BY rowid",
+      "SELECT session_id, header_session_id, header_name, project_path, project_path_provisional FROM session_state WHERE header_name = 'x-claude-code-session-id' ORDER BY rowid",
     );
 
     // TWO distinct internal sessions — the core regression assertion. Pre-fix
@@ -152,8 +160,9 @@ describe("Tier 1b session-merge regression (x-claude-code-session-id)", () => {
     await r2.text();
 
     // Same header value across turns → ONE session (legitimate resumption).
+    // Scoped by header_name to ignore phantom header-NULL rows (see #859 note above).
     const sessions = harness.queryDB<SessionRow>(
-      "SELECT session_id, project_path FROM session_state",
+      "SELECT session_id, project_path FROM session_state WHERE header_name = 'x-claude-code-session-id'",
     );
     expect(sessions.length).toBe(1);
     expect(sessions[0].project_path).toBe("/proj/gamma");
@@ -193,8 +202,9 @@ describe("Tier 1b session-merge regression (x-claude-code-session-id)", () => {
       await r.text();
     }
 
+    // Scoped by header_name to ignore phantom header-NULL rows (see #859 note above).
     const sessions = harness.queryDB<SessionRow>(
-      "SELECT session_id, header_session_id, project_path FROM session_state",
+      "SELECT session_id, header_session_id, project_path FROM session_state WHERE header_name = 'x-claude-code-session-id'",
     );
     // Three distinct sessions, each on its own project (pre-fix: 1 session).
     expect(sessions.length).toBe(3);
@@ -243,8 +253,9 @@ describe("Tier 1b rotation: x-session-affinity (OpenCode nanoid) still rotates s
     expect(r2.status).toBe(200);
     await r2.text();
 
+    // Scoped by header_name to ignore phantom header-NULL rows (see #859 note above).
     const sessions = harness.queryDB<SessionRow>(
-      "SELECT session_id, project_path FROM session_state",
+      "SELECT session_id, project_path FROM session_state WHERE header_name = 'x-session-affinity'",
     );
     // Two distinct sessions — the rotation was refused due to project mismatch.
     expect(sessions.length).toBe(2);
@@ -281,8 +292,9 @@ describe("Tier 1b rotation: x-session-affinity (OpenCode nanoid) still rotates s
     expect(r2.status).toBe(200);
     await r2.text();
 
+    // Scoped by header_name to ignore phantom header-NULL rows (see #859 note above).
     const sessions = harness.queryDB<SessionRow>(
-      "SELECT session_id, project_path FROM session_state",
+      "SELECT session_id, project_path FROM session_state WHERE header_name = 'x-session-affinity'",
     );
     // ONE session — the rotation resumed the original (same project).
     expect(sessions.length).toBe(1);
@@ -310,14 +322,6 @@ describe("Tier 1b rotation: x-session-affinity (OpenCode nanoid) still rotates s
     expect(r1.status).toBe(200);
     await r1.text();
 
-    // Settle: under extreme parallel-suite load (vitest worker reuse across
-    // files), a stale async task may momentarily re-populate headerSessionIndex
-    // after harness setup, creating duplicate x-session-affinity entries that
-    // make findRotationPredecessor bail (ambiguous → no rotation → 2 sessions).
-    // A small await drains any lingering microtasks from setup/teardown so only
-    // the current test's entries are present. #859
-    await new Promise((r) => setTimeout(r, 0));
-
     // Second request: new nanoid, NO x-lore-project header at all.
     const r2 = await harness.chat(body("no-header two"), "key-A", {
       "x-session-affinity": "nanoid-after",
@@ -326,8 +330,11 @@ describe("Tier 1b rotation: x-session-affinity (OpenCode nanoid) still rotates s
     expect(r2.status).toBe(200);
     await r2.text();
 
+    // Scoped by header_name to ignore phantom header-NULL rows (see #859 note
+    // above). This is what previously flaked: an unscoped count picked up a
+    // phantom row from a leaked background write and read 2 instead of 1.
     const sessions = harness.queryDB<SessionRow>(
-      "SELECT session_id, project_path FROM session_state",
+      "SELECT session_id, project_path FROM session_state WHERE header_name = 'x-session-affinity'",
     );
     // ONE session — rotation proceeded (Fix 2 was a no-op, no incoming project).
     expect(sessions.length).toBe(1);
@@ -370,8 +377,9 @@ describe("Tier 1b: x-lore-session-id isolation (Lore plugin stable ID)", () => {
     expect(r2.status).toBe(200);
     await r2.text();
 
+    // Scoped by header_name to ignore phantom header-NULL rows (see #859 note above).
     const sessions = harness.queryDB<SessionRow>(
-      "SELECT session_id, project_path FROM session_state",
+      "SELECT session_id, project_path FROM session_state WHERE header_name = 'x-lore-session-id'",
     );
     // Two distinct sessions — x-lore-session-id never rotates.
     expect(sessions.length).toBe(2);
