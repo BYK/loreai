@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import {
   runBackground,
+  drainBackground,
   isBackgroundPaused,
   tripCircuitBreaker,
   resetBackgroundLimiter,
@@ -502,5 +503,84 @@ describe("background-limiter", () => {
 
     resolve();
     await Promise.all([active1, active2, ...queued]);
+  });
+
+  describe("drainBackground", () => {
+    test("resolves immediately when nothing is in flight", async () => {
+      await expect(drainBackground()).resolves.toBeUndefined();
+    });
+
+    test("awaits an in-flight (started) task before resolving", async () => {
+      let completed = false;
+      let release: () => void = () => {};
+      const gate = new Promise<void>((r) => {
+        release = r;
+      });
+      const task = runBackground(async () => {
+        await gate;
+        completed = true;
+      });
+      await new Promise((r) => setTimeout(r, 10)); // let it start
+      expect(completed).toBe(false);
+
+      const drain = drainBackground();
+      let drainResolved = false;
+      void drain.then(() => {
+        drainResolved = true;
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      // The drain must NOT resolve while the task is still running.
+      expect(drainResolved).toBe(false);
+
+      release();
+      await drain;
+      expect(completed).toBe(true);
+      await task;
+    });
+
+    test("discards queued (not-yet-started) tasks without hanging", async () => {
+      _setConcurrencyForTest(1);
+      let started2 = false;
+      let release1: () => void = () => {};
+      const gate1 = new Promise<void>((r) => {
+        release1 = r;
+      });
+      const t1 = runBackground(async () => {
+        await gate1;
+      });
+      // Queued behind t1 (concurrency 1). It must never run after the drain.
+      const t2 = runBackground(async () => {
+        started2 = true;
+      });
+      void t2.catch(() => {}); // queued task may stay pending after clearQueue
+      await new Promise((r) => setTimeout(r, 10));
+      expect(started2).toBe(false);
+
+      const drain = drainBackground();
+      release1();
+      await drain; // must not hang on the discarded t2
+      await t1;
+      expect(started2).toBe(false); // t2 was discarded, never executed
+    });
+
+    test("returns after the timeout instead of hanging on a slow task", async () => {
+      let release: () => void = () => {};
+      const gate = new Promise<void>((r) => {
+        release = r;
+      });
+      const task = runBackground(async () => {
+        await gate;
+      });
+      await new Promise((r) => setTimeout(r, 10)); // let it start
+
+      const start = Date.now();
+      await drainBackground(50);
+      const elapsed = Date.now() - start;
+      expect(elapsed).toBeGreaterThanOrEqual(40);
+      expect(elapsed).toBeLessThan(1500);
+
+      release(); // let the task finish so it leaves the in-flight set
+      await task;
+    });
   });
 });

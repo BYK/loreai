@@ -165,6 +165,7 @@ import {
   runBackground,
   resetBackgroundLimiter,
   isBackgroundPaused,
+  drainBackground,
 } from "./background-limiter";
 import {
   extractAuth,
@@ -455,6 +456,23 @@ export function setUpstreamInterceptor(
 export async function resetPipelineState(opts?: {
   fast?: boolean;
 }): Promise<void> {
+  // Quiesce background work before tearing anything down (config reload / test
+  // teardown only — the fast process-exit path skips this to keep Ctrl+C
+  // snappy). Stop the idle scheduler FIRST so no new ticks schedule work, then
+  // await every in-flight distillation / curation / idle task. This is done
+  // while llmClient + the upstream interceptor are still live, so the drained
+  // tasks complete cleanly. The point: a late `saveSessionTracking()` write
+  // must land in THIS process's DB, not leak into the next one's as a phantom
+  // row — the cross-harness contamination behind the #859 flake. See #885.
+  if (!opts?.fast) {
+    if (stopIdleScheduler) {
+      stopIdleScheduler();
+      stopIdleScheduler = null;
+    }
+    await drainBackground();
+    await Promise.allSettled([...inFlightBackground]);
+    inFlightBackground.clear();
+  }
   initialized = false;
   sessions.clear();
   cwdWarned.clear();
@@ -4391,6 +4409,18 @@ function postResponse(
 /**
  * Schedule background distillation and curation (fire-and-forget).
  */
+/**
+ * In-flight DIRECT (non-limiter) background promises — currently just the
+ * urgent distillation, which bypasses `runBackground`. Tracked so
+ * `resetPipelineState()` can await it before the DB is swapped, alongside the
+ * limiter's `drainBackground()`. See #885.
+ */
+const inFlightBackground = new Set<Promise<unknown>>();
+function trackBackground(p: Promise<unknown>): void {
+  inFlightBackground.add(p);
+  void p.finally(() => inFlightBackground.delete(p));
+}
+
 function scheduleBackgroundWork(
   sessionState: SessionState,
   config: GatewayConfig,
@@ -4445,23 +4475,25 @@ function scheduleBackgroundWork(
     saveSessionTracking(sessionID, { compactionAnomalyPending: false });
   }
   if (urgentFromGradient || urgentFromCompaction) {
-    distillation
-      .run({
-        llm,
-        projectPath,
-        sessionID,
-        model,
-        force: true,
-        urgent: true,
-        callType: "direct",
-        // Never run meta-distillation while the conversation cache is warm.
-        // Meta archives gen-0 rows and creates a gen-1 row, rewriting the
-        // synthetic distilled prefix at messages[0/1] on the next turn. That
-        // early-message rewrite is a real prompt-cache bust. Idle-time meta in
-        // idle.ts remains enabled because the cache is already cold there.
-        skipMeta: true,
-      })
-      .catch((e) => log.error("background distillation failed:", e));
+    trackBackground(
+      distillation
+        .run({
+          llm,
+          projectPath,
+          sessionID,
+          model,
+          force: true,
+          urgent: true,
+          callType: "direct",
+          // Never run meta-distillation while the conversation cache is warm.
+          // Meta archives gen-0 rows and creates a gen-1 row, rewriting the
+          // synthetic distilled prefix at messages[0/1] on the next turn. That
+          // early-message rewrite is a real prompt-cache bust. Idle-time meta in
+          // idle.ts remains enabled because the cache is already cold there.
+          skipMeta: true,
+        })
+        .catch((e) => log.error("background distillation failed:", e)),
+    );
   } else if (
     !isBackgroundPaused(workerProviderID) &&
     !quotaPaused &&
