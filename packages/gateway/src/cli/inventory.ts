@@ -125,9 +125,23 @@ export function collectClaudeCodeInventory(): AppInventory {
   let hasBackup = false;
   if (fileExists) {
     const cfg = readJsonConfig(file);
-    hasBackup = LORE_BACKUP_KEY in cfg;
+    const backup = cfg[LORE_BACKUP_KEY] as
+      | {
+          entries?: {
+            path: string;
+            priorValue?: unknown;
+            hadPrior?: boolean;
+          }[];
+        }
+      | undefined;
+    hasBackup = backup !== undefined;
     for (const key of ["env.ANTHROPIC_BASE_URL", "env.DISABLE_AUTO_COMPACT"]) {
       const v = getPath(cfg, key);
+      const entry = backup?.entries?.find((e) => e.path === key);
+      const priorValue =
+        entry?.hadPrior && typeof entry.priorValue === "string"
+          ? entry.priorValue
+          : undefined;
       rows.push({
         app: "Claude Code",
         file,
@@ -135,6 +149,7 @@ export function collectClaudeCodeInventory(): AppInventory {
         key,
         routing:
           typeof v === "string" ? classifyRoutingValue(v) : { kind: "unset" },
+        priorValue,
       });
     }
   }
@@ -218,8 +233,8 @@ export function collectInventory(): AppInventory[] {
 // `lore setup status` — print the inventory
 // ---------------------------------------------------------------------------
 
-export function printInventoryStatus(): void {
-  const all = collectInventory();
+export function printInventoryStatus(inventory?: AppInventory[]): void {
+  const all = inventory ?? collectInventory();
   for (const inv of all) {
     console.log(`[lore] ${inv.app}  (${inv.file})`);
     if (!inv.fileExists) {
@@ -446,9 +461,10 @@ export async function commandDoctor(): Promise<void> {
     opencodePluginInstalled: isNpmPackageInstalledSafe("@loreai/opencode"),
   });
 
-  // Print inventory first, then findings.
+  // Print inventory first, then findings. Reuse the already-collected
+  // inventory so diagnostics and display see the same data.
   console.log("[lore] Setup inventory:");
-  printInventoryStatus();
+  printInventoryStatus(inventory);
   console.log("[lore] Diagnostics:");
   for (const f of findings) {
     console.log(`[lore]   ${formatFinding(f).split("\n").join("\n[lore]   ")}`);
