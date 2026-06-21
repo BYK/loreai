@@ -4003,6 +4003,9 @@ describe("tier-based context management", () => {
       // distilled+raw budget (~0.65*usable ≈ 620K) genuinely exceeds the clamp
       // target (layer0Ceiling = 200K). If usable here collapses (e.g. overhead
       // pollution), the test would pass for the wrong reason — so assert it.
+      // (The base distilled/raw budgets returned here are intentionally NOT
+      // clamped — they feed the layer-1 stable window; only the ESCALATED-stage
+      // builders and the tier gate's compressedEstimate clamp to the ceiling.)
       expect(result.usable).toBeGreaterThan(900_000);
       expect(result.distilledBudget + result.rawBudget).toBeGreaterThan(
         300_000,
@@ -4086,6 +4089,185 @@ describe("tier-based context management", () => {
       expect(result.unsustainable).toBe(true);
       // Restore pricing for sibling tests.
       setCachePricing(6.25 / 1_000_000, 0.5 / 1_000_000);
+    });
+  });
+
+  // Regression for the high-context overflow that wedged opencode session
+  // ses_14b9bf3d4ffeEaA95V1pK9b6Nj (lore 0AVWKugtmhBKqLOX9): on a 1M-token model
+  // the ESCALATED compression-stage budgets were scaled off the full `usable`
+  // (~800K), so `usable * rawFrac` (0.5) produced a ~400K raw window — LARGER
+  // than the ~200K cost cap whose breach triggered compression, AND larger than
+  // the layer-1 window. Escalating to a higher layer GREW the window (logs:
+  // layer-1 200K → layer-2 356K → 461K) until the real request overflowed the
+  // model. Two fixes:
+  //   1. clamp the ESCALATED-stage budgets (layers 2-3) to the layer-0 cost
+  //      ceiling — the layer-1 stable-window budget is deliberately left at the
+  //      full `usable * raw` so its cache-stable pin keeps eviction headroom, and
+  //   2. validate every rebuilt window against the hard ceiling (no free pass
+  //      for calibrated sessions, whose rebuilt windows are still chars/3
+  //      estimates that undercount the real tokenizer).
+  describe("gradient — high-context compression budget clamp (overflow fix)", () => {
+    const SID = "overflow-fix-sess";
+    const PID_KEY = "overflow-fix-project";
+    let projectId: string;
+    let createdCounter = 0;
+
+    function seedDistillations(count: number, charsEach: number) {
+      for (let i = 0; i < count; i++) {
+        db()
+          .query(
+            `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            crypto.randomUUID(),
+            projectId,
+            SID,
+            "",
+            "[]",
+            `Distillation ${i}: ${"o".repeat(charsEach)}`,
+            "[]",
+            0,
+            Math.ceil(charsEach / 3),
+            0,
+            Date.now() + createdCounter++,
+          );
+      }
+    }
+
+    beforeAll(() => {
+      projectId = ensureProject(`/test/${PID_KEY}`);
+    });
+
+    beforeEach(() => {
+      resetCalibration(SID);
+      resetPrefixCache(SID);
+      resetRawWindowCache(SID);
+      resetDistillationSnapshot(SID);
+      createdCounter = 0;
+      db()
+        .query("DELETE FROM distillations WHERE project_id = ?")
+        .run(projectId);
+      db().query("DELETE FROM session_state WHERE session_id = ?").run(SID);
+    });
+
+    afterAll(() => {
+      setModelLimits({ context: 10_000, output: 2_000 });
+      setMaxLayer0Tokens(0);
+      resetCalibration(SID);
+      calibrate(0);
+      db()
+        .query("DELETE FROM distillations WHERE project_id = ?")
+        .run(projectId);
+      db().query("DELETE FROM session_state WHERE session_id = ?").run(SID);
+    });
+
+    test("layer-1 base budgets are NOT clamped to the cost cap (cache-stable window keeps headroom)", () => {
+      // The narrow fix must clamp ONLY the escalated stages (layers 2-3). The
+      // layer-1 stable-window budget (returned as result.rawBudget/distilledBudget)
+      // MUST stay at the full `usable * fraction`. Clamping it to the cost cap
+      // (an earlier over-broad fix) shrank the raw-window pin so it marched every
+      // turn and busted the cache (regression caught by cache-stability.e2e).
+      // 1M context + a deliberately LOW 40K cost cap (mirrors that e2e test).
+      setModelLimits({ context: 1_000_000, output: 32_000 });
+      setMaxLayer0Tokens(40_000);
+      calibrate(0);
+
+      const result = transform({
+        messages: [
+          makeMsg("l1-1", "user", "hi", SID),
+          makeMsg("l1-2", "assistant", "ok", SID),
+        ],
+        projectPath: `/test/${PID_KEY}`,
+        sessionID: SID,
+      });
+
+      // usable stays the full ~968K (LTM / economics read this).
+      expect(result.usable).toBeGreaterThan(900_000);
+      // Base budgets scale off the full usable — NOT the 40K cap (which would
+      // give rawBudget = 40K*0.4 = 16K, starving the layer-1 pin).
+      expect(result.rawBudget).toBe(Math.floor(result.usable * 0.4));
+      expect(result.distilledBudget).toBe(Math.floor(result.usable * 0.25));
+      expect(result.rawBudget).toBeGreaterThan(40_000);
+    });
+
+    test("escalating to layer 2 on a 1M model stays bounded near the cap (does NOT grow)", () => {
+      setModelLimits({ context: 1_000_000, output: 32_000 });
+      setMaxLayer0Tokens(200_000);
+      calibrate(0);
+
+      // ~500K tokens of raw conversation — far more than any single stage
+      // budget, so the window size is determined by the BUDGET, not message
+      // scarcity. Pre-fix the layer-2 raw budget was usable*0.5 ≈ 476K, so the
+      // window grew to ~476K (and the real token count overflowed the model).
+      const msgs = Array.from({ length: 300 }, (_, i) =>
+        makeMsg(
+          `big-${i}`,
+          i % 2 === 0 ? "user" : "assistant",
+          "w".repeat(5_000),
+          SID,
+        ),
+      );
+
+      setForceMinLayer(2, SID); // jump straight to the layer that overflowed
+      const result = transform({
+        messages: msgs,
+        projectPath: `/test/${PID_KEY}`,
+        sessionID: SID,
+      });
+
+      expect(result.layer).toBeGreaterThanOrEqual(2);
+      // Post-fix the layer-2 raw budget = stageBudgetUsable*0.5 = 200K*0.5 =
+      // 100K, so the rebuilt window is ~100K — bounded by the cap, not a
+      // fraction of the 1M usable (pre-fix ~476K).
+      expect(result.totalTokens).toBeLessThan(200_000);
+      // `usable` itself is untouched (only the compression budgets are clamped).
+      expect(result.usable).toBeGreaterThan(900_000);
+    });
+
+    test("hard-ceiling guard: a rebuilt over-ceiling window escalates instead of shipping (calibrated)", () => {
+      // Cost cap disabled on a 200K model so budgetUsable === usable === maxInput
+      // (168K). A forced layer-2 window fills prefix (0.25) + raw (0.5) ≈ 0.75 ×
+      // 168K ≈ 126K; its chars/3 estimate undercounts the real tokenizer ~1.5×,
+      // so 126K*1.5 = 189K > 168K maxInput. Pre-fix, a CALIBRATED session got a
+      // free pass (`fitsWithSafetyMargin` returned true unconditionally) and
+      // shipped that over-ceiling window → "prompt is too long". Post-fix the
+      // guard rejects it and the loop escalates to a tighter layer.
+      setModelLimits({ context: 200_000, output: 32_000 }); // maxInput = 168K
+      setMaxLayer0Tokens(0); // disabled → budgetUsable === usable === 168K
+      calibrate(0);
+
+      // Prefix budget at layer 2 = 0.25*168K = 42K tokens; seed well past it so
+      // the prefix fills its budget after the binary-search trim.
+      seedDistillations(10, 18_000); // 10 × 6K tokens = 60K tokens of distillate
+      // Raw budget at layer 2 = 0.5*168K = 84K tokens; provide far more.
+      const msgs = Array.from({ length: 150 }, (_, i) =>
+        makeMsg(
+          `hc-${i}`,
+          i % 2 === 0 ? "user" : "assistant",
+          "h".repeat(3_000),
+          SID,
+        ),
+      );
+
+      // Mark the session calibrated WITHOUT a prior transform (so the shared
+      // overhead EMA is not perturbed and usable stays at the true 168K). This
+      // is the exact condition the pre-fix free pass applied to.
+      calibrate(120_000, SID, msgs.length);
+      setForceMinLayer(2, SID);
+
+      const result = transform({
+        messages: msgs,
+        projectPath: `/test/${PID_KEY}`,
+        sessionID: SID,
+      });
+
+      const maxInput = 200_000 - 32_000; // 168K
+      // The guard rejected the over-ceiling layer-2 window and escalated past
+      // the forced layer (pre-fix this stayed at layer 2 and overflowed).
+      expect(result.layer).toBeGreaterThanOrEqual(3);
+      // Whatever layer it lands on, the SHIPPED window must fit the hard ceiling.
+      expect(result.totalTokens).toBeLessThanOrEqual(maxInput);
     });
   });
 

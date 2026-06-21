@@ -2299,6 +2299,30 @@ function transformInner(input: {
   // Base raw budget. May be overridden below for post-idle compact mode.
   let rawBudget = Math.floor(usable * cfg.budget.raw);
 
+  // --- Escalated-stage budget ceiling (layers 2-3 only) ---
+  // The ESCALATED compression stages (layer 2: rawFrac 0.5; layer 3: rawFrac
+  // 0.55) size their raw/distilled windows as a fraction of `usable`. On a
+  // high-context model (e.g. a 1M-token opus → usable ~800K) `usable * 0.5` ≈
+  // 400K — far LARGER than the ~200K cost cap (maxLayer0Tokens) whose breach
+  // triggered compression, AND larger than the layer-1 window itself. So
+  // escalating to a "more aggressive" layer paradoxically GREW the context,
+  // unbounded, until the model's real limit overflowed. (This wedged session
+  // 0AVWKugtmhBKqLOX9 at layer 2: layer-1 200K → layer-2 356K → 461K, then
+  // "prompt is too long".) Clamp the ESCALATED-stage budgets to the layer-0
+  // cost ceiling so each higher layer actually shrinks the window toward the
+  // cap. NOTE: the layer-1 stable window (stage 0, rawFrac=null) deliberately
+  // keeps the full `usable * raw` budget — the cost cap governs WHEN to
+  // compress, not the layer-1 window size, and shrinking it would defeat the
+  // cache-stable raw-window pin (its chunked eviction needs headroom).
+  //   - maxLayer0Tokens === 0 (cost cap disabled): stageBudgetUsable === usable,
+  //     a no-op preserving the explicit "use the model's full context" opt-out.
+  //   - small-context models: usable < ceiling, so this is also a no-op.
+  const stageBudgetCeiling =
+    maxLayer0Tokens > 0
+      ? Math.min(contextLimit - outputReserved, maxLayer0Tokens)
+      : contextLimit - outputReserved;
+  const stageBudgetUsable = Math.min(usable, stageBudgetCeiling);
+
   // --- Force escalation (reactive error recovery) ---
   // When the API previously rejected with "prompt is too long", skip layers
   // below the forced minimum to ensure enough trimming on the next attempt.
@@ -2326,13 +2350,27 @@ function transformInner(input: {
   // API limit — exceeding it causes an unrecoverable 400.
   const HARD_CEILING_MARGIN = 0.95;
 
-  // Returns true if the tryFit result is safe to use: either we have calibrated
-  // data (exact) or the estimated total * safety factor fits within maxInput.
+  // Returns true if a rebuilt compression-stage window is safe to ship.
+  //
+  // A rebuilt window's `totalTokens` is a FRESH chars/3 estimate of the WHOLE
+  // window — it is NOT anchored to the API's last real count the way the
+  // layer-0 delta path (expectedInput = lastKnownInput + delta) is. So being
+  // "calibrated" does NOT make a rebuilt window exact: chars/3 undercounts the
+  // real tokenizer ~1.5-3x. Previously this returned `true` unconditionally for
+  // calibrated sessions, so a stage whose real size exceeded the model's
+  // context window was shipped anyway → unrecoverable "prompt is too long"
+  // (this, with the unclamped budgets, wedged session 0AVWKugtmhBKqLOX9).
+  //
+  // Validate every rebuilt window — calibrated or not — against the hard API
+  // ceiling with the same undercount safety multiplier. Rejecting an
+  // over-ceiling stage makes the loop escalate to a tighter layer (ultimately
+  // the always-returns emergency tail) instead of overflowing the model. This
+  // is only the stage-loop acceptance gate (the layer-0 / tier-gate paths use
+  // their own `maxInput * HARD_CEILING_MARGIN` checks against expectedInput).
   function fitsWithSafetyMargin(
     result: { totalTokens: number } | null,
   ): boolean {
     if (!result) return false;
-    if (calibrated) return true;
     return result.totalTokens * UNCALIBRATED_SAFETY <= maxInput;
   }
 
@@ -2639,11 +2677,21 @@ function transformInner(input: {
     if (effectiveMinLayer > stageLayer) continue;
 
     const stage = COMPRESSION_STAGES[s];
+    // Escalated stages (rawFrac/distFrac non-null) scale off `stageBudgetUsable`
+    // (clamped to the layer-0 cost ceiling), NOT raw `usable` — see the
+    // "Escalated-stage budget ceiling" note above. Without the clamp,
+    // `usable * 0.5` on a 1M-token model targets ~400K raw, larger than the
+    // ~200K cap that triggered compression AND larger than the layer-1 window,
+    // so escalating layers GREW the window and overflowed the model. Stage 0
+    // (layer 1, rawFrac=null) falls through to the unclamped base rawBudget /
+    // distilledBudget so the cache-stable raw-window pin keeps its full budget.
     const stageRawBudget =
-      stage.rawFrac !== null ? Math.floor(usable * stage.rawFrac) : rawBudget;
+      stage.rawFrac !== null
+        ? Math.floor(stageBudgetUsable * stage.rawFrac)
+        : rawBudget;
     const stageDistBudget =
       stage.distFrac !== null
-        ? Math.floor(usable * stage.distFrac)
+        ? Math.floor(stageBudgetUsable * stage.distFrac)
         : distilledBudget;
 
     // Determine prefix: if distLimit is finite, re-render with trimmed distillations.
