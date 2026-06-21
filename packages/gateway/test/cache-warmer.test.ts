@@ -52,6 +52,12 @@ import {
   normalizeBodyForComparison,
 } from "../src/cache-analytics";
 import { getKV, setKV } from "@loreai/core";
+import {
+  setCacheSizeSnapshot,
+  evaluateCacheStrategy,
+  setCachePricing,
+  evictSession,
+} from "@loreai/core";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -3206,5 +3212,113 @@ describe("creditWarmupHit", () => {
     const warmup = makeWarmup({ lastWarmupAt: 0 });
     expect(creditWarmupHit(warmup, 30_000, 300_000).hit).toBe(false);
     expect(warmup.warmupHits).toBe(0);
+  });
+});
+
+describe("shouldWarm unified cache-economics flip (PR2b)", () => {
+  const SESSION_PREFIX = "econ-flip-";
+  let counter = 0;
+  function freshSession(): string {
+    return `${SESSION_PREFIX}${Date.now()}-${counter++}`;
+  }
+
+  beforeEach(() => {
+    _resetForTest();
+    // Pricing: read=$0.30/MTok, write=$3.75/MTok (Anthropic 5m cache, Opus-ish).
+    setCachePricing(0.3, 3.75);
+  });
+
+  // Build a state with a stored body, in the warmup margin of the first TTL
+  // window, with enough turns/input to pass the legacy guards.
+  function makeWarmeableState(sessionID: string) {
+    const now = Date.now();
+    return makeSessionState({
+      sessionID,
+      lastRequestTime: now - 270_000, // 4.5 min — inside the 5m warmup margin
+      messageCount: 20, // ≥ MIN_TURNS_FOR_WARMING * 2
+      lastInputTokens: 100_000, // ≥ MIN_INPUT_TOKENS_FOR_WARMING
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,' +
+            '"messages":[{"role":"user","content":"test"}]}',
+        ),
+      },
+    });
+  }
+
+  function goodHist() {
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 360_000); // 6m — users return
+    return hist;
+  }
+
+  test("hold-warm strategy overrides a below-threshold pReturns — warms", () => {
+    const sid = freshSession();
+    // Small body, high return → hold-warm is cheaper than cooling.
+    setCacheSizeSnapshot(sid, 10_000, 10_000);
+    const state = makeWarmeableState(sid);
+
+    // Survive the safety guards (not subagent, warming enabled, etc.).
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const result = shouldWarm(state, profile, goodHist());
+    expect(result).toBe(true);
+
+    evictSession(sid);
+  });
+
+  test("cool-bust strategy blocks warming even when pReturns is high", () => {
+    const sid = freshSession();
+    // Large body, compaction available → cool-bust (cheap compact-on-return).
+    setCacheSizeSnapshot(sid, 800_000, 100_000);
+    const state = makeWarmeableState(sid);
+
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    // Even with a good histogram (high pReturns), cool-bust must block warming.
+    expect(shouldWarm(state, profile, goodHist(), Date.now())).toBe(false);
+
+    evictSession(sid);
+  });
+
+  test("cool-full-write strategy blocks warming (low return, large body, no compaction)", () => {
+    const sid = freshSession();
+    // Large body, no compaction (compressed == full). With a LOW-return
+    // histogram, hold-warm's ongoing keepalive cost exceeds the rare cold
+    // rewrite → cool-full-write (don't warm, don't compact).
+    setCacheSizeSnapshot(sid, 800_000, 800_000);
+    const now = Date.now();
+    const state = makeSessionState({
+      sessionID: sid,
+      lastRequestTime: now - 270_000,
+      messageCount: 20,
+      lastInputTokens: 100_000,
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,' +
+            '"messages":[{"role":"user","content":"test"}]}',
+        ),
+      },
+    });
+
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    // Low-return histogram: users rarely come back → cool-full-write.
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 3_600_000); // 60m gaps
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+
+    evictSession(sid);
+  });
+
+  test("falls back to legacy pReturns/threshold when no snapshot (non-confident)", () => {
+    const sid = freshSession();
+    // No snapshot → evaluateCacheStrategy returns null → legacy path.
+    const state = makeWarmeableState(sid);
+
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    // Good histogram → legacy would warm. Confirm the fallback still works.
+    expect(shouldWarm(state, profile, goodHist(), Date.now())).toBe(true);
+
+    evictSession(sid);
   });
 });

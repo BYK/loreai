@@ -5721,7 +5721,14 @@ async function handleConversationTurn(
   // If the cache warmer recently refreshed this session's prompt cache,
   // skip post-idle compaction — compacting would produce a different prompt
   // body that doesn't match the warmed prefix, causing a cache bust.
-  const cacheWarm = isCacheWarm(sessionState);
+  // PR2b: when the unified cache-economics strategy is confident, IT decides
+  // skipCompact (hold-warm → skip; cool-bust/cool-full-write → don't skip).
+  // Falls back to the legacy isCacheWarm signal when no confident strategy.
+  const econ = getCacheStrategy(sessionID);
+  const econConfident = econ?.result.confident === true;
+  const cacheWarm = econConfident
+    ? strategyWantsWarming(econ!.result.strategy)
+    : isCacheWarm(sessionState);
   const idleResult = onIdleResume(
     sessionID,
     thresholdMs,
@@ -5744,19 +5751,16 @@ async function handleConversationTurn(
     // newly-curated preferences are picked up by the NEXT session, not mid-session.
     log.info(
       `session idle ${Math.round(idleResult.idleMs / 60_000)}min — refreshing caches` +
-        (cacheWarm ? " (cache warm — skipping compact)" : ""),
+        (cacheWarm ? " (cache warm — skipping compact)" : "") +
+        (econConfident
+          ? ` (strategy=${econ!.result.strategy})`
+          : " (legacy isCacheWarm)"),
     );
-    // --- Shared cache-economics: SHADOW compaction decision (measure-only) ---
-    // Compare what the unified strategy WOULD do (skip compaction iff hold-warm)
-    // against the legacy isCacheWarm-driven skipCompact. No behavior change —
-    // onIdleResume above still used the legacy `cacheWarm`.
-    const econ = getCacheStrategy(sessionID);
     if (econ) {
-      const wouldSkipCompact = strategyWantsWarming(econ.result.strategy);
       log.info(
-        `cache-economics shadow (compaction): session=${sessionID.slice(0, 16)} ` +
-          `strategy=${econ.result.strategy} wouldSkipCompact=${wouldSkipCompact} ` +
-          `actualSkipCompact=${cacheWarm} strategyAgeMs=${Date.now() - econ.decidedAt}`,
+        `cache-economics (compaction): session=${sessionID.slice(0, 16)} ` +
+          `strategy=${econ.result.strategy} skipCompact=${cacheWarm} ` +
+          `confident=${econConfident} strategyAgeMs=${Date.now() - econ.decidedAt}`,
       );
     }
   }

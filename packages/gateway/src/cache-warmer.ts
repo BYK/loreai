@@ -33,6 +33,7 @@ import {
   evaluateCacheStrategy,
   strategyWantsWarming,
   getCacheSizeSnapshot,
+  getCacheStrategy,
 } from "@loreai/core";
 import type {
   InterTurnHistogram,
@@ -1233,12 +1234,13 @@ export function shouldWarm(
     cacheMissCostPerMTok,
   );
 
-  // --- Shared cache-economics: SHADOW evaluation (measure-only, PR2a) ---
-  // Run the single core entry point and LOG the unified strategy next to the
-  // legacy decision. No behavior change: shouldWarm still returns its existing
-  // result below. This lets us watch, on real sessions, whether the shared model
-  // agrees with reality (and cross-check the gradient size estimate against the
-  // real API token count) before PR2b hands it the wheel.
+  // --- Shared cache-economics: PRIMARY evaluation (PR2b flip) ---
+  // The unified strategy is now the PRIMARY warm/no-warm decision (legacy
+  // pReturns/threshold is the fallback for non-confident cases — no snapshot,
+  // non-finite inputs). evaluateCacheStrategy stores the result on the core
+  // session state; the Phase A/B block below reads it via getCacheStrategy.
+  // The LOG is still gated to the warmup margin for volume; the decision reads
+  // the stored strategy regardless of when it was last logged.
   {
     const expectedCycles = expectedWarmupCycles(
       blendedHist,
@@ -1247,7 +1249,7 @@ export function shouldWarm(
       maxCycles,
     );
     const expectedFutureTurns = Math.min(totalTurns, SHADOW_FUTURE_TURNS_CAP);
-    const shadow = evaluateCacheStrategy(
+    const result = evaluateCacheStrategy(
       state.sessionID,
       { pReturn: pReturns, expectedCycles, expectedFutureTurns },
       {
@@ -1255,24 +1257,21 @@ export function shouldWarm(
         writePerToken: cacheMissCostPerMTok / 1_000_000,
       },
     );
-    // Only log near a real warm decision (within the warmup margin of the
-    // current TTL window), not on every tick while the cache is still fresh —
-    // keeps the shadow measurement readable without dropping any decision point.
     const inWarmupMargin = elapsed % ttlMs >= ttlMs - warmupMarginMs;
-    if (shadow?.confident && inWarmupMargin) {
+    if (result?.confident && inWarmupMargin) {
       const snap = getCacheSizeSnapshot(state.sessionID);
       const apiActual =
         (state.cacheAnalytics?.lastCacheRead ?? 0) +
         (state.cacheAnalytics?.lastCacheCreation ?? 0);
       log.info(
-        `cache-economics shadow: session=${state.sessionID.slice(0, 16)} ` +
-          `strategy=${shadow.strategy} wouldWarm=${strategyWantsWarming(shadow.strategy)} ` +
+        `cache-economics: session=${state.sessionID.slice(0, 16)} ` +
+          `strategy=${result.strategy} wouldWarm=${strategyWantsWarming(result.strategy)} ` +
           `gradFull=${snap?.full ?? "?"} gradCompressed=${snap?.compressed ?? "?"} ` +
           `apiActual=${apiActual} pReturn=${pReturns.toFixed(2)} ` +
           `cycles=${expectedCycles.toFixed(1)} futureTurns=${expectedFutureTurns} ` +
-          `costs[hold=${shadow.holdWarmCost.toFixed(4)} ` +
-          `coolBust=${shadow.coolBustCost.toFixed(4)} ` +
-          `coolFull=${shadow.coolFullWriteCost.toFixed(4)}]`,
+          `costs[hold=${result.holdWarmCost.toFixed(4)} ` +
+          `coolBust=${result.coolBustCost.toFixed(4)} ` +
+          `coolFull=${result.coolFullWriteCost.toFixed(4)}]`,
       );
     }
   }
@@ -1292,6 +1291,15 @@ export function shouldWarm(
   // cacheRead/(read+write)). Independent of the return-rate guard above.
   if (warmupWriteEfficiencyTooLow(state.warmup)) return false;
 
+  // Read the unified strategy (stored by the eval block above). When confident,
+  // this is the PRIMARY warm/no-warm decision (PR2b flip): `hold-warm` → warm,
+  // `cool-bust`/`cool-full-write` → don't. Non-confident (no snapshot, non-finite
+  // inputs) falls back to the legacy pReturns/threshold mechanics.
+  const econ = getCacheStrategy(state.sessionID);
+  const econConfident = econ?.result.confident === true;
+  const econWantsWarming =
+    econConfident && strategyWantsWarming(econ!.result.strategy);
+
   // Determine if this is the initial commitment or a continuation
   const cyclesSpent = state.warmup?.warmupCount ?? 0;
   const isFirstWindow = elapsed < ttlMs;
@@ -1303,8 +1311,14 @@ export function shouldWarm(
     // Cache still fresh — no warmup needed yet
     if (elapsed < ttlMs - warmupMarginMs) return false;
 
-    // P(returns) too low to justify even one warmup
-    if (pReturns <= threshold) {
+    // PRIMARY: unified strategy says don't warm (cool-bust or cool-full-write).
+    if (econConfident && !econWantsWarming) {
+      markDeadIfSurvivalLow(state, survivalAtIdle);
+      return false;
+    }
+
+    // FALLBACK (no confident strategy): legacy pReturns/threshold gate.
+    if (!econConfident && pReturns <= threshold) {
       markDeadIfSurvivalLow(state, survivalAtIdle);
       return false;
     }
@@ -1327,20 +1341,24 @@ export function shouldWarm(
       return false;
     }
 
-    // Rising cost threshold: after k cycles, the accumulated warmup cost
-    // means we need a higher P(returns) to justify the next one.
-    // k=1: 8.7%, k=3: 26%, k=5: 43%, k=6: 52% for Opus 5m.
-    // NOTE: intentionally does NOT use MIN_RETURN_PROBABILITY_FLOOR — the
-    // floor only gates the initial commitment (Phase A). Once committed,
-    // the rising threshold handles profitability based on sunk costs.
-    const risingThreshold = cumulativeCostThreshold(
-      cyclesSpent + 1, // +1 because we're deciding whether to do the NEXT cycle
-      cacheReadCostPerMTok,
-      cacheMissCostPerMTok,
-    );
-    if (pReturns <= risingThreshold) {
+    // PRIMARY: unified strategy no longer wants warming (flipped from hold-warm
+    // to cool-bust/full-write mid-break, e.g. after recalibration). Stop.
+    if (econConfident && !econWantsWarming) {
       markDeadIfSurvivalLow(state, survivalAtIdle);
       return false;
+    }
+
+    // FALLBACK: rising cost threshold (only when no confident strategy).
+    if (!econConfident) {
+      const risingThreshold = cumulativeCostThreshold(
+        cyclesSpent + 1, // +1 because we're deciding whether to do the NEXT cycle
+        cacheReadCostPerMTok,
+        cacheMissCostPerMTok,
+      );
+      if (pReturns <= risingThreshold) {
+        markDeadIfSurvivalLow(state, survivalAtIdle);
+        return false;
+      }
     }
 
     // Re-evaluate: expected remaining cycles must keep total under maxCycles
