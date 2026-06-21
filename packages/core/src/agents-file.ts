@@ -555,6 +555,7 @@ export function shouldImport(input: {
  */
 function _importEntries(entries: ParsedFileEntry[], projectPath: string): void {
   const seenIds = new Set<string>();
+  const pid = ensureProject(projectPath); // loop-invariant — resolve once
 
   for (const entry of entries) {
     if (entry.id !== null) {
@@ -573,7 +574,7 @@ function _importEntries(entries: ParsedFileEntry[], projectPath: string): void {
         existing &&
         existing.cross_project === 0 &&
         existing.project_id !== null &&
-        existing.project_id !== ensureProject(projectPath)
+        existing.project_id !== pid
       ) {
         continue;
       }
@@ -590,7 +591,6 @@ function _importEntries(entries: ParsedFileEntry[], projectPath: string): void {
         // Check for a fuzzy title match before creating — prevents duplicates
         // when two machines independently create entries for the same concept
         // with different UUIDs but similar titles.
-        const pid = ensureProject(projectPath);
         const fuzzyMatch = ltm.findFuzzyDuplicate({
           title: entry.title,
           projectId: pid,

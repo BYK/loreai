@@ -1,7 +1,38 @@
 import { beforeEach, describe, expect, test } from "vitest";
 import { db, ensureProject } from "../src/db";
 import * as entities from "../src/entities";
+import * as ltm from "../src/ltm";
 import { recallById, runRecall, searchRecall } from "../src/recall";
+
+describe("recallById('k:..') — append-only logical_id resolution (A2, #823)", () => {
+  const PROJECT = "/test/recall/k-a2";
+  beforeEach(() => {
+    const pid = ensureProject(PROJECT);
+    db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+  });
+
+  test("resolves a logical_id whose current version has a different row id", () => {
+    const id = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "decision",
+      title: "RecallA2",
+      content: "v1 detail body",
+    });
+    ltm.update(id, { content: "v2 detail body" }); // appends → id is now superseded
+    // id is the stable logical_id; without the getByLogical fallback this returns
+    // "No entry found" because get(id) misses the superseded v1 row.
+    const detail = recallById(`k:${id}`);
+    expect(detail).not.toContain("No entry found");
+    expect(detail).toContain("v2 detail body"); // current version content
+  });
+
+  test("returns not-found for an unknown knowledge id", () => {
+    expect(recallById("k:019eac47-0000-0000-0000-000000000000")).toContain(
+      "No entry found",
+    );
+  });
+});
 
 const PROJECT = "/test/recall-entity/project";
 
