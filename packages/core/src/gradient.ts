@@ -2966,7 +2966,7 @@ export function transform(input: {
     // floor (which compaction does NOT remove). Harmless while the evaluator is
     // shadow/log-only; PR2b MUST normalize both sides to the cache-input scale
     // (lift compressed to body + overhead + LTM, reconcile the uncalibrated factor
-    // on full) before acting on cool-bust.
+    // on full) before acting on cool-bust. Tracked in issue #886.
     state.cacheSizeCompressed =
       result.layer >= 1
         ? Math.max(0, Math.min(result.totalTokens, state.cacheSizeFull))
