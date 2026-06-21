@@ -331,10 +331,26 @@ export function startIdleScheduler(
       // Dropping idle work is safe.
       if (shouldShedLowPriority()) continue;
 
+      // Provider-aware auth guard (mirror of scheduleBackgroundWork): skip when
+      // the worker model's provider has no usable credential for this session.
+      // A no-auth worker call just degrades worker-health every idle tick;
+      // resolveAuth/getSessionAuth warns once on the mismatch, then stays quiet.
+      // Resumes once a turn uses a credentialed provider. #894
+      const idleWorkerModel = getWorkerModel(state.lastUpstream);
+      if (
+        idleWorkerModel &&
+        !resolveAuth(sessionID, idleWorkerModel.providerID)
+      ) {
+        continue;
+      }
+
       inProgress.add(sessionID);
       // Scope the circuit-breaker check to the provider this session's worker
       // will call — a 429 from a different provider must not pause this work.
-      const idleProviderID = getWorkerModel(state.lastUpstream)?.providerID;
+      // (idleWorkerModel may be undefined — getWorkerModel returns undefined
+      // when no provider can be resolved; the guard above only skips when it IS
+      // defined but unauthed, so preserve the undefined-safe access here.)
+      const idleProviderID = idleWorkerModel?.providerID;
       runBackground(
         () => doIdleWork(sessionID, state),
         `idle session=${sessionID.slice(0, 16)}`,

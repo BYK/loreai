@@ -562,6 +562,81 @@ describe("startIdleScheduler", () => {
     }
   });
 
+  test("skips background work when the worker model's provider has no credential (#894)", async () => {
+    vi.useFakeTimers();
+    try {
+      distillLimiter.clear();
+      curatorLimiter.clear();
+      const config = makeConfig();
+      const sessions = new Map<string, SessionState>();
+
+      // Session A: lastUpstream points at anthropic, but the only stored
+      // credential is under openrouter → resolveAuth(sid, "anthropic") is null
+      // (cross-provider fail-closed) → background work must be SKIPPED instead
+      // of firing a doomed no-auth worker call every tick.
+      sessions.set(
+        "no-cred-sess",
+        makeSessionState({
+          sessionID: "no-cred-sess",
+          lastRequestTime: Date.now() - 10 * 60 * 1000,
+          lastStopReason: "end_turn",
+          lastUpstream: {
+            url: "",
+            protocol: "anthropic",
+            providerID: "anthropic",
+            model: "claude-opus-4-8",
+            headers: {},
+          },
+        }),
+      );
+      setSessionAuth(
+        "no-cred-sess",
+        { scheme: "bearer", value: "or-key" },
+        "openrouter",
+      );
+
+      // Session B (control): lastUpstream provider matches the stored
+      // credential → resolveAuth succeeds → background work runs. Proves the
+      // skip above is the auth guard, not some unrelated idle-loop condition.
+      sessions.set(
+        "has-cred-sess",
+        makeSessionState({
+          sessionID: "has-cred-sess",
+          lastRequestTime: Date.now() - 10 * 60 * 1000,
+          lastStopReason: "end_turn",
+          lastUpstream: {
+            url: "",
+            protocol: "openai",
+            providerID: "openrouter",
+            model: "z-ai/glm-5.2",
+            headers: {},
+          },
+        }),
+      );
+      setSessionAuth(
+        "has-cred-sess",
+        { scheme: "bearer", value: "or-key" },
+        "openrouter",
+      );
+
+      const ran: string[] = [];
+      const stop = startIdleScheduler(config, sessions, async (sid) => {
+        ran.push(sid);
+      });
+
+      await vi.advanceTimersByTimeAsync(31_000);
+
+      expect(ran).toContain("has-cred-sess"); // control ran
+      expect(ran).not.toContain("no-cred-sess"); // skipped by the auth guard
+
+      stop();
+    } finally {
+      vi.useRealTimers();
+      distillLimiter.clear();
+      curatorLimiter.clear();
+    }
+  });
+
   test("runs the global dead-knowledge sweep on the first tick, with no active session", async () => {
     vi.useFakeTimers();
     try {
