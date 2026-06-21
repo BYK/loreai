@@ -310,6 +310,14 @@ describe("Tier 1b rotation: x-session-affinity (OpenCode nanoid) still rotates s
     expect(r1.status).toBe(200);
     await r1.text();
 
+    // Settle: under extreme parallel-suite load (vitest worker reuse across
+    // files), a stale async task may momentarily re-populate headerSessionIndex
+    // after harness setup, creating duplicate x-session-affinity entries that
+    // make findRotationPredecessor bail (ambiguous → no rotation → 2 sessions).
+    // A small await drains any lingering microtasks from setup/teardown so only
+    // the current test's entries are present. #859
+    await new Promise((r) => setTimeout(r, 0));
+
     // Second request: new nanoid, NO x-lore-project header at all.
     const r2 = await harness.chat(body("no-header two"), "key-A", {
       "x-session-affinity": "nanoid-after",
