@@ -4458,7 +4458,17 @@ function scheduleBackgroundWork(
   // store-key/lookup-key mismatch warning once, then we stay quiet, and work
   // resumes automatically once a turn uses a provider we hold a credential for.
   // Gates urgent distillation too: a no-auth call can never succeed. #894
-  if (model && !resolveAuth(sessionID, model.providerID)) return;
+  // Exempt the dedicated-worker-key setup (LORE_WORKER_API_KEY): there the
+  // worker uses its own credential and bypasses resolveAuth (getWorkerAuth,
+  // ~1697), so a session-auth miss must NOT disable background work — that
+  // cross-provider config (e.g. MiniMax workers, Anthropic sessions) is exactly
+  // when model.providerID legitimately differs from the session's credential.
+  if (
+    !config.workerApiKey &&
+    model &&
+    !resolveAuth(sessionID, model.providerID)
+  )
+    return;
 
   // When the OAuth account is near quota exhaustion, skip non-urgent
   // background work to preserve remaining entitlement for user-facing turns.

@@ -637,6 +637,59 @@ describe("startIdleScheduler", () => {
     }
   });
 
+  test("does NOT skip on a provider mismatch when a dedicated worker key is set (#894)", async () => {
+    vi.useFakeTimers();
+    try {
+      distillLimiter.clear();
+      curatorLimiter.clear();
+      // Dedicated worker key (LORE_WORKER_API_KEY): the worker uses its own
+      // credential and bypasses resolveAuth, so the provider-mismatch skip must
+      // NOT apply — this cross-provider config (e.g. MiniMax workers while
+      // sessions use Anthropic) is exactly when the mismatch is intentional.
+      const config = makeConfig({ workerApiKey: "dedicated-worker-key" });
+      const sessions = new Map<string, SessionState>();
+
+      // Same mismatch as the skip test: lastUpstream=anthropic, cred=openrouter.
+      sessions.set(
+        "mismatch-but-keyed",
+        makeSessionState({
+          sessionID: "mismatch-but-keyed",
+          lastRequestTime: Date.now() - 10 * 60 * 1000,
+          lastStopReason: "end_turn",
+          lastUpstream: {
+            url: "",
+            protocol: "anthropic",
+            providerID: "anthropic",
+            model: "claude-opus-4-8",
+            headers: {},
+          },
+        }),
+      );
+      setSessionAuth(
+        "mismatch-but-keyed",
+        { scheme: "bearer", value: "or-key" },
+        "openrouter",
+      );
+
+      const ran: string[] = [];
+      const stop = startIdleScheduler(config, sessions, async (sid) => {
+        ran.push(sid);
+      });
+
+      await vi.advanceTimersByTimeAsync(31_000);
+
+      // The dedicated worker key means the worker would authenticate despite the
+      // mismatch — background work must run, not be skipped by the auth guard.
+      expect(ran).toContain("mismatch-but-keyed");
+
+      stop();
+    } finally {
+      vi.useRealTimers();
+      distillLimiter.clear();
+      curatorLimiter.clear();
+    }
+  });
+
   test("runs the global dead-knowledge sweep on the first tick, with no active session", async () => {
     vi.useFakeTimers();
     try {

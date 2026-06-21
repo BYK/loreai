@@ -337,7 +337,11 @@ export function startIdleScheduler(
       // resolveAuth/getSessionAuth warns once on the mismatch, then stays quiet.
       // Resumes once a turn uses a credentialed provider. #894
       const idleWorkerModel = getWorkerModel(state.lastUpstream);
+      // Exempt the dedicated-worker-key setup (LORE_WORKER_API_KEY): the worker
+      // uses its own credential and bypasses resolveAuth, so a session-auth miss
+      // must NOT disable background work there.
       if (
+        !config.workerApiKey &&
         idleWorkerModel &&
         !resolveAuth(sessionID, idleWorkerModel.providerID)
       ) {
