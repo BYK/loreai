@@ -17,6 +17,8 @@ Commands:
                        Remote-gateway mode is also ON by default for long-running
                        setups — path-less sessions route to per-session buckets
                        so unrelated projects never merge onto the gateway cwd.
+                       Use --bg to run it detached in the background.
+  stop                Stop a background gateway started with \`lore start --bg\`
   setup [app]         Configure an AI app to route through lore
                        Supported: codex, opencode, claude-code
   logs                Show lore activity log
@@ -41,6 +43,8 @@ Options:
   -l, --local         Disable hosted mode AND remote-gateway mode for
                       \`lore start\` (keep FS ops active; bucket cwd fallback)
                       (env: LORE_HOSTED_MODE=0)
+      --bg, --daemon  \`lore start\`: run the gateway detached in the background,
+                      then print its address, PID, and log path and exit
   -d, --debug         Enable debug logging (env: LORE_DEBUG=1)
       --no-plugin     Skip auto-install of the @loreai/<app> plugin
                       for \`lore setup <app>\` (use on CI, air-gapped
@@ -122,6 +126,8 @@ Examples:
   lore -- --verbose --debug                  # Use -- to forward lore-like flags
   lore run --remote http://remote:3207  # Use a remote gateway
   lore start                    # Start gateway (hosted mode, FS ops disabled)
+  lore start --bg               # Start gateway in the background, then exit
+  lore stop                     # Stop a background gateway
   lore start --local            # Start gateway with FS ops enabled (local use)
   lore start -p 8080            # Start gateway on a custom port
   lore start -H 127.0.0.1 -H 100.69.65.125  # Bind to multiple interfaces

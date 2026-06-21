@@ -3,11 +3,15 @@
  *
  * Extracted from the old top-level index.ts boot logic.
  */
+import { spawn } from "node:child_process";
+import { openSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { loadConfig, DEFAULT_PORTS, type GatewayConfig } from "../config";
 import { startServer } from "../server";
 import { resetPipelineState } from "../pipeline";
-import { writePortFile, removePortFile } from "../portfile";
-import { embedding } from "@loreai/core";
+import { writePortFile, removePortFile, readPortFile } from "../portfile";
+import { writePidFile, removePidFile } from "../pidfile";
+import { dataDir, embedding } from "@loreai/core";
 import { safeExit } from "./exit";
 import { installSignalShutdown } from "./shutdown";
 
@@ -25,6 +29,12 @@ export interface StartOptions {
    * CLI: `--local` / `-l`.
    */
   local?: boolean;
+  /**
+   * When true, `lore start` daemonizes: it re-spawns itself detached, polls
+   * the gateway until healthy, prints the address + PID + log path, and exits 0.
+   * CLI: `--bg` / `--daemon`.
+   */
+  bg?: boolean;
 }
 
 export interface GatewayHandle {
@@ -55,6 +65,113 @@ export async function probeGateway(
   } catch {
     return false;
   }
+}
+
+/** Path to the daemon's combined stdout/stderr log. */
+export function daemonLogPath(): string {
+  return join(dataDir(), "gateway.log");
+}
+
+/**
+ * Reconstruct the argv for the detached child of `lore start --bg`.
+ *
+ * The child runs a plain foreground `start` with the same effective options,
+ * MINUS the daemonize flag (or it would fork forever). Building from the typed
+ * options — rather than mangling `process.argv` — keeps this deterministic and
+ * unit-testable across the npm and standalone-binary invocation forms.
+ */
+export function buildStartChildArgs(opts: StartOptions): string[] {
+  const args: string[] = ["start"];
+  if (opts.port !== undefined) args.push("--port", String(opts.port));
+  if (opts.hosts?.length) {
+    for (const h of opts.hosts) args.push("--host", h);
+  }
+  if (opts.debug) args.push("--debug");
+  if (opts.local) args.push("--local");
+  if (opts.remoteUrl) args.push("--remote", opts.remoteUrl);
+  return args;
+}
+
+/**
+ * Whether we are running as a packaged single-executable (SEA) binary, in
+ * which case `process.execPath` IS the lore program and no script path is
+ * needed. In dev/npm mode `process.execPath` is node/bun and we must pass the
+ * script (`process.argv[1]`) as the first arg.
+ */
+function isSeaBinary(): boolean {
+  try {
+    const sea = require("node:sea") as { isSea?: () => boolean };
+    return typeof sea.isSea === "function" ? sea.isSea() : false;
+  } catch {
+    return false;
+  }
+}
+
+/** Build the `{ command, args }` used to re-spawn lore detached. */
+export function daemonSpawnSpec(opts: StartOptions): {
+  command: string;
+  args: string[];
+} {
+  const childArgs = buildStartChildArgs(opts);
+  if (isSeaBinary()) {
+    return { command: process.execPath, args: childArgs };
+  }
+  // Dev/npm: prepend the script path (node/bun <script> start …).
+  return { command: process.execPath, args: [process.argv[1], ...childArgs] };
+}
+
+/**
+ * Daemonize: re-spawn `lore start` detached with stdio redirected to a log
+ * file, poll until the gateway is healthy, print where it's listening, and
+ * exit 0. On timeout, point the user at the log file and exit non-zero.
+ */
+async function startDaemon(opts: StartOptions): Promise<never> {
+  // If a gateway is already up on the preferred port, don't start a second one.
+  const existingPort = readPortFile();
+  if (existingPort) {
+    const url = `http://127.0.0.1:${existingPort}`;
+    if (await probeGateway(url)) {
+      console.log(`[lore] Gateway already running on ${url}`);
+      console.log(`[lore] Dashboard: ${url}/ui`);
+      console.log(`[lore] Stop it with: lore stop`);
+      safeExit(0);
+    }
+  }
+
+  const logPath = daemonLogPath();
+  mkdirSync(dataDir(), { recursive: true });
+  const logFd = openSync(logPath, "a");
+
+  const { command, args } = daemonSpawnSpec(opts);
+  const child = spawn(command, args, {
+    detached: true,
+    stdio: ["ignore", logFd, logFd],
+    env: process.env,
+  });
+  child.unref();
+
+  // Poll the port file → probe, until the detached gateway is serving.
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 250));
+    const port = readPortFile();
+    if (port && (await probeGateway(`http://127.0.0.1:${port}`))) {
+      const url = `http://127.0.0.1:${port}`;
+      console.log(
+        `[lore] Gateway started in the background (pid ${child.pid})`,
+      );
+      console.log(`[lore] Listening on ${url}`);
+      console.log(`[lore] Dashboard: ${url}/ui`);
+      console.log(`[lore] Logs: ${logPath}`);
+      console.log(`[lore] Stop it with: lore stop`);
+      safeExit(0);
+    }
+  }
+
+  console.error(
+    `[lore] Gateway did not become healthy within 10s. Check the log: ${logPath}`,
+  );
+  safeExit(1);
 }
 
 /**
@@ -147,6 +264,8 @@ export async function startGateway(
 
       // Write port file so plugins can discover us (even on random port).
       writePortFile(actualPort);
+      // Write pid file so `lore stop` can find and signal this process.
+      writePidFile();
 
       const boundServer = server;
       let shutdownStarted = false;
@@ -156,6 +275,7 @@ export async function startGateway(
         console.error("[lore] Shutting down…");
         boundServer.stop();
         removePortFile(actualPort);
+        removePidFile();
         // `fast`: skip the synchronous batch-queue LLM drain on process exit —
         // replaying queued background prompts through retries is what made
         // Ctrl+C hang for minutes. They resume next session.
@@ -231,6 +351,11 @@ export async function startGateway(
  * SIGINT/SIGTERM.
  */
 export async function commandStart(opts: StartOptions): Promise<never> {
+  // Background mode: re-spawn detached, report status, and exit.
+  if (opts.bg) {
+    return startDaemon(opts);
+  }
+
   const { config, port, owned, shutdown } = await startGateway(opts);
 
   const addrs = config.hosts.map((h) => `http://${h}:${port}`);

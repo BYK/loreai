@@ -118,6 +118,9 @@ const OPTIONS = {
   all: { type: "boolean" as const },
   // `lore start --local` — disable hosted mode (keep FS ops active)
   local: { type: "boolean" as const, short: "l" },
+  // `lore start --bg` / `--daemon` — run the gateway detached in the background
+  bg: { type: "boolean" as const },
+  daemon: { type: "boolean" as const },
   // `lore login` / `lore whoami` flags
   email: { type: "string" as const },
   verify: { type: "boolean" as const },
@@ -155,6 +158,8 @@ function buildStartOptions(values: {
   debug?: boolean;
   remote?: string;
   local?: boolean;
+  bg?: boolean;
+  daemon?: boolean;
 }): StartOptions {
   // Flatten: each --host value may itself be comma-separated
   const hosts = values.host?.flatMap((h) =>
@@ -169,6 +174,7 @@ function buildStartOptions(values: {
     debug: values.debug ?? undefined,
     remoteUrl: values.remote ?? undefined,
     local: values.local ?? undefined,
+    bg: values.bg || values.daemon || undefined,
   };
 }
 
@@ -266,6 +272,8 @@ export async function _cli(): Promise<void> {
       debug?: boolean;
       remote?: string;
       local?: boolean;
+      bg?: boolean;
+      daemon?: boolean;
     },
   );
 
@@ -281,6 +289,12 @@ export async function _cli(): Promise<void> {
       case "start":
         await commandStart(startOpts);
         break;
+
+      case "stop": {
+        const { commandStop } = await import("./stop");
+        await commandStop();
+        break;
+      }
 
       case "run": {
         // Lazy-import to avoid pulling in child_process + agent detection
@@ -378,6 +392,7 @@ export async function _cli(): Promise<void> {
             // Not a known agent — likely a typo. Show a helpful error.
             const knownCommands = [
               "start",
+              "stop",
               "run",
               "setup",
               "data",
