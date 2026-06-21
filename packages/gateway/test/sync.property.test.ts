@@ -18,7 +18,7 @@ import {
   setKV,
   syncData,
 } from "@loreai/core";
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 // --- Faithful in-memory Supabase (PostgREST surface the engine uses) ---------
 interface RemoteRow extends Record<string, unknown> {
@@ -147,10 +147,9 @@ function makeClient() {
 
 // pushOnce/pullOnce take the client as an argument (we pass a fresh makeClient()
 // each call — all share the module-level `remote`). The mock only keeps the real
-// supabase module from loading; syncOnce() (which uses getAuthedClient) is unused.
+// supabase module from loading; syncOnce()/getCurrentUser are unused here.
 vi.mock("../src/supabase", () => ({
   getAuthedClient: () => Promise.resolve(makeClient()),
-  getCurrentUser: () => Promise.resolve({ github_login: "octocat" }),
 }));
 
 import { pullOnce, pushOnce } from "../src/sync";
@@ -159,6 +158,29 @@ const client = () => makeClient() as never;
 
 const PROJECT = "/tmp/lore-sync-property";
 const IDS = ["k1", "k2", "k3"] as const;
+
+// Auth/tier model: `profiles` is a pull-only, server-authoritative mirror scoped
+// (by RLS) to the signed-in user. We serve exactly the current user's profile so a
+// pull mirrors ONE row and currentTier() resolves their plan. Seeding it means the
+// data properties also exercise the #828 pull-only guards (a mirrored profile gives
+// reconcile a pull-only row to (not) enqueue, and assertSyncInvariants then checks
+// "profiles <= 1" and "no pull-only outbox entry").
+const USERS: Record<string, string> = { u1: "pro", u2: "free" };
+let currentUser = "u1";
+function seedCurrentProfile(): void {
+  remote.set("profiles", [
+    {
+      id: currentUser,
+      tier: USERS[currentUser],
+      github_login: currentUser,
+      display_name: currentUser,
+      email: `${currentUser}@x.dev`,
+      is_deleted: false,
+      created_at: new Date(1000).toISOString(),
+      updated_at: nextTs(),
+    } as RemoteRow,
+  ]);
+}
 
 function resetAll(): void {
   deleteTeamConfig("sync.enabled");
@@ -176,6 +198,8 @@ function resetAll(): void {
   }
   remote.clear();
   clock = 1_000_000;
+  currentUser = "u1";
+  seedCurrentProfile(); // a pull mirrors the signed-in user's (pull-only) profile
 }
 
 function exists(id: string): boolean {
@@ -277,8 +301,8 @@ function remoteLiveIds(): Set<string> {
 }
 
 describe("sync engine — property/sequence tests (#833)", () => {
-  beforeEach(() => resetAll());
-
+  // NB: every property predicate calls resetAll() itself (fast-check runs the
+  // predicate many times per test), so no beforeEach is needed.
   test("standing invariants hold after EVERY op in a random sequence", async () => {
     await fc.assert(
       fc.asyncProperty(seqArb, async (ops) => {
@@ -358,6 +382,46 @@ describe("sync engine — property/sequence tests (#833)", () => {
         const r3 = await pushOnce(client());
         expect(r3.pushed).toBe(0);
       }),
+      { numRuns: 40 },
+    );
+  });
+
+  // The other #828 bug class: account switch / logout must leave currentTier()
+  // reflecting exactly the last-authenticated user, with no cross-account residue
+  // in the pull-only profiles mirror (tier-residue / "two rows" bugs, #828).
+  test("currentTier reflects the last-authenticated user across switch/logout", async () => {
+    const authOp = fc.oneof(
+      fc.record({
+        t: fc.constant("switch" as const),
+        user: fc.constantFrom(...Object.keys(USERS)),
+      }),
+      fc.record({ t: fc.constant("logout" as const) }),
+    );
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(authOp, { minLength: 1, maxLength: 8 }),
+        async (ops) => {
+          resetAll();
+          let expected = "free"; // nothing mirrored yet → default tier
+          for (const op of ops) {
+            if (op.t === "switch") {
+              // Sign in as `user`: wipe the previous mirror (+ reset its pull
+              // cursor) then pull this user's single server profile.
+              currentUser = op.user;
+              syncData.clearProfileMirror();
+              seedCurrentProfile();
+              await pullOnce(client());
+              expected = USERS[op.user];
+            } else {
+              syncData.clearProfileMirror(); // logout wipes the mirror
+              expected = "free";
+            }
+            expect(syncData.currentTier()).toBe(expected);
+            // No residue: profiles mirror holds at most the current account's row.
+            syncData.assertSyncInvariants();
+          }
+        },
+      ),
       { numRuns: 40 },
     );
   });
