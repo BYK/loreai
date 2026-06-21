@@ -17,13 +17,14 @@ import {
   touchSession,
   consolidationCooldownActive,
   perCategoryThreshold,
-  idleDistillInvalidatesWarmupBody,
+  invalidateWarmupBodyAfterIdleDistill,
   CONSOLIDATION_COOLDOWN_MS,
   CONSOLIDATION_REATTEMPT_GROWTH,
 } from "../src/idle";
 import { recordConversationCost, clearAllCosts } from "../src/cost-tracker";
 import { resetPipelineState } from "../src/pipeline";
-import { ltm, loadSessionCosts } from "@loreai/core";
+import { compressBody } from "../src/cache-analytics";
+import { ltm, loadSessionCosts, db, ensureProject } from "@loreai/core";
 import type { LLMClient } from "@loreai/core";
 import type { SessionState } from "../src/translate/types";
 
@@ -182,22 +183,46 @@ describe("perCategoryThreshold", () => {
   });
 });
 
-describe("idleDistillInvalidatesWarmupBody", () => {
-  test("invalidates a compressed session's stored body after a prefix mutation", () => {
-    expect(idleDistillInvalidatesWarmupBody(true, 1, true)).toBe(true);
-    expect(idleDistillInvalidatesWarmupBody(true, 3, true)).toBe(true);
+describe("invalidateWarmupBodyAfterIdleDistill", () => {
+  function stateWithBody(): SessionState {
+    return makeSessionState({
+      cacheAnalytics: {
+        lastRequestBody: compressBody('{"model":"x"}'),
+        lastRequestBodyLength: 10,
+        lastCacheRead: 0,
+        lastCacheCreation: 0,
+        turnCount: 0,
+        bustCount: 0,
+      },
+    });
+  }
+
+  test("drops a compressed session's stored body after a prefix mutation", () => {
+    const s1 = stateWithBody();
+    expect(invalidateWarmupBodyAfterIdleDistill(s1, true, 1)).toBe(true);
+    expect(s1.cacheAnalytics.lastRequestBody).toBeNull();
+
+    const s3 = stateWithBody();
+    expect(invalidateWarmupBodyAfterIdleDistill(s3, true, 3)).toBe(true);
+    expect(s3.cacheAnalytics.lastRequestBody).toBeNull();
   });
 
-  test("does NOT invalidate a layer-0 (full-passthrough) session — no distilled prefix in its body", () => {
-    expect(idleDistillInvalidatesWarmupBody(true, 0, true)).toBe(false);
+  test("preserves a layer-0 (full-passthrough) body — no distilled prefix in it", () => {
+    const s = stateWithBody();
+    expect(invalidateWarmupBodyAfterIdleDistill(s, true, 0)).toBe(false);
+    expect(s.cacheAnalytics.lastRequestBody).not.toBeNull();
   });
 
-  test("does NOT invalidate when the prefix did not mutate", () => {
-    expect(idleDistillInvalidatesWarmupBody(false, 2, true)).toBe(false);
+  test("preserves the body when the prefix did not mutate", () => {
+    const s = stateWithBody();
+    expect(invalidateWarmupBodyAfterIdleDistill(s, false, 2)).toBe(false);
+    expect(s.cacheAnalytics.lastRequestBody).not.toBeNull();
   });
 
-  test("does NOT invalidate when there is no stored body", () => {
-    expect(idleDistillInvalidatesWarmupBody(true, 2, false)).toBe(false);
+  test("no-ops when there is no stored body", () => {
+    const s = makeSessionState(); // lastRequestBody: null
+    expect(invalidateWarmupBodyAfterIdleDistill(s, true, 2)).toBe(false);
+    expect(s.cacheAnalytics.lastRequestBody).toBeNull();
   });
 });
 
@@ -216,6 +241,73 @@ describe("buildIdleWorkHandler", () => {
     // No undistilled messages and no knowledge entries → all worker LLM
     // steps (distillation/curation/consolidation) are skipped.
     expect(llm.prompt).not.toHaveBeenCalled();
+  });
+
+  test("drives force-distill + meta-consolidation but preserves a layer-0 warmup body", async () => {
+    const projectPath = makeProjectDir();
+    const sessionID = "idle-distill-wiring";
+    const pid = ensureProject(projectPath);
+    const T = Date.now();
+
+    // Undistilled messages → force-distill runs and creates a gen-0 segment.
+    for (let i = 0; i < 6; i++) {
+      db()
+        .query(
+          `INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
+           VALUES (?, ?, ?, 'user', ?, ?, 0, ?, '{}')`,
+        )
+        .run(
+          `wire-msg-${i}`,
+          pid,
+          sessionID,
+          "x".repeat(600),
+          200,
+          T + i * 1000,
+        );
+    }
+    // >= metaThreshold (20) gen-0 distillations → meta-consolidation runs.
+    for (let i = 0; i < 20; i++) {
+      db()
+        .query(
+          `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+           VALUES (?, ?, ?, '', '', ?, '[]', 0, ?, 0, ?)`,
+        )
+        .run(`wire-g0-${i}`, pid, sessionID, `obs ${i} `.repeat(20), 50, T + i);
+    }
+
+    // Stub returns compressed observations so both distill + meta succeed.
+    const llm: LLMClient = {
+      prompt: vi.fn(
+        async () => "<observations>\nshort summary\n</observations>",
+      ),
+    };
+    const state = makeSessionState({
+      sessionID,
+      projectPath,
+      turnsSinceCuration: 0,
+      cacheAnalytics: {
+        lastRequestBody: compressBody('{"model":"x","messages":[]}'),
+        lastRequestBodyLength: 20,
+        lastCacheRead: 0,
+        lastCacheCreation: 0,
+        turnCount: 0,
+        bustCount: 0,
+      },
+    });
+
+    const prev = process.env.LORE_BATCH_DISABLED;
+    process.env.LORE_BATCH_DISABLED = "1"; // direct (synchronous) distillation
+    try {
+      await buildIdleWorkHandler(llm)(sessionID, state);
+    } finally {
+      if (prev === undefined) delete process.env.LORE_BATCH_DISABLED;
+      else process.env.LORE_BATCH_DISABLED = prev;
+    }
+
+    // The handler drove force-distill + meta-consolidation (prefix mutated), but
+    // this session never transformed → getLastLayer == 0 → its full-passthrough
+    // warmup body is preserved (only COMPRESSED sessions are invalidated).
+    expect(state.cacheAnalytics.lastRequestBody).not.toBeNull();
   });
 
   test("exports a knowledge file when the project has entries", async () => {

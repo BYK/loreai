@@ -191,22 +191,25 @@ export function perCategoryThreshold(maxEntries: number): number {
 
 /**
  * After an idle tick that may have rewritten the distilled prefix (messages[1])
- * via force-distillation / meta-consolidation, decide whether the cache warmer's
- * stored body is now stale and must be dropped.
+ * via force-distillation / meta-consolidation, drop the cache warmer's stored
+ * body when it is now stale, and report whether it did.
  *
- * True only when ALL hold:
+ * Stale ⇔ ALL hold:
  *  - `prefixMutated`: idle distillation actually rewrote the distilled prefix;
- *  - `hasStoredBody`: there is a warmup body to invalidate;
  *  - `layer >= 1`: the session is COMPRESSED, so its body actually carries the
  *    distilled prefix. Layer-0 (full-passthrough) bodies have no distilled
- *    prefix, so distillation doesn't change them — leave their warming untouched.
+ *    prefix, so distillation doesn't change them — leave their warming untouched;
+ *  - there is a stored body to invalidate.
  */
-export function idleDistillInvalidatesWarmupBody(
+export function invalidateWarmupBodyAfterIdleDistill(
+  state: SessionState,
   prefixMutated: boolean,
   layer: number,
-  hasStoredBody: boolean,
 ): boolean {
-  return prefixMutated && hasStoredBody && layer >= 1;
+  const stale =
+    prefixMutated && layer >= 1 && state.cacheAnalytics.lastRequestBody != null;
+  if (stale) state.cacheAnalytics.lastRequestBody = null;
+  return stale;
 }
 
 /**
@@ -775,17 +778,13 @@ export function buildIdleWorkHandler(
     // and the idle force-distill above is explicitly preparing a smaller
     // post-idle-compact body. So the cache warmer's stored body is now stale:
     // replaying it would just refresh a prefix the next turn busts anyway (the
-    // large-session cacheRead=0 waste). Null it — same rationale as the /compact
+    // large-session cacheRead=0 waste). Drop it — same rationale as the /compact
     // and model-switch invalidations in pipeline.ts.
-    if (
-      idleDistillInvalidatesWarmupBody(
-        idlePrefixMutated,
-        getLastLayer(sessionID),
-        state.cacheAnalytics.lastRequestBody != null,
-      )
-    ) {
-      state.cacheAnalytics.lastRequestBody = null;
-    }
+    invalidateWarmupBodyAfterIdleDistill(
+      state,
+      idlePrefixMutated,
+      getLastLayer(sessionID),
+    );
 
     // 2. Curation — cost-aware frequency: on expensive worker models, curate
     //    less often (same multiplier as the inline path in pipeline.ts).
