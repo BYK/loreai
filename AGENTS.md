@@ -4,6 +4,10 @@
 For long-term knowledge entries managed by [lore](https://github.com/BYK/loreai) (gotchas, patterns, decisions, architecture), see [`.lore.md`](.lore.md) in the project root.
 <!-- End lore-managed section -->
 
+## Review
+
+See [`quality/REVIEW.md`](quality/REVIEW.md) for the review heuristics and workflow — regression-test discipline, adversarial-order state setup, fan-out registry coverage, recurring bug-class batteries, and the two-reviewer rule. Every non-trivial PR requires an adversarial correctness review before merge.
+
 # Project Overview
 
 Lore is a **three-tier memory architecture** for AI coding agents. It intercepts LLM API calls (as a transparent proxy or native plugin), distills conversation history into compressed summaries, and extracts long-term knowledge entries that persist across sessions.
