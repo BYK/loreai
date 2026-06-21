@@ -376,6 +376,26 @@ describe("pushOnce — happy path", () => {
     // The tombstone must carry a NULL content_hash on the wire (the contract).
     expect(remote?.content_hash).toBeNull();
   });
+
+  test("a row deleted then RE-CREATED while sync was OFF is re-synced on enable (not orphaned)", async () => {
+    // While enabled, insert+delete leaves a coalesced delete in the outbox. Then
+    // sync goes OFF and the row is re-created (no capture). On re-enable, reconcile
+    // must re-enqueue the LIVE row — otherwise seedOutbox skips it (it still has the
+    // stale pending delete), the coalesced delete pushes (a no-op on a row that was
+    // never uploaded), and the re-created row is silently never synced.
+    syncData.enableSync("basic");
+    insertKnowledge("kr", "v1");
+    db().query("DELETE FROM knowledge WHERE id='kr'").run(); // outbox: upsert, delete
+    syncData.disableSync();
+    insertKnowledge("kr", "v2"); // re-created while OFF — not captured
+    syncData.enableSync("basic"); // reconcile must catch the live row
+    const r = await pushOnce(makeClient() as never);
+    expect(r.pushed).toBeGreaterThan(0);
+    const remote = tableRows("knowledge").find((x) => x.id === "kr");
+    expect(remote).toBeDefined(); // the re-created row reached the remote…
+    expect(remote?.is_deleted).not.toBe(true); // …live, not tombstoned…
+    expect(remote?.content).toBe("v2"); // …with the re-created content.
+  });
 });
 
 describe("BLOCKER regressions", () => {
