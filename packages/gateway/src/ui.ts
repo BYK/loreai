@@ -53,6 +53,15 @@ import type { InterTurnHistogram, SessionState } from "./translate/types";
 import { resolveAuth } from "./auth";
 import { getQuotaForCredential, type QuotaSnapshot } from "./quota";
 
+/**
+ * Resolve a knowledge id from a (possibly stale) UI route/form — a current OR
+ * superseded version id, or a logical_id — to the current entry (A2, #823). A
+ * link captured before the curator appended a new version still resolves.
+ */
+function kget(id: string) {
+  return ltm.get(id) ?? ltm.getByLogical(ltm.logicalIdOf(id));
+}
+
 // ---------------------------------------------------------------------------
 // HTML template helpers
 // ---------------------------------------------------------------------------
@@ -1931,7 +1940,7 @@ async function pageUserKnowledge(): Promise<string> {
 }
 
 function pageKnowledge(id: string): string | null {
-  const entry = ltm.get(id);
+  const entry = kget(id);
   if (!entry) return null;
 
   const projName = entry.project_id ? projectName(entry.project_id) : null;
@@ -3526,8 +3535,8 @@ export async function handleUIRequest(
       "/ui/api/merge/knowledge/:survivingId/:sourceId",
     );
     if (mergeKnowledge) {
-      const surviving = ltm.get(mergeKnowledge.survivingId);
-      const source = ltm.get(mergeKnowledge.sourceId);
+      const surviving = kget(mergeKnowledge.survivingId);
+      const source = kget(mergeKnowledge.sourceId);
       if (surviving && source && surviving.id !== source.id) {
         // Parse form data before removal — source entry is deleted below.
         const formData = await req.formData();
@@ -3557,8 +3566,8 @@ export async function handleUIRequest(
       "/ui/api/dismiss/knowledge/:survivingId/:sourceId",
     );
     if (dismissKnowledge) {
-      const surviving = ltm.get(dismissKnowledge.survivingId);
-      const source = ltm.get(dismissKnowledge.sourceId);
+      const surviving = kget(dismissKnowledge.survivingId);
+      const source = kget(dismissKnowledge.sourceId);
       const formData = await req.formData();
       const similarity = Number.parseFloat(
         (formData.get("similarity") as string) || "",
@@ -3610,7 +3619,7 @@ export async function handleUIRequest(
     // Delete knowledge
     const delKnowledge = matchRoute(pathname, "/ui/api/delete/knowledge/:id");
     if (delKnowledge) {
-      const entry = ltm.get(delKnowledge.id);
+      const entry = kget(delKnowledge.id);
       data.deleteKnowledge(delKnowledge.id);
       if (entry?.cross_project || !entry?.project_id) {
         return redirect("/ui/knowledge");
@@ -3670,7 +3679,7 @@ export async function handleUIRequest(
         data.reassignKnowledge(moveKnowledge.id, targetPath);
       }
       // Redirect to the entry's updated page
-      const entry = ltm.get(moveKnowledge.id);
+      const entry = kget(moveKnowledge.id);
       if (entry?.project_id) {
         return redirect(`/ui/projects/${entry.project_id}`);
       }

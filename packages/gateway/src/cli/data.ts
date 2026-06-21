@@ -148,7 +148,7 @@ async function cmdList(
           truncate(e.title, 40),
           e.confidence.toFixed(2),
           formatDate(e.updated_at),
-          e.id.slice(0, 8),
+          e.logical_id.slice(0, 8), // stable id (A2): show/delete/move resolve by logical_id
         ]),
         [14, 40, 12, 20, 10],
       );
@@ -252,7 +252,8 @@ async function cmdShow(
   switch (type) {
     case "knowledge": {
       const id = data.resolveId("knowledge", rawId) ?? rawId;
-      const entry = ltm.get(id);
+      // Resolve to the current version via the stable logical_id (A2, #823).
+      const entry = ltm.get(id) ?? ltm.getByLogical(ltm.logicalIdOf(id));
       if (!entry) {
         console.error(`Knowledge entry not found: ${rawId}`);
         process.exit(1);
@@ -1392,7 +1393,7 @@ async function cmdListRemote(
           truncate(e.title, 40),
           e.confidence.toFixed(2),
           formatDate(e.updated_at),
-          e.id.slice(0, 8),
+          e.id.slice(0, 8), // remote API presents logical_id as id (A2)
         ]),
         [14, 40, 12, 20, 10],
       );

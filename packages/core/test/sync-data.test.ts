@@ -22,6 +22,7 @@ import {
   getSyncState,
   hasPendingChange,
   isSyncEnabled,
+  knowledgeSyncOp,
   maxOutboxSeq,
   pickSyncColumns,
   readOutbox,
@@ -33,8 +34,44 @@ import {
   SYNCED_TABLES,
   withApplying,
 } from "../src/sync-data";
+import * as ltm from "../src/ltm";
 
 const now = () => Date.now();
+
+describe("knowledgeSyncOp — append-only remote mapping (A2)", () => {
+  test("current live → upsert; superseded + death-cert → delete; gone → skip", () => {
+    const id = ltm.create({
+      projectPath: "/tmp/lore-sync-kso",
+      scope: "project",
+      category: "decision",
+      title: "KSO",
+      content: "secret v1",
+    });
+    expect(knowledgeSyncOp(id)).toBe("upsert"); // current live
+
+    const v2 = ltm.appendVersion(id, { content: "redacted v2" });
+    // The superseded v1 must become a remote DELETE so the old (secret) content is
+    // removed from the remote — not re-pushed as a live row.
+    expect(knowledgeSyncOp(id)).toBe("delete");
+    expect(knowledgeSyncOp(v2 as string)).toBe("upsert"); // new current live
+
+    ltm.remove(id); // append a death-cert, demoting v2
+    // Deletion propagates: the now-superseded v2 becomes a remote DELETE.
+    expect(knowledgeSyncOp(v2 as string)).toBe("delete");
+    const deathCert = (
+      db()
+        .query(
+          "SELECT id FROM knowledge WHERE logical_id = ? AND is_current = 1",
+        )
+        .get(id) as { id: string }
+    ).id;
+    expect(knowledgeSyncOp(deathCert)).toBe("delete"); // death cert → delete
+
+    expect(knowledgeSyncOp("00000000-0000-0000-0000-000000000000")).toBe(
+      "skip",
+    );
+  });
+});
 
 function insertKnowledge(id: string, title: string, content: string): string {
   const pid = ensureProject("/tmp/lore-sync-data");

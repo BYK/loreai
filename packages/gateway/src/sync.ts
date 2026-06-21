@@ -147,7 +147,19 @@ async function pushEntry(
   e: syncData.OutboxEntry,
   res: SyncResult,
 ): Promise<PushOutcome> {
-  const { table_name: table, row_id: rowId, op } = e;
+  const { table_name: table, row_id: rowId } = e;
+  let op = e.op;
+
+  // A2 (#823): knowledge is append-only — update()/remove() append immutable
+  // versions and remove() emits no physical-delete op. Translate the version churn
+  // so the remote mirrors only the current LIVE version: a superseded or
+  // soft-deleted row becomes a remote soft-delete (propagating deletions + removing
+  // stale/redacted content), a current live row upserts. See knowledgeSyncOp.
+  if (table === "knowledge" && op === "upsert") {
+    const kop = syncData.knowledgeSyncOp(rowId);
+    if (kop === "skip") return "ok";
+    op = kop;
+  }
 
   if (op === "delete") {
     const { error } = await client

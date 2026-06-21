@@ -362,7 +362,9 @@ export function applyOps(
       });
       created++;
     } else if (op.op === "update") {
-      const entry = ltm.get(op.id);
+      // op.id may already be superseded by an earlier op on the same entry in
+      // this batch — resolve through the stable logical_id so the op isn't dropped.
+      const entry = ltm.get(op.id) ?? ltm.getByLogical(ltm.logicalIdOf(op.id));
       if (entry) {
         // Guard: don't mutate entries owned by a different project.
         // Cross-project entries (project_id=NULL or same project) are safe.
@@ -393,7 +395,8 @@ export function applyOps(
         updated++;
       }
     } else if (op.op === "delete") {
-      const entry = ltm.get(op.id);
+      // Resolve through logical_id in case an earlier op in this batch superseded op.id.
+      const entry = ltm.get(op.id) ?? ltm.getByLogical(ltm.logicalIdOf(op.id));
       if (entry) {
         // Guard: don't delete entries owned by a different project.
         if (entry.project_id !== null && input.projectPath) {

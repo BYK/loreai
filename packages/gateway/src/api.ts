@@ -164,7 +164,9 @@ function handleGlobalStats(): Response {
 
 function handleListKnowledge(_url: URL, projectPath: string): Response {
   const entries = ltm.forProject(projectPath, false);
-  return jsonResponse(entries);
+  // Present the stable logical_id as the external id (A2, #823), consistent with
+  // handleShowKnowledge, so a listed id round-trips through show/delete/move.
+  return jsonResponse(entries.map((e) => ({ ...e, id: e.logical_id })));
 }
 
 function handleListSessions(url: URL, projectPath: string): Response {

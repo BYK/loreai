@@ -597,6 +597,26 @@ export function applyRemoteDelete(table: string, rowId: string): void {
   );
 }
 
+/**
+ * Map a knowledge outbox row to its remote sync op under the append-only model
+ * (A2, #823). The remote mirrors only the CURRENT LIVE version: a superseded
+ * (is_current=0) or soft-deleted (is_deleted=1) version becomes a remote
+ * soft-delete — this removes stale/redacted content from the remote and
+ * propagates deletions (remove() no longer emits a physical-delete outbox op).
+ * A current live version is upserted. Returns "skip" if the row is gone.
+ *
+ * NOTE: this keeps the remote a correct CURRENT-only mirror keyed by the current
+ * version id. Full cross-device id↔logical_id convergence (so refs resolve the
+ * same entry on every device) is completed in sub-PR 3.
+ */
+export function knowledgeSyncOp(rowId: string): "upsert" | "delete" | "skip" {
+  const v = db()
+    .query("SELECT is_current, is_deleted FROM knowledge WHERE id = ?")
+    .get(rowId) as { is_current: number; is_deleted: number } | undefined;
+  if (!v) return "skip";
+  return v.is_current === 0 || v.is_deleted === 1 ? "delete" : "upsert";
+}
+
 /** Rebuild an external-content FTS5 index after a batch of pulled changes. */
 export function rebuildFts(ftsTable: string): void {
   if (ftsTable === "knowledge_fts") {

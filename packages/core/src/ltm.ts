@@ -363,8 +363,16 @@ export function update(
   // sensitivity are MUTABLE metadata applied to the current version in place.
   // `id` may be a current OR superseded version id — resolve to the logical_id.
   const logicalId = logicalIdOf(id);
+  // Append a new version only when the content actually changed — a byte-identical
+  // "update" (e.g. the curator re-observing an unchanged entry) must NOT append, or
+  // frequently re-observed entries grow the table unbounded until compaction.
+  let appended = false;
   if (input.content !== undefined) {
-    appendVersion(logicalId, { content: input.content });
+    const cur = getByLogical(logicalId);
+    if (cur && cur.content !== input.content) {
+      appendVersion(logicalId, { content: input.content });
+      appended = true;
+    }
   }
 
   const sets: string[] = [];
@@ -398,8 +406,8 @@ export function update(
     )
     .run(...(params as [string, ...string[]]));
 
-  // Re-embed the new current version when content changed (fire-and-forget).
-  if (embedding.isAvailable() && input.content !== undefined) {
+  // Re-embed the new current version only when a content change was appended.
+  if (embedding.isAvailable() && appended) {
     const entry = getByLogical(logicalId);
     if (entry) {
       embedding.embedKnowledgeEntry(entry.id, entry.title, entry.content);
