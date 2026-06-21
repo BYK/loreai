@@ -166,6 +166,7 @@ import {
   resetBackgroundLimiter,
   isBackgroundPaused,
   drainBackground,
+  boundedSettle,
 } from "./background-limiter";
 import {
   extractAuth,
@@ -474,7 +475,9 @@ export async function resetPipelineState(opts?: {
       stopIdleScheduler = null;
     }
     await drainBackground();
-    await Promise.allSettled([...inFlightBackground]);
+    // Bound this drain too (Seer) — a stalled urgent distillation / curation
+    // chain must not hang the reset, matching drainBackground's guarantee.
+    await boundedSettle(inFlightBackground);
     inFlightBackground.clear();
   }
   initialized = false;

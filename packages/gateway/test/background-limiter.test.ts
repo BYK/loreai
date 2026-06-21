@@ -2,6 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import {
   runBackground,
   drainBackground,
+  boundedSettle,
   isBackgroundPaused,
   tripCircuitBreaker,
   resetBackgroundLimiter,
@@ -581,6 +582,31 @@ describe("background-limiter", () => {
 
       release(); // let the task finish so it leaves the in-flight set
       await task;
+    });
+  });
+
+  describe("boundedSettle", () => {
+    test("resolves immediately on empty input", async () => {
+      await expect(boundedSettle([])).resolves.toBeUndefined();
+    });
+
+    test("awaits settled promises", async () => {
+      let done = false;
+      const p = (async () => {
+        await new Promise((r) => setTimeout(r, 20));
+        done = true;
+      })();
+      await boundedSettle([p]);
+      expect(done).toBe(true);
+    });
+
+    test("returns after the timeout if a promise never settles", async () => {
+      const stuck = new Promise<void>(() => {}); // never resolves
+      const start = Date.now();
+      await boundedSettle([stuck], 50);
+      const elapsed = Date.now() - start;
+      expect(elapsed).toBeGreaterThanOrEqual(40);
+      expect(elapsed).toBeLessThan(1500);
     });
   });
 });

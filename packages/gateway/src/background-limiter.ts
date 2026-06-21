@@ -319,7 +319,22 @@ export async function runBackground<T>(
  */
 export async function drainBackground(timeoutMs = 5000): Promise<void> {
   limiter.clearQueue(); // discard not-yet-started tasks — they never write
-  if (activeTasks.size === 0) return;
+  await boundedSettle(activeTasks, timeoutMs);
+}
+
+/**
+ * `Promise.allSettled` over `promises`, but bounded by `timeoutMs` so a stalled
+ * promise can never hang the caller. Resolves on whichever comes first. Shared
+ * by `drainBackground` (limiter tasks) and `resetPipelineState` (the direct
+ * urgent-distillation / curation chains in `inFlightBackground`) so BOTH drains
+ * carry the same hang guard. See #885.
+ */
+export async function boundedSettle(
+  promises: Iterable<Promise<unknown>>,
+  timeoutMs = 5000,
+): Promise<void> {
+  const arr = [...promises];
+  if (arr.length === 0) return;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<void>((resolve) => {
     // unref so the timer can never independently hold the event loop open.
@@ -327,7 +342,7 @@ export async function drainBackground(timeoutMs = 5000): Promise<void> {
     timer.unref?.();
   });
   try {
-    await Promise.race([Promise.allSettled([...activeTasks]), timeout]);
+    await Promise.race([Promise.allSettled(arr), timeout]);
   } finally {
     if (timer) clearTimeout(timer);
   }
