@@ -1338,6 +1338,16 @@ const MIGRATIONS: string[] = [
   CREATE INDEX IF NOT EXISTS idx_knowledge_project_current
     ON knowledge(project_id) WHERE is_current = 1 AND is_deleted = 0;
   `,
+  `
+  -- Version 52: widen the sync_outbox per-row lookup index to include seq, so
+  -- seedOutbox's "latest pending op for this row" probe (ORDER BY seq DESC LIMIT 1)
+  -- is a pure index seek instead of a sort within the (table_name,row_id) group.
+  -- Same name as before (a superset prefix), so the by-name IF NOT EXISTS ensures
+  -- elsewhere see it as present and never revert it.
+  DROP INDEX IF EXISTS idx_sync_outbox_table_row;
+  CREATE INDEX IF NOT EXISTS idx_sync_outbox_table_row
+    ON sync_outbox (table_name, row_id, seq);
+  `,
 ];
 
 /**
