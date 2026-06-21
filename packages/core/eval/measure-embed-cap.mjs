@@ -72,13 +72,21 @@ const worker = new Worker(wrapper, {
 let nextId = 1;
 const pending = new Map();
 worker.on("message", (msg) => {
+  if (msg.type === "init-error") {
+    // init-error carries no id — fail every pending request and bail so the
+    // script doesn't hang on the first await when the model fails to load.
+    console.error("worker init-error:", msg.error);
+    for (const p of pending.values()) p.reject(new Error(msg.error));
+    pending.clear();
+    process.exit(1);
+  }
   const p = pending.get(msg.id);
   if (msg.type === "result") {
     if (p) {
       pending.delete(msg.id);
       p.resolve(msg.vectors);
     }
-  } else if (msg.type === "error" || msg.type === "init-error") {
+  } else if (msg.type === "error") {
     if (p) {
       pending.delete(msg.id);
       p.reject(new Error(msg.error));
