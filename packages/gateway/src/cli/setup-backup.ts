@@ -192,7 +192,12 @@ export function restoreJsonBackup(
     }
   }
 
-  delete config[LORE_BACKUP_KEY];
+  // Consume the backup only when everything was reverted. If some keys were
+  // skipped (the user changed them after setup), keep the sidecar so their
+  // original values remain recoverable — never silently drop that metadata.
+  if (skipped.length === 0) {
+    delete config[LORE_BACKUP_KEY];
+  }
   return { hadBackup: true, restored, skipped };
 }
 
@@ -288,7 +293,9 @@ export function prependTomlBackupBlock(content: string, block: string): string {
  * Restore a Codex TOML file from its commented backup block. For each recorded
  * key: revert to the prior value (or delete it if originally unset) **only when
  * the file still holds the value lore wrote** — a value the user changed after
- * setup is left untouched and reported as skipped. Removes the backup block.
+ * setup is left untouched and reported as skipped. The backup block is removed
+ * only when every key was reverted; if any were skipped it is kept so their
+ * original values stay recoverable.
  */
 export function restoreTomlBackup(content: string): {
   content: string;
@@ -316,8 +323,10 @@ export function restoreTomlBackup(content: string): {
   const restored: string[] = [];
   const skipped: string[] = [];
   const entryLines = lines.slice(start + 1, end);
-  // Remove the block first so subsequent set/delete operate on clean content.
-  let result = [...lines.slice(0, start), ...lines.slice(end + 1)].join("\n");
+  // Restore against the FULL content — the block lines are comments, so they
+  // never match a top-level key pattern. The block is stripped afterwards, but
+  // only when nothing was skipped (see below).
+  let result = content;
 
   for (const raw of entryLines) {
     const body = raw.replace(/^#\s*/, "");
@@ -348,6 +357,17 @@ export function restoreTomlBackup(content: string): {
         ? deleteTomlTopLevelKey(result, key)
         : setTomlTopLevelKeyRaw(result, key, priorValue);
     restored.push(key);
+  }
+
+  // Strip the backup block only when everything was reverted. If some keys were
+  // skipped (the user changed them), keep the block so their original values
+  // remain recoverable — never silently drop that metadata.
+  if (skipped.length === 0) {
+    const out = result.split("\n");
+    const s = out.findIndex((l) => l.trim() === TOML_BACKUP_HEADER);
+    let e = s;
+    while (e < out.length && out[e].trim() !== TOML_BACKUP_FOOTER) e++;
+    result = [...out.slice(0, s), ...out.slice(e + 1)].join("\n");
   }
 
   return {

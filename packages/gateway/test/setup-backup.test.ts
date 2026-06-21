@@ -150,6 +150,9 @@ describe("restoreJsonBackup", () => {
     expect(getPath(cfg, "env.ANTHROPIC_BASE_URL")).toBe(
       "http://user-changed:9999",
     );
+    // A key was skipped → the sidecar is KEPT so its prior value stays
+    // recoverable (Seer #876 — no metadata loss).
+    expect(LORE_BACKUP_KEY in cfg).toBe(true);
   });
 
   it("reports no backup when the sidecar is missing", () => {
@@ -276,8 +279,12 @@ describe("TOML backup block round-trip", () => {
     expect(restored).toContain(
       'openai_base_url = "http://user-changed:9999/v1"',
     );
-    // The block is still removed.
-    expect(restored).not.toContain("lore setup backup");
+    // Because a key was skipped, the backup block is KEPT so the skipped key's
+    // original value stays recoverable (Seer #876 — no metadata loss).
+    expect(restored).toContain("lore setup backup");
+    expect(restored).toContain(
+      '#   openai_base_url = "https://api.openai.com/v1"',
+    );
   });
 
   it("reports no backup when the block is absent", () => {

@@ -143,6 +143,24 @@ describe("commandSetup — OpenCode", () => {
     expect(restored.compaction).toBeUndefined();
     expect(restored._loreBackup).toBeUndefined();
   });
+
+  it("does NOT remove a plugin lore never added (Seer #876)", async () => {
+    // --no-plugin means lore does not add @loreai/opencode, so pluginAdded is
+    // false in the backup. If the user adds it themselves afterwards, undo must
+    // leave it alone.
+    await commandSetup(["opencode"], { port: 3299, noPlugin: true });
+    const cfg = JSON.parse(readFileSync(ocPath(), "utf8"));
+    expect(cfg._loreBackup.pluginAdded).toBe(false);
+
+    // User manually adds the plugin after setup.
+    cfg.plugin = ["@loreai/opencode"];
+    writeFileSync(ocPath(), JSON.stringify(cfg, null, 2));
+
+    await commandSetup(["undo", "opencode"], {});
+
+    const restored = JSON.parse(readFileSync(ocPath(), "utf8"));
+    expect(restored.plugin).toEqual(["@loreai/opencode"]); // preserved
+  });
 });
 
 describe("commandSetup — undo with nothing to restore", () => {

@@ -677,8 +677,8 @@ function setupOpencode(baseUrl: string, noPlugin: boolean): void {
 
   const existing = readJsonConfig(configPath);
 
-  // Capture a backup of the values lore is about to set (provider baseURLs +
-  // compaction) and whether lore will add its plugin to the array.
+  // Values lore is about to set (provider baseURLs + compaction), captured from
+  // the ORIGINAL config for the backup's prior values.
   const loreValues: Record<string, unknown> = { "compaction.auto": false };
   for (const id of OPENCODE_SETUP_PROVIDER_IDS) {
     loreValues[`provider.${id}.options.baseURL`] = baseUrl;
@@ -687,12 +687,12 @@ function setupOpencode(baseUrl: string, noPlugin: boolean): void {
   const pluginAlreadyPresent =
     Array.isArray(existingPlugins) &&
     existingPlugins.includes("@loreai/opencode");
-  const backup = captureJsonBackup(existing, loreValues, {
-    pluginAdded: !noPlugin && !pluginAlreadyPresent,
-  });
 
+  // Write the provider/compaction config first WITHOUT a backup. The backup is
+  // finalized at the end, after the plugin install, so `pluginAdded` reflects
+  // what actually happened (a failed install must NOT later cause undo to
+  // remove a plugin the user added themselves).
   const updated = updateOpencodeConfig(existing, baseUrl);
-  attachJsonBackup(updated, backup);
   writeFileSync(configPath, `${JSON.stringify(updated, null, 2)}\n`, "utf8");
 
   console.log(`[lore] OpenCode configured to use Lore gateway.`);
@@ -703,8 +703,8 @@ function setupOpencode(baseUrl: string, noPlugin: boolean): void {
   console.log(`[lore]   Config: ${configPath}`);
   console.log(`[lore]`);
 
+  let pluginInstalled = false;
   if (noPlugin) {
-    console.log(`[lore]`);
     console.log(
       `[lore] Skipped @loreai/opencode plugin install (--no-plugin).`,
     );
@@ -714,12 +714,24 @@ function setupOpencode(baseUrl: string, noPlugin: boolean): void {
     console.log(
       `[lore] "@loreai/opencode" to the "plugin" array in ${configPath}.`,
     );
-    return;
+  } else {
+    pluginInstalled = installPlugin(opencodePluginSpec, configPath);
+    if (!pluginInstalled) process.exitCode = 1;
   }
 
-  if (!installPlugin(opencodePluginSpec, configPath)) {
-    process.exitCode = 1;
-  }
+  // Finalize the backup now that the (possibly config-rewriting) plugin install
+  // has run. `installPlugin` returns true only when it actually added the
+  // plugin to the array, so this attribution is accurate.
+  const finalConfig = readJsonConfig(configPath);
+  const backup = captureJsonBackup(existing, loreValues, {
+    pluginAdded: pluginInstalled && !pluginAlreadyPresent,
+  });
+  attachJsonBackup(finalConfig, backup);
+  writeFileSync(
+    configPath,
+    `${JSON.stringify(finalConfig, null, 2)}\n`,
+    "utf8",
+  );
 }
 
 // ---------------------------------------------------------------------------
