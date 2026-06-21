@@ -103,6 +103,12 @@ async function resolveLaunchTarget(
       "[lore] Install one of: Claude Code (claude), Codex (codex), Pi (pi), OpenCode (opencode), Hermes (hermes)",
     );
     console.error(`[lore] Or run with an explicit command: lore run <command>`);
+    console.error(
+      `[lore] Using a GUI/IDE agent (Claude Desktop, an IDE extension)? Run`,
+    );
+    console.error(
+      `[lore]   \`lore setup <app>\` and keep a gateway up with \`lore start --bg\`.`,
+    );
     return null;
   }
 

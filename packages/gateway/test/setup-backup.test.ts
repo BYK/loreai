@@ -1,0 +1,265 @@
+import { describe, it, expect } from "vitest";
+import {
+  getPath,
+  setPath,
+  deletePath,
+  captureJsonBackup,
+  attachJsonBackup,
+  restoreJsonBackup,
+  LORE_BACKUP_KEY,
+  getTomlTopLevelValue,
+  deleteTomlTopLevelKey,
+  buildTomlBackupBlock,
+  prependTomlBackupBlock,
+  restoreTomlBackup,
+} from "../src/cli/setup-backup";
+
+// ---------------------------------------------------------------------------
+// JSON dot-path helpers
+// ---------------------------------------------------------------------------
+
+describe("dot-path helpers", () => {
+  it("getPath reads nested values and returns undefined for missing", () => {
+    const o = { env: { A: "1" } };
+    expect(getPath(o, "env.A")).toBe("1");
+    expect(getPath(o, "env.B")).toBeUndefined();
+    expect(getPath(o, "x.y.z")).toBeUndefined();
+  });
+
+  it("setPath creates intermediate objects", () => {
+    const o: Record<string, unknown> = {};
+    setPath(o, "a.b.c", 42);
+    expect(o).toEqual({ a: { b: { c: 42 } } });
+  });
+
+  it("deletePath removes the leaf and prunes emptied ancestors", () => {
+    const o: Record<string, unknown> = { env: { A: "1" } };
+    deletePath(o, "env.A");
+    expect(o).toEqual({}); // env pruned because it became empty
+  });
+
+  it("deletePath keeps ancestors that still have other keys", () => {
+    const o: Record<string, unknown> = { env: { A: "1", B: "2" } };
+    deletePath(o, "env.A");
+    expect(o).toEqual({ env: { B: "2" } });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// JSON backup capture / attach / restore
+// ---------------------------------------------------------------------------
+
+const CLAUDE_LORE_VALUES = {
+  "env.ANTHROPIC_BASE_URL": "http://127.0.0.1:3207",
+  "env.DISABLE_AUTO_COMPACT": "1",
+};
+
+describe("captureJsonBackup", () => {
+  it("records prior values and absence per managed path", () => {
+    const existing = {
+      env: { ANTHROPIC_BASE_URL: "https://api.anthropic.com" },
+    };
+    const backup = captureJsonBackup(existing, CLAUDE_LORE_VALUES, {
+      now: () => new Date("2026-06-21T00:00:00Z"),
+    });
+    expect(backup.savedAt).toBe("2026-06-21T00:00:00.000Z");
+    const byPath = Object.fromEntries(backup.entries.map((e) => [e.path, e]));
+    expect(byPath["env.ANTHROPIC_BASE_URL"]).toEqual({
+      path: "env.ANTHROPIC_BASE_URL",
+      loreValue: "http://127.0.0.1:3207",
+      hadPrior: true,
+      priorValue: "https://api.anthropic.com",
+    });
+    expect(byPath["env.DISABLE_AUTO_COMPACT"]).toEqual({
+      path: "env.DISABLE_AUTO_COMPACT",
+      loreValue: "1",
+      hadPrior: false,
+    });
+  });
+});
+
+describe("attachJsonBackup", () => {
+  it("attaches when absent", () => {
+    const cfg: Record<string, unknown> = {};
+    attachJsonBackup(cfg, captureJsonBackup({}, CLAUDE_LORE_VALUES));
+    expect(cfg[LORE_BACKUP_KEY]).toBeDefined();
+  });
+
+  it("does NOT overwrite an existing backup (preserves the true original)", () => {
+    const original = captureJsonBackup(
+      { env: { ANTHROPIC_BASE_URL: "https://api.anthropic.com" } },
+      CLAUDE_LORE_VALUES,
+    );
+    const cfg: Record<string, unknown> = {};
+    attachJsonBackup(cfg, original);
+    // Second setup run: prior now looks like lore's own value — must be ignored.
+    const second = captureJsonBackup(
+      { env: { ANTHROPIC_BASE_URL: "http://127.0.0.1:3207" } },
+      CLAUDE_LORE_VALUES,
+    );
+    attachJsonBackup(cfg, second);
+    expect(cfg[LORE_BACKUP_KEY]).toBe(original);
+  });
+});
+
+describe("restoreJsonBackup", () => {
+  it("restores prior values and deletes keys that were originally unset", () => {
+    // Simulate the post-setup config.
+    const cfg: Record<string, unknown> = {
+      env: {
+        ANTHROPIC_BASE_URL: "http://127.0.0.1:3207",
+        DISABLE_AUTO_COMPACT: "1",
+      },
+    };
+    attachJsonBackup(
+      cfg,
+      captureJsonBackup(
+        { env: { ANTHROPIC_BASE_URL: "https://api.anthropic.com" } },
+        CLAUDE_LORE_VALUES,
+      ),
+    );
+    const summary = restoreJsonBackup(cfg);
+    expect(summary.hadBackup).toBe(true);
+    expect(summary.restored.sort()).toEqual([
+      "env.ANTHROPIC_BASE_URL",
+      "env.DISABLE_AUTO_COMPACT",
+    ]);
+    expect(cfg).toEqual({
+      env: { ANTHROPIC_BASE_URL: "https://api.anthropic.com" },
+    });
+  });
+
+  it("does NOT revert a value the user changed after setup (revert-only-if-unchanged)", () => {
+    const cfg: Record<string, unknown> = {
+      env: {
+        ANTHROPIC_BASE_URL: "http://user-changed:9999", // user edited this
+        DISABLE_AUTO_COMPACT: "1",
+      },
+    };
+    attachJsonBackup(
+      cfg,
+      captureJsonBackup(
+        { env: { ANTHROPIC_BASE_URL: "https://api.anthropic.com" } },
+        CLAUDE_LORE_VALUES,
+      ),
+    );
+    const summary = restoreJsonBackup(cfg);
+    expect(summary.skipped).toContain("env.ANTHROPIC_BASE_URL");
+    expect(summary.restored).toContain("env.DISABLE_AUTO_COMPACT");
+    // The user's value is preserved.
+    expect(getPath(cfg, "env.ANTHROPIC_BASE_URL")).toBe(
+      "http://user-changed:9999",
+    );
+  });
+
+  it("reports no backup when the sidecar is missing", () => {
+    expect(restoreJsonBackup({ env: {} }).hadBackup).toBe(false);
+  });
+
+  it("removes a plugin lore appended (OpenCode)", () => {
+    const cfg: Record<string, unknown> = {
+      plugin: ["@other/plugin", "@loreai/opencode"],
+    };
+    attachJsonBackup(cfg, captureJsonBackup({}, {}, { pluginAdded: true }));
+    const summary = restoreJsonBackup(cfg);
+    expect(summary.restored).toContain("plugin[@loreai/opencode]");
+    expect(cfg.plugin).toEqual(["@other/plugin"]);
+  });
+
+  it("leaves a plugin the user already had (pluginAdded=false)", () => {
+    const cfg: Record<string, unknown> = {
+      plugin: ["@loreai/opencode"],
+    };
+    attachJsonBackup(cfg, captureJsonBackup({}, {}, { pluginAdded: false }));
+    restoreJsonBackup(cfg);
+    expect(cfg.plugin).toEqual(["@loreai/opencode"]);
+  });
+
+  it("survives a full round-trip and leaves no _loreBackup key", () => {
+    const cfg: Record<string, unknown> = {
+      env: {
+        ANTHROPIC_BASE_URL: "http://127.0.0.1:3207",
+        DISABLE_AUTO_COMPACT: "1",
+      },
+    };
+    attachJsonBackup(cfg, captureJsonBackup({}, CLAUDE_LORE_VALUES));
+    restoreJsonBackup(cfg);
+    expect(LORE_BACKUP_KEY in cfg).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TOML backup (Codex)
+// ---------------------------------------------------------------------------
+
+describe("getTomlTopLevelValue", () => {
+  it("reads a top-level value", () => {
+    expect(
+      getTomlTopLevelValue('openai_base_url = "x"\n', "openai_base_url"),
+    ).toBe('"x"');
+  });
+
+  it("returns null for an absent key", () => {
+    expect(
+      getTomlTopLevelValue('model = "gpt"\n', "openai_base_url"),
+    ).toBeNull();
+  });
+
+  it("ignores a key nested inside a section", () => {
+    const c = '[tui]\nopenai_base_url = "nested"\n';
+    expect(getTomlTopLevelValue(c, "openai_base_url")).toBeNull();
+  });
+});
+
+describe("TOML backup block round-trip", () => {
+  const KEYS = ["openai_base_url", "model_auto_compact_token_limit"];
+
+  it("captures prior values and unset markers", () => {
+    const original = 'openai_base_url = "https://api.openai.com/v1"\n';
+    const block = buildTomlBackupBlock(original, KEYS);
+    expect(block).not.toBeNull();
+    expect(block).toContain(
+      '#   openai_base_url = "https://api.openai.com/v1"',
+    );
+    expect(block).toContain("#   model_auto_compact_token_limit (was unset)");
+  });
+
+  it("does not build a second block when one already exists", () => {
+    const original = 'openai_base_url = "https://api.openai.com/v1"\n';
+    const block = buildTomlBackupBlock(original, KEYS) as string;
+    const withBlock = prependTomlBackupBlock(original, block);
+    expect(buildTomlBackupBlock(withBlock, KEYS)).toBeNull();
+  });
+
+  it("restores prior value and deletes originally-unset keys", () => {
+    const original = 'openai_base_url = "https://api.openai.com/v1"\n';
+    // Real setup order: capture the block from the ORIGINAL, apply lore's
+    // writes to the original, then prepend the block to the updated content.
+    const block = buildTomlBackupBlock(original, KEYS) as string;
+    const updated =
+      'openai_base_url = "http://127.0.0.1:3207/v1"\nmodel_auto_compact_token_limit = 999999999\n';
+    const content = prependTomlBackupBlock(updated, block);
+
+    const { content: restored, summary } = restoreTomlBackup(content);
+    expect(summary.hadBackup).toBe(true);
+    expect(restored).toContain('openai_base_url = "https://api.openai.com/v1"');
+    expect(restored).not.toContain("http://127.0.0.1:3207/v1");
+    // Originally-unset key is removed entirely.
+    expect(restored).not.toContain("model_auto_compact_token_limit");
+    // Backup block removed.
+    expect(restored).not.toContain("lore setup backup");
+  });
+
+  it("reports no backup when the block is absent", () => {
+    expect(restoreTomlBackup('model = "gpt"\n').summary.hadBackup).toBe(false);
+  });
+});
+
+describe("deleteTomlTopLevelKey", () => {
+  it("removes only the top-level occurrence", () => {
+    const c = 'openai_base_url = "x"\n[tui]\nopenai_base_url = "nested"\n';
+    const out = deleteTomlTopLevelKey(c, "openai_base_url");
+    expect(out).not.toContain('openai_base_url = "x"');
+    expect(out).toContain('openai_base_url = "nested"');
+  });
+});

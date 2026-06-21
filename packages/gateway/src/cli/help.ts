@@ -19,8 +19,12 @@ Commands:
                        so unrelated projects never merge onto the gateway cwd.
                        Use --bg to run it detached in the background.
   stop                Stop a background gateway started with \`lore start --bg\`
-  setup [app]         Configure an AI app to route through lore
+  setup [app]         Configure an AI app to route through lore. Prefer \`lore run\`
+                       for terminal agents; use setup for GUI/IDE agents lore can't
+                       launch, paired with a background gateway (\`lore start --bg\`).
                        Supported: codex, opencode, claude-code
+                       \`setup undo [app]\` reverts a previous setup (restores
+                       the backup lore saved before it changed your config)
   logs                Show lore activity log
   import              Import knowledge from prior AI agent conversations
   data <subcommand>   Manage stored data (list, show, clear, delete)
@@ -136,6 +140,8 @@ Examples:
   lore setup codex              # Configure Codex to use lore
   lore setup codex -r http://remote:3207  # Configure Codex with a remote gateway
   lore setup opencode --no-plugin  # Configure OpenCode without installing the @loreai/opencode plugin
+  lore setup undo               # Undo setup for all configured apps
+  lore setup undo claude-code   # Undo setup for Claude Code only
   lore upgrade                  # Upgrade to latest version
   lore upgrade --check          # Check for updates without installing
   lore upgrade --force          # Force re-download even if up to date

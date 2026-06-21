@@ -18,7 +18,18 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { CLAUDE_CODE_FIRST_PARTY_ENV } from "../cch";
+import { readPortFile } from "../portfile";
 import { detectAgents } from "./agents";
+import { probeGateway } from "./start";
+import {
+  captureJsonBackup,
+  attachJsonBackup,
+  restoreJsonBackup,
+  buildTomlBackupBlock,
+  prependTomlBackupBlock,
+  restoreTomlBackup,
+  type RestoreSummary,
+} from "./setup-backup";
 
 // ---------------------------------------------------------------------------
 // Supported apps and their setup handlers
@@ -48,6 +59,8 @@ interface AppSetup {
   run: (baseUrl: string, noPlugin: boolean) => void;
   /** Optional plugin install + registration */
   plugin?: PluginSpec;
+  /** Undo a previous `lore setup` for this app, restoring the saved backup. */
+  undo: () => RestoreSummary;
 }
 
 /**
@@ -78,6 +91,7 @@ const SUPPORTED_APPS: AppSetup[] = [
     agentName: "codex",
     displayName: "Codex",
     run: (baseUrl) => setupCodex(baseUrl),
+    undo: undoCodex,
     // No Lore plugin for Codex — the gateway URL + DISABLE_AUTO_COMPACT in
     // the TOML is the full integration. There's no plugin host in Codex.
   },
@@ -86,11 +100,13 @@ const SUPPORTED_APPS: AppSetup[] = [
     displayName: "OpenCode",
     run: (baseUrl, noPlugin) => setupOpencode(baseUrl, noPlugin),
     plugin: opencodePluginSpec,
+    undo: undoOpencode,
   },
   {
     agentName: "claude-code",
     displayName: "Claude Code",
     run: (baseUrl) => setupClaudeCode(baseUrl),
+    undo: undoClaudeCode,
     // No Lore plugin for Claude Code — Anthropic controls the API surface
     // and there's no plugin host. The ANTHROPIC_BASE_URL env var is the
     // only integration point.
@@ -213,6 +229,86 @@ function installPlugin(spec: PluginSpec, configPath: string): boolean {
 
 /** Default gateway port (matches DEFAULT_PORTS[0] in start.ts) */
 const DEFAULT_PORT = 3207;
+
+/**
+ * Decide which port `lore setup` should bake into the written config.
+ *
+ * - Remote setup ignores the port entirely (the remote URL is authoritative).
+ * - An explicit `--port` always wins (the user knows what they want).
+ * - Otherwise, prefer a *detected live* gateway port. This fixes the mismatch
+ *   where setup hardcoded 3207 but the gateway had fallen back to 5673 or a
+ *   random port (`start.ts` DEFAULT_PORTS chain).
+ * - When nothing is detected, return undefined so `normalizeBaseUrl` falls
+ *   back to the default port.
+ */
+export function chooseSetupPort(input: {
+  explicitPort?: number;
+  remoteUrl?: string;
+  livePort?: number | null;
+}): number | undefined {
+  if (input.remoteUrl) return undefined;
+  if (input.explicitPort !== undefined) return input.explicitPort;
+  if (input.livePort != null) return input.livePort;
+  return undefined;
+}
+
+/**
+ * Build the post-setup liveness notice. Pure so the PASS/WARN copy is
+ * unit-testable. `origin` is the gateway base URL without the `/v1` suffix
+ * (what `probeGateway` hits).
+ */
+export function formatLivenessNotice(input: {
+  alive: boolean;
+  origin: string;
+  remote: boolean;
+}): { ok: boolean; lines: string[] } {
+  if (input.alive) {
+    return {
+      ok: true,
+      lines: [`[lore] ✓ Gateway is reachable at ${input.origin}.`],
+    };
+  }
+  const lines = [
+    `[lore] ⚠ Gateway is not reachable at ${input.origin}.`,
+    `[lore]   ${input.remote ? "The agent will fail to connect until the remote gateway is running." : "The agent will fail to connect until a gateway is running."}`,
+  ];
+  if (input.remote) {
+    lines.push(
+      `[lore]   Ensure the remote gateway is up and reachable, then try again.`,
+    );
+  } else {
+    lines.push(
+      `[lore]   Start one in the background:  lore start --bg`,
+      `[lore]   …then re-run this setup so the live port is written.`,
+      `[lore]   Or skip the global redirect entirely and use:  lore run`,
+    );
+  }
+  return { ok: false, lines };
+}
+
+/**
+ * Post-setup guidance steering terminal users toward `lore run` (no global
+ * redirect, gateway lifecycle tied to the agent) and framing `lore setup` as
+ * the path for GUI/IDE agents that lore can't launch. Pure for testing.
+ */
+export function formatSetupGuidance(): string[] {
+  return [
+    `[lore] Tip: for terminal use, \`lore run\` (or just \`lore\`) launches your agent`,
+    `[lore]   through the gateway with no global config, and stops it automatically`,
+    `[lore]   on exit. \`lore setup\` is best for GUI/IDE agents lore can't launch`,
+    `[lore]   (Claude Desktop, IDE extensions) — keep a gateway up with \`lore start --bg\`.`,
+  ];
+}
+
+/**
+ * Detect a running local gateway and return its port, or null. Reads the port
+ * file written by a running gateway, then verifies it actually answers.
+ */
+async function detectLiveGatewayPort(): Promise<number | null> {
+  const port = readPortFile();
+  if (!port) return null;
+  return (await probeGateway(`http://127.0.0.1:${port}`)) ? port : null;
+}
 
 /**
  * Normalize a gateway URL for use as a provider base URL.
@@ -380,8 +476,17 @@ function setupCodex(baseUrl: string): void {
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
   }
 
+  // Capture a commented backup block from the ORIGINAL content (before lore's
+  // writes), then apply lore's changes and prepend the block.
+  const backupBlock = buildTomlBackupBlock(content, [
+    "openai_base_url",
+    "model_auto_compact_token_limit",
+  ]);
   const updated = updateCodexConfig(content, baseUrl);
-  writeFileSync(configPath, updated, "utf8");
+  const final = backupBlock
+    ? prependTomlBackupBlock(updated, backupBlock)
+    : updated;
+  writeFileSync(configPath, final, "utf8");
 
   console.log(`[lore] Codex configured to use Lore gateway.`);
   console.log(`[lore]   openai_base_url = "${baseUrl}"`);
@@ -389,10 +494,6 @@ function setupCodex(baseUrl: string): void {
     `[lore]   model_auto_compact_token_limit = ${CODEX_COMPACT_DISABLE_LIMIT} (auto-compaction disabled)`,
   );
   console.log(`[lore]   Config: ${configPath}`);
-  console.log(`[lore]`);
-  console.log(
-    `[lore] Make sure the gateway is running (lore start) before using Codex.`,
-  );
 }
 
 // ---------------------------------------------------------------------------
@@ -574,7 +675,23 @@ function setupOpencode(baseUrl: string, noPlugin: boolean): void {
   mkdirSync(configDir, { recursive: true });
 
   const existing = readJsonConfig(configPath);
+
+  // Capture a backup of the values lore is about to set (provider baseURLs +
+  // compaction) and whether lore will add its plugin to the array.
+  const loreValues: Record<string, unknown> = { "compaction.auto": false };
+  for (const id of OPENCODE_SETUP_PROVIDER_IDS) {
+    loreValues[`provider.${id}.options.baseURL`] = baseUrl;
+  }
+  const existingPlugins = existing.plugin;
+  const pluginAlreadyPresent =
+    Array.isArray(existingPlugins) &&
+    existingPlugins.includes("@loreai/opencode");
+  const backup = captureJsonBackup(existing, loreValues, {
+    pluginAdded: !noPlugin && !pluginAlreadyPresent,
+  });
+
   const updated = updateOpencodeConfig(existing, baseUrl);
+  attachJsonBackup(updated, backup);
   writeFileSync(configPath, `${JSON.stringify(updated, null, 2)}\n`, "utf8");
 
   console.log(`[lore] OpenCode configured to use Lore gateway.`);
@@ -659,7 +776,13 @@ function setupClaudeCode(baseUrl: string): void {
     : baseUrl;
 
   const existing = readJsonConfig(configPath);
+  const backup = captureJsonBackup(existing, {
+    "env.ANTHROPIC_BASE_URL": anthropicBaseUrl,
+    "env.DISABLE_AUTO_COMPACT": "1",
+    [`env.${CLAUDE_CODE_FIRST_PARTY_ENV}`]: "1",
+  });
   const updated = updateClaudeCodeSettings(existing, anthropicBaseUrl);
+  attachJsonBackup(updated, backup);
   writeFileSync(configPath, `${JSON.stringify(updated, null, 2)}\n`, "utf8");
 
   console.log(`[lore] Claude Code configured to use Lore gateway.`);
@@ -671,10 +794,96 @@ function setupClaudeCode(baseUrl: string): void {
     `[lore]   env.${CLAUDE_CODE_FIRST_PARTY_ENV} = "1" (keeps cch billing flowing through the gateway)`,
   );
   console.log(`[lore]   Config: ${configPath}`);
-  console.log(`[lore]`);
+}
+
+// ---------------------------------------------------------------------------
+// Undo (`lore setup undo [app]`)
+// ---------------------------------------------------------------------------
+
+/** Restore a JSON-config app (Claude Code, OpenCode) from its `_loreBackup`. */
+function undoJsonApp(configPath: string): RestoreSummary {
+  const cfg = readJsonConfig(configPath);
+  const summary = restoreJsonBackup(cfg);
+  if (summary.hadBackup) {
+    writeFileSync(configPath, `${JSON.stringify(cfg, null, 2)}\n`, "utf8");
+  }
+  return summary;
+}
+
+function undoClaudeCode(): RestoreSummary {
+  return undoJsonApp(claudeCodeSettingsPath());
+}
+
+function undoOpencode(): RestoreSummary {
+  return undoJsonApp(opencodeConfigPath());
+}
+
+function undoCodex(): RestoreSummary {
+  const configPath = codexConfigPath();
+  let content: string;
+  try {
+    content = readFileSync(configPath, "utf8");
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+      return { hadBackup: false, restored: [], skipped: [] };
+    }
+    throw e;
+  }
+  const { content: restored, summary } = restoreTomlBackup(content);
+  if (summary.hadBackup) writeFileSync(configPath, restored, "utf8");
+  return summary;
+}
+
+/** Print the result of one app's undo. */
+function reportUndo(app: AppSetup, summary: RestoreSummary, explicit: boolean) {
+  if (!summary.hadBackup) {
+    if (explicit) {
+      console.log(
+        `[lore] ${app.displayName}: no lore backup found — nothing to undo.`,
+      );
+    }
+    return;
+  }
   console.log(
-    `[lore] Make sure the gateway is running (lore start) before using Claude Code.`,
+    `[lore] ${app.displayName}: restored ${summary.restored.length} setting(s) from backup.`,
   );
+  if (summary.skipped.length > 0) {
+    console.log(
+      `[lore]   Left ${summary.skipped.length} value(s) you changed after setup untouched: ${summary.skipped.join(", ")}`,
+    );
+  }
+}
+
+async function commandUndo(args: string[]): Promise<void> {
+  const appName = args[0]?.toLowerCase();
+  let targets: AppSetup[];
+  if (appName) {
+    const app = SUPPORTED_APPS.find(
+      (a) => a.agentName === appName || a.displayName.toLowerCase() === appName,
+    );
+    if (!app) {
+      const supported = SUPPORTED_APPS.map((a) => a.agentName).join(", ");
+      console.error(
+        `[lore] Unknown app "${args[0]}". Supported apps: ${supported}`,
+      );
+      process.exitCode = 1;
+      return;
+    }
+    targets = [app];
+  } else {
+    targets = SUPPORTED_APPS;
+  }
+
+  let restoredAny = false;
+  for (const app of targets) {
+    const summary = app.undo();
+    if (summary.hadBackup) restoredAny = true;
+    reportUndo(app, summary, Boolean(appName));
+  }
+
+  if (!restoredAny && !appName) {
+    console.log(`[lore] No lore setup backups found — nothing to undo.`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -685,13 +894,29 @@ export async function commandSetup(
   args: string[],
   values: Record<string, unknown>,
 ): Promise<void> {
+  // `lore setup undo [app]` — restore the backup written by a prior setup.
+  if (args[0]?.toLowerCase() === "undo") {
+    await commandUndo(args.slice(1));
+    return;
+  }
+
   const remoteUrl = values.remote as string | undefined;
-  const port = values.port ? Number(values.port) : undefined;
+  const explicitPort = values.port ? Number(values.port) : undefined;
   const noPlugin = values.noPlugin === true;
+
+  // Detect a running local gateway so we write its actual port (handles the
+  // 3207 → 5673 → random fallback chain) rather than blindly assuming 3207.
+  const livePort =
+    remoteUrl || explicitPort !== undefined
+      ? null
+      : await detectLiveGatewayPort();
 
   let baseUrl: string;
   try {
-    baseUrl = normalizeBaseUrl(remoteUrl, port);
+    baseUrl = normalizeBaseUrl(
+      remoteUrl,
+      chooseSetupPort({ explicitPort, remoteUrl, livePort }),
+    );
   } catch (e) {
     console.error(`[lore] ${e instanceof Error ? e.message : e}`);
     process.exitCode = 1;
@@ -724,6 +949,7 @@ export async function commandSetup(
     }
 
     app.run(baseUrl, noPlugin);
+    await reportLiveness(baseUrl, remoteUrl, livePort);
     return;
   }
 
@@ -749,4 +975,29 @@ export async function commandSetup(
   for (const app of setupTargets) {
     app.run(baseUrl, noPlugin);
   }
+  await reportLiveness(baseUrl, remoteUrl, livePort);
+}
+
+/**
+ * Probe the configured gateway and print a PASS/WARN notice. Reuses the
+ * already-probed `livePort` result for the default-local case to avoid a
+ * second network round-trip.
+ */
+async function reportLiveness(
+  baseUrl: string,
+  remoteUrl: string | undefined,
+  livePort: number | null,
+): Promise<void> {
+  const origin = baseUrl.replace(/\/v1$/, "");
+  // If we already confirmed a live local port, we know it's reachable.
+  const alive = livePort != null ? true : await probeGateway(origin);
+  const notice = formatLivenessNotice({
+    alive,
+    origin,
+    remote: Boolean(remoteUrl),
+  });
+  console.log(`[lore]`);
+  for (const line of notice.lines) console.log(line);
+  console.log(`[lore]`);
+  for (const line of formatSetupGuidance()) console.log(line);
 }
