@@ -411,7 +411,7 @@ describe("outcome-reward: outcomeImpact (observability, #497 follow-up)", () => 
     ltm.creditSessionOutcome(session, PROJECT);
   }
 
-  test("aggregates pass/fail co-occurrence counts and the last verdict", () => {
+  test("aggregates pass/fail co-occurrence counts across sessions", () => {
     const e = makeProjectEntry("imp-1", 0.5);
     const lid = getEntry(e).logical_id;
     creditOnce(lid, "i-a", "pass");
@@ -421,18 +421,14 @@ describe("outcome-reward: outcomeImpact (observability, #497 follow-up)", () => 
     const impact = ltm.outcomeImpact(lid);
     expect(impact.passes).toBe(2);
     expect(impact.fails).toBe(1);
-    expect(impact.lastVerdict).toBe("fail"); // most recent credited session
   });
 
-  test("ignores uncredited (NULL-verdict) rows even when more recently injected", () => {
-    // Pins the `verdict IN ('pass','fail')` filter: a later-injected but
-    // still-uncredited (NULL verdict) row must NOT clobber lastVerdict or be
-    // counted. Without the filter, the NULL group's MAX(created_at) wins and
-    // lastVerdict collapses to null.
+  test("does not count uncredited (NULL-verdict) rows", () => {
+    // Pins the `verdict IN ('pass','fail')` filter: a still-uncredited (NULL
+    // verdict) injection must not be counted toward passes/fails.
     const e = makeProjectEntry("imp-null", 0.5);
     const lid = getEntry(e).logical_id;
     creditOnce(lid, "i-pass", "pass");
-    // An uncredited injection in a LATER session (higher created_at, verdict NULL).
     db()
       .query(
         `INSERT INTO knowledge_session_injections (session_id, logical_id, project_id, created_at, credited, verdict)
@@ -443,13 +439,12 @@ describe("outcome-reward: outcomeImpact (observability, #497 follow-up)", () => 
     const impact = ltm.outcomeImpact(lid);
     expect(impact.passes).toBe(1);
     expect(impact.fails).toBe(0);
-    expect(impact.lastVerdict).toBe("pass"); // NULL row excluded
   });
 
   test("zero for an entry that has never been credited", () => {
     const e = makeProjectEntry("imp-2", 0.5);
     const impact = ltm.outcomeImpact(getEntry(e).logical_id);
-    expect(impact).toEqual({ passes: 0, fails: 0, lastVerdict: null });
+    expect(impact).toEqual({ passes: 0, fails: 0 });
   });
 
   test("a NONE-verdict session records no verdict (uncredited, not counted)", () => {
@@ -463,10 +458,6 @@ describe("outcome-reward: outcomeImpact (observability, #497 follow-up)", () => 
       .run("i-none", lid, pid, Date.now());
     // No verifier tool call → verdict 'none' → nothing recorded.
     ltm.creditSessionOutcome("i-none", PROJECT);
-    expect(ltm.outcomeImpact(lid)).toEqual({
-      passes: 0,
-      fails: 0,
-      lastVerdict: null,
-    });
+    expect(ltm.outcomeImpact(lid)).toEqual({ passes: 0, fails: 0 });
   });
 });

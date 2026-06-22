@@ -269,8 +269,7 @@ async function cmdShow(
       const impact = ltm.outcomeImpact(entry.logical_id);
       if (impact.passes || impact.fails) {
         console.log(
-          `Outcome:     ${impact.passes} passed / ${impact.fails} failed sessions` +
-            (impact.lastVerdict ? ` (last: ${impact.lastVerdict})` : ""),
+          `Outcome:     ${impact.passes} passed / ${impact.fails} failed sessions`,
         );
       }
       console.log(`Project ID:  ${entry.project_id ?? "(global)"}`);
