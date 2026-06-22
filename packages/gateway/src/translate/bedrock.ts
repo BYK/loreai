@@ -297,7 +297,15 @@ export function buildBedrockHeaders(
 ): Record<string, string> {
   const headers: Record<string, string> = {
     "content-type": "application/json",
-    accept: req.stream ? "text/event-stream" : "application/json",
+    // Bedrock InvokeModelWithResponseStream returns AWS binary event-stream
+    // framing (NOT SSE). The Accept header MUST be application/vnd.amazon.eventstream
+    // or Bedrock will reject the request. Non-streaming InvokeModel returns
+    // plain JSON, so application/json is correct there.
+    // Symmetric with bedrock-stream.ts decodeBedrockEventStream which uses
+    // @smithy/eventstream-codec to parse the binary event-stream format.
+    accept: req.stream
+      ? "application/vnd.amazon.eventstream"
+      : "application/json",
   };
 
   // Forward non-managed, non-Anthropic-specific client headers

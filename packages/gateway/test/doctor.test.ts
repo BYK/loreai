@@ -79,6 +79,51 @@ describe("lore setup status (integration)", () => {
   });
 });
 
+describe("commandSetup — cloud flag conflict detection", () => {
+  const origBedrock = process.env.CLAUDE_CODE_USE_BEDROCK;
+  const origVertex = process.env.CLAUDE_CODE_USE_VERTEX;
+
+  afterEach(() => {
+    if (origBedrock === undefined) delete process.env.CLAUDE_CODE_USE_BEDROCK;
+    else process.env.CLAUDE_CODE_USE_BEDROCK = origBedrock;
+    if (origVertex === undefined) delete process.env.CLAUDE_CODE_USE_VERTEX;
+    else process.env.CLAUDE_CODE_USE_VERTEX = origVertex;
+  });
+
+  it("refuses when CLAUDE_CODE_USE_BEDROCK=1 is set", async () => {
+    process.env.CLAUDE_CODE_USE_BEDROCK = "1";
+    process.exitCode = 0;
+    await commandSetup(["claude-code"], { port: 3299 });
+    expect(process.exitCode).toBe(1);
+    const out = logged();
+    expect(out).toContain("CLAUDE_CODE_USE_BEDROCK");
+    expect(out).toContain("Lore translates");
+  });
+
+  it("refuses when CLAUDE_CODE_USE_VERTEX=1 is set", async () => {
+    process.env.CLAUDE_CODE_USE_VERTEX = "1";
+    process.exitCode = 0;
+    await commandSetup(["claude-code"], { port: 3299 });
+    expect(process.exitCode).toBe(1);
+    const out = logged();
+    expect(out).toContain("CLAUDE_CODE_USE_VERTEX");
+    expect(out).toContain("Lore translates");
+  });
+
+  it("proceeds when neither flag is set", async () => {
+    delete process.env.CLAUDE_CODE_USE_BEDROCK;
+    delete process.env.CLAUDE_CODE_USE_VERTEX;
+    process.exitCode = 0;
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    // Should not exit early with code 1 from the flag check.
+    // (It may still exit 1 later if the port probe fails, but the flag
+    //  detection must not fire.)
+    await commandSetup(["status"], {});
+    const out = logged();
+    expect(out).not.toContain("Conflicting environment variable");
+  });
+});
+
 describe("runDoctorDiagnostics (pure)", () => {
   const emptyInventory = [
     {
