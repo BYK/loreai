@@ -113,7 +113,12 @@ export async function signBedrockRequest(
   const signer = new SignatureV4({
     credentials,
     region,
-    service: "bedrock",
+    // Bedrock runtime endpoints (InvokeModel / InvokeModelWithResponseStream)
+    // use service name "bedrock-runtime" in SigV4, NOT "bedrock". The
+    // hostname is bedrock-runtime.<region>.amazonaws.com. Using "bedrock"
+    // causes authentication failures because AWS validates the service
+    // name in the signature against the request scope.
+    service: "bedrock-runtime",
     sha256: Sha256,
   });
 

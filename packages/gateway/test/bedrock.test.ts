@@ -355,3 +355,59 @@ describe("resolveUpstreamRoute — Vertex route is intentionally absent", () => 
     expect(vertexRoute?.protocol).not.toBe("vertex");
   });
 });
+
+// ---------------------------------------------------------------------------
+// SigV4 service name (Seer finding — CRITICAL)
+// ---------------------------------------------------------------------------
+
+describe("signBedrockRequest service name", () => {
+  test("SigV4 uses service name 'bedrock-runtime' (NOT 'bedrock')", async () => {
+    // Bedrock runtime endpoints (InvokeModel / InvokeModelWithResponseStream)
+    // use service name "bedrock-runtime" in SigV4 signatures. The hostname
+    // is bedrock-runtime.<region>.amazonaws.com. AWS validates the service
+    // name against the request scope, so using "bedrock" causes auth
+    // failures for ALL runtime requests.
+    //
+    // We test by calling signBedrockRequest with test credentials and
+    // inspecting the signed Authorization header for the Credential scope.
+    const { signBedrockRequest } = await import("../src/bedrock-auth");
+
+    // Mock credentials — we just need to verify the service name in the
+    // signed credential scope, not the actual signature.
+    const creds = {
+      accessKeyId: "AKIATEST",
+      secretAccessKey: "test-secret",
+    };
+
+    // Set env vars for the credential provider
+    process.env.AWS_ACCESS_KEY_ID = creds.accessKeyId;
+    process.env.AWS_SECRET_ACCESS_KEY = creds.secretAccessKey;
+
+    const url =
+      "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-3-5-sonnet-20241022-v2%3A0/invoke";
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      accept: "application/json",
+      host: "bedrock-runtime.us-east-1.amazonaws.com",
+    };
+
+    await signBedrockRequest(
+      "POST",
+      url,
+      headers,
+      '{"anthropic_version":"bedrock-2023-05-31"}',
+      "us-east-1",
+    );
+
+    // The Authorization header MUST contain "bedrock-runtime" in the
+    // Credential scope (not "bedrock"). AWS validates this against the
+    // request scope and rejects mismatches.
+    const authHeader = headers.authorization ?? headers.Authorization ?? "";
+    expect(authHeader).toContain("bedrock-runtime");
+    expect(authHeader).not.toMatch(/\/bedrock\/aws4_request/);
+
+    // Cleanup
+    delete process.env.AWS_ACCESS_KEY_ID;
+    delete process.env.AWS_SECRET_ACCESS_KEY;
+  });
+});
