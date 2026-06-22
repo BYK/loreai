@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { openSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, DEFAULT_PORTS, type GatewayConfig } from "../config";
-import { startServer } from "../server";
+import { startServer, bracketHost } from "../server";
 import { resetPipelineState } from "../pipeline";
 import { writePortFile, removePortFile, readPortFile } from "../portfile";
 import { writePidFile, removePidFile } from "../pidfile";
@@ -74,8 +74,7 @@ export async function probeGateway(
  * contain one); an already-bracketed value is left untouched.
  */
 function probeUrlFor(host: string, port: number): string {
-  const h = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
-  return `http://${h}:${port}`;
+  return `http://${bracketHost(host)}:${port}`;
 }
 
 /**

@@ -210,4 +210,33 @@ describe("startServer configuration", () => {
       startServer(makeConfig({ hosts: ["192.0.2.1", "203.0.113.1"] })),
     ).rejects.toThrow(/none of the configured hosts are available/);
   });
+
+  // Regression for #907: handleNodeRequest interpolated the bind host into the
+  // request URL without bracketing IPv6 literals, so a `::1` bind produced the
+  // invalid `http://::1:PORT/...`; `new Request()` threw and every request 500'd.
+  // The bind itself succeeds (node's listen() accepts `::1`) — the failure only
+  // surfaced once a request reached the node:http handler. Asserting a 200 here
+  // fails pre-fix (500) and passes post-fix.
+  //
+  // Guard: on IPv4-only environments the `::1` bind yields EADDRNOTAVAIL, so
+  // every configured host is skipped and startServer throws "none available".
+  // Treat that as "no IPv6 loopback here" and skip — keeps the test hermetic.
+  test("serves over an IPv6 loopback bind (brackets the host in the request URL)", async () => {
+    let s: ServerHandle;
+    try {
+      s = await startServer(makeConfig({ hosts: ["::1"] }));
+    } catch (e) {
+      expect(String(e)).toMatch(/none of the configured hosts are available/);
+      return;
+    }
+    try {
+      expect(s.hosts).toContain("::1");
+      const res = await fetch(`http://[::1]:${s.port}/health`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { status: string };
+      expect(body.status).toBe("ok");
+    } finally {
+      s.stop();
+    }
+  });
 });

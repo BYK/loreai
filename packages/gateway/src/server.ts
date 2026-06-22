@@ -703,6 +703,18 @@ function bindServer(
 }
 
 /**
+ * Bracket an IPv6 host literal so it can be safely interpolated into a URL
+ * (e.g. `[::1]`, not `::1`). A bare `:` marks an IPv6 address (hostnames and
+ * IPv4 never contain one); an already-bracketed value is left untouched.
+ *
+ * Shared by the request path (`handleNodeRequest` below) and the probe path
+ * (`probeUrlFor` in cli/start.ts) so the two never diverge — see issue #907.
+ */
+export function bracketHost(host: string): string {
+  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+}
+
+/**
  * Convert a node:http `IncomingMessage` to a Web `Request`, run the shared
  * `fetch` handler, and stream the resulting Web `Response` back over the
  * node:http `ServerResponse`.
@@ -719,7 +731,7 @@ async function handleNodeRequest(
   port: number,
 ): Promise<void> {
   try {
-    const url = `http://${host}:${port}${nodeReq.url ?? "/"}`;
+    const url = `http://${bracketHost(host)}:${port}${nodeReq.url ?? "/"}`;
 
     const body =
       nodeReq.method === "GET" || nodeReq.method === "HEAD"
