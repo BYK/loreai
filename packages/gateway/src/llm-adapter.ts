@@ -354,6 +354,14 @@ export function resolveWorkerProtocol(
     // Bedrock/Vertex collapse to "anthropic" for worker calls — workers
     // use simple prompt→response and Bedrock's InvokeModel (non-streaming)
     // returns the same JSON shape as Anthropic Messages API.
+    //
+    // 🔴 KNOWN LIMITATION (issue #870 part 1): this only normalizes the WIRE
+    // SHAPE. The worker LLM adapter and cache-warmer do NOT apply AWS SigV4
+    // signing, so background work (distillation/curation/warming) for a
+    // Bedrock-only session would hit bedrock-runtime unsigned → 403. Until
+    // worker-side SigV4 lands (follow-up), Bedrock users must point
+    // LORE_WORKER_UPSTREAM + LORE_WORKER_API_KEY at a non-Bedrock,
+    // Anthropic-compatible endpoint for memory-building to function.
     return explicit === "anthropic" ||
       explicit === "bedrock" ||
       explicit === "vertex"
