@@ -46,16 +46,18 @@ function getEntry(id: string): {
   confidence: number;
   cross_project: number;
   category: string;
+  project_id: string | null;
 } {
   return db()
     .query(
-      "SELECT logical_id, confidence, cross_project, category FROM knowledge WHERE id = ?",
+      "SELECT logical_id, confidence, cross_project, category, project_id FROM knowledge WHERE id = ?",
     )
     .get(id) as {
     logical_id: string;
     confidence: number;
     cross_project: number;
     category: string;
+    project_id: string | null;
   };
 }
 
@@ -109,12 +111,33 @@ describe("outcome-reward: verifier detection (tool-trace)", () => {
       "cd packages/core",
       "echo testing", // 'test' only as a substring of a word → not matched
       "mkdir build-output",
+      // Merely MENTIONING a runner (not invoking it) must not count — the token
+      // is not at command position. These are the high-frequency false-positives.
+      "cat vitest.config.ts",
+      "vim biome.json",
+      "ls eslint.config.js",
+      "grep ruff pyproject.toml",
+      "echo 'run mypy soon'",
+      "git checkout -- pytest.ini",
     ]) {
       expect(isVerifierCall({ command: cmd })).toBe(false);
     }
     // Non-extractable input is never a verifier.
     expect(isVerifierCall({ filePath: "x" })).toBe(false);
     expect(isVerifierCall(undefined)).toBe(false);
+  });
+
+  test("isVerifierCall matches a runner that leads any command segment or benign prefix", () => {
+    for (const cmd of [
+      "cd packages/core && pnpm test", // runner leads the 2nd segment
+      "rm -rf dist; pnpm build", // after a semicolon
+      "npx vitest run", // benign npx prefix
+      "sudo cargo test", // sudo prefix
+      "CI=1 pnpm test", // leading env assignment
+      "env FOO=bar tsc --noEmit", // env prefix
+    ]) {
+      expect(isVerifierCall({ command: cmd })).toBe(true);
+    }
   });
 });
 
@@ -243,12 +266,25 @@ describe("outcome-reward: creditSessionOutcome", () => {
     expect(getEntry(e).confidence).toBeCloseTo(0.5 + ltm.OUTCOME_REWARD, 6);
   });
 
-  test("PASS does not boost an entry already at/above the ceiling", () => {
+  test("PASS does not boost an entry already at the ceiling", () => {
     const e = makeProjectEntry("c-ceil", ltm.OUTCOME_BOOST_CEILING);
     inject("sc", e);
     insertToolCall(pid, { session: "sc", status: "completed", verifier: 1 });
     ltm.creditSessionOutcome("sc", PROJECT);
     expect(getEntry(e).confidence).toBeCloseTo(ltm.OUTCOME_BOOST_CEILING, 6);
+  });
+
+  test("PASS NEVER demotes a high-confidence entry above the ceiling (anti-deflation)", () => {
+    // The `confidence < ceiling` guard's critical second job: an entry already
+    // ABOVE the ceiling (e.g. a curator-minted 0.95) injected into a passing
+    // session must be left UNTOUCHED — not flattened to the ceiling by MIN().
+    // Without the guard this would silently collapse the whole 0.8–1.0 band to
+    // 0.8 on every passing session (top entries are injected nearly always).
+    const e = makeProjectEntry("c-above", 0.95);
+    inject("sa", e);
+    insertToolCall(pid, { session: "sa", status: "completed", verifier: 1 });
+    ltm.creditSessionOutcome("sa", PROJECT);
+    expect(getEntry(e).confidence).toBe(0.95);
   });
 
   test("PASS boost is clamped to the ceiling (near-ceiling entry)", () => {
@@ -304,16 +340,17 @@ describe("outcome-reward: creditSessionOutcome", () => {
     expect(getEntry(e).confidence).toBe(afterFirst);
   });
 
-  test("never touches cross_project (shared) entries even if an injection row exists", () => {
-    const e = ltm.create({
-      category: "pattern",
-      title: "c-shared",
-      content: "shared knowledge",
-      scope: "global",
-      confidence: 0.5,
-    });
+  test("never touches a PROMOTED entry (project_id set, cross_project=1) — the cross_project=0 backstop", () => {
+    // A promoted entry keeps its origin project_id but is cross_project=1. The
+    // `project_id = pid` guard alone would NOT protect it (project_id matches),
+    // so this exercises the `cross_project = 0` backstop specifically — a global
+    // (project_id=NULL) entry would be masked by the project_id guard and leave
+    // the backstop unverified.
+    const e = makeProjectEntry("c-promoted", 0.5);
     const entry = getEntry(e);
-    expect(entry.cross_project).toBe(1);
+    db().query("UPDATE knowledge SET cross_project = 1 WHERE id = ?").run(e);
+    expect(getEntry(e).cross_project).toBe(1);
+    expect(entry.project_id).not.toBeNull();
     // Force an injection row (recordSessionInjections would normally skip it).
     db()
       .query(
@@ -324,6 +361,15 @@ describe("outcome-reward: creditSessionOutcome", () => {
     insertToolCall(pid, { session: "sx", status: "error", verifier: 1 });
     ltm.creditSessionOutcome("sx", PROJECT);
     expect(getEntry(e).confidence).toBe(0.5); // unchanged — shared knowledge protected
+  });
+
+  test("does not adjust a deleted current version (is_deleted = 1)", () => {
+    const e = makeProjectEntry("c-deleted", 0.5);
+    inject("sd", e);
+    db().query("UPDATE knowledge SET is_deleted = 1 WHERE id = ?").run(e);
+    insertToolCall(pid, { session: "sd", status: "error", verifier: 1 });
+    ltm.creditSessionOutcome("sd", PROJECT);
+    expect(getEntry(e).confidence).toBe(0.5); // tombstoned → left alone
   });
 
   test("no injections → none verdict, zero credited", () => {

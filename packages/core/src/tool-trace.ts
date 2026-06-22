@@ -108,25 +108,31 @@ export function classifyToolError(_tool: string, error: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Recognizes test / build / typecheck / lint runner invocations. Deliberately
- * conservative — it must match clear runner tokens so a session's verifier
- * verdict is high-precision (a failing `pnpm test` is a real signal; an
- * incidental `grep` miss is not). Unmatched commands are simply not verifiers
- * (no signal), which is the safe default for a confidence-adjusting loop.
+ * Recognizes a test / build / typecheck / lint runner at the START of a command
+ * segment. Anchoring to command position (rather than matching the token
+ * anywhere) is what makes the verdict high-precision: `pnpm test` matches, but
+ * `cat vitest.config.ts`, `vim biome.json`, and `echo 'run mypy'` do NOT — they
+ * merely mention a runner. Optional benign prefixes (sudo/env/time/npx/…) are
+ * skipped so `npx vitest` / `sudo pnpm test` still match. A non-match means "not
+ * a verifier" (no signal), the safe default for a confidence-adjusting loop.
  */
-const VERIFIER_COMMAND = new RegExp(
-  [
-    // package-manager script runners: (npm|pnpm|yarn|bun) [run] test|build|typecheck|lint|check|tsc
-    String.raw`\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|build|typecheck|type-check|lint|tsc|check)\b`,
-    // direct test runners
-    String.raw`\b(?:vitest|jest|mocha|ava|pytest|rspec|phpunit|gotestsum)\b`,
-    String.raw`\b(?:go|cargo|gradle|mvn|dotnet)\s+test\b`,
-    // typecheck / compile
-    String.raw`\b(?:tsc|tsgo)\b`,
-    String.raw`\b(?:go|cargo)\s+build\b`,
-    // linters / formatters used as gates
-    String.raw`\b(?:eslint|biome|ruff|flake8|mypy|clippy|golangci-lint)\b`,
-  ].join("|"),
+const VERIFIER_LEADING = new RegExp(
+  // optional leading prefixes that precede the real command
+  String.raw`^\s*(?:(?:sudo|time|npx|bunx)\s+|\w+=\S+\s+|env\s+)*` +
+    "(?:" +
+    [
+      // package-manager script runners
+      String.raw`(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|build|typecheck|type-check|lint|tsc|check)\b`,
+      // direct test runners
+      String.raw`(?:vitest|jest|mocha|ava|pytest|rspec|phpunit|gotestsum)\b`,
+      String.raw`(?:go|cargo|gradle|mvn|dotnet)\s+test\b`,
+      // typecheck / compile
+      String.raw`(?:tsc|tsgo)\b`,
+      String.raw`(?:go|cargo)\s+build\b`,
+      // linters / formatters used as gates
+      String.raw`(?:eslint|biome|ruff|flake8|mypy|clippy|golangci-lint)\b`,
+    ].join("|") +
+    ")",
   "i",
 );
 
@@ -146,11 +152,19 @@ export function extractCommand(input: unknown): string | null {
   return null;
 }
 
-/** True when a tool call's `input` is a recognized verifier invocation. */
+/**
+ * True when a tool call's `input` invokes a recognized verifier. The command is
+ * split into segments on the shell chaining/pipe operators (`&&`, `||`, `;`,
+ * `|`, newline) and a segment counts only when a runner leads it — so
+ * `cd pkg && pnpm test` matches (2nd segment) while `cat vitest.config.ts` and
+ * `grep biome .` do not.
+ */
 export function isVerifierCall(input: unknown): boolean {
   const cmd = extractCommand(input);
   if (!cmd) return false;
-  return VERIFIER_COMMAND.test(cmd);
+  return cmd
+    .split(/&&|\|\||[;\n|]/)
+    .some((segment) => VERIFIER_LEADING.test(segment));
 }
 
 export type SessionVerifierVerdict = "pass" | "fail" | "none";

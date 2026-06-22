@@ -883,12 +883,16 @@ export function recordSessionInjections(
      VALUES (?, ?, ?, ?, 0)
      ON CONFLICT(session_id, logical_id) DO NOTHING`,
   );
-  for (const e of entries) {
-    if (!e.logical_id) continue;
-    if (e.cross_project === 1) continue;
-    if (e.category === "lat.md") continue;
-    stmt.run(sessionID, e.logical_id, pid, now);
-  }
+  // One transaction for the whole batch (matches markInjected's single write and
+  // avoids a per-entry auto-commit on the request hot path).
+  withTransaction(() => {
+    for (const e of entries) {
+      if (!e.logical_id) continue;
+      if (e.cross_project === 1) continue;
+      if (e.category === "lat.md") continue;
+      stmt.run(sessionID, e.logical_id, pid, now);
+    }
+  });
 }
 
 /** Outcome of crediting one session's injected entries. */
@@ -932,42 +936,48 @@ export function creditSessionOutcome(
   const ids = uncredited.map((r) => r.logical_id);
   const placeholders = ids.map(() => "?").join(",");
   const now = Date.now();
-  // Adjust the current version of each injected logical entry. The cross_project
-  // = 0 guard is a backstop (injections already exclude shared entries).
-  if (verdict === "pass") {
-    db()
-      .query(
-        `UPDATE knowledge
-         SET confidence = MIN(?, confidence + ?), last_reinforced_at = ?
-         WHERE is_current = 1 AND cross_project = 0 AND project_id = ?
-           AND confidence < ? AND logical_id IN (${placeholders})`,
-      )
-      .run(
-        OUTCOME_BOOST_CEILING,
-        OUTCOME_REWARD,
-        now,
-        pid,
-        OUTCOME_BOOST_CEILING,
-        ...ids,
-      );
-  } else {
-    db()
-      .query(
-        `UPDATE knowledge
-         SET confidence = MAX(0, confidence - ?), last_reinforced_at = ?
-         WHERE is_current = 1 AND cross_project = 0 AND project_id = ?
-           AND logical_id IN (${placeholders})`,
-      )
-      .run(OUTCOME_PENALTY, now, pid, ...ids);
-  }
+  // Apply the confidence adjustment and the credited-flag write atomically, so a
+  // crash between them can't re-credit (double-adjust) on restart.
+  withTransaction(() => {
+    // Adjust the current, live version of each injected logical entry. The
+    // cross_project = 0 guard is a real backstop (a PROMOTED entry keeps its
+    // origin project_id but has cross_project = 1 — it must never be adjusted);
+    // is_deleted = 0 skips death-certificate versions.
+    if (verdict === "pass") {
+      db()
+        .query(
+          `UPDATE knowledge
+           SET confidence = MIN(?, confidence + ?), last_reinforced_at = ?
+           WHERE is_current = 1 AND is_deleted = 0 AND cross_project = 0
+             AND project_id = ? AND confidence < ? AND logical_id IN (${placeholders})`,
+        )
+        .run(
+          OUTCOME_BOOST_CEILING,
+          OUTCOME_REWARD,
+          now,
+          pid,
+          OUTCOME_BOOST_CEILING,
+          ...ids,
+        );
+    } else {
+      db()
+        .query(
+          `UPDATE knowledge
+           SET confidence = MAX(0, confidence - ?), last_reinforced_at = ?
+           WHERE is_current = 1 AND is_deleted = 0 AND cross_project = 0
+             AND project_id = ? AND logical_id IN (${placeholders})`,
+        )
+        .run(OUTCOME_PENALTY, now, pid, ...ids);
+    }
 
-  // Mark this session's injections credited so a later idle tick is a no-op.
-  db()
-    .query(
-      `UPDATE knowledge_session_injections SET credited = 1
-       WHERE session_id = ? AND project_id = ? AND credited = 0`,
-    )
-    .run(sessionID, pid);
+    // Mark this session's injections credited so a later idle tick is a no-op.
+    db()
+      .query(
+        `UPDATE knowledge_session_injections SET credited = 1
+         WHERE session_id = ? AND project_id = ? AND credited = 0`,
+      )
+      .run(sessionID, pid);
+  });
 
   return { verdict, credited: ids.length };
 }

@@ -1888,6 +1888,17 @@ function recoverMissingObjects(database: Database) {
       );
     }
   }
+  // Version 53: tool_calls.verifier (outcome-reward, #497). Recover the column
+  // independently — the CREATE TABLE IF NOT EXISTS above is a no-op on an
+  // existing tool_calls table and cannot add a missing column to it.
+  {
+    const tcols = database
+      .query("PRAGMA table_info(tool_calls)")
+      .all() as Array<{ name: string }>;
+    if (!tcols.some((c) => c.name === "verifier")) {
+      database.exec("ALTER TABLE tool_calls ADD COLUMN verifier INTEGER;");
+    }
+  }
 }
 
 /**
