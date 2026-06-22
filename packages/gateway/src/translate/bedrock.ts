@@ -124,11 +124,17 @@ export function buildBedrockRequestBody(
 
   // System prompt — concatenate LTM into system (Bedrock doesn't support
   // multi-block system with cache_control the way native Anthropic does).
-  const ltmParts = [cache?.stableLtmSystem, cache?.ltmSystem].filter(Boolean);
-  if (req.system) {
-    body.system = ltmParts.length
-      ? `${req.system}\n\n${ltmParts.join("\n\n")}`
-      : req.system;
+  // NOTE: filter the host prompt together with the LTM parts — an EMPTY
+  // req.system must NOT discard LTM (a client sending no system prompt still
+  // needs its long-term-memory context). Only omit `system` when there is
+  // genuinely nothing to send.
+  const systemParts = [
+    req.system,
+    cache?.stableLtmSystem,
+    cache?.ltmSystem,
+  ].filter(Boolean);
+  if (systemParts.length > 0) {
+    body.system = systemParts.join("\n\n");
   }
 
   // Messages

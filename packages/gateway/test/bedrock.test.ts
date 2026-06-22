@@ -360,12 +360,29 @@ describe("buildBedrockRequestBody", () => {
     expect(body.top_p).toBe(0.9);
   });
 
-  test("omits the system key entirely when there is no system prompt", () => {
+  test("omits the system key entirely when there is no system prompt AND no LTM", () => {
     const body = buildBedrockRequestBody(makeReq({ system: "" })) as Record<
       string,
       unknown
     >;
     expect("system" in body).toBe(false);
+  });
+
+  test("preserves LTM even when the host system prompt is empty (Seer finding)", () => {
+    // Regression: an empty req.system must NOT discard LTM context. A client
+    // that sends no system prompt still needs its long-term memory injected.
+    const body = buildBedrockRequestBody(makeReq({ system: "" }), {
+      stableLtmSystem: "STABLE_LTM",
+      ltmSystem: "CONTEXT_LTM",
+    }) as Record<string, unknown>;
+    expect(body.system).toBe("STABLE_LTM\n\nCONTEXT_LTM");
+  });
+
+  test("includes only stableLtm when contextLtm is absent (empty system)", () => {
+    const body = buildBedrockRequestBody(makeReq({ system: "" }), {
+      stableLtmSystem: "STABLE_LTM",
+    }) as Record<string, unknown>;
+    expect(body.system).toBe("STABLE_LTM");
   });
 
   test("omits the tools key entirely when there are no tools", () => {
