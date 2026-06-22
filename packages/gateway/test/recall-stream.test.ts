@@ -10,6 +10,7 @@
  */
 import { describe, test, expect } from "vitest";
 import { createRecallAwareAccumulator } from "../src/stream/anthropic";
+import { DEFAULT_MAX_REPORTED_USAGE } from "../src/compaction";
 import {
   findRecallToolUse,
   replaceRecallWithMarker,
@@ -1137,5 +1138,100 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
     expect((userMsg.content[2] as { toolUseId: string }).toolUseId).toBe(
       "toolu_bash_1",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: client usage scaling (anti-compaction) on the recall accumulator
+// ---------------------------------------------------------------------------
+
+describe("RecallAwareAccumulator — usage scaling", () => {
+  const bigCacheRead = 10_000_000;
+
+  function bigMessageStart(): { event: string; data: string } {
+    return {
+      event: "message_start",
+      data: JSON.stringify({
+        type: "message_start",
+        message: {
+          id: "msg_scale",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: "claude-sonnet-4-20250514",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: {
+            input_tokens: 5,
+            output_tokens: 1,
+            cache_read_input_tokens: bigCacheRead,
+            cache_creation_input_tokens: 0,
+          },
+        },
+      }),
+    };
+  }
+
+  // Terminal delta carrying the full cumulative usage (as the real API sends).
+  function fullMessageDelta(): { event: string; data: string } {
+    return {
+      event: "message_delta",
+      data: JSON.stringify({
+        type: "message_delta",
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: {
+          input_tokens: 5,
+          output_tokens: 500,
+          cache_read_input_tokens: bigCacheRead,
+          cache_creation_input_tokens: 0,
+        },
+      }),
+    };
+  }
+
+  function deltaTotal(usage: Record<string, number>): number {
+    return (
+      usage.input_tokens +
+      usage.output_tokens +
+      usage.cache_read_input_tokens +
+      usage.cache_creation_input_tokens
+    );
+  }
+
+  test("scales the terminal message_delta on a non-recall stream", () => {
+    const accum = createRecallAwareAccumulator("recall", {
+      scaleClientUsage: true,
+    });
+    const sse = processAll(accum, [bigMessageStart(), fullMessageDelta()]);
+    const delta = parseForwardedEvents(sse).find(
+      (e) => e.event === "message_delta",
+    );
+    expect(delta).toBeDefined();
+    const usage = delta!.data.usage as Record<string, number>;
+    expect(usage.cache_read_input_tokens).toBeLessThan(bigCacheRead);
+    expect(deltaTotal(usage)).toBeLessThanOrEqual(DEFAULT_MAX_REPORTED_USAGE);
+    // Internal accumulation stays real (used by calibration/bustRate).
+    expect(accum.getResponse().usage?.cacheReadInputTokens).toBe(bigCacheRead);
+  });
+
+  test("scales the held-back message_delta on a recall (continuation) stream", () => {
+    const accum = createRecallAwareAccumulator("recall", {
+      scaleClientUsage: true,
+    });
+    processAll(accum, [
+      bigMessageStart(),
+      toolUseBlockStart(0, "recall"),
+      inputJsonDelta(0, "{}"),
+      contentBlockStop(0),
+      fullMessageDelta(),
+    ]);
+    expect(accum.hasRecall()).toBe(true);
+    const held = parseForwardedEvents(accum.heldBackEvents()).find(
+      (e) => e.event === "message_delta",
+    );
+    expect(held).toBeDefined();
+    const usage = held!.data.usage as Record<string, number>;
+    expect(usage.cache_read_input_tokens).toBeLessThan(bigCacheRead);
+    expect(deltaTotal(usage)).toBeLessThanOrEqual(DEFAULT_MAX_REPORTED_USAGE);
   });
 });

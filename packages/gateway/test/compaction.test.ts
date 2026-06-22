@@ -10,6 +10,9 @@ import {
   assembleOfflineCompaction,
   COMPACTION_SYSTEM_PATTERNS,
   COMPACTION_USER_PATTERNS,
+  maxReportedUsageForModel,
+  DEFAULT_MAX_REPORTED_USAGE,
+  scaleUsageForClient,
 } from "../src/compaction";
 import type { GatewayRequest } from "../src/translate/types";
 
@@ -841,5 +844,81 @@ describe("detectCompactionRequest", () => {
         isCompactionRequest(req),
       );
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-model client usage scaling
+// ---------------------------------------------------------------------------
+
+describe("maxReportedUsageForModel", () => {
+  test("200K model reproduces the historical 150,300 cap", () => {
+    // effective = 200_000 - min(64_000, 20_000) = 180_000
+    // threshold = 180_000 - 13_000 = 167_000; cap = floor(167_000 * 0.9)
+    expect(maxReportedUsageForModel(200_000, 64_000)).toBe(150_300);
+    expect(DEFAULT_MAX_REPORTED_USAGE).toBe(150_300);
+  });
+
+  test("1M model yields a proportionally larger cap", () => {
+    // effective = 1_000_000 - 20_000 = 980_000
+    // threshold = 980_000 - 13_000 = 967_000; cap = floor(967_000 * 0.9)
+    expect(maxReportedUsageForModel(1_000_000, 64_000)).toBe(870_300);
+  });
+
+  test("max-output below the 20K reserve is used as-is", () => {
+    // effective = 200_000 - 8_000 = 192_000
+    // threshold = 192_000 - 13_000 = 179_000; cap = floor(179_000 * 0.9)
+    expect(maxReportedUsageForModel(200_000, 8_000)).toBe(161_100);
+  });
+
+  test("never returns negative for tiny windows", () => {
+    expect(maxReportedUsageForModel(1_000, 20_000)).toBe(0);
+  });
+});
+
+describe("scaleUsageForClient", () => {
+  test("returns the original object unchanged when total is within the cap", () => {
+    const usage = { input_tokens: 100, output_tokens: 50 };
+    expect(scaleUsageForClient(usage, 150_300)).toBe(usage);
+  });
+
+  test("scales proportionally when total exceeds the cap; new total ≤ cap", () => {
+    const scaled = scaleUsageForClient(
+      {
+        input_tokens: 5,
+        output_tokens: 95,
+        cache_read_input_tokens: 900_000,
+        cache_creation_input_tokens: 100_000,
+      },
+      150_300,
+    );
+    const total =
+      scaled.input_tokens +
+      scaled.output_tokens +
+      (scaled.cache_read_input_tokens ?? 0) +
+      (scaled.cache_creation_input_tokens ?? 0);
+    expect(total).toBeLessThanOrEqual(150_300);
+    expect(scaled.cache_read_input_tokens).toBeLessThan(900_000);
+  });
+
+  test("per-model cap is honored — a 1M cap is NOT throttled to the 200K cap", () => {
+    // 1,000,000 real input tokens, scaled against the 1M-model cap.
+    const cap1M = maxReportedUsageForModel(1_000_000, 64_000); // 870_300
+    const scaled = scaleUsageForClient(
+      { input_tokens: 1_000_000, output_tokens: 0 },
+      cap1M,
+    );
+    // Mutation guard: if the cap were hardcoded to 150_300 (the old 200K
+    // behavior), this would scale to 150_300 and the assertion would fail.
+    expect(scaled.input_tokens).toBe(870_300);
+    expect(scaled.input_tokens).toBeGreaterThan(DEFAULT_MAX_REPORTED_USAGE);
+  });
+
+  test("200K cap regression-lock: scales 1M tokens down to 150,300", () => {
+    const scaled = scaleUsageForClient(
+      { input_tokens: 1_000_000, output_tokens: 0 },
+      maxReportedUsageForModel(200_000, 64_000),
+    );
+    expect(scaled.input_tokens).toBe(150_300);
   });
 });
