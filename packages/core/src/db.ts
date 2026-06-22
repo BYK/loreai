@@ -1524,13 +1524,14 @@ function installSyncCapture(database: Database) {
     "entity_relations",
   ]) {
     for (const [evt, suffix, ref, op] of ops) {
-      // Knowledge is remote-keyed by logical_id (A2 sub-PR 3, #823). INSERT/UPDATE
-      // capture the version id (op=upsert; the push plan resolves it to the current
-      // logical row while the row still exists). DELETE must capture the logical_id
-      // NOW — the row is gone afterward, so the push can't resolve it, and a delete
-      // keyed by a version id would never match the logical_id-keyed remote row.
+      // Knowledge is remote-keyed by logical_id (A2, #823), so capture the
+      // logical_id for ALL ops (not the per-version row id). This makes the outbox
+      // uniformly logical_id-keyed: the push plan + pending checks read the row_id
+      // directly with no join back to a physical version row — so they survive
+      // compaction that prunes the v1 anchor (#909). DELETE must capture it anyway
+      // (the row is gone afterward); INSERT/UPDATE capture it for uniformity.
       const rowExpr =
-        t === "knowledge" && op === "delete"
+        t === "knowledge"
           ? `COALESCE(${ref}.logical_id, ${ref}.id)`
           : `${ref}.id`;
       sql += `
