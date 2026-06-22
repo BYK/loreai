@@ -152,8 +152,12 @@ export function buildBedrockRequestBody(
     }));
   }
 
-  // Restore metadata params (temperature, top_p, etc.)
+  // Restore metadata params (temperature, top_p, etc.). `anthropic_version` is
+  // NOT a KNOWN_BODY_FIELD, so a client that puts it in the body lands it in
+  // metadata — never let it override the Bedrock sentinel "bedrock-2023-05-31"
+  // (the native Anthropic value would make Bedrock reject the request).
   for (const [key, value] of Object.entries(req.metadata)) {
+    if (key === "anthropic_version") continue;
     body[key] = value;
   }
 
@@ -309,20 +313,13 @@ export function bedrockChunkToSSEEvents(
 export function buildBedrockHeaders(
   req: GatewayRequest,
 ): Record<string, string> {
-  const headers: Record<string, string> = {
-    "content-type": "application/json",
-    // Bedrock InvokeModelWithResponseStream returns AWS binary event-stream
-    // framing (NOT SSE). The Accept header MUST be application/vnd.amazon.eventstream
-    // or Bedrock will reject the request. Non-streaming InvokeModel returns
-    // plain JSON, so application/json is correct there.
-    // Symmetric with bedrock-stream.ts decodeBedrockEventStream which uses
-    // @smithy/eventstream-codec to parse the binary event-stream format.
-    accept: req.stream
-      ? "application/vnd.amazon.eventstream"
-      : "application/json",
-  };
+  const headers: Record<string, string> = {};
 
-  // Forward non-managed, non-Anthropic-specific client headers
+  // Forward non-managed, non-Anthropic-specific client headers FIRST, so the
+  // gateway-managed content-type/accept set below always win. `accept` is NOT
+  // in GATEWAY_MANAGED_HEADERS, so a client `accept` (e.g. undici's default
+  // "*/*" or an SDK's "application/json") would otherwise clobber the
+  // Bedrock-required Accept and break streaming — set our values LAST.
   const forwarded = forwardClientHeaders(req.rawHeaders);
   for (const [key, value] of Object.entries(forwarded)) {
     // Skip Anthropic-specific headers that Bedrock doesn't understand
@@ -331,6 +328,17 @@ export function buildBedrockHeaders(
     if (key === "x-anthropic-billing-header") continue;
     headers[key] = value;
   }
+
+  // Gateway-managed framing headers — set LAST so they override any forwarded
+  // client values. Bedrock InvokeModelWithResponseStream returns AWS binary
+  // event-stream framing (NOT SSE): the Accept header MUST be
+  // application/vnd.amazon.eventstream or Bedrock rejects/mis-formats the
+  // response. Non-streaming InvokeModel returns plain JSON. Symmetric with
+  // bedrock-stream.ts decodeBedrockEventStream.
+  headers["content-type"] = "application/json";
+  headers.accept = req.stream
+    ? "application/vnd.amazon.eventstream"
+    : "application/json";
 
   return headers;
 }

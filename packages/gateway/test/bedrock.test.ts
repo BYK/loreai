@@ -208,6 +208,31 @@ describe("buildBedrockHeaders — Accept header", () => {
     expect(nonStreaming["content-type"]).toBe("application/json");
   });
 
+  test("client-supplied accept header does NOT override the streaming Accept", () => {
+    // Regression: `accept` is NOT in GATEWAY_MANAGED_HEADERS, so a forwarded
+    // client `accept` would clobber the Bedrock-required event-stream Accept
+    // unless the gateway sets it LAST. Undici's default is "*/*"; SDKs send
+    // "application/json" — either would break streaming if it won.
+    const headers = buildBedrockHeaders(
+      makeReq({ stream: true, rawHeaders: { accept: "application/json" } }),
+    );
+    expect(headers.accept).toBe("application/vnd.amazon.eventstream");
+  });
+
+  test("client accept '*/*' does NOT override the non-streaming Accept", () => {
+    const headers = buildBedrockHeaders(
+      makeReq({ stream: false, rawHeaders: { accept: "*/*" } }),
+    );
+    expect(headers.accept).toBe("application/json");
+  });
+
+  test("client content-type does NOT override application/json", () => {
+    const headers = buildBedrockHeaders(
+      makeReq({ rawHeaders: { "content-type": "text/plain" } }),
+    );
+    expect(headers["content-type"]).toBe("application/json");
+  });
+
   test("strips Anthropic-specific headers Bedrock doesn't understand", () => {
     const req = makeReq({
       rawHeaders: {
@@ -358,6 +383,18 @@ describe("buildBedrockRequestBody", () => {
     const body = buildBedrockRequestBody(req) as Record<string, unknown>;
     expect(body.temperature).toBe(0.7);
     expect(body.top_p).toBe(0.9);
+  });
+
+  test("metadata cannot override the Bedrock anthropic_version sentinel", () => {
+    // Regression: anthropic_version is not a KNOWN_BODY_FIELD, so a client that
+    // sends it in the body lands it in metadata. It must NOT overwrite the
+    // Bedrock sentinel (the native value makes Bedrock reject the request).
+    const req = makeReq({
+      metadata: { anthropic_version: "2023-06-01", temperature: 0.5 },
+    });
+    const body = buildBedrockRequestBody(req) as Record<string, unknown>;
+    expect(body.anthropic_version).toBe("bedrock-2023-05-31");
+    expect(body.temperature).toBe(0.5);
   });
 
   test("omits the system key entirely when there is no system prompt AND no LTM", () => {

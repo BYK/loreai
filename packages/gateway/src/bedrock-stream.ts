@@ -28,6 +28,13 @@ const decoder = new TextDecoder();
  */
 const PRELUDE_TOTAL_LENGTH_BYTES = 4;
 
+/**
+ * AWS caps an event-stream message at 16 MiB. A length prefix beyond this is a
+ * corrupt/garbled frame — reject it (fail fast) rather than buffering unbounded
+ * bytes waiting for a frame that will never complete (DoS / OOM guard).
+ */
+const MAX_FRAME_LENGTH_BYTES = 16 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // Event-stream decoding
 // ---------------------------------------------------------------------------
@@ -116,8 +123,12 @@ function takeCompleteFrame(
     buffer.byteLength,
   );
   const totalLength = view.getUint32(0, false); // big-endian
-  // Guard against a corrupt/zero length that would wedge the loop.
-  if (totalLength < PRELUDE_TOTAL_LENGTH_BYTES) {
+  // Guard against a corrupt length that would wedge the loop (too small to make
+  // progress) or buffer unbounded bytes (absurdly large — never completes).
+  if (
+    totalLength < PRELUDE_TOTAL_LENGTH_BYTES ||
+    totalLength > MAX_FRAME_LENGTH_BYTES
+  ) {
     throw new Error(
       `bedrock event-stream: invalid frame length ${totalLength}`,
     );
@@ -182,8 +193,13 @@ function parseBedrockMessage(
       return null;
     }
 
-    // Decode base64 → JSON (Anthropic SSE event payload)
-    const decoded = atob(bodyJson.bytes);
+    // Decode base64 → UTF-8 JSON (Anthropic SSE event payload).
+    // NOTE: must decode base64 as UTF-8 bytes, NOT via atob(). atob() yields a
+    // Latin-1 binary string (one char per byte), so any multi-byte UTF-8
+    // sequence (accents, CJK, emoji, smart quotes) becomes mojibake — and that
+    // corrupted string is what gets forwarded to the client AND stored in
+    // memory. The bytes field is base64 of UTF-8 JSON, so decode accordingly.
+    const decoded = Buffer.from(bodyJson.bytes, "base64").toString("utf8");
     const payload = JSON.parse(decoded) as Record<string, unknown>;
 
     // The Anthropic SSE event type is in the `type` field

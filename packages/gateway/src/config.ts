@@ -489,8 +489,17 @@ const PROVIDER_ROUTES: Record<string, ProviderRoute> = {
   tabbyml: { url: null, protocol: "openai" },
   litellm: { url: null, protocol: "openai" },
   // --- AWS Bedrock ---
+  // url is null because the Bedrock branch self-builds the region URL
+  // (bedrock-runtime.<region>.amazonaws.com). Unlike the local `url: null`
+  // providers above (which REQUIRE LORE_UPSTREAM_<PROVIDER>), bedrock is
+  // reachable with null url — `providerRouteUsable` in pipeline.ts special-cases
+  // self-URL-building protocols. `amazon-bedrock` is opencode's provider id.
   bedrock: {
-    url: null, // Dynamic URL based on region
+    url: null,
+    protocol: "bedrock",
+  },
+  "amazon-bedrock": {
+    url: null,
     protocol: "bedrock",
   },
   // --- Google Vertex AI ---

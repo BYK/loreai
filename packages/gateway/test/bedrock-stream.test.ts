@@ -115,6 +115,21 @@ describe("decodeBedrockEventStream", () => {
     expect(JSON.parse(events[0].data)).toEqual(event);
   });
 
+  test("decodes non-ASCII (UTF-8) content without corruption", async () => {
+    // Regression: the decoder must base64-decode as UTF-8, NOT via atob()
+    // (which yields a Latin-1 binary string and mojibakes multi-byte chars).
+    const event = {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "text_delta", text: "café ☕ 你好 — “smart” — 🚀" },
+    };
+    const events = await collect(readerFromChunks([chunkFrame(event)]));
+    expect(events).toHaveLength(1);
+    // Exact round-trip — on the buggy atob() path this would be mojibake.
+    expect(JSON.parse(events[0].data)).toEqual(event);
+    expect(events[0].data).toContain("café ☕ 你好 — “smart” — 🚀");
+  });
+
   test("decodes a full multi-frame conversation in order", async () => {
     const frames = [
       chunkFrame({ type: "message_start", message: { id: "m1" } }),
@@ -247,6 +262,16 @@ describe("decodeBedrockEventStream", () => {
     // A length prefix smaller than the prelude itself is unrecoverable — we
     // must fail loudly rather than spin forever on a zero-advance buffer.
     const bogus = new Uint8Array([0, 0, 0, 2]); // totalLength = 2
+    await expect(collect(readerFromChunks([bogus]))).rejects.toThrow(
+      /invalid frame length/i,
+    );
+  });
+
+  test("throws on an absurdly large frame length (>16 MiB DoS guard)", async () => {
+    // A garbled prelude declaring a huge length must fail fast rather than
+    // buffering unbounded bytes waiting for a frame that never completes.
+    const bogus = new Uint8Array(8);
+    new DataView(bogus.buffer).setUint32(0, 0x7fffffff, false); // ~2 GiB
     await expect(collect(readerFromChunks([bogus]))).rejects.toThrow(
       /invalid frame length/i,
     );

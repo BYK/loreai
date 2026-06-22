@@ -2923,8 +2923,18 @@ async function forwardToUpstream(
   // (either providerRoute.url or headerUpstream). When url is null (local/
   // custom providers like vllm, github-copilot), the protocol should come
   // from whichever tier actually provides the URL to avoid mismatches.
+  //
+  // EXCEPTION: self-URL-building protocols (bedrock builds
+  // bedrock-runtime.<region>.amazonaws.com from config; vertex likewise) are
+  // usable with a null url and no X-Lore-Upstream-URL — otherwise
+  // `X-Lore-Provider: bedrock` would fall through to the model-prefix route
+  // (api.anthropic.com for claude-* IDs) and silently bypass Bedrock entirely.
+  const selfUrlBuildingProtocol =
+    providerRoute?.protocol === "bedrock" ||
+    providerRoute?.protocol === "vertex";
   const providerRouteUsable =
-    providerRoute && (providerRoute.url != null || headerUpstream)
+    providerRoute &&
+    (providerRoute.url != null || headerUpstream || selfUrlBuildingProtocol)
       ? providerRoute
       : null;
 
@@ -2938,17 +2948,27 @@ async function forwardToUpstream(
       ? "openai-responses"
       : (providerRouteUsable?.protocol ?? modelRoute?.protocol ?? req.protocol);
 
+  // Self-URL-building protocols derive their base from config (region), not
+  // from the route tables. This must take precedence over `modelRoute?.url`:
+  // a claude-* model ID resolves to api.anthropic.com via the model-prefix
+  // route, which would otherwise mask the real Bedrock/Vertex base in logs and
+  // the auth-mismatch check (the Bedrock branch builds its own request URL, so
+  // this is also defensive for any future consumer of effectiveUpstreamBase).
+  // An explicit X-Lore-Upstream-URL header still wins.
+  const selfBuiltUpstreamUrl =
+    effectiveProtocol === "bedrock"
+      ? `https://bedrock-runtime.${config.bedrockRegion}.amazonaws.com`
+      : effectiveProtocol === "vertex"
+        ? `https://${config.vertexRegion}-aiplatform.googleapis.com`
+        : null;
   const effectiveUpstreamBase =
     headerUpstream ??
+    selfBuiltUpstreamUrl ??
     providerRoute?.url ??
     modelRoute?.url ??
     (effectiveProtocol === "anthropic"
       ? config.upstreamAnthropic
-      : effectiveProtocol === "bedrock"
-        ? `https://bedrock-runtime.${config.bedrockRegion}.amazonaws.com`
-        : effectiveProtocol === "vertex"
-          ? `https://${config.vertexRegion}-aiplatform.googleapis.com`
-          : config.upstreamOpenAI);
+      : config.upstreamOpenAI);
 
   // Warn when a provider route exists but has no URL and no header override —
   // the request will fall through to config defaults which likely have wrong
@@ -3084,6 +3104,15 @@ async function forwardToUpstream(
     url = result.url;
     headers = result.headers;
     body = result.body;
+  } else if (effectiveProtocol === "vertex") {
+    // Vertex AI is part 2 of issue #870 and has no upstream builder yet. Fail
+    // LOUD rather than silently falling through to the Anthropic builder below
+    // (which would POST Anthropic-shaped, x-api-key-authed requests to a Vertex
+    // URL). No PROVIDER_ROUTES entry produces "vertex" today, so this is a
+    // forward guard for when the route lands without its handler.
+    throw new Error(
+      "Vertex AI upstream is not yet implemented (issue #870 part 2)",
+    );
   } else {
     // For non-native-Anthropic upstreams (MiniMax, Fireworks, etc.), downgrade
     // extended cache TTL ("1h") to standard 5-minute ephemeral — the "1h" TTL
