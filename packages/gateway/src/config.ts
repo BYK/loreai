@@ -494,14 +494,13 @@ const PROVIDER_ROUTES: Record<string, ProviderRoute> = {
     protocol: "bedrock",
   },
   // --- Google Vertex AI ---
-  vertex: {
-    url: null, // Dynamic URL based on project/region
-    protocol: "vertex",
-  },
-  "vertex-anthropic": {
-    url: null,
-    protocol: "vertex",
-  },
+  // NOTE: Vertex AI support is part 2 of issue #870 and is NOT yet implemented.
+  // The vertex protocol is registered in the type system for forward compatibility,
+  // but PROVIDER_ROUTES deliberately does NOT include vertex/vertex-anthropic
+  // entries. Adding them here would let X-Lore-Provider: vertex requests reach
+  // forwardToUpstream and fall through to the default Anthropic handler (wrong
+  // auth + wrong body), silently breaking requests. The entries will be added
+  // when the Vertex handler lands in part 2.
 };
 
 /**

@@ -357,6 +357,27 @@ describe("resolveUpstreamRoute — Vertex route is intentionally absent", () => 
 });
 
 // ---------------------------------------------------------------------------
+// Vertex AI — NOT yet implemented (part 2 of issue #870)
+// ---------------------------------------------------------------------------
+
+describe("Vertex AI routing (not yet implemented)", () => {
+  test("vertex provider is NOT routable (Seer finding — HIGH)", async () => {
+    // Seer found that X-Lore-Provider: vertex requests would fall through
+    // to the default Anthropic handler (wrong auth: x-api-key vs Bearer,
+    // wrong body format), silently breaking requests.
+    //
+    // Vertex support is part 2 of issue #870. Until the vertex handler lands,
+    // vertex provider IDs MUST NOT resolve to a route. We test via the
+    // public resolveProviderRoute() entry point.
+    const { resolveProviderRoute } = await import("../src/config");
+    expect(resolveProviderRoute("vertex")).toBeNull();
+    expect(resolveProviderRoute("vertex-anthropic")).toBeNull();
+    expect(resolveProviderRoute("google-vertex")).toBeNull();
+    expect(resolveProviderRoute("google-vertex-anthropic")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // SigV4 service name (Seer finding — CRITICAL)
 // ---------------------------------------------------------------------------
 
