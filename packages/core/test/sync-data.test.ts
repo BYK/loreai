@@ -17,6 +17,7 @@ import {
   clearProfileMirror,
   clearSyncState,
   contentHash,
+  currentKnowledgeRow,
   currentTier,
   disableSync,
   enableSync,
@@ -224,6 +225,37 @@ describe("knowledgePushPlan — append-only remote mapping keyed by logical_id (
     expect(knowledgePushPlan("00000000-0000-0000-0000-000000000000").op).toBe(
       "skip",
     );
+  });
+
+  test("seedOutbox skips an already-synced versioned (v2) entry — no re-enqueue bloat (#823)", () => {
+    setTeamConfig("sync.enabled", "1");
+    const id = ltm.create({
+      projectPath: "/tmp/lore-seed-bloat",
+      scope: "project",
+      category: "decision",
+      title: "SB",
+      content: "v1",
+    });
+    ltm.appendVersion(id, { content: "v2" }); // versioned: current id ≠ logical_id
+    // Mark synced exactly as push would: sync_state keyed by logical_id, hashing the
+    // current row re-keyed id=logical_id.
+    const row = currentKnowledgeRow(id) as Record<string, unknown>;
+    setSyncState("knowledge", id, {
+      content_hash: contentHash("knowledge", row),
+      revision: 1,
+      remote_updated_at: null,
+    });
+    db().exec("DELETE FROM sync_outbox"); // clear capture from create/append
+    setKV("sync.push.knowledge", "0");
+    seedOutbox("basic");
+    const n = (
+      db()
+        .query(
+          "SELECT COUNT(*) AS n FROM sync_outbox WHERE table_name = 'knowledge'",
+        )
+        .get() as { n: number }
+    ).n;
+    expect(n).toBe(0); // already synced (by logical_id) → not re-enqueued
   });
 });
 

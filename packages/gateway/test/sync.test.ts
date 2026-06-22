@@ -763,6 +763,42 @@ describe("pullOnce", () => {
       | undefined;
     expect(remote?.is_deleted).toBe(true); // delete propagated via logical_id
   });
+
+  test("a versioned entry deleted while sync is OFF tombstones on re-enable (#823)", async () => {
+    // reconcile() must tombstone by knowledge_current liveness, not physical-row
+    // existence — a deleted entry keeps its demoted/death-cert version rows, so an
+    // id=logical_id existence check would never reconcile a delete made while OFF.
+    syncData.enableSync("basic");
+    const id = ltm.create({
+      projectPath: "/tmp/lore-sync-engine",
+      scope: "project",
+      category: "pattern",
+      title: "DW",
+      content: "v1",
+    });
+    ltm.update(id, { content: "v2" }); // versioned
+    await pushOnce(makeClient() as never); // remote live
+    expect(
+      (
+        tableRows("knowledge").find((r) => r.id === id) as Record<
+          string,
+          unknown
+        >
+      )?.is_deleted,
+    ).toBeFalsy();
+    syncData.disableSync();
+    ltm.remove(id); // death-cert while OFF → capture trigger doesn't fire
+    syncData.enableSync("basic"); // reconcile enqueues the missed delete
+    await pushOnce(makeClient() as never);
+    expect(
+      (
+        tableRows("knowledge").find((r) => r.id === id) as Record<
+          string,
+          unknown
+        >
+      )?.is_deleted,
+    ).toBe(true);
+  });
 });
 
 describe("profiles (pull-only mirror)", () => {

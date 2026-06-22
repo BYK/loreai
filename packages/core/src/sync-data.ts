@@ -526,6 +526,41 @@ export function seedOutbox(tier: SyncTier = "basic"): void {
       // (via the prune floor) permanently disabling outbox pruning for ALL tables.
       if (m.pullOnly) continue;
       const pushCursor = Number(getKV(`sync.push.${m.table}`) ?? "0");
+
+      // Knowledge is remote-keyed by logical_id (A2 sub-PR 3, #823): seed ONE entry
+      // per CURRENT live logical entry — NOT every physical version — keyed + hashed
+      // by logical_id to match the push plan + sync_state. Iterating physical rows
+      // and checking sync_state by version id would miss every v2+ entry (sync_state
+      // is keyed by logical_id) and re-enqueue it (outbox bloat). Deleted entries
+      // (no live current) are NOT seeded here — reconcile's tombstone pass emits the
+      // delete (its liveness check is also knowledge_current-based).
+      if (m.table === "knowledge") {
+        const latestForLogical = db().query(
+          `SELECT o.op FROM sync_outbox o JOIN knowledge k ON k.id = o.row_id
+            WHERE o.table_name = 'knowledge' AND o.seq > ?
+              AND COALESCE(k.logical_id, k.id) = ?
+            ORDER BY o.seq DESC LIMIT 1`,
+        );
+        const lids = db()
+          .query(
+            "SELECT DISTINCT COALESCE(logical_id, id) AS lid FROM knowledge_current",
+          )
+          .all() as { lid: string }[];
+        for (const { lid } of lids) {
+          const pending =
+            (latestForLogical.get(pushCursor, lid) as { op: string } | null)
+              ?.op ?? null;
+          if (pending === "upsert") continue; // already queued
+          if (pending === null) {
+            const synced = getSyncState("knowledge", lid)?.content_hash ?? null;
+            const row = currentKnowledgeRow(lid);
+            if (row && contentHash("knowledge", row) === synced) continue;
+          }
+          enqueue.run("knowledge", lid, now);
+        }
+        continue;
+      }
+
       // Resolve the synced columns ONCE per table (one PRAGMA table_info) — not
       // per row, which is what `contentHash` would do (an N+1 on large tables).
       const cols = columns(m.table);
@@ -574,14 +609,21 @@ export function reconcile(tier: SyncTier = "basic"): void {
     // Pull-only tables are never pushed (see seedOutbox) — also skip the
     // delete-tombstone reconciliation so no `profiles` outbox entry is created.
     if (m.pullOnly) continue;
-    const idExpr = rowIdExpr(m);
+    // Knowledge is keyed by logical_id and append-only: "live" means a CURRENT live
+    // version exists (knowledge_current), NOT merely a physical row — a deleted
+    // entry keeps its demoted/death-cert version rows, so an `id = logical_id`
+    // existence check would never tombstone a delete made while sync was OFF (#823).
+    const livenessNotExists =
+      m.table === "knowledge"
+        ? "NOT EXISTS (SELECT 1 FROM knowledge_current t WHERE COALESCE(t.logical_id, t.id) = s.row_id)"
+        : `NOT EXISTS (SELECT 1 FROM ${m.table} t WHERE ${rowIdExpr(m)} = s.row_id)`;
     db()
       .query(
         `INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
          SELECT s.table_name, s.row_id, 'delete', ?
            FROM sync_state s
           WHERE s.table_name = ?
-            AND NOT EXISTS (SELECT 1 FROM ${m.table} t WHERE ${idExpr} = s.row_id)
+            AND ${livenessNotExists}
             AND COALESCE(
               (SELECT o.op FROM sync_outbox o
                 WHERE o.table_name = s.table_name AND o.row_id = s.row_id
