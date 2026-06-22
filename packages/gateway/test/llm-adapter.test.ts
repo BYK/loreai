@@ -451,7 +451,7 @@ describe("worker handles provider error envelopes in HTTP 200 bodies (#899)", ()
     expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
-  test("retries to exhaustion on a persistent 200 + embedded 504 → null, records no-response (not incapable)", async () => {
+  test("retries to exhaustion on a persistent 200 + embedded 504 → null, records upstream-error (not incapable)", async () => {
     // mockImplementation (not mockResolvedValue): each retry needs a FRESH
     // Response — a body can only be read once.
     mockFetch.mockImplementation(async () => envelope200(504));
@@ -461,10 +461,11 @@ describe("worker handles provider error envelopes in HTTP 200 bodies (#899)", ()
     });
     expect(text).toBeNull();
     expect(mockFetch).toHaveBeenCalledTimes(4); // maxRetries(3) + 1
+    // Mirrors the HTTP-level transient exhaustion reason (504 → upstream-error).
     expect(recordWorkerFailure).toHaveBeenCalledWith(
       "s-exhaust",
       "lore-distill",
-      "no-response",
+      "upstream-error",
     );
     // A flaky upstream must never mark a capable model incapable.
     expect(recordWorkerFailure).not.toHaveBeenCalledWith(

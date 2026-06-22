@@ -1205,41 +1205,61 @@ export function createGatewayLLMClient(
                     await sleep(delay);
                     continue;
                   }
-                  // Exhausted: a persistent upstream transient, NOT a model
-                  // capability fact — record no-response (not worker-incapable)
-                  // so a flaky upstream never marks a capable model incapable.
+                  // Exhausted. Mirror the HTTP-level exhaustion path for full
+                  // observability parity (Seer): log, capture to Sentry for
+                  // alerting, enrich the span with retry metadata, and mark the
+                  // span errored. This path retries up to maxRetries times, so
+                  // those attempts must not be invisible in tracing. Worker-health
+                  // reason matches the HTTP transient path (rate-limit/upstream-
+                  // error) — NEVER worker-incapable: the upstream responded with a
+                  // transient error, which must not mark a capable model incapable.
                   log.warn(
                     `worker upstream embedded ${bodyErrCode} error persisted after ` +
                       `${maxRetries + 1} attempts — model=${model.providerID}/${model.modelID} ` +
                       `worker=${opts?.workerID ?? "unknown"} ` +
                       `session=${opts?.sessionID?.slice(0, 16) ?? "none"}`,
                   );
-                  // Enrich the span with retry metadata, matching the HTTP-level
-                  // exhaustion path — this path retries up to maxRetries times, so
-                  // those attempts must not be invisible in tracing. The wire
-                  // status was a misleading 200, so also surface the embedded code.
-                  if (retryCount > 0) {
-                    span.setAttribute("lore.retry.count", retryCount);
-                    span.setAttribute(
-                      "lore.retry.total_delay_ms",
-                      totalDelayMs,
-                    );
-                    if (lastRetryAfterMs != null) {
-                      span.setAttribute(
-                        "lore.retry.last_retry_after_ms",
+                  Sentry.captureException(
+                    new Error(
+                      `Worker upstream exhausted ${maxRetries + 1} retries: HTTP 200 embedded ${bodyErrCode}`,
+                    ),
+                    {
+                      fingerprint: [
+                        "LOREAI-GATEWAY",
+                        "worker-retry-exhausted",
+                        String(bodyErrCode),
+                      ],
+                      extra: {
+                        // Wire status was a misleading 200; the embedded code is
+                        // the real failure signal.
+                        status: 200,
+                        bodyErrorCode: bodyErrCode,
+                        attempts: maxRetries + 1,
+                        totalDelayMs,
                         lastRetryAfterMs,
-                      );
-                    }
-                    span.setAttribute("lore.retry.final_status", finalStatus);
+                        model: model.modelID,
+                        workerID: opts?.workerID ?? "unknown",
+                      },
+                    },
+                  );
+                  span.setAttribute("lore.retry.count", retryCount);
+                  span.setAttribute("lore.retry.total_delay_ms", totalDelayMs);
+                  if (lastRetryAfterMs != null) {
                     span.setAttribute(
-                      "lore.retry.body_error_code",
-                      bodyErrCode,
+                      "lore.retry.last_retry_after_ms",
+                      lastRetryAfterMs,
                     );
                   }
+                  span.setAttribute("lore.retry.final_status", finalStatus);
+                  span.setAttribute("lore.retry.body_error_code", bodyErrCode);
+                  span.setStatus({
+                    code: 2,
+                    message: "embedded error exhausted retries",
+                  });
                   recordWorkerFailure(
                     opts?.sessionID ?? "_unknown",
                     opts?.workerID ?? "unknown",
-                    "no-response",
+                    bodyErrCode === 429 ? "rate-limit" : "upstream-error",
                   );
                   return null;
                 }
