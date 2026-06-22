@@ -475,6 +475,10 @@ describe("worker handles provider error envelopes in HTTP 200 bodies (#899)", ()
   });
 
   test("does NOT retry a 200 + embedded NON-transient (400) error", async () => {
+    // Guards the TRANSIENT_CODES gate: a non-transient embedded code must fall
+    // through to the normal empty-response path (single call, no retry), not be
+    // treated as retryable. (A 400 envelope took the same null path pre-PR too,
+    // so this asserts the gate condition, not the block's existence.)
     mockFetch.mockResolvedValue(envelope200(400));
     const text = await client().prompt("system", "user", {
       sessionID: "s-400",

@@ -1214,6 +1214,28 @@ export function createGatewayLLMClient(
                       `worker=${opts?.workerID ?? "unknown"} ` +
                       `session=${opts?.sessionID?.slice(0, 16) ?? "none"}`,
                   );
+                  // Enrich the span with retry metadata, matching the HTTP-level
+                  // exhaustion path — this path retries up to maxRetries times, so
+                  // those attempts must not be invisible in tracing. The wire
+                  // status was a misleading 200, so also surface the embedded code.
+                  if (retryCount > 0) {
+                    span.setAttribute("lore.retry.count", retryCount);
+                    span.setAttribute(
+                      "lore.retry.total_delay_ms",
+                      totalDelayMs,
+                    );
+                    if (lastRetryAfterMs != null) {
+                      span.setAttribute(
+                        "lore.retry.last_retry_after_ms",
+                        lastRetryAfterMs,
+                      );
+                    }
+                    span.setAttribute("lore.retry.final_status", finalStatus);
+                    span.setAttribute(
+                      "lore.retry.body_error_code",
+                      bodyErrCode,
+                    );
+                  }
                   recordWorkerFailure(
                     opts?.sessionID ?? "_unknown",
                     opts?.workerID ?? "unknown",
