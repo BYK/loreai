@@ -179,14 +179,16 @@ async function pushEntry(
       is_deleted: true,
       content_hash: null,
     };
-    // Erasure completeness (#823): scrub the deleted knowledge content/title from
-    // the remote tombstone so the bytes don't linger server-side until the sub-PR 4
-    // reaper. The LOCAL death-cert preserves content, and applyRemoteKnowledgeDelete
-    // rebuilds a peer's death-cert from its OWN current row, so peers are unaffected.
-    // (Remote content/title are NOT NULL — scrub to '' not null.)
+    // Erasure completeness (#823): scrub the deleted knowledge content-bearing
+    // columns from the remote tombstone so the bytes don't linger server-side until
+    // the sub-PR 4 reaper. The LOCAL death-cert preserves them, and
+    // applyRemoteKnowledgeDelete rebuilds a peer's death-cert from its OWN current
+    // row, so peers are unaffected. (Remote content/title are NOT NULL → ''; metadata
+    // is nullable → null.)
     if (table === "knowledge") {
       tombstone.content = "";
       tombstone.title = "";
+      tombstone.metadata = null;
     }
     const { error } = await client
       .from(table)

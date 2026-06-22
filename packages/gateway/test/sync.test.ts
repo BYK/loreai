@@ -700,6 +700,38 @@ describe("pullOnce", () => {
       ).n,
     ).toBe(0); // no false conflict recorded
   });
+
+  test("conflict on a versioned (v2) entry snapshots the CURRENT version, not stale v1 (#823)", async () => {
+    // Guards the conflict-snapshot half of the classify fix: localBefore must read
+    // knowledge_current (current version), not getRowById (the demoted v1 row), so
+    // the discarded edit recoverable from sync_conflicts.local_content is the real
+    // superseded content. Reverting that branch to getRowById makes this fail.
+    syncData.enableSync("basic");
+    const id = ltm.create({
+      projectPath: "/tmp/lore-sync-engine",
+      scope: "project",
+      category: "pattern",
+      title: "VC",
+      content: "v1",
+    });
+    await pushOnce(makeClient() as never); // remote synced at v1
+    ltm.update(id, { content: "local-v2" }); // append v2, UNPUSHED → pending local change
+    // A divergent remote edit on the same logical_id (remote is keyed by id=logical_id).
+    const remoteRow = tableRows("knowledge").find((r) => r.id === id) as Record<
+      string,
+      unknown
+    >;
+    remoteRow.content = "remote-v2";
+    remoteRow.content_hash = "remotehash-v2";
+    remoteRow.updated_at = new Date(9_000_000).toISOString();
+    const r = await pullOnce(makeClient() as never);
+    expect(r.conflicts).toBe(1);
+    expect(currentContent(id)).toBe("remote-v2"); // LWW: remote wins
+    const row = db()
+      .query("SELECT local_content FROM sync_conflicts WHERE row_id = ?")
+      .get(id) as { local_content: string };
+    expect(JSON.parse(row.local_content).content).toBe("local-v2"); // current v2, not v1
+  });
 });
 
 describe("profiles (pull-only mirror)", () => {
