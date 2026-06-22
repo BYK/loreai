@@ -165,6 +165,27 @@ describe("runDaemon", () => {
     expect(info.join("\n")).toContain("100.64.0.1:3207");
   });
 
+  // #907 follow-up: an IPv6 bind host must be bracketed before being
+  // interpolated into the probe URL, or `http://::1:PORT` is an invalid URL —
+  // fetch throws, probeGateway swallows it as `false`, and the daemon never
+  // detects its own healthy gateway (false-negative "did not become healthy").
+  it("brackets an IPv6 host in the probe + reported URLs", async () => {
+    const probed: string[] = [];
+    const { io, info } = makeDaemonIO({
+      readPort: () => 3207,
+      probe: async (url) => {
+        probed.push(url);
+        return true;
+      },
+    });
+    const code = await runDaemon({ hosts: ["::1"] }, io);
+    expect(code).toBe(0);
+    expect(probed).toContain("http://[::1]:3207");
+    // The bare, unbracketed form must never be probed or reported.
+    expect(probed.some((u) => u.includes("http://::1:"))).toBe(false);
+    expect(info.join("\n")).toContain("http://[::1]:3207");
+  });
+
   it("spawns, polls, and reports the healthy gateway", async () => {
     let portCalls = 0;
     const { io, info, spawned } = makeDaemonIO({

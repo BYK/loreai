@@ -188,7 +188,7 @@ export async function runDaemon(
   // If a gateway is already up on the preferred port, don't start a second one.
   const existingPort = io.readPort();
   if (existingPort) {
-    const url = `http://${host}:${existingPort}`;
+    const url = probeUrlFor(host, existingPort);
     if (await io.probe(url)) {
       io.logInfo(`Gateway already running on ${url}`);
       io.logInfo(`Dashboard: ${url}/ui`);
@@ -204,8 +204,8 @@ export async function runDaemon(
   while (io.now() < deadline) {
     await io.sleep(interval);
     const port = io.readPort();
-    if (port && (await io.probe(`http://${host}:${port}`))) {
-      const url = `http://${host}:${port}`;
+    const url = port ? probeUrlFor(host, port) : null;
+    if (url && (await io.probe(url))) {
       io.logInfo(`Gateway started in the background (pid ${pid})`);
       io.logInfo(`Listening on ${url}`);
       io.logInfo(`Dashboard: ${url}/ui`);
@@ -459,7 +459,7 @@ export async function commandStart(opts: StartOptions): Promise<never> {
 
   const { config, port, owned, shutdown } = await startGateway(opts);
 
-  const addrs = config.hosts.map((h) => `http://${h}:${port}`);
+  const addrs = config.hosts.map((h) => `http://${bracketHost(h)}:${port}`);
 
   if (!owned) {
     // Another lore gateway is already running — nothing to do.

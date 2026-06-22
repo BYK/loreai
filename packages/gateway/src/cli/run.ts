@@ -8,6 +8,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import { startGateway, probeGateway, type StartOptions } from "./start";
+import { bracketHost } from "../server";
 import { loadConfig } from "../config";
 import { detectAgents, AGENTS, type DetectedAgent } from "./agents";
 import { safeExit } from "./exit";
@@ -192,7 +193,7 @@ export async function commandRun(
     // Local mode: start (or reuse) a local gateway.
     // `lore run` always runs locally — agent is on the same machine.
     const handle = await startGateway({ ...opts, local: true });
-    gatewayUrl = `http://${handle.config.hosts[0]}:${handle.port}`;
+    gatewayUrl = `http://${bracketHost(handle.config.hosts[0])}:${handle.port}`;
     owned = handle.owned;
     shutdown = handle.shutdown;
 
