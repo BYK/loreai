@@ -38,6 +38,8 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 
 | Variable | Description |
 |---|---|
+| `LORE_BEDROCK_PROFILE`<br>**Default:** `env.AWS_PROFILE` | Initialize the AWS credential provider chain. Called lazily on first Bedrock request. Resolution order follows the standard AWS SDK chain: 1. Environment variables (fromEnv) 2. ~/.aws/credentials with profile (fromIni) 3. ECS task role (fromContainerMetadata) 4. EC2 IMDS (fromInstanceMetadata) Each provider throws when credentials are unavailable; the chain tries them in order until one succeeds. @param profile - Optional AWS profile name (from AWS_PROFILE or LORE_BEDROCK_PROFILE) |
+| `LORE_BEDROCK_REGION` | _no description in source_ |
 | `LORE_DEBUG`<br>**Parser:** `isTruthy` | Whether to log requests. Default: false. Env: LORE_DEBUG |
 | `LORE_IDLE_TIMEOUT`<br>**Default:** `parsePositiveInt(60)`<br>**Parser:** `parsePositiveInt` | Idle timeout in seconds. After this many seconds with no active request, the gateway stops the per-session in-memory cache warmer and distillation loop to free resources. State is preserved in the DB so a new request resumes from where the session left off. Default: 60. Env: `LORE_IDLE_TIMEOUT`. |
 | `LORE_LISTEN_HOST`<br>**Parser:** `parseHosts` | Hosts to bind to. Default: ["127.0.0.1"]. Env: LORE_LISTEN_HOST (comma-separated for multiple addresses). CLI: --host (can be specified multiple times, or comma-separated). |
@@ -45,6 +47,8 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 | `LORE_SESSION_EVICTION_TIMEOUT` | Session eviction timeout in seconds. Sessions idle beyond this are evicted from memory (state is preserved in DB). Default: 1800 (30 min). Set to 0 to disable eviction. Env: LORE_SESSION_EVICTION_TIMEOUT |
 | `LORE_UPSTREAM_ANTHROPIC`<br>**Default:** `"https://api.anthropic.com"` | Upstream Anthropic API URL. Default: "https://api.anthropic.com". Env: LORE_UPSTREAM_ANTHROPIC |
 | `LORE_UPSTREAM_OPENAI`<br>**Default:** `"https://api.openai.com"` | Upstream OpenAI API URL. Default: "https://api.openai.com". Env: LORE_UPSTREAM_OPENAI |
+| `LORE_VERTEX_PROJECT`<br>**Default:** `env.GOOGLE_CLOUD_PROJECT ?? ""` | Vertex config — standard GCP ADC chain + optional LORE overrides |
+| `LORE_VERTEX_REGION` | _no description in source_ |
 | `LORE_WORKER_API_KEY`<br>**Default:** `undefined` | Standalone API key for background worker calls (distillation, curation, consolidation, etc.). When set, workers authenticate with this key instead of the session's client credential — enabling workers to use a different provider (e.g. MiniMax) than the session's Anthropic key. Env: LORE_WORKER_API_KEY |
 | `LORE_WORKER_UPSTREAM` | Custom upstream URL for background worker calls. When set, all worker HTTP calls route to this URL instead of the default upstream URLs. Enables routing workers to a different provider (e.g. MiniMax's Anthropic-compatible endpoint) while sessions continue using Anthropic. Env: LORE_WORKER_UPSTREAM |
 
