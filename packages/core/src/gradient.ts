@@ -1086,6 +1086,19 @@ export function setLastTurnAtForTest(sessionID: string, ms: number): void {
 }
 
 /**
+ * For testing only — set the session's consecutiveBusts count. Used to drive
+ * bust-pressure code paths (e.g. the idle handler's deferred-prefix-work
+ * override) without replaying real cache-bust turns. Creates the session state
+ * if not present.
+ */
+export function setConsecutiveBustsForTest(
+  sessionID: string,
+  busts: number,
+): void {
+  getSessionState(sessionID).consecutiveBusts = busts;
+}
+
+/**
  * Persist gradient calibration state to the session_state table.
  *
  * Designed to be called periodically (e.g. every 30s from the idle scheduler

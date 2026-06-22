@@ -29,6 +29,7 @@ import {
   saveGradientState,
   getConsecutiveBusts,
   effectiveMetaThreshold,
+  BUST_PRESSURE_THRESHOLD,
   getCacheStrategy,
   strategyWantsWarming,
   getLastLayer,
@@ -761,15 +762,17 @@ export function buildIdleWorkHandler(
     // (pruning, export, lat refresh, cost metrics) are unaffected.
     const allowWorker = allowWorkerProbe(sessionID);
 
-    // Bust pressure: effectiveMetaThreshold lowers the meta bar once the session
-    // crosses BUST_PRESSURE_THRESHOLD consecutive busts. Reuse that exact signal
-    // (no separate constant) as the "session is churning cache anyway" override.
+    // Bust pressure: the session has bust the cache on enough consecutive turns
+    // that it's churning regardless of intent — flushing deferred prefix work is
+    // free. Use the same BUST_PRESSURE_THRESHOLD that effectiveMetaThreshold uses
+    // to lower the meta bar (single source of truth; deriving it from the lowered
+    // threshold value degenerates to "never" at metaThreshold == 3).
     const busts = getConsecutiveBusts(sessionID);
     const metaThreshold = effectiveMetaThreshold(
       busts,
       cfg.distillation.metaThreshold,
     );
-    const bustPressure = metaThreshold < cfg.distillation.metaThreshold;
+    const bustPressure = busts >= BUST_PRESSURE_THRESHOLD;
 
     // D6′ deferred prefix work (PR2b follow-on): the idle force-distill below was
     // written assuming "idle ⇒ cache going cold." That is no longer true — when

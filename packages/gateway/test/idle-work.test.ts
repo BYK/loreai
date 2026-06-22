@@ -33,6 +33,7 @@ import {
   setCacheSizeSnapshot,
   evaluateCacheStrategy,
   setCachePricing,
+  setConsecutiveBustsForTest,
   evictSession,
 } from "@loreai/core";
 import type { LLMClient } from "@loreai/core";
@@ -423,81 +424,128 @@ describe("buildIdleWorkHandler", () => {
     expect(state.cacheAnalytics.lastRequestBody).not.toBeNull();
   });
 
-  // D6′: hold-warm sessions DEFER the idle force-distill (the existing minMessages
-  // gate is the urgency override). cool-bust sessions still force-distill below
-  // minMessages. Drive both through the real handler and assert via the
-  // distillation LLM call: with a sub-minMessages backlog, only the cool-bust
-  // session reaches the LLM.
-  test("hold-warm defers idle distillation below minMessages; cool-bust flushes (D6′)", async () => {
+  // D6′ deferred prefix work — drive the real handler and assert via the worker
+  // LLM call. Shared helpers below.
+  const D6_PRICE = {
+    readPerToken: 0.3 / 1_000_000,
+    writePerToken: 3.75 / 1_000_000,
+  };
+  const D6_INPUTS = {
+    pReturn: 0.9,
+    expectedCycles: 4,
+    expectedFutureTurns: 50,
+  };
+
+  // Store a confident strategy for the session. (10k/10k → hold-warm;
+  // 800k/100k → cool-bust, verified by the assertions at each call site.)
+  function d6SetStrategy(sessionID: string, full: number, compressed: number) {
     setCachePricing(3.75, 0.3);
-    const T = Date.now();
-    const PRICE = {
-      readPerToken: 0.3 / 1_000_000,
-      writePerToken: 3.75 / 1_000_000,
-    };
-    const INPUTS = { pReturn: 0.9, expectedCycles: 4, expectedFutureTurns: 50 };
+    setCacheSizeSnapshot(sessionID, full, compressed);
+    return evaluateCacheStrategy(sessionID, D6_INPUTS, D6_PRICE)?.strategy;
+  }
 
-    // 3 undistilled messages — below the default minMessages (5).
-    function seed(sessionID: string): string {
-      const projectPath = makeProjectDir();
-      const pid = ensureProject(projectPath);
-      for (let i = 0; i < 3; i++) {
-        db()
-          .query(
-            `INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
-             VALUES (?, ?, ?, 'user', ?, ?, 0, ?, '{}')`,
-          )
-          .run(
-            `${sessionID}-m${i}`,
-            pid,
-            sessionID,
-            "x".repeat(600),
-            200,
-            T + i,
-          );
-      }
-      return projectPath;
+  function d6SeedMessages(sessionID: string, n: number): string {
+    const projectPath = makeProjectDir();
+    const pid = ensureProject(projectPath);
+    for (let i = 0; i < n; i++) {
+      db()
+        .query(
+          `INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
+           VALUES (?, ?, ?, 'user', ?, ?, 0, ?, '{}')`,
+        )
+        .run(`${sessionID}-m${i}`, pid, sessionID, "x".repeat(600), 200, i);
     }
+    return projectPath;
+  }
 
-    async function runIdle(sessionID: string, projectPath: string) {
-      const llm: LLMClient = {
-        prompt: vi.fn(async () => "<observations>x</observations>"),
-      };
-      const prev = process.env.LORE_BATCH_DISABLED;
-      process.env.LORE_BATCH_DISABLED = "1"; // direct (synchronous) distillation
-      try {
-        await buildIdleWorkHandler(llm)(
+  // Seed >= metaThreshold (20) gen-0 distillations on an already-distilled
+  // project (no undistilled messages), so the meta-consolidation gate is the
+  // ONLY step that can call the worker LLM.
+  function d6SeedGen0(sessionID: string): string {
+    const projectPath = makeProjectDir();
+    const pid = ensureProject(projectPath);
+    for (let i = 0; i < 20; i++) {
+      db()
+        .query(
+          `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+           VALUES (?, ?, ?, '', '', ?, '[]', 0, ?, 0, ?)`,
+        )
+        .run(
+          `${sessionID}-g0-${i}`,
+          pid,
           sessionID,
-          makeSessionState({ sessionID, projectPath, turnsSinceCuration: 0 }),
+          `obs ${i} `.repeat(20),
+          50,
+          i,
         );
-      } finally {
-        if (prev === undefined) delete process.env.LORE_BATCH_DISABLED;
-        else process.env.LORE_BATCH_DISABLED = prev;
-      }
-      return llm;
     }
+    return projectPath;
+  }
 
-    // hold-warm (small body, high return) → defer → distillation never runs.
-    const warm = "idle-d6-holdwarm";
-    const warmPath = seed(warm);
-    setCacheSizeSnapshot(warm, 10_000, 10_000);
-    expect(evaluateCacheStrategy(warm, INPUTS, PRICE)?.strategy).toBe(
-      "hold-warm",
-    );
-    const warmLLM = await runIdle(warm, warmPath);
-    expect(warmLLM.prompt).not.toHaveBeenCalled();
+  async function d6RunIdle(sessionID: string, projectPath: string) {
+    const llm: LLMClient = {
+      prompt: vi.fn(async () => "<observations>x</observations>"),
+    };
+    const prev = process.env.LORE_BATCH_DISABLED;
+    process.env.LORE_BATCH_DISABLED = "1"; // direct (synchronous) distillation
+    try {
+      await buildIdleWorkHandler(llm)(
+        sessionID,
+        makeSessionState({ sessionID, projectPath, turnsSinceCuration: 0 }),
+      );
+    } finally {
+      if (prev === undefined) delete process.env.LORE_BATCH_DISABLED;
+      else process.env.LORE_BATCH_DISABLED = prev;
+    }
+    return llm;
+  }
+
+  // Distillation gate: a sub-minMessages backlog is deferred on hold-warm but
+  // force-distilled on cool-bust. The worker LLM is reached only for cool-bust.
+  test("D6′: hold-warm defers idle distillation below minMessages; cool-bust flushes", async () => {
+    const warm = "idle-d6-distill-holdwarm";
+    const warmPath = d6SeedMessages(warm, 3); // < minMessages (5)
+    expect(d6SetStrategy(warm, 10_000, 10_000)).toBe("hold-warm");
+    expect((await d6RunIdle(warm, warmPath)).prompt).not.toHaveBeenCalled();
     evictSession(warm);
 
-    // cool-bust (large body, compaction available) → flush → distillation runs.
-    const cool = "idle-d6-coolbust";
-    const coolPath = seed(cool);
-    setCacheSizeSnapshot(cool, 800_000, 100_000);
-    expect(evaluateCacheStrategy(cool, INPUTS, PRICE)?.strategy).toBe(
-      "cool-bust",
-    );
-    const coolLLM = await runIdle(cool, coolPath);
-    expect(coolLLM.prompt).toHaveBeenCalled();
+    const cool = "idle-d6-distill-coolbust";
+    const coolPath = d6SeedMessages(cool, 3);
+    expect(d6SetStrategy(cool, 800_000, 100_000)).toBe("cool-bust");
+    expect((await d6RunIdle(cool, coolPath)).prompt).toHaveBeenCalled();
     evictSession(cool);
+  });
+
+  // Meta gate: with >= metaThreshold gen-0 and no undistilled messages, the
+  // `g0 >= metaThreshold && !holdingWarm` gate is the only LLM caller. hold-warm
+  // defers meta-consolidation; cool-bust runs it. (Kills the `&& !holdingWarm`
+  // mutation — the distillation gate can't reach this branch.)
+  test("D6′: hold-warm defers meta-consolidation; cool-bust runs it", async () => {
+    const warm = "idle-d6-meta-holdwarm";
+    const warmPath = d6SeedGen0(warm);
+    expect(d6SetStrategy(warm, 10_000, 10_000)).toBe("hold-warm");
+    expect((await d6RunIdle(warm, warmPath)).prompt).not.toHaveBeenCalled();
+    evictSession(warm);
+
+    const cool = "idle-d6-meta-coolbust";
+    const coolPath = d6SeedGen0(cool);
+    expect(d6SetStrategy(cool, 800_000, 100_000)).toBe("cool-bust");
+    expect((await d6RunIdle(cool, coolPath)).prompt).toHaveBeenCalled();
+    evictSession(cool);
+  });
+
+  // Urgency override: a hold-warm session under bust pressure
+  // (consecutiveBusts >= BUST_PRESSURE_THRESHOLD) flushes anyway — a churning
+  // session is busting cache regardless of intent. Same sub-minMessages backlog
+  // that the first test deferred now force-distills because of the bust pressure.
+  test("D6′: bust pressure overrides hold-warm and force-distills", async () => {
+    const sessionID = "idle-d6-bust-override";
+    const projectPath = d6SeedMessages(sessionID, 3); // < minMessages
+    expect(d6SetStrategy(sessionID, 10_000, 10_000)).toBe("hold-warm");
+    // Mark the session as churning AFTER the strategy is stored.
+    setConsecutiveBustsForTest(sessionID, 3); // >= BUST_PRESSURE_THRESHOLD
+    expect((await d6RunIdle(sessionID, projectPath)).prompt).toHaveBeenCalled();
+    evictSession(sessionID);
   });
 
   test("exports a knowledge file when the project has entries", async () => {

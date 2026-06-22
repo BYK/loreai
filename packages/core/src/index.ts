@@ -161,6 +161,7 @@ export {
   // Test-only — exposed at the barrel so host-package tests can simulate idle
   // gaps without sleeping. Not part of the public API.
   setLastTurnAtForTest,
+  setConsecutiveBustsForTest,
   inspectSessionState,
   getConsecutiveBusts,
   BUST_PRESSURE_THRESHOLD,
