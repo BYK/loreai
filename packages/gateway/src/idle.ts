@@ -29,12 +29,14 @@ import {
   saveGradientState,
   getConsecutiveBusts,
   effectiveMetaThreshold,
+  getCacheStrategy,
+  strategyWantsWarming,
   getLastLayer,
   evictSession as evictGradientSession,
   distillLimiter,
   curatorLimiter,
 } from "@loreai/core";
-import type { ChangedEntry, LLMClient } from "@loreai/core";
+import type { CacheStrategy, ChangedEntry, LLMClient } from "@loreai/core";
 import {
   makeWorkerHealth,
   allowWorkerProbe,
@@ -210,6 +212,34 @@ export function invalidateWarmupBodyAfterIdleDistill(
     prefixMutated && layer >= 1 && state.cacheAnalytics.lastRequestBody != null;
   if (stale) state.cacheAnalytics.lastRequestBody = null;
   return stale;
+}
+
+/**
+ * D6′ deferred prefix work (PR2b follow-on): should the idle handler DEFER its
+ * prefix-rewriting steps (force-distillation, meta-consolidation) to avoid
+ * busting a cache the warmer is deliberately keeping warm?
+ *
+ * Defer ⇔ the unified cache-economics strategy confidently wants to keep this
+ * session warm (`hold-warm`) AND the session is NOT under bust pressure. A
+ * cool-bust / cool-full-write / non-confident session is busting (or letting go
+ * of) its prefix anyway, so flushing now is free. Bust pressure overrides
+ * hold-warm: a churning session is busting cache regardless of intent, so the
+ * deferred work is free at that point too.
+ *
+ * This only biases the SCHEDULE — it never starves distillation/LTM. The
+ * existing urgency thresholds still fire: distillation falls back to the
+ * `minMessages` gate (a ≥minMessages backlog distills even while held warm), and
+ * meta-consolidation keeps its `gen0 >= metaThreshold` gate.
+ */
+export function shouldHoldPrefixWarm(
+  econ: { result: { strategy: CacheStrategy; confident: boolean } } | null,
+  bustPressure: boolean,
+): boolean {
+  if (bustPressure) return false;
+  return (
+    econ?.result.confident === true &&
+    strategyWantsWarming(econ.result.strategy)
+  );
 }
 
 /**
@@ -731,9 +761,36 @@ export function buildIdleWorkHandler(
     // (pruning, export, lat refresh, cost metrics) are unaffected.
     const allowWorker = allowWorkerProbe(sessionID);
 
-    // 1. Distillation — force-distill ALL pending messages on idle, even
-    // below minMessages. The cache is going cold; aggressive distillation
-    // now means a smaller context on the next turn via post-idle compact.
+    // Bust pressure: effectiveMetaThreshold lowers the meta bar once the session
+    // crosses BUST_PRESSURE_THRESHOLD consecutive busts. Reuse that exact signal
+    // (no separate constant) as the "session is churning cache anyway" override.
+    const busts = getConsecutiveBusts(sessionID);
+    const metaThreshold = effectiveMetaThreshold(
+      busts,
+      cfg.distillation.metaThreshold,
+    );
+    const bustPressure = metaThreshold < cfg.distillation.metaThreshold;
+
+    // D6′ deferred prefix work (PR2b follow-on): the idle force-distill below was
+    // written assuming "idle ⇒ cache going cold." That is no longer true — when
+    // the unified cache-economics strategy is `hold-warm`, the warmer is (or will
+    // be) paying to keep this session's prompt prefix alive. Force-distilling /
+    // meta-consolidating then rewrites the very prefix we're paying to keep warm
+    // (busting the cache and forcing the warmer to re-WRITE instead of re-READ).
+    // So on hold-warm we DEFER the prefix-rewriting steps; cool-bust /
+    // cool-full-write / non-confident sessions still flush aggressively (the
+    // prefix is busting anyway — flushing is free). See shouldHoldPrefixWarm.
+    const holdingWarm = shouldHoldPrefixWarm(
+      getCacheStrategy(sessionID),
+      bustPressure,
+    );
+
+    // 1. Distillation. When NOT holding the cache warm, force-distill ALL pending
+    // messages even below minMessages — the cache is going cold, so aggressive
+    // distillation now means a smaller context on the next turn via post-idle
+    // compact. When holding warm, defer: pass force=false so distillation runs
+    // only once enough has piled up (the existing minMessages gate is the natural
+    // urgency override — a ≥minMessages backlog warrants the rewrite regardless).
     // Skip meta-distillation in the run() call: we run it as a separate
     // step below so gen-0 segments from the force-distill are counted.
     // Tracks whether this tick's distillation rewrote the in-context distilled
@@ -751,7 +808,7 @@ export function buildIdleWorkHandler(
           projectPath,
           sessionID,
           model,
-          force: true,
+          force: !holdingWarm,
           skipMeta: true,
           callType,
           workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
@@ -764,19 +821,13 @@ export function buildIdleWorkHandler(
         // warmup body) unchanged. Gating on it avoids nulling a still-valid body.
         if (result.distilled > 0) idlePrefixMutated = true;
       }
-      // Meta consolidation: safe on idle because cache is already cold.
-      // Run as a separate step so gen-0 segments from the force-distill
-      // above are counted toward the threshold.
-      // Under bust pressure (3+ consecutive busts), lower the threshold
-      // to consolidate earlier — shrinks the distilled prefix before the
-      // session becomes unsustainable.
-      const busts = getConsecutiveBusts(sessionID);
-      const metaThreshold = effectiveMetaThreshold(
-        busts,
-        cfg.distillation.metaThreshold,
-      );
+      // Meta consolidation — also a prefix rewrite (archives gen-0, adds gen-1+),
+      // so it's deferred under the same hold-warm bias. Run as a separate step so
+      // gen-0 segments from the force-distill above are counted toward the
+      // threshold. Under bust pressure the threshold is already lowered AND
+      // holdingWarm is false, so a churning session consolidates earlier.
       const g0 = distillation.gen0Count(projectPath, sessionID);
-      if (allowWorker && g0 >= metaThreshold) {
+      if (allowWorker && g0 >= metaThreshold && !holdingWarm) {
         const meta = await distillation.metaDistill({
           llm,
           projectPath,

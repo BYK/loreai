@@ -18,13 +18,23 @@ import {
   consolidationCooldownActive,
   perCategoryThreshold,
   invalidateWarmupBodyAfterIdleDistill,
+  shouldHoldPrefixWarm,
   CONSOLIDATION_COOLDOWN_MS,
   CONSOLIDATION_REATTEMPT_GROWTH,
 } from "../src/idle";
 import { recordConversationCost, clearAllCosts } from "../src/cost-tracker";
 import { resetPipelineState } from "../src/pipeline";
 import { compressBody } from "../src/cache-analytics";
-import { ltm, loadSessionCosts, db, ensureProject } from "@loreai/core";
+import {
+  ltm,
+  loadSessionCosts,
+  db,
+  ensureProject,
+  setCacheSizeSnapshot,
+  evaluateCacheStrategy,
+  setCachePricing,
+  evictSession,
+} from "@loreai/core";
 import type { LLMClient } from "@loreai/core";
 import type { SessionState } from "../src/translate/types";
 
@@ -226,6 +236,35 @@ describe("invalidateWarmupBodyAfterIdleDistill", () => {
   });
 });
 
+describe("shouldHoldPrefixWarm (D6′ defer decision)", () => {
+  function econ(
+    strategy: "hold-warm" | "cool-bust" | "cool-full-write",
+    confident: boolean,
+  ) {
+    return { result: { strategy, confident }, decidedAt: Date.now() };
+  }
+
+  test("hold-warm + no bust pressure → defer prefix rewrites", () => {
+    expect(shouldHoldPrefixWarm(econ("hold-warm", true), false)).toBe(true);
+  });
+
+  test("hold-warm + bust pressure → flush (churning busts cache anyway)", () => {
+    expect(shouldHoldPrefixWarm(econ("hold-warm", true), true)).toBe(false);
+  });
+
+  test("cool-bust / cool-full-write → never defer (prefix busting anyway)", () => {
+    expect(shouldHoldPrefixWarm(econ("cool-bust", true), false)).toBe(false);
+    expect(shouldHoldPrefixWarm(econ("cool-full-write", true), false)).toBe(
+      false,
+    );
+  });
+
+  test("non-confident strategy or null → flush (legacy aggressive behavior)", () => {
+    expect(shouldHoldPrefixWarm(econ("hold-warm", false), false)).toBe(false);
+    expect(shouldHoldPrefixWarm(null, false)).toBe(false);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // buildIdleWorkHandler
 // ---------------------------------------------------------------------------
@@ -382,6 +421,83 @@ describe("buildIdleWorkHandler", () => {
     // this session never transformed → getLastLayer == 0 → its full-passthrough
     // warmup body is preserved (only COMPRESSED sessions are invalidated).
     expect(state.cacheAnalytics.lastRequestBody).not.toBeNull();
+  });
+
+  // D6′: hold-warm sessions DEFER the idle force-distill (the existing minMessages
+  // gate is the urgency override). cool-bust sessions still force-distill below
+  // minMessages. Drive both through the real handler and assert via the
+  // distillation LLM call: with a sub-minMessages backlog, only the cool-bust
+  // session reaches the LLM.
+  test("hold-warm defers idle distillation below minMessages; cool-bust flushes (D6′)", async () => {
+    setCachePricing(3.75, 0.3);
+    const T = Date.now();
+    const PRICE = {
+      readPerToken: 0.3 / 1_000_000,
+      writePerToken: 3.75 / 1_000_000,
+    };
+    const INPUTS = { pReturn: 0.9, expectedCycles: 4, expectedFutureTurns: 50 };
+
+    // 3 undistilled messages — below the default minMessages (5).
+    function seed(sessionID: string): string {
+      const projectPath = makeProjectDir();
+      const pid = ensureProject(projectPath);
+      for (let i = 0; i < 3; i++) {
+        db()
+          .query(
+            `INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
+             VALUES (?, ?, ?, 'user', ?, ?, 0, ?, '{}')`,
+          )
+          .run(
+            `${sessionID}-m${i}`,
+            pid,
+            sessionID,
+            "x".repeat(600),
+            200,
+            T + i,
+          );
+      }
+      return projectPath;
+    }
+
+    async function runIdle(sessionID: string, projectPath: string) {
+      const llm: LLMClient = {
+        prompt: vi.fn(async () => "<observations>x</observations>"),
+      };
+      const prev = process.env.LORE_BATCH_DISABLED;
+      process.env.LORE_BATCH_DISABLED = "1"; // direct (synchronous) distillation
+      try {
+        await buildIdleWorkHandler(llm)(
+          sessionID,
+          makeSessionState({ sessionID, projectPath, turnsSinceCuration: 0 }),
+        );
+      } finally {
+        if (prev === undefined) delete process.env.LORE_BATCH_DISABLED;
+        else process.env.LORE_BATCH_DISABLED = prev;
+      }
+      return llm;
+    }
+
+    // hold-warm (small body, high return) → defer → distillation never runs.
+    const warm = "idle-d6-holdwarm";
+    const warmPath = seed(warm);
+    setCacheSizeSnapshot(warm, 10_000, 10_000);
+    expect(evaluateCacheStrategy(warm, INPUTS, PRICE)?.strategy).toBe(
+      "hold-warm",
+    );
+    const warmLLM = await runIdle(warm, warmPath);
+    expect(warmLLM.prompt).not.toHaveBeenCalled();
+    evictSession(warm);
+
+    // cool-bust (large body, compaction available) → flush → distillation runs.
+    const cool = "idle-d6-coolbust";
+    const coolPath = seed(cool);
+    setCacheSizeSnapshot(cool, 800_000, 100_000);
+    expect(evaluateCacheStrategy(cool, INPUTS, PRICE)?.strategy).toBe(
+      "cool-bust",
+    );
+    const coolLLM = await runIdle(cool, coolPath);
+    expect(coolLLM.prompt).toHaveBeenCalled();
+    evictSession(cool);
   });
 
   test("exports a knowledge file when the project has entries", async () => {
