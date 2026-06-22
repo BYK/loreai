@@ -50,6 +50,7 @@ import {
   onIdleResume,
   getCacheStrategy,
   strategyWantsWarming,
+  type CacheStrategy,
   consumeCameOutOfIdle,
   needsUrgentDistillation,
   formatKnowledge,
@@ -5254,6 +5255,29 @@ function isCacheWarm(state: SessionState): boolean {
   return Date.now() - warmup.lastWarmupAt < profile.ttlMs;
 }
 
+/**
+ * Decide whether to skip post-idle compaction (PR2b). The unified cache-economics
+ * strategy provides the INTENT (hold-warm → protect the warm prefix by skipping
+ * compaction; cool-bust/cool-full-write → let it compact), but the cache must
+ * ACTUALLY still be live (`cacheIsLive` — the `isCacheWarm` time check) — a stale
+ * hold-warm strategy whose cache has expired must NOT skip compaction (the cache
+ * is cold; compaction is free and reduces ongoing read cost). Non-confident
+ * strategy → `cacheIsLive` alone (the legacy behavior, byte-identical).
+ */
+export function decideSkipCompact(
+  econ: {
+    result: { strategy: CacheStrategy; confident: boolean };
+    decidedAt: number;
+  } | null,
+  cacheIsLive: boolean,
+): boolean {
+  if (!econ || !econ.result.confident) return cacheIsLive;
+  // Confident hold-warm wants to skip, but ONLY if the cache is actually live.
+  if (strategyWantsWarming(econ.result.strategy)) return cacheIsLive;
+  // cool-bust / cool-full-write: don't skip — let it compact.
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Case 3: Normal conversation turn — full pipeline
 // ---------------------------------------------------------------------------
@@ -5718,17 +5742,15 @@ async function handleConversationTurn(
       ? 60
       : cfg.idleResumeMinutes;
   const thresholdMs = effectiveIdleMinutes * 60_000;
-  // If the cache warmer recently refreshed this session's prompt cache,
-  // skip post-idle compaction — compacting would produce a different prompt
-  // body that doesn't match the warmed prefix, causing a cache bust.
-  // PR2b: when the unified cache-economics strategy is confident, IT decides
-  // skipCompact (hold-warm → skip; cool-bust/cool-full-write → don't skip).
-  // Falls back to the legacy isCacheWarm signal when no confident strategy.
+  // PR2b: the unified cache-economics strategy decides whether to skip
+  // post-idle compaction. When confident AND the cache is actually still live
+  // (isCacheWarm time check), hold-warm → skip compaction (protect the warm
+  // prefix); cool-bust/cool-full-write → don't skip (let it compact). The
+  // isCacheWarm liveness floor is ALWAYS required — a stale hold-warm strategy
+  // with an expired cache must NOT skip compaction (the cache is cold, compaction
+  // is free and beneficial). Falls back to isCacheWarm when non-confident.
   const econ = getCacheStrategy(sessionID);
-  const econConfident = econ?.result.confident === true;
-  const cacheWarm = econConfident
-    ? strategyWantsWarming(econ!.result.strategy)
-    : isCacheWarm(sessionState);
+  const cacheWarm = decideSkipCompact(econ, isCacheWarm(sessionState));
   const idleResult = onIdleResume(
     sessionID,
     thresholdMs,
@@ -5752,15 +5774,15 @@ async function handleConversationTurn(
     log.info(
       `session idle ${Math.round(idleResult.idleMs / 60_000)}min — refreshing caches` +
         (cacheWarm ? " (cache warm — skipping compact)" : "") +
-        (econConfident
-          ? ` (strategy=${econ!.result.strategy})`
+        (econ?.result.confident
+          ? ` (strategy=${econ.result.strategy})`
           : " (legacy isCacheWarm)"),
     );
     if (econ) {
       log.info(
         `cache-economics (compaction): session=${sessionID.slice(0, 16)} ` +
           `strategy=${econ.result.strategy} skipCompact=${cacheWarm} ` +
-          `confident=${econConfident} strategyAgeMs=${Date.now() - econ.decidedAt}`,
+          `confident=${econ.result.confident === true} strategyAgeMs=${Date.now() - econ.decidedAt}`,
       );
     }
   }

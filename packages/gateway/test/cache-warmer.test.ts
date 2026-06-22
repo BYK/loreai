@@ -54,11 +54,10 @@ import {
 import { getKV, setKV } from "@loreai/core";
 import {
   setCacheSizeSnapshot,
-  evaluateCacheStrategy,
   setCachePricing,
   evictSession,
 } from "@loreai/core";
-
+import { decideSkipCompact } from "../src/pipeline";
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -488,6 +487,51 @@ describe("prepareAnthropicWarmupBody", () => {
     expect(breakpoints).toHaveLength(1);
     expect(result.messages[0].content[0].cache_control).toEqual({
       type: "ephemeral",
+    });
+  });
+
+  describe("decideSkipCompact (pipeline compaction flip, PR2b)", () => {
+    function econ(
+      strategy: "hold-warm" | "cool-bust" | "cool-full-write",
+      confident: boolean,
+    ) {
+      return {
+        result: { strategy, confident },
+        decidedAt: Date.now(),
+      };
+    }
+
+    test("hold-warm + cache live → skip compaction (protect warm prefix)", () => {
+      expect(decideSkipCompact(econ("hold-warm", true), true)).toBe(true);
+    });
+
+    test("hold-warm + cache EXPIRED → do NOT skip (stale strategy, cold cache)", () => {
+      // The MUST-FIX regression: a stale hold-warm whose cache expired must NOT
+      // skip compaction — isCacheWarm liveness floor is always required.
+      expect(decideSkipCompact(econ("hold-warm", true), false)).toBe(false);
+    });
+
+    test("cool-bust → never skip (let it compact), regardless of cache liveness", () => {
+      expect(decideSkipCompact(econ("cool-bust", true), true)).toBe(false);
+      expect(decideSkipCompact(econ("cool-bust", true), false)).toBe(false);
+    });
+
+    test("cool-full-write → never skip, regardless of cache liveness", () => {
+      expect(decideSkipCompact(econ("cool-full-write", true), true)).toBe(
+        false,
+      );
+      expect(decideSkipCompact(econ("cool-full-write", true), false)).toBe(
+        false,
+      );
+    });
+
+    test("non-confident strategy → fall back to isCacheWarm (cacheIsLive) alone", () => {
+      // Byte-identical to the legacy behavior: skipCompact = isCacheWarm.
+      expect(decideSkipCompact(econ("hold-warm", false), true)).toBe(true);
+      expect(decideSkipCompact(econ("hold-warm", false), false)).toBe(false);
+      expect(decideSkipCompact(econ("cool-bust", false), true)).toBe(true);
+      expect(decideSkipCompact(null, true)).toBe(true);
+      expect(decideSkipCompact(null, false)).toBe(false);
     });
   });
 });
@@ -3224,8 +3268,8 @@ describe("shouldWarm unified cache-economics flip (PR2b)", () => {
 
   beforeEach(() => {
     _resetForTest();
-    // Pricing: read=$0.30/MTok, write=$3.75/MTok (Anthropic 5m cache, Opus-ish).
-    setCachePricing(0.3, 3.75);
+    // Pricing: write=$3.75/MTok, read=$0.30/MTok (Anthropic 5m cache, Opus-ish).
+    setCachePricing(3.75, 0.3);
   });
 
   // Build a state with a stored body, in the warmup margin of the first TTL
