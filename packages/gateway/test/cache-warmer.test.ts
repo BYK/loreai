@@ -3366,3 +3366,174 @@ describe("shouldWarm unified cache-economics flip (PR2b)", () => {
     evictSession(sid);
   });
 });
+
+describe("shouldWarm Phase A freshness + Phase B continuation (PR2b coverage)", () => {
+  let counter = 0;
+  function freshSession(): string {
+    return `econ-phaseb-${Date.now()}-${counter++}`;
+  }
+
+  beforeEach(() => {
+    _resetForTest();
+    setCachePricing(3.75, 0.3);
+  });
+
+  const BODY = compressBody(
+    '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,' +
+      '"messages":[{"role":"user","content":"test"}]}',
+  );
+
+  // 5m profile: ttlMs=300_000, warmupMarginMs=45_000 → in-margin means
+  // intoWindow (elapsed % ttlMs) ≥ 255_000; cooldown = 255_000.
+  const profile = () => buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+
+  // Long gaps → survival ≈ 1 at the test elapsed → pReturns high (~0.92).
+  function longGapHist() {
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 1_800_000); // 30m
+    return hist;
+  }
+  // Short BREAK gaps (≥ BREAK_FLOOR 180k but < the test elapsed) → survival ≈ 0
+  // → pReturns low (~0.12); breakFraction stays high so pFinished ≤ 0.95
+  // (the pFinished>0.95 guard does NOT fire — we reach the threshold logic).
+  function shortBreakHist() {
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 200_000); // 3.3m
+    return hist;
+  }
+
+  function warmupState(overrides: Partial<WarmupState>): WarmupState {
+    return {
+      lastWarmupAt: 0,
+      warmupCount: 0,
+      totalWarmups: 0,
+      warmupHits: 0,
+      disabled: false,
+      ...overrides,
+    };
+  }
+
+  function makeState(
+    sid: string,
+    now: number,
+    elapsedMs: number,
+    warmup?: Partial<WarmupState>,
+  ): SessionState {
+    return makeSessionState({
+      sessionID: sid,
+      lastRequestTime: now - elapsedMs,
+      messageCount: 20,
+      lastInputTokens: 100_000,
+      warmup: warmup ? warmupState(warmup) : undefined,
+      cacheAnalytics: { ...makeCacheAnalytics(), lastRequestBody: BODY },
+    });
+  }
+
+  test("Phase A: cache still fresh (before the warmup margin) → don't warm yet", () => {
+    const sid = freshSession();
+    setCacheSizeSnapshot(sid, 10_000, 10_000); // would be hold-warm
+    const now = Date.now();
+    // 1 min into a 5m window — well before the last-45s margin. Even though the
+    // strategy wants warming, it's too early (elapsed < ttlMs - warmupMarginMs).
+    expect(
+      shouldWarm(makeState(sid, now, 60_000), profile(), longGapHist(), now),
+    ).toBe(false);
+    evictSession(sid);
+  });
+
+  test("Phase B: mid-break flip to cool-bust stops a continuation warm", () => {
+    const sid = freshSession();
+    // Large body + compaction available → cool-bust. A session already past its
+    // first TTL window (Phase B) whose strategy is cool-bust must STOP warming,
+    // even though survival is high (pReturns ~0.92 → pFinished ≤ 0.95).
+    setCacheSizeSnapshot(sid, 800_000, 100_000);
+    const now = Date.now();
+    // elapsed 310s → Phase B (≥ ttlMs); the cool-bust stop fires before the
+    // margin check, so the not-in-margin position is irrelevant here.
+    expect(
+      shouldWarm(makeState(sid, now, 310_000), profile(), longGapHist(), now),
+    ).toBe(false);
+    evictSession(sid);
+  });
+
+  test("Phase B: hold-warm continues — warms when in-margin, waits when not", () => {
+    const sid = freshSession();
+    setCacheSizeSnapshot(sid, 10_000, 10_000); // hold-warm
+    const now = Date.now();
+    // Not yet in this window's margin (intoWindow 10s < 255s) → wait.
+    expect(
+      shouldWarm(makeState(sid, now, 310_000), profile(), longGapHist(), now),
+    ).toBe(false);
+    // In-margin of the 2nd window (intoWindow 260s ≥ 255s) → warm.
+    expect(
+      shouldWarm(makeState(sid, now, 560_000), profile(), longGapHist(), now),
+    ).toBe(true);
+    evictSession(sid);
+  });
+
+  test("Phase B: hard break-even cap (cyclesSpent ≥ maxCycles) stops warming", () => {
+    const sid = freshSession();
+    setCacheSizeSnapshot(sid, 10_000, 10_000); // hold-warm — but cap overrides
+    const now = Date.now();
+    const p = profile();
+    const maxCycles = maxProfitableCycles(
+      p.cacheReadCostPerMTok,
+      p.cacheMissCostPerMTok,
+    );
+    // Already spent the full break-even budget; all prior warms hit (ROI passes).
+    const s = makeState(sid, now, 560_000, {
+      warmupCount: maxCycles,
+      totalWarmups: maxCycles,
+      warmupHits: maxCycles,
+      lastWarmupAt: now - 300_000, // > cooldown (255s) → not double-warming
+    });
+    expect(shouldWarm(s, p, longGapHist(), now)).toBe(false);
+    evictSession(sid);
+  });
+
+  test("Phase B fallback: non-confident + pReturns below the rising threshold stops", () => {
+    const sid = freshSession();
+    // NO snapshot → non-confident → legacy rising-cost threshold governs.
+    const now = Date.now();
+    const p = profile();
+    // 4 cycles spent (< maxCycles, < ROI check of 5). rising = cumulative(5).
+    const rising = cumulativeCostThreshold(
+      5,
+      p.cacheReadCostPerMTok,
+      p.cacheMissCostPerMTok,
+    );
+    // shortBreakHist → pReturns ~0.12, comfortably below rising(5).
+    expect(rising).toBeGreaterThan(0.2);
+    const s = makeState(sid, now, 310_000, {
+      warmupCount: 4,
+      totalWarmups: 4, // < MIN_WARMUPS_FOR_ROI_CHECK (5) → ROI guard skipped
+      warmupHits: 0,
+      lastWarmupAt: now - 300_000,
+    });
+    expect(shouldWarm(s, p, shortBreakHist(), now)).toBe(false);
+    evictSession(sid);
+  });
+
+  test("Phase B fallback: dead-survival session exceeds the remaining-cycles budget", () => {
+    const sid = freshSession();
+    // NO snapshot → non-confident. cyclesSpent=0 → rising threshold is at its
+    // lowest (costThreshold), so pReturns (~0.12 from the dead histogram) clears
+    // it and we fall through to the remaining-cycles re-check. A dead session
+    // (survival < 0.001) makes expectedWarmupCycles return maxCycles+1, so
+    // cyclesSpent + remaining > maxCycles → stop. Guards the defensive cap.
+    const now = Date.now();
+    const p = profile();
+    const rising = cumulativeCostThreshold(
+      1,
+      p.cacheReadCostPerMTok,
+      p.cacheMissCostPerMTok,
+    );
+    // Precondition for reaching the remaining-cycles re-check at cyclesSpent=0:
+    // pReturns (~0.12) must exceed the k=1 rising threshold.
+    expect(rising).toBeLessThan(0.12);
+    expect(
+      shouldWarm(makeState(sid, now, 310_000), p, shortBreakHist(), now),
+    ).toBe(false);
+    evictSession(sid);
+  });
+});

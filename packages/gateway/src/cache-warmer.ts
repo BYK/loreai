@@ -1298,7 +1298,7 @@ export function shouldWarm(
   const econ = getCacheStrategy(state.sessionID);
   const econConfident = econ?.result.confident === true;
   const econWantsWarming =
-    econConfident && strategyWantsWarming(econ!.result.strategy);
+    econ != null && econConfident && strategyWantsWarming(econ.result.strategy);
 
   // Determine if this is the initial commitment or a continuation
   const cyclesSpent = state.warmup?.warmupCount ?? 0;

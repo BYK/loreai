@@ -5294,7 +5294,7 @@ export function decideSkipCompact(
   } | null,
   cacheIsLive: boolean,
 ): boolean {
-  if (!econ || !econ.result.confident) return cacheIsLive;
+  if (!econ?.result.confident) return cacheIsLive;
   // Confident hold-warm wants to skip, but ONLY if the cache is actually live.
   if (strategyWantsWarming(econ.result.strategy)) return cacheIsLive;
   // cool-bust / cool-full-write: don't skip — let it compact.
