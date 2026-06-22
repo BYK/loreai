@@ -215,10 +215,24 @@ describe("buildBedrockRequestBody", () => {
     ]);
   });
 
-  test("includes stream flag when streaming", () => {
-    const req = makeReq({ stream: true });
-    const body = buildBedrockRequestBody(req) as Record<string, unknown>;
-    expect(body.stream).toBe(true);
+  test("does NOT include stream field (controlled by endpoint, not body)", () => {
+    // Bedrock determines streaming via the endpoint URL, not a body field.
+    // Adding `stream: true|false` to the body causes Bedrock to reject the
+    // request with a validation error. The URL builder selects the right
+    // endpoint (InvokeModel vs InvokeModelWithResponseStream) based on req.stream.
+    const streamingReq = makeReq({ stream: true });
+    const streamingBody = buildBedrockRequestBody(streamingReq) as Record<
+      string,
+      unknown
+    >;
+    expect(streamingBody.stream).toBeUndefined();
+
+    const nonStreamingReq = makeReq({ stream: false });
+    const nonStreamingBody = buildBedrockRequestBody(nonStreamingReq) as Record<
+      string,
+      unknown
+    >;
+    expect(nonStreamingBody.stream).toBeUndefined();
   });
 });
 

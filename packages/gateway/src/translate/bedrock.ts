@@ -111,7 +111,11 @@ export function buildBedrockRequestBody(
   const body: Record<string, unknown> = {
     anthropic_version: BEDROCK_ANTHROPIC_VERSION,
     max_tokens: req.maxTokens,
-    stream: req.stream,
+    // NOTE: Bedrock does NOT accept a `stream` field in the body. Streaming
+    // is controlled by the endpoint: `InvokeModel` (non-streaming) vs
+    // `InvokeModelWithResponseStream` (streaming). The URL builder selects
+    // the right endpoint based on req.stream. Adding `stream: true|false`
+    // here causes Bedrock to reject the request with a validation error.
   };
 
   // System prompt — concatenate LTM into system (Bedrock doesn't support
