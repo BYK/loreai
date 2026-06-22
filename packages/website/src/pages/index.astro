@@ -380,6 +380,20 @@ const base = import.meta.env.BASE_URL;
       </div>
       <div class="bc bc-3 sr">
         <div>
+          <p class="bc-tag">Team</p>
+          <h3 class="bc-t">Memory your team reviews</h3>
+          <p class="bc-b">Curated knowledge is exported to <code class="code-inline">.lore.md</code> —
+            plain Markdown in your repo, sorted for clean diffs and tagged with stable IDs. Your team
+            reviews what the AI learned in a pull request, the same way it reviews code. No private
+            database, no black box. Live team sync is coming with Folk Lore.
+            <a href={`${base}docs/team-memory/`} style="border-bottom:1px solid var(--g4);color:var(--g2)">How team memory works &rarr;</a></p>
+        </div>
+        <div class="code-block">
+          <code><span class="ck"># Review what your AI learned</span><br><span class="cv">$</span> git diff .lore.md<br><br><span class="ck">+ * **Auth**: refresh tokens in the</span><br><span class="ck">+   middleware, never per route.</span></code>
+        </div>
+      </div>
+      <div class="bc bc-3 sr">
+        <div>
           <p class="bc-tag">Migration</p>
           <h3 class="bc-t">Import your history, start smart</h3>
           <p class="bc-b">Lore imports conversations from Claude Code, Codex, Aider, Cline, Continue,
