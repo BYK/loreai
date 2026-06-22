@@ -257,6 +257,18 @@ function insertKnowledge(id: string, content: string): void {
     )
     .run(id, pid, content, now(), now());
 }
+
+// Knowledge is append-only (A2): a pulled change appends a new version and a
+// pulled delete appends a death-cert, so the CURRENT live content is in
+// knowledge_current keyed by logical_id — not the base row addressed by getRowById.
+function currentContent(logicalId: string): string | null {
+  const r = db()
+    .query(
+      "SELECT content FROM knowledge_current WHERE COALESCE(logical_id, id) = ?",
+    )
+    .get(logicalId) as { content: string } | undefined;
+  return r?.content ?? null;
+}
 function insertEntity(id: string): void {
   const pid = ensureProject("/tmp/lore-sync-engine");
   db()
@@ -597,7 +609,7 @@ describe("pullOnce", () => {
       updated_at: new Date(2_000_000).toISOString(),
     });
     await pullOnce(makeClient() as never);
-    expect(syncData.getRowById("knowledge", "kr")?.content).toBe("from server");
+    expect(currentContent("kr")).toBe("from server");
 
     syncData.withApplying(() => insertKnowledge("kd", "x"));
     tableRows("knowledge").push({
@@ -608,7 +620,7 @@ describe("pullOnce", () => {
       updated_at: new Date(3_000_000).toISOString(),
     } as never);
     await pullOnce(makeClient() as never);
-    expect(syncData.getRowById("knowledge", "kd")).toBeNull();
+    expect(currentContent("kd")).toBeNull(); // death-cert applied → no live current
   });
 
   test("a remote tombstone that RETAINED its content_hash still deletes a content-identical local row", async () => {
@@ -629,7 +641,7 @@ describe("pullOnce", () => {
     remoteRow.updated_at = new Date(9_000_000).toISOString(); // past the pull cursor
     expect(typeof remoteRow.content_hash).toBe("string"); // hash intact (the trap)
     const r = await pullOnce(makeClient() as never);
-    expect(syncData.getRowById("knowledge", "kt")).toBeNull(); // delete propagated
+    expect(currentContent("kt")).toBeNull(); // delete propagated (death-cert)
     expect(r.pulled).toBe(1); // a clean apply…
     expect(r.conflicts).toBe(0); // …not a conflict
   });
@@ -652,7 +664,7 @@ describe("pullOnce", () => {
     });
     const r = await pullOnce(makeClient() as never);
     expect(r.conflicts).toBe(1);
-    expect(syncData.getRowById("knowledge", "kc")?.content).toBe("remote-edit");
+    expect(currentContent("kc")).toBe("remote-edit"); // remote wins → new current version
     // The discarded local edit is recoverable from sync_conflicts.local_content.
     const row = db()
       .query("SELECT local_content FROM sync_conflicts WHERE row_id='kc'")

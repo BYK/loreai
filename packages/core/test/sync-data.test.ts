@@ -9,6 +9,8 @@ import {
 } from "../src/db";
 import {
   applyRemoteDelete,
+  applyRemoteKnowledge,
+  applyRemoteKnowledgeDelete,
   applyRemoteUpsert,
   assertSyncInvariants,
   classifyRemoteRow,
@@ -22,7 +24,7 @@ import {
   getSyncState,
   hasPendingChange,
   isSyncEnabled,
-  knowledgeSyncOp,
+  knowledgePushPlan,
   maxOutboxSeq,
   pickSyncColumns,
   readOutbox,
@@ -38,26 +40,174 @@ import * as ltm from "../src/ltm";
 
 const now = () => Date.now();
 
-describe("knowledgeSyncOp — append-only remote mapping (A2)", () => {
-  test("current live → upsert; superseded + death-cert → delete; gone → skip", () => {
+describe("applyRemoteKnowledge — append-only pull apply (A2, #823)", () => {
+  const PROJ = "/tmp/lore-apply-knowledge";
+  const remoteRow = (
+    id: string,
+    content: string,
+    extra: Record<string, unknown> = {},
+  ) => ({
+    id,
+    project_id: ensureProject(PROJ),
+    category: "decision",
+    title: "AK",
+    content,
+    created_at: now(),
+    updated_at: now(),
+    ...extra,
+  });
+  const versions = (lid: string) =>
+    db()
+      .query(
+        "SELECT id, version, is_current, is_deleted, content FROM knowledge WHERE COALESCE(logical_id, id) = ? ORDER BY version",
+      )
+      .all(lid) as Array<{
+      id: string;
+      version: number;
+      is_current: number;
+      is_deleted: number;
+      content: string;
+    }>;
+  const curContent = (lid: string) =>
+    (
+      db()
+        .query(
+          "SELECT content FROM knowledge_current WHERE COALESCE(logical_id, id) = ?",
+        )
+        .get(lid) as { content: string } | undefined
+    )?.content;
+
+  test("new entry → v1 with id = logical_id", () => {
+    applyRemoteKnowledge(remoteRow("n1", "hello"));
+    const v = versions("n1");
+    expect(v).toHaveLength(1);
+    expect(v[0].id).toBe("n1");
+    expect(v[0].version).toBe(1);
+    expect(v[0].is_current).toBe(1);
+    expect(curContent("n1")).toBe("hello");
+  });
+
+  test("content change → appends a new current version; prior preserved + demoted", () => {
+    applyRemoteKnowledge(remoteRow("c1", "v1"));
+    applyRemoteKnowledge(remoteRow("c1", "v2"));
+    const v = versions("c1");
+    expect(v).toHaveLength(2);
+    expect(v[0].content).toBe("v1");
+    expect(v[0].is_current).toBe(0); // prior demoted, immutably preserved
+    expect(v[1].content).toBe("v2");
+    expect(v[1].is_current).toBe(1);
+    expect(v[1].id).not.toBe("c1"); // new version row gets a fresh id
+    expect(curContent("c1")).toBe("v2");
+  });
+
+  test("identical content → no new version (idempotent re-pull / echo)", () => {
+    applyRemoteKnowledge(remoteRow("i1", "same"));
+    applyRemoteKnowledge(remoteRow("i1", "same"));
+    expect(versions("i1")).toHaveLength(1);
+  });
+
+  test("metadata-only change (same content) converges in place, no new version", () => {
+    applyRemoteKnowledge(remoteRow("m1", "body", { confidence: 0.5 }));
+    applyRemoteKnowledge(remoteRow("m1", "body", { confidence: 0.9 }));
+    expect(versions("m1")).toHaveLength(1);
+    expect(
+      (
+        db()
+          .query(
+            "SELECT confidence FROM knowledge_current WHERE COALESCE(logical_id, id) = ?",
+          )
+          .get("m1") as { confidence: number }
+      ).confidence,
+    ).toBe(0.9);
+  });
+
+  test("delete → death-cert (no live current); re-delete is a no-op", () => {
+    applyRemoteKnowledge(remoteRow("d1", "body"));
+    applyRemoteKnowledgeDelete("d1");
+    expect(curContent("d1")).toBeUndefined();
+    const v = versions("d1");
+    expect(v).toHaveLength(2);
+    expect(v[1].is_deleted).toBe(1);
+    applyRemoteKnowledgeDelete("d1"); // idempotent
+    expect(versions("d1")).toHaveLength(2);
+  });
+
+  test("revive: a remote upsert after a delete appends a new live current", () => {
+    applyRemoteKnowledge(remoteRow("r1", "body"));
+    applyRemoteKnowledgeDelete("r1");
+    expect(curContent("r1")).toBeUndefined();
+    applyRemoteKnowledge(remoteRow("r1", "revived"));
+    expect(curContent("r1")).toBe("revived");
+    expect(versions("r1")).toHaveLength(3); // v1 live, v2 death-cert, v3 revived
+  });
+
+  test("round-trip: A's multi-version entry coalesces to ONE version on peer B", () => {
+    // Device A: create + update → two local versions, current content "final".
     const id = ltm.create({
-      projectPath: "/tmp/lore-sync-kso",
+      projectPath: PROJ,
       scope: "project",
       category: "decision",
-      title: "KSO",
+      title: "RT",
+      content: "first",
+    });
+    ltm.update(id, { content: "final" });
+    expect(versions(id)).toHaveLength(2); // A has v1 + v2
+
+    // Push coalesces both versions to ONE remote row keyed by logical_id.
+    const plan = knowledgePushPlan(id);
+    expect(plan.op).toBe("upsert");
+    if (plan.op !== "upsert") return;
+    expect(plan.row.id).toBe(id);
+    expect(plan.row.content).toBe("final");
+
+    // Device B (simulated as a peer with none of A's local version history).
+    db()
+      .query("DELETE FROM knowledge WHERE COALESCE(logical_id, id) = ?")
+      .run(id);
+    applyRemoteKnowledge(plan.row);
+    const vB = versions(id);
+    expect(vB).toHaveLength(1); // ONE coalesced version, not A's two
+    expect(vB[0].id).toBe(id); // v1 keyed by the shared logical_id
+    expect(curContent(id)).toBe("final");
+
+    // Re-pulling the same row (echo) is idempotent.
+    applyRemoteKnowledge(plan.row);
+    expect(versions(id)).toHaveLength(1);
+  });
+});
+
+describe("knowledgePushPlan — append-only remote mapping keyed by logical_id (A2)", () => {
+  test("coalesces versions to one logical-keyed upsert; no live current → delete; gone → skip", () => {
+    const id = ltm.create({
+      projectPath: "/tmp/lore-sync-kpp",
+      scope: "project",
+      category: "decision",
+      title: "KPP",
       content: "secret v1",
     });
-    expect(knowledgeSyncOp(id)).toBe("upsert"); // current live
+    const p1 = knowledgePushPlan(id);
+    expect(p1.op).toBe("upsert");
+    if (p1.op === "upsert") {
+      expect(p1.logicalId).toBe(id);
+      expect(p1.row.id).toBe(id); // re-keyed on logical_id
+      expect(p1.row.content).toBe("secret v1");
+    }
 
-    const v2 = ltm.appendVersion(id, { content: "redacted v2" });
-    // The superseded v1 must become a remote DELETE so the old (secret) content is
-    // removed from the remote — not re-pushed as a live row.
-    expect(knowledgeSyncOp(id)).toBe("delete");
-    expect(knowledgeSyncOp(v2 as string)).toBe("upsert"); // new current live
+    const v2 = ltm.appendVersion(id, { content: "redacted v2" }) as string;
+    // Both the (now superseded) v1 outbox row AND the new v2 row coalesce to ONE
+    // upsert keyed by logical_id carrying the CURRENT content — the old secret is
+    // never pushed as a live row.
+    for (const outboxId of [id, v2]) {
+      const p = knowledgePushPlan(outboxId);
+      expect(p.op).toBe("upsert");
+      if (p.op === "upsert") {
+        expect(p.logicalId).toBe(id);
+        expect(p.row.id).toBe(id);
+        expect(p.row.content).toBe("redacted v2");
+      }
+    }
 
-    ltm.remove(id); // append a death-cert, demoting v2
-    // Deletion propagates: the now-superseded v2 becomes a remote DELETE.
-    expect(knowledgeSyncOp(v2 as string)).toBe("delete");
+    ltm.remove(id); // append a death-cert → no live current
     const deathCert = (
       db()
         .query(
@@ -65,9 +215,13 @@ describe("knowledgeSyncOp — append-only remote mapping (A2)", () => {
         )
         .get(id) as { id: string }
     ).id;
-    expect(knowledgeSyncOp(deathCert)).toBe("delete"); // death cert → delete
+    for (const outboxId of [id, v2, deathCert]) {
+      const p = knowledgePushPlan(outboxId);
+      expect(p.op).toBe("delete");
+      if (p.op === "delete") expect(p.logicalId).toBe(id);
+    }
 
-    expect(knowledgeSyncOp("00000000-0000-0000-0000-000000000000")).toBe(
+    expect(knowledgePushPlan("00000000-0000-0000-0000-000000000000").op).toBe(
       "skip",
     );
   });
@@ -401,20 +555,20 @@ describe("applyRemoteUpsert / applyRemoteDelete", () => {
     rebuildFts("knowledge_fts"); // must not throw
   });
 
-  test("backfills logical_id = id for a pulled knowledge row, scoped to that row only", () => {
-    // Remote has no logical_id column yet (sub-PR 3), so pulled rows land NULL;
-    // applyRemoteUpsert backfills each row's OWN id and touches nothing else.
+  test("applyRemoteKnowledge inserts a pulled entry as v1 with logical_id = id, scoped per row", () => {
+    // A pulled knowledge row is keyed by logical_id (= id); a brand-new entry
+    // lands as v1 with logical_id = id, isolated per row.
     setTeamConfig("sync.enabled", "1");
     const pid = ensureProject("/tmp/lore-sync-backfill");
     const base = { project_id: pid, category: "pattern", content: "c" };
-    applyRemoteUpsert("knowledge", {
+    applyRemoteKnowledge({
       id: "kA",
       title: "A",
       created_at: now(),
       updated_at: now(),
       ...base,
     });
-    applyRemoteUpsert("knowledge", {
+    applyRemoteKnowledge({
       id: "kB",
       title: "B",
       created_at: now(),

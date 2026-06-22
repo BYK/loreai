@@ -286,10 +286,18 @@ const opArb: fc.Arbitrary<Op> = fc.oneof(
 const seqArb = fc.array(opArb, { minLength: 1, maxLength: 14 });
 
 function localIds(): Set<string> {
+  // Append-only (A2, #823): the live set is the CURRENT live versions, identified
+  // by the synced logical_id. Superseded + death-cert versions are local-only
+  // history and must not count toward convergence with the remote (which mirrors
+  // one row per logical entry).
   return new Set(
-    (db().query("SELECT id FROM knowledge").all() as Array<{ id: string }>).map(
-      (r) => r.id,
-    ),
+    (
+      db()
+        .query(
+          "SELECT COALESCE(logical_id, id) AS id FROM knowledge WHERE is_current = 1 AND is_deleted = 0",
+        )
+        .all() as Array<{ id: string }>
+    ).map((r) => r.id),
   );
 }
 function remoteLiveIds(): Set<string> {

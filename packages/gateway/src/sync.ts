@@ -149,16 +149,24 @@ async function pushEntry(
 ): Promise<PushOutcome> {
   const { table_name: table, row_id: rowId } = e;
   let op = e.op;
+  // The remote row key. For knowledge the remote is a CURRENT-only mirror keyed by
+  // logical_id (not the per-version row id), so sync_state + the upsert/delete both
+  // operate on the logical_id. For every other table this stays the outbox rowId.
+  let effectiveId = rowId;
+  // For a knowledge upsert, the row to push is the CURRENT version (id=logical_id),
+  // not the outbox version row — resolved by the push plan.
+  let knowledgeRow: Record<string, unknown> | undefined;
 
   // A2 (#823): knowledge is append-only — update()/remove() append immutable
-  // versions and remove() emits no physical-delete op. Translate the version churn
-  // so the remote mirrors only the current LIVE version: a superseded or
-  // soft-deleted row becomes a remote soft-delete (propagating deletions + removing
-  // stale/redacted content), a current live row upserts. See knowledgeSyncOp.
+  // versions and remove() emits no physical-delete op. The plan coalesces all of an
+  // entry's versions to ONE remote row keyed by logical_id: a live current → upsert
+  // that content; no live current (every version superseded/deleted) → soft-delete.
   if (table === "knowledge" && op === "upsert") {
-    const kop = syncData.knowledgeSyncOp(rowId);
-    if (kop === "skip") return "ok";
-    op = kop;
+    const plan = syncData.knowledgePushPlan(rowId);
+    if (plan.op === "skip") return "ok";
+    effectiveId = plan.logicalId;
+    op = plan.op;
+    if (plan.op === "upsert") knowledgeRow = plan.row;
   }
 
   if (op === "delete") {
@@ -169,13 +177,15 @@ async function pushEntry(
     const { error } = await client
       .from(table)
       .update({ is_deleted: true, content_hash: null })
-      .match(decomposeId(table, rowId));
+      .match(decomposeId(table, effectiveId));
     if (error) {
-      console.error(`sync: push delete ${table}/${rowId}: ${error.message}`);
+      console.error(
+        `sync: push delete ${table}/${effectiveId}: ${error.message}`,
+      );
       return "stop"; // transient; keep pending so the delete isn't lost
     }
-    const prev = syncData.getSyncState(table, rowId);
-    syncData.setSyncState(table, rowId, {
+    const prev = syncData.getSyncState(table, effectiveId);
+    syncData.setSyncState(table, effectiveId, {
       content_hash: null,
       revision: (prev?.revision ?? 0) + 1,
       remote_updated_at: prev?.remote_updated_at ?? null,
@@ -184,11 +194,11 @@ async function pushEntry(
     return "ok";
   }
 
-  // upsert
-  const row = syncData.getRowById(table, rowId);
+  // upsert — for knowledge, `knowledgeRow` is the CURRENT version keyed by logical_id.
+  const row = knowledgeRow ?? syncData.getRowById(table, rowId);
   if (!row) return "ok"; // row gone; a later delete entry (if any) handles it
   const hash = syncData.contentHash(table, row);
-  const state = syncData.getSyncState(table, rowId);
+  const state = syncData.getSyncState(table, effectiveId);
   if (state?.content_hash === hash) {
     res.pushed++; // already in sync — no-op
     return "ok";
@@ -226,22 +236,24 @@ async function pushEntry(
       // pause the table (that would wedge it forever) — record it and advance
       // past it so the rest of the table keeps syncing.
       console.error(
-        `sync: dropping unsyncable ${table}/${rowId}: ${error.message}`,
+        `sync: dropping unsyncable ${table}/${effectiveId}: ${error.message}`,
       );
-      syncData.recordConflict(table, rowId, "rejected_unsyncable", row);
+      syncData.recordConflict(table, effectiveId, "rejected_unsyncable", row);
       // Mark as "synced" to this hash so we don't retry the same poison row.
-      syncData.setSyncState(table, rowId, {
+      syncData.setSyncState(table, effectiveId, {
         content_hash: hash,
         revision,
         remote_updated_at: state?.remote_updated_at ?? null,
       });
       return "ok";
     }
-    console.error(`sync: push upsert ${table}/${rowId}: ${error.message}`);
+    console.error(
+      `sync: push upsert ${table}/${effectiveId}: ${error.message}`,
+    );
     return "stop"; // transient — keep pending so we retry (never lose a write)
   }
 
-  syncData.setSyncState(table, rowId, {
+  syncData.setSyncState(table, effectiveId, {
     content_hash: hash,
     revision,
     remote_updated_at: state?.remote_updated_at ?? null,
@@ -432,11 +444,12 @@ function applyRemote(
   // Unpushed local intent for this row (push runs first, but a quota-paused or
   // failed push can leave one pending) → never fast-forward over it.
   const pushCursor = Number(getKV(pushKey(meta.table)) ?? "0");
-  const pendingLocalChange = syncData.hasPendingChange(
-    meta.table,
-    rowId,
-    pushCursor,
-  );
+  // Knowledge is keyed by logical_id on the remote but per-version in the outbox,
+  // so resolve pending edits by logical_id (A2, #823).
+  const pendingLocalChange =
+    meta.table === "knowledge"
+      ? syncData.hasPendingKnowledgeChange(rowId, pushCursor)
+      : syncData.hasPendingChange(meta.table, rowId, pushCursor);
   // Pull-only tables are server-authoritative — the client never writes them, so
   // local divergence (a "conflict") is impossible by construction. classifyRemoteRow
   // would otherwise flag every change as a conflict: these tables carry no remote
@@ -463,11 +476,23 @@ function applyRemote(
   }
 
   if (isDeleted) {
-    syncData.applyRemoteDelete(meta.table, rowId);
+    // Knowledge applies a remote delete as a death-cert version (append-only),
+    // not a physical row delete (A2, #823).
+    if (meta.table === "knowledge") {
+      syncData.applyRemoteKnowledgeDelete(rowId);
+    } else {
+      syncData.applyRemoteDelete(meta.table, rowId);
+    }
     syncData.clearSyncState(meta.table, rowId);
     for (const fts of meta.ftsTables) touchedFts.add(fts);
   } else {
-    syncData.applyRemoteUpsert(meta.table, stripSyncCols(remote));
+    // Knowledge applies a remote content change as a new version (append-only),
+    // never an in-place upsert of an immutable version (A2, #823).
+    if (meta.table === "knowledge") {
+      syncData.applyRemoteKnowledge(stripSyncCols(remote));
+    } else {
+      syncData.applyRemoteUpsert(meta.table, stripSyncCols(remote));
+    }
     syncData.setSyncState(meta.table, rowId, {
       content_hash: remoteHash,
       revision: typeof remote.revision === "number" ? remote.revision : 0,
