@@ -164,6 +164,16 @@ The assistant gets a `recall` tool that searches across stored messages, distill
 
 Search results are ranked using Reciprocal Rank Fusion across multiple sources: knowledge entries, distillation observations, temporal messages, recency-biased temporal, cross-project knowledge, and lat.md sections.
 
+## Team memory
+
+Lore's long-term knowledge is local-first, but it's most valuable shared. Curated facts are exported to a `.lore.md` file at your project root — plain Markdown, committed to your repo, and designed to be reviewed in pull requests.
+
+- **Diffable & merge-friendly** — entries are sorted alphabetically by title within each category and carry stable `<!-- lore:UUID -->` markers, so a new fact is a minimal diff, not a reshuffle.
+- **Reviewable** — `git diff` shows what the agent learned; a reviewer can reject a wrong fact before it becomes shared truth. Knowledge history is your git history.
+- **Hand-editable** — fix, delete, or add facts by hand; they're imported on the next run.
+
+This is the team path that works today with your existing git workflow. **Folk Lore** (coming soon) adds live, continuous team sync on top — see [withlore.ai](https://withlore.ai/different/#waitlist).
+
 ## Configuration
 
 Create a `.lore.json` file in your project root to customize behavior. All fields are optional — defaults are shown below:

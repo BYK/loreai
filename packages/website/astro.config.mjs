@@ -56,6 +56,7 @@ export default defineConfig({
             { label: "Overview", slug: "docs" },
             { label: "Install", slug: "docs/install" },
             { label: "Architecture", slug: "docs/architecture" },
+            { label: "Team memory", slug: "docs/team-memory" },
           ],
         },
         {
