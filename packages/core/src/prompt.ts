@@ -594,9 +594,10 @@ CONSOLIDATION STRATEGY (apply in order):
    the least valuable remaining entries until the count reaches the target. Rank entries by
    recurring impact: entries about rare edge cases or narrow contexts are lower value than
    entries about broadly applicable patterns or frequently encountered gotchas. Each entry is
-   annotated "(category, conf <0-1>, verifier pass <n>, fail <n>)": prefer evicting entries
+   annotated "(category[, conf <0-1>][, verifier pass <n>, fail <n>])": prefer evicting entries
    with LOW confidence and/or a poor verifier record (more fail than pass) first, and keep
-   entries that have proven reliable (high confidence, more verifier passes).
+   entries that have proven reliable (high confidence, more verifier passes). A missing verifier
+   annotation means "no signal yet" (neutral) — do not treat it as a poor record.
 
 PRESERVE (highest priority — delete these last):
 - Entries describing non-obvious design decisions specific to this codebase
@@ -621,7 +622,7 @@ Output ONLY valid JSON. No markdown fences, no explanation, no preamble.`;
  */
 export const CONSOLIDATION_MERGE_SYSTEM = `You are a long-term memory curator. You are given all knowledge entries of a SINGLE category that has grown bloated with near-duplicates. Your ONLY job is to merge genuine duplicates.
 
-Each entry is listed as "- [id] (category, conf <0-1>, verifier pass <n>, fail <n>) title: content". The "conf" and "verifier pass/fail" annotations are a VALUE signal: higher confidence and a better verifier record (more pass, fewer fail) mean the entry has proven more reliable in practice.
+Each entry is listed as "- [id] (category[, conf <0-1>][, verifier pass <n>, fail <n>]) title: content". The "conf" and "verifier pass/fail" annotations are an optional VALUE signal: higher confidence and a better verifier record (more pass, fewer fail) mean the entry has proven more reliable in practice. The verifier annotation is present only for entries that have been in a verified session — its ABSENCE means "no signal yet", which is neutral (NOT low-value).
 
 RULES:
 1. Find groups of entries that express the SAME underlying rule/fact, just phrased differently (paraphrases). For each such group, pick ONE survivor and "update" it to the clearest concise wording (under 150 words), then "delete" the others. When the paraphrases differ in value, keep the higher-value entry as the survivor (higher confidence, and/or more verifier passes with fewer fails) — fold any unique detail from the others into its wording before deleting them.
