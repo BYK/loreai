@@ -165,6 +165,32 @@ describe("runDaemon", () => {
     expect(info.join("\n")).toContain("100.64.0.1:3207");
   });
 
+  it("reuses a loopback gateway when configured for a non-overlapping host (issue #908)", async () => {
+    // The existing gateway is reachable on 127.0.0.1 only; we asked for a
+    // Tailscale/LAN IP nothing is bound to. The reuse-check must probe 127.0.0.1
+    // in ADDITION to the configured host, find the gateway, and adopt it WITHOUT
+    // spawning a child — otherwise the child's own pre-bind probe would
+    // reuse-and-exit, leaving us polling 100.64.0.1 until the deadline.
+    let t = 0;
+    const { io, info, spawned } = makeDaemonIO({
+      readPort: () => 3207,
+      probe: async (url) => url.includes("127.0.0.1"),
+      // Advance the clock so that a *regressed* spawn+poll path terminates
+      // (times out) instead of hanging the test on a constant now() === 0.
+      now: () => (t += 5000),
+      timeoutMs: 10_000,
+    });
+    const code = await runDaemon({ hosts: ["100.64.0.1"] }, io);
+    expect(code).toBe(0);
+    expect(spawned()).toBe(0);
+    expect(info.join("\n")).toContain("already running");
+    expect(info.join("\n")).toContain("127.0.0.1:3207");
+
+    // Regression guard: a single-host reuse-check (probing only the configured
+    // 100.64.0.1) returns false → spawns a child → polls 100.64.0.1 forever →
+    // times out (code 1, spawned 1), failing the assertions above.
+  });
+
   it("spawns, polls, and reports the healthy gateway", async () => {
     let portCalls = 0;
     const { io, info, spawned } = makeDaemonIO({

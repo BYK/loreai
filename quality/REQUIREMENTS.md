@@ -198,6 +198,7 @@ Requirements are grouped by functional section. All requirements are **Tier 3** 
 1. Port conflict probe checks at least `127.0.0.1` and all entries in `config.hosts`.
 2. If any probe succeeds, the existing gateway is reused.
 3. If port 0 is resolved from the first bind, subsequent binds on the same resolved port that fail are handled gracefully (not an uncaught throw).
+4. An existing gateway is detected even when the new instance binds a **non-overlapping** interface (e.g. existing on `127.0.0.1`, new instance on a LAN/Tailscale IP only): the bind would succeed and never raise `EADDRINUSE`, so the reuse decision MUST also run **before** binding, not only in the post-bind catch. The `lore start --bg` daemon reuse-check applies the same multi-interface probe so it does not spawn a redundant child. *(Closed by #908.)*
 
 **Alternative Paths:**
 - Probe `127.0.0.1` unconditionally (it's always reachable for local gateways), plus each configured host.
@@ -206,8 +207,9 @@ Requirements are grouped by functional section. All requirements are **Tier 3** 
 **Use Cases:** UC-01 (multi-session gateway startup)
 
 **References:**
-- `packages/gateway/src/cli/start.ts:137–148` — port conflict probe using `config.hosts[0]`
-- `packages/gateway/src/server.ts:356–368` — sequential multi-host bind loop
+- `packages/gateway/src/cli/start.ts` — pre-bind reuse probe + post-bind `anyGatewayAlive` catch backstop (#903, #908)
+- `packages/gateway/src/cli/start.ts` `runDaemon()` — multi-interface daemon reuse-check (#908)
+- `packages/gateway/src/server.ts` — multi-host bind loop, tolerant of unbindable hosts (#904)
 
 ---
 
