@@ -1373,6 +1373,17 @@ const MIGRATIONS: string[] = [
   CREATE INDEX IF NOT EXISTS idx_ksi_session_uncredited
     ON knowledge_session_injections (session_id, credited);
   `,
+
+  `
+  -- Version 54: record the session's verifier verdict on each injection at
+  -- credit time (#497 follow-up). Enables per-entry "knowledge impact" stats
+  -- (how many passing vs failing sessions an entry co-occurred with) surfaced in
+  -- 'lore data show'. NULL until the injection is credited (or the session had
+  -- no verifier signal).
+  ALTER TABLE knowledge_session_injections ADD COLUMN verdict TEXT;
+  CREATE INDEX IF NOT EXISTS idx_ksi_logical_verdict
+    ON knowledge_session_injections (logical_id, verdict);
+  `,
 ];
 
 /**
@@ -1749,10 +1760,13 @@ function recoverMissingObjects(database: Database) {
       project_id  TEXT NOT NULL,
       created_at  INTEGER NOT NULL,
       credited    INTEGER NOT NULL DEFAULT 0,
+      verdict     TEXT,
       PRIMARY KEY (session_id, logical_id)
     );
     CREATE INDEX IF NOT EXISTS idx_ksi_session_uncredited
       ON knowledge_session_injections (session_id, credited);
+    CREATE INDEX IF NOT EXISTS idx_ksi_logical_verdict
+      ON knowledge_session_injections (logical_id, verdict);
     CREATE TABLE IF NOT EXISTS knowledge_transfers (
       knowledge_id           TEXT NOT NULL,
       recalled_in_project_id TEXT NOT NULL,
@@ -1906,6 +1920,17 @@ function recoverMissingObjects(database: Database) {
       .all() as Array<{ name: string }>;
     if (!tcols.some((c) => c.name === "verifier")) {
       database.exec("ALTER TABLE tool_calls ADD COLUMN verifier INTEGER;");
+    }
+  }
+  // Version 54: knowledge_session_injections.verdict (outcome impact, #497).
+  {
+    const icols = database
+      .query("PRAGMA table_info(knowledge_session_injections)")
+      .all() as Array<{ name: string }>;
+    if (icols.length && !icols.some((c) => c.name === "verdict")) {
+      database.exec(
+        "ALTER TABLE knowledge_session_injections ADD COLUMN verdict TEXT;",
+      );
     }
   }
 }

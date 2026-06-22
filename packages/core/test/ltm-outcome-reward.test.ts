@@ -379,3 +379,72 @@ describe("outcome-reward: creditSessionOutcome", () => {
     expect(res.credited).toBe(0);
   });
 });
+
+describe("outcome-reward: outcomeImpact (observability, #497 follow-up)", () => {
+  let pid: string;
+  beforeEach(() => {
+    pid = ensureProject(PROJECT);
+    db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+    db().query("DELETE FROM tool_calls WHERE project_id = ?").run(pid);
+    db()
+      .query("DELETE FROM knowledge_session_injections WHERE project_id = ?")
+      .run(pid);
+  });
+
+  /** Credit one entry in a fresh session with the given verdict. */
+  function creditOnce(
+    logicalId: string,
+    session: string,
+    verdict: "pass" | "fail",
+  ): void {
+    db()
+      .query(
+        `INSERT INTO knowledge_session_injections (session_id, logical_id, project_id, created_at, credited)
+         VALUES (?, ?, ?, ?, 0)`,
+      )
+      .run(session, logicalId, pid, Date.now());
+    insertToolCall(pid, {
+      session,
+      status: verdict === "pass" ? "completed" : "error",
+      verifier: 1,
+    });
+    ltm.creditSessionOutcome(session, PROJECT);
+  }
+
+  test("aggregates pass/fail co-occurrence counts and the last verdict", () => {
+    const e = makeProjectEntry("imp-1", 0.5);
+    const lid = getEntry(e).logical_id;
+    creditOnce(lid, "i-a", "pass");
+    creditOnce(lid, "i-b", "pass");
+    creditOnce(lid, "i-c", "fail");
+
+    const impact = ltm.outcomeImpact(lid);
+    expect(impact.passes).toBe(2);
+    expect(impact.fails).toBe(1);
+    expect(impact.lastVerdict).toBe("fail"); // most recent credited session
+  });
+
+  test("zero for an entry that has never been credited", () => {
+    const e = makeProjectEntry("imp-2", 0.5);
+    const impact = ltm.outcomeImpact(getEntry(e).logical_id);
+    expect(impact).toEqual({ passes: 0, fails: 0, lastVerdict: null });
+  });
+
+  test("a NONE-verdict session records no verdict (uncredited, not counted)", () => {
+    const e = makeProjectEntry("imp-3", 0.5);
+    const lid = getEntry(e).logical_id;
+    db()
+      .query(
+        `INSERT INTO knowledge_session_injections (session_id, logical_id, project_id, created_at, credited)
+         VALUES (?, ?, ?, ?, 0)`,
+      )
+      .run("i-none", lid, pid, Date.now());
+    // No verifier tool call → verdict 'none' → nothing recorded.
+    ltm.creditSessionOutcome("i-none", PROJECT);
+    expect(ltm.outcomeImpact(lid)).toEqual({
+      passes: 0,
+      fails: 0,
+      lastVerdict: null,
+    });
+  });
+});
