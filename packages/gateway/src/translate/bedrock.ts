@@ -57,7 +57,11 @@ const BEDROCK_MODEL_MAP: Record<string, string> = {
  * Passes through if already in Bedrock format or unknown.
  */
 export function resolveBedrockModelID(model: string): string {
-  if (BEDROCK_MODEL_MAP[model]) return BEDROCK_MODEL_MAP[model];
+  // Use Object.hasOwn — a plain bracket lookup (BEDROCK_MODEL_MAP[model])
+  // resolves inherited Object.prototype members, so a model literally named
+  // "valueOf"/"toString"/"constructor" would return the prototype function
+  // instead of undefined and corrupt the result. Guard against own keys only.
+  if (Object.hasOwn(BEDROCK_MODEL_MAP, model)) return BEDROCK_MODEL_MAP[model];
   // Already in Bedrock format (starts with anthropic.)
   if (model.startsWith("anthropic.")) return model;
   // Unknown — return as-is (Bedrock may reject, but let it fail loudly)

@@ -39,6 +39,22 @@ type CredentialProvider = () => Promise<AwsCredentialIdentity>;
 let credentialProvider: CredentialProvider | null = null;
 
 /**
+ * Test seam (never set in production): an explicit provider chain to exercise
+ * the fallback + total-failure paths deterministically. The real chain ends in
+ * `fromInstanceMetadata()`, which makes an IMDS network call that would hang a
+ * unit test on a machine without an instance-metadata endpoint — so we never
+ * drive the real chain to exhaustion in tests.
+ */
+let testCredentialProviders: CredentialProvider[] | null = null;
+
+export function _setTestCredentialProviders(
+  providers: CredentialProvider[] | null,
+): void {
+  testCredentialProviders = providers;
+  credentialProvider = null; // force the chain to rebuild on next sign
+}
+
+/**
  * Initialize the AWS credential provider chain.
  * Called lazily on first Bedrock request.
  *
@@ -63,7 +79,7 @@ async function getCredentialProvider(
   // Build a manual chain: try each provider in order until one succeeds.
   // Using @aws-sdk/credential-providers directly is simpler than the
   // @smithy/property-provider chain() combinator and avoids extra deps.
-  const providers: CredentialProvider[] = [
+  const providers: CredentialProvider[] = testCredentialProviders ?? [
     fromEnv(),
     fromIni({ profile: profileName }),
     fromContainerMetadata(),

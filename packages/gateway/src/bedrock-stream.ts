@@ -12,7 +12,6 @@
  */
 import { EventStreamCodec } from "@smithy/eventstream-codec";
 import type { Message } from "@smithy/eventstream-codec";
-import type { AvailableMessage } from "@smithy/types";
 import { log } from "@loreai/core";
 
 // ---------------------------------------------------------------------------
@@ -23,13 +22,11 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 /**
- * Extract a `Message` from an `AvailableMessage` returned by the codec.
- * Returns null when the available message is empty or signals end-of-stream.
+ * AWS event-stream frame prelude: a 4-byte big-endian total-message-length
+ * prefix is the first field of every frame. We use it to carve complete
+ * frames out of the (arbitrarily-chunked) byte stream before decoding.
  */
-function extractMessage(available: AvailableMessage): Message | null {
-  if (available.isEndOfStream()) return null;
-  return available.getMessage() ?? null;
-}
+const PRELUDE_TOTAL_LENGTH_BYTES = 4;
 
 // ---------------------------------------------------------------------------
 // Event-stream decoding
@@ -48,6 +45,14 @@ function extractMessage(available: AvailableMessage): Message | null {
  *
  * We decode the base64 bytes, parse the JSON, and yield { event, data } pairs.
  *
+ * IMPORTANT: network reads do NOT align to event-stream frame boundaries — a
+ * single read may contain a partial frame, exactly one frame, or several. The
+ * @smithy `EventStreamCodec.decode()` decodes EXACTLY one complete frame and
+ * throws if the buffer length doesn't match the frame's own length prefix
+ * (it does no buffering of its own). So we buffer raw bytes here and carve out
+ * complete frames using the 4-byte big-endian total-length prelude, decoding
+ * one frame at a time.
+ *
  * @param reader - A ReadableStream reader yielding Uint8Array chunks
  * @yields { event: string; data: string } - Anthropic SSE events
  */
@@ -63,33 +68,87 @@ export async function* decodeBedrockEventStream(
     (input: string) => encoder.encode(input),
   );
 
+  let buffer: Uint8Array = new Uint8Array(0);
+
   for (;;) {
     const { done, value } = await reader.read();
-    if (done) {
-      codec.endOfStream();
-      // Drain any remaining messages
+
+    if (value && value.length > 0) {
+      buffer = concatBytes(buffer, value);
+      // Carve out and emit every COMPLETE frame currently buffered. A frame is
+      // complete once we have its full declared length (first 4 bytes, BE).
       for (;;) {
-        const available = codec.getMessage();
-        const msg = extractMessage(available);
-        if (!msg) break;
-        const sseEvent = parseBedrockMessage(msg);
+        const frame = takeCompleteFrame(buffer);
+        if (!frame) break; // need more bytes
+        buffer = frame.rest;
+        const sseEvent = decodeFrame(codec, frame.frame);
         if (sseEvent) yield sseEvent;
+      }
+    }
+
+    if (done) {
+      // A well-formed stream ends on a frame boundary; any trailing bytes are a
+      // truncated/partial frame we cannot decode. Surface it, don't crash.
+      if (buffer.length > 0) {
+        log.warn(
+          `bedrock event-stream: ${buffer.length} trailing undecodable byte(s) at end of stream`,
+        );
       }
       break;
     }
-
-    if (value) {
-      codec.feed(value);
-      // Drain all available messages from the buffer
-      for (;;) {
-        const available = codec.getMessage();
-        const msg = extractMessage(available);
-        if (!msg) break;
-        const sseEvent = parseBedrockMessage(msg);
-        if (sseEvent) yield sseEvent;
-      }
-    }
   }
+}
+
+/**
+ * If `buffer` begins with a complete event-stream frame, split it off and
+ * return `{ frame, rest }`; otherwise return null (need more bytes).
+ *
+ * The first 4 bytes are the total frame length (big-endian, inclusive of the
+ * prelude and trailing CRC), per the AWS event-stream framing spec.
+ */
+function takeCompleteFrame(
+  buffer: Uint8Array,
+): { frame: Uint8Array<ArrayBuffer>; rest: Uint8Array<ArrayBuffer> } | null {
+  if (buffer.length < PRELUDE_TOTAL_LENGTH_BYTES) return null;
+  const view = new DataView(
+    buffer.buffer,
+    buffer.byteOffset,
+    buffer.byteLength,
+  );
+  const totalLength = view.getUint32(0, false); // big-endian
+  // Guard against a corrupt/zero length that would wedge the loop.
+  if (totalLength < PRELUDE_TOTAL_LENGTH_BYTES) {
+    throw new Error(
+      `bedrock event-stream: invalid frame length ${totalLength}`,
+    );
+  }
+  if (buffer.length < totalLength) return null; // frame not fully arrived yet
+  return {
+    frame: buffer.slice(0, totalLength),
+    rest: buffer.slice(totalLength),
+  };
+}
+
+function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array<ArrayBuffer> {
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
+
+/** Decode one complete frame and convert it to an Anthropic SSE event. */
+function decodeFrame(
+  codec: EventStreamCodec,
+  frame: Uint8Array,
+): { event: string; data: string } | null {
+  let message: Message;
+  try {
+    message = codec.decode(frame);
+  } catch (e) {
+    log.warn(`bedrock event-stream: failed to decode frame: ${e}`);
+    return null;
+  }
+  return parseBedrockMessage(message);
 }
 
 // ---------------------------------------------------------------------------
