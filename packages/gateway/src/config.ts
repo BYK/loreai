@@ -45,6 +45,14 @@ export interface GatewayConfig {
   upstreamAnthropic: string;
   /** Upstream OpenAI API URL. Default: "https://api.openai.com". Env: LORE_UPSTREAM_OPENAI */
   upstreamOpenAI: string;
+  /** AWS Bedrock region. Default: from AWS_REGION/AWS_DEFAULT_REGION env or "us-east-1" */
+  bedrockRegion: string;
+  /** AWS Bedrock profile name (optional). From AWS_PROFILE env. */
+  bedrockProfile?: string;
+  /** Google Vertex AI project ID. Required. From GOOGLE_CLOUD_PROJECT env. */
+  vertexProject: string;
+  /** Google Vertex AI region. Default: from GOOGLE_CLOUD_REGION/GOOGLE_CLOUD_LOCATION env or "us-central1" */
+  vertexRegion: string;
   /** Idle timeout in seconds before triggering background work. Default: 60 */
   idleTimeoutSeconds: number;
   /** Session eviction timeout in seconds. Sessions idle beyond this are evicted
@@ -201,6 +209,20 @@ export function loadConfig(): GatewayConfig {
       ? trimTrailingSlash(env.LORE_WORKER_UPSTREAM)
       : undefined,
     upstreamExtraHeaders: parseCurlHeaders(env.LORE_UPSTREAM_EXTRA_HEADERS),
+    // Bedrock config — standard AWS chain + optional LORE overrides
+    bedrockRegion:
+      env.LORE_BEDROCK_REGION ??
+      env.AWS_REGION ??
+      env.AWS_DEFAULT_REGION ??
+      "us-east-1",
+    bedrockProfile: env.LORE_BEDROCK_PROFILE ?? env.AWS_PROFILE,
+    // Vertex config — standard GCP ADC chain + optional LORE overrides
+    vertexProject: env.LORE_VERTEX_PROJECT ?? env.GOOGLE_CLOUD_PROJECT ?? "",
+    vertexRegion:
+      env.LORE_VERTEX_REGION ??
+      env.GOOGLE_CLOUD_REGION ??
+      env.GOOGLE_CLOUD_LOCATION ??
+      "us-central1",
     // Hosted mode is always a remote gateway (no shared filesystem with clients).
     // Auto-detect from bind address when neither flag is explicitly set.
     remoteGateway: remoteGatewayEnv || hostedModeEnv || autoDetected,
@@ -214,7 +236,7 @@ export function loadConfig(): GatewayConfig {
 
 export type UpstreamRoute = {
   url: string;
-  protocol: "anthropic" | "openai" | "openai-responses";
+  protocol: "anthropic" | "openai" | "openai-responses" | "bedrock" | "vertex";
 };
 
 /**
@@ -227,7 +249,7 @@ export type UpstreamRoute = {
 const UPSTREAM_ROUTES: Array<{
   prefix: string;
   url: string;
-  protocol: "anthropic" | "openai" | "openai-responses";
+  protocol: "anthropic" | "openai" | "openai-responses" | "bedrock" | "vertex";
 }> = [
   // Anthropic
   {
@@ -283,6 +305,18 @@ const UPSTREAM_ROUTES: Array<{
     prefix: "gemini-",
     url: "https://generativelanguage.googleapis.com",
     protocol: "openai",
+  },
+  // AWS Bedrock (model IDs like anthropic.claude-3-5-sonnet-20241022-v2:0)
+  {
+    prefix: "anthropic.claude-",
+    url: "", // Dynamic URL built at request time based on region
+    protocol: "bedrock",
+  },
+  // Google Vertex AI (model IDs like claude-3-5-sonnet@20241022)
+  {
+    prefix: "claude-",
+    url: "", // Dynamic URL built at request time based on project/region
+    protocol: "vertex",
   },
 ];
 
@@ -360,7 +394,13 @@ export type ProviderRoute = {
   /** Wire protocol for this upstream. When `null`, the ingress protocol is
    *  preserved — use this for proxy/aggregator providers (OpenCode Zen,
    *  Vercel AI Gateway, etc.) that accept whichever protocol the client sends. */
-  protocol: "anthropic" | "openai" | "openai-responses" | null;
+  protocol:
+    | "anthropic"
+    | "openai"
+    | "openai-responses"
+    | "bedrock"
+    | "vertex"
+    | null;
 };
 
 /**
@@ -451,6 +491,20 @@ const PROVIDER_ROUTES: Record<string, ProviderRoute> = {
   tgi: { url: null, protocol: "openai" },
   tabbyml: { url: null, protocol: "openai" },
   litellm: { url: null, protocol: "openai" },
+  // --- AWS Bedrock ---
+  bedrock: {
+    url: null, // Dynamic URL based on region
+    protocol: "bedrock",
+  },
+  // --- Google Vertex AI ---
+  vertex: {
+    url: null, // Dynamic URL based on project/region
+    protocol: "vertex",
+  },
+  "vertex-anthropic": {
+    url: null,
+    protocol: "vertex",
+  },
 };
 
 /**

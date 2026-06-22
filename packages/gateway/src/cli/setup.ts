@@ -908,6 +908,28 @@ export async function commandSetup(
   args: string[],
   values: Record<string, unknown>,
 ): Promise<void> {
+  // Detect conflicting Claude Code native cloud flags — these break the
+  // plain-Anthropic-to-lore path. The client must NOT use CLAUDE_CODE_USE_BEDROCK
+  // or CLAUDE_CODE_USE_VERTEX; the gateway handles cloud translation instead.
+  if (
+    process.env.CLAUDE_CODE_USE_BEDROCK === "1" ||
+    process.env.CLAUDE_CODE_USE_VERTEX === "1"
+  ) {
+    const flag =
+      process.env.CLAUDE_CODE_USE_BEDROCK === "1"
+        ? "CLAUDE_CODE_USE_BEDROCK"
+        : "CLAUDE_CODE_USE_VERTEX";
+    console.error(`[lore] Conflicting environment variable: ${flag}=1`);
+    console.error(
+      `[lore] Lore translates requests to Bedrock/Vertex internally — the client must speak plain Anthropic to the gateway.`,
+    );
+    console.error(
+      `[lore] Unset ${flag} and let Lore handle the cloud provider routing.`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+
   // `lore setup undo [app]` — restore the backup written by a prior setup.
   if (args[0]?.toLowerCase() === "undo") {
     await commandUndo(args.slice(1));

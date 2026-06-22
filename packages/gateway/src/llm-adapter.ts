@@ -341,7 +341,7 @@ type ProviderTarget = {
  */
 export function resolveWorkerProtocol(
   providerID: string,
-  explicit?: "anthropic" | "openai" | "openai-responses",
+  explicit?: "anthropic" | "openai" | "openai-responses" | "bedrock" | "vertex",
 ): WorkerProtocol {
   // openai-codex MUST use the Responses API — its backend has no Chat
   // Completions endpoint. This takes precedence over the explicit hint
@@ -351,12 +351,23 @@ export function resolveWorkerProtocol(
   }
   // 1. Explicit protocol from caller (threaded from UpstreamSnapshot)
   if (explicit) {
-    return explicit === "anthropic" ? "anthropic" : "openai";
+    // Bedrock/Vertex collapse to "anthropic" for worker calls — workers
+    // use simple prompt→response and Bedrock's InvokeModel (non-streaming)
+    // returns the same JSON shape as Anthropic Messages API.
+    return explicit === "anthropic" ||
+      explicit === "bedrock" ||
+      explicit === "vertex"
+      ? "anthropic"
+      : "openai";
   }
   // 2. Route table lookup
   const route = resolveProviderRoute(providerID);
   if (route?.protocol) {
-    return route.protocol === "anthropic" ? "anthropic" : "openai";
+    return route.protocol === "anthropic" ||
+      route.protocol === "bedrock" ||
+      route.protocol === "vertex"
+      ? "anthropic"
+      : "openai";
   }
   // 3. Default: anthropic (safest for unknown/aggregator providers)
   return "anthropic";

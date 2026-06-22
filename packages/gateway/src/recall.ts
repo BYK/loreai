@@ -433,7 +433,12 @@ export async function executeRecall(
 // ---------------------------------------------------------------------------
 
 /** Wire protocol used for a recall follow-up upstream response. */
-export type RecallProtocol = "anthropic" | "openai" | "openai-responses";
+export type RecallProtocol =
+  | "anthropic"
+  | "openai"
+  | "openai-responses"
+  | "bedrock"
+  | "vertex";
 
 /**
  * Injected upstream dependencies for recall follow-up execution.

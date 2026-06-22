@@ -133,6 +133,16 @@ import {
   type AnthropicCacheOptions,
 } from "./translate/anthropic";
 import {
+  buildBedrockRequestBody,
+  buildBedrockHeaders,
+  bedrockInvokeUrl,
+  bedrockInvokeNoStreamUrl,
+  resolveBedrockModelID,
+  parseBedrockResponseJSON,
+} from "./translate/bedrock";
+import { signBedrockRequest } from "./bedrock-auth";
+import { decodeBedrockEventStream } from "./bedrock-stream";
+import {
   buildOpenAIUpstreamRequest,
   buildOpenAIResponse,
 } from "./translate/openai";
@@ -2862,7 +2872,12 @@ type UpstreamResult = {
   /** The serialized JSON body sent to the upstream provider. */
   serializedBody: string;
   /** The wire protocol used for the upstream request (may differ from ingress). */
-  effectiveProtocol: "anthropic" | "openai" | "openai-responses";
+  effectiveProtocol:
+    | "anthropic"
+    | "openai"
+    | "openai-responses"
+    | "bedrock"
+    | "vertex";
 };
 
 /**
@@ -2929,7 +2944,11 @@ async function forwardToUpstream(
     modelRoute?.url ??
     (effectiveProtocol === "anthropic"
       ? config.upstreamAnthropic
-      : config.upstreamOpenAI);
+      : effectiveProtocol === "bedrock"
+        ? `https://bedrock-runtime.${config.bedrockRegion}.amazonaws.com`
+        : effectiveProtocol === "vertex"
+          ? `https://${config.vertexRegion}-aiplatform.googleapis.com`
+          : config.upstreamOpenAI);
 
   // Warn when a provider route exists but has no URL and no header override —
   // the request will fall through to config defaults which likely have wrong
@@ -2971,6 +2990,64 @@ async function forwardToUpstream(
       `auth/upstream mismatch: GitHub OAuth token (gho_) routed to ${effectiveUpstreamBase} — ` +
         `provider: ${providerID ?? "none"}`,
     );
+  }
+
+  if (effectiveProtocol === "bedrock") {
+    // AWS Bedrock: build request body, sign with SigV4, decode event-stream.
+    // The model ID must be mapped to Bedrock format and the URL is region-specific.
+    // cch billing header is NOT applicable (Anthropic-first-party only).
+    const bedrockModelId = resolveBedrockModelID(req.model);
+    const bedrockUrl = req.stream
+      ? bedrockInvokeUrl(config.bedrockRegion, bedrockModelId)
+      : bedrockInvokeNoStreamUrl(config.bedrockRegion, bedrockModelId);
+
+    const bedrockBody = buildBedrockRequestBody(req, cache);
+    const bedrockHeaders = buildBedrockHeaders(req);
+    const serializedBedrockBody = JSON.stringify(bedrockBody);
+
+    // SigV4 sign the request (mutates headers with Authorization, x-amz-*, etc.)
+    await signBedrockRequest(
+      "POST",
+      bedrockUrl,
+      bedrockHeaders,
+      serializedBedrockBody,
+      config.bedrockRegion,
+      config.bedrockProfile,
+    );
+
+    // Apply user-supplied extra headers (corporate proxies, etc.)
+    applyUpstreamExtraHeaders(bedrockHeaders, config.upstreamExtraHeaders);
+
+    const effectiveInterceptorBR = interceptor ?? activeInterceptor;
+    if (effectiveInterceptorBR) {
+      const response = await effectiveInterceptorBR(
+        bedrockBody,
+        req.model,
+        req.stream,
+        () =>
+          upstreamFetch(bedrockUrl, {
+            method: "POST",
+            headers: bedrockHeaders,
+            body: serializedBedrockBody,
+          }),
+      );
+      return {
+        response,
+        serializedBody: serializedBedrockBody,
+        effectiveProtocol,
+      };
+    }
+
+    const response = await upstreamFetch(bedrockUrl, {
+      method: "POST",
+      headers: bedrockHeaders,
+      body: serializedBedrockBody,
+    });
+    return {
+      response,
+      serializedBody: serializedBedrockBody,
+      effectiveProtocol,
+    };
   }
 
   if (effectiveProtocol === "openai-responses") {
@@ -3138,6 +3215,9 @@ function buildStreamingResponse(
   sessionID?: string,
   /** Per-model client-usage cap (anti-compaction). Defaults to the 200K cap. */
   maxReportedUsage: number = DEFAULT_MAX_REPORTED_USAGE,
+  /** Upstream wire protocol. When "bedrock", decode AWS event-stream → SSE
+   *  before feeding events to the accumulator. Default: "anthropic" (SSE). */
+  upstreamProtocol?: "anthropic" | "bedrock",
 ): Response {
   const recallAccum = recallContext
     ? createRecallAwareAccumulator(RECALL_TOOL_NAME, {
@@ -3230,7 +3310,13 @@ function buildStreamingResponse(
         const warningOffset = warningText ? 1 : 0;
 
         resetKeepalive();
-        for await (const { event, data } of parseSSEStream(reader)) {
+        // Bedrock uses AWS binary event-stream framing instead of SSE.
+        // Decode it to { event, data } pairs before feeding the accumulator.
+        const eventStream =
+          upstreamProtocol === "bedrock"
+            ? decodeBedrockEventStream(reader)
+            : parseSSEStream(reader);
+        for await (const { event, data } of eventStream) {
           resetKeepalive(); // upstream is alive — reset inactivity timer
           const forwarded = accumulator.processEvent(event, data);
           if (forwarded) {
@@ -3617,7 +3703,12 @@ function buildStreamingResponse(
  */
 async function accumulateNonStreamResponse(
   upstreamResponse: Response,
-  protocol: "anthropic" | "openai" | "openai-responses" = "anthropic",
+  protocol:
+    | "anthropic"
+    | "openai"
+    | "openai-responses"
+    | "bedrock"
+    | "vertex" = "anthropic",
 ): Promise<GatewayResponse> {
   // Some providers (e.g. DeepSeek) return SSE-formatted responses even when
   // stream: false was sent. Detect this via content-type and extract the JSON
@@ -3636,6 +3727,9 @@ async function accumulateNonStreamResponse(
       return accumulateOpenAINonStreamJSON(json);
     case "openai-responses":
       return accumulateResponsesNonStreamJSON(json);
+    case "bedrock":
+      // Bedrock non-streaming returns the same JSON structure as Anthropic
+      return parseBedrockResponseJSON(json);
     default:
       return accumulateAnthropicNonStreamJSON(json);
   }
@@ -4330,7 +4424,12 @@ function postResponse(
     const lpHeaderUpstream = extractUpstreamUrlHeader(req.rawHeaders);
     const lpRouteUsable =
       lpRoute && (lpRoute.url != null || lpHeaderUpstream) ? lpRoute : null;
-    const snapshotProtocol: "anthropic" | "openai" | "openai-responses" =
+    const snapshotProtocol:
+      | "anthropic"
+      | "openai"
+      | "openai-responses"
+      | "bedrock"
+      | "vertex" =
       req.protocol === "openai-responses"
         ? "openai-responses"
         : (lpRouteUsable?.protocol ??
@@ -5259,6 +5358,26 @@ async function handlePassthrough(
       if (req.protocol === "openai-responses") {
         return translateAnthropicStreamToResponses(anthropicSSE);
       }
+    }
+    if (effectiveProtocol === "bedrock") {
+      // Bedrock event-stream → decode to Anthropic SSE, then translate if needed.
+      // Meta requests (title gen, summaries) are non-cached, so no cch concerns.
+      const anthropicSSE = buildStreamingResponse(
+        upstreamResponse,
+        () => {},
+        undefined,
+        undefined,
+        undefined,
+        maxReportedUsageForModelID(req.model),
+        "bedrock",
+      );
+      if (req.protocol === "openai") {
+        return translateAnthropicStreamToOpenAI(anthropicSSE);
+      }
+      if (req.protocol === "openai-responses") {
+        return translateAnthropicStreamToResponses(anthropicSSE);
+      }
+      return anthropicSSE;
     }
     // Other cross-protocol streaming combos: accumulate + re-emit
     const resp = await accumulateNonStreamResponse(
@@ -7097,6 +7216,7 @@ async function handleConversationTurn(
       // Cap usage against the model the CLIENT meters against (its requested
       // model), so a 1M-context model isn't throttled to the 200K cap.
       maxReportedUsageForModelID(req.model),
+      effectiveProtocol === "bedrock" ? "bedrock" : "anthropic",
     );
     // Translate to client's wire format if needed. When the upstream is
     // Anthropic but the client speaks OpenAI, wrap the Anthropic SSE stream.

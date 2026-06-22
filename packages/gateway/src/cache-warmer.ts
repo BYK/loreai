@@ -970,7 +970,13 @@ function isAnthropicFirstPartyHost(url: string): boolean {
  */
 export function resolveProfile(
   model: string | undefined,
-  protocol: "anthropic" | "openai" | "openai-responses" | undefined,
+  protocol:
+    | "anthropic"
+    | "openai"
+    | "openai-responses"
+    | "bedrock"
+    | "vertex"
+    | undefined,
   ttl: "5m" | "1h" | undefined,
   upstreamBase?: string,
   providerID?: string,

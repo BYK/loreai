@@ -158,7 +158,12 @@ export type GatewayTool = {
 // Request — the normalized form after ingress translation
 // ---------------------------------------------------------------------------
 
-export type GatewayProtocol = "anthropic" | "openai" | "openai-responses";
+export type GatewayProtocol =
+  | "anthropic"
+  | "openai"
+  | "openai-responses"
+  | "bedrock"
+  | "vertex";
 
 /** Normalized request after ingress translation from either protocol. */
 export type GatewayRequest = {
@@ -395,7 +400,7 @@ export interface UpstreamSnapshot {
   /** Resolved upstream base URL (e.g., "https://api.minimax.io/anthropic"). */
   url: string;
   /** Wire protocol used for the request. */
-  protocol: "anthropic" | "openai" | "openai-responses";
+  protocol: "anthropic" | "openai" | "openai-responses" | "bedrock" | "vertex";
   /** Provider ID from X-Lore-Provider header (for worker model selection). */
   providerID?: string;
   /** Session model ID (for cost-aware worker model downgrade). */
