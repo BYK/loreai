@@ -161,4 +161,53 @@ describe("startServer configuration", () => {
       s.stop();
     }
   });
+
+  // Regression: a configured host that isn't assigned to any local interface
+  // (e.g. a Tailscale IP from a tailnet you've left) used to fail the whole
+  // bind with EADDRNOTAVAIL, which startGateway() then misreported as a port
+  // conflict ("Port N in use … Failed to bind to any port"). Such hosts must
+  // be treated as optional: skipped with a warning while the reachable hosts
+  // (loopback) still bind and serve. 192.0.2.1 is TEST-NET-1 (RFC 5737) — it
+  // is guaranteed not assigned to any interface, so binding it yields
+  // EADDRNOTAVAIL deterministically and hermetically.
+  test("skips an unavailable host (EADDRNOTAVAIL) and still serves on loopback", async () => {
+    const s = await startServer(
+      makeConfig({ hosts: ["127.0.0.1", "192.0.2.1"] }),
+    );
+    try {
+      // The unavailable host is dropped; only the bound host remains.
+      expect(s.hosts).toEqual(["127.0.0.1"]);
+      const res = await fetch(`http://127.0.0.1:${s.port}/health`);
+      expect(res.status).toBe(200);
+    } finally {
+      s.stop();
+    }
+  });
+
+  // The unavailable host appearing FIRST must not prevent binding the
+  // reachable host that follows it (adversarial ordering — the resolved port
+  // must come from the first host that actually binds).
+  test("skips a leading unavailable host and binds the reachable one", async () => {
+    const s = await startServer(
+      makeConfig({ hosts: ["192.0.2.1", "127.0.0.1"] }),
+    );
+    try {
+      expect(s.hosts).toEqual(["127.0.0.1"]);
+      expect(s.port).toBeGreaterThan(0);
+      const res = await fetch(`http://127.0.0.1:${s.port}/health`);
+      expect(res.status).toBe(200);
+    } finally {
+      s.stop();
+    }
+  });
+
+  // If EVERY configured host is unavailable, that is a genuine failure — the
+  // gateway must throw rather than silently bind nothing. Assert the specific
+  // "none available" message (not the raw EADDRNOTAVAIL the base branch threw)
+  // so this is a real guard for the new behavior, not an incidental match.
+  test("throws when all configured hosts are unavailable", async () => {
+    await expect(
+      startServer(makeConfig({ hosts: ["192.0.2.1", "203.0.113.1"] })),
+    ).rejects.toThrow(/none of the configured hosts are available/);
+  });
 });

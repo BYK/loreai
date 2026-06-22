@@ -498,6 +498,7 @@ export async function startServer(config: GatewayConfig): Promise<{
   // the same actual port. node:http's listen() is async, so we must
   // await each bind; Array#map can't await, hence the for-of loop.
   const servers: Server[] = [];
+  const boundHosts: string[] = [];
   let resolvedPort = config.port;
   try {
     for (const host of config.hosts) {
@@ -552,7 +553,29 @@ export async function startServer(config: GatewayConfig): Promise<{
       // Wait for the first bind so we learn the OS-assigned port (when
       // resolvedPort started as 0). Subsequent hosts then bind to the
       // same port to share it.
-      await ready;
+      try {
+        await ready;
+      } catch (e) {
+        // A configured host may not be assigned to any local interface right
+        // now — e.g. a Tailscale/LAN IP from a tailnet you've left, or an
+        // interface that hasn't come up yet at boot. Binding it fails with
+        // EADDRNOTAVAIL (or EADDRNOTFOUND on some platforms). Such hosts are
+        // OPTIONAL: skip them and keep binding the rest, so the gateway still
+        // comes up on loopback. Real conflicts (EADDRINUSE) and any other
+        // error still propagate to startGateway()'s port-fallback/reuse logic.
+        if (isUnavailableAddressError(e)) {
+          // Close this never-listening server to avoid leaking the handle.
+          s.close();
+          // Always warn (not just in debug): silently degrading to loopback-only
+          // when an explicitly-configured host is dropped is surprising, and the
+          // event is low-frequency and actionable.
+          console.error(
+            `[lore] configured host ${host} is unavailable (${addressErrorCode(e)}); skipping it and serving on the remaining hosts`,
+          );
+          continue;
+        }
+        throw e;
+      }
       if (resolvedPort === 0) {
         const addr = s.address();
         if (addr && typeof addr === "object") {
@@ -560,6 +583,7 @@ export async function startServer(config: GatewayConfig): Promise<{
         }
       }
       servers.push(s);
+      boundHosts.push(host);
     }
   } catch (e) {
     // A later host failed to bind (e.g. EADDRINUSE) after earlier hosts
@@ -567,6 +591,14 @@ export async function startServer(config: GatewayConfig): Promise<{
     // file descriptors, then re-throw for startGateway() to handle.
     for (const s of servers) s.close();
     throw e;
+  }
+
+  // Every configured host was unavailable (nothing bound). That's a genuine
+  // failure — surface it rather than returning a gateway that listens nowhere.
+  if (servers.length === 0) {
+    throw new Error(
+      `Failed to bind: none of the configured hosts are available (${config.hosts.join(", ")}).`,
+    );
   }
 
   // Collect all ready promises so startGateway() can await them.
@@ -579,7 +611,9 @@ export async function startServer(config: GatewayConfig): Promise<{
       for (const s of servers) s.close();
     },
     port: resolvedPort,
-    hosts: config.hosts,
+    // Report the hosts we actually bound (unavailable ones were skipped), so
+    // callers and /health probes don't reference an interface that's down.
+    hosts: boundHosts,
     ready: Promise.all(readyPromises).then(() => {}),
   };
 
@@ -605,6 +639,29 @@ export async function startServer(config: GatewayConfig): Promise<{
   }
 
   return promise;
+}
+
+/**
+ * Extract the errno code (e.g. "EADDRINUSE", "EADDRNOTAVAIL") from a Node
+ * socket error, if present.
+ */
+function addressErrorCode(err: unknown): string | undefined {
+  if (err && typeof err === "object" && "code" in err) {
+    const code = (err as { code?: unknown }).code;
+    if (typeof code === "string") return code;
+  }
+  return undefined;
+}
+
+/**
+ * True when a bind failed because the address isn't assigned to any local
+ * interface (so the host is absent/optional), as opposed to a real conflict
+ * (EADDRINUSE) or permission error. EADDRNOTAVAIL is the common case;
+ * EADDRNOTFOUND appears on some platforms for unresolvable hosts.
+ */
+function isUnavailableAddressError(err: unknown): boolean {
+  const code = addressErrorCode(err);
+  return code === "EADDRNOTAVAIL" || code === "EADDRNOTFOUND";
 }
 
 // ---------------------------------------------------------------------------

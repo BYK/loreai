@@ -347,6 +347,11 @@ export async function startGateway(
       server = await startServer(config);
       await server.ready; // already resolved by startServer; kept for clarity
       const actualPort = server.port;
+      // startServer() may drop hosts that aren't currently bindable (e.g. a
+      // stale Tailscale IP → EADDRNOTAVAIL). Reflect the hosts we actually
+      // bound so the "listening on …" log and /health probes don't advertise
+      // an interface that's down.
+      if (server.hosts.length) config.hosts = server.hosts;
 
       // Write port file so plugins can discover us (even on random port).
       writePortFile(actualPort);
