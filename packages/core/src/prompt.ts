@@ -593,7 +593,10 @@ CONSOLIDATION STRATEGY (apply in order):
 4. FORCED EVICTION — if steps 1–3 are insufficient to reach the target, you MUST delete
    the least valuable remaining entries until the count reaches the target. Rank entries by
    recurring impact: entries about rare edge cases or narrow contexts are lower value than
-   entries about broadly applicable patterns or frequently encountered gotchas.
+   entries about broadly applicable patterns or frequently encountered gotchas. Each entry is
+   annotated "(category, conf <0-1>, verifier pass <n>, fail <n>)": prefer evicting entries
+   with LOW confidence and/or a poor verifier record (more fail than pass) first, and keep
+   entries that have proven reliable (high confidence, more verifier passes).
 
 PRESERVE (highest priority — delete these last):
 - Entries describing non-obvious design decisions specific to this codebase
@@ -618,8 +621,10 @@ Output ONLY valid JSON. No markdown fences, no explanation, no preamble.`;
  */
 export const CONSOLIDATION_MERGE_SYSTEM = `You are a long-term memory curator. You are given all knowledge entries of a SINGLE category that has grown bloated with near-duplicates. Your ONLY job is to merge genuine duplicates.
 
+Each entry is listed as "- [id] (category, conf <0-1>, verifier pass <n>, fail <n>) title: content". The "conf" and "verifier pass/fail" annotations are a VALUE signal: higher confidence and a better verifier record (more pass, fewer fail) mean the entry has proven more reliable in practice.
+
 RULES:
-1. Find groups of entries that express the SAME underlying rule/fact, just phrased differently (paraphrases). For each such group, pick ONE survivor, "update" it to the clearest concise wording (under 150 words), and "delete" the others.
+1. Find groups of entries that express the SAME underlying rule/fact, just phrased differently (paraphrases). For each such group, pick ONE survivor and "update" it to the clearest concise wording (under 150 words), then "delete" the others. When the paraphrases differ in value, keep the higher-value entry as the survivor (higher confidence, and/or more verifier passes with fewer fails) — fold any unique detail from the others into its wording before deleting them.
 2. Do NOT merge entries that are merely related or about the same area but make DISTINCT points. Two different rules are NOT duplicates even if they share words. Opposing rules (e.g. "always use tabs" vs "always use spaces") are NEVER duplicates — never merge them.
 3. There is NO target count. If nothing is a true duplicate, return an empty array — that is correct and acceptable.
 4. Never invent new knowledge; only "update" survivors and "delete" true duplicates.
@@ -630,12 +635,36 @@ OUTPUT: A JSON array of "update" and "delete" ops only (may be empty). No "creat
 
 Output ONLY valid JSON. No markdown fences, no explanation, no preamble.`;
 
+/**
+ * Compact value annotation for a consolidation entry, shown inside the category
+ * parens so the curator can prefer keeping proven-valuable entries (#497). The
+ * `[id]` bracket is left untouched so the model still echoes a clean id in ops.
+ * Outcome (pass/fail co-occurrence) is appended only when there is a signal.
+ */
+function consolidationValueTag(e: {
+  confidence?: number;
+  outcome?: { passes: number; fails: number };
+}): string {
+  const parts: string[] = [];
+  if (typeof e.confidence === "number") {
+    parts.push(`conf ${e.confidence.toFixed(2)}`);
+  }
+  if (e.outcome && (e.outcome.passes > 0 || e.outcome.fails > 0)) {
+    parts.push(`verifier pass ${e.outcome.passes}, fail ${e.outcome.fails}`);
+  }
+  return parts.length ? `, ${parts.join(", ")}` : "";
+}
+
 export function consolidationUser(input: {
   entries: Array<{
     id: string;
     category: string;
     title: string;
     content: string;
+    /** Current confidence (0–1) — already folds in outcome reward/penalty. */
+    confidence?: number;
+    /** Within-session verifier co-occurrence record (#497). */
+    outcome?: { passes: number; fails: number };
   }>;
   targetMax: number;
   /** "trim" (default): reduce to targetMax via merge+evict. "merge-duplicates":
@@ -644,7 +673,10 @@ export function consolidationUser(input: {
 }): string {
   const count = input.entries.length;
   const listed = input.entries
-    .map((e) => `- [${e.id}] (${e.category}) ${e.title}: ${e.content}`)
+    .map(
+      (e) =>
+        `- [${e.id}] (${e.category}${consolidationValueTag(e)}) ${e.title}: ${e.content}`,
+    )
     .join("\n");
 
   if (input.mode === "merge-duplicates") {
