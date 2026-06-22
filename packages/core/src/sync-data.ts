@@ -877,7 +877,6 @@ export function applyRemoteKnowledgeDelete(logicalId: string): void {
 }
 
 export type KnowledgePushPlan =
-  | { op: "skip" }
   | { op: "delete"; logicalId: string }
   | { op: "upsert"; logicalId: string; row: Record<string, unknown> };
 

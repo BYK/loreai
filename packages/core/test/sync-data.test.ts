@@ -24,6 +24,7 @@ import {
   getRowById,
   getSyncState,
   hasPendingChange,
+  hasPendingKnowledgeChange,
   isSyncEnabled,
   knowledgePushPlan,
   maxOutboxSeq,
@@ -922,6 +923,44 @@ describe("mutation gap coverage (#832)", () => {
     seedOutbox();
     expect(hasPendingChange("knowledge", "k1", 0)).toBe(true);
     expect(hasPendingChange("knowledge", "absent", 0)).toBe(false);
+  });
+
+  test("hasPendingKnowledgeChange survives compaction of ALL version rows (#909 anchor-free contract)", () => {
+    setTeamConfig("sync.enabled", "1");
+    const id = ltm.create({
+      projectPath: "/tmp/lore-anchor-free",
+      scope: "project",
+      category: "decision",
+      title: "AF",
+      content: "v1",
+    });
+    // A pending (unpushed) edit captured in the outbox, keyed by logical_id (#909).
+    db().exec("DELETE FROM sync_outbox");
+    db()
+      .query(
+        "INSERT INTO sync_outbox (table_name, row_id, op, changed_at) VALUES ('knowledge', ?, 'upsert', ?)",
+      )
+      .run(id, Date.now());
+    // Future compaction physically removes EVERY version row — including the v1
+    // anchor (id == logical_id). Under apply-suppression so the DELETE triggers add
+    // no outbox entries of their own.
+    withApplying(() =>
+      db()
+        .query("DELETE FROM knowledge WHERE COALESCE(logical_id, id) = ?")
+        .run(id),
+    );
+    expect(
+      (
+        db()
+          .query(
+            "SELECT COUNT(*) AS n FROM knowledge WHERE COALESCE(logical_id, id) = ?",
+          )
+          .get(id) as { n: number }
+      ).n,
+    ).toBe(0);
+    // STILL detected — the outbox row_id IS the logical_id, with no dependency on a
+    // surviving version row to JOIN through (the old JOIN form returned false here).
+    expect(hasPendingKnowledgeChange(id, 0)).toBe(true);
   });
 
   test("seedOutbox builds a composite row_id for the join table", () => {
