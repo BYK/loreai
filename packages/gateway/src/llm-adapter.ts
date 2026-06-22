@@ -61,8 +61,10 @@ export const activeWorkerCalls = new Set<string>();
 // Retry helpers (exported for testing)
 // ---------------------------------------------------------------------------
 
-/** HTTP status codes that are transient and worth retrying. */
-const TRANSIENT_CODES = new Set([429, 500, 502, 503, 529]);
+/** HTTP status codes that are transient and worth retrying. 504 (Gateway
+ *  Timeout) is included: upstream gateways (esp. OpenRouter fronting slow free
+ *  models) return it on transient upstream timeouts — a retry usually clears. */
+const TRANSIENT_CODES = new Set([429, 500, 502, 503, 504, 529]);
 
 /** HTTP status codes indicating permanent auth failure. */
 export const AUTH_ERROR_CODES = new Set([401, 403]);
@@ -870,6 +872,27 @@ function extractFinishReason(rawData: unknown): string | undefined {
   }
 }
 
+/**
+ * Detect a provider error envelope embedded in an otherwise-2xx body and return
+ * its numeric status code, if any. Gateways such as OpenRouter surface an
+ * UPSTREAM failure as an HTTP 200 whose body is `{"error":{"code":504,...}}`
+ * instead of propagating the status line — so the status-keyed transient retry
+ * never sees it and the body parses as a "successful but empty" completion.
+ * Returns the embedded code (number) when present, else null. Only the shape
+ * `{ error: { code: <number|numeric-string> } }` is recognized; a normal
+ * completion has no top-level `error` object, so false positives are unlikely.
+ * See #899.
+ */
+function extractBodyErrorCode(rawData: unknown): number | null {
+  if (!rawData || typeof rawData !== "object") return null;
+  const err = (rawData as { error?: unknown }).error;
+  if (!err || typeof err !== "object") return null;
+  const code = (err as { code?: unknown }).code;
+  if (typeof code === "number" && Number.isFinite(code)) return code;
+  if (typeof code === "string" && /^\d+$/.test(code)) return Number(code);
+  return null;
+}
+
 function describeEmptyWorkerResponse(rawData: unknown): string {
   const fields: string[] = [];
   let finishReason: string | undefined;
@@ -1146,6 +1169,58 @@ export function createGatewayLLMClient(
                 const rawData = ct.includes("text/event-stream")
                   ? await extractJSONFromSSE(response)
                   : await response.json();
+
+                // A 2xx whose body is a provider error envelope (e.g. OpenRouter
+                // surfacing an upstream timeout as HTTP 200 + {error:{code:504}})
+                // is NOT a usable completion. The status-keyed transient handling
+                // below never sees it, and parseWorkerResponse would yield no text
+                // → it would be miscounted as an empty/incapable response. Route a
+                // transient embedded code into the SAME retry/backoff ladder as a
+                // real HTTP-level transient. Non-transient embedded codes fall
+                // through to the normal empty-response handling (no regression). #899
+                const bodyErrCode = extractBodyErrorCode(rawData);
+                if (bodyErrCode != null && TRANSIENT_CODES.has(bodyErrCode)) {
+                  // Trip the breaker once on an embedded 429, matching the
+                  // HTTP-level 429 path (background work to this provider pauses
+                  // while this call rides out the limit; other providers drain).
+                  if (bodyErrCode === 429 && !breakerTripped) {
+                    breakerTripped = true;
+                    const cbRetryAfter = parseRetryAfter(response);
+                    tripCircuitBreaker(
+                      cbRetryAfter ? Math.ceil(cbRetryAfter / 1000) : undefined,
+                      model.providerID,
+                    );
+                  }
+                  if (attempt < maxRetries) {
+                    const retryAfter = parseRetryAfter(response);
+                    const delay = backoffMs(attempt, retryAfter);
+                    retryCount++;
+                    totalDelayMs += delay;
+                    if (retryAfter != null) lastRetryAfterMs = retryAfter;
+                    log.warn(
+                      `worker upstream returned HTTP 200 with an embedded ${bodyErrCode} ` +
+                        `error (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms ` +
+                        `— model=${model.providerID}/${model.modelID} worker=${opts?.workerID ?? "unknown"}`,
+                    );
+                    await sleep(delay);
+                    continue;
+                  }
+                  // Exhausted: a persistent upstream transient, NOT a model
+                  // capability fact — record no-response (not worker-incapable)
+                  // so a flaky upstream never marks a capable model incapable.
+                  log.warn(
+                    `worker upstream embedded ${bodyErrCode} error persisted after ` +
+                      `${maxRetries + 1} attempts — model=${model.providerID}/${model.modelID} ` +
+                      `worker=${opts?.workerID ?? "unknown"} ` +
+                      `session=${opts?.sessionID?.slice(0, 16) ?? "none"}`,
+                  );
+                  recordWorkerFailure(
+                    opts?.sessionID ?? "_unknown",
+                    opts?.workerID ?? "unknown",
+                    "no-response",
+                  );
+                  return null;
+                }
 
                 // Parse response based on protocol
                 const parsed = parseWorkerResponse(target.protocol, rawData);

@@ -386,6 +386,132 @@ describe("worker 429 trips the circuit breaker (urgent included)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Provider error envelopes wrapped in HTTP 200 bodies (#899)
+// ---------------------------------------------------------------------------
+
+describe("worker handles provider error envelopes in HTTP 200 bodies (#899)", () => {
+  const mockFetch = vi.mocked(upstreamFetch);
+  const realMaxRetries = process.env.LORE_MAX_RETRIES;
+  const UPSTREAMS = {
+    anthropic: "https://api.anthropic.com",
+    openai: "https://api.openai.com",
+  };
+
+  beforeEach(() => {
+    process.env.LORE_MAX_RETRIES = "3";
+    resetBackgroundLimiter();
+    vi.mocked(recordWorkerFailure).mockClear();
+  });
+  afterEach(() => {
+    mockFetch.mockReset();
+    clearAllCosts();
+    resetBackgroundLimiter();
+    if (realMaxRetries === undefined) delete process.env.LORE_MAX_RETRIES;
+    else process.env.LORE_MAX_RETRIES = realMaxRetries;
+  });
+
+  // HTTP 200 whose body is a provider error envelope. retry-after:0 keeps the
+  // retries instant so the loop runs to exhaustion without real waits.
+  function envelope200(code: number) {
+    return new Response(
+      JSON.stringify({ error: { message: "Provider returned error", code } }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json", "retry-after": "0" },
+      },
+    );
+  }
+  function anthropicSuccess() {
+    return new Response(
+      JSON.stringify({
+        content: [{ type: "text", text: "recovered" }],
+        model: "claude-test",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }
+  function client() {
+    return createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      { providerID: "anthropic", modelID: "claude-test" },
+    );
+  }
+
+  test("retries a 200 + embedded 504 and recovers when the retry succeeds", async () => {
+    mockFetch
+      .mockResolvedValueOnce(envelope200(504))
+      .mockResolvedValueOnce(anthropicSuccess());
+    const text = await client().prompt("system", "user", {
+      sessionID: "s-recover",
+      workerID: "lore-distill",
+    });
+    expect(text).toBe("recovered");
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  test("retries to exhaustion on a persistent 200 + embedded 504 → null, records no-response (not incapable)", async () => {
+    // mockImplementation (not mockResolvedValue): each retry needs a FRESH
+    // Response — a body can only be read once.
+    mockFetch.mockImplementation(async () => envelope200(504));
+    const text = await client().prompt("system", "user", {
+      sessionID: "s-exhaust",
+      workerID: "lore-distill",
+    });
+    expect(text).toBeNull();
+    expect(mockFetch).toHaveBeenCalledTimes(4); // maxRetries(3) + 1
+    expect(recordWorkerFailure).toHaveBeenCalledWith(
+      "s-exhaust",
+      "lore-distill",
+      "no-response",
+    );
+    // A flaky upstream must never mark a capable model incapable.
+    expect(recordWorkerFailure).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      "worker-incapable",
+    );
+  });
+
+  test("does NOT retry a 200 + embedded NON-transient (400) error", async () => {
+    mockFetch.mockResolvedValue(envelope200(400));
+    const text = await client().prompt("system", "user", {
+      sessionID: "s-400",
+      workerID: "lore-distill",
+    });
+    expect(text).toBeNull();
+    // Falls through to the existing empty-response handling — no retry.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  test("an embedded 429 trips the provider circuit breaker", async () => {
+    mockFetch.mockImplementation(async () => envelope200(429));
+    await client().prompt("system", "user", {
+      sessionID: "s-429",
+      workerID: "lore-distill",
+    });
+    expect(getConsecutiveTrips("anthropic")).toBe(1);
+  });
+
+  test("a real HTTP 504 is now transient and retried (was a hard fail)", async () => {
+    mockFetch.mockImplementation(
+      async () =>
+        new Response("gateway timeout", {
+          status: 504,
+          headers: { "retry-after": "0" },
+        }),
+    );
+    const text = await client().prompt("system", "user", {
+      sessionID: "s-http504",
+      workerID: "lore-distill",
+    });
+    expect(text).toBeNull();
+    expect(mockFetch).toHaveBeenCalledTimes(4); // maxRetries(3) + 1
+  });
+});
+
+// ---------------------------------------------------------------------------
 // createGatewayLLMClient.prompt() — request building, success, and guards
 // ---------------------------------------------------------------------------
 
