@@ -6,7 +6,9 @@ import {
   conditionalReturnProbability,
   blendHistograms,
   prepareAnthropicWarmupBody,
+  prepareBedrockWarmupBody,
   buildAnthropicProfile,
+  buildBedrockProfile,
   resolveProfile,
   shouldWarm,
   warmupWriteEfficiencyTooLow,
@@ -1513,6 +1515,64 @@ describe("resolveProfile — Anthropic first-party host gate (cross-provider 401
     expect(
       resolveProfile("gpt-5", "openai", "5m", "https://api.openai.com"),
     ).toBeNull();
+  });
+
+  test("returns a Bedrock profile for a bedrock-protocol session", () => {
+    const profile = resolveProfile(
+      "claude-3-5-sonnet-20241022",
+      "bedrock",
+      "5m",
+      "https://bedrock-runtime.us-east-1.amazonaws.com",
+      "bedrock",
+      { region: "us-east-1" },
+    );
+    expect(profile).not.toBeNull();
+    expect(profile?.auth?.mode).toBe("bedrock");
+    // Non-streaming InvokeModel URL with the Bedrock-format model id.
+    expect(profile?.upstreamUrl).toBe(
+      "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-3-5-sonnet-20241022-v2%3A0/invoke",
+    );
+  });
+});
+
+describe("Bedrock warmup", () => {
+  test("prepareBedrockWarmupBody: max_tokens=1, NO stream, sentinel preserved", () => {
+    const stored = JSON.stringify({
+      anthropic_version: "bedrock-2023-05-31",
+      max_tokens: 8000,
+      stream: true,
+      system: "s",
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    });
+    const out = JSON.parse(prepareBedrockWarmupBody(stored));
+    expect(out.max_tokens).toBe(1);
+    expect("stream" in out).toBe(false); // Bedrock rejects a body stream field
+    expect(out.anthropic_version).toBe("bedrock-2023-05-31");
+    // A cache breakpoint is ensured for the warmup to actually touch the cache.
+    const hasBreakpoint = (out.messages as Array<{ content?: unknown }>).some(
+      (m) =>
+        Array.isArray(m.content) &&
+        m.content.some(
+          (b: unknown) =>
+            typeof b === "object" && b !== null && "cache_control" in b,
+        ),
+    );
+    expect(hasBreakpoint).toBe(true);
+  });
+
+  test("buildBedrockProfile: region from URL wins over the configured region", () => {
+    const profile = buildBedrockProfile(
+      "claude-3-5-sonnet-20241022",
+      "5m",
+      "us-east-1", // configured
+      undefined,
+      "https://bedrock-runtime.ap-southeast-2.amazonaws.com", // URL region
+    );
+    expect(profile.auth?.mode).toBe("bedrock");
+    if (profile.auth?.mode === "bedrock") {
+      expect(profile.auth.region).toBe("ap-southeast-2");
+    }
+    expect(profile.upstreamUrl).toContain("bedrock-runtime.ap-southeast-2");
   });
 });
 

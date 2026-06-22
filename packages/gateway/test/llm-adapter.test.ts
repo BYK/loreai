@@ -294,6 +294,16 @@ describe("resolveWorkerProtocol", () => {
       "openai-codex-responses",
     );
   });
+
+  // Bedrock keeps its own worker protocol (SigV4 + InvokeModel) — must NOT
+  // collapse to "anthropic" (that path uses x-api-key, not SigV4).
+  test("bedrock stays 'bedrock' via explicit hint and via the route table", () => {
+    expect(resolveWorkerProtocol("bedrock", "bedrock")).toBe("bedrock");
+    expect(resolveWorkerProtocol("amazon-bedrock", "bedrock")).toBe("bedrock");
+    // From the provider route table (no explicit hint).
+    expect(resolveWorkerProtocol("bedrock")).toBe("bedrock");
+    expect(resolveWorkerProtocol("amazon-bedrock")).toBe("bedrock");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1172,5 +1182,83 @@ describe("worker beta capability validation", () => {
     expect(betaOf(1)).toBeDefined();
     expect(betaOf(1)).not.toContain("context-1m");
     expect(betaOf(1)).toContain("oauth-2025-04-20");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bedrock worker calls — SigV4-signed InvokeModel (issue #870 worker support)
+// ---------------------------------------------------------------------------
+
+describe("bedrock worker SigV4", () => {
+  const mockFetch = vi.mocked(upstreamFetch);
+
+  afterEach(async () => {
+    mockFetch.mockReset();
+    clearAllCosts();
+    resetBackgroundLimiter();
+    const { _setTestCredentialProviders } = await import("../src/bedrock-auth");
+    _setTestCredentialProviders(null);
+  });
+
+  function bedrockJSON() {
+    return new Response(
+      JSON.stringify({
+        content: [{ type: "text", text: "distilled by bedrock" }],
+        model: "claude-3-5-sonnet-20241022",
+        usage: { input_tokens: 10, output_tokens: 5 },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }
+
+  test("signs a non-streaming InvokeModel request with the Bedrock body", async () => {
+    mockFetch.mockResolvedValue(bedrockJSON());
+    const { _setTestCredentialProviders } = await import("../src/bedrock-auth");
+    _setTestCredentialProviders([
+      async () => ({ accessKeyId: "AKIATEST", secretAccessKey: "secret" }),
+    ]);
+
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.anthropic.com",
+        openai: "https://api.openai.com",
+      },
+      () => ({ scheme: "api-key", value: "client-key" }),
+      { providerID: "bedrock", modelID: "claude-3-5-sonnet-20241022" },
+      { bedrock: { region: "us-east-1" } },
+    );
+
+    const text = await client.prompt("worker system", "worker user", {
+      sessionID: "sess-bedrock",
+      workerID: "lore-distill",
+      model: { providerID: "bedrock", modelID: "claude-3-5-sonnet-20241022" },
+      protocol: "bedrock",
+      upstreamProviderID: "bedrock",
+      upstreamUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+    });
+
+    expect(text).toBe("distilled by bedrock");
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+
+    const [url, init] = mockFetch.mock.calls[0] as [
+      string,
+      { headers: Record<string, string>; body: string },
+    ];
+    // Non-streaming InvokeModel URL with the Bedrock-format model id in the path.
+    expect(url).toBe(
+      "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-3-5-sonnet-20241022-v2%3A0/invoke",
+    );
+    // SigV4 Authorization with the bedrock-runtime service scope + signed host.
+    const auth = init.headers.authorization ?? init.headers.Authorization ?? "";
+    expect(auth).toContain("AWS4-HMAC-SHA256");
+    expect(auth).toContain("bedrock-runtime");
+    expect(auth).toMatch(/SignedHeaders=[^,]*\bhost\b/);
+    // NO client x-api-key / Authorization-bearer — auth is SigV4 only.
+    expect(init.headers["x-api-key"]).toBeUndefined();
+    // Bedrock-shaped body: sentinel present, no stream field.
+    const body = JSON.parse(init.body);
+    expect(body.anthropic_version).toBe("bedrock-2023-05-31");
+    expect("stream" in body).toBe(false);
+    expect(body.messages).toEqual([{ role: "user", content: "worker user" }]);
   });
 });

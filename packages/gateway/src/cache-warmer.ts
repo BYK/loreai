@@ -45,6 +45,12 @@ import { decompressBody } from "./cache-analytics";
 import { resolveAuth, authHeaders, markAuthStale } from "./auth";
 import { recordWorkerFailure, recordWorkerSuccess } from "./worker-health";
 import { resignBody } from "./cch";
+import {
+  bedrockInvokeNoStreamUrl,
+  regionFromBedrockUrl,
+  resolveBedrockModelID,
+} from "./translate/bedrock";
+import { signBedrockRequest } from "./bedrock-auth";
 import { resolveUpstreamRoute } from "./config";
 import { getModelEntrySync } from "./worker-model";
 import { recordWarmupCost } from "./cost-tracker";
@@ -831,6 +837,15 @@ export type CacheWarmingProfile = {
   prepareWarmupBody: (storedBody: string) => string;
   /** Upstream URL to send the warmup to. */
   upstreamUrl: string;
+  /**
+   * Auth/signing mode for the warmup request. "anthropic" (default) uses the
+   * session credential + cch billing re-sign; "bedrock" uses AWS SigV4 and
+   * carries the region/profile needed to sign. Determines how executeWarmup
+   * builds headers and signs the body.
+   */
+  auth?:
+    | { mode: "anthropic" }
+    | { mode: "bedrock"; region: string; profile?: string };
 };
 
 /**
@@ -948,6 +963,74 @@ export function buildAnthropicProfile(
 }
 
 /**
+ * Prepare a stored Bedrock request body for a warmup InvokeModel call.
+ *
+ * Like prepareAnthropicWarmupBody, but Bedrock-specific:
+ *  - Bedrock does NOT accept a `stream` field in the body — delete it.
+ *  - Bedrock-on-Claude requires max_tokens >= 1, so use 1 (max_tokens:0 would
+ *    be rejected) — negligible output cost for a warmup.
+ *  - Preserve `anthropic_version` (the Bedrock sentinel) and the cache_control
+ *    breakpoints; re-add a breakpoint if none survived.
+ */
+export function prepareBedrockWarmupBody(storedBody: string): string {
+  const body = JSON.parse(storedBody);
+  body.max_tokens = 1;
+  // Bedrock rejects a `stream` body field outright (endpoint controls streaming).
+  delete body.stream;
+  if (body.tool_choice?.type === "tool" || body.tool_choice?.type === "any") {
+    delete body.tool_choice;
+  }
+  delete body.output_config;
+  ensureCacheBreakpoint(body);
+  return JSON.stringify(body);
+}
+
+/**
+ * Build a Bedrock warming profile. Warmup is a non-streaming InvokeModel call
+ * to the region endpoint, SigV4-signed (no cch / session credential).
+ */
+export function buildBedrockProfile(
+  model: string,
+  ttl: "5m" | "1h",
+  region: string,
+  awsProfile: string | undefined,
+  upstreamBase?: string,
+): CacheWarmingProfile {
+  const entry = getModelEntrySync(model);
+  const cacheReadCost =
+    entry.cost?.cache_read ?? (entry.cost?.input ?? 3) * 0.1;
+  const baseCacheWrite =
+    entry.cost?.cache_write ?? (entry.cost?.input ?? 3) * 1.25;
+  const cacheWriteCost = ttl === "1h" ? baseCacheWrite * 2 : baseCacheWrite;
+  const ttlMs = ttl === "1h" ? 3_600_000 : 300_000;
+  const warmupMarginMs = ttl === "1h" ? 300_000 : 45_000;
+
+  // Prefer the region embedded in the session's upstream URL (handles a custom
+  // proxy/base); fall back to the configured region.
+  const resolvedRegion =
+    (upstreamBase ? regionFromBedrockUrl(upstreamBase) : null) ?? region;
+  const bedrockModelId = resolveBedrockModelID(model);
+  // If the session used a custom (proxy) base, send the warmup there; otherwise
+  // build the standard region InvokeModel URL.
+  const customBase =
+    upstreamBase && !regionFromBedrockUrl(upstreamBase)
+      ? `${upstreamBase.replace(/\/$/, "")}/model/${encodeURIComponent(bedrockModelId)}/invoke`
+      : null;
+  const upstreamUrl =
+    customBase ?? bedrockInvokeNoStreamUrl(resolvedRegion, bedrockModelId);
+
+  return {
+    ttlMs,
+    cacheReadCostPerMTok: cacheReadCost,
+    cacheMissCostPerMTok: cacheWriteCost,
+    warmupMarginMs,
+    prepareWarmupBody: prepareBedrockWarmupBody,
+    upstreamUrl,
+    auth: { mode: "bedrock", region: resolvedRegion, profile: awsProfile },
+  };
+}
+
+/**
  * True only for Anthropic's first-party API host. Anthropic-compatible
  * providers (MiniMax `api.minimax.io/anthropic`, Fireworks, Kimi, …) report
  * `protocol:"anthropic"` but do NOT support Anthropic prompt-cache warming and
@@ -980,11 +1063,25 @@ export function resolveProfile(
   ttl: "5m" | "1h" | undefined,
   upstreamBase?: string,
   providerID?: string,
+  bedrock?: { region: string; profile?: string },
 ): CacheWarmingProfile | null {
   if (!model || !protocol) return null;
 
-  // Only Anthropic protocol for now — OpenAI has automatic prefix caching with
-  // no explicit warming API.
+  // AWS Bedrock supports Claude prompt caching too. Warm via a SigV4-signed
+  // non-streaming InvokeModel call. Region comes from config (or the session's
+  // bedrock-runtime upstream URL inside buildBedrockProfile).
+  if (protocol === "bedrock") {
+    return buildBedrockProfile(
+      model,
+      ttl ?? "5m",
+      bedrock?.region ?? "us-east-1",
+      bedrock?.profile,
+      upstreamBase,
+    );
+  }
+
+  // Only Anthropic protocol otherwise — OpenAI has automatic prefix caching
+  // with no explicit warming API.
   if (protocol !== "anthropic") return null;
 
   // 🔴 Gate on Anthropic IDENTITY, not just the wire protocol. Anthropic-compat
@@ -1802,10 +1899,17 @@ export async function executeWarmup(
   // Prepare for warmup (max_tokens:0, strip incompatible fields)
   const warmupBody = profile.prepareWarmupBody(storedBody);
 
+  const isBedrock = profile.auth?.mode === "bedrock";
+
   // Resolve auth for this session — use the provider from lastUpstream
   // to avoid cross-contamination when the session uses multiple providers.
-  const cred = resolveAuth(state.sessionID, state.lastUpstream?.providerID);
-  if (!cred) {
+  // Bedrock does NOT need a session credential: its auth is SigV4 (the client
+  // x-api-key / OAuth token is irrelevant to the bedrock-runtime call), so we
+  // skip the credential requirement for the bedrock path.
+  const cred = isBedrock
+    ? null
+    : resolveAuth(state.sessionID, state.lastUpstream?.providerID);
+  if (!isBedrock && !cred) {
     log.warn(
       `cache-warmer: no auth for session=${state.sessionID.slice(0, 16)}, skipping`,
     );
@@ -1813,17 +1917,23 @@ export async function executeWarmup(
     return noResult;
   }
 
-  const headers: Record<string, string> = {
-    "content-type": "application/json",
-    "anthropic-version": "2023-06-01",
-    ...authHeaders(cred),
-  };
+  const headers: Record<string, string> = isBedrock
+    ? { "content-type": "application/json", accept: "application/json" }
+    : {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+        // cred is non-null here (guarded by the !isBedrock && !cred check above).
+        ...(cred ? authHeaders(cred) : {}),
+      };
 
   // Forward anthropic-beta from the last real request so beta-gated body
   // fields (e.g. context_management) are accepted by the upstream API.
-  const betaHeader = state.lastUpstream?.headers["anthropic-beta"];
-  if (betaHeader) {
-    headers["anthropic-beta"] = betaHeader;
+  // Bedrock doesn't understand anthropic-beta — skip it there.
+  if (!isBedrock) {
+    const betaHeader = state.lastUpstream?.headers["anthropic-beta"];
+    if (betaHeader) {
+      headers["anthropic-beta"] = betaHeader;
+    }
   }
 
   // Apply user-supplied LORE_UPSTREAM_EXTRA_HEADERS as the final overlay so
@@ -1833,11 +1943,27 @@ export async function executeWarmup(
     headers[key] = value;
   }
 
-  // Re-sign the cch billing header. The cch hash covers the entire
-  // serialized body, and we changed max_tokens/stream. The cch is
-  // billing verification only — NOT part of the cache key.
-  const firstUserText = extractFirstUserText(storedBody);
-  const signedBody = resignBody(warmupBody, firstUserText);
+  let signedBody: string;
+  if (isBedrock && profile.auth?.mode === "bedrock") {
+    // Bedrock: no cch (Anthropic-first-party only); auth is SigV4. Sign the
+    // warmup body against the InvokeModel URL — this mutates `headers` with
+    // Authorization, x-amz-date, host.
+    signedBody = warmupBody;
+    await signBedrockRequest(
+      "POST",
+      profile.upstreamUrl,
+      headers,
+      signedBody,
+      profile.auth.region,
+      profile.auth.profile,
+    );
+  } else {
+    // Re-sign the cch billing header. The cch hash covers the entire
+    // serialized body, and we changed max_tokens/stream. The cch is
+    // billing verification only — NOT part of the cache key.
+    const firstUserText = extractFirstUserText(storedBody);
+    signedBody = resignBody(warmupBody, firstUserText);
+  }
 
   log.info(
     `cache-warmer: sending warmup for session=${state.sessionID.slice(0, 16)} ` +

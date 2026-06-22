@@ -17,6 +17,8 @@ import {
   bedrockInvokeNoStreamUrl,
   buildBedrockHeaders,
   buildBedrockRequestBody,
+  buildBedrockWorkerBody,
+  regionFromBedrockUrl,
   parseBedrockResponseJSON,
   bedrockChunkToSSEEvents,
 } from "../src/translate/bedrock";
@@ -893,5 +895,55 @@ describe("Bedrock credential provider chain", () => {
       "AWS4-HMAC-SHA256",
     );
     _setTestCredentialProviders(null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Worker body builder (background distillation/curation calls)
+// ---------------------------------------------------------------------------
+
+describe("buildBedrockWorkerBody", () => {
+  test("sets the Bedrock sentinel, max_tokens, system, and user message", () => {
+    const body = buildBedrockWorkerBody("SYS", "hello", 512);
+    expect(body.anthropic_version).toBe("bedrock-2023-05-31");
+    expect(body.max_tokens).toBe(512);
+    expect(body.system).toBe("SYS");
+    expect(body.messages).toEqual([{ role: "user", content: "hello" }]);
+  });
+
+  test("NEVER includes a stream field (endpoint controls streaming)", () => {
+    const body = buildBedrockWorkerBody("", "u", 16);
+    expect("stream" in body).toBe(false);
+  });
+
+  test("omits system when empty; includes temperature when provided", () => {
+    const noSys = buildBedrockWorkerBody("", "u", 16);
+    expect("system" in noSys).toBe(false);
+    const withTemp = buildBedrockWorkerBody("s", "u", 16, 0.3);
+    expect(withTemp.temperature).toBe(0.3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// regionFromBedrockUrl
+// ---------------------------------------------------------------------------
+
+describe("regionFromBedrockUrl", () => {
+  test("extracts region from a bedrock-runtime host", () => {
+    expect(
+      regionFromBedrockUrl(
+        "https://bedrock-runtime.eu-central-1.amazonaws.com/model/x/invoke",
+      ),
+    ).toBe("eu-central-1");
+  });
+
+  test("returns null for a non-bedrock host (custom proxy)", () => {
+    expect(regionFromBedrockUrl("https://my-proxy.example.com/bedrock")).toBe(
+      null,
+    );
+  });
+
+  test("returns null for a malformed URL", () => {
+    expect(regionFromBedrockUrl("not a url")).toBe(null);
   });
 });

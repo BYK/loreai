@@ -1730,7 +1730,15 @@ function getLLMClient(config: GatewayConfig): LLMClient {
       workerUpstreams,
       getWorkerAuth,
       defaultModel,
-      { dedicatedWorkerKey: !!workerApiKey },
+      {
+        dedicatedWorkerKey: !!workerApiKey,
+        // AWS config for SigV4-signing Bedrock worker calls (region is also
+        // recoverable from the session's bedrock-runtime upstream URL).
+        bedrock: {
+          region: config.bedrockRegion,
+          profile: config.bedrockProfile,
+        },
+      },
     );
 
     // Workers always use the same provider as the session. Route worker

@@ -458,6 +458,8 @@ export function startIdleScheduler(
         // provider's key to api.anthropic.com (MiniMax 401 loop).
         state.lastUpstream?.url,
         state.lastUpstream?.providerID,
+        // AWS config for SigV4-signing Bedrock warmups.
+        { region: config.bedrockRegion, profile: config.bedrockProfile },
       );
       if (!profile) continue;
 

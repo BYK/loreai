@@ -90,6 +90,47 @@ export function bedrockInvokeNoStreamUrl(
   return `https://bedrock-runtime.${region}.amazonaws.com/model/${encodedModel}/invoke`;
 }
 
+/**
+ * Build a Bedrock InvokeModel request body for a background WORKER call
+ * (distillation, curation, query-expansion). Workers do a simple single-turn
+ * system+user prompt → response, so this is a much smaller builder than the
+ * conversation-path `buildBedrockRequestBody`.
+ *
+ * Like the conversation path: `anthropic_version` is the Bedrock sentinel and
+ * there is NO `stream` field (the endpoint, not the body, controls streaming —
+ * workers always use the non-streaming InvokeModel endpoint).
+ */
+export function buildBedrockWorkerBody(
+  system: string,
+  user: string,
+  maxTokens: number,
+  temperature?: number,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    anthropic_version: BEDROCK_ANTHROPIC_VERSION,
+    max_tokens: maxTokens,
+  };
+  if (system) body.system = system;
+  if (temperature != null) body.temperature = temperature;
+  body.messages = [{ role: "user", content: user }];
+  return body;
+}
+
+/**
+ * Parse the AWS region out of a `bedrock-runtime.<region>.amazonaws.com` URL.
+ * Returns null when the host doesn't match (e.g. a custom proxy upstream) so
+ * the caller can fall back to configured region.
+ */
+export function regionFromBedrockUrl(url: string): string | null {
+  try {
+    const host = new URL(url).hostname;
+    const m = /^bedrock-runtime\.([^.]+)\.amazonaws\.com$/.exec(host);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Request body translation: Anthropic → Bedrock
 // ---------------------------------------------------------------------------

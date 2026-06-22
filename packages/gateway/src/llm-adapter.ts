@@ -42,6 +42,12 @@ import { recordWorkerCost } from "./cost-tracker";
 import { upstreamFetch } from "./fetch";
 import { extractJSONFromSSE } from "./translate/types";
 import {
+  buildBedrockWorkerBody,
+  regionFromBedrockUrl,
+  resolveBedrockModelID,
+} from "./translate/bedrock";
+import { signBedrockRequest } from "./bedrock-auth";
+import {
   recordWorkerFailure,
   markWorkerPaused,
   isWorkerIncapable,
@@ -315,8 +321,17 @@ export function normalizeOpenAIUsage(
  * endpoint is simpler/cheaper. The one exception is `openai-codex`: ChatGPT's
  * `/backend-api` serves ONLY the Responses API (`/codex/responses`), so it gets
  * a dedicated `"openai-codex-responses"` worker protocol that speaks Responses.
+ *
+ * `bedrock` keeps its own protocol (it does NOT collapse to "anthropic") because
+ * worker calls to AWS Bedrock require SigV4 signing, a region-specific
+ * InvokeModel URL, and the Bedrock body sentinel — see buildBedrockWorkerRequest
+ * and the SigV4 signing step in the retry loop.
  */
-type WorkerProtocol = "anthropic" | "openai" | "openai-codex-responses";
+type WorkerProtocol =
+  | "anthropic"
+  | "openai"
+  | "openai-codex-responses"
+  | "bedrock";
 
 /** Upstream URL, wire protocol, and provider label for a resolved target. */
 type ProviderTarget = {
@@ -351,29 +366,21 @@ export function resolveWorkerProtocol(
   }
   // 1. Explicit protocol from caller (threaded from UpstreamSnapshot)
   if (explicit) {
-    // Bedrock/Vertex collapse to "anthropic" for worker calls — workers
-    // use simple prompt→response and Bedrock's InvokeModel (non-streaming)
-    // returns the same JSON shape as Anthropic Messages API.
-    //
-    // 🔴 KNOWN LIMITATION (issue #870 part 1): this only normalizes the WIRE
-    // SHAPE. The worker LLM adapter and cache-warmer do NOT apply AWS SigV4
-    // signing, so background work (distillation/curation/warming) for a
-    // Bedrock-only session would hit bedrock-runtime unsigned → 403. Until
-    // worker-side SigV4 lands (follow-up), Bedrock users must point
-    // LORE_WORKER_UPSTREAM + LORE_WORKER_API_KEY at a non-Bedrock,
-    // Anthropic-compatible endpoint for memory-building to function.
-    return explicit === "anthropic" ||
-      explicit === "bedrock" ||
-      explicit === "vertex"
+    // Bedrock keeps its own worker protocol (SigV4 + InvokeModel URL).
+    // Vertex still collapses to "anthropic" — it has no worker handler yet and
+    // no route can produce it (part 2). Bedrock's non-streaming InvokeModel
+    // returns the same JSON shape as Anthropic Messages API, so response
+    // parsing is shared, but the request build + auth differ.
+    if (explicit === "bedrock") return "bedrock";
+    return explicit === "anthropic" || explicit === "vertex"
       ? "anthropic"
       : "openai";
   }
   // 2. Route table lookup
   const route = resolveProviderRoute(providerID);
   if (route?.protocol) {
-    return route.protocol === "anthropic" ||
-      route.protocol === "bedrock" ||
-      route.protocol === "vertex"
+    if (route.protocol === "bedrock") return "bedrock";
+    return route.protocol === "anthropic" || route.protocol === "vertex"
       ? "anthropic"
       : "openai";
   }
@@ -796,6 +803,36 @@ function parseResponsesWorkerResponse(data: {
 }
 
 /**
+ * Build an AWS Bedrock InvokeModel (non-streaming) worker request.
+ *
+ * `target.url` is the region-specific bedrock-runtime base. The model id is
+ * mapped to Bedrock format and placed in the URL path. The returned request is
+ * UNSIGNED — SigV4 headers (Authorization, x-amz-date, host) are added in the
+ * retry loop (the x-amz-date must be fresh per attempt). No cch/billing header
+ * (Anthropic-first-party only); auth is entirely SigV4.
+ */
+function buildBedrockWorkerRequest(
+  target: ProviderTarget,
+  model: { providerID: string; modelID: string },
+  system: string,
+  user: string,
+  maxTokens: number,
+  temperature?: number,
+): { url: string; headers: Record<string, string>; body: string } {
+  const bedrockModelId = resolveBedrockModelID(model.modelID);
+  const encoded = encodeURIComponent(bedrockModelId);
+  const url = `${target.url}/model/${encoded}/invoke`;
+  const body = JSON.stringify(
+    buildBedrockWorkerBody(system, user, maxTokens, temperature),
+  );
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    accept: "application/json",
+  };
+  return { url, headers, body };
+}
+
+/**
  * Dispatch to the correct worker request builder for a resolved target.
  * Single source of truth so adding a protocol touches exactly one place.
  */
@@ -810,6 +847,15 @@ function buildWorkerRequest(
   temperature?: number,
 ): { url: string; headers: Record<string, string>; body: string } {
   switch (target.protocol) {
+    case "bedrock":
+      return buildBedrockWorkerRequest(
+        target,
+        model,
+        system,
+        user,
+        maxTokens,
+        temperature,
+      );
     case "openai-codex-responses":
       // Codex omits max_output_tokens (rejected by ChatGPT) — no maxTokens arg.
       return buildCodexWorkerRequest(
@@ -976,9 +1022,14 @@ export function createGatewayLLMClient(
   upstreams: { anthropic: string; openai: string },
   getAuth: (sessionID?: string, providerID?: string) => AuthCredential | null,
   defaultModel: { providerID: string; modelID: string },
-  opts?: { dedicatedWorkerKey?: boolean },
+  opts?: {
+    dedicatedWorkerKey?: boolean;
+    /** AWS config for SigV4-signing Bedrock worker calls. */
+    bedrock?: { region: string; profile?: string };
+  },
 ): LLMClient {
   const hasDedicatedKey = opts?.dedicatedWorkerKey === true;
+  const bedrockConfig = opts?.bedrock;
   return {
     async prompt(system, user, opts) {
       const model = opts?.model ?? defaultModel;
@@ -1151,6 +1202,31 @@ export function createGatewayLLMClient(
             for (let attempt = 0; ; attempt++) {
               let response: Response;
               try {
+                // Bedrock: SigV4-sign the request on EVERY attempt — the
+                // signature embeds x-amz-date, which must be fresh (a stale
+                // date is rejected), and signing mutates req.headers. Region
+                // comes from the request URL host (bedrock-runtime.<region>.…)
+                // falling back to the configured region; profile from config.
+                if (target.protocol === "bedrock") {
+                  const region =
+                    regionFromBedrockUrl(req.url) ??
+                    bedrockConfig?.region ??
+                    "us-east-1";
+                  // Re-clone headers so each attempt signs a fresh set (avoids
+                  // accumulating stale Authorization/x-amz-* from a prior try).
+                  req.headers = {
+                    "content-type": "application/json",
+                    accept: "application/json",
+                  };
+                  await signBedrockRequest(
+                    "POST",
+                    req.url,
+                    req.headers,
+                    req.body,
+                    region,
+                    bedrockConfig?.profile,
+                  );
+                }
                 response = await upstreamFetch(req.url, {
                   method: "POST",
                   headers: req.headers,
