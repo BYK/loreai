@@ -312,12 +312,9 @@ const UPSTREAM_ROUTES: Array<{
     url: "", // Dynamic URL built at request time based on region
     protocol: "bedrock",
   },
-  // Google Vertex AI (model IDs like claude-3-5-sonnet@20241022)
-  {
-    prefix: "claude-",
-    url: "", // Dynamic URL built at request time based on project/region
-    protocol: "vertex",
-  },
+  // Note: Google Vertex AI uses the same `claude-` model prefix as Anthropic,
+  // so it cannot be distinguished by model-prefix routing. Vertex is reachable
+  // only via the `X-Lore-Provider: vertex` header (PROVIDER_ROUTES table).
 ];
 
 /**
