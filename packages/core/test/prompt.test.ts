@@ -5,6 +5,7 @@ import {
   CONSOLIDATION_MERGE_SYSTEM,
   CONSOLIDATION_SYSTEM,
   consolidationUser,
+  CURATOR_SYSTEM,
   recursiveUser,
   formatDistillations,
 } from "../src/prompt";
@@ -331,5 +332,47 @@ describe("consolidationUser — value annotation (#497)", () => {
     expect(CONSOLIDATION_MERGE_SYSTEM).toContain("verifier pass");
     expect(CONSOLIDATION_MERGE_SYSTEM.toLowerCase()).toContain("higher-value");
     expect(CONSOLIDATION_SYSTEM).toContain("verifier pass");
+  });
+});
+
+describe("CURATOR_SYSTEM — procedural pattern runbooks (#914)", () => {
+  test("declares a PROCEDURAL PATTERNS section heading", () => {
+    expect(CURATOR_SYSTEM).toContain("PROCEDURAL PATTERNS");
+  });
+
+  test("requires Steps / Gotchas / Verify headings for procedural entries", () => {
+    // Each must appear as a label the curator is told to emit.
+    expect(CURATOR_SYSTEM).toMatch(/\bSteps\s*:/);
+    expect(CURATOR_SYSTEM).toMatch(/\bGotchas\s*:/);
+    expect(CURATOR_SYSTEM).toMatch(/\bVerify\s*:/);
+  });
+
+  test("mentions the 1200-character content cap so curators know when to split", () => {
+    expect(CURATOR_SYSTEM).toContain("1200");
+  });
+
+  test("does not force the runbook shape onto flat (non-procedural) patterns", () => {
+    // The guidance must explicitly carve out a flat-pattern path. Pin a phrase
+    // that pins the "FLAT / 1-3 sentence" carve-out so it can't regress to
+    // "always emit Steps/Gotchas/Verify".
+    expect(CURATOR_SYSTEM).toMatch(/FLAT/i);
+    expect(CURATOR_SYSTEM).toMatch(/non-?procedural/i);
+  });
+
+  test("includes a golden example showing the runbook shape", () => {
+    // A worked example lets the model pattern-match the structure. Pin that
+    // the example contains a numbered step, a dashed gotcha, and a checkbox.
+    expect(CURATOR_SYSTEM).toMatch(/^\s*\d+\.\s/m);
+    expect(CURATOR_SYSTEM).toContain("[ ]");
+  });
+
+  test("PROCEDURAL PATTERNS section appears between INCLUDE THE WHY and BREVITY", () => {
+    const whyIdx = CURATOR_SYSTEM.indexOf('INCLUDE THE "WHY"');
+    const procIdx = CURATOR_SYSTEM.indexOf("PROCEDURAL PATTERNS");
+    const brevIdx = CURATOR_SYSTEM.indexOf("BREVITY IS CRITICAL");
+
+    expect(whyIdx).toBeGreaterThan(-1);
+    expect(procIdx).toBeGreaterThan(whyIdx);
+    expect(brevIdx).toBeGreaterThan(procIdx);
   });
 });

@@ -339,6 +339,43 @@ INCLUDE THE "WHY" — decisions and gotchas without rationale get undone:
 - Any standard or rule without its rationale is vulnerable to being optimized away by
   a session that doesn't know what problem it was solving.
 
+PROCEDURAL PATTERNS — recurring procedures get a runbook shape, not a flat fact:
+- When the captured pattern is a recurring *procedure* (deploy, release, review,
+  debug-X, setup, migration, hand-off), structure the content as:
+    Steps:
+    1. <action> — <one-line rationale>
+    2. ...
+    Gotchas:
+    - <trap>: <one-line fix>
+    Verify:
+    - [ ] <observable check>
+    - [ ] ...
+- Use plain Markdown (numbered steps, dashed bullets, dash-bracket checkboxes) so the
+  entry renders cleanly in .lore.md and PR diffs.
+- Keep the entry within the 1200-character content cap (and the curator's ~150-word
+  brevity budget). A runbook with more than ~5 steps or ~3 gotchas is probably
+  multiple patterns scoped to a phase — split it (e.g. "Deploy: pre-flight",
+  "Deploy: cutover", "Deploy: rollback") rather than truncating mid-procedure.
+- FLAT (non-procedural) patterns stay as a 1-3 sentence fact — do NOT force the
+  runbook shape onto one-line insights.
+
+Example procedural pattern (release cutover):
+  Title: Release: cut over to a new version
+  Category: pattern
+  Content:
+    Steps:
+    1. Merge release branch to main — gates the deploy on PR review.
+    2. Tag the merge commit vX.Y.Z — releases are pinned to immutable tags.
+    3. Trigger deploy-prod workflow on the tag — pins the deploy to the audited
+       artifact.
+    Gotchas:
+    - Skipping the tag and running from main: workflow can't reproduce which
+      commit shipped; rollback becomes guesswork.
+    Verify:
+    - [ ] git tag --list vX.Y.Z shows the new tag.
+    - [ ] deploy-prod workflow run for the tag has status "success".
+    - [ ] GET /health on production returns 200.
+
 BREVITY IS CRITICAL — each entry must be concise:
 - content MUST be under 150 words (~600 characters). Capture ONE specific actionable
   insight in 2-3 sentences. Prefer terse technical language.
