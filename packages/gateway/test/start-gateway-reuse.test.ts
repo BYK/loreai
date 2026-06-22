@@ -134,6 +134,11 @@ describe("startGateway EADDRINUSE reuse", () => {
 
     expect(handle.owned).toBe(false);
     expect(handle.port).toBe(port);
+    // The handle MUST report the interface the gateway actually answered on
+    // (127.0.0.1), NOT the requested-but-dead 127.0.0.2 — callers build the
+    // agent's gateway URL from config.hosts[0] (run.ts), so a non-reachable
+    // host here would point the agent at a refused address.
+    expect(handle.config.hosts).toEqual(["127.0.0.1"]);
   });
 
   it("throws a friendly error when the port is held by a non-lore process", async () => {

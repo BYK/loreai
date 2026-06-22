@@ -97,19 +97,6 @@ async function firstReachableHost(
   return idx === -1 ? null : hosts[idx];
 }
 
-/**
- * Probe several interfaces concurrently for a live lore gateway on `port`.
- * Resolves `true` if ANY host answers `/health`, `false` only once every probe
- * has failed. Concurrent so one hanging interface can't serialize the per-probe
- * timeout onto the rest.
- */
-async function anyGatewayAlive(
-  hosts: string[],
-  port: number,
-): Promise<boolean> {
-  return (await firstReachableHost(hosts, port)) !== null;
-}
-
 /** Path to the daemon's combined stdout/stderr log. */
 export function daemonLogPath(): string {
   return join(dataDir(), "gateway.log");
@@ -390,7 +377,14 @@ export async function startGateway(
     // connection-refused loopback probe.
     if (candidatePort !== 0) {
       const probeHosts = [...new Set(["127.0.0.1", ...config.hosts])];
-      if (await anyGatewayAlive(probeHosts, candidatePort)) {
+      const reachableHost = await firstReachableHost(probeHosts, candidatePort);
+      if (reachableHost) {
+        // Report the interface the existing gateway actually answered on — not
+        // the (possibly non-overlapping) hosts we were configured to bind.
+        // Callers derive the agent's gateway URL from config.hosts[0]
+        // (run.ts), so this MUST be a reachable address or the agent would be
+        // pointed at a dead interface.
+        config.hosts = [reachableHost];
         return {
           config,
           port: candidatePort,
@@ -475,8 +469,13 @@ export async function startGateway(
       // address) must not serialize 1.5s timeouts onto the others.
       if (candidatePort !== 0) {
         const probeHosts = [...new Set(["127.0.0.1", ...config.hosts])];
-        const alive = await anyGatewayAlive(probeHosts, candidatePort);
-        if (alive) {
+        const reachableHost = await firstReachableHost(
+          probeHosts,
+          candidatePort,
+        );
+        if (reachableHost) {
+          // Pin to the interface that actually answered (see pre-bind probe).
+          config.hosts = [reachableHost];
           return {
             config,
             port: candidatePort,
