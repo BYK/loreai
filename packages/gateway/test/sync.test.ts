@@ -732,6 +732,37 @@ describe("pullOnce", () => {
       .get(id) as { local_content: string };
     expect(JSON.parse(row.local_content).content).toBe("local-v2"); // current v2, not v1
   });
+
+  test("a physical delete of a non-v1 version propagates to the remote by logical_id (#823, Seer)", async () => {
+    // The DELETE capture trigger must record the logical_id, not the version id —
+    // otherwise a delete of a version whose id ≠ logical_id targets a remote row
+    // that doesn't exist (remote is keyed by logical_id) and silently no-ops.
+    syncData.enableSync("basic");
+    const id = ltm.create({
+      projectPath: "/tmp/lore-sync-engine",
+      scope: "project",
+      category: "pattern",
+      title: "PD",
+      content: "v1",
+    });
+    ltm.update(id, { content: "v2" }); // current version's id is a fresh uuid ≠ id
+    const currentId = (
+      db()
+        .query(
+          "SELECT id FROM knowledge_current WHERE COALESCE(logical_id, id) = ?",
+        )
+        .get(id) as { id: string }
+    ).id;
+    expect(currentId).not.toBe(id);
+    await pushOnce(makeClient() as never); // remote row keyed by logical_id (= id)
+    // Physically delete the current version by its (non-logical) id.
+    db().query("DELETE FROM knowledge WHERE id = ?").run(currentId);
+    await pushOnce(makeClient() as never);
+    const remote = tableRows("knowledge").find((r) => r.id === id) as
+      | Record<string, unknown>
+      | undefined;
+    expect(remote?.is_deleted).toBe(true); // delete propagated via logical_id
+  });
 });
 
 describe("profiles (pull-only mirror)", () => {

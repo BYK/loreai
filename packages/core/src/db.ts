@@ -1488,12 +1488,21 @@ function installSyncCapture(database: Database) {
     "entity_relations",
   ]) {
     for (const [evt, suffix, ref, op] of ops) {
+      // Knowledge is remote-keyed by logical_id (A2 sub-PR 3, #823). INSERT/UPDATE
+      // capture the version id (op=upsert; the push plan resolves it to the current
+      // logical row while the row still exists). DELETE must capture the logical_id
+      // NOW — the row is gone afterward, so the push can't resolve it, and a delete
+      // keyed by a version id would never match the logical_id-keyed remote row.
+      const rowExpr =
+        t === "knowledge" && op === "delete"
+          ? `COALESCE(${ref}.logical_id, ${ref}.id)`
+          : `${ref}.id`;
       sql += `
         CREATE TEMP TRIGGER IF NOT EXISTS ${t}_outbox_${suffix}
         AFTER ${evt} ON ${t} WHEN (${gate})
         BEGIN
           INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
-          VALUES ('${t}', ${ref}.id, '${op}', ${ts});
+          VALUES ('${t}', ${rowExpr}, '${op}', ${ts});
         END;`;
     }
   }
