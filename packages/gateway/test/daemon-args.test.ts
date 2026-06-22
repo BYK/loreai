@@ -205,6 +205,31 @@ describe("runDaemon", () => {
     expect(info.join("\n")).toContain("3299");
   });
 
+  it("brackets IPv6 hosts in the health-poll URL (Seer, PR #920)", async () => {
+    // The post-spawn polling loop must bracket IPv6 literals via probeUrlFor:
+    // a raw `http://${host}:${port}` template yields the malformed
+    // `http://::1:3207`, the probe never connects, and the daemon times out.
+    let t = 0;
+    let portCalls = 0;
+    let probedUrl = "";
+    const { io, spawned } = makeDaemonIO({
+      // existing-check → no port yet; first poll → port present
+      readPort: () => (portCalls++ === 0 ? null : 3207),
+      probe: async (url) => {
+        probedUrl = url;
+        return url.includes("[::1]");
+      },
+      // Advance the clock so the regressed (unbracketed) path times out
+      // instead of hanging on a constant now() === 0.
+      now: () => (t += 5000),
+      timeoutMs: 10_000,
+    });
+    const code = await runDaemon({ hosts: ["::1"] }, io);
+    expect(code).toBe(0);
+    expect(spawned()).toBe(1);
+    expect(probedUrl).toBe("http://[::1]:3207");
+  });
+
   it("returns 1 and logs an error on health-poll timeout", async () => {
     let t = 0;
     const { io, errors, spawned } = makeDaemonIO({

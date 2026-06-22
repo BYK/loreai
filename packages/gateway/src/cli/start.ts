@@ -228,8 +228,10 @@ export async function runDaemon(
   while (io.now() < deadline) {
     await io.sleep(interval);
     const port = io.readPort();
-    if (port && (await io.probe(`http://${host}:${port}`))) {
-      const url = `http://${host}:${port}`;
+    // probeUrlFor brackets IPv6 literals (e.g. http://[::1]:3207); a raw
+    // template would yield the malformed http://::1:3207 and never connect.
+    const url = port ? probeUrlFor(host, port) : "";
+    if (port && (await io.probe(url))) {
       io.logInfo(`Gateway started in the background (pid ${pid})`);
       io.logInfo(`Listening on ${url}`);
       io.logInfo(`Dashboard: ${url}/ui`);
