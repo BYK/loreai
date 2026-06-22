@@ -1348,6 +1348,31 @@ const MIGRATIONS: string[] = [
   CREATE INDEX IF NOT EXISTS idx_sync_outbox_table_row
     ON sync_outbox (table_name, row_id, seq);
   `,
+
+  `
+  -- Version 53: outcome-reward loop (#497). Two additions:
+  --  (a) tool_calls.verifier — 1 when the tool call was a test/build/typecheck/
+  --      lint runner, so a session's verifier outcome can be derived precisely
+  --      (a failing 'pnpm test' vs an incidental 'grep' miss). NULL = unknown.
+  --  (b) knowledge_session_injections — which knowledge entries were injected
+  --      into a session, keyed by logical_id (A2 stable identity, survives
+  --      version edits). The idle pass credits each entry's confidence by the
+  --      session's verifier verdict; 'credited' makes that idempotent (at most
+  --      once per session per entry). Project-scoped only — cross_project
+  --      entries are never recorded (the loop must never auto-demote shared
+  --      knowledge).
+  ALTER TABLE tool_calls ADD COLUMN verifier INTEGER;
+  CREATE TABLE IF NOT EXISTS knowledge_session_injections (
+    session_id  TEXT NOT NULL,
+    logical_id  TEXT NOT NULL,
+    project_id  TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    credited    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (session_id, logical_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_ksi_session_uncredited
+    ON knowledge_session_injections (session_id, credited);
+  `,
 ];
 
 /**
@@ -1702,12 +1727,23 @@ function recoverMissingObjects(database: Database) {
       error_type    TEXT,
       error_message TEXT,
       duration_ms   INTEGER,
-      created_at    INTEGER NOT NULL
+      created_at    INTEGER NOT NULL,
+      verifier      INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_tool_calls_project_tool_status
       ON tool_calls (project_id, tool, status);
     CREATE INDEX IF NOT EXISTS idx_tool_calls_project_session
       ON tool_calls (project_id, session_id);
+    CREATE TABLE IF NOT EXISTS knowledge_session_injections (
+      session_id  TEXT NOT NULL,
+      logical_id  TEXT NOT NULL,
+      project_id  TEXT NOT NULL,
+      created_at  INTEGER NOT NULL,
+      credited    INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (session_id, logical_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_ksi_session_uncredited
+      ON knowledge_session_injections (session_id, credited);
     CREATE TABLE IF NOT EXISTS knowledge_transfers (
       knowledge_id           TEXT NOT NULL,
       recalled_in_project_id TEXT NOT NULL,

@@ -270,11 +270,23 @@ export const LoreConfig = z.object({
         .describe(
           "Auto-create gotcha entries from recurring tool failures. Default false (noisy; can churn the LTM cache).",
         ),
+      /** Adjust knowledge confidence by within-session verifier outcomes (#497):
+       *  an entry injected into a session whose test/build/typecheck/lint runs
+       *  passed gets a small (capped) confidence boost; one present while they
+       *  failed gets a larger penalty. Applied once per entry per session on
+       *  idle. cross_project (shared) entries are never adjusted. Default true. */
+      outcomeReward: z
+        .boolean()
+        .default(true)
+        .describe(
+          "Adjust knowledge confidence by within-session verifier (test/build/typecheck/lint) outcomes. Default: true.",
+        ),
     })
     .default({
       enabled: true,
       maxEntityInject: 30,
       autoToolFailureGotchas: false,
+      outcomeReward: true,
     })
     .describe("Long-term knowledge (curator, entity injection) controls."),
   curator: z

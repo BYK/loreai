@@ -10,6 +10,7 @@ import {
   runRelaxedSearch,
 } from "./search";
 import * as embedding from "./embedding";
+import { sessionVerifierVerdict } from "./tool-trace";
 import * as latReader from "./lat-reader";
 import * as log from "./log";
 
@@ -809,6 +810,22 @@ export const DECAY_GRACE_MS = 7 * 24 * 60 * 60 * 1000; // 7d
 /** Confidence removed per decay pass for an unreinforced entry. */
 export const DECAY_STEP = 0.1;
 
+// --- Outcome-reward loop (#497) --------------------------------------------
+// Within-session co-occurrence: an entry injected into a session is credited
+// by that session's verifier verdict. Deliberately asymmetric and bounded:
+//  - the boost is SMALL and CAPPED at a ceiling, so co-occurrence with passing
+//    verifiers can lift an under-confident-but-useful entry without ever
+//    manufacturing the 0.9–1.0 cluster (mere selection ≠ proven certainty);
+//  - the penalty is LARGER and uncapped (down to 0), because an entry present
+//    while verifiers fail is the more decisive signal.
+/** Confidence added to an injected entry when the session's verifiers passed. */
+export const OUTCOME_REWARD = 0.02;
+/** Confidence removed from an injected entry when the session's verifiers failed. */
+export const OUTCOME_PENALTY = 0.05;
+/** The outcome boost never lifts confidence above this — it only rescues
+ *  under-confident entries; the high band stays reserved for explicit signals. */
+export const OUTCOME_BOOST_CEILING = 0.8;
+
 /**
  * Mark entries as injected into a prompt this turn: reset the decay clock
  * WITHOUT changing confidence. Selection by forSession means "still relevant",
@@ -841,6 +858,118 @@ export function reinforce(id: string, delta: number = REINFORCE_STEP): void {
        WHERE id = ? AND is_current = 1`,
     )
     .run(delta, Date.now(), id);
+}
+
+/**
+ * Record which knowledge entries were injected into a session, for the
+ * outcome-reward loop (#497). Keyed by `logical_id` (the A2 stable identity), so
+ * crediting survives a version edit between injection and the idle credit pass.
+ * Idempotent per (session, entry) via the PK — re-injection across turns does
+ * NOT reset the `credited` flag, so an entry is credited at most once per
+ * session. cross_project (shared) and synthetic (lat.md) entries are skipped:
+ * the loop must never auto-adjust shared knowledge, and synthetics aren't rows.
+ */
+export function recordSessionInjections(
+  sessionID: string | undefined,
+  projectPath: string,
+  entries: { logical_id?: string; cross_project?: number; category?: string }[],
+): void {
+  if (!sessionID) return;
+  const pid = ensureProject(projectPath);
+  const now = Date.now();
+  const stmt = db().query(
+    `INSERT INTO knowledge_session_injections
+       (session_id, logical_id, project_id, created_at, credited)
+     VALUES (?, ?, ?, ?, 0)
+     ON CONFLICT(session_id, logical_id) DO NOTHING`,
+  );
+  for (const e of entries) {
+    if (!e.logical_id) continue;
+    if (e.cross_project === 1) continue;
+    if (e.category === "lat.md") continue;
+    stmt.run(sessionID, e.logical_id, pid, now);
+  }
+}
+
+/** Outcome of crediting one session's injected entries. */
+export type OutcomeCreditResult = {
+  verdict: "pass" | "fail" | "none";
+  /** Number of injected entries whose confidence was adjusted. */
+  credited: number;
+};
+
+/**
+ * Credit a session's injected knowledge entries by its verifier verdict (#497).
+ * Runs at idle. Within-session co-occurrence: entries that were in-context when
+ * the session's verifiers passed get a small (capped) boost; entries in-context
+ * when verifiers failed get a larger penalty. Applied at most once per entry per
+ * session (the `credited` flag), so a later idle tick won't re-credit.
+ *
+ * Invariants:
+ *  - `none` verdict (no verifier ran) is a no-op — never guess.
+ *  - cross_project (shared) entries are never touched (the injection log already
+ *    excludes them; the UPDATE re-asserts `cross_project = 0` as a backstop).
+ *  - the boost is clamped to OUTCOME_BOOST_CEILING; the penalty floors at 0.
+ *  - both write `last_reinforced_at` (the entry was demonstrably in use), so a
+ *    credited entry won't also be aged out by decay this cycle.
+ */
+export function creditSessionOutcome(
+  sessionID: string,
+  projectPath: string,
+): OutcomeCreditResult {
+  const pid = ensureProject(projectPath);
+  const uncredited = db()
+    .query(
+      `SELECT logical_id FROM knowledge_session_injections
+       WHERE session_id = ? AND project_id = ? AND credited = 0`,
+    )
+    .all(sessionID, pid) as { logical_id: string }[];
+  if (uncredited.length === 0) return { verdict: "none", credited: 0 };
+
+  const verdict = sessionVerifierVerdict(projectPath, sessionID);
+  if (verdict === "none") return { verdict, credited: 0 };
+
+  const ids = uncredited.map((r) => r.logical_id);
+  const placeholders = ids.map(() => "?").join(",");
+  const now = Date.now();
+  // Adjust the current version of each injected logical entry. The cross_project
+  // = 0 guard is a backstop (injections already exclude shared entries).
+  if (verdict === "pass") {
+    db()
+      .query(
+        `UPDATE knowledge
+         SET confidence = MIN(?, confidence + ?), last_reinforced_at = ?
+         WHERE is_current = 1 AND cross_project = 0 AND project_id = ?
+           AND confidence < ? AND logical_id IN (${placeholders})`,
+      )
+      .run(
+        OUTCOME_BOOST_CEILING,
+        OUTCOME_REWARD,
+        now,
+        pid,
+        OUTCOME_BOOST_CEILING,
+        ...ids,
+      );
+  } else {
+    db()
+      .query(
+        `UPDATE knowledge
+         SET confidence = MAX(0, confidence - ?), last_reinforced_at = ?
+         WHERE is_current = 1 AND cross_project = 0 AND project_id = ?
+           AND logical_id IN (${placeholders})`,
+      )
+      .run(OUTCOME_PENALTY, now, pid, ...ids);
+  }
+
+  // Mark this session's injections credited so a later idle tick is a no-op.
+  db()
+    .query(
+      `UPDATE knowledge_session_injections SET credited = 1
+       WHERE session_id = ? AND project_id = ? AND credited = 0`,
+    )
+    .run(sessionID, pid);
+
+  return { verdict, credited: ids.length };
 }
 
 /**
@@ -1194,6 +1323,7 @@ export async function forSession(
     // deleting an actively-used directive. Resets the decay clock only.
     try {
       markInjected(result.map((e) => e.id));
+      recordSessionInjections(sessionID, projectPath, result);
     } catch (err) {
       log.warn(
         "forSession(preference): reinforcement failed (non-fatal):",
@@ -1458,6 +1588,7 @@ export async function forSession(
     markInjected(
       result.filter((e) => e.category !== "lat.md").map((e) => e.id),
     );
+    recordSessionInjections(sessionID, projectPath, result);
   } catch (err) {
     log.warn("forSession: reinforcement failed (non-fatal):", err);
   }

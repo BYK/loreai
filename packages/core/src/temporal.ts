@@ -2,7 +2,11 @@ import { db, ensureProject } from "./db";
 import { runRelaxedSearch } from "./search";
 import { sanitizeSurrogates } from "./markdown";
 import * as embedding from "./embedding";
-import { classifyToolError, MAX_ERROR_MESSAGE_LEN } from "./tool-trace";
+import {
+  classifyToolError,
+  isVerifierCall,
+  MAX_ERROR_MESSAGE_LEN,
+} from "./tool-trace";
 import type { LoreMessage, LorePart, LoreToolState } from "./types";
 import { isTextPart, isReasoningPart, isToolPart } from "./types";
 
@@ -162,13 +166,16 @@ export function recordToolCalls(input: {
   // revert a resolved row back to pending on a re-seed (retry / re-delivery).
   const seedStmt = db().query(
     `INSERT INTO tool_calls
-       (call_id, message_id, project_id, session_id, tool, status, error_type, error_message, duration_ms, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       (call_id, message_id, project_id, session_id, tool, status, error_type, error_message, duration_ms, created_at, verifier)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(call_id) DO UPDATE SET
        status = CASE WHEN tool_calls.status = 'pending' THEN excluded.status ELSE tool_calls.status END,
        error_type = CASE WHEN tool_calls.status = 'pending' THEN excluded.error_type ELSE tool_calls.error_type END,
        error_message = CASE WHEN tool_calls.status = 'pending' THEN excluded.error_message ELSE tool_calls.error_message END,
-       duration_ms = COALESCE(excluded.duration_ms, tool_calls.duration_ms)`,
+       duration_ms = COALESCE(excluded.duration_ms, tool_calls.duration_ms),
+       -- verifier is derived from the tool_use input (stable across re-seeds);
+       -- keep the first non-null classification.
+       verifier = COALESCE(tool_calls.verifier, excluded.verifier)`,
   );
   // Phase B: user tool_result parts — update outcome by call_id, preserving
   // the previously-seeded tool name and message_id.
@@ -205,6 +212,7 @@ export function recordToolCalls(input: {
       outcome.errorMessage,
       outcome.duration,
       createdAt,
+      isVerifierCall(st.input) ? 1 : 0,
     );
   }
 }

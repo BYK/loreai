@@ -858,6 +858,17 @@ export function buildIdleWorkHandler(
     //    count and the curator's existing-entries context lean.
     if (cfg.knowledge.enabled) {
       try {
+        // Credit injected entries by this session's verifier outcome (#497)
+        // BEFORE decay/prune, so a penalty that reaches the relevance floor is
+        // reaped in the same pass. Once-per-session (idempotent).
+        if (cfg.knowledge.outcomeReward) {
+          const credit = ltm.creditSessionOutcome(sessionID, projectPath);
+          if (credit.credited > 0) {
+            log.info(
+              `outcome (${credit.verdict}): adjusted ${credit.credited} injected knowledge entries`,
+            );
+          }
+        }
         const decayed = ltm.decayProject(projectPath);
         if (decayed > 0) {
           log.info(`decayed ${decayed} unreinforced knowledge entries`);

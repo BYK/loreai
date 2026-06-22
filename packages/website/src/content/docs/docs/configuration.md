@@ -119,6 +119,7 @@ Long-term knowledge (curator, entity injection) controls.
 | `enabled` | boolean | `true` |  | Enable long-term knowledge storage and system-prompt injection. When false, the curator is disabled but recall and context management remain active. Default: true. |
 | `maxEntityInject` | number | `30` | min 0 | Max entities to inject into the agent system prompt. Set to 0 to disable. Default: 30. |
 | `autoToolFailureGotchas` | boolean | `false` |  | Auto-create gotcha entries from recurring tool failures. Default false (noisy; can churn the LTM cache). |
+| `outcomeReward` | boolean | `true` |  | Adjust knowledge confidence by within-session verifier (test/build/typecheck/lint) outcomes. Default: true. |
 
 
 ## `curator`

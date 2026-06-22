@@ -58,7 +58,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(52);
+    expect(row.version).toBe(53);
   });
 
   test("session_prompt_deltas persist ordered selector/content rows (v42)", () => {

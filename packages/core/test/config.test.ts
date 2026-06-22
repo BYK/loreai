@@ -52,6 +52,14 @@ describe("LoreConfig — knowledge schema", () => {
     expect(cfg.knowledge.enabled).toBe(true);
   });
 
+  test("knowledge.outcomeReward defaults to true and is overridable", () => {
+    expect(LoreConfig.parse({}).knowledge.outcomeReward).toBe(true);
+    expect(
+      LoreConfig.parse({ knowledge: { outcomeReward: false } }).knowledge
+        .outcomeReward,
+    ).toBe(false);
+  });
+
   test("knowledge.enabled can be set to false", () => {
     const cfg = LoreConfig.parse({ knowledge: { enabled: false } });
     expect(cfg.knowledge.enabled).toBe(false);

@@ -243,6 +243,80 @@ describe("buildIdleWorkHandler", () => {
     expect(llm.prompt).not.toHaveBeenCalled();
   });
 
+  // #497: the idle knowledge-lifecycle step credits injected entries by the
+  // session's verifier outcome. These drive the real handler end-to-end.
+  function seedInjectedEntry(
+    projectPath: string,
+    sessionID: string,
+    confidence: number,
+  ): string {
+    const pid = ensureProject(projectPath);
+    const id = ltm.create({
+      projectPath,
+      category: "pattern",
+      title: `wire-${sessionID}`,
+      content: "knowledge in context",
+      scope: "project",
+      confidence,
+    });
+    const logicalId = (
+      db().query("SELECT logical_id FROM knowledge WHERE id = ?").get(id) as {
+        logical_id: string;
+      }
+    ).logical_id;
+    ltm.recordSessionInjections(sessionID, projectPath, [
+      { logical_id: logicalId, cross_project: 0, category: "pattern" },
+    ]);
+    // A verifier tool call; the caller sets its final status (completed/error).
+    db()
+      .query(
+        `INSERT INTO tool_calls
+           (call_id, message_id, project_id, session_id, tool, status, error_type, error_message, duration_ms, created_at, verifier)
+         VALUES (?, ?, ?, ?, 'bash', 'pending', NULL, NULL, 0, ?, 1)`,
+      )
+      .run(`tc-${sessionID}`, `m-${sessionID}`, pid, sessionID, Date.now());
+    return id;
+  }
+
+  test("idle credits injected knowledge on a PASS verifier outcome (boost)", async () => {
+    const projectPath = makeProjectDir();
+    const sessionID = "idle-outcome-pass";
+    const id = seedInjectedEntry(projectPath, sessionID, 0.5);
+    // Mark the verifier tool call as completed (PASS).
+    db()
+      .query("UPDATE tool_calls SET status = 'completed' WHERE session_id = ?")
+      .run(sessionID);
+
+    const handler = buildIdleWorkHandler(makeLLM());
+    await handler(sessionID, makeSessionState({ sessionID, projectPath }));
+
+    const conf = (
+      db().query("SELECT confidence FROM knowledge WHERE id = ?").get(id) as {
+        confidence: number;
+      }
+    ).confidence;
+    expect(conf).toBeCloseTo(0.5 + ltm.OUTCOME_REWARD, 6);
+  });
+
+  test("idle credits injected knowledge on a FAIL verifier outcome (penalty)", async () => {
+    const projectPath = makeProjectDir();
+    const sessionID = "idle-outcome-fail";
+    const id = seedInjectedEntry(projectPath, sessionID, 0.5);
+    db()
+      .query("UPDATE tool_calls SET status = 'error' WHERE session_id = ?")
+      .run(sessionID);
+
+    const handler = buildIdleWorkHandler(makeLLM());
+    await handler(sessionID, makeSessionState({ sessionID, projectPath }));
+
+    const conf = (
+      db().query("SELECT confidence FROM knowledge WHERE id = ?").get(id) as {
+        confidence: number;
+      }
+    ).confidence;
+    expect(conf).toBeCloseTo(0.5 - ltm.OUTCOME_PENALTY, 6);
+  });
+
   test("drives force-distill + meta-consolidation but preserves a layer-0 warmup body", async () => {
     const projectPath = makeProjectDir();
     const sessionID = "idle-distill-wiring";
