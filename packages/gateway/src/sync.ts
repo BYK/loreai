@@ -149,12 +149,13 @@ async function pushEntry(
 ): Promise<PushOutcome> {
   const { table_name: table, row_id: rowId } = e;
   let op = e.op;
-  // The remote row key. For knowledge the remote is a CURRENT-only mirror keyed by
-  // logical_id (not the per-version row id), so sync_state + the upsert/delete both
-  // operate on the logical_id. For every other table this stays the outbox rowId.
+  // The remote row key. For knowledge the outbox is logical_id-keyed (#909) and the
+  // remote is a CURRENT-only mirror keyed by logical_id, so the outbox rowId already
+  // IS the remote key — sync_state + the upsert/delete operate on it directly. For
+  // every other table this also stays the outbox rowId.
   let effectiveId = rowId;
-  // For a knowledge upsert, the row to push is the CURRENT version (id=logical_id),
-  // not the outbox version row — resolved by the push plan.
+  // For a knowledge upsert, the row to push is the CURRENT version's content
+  // (re-keyed id=logical_id) — resolved by the push plan.
   let knowledgeRow: Record<string, unknown> | undefined;
 
   // A2 (#823): knowledge is append-only — update()/remove() append immutable
@@ -163,8 +164,9 @@ async function pushEntry(
   // that content; no live current (every version superseded/deleted) → soft-delete.
   if (table === "knowledge") {
     if (op === "upsert") {
+      // rowId is the logical_id (the outbox is logical_id-keyed, #909): a live
+      // current → upsert that content; no live current → delete.
       const plan = syncData.knowledgePushPlan(rowId);
-      if (plan.op === "skip") return "ok";
       effectiveId = plan.logicalId;
       op = plan.op;
       if (plan.op === "upsert") knowledgeRow = plan.row;
@@ -175,9 +177,8 @@ async function pushEntry(
       // deletion; re-push the current content instead. Only a genuinely dead entry
       // (no live current) propagates as a remote delete. Guards a future compaction
       // (sub-PR 4) that prunes superseded versions from falsely deleting a live remote
-      // entry. (We re-validate directly, NOT via knowledgePushPlan, because the plan
-      // would "skip" a dead entry whose v1 anchor row was also pruned — dropping the
-      // delete.)
+      // entry. (We re-validate directly rather than reusing the upsert plan to keep
+      // the delete-vs-revive decision explicit on this branch.)
       const live = syncData.currentKnowledgeRow(rowId);
       if (live) {
         op = "upsert";
@@ -478,8 +479,8 @@ function applyRemote(
   // Unpushed local intent for this row (push runs first, but a quota-paused or
   // failed push can leave one pending) → never fast-forward over it.
   const pushCursor = Number(getKV(pushKey(meta.table)) ?? "0");
-  // Knowledge is keyed by logical_id on the remote but per-version in the outbox,
-  // so resolve pending edits by logical_id (A2, #823).
+  // Knowledge is keyed by logical_id everywhere (remote + outbox, #909), so the
+  // pending check matches the remote rowId (= logical_id) directly (A2, #823).
   const pendingLocalChange =
     meta.table === "knowledge"
       ? syncData.hasPendingKnowledgeChange(rowId, pushCursor)

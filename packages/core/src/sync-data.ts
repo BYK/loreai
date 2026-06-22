@@ -436,11 +436,10 @@ export function hasPendingChange(
 }
 
 /**
- * Knowledge-aware pending check (A2, #823): the remote keys knowledge by
- * `logical_id`, but the outbox holds per-VERSION row ids — so resolve every
- * unpushed knowledge outbox row to its logical_id. Without this, the pull path
- * would miss an unpushed local edit to a versioned entry (its outbox id ≠
- * logical_id) and silently let a remote change win without logging the conflict.
+ * Knowledge-aware pending check (A2, #823): the knowledge outbox is logical_id-
+ * keyed (#909), so an unpushed edit to a logical entry is simply a row whose
+ * `row_id` equals the logical_id. The pull path uses this so it never silently
+ * lets a remote change win over an unpushed local edit (it logs a conflict).
  */
 export function hasPendingKnowledgeChange(
   logicalId: string,
@@ -448,10 +447,8 @@ export function hasPendingKnowledgeChange(
 ): boolean {
   const row = db()
     .query(
-      `SELECT 1 FROM sync_outbox o
-         JOIN knowledge k ON k.id = o.row_id
-        WHERE o.table_name = 'knowledge' AND o.seq > ?
-          AND COALESCE(k.logical_id, k.id) = ? LIMIT 1`,
+      `SELECT 1 FROM sync_outbox
+        WHERE table_name = 'knowledge' AND seq > ? AND row_id = ? LIMIT 1`,
     )
     .get(sinceSeq, logicalId);
   return row != null;
@@ -536,10 +533,9 @@ export function seedOutbox(tier: SyncTier = "basic"): void {
       // delete (its liveness check is also knowledge_current-based).
       if (m.table === "knowledge") {
         const latestForLogical = db().query(
-          `SELECT o.op FROM sync_outbox o JOIN knowledge k ON k.id = o.row_id
-            WHERE o.table_name = 'knowledge' AND o.seq > ?
-              AND COALESCE(k.logical_id, k.id) = ?
-            ORDER BY o.seq DESC LIMIT 1`,
+          `SELECT op FROM sync_outbox
+            WHERE table_name = 'knowledge' AND seq > ? AND row_id = ?
+            ORDER BY seq DESC LIMIT 1`,
         );
         const lids = db()
           .query(
@@ -881,7 +877,6 @@ export function applyRemoteKnowledgeDelete(logicalId: string): void {
 }
 
 export type KnowledgePushPlan =
-  | { op: "skip" }
   | { op: "delete"; logicalId: string }
   | { op: "upsert"; logicalId: string; row: Record<string, unknown> };
 
@@ -924,13 +919,10 @@ export function currentKnowledgeRow(
 }
 
 export function knowledgePushPlan(outboxRowId: string): KnowledgePushPlan {
-  const lid = db()
-    .query(
-      "SELECT COALESCE(logical_id, id) AS logical_id FROM knowledge WHERE id = ?",
-    )
-    .get(outboxRowId) as { logical_id: string } | undefined;
-  if (!lid) return { op: "skip" }; // physical row gone (not expected post-flip)
-  const logicalId = lid.logical_id;
+  // The knowledge outbox is logical_id-keyed for every op (#909 capture triggers),
+  // so the row_id IS the logical_id — resolve the current row directly, with no
+  // join back to a physical version row (survives compaction of the v1 anchor).
+  const logicalId = outboxRowId;
   const row = currentKnowledgeRow(logicalId);
   if (!row) return { op: "delete", logicalId }; // no live current → soft-delete
   return { op: "upsert", logicalId, row };

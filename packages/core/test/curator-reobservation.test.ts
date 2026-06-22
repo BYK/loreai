@@ -126,6 +126,56 @@ describe("curator consolidate — focusCategory merge", () => {
     expect(ltm.getByLogical(aId)).not.toBeNull();
   });
 
+  test("consolidation prompt shows verifier counts keyed by logical_id (incl. a v2 entry)", async () => {
+    const pid = ensureProject(PROJ);
+    const logicalOf = (id: string) =>
+      (
+        db().query("SELECT logical_id FROM knowledge WHERE id = ?").get(id) as {
+          logical_id: string;
+        }
+      ).logical_id;
+    const aLogical = logicalOf(aId);
+    const bLogical = logicalOf(bId);
+    // Make B a second version so its CURRENT id != logical_id — this is what
+    // catches a wrong `e.id` (vs `e.logical_id`) wiring: injections are keyed by
+    // the stable logical_id, so only logical_id resolves B's counts.
+    ltm.update(bId, { content: "Put invariants in comments (v2)." });
+    expect(ltm.getByLogical(bLogical)?.id).not.toBe(bId); // current id changed
+
+    const recordVerdict = (
+      logicalId: string,
+      session: string,
+      verdict: "pass" | "fail",
+    ) =>
+      db()
+        .query(
+          `INSERT INTO knowledge_session_injections (session_id, logical_id, project_id, created_at, credited, verdict)
+           VALUES (?, ?, ?, ?, 1, ?)`,
+        )
+        .run(session, logicalId, pid, Date.now(), verdict);
+    recordVerdict(aLogical, "s1", "pass");
+    recordVerdict(aLogical, "s2", "pass");
+    recordVerdict(bLogical, "s3", "fail");
+
+    let userContent = "";
+    const llm: LLMClient = {
+      prompt: async (_system: string, user: string) => {
+        userContent = user;
+        return "[]";
+      },
+    };
+    await consolidate({
+      llm,
+      projectPath: PROJ,
+      sessionID: "sess-consolidate",
+      focusCategory: "preference",
+    });
+
+    // A (simple entry) and B (v2, id != logical_id) both show their real counts.
+    expect(userContent).toContain("verifier pass 2, fail 0");
+    expect(userContent).toContain("verifier pass 0, fail 1");
+  });
+
   test("does nothing when fewer than 2 entries in the category", async () => {
     db().query("DELETE FROM knowledge WHERE id = ?").run(bId);
     const llm: LLMClient = { prompt: vi.fn(async () => "[]") };

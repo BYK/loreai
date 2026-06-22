@@ -24,6 +24,7 @@ import {
   getRowById,
   getSyncState,
   hasPendingChange,
+  hasPendingKnowledgeChange,
   isSyncEnabled,
   knowledgePushPlan,
   maxOutboxSeq,
@@ -178,7 +179,9 @@ describe("applyRemoteKnowledge — append-only pull apply (A2, #823)", () => {
 });
 
 describe("knowledgePushPlan — append-only remote mapping keyed by logical_id (A2)", () => {
-  test("coalesces versions to one logical-keyed upsert; no live current → delete; gone → skip", () => {
+  test("live current → upsert by logical_id (current content); no live current → delete", () => {
+    // The knowledge outbox is logical_id-keyed for every op (#909), so the plan's
+    // input IS the logical_id (= id for v1). No version ids ever reach it.
     const id = ltm.create({
       projectPath: "/tmp/lore-sync-kpp",
       scope: "project",
@@ -186,45 +189,53 @@ describe("knowledgePushPlan — append-only remote mapping keyed by logical_id (
       title: "KPP",
       content: "secret v1",
     });
-    const p1 = knowledgePushPlan(id);
-    expect(p1.op).toBe("upsert");
-    if (p1.op === "upsert") {
-      expect(p1.logicalId).toBe(id);
-      expect(p1.row.id).toBe(id); // re-keyed on logical_id
-      expect(p1.row.content).toBe("secret v1");
+    let p = knowledgePushPlan(id);
+    expect(p.op).toBe("upsert");
+    if (p.op === "upsert") {
+      expect(p.logicalId).toBe(id);
+      expect(p.row.id).toBe(id); // keyed on the stable logical_id
+      expect(p.row.content).toBe("secret v1");
     }
 
-    const v2 = ltm.appendVersion(id, { content: "redacted v2" }) as string;
-    // Both the (now superseded) v1 outbox row AND the new v2 row coalesce to ONE
-    // upsert keyed by logical_id carrying the CURRENT content — the old secret is
-    // never pushed as a live row.
-    for (const outboxId of [id, v2]) {
-      const p = knowledgePushPlan(outboxId);
-      expect(p.op).toBe("upsert");
-      if (p.op === "upsert") {
-        expect(p.logicalId).toBe(id);
-        expect(p.row.id).toBe(id);
-        expect(p.row.content).toBe("redacted v2");
-      }
+    ltm.appendVersion(id, { content: "redacted v2" });
+    // Same logical_id → the plan now carries the CURRENT content; the old secret
+    // is never pushed as a live row.
+    p = knowledgePushPlan(id);
+    expect(p.op).toBe("upsert");
+    if (p.op === "upsert") {
+      expect(p.logicalId).toBe(id);
+      expect(p.row.id).toBe(id);
+      expect(p.row.content).toBe("redacted v2");
     }
 
-    ltm.remove(id); // append a death-cert → no live current
-    const deathCert = (
+    ltm.remove(id); // death-cert → no live current
+    expect(knowledgePushPlan(id).op).toBe("delete");
+    // An unknown logical_id has no live current → a (harmless, idempotent) delete.
+    expect(knowledgePushPlan("00000000-0000-0000-0000-000000000000").op).toBe(
+      "delete",
+    );
+  });
+
+  test("capture triggers key the knowledge outbox by logical_id for every op (#909)", () => {
+    setTeamConfig("sync.enabled", "1");
+    db().exec("DELETE FROM sync_outbox");
+    const id = ltm.create({
+      projectPath: "/tmp/lore-kpp-triggers",
+      scope: "project",
+      category: "decision",
+      title: "TRIG",
+      content: "v1",
+    });
+    ltm.appendVersion(id, { content: "v2" }); // demote (UPDATE) + insert (INSERT)
+    ltm.remove(id); // demote + death-cert insert (+ the remove's internal ops)
+    const rowIds = (
       db()
         .query(
-          "SELECT id FROM knowledge WHERE logical_id = ? AND is_current = 1",
+          "SELECT DISTINCT row_id FROM sync_outbox WHERE table_name = 'knowledge'",
         )
-        .get(id) as { id: string }
-    ).id;
-    for (const outboxId of [id, v2, deathCert]) {
-      const p = knowledgePushPlan(outboxId);
-      expect(p.op).toBe("delete");
-      if (p.op === "delete") expect(p.logicalId).toBe(id);
-    }
-
-    expect(knowledgePushPlan("00000000-0000-0000-0000-000000000000").op).toBe(
-      "skip",
-    );
+        .all() as { row_id: string }[]
+    ).map((r) => r.row_id);
+    expect(rowIds).toEqual([id]); // every knowledge op coalesced to the logical_id
   });
 
   test("seedOutbox skips an already-synced versioned (v2) entry — no re-enqueue bloat (#823)", () => {
@@ -912,6 +923,44 @@ describe("mutation gap coverage (#832)", () => {
     seedOutbox();
     expect(hasPendingChange("knowledge", "k1", 0)).toBe(true);
     expect(hasPendingChange("knowledge", "absent", 0)).toBe(false);
+  });
+
+  test("hasPendingKnowledgeChange survives compaction of ALL version rows (#909 anchor-free contract)", () => {
+    setTeamConfig("sync.enabled", "1");
+    const id = ltm.create({
+      projectPath: "/tmp/lore-anchor-free",
+      scope: "project",
+      category: "decision",
+      title: "AF",
+      content: "v1",
+    });
+    // A pending (unpushed) edit captured in the outbox, keyed by logical_id (#909).
+    db().exec("DELETE FROM sync_outbox");
+    db()
+      .query(
+        "INSERT INTO sync_outbox (table_name, row_id, op, changed_at) VALUES ('knowledge', ?, 'upsert', ?)",
+      )
+      .run(id, Date.now());
+    // Future compaction physically removes EVERY version row — including the v1
+    // anchor (id == logical_id). Under apply-suppression so the DELETE triggers add
+    // no outbox entries of their own.
+    withApplying(() =>
+      db()
+        .query("DELETE FROM knowledge WHERE COALESCE(logical_id, id) = ?")
+        .run(id),
+    );
+    expect(
+      (
+        db()
+          .query(
+            "SELECT COUNT(*) AS n FROM knowledge WHERE COALESCE(logical_id, id) = ?",
+          )
+          .get(id) as { n: number }
+      ).n,
+    ).toBe(0);
+    // STILL detected — the outbox row_id IS the logical_id, with no dependency on a
+    // surviving version row to JOIN through (the old JOIN form returned false here).
+    expect(hasPendingKnowledgeChange(id, 0)).toBe(true);
   });
 
   test("seedOutbox builds a composite row_id for the join table", () => {

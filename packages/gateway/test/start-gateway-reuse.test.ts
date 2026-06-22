@@ -97,6 +97,50 @@ describe("startGateway EADDRINUSE reuse", () => {
     expect(handle.port).toBe(port);
   });
 
+  it("reuses a gateway on a non-overlapping interface instead of starting a second one (issue #908)", async () => {
+    const { startServer } = await import("../src/server");
+    const { startGateway } = await import("../src/cli/start");
+    const { loadConfig } = await import("../src/config");
+
+    // Existing gateway is bound to 127.0.0.1 only.
+    const config = loadConfig();
+    config.port = 0;
+    config.hosts = ["127.0.0.1"];
+    const existing = await startServer(config);
+    teardowns.push(() => existing.stop());
+
+    const port = existing.port;
+    expect(port).toBeGreaterThan(0);
+
+    // New instance is configured for 127.0.0.2 ONLY — a NON-overlapping loopback
+    // interface. Binding 127.0.0.2:<port> SUCCEEDS (it's a distinct socket
+    // address from the occupied 127.0.0.1:<port>), so the bind never throws
+    // EADDRINUSE and the post-bind reuse path is never entered. Without the
+    // PRE-bind probe, startGateway() would happily start a SECOND gateway here
+    // (owned:true) sharing the same port file / pid file / SQLite DB. The fix
+    // probes 127.0.0.1 before binding, finds the live gateway, and adopts it
+    // (owned:false). 127.0.0.0/8 is entirely loopback on Linux, so this stays
+    // hermetic with no host setup.
+    //
+    // Regression guard: removing the pre-bind probe makes 127.0.0.2:<port> bind
+    // cleanly → owned:true → this assertion fails, per quality/REVIEW.md §1.
+    const handle = await startGateway({
+      port,
+      hosts: ["127.0.0.2"],
+      local: true,
+      quiet: true,
+    });
+    teardowns.push(() => handle.shutdown());
+
+    expect(handle.owned).toBe(false);
+    expect(handle.port).toBe(port);
+    // The handle MUST report the interface the gateway actually answered on
+    // (127.0.0.1), NOT the requested-but-dead 127.0.0.2 — callers build the
+    // agent's gateway URL from config.hosts[0] (run.ts), so a non-reachable
+    // host here would point the agent at a refused address.
+    expect(handle.config.hosts).toEqual(["127.0.0.1"]);
+  });
+
   it("throws a friendly error when the port is held by a non-lore process", async () => {
     const { startGateway } = await import("../src/cli/start");
 

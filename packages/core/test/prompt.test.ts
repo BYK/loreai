@@ -2,6 +2,9 @@ import { describe, test, expect } from "vitest";
 import {
   buildCompactPrompt,
   COMPACT_SUMMARY_TEMPLATE,
+  CONSOLIDATION_MERGE_SYSTEM,
+  CONSOLIDATION_SYSTEM,
+  consolidationUser,
   recursiveUser,
   formatDistillations,
 } from "../src/prompt";
@@ -272,5 +275,61 @@ describe("formatDistillations — rolling-summary block ordering (RC4)", () => {
     ]);
     expect(out).toContain("### Earlier Work (summarized)");
     expect(out).not.toContain("### Recent Work (distilled)");
+  });
+});
+
+describe("consolidationUser — value annotation (#497)", () => {
+  const base = { id: "abc123", category: "pattern", title: "T", content: "C" };
+
+  test("renders confidence + verifier record inside the category parens", () => {
+    const out = consolidationUser({
+      entries: [{ ...base, confidence: 0.9, outcome: { passes: 5, fails: 2 } }],
+      targetMax: 0,
+      mode: "merge-duplicates",
+    });
+    expect(out).toContain("(pattern, conf 0.90, verifier pass 5, fail 2)");
+    // The [id] bracket stays clean so the model echoes a usable id.
+    expect(out).toContain("- [abc123] (pattern,");
+  });
+
+  test("omits the verifier record when there is no signal (0/0)", () => {
+    const out = consolidationUser({
+      entries: [{ ...base, confidence: 0.8, outcome: { passes: 0, fails: 0 } }],
+      targetMax: 0,
+      mode: "merge-duplicates",
+    });
+    expect(out).toContain("(pattern, conf 0.80)");
+    expect(out).not.toContain("verifier");
+  });
+
+  test("renders confidence even when outcome is absent; bare entry has no tag", () => {
+    const withConf = consolidationUser({
+      entries: [{ ...base, confidence: 0.7 }],
+      targetMax: 0,
+      mode: "merge-duplicates",
+    });
+    expect(withConf).toContain("(pattern, conf 0.70)");
+    // No value fields at all → plain category, no trailing comma.
+    const bare = consolidationUser({
+      entries: [base],
+      targetMax: 0,
+      mode: "merge-duplicates",
+    });
+    expect(bare).toContain("- [abc123] (pattern) T: C");
+  });
+
+  test("value tag also renders in trim mode", () => {
+    const out = consolidationUser({
+      entries: [{ ...base, confidence: 0.3, outcome: { passes: 0, fails: 4 } }],
+      targetMax: 0,
+      mode: "trim",
+    });
+    expect(out).toContain("(pattern, conf 0.30, verifier pass 0, fail 4)");
+  });
+
+  test("both consolidation system prompts explain the value annotation", () => {
+    expect(CONSOLIDATION_MERGE_SYSTEM).toContain("verifier pass");
+    expect(CONSOLIDATION_MERGE_SYSTEM.toLowerCase()).toContain("higher-value");
+    expect(CONSOLIDATION_SYSTEM).toContain("verifier pass");
   });
 });

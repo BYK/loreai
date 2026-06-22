@@ -17,7 +17,11 @@ import {
   type GatewayResponse,
   type GatewayUsage,
 } from "../translate/types";
-import { scaleUsageForClient, estimateTokens } from "../compaction";
+import {
+  DEFAULT_MAX_REPORTED_USAGE,
+  estimateTokens,
+  scaleUsageForClient,
+} from "../compaction";
 
 // ---------------------------------------------------------------------------
 // SSE formatting
@@ -122,12 +126,77 @@ export interface StreamAccumulator {
   isDone(): boolean;
 }
 
+/**
+ * Scale the `usage` block of a terminal `message_delta` for the client.
+ *
+ * Anthropic's `message_delta` carries the FULL cumulative usage (input + cache
+ * + output), not just `output_tokens`. We scale every field it carries so the
+ * client's last-write-wins total stays under the cap. The delta's own fields
+ * are authoritative for the scale basis (falling back to the internally
+ * accumulated values only when a field is absent), so the basis can never
+ * under-count and re-leak a raw, unscaled value. We never write back a raw
+ * delta value — only the scaled result (0 if the scaler dropped the field).
+ */
+export function scaleMessageDeltaUsage(
+  deltaUsage: Record<string, number>,
+  accumulated: {
+    inputTokens: number;
+    cacheReadInputTokens?: number;
+    cacheCreationInputTokens?: number;
+  },
+  maxReportedUsage: number,
+): Record<string, number> {
+  const basisInput =
+    typeof deltaUsage.input_tokens === "number"
+      ? deltaUsage.input_tokens
+      : accumulated.inputTokens;
+  const basisCacheRead =
+    typeof deltaUsage.cache_read_input_tokens === "number"
+      ? deltaUsage.cache_read_input_tokens
+      : accumulated.cacheReadInputTokens;
+  const basisCacheCreation =
+    typeof deltaUsage.cache_creation_input_tokens === "number"
+      ? deltaUsage.cache_creation_input_tokens
+      : accumulated.cacheCreationInputTokens;
+
+  const scaled = scaleUsageForClient(
+    {
+      input_tokens: basisInput,
+      output_tokens: deltaUsage.output_tokens,
+      cache_read_input_tokens: basisCacheRead,
+      cache_creation_input_tokens: basisCacheCreation,
+    },
+    maxReportedUsage,
+  );
+
+  const newUsage: Record<string, number> = {
+    ...deltaUsage,
+    output_tokens: scaled.output_tokens,
+  };
+  if (typeof deltaUsage.input_tokens === "number") {
+    newUsage.input_tokens = scaled.input_tokens;
+  }
+  if (typeof deltaUsage.cache_read_input_tokens === "number") {
+    newUsage.cache_read_input_tokens = scaled.cache_read_input_tokens ?? 0;
+  }
+  if (typeof deltaUsage.cache_creation_input_tokens === "number") {
+    newUsage.cache_creation_input_tokens =
+      scaled.cache_creation_input_tokens ?? 0;
+  }
+  return newUsage;
+}
+
 export function createStreamAccumulator(options?: {
   /** When true, scale usage fields in client-facing SSE events so Claude Code's
    *  auto-compact threshold is never reached.  Internal accumulation is unaffected. */
   scaleClientUsage?: boolean;
+  /** Per-model usage cap (from `maxReportedUsageForModel`). Defaults to the
+   *  200K-model cap when unknown. */
+  maxReportedUsage?: number;
 }): StreamAccumulator {
   const shouldScale = options?.scaleClientUsage ?? false;
+  const maxReportedUsage =
+    options?.maxReportedUsage ?? DEFAULT_MAX_REPORTED_USAGE;
 
   let id = "";
   let model = "";
@@ -162,12 +231,15 @@ export function createStreamAccumulator(options?: {
       const msgUsage = message?.usage as Record<string, number> | undefined;
       if (!msgUsage) return null;
 
-      const scaled = scaleUsageForClient({
-        input_tokens: msgUsage.input_tokens ?? 0,
-        output_tokens: msgUsage.output_tokens ?? 0,
-        cache_read_input_tokens: msgUsage.cache_read_input_tokens,
-        cache_creation_input_tokens: msgUsage.cache_creation_input_tokens,
-      });
+      const scaled = scaleUsageForClient(
+        {
+          input_tokens: msgUsage.input_tokens ?? 0,
+          output_tokens: msgUsage.output_tokens ?? 0,
+          cache_read_input_tokens: msgUsage.cache_read_input_tokens,
+          cache_creation_input_tokens: msgUsage.cache_creation_input_tokens,
+        },
+        maxReportedUsage,
+      );
       // Only rewrite if scaling actually changed something
       if (scaled === msgUsage) return null;
 
@@ -183,20 +255,19 @@ export function createStreamAccumulator(options?: {
       if (!deltaUsage || typeof deltaUsage.output_tokens !== "number")
         return null;
 
-      // For message_delta, the usage only carries output_tokens.  We need to
-      // scale based on the *total* accumulated so far (input from message_start
-      // + output from this delta) so the proportional scaling is consistent.
-      const scaled = scaleUsageForClient({
-        input_tokens: usage.inputTokens,
-        output_tokens: deltaUsage.output_tokens,
-        cache_read_input_tokens: usage.cacheReadInputTokens,
-        cache_creation_input_tokens: usage.cacheCreationInputTokens,
-      });
-      const rewritten = {
-        ...parsed,
-        usage: { ...deltaUsage, output_tokens: scaled.output_tokens },
-      };
-      return JSON.stringify(rewritten);
+      // See scaleMessageDeltaUsage: the terminal message_delta carries the full
+      // cumulative usage, so scale every field it carries (client usage is
+      // last-write-wins) using the delta's own values as the authoritative basis.
+      const newUsage = scaleMessageDeltaUsage(
+        deltaUsage,
+        {
+          inputTokens: usage.inputTokens,
+          cacheReadInputTokens: usage.cacheReadInputTokens,
+          cacheCreationInputTokens: usage.cacheCreationInputTokens,
+        },
+        maxReportedUsage,
+      );
+      return JSON.stringify({ ...parsed, usage: newUsage });
     }
 
     return null;
@@ -860,6 +931,7 @@ export interface RecallAwareAccumulator extends StreamAccumulator {
  *
  * @param recallToolName - The name of the recall tool to intercept (default: "recall")
  * @param options.scaleClientUsage - Scale usage numbers for the client (anti-compaction)
+ * @param options.maxReportedUsage - Per-model usage cap (from `maxReportedUsageForModel`)
  * @param options.blockOffset - Added to all emitted block indices (for continuation streams
  *   that must continue the client's block numbering from where a previous stream left off)
  * @param options.suppressMessageStart - Suppress message_start events (continuation streams
@@ -869,11 +941,14 @@ export function createRecallAwareAccumulator(
   recallToolName = "recall",
   options?: {
     scaleClientUsage?: boolean;
+    maxReportedUsage?: number;
     blockOffset?: number;
     suppressMessageStart?: boolean;
   },
 ): RecallAwareAccumulator {
   const shouldScale = options?.scaleClientUsage ?? false;
+  const maxReportedUsage =
+    options?.maxReportedUsage ?? DEFAULT_MAX_REPORTED_USAGE;
   const baseOffset = options?.blockOffset ?? 0;
   const suppressMsgStart = options?.suppressMessageStart ?? false;
   // Delegate to the standard accumulator for actual accumulation (never scales — internal only)
@@ -905,12 +980,15 @@ export function createRecallAwareAccumulator(
       const message = parsed.message as Record<string, unknown> | undefined;
       const msgUsage = message?.usage as Record<string, number> | undefined;
       if (!msgUsage) return null;
-      const scaled = scaleUsageForClient({
-        input_tokens: msgUsage.input_tokens ?? 0,
-        output_tokens: msgUsage.output_tokens ?? 0,
-        cache_read_input_tokens: msgUsage.cache_read_input_tokens,
-        cache_creation_input_tokens: msgUsage.cache_creation_input_tokens,
-      });
+      const scaled = scaleUsageForClient(
+        {
+          input_tokens: msgUsage.input_tokens ?? 0,
+          output_tokens: msgUsage.output_tokens ?? 0,
+          cache_read_input_tokens: msgUsage.cache_read_input_tokens,
+          cache_creation_input_tokens: msgUsage.cache_creation_input_tokens,
+        },
+        maxReportedUsage,
+      );
       if (scaled === msgUsage) return null;
       return JSON.stringify({
         ...parsed,
@@ -922,19 +1000,21 @@ export function createRecallAwareAccumulator(
       const deltaUsage = parsed.usage as Record<string, number> | undefined;
       if (!deltaUsage || typeof deltaUsage.output_tokens !== "number")
         return null;
-      // Scale based on total accumulated in the inner accumulator
-      const innerResp = inner.getResponse();
-      const iu = innerResp.usage ?? ZERO_USAGE;
-      const scaled = scaleUsageForClient({
-        input_tokens: iu.inputTokens,
-        output_tokens: deltaUsage.output_tokens,
-        cache_read_input_tokens: iu.cacheReadInputTokens,
-        cache_creation_input_tokens: iu.cacheCreationInputTokens,
-      });
-      return JSON.stringify({
-        ...parsed,
-        usage: { ...deltaUsage, output_tokens: scaled.output_tokens },
-      });
+      // The terminal message_delta carries the full cumulative usage; scale
+      // every field it carries (not just output_tokens) so the client's
+      // last-write-wins usage stays under the cap. Base the factor on the
+      // delta's own values, falling back to the inner accumulator's real totals.
+      const iu = inner.getResponse().usage ?? ZERO_USAGE;
+      const newUsage = scaleMessageDeltaUsage(
+        deltaUsage,
+        {
+          inputTokens: iu.inputTokens,
+          cacheReadInputTokens: iu.cacheReadInputTokens,
+          cacheCreationInputTokens: iu.cacheCreationInputTokens,
+        },
+        maxReportedUsage,
+      );
+      return JSON.stringify({ ...parsed, usage: newUsage });
     }
 
     return null;

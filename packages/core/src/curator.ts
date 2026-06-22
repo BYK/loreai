@@ -1166,6 +1166,42 @@ export function enforceEntryCap(
  *
  * Only "update" and "delete" ops are applied — consolidation never creates entries.
  */
+/** An entry as presented to the consolidation LLM, with its value signal (#497). */
+type ConsolidationEntry = {
+  id: string;
+  category: string;
+  title: string;
+  content: string;
+  confidence: number;
+  outcome: { passes: number; fails: number };
+};
+
+/**
+ * Project a knowledge entry into the consolidation-prompt shape, attaching its
+ * value signal so the curator can keep proven-valuable entries when merging
+ * duplicates or trimming (#497): current confidence (already folds in the
+ * outcome reward/penalty) plus the raw verifier pass/fail co-occurrence record
+ * (which discriminates within the confidence cluster). One indexed lookup per
+ * entry — cheap, and only on the idle consolidation path.
+ */
+function toConsolidationEntry(e: {
+  id: string;
+  category: string;
+  title: string;
+  content: string;
+  confidence: number;
+  logical_id: string;
+}): ConsolidationEntry {
+  return {
+    id: e.id,
+    category: e.category,
+    title: e.title,
+    content: e.content,
+    confidence: e.confidence,
+    outcome: ltm.outcomeImpact(e.logical_id),
+  };
+}
+
 export async function consolidate(input: {
   llm: LLMClient;
   projectPath: string;
@@ -1216,34 +1252,19 @@ export async function consolidate(input: {
   // Entries are sorted by confidence DESC, updated_at DESC from forProject().
   // For batched mode, we take the lowest-confidence entries (tail of the list)
   // as candidates for deletion — they're the least valuable.
-  let entriesForPrompt: Array<{
-    id: string;
-    category: string;
-    title: string;
-    content: string;
-  }>;
+  let entriesForPrompt: ConsolidationEntry[];
   let batchTarget: number;
 
   if (entries.length <= CONSOLIDATION_BATCH_SIZE) {
     // Small overshoot — send all entries, target is maxEntries
-    entriesForPrompt = entries.map((e) => ({
-      id: e.id,
-      category: e.category,
-      title: e.title,
-      content: e.content,
-    }));
+    entriesForPrompt = entries.map(toConsolidationEntry);
     batchTarget = cfg.curator.maxEntries;
   } else {
     // Large overshoot — batched mode. Take the lowest-confidence entries.
     // The LLM evaluates this batch and deletes the least valuable ones.
     // Subsequent passes (on future idle ticks) handle the rest.
     const candidates = entries.slice(-CONSOLIDATION_BATCH_SIZE);
-    entriesForPrompt = candidates.map((e) => ({
-      id: e.id,
-      category: e.category,
-      title: e.title,
-      content: e.content,
-    }));
+    entriesForPrompt = candidates.map(toConsolidationEntry);
     // Target is relative to the batch (not the global total) because the
     // prompt only sees the batch entries. Keep at most half — delete the rest.
     // Each pass deletes ~25 entries, the idle scheduler re-triggers (cooldown
@@ -1272,14 +1293,11 @@ async function consolidateEntries(
     category: string;
     title: string;
     content: string;
+    confidence: number;
+    logical_id: string;
   }>,
 ): Promise<{ updated: number; deleted: number }> {
-  const entriesForPrompt = entries.map((e) => ({
-    id: e.id,
-    category: e.category,
-    title: e.title,
-    content: e.content,
-  }));
+  const entriesForPrompt = entries.map(toConsolidationEntry);
   log.info(
     `consolidation: category-focused — evaluating ${entries.length} "${entries[0]?.category}" entries for near-duplicate merge`,
   );
@@ -1294,12 +1312,7 @@ async function consolidateEntries(
  */
 async function runConsolidationPrompt(
   input: Parameters<typeof consolidate>[0],
-  entriesForPrompt: Array<{
-    id: string;
-    category: string;
-    title: string;
-    content: string;
-  }>,
+  entriesForPrompt: ConsolidationEntry[],
   targetMax: number,
   mode: "trim" | "merge-duplicates" = "trim",
 ): Promise<{ updated: number; deleted: number }> {

@@ -266,6 +266,12 @@ async function cmdShow(
       console.log(`Category:    ${entry.category}`);
       console.log(`Title:       ${entry.title}`);
       console.log(`Confidence:  ${entry.confidence}`);
+      const impact = ltm.outcomeImpact(entry.logical_id);
+      if (impact.passes || impact.fails) {
+        console.log(
+          `Outcome:     ${impact.passes} passed / ${impact.fails} failed sessions`,
+        );
+      }
       console.log(`Project ID:  ${entry.project_id ?? "(global)"}`);
       console.log(`Cross-proj:  ${entry.cross_project ? "yes" : "no"}`);
       console.log(`Session:     ${entry.source_session ?? "(none)"}`);

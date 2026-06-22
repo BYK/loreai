@@ -1373,6 +1373,17 @@ const MIGRATIONS: string[] = [
   CREATE INDEX IF NOT EXISTS idx_ksi_session_uncredited
     ON knowledge_session_injections (session_id, credited);
   `,
+
+  `
+  -- Version 54: record the session's verifier verdict on each injection at
+  -- credit time (#497 follow-up). Enables per-entry "knowledge impact" stats
+  -- (how many passing vs failing sessions an entry co-occurred with) surfaced in
+  -- 'lore data show'. NULL until the injection is credited (or the session had
+  -- no verifier signal).
+  ALTER TABLE knowledge_session_injections ADD COLUMN verdict TEXT;
+  CREATE INDEX IF NOT EXISTS idx_ksi_logical_verdict
+    ON knowledge_session_injections (logical_id, verdict);
+  `,
 ];
 
 /**
@@ -1513,13 +1524,14 @@ function installSyncCapture(database: Database) {
     "entity_relations",
   ]) {
     for (const [evt, suffix, ref, op] of ops) {
-      // Knowledge is remote-keyed by logical_id (A2 sub-PR 3, #823). INSERT/UPDATE
-      // capture the version id (op=upsert; the push plan resolves it to the current
-      // logical row while the row still exists). DELETE must capture the logical_id
-      // NOW — the row is gone afterward, so the push can't resolve it, and a delete
-      // keyed by a version id would never match the logical_id-keyed remote row.
+      // Knowledge is remote-keyed by logical_id (A2, #823), so capture the
+      // logical_id for ALL ops (not the per-version row id). This makes the outbox
+      // uniformly logical_id-keyed: the push plan + pending checks read the row_id
+      // directly with no join back to a physical version row — so they survive
+      // compaction that prunes the v1 anchor (#909). DELETE must capture it anyway
+      // (the row is gone afterward); INSERT/UPDATE capture it for uniformity.
       const rowExpr =
-        t === "knowledge" && op === "delete"
+        t === "knowledge"
           ? `COALESCE(${ref}.logical_id, ${ref}.id)`
           : `${ref}.id`;
       sql += `
@@ -1749,6 +1761,7 @@ function recoverMissingObjects(database: Database) {
       project_id  TEXT NOT NULL,
       created_at  INTEGER NOT NULL,
       credited    INTEGER NOT NULL DEFAULT 0,
+      verdict     TEXT,
       PRIMARY KEY (session_id, logical_id)
     );
     CREATE INDEX IF NOT EXISTS idx_ksi_session_uncredited
@@ -1906,6 +1919,25 @@ function recoverMissingObjects(database: Database) {
       .all() as Array<{ name: string }>;
     if (!tcols.some((c) => c.name === "verifier")) {
       database.exec("ALTER TABLE tool_calls ADD COLUMN verifier INTEGER;");
+    }
+  }
+  // Version 54: knowledge_session_injections.verdict (outcome impact, #497).
+  // The verdict-keyed index MUST be created here, AFTER the column is ensured —
+  // never in the big exec above, which runs before this ALTER and would throw
+  // `no such column: verdict` while recovering a pre-v54 (verdict-less) table.
+  {
+    const icols = database
+      .query("PRAGMA table_info(knowledge_session_injections)")
+      .all() as Array<{ name: string }>;
+    if (icols.length) {
+      if (!icols.some((c) => c.name === "verdict")) {
+        database.exec(
+          "ALTER TABLE knowledge_session_injections ADD COLUMN verdict TEXT;",
+        );
+      }
+      database.exec(
+        "CREATE INDEX IF NOT EXISTS idx_ksi_logical_verdict ON knowledge_session_injections (logical_id, verdict);",
+      );
     }
   }
 }

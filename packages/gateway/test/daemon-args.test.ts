@@ -165,25 +165,30 @@ describe("runDaemon", () => {
     expect(info.join("\n")).toContain("100.64.0.1:3207");
   });
 
-  // #907 follow-up: an IPv6 bind host must be bracketed before being
-  // interpolated into the probe URL, or `http://::1:PORT` is an invalid URL —
-  // fetch throws, probeGateway swallows it as `false`, and the daemon never
-  // detects its own healthy gateway (false-negative "did not become healthy").
-  it("brackets an IPv6 host in the probe + reported URLs", async () => {
-    const probed: string[] = [];
-    const { io, info } = makeDaemonIO({
+  it("reuses a loopback gateway when configured for a non-overlapping host (issue #908)", async () => {
+    // The existing gateway is reachable on 127.0.0.1 only; we asked for a
+    // Tailscale/LAN IP nothing is bound to. The reuse-check must probe 127.0.0.1
+    // in ADDITION to the configured host, find the gateway, and adopt it WITHOUT
+    // spawning a child — otherwise the child's own pre-bind probe would
+    // reuse-and-exit, leaving us polling 100.64.0.1 until the deadline.
+    let t = 0;
+    const { io, info, spawned } = makeDaemonIO({
       readPort: () => 3207,
-      probe: async (url) => {
-        probed.push(url);
-        return true;
-      },
+      probe: async (url) => url.includes("127.0.0.1"),
+      // Advance the clock so that a *regressed* spawn+poll path terminates
+      // (times out) instead of hanging the test on a constant now() === 0.
+      now: () => (t += 5000),
+      timeoutMs: 10_000,
     });
-    const code = await runDaemon({ hosts: ["::1"] }, io);
+    const code = await runDaemon({ hosts: ["100.64.0.1"] }, io);
     expect(code).toBe(0);
-    expect(probed).toContain("http://[::1]:3207");
-    // The bare, unbracketed form must never be probed or reported.
-    expect(probed.some((u) => u.includes("http://::1:"))).toBe(false);
-    expect(info.join("\n")).toContain("http://[::1]:3207");
+    expect(spawned()).toBe(0);
+    expect(info.join("\n")).toContain("already running");
+    expect(info.join("\n")).toContain("127.0.0.1:3207");
+
+    // Regression guard: a single-host reuse-check (probing only the configured
+    // 100.64.0.1) returns false → spawns a child → polls 100.64.0.1 forever →
+    // times out (code 1, spawned 1), failing the assertions above.
   });
 
   it("spawns, polls, and reports the healthy gateway", async () => {
@@ -198,6 +203,31 @@ describe("runDaemon", () => {
     expect(spawned()).toBe(1);
     expect(info.join("\n")).toContain("pid 4242");
     expect(info.join("\n")).toContain("3299");
+  });
+
+  it("brackets IPv6 hosts in the health-poll URL (Seer, PR #920)", async () => {
+    // The post-spawn polling loop must bracket IPv6 literals via probeUrlFor:
+    // a raw `http://${host}:${port}` template yields the malformed
+    // `http://::1:3207`, the probe never connects, and the daemon times out.
+    let t = 0;
+    let portCalls = 0;
+    let probedUrl = "";
+    const { io, spawned } = makeDaemonIO({
+      // existing-check → no port yet; first poll → port present
+      readPort: () => (portCalls++ === 0 ? null : 3207),
+      probe: async (url) => {
+        probedUrl = url;
+        return url.includes("[::1]");
+      },
+      // Advance the clock so the regressed (unbracketed) path times out
+      // instead of hanging on a constant now() === 0.
+      now: () => (t += 5000),
+      timeoutMs: 10_000,
+    });
+    const code = await runDaemon({ hosts: ["::1"] }, io);
+    expect(code).toBe(0);
+    expect(spawned()).toBe(1);
+    expect(probedUrl).toBe("http://[::1]:3207");
   });
 
   it("returns 1 and logs an error on health-poll timeout", async () => {

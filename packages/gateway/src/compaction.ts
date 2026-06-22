@@ -78,33 +78,75 @@ export function estimateTokens(text: string): number {
 // ---------------------------------------------------------------------------
 
 /**
- * Claude Code's auto-compact threshold for a 200K context model:
+ * Claude Code's auto-compact arithmetic (mirrors `freecodexyz/free-code`
+ * `src/services/compact/autoCompact.ts`, which is a faithful reimplementation):
  *   effectiveContextWindow = contextWindow - min(maxOutputTokens, 20_000)
- *   autoCompactThreshold  = effectiveContextWindow - 13_000
+ *   autoCompactThreshold   = effectiveContextWindow - 13_000
  *
- * For 200K context → 167K.  We report at most TARGET_RATIO × 167K ≈ 150K
- * so the client's "X% until auto-compact" UI grows naturally but never
- * triggers the compaction.
+ * The client's context meter and auto-compact trigger both read API-reported
+ * usage (`input_tokens + cache_creation + cache_read + output_tokens` from the
+ * last response). We report at most `USAGE_REPORT_RATIO × autoCompactThreshold`
+ * so the client's "X% until auto-compact" UI grows naturally but never trips.
+ *
+ * The cap is **per-model**: it must be derived from the model's real context
+ * window, not hardcoded. A hardcoded 200K cap (the old behavior) reports ~150K
+ * for every model, which on a 1M-context model is wrong by ~6× and on smaller
+ * models can trigger premature compaction.
+ */
+export const AUTOCOMPACT_BUFFER_TOKENS = 13_000;
+/** Tokens Claude Code reserves for the compaction summary output. */
+export const MAX_OUTPUT_RESERVE = 20_000;
+/** Report at most this fraction of the auto-compact threshold. */
+export const USAGE_REPORT_RATIO = 0.9;
+
+/**
+ * Auto-compact threshold for a 200K-context model (effective 180K − 13K).
+ * Retained for cost-tracker's counterfactual "avoided compactions" estimate.
+ * TODO: make cost-tracker per-model too (low blast radius — dashboard estimate).
  */
 export const AUTOCOMPACT_THRESHOLD = 167_000;
-const TARGET_RATIO = 0.9;
-const MAX_REPORTED_USAGE = Math.floor(AUTOCOMPACT_THRESHOLD * TARGET_RATIO);
+
+/**
+ * Largest client-reported usage total for a model with the given context window
+ * and max-output budget. Mirrors `0.9 × (effectiveWindow − 13_000)`.
+ */
+export function maxReportedUsageForModel(
+  contextWindow: number,
+  maxOutputTokens: number,
+): number {
+  const effective =
+    contextWindow - Math.min(maxOutputTokens, MAX_OUTPUT_RESERVE);
+  const threshold = effective - AUTOCOMPACT_BUFFER_TOKENS;
+  return Math.max(0, Math.floor(threshold * USAGE_REPORT_RATIO));
+}
+
+/**
+ * Cap used when the model's real window is unknown — preserves the historical
+ * 200K-model behavior (floor(167_000 × 0.9) = 150_300).
+ */
+export const DEFAULT_MAX_REPORTED_USAGE = maxReportedUsageForModel(
+  200_000,
+  MAX_OUTPUT_RESERVE,
+);
 
 /**
  * Scale usage fields proportionally so the client's total
  * (`input_tokens + cache_creation + cache_read + output_tokens`) stays
- * below `MAX_REPORTED_USAGE`.
+ * below `maxReportedUsage` (per-model; defaults to the 200K-model cap).
  *
  * Returns the original usage unchanged when the total is already safe.
  * Internal Lore systems (calibrate, bustRate) must use the **real** values
  * — only the client-facing response should carry the scaled values.
  */
-export function scaleUsageForClient(usage: {
-  input_tokens: number;
-  output_tokens: number;
-  cache_read_input_tokens?: number;
-  cache_creation_input_tokens?: number;
-}): {
+export function scaleUsageForClient(
+  usage: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+  },
+  maxReportedUsage: number = DEFAULT_MAX_REPORTED_USAGE,
+): {
   input_tokens: number;
   output_tokens: number;
   cache_read_input_tokens?: number;
@@ -116,9 +158,9 @@ export function scaleUsageForClient(usage: {
     (usage.cache_creation_input_tokens ?? 0) +
     usage.output_tokens;
 
-  if (total <= MAX_REPORTED_USAGE) return usage;
+  if (total <= maxReportedUsage) return usage;
 
-  const scale = MAX_REPORTED_USAGE / total;
+  const scale = maxReportedUsage / total;
   return {
     input_tokens: Math.floor(usage.input_tokens * scale),
     output_tokens: Math.floor(usage.output_tokens * scale),

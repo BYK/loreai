@@ -11,10 +11,15 @@ import {
   formatSSEEvent,
   parseSSEStream,
   createStreamAccumulator,
+  scaleMessageDeltaUsage,
   buildSSEMessageStart,
   buildSSETextResponse,
   accumulateSSEResponse,
 } from "../src/stream/anthropic";
+import {
+  DEFAULT_MAX_REPORTED_USAGE,
+  maxReportedUsageForModel,
+} from "../src/compaction";
 import type { GatewayResponse } from "../src/translate/types";
 
 // ---------------------------------------------------------------------------
@@ -235,6 +240,154 @@ describe("createStreamAccumulator", () => {
 
     // Internal accumulation keeps the real (unscaled) token count.
     expect(acc.getResponse().usage?.inputTokens).toBe(bigInput);
+  });
+
+  test("scaleClientUsage scales ALL fields in the terminal message_delta", () => {
+    // Anthropic's terminal message_delta carries the full cumulative usage
+    // (input + cache), not just output_tokens. If only output_tokens is scaled,
+    // the client's last-write-wins usage is overwritten with the real total and
+    // the meter spoof is defeated. (Regression guard for the message_delta leak.)
+    const acc = createStreamAccumulator({ scaleClientUsage: true });
+    const bigCacheRead = 10_000_000;
+
+    acc.processEvent(
+      "message_start",
+      JSON.stringify({
+        type: "message_start",
+        message: {
+          id: "m",
+          model: "x",
+          usage: {
+            input_tokens: 5,
+            output_tokens: 1,
+            cache_read_input_tokens: bigCacheRead,
+            cache_creation_input_tokens: 0,
+          },
+        },
+      }),
+    );
+
+    const forwarded = acc.processEvent(
+      "message_delta",
+      JSON.stringify({
+        type: "message_delta",
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: {
+          input_tokens: 5,
+          output_tokens: 500,
+          cache_read_input_tokens: bigCacheRead,
+          cache_creation_input_tokens: 0,
+        },
+      }),
+    );
+
+    const usage = parseEventData(forwarded, "message_delta").usage as Record<
+      string,
+      number
+    >;
+    // The leaked field must be scaled down, not passed through unchanged.
+    expect(usage.cache_read_input_tokens).toBeLessThan(bigCacheRead);
+    const clientTotal =
+      usage.input_tokens +
+      usage.output_tokens +
+      usage.cache_read_input_tokens +
+      usage.cache_creation_input_tokens;
+    expect(clientTotal).toBeLessThanOrEqual(DEFAULT_MAX_REPORTED_USAGE);
+
+    // Internal accumulation still reflects the real (unscaled) cache read.
+    expect(acc.getResponse().usage?.cacheReadInputTokens).toBe(bigCacheRead);
+  });
+
+  test("maxReportedUsage cap is per-model (1M not throttled to 200K)", () => {
+    const cap1M = maxReportedUsageForModel(1_000_000, 64_000); // 870_300
+    const acc = createStreamAccumulator({
+      scaleClientUsage: true,
+      maxReportedUsage: cap1M,
+    });
+    const forwarded = acc.processEvent(
+      "message_start",
+      JSON.stringify({
+        type: "message_start",
+        message: {
+          id: "m",
+          model: "x",
+          usage: {
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_read_input_tokens: 1_000_000,
+            cache_creation_input_tokens: 0,
+          },
+        },
+      }),
+    );
+    const usage = parseEventData(forwarded, "message_start").message as {
+      usage: Record<string, number>;
+    };
+    // ~1M total scaled to the 1M cap (870_300), NOT the 200K cap (150_300).
+    expect(usage.usage.cache_read_input_tokens).toBeGreaterThan(
+      DEFAULT_MAX_REPORTED_USAGE,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// scaleMessageDeltaUsage
+// ---------------------------------------------------------------------------
+
+describe("scaleMessageDeltaUsage", () => {
+  test("scales all cumulative fields the delta carries; total ≤ cap", () => {
+    const out = scaleMessageDeltaUsage(
+      {
+        input_tokens: 5,
+        output_tokens: 500,
+        cache_read_input_tokens: 900_000,
+        cache_creation_input_tokens: 100_000,
+      },
+      {
+        inputTokens: 5,
+        cacheReadInputTokens: 900_000,
+        cacheCreationInputTokens: 100_000,
+      },
+      150_300,
+    );
+    const total =
+      out.input_tokens +
+      out.output_tokens +
+      out.cache_read_input_tokens +
+      out.cache_creation_input_tokens;
+    expect(total).toBeLessThanOrEqual(150_300);
+    expect(out.cache_read_input_tokens).toBeLessThan(900_000);
+  });
+
+  test("only scales output_tokens when the delta carries nothing else", () => {
+    const out = scaleMessageDeltaUsage(
+      { output_tokens: 500 },
+      { inputTokens: 1_000_000, cacheReadInputTokens: 0 },
+      150_300,
+    );
+    // input/cache keys must NOT be invented when the delta omits them.
+    expect("input_tokens" in out).toBe(false);
+    expect("cache_read_input_tokens" in out).toBe(false);
+    expect(out.output_tokens).toBeLessThan(500);
+  });
+
+  test("no re-leak when message_start omitted a cache field the delta carries", () => {
+    // The asymmetric case: the accumulated basis (from message_start) lacks
+    // cache_read, but the terminal delta reports a huge cache_read. The delta's
+    // own value must drive the scale basis — never fall back to the raw value.
+    const out = scaleMessageDeltaUsage(
+      {
+        input_tokens: 5,
+        output_tokens: 10,
+        cache_read_input_tokens: 10_000_000,
+      },
+      { inputTokens: 5 }, // no cacheReadInputTokens — message_start didn't report it
+      150_300,
+    );
+    const total =
+      out.input_tokens + out.output_tokens + out.cache_read_input_tokens;
+    expect(total).toBeLessThanOrEqual(150_300);
+    expect(out.cache_read_input_tokens).toBeLessThan(10_000_000);
   });
 });
 

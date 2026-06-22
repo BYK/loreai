@@ -78,19 +78,22 @@ function probeUrlFor(host: string, port: number): string {
 }
 
 /**
- * Probe several interfaces concurrently for a live lore gateway on `port`.
- * Resolves `true` as soon as ANY host answers `/health`, `false` only once
- * every probe has failed. Concurrent so one hanging interface can't serialize
- * the per-probe timeout onto the rest.
+ * Probe several interfaces concurrently and return the FIRST host (by list
+ * order) that answers `/health`, or `null` if none do. Concurrent so one
+ * hanging/unreachable interface can't serialize the per-probe timeout onto the
+ * rest. The `probe` is injectable so callers wired through `DaemonIO` (which
+ * mocks/wraps the real probe) can reuse this.
  */
-async function anyGatewayAlive(
+async function firstReachableHost(
   hosts: string[],
   port: number,
-): Promise<boolean> {
+  probe: (url: string) => Promise<boolean> = probeGateway,
+): Promise<string | null> {
   const results = await Promise.all(
-    hosts.map((host) => probeGateway(probeUrlFor(host, port))),
+    hosts.map((host) => probe(probeUrlFor(host, port))),
   );
-  return results.some((alive) => alive);
+  const idx = results.findIndex((alive) => alive);
+  return idx === -1 ? null : hosts[idx];
 }
 
 /** Path to the daemon's combined stdout/stderr log. */
@@ -185,11 +188,31 @@ export async function runDaemon(
 ): Promise<number> {
   const host = daemonProbeHost(opts);
 
-  // If a gateway is already up on the preferred port, don't start a second one.
+  // If a gateway is already up on the recorded port, don't start a second one.
+  //
+  // The running gateway may be bound to an interface that does NOT overlap with
+  // ours (issue #908) — e.g. it's on 127.0.0.1 while we asked for a LAN/Tailscale
+  // IP only. Probe every configured host plus 127.0.0.1 and adopt the first that
+  // answers; otherwise we'd spawn a child that itself reuses-and-exits (its own
+  // pre-bind probe finds the loopback gateway), leaving us polling an interface
+  // nothing ever bound until the health-poll deadline. Configured hosts are
+  // probed first so the reported address is the one the user asked for (#875),
+  // falling back to loopback.
   const existingPort = io.readPort();
   if (existingPort) {
-    const url = probeUrlFor(host, existingPort);
-    if (await io.probe(url)) {
+    const probeHosts = [
+      ...new Set([
+        ...(opts.hosts ?? []).filter((h) => h && h.length > 0),
+        "127.0.0.1",
+      ]),
+    ];
+    const reusedHost = await firstReachableHost(
+      probeHosts,
+      existingPort,
+      io.probe,
+    );
+    if (reusedHost) {
+      const url = probeUrlFor(reusedHost, existingPort);
       io.logInfo(`Gateway already running on ${url}`);
       io.logInfo(`Dashboard: ${url}/ui`);
       io.logInfo(`Stop it with: lore stop`);
@@ -204,8 +227,10 @@ export async function runDaemon(
   while (io.now() < deadline) {
     await io.sleep(interval);
     const port = io.readPort();
-    const url = port ? probeUrlFor(host, port) : null;
-    if (url && (await io.probe(url))) {
+    // probeUrlFor brackets IPv6 literals (e.g. http://[::1]:3207); a raw
+    // template would yield the malformed http://::1:3207 and never connect.
+    const url = port ? probeUrlFor(host, port) : "";
+    if (port && (await io.probe(url))) {
       io.logInfo(`Gateway started in the background (pid ${pid})`);
       io.logInfo(`Listening on ${url}`);
       io.logInfo(`Dashboard: ${url}/ui`);
@@ -337,6 +362,39 @@ export async function startGateway(
 
   for (const candidatePort of portsToTry) {
     config.port = candidatePort;
+
+    // Pre-bind reuse probe (issue #908): an existing gateway may be bound to an
+    // interface that does NOT overlap with ours (e.g. it's on 127.0.0.1 while
+    // we're configured for a LAN/Tailscale IP only). Binding our interface would
+    // then SUCCEED — no EADDRINUSE — and we'd silently start a SECOND redundant
+    // gateway sharing this port's port file, pid file, and SQLite DB. Probe
+    // first; if a live lore gateway answers on 127.0.0.1 or any configured host,
+    // reuse it instead of binding. The post-bind catch below stays as a backstop
+    // for the race where a gateway binds between this probe and our bind.
+    //
+    // Skip port 0 (OS-assigned random): nothing can already be listening there,
+    // and port 0 is not a probeable address. Default config.hosts is
+    // ["127.0.0.1"], so the common cold-start cost here is a single fast,
+    // connection-refused loopback probe.
+    if (candidatePort !== 0) {
+      const probeHosts = [...new Set(["127.0.0.1", ...config.hosts])];
+      const reachableHost = await firstReachableHost(probeHosts, candidatePort);
+      if (reachableHost) {
+        // Report the interface the existing gateway actually answered on — not
+        // the (possibly non-overlapping) hosts we were configured to bind.
+        // Callers derive the agent's gateway URL from config.hosts[0]
+        // (run.ts), so this MUST be a reachable address or the agent would be
+        // pointed at a dead interface.
+        config.hosts = [reachableHost];
+        return {
+          config,
+          port: candidatePort,
+          owned: false,
+          shutdown: async () => {},
+        };
+      }
+    }
+
     let server: Awaited<ReturnType<typeof startServer>> | undefined;
     try {
       // startServer() binds each host and awaits the OS bind internally, so an
@@ -412,8 +470,13 @@ export async function startGateway(
       // address) must not serialize 1.5s timeouts onto the others.
       if (candidatePort !== 0) {
         const probeHosts = [...new Set(["127.0.0.1", ...config.hosts])];
-        const alive = await anyGatewayAlive(probeHosts, candidatePort);
-        if (alive) {
+        const reachableHost = await firstReachableHost(
+          probeHosts,
+          candidatePort,
+        );
+        if (reachableHost) {
+          // Pin to the interface that actually answered (see pre-bind probe).
+          config.hosts = [reachableHost];
           return {
             config,
             port: candidatePort,

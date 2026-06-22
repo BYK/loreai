@@ -970,16 +970,53 @@ export function creditSessionOutcome(
         .run(OUTCOME_PENALTY, now, pid, ...ids);
     }
 
-    // Mark this session's injections credited so a later idle tick is a no-op.
+    // Mark this session's injections credited (so a later idle tick is a no-op)
+    // and record the verdict for per-entry "knowledge impact" stats (#497).
     db()
       .query(
-        `UPDATE knowledge_session_injections SET credited = 1
+        `UPDATE knowledge_session_injections SET credited = 1, verdict = ?
          WHERE session_id = ? AND project_id = ? AND credited = 0`,
       )
-      .run(sessionID, pid);
+      .run(verdict, sessionID, pid);
   });
 
   return { verdict, credited: ids.length };
+}
+
+/** Per-entry outcome co-occurrence stats for the reward loop (#497). */
+export type OutcomeImpact = {
+  /** Sessions this entry was injected into that ended with passing verifiers. */
+  passes: number;
+  /** Sessions this entry was injected into that ended with failing verifiers. */
+  fails: number;
+};
+
+/**
+ * Aggregate the verifier outcomes a knowledge entry has co-occurred with, by its
+ * stable `logical_id` (A2). Counts credited injection rows by verdict; 'none'
+ * verdicts are not recorded (no signal), so only pass/fail are counted (the
+ * `verdict IN ('pass','fail')` filter also excludes still-uncredited NULL rows).
+ * Read-only — surfaced by `lore data show` so the reward loop's effect is
+ * observable. (A recency / "last verdict" hint is intentionally omitted: the
+ * only available timestamp is injection time, not credit time, so it would
+ * misreport when an old session is credited late.)
+ */
+export function outcomeImpact(logicalId: string): OutcomeImpact {
+  const rows = db()
+    .query(
+      `SELECT verdict, COUNT(*) AS n
+       FROM knowledge_session_injections
+       WHERE logical_id = ? AND verdict IN ('pass','fail')
+       GROUP BY verdict`,
+    )
+    .all(logicalId) as { verdict: string; n: number }[];
+  let passes = 0;
+  let fails = 0;
+  for (const r of rows) {
+    if (r.verdict === "pass") passes = r.n;
+    else if (r.verdict === "fail") fails = r.n;
+  }
+  return { passes, fails };
 }
 
 /**

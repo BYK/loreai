@@ -58,7 +58,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(53);
+    expect(row.version).toBe(54);
   });
 
   test("session_prompt_deltas persist ordered selector/content rows (v42)", () => {
@@ -1569,6 +1569,45 @@ describe("db", () => {
             name: string;
           }>
         ).some((c) => c.name === "last_known_message_count"),
+      ).toBe(true);
+    });
+
+    test("recoverMissingObjects re-adds knowledge_session_injections.verdict without throwing on the index", () => {
+      // Regression: the (logical_id, verdict) index must be created AFTER the
+      // verdict column is ensured. Dropping the column (SQLite also drops the
+      // dependent index) then reopening must self-heal — not throw
+      // `no such column: verdict` while recovering a pre-v54 table.
+      const d = db();
+      // SQLite refuses to drop a column an index depends on — drop the index
+      // first, reproducing a pre-v54 table (no verdict column, no verdict index).
+      d.exec("DROP INDEX IF EXISTS idx_ksi_logical_verdict");
+      d.exec("ALTER TABLE knowledge_session_injections DROP COLUMN verdict");
+      expect(
+        (
+          d
+            .query("PRAGMA table_info(knowledge_session_injections)")
+            .all() as Array<{
+            name: string;
+          }>
+        ).some((c) => c.name === "verdict"),
+      ).toBe(false);
+
+      close();
+      const fresh = db(); // must not throw
+      expect(
+        (
+          fresh
+            .query("PRAGMA table_info(knowledge_session_injections)")
+            .all() as Array<{ name: string }>
+        ).some((c) => c.name === "verdict"),
+      ).toBe(true);
+      // The verdict-keyed index is restored too.
+      expect(
+        (
+          fresh
+            .query("PRAGMA index_list(knowledge_session_injections)")
+            .all() as Array<{ name: string }>
+        ).some((i) => i.name === "idx_ksi_logical_verdict"),
       ).toBe(true);
     });
 

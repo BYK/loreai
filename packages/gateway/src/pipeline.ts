@@ -122,6 +122,9 @@ import {
   buildCompactionResponse,
   assembleOfflineCompaction,
   scaleUsageForClient,
+  maxReportedUsageForModel,
+  MAX_OUTPUT_RESERVE,
+  DEFAULT_MAX_REPORTED_USAGE,
 } from "./compaction";
 import {
   buildAnthropicRequest,
@@ -3094,6 +3097,21 @@ async function forwardToUpstream(
 // ---------------------------------------------------------------------------
 
 /**
+ * Per-model cap for client usage scaling. Derives the model's real context
+ * window and max-output budget (models.dev-backed) and mirrors Claude Code's
+ * `0.9 × (effectiveWindow − 13k)`. An empty/missing model id falls back to the
+ * conservative default cap; unknown models use `getModelEntrySync`'s 200K-window
+ * fallback entry (still well under a real 200K client's compaction threshold).
+ */
+function maxReportedUsageForModelID(modelID: string): number {
+  if (!modelID) return DEFAULT_MAX_REPORTED_USAGE;
+  const entry = getModelEntrySync(modelID);
+  const contextWindow = entry.limit?.context ?? 200_000;
+  const maxOutput = entry.limit?.output ?? MAX_OUTPUT_RESERVE;
+  return maxReportedUsageForModel(contextWindow, maxOutput);
+}
+
+/**
  * Create a streaming SSE response from upstream with parallel accumulation.
  *
  * When `recallContext` is provided, uses a recall-aware accumulator that
@@ -3118,12 +3136,18 @@ function buildStreamingResponse(
   /** Session id, for telemetry (abort-under-pressure capture). Passed
    *  independently of recallContext so non-recall turns are still attributable. */
   sessionID?: string,
+  /** Per-model client-usage cap (anti-compaction). Defaults to the 200K cap. */
+  maxReportedUsage: number = DEFAULT_MAX_REPORTED_USAGE,
 ): Response {
   const recallAccum = recallContext
-    ? createRecallAwareAccumulator(RECALL_TOOL_NAME, { scaleClientUsage: true })
+    ? createRecallAwareAccumulator(RECALL_TOOL_NAME, {
+        scaleClientUsage: true,
+        maxReportedUsage,
+      })
     : null;
   const accumulator: StreamAccumulator =
-    recallAccum ?? createStreamAccumulator({ scaleClientUsage: true });
+    recallAccum ??
+    createStreamAccumulator({ scaleClientUsage: true, maxReportedUsage });
   const encoder = new TextEncoder();
   // Start of the client-facing stream — used to flag aborts that happen after
   // a long in-flight time (a host-pressure signal; see the abort catch below).
@@ -3473,6 +3497,8 @@ function buildStreamingResponse(
             const contBlockOffset =
               currentAccum.clientBlockCount() + currentBlockOffset + 1;
             const contAccum = createRecallAwareAccumulator(RECALL_TOOL_NAME, {
+              scaleClientUsage: true,
+              maxReportedUsage,
               blockOffset: contBlockOffset,
               suppressMessageStart: true,
             });
@@ -3905,12 +3931,17 @@ function nonStreamHttpResponse(
 
   // Scale usage so the client's token total stays below auto-compact threshold.
   // postResponse() has already consumed the real values for calibration/bustRate.
-  const scaledUsage = scaleUsageForClient({
-    input_tokens: usage.inputTokens,
-    output_tokens: usage.outputTokens,
-    cache_read_input_tokens: usage.cacheReadInputTokens,
-    cache_creation_input_tokens: usage.cacheCreationInputTokens,
-  });
+  // Cap is per-model (from the response's model), so a 1M-context model isn't
+  // throttled to the 200K cap.
+  const scaledUsage = scaleUsageForClient(
+    {
+      input_tokens: usage.inputTokens,
+      output_tokens: usage.outputTokens,
+      cache_read_input_tokens: usage.cacheReadInputTokens,
+      cache_creation_input_tokens: usage.cacheCreationInputTokens,
+    },
+    maxReportedUsageForModelID(resp.model),
+  );
   const scaledResp: GatewayResponse = {
     ...resp,
     usage: {
@@ -7063,6 +7094,9 @@ async function handleConversationTurn(
         : undefined,
       warningText,
       sessionState.sessionID,
+      // Cap usage against the model the CLIENT meters against (its requested
+      // model), so a 1M-context model isn't throttled to the 200K cap.
+      maxReportedUsageForModelID(req.model),
     );
     // Translate to client's wire format if needed. When the upstream is
     // Anthropic but the client speaks OpenAI, wrap the Anthropic SSE stream.
