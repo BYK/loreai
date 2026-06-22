@@ -858,9 +858,30 @@ export type KnowledgePushPlan =
  * overridden to `logical_id` (the remote row key). This coalesces all versions to
  * one remote row and converges `id`↔`logical_id` across devices.
  */
+/**
+ * The CURRENT live version's synced columns for a logical entry, re-keyed
+ * `id = logical_id` — i.e. the exact remote-row shape that {@link knowledgePushPlan}
+ * pushes (and {@link contentHash} hashes). Null if the entry has no live current.
+ * Use this (not getRowById, which addresses the physical/demoted row) whenever the
+ * remote is keyed by logical_id — push, conflict classification, conflict snapshot.
+ * COALESCE(logical_id, id): production always sets logical_id; be robust to a
+ * legacy/unmigrated NULL (a v1 row IS its own logical entity).
+ */
+export function currentKnowledgeRow(
+  logicalId: string,
+): Record<string, unknown> | null {
+  const cols = columns("knowledge").filter((c) => !PAYLOAD_EXCLUDE.has(c));
+  const row = db()
+    .query(
+      `SELECT ${cols.join(", ")} FROM knowledge_current WHERE COALESCE(logical_id, id) = ?`,
+    )
+    .get(logicalId) as Record<string, unknown> | undefined;
+  if (!row) return null;
+  row.id = logicalId; // re-key on the stable logical_id (the remote row key)
+  return row;
+}
+
 export function knowledgePushPlan(outboxRowId: string): KnowledgePushPlan {
-  // COALESCE(logical_id, id): production always sets logical_id, but be robust to a
-  // legacy/unmigrated NULL (a v1 row IS its own logical entity).
   const lid = db()
     .query(
       "SELECT COALESCE(logical_id, id) AS logical_id FROM knowledge WHERE id = ?",
@@ -868,14 +889,8 @@ export function knowledgePushPlan(outboxRowId: string): KnowledgePushPlan {
     .get(outboxRowId) as { logical_id: string } | undefined;
   if (!lid) return { op: "skip" }; // physical row gone (not expected post-flip)
   const logicalId = lid.logical_id;
-  const cols = columns("knowledge").filter((c) => !PAYLOAD_EXCLUDE.has(c));
-  const row = db()
-    .query(
-      `SELECT ${cols.join(", ")} FROM knowledge_current WHERE COALESCE(logical_id, id) = ?`,
-    )
-    .get(logicalId) as Record<string, unknown> | undefined;
+  const row = currentKnowledgeRow(logicalId);
   if (!row) return { op: "delete", logicalId }; // no live current → soft-delete
-  row.id = logicalId; // re-key the remote row on the stable logical_id
   return { op: "upsert", logicalId, row };
 }
 
@@ -925,7 +940,15 @@ export function classifyRemoteRow(
   remoteHash: string | null,
   opts: { pendingLocalChange?: boolean } = {},
 ): RemoteClass {
-  const local = getRowById(table, rowId);
+  // Knowledge is append-only and remote-keyed by logical_id: the local CURRENT
+  // content lives in knowledge_current (a fresh version row), NOT the physical row
+  // addressed by getRowById(id=logical_id) — which is the demoted v1 after any
+  // update. Reading the demoted row here mis-hashes every versioned entry, turning
+  // clean fast-forwards/echoes into false conflicts (Seer + review, #823).
+  const local =
+    table === "knowledge"
+      ? currentKnowledgeRow(rowId)
+      : getRowById(table, rowId);
   const localHash = local ? contentHash(table, local) : null;
   if (remoteHash !== null && localHash === remoteHash) return "skip";
 

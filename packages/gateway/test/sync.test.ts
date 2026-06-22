@@ -6,7 +6,7 @@ import {
   setKV,
   deleteTeamConfig,
 } from "@loreai/core";
-import { log, syncData } from "@loreai/core";
+import { ltm, log, syncData } from "@loreai/core";
 
 // --- Fake Supabase client ----------------------------------------------------
 // In-memory per-table store with the PostgREST surface the engine uses, PLUS
@@ -670,6 +670,35 @@ describe("pullOnce", () => {
       .query("SELECT local_content FROM sync_conflicts WHERE row_id='kc'")
       .get() as { local_content: string };
     expect(JSON.parse(row.local_content).content).toBe("local-edit");
+  });
+
+  test("a versioned (v2+) entry echo-pulls as skip — NO false conflict (#823, Seer)", async () => {
+    // BLOCKER regression: classifyRemoteRow must hash the CURRENT version
+    // (knowledge_current, keyed by logical_id), not the demoted v1 base row that
+    // getRowById(id=logical_id) returns. Reverting that fix makes this fail with
+    // conflicts=1 / pulled=1 and a stale (v1) sync_conflicts.local_content.
+    syncData.enableSync("basic");
+    const id = ltm.create({
+      projectPath: "/tmp/lore-sync-engine",
+      scope: "project",
+      category: "pattern",
+      title: "V",
+      content: "v1",
+    });
+    ltm.update(id, { content: "v2" }); // append v2 → current row id ≠ logical_id (id)
+    await pushOnce(makeClient() as never);
+    // Pulling our OWN just-pushed current content must classify skip, not conflict.
+    const r = await pullOnce(makeClient() as never);
+    expect(r.conflicts).toBe(0);
+    expect(r.pulled).toBe(0);
+    expect(currentContent(id)).toBe("v2");
+    expect(
+      (
+        db()
+          .query("SELECT COUNT(*) AS n FROM sync_conflicts WHERE row_id = ?")
+          .get(id) as { n: number }
+      ).n,
+    ).toBe(0); // no false conflict recorded
   });
 });
 

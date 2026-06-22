@@ -174,9 +174,23 @@ async function pushEntry(
     // "remoteHash is null for a tombstone" contract on the wire. The pull side
     // (applyRemote) already treats is_deleted rows as hash-null, but this also
     // protects un-upgraded readers during a rollout.
+    // Null the remote content_hash too (tombstone "remoteHash is null" contract).
+    const tombstone: Record<string, unknown> = {
+      is_deleted: true,
+      content_hash: null,
+    };
+    // Erasure completeness (#823): scrub the deleted knowledge content/title from
+    // the remote tombstone so the bytes don't linger server-side until the sub-PR 4
+    // reaper. The LOCAL death-cert preserves content, and applyRemoteKnowledgeDelete
+    // rebuilds a peer's death-cert from its OWN current row, so peers are unaffected.
+    // (Remote content/title are NOT NULL — scrub to '' not null.)
+    if (table === "knowledge") {
+      tombstone.content = "";
+      tombstone.title = "";
+    }
     const { error } = await client
       .from(table)
-      .update({ is_deleted: true, content_hash: null })
+      .update(tombstone)
       .match(decomposeId(table, effectiveId));
     if (error) {
       console.error(
@@ -465,8 +479,14 @@ function applyRemote(
   if (cls === "skip") return;
   if (cls === "conflict") {
     res.conflicts++;
-    // Preserve the local row we're about to overwrite (LWW = remote wins).
-    const localBefore = syncData.getRowById(meta.table, rowId);
+    // Preserve the local row we're about to overwrite (LWW = remote wins). For
+    // knowledge, snapshot the CURRENT version (keyed by logical_id) — not the
+    // demoted physical row getRowById would return — so the discarded edit is
+    // actually recoverable from sync_conflicts.local_content (#823).
+    const localBefore =
+      meta.table === "knowledge"
+        ? syncData.currentKnowledgeRow(rowId)
+        : syncData.getRowById(meta.table, rowId);
     syncData.recordConflict(
       meta.table,
       rowId,

@@ -15,6 +15,7 @@ import {
   db,
   deleteTeamConfig,
   ensureProject,
+  ltm,
   setKV,
   syncData,
 } from "@loreai/core";
@@ -227,29 +228,26 @@ type Op =
 async function apply(op: Op): Promise<void> {
   const pid = ensureProject(PROJECT);
   switch (op.t) {
+    // Drive local knowledge through the REAL append-only ops (ltm), so the engine
+    // is exercised against versioned (v2+) entries — the case sub-PR 3 exists to
+    // handle. A raw in-place UPDATE / physical DELETE would only ever produce v1
+    // (id == logical_id) rows and silently skip the append-only code paths.
     case "insert":
       if (!exists(op.id)) {
+        // Unique title per id so create()'s fuzzy-dedup can't merge entries.
         db()
           .query(
-            `INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at)
-             VALUES (?, ?, 'pattern', 'T', ?, ?, ?)`,
+            `INSERT INTO knowledge (id, logical_id, project_id, category, title, content, created_at, updated_at)
+             VALUES (?, ?, ?, 'pattern', ?, ?, ?, ?)`,
           )
-          .run(op.id, pid, op.content, Date.now(), Date.now());
+          .run(op.id, op.id, pid, op.id, op.content, Date.now(), Date.now());
       }
       break;
     case "update":
-      if (exists(op.id)) {
-        db()
-          .query(
-            "UPDATE knowledge SET content = ?, updated_at = ? WHERE id = ?",
-          )
-          .run(op.content, Date.now(), op.id);
-      }
+      if (exists(op.id)) ltm.update(op.id, { content: op.content }); // appends a version
       break;
     case "delete":
-      if (exists(op.id)) {
-        db().query("DELETE FROM knowledge WHERE id = ?").run(op.id);
-      }
+      if (exists(op.id)) ltm.remove(op.id); // appends a death-cert (no physical delete)
       break;
     case "enable":
       syncData.enableSync("basic");
@@ -382,11 +380,17 @@ describe("sync engine — property/sequence tests (#833)", () => {
         for (const op of ops) await apply(op);
         syncData.enableSync("basic"); // reconcile + push so there ARE pushed rows
         await pushOnce(client());
-        await pullOnce(client());
+        // Pulling our OWN just-pushed rows must never self-conflict — even for
+        // versioned (v2+) entries, whose current content lives in a fresh version
+        // row keyed by logical_id (#823, Seer): a stale by-id hash here would
+        // mis-classify every echo as a conflict.
+        const r1 = await pullOnce(client());
+        expect(r1.conflicts).toBe(0);
         // A second pull of our OWN just-pushed rows must apply nothing (they
         // classify as skip), and a re-push of unchanged rows must upload nothing.
         const r2 = await pullOnce(client());
         expect(r2.pulled).toBe(0);
+        expect(r2.conflicts).toBe(0);
         const r3 = await pushOnce(client());
         expect(r3.pushed).toBe(0);
       }),
