@@ -161,12 +161,30 @@ async function pushEntry(
   // versions and remove() emits no physical-delete op. The plan coalesces all of an
   // entry's versions to ONE remote row keyed by logical_id: a live current → upsert
   // that content; no live current (every version superseded/deleted) → soft-delete.
-  if (table === "knowledge" && op === "upsert") {
-    const plan = syncData.knowledgePushPlan(rowId);
-    if (plan.op === "skip") return "ok";
-    effectiveId = plan.logicalId;
-    op = plan.op;
-    if (plan.op === "upsert") knowledgeRow = plan.row;
+  if (table === "knowledge") {
+    if (op === "upsert") {
+      const plan = syncData.knowledgePushPlan(rowId);
+      if (plan.op === "skip") return "ok";
+      effectiveId = plan.logicalId;
+      op = plan.op;
+      if (plan.op === "upsert") knowledgeRow = plan.row;
+    } else {
+      // op === "delete" (a physical-delete capture, keyed by logical_id). Re-validate
+      // liveness: if the entry STILL has a live current version — i.e. a SUPERSEDED
+      // version was physically deleted while the entry lives on — this is NOT a
+      // deletion; re-push the current content instead. Only a genuinely dead entry
+      // (no live current) propagates as a remote delete. Guards a future compaction
+      // (sub-PR 4) that prunes superseded versions from falsely deleting a live remote
+      // entry. (We re-validate directly, NOT via knowledgePushPlan, because the plan
+      // would "skip" a dead entry whose v1 anchor row was also pruned — dropping the
+      // delete.)
+      const live = syncData.currentKnowledgeRow(rowId);
+      if (live) {
+        op = "upsert";
+        knowledgeRow = live;
+      }
+      // effectiveId stays rowId (= logical_id, the remote key) for both branches.
+    }
   }
 
   if (op === "delete") {

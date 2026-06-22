@@ -799,6 +799,30 @@ describe("pullOnce", () => {
       )?.is_deleted,
     ).toBe(true);
   });
+
+  test("physically deleting a SUPERSEDED version of a live entry does NOT delete the remote (#823, sub-PR 4 guard)", async () => {
+    // A physical delete of a non-current version fires op=delete keyed by logical_id.
+    // The push delete branch must re-validate liveness: the entry still has a live
+    // current version, so this is NOT a deletion — re-push current, don't tombstone.
+    syncData.enableSync("basic");
+    const id = ltm.create({
+      projectPath: "/tmp/lore-sync-engine",
+      scope: "project",
+      category: "pattern",
+      title: "SV",
+      content: "v1",
+    });
+    ltm.update(id, { content: "v2" }); // v2 current; v1 (id=id) demoted
+    await pushOnce(makeClient() as never); // remote live, content v2
+    // Physically delete only the SUPERSEDED v1 row — the entry lives on at v2.
+    db().query("DELETE FROM knowledge WHERE id = ? AND is_current = 0").run(id);
+    await pushOnce(makeClient() as never);
+    const remote = tableRows("knowledge").find((r) => r.id === id) as
+      | Record<string, unknown>
+      | undefined;
+    expect(remote?.is_deleted).toBeFalsy(); // still live → NOT deleted
+    expect(remote?.content).toBe("v2"); // current content retained
+  });
 });
 
 describe("profiles (pull-only mirror)", () => {
