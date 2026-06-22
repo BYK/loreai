@@ -740,6 +740,37 @@ describe("signBedrockRequest service name", () => {
     delete process.env.AWS_SECRET_ACCESS_KEY;
   });
 
+  test("sets and signs the host header even when the caller omits it", async () => {
+    // Regression (CRITICAL): production callers (buildBedrockHeaders + pipeline)
+    // do NOT set `host`. SigV4 requires host in SignedHeaders and the wire
+    // request carries a Host header AWS validates — @smithy/signature-v4 signs
+    // ONLY headers present on the request, so signBedrockRequest must populate
+    // host itself or every Bedrock request fails with SignatureDoesNotMatch.
+    const { signBedrockRequest, _setTestCredentialProviders } = await import(
+      "../src/bedrock-auth"
+    );
+    _setTestCredentialProviders([
+      async () => ({ accessKeyId: "AKIATEST", secretAccessKey: "secret" }),
+    ]);
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      // NOTE: deliberately NO host — mirrors the real production call site.
+    };
+    await signBedrockRequest(
+      "POST",
+      "https://bedrock-runtime.us-east-1.amazonaws.com/model/x/invoke",
+      headers,
+      "{}",
+      "us-east-1",
+    );
+    // host populated for the wire request...
+    expect(headers.host).toBe("bedrock-runtime.us-east-1.amazonaws.com");
+    // ...and included in the signed-headers list.
+    const auth = headers.authorization ?? headers.Authorization ?? "";
+    expect(auth).toMatch(/SignedHeaders=[^,]*\bhost\b/);
+    _setTestCredentialProviders(null);
+  });
+
   test("signs query-string params into the canonical request", async () => {
     const { signBedrockRequest, _setTestCredentialProviders } = await import(
       "../src/bedrock-auth"

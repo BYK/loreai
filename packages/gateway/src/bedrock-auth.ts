@@ -147,6 +147,14 @@ export async function signBedrockRequest(
     query[key] = value;
   });
 
+  // The `host` header MUST be signed: SigV4 always includes it in SignedHeaders,
+  // and the actual HTTP request carries a Host header (added by fetch/undici)
+  // that AWS validates against the signature. @smithy/signature-v4 signs ONLY
+  // the headers present on the request (it does NOT auto-populate `host` from
+  // `hostname`), so we set it here — centralized so every caller (and the wire
+  // request) signs and sends a consistent Host. Omitting it → SignatureDoesNotMatch.
+  headers.host = hostname;
+
   // Build the HttpRequest for Smithy signer
   const httpRequest = new HttpRequest({
     method,

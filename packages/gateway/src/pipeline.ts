@@ -4451,8 +4451,17 @@ function postResponse(
     const lpProvider = extractProviderHeader(req.rawHeaders);
     const lpRoute = lpProvider ? resolveProviderRoute(lpProvider) : null;
     const lpHeaderUpstream = extractUpstreamUrlHeader(req.rawHeaders);
+    // MUST mirror `providerRouteUsable` in forwardToUpstream: self-URL-building
+    // protocols (bedrock/vertex build their region URL from config) are usable
+    // with a null route url. Without this, a `X-Lore-Provider: bedrock` session
+    // would record snapshotProtocol "anthropic" (via the claude-* model route)
+    // in the UpstreamSnapshot that workers/warmer/idle treat as source of truth.
+    const lpSelfUrlBuilding =
+      lpRoute?.protocol === "bedrock" || lpRoute?.protocol === "vertex";
     const lpRouteUsable =
-      lpRoute && (lpRoute.url != null || lpHeaderUpstream) ? lpRoute : null;
+      lpRoute && (lpRoute.url != null || lpHeaderUpstream || lpSelfUrlBuilding)
+        ? lpRoute
+        : null;
     const snapshotProtocol:
       | "anthropic"
       | "openai"
@@ -4465,8 +4474,17 @@ function postResponse(
           resolveUpstreamRoute(req.model)?.protocol ??
           req.protocol);
 
+    // Self-URL-building protocols derive their base from config (region) — mirror
+    // effectiveUpstreamBase so the snapshot url isn't empty/wrong for bedrock.
+    const lpSelfBuiltUrl =
+      snapshotProtocol === "bedrock"
+        ? `https://bedrock-runtime.${config.bedrockRegion}.amazonaws.com`
+        : snapshotProtocol === "vertex"
+          ? `https://${config.vertexRegion}-aiplatform.googleapis.com`
+          : null;
+
     const upstreamSnapshot: UpstreamSnapshot = {
-      url: lpHeaderUpstream ?? lpRoute?.url ?? "",
+      url: lpHeaderUpstream ?? lpSelfBuiltUrl ?? lpRoute?.url ?? "",
       protocol: snapshotProtocol,
       providerID: lpProvider || undefined,
       model: req.model,

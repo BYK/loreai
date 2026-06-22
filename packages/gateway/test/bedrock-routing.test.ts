@@ -51,9 +51,8 @@ describe("X-Lore-Provider: bedrock routing", () => {
     process.env.LORE_BEDROCK_REGION = "us-east-1";
     if (!process.env.LORE_DEBUG) process.env.LORE_DEBUG = "false";
 
-    const { setUpstreamInterceptor, resetPipelineState } = await import(
-      "../src/pipeline"
-    );
+    const { setUpstreamInterceptor, resetPipelineState, getActiveSessions } =
+      await import("../src/pipeline");
     const { _setTestCredentialProviders } = await import("../src/bedrock-auth");
     const { startServer } = await import("../src/server");
     const { loadConfig } = await import("../src/config");
@@ -128,5 +127,24 @@ describe("X-Lore-Provider: bedrock routing", () => {
     // And the client gets the decoded Bedrock response back.
     const text = await resp.text();
     expect(text).toContain("hi from bedrock");
+
+    // The UpstreamSnapshot (single source of truth for workers/warmer/idle,
+    // set in postResponse) must ALSO record protocol "bedrock" — postResponse
+    // has its own route-usability check that must mirror forwardToUpstream.
+    // Poll briefly in case postResponse settles just after the body is read.
+    let snapshotProtocol: string | undefined;
+    let snapshotUrl: string | undefined;
+    for (let i = 0; i < 20; i++) {
+      for (const s of getActiveSessions().values()) {
+        if (s.lastUpstream?.protocol === "bedrock") {
+          snapshotProtocol = s.lastUpstream.protocol;
+          snapshotUrl = s.lastUpstream.url;
+        }
+      }
+      if (snapshotProtocol) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(snapshotProtocol).toBe("bedrock");
+    expect(snapshotUrl).toBe("https://bedrock-runtime.us-east-1.amazonaws.com");
   });
 });
