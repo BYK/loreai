@@ -989,7 +989,9 @@ export type OutcomeImpact = {
   passes: number;
   /** Sessions this entry was injected into that ended with failing verifiers. */
   fails: number;
-  /** The most recent recorded verdict ('pass'|'fail'), or null if never credited. */
+  /** Verdict of the most-recently-injected credited session ('pass'|'fail'), or
+   *  null if never credited. Ordered by injection time (created_at), not credit
+   *  time — there is no credit-time column; this is an observability hint only. */
   lastVerdict: "pass" | "fail" | null;
 };
 

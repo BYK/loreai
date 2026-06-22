@@ -1765,8 +1765,6 @@ function recoverMissingObjects(database: Database) {
     );
     CREATE INDEX IF NOT EXISTS idx_ksi_session_uncredited
       ON knowledge_session_injections (session_id, credited);
-    CREATE INDEX IF NOT EXISTS idx_ksi_logical_verdict
-      ON knowledge_session_injections (logical_id, verdict);
     CREATE TABLE IF NOT EXISTS knowledge_transfers (
       knowledge_id           TEXT NOT NULL,
       recalled_in_project_id TEXT NOT NULL,
@@ -1923,13 +1921,21 @@ function recoverMissingObjects(database: Database) {
     }
   }
   // Version 54: knowledge_session_injections.verdict (outcome impact, #497).
+  // The verdict-keyed index MUST be created here, AFTER the column is ensured —
+  // never in the big exec above, which runs before this ALTER and would throw
+  // `no such column: verdict` while recovering a pre-v54 (verdict-less) table.
   {
     const icols = database
       .query("PRAGMA table_info(knowledge_session_injections)")
       .all() as Array<{ name: string }>;
-    if (icols.length && !icols.some((c) => c.name === "verdict")) {
+    if (icols.length) {
+      if (!icols.some((c) => c.name === "verdict")) {
+        database.exec(
+          "ALTER TABLE knowledge_session_injections ADD COLUMN verdict TEXT;",
+        );
+      }
       database.exec(
-        "ALTER TABLE knowledge_session_injections ADD COLUMN verdict TEXT;",
+        "CREATE INDEX IF NOT EXISTS idx_ksi_logical_verdict ON knowledge_session_injections (logical_id, verdict);",
       );
     }
   }

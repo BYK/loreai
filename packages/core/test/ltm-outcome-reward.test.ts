@@ -424,6 +424,28 @@ describe("outcome-reward: outcomeImpact (observability, #497 follow-up)", () => 
     expect(impact.lastVerdict).toBe("fail"); // most recent credited session
   });
 
+  test("ignores uncredited (NULL-verdict) rows even when more recently injected", () => {
+    // Pins the `verdict IN ('pass','fail')` filter: a later-injected but
+    // still-uncredited (NULL verdict) row must NOT clobber lastVerdict or be
+    // counted. Without the filter, the NULL group's MAX(created_at) wins and
+    // lastVerdict collapses to null.
+    const e = makeProjectEntry("imp-null", 0.5);
+    const lid = getEntry(e).logical_id;
+    creditOnce(lid, "i-pass", "pass");
+    // An uncredited injection in a LATER session (higher created_at, verdict NULL).
+    db()
+      .query(
+        `INSERT INTO knowledge_session_injections (session_id, logical_id, project_id, created_at, credited, verdict)
+         VALUES (?, ?, ?, ?, 0, NULL)`,
+      )
+      .run("i-later-uncredited", lid, pid, Date.now() + 60_000);
+
+    const impact = ltm.outcomeImpact(lid);
+    expect(impact.passes).toBe(1);
+    expect(impact.fails).toBe(0);
+    expect(impact.lastVerdict).toBe("pass"); // NULL row excluded
+  });
+
   test("zero for an entry that has never been credited", () => {
     const e = makeProjectEntry("imp-2", 0.5);
     const impact = ltm.outcomeImpact(getEntry(e).logical_id);
