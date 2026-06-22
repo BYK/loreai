@@ -56,6 +56,47 @@ describe("startGateway EADDRINUSE reuse", () => {
     expect(handle.port).toBe(port);
   });
 
+  it("reuses a gateway bound to a different interface (probes 127.0.0.1)", async () => {
+    const { startServer } = await import("../src/server");
+    const { startGateway } = await import("../src/cli/start");
+    const { loadConfig } = await import("../src/config");
+
+    // Existing gateway is bound to 127.0.0.1 only.
+    const config = loadConfig();
+    config.port = 0;
+    config.hosts = ["127.0.0.1"];
+    const existing = await startServer(config);
+    teardowns.push(() => existing.stop());
+
+    const port = existing.port;
+    expect(port).toBeGreaterThan(0);
+
+    // New startGateway() is configured with hosts = ["127.0.0.2", "0.0.0.0"]:
+    //   - config.hosts[0] is 127.0.0.2 — binds fine (nothing there), and a
+    //     /health probe of http://127.0.0.2:<port> REFUSES (no gateway there),
+    //     so the OLD single-host probe (config.hosts[0] only) would conclude
+    //     "not a lore gateway" and throw. This is the precondition that fails
+    //     on the base branch.
+    //   - the second host 0.0.0.0 then conflicts with the 127.0.0.1 occupant →
+    //     EADDRINUSE, entering the reuse path.
+    // The fix probes 127.0.0.1 (always) in addition to the configured hosts,
+    // finds the live gateway there, and adopts it (owned:false). 127.0.0.0/8 is
+    // entirely loopback on Linux, so this stays hermetic with no host setup.
+    //
+    // Regression guard: reverting the probe to config.hosts[0] only makes this
+    // test fail (127.0.0.2 has no gateway), per quality/REVIEW.md §1.
+    const handle = await startGateway({
+      port,
+      hosts: ["127.0.0.2", "0.0.0.0"],
+      local: true,
+      quiet: true,
+    });
+    teardowns.push(() => handle.shutdown());
+
+    expect(handle.owned).toBe(false);
+    expect(handle.port).toBe(port);
+  });
+
   it("throws a friendly error when the port is held by a non-lore process", async () => {
     const { startGateway } = await import("../src/cli/start");
 

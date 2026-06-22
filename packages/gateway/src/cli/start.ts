@@ -67,6 +67,33 @@ export async function probeGateway(
   }
 }
 
+/**
+ * Build the base URL for probing `host:port`, bracketing IPv6 literals so the
+ * resulting URL is valid (e.g. `http://[::1]:3207`, not `http://::1:3207`).
+ * A bare `:` in the host marks it as an IPv6 address (hostnames/IPv4 never
+ * contain one); an already-bracketed value is left untouched.
+ */
+function probeUrlFor(host: string, port: number): string {
+  const h = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  return `http://${h}:${port}`;
+}
+
+/**
+ * Probe several interfaces concurrently for a live lore gateway on `port`.
+ * Resolves `true` as soon as ANY host answers `/health`, `false` only once
+ * every probe has failed. Concurrent so one hanging interface can't serialize
+ * the per-probe timeout onto the rest.
+ */
+async function anyGatewayAlive(
+  hosts: string[],
+  port: number,
+): Promise<boolean> {
+  const results = await Promise.all(
+    hosts.map((host) => probeGateway(probeUrlFor(host, port))),
+  );
+  return results.some((alive) => alive);
+}
+
 /** Path to the daemon's combined stdout/stderr log. */
 export function daemonLogPath(): string {
   return join(dataDir(), "gateway.log");
@@ -368,9 +395,20 @@ export async function startGateway(
 
       // Port is occupied — check if it's a lore gateway we can reuse.
       // (Skip probe for port 0 — it can't EADDRINUSE.)
+      //
+      // The running gateway may be bound to an interface other than
+      // config.hosts[0] (e.g. it's on 127.0.0.1 while we're configured for a
+      // LAN/Tailscale IP, or vice versa). Probe 127.0.0.1 (always reachable for
+      // a local gateway) plus every configured host before declaring the port
+      // foreign-owned — otherwise a healthy lore gateway gets misreported as
+      // "port in use".
+      //
+      // Probe in parallel and adopt the first interface that answers: probes
+      // are independent, and a hanging/unreachable host (e.g. a stale Tailscale
+      // address) must not serialize 1.5s timeouts onto the others.
       if (candidatePort !== 0) {
-        const probeUrl = `http://${config.hosts[0]}:${candidatePort}`;
-        const alive = await probeGateway(probeUrl);
+        const probeHosts = [...new Set(["127.0.0.1", ...config.hosts])];
+        const alive = await anyGatewayAlive(probeHosts, candidatePort);
         if (alive) {
           return {
             config,
