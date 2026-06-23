@@ -1192,32 +1192,13 @@ export async function embed(
 // ---------------------------------------------------------------------------
 
 /**
- * Cosine similarity between two Float32Array vectors.
+ * Cosine similarity between two L2-normalized Float32Array vectors.
+ * All vectors in the system (local ONNX, Voyage, OpenAI) are L2-normalized
+ * at embedding time, so dot product === cosine similarity. This skips the
+ * per-vector norm accumulations and sqrt calls (~2× faster).
  * Returns -1.0 to 1.0 where 1.0 = identical direction.
- * Returns 0 if either vector is zero-length.
  */
 export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
-  const len = Math.min(a.length, b.length);
-  let dot = 0;
-  let normA = 0;
-  let normB = 0;
-  for (let i = 0; i < len; i++) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-  const denom = Math.sqrt(normA) * Math.sqrt(normB);
-  if (denom === 0) return 0;
-  return dot / denom;
-}
-
-/**
- * Dot product between two L2-normalized Float32Array vectors.
- * For normalized vectors, dot product === cosine similarity, avoiding two
- * per-vector norm accumulations and two sqrt calls (~2× faster).
- * All vectors produced by the embedding worker are L2-normalized.
- */
-function dotProductNormalized(a: Float32Array, b: Float32Array): number {
   const len = a.length;
   let dot = 0;
   for (let i = 0; i < len; i++) {
@@ -1306,7 +1287,7 @@ export function vectorSearch(
   const topK: VectorHit[] = [];
   for (const row of rows) {
     const vec = fromBlob(row.embedding);
-    const sim = dotProductNormalized(queryEmbedding, vec);
+    const sim = cosineSimilarity(queryEmbedding, vec);
     topKInsert(topK, { id: row.id, similarity: sim }, limit);
   }
   return topK;
@@ -1327,7 +1308,7 @@ export function vectorSearchEntities(
   const topK: VectorHit[] = [];
   for (const row of rows) {
     const vec = fromBlob(row.embedding);
-    const sim = dotProductNormalized(queryEmbedding, vec);
+    const sim = cosineSimilarity(queryEmbedding, vec);
     topKInsert(topK, { id: row.id, similarity: sim }, limit);
   }
   return topK;
@@ -1354,7 +1335,7 @@ export function vectorSearchDistillations(
   const topK: VectorHit[] = [];
   for (const row of rows) {
     const vec = fromBlob(row.embedding);
-    const sim = dotProductNormalized(queryEmbedding, vec);
+    const sim = cosineSimilarity(queryEmbedding, vec);
     topKInsert(topK, { id: row.id, similarity: sim }, limit);
   }
   return topK;
@@ -1403,7 +1384,7 @@ export function vectorSearchAllDistillations(
   const topK: DistillationVectorHit[] = [];
   for (const row of rows) {
     const vec = fromBlob(row.embedding);
-    const sim = dotProductNormalized(queryEmbedding, vec);
+    const sim = cosineSimilarity(queryEmbedding, vec);
     topKInsert(
       topK,
       { id: row.id, session_id: row.session_id, similarity: sim },
@@ -1555,7 +1536,7 @@ export function vectorSearchTemporal(
   const topK: VectorHit[] = [];
   for (const row of rows) {
     const vec = fromBlob(row.embedding);
-    const sim = dotProductNormalized(queryEmbedding, vec);
+    const sim = cosineSimilarity(queryEmbedding, vec);
     topKInsert(topK, { id: row.id, similarity: sim }, limit);
   }
   return topK;
