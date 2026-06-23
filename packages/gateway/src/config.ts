@@ -142,6 +142,23 @@ export interface GatewayConfig {
 // ---------------------------------------------------------------------------
 
 /** Load gateway configuration from environment variables with defaults. */
+/**
+ * Resolve the default AWS Bedrock region from the standard env chain
+ * (`LORE_BEDROCK_REGION` → `AWS_REGION` → `AWS_DEFAULT_REGION` → "us-east-1").
+ * Shared between `loadConfig()` and call sites that build a Bedrock profile
+ * without a threaded config (e.g. the cache-warmer dashboard snapshot), so they
+ * never diverge on a hard-coded region.
+ */
+export function defaultBedrockRegion(): string {
+  const env = process.env;
+  return (
+    env.LORE_BEDROCK_REGION ??
+    env.AWS_REGION ??
+    env.AWS_DEFAULT_REGION ??
+    "us-east-1"
+  );
+}
+
 export function loadConfig(): GatewayConfig {
   const env = process.env;
   const hosts = parseHosts(env.LORE_LISTEN_HOST);
@@ -210,11 +227,7 @@ export function loadConfig(): GatewayConfig {
       : undefined,
     upstreamExtraHeaders: parseCurlHeaders(env.LORE_UPSTREAM_EXTRA_HEADERS),
     // Bedrock config — standard AWS chain + optional LORE overrides
-    bedrockRegion:
-      env.LORE_BEDROCK_REGION ??
-      env.AWS_REGION ??
-      env.AWS_DEFAULT_REGION ??
-      "us-east-1",
+    bedrockRegion: defaultBedrockRegion(),
     bedrockProfile: env.LORE_BEDROCK_PROFILE ?? env.AWS_PROFILE,
     // Vertex config — standard GCP ADC chain + optional LORE overrides
     vertexProject: env.LORE_VERTEX_PROJECT ?? env.GOOGLE_CLOUD_PROJECT ?? "",

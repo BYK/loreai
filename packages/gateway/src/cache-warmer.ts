@@ -51,7 +51,7 @@ import {
   resolveBedrockModelID,
 } from "./translate/bedrock";
 import { signBedrockRequest } from "./bedrock-auth";
-import { resolveUpstreamRoute } from "./config";
+import { defaultBedrockRegion, resolveUpstreamRoute } from "./config";
 import { getModelEntrySync } from "./worker-model";
 import { recordWarmupCost } from "./cost-tracker";
 import { upstreamFetch } from "./fetch";
@@ -1071,10 +1071,13 @@ export function resolveProfile(
   // non-streaming InvokeModel call. Region comes from config (or the session's
   // bedrock-runtime upstream URL inside buildBedrockProfile).
   if (protocol === "bedrock") {
+    // Fall back to the env-derived region (matches loadConfig) when no config
+    // is threaded — e.g. computeWarmingSnapshot's dashboard call — so the
+    // displayed region reflects the deployment, not a hard-coded default.
     return buildBedrockProfile(
       model,
       ttl ?? "5m",
-      bedrock?.region ?? "us-east-1",
+      bedrock?.region ?? defaultBedrockRegion(),
       bedrock?.profile,
       upstreamBase,
     );

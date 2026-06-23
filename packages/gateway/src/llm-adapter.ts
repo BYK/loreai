@@ -1487,15 +1487,24 @@ export function createGatewayLLMClient(
                 // falls through to global — but only for THIS provider,
                 // not other providers on the same session. Requires a real
                 // session ID (staleness is per-session state).
-                if (opts?.sessionID) {
-                  markAuthStale(opts.sessionID, model.providerID);
-                } else {
-                  // Session-less worker (e.g. entity-rebuild) — mark the
-                  // global fallback as stale so resolveAuth(undefined)
-                  // returns null instead of the same rejected token.
-                  // Without this, session-less workers hammer indefinitely
-                  // because markAuthStale requires a sessionID.
-                  markGlobalAuthStale();
+                //
+                // Bedrock auth is SigV4 — there is NO client credential to mark
+                // stale, and a 403 is an AWS config error (the conversation path
+                // fails too, so the user fixes creds at the source). Marking the
+                // client/global credential stale here would contaminate the
+                // conversation path's auth resolution. Skip for bedrock; the
+                // recordWorkerFailure above still feeds the worker-health ladder.
+                if (!isBedrockWorker) {
+                  if (opts?.sessionID) {
+                    markAuthStale(opts.sessionID, model.providerID);
+                  } else {
+                    // Session-less worker (e.g. entity-rebuild) — mark the
+                    // global fallback as stale so resolveAuth(undefined)
+                    // returns null instead of the same rejected token.
+                    // Without this, session-less workers hammer indefinitely
+                    // because markAuthStale requires a sessionID.
+                    markGlobalAuthStale();
+                  }
                 }
 
                 // Re-resolve: credential may have been refreshed by a concurrent client request
@@ -1560,7 +1569,15 @@ export function createGatewayLLMClient(
                 // the pause is the robust backstop. isWorkerCreditPaused()
                 // still lets one probe through per 5 min so a refreshed
                 // credential recovers automatically. Urgent calls are exempt.
-                if (opts?.sessionID) markWorkerPaused(opts.sessionID);
+                //
+                // Skip for bedrock: a SigV4 403 is an AWS config error, not a
+                // client-credential issue, so pausing ALL of this session's
+                // background work is the wrong lever (the conversation path
+                // surfaces the same error and the user fixes creds at the
+                // source). recordWorkerFailure above still throttles via the
+                // worker-health ladder if failures persist.
+                if (!isBedrockWorker && opts?.sessionID)
+                  markWorkerPaused(opts.sessionID);
                 return null;
               }
 

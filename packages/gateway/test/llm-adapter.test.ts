@@ -1303,6 +1303,45 @@ describe("bedrock worker SigV4", () => {
     expect(init.headers["x-api-key"]).toBeUndefined();
   });
 
+  test("a bedrock worker 403 does NOT pause the session's workers", async () => {
+    // A Bedrock SigV4 403 is an AWS config error, not a client-credential
+    // problem — it must NOT markWorkerPaused (which would halt ALL of the
+    // session's distillation/curation). recordWorkerFailure still fires.
+    vi.mocked(markWorkerPaused).mockClear();
+    vi.mocked(recordWorkerFailure).mockClear();
+    mockFetch.mockResolvedValue(
+      new Response("AccessDeniedException", { status: 403 }),
+    );
+    const { _setTestCredentialProviders } = await import("../src/bedrock-auth");
+    _setTestCredentialProviders([
+      async () => ({ accessKeyId: "AKIATEST", secretAccessKey: "secret" }),
+    ]);
+
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.anthropic.com",
+        openai: "https://api.openai.com",
+      },
+      () => ({ scheme: "api-key", value: "client-key" }),
+      { providerID: "bedrock", modelID: "claude-3-5-sonnet-20241022" },
+      { bedrock: { region: "us-east-1" } },
+    );
+
+    const text = await client.prompt("sys", "user", {
+      sessionID: "sess-bedrock-403",
+      workerID: "lore-distill",
+      model: { providerID: "bedrock", modelID: "claude-3-5-sonnet-20241022" },
+      protocol: "bedrock",
+      upstreamProviderID: "bedrock",
+      upstreamUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+    });
+
+    expect(text).toBeNull();
+    expect(markWorkerPaused).not.toHaveBeenCalled();
+    // The failure is still recorded for the worker-health ladder.
+    expect(recordWorkerFailure).toHaveBeenCalled();
+  });
+
   test("a NON-bedrock worker with no credential is still skipped (no-auth)", async () => {
     // Guards the exemption's scope: the no-auth gate must remain for anthropic.
     const client = createGatewayLLMClient(
