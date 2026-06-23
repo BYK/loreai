@@ -1404,7 +1404,11 @@ export function vectorSearchAllDistillations(
   for (const row of rows) {
     const vec = fromBlob(row.embedding);
     const sim = dotProductNormalized(queryEmbedding, vec);
-    topKInsert(topK, { id: row.id, session_id: row.session_id, similarity: sim }, limit);
+    topKInsert(
+      topK,
+      { id: row.id, session_id: row.session_id, similarity: sim },
+      limit,
+    );
   }
   return topK;
 }
@@ -1548,15 +1552,13 @@ export function vectorSearchTemporal(
     .query(sql)
     .all(...params) as Array<{ id: string; embedding: Buffer }>;
 
-  const scored: VectorHit[] = [];
+  const topK: VectorHit[] = [];
   for (const row of rows) {
     const vec = fromBlob(row.embedding);
-    const sim = cosineSimilarity(queryEmbedding, vec);
-    scored.push({ id: row.id, similarity: sim });
+    const sim = dotProductNormalized(queryEmbedding, vec);
+    topKInsert(topK, { id: row.id, similarity: sim }, limit);
   }
-
-  scored.sort((a, b) => b.similarity - a.similarity);
-  return scored.slice(0, limit);
+  return topK;
 }
 
 // ---------------------------------------------------------------------------

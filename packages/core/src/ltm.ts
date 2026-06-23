@@ -2385,9 +2385,11 @@ function _dedup(
 
       if (titleMatch || embeddingMatch) {
         const score = Math.max(coefficient, similarity);
-        neighborMap.get(entry.id)!.push({ id: other.id, score });
+        const entryNeighbors = neighborMap.get(entry.id);
+        if (entryNeighbors) entryNeighbors.push({ id: other.id, score });
         if (!neighborMap.has(other.id)) neighborMap.set(other.id, []);
-        neighborMap.get(other.id)!.push({ id: entry.id, score });
+        const otherNeighbors = neighborMap.get(other.id);
+        if (otherNeighbors) otherNeighbors.push({ id: entry.id, score });
       }
     }
   }

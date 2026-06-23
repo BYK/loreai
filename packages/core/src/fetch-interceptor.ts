@@ -112,7 +112,7 @@ function pathLooksLLMLike(pathname: string): boolean {
  * fall through to the warn-once path. Returns undefined on any failure.
  */
 function extractBodyString(
-  input: RequestInfo | URL,
+  _input: RequestInfo | URL,
   init: RequestInit | undefined,
 ): string | undefined {
   const body = init?.body;
