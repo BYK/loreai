@@ -553,10 +553,14 @@ export function extractProviderHeader(
  *
  * Built once from PROVIDER_ROUTES at module load. Each route's `url` is run
  * through `extractUpstreamUrlHeader` so the keys are normalized byte-for-byte
- * the same way an incoming `x-lore-upstream-url` header is — there is no second
- * normalization path that could drift. Providers with a `null` url
- * (local/self-hosted, aggregators the user must configure) are skipped: their
- * real upstream is user-specific and never matches a static table entry.
+ * the same way an incoming `x-lore-upstream-url` header is — the normalization
+ * itself cannot drift between the two sides. (The incoming value is the
+ * interceptor-derived `upstreamBase`, which for a provider whose API path lacks
+ * a `/v1/` segment — e.g. google's `/v1beta/openai/...` — does not equal the
+ * route key; that simply yields a lookup miss → `undefined`, i.e. an untagged
+ * credential, never a WRONG tag.) Providers with a `null` url (local/self-
+ * hosted, aggregators the user must configure) are skipped: their real upstream
+ * is user-specific and never matches a static table entry.
  *
  * First definition wins on the (currently impossible) chance two routes
  * normalize to the same base, keeping the mapping deterministic.
