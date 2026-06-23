@@ -643,6 +643,63 @@ describe("createGatewayLLMClient.prompt", () => {
     expect(body.max_output_tokens).toBeUndefined();
   });
 
+  test("bedrock-mantle worker remaps body.model to the mantle catalog id", async () => {
+    // A Bedrock session's worker (distillation/curation) routes to the session's
+    // mantle upstream over the Anthropic path with the client's Bedrock API key.
+    // The OUTGOING body model MUST be the mantle catalog id (`anthropic.<model>`),
+    // or mantle rejects it as unknown — silently degrading all memory-building.
+    mockFetch.mockResolvedValue(anthropicResponse());
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "bedrock-api-key-test" }),
+      { providerID: "bedrock", modelID: "claude-haiku-4-5" },
+    );
+
+    const text = await client.prompt("system", "user", {
+      sessionID: "sess-bedrock",
+      workerID: "lore-distill",
+      // Session upstream override = the regional mantle base (from the snapshot).
+      upstreamUrl: "https://bedrock-mantle.us-east-1.api.aws/anthropic",
+      upstreamProviderID: "bedrock",
+      protocol: "anthropic",
+    });
+
+    expect(text).toBe("hello from worker");
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toBe(
+      "https://bedrock-mantle.us-east-1.api.aws/anthropic/v1/messages",
+    );
+    const headers = init?.headers as Record<string, string>;
+    // Client's Bedrock API key via x-api-key; mantle requires anthropic-version.
+    expect(headers["x-api-key"]).toBe("bedrock-api-key-test");
+    expect(headers["anthropic-version"]).toBe("2023-06-01");
+    // No SigV4 / OAuth on the mantle worker path (api-key scheme).
+    expect(headers.Authorization).toBeUndefined();
+    const body = JSON.parse(init?.body as string) as Record<string, unknown>;
+    expect(body.model).toBe("anthropic.claude-haiku-4-5");
+  });
+
+  test("a non-mantle anthropic worker keeps the bare client model id", async () => {
+    // Guards the remap from over-reaching: a normal Anthropic worker must NOT
+    // get the `anthropic.` prefix.
+    mockFetch.mockResolvedValue(anthropicResponse());
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      { providerID: "anthropic", modelID: "claude-haiku-4-5" },
+    );
+
+    await client.prompt("system", "user", {
+      sessionID: "sess-anthropic",
+      workerID: "lore-distill",
+    });
+
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toContain("api.anthropic.com");
+    const body = JSON.parse(init?.body as string) as Record<string, unknown>;
+    expect(body.model).toBe("claude-haiku-4-5");
+  });
+
   test("returns null without calling upstream when no auth is available", async () => {
     const client = createGatewayLLMClient(UPSTREAMS, () => null, {
       providerID: "anthropic",
