@@ -1,32 +1,31 @@
 /**
- * Integration test: X-Lore-Provider routing actually reaches the Bedrock branch.
+ * Integration test: `X-Lore-Provider: bedrock` routes to the bedrock-mantle
+ * endpoint over the native Anthropic protocol.
  *
- * Regression for the routing bug found in adversarial review of PR #898:
- * `providerRouteUsable` nulled out any provider route whose `url` is null
- * unless an X-Lore-Upstream-URL was also present. The `bedrock` PROVIDER_ROUTES
- * entry has `url: null` (the Bedrock branch self-builds the region URL), so
- * `X-Lore-Provider: bedrock` fell through to the model-prefix route — a
- * claude-* model resolves to api.anthropic.com — and silently bypassed Bedrock
- * entirely (wrong auth, no SigV4).
+ * Bedrock is reached via `bedrock-mantle.<region>.api.aws/anthropic` (the native
+ * Anthropic Messages API). The provider route carries `bedrockMantle: true` with
+ * `protocol: "anthropic"`, so the request rides the normal Anthropic path — the
+ * only Bedrock-specific transforms are the region-built base URL and the model
+ * remap (`claude-… → anthropic.claude-…`) on the OUTGOING body.
  *
- * We drive a non-streaming Anthropic-format client request with
- * `X-Lore-Provider: bedrock` and assert the UPSTREAM body the interceptor
- * receives is Bedrock-shaped (`anthropic_version: "bedrock-2023-05-31"`),
- * proving effectiveProtocol resolved to "bedrock". On the pre-fix code this
- * body would be the native-Anthropic shape (no bedrock sentinel).
+ * We drive a non-streaming Anthropic client request with `X-Lore-Provider:
+ * bedrock` and assert: (1) the upstream body carries the mantle model id, and
+ * (2) the UpstreamSnapshot records protocol "anthropic" + the mantle URL (the
+ * single source of truth that workers/warmer/idle consume). Both have their own
+ * route-usability check that must recognize the `bedrockMantle` self-URL route.
  */
 import { describe, test, expect, afterEach } from "vitest";
 import { existsSync, unlinkSync } from "node:fs";
 
-/** A non-streaming Bedrock (InvokeModel) JSON response — Anthropic message shape. */
-function bedrockJSONResponse(): Response {
+/** A non-streaming Anthropic message response (mantle returns native shape). */
+function mantleJSONResponse(): Response {
   return new Response(
     JSON.stringify({
       id: "msg_bedrock",
       type: "message",
       role: "assistant",
       content: [{ type: "text", text: "hi from bedrock" }],
-      model: "claude-3-5-sonnet-20241022",
+      model: "anthropic.claude-3-5-sonnet-20241022",
       stop_reason: "end_turn",
       usage: { input_tokens: 10, output_tokens: 5 },
     }),
@@ -41,8 +40,8 @@ afterEach(() => {
   teardownFn = undefined;
 });
 
-describe("X-Lore-Provider: bedrock routing", () => {
-  test("routes to the Bedrock branch (upstream body is Bedrock-shaped)", async () => {
+describe("X-Lore-Provider: bedrock routing (bedrock-mantle)", () => {
+  test("routes to mantle over the Anthropic protocol with a remapped model id", async () => {
     const dbPath = `/tmp/lore-bedrock-route-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
     process.env.LORE_DB_PATH = dbPath;
     process.env.LORE_LISTEN_PORT = String(
@@ -53,7 +52,6 @@ describe("X-Lore-Provider: bedrock routing", () => {
 
     const { setUpstreamInterceptor, resetPipelineState, getActiveSessions } =
       await import("../src/pipeline");
-    const { _setTestCredentialProviders } = await import("../src/bedrock-auth");
     const { startServer } = await import("../src/server");
     const { loadConfig } = await import("../src/config");
     const { close: closeDB } = await import("@loreai/core");
@@ -61,18 +59,12 @@ describe("X-Lore-Provider: bedrock routing", () => {
     closeDB();
     await resetPipelineState();
 
-    // Deterministic AWS creds so SigV4 signing (runs before the interceptor)
-    // succeeds without touching the real credential chain / IMDS.
-    _setTestCredentialProviders([
-      async () => ({ accessKeyId: "AKIATEST", secretAccessKey: "secret" }),
-    ]);
-
     let capturedBody: Record<string, unknown> | undefined;
     let capturedModel: string | undefined;
     setUpstreamInterceptor(async (body, model) => {
       capturedBody = body as Record<string, unknown>;
       capturedModel = model;
-      return bedrockJSONResponse();
+      return mantleJSONResponse();
     });
 
     const config = loadConfig();
@@ -83,7 +75,6 @@ describe("X-Lore-Provider: bedrock routing", () => {
       server.stop();
       closeDB();
       setUpstreamInterceptor(undefined);
-      _setTestCredentialProviders(null);
       delete process.env.LORE_BEDROCK_REGION;
       for (const suffix of ["", "-shm", "-wal"]) {
         const f = `${dbPath}${suffix}`;
@@ -99,7 +90,7 @@ describe("X-Lore-Provider: bedrock routing", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-api-key": "test-key",
+        "x-api-key": "bedrock-api-key-test",
         "anthropic-version": "2023-06-01",
         // X-Lore-Provider: bedrock is THE path under test.
         "x-lore-provider": "bedrock",
@@ -115,36 +106,40 @@ describe("X-Lore-Provider: bedrock routing", () => {
 
     expect(resp.ok).toBe(true);
 
-    // The interceptor must have been called with a BEDROCK-shaped body —
-    // proof that routing resolved effectiveProtocol === "bedrock" rather than
-    // falling through to the native Anthropic path.
+    // The OUTGOING body must carry the mantle model id — proof that the bedrock
+    // route resolved (anthropic protocol) AND the model remap fired. A native
+    // Anthropic body would keep the bare `claude-…` id.
     expect(capturedBody).toBeDefined();
-    expect(capturedBody?.anthropic_version).toBe("bedrock-2023-05-31");
-    // Bedrock body never carries a `stream` field (endpoint controls streaming).
-    expect("stream" in (capturedBody ?? {})).toBe(false);
+    expect(capturedBody?.model).toBe("anthropic.claude-3-5-sonnet-20241022");
+    // It is plain Anthropic — NOT the runtime InvokeModel sentinel.
+    expect("anthropic_version" in (capturedBody ?? {})).toBe(false);
+    // req.model (the client-facing id) is unchanged for session/cache tracking.
     expect(capturedModel).toBe("claude-3-5-sonnet-20241022");
 
-    // And the client gets the decoded Bedrock response back.
+    // The client gets the response back.
     const text = await resp.text();
     expect(text).toContain("hi from bedrock");
 
-    // The UpstreamSnapshot (single source of truth for workers/warmer/idle,
-    // set in postResponse) must ALSO record protocol "bedrock" — postResponse
-    // has its own route-usability check that must mirror forwardToUpstream.
-    // Poll briefly in case postResponse settles just after the body is read.
+    // The UpstreamSnapshot (single source of truth for workers/warmer/idle)
+    // must record protocol "anthropic" + the regional mantle base URL.
     let snapshotProtocol: string | undefined;
     let snapshotUrl: string | undefined;
     for (let i = 0; i < 20; i++) {
       for (const s of getActiveSessions().values()) {
-        if (s.lastUpstream?.protocol === "bedrock") {
+        if (
+          s.lastUpstream?.url ===
+          "https://bedrock-mantle.us-east-1.api.aws/anthropic"
+        ) {
           snapshotProtocol = s.lastUpstream.protocol;
           snapshotUrl = s.lastUpstream.url;
         }
       }
-      if (snapshotProtocol) break;
+      if (snapshotUrl) break;
       await new Promise((r) => setTimeout(r, 50));
     }
-    expect(snapshotProtocol).toBe("bedrock");
-    expect(snapshotUrl).toBe("https://bedrock-runtime.us-east-1.amazonaws.com");
+    expect(snapshotProtocol).toBe("anthropic");
+    expect(snapshotUrl).toBe(
+      "https://bedrock-mantle.us-east-1.api.aws/anthropic",
+    );
   });
 });

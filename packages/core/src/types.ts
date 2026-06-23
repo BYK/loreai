@@ -334,12 +334,7 @@ export interface LLMClient {
        * Only the gateway adapter honors this field; other adapters
        * (OpenCode, Pi) ignore it.
        */
-      protocol?:
-        | "anthropic"
-        | "openai"
-        | "openai-responses"
-        | "bedrock"
-        | "vertex";
+      protocol?: "anthropic" | "openai" | "openai-responses" | "vertex";
     },
   ): Promise<string | null>;
 }

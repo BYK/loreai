@@ -41,6 +41,7 @@ import {
 import { recordWorkerCost } from "./cost-tracker";
 import { upstreamFetch } from "./fetch";
 import { extractJSONFromSSE } from "./translate/types";
+import { isBedrockMantleHost, toMantleModelId } from "./translate/bedrock";
 import {
   recordWorkerFailure,
   markWorkerPaused,
@@ -341,7 +342,7 @@ type ProviderTarget = {
  */
 export function resolveWorkerProtocol(
   providerID: string,
-  explicit?: "anthropic" | "openai" | "openai-responses" | "bedrock" | "vertex",
+  explicit?: "anthropic" | "openai" | "openai-responses" | "vertex",
 ): WorkerProtocol {
   // openai-codex MUST use the Responses API — its backend has no Chat
   // Completions endpoint. This takes precedence over the explicit hint
@@ -351,29 +352,21 @@ export function resolveWorkerProtocol(
   }
   // 1. Explicit protocol from caller (threaded from UpstreamSnapshot)
   if (explicit) {
-    // Bedrock/Vertex collapse to "anthropic" for worker calls — workers
-    // use simple prompt→response and Bedrock's InvokeModel (non-streaming)
-    // returns the same JSON shape as Anthropic Messages API.
-    //
-    // 🔴 KNOWN LIMITATION (issue #870 part 1): this only normalizes the WIRE
-    // SHAPE. The worker LLM adapter and cache-warmer do NOT apply AWS SigV4
-    // signing, so background work (distillation/curation/warming) for a
-    // Bedrock-only session would hit bedrock-runtime unsigned → 403. Until
-    // worker-side SigV4 lands (follow-up), Bedrock users must point
-    // LORE_WORKER_UPSTREAM + LORE_WORKER_API_KEY at a non-Bedrock,
-    // Anthropic-compatible endpoint for memory-building to function.
-    return explicit === "anthropic" ||
-      explicit === "bedrock" ||
-      explicit === "vertex"
+    // Vertex collapses to "anthropic" for worker calls (same wire shape).
+    // NOTE: AWS Bedrock is NOT a distinct worker protocol — it is reached via
+    // the bedrock-mantle endpoint, whose snapshot protocol is already
+    // "anthropic" (the provider route carries `bedrockMantle: true`, protocol
+    // "anthropic"). Bedrock worker calls therefore route to the session's
+    // mantle upstream over the normal Anthropic path with the client's Bedrock
+    // API key — no SigV4, no separate LORE_WORKER_UPSTREAM workaround.
+    return explicit === "anthropic" || explicit === "vertex"
       ? "anthropic"
       : "openai";
   }
   // 2. Route table lookup
   const route = resolveProviderRoute(providerID);
   if (route?.protocol) {
-    return route.protocol === "anthropic" ||
-      route.protocol === "bedrock" ||
-      route.protocol === "vertex"
+    return route.protocol === "anthropic" || route.protocol === "vertex"
       ? "anthropic"
       : "openai";
   }
@@ -526,8 +519,18 @@ function buildAnthropicWorkerRequest(
       ? [...(billingBlock ? [billingBlock] : []), ...systemBlocks]
       : undefined;
 
+  // AWS Bedrock via bedrock-mantle: the worker hits the session's mantle
+  // upstream over this Anthropic path, so the body model must be the mantle
+  // catalog id (`anthropic.<model>`). Detected from the target host so it
+  // applies whether the session was routed via X-Lore-Provider: bedrock or a
+  // mantle LORE_UPSTREAM_ANTHROPIC. Auth is the client's Bedrock API key
+  // (x-api-key via authHeaders) — no SigV4, no billing block (api-key scheme).
+  const upstreamModelID = isBedrockMantleHost(target.url)
+    ? toMantleModelId(model.modelID)
+    : model.modelID;
+
   let body = JSON.stringify({
-    model: model.modelID,
+    model: upstreamModelID,
     max_tokens: maxTokens,
     ...(temperature != null && { temperature }),
     system: systemPayload,

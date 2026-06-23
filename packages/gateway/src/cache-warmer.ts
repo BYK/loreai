@@ -46,6 +46,7 @@ import { resolveAuth, authHeaders, markAuthStale } from "./auth";
 import { recordWorkerFailure, recordWorkerSuccess } from "./worker-health";
 import { resignBody } from "./cch";
 import { resolveUpstreamRoute } from "./config";
+import { isBedrockMantleHost } from "./translate/bedrock";
 import { getModelEntrySync } from "./worker-model";
 import { recordWarmupCost } from "./cost-tracker";
 import { upstreamFetch } from "./fetch";
@@ -970,13 +971,7 @@ function isAnthropicFirstPartyHost(url: string): boolean {
  */
 export function resolveProfile(
   model: string | undefined,
-  protocol:
-    | "anthropic"
-    | "openai"
-    | "openai-responses"
-    | "bedrock"
-    | "vertex"
-    | undefined,
+  protocol: "anthropic" | "openai" | "openai-responses" | "vertex" | undefined,
   ttl: "5m" | "1h" | undefined,
   upstreamBase?: string,
   providerID?: string,
@@ -984,7 +979,7 @@ export function resolveProfile(
   if (!model || !protocol) return null;
 
   // Only Anthropic protocol for now — OpenAI has automatic prefix caching with
-  // no explicit warming API.
+  // no explicit warming API. (Bedrock rides the anthropic protocol via mantle.)
   if (protocol !== "anthropic") return null;
 
   // 🔴 Gate on Anthropic IDENTITY, not just the wire protocol. Anthropic-compat
@@ -1004,6 +999,24 @@ export function resolveProfile(
   // (api.anthropic.com) instead of leaving warmupHost = "" → wrongly skipped.
   const route = resolveUpstreamRoute(model);
   const warmupHost = upstreamBase || route?.url;
+
+  // AWS Bedrock via bedrock-mantle: prompt caching IS supported, so warm it.
+  // Unlike MiniMax/Fireworks (foreign anthropic-compat hosts we must NOT warm,
+  // because that would send the session key to api.anthropic.com), the mantle
+  // warmup hits the SESSION's own mantle host with the SESSION's Bedrock API
+  // key — the exact credential the real turns use. The warmup BODY already
+  // carries the mantle model id (the conversation path remapped it before it
+  // was stored as lastRequestBody), so we pass the CLIENT model id here purely
+  // for the models.dev cost lookup (the mantle `anthropic.<model>` id would not
+  // resolve to a pricing entry).
+  const isBedrockMantle =
+    providerID === "bedrock" ||
+    providerID === "amazon-bedrock" ||
+    (!!warmupHost && isBedrockMantleHost(warmupHost));
+  if (isBedrockMantle) {
+    return buildAnthropicProfile(model, ttl ?? "5m", upstreamBase);
+  }
+
   const isAnthropic =
     providerID === "anthropic" ||
     (!!warmupHost && isAnthropicFirstPartyHost(warmupHost));

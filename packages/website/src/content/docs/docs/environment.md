@@ -38,7 +38,6 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 
 | Variable | Description |
 |---|---|
-| `LORE_BEDROCK_PROFILE`<br>**Default:** `env.AWS_PROFILE` | Initialize the AWS credential provider chain. Called lazily on first Bedrock request. Resolution order follows the standard AWS SDK chain: 1. Environment variables (fromEnv) 2. ~/.aws/credentials with profile (fromIni) 3. ECS task role (fromContainerMetadata) 4. EC2 IMDS (fromInstanceMetadata) Each provider throws when credentials are unavailable; the chain tries them in order until one succeeds. @param profile - Optional AWS profile name (from AWS_PROFILE or LORE_BEDROCK_PROFILE) |
 | `LORE_BEDROCK_REGION` | _no description in source_ |
 | `LORE_DEBUG`<br>**Parser:** `isTruthy` | Whether to log requests. Default: false. Env: LORE_DEBUG |
 | `LORE_IDLE_TIMEOUT`<br>**Default:** `parsePositiveInt(60)`<br>**Parser:** `parsePositiveInt` | Idle timeout in seconds. After this many seconds with no active request, the gateway stops the per-session in-memory cache warmer and distillation loop to free resources. State is preserved in the DB so a new request resumes from where the session left off. Default: 60. Env: `LORE_IDLE_TIMEOUT`. |
