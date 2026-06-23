@@ -97,6 +97,26 @@ describe("outcome-reward: verifier detection (tool-trace)", () => {
       "biome check src",
       "pytest -q",
       "ruff check",
+      // Broadened recall (#497 follow-up): pm exec/dlx + bare runner, verify-named
+      // scripts, task runners, and more toolchains.
+      "pnpm exec biome check",
+      "pnpm exec tsc --noEmit",
+      "pnpm vitest run packages/core",
+      "pnpm dlx vitest",
+      "pnpm run ci",
+      "yarn coverage",
+      "npm run e2e",
+      "make test",
+      "make check",
+      "just lint",
+      "task typecheck",
+      "rake spec",
+      "bazel test //...",
+      "deno test",
+      "deno check main.ts",
+      "swift test",
+      "tox",
+      "pre-commit run --all-files",
     ]) {
       expect(isVerifierCall({ command: cmd })).toBe(true);
     }
@@ -119,6 +139,17 @@ describe("outcome-reward: verifier detection (tool-trace)", () => {
       "grep ruff pyproject.toml",
       "echo 'run mypy soon'",
       "git checkout -- pytest.ini",
+      // Broadened recall must NOT misfire on these non-verifier neighbors:
+      "make run", // running the app, not verifying
+      "make", // bare default target — ambiguous, not a verify signal
+      "pnpm install",
+      "pnpm add vitest", // installing a runner is not running it
+      "pnpm dlx prettier --write", // prettier is not in the runner set
+      "pnpm exec tsx scripts/migrate.ts", // tsx runs a script, not a verifier
+      "cargo run",
+      "go run main.go",
+      "npm ls jest",
+      "pnpm why eslint",
     ]) {
       expect(isVerifierCall({ command: cmd })).toBe(false);
     }
