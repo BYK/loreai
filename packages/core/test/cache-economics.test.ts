@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   type CacheEconomicsInput,
   decideCacheStrategy,
+  estimateMetaDistillCostPerCall,
   strategyWantsCompaction,
   strategyWantsWarming,
 } from "../src/cache-economics";
@@ -216,10 +217,6 @@ describe("decideCacheStrategy — meta-aware cost model (#947)", () => {
   // The adjustment is gated on (a) compressed < full (no point adjusting if no
   // compaction was possible in the first place) and (b) meta fields are
   // meaningful (default 0 → no-op, byte-identical to current behavior).
-  const META_DEFAULTS = {
-    metaThreshold: 0, // 0 = meta adjustment disabled (back-compat default)
-    metaDistillCostPerCall: 0, // 0 = no worker LLM cost added
-  };
 
   test("back-compat: missing meta fields → byte-identical to current behavior", () => {
     // Production session 0AVWKugtmhBKqLOX parameters; the call site doesn't
@@ -236,9 +233,12 @@ describe("decideCacheStrategy — meta-aware cost model (#947)", () => {
     expect(r.holdWarmCost).toBe(5.5 * 120_000 + 0.75 * 16 * 120_000);
     // coolBust = 0.75·(80k·12 + 15·80k) = 0.75·(960k + 1200k) = 1620k
     expect(r.coolBustCost).toBe(0.75 * (80_000 * 12 + 15 * 80_000));
-    // No expectedMetaBusts / metaBustCost fields surfaced yet (will be added
-    // when the result struct is extended). This test only checks the COST
-    // outputs match the pre-#947 math exactly.
+    // coolFullWrite = 0.75·(120k·12 + 15·120k) = 0.75·(1440k + 1800k) = 2430k
+    expect(r.coolFullWriteCost).toBe(0.75 * (120_000 * 12 + 15 * 120_000));
+    // No meta fields passed → expectedMetaBusts and metaBustCost are 0
+    // (the new fields are observability only, not part of the decision).
+    expect(r.expectedMetaBusts).toBe(0);
+    expect(r.metaBustCost).toBe(0);
   });
 
   test("adjustment applies: with meta fields, coolBustCost is strictly greater than baseline", () => {
@@ -288,6 +288,9 @@ describe("decideCacheStrategy — meta-aware cost model (#947)", () => {
     expect(adjusted.coolBustCost).toBe(baseline.coolBustCost);
     // And the no-compaction invariant still holds.
     expect(adjusted.coolBustCost).toBe(adjusted.coolFullWriteCost);
+    // The adjustment term itself is gated to 0 in this case.
+    expect(adjusted.metaBustCost).toBe(0);
+    expect(adjusted.expectedMetaBusts).toBe(0);
   });
 
   test("decision flip: high expectedFutureTurns / low metaThreshold flips cool-bust → hold-warm", () => {
@@ -487,5 +490,113 @@ describe("strategy helpers", () => {
     expect(strategyWantsCompaction("cool-bust")).toBe(true);
     expect(strategyWantsCompaction("hold-warm")).toBe(false);
     expect(strategyWantsCompaction("cool-full-write")).toBe(false);
+  });
+});
+
+describe("estimateMetaDistillCostPerCall — pure LLM cost helper", () => {
+  // The helper converts per-MTok worker model rates × estimated input/output
+  // token counts into a per-call $/token figure. Direct unit tests are
+  // load-bearing: the cache-economics tests pass metaDistillCostPerCall as a
+  // pre-computed number, so a wrong formula in the helper would not be caught
+  // by those tests (mutation E confirmed). The helpers's contract:
+
+  test("null workerModel → 0 (caller had no pricing)", () => {
+    expect(estimateMetaDistillCostPerCall(null, 20)).toBe(0);
+  });
+
+  test("undefined workerModel → 0", () => {
+    expect(estimateMetaDistillCostPerCall(undefined, 20)).toBe(0);
+  });
+
+  test("workerModel with no cost → 0", () => {
+    expect(estimateMetaDistillCostPerCall({ cost: {} }, 20)).toBe(0);
+  });
+
+  test("free model (cost.input=0) → 0 (falsy check)", () => {
+    // A free model has no input cost; the helper's truthy check on
+    // workerModel.cost.input suppresses the calculation. Conservative: a
+    // partially-free model (cost.input=0, cost.output=5) is treated as
+    // "unknown pricing" and returns 0 (falsy short-circuits the ||).
+    expect(
+      estimateMetaDistillCostPerCall({ cost: { input: 0, output: 0 } }, 20),
+    ).toBe(0);
+  });
+
+  test("metaThreshold = 0 → 0 (no meta configured)", () => {
+    expect(
+      estimateMetaDistillCostPerCall({ cost: { input: 3, output: 15 } }, 0),
+    ).toBe(0);
+  });
+
+  test("metaThreshold = -1 → 0 (defensive)", () => {
+    expect(
+      estimateMetaDistillCostPerCall({ cost: { input: 3, output: 15 } }, -1),
+    ).toBe(0);
+  });
+
+  test("non-finite metaThreshold → 0", () => {
+    expect(
+      estimateMetaDistillCostPerCall(
+        { cost: { input: 3, output: 15 } },
+        Number.NaN,
+      ),
+    ).toBe(0);
+    expect(
+      estimateMetaDistillCostPerCall(
+        { cost: { input: 3, output: 15 } },
+        Number.POSITIVE_INFINITY,
+      ),
+    ).toBe(0);
+  });
+
+  test("Anthropic Sonnet-4 rates at metaThreshold=20, defaults: 3,000 / 2,048", () => {
+    // Per-MTok → per-token: divide by 1_000_000.
+    // input cost = 3/1M = 3e-6 $/token
+    // output cost = 15/1M = 1.5e-5 $/token
+    // metaInput = 20 × 3,000 = 60,000 tokens
+    // metaOutput = 2,048 tokens
+    // cost = 60,000 × 3e-6 + 2,048 × 1.5e-5 = 0.18 + 0.03072 = 0.21072
+    expect(
+      estimateMetaDistillCostPerCall({ cost: { input: 3, output: 15 } }, 20),
+    ).toBeCloseTo(0.21072, 6);
+  });
+
+  test("Anthropic Opus-4 rates at metaThreshold=20: input=15, output=75", () => {
+    // input = 15/1M, output = 75/1M
+    // cost = 60,000 × 15/1M + 2,048 × 75/1M = 0.9 + 0.1536 = 1.0536
+    expect(
+      estimateMetaDistillCostPerCall({ cost: { input: 15, output: 75 } }, 20),
+    ).toBeCloseTo(1.0536, 6);
+  });
+
+  test("custom avgSegmentTokens / metaOutputTokens overrides propagate", () => {
+    // Smaller segments: metaInput = 5 × 1,000 = 5,000 tokens
+    // Smaller output: 1,024 tokens
+    // cost = 5,000 × 3e-6 + 1,024 × 1.5e-5 = 0.015 + 0.01536 = 0.03036
+    expect(
+      estimateMetaDistillCostPerCall(
+        { cost: { input: 3, output: 15 } },
+        5,
+        1_000, // avgSegmentTokens
+        1_024, // metaOutputTokens
+      ),
+    ).toBeCloseTo(0.03036, 6);
+  });
+
+  test("per-token scale: smaller values produce smaller costs (monotonicity)", () => {
+    const small = estimateMetaDistillCostPerCall(
+      { cost: { input: 3, output: 15 } },
+      5,
+    );
+    const large = estimateMetaDistillCostPerCall(
+      { cost: { input: 3, output: 15 } },
+      20,
+    );
+    // Sanity: higher metaThreshold → more input tokens → higher cost.
+    expect(large).toBeGreaterThan(small);
+    // The output-cost component is constant, so the ratio is bounded by
+    // `largeMetaThreshold / smallMetaThreshold = 4` (purely on the input
+    // component). Real ratio is lower (2.78× at default token counts).
+    expect(large).toBeLessThan(small * 4);
   });
 });

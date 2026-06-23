@@ -245,11 +245,14 @@ export function decideCacheStrategy(
   // #947 — meta-aware adjustment to coolBustCost only. A mid-flight meta-bust
   // destroys the compressed-prefix advantage: the remaining `futureTurns - T`
   // turns (where T is the bust time) pay `full · read` instead of
-  // `compressed · read`. Under a uniform-bust-time assumption (T ∈ [1, futureTurns]),
-  // the expected "remaining turns after bust" is `futureTurns / 2`, and the
-  // per-bust cache-read-miss cost is `(futureTurns / 2) × (full - compressed) × read`.
+  // `compressed · read`. Under a uniform-bust-time assumption (T ∈ [0, futureTurns],
+  // i.e. bust can happen as early as the first resumed turn), the expected
+  // "remaining turns after bust" is the integral of `futureTurns - T` over
+  // `[0, futureTurns]`, divided by `futureTurns`, which is exactly
+  // `futureTurns / 2` (no constant offset). The per-bust cache-read-miss cost
+  // is therefore `(futureTurns / 2) × (full - compressed) × read`.
   //
-  // The adjustment is gated on THREE conditions (any one failing → 0):
+  // The adjustment is gated on TWO conditions (any one failing → 0):
   //   1. `metaThreshold > 0` (caller actually configured meta). Default 0 (or
   //      non-finite) → no adjustment, byte-identical to the pre-#947 output.
   //   2. `compressed < full` (compaction advantage exists to lose). With
@@ -257,16 +260,16 @@ export function decideCacheStrategy(
   //      `coolBustCost === coolFullWriteCost`; adding any adjustment here
   //      would create a phantom bust and violate the "bust must never be
   //      reported as cheaper" invariant.
-  //   3. `futureTurns > 0` (otherwise there's no horizon over which to bust).
-  //      Defensive: an idle session returning with 0 remaining turns has
-  //      nothing for a meta-bust to disrupt.
+  // (`futureTurns > 0` is implicitly handled: `finiteNonNeg` floors to 0,
+  // and `clamp01(0/metaThreshold) = 0` collapses the term. The gate was
+  // removed because mutation testing confirmed it was dead code.)
   const metaThreshold = finiteNonNeg(input.metaThreshold ?? 0);
   const metaDistillCostPerCall = finiteNonNeg(
     input.metaDistillCostPerCall ?? 0,
   );
   const hasCompactionAdvantage = compressed < fullBodyTokens;
   const expectedBusts =
-    metaThreshold > 0 && hasCompactionAdvantage && futureTurns > 0
+    metaThreshold > 0 && hasCompactionAdvantage
       ? clamp01(futureTurns / metaThreshold)
       : 0;
   const bustCostPerBust =

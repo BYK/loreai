@@ -1305,6 +1305,8 @@ export function shouldWarm(
           `gradFull=${snap?.full ?? "?"} gradCompressed=${snap?.compressed ?? "?"} ` +
           `apiActual=${apiActual} pReturn=${pReturns.toFixed(2)} ` +
           `cycles=${expectedCycles.toFixed(1)} futureTurns=${expectedFutureTurns} ` +
+          `meta[threshold=${metaThreshold} expectedBusts=${result.expectedMetaBusts.toFixed(3)} ` +
+          `bustCost=${result.metaBustCost.toFixed(4)}] ` +
           `costs[hold=${result.holdWarmCost.toFixed(4)} ` +
           `coolBust=${result.coolBustCost.toFixed(4)} ` +
           `coolFull=${result.coolFullWriteCost.toFixed(4)}]`,
