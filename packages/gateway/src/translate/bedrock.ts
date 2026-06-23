@@ -30,6 +30,29 @@ export function bedrockMantleUrl(region: string): string {
 }
 
 /**
+ * Decide whether a resolved provider route should dispatch as bedrock-mantle:
+ * the route must carry `bedrockMantle: true` AND the effective wire protocol
+ * must be `"anthropic"`.
+ *
+ * The protocol guard is load-bearing: the bedrock-mantle base-URL build and the
+ * `body.model` remap live ONLY on the anthropic dispatch path. An ingress that
+ * force-pins a non-anthropic protocol (e.g. "openai-responses") carrying
+ * `X-Lore-Provider: bedrock` must NOT build the mantle URL — that would POST a
+ * non-Anthropic wire shape with an un-remapped model to the mantle endpoint.
+ * No real client produces that pairing (Bedrock Claude arrives as anthropic or
+ * openai ingress), so this is defense-in-depth — but it keeps the invariant
+ * `bedrockMantle ⟹ anthropic` explicit and is shared verbatim by the request
+ * path (forwardToUpstream) and the snapshot path (postResponse) so they can
+ * never diverge.
+ */
+export function isBedrockMantleDispatch(
+  route: { bedrockMantle?: boolean } | null | undefined,
+  effectiveProtocol: string,
+): boolean {
+  return route?.bedrockMantle === true && effectiveProtocol === "anthropic";
+}
+
+/**
  * True if `url` (a base URL or host) points at a bedrock-mantle endpoint
  * (`bedrock-mantle.<region>.api.aws`). Used to recognize a Bedrock session for
  * cache-warming even when no `X-Lore-Provider` header is present (e.g. a user

@@ -132,7 +132,11 @@ import {
   parseAnthropicResponseJSON,
   type AnthropicCacheOptions,
 } from "./translate/anthropic";
-import { bedrockMantleUrl, toMantleModelId } from "./translate/bedrock";
+import {
+  bedrockMantleUrl,
+  isBedrockMantleDispatch,
+  toMantleModelId,
+} from "./translate/bedrock";
 import {
   buildOpenAIUpstreamRequest,
   buildOpenAIResponse,
@@ -2947,15 +2951,13 @@ async function forwardToUpstream(
   // the base is the regional mantle endpoint and the wire protocol stays
   // `anthropic` (so the normal Anthropic path handles it; only body.model is
   // remapped below). An explicit X-Lore-Upstream-URL header still wins.
-  // Invariant: bedrock-mantle ALWAYS rides the anthropic wire path (the model
-  // remap below lives only in the anthropic branch). The bedrock provider route
-  // is protocol "anthropic", so this holds for anthropic/openai ingress — but
-  // an "openai-responses" ingress force-overrides effectiveProtocol (above), so
-  // gate on it explicitly: never build the mantle URL for a non-anthropic
-  // dispatch (which would POST the wrong wire shape with an un-remapped model).
-  const bedrockMantle =
-    providerRouteUsable?.bedrockMantle === true &&
-    effectiveProtocol === "anthropic";
+  // bedrock-mantle ALWAYS rides the anthropic wire path (the model remap below
+  // lives only in the anthropic branch). Shared with the snapshot path so the
+  // two can never diverge; see isBedrockMantleDispatch for the invariant.
+  const bedrockMantle = isBedrockMantleDispatch(
+    providerRouteUsable,
+    effectiveProtocol,
+  );
   const selfBuiltUpstreamUrl = bedrockMantle
     ? bedrockMantleUrl(config.bedrockRegion)
     : effectiveProtocol === "vertex"
@@ -4421,9 +4423,11 @@ function postResponse(
         : (lpRouteUsable?.protocol ??
           resolveUpstreamRoute(req.model)?.protocol ??
           req.protocol);
-    // Mirror forwardToUpstream's invariant: mantle only on an anthropic dispatch.
-    const lpBedrockMantle =
-      lpRouteUsable?.bedrockMantle === true && snapshotProtocol === "anthropic";
+    // Mirror forwardToUpstream exactly (same shared predicate).
+    const lpBedrockMantle = isBedrockMantleDispatch(
+      lpRouteUsable,
+      snapshotProtocol,
+    );
 
     // Self-URL-building routes derive their base from config (region) — mirror
     // effectiveUpstreamBase so the snapshot url isn't empty/wrong. bedrock-mantle

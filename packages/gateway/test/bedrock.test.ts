@@ -11,6 +11,7 @@
 import { describe, test, expect } from "vitest";
 import {
   bedrockMantleUrl,
+  isBedrockMantleDispatch,
   isBedrockMantleHost,
   toMantleModelId,
 } from "../src/translate/bedrock";
@@ -84,6 +85,37 @@ describe("isBedrockMantleHost", () => {
       isBedrockMantleHost("https://bedrock-mantle.us-east-1.api.aws.evil.com"),
     ).toBe(false);
     expect(isBedrockMantleHost("")).toBe(false);
+  });
+});
+
+describe("isBedrockMantleDispatch — gate (bedrockMantle ∧ anthropic)", () => {
+  test("true only for a bedrockMantle route on an anthropic dispatch", () => {
+    expect(isBedrockMantleDispatch({ bedrockMantle: true }, "anthropic")).toBe(
+      true,
+    );
+  });
+
+  test("false on a non-anthropic dispatch even for a bedrockMantle route", () => {
+    // The load-bearing guard: an openai-responses ingress carrying
+    // X-Lore-Provider: bedrock must NOT build the mantle URL / remap the model.
+    expect(
+      isBedrockMantleDispatch({ bedrockMantle: true }, "openai-responses"),
+    ).toBe(false);
+    expect(isBedrockMantleDispatch({ bedrockMantle: true }, "openai")).toBe(
+      false,
+    );
+    expect(isBedrockMantleDispatch({ bedrockMantle: true }, "vertex")).toBe(
+      false,
+    );
+  });
+
+  test("false for a non-bedrock route and for null/undefined", () => {
+    expect(isBedrockMantleDispatch({}, "anthropic")).toBe(false);
+    expect(isBedrockMantleDispatch({ bedrockMantle: false }, "anthropic")).toBe(
+      false,
+    );
+    expect(isBedrockMantleDispatch(null, "anthropic")).toBe(false);
+    expect(isBedrockMantleDispatch(undefined, "anthropic")).toBe(false);
   });
 });
 
