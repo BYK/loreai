@@ -1087,6 +1087,21 @@ export function createGatewayLLMClient(
         value: "",
       };
 
+      // Soft-pause this session's background work after a worker request
+      // failure (401/403, 402, persistent 4xx). Centralized so the bedrock
+      // exemption can't be missed at one of the call sites (it was, twice):
+      // a Bedrock failure is an AWS config/credential issue surfaced on the
+      // conversation path too — the user fixes it at the source — so pausing
+      // ALL of the session's distillation/curation is the wrong lever. The
+      // per-worker health ladder (recordWorkerFailure) still throttles a
+      // persistently failing worker. Does NOT cover the pre-loop no-route
+      // guard below, which is a distinct "cannot route at all" case.
+      const pauseSessionWorkersOnFailure = (): void => {
+        if (!isBedrockWorker && opts?.sessionID) {
+          markWorkerPaused(opts.sessionID);
+        }
+      };
+
       // Cross-provider fail-closed: the worker model's provider has no route
       // URL (unknown provider, or a local provider missing its explicit
       // upstream). We must NOT fall back to the session's foreign endpoint —
@@ -1576,8 +1591,7 @@ export function createGatewayLLMClient(
                 // surfaces the same error and the user fixes creds at the
                 // source). recordWorkerFailure above still throttles via the
                 // worker-health ladder if failures persist.
-                if (!isBedrockWorker && opts?.sessionID)
-                  markWorkerPaused(opts.sessionID);
+                pauseSessionWorkersOnFailure();
                 return null;
               }
 
@@ -1600,7 +1614,9 @@ export function createGatewayLLMClient(
                     ` — ${text.slice(0, 200)}`,
                 );
                 if (opts?.sessionID) {
-                  markWorkerPaused(opts.sessionID);
+                  // (AWS Bedrock never returns 402, so this is non-bedrock in
+                  // practice; routed through the helper for uniformity.)
+                  pauseSessionWorkersOnFailure();
                 } else {
                   // Session-less workers (e.g. entity-rebuild) can't be paused
                   // per-session — log so it's visible but don't escalate.
@@ -1661,7 +1677,14 @@ export function createGatewayLLMClient(
                 // same content is permanent. Stops the re-fire-every-turn loop;
                 // isWorkerCreditPaused() still probes once per 5 min so a fixed
                 // request recovers. Urgent calls are pause-exempt.
-                if (opts?.sessionID) markWorkerPaused(opts.sessionID);
+                //
+                // Skip for bedrock (consistent with the 401/403 path above): a
+                // persistent Bedrock 4xx (e.g. a bad model id → 400) surfaces on
+                // the conversation path too — the user fixes it at the source —
+                // so pausing ALL of this session's background work is the wrong
+                // lever. recordWorkerFailure above still throttles a persistently
+                // failing worker via the per-worker health ladder.
+                pauseSessionWorkersOnFailure();
                 return null;
               }
 
