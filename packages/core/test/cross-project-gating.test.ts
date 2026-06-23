@@ -214,28 +214,28 @@ describe("migration v38 demotion semantics", () => {
     const curatorId = uuidv7();
     db()
       .query(
-        `INSERT INTO knowledge (id, project_id, category, title, content, cross_project, confidence, created_at, updated_at, promotion_status, approval_status)
-         VALUES (?, ?, 'gotcha', ?, 'x', 1, 1.0, 0, 0, NULL, 'auto')`,
+        `INSERT INTO knowledge (id, project_id, category, title, content, cross_project, created_at, updated_at, promotion_status, approval_status, logical_id)
+         VALUES (?, ?, 'gotcha', ?, 'x', 1, 0, 0, NULL, 'auto', ?)`,
       )
-      .run(curatorId, pidA, `${TITLE_PREFIX}curator_default`);
+      .run(curatorId, pidA, `${TITLE_PREFIX}curator_default`, curatorId);
 
     // (2) auto-promoted row (earned cross-project) → SHOULD be preserved.
     const promotedId = uuidv7();
     db()
       .query(
-        `INSERT INTO knowledge (id, project_id, category, title, content, cross_project, confidence, created_at, updated_at, promotion_status, approval_status)
-         VALUES (?, ?, 'gotcha', ?, 'x', 1, 1.0, 0, 0, 'promoted', 'auto')`,
+        `INSERT INTO knowledge (id, project_id, category, title, content, cross_project, created_at, updated_at, promotion_status, approval_status, logical_id)
+         VALUES (?, ?, 'gotcha', ?, 'x', 1, 0, 0, 'promoted', 'auto', ?)`,
       )
-      .run(promotedId, pidA, `${TITLE_PREFIX}promoted`);
+      .run(promotedId, pidA, `${TITLE_PREFIX}promoted`, promotedId);
 
     // (3) true global (project_id NULL) → SHOULD be preserved.
     const globalId = uuidv7();
     db()
       .query(
-        `INSERT INTO knowledge (id, project_id, category, title, content, cross_project, confidence, created_at, updated_at, promotion_status, approval_status)
-         VALUES (?, NULL, 'preference', ?, 'x', 1, 1.0, 0, 0, NULL, 'auto')`,
+        `INSERT INTO knowledge (id, project_id, category, title, content, cross_project, created_at, updated_at, promotion_status, approval_status, logical_id)
+         VALUES (?, NULL, 'preference', ?, 'x', 1, 0, 0, NULL, 'auto', ?)`,
       )
-      .run(globalId, `${TITLE_PREFIX}global`);
+      .run(globalId, `${TITLE_PREFIX}global`, globalId);
 
     db().query(DEMOTION_SQL).run();
 

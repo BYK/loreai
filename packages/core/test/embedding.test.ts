@@ -286,7 +286,7 @@ describe("vectorSearch", () => {
 
     db()
       .query(
-        "INSERT INTO knowledge (id, project_id, category, title, content, confidence, created_at, updated_at, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, embedding, logical_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         "embed-a",
@@ -294,14 +294,14 @@ describe("vectorSearch", () => {
         "test",
         "Entry A",
         "Perfect match",
-        1.0,
         now,
         now,
         toBlob(vecA),
+        "embed-a",
       );
     db()
       .query(
-        "INSERT INTO knowledge (id, project_id, category, title, content, confidence, created_at, updated_at, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, embedding, logical_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         "embed-b",
@@ -309,14 +309,14 @@ describe("vectorSearch", () => {
         "test",
         "Entry B",
         "Orthogonal",
-        1.0,
         now,
         now,
         toBlob(vecB),
+        "embed-b",
       );
     db()
       .query(
-        "INSERT INTO knowledge (id, project_id, category, title, content, confidence, created_at, updated_at, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, embedding, logical_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         "embed-c",
@@ -324,10 +324,10 @@ describe("vectorSearch", () => {
         "test",
         "Entry C",
         "Similar",
-        1.0,
         now,
         now,
         toBlob(vecC),
+        "embed-c",
       );
 
     const query = new Float32Array([1, 0, 0]);
@@ -350,7 +350,7 @@ describe("vectorSearch", () => {
       const vec = new Float32Array([Math.random(), Math.random(), 0]);
       db()
         .query(
-          "INSERT INTO knowledge (id, project_id, category, title, content, confidence, created_at, updated_at, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, embedding, logical_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .run(
           `embed-limit-${i}`,
@@ -358,10 +358,10 @@ describe("vectorSearch", () => {
           "test",
           `Entry ${i}`,
           `Content ${i}`,
-          1.0,
           now,
           now,
           toBlob(vec),
+          `embed-limit-${i}`,
         );
     }
 
@@ -376,7 +376,7 @@ describe("vectorSearch", () => {
 
     db()
       .query(
-        "INSERT INTO knowledge (id, project_id, category, title, content, confidence, created_at, updated_at, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, embedding, logical_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         "embed-yes",
@@ -384,17 +384,26 @@ describe("vectorSearch", () => {
         "test",
         "Has Embedding",
         "Content",
-        1.0,
         now,
         now,
         toBlob(new Float32Array([1, 0, 0])),
+        "embed-yes",
       );
 
     db()
       .query(
-        "INSERT INTO knowledge (id, project_id, category, title, content, confidence, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, logical_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
       )
-      .run("embed-no", pid, "test", "No Embedding", "Content", 1.0, now, now);
+      .run(
+        "embed-no",
+        pid,
+        "test",
+        "No Embedding",
+        "Content",
+        now,
+        now,
+        "embed-no",
+      );
 
     const query = new Float32Array([1, 0, 0]);
     const results = vectorSearch(query, 10);
@@ -409,7 +418,7 @@ describe("vectorSearch", () => {
 
     db()
       .query(
-        "INSERT INTO knowledge (id, project_id, category, title, content, confidence, created_at, updated_at, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, embedding, logical_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         "embed-high",
@@ -417,15 +426,15 @@ describe("vectorSearch", () => {
         "test",
         "High Confidence",
         "Content",
-        1.0,
         now,
         now,
         toBlob(new Float32Array([1, 0, 0])),
+        "embed-high",
       );
 
     db()
       .query(
-        "INSERT INTO knowledge (id, project_id, category, title, content, confidence, created_at, updated_at, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, embedding, logical_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         "embed-low",
@@ -433,11 +442,18 @@ describe("vectorSearch", () => {
         "test",
         "Low Confidence",
         "Content",
-        0.1,
         now,
         now,
         toBlob(new Float32Array([1, 0, 0])),
+        "embed-low",
       );
+    // confidence lives on the knowledge_meta register now (A2 3b); 0.1 is below
+    // the relevance floor so vectorSearch must skip it.
+    db()
+      .query(
+        "INSERT INTO knowledge_meta (logical_id, confidence, last_reinforced_at, updated_at) VALUES (?, ?, ?, ?)",
+      )
+      .run("embed-low", 0.1, now, now);
 
     const query = new Float32Array([1, 0, 0]);
     const results = vectorSearch(query, 10);
@@ -571,7 +587,7 @@ describeLocalProvider("LocalProvider integration", () => {
     for (let i = 0; i < texts.length; i++) {
       db()
         .query(
-          "INSERT INTO knowledge (id, project_id, category, title, content, confidence, created_at, updated_at, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, embedding, logical_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .run(
           `local-${i}`,
@@ -579,10 +595,10 @@ describeLocalProvider("LocalProvider integration", () => {
           "test",
           `Entry ${i}`,
           texts[i],
-          1.0,
           now,
           now,
           toBlob(vecs[i]),
+          `local-${i}`,
         );
     }
 
@@ -670,7 +686,7 @@ describe("checkConfigChange", () => {
 
     db()
       .query(
-        "INSERT INTO knowledge (id, project_id, category, title, content, confidence, created_at, updated_at, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, embedding, logical_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         "cc-1",
@@ -678,10 +694,10 @@ describe("checkConfigChange", () => {
         "test",
         "Test",
         "Content",
-        1.0,
         now,
         now,
         toBlob(new Float32Array([1, 0, 0])),
+        "cc-1",
       );
 
     // Store a different fingerprint (simulating a previous config)

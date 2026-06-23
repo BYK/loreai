@@ -50,7 +50,10 @@ function getEntry(id: string): {
 } {
   return db()
     .query(
-      "SELECT logical_id, confidence, cross_project, category, project_id FROM knowledge WHERE id = ?",
+      // confidence lives on the knowledge_meta register now (A2 3b), keyed by logical_id.
+      `SELECT k.logical_id, m.confidence, k.cross_project, k.category, k.project_id
+         FROM knowledge k JOIN knowledge_meta m ON m.logical_id = k.logical_id
+        WHERE k.id = ?`,
     )
     .get(id) as {
     logical_id: string;

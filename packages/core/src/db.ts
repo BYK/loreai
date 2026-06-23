@@ -1384,7 +1384,100 @@ const MIGRATIONS: string[] = [
   CREATE INDEX IF NOT EXISTS idx_ksi_logical_verdict
     ON knowledge_session_injections (logical_id, verdict);
   `,
+
+  `
+  -- Version 55: extract the mutable metric register into knowledge_meta (A2
+  -- sub-PR 3b, #823). confidence + last_reinforced_at are MUTABLE per-entry values
+  -- that were living on the IMMUTABLE append-only knowledge version rows (every
+  -- decay/reinforce/credit flipped the current version's content hash, re-pushing
+  -- the ENTIRE content row to ship a 0.05 delta; appendVersion had to copy them
+  -- forward). They move to a register keyed by the STABLE logical_id, JOINed back
+  -- into knowledge_current so the read surface is unchanged. BEHAVIOR-NEUTRAL.
+  --
+  -- This migration is DESTRUCTIVE (DROP COLUMN) and the backfill reads the about-
+  -- to-be-dropped column, so it is NOT idempotent as plain SQL: a partial apply
+  -- (crash after DROP COLUMN, before the post-loop version bump) would re-run this
+  -- and fail "no such column: confidence", boot-looping. It is therefore run as a
+  -- column-presence-aware JS step (applyKnowledgeMetaRegister), special-cased in
+  -- migrate() by KNOWLEDGE_META_MIGRATION_INDEX — the same pattern VACUUM uses.
+  -- This string is intentionally a no-op marker so MIGRATIONS.length still counts.
+  `,
 ];
+
+// Index of the migration whose work is performed by a column-presence-aware JS
+// step instead of plain SQL, because it is destructive (DROP COLUMN) and its
+// backfill reads the dropped column — re-running the raw SQL after a partial
+// apply would throw "no such column" and boot-loop (mirrors VACUUM's special
+// casing). The MIGRATIONS entry at this index is a no-op documentation marker.
+const KNOWLEDGE_META_MIGRATION_INDEX = 54; // 0-based index of version-55
+
+/**
+ * Idempotent, column-presence-aware application of the v55 knowledge_meta register
+ * extraction (A2 sub-PR 3b, #823). Safe to run any number of times and in any
+ * partial-apply state:
+ *  - creates knowledge_meta if absent;
+ *  - if `confidence` still exists on knowledge (pre/mid-drop): backfills the
+ *    register from the current versions' real values, then drops both columns;
+ *  - if already dropped (re-run after a partial apply): backfills any missing
+ *    register rows at the default 1.0 (the live values are gone);
+ *  - (re)builds knowledge_current to LEFT JOIN the register.
+ * Called from BOTH the forward migration loop and recoverMissingObjects, so a
+ * crash between the DROP COLUMN and the version bump can never boot-loop.
+ */
+function applyKnowledgeMetaRegister(database: Database): void {
+  // updated_at is the register's own clock (future pull cursor / merge tiebreak),
+  // bumped by metric CHANGES (reinforce/decay/credit/curator set) but NOT by
+  // markInjected (a relevance touch) — so an injection stays sync-silent.
+  database.exec(`CREATE TABLE IF NOT EXISTS knowledge_meta (
+    logical_id         TEXT PRIMARY KEY,
+    confidence         REAL NOT NULL DEFAULT 1.0,
+    last_reinforced_at INTEGER,
+    updated_at         INTEGER NOT NULL DEFAULT 0
+  );`);
+  const hasConfidence = (
+    database.query("PRAGMA table_info(knowledge)").all() as Array<{
+      name: string;
+    }>
+  ).some((c) => c.name === "confidence");
+  // The view references confidence via k.* — drop it before touching the columns.
+  database.exec("DROP VIEW IF EXISTS knowledge_current;");
+  if (hasConfidence) {
+    // Backfill one register row per logical entry from its CURRENT version's
+    // values (idx_knowledge_one_current guarantees one is_current=1 row each).
+    database.exec(
+      `INSERT OR IGNORE INTO knowledge_meta (logical_id, confidence, last_reinforced_at, updated_at)
+         SELECT logical_id, confidence, last_reinforced_at, updated_at
+           FROM knowledge WHERE is_current = 1;`,
+    );
+    try {
+      database.exec("ALTER TABLE knowledge DROP COLUMN confidence;");
+    } catch {
+      // already dropped by a prior partial run
+    }
+    try {
+      database.exec("ALTER TABLE knowledge DROP COLUMN last_reinforced_at;");
+    } catch {
+      // already dropped by a prior partial run
+    }
+  } else {
+    // Columns already gone (re-run): the live values are unrecoverable, so any
+    // entry missing a register row degrades to the default 1.0 (matches the view).
+    database.exec(
+      `INSERT OR IGNORE INTO knowledge_meta (logical_id, confidence, updated_at)
+         SELECT logical_id, 1.0, updated_at FROM knowledge WHERE is_current = 1;`,
+    );
+  }
+  // LEFT JOIN + COALESCE default (not INNER): a current entry must NEVER vanish
+  // from reads just because its register row is missing — it degrades to
+  // confidence 1.0 (the old column default). last_reinforced_at stays NULL when
+  // absent (decay's COALESCE(last_reinforced_at, updated_at) falls back to the
+  // content clock).
+  database.exec(`CREATE VIEW knowledge_current AS
+    SELECT k.*, COALESCE(m.confidence, 1.0) AS confidence, m.last_reinforced_at
+      FROM knowledge k
+      LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id
+     WHERE k.is_current = 1 AND k.is_deleted = 0;`);
+}
 
 /**
  * Resolved path of the SQLite database file. Reads
@@ -1611,6 +1704,10 @@ function migrate(database: Database) {
       // startup's "PRAGMA auto_vacuum = INCREMENTAL" is a no-op (already set).
       database.exec("PRAGMA auto_vacuum = INCREMENTAL");
       database.exec("VACUUM");
+    } else if (i === KNOWLEDGE_META_MIGRATION_INDEX) {
+      // Destructive (DROP COLUMN) + non-idempotent-as-SQL: run the column-aware
+      // JS step so a partial apply can't boot-loop on re-run (see the fn doc).
+      applyKnowledgeMetaRegister(database);
     } else {
       try {
         database.exec(MIGRATIONS[i]);
@@ -1875,9 +1972,12 @@ function recoverMissingObjects(database: Database) {
       ON knowledge(logical_id) WHERE is_current = 1;
     CREATE INDEX IF NOT EXISTS idx_knowledge_project_current
       ON knowledge(project_id) WHERE is_current = 1 AND is_deleted = 0;
-    CREATE VIEW IF NOT EXISTS knowledge_current AS
-      SELECT k.* FROM knowledge k WHERE k.is_current = 1 AND k.is_deleted = 0;
   `);
+  // Version 55: knowledge_meta metric register + JOIN view (A2 sub-PR 3b). Shares
+  // the SAME column-presence-aware, idempotent routine the forward migration uses,
+  // so a fully-migrated DB self-heals a missing register/view and a partial apply
+  // is finished here too.
+  applyKnowledgeMetaRegister(database);
   // Version 36: session project binding. Recover each column independently in
   // case a partial ALTER (e.g. the first succeeded, the second was skipped on a
   // prior failure) left the table missing a column.

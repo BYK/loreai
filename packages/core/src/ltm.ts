@@ -69,9 +69,42 @@ export type KnowledgeEntry = {
 const KNOWLEDGE_COLS =
   "id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at, metadata, created_by, updated_by, sensitivity, promotion_status, promoted_at, approval_status, approved_by, approved_at, source_user_id, source_entry_id, last_accessed_at, worker_provider_id, worker_model_id, last_reinforced_at, logical_id";
 
-/** Same columns with table alias prefix for use in JOIN queries. */
+/** Same columns with table alias prefix for use in JOIN queries. `confidence` and
+ *  `last_reinforced_at` live on the metric register (alias `m`), not the immutable
+ *  knowledge version row (A2 sub-PR 3b, #823) — so every query using this MUST also
+ *  `LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id` (LEFT + COALESCE
+ *  default mirrors the knowledge_current view, so a meta-less row never vanishes). */
 const KNOWLEDGE_COLS_K =
-  "k.id, k.project_id, k.category, k.title, k.content, k.source_session, k.cross_project, k.confidence, k.created_at, k.updated_at, k.metadata, k.created_by, k.updated_by, k.sensitivity, k.promotion_status, k.promoted_at, k.approval_status, k.approved_by, k.approved_at, k.source_user_id, k.source_entry_id, k.last_accessed_at, k.worker_provider_id, k.worker_model_id, k.last_reinforced_at, k.logical_id";
+  "k.id, k.project_id, k.category, k.title, k.content, k.source_session, k.cross_project, COALESCE(m.confidence, 1.0) AS confidence, k.created_at, k.updated_at, k.metadata, k.created_by, k.updated_by, k.sensitivity, k.promotion_status, k.promoted_at, k.approval_status, k.approved_by, k.approved_at, k.source_user_id, k.source_entry_id, k.last_accessed_at, k.worker_provider_id, k.worker_model_id, m.last_reinforced_at, k.logical_id";
+
+/**
+ * Upsert the metric-register row for a logical entry (A2 sub-PR 3b, #823).
+ * `confidence` + `last_reinforced_at` are the mutable per-entry metrics, keyed by
+ * the STABLE logical_id (one row across all versions), not the immutable knowledge
+ * version rows. `create()` mints the row; the lifecycle ops below mutate it.
+ *
+ * `updated_at` is the register's own clock (future sync cursor / CRDT tiebreak):
+ * a synced-metric CHANGE (confidence) bumps it; a pure relevance touch
+ * (`last_reinforced_at` alone, via markInjected) must NOT — so injection stays
+ * sync-silent. ON CONFLICT keeps it idempotent for cross-machine re-create.
+ */
+function insertMeta(
+  logicalId: string,
+  confidence: number,
+  lastReinforcedAt: number | null,
+  now: number,
+): void {
+  db()
+    .query(
+      `INSERT INTO knowledge_meta (logical_id, confidence, last_reinforced_at, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(logical_id) DO UPDATE SET
+         confidence = excluded.confidence,
+         last_reinforced_at = excluded.last_reinforced_at,
+         updated_at = excluded.updated_at`,
+    )
+    .run(logicalId, confidence, lastReinforcedAt, now);
+}
 
 export function create(input: {
   projectPath?: string;
@@ -175,8 +208,8 @@ export function create(input: {
     input.confidence != null ? Math.max(0, Math.min(1, input.confidence)) : 1.0;
   db()
     .query(
-      `INSERT INTO knowledge (id, logical_id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at, created_by, sensitivity, worker_provider_id, worker_model_id, last_reinforced_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO knowledge (id, logical_id, project_id, category, title, content, source_session, cross_project, created_at, updated_at, created_by, sensitivity, worker_provider_id, worker_model_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -187,15 +220,16 @@ export function create(input: {
       input.content,
       input.session ?? null,
       crossProject ? 1 : 0,
-      confidence,
       now,
       now,
       input.createdBy ?? null,
       input.sensitivity ?? "normal",
       input.workerProviderID ?? null,
       input.workerModelID ?? null,
-      now, // last_reinforced_at — a fresh entry starts its decay clock now
     );
+  // The mutable metrics live on the register, keyed by logical_id (A2 3b). A fresh
+  // entry starts its decay clock now (last_reinforced_at = now).
+  insertMeta(id, confidence, now, now);
 
   // Fire-and-forget: embed for vector search (errors logged, never thrown)
   if (embedding.isAvailable()) {
@@ -247,19 +281,21 @@ export function appendVersion(
     db().query("UPDATE knowledge SET is_current = 0 WHERE id = ?").run(cur.id);
     db()
       .query(
+        // confidence/last_reinforced_at are NOT copied — they live on the register
+        // (knowledge_meta), keyed by the stable logical_id, unchanged by an append.
         `INSERT INTO knowledge (
            id, project_id, category, title, content, source_session, cross_project,
-           confidence, created_at, updated_at, metadata, embedding, created_by,
+           created_at, updated_at, metadata, embedding, created_by,
            updated_by, sensitivity, promotion_status, promoted_at, approval_status,
            approved_by, approved_at, source_user_id, source_entry_id, last_accessed_at,
-           worker_provider_id, worker_model_id, last_reinforced_at,
+           worker_provider_id, worker_model_id,
            logical_id, version, is_deleted, is_current)
          SELECT
            ?, project_id, COALESCE(?, category), COALESCE(?, title), COALESCE(?, content),
-           source_session, cross_project, confidence, created_at, ?, metadata, NULL,
+           source_session, cross_project, created_at, ?, metadata, NULL,
            created_by, updated_by, sensitivity, promotion_status, promoted_at,
            approval_status, approved_by, approved_at, source_user_id, source_entry_id,
-           last_accessed_at, worker_provider_id, worker_model_id, last_reinforced_at,
+           last_accessed_at, worker_provider_id, worker_model_id,
            logical_id, version + 1, ?, 1
          FROM knowledge WHERE id = ?`,
       )
@@ -376,14 +412,11 @@ export function update(
     }
   }
 
-  const sets: string[] = [];
-  const params: unknown[] = [];
-  if (input.confidence !== undefined) {
-    // Clamp to [0.0, 1.0] — an LLM-provided value outside this range would
-    // give disproportionate scoring weight (>1) or silently soft-delete (<0.2).
-    sets.push("confidence = ?");
-    params.push(Math.max(0, Math.min(1, input.confidence)));
-  }
+  const now = Date.now();
+  // Mutable METADATA on the current version row (NOT confidence — that's a metric
+  // register field now, A2 3b). updated_at always bumps (a re-confirmation).
+  const sets: string[] = ["updated_at = ?"];
+  const params: unknown[] = [now];
   if (input.updatedBy !== undefined) {
     sets.push("updated_by = ?");
     params.push(input.updatedBy);
@@ -392,13 +425,6 @@ export function update(
     sets.push("sensitivity = ?");
     params.push(input.sensitivity);
   }
-  const now = Date.now();
-  sets.push("updated_at = ?");
-  params.push(now);
-  // Any update is a re-confirmation (curator edit, dedup-merge, .lore.md import)
-  // → reset the decay clock so a freshly-touched entry never ages out (v48).
-  sets.push("last_reinforced_at = ?");
-  params.push(now);
   params.push(logicalId);
   // Target the CURRENT version (the freshly-appended one if content changed).
   db()
@@ -406,6 +432,24 @@ export function update(
       `UPDATE knowledge SET ${sets.join(", ")} WHERE logical_id = ? AND is_current = 1`,
     )
     .run(...(params as [string, ...string[]]));
+
+  // Metric register (A2 3b): any update is a re-confirmation → reset the decay
+  // clock so a freshly-touched entry never ages out (v48). Bump the register's
+  // sync clock (updated_at) ONLY when the synced metric (confidence) actually
+  // changed — a content-only edit must not churn metric sync. Clamp confidence to
+  // [0,1] (an out-of-range LLM value would over-weight scoring or silently delete).
+  const metaSets: string[] = ["last_reinforced_at = ?"];
+  const metaParams: unknown[] = [now];
+  if (input.confidence !== undefined) {
+    metaSets.push("confidence = ?", "updated_at = ?");
+    metaParams.push(Math.max(0, Math.min(1, input.confidence)), now);
+  }
+  metaParams.push(logicalId);
+  db()
+    .query(
+      `UPDATE knowledge_meta SET ${metaSets.join(", ")} WHERE logical_id = ?`,
+    )
+    .run(...(metaParams as [unknown, ...unknown[]]));
 
   // Re-embed the new current version only when a content change was appended.
   if (embedding.isAvailable() && appended) {
@@ -557,16 +601,18 @@ export function findFuzzyDuplicate(input: {
       input.projectId !== null
         ? `SELECT k.id, k.title FROM knowledge_fts f
          CROSS JOIN knowledge k ON k.rowid = f.rowid
+         LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id
          WHERE knowledge_fts MATCH ?
          AND (k.project_id = ? OR k.cross_project = 1)
-         AND k.confidence > 0.2
+         AND COALESCE(m.confidence, 1.0) > 0.2
          ${excludeClause}
          ORDER BY bm25(knowledge_fts, ?, ?, ?) LIMIT 5`
         : `SELECT k.id, k.title FROM knowledge_fts f
          CROSS JOIN knowledge k ON k.rowid = f.rowid
+         LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id
          WHERE knowledge_fts MATCH ?
          AND (k.project_id IS NULL OR k.cross_project = 1)
-         AND k.confidence > 0.2
+         AND COALESCE(m.confidence, 1.0) > 0.2
          ${excludeClause}
          ORDER BY bm25(knowledge_fts, ?, ?, ?) LIMIT 5`;
 
@@ -836,9 +882,13 @@ export const OUTCOME_BOOST_CEILING = 0.8;
 export function markInjected(ids: string[]): void {
   if (ids.length === 0) return;
   const placeholders = ids.map(() => "?").join(",");
+  // last_reinforced_at lives on the metric register (A2 3b); resolve the passed
+  // version ids to their logical_ids. A pure relevance touch — does NOT bump the
+  // register's updated_at, so an injection stays sync-silent.
   db()
     .query(
-      `UPDATE knowledge SET last_reinforced_at = ? WHERE is_current = 1 AND id IN (${placeholders})`,
+      `UPDATE knowledge_meta SET last_reinforced_at = ?
+        WHERE logical_id IN (SELECT logical_id FROM knowledge WHERE id IN (${placeholders}))`,
     )
     .run(Date.now(), ...ids);
 }
@@ -851,13 +901,16 @@ export function markInjected(ids: string[]): void {
  * reward (#497: test/build pass → boost).
  */
 export function reinforce(id: string, delta: number = REINFORCE_STEP): void {
+  // Metric register (A2 3b): a confidence change bumps the register's sync clock.
+  // `id` may be any version id — resolve to the stable logical_id.
+  const now = Date.now();
   db()
     .query(
-      `UPDATE knowledge
-       SET confidence = MAX(0, MIN(1, confidence + ?)), last_reinforced_at = ?
-       WHERE id = ? AND is_current = 1`,
+      `UPDATE knowledge_meta
+       SET confidence = MAX(0, MIN(1, confidence + ?)), last_reinforced_at = ?, updated_at = ?
+       WHERE logical_id = (SELECT logical_id FROM knowledge WHERE id = ?)`,
     )
-    .run(delta, Date.now(), id);
+    .run(delta, now, now, id);
 }
 
 /**
@@ -943,17 +996,25 @@ export function creditSessionOutcome(
     // cross_project = 0 guard is a real backstop (a PROMOTED entry keeps its
     // origin project_id but has cross_project = 1 — it must never be adjusted);
     // is_deleted = 0 skips death-certificate versions.
+    // Confidence lives on the register (A2 3b); the eligibility filters
+    // (is_current/is_deleted/cross_project/project_id) are knowledge-row facts, so
+    // gate via a knowledge_current subquery (it already pins is_current=1 AND
+    // is_deleted=0 and exposes confidence via the JOIN). A confidence change bumps
+    // the register's sync clock (updated_at).
     if (verdict === "pass") {
       db()
         .query(
-          `UPDATE knowledge
-           SET confidence = MIN(?, confidence + ?), last_reinforced_at = ?
-           WHERE is_current = 1 AND is_deleted = 0 AND cross_project = 0
-             AND project_id = ? AND confidence < ? AND logical_id IN (${placeholders})`,
+          `UPDATE knowledge_meta
+           SET confidence = MIN(?, confidence + ?), last_reinforced_at = ?, updated_at = ?
+           WHERE logical_id IN (
+             SELECT logical_id FROM knowledge_current
+              WHERE cross_project = 0 AND project_id = ? AND confidence < ?
+                AND logical_id IN (${placeholders}))`,
         )
         .run(
           OUTCOME_BOOST_CEILING,
           OUTCOME_REWARD,
+          now,
           now,
           pid,
           OUTCOME_BOOST_CEILING,
@@ -962,12 +1023,13 @@ export function creditSessionOutcome(
     } else {
       db()
         .query(
-          `UPDATE knowledge
-           SET confidence = MAX(0, confidence - ?), last_reinforced_at = ?
-           WHERE is_current = 1 AND is_deleted = 0 AND cross_project = 0
-             AND project_id = ? AND logical_id IN (${placeholders})`,
+          `UPDATE knowledge_meta
+           SET confidence = MAX(0, confidence - ?), last_reinforced_at = ?, updated_at = ?
+           WHERE logical_id IN (
+             SELECT logical_id FROM knowledge_current
+              WHERE cross_project = 0 AND project_id = ? AND logical_id IN (${placeholders}))`,
         )
-        .run(OUTCOME_PENALTY, now, pid, ...ids);
+        .run(OUTCOME_PENALTY, now, now, pid, ...ids);
     }
 
     // Mark this session's injections credited (so a later idle tick is a no-op)
@@ -1050,14 +1112,22 @@ export function decayProject(
   // (<= floor) are invisible everywhere and reaped by pruneDeadEntries; matching
   // them here would re-apply a no-op MAX(0, …) and inflate the returned/logged
   // count with rows whose confidence didn't actually change. (Seer review.)
+  // Confidence is a register field (A2 3b); the eligibility facts (project_id,
+  // cross_project, confidence floor, grace window) come from knowledge_current
+  // (which pins is_current=1 and exposes confidence/last_reinforced_at via the
+  // JOIN; `updated_at` here is the content row's, NOT the register's, so the bump
+  // below can't feed back into the grace check). Decay does NOT reset
+  // last_reinforced_at; it bumps the register's sync clock (updated_at).
   const res = db()
     .query(
-      `UPDATE knowledge
-       SET confidence = MAX(0, confidence - ?)
-       WHERE is_current = 1 AND project_id = ? AND cross_project = 0 AND confidence > ?
-         AND COALESCE(last_reinforced_at, updated_at) < ?`,
+      `UPDATE knowledge_meta
+       SET confidence = MAX(0, confidence - ?), updated_at = ?
+       WHERE logical_id IN (
+         SELECT logical_id FROM knowledge_current
+          WHERE project_id = ? AND cross_project = 0 AND confidence > ?
+            AND COALESCE(last_reinforced_at, updated_at) < ?)`,
     )
-    .run(DECAY_STEP, pid, DEAD_CONFIDENCE_FLOOR, cutoff) as {
+    .run(DECAY_STEP, now, pid, DEAD_CONFIDENCE_FLOOR, cutoff) as {
     changes?: number | bigint;
   };
   db()
@@ -1174,8 +1244,9 @@ function scoreEntriesFTS(sessionContext: string): Map<string, number> {
         `SELECT k.id, bm25(knowledge_fts, ?, ?, ?) as rank
           FROM knowledge_fts f
           CROSS JOIN knowledge k ON k.rowid = f.rowid
+         LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id
           WHERE knowledge_fts MATCH ?
-          AND k.confidence > 0.2`,
+          AND COALESCE(m.confidence, 1.0) > 0.2`,
       )
       .all(title, content, category, q) as Array<{
       id: string;
@@ -1783,14 +1854,16 @@ export function search(input: {
   const ftsSQL = pid
     ? `SELECT ${KNOWLEDGE_COLS_K} FROM knowledge_fts f
        CROSS JOIN knowledge k ON k.rowid = f.rowid
+         LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id
        WHERE knowledge_fts MATCH ?
        AND (k.project_id = ? OR k.project_id IS NULL OR k.cross_project = 1)
-       AND k.confidence > 0.2
+       AND COALESCE(m.confidence, 1.0) > 0.2
        ORDER BY bm25(knowledge_fts, ?, ?, ?) LIMIT ?`
     : `SELECT ${KNOWLEDGE_COLS_K} FROM knowledge_fts f
        CROSS JOIN knowledge k ON k.rowid = f.rowid
+         LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id
        WHERE knowledge_fts MATCH ?
-       AND k.confidence > 0.2
+       AND COALESCE(m.confidence, 1.0) > 0.2
        ORDER BY bm25(knowledge_fts, ?, ?, ?) LIMIT ?`;
 
   const { title, content, category } = ftsWeights();
@@ -1835,14 +1908,16 @@ export function searchScored(input: {
   const ftsSQL = pid
     ? `SELECT ${KNOWLEDGE_COLS_K}, bm25(knowledge_fts, ?, ?, ?) as rank FROM knowledge_fts f
        CROSS JOIN knowledge k ON k.rowid = f.rowid
+         LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id
        WHERE knowledge_fts MATCH ?
        AND (k.project_id = ? OR k.project_id IS NULL OR k.cross_project = 1)
-       AND k.confidence > 0.2
+       AND COALESCE(m.confidence, 1.0) > 0.2
        ORDER BY rank LIMIT ?`
     : `SELECT ${KNOWLEDGE_COLS_K}, bm25(knowledge_fts, ?, ?, ?) as rank FROM knowledge_fts f
        CROSS JOIN knowledge k ON k.rowid = f.rowid
+         LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id
        WHERE knowledge_fts MATCH ?
-       AND k.confidence > 0.2
+       AND COALESCE(m.confidence, 1.0) > 0.2
        ORDER BY rank LIMIT ?`;
 
   try {
@@ -1887,11 +1962,12 @@ export function searchScoredOtherProjects(input: {
   // Also exclude entries with no project_id (global) — already included.
   const ftsSQL = `SELECT ${KNOWLEDGE_COLS_K}, bm25(knowledge_fts, ?, ?, ?) as rank FROM knowledge_fts f
      CROSS JOIN knowledge k ON k.rowid = f.rowid
+         LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id
      WHERE knowledge_fts MATCH ?
      AND k.project_id IS NOT NULL
      AND k.project_id != ?
      AND k.cross_project = 0
-     AND k.confidence > 0.2
+     AND COALESCE(m.confidence, 1.0) > 0.2
      ORDER BY rank LIMIT ?`;
 
   try {
@@ -1982,9 +2058,14 @@ export function getWorkerSource(
  * @returns Number of entries pruned
  */
 export function pruneOversized(maxLength: number): number {
+  // confidence is a register field (A2 3b); the size filter is a knowledge-row
+  // fact, so gate via knowledge_current (current+live, exposes content+confidence).
   const result = db()
     .query(
-      "UPDATE knowledge SET confidence = 0, updated_at = ? WHERE is_current = 1 AND LENGTH(content) > ? AND confidence > 0",
+      `UPDATE knowledge_meta SET confidence = 0, updated_at = ?
+        WHERE logical_id IN (
+          SELECT logical_id FROM knowledge_current
+           WHERE LENGTH(content) > ? AND confidence > 0)`,
     )
     .run(Date.now(), maxLength);
   // node:sqlite returns `changes` as `number | bigint`; coerce for cross-runtime parity.
@@ -2213,9 +2294,10 @@ export function check(projectPath: string): IntegrityIssue[] {
         .query(
           `SELECT k.id, k.title FROM knowledge_fts f
            CROSS JOIN knowledge k ON k.rowid = f.rowid
+         LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id
            WHERE knowledge_fts MATCH ?
            AND k.id != ?
-           AND k.confidence > 0.2
+           AND COALESCE(m.confidence, 1.0) > 0.2
            ORDER BY bm25(knowledge_fts, ?, ?, ?) LIMIT 3`,
         )
         .all(q, entry.id, title, content, category) as Array<{

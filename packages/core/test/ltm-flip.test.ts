@@ -45,9 +45,10 @@ describe("A2 sub-PR 2b-2b: update()/remove() append flip", () => {
     expect(cur?.confidence).toBe(0.7);
     expect(cur?.id).not.toBe(id); // current row moved to the new version
     // The prior version is preserved, immutable, with its original content.
+    // (confidence is a per-logical register value now, not a per-version column.)
     const v1 = db()
-      .query("SELECT content, confidence FROM knowledge WHERE id = ?")
-      .get(id) as { content: string; confidence: number };
+      .query("SELECT content FROM knowledge WHERE id = ?")
+      .get(id) as { content: string };
     expect(v1.content).toBe("v1body");
   });
 

@@ -75,8 +75,11 @@ const ROW_SEP = "\x1f";
 /**
  * Volatile / local-only columns never sent over the wire: BLOB `embedding`
  * (re-derived on restore), `last_accessed_at` and `last_reinforced_at`
- * (per-machine access / reinforcement tracking — the synced `confidence` already
- * carries the meaningful decayed state).
+ * (per-machine access / reinforcement clocks). These are still listed here as a
+ * belt-and-suspenders denylist even though, post-A2-3b, they are no longer
+ * `knowledge` columns at all (`confidence`/`last_reinforced_at` moved to the
+ * `knowledge_meta` register, which syncs separately in 3b-2) — `syncedColumns()`
+ * already intersects with the live schema, so they cannot leak regardless.
  */
 const PAYLOAD_EXCLUDE = new Set([
   "embedding",
@@ -110,7 +113,10 @@ export const SYNCED_TABLES: Record<SyncTier, SyncTableMeta[]> = {
         "content",
         "source_session",
         "cross_project",
-        "confidence",
+        // confidence moved to the knowledge_meta register (A2 sub-PR 3b, #823) —
+        // it is no longer a knowledge column, and syncs as its own convergent
+        // table in 3b-2. (syncedColumns() also filters by the live schema, so a
+        // stale entry here would be dropped — removing it keeps the registry honest.)
         "metadata",
         "created_by",
         "updated_by",
@@ -757,6 +763,18 @@ function insertKnowledgeVersion(
       `INSERT INTO knowledge (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`,
     )
     .run(...cols.map((c) => vals[c] as never));
+  // Uphold the local model invariant (A2 3b): every logical entry has a
+  // knowledge_meta register row, so subsequent local reinforce/decay/update —
+  // which UPDATE knowledge_meta WHERE logical_id=… — affect a row instead of
+  // silently no-op'ing. INSERT OR IGNORE never clobbers an existing (possibly
+  // converged) confidence on re-pull/version-append. confidence is NOT a synced
+  // knowledge column in 3b-1, so a pulled entry defaults to 1.0 here until the
+  // register itself syncs (3b-2). updated_at=0 marks it as never-locally-changed.
+  db()
+    .query(
+      "INSERT OR IGNORE INTO knowledge_meta (logical_id, confidence, last_reinforced_at, updated_at) VALUES (?, 1.0, NULL, 0)",
+    )
+    .run(ident.logicalId);
 }
 
 /**

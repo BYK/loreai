@@ -93,32 +93,35 @@ describe("A2 sub-PR 2b-2a: append-only invariants + partial-mirror obligations",
     expect(match("gammaword")).toBe(0); // deleted — not indexed
   });
 
-  const confOf = (where: string, ...args: unknown[]) =>
+  // Confidence is a per-logical-entry register value now (A2 3b), keyed by
+  // logical_id — there is no per-version confidence. The pruneOversized/decay
+  // tests therefore assert the register value reflects the CURRENT version's
+  // eligibility (an oversized/decayable SUPERSEDED version must NOT drive it).
+  const confOf = (logicalId: string): number =>
     (
       db()
-        .query(`SELECT confidence FROM knowledge WHERE ${where}`)
-        .get(...(args as [])) as { confidence: number }
+        .query("SELECT confidence FROM knowledge_meta WHERE logical_id = ?")
+        .get(logicalId) as { confidence: number }
     ).confidence;
 
-  test("pruneOversized never touches a superseded (oversized) version", () => {
-    // v1 is oversized, v2 (current) is small. Discriminating: without the
-    // is_current filter, pruneOversized would zero the superseded v1.
+  test("pruneOversized keys off the CURRENT version, ignoring an oversized superseded one", () => {
+    // v1 is oversized, v2 (current) is small. Discriminating: if pruneOversized
+    // matched superseded versions (queried base knowledge instead of
+    // knowledge_current), it would zero the register confidence.
     const id = mk("OversizeEntry", "x".repeat(5000));
-    const v2 = ltm.appendVersion(id, { content: "small" });
+    ltm.appendVersion(id, { content: "small" });
     ltm.pruneOversized(1000);
-    expect(confOf("id = ?", v2)).toBe(1.0); // current is small → not oversized
-    expect(confOf("logical_id = ? AND is_current = 0", id)).toBe(1.0); // superseded → untouched
+    expect(confOf(id)).toBe(1.0); // current is small → entry not pruned
   });
 
-  test("decayProject decays only the current version, never a superseded one", () => {
+  test("decayProject decays the entry via its current version only", () => {
     const id = mk("DecayEntry", "body");
-    const v2 = ltm.appendVersion(id, { content: "body2" });
-    // A future `now` makes both versions age past the decay grace window without
+    ltm.appendVersion(id, { content: "body2" });
+    // A future `now` makes the entry age past the decay grace window without
     // touching timestamps; the interval gate (last_decay_at=0) also opens.
     const future = Date.now() + 60 * 24 * 60 * 60 * 1000;
     const decayed = ltm.decayProject(PROJECT, future);
-    expect(decayed).toBe(1); // exactly the current version
-    expect(confOf("id = ?", v2)).toBeLessThan(1.0); // current decayed
-    expect(confOf("logical_id = ? AND is_current = 0", id)).toBe(1.0); // superseded untouched
+    expect(decayed).toBe(1); // exactly one logical entry, counted once (not per-version)
+    expect(confOf(id)).toBeLessThan(1.0); // decayed
   });
 });

@@ -62,10 +62,13 @@ describe("ltm.pruneDeadEntries", () => {
       scope: "project",
     });
     db()
-      .query(
-        "UPDATE knowledge SET cross_project = 1, confidence = 0.1 WHERE id = ?",
-      )
+      .query("UPDATE knowledge SET cross_project = 1 WHERE id = ?")
       .run(promoted);
+    db()
+      .query(
+        "UPDATE knowledge_meta SET confidence = ?, updated_at = ? WHERE logical_id = (SELECT logical_id FROM knowledge WHERE id = ?)",
+      )
+      .run(0.1, Date.now(), promoted);
 
     const pruned = ltm.pruneDeadEntries(PROJECT);
 
@@ -140,10 +143,13 @@ describe("ltm.pruneDeadEntriesAllProjects", () => {
       scope: "project",
     });
     db()
-      .query(
-        "UPDATE knowledge SET cross_project = 1, confidence = 0.0 WHERE id = ?",
-      )
+      .query("UPDATE knowledge SET cross_project = 1 WHERE id = ?")
       .run(promotedDead);
+    db()
+      .query(
+        "UPDATE knowledge_meta SET confidence = ?, updated_at = ? WHERE logical_id = (SELECT logical_id FROM knowledge WHERE id = ?)",
+      )
+      .run(0.0, Date.now(), promotedDead);
     // A true global (project_id NULL) dead entry — shared.
     const globalDead = ltm.create({
       category: "preference",

@@ -33,10 +33,25 @@ describe("knowledge integrity checking", () => {
       const now = Date.now();
       db()
         .query(
-          `INSERT INTO knowledge (id, project_id, category, title, content, cross_project, confidence, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 0, 1.0, ?, ?)`,
+          `INSERT INTO knowledge (id, project_id, category, title, content, cross_project, created_at, updated_at, logical_id)
+           VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)`,
         )
-        .run("empty-test-id", pid, "decision", "Empty Entry", "   ", now, now);
+        .run(
+          "empty-test-id",
+          pid,
+          "decision",
+          "Empty Entry",
+          "   ",
+          now,
+          now,
+          "empty-test-id",
+        );
+      // confidence lives on the knowledge_meta register now (A2 3b).
+      db()
+        .query(
+          "INSERT INTO knowledge_meta (logical_id, confidence, last_reinforced_at, updated_at) VALUES (?, ?, ?, ?)",
+        )
+        .run("empty-test-id", 1.0, now, now);
 
       const issues = ltm.check(PROJECT);
       const empty = issues.filter((i) => i.type === "empty");
@@ -50,8 +65,8 @@ describe("knowledge integrity checking", () => {
 
       db()
         .query(
-          `INSERT INTO knowledge (id, project_id, category, title, content, cross_project, confidence, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 0, 1.0, ?, ?)`,
+          `INSERT INTO knowledge (id, project_id, category, title, content, cross_project, created_at, updated_at, logical_id)
+           VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)`,
         )
         .run(
           "dup-a",
@@ -61,12 +76,18 @@ describe("knowledge integrity checking", () => {
           "Use forward-only migrations",
           now,
           now,
+          "dup-a",
         );
+      db()
+        .query(
+          "INSERT INTO knowledge_meta (logical_id, confidence, last_reinforced_at, updated_at) VALUES (?, ?, ?, ?)",
+        )
+        .run("dup-a", 1.0, now, now);
 
       db()
         .query(
-          `INSERT INTO knowledge (id, project_id, category, title, content, cross_project, confidence, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 0, 1.0, ?, ?)`,
+          `INSERT INTO knowledge (id, project_id, category, title, content, cross_project, created_at, updated_at, logical_id)
+           VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)`,
         )
         .run(
           "dup-b",
@@ -76,7 +97,13 @@ describe("knowledge integrity checking", () => {
           "Updated migration approach",
           now,
           now,
+          "dup-b",
         );
+      db()
+        .query(
+          "INSERT INTO knowledge_meta (logical_id, confidence, last_reinforced_at, updated_at) VALUES (?, ?, ?, ?)",
+        )
+        .run("dup-b", 1.0, now, now);
 
       const issues = ltm.check(PROJECT);
       const duplicates = issues.filter((i) => i.type === "duplicate");

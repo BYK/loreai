@@ -36,6 +36,7 @@ import {
   seedOutbox,
   setSyncState,
   SYNCED_TABLES,
+  syncedColumns,
   withApplying,
 } from "../src/sync-data";
 import * as ltm from "../src/ltm";
@@ -109,18 +110,21 @@ describe("applyRemoteKnowledge — append-only pull apply (A2, #823)", () => {
   });
 
   test("metadata-only change (same content) converges in place, no new version", () => {
-    applyRemoteKnowledge(remoteRow("m1", "body", { confidence: 0.5 }));
-    applyRemoteKnowledge(remoteRow("m1", "body", { confidence: 0.9 }));
+    // confidence moved to the knowledge_meta register (A2 3b) and is no longer a
+    // knowledge sync field, so use another synced metadata column (sensitivity) to
+    // exercise the in-place convergence path.
+    applyRemoteKnowledge(remoteRow("m1", "body", { sensitivity: "normal" }));
+    applyRemoteKnowledge(remoteRow("m1", "body", { sensitivity: "sensitive" }));
     expect(versions("m1")).toHaveLength(1);
     expect(
       (
         db()
           .query(
-            "SELECT confidence FROM knowledge_current WHERE COALESCE(logical_id, id) = ?",
+            "SELECT sensitivity FROM knowledge_current WHERE COALESCE(logical_id, id) = ?",
           )
-          .get("m1") as { confidence: number }
-      ).confidence,
-    ).toBe(0.9);
+          .get("m1") as { sensitivity: string }
+      ).sensitivity,
+    ).toBe("sensitive");
   });
 
   test("delete → death-cert (no live current); re-delete is a no-op", () => {
@@ -545,33 +549,26 @@ describe("contentHash", () => {
     expect(h2).not.toBe(h1);
   });
 
-  test("changes when confidence changes (decay must propagate to sync)", () => {
-    // decayProject lowers confidence without bumping updated_at; the content
-    // hash must still change so the row is pushed to other clients.
-    insertKnowledge("k1", "T", "C");
-    const h1 = contentHash(
-      "knowledge",
-      getRowById("knowledge", "k1") as Record<string, unknown>,
-    );
-    db().query("UPDATE knowledge SET confidence = 0.5 WHERE id='k1'").run();
-    const h2 = contentHash(
-      "knowledge",
-      getRowById("knowledge", "k1") as Record<string, unknown>,
-    );
-    expect(h2).not.toBe(h1);
-  });
-
-  test("stable when only last_reinforced_at changes (injection must not churn sync)", () => {
-    // markInjected fires every turn on the hot path; it must not alter the hash
-    // or every injected entry would be re-pushed each turn.
+  test("confidence is NO LONGER a knowledge sync column (moved to knowledge_meta, A2 3b)", () => {
+    // confidence + last_reinforced_at were relocated to the knowledge_meta register
+    // (sub-PR 3b). They must not appear in knowledge's synced columns — confidence
+    // syncs via its own convergent table in 3b-2; the knowledge content row no
+    // longer churns when only a metric changes.
+    const cols = syncedColumns("knowledge");
+    expect(cols).not.toContain("confidence");
+    expect(cols).not.toContain("last_reinforced_at");
+    // A confidence change (via the register) therefore does NOT alter the knowledge
+    // content hash — the content row is not re-pushed for a metric nudge.
     insertKnowledge("k1", "T", "C");
     const h1 = contentHash(
       "knowledge",
       getRowById("knowledge", "k1") as Record<string, unknown>,
     );
     db()
-      .query("UPDATE knowledge SET last_reinforced_at = ? WHERE id='k1'")
-      .run(now() + 12345);
+      .query(
+        "INSERT OR REPLACE INTO knowledge_meta (logical_id, confidence, updated_at) VALUES ('k1', 0.5, ?)",
+      )
+      .run(now());
     const h2 = contentHash(
       "knowledge",
       getRowById("knowledge", "k1") as Record<string, unknown>,

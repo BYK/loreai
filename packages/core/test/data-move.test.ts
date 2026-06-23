@@ -64,20 +64,27 @@ function insertKnowledge(
   id: string,
   opts?: { sourceSession?: string; crossProject?: boolean },
 ): void {
+  const now = Date.now();
   db()
     .query(
-      `INSERT INTO knowledge (id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at, logical_id)
-       VALUES (?, ?, 'pattern', 'Test Knowledge', 'test content', ?, ?, 0.8, ?, ?, ?)`,
+      `INSERT INTO knowledge (id, project_id, category, title, content, source_session, cross_project, created_at, updated_at, logical_id)
+       VALUES (?, ?, 'pattern', 'Test Knowledge', 'test content', ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
       projectId,
       opts?.sourceSession ?? null,
       opts?.crossProject ? 1 : 0,
-      Date.now(),
-      Date.now(),
+      now,
+      now,
       id, // logical_id = id, matching create()/production
     );
+  // confidence lives on the knowledge_meta register now (A2 3b), keyed by logical_id.
+  db()
+    .query(
+      "INSERT INTO knowledge_meta (logical_id, confidence, last_reinforced_at, updated_at) VALUES (?, ?, ?, ?)",
+    )
+    .run(id, 0.8, now, now);
 }
 
 function countInProject(table: string, projectId: string): number {

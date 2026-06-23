@@ -750,10 +750,16 @@ describe("search", () => {
       ] as const) {
         db()
           .query(
-            `INSERT OR REPLACE INTO knowledge (id, project_id, category, title, content, confidence, created_at, updated_at)
-             VALUES (?, ?, 'decision', ?, ?, 1.0, ?, ?)`,
+            `INSERT OR REPLACE INTO knowledge (id, project_id, category, title, content, created_at, updated_at, logical_id)
+             VALUES (?, ?, 'decision', ?, ?, ?, ?, ?)`,
           )
-          .run(id, pid, title, content, now, now);
+          .run(id, pid, title, content, now, now, id);
+        // confidence lives on the knowledge_meta register now (A2 3b).
+        db()
+          .query(
+            "INSERT OR REPLACE INTO knowledge_meta (logical_id, confidence, last_reinforced_at, updated_at) VALUES (?, ?, ?, ?)",
+          )
+          .run(id, 1.0, now, now);
       }
     });
 

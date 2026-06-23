@@ -47,6 +47,7 @@ describe("db", () => {
     expect(names).toContain("temporal_messages");
     expect(names).toContain("distillations");
     expect(names).toContain("knowledge");
+    expect(names).toContain("knowledge_meta");
     expect(names).toContain("schema_version");
     expect(names).toContain("session_state");
     expect(names).toContain("metadata");
@@ -58,7 +59,74 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(54);
+    expect(row.version).toBe(55);
+  });
+
+  test("v55: confidence/last_reinforced_at moved to knowledge_meta, exposed via view", () => {
+    // The columns are GONE from the base knowledge table...
+    const kcols = (
+      db().query("PRAGMA table_info(knowledge)").all() as Array<{
+        name: string;
+      }>
+    ).map((c) => c.name);
+    expect(kcols).not.toContain("confidence");
+    expect(kcols).not.toContain("last_reinforced_at");
+    // ...live on the register...
+    const mcols = (
+      db().query("PRAGMA table_info(knowledge_meta)").all() as Array<{
+        name: string;
+      }>
+    ).map((c) => c.name);
+    expect(mcols).toEqual(
+      expect.arrayContaining([
+        "logical_id",
+        "confidence",
+        "last_reinforced_at",
+        "updated_at",
+      ]),
+    );
+    // ...and reappear (same SHAPE) on the read view via the JOIN.
+    const vcols = (
+      db().query("PRAGMA table_info(knowledge_current)").all() as Array<{
+        name: string;
+      }>
+    ).map((c) => c.name);
+    expect(vcols).toContain("confidence");
+    expect(vcols).toContain("last_reinforced_at");
+  });
+
+  test("v55 is re-run-safe after a partial apply (no 'no such column' boot-loop)", () => {
+    // Regression for the partial-v55 boot-loop: migrations are NOT transaction-
+    // wrapped, so a crash AFTER `ALTER TABLE knowledge DROP COLUMN confidence` but
+    // BEFORE the post-loop version bump leaves confidence gone with schema_version
+    // still < 55. The forward loop then re-runs v55; a plain-SQL backfill that
+    // SELECTs confidence would throw "no such column: confidence" (not swallowed by
+    // the duplicate-column catch) → re-thrown → permanent boot-loop. The column-
+    // aware JS step (applyKnowledgeMetaRegister) must make the re-run a clean no-op.
+    const d = db(); // already at v55: confidence dropped, register present
+    // Simulate the crashed-mid-v55 on-disk state.
+    d.exec("UPDATE schema_version SET version = 54");
+    d.exec("DROP VIEW IF EXISTS knowledge_current");
+    d.exec("DROP TABLE IF EXISTS knowledge_meta");
+
+    // Re-open — migrate() re-runs the v55 step. Must NOT throw.
+    close();
+    const fresh = db();
+    const ver = fresh.query("SELECT version FROM schema_version").get() as {
+      version: number;
+    };
+    expect(ver.version).toBe(55);
+    // Register + JOIN view were rebuilt and are queryable (confidence exposed).
+    expect(
+      fresh
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_meta'",
+        )
+        .get(),
+    ).not.toBeNull();
+    expect(() =>
+      fresh.query("SELECT confidence FROM knowledge_current LIMIT 1").all(),
+    ).not.toThrow();
   });
 
   test("session_prompt_deltas persist ordered selector/content rows (v42)", () => {

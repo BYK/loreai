@@ -332,7 +332,12 @@ describe("buildIdleWorkHandler", () => {
     await handler(sessionID, makeSessionState({ sessionID, projectPath }));
 
     const conf = (
-      db().query("SELECT confidence FROM knowledge WHERE id = ?").get(id) as {
+      db()
+        .query(
+          // confidence lives on the knowledge_meta register now (A2 3b), keyed by logical_id.
+          "SELECT m.confidence FROM knowledge k JOIN knowledge_meta m ON m.logical_id = k.logical_id WHERE k.id = ?",
+        )
+        .get(id) as {
         confidence: number;
       }
     ).confidence;
@@ -351,7 +356,12 @@ describe("buildIdleWorkHandler", () => {
     await handler(sessionID, makeSessionState({ sessionID, projectPath }));
 
     const conf = (
-      db().query("SELECT confidence FROM knowledge WHERE id = ?").get(id) as {
+      db()
+        .query(
+          // confidence lives on the knowledge_meta register now (A2 3b), keyed by logical_id.
+          "SELECT m.confidence FROM knowledge k JOIN knowledge_meta m ON m.logical_id = k.logical_id WHERE k.id = ?",
+        )
+        .get(id) as {
         confidence: number;
       }
     ).confidence;

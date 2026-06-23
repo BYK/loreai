@@ -1752,10 +1752,16 @@ describe("loreFile.enabled toggle", () => {
     const pid = ensureProject(PROJECT);
     db()
       .query(
-        `INSERT OR REPLACE INTO knowledge (id, project_id, category, title, content, confidence, created_at, updated_at)
-         VALUES (?, ?, 'decision', 'Test entry', 'Test content', 1.0, datetime('now'), datetime('now'))`,
+        `INSERT OR REPLACE INTO knowledge (id, project_id, category, title, content, created_at, updated_at, logical_id)
+         VALUES (?, ?, 'decision', 'Test entry', 'Test content', datetime('now'), datetime('now'), ?)`,
       )
-      .run(id, pid);
+      .run(id, pid, id);
+    // confidence lives on the knowledge_meta register now (A2 3b), keyed by logical_id.
+    db()
+      .query(
+        "INSERT OR REPLACE INTO knowledge_meta (logical_id, confidence, last_reinforced_at, updated_at) VALUES (?, ?, ?, ?)",
+      )
+      .run(id, 1.0, Date.now(), Date.now());
   }
 
   // Reset config to defaults after each test in this block.

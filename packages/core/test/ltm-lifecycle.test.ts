@@ -40,7 +40,9 @@ describe("ltm reinforcement", () => {
     });
     // Backdate the clock so we can observe a forward move.
     db()
-      .query("UPDATE knowledge SET last_reinforced_at = 1000 WHERE id = ?")
+      .query(
+        "UPDATE knowledge_meta SET last_reinforced_at = 1000 WHERE logical_id = (SELECT logical_id FROM knowledge WHERE id = ?)",
+      )
       .run(id);
     const beforeConf = ltm.get(id)?.confidence;
 
@@ -63,7 +65,9 @@ describe("ltm reinforcement", () => {
       scope: "project",
     });
     db()
-      .query("UPDATE knowledge SET last_reinforced_at = 1000 WHERE id = ?")
+      .query(
+        "UPDATE knowledge_meta SET last_reinforced_at = 1000 WHERE logical_id = (SELECT logical_id FROM knowledge WHERE id = ?)",
+      )
       .run(id);
     ltm.update(id, { content: "y" });
     expect(reinforcedAt(id)).toBeGreaterThan(1000);
@@ -79,7 +83,9 @@ describe("ltm reinforcement", () => {
       confidence: 0.5,
     });
     db()
-      .query("UPDATE knowledge SET last_reinforced_at = 1000 WHERE id = ?")
+      .query(
+        "UPDATE knowledge_meta SET last_reinforced_at = 1000 WHERE logical_id = (SELECT logical_id FROM knowledge WHERE id = ?)",
+      )
       .run(id);
     ltm.reinforce(id, 0.2);
     expect(ltm.get(id)?.confidence).toBeCloseTo(0.7, 5);
@@ -116,7 +122,9 @@ describe("ltm.decayProject", () => {
     // `fresh` as reinforced just before the run so only `stale` decays.
     const decayNow = base + ltm.DECAY_GRACE_MS + 60_000;
     db()
-      .query("UPDATE knowledge SET last_reinforced_at = ? WHERE id = ?")
+      .query(
+        "UPDATE knowledge_meta SET last_reinforced_at = ? WHERE logical_id = (SELECT logical_id FROM knowledge WHERE id = ?)",
+      )
       .run(decayNow - 1000, fresh); // reinforced after the cutoff
 
     const decayed = ltm.decayProject(PROJECT, decayNow);
@@ -175,7 +183,11 @@ describe("ltm.decayProject", () => {
       scope: "project",
     });
     // dead is below the relevance floor; both are long-unreinforced.
-    db().query("UPDATE knowledge SET confidence = 0.15 WHERE id = ?").run(dead);
+    db()
+      .query(
+        "UPDATE knowledge_meta SET confidence = ?, updated_at = ? WHERE logical_id = (SELECT logical_id FROM knowledge WHERE id = ?)",
+      )
+      .run(0.15, Date.now(), dead);
 
     const decayed = ltm.decayProject(
       PROJECT,
@@ -200,8 +212,11 @@ describe("ltm.decayProject", () => {
     });
     // Promote in place (origin project_id retained) and backdate reinforcement.
     db()
+      .query("UPDATE knowledge SET cross_project = 1 WHERE id = ?")
+      .run(promoted);
+    db()
       .query(
-        "UPDATE knowledge SET cross_project = 1, last_reinforced_at = 1000 WHERE id = ?",
+        "UPDATE knowledge_meta SET last_reinforced_at = 1000 WHERE logical_id = (SELECT logical_id FROM knowledge WHERE id = ?)",
       )
       .run(promoted);
     ltm.decayProject(PROJECT, base + ltm.DECAY_GRACE_MS + 60_000);
@@ -265,10 +280,14 @@ describe("ltm.evictLowestValue", () => {
       confidence: 0.5,
     });
     db()
-      .query("UPDATE knowledge SET last_reinforced_at = 1000 WHERE id = ?")
+      .query(
+        "UPDATE knowledge_meta SET last_reinforced_at = 1000 WHERE logical_id = (SELECT logical_id FROM knowledge WHERE id = ?)",
+      )
       .run(older);
     db()
-      .query("UPDATE knowledge SET last_reinforced_at = 9000 WHERE id = ?")
+      .query(
+        "UPDATE knowledge_meta SET last_reinforced_at = 9000 WHERE logical_id = (SELECT logical_id FROM knowledge WHERE id = ?)",
+      )
       .run(newer);
 
     const evicted = ltm.evictLowestValue(PROJECT, 1);
@@ -353,7 +372,9 @@ describe("preference reinforcement on injection (forSession fast path)", () => {
     });
     // Simulate a long-unreinforced entry that WOULD decay on the next pass.
     db()
-      .query("UPDATE knowledge SET last_reinforced_at = 1000 WHERE id = ?")
+      .query(
+        "UPDATE knowledge_meta SET last_reinforced_at = 1000 WHERE logical_id = (SELECT logical_id FROM knowledge WHERE id = ?)",
+      )
       .run(id);
 
     // The preference-only fast path is the ONLY injection path for preferences
