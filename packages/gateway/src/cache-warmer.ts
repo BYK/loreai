@@ -1987,7 +1987,14 @@ export async function executeWarmup(
       // a fresh credential arrives. Prevents unbounded 401 spam every 30s.
       if (response.status === 401 || response.status === 403) {
         authDisabledSessions.add(state.sessionID);
-        markAuthStale(state.sessionID, state.lastUpstream?.providerID);
+        // Bedrock auth is SigV4 — there is NO client credential to refresh, so
+        // do NOT mark the session's client auth stale (a SigV4/region/config
+        // hiccup must not contaminate the client-credential staleness state).
+        // Disabling this session's warmup is enough: a 403 here is a persistent
+        // AWS config error that won't self-heal mid-session anyway.
+        if (!isBedrock) {
+          markAuthStale(state.sessionID, state.lastUpstream?.providerID);
+        }
         recordWorkerFailure(state.sessionID, "cache-warmer", "auth-rejected");
         log.warn(
           `cache-warmer: auth error ${response.status} — disabling warmup for ` +

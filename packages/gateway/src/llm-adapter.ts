@@ -1041,16 +1041,6 @@ export function createGatewayLLMClient(
         return null;
       }
 
-      const cred = getAuth(opts?.sessionID, model.providerID);
-      if (!cred) {
-        log.warn("no auth credentials available for worker call");
-        recordWorkerFailure(
-          opts?.sessionID ?? "_unknown",
-          opts?.workerID ?? "unknown",
-          "no-auth",
-        );
-        return null;
-      }
       const upstreamOverride = opts?.upstreamUrl;
       // The explicit protocol hint comes from the SESSION's upstream. Only
       // honor it when the worker model belongs to the same provider as the
@@ -1074,6 +1064,28 @@ export function createGatewayLLMClient(
         opts?.upstreamProviderID,
       );
       const maxTokens = opts?.maxTokens ?? DEFAULT_WORKER_MAX_TOKENS;
+
+      // Bedrock auth is AWS SigV4, NOT a client credential — the worker request
+      // is signed in the retry loop below. So a Bedrock worker must NOT be
+      // skipped for a missing client cred (mirrors executeWarmup, which also
+      // exempts bedrock). For all other protocols a credential is required.
+      // The placeholder is NEVER sent: buildBedrockWorkerRequest ignores `cred`
+      // and the api-key mismatch guard is skipped for bedrock-runtime hosts.
+      const isBedrockWorker = protocol === "bedrock";
+      const cred = getAuth(opts?.sessionID, model.providerID);
+      if (!cred && !isBedrockWorker) {
+        log.warn("no auth credentials available for worker call");
+        recordWorkerFailure(
+          opts?.sessionID ?? "_unknown",
+          opts?.workerID ?? "unknown",
+          "no-auth",
+        );
+        return null;
+      }
+      const effectiveCred: AuthCredential = cred ?? {
+        scheme: "api-key",
+        value: "",
+      };
 
       // Cross-provider fail-closed: the worker model's provider has no route
       // URL (unknown provider, or a local provider missing its explicit
@@ -1118,11 +1130,11 @@ export function createGatewayLLMClient(
         // above already failed closed for unroutable providers).
       }
       if (
-        cred.scheme === "api-key" &&
+        effectiveCred.scheme === "api-key" &&
         !hasDedicatedKey &&
         shouldCheckProtocolMismatch
       ) {
-        const isAnthropicKey = cred.value.startsWith("sk-ant-");
+        const isAnthropicKey = effectiveCred.value.startsWith("sk-ant-");
         if (target.protocol === "anthropic" && !isAnthropicKey) {
           log.warn(
             `worker protocol mismatch: ${target.protocol} target with non-Anthropic API key — skipping (model=${model.modelID}, worker=${opts?.workerID ?? "unknown"})`,
@@ -1150,7 +1162,7 @@ export function createGatewayLLMClient(
       // Build protocol-specific request
       let req = buildWorkerRequest(
         target,
-        cred,
+        effectiveCred,
         model,
         system,
         user,
@@ -1489,7 +1501,7 @@ export function createGatewayLLMClient(
                 // Re-resolve: credential may have been refreshed by a concurrent client request
                 const freshCred = getAuth(opts?.sessionID, model.providerID);
                 const credentialChanged =
-                  !!freshCred && freshCred.value !== cred.value;
+                  !!freshCred && freshCred.value !== effectiveCred.value;
                 if (credentialChanged && attempt === 0) {
                   // Credential changed — rebuild request and retry once
                   log.info(
@@ -1513,7 +1525,7 @@ export function createGatewayLLMClient(
                 log.error(
                   `worker upstream auth error: ${response.status} ${response.statusText}` +
                     ` — url=${target.url} model=${model.providerID}/${model.modelID}` +
-                    ` cred=${cred.scheme} worker=${opts?.workerID ?? "unknown"}` +
+                    ` cred=${effectiveCred.scheme} worker=${opts?.workerID ?? "unknown"}` +
                     ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}` +
                     ` — ${text}`,
                 );
@@ -1618,7 +1630,7 @@ export function createGatewayLLMClient(
                 log.error(
                   `worker upstream request failed: ${response.status} ${response.statusText}` +
                     ` — url=${target.url} model=${model.providerID}/${model.modelID}` +
-                    ` cred=${cred.scheme} worker=${opts?.workerID ?? "unknown"}` +
+                    ` cred=${effectiveCred.scheme} worker=${opts?.workerID ?? "unknown"}` +
                     ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}` +
                     ` — ${text}`,
                 );
@@ -1684,7 +1696,7 @@ export function createGatewayLLMClient(
               const exhaustionMsg =
                 `worker upstream request failed after ${maxRetries + 1} attempts: ${response.status} ${response.statusText}` +
                 ` — url=${target.url} model=${model.providerID}/${model.modelID}` +
-                ` cred=${cred.scheme} worker=${opts?.workerID ?? "unknown"}` +
+                ` cred=${effectiveCred.scheme} worker=${opts?.workerID ?? "unknown"}` +
                 ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}` +
                 ` — ${text}`;
               if (urgent) {

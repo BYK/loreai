@@ -1261,4 +1261,64 @@ describe("bedrock worker SigV4", () => {
     expect("stream" in body).toBe(false);
     expect(body.messages).toEqual([{ role: "user", content: "worker user" }]);
   });
+
+  test("proceeds and signs even when NO client credential is available", async () => {
+    // Bedrock auth is SigV4, not the client credential — a Bedrock session with
+    // no client key must still run distillation/curation (mirrors executeWarmup,
+    // which exempts bedrock). On the pre-fix code the no-auth gate skipped it.
+    mockFetch.mockResolvedValue(bedrockJSON());
+    const { _setTestCredentialProviders } = await import("../src/bedrock-auth");
+    _setTestCredentialProviders([
+      async () => ({ accessKeyId: "AKIATEST", secretAccessKey: "secret" }),
+    ]);
+
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.anthropic.com",
+        openai: "https://api.openai.com",
+      },
+      () => null, // NO client credential at all
+      { providerID: "bedrock", modelID: "claude-3-5-sonnet-20241022" },
+      { bedrock: { region: "us-east-1" } },
+    );
+
+    const text = await client.prompt("sys", "user", {
+      sessionID: "sess-bedrock-nocred",
+      workerID: "lore-distill",
+      model: { providerID: "bedrock", modelID: "claude-3-5-sonnet-20241022" },
+      protocol: "bedrock",
+      upstreamProviderID: "bedrock",
+      upstreamUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+    });
+
+    expect(text).toBe("distilled by bedrock"); // NOT skipped
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const [, init] = mockFetch.mock.calls[0] as [
+      string,
+      { headers: Record<string, string> },
+    ];
+    const auth = init.headers.authorization ?? init.headers.Authorization ?? "";
+    expect(auth).toContain("AWS4-HMAC-SHA256");
+    // The placeholder credential is never sent as a client key.
+    expect(init.headers["x-api-key"]).toBeUndefined();
+  });
+
+  test("a NON-bedrock worker with no credential is still skipped (no-auth)", async () => {
+    // Guards the exemption's scope: the no-auth gate must remain for anthropic.
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.anthropic.com",
+        openai: "https://api.openai.com",
+      },
+      () => null,
+      { providerID: "anthropic", modelID: "claude-test" },
+    );
+    const text = await client.prompt("sys", "user", {
+      sessionID: "sess-anthropic-nocred",
+      workerID: "lore-distill",
+      model: { providerID: "anthropic", modelID: "claude-test" },
+    });
+    expect(text).toBeNull();
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
 });
