@@ -8,9 +8,16 @@
 import { describe, test, expect, afterEach, vi } from "vitest";
 
 vi.mock("../src/fetch", () => ({ upstreamFetch: vi.fn() }));
+// Spy markAuthStale (real impl preserved) so we can assert a Bedrock warmup
+// 403 does NOT mark the client credential stale (SigV4 has none).
+vi.mock("../src/auth", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/auth")>();
+  return { ...actual, markAuthStale: vi.fn(actual.markAuthStale) };
+});
 
 import { buildBedrockProfile, executeWarmup } from "../src/cache-warmer";
 import { upstreamFetch } from "../src/fetch";
+import { markAuthStale } from "../src/auth";
 import { compressBody } from "../src/cache-analytics";
 import { _setTestCredentialProviders } from "../src/bedrock-auth";
 import type { SessionState } from "../src/translate/types";
@@ -118,5 +125,30 @@ describe("executeWarmup — Bedrock SigV4", () => {
     expect(body.max_tokens).toBe(1);
     expect("stream" in body).toBe(false);
     expect(body.anthropic_version).toBe("bedrock-2023-05-31");
+  });
+
+  test("a 403 does NOT mark the client credential stale (SigV4 has none)", async () => {
+    vi.mocked(markAuthStale).mockClear();
+    mockFetch.mockResolvedValue(
+      new Response("AccessDeniedException", { status: 403 }),
+    );
+    _setTestCredentialProviders([
+      async () => ({ accessKeyId: "AKIATEST", secretAccessKey: "secret" }),
+    ]);
+
+    const profile = buildBedrockProfile(
+      "claude-3-5-sonnet-20241022",
+      "5m",
+      "us-east-1",
+      undefined,
+      "https://bedrock-runtime.us-east-1.amazonaws.com",
+    );
+
+    const result = await executeWarmup(bedrockSession(), profile);
+
+    expect(result.ok).toBe(false);
+    // A Bedrock warmup 403 is an AWS config/signing issue — it must NOT touch
+    // the session's client-credential staleness state.
+    expect(markAuthStale).not.toHaveBeenCalled();
   });
 });

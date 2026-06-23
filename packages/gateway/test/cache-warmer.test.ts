@@ -1533,6 +1533,32 @@ describe("resolveProfile — Anthropic first-party host gate (cross-provider 401
       "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-3-5-sonnet-20241022-v2%3A0/invoke",
     );
   });
+
+  test("falls back to the env-configured region when no bedrock arg + no URL region (computeWarmingSnapshot path)", () => {
+    // computeWarmingSnapshot calls resolveProfile WITHOUT the bedrock arg. With
+    // no region recoverable from the URL, the region must come from the env
+    // chain via defaultBedrockRegion() — NOT a hard-coded us-east-1.
+    const prev = process.env.LORE_BEDROCK_REGION;
+    process.env.LORE_BEDROCK_REGION = "eu-west-1";
+    try {
+      const profile = resolveProfile(
+        "claude-3-5-sonnet-20241022",
+        "bedrock",
+        "5m",
+        undefined, // no upstreamBase → no region parseable from a URL
+        "bedrock",
+        // no 6th bedrock arg — mirrors computeWarmingSnapshot
+      );
+      expect(profile?.auth?.mode).toBe("bedrock");
+      if (profile?.auth?.mode === "bedrock") {
+        expect(profile.auth.region).toBe("eu-west-1");
+      }
+      expect(profile?.upstreamUrl).toContain("bedrock-runtime.eu-west-1");
+    } finally {
+      if (prev === undefined) delete process.env.LORE_BEDROCK_REGION;
+      else process.env.LORE_BEDROCK_REGION = prev;
+    }
+  });
 });
 
 describe("Bedrock warmup", () => {

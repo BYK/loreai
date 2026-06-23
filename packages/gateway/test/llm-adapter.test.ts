@@ -13,6 +13,17 @@ vi.mock("../src/worker-health", async (importOriginal) => {
     markWorkerPaused: vi.fn(actual.markWorkerPaused),
   };
 });
+// Spy the client-credential staleness markers (real impl preserved) so the
+// Bedrock exemption — SigV4 has no client credential to mark stale — can be
+// asserted without changing behavior.
+vi.mock("../src/auth", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/auth")>();
+  return {
+    ...actual,
+    markAuthStale: vi.fn(actual.markAuthStale),
+    markGlobalAuthStale: vi.fn(actual.markGlobalAuthStale),
+  };
+});
 
 import {
   backoffMs,
@@ -1340,6 +1351,41 @@ describe("bedrock worker SigV4", () => {
     expect(markWorkerPaused).not.toHaveBeenCalled();
     // The failure is still recorded for the worker-health ladder.
     expect(recordWorkerFailure).toHaveBeenCalled();
+  });
+
+  test("a bedrock worker 403 does NOT mark the client credential stale", async () => {
+    // SigV4 has no client credential — a 403 must NOT mark the session/global
+    // client auth stale (that would contaminate the conversation path's auth).
+    const { markAuthStale, markGlobalAuthStale } = await import("../src/auth");
+    vi.mocked(markAuthStale).mockClear();
+    vi.mocked(markGlobalAuthStale).mockClear();
+    mockFetch.mockResolvedValue(new Response("AccessDenied", { status: 403 }));
+    const { _setTestCredentialProviders } = await import("../src/bedrock-auth");
+    _setTestCredentialProviders([
+      async () => ({ accessKeyId: "AKIATEST", secretAccessKey: "secret" }),
+    ]);
+
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.anthropic.com",
+        openai: "https://api.openai.com",
+      },
+      () => ({ scheme: "api-key", value: "client-key" }),
+      { providerID: "bedrock", modelID: "claude-3-5-sonnet-20241022" },
+      { bedrock: { region: "us-east-1" } },
+    );
+
+    await client.prompt("sys", "user", {
+      sessionID: "sess-bedrock-403-stale",
+      workerID: "lore-distill",
+      model: { providerID: "bedrock", modelID: "claude-3-5-sonnet-20241022" },
+      protocol: "bedrock",
+      upstreamProviderID: "bedrock",
+      upstreamUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+    });
+
+    expect(markAuthStale).not.toHaveBeenCalled();
+    expect(markGlobalAuthStale).not.toHaveBeenCalled();
   });
 
   test("a bedrock worker non-transient 400 does NOT pause the session's workers", async () => {
