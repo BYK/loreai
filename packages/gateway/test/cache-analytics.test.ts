@@ -977,6 +977,101 @@ describe("categorizeBust", () => {
     ).toBe("incremental");
   });
 
+  test("classifies messages[0/1] divergence as prefix-rewrite even with partial cache hit", () => {
+    // Partial cache hit + divergence at messages[0/1] = meta-distillation
+    // rewrote the distilled prefix even though some earlier prefix matched.
+    // This MUST classify as prefix-rewrite (not incremental) so the
+    // consecutive-bust counter exempts it — the cause is Lore's own
+    // meta-distillation pipeline, not user-context growth.
+    // Regression test for the false "unsustainable conversation" warnings
+    // observed on sessions with sustained meta-distillation activity.
+    expect(
+      categorizeBust(
+        makeAnalysis({
+          cacheRead: 53_412,
+          cacheCreation: 109_745,
+          divergencePoint: "messages[1].content[0].text",
+        }),
+        false,
+      ),
+    ).toBe("prefix-rewrite");
+    expect(
+      categorizeBust(
+        makeAnalysis({
+          cacheRead: 53_412,
+          cacheCreation: 109_745,
+          divergencePoint: "messages[0]",
+        }),
+        false,
+      ),
+    ).toBe("prefix-rewrite");
+  });
+
+  test("messages[0/1] divergence with cacheCreation=0 stays 'incremental' (no-op turn is not a rewrite)", () => {
+    // A divergence reported at messages[0/1] with NO new cache content is
+    // a no-op turn (bustRatio=0 — the counter won't advance regardless of
+    // label). "prefix-rewrite" implies a real rewrite happened, so this
+    // case is semantically "incremental" not "prefix-rewrite". Seer review
+    // on PR #943 flagged the missing distinction (LOW severity): the
+    // cacheCreation > 0 guard in categorizeBust ensures the label stays
+    // accurate even when bustRatio would also be 0.
+    expect(
+      categorizeBust(
+        makeAnalysis({
+          cacheRead: 50_000,
+          cacheCreation: 0,
+          divergencePoint: "messages[1].content[0].text",
+        }),
+        false,
+      ),
+    ).toBe("incremental");
+    expect(
+      categorizeBust(
+        makeAnalysis({
+          cacheRead: 50_000,
+          cacheCreation: 0,
+          divergencePoint: "messages[0]",
+        }),
+        false,
+      ),
+    ).toBe("incremental");
+  });
+
+  test("full bust on post-idle + messages[0/1] divergence is 'prefix-rewrite' (structural cause wins over idle context)", () => {
+    // Pin down the chosen label for a full bust at messages[0/1] on an
+    // idle resume. Pre-PR this returned "idle-resume"; post-PR it returns
+    // "prefix-rewrite" because the new messages[0/1] check fires before
+    // the post-idle branch. The counter is exempt in both cases (both
+    // causes are OR'd in gradient.ts:323), so the bust-pressure semantics
+    // are unchanged — but the cause label feeds telemetry
+    // (setCacheAnalyticsAttributes, emitCacheBustMetric,
+    // recordCacheBustObservation), and "prefix-rewrite" is the more
+    // specific signal (a structural prefix change is the dominant cause;
+    // "idle-resume" is about cache TTL, not what changed in the prefix).
+    // Adversarial review NIT on PR #943: pin the label so future readers
+    // don't accidentally regress to the old behavior.
+    expect(
+      categorizeBust(
+        makeAnalysis({
+          cacheRead: 0,
+          cacheCreation: 100_000,
+          divergencePoint: "messages[0]",
+        }),
+        true,
+      ),
+    ).toBe("prefix-rewrite");
+    expect(
+      categorizeBust(
+        makeAnalysis({
+          cacheRead: 0,
+          cacheCreation: 100_000,
+          divergencePoint: "messages[1].content[0].text",
+        }),
+        true,
+      ),
+    ).toBe("prefix-rewrite");
+  });
+
   test("post-idle cold cache is idle-resume, not window-shift", () => {
     expect(
       categorizeBust(

@@ -700,6 +700,25 @@ export function categorizeBust(
   // First turn — no prior request to compare
   if (turn <= 1 || divergencePoint === "<first-turn>") return "first-turn";
 
+  // Prefix-rewrite signature: divergence at messages[0/1] AND something
+  // was actually written to the cache means the synthetic distilled
+  // prefix was rewritten (meta-distillation). This is a LORE-INTERNAL
+  // cause, not user-context growth — must be exempt from the
+  // consecutive-bust counter even with a partial cache hit (some earlier
+  // prefix matched, the distillation block was regenerated). Counting
+  // these as "incremental" tripped false "unsustainable conversation"
+  // warnings on sessions with sustained meta-distillation activity.
+  //
+  // We also require cacheCreation > 0 because "prefix-rewrite" implies
+  // a real rewrite — a divergence reported at messages[0/1] with no new
+  // cache content is a no-op turn (bustRatio=0), and labeling it a
+  // "rewrite" would be misleading. Seer PR #943 review (LOW severity).
+  const msgMatch = divergencePoint.match(/^messages\[(\d+)\]/);
+  if (msgMatch && cacheCreation > 0) {
+    const idx = parseInt(msgMatch[1], 10);
+    if (idx <= 1) return "prefix-rewrite";
+  }
+
   // Not a bust: cache read > 0, creation is only the new tail
   if (cacheRead > 0 && cacheCreation > 0) return "incremental";
   if (cacheRead > 0 && cacheCreation === 0) return "incremental";
@@ -726,16 +745,8 @@ export function categorizeBust(
     if (divergencePoint === "tools" || divergencePoint.startsWith("tools"))
       return "tools-change";
 
-    // Message-level divergence
-    const msgMatch = divergencePoint.match(/^messages\[(\d+)\]/);
-    if (msgMatch) {
-      const idx = parseInt(msgMatch[1], 10);
-      // Early message changes (index 0 or 1) likely indicate prefix rewrite
-      // (distilled prefix is injected as messages[0] and messages[1])
-      if (idx <= 1) return "prefix-rewrite";
-      // Later message changes indicate window shift (raw window eviction)
-      return "window-shift";
-    }
+    // Message-level divergence (messages[idx>=2])
+    if (msgMatch) return "window-shift";
 
     return "unknown";
   }

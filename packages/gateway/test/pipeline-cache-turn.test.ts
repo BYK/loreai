@@ -168,6 +168,86 @@ describe("recordCacheTurnUsage — pipeline bust-cause wiring (#928)", () => {
     expect(getConsecutiveBusts(sessionID)).toBe(1);
   });
 
+  test("a partial-cache-hit turn with messages[0/1] divergence is classified prefix-rewrite (not counted)", () => {
+    const sessionID = "cache-turn-partial-hit-prefix-rewrite";
+    sessions.push(sessionID);
+    // Partial cache hit: read=53_412, create=109_745 — production-mirroring
+    // numbers from a session with sustained meta-distillation activity. The
+    // distilled prefix (messages[1] in this body) was rewritten but a sizeable
+    // earlier prefix (the system block) still matched.
+    // Mirror of the live-log signature:
+    //   [cache-analytics: session=... hit=34% read=53412 create=109745 ...]
+    //   [bust-tracker: ... ratio=0.673 (write=109745 read=53412 ...) ...]
+    const PARTIAL_HIT_USAGE = Object.freeze({
+      inputTokens: 2,
+      outputTokens: 50,
+      cacheReadInputTokens: 53_412,
+      cacheCreationInputTokens: 109_745,
+    });
+    // system block matches; messages[0] identical; messages[1] text differs.
+    // → divergence is at messages[1], which is the synthetic distilled prefix.
+    const prev = body([
+      "stable user 0",
+      "DISTILLED PREFIX v1 — long stable text here",
+      "user msg 2",
+    ]);
+    const curr = body([
+      "stable user 0",
+      "DISTILLED PREFIX v2 — long stable text here",
+      "user msg 2",
+    ]);
+    const state = seedSession(sessionID, prev);
+
+    const cause = recordCacheTurnUsage(
+      state,
+      PARTIAL_HIT_USAGE,
+      MODEL,
+      PROJECT,
+      curr,
+    );
+
+    // Sanity: scenario really is a partial hit with prefix divergence.
+    // The wire must classify this as "prefix-rewrite" (not "incremental") —
+    // categorizeBust now recognizes messages[0/1] divergence regardless of
+    // cache activity, closing the gap that #926 left for partial hits.
+    expect(cause).toBe("prefix-rewrite");
+    // The consecutive-bust counter MUST stay at 0 — this is the regression
+    // guard for the false "unsustainable conversation" warnings on sessions
+    // with sustained meta-distillation activity. Without the fix, this would
+    // be classified "incremental" and the counter would jump to 1, just like
+    // the 12na8hXrpthm52Hl / 0GZ6jpMwyZ6n09xm sessions in the production logs.
+    expect(getConsecutiveBusts(sessionID)).toBe(0);
+  });
+
+  test("a partial-cache-hit turn with messages[2+] divergence is classified incremental (control)", () => {
+    const sessionID = "cache-turn-partial-hit-incremental";
+    sessions.push(sessionID);
+    // Partial cache hit + divergence deep in messages — a normal user-context
+    // growth. MUST classify as "incremental" (the pre-existing semantics) so
+    // the gate only exempts prefix-rewrite signatures, not all partial hits.
+    // This is the negative control proving the new check is narrowly scoped
+    // to messages[0/1] and does not leak exemptions to genuine growth busts.
+    const PARTIAL_HIT_USAGE = Object.freeze({
+      inputTokens: 2,
+      outputTokens: 50,
+      cacheReadInputTokens: 53_412,
+      cacheCreationInputTokens: 1_000,
+    });
+    const prev = body(["u0", "a1", "OLD third message"]);
+    const curr = body(["u0", "a1", "NEW third message, longer"]);
+    const state = seedSession(sessionID, prev);
+
+    const cause = recordCacheTurnUsage(
+      state,
+      PARTIAL_HIT_USAGE,
+      MODEL,
+      PROJECT,
+      curr,
+    );
+
+    expect(cause).toBe("incremental");
+  });
+
   test("the no-request-body path records a turn without a cause (legacy count)", () => {
     const sessionID = "cache-turn-no-body";
     sessions.push(sessionID);
