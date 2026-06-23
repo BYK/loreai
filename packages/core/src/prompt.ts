@@ -352,10 +352,11 @@ PROCEDURAL PATTERNS — recurring procedures get a runbook shape, not a flat fac
     - [ ] ...
 - Use plain Markdown (numbered steps, dashed bullets, dash-bracket checkboxes) so the
   entry renders cleanly in .lore.md and PR diffs.
-- Keep the entry within the 1200-character content cap (and the curator's ~150-word
-  brevity budget). A runbook with more than ~5 steps or ~3 gotchas is probably
-  multiple patterns scoped to a phase — split it (e.g. "Deploy: pre-flight",
-  "Deploy: cutover", "Deploy: rollback") rather than truncating mid-procedure.
+- A runbook is the ONE exception to the ~150-word brevity budget below: it may use up
+  to the full 1200-character content cap so the Steps/Gotchas/Verify stay intact. A
+  procedure with more than ~5 steps or ~3 gotchas is probably multiple patterns scoped
+  to a phase — split it (e.g. "Deploy: pre-flight", "Deploy: cutover", "Deploy:
+  rollback") rather than truncating mid-procedure.
 - FLAT (non-procedural) patterns stay as a 1-3 sentence fact — do NOT force the
   runbook shape onto one-line insights.
 
@@ -377,12 +378,16 @@ Example procedural pattern (release cutover):
     - [ ] GET /health on production returns 200.
 
 BREVITY IS CRITICAL — each entry must be concise:
-- content MUST be under 150 words (~600 characters). Capture ONE specific actionable
-  insight in 2-3 sentences. Prefer terse technical language.
+- content MUST be under 150 words (~600 characters) — EXCEPT a procedural pattern
+  (runbook), which may extend to the 1200-character cap to keep Steps/Gotchas/Verify
+  intact. Capture ONE specific actionable insight in 2-3 sentences. Prefer terse
+  technical language.
 - Each "gotcha": one specific trap + WHY it looks right + its fix in 2-3 sentences
 - Each "architecture": one design decision and its key constraint
 - Focus on the actionable insight, not the full story behind it
-- If a pattern requires more detail, split into multiple focused entries (each under 150 words)
+- If a FLAT pattern requires more detail, split into multiple focused entries (each
+  under 150 words); a procedural runbook stays a single entry but splits by PHASE when
+  it outgrows 1200 characters
 - Omit code examples unless a single short snippet is essential
 - Never include full file contents, large diffs, or complete command outputs
 

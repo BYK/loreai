@@ -375,4 +375,18 @@ describe("CURATOR_SYSTEM — procedural pattern runbooks (#914)", () => {
     expect(procIdx).toBeGreaterThan(whyIdx);
     expect(brevIdx).toBeGreaterThan(procIdx);
   });
+
+  test("brevity cap exempts procedural runbooks — no 600-vs-1200 contradiction (#923 Seer)", () => {
+    // Seer flagged that the 1200-char runbook cap contradicted the blanket
+    // ~600-char (150-word) brevity cap, which could make the model truncate
+    // runbooks. The brevity mandate MUST carve out procedural patterns up to
+    // 1200 chars; this pins the two sections so they can't silently diverge.
+    expect(CURATOR_SYSTEM).toMatch(
+      /under 150 words[^\n]*EXCEPT[^\n]*procedural[\s\S]{0,120}1200/i,
+    );
+    // And the split-on-overflow rule must not tell runbooks to split at 150 words.
+    expect(CURATOR_SYSTEM).toMatch(
+      /procedural runbook stays a single entry but splits by PHASE/i,
+    );
+  });
 });
