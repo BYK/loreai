@@ -81,6 +81,7 @@ import type {
   GatewayContentBlock,
   GatewayToolUseBlock,
   GatewayToolResultBlock,
+  GatewayUsage,
   SessionState,
   UpstreamSnapshot,
   WarmupState,
@@ -4140,6 +4141,127 @@ function streamHttpResponse(resp: GatewayResponse): Response {
 // ---------------------------------------------------------------------------
 
 /**
+ * Analyze this turn's cache behavior and feed the result into BOTH the
+ * telemetry sinks (span attributes, Sentry metric, durable bust counter) and
+ * the consecutive-bust tracker (recordCacheUsage).
+ *
+ * Extracted from postResponse() as a testable seam (issue #928). The wire that
+ * matters for correctness is: analyzeCacheTurn -> categorizeBust ->
+ * recordCacheUsage(..., bustCause). Threading the categorized cause is what
+ * lets recordCacheUsage exempt prefix-rewrite busts (caused by Lore's own
+ * meta-distillation) from consecutiveBusts, the same way it exempts idle-resume
+ * re-warms — neither is user-context growth. That wire was previously only
+ * reachable through the full pipeline; this seam makes it directly unit-testable
+ * (a turn that categorizes as prefix-rewrite must NOT increment the counter).
+ *
+ * Side effects (unchanged from the inlined version):
+ *   - mutates sessionState.cacheAnalytics (via analyzeCacheTurn),
+ *     sessionState.lastTurnWasIdle (consumed -> false) and
+ *     sessionState.coldCacheWindow (rolling 20-turn cold-turn history),
+ *   - enriches genAiSpan with cache-divergence attributes and ends it (the span
+ *     is finalized here, before recordCacheUsage, exactly as in the original
+ *     inlined block),
+ *   - increments the per-session consecutive-bust counter in @loreai/core.
+ *
+ * @returns the categorized bust cause, or `undefined` when there is no request
+ *          body to compare (the rare no-body path — the bust tracker then falls
+ *          back to its legacy "count it" behavior).
+ */
+export function recordCacheTurnUsage(
+  sessionState: SessionState,
+  usage: GatewayUsage,
+  model: string,
+  projectPath: string,
+  /** Serialized JSON body sent upstream — for cache prefix comparison. */
+  requestBody?: string,
+  /** Active gen_ai.chat span to enrich with divergence diagnostics. */
+  genAiSpan?: Sentry.Span,
+): CacheBustCause | undefined {
+  // Capture the idle-resume flag up front: it is consumed (set false) inside
+  // the block below but is still needed afterwards by recordCacheUsage so a
+  // cold-cache re-warm is not counted as a consecutive bust.
+  const turnWasIdleResume = sessionState.lastTurnWasIdle ?? false;
+  // bustCause is computed inside the requestBody block (so we know we have a
+  // body to analyze); left undefined when the body is missing so the
+  // recordCacheUsage call below falls through to the legacy "count it"
+  // behavior on the rare no-body path.
+  let bustCause: CacheBustCause | undefined;
+  if (requestBody) {
+    const turnAnalysis = analyzeCacheTurn(
+      sessionState.cacheAnalytics,
+      requestBody,
+      usage,
+      sessionState.sessionID,
+      sessionState.messageCount,
+    );
+    bustCause = categorizeBust(turnAnalysis, turnWasIdleResume);
+    if (genAiSpan) {
+      setCacheAnalyticsAttributes(
+        genAiSpan,
+        turnAnalysis,
+        bustCause,
+        turnAnalysis.prevSnippet,
+        turnAnalysis.currSnippet,
+      );
+    }
+    emitCacheBustMetric(
+      bustCause,
+      usage.cacheCreationInputTokens ?? 0,
+      model,
+      turnAnalysis.relocatable,
+    );
+    // Persist a durable counter so the issue #791 "is system[0] dynamic
+    // content a material cache-bust cause?" gate survives gateway restarts
+    // (the in-memory analytics reset every restart). Passive telemetry only.
+    recordCacheBustObservation({
+      projectID: ensureProject(projectPath),
+      cause: bustCause,
+      relocatable: turnAnalysis.relocatable,
+      writeTokens: usage.cacheCreationInputTokens ?? 0,
+    });
+    sessionState.lastTurnWasIdle = false; // consumed
+
+    // Track cold-cache turns for auto-TTL upgrade (rolling 20-turn window)
+    const cacheRead = usage.cacheReadInputTokens ?? 0;
+    const cacheCreation = usage.cacheCreationInputTokens ?? 0;
+    const isColdTurn = cacheRead === 0 && cacheCreation > 0;
+    if (!sessionState.coldCacheWindow) sessionState.coldCacheWindow = [];
+    sessionState.coldCacheWindow.push(isColdTurn);
+    if (sessionState.coldCacheWindow.length > 20) {
+      sessionState.coldCacheWindow.shift();
+    }
+  }
+
+  // --- Finalize gen_ai.chat span (after cache analytics enrichment) ---
+  // Ended here (before recordCacheUsage, matching the original inlined order)
+  // so the extraction is ordering-identical: recordCacheUsage is pure
+  // session-state bookkeeping that never touches the span, and ending the span
+  // first means a throw in recordCacheUsage can't leak an unfinished span.
+  if (genAiSpan) {
+    genAiSpan.end();
+  }
+
+  // --- Consecutive bust tracking for tier-based decisions ---
+  // Pass the current turn's idle-resume flag so a cold-cache re-warm (cache
+  // legitimately expired during the user's pause) is not counted as a
+  // consecutive bust — that produced false "unsustainable" warnings on bursty
+  // sessions whose turns are spaced beyond the conversation cache TTL.
+  // Also pass the categorized bust cause so prefix-rewrite busts (caused by
+  // Lore's own meta-distillation) are held the same way idle-resume busts
+  // are — these are not user-context growth.
+  recordCacheUsage(
+    usage.cacheCreationInputTokens ?? 0,
+    usage.cacheReadInputTokens ?? 0,
+    usage.inputTokens ?? 0,
+    sessionState.sessionID,
+    turnWasIdleResume,
+    bustCause,
+  );
+
+  return bustCause;
+}
+
+/**
  * Run after a successful response: calibrate, store temporal messages,
  * and schedule background work (distillation, curation).
  */
@@ -4190,84 +4312,20 @@ function postResponse(
       setGenAiUsageAttributes(genAiSpan, usageForSentry, resp.model);
     }
 
-    // --- Cache analytics + bust cause telemetry ---
-    // Run BEFORE genAiSpan.end() so we can enrich the span with
-    // divergence diagnostics (divergence point, prefix match, bust cause).
-    // Capture the idle-resume flag up front: it is consumed (set false) inside
-    // the block below but is still needed afterwards by recordCacheUsage so a
-    // cold-cache re-warm is not counted as a consecutive bust.
-    const turnWasIdleResume = sessionState.lastTurnWasIdle ?? false;
-    // bustCause is computed inside the requestBody block (so we know we have a
-    // body to analyze); defaulted to undefined when the body is missing so the
-    // recordCacheUsage call below falls through to the legacy "count it"
-    // behavior on the rare no-body path.
-    let bustCause: CacheBustCause | undefined;
-    if (requestBody) {
-      const turnAnalysis = analyzeCacheTurn(
-        sessionState.cacheAnalytics,
-        requestBody,
-        usage,
-        sessionID,
-        sessionState.messageCount,
-      );
-      bustCause = categorizeBust(turnAnalysis, turnWasIdleResume);
-      if (genAiSpan) {
-        setCacheAnalyticsAttributes(
-          genAiSpan,
-          turnAnalysis,
-          bustCause,
-          turnAnalysis.prevSnippet,
-          turnAnalysis.currSnippet,
-        );
-      }
-      emitCacheBustMetric(
-        bustCause,
-        usage.cacheCreationInputTokens ?? 0,
-        resp.model,
-        turnAnalysis.relocatable,
-      );
-      // Persist a durable counter so the issue #791 "is system[0] dynamic
-      // content a material cache-bust cause?" gate survives gateway restarts
-      // (the in-memory analytics reset every restart). Passive telemetry only.
-      recordCacheBustObservation({
-        projectID: ensureProject(projectPath),
-        cause: bustCause,
-        relocatable: turnAnalysis.relocatable,
-        writeTokens: usage.cacheCreationInputTokens ?? 0,
-      });
-      sessionState.lastTurnWasIdle = false; // consumed
-
-      // Track cold-cache turns for auto-TTL upgrade (rolling 20-turn window)
-      const cacheRead = usage.cacheReadInputTokens ?? 0;
-      const cacheCreation = usage.cacheCreationInputTokens ?? 0;
-      const isColdTurn = cacheRead === 0 && cacheCreation > 0;
-      if (!sessionState.coldCacheWindow) sessionState.coldCacheWindow = [];
-      sessionState.coldCacheWindow.push(isColdTurn);
-      if (sessionState.coldCacheWindow.length > 20) {
-        sessionState.coldCacheWindow.shift();
-      }
-    }
-
-    // --- Finalize gen_ai.chat span (after cache analytics enrichment) ---
-    if (genAiSpan) {
-      genAiSpan.end();
-    }
-
-    // --- Consecutive bust tracking for tier-based decisions ---
-    // Pass the current turn's idle-resume flag so a cold-cache re-warm (cache
-    // legitimately expired during the user's pause) is not counted as a
-    // consecutive bust — that produced false "unsustainable" warnings on bursty
-    // sessions whose turns are spaced beyond the conversation cache TTL.
-    // Also pass the categorized bust cause so prefix-rewrite busts (caused by
-    // Lore's own meta-distillation) are held the same way idle-resume busts
-    // are — these are not user-context growth.
-    recordCacheUsage(
-      usage.cacheCreationInputTokens ?? 0,
-      usage.cacheReadInputTokens ?? 0,
-      usage.inputTokens ?? 0,
-      sessionState.sessionID,
-      turnWasIdleResume,
-      bustCause,
+    // --- Cache analytics + bust cause telemetry + consecutive-bust tracking ---
+    // Extracted into recordCacheTurnUsage() so the analyze -> categorize ->
+    // recordCacheUsage wire (esp. threading the bust cause so prefix-rewrite
+    // busts are exempted from consecutiveBusts) is unit-testable without driving
+    // the whole pipeline. The seam also enriches and ENDS genAiSpan (before its
+    // own recordCacheUsage call) so the extraction is ordering-identical to the
+    // original inlined block. See issue #928.
+    recordCacheTurnUsage(
+      sessionState,
+      usage,
+      resp.model,
+      projectPath,
+      requestBody,
+      genAiSpan,
     );
 
     // Capture previous stop reason before it's overwritten below (line ~1667).
