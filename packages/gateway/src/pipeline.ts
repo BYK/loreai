@@ -5587,7 +5587,9 @@ async function handleConversationTurn(
   // --- 2. Capture auth credentials for background workers ---
   const cred = extractAuth(req.rawHeaders);
   if (cred) {
-    setLastSeenAuth(cred);
+    // Tag the global fallback with the request's provider so a worker for a
+    // different provider can't borrow this credential (cross-contamination, #829).
+    setLastSeenAuth(cred, extractProviderHeader(req.rawHeaders) || undefined);
   }
 
   // --- 3. Session identification ---
@@ -8041,7 +8043,10 @@ export async function handleRequest(
     // Capture auth credentials early for background workers
     const earlyAuth = extractAuth(req.rawHeaders);
     if (earlyAuth) {
-      setLastSeenAuth(earlyAuth);
+      setLastSeenAuth(
+        earlyAuth,
+        extractProviderHeader(req.rawHeaders) || undefined,
+      );
     }
 
     // --- Quick Tier-1 session lookup for structural compaction detection ---

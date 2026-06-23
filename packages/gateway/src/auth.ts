@@ -273,6 +273,15 @@ function clearProviderStale(sessionID: string, providerID: string): void {
 let lastSeenAuth: AuthCredential | null = null;
 
 /**
+ * Provider the global fallback credential was last captured for (the request's
+ * `x-lore-provider`). `null` means unknown/agnostic — a legacy client that
+ * sends no provider header. Used to stop a SPECIFIC-provider lookup from
+ * borrowing a credential captured for a DIFFERENT provider (cross-contamination,
+ * #829): a provider-A key handed to provider-B always 401s ("Incorrect API key").
+ */
+let lastSeenAuthProvider: string | null = null;
+
+/**
  * When true, the global `lastSeenAuth` has been rejected by an upstream
  * provider (401/403) and no session-level credential refresh has cleared it.
  * Prevents session-less workers from hammering with a permanently-stale token.
@@ -282,17 +291,38 @@ let lastSeenAuth: AuthCredential | null = null;
  */
 let globalAuthStale = false;
 
-export function setLastSeenAuth(cred: AuthCredential): void {
+export function setLastSeenAuth(
+  cred: AuthCredential,
+  providerID?: string,
+): void {
   // A fresh credential clears global staleness — a new client request
   // arrived, so the token may be valid again.
   if (!lastSeenAuth || lastSeenAuth.value !== cred.value) {
     globalAuthStale = false;
   }
   lastSeenAuth = cred;
+  lastSeenAuthProvider = providerID ?? null;
 }
 
-export function getLastSeenAuth(): AuthCredential | null {
+/**
+ * Return the global fallback credential, or `null`.
+ *
+ * When `providerID` is given, the credential is returned ONLY if it was
+ * captured for that same provider, or for an unknown/agnostic provider (a
+ * legacy client that sent no `x-lore-provider` — kept working for single-
+ * provider setups). A credential captured for a DIFFERENT known provider is
+ * NEVER returned — that is the #829 cross-contamination (e.g. an Anthropic key
+ * handed to an OpenAI worker, rejected as "Incorrect API key provided").
+ */
+export function getLastSeenAuth(providerID?: string): AuthCredential | null {
   if (globalAuthStale) return null;
+  if (
+    providerID &&
+    lastSeenAuthProvider !== null &&
+    lastSeenAuthProvider !== providerID
+  ) {
+    return null;
+  }
   return lastSeenAuth;
 }
 
@@ -360,15 +390,16 @@ export function resolveAuth(
       return null;
     }
 
-    // Global fallback — but guard against returning the same stale token.
+    // Global fallback — provider-aware (never borrows a different provider's
+    // credential, #829) — and guarded against returning the same stale token.
     // In single-session OAuth setups, session and global hold the exact
     // same expired bearer token. Returning it would cause callers to make
     // a request that immediately 401s again.
-    const global = getLastSeenAuth();
+    const global = getLastSeenAuth(providerID);
     if (cred && global && global.value === cred.value) return null;
     return global;
   }
-  return getLastSeenAuth();
+  return getLastSeenAuth(providerID);
 }
 
 /**
@@ -397,6 +428,7 @@ export function _resetAuthForTest(): void {
   staleSessionAuth.clear();
   warnedAuthKeyMismatch.clear();
   lastSeenAuth = null;
+  lastSeenAuthProvider = null;
   globalAuthStale = false;
 }
 
