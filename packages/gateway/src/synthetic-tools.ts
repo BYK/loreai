@@ -391,6 +391,61 @@ export function buildResolveProjectInput(
   return input;
 }
 
+/**
+ * Build a synthetic shell tool_use that runs an arbitrary read-only `script`
+ * (used by the #627 reference-validity probe). Mirrors buildResolveProjectInput's
+ * array-vs-string handling. The caller is responsible for the script being
+ * read-only and shell-injection-safe.
+ */
+export function buildShellProbeBlock(
+  target: ShellToolTarget,
+  script: string,
+): GatewayToolUseBlock {
+  const input: Record<string, unknown> = { ...target.extraRequired };
+  input[target.commandParam] = target.commandIsArray
+    ? ["bash", "-lc", script]
+    : script;
+  return {
+    type: "tool_use",
+    id: mintSyntheticToolUseId(),
+    name: target.toolName,
+    input,
+  };
+}
+
+/** Marker separating the project-resolution output from the appended
+ *  reference-validity snapshot in a combined shell probe (#627 piggyback). */
+export const REFCHECK_SECTION_SEP = "===LORE-REFCHECK-SNAPSHOT===";
+
+/**
+ * Build a SHELL probe that runs the project-resolution script AND, after a
+ * separator, an appended read-only reference-validity snapshot script (#627). A
+ * single round-trip carries both — refcheck never adds its own injection. Only
+ * valid for the shell stage (the read probe can't run a script).
+ */
+export function buildCombinedResolveRefcheckBlock(
+  target: ShellToolTarget,
+  refcheckScript: string,
+): GatewayToolUseBlock {
+  const combined = `${RESOLVE_PROJECT_SCRIPT}\nprintf '%s\\n' '${REFCHECK_SECTION_SEP}'\n${refcheckScript}`;
+  return buildShellProbeBlock(target, combined);
+}
+
+/** Split a combined probe's output into the resolution part and the refcheck
+ *  snapshot part. Returns refcheck=null when the separator is absent (the probe
+ *  was resolution-only). */
+export function splitProbeOutput(text: string): {
+  resolution: string;
+  refcheck: string | null;
+} {
+  const i = text.indexOf(REFCHECK_SECTION_SEP);
+  if (i === -1) return { resolution: text, refcheck: null };
+  return {
+    resolution: text.slice(0, i),
+    refcheck: text.slice(i + REFCHECK_SECTION_SEP.length),
+  };
+}
+
 /** Build a complete GatewayToolUseBlock for a synthetic probe. */
 export function buildSyntheticToolUseBlock(
   target: SyntheticToolTarget,

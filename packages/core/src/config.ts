@@ -281,12 +281,25 @@ export const LoreConfig = z.object({
         .describe(
           "Adjust knowledge confidence by within-session verifier (test/build/typecheck/lint) outcomes. Default: true.",
         ),
+      /** Lower confidence on project entries whose literal references (file:line
+       *  citations, `pnpm run X` commands) no longer resolve against the current
+       *  repo (#627 Phase 0). Decay-not-delete and capped per pass; only a
+       *  DEFINITIVELY resolved-missing reference penalizes — unverifiable (no FS
+       *  access, probe error/timeout) is always a neutral no-op. cross_project
+       *  (shared) entries are never touched. Default true. */
+      referenceValidation: z
+        .boolean()
+        .default(true)
+        .describe(
+          "Lower confidence on entries whose file:line / command references no longer resolve against the repo. Unverifiable refs never penalize. Default: true.",
+        ),
     })
     .default({
       enabled: true,
       maxEntityInject: 30,
       autoToolFailureGotchas: false,
       outcomeReward: true,
+      referenceValidation: true,
     })
     .describe("Long-term knowledge (curator, entity injection) controls."),
   curator: z

@@ -25,6 +25,9 @@ import {
   isUnattributedProjectPath,
   temporal,
   ltm,
+  SyntheticProbeResolver,
+  NoopResolver,
+  buildRefcheckProbeScript,
   entities,
   distillation,
   curator,
@@ -289,6 +292,8 @@ import {
   findReadTool,
   findShellTool,
   buildSyntheticToolUseBlock,
+  buildCombinedResolveRefcheckBlock,
+  splitProbeOutput,
   captureSyntheticToolResult,
   stripSyntheticRoundTrips,
   parseResolveProjectResult,
@@ -5700,11 +5705,17 @@ async function handleConversationTurn(
       sessionState.syntheticResolveToolUseId,
     );
     if (captured && sessionState.syntheticResolveKind) {
+      // A combined shell probe (#627 piggyback) carries the project-resolution
+      // output AND, after a separator, a reference-validity snapshot. Split
+      // first so resolution parsing only sees its own lines.
+      const split = sessionState.refcheckInProbe
+        ? splitProbeOutput(captured.text)
+        : { resolution: captured.text, refcheck: null };
       const resolved = captured.isError
         ? {}
         : parseResolveProjectResult(
             sessionState.syntheticResolveKind,
-            captured.text,
+            split.resolution,
           );
       // Apply the resolution — bind the project by remote and/or root.
       projectPath = applySyntheticResolution(
@@ -5715,6 +5726,31 @@ async function handleConversationTurn(
       // Strip the synthetic round-trip from the conversation so the LLM
       // never sees it and it's excluded from temporal storage.
       stripSyntheticRoundTrips(req);
+
+      // Apply the piggybacked reference-validity snapshot against the NOW-BOUND
+      // project (#627). A missing/errored snapshot → NoopResolver (neutral, but
+      // still stamps the 24h gate). Never throws into the request path.
+      if (sessionState.refcheckInProbe) {
+        try {
+          const resolver =
+            captured.isError || split.refcheck == null
+              ? new NoopResolver()
+              : new SyntheticProbeResolver(split.refcheck);
+          const refRes = await ltm.validateProjectReferences(
+            projectPath,
+            resolver,
+          );
+          if (refRes.penalized > 0) {
+            log.info(
+              `reference drift (remote): penalized ${refRes.penalized}/${refRes.checked} ` +
+                `entries for session ${sessionID.slice(0, 16)}`,
+            );
+          }
+        } catch (e) {
+          log.warn("synthetic reference-validation error (non-fatal):", e);
+        }
+        sessionState.refcheckInProbe = false;
+      }
 
       // Escalation: read probe yielded no remote → try shell next.
       const stillWeak = sessionState.projectPathProvisional === true;
@@ -5731,6 +5767,7 @@ async function handleConversationTurn(
     } else {
       // No tool_result arrived (non-agentic client or skipped) — give up.
       sessionState.syntheticResolveState = "done";
+      sessionState.refcheckInProbe = false;
     }
     sessionState.syntheticResolveToolUseId = undefined;
     sessionState.syntheticResolveKind = undefined;
@@ -6907,14 +6944,37 @@ async function handleConversationTurn(
       const readTarget = stage ? null : findReadTool(modifiedReq.tools);
       const target = readTarget ?? findShellTool(modifiedReq.tools);
       if (target) {
-        const block = buildSyntheticToolUseBlock(target);
+        // Piggyback the #627 reference-validity snapshot onto the SHELL probe so
+        // it costs NO extra round-trip (a separate probe would short-circuit an
+        // additional turn). Only the shell stage can run a script; the read
+        // probe can't. Ref scope is best-effort: the project is still provisional
+        // here, so refs come from the provisional binding — capture re-gathers
+        // from the RESOLVED project, and file/command checks are repo-level
+        // (identity-independent), so accuracy is preserved; only a line ref whose
+        // basename wasn't pre-listed degrades to 'unknown' (neutral).
+        let block = buildSyntheticToolUseBlock(target);
+        if (
+          target.kind === "shell" &&
+          cfg.knowledge.enabled &&
+          cfg.knowledge.referenceValidation
+        ) {
+          const peek = ltm.peekProjectRefs(projectPath);
+          if (!peek.gated && peek.refs.length > 0) {
+            block = buildCombinedResolveRefcheckBlock(
+              target,
+              buildRefcheckProbeScript(peek.refs),
+            );
+            sessionState.refcheckInProbe = true;
+          }
+        }
         sessionState.syntheticResolveState =
           target.kind === "read" ? "readPending" : "shellPending";
         sessionState.syntheticResolveToolUseId = block.id;
         sessionState.syntheticResolveKind = target.kind;
         log.info(
           `synthetic-resolve: injecting ${target.kind} probe ` +
-            `(tool=${target.toolName}) for session ${sessionID.slice(0, 16)}`,
+            `(tool=${target.toolName}${sessionState.refcheckInProbe ? "+refcheck" : ""}) ` +
+            `for session ${sessionID.slice(0, 16)}`,
         );
         // SHORT-CIRCUIT: do NOT forward upstream. Return our own tool_use
         // response so the client harness executes the probe locally.

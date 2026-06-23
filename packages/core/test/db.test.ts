@@ -59,7 +59,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(55);
+    expect(row.version).toBe(56);
   });
 
   test("v55: confidence/last_reinforced_at moved to knowledge_meta, exposed via view", () => {
@@ -115,7 +115,7 @@ describe("db", () => {
     const ver = fresh.query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(ver.version).toBe(55);
+    expect(ver.version).toBe(56);
     // Register + JOIN view were rebuilt and are queryable (confidence exposed).
     expect(
       fresh
@@ -127,6 +127,27 @@ describe("db", () => {
     expect(() =>
       fresh.query("SELECT confidence FROM knowledge_current LIMIT 1").all(),
     ).not.toThrow();
+  });
+
+  test("v56: knowledge_ref_validity table + projects.last_refcheck_at exist after recovery", () => {
+    // Simulate a crash after v56 forward migration but before the version bump:
+    // drop both, reopen, confirm recoverMissingObjects restores them idempotently.
+    db().exec("DROP TABLE IF EXISTS knowledge_ref_validity");
+    db().exec(
+      "UPDATE projects SET last_refcheck_at = NULL WHERE last_refcheck_at IS NOT NULL",
+    );
+    close();
+    const fresh = db();
+    const rv = fresh
+      .query("PRAGMA table_info(knowledge_ref_validity)")
+      .all() as Array<{ name: string; notnull: number }>;
+    expect(rv.map((c) => c.name)).toEqual(
+      expect.arrayContaining(["logical_id", "broken", "total", "checked_at"]),
+    );
+    const pcols = fresh
+      .query("PRAGMA table_info(projects)")
+      .all() as Array<{ name: string }>;
+    expect(pcols.some((c) => c.name === "last_refcheck_at")).toBe(true);
   });
 
   test("session_prompt_deltas persist ordered selector/content rows (v42)", () => {
