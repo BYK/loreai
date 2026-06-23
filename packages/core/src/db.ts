@@ -1402,6 +1402,34 @@ const MIGRATIONS: string[] = [
   -- migrate() by KNOWLEDGE_META_MIGRATION_INDEX — the same pattern VACUUM uses.
   -- This string is intentionally a no-op marker so MIGRATIONS.length still counts.
   `,
+
+  `
+  -- Version 56: index the /ui/costs "first assistant message per session" scan.
+  --
+  -- The costs page runs three cross-project bulk aggregates (#561):
+  -- listAllRecentSessions, aggregateTokensBySessionAll and
+  -- aggregateDistillationsBySessionAll. The expensive one is the metadata lookup
+  -- inside aggregateTokensBySessionAll: a subquery that filters role='assistant'
+  -- AND created_at>=? and groups by session_id to find each session's earliest
+  -- assistant message. With only single-column indexes, SQLite full-SCANs
+  -- idx_temporal_session for that subquery (~360ms at ~200K messages).
+  --
+  --   idx_temporal_role_session_created on temporal_messages(role, session_id, created_at)
+  --   turns it into a covering equality seek on role='assistant' that streams the
+  --   GROUP BY in (session_id, created_at) order — measured ~8x faster (~360ms -> ~42ms).
+  --
+  -- Deliberately NOT added: a (created_at, session_id) index for the token-sum,
+  -- distillation and recent-session aggregates. EXPLAIN QUERY PLAN was measured at
+  -- both low and high created_at selectivity (young DB vs years of history) and the
+  -- planner always prefers the session-ordered idx_temporal_session /
+  -- idx_distillation_session scan there: session ordering lets it stream the
+  -- GROUP BY without a temp b-tree, and the token-sum / distillation projections
+  -- (SUM(tokens), call_type, token_count) aren't covered anyway. A (created_at,
+  -- session_id) index would be pure write amplification on the two hottest tables
+  -- with no read benefit, so it is intentionally omitted. (See cost-bulk-queries.test.ts.)
+  CREATE INDEX IF NOT EXISTS idx_temporal_role_session_created
+    ON temporal_messages (role, session_id, created_at);
+  `,
 ];
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -1978,6 +2006,13 @@ function recoverMissingObjects(database: Database) {
   // so a fully-migrated DB self-heals a missing register/view and a partial apply
   // is finished here too.
   applyKnowledgeMetaRegister(database);
+  // Version 56: costs-page metadata-scan index. Self-heal a fully-migrated DB
+  // that spontaneously lost it (re-creation is a no-op when present). Missing it
+  // is latency-only, but recovering it keeps parity with the sibling index blocks.
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_temporal_role_session_created
+      ON temporal_messages(role, session_id, created_at);
+  `);
   // Version 36: session project binding. Recover each column independently in
   // case a partial ALTER (e.g. the first succeeded, the second was skipped on a
   // prior failure) left the table missing a column.
