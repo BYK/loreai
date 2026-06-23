@@ -25,7 +25,6 @@ import { compressBody } from "../src/cache-analytics";
 import type { CacheAnalytics, SessionState } from "../src/translate/types";
 import {
   getConsecutiveBusts,
-  getCacheStrategy,
   evictSession,
   inspectSessionState,
   log,
@@ -318,6 +317,8 @@ describe("recordCacheTurnUsage — pipeline bust-cause wiring (#928)", () => {
         holdWarmCost: 0,
         coolBustCost: 0,
         coolFullWriteCost: 0,
+        expectedMetaBusts: 0,
+        metaBustCost: 0,
       },
       decidedAt: Date.now(),
     });

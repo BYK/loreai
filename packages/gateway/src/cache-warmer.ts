@@ -34,6 +34,7 @@ import {
   strategyWantsWarming,
   getCacheSizeSnapshot,
   getCacheStrategy,
+  estimateMetaDistillCostPerCall,
 } from "@loreai/core";
 import type {
   InterTurnHistogram,
@@ -1268,9 +1269,25 @@ export function shouldWarm(
       maxCycles,
     );
     const expectedFutureTurns = Math.min(totalTurns, SHADOW_FUTURE_TURNS_CAP);
+    // #947 — meta-aware cost model. Source the meta threshold from config
+    // and pre-compute the per-call LLM cost from the worker model rates. The
+    // pure function falls back to "no adjustment" (byte-identical to pre-#947)
+    // when either is missing — so the cost model flip is opt-in by config.
+    const metaThreshold = cfg.distillation.metaThreshold;
+    const workerModel = getModelEntrySync(state.lastUpstream?.model ?? "");
+    const metaDistillCostPerCall = estimateMetaDistillCostPerCall(
+      workerModel,
+      metaThreshold,
+    );
     const result = evaluateCacheStrategy(
       state.sessionID,
-      { pReturn: pReturns, expectedCycles, expectedFutureTurns },
+      {
+        pReturn: pReturns,
+        expectedCycles,
+        expectedFutureTurns,
+        metaThreshold,
+        metaDistillCostPerCall,
+      },
       {
         readPerToken: cacheReadCostPerMTok / 1_000_000,
         writePerToken: cacheMissCostPerMTok / 1_000_000,

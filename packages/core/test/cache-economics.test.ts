@@ -201,6 +201,186 @@ describe("decideCacheStrategy — strict-tie boundary (never pay to warm on a ti
   });
 });
 
+describe("decideCacheStrategy — meta-aware cost model (#947)", () => {
+  // The meta-aware adjustment accounts for the cost of intra-session meta-busts:
+  // a mid-flight meta-distillation destroys the compressed-prefix advantage, so
+  // the remaining `futureTurns` pay `full · read` instead of `compressed · read`.
+  // Probability-weighted, additive to cool-bust only (not hold-warm / cool-full-write,
+  // which already pay full-body on every return or have no advantage to lose).
+  //
+  //   expectedBusts    = clamp01(expectedFutureTurns / metaThreshold)
+  //   bustCostPerBust  = (expectedFutureTurns / 2) × (full - compressed) × read
+  //                    + metaDistillCostPerCall
+  //   coolBust_actual  = coolBust_baseline + expectedBusts × bustCostPerBust
+  //
+  // The adjustment is gated on (a) compressed < full (no point adjusting if no
+  // compaction was possible in the first place) and (b) meta fields are
+  // meaningful (default 0 → no-op, byte-identical to current behavior).
+  const META_DEFAULTS = {
+    metaThreshold: 0, // 0 = meta adjustment disabled (back-compat default)
+    metaDistillCostPerCall: 0, // 0 = no worker LLM cost added
+  };
+
+  test("back-compat: missing meta fields → byte-identical to current behavior", () => {
+    // Production session 0AVWKugtmhBKqLOX parameters; the call site doesn't
+    // have a meta threshold configured yet, so the result is byte-identical
+    // to the pre-#947 output.
+    const r = decide({
+      fullBodyTokens: 120_000,
+      compressedTokens: 80_000,
+      pReturn: 0.75,
+      expectedCycles: 5.5,
+      expectedFutureTurns: 15,
+    });
+    // holdWarm = 5.5·120k + 0.75·16·120k = 660k + 1440k = 2100k
+    expect(r.holdWarmCost).toBe(5.5 * 120_000 + 0.75 * 16 * 120_000);
+    // coolBust = 0.75·(80k·12 + 15·80k) = 0.75·(960k + 1200k) = 1620k
+    expect(r.coolBustCost).toBe(0.75 * (80_000 * 12 + 15 * 80_000));
+    // No expectedMetaBusts / metaBustCost fields surfaced yet (will be added
+    // when the result struct is extended). This test only checks the COST
+    // outputs match the pre-#947 math exactly.
+  });
+
+  test("adjustment applies: with meta fields, coolBustCost is strictly greater than baseline", () => {
+    // Same production session but with meta configured.
+    const baseline = decide({
+      fullBodyTokens: 120_000,
+      compressedTokens: 80_000,
+      pReturn: 0.75,
+      expectedCycles: 5.5,
+      expectedFutureTurns: 15,
+    });
+    const adjusted = decide({
+      fullBodyTokens: 120_000,
+      compressedTokens: 80_000,
+      pReturn: 0.75,
+      expectedCycles: 5.5,
+      expectedFutureTurns: 15,
+      metaThreshold: 20,
+      metaDistillCostPerCall: 0.01,
+    });
+    expect(adjusted.coolBustCost).toBeGreaterThan(baseline.coolBustCost);
+    // holdWarm and coolFullWrite are NOT adjusted (intentional — see plan).
+    expect(adjusted.holdWarmCost).toBe(baseline.holdWarmCost);
+    expect(adjusted.coolFullWriteCost).toBe(baseline.coolFullWriteCost);
+  });
+
+  test("adjustment is 0 when compressed == full (no compaction advantage to lose)", () => {
+    // With no real compaction, meta-busts don't pay any 'lost advantage' — the
+    // session is already paying full · read on every turn. The adjustment
+    // must gate on compressed < full, so coolBustCost is unchanged.
+    const baseline = decide({
+      fullBodyTokens: 100_000,
+      compressedTokens: 100_000, // no compaction available
+      pReturn: 0.5,
+      expectedCycles: 1,
+      expectedFutureTurns: 10,
+    });
+    const adjusted = decide({
+      fullBodyTokens: 100_000,
+      compressedTokens: 100_000,
+      pReturn: 0.5,
+      expectedCycles: 1,
+      expectedFutureTurns: 10,
+      metaThreshold: 5,
+      metaDistillCostPerCall: 0.5, // large — must NOT contribute
+    });
+    expect(adjusted.coolBustCost).toBe(baseline.coolBustCost);
+    // And the no-compaction invariant still holds.
+    expect(adjusted.coolBustCost).toBe(adjusted.coolFullWriteCost);
+  });
+
+  test("decision flip: high expectedFutureTurns / low metaThreshold flips cool-bust → hold-warm", () => {
+    // F=200k, C=100k, p=0.5, k=2, f=20, metaThreshold=5
+    // Baseline: holdWarm = 2·200k + 0.5·21·200k = 400k + 2,100k = 2,500k
+    //           coolBust = 0.5·(100k·12 + 20·100k) = 0.5·3,200k = 1,600k
+    //           → cool-bust wins (1,600k < 2,500k)
+    // Adjusted:  expectedBusts = clamp01(20/5) = 1.0
+    //            bustCostPerBust = (20/2)·(200k-100k)·1 + 0.01 = 1,000,000.01
+    //            metaBustCost = 1.0 × 1,000,000 = 1,000,000
+    //            coolBust adjusted = 1,600,000 + 1,000,000 = 2,600,000
+    //           → 2,600k > 2,500k → hold-warm wins
+    const baseline = decide({
+      fullBodyTokens: 200_000,
+      compressedTokens: 100_000,
+      pReturn: 0.5,
+      expectedCycles: 2,
+      expectedFutureTurns: 20,
+    });
+    expect(baseline.strategy).toBe("cool-bust");
+    const adjusted = decide({
+      fullBodyTokens: 200_000,
+      compressedTokens: 100_000,
+      pReturn: 0.5,
+      expectedCycles: 2,
+      expectedFutureTurns: 20,
+      metaThreshold: 5,
+      metaDistillCostPerCall: 0.01,
+    });
+    expect(adjusted.strategy).toBe("hold-warm");
+  });
+
+  test("tie-break preserved: strict <; adjustment does not flip a genuine tie", () => {
+    // At the exact break-even (p=0.5 with k=1, r=1, w=3, F=C=100k, f=3),
+    // holdWarm === coolFullWrite exactly. Adding a meta adjustment that
+    // doesn't actually shift cool-bust past hold-warm must NOT flip the
+    // strategy. (The adjustment targets cool-bust specifically; a large
+    // metaThreshold pushes expectedBusts toward 0, so the adjustment is
+    // small enough to leave the tie intact.)
+    const tie = {
+      fullBodyTokens: 100_000,
+      compressedTokens: 100_000,
+      readPerToken: 1,
+      writePerToken: 3,
+      pReturn: 0.5,
+      expectedCycles: 1,
+      expectedFutureTurns: 3,
+      metaThreshold: 1000, // expectedBusts = 3/1000 = 0.003, tiny
+      metaDistillCostPerCall: 0.01,
+    };
+    const r = decide(tie);
+    expect(r.holdWarmCost).toBe(r.coolFullWriteCost);
+    expect(r.strategy).toBe("cool-full-write"); // tie → never pay to warm
+  });
+
+  test("confidence invariant: missing meta fields but valid other inputs → still confident", () => {
+    const r = decide({
+      fullBodyTokens: 10_000,
+      compressedTokens: 10_000,
+      pReturn: 0.9,
+      expectedCycles: 1,
+      expectedFutureTurns: 2,
+      // No meta fields passed.
+    });
+    expect(r.confident).toBe(true);
+  });
+
+  test("non-finite meta fields → treated as 0 (no adjustment, still confident)", () => {
+    // Defensive: a model missing from the pricing table arrives here with
+    // undefined/NaN pricing — the meta fields must follow the same convention
+    // (treated as 0, no adjustment, confidence depends on the OTHER fields).
+    const r = decide({
+      fullBodyTokens: 10_000,
+      compressedTokens: 5_000,
+      pReturn: 0.8,
+      expectedCycles: 1,
+      expectedFutureTurns: 5,
+      metaThreshold: undefined as unknown as number,
+      metaDistillCostPerCall: undefined as unknown as number,
+    });
+    expect(r.confident).toBe(true);
+    // No meta adjustment → coolBustCost matches the no-meta formula.
+    const noMeta = decide({
+      fullBodyTokens: 10_000,
+      compressedTokens: 5_000,
+      pReturn: 0.8,
+      expectedCycles: 1,
+      expectedFutureTurns: 5,
+    });
+    expect(r.coolBustCost).toBe(noMeta.coolBustCost);
+  });
+});
+
 describe("decideCacheStrategy — non-finite inputs break confidence, not the contract", () => {
   test("undefined pricing (missing model) → confident:false, no NaN", () => {
     const r = decide({ readPerToken: undefined as unknown as number });

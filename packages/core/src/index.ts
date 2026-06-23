@@ -254,6 +254,7 @@ export {
   decideCacheStrategy,
   strategyWantsWarming,
   strategyWantsCompaction,
+  estimateMetaDistillCostPerCall,
 } from "./cache-economics";
 export type {
   CacheStrategy,

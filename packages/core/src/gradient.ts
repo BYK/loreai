@@ -674,6 +674,21 @@ export interface CacheSurvivalInputs {
   expectedCycles: number;
   /** Expected turns the resumed session runs (the "ongoing cost" horizon). */
   expectedFutureTurns: number;
+  /**
+   * #947 — meta-distillation threshold (gen-0 segments per meta cycle). Passed
+   * through to `decideCacheStrategy` to compute the meta-aware adjustment to
+   * `coolBustCost`. Default 0 (or undefined) → no adjustment, byte-identical
+   * to the pre-#947 behavior. Use `cfg.distillation.metaThreshold`.
+   */
+  metaThreshold?: number;
+  /**
+   * #947 — per-call cost of meta-distillation ($/call, same currency unit as
+   * `readPerToken`/`writePerToken`). Pre-computed at the call site from
+   * worker model rates × estimated input/output token counts. Default 0 (or
+   * undefined) → only the cache-read-miss term in the meta-bust cost applies
+   * (the LLM term is suppressed).
+   */
+  metaDistillCostPerCall?: number;
 }
 
 /**
@@ -773,6 +788,8 @@ export function evaluateCacheStrategy(
     pReturn: survival.pReturn,
     expectedCycles: survival.expectedCycles,
     expectedFutureTurns: survival.expectedFutureTurns,
+    metaThreshold: survival.metaThreshold,
+    metaDistillCostPerCall: survival.metaDistillCostPerCall,
   });
   state.cacheStrategy = { result, decidedAt: now };
   return result;
