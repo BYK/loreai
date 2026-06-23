@@ -1114,12 +1114,13 @@ export function getConsecutiveBusts(sessionID: string): number {
 export const BUST_PRESSURE_THRESHOLD = 3;
 
 /** Minimum gap between the session's last turn and "now" for the bust-pressure
- *  meta-threshold override to apply. Below this, the session is too fresh —
- *  the user is likely to come back to a still-warming cache, and forcing meta
- *  would rewrite the prefix right before the next user turn, busting the
- *  cache they just paid to re-warm. Matches the default Anthropic prompt
- *  cache TTL (5 min) — anything tighter would race the warmer. */
-const DEEP_IDLE_MS = 5 * 60 * 1000;
+ *  meta-threshold override (and the symmetric cool-bust mid-flight defer
+ *  gate in the gateway idle handler) to apply. Below this, the session is too
+ *  fresh — the user is likely to come back to a still-warming cache, and
+ *  forcing meta would rewrite the prefix right before the next user turn,
+ *  busting the cache they just paid to re-warm. Matches the default Anthropic
+ *  prompt cache TTL (5 min) — anything tighter would race the warmer. */
+export const DEEP_IDLE_MS = 5 * 60 * 1000;
 
 /** Floor for the bust-pressure meta-threshold override. Even with busts
  *  ≥ BUST_PRESSURE_THRESHOLD, the lowered threshold is clamped to this value

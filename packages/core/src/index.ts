@@ -165,6 +165,7 @@ export {
   inspectSessionState,
   getConsecutiveBusts,
   BUST_PRESSURE_THRESHOLD,
+  DEEP_IDLE_MS,
   effectiveMetaThreshold,
   isLargeColdStart,
   setCacheSizeSnapshot,

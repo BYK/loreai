@@ -30,6 +30,7 @@ import {
   getConsecutiveBusts,
   effectiveMetaThreshold,
   BUST_PRESSURE_THRESHOLD,
+  DEEP_IDLE_MS,
   getLastTurnAt,
   getCacheStrategy,
   strategyWantsWarming,
@@ -93,6 +94,12 @@ import {
   isQuotaPaused,
   deleteQuotaForFingerprint,
 } from "./quota";
+
+// Re-export DEEP_IDLE_MS so test fixtures can compute "recent vs deep-idle"
+// boundaries against the same constant the helper uses (the test imports
+// from `../src/idle` rather than @loreai/core to keep the boundary
+// observable from the helper's own import surface).
+export { DEEP_IDLE_MS };
 
 const POLL_INTERVAL_MS = 30_000;
 
@@ -262,6 +269,51 @@ export function shouldHoldPrefixWarm(
     econ?.result.confident === true &&
     strategyWantsWarming(econ.result.strategy)
   );
+}
+
+/**
+ * #946 symmetric inverse override: should the idle handler DEFER its
+ * prefix-rewriting steps for a cool-bust / cool-full-write session that is
+ * still mid-flight (the user's last turn was recent enough that the prompt
+ * cache is still warm)?
+ *
+ * Defer ⇔ ALL hold:
+ *  1. The session is NOT under bust pressure — a churning session is busting
+ *     cache regardless of intent, so flushing is free.
+ *  2. The strategy is confidently `cool-bust` or `cool-full-write` (the
+ *     inverse of `shouldHoldPrefixWarm` — do not double-defer hold-warm,
+ *     which `shouldHoldPrefixWarm` already owns).
+ *  3. `lastTurnAtMs === 0` (no recorded turns — no cache to protect) OR
+ *     `nowMs - lastTurnAtMs < DEEP_IDLE_MS` (the user was active within the
+ *     default Anthropic prompt-cache TTL, so the cache is still warm from
+ *     their last turn).
+ *
+ * Reuses `DEEP_IDLE_MS` from `@loreai/core` — the same constant that gates
+ * `effectiveMetaThreshold`'s bust-pressure override. The 5 min default matches
+ * Anthropic's prompt cache TTL so the gate aligns with the cache's natural
+ * liveness window.
+ *
+ * Like `shouldHoldPrefixWarm`, this only biases the SCHEDULE — it never
+ * starves distillation/LTM. The existing urgency thresholds still fire
+ * (distillation's `minMessages` gate, meta's `gen0 >= metaThreshold` gate,
+ * bust-pressure's lowered threshold).
+ */
+export function shouldDeferPrefixRewriteOnCoolBust(
+  econ: { result: { strategy: CacheStrategy; confident: boolean } } | null,
+  bustPressure: boolean,
+  lastTurnAtMs: number,
+  nowMs: number,
+): boolean {
+  if (bustPressure) return false;
+  if (!econ?.result.confident) return false;
+  // The inverse of shouldHoldPrefixWarm: defer only when the strategy is NOT
+  // hold-warm. A hold-warm session is governed by shouldHoldPrefixWarm.
+  if (strategyWantsWarming(econ.result.strategy)) return false;
+  // lastTurnAtMs === 0 is a sentinel for "never had a turn" — treat as
+  // "user is away, no cache to protect, flushing is free" (mirrors the
+  // effectiveMetaThreshold convention at gradient.ts:1177).
+  if (lastTurnAtMs === 0) return false;
+  return nowMs - lastTurnAtMs < DEEP_IDLE_MS;
 }
 
 /**
@@ -787,10 +839,29 @@ export function buildIdleWorkHandler(
     // So on hold-warm we DEFER the prefix-rewriting steps; cool-bust /
     // cool-full-write / non-confident sessions still flush aggressively (the
     // prefix is busting anyway — flushing is free). See shouldHoldPrefixWarm.
+    //
+    // #946 symmetric inverse: the D6′ deferral is one-directional — it only
+    // defers hold-warm. But a cool-bust / cool-full-write session that is
+    // still MID-FLIGHT (the user's last turn was within DEEP_IDLE_MS) has a
+    // still-warm prompt cache; flushing the rewrite here busts that warm
+    // cache for no benefit, forcing the next user turn to pay a full cache
+    // write. Mirror the deferral: if the session is mid-flight, low bust
+    // pressure, and not hold-warm, defer the rewrite too. The two helpers
+    // are OR'd together so a session that's both hold-warm AND mid-flight
+    // defers for either reason, but a cool-bust session defers only for
+    // mid-flight, and a hold-warm session defers only for hold-warm. See
+    // shouldDeferPrefixRewriteOnCoolBust.
     const holdingWarm = shouldHoldPrefixWarm(
       getCacheStrategy(sessionID),
       bustPressure,
     );
+    const deferCoolBust = shouldDeferPrefixRewriteOnCoolBust(
+      getCacheStrategy(sessionID),
+      bustPressure,
+      getLastTurnAt(sessionID),
+      Date.now(),
+    );
+    const deferPrefixRewrites = holdingWarm || deferCoolBust;
 
     // 1. Distillation. When NOT holding the cache warm, force-distill ALL pending
     // messages even below minMessages — the cache is going cold, so aggressive
@@ -815,7 +886,7 @@ export function buildIdleWorkHandler(
           projectPath,
           sessionID,
           model,
-          force: !holdingWarm,
+          force: !deferPrefixRewrites,
           skipMeta: true,
           callType,
           workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
@@ -829,12 +900,13 @@ export function buildIdleWorkHandler(
         if (result.distilled > 0) idlePrefixMutated = true;
       }
       // Meta consolidation — also a prefix rewrite (archives gen-0, adds gen-1+),
-      // so it's deferred under the same hold-warm bias. Run as a separate step so
-      // gen-0 segments from the force-distill above are counted toward the
-      // threshold. Under bust pressure the threshold is already lowered AND
-      // holdingWarm is false, so a churning session consolidates earlier.
+      // so it's deferred under the same hold-warm bias (and the #946 cool-bust
+      // mid-flight bias). Run as a separate step so gen-0 segments from the
+      // force-distill above are counted toward the threshold. Under bust pressure
+      // the threshold is already lowered AND deferPrefixRewrites is false, so a
+      // churning session consolidates earlier.
       const g0 = distillation.gen0Count(projectPath, sessionID);
-      if (allowWorker && g0 >= metaThreshold && !holdingWarm) {
+      if (allowWorker && g0 >= metaThreshold && !deferPrefixRewrites) {
         const meta = await distillation.metaDistill({
           llm,
           projectPath,
