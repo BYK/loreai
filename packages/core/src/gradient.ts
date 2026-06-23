@@ -1160,17 +1160,21 @@ const BUST_PRESSURE_META_FLOOR = 10;
  * @param configThreshold - configured metaThreshold (e.g. `cfg.distillation.metaThreshold`)
  * @param lastTurnAtMs    - wall-clock ms of the session's last turn
  *                          (use 0 for "never"; treated as deep-idle)
+ * @param nowMs           - current wall-clock ms; injectable for deterministic
+ *                          tests. Defaults to `Date.now()`. Production callers
+ *                          never pass it.
  * @returns the effective meta-threshold for the idle handler
  */
 export function effectiveMetaThreshold(
   busts: number,
   configThreshold: number,
   lastTurnAtMs = 0,
+  nowMs: number = Date.now(),
 ): number {
   if (busts < BUST_PRESSURE_THRESHOLD) return configThreshold;
   // 0 = never set (first turn). Treat as deep-idle so the very first bust
   // pressure event isn't blocked by a missing timestamp.
-  const gapMs = lastTurnAtMs === 0 ? Infinity : Date.now() - lastTurnAtMs;
+  const gapMs = lastTurnAtMs === 0 ? Infinity : nowMs - lastTurnAtMs;
   if (gapMs < DEEP_IDLE_MS) return configThreshold;
   return Math.max(BUST_PRESSURE_META_FLOOR, Math.floor(configThreshold / 4));
 }

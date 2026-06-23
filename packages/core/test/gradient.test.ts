@@ -4516,7 +4516,8 @@ describe("tier-based context management", () => {
       test("non-exempt causes (system-ltm-change, tools-change) still count", () => {
         // system-ltm-change is Lore-internal but NOT currently exempt — a burst
         // of those usually indicates real upstream configuration churn worth
-        // flagging (see NON_USER_BUST_CAUSES rationale in gradient.ts).
+        // flagging. Only `prefix-rewrite` is held by recordCacheUsage (see the
+        // isNonUserBust check in gradient.ts).
         recordCacheUsage(100_000, 0, 3, PR_SID, false, "system-ltm-change");
         expect(inspectSessionState(PR_SID)?.consecutiveBusts).toBe(1);
         // tools-change is genuine user-context growth (tool definitions
@@ -5698,26 +5699,35 @@ describe("issue #796: isLargeColdStart + cold-start force-compress", () => {
     const DEEP_IDLE_MS = 5 * 60 * 1000;
     const META_FLOOR = 10;
     const DEFAULT_CONFIG = 20;
+    // Fixed clock injected as the 4th arg (nowMs) so the deep-idle boundary
+    // tests are deterministic — the function reads nowMs instead of calling
+    // Date.now() internally, eliminating the scheduling-jitter race that made
+    // the "1ms before gate" assertion flaky.
+    const NOW = 1_000_000_000_000;
 
     test("below BUST_PRESSURE_THRESHOLD returns the configured value regardless of idle", () => {
-      const now = Date.now();
       expect(
-        effectiveMetaThreshold(0, DEFAULT_CONFIG, now - 10 * 60 * 1000),
+        effectiveMetaThreshold(0, DEFAULT_CONFIG, NOW - 10 * 60 * 1000, NOW),
       ).toBe(DEFAULT_CONFIG);
       expect(
-        effectiveMetaThreshold(BUST_PRESSURE_THRESHOLD - 1, DEFAULT_CONFIG, 0),
+        effectiveMetaThreshold(
+          BUST_PRESSURE_THRESHOLD - 1,
+          DEFAULT_CONFIG,
+          0,
+          NOW,
+        ),
       ).toBe(DEFAULT_CONFIG);
     });
 
-    test("at BUST_PRESSURE_THRESHOLD + deep-idle returns floor(20/4)=5 clamped to 10", () => {
+    test("at BUST_PRESSURE_THRESHOLD + deep-idle clamps floor(20/4)=5 up to floor 10", () => {
       // The OLD behavior would return max(3, 5) = 5. The NEW behavior clamps
       // to BUST_PRESSURE_META_FLOOR=10 — meta shouldn't run every 5 segments
       // even under bust pressure.
-      const now = Date.now();
       const result = effectiveMetaThreshold(
         BUST_PRESSURE_THRESHOLD,
         DEFAULT_CONFIG,
-        now - 6 * 60 * 1000, // 6 min ago — past the 5 min deep-idle gate
+        NOW - 6 * 60 * 1000, // 6 min ago — past the 5 min deep-idle gate
+        NOW,
       );
       expect(result).toBe(META_FLOOR);
     });
@@ -5727,11 +5737,11 @@ describe("issue #796: isLargeColdStart + cold-start force-compress", () => {
       // pressure does NOT lower the meta threshold. Without this, a churn
       // session that briefly went idle would fire meta right before the
       // user came back, busting the cache they just paid to re-warm.
-      const now = Date.now();
       const result = effectiveMetaThreshold(
         BUST_PRESSURE_THRESHOLD,
         DEFAULT_CONFIG,
-        now - 90 * 1000, // 90s ago — recent activity
+        NOW - 90 * 1000, // 90s ago — recent activity
+        NOW,
       );
       expect(result).toBe(DEFAULT_CONFIG);
     });
@@ -5741,32 +5751,33 @@ describe("issue #796: isLargeColdStart + cold-start force-compress", () => {
       // by a missing timestamp — treat as deep-idle so the override CAN fire
       // if the gating logic ever lands on a fresh session.
       expect(
-        effectiveMetaThreshold(BUST_PRESSURE_THRESHOLD, DEFAULT_CONFIG, 0),
+        effectiveMetaThreshold(BUST_PRESSURE_THRESHOLD, DEFAULT_CONFIG, 0, NOW),
       ).toBe(META_FLOOR);
     });
 
     test("at BUST_PRESSURE_THRESHOLD with lastTurnAt exactly 5 min ago returns floor (boundary)", () => {
-      // 5 min is the gate value. At exactly the boundary, the comparison is
-      // < not <=, so the gap must be STRICTLY less than DEEP_IDLE_MS to
-      // keep the configured threshold. 5 min exactly passes the gate.
-      const now = Date.now();
+      // 5 min is the gate value. The comparison is `gapMs < DEEP_IDLE_MS`, so a
+      // gap of EXACTLY DEEP_IDLE_MS is NOT < the gate — it passes through to the
+      // floor. This pins the boundary semantics (>= 5 min == deep-idle).
       expect(
         effectiveMetaThreshold(
           BUST_PRESSURE_THRESHOLD,
           DEFAULT_CONFIG,
-          now - DEEP_IDLE_MS,
+          NOW - DEEP_IDLE_MS,
+          NOW,
         ),
       ).toBe(META_FLOOR);
     });
 
     test("at BUST_PRESSURE_THRESHOLD with lastTurnAt 1ms before gate returns config", () => {
-      // 1ms short of the 5 min gate — should keep the configured threshold.
-      const now = Date.now();
+      // 1ms short of the 5 min gate (gapMs = DEEP_IDLE_MS - 1 < DEEP_IDLE_MS) —
+      // should keep the configured threshold. Deterministic via injected NOW.
       expect(
         effectiveMetaThreshold(
           BUST_PRESSURE_THRESHOLD,
           DEFAULT_CONFIG,
-          now - (DEEP_IDLE_MS - 1),
+          NOW - (DEEP_IDLE_MS - 1),
+          NOW,
         ),
       ).toBe(DEFAULT_CONFIG);
     });
@@ -5774,22 +5785,21 @@ describe("issue #796: isLargeColdStart + cold-start force-compress", () => {
     test("well above BUST_PRESSURE_THRESHOLD still respects the floor", () => {
       // busts=10 (way past threshold) doesn't unlock a lower threshold — the
       // floor of 10 is the floor.
-      const now = Date.now();
       expect(
-        effectiveMetaThreshold(10, DEFAULT_CONFIG, now - 10 * 60 * 1000),
+        effectiveMetaThreshold(10, DEFAULT_CONFIG, NOW - 10 * 60 * 1000, NOW),
       ).toBe(META_FLOOR);
     });
 
-    test("custom configThreshold above 40 still uses floor(20) with deep-idle", () => {
-      // configThreshold=100 → floor(100/4) = 25, clamped to max(10, 25) = 25.
-      // The floor is a floor, not a ceiling — generous configurations still
-      // get their proportional reduction.
-      const now = Date.now();
+    test("configThreshold=100 under deep-idle returns floor(100/4)=25 (floor is a floor, not a ceiling)", () => {
+      // floor(100/4) = 25, clamped to max(10, 25) = 25. Generous configurations
+      // still get their proportional 1/4 reduction; the floor only kicks in
+      // when floor(config/4) would drop below 10.
       expect(
         effectiveMetaThreshold(
           BUST_PRESSURE_THRESHOLD,
           100,
-          now - 10 * 60 * 1000,
+          NOW - 10 * 60 * 1000,
+          NOW,
         ),
       ).toBe(25);
     });
@@ -5798,14 +5808,25 @@ describe("issue #796: isLargeColdStart + cold-start force-compress", () => {
       // The OLD behavior would return max(3, 0) = 3. The NEW behavior is
       // max(10, 0) = 10 — even at the minimum config, the bust-pressure
       // override is clamped to a sane minimum.
-      const now = Date.now();
       expect(
         effectiveMetaThreshold(
           BUST_PRESSURE_THRESHOLD,
           3,
-          now - 10 * 60 * 1000,
+          NOW - 10 * 60 * 1000,
+          NOW,
         ),
       ).toBe(META_FLOOR);
+    });
+
+    test("defaults nowMs to Date.now() when omitted (production call shape)", () => {
+      // Production callers (idle.ts) pass only 3 args. With a lastTurnAt far in
+      // the past, the deep-idle gate passes regardless of the real clock, so
+      // the override fires deterministically even using the real Date.now().
+      expect(
+        effectiveMetaThreshold(BUST_PRESSURE_THRESHOLD, DEFAULT_CONFIG, 1),
+      ).toBe(META_FLOOR);
+      // And below pressure, the 3-arg shape returns config.
+      expect(effectiveMetaThreshold(0, DEFAULT_CONFIG, 1)).toBe(DEFAULT_CONFIG);
     });
   });
 });

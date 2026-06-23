@@ -3004,7 +3004,7 @@ export function listSessionPromptDeltas(
 /** A durable per-(project, cause, relocatable) cache-bust tally. */
 export type CacheBustStat = {
   projectID: string;
-  /** A CacheBustCause value (gateway-owned string). */
+  /** A CacheBustCause value (defined in gradient.ts, core-owned). */
   cause: string;
   /** Whether the (system[0]) divergence looked relocatable. */
   relocatable: boolean;

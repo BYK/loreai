@@ -34,6 +34,7 @@ import {
   evaluateCacheStrategy,
   setCachePricing,
   setConsecutiveBustsForTest,
+  setLastTurnAtForTest,
   evictSession,
 } from "@loreai/core";
 import type { LLMClient } from "@loreai/core";
@@ -544,6 +545,63 @@ describe("buildIdleWorkHandler", () => {
     expect(d6SetStrategy(sessionID, 10_000, 10_000)).toBe("hold-warm");
     // Mark the session as churning AFTER the strategy is stored.
     setConsecutiveBustsForTest(sessionID, 3); // >= BUST_PRESSURE_THRESHOLD
+    expect((await d6RunIdle(sessionID, projectPath)).prompt).toHaveBeenCalled();
+    evictSession(sessionID);
+  });
+
+  // Seed an arbitrary number of gen-0 distillations (no undistilled messages),
+  // so the meta-consolidation gate is the only step that can call the worker
+  // LLM. Count chosen to sit BETWEEN the bust-pressure floor (10) and the
+  // default metaThreshold (20) so the effective-threshold value decides whether
+  // meta fires.
+  function seedGen0N(sessionID: string, n: number): string {
+    const projectPath = makeProjectDir();
+    const pid = ensureProject(projectPath);
+    for (let i = 0; i < n; i++) {
+      db()
+        .query(
+          `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+           VALUES (?, ?, ?, '', '', ?, '[]', 0, ?, 0, ?)`,
+        )
+        .run(
+          `${sessionID}-g0-${i}`,
+          pid,
+          sessionID,
+          `obs ${i} `.repeat(20),
+          50,
+          i,
+        );
+    }
+    return projectPath;
+  }
+
+  // Wiring guard for Fix (2): the idle handler must thread getLastTurnAt() into
+  // effectiveMetaThreshold. With bust pressure and 12 gen-0 segments (between
+  // the floor 10 and the default threshold 20), the deep-idle gate decides
+  // whether meta fires:
+  //   - recent lastTurnAt (< 5 min) → threshold stays 20 → 12 < 20 → meta SKIPPED
+  //   - old lastTurnAt   (> 5 min)  → threshold drops to 10 → 12 >= 10 → meta RUNS
+  // If the call site passed a constant (e.g. 0) instead of getLastTurnAt(), the
+  // "recent" case would also drop to 10 and meta would fire — so the
+  // not.toHaveBeenCalled() assertion below kills that mutation.
+  test("D6′: idle threads getLastTurnAt — recent turn under bust pressure defers meta", async () => {
+    const sessionID = "idle-d6-recent-no-meta";
+    const projectPath = seedGen0N(sessionID, 12);
+    setConsecutiveBustsForTest(sessionID, 3); // bust pressure → holdingWarm=false
+    setLastTurnAtForTest(sessionID, Date.now()); // recent → NOT deep-idle
+    // threshold stays at config (20); 12 gen-0 < 20 → meta-consolidation skipped.
+    expect(
+      (await d6RunIdle(sessionID, projectPath)).prompt,
+    ).not.toHaveBeenCalled();
+    evictSession(sessionID);
+  });
+
+  test("D6′: idle threads getLastTurnAt — deep-idle turn under bust pressure runs meta", async () => {
+    const sessionID = "idle-d6-deepidle-meta";
+    const projectPath = seedGen0N(sessionID, 12);
+    setConsecutiveBustsForTest(sessionID, 3); // bust pressure → holdingWarm=false
+    // 6 min ago → deep-idle → threshold drops to floor 10; 12 >= 10 → meta runs.
+    setLastTurnAtForTest(sessionID, Date.now() - 6 * 60 * 1000);
     expect((await d6RunIdle(sessionID, projectPath)).prompt).toHaveBeenCalled();
     evictSession(sessionID);
   });
