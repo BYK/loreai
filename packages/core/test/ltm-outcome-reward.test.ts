@@ -142,6 +142,10 @@ describe("outcome-reward: verifier detection (tool-trace)", () => {
       // Broadened recall must NOT misfire on these non-verifier neighbors:
       "make run", // running the app, not verifying
       "make", // bare default target — ambiguous, not a verify signal
+      "npm ci", // clean dependency INSTALL — not a verifier (only `run ci` is)
+      "yarn ci",
+      "pnpm ci",
+      "bun ci",
       "pnpm install",
       "pnpm add vitest", // installing a runner is not running it
       "pnpm dlx prettier --write", // prettier is not in the runner set

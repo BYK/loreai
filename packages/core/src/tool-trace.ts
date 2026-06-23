@@ -125,8 +125,12 @@ const VERIFIER_LEADING = new RegExp(
   String.raw`^\s*(?:(?:sudo|time|npx|bunx)\s+|\w+=\S+\s+|env\s+|(?:npm|pnpm|yarn|bun)\s+(?:run\s+|exec\s+|dlx\s+)?)*` +
     "(?:" +
     [
-      // package-manager verify scripts: pnpm test, yarn run ci, npm run e2e, ...
-      String.raw`(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|build|typecheck|type-check|lint|tsc|check|ci|verify|validate|e2e|spec|coverage)\b`,
+      // package-manager verify scripts: pnpm test, yarn coverage, npm run e2e, ...
+      String.raw`(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|build|typecheck|type-check|lint|tsc|check|verify|validate|e2e|spec|coverage)\b`,
+      // `ci` ONLY with an explicit `run` — bare `npm ci` is a clean dependency
+      // INSTALL (fails on network/registry/lockfile, unrelated to code), so it
+      // must never be counted as a verifier.
+      String.raw`(?:npm|pnpm|yarn|bun)\s+run\s+ci\b`,
       // direct test runners
       String.raw`(?:vitest|jest|mocha|ava|pytest|rspec|phpunit|gotestsum|tox|nox|ctest|pre-commit)\b`,
       // language / build toolchains with a verify subcommand
@@ -171,7 +175,12 @@ export function extractCommand(input: unknown): string | null {
 export function isVerifierCall(input: unknown): boolean {
   const cmd = extractCommand(input);
   if (!cmd) return false;
+  // Bound the work before regex (mirrors classifyToolError). A verifier
+  // invocation leads a command segment, so it lives near the start; the cap is
+  // defense-in-depth against a pathological multi-KB command on this
+  // request-adjacent path. Truncation can only drop a match (safe direction).
   return cmd
+    .slice(0, 4000)
     .split(/&&|\|\||[;\n|]/)
     .some((segment) => VERIFIER_LEADING.test(segment));
 }
