@@ -1409,7 +1409,6 @@ const MIGRATIONS: string[] = [
   -- migrate() by KNOWLEDGE_META_MIGRATION_INDEX — the same pattern VACUUM uses.
   -- This string is intentionally a no-op marker so MIGRATIONS.length still counts.
   `,
-
   `
 
   -- Version 56: reference-validity validator (#627 Phase 0). Two additions:
@@ -1531,7 +1530,6 @@ const MIGRATIONS: string[] = [
   -- dropped/empty rollup) and reuse the canonical rebuild query in tests/recovery.
   -- This string is intentionally a no-op marker so MIGRATIONS.length still counts.
   `,
-
   `
   -- Version 61: persist the per-session cache-warmup COST bucket separately.
   -- session_state already stores warmup_savings / warmup_hits, but the warmup
@@ -1565,6 +1563,30 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX IF NOT EXISTS idx_knowledge_contradictions_status
     ON knowledge_contradictions (status);
+  `,
+
+  `
+  -- Version 63: make knowledge_meta.confidence a CONVERGENT register (A2 sub-PR
+  -- 3b-2, #823). confidence becomes a materialized cache derived from a PN-counter
+  -- CRDT: per-replica grow-only positive/negative delta accumulators, summed onto
+  -- an immutable per-entry base. This lets two devices' independent reinforce/decay
+  -- both survive a merge (max per replica counter) instead of last-writer-wins
+  -- clobbering the whole value. base_confidence is the create-time value the deltas
+  -- accumulate relative to (backfilled from the current confidence).
+  ALTER TABLE knowledge_meta ADD COLUMN base_confidence REAL NOT NULL DEFAULT 1.0;
+  UPDATE knowledge_meta SET base_confidence = confidence;
+  -- Grow-only counters keyed by (logical_id, replica_id). value(entry) =
+  -- clamp(base_confidence + SUM(pos) - SUM(neg), 0, 1), clamped at materialize time.
+  -- Merge across devices is per-key max(pos)/max(neg) — a join-semilattice, so it is
+  -- commutative/associative/idempotent and a stale lower counter never lowers value.
+  CREATE TABLE IF NOT EXISTS knowledge_meta_crdt (
+    logical_id  TEXT NOT NULL,
+    replica_id  TEXT NOT NULL,
+    pos         REAL NOT NULL DEFAULT 0,
+    neg         REAL NOT NULL DEFAULT 0,
+    updated_at  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (logical_id, replica_id)
+  );
   `,
 ];
 
@@ -2202,6 +2224,44 @@ function installSyncCapture(database: Database) {
       INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
       VALUES ('knowledge_entity_refs', old.knowledge_id || char(31) || old.entity_id, 'delete', ${ts});
     END;`;
+  // A2 sub-PR 3b-2: knowledge_meta base register, keyed by logical_id. Only the
+  // IMMUTABLE base_confidence syncs, so the UPDATE trigger fires ONLY when it
+  // actually changes — the frequent per-op confidence re-materialization (which
+  // only writes the local-derived confidence/updated_at) must NOT churn the outbox.
+  // No DELETE (a register row outlives the knowledge entry's death-cert).
+  sql += `
+    CREATE TEMP TRIGGER IF NOT EXISTS knowledge_meta_outbox_ins
+    AFTER INSERT ON knowledge_meta WHEN (${gate})
+    BEGIN
+      INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
+      VALUES ('knowledge_meta', new.logical_id, 'upsert', ${ts});
+    END;
+    CREATE TEMP TRIGGER IF NOT EXISTS knowledge_meta_outbox_upd
+    AFTER UPDATE ON knowledge_meta
+    WHEN ((${gate}) AND new.base_confidence IS NOT old.base_confidence)
+    BEGIN
+      INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
+      VALUES ('knowledge_meta', new.logical_id, 'upsert', ${ts});
+    END;`;
+  // A2 sub-PR 3b-2: knowledge_meta_crdt grow-only counters, composite key
+  // (logical_id || US || replica_id). Single-owner per (logical_id, replica_id):
+  // local applyConfidenceDelta only ever writes THIS device's replica row, and
+  // pulled peer rows arrive under apply-suppression — so the outbox only carries
+  // this device's counters. INSERT + UPDATE (pos/neg grow); no DELETE.
+  sql += `
+    CREATE TEMP TRIGGER IF NOT EXISTS knowledge_meta_crdt_outbox_ins
+    AFTER INSERT ON knowledge_meta_crdt WHEN (${gate})
+    BEGIN
+      INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
+      VALUES ('knowledge_meta_crdt', new.logical_id || char(31) || new.replica_id, 'upsert', ${ts});
+    END;
+    CREATE TEMP TRIGGER IF NOT EXISTS knowledge_meta_crdt_outbox_upd
+    AFTER UPDATE ON knowledge_meta_crdt
+    WHEN (${gate} AND (new.pos > old.pos OR new.neg > old.neg))
+    BEGIN
+      INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
+      VALUES ('knowledge_meta_crdt', new.logical_id || char(31) || new.replica_id, 'upsert', ${ts});
+    END;`;
   database.exec(sql);
 }
 
@@ -2594,6 +2654,29 @@ function recoverMissingObjects(database: Database) {
       if (hasMessages || hasDistill) rebuildAllSessionRollups(database);
     }
   }
+  // Version 63: knowledge_meta CRDT register (A2 sub-PR 3b-2). Recover the
+  // base_confidence column (backfilled from the materialized confidence) and the
+  // grow-only counter table independently of the forward migration.
+  {
+    const mcols = database
+      .query("PRAGMA table_info(knowledge_meta)")
+      .all() as Array<{ name: string }>;
+    if (!mcols.some((c) => c.name === "base_confidence")) {
+      database.exec(
+        "ALTER TABLE knowledge_meta ADD COLUMN base_confidence REAL NOT NULL DEFAULT 1.0;",
+      );
+      database.exec("UPDATE knowledge_meta SET base_confidence = confidence;");
+    }
+    database.exec(`CREATE TABLE IF NOT EXISTS knowledge_meta_crdt (
+      logical_id  TEXT NOT NULL,
+      replica_id  TEXT NOT NULL,
+      pos         REAL NOT NULL DEFAULT 0,
+      neg         REAL NOT NULL DEFAULT 0,
+      updated_at  INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (logical_id, replica_id)
+    );`);
+  }
+
   // Version 36: session project binding. Recover each column independently in
   // case a partial ALTER (e.g. the first succeeded, the second was skipped on a
   // prior failure) left the table missing a column.

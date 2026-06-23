@@ -460,6 +460,27 @@ function applyRemote(
   touchedFts: Set<string>,
 ): void {
   const rowId = syncData.rowIdOf(meta.table, remote);
+
+  // A2 sub-PR 3b-2: the CRDT counter table is a grow-only join-semilattice — its
+  // per-key MAX merge is idempotent + monotonic, so a remote row is ALWAYS safe to
+  // apply (a stale lower counter never lowers the local value). Apply unconditionally
+  // (no hash classify, never a skip/conflict). Track sync_state from the MERGED LOCAL
+  // row so the push side sees the post-merge value as in-sync and never re-pushes a
+  // peer's counter (this device only pushes its OWN replica's rows).
+  if (meta.table === "knowledge_meta_crdt") {
+    syncData.applyRemoteMetaCrdt(stripSyncCols(remote));
+    const localRow = syncData.getRowById(meta.table, rowId);
+    syncData.setSyncState(meta.table, rowId, {
+      content_hash: localRow
+        ? syncData.contentHash(meta.table, localRow)
+        : null,
+      revision: 0,
+      remote_updated_at: String(remote.updated_at ?? ""),
+    });
+    res.pulled++;
+    return;
+  }
+
   const isDeleted = remote.is_deleted === true || remote.is_deleted === 1;
   // classifyRemoteRow's contract: "remoteHash is null for a tombstone". A delete
   // has no content to compare, so a tombstone is NEVER a content-match "skip".
@@ -527,6 +548,10 @@ function applyRemote(
     // never an in-place upsert of an immutable version (A2, #823).
     if (meta.table === "knowledge") {
       syncData.applyRemoteKnowledge(stripSyncCols(remote));
+    } else if (meta.table === "knowledge_meta") {
+      // A2 3b-2: upsert the immutable base_confidence + re-materialize confidence
+      // (the materialized value & local decay clock are never overwritten by pull).
+      syncData.applyRemoteMeta(stripSyncCols(remote));
     } else {
       syncData.applyRemoteUpsert(meta.table, stripSyncCols(remote));
     }

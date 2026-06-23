@@ -188,6 +188,13 @@ function resetAll(): void {
   db().exec("DELETE FROM temp._sync_applying");
   db().exec("DELETE FROM knowledge_entity_refs");
   db().exec("DELETE FROM knowledge");
+  // The knowledge_meta register + CRDT counters (A2 3b-2) are synced tables but are
+  // NOT cascade-deleted by the hard `DELETE FROM knowledge` (no FK CASCADE). A
+  // pulled entry mints a register row (insertKnowledgeVersion), so without clearing
+  // them an orphan row survives resetAll, gets re-seeded at a low outbox seq, and
+  // transiently pins the prune floor below this run's knowledge entries.
+  db().exec("DELETE FROM knowledge_meta");
+  db().exec("DELETE FROM knowledge_meta_crdt");
   db().exec("DELETE FROM entities");
   db().exec("DELETE FROM profiles");
   db().exec("DELETE FROM sync_outbox");
@@ -325,23 +332,31 @@ describe("sync engine — property/sequence tests (#833)", () => {
     );
   });
 
-  test("the outbox fully drains after a push (the prune floor never wedges)", async () => {
+  test("the outbox fully drains after repeated pushes (the prune floor never wedges)", async () => {
     await fc.assert(
       fc.asyncProperty(seqArb, async (ops) => {
         resetAll();
         syncData.enableSync("basic");
         for (const op of ops) await apply(op);
-        await pushOnce(client());
-        // pushOnce prunes seq <= min push cursor across tables-with-entries. Only
-        // `knowledge` is ever mutated here, so after a (mock: always-succeeds)
-        // push, EVERY entry is fully pushed and pruned -> the outbox is empty.
-        // A wedged prune floor (e.g. min cursor pinned at 0 by an empty/pull-only
-        // table — the #828 bug) would leave pushed entries stranded here.
-        const remaining = (
-          db().query("SELECT COUNT(*) AS n FROM sync_outbox").get() as {
-            n: number;
-          }
-        ).n;
+        // pushOnce prunes seq <= the MIN push cursor across tables-with-entries
+        // (the #828 safety floor). When several synced tables interleave in the
+        // global outbox seq — e.g. a knowledge entry AND its knowledge_meta register
+        // row (minted on pull, re-seeded on enable, A2 3b-2) — a single push prunes
+        // only up to the lowest cursor; the higher-seq entries of another table are
+        // PUSHED but reclaimed on a later pass. So full draining is EVENTUAL, not
+        // single-shot. A real wedge (#828: a cursor permanently pinned at 0 by an
+        // empty/pull-only table) would never drain no matter how many passes.
+        let remaining = Number.POSITIVE_INFINITY;
+        const maxPasses = syncData.syncedTables("basic").length + 1;
+        for (let pass = 0; pass < maxPasses; pass++) {
+          await pushOnce(client());
+          remaining = (
+            db().query("SELECT COUNT(*) AS n FROM sync_outbox").get() as {
+              n: number;
+            }
+          ).n;
+          if (remaining === 0) break;
+        }
         expect(remaining).toBe(0);
       }),
       { numRuns: 60 },

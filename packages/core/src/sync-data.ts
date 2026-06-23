@@ -27,6 +27,7 @@ import {
   withSyncApplying,
   withTransaction,
 } from "./db";
+import { rematerializeConfidence } from "./ltm";
 
 /**
  * Run `fn` with this connection's sync capture suppressed (re-entrant,
@@ -125,6 +126,39 @@ export const SYNCED_TABLES: Record<SyncTier, SyncTableMeta[]> = {
         "created_at",
         "updated_at",
       ],
+    },
+    {
+      // A2 sub-PR 3b-2 (#823): the per-entry metric register, keyed by the stable
+      // logical_id. Only the IMMUTABLE base_confidence syncs (set once at create;
+      // the materialized `confidence` is local-derived from base + the CRDT counters,
+      // and last_reinforced_at is a local decay clock — neither is in syncColumns).
+      // hash-LWW (versioned) is safe because base is immutable AFTER create: the
+      // only divergence is a one-time seam where two devices backfill base from
+      // their own pre-sync LWW confidence (v63 migration) — hash-LWW picks one
+      // winner and, since the CRDT counters MAX-merge independently, both sides
+      // still CONVERGE. Applied via applyRemoteMeta (upsert base + re-materialize).
+      // (No created_at: the local knowledge_meta table has none — syncedColumns()
+      // would silently drop it; listing it only mis-leads remote migration 0009.)
+      table: "knowledge_meta",
+      idColumns: ["logical_id"],
+      ftsTables: [],
+      syncColumns: ["logical_id", "base_confidence", "updated_at"],
+    },
+    {
+      // A2 sub-PR 3b-2: the convergent PN-counter state. Grow-only per
+      // (logical_id, replica_id); each row is SINGLE-OWNER (a device only ever
+      // increments its OWN replica's counter via applyConfidenceDelta, and pulled
+      // peer rows arrive under apply-suppression) — so the remote overwrite-upsert
+      // is monotonic and the outbox only ever carries this device's rows. Merge on
+      // the PULL side is per-key max (applyRemoteMetaCrdt), a join-semilattice.
+      // versioned:false: no content_hash/revision remotely (the local sync_state
+      // still hashes pos/neg to skip no-op pushes). Always-applied on pull (max-
+      // merge is idempotent/monotonic — never a "conflict").
+      table: "knowledge_meta_crdt",
+      idColumns: ["logical_id", "replica_id"],
+      ftsTables: [],
+      versioned: false,
+      syncColumns: ["logical_id", "replica_id", "pos", "neg"],
     },
     {
       table: "entities",
@@ -744,6 +778,61 @@ export function applyRemoteDelete(table: string, rowId: string): void {
   );
 }
 
+/**
+ * Apply a pulled `knowledge_meta` base row (A2 sub-PR 3b-2). Upserts the IMMUTABLE
+ * `base_confidence` (the only synced field) keyed by `logical_id`, then re-
+ * materializes the local `confidence` cache from base + the PN-counters. The
+ * materialized `confidence` and the local `last_reinforced_at` decay clock are
+ * local-derived/local-only and are NEVER overwritten by the pull. Runs under
+ * apply-suppression (the base write is not re-pushed). A NEW row seeds
+ * `confidence = base`; re-materialize then folds in any counters already present.
+ */
+export function applyRemoteMeta(row: Record<string, unknown>): void {
+  const logicalId = String(row.logical_id);
+  const base = Number(row.base_confidence ?? 1.0);
+  withApplying(() => {
+    db()
+      .query(
+        `INSERT INTO knowledge_meta (logical_id, base_confidence, confidence, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(logical_id) DO UPDATE SET base_confidence = excluded.base_confidence`,
+      )
+      .run(logicalId, base, base, Number(row.updated_at ?? 0));
+    rematerializeConfidence(logicalId, Date.now());
+  });
+}
+
+/**
+ * Apply a pulled `knowledge_meta_crdt` counter row (A2 sub-PR 3b-2) via per-key
+ * MAX merge (a grow-only join-semilattice), then re-materialize the entry's
+ * confidence. ALWAYS safe to apply — idempotent and monotonic: a stale lower
+ * counter never lowers the local value — so the engine applies it unconditionally
+ * (no hash classify). Runs under apply-suppression so the merged PEER counter is
+ * not re-pushed (this device only ever pushes its OWN replica's rows).
+ */
+export function applyRemoteMetaCrdt(row: Record<string, unknown>): void {
+  const logicalId = String(row.logical_id);
+  withApplying(() => {
+    db()
+      .query(
+        `INSERT INTO knowledge_meta_crdt (logical_id, replica_id, pos, neg, updated_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(logical_id, replica_id) DO UPDATE SET
+           pos = MAX(pos, excluded.pos),
+           neg = MAX(neg, excluded.neg),
+           updated_at = MAX(updated_at, excluded.updated_at)`,
+      )
+      .run(
+        logicalId,
+        String(row.replica_id),
+        Number(row.pos ?? 0),
+        Number(row.neg ?? 0),
+        Number(row.updated_at ?? 0),
+      );
+    rematerializeConfidence(logicalId, Number(row.updated_at ?? 0));
+  });
+}
+
 /** Insert one knowledge version row from a synced-column source `src`. */
 function insertKnowledgeVersion(
   src: Record<string, unknown>,
@@ -767,14 +856,42 @@ function insertKnowledgeVersion(
   // knowledge_meta register row, so subsequent local reinforce/decay/update —
   // which UPDATE knowledge_meta WHERE logical_id=… — affect a row instead of
   // silently no-op'ing. INSERT OR IGNORE never clobbers an existing (possibly
-  // converged) confidence on re-pull/version-append. confidence is NOT a synced
-  // knowledge column in 3b-1, so a pulled entry defaults to 1.0 here until the
-  // register itself syncs (3b-2). updated_at=0 marks it as never-locally-changed.
+  // converged) register on re-pull/version-append.
+  const hadMeta =
+    db()
+      .query("SELECT 1 FROM knowledge_meta WHERE logical_id = ?")
+      .get(ident.logicalId) != null;
+  // Seed last_reinforced_at to NOW (a local first-appearance touch), NOT NULL:
+  // decayProject grace-checks COALESCE(last_reinforced_at, k.updated_at), and a
+  // just-pulled entry's k.updated_at is the AUTHOR's (possibly old) content clock —
+  // NULL would make it instantly decay-eligible on this device, and since decay now
+  // records a CRDT counter, that local decay would sync back and spuriously lower the
+  // entry for every replica. last_reinforced_at is local-only (not a syncColumn), so
+  // this does not affect the placeholder base-guard hash below. updated_at stays 0
+  // (the register's sync clock) until the real base arrives via applyRemoteMeta.
   db()
     .query(
-      "INSERT OR IGNORE INTO knowledge_meta (logical_id, confidence, last_reinforced_at, updated_at) VALUES (?, 1.0, NULL, 0)",
+      "INSERT OR IGNORE INTO knowledge_meta (logical_id, confidence, last_reinforced_at, updated_at) VALUES (?, 1.0, ?, 0)",
     )
-    .run(ident.logicalId);
+    .run(ident.logicalId, Date.now());
+  if (!hadMeta) {
+    // The real base_confidence is whatever the entry's AUTHOR set; it only reaches
+    // this device once knowledge_meta itself syncs (a separate per-table cursor, so
+    // it can lag the knowledge pull arbitrarily). The 1.0 minted just above is a
+    // PLACEHOLDER this device did NOT author. Record its sync_state so a later
+    // disable→enable's seedOutbox treats it as already-in-sync and NEVER pushes the
+    // fabricated default — which would otherwise overwrite the author's real base on
+    // the (scope_id, logical_id)-keyed remote and permanently clobber it for every
+    // replica (base is immutable, so no one re-corrects it). When the real base
+    // arrives, applyRemoteMeta overwrites it and re-records sync_state from it.
+    const minted = getRowById("knowledge_meta", ident.logicalId);
+    if (minted)
+      setSyncState("knowledge_meta", ident.logicalId, {
+        content_hash: contentHash("knowledge_meta", minted),
+        revision: 0,
+        remote_updated_at: "",
+      });
+  }
 }
 
 /**

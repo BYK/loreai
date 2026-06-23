@@ -291,6 +291,13 @@ beforeEach(() => {
   deleteTeamConfig("sync.enabled");
   db().exec("DELETE FROM temp._sync_applying");
   db().exec("DELETE FROM knowledge");
+  // The knowledge_meta register + CRDT counters are now synced tables (A2 3b-2)
+  // and are NOT cascade-deleted by the hard `DELETE FROM knowledge` above (no FK
+  // CASCADE; production deletes via append-only death-certs, not a hard delete).
+  // Clear them too so orphaned register rows don't accumulate across tests and get
+  // re-seeded into the outbox by enableSync.
+  db().exec("DELETE FROM knowledge_meta");
+  db().exec("DELETE FROM knowledge_meta_crdt");
   db().exec("DELETE FROM entities");
   db().exec("DELETE FROM profiles");
   db().exec("DELETE FROM sync_outbox");
@@ -971,5 +978,56 @@ describe("syncOnce", () => {
     // Echo-pull of our own row is a no-op (hash matches) — pulled stays 0.
     expect(r.pulled).toBe(0);
     expect(tableRows("knowledge").find((x) => x.id === "k1")).toBeTruthy();
+  });
+});
+
+describe("knowledge_meta register sync (A2 3b-2)", () => {
+  test("pushOnce uploads the base register row AND the CRDT counters", async () => {
+    syncData.enableSync("basic");
+    // Capture triggers fire on these local writes (sync enabled) → outbox.
+    db()
+      .query(
+        "INSERT INTO knowledge_meta (logical_id, confidence, base_confidence, updated_at) VALUES ('k1', 0.6, 0.6, ?)",
+      )
+      .run(now());
+    db()
+      .query(
+        "INSERT INTO knowledge_meta_crdt (logical_id, replica_id, pos, neg, updated_at) VALUES ('k1', 'rA', 0.1, 0, ?)",
+      )
+      .run(now());
+    await pushOnce(makeClient() as never);
+    // Base: the IMMUTABLE base_confidence is uploaded (NOT the local-derived confidence).
+    const baseRow = tableRows("knowledge_meta").find(
+      (x) => x.logical_id === "k1",
+    );
+    expect(baseRow?.base_confidence).toBeCloseTo(0.6, 6);
+    expect("confidence" in (baseRow ?? {})).toBe(false); // local-derived, never synced
+    // Counters: the local replica's grow-only row is uploaded.
+    const crdtRow = tableRows("knowledge_meta_crdt").find(
+      (x) => x.logical_id === "k1" && x.replica_id === "rA",
+    );
+    expect(crdtRow?.pos).toBeCloseTo(0.1, 6);
+    expect(crdtRow?.neg).toBe(0);
+  });
+
+  test("the per-op confidence re-materialization does NOT churn the base outbox", () => {
+    syncData.enableSync("basic");
+    db()
+      .query(
+        "INSERT INTO knowledge_meta (logical_id, confidence, base_confidence, updated_at) VALUES ('k1', 0.6, 0.6, ?)",
+      )
+      .run(now());
+    db().exec("DELETE FROM sync_outbox"); // ignore the INSERT capture
+    // A materialization-style write (confidence/updated_at only, base unchanged)
+    // must NOT enqueue a knowledge_meta push (the UPDATE trigger is base-gated).
+    db()
+      .query(
+        "UPDATE knowledge_meta SET confidence = 0.55, updated_at = ? WHERE logical_id = 'k1'",
+      )
+      .run(now() + 1);
+    expect(
+      syncData.readOutbox(0).filter((e) => e.table_name === "knowledge_meta")
+        .length,
+    ).toBe(0);
   });
 });

@@ -160,16 +160,88 @@ function insertMeta(
   lastReinforcedAt: number | null,
   now: number,
 ): void {
+  // A2 3b-2: `base_confidence` is the create-time value the PN-counter deltas
+  // accumulate relative to (immutable after create). A fresh entry has no deltas,
+  // so its materialized `confidence` equals the base.
   db()
     .query(
-      `INSERT INTO knowledge_meta (logical_id, confidence, last_reinforced_at, updated_at)
-       VALUES (?, ?, ?, ?)
+      `INSERT INTO knowledge_meta (logical_id, confidence, base_confidence, last_reinforced_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(logical_id) DO UPDATE SET
          confidence = excluded.confidence,
          last_reinforced_at = excluded.last_reinforced_at,
          updated_at = excluded.updated_at`,
     )
-    .run(logicalId, confidence, lastReinforcedAt, now);
+    .run(logicalId, confidence, confidence, lastReinforcedAt, now);
+}
+
+// ── A2 sub-PR 3b-2: confidence is a convergent PN-counter register ────────────
+// `knowledge_meta.confidence` is a MATERIALIZED cache, never written directly by
+// the lifecycle ops. Each op records a signed delta into THIS replica's grow-only
+// (pos,neg) accumulators in `knowledge_meta_crdt`, then re-materializes
+// `confidence = clamp(base_confidence + Σpos − Σneg, 0, 1)`. Merge across devices
+// is per-(logical_id,replica_id) max — so two devices' independent reinforce/decay
+// both survive. Clamp is applied ONLY at materialize time: counters may accumulate
+// past [0,1], producing intentional boundary hysteresis (a long-reinforced entry
+// resists a single penalty) — the accepted cost of a faithful additive CRDT.
+
+/** Stable per-device replica id (UUIDv7), minted once into KV. Not cached: the
+ *  test suite swaps the DB between cases, so always read it from the live DB. */
+function replicaId(): string {
+  let id = getKV("sync.replica_id");
+  if (!id) {
+    id = uuidv7();
+    setKV("sync.replica_id", id);
+  }
+  return id;
+}
+
+/** Re-derive the materialized `confidence` cache for a logical entry from its
+ *  immutable base plus the summed PN-counters. Clamp is HERE (read time) only.
+ *  Exported so the sync apply path (3b-2b) can re-materialize after merging a
+ *  pulled base / peer counter into the register. Idempotent; no-op if the entry
+ *  has no knowledge_meta row yet. */
+export function rematerializeConfidence(logicalId: string, now: number): void {
+  db()
+    .query(
+      `UPDATE knowledge_meta
+         SET confidence = MAX(0.0, MIN(1.0,
+               base_confidence
+               + COALESCE((SELECT SUM(pos) FROM knowledge_meta_crdt WHERE logical_id = ?), 0)
+               - COALESCE((SELECT SUM(neg) FROM knowledge_meta_crdt WHERE logical_id = ?), 0))),
+             updated_at = ?
+       WHERE logical_id = ?`,
+    )
+    .run(logicalId, logicalId, now, logicalId);
+}
+
+/** Record a signed confidence delta on the LOCAL replica's grow-only counters,
+ *  then re-materialize. Positive → pos, negative → neg (a faithful PN-counter). */
+function applyConfidenceDelta(
+  logicalId: string,
+  delta: number,
+  now: number,
+): void {
+  if (delta === 0) return;
+  const pos = delta > 0 ? delta : 0;
+  const neg = delta < 0 ? -delta : 0;
+  db()
+    .query(
+      `INSERT INTO knowledge_meta_crdt (logical_id, replica_id, pos, neg, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(logical_id, replica_id) DO UPDATE SET
+         pos = pos + excluded.pos, neg = neg + excluded.neg, updated_at = excluded.updated_at`,
+    )
+    .run(logicalId, replicaId(), pos, neg, now);
+  rematerializeConfidence(logicalId, now);
+}
+
+/** Current materialized confidence of a logical entry (default 1.0 if no row). */
+function currentConfidence(logicalId: string): number {
+  const row = db()
+    .query("SELECT confidence FROM knowledge_meta WHERE logical_id = ?")
+    .get(logicalId) as { confidence: number } | undefined;
+  return row?.confidence ?? 1.0;
 }
 
 export function create(input: {
@@ -534,22 +606,19 @@ export function update(
     .run(...(params as [string, ...string[]]));
 
   // Metric register (A2 3b): any update is a re-confirmation → reset the decay
-  // clock so a freshly-touched entry never ages out (v48). Bump the register's
-  // sync clock (updated_at) ONLY when the synced metric (confidence) actually
-  // changed — a content-only edit must not churn metric sync. Clamp confidence to
-  // [0,1] (an out-of-range LLM value would over-weight scoring or silently delete).
-  const metaSets: string[] = ["last_reinforced_at = ?"];
-  const metaParams: unknown[] = [now];
-  if (input.confidence !== undefined) {
-    metaSets.push("confidence = ?", "updated_at = ?");
-    metaParams.push(Math.max(0, Math.min(1, input.confidence)), now);
-  }
-  metaParams.push(logicalId);
+  // clock so a freshly-touched entry never ages out (v48). last_reinforced_at is
+  // local (does NOT bump the register's sync clock on its own).
   db()
     .query(
-      `UPDATE knowledge_meta SET ${metaSets.join(", ")} WHERE logical_id = ?`,
+      "UPDATE knowledge_meta SET last_reinforced_at = ? WHERE logical_id = ?",
     )
-    .run(...(metaParams as [unknown, ...unknown[]]));
+    .run(now, logicalId);
+  // A confidence "set" (A2 3b-2) becomes a delta to the target on the local replica
+  // (clamped to [0,1]); applyConfidenceDelta re-materializes + bumps updated_at.
+  if (input.confidence !== undefined) {
+    const target = Math.max(0, Math.min(1, input.confidence));
+    applyConfidenceDelta(logicalId, target - currentConfidence(logicalId), now);
+  }
 
   // Re-embed the new current version only when a content change was appended.
   if (embedding.isAvailable() && appended) {
@@ -1110,16 +1179,16 @@ export function markInjected(ids: string[]): void {
  * reward (#497: test/build pass → boost).
  */
 export function reinforce(id: string, delta: number = REINFORCE_STEP): void {
-  // Metric register (A2 3b): a confidence change bumps the register's sync clock.
-  // `id` may be any version id — resolve to the stable logical_id.
+  // A2 3b-2: record the delta on the local replica's PN-counter (re-materializes
+  // confidence). `id` may be any version id — resolve to the stable logical_id.
   const now = Date.now();
+  const logicalId = logicalIdOf(id);
+  applyConfidenceDelta(logicalId, delta, now);
   db()
     .query(
-      `UPDATE knowledge_meta
-       SET confidence = MAX(0, MIN(1, confidence + ?)), last_reinforced_at = ?, updated_at = ?
-       WHERE logical_id = (SELECT logical_id FROM knowledge WHERE id = ?)`,
+      "UPDATE knowledge_meta SET last_reinforced_at = ? WHERE logical_id = ?",
     )
-    .run(delta, now, now, id);
+    .run(now, logicalId);
 }
 
 /**
@@ -1137,13 +1206,12 @@ export function penalizeStaleReferences(
   logicalId: string,
   delta: number = REFERENCE_DRIFT_PENALTY,
 ): void {
-  db()
-    .query(
-      `UPDATE knowledge_meta
-       SET confidence = MAX(0, confidence - ?), updated_at = ?
-       WHERE logical_id = ?`,
-    )
-    .run(delta, Date.now(), logicalId);
+  // confidence is a materialized cache over the PN-counter register (A2 3b-2):
+  // a direct `UPDATE knowledge_meta SET confidence = …` would be WIPED by the next
+  // rematerializeConfidence (any reinforce/decay/credit/update/prune). Record the
+  // penalty as a signed delta on this replica's counter so it is durable AND
+  // converges across devices — mirrors decayProject / creditSessionOutcome.
+  applyConfidenceDelta(logicalId, -delta, Date.now());
 }
 
 /** Outcome of a reference-validity pass over one project. */
@@ -1478,40 +1546,45 @@ export function creditSessionOutcome(
     // cross_project = 0 guard is a real backstop (a PROMOTED entry keeps its
     // origin project_id but has cross_project = 1 — it must never be adjusted);
     // is_deleted = 0 skips death-certificate versions.
-    // Confidence lives on the register (A2 3b); the eligibility filters
+    // Confidence is a PN-counter register (A2 3b-2): record a per-entry delta on
+    // the local replica, then re-materialize. The eligibility filters
     // (is_current/is_deleted/cross_project/project_id) are knowledge-row facts, so
-    // gate via a knowledge_current subquery (it already pins is_current=1 AND
-    // is_deleted=0 and exposes confidence via the JOIN). A confidence change bumps
-    // the register's sync clock (updated_at).
-    if (verdict === "pass") {
+    // gate via knowledge_current (pins is_current=1 AND is_deleted=0, exposes the
+    // materialized confidence). cross_project = 0 is a real backstop (a PROMOTED
+    // entry keeps its origin project_id but has cross_project = 1 — never adjust it).
+    // PASS additionally only rescues under-confident entries (confidence <
+    // OUTCOME_BOOST_CEILING) and the delta is capped so the boost never lifts an
+    // entry above that ceiling — preserved by computing min(REWARD, CEILING−conf)
+    // per entry. FAIL drives down by OUTCOME_PENALTY (materialize clamps at 0).
+    const eligible = (
+      verdict === "pass"
+        ? db()
+            .query(
+              `SELECT logical_id, confidence FROM knowledge_current
+                WHERE cross_project = 0 AND project_id = ? AND confidence < ?
+                  AND logical_id IN (${placeholders})`,
+            )
+            .all(pid, OUTCOME_BOOST_CEILING, ...ids)
+        : db()
+            .query(
+              `SELECT logical_id, confidence FROM knowledge_current
+                WHERE cross_project = 0 AND project_id = ?
+                  AND logical_id IN (${placeholders})`,
+            )
+            .all(pid, ...ids)
+    ) as { logical_id: string; confidence: number }[];
+    for (const e of eligible) {
+      const delta =
+        verdict === "pass"
+          ? Math.min(OUTCOME_REWARD, OUTCOME_BOOST_CEILING - e.confidence)
+          : -OUTCOME_PENALTY;
+      applyConfidenceDelta(e.logical_id, delta, now);
+      // Both verdicts reset the decay clock (the entry was demonstrably in use).
       db()
         .query(
-          `UPDATE knowledge_meta
-           SET confidence = MIN(?, confidence + ?), last_reinforced_at = ?, updated_at = ?
-           WHERE logical_id IN (
-             SELECT logical_id FROM knowledge_current
-              WHERE cross_project = 0 AND project_id = ? AND confidence < ?
-                AND logical_id IN (${placeholders}))`,
+          "UPDATE knowledge_meta SET last_reinforced_at = ? WHERE logical_id = ?",
         )
-        .run(
-          OUTCOME_BOOST_CEILING,
-          OUTCOME_REWARD,
-          now,
-          now,
-          pid,
-          OUTCOME_BOOST_CEILING,
-          ...ids,
-        );
-    } else {
-      db()
-        .query(
-          `UPDATE knowledge_meta
-           SET confidence = MAX(0, confidence - ?), last_reinforced_at = ?, updated_at = ?
-           WHERE logical_id IN (
-             SELECT logical_id FROM knowledge_current
-              WHERE cross_project = 0 AND project_id = ? AND logical_id IN (${placeholders}))`,
-        )
-        .run(OUTCOME_PENALTY, now, now, pid, ...ids);
+        .run(now, e.logical_id);
     }
 
     // Mark this session's injections credited (so a later idle tick is a no-op)
@@ -1620,28 +1693,26 @@ export function decayProject(
   // (<= floor) are invisible everywhere and reaped by pruneDeadEntries; matching
   // them here would re-apply a no-op MAX(0, …) and inflate the returned/logged
   // count with rows whose confidence didn't actually change. (Seer review.)
-  // Confidence is a register field (A2 3b); the eligibility facts (project_id,
-  // cross_project, confidence floor, grace window) come from knowledge_current
-  // (which pins is_current=1 and exposes confidence/last_reinforced_at via the
-  // JOIN; `updated_at` here is the content row's, NOT the register's, so the bump
-  // below can't feed back into the grace check). Decay does NOT reset
-  // last_reinforced_at; it bumps the register's sync clock (updated_at).
-  const res = db()
+  // Confidence is a PN-counter register (A2 3b-2): record a −DECAY_STEP delta per
+  // eligible entry on the local replica, then re-materialize. The eligibility facts
+  // (project_id, cross_project, confidence floor, grace window) come from
+  // knowledge_current (pins is_current=1, exposes the materialized confidence +
+  // last_reinforced_at; `updated_at` here is the CONTENT row's, NOT the register's,
+  // so the bump can't feed back into the grace check). Decay does NOT reset
+  // last_reinforced_at.
+  const eligible = db()
     .query(
-      `UPDATE knowledge_meta
-       SET confidence = MAX(0, confidence - ?), updated_at = ?
-       WHERE logical_id IN (
-         SELECT logical_id FROM knowledge_current
-          WHERE project_id = ? AND cross_project = 0 AND confidence > ?
-            AND COALESCE(last_reinforced_at, updated_at) < ?)`,
+      `SELECT logical_id FROM knowledge_current
+        WHERE project_id = ? AND cross_project = 0 AND confidence > ?
+          AND COALESCE(last_reinforced_at, updated_at) < ?`,
     )
-    .run(DECAY_STEP, now, pid, DEAD_CONFIDENCE_FLOOR, cutoff) as {
-    changes?: number | bigint;
-  };
+    .all(pid, DEAD_CONFIDENCE_FLOOR, cutoff) as { logical_id: string }[];
+  for (const e of eligible)
+    applyConfidenceDelta(e.logical_id, -DECAY_STEP, now);
   db()
     .query("UPDATE projects SET last_decay_at = ? WHERE id = ?")
     .run(now, pid);
-  return Number(res.changes ?? 0);
+  return eligible.length;
 }
 
 /**
@@ -2715,18 +2786,35 @@ export function getWorkerSource(
  * @returns Number of entries pruned
  */
 export function pruneOversized(maxLength: number): number {
-  // confidence is a register field (A2 3b); the size filter is a knowledge-row
-  // fact, so gate via knowledge_current (current+live, exposes content+confidence).
-  const result = db()
+  // confidence is a PN-counter register (A2 3b-2); the size filter is a
+  // knowledge-row fact, so gate via knowledge_current (current+live, exposes
+  // content + materialized confidence). Drive each oversized entry to 0 with a
+  // delta of −(its RAW unclamped confidence) on the local replica, so that
+  // CRDT hysteresis doesn't prevent full zeroing.
+  const now = Date.now();
+  // INNER JOIN knowledge_meta is DELIBERATE (not the reads' LEFT JOIN + COALESCE):
+  // pruning drives the raw counter to 0 via applyConfidenceDelta, which UPDATEs
+  // knowledge_meta WHERE logical_id — a meta-less row has nothing to write, so
+  // rematerializeConfidence would no-op and the entry would read 1.0 forever while
+  // being counted as "pruned". Only rows with a register row can actually be zeroed,
+  // so we select exactly those. The A2 3b invariant (every current entry has a
+  // register row — create/pull-mint/recover all uphold it) makes this lossless.
+  const oversized = db()
     .query(
-      `UPDATE knowledge_meta SET confidence = 0, updated_at = ?
-        WHERE logical_id IN (
-          SELECT logical_id FROM knowledge_current
-           WHERE LENGTH(content) > ? AND confidence > 0)`,
+      `SELECT k.logical_id,
+              m.base_confidence
+              + COALESCE((SELECT SUM(pos) FROM knowledge_meta_crdt WHERE logical_id = k.logical_id), 0)
+              - COALESCE((SELECT SUM(neg) FROM knowledge_meta_crdt WHERE logical_id = k.logical_id), 0)
+              AS raw_confidence
+         FROM knowledge k
+         JOIN knowledge_meta m ON m.logical_id = k.logical_id
+         WHERE k.is_current = 1 AND k.is_deleted = 0
+           AND LENGTH(k.content) > ? AND m.confidence > 0`,
     )
-    .run(Date.now(), maxLength);
-  // node:sqlite returns `changes` as `number | bigint`; coerce for cross-runtime parity.
-  return Number(result.changes);
+    .all(maxLength) as { logical_id: string; raw_confidence: number }[];
+  for (const e of oversized)
+    applyConfidenceDelta(e.logical_id, -e.raw_confidence, now);
+  return oversized.length;
 }
 
 // ---------------------------------------------------------------------------

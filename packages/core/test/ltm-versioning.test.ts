@@ -39,11 +39,11 @@ function ftsHits(token: string): number {
 }
 
 describe("A2 sub-PR 1: append-only knowledge scaffolding", () => {
-  test("schema version is 62", () => {
+  test("schema version is 63", () => {
     const v = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(v.version).toBe(62);
+    expect(v.version).toBe(63);
   });
 
   test("create() defaults logical_id = id, version 1, current, not deleted", () => {
@@ -87,7 +87,9 @@ describe("A2 sub-PR 1: append-only knowledge scaffolding", () => {
 
     const v = versions(id);
     expect(v).toHaveLength(2); // append-only: both physically present
+    // biome-ignore lint/style/noNonNullAssertion: known-safe after toHaveLength(2) check above
     const v1 = v.find((x) => x.version === 1)!;
+    // biome-ignore lint/style/noNonNullAssertion: known-safe after toHaveLength(2) check above
     const v2 = v.find((x) => x.version === 2)!;
     expect(v1.is_current).toBe(0); // demoted
     expect(v2.is_current).toBe(1);

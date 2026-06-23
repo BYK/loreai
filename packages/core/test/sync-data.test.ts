@@ -11,6 +11,8 @@ import {
   applyRemoteDelete,
   applyRemoteKnowledge,
   applyRemoteKnowledgeDelete,
+  applyRemoteMeta,
+  applyRemoteMetaCrdt,
   applyRemoteUpsert,
   assertSyncInvariants,
   classifyRemoteRow,
@@ -1012,5 +1014,154 @@ describe("mutation gap coverage (#832)", () => {
     expect(isSyncEnabled()).toBe(false);
     enableSync();
     expect(isSyncEnabled()).toBe(true);
+  });
+});
+
+describe("applyRemoteMeta / applyRemoteMetaCrdt — convergent confidence (A2 3b-2b)", () => {
+  const PROJ = "/tmp/lore-meta-sync";
+  const mk = (confidence: number): string =>
+    ltm.create({
+      projectPath: PROJ,
+      scope: "project",
+      category: "decision",
+      title: `T-${Math.random()}`,
+      content: "body",
+      confidence,
+    });
+  const conf = (logicalId: string): number =>
+    (
+      db()
+        .query("SELECT confidence FROM knowledge_meta WHERE logical_id = ?")
+        .get(logicalId) as { confidence: number }
+    ).confidence;
+  const base = (logicalId: string): number =>
+    (
+      db()
+        .query(
+          "SELECT base_confidence FROM knowledge_meta WHERE logical_id = ?",
+        )
+        .get(logicalId) as { base_confidence: number }
+    ).base_confidence;
+  const crdtCount = (logicalId: string, replicaId: string): number =>
+    (
+      db()
+        .query(
+          "SELECT COUNT(*) n FROM knowledge_meta_crdt WHERE logical_id = ? AND replica_id = ?",
+        )
+        .get(logicalId, replicaId) as { n: number }
+    ).n;
+
+  beforeEach(() => {
+    const pid = ensureProject(PROJ);
+    db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+    db().query("DELETE FROM knowledge_meta").run();
+    db().query("DELETE FROM knowledge_meta_crdt").run();
+  });
+
+  test("applyRemoteMeta upserts the immutable base and re-materializes confidence", () => {
+    const id = mk(1.0); // local base 1.0
+    applyRemoteMeta({ logical_id: id, base_confidence: 0.7, updated_at: 1 });
+    expect(base(id)).toBeCloseTo(0.7, 6);
+    expect(conf(id)).toBeCloseTo(0.7, 6); // clamp(0.7 + 0 − 0)
+  });
+
+  test("applyRemoteMeta does NOT overwrite the local materialized confidence/decay clock", () => {
+    const id = mk(0.5);
+    ltm.reinforce(id, 0.1); // local counter pos=0.1 → conf 0.6
+    // A re-pulled base (same value) must not clobber the locally-accumulated value.
+    applyRemoteMeta({ logical_id: id, base_confidence: 0.5, updated_at: 2 });
+    expect(conf(id)).toBeCloseTo(0.6, 6); // base 0.5 + local 0.1, NOT reset to base
+  });
+
+  test("applyRemoteMetaCrdt max-merges a peer counter and converges (A reinforce + B decay)", () => {
+    const id = mk(0.5); // base 0.5
+    ltm.reinforce(id, 0.1); // local replica pos=0.1 → 0.6
+    applyRemoteMetaCrdt({ logical_id: id, replica_id: "B", pos: 0, neg: 0.2 });
+    // clamp(0.5 + 0.1(local) − 0.2(B)) = 0.4 — both devices' deltas survive.
+    expect(conf(id)).toBeCloseTo(0.4, 6);
+  });
+
+  test("stale lower counter never lowers the value (per-key MAX)", () => {
+    const id = mk(0.5);
+    applyRemoteMetaCrdt({ logical_id: id, replica_id: "B", pos: 0.3, neg: 0 });
+    expect(conf(id)).toBeCloseTo(0.8, 6);
+    // A stale re-delivery of B with a LOWER pos must be absorbed by MAX → no change.
+    applyRemoteMetaCrdt({ logical_id: id, replica_id: "B", pos: 0.1, neg: 0 });
+    expect(conf(id)).toBeCloseTo(0.8, 6);
+  });
+
+  test("re-pulling the same counter is idempotent (one row, value unchanged)", () => {
+    const id = mk(0.5);
+    applyRemoteMetaCrdt({ logical_id: id, replica_id: "B", pos: 0.2, neg: 0 });
+    applyRemoteMetaCrdt({ logical_id: id, replica_id: "B", pos: 0.2, neg: 0 });
+    expect(conf(id)).toBeCloseTo(0.7, 6);
+    expect(crdtCount(id, "B")).toBe(1);
+  });
+
+  test("three replicas' independent deltas all sum into the converged value", () => {
+    const id = mk(0.5);
+    ltm.reinforce(id, 0.1); // local
+    applyRemoteMetaCrdt({ logical_id: id, replica_id: "B", pos: 0.2, neg: 0 });
+    applyRemoteMetaCrdt({ logical_id: id, replica_id: "C", pos: 0, neg: 0.05 });
+    // clamp(0.5 + 0.1 + 0.2 − 0.05) = clamp(0.75) = 0.75
+    expect(conf(id)).toBeCloseTo(0.75, 6);
+  });
+
+  test("a pull-minted register's placeholder base is NEVER pushed on (re-)enable — no peer-base clobber", () => {
+    setTeamConfig("sync.enabled", "1");
+    const pid = ensureProject(PROJ);
+    // Pull a brand-new entry authored on ANOTHER device: only the knowledge content
+    // lands here; knowledge_meta syncs on its own (laggable) cursor — so this mints a
+    // PLACEHOLDER register row at the default base 1.0 (the real base is unknown yet).
+    applyRemoteKnowledge({
+      id: "kpeer",
+      title: "peer entry",
+      content: "peer body",
+      category: "decision",
+      project_id: pid,
+      created_at: 1,
+      updated_at: 1,
+    });
+    expect(base("kpeer")).toBeCloseTo(1.0, 6); // fabricated placeholder
+
+    // A later disable→enable re-seeds the outbox from all existing rows.
+    seedOutbox("basic");
+    // The placeholder must NOT be enqueued: pushing the fabricated 1.0 would overwrite
+    // the author's REAL base on the (scope_id, logical_id)-keyed remote and permanently
+    // clobber it for every replica (base is immutable → no one re-corrects it). The
+    // mint records sync_state so seedOutbox sees it as already-in-sync.
+    const pushed = readOutbox(0).filter(
+      (e) => e.table_name === "knowledge_meta" && e.row_id === "kpeer",
+    );
+    expect(pushed).toHaveLength(0);
+  });
+
+  test("a pull-minted register seeds last_reinforced_at to NOW (not NULL) — no premature decay", () => {
+    const pid = ensureProject(PROJ);
+    const before = Date.now();
+    // Pull an entry authored long ago on another device (old content clock).
+    applyRemoteKnowledge({
+      id: "kold",
+      title: "old peer entry",
+      content: "old body",
+      category: "decision",
+      project_id: pid,
+      created_at: 1,
+      updated_at: 1, // author's ancient content clock
+    });
+    // The minted register's decay clock must be a local first-appearance touch, NOT
+    // NULL: decayProject grace-checks COALESCE(last_reinforced_at, k.updated_at), and
+    // NULL would fall back to updated_at=1 (1970) → instantly decay-eligible → a local
+    // decay that (now being a CRDT counter) would sync back and spuriously lower the
+    // entry for every replica.
+    const lra = (
+      db()
+        .query(
+          "SELECT last_reinforced_at FROM knowledge_meta WHERE logical_id = ?",
+        )
+        .get("kold") as { last_reinforced_at: number | null }
+    ).last_reinforced_at;
+    expect(lra).not.toBeNull();
+    expect(lra as number).toBeGreaterThanOrEqual(before);
   });
 });
