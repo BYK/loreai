@@ -282,7 +282,12 @@ describe("vectorSearch", () => {
 
     const vecA = new Float32Array([1, 0, 0]);
     const vecB = new Float32Array([0, 1, 0]);
-    const vecC = new Float32Array([0.9, 0.1, 0]);
+    // L2-normalize vecC to match production vectors (the embedding worker
+    // always normalizes). Un-normalized vectors would give different scores
+    // from dotProductNormalized vs cosineSimilarity.
+    const rawC = [0.9, 0.1, 0];
+    const normC = Math.sqrt(rawC[0] ** 2 + rawC[1] ** 2 + rawC[2] ** 2);
+    const vecC = new Float32Array(rawC.map((v) => v / normC));
 
     db()
       .query(

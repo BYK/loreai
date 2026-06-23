@@ -371,6 +371,11 @@ export function installFetchInterceptor(
   _originalFetch = globalThis.fetch;
   const originalFetch = _originalFetch;
 
+  // Pre-parse the gateway URL once — avoids constructing a new URL object on
+  // every fetch call in the process (tool executions, file downloads, etc.).
+  const gateway = new URL(config.gatewayBase);
+  const gatewayBase = config.gatewayBase;
+
   const interceptor = async (
     input: RequestInfo | URL,
     init?: RequestInit,
@@ -382,14 +387,45 @@ export function installFetchInterceptor(
           ? input.toString()
           : input.url;
 
-    const gateway = new URL(config.gatewayBase);
+    // Fast exit: skip URL parsing entirely for requests that can't possibly
+    // be LLM API calls. Most fetch calls (tool execution, file downloads,
+    // health checks) don't contain any LLM endpoint suffix.
+    if (
+      !url.includes("/messages") &&
+      !url.includes("/completions") &&
+      !url.includes("/responses")
+    ) {
+      return originalFetch(input, init);
+    }
+
+    // Parse the URL once and reuse across both intercept paths.
+    let upstream: URL;
+    try {
+      upstream = new URL(url);
+    } catch {
+      return originalFetch(input, init);
+    }
+
+    // Never intercept requests already going to the gateway
+    if (url.startsWith(gatewayBase)) return originalFetch(input, init);
+
+    // Never intercept local requests (could be local LLM or gateway itself)
+    const host = upstream.hostname;
+    if (
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      host === "0.0.0.0" ||
+      host === "::1" ||
+      host === "[::1]"
+    ) {
+      return originalFetch(input, init);
+    }
 
     // ---- Path 1: URL matched a known LLM API pattern ----
-    if (shouldIntercept(url, config.gatewayBase)) {
-      const upstream = new URL(url);
+    if (matchesLLMApiPath(upstream.pathname)) {
       const rewrite = interceptUrl(upstream, gateway);
       if (!rewrite) {
-        // Should not happen — shouldIntercept() being true means the path
+        // Should not happen — matchesLLMApiPath() being true means the path
         // matched a pattern, and interceptUrl handles all patterns. Pass
         // through as a safety fallback.
         return originalFetch(input, init);
@@ -407,56 +443,38 @@ export function installFetchInterceptor(
     }
 
     // ---- Path 2: URL didn't match, but the body shape may reveal an LLM call ----
-    try {
-      const upstream = new URL(url);
-      const host = upstream.hostname;
-      const isLocal =
-        host === "localhost" ||
-        host === "127.0.0.1" ||
-        host === "0.0.0.0" ||
-        host === "::1" ||
-        host === "[::1]";
-      const isGateway = url.startsWith(config.gatewayBase);
+    if (host && pathLooksLLMLike(upstream.pathname)) {
+      const bodyRaw = extractBodyString(input, init);
+      const detected = bodyRaw ? detectProtocolFromBody(bodyRaw) : null;
 
-      if (
-        host &&
-        !isLocal &&
-        !isGateway &&
-        pathLooksLLMLike(upstream.pathname)
-      ) {
-        const bodyRaw = extractBodyString(input, init);
-        const detected = bodyRaw ? detectProtocolFromBody(bodyRaw) : null;
-
-        if (detected) {
-          // Body shape identified the protocol — route to the canonical
-          // gateway endpoint for that protocol so the request goes through
-          // Lore even though the URL path was non-standard.
-          const rewrite = interceptUrlForProtocol(upstream, gateway, detected);
-          const headers = buildGatewayHeaders(
-            input,
-            init,
-            rewrite.upstreamBase,
-            config,
-          );
-          log.info(
-            `fetch-interceptor: ${upstream.host}${upstream.pathname} → gateway (body-detected ${detected})`,
-          );
-          return originalFetch(rewrite.gatewayUrl, { ...init, headers });
-        }
-
-        // LLM-looking path we couldn't intercept (no body, or unrecognized
-        // shape) — warn once so the operator can extend the patterns.
-        const warnKey = `${upstream.host}${upstream.pathname}`;
-        if (!warnedPaths.has(warnKey)) {
-          warnedPaths.add(warnKey);
-          log.warn(
-            `fetch-interceptor: ${upstream.host}${upstream.pathname} matched no LLM API pattern — request bypassing Lore gateway. Add a pattern in fetch-interceptor.ts if this is an LLM endpoint.`,
-          );
-        }
+      if (detected) {
+        // Body shape identified the protocol — route to the canonical
+        // gateway endpoint for that protocol so the request goes through
+        // Lore even though the URL path was non-standard.
+        const rewrite = interceptUrlForProtocol(upstream, gateway, detected);
+        const headers = buildGatewayHeaders(
+          input,
+          init,
+          rewrite.upstreamBase,
+          config,
+        );
+        log.info(
+          `fetch-interceptor: ${upstream.host}${upstream.pathname} → gateway (body-detected ${detected})`,
+        );
+        return originalFetch(rewrite.gatewayUrl, { ...init, headers });
       }
-    } catch {
-      // ignore URL parse errors — we're already in the non-intercept branch
+
+      // LLM-looking path we couldn't intercept (no body, or unrecognized
+      // shape) — warn once so the operator can extend the patterns.
+      const warnKey = `${upstream.host}${upstream.pathname}`;
+      if (!warnedPaths.has(warnKey)) {
+        warnedPaths.add(warnKey);
+        log.warn(
+          `fetch-interceptor: ${upstream.host}${upstream.pathname} matched no LLM API pattern — request bypassing Lore gateway. Add a pattern in fetch-interceptor.ts if this is an LLM endpoint.`,
+        );
+      }
     }
+
     return originalFetch(input, init);
   };
 

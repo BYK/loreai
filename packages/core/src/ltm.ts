@@ -2343,18 +2343,20 @@ function _dedup(
     }
   }
 
-  // Pre-compute neighbors for all pairs
+  // Pre-compute neighbors for all UNIQUE pairs — title overlap and cosine
+  // similarity are both symmetric, so (A,B) == (B,A). Iterating over unique
+  // pairs halves the number of comparisons (n*(n-1)/2 instead of n²).
   type DedupHit = { id: string; score: number };
   const neighborMap = new Map<string, DedupHit[]>();
-  // Collect all pairwise embedding similarities (for feedback/calibration).
   const pairSimilarities = new Map<string, number>();
 
-  for (const entry of entries) {
-    const neighbors: DedupHit[] = [];
-    const entryVec = embeddingMap.get(entry.id);
+  for (let i = 0; i < entries.length; i++) {
+    if (!neighborMap.has(entries[i].id)) neighborMap.set(entries[i].id, []);
+    const entryVec = embeddingMap.get(entries[i].id);
 
-    for (const other of entries) {
-      if (other.id === entry.id) continue;
+    for (let j = i + 1; j < entries.length; j++) {
+      const entry = entries[i];
+      const other = entries[j];
 
       // Signal 1: title word-overlap
       const { coefficient, intersectionSize } = titleOverlap(
@@ -2376,24 +2378,21 @@ function _dedup(
         }
       }
 
-      // Track all pairwise embedding similarities for calibration signals
+      // Track pairwise embedding similarity for calibration
       if (similarity > 0) {
-        const pk = dedupPairKey(entry.id, other.id);
-        if (!pairSimilarities.has(pk)) {
-          pairSimilarities.set(pk, similarity);
-        }
+        pairSimilarities.set(dedupPairKey(entry.id, other.id), similarity);
       }
 
       if (titleMatch || embeddingMatch) {
-        // Use the stronger signal as the match score for cluster priority
-        neighbors.push({
-          id: other.id,
-          score: Math.max(coefficient, similarity),
-        });
+        const score = Math.max(coefficient, similarity);
+        neighborMap.get(entry.id)!.push({ id: other.id, score });
+        if (!neighborMap.has(other.id)) neighborMap.set(other.id, []);
+        neighborMap.get(other.id)!.push({ id: entry.id, score });
       }
     }
+  }
+  for (const neighbors of neighborMap.values()) {
     neighbors.sort((a, b) => b.score - a.score);
-    neighborMap.set(entry.id, neighbors);
   }
 
   // Greedy star clustering — process entries with most neighbors first
