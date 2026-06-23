@@ -19,7 +19,7 @@ import type {
   CacheTurnAnalysis,
   GatewayUsage,
 } from "./translate/types.ts";
-import { log, type CacheBustCause } from "@loreai/core";
+import { log, type CacheBustCause, type CacheStrategy } from "@loreai/core";
 import { zstdCompressSync, zstdDecompressSync } from "node:zlib";
 
 // ---------------------------------------------------------------------------
@@ -464,6 +464,17 @@ export function analyzeCacheTurn(
   sessionID?: string,
   /** Number of messages in the current request (for human-friendly divergence reasons). */
   messageCount?: number,
+  /**
+   * The session's current unified cache strategy (`hold-warm` / `cool-bust` /
+   * `cool-full-write`). When set, the dramatic-drop WARN is suppressed for
+   * `cool-bust` and `cool-full-write` sessions — those strategies EXPLICITLY
+   * chose to let the prefix go cold, so a "dramatic" hit-rate drop is the
+   * expected outcome (the economic model decided warming wasn't worth it).
+   * `hold-warm` sessions and the no-strategy-supplied default keep the WARN
+   * — for hold-warm, a drop means the warmer is failing; for unknown, we
+   * can't decide, so we keep the existing noisy behavior to avoid surprises.
+   */
+  cacheStrategy?: CacheStrategy,
 ): CacheTurnAnalysis {
   analytics.turnCount++;
 
@@ -656,10 +667,23 @@ export function analyzeCacheTurn(
 
     // Warn on dramatic cache hit rate drops (e.g. 99% → 23%) to help
     // diagnose cache eviction or unexpected prefix divergence.
+    //
+    // Skip when the session is in a `cool-*` strategy: the unified cache
+    // strategy EXPLICITLY chose to let the prefix go cold, so a dramatic
+    // hit-rate drop is the expected outcome, not a bug. The economic model
+    // already decided warming isn't worth it (see `evaluateCacheStrategy`
+    // in @loreai/core) — alerting on a known-acceptable outcome is just
+    // noise that drowns out real signals on hold-warm sessions.
+    // hold-warm sessions and the no-strategy default keep the WARN: for
+    // hold-warm, a drop means the warmer is failing; for unknown, we
+    // err on the side of surfacing the signal.
+    const isExpectedBust =
+      cacheStrategy === "cool-bust" || cacheStrategy === "cool-full-write";
     if (
       analytics.turnCount > 2 &&
       prevHitRate > 0.5 &&
-      cacheHitRate < prevHitRate * 0.4
+      cacheHitRate < prevHitRate * 0.4 &&
+      !isExpectedBust
     ) {
       log.warn(
         `cache-analytics:${sidStr} dramatic hit rate drop:` +

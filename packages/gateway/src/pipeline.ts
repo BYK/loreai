@@ -4201,12 +4201,22 @@ export function recordCacheTurnUsage(
   // behavior on the rare no-body path.
   let bustCause: CacheBustCause | undefined;
   if (requestBody) {
+    // Read the unified cache strategy so the cache-analytics warn path can
+    // skip the dramatic-drop alert for cool-* sessions (those strategies
+    // explicitly chose to let the prefix go cold; the alert is just noise).
+    // Result is `undefined` for non-confident strategies — analyzeCacheTurn
+    // falls back to the existing noisy behavior in that case (conservative).
+    const econResult = getCacheStrategy(sessionState.sessionID);
+    const cacheStrategy = econResult?.result.confident
+      ? econResult.result.strategy
+      : undefined;
     const turnAnalysis = analyzeCacheTurn(
       sessionState.cacheAnalytics,
       requestBody,
       usage,
       sessionState.sessionID,
       sessionState.messageCount,
+      cacheStrategy,
     );
     bustCause = categorizeBust(turnAnalysis, turnWasIdleResume);
     if (genAiSpan) {
