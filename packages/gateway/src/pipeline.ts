@@ -101,6 +101,7 @@ import {
   resolveUpstreamRoute,
   extractUpstreamUrlHeader,
   extractProviderHeader,
+  resolveLastSeenProvider,
   resolveProviderRoute,
   unattributedBucketPath,
   type ProjectPathResult,
@@ -5588,8 +5589,11 @@ async function handleConversationTurn(
   const cred = extractAuth(req.rawHeaders);
   if (cred) {
     // Tag the global fallback with the request's provider so a worker for a
-    // different provider can't borrow this credential (cross-contamination, #829).
-    setLastSeenAuth(cred, extractProviderHeader(req.rawHeaders) || undefined);
+    // different provider can't borrow this credential (cross-contamination,
+    // #829). Falls back to the upstream destination URL when no x-lore-provider
+    // header is present — e.g. credentialed title/summary-gen requests that
+    // bypass the per-turn chat.headers hook (#942).
+    setLastSeenAuth(cred, resolveLastSeenProvider(req.rawHeaders));
   }
 
   // --- 3. Session identification ---
@@ -8040,13 +8044,12 @@ export async function handleRequest(
       return errorResponse(400, "Malformed request: missing headers");
     }
 
-    // Capture auth credentials early for background workers
+    // Capture auth credentials early for background workers. Tag by the
+    // explicit x-lore-provider header, falling back to the upstream URL for
+    // header-less credentialed requests (#829/#942).
     const earlyAuth = extractAuth(req.rawHeaders);
     if (earlyAuth) {
-      setLastSeenAuth(
-        earlyAuth,
-        extractProviderHeader(req.rawHeaders) || undefined,
-      );
+      setLastSeenAuth(earlyAuth, resolveLastSeenProvider(req.rawHeaders));
     }
 
     // --- Quick Tier-1 session lookup for structural compaction detection ---

@@ -548,6 +548,69 @@ export function extractProviderHeader(
   return sanitized;
 }
 
+/**
+ * Reverse map: normalized upstream base URL → provider id.
+ *
+ * Built once from PROVIDER_ROUTES at module load. Each route's `url` is run
+ * through `extractUpstreamUrlHeader` so the keys are normalized byte-for-byte
+ * the same way an incoming `x-lore-upstream-url` header is — there is no second
+ * normalization path that could drift. Providers with a `null` url
+ * (local/self-hosted, aggregators the user must configure) are skipped: their
+ * real upstream is user-specific and never matches a static table entry.
+ *
+ * First definition wins on the (currently impossible) chance two routes
+ * normalize to the same base, keeping the mapping deterministic.
+ */
+const UPSTREAM_URL_TO_PROVIDER: ReadonlyMap<string, string> = (() => {
+  const m = new Map<string, string>();
+  for (const [id, route] of Object.entries(PROVIDER_ROUTES)) {
+    if (!route.url) continue;
+    const norm = extractUpstreamUrlHeader({ "x-lore-upstream-url": route.url });
+    if (norm && !m.has(norm)) m.set(norm, id);
+  }
+  return m;
+})();
+
+/**
+ * Derive the provider id from a request's `x-lore-upstream-url` header by
+ * matching the upstream destination against PROVIDER_ROUTES.
+ *
+ * This is the fallback used to tag the global fallback credential (#829/#942)
+ * for credentialed requests that bypass the per-turn `chat.headers` hook and
+ * therefore carry NO `x-lore-provider` header (title/summary generation, etc.).
+ * Tagging by the ACTUAL destination — not a stale "last-seen provider" guess —
+ * is what prevents reintroducing the #829 cross-contamination from the other
+ * direction (e.g. tagging an OpenAI-bound key as `anthropic` because the last
+ * foreground turn was Anthropic).
+ *
+ * Returns `undefined` when the header is absent, malformed, or points at a host
+ * not in the static route table (custom/self-hosted) — in which case the
+ * credential stays untagged, exactly as before.
+ */
+export function providerFromUpstreamUrl(
+  headers: Record<string, string>,
+): string | undefined {
+  const base = extractUpstreamUrlHeader(headers);
+  if (!base) return undefined;
+  return UPSTREAM_URL_TO_PROVIDER.get(base);
+}
+
+/**
+ * Resolve the provider id used to tag the global fallback credential
+ * (`setLastSeenAuth`). The explicit `x-lore-provider` header is authoritative
+ * (the plugin set it deliberately for this turn); only when it is absent or
+ * invalid do we fall back to deriving it from the upstream destination URL.
+ *
+ * Returning `undefined` means "unknown/agnostic" — the credential is served to
+ * any provider lookup, which is load-bearing for legacy single-provider clients
+ * that send neither header.
+ */
+export function resolveLastSeenProvider(
+  headers: Record<string, string>,
+): string | undefined {
+  return extractProviderHeader(headers) ?? providerFromUpstreamUrl(headers);
+}
+
 // ---------------------------------------------------------------------------
 // Project path inference
 // ---------------------------------------------------------------------------
