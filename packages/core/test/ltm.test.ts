@@ -571,6 +571,53 @@ describe("ltm.forSession", () => {
     expect(result.length).toBeGreaterThan(0);
   });
 
+  test("overflowSink collects scored entries that did not fit the budget (#917)", async () => {
+    // 10 entries (~100 tokens each); a budget that fits only a couple. The rest
+    // are relevance-scored but over-budget — they must surface in overflowSink
+    // so the caller can advertise them for recall-on-demand without re-querying.
+    const ids: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      ids.push(
+        ltm.create({
+          projectPath: PROJ,
+          category: "pattern",
+          title: `Overflow pattern ${i}`,
+          content: "C ".repeat(150),
+          scope: "project",
+          crossProject: false,
+        }),
+      );
+    }
+
+    const overflow: ltm.KnowledgeEntry[] = [];
+    const selected = await ltm.forSession(PROJ, SESSION, 250, {
+      overflowSink: overflow,
+    });
+
+    // Some fit, some didn't.
+    expect(selected.length).toBeGreaterThan(0);
+    expect(selected.length).toBeLessThan(10);
+    expect(overflow.length).toBeGreaterThan(0);
+
+    // Selected and overflow are disjoint, and every overflow entry is a seeded
+    // entry (never a phantom).
+    const selectedIds = new Set(selected.map((e) => e.id));
+    for (const e of overflow) {
+      expect(selectedIds.has(e.id)).toBe(false);
+      expect(ids).toContain(e.id);
+    }
+
+    // No id appears in both lists.
+    const union = new Set([...selectedIds, ...overflow.map((e) => e.id)]);
+    expect(union.size).toBe(selectedIds.size + overflow.length);
+
+    // Overflow is ranked (score desc), same order forSession uses internally —
+    // pin determinism so the rendered ToC is byte-stable across turns.
+    const rerun: ltm.KnowledgeEntry[] = [];
+    await ltm.forSession(PROJ, SESSION, 250, { overflowSink: rerun });
+    expect(rerun.map((e) => e.id)).toEqual(overflow.map((e) => e.id));
+  });
+
   test("includes relevant cross-project entries when session context matches", async () => {
     // Create a cross-project entry about TypeScript
     ltm.create({

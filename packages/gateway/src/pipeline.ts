@@ -721,6 +721,40 @@ export function sameEntryKeys(
 
 const KNOWLEDGE_DELTA_TOKEN_BUDGET = 400;
 
+/** Max entries listed in the "Other relevant knowledge" overflow ToC (#917).
+ *  Each line is just `[id] title (category)` (~15-20 tokens), so 12 lines is a
+ *  ~200-token index — small enough to ride the frozen delta without crowding
+ *  out the rendered changed-entry content above it. */
+const OVERFLOW_TOC_MAX = 12;
+
+/** Max entries listed in the frozen system[1] project-knowledge catalog (#917,
+ *  the "A" floor). Present from turn 1 (before system[2] / any delta exists) so
+ *  the agent always knows what project knowledge exists and can recall it. */
+const STABLE_KNOWLEDGE_TOC_MAX = 15;
+
+/**
+ * Build a compact, recall-by-id catalog of project knowledge titles (#917 "A").
+ * Folded into the frozen system[1] baseline so it is present from turn 1 and
+ * byte-stable for the session's life (mirrors the entities partial-list block).
+ * Entries must be pre-sorted deterministically (forProject orders by confidence
+ * desc, updated_at desc) so the frozen bytes never depend on call order.
+ */
+export function buildKnowledgeCatalogText(
+  entries: Array<{ id: string; category: string; title: string }>,
+  max: number,
+): string {
+  if (!entries.length) return "";
+  const lines = entries
+    .slice(0, max)
+    .map((e) => `* [${e.id.slice(0, 8)}] ${e.title} (${e.category})`)
+    .join("\n");
+  const more =
+    entries.length > max
+      ? `\n* ${entries.length - max} more — use recall with an id for detail.`
+      : "";
+  return `## Project knowledge (recall by id for detail)\n\n${lines}${more}`;
+}
+
 type MessageInsertSelector = {
   target: "messages";
   insertAt: number;
@@ -1038,7 +1072,7 @@ function hasMaterialLtmDelta(input: {
   );
 }
 
-function buildKnowledgeDeltaMessage(
+export function buildKnowledgeDeltaMessage(
   entries: Array<{
     id: string;
     category: string;
@@ -1046,6 +1080,11 @@ function buildKnowledgeDeltaMessage(
     content: string;
   }>,
   removedIds: string[],
+  overflow?: Array<{
+    id: string;
+    category: string;
+    title: string;
+  }>,
 ): GatewayMessage | null {
   if (!entries.length && !removedIds.length) return null;
   const renderedIds: string[] = [];
@@ -1101,6 +1140,32 @@ function buildKnowledgeDeltaMessage(
   const removals = removedIds.length
     ? `\n\n## Superseded Long-term Knowledge\n\nIgnore any older pinned system[2] entries with these IDs; they are no longer in the current selected knowledge set:\n${removedIds.map((id) => `* [${id.slice(0, 8)}]`).join("\n")}`
     : "";
+  // #917 overflow ToC: a compact index of relevance-scored entries that didn't
+  // fit the system[2] budget, so the agent can recall them on demand. Exclude
+  // ids already shown above (changed/rendered) or listed as superseded — listing
+  // a "recall this" id that's also "ignore this" would contradict. Sort by id
+  // (NOT relevance order, which churns per turn) so the section is byte-stable
+  // across turns and only changes when the overflow SET changes — same cache-
+  // stability rationale as the "Additional Changed Knowledge" slice above. The
+  // section never appears alone: the early return above bails when there is no
+  // material change, so overflow only ever rides a delta that already exists.
+  const shownOrRemoved = new Set<string>([
+    ...entries.map((e) => e.id),
+    ...removedIds,
+  ]);
+  const tocEntries = (overflow ?? [])
+    .filter((e) => !shownOrRemoved.has(e.id))
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const tocRendered = tocEntries.length
+    ? `\n\n## Other relevant knowledge (recall by id for detail)\n\n${tocEntries
+        .slice(0, OVERFLOW_TOC_MAX)
+        .map((e) => `* [${e.id.slice(0, 8)}] ${e.title} (${e.category})`)
+        .join("\n")}${
+        tocEntries.length > OVERFLOW_TOC_MAX
+          ? `\n* ${tocEntries.length - OVERFLOW_TOC_MAX} more — use recall with an id for detail.`
+          : ""
+      }`
+    : "";
   return {
     role: "user",
     content: [
@@ -1110,7 +1175,8 @@ function buildKnowledgeDeltaMessage(
           "[Lore knowledge update: durable prompt delta. This message is inserted by Lore and replayed byte-identically on later turns until an intentional cache reset.]\n\n" +
           rendered +
           skippedRendered +
-          removals,
+          removals +
+          tocRendered,
       },
     ],
   };
@@ -1128,6 +1194,7 @@ function appendKnowledgePromptDelta(input: {
     title: string;
     content: string;
   }>;
+  overflow?: Array<{ id: string; category: string; title: string }>;
 }): boolean {
   const entries = changedLtmEntries(
     input.entries,
@@ -1137,6 +1204,7 @@ function appendKnowledgePromptDelta(input: {
   const message = buildKnowledgeDeltaMessage(
     entries,
     removedLtmEntryIds(input.previousKeys, input.nextKeys),
+    input.overflow,
   );
   if (!message) return false;
 
@@ -6047,6 +6115,9 @@ async function handleConversationTurn(
           title: string;
           content: string;
         }>;
+        // #917: relevance-scored entries that didn't fit the system[2] budget,
+        // surfaced as a recall-by-id ToC inside the (frozen) knowledge delta.
+        overflow?: Array<{ id: string; category: string; title: string }>;
       }
     | undefined;
   if (cfg.knowledge.enabled) {
@@ -6120,7 +6191,31 @@ async function handleConversationTurn(
           }
         }
 
-        const formatted = [prefText, entitiesText].filter(Boolean).join("\n\n");
+        // Project-knowledge catalog (#917 "A") — a compact, recall-by-id index
+        // of this project's knowledge titles, folded into the frozen system[1]
+        // baseline so it is present from turn 1 (system[2] full content is
+        // deferred to turn 2+). Conservative visibility mirrors the entities
+        // block: project-owned entries only (includeCross=false), preferences
+        // excluded (already shown above). Frozen with the rest of the baseline,
+        // so it never churns the cache; the dynamic relevance-overflow tail is
+        // handled separately by the knowledge delta (#917 "B").
+        let knowledgeTocText = "";
+        try {
+          const catalog = ltm
+            .forProject(projectPath, false)
+            .filter((e) => e.category !== "preference")
+            .map((e) => ({ id: e.id, category: e.category, title: e.title }));
+          knowledgeTocText = buildKnowledgeCatalogText(
+            catalog,
+            STABLE_KNOWLEDGE_TOC_MAX,
+          );
+        } catch (err) {
+          log.warn("knowledge catalog injection failed (non-fatal):", err);
+        }
+
+        const formatted = [prefText, entitiesText, knowledgeTocText]
+          .filter(Boolean)
+          .join("\n\n");
         // Freeze this baseline durably (v45) — INCLUDING an empty result. The
         // in-memory cache is lost on process restart / session eviction;
         // persisting lets getOrCreateSession restore the exact bytes so system[1]
@@ -6186,6 +6281,11 @@ async function handleConversationTurn(
               content: string;
             }>
           | undefined;
+        // #917: the budget-overflow tail from this turn's forSession, mapped to
+        // the ToC shape. Threaded into the knowledge delta below.
+        let freshContextOverflow:
+          | Array<{ id: string; category: string; title: string }>
+          | undefined;
 
         if (!cached) {
           // Full context-bound budget — preferences have their own dedicated budget.
@@ -6198,6 +6298,7 @@ async function handleConversationTurn(
             ltmPinnedText.get(sessionID)?.entryKeys,
           );
           // Exclude preferences — they're already in system[1]
+          const overflowSink: ltm.KnowledgeEntry[] = [];
           const contextEntries = await ltm.forSession(
             projectPath,
             sessionID,
@@ -6206,9 +6307,15 @@ async function handleConversationTurn(
               excludeCategories: ["preference"],
               ...(contextHint ? { contextHint } : {}),
               ...(stickyIds.size ? { stickyIds } : {}),
+              overflowSink,
             },
           );
           freshContextEntries = contextEntries;
+          freshContextOverflow = overflowSink.map((e) => ({
+            id: e.id,
+            category: e.category,
+            title: e.title,
+          }));
           if (contextEntries.length) {
             const renderedIds: string[] = [];
             const formatted = formatKnowledge(
@@ -6320,6 +6427,7 @@ async function handleConversationTurn(
               previousKeys: pinned.entryKeys,
               nextKeys: cachedKeys,
               entries: freshContextEntries,
+              overflow: freshContextOverflow,
             };
             ltmPinnedText.set(sessionID, {
               formatted: pinned.formatted,
@@ -6439,6 +6547,7 @@ async function handleConversationTurn(
       // Stability hint: keep the previously-pinned set sticky so consecutive
       // Layer-4 turns don't churn the selection (see step-6).
       const stickyIds = entryKeyIds(ltmPinnedText.get(sessionID)?.entryKeys);
+      const overflowSink: ltm.KnowledgeEntry[] = [];
       const contextEntries = await ltm.forSession(
         projectPath,
         sessionID,
@@ -6447,8 +6556,14 @@ async function handleConversationTurn(
           excludeCategories: ["preference"],
           ...(contextHint ? { contextHint } : {}),
           ...(stickyIds.size ? { stickyIds } : {}),
+          overflowSink,
         },
       );
+      const contextOverflow = overflowSink.map((e) => ({
+        id: e.id,
+        category: e.category,
+        title: e.title,
+      }));
       let refreshed = false;
 
       if (contextEntries.length) {
@@ -6509,6 +6624,7 @@ async function handleConversationTurn(
               previousKeys: frozenKeys,
               nextKeys: entryKeys,
               entries: contextEntries,
+              overflow: contextOverflow,
             };
             ltmPinnedText.set(sessionID, {
               formatted: pinned.formatted,

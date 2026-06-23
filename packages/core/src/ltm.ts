@@ -1235,6 +1235,18 @@ export type ForSessionOptions = {
    * wins, but ties and minor fluctuations don't reshuffle the selected set.
    */
   stickyIds?: Set<string>;
+  /**
+   * Optional sink for the budget-overflow tail (#917). When provided,
+   * `forSession` pushes the entries that were relevance-scored but did NOT fit
+   * the token budget into this array, in the same score-descending order it
+   * uses internally. Lets a caller surface a compact "these also exist — recall
+   * by id for detail" table of contents without re-querying. Invariants:
+   * selected (returned) entries are never included; lat.md synthetics are never
+   * included (they are not knowledge rows and carry no recall id). Ordering is
+   * deterministic (matches the internal `allScored` sort) so the rendered ToC is
+   * byte-stable across turns.
+   */
+  overflowSink?: KnowledgeEntry[];
 };
 
 /**
@@ -1638,6 +1650,20 @@ export async function forSession(
     recordSessionInjections(sessionID, projectPath, result);
   } catch (err) {
     log.warn("forSession: reinforcement failed (non-fatal):", err);
+  }
+
+  // --- 9. Surface the budget-overflow tail (#917) ---
+  // Entries that were relevance-scored (`allScored`) but didn't make the
+  // budget cut. `allScored` is already sorted score-desc (with id tiebreak), so
+  // pushing in iteration order yields deterministic, byte-stable ordering for
+  // the caller's recall-on-demand ToC. `allScored` contains only knowledge rows
+  // (lat.md synthetics are packed separately in step 6), so this never leaks a
+  // lat.md row, which has no recall id.
+  if (options?.overflowSink) {
+    const selectedIds = new Set(result.map((e) => e.id));
+    for (const { entry } of allScored) {
+      if (!selectedIds.has(entry.id)) options.overflowSink.push(entry);
+    }
   }
 
   return result;
