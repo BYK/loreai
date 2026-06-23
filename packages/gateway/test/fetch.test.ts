@@ -27,7 +27,7 @@ describe("upstreamFetch runtime split", () => {
   test("Bun: uses node:http(s) and never imports undici", async () => {
     // Stand up a tiny HTTP server that returns a known body
     const server: Server = await new Promise((resolve) => {
-      const s = createServer((req, res) => {
+      const s = createServer((_req, res) => {
         res.writeHead(200, {
           "content-type": "text/plain",
           "x-test": "from-server",
@@ -68,7 +68,7 @@ describe("upstreamFetch runtime split", () => {
   test("Bun: streams response body incrementally", async () => {
     // SSE-style streaming server
     const server: Server = await new Promise((resolve) => {
-      const s = createServer((req, res) => {
+      const s = createServer((_req, res) => {
         res.writeHead(200, { "content-type": "text/event-stream" });
         let n = 0;
         const iv = setInterval(() => {

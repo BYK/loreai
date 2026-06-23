@@ -1312,27 +1312,35 @@ describe("analyzeCacheTurn — strategy-aware dramatic-drop warn gating", () => 
     runDramaticDropScenario(makeCacheAnalytics());
 
     const calls = warn.mock.calls.map((args: unknown[]) => String(args[0]));
-    expect(calls.some((c: string) => c.includes("dramatic hit rate drop"))).toBe(true);
+    expect(
+      calls.some((c: string) => c.includes("dramatic hit rate drop")),
+    ).toBe(true);
   });
 
   test("emits the dramatic-drop warn when cacheStrategy is 'hold-warm'", () => {
     runDramaticDropScenario(makeCacheAnalytics(), "hold-warm");
 
     const calls = warn.mock.calls.map((args: unknown[]) => String(args[0]));
-    expect(calls.some((c: string) => c.includes("dramatic hit rate drop"))).toBe(true);
+    expect(
+      calls.some((c: string) => c.includes("dramatic hit rate drop")),
+    ).toBe(true);
   });
 
   test("suppresses the dramatic-drop warn when cacheStrategy is 'cool-bust'", () => {
     runDramaticDropScenario(makeCacheAnalytics(), "cool-bust");
 
     const calls = warn.mock.calls.map((args: unknown[]) => String(args[0]));
-    expect(calls.some((c: string) => c.includes("dramatic hit rate drop"))).toBe(false);
+    expect(
+      calls.some((c: string) => c.includes("dramatic hit rate drop")),
+    ).toBe(false);
   });
 
   test("suppresses the dramatic-drop warn when cacheStrategy is 'cool-full-write'", () => {
     runDramaticDropScenario(makeCacheAnalytics(), "cool-full-write");
 
     const calls = warn.mock.calls.map((args: unknown[]) => String(args[0]));
-    expect(calls.some((c: string) => c.includes("dramatic hit rate drop"))).toBe(false);
+    expect(
+      calls.some((c: string) => c.includes("dramatic hit rate drop")),
+    ).toBe(false);
   });
 });

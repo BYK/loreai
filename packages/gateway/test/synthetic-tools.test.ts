@@ -78,7 +78,7 @@ const CLAUDE_GREP = tool(
   { pattern: str(), path: str() },
   ["pattern"],
 );
-const CLAUDE_GLOB = tool(
+const _CLAUDE_GLOB = tool(
   "Glob",
   "Find files by pattern.",
   { pattern: str(), path: str() },
@@ -912,6 +912,8 @@ describe("parseResolveProjectResult (read)", () => {
     const result = parseResolveProjectResult("read", config);
     // normalizeRemoteUrl may return the string as-is or throw — either way
     // the result should not crash and gitRemote should be defined or undefined
+    // (we just need the call to not throw — see the "read, ''" assertion above)
+    void result;
     // (depending on normalizeRemoteUrl's behavior with malformed input).
     expect(() => parseResolveProjectResult("read", config)).not.toThrow();
   });
