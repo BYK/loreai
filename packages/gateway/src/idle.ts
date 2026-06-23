@@ -96,6 +96,26 @@ import {
 
 const POLL_INTERVAL_MS = 30_000;
 
+function persistSessionCosts(sessionID: string): void {
+  const costs = getSessionCosts(sessionID);
+  if (costs && costs.conversation.turns > 0) {
+    saveSessionCosts(sessionID, {
+      conversationCost: costs.conversation.cost,
+      workerCost: totalWorkerCost(costs),
+      conversationTurns: costs.conversation.turns,
+      cacheReadTokens: costs.conversation.cacheReadTokens,
+      cacheWriteTokens: costs.conversation.cacheWriteTokens,
+      warmupSavings: costs.counterfactual.warmupSavings,
+      warmupHits: costs.counterfactual.warmupHits,
+      ttlSavings: costs.counterfactual.ttlSavings,
+      ttlHits: costs.counterfactual.ttlHits,
+      batchSavings: costs.batchSavings,
+      avoidedCompactions: costs.counterfactual.avoidedCompactions,
+      avoidedCompactionCost: costs.counterfactual.avoidedCompactionCost,
+    });
+  }
+}
+
 /**
  * How often the scheduler runs the GLOBAL dead-knowledge sweep
  * (`pruneDeadEntriesAllProjects`). The per-session idle pass only prunes the
@@ -318,6 +338,20 @@ export function startIdleScheduler(
       }
     }
 
+    // Global dead-reference cleanup — once per tick, not per session.
+    // cleanDeadRefs scans ALL knowledge_refs globally, so running it for
+    // every idle session was redundant work.
+    if (loreConfig().knowledge.enabled) {
+      try {
+        const cleaned = ltm.cleanDeadRefs();
+        if (cleaned > 0) {
+          log.info(`cleaned ${cleaned} dead knowledge cross-references`);
+        }
+      } catch (e) {
+        log.error("dead-ref cleanup error:", e);
+      }
+    }
+
     // --- Idle work (distillation, curation, etc.) ---
     for (const [sessionID, state] of sessions) {
       if (inProgress.has(sessionID)) continue;
@@ -512,23 +546,7 @@ export function startIdleScheduler(
           warmupState: state.warmup ? JSON.stringify(state.warmup) : null,
         });
         // Persist cost snapshot
-        const costs = getSessionCosts(sessionID);
-        if (costs && costs.conversation.turns > 0) {
-          saveSessionCosts(sessionID, {
-            conversationCost: costs.conversation.cost,
-            workerCost: totalWorkerCost(costs),
-            conversationTurns: costs.conversation.turns,
-            cacheReadTokens: costs.conversation.cacheReadTokens,
-            cacheWriteTokens: costs.conversation.cacheWriteTokens,
-            warmupSavings: costs.counterfactual.warmupSavings,
-            warmupHits: costs.counterfactual.warmupHits,
-            ttlSavings: costs.counterfactual.ttlSavings,
-            ttlHits: costs.counterfactual.ttlHits,
-            batchSavings: costs.batchSavings,
-            avoidedCompactions: costs.counterfactual.avoidedCompactions,
-            avoidedCompactionCost: costs.counterfactual.avoidedCompactionCost,
-          });
-        }
+        persistSessionCosts(sessionID);
         state._dirty = false;
       } catch (e) {
         log.error(
@@ -590,23 +608,7 @@ export function evictIdleSessions(
 
     // Persist final cost snapshot before eviction
     try {
-      const costs = getSessionCosts(sessionID);
-      if (costs && costs.conversation.turns > 0) {
-        saveSessionCosts(sessionID, {
-          conversationCost: costs.conversation.cost,
-          workerCost: totalWorkerCost(costs),
-          conversationTurns: costs.conversation.turns,
-          cacheReadTokens: costs.conversation.cacheReadTokens,
-          cacheWriteTokens: costs.conversation.cacheWriteTokens,
-          warmupSavings: costs.counterfactual.warmupSavings,
-          warmupHits: costs.counterfactual.warmupHits,
-          ttlSavings: costs.counterfactual.ttlSavings,
-          ttlHits: costs.counterfactual.ttlHits,
-          batchSavings: costs.batchSavings,
-          avoidedCompactions: costs.counterfactual.avoidedCompactions,
-          avoidedCompactionCost: costs.counterfactual.avoidedCompactionCost,
-        });
-      }
+      persistSessionCosts(sessionID);
     } catch (e) {
       log.warn(
         `session eviction: cost persistence failed for ${sessionID.slice(0, 16)}:`,
@@ -940,13 +942,18 @@ export function buildIdleWorkHandler(
       }
     }
 
+    // Load project entries once for steps 4 (consolidation) and 6 (export).
+    // Re-queried only if consolidation actually runs and mutates entries.
+    let entries = cfg.knowledge.enabled
+      ? ltm.forProject(projectPath, false)
+      : [];
+
     // 4. Consolidation — runs after curation so new entries are counted.
     //    Cooldown: skip if we already attempted consolidation for this project
     //    with the same entry count within the last hour — avoids wasting
     //    Sonnet calls when the LLM correctly concludes all entries are unique.
     if (allowWorker && cfg.knowledge.enabled) {
       try {
-        const entries = ltm.forProject(projectPath, false);
         // Per-category bloat check counts PROJECT-SCOPED entries only — matching
         // what category-focused consolidation will actually merge (it excludes
         // cross-project entries to avoid one project deleting a globally-shared
@@ -1023,6 +1030,8 @@ export function buildIdleWorkHandler(
                   ...result,
                   trigger: "consolidation",
                 });
+                // Consolidation mutated entries — refresh for step 6 (export).
+                entries = ltm.forProject(projectPath, false);
                 // Consolidation made progress — clear cooldown so it can retry
                 consolidationCooldown.delete(projectId);
               } else {
@@ -1065,21 +1074,21 @@ export function buildIdleWorkHandler(
     }
 
     // 6. Knowledge export (.lore.md + optional agents file)
+    //    Reuses `entries` from step 4 (re-queried only if consolidation mutated).
     if (cfg.knowledge.enabled) {
       try {
-        const entries = ltm.forProject(projectPath, false);
         if (entries.length > 0) {
           if (cfg.loreFile.enabled && cfg.agentsFile.enabled) {
             // Default: .lore.md + AGENTS.md pointer
             const filePath = join(projectPath, cfg.agentsFile.path);
-            exportToFile({ projectPath, filePath });
+            exportToFile({ projectPath, filePath, entries });
           } else if (cfg.loreFile.enabled) {
             // .lore.md only
-            exportLoreFile(projectPath);
+            exportLoreFile(projectPath, entries);
           } else if (cfg.agentsFile.enabled) {
             // Inline knowledge in AGENTS.md (no .lore.md)
             const filePath = join(projectPath, cfg.agentsFile.path);
-            exportInlineToAgentsFile({ projectPath, filePath });
+            exportInlineToAgentsFile({ projectPath, filePath, entries });
           }
           // else: both disabled — no markdown file
         }
@@ -1088,17 +1097,8 @@ export function buildIdleWorkHandler(
       }
     }
 
-    // 7. Dead reference cleanup
-    if (cfg.knowledge.enabled) {
-      try {
-        const cleaned = ltm.cleanDeadRefs();
-        if (cleaned > 0) {
-          log.info(`cleaned ${cleaned} dead knowledge cross-references`);
-        }
-      } catch (e) {
-        log.error("idle dead-ref cleanup error:", e);
-      }
-    }
+    // 7. Dead reference cleanup — moved to the scheduler level (once per tick,
+    //    not per session) since cleanDeadRefs is a global operation.
 
     // 8. lat.md refresh
     try {
@@ -1114,23 +1114,7 @@ export function buildIdleWorkHandler(
     //    include all worker costs, avoided compactions, cache warming,
     //    1h TTL, and batch API savings after restart.
     try {
-      const costs = getSessionCosts(sessionID);
-      if (costs && costs.conversation.turns > 0) {
-        saveSessionCosts(sessionID, {
-          conversationCost: costs.conversation.cost,
-          workerCost: totalWorkerCost(costs),
-          conversationTurns: costs.conversation.turns,
-          cacheReadTokens: costs.conversation.cacheReadTokens,
-          cacheWriteTokens: costs.conversation.cacheWriteTokens,
-          warmupSavings: costs.counterfactual.warmupSavings,
-          warmupHits: costs.counterfactual.warmupHits,
-          ttlSavings: costs.counterfactual.ttlSavings,
-          ttlHits: costs.counterfactual.ttlHits,
-          batchSavings: costs.batchSavings,
-          avoidedCompactions: costs.counterfactual.avoidedCompactions,
-          avoidedCompactionCost: costs.counterfactual.avoidedCompactionCost,
-        });
-      }
+      persistSessionCosts(sessionID);
     } catch (e) {
       log.error("idle session cost persistence error:", e);
     }
