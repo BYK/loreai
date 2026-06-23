@@ -352,6 +352,12 @@ describe("resolveAuth with staleness", () => {
 
   test("end-to-end #829: Anthropic session + OpenAI worker resolves null, not the Anthropic key", () => {
     // Mixed-provider setup: chat on Anthropic, a worker/aux model on OpenAI.
+    // NOTE: this scenario is actually closed by the pre-existing 359 guard
+    // (the session has a non-_default "anthropic" store, so
+    // sessionHasProviderStore() is true and the global fallback is never
+    // reached) — it passes even WITHOUT the provider-aware tag. It documents
+    // the full #829 shape; the provider-tag logic itself is guarded by the
+    // session-less and _default-only tests above.
     setSessionAuth("sess-1", apiKeyCred, "anthropic");
     setLastSeenAuth(apiKeyCred, "anthropic");
 
