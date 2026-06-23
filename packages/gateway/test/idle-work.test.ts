@@ -614,6 +614,10 @@ describe("buildIdleWorkHandler", () => {
 
   // Distillation gate: a sub-minMessages backlog is deferred on hold-warm but
   // force-distilled on cool-bust. The worker LLM is reached only for cool-bust.
+  // Set lastTurnAt deep-idle (6 min ago) explicitly so the #946 mid-flight
+  // gate doesn't kick in — without this, the default lastTurnAt=0 would make
+  // shouldDeferPrefixRewriteOnCoolBust return false via its sentinel shortcut,
+  // masking the actual production behavior we want to test.
   test("D6′: hold-warm defers idle distillation below minMessages; cool-bust flushes", async () => {
     const warm = "idle-d6-distill-holdwarm";
     const warmPath = d6SeedMessages(warm, 3); // < minMessages (5)
@@ -624,6 +628,7 @@ describe("buildIdleWorkHandler", () => {
     const cool = "idle-d6-distill-coolbust";
     const coolPath = d6SeedMessages(cool, 3);
     expect(d6SetStrategy(cool, 800_000, 100_000)).toBe("cool-bust");
+    setLastTurnAtForTest(cool, Date.now() - 6 * 60 * 1000); // deep-idle
     expect((await d6RunIdle(cool, coolPath)).prompt).toHaveBeenCalled();
     evictSession(cool);
   });
@@ -631,7 +636,9 @@ describe("buildIdleWorkHandler", () => {
   // Meta gate: with >= metaThreshold gen-0 and no undistilled messages, the
   // `g0 >= metaThreshold && !holdingWarm` gate is the only LLM caller. hold-warm
   // defers meta-consolidation; cool-bust runs it. (Kills the `&& !holdingWarm`
-  // mutation — the distillation gate can't reach this branch.)
+  // mutation — the distillation gate can't reach this branch.) Set lastTurnAt
+  // deep-idle explicitly so the #946 mid-flight gate doesn't mask the
+  // production behavior (see note above).
   test("D6′: hold-warm defers meta-consolidation; cool-bust runs it", async () => {
     const warm = "idle-d6-meta-holdwarm";
     const warmPath = d6SeedGen0(warm);
@@ -642,6 +649,7 @@ describe("buildIdleWorkHandler", () => {
     const cool = "idle-d6-meta-coolbust";
     const coolPath = d6SeedGen0(cool);
     expect(d6SetStrategy(cool, 800_000, 100_000)).toBe("cool-bust");
+    setLastTurnAtForTest(cool, Date.now() - 6 * 60 * 1000); // deep-idle
     expect((await d6RunIdle(cool, coolPath)).prompt).toHaveBeenCalled();
     evictSession(cool);
   });

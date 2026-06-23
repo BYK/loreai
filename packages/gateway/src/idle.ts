@@ -294,9 +294,22 @@ export function shouldHoldPrefixWarm(
  * liveness window.
  *
  * Like `shouldHoldPrefixWarm`, this only biases the SCHEDULE — it never
- * starves distillation/LTM. The existing urgency thresholds still fire
- * (distillation's `minMessages` gate, meta's `gen0 >= metaThreshold` gate,
- * bust-pressure's lowered threshold).
+ * starves distillation/LTM in a single deferral. The existing urgency
+ * thresholds still fire when a deferral is in effect: distillation's
+ * `minMessages` gate runs even with `force=false`, meta's
+ * `gen0 >= metaThreshold` gate runs once the cache goes cold, and the
+ * bust-pressure lowered threshold is unaffected (its `lastTurnAt=0` path is
+ * orthogonal to this helper's `lastTurnAt=0` path).
+ *
+ * ⚠ Bursty-user caveat: a user who makes turns every 60–90s (so
+ * `lastTurnAt` is always within `DEEP_IDLE_MS`) will keep the cache warm
+ * continuously. Meta-consolidation is then deferred on every idle tick until
+ * the user goes truly idle (>5 min). This is the same bursty-user tradeoff
+ * `shouldHoldPrefixWarm` already makes — a churn-heavy session would have
+ * the same meta-deferral pattern there. The fix targets the high-frequency
+ * bust pattern (session 0AVWKugtmhBKqLOX: 8 bust turns / 16 observed) where
+ * the per-tick cost dominates; lower-frequency sessions trade a one-tick
+ * deferral for the next user turn's intact prompt cache.
  */
 export function shouldDeferPrefixRewriteOnCoolBust(
   econ: { result: { strategy: CacheStrategy; confident: boolean } } | null,
