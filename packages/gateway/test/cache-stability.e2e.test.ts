@@ -13,6 +13,7 @@
  * token injected into a cached block, etc.), the divergence offset jumps out of
  * the tail and these tests fail — turning whack-a-mole into a guardrail.
  */
+import { mkdirSync, writeFileSync } from "node:fs";
 import { describe, it, expect, afterEach } from "vitest";
 import { log } from "@loreai/core";
 import type { Harness } from "./helpers/harness";
@@ -602,6 +603,157 @@ describe("cache stability (e2e)", () => {
     expect(Number.isInteger(selector.insertAt)).toBe(true);
     expect(rows[0].content).toContain("Updated context-bound knowledge");
     expect(rows[0].content).toContain("Changed huge durable delta marker");
+  });
+
+  it("budget-overflow knowledge surfaces as a recall-by-id ToC in system[1] (A) and the delta (B) [#917]", async () => {
+    // End-to-end proof of the #917 wiring: knowledge that is relevance-scored
+    // but doesn't fit the system[2] injection budget must reach the wire as a
+    // recall-by-id table of contents — A in the frozen system[1] baseline
+    // (present from turn 1), B in the durable knowledge delta (on material
+    // change). The LTM budget floors at LTM_BUDGET_STEP (8000 tokens), so we
+    // seed ~30 entries (~9K tokens total) to force a real overflow tail.
+    //
+    // Each entry's content stays UNDER the 1200-char knowledge cap: the pipeline
+    // runs `ltm.pruneOversized(1200)` on every turn, which zeroes the confidence
+    // of any oversized entry — pruned entries fall below the `confidence > 0.2`
+    // floor and vanish from forSession/forProject, so oversized seeds never
+    // reach the ToC at all.
+    const turns = Array.from({ length: 4 }, (_, i) => ({
+      // Mention the shared topic ("dashboard") so forSession's relevance scoring
+      // keeps the whole seeded set in play — otherwise it filters to a handful
+      // that all fit the budget and there is no overflow tail to surface.
+      userMessage: `Turn ${i}: tell me more about the dashboard subsystem and its dashboard internals.`,
+      assistantText: `Working on the dashboard ${i}.`,
+    }));
+    harness = await createHarness({
+      fixtures: makeConversationFixtures(turns),
+    });
+
+    const projectPath = `/tmp/lore-overflow-toc-${Date.now()}`;
+    const clientSessionID = `overflow-toc-client-${Date.now()}`;
+    const headers = {
+      "x-lore-project": projectPath,
+      "x-lore-session-id": clientSessionID,
+    };
+
+    const { ltm } = await import("@loreai/core");
+
+    // Per-project config: a near-zero idle-resume threshold so that the small
+    // real delay between turns counts as an "idle resume". Idle resume busts the
+    // in-memory LTM session cache (gradient.onIdleResume → ltmSessionCache delete)
+    // and forces a forSession recompute on the next turn — the path that turns a
+    // pinned-system[2] knowledge change into a durable message delta (where B's
+    // overflow ToC rides) instead of a direct system[2] rewrite.
+    mkdirSync(projectPath, { recursive: true });
+    writeFileSync(
+      `${projectPath}/.lore.json`,
+      JSON.stringify({ idleResumeMinutes: 0.0005 }),
+    );
+
+    // Seed 30 project entries BEFORE the first request so they exist when
+    // system[1] is first built (and frozen) on turn 0. ~310 tokens each ×30 ≈
+    // 9.3K tokens > the 8000-token budget floor → guaranteed overflow tail when
+    // forSession scores by confidence (no/sparse session context).
+    const SEED_COUNT = 30;
+    const seededIds: string[] = [];
+    for (let i = 0; i < SEED_COUNT; i++) {
+      seededIds.push(
+        ltm.create({
+          projectPath,
+          scope: "project",
+          crossProject: false,
+          category: i % 2 ? "gotcha" : "pattern",
+          title: `Dashboard subsystem note ${String(i).padStart(2, "0")}`,
+          // ~900 chars (under the 1200-char prune cap), saturated with the
+          // shared "dashboard" topic so every entry scores relevant to the
+          // conversation and the full set competes for the budget.
+          content:
+            `Dashboard subsystem detail ${i}. ` +
+            "The dashboard internals and dashboard pipeline matter here. ".repeat(
+              15,
+            ),
+        }),
+      );
+    }
+
+    const history: unknown[] = [];
+    let sessionID = "";
+    for (let i = 0; i < turns.length; i++) {
+      // A small real delay so each turn (after the first) clears the near-zero
+      // idle threshold → idle-resume recompute on the next turn.
+      if (i > 0) await new Promise((r) => setTimeout(r, 80));
+
+      const resp = await harness.chat(
+        makeBody(turns[i].userMessage, history),
+        "test-key",
+        headers,
+      );
+      expect(resp.status).toBe(200);
+      await resp.json();
+      history.push({ role: "user", content: turns[i].userMessage });
+      history.push({
+        role: "assistant",
+        content: [{ type: "text", text: turns[i].assistantText }],
+      });
+
+      if (i === 0) {
+        const rows = harness.queryDB<{ session_id: string }>(
+          "SELECT session_id FROM session_state ORDER BY updated_at DESC LIMIT 1",
+        );
+        sessionID = rows[0]?.session_id ?? "";
+        expect(sessionID).not.toBe("");
+      }
+
+      if (i === 1) {
+        // Material change to a pinned entry. The next turn's idle-resume recompute
+        // detects the change and carries it (plus the #917 overflow tail) as a
+        // durable message delta instead of rewriting the cached system[2] block.
+        ltm.update(seededIds[0], {
+          content:
+            "Changed body that must arrive as a durable delta. " +
+            "More filler to keep it material. ".repeat(20),
+        });
+      }
+    }
+
+    const bodies = harness.upstreamBodies();
+    expect(bodies.length).toBe(turns.length);
+
+    // --- A: frozen system[1] catalog, present from turn 0, byte-stable ---
+    // The catalog lives in its own system block (system[1]); isolate it rather
+    // than joining all blocks, since system[2] (full context-bound LTM) appears
+    // from turn 2 and would otherwise pollute the comparison.
+    const catalogBlock = (body: string): string | undefined =>
+      systemBlocks(body).find((b) =>
+        b.includes("Project knowledge (recall by id for detail)"),
+      );
+    const cat0 = catalogBlock(bodies[0]);
+    expect(cat0).toBeDefined();
+    // Renders a FULL recall-ready id (k:<uuid>), never an 8-char slice.
+    expect(cat0 as string).toMatch(/\[k:[0-9a-f]{8}-[0-9a-f-]{27,}\]/);
+    // 30 seeded, cap 15 → the remainder is summarized as "15 more".
+    expect(cat0 as string).toMatch(/\b15 more\b/);
+    // Frozen: the catalog block is byte-identical on a later turn.
+    expect(catalogBlock(bodies[bodies.length - 1])).toEqual(cat0);
+
+    // --- B: overflow ToC rides the durable knowledge delta after the material
+    // change. Assert against the persisted session_prompt_deltas row (the source
+    // of truth) rather than the replayed window, which Layer-4 compaction may
+    // strip down. ---
+    const deltaRows = harness.queryDB<{ content: string }>(
+      "SELECT content FROM session_prompt_deltas WHERE session_id = ? ORDER BY seq",
+      [sessionID],
+    );
+    const deltaText = deltaRows.map((r) => r.content).join("\n---\n");
+    expect(deltaText).toContain(
+      "## Other relevant knowledge (recall by id for detail)",
+    );
+    // The id in the B section is a full recall-ready k:<uuid> (the 8-char slice
+    // handle used by the changed-entry section above it would not match this
+    // pattern anchored at the B heading).
+    expect(deltaText).toMatch(
+      /Other relevant knowledge \(recall by id for detail\)[\s\S]*?\[k:[0-9a-f]{8}-[0-9a-f-]{27,}\]/,
+    );
   });
 
   it("coalesces MULTIPLE successive knowledge changes into ONE position-stable delta row", async () => {
