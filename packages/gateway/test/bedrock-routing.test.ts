@@ -45,9 +45,9 @@ describe("X-Lore-Provider: bedrock routing", () => {
   test("routes to the Bedrock branch (upstream body is Bedrock-shaped)", async () => {
     const dbPath = `/tmp/lore-bedrock-route-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
     process.env.LORE_DB_PATH = dbPath;
-    process.env.LORE_LISTEN_PORT = String(
-      20000 + Math.floor(Math.random() * 30000),
-    );
+    // Port 0 = OS-assigned ephemeral port; server.port returns the actual
+    // bound port. Avoids EADDRINUSE flakes from random-port collisions (#931).
+    process.env.LORE_LISTEN_PORT = "0";
     process.env.LORE_BEDROCK_REGION = "us-east-1";
     if (!process.env.LORE_DEBUG) process.env.LORE_DEBUG = "false";
 
