@@ -291,30 +291,31 @@ describe("decideCacheStrategy — meta-aware cost model (#947)", () => {
   });
 
   test("decision flip: high expectedFutureTurns / low metaThreshold flips cool-bust → hold-warm", () => {
-    // F=200k, C=100k, p=0.5, k=2, f=20, metaThreshold=5
-    // Baseline: holdWarm = 2·200k + 0.5·21·200k = 400k + 2,100k = 2,500k
-    //           coolBust = 0.5·(100k·12 + 20·100k) = 0.5·3,200k = 1,600k
-    //           → cool-bust wins (1,600k < 2,500k)
-    // Adjusted:  expectedBusts = clamp01(20/5) = 1.0
-    //            bustCostPerBust = (20/2)·(200k-100k)·1 + 0.01 = 1,000,000.01
-    //            metaBustCost = 1.0 × 1,000,000 = 1,000,000
-    //            coolBust adjusted = 1,600,000 + 1,000,000 = 2,600,000
-    //           → 2,600k > 2,500k → hold-warm wins
+    // F=100k, C=50k, p=0.95, k=1, f=10, metaThreshold=2
+    // Baseline: holdWarm = 1·100k + 0.95·11·100k = 100k + 1,045k = 1,145k
+    //           coolBust = 0.95·(50k·12 + 10·50k) = 0.95·1,100k = 1,045k
+    //           → cool-bust wins (1,045k < 1,145k)
+    // Adjusted:  expectedBusts = clamp01(10/2) = 1.0
+    //            bustCostPerBust = (10/2)·(100k-50k)·1 + 0.01 = 250,000.01
+    //            metaBustCost = pReturn × expectedBusts × bustCostPerBust
+    //                         = 0.95 × 1.0 × 250,000 = 237,500
+    //            coolBust adjusted = 1,045,000 + 237,500 = 1,282,500
+    //           → 1,282.5k > 1,145k → hold-warm wins
     const baseline = decide({
-      fullBodyTokens: 200_000,
-      compressedTokens: 100_000,
-      pReturn: 0.5,
-      expectedCycles: 2,
-      expectedFutureTurns: 20,
+      fullBodyTokens: 100_000,
+      compressedTokens: 50_000,
+      pReturn: 0.95,
+      expectedCycles: 1,
+      expectedFutureTurns: 10,
     });
     expect(baseline.strategy).toBe("cool-bust");
     const adjusted = decide({
-      fullBodyTokens: 200_000,
-      compressedTokens: 100_000,
-      pReturn: 0.5,
-      expectedCycles: 2,
-      expectedFutureTurns: 20,
-      metaThreshold: 5,
+      fullBodyTokens: 100_000,
+      compressedTokens: 50_000,
+      pReturn: 0.95,
+      expectedCycles: 1,
+      expectedFutureTurns: 10,
+      metaThreshold: 2,
       metaDistillCostPerCall: 0.01,
     });
     expect(adjusted.strategy).toBe("hold-warm");
@@ -378,6 +379,29 @@ describe("decideCacheStrategy — meta-aware cost model (#947)", () => {
       expectedFutureTurns: 5,
     });
     expect(r.coolBustCost).toBe(noMeta.coolBustCost);
+  });
+
+  test("pReturn scaling: metaBustCost is scaled by pReturn (Seer finding)", () => {
+    // The meta-bust cost is conditional on the session returning. The expected
+    // cost over the idle→return horizon is `pReturn × (expectedBusts ×
+    // bustCostPerBust)`. Without this scaling, the adjustment would inflate
+    // the cost for sessions unlikely to return (pReturn≈0), biasing the
+    // strategy toward hold-warm when warming is the wrong call.
+    const base = {
+      fullBodyTokens: 100_000,
+      compressedTokens: 50_000,
+      expectedCycles: 1,
+      expectedFutureTurns: 10,
+      metaThreshold: 2,
+      metaDistillCostPerCall: 0,
+    };
+    // expectedBusts=1.0, bustCostPerBust=250,000 (the LLM term is 0).
+    const high = decide({ ...base, pReturn: 1.0 });
+    const low = decide({ ...base, pReturn: 0.5 });
+    // At pReturn=1.0: metaBustCost = 1.0 × 1.0 × 250,000 = 250,000
+    // At pReturn=0.5: metaBustCost = 0.5 × 1.0 × 250,000 = 125,000
+    expect(high.metaBustCost).toBe(250_000);
+    expect(low.metaBustCost).toBe(125_000);
   });
 });
 

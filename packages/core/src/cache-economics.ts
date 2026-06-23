@@ -272,7 +272,16 @@ export function decideCacheStrategy(
   const bustCostPerBust =
     (futureTurns / 2) * (fullBodyTokens - compressed) * readPerToken +
     metaDistillCostPerCall;
-  const metaBustCost = expectedBusts * bustCostPerBust;
+  // The meta-bust cost is conditional on the session returning (no return →
+  // no resumed session → no mid-flight busts), so the EXPECTED cost over the
+  // idle→return horizon is `pReturn × (expectedBusts × bustCostPerBust)`.
+  // The `pReturn` factor is consistent with the rest of the cost model:
+  // every return-conditional term (coolBustCostBase, coolFullWriteCost, the
+  // (1+futureTurns) term in holdWarmCost) is scaled by pReturn. Without this
+  // scaling the adjustment would inflate the cost for sessions unlikely to
+  // return (pReturn≈0), biasing the strategy toward hold-warm even when
+  // warming is the wrong call (Seer finding on #947, medium severity).
+  const metaBustCost = pReturn * expectedBusts * bustCostPerBust;
   const coolBustCost = coolBustCostBase + metaBustCost;
 
   // Pick the cheapest. Among the two cool options, prefer `cool-bust` only when
