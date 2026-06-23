@@ -19,14 +19,16 @@
  * threading bustCause into recordCacheUsage, the prefix-rewrite turn is counted
  * and the `toBe(0)` assertion fails.
  */
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { recordCacheTurnUsage } from "../src/pipeline";
 import { compressBody } from "../src/cache-analytics";
 import type { CacheAnalytics, SessionState } from "../src/translate/types";
 import {
   getConsecutiveBusts,
+  getCacheStrategy,
   evictSession,
   inspectSessionState,
+  log,
 } from "@loreai/core";
 
 const MODEL = "claude-test";
@@ -286,5 +288,76 @@ describe("recordCacheTurnUsage — pipeline bust-cause wiring (#928)", () => {
     // sanity: the core session state actually exists after recording
     // (inspectSessionState returns null — not undefined — when absent).
     expect(inspectSessionState(sessionID)).not.toBeNull();
+  });
+
+  test("pipeline wires the session's cool-bust strategy into the dramatic-drop warn suppression", async () => {
+    // Adversarial-review NIT on PR #948: the 4 new unit tests in
+    // cache-analytics.test.ts exercise the new cacheStrategy parameter, but
+    // they call analyzeCacheTurn directly and never go through
+    // recordCacheTurnUsage. The bridge from getCacheStrategy() →
+    // recordCacheTurnUsage → analyzeCacheTurn was untested. This test drives
+    // the full path and asserts the warn is suppressed when the session's
+    // stored strategy is cool-bust, mutation-verified below.
+    const sessionID = "cache-turn-cool-bust-suppress-warn";
+    sessions.push(sessionID);
+    const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+
+    // Mock getCacheStrategy to report a confident cool-bust decision for
+    // this session. The pipeline reads this on every recordCacheTurnUsage
+    // call and passes the strategy to analyzeCacheTurn.
+    const strategySpy = vi.spyOn(
+      await import("@loreai/core"),
+      "getCacheStrategy",
+    );
+    strategySpy.mockReturnValue({
+      result: {
+        confident: true,
+        strategy: "cool-bust",
+        // Other fields unused by the test — fill with sane defaults
+        // matching the CacheEconomicsResult interface.
+        holdWarmCost: 0,
+        coolBustCost: 0,
+        coolFullWriteCost: 0,
+      },
+      decidedAt: Date.now(),
+    });
+
+    // 3 turns: establish a high hit rate, hold it, then drop dramatically
+    // (the same shape that trips the warn condition in cache-analytics.ts).
+    // Without the cool-bust strategy, turn 3 would emit the
+    // "dramatic hit rate drop" WARN. With the strategy, the pipeline must
+    // pass it through and analyzeCacheTurn must skip the warn.
+    const state = seedSession(sessionID, body(["warm user message"]));
+    const warm = body(["warm user message"]);
+    const cold = body(["DIFFERENT cold user message"]); // divergence at messages[0]
+    const warmUsage = Object.freeze({
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadInputTokens: 900,
+      cacheCreationInputTokens: 0,
+    });
+    const coldUsage = Object.freeze({
+      inputTokens: 1000,
+      outputTokens: 50,
+      cacheReadInputTokens: 0,
+      cacheCreationInputTokens: 0,
+    });
+
+    recordCacheTurnUsage(state, warmUsage, MODEL, PROJECT, warm);
+    recordCacheTurnUsage(state, warmUsage, MODEL, PROJECT, warm);
+    recordCacheTurnUsage(state, coldUsage, MODEL, PROJECT, cold);
+
+    // Assert: the strategy was consulted (proves the wiring ran).
+    expect(strategySpy).toHaveBeenCalledWith(sessionID);
+    // Assert: the dramatic-drop warn was NOT emitted (proves the strategy
+    // gated the warn). Without the wiring, this would be a noisy warn
+    // because cool-bust is the very signal that says "let the cache die".
+    const calls = warn.mock.calls.map((args: unknown[]) => String(args[0]));
+    expect(
+      calls.some((c: string) => c.includes("dramatic hit rate drop")),
+    ).toBe(false);
+
+    warn.mockRestore();
+    strategySpy.mockRestore();
   });
 });
