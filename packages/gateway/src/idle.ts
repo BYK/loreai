@@ -30,6 +30,7 @@ import {
   getConsecutiveBusts,
   effectiveMetaThreshold,
   BUST_PRESSURE_THRESHOLD,
+  getLastTurnAt,
   getCacheStrategy,
   strategyWantsWarming,
   getLastLayer,
@@ -771,6 +772,7 @@ export function buildIdleWorkHandler(
     const metaThreshold = effectiveMetaThreshold(
       busts,
       cfg.distillation.metaThreshold,
+      getLastTurnAt(sessionID),
     );
     const bustPressure = busts >= BUST_PRESSURE_THRESHOLD;
 

@@ -217,7 +217,11 @@ import {
   resignBody,
 } from "./cch";
 import { isClaudeCodeClient, isRotationEligible } from "./session";
-import { analyzeCacheTurn, categorizeBust } from "./cache-analytics";
+import {
+  analyzeCacheTurn,
+  categorizeBust,
+  type CacheBustCause,
+} from "./cache-analytics";
 import {
   recordGap,
   getSessionHistogram,
@@ -4193,6 +4197,11 @@ function postResponse(
     // the block below but is still needed afterwards by recordCacheUsage so a
     // cold-cache re-warm is not counted as a consecutive bust.
     const turnWasIdleResume = sessionState.lastTurnWasIdle ?? false;
+    // bustCause is computed inside the requestBody block (so we know we have a
+    // body to analyze); defaulted to undefined when the body is missing so the
+    // recordCacheUsage call below falls through to the legacy "count it"
+    // behavior on the rare no-body path.
+    let bustCause: CacheBustCause | undefined;
     if (requestBody) {
       const turnAnalysis = analyzeCacheTurn(
         sessionState.cacheAnalytics,
@@ -4201,7 +4210,7 @@ function postResponse(
         sessionID,
         sessionState.messageCount,
       );
-      const bustCause = categorizeBust(turnAnalysis, turnWasIdleResume);
+      bustCause = categorizeBust(turnAnalysis, turnWasIdleResume);
       if (genAiSpan) {
         setCacheAnalyticsAttributes(
           genAiSpan,
@@ -4249,12 +4258,16 @@ function postResponse(
     // legitimately expired during the user's pause) is not counted as a
     // consecutive bust — that produced false "unsustainable" warnings on bursty
     // sessions whose turns are spaced beyond the conversation cache TTL.
+    // Also pass the categorized bust cause so prefix-rewrite busts (caused by
+    // Lore's own meta-distillation) are held the same way idle-resume busts
+    // are — these are not user-context growth.
     recordCacheUsage(
       usage.cacheCreationInputTokens ?? 0,
       usage.cacheReadInputTokens ?? 0,
       usage.inputTokens ?? 0,
       sessionState.sessionID,
       turnWasIdleResume,
+      bustCause,
     );
 
     // Capture previous stop reason before it's overwritten below (line ~1667).

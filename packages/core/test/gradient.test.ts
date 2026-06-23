@@ -30,6 +30,8 @@ import {
   prefixPresentFloorApplies,
   recordCacheUsage,
   setCachePricing,
+  effectiveMetaThreshold,
+  BUST_PRESSURE_THRESHOLD,
   setMaxLayer0Tokens,
   getCachePricing,
   shouldCompress,
@@ -4433,6 +4435,96 @@ describe("tier-based context management", () => {
       recordCacheUsage(1_000, 90_000, 3, SID, true);
       expect(inspectSessionState(SID)?.consecutiveBusts).toBe(0);
     });
+
+    // Regression for the ses_10f932a26ffeFBKO9ZsjycCCna (lore 0XrHNdlsWwgVkX4MH)
+    // false "unsustainable" warning: meta-distillation rewrites the synthetic
+    // distilled prefix at messages[0/1] on the next turn, producing a real
+    // prompt-cache bust that the counter previously accumulated identically to
+    // user-context growth. The session's context was bounded (~130K tokens, well
+    // under the 200K layer-0 cap) — only the cache prefix was unstable, because
+    // Lore itself was rewriting it. prefix-rewrite busts must be exempted from
+    // the counter the same way idle-resume busts are.
+    describe("prefix-rewrite (meta-distillation) bust exemption", () => {
+      const PR_SID = "prefix-rewrite-exemption-sess";
+
+      beforeEach(() => {
+        resetCalibration(PR_SID);
+      });
+
+      test("single prefix-rewrite bust does NOT increment consecutive busts", () => {
+        // 100K write, 0 read, 3 uncached → ratio≈100% — would normally count as
+        // a bust, but the cause is meta-distillation (prefix-rewrite), not
+        // user-context growth.
+        recordCacheUsage(100_000, 0, 3, PR_SID, false, "prefix-rewrite");
+        expect(inspectSessionState(PR_SID)?.consecutiveBusts).toBe(0);
+      });
+
+      test("two consecutive prefix-rewrite busts stay below the unsustainable threshold", () => {
+        // The ses_10f932a26ffe… incident: two consecutive prefix-rewrite busts
+        // (no idle gap between) used to trip the warning even though the
+        // session was bounded.
+        recordCacheUsage(100_000, 0, 3, PR_SID, false, "prefix-rewrite");
+        recordCacheUsage(80_000, 20_000, 5, PR_SID, false, "prefix-rewrite");
+        expect(inspectSessionState(PR_SID)?.consecutiveBusts).toBe(0);
+      });
+
+      test("prefix-rewrite holds (does not erase) a genuine prior bust run", () => {
+        // A real warm-cache bust happened first.
+        recordCacheUsage(100_000, 0, 3, PR_SID);
+        expect(inspectSessionState(PR_SID)?.consecutiveBusts).toBe(1);
+        // Then a prefix-rewrite bust: hold the counter — neither advance toward
+        // the threshold nor wipe the genuine prior bust.
+        recordCacheUsage(100_000, 0, 3, PR_SID, false, "prefix-rewrite");
+        expect(inspectSessionState(PR_SID)?.consecutiveBusts).toBe(1);
+      });
+
+      test("window-shift (non-exempt) bust still increments after prefix-rewrite", () => {
+        // A meta-distillation prefix-rewrite bust — held.
+        recordCacheUsage(100_000, 0, 3, PR_SID, false, "prefix-rewrite");
+        expect(inspectSessionState(PR_SID)?.consecutiveBusts).toBe(0);
+        // A genuine window-shift bust (raw window eviction) — counted.
+        recordCacheUsage(100_000, 0, 3, PR_SID, false, "window-shift");
+        recordCacheUsage(100_000, 0, 3, PR_SID, false, "window-shift");
+        expect(inspectSessionState(PR_SID)?.consecutiveBusts).toBe(2);
+      });
+
+      test("prefix-rewrite cache HIT still resets the counter", () => {
+        // A real warm-cache bust happened first.
+        recordCacheUsage(100_000, 0, 3, PR_SID);
+        recordCacheUsage(100_000, 0, 3, PR_SID);
+        expect(inspectSessionState(PR_SID)?.consecutiveBusts).toBe(2);
+        // A cache HIT (ratio < 0.5) on a prefix-rewrite turn is still a hit —
+        // reset.
+        recordCacheUsage(1_000, 90_000, 3, PR_SID, false, "prefix-rewrite");
+        expect(inspectSessionState(PR_SID)?.consecutiveBusts).toBe(0);
+      });
+
+      test("prefix-rewrite + idle-resume both apply (additive exemptions)", () => {
+        // A post-idle prefix-rewrite bust is BOTH an idle-resume AND a
+        // prefix-rewrite — both exemptions should hold the counter.
+        recordCacheUsage(100_000, 0, 3, PR_SID, true, "prefix-rewrite");
+        expect(inspectSessionState(PR_SID)?.consecutiveBusts).toBe(0);
+      });
+
+      test("undefined bustCause falls through to legacy count behavior", () => {
+        // No cause provided → legacy behavior (count it). This is the safe
+        // fallback for callers that haven't been updated to thread bustCause.
+        recordCacheUsage(100_000, 0, 3, PR_SID);
+        expect(inspectSessionState(PR_SID)?.consecutiveBusts).toBe(1);
+      });
+
+      test("non-exempt causes (system-ltm-change, tools-change) still count", () => {
+        // system-ltm-change is Lore-internal but NOT currently exempt — a burst
+        // of those usually indicates real upstream configuration churn worth
+        // flagging (see NON_USER_BUST_CAUSES rationale in gradient.ts).
+        recordCacheUsage(100_000, 0, 3, PR_SID, false, "system-ltm-change");
+        expect(inspectSessionState(PR_SID)?.consecutiveBusts).toBe(1);
+        // tools-change is genuine user-context growth (tool definitions
+        // changed) — counted.
+        recordCacheUsage(100_000, 0, 3, PR_SID, false, "tools-change");
+        expect(inspectSessionState(PR_SID)?.consecutiveBusts).toBe(2);
+      });
+    });
   });
 
   describe("unsustainable gating — only fires when genuinely over the layer-0 cap", () => {
@@ -5586,5 +5678,134 @@ describe("issue #796: isLargeColdStart + cold-start force-compress", () => {
       expect(predicted).toBe(result.layer >= 1);
     }
     resetBaseline();
+  });
+
+  describe("effectiveMetaThreshold — bust-pressure meta-threshold override", () => {
+    // Regression for the ses_10f932a26ffe… (lore 0XrHNdlsWwgVkX4MH) false
+    // "unsustainable" warning: bust pressure (consecutiveBusts >= 3) crossed
+    // the threshold at 20:04. Under the OLD logic, the override lowered the
+    // meta-threshold from 20 to max(3, 5) = 5 — a 4× compression of the meta
+    // cadence. Combined with the session idling 36 min afterward, meta fired
+    // in idle and rewrote the prefix, causing the very prefix-rewrite busts
+    // the counter was meant to track. The NEW logic adds two gates:
+    //   (a) deep-idle check (5 min) — meta only fires under bust pressure
+    //       when the session has been idle long enough that the user is
+    //       probably away, and
+    //   (b) floor of 10 — even when the override fires, the lowered threshold
+    //       is clamped to a sane minimum so the meta cadence can't collapse
+    //       to "every 5 gen-0 segments" (which is too eager given that meta
+    //       itself causes prefix-rewrite busts).
+    const DEEP_IDLE_MS = 5 * 60 * 1000;
+    const META_FLOOR = 10;
+    const DEFAULT_CONFIG = 20;
+
+    test("below BUST_PRESSURE_THRESHOLD returns the configured value regardless of idle", () => {
+      const now = Date.now();
+      expect(
+        effectiveMetaThreshold(0, DEFAULT_CONFIG, now - 10 * 60 * 1000),
+      ).toBe(DEFAULT_CONFIG);
+      expect(
+        effectiveMetaThreshold(BUST_PRESSURE_THRESHOLD - 1, DEFAULT_CONFIG, 0),
+      ).toBe(DEFAULT_CONFIG);
+    });
+
+    test("at BUST_PRESSURE_THRESHOLD + deep-idle returns floor(20/4)=5 clamped to 10", () => {
+      // The OLD behavior would return max(3, 5) = 5. The NEW behavior clamps
+      // to BUST_PRESSURE_META_FLOOR=10 — meta shouldn't run every 5 segments
+      // even under bust pressure.
+      const now = Date.now();
+      const result = effectiveMetaThreshold(
+        BUST_PRESSURE_THRESHOLD,
+        DEFAULT_CONFIG,
+        now - 6 * 60 * 1000, // 6 min ago — past the 5 min deep-idle gate
+      );
+      expect(result).toBe(META_FLOOR);
+    });
+
+    test("at BUST_PRESSURE_THRESHOLD + active session (NOT deep-idle) keeps config", () => {
+      // The key new gate: if the user came back recently (< 5 min), bust
+      // pressure does NOT lower the meta threshold. Without this, a churn
+      // session that briefly went idle would fire meta right before the
+      // user came back, busting the cache they just paid to re-warm.
+      const now = Date.now();
+      const result = effectiveMetaThreshold(
+        BUST_PRESSURE_THRESHOLD,
+        DEFAULT_CONFIG,
+        now - 90 * 1000, // 90s ago — recent activity
+      );
+      expect(result).toBe(DEFAULT_CONFIG);
+    });
+
+    test("at BUST_PRESSURE_THRESHOLD with lastTurnAt=0 (never) treats as deep-idle", () => {
+      // 0 = never set. The very first bust-pressure event shouldn't be blocked
+      // by a missing timestamp — treat as deep-idle so the override CAN fire
+      // if the gating logic ever lands on a fresh session.
+      expect(
+        effectiveMetaThreshold(BUST_PRESSURE_THRESHOLD, DEFAULT_CONFIG, 0),
+      ).toBe(META_FLOOR);
+    });
+
+    test("at BUST_PRESSURE_THRESHOLD with lastTurnAt exactly 5 min ago returns floor (boundary)", () => {
+      // 5 min is the gate value. At exactly the boundary, the comparison is
+      // < not <=, so the gap must be STRICTLY less than DEEP_IDLE_MS to
+      // keep the configured threshold. 5 min exactly passes the gate.
+      const now = Date.now();
+      expect(
+        effectiveMetaThreshold(
+          BUST_PRESSURE_THRESHOLD,
+          DEFAULT_CONFIG,
+          now - DEEP_IDLE_MS,
+        ),
+      ).toBe(META_FLOOR);
+    });
+
+    test("at BUST_PRESSURE_THRESHOLD with lastTurnAt 1ms before gate returns config", () => {
+      // 1ms short of the 5 min gate — should keep the configured threshold.
+      const now = Date.now();
+      expect(
+        effectiveMetaThreshold(
+          BUST_PRESSURE_THRESHOLD,
+          DEFAULT_CONFIG,
+          now - (DEEP_IDLE_MS - 1),
+        ),
+      ).toBe(DEFAULT_CONFIG);
+    });
+
+    test("well above BUST_PRESSURE_THRESHOLD still respects the floor", () => {
+      // busts=10 (way past threshold) doesn't unlock a lower threshold — the
+      // floor of 10 is the floor.
+      const now = Date.now();
+      expect(
+        effectiveMetaThreshold(10, DEFAULT_CONFIG, now - 10 * 60 * 1000),
+      ).toBe(META_FLOOR);
+    });
+
+    test("custom configThreshold above 40 still uses floor(20) with deep-idle", () => {
+      // configThreshold=100 → floor(100/4) = 25, clamped to max(10, 25) = 25.
+      // The floor is a floor, not a ceiling — generous configurations still
+      // get their proportional reduction.
+      const now = Date.now();
+      expect(
+        effectiveMetaThreshold(
+          BUST_PRESSURE_THRESHOLD,
+          100,
+          now - 10 * 60 * 1000,
+        ),
+      ).toBe(25);
+    });
+
+    test("low configThreshold (3) still uses the floor (no divide-by-zero collapse)", () => {
+      // The OLD behavior would return max(3, 0) = 3. The NEW behavior is
+      // max(10, 0) = 10 — even at the minimum config, the bust-pressure
+      // override is clamped to a sane minimum.
+      const now = Date.now();
+      expect(
+        effectiveMetaThreshold(
+          BUST_PRESSURE_THRESHOLD,
+          3,
+          now - 10 * 60 * 1000,
+        ),
+      ).toBe(META_FLOOR);
+    });
   });
 });

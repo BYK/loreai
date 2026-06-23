@@ -162,6 +162,23 @@ export function isFreeWriteSession(sessionID: string): boolean {
  *  surfaces the unsustainable-conversation warning promptly. */
 const SUSTAINED_BUST_THRESHOLD = 2;
 
+/** Categorical cause of a cache bust. Defined in core (rather than gateway) so
+ *  `recordCacheUsage` can discriminate non-user-driven busts (e.g. meta-
+ *  distillation prefix rewrites) from genuine user-context growth without
+ *  creating a circular gateway→core import. Gateway's own categorization
+ *  (`categorizeBust` in `cache-analytics.ts`) assigns one of these values and
+ *  threads it into `recordCacheUsage`. */
+export type CacheBustCause =
+  | "first-turn" // session's first request (unavoidable)
+  | "system-host-change" // divergence in system[0]: agent-owned host prompt
+  | "system-ltm-change" // divergence in system[1]/[2]: lore's own LTM blocks
+  | "tools-change" // tool definitions changed
+  | "prefix-rewrite" // distilled prefix content changed (meta-distillation)
+  | "window-shift" // raw window eviction changed message positions
+  | "idle-resume" // first turn after idle detection (cold cache)
+  | "incremental" // normal append (cache hit, write only new tail)
+  | "unknown"; // unclassified
+
 /**
  * Decide whether compression is economical at a tier boundary.
  *
@@ -247,6 +264,15 @@ export function getTier(tokens: number): number {
  * @param inputTokens - input_tokens from the API response (uncached portion only —
  *                      Anthropic's input_tokens excludes both cache reads and writes)
  * @param sessionID   - session that produced this response
+ * @param isIdleResume  - true when the upstream turn is the first one after an
+ *                        idle gap past the cache TTL; re-warms are expected
+ *                        cold-cache writes, not sustained growth
+ * @param bustCause     - categorical cause of the bust (when the gateway has
+ *                        computed it). `prefix-rewrite` busts are exempted from
+ *                        the counter because they are self-inflicted by Lore's
+ *                        own meta-distillation — they don't reflect user-context
+ *                        growth. `undefined` falls through to the legacy
+ *                        counter behavior (treat as a user-driven bust).
  */
 export function recordCacheUsage(
   cacheWrite: number,
@@ -254,6 +280,7 @@ export function recordCacheUsage(
   inputTokens: number,
   sessionID?: string,
   isIdleResume = false,
+  bustCause?: CacheBustCause,
 ): void {
   if (!sessionID) return;
   const state = getSessionState(sessionID);
@@ -266,18 +293,35 @@ export function recordCacheUsage(
     const bustRatio = cacheWrite / total;
     const prev = state.consecutiveBusts;
     if (bustRatio > 0.5) {
-      // Idle-resume re-warms are EXPECTED cold-cache writes, NOT sustained
-      // growth: when the user pauses longer than the conversation cache TTL the
-      // cache legitimately expires, so the next turn re-warms it (a write-heavy
-      // "bust"). Counting these toward consecutiveBusts produces false
-      // "unsustainable conversation" warnings on bursty sessions whose turns are
-      // spaced beyond the TTL — every threshold-crossing bust in the
-      // ses_14b9bf3d… incident followed an 11m–2h idle gap past the 5m TTL.
-      // HOLD the counter on an idle resume: neither advance toward the threshold
-      // nor erase a genuine prior run (a real warm-window bust that preceded the
-      // idle is still real). A genuine cache HIT (ratio <= 0.5) below still
-      // resets, even on an idle resume.
-      if (!isIdleResume) state.consecutiveBusts++;
+      // Two classes of bust are NOT counted toward consecutiveBusts:
+      //
+      // (a) Idle-resume re-warms: expected cold-cache writes when the user
+      //     pauses longer than the conversation cache TTL. Counting these
+      //     produced false "unsustainable conversation" warnings on bursty
+      //     sessions whose turns are spaced beyond the TTL — every threshold-
+      //     crossing bust in the ses_14b9bf3d… incident followed an 11m–2h
+      //     idle gap past the 5m TTL. HOLD the counter on an idle resume:
+      //     neither advance toward the threshold nor erase a genuine prior
+      //     run (a real warm-window bust that preceded the idle is still
+      //     real). A genuine cache HIT (ratio <= 0.5) below still resets,
+      //     even on an idle resume.
+      //
+      // (b) Lore-internal prefix rewrites (`prefix-rewrite`): meta-
+      //     distillation consolidates gen-0 segments and rewrites the
+      //     synthetic distilled prefix (messages[0/1]) on the next turn.
+      //     That's a real prompt-cache bust, but the cause is Lore's own
+      //     distillation pipeline — it does NOT reflect user-context growth.
+      //     Counting it produced the false "unsustainable conversation"
+      //     warning on opencode session ses_10f932a26ffeFBKO9ZsjycCCna
+      //     (Lore session 0XrHNdlsWwgVkX4MH, 2026-06-22): context was
+      //     bounded at ~130K tokens (well under the 200K layer-0 cap), but
+      //     meta-distillation firing under bust pressure rewrote the prefix
+      //     every few turns, accumulating 2-3 consecutive busts and tripping
+      //     the warning. Adding the bust-cause discriminator (this parameter)
+      //     lets the counter recognize these self-inflicted busts the same
+      //     way it recognizes idle-resume ones.
+      const isNonUserBust = isIdleResume || bustCause === "prefix-rewrite";
+      if (!isNonUserBust) state.consecutiveBusts++;
     } else {
       state.consecutiveBusts = 0;
     }
@@ -285,11 +329,18 @@ export function recordCacheUsage(
       log.info(
         `bust-tracker: session=${sessionID.slice(0, 16)} ratio=${bustRatio.toFixed(3)}` +
           ` (write=${cacheWrite} read=${cacheRead} uncached=${inputTokens})` +
-          ` busts=${prev}→${state.consecutiveBusts}`,
+          ` busts=${prev}→${state.consecutiveBusts}` +
+          (bustCause ? ` cause=${bustCause}` : ""),
       );
     } else if (isIdleResume && bustRatio > 0.5) {
       log.info(
         `bust-tracker: session=${sessionID.slice(0, 16)} idle-resume re-warm` +
+          ` ratio=${bustRatio.toFixed(3)} (write=${cacheWrite} read=${cacheRead}` +
+          ` uncached=${inputTokens}) — not counted (busts held at ${state.consecutiveBusts})`,
+      );
+    } else if (bustCause === "prefix-rewrite" && bustRatio > 0.5) {
+      log.info(
+        `bust-tracker: session=${sessionID.slice(0, 16)} prefix-rewrite (meta-distill)` +
           ` ratio=${bustRatio.toFixed(3)} (write=${cacheWrite} read=${cacheRead}` +
           ` uncached=${inputTokens}) — not counted (busts held at ${state.consecutiveBusts})`,
       );
@@ -1062,18 +1113,66 @@ export function getConsecutiveBusts(sessionID: string): number {
  *  value trigger earlier consolidation of gen-0 segments. */
 export const BUST_PRESSURE_THRESHOLD = 3;
 
+/** Minimum gap between the session's last turn and "now" for the bust-pressure
+ *  meta-threshold override to apply. Below this, the session is too fresh —
+ *  the user is likely to come back to a still-warming cache, and forcing meta
+ *  would rewrite the prefix right before the next user turn, busting the
+ *  cache they just paid to re-warm. Matches the default Anthropic prompt
+ *  cache TTL (5 min) — anything tighter would race the warmer. */
+const DEEP_IDLE_MS = 5 * 60 * 1000;
+
+/** Floor for the bust-pressure meta-threshold override. Even with busts
+ *  ≥ BUST_PRESSURE_THRESHOLD, the lowered threshold is clamped to this value
+ *  — meta-distillation is a heavy rewrite (archives gen-0, creates gen-1,
+ *  busts the prompt cache on the next turn), so the override only fires
+ *  when there's enough accumulated churn to justify it. With the default
+ *  metaThreshold=20 and the 1/4 rule, the lowered value would be 5 — too
+ *  eager given that meta itself causes prefix-rewrite busts. */
+const BUST_PRESSURE_META_FLOOR = 10;
+
 /**
  * Compute the effective meta-distillation threshold under bust pressure.
- * When busts ≥ BUST_PRESSURE_THRESHOLD, lowers the threshold to 1/4 of the
- * configured value (min 3) to consolidate the distilled prefix earlier.
+ *
+ * Two conditions gate the override:
+ *
+ * (1) **Bust pressure** — `busts >= BUST_PRESSURE_THRESHOLD` (3 consecutive
+ *     busts). The session is churning, so earlier consolidation can help.
+ *
+ * (2) **Deep-idle signal** — the session's last turn was at least
+ *     `DEEP_IDLE_MS` (5 min) ago. Without this, a churning session that
+ *     briefly goes idle (e.g. 90s gap) would fire meta right before the
+ *     user comes back, busting the cache they just paid to re-warm. The
+ *     ses_10f932a26ffe… (lore 0XrHNdlsWwgVkX4MH) incident: bust pressure
+ *     crossed the threshold at 20:04, the session idled 36 min (well past
+ *     5 min), and meta fired during that idle. Good. But the OLD logic
+ *     (floor=3) would have fired meta at 20:04 even with a 1-min gap —
+ *     which would have busted the cache on the turn the user was about to
+ *     send. The 5-min gate is the "we expect the user to be away" check.
+ *
+ * When the override DOES fire, the threshold is `floor(configThreshold / 4)`
+ * clamped to `BUST_PRESSURE_META_FLOOR` (10). The floor prevents the
+ * override from collapsing the meta cadence to "every 5 gen-0 segments" —
+ * which is too eager given that meta itself causes prefix-rewrite busts
+ * (those are now exempt from consecutiveBusts, but they still incur a
+ * real cache write cost).
+ *
+ * @param busts           - current consecutive-bust count for the session
+ * @param configThreshold - configured metaThreshold (e.g. `cfg.distillation.metaThreshold`)
+ * @param lastTurnAtMs    - wall-clock ms of the session's last turn
+ *                          (use 0 for "never"; treated as deep-idle)
+ * @returns the effective meta-threshold for the idle handler
  */
 export function effectiveMetaThreshold(
   busts: number,
   configThreshold: number,
+  lastTurnAtMs = 0,
 ): number {
-  return busts >= BUST_PRESSURE_THRESHOLD
-    ? Math.max(3, Math.floor(configThreshold / 4))
-    : configThreshold;
+  if (busts < BUST_PRESSURE_THRESHOLD) return configThreshold;
+  // 0 = never set (first turn). Treat as deep-idle so the very first bust
+  // pressure event isn't blocked by a missing timestamp.
+  const gapMs = lastTurnAtMs === 0 ? Infinity : Date.now() - lastTurnAtMs;
+  if (gapMs < DEEP_IDLE_MS) return configThreshold;
+  return Math.max(BUST_PRESSURE_META_FLOOR, Math.floor(configThreshold / 4));
 }
 
 /**

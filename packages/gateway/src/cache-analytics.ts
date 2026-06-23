@@ -19,7 +19,7 @@ import type {
   CacheTurnAnalysis,
   GatewayUsage,
 } from "./translate/types.ts";
-import { log } from "@loreai/core";
+import { log, type CacheBustCause } from "@loreai/core";
 import { zstdCompressSync, zstdDecompressSync } from "node:zlib";
 
 // ---------------------------------------------------------------------------
@@ -677,17 +677,10 @@ export function analyzeCacheTurn(
 // Bust cause categorization
 // ---------------------------------------------------------------------------
 
-/** Cache event categories for telemetry. */
-export type CacheBustCause =
-  | "first-turn" // session's first request (unavoidable)
-  | "system-host-change" // divergence in system[0]: agent-owned host prompt (CacheAligner target — issue #791)
-  | "system-ltm-change" // divergence in system[1]/[2]: lore's own LTM blocks (already managed by 3-block pinning)
-  | "tools-change" // tool definitions changed
-  | "prefix-rewrite" // distilled prefix content changed (meta-distillation)
-  | "window-shift" // raw window eviction changed message positions
-  | "idle-resume" // first turn after idle detection (cold cache)
-  | "incremental" // normal append (cache hit, write only new tail)
-  | "unknown"; // unclassified
+// Re-export for callers that imported CacheBustCause from this module. The
+// canonical definition lives in @loreai/core (so recordCacheUsage can use it
+// without a circular gateway→core import).
+export type { CacheBustCause };
 
 /**
  * Categorize a cache event from the turn analysis.

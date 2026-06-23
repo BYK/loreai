@@ -173,7 +173,7 @@ export {
   getCacheStrategy,
   getCacheSizeSnapshot,
 } from "./gradient";
-export type { CacheSurvivalInputs } from "./gradient";
+export type { CacheSurvivalInputs, CacheBustCause } from "./gradient";
 export {
   formatKnowledge,
   formatKnowledgeDelta,
