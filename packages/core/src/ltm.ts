@@ -2613,8 +2613,8 @@ export function promoteCrossProject(opts?: {
   if (!embedding.isAvailable()) return { promoted: 0, clusters: [] };
 
   // 1. Load eligible candidate entries (project-scoped, high-confidence, embedded).
-  //    Capped at MAX_PROMOTION_CANDIDATES to keep O(n²) pairwise comparison
-  //    bounded. Query orders by confidence DESC so the best entries survive.
+  //    Capped at MAX_PROMOTION_CANDIDATES to keep pairwise comparison bounded.
+  //    Query orders by confidence DESC so the best entries survive.
   const candidates = db()
     .query(
       `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
@@ -2656,24 +2656,26 @@ export function promoteCrossProject(opts?: {
   }
 
   // 3. Build neighbor map by cross-project embedding similarity.
+  //    Iterate unique pairs (i < j) and record the relationship symmetrically
+  //    to halve the number of cosineSimilarity calls.
   const neighborMap = new Map<string, string[]>();
-  for (const entry of candidates) {
+  for (const c of candidates) neighborMap.set(c.id, []);
+  for (let i = 0; i < candidates.length; i++) {
+    const entry = candidates[i];
     const entryVec = embeddingMap.get(entry.id);
-    const neighbors: string[] = [];
-    if (entryVec) {
-      for (const other of candidates) {
-        if (other.id === entry.id) continue;
-        const otherVec = embeddingMap.get(other.id);
-        if (!otherVec || otherVec.length !== entryVec.length) continue;
-        if (
-          embedding.cosineSimilarity(entryVec, otherVec) >=
-          PROMOTION_SIMILARITY_THRESHOLD
-        ) {
-          neighbors.push(other.id);
-        }
+    if (!entryVec) continue;
+    for (let j = i + 1; j < candidates.length; j++) {
+      const other = candidates[j];
+      const otherVec = embeddingMap.get(other.id);
+      if (!otherVec || otherVec.length !== entryVec.length) continue;
+      if (
+        embedding.cosineSimilarity(entryVec, otherVec) >=
+        PROMOTION_SIMILARITY_THRESHOLD
+      ) {
+        neighborMap.get(entry.id)?.push(other.id);
+        neighborMap.get(other.id)?.push(entry.id);
       }
     }
-    neighborMap.set(entry.id, neighbors);
   }
 
   // 4. Greedy star clustering (no transitivity) — process entries with the
