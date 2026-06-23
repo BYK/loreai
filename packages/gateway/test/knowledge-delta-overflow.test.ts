@@ -1,4 +1,5 @@
 import { describe, test, expect } from "vitest";
+import { ltm, recallById } from "@loreai/core";
 import {
   buildKnowledgeDeltaMessage,
   buildKnowledgeCatalogText,
@@ -28,7 +29,7 @@ const toc = (p: string, title: string, category = "pattern") => ({
 const HEADING = "## Other relevant knowledge (recall by id for detail)";
 
 describe("buildKnowledgeDeltaMessage — overflow ToC (#917)", () => {
-  test("renders an overflow section listing titles, short ids, and categories", () => {
+  test("renders an overflow section listing titles, recall-ready ids, and categories", () => {
     const msg = buildKnowledgeDeltaMessage(
       [changed("019aaaaa", "Changed entry")],
       [],
@@ -39,8 +40,10 @@ describe("buildKnowledgeDeltaMessage — overflow ToC (#917)", () => {
     );
     const t = text(msg);
     expect(t).toContain(HEADING);
-    expect(t).toContain("[019bbbbb] Overflow one (pattern)");
-    expect(t).toContain("[019ccccc] Overflow two (gotcha)");
+    // Full id with a `k:` recall prefix — NOT an 8-char slice (recallById is
+    // exact-match, so a slice is unresolvable).
+    expect(t).toContain(`[k:${id("019bbbbb")}] Overflow one (pattern)`);
+    expect(t).toContain(`[k:${id("019ccccc")}] Overflow two (gotcha)`);
   });
 
   test("overflow alone (no changes/removals) does NOT create a delta — rides existing cadence", () => {
@@ -111,7 +114,7 @@ describe("buildKnowledgeDeltaMessage — overflow ToC (#917)", () => {
 });
 
 describe("buildKnowledgeCatalogText — frozen system[1] catalog (#917 A)", () => {
-  test("renders a recall-by-id catalog of titles + short ids + categories", () => {
+  test("renders a recall-by-id catalog of titles + recall-ready ids + categories", () => {
     const out = buildKnowledgeCatalogText(
       [
         toc("019aaaaa", "Auth flow", "architecture"),
@@ -120,8 +123,8 @@ describe("buildKnowledgeCatalogText — frozen system[1] catalog (#917 A)", () =
       15,
     );
     expect(out).toContain("## Project knowledge (recall by id for detail)");
-    expect(out).toContain("* [019aaaaa] Auth flow (architecture)");
-    expect(out).toContain("* [019bbbbb] DB gotcha (gotcha)");
+    expect(out).toContain(`* [k:${id("019aaaaa")}] Auth flow (architecture)`);
+    expect(out).toContain(`* [k:${id("019bbbbb")}] DB gotcha (gotcha)`);
   });
 
   test("empty input → empty string (keeps system[1] absent — no array-grow cache bust)", () => {
@@ -146,5 +149,56 @@ describe("buildKnowledgeCatalogText — frozen system[1] catalog (#917 A)", () =
     );
     // First listed first even though its id sorts later — order is the caller's.
     expect(out.indexOf("First")).toBeLessThan(out.indexOf("Second"));
+  });
+});
+
+// The whole point of the ToC is recall-on-demand: the rendered id MUST be
+// resolvable by the recall tool. recallById is exact-match, so this round-trip
+// guards against regressing to a non-resolvable short id (the #930 review B1).
+describe("ToC ids are recall-resolvable (#917 round-trip)", () => {
+  const RTPROJ = "/test/overflow-toc-roundtrip";
+  const RECALL_ID_RE = /\[(k:[0-9a-f-]+)\]/;
+
+  test("catalog (A) id renders the exact token recallById resolves", () => {
+    const realId = ltm.create({
+      projectPath: RTPROJ,
+      category: "gotcha",
+      title: "Round-trip catalog entry",
+      content: "Body content that recall should surface in full.",
+      scope: "project",
+      crossProject: false,
+    });
+    const out = buildKnowledgeCatalogText(
+      [{ id: realId, category: "gotcha", title: "Round-trip catalog entry" }],
+      15,
+    );
+    const token = out.match(RECALL_ID_RE)?.[1];
+    expect(token).toBe(`k:${realId}`);
+    const detail = recallById(token as string);
+    expect(detail).not.toMatch(/No entry found/);
+    expect(detail).toContain("Round-trip catalog entry");
+  });
+
+  test("overflow (B) id renders the exact token recallById resolves", () => {
+    const realId = ltm.create({
+      projectPath: RTPROJ,
+      category: "pattern",
+      title: "Round-trip overflow entry",
+      content: "Overflow body content that recall should surface in full.",
+      scope: "project",
+      crossProject: false,
+    });
+    const msg = buildKnowledgeDeltaMessage(
+      [changed("019aaaaa", "A changed entry")],
+      [],
+      [{ id: realId, category: "pattern", title: "Round-trip overflow entry" }],
+    );
+    const token = text(msg).match(RECALL_ID_RE)?.[1];
+    // The changed-entry section uses an 8-char correlation handle; ensure we
+    // matched the overflow ToC's full recall id, not that.
+    expect(token).toBe(`k:${realId}`);
+    const detail = recallById(token as string);
+    expect(detail).not.toMatch(/No entry found/);
+    expect(detail).toContain("Round-trip overflow entry");
   });
 });

@@ -738,6 +738,13 @@ const STABLE_KNOWLEDGE_TOC_MAX = 15;
  * byte-stable for the session's life (mirrors the entities partial-list block).
  * Entries must be pre-sorted deterministically (forProject orders by confidence
  * desc, updated_at desc) so the frozen bytes never depend on call order.
+ *
+ * Each line renders the FULL id with a `k:` prefix (`[k:<uuid>]`) — that exact
+ * token is what the agent passes to the recall tool's `id` param. Do NOT shorten
+ * it: `recallById` (recall.ts) resolves `k:`/`xk:` by EXACT `ltm.get(id)` /
+ * `getByLogical(logicalIdOf(id))` with no prefix matching, so an 8-char slice is
+ * unresolvable ("No entry found"). `k:` and `xk:` resolve identically (both hit
+ * `ltm.get`), so `k:` is safe for project-owned and promoted rows alike.
  */
 export function buildKnowledgeCatalogText(
   entries: Array<{ id: string; category: string; title: string }>,
@@ -746,7 +753,7 @@ export function buildKnowledgeCatalogText(
   if (!entries.length) return "";
   const lines = entries
     .slice(0, max)
-    .map((e) => `* [${e.id.slice(0, 8)}] ${e.title} (${e.category})`)
+    .map((e) => `* [k:${e.id}] ${e.title} (${e.category})`)
     .join("\n");
   const more =
     entries.length > max
@@ -1159,7 +1166,7 @@ export function buildKnowledgeDeltaMessage(
   const tocRendered = tocEntries.length
     ? `\n\n## Other relevant knowledge (recall by id for detail)\n\n${tocEntries
         .slice(0, OVERFLOW_TOC_MAX)
-        .map((e) => `* [${e.id.slice(0, 8)}] ${e.title} (${e.category})`)
+        .map((e) => `* [k:${e.id}] ${e.title} (${e.category})`)
         .join("\n")}${
         tocEntries.length > OVERFLOW_TOC_MAX
           ? `\n* ${tocEntries.length - OVERFLOW_TOC_MAX} more — use recall with an id for detail.`
