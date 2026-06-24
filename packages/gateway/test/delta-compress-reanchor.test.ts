@@ -544,11 +544,21 @@ describe("steady-layer-1 insertAt drift — nudge is persisted", () => {
     );
 
     // Persist a delta whose stored insertAt (2) is safe in the CURRENT layout
-    // (assistant has only a text block, no tool_use).
+    // (assistant has only a text block, no tool_use). Include a `mut` field so
+    // we can assert it survives the re-anchor — `parseMessageInsertSelector`
+    // returns only {target, insertAt} and a typed spread would silently drop
+    // mut, breaking advanceSurfacedKeys downstream.
     appendSessionPromptDelta({
       sessionID,
       projectID,
-      selector: JSON.stringify({ target: "messages", insertAt: 2 }),
+      selector: JSON.stringify({
+        target: "messages",
+        insertAt: 2,
+        mut: {
+          changed: [{ id: "k1", h: "h1" }],
+          removed: ["k2"],
+        },
+      }),
       content: JSON.stringify({
         role: "user",
         content: [{ type: "text", text: "Lore knowledge update" }],
@@ -591,13 +601,19 @@ describe("steady-layer-1 insertAt drift — nudge is persisted", () => {
     expect(deltaIdx2).toBeLessThan(2); // nudged before the assistant(tool_use)
     expect(deltaIdx2).toBeGreaterThanOrEqual(0);
 
-    // THE FIX: the new safe index is now PERSISTED — without this, every
-    // subsequent turn would re-compute the same nudge and the position would
-    // drift by 1+ per turn (the Bug 2 production pattern).
+    // THE FIX (blocker): the new safe index is PERSISTED AND `mut` IS
+    // PRESERVED. Without the raw-JSON write-back, the typed selector spread
+    // would silently drop `mut`, advanceSurfacedKeys would re-surface the
+    // original mutations every turn, and we'd append a fresh block per turn
+    // — exactly the bug #958 fixed in session 1LYkXZ7jkiHHnqPl.
     const rows = listSessionPromptDeltas(sessionID);
     expect(rows.length).toBe(1);
     const persistedSelector = JSON.parse(rows[0].selector);
     expect(persistedSelector.insertAt).toBe(deltaIdx2);
+    expect(persistedSelector.mut).toEqual({
+      changed: [{ id: "k1", h: "h1" }],
+      removed: ["k2"],
+    });
 
     // Turn 3: SAME drifted layout — replay must be byte-identical to turn 2.
     // The persisted insertAt is used verbatim (no further nudge).

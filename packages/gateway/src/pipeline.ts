@@ -1004,9 +1004,16 @@ export function applySessionPromptDeltas(
   if (!deltas.length) return messages;
 
   const out = messages.slice();
+  // We carry the raw selector JSON alongside the validated `insertAt` so the
+  // re-anchor path can preserve unknown fields (notably `mut`, the per-block
+  // mutation signature used by advanceSurfacedKeys). parseMessageInsertSelector
+  // returns ONLY {target, insertAt} — spreading that loses every other field
+  // and reintroduces the bug #958 fixed in session 1LYkXZ7jkiHHnqPl. Use the
+  // same raw-JSON mutate pattern as reanchorExistingDelta below.
   const parsed: Array<{
     seq: number;
-    selector: MessageInsertSelector;
+    rawSelector: string;
+    insertAt: number;
     message: GatewayMessage;
   }> = [];
   for (const delta of deltas) {
@@ -1018,10 +1025,15 @@ export function applySessionPromptDeltas(
       );
       continue;
     }
-    parsed.push({ seq: delta.seq, selector, message });
+    parsed.push({
+      seq: delta.seq,
+      rawSelector: delta.selector,
+      insertAt: selector.insertAt,
+      message,
+    });
   }
   parsed.sort((a, b) => {
-    const byPosition = b.selector.insertAt - a.selector.insertAt;
+    const byPosition = b.insertAt - a.insertAt;
     return byPosition !== 0 ? byPosition : b.seq - a.seq;
   });
 
@@ -1031,9 +1043,13 @@ export function applySessionPromptDeltas(
   // every turn the nudge re-fires and the delta block drifts +N/turn, busting
   // `messages[0]` (production session 1GYu, k:019ece09). Batched at the end so
   // each drift = one DB write, not one per turn.
-  const reanchored: Array<{ seq: number; selector: MessageInsertSelector }> =
-    [];
-  for (const { seq, selector, message } of parsed) {
+  const reanchored: Array<{ seq: number; selector: string }> = [];
+  for (const {
+    seq,
+    rawSelector,
+    insertAt: storedInsertAt,
+    message,
+  } of parsed) {
     // Selector positions are defined against the transformed upstream message
     // array at the time the delta is created (where they were already made
     // tool-pair-safe via safeDeltaInsertIndex). Re-inserting at the SAME index
@@ -1048,15 +1064,24 @@ export function applySessionPromptDeltas(
     // user(tool_result), the function walks back before the assistant. We
     // persist that nudge so the next turn does NOT re-fire the same nudge
     // (the new persisted index is byte-stable until the next layout shift).
-    const clamped = Math.min(selector.insertAt, out.length);
-    const insertAt = safeDeltaInsertIndex(out, clamped);
-    if (insertAt !== clamped) {
-      reanchored.push({ seq, selector: { ...selector, insertAt } });
+    const clamped = Math.min(storedInsertAt, out.length);
+    const safe = safeDeltaInsertIndex(out, clamped);
+    if (safe !== clamped) {
+      // Mutate the raw JSON to preserve unknown fields (mut, etc.) — do NOT
+      // spread the typed MessageInsertSelector (only carries target+insertAt).
+      let rawSelectorObj: Record<string, unknown>;
+      try {
+        rawSelectorObj = JSON.parse(rawSelector) as Record<string, unknown>;
+      } catch {
+        rawSelectorObj = { target: "messages" };
+      }
+      rawSelectorObj.insertAt = safe;
+      reanchored.push({ seq, selector: JSON.stringify(rawSelectorObj) });
     }
-    out.splice(insertAt, 0, message);
+    out.splice(safe, 0, message);
   }
   for (const { seq, selector } of reanchored) {
-    updateSessionPromptDeltaSelector(sessionID, seq, JSON.stringify(selector));
+    updateSessionPromptDeltaSelector(sessionID, seq, selector);
   }
   return out;
 }
@@ -1319,11 +1344,15 @@ export function buildKnowledgeDeltaMessage(
 
 /**
  * The mutation signature an appended delta block surfaced, stashed in the
- * block's selector JSON. `parseMessageInsertSelector` ignores unknown fields,
- * so this rides alongside `insertAt` without affecting replay. It lets a later
- * turn reconstruct the ADVANCING surfaced set (frozen pin baseline + every
- * block's increment) purely from the persisted blocks — no extra state, durable
- * across restart for free.
+ * block's selector JSON. `parseMessageInsertSelector` only VALIDATES the
+ * `{target, insertAt}` shape and discards every other field on read, so this
+ * rides alongside `insertAt` without affecting replay — but callers that need
+ * to WRITE back a re-anchored selector (e.g. applySessionPromptDeltas' drift
+ * fix) MUST go through the raw JSON, not the typed return, or `mut` is lost
+ * (re-introduces the bug #958 fixed in session 1LYkXZ7jkiHHnqPl). Lets a
+ * later turn reconstruct the ADVANCING surfaced set (frozen pin baseline +
+ * every block's increment) purely from the persisted blocks — no extra state,
+ * durable across restart for free.
  */
 type DeltaMutation = {
   /** ids whose content was surfaced as changed, with the surfaced hash. */
