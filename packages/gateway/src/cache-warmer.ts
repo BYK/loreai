@@ -2091,12 +2091,25 @@ export type WarmupHitOutcome = {
  * 🔴 Savings token source (Bug B): when a hit is credited, the caller MUST
  * use `creditedTokens` (the prefix the warmup refreshed), NOT the returning
  * turn's cacheReadInputTokens — which is often ~10× smaller (tool-use
- * continuation / breakpoint shift).
+ * continuation / breakpoint shift). Known residual: when the returning turn
+ * reads only PART of the warmed prefix (0 < read < refreshTokens), the full
+ * `refreshTokens` is still credited — the gate below is binary, not pro-rata.
+ *
+ * 🔴 Read-confirmation guard (Bug C): a hit is ONLY attributed when the
+ * returning turn ACTUALLY READ the warmed cache (`cacheReadTokens > 0`). The
+ * warmup refreshes the prefix, but the returning turn can pivot to a different
+ * context, use a different tool chain, or find the cache evicted by a
+ * concurrent path — in which case the API reports zero cache read and there
+ * are no savings to book. Without this, warmupHits/creditedTokens inflate and
+ * warp the ROI analysis that gates future warming.
  *
  * This function MUTATES `warmup`: it consumes the warmup by zeroing
  * `lastWarmupAt` and `lastWarmupRefreshTokens` (a warmup benefits only the
  * first returning turn) and increments `warmupHits` on a confirmed hit. It
  * also scrubs a stale/inherited `lastWarmupAt` that lacks proof of payment.
+ *
+ * @param cacheReadTokens The returning turn's `cache_read_input_tokens` (Bug C
+ *   gate). Pass 0 — never a positive placeholder — when the turn read nothing.
  */
 export function creditWarmupHit(
   warmup: WarmupState | undefined,
