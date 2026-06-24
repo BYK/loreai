@@ -1078,10 +1078,12 @@ function hasMaterialLtmDelta(input: {
  * 1LYkXZ7jkiHHnqPl: read pinned at 41k, ~250k rewritten per turn).
  *
  * This trigger ignores ranking entirely. `surfacedKeys` is the set of
- * `id:fnv1a(title\x1f content)` keys the model has ALREADY been shown (the
- * system[2] pin ∪ all appended delta blocks). For each, we look up the entry's
- * CURRENT state in the DB (`knowledge_current` via `getByLogical`) and compare
- * the content hash:
+ * `id:fnv1a(title\x1f content)` keys the model has ALREADY been shown. Today
+ * every call site passes the FROZEN system[2] pin keys (`pinned.entryKeys`),
+ * so the result is the cumulative delta from the pinned baseline — preserving
+ * the single-coalesced-row contract. (The append-only follow-up will widen
+ * this to the pin ∪ already-appended blocks.) For each key we look up the
+ * entry's CURRENT state in the DB and compare the content hash:
  *   - missing  → the entry was deleted/superseded → `removedIds`
  *   - hash differs → genuine content edit (curator/consolidation) → `changed`
  *   - hash same → no signal (NOT in the result), no matter the ranking
@@ -1118,6 +1120,13 @@ export function detectSurfacedMutations(surfacedKeys: string[] | undefined): {
     // version supersedes it, fall back through `logicalIdOf` → `getByLogical` so
     // a mere version bump is reported as a CONTENT change, not a deletion. Only a
     // genuine delete (no current version for the logical_id) resolves to null.
+    //
+    // 🔴 Coupling: `logicalIdOf` reads the BASE `knowledge` table to map a
+    // superseded version id → logical_id, correct only while superseded version
+    // rows are NEVER physically purged (today delete = append a death-cert row).
+    // A future base-row GC would make `logicalIdOf(purgedId)` fall back to the
+    // input id → `getByLogical` null → a FALSE removal + one-time bust. Revisit
+    // alongside any version-row compaction.
     const current = ltm.get(id) ?? ltm.getByLogical(ltm.logicalIdOf(id));
     if (!current) {
       removedIds.push(id);
