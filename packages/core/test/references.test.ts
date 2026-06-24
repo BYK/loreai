@@ -128,6 +128,30 @@ describe("extractReferences", () => {
     expect(cmds).toHaveLength(3);
   });
 
+  // Regression (#939 re-review): commands are matched PER LINE, so a runner in
+  // one backtick span must not fuse with a token in an ADJACENT span (the
+  // command regexes use `\s+` and `\n` is whitespace). `make`+`Makefile` and
+  // `npm`+`yarn` previously fabricated phantom commands (`make Makefile`,
+  // `npm yarn`) that then resolved "missing" → false penalty.
+  test("adjacent backtick spans do NOT fuse into a phantom command", () => {
+    expect(
+      extractReferences("The `make` command reads the `Makefile`.").filter(
+        (r) => r.kind === "command",
+      ),
+    ).toHaveLength(0);
+    expect(
+      extractReferences("Use `npm` or `yarn` for installs.").filter(
+        (r) => r.kind === "command",
+      ),
+    ).toHaveLength(0);
+  });
+
+  test("separate lines inside one fenced span do NOT fuse", () => {
+    // `make` and `check` on separate lines must not become `make check`.
+    const refs = extractReferences("```\nmake\ncheck\n```");
+    expect(refs.filter((r) => r.kind === "command")).toHaveLength(0);
+  });
+
   // Regression (#939 MUST-FIX): bare/relative URLs match FILE_CAND_RE via their
   // `/` and would resolve "missing" on every repo. A path whose first segment
   // looks like a DNS host must be rejected.
@@ -221,8 +245,20 @@ describe("DirectFsResolver", () => {
   test("make target present → ok", async () => {
     expect(await resolve("`make check`")).toBe("ok");
   });
-  test("make target absent → missing", async () => {
-    expect(await resolve("`make nope`")).toBe("missing");
+  // make/yarn are English words → an absent target is UNKNOWN (neutral), never
+  // "missing" (so a backticked prose phrase like `make sense` can't penalize).
+  test("make target absent → unknown (neutral, NOT missing)", async () => {
+    expect(await resolve("`make nope`")).toBe("unknown");
+  });
+  test("backticked make-prose (`make sense`) → unknown, never missing", async () => {
+    expect(await resolve("`make sense`")).toBe("unknown");
+  });
+  test("yarn script absent → unknown (neutral, NOT missing)", async () => {
+    expect(await resolve("`yarn about`")).toBe("unknown");
+  });
+  test("yarn script present → ok", async () => {
+    // package.json has a `lint` script in this fixture.
+    expect(await resolve("`yarn lint`")).toBe("ok");
   });
 
   test("dot-dir file (e.g. .github/workflows/release.yml) resolves ok", async () => {
@@ -304,9 +340,9 @@ describe("SyntheticProbeResolver (remote mode, snapshot-driven)", () => {
     expect(await resolve("`pnpm run lint`")).toBe("ok");
     expect(await resolve("`pnpm run nope`")).toBe("missing");
   });
-  test("make target present → ok, absent → missing", async () => {
+  test("make target present → ok, absent → unknown (neutral)", async () => {
     expect(await resolve("`make check`")).toBe("ok");
-    expect(await resolve("`make nope`")).toBe("missing");
+    expect(await resolve("`make nope`")).toBe("unknown");
   });
   test("malformed / empty probe output → null (whole-batch neutral)", async () => {
     const refs = extractReferences("src/foo.ts:1");

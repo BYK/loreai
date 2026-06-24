@@ -117,15 +117,23 @@ const PM_CMD_RE = /\b(pnpm|npm|yarn)\s+(?:run\s+)?([A-Za-z][A-Za-z0-9:_-]*)/g;
 const MAKE_CMD_RE = /\bmake\s+([A-Za-z][A-Za-z0-9:_-]*)/g;
 
 // Inline-code / fenced-code spans (the inner text between backtick runs).
-// Command references are extracted ONLY from inside code spans. `make` and
-// `yarn` are common English words, so prose like "make decisions", "make sure",
-// or "yarn about it" must NEVER be treated as build commands — a false "missing"
-// penalty violates the load-bearing invariant ("cannot verify" ≠ "broken"), and
-// no stopword denylist can enumerate the open set of English words. Knowledge
-// entries consistently backtick-wrap real commands (`pnpm run lint`,
-// `make check`), so this is high-precision with negligible recall loss. False
-// negatives (an un-backticked command not checked) are acceptable; false
-// positives (penalizing prose) are not.
+// Command references are extracted ONLY from inside code spans, and only ever
+// per single line (see codeLines). Knowledge entries consistently backtick-wrap
+// real commands (`pnpm run lint`, `make check`), so this is high-precision with
+// negligible recall loss. False negatives (an un-backticked command not checked)
+// are acceptable; false positives (penalizing prose) are NOT — this is the
+// load-bearing invariant ("cannot verify" ≠ "broken").
+//
+// Two further guards against fabricating a phantom command out of prose:
+//  1. Per-line matching: the command regexes use `\s+`, and `\n` is whitespace,
+//     so concatenating spans/lines would let `make` on one line fuse with the
+//     next token (`` `make` … `Makefile` `` → "make Makefile"). Matching each
+//     line in isolation prevents cross-span and cross-line fusion.
+//  2. `make`/`yarn` are common English words; even inside one backtick span a
+//     `make X`/`yarn X` token can't be told apart from prose ("make sense"),
+//     so resolveRefAgainstView treats an ABSENT make target / yarn script as
+//     "unknown" (neutral), never "missing" (see there). `pnpm`/`npm` are not
+//     English words, so they keep full ok/missing semantics.
 const CODE_SPAN_RE = /`+([^`]+)`+/g;
 
 // A path first-segment that looks like a DNS host (`github.com`,
@@ -135,11 +143,14 @@ const CODE_SPAN_RE = /`+([^`]+)`+/g;
 // match (the first char must be alphanumeric).
 const HOSTLIKE_FIRST_SEG_RE = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/;
 
-/** Concatenate the inner text of every backtick code span in `text`. */
-function codeSpanText(text: string): string {
-  let out = "";
-  for (const m of text.matchAll(CODE_SPAN_RE)) out += `${m[1]}\n`;
-  return out;
+/** The inner text of every backtick code span in `text`, split into individual
+ *  lines. Matching commands per-line keeps `\s+` in the command regexes from
+ *  fusing a runner with a token on a separate span/line. */
+function codeLines(text: string): string[] {
+  const lines: string[] = [];
+  for (const m of text.matchAll(CODE_SPAN_RE))
+    for (const line of m[1].split("\n")) lines.push(line);
+  return lines;
 }
 
 /**
@@ -184,25 +195,27 @@ export function extractReferences(text: string): Reference[] {
     });
   }
 
-  // Commands only from inside backtick code spans (see CODE_SPAN_RE rationale).
-  const code = codeSpanText(text);
+  // Commands only from inside backtick code spans, matched PER LINE (see
+  // codeLines rationale) so neither separate spans nor separate lines can fuse
+  // a runner with an unrelated following token into a phantom command.
+  for (const line of codeLines(text)) {
+    for (const m of line.matchAll(PM_CMD_RE)) {
+      const runner = m[1] as "pnpm" | "npm" | "yarn";
+      const script = m[2];
+      if (PM_BUILTINS.has(script)) continue;
+      const raw = m[0];
+      if (seen.has(raw)) continue;
+      seen.add(raw);
+      out.push({ kind: "command", runner, script, raw });
+    }
 
-  for (const m of code.matchAll(PM_CMD_RE)) {
-    const runner = m[1] as "pnpm" | "npm" | "yarn";
-    const script = m[2];
-    if (PM_BUILTINS.has(script)) continue;
-    const raw = m[0];
-    if (seen.has(raw)) continue;
-    seen.add(raw);
-    out.push({ kind: "command", runner, script, raw });
-  }
-
-  for (const m of code.matchAll(MAKE_CMD_RE)) {
-    const script = m[1];
-    const raw = m[0];
-    if (seen.has(raw)) continue;
-    seen.add(raw);
-    out.push({ kind: "command", runner: "make", script, raw });
+    for (const m of line.matchAll(MAKE_CMD_RE)) {
+      const script = m[1];
+      const raw = m[0];
+      if (seen.has(raw)) continue;
+      seen.add(raw);
+      out.push({ kind: "command", runner: "make", script, raw });
+    }
   }
 
   return out;
@@ -247,9 +260,20 @@ export function resolveRefAgainstView(
   view: RepoView,
 ): RefStatus {
   if (ref.kind === "command") {
+    // `make`/`yarn` are common English words: even inside a backtick span a
+    // `make X`/`yarn X` token can't be definitively distinguished from prose
+    // ("make sense", "yarn about"). Per the load-bearing invariant, an ABSENT
+    // make target / yarn script is therefore UNKNOWN (neutral) — these runners
+    // can only ever *confirm* a reference, never break it. `pnpm`/`npm` are not
+    // English words, so a backticked `pnpm/npm X` is unambiguously a command and
+    // an absent script IS "missing".
     if (ref.runner === "make") {
       if (view.makeTargets == null) return "unknown";
-      return view.makeTargets.has(ref.script) ? "ok" : "missing";
+      return view.makeTargets.has(ref.script) ? "ok" : "unknown";
+    }
+    if (ref.runner === "yarn") {
+      if (view.scripts == null) return "unknown";
+      return view.scripts.has(ref.script) ? "ok" : "unknown";
     }
     if (view.scripts == null) return "unknown";
     return view.scripts.has(ref.script) ? "ok" : "missing";
