@@ -862,15 +862,17 @@ describe("cache stability (e2e)", () => {
     }
   });
 
-  it("coalesces MULTIPLE successive knowledge changes into ONE position-stable delta row", async () => {
-    // Regression for the durable-delta accumulation that busts the cache every
-    // turn: pre-fix, EACH material knowledge-set change appended a NEW
-    // session_prompt_deltas row (seq 0,1,2,...) at a DIFFERENT insertAt (the
-    // tail had grown). Replaying all of them inserts a new synthetic message
-    // into the cached prefix every change → shifts later messages → prompt-cache
-    // bust. The coalescing fix keeps exactly ONE row (seq 0) at a FROZEN
-    // insertAt, replaced in place, so the message prefix is byte-stable until
-    // the delta CONTENT changes.
+  it("successive knowledge changes APPEND immutable blocks at the tail (no in-place rewrite)", async () => {
+    // Append-only redesign: each genuine knowledge change appends a NEW
+    // immutable block at the CURRENT tail (seq = MAX+1) rather than rewriting
+    // one coalesced row in place at a frozen deep position. The cache-stability
+    // guarantee is no longer "exactly one row" but "every block, once written,
+    // is byte-immutable and tail-anchored" — so a write extends the cache
+    // frontier instead of invalidating the prefix from a deep index (the
+    // session-1LYkXZ7jkiHHnqPl `cause=incremental` bust). We assert: (a) one
+    // block per DISTINCT change, (b) monotonically increasing insertAt
+    // (tail-appended, never shifting the prefix), (c) earlier blocks are
+    // byte-identical after later appends.
     const turns = Array.from({ length: 6 }, (_, i) => ({
       userMessage: `Coalesce turn ${i}: keep working.`,
       assistantText: `Coalesce response ${i}.`,
@@ -890,6 +892,9 @@ describe("cache stability (e2e)", () => {
     const history: unknown[] = [];
     let sessionID = "";
     let ctxID = "";
+    // Snapshot block 0's bytes the first time it appears, to prove immutability.
+    let block0First: { seq: number; selector: string; content: string } | null =
+      null;
 
     for (let i = 0; i < turns.length; i++) {
       // Force emergency LTM refresh from turn 2 on, so each turn re-evaluates
@@ -923,41 +928,72 @@ describe("cache stability (e2e)", () => {
           session: sessionID,
         });
       }
-      // Mutate the pinned entry on MULTIPLE successive turns → multiple material
-      // changes. Pre-fix this appends one delta row per change.
+      // Mutate the pinned entry on MULTIPLE successive turns → three DISTINCT
+      // genuine changes (content hash differs each time).
       if (i === 1) ltm.update(ctxID, { content: "First change to coalesce." });
       if (i === 2) ltm.update(ctxID, { content: "Second change to coalesce." });
       if (i === 3) ltm.update(ctxID, { content: "Third change to coalesce." });
+
+      // Capture block 0 the first turn any delta row exists.
+      if (!block0First && sessionID) {
+        const r = harness.queryDB<{
+          seq: number;
+          selector: string;
+          content: string;
+        }>(
+          "SELECT seq, selector, content FROM session_prompt_deltas WHERE session_id = ? AND seq = 0",
+          [sessionID],
+        );
+        if (r[0]) block0First = r[0];
+      }
     }
 
-    const rows = harness.queryDB<{ seq: number; selector: string }>(
-      "SELECT seq, selector FROM session_prompt_deltas WHERE session_id = ? ORDER BY seq",
+    const rows = harness.queryDB<{
+      seq: number;
+      selector: string;
+      content: string;
+    }>(
+      "SELECT seq, selector, content FROM session_prompt_deltas WHERE session_id = ? ORDER BY seq",
       [sessionID],
     );
 
-    // The core coalescing guarantee: exactly ONE durable-delta row, at sentinel
-    // seq 0, regardless of how many successive knowledge changes occurred.
+    // One immutable block per distinct change (three edits → three blocks),
+    // appended (not coalesced) with monotonically increasing seqs.
     expect(
       rows.length,
-      `expected exactly one coalesced delta row after multiple knowledge ` +
-        `changes, got ${rows.length} (seqs=${rows.map((r) => r.seq).join(",")}) ` +
-        `— accumulating rows shifts the cached prefix and busts the cache`,
-    ).toBe(1);
-    expect(rows[0].seq).toBe(0);
+      `expected one appended block per distinct change, got seqs=${rows
+        .map((r) => r.seq)
+        .join(",")}`,
+    ).toBe(3);
+    expect(rows.map((r) => r.seq)).toEqual([0, 1, 2]);
+
+    // Tail-appended: insertAt is non-decreasing across blocks (each new block
+    // sits at or after the previous — it never shifts the cached prefix).
+    const insertAts = rows.map(
+      (r) => (JSON.parse(r.selector) as { insertAt: number }).insertAt,
+    );
+    for (let i = 1; i < insertAts.length; i++) {
+      expect(insertAts[i]).toBeGreaterThanOrEqual(insertAts[i - 1]);
+    }
+
+    // Immutability: block 0's bytes are identical to the first time it appeared,
+    // even after blocks 1 and 2 were appended on later turns.
+    expect(block0First).not.toBeNull();
+    expect(rows[0].selector).toBe(block0First?.selector);
+    expect(rows[0].content).toBe(block0First?.content);
   });
 
-  it("coalesced delta is CUMULATIVE: two entries superseded on different turns both stay in the single row", async () => {
-    // Regression for the coalescing correctness BLOCKER (B1): the durable delta
-    // is an incremental diff. If the coalesced (replaced) row were computed
-    // against the ROLLING pin baseline, a later turn's supersession would
-    // OVERWRITE the row and DROP an earlier turn's supersession — leaving a
-    // stale entry pinned in system[2] with no correcting delta. The pin must
-    // keep its baseline FROZEN at the bytes rendered into system[2], so the
-    // single row always describes the full cumulative frozen→current delta.
-    //
-    // Mirrors the proven single-removal test mechanism (force layer 4 + restart
-    // so the pin reloads its frozen baseline from the DB), but removes TWO
-    // distinct entries on TWO different turns.
+  it("supersessions on different turns are ALL preserved across the appended block sequence (incl. restart)", async () => {
+    // Append-only correctness: two entries superseded on two different turns
+    // must BOTH remain surfaced. In the append-only model each removal appends
+    // its own immutable block, so the supersessions live across the SEQUENCE of
+    // blocks (not one rewritten row). The advancing surfaced-set reconstruction
+    // — frozen pin baseline + each block's stashed mutation signature — is what
+    // keeps the earlier supersession from being dropped AND keeps the later one
+    // from re-surfacing the earlier (already-surfaced) entry. The reconstruction
+    // is durable: it is rebuilt purely from the persisted blocks, so it survives
+    // a restart with no extra state. We exercise force layer 4 + a restart
+    // between the two removals to prove it.
     const turns = Array.from({ length: 7 }, (_, i) => ({
       userMessage: `Cumulative turn ${i}: continue.`,
       assistantText: `Cumulative response ${i}.`,
@@ -1036,32 +1072,39 @@ describe("cache stability (e2e)", () => {
       "SELECT seq, content FROM session_prompt_deltas WHERE session_id = ? ORDER BY seq",
       [sessionID],
     );
-    expect(rows).toHaveLength(1);
+    // Two distinct removals on two turns → two appended blocks (A's, then B's).
+    expect(
+      rows.length,
+      `expected two appended supersession blocks, got seqs=${rows
+        .map((r) => r.seq)
+        .join(",")}`,
+    ).toBe(2);
 
-    const content = rows[0].content;
-    expect(content).toContain("Superseded Long-term Knowledge");
-    // The superseded section renders one `* [<id8>]` bullet per removed entry.
-    // (UUIDv7's first 8 hex chars are a coarse time prefix shared by entries
-    // created within the same ~49-day window, so we count BULLETS rather than
-    // match specific ids.) With the frozen-baseline fix the coalesced row
-    // describes the full cumulative delta → BOTH removals → 2 bullets. Pre-fix
-    // (rolling baseline + replace), the turn-4 row holds only B's removal → 1.
-    // content is a serialized GatewayMessage; extract the text and count bullets.
-    const text = (
-      JSON.parse(content) as { content: Array<{ text?: string }> }
-    ).content
-      .map((b) => b.text ?? "")
-      .join("");
-    const supersededSection = text.slice(
-      text.indexOf("## Superseded Long-term Knowledge"),
-    );
-    const bulletCount = (supersededSection.match(/\n\* \[/g) ?? []).length;
+    // Across the WHOLE block sequence, BOTH A and B must be surfaced as
+    // superseded — exactly once each (no drop, no duplicate re-surface despite
+    // the restart between the two removals).
+    const allText = rows
+      .map((r) =>
+        (JSON.parse(r.content) as { content: Array<{ text?: string }> }).content
+          .map((b) => b.text ?? "")
+          .join(""),
+      )
+      .join("\n");
+    for (const r of rows) {
+      const blockText = (
+        JSON.parse(r.content) as { content: Array<{ text?: string }> }
+      ).content
+        .map((b) => b.text ?? "")
+        .join("");
+      expect(blockText).toContain("Superseded Long-term Knowledge");
+    }
+    const bulletCount = (allText.match(/\n\* \[/g) ?? []).length;
     expect(
       bulletCount,
-      `coalesced delta superseded ${bulletCount} entr${bulletCount === 1 ? "y" : "ies"}, ` +
-        `expected 2 (both A removed on turn 2 and B removed on turn 4). A count ` +
-        `of 1 means a later supersession overwrote an earlier one in the single ` +
-        `coalesced row (B1 regression). Content: ${content}`,
+      `expected 2 superseded bullets across the block sequence (A on turn 2, ` +
+        `B on turn 4), got ${bulletCount}. A count of 1 means a supersession ` +
+        `was dropped; >2 means an already-surfaced removal re-fired (the ` +
+        `advancing surfaced-set didn't survive the restart). Blocks: ${allText}`,
     ).toBe(2);
   });
 

@@ -64,7 +64,7 @@ import {
   embedding,
   saveSessionTracking,
   loadSessionTracking,
-  upsertSessionPromptDelta,
+  appendSessionPromptDelta,
   deleteSessionPromptDelta,
   listSessionPromptDeltas,
   loadHeaderSessionIndex,
@@ -842,11 +842,19 @@ export function shouldResetDeltaOnCompression(
 }
 
 /**
- * Re-anchor an existing seq-0 durable delta (same content) to a fresh, tool-
+ * Re-anchor the existing durable delta blocks (same content) to a fresh, tool-
  * pair-safe near-tail index in the current (post-reshuffle) message array, so a
  * frozen absolute insertAt isn't replayed at a position that no longer matches
  * the array layout. Returns the recomputed insertAt, or null when there is no
  * delta to re-anchor.
+ *
+ * Append-only sessions can hold MORE THAN ONE block (one per surfaced mutation
+ * since the last compaction). All blocks move to the SAME fresh tail index;
+ * `applySessionPromptDeltas` sorts by insertAt DESC then seq DESC and splices
+ * at that index, so equal insertAt + ascending re-append order replays the
+ * blocks in their original chronological order. Each block's mutation signature
+ * (and any other selector field) is preserved — only `insertAt` is rewritten —
+ * so the advancing surfaced-set reconstruction stays intact across the reshuffle.
  *
  * @internal Exported for tests (covers the call-site behavior — passing the
  * post-compact array and persisting a recomputed index — that the predicate
@@ -857,18 +865,34 @@ export function reanchorExistingDelta(
   projectPath: string,
   messages: GatewayMessage[],
 ): number | null {
-  const existing = listSessionPromptDeltas(sessionID).find((d) => d.seq === 0);
-  if (!existing) return null;
+  const blocks = listSessionPromptDeltas(sessionID);
+  if (!blocks.length) return null;
   const reInsertAt = safeDeltaInsertIndex(
     messages,
     Math.max(0, messages.length - 1),
   );
-  upsertSessionPromptDelta({
-    sessionID,
-    projectID: ensureProject(projectPath),
-    selector: JSON.stringify({ target: "messages", insertAt: reInsertAt }),
-    content: existing.content,
+  const projectID = ensureProject(projectPath);
+  // Rewrite each block's insertAt while preserving content + mutation signature
+  // + chronological (seq) order. Snapshot before mutating the table.
+  const preserved = blocks.map((b) => {
+    let selectorObj: Record<string, unknown>;
+    try {
+      selectorObj = JSON.parse(b.selector) as Record<string, unknown>;
+    } catch {
+      selectorObj = { target: "messages" };
+    }
+    selectorObj.insertAt = reInsertAt;
+    return { content: b.content, selector: JSON.stringify(selectorObj) };
   });
+  deleteSessionPromptDelta(sessionID);
+  for (const p of preserved) {
+    appendSessionPromptDelta({
+      sessionID,
+      projectID,
+      selector: p.selector,
+      content: p.content,
+    });
+  }
   return reInsertAt;
 }
 
@@ -1258,6 +1282,80 @@ export function buildKnowledgeDeltaMessage(
   };
 }
 
+/**
+ * The mutation signature an appended delta block surfaced, stashed in the
+ * block's selector JSON. `parseMessageInsertSelector` ignores unknown fields,
+ * so this rides alongside `insertAt` without affecting replay. It lets a later
+ * turn reconstruct the ADVANCING surfaced set (frozen pin baseline + every
+ * block's increment) purely from the persisted blocks — no extra state, durable
+ * across restart for free.
+ */
+type DeltaMutation = {
+  /** ids whose content was surfaced as changed, with the surfaced hash. */
+  changed: Array<{ id: string; h: string }>;
+  /** ids surfaced as removed/superseded. */
+  removed: string[];
+};
+
+/** Read a block's stashed {@link DeltaMutation} from its selector JSON. */
+function parseDeltaMutation(rawSelector: string): DeltaMutation | null {
+  try {
+    const parsed = JSON.parse(rawSelector) as { mut?: unknown };
+    const mut = parsed.mut as Partial<DeltaMutation> | undefined;
+    if (!mut || typeof mut !== "object") return null;
+    const removed = Array.isArray(mut.removed)
+      ? mut.removed.filter((x): x is string => typeof x === "string")
+      : [];
+    const changed = Array.isArray(mut.changed)
+      ? mut.changed.filter(
+          (x): x is { id: string; h: string } =>
+            !!x &&
+            typeof (x as { id?: unknown }).id === "string" &&
+            typeof (x as { h?: unknown }).h === "string",
+        )
+      : [];
+    return { changed, removed };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reconstruct the ADVANCING surfaced set: the frozen system[2] pin baseline
+ * (`baseline` = `id:hash` keys) advanced through every already-appended block's
+ * surfaced increment. A `changed` id moves to its surfaced hash; a `removed` id
+ * drops out. Blocks must be applied in seq order (the natural order returned by
+ * `listSessionPromptDeltas`, `ORDER BY seq`).
+ *
+ * This is the heart of the append-only redesign: once a mutation has been
+ * surfaced by a block, it leaves the surfaced set, so the next turn's
+ * `detectSurfacedMutations` sees no outstanding change and appends nothing —
+ * killing the per-turn re-fire that rewrote a deep message every turn
+ * (session 1LYkXZ7jkiHHnqPl). Old-format blocks (pre-redesign seq=0 rows with
+ * no `mut`) contribute nothing here; at worst they cause one extra append on
+ * the upgrade boundary, after which the new block carries the advance.
+ *
+ * @internal Exported for tests.
+ */
+export function advanceSurfacedKeys(
+  baseline: string[] | undefined,
+  blocks: Array<{ selector: string }>,
+): string[] {
+  const map = new Map<string, string>();
+  for (const key of baseline ?? []) {
+    const idx = key.lastIndexOf(":");
+    const id = idx === -1 ? key : key.slice(0, idx);
+    map.set(id, key);
+  }
+  for (const block of blocks) {
+    const mut = parseDeltaMutation(block.selector);
+    if (!mut) continue;
+    for (const c of mut.changed) map.set(c.id, `${c.id}:${c.h}`);
+    for (const id of mut.removed) map.delete(id);
+  }
+  return [...map.values()];
+}
+
 /** @internal Exported for tests (guards the DB-mutation wiring at its seam:
  *  a pinned entry that merely dropped out of the per-turn selection — but still
  *  exists in the DB — must produce NO delta, whereas a genuine content change
@@ -1276,20 +1374,24 @@ export function appendKnowledgePromptDelta(input: {
   }>;
   overflow?: Array<{ id: string; category: string; title: string }>;
 }): boolean {
-  // Source the delta from GENUINE DB mutations to the surfaced (pinned) set,
+  // Source the delta from GENUINE DB mutations to the ADVANCING surfaced set,
   // NOT from the per-turn relevance selection. `previousKeys` is the frozen
-  // system[2] pin baseline; `detectSurfacedMutations` compares it against the
-  // CURRENT DB state, so an entry that merely wasn't top-K this turn produces
-  // no delta. The legacy `changedLtmEntries`/`removedLtmEntryIds(previousKeys,
-  // nextKeys)` compared the pin against the volatile selection, so ranking
-  // churn (8→7→6→12 entries) rewrote this row every turn and busted the cache
-  // from the delta's position onward (session 1LYkXZ7jkiHHnqPl: read pinned at
-  // 41k, ~250k rewritten per turn). The comparison stays against the FROZEN
-  // pin, so the result is still cumulative (every change since the pin),
-  // preserving the single-coalesced-row contract — it just no longer fires on
-  // pure re-ranking. `nextKeys`/`entries` are retained on the input for the
-  // gate sites (hasMaterialLtmDelta) but are intentionally unused here.
-  const { changed, removedIds } = detectSurfacedMutations(input.previousKeys);
+  // system[2] pin baseline; the surfaced set is that baseline advanced through
+  // every block already appended this session (each block records the
+  // `id:hash` mutations it surfaced in its selector). `detectSurfacedMutations`
+  // compares the surfaced set against the CURRENT DB state, so:
+  //   - an entry that merely wasn't top-K this turn produces no delta (it never
+  //     left the surfaced set and the DB is unchanged) — kills the ranking
+  //     churn that rewrote a deep message every turn (session 1LYkXZ7jkiHHnqPl:
+  //     read pinned at 41k, ~250k rewritten per turn);
+  //   - a removal/change ALREADY surfaced by a prior block has left the surfaced
+  //     set, so a PERSISTENT mutation (e.g. 66 pinned entries genuinely gone)
+  //     fires exactly once, not every turn.
+  // `nextKeys`/`entries` are retained on the input for the gate sites
+  // (hasMaterialLtmDelta) but are intentionally unused here.
+  const blocks = listSessionPromptDeltas(input.sessionID);
+  const surfacedKeys = advanceSurfacedKeys(input.previousKeys, blocks);
+  const { changed, removedIds } = detectSurfacedMutations(surfacedKeys);
   const message = buildKnowledgeDeltaMessage(
     changed,
     removedIds,
@@ -1297,35 +1399,34 @@ export function appendKnowledgePromptDelta(input: {
   );
   if (!message) return false;
 
-  // Coalesce into a SINGLE durable-delta row (sentinel seq 0), replacing any
-  // prior delta in place rather than appending a new row each time the
-  // knowledge set changes. Appending accumulated rows at ever-larger insertAt
-  // positions, inserting a new synthetic message into the cached prefix every
-  // change → shifting all later messages → busting the prompt cache. One
-  // coalesced row at a FROZEN insertAt keeps the message prefix byte-stable
-  // until the delta's content genuinely changes.
-  //
-  // Freeze the position: reuse the already-persisted insertAt if a delta row
-  // exists, so the durable delta does not migrate as the conversation grows
-  // (which would itself shift the prefix and bust the cache). Only compute a
-  // fresh insertAt the first time.
-  const existing = listSessionPromptDeltas(input.sessionID).find(
-    (d) => d.seq === 0,
-  );
-  let insertAt = input.insertAt;
-  if (existing) {
-    const prevSelector = parseMessageInsertSelector(existing.selector);
-    if (prevSelector) insertAt = prevSelector.insertAt;
-  }
-
-  upsertSessionPromptDelta({
+  // APPEND a fresh immutable block at the current tail (seq = MAX+1) instead of
+  // rewriting one coalesced row in place. The insertAt is computed tool-pair-
+  // safe at the call site against the CURRENT array tail, so the new message
+  // extends the cache frontier (it sits after everything already cached and
+  // before the final uncached user turn) → it never invalidates the prefix. An
+  // appended block is never touched again: its content + position are frozen,
+  // so later turns replay it byte-identically (cache-stable by construction).
+  // The block stashes the mutation signature it surfaced so the NEXT turn can
+  // advance the surfaced set past it (see advanceSurfacedKeys).
+  const mut: DeltaMutation = {
+    changed: changed.map((c) => ({
+      id: c.id,
+      h: fnv1a(`${c.title}\x1f${c.content}`),
+    })),
+    removed: removedIds,
+  };
+  appendSessionPromptDelta({
     sessionID: input.sessionID,
     projectID: ensureProject(input.projectPath),
-    selector: JSON.stringify({ target: "messages", insertAt }),
+    selector: JSON.stringify({
+      target: "messages",
+      insertAt: input.insertAt,
+      mut,
+    }),
     content: JSON.stringify(message),
   });
   log.info(
-    `prompt-delta: upserted knowledge update for session ${input.sessionID.slice(0, 16)} (${changed.length} changed, ${removedIds.length} removed, insertAt=${insertAt})`,
+    `prompt-delta: appended knowledge block for session ${input.sessionID.slice(0, 16)} (${changed.length} changed, ${removedIds.length} removed, insertAt=${input.insertAt}, seq=${blocks.length})`,
   );
   return true;
 }
