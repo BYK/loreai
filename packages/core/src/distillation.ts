@@ -956,6 +956,10 @@ async function runInner(input: {
           urgent: input.urgent,
           callType: input.callType,
           workerHealth: input.workerHealth,
+          // #627 Phase 1: propagate gitHead down the main distillation path so
+          // observer/echo/tag entries minted here get stamped (not just the
+          // urgent path).
+          metadata: input.metadata,
         });
         if (result) {
           distilled += segment.length;
@@ -981,6 +985,9 @@ async function runInner(input: {
         urgent: input.urgent,
         callType: input.callType,
         workerHealth: input.workerHealth,
+        // #627 Phase 1: propagate gitHead so meta-distilled (gen-1+) entries
+        // are stamped on the main path too.
+        metadata: input.metadata,
       });
       rounds++;
     }

@@ -14,6 +14,7 @@ import {
   run,
 } from "../src/distillation";
 import { distillationUser } from "../src/prompt";
+import * as ltm from "../src/ltm";
 import type * as temporal from "../src/temporal";
 import { CHUNK_TERMINATOR, partsToText } from "../src/temporal";
 import { db, ensureProject } from "../src/db";
@@ -2099,5 +2100,130 @@ describe("detectToolFailures", () => {
     expect(result).toContain("bash:timeout (×2)");
     expect(result).toContain("edit:edit_noop (×1)");
     expect(result).not.toContain("read");
+  });
+});
+
+// ─── run() → metadata propagation (#627 Phase 1, Seer #14859581) ───────
+//
+// Regression guard: runInner() accepts a `metadata` blob (the session's
+// gitHead) but must forward it to BOTH distillSegment() and metaDistillInner().
+// The original PR threaded metadata through the urgent path only — the main
+// `run()` path dropped it, so every entry minted by ordinary distillation/
+// meta-distillation got NULL metadata. These tests drive the real `run()`
+// path and assert the gitHead reaches the created knowledge row, so a future
+// regression (or a reverted fix) fails loudly. Mutation-verified: reverting
+// either `metadata: input.metadata` forward in runInner fails this test.
+
+describe("run() propagates metadata to minted knowledge (#627 Phase 1)", () => {
+  const META_META_PROJECT = "/test/distillation/run-metadata";
+  const META_META_SESSION = "run-metadata-sess";
+  const GITHEAD = "abc1234deadbeefcafe";
+
+  beforeEach(() => {
+    const pid = ensureProject(META_META_PROJECT);
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
+    db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+    db().query("DELETE FROM temporal_messages WHERE project_id = ?").run(pid);
+  });
+
+  test("gitHead reaches knowledge entries minted by meta-distillation", async () => {
+    const pid = ensureProject(META_META_PROJECT);
+    // Seed gen-0 rows past the meta threshold (default 20) so a forced run()
+    // triggers metaDistillInner without needing any new temporal messages.
+    for (let i = 0; i < 22; i++) {
+      insertGen0({
+        projectId: pid,
+        sessionID: META_META_SESSION,
+        observations: `segment ${i} observations`,
+      });
+    }
+    // The meta consolidation LLM output carries a decision pattern that
+    // extractPatterns() turns into a knowledge entry.
+    const llm = makeStubLLM(
+      "<observations>\ndecided to use Postgres for storage\n</observations>",
+    );
+
+    await run({
+      llm,
+      projectPath: META_META_PROJECT,
+      sessionID: META_META_SESSION,
+      force: true,
+      metadata: { gitHead: GITHEAD },
+    });
+
+    const entries = ltm.forProject(META_META_PROJECT, false);
+    // At least one entry was minted by meta-distillation, and it carries the
+    // session's gitHead — proof runInner forwarded metadata to metaDistillInner.
+    const stamped = entries.filter((e) => e.metadata?.gitHead === GITHEAD);
+    expect(stamped.length).toBeGreaterThan(0);
+  });
+
+  test("entries are minted WITHOUT metadata when run() is given none (no regression)", async () => {
+    const pid = ensureProject(META_META_PROJECT);
+    for (let i = 0; i < 22; i++) {
+      insertGen0({
+        projectId: pid,
+        sessionID: META_META_SESSION,
+        observations: `segment ${i} observations`,
+      });
+    }
+    const llm = makeStubLLM(
+      "<observations>\ndecided to use Postgres for storage\n</observations>",
+    );
+
+    await run({
+      llm,
+      projectPath: META_META_PROJECT,
+      sessionID: META_META_SESSION,
+      force: true,
+      // no metadata
+    });
+
+    const entries = ltm.forProject(META_META_PROJECT, false);
+    // The pattern still mints an entry, but metadata stays NULL — opting out
+    // is free and never fabricates a gitHead.
+    expect(entries.length).toBeGreaterThan(0);
+    expect(entries.every((e) => e.metadata == null)).toBe(true);
+  });
+
+  test("gitHead reaches knowledge entries minted by segment distillation", async () => {
+    const pid = ensureProject(META_META_PROJECT);
+    // A single distillable segment (no pre-seeded gen-0 → meta does NOT fire),
+    // so the ONLY knowledge minted comes from distillSegment's extractPatterns.
+    // This isolates the runInner → distillSegment metadata forward.
+    const content = "x".repeat(600); // 200 tokens/msg × 6 = 1200 source tokens
+    for (let i = 0; i < 6; i++) {
+      db()
+        .query(
+          `INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
+           VALUES (?, ?, ?, 'user', ?, ?, 0, ?, '{}')`,
+        )
+        .run(
+          `seg-msg-${crypto.randomUUID()}`,
+          pid,
+          META_META_SESSION,
+          content,
+          200,
+          Date.now() + i,
+        );
+    }
+    // Small observation (decision pattern) — well under the expansion limit so
+    // the segment is stored, and extractPatterns mints a decision entry.
+    const llm = makeStubLLM(
+      "<observations>\ndecided to use Postgres for storage\n</observations>",
+    );
+
+    await run({
+      llm,
+      projectPath: META_META_PROJECT,
+      sessionID: META_META_SESSION,
+      force: true,
+      metadata: { gitHead: GITHEAD },
+    });
+
+    const stamped = ltm
+      .forProject(META_META_PROJECT, false)
+      .filter((e) => e.metadata?.gitHead === GITHEAD);
+    expect(stamped.length).toBeGreaterThan(0);
   });
 });
