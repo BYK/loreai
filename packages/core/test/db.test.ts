@@ -131,12 +131,19 @@ describe("db", () => {
   });
 
   test("v56: knowledge_ref_validity table + projects.last_refcheck_at exist after recovery", () => {
-    // Simulate a crash after v56 forward migration but before the version bump:
-    // drop both, reopen, confirm recoverMissingObjects restores them idempotently.
+    // Simulate the real v56→v57 upgrade path where the column/table are ABSENT
+    // (a DB already at v56=costs-index, on which the renumbered refcheck
+    // migration's loop body never runs — see db.ts mid-array-insert note). Drop
+    // the table AND the column, reopen, confirm recoverMissingObjects restores
+    // both idempotently. Dropping the column (not just NULLing it) is what
+    // actually exercises the column-presence ALTER branch.
     db().exec("DROP TABLE IF EXISTS knowledge_ref_validity");
-    db().exec(
-      "UPDATE projects SET last_refcheck_at = NULL WHERE last_refcheck_at IS NOT NULL",
-    );
+    db().exec("ALTER TABLE projects DROP COLUMN last_refcheck_at");
+    // Sanity: the column is really gone before recovery runs.
+    const before = db().query("PRAGMA table_info(projects)").all() as Array<{
+      name: string;
+    }>;
+    expect(before.some((c) => c.name === "last_refcheck_at")).toBe(false);
     close();
     const fresh = db();
     const rv = fresh

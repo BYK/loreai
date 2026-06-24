@@ -63,13 +63,13 @@ describe("validateProjectReferences (#627 Phase 0)", () => {
   });
 
   test("pnpm run <removed-script> → penalized", async () => {
-    const id = seed("always pnpm run typecheck before commit"); // typecheck not in scripts
+    const id = seed("always `pnpm run typecheck` before commit"); // typecheck not in scripts
     await ltm.validateProjectReferences(root, resolver());
     expect(conf(id)).toBeCloseTo(0.9, 5);
   });
 
   test("present script → no penalty", async () => {
-    const id = seed("run pnpm run lint to format");
+    const id = seed("run `pnpm run lint` to format");
     await ltm.validateProjectReferences(root, resolver());
     expect(conf(id)).toBe(1.0);
   });
@@ -82,7 +82,7 @@ describe("validateProjectReferences (#627 Phase 0)", () => {
   });
 
   test("ONE flat penalty regardless of how many refs are broken", async () => {
-    const id = seed("src/gone1.ts:1 and src/gone2.ts:2 and pnpm run nope");
+    const id = seed("src/gone1.ts:1 and src/gone2.ts:2 and `pnpm run nope`");
     await ltm.validateProjectReferences(root, resolver());
     // exactly one −0.1, never 3×
     expect(conf(id)).toBeCloseTo(0.9, 5);

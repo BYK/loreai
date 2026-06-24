@@ -116,66 +116,43 @@ const PM_BUILTINS = new Set([
 const PM_CMD_RE = /\b(pnpm|npm|yarn)\s+(?:run\s+)?([A-Za-z][A-Za-z0-9:_-]*)/g;
 const MAKE_CMD_RE = /\bmake\s+([A-Za-z][A-Za-z0-9:_-]*)/g;
 
+// Inline-code / fenced-code spans (the inner text between backtick runs).
+// Command references are extracted ONLY from inside code spans. `make` and
+// `yarn` are common English words, so prose like "make decisions", "make sure",
+// or "yarn about it" must NEVER be treated as build commands — a false "missing"
+// penalty violates the load-bearing invariant ("cannot verify" ≠ "broken"), and
+// no stopword denylist can enumerate the open set of English words. Knowledge
+// entries consistently backtick-wrap real commands (`pnpm run lint`,
+// `make check`), so this is high-precision with negligible recall loss. False
+// negatives (an un-backticked command not checked) are acceptable; false
+// positives (penalizing prose) are not.
+const CODE_SPAN_RE = /`+([^`]+)`+/g;
+
+// A path first-segment that looks like a DNS host (`github.com`,
+// `www.example.com`): used to reject bare/relative URLs that would otherwise
+// match FILE_CAND_RE via their `/` (e.g. `github.com/org/repo/Home.md`). A real
+// repo directory never looks like `label.tld`; `.github` (leading dot) does NOT
+// match (the first char must be alphanumeric).
+const HOSTLIKE_FIRST_SEG_RE = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/;
+
+/** Concatenate the inner text of every backtick code span in `text`. */
+function codeSpanText(text: string): string {
+  let out = "";
+  for (const m of text.matchAll(CODE_SPAN_RE)) out += `${m[1]}\n`;
+  return out;
+}
+
 /**
  * Extract the literal `file:line` and command references from an entry's text.
- * Conservative by design — a file token is only kept when it has a `:line`
- * suffix OR a `/` path separator, so prose like `e.g`, `i.e`, and bare words are
- * never treated as files. Deduplicated by raw token (within this text).
+ * Conservative by design:
+ * - A file token is only kept when it has a `:line` suffix OR a `/` path
+ *   separator (so prose like `e.g`, `i.e`, and bare words are never files), and
+ *   its first path segment must not look like a DNS host (so bare URLs like
+ *   `github.com/org/repo/x.md` are rejected).
+ * - A command token is only kept when it appears inside a backtick code span
+ *   (so prose like "make decisions"/"yarn about" is never a command).
+ * Deduplicated by raw token (within this text).
  */
-// Common English words that look like make targets in prose ("make sure", "make
-// it", "make progress") but are never repo build commands. Extracted as `make X`
-// would produce a false "missing" penalty on any repo with a Makefile.
-const MAKE_PROSE_STOPWORDS = new Set([
-  "sure",
-  "it",
-  "the",
-  "a",
-  "an",
-  "this",
-  "that",
-  "them",
-  "your",
-  "our",
-  "their",
-  "my",
-  "me",
-  "use",
-  "sense",
-  "do",
-  "run",
-  "changes",
-  "progress",
-  "surest",
-  "current",
-  "actual",
-  "real",
-  "certain",
-  "specific",
-  "particular",
-  "possible",
-  "clear",
-  "great",
-  "good",
-  "better",
-  "best",
-  "simple",
-  "easy",
-  "quick",
-  "fast",
-  "sure",
-  "certain",
-  "definite",
-  "likely",
-  "unlikely",
-  "enough",
-  // Possessive / contractions that can look like targets
-  "its",
-  "it's",
-  "them",
-  "those",
-  "these",
-]);
-
 export function extractReferences(text: string): Reference[] {
   if (!text) return [];
   const out: Reference[] = [];
@@ -190,6 +167,12 @@ export function extractReferences(text: string): Reference[] {
     // `foo.bar` with neither is too ambiguous (could be prose) to act on.
     if (!hasSlash && !hasLine) continue;
     const path = hasLine ? raw.slice(0, colonIdx) : raw;
+    // Reject relative URLs whose first segment is a DNS host (`github.com/...`,
+    // `www.example.com/...`). Absolute-path URLs (`/host/...`) are handled
+    // downstream by the isAbsolute → "unknown" guard.
+    const slashIdx = path.indexOf("/");
+    if (slashIdx > 0 && HOSTLIKE_FIRST_SEG_RE.test(path.slice(0, slashIdx)))
+      continue;
     const line = hasLine ? Number.parseInt(raw.slice(colonIdx + 1), 10) : null;
     if (seen.has(raw)) continue;
     seen.add(raw);
@@ -201,7 +184,10 @@ export function extractReferences(text: string): Reference[] {
     });
   }
 
-  for (const m of text.matchAll(PM_CMD_RE)) {
+  // Commands only from inside backtick code spans (see CODE_SPAN_RE rationale).
+  const code = codeSpanText(text);
+
+  for (const m of code.matchAll(PM_CMD_RE)) {
     const runner = m[1] as "pnpm" | "npm" | "yarn";
     const script = m[2];
     if (PM_BUILTINS.has(script)) continue;
@@ -211,9 +197,8 @@ export function extractReferences(text: string): Reference[] {
     out.push({ kind: "command", runner, script, raw });
   }
 
-  for (const m of text.matchAll(MAKE_CMD_RE)) {
+  for (const m of code.matchAll(MAKE_CMD_RE)) {
     const script = m[1];
-    if (MAKE_PROSE_STOPWORDS.has(script)) continue;
     const raw = m[0];
     if (seen.has(raw)) continue;
     seen.add(raw);
@@ -447,11 +432,25 @@ const PROBE_LINES = "===LORE-LINES===";
 export function buildRefcheckProbeScript(refs: Reference[]): string {
   const basenames = new Set<string>();
   for (const ref of refs) {
-    if (ref.kind === "file") basenames.add(basenameOf(ref.path));
+    if (ref.kind !== "file") continue;
+    const bn = basenameOf(ref.path);
+    // Defense-in-depth: the extraction charset already excludes shell
+    // metacharacters, but assert it again at the interpolation site so a future
+    // regex broadening can't silently turn `__refset='…'` into a shell-injection
+    // sink. A non-conforming basename is simply dropped (no line-count check).
+    if (/^[A-Za-z0-9_.-]+$/.test(bn)) basenames.add(bn);
   }
   // `|a.ts|b.ts|` — a glob-case membership test; basenames are metachar-free.
   const refset = `|${[...basenames].join("|")}|`;
+  // Run the snapshot from the REPO ROOT, not the client's CWD. `git ls-files`
+  // (and the `find` fallback) emit paths relative to the working directory, but
+  // knowledge refs are repo-root-relative (`packages/core/src/db.ts:42`). An
+  // agent launched from a subdirectory would otherwise produce subdir-relative
+  // paths → every root-relative ref "missing" → mass false penalty. The cd runs
+  // in a subshell so it cannot affect the (already-emitted) resolution section
+  // of a combined probe; a non-git CWD falls back to `.` (current behavior).
   return [
+    `( cd "$(git rev-parse --show-toplevel 2>/dev/null || echo .)" 2>/dev/null`,
     `__f=$(git ls-files 2>/dev/null)`,
     `[ -z "$__f" ] && __f=$(find . \\( -name node_modules -o -name .git -o -name dist -o -name build -o -name coverage \\) -prune -o -type f -print 2>/dev/null | sed 's|^\\./||')`,
     `printf '%s\\n' "$__f"`,
@@ -462,6 +461,7 @@ export function buildRefcheckProbeScript(refs: Reference[]): string {
     `printf '%s\\n' '${PROBE_LINES}'`,
     `__refset='${refset}'`,
     `printf '%s\\n' "$__f" | while IFS= read -r f; do bn=\${f##*/}; case "$__refset" in *"|$bn|"*) printf '%s\\t%s\\n' "$f" "$(wc -l < "$f" 2>/dev/null)";; esac; done`,
+    `)`,
   ].join("\n");
 }
 
@@ -490,6 +490,12 @@ export function parseProbeSnapshot(text: string): RepoView | null {
     if (arr) arr.push(f);
     else basenames.set(bn, [f]);
   }
+  // An empty file list means the probe couldn't enumerate the repo (git absent
+  // AND `find` empty, or it ran in the wrong place) — the snapshot is
+  // unverifiable, not "every file is missing". Treat as neutral (null) so a
+  // degenerate probe can never mass-penalize. (A genuinely empty repo has no
+  // refs to resolve anyway.)
+  if (files.size === 0) return null;
 
   const lineCounts = new Map<string, number>();
   for (const raw of linesBlock.split("\n")) {
