@@ -50,6 +50,7 @@ import {
 import type { GatewayConfig } from "./config";
 import type { SessionState } from "./translate/types";
 import { getWorkerModel, getModelEntrySync } from "./worker-model";
+import { buildSessionMetadata } from "./session-metadata";
 import {
   isCircuitBreakerTripped,
   pruneExpiredCircuitBreakers,
@@ -905,6 +906,8 @@ export function buildIdleWorkHandler(
           skipMeta: true,
           callType,
           workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
+          // #627 Phase 1: stamp the session's gitHead on every distilled row.
+          metadata: buildSessionMetadata(state.gitHead),
         });
         // Only a run that actually created gen-0 segments rewrites the in-context
         // prefix. `distilled` counts messages folded into a NEW gen-0 segment
@@ -928,6 +931,8 @@ export function buildIdleWorkHandler(
           sessionID,
           model,
           callType,
+          // #627 Phase 1: stamp the session's gitHead on meta-distilled rows.
+          metadata: buildSessionMetadata(state.gitHead),
           workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
         });
         // meta consolidation archives gen-0 and adds gen-1+ — rewrites the prefix.
@@ -975,6 +980,8 @@ export function buildIdleWorkHandler(
                 sessionID,
                 model,
                 workerHealth: makeWorkerHealth(sessionID, "lore-curator"),
+                // #627 Phase 1: stamp the session's gitHead on curator entries.
+                metadata: buildSessionMetadata(state.gitHead),
               }),
           );
           state.turnsSinceCuration = 0;

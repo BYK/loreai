@@ -423,6 +423,13 @@ export type SessionState = {
    *  Cached on the session so subsequent turns benefit even if the header
    *  is absent (e.g. prompt-cache probes). */
   gitRemote?: string;
+  /** Commit SHA the session was on when bound (#627 Phase 1). Captured from
+   *  the session-start shell probe (`synthetic-tools.ts:535-622`); validated
+   *  as 7-40 char lowercase hex at capture. Persisted into new knowledge
+   *  entries' `metadata.gitHead` so future reference-validity passes can
+   *  correlate drift to commit. Absent for non-git clients — callers must
+   *  treat it as optional. */
+  gitHead?: string;
   /** SHA-256 fingerprint of the first user message — used for Tier 3 session correlation. */
   fingerprint: string;
   /** Unix timestamp (ms) of the last request in this session. */

@@ -193,6 +193,7 @@ import {
 } from "./auth";
 import type { UpstreamInterceptor } from "./recorder";
 import { startIdleScheduler, buildIdleWorkHandler } from "./idle";
+import { buildSessionMetadata } from "./session-metadata";
 import {
   makeWorkerHealth,
   recordWorkerFailure,
@@ -2384,7 +2385,7 @@ function applySyntheticResolution(
   currentProjectPath: string,
 ): string {
   try {
-    const { root, gitRemote } = resolved;
+    const { root, gitRemote, gitHead } = resolved;
     if (!root && !gitRemote) return currentProjectPath; // nothing useful — no-op
 
     const newPath = root ?? currentProjectPath;
@@ -2406,6 +2407,13 @@ function applySyntheticResolution(
     if (gitRemote) {
       sessionState.gitRemote = gitRemote;
     }
+    // Bind the captured commit SHA (#627 Phase 1) so subsequent knowledge
+    // creations in this session can stamp `metadata.gitHead`. The probe
+    // already validates the format (synthetic-tools.ts:621), so no second
+    // guard is needed here.
+    if (gitHead) {
+      sessionState.gitHead = gitHead;
+    }
 
     if (gitRemote || root) {
       ensureProject(newPath, undefined, gitRemote);
@@ -2413,7 +2421,8 @@ function applySyntheticResolution(
 
     log.info(
       `synthetic-resolve: bound session ${sessionState.sessionID.slice(0, 16)} → ` +
-        `path=${newPath}${gitRemote ? ` remote=${gitRemote}` : ""}`,
+        `path=${newPath}${gitRemote ? ` remote=${gitRemote}` : ""}` +
+        `${gitHead ? ` head=${gitHead.slice(0, 8)}` : ""}`,
     );
     return newPath;
   } catch (e) {
@@ -5060,6 +5069,8 @@ function scheduleBackgroundWork(
               skipMeta: true,
               callType: batchQueueEnabled ? "batch" : "direct",
               workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
+              // #627 Phase 1: stamp the session's gitHead on every distilled row.
+              metadata: buildSessionMetadata(sessionState.gitHead),
             }),
           `incremental-distill session=${sessionID.slice(0, 16)}`,
           workerProviderID,
@@ -5138,6 +5149,8 @@ function scheduleBackgroundWork(
                 sessionID,
                 model,
                 workerHealth: makeWorkerHealth(sessionID, "lore-curator"),
+                // #627 Phase 1: stamp the session's gitHead on curator entries.
+                metadata: buildSessionMetadata(sessionState.gitHead),
               }),
           ),
         `in-flight-curation session=${sessionID.slice(0, 16)}`,
@@ -5225,6 +5238,10 @@ export async function generateCompactionSummary(opts: {
       urgent: true,
       callType: "direct",
       workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
+      // #627 Phase 1: stamp the session's gitHead on urgent-compaction rows.
+      // Compaction is invoked via HTTP intercept or /v1/compact, so we look up
+      // the session by ID rather than threading state through the call.
+      metadata: buildSessionMetadata(sessions.get(sessionID)?.gitHead),
     });
   }
 
@@ -8233,6 +8250,8 @@ async function handleCurateSlashCommand(
       urgent: true,
       callType: "direct",
       workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
+      // #627 Phase 1: stamp the session's gitHead on slash-curate rows.
+      metadata: buildSessionMetadata(state.gitHead),
     });
     distilled = dResult.distilled;
   } catch (e) {
@@ -8250,6 +8269,8 @@ async function handleCurateSlashCommand(
       sessionID,
       model,
       workerHealth: makeWorkerHealth(sessionID, "lore-curator"),
+      // #627 Phase 1: stamp the session's gitHead on slash-curate entries.
+      metadata: buildSessionMetadata(state.gitHead),
     });
     created = cResult.created;
     updated = cResult.updated;

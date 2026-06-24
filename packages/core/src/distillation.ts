@@ -4,6 +4,7 @@ import * as temporal from "./temporal";
 import { CHUNK_TERMINATOR } from "./temporal";
 import * as embedding from "./embedding";
 import * as ltm from "./ltm";
+import type { KnowledgeMetadata } from "./ltm";
 import * as log from "./log";
 import {
   extractPatterns,
@@ -868,6 +869,10 @@ export async function run(input: {
     recordFailure(reason: string): void;
     recordSuccess(): void;
   };
+  /** Per-entry metadata stamped on every knowledge row this distillation
+   *  pass mints (#627 Phase 1). The gateway translates `sessionState.gitHead`
+   *  into this shape; distillation never reaches into gateway state. */
+  metadata?: KnowledgeMetadata;
 }): Promise<{ rounds: number; distilled: number }> {
   return distillLimiter.get(input.sessionID)(() => runInner(input));
 }
@@ -898,6 +903,8 @@ async function runInner(input: {
     recordFailure(reason: string): void;
     recordSuccess(): void;
   };
+  /** See run() — propagated to the `metadata` column on every minted row. */
+  metadata?: KnowledgeMetadata;
 }): Promise<{ rounds: number; distilled: number }> {
   // Reset orphaned messages (marked distilled by a deleted/migrated distillation)
   const orphans = resetOrphans(input.projectPath, input.sessionID);
@@ -999,6 +1006,8 @@ async function distillSegment(input: {
     recordFailure(reason: string): void;
     recordSuccess(): void;
   };
+  /** See run() — propagated to the `metadata` column on every minted row. */
+  metadata?: KnowledgeMetadata;
 }): Promise<DistillationResult | null> {
   const prior = latestObservations(input.projectPath, input.sessionID);
   const text = messagesToText(input.messages);
@@ -1148,6 +1157,9 @@ async function distillSegment(input: {
       sessionID: input.sessionID,
       llm: input.llm,
       model: input.model,
+      // #627 Phase 1: propagate gitHead so echo-extracted preferences also
+      // get stamped.
+      metadata: input.metadata,
     });
     if (input.urgent) await echoPromise;
   } else if (embedding.isAvailable()) {
@@ -1168,6 +1180,8 @@ async function distillSegment(input: {
           scope: "project",
           workerProviderID: input.model?.providerID,
           workerModelID: input.model?.modelID,
+          // #627 Phase 1: stamp gitHead from the session-start probe.
+          metadata: input.metadata,
         });
       } catch {
         // Dedup guard in ltm.create() handles duplicates — swallow errors
@@ -1226,6 +1240,8 @@ async function distillSegment(input: {
               confidence: 0.8,
               workerProviderID: input.model?.providerID,
               workerModelID: input.model?.modelID,
+              // #627 Phase 1: stamp gitHead from the session-start probe.
+              metadata: input.metadata,
             });
             log.info(
               `action tag '${tag}' found in ${sessionCount} sessions — created preference`,
@@ -1283,6 +1299,8 @@ async function distillSegment(input: {
               confidence: 0.75,
               workerProviderID: input.model?.providerID,
               workerModelID: input.model?.modelID,
+              // #627 Phase 1: stamp gitHead from the session-start probe.
+              metadata: input.metadata,
             });
             log.info(
               `tool-failure gotcha: ${stat.tool}/${stat.error_type} in ${stat.session_count} sessions — created gotcha`,
@@ -1319,6 +1337,8 @@ export async function metaDistill(input: {
     recordFailure(reason: string): void;
     recordSuccess(): void;
   };
+  /** See run() — propagated to the `metadata` column on every minted row. */
+  metadata?: KnowledgeMetadata;
 }): Promise<DistillationResult | null> {
   return distillLimiter.get(input.sessionID)(() => metaDistillInner(input));
 }
@@ -1334,6 +1354,8 @@ async function metaDistillInner(input: {
     recordFailure(reason: string): void;
     recordSuccess(): void;
   };
+  /** See run() — propagated to the `metadata` column on every minted row. */
+  metadata?: KnowledgeMetadata;
 }): Promise<DistillationResult | null> {
   const existing = loadGen0(input.projectPath, input.sessionID);
 
@@ -1463,6 +1485,8 @@ async function metaDistillInner(input: {
           scope: "project",
           workerProviderID: input.model?.providerID,
           workerModelID: input.model?.modelID,
+          // #627 Phase 1: stamp gitHead from the session-start probe.
+          metadata: input.metadata,
         });
       } catch {
         // Dedup guard in ltm.create() handles duplicates — swallow errors

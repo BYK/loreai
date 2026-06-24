@@ -31,6 +31,54 @@ export type PromotionStatus = "nominated" | "suggested" | "promoted";
 /** Approval state — used in team DB for admin approval workflow. */
 export type ApprovalStatus = "auto" | "pending" | "approved" | "rejected";
 
+/** Per-entry metadata blob — intentionally narrow. The column exists for
+ *  non-queryable per-version data; queryable fields get dedicated columns (see
+ *  worker_provider_id / worker_model_id, v35 — db.ts:1000-1004). (#627 Phase 1.) */
+export type KnowledgeMetadata = {
+  /** Commit SHA the session was on when this entry was minted
+   *  (`synthetic-tools.ts` probe → `applySyntheticResolution` → SessionState).
+   *  Format: 7-40 char lowercase hex. Never validated here — the probe guard at
+   *  synthetic-tools.ts:621 already rejects malformed SHAs. */
+  gitHead?: string;
+};
+
+/** Parse the raw `metadata` TEXT column into a typed object. Tolerant: a
+ *  malformed/garbled value (e.g. user-edited `.lore.md`) yields `null` + warn
+ *  rather than a throw — metadata is a slot, not a constraint. (#627 Phase 1.) */
+function parseMetadata(raw: string | null): KnowledgeMetadata | null {
+  if (raw == null) return null;
+  try {
+    const obj = JSON.parse(raw);
+    if (obj == null || typeof obj !== "object") return null;
+    return obj as KnowledgeMetadata;
+  } catch (e) {
+    log.warn("ltm.parseMetadata: malformed JSON, dropping:", e);
+    return null;
+  }
+}
+
+/** Stringify a metadata object for INSERT/UPDATE. `undefined` and empty objects
+ *  both serialize to NULL so the column stays clean for entries that never opt in. */
+function stringifyMetadata(m: KnowledgeMetadata | undefined): string | null {
+  if (m == null) return null;
+  const json = JSON.stringify(m);
+  return json === "{}" ? null : json;
+}
+
+/** Apply the metadata column parse to a raw DB row. Every `KnowledgeEntry`
+ *  consumer site hydrates through this so the parsed type is the single source
+ *  of truth. The generic bound is wide on purpose — sql.js `.all()` returns
+ *  `Record<string, unknown>[]`, and we only need `row.metadata` to be a string
+ *  (or null). (#627 Phase 1.) */
+export function hydrateKnowledgeEntry<T extends Record<string, unknown>>(
+  row: T,
+): T & { metadata: KnowledgeMetadata | null } {
+  return {
+    ...row,
+    metadata: parseMetadata(row.metadata as string | null),
+  };
+}
+
 export type KnowledgeEntry = {
   id: string;
   /** Stable entry identity across versions (A2, #823). For a v1/unversioned row
@@ -46,7 +94,7 @@ export type KnowledgeEntry = {
   confidence: number;
   created_at: number;
   updated_at: number;
-  metadata: string | null;
+  metadata: KnowledgeMetadata | null;
   // Multi-user attribution & sync (v29)
   created_by: string | null;
   updated_by: string | null;
@@ -131,6 +179,11 @@ export function create(input: {
   workerProviderID?: string;
   /** Worker model ID that produced this entry. */
   workerModelID?: string;
+  /** Per-entry metadata (e.g. `gitHead` from the session-start probe, #627
+   *  Phase 1). Stored as JSON in the `metadata` TEXT column. `undefined` →
+   *  NULL; an empty object → NULL (so the column stays clean for entries that
+   *  never opt in). Parsed back into a typed object on read. */
+  metadata?: KnowledgeMetadata;
 }): string {
   const pid =
     input.scope === "project" && input.projectPath
@@ -213,8 +266,8 @@ export function create(input: {
     input.confidence != null ? Math.max(0, Math.min(1, input.confidence)) : 1.0;
   db()
     .query(
-      `INSERT INTO knowledge (id, logical_id, project_id, category, title, content, source_session, cross_project, created_at, updated_at, created_by, sensitivity, worker_provider_id, worker_model_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO knowledge (id, logical_id, project_id, category, title, content, source_session, cross_project, created_at, updated_at, created_by, sensitivity, worker_provider_id, worker_model_id, metadata)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -231,6 +284,7 @@ export function create(input: {
       input.sensitivity ?? "normal",
       input.workerProviderID ?? null,
       input.workerModelID ?? null,
+      stringifyMetadata(input.metadata),
     );
   // The mutable metrics live on the register, keyed by logical_id (A2 3b). A fresh
   // entry starts its decay clock now (last_reinforced_at = now).
@@ -720,7 +774,8 @@ export function forProject(
          AND confidence > 0.2
          ORDER BY confidence DESC, updated_at DESC`,
       )
-      .all(pid) as KnowledgeEntry[];
+      .all(pid)
+      .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
   }
   return db()
     .query(
@@ -729,7 +784,8 @@ export function forProject(
        AND confidence > 0.2
        ORDER BY confidence DESC, updated_at DESC`,
     )
-    .all(pid) as KnowledgeEntry[];
+    .all(pid)
+    .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
 }
 
 /**
@@ -758,7 +814,8 @@ export function pruneDeadEntries(projectPath: string): KnowledgeEntry[] {
       `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
        WHERE project_id = ? AND cross_project = 0 AND confidence <= ?`,
     )
-    .all(pid, DEAD_CONFIDENCE_FLOOR) as KnowledgeEntry[];
+    .all(pid, DEAD_CONFIDENCE_FLOOR)
+    .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
   for (const e of dead) remove(e.id);
   return dead;
 }
@@ -782,7 +839,8 @@ export function pruneDeadEntriesAllProjects(limit = -1): KnowledgeEntry[] {
       `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
        WHERE cross_project = 0 AND confidence <= ? LIMIT ?`,
     )
-    .all(DEAD_CONFIDENCE_FLOOR, limit) as KnowledgeEntry[];
+    .all(DEAD_CONFIDENCE_FLOOR, limit)
+    .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
   for (const e of dead) remove(e.id);
   return dead;
 }
@@ -1407,7 +1465,8 @@ export function evictLowestValue(
        ORDER BY confidence ASC, COALESCE(last_reinforced_at, updated_at) ASC
        LIMIT ?`,
     )
-    .all(pid, DEAD_CONFIDENCE_FLOOR, count) as KnowledgeEntry[];
+    .all(pid, DEAD_CONFIDENCE_FLOOR, count)
+    .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
   for (const e of victims) remove(e.id);
   return victims;
 }
@@ -1618,7 +1677,8 @@ export async function forSession(
        WHERE project_id = ? AND cross_project = 0 AND confidence > 0.2${categoryClause}
        ORDER BY confidence DESC, updated_at DESC`,
     )
-    .all(pid, ...categoryParams) as KnowledgeEntry[];
+    .all(pid, ...categoryParams)
+    .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
 
   // --- 2. Load cross-project candidates ---
   const crossEntries = db()
@@ -1627,7 +1687,8 @@ export async function forSession(
        WHERE (project_id IS NULL OR cross_project = 1) AND confidence > 0.2${categoryClause}
        ORDER BY confidence DESC, updated_at DESC`,
     )
-    .all(...categoryParams) as KnowledgeEntry[];
+    .all(...categoryParams)
+    .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
 
   if (!crossEntries.length && !projectEntries.length) return [];
 
@@ -2012,7 +2073,8 @@ export function all(): KnowledgeEntry[] {
     .query(
       `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE confidence > 0.2 ORDER BY confidence DESC, updated_at DESC`,
     )
-    .all() as KnowledgeEntry[];
+    .all()
+    .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
 }
 
 /** Return all cross-project and global (user-level) knowledge entries. */
@@ -2023,7 +2085,8 @@ export function crossProject(): KnowledgeEntry[] {
        WHERE (project_id IS NULL OR cross_project = 1) AND confidence > 0.2
        ORDER BY confidence DESC, updated_at DESC`,
     )
-    .all() as KnowledgeEntry[];
+    .all()
+    .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
 }
 
 /**
@@ -2045,7 +2108,8 @@ export function rerankPreferences(): number {
     .query(
       `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE category = 'preference' AND confidence = 1.0`,
     )
-    .all() as KnowledgeEntry[];
+    .all()
+    .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
 
   // Strong unconditional directives
   const STRONG_DIRECTIVE_RE = /\b(never|always|must not|must)\b/i;
@@ -2096,13 +2160,15 @@ function searchLike(input: {
       .query(
         `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE (project_id = ? OR project_id IS NULL OR cross_project = 1) AND confidence > 0.2 AND ${conditions} ORDER BY updated_at DESC LIMIT ?`,
       )
-      .all(pid, ...likeParams, input.limit) as KnowledgeEntry[];
+      .all(pid, ...likeParams, input.limit)
+      .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
   }
   return db()
     .query(
       `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE confidence > 0.2 AND ${conditions} ORDER BY updated_at DESC LIMIT ?`,
     )
-    .all(...likeParams, input.limit) as KnowledgeEntry[];
+    .all(...likeParams, input.limit)
+    .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
 }
 
 export function search(input: {
@@ -2138,7 +2204,8 @@ export function search(input: {
         : [matchExpr, title, content, category, limit];
       return db()
         .query(ftsSQL)
-        .all(...params) as KnowledgeEntry[];
+        .all(...params)
+        .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
     });
   } catch {
     return searchLike({
@@ -2833,7 +2900,8 @@ export async function deduplicateGlobal(opts?: {
        AND confidence > 0.2
        ORDER BY confidence DESC, updated_at DESC`,
     )
-    .all() as KnowledgeEntry[];
+    .all()
+    .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
   return _dedup(entries, opts?.dryRun ?? true, threshold);
 }
 
@@ -2888,10 +2956,8 @@ export function promoteCrossProject(opts?: {
        ORDER BY confidence DESC, updated_at DESC
        LIMIT ?`,
     )
-    .all(
-      MIN_PROMOTION_CONFIDENCE,
-      MAX_PROMOTION_CANDIDATES,
-    ) as KnowledgeEntry[];
+    .all(MIN_PROMOTION_CONFIDENCE, MAX_PROMOTION_CANDIDATES)
+    .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
 
   if (candidates.length < MIN_PROMOTION_PROJECTS) {
     // Fewer entries than the minimum distinct-project requirement — impossible

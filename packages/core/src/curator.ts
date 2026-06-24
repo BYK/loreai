@@ -8,6 +8,7 @@ import {
 import * as temporal from "./temporal";
 import * as distillation from "./distillation";
 import * as ltm from "./ltm";
+import type { KnowledgeMetadata } from "./ltm";
 import * as entities from "./entities";
 import * as embedding from "./embedding";
 import * as log from "./log";
@@ -281,6 +282,8 @@ export function applyOps(
     detectedRelations?: DetectedRelation[];
     /** Worker model that produced these ops (for v35 source attribution). */
     workerModel?: { providerID: string; modelID: string };
+    /** #627 Phase 1: per-entry metadata stamped on every "create" op. */
+    metadata?: KnowledgeMetadata;
   },
 ): {
   created: number;
@@ -329,6 +332,10 @@ export function applyOps(
         confidence: op.confidence,
         workerProviderID: input.workerModel?.providerID,
         workerModelID: input.workerModel?.modelID,
+        // #627 Phase 1: stamp the session's gitHead (from the session-start
+        // shell probe) on every entry minted this run. Empty `metadata` becomes
+        // a NULL column row via `stringifyMetadata`, so opting out stays free.
+        metadata: input.metadata,
       });
       if (!wasCreated) {
         // Dedup-merged into an existing entry — not a real create, but the
@@ -530,6 +537,12 @@ export async function run(input: {
     recordFailure(reason: string): void;
     recordSuccess(): void;
   };
+  /** Per-entry metadata stamped on every entry the curator mints this run
+   *  (#627 Phase 1). The gateway translates `sessionState.gitHead` into this
+   *  shape; core never reaches into gateway state. `undefined`/empty entries
+   *  persist as NULL in the `metadata` column — no regression for callers that
+   *  haven't opted in. */
+  metadata?: KnowledgeMetadata;
 }): Promise<{
   created: number;
   updated: number;
@@ -663,6 +676,8 @@ async function runInner(input: {
     recordFailure(reason: string): void;
     recordSuccess(): void;
   };
+  /** See run() — propagated to applyOps → ltm.tryCreate. */
+  metadata?: KnowledgeMetadata;
 }): Promise<{
   created: number;
   updated: number;
@@ -859,6 +874,8 @@ async function runInner(input: {
     detectedEntities: response.entities,
     detectedRelations: response.relations,
     workerModel: input.model,
+    // #627 Phase 1: propagate gitHead through applyOps to every entry minted.
+    metadata: input.metadata,
   });
 
   // Post-curation dedup sweep: if the curator created new entries, check for

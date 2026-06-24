@@ -1973,7 +1973,7 @@ function pageKnowledge(id: string): string | null {
   body += `<div class="field"><span class="key">Created:</span> ${formatDate(entry.created_at)}</div>`;
   body += `<div class="field"><span class="key">Updated:</span> ${formatDate(entry.updated_at)}</div>`;
   if (entry.metadata) {
-    body += `<div class="field"><span class="key">Metadata:</span></div><pre>${esc(entry.metadata)}</pre>`;
+    body += `<div class="field"><span class="key">Metadata:</span></div><pre>${esc(JSON.stringify(entry.metadata, null, 2))}</pre>`;
   }
 
   // Cross-project recall breakdown (#506): which foreign projects surfaced this

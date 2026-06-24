@@ -286,7 +286,7 @@ async function cmdShow(
       console.log(`Created:     ${formatDate(entry.created_at)}`);
       console.log(`Updated:     ${formatDate(entry.updated_at)}`);
       if (entry.metadata) {
-        console.log(`Metadata:    ${entry.metadata}`);
+        console.log(`Metadata:    ${JSON.stringify(entry.metadata)}`);
       }
       console.log(`\nContent:\n${entry.content}`);
       break;
@@ -1563,7 +1563,8 @@ async function cmdShowRemote(
       console.log(`Session:     ${entry.source_session ?? "(none)"}`);
       console.log(`Created:     ${formatDate(entry.created_at)}`);
       console.log(`Updated:     ${formatDate(entry.updated_at)}`);
-      if (entry.metadata) console.log(`Metadata:    ${entry.metadata}`);
+      if (entry.metadata)
+        console.log(`Metadata:    ${JSON.stringify(entry.metadata)}`);
       console.log(`\nContent:\n${entry.content}`);
       break;
     }

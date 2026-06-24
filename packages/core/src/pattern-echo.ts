@@ -16,6 +16,7 @@
 import { db, ensureProject } from "./db";
 import * as embedding from "./embedding";
 import * as ltm from "./ltm";
+import type { KnowledgeMetadata } from "./ltm";
 import * as log from "./log";
 import { PATTERN_ECHO_SYSTEM, patternEchoUser } from "./prompt";
 import type { LLMClient } from "./types";
@@ -83,6 +84,8 @@ export function detectPatternEchoes(input: {
   sessionID: string;
   llm: LLMClient;
   model?: { providerID: string; modelID: string };
+  /** Per-entry metadata stamped on every echo entry minted (#627 Phase 1). */
+  metadata?: KnowledgeMetadata;
 }): Promise<void> {
   const p = _detect(input).catch((err) => {
     log.error("pattern echo detection failed:", err);
@@ -101,6 +104,7 @@ async function _detect(input: {
   sessionID: string;
   llm: LLMClient;
   model?: { providerID: string; modelID: string };
+  metadata?: KnowledgeMetadata;
 }): Promise<void> {
   // Rate limit check
   const lastTime = lastExtraction.get(input.sessionID) ?? 0;
@@ -224,6 +228,9 @@ async function _detect(input: {
       confidence: 0.8, // moderate — auto-extracted, not user-stated
       workerProviderID: model?.providerID,
       workerModelID: model?.modelID,
+      // #627 Phase 1: stamp the session's gitHead on auto-extracted
+      // preferences so they're tied to the commit that produced them.
+      metadata: input.metadata,
     });
     log.info(`pattern echo created preference: "${pattern.title}"`);
     lastExtraction.set(input.sessionID, Date.now());
