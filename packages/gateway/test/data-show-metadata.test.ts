@@ -68,3 +68,59 @@ describe("lore data show knowledge — metadata rendering (#627 Phase 1)", () =>
     );
   });
 });
+
+// The remote path (LORE_REMOTE_URL set) routes through cmdShowRemote, which
+// fetches the entry from the gateway API. The API serializes ltm.get()'s
+// hydrated entry, so metadata arrives as a parsed object and is JSON-stringified
+// for display — same contract as the local path.
+describe("lore data show knowledge — remote metadata rendering (#627 Phase 1)", () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  afterEach(() => {
+    fetchSpy?.mockRestore();
+    delete process.env.LORE_REMOTE_URL;
+  });
+
+  function mockRemoteEntry(metadata: unknown): void {
+    process.env.LORE_REMOTE_URL = "https://remote.example";
+    const entry = {
+      id: "remote-entry-1",
+      category: "decision",
+      title: "Remote entry",
+      content: "remote body",
+      confidence: 1,
+      project_id: null,
+      cross_project: true,
+      source_session: null,
+      created_at: 0,
+      updated_at: 0,
+      metadata,
+    };
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(entry), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  }
+
+  test("renders remote metadata object as JSON, not [object Object]", async () => {
+    mockRemoteEntry({ gitHead: "remotedeadbeef" });
+
+    await commandData(["show", "knowledge", "remote-entry-1"], {});
+
+    const metaLine = logLines.find((l) => l.startsWith("Metadata:"));
+    expect(metaLine).toBeDefined();
+    expect(metaLine).not.toContain("[object Object]");
+    expect(metaLine).toContain('{"gitHead":"remotedeadbeef"}');
+  });
+
+  test("omits the remote Metadata line when metadata is null", async () => {
+    mockRemoteEntry(null);
+
+    await commandData(["show", "knowledge", "remote-entry-1"], {});
+
+    expect(logLines.some((l) => l.startsWith("Metadata:"))).toBe(false);
+    expect(logLines.some((l) => l.includes("Remote entry"))).toBe(true);
+  });
+});
