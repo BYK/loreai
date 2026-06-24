@@ -8,6 +8,8 @@ import {
   extractReferences,
   NoopResolver,
   type Reference,
+  type RepoView,
+  resolveRefAgainstView,
   SyntheticProbeResolver,
 } from "../src/references";
 
@@ -304,6 +306,44 @@ describe("DirectFsResolver", () => {
     } finally {
       rmSync(noMake, { recursive: true, force: true });
     }
+  });
+});
+
+// Regression (#939 Seer HIGH): on Windows `path.normalize` emits backslash
+// separators, but `view.files` is built with forward slashes on every platform,
+// so the resolver must `.replace(/\\/g, "/")` the normalized path or a valid file
+// ref would wrongly resolve "missing" (and get penalized). We can't run on Windows
+// here, so we drive resolveRefAgainstView with a path that already contains literal
+// backslashes (plus one forward slash to clear the multi-segment branch gate) and
+// a forward-slash view — exactly what the `.replace` reconciles. Mutation-verified:
+// dropping the `.replace`, or its `/g` flag, makes this resolve "missing".
+describe("resolveRefAgainstView (Windows backslash normalization)", () => {
+  const view: RepoView = {
+    files: new Set(["a/b/c/d.ts"]),
+    basenames: new Map([["d.ts", ["a/b/c/d.ts"]]]),
+    scripts: null,
+    makeTargets: null,
+    lineCount: (rel) => (rel === "a/b/c/d.ts" ? 5 : null),
+  };
+
+  test("file ref with backslash separators matches the forward-slash view → ok", () => {
+    const ref: Reference = {
+      kind: "file",
+      path: "a/b\\c\\d.ts",
+      line: 3,
+      raw: "a/b\\c\\d.ts:3",
+    };
+    expect(resolveRefAgainstView(ref, view)).toBe("ok");
+  });
+
+  test("backslash separators still honor the line bound → missing when out of range", () => {
+    const ref: Reference = {
+      kind: "file",
+      path: "a/b\\c\\d.ts",
+      line: 99,
+      raw: "a/b\\c\\d.ts:99",
+    };
+    expect(resolveRefAgainstView(ref, view)).toBe("missing");
   });
 });
 
