@@ -320,36 +320,25 @@ export const LORE_COMMIT_REMINDER =
 /** One-time initialization flag. */
 let initialized = false;
 
-// --- Context warning marker for unsustainable conversations ---
+// --- Response warning marker ---
 // Injected into the response (assistant message) so the user can see it.
 // Stripped from incoming requests on subsequent turns to preserve cache prefix.
+// Used by the worker-degradation warning (#797 removed the unsustainable-
+// conversation warning; the marker mechanism stays because worker degradation
+// is still user-actionable).
 export const CONTEXT_WARNING_MARKER = "[lore:context-warning]";
-
-/**
- * Build the unsustainable-conversation warning, reporting the ACTUAL number of
- * consecutive cache busts rather than a hardcoded figure. `count` falls back to
- * generic wording when unknown/zero.
- *
- * @internal Exported for tests.
- */
-export function contextWarningText(count?: number): string {
-  const times =
-    count && count > 0 ? `${count} times in a row` : "several times in a row";
-  return (
-    `${CONTEXT_WARNING_MARKER} This conversation is growing unsustainably \u2014 ` +
-    `it has exceeded the context limit ${times} and compression cannot keep up. ` +
-    `Consider running /compact or starting a new conversation.\n\n---\n\n`
-  );
-}
 
 /**
  * Build the worker-degradation warning text (or null if the session's
  * background workers are healthy / not yet sustained-failing). Reuses the
- * CONTEXT_WARNING_MARKER so it is stripped on the next turn like the
- * unsustainable-conversation warning, preserving the prompt cache prefix.
+ * CONTEXT_WARNING_MARKER so it is stripped on the next turn, preserving the
+ * prompt cache prefix.
  *
  * This is the user-visible signal that distillation/curation/cache-warming
  * are failing — so degradation (context bloat, no LTM growth) is never silent.
+ * The previous "unsustainable conversation" warning (cache bust spirals) was
+ * removed because it was almost always an upstream bug the user couldn't
+ * action on; that signal now goes to Sentry via setupBustSpiralCapture.
  */
 function buildWorkerDegradationWarning(sessionID: string): string | null {
   const warning = getDegradationWarning(sessionID);
@@ -359,12 +348,12 @@ function buildWorkerDegradationWarning(sessionID: string): string | null {
 
 /**
  * Insert a warning text block into a response, after any leading thinking
- * blocks. Defaults to the unsustainable-conversation text; pass `text` to
- * inject a different marker'd warning (e.g. worker degradation).
+ * blocks. Caller provides the marker'd warning text (currently always the
+ * worker-degradation block from buildWorkerDegradationWarning).
  */
 function injectContextWarning(
   resp: GatewayResponse,
-  text: string = contextWarningText(),
+  text: string,
 ): GatewayResponse {
   // Insert after thinking blocks to preserve the expected block ordering
   // (thinking first, then text). Clients may inspect the first block's type
@@ -3266,7 +3255,10 @@ function buildStreamingResponse(
     sessionState: SessionState;
     cacheOptions: AnthropicCacheOptions;
   },
-  /** When set, prepend a synthetic warning content block to the stream. */
+  /** When set, prepend a synthetic warning content block to the stream.
+   *  Currently used for the worker-degradation warning (#797 removed the
+   *  unsustainable-conversation warning, but the injection mechanism is
+   *  reusable for any user-actionable warning surfaced mid-stream). */
   warningText?: string,
   /** Session id, for telemetry (abort-under-pressure capture). Passed
    *  independently of recallContext so non-recall turns are still attributable. */
@@ -6753,40 +6745,28 @@ async function handleConversationTurn(
   // lives statically in RECALL_TOOL_DESCRIPTION, which never busts the cache.
   // See issue #741.
 
-  // --- 7d. Unsustainable conversation warning ---
-  // When a sustained run of consecutive cache busts is detected (gradient's
-  // SUSTAINED_BUST_THRESHOLD), flag for response-side injection.
-  // The warning is injected into the assistant response (not the user message) so:
-  //  1. The user can actually see it (not hidden in <system-reminder> tags)
-  //  2. No modification to user messages → no cache prefix divergence
-  //  3. Stripped on the next turn to restore API-original content for cache
-  const unsustainable = result.unsustainable;
-  const unsustainableBusts = result.consecutiveBusts;
-  if (unsustainable) {
-    log.warn(
-      `session ${sessionID}: unsustainable conversation detected (${unsustainableBusts ?? "several"} consecutive cache busts). ` +
-        `Warning will be prepended to response.`,
-    );
-  }
-
-  // Worker-degradation warning: surfaced when background workers (distillation,
-  // curation, cache-warming) have been failing for a sustained period, so the
-  // user is told instead of silently losing compression/LTM. Reuses the same
-  // marker-based response injection as the unsustainable warning. The
-  // unsustainable warning takes precedence when both apply (it's the more
-  // urgent, actionable signal); we never inject two warning blocks.
-  const workerWarningText = unsustainable
-    ? undefined
-    : buildWorkerDegradationWarning(sessionID);
+  // --- 7d. Response-side warning injection ---
+  // The previous "unsustainable conversation detected (N consecutive cache busts)"
+  // warning was removed (#797). Rationale: the user has no actionable response
+  // (cache spirals are almost always upstream bugs — prefix drift, idle
+  // recompression artifacts, LTM pin mismatch — not user-correctable behavior),
+  // and the message was misleading. The bust-spiral signal is now routed
+  // directly to Sentry via `setupBustSpiralCapture` (past-grace = error,
+  // in-grace = info breadcrumb, recovery = info breadcrumb).
+  //
+  // Worker-degradation warning: still surfaced when background workers
+  // (distillation, curation, cache-warming) have been failing for a sustained
+  // period, so the user is told instead of silently losing compression/LTM.
+  // The user CAN act on this (e.g. check credentials / provider status), so
+  // user-visible text remains the right channel.
+  const workerWarningText = buildWorkerDegradationWarning(sessionID);
   if (workerWarningText) {
     log.warn(
       `session ${sessionID}: worker degradation detected — warning will be prepended to response.`,
     );
   }
   // A single combined flag/text drives all injection sites below.
-  const warningText: string | undefined = unsustainable
-    ? contextWarningText(unsustainableBusts)
-    : (workerWarningText ?? undefined);
+  const warningText: string | undefined = workerWarningText ?? undefined;
   const shouldInjectWarning = !!warningText;
 
   // --- 8. Build the modified request ---

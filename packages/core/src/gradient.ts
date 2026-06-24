@@ -158,9 +158,25 @@ export function isFreeWriteSession(sessionID: string): boolean {
  *  hundreds of thousands of tokens at ~12.5× the read price, so even two
  *  consecutive full busts is already too expensive to keep paying. A low
  *  threshold makes shouldCompress() reprice "continue" at the write rate
- *  sooner (compressing earlier instead of letting the context grow), and
- *  surfaces the unsustainable-conversation warning promptly. */
+ *  sooner (compressing earlier instead of letting the context grow). */
 const SUSTAINED_BUST_THRESHOLD = 2;
+
+/** Number of a newly-tracked session's first in-process transforms during which
+ *  bust spirals are treated as expected cold-start rewrites, not alerts (#797).
+ *
+ *  When Lore first tracks a large conversation in-process the opening turns
+ *  inherently rewrite the body — turn-1 cold write, turn-2 LTM injection,
+ *  turn-3 layer 0→1 transition — and each counts as a consecutive cache bust.
+ *  The first cold-start episode within this window emits a low-severity Sentry
+ *  breadcrumb (informational); past the window, sustained busts fire a
+ *  high-severity Sentry alert (one per spiral episode, debounced, cleared on
+ *  recovery). The economic `consecutiveBusts` counter (which drives
+ *  compression) is left untouched. Kept at 3 to span the documented
+ *  cold-start sequence. Like `consecutiveBusts`, the per-session
+ *  `transformCount` that drives this is NOT restored from the DB — a resumed/
+ *  restarted session re-enters the grace, which is harmless (it is already
+ *  calibrated and does not cold-start bust). */
+export const COLD_START_GRACE_TURNS = 3;
 
 /** Categorical cause of a cache bust. Defined in core (rather than gateway) so
  *  `recordCacheUsage` can discriminate non-user-driven busts (e.g. meta-
@@ -297,29 +313,29 @@ export function recordCacheUsage(
       //
       // (a) Idle-resume re-warms: expected cold-cache writes when the user
       //     pauses longer than the conversation cache TTL. Counting these
-      //     produced false "unsustainable conversation" warnings on bursty
-      //     sessions whose turns are spaced beyond the TTL — every threshold-
-      //     crossing bust in the ses_14b9bf3d… incident followed an 11m–2h
-      //     idle gap past the 5m TTL. HOLD the counter on an idle resume:
-      //     neither advance toward the threshold nor erase a genuine prior
-      //     run (a real warm-window bust that preceded the idle is still
-      //     real). A genuine cache HIT (ratio <= 0.5) below still resets,
-      //     even on an idle resume.
+      //     produced false bust-spiral alerts on bursty sessions whose
+      //     turns are spaced beyond the TTL — every threshold-crossing bust
+      //     in the ses_14b9bf3d… incident followed an 11m–2h idle gap past
+      //     the 5m TTL. HOLD the counter on an idle resume: neither advance
+      //     toward the threshold nor erase a genuine prior run (a real
+      //     warm-window bust that preceded the idle is still real). A
+      //     genuine cache HIT (ratio <= 0.5) below still resets, even on an
+      //     idle resume.
       //
       // (b) Lore-internal prefix rewrites (`prefix-rewrite`): meta-
       //     distillation consolidates gen-0 segments and rewrites the
       //     synthetic distilled prefix (messages[0/1]) on the next turn.
       //     That's a real prompt-cache bust, but the cause is Lore's own
       //     distillation pipeline — it does NOT reflect user-context growth.
-      //     Counting it produced the false "unsustainable conversation"
-      //     warning on opencode session ses_10f932a26ffeFBKO9ZsjycCCna
-      //     (Lore session 0XrHNdlsWwgVkX4MH, 2026-06-22): context was
-      //     bounded at ~130K tokens (well under the 200K layer-0 cap), but
-      //     meta-distillation firing under bust pressure rewrote the prefix
-      //     every few turns, accumulating 2-3 consecutive busts and tripping
-      //     the warning. Adding the bust-cause discriminator (this parameter)
-      //     lets the counter recognize these self-inflicted busts the same
-      //     way it recognizes idle-resume ones.
+      //     Counting it produced the false bust-spiral alert on opencode
+      //     session ses_10f932a26ffeFBKO9ZsjycCCna (Lore session
+      //     0XrHNdlsWwgVkX4MH, 2026-06-22): context was bounded at ~130K
+      //     tokens (well under the 200K layer-0 cap), but meta-distillation
+      //     firing under bust pressure rewrote the prefix every few turns,
+      //     accumulating 2-3 consecutive busts and triggering the alert.
+      //     Adding the bust-cause discriminator (this parameter) lets the
+      //     counter recognize these self-inflicted busts the same way it
+      //     recognizes idle-resume ones.
       const isNonUserBust = isIdleResume || bustCause === "prefix-rewrite";
       if (!isNonUserBust) state.consecutiveBusts++;
     } else {
@@ -465,6 +481,21 @@ type SessionState = {
    *  Not persisted to DB — rebuilds from live API responses (same rationale as
    *  consecutiveBusts: stale values from a prior process would be incorrect). */
   zeroCacheWriteTurns: number;
+  /** Number of transform() calls observed for this session in the current
+   *  process. Starts at 0 for a freshly-tracked session and is NOT restored
+   *  from the DB (same rationale as consecutiveBusts). Drives the cold-start
+   *  grace window that gates bust-spiral alerting for the first
+   *  COLD_START_GRACE_TURNS turns (#797). */
+  transformCount: number;
+  /** True once we've fired the high-severity Sentry alert for this session's
+   *  current bust-spiral episode. Cleared when consecutiveBusts drops to 0
+   *  (i.e. the episode ended) so a future spiral can alert again. NOT
+   *  persisted to DB (same rationale as consecutiveBusts). */
+  bustSpiralAlerted: boolean;
+  /** True once we've emitted the cold-start info-breadcrumb for this session's
+   *  first in-grace spiral. Cold-start is bounded by the grace window so this
+   *  is never cleared within a process run. NOT persisted to DB. */
+  bustSpiralColdStartLogged: boolean;
 
   /**
    * Distillation row snapshot — cached to avoid hitting the DB on every
@@ -528,6 +559,9 @@ function makeSessionState(): SessionState {
     consecutiveHighLayer: 0,
     consecutiveBusts: 0,
     zeroCacheWriteTurns: 0,
+    transformCount: 0,
+    bustSpiralAlerted: false,
+    bustSpiralColdStartLogged: false,
 
     distillationSnapshot: null,
     dedupDecisions: new Map(),
@@ -571,8 +605,8 @@ function getSessionState(sessionID: string): SessionState {
       // Don't restore consecutiveBusts from DB — it's a short-term rolling
       // signal that must rebuild from live API responses in the current process.
       // Stale values from a previous process (different cache state after restart)
-      // cause false unsustainable warnings. The dynamicContextCap column is still
-      // written for diagnostics but not consumed on restore.
+      // would cause false bust-spiral alerts. The dynamicContextCap column is
+      // still written for diagnostics but not consumed on restore.
     }
 
     sessionStates.set(sessionID, state);
@@ -1097,6 +1131,9 @@ export function inspectSessionState(sessionID: string): {
   consecutiveBusts: number;
   zeroCacheWriteTurns: number;
   lastKnownMessageCount: number;
+  transformCount: number;
+  bustSpiralAlerted: boolean;
+  bustSpiralColdStartLogged: boolean;
 } | null {
   const state = sessionStates.get(sessionID);
   if (!state) return null;
@@ -1110,6 +1147,9 @@ export function inspectSessionState(sessionID: string): {
     consecutiveBusts: state.consecutiveBusts,
     zeroCacheWriteTurns: state.zeroCacheWriteTurns,
     lastKnownMessageCount: state.lastKnownMessageCount,
+    transformCount: state.transformCount,
+    bustSpiralAlerted: state.bustSpiralAlerted,
+    bustSpiralColdStartLogged: state.bustSpiralColdStartLogged,
   };
 }
 
@@ -1124,6 +1164,133 @@ export function inspectSessionState(sessionID: string): {
  */
 export function getConsecutiveBusts(sessionID: string): number {
   return sessionStates.get(sessionID)?.consecutiveBusts ?? 0;
+}
+
+// ---------------------------------------------------------------------------
+// Bust-spiral alerting (#797)
+//
+// When a session goes through a sustained sequence of cache busts (the
+// "bust spiral"), it's almost always a real caching bug we want to
+// investigate — prefix drift, prompt-delta position drift after
+// post-idle recompression, LTM pin mismatch, etc. We surface this via
+// a host-registered hook (gateway → Sentry) rather than the user-facing
+// warning we used to inject, because:
+//   - The user has no actionable response.
+//   - Two structurally different bugs (drift vs. genuine unbounded growth)
+//     surfaced the same way to the user; Sentry's structured context lets
+//     us distinguish them in aggregate.
+//   - The cold-start opening (turn-1 cold write, turn-2 LTM injection,
+//     turn-3 layer transition) is EXPECTED per #796/#804 and would be noise
+//     if alerted on. The grace window above distinguishes the two cases.
+//
+// The hook is optional; core has no Sentry dependency. The gateway wires it
+// once at startup (`setupBustSpiralCapture`).
+// ---------------------------------------------------------------------------
+
+/** Diagnostic snapshot passed to {@link BustSpiralHook} callbacks. */
+export interface BustSpiralInfo {
+  sessionID: string;
+  /** Current consecutive-bust count at the time of detection. */
+  consecutiveBusts: number;
+  /** Transform count at the time of detection (cold-start gate signal). */
+  transformCount: number;
+  /** Current gradient layer (0 = raw passthrough, 4 = emergency). */
+  layer: number;
+  /** Optional upstream cache telemetry, when available. */
+  cacheWriteTokens?: number;
+  cacheReadTokens?: number;
+}
+
+/** Optional hook the gateway registers to surface bust-spiral events.
+ *  All methods are optional; core calls only what the host provides. */
+export interface BustSpiralHook {
+  /** Within cold-start grace, busts first cross SUSTAINED_BUST_THRESHOLD.
+   *  Fires once per cold-start episode (debounced via SessionState). */
+  onColdStart?(info: BustSpiralInfo): void;
+  /** Past cold-start grace, busts at SUSTAINED_BUST_THRESHOLD+. Fires once
+   *  per spiral episode; cleared when consecutiveBusts drops to 0. */
+  onSpiral?(info: BustSpiralInfo): void;
+  /** Spiral ended (consecutiveBusts dropped to 0 after a spiral). Optional
+   *  recovery signal — gateway typically emits an info-level breadcrumb. */
+  onRecovered?(info: BustSpiralInfo): void;
+}
+
+let bustSpiralHook: BustSpiralHook | null = null;
+
+/** Register (or clear, with `null`) the bust-spiral hook. The gateway calls
+ *  this once at startup. Pass `null` to clear (used by tests). */
+export function setBustSpiralHook(h: BustSpiralHook | null): void {
+  bustSpiralHook = h;
+}
+
+/** Build a {@link BustSpiralInfo} snapshot from current SessionState. */
+function bustSpiralInfo(
+  sid: string,
+  state: SessionState,
+  layer: number,
+): BustSpiralInfo {
+  return {
+    sessionID: sid,
+    consecutiveBusts: state.consecutiveBusts,
+    transformCount: state.transformCount,
+    layer,
+  };
+}
+
+/** Run the bust-spiral detection logic for a session. Called from
+ *  transform() after the inner transform updates SessionState.
+ *
+ *  Fires:
+ *  - `onColdStart` (once per cold-start episode) when in grace AND busts ≥
+ *    SUSTAINED_BUST_THRESHOLD AND not already logged this episode.
+ *  - `onSpiral` (once per past-grace episode) when past grace AND busts ≥
+ *    SUSTAINED_BUST_THRESHOLD AND not already alerted this episode.
+ *  - `onRecovered` when an alerted episode ends (busts dropped to 0).
+ *
+ *  Pure no-op when `sid` is undefined (callers without session context are not
+ *  interesting for spiral alerts). */
+function maybeDetectBustSpiral(
+  sid: string | undefined,
+  state: SessionState,
+  layer: number,
+  totalTokens: number,
+): void {
+  if (!sid) return;
+  const busts = state.consecutiveBusts;
+  const inGrace = state.transformCount <= COLD_START_GRACE_TURNS;
+
+  // The cap-fit passthrough (layer 0, tier 0) returns a session that fits
+  // the layer-0 cap with headroom — its busts come from structural causes
+  // (e.g. a prompt-delta position drift after post-idle recompression), not
+  // genuine context growth. Skip the alert for sub-cap sessions even past
+  // the cold-start grace window. Mirrors the original cap-fit hardcode
+  // `unsustainable: false` from #797's earlier design.
+  const isCapFit = layer === 0 && getTier(totalTokens) === 0;
+
+  if (busts >= SUSTAINED_BUST_THRESHOLD) {
+    if (inGrace && !state.bustSpiralColdStartLogged) {
+      state.bustSpiralColdStartLogged = true;
+      // Cold-start breadcrumb fires even for cap-fit sub-cap sessions —
+      // useful telemetry for the cold-start phase regardless of cap-fit.
+      bustSpiralHook?.onColdStart?.(bustSpiralInfo(sid, state, layer));
+    } else if (!inGrace && !state.bustSpiralAlerted && !isCapFit) {
+      state.bustSpiralAlerted = true;
+      bustSpiralHook?.onSpiral?.(bustSpiralInfo(sid, state, layer));
+    }
+    return;
+  }
+
+  // Recovery — an alerted episode ended. Clear the debounce flag so a future
+  // spiral alerts again. Also clear the cold-start flag so the next cold-start
+  // episode (in a new process run) can log a fresh breadcrumb.
+  if (busts === 0) {
+    const hadAlert = state.bustSpiralAlerted;
+    state.bustSpiralAlerted = false;
+    state.bustSpiralColdStartLogged = false;
+    if (hadAlert) {
+      bustSpiralHook?.onRecovered?.(bustSpiralInfo(sid, state, layer));
+    }
+  }
 }
 
 /** Bust-pressure threshold for meta-distillation: consecutive busts ≥ this
@@ -1217,6 +1384,19 @@ export function setConsecutiveBustsForTest(
   busts: number,
 ): void {
   getSessionState(sessionID).consecutiveBusts = busts;
+}
+
+/**
+ * Test-only: set the per-session transform counter that drives the cold-start
+ * grace window (#797). Set it above COLD_START_GRACE_TURNS to simulate a
+ * session that has moved past cold-start stabilization, or below it to simulate
+ * a freshly-tracked session still within the grace window.
+ */
+export function setTransformCountForTest(
+  sessionID: string,
+  count: number,
+): void {
+  getSessionState(sessionID).transformCount = count;
 }
 
 /**
@@ -2341,14 +2521,9 @@ export type TransformResult = {
   // relevance scoring. Set on Layer 4 (emergency) where the context is
   // fully reset and mid-session knowledge may have changed relevance.
   refreshLtm: boolean;
-  /** When set, the conversation is growing unsustainably —
-   *  SUSTAINED_BUST_THRESHOLD+ consecutive cache busts detected. The pipeline
-   *  should inject a warning message advising the user to compact or start a
-   *  new conversation. */
-  unsustainable?: boolean;
   /** Number of consecutive cache busts detected for this session at the time
-   *  of this transform. Surfaced so the pipeline can report the actual count in
-   *  the unsustainable-conversation warning instead of a hardcoded figure. */
+   *  of this transform. Surfaced so callers (and the bust-spiral detection in
+   *  transform()) can observe the current bust pressure. */
   consecutiveBusts?: number;
 };
 
@@ -2753,14 +2928,6 @@ function transformInner(input: {
       distilledBudget,
       rawBudget,
       refreshLtm: false,
-      // Layer-0 passthrough means the conversation fits the layer-0 cap with
-      // headroom — it is sustainable by definition. Never surface the
-      // unsustainable warning here even under a sustained bust count: at this
-      // layer busts come from structural causes (e.g. a prompt-delta whose
-      // position drifted after a post-idle recompression), not from genuine
-      // context growth. Gating on the cap-fit prevents the false-positive
-      // warning observed on tier-0 sessions.
-      unsustainable: false,
     };
   }
 
@@ -2824,7 +2991,6 @@ function transformInner(input: {
         distilledBudget,
         rawBudget,
         refreshLtm: false,
-        unsustainable: busts >= SUSTAINED_BUST_THRESHOLD,
         consecutiveBusts: busts,
       };
     }
@@ -3001,9 +3167,6 @@ function transformInner(input: {
         distilledBudget,
         rawBudget,
         refreshLtm: false,
-        unsustainable: sid
-          ? getSessionState(sid).consecutiveBusts >= SUSTAINED_BUST_THRESHOLD
-          : false,
         consecutiveBusts: sid ? getSessionState(sid).consecutiveBusts : 0,
       };
     }
@@ -3081,7 +3244,6 @@ function transformInner(input: {
   const nuclearRawTokens = olderTokens + currentTurnTokens;
 
   const busts = sid ? getSessionState(sid).consecutiveBusts : 0;
-  const unsustainable = busts >= SUSTAINED_BUST_THRESHOLD;
 
   return {
     messages: [...nuclearPrefix, ...nuclearRaw],
@@ -3093,7 +3255,6 @@ function transformInner(input: {
     distilledBudget,
     rawBudget,
     refreshLtm: true,
-    unsustainable,
     consecutiveBusts: busts,
   };
 }
@@ -3121,6 +3282,15 @@ export function transform(input: {
   // Apply the per-request budget synchronously before transformInner so no
   // other request can clobber the globals between here and the transform.
   if (input.budget) applyModelBudget(input.budget);
+
+  // #797: count this transform for the cold-start grace window. Incremented
+  // BEFORE transformInner so the very first turn observes transformCount === 1,
+  // making the grace cover exactly the first COLD_START_GRACE_TURNS turns of a
+  // newly-tracked session. NOT restored from the DB (see makeSessionState /
+  // getSessionState), so a resumed/restarted session re-enters the grace —
+  // harmless, since it is already calibrated and will not cold-start bust.
+  const coldStartSid = input.sessionID ?? input.messages[0]?.info.sessionID;
+  if (coldStartSid) getSessionState(coldStartSid).transformCount++;
 
   const result = transformInner(input);
 
@@ -3175,6 +3345,13 @@ export function transform(input: {
     } else {
       state.consecutiveHighLayer = 0;
     }
+
+    // --- Bust-spiral detection (#797) ---
+    // Gated by the cold-start grace window (transformCount): in-grace spirals
+    // emit an info-level breadcrumb; past-grace spirals fire a high-severity
+    // Sentry alert (debounced per episode, cleared on recovery). No-op when no
+    // hook is registered (CLI/tests).
+    maybeDetectBustSpiral(sid, state, result.layer, result.totalTokens);
 
     log.info(
       `gradient: session=${sid} layer=${result.layer} tokens=${result.totalTokens}` +
