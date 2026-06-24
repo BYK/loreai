@@ -30,10 +30,13 @@ import * as data from "../src/data";
 // leading): the planner prefers the session-ordered covering scans, so it would
 // be pure write amplification. The "deliberately unindexed" test below pins that.
 //
-// The SQL strings asserted in the plan tests are kept byte-identical to the
-// production queries (temporal.ts: aggregateTokensBySessionAll, data.ts:
-// listAllRecentSessions + aggregateDistillationsBySessionAll). The correctness
-// tests drive the real exported functions so the path cannot silently drift.
+// The SQL strings asserted in the plan tests are kept textually in sync with
+// the production queries (temporal.ts: aggregateTokensBySessionAll, data.ts:
+// listAllRecentSessions + aggregateDistillationsBySessionAll). Whitespace may
+// differ — EXPLAIN QUERY PLAN ignores it — but the shape/table/clauses match.
+// Each of the three aggregates also has a correctness test that drives its real
+// exported function, so a production-query change that alters results (not just
+// the plan) cannot silently drift past these tests.
 
 const PROJECT = "/test/cost-bulk-queries/project";
 
@@ -233,7 +236,11 @@ describe("cost-page bulk query indexes (migrations v57 + v58)", () => {
       const recentPlan = explainPlan(SQL_RECENT, SINCE_MS(), 50_000);
       expect(recentPlan).toContain("idx_temporal_project_session_created");
       expect(recentPlan).toMatch(/USING COVERING INDEX/);
-      expect(recentPlan).not.toContain("SCAN t");
+      // Reject only a *heap* scan of `t` (no index). A full index-only walk is
+      // reported as "SCAN t USING COVERING INDEX ..." on some SQLite builds and
+      // is a legitimate plan — mirror the robust token-sum assertion (line ~226)
+      // instead of a bare toContain("SCAN t") that would false-fail on it.
+      expect(recentPlan).not.toMatch(/SCAN t(?! USING)/);
     });
 
     test("distillation aggregate stays index-backed (no full heap scan)", () => {
@@ -287,6 +294,21 @@ describe("cost-page bulk query indexes (migrations v57 + v58)", () => {
       const sess0 = result.get("cqb-sess-0");
       expect(sess0).toBeDefined();
       expect(sess0?.first_assistant_metadata).toBeNull();
+    });
+
+    test("listAllRecentSessions reports per-session counts and time bounds", () => {
+      const rows = data.listAllRecentSessions({ sinceMs: SINCE_MS() });
+      const sess0 = rows.find((r) => r.session_id === "cqb-sess-0");
+      expect(sess0).toBeDefined();
+      if (!sess0) return;
+      // 200 messages inserted for this session, all within the 90-day window.
+      expect(sess0.message_count).toBe(200);
+      expect(sess0.project_path).toBe(PROJECT);
+      // created_at = now - ((s + m) % 60) * day; m = 0..199 covers residues
+      // 0..59, so first..last spans exactly 59 days for every session.
+      expect(sess0.last_message_at - sess0.first_message_at).toBe(
+        59 * 86_400_000,
+      );
     });
 
     test("aggregateDistillationsBySessionAll groups calls and tokens by session", () => {
