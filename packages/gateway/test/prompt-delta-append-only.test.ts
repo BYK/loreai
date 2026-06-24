@@ -23,7 +23,13 @@
  */
 import { describe, it, expect } from "vitest";
 import { ltm, listSessionPromptDeltas } from "@loreai/core";
-import { appendKnowledgePromptDelta, fnv1a } from "../src/pipeline";
+import {
+  appendKnowledgePromptDelta,
+  applySessionPromptDeltas,
+  fnv1a,
+  reanchorExistingDelta,
+} from "../src/pipeline";
+import type { GatewayMessage } from "../src/translate/types";
 
 const PROJECT = "/tmp/lore-delta-append-only";
 
@@ -197,6 +203,127 @@ describe("append-only durable knowledge deltas", () => {
     // Byte-identical: same selector AND same content after the later append.
     expect(block0After.selector).toBe(block0Before.selector);
     expect(block0After.content).toBe(block0Before.content);
+  });
+
+  it("reanchorExistingDelta moves ALL blocks to one tail index, preserving order + mut (no re-fire after)", () => {
+    const a = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Reanchor A",
+      content: "A r1.",
+    });
+    const b = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Reanchor B",
+      content: "B r1.",
+    });
+    const sessionID = `reanchor-multi-${Date.now()}`;
+    const pin = [
+      keyOf(a, "Reanchor A", "A r1."),
+      keyOf(b, "Reanchor B", "B r1."),
+    ];
+
+    ltm.update(a, { content: "A r2." });
+    appendKnowledgePromptDelta({
+      sessionID,
+      projectPath: PROJECT,
+      insertAt: 10,
+      previousKeys: pin,
+      nextKeys: pin,
+      entries: [],
+    });
+    ltm.update(b, { content: "B r2." });
+    appendKnowledgePromptDelta({
+      sessionID,
+      projectPath: PROJECT,
+      insertAt: 40,
+      previousKeys: pin,
+      nextKeys: pin,
+      entries: [],
+    });
+    expect(listSessionPromptDeltas(sessionID)).toHaveLength(2);
+
+    // Simulate a reshuffle: re-anchor against a short message array.
+    const messages: GatewayMessage[] = [
+      { role: "user", content: [{ type: "text", text: "hi" }] },
+      { role: "assistant", content: [{ type: "text", text: "yo" }] },
+    ];
+    const reInsertAt = reanchorExistingDelta(sessionID, PROJECT, messages);
+    expect(reInsertAt).not.toBeNull();
+
+    const rows = listSessionPromptDeltas(sessionID);
+    expect(rows).toHaveLength(2);
+    // Both blocks now share the one fresh tail index.
+    const insertAts = rows.map(
+      (r) => (JSON.parse(r.selector) as { insertAt: number }).insertAt,
+    );
+    expect(insertAts).toEqual([reInsertAt, reInsertAt]);
+
+    // Replay preserves chronological order: A's block (older) before B's block.
+    const replayed = applySessionPromptDeltas(messages, sessionID);
+    const replayedText = JSON.stringify(replayed);
+    expect(replayedText.indexOf("A r2.")).toBeGreaterThanOrEqual(0);
+    expect(replayedText.indexOf("A r2.")).toBeLessThan(
+      replayedText.indexOf("B r2."),
+    );
+
+    // mut survived the reanchor: a follow-up append with the same DB state
+    // finds nothing outstanding → no new block (advance still suppresses).
+    const wrote = appendKnowledgePromptDelta({
+      sessionID,
+      projectPath: PROJECT,
+      insertAt: 99,
+      previousKeys: pin,
+      nextKeys: pin,
+      entries: [],
+    });
+    expect(wrote).toBe(false);
+    expect(listSessionPromptDeltas(sessionID)).toHaveLength(2);
+  });
+
+  it("caps appended blocks — coalesces to ONE cumulative block at the limit", () => {
+    const N = 9; // > MAX_DELTA_BLOCKS (8)
+    const ids: string[] = [];
+    const pin: string[] = [];
+    for (let i = 0; i < N; i++) {
+      const id = ltm.create({
+        projectPath: PROJECT,
+        scope: "project",
+        category: "gotcha",
+        title: `Cap entry ${i}`,
+        content: `cap v1 ${i}.`,
+      });
+      ids.push(id);
+      pin.push(keyOf(id, `Cap entry ${i}`, `cap v1 ${i}.`));
+    }
+    const sessionID = `cap-${Date.now()}`;
+
+    let lastLen = 0;
+    for (let i = 0; i < N; i++) {
+      ltm.update(ids[i], { content: `cap v2 ${i}.` });
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 10 + i,
+        previousKeys: pin,
+        nextKeys: pin,
+        entries: [],
+      });
+      lastLen = listSessionPromptDeltas(sessionID).length;
+      // The block count never exceeds the cap.
+      expect(lastLen).toBeLessThanOrEqual(8);
+    }
+    // After crossing the cap, the blocks coalesced to a single cumulative block.
+    expect(lastLen).toBe(1);
+    // That one block describes the full pin→DB delta (all 9 entries changed).
+    const text = JSON.parse(listSessionPromptDeltas(sessionID)[0].content) as {
+      content: Array<{ text?: string }>;
+    };
+    const body = text.content.map((b) => b.text ?? "").join("");
+    expect(body).toContain("cap v2 0.");
   });
 
   it("re-editing the SAME entry to a new value DOES append a second block", () => {

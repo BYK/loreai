@@ -162,6 +162,20 @@ describe("detectSurfacedMutations — genuine DB mutation, not ranking churn", (
     expect(result.changed.map((e) => e.id)).not.toContain(stable);
   });
 
+  it("a surfaced id that was NEVER a knowledge entry is NOT 'removed' (lat.md synthetics)", () => {
+    // forSession injects lat.md sections as synthetic KnowledgeEntry-shaped rows
+    // (category "lat.md", id like `file#Heading`) that live in lat_sections, not
+    // `knowledge`. They land in the frozen pin baseline, but they never resolve
+    // via ltm.get/getByLogical. They must NOT be reported as superseded — doing
+    // so tells the model to ignore still-valid pinned lat.md knowledge, and (in
+    // the append-only model) bakes that false removal into an immutable block.
+    // Only a genuinely tombstoned KNOWLEDGE entry counts as removed.
+    const latLikeKey = "lat.md/notes#Deploy ship release:deadbeef";
+    const result = detectSurfacedMutations([latLikeKey]);
+    expect(result.removedIds).toEqual([]);
+    expect(result.changed).toEqual([]);
+  });
+
   it("empty / undefined surfaced set → empty result", () => {
     expect(detectSurfacedMutations([])).toEqual({
       changed: [],

@@ -707,6 +707,17 @@ export function sameEntryKeys(
 
 const KNOWLEDGE_DELTA_TOKEN_BUDGET = 400;
 
+/** Cap on appended durable-delta blocks before forcing a coalesce. Append-only
+ *  blocks normally coalesce at the next reshuffle (layer change / post-idle),
+ *  but a pathological no-idle session that churns a pinned entry every turn
+ *  (e.g. in-flight curation rewriting the same entry) would otherwise grow the
+ *  block count — and thus per-turn context tokens — without bound. When this
+ *  many blocks have accumulated, the next append deletes them all and re-derives
+ *  ONE cumulative block from the frozen pin baseline (paying one bust to reclaim
+ *  budget). Each block is ≤ KNOWLEDGE_DELTA_TOKEN_BUDGET, so the worst-case
+ *  durable-delta footprint is bounded at ~MAX_DELTA_BLOCKS × 400 tokens. */
+const MAX_DELTA_BLOCKS = 8;
+
 /** Max entries listed in the "Other relevant knowledge" overflow ToC (#917).
  *  Each line is just `[id] title (category)` (~15-20 tokens), so 12 lines is a
  *  ~200-token index — small enough to ride the frozen delta without crowding
@@ -1151,9 +1162,19 @@ export function detectSurfacedMutations(surfacedKeys: string[] | undefined): {
     // A future base-row GC would make `logicalIdOf(purgedId)` fall back to the
     // input id → `getByLogical` null → a FALSE removal + one-time bust. Revisit
     // alongside any version-row compaction.
-    const current = ltm.get(id) ?? ltm.getByLogical(ltm.logicalIdOf(id));
+    const logicalId = ltm.logicalIdOf(id);
+    const current = ltm.get(id) ?? ltm.getByLogical(logicalId);
     if (!current) {
-      removedIds.push(id);
+      // Null resolution means EITHER a genuinely deleted knowledge entry OR an
+      // id that was never a `knowledge` row at all (e.g. lat.md synthetics,
+      // which forSession injects as KnowledgeEntry-shaped rows with ids like
+      // `file#Heading` that live in lat_sections). Only the former is a real
+      // supersession — classify as removed ONLY when the logical id is actually
+      // tombstoned. Otherwise the model would be told to ignore still-valid
+      // pinned knowledge, and (append-only) that false removal would be frozen
+      // into an immutable block + advance the surfaced set past a non-knowledge
+      // id.
+      if (ltm.isTombstoned(logicalId)) removedIds.push(id);
       continue;
     }
     const currentHash = fnv1a(`${current.title}\x1f${current.content}`);
@@ -1389,7 +1410,16 @@ export function appendKnowledgePromptDelta(input: {
   //     fires exactly once, not every turn.
   // `nextKeys`/`entries` are retained on the input for the gate sites
   // (hasMaterialLtmDelta) but are intentionally unused here.
-  const blocks = listSessionPromptDeltas(input.sessionID);
+  let blocks = listSessionPromptDeltas(input.sessionID);
+  // Bound pathological growth: if too many blocks have accumulated without a
+  // reshuffle to coalesce them, clear them and re-derive ONE cumulative block
+  // from the frozen pin baseline below (advanceSurfacedKeys over [] == the pin,
+  // so detectSurfacedMutations re-captures the full pin→DB delta). Costs one
+  // bust, paid only when MAX_DELTA_BLOCKS is reached.
+  if (blocks.length >= MAX_DELTA_BLOCKS) {
+    deleteSessionPromptDelta(input.sessionID);
+    blocks = [];
+  }
   const surfacedKeys = advanceSurfacedKeys(input.previousKeys, blocks);
   const { changed, removedIds } = detectSurfacedMutations(surfacedKeys);
   const message = buildKnowledgeDeltaMessage(
