@@ -1013,7 +1013,8 @@ export function applySessionPromptDeltas(
   const parsed: Array<{
     seq: number;
     rawSelector: string;
-    insertAt: number;
+    clamped: number;
+    safe: number;
     message: GatewayMessage;
   }> = [];
   for (const delta of deltas) {
@@ -1025,15 +1026,30 @@ export function applySessionPromptDeltas(
       );
       continue;
     }
+    // Compute the tool-pair-safe index against the ORIGINAL `messages` array —
+    // a STABLE reference shared by every block this turn. Computing it against
+    // the MUTATING `out` (as earlier blocks splice in) makes a block's nudge
+    // depend on processing order: two blocks sharing an insertAt would have the
+    // first block's splice shield the second from the tool_use, so they persist
+    // DIVERGENT indices and flip their replay order on later turns — a cache
+    // bust (Seer, PR #976 follow-up; reanchorExistingDelta deliberately puts
+    // all blocks at the SAME insertAt, so the collision is reachable).
+    const clamped = Math.min(selector.insertAt, messages.length);
+    const safe = safeDeltaInsertIndex(messages, clamped);
     parsed.push({
       seq: delta.seq,
       rawSelector: delta.selector,
-      insertAt: selector.insertAt,
+      clamped,
+      safe,
       message,
     });
   }
+  // Sort by the (stable) safe position DESC, then seq DESC, so splicing
+  // back-to-front places equal-position blocks in ascending-seq order (the
+  // append-only chronological order). Sorting by safe (not the stored insertAt)
+  // keeps the placement consistent with the index we actually splice at.
   parsed.sort((a, b) => {
-    const byPosition = b.insertAt - a.insertAt;
+    const byPosition = b.safe - a.safe;
     return byPosition !== 0 ? byPosition : b.seq - a.seq;
   });
 
@@ -1044,28 +1060,24 @@ export function applySessionPromptDeltas(
   // `messages[0]` (production session 1GYu, k:019ece09). Batched at the end so
   // each drift = one DB write, not one per turn.
   const reanchored: Array<{ seq: number; selector: string }> = [];
-  for (const {
-    seq,
-    rawSelector,
-    insertAt: storedInsertAt,
-    message,
-  } of parsed) {
+  for (const { seq, rawSelector, clamped, safe, message } of parsed) {
     // Selector positions are defined against the transformed upstream message
     // array at the time the delta is created (where they were already made
     // tool-pair-safe via safeDeltaInsertIndex). Re-inserting at the SAME index
     // on subsequent turns is intentional: #747 requires the delta to stay at a
     // byte-identical position to preserve the conversation prompt cache.
     //
-    // safeDeltaInsertIndex is run as a tool-pair guard: when the persisted
-    // index still points at a safe boundary (the common case) it returns the
-    // index unchanged → byte-identical replay. When the layout below the
-    // stored index has shifted (compressed layer-1 array slides) and the
-    // persisted index now lands BETWEEN an assistant(tool_use) and its
-    // user(tool_result), the function walks back before the assistant. We
-    // persist that nudge so the next turn does NOT re-fire the same nudge
-    // (the new persisted index is byte-stable until the next layout shift).
-    const clamped = Math.min(storedInsertAt, out.length);
-    const safe = safeDeltaInsertIndex(out, clamped);
+    // safeDeltaInsertIndex is run (above, against `messages`) as a tool-pair
+    // guard: when the persisted index still points at a safe boundary (the
+    // common case) it returns the index unchanged → byte-identical replay.
+    // When the layout below the stored index has shifted (compressed layer-1
+    // array slides) and the persisted index now lands BETWEEN an
+    // assistant(tool_use) and its user(tool_result), the function walks back
+    // before the assistant. We persist that nudge so the next turn does NOT
+    // re-fire the same nudge (the new persisted index is byte-stable until the
+    // next layout shift). `safe` is a `messages`-relative index; splicing it
+    // back-to-front into `out` is correct because higher positions are spliced
+    // first (lower-index blocks are never shifted by a later, lower splice).
     if (safe !== clamped) {
       // Mutate the raw JSON to preserve unknown fields (mut, etc.) — do NOT
       // spread the typed MessageInsertSelector (only carries target+insertAt).

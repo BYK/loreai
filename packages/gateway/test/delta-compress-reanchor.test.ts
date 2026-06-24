@@ -634,3 +634,87 @@ describe("steady-layer-1 insertAt drift — nudge is persisted", () => {
     ).toBe(deltaIdx2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Bug 2 follow-up — multi-block re-anchor must not reorder same-insertAt blocks
+// ---------------------------------------------------------------------------
+// Seer flagged (PR #976): the Bug 2 per-block re-anchor computes
+// safeDeltaInsertIndex against the MUTATING `out` array. When two blocks share
+// a stored insertAt and a nudge fires, the first block's splice shields the
+// second from the tool_use, so they persist DIVERGENT insertAt values. That
+// changes the sort tie-break on later turns, flipping the blocks' replay order
+// (cache bust). reanchorExistingDelta deliberately puts all blocks at the SAME
+// insertAt, so this is reachable in production.
+describe("multi-block re-anchor keeps same-insertAt blocks in stable order", () => {
+  test("two blocks sharing an insertAt replay in a STABLE order across turns", () => {
+    const sessionID = `delta-multiblk-${Date.now()}-${Math.random()}`;
+    const projectID = ensureProject(
+      `/tmp/lore-delta-multiblk-${Date.now()}-${Math.random()}`,
+    );
+
+    // Two append-only blocks, both stored at insertAt=2 (the state
+    // reanchorExistingDelta produces). seq is allocated MAX+1, so A=seq0,
+    // B=seq1. Ascending-seq order (A before B) must hold every turn.
+    appendSessionPromptDelta({
+      sessionID,
+      projectID,
+      selector: JSON.stringify({ target: "messages", insertAt: 2 }),
+      content: JSON.stringify({
+        role: "user",
+        content: [{ type: "text", text: "BLOCK-A" }],
+      }),
+    });
+    appendSessionPromptDelta({
+      sessionID,
+      projectID,
+      selector: JSON.stringify({ target: "messages", insertAt: 2 }),
+      content: JSON.stringify({
+        role: "user",
+        content: [{ type: "text", text: "BLOCK-B" }],
+      }),
+    });
+
+    // Layout where stored insertAt=2 lands right after assistant(tool_use) at
+    // index 1 → safeDeltaInsertIndex nudges before the assistant.
+    const layout: GatewayMessage[] = [
+      user(text("u0")),
+      assistant(toolUse("X")),
+      user(toolResult("X")),
+      user(text("u3")),
+    ];
+
+    /** Returns [idxA, idxB] of the two delta blocks in the applied output. */
+    const orderOf = (out: GatewayMessage[]): [number, number] => {
+      const idxA = out.findIndex((m) =>
+        m.content.some((b) => b.type === "text" && b.text === "BLOCK-A"),
+      );
+      const idxB = out.findIndex((m) =>
+        m.content.some((b) => b.type === "text" && b.text === "BLOCK-B"),
+      );
+      return [idxA, idxB];
+    };
+
+    // Replay the SAME layout three turns. The relative order of A vs B must be
+    // identical every turn (cache stability). Pre-fix the order flips
+    // (B,A → B,A → A,B) as divergent persisted insertAt values reshuffle the
+    // sort tie-break.
+    const orders: Array<"A<B" | "B<A"> = [];
+    for (let turn = 0; turn < 3; turn++) {
+      const out = applySessionPromptDeltas(layout, sessionID);
+      removeOrphanedToolResults(out);
+      assertNoOrphanedTools(out);
+      const [idxA, idxB] = orderOf(out);
+      expect(idxA).toBeGreaterThanOrEqual(0);
+      expect(idxB).toBeGreaterThanOrEqual(0);
+      orders.push(idxA < idxB ? "A<B" : "B<A");
+    }
+
+    // All three turns must agree on the order.
+    expect(
+      new Set(orders).size,
+      `order flipped across turns: ${orders.join(",")}`,
+    ).toBe(1);
+    // And it must be the ascending-seq order (A before B).
+    expect(orders[0]).toBe("A<B");
+  });
+});
