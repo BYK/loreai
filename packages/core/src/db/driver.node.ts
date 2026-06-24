@@ -33,9 +33,7 @@ export function supportsAllowExtension(
   nodeVersion: string = process.versions.node,
 ): boolean {
   const [maj = 0, min = 0] = nodeVersion.split(".").map(Number);
-  return (
-    maj > 23 || (maj === 23 && min >= 5) || (maj === 22 && min >= 13)
-  );
+  return maj > 23 || (maj === 23 && min >= 5) || (maj === 22 && min >= 13);
 }
 
 export class Database extends DatabaseSync {
