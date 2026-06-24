@@ -204,6 +204,33 @@ function binaryExternalsPlugin(): esbuild.Plugin {
 }
 
 // ---------------------------------------------------------------------------
+// esbuild: stub `sqlite-vec` in the SEA bundle
+// ---------------------------------------------------------------------------
+// The `sqlite-vec` npm package resolves its native loadable extension from a
+// platform optionalDependency in node_modules — which doesn't exist inside the
+// fossilize binary. We stub it to a no-op so the bundle builds; the SEA path
+// loads the extension from an embedded asset instead (it sets
+// `globalThis.__LORE_VEC_EXTENSION_PATH__`, which db/vec.ts prefers). Until
+// that asset is embedded, the binary transparently uses the JS brute-force
+// fallback. See #956.
+function stubSqliteVecPlugin(): esbuild.Plugin {
+  return {
+    name: "stub-sqlite-vec",
+    setup(build) {
+      build.onResolve({ filter: /^sqlite-vec$/ }, () => ({
+        path: "sqlite-vec",
+        namespace: "stub-sqlite-vec",
+      }));
+      build.onLoad({ filter: /.*/, namespace: "stub-sqlite-vec" }, () => ({
+        contents:
+          "export function getLoadablePath(){return undefined;}export function load(){}",
+        loader: "js",
+      }));
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // esbuild: @sentry/bun → @sentry/node redirect
 // ---------------------------------------------------------------------------
 
@@ -452,7 +479,11 @@ async function buildBinary() {
     // sharp is for vision models, unused. onnxruntime-node is redirected
     // to onnxruntime-web by the plugin. The WASM runtime is API-compatible.
     external: ["sharp"],
-    plugins: [binaryExternalsPlugin(), sentryBunToNodePlugin()],
+    plugins: [
+      binaryExternalsPlugin(),
+      sentryBunToNodePlugin(),
+      stubSqliteVecPlugin(),
+    ],
     inject: [
       // Runs FIRST: extracts WASM files from SEA assets and registers
       // __LORE_VENDOR_WASM_PATHS__ on globalThis.
@@ -497,7 +528,7 @@ async function buildBinary() {
     platform: "node",
     conditions: ["node"],
     external: ["sharp"],
-    plugins: [binaryExternalsPlugin()],
+    plugins: [binaryExternalsPlugin(), stubSqliteVecPlugin()],
     inject: [join(here, "native-loader.cjs")],
     outfile: workerBundlePath,
     sourcemap: "linked",

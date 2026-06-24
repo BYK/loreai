@@ -15,6 +15,7 @@
 
 import { freemem } from "node:os";
 import { db } from "./db";
+import { isVecAvailable } from "./db/vec";
 import { config } from "./config";
 import * as log from "./log";
 import { vendorModelInfo } from "./embedding-vendor";
@@ -1273,6 +1274,24 @@ export function vectorSearch(
   limit = 10,
   excludeCategories?: string[],
 ): VectorHit[] {
+  if (isVecAvailable()) {
+    try {
+      let sql =
+        "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM knowledge_current WHERE embedding IS NOT NULL AND confidence > 0.2";
+      const params: unknown[] = [toBlob(queryEmbedding)];
+      if (excludeCategories?.length) {
+        sql += ` AND category NOT IN (${excludeCategories.map(() => "?").join(",")})`;
+        params.push(...excludeCategories);
+      }
+      sql += " ORDER BY similarity DESC LIMIT ?";
+      params.push(limit);
+      return db()
+        .query(sql)
+        .all(...params) as VectorHit[];
+    } catch {
+      // fall through to JS brute-force
+    }
+  }
   let sql =
     "SELECT id, embedding FROM knowledge_current WHERE embedding IS NOT NULL AND confidence > 0.2";
   const params: string[] = [];
@@ -1301,6 +1320,17 @@ export function vectorSearchEntities(
   queryEmbedding: Float32Array,
   limit = 10,
 ): VectorHit[] {
+  if (isVecAvailable()) {
+    try {
+      return db()
+        .query(
+          "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM entities WHERE embedding IS NOT NULL ORDER BY similarity DESC LIMIT ?",
+        )
+        .all(toBlob(queryEmbedding), limit) as VectorHit[];
+    } catch {
+      // fall through to JS brute-force
+    }
+  }
   const rows = db()
     .query("SELECT id, embedding FROM entities WHERE embedding IS NOT NULL")
     .all() as Array<{ id: string; embedding: Buffer }>;
@@ -1326,6 +1356,17 @@ export function vectorSearchDistillations(
   queryEmbedding: Float32Array,
   limit = 10,
 ): VectorHit[] {
+  if (isVecAvailable()) {
+    try {
+      return db()
+        .query(
+          "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM distillations WHERE embedding IS NOT NULL AND archived = 0 ORDER BY similarity DESC LIMIT ?",
+        )
+        .all(toBlob(queryEmbedding), limit) as VectorHit[];
+    } catch {
+      // fall through to JS brute-force
+    }
+  }
   const rows = db()
     .query(
       "SELECT id, embedding FROM distillations WHERE embedding IS NOT NULL AND archived = 0",
@@ -1371,6 +1412,24 @@ export function vectorSearchAllDistillations(
   projectId: string,
   limit = 20,
 ): DistillationVectorHit[] {
+  if (isVecAvailable()) {
+    try {
+      // Rank by similarity within the same most-recent candidate window the JS
+      // path uses (created_at DESC, capped at MAX_DISTILLATION_VECTOR_ROWS).
+      return db()
+        .query(
+          "SELECT id, session_id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM (SELECT id, session_id, embedding FROM distillations WHERE embedding IS NOT NULL AND project_id = ? ORDER BY created_at DESC LIMIT ?) ORDER BY similarity DESC LIMIT ?",
+        )
+        .all(
+          toBlob(queryEmbedding),
+          projectId,
+          MAX_DISTILLATION_VECTOR_ROWS,
+          limit,
+        ) as DistillationVectorHit[];
+    } catch {
+      // fall through to JS brute-force
+    }
+  }
   const rows = db()
     .query(
       "SELECT id, session_id, embedding FROM distillations WHERE embedding IS NOT NULL AND project_id = ? ORDER BY created_at DESC LIMIT ?",
@@ -1524,6 +1583,21 @@ export function vectorSearchTemporal(
   limit = 10,
   sessionId?: string,
 ): VectorHit[] {
+  if (isVecAvailable()) {
+    try {
+      const vsql = sessionId
+        ? "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM temporal_messages WHERE embedding IS NOT NULL AND project_id = ? AND session_id = ? ORDER BY similarity DESC LIMIT ?"
+        : "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM temporal_messages WHERE embedding IS NOT NULL AND project_id = ? ORDER BY similarity DESC LIMIT ?";
+      const vparams: unknown[] = sessionId
+        ? [toBlob(queryEmbedding), projectId, sessionId, limit]
+        : [toBlob(queryEmbedding), projectId, limit];
+      return db()
+        .query(vsql)
+        .all(...vparams) as VectorHit[];
+    } catch {
+      // fall through to JS brute-force
+    }
+  }
   const sql = sessionId
     ? "SELECT id, embedding FROM temporal_messages WHERE embedding IS NOT NULL AND project_id = ? AND session_id = ?"
     : "SELECT id, embedding FROM temporal_messages WHERE embedding IS NOT NULL AND project_id = ?";

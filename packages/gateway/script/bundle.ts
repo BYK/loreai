@@ -59,7 +59,11 @@ mkdirSync(distDir, { recursive: true });
 // External: Node built-ins + native/unused deps from @huggingface/transformers.
 // onnxruntime-node: .node native binaries that esbuild can't handle.
 // sharp: image processing for vision models, not needed for text embeddings.
-const external = ["node:*", "onnxruntime-node", "sharp"];
+// sqlite-vec: resolves a native loadable extension (vec0.{so,dylib,dll}) at
+//   runtime via its platform optionalDependency — must stay external. (The SEA
+//   binary stubs it and uses the JS fallback for now; embedding the extension
+//   as an asset is deferred — see #956.)
+const external = ["node:*", "onnxruntime-node", "sharp", "sqlite-vec"];
 
 // Remap @sentry/bun → @sentry/node so the CJS bundle gets Node-native
 // Sentry integrations (http server instrumentation via diagnostics_channel)
@@ -150,6 +154,7 @@ await esbuild.build({
     "undici",
     "onnxruntime-node",
     "sharp",
+    "sqlite-vec",
     "@loreai/core",
   ],
   outfile: join(distDir, "index.bun.js"),

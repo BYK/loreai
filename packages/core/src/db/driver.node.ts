@@ -19,7 +19,30 @@ interface QueryStatement {
   run: (...args: unknown[]) => { changes: number; lastInsertRowid: bigint };
 }
 
+/**
+ * `allowExtension` (required to load the sqlite-vec native extension) landed in
+ * `node:sqlite` in Node 23.5. Passing it on older Node throws during option
+ * validation, so we gate on the runtime version. On 22.5–23.4 the option is
+ * omitted and vector search transparently uses the JS brute-force fallback.
+ */
+function supportsAllowExtension(): boolean {
+  const [maj = 0, min = 0] = process.versions.node.split(".").map(Number);
+  return maj > 23 || (maj === 23 && min >= 5);
+}
+
 export class Database extends DatabaseSync {
+  constructor(
+    path: ConstructorParameters<typeof DatabaseSync>[0],
+    options?: ConstructorParameters<typeof DatabaseSync>[1],
+  ) {
+    super(
+      path,
+      supportsAllowExtension()
+        ? { ...(options ?? {}), allowExtension: true }
+        : options,
+    );
+  }
+
   query(sql: string): QueryStatement {
     let map = statementCache.get(this);
     if (!map) {
