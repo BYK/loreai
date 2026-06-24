@@ -239,8 +239,13 @@ describe("cost-page bulk query indexes (migrations v57 + v58)", () => {
       // Reject only a *heap* scan of `t` (no index). A full index-only walk is
       // reported as "SCAN t USING COVERING INDEX ..." on some SQLite builds and
       // is a legitimate plan — mirror the robust token-sum assertion (line ~226)
-      // instead of a bare toContain("SCAN t") that would false-fail on it.
-      expect(recentPlan).not.toMatch(/SCAN t(?! USING)/);
+      // instead of a bare toContain("SCAN t") that would false-fail on it. The
+      // `\b` stops "SCAN t" from matching inside "SCAN temporal_messages" should
+      // a build ever report the full table name instead of the alias; the
+      // alternation still rejects a full-name heap scan in that case.
+      expect(recentPlan).not.toMatch(
+        /SCAN (?:t|temporal_messages)\b(?! USING)/,
+      );
     });
 
     test("distillation aggregate stays index-backed (no full heap scan)", () => {
