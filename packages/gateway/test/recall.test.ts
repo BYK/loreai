@@ -21,6 +21,7 @@ import {
   buildRecallFollowUpRequest,
   runRecallFollowUpStreaming,
   runRecallFollowUpJSON,
+  runRecallFollowUpStreamAccumulated,
   type RecallFollowUpCtx,
   buildRecallMarker,
   parseRecallMarker,
@@ -894,6 +895,145 @@ describe("runRecallFollowUpJSON", () => {
         recallBlock,
       ),
     ).rejects.toThrow("recall follow-up expected JSON but got SSE");
+  });
+});
+
+describe("runRecallFollowUpStreamAccumulated", () => {
+  const recallBlock = makeRecallToolUse("test query");
+  const resp = makeResponse([recallBlock], "tool_use");
+
+  function makeSseResponse(): Response {
+    return new Response("data: test\n\n", {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  }
+
+  test("sends stream:true and returns the SSE-accumulated continuation", async () => {
+    let capturedReq: GatewayRequest | null = null;
+    const fakeGatewayResponse: GatewayResponse = makeResponse(
+      [{ type: "text", text: "Here is the answer." }],
+      "end_turn",
+    );
+    const ctx: RecallFollowUpCtx = {
+      forward: async (r) => {
+        capturedReq = r;
+        return { response: makeSseResponse(), effectiveProtocol: "openai" };
+      },
+      parseJSON: () => {
+        throw new Error("should not be called");
+      },
+      parseSSE: async () => fakeGatewayResponse,
+    };
+
+    const result = await runRecallFollowUpStreamAccumulated(
+      ctx,
+      makeRequest(),
+      resp,
+      "recall results",
+      recallBlock,
+    );
+
+    expect(capturedReq).not.toBeNull();
+    const req = capturedReq as unknown as GatewayRequest;
+    expect(req.stream).toBe(true);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.continuation).toBe(fakeGatewayResponse);
+      expect(result.followUp).toBeDefined();
+    }
+  });
+
+  test("returns error when upstream responds with non-OK status", async () => {
+    const ctx: RecallFollowUpCtx = {
+      forward: async () => ({
+        response: new Response("server error", {
+          status: 502,
+          headers: { "content-type": "application/json" },
+        }),
+        effectiveProtocol: "openai",
+      }),
+      parseJSON: () => {
+        throw new Error("should not be called");
+      },
+      parseSSE: () => {
+        throw new Error("should not be called on non-OK");
+      },
+    };
+
+    const result = await runRecallFollowUpStreamAccumulated(
+      ctx,
+      makeRequest(),
+      resp,
+      "recall results",
+      recallBlock,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.status).toBe(502);
+      expect(result.detail).toBe("server error");
+    }
+  });
+
+  test("throws on content-type mismatch (JSON instead of SSE)", async () => {
+    // Mirror of the streaming guard: if the upstream returns JSON instead of
+    // SSE, the accumulator would silently yield zero events. assertSSEResponse
+    // converts that into a loud, greppable error before parseSSE is reached.
+    let parseSSECalled = false;
+    const ctx: RecallFollowUpCtx = {
+      forward: async () => ({
+        response: new Response(JSON.stringify({ type: "message" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+        effectiveProtocol: "openai",
+      }),
+      parseJSON: () => {
+        throw new Error("should not be called");
+      },
+      parseSSE: async () => {
+        parseSSECalled = true;
+        return makeResponse([], "end_turn");
+      },
+    };
+
+    await expect(
+      runRecallFollowUpStreamAccumulated(
+        ctx,
+        makeRequest(),
+        resp,
+        "recall results",
+        recallBlock,
+      ),
+    ).rejects.toThrow("recall follow-up expected SSE");
+    expect(parseSSECalled).toBe(false);
+  });
+
+  test("throws when ctx.parseSSE is not provided", async () => {
+    let forwardCalled = false;
+    const ctx: RecallFollowUpCtx = {
+      forward: async () => {
+        forwardCalled = true;
+        return { response: makeSseResponse(), effectiveProtocol: "openai" };
+      },
+      parseJSON: () => {
+        throw new Error("should not be called");
+      },
+      // parseSSE intentionally omitted
+    };
+
+    await expect(
+      runRecallFollowUpStreamAccumulated(
+        ctx,
+        makeRequest(),
+        resp,
+        "recall results",
+        recallBlock,
+      ),
+    ).rejects.toThrow("requires ctx.parseSSE");
+    // Must fail fast before forwarding — never send an unaccumulatable request.
+    expect(forwardCalled).toBe(false);
   });
 });
 
