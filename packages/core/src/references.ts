@@ -237,10 +237,23 @@ export function extractReferences(text: string): Reference[] {
   return out;
 }
 
-/** The lowercase basename of a reference path (last `/`-segment). */
+/** The basename (last `/`-segment) of a path, preserving its original case. */
 function basenameOf(path: string): string {
   const i = path.lastIndexOf("/");
   return i === -1 ? path : path.slice(i + 1);
+}
+
+/** Append `value` to the array at `key`, creating the array on first insert.
+ *  Used to build the case-folded `filesLower`/`basenames` indices in both the
+ *  Direct-FS walk and the probe snapshot parser. */
+function pushIndex(
+  map: Map<string, string[]>,
+  key: string,
+  value: string,
+): void {
+  const arr = map.get(key);
+  if (arr) arr.push(value);
+  else map.set(key, [value]);
 }
 
 // --- Shared resolution -----------------------------------------------------
@@ -254,9 +267,15 @@ function basenameOf(path: string): string {
  * to `"unknown"` (neutral) so the load-bearing invariant holds.
  */
 export interface RepoView {
-  /** Set of repo-relative file paths (for relative-path existence). */
+  /** Set of repo-relative file paths, ACTUAL case (fast exact-case existence). */
   files: Set<string>;
-  /** basename -> repo-relative paths (for bare-filename resolution + ambiguity). */
+  /** lowercased repo-relative path -> actual-case path(s) (case-insensitive
+   *  fallback). An array len > 1 means a case-collision (`Foo.ts`/`foo.ts` on a
+   *  case-sensitive FS) — ambiguous, so the resolver stays neutral. */
+  filesLower: Map<string, string[]>;
+  /** lowercased basename -> actual-case repo-relative paths (for bare-filename
+   *  resolution + ambiguity). Keyed case-insensitively; values keep the real
+   *  case so `lineCount` reads the right file. */
   basenames: Map<string, string[]>;
   /** package.json script names, or null if package.json is unavailable. */
   scripts: Set<string> | null;
@@ -302,19 +321,44 @@ export function resolveRefAgainstView(
   const rel = normalize(ref.path).replace(/\\/g, "/");
   if (rel.startsWith("..")) return "unknown";
 
+  // Reference file resolution is case-INSENSITIVE (#969): a citation like
+  // `DB.ts` for an actual `db.ts` must not false-"missing" on a case-sensitive
+  // FS ("cannot verify" ≠ "broken"). We prefer an exact-case hit, then fall back
+  // to a case-folded lookup; a case-collision (two siblings differing only in
+  // case) is ambiguous and stays neutral so we never emit a false penalty. The
+  // resolved ACTUAL-case path is what feeds `lineCount` (the line bound below).
   let targetExists: boolean;
   let target: string | undefined;
   if (ref.path.includes("/")) {
-    target = rel;
-    targetExists = view.files.has(rel);
+    if (view.files.has(rel)) {
+      target = rel; // exact case
+      targetExists = true;
+    } else {
+      const ci = view.filesLower.get(rel.toLowerCase()) ?? [];
+      if (ci.length === 1) {
+        target = ci[0];
+        targetExists = true;
+      } else if (ci.length > 1) {
+        return "unknown"; // case-collision → ambiguous → neutral
+      } else {
+        targetExists = false;
+      }
+    }
   } else {
-    const matches = view.basenames.get(ref.path) ?? [];
+    const matches = view.basenames.get(rel.toLowerCase()) ?? [];
     if (matches.length === 0) targetExists = false;
-    else if (matches.length > 1)
-      return "unknown"; // ambiguous → neutral
-    else {
+    else if (matches.length === 1) {
       target = matches[0];
       targetExists = true;
+    } else {
+      // Several files share this case-folded basename. Prefer a UNIQUE
+      // exact-case match (preserves the prior precise behavior); a genuinely
+      // ambiguous set stays neutral.
+      const exact = matches.filter((p) => basenameOf(p) === ref.path);
+      if (exact.length === 1) {
+        target = exact[0];
+        targetExists = true;
+      } else return "unknown"; // ambiguous → neutral
     }
   }
   if (!targetExists) {
@@ -377,6 +421,7 @@ export class DirectFsResolver implements ReferenceResolver {
     const root = this.root;
     this.view = {
       files: walk.files,
+      filesLower: walk.filesLower,
       basenames: walk.basenames,
       truncated: walk.truncated,
       scripts: readScripts(safeRead(join(root, "package.json"))),
@@ -400,10 +445,12 @@ export class DirectFsResolver implements ReferenceResolver {
 
   private walk(): {
     files: Set<string>;
+    filesLower: Map<string, string[]>;
     basenames: Map<string, string[]>;
     truncated: boolean;
   } {
     const files = new Set<string>();
+    const filesLower = new Map<string, string[]>();
     const basenames = new Map<string, string[]>();
     let count = 0;
     let truncated = false;
@@ -430,14 +477,13 @@ export class DirectFsResolver implements ReferenceResolver {
           count++;
           const relPath = rel ? `${rel}/${e.name}` : e.name;
           files.add(relPath);
-          const arr = basenames.get(e.name);
-          if (arr) arr.push(relPath);
-          else basenames.set(e.name, [relPath]);
+          pushIndex(filesLower, relPath.toLowerCase(), relPath);
+          pushIndex(basenames, e.name.toLowerCase(), relPath);
         }
       }
     };
     recur(this.root, "");
-    return { files, basenames, truncated };
+    return { files, filesLower, basenames, truncated };
   }
 }
 
@@ -480,7 +526,10 @@ export function buildRefcheckProbeScript(refs: Reference[]): string {
     // metacharacters, but assert it again at the interpolation site so a future
     // regex broadening can't silently turn `__refset='…'` into a shell-injection
     // sink. A non-conforming basename is simply dropped (no line-count check).
-    if (/^[A-Za-z0-9_.-]+$/.test(bn)) basenames.add(bn);
+    // Lowercased so the membership test matches the (also-lowercased) basename
+    // emitted by the shell — reference resolution is case-insensitive (#969).
+    // Lowercasing preserves the `[A-Za-z0-9_.-]` charset, so it stays injection-safe.
+    if (/^[A-Za-z0-9_.-]+$/.test(bn)) basenames.add(bn.toLowerCase());
   }
   // `|a.ts|b.ts|` — a glob-case membership test; basenames are metachar-free.
   const refset = `|${[...basenames].join("|")}|`;
@@ -502,7 +551,7 @@ export function buildRefcheckProbeScript(refs: Reference[]): string {
     `for mf in Makefile makefile GNUmakefile; do [ -f "$mf" ] && { cat "$mf"; break; }; done`,
     `printf '%s\\n' '${PROBE_LINES}'`,
     `__refset='${refset}'`,
-    `printf '%s\\n' "$__f" | while IFS= read -r f; do bn=\${f##*/}; case "$__refset" in *"|$bn|"*) printf '%s\\t%s\\n' "$f" "$(wc -l < "$f" 2>/dev/null)";; esac; done`,
+    `printf '%s\\n' "$__f" | while IFS= read -r f; do bn=$(printf '%s' "\${f##*/}" | tr '[:upper:]' '[:lower:]'); case "$__refset" in *"|$bn|"*) printf '%s\\t%s\\n' "$f" "$(wc -l < "$f" 2>/dev/null)";; esac; done`,
     `)`,
   ].join("\n");
 }
@@ -522,15 +571,16 @@ export function parseProbeSnapshot(text: string): RepoView | null {
   const linesBlock = text.slice(linesAt + PROBE_LINES.length);
 
   const files = new Set<string>();
+  const filesLower = new Map<string, string[]>();
   const basenames = new Map<string, string[]>();
   for (const raw of fileBlock.split("\n")) {
     const f = raw.trim();
     if (!f) continue;
     files.add(f);
-    const bn = basenameOf(f);
-    const arr = basenames.get(bn);
-    if (arr) arr.push(f);
-    else basenames.set(bn, [f]);
+    // Case-folded indices (#969), keyed lowercase with actual-case values —
+    // identical shape to the Direct-FS walk so the two modes stay in parity.
+    pushIndex(filesLower, f.toLowerCase(), f);
+    pushIndex(basenames, basenameOf(f).toLowerCase(), f);
   }
   // An empty file list means the probe couldn't enumerate the repo (git absent
   // AND `find` empty, or it ran in the wrong place) — the snapshot is
@@ -550,6 +600,7 @@ export function parseProbeSnapshot(text: string): RepoView | null {
 
   return {
     files,
+    filesLower,
     basenames,
     scripts: readScripts(pkgBlock.trim() || null),
     makeTargets: readMakeTargets(makeBlock.trim() || null),
