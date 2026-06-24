@@ -21,13 +21,21 @@ interface QueryStatement {
 
 /**
  * `allowExtension` (required to load the sqlite-vec native extension) landed in
- * `node:sqlite` in Node 23.5. Passing it on older Node throws during option
- * validation, so we gate on the runtime version. On 22.5–23.4 the option is
- * omitted and vector search transparently uses the JS brute-force fallback.
+ * `node:sqlite` in Node 23.5 and was backported to Node 22.13 (LTS). Passing
+ * it on older Node throws during option validation, so we gate on the runtime
+ * version. On 22.5–22.12 and 23.0–23.4 the option is omitted and vector
+ * search transparently uses the JS brute-force fallback.
+ *
+ * `nodeVersion` is parameterized for testability — production callers should
+ * leave it unset to read the live runtime version.
  */
-function supportsAllowExtension(): boolean {
-  const [maj = 0, min = 0] = process.versions.node.split(".").map(Number);
-  return maj > 23 || (maj === 23 && min >= 5);
+export function supportsAllowExtension(
+  nodeVersion: string = process.versions.node,
+): boolean {
+  const [maj = 0, min = 0] = nodeVersion.split(".").map(Number);
+  return (
+    maj > 23 || (maj === 23 && min >= 5) || (maj === 22 && min >= 13)
+  );
 }
 
 export class Database extends DatabaseSync {
