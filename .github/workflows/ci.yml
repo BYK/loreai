@@ -531,6 +531,38 @@ jobs:
       - run: pnpm run check:links
 
   # ---------------------------------------------------------------------------
+  # PR-preview link integrity.
+  #
+  # The check-links job above only exercises the PRODUCTION build (base
+  # `/`), where site-root-absolute links (`/docs/...`) are correct. On PR
+  # previews the site is served from `/_preview/pr-<n>/`, so those links
+  # must be base-prefixed by the prefix-base-links integration. This job
+  # builds a preview (fixed sentinel PR_NUMBER) and fails if ANY internal
+  # root-absolute link is left un-prefixed — covering markdown body,
+  # frontmatter hero links, and component links.
+  #
+  # Runs on any change to the website, docs content, or the checker
+  # script itself. Skipped for unrelated changes.
+  # ---------------------------------------------------------------------------
+
+  check-preview-links:
+    name: Check preview links
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-tags: true
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run check:preview-links
+
+  # ---------------------------------------------------------------------------
   # Social-media meta tag integrity.
   #
   # Builds the website (auto-runs the favicon-assets integration that

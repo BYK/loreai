@@ -1,40 +1,30 @@
 #!/usr/bin/env node
 /**
  * Wrapper around linkinator that runs against the built-and-served
- * docs site, filters known linkinator false positives, and exits
- * non-zero only when *real* broken links remain.
+ * docs site and exits non-zero only when broken links remain.
  *
  * Why a wrapper:
- *   linkinator has a path-resolution bug with clean-URL sites: when
- *   the current page is a "directory" URL ending in `/` (e.g.
- *   `/docs/configuration/`), it incorrectly resolves a relative
- *   sibling `./environment/` to `/docs/configuration/environment/`
- *   instead of `/docs/environment/`. The browser resolves it
- *   correctly. This wrapper:
- *
- *     1. Builds the docs site
- *     2. Serves it on a random port via `astro preview`
- *     3. Runs linkinator against `http://127.0.0.1:PORT/docs/`
- *        with `--recurse` and a skip list for known noisy URLs
- *     4. Filters linkinator's remaining 404 output to drop
- *        false-positive resolutions of relative sibling links
- *     5. Reports any *actual* broken links and exits 1
+ *   1. Builds the docs site
+ *   2. Serves it on a random port via `astro preview`
+ *   3. Runs linkinator against `http://127.0.0.1:PORT/docs/` with
+ *      `--recurse` and a skip list for external/example URLs
+ *   4. Reports any broken links and exits 1
  *
  * Usage:
  *   pnpm run check:links
  *
- * Skipped URL patterns (known false positives or intentional):
- *   - withlore.ai             — Starlight's canonical links point at
- *                                `…/docs/<page>.html` but production
- *                                uses clean URLs without `.html`.
- *                                Tracked in issue #TBD.
- *   - api.openai.com / api.anthropic.com — example base URLs in
- *                                the docs; not meant to be live.
- *   - blog.google             — external Google blog link that
- *                                has moved/404s externally.
- *   - /docs/<page>/<subpath>/  where <subpath> is a known sibling
- *                                — linkinator's clean-URL resolution
- *                                bug (see header).
+ * Skipped URL patterns (external or intentional, not crawled):
+ *   - withlore.ai             — canonical <link> tags point at the
+ *                                production domain, not the local preview.
+ *   - api.openai.com / api.anthropic.com — example base URLs in the
+ *                                docs; not meant to be live.
+ *   - blog.google             — external Google blog link that 404s
+ *                                externally.
+ *
+ * Note: docs links are authored as site-root-absolute paths (`/docs/...`),
+ * so linkinator's relative clean-URL resolution bug no longer applies and
+ * no false-positive filtering is needed here. Preview-base prefixing
+ * (`/_preview/pr-<n>/`) is validated separately by check-preview-links.mjs.
  */
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
@@ -82,27 +72,6 @@ function waitForServer(url, timeoutMs) {
     };
     tick();
   });
-}
-
-const KNOWN_FALSE_POSITIVE_RESOLUTIONS = [
-  // linkinator resolves these from a clean-URL page ending in `/` as if
-  // the relative path was a child, not a sibling. The browser correctly
-  // resolves them as siblings (returns 200 in the preview server).
-  /\/docs\/configuration\/environment\/$/,
-  /\/docs\/architecture\/configuration\/$/,
-  /\/docs\/guides\/configuration\/$/,
-  /\/docs\/guides\/architecture\/$/,
-  /\/docs\/guides\/local-inference\/custom-upstreams\/$/,
-  /\/docs\/guides\/custom-upstreams\/local-inference\/$/,
-  // Starlight renders both a relative and an absolute copy of some
-  // site-root links on the docs index. The relative copy resolves to
-  // `/docs/docs/<page>.html` (404) but the absolute copy at
-  // `/docs/<page>.html` is correct.
-  /\/docs\/docs\/(install|architecture|index)\.html$/,
-];
-
-function isKnownFalsePositive(url) {
-  return KNOWN_FALSE_POSITIVE_RESOLUTIONS.some((re) => re.test(url));
 }
 
 const SKIP_ARGS = [
@@ -194,28 +163,19 @@ try {
   const stdout = linkResult.stdout || "";
   const stderr = linkResult.stderr || "";
 
-  // Extract the lines like "  [404] http://..." and the trailing summary.
-  const brokenLines = stdout
+  // Extract the lines like "  [404] http://...".
+  const broken = stdout
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l.startsWith("[404]") || l.startsWith("[421]"));
 
-  const real = brokenLines.filter((l) => {
-    const url = l.replace(/^\[\d+\]\s+/, "");
-    return !isKnownFalsePositive(url);
-  });
-
-  if (real.length === 0) {
-    const suppressed = brokenLines.length;
-    console.log(
-      `[check-links] OK: 0 real broken links.` +
-        (suppressed > 0 ? ` (suppressed ${suppressed} known linkinator false positives)` : ""),
-    );
+  if (broken.length === 0) {
+    console.log("[check-links] OK: 0 broken links.");
     process.exit(0);
   }
 
-  console.error(`[check-links] FAIL: ${real.length} real broken link(s):`);
-  for (const l of real) console.error(`  ${l}`);
+  console.error(`[check-links] FAIL: ${broken.length} broken link(s):`);
+  for (const l of broken) console.error(`  ${l}`);
   if (stderr) process.stderr.write(stderr);
   process.exit(1);
 } finally {

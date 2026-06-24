@@ -45,6 +45,7 @@
     "check:patches": "tsx scripts/check-patches.ts",
     "check:docs": "tsx scripts/generate-config-docs.ts --check && tsx scripts/generate-env-docs.ts --check",
     "check:links": "node scripts/check-docs-links.mjs",
+    "check:preview-links": "node scripts/check-preview-links.mjs",
     "check:social": "node scripts/check-social-meta.mjs",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
