@@ -387,10 +387,18 @@ export function recordCacheUsage(
 // accounts for provider system prompt + AGENTS.md + tool definitions + env info
 const FIRST_TURN_OVERHEAD = 15_000;
 
-// Calibrated overhead: actual tokens used minus our message estimate.
+// Calibrated overhead: actual tokens used minus our message estimate (and, since
+// Bug 1 lever 3, minus injected LTM — overhead represents system prompt + tools
+// only; LTM is subtracted separately at the `usable` computation).
 // Null = not yet calibrated (first turn). Updated after every assistant response.
-// Shared across all sessions — this is model-level overhead (system prompt,
-// tool definitions, provider headers) that doesn't vary per session.
+//
+// BUG 1 (lever 2): this global is no longer authoritative. Per-session overhead
+// lives in SessionState.overheadEma (host system prompt is stable WITHIN a
+// session but varies wildly BETWEEN sessions; blending heterogeneous concurrent
+// sessions produced a ~20x usable swing that front-busted the distilled prefix).
+// The global is now only the first-turn seed / no-session fallback used by
+// getOverhead() when no sessionID is provided. Production callers always pass
+// sessionID.
 let calibratedOverhead: number | null = null;
 
 // ---------------------------------------------------------------------------
@@ -1181,9 +1189,12 @@ export function resetCalibration(sessionID?: string) {
 
 /**
  * For testing only — observe session-state cache fields without exposing the
- * full type. Returns null when the session has no state. The boolean fields
- * answer "does this cache hold something right now?" — sufficient for asserting
- * that onIdleResume() reset them.
+ * full type. Returns null when the session has no state. Boolean fields answer
+ * "does this cache hold something right now?" — sufficient for asserting that
+ * onIdleResume() reset them. Numeric fields (`lastKnownMessageCount`,
+ * `transformCount`, `overheadEma`, `distilledBudgetHighWater`) expose the
+ * calibration state used by Bug 1's levers (per-session overhead isolation +
+ * distilled-prefix budget hysteresis).
  */
 export function inspectSessionState(sessionID: string): {
   hasPrefixCache: boolean;
@@ -2322,24 +2333,39 @@ export function importDedupDecisions(sessionID: string, json: string): void {
   }
 }
 
-// For testing only — reset prefix cache state for a specific session (or all)
+// For testing only — reset prefix cache state for a specific session (or all).
+// Also clears the Bug 1 distilled-budget high-water (same lifecycle as the
+// prefix — the high-water only makes sense when a prefix has been rendered).
 export function resetPrefixCache(sessionID?: string) {
   if (sessionID) {
     const state = sessionStates.get(sessionID);
-    if (state) state.prefixCache = null;
+    if (state) {
+      state.prefixCache = null;
+      state.distilledBudgetHighWater = 0;
+    }
   } else {
-    for (const state of sessionStates.values()) state.prefixCache = null;
+    for (const state of sessionStates.values()) {
+      state.prefixCache = null;
+      state.distilledBudgetHighWater = 0;
+    }
   }
 }
 
-// For testing only — reset distillation snapshot for a specific session (or all)
+// For testing only — reset distillation snapshot for a specific session (or all).
+// Also clears the Bug 1 distilled-budget high-water (prefix invalidated when the
+// distillation set changes).
 export function resetDistillationSnapshot(sessionID?: string) {
   if (sessionID) {
     const state = sessionStates.get(sessionID);
-    if (state) state.distillationSnapshot = null;
-  } else {
-    for (const state of sessionStates.values())
+    if (state) {
       state.distillationSnapshot = null;
+      state.distilledBudgetHighWater = 0;
+    }
+  } else {
+    for (const state of sessionStates.values()) {
+      state.distillationSnapshot = null;
+      state.distilledBudgetHighWater = 0;
+    }
   }
 }
 
@@ -2734,11 +2760,16 @@ function transformInner(input: {
   //
   // NOTE: `usable` is sensitive to BOTH `contextLimit` (set per-turn from the
   // model spec, which can climb as models.dev data warms from a cold fallback)
-  // and `overhead` (a shared EMA from calibrate()). Anything derived as a
+  // and `overhead` (per-session EMA from calibrate() since Bug 1 lever 2 — see
+  // `calibratedOverhead` for the now-fallback global). Anything derived as a
   // fraction of `usable` — e.g. distilled/raw budgets — therefore scales with a
   // large context window. Downstream economic decisions must not treat such a
   // budget as the real compressed size (see the tier gate's compressedEstimate
   // clamp below).
+  // LTM is subtracted EXACTLY ONCE (sessLtmTokens here) — `calibrate` no longer
+  // folds LTM into `overhead` (Bug 1, lever 3): documented intent was system
+  // + tools only, but the previous code double-counted LTM via
+  // actualInput − bodyEstimate (which INCLUDED LTM).
   const sessLtmTokens = sid ? sessState.ltmTokens : ltmTokensFallback;
   const usableRaw = Math.max(
     0,
