@@ -6387,8 +6387,13 @@ async function handleConversationTurn(
 
     try {
       const ltmFraction = cfg.budget.ltm;
-      const ltmBudget = getLtmBudget(ltmFraction);
-      const prefBudget = getPreferenceLtmBudget(cfg.budget.preferenceLtm);
+      // Per-session overhead (Bug 1, lever 2): budget off this session's own
+      // calibrated overhead, not a global EMA blended across sessions.
+      const ltmBudget = getLtmBudget(ltmFraction, sessionID ?? undefined);
+      const prefBudget = getPreferenceLtmBudget(
+        cfg.budget.preferenceLtm,
+        sessionID ?? undefined,
+      );
       const isFirstTurn =
         sessionID != null && !temporal.hasMessages(projectPath, sessionID);
       const contextHint = lastUserTextTrimmed(req);
@@ -6799,7 +6804,8 @@ async function handleConversationTurn(
   if (result.refreshLtm && cfg.knowledge.enabled) {
     try {
       const ltmFraction = cfg.budget.ltm;
-      const ltmBudget = getLtmBudget(ltmFraction);
+      // Per-session overhead (Bug 1, lever 2).
+      const ltmBudget = getLtmBudget(ltmFraction, sessionID);
       // Full context-bound budget — preferences have their own dedicated budget.
       const contextBudget = ltmBudget;
       const stableTokens = stableLtmCache.get(sessionID)?.tokenCount ?? 0;
