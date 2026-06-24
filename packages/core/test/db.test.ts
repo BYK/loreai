@@ -59,7 +59,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(56);
+    expect(row.version).toBe(57);
   });
 
   test("v55: confidence/last_reinforced_at moved to knowledge_meta, exposed via view", () => {
@@ -109,13 +109,14 @@ describe("db", () => {
     d.exec("DROP VIEW IF EXISTS knowledge_current");
     d.exec("DROP TABLE IF EXISTS knowledge_meta");
 
-    // Re-open — migrate() re-runs the v55 step. Must NOT throw.
+    // Re-open — migrate() re-runs the v55 step (and any later migrations). Must
+    // NOT throw, and the version normalizes to MIGRATIONS.length.
     close();
     const fresh = db();
     const ver = fresh.query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(ver.version).toBe(56);
+    expect(ver.version).toBe(57);
     // Register + JOIN view were rebuilt and are queryable (confidence exposed).
     expect(
       fresh
@@ -144,9 +145,9 @@ describe("db", () => {
     expect(rv.map((c) => c.name)).toEqual(
       expect.arrayContaining(["logical_id", "broken", "total", "checked_at"]),
     );
-    const pcols = fresh
-      .query("PRAGMA table_info(projects)")
-      .all() as Array<{ name: string }>;
+    const pcols = fresh.query("PRAGMA table_info(projects)").all() as Array<{
+      name: string;
+    }>;
     expect(pcols.some((c) => c.name === "last_refcheck_at")).toBe(true);
   });
 

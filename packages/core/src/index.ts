@@ -176,9 +176,12 @@ export {
   // gaps without sleeping. Not part of the public API.
   setLastTurnAtForTest,
   setConsecutiveBustsForTest,
+  setTransformCountForTest,
   inspectSessionState,
   getConsecutiveBusts,
   BUST_PRESSURE_THRESHOLD,
+  DEEP_IDLE_MS,
+  COLD_START_GRACE_TURNS,
   effectiveMetaThreshold,
   isLargeColdStart,
   setCacheSizeSnapshot,
@@ -186,8 +189,17 @@ export {
   evaluateCacheStrategy,
   getCacheStrategy,
   getCacheSizeSnapshot,
+  // #797: bust-spiral alerting hook. The gateway registers this once at
+  // startup (`setupBustSpiralCapture`) to surface cache-bust spirals to Sentry
+  // (cold-start info-breadcrumb + past-grace error alert + recovery breadcrumb).
+  setBustSpiralHook,
 } from "./gradient";
-export type { CacheSurvivalInputs, CacheBustCause } from "./gradient";
+export type {
+  CacheSurvivalInputs,
+  CacheBustCause,
+  BustSpiralInfo,
+  BustSpiralHook,
+} from "./gradient";
 export {
   formatKnowledge,
   formatKnowledgeDelta,
@@ -267,6 +279,7 @@ export {
   decideCacheStrategy,
   strategyWantsWarming,
   strategyWantsCompaction,
+  estimateMetaDistillCostPerCall,
 } from "./cache-economics";
 export type {
   CacheStrategy,

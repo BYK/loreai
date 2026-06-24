@@ -32,6 +32,7 @@ import {
   getConsecutiveBusts,
   effectiveMetaThreshold,
   BUST_PRESSURE_THRESHOLD,
+  DEEP_IDLE_MS,
   getLastTurnAt,
   getCacheStrategy,
   strategyWantsWarming,
@@ -96,7 +97,33 @@ import {
   deleteQuotaForFingerprint,
 } from "./quota";
 
+// Re-export DEEP_IDLE_MS so test fixtures can compute "recent vs deep-idle"
+// boundaries against the same constant the helper uses (the test imports
+// from `../src/idle` rather than @loreai/core to keep the boundary
+// observable from the helper's own import surface).
+export { DEEP_IDLE_MS };
+
 const POLL_INTERVAL_MS = 30_000;
+
+function persistSessionCosts(sessionID: string): void {
+  const costs = getSessionCosts(sessionID);
+  if (costs && costs.conversation.turns > 0) {
+    saveSessionCosts(sessionID, {
+      conversationCost: costs.conversation.cost,
+      workerCost: totalWorkerCost(costs),
+      conversationTurns: costs.conversation.turns,
+      cacheReadTokens: costs.conversation.cacheReadTokens,
+      cacheWriteTokens: costs.conversation.cacheWriteTokens,
+      warmupSavings: costs.counterfactual.warmupSavings,
+      warmupHits: costs.counterfactual.warmupHits,
+      ttlSavings: costs.counterfactual.ttlSavings,
+      ttlHits: costs.counterfactual.ttlHits,
+      batchSavings: costs.batchSavings,
+      avoidedCompactions: costs.counterfactual.avoidedCompactions,
+      avoidedCompactionCost: costs.counterfactual.avoidedCompactionCost,
+    });
+  }
+}
 
 /**
  * How often the scheduler runs the GLOBAL dead-knowledge sweep
@@ -247,6 +274,64 @@ export function shouldHoldPrefixWarm(
 }
 
 /**
+ * #946 symmetric inverse override: should the idle handler DEFER its
+ * prefix-rewriting steps for a cool-bust / cool-full-write session that is
+ * still mid-flight (the user's last turn was recent enough that the prompt
+ * cache is still warm)?
+ *
+ * Defer ⇔ ALL hold:
+ *  1. The session is NOT under bust pressure — a churning session is busting
+ *     cache regardless of intent, so flushing is free.
+ *  2. The strategy is confidently `cool-bust` or `cool-full-write` (the
+ *     inverse of `shouldHoldPrefixWarm` — do not double-defer hold-warm,
+ *     which `shouldHoldPrefixWarm` already owns).
+ *  3. `lastTurnAtMs === 0` (no recorded turns — no cache to protect) OR
+ *     `nowMs - lastTurnAtMs < DEEP_IDLE_MS` (the user was active within the
+ *     default Anthropic prompt-cache TTL, so the cache is still warm from
+ *     their last turn).
+ *
+ * Reuses `DEEP_IDLE_MS` from `@loreai/core` — the same constant that gates
+ * `effectiveMetaThreshold`'s bust-pressure override. The 5 min default matches
+ * Anthropic's prompt cache TTL so the gate aligns with the cache's natural
+ * liveness window.
+ *
+ * Like `shouldHoldPrefixWarm`, this only biases the SCHEDULE — it never
+ * starves distillation/LTM in a single deferral. The existing urgency
+ * thresholds still fire when a deferral is in effect: distillation's
+ * `minMessages` gate runs even with `force=false`, meta's
+ * `gen0 >= metaThreshold` gate runs once the cache goes cold, and the
+ * bust-pressure lowered threshold is unaffected (its `lastTurnAt=0` path is
+ * orthogonal to this helper's `lastTurnAt=0` path).
+ *
+ * ⚠ Bursty-user caveat: a user who makes turns every 60–90s (so
+ * `lastTurnAt` is always within `DEEP_IDLE_MS`) will keep the cache warm
+ * continuously. Meta-consolidation is then deferred on every idle tick until
+ * the user goes truly idle (>5 min). This is the same bursty-user tradeoff
+ * `shouldHoldPrefixWarm` already makes — a churn-heavy session would have
+ * the same meta-deferral pattern there. The fix targets the high-frequency
+ * bust pattern (session 0AVWKugtmhBKqLOX: 8 bust turns / 16 observed) where
+ * the per-tick cost dominates; lower-frequency sessions trade a one-tick
+ * deferral for the next user turn's intact prompt cache.
+ */
+export function shouldDeferPrefixRewriteOnCoolBust(
+  econ: { result: { strategy: CacheStrategy; confident: boolean } } | null,
+  bustPressure: boolean,
+  lastTurnAtMs: number,
+  nowMs: number,
+): boolean {
+  if (bustPressure) return false;
+  if (!econ?.result.confident) return false;
+  // The inverse of shouldHoldPrefixWarm: defer only when the strategy is NOT
+  // hold-warm. A hold-warm session is governed by shouldHoldPrefixWarm.
+  if (strategyWantsWarming(econ.result.strategy)) return false;
+  // lastTurnAtMs === 0 is a sentinel for "never had a turn" — treat as
+  // "user is away, no cache to protect, flushing is free" (mirrors the
+  // effectiveMetaThreshold convention at gradient.ts:1177).
+  if (lastTurnAtMs === 0) return false;
+  return nowMs - lastTurnAtMs < DEEP_IDLE_MS;
+}
+
+/**
  * Sub-agent sessions are ephemeral (1-3 turns) — evict them faster than
  * regular sessions to free memory sooner.
  */
@@ -317,6 +402,20 @@ export function startIdleScheduler(
         if (pruned.length >= GLOBAL_DEAD_SWEEP_BATCH) lastGlobalDeadSweepAt = 0;
       } catch (e) {
         log.error("global dead-entry sweep error:", e);
+      }
+    }
+
+    // Global dead-reference cleanup — once per tick, not per session.
+    // cleanDeadRefs scans ALL knowledge_refs globally, so running it for
+    // every idle session was redundant work.
+    if (loreConfig().knowledge.enabled) {
+      try {
+        const cleaned = ltm.cleanDeadRefs();
+        if (cleaned > 0) {
+          log.info(`cleaned ${cleaned} dead knowledge cross-references`);
+        }
+      } catch (e) {
+        log.error("dead-ref cleanup error:", e);
       }
     }
 
@@ -514,23 +613,7 @@ export function startIdleScheduler(
           warmupState: state.warmup ? JSON.stringify(state.warmup) : null,
         });
         // Persist cost snapshot
-        const costs = getSessionCosts(sessionID);
-        if (costs && costs.conversation.turns > 0) {
-          saveSessionCosts(sessionID, {
-            conversationCost: costs.conversation.cost,
-            workerCost: totalWorkerCost(costs),
-            conversationTurns: costs.conversation.turns,
-            cacheReadTokens: costs.conversation.cacheReadTokens,
-            cacheWriteTokens: costs.conversation.cacheWriteTokens,
-            warmupSavings: costs.counterfactual.warmupSavings,
-            warmupHits: costs.counterfactual.warmupHits,
-            ttlSavings: costs.counterfactual.ttlSavings,
-            ttlHits: costs.counterfactual.ttlHits,
-            batchSavings: costs.batchSavings,
-            avoidedCompactions: costs.counterfactual.avoidedCompactions,
-            avoidedCompactionCost: costs.counterfactual.avoidedCompactionCost,
-          });
-        }
+        persistSessionCosts(sessionID);
         state._dirty = false;
       } catch (e) {
         log.error(
@@ -592,23 +675,7 @@ export function evictIdleSessions(
 
     // Persist final cost snapshot before eviction
     try {
-      const costs = getSessionCosts(sessionID);
-      if (costs && costs.conversation.turns > 0) {
-        saveSessionCosts(sessionID, {
-          conversationCost: costs.conversation.cost,
-          workerCost: totalWorkerCost(costs),
-          conversationTurns: costs.conversation.turns,
-          cacheReadTokens: costs.conversation.cacheReadTokens,
-          cacheWriteTokens: costs.conversation.cacheWriteTokens,
-          warmupSavings: costs.counterfactual.warmupSavings,
-          warmupHits: costs.counterfactual.warmupHits,
-          ttlSavings: costs.counterfactual.ttlSavings,
-          ttlHits: costs.counterfactual.ttlHits,
-          batchSavings: costs.batchSavings,
-          avoidedCompactions: costs.counterfactual.avoidedCompactions,
-          avoidedCompactionCost: costs.counterfactual.avoidedCompactionCost,
-        });
-      }
+      persistSessionCosts(sessionID);
     } catch (e) {
       log.warn(
         `session eviction: cost persistence failed for ${sessionID.slice(0, 16)}:`,
@@ -787,10 +854,29 @@ export function buildIdleWorkHandler(
     // So on hold-warm we DEFER the prefix-rewriting steps; cool-bust /
     // cool-full-write / non-confident sessions still flush aggressively (the
     // prefix is busting anyway — flushing is free). See shouldHoldPrefixWarm.
+    //
+    // #946 symmetric inverse: the D6′ deferral is one-directional — it only
+    // defers hold-warm. But a cool-bust / cool-full-write session that is
+    // still MID-FLIGHT (the user's last turn was within DEEP_IDLE_MS) has a
+    // still-warm prompt cache; flushing the rewrite here busts that warm
+    // cache for no benefit, forcing the next user turn to pay a full cache
+    // write. Mirror the deferral: if the session is mid-flight, low bust
+    // pressure, and not hold-warm, defer the rewrite too. The two helpers
+    // are OR'd together so a session that's both hold-warm AND mid-flight
+    // defers for either reason, but a cool-bust session defers only for
+    // mid-flight, and a hold-warm session defers only for hold-warm. See
+    // shouldDeferPrefixRewriteOnCoolBust.
     const holdingWarm = shouldHoldPrefixWarm(
       getCacheStrategy(sessionID),
       bustPressure,
     );
+    const deferCoolBust = shouldDeferPrefixRewriteOnCoolBust(
+      getCacheStrategy(sessionID),
+      bustPressure,
+      getLastTurnAt(sessionID),
+      Date.now(),
+    );
+    const deferPrefixRewrites = holdingWarm || deferCoolBust;
 
     // 1. Distillation. When NOT holding the cache warm, force-distill ALL pending
     // messages even below minMessages — the cache is going cold, so aggressive
@@ -815,7 +901,7 @@ export function buildIdleWorkHandler(
           projectPath,
           sessionID,
           model,
-          force: !holdingWarm,
+          force: !deferPrefixRewrites,
           skipMeta: true,
           callType,
           workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
@@ -829,12 +915,13 @@ export function buildIdleWorkHandler(
         if (result.distilled > 0) idlePrefixMutated = true;
       }
       // Meta consolidation — also a prefix rewrite (archives gen-0, adds gen-1+),
-      // so it's deferred under the same hold-warm bias. Run as a separate step so
-      // gen-0 segments from the force-distill above are counted toward the
-      // threshold. Under bust pressure the threshold is already lowered AND
-      // holdingWarm is false, so a churning session consolidates earlier.
+      // so it's deferred under the same hold-warm bias (and the #946 cool-bust
+      // mid-flight bias). Run as a separate step so gen-0 segments from the
+      // force-distill above are counted toward the threshold. Under bust pressure
+      // the threshold is already lowered AND deferPrefixRewrites is false, so a
+      // churning session consolidates earlier.
       const g0 = distillation.gen0Count(projectPath, sessionID);
-      if (allowWorker && g0 >= metaThreshold && !holdingWarm) {
+      if (allowWorker && g0 >= metaThreshold && !deferPrefixRewrites) {
         const meta = await distillation.metaDistill({
           llm,
           projectPath,
@@ -962,13 +1049,18 @@ export function buildIdleWorkHandler(
       }
     }
 
+    // Load project entries once for steps 4 (consolidation) and 6 (export).
+    // Re-queried only if consolidation actually runs and mutates entries.
+    let entries = cfg.knowledge.enabled
+      ? ltm.forProject(projectPath, false)
+      : [];
+
     // 4. Consolidation — runs after curation so new entries are counted.
     //    Cooldown: skip if we already attempted consolidation for this project
     //    with the same entry count within the last hour — avoids wasting
     //    Sonnet calls when the LLM correctly concludes all entries are unique.
     if (allowWorker && cfg.knowledge.enabled) {
       try {
-        const entries = ltm.forProject(projectPath, false);
         // Per-category bloat check counts PROJECT-SCOPED entries only — matching
         // what category-focused consolidation will actually merge (it excludes
         // cross-project entries to avoid one project deleting a globally-shared
@@ -1045,6 +1137,8 @@ export function buildIdleWorkHandler(
                   ...result,
                   trigger: "consolidation",
                 });
+                // Consolidation mutated entries — refresh for step 6 (export).
+                entries = ltm.forProject(projectPath, false);
                 // Consolidation made progress — clear cooldown so it can retry
                 consolidationCooldown.delete(projectId);
               } else {
@@ -1087,21 +1181,21 @@ export function buildIdleWorkHandler(
     }
 
     // 6. Knowledge export (.lore.md + optional agents file)
+    //    Reuses `entries` from step 4 (re-queried only if consolidation mutated).
     if (cfg.knowledge.enabled) {
       try {
-        const entries = ltm.forProject(projectPath, false);
         if (entries.length > 0) {
           if (cfg.loreFile.enabled && cfg.agentsFile.enabled) {
             // Default: .lore.md + AGENTS.md pointer
             const filePath = join(projectPath, cfg.agentsFile.path);
-            exportToFile({ projectPath, filePath });
+            exportToFile({ projectPath, filePath, entries });
           } else if (cfg.loreFile.enabled) {
             // .lore.md only
-            exportLoreFile(projectPath);
+            exportLoreFile(projectPath, entries);
           } else if (cfg.agentsFile.enabled) {
             // Inline knowledge in AGENTS.md (no .lore.md)
             const filePath = join(projectPath, cfg.agentsFile.path);
-            exportInlineToAgentsFile({ projectPath, filePath });
+            exportInlineToAgentsFile({ projectPath, filePath, entries });
           }
           // else: both disabled — no markdown file
         }
@@ -1110,17 +1204,8 @@ export function buildIdleWorkHandler(
       }
     }
 
-    // 7. Dead reference cleanup
-    if (cfg.knowledge.enabled) {
-      try {
-        const cleaned = ltm.cleanDeadRefs();
-        if (cleaned > 0) {
-          log.info(`cleaned ${cleaned} dead knowledge cross-references`);
-        }
-      } catch (e) {
-        log.error("idle dead-ref cleanup error:", e);
-      }
-    }
+    // 7. Dead reference cleanup — moved to the scheduler level (once per tick,
+    //    not per session) since cleanDeadRefs is a global operation.
 
     // 8. lat.md refresh
     try {
@@ -1136,23 +1221,7 @@ export function buildIdleWorkHandler(
     //    include all worker costs, avoided compactions, cache warming,
     //    1h TTL, and batch API savings after restart.
     try {
-      const costs = getSessionCosts(sessionID);
-      if (costs && costs.conversation.turns > 0) {
-        saveSessionCosts(sessionID, {
-          conversationCost: costs.conversation.cost,
-          workerCost: totalWorkerCost(costs),
-          conversationTurns: costs.conversation.turns,
-          cacheReadTokens: costs.conversation.cacheReadTokens,
-          cacheWriteTokens: costs.conversation.cacheWriteTokens,
-          warmupSavings: costs.counterfactual.warmupSavings,
-          warmupHits: costs.counterfactual.warmupHits,
-          ttlSavings: costs.counterfactual.ttlSavings,
-          ttlHits: costs.counterfactual.ttlHits,
-          batchSavings: costs.batchSavings,
-          avoidedCompactions: costs.counterfactual.avoidedCompactions,
-          avoidedCompactionCost: costs.counterfactual.avoidedCompactionCost,
-        });
-      }
+      persistSessionCosts(sessionID);
     } catch (e) {
       log.error("idle session cost persistence error:", e);
     }

@@ -3,6 +3,8 @@ import {
   resolveUpstreamRoute,
   resolveProviderRoute,
   extractProviderHeader,
+  providerFromUpstreamUrl,
+  resolveLastSeenProvider,
 } from "../src/config";
 
 // ---------------------------------------------------------------------------
@@ -334,5 +336,133 @@ describe("extractProviderHeader", () => {
     expect(extractProviderHeader({ "x-lore-provider": "mini\x00max" })).toBe(
       "minimax",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// providerFromUpstreamUrl (#942 — derive the provider tag from the actual
+// upstream destination when no x-lore-provider header was sent)
+// ---------------------------------------------------------------------------
+
+describe("providerFromUpstreamUrl", () => {
+  test("maps a known Anthropic upstream base to its provider id", () => {
+    expect(
+      providerFromUpstreamUrl({
+        "x-lore-upstream-url": "https://api.anthropic.com",
+      }),
+    ).toBe("anthropic");
+  });
+
+  test("maps a known OpenAI upstream base to its provider id", () => {
+    expect(
+      providerFromUpstreamUrl({
+        "x-lore-upstream-url": "https://api.openai.com",
+      }),
+    ).toBe("openai");
+  });
+
+  test("matches a path-prefixed upstream base (minimax /anthropic)", () => {
+    expect(
+      providerFromUpstreamUrl({
+        "x-lore-upstream-url": "https://api.minimax.io/anthropic",
+      }),
+    ).toBe("minimax");
+  });
+
+  test("distinguishes providers that share a host by path (minimax vs minimax-cn)", () => {
+    expect(
+      providerFromUpstreamUrl({
+        "x-lore-upstream-url": "https://api.minimaxi.com/anthropic",
+      }),
+    ).toBe("minimax-cn");
+  });
+
+  test("distinguishes opencode vs opencode-go by path prefix", () => {
+    expect(
+      providerFromUpstreamUrl({
+        "x-lore-upstream-url": "https://opencode.ai/zen",
+      }),
+    ).toBe("opencode");
+    expect(
+      providerFromUpstreamUrl({
+        "x-lore-upstream-url": "https://opencode.ai/zen/go",
+      }),
+    ).toBe("opencode-go");
+  });
+
+  test("normalizes a trailing slash before matching", () => {
+    expect(
+      providerFromUpstreamUrl({
+        "x-lore-upstream-url": "https://api.openai.com/",
+      }),
+    ).toBe("openai");
+  });
+
+  test("normalizes a trailing /v1 before matching", () => {
+    expect(
+      providerFromUpstreamUrl({
+        "x-lore-upstream-url": "https://api.anthropic.com/v1",
+      }),
+    ).toBe("anthropic");
+  });
+
+  test("returns undefined for an unrecognized host (custom/self-hosted)", () => {
+    expect(
+      providerFromUpstreamUrl({
+        "x-lore-upstream-url": "https://my-llm.internal.example.com",
+      }),
+    ).toBeUndefined();
+  });
+
+  test("returns undefined when the upstream header is absent", () => {
+    expect(providerFromUpstreamUrl({})).toBeUndefined();
+  });
+
+  test("returns undefined for a malformed upstream url", () => {
+    expect(
+      providerFromUpstreamUrl({ "x-lore-upstream-url": "not a url" }),
+    ).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveLastSeenProvider (#942 — header-wins-over-URL precedence for tagging
+// the global fallback credential)
+// ---------------------------------------------------------------------------
+
+describe("resolveLastSeenProvider", () => {
+  test("prefers the explicit x-lore-provider header over the upstream url", () => {
+    expect(
+      resolveLastSeenProvider({
+        "x-lore-provider": "anthropic",
+        "x-lore-upstream-url": "https://api.openai.com",
+      }),
+    ).toBe("anthropic");
+  });
+
+  test("falls back to the upstream url when no provider header is present", () => {
+    expect(
+      resolveLastSeenProvider({
+        "x-lore-upstream-url": "https://api.openai.com",
+      }),
+    ).toBe("openai");
+  });
+
+  test("falls back to the upstream url when the provider header is invalid", () => {
+    expect(
+      resolveLastSeenProvider({
+        "x-lore-provider": "bad provider!",
+        "x-lore-upstream-url": "https://api.anthropic.com",
+      }),
+    ).toBe("anthropic");
+  });
+
+  test("returns undefined when neither header identifies a provider", () => {
+    expect(resolveLastSeenProvider({})).toBeUndefined();
+    expect(
+      resolveLastSeenProvider({
+        "x-lore-upstream-url": "https://my-llm.internal.example.com",
+      }),
+    ).toBeUndefined();
   });
 });

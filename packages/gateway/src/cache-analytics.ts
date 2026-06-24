@@ -19,7 +19,7 @@ import type {
   CacheTurnAnalysis,
   GatewayUsage,
 } from "./translate/types.ts";
-import { log, type CacheBustCause } from "@loreai/core";
+import { log, type CacheBustCause, type CacheStrategy } from "@loreai/core";
 import { zstdCompressSync, zstdDecompressSync } from "node:zlib";
 
 // ---------------------------------------------------------------------------
@@ -464,6 +464,17 @@ export function analyzeCacheTurn(
   sessionID?: string,
   /** Number of messages in the current request (for human-friendly divergence reasons). */
   messageCount?: number,
+  /**
+   * The session's current unified cache strategy (`hold-warm` / `cool-bust` /
+   * `cool-full-write`). When set, the dramatic-drop WARN is suppressed for
+   * `cool-bust` and `cool-full-write` sessions — those strategies EXPLICITLY
+   * chose to let the prefix go cold, so a "dramatic" hit-rate drop is the
+   * expected outcome (the economic model decided warming wasn't worth it).
+   * `hold-warm` sessions and the no-strategy-supplied default keep the WARN
+   * — for hold-warm, a drop means the warmer is failing; for unknown, we
+   * can't decide, so we keep the existing noisy behavior to avoid surprises.
+   */
+  cacheStrategy?: CacheStrategy,
 ): CacheTurnAnalysis {
   analytics.turnCount++;
 
@@ -656,10 +667,23 @@ export function analyzeCacheTurn(
 
     // Warn on dramatic cache hit rate drops (e.g. 99% → 23%) to help
     // diagnose cache eviction or unexpected prefix divergence.
+    //
+    // Skip when the session is in a `cool-*` strategy: the unified cache
+    // strategy EXPLICITLY chose to let the prefix go cold, so a dramatic
+    // hit-rate drop is the expected outcome, not a bug. The economic model
+    // already decided warming isn't worth it (see `evaluateCacheStrategy`
+    // in @loreai/core) — alerting on a known-acceptable outcome is just
+    // noise that drowns out real signals on hold-warm sessions.
+    // hold-warm sessions and the no-strategy default keep the WARN: for
+    // hold-warm, a drop means the warmer is failing; for unknown, we
+    // err on the side of surfacing the signal.
+    const isExpectedBust =
+      cacheStrategy === "cool-bust" || cacheStrategy === "cool-full-write";
     if (
       analytics.turnCount > 2 &&
       prevHitRate > 0.5 &&
-      cacheHitRate < prevHitRate * 0.4
+      cacheHitRate < prevHitRate * 0.4 &&
+      !isExpectedBust
     ) {
       log.warn(
         `cache-analytics:${sidStr} dramatic hit rate drop:` +
@@ -700,6 +724,25 @@ export function categorizeBust(
   // First turn — no prior request to compare
   if (turn <= 1 || divergencePoint === "<first-turn>") return "first-turn";
 
+  // Prefix-rewrite signature: divergence at messages[0/1] AND something
+  // was actually written to the cache means the synthetic distilled
+  // prefix was rewritten (meta-distillation). This is a LORE-INTERNAL
+  // cause, not user-context growth — must be exempt from the
+  // consecutive-bust counter even with a partial cache hit (some earlier
+  // prefix matched, the distillation block was regenerated). Counting
+  // these as "incremental" tripped false "unsustainable conversation"
+  // warnings on sessions with sustained meta-distillation activity.
+  //
+  // We also require cacheCreation > 0 because "prefix-rewrite" implies
+  // a real rewrite — a divergence reported at messages[0/1] with no new
+  // cache content is a no-op turn (bustRatio=0), and labeling it a
+  // "rewrite" would be misleading. Seer PR #943 review (LOW severity).
+  const msgMatch = divergencePoint.match(/^messages\[(\d+)\]/);
+  if (msgMatch && cacheCreation > 0) {
+    const idx = parseInt(msgMatch[1], 10);
+    if (idx <= 1) return "prefix-rewrite";
+  }
+
   // Not a bust: cache read > 0, creation is only the new tail
   if (cacheRead > 0 && cacheCreation > 0) return "incremental";
   if (cacheRead > 0 && cacheCreation === 0) return "incremental";
@@ -726,16 +769,8 @@ export function categorizeBust(
     if (divergencePoint === "tools" || divergencePoint.startsWith("tools"))
       return "tools-change";
 
-    // Message-level divergence
-    const msgMatch = divergencePoint.match(/^messages\[(\d+)\]/);
-    if (msgMatch) {
-      const idx = parseInt(msgMatch[1], 10);
-      // Early message changes (index 0 or 1) likely indicate prefix rewrite
-      // (distilled prefix is injected as messages[0] and messages[1])
-      if (idx <= 1) return "prefix-rewrite";
-      // Later message changes indicate window shift (raw window eviction)
-      return "window-shift";
-    }
+    // Message-level divergence (messages[idx>=2])
+    if (msgMatch) return "window-shift";
 
     return "unknown";
   }

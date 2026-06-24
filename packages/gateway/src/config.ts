@@ -45,10 +45,9 @@ export interface GatewayConfig {
   upstreamAnthropic: string;
   /** Upstream OpenAI API URL. Default: "https://api.openai.com". Env: LORE_UPSTREAM_OPENAI */
   upstreamOpenAI: string;
-  /** AWS Bedrock region. Default: from AWS_REGION/AWS_DEFAULT_REGION env or "us-east-1" */
+  /** AWS Bedrock region (selects the bedrock-mantle endpoint). Default: from
+   *  AWS_REGION/AWS_DEFAULT_REGION env or "us-east-1". */
   bedrockRegion: string;
-  /** AWS Bedrock profile name (optional). From AWS_PROFILE env. */
-  bedrockProfile?: string;
   /** Google Vertex AI project ID. Required. From GOOGLE_CLOUD_PROJECT env. */
   vertexProject: string;
   /** Google Vertex AI region. Default: from GOOGLE_CLOUD_REGION/GOOGLE_CLOUD_LOCATION env or "us-central1" */
@@ -209,13 +208,12 @@ export function loadConfig(): GatewayConfig {
       ? trimTrailingSlash(env.LORE_WORKER_UPSTREAM)
       : undefined,
     upstreamExtraHeaders: parseCurlHeaders(env.LORE_UPSTREAM_EXTRA_HEADERS),
-    // Bedrock config — standard AWS chain + optional LORE overrides
+    // Bedrock (bedrock-mantle) region — selects the regional mantle endpoint.
     bedrockRegion:
       env.LORE_BEDROCK_REGION ??
       env.AWS_REGION ??
       env.AWS_DEFAULT_REGION ??
       "us-east-1",
-    bedrockProfile: env.LORE_BEDROCK_PROFILE ?? env.AWS_PROFILE,
     // Vertex config — standard GCP ADC chain + optional LORE overrides
     vertexProject: env.LORE_VERTEX_PROJECT ?? env.GOOGLE_CLOUD_PROJECT ?? "",
     vertexRegion:
@@ -236,7 +234,7 @@ export function loadConfig(): GatewayConfig {
 
 export type UpstreamRoute = {
   url: string;
-  protocol: "anthropic" | "openai" | "openai-responses" | "bedrock" | "vertex";
+  protocol: "anthropic" | "openai" | "openai-responses" | "vertex";
 };
 
 /**
@@ -249,7 +247,7 @@ export type UpstreamRoute = {
 const UPSTREAM_ROUTES: Array<{
   prefix: string;
   url: string;
-  protocol: "anthropic" | "openai" | "openai-responses" | "bedrock" | "vertex";
+  protocol: "anthropic" | "openai" | "openai-responses" | "vertex";
 }> = [
   // Anthropic
   {
@@ -306,12 +304,10 @@ const UPSTREAM_ROUTES: Array<{
     url: "https://generativelanguage.googleapis.com",
     protocol: "openai",
   },
-  // AWS Bedrock (model IDs like anthropic.claude-3-5-sonnet-20241022-v2:0)
-  {
-    prefix: "anthropic.claude-",
-    url: "", // Dynamic URL built at request time based on region
-    protocol: "bedrock",
-  },
+  // Note: AWS Bedrock is NOT model-prefix-routed. It is reached only via the
+  // `X-Lore-Provider: bedrock` header (PROVIDER_ROUTES) so the region-specific
+  // bedrock-mantle URL + model remap can be applied. A bare `anthropic.claude-`
+  // model id has no region signal, so it must not auto-route to Bedrock.
   // Note: Google Vertex AI uses the same `claude-` model prefix as Anthropic,
   // so it cannot be distinguished by model-prefix routing. Vertex is reachable
   // only via the `X-Lore-Provider: vertex` header (PROVIDER_ROUTES table).
@@ -391,13 +387,14 @@ export type ProviderRoute = {
   /** Wire protocol for this upstream. When `null`, the ingress protocol is
    *  preserved — use this for proxy/aggregator providers (OpenCode Zen,
    *  Vercel AI Gateway, etc.) that accept whichever protocol the client sends. */
-  protocol:
-    | "anthropic"
-    | "openai"
-    | "openai-responses"
-    | "bedrock"
-    | "vertex"
-    | null;
+  protocol: "anthropic" | "openai" | "openai-responses" | "vertex" | null;
+  /** AWS Bedrock via the `bedrock-mantle` endpoint. When true, the gateway
+   *  builds the region-specific mantle URL (`bedrock-mantle.<region>.api.aws/
+   *  anthropic`) as the upstream base and remaps `body.model` to the mantle
+   *  catalog id (`anthropic.<model>`). The wire protocol stays `anthropic`
+   *  (mantle speaks the native Anthropic Messages API), so this rides the
+   *  normal Anthropic path — no SigV4, no InvokeModel. */
+  bedrockMantle?: boolean;
 };
 
 /**
@@ -488,19 +485,21 @@ const PROVIDER_ROUTES: Record<string, ProviderRoute> = {
   tgi: { url: null, protocol: "openai" },
   tabbyml: { url: null, protocol: "openai" },
   litellm: { url: null, protocol: "openai" },
-  // --- AWS Bedrock ---
-  // url is null because the Bedrock branch self-builds the region URL
-  // (bedrock-runtime.<region>.amazonaws.com). Unlike the local `url: null`
-  // providers above (which REQUIRE LORE_UPSTREAM_<PROVIDER>), bedrock is
-  // reachable with null url — `providerRouteUsable` in pipeline.ts special-cases
-  // self-URL-building protocols. `amazon-bedrock` is opencode's provider id.
+  // --- AWS Bedrock (via bedrock-mantle, native Anthropic Messages API) ---
+  // url is null because the mantle URL is region-specific and built at request
+  // time from LORE_BEDROCK_REGION (`bedrock-mantle.<region>.api.aws/anthropic`).
+  // `bedrockMantle: true` tells pipeline.ts to build that base + remap the model
+  // id; the wire protocol is plain `anthropic` (mantle is Anthropic-compatible),
+  // so it rides the normal Anthropic path. `amazon-bedrock` is opencode's id.
   bedrock: {
     url: null,
-    protocol: "bedrock",
+    protocol: "anthropic",
+    bedrockMantle: true,
   },
   "amazon-bedrock": {
     url: null,
-    protocol: "bedrock",
+    protocol: "anthropic",
+    bedrockMantle: true,
   },
   // --- Google Vertex AI ---
   // NOTE: Vertex AI support is part 2 of issue #870 and is NOT yet implemented.
@@ -547,6 +546,73 @@ export function extractProviderHeader(
   if (!/^[a-z0-9-]+$/.test(sanitized)) return undefined;
 
   return sanitized;
+}
+
+/**
+ * Reverse map: normalized upstream base URL → provider id.
+ *
+ * Built once from PROVIDER_ROUTES at module load. Each route's `url` is run
+ * through `extractUpstreamUrlHeader` so the keys are normalized byte-for-byte
+ * the same way an incoming `x-lore-upstream-url` header is — the normalization
+ * itself cannot drift between the two sides. (The incoming value is the
+ * interceptor-derived `upstreamBase`, which for a provider whose API path lacks
+ * a `/v1/` segment — e.g. google's `/v1beta/openai/...` — does not equal the
+ * route key; that simply yields a lookup miss → `undefined`, i.e. an untagged
+ * credential, never a WRONG tag.) Providers with a `null` url (local/self-
+ * hosted, aggregators the user must configure) are skipped: their real upstream
+ * is user-specific and never matches a static table entry.
+ *
+ * First definition wins on the (currently impossible) chance two routes
+ * normalize to the same base, keeping the mapping deterministic.
+ */
+const UPSTREAM_URL_TO_PROVIDER: ReadonlyMap<string, string> = (() => {
+  const m = new Map<string, string>();
+  for (const [id, route] of Object.entries(PROVIDER_ROUTES)) {
+    if (!route.url) continue;
+    const norm = extractUpstreamUrlHeader({ "x-lore-upstream-url": route.url });
+    if (norm && !m.has(norm)) m.set(norm, id);
+  }
+  return m;
+})();
+
+/**
+ * Derive the provider id from a request's `x-lore-upstream-url` header by
+ * matching the upstream destination against PROVIDER_ROUTES.
+ *
+ * This is the fallback used to tag the global fallback credential (#829/#942)
+ * for credentialed requests that bypass the per-turn `chat.headers` hook and
+ * therefore carry NO `x-lore-provider` header (title/summary generation, etc.).
+ * Tagging by the ACTUAL destination — not a stale "last-seen provider" guess —
+ * is what prevents reintroducing the #829 cross-contamination from the other
+ * direction (e.g. tagging an OpenAI-bound key as `anthropic` because the last
+ * foreground turn was Anthropic).
+ *
+ * Returns `undefined` when the header is absent, malformed, or points at a host
+ * not in the static route table (custom/self-hosted) — in which case the
+ * credential stays untagged, exactly as before.
+ */
+export function providerFromUpstreamUrl(
+  headers: Record<string, string>,
+): string | undefined {
+  const base = extractUpstreamUrlHeader(headers);
+  if (!base) return undefined;
+  return UPSTREAM_URL_TO_PROVIDER.get(base);
+}
+
+/**
+ * Resolve the provider id used to tag the global fallback credential
+ * (`setLastSeenAuth`). The explicit `x-lore-provider` header is authoritative
+ * (the plugin set it deliberately for this turn); only when it is absent or
+ * invalid do we fall back to deriving it from the upstream destination URL.
+ *
+ * Returning `undefined` means "unknown/agnostic" — the credential is served to
+ * any provider lookup, which is load-bearing for legacy single-provider clients
+ * that send neither header.
+ */
+export function resolveLastSeenProvider(
+  headers: Record<string, string>,
+): string | undefined {
+  return extractProviderHeader(headers) ?? providerFromUpstreamUrl(headers);
 }
 
 // ---------------------------------------------------------------------------

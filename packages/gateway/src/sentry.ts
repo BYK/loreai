@@ -563,6 +563,66 @@ export function setupEmbeddingFailureCapture(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Bust-spiral alerting (#797)
+// ---------------------------------------------------------------------------
+
+import { setBustSpiralHook, type BustSpiralInfo } from "@loreai/core";
+
+/**
+ * Wire core's bust-spiral detection hook to Sentry. Called once at startup.
+ *
+ * The hook is triggered by core's `transform()` whenever a session accumulates
+ * a sustained run of cache busts (`consecutiveBusts >= 2`). Cold-start
+ * episodes (the first few turns of a freshly-tracked session) emit an
+ * info-level breadcrumb; past the grace window, sustained busts fire a
+ * high-severity Sentry alert (#797 — almost always a real caching bug we want
+ * to investigate). Recovery (busts → 0) emits another info breadcrumb.
+ *
+ * One alert per (session, episode) — debounced via the per-session
+ * `bustSpiralAlerted` flag in core, cleared on recovery.
+ */
+export function setupBustSpiralCapture(): void {
+  setBustSpiralHook({
+    onColdStart: (info: BustSpiralInfo) => {
+      if (!Sentry.isInitialized()) return;
+      Sentry.addBreadcrumb({
+        category: "lore.cache.bust_spiral",
+        level: "info",
+        message:
+          "Cold-start bust spiral observed (within grace window) — expected per #796/#804",
+        data: info as unknown as Record<string, unknown>,
+      });
+    },
+    onSpiral: (info: BustSpiralInfo) => {
+      if (!Sentry.isInitialized()) return;
+      Sentry.captureMessage(
+        "Cache bust spiral past cold-start grace — investigate caching bug",
+        {
+          // High severity: a sustained cache-bust spiral in steady state is
+          // almost always an upstream bug (#797). Aggregates as a Sentry
+          // issue; not paging.
+          level: "error",
+          // One grouped issue per fingerprint, not per session/event.
+          fingerprint: ["bust-spiral-past-grace"],
+          contexts: {
+            bust_spiral: info as unknown as Record<string, unknown>,
+          },
+        },
+      );
+    },
+    onRecovered: (info: BustSpiralInfo) => {
+      if (!Sentry.isInitialized()) return;
+      Sentry.addBreadcrumb({
+        category: "lore.cache.bust_spiral",
+        level: "info",
+        message: "Bust spiral recovered",
+        data: info as unknown as Record<string, unknown>,
+      });
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Process resource gauge + event-loop lag (periodic, from the idle tick)
 // ---------------------------------------------------------------------------
 

@@ -104,6 +104,7 @@ import {
   resolveUpstreamRoute,
   extractUpstreamUrlHeader,
   extractProviderHeader,
+  resolveLastSeenProvider,
   resolveProviderRoute,
   unattributedBucketPath,
   type ProjectPathResult,
@@ -137,15 +138,10 @@ import {
   type AnthropicCacheOptions,
 } from "./translate/anthropic";
 import {
-  buildBedrockRequestBody,
-  buildBedrockHeaders,
-  bedrockInvokeUrl,
-  bedrockInvokeNoStreamUrl,
-  resolveBedrockModelID,
-  parseBedrockResponseJSON,
+  bedrockMantleUrl,
+  isBedrockMantleDispatch,
+  toMantleModelId,
 } from "./translate/bedrock";
-import { signBedrockRequest } from "./bedrock-auth";
-import { decodeBedrockEventStream } from "./bedrock-stream";
 import {
   buildOpenAIUpstreamRequest,
   buildOpenAIResponse,
@@ -329,36 +325,25 @@ export const LORE_COMMIT_REMINDER =
 /** One-time initialization flag. */
 let initialized = false;
 
-// --- Context warning marker for unsustainable conversations ---
+// --- Response warning marker ---
 // Injected into the response (assistant message) so the user can see it.
 // Stripped from incoming requests on subsequent turns to preserve cache prefix.
+// Used by the worker-degradation warning (#797 removed the unsustainable-
+// conversation warning; the marker mechanism stays because worker degradation
+// is still user-actionable).
 export const CONTEXT_WARNING_MARKER = "[lore:context-warning]";
-
-/**
- * Build the unsustainable-conversation warning, reporting the ACTUAL number of
- * consecutive cache busts rather than a hardcoded figure. `count` falls back to
- * generic wording when unknown/zero.
- *
- * @internal Exported for tests.
- */
-export function contextWarningText(count?: number): string {
-  const times =
-    count && count > 0 ? `${count} times in a row` : "several times in a row";
-  return (
-    `${CONTEXT_WARNING_MARKER} This conversation is growing unsustainably \u2014 ` +
-    `it has exceeded the context limit ${times} and compression cannot keep up. ` +
-    `Consider running /compact or starting a new conversation.\n\n---\n\n`
-  );
-}
 
 /**
  * Build the worker-degradation warning text (or null if the session's
  * background workers are healthy / not yet sustained-failing). Reuses the
- * CONTEXT_WARNING_MARKER so it is stripped on the next turn like the
- * unsustainable-conversation warning, preserving the prompt cache prefix.
+ * CONTEXT_WARNING_MARKER so it is stripped on the next turn, preserving the
+ * prompt cache prefix.
  *
  * This is the user-visible signal that distillation/curation/cache-warming
  * are failing — so degradation (context bloat, no LTM growth) is never silent.
+ * The previous "unsustainable conversation" warning (cache bust spirals) was
+ * removed because it was almost always an upstream bug the user couldn't
+ * action on; that signal now goes to Sentry via setupBustSpiralCapture.
  */
 function buildWorkerDegradationWarning(sessionID: string): string | null {
   const warning = getDegradationWarning(sessionID);
@@ -368,12 +353,12 @@ function buildWorkerDegradationWarning(sessionID: string): string | null {
 
 /**
  * Insert a warning text block into a response, after any leading thinking
- * blocks. Defaults to the unsustainable-conversation text; pass `text` to
- * inject a different marker'd warning (e.g. worker degradation).
+ * blocks. Caller provides the marker'd warning text (currently always the
+ * worker-degradation block from buildWorkerDegradationWarning).
  */
 function injectContextWarning(
   resp: GatewayResponse,
-  text: string = contextWarningText(),
+  text: string,
 ): GatewayResponse {
   // Insert after thinking blocks to preserve the expected block ordering
   // (thinking first, then text). Clients may inspect the first block's type
@@ -2957,12 +2942,7 @@ type UpstreamResult = {
   /** The serialized JSON body sent to the upstream provider. */
   serializedBody: string;
   /** The wire protocol used for the upstream request (may differ from ingress). */
-  effectiveProtocol:
-    | "anthropic"
-    | "openai"
-    | "openai-responses"
-    | "bedrock"
-    | "vertex";
+  effectiveProtocol: "anthropic" | "openai" | "openai-responses" | "vertex";
 };
 
 /**
@@ -3009,13 +2989,15 @@ async function forwardToUpstream(
   // custom providers like vllm, github-copilot), the protocol should come
   // from whichever tier actually provides the URL to avoid mismatches.
   //
-  // EXCEPTION: self-URL-building protocols (bedrock builds
-  // bedrock-runtime.<region>.amazonaws.com from config; vertex likewise) are
-  // usable with a null url and no X-Lore-Upstream-URL — otherwise
-  // `X-Lore-Provider: bedrock` would fall through to the model-prefix route
-  // (api.anthropic.com for claude-* IDs) and silently bypass Bedrock entirely.
+  // EXCEPTION: self-URL-building routes are usable with a null url and no
+  // X-Lore-Upstream-URL because they build a region-specific base from config:
+  //   - bedrock-mantle: `bedrock-mantle.<region>.api.aws/anthropic` (Anthropic
+  //     protocol — only the base URL + model id differ from native Anthropic);
+  //   - vertex: `<region>-aiplatform.googleapis.com` (part 2, not yet wired).
+  // Without this, `X-Lore-Provider: bedrock` would fall through to the model-
+  // prefix route (api.anthropic.com for claude-* IDs) and silently bypass it.
   const selfUrlBuildingProtocol =
-    providerRoute?.protocol === "bedrock" ||
+    providerRoute?.bedrockMantle === true ||
     providerRoute?.protocol === "vertex";
   const providerRouteUsable =
     providerRoute &&
@@ -3033,19 +3015,25 @@ async function forwardToUpstream(
       ? "openai-responses"
       : (providerRouteUsable?.protocol ?? modelRoute?.protocol ?? req.protocol);
 
-  // Self-URL-building protocols derive their base from config (region), not
-  // from the route tables. This must take precedence over `modelRoute?.url`:
-  // a claude-* model ID resolves to api.anthropic.com via the model-prefix
-  // route, which would otherwise mask the real Bedrock/Vertex base in logs and
-  // the auth-mismatch check (the Bedrock branch builds its own request URL, so
-  // this is also defensive for any future consumer of effectiveUpstreamBase).
-  // An explicit X-Lore-Upstream-URL header still wins.
-  const selfBuiltUpstreamUrl =
-    effectiveProtocol === "bedrock"
-      ? `https://bedrock-runtime.${config.bedrockRegion}.amazonaws.com`
-      : effectiveProtocol === "vertex"
-        ? `https://${config.vertexRegion}-aiplatform.googleapis.com`
-        : null;
+  // Self-URL-building routes derive their base from config (region), not from
+  // the route tables. This must take precedence over `modelRoute?.url`: a
+  // claude-* model ID resolves to api.anthropic.com via the model-prefix route,
+  // which would otherwise mask the real Bedrock/Vertex base. For bedrock-mantle
+  // the base is the regional mantle endpoint and the wire protocol stays
+  // `anthropic` (so the normal Anthropic path handles it; only body.model is
+  // remapped below). An explicit X-Lore-Upstream-URL header still wins.
+  // bedrock-mantle ALWAYS rides the anthropic wire path (the model remap below
+  // lives only in the anthropic branch). Shared with the snapshot path so the
+  // two can never diverge; see isBedrockMantleDispatch for the invariant.
+  const bedrockMantle = isBedrockMantleDispatch(
+    providerRouteUsable,
+    effectiveProtocol,
+  );
+  const selfBuiltUpstreamUrl = bedrockMantle
+    ? bedrockMantleUrl(config.bedrockRegion)
+    : effectiveProtocol === "vertex"
+      ? `https://${config.vertexRegion}-aiplatform.googleapis.com`
+      : null;
   const effectiveUpstreamBase =
     headerUpstream ??
     selfBuiltUpstreamUrl ??
@@ -3095,64 +3083,6 @@ async function forwardToUpstream(
       `auth/upstream mismatch: GitHub OAuth token (gho_) routed to ${effectiveUpstreamBase} — ` +
         `provider: ${providerID ?? "none"}`,
     );
-  }
-
-  if (effectiveProtocol === "bedrock") {
-    // AWS Bedrock: build request body, sign with SigV4, decode event-stream.
-    // The model ID must be mapped to Bedrock format and the URL is region-specific.
-    // cch billing header is NOT applicable (Anthropic-first-party only).
-    const bedrockModelId = resolveBedrockModelID(req.model);
-    const bedrockUrl = req.stream
-      ? bedrockInvokeUrl(config.bedrockRegion, bedrockModelId)
-      : bedrockInvokeNoStreamUrl(config.bedrockRegion, bedrockModelId);
-
-    const bedrockBody = buildBedrockRequestBody(req, cache);
-    const bedrockHeaders = buildBedrockHeaders(req);
-    const serializedBedrockBody = JSON.stringify(bedrockBody);
-
-    // SigV4 sign the request (mutates headers with Authorization, x-amz-*, etc.)
-    await signBedrockRequest(
-      "POST",
-      bedrockUrl,
-      bedrockHeaders,
-      serializedBedrockBody,
-      config.bedrockRegion,
-      config.bedrockProfile,
-    );
-
-    // Apply user-supplied extra headers (corporate proxies, etc.)
-    applyUpstreamExtraHeaders(bedrockHeaders, config.upstreamExtraHeaders);
-
-    const effectiveInterceptorBR = interceptor ?? activeInterceptor;
-    if (effectiveInterceptorBR) {
-      const response = await effectiveInterceptorBR(
-        bedrockBody,
-        req.model,
-        req.stream,
-        () =>
-          upstreamFetch(bedrockUrl, {
-            method: "POST",
-            headers: bedrockHeaders,
-            body: serializedBedrockBody,
-          }),
-      );
-      return {
-        response,
-        serializedBody: serializedBedrockBody,
-        effectiveProtocol,
-      };
-    }
-
-    const response = await upstreamFetch(bedrockUrl, {
-      method: "POST",
-      headers: bedrockHeaders,
-      body: serializedBedrockBody,
-    });
-    return {
-      response,
-      serializedBody: serializedBedrockBody,
-      effectiveProtocol,
-    };
   }
 
   if (effectiveProtocol === "openai-responses") {
@@ -3218,6 +3148,14 @@ async function forwardToUpstream(
     url = `${effectiveUpstreamBase}${result.url}`;
     headers = result.headers;
     body = result.body;
+    // AWS Bedrock (bedrock-mantle): remap the model id in the OUTGOING body to
+    // the mantle catalog form (`anthropic.<model>`). Only the upstream body is
+    // remapped — `req.model` stays the client id for session/cache tracking.
+    // The mantle endpoint reads `model` from the body (native Anthropic Messages
+    // API), so this is the only Bedrock-specific transform on the request path.
+    if (bedrockMantle && body && typeof body === "object") {
+      (body as { model?: string }).model = toMantleModelId(req.model);
+    }
   }
 
   // Apply user-supplied LORE_UPSTREAM_EXTRA_HEADERS as the final overlay so
@@ -3322,16 +3260,16 @@ function buildStreamingResponse(
     sessionState: SessionState;
     cacheOptions: AnthropicCacheOptions;
   },
-  /** When set, prepend a synthetic warning content block to the stream. */
+  /** When set, prepend a synthetic warning content block to the stream.
+   *  Currently used for the worker-degradation warning (#797 removed the
+   *  unsustainable-conversation warning, but the injection mechanism is
+   *  reusable for any user-actionable warning surfaced mid-stream). */
   warningText?: string,
   /** Session id, for telemetry (abort-under-pressure capture). Passed
    *  independently of recallContext so non-recall turns are still attributable. */
   sessionID?: string,
   /** Per-model client-usage cap (anti-compaction). Defaults to the 200K cap. */
   maxReportedUsage: number = DEFAULT_MAX_REPORTED_USAGE,
-  /** Upstream wire protocol. When "bedrock", decode AWS event-stream → SSE
-   *  before feeding events to the accumulator. Default: "anthropic" (SSE). */
-  upstreamProtocol?: "anthropic" | "bedrock",
 ): Response {
   const recallAccum = recallContext
     ? createRecallAwareAccumulator(RECALL_TOOL_NAME, {
@@ -3424,12 +3362,7 @@ function buildStreamingResponse(
         const warningOffset = warningText ? 1 : 0;
 
         resetKeepalive();
-        // Bedrock uses AWS binary event-stream framing instead of SSE.
-        // Decode it to { event, data } pairs before feeding the accumulator.
-        const eventStream =
-          upstreamProtocol === "bedrock"
-            ? decodeBedrockEventStream(reader)
-            : parseSSEStream(reader);
+        const eventStream = parseSSEStream(reader);
         for await (const { event, data } of eventStream) {
           resetKeepalive(); // upstream is alive — reset inactivity timer
           const forwarded = accumulator.processEvent(event, data);
@@ -3821,7 +3754,6 @@ async function accumulateNonStreamResponse(
     | "anthropic"
     | "openai"
     | "openai-responses"
-    | "bedrock"
     | "vertex" = "anthropic",
 ): Promise<GatewayResponse> {
   // Some providers (e.g. DeepSeek) return SSE-formatted responses even when
@@ -3841,10 +3773,9 @@ async function accumulateNonStreamResponse(
       return accumulateOpenAINonStreamJSON(json);
     case "openai-responses":
       return accumulateResponsesNonStreamJSON(json);
-    case "bedrock":
-      // Bedrock non-streaming returns the same JSON structure as Anthropic
-      return parseBedrockResponseJSON(json);
     default:
+      // Anthropic (incl. Bedrock via bedrock-mantle, which returns the native
+      // Anthropic non-streaming JSON shape).
       return accumulateAnthropicNonStreamJSON(json);
   }
 }
@@ -4267,12 +4198,22 @@ export function recordCacheTurnUsage(
   // behavior on the rare no-body path.
   let bustCause: CacheBustCause | undefined;
   if (requestBody) {
+    // Read the unified cache strategy so the cache-analytics warn path can
+    // skip the dramatic-drop alert for cool-* sessions (those strategies
+    // explicitly chose to let the prefix go cold; the alert is just noise).
+    // Result is `undefined` for non-confident strategies — analyzeCacheTurn
+    // falls back to the existing noisy behavior in that case (conservative).
+    const econResult = getCacheStrategy(sessionState.sessionID);
+    const cacheStrategy = econResult?.result.confident
+      ? econResult.result.strategy
+      : undefined;
     const turnAnalysis = analyzeCacheTurn(
       sessionState.cacheAnalytics,
       requestBody,
       usage,
       sessionState.sessionID,
       sessionState.messageCount,
+      cacheStrategy,
     );
     bustCause = categorizeBust(turnAnalysis, turnWasIdleResume);
     if (genAiSpan) {
@@ -4603,12 +4544,12 @@ function postResponse(
     const lpRoute = lpProvider ? resolveProviderRoute(lpProvider) : null;
     const lpHeaderUpstream = extractUpstreamUrlHeader(req.rawHeaders);
     // MUST mirror `providerRouteUsable` in forwardToUpstream: self-URL-building
-    // protocols (bedrock/vertex build their region URL from config) are usable
-    // with a null route url. Without this, a `X-Lore-Provider: bedrock` session
-    // would record snapshotProtocol "anthropic" (via the claude-* model route)
-    // in the UpstreamSnapshot that workers/warmer/idle treat as source of truth.
+    // routes (bedrock-mantle builds its region URL from config; vertex likewise)
+    // are usable with a null route url. Without this, a `X-Lore-Provider:
+    // bedrock` session would record the wrong base URL in the UpstreamSnapshot
+    // that workers/warmer/idle treat as source of truth.
     const lpSelfUrlBuilding =
-      lpRoute?.protocol === "bedrock" || lpRoute?.protocol === "vertex";
+      lpRoute?.bedrockMantle === true || lpRoute?.protocol === "vertex";
     const lpRouteUsable =
       lpRoute && (lpRoute.url != null || lpHeaderUpstream || lpSelfUrlBuilding)
         ? lpRoute
@@ -4617,22 +4558,26 @@ function postResponse(
       | "anthropic"
       | "openai"
       | "openai-responses"
-      | "bedrock"
       | "vertex" =
       req.protocol === "openai-responses"
         ? "openai-responses"
         : (lpRouteUsable?.protocol ??
           resolveUpstreamRoute(req.model)?.protocol ??
           req.protocol);
+    // Mirror forwardToUpstream exactly (same shared predicate).
+    const lpBedrockMantle = isBedrockMantleDispatch(
+      lpRouteUsable,
+      snapshotProtocol,
+    );
 
-    // Self-URL-building protocols derive their base from config (region) — mirror
-    // effectiveUpstreamBase so the snapshot url isn't empty/wrong for bedrock.
-    const lpSelfBuiltUrl =
-      snapshotProtocol === "bedrock"
-        ? `https://bedrock-runtime.${config.bedrockRegion}.amazonaws.com`
-        : snapshotProtocol === "vertex"
-          ? `https://${config.vertexRegion}-aiplatform.googleapis.com`
-          : null;
+    // Self-URL-building routes derive their base from config (region) — mirror
+    // effectiveUpstreamBase so the snapshot url isn't empty/wrong. bedrock-mantle
+    // uses the regional mantle endpoint (wire protocol stays anthropic).
+    const lpSelfBuiltUrl = lpBedrockMantle
+      ? bedrockMantleUrl(config.bedrockRegion)
+      : snapshotProtocol === "vertex"
+        ? `https://${config.vertexRegion}-aiplatform.googleapis.com`
+        : null;
 
     const upstreamSnapshot: UpstreamSnapshot = {
       url: lpHeaderUpstream ?? lpSelfBuiltUrl ?? lpRoute?.url ?? "",
@@ -5557,26 +5502,6 @@ async function handlePassthrough(
         return translateAnthropicStreamToResponses(anthropicSSE);
       }
     }
-    if (effectiveProtocol === "bedrock") {
-      // Bedrock event-stream → decode to Anthropic SSE, then translate if needed.
-      // Meta requests (title gen, summaries) are non-cached, so no cch concerns.
-      const anthropicSSE = buildStreamingResponse(
-        upstreamResponse,
-        () => {},
-        undefined,
-        undefined,
-        undefined,
-        maxReportedUsageForModelID(req.model),
-        "bedrock",
-      );
-      if (req.protocol === "openai") {
-        return translateAnthropicStreamToOpenAI(anthropicSSE);
-      }
-      if (req.protocol === "openai-responses") {
-        return translateAnthropicStreamToResponses(anthropicSSE);
-      }
-      return anthropicSSE;
-    }
     // Other cross-protocol streaming combos: accumulate + re-emit
     const resp = await accumulateNonStreamResponse(
       upstreamResponse,
@@ -5670,7 +5595,12 @@ async function handleConversationTurn(
   // --- 2. Capture auth credentials for background workers ---
   const cred = extractAuth(req.rawHeaders);
   if (cred) {
-    setLastSeenAuth(cred);
+    // Tag the global fallback with the request's provider so a worker for a
+    // different provider can't borrow this credential (cross-contamination,
+    // #829). Falls back to the upstream destination URL when no x-lore-provider
+    // header is present — e.g. credentialed title/summary-gen requests that
+    // bypass the per-turn chat.headers hook (#942).
+    setLastSeenAuth(cred, resolveLastSeenProvider(req.rawHeaders));
   }
 
   // --- 3. Session identification ---
@@ -6852,40 +6782,28 @@ async function handleConversationTurn(
   // lives statically in RECALL_TOOL_DESCRIPTION, which never busts the cache.
   // See issue #741.
 
-  // --- 7d. Unsustainable conversation warning ---
-  // When a sustained run of consecutive cache busts is detected (gradient's
-  // SUSTAINED_BUST_THRESHOLD), flag for response-side injection.
-  // The warning is injected into the assistant response (not the user message) so:
-  //  1. The user can actually see it (not hidden in <system-reminder> tags)
-  //  2. No modification to user messages → no cache prefix divergence
-  //  3. Stripped on the next turn to restore API-original content for cache
-  const unsustainable = result.unsustainable;
-  const unsustainableBusts = result.consecutiveBusts;
-  if (unsustainable) {
-    log.warn(
-      `session ${sessionID}: unsustainable conversation detected (${unsustainableBusts ?? "several"} consecutive cache busts). ` +
-        `Warning will be prepended to response.`,
-    );
-  }
-
-  // Worker-degradation warning: surfaced when background workers (distillation,
-  // curation, cache-warming) have been failing for a sustained period, so the
-  // user is told instead of silently losing compression/LTM. Reuses the same
-  // marker-based response injection as the unsustainable warning. The
-  // unsustainable warning takes precedence when both apply (it's the more
-  // urgent, actionable signal); we never inject two warning blocks.
-  const workerWarningText = unsustainable
-    ? undefined
-    : buildWorkerDegradationWarning(sessionID);
+  // --- 7d. Response-side warning injection ---
+  // The previous "unsustainable conversation detected (N consecutive cache busts)"
+  // warning was removed (#797). Rationale: the user has no actionable response
+  // (cache spirals are almost always upstream bugs — prefix drift, idle
+  // recompression artifacts, LTM pin mismatch — not user-correctable behavior),
+  // and the message was misleading. The bust-spiral signal is now routed
+  // directly to Sentry via `setupBustSpiralCapture` (past-grace = error,
+  // in-grace = info breadcrumb, recovery = info breadcrumb).
+  //
+  // Worker-degradation warning: still surfaced when background workers
+  // (distillation, curation, cache-warming) have been failing for a sustained
+  // period, so the user is told instead of silently losing compression/LTM.
+  // The user CAN act on this (e.g. check credentials / provider status), so
+  // user-visible text remains the right channel.
+  const workerWarningText = buildWorkerDegradationWarning(sessionID);
   if (workerWarningText) {
     log.warn(
       `session ${sessionID}: worker degradation detected — warning will be prepended to response.`,
     );
   }
   // A single combined flag/text drives all injection sites below.
-  const warningText: string | undefined = unsustainable
-    ? contextWarningText(unsustainableBusts)
-    : (workerWarningText ?? undefined);
+  const warningText: string | undefined = workerWarningText ?? undefined;
   const shouldInjectWarning = !!warningText;
 
   // --- 8. Build the modified request ---
@@ -7517,7 +7435,6 @@ async function handleConversationTurn(
       // Cap usage against the model the CLIENT meters against (its requested
       // model), so a 1M-context model isn't throttled to the 200K cap.
       maxReportedUsageForModelID(req.model),
-      effectiveProtocol === "bedrock" ? "bedrock" : "anthropic",
     );
     // Translate to client's wire format if needed. When the upstream is
     // Anthropic but the client speaks OpenAI, wrap the Anthropic SSE stream.
@@ -8177,10 +8094,12 @@ export async function handleRequest(
       return errorResponse(400, "Malformed request: missing headers");
     }
 
-    // Capture auth credentials early for background workers
+    // Capture auth credentials early for background workers. Tag by the
+    // explicit x-lore-provider header, falling back to the upstream URL for
+    // header-less credentialed requests (#829/#942).
     const earlyAuth = extractAuth(req.rawHeaders);
     if (earlyAuth) {
-      setLastSeenAuth(earlyAuth);
+      setLastSeenAuth(earlyAuth, resolveLastSeenProvider(req.rawHeaders));
     }
 
     // --- Quick Tier-1 session lookup for structural compaction detection ---

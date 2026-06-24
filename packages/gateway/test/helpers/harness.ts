@@ -90,9 +90,13 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
   // Set env vars BEFORE any gateway/core imports so db.ts picks up the right path
   process.env.LORE_DB_PATH = dbPath;
 
-  // --- 2. Random port in [20000, 50000) ---
-  const port =
-    opts.configOverrides?.port ?? 20000 + Math.floor(Math.random() * 30000);
+  // --- 2. Port 0 = OS-assigned ephemeral port ---
+  // Binding to 0 lets the OS hand out a guaranteed-free port; startServer
+  // resolves the actual bound port and exposes it as server.port (used for
+  // baseURL below). This avoids the EADDRINUSE flakes that a random port in a
+  // fixed range produced when two harnesses drew the same number or a just-
+  // stopped server hadn't released its port yet. See issue #931.
+  const port = opts.configOverrides?.port ?? 0;
 
   process.env.LORE_LISTEN_PORT = String(port);
 

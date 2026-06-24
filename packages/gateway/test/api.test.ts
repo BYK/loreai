@@ -22,8 +22,9 @@ beforeAll(async () => {
   dbPath = `/tmp/lore-api-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
   process.env.LORE_DB_PATH = dbPath;
 
-  const port = 20000 + Math.floor(Math.random() * 30000);
-  process.env.LORE_LISTEN_PORT = String(port);
+  // Port 0 = OS-assigned ephemeral port; server.port returns the actual bound
+  // port (used for baseURL below). Avoids EADDRINUSE random-port flakes (#931).
+  process.env.LORE_LISTEN_PORT = "0";
   process.env.LORE_DEBUG = "false";
 
   const { startServer } = await import("../src/server");

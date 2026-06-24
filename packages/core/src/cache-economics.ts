@@ -87,6 +87,27 @@ export interface CacheEconomicsInput {
    * `fullBody·read` every one of these turns, vs `compressed·read` if compacted.
    */
   expectedFutureTurns: number;
+  /**
+   * #947 — meta-distillation threshold (gen-0 segments per meta cycle). When
+   * `expectedFutureTurns / metaThreshold` is the expected number of meta-busts
+   * during the resumed-session horizon. Default 0 (or non-finite) disables the
+   * meta-aware adjustment: output is byte-identical to the pre-#947 behavior.
+   *
+   * Pass `cfg.distillation.metaThreshold` from the call site. The bust-pressure
+   * override (`effectiveMetaThreshold`) is intentionally NOT threaded here —
+   * this model computes the session-AVERAGE expected busts; the bust-pressure
+   * override is a SCHEDULE concern handled by the idle handler. See plan
+   * follow-up "Effective-meta-threshold wiring" filed as a follow-up issue.
+   */
+  metaThreshold?: number;
+  /**
+   * #947 — per-call cost of a meta-distillation ($). Pre-computed at the call
+   * site from worker model rates × estimated input/output token counts (see
+   * `evaluateCacheStrategy` in gradient.ts). Default 0 (or non-finite)
+   * disables the LLM-cost term in the meta-aware adjustment; the cache-read
+   * miss term still applies.
+   */
+  metaDistillCostPerCall?: number;
 }
 
 export interface CacheEconomicsResult {
@@ -97,7 +118,11 @@ export interface CacheEconomicsResult {
   // (NOT $/MTok). They are primarily for logging/telemetry.
   /** Expected cost of holding the body warm across the horizon. */
   holdWarmCost: number;
-  /** Expected cost of cooling and compacting on return ($). */
+  /**
+   * Expected cost of cooling and compacting on return, INCLUDING the #947
+   * meta-aware adjustment for intra-session meta-bust risk. When the meta
+   * fields are 0/missing, this matches the pre-#947 formula exactly.
+   */
   coolBustCost: number;
   /** Expected cost of cooling without compacting (cold full write) ($). */
   coolFullWriteCost: number;
@@ -107,6 +132,21 @@ export interface CacheEconomicsResult {
    * rather than acting on the (meaningless) strategy.
    */
   confident: boolean;
+  /**
+   * #947 — expected number of meta-busts during the resumed-session horizon
+   * (= `clamp01(expectedFutureTurns / metaThreshold)`). 0 when meta fields
+   * are missing/non-finite. Reported for logging/observability (Sentry
+   * shadow-mode cohort analysis) — does NOT affect the strategy decision in
+   * shadow mode.
+   */
+  expectedMetaBusts: number;
+  /**
+   * #947 — total meta-bust cost adjustment added to `coolBustCost`
+   * (= `expectedMetaBusts × bustCostPerBust`). 0 when meta fields are
+   * missing/non-finite OR when compressed === full (no compaction
+   * advantage to lose). Reported for logging/observability.
+   */
+  metaBustCost: number;
 }
 
 function clamp01(x: number): number {
@@ -175,6 +215,8 @@ export function decideCacheStrategy(
       coolBustCost: 0,
       coolFullWriteCost: 0,
       confident: false,
+      expectedMetaBusts: 0,
+      metaBustCost: 0,
     };
   }
 
@@ -191,7 +233,7 @@ export function decideCacheStrategy(
     cycles * fullBodyTokens * readPerToken +
     pReturn * (1 + futureTurns) * fullBodyTokens * readPerToken;
 
-  const coolBustCost =
+  const coolBustCostBase =
     pReturn *
     (compressed * writePerToken + futureTurns * compressed * readPerToken);
 
@@ -199,6 +241,51 @@ export function decideCacheStrategy(
     pReturn *
     (fullBodyTokens * writePerToken +
       futureTurns * fullBodyTokens * readPerToken);
+
+  // #947 — meta-aware adjustment to coolBustCost only. A mid-flight meta-bust
+  // destroys the compressed-prefix advantage: the remaining `futureTurns - T`
+  // turns (where T is the bust time) pay `full · read` instead of
+  // `compressed · read`. Under a uniform-bust-time assumption (T ∈ [0, futureTurns],
+  // i.e. bust can happen as early as the first resumed turn), the expected
+  // "remaining turns after bust" is the integral of `futureTurns - T` over
+  // `[0, futureTurns]`, divided by `futureTurns`, which is exactly
+  // `futureTurns / 2` (no constant offset). The per-bust cache-read-miss cost
+  // is therefore `(futureTurns / 2) × (full - compressed) × read`.
+  //
+  // The adjustment is gated on TWO conditions (any one failing → 0):
+  //   1. `metaThreshold > 0` (caller actually configured meta). Default 0 (or
+  //      non-finite) → no adjustment, byte-identical to the pre-#947 output.
+  //   2. `compressed < full` (compaction advantage exists to lose). With
+  //      `compressed === full` the no-compaction invariant forces
+  //      `coolBustCost === coolFullWriteCost`; adding any adjustment here
+  //      would create a phantom bust and violate the "bust must never be
+  //      reported as cheaper" invariant.
+  // (`futureTurns > 0` is implicitly handled: `finiteNonNeg` floors to 0,
+  // and `clamp01(0/metaThreshold) = 0` collapses the term. The gate was
+  // removed because mutation testing confirmed it was dead code.)
+  const metaThreshold = finiteNonNeg(input.metaThreshold ?? 0);
+  const metaDistillCostPerCall = finiteNonNeg(
+    input.metaDistillCostPerCall ?? 0,
+  );
+  const hasCompactionAdvantage = compressed < fullBodyTokens;
+  const expectedBusts =
+    metaThreshold > 0 && hasCompactionAdvantage
+      ? clamp01(futureTurns / metaThreshold)
+      : 0;
+  const bustCostPerBust =
+    (futureTurns / 2) * (fullBodyTokens - compressed) * readPerToken +
+    metaDistillCostPerCall;
+  // The meta-bust cost is conditional on the session returning (no return →
+  // no resumed session → no mid-flight busts), so the EXPECTED cost over the
+  // idle→return horizon is `pReturn × (expectedBusts × bustCostPerBust)`.
+  // The `pReturn` factor is consistent with the rest of the cost model:
+  // every return-conditional term (coolBustCostBase, coolFullWriteCost, the
+  // (1+futureTurns) term in holdWarmCost) is scaled by pReturn. Without this
+  // scaling the adjustment would inflate the cost for sessions unlikely to
+  // return (pReturn≈0), biasing the strategy toward hold-warm even when
+  // warming is the wrong call (Seer finding on #947, medium severity).
+  const metaBustCost = pReturn * expectedBusts * bustCostPerBust;
+  const coolBustCost = coolBustCostBase + metaBustCost;
 
   // Pick the cheapest. Among the two cool options, prefer `cool-bust` only when
   // compaction is STRICTLY cheaper — a tie means compaction buys nothing (e.g.
@@ -217,12 +304,52 @@ export function decideCacheStrategy(
     coolBustCost,
     coolFullWriteCost,
     confident: true,
+    expectedMetaBusts: expectedBusts,
+    metaBustCost,
   };
 }
 
 /** Whether the chosen strategy calls for the cache warmer to keep warming. */
 export function strategyWantsWarming(strategy: CacheStrategy): boolean {
   return strategy === "hold-warm";
+}
+
+/**
+ * #947 — estimate the per-call cost of a meta-distillation ($/call), in the same
+ * currency unit as `readPerToken`/`writePerToken` (so $/token, NOT $/MTok).
+ *
+ * Pre-computed at the call site from the worker model's per-MTok rates and a
+ * documented approximation of the input/output token counts. Defaults are
+ * calibrated to a typical gen-0 segment of 3,000 input tokens and a meta output
+ * budget midpoint of 2,048 tokens.
+ *
+ * Returns 0 when the worker model or any input rate is missing — the cost model
+ * treats this as "no LLM cost term" and only the cache-read-miss term
+ * contributes to `bustCostPerBust`.
+ *
+ * Documented approximation, NOT measured. The point of this function is to
+ * get the cost model directionally right, not to be perfectly calibrated. Real
+ * meta-call costs vary ±2× with segment size and output length; the cohort
+ * analysis (PR2 follow-up) is the validation gate.
+ */
+export function estimateMetaDistillCostPerCall(
+  workerModel:
+    | { cost?: { input?: number; output?: number } }
+    | null
+    | undefined,
+  metaThreshold: number,
+  avgSegmentTokens: number = 3_000,
+  metaOutputTokens: number = 2_048,
+): number {
+  if (!workerModel?.cost?.input || !workerModel.cost?.output) return 0;
+  if (!Number.isFinite(metaThreshold) || metaThreshold <= 0) return 0;
+  // Per-MTok rates → per-token: divide by 1_000_000. Same pattern as
+  // cache-warmer.ts:1275-1277 (per-MTok → per-token conversion).
+  const inputRate = workerModel.cost.input / 1_000_000;
+  const outputRate = workerModel.cost.output / 1_000_000;
+  return (
+    metaThreshold * avgSegmentTokens * inputRate + metaOutputTokens * outputRate
+  );
 }
 
 /**

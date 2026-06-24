@@ -34,6 +34,7 @@ import {
   strategyWantsWarming,
   getCacheSizeSnapshot,
   getCacheStrategy,
+  estimateMetaDistillCostPerCall,
 } from "@loreai/core";
 import type {
   InterTurnHistogram,
@@ -46,7 +47,8 @@ import { resolveAuth, authHeaders, markAuthStale } from "./auth";
 import { recordWorkerFailure, recordWorkerSuccess } from "./worker-health";
 import { resignBody } from "./cch";
 import { resolveUpstreamRoute } from "./config";
-import { getModelEntrySync } from "./worker-model";
+import { isBedrockMantleHost } from "./translate/bedrock";
+import { getModelEntrySync, getWorkerModel } from "./worker-model";
 import { recordWarmupCost } from "./cost-tracker";
 import { upstreamFetch } from "./fetch";
 import { emitWarmupCircuitBreakerMetric } from "./sentry";
@@ -970,13 +972,7 @@ function isAnthropicFirstPartyHost(url: string): boolean {
  */
 export function resolveProfile(
   model: string | undefined,
-  protocol:
-    | "anthropic"
-    | "openai"
-    | "openai-responses"
-    | "bedrock"
-    | "vertex"
-    | undefined,
+  protocol: "anthropic" | "openai" | "openai-responses" | "vertex" | undefined,
   ttl: "5m" | "1h" | undefined,
   upstreamBase?: string,
   providerID?: string,
@@ -984,7 +980,7 @@ export function resolveProfile(
   if (!model || !protocol) return null;
 
   // Only Anthropic protocol for now — OpenAI has automatic prefix caching with
-  // no explicit warming API.
+  // no explicit warming API. (Bedrock rides the anthropic protocol via mantle.)
   if (protocol !== "anthropic") return null;
 
   // 🔴 Gate on Anthropic IDENTITY, not just the wire protocol. Anthropic-compat
@@ -1004,6 +1000,24 @@ export function resolveProfile(
   // (api.anthropic.com) instead of leaving warmupHost = "" → wrongly skipped.
   const route = resolveUpstreamRoute(model);
   const warmupHost = upstreamBase || route?.url;
+
+  // AWS Bedrock via bedrock-mantle: prompt caching IS supported, so warm it.
+  // Unlike MiniMax/Fireworks (foreign anthropic-compat hosts we must NOT warm,
+  // because that would send the session key to api.anthropic.com), the mantle
+  // warmup hits the SESSION's own mantle host with the SESSION's Bedrock API
+  // key — the exact credential the real turns use. The warmup BODY already
+  // carries the mantle model id (the conversation path remapped it before it
+  // was stored as lastRequestBody), so we pass the CLIENT model id here purely
+  // for the models.dev cost lookup (the mantle `anthropic.<model>` id would not
+  // resolve to a pricing entry).
+  const isBedrockMantle =
+    providerID === "bedrock" ||
+    providerID === "amazon-bedrock" ||
+    (!!warmupHost && isBedrockMantleHost(warmupHost));
+  if (isBedrockMantle) {
+    return buildAnthropicProfile(model, ttl ?? "5m", upstreamBase);
+  }
+
   const isAnthropic =
     providerID === "anthropic" ||
     (!!warmupHost && isAnthropicFirstPartyHost(warmupHost));
@@ -1255,9 +1269,37 @@ export function shouldWarm(
       maxCycles,
     );
     const expectedFutureTurns = Math.min(totalTurns, SHADOW_FUTURE_TURNS_CAP);
+    // #947 — meta-aware cost model. Source the meta threshold from config
+    // and pre-compute the per-call LLM cost from the worker model rates. The
+    // pure function falls back to "no adjustment" (byte-identical to pre-#947)
+    // when either is missing — so the cost model flip is opt-in by config.
+    const metaThreshold = cfg.distillation.metaThreshold;
+    // Seer finding (medium severity): price meta-distillation with the
+    // WORKER model's rates, not the session model's. Meta-distillation is
+    // performed by a worker LLM (typically cheaper than the session model —
+    // e.g. Sonnet for a Sonnet session, MiniMax-MiniMax for an Opus session).
+    // Using `state.lastUpstream?.model` would price the meta call at the
+    // session model rate (Opus), inflating the cost and biasing the
+    // strategy toward hold-warm when warming is the wrong call. The same
+    // `getWorkerModel(...)` pattern is used by idle.ts and pipeline.ts for
+    // analogous cost calculations.
+    const workerModelID = getWorkerModel(state.lastUpstream)?.modelID;
+    const workerModel = workerModelID
+      ? getModelEntrySync(workerModelID)
+      : undefined;
+    const metaDistillCostPerCall = estimateMetaDistillCostPerCall(
+      workerModel,
+      metaThreshold,
+    );
     const result = evaluateCacheStrategy(
       state.sessionID,
-      { pReturn: pReturns, expectedCycles, expectedFutureTurns },
+      {
+        pReturn: pReturns,
+        expectedCycles,
+        expectedFutureTurns,
+        metaThreshold,
+        metaDistillCostPerCall,
+      },
       {
         readPerToken: cacheReadCostPerMTok / 1_000_000,
         writePerToken: cacheMissCostPerMTok / 1_000_000,
@@ -1275,6 +1317,8 @@ export function shouldWarm(
           `gradFull=${snap?.full ?? "?"} gradCompressed=${snap?.compressed ?? "?"} ` +
           `apiActual=${apiActual} pReturn=${pReturns.toFixed(2)} ` +
           `cycles=${expectedCycles.toFixed(1)} futureTurns=${expectedFutureTurns} ` +
+          `meta[threshold=${metaThreshold} expectedBusts=${result.expectedMetaBusts.toFixed(3)} ` +
+          `bustCost=${result.metaBustCost.toFixed(4)}] ` +
           `costs[hold=${result.holdWarmCost.toFixed(4)} ` +
           `coolBust=${result.coolBustCost.toFixed(4)} ` +
           `coolFull=${result.coolFullWriteCost.toFixed(4)}]`,

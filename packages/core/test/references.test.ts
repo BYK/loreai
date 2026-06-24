@@ -103,8 +103,12 @@ describe("extractReferences", () => {
   });
 
   test("make actual targets ARE still extracted", () => {
-    const refs = extractReferences("run make check, make build-prod, and make test");
-    const cmds = refs.filter((r) => r.kind === "command" && r.runner === "make");
+    const refs = extractReferences(
+      "run make check, make build-prod, and make test",
+    );
+    const cmds = refs.filter(
+      (r) => r.kind === "command" && r.runner === "make",
+    );
     expect(cmds).toHaveLength(3);
   });
 });

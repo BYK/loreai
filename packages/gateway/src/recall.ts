@@ -437,7 +437,6 @@ export type RecallProtocol =
   | "anthropic"
   | "openai"
   | "openai-responses"
-  | "bedrock"
   | "vertex";
 
 /**

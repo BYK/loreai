@@ -27,11 +27,14 @@ import {
   consumeCameOutOfIdle,
   inspectSessionState,
   setLastTurnAtForTest,
+  setTransformCountForTest,
+  setBustSpiralHook,
   prefixPresentFloorApplies,
   recordCacheUsage,
   setCachePricing,
   effectiveMetaThreshold,
   BUST_PRESSURE_THRESHOLD,
+  COLD_START_GRACE_TURNS,
   setMaxLayer0Tokens,
   getCachePricing,
   shouldCompress,
@@ -4047,13 +4050,14 @@ describe("tier-based context management", () => {
       expect(result.layer).toBe(0);
     });
 
-    test("over-cap session that bypasses compression STILL reports unsustainable", () => {
+    test("over-cap session that bypasses compression STILL fires the bust-spiral alert (#797)", () => {
       // The tier-gate bypass returns at layer 0 but for a genuinely over-cap
       // conversation (it merely declined to compress because the bust cost
-      // wasn't justified). That path MUST keep surfacing the warning — it is a
-      // real exhaustion signal, distinct from the cap-fitting passthrough which
-      // hardcodes unsustainable:false. This locks the intentional distinction
-      // so a future refactor can't silently collapse the two layer-0 returns.
+      // wasn't justified). That path MUST surface the alert past the cold-start
+      // grace window — it is a real exhaustion signal, distinct from the
+      // cap-fitting passthrough which never alerts (busts there are structural,
+      // not genuine growth). This locks the intentional distinction so a future
+      // refactor can't silently collapse the two layer-0 returns.
       const msgs = Array.from({ length: 8 }, (_, i) =>
         makeMsg(
           `bypass-${i}`,
@@ -4078,19 +4082,33 @@ describe("tier-based context management", () => {
         true,
       );
 
-      const result = transform({
-        messages: msgs,
-        projectPath: PROJECT,
-        sessionID: SESSION,
+      // Register a hook to capture the alert — and seed past-grace so the
+      // gate fires (transform() increments the counter again below).
+      const calls: Array<{ kind: string; info: unknown }> = [];
+      setBustSpiralHook({
+        onColdStart: (info) => calls.push({ kind: "coldStart", info }),
+        onSpiral: (info) => calls.push({ kind: "spiral", info }),
+        onRecovered: (info) => calls.push({ kind: "recovered", info }),
       });
+      try {
+        setTransformCountForTest(SESSION, COLD_START_GRACE_TURNS + 1);
+        const result = transform({
+          messages: msgs,
+          projectPath: PROJECT,
+          sessionID: SESSION,
+        });
 
-      // Bypassed compression → layer 0, but genuinely over the cap (tier >= 1)…
-      expect(result.layer).toBe(0);
-      expect(getTier(result.totalTokens)).toBeGreaterThanOrEqual(1);
-      // …so the warning MUST still fire (unlike the cap-fitting passthrough).
-      expect(result.unsustainable).toBe(true);
-      // Restore pricing for sibling tests.
-      setCachePricing(6.25 / 1_000_000, 0.5 / 1_000_000);
+        // Bypassed compression → layer 0, but genuinely over the cap (tier >= 1).
+        expect(result.layer).toBe(0);
+        expect(getTier(result.totalTokens)).toBeGreaterThanOrEqual(1);
+        // Past-grace spiral → onSpiral MUST fire (unlike the cap-fit passthrough,
+        // which never fires the hook).
+        expect(calls.map((c) => c.kind)).toEqual(["spiral"]);
+        expect(inspectSessionState(SESSION)?.bustSpiralAlerted).toBe(true);
+      } finally {
+        setBustSpiralHook(null);
+        setCachePricing(6.25 / 1_000_000, 0.5 / 1_000_000);
+      }
     });
   });
 
@@ -4528,18 +4546,20 @@ describe("tier-based context management", () => {
     });
   });
 
-  describe("unsustainable gating — only fires when genuinely over the layer-0 cap", () => {
+  describe("unsustainable gating — only alerts when genuinely over the layer-0 cap (#797)", () => {
     // Regression for false "unsustainable conversation" warnings on a small
     // (tier-0) session that fits layer 0 with headroom. The bug surfaced when a
     // sub-cap session accumulated consecutive cache busts from a structural
     // cause (stale prompt-delta position post-idle) — consecutiveBusts climbed
     // unbounded and the warning fired every turn even though the conversation
-    // was trivially sustainable. unsustainable must be gated on real context
-    // exhaustion (tier >= 1 / over the layer-0 cap), not on the bust count alone.
+    // was trivially sustainable. The bust-spiral alert must NOT fire for a
+    // tier-0 (under-cap) session even past the cold-start grace window —
+    // busts there come from structural causes, not genuine context growth.
     const SID = "unsustainable-gate-sess";
 
     beforeEach(() => {
       resetCalibration(SID);
+      setBustSpiralHook(null);
       setModelLimits({ context: 10_000, output: 2_000 });
       calibrate(0);
     });
@@ -4547,9 +4567,10 @@ describe("tier-based context management", () => {
     afterAll(() => {
       setModelLimits({ context: 10_000, output: 2_000 });
       calibrate(0);
+      setBustSpiralHook(null);
     });
 
-    test("tier-0 layer-0 passthrough never reports unsustainable, even after sustained busts", () => {
+    test("tier-0 layer-0 passthrough never alerts, even after sustained busts past grace", () => {
       const messages = [
         makeMsg("u-1", "user", "Hello", SID),
         makeMsg("u-2", "assistant", "Hi", SID),
@@ -4561,17 +4582,371 @@ describe("tier-based context management", () => {
       recordCacheUsage(100_000, 0, 3, SID);
       expect((inspectSessionState(SID)?.consecutiveBusts ?? 0) >= 2).toBe(true);
 
-      const result = transform({
-        messages,
-        projectPath: PROJECT,
-        sessionID: SID,
+      // Register a hook — it MUST NOT fire for a sub-cap session even past
+      // the cold-start grace window.
+      const calls: Array<{ kind: string }> = [];
+      setBustSpiralHook({
+        onColdStart: () => calls.push({ kind: "coldStart" }),
+        onSpiral: () => calls.push({ kind: "spiral" }),
+        onRecovered: () => calls.push({ kind: "recovered" }),
       });
+      try {
+        setTransformCountForTest(SID, COLD_START_GRACE_TURNS + 1);
+        const result = transform({
+          messages,
+          projectPath: PROJECT,
+          sessionID: SID,
+        });
 
-      // Small conversation: layer 0, tier 0 — genuinely sustainable.
-      expect(result.layer).toBe(0);
-      expect(getTier(result.totalTokens)).toBe(0);
-      // The signal must NOT fire for a sub-cap conversation.
-      expect(result.unsustainable).toBe(false);
+        // Small conversation: layer 0, tier 0 — genuinely sustainable.
+        expect(result.layer).toBe(0);
+        expect(getTier(result.totalTokens)).toBe(0);
+        // No alert despite busts being at threshold and transformCount past grace.
+        expect(calls).toEqual([]);
+      } finally {
+        setBustSpiralHook(null);
+      }
+    });
+  });
+
+  describe("bust-spiral alerting — cold-start grace + past-grace alert + recovery (#797)", () => {
+    // A freshly-tracked large session inherently rewrites its body for the
+    // first few turns (cold write → LTM injection → layer 0→1 transition),
+    // tripping the consecutive-bust counter even though it stabilizes a turn
+    // or two later. We surface this via a host-registered hook
+    // (gateway → Sentry) rather than the old user-facing warning: cold-start
+    // episodes emit an info-level breadcrumb; past-grace sustained busts
+    // fire a high-severity alert (debounced per episode); recovery emits a
+    // breadcrumb. The economic `consecutiveBusts` counter (which drives
+    // compression) is left untouched.
+    const SID = "bust-spiral-sess";
+
+    beforeEach(() => {
+      resetCalibration(SID);
+      resetPrefixCache();
+      resetRawWindowCache();
+      setBustSpiralHook(null);
+      // Same high-context, over-cap setup as the tier-gate test. Per-test
+      // helpers set pricing: (0,0) → shouldCompress() declines → tier-gate
+      // bypass at layer 0 (path b); real pricing → compresses (path c).
+      setModelLimits({ context: 1_000_000, output: 32_000 });
+      setMaxLayer0Tokens(200_000);
+      setCachePricing(0, 0);
+    });
+
+    afterAll(() => {
+      // Restore suite-wide defaults so later describe blocks are unaffected.
+      setModelLimits({ context: 10_000, output: 2_000 });
+      setMaxLayer0Tokens(0);
+      setCachePricing(0, 0);
+      resetCalibration(SID);
+      setBustSpiralHook(null);
+    });
+
+    // Capture hook calls for assertions.
+    interface HookCall {
+      kind: "coldStart" | "spiral" | "recovered";
+      sessionID: string;
+      consecutiveBusts: number;
+      transformCount: number;
+      layer: number;
+    }
+    function captureHook(): HookCall[] {
+      const calls: HookCall[] = [];
+      setBustSpiralHook({
+        onColdStart: (info) =>
+          calls.push({
+            kind: "coldStart",
+            sessionID: info.sessionID,
+            consecutiveBusts: info.consecutiveBusts,
+            transformCount: info.transformCount,
+            layer: info.layer,
+          }),
+        onSpiral: (info) =>
+          calls.push({
+            kind: "spiral",
+            sessionID: info.sessionID,
+            consecutiveBusts: info.consecutiveBusts,
+            transformCount: info.transformCount,
+            layer: info.layer,
+          }),
+        onRecovered: (info) =>
+          calls.push({
+            kind: "recovered",
+            sessionID: info.sessionID,
+            consecutiveBusts: info.consecutiveBusts,
+            transformCount: info.transformCount,
+            layer: info.layer,
+          }),
+      });
+      return calls;
+    }
+
+    // Build an over-cap, sustained-bust session that takes the tier-gate bypass
+    // (layer 0 while over the cap). Does NOT call transform() — leaves
+    // transformCount untouched so callers control the grace position.
+    function setUpOverCapBustingSession(): LoreMessageWithParts[] {
+      const msgs = Array.from({ length: 8 }, (_, i) =>
+        makeMsg(
+          `cs-${i}`,
+          i % 2 === 0 ? "user" : "assistant",
+          "z".repeat(200),
+          SID,
+        ),
+      );
+      // Large grown input, over the 200K layer-0 cap.
+      calibrate(635_000, SID, msgs.length);
+      // No pricing → shouldCompress() conservatively returns false, so the tier
+      // gate bypasses compression and returns at layer 0 while over-cap.
+      setCachePricing(0, 0);
+      // Sustained-bust regime (>= SUSTAINED_BUST_THRESHOLD = 2).
+      for (let i = 0; i < 4; i++) recordCacheUsage(440_000, 34_813, 2, SID);
+      expect((inspectSessionState(SID)?.consecutiveBusts ?? 0) >= 2).toBe(true);
+      return msgs;
+    }
+
+    test("within the grace window: onColdStart fires once, no onSpiral", () => {
+      const msgs = setUpOverCapBustingSession();
+      const calls = captureHook();
+      try {
+        // Fresh session: this is its very first transform → transformCount === 1.
+        const result = transform({
+          messages: msgs,
+          projectPath: PROJECT,
+          sessionID: SID,
+        });
+        expect(result.layer).toBe(0);
+        expect(getTier(result.totalTokens)).toBeGreaterThanOrEqual(1);
+        expect(inspectSessionState(SID)?.transformCount).toBe(1);
+        // The bust spiral IS detected (cold-start episode) → info breadcrumb.
+        // The high-severity alert does NOT fire (we're still in grace).
+        expect(calls.map((c) => c.kind)).toEqual(["coldStart"]);
+        expect(calls[0].transformCount).toBe(1);
+        expect(calls[0].consecutiveBusts).toBeGreaterThanOrEqual(2);
+        expect(calls[0].layer).toBe(0);
+        // Flag set so subsequent in-grace turns don't re-fire.
+        expect(inspectSessionState(SID)?.bustSpiralColdStartLogged).toBe(true);
+        expect(inspectSessionState(SID)?.bustSpiralAlerted).toBe(false);
+
+        // Second transform within the same cold-start episode (still in grace)
+        // must NOT re-fire onColdStart — the cold-start breadcrumb is per
+        // episode, not per turn. Removing the debounce flag check would cause
+        // a second coldStart call here, killing this assertion.
+        transform({ messages: msgs, projectPath: PROJECT, sessionID: SID });
+        expect(calls.map((c) => c.kind)).toEqual(["coldStart"]);
+      } finally {
+        setBustSpiralHook(null);
+      }
+    });
+
+    test("past the grace window: onSpiral fires (debounced per episode)", () => {
+      const msgs = setUpOverCapBustingSession();
+      const calls = captureHook();
+      try {
+        setTransformCountForTest(SID, COLD_START_GRACE_TURNS + 1);
+        const result = transform({
+          messages: msgs,
+          projectPath: PROJECT,
+          sessionID: SID,
+        });
+        expect(result.layer).toBe(0);
+        expect(getTier(result.totalTokens)).toBeGreaterThanOrEqual(1);
+        // Past grace → the alert fires (no cold-start breadcrumb — we're past it).
+        expect(calls.map((c) => c.kind)).toEqual(["spiral"]);
+        expect(inspectSessionState(SID)?.bustSpiralAlerted).toBe(true);
+        // Cold-start flag does NOT set on a past-grace episode.
+        expect(inspectSessionState(SID)?.bustSpiralColdStartLogged).toBe(false);
+      } finally {
+        setBustSpiralHook(null);
+      }
+    });
+
+    test("debounced: subsequent past-grace turns at the same bust level do not re-fire", () => {
+      const msgs = setUpOverCapBustingSession();
+      const calls = captureHook();
+      try {
+        setTransformCountForTest(SID, COLD_START_GRACE_TURNS + 1);
+        transform({ messages: msgs, projectPath: PROJECT, sessionID: SID });
+        transform({ messages: msgs, projectPath: PROJECT, sessionID: SID });
+        transform({ messages: msgs, projectPath: PROJECT, sessionID: SID });
+        // Only one alert fires for the episode, not one per turn.
+        expect(calls.map((c) => c.kind)).toEqual(["spiral"]);
+      } finally {
+        setBustSpiralHook(null);
+      }
+    });
+
+    test("recovery (busts → 0) fires onRecovered and clears the alert flag", () => {
+      const msgs = setUpOverCapBustingSession();
+      const calls = captureHook();
+      try {
+        setTransformCountForTest(SID, COLD_START_GRACE_TURNS + 1);
+        transform({ messages: msgs, projectPath: PROJECT, sessionID: SID });
+        expect(calls.map((c) => c.kind)).toEqual(["spiral"]);
+        // Simulate recovery: bustRatio <= 0.5 (cache hit) resets consecutiveBusts.
+        recordCacheUsage(10, 1_000_000, 1_000, SID);
+        transform({ messages: msgs, projectPath: PROJECT, sessionID: SID });
+        expect(calls.map((c) => c.kind)).toEqual(["spiral", "recovered"]);
+        // Flag cleared so a future spiral can alert again.
+        expect(inspectSessionState(SID)?.bustSpiralAlerted).toBe(false);
+      } finally {
+        setBustSpiralHook(null);
+      }
+    });
+
+    test("post-recovery, a new spiral fires onSpiral again", () => {
+      const msgs = setUpOverCapBustingSession();
+      const calls = captureHook();
+      try {
+        setTransformCountForTest(SID, COLD_START_GRACE_TURNS + 1);
+        // First spiral.
+        transform({ messages: msgs, projectPath: PROJECT, sessionID: SID });
+        // Recover.
+        recordCacheUsage(10, 1_000_000, 1_000, SID);
+        transform({ messages: msgs, projectPath: PROJECT, sessionID: SID });
+        // Bust again → second spiral alerts again.
+        for (let i = 0; i < 4; i++) recordCacheUsage(440_000, 0, 2, SID);
+        transform({ messages: msgs, projectPath: PROJECT, sessionID: SID });
+        expect(calls.map((c) => c.kind)).toEqual([
+          "spiral",
+          "recovered",
+          "spiral",
+        ]);
+      } finally {
+        setBustSpiralHook(null);
+      }
+    });
+
+    test("past-grace with no hook registered: no crash, state still updates", () => {
+      const msgs = setUpOverCapBustingSession();
+      // No hook registered — the detection should be a pure no-op.
+      setBustSpiralHook(null);
+      setTransformCountForTest(SID, COLD_START_GRACE_TURNS + 1);
+      expect(() =>
+        transform({ messages: msgs, projectPath: PROJECT, sessionID: SID }),
+      ).not.toThrow();
+      // State still updates as expected.
+      expect(inspectSessionState(SID)?.bustSpiralAlerted).toBe(true);
+    });
+
+    test("grace boundary is inclusive: <window still in grace, =window+1 past it", () => {
+      const msgs = setUpOverCapBustingSession();
+      const calls = captureHook();
+      try {
+        // First turn: seed (window - 1), transform() increments → lands at
+        // exactly COLD_START_GRACE_TURNS → inclusive <= → still in grace →
+        // cold-start fires (not spiral).
+        setTransformCountForTest(SID, COLD_START_GRACE_TURNS - 1);
+        transform({ messages: msgs, projectPath: PROJECT, sessionID: SID });
+        expect(inspectSessionState(SID)?.transformCount).toBe(
+          COLD_START_GRACE_TURNS,
+        );
+        expect(calls.map((c) => c.kind)).toEqual(["coldStart"]);
+        // Busts have stabilized by now in real life; force a fresh spiral past
+        // grace to test the spiral boundary.
+        for (let i = 0; i < 4; i++) recordCacheUsage(440_000, 34_813, 2, SID);
+        // Second turn: transformCount becomes COLD_START_GRACE_TURNS + 1 → past grace.
+        transform({ messages: msgs, projectPath: PROJECT, sessionID: SID });
+        expect(inspectSessionState(SID)?.transformCount).toBe(
+          COLD_START_GRACE_TURNS + 1,
+        );
+        // spiral (cold-start flag was already set in the first turn, so the
+        // first call didn't fire spiral; the spiral fired in the second turn).
+        expect(calls.map((c) => c.kind)).toEqual(["coldStart", "spiral"]);
+      } finally {
+        setBustSpiralHook(null);
+      }
+    });
+
+    test("compression-stage path (layer >= 1): within grace → coldStart, past → spiral", () => {
+      // Real pricing → shouldCompress() accepts → session compresses to layer >= 1.
+      const msgs = Array.from({ length: 8 }, (_, i) =>
+        makeMsg(
+          `csc-${i}`,
+          i % 2 === 0 ? "user" : "assistant",
+          "x".repeat(200),
+          SID,
+        ),
+      );
+      calibrate(635_000, SID, msgs.length);
+      setCachePricing(6.25 / 1_000_000, 0.5 / 1_000_000);
+      for (let i = 0; i < 6; i++) recordCacheUsage(440_000, 34_813, 2, SID);
+      const calls = captureHook();
+      try {
+        const within = transform({
+          messages: msgs,
+          projectPath: PROJECT,
+          sessionID: SID,
+        });
+        expect(within.layer).toBeGreaterThanOrEqual(1);
+        expect(calls.map((c) => c.kind)).toEqual(["coldStart"]);
+        expect(calls[0].layer).toBeGreaterThanOrEqual(1);
+
+        // Past grace: seed the busts again (transform() reads state) and
+        // transform — spiral should fire now.
+        for (let i = 0; i < 6; i++) recordCacheUsage(440_000, 34_813, 2, SID);
+        setTransformCountForTest(SID, COLD_START_GRACE_TURNS + 1);
+        const past = transform({
+          messages: msgs,
+          projectPath: PROJECT,
+          sessionID: SID,
+        });
+        expect(past.layer).toBeGreaterThanOrEqual(1);
+        expect(calls.map((c) => c.kind)).toEqual(["coldStart", "spiral"]);
+      } finally {
+        setBustSpiralHook(null);
+      }
+    });
+
+    test("emergency layer-4 path: within grace → coldStart, past → spiral", () => {
+      setModelLimits({ context: 2_000, output: 500 });
+      setMaxLayer0Tokens(0);
+      calibrate(0);
+      const bigMsgs = Array.from({ length: 10 }, (_, i) =>
+        makeMsg(
+          `csd-${i}`,
+          i % 2 === 0 ? "user" : "assistant",
+          `Message ${i}: ${"detailed content about various topics and implementation details that span across multiple concerns ".repeat(40)}`,
+          SID,
+        ),
+      );
+      for (let i = 0; i < 4; i++) recordCacheUsage(440_000, 0, 2, SID);
+      const calls = captureHook();
+      try {
+        const within = transform({
+          messages: bigMsgs,
+          projectPath: PROJECT,
+          sessionID: SID,
+        });
+        expect(within.layer).toBe(4);
+        expect(calls.map((c) => c.kind)).toEqual(["coldStart"]);
+        expect(calls[0].layer).toBe(4);
+
+        for (let i = 0; i < 4; i++) recordCacheUsage(440_000, 0, 2, SID);
+        setTransformCountForTest(SID, COLD_START_GRACE_TURNS + 1);
+        const past = transform({
+          messages: bigMsgs,
+          projectPath: PROJECT,
+          sessionID: SID,
+        });
+        expect(past.layer).toBe(4);
+        expect(calls.map((c) => c.kind)).toEqual(["coldStart", "spiral"]);
+      } finally {
+        setBustSpiralHook(null);
+      }
+    });
+
+    test("transformCount increments exactly once per transform() call", () => {
+      resetCalibration(SID);
+      expect(inspectSessionState(SID)).toBeNull();
+      const msgs = [
+        makeMsg("inc-1", "user", "hello", SID),
+        makeMsg("inc-2", "assistant", "hi", SID),
+      ];
+      for (let n = 1; n <= 5; n++) {
+        transform({ messages: msgs, projectPath: PROJECT, sessionID: SID });
+        expect(inspectSessionState(SID)?.transformCount).toBe(n);
+      }
     });
   });
 

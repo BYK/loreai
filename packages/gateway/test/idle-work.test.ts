@@ -19,6 +19,8 @@ import {
   perCategoryThreshold,
   invalidateWarmupBodyAfterIdleDistill,
   shouldHoldPrefixWarm,
+  shouldDeferPrefixRewriteOnCoolBust,
+  DEEP_IDLE_MS,
   CONSOLIDATION_COOLDOWN_MS,
   CONSOLIDATION_REATTEMPT_GROWTH,
 } from "../src/idle";
@@ -264,6 +266,105 @@ describe("shouldHoldPrefixWarm (D6′ defer decision)", () => {
   test("non-confident strategy or null → flush (legacy aggressive behavior)", () => {
     expect(shouldHoldPrefixWarm(econ("hold-warm", false), false)).toBe(false);
     expect(shouldHoldPrefixWarm(null, false)).toBe(false);
+  });
+});
+
+// #946: symmetric inverse override — defer prefix-rewriting steps for
+// cool-bust / cool-full-write sessions that are still mid-flight (the user's
+// last turn was recent enough that the prompt cache is still warm). The
+// rewrite would bust the warm cache for no benefit — the next user turn would
+// pay a full cache write for a prefix that would have served as a cache read.
+describe("shouldDeferPrefixRewriteOnCoolBust (#946 mid-flight defer)", () => {
+  const NOW = 1_700_000_000_000;
+  const RECENT = NOW - 60_000; // 1 min ago — mid-flight
+  const DEEP = NOW - (DEEP_IDLE_MS + 60_000); // 6 min ago — deep-idle
+  const NEVER = 0; // never had a turn — treat as "user is away"
+
+  function econ(
+    strategy: "hold-warm" | "cool-bust" | "cool-full-write",
+    confident: boolean,
+  ) {
+    return { result: { strategy, confident }, decidedAt: NOW };
+  }
+
+  test("cool-bust + no bust pressure + recent lastTurnAt → defer (mid-flight)", () => {
+    expect(
+      shouldDeferPrefixRewriteOnCoolBust(
+        econ("cool-bust", true),
+        false,
+        RECENT,
+        NOW,
+      ),
+    ).toBe(true);
+  });
+
+  test("cool-full-write + no bust pressure + recent lastTurnAt → defer (mid-flight)", () => {
+    expect(
+      shouldDeferPrefixRewriteOnCoolBust(
+        econ("cool-full-write", true),
+        false,
+        RECENT,
+        NOW,
+      ),
+    ).toBe(true);
+  });
+
+  test("cool-bust + no bust pressure + deep-idle lastTurnAt → flush (user is away)", () => {
+    expect(
+      shouldDeferPrefixRewriteOnCoolBust(
+        econ("cool-bust", true),
+        false,
+        DEEP,
+        NOW,
+      ),
+    ).toBe(false);
+  });
+
+  test("cool-bust + no bust pressure + lastTurnAt=0 (never) → flush (no cache to protect)", () => {
+    expect(
+      shouldDeferPrefixRewriteOnCoolBust(
+        econ("cool-bust", true),
+        false,
+        NEVER,
+        NOW,
+      ),
+    ).toBe(false);
+  });
+
+  test("cool-bust + bust pressure → flush (churning busts cache anyway)", () => {
+    expect(
+      shouldDeferPrefixRewriteOnCoolBust(
+        econ("cool-bust", true),
+        true,
+        RECENT,
+        NOW,
+      ),
+    ).toBe(false);
+  });
+
+  test("hold-warm → deferCoolBust returns false (no double-defer; shouldHoldPrefixWarm owns this)", () => {
+    expect(
+      shouldDeferPrefixRewriteOnCoolBust(
+        econ("hold-warm", true),
+        false,
+        RECENT,
+        NOW,
+      ),
+    ).toBe(false);
+  });
+
+  test("non-confident strategy → flush (legacy aggressive behavior)", () => {
+    expect(
+      shouldDeferPrefixRewriteOnCoolBust(
+        econ("cool-bust", false),
+        false,
+        RECENT,
+        NOW,
+      ),
+    ).toBe(false);
+    expect(shouldDeferPrefixRewriteOnCoolBust(null, false, RECENT, NOW)).toBe(
+      false,
+    );
   });
 });
 
@@ -513,6 +614,10 @@ describe("buildIdleWorkHandler", () => {
 
   // Distillation gate: a sub-minMessages backlog is deferred on hold-warm but
   // force-distilled on cool-bust. The worker LLM is reached only for cool-bust.
+  // Set lastTurnAt deep-idle (6 min ago) explicitly so the #946 mid-flight
+  // gate doesn't kick in — without this, the default lastTurnAt=0 would make
+  // shouldDeferPrefixRewriteOnCoolBust return false via its sentinel shortcut,
+  // masking the actual production behavior we want to test.
   test("D6′: hold-warm defers idle distillation below minMessages; cool-bust flushes", async () => {
     const warm = "idle-d6-distill-holdwarm";
     const warmPath = d6SeedMessages(warm, 3); // < minMessages (5)
@@ -523,6 +628,7 @@ describe("buildIdleWorkHandler", () => {
     const cool = "idle-d6-distill-coolbust";
     const coolPath = d6SeedMessages(cool, 3);
     expect(d6SetStrategy(cool, 800_000, 100_000)).toBe("cool-bust");
+    setLastTurnAtForTest(cool, Date.now() - 6 * 60 * 1000); // deep-idle
     expect((await d6RunIdle(cool, coolPath)).prompt).toHaveBeenCalled();
     evictSession(cool);
   });
@@ -530,7 +636,9 @@ describe("buildIdleWorkHandler", () => {
   // Meta gate: with >= metaThreshold gen-0 and no undistilled messages, the
   // `g0 >= metaThreshold && !holdingWarm` gate is the only LLM caller. hold-warm
   // defers meta-consolidation; cool-bust runs it. (Kills the `&& !holdingWarm`
-  // mutation — the distillation gate can't reach this branch.)
+  // mutation — the distillation gate can't reach this branch.) Set lastTurnAt
+  // deep-idle explicitly so the #946 mid-flight gate doesn't mask the
+  // production behavior (see note above).
   test("D6′: hold-warm defers meta-consolidation; cool-bust runs it", async () => {
     const warm = "idle-d6-meta-holdwarm";
     const warmPath = d6SeedGen0(warm);
@@ -541,6 +649,7 @@ describe("buildIdleWorkHandler", () => {
     const cool = "idle-d6-meta-coolbust";
     const coolPath = d6SeedGen0(cool);
     expect(d6SetStrategy(cool, 800_000, 100_000)).toBe("cool-bust");
+    setLastTurnAtForTest(cool, Date.now() - 6 * 60 * 1000); // deep-idle
     expect((await d6RunIdle(cool, coolPath)).prompt).toHaveBeenCalled();
     evictSession(cool);
   });
@@ -612,6 +721,41 @@ describe("buildIdleWorkHandler", () => {
     setConsecutiveBustsForTest(sessionID, 3); // bust pressure → holdingWarm=false
     // 6 min ago → deep-idle → threshold drops to floor 10; 12 >= 10 → meta runs.
     setLastTurnAtForTest(sessionID, Date.now() - 6 * 60 * 1000);
+    expect((await d6RunIdle(sessionID, projectPath)).prompt).toHaveBeenCalled();
+    evictSession(sessionID);
+  });
+
+  // #946: cool-bust sessions that are mid-flight (recent lastTurnAt, no bust
+  // pressure) defer BOTH the force-distill and meta-consolidation paths. The
+  // rewrite would bust a still-warm prompt cache for no benefit — the next
+  // user turn would pay a full cache write for a prefix that would have
+  // served as a cache read. With the inverse override in place, no LLM call.
+  test("#946: cool-bust + mid-flight (recent lastTurnAt, no bust pressure) defers force-distill and meta", async () => {
+    // 800k/100k snapshot → cool-bust; gen-0=20 → meta gate armed.
+    const sessionID = "idle-946-midflight";
+    const projectPath = d6SeedGen0(sessionID); // 20 gen-0 segments
+    // Also seed a sub-minMessages backlog so the force-distill gate is armed.
+    const backlogProject = d6SeedMessages(sessionID, 3);
+    void backlogProject; // single project path is shared; gen-0 seeding is the priority.
+    expect(d6SetStrategy(sessionID, 800_000, 100_000)).toBe("cool-bust");
+    setConsecutiveBustsForTest(sessionID, 0); // no bust pressure
+    setLastTurnAtForTest(sessionID, Date.now()); // recent → mid-flight
+    // No LLM call expected: the mid-flight gate defers both steps.
+    expect(
+      (await d6RunIdle(sessionID, projectPath)).prompt,
+    ).not.toHaveBeenCalled();
+    evictSession(sessionID);
+  });
+
+  // #946: cool-bust with deep-idle (user away) still flushes. The inverse
+  // override only fires when the cache is still warm; deep-idle means the
+  // cache is going cold anyway, so flushing is free.
+  test("#946: cool-bust + deep-idle lastTurnAt still flushes (cache going cold anyway)", async () => {
+    const sessionID = "idle-946-deepidle";
+    const projectPath = d6SeedGen0(sessionID);
+    expect(d6SetStrategy(sessionID, 800_000, 100_000)).toBe("cool-bust");
+    setConsecutiveBustsForTest(sessionID, 0);
+    setLastTurnAtForTest(sessionID, Date.now() - 6 * 60 * 1000); // deep-idle
     expect((await d6RunIdle(sessionID, projectPath)).prompt).toHaveBeenCalled();
     evictSession(sessionID);
   });

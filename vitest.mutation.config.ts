@@ -24,8 +24,7 @@ export default defineConfig({
       "packages/gateway/test/sync.test.ts",
       // Covering tests for packages/gateway/src/translate/bedrock.ts.
       "packages/gateway/test/bedrock.test.ts",
-      "packages/gateway/test/bedrock.property.test.ts",
-      "packages/gateway/test/bedrock-stream.test.ts",
+      "packages/gateway/test/bedrock-routing.test.ts",
     ],
     setupFiles: ["./packages/core/test/setup.ts"],
     environment: "node",

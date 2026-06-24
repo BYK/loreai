@@ -210,7 +210,7 @@ export function getSessionConfidentProjectPath(
     .get(sessionId) as
     | { project_path: string | null; project_path_provisional: number }
     | undefined;
-  if (!row || !row.project_path || row.project_path_provisional !== 0) {
+  if (!row?.project_path || row.project_path_provisional !== 0) {
     return null;
   }
   return row.project_path;

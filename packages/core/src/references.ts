@@ -126,13 +126,54 @@ const MAKE_CMD_RE = /\bmake\s+([A-Za-z][A-Za-z0-9:_-]*)/g;
 // it", "make progress") but are never repo build commands. Extracted as `make X`
 // would produce a false "missing" penalty on any repo with a Makefile.
 const MAKE_PROSE_STOPWORDS = new Set([
-  "sure", "it", "the", "a", "an", "this", "that", "them", "your", "our", "their",
-  "my", "me", "use", "sense", "do", "run", "changes", "progress", "surest",
-  "current", "actual", "real", "certain", "specific", "particular", "possible",
-  "clear", "great", "good", "better", "best", "simple", "easy", "quick", "fast",
-  "sure", "certain", "definite", "likely", "unlikely", "enough",
+  "sure",
+  "it",
+  "the",
+  "a",
+  "an",
+  "this",
+  "that",
+  "them",
+  "your",
+  "our",
+  "their",
+  "my",
+  "me",
+  "use",
+  "sense",
+  "do",
+  "run",
+  "changes",
+  "progress",
+  "surest",
+  "current",
+  "actual",
+  "real",
+  "certain",
+  "specific",
+  "particular",
+  "possible",
+  "clear",
+  "great",
+  "good",
+  "better",
+  "best",
+  "simple",
+  "easy",
+  "quick",
+  "fast",
+  "sure",
+  "certain",
+  "definite",
+  "likely",
+  "unlikely",
+  "enough",
   // Possessive / contractions that can look like targets
-  "its", "it's", "them", "those", "these",
+  "its",
+  "it's",
+  "them",
+  "those",
+  "these",
 ]);
 
 export function extractReferences(text: string): Reference[] {
@@ -242,7 +283,8 @@ export function resolveRefAgainstView(
   } else {
     const matches = view.basenames.get(ref.path) ?? [];
     if (matches.length === 0) targetExists = false;
-    else if (matches.length > 1) return "unknown"; // ambiguous → neutral
+    else if (matches.length > 1)
+      return "unknown"; // ambiguous → neutral
     else {
       target = matches[0];
       targetExists = true;
@@ -339,7 +381,10 @@ export class DirectFsResolver implements ReferenceResolver {
     let count = 0;
     let truncated = false;
     const recur = (dir: string, rel: string): void => {
-      if (count >= WALK_FILE_CAP) { truncated = true; return; }
+      if (count >= WALK_FILE_CAP) {
+        truncated = true;
+        return;
+      }
       let entries: import("node:fs").Dirent[];
       try {
         entries = readdirSync(dir, { withFileTypes: true });
@@ -347,7 +392,10 @@ export class DirectFsResolver implements ReferenceResolver {
         return;
       }
       for (const e of entries) {
-        if (count >= WALK_FILE_CAP) { truncated = true; return; }
+        if (count >= WALK_FILE_CAP) {
+          truncated = true;
+          return;
+        }
         if (e.isDirectory()) {
           if (WALK_IGNORE.has(e.name)) continue;
           recur(join(dir, e.name), rel ? `${rel}/${e.name}` : e.name);

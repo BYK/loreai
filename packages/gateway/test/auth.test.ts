@@ -314,6 +314,67 @@ describe("resolveAuth with staleness", () => {
     expect(resolveAuth("sess-cold", "anthropic")).toEqual(apiKeyCred);
   });
 
+  // -------------------------------------------------------------------------
+  // Provider-aware global fallback (#829 cross-contamination)
+  //
+  // The global fallback is captured WITH the request's provider tag. A lookup
+  // for a DIFFERENT known provider must never receive it — handing an Anthropic
+  // key to an OpenAI worker is rejected upstream as "Incorrect API key
+  // provided", which is the persistent 401 reported in #829.
+  // -------------------------------------------------------------------------
+
+  test("does NOT borrow a provider-tagged global credential for a different provider (#829)", () => {
+    // An Anthropic foreground request captured the global, tagged "anthropic".
+    setLastSeenAuth(apiKeyCred, "anthropic");
+
+    // A session-less OpenAI worker must NOT receive the Anthropic key.
+    expect(resolveAuth(undefined, "openai")).toBe(null);
+    // The matching provider still resolves via the global.
+    expect(resolveAuth(undefined, "anthropic")).toEqual(apiKeyCred);
+    // A provider-agnostic caller still gets the global.
+    expect(resolveAuth(undefined)).toEqual(apiKeyCred);
+  });
+
+  test("a _default-only session does not leak a cross-provider global (#829)", () => {
+    // Foreground request arrived WITHOUT x-lore-provider → stored under
+    // _default — while the global was tagged with the real provider. A
+    // _default store does not satisfy a specific-provider lookup, and
+    // sessionHasProviderStore() is false, so the 359 guard cannot fire: the
+    // provider-aware global is the only thing standing between the OpenAI
+    // worker and the Anthropic key.
+    setSessionAuth("sess-1", apiKeyCred); // no providerID → _default
+    setLastSeenAuth(apiKeyCred, "anthropic");
+
+    expect(resolveAuth("sess-1", "openai")).toBe(null);
+    // The captured provider still resolves through the global fallback.
+    expect(resolveAuth("sess-1", "anthropic")).toEqual(apiKeyCred);
+  });
+
+  test("end-to-end #829: Anthropic session + OpenAI worker resolves null, not the Anthropic key", () => {
+    // Mixed-provider setup: chat on Anthropic, a worker/aux model on OpenAI.
+    // NOTE: this scenario is actually closed by the pre-existing 359 guard
+    // (the session has a non-_default "anthropic" store, so
+    // sessionHasProviderStore() is true and the global fallback is never
+    // reached) — it passes even WITHOUT the provider-aware tag. It documents
+    // the full #829 shape; the provider-tag logic itself is guarded by the
+    // session-less and _default-only tests above.
+    setSessionAuth("sess-1", apiKeyCred, "anthropic");
+    setLastSeenAuth(apiKeyCred, "anthropic");
+
+    const workerCred = resolveAuth("sess-1", "openai");
+    expect(workerCred).toBe(null);
+    expect(workerCred).not.toEqual(apiKeyCred);
+  });
+
+  test("an UNTAGGED global still serves any provider (legacy single-provider client)", () => {
+    // A client that sends no x-lore-provider produces a null tag. Single-
+    // provider setups must keep working: the global is the only credential and
+    // is necessarily the right one — suppressing it would break their workers.
+    setLastSeenAuth(minimaxCred); // no providerID → null tag
+    expect(resolveAuth("sess-cold", "openai")).toEqual(minimaxCred);
+    expect(resolveAuth(undefined, "anthropic")).toEqual(minimaxCred);
+  });
+
   test("re-resolves to session credential after staleness cleared", () => {
     setSessionAuth("sess-1", bearerCred);
     setLastSeenAuth(apiKeyCred);

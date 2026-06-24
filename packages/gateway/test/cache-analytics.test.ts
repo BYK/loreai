@@ -1,4 +1,4 @@
-import { describe, test, expect, vi, afterEach } from "vitest";
+import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 import { log } from "@loreai/core";
 import {
   compressBody,
@@ -977,6 +977,101 @@ describe("categorizeBust", () => {
     ).toBe("incremental");
   });
 
+  test("classifies messages[0/1] divergence as prefix-rewrite even with partial cache hit", () => {
+    // Partial cache hit + divergence at messages[0/1] = meta-distillation
+    // rewrote the distilled prefix even though some earlier prefix matched.
+    // This MUST classify as prefix-rewrite (not incremental) so the
+    // consecutive-bust counter exempts it — the cause is Lore's own
+    // meta-distillation pipeline, not user-context growth.
+    // Regression test for the false "unsustainable conversation" warnings
+    // observed on sessions with sustained meta-distillation activity.
+    expect(
+      categorizeBust(
+        makeAnalysis({
+          cacheRead: 53_412,
+          cacheCreation: 109_745,
+          divergencePoint: "messages[1].content[0].text",
+        }),
+        false,
+      ),
+    ).toBe("prefix-rewrite");
+    expect(
+      categorizeBust(
+        makeAnalysis({
+          cacheRead: 53_412,
+          cacheCreation: 109_745,
+          divergencePoint: "messages[0]",
+        }),
+        false,
+      ),
+    ).toBe("prefix-rewrite");
+  });
+
+  test("messages[0/1] divergence with cacheCreation=0 stays 'incremental' (no-op turn is not a rewrite)", () => {
+    // A divergence reported at messages[0/1] with NO new cache content is
+    // a no-op turn (bustRatio=0 — the counter won't advance regardless of
+    // label). "prefix-rewrite" implies a real rewrite happened, so this
+    // case is semantically "incremental" not "prefix-rewrite". Seer review
+    // on PR #943 flagged the missing distinction (LOW severity): the
+    // cacheCreation > 0 guard in categorizeBust ensures the label stays
+    // accurate even when bustRatio would also be 0.
+    expect(
+      categorizeBust(
+        makeAnalysis({
+          cacheRead: 50_000,
+          cacheCreation: 0,
+          divergencePoint: "messages[1].content[0].text",
+        }),
+        false,
+      ),
+    ).toBe("incremental");
+    expect(
+      categorizeBust(
+        makeAnalysis({
+          cacheRead: 50_000,
+          cacheCreation: 0,
+          divergencePoint: "messages[0]",
+        }),
+        false,
+      ),
+    ).toBe("incremental");
+  });
+
+  test("full bust on post-idle + messages[0/1] divergence is 'prefix-rewrite' (structural cause wins over idle context)", () => {
+    // Pin down the chosen label for a full bust at messages[0/1] on an
+    // idle resume. Pre-PR this returned "idle-resume"; post-PR it returns
+    // "prefix-rewrite" because the new messages[0/1] check fires before
+    // the post-idle branch. The counter is exempt in both cases (both
+    // causes are OR'd in gradient.ts:323), so the bust-pressure semantics
+    // are unchanged — but the cause label feeds telemetry
+    // (setCacheAnalyticsAttributes, emitCacheBustMetric,
+    // recordCacheBustObservation), and "prefix-rewrite" is the more
+    // specific signal (a structural prefix change is the dominant cause;
+    // "idle-resume" is about cache TTL, not what changed in the prefix).
+    // Adversarial review NIT on PR #943: pin the label so future readers
+    // don't accidentally regress to the old behavior.
+    expect(
+      categorizeBust(
+        makeAnalysis({
+          cacheRead: 0,
+          cacheCreation: 100_000,
+          divergencePoint: "messages[0]",
+        }),
+        true,
+      ),
+    ).toBe("prefix-rewrite");
+    expect(
+      categorizeBust(
+        makeAnalysis({
+          cacheRead: 0,
+          cacheCreation: 100_000,
+          divergencePoint: "messages[1].content[0].text",
+        }),
+        true,
+      ),
+    ).toBe("prefix-rewrite");
+  });
+
   test("post-idle cold cache is idle-resume, not window-shift", () => {
     expect(
       categorizeBust(
@@ -1151,5 +1246,101 @@ describe("analyzeCacheTurn — system[0] relocatability fields", () => {
     const result = analyzeCacheTurn(analytics, body("2024-12-15"), makeUsage());
     expect(result.system0Bust).toBe(false);
     expect(result.relocatable).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Strategy-aware warn gating: a dramatic hit-rate drop on a session whose
+// cache strategy is cool-* is by DESIGN (we chose to let the prefix go cold)
+// and the WARN is just noise in that case. hold-warm sessions and the
+// no-strategy-supplied default still emit the WARN.
+// ---------------------------------------------------------------------------
+
+describe("analyzeCacheTurn — strategy-aware dramatic-drop warn gating", () => {
+  let warn: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    // Clear the log.warn spy between tests — `vi.spyOn` accumulates calls
+    // across the whole describe block by default, which would let one test's
+    // emitted warn leak into another test's assertion.
+    warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warn.mockRestore();
+  });
+
+  const dramaticBodyA = JSON.stringify({
+    system: "stable host",
+    messages: [{ role: "user", content: "first user message here" }],
+  });
+  // Same system, divergent messages → bust (low hit rate, divergence at messages[0])
+  const dramaticBodyB = JSON.stringify({
+    system: "stable host",
+    messages: [
+      { role: "user", content: "first user message here (REWRITTEN)" },
+    ],
+  });
+
+  // The dramatic-drop warn is gated on `analytics.turnCount > 2`, so we need
+  // a 3-turn sequence: (1) establish a baseline hit rate, (2) maintain the
+  // hit rate, (3) drop dramatically → the warn fires on turn 3.
+  function runDramaticDropScenario(
+    analytics: ReturnType<typeof makeCacheAnalytics>,
+    cacheStrategy?: "hold-warm" | "cool-bust" | "cool-full-write",
+  ): void {
+    // Turn 1: high cache hit (900 read of 1000) → prevHitRate baseline 0.9
+    analyzeCacheTurn(analytics, dramaticBodyA, makeUsage());
+    // Turn 2: same high-hit baseline so the previous-turn cacheRead stays at 900
+    analyzeCacheTurn(analytics, dramaticBodyA, makeUsage());
+    // Turn 3: cold (0 read, 1000 input) → drop from 0.9 → 0 (>40% of 0.9)
+    analyzeCacheTurn(
+      analytics,
+      dramaticBodyB,
+      makeUsage({
+        inputTokens: 1000,
+        cacheReadInputTokens: 0,
+        cacheCreationInputTokens: 0,
+      }),
+      undefined,
+      undefined,
+      cacheStrategy,
+    );
+  }
+
+  test("emits the dramatic-drop warn when cacheStrategy is omitted (default behavior)", () => {
+    runDramaticDropScenario(makeCacheAnalytics());
+
+    const calls = warn.mock.calls.map((args: unknown[]) => String(args[0]));
+    expect(
+      calls.some((c: string) => c.includes("dramatic hit rate drop")),
+    ).toBe(true);
+  });
+
+  test("emits the dramatic-drop warn when cacheStrategy is 'hold-warm'", () => {
+    runDramaticDropScenario(makeCacheAnalytics(), "hold-warm");
+
+    const calls = warn.mock.calls.map((args: unknown[]) => String(args[0]));
+    expect(
+      calls.some((c: string) => c.includes("dramatic hit rate drop")),
+    ).toBe(true);
+  });
+
+  test("suppresses the dramatic-drop warn when cacheStrategy is 'cool-bust'", () => {
+    runDramaticDropScenario(makeCacheAnalytics(), "cool-bust");
+
+    const calls = warn.mock.calls.map((args: unknown[]) => String(args[0]));
+    expect(
+      calls.some((c: string) => c.includes("dramatic hit rate drop")),
+    ).toBe(false);
+  });
+
+  test("suppresses the dramatic-drop warn when cacheStrategy is 'cool-full-write'", () => {
+    runDramaticDropScenario(makeCacheAnalytics(), "cool-full-write");
+
+    const calls = warn.mock.calls.map((args: unknown[]) => String(args[0]));
+    expect(
+      calls.some((c: string) => c.includes("dramatic hit rate drop")),
+    ).toBe(false);
   });
 });

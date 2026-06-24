@@ -37,10 +37,8 @@ const config = {
   mutate: [
     "packages/core/src/sync-data.ts",
     "packages/gateway/src/sync.ts",
-    // Bedrock translation — pure, deterministic logic where the recent bugs
-    // (stream-field-in-body, wrong Accept header, prototype-pollution in the
-    // model map) were exactly the class mutation testing pins down. Covered by
-    // bedrock.test.ts + bedrock.property.test.ts + bedrock-stream.test.ts.
+    // Bedrock (bedrock-mantle) translation — pure, deterministic model-id remap
+    // + URL/host helpers. Covered by bedrock.test.ts + bedrock-routing.test.ts.
     "packages/gateway/src/translate/bedrock.ts",
   ],
   // 4-core box → 2 concurrent vitest workers (each uses the forks pool, and the

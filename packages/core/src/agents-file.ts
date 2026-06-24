@@ -300,12 +300,15 @@ function hashSection(section: string): string {
 // Build the lore section body from DB entries
 // ---------------------------------------------------------------------------
 
-function buildSection(projectPath: string): string {
+function buildSection(
+  projectPath: string,
+  preloaded?: ltm.KnowledgeEntry[],
+): string {
   // Export only project-specific entries (cross_project=0, project_id = this project).
   // Cross-project entries live in the shared DB on each machine and don't belong
   // in a per-project AGENTS.md — including them would inflate the file with
   // unrelated knowledge from every other project the user has worked on.
-  const entries = ltm.forProject(projectPath, false);
+  const entries = preloaded ?? ltm.forProject(projectPath, false);
   if (!entries.length) {
     return "\n";
   }
@@ -381,11 +384,12 @@ function buildSection(projectPath: string): string {
 export function exportToFile(input: {
   projectPath: string;
   filePath: string;
+  entries?: ltm.KnowledgeEntry[];
 }): void {
   if (isHostedMode()) return;
 
   // Write the actual entries to .lore.md first.
-  exportLoreFile(input.projectPath);
+  exportLoreFile(input.projectPath, input.entries);
 
   // Build a pointer section for the agents file instead of full entries.
   const pointerBody =
@@ -422,11 +426,12 @@ export function exportToFile(input: {
 export function exportInlineToAgentsFile(input: {
   projectPath: string;
   filePath: string;
+  entries?: ltm.KnowledgeEntry[];
 }): void {
   if (isHostedMode()) return;
   if (!loreConfig().agentsFile.enabled) return;
 
-  const sectionBody = buildSection(input.projectPath);
+  const sectionBody = buildSection(input.projectPath, input.entries);
   const newSection = `${LORE_SECTION_START}\n${sectionBody}${LORE_SECTION_END}\n`;
 
   let fileContent = "";
@@ -689,11 +694,14 @@ export function loreFileExists(projectPath: string): boolean {
  * unchanged since last export), avoiding unnecessary filesystem writes
  * and mtime bumps.
  */
-export function exportLoreFile(projectPath: string): void {
+export function exportLoreFile(
+  projectPath: string,
+  entries?: ltm.KnowledgeEntry[],
+): void {
   if (isHostedMode()) return;
   if (!loreConfig().loreFile.enabled) return;
 
-  const sectionBody = buildSection(projectPath);
+  const sectionBody = buildSection(projectPath, entries);
   const content = `${LORE_FILE_HEADER}\n${sectionBody}`;
   const contentHash = hashSection(content);
 
