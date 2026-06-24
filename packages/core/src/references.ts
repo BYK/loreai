@@ -137,11 +137,12 @@ const MAKE_CMD_RE = /\bmake\s+([A-Za-z][A-Za-z0-9:_-]*)/g;
 //     so concatenating spans/lines would let `make` on one line fuse with the
 //     next token (`` `make` … `Makefile` `` → "make Makefile"). Matching each
 //     line in isolation prevents cross-span and cross-line fusion.
-//  2. `make`/`yarn` are common English words; even inside one backtick span a
-//     `make X`/`yarn X` token can't be told apart from prose ("make sense"),
-//     so resolveRefAgainstView treats an ABSENT make target / yarn script as
-//     "unknown" (neutral), never "missing" (see there). `pnpm`/`npm` are not
-//     English words, so they keep full ok/missing semantics.
+//  2. Explicit-verb gate (see resolveRefAgainstView): a pnpm/npm/yarn ref only
+//     resolves "missing" on an absent script when it was an explicit
+//     `<pm> run <script>`. A bare `<pm> <word>` is ambiguous with a noun phrase
+//     ("npm registry", "yarn about") so an absent bare script is "unknown"
+//     (neutral). `make` has no `run` verb and reads as prose ("make sense"), so
+//     it is always confirm-only (absent → "unknown").
 const CODE_SPAN_RE = /`+([^`]+)`+/g;
 
 // A path first-segment that looks like a DNS host (`github.com`,
