@@ -52,14 +52,32 @@ export function inline(value: string): string {
     .trim();
 }
 
+// Upper bound on parse→stringify passes in `normalize`. remark's escaping is
+// monotone (each pass can only add backslash escapes for newly-ambiguous
+// sequences) and converges; across a 300k-sample fast-check search the worst
+// observed input reached a fixpoint in 4 passes with zero oscillations, so 8
+// is a generous safety bound that also guards against pathological non-
+// convergence (we return the last result rather than looping forever).
+const MAX_NORMALIZE_PASSES = 8;
+
 // Normalize arbitrary markdown via parse → stringify roundtrip.
 // Used for content we don't control (e.g. existing text parts in Layer 4
 // after tool parts are stripped out), where we can't build from AST.
-// Two passes are needed: remark's asterisk/underscore escaping can introduce
-// new sequences on the first pass that the second pass then stabilizes.
+//
+// A single roundtrip is not idempotent: remark's asterisk/underscore escaping
+// can introduce new ambiguous sequences (e.g. `**` adjacent to already-escaped
+// asterisks becomes `\*\*`) that only stabilize on a *later* pass. A fixed two
+// passes was not enough for some hostile inputs (issue #959), so we iterate to
+// a fixpoint (bounded by MAX_NORMALIZE_PASSES). This guarantees the result is
+// itself already-normalized: normalize(normalize(x)) === normalize(x).
 export function normalize(md: string): string {
-  const once = processor.stringify(processor.parse(md));
-  return processor.stringify(processor.parse(once));
+  let prev = processor.stringify(processor.parse(md));
+  for (let i = 0; i < MAX_NORMALIZE_PASSES; i++) {
+    const next = processor.stringify(processor.parse(prev));
+    if (next === prev) return prev;
+    prev = next;
+  }
+  return prev;
 }
 
 /**

@@ -59,7 +59,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(56);
+    expect(row.version).toBe(57);
   });
 
   test("v55: confidence/last_reinforced_at moved to knowledge_meta, exposed via view", () => {
@@ -116,7 +116,7 @@ describe("db", () => {
     const ver = fresh.query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(ver.version).toBe(56);
+    expect(ver.version).toBe(57);
     // Register + JOIN view were rebuilt and are queryable (confidence exposed).
     expect(
       fresh
@@ -128,6 +128,34 @@ describe("db", () => {
     expect(() =>
       fresh.query("SELECT confidence FROM knowledge_current LIMIT 1").all(),
     ).not.toThrow();
+  });
+
+  test("v56: knowledge_ref_validity table + projects.last_refcheck_at exist after recovery", () => {
+    // Simulate the real v56→v57 upgrade path where the column/table are ABSENT
+    // (a DB already at v56=costs-index, on which the renumbered refcheck
+    // migration's loop body never runs — see db.ts mid-array-insert note). Drop
+    // the table AND the column, reopen, confirm recoverMissingObjects restores
+    // both idempotently. Dropping the column (not just NULLing it) is what
+    // actually exercises the column-presence ALTER branch.
+    db().exec("DROP TABLE IF EXISTS knowledge_ref_validity");
+    db().exec("ALTER TABLE projects DROP COLUMN last_refcheck_at");
+    // Sanity: the column is really gone before recovery runs.
+    const before = db().query("PRAGMA table_info(projects)").all() as Array<{
+      name: string;
+    }>;
+    expect(before.some((c) => c.name === "last_refcheck_at")).toBe(false);
+    close();
+    const fresh = db();
+    const rv = fresh
+      .query("PRAGMA table_info(knowledge_ref_validity)")
+      .all() as Array<{ name: string; notnull: number }>;
+    expect(rv.map((c) => c.name)).toEqual(
+      expect.arrayContaining(["logical_id", "broken", "total", "checked_at"]),
+    );
+    const pcols = fresh.query("PRAGMA table_info(projects)").all() as Array<{
+      name: string;
+    }>;
+    expect(pcols.some((c) => c.name === "last_refcheck_at")).toBe(true);
   });
 
   test("session_prompt_deltas persist ordered selector/content rows (v42)", () => {

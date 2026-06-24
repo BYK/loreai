@@ -272,6 +272,14 @@ async function cmdShow(
           `Outcome:     ${impact.passes} passed / ${impact.fails} failed sessions`,
         );
       }
+      const refs = ltm.refValidity(entry.logical_id);
+      if (refs) {
+        console.log(
+          `References:  ${refs.total - refs.broken}/${refs.total} resolve` +
+            `${refs.broken > 0 ? ` (${refs.broken} broken)` : ""}` +
+            ` (last checked ${formatDate(refs.checkedAt)})`,
+        );
+      }
       console.log(`Project ID:  ${entry.project_id ?? "(global)"}`);
       console.log(`Cross-proj:  ${entry.cross_project ? "yes" : "no"}`);
       console.log(`Session:     ${entry.source_session ?? "(none)"}`);

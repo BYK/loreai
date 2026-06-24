@@ -12,6 +12,10 @@ import {
   mintSyntheticToolUseId,
   isSyntheticToolUseId,
   buildSyntheticToolUseBlock,
+  buildShellProbeBlock,
+  buildCombinedResolveRefcheckBlock,
+  splitProbeOutput,
+  REFCHECK_SECTION_SEP,
   buildResolveProjectInput,
   captureSyntheticToolResult,
   stripSyntheticRoundTrips,
@@ -970,5 +974,69 @@ not-a-sha
     const result = parseResolveProjectResult("shell", output);
     expect(result.gitHead).toBeUndefined();
     expect(result.root).toBe("/home/user/project");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildShellProbeBlock — generic read-only shell probe (#627 reference probe)
+// ---------------------------------------------------------------------------
+
+describe("buildShellProbeBlock", () => {
+  test("string command param: embeds the script directly", () => {
+    const target = findShellTool([CLAUDE_BASH]);
+    expect(target).not.toBeNull();
+    if (!target) return;
+    const block = buildShellProbeBlock(target, "echo hello");
+    expect(block.type).toBe("tool_use");
+    expect(block.name).toBe(target.toolName);
+    expect(isSyntheticToolUseId(block.id)).toBe(true);
+    expect((block.input as Record<string, unknown>)[target.commandParam]).toBe(
+      "echo hello",
+    );
+  });
+
+  test("array command param: wraps as [bash, -lc, script]", () => {
+    const target = findShellTool([CODEX_SHELL_ARRAY]);
+    expect(target?.commandIsArray).toBe(true);
+    if (!target) return;
+    const block = buildShellProbeBlock(target, "echo hi");
+    expect(
+      (block.input as Record<string, unknown>)[target.commandParam],
+    ).toEqual(["bash", "-lc", "echo hi"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Combined resolution + reference-validity probe (#627 piggyback)
+// ---------------------------------------------------------------------------
+
+describe("buildCombinedResolveRefcheckBlock + splitProbeOutput", () => {
+  test("combined script carries resolution + refcheck, separated by the marker", () => {
+    const target = findShellTool([CLAUDE_BASH]);
+    expect(target).not.toBeNull();
+    if (!target) return;
+    const block = buildCombinedResolveRefcheckBlock(
+      target,
+      "echo SNAPSHOT_HERE",
+    );
+    const cmd = (block.input as Record<string, unknown>)[target.commandParam];
+    const script = Array.isArray(cmd) ? (cmd as string[])[2] : (cmd as string);
+    expect(script).toContain("git rev-parse --show-toplevel"); // resolution part
+    expect(script).toContain(REFCHECK_SECTION_SEP); // separator
+    expect(script).toContain("echo SNAPSHOT_HERE"); // refcheck part
+  });
+
+  test("splitProbeOutput separates resolution from the refcheck snapshot", () => {
+    const out = `/repo\ngit@x\nDEADBEEF\n/repo\n${REFCHECK_SECTION_SEP}\nsrc/a.ts\nsrc/b.ts`;
+    const { resolution, refcheck } = splitProbeOutput(out);
+    expect(resolution).toContain("/repo");
+    expect(resolution).not.toContain("src/a.ts");
+    expect(refcheck).toContain("src/a.ts");
+  });
+
+  test("splitProbeOutput: no marker → refcheck null (resolution-only probe)", () => {
+    const { resolution, refcheck } = splitProbeOutput("/repo\ngit@x");
+    expect(refcheck).toBeNull();
+    expect(resolution).toBe("/repo\ngit@x");
   });
 });

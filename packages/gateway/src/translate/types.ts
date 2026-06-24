@@ -545,6 +545,10 @@ export type SessionState = {
   syntheticResolveKind?: "read" | "shell";
   /** Tracks which stages have been attempted. Bounds escalation. */
   syntheticResolveStage?: "readTried" | "shellTried";
+  /** True when the currently-pending SHELL probe also carries a #627
+   *  reference-validity snapshot (piggybacked — no extra round-trip). Set at
+   *  injection, consumed at capture to apply reference penalties. */
+  refcheckInProbe?: boolean;
 
   // --- Amnesia mode ---
 

@@ -11,6 +11,20 @@
 
 export * as temporal from "./temporal";
 export * as ltm from "./ltm";
+export * as references from "./references";
+export {
+  DirectFsResolver,
+  NoopResolver,
+  SyntheticProbeResolver,
+  extractReferences,
+  buildRefcheckProbeScript,
+  parseProbeSnapshot,
+  resolveRefAgainstView,
+  type Reference,
+  type ReferenceResolver,
+  type RefStatus,
+  type RepoView,
+} from "./references";
 export * as syncData from "./sync-data";
 export * as data from "./data";
 export * as distillation from "./distillation";

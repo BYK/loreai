@@ -1404,7 +1404,26 @@ const MIGRATIONS: string[] = [
   `,
 
   `
-  -- Version 56: index the /ui/costs "first assistant message per session" scan.
+
+  -- Version 56: reference-validity validator (#627 Phase 0). Two additions:
+  --  (a) projects.last_refcheck_at — rate-gates the per-project reference-resolution
+  --      pass to once per interval (mirrors last_decay_at), so the per-pass penalty is
+  --      rate-stable regardless of idle-tick frequency.
+  --  (b) knowledge_ref_validity — the last observed resolve counts per logical entry
+  --      (broken/total/checked_at), surfaced in 'lore data show'/'lore doctor'. Keyed
+  --      by the stable logical_id (matches knowledge_session_injections / knowledge_meta),
+  --      so it survives version edits between checks.
+  ALTER TABLE projects ADD COLUMN last_refcheck_at INTEGER;
+  CREATE TABLE IF NOT EXISTS knowledge_ref_validity (
+    logical_id TEXT PRIMARY KEY,
+    broken     INTEGER NOT NULL DEFAULT 0,
+    total      INTEGER NOT NULL DEFAULT 0,
+    checked_at INTEGER NOT NULL DEFAULT 0
+  );
+  `,
+
+  `
+  -- Version 57: index the /ui/costs "first assistant message per session" scan.
   --
   -- The costs page runs three cross-project bulk aggregates (#561):
   -- listAllRecentSessions, aggregateTokensBySessionAll and
@@ -1891,6 +1910,12 @@ function recoverMissingObjects(database: Database) {
     );
     CREATE INDEX IF NOT EXISTS idx_ksi_session_uncredited
       ON knowledge_session_injections (session_id, credited);
+    CREATE TABLE IF NOT EXISTS knowledge_ref_validity (
+      logical_id TEXT PRIMARY KEY,
+      broken     INTEGER NOT NULL DEFAULT 0,
+      total      INTEGER NOT NULL DEFAULT 0,
+      checked_at INTEGER NOT NULL DEFAULT 0
+    );
     CREATE TABLE IF NOT EXISTS knowledge_transfers (
       knowledge_id           TEXT NOT NULL,
       recalled_in_project_id TEXT NOT NULL,
@@ -2072,6 +2097,17 @@ function recoverMissingObjects(database: Database) {
       }
       database.exec(
         "CREATE INDEX IF NOT EXISTS idx_ksi_logical_verdict ON knowledge_session_injections (logical_id, verdict);",
+      );
+    }
+  }
+  // Version 56: projects.last_refcheck_at (reference-validity rate gate, #627).
+  {
+    const pcols = database.query("PRAGMA table_info(projects)").all() as Array<{
+      name: string;
+    }>;
+    if (pcols.length && !pcols.some((c) => c.name === "last_refcheck_at")) {
+      database.exec(
+        "ALTER TABLE projects ADD COLUMN last_refcheck_at INTEGER;",
       );
     }
   }

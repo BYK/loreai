@@ -12,6 +12,11 @@ import {
 import * as embedding from "./embedding";
 import { sessionVerifierVerdict } from "./tool-trace";
 import * as latReader from "./lat-reader";
+import {
+  extractReferences,
+  type Reference,
+  type ReferenceResolver,
+} from "./references";
 import * as log from "./log";
 
 // ~3 chars per token — validated as best heuristic against real API data.
@@ -856,6 +861,17 @@ export const DECAY_GRACE_MS = 7 * 24 * 60 * 60 * 1000; // 7d
 /** Confidence removed per decay pass for an unreinforced entry. */
 export const DECAY_STEP = 0.1;
 
+// --- Reference-validity validator (#627 Phase 0) ---------------------------
+/** Min interval between reference-resolution passes per project (mirrors
+ *  DECAY_INTERVAL_MS) — the per-pass penalty is rate-stable regardless of how
+ *  often the idle tick fires. */
+export const REFCHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24h
+/** Confidence removed per pass for an entry with ≥1 definitively-broken
+ *  reference. ONE flat decrement per stale entry per pass — never scaled by the
+ *  number of broken refs, never deleting. Symmetric with DECAY_STEP, so a
+ *  continuously-broken, never-reinforced entry loses ~0.1/day. */
+export const REFERENCE_DRIFT_PENALTY = 0.1;
+
 // --- Outcome-reward loop (#497) --------------------------------------------
 // Within-session co-occurrence: an entry injected into a session is credited
 // by that session's verifier verdict. Deliberately asymmetric and bounded:
@@ -911,6 +927,201 @@ export function reinforce(id: string, delta: number = REINFORCE_STEP): void {
        WHERE logical_id = (SELECT logical_id FROM knowledge WHERE id = ?)`,
     )
     .run(delta, now, now, id);
+}
+
+/**
+ * Lower an entry's confidence for reference drift (#627 Phase 0), keyed by the
+ * stable logical_id. Unlike `reinforce`, this deliberately does NOT touch
+ * `last_reinforced_at`: a broken, unused entry should age toward the floor
+ * FASTER, not be protected from time-decay — so reference-drift and disuse-decay
+ * compound (resetting the clock here would let a continuously-broken entry that
+ * is never injected dodge `decayProject` forever). It DOES bump the register's
+ * sync clock (`updated_at`), because confidence is a synced metric. Floors at 0;
+ * `pruneDeadEntries` reaps only once an entry sinks to DEAD_CONFIDENCE_FLOOR
+ * after repeated misses. Mirrors `decayProject`'s register write exactly.
+ */
+export function penalizeStaleReferences(
+  logicalId: string,
+  delta: number = REFERENCE_DRIFT_PENALTY,
+): void {
+  db()
+    .query(
+      `UPDATE knowledge_meta
+       SET confidence = MAX(0, confidence - ?), updated_at = ?
+       WHERE logical_id = ?`,
+    )
+    .run(delta, Date.now(), logicalId);
+}
+
+/** Outcome of a reference-validity pass over one project. */
+export interface RefCheckResult {
+  /** Live entries whose references were resolved this pass (excludes no-ref and
+   *  all-unverifiable entries). */
+  checked: number;
+  /** Entries that had ≥1 definitively-missing reference and were penalized. */
+  penalized: number;
+  /** True when the rate gate blocked the run (no work done). */
+  gated: boolean;
+  /** True when the resolver returned a whole-batch null (unverifiable → neutral
+   *  no-op; the gate is still consumed to avoid hammering a failing probe). */
+  neutral: boolean;
+}
+
+/**
+ * Reference-validity pass for one project (#627 Phase 0). Lowers confidence on
+ * project-scoped entries whose literal `file:line` / command references no longer
+ * resolve against the current repo, via the supplied `ReferenceResolver`.
+ *
+ * 🔴 Invariants (mirrors decayProject + creditSessionOutcome):
+ *  - Rate-gated once per REFCHECK_INTERVAL_MS via `projects.last_refcheck_at`, so
+ *    the per-pass penalty is rate-stable regardless of idle-tick frequency.
+ *  - Only project-scoped (`cross_project = 0`) LIVE (`confidence > floor`) entries
+ *    are touched — a single project must never penalize shared/global knowledge.
+ *  - "cannot verify" ≠ "broken": a null resolver result, or refs that resolve to
+ *    "unknown" (absolute/out-of-tree path, ambiguous basename, missing
+ *    package.json), NEVER penalize. Only ≥1 definitively-"missing" ref does.
+ *  - Exactly ONE flat penalty per stale entry per pass (never scaled by broken-ref
+ *    count, never deleting); `pruneDeadEntries` reaps at the floor after repeated
+ *    misses. Entries with zero extractable refs are untouched (no refs ≠ broken).
+ */
+export async function validateProjectReferences(
+  projectPath: string,
+  resolver: ReferenceResolver,
+  now: number = Date.now(),
+): Promise<RefCheckResult> {
+  const pid = ensureProject(projectPath);
+  const proj = db()
+    .query("SELECT last_refcheck_at FROM projects WHERE id = ?")
+    .get(pid) as { last_refcheck_at: number | null } | null;
+  const last = proj?.last_refcheck_at ?? 0;
+  if (now - last < REFCHECK_INTERVAL_MS) {
+    return { checked: 0, penalized: 0, gated: true, neutral: false };
+  }
+
+  const rows = db()
+    .query(
+      `SELECT logical_id, title, content FROM knowledge_current
+        WHERE project_id = ? AND cross_project = 0 AND confidence > ?`,
+    )
+    .all(pid, DEAD_CONFIDENCE_FLOOR) as Array<{
+    logical_id: string;
+    title: string;
+    content: string;
+  }>;
+
+  // Extract per entry; dedupe the union of refs so the resolver does ONE batch
+  // (one client round-trip in synthetic-probe mode).
+  const perEntry = new Map<string, Reference[]>();
+  const union = new Map<string, Reference>();
+  for (const r of rows) {
+    const refs = extractReferences(`${r.title}\n${r.content}`);
+    if (refs.length === 0) continue; // no signal — untouched
+    perEntry.set(r.logical_id, refs);
+    for (const ref of refs) {
+      if (!union.has(ref.raw)) union.set(ref.raw, ref);
+    }
+  }
+  const unionList = [...union.values()];
+
+  const stampGate = (): void => {
+    db()
+      .query("UPDATE projects SET last_refcheck_at = ? WHERE id = ?")
+      .run(now, pid);
+  };
+
+  if (unionList.length === 0) {
+    stampGate();
+    return { checked: 0, penalized: 0, gated: false, neutral: false };
+  }
+
+  const statusMap = await resolver.resolve(unionList);
+  if (statusMap == null) {
+    // Whole batch unverifiable (probe error/timeout / no FS) → strict no-op.
+    // Consume the gate so a failing probe isn't re-hammered every idle tick.
+    stampGate();
+    return { checked: 0, penalized: 0, gated: false, neutral: true };
+  }
+
+  let checked = 0;
+  let penalized = 0;
+  // Stamp the 24h gate in a `finally`, OUTSIDE the penalty transaction. If a
+  // write inside the transaction throws, `withTransaction` rolls back the whole
+  // batch — but the gate MUST still advance, otherwise the next idle tick re-runs
+  // the same failing pass (re-resolving / re-probing) every tick forever. The
+  // gate is just a rate-limiter timestamp, so decoupling it from the penalty
+  // atomicity is safe; a failed pass simply waits for the next 24h window. (Seer.)
+  try {
+    withTransaction(() => {
+      for (const [logicalId, refs] of perEntry) {
+        let broken = 0;
+        let total = 0; // refs with a DEFINITIVE status (ok|missing); excludes unknown
+        for (const ref of refs) {
+          const st = statusMap.get(ref.raw);
+          if (st === "missing") {
+            broken++;
+            total++;
+          } else if (st === "ok") {
+            total++;
+          }
+          // "unknown" / absent → neutral, not counted
+        }
+        if (total === 0) continue; // every ref unverifiable for this entry — neutral
+        checked++;
+        db()
+          .query(
+            `INSERT INTO knowledge_ref_validity (logical_id, broken, total, checked_at)
+               VALUES (?, ?, ?, ?)
+             ON CONFLICT(logical_id) DO UPDATE SET
+               broken = excluded.broken, total = excluded.total, checked_at = excluded.checked_at`,
+          )
+          .run(logicalId, broken, total, now);
+        if (broken >= 1) {
+          penalizeStaleReferences(logicalId, REFERENCE_DRIFT_PENALTY);
+          penalized++;
+        }
+      }
+    });
+  } finally {
+    stampGate();
+  }
+
+  return { checked, penalized, gated: false, neutral: false };
+}
+
+/**
+ * Peek the deduped reference set for a project WITHOUT resolving or writing
+ * anything — used by the remote synthetic-probe driver to (a) check the rate gate
+ * and (b) build the client probe script. The actual penalty pass happens later
+ * (turn N+1) via `validateProjectReferences` with a `SyntheticProbeResolver`,
+ * which re-gathers from the SAME query, so the two are consistent by construction.
+ */
+export function peekProjectRefs(
+  projectPath: string,
+  now: number = Date.now(),
+): { gated: boolean; refs: Reference[] } {
+  const pid = ensureProject(projectPath);
+  const proj = db()
+    .query("SELECT last_refcheck_at FROM projects WHERE id = ?")
+    .get(pid) as { last_refcheck_at: number | null } | null;
+  const last = proj?.last_refcheck_at ?? 0;
+  if (now - last < REFCHECK_INTERVAL_MS) return { gated: true, refs: [] };
+
+  const rows = db()
+    .query(
+      `SELECT title, content FROM knowledge_current
+        WHERE project_id = ? AND cross_project = 0 AND confidence > ?`,
+    )
+    .all(pid, DEAD_CONFIDENCE_FLOOR) as Array<{
+    title: string;
+    content: string;
+  }>;
+  const union = new Map<string, Reference>();
+  for (const r of rows) {
+    for (const ref of extractReferences(`${r.title}\n${r.content}`)) {
+      if (!union.has(ref.raw)) union.set(ref.raw, ref);
+    }
+  }
+  return { gated: false, refs: [...union.values()] };
 }
 
 /**
@@ -1079,6 +1290,32 @@ export function outcomeImpact(logicalId: string): OutcomeImpact {
     else if (r.verdict === "fail") fails = r.n;
   }
   return { passes, fails };
+}
+
+/** Last observed reference-resolution counts for an entry (#627), or null if it
+ *  has never been checked (or has no extractable references). */
+export type RefValidity = {
+  /** References that resolved definitively MISSING at the last check. */
+  broken: number;
+  /** References with a definitive status (ok + missing) at the last check. */
+  total: number;
+  /** When the last check ran (epoch ms). */
+  checkedAt: number;
+};
+
+/** Read the last reference-validity snapshot for an entry by logical_id. Read-only;
+ *  surfaced by `lore data show`. */
+export function refValidity(logicalId: string): RefValidity | null {
+  const row = db()
+    .query(
+      "SELECT broken, total, checked_at FROM knowledge_ref_validity WHERE logical_id = ?",
+    )
+    .get(logicalId) as
+    | { broken: number; total: number; checked_at: number }
+    | null
+    | undefined;
+  if (!row) return null;
+  return { broken: row.broken, total: row.total, checkedAt: row.checked_at };
 }
 
 /**

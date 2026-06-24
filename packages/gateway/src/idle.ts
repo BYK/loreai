@@ -11,12 +11,14 @@
  * to fire ~45s before cache TTL expiry, not after the idle timeout.
  */
 
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
   temporal,
   distillation,
   curator,
   ltm,
+  DirectFsResolver,
   ensureProject,
   latReader,
   log,
@@ -1015,6 +1017,26 @@ export function buildIdleWorkHandler(
         const decayed = ltm.decayProject(projectPath);
         if (decayed > 0) {
           log.info(`decayed ${decayed} unreinforced knowledge entries`);
+        }
+        // Reference-validity (#627 Phase 0): local Direct-FS mode only — runs
+        // when the gateway can stat the repo (native plugin / `lore run`/`start`
+        // co-located). Remote-mode projects (root not statable here) are checked
+        // by the synthetic client probe on the request path instead. Runs BEFORE
+        // prune so an entry pushed to the floor is reaped in the same pass.
+        if (cfg.knowledge.referenceValidation && existsSync(projectPath)) {
+          try {
+            const res = await ltm.validateProjectReferences(
+              projectPath,
+              new DirectFsResolver(projectPath),
+            );
+            if (res.penalized > 0) {
+              log.info(
+                `reference drift: penalized ${res.penalized}/${res.checked} entries with unresolved references`,
+              );
+            }
+          } catch (e) {
+            log.warn("idle reference-validation error (non-fatal):", e);
+          }
         }
         const pruned = ltm.pruneDeadEntries(projectPath);
         if (pruned.length > 0) {
