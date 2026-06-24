@@ -166,6 +166,6 @@ Results and the evaluation harness live in `packages/core/eval/` if you'd like t
 
 ## Next steps
 
-- [Configuration](../configuration/) — full reference for `.lore.json`.
-- [Custom upstreams](./custom-upstreams/) — corporate proxies, LiteLLM, Cloudflare AI Gateway.
-- [Architecture](../architecture/) — how temporal storage, distillation, and the gradient context manager fit together.
+- [Configuration](/docs/configuration/) — full reference for `.lore.json`.
+- [Custom upstreams](/docs/guides/custom-upstreams/) — corporate proxies, LiteLLM, Cloudflare AI Gateway.
+- [Architecture](/docs/architecture/) — how temporal storage, distillation, and the gradient context manager fit together.

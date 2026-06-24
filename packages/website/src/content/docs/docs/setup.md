@@ -67,6 +67,6 @@ A quick check for override-by-another-tool: `stat -c '%y' ~/.codex/config.toml`.
 
 ## Next steps
 
-- [Codex with Lore](./guides/with-codex/) — full per-harness guide for Codex, including the Codex Desktop caveat and custom-upstream headers.
-- [Custom upstreams](./guides/custom-upstreams/) — corporate proxies, LiteLLM, Cloudflare AI Gateway. Pairs with `lore setup -r` for remote gateways.
-- [Architecture](./architecture/) — how temporal storage, distillation, and the gradient context manager fit together.
+- [Codex with Lore](/docs/guides/with-codex/) — full per-harness guide for Codex, including the Codex Desktop caveat and custom-upstream headers.
+- [Custom upstreams](/docs/guides/custom-upstreams/) — corporate proxies, LiteLLM, Cloudflare AI Gateway. Pairs with `lore setup -r` for remote gateways.
+- [Architecture](/docs/architecture/) — how temporal storage, distillation, and the gradient context manager fit together.

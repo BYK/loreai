@@ -27,7 +27,7 @@ The package is also published as `opencode-lore` (legacy alias). Both names ship
 
 ## What you get
 
-Once the plugin is loaded, every conversation you have with OpenCode is captured in Lore's three-tier memory. Distillations run in the background, the recall tool is available in any session, and your project knowledge is exported to `.lore.md` and `AGENTS.md` automatically. See the [architecture overview](../architecture/) for the full picture.
+Once the plugin is loaded, every conversation you have with OpenCode is captured in Lore's three-tier memory. Distillations run in the background, the recall tool is available in any session, and your project knowledge is exported to `.lore.md` and `AGENTS.md` automatically. See the [architecture overview](/docs/architecture/) for the full picture.
 
 ## Local embeddings
 
@@ -51,7 +51,7 @@ export LORE_UPSTREAM_VLLM=http://localhost:8000
 export LORE_UPSTREAM_OLLAMA=http://localhost:11434
 ```
 
-The URL is the server root — do not include `/v1` (the gateway appends API paths automatically). See the [local inference guide](./local-inference/) for a full walkthrough.
+The URL is the server root — do not include `/v1` (the gateway appends API paths automatically). See the [local inference guide](/docs/guides/local-inference/) for a full walkthrough.
 
 ## Per-harness notes
 
@@ -61,7 +61,7 @@ The URL is the server root — do not include `/v1` (the gateway appends API pat
 
 ## Next steps
 
-- [Architecture](../architecture/) — how temporal storage, distillation, and the gradient context manager fit together.
-- [Configuration](../configuration/) — full reference for `.lore.json`.
-- [Local inference](./local-inference/) — running OpenCode against Ollama, vLLM, or llama.cpp.
-- [Custom upstreams](./custom-upstreams/) — corporate proxies, LiteLLM, Cloudflare AI Gateway.
+- [Architecture](/docs/architecture/) — how temporal storage, distillation, and the gradient context manager fit together.
+- [Configuration](/docs/configuration/) — full reference for `.lore.json`.
+- [Local inference](/docs/guides/local-inference/) — running OpenCode against Ollama, vLLM, or llama.cpp.
+- [Custom upstreams](/docs/guides/custom-upstreams/) — corporate proxies, LiteLLM, Cloudflare AI Gateway.

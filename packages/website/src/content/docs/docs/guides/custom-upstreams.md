@@ -174,6 +174,6 @@ Both the OpenCode and Pi plugins probe the URL on startup.
 
 ## Next steps
 
-- [Configuration](../configuration/) — full reference for `.lore.json` and related env vars.
-- [Local inference](./local-inference/) — running Lore against Ollama, vLLM, or llama.cpp.
-- [Architecture](../architecture/) — how temporal storage, distillation, and the gradient context manager fit together.
+- [Configuration](/docs/configuration/) — full reference for `.lore.json` and related env vars.
+- [Local inference](/docs/guides/local-inference/) — running Lore against Ollama, vLLM, or llama.cpp.
+- [Architecture](/docs/architecture/) — how temporal storage, distillation, and the gradient context manager fit together.

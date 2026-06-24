@@ -41,7 +41,7 @@ claude
 
 ## What you get
 
-Every Claude Code conversation is captured in Lore's three-tier memory. Distillations run in the background, the recall tool is available, and your project knowledge is exported to `.lore.md` and `AGENTS.md` automatically. See the [architecture overview](../architecture/) for the full picture.
+Every Claude Code conversation is captured in Lore's three-tier memory. Distillations run in the background, the recall tool is available, and your project knowledge is exported to `.lore.md` and `AGENTS.md` automatically. See the [architecture overview](/docs/architecture/) for the full picture.
 
 ## Per-harness notes
 
@@ -55,6 +55,6 @@ Your project knowledge (`.lore.md`, `AGENTS.md`, the SQLite database at `~/.loca
 
 ## Next steps
 
-- [Architecture](../architecture/) — how temporal storage, distillation, and the gradient context manager fit together.
-- [Configuration](../configuration/) — full reference for `.lore.json`.
-- [Custom upstreams](./custom-upstreams/) — corporate proxies, LiteLLM, Cloudflare AI Gateway.
+- [Architecture](/docs/architecture/) — how temporal storage, distillation, and the gradient context manager fit together.
+- [Configuration](/docs/configuration/) — full reference for `.lore.json`.
+- [Custom upstreams](/docs/guides/custom-upstreams/) — corporate proxies, LiteLLM, Cloudflare AI Gateway.

@@ -5,6 +5,7 @@ import {
   faviconAssets,
   generateAssetsEagerly,
 } from "./integrations/favicon-assets";
+import prefixBaseLinks from "./integrations/prefix-base-links.mjs";
 
 const prNumber = process.env.PR_NUMBER;
 const base = prNumber ? `/_preview/pr-${prNumber}/` : "/";
@@ -28,6 +29,11 @@ export default defineConfig({
     format: "directory",
   },
   integrations: [
+    // Post-build pass that prefixes internal root-absolute links
+    // (`/docs/...`) with `base` so they resolve on PR previews
+    // (`/_preview/pr-<n>/`). No-op in production. Covers markdown body,
+    // frontmatter hero links, and component links. See prefix-base-links.mjs.
+    prefixBaseLinks(),
     faviconAssets(),
     starlight({
       title: "Lore",

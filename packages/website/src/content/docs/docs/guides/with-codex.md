@@ -5,7 +5,7 @@ sidebar:
   order: 4
 ---
 
-[Codex](https://github.com/openai/codex) is OpenAI's terminal-based AI coding agent. Lore's gateway is the recommended way to run Codex with persistent memory and gradient context management. For CLI users, `lore run` is the simplest path. For the Codex Desktop app — which can't accept `-c` CLI overrides — see [Setup command](../setup/).
+[Codex](https://github.com/openai/codex) is OpenAI's terminal-based AI coding agent. Lore's gateway is the recommended way to run Codex with persistent memory and gradient context management. For CLI users, `lore run` is the simplest path. For the Codex Desktop app — which can't accept `-c` CLI overrides — see [Setup command](/docs/setup/).
 
 The Codex CLI is a Rust binary that does NOT read `OPENAI_BASE_URL` from the environment. Provider routing is done exclusively via `~/.codex/config.toml` or `-c` CLI overrides. The gateway uses `-c` overrides when launched via `lore run` so you do not have to edit the config file by hand.
 
@@ -41,11 +41,11 @@ Both overrides are per-invocation — they do not affect Codex's persisted `conf
 
 ## Manual setup (CLI)
 
-If you'd rather start the gateway yourself and launch Codex directly — or if you're setting up the Codex Desktop app, which doesn't accept `-c` CLI overrides — run [`lore setup codex`](../setup/) once. It writes the right `~/.codex/config.toml` for both the CLI and the Desktop app, and supports `-r <url>` for remote gateways. See the [Setup command](../setup/) page for the full command reference.
+If you'd rather start the gateway yourself and launch Codex directly — or if you're setting up the Codex Desktop app, which doesn't accept `-c` CLI overrides — run [`lore setup codex`](/docs/setup/) once. It writes the right `~/.codex/config.toml` for both the CLI and the Desktop app, and supports `-r <url>` for remote gateways. See the [Setup command](/docs/setup/) page for the full command reference.
 
 ## Custom upstream headers
 
-The Codex plugin reads `LORE_UPSTREAM_EXTRA_HEADERS` from your environment and folds its values into Codex's `openai_provider_headers` TOML map. This is the path for corporate proxies, LiteLLM team-routing tokens, and Cloudflare AI Gateway. See the [custom upstreams guide](./custom-upstreams/) for full examples.
+The Codex plugin reads `LORE_UPSTREAM_EXTRA_HEADERS` from your environment and folds its values into Codex's `openai_provider_headers` TOML map. This is the path for corporate proxies, LiteLLM team-routing tokens, and Cloudflare AI Gateway. See the [custom upstreams guide](/docs/guides/custom-upstreams/) for full examples.
 
 ## Per-harness notes
 
@@ -54,7 +54,7 @@ The Codex plugin reads `LORE_UPSTREAM_EXTRA_HEADERS` from your environment and f
 
 ## Next steps
 
-- [Setup command](../setup/) — `lore setup codex` for manual/Desktop configuration and remote gateways.
-- [Architecture](../architecture/) — how temporal storage, distillation, and the gradient context manager fit together.
-- [Configuration](../configuration/) — full reference for `.lore.json`.
-- [Custom upstreams](./custom-upstreams/) — corporate proxies, LiteLLM, Cloudflare AI Gateway.
+- [Setup command](/docs/setup/) — `lore setup codex` for manual/Desktop configuration and remote gateways.
+- [Architecture](/docs/architecture/) — how temporal storage, distillation, and the gradient context manager fit together.
+- [Configuration](/docs/configuration/) — full reference for `.lore.json`.
+- [Custom upstreams](/docs/guides/custom-upstreams/) — corporate proxies, LiteLLM, Cloudflare AI Gateway.
