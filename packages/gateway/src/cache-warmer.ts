@@ -48,7 +48,7 @@ import { recordWorkerFailure, recordWorkerSuccess } from "./worker-health";
 import { resignBody } from "./cch";
 import { resolveUpstreamRoute } from "./config";
 import { isBedrockMantleHost } from "./translate/bedrock";
-import { getModelEntrySync } from "./worker-model";
+import { getModelEntrySync, getWorkerModel } from "./worker-model";
 import { recordWarmupCost } from "./cost-tracker";
 import { upstreamFetch } from "./fetch";
 import { emitWarmupCircuitBreakerMetric } from "./sentry";
@@ -1274,7 +1274,19 @@ export function shouldWarm(
     // pure function falls back to "no adjustment" (byte-identical to pre-#947)
     // when either is missing — so the cost model flip is opt-in by config.
     const metaThreshold = cfg.distillation.metaThreshold;
-    const workerModel = getModelEntrySync(state.lastUpstream?.model ?? "");
+    // Seer finding (medium severity): price meta-distillation with the
+    // WORKER model's rates, not the session model's. Meta-distillation is
+    // performed by a worker LLM (typically cheaper than the session model —
+    // e.g. Sonnet for a Sonnet session, MiniMax-MiniMax for an Opus session).
+    // Using `state.lastUpstream?.model` would price the meta call at the
+    // session model rate (Opus), inflating the cost and biasing the
+    // strategy toward hold-warm when warming is the wrong call. The same
+    // `getWorkerModel(...)` pattern is used by idle.ts and pipeline.ts for
+    // analogous cost calculations.
+    const workerModelID = getWorkerModel(state.lastUpstream)?.modelID;
+    const workerModel = workerModelID
+      ? getModelEntrySync(workerModelID)
+      : undefined;
     const metaDistillCostPerCall = estimateMetaDistillCostPerCall(
       workerModel,
       metaThreshold,
