@@ -1309,7 +1309,7 @@ jobs:
   ci-status:
     name: CI Status
     if: always()
-    needs: [changes, test, binary-smoke-native, check-docs, check-links, check-social, check-patches, actionlint, sync-integration]
+    needs: [changes, test, binary-smoke-native, check-docs, check-links, check-preview-links, check-social, check-patches, actionlint, sync-integration]
     runs-on: ubuntu-latest
     steps:
       - name: Check CI result
@@ -1341,6 +1341,15 @@ jobs:
           checkLinksResult="${{ needs.check-links.result }}"
           if [ "$checkLinksResult" == "failure" ] || [ "$checkLinksResult" == "cancelled" ]; then
             echo "::error::check-links did not succeed (result: $checkLinksResult)"
+            exit 1
+          fi
+          # check-preview-links follows the same self-gating pattern as the
+          # other check-* jobs. Without this, a failed preview-links run
+          # would still leave ci-status green and the PR would be mergeable
+          # with broken preview links (PR #960 follow-up — Seer review).
+          checkPreviewLinksResult="${{ needs.check-preview-links.result }}"
+          if [ "$checkPreviewLinksResult" == "failure" ] || [ "$checkPreviewLinksResult" == "cancelled" ]; then
+            echo "::error::check-preview-links did not succeed (result: $checkPreviewLinksResult)"
             exit 1
           fi
           # check-social follows the same self-gating pattern.
