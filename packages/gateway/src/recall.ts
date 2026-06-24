@@ -457,6 +457,12 @@ export interface RecallFollowUpCtx {
     response: Response,
     protocol: RecallProtocol,
   ) => Promise<GatewayResponse>;
+  /**
+   * Accumulate a streaming (SSE) upstream response into a GatewayResponse.
+   * Required only by `runRecallFollowUpStreamAccumulated` (the `openai-codex`
+   * path, whose ChatGPT backend mandates streaming).
+   */
+  parseSSE?: (response: Response) => Promise<GatewayResponse>;
 }
 
 /**
@@ -673,6 +679,52 @@ export async function runRecallFollowUpJSON(
   }
   assertJSONResponse(response);
   const continuation = await ctx.parseJSON(response, effectiveProtocol);
+  return { ok: true, continuation, followUp };
+}
+
+/**
+ * Build a `stream: true` follow-up, forward it, accumulate the SSE body into a
+ * non-streaming continuation, and return it in the same shape as
+ * `runRecallFollowUpJSON`.
+ *
+ * This is the follow-up path for backends that MANDATE streaming and reject a
+ * non-streaming request — specifically Pi's `openai-codex` provider, whose
+ * ChatGPT backend (`/backend-api/codex/responses`) returns
+ * `400 {"detail":"Stream must be set to true"}` for `stream: false`. The plain
+ * `runRecallFollowUpJSON` path (`stream: false`) therefore always 400s on
+ * Codex, breaking every recall continuation. Here the follow-up is forced to
+ * stream and its SSE body is accumulated (via the injected `ctx.parseSSE`,
+ * which the pipeline wires to `accumulateResponsesSSEStream`) back into a
+ * non-streaming `GatewayResponse`, so the shared recall loop continues
+ * unchanged. The stream flag is coupled to its consumer — the body is asserted
+ * to be SSE — so a flag/consumer mismatch fails loud (see assertSSEResponse).
+ */
+export async function runRecallFollowUpStreamAccumulated(
+  ctx: RecallFollowUpCtx,
+  originalReq: GatewayRequest,
+  resp: GatewayResponse,
+  recallResult: string,
+  recallToolUseBlock: GatewayToolUseBlock,
+): Promise<RecallFollowUpJSON | RecallFollowUpError> {
+  if (!ctx.parseSSE) {
+    throw new Error(
+      "runRecallFollowUpStreamAccumulated requires ctx.parseSSE to accumulate the streamed continuation",
+    );
+  }
+  const followUp = buildRecallFollowUpRequest(
+    originalReq,
+    resp,
+    recallResult,
+    recallToolUseBlock,
+    /* stream */ true,
+  );
+  const { response } = await ctx.forward(followUp);
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    return { ok: false, status: response.status, detail: detail.slice(0, 500) };
+  }
+  assertSSEResponse(response);
+  const continuation = await ctx.parseSSE(response);
   return { ok: true, continuation, followUp };
 }
 

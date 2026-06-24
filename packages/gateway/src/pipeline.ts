@@ -270,6 +270,7 @@ import {
   clientHasRecallTool,
   runRecallFollowUpStreaming,
   runRecallFollowUpJSON,
+  runRecallFollowUpStreamAccumulated,
   type RecallFollowUpCtx,
   buildRecallMarker,
   recallStoreKey,
@@ -7433,11 +7434,21 @@ async function handleConversationTurn(
       }
 
       // Recall-only — send follow-up request for seamless UX.
-      // Build (stream:false) + forward + assert-JSON + parse in one coupled
-      // call so the follow-up's stream flag can never diverge from how the
-      // continuation is consumed (accumulateNonStreamResponse).
+      // Build + forward + assert-content-type + parse in one coupled call so
+      // the follow-up's stream flag can never diverge from how the continuation
+      // is consumed.
+      //
+      // openai-codex (ChatGPT) MANDATES streaming: its `/backend-api/codex/
+      // responses` backend rejects `stream: false` with
+      // `400 {"detail":"Stream must be set to true"}`. A plain stream:false
+      // JSON follow-up therefore 400s on every Codex recall continuation. For
+      // codex we force the follow-up to stream and accumulate its SSE body back
+      // into a non-streaming continuation, so the recall loop below is
+      // unchanged. Every other backend keeps the stream:false JSON follow-up
+      // (the standard Responses API and Chat Completions both accept it).
+      const followUpRequiresStream = currentModifiedReq.codex === true;
       log.info(
-        `recall (non-stream, depth=${recallDepth}): executing follow-up for session ${sessionState.sessionID.slice(0, 16)}`,
+        `recall (non-stream, depth=${recallDepth}, codex=${followUpRequiresStream}): executing follow-up for session ${sessionState.sessionID.slice(0, 16)}`,
       );
       const jsonRecallCtx: RecallFollowUpCtx = {
         forward: (r) =>
@@ -7446,16 +7457,25 @@ async function handleConversationTurn(
             cacheConversation: false,
           }),
         parseJSON: accumulateNonStreamResponse,
+        parseSSE: accumulateResponsesSSEStream,
       };
       let jsonFollowUp: Awaited<ReturnType<typeof runRecallFollowUpJSON>>;
       try {
-        jsonFollowUp = await runRecallFollowUpJSON(
-          jsonRecallCtx,
-          currentModifiedReq,
-          currentResp,
-          result,
-          recallBlock,
-        );
+        jsonFollowUp = followUpRequiresStream
+          ? await runRecallFollowUpStreamAccumulated(
+              jsonRecallCtx,
+              currentModifiedReq,
+              currentResp,
+              result,
+              recallBlock,
+            )
+          : await runRecallFollowUpJSON(
+              jsonRecallCtx,
+              currentModifiedReq,
+              currentResp,
+              result,
+              recallBlock,
+            );
       } catch (fetchErr) {
         log.error(
           `recall follow-up fetch error (non-stream, depth=${recallDepth}) for session ${sessionState.sessionID.slice(0, 16)}:`,
