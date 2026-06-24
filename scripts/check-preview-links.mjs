@@ -34,6 +34,17 @@
 import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
+// Reuse the integration's own matcher + skip predicates so this guard and the
+// thing it guards can never drift apart. NOTE: this means the check is a
+// CONTRACT test for the integration (href/src, double-quoted, root-absolute),
+// not an independent oracle — out-of-scope forms (srcset, single-quoted attrs,
+// `content="/..."`) are intentionally not validated here, just as the
+// integration does not rewrite them.
+import {
+  INTERNAL_LINK_RE,
+  isProtocolRelative,
+  isUnderPrefix,
+} from "../packages/website/integrations/prefix-base-links.mjs";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -47,11 +58,6 @@ const DIST_DIR = join(SITE_ROOT, "packages/website/dist");
 // usually unset). A fixed sentinel keeps the expected prefix stable.
 const PR_NUMBER = "0";
 const BASE_PREFIX = `/_preview/pr-${PR_NUMBER}`;
-
-// Matches `href="/..."` / `src="/..."`. Code samples that display HTML
-// are entity-escaped (`&quot;`), so the literal-quote form never matches
-// rendered example markup.
-const ATTR_RE = /(?:href|src)="(\/[^"]*)"/g;
 
 // ---------------------------------------------------------------------------
 // Build
@@ -100,13 +106,12 @@ function listHtmlFiles(dir) {
 /** Return the list of un-prefixed internal root-absolute links in `html`. */
 function findUnprefixed(html) {
   const offenders = [];
-  let match;
-  while ((match = ATTR_RE.exec(html)) !== null) {
-    const path = match[1];
-    // Protocol-relative URL (`//cdn.example.com/...`) — intentional, skip.
-    if (path.startsWith("//")) continue;
-    // Correctly prefixed with the base — the expected state.
-    if (path === BASE_PREFIX || path.startsWith(`${BASE_PREFIX}/`)) continue;
+  // `matchAll` operates on an internal copy of the global regex, so the
+  // shared INTERNAL_LINK_RE's lastIndex is never carried across files.
+  for (const match of html.matchAll(INTERNAL_LINK_RE)) {
+    const path = match[2]; // group 1 = attr name, group 2 = path
+    if (isProtocolRelative(path)) continue; // `//cdn...` — intentional, skip
+    if (isUnderPrefix(path, BASE_PREFIX)) continue; // correctly prefixed
     offenders.push(path);
   }
   return offenders;

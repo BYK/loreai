@@ -55,13 +55,31 @@ function listHtmlFiles(dir) {
   return results;
 }
 
+// Matches `href="/..."` / `src="/..."` (double-quoted, root-absolute only).
+// Group 1 = attribute name, group 2 = path. Code samples that display HTML
+// are entity-escaped (`&quot;`), so the literal-quote form never matches
+// rendered example markup. Exported so the CI guard
+// (scripts/check-preview-links.mjs) validates the SAME contract this
+// integration enforces — the two cannot silently drift.
+export const INTERNAL_LINK_RE = /(href|src)="(\/[^"]*)"/g;
+
+/** Protocol-relative URL (`//cdn.example.com/...`) — never a local path. */
+export function isProtocolRelative(path) {
+  return path.startsWith("//");
+}
+
+/** True if `path` already lives under `prefix` (so prefixing would duplicate). */
+export function isUnderPrefix(path, prefix) {
+  return path === prefix || path.startsWith(`${prefix}/`);
+}
+
 /** Rewrite one HTML document's internal root-absolute href/src attrs. */
 export function prefixHtml(html, prefix) {
-  return html.replace(/(href|src)="(\/[^"]*)"/g, (match, attr, path) => {
-    // Protocol-relative URL (`//cdn.example.com/...`) — leave untouched.
-    if (path.startsWith("//")) return match;
-    // Already under the base prefix — idempotent, don't double-prefix.
-    if (path === prefix || path.startsWith(`${prefix}/`)) return match;
+  // `.replace` resets the shared regex's lastIndex on entry and runs to
+  // completion, so reusing the module-level INTERNAL_LINK_RE is safe here.
+  return html.replace(INTERNAL_LINK_RE, (match, attr, path) => {
+    if (isProtocolRelative(path)) return match; // leave `//cdn...` untouched
+    if (isUnderPrefix(path, prefix)) return match; // idempotent, no double-prefix
     return `${attr}="${prefix}${path}"`;
   });
 }
