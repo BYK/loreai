@@ -55,6 +55,11 @@ function resolveExtensionPath(): string | null {
 export function loadVecExtension(database: Database): void {
   if (attempted) return;
   attempted = true;
+  // LORE_DISABLE_VEC=1 forces the JS brute-force vector-search path. Useful as
+  // a production kill-switch if the native extension causes issues, and as a
+  // test seam for the JS fallback. Set before the first `db()` call — once
+  // attempted=true is sticky for the connection lifetime, the env var won't be
+  // re-read until resetVecState() runs (in close()).
   if (process.env.LORE_DISABLE_VEC === "1") return; // kill-switch → JS fallback
   try {
     const path = resolveExtensionPath();
