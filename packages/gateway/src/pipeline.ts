@@ -1065,6 +1065,80 @@ function hasMaterialLtmDelta(input: {
   );
 }
 
+/**
+ * Append-only delta trigger: detect GENUINE knowledge mutations to the
+ * already-surfaced set, independent of per-turn relevance ranking.
+ *
+ * The legacy trigger (`hasMaterialLtmDelta`) compared the frozen system[2] pin
+ * against the CURRENT per-turn `forSession()` selection. Because relevance
+ * ranking picks a different subset every turn (e.g. 8→7→6→12 entries), an entry
+ * that simply wasn't top-K this turn registered as "removed" — firing a delta
+ * (and rewriting a deep-prefix message) every turn even though NOTHING changed
+ * in the DB. That was the `cause=incremental` bust spiral (session
+ * 1LYkXZ7jkiHHnqPl: read pinned at 41k, ~250k rewritten per turn).
+ *
+ * This trigger ignores ranking entirely. `surfacedKeys` is the set of
+ * `id:fnv1a(title\x1f content)` keys the model has ALREADY been shown (the
+ * system[2] pin ∪ all appended delta blocks). For each, we look up the entry's
+ * CURRENT state in the DB (`knowledge_current` via `getByLogical`) and compare
+ * the content hash:
+ *   - missing  → the entry was deleted/superseded → `removedIds`
+ *   - hash differs → genuine content edit (curator/consolidation) → `changed`
+ *   - hash same → no signal (NOT in the result), no matter the ranking
+ *
+ * A delta is emitted iff `changed ∪ removedIds` is non-empty, so a steady
+ * session with no real knowledge change emits zero deltas and never busts.
+ *
+ * @internal Exported for tests.
+ */
+export function detectSurfacedMutations(surfacedKeys: string[] | undefined): {
+  changed: Array<{
+    id: string;
+    category: string;
+    title: string;
+    content: string;
+  }>;
+  removedIds: string[];
+} {
+  const changed: Array<{
+    id: string;
+    category: string;
+    title: string;
+    content: string;
+  }> = [];
+  const removedIds: string[] = [];
+  for (const key of surfacedKeys ?? []) {
+    const idx = key.lastIndexOf(":");
+    const id = idx === -1 ? key : key.slice(0, idx);
+    const surfacedHash = idx === -1 ? "" : key.slice(idx + 1);
+    // Resolve the surfaced id to its CURRENT version. The append-only knowledge
+    // model (A2/#823) bumps the per-version `id` on every edit while keeping a
+    // stable `logical_id`; the surfaced key holds the id as it was at surface
+    // time. `get(id)` finds it while that version is still current; once a later
+    // version supersedes it, fall back through `logicalIdOf` → `getByLogical` so
+    // a mere version bump is reported as a CONTENT change, not a deletion. Only a
+    // genuine delete (no current version for the logical_id) resolves to null.
+    const current = ltm.get(id) ?? ltm.getByLogical(ltm.logicalIdOf(id));
+    if (!current) {
+      removedIds.push(id);
+      continue;
+    }
+    const currentHash = fnv1a(`${current.title}\x1f${current.content}`);
+    if (currentHash !== surfacedHash) {
+      // Report under the id the model already knows (the surfaced id), so the
+      // delta's recall tokens and any later supersession matching stay in the
+      // same id space as `surfacedKeys`. Content/title/category are current.
+      changed.push({
+        id,
+        category: current.category,
+        title: current.title,
+        content: current.content,
+      });
+    }
+  }
+  return { changed, removedIds };
+}
+
 export function buildKnowledgeDeltaMessage(
   entries: Array<{
     id: string;
@@ -1175,7 +1249,11 @@ export function buildKnowledgeDeltaMessage(
   };
 }
 
-function appendKnowledgePromptDelta(input: {
+/** @internal Exported for tests (guards the DB-mutation wiring at its seam:
+ *  a pinned entry that merely dropped out of the per-turn selection — but still
+ *  exists in the DB — must produce NO delta, whereas a genuine content change
+ *  or deletion must). */
+export function appendKnowledgePromptDelta(input: {
   sessionID: string;
   projectPath: string;
   insertAt: number;
@@ -1189,14 +1267,23 @@ function appendKnowledgePromptDelta(input: {
   }>;
   overflow?: Array<{ id: string; category: string; title: string }>;
 }): boolean {
-  const entries = changedLtmEntries(
-    input.entries,
-    input.previousKeys,
-    input.nextKeys,
-  );
+  // Source the delta from GENUINE DB mutations to the surfaced (pinned) set,
+  // NOT from the per-turn relevance selection. `previousKeys` is the frozen
+  // system[2] pin baseline; `detectSurfacedMutations` compares it against the
+  // CURRENT DB state, so an entry that merely wasn't top-K this turn produces
+  // no delta. The legacy `changedLtmEntries`/`removedLtmEntryIds(previousKeys,
+  // nextKeys)` compared the pin against the volatile selection, so ranking
+  // churn (8→7→6→12 entries) rewrote this row every turn and busted the cache
+  // from the delta's position onward (session 1LYkXZ7jkiHHnqPl: read pinned at
+  // 41k, ~250k rewritten per turn). The comparison stays against the FROZEN
+  // pin, so the result is still cumulative (every change since the pin),
+  // preserving the single-coalesced-row contract — it just no longer fires on
+  // pure re-ranking. `nextKeys`/`entries` are retained on the input for the
+  // gate sites (hasMaterialLtmDelta) but are intentionally unused here.
+  const { changed, removedIds } = detectSurfacedMutations(input.previousKeys);
   const message = buildKnowledgeDeltaMessage(
-    entries,
-    removedLtmEntryIds(input.previousKeys, input.nextKeys),
+    changed,
+    removedIds,
     input.overflow,
   );
   if (!message) return false;
@@ -1229,7 +1316,7 @@ function appendKnowledgePromptDelta(input: {
     content: JSON.stringify(message),
   });
   log.info(
-    `prompt-delta: upserted knowledge update for session ${input.sessionID.slice(0, 16)} (${entries.length} entr${entries.length === 1 ? "y" : "ies"}, insertAt=${insertAt})`,
+    `prompt-delta: upserted knowledge update for session ${input.sessionID.slice(0, 16)} (${changed.length} changed, ${removedIds.length} removed, insertAt=${insertAt})`,
   );
   return true;
 }
