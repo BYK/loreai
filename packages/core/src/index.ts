@@ -109,6 +109,7 @@ export {
   upsertSessionPromptDelta,
   deleteSessionPromptDelta,
   listSessionPromptDeltas,
+  updateSessionPromptDeltaSelector,
   recordCacheBustObservation,
   getCacheBustStats,
   summarizeCacheBustStats,

@@ -3125,6 +3125,29 @@ export function upsertSessionPromptDelta(input: {
 }
 
 /**
+ * Rewrite the persisted `selector` JSON for a single delta block, identified by
+ * (sessionID, seq). Content is left untouched — only the placement metadata
+ * moves. Used by the steady-layer-1 drift fix (Bug 2): when safeDeltaInsertIndex
+ * nudges a once-safe insertAt because the compressed array below it slid,
+ * persist the new safe index so subsequent replays use it verbatim and the
+ * delta block stays at a byte-identical position across turns. No-op if no
+ * matching row exists.
+ */
+export function updateSessionPromptDeltaSelector(
+  sessionID: string,
+  seq: number,
+  selector: string,
+): void {
+  db()
+    .query(
+      `UPDATE session_prompt_deltas
+          SET selector = ?
+        WHERE session_id = ? AND seq = ?`,
+    )
+    .run(selector, sessionID, seq);
+}
+
+/**
  * Delete all persisted prompt-delta rows for a session.
  *
  * Used when the gradient compresses (a cache-busting layer change): the

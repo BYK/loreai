@@ -70,6 +70,7 @@ import {
   appendSessionPromptDelta,
   deleteSessionPromptDelta,
   listSessionPromptDeltas,
+  updateSessionPromptDeltaSelector,
   loadHeaderSessionIndex,
   isHostedMode,
   enableHostedMode,
@@ -1024,31 +1025,38 @@ export function applySessionPromptDeltas(
     return byPosition !== 0 ? byPosition : b.seq - a.seq;
   });
 
-  for (const { selector, message } of parsed) {
+  // Bug 2: when safeDeltaInsertIndex nudges a stored insertAt because the
+  // compressed array below it slid (steady-layer-1 layout shifts), persist
+  // the new safe index so subsequent replays use it verbatim. Without this,
+  // every turn the nudge re-fires and the delta block drifts +N/turn, busting
+  // `messages[0]` (production session 1GYu, k:019ece09). Batched at the end so
+  // each drift = one DB write, not one per turn.
+  const reanchored: Array<{ seq: number; selector: MessageInsertSelector }> =
+    [];
+  for (const { seq, selector, message } of parsed) {
     // Selector positions are defined against the transformed upstream message
     // array at the time the delta is created (where they were already made
     // tool-pair-safe via safeDeltaInsertIndex). Re-inserting at the SAME index
     // on subsequent turns is intentional: #747 requires the delta to stay at a
     // byte-identical position to preserve the conversation prompt cache.
     //
-    // We re-run safeDeltaInsertIndex ONLY as a tool-pair guard, not a general
-    // re-placement: when the persisted index still points at a safe boundary
-    // (the common case) it returns the index unchanged → byte-identical replay,
-    // preserving the cache exactly as before. But the conversation grows and the
-    // raw-window/distilled-prefix boundary below the delta slides, so a once-safe
-    // absolute index can later land BETWEEN an assistant(tool_use) and its
-    // user(tool_result). Previously the splice went in anyway and
-    // removeOrphanedToolResults DESTRUCTIVELY stripped both blocks every turn —
-    // silently deleting a real tool call from history (and firing on every turn,
-    // not "rarely" as assumed). Nudging to the nearest safe boundary preserves
-    // the tool pair. The nudge is deterministic and layout-stable turn-over-turn
-    // (the messages below the delta are themselves stable until they change), so
-    // it does not introduce per-turn churn; at worst it shifts ONCE when the
-    // split first appears — strictly better than rewriting two historical
-    // messages every turn.
+    // safeDeltaInsertIndex is run as a tool-pair guard: when the persisted
+    // index still points at a safe boundary (the common case) it returns the
+    // index unchanged → byte-identical replay. When the layout below the
+    // stored index has shifted (compressed layer-1 array slides) and the
+    // persisted index now lands BETWEEN an assistant(tool_use) and its
+    // user(tool_result), the function walks back before the assistant. We
+    // persist that nudge so the next turn does NOT re-fire the same nudge
+    // (the new persisted index is byte-stable until the next layout shift).
     const clamped = Math.min(selector.insertAt, out.length);
     const insertAt = safeDeltaInsertIndex(out, clamped);
+    if (insertAt !== clamped) {
+      reanchored.push({ seq, selector: { ...selector, insertAt } });
+    }
     out.splice(insertAt, 0, message);
+  }
+  for (const { seq, selector } of reanchored) {
+    updateSessionPromptDeltaSelector(sessionID, seq, JSON.stringify(selector));
   }
   return out;
 }

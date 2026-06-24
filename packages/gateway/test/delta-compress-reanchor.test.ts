@@ -522,3 +522,99 @@ describe("reanchorExistingDelta — recomputes a persisted delta against the cur
     expect(listSessionPromptDeltas(sessionID).length).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Bug 2 — steady-layer-1 frozen insertAt drift (k:019ece09)
+// ---------------------------------------------------------------------------
+// Production (session 1GYu, post-#958): the persisted delta's stored insertAt
+// stays frozen across turns, but the compressed layer-1 array slides as the
+// raw window re-evicts. When the message BELOW the stored insertAt becomes
+// assistant(tool_use), safeDeltaInsertIndex nudges the delta up by 1 — and
+// keeps nudging every turn the layout shifts, so the delta block's position
+// drifts +N/turn and `messages[0]`/the prefix busts on every replay.
+//
+// The fix: when the nudge fires, PERSIST the new safe index so subsequent
+// replays use it verbatim (byte-identical position turn-over-turn, modulo
+// further shifts which trigger another nudge-and-persist).
+describe("steady-layer-1 insertAt drift — nudge is persisted", () => {
+  test("nudged insertAt is written back to DB so replays are byte-identical", () => {
+    const sessionID = `delta-drift-${Date.now()}-${Math.random()}`;
+    const projectID = ensureProject(
+      `/tmp/lore-delta-drift-${Date.now()}-${Math.random()}`,
+    );
+
+    // Persist a delta whose stored insertAt (2) is safe in the CURRENT layout
+    // (assistant has only a text block, no tool_use).
+    appendSessionPromptDelta({
+      sessionID,
+      projectID,
+      selector: JSON.stringify({ target: "messages", insertAt: 2 }),
+      content: JSON.stringify({
+        role: "user",
+        content: [{ type: "text", text: "Lore knowledge update" }],
+      }),
+    });
+
+    // Turn 1: layout is safe at stored insertAt=2.
+    const layoutSafe: GatewayMessage[] = [
+      user(text("hi")),
+      assistant(text("ok")), // no tool_use — stored insertAt=2 is safe
+      user(text("continue")),
+    ];
+    const out1 = applySessionPromptDeltas(layoutSafe, sessionID);
+    removeOrphanedToolResults(out1);
+    // Delta was placed at the stored position (no nudge on this layout).
+    const deltaIdx1 = out1.findIndex((m) =>
+      m.content.some(
+        (b) => b.type === "text" && b.text === "Lore knowledge update",
+      ),
+    );
+    expect(deltaIdx1).toBe(2);
+
+    // Turn 2: LAYOUT SHIFTS — the assistant now carries a tool_use. Stored
+    // insertAt=2 would land BETWEEN the tool_use and its tool_result (orphaning
+    // the pair). safeDeltaInsertIndex nudges to a safe index < 2.
+    const layoutDrifts: GatewayMessage[] = [
+      user(text("hi")),
+      assistant(toolUse("X")),
+      user(toolResult("X")),
+      user(text("next turn")),
+    ];
+    const out2 = applySessionPromptDeltas(layoutDrifts, sessionID);
+    removeOrphanedToolResults(out2);
+    assertNoOrphanedTools(out2);
+    const deltaIdx2 = out2.findIndex((m) =>
+      m.content.some(
+        (b) => b.type === "text" && b.text === "Lore knowledge update",
+      ),
+    );
+    expect(deltaIdx2).toBeLessThan(2); // nudged before the assistant(tool_use)
+    expect(deltaIdx2).toBeGreaterThanOrEqual(0);
+
+    // THE FIX: the new safe index is now PERSISTED — without this, every
+    // subsequent turn would re-compute the same nudge and the position would
+    // drift by 1+ per turn (the Bug 2 production pattern).
+    const rows = listSessionPromptDeltas(sessionID);
+    expect(rows.length).toBe(1);
+    const persistedSelector = JSON.parse(rows[0].selector);
+    expect(persistedSelector.insertAt).toBe(deltaIdx2);
+
+    // Turn 3: SAME drifted layout — replay must be byte-identical to turn 2.
+    // The persisted insertAt is used verbatim (no further nudge).
+    const out3 = applySessionPromptDeltas(layoutDrifts, sessionID);
+    removeOrphanedToolResults(out3);
+    assertNoOrphanedTools(out3);
+    const deltaIdx3 = out3.findIndex((m) =>
+      m.content.some(
+        (b) => b.type === "text" && b.text === "Lore knowledge update",
+      ),
+    );
+    expect(deltaIdx3).toBe(deltaIdx2);
+    // DB still has exactly one row (no spurious new block created).
+    expect(listSessionPromptDeltas(sessionID).length).toBe(1);
+    // The persisted insertAt is unchanged from turn 2 (no re-write needed).
+    expect(
+      JSON.parse(listSessionPromptDeltas(sessionID)[0].selector).insertAt,
+    ).toBe(deltaIdx2);
+  });
+});
