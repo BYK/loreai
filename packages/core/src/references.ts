@@ -295,7 +295,11 @@ export function resolveRefAgainstView(
 
   // file ref
   if (isAbsolute(ref.path)) return "unknown";
-  const rel = normalize(ref.path);
+  // Normalize `.`/`..` segments, then force forward slashes: on Windows
+  // `path.normalize` emits backslashes, but `view.files`/`basenames` are built
+  // with forward slashes on every platform (both the FS walk and the probe
+  // snapshot), so a backslash path would never match → false "missing". (Seer.)
+  const rel = normalize(ref.path).replace(/\\/g, "/");
   if (rel.startsWith("..")) return "unknown";
 
   let targetExists: boolean;

@@ -1044,37 +1044,46 @@ export async function validateProjectReferences(
 
   let checked = 0;
   let penalized = 0;
-  withTransaction(() => {
-    for (const [logicalId, refs] of perEntry) {
-      let broken = 0;
-      let total = 0; // refs with a DEFINITIVE status (ok|missing); excludes unknown
-      for (const ref of refs) {
-        const st = statusMap.get(ref.raw);
-        if (st === "missing") {
-          broken++;
-          total++;
-        } else if (st === "ok") {
-          total++;
+  // Stamp the 24h gate in a `finally`, OUTSIDE the penalty transaction. If a
+  // write inside the transaction throws, `withTransaction` rolls back the whole
+  // batch — but the gate MUST still advance, otherwise the next idle tick re-runs
+  // the same failing pass (re-resolving / re-probing) every tick forever. The
+  // gate is just a rate-limiter timestamp, so decoupling it from the penalty
+  // atomicity is safe; a failed pass simply waits for the next 24h window. (Seer.)
+  try {
+    withTransaction(() => {
+      for (const [logicalId, refs] of perEntry) {
+        let broken = 0;
+        let total = 0; // refs with a DEFINITIVE status (ok|missing); excludes unknown
+        for (const ref of refs) {
+          const st = statusMap.get(ref.raw);
+          if (st === "missing") {
+            broken++;
+            total++;
+          } else if (st === "ok") {
+            total++;
+          }
+          // "unknown" / absent → neutral, not counted
         }
-        // "unknown" / absent → neutral, not counted
+        if (total === 0) continue; // every ref unverifiable for this entry — neutral
+        checked++;
+        db()
+          .query(
+            `INSERT INTO knowledge_ref_validity (logical_id, broken, total, checked_at)
+               VALUES (?, ?, ?, ?)
+             ON CONFLICT(logical_id) DO UPDATE SET
+               broken = excluded.broken, total = excluded.total, checked_at = excluded.checked_at`,
+          )
+          .run(logicalId, broken, total, now);
+        if (broken >= 1) {
+          penalizeStaleReferences(logicalId, REFERENCE_DRIFT_PENALTY);
+          penalized++;
+        }
       }
-      if (total === 0) continue; // every ref unverifiable for this entry — neutral
-      checked++;
-      db()
-        .query(
-          `INSERT INTO knowledge_ref_validity (logical_id, broken, total, checked_at)
-             VALUES (?, ?, ?, ?)
-           ON CONFLICT(logical_id) DO UPDATE SET
-             broken = excluded.broken, total = excluded.total, checked_at = excluded.checked_at`,
-        )
-        .run(logicalId, broken, total, now);
-      if (broken >= 1) {
-        penalizeStaleReferences(logicalId, REFERENCE_DRIFT_PENALTY);
-        penalized++;
-      }
-    }
+    });
+  } finally {
     stampGate();
-  });
+  }
 
   return { checked, penalized, gated: false, neutral: false };
 }

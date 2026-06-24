@@ -143,6 +143,37 @@ describe("validateProjectReferences (#627 Phase 0)", () => {
     expect(conf(id)).toBe(1.0);
   });
 
+  // Regression (#939 Seer): a write failure inside the penalty transaction must
+  // still advance the 24h rate gate — otherwise the next idle tick re-runs the
+  // same failing pass (re-resolve / re-probe) every tick forever.
+  test("a penalty-transaction write failure still stamps the rate gate (no retry loop)", async () => {
+    seed("src/gone.ts:1"); // a broken ref → reaches the penalty/insert write
+    db().exec("DROP TABLE knowledge_ref_validity"); // force the upsert to throw
+    const now = Date.now();
+    try {
+      // The pass throws (the transaction rolls back), but the gate is stamped
+      // in `finally`, so the SECOND pass is rate-gated instead of re-running.
+      await expect(
+        ltm.validateProjectReferences(root, resolver(), now),
+      ).rejects.toThrow();
+      const second = await ltm.validateProjectReferences(
+        root,
+        resolver(),
+        now + 1000,
+      );
+      expect(second.gated).toBe(true);
+    } finally {
+      db().exec(
+        `CREATE TABLE IF NOT EXISTS knowledge_ref_validity (
+           logical_id TEXT PRIMARY KEY,
+           broken     INTEGER NOT NULL DEFAULT 0,
+           total      INTEGER NOT NULL DEFAULT 0,
+           checked_at INTEGER NOT NULL DEFAULT 0
+         )`,
+      );
+    }
+  });
+
   test("records resolve counts in knowledge_ref_validity", async () => {
     const id = seed("ok: src/real.ts:1 broken: src/gone.ts:1");
     const logicalId = ltm.get(id)?.logical_id;
