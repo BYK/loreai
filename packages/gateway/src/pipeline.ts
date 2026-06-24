@@ -2379,7 +2379,7 @@ function reattributeProvisionalProject(
  *
  * Returns the (possibly updated) projectPath for the caller to use.
  */
-function applySyntheticResolution(
+export function applySyntheticResolution(
   sessionState: SessionState,
   resolved: ResolveProjectResult,
   currentProjectPath: string,

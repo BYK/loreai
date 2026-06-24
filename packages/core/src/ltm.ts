@@ -2317,9 +2317,13 @@ export function searchScoredOtherProjects(input: {
 }
 
 export function get(id: string): KnowledgeEntry | null {
-  return db()
+  const row = db()
     .query(`SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE id = ?`)
-    .get(id) as KnowledgeEntry | null;
+    .get(id) as Record<string, unknown> | null;
+  // Hydrate the `metadata` column like every `.all()` site does — without this
+  // the single-row getters would return an unparsed JSON string, violating the
+  // `KnowledgeEntry.metadata: KnowledgeMetadata | null` contract (#627 Phase 1).
+  return row ? (hydrateKnowledgeEntry(row) as KnowledgeEntry) : null;
 }
 
 /**
@@ -2330,11 +2334,13 @@ export function get(id: string): KnowledgeEntry | null {
  * this is identical to `get()`.
  */
 export function getByLogical(logicalId: string): KnowledgeEntry | null {
-  return db()
+  const row = db()
     .query(
       `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE logical_id = ?`,
     )
-    .get(logicalId) as KnowledgeEntry | null;
+    .get(logicalId) as Record<string, unknown> | null;
+  // Hydrate `metadata` (#627 Phase 1) — see get() above.
+  return row ? (hydrateKnowledgeEntry(row) as KnowledgeEntry) : null;
 }
 
 /**

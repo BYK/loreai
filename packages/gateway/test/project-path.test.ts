@@ -10,8 +10,12 @@ import {
   UNATTRIBUTED_PREFIX,
   type GatewayConfig,
 } from "../src/config";
-import { resolveSessionProjectPath } from "../src/pipeline";
+import {
+  resolveSessionProjectPath,
+  applySyntheticResolution,
+} from "../src/pipeline";
 import type { SessionState } from "../src/translate/types";
+import type { ResolveProjectResult } from "../src/synthetic-tools";
 import {
   ensureProject,
   projectId,
@@ -1038,5 +1042,61 @@ describe("restart continuity: persisted project binding", () => {
     const state = rehydrateSeed(sid, persisted, process.cwd(), "cwd");
     expect(state.projectPath).toBe(process.cwd());
     expect(state.projectPathProvisional).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// applySyntheticResolution — #627 Phase 1 gitHead binding
+// ---------------------------------------------------------------------------
+
+describe("applySyntheticResolution gitHead binding (#627 Phase 1)", () => {
+  function freshState(sessionID: string): SessionState {
+    return {
+      sessionID,
+      projectPath: "/tmp/provisional",
+      projectPathProvisional: true,
+    } as Partial<SessionState> as SessionState;
+  }
+
+  test("binds gitHead onto the session when the probe captured one", () => {
+    const state = freshState("sid-githead-1");
+    const resolved: ResolveProjectResult = {
+      root: "/home/me/proj-a",
+      gitHead: "abc1234deadbeef",
+    };
+    const path = applySyntheticResolution(state, resolved, "/tmp/provisional");
+    expect(path).toBe("/home/me/proj-a");
+    // The whole point of Phase 1: gitHead survives onto the session so later
+    // knowledge creations can stamp metadata.gitHead.
+    expect(state.gitHead).toBe("abc1234deadbeef");
+  });
+
+  test("leaves gitHead undefined when the probe captured none", () => {
+    const state = freshState("sid-githead-2");
+    const resolved: ResolveProjectResult = { root: "/home/me/proj-b" };
+    applySyntheticResolution(state, resolved, "/tmp/provisional");
+    expect(state.gitHead).toBeUndefined();
+  });
+
+  test("binds gitHead alongside a git remote (both captured)", () => {
+    const state = freshState("sid-githead-3");
+    const resolved: ResolveProjectResult = {
+      root: "/home/me/proj-c",
+      gitRemote: "github.com/org/repo",
+      gitHead: "f00dface99",
+    };
+    applySyntheticResolution(state, resolved, "/tmp/provisional");
+    expect(state.gitRemote).toBe("github.com/org/repo");
+    expect(state.gitHead).toBe("f00dface99");
+  });
+
+  test("no-op result (no root, no remote) never binds gitHead", () => {
+    const state = freshState("sid-githead-4");
+    // A gitHead with no root/remote is not a confident binding — the early
+    // return fires before any gitHead is bound.
+    const resolved: ResolveProjectResult = { gitHead: "deadbeef" };
+    const path = applySyntheticResolution(state, resolved, "/tmp/provisional");
+    expect(path).toBe("/tmp/provisional");
+    expect(state.gitHead).toBeUndefined();
   });
 });

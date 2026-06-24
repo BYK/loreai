@@ -1,9 +1,12 @@
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { describe, expect, test } from "vitest";
 import { db } from "../src/db";
 import {
   create,
   forProject,
+  get,
+  getByLogical,
   hydrateKnowledgeEntry,
+  logicalIdOf,
   type KnowledgeMetadata,
 } from "../src/ltm";
 
@@ -217,5 +220,80 @@ describe("KnowledgeEntry.metadata column-level guarantees (#627 Phase 1)", () =>
     const rows = forProject(projectPath, false);
     const got = rows.find((r) => r.title === "Gotcha with gitHead");
     expect(got?.metadata?.gitHead).toBe("f00dface");
+  });
+});
+
+describe("single-row getters hydrate metadata (Seer #14858326, #627 Phase 1)", () => {
+  test("get(id) returns a PARSED metadata object, not a raw JSON string", () => {
+    const projectPath = nextProject();
+    const id = create({
+      projectPath,
+      category: "decision",
+      title: "Single-row get hydration",
+      content: "x",
+      scope: "project",
+      metadata: { gitHead: "cafe1234beef" },
+    });
+    const got = get(id);
+    expect(got).not.toBeNull();
+    // The bug: get() used to return `metadata` as the raw string
+    // '{"gitHead":"cafe1234beef"}'. Assert it's a structured object.
+    expect(typeof got!.metadata).toBe("object");
+    expect(got!.metadata).toEqual({ gitHead: "cafe1234beef" });
+    expect(got!.metadata?.gitHead).toBe("cafe1234beef");
+  });
+
+  test("get(id) returns null metadata for a no-metadata entry", () => {
+    const projectPath = nextProject();
+    const id = create({
+      projectPath,
+      category: "decision",
+      title: "Single-row get no metadata",
+      content: "x",
+      scope: "project",
+    });
+    expect(get(id)?.metadata).toBeNull();
+  });
+
+  test("get(id) drops malformed metadata without throwing", () => {
+    const projectPath = nextProject();
+    const id = create({
+      projectPath,
+      category: "decision",
+      title: "Single-row get garbage",
+      content: "x",
+      scope: "project",
+      metadata: { gitHead: "abc" },
+    });
+    db()
+      .query("UPDATE knowledge SET metadata = ? WHERE id = ?")
+      .run("not-json{", id);
+    expect(() => get(id)).not.toThrow();
+    expect(get(id)?.metadata).toBeNull();
+  });
+
+  test("get() returns null for a missing id (no crash on null row)", () => {
+    expect(get("nonexistent-id")).toBeNull();
+  });
+
+  test("getByLogical(logicalId) returns a PARSED metadata object", () => {
+    const projectPath = nextProject();
+    const id = create({
+      projectPath,
+      category: "decision",
+      title: "getByLogical hydration",
+      content: "x",
+      scope: "project",
+      metadata: { gitHead: "deadbeef9999" },
+    });
+    const logicalId = logicalIdOf(id);
+    const got = getByLogical(logicalId);
+    expect(got).not.toBeNull();
+    expect(typeof got!.metadata).toBe("object");
+    expect(got!.metadata).toEqual({ gitHead: "deadbeef9999" });
+  });
+
+  test("getByLogical() returns null for a missing logical id", () => {
+    expect(getByLogical("nonexistent-logical-id")).toBeNull();
   });
 });
