@@ -56,9 +56,49 @@ export function inline(value: string): string {
 // monotone (each pass can only add backslash escapes for newly-ambiguous
 // sequences) and converges; across a 300k-sample fast-check search the worst
 // observed input reached a fixpoint in 4 passes with zero oscillations, so 8
-// is a generous safety bound that also guards against pathological non-
-// convergence (we return the last result rather than looping forever).
+// is a generous safety bound.
 const MAX_NORMALIZE_PASSES = 8;
+
+// One markdown parse → stringify roundtrip.
+function roundtrip(md: string): string {
+  return processor.stringify(processor.parse(md));
+}
+
+/**
+ * Iterate `step` from `seed` until the sequence stabilizes, bounded by
+ * `maxPasses`. Returns a fixpoint (`step(x) === x`) when one is reached.
+ *
+ * A fixpoint is just a self-cycle (`step(x) === x`, and `x` is already in the
+ * seen-set), so a single repeat check covers both convergence and the
+ * defensive cases, making this provably terminating for *any* `step`:
+ *  - **fixpoint / cycle**: if an output repeats a value we've already seen,
+ *    the sequence has stabilized (`x → x`) or `step` is oscillating
+ *    (`A → B → A → …`); either way we stop and return that value.
+ *  - **cap exhaustion**: a strictly non-repeating sequence is bounded by
+ *    `maxPasses`, after which we return the last result rather than looping
+ *    forever.
+ *
+ * For the real markdown roundtrip the cap and oscillation cases never fire —
+ * remark's escaping is monotone, so the sequence strictly grows until it
+ * stabilizes — but they guard against a future serializer regression that
+ * could oscillate. Exported so tests can drive the convergence / cycle / cap
+ * branches with synthetic steps (real markdown only ever hits convergence).
+ */
+export function iterateToFixpoint(
+  seed: string,
+  step: (value: string) => string,
+  maxPasses: number = MAX_NORMALIZE_PASSES,
+): string {
+  let prev = seed;
+  const seen = new Set<string>([prev]);
+  for (let i = 0; i < maxPasses; i++) {
+    const next = step(prev);
+    if (seen.has(next)) return next; // fixpoint (self-cycle) or oscillation
+    seen.add(next);
+    prev = next;
+  }
+  return prev; // cap exhausted without convergence
+}
 
 // Normalize arbitrary markdown via parse → stringify roundtrip.
 // Used for content we don't control (e.g. existing text parts in Layer 4
@@ -68,16 +108,11 @@ const MAX_NORMALIZE_PASSES = 8;
 // can introduce new ambiguous sequences (e.g. `**` adjacent to already-escaped
 // asterisks becomes `\*\*`) that only stabilize on a *later* pass. A fixed two
 // passes was not enough for some hostile inputs (issue #959), so we iterate to
-// a fixpoint (bounded by MAX_NORMALIZE_PASSES). This guarantees the result is
-// itself already-normalized: normalize(normalize(x)) === normalize(x).
+// a fixpoint (bounded by MAX_NORMALIZE_PASSES). For the monotone remark
+// transform this guarantees the result is itself already-normalized:
+// normalize(normalize(x)) === normalize(x).
 export function normalize(md: string): string {
-  let prev = processor.stringify(processor.parse(md));
-  for (let i = 0; i < MAX_NORMALIZE_PASSES; i++) {
-    const next = processor.stringify(processor.parse(prev));
-    if (next === prev) return prev;
-    prev = next;
-  }
-  return prev;
+  return iterateToFixpoint(roundtrip(md), roundtrip);
 }
 
 /**

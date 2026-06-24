@@ -1,4 +1,5 @@
 import { Database } from "#db/driver";
+import { loadVecExtension, resetVecState } from "./db/vec";
 import { join, dirname } from "node:path";
 import { chmodSync, mkdirSync } from "node:fs";
 import { getGitRemote } from "./git";
@@ -1609,6 +1610,10 @@ export function db(): Database {
   database.exec("PRAGMA auto_vacuum = INCREMENTAL");
   migrate(database);
   installSyncCapture(database);
+  // Load the sqlite-vec native extension (if available) on the RAW connection,
+  // before the tracing Proxy wrap. Never throws — when unavailable, vector
+  // search falls back to the pure-JS brute-force path (see db/vec.ts).
+  loadVecExtension(database);
   // Wrap the connection in the query-tracing Proxy AFTER migrate() and sync
   // change-capture are installed on the RAW connection, so (a) migration and
   // TEMP-trigger setup queries are never traced / re-entrant, and (b) the
@@ -2203,6 +2208,9 @@ export function close() {
     instance.close();
     instance = undefined;
   }
+  // The sqlite-vec extension is loaded per-connection; reset loader state so a
+  // subsequent db() on a fresh connection re-attempts the load.
+  resetVecState();
 }
 
 // ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@
 
 import { freemem } from "node:os";
 import { db } from "./db";
+import { isVecAvailable } from "./db/vec";
 import { config } from "./config";
 import * as log from "./log";
 import { vendorModelInfo } from "./embedding-vendor";
@@ -1184,7 +1185,11 @@ export async function embed(
 ): Promise<Float32Array[]> {
   const provider = getProvider();
   if (!provider) throw new Error("No embedding provider available");
-  return provider.embed(texts, inputType);
+  const vecs = await provider.embed(texts, inputType);
+  // Enforce the L2-normalization invariant at the single chokepoint so the JS
+  // dot-product path and sqlite-vec's vec_distance_cosine() always agree. See
+  // l2Normalize() for the full rationale.
+  return vecs.map(l2Normalize);
 }
 
 // ---------------------------------------------------------------------------
@@ -1205,6 +1210,38 @@ export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
     dot += a[i] * b[i];
   }
   return dot;
+}
+
+/**
+ * Return an L2-normalized (unit-length) copy of a vector.
+ *
+ * System-wide invariant: every vector produced by {@link embed} is
+ * L2-normalized. Two consumers depend on this and would silently DIVERGE if it
+ * were violated:
+ *   1. {@link cosineSimilarity} (the JS brute-force path) is a bare dot product
+ *      — it only equals cosine similarity for unit vectors.
+ *   2. sqlite-vec's `vec_distance_cosine()` (the native fast path) normalizes
+ *      internally, so a non-normalized stored vector would score differently on
+ *      the two paths (e.g. stored [2,0,0] vs query [1,0,0]: JS dot → 2.0, vec →
+ *      1.0), breaking vec/JS parity and producing similarities outside [-1, 1].
+ *
+ * Providers (local ONNX, Voyage, OpenAI) already return ~unit vectors, so this
+ * is idempotent in practice. It is applied unconditionally at the single
+ * {@link embed} chokepoint to make the invariant true *by construction* rather
+ * than by provider convention — guarding against drift if a provider ever
+ * returns non-normalized output.
+ *
+ * A zero or non-finite vector cannot be normalized and is returned unchanged
+ * (matches {@link cosineSimilarity}'s zero-vector handling, which returns 0).
+ */
+export function l2Normalize(vec: Float32Array): Float32Array {
+  let sumSq = 0;
+  for (let i = 0; i < vec.length; i++) sumSq += vec[i] * vec[i];
+  const norm = Math.sqrt(sumSq);
+  if (!(norm > 0) || !Number.isFinite(norm)) return vec;
+  const out = new Float32Array(vec.length);
+  for (let i = 0; i < vec.length; i++) out[i] = vec[i] / norm;
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -1273,6 +1310,24 @@ export function vectorSearch(
   limit = 10,
   excludeCategories?: string[],
 ): VectorHit[] {
+  if (isVecAvailable()) {
+    try {
+      let sql =
+        "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM knowledge_current WHERE embedding IS NOT NULL AND confidence > 0.2";
+      const params: unknown[] = [toBlob(queryEmbedding)];
+      if (excludeCategories?.length) {
+        sql += ` AND category NOT IN (${excludeCategories.map(() => "?").join(",")})`;
+        params.push(...excludeCategories);
+      }
+      sql += " ORDER BY similarity DESC LIMIT ?";
+      params.push(limit);
+      return db()
+        .query(sql)
+        .all(...params) as VectorHit[];
+    } catch {
+      // fall through to JS brute-force
+    }
+  }
   let sql =
     "SELECT id, embedding FROM knowledge_current WHERE embedding IS NOT NULL AND confidence > 0.2";
   const params: string[] = [];
@@ -1301,6 +1356,17 @@ export function vectorSearchEntities(
   queryEmbedding: Float32Array,
   limit = 10,
 ): VectorHit[] {
+  if (isVecAvailable()) {
+    try {
+      return db()
+        .query(
+          "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM entities WHERE embedding IS NOT NULL ORDER BY similarity DESC LIMIT ?",
+        )
+        .all(toBlob(queryEmbedding), limit) as VectorHit[];
+    } catch {
+      // fall through to JS brute-force
+    }
+  }
   const rows = db()
     .query("SELECT id, embedding FROM entities WHERE embedding IS NOT NULL")
     .all() as Array<{ id: string; embedding: Buffer }>;
@@ -1326,6 +1392,17 @@ export function vectorSearchDistillations(
   queryEmbedding: Float32Array,
   limit = 10,
 ): VectorHit[] {
+  if (isVecAvailable()) {
+    try {
+      return db()
+        .query(
+          "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM distillations WHERE embedding IS NOT NULL AND archived = 0 ORDER BY similarity DESC LIMIT ?",
+        )
+        .all(toBlob(queryEmbedding), limit) as VectorHit[];
+    } catch {
+      // fall through to JS brute-force
+    }
+  }
   const rows = db()
     .query(
       "SELECT id, embedding FROM distillations WHERE embedding IS NOT NULL AND archived = 0",
@@ -1371,6 +1448,24 @@ export function vectorSearchAllDistillations(
   projectId: string,
   limit = 20,
 ): DistillationVectorHit[] {
+  if (isVecAvailable()) {
+    try {
+      // Rank by similarity within the same most-recent candidate window the JS
+      // path uses (created_at DESC, capped at MAX_DISTILLATION_VECTOR_ROWS).
+      return db()
+        .query(
+          "SELECT id, session_id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM (SELECT id, session_id, embedding FROM distillations WHERE embedding IS NOT NULL AND project_id = ? ORDER BY created_at DESC LIMIT ?) ORDER BY similarity DESC LIMIT ?",
+        )
+        .all(
+          toBlob(queryEmbedding),
+          projectId,
+          MAX_DISTILLATION_VECTOR_ROWS,
+          limit,
+        ) as DistillationVectorHit[];
+    } catch {
+      // fall through to JS brute-force
+    }
+  }
   const rows = db()
     .query(
       "SELECT id, session_id, embedding FROM distillations WHERE embedding IS NOT NULL AND project_id = ? ORDER BY created_at DESC LIMIT ?",
@@ -1524,6 +1619,21 @@ export function vectorSearchTemporal(
   limit = 10,
   sessionId?: string,
 ): VectorHit[] {
+  if (isVecAvailable()) {
+    try {
+      const vsql = sessionId
+        ? "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM temporal_messages WHERE embedding IS NOT NULL AND project_id = ? AND session_id = ? ORDER BY similarity DESC LIMIT ?"
+        : "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM temporal_messages WHERE embedding IS NOT NULL AND project_id = ? ORDER BY similarity DESC LIMIT ?";
+      const vparams: unknown[] = sessionId
+        ? [toBlob(queryEmbedding), projectId, sessionId, limit]
+        : [toBlob(queryEmbedding), projectId, limit];
+      return db()
+        .query(vsql)
+        .all(...vparams) as VectorHit[];
+    } catch {
+      // fall through to JS brute-force
+    }
+  }
   const sql = sessionId
     ? "SELECT id, embedding FROM temporal_messages WHERE embedding IS NOT NULL AND project_id = ? AND session_id = ?"
     : "SELECT id, embedding FROM temporal_messages WHERE embedding IS NOT NULL AND project_id = ?";

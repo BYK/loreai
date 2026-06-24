@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -185,6 +186,9 @@ describe("DirectFsResolver", () => {
     root = mkdtempSync(join(tmpdir(), "lore-refres-"));
     mkdirSync(join(root, "src"), { recursive: true });
     writeFileSync(join(root, "src", "foo.ts"), "1\n2\n3\n4\n5\n"); // 5 lines
+    // mixed-case on-disk filename — exercises the builder's basename/path
+    // lowercasing (#969): a lowercase citation must resolve against it.
+    writeFileSync(join(root, "src", "Widget.tsx"), "1\n2\n3\n"); // 3 lines
     writeFileSync(join(root, "uniquebar.ts"), "x\ny\n"); // 2 lines, unique basename
     // ambiguous basename: two dup.ts
     mkdirSync(join(root, "a"), { recursive: true });
@@ -286,6 +290,32 @@ describe("DirectFsResolver", () => {
   test("dot-dir file (e.g. .github/workflows/release.yml) resolves ok", async () => {
     expect(await resolve(".github/workflows/release.yml")).toBe("ok");
   });
+
+  // Case-insensitive file resolution (#969): a citation whose case differs from
+  // the on-disk file must NOT false-"missing" on a case-sensitive FS (Linux/CI).
+  // The actual-case path is what feeds the line-count check, so the line bound is
+  // still honored exactly.
+  test("wrong-case multi-segment path resolves against actual file → ok", async () => {
+    expect(await resolve("src/FOO.ts:3")).toBe("ok"); // file is src/foo.ts
+  });
+  test("wrong-case path still honors the line bound → missing when out of range", async () => {
+    expect(await resolve("src/FOO.ts:99")).toBe("missing");
+  });
+  test("wrong-case dir AND file segments resolve → ok (no line)", async () => {
+    expect(await resolve("SRC/FOO.ts")).toBe("ok");
+  });
+  test("wrong-case bare basename resolves to the actual-case file → ok", async () => {
+    expect(await resolve("UNIQUEBAR.ts:2")).toBe("ok");
+  });
+  test("case-fold does not mask a genuinely absent file → missing", async () => {
+    expect(await resolve("src/GONE.ts:1")).toBe("missing");
+  });
+  test("lowercase citation resolves a mixed-case on-disk file (multi-segment) → ok", async () => {
+    expect(await resolve("src/widget.tsx:2")).toBe("ok"); // file is src/Widget.tsx
+  });
+  test("lowercase citation resolves a mixed-case on-disk file (bare basename) → ok", async () => {
+    expect(await resolve("widget.tsx:3")).toBe("ok");
+  });
   test("command refs are unknown when package.json is absent (neutral)", async () => {
     const noPkg = mkdtempSync(join(tmpdir(), "lore-nopkg-"));
     try {
@@ -320,6 +350,7 @@ describe("DirectFsResolver", () => {
 describe("resolveRefAgainstView (Windows backslash normalization)", () => {
   const view: RepoView = {
     files: new Set(["a/b/c/d.ts"]),
+    filesLower: new Map([["a/b/c/d.ts", ["a/b/c/d.ts"]]]),
     basenames: new Map([["d.ts", ["a/b/c/d.ts"]]]),
     scripts: null,
     makeTargets: null,
@@ -344,6 +375,134 @@ describe("resolveRefAgainstView (Windows backslash normalization)", () => {
       raw: "a/b\\c\\d.ts:99",
     };
     expect(resolveRefAgainstView(ref, view)).toBe("missing");
+  });
+});
+
+// Case-insensitive file resolution (#969), unit-tested directly against
+// hand-built RepoViews so the exact-vs-case-folded branches and case-collision
+// neutrality are exercised independent of any filesystem. Mutation-verified:
+// removing either `.toLowerCase()` in the lookups, or collapsing the
+// case-collision `unknown` to a positive verdict, flips one of these.
+describe("resolveRefAgainstView (case-insensitive file resolution, #969)", () => {
+  // Actual paths are lowercase; indices are keyed lowercase with actual-case
+  // values — exactly the shape both builders produce.
+  const view: RepoView = {
+    files: new Set(["packages/core/src/db.ts", "readme.md"]),
+    filesLower: new Map([
+      ["packages/core/src/db.ts", ["packages/core/src/db.ts"]],
+      ["readme.md", ["readme.md"]],
+    ]),
+    basenames: new Map([
+      ["db.ts", ["packages/core/src/db.ts"]],
+      ["readme.md", ["readme.md"]],
+    ]),
+    scripts: null,
+    makeTargets: null,
+    lineCount: (rel) =>
+      rel === "packages/core/src/db.ts" ? 42 : rel === "readme.md" ? 10 : null,
+  };
+  const status = (path: string, line: number | null) =>
+    resolveRefAgainstView(
+      {
+        kind: "file",
+        path,
+        line,
+        raw: `${path}${line == null ? "" : `:${line}`}`,
+      },
+      view,
+    );
+
+  test("wrong-case multi-segment path → ok (not a false missing)", () => {
+    expect(status("packages/core/src/DB.ts", null)).toBe("ok");
+  });
+  test("wrong-case path + in-range line uses the actual file's count → ok", () => {
+    expect(status("packages/core/src/DB.ts", 42)).toBe("ok");
+  });
+  test("wrong-case path + out-of-range line → missing (bound still honored)", () => {
+    expect(status("packages/core/src/DB.ts", 43)).toBe("missing");
+  });
+  test("exact-case match is still ok", () => {
+    expect(status("packages/core/src/db.ts", 42)).toBe("ok");
+  });
+  test("wrong-case bare basename → ok (resolves to the actual-case file)", () => {
+    expect(status("README.MD", 10)).toBe("ok");
+  });
+  test("genuinely absent file is still missing (case-fold doesn't mask it)", () => {
+    expect(status("packages/core/src/gone.ts", null)).toBe("missing");
+  });
+
+  // A case-collision (two siblings differing only in case — possible on a
+  // case-sensitive FS) is ambiguous: resolution stays NEUTRAL ("unknown") so a
+  // line check against the wrong sibling can never emit a false penalty.
+  test("multi-segment case-collision (no exact hit) → unknown (neutral)", () => {
+    const collide: RepoView = {
+      files: new Set(["src/Foo.ts", "src/foo.ts"]),
+      filesLower: new Map([["src/foo.ts", ["src/Foo.ts", "src/foo.ts"]]]),
+      basenames: new Map([["foo.ts", ["src/Foo.ts", "src/foo.ts"]]]),
+      scripts: null,
+      makeTargets: null,
+      lineCount: () => 1,
+    };
+    expect(
+      resolveRefAgainstView(
+        { kind: "file", path: "src/FOO.ts", line: 1, raw: "src/FOO.ts:1" },
+        collide,
+      ),
+    ).toBe("unknown");
+  });
+  test("multi-segment exact case wins over a sibling collision → ok", () => {
+    const collide: RepoView = {
+      files: new Set(["src/Foo.ts", "src/foo.ts"]),
+      filesLower: new Map([["src/foo.ts", ["src/Foo.ts", "src/foo.ts"]]]),
+      basenames: new Map([["foo.ts", ["src/Foo.ts", "src/foo.ts"]]]),
+      scripts: null,
+      makeTargets: null,
+      lineCount: () => 1,
+    };
+    expect(
+      resolveRefAgainstView(
+        { kind: "file", path: "src/foo.ts", line: 1, raw: "src/foo.ts:1" },
+        collide,
+      ),
+    ).toBe("ok");
+  });
+  test("bare basename collision with a unique exact-case match prefers it → ok", () => {
+    const collide: RepoView = {
+      files: new Set(["a/Foo.ts", "b/foo.ts"]),
+      filesLower: new Map([
+        ["a/foo.ts", ["a/Foo.ts"]],
+        ["b/foo.ts", ["b/foo.ts"]],
+      ]),
+      basenames: new Map([["foo.ts", ["a/Foo.ts", "b/foo.ts"]]]),
+      scripts: null,
+      makeTargets: null,
+      lineCount: () => 5,
+    };
+    expect(
+      resolveRefAgainstView(
+        { kind: "file", path: "foo.ts", line: 5, raw: "foo.ts:5" },
+        collide,
+      ),
+    ).toBe("ok");
+  });
+  test("bare basename collision with no exact-case match → unknown (neutral)", () => {
+    const collide: RepoView = {
+      files: new Set(["a/Foo.ts", "b/FOO.ts"]),
+      filesLower: new Map([
+        ["a/foo.ts", ["a/Foo.ts"]],
+        ["b/foo.ts", ["b/FOO.ts"]],
+      ]),
+      basenames: new Map([["foo.ts", ["a/Foo.ts", "b/FOO.ts"]]]),
+      scripts: null,
+      makeTargets: null,
+      lineCount: () => 5,
+    };
+    expect(
+      resolveRefAgainstView(
+        { kind: "file", path: "foo.ts", line: 5, raw: "foo.ts:5" },
+        collide,
+      ),
+    ).toBe("unknown");
   });
 });
 
@@ -441,6 +600,7 @@ describe("Direct-FS ↔ SyntheticProbe parity (real ref-by-ref comparison)", () 
   // path -> file contents (newline count drives line resolution).
   const fixture: Record<string, string> = {
     "src/foo.ts": "1\n2\n3\n4\n5\n",
+    "src/Widget.tsx": "1\n2\n3\n", // mixed-case on disk (#969 builder lowercasing)
     "uniquebar.ts": "x\ny\n",
     "a/dup.ts": "1\n",
     "b/dup.ts": "1\n",
@@ -488,8 +648,14 @@ describe("Direct-FS ↔ SyntheticProbe parity (real ref-by-ref comparison)", () 
     "src/foo.ts:6", // boundary (5 newlines + 1)
     "src/foo.ts:7", // out of range
     "src/foo.ts", // exists, no line
+    "src/FOO.ts:3", // wrong-case multi-segment, in range (#969)
+    "src/FOO.ts:7", // wrong-case multi-segment, out of range (#969)
+    "SRC/FOO.ts", // wrong-case dir + file, no line (#969)
+    "src/widget.tsx:2", // lowercase ref → mixed-case on-disk file (#969 builders)
+    "widget.tsx:3", // lowercase bare basename → mixed-case on-disk file (#969)
     "src/gone.ts:1", // missing file
     "uniquebar.ts:2", // bare unique basename, in range
+    "UNIQUEBAR.ts:2", // wrong-case bare basename, in range (#969)
     "uniquebar.ts:99", // bare unique basename, out of range
     "dup.ts:1", // ambiguous basename
     "/etc/foo.ts:1", // absolute
@@ -527,6 +693,20 @@ describe("buildRefcheckProbeScript", () => {
     expect(script).toContain("===LORE-LINES===");
   });
 
+  // Case-insensitive line-count emission (#969): the refset is lowercased and the
+  // shell lowercases each on-disk basename (`tr`), so a wrong-case citation
+  // (`DB.ts`) still gets the actual file's line count emitted → remote parity
+  // with Direct-FS. Mutation-verified: dropping `.toLowerCase()` on the refset
+  // leaves `|DB.ts|`, which the lowercased shell basename never matches.
+  test("lowercases referenced basenames in the filter set + the shell basename", () => {
+    const script = buildRefcheckProbeScript(
+      extractReferences("see src/DB.ts:10"),
+    );
+    expect(script).toContain("|db.ts|");
+    expect(script).not.toContain("|DB.ts|");
+    expect(script).toContain("tr '[:upper:]' '[:lower:]'");
+  });
+
   // Regression (#939 MUST-FIX 2a): the snapshot must run from the repo ROOT, not
   // the client CWD, so a subdir-launched agent doesn't mass-false-penalize
   // root-relative refs. The cd runs in a subshell so it can't leak into a
@@ -555,3 +735,52 @@ describe("buildRefcheckProbeScript", () => {
     expect(script).not.toContain("a$(");
   });
 });
+
+// True end-to-end parity: EXECUTE the generated probe under a POSIX shell against
+// a mixed-case fixture, feed the REAL output through SyntheticProbeResolver, and
+// compare ref-by-ref to DirectFsResolver. Unlike the JS-derived parity suite
+// above (which emits every line count unconditionally), this exercises the
+// shell's refset filter + `tr` case-fold, so it behaviorally guards the
+// case-insensitive line-count emission (#969) — not just a string match.
+// (Skipped on Windows; vitest CI runs on Linux and the script is POSIX-only.)
+describe.skipIf(process.platform === "win32")(
+  "buildRefcheckProbeScript real-shell ↔ Direct-FS parity (#969)",
+  () => {
+    let root: string;
+    beforeAll(() => {
+      root = mkdtempSync(join(tmpdir(), "lore-shellparity-"));
+      mkdirSync(join(root, "src"), { recursive: true });
+      // mixed-case on-disk filename; 3 newlines → 4 lines via split("\n").
+      writeFileSync(join(root, "src", "Db.ts"), "1\n2\n3\n");
+      writeFileSync(join(root, "src", "foo.ts"), "1\n2\n");
+    });
+    afterAll(() => rmSync(root, { recursive: true, force: true }));
+
+    // Run the actual probe (git absent in a tmp dir → its `find` fallback fires).
+    const runProbe = (refs: ReturnType<typeof extractReferences>): string =>
+      execFileSync("sh", ["-c", buildRefcheckProbeScript(refs)], {
+        cwd: root,
+        encoding: "utf8",
+      });
+
+    test.each([
+      ["src/DB.ts:2", "ok"], // wrong-case path, in range
+      ["src/DB.ts:99", "missing"], // wrong-case path, out of range
+      ["SRC/DB.ts", "ok"], // wrong-case dir+file, no line
+      ["DB.ts:3", "ok"], // wrong-case bare basename, in range
+      ["src/Db.ts:2", "ok"], // exact case still works
+    ])("real probe and Direct-FS agree on %j (expect %s)", async (raw, expected) => {
+      const refs = extractReferences(raw);
+      const key = refs[0].raw;
+      const direct = (await new DirectFsResolver(root).resolve(refs))?.get(key);
+      // The real shell output drives the synthetic resolver — if the shell's
+      // `tr` fold or lowercased refset regressed, the wrong-case line count
+      // would be absent and the line-bound rows would diverge to "unknown".
+      const synthetic = (
+        await new SyntheticProbeResolver(runProbe(refs)).resolve(refs)
+      )?.get(key);
+      expect(direct).toBe(expected);
+      expect(synthetic).toBe(expected);
+    });
+  },
+);

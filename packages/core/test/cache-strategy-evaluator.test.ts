@@ -298,7 +298,7 @@ describe("transform writes the size snapshot end-to-end", () => {
       const expected = computeCompressedCacheSize(
         result.layer,
         result.totalTokens,
-        getOverhead() + ltm,
+        getOverhead(session) + ltm,
         UNCALIBRATED_SAFETY,
         snap?.full ?? 0,
       );
@@ -347,7 +347,7 @@ describe("transform writes the size snapshot end-to-end", () => {
       const expected = computeCompressedCacheSize(
         result.layer,
         result.totalTokens,
-        getOverhead() + ltm,
+        getOverhead(session) + ltm,
         1,
         snap?.full ?? 0,
       );
@@ -408,7 +408,7 @@ describe("transform writes the size snapshot end-to-end", () => {
           computeCompressedCacheSize(
             result.layer,
             result.totalTokens,
-            getOverhead() + ltm,
+            getOverhead(session) + ltm,
             UNCALIBRATED_SAFETY,
             snap?.full ?? 0,
           ),
@@ -455,7 +455,7 @@ describe("transform writes the size snapshot end-to-end", () => {
           computeCompressedCacheSize(
             result.layer,
             result.totalTokens,
-            getOverhead() + ltm,
+            getOverhead(session) + ltm,
             1,
             snap?.full ?? 0,
           ),

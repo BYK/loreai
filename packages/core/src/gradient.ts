@@ -387,10 +387,18 @@ export function recordCacheUsage(
 // accounts for provider system prompt + AGENTS.md + tool definitions + env info
 const FIRST_TURN_OVERHEAD = 15_000;
 
-// Calibrated overhead: actual tokens used minus our message estimate.
+// Calibrated overhead: actual tokens used minus our message estimate (and, since
+// Bug 1 lever 3, minus injected LTM — overhead represents system prompt + tools
+// only; LTM is subtracted separately at the `usable` computation).
 // Null = not yet calibrated (first turn). Updated after every assistant response.
-// Shared across all sessions — this is model-level overhead (system prompt,
-// tool definitions, provider headers) that doesn't vary per session.
+//
+// BUG 1 (lever 2): this global is no longer authoritative. Per-session overhead
+// lives in SessionState.overheadEma (host system prompt is stable WITHIN a
+// session but varies wildly BETWEEN sessions; blending heterogeneous concurrent
+// sessions produced a ~20x usable swing that front-busted the distilled prefix).
+// The global is now only the first-turn seed / no-session fallback used by
+// getOverhead() when no sessionID is provided. Production callers always pass
+// sessionID.
 let calibratedOverhead: number | null = null;
 
 // ---------------------------------------------------------------------------
@@ -435,6 +443,25 @@ type SessionState = {
   lastTransformEstimate: number;
   /** LTM tokens injected for this session's current turn (per-session isolation) */
   ltmTokens: number;
+  /**
+   * Per-session overhead EMA (system prompt + tools, in real tokens), or null
+   * until the first calibrate() with a transform baseline. The dominant term is
+   * the host system prompt, which is stable WITHIN a session but varies wildly
+   * BETWEEN sessions (different agents/projects). A single module-global EMA
+   * blended all concurrent sessions together, producing a ~20x turn-to-turn
+   * `usable` swing that front-busted the distilled prefix (Bug 1, session 1GYu).
+   * getOverhead(sessionID) prefers this; the global `calibratedOverhead` remains
+   * only as the first-turn seed / no-session fallback.
+   */
+  overheadEma: number | null;
+  /**
+   * High-water mark for the layer-1 distilled budget (Bug 1, lever 1). Once the
+   * distilled prefix has been admitted at a given `distilledBudget`, residual
+   * per-turn overhead-EMA wobble must not re-trim it (a front-bust). The trim
+   * gate uses max(stageDistBudget, this); this only ratchets UP. Mirrors the
+   * raw-window pin's high-water hysteresis. Reset alongside rawWindowCache.
+   */
+  distilledBudgetHighWater: number;
   /** Distilled prefix cache (Approach C) */
   prefixCache: PrefixCache | null;
   /** Raw window pin cache (Approach B) */
@@ -551,6 +578,8 @@ function makeSessionState(): SessionState {
     forceMinLayer: 0,
     lastTransformEstimate: 0,
     ltmTokens: 0,
+    overheadEma: null,
+    distilledBudgetHighWater: 0,
     prefixCache: null,
     rawWindowCache: null,
     lastTurnAt: 0,
@@ -665,6 +694,9 @@ export function onIdleResume(
   if (idleMs < thresholdMs) return { triggered: false };
   state.prefixCache = null;
   state.rawWindowCache = null;
+  // Cold cache → the prefix will be re-rendered/re-pinned, so drop the distilled
+  // high-water too (Bug 1, lever 1; same lifecycle as the raw-window pin).
+  state.distilledBudgetHighWater = 0;
   state.distillationSnapshot = null;
   // Cache is cold after idle eviction — a fresh window will be rebuilt, so the
   // stable-dedup memo can reset too (its purpose is warm-cache stability).
@@ -950,8 +982,8 @@ export function getLtmTokens(sessionID?: string): number {
  * the configured ltm budget fraction. Call this from the system transform
  * hook to cap how many tokens formatKnowledge may use.
  */
-export function getLtmBudget(ltmFraction: number): number {
-  const overhead = calibratedOverhead ?? FIRST_TURN_OVERHEAD;
+export function getLtmBudget(ltmFraction: number, sessionID?: string): number {
+  const overhead = getOverhead(sessionID);
   const usable = Math.max(0, contextLimit - outputReserved - overhead);
   // Quantize to a coarse step so per-turn `usable` wobble (overhead EMA drift)
   // does not move the ltm.forSession() packing boundary and churn the pinned
@@ -985,34 +1017,57 @@ export function calibrate(
   sessionID?: string,
   messageCount?: number,
 ) {
+  const state = sessionID !== undefined ? getSessionState(sessionID) : null;
+
   // Use the transform's own estimate for the compressed window it produced.
   // This is the correct baseline: it estimates the same messages the model saw.
-  const messageEstimate = sessionID
-    ? getSessionState(sessionID).lastTransformEstimate
-    : 0;
+  const messageEstimate = state ? state.lastTransformEstimate : 0;
 
-  // Update global overhead calibration (shared across sessions — model-level).
+  // Lever 3 (Bug 1): subtract the LTM injected for this turn. `overhead` must
+  // represent system prompt + tools ONLY — the `usable` computation subtracts
+  // LTM SEPARATELY (sessLtmTokens). actualInput INCLUDES the LTM (it lives in
+  // the system blocks) while messageEstimate (body only) does NOT, so leaving
+  // LTM in `overhead` double-counts it and makes `usable` systematically too
+  // small. This matches the documented intent at the `usable` computation.
+  const ltm = state ? state.ltmTokens : 0;
+
   // Skip when actualInput > 0 but no transform estimate exists yet (no baseline
   // to compare against). Allow when both are 0 (test setup to zero overhead) or
   // when we have a real transform estimate.
   if (messageEstimate > 0 || actualInput === 0) {
-    const overhead = Math.max(0, actualInput - messageEstimate);
-    calibratedOverhead =
-      calibratedOverhead === null
-        ? overhead
-        : Math.round(calibratedOverhead * 0.7 + overhead * 0.3);
+    const overhead = Math.max(0, actualInput - messageEstimate - ltm);
+    // Lever 2 (Bug 1): the per-session EMA is authoritative — getOverhead()
+    // prefers it. The module-global EMA is still updated, but only serves as
+    // the first-turn seed / no-session fallback. A single shared global blended
+    // heterogeneous concurrent sessions (different system-prompt sizes) into one
+    // value, producing the ~20x turn-to-turn `usable` swing that front-busted
+    // the distilled prefix. Both use the same 0.7/0.3 smoothing.
+    const blend = (prev: number | null) =>
+      prev === null ? overhead : Math.round(prev * 0.7 + overhead * 0.3);
+    calibratedOverhead = blend(calibratedOverhead);
+    if (state) state.overheadEma = blend(state.overheadEma);
   }
 
   // Store per-session exact counts for the proactive layer 0 decision.
-  if (sessionID !== undefined) {
-    const state = getSessionState(sessionID);
+  if (state) {
     state.lastKnownInput = actualInput;
     state.lastKnownLtm = state.ltmTokens;
     if (messageCount !== undefined) state.lastKnownMessageCount = messageCount;
   }
 }
 
-export function getOverhead(): number {
+/**
+ * Returns the calibrated overhead (system prompt + tools, in real tokens) for a
+ * session. Prefers the per-session EMA (Bug 1, lever 2); falls back to the
+ * module-global EMA (first-turn seed / no-session callers), then to
+ * FIRST_TURN_OVERHEAD before any calibration. Uses a non-creating Map lookup so
+ * read-only callers never spawn a phantom SessionState.
+ */
+export function getOverhead(sessionID?: string): number {
+  if (sessionID !== undefined) {
+    const ema = sessionStates.get(sessionID)?.overheadEma;
+    if (ema != null) return ema;
+  }
   return calibratedOverhead ?? FIRST_TURN_OVERHEAD;
 }
 
@@ -1067,6 +1122,23 @@ export function prefixPresentFloorApplies(
 }
 
 /**
+ * Distilled-prefix budget hysteresis (Bug 1, lever 1).
+ *
+ * Returns the budget the layer-1 prefix-trim gate should use: the larger of the
+ * current stage budget and the session's high-water mark. Once the distilled
+ * prefix has been admitted at some `distilledBudget`, residual per-turn
+ * overhead-EMA wobble must not contract the budget below the frozen prefix and
+ * re-trim it (a front-bust). Mirrors the raw-window pin's high-water hysteresis.
+ * Pure function of its inputs.
+ */
+export function effectiveDistilledBudget(
+  stageDistBudget: number,
+  highWater: number,
+): number {
+  return Math.max(stageDistBudget, highWater);
+}
+
+/**
  * Force the next transform() call for this session to use at least the given layer.
  * Called when the API returns "prompt is too long" so the next attempt
  * trims the context enough to fit within the model's context window.
@@ -1117,9 +1189,12 @@ export function resetCalibration(sessionID?: string) {
 
 /**
  * For testing only — observe session-state cache fields without exposing the
- * full type. Returns null when the session has no state. The boolean fields
- * answer "does this cache hold something right now?" — sufficient for asserting
- * that onIdleResume() reset them.
+ * full type. Returns null when the session has no state. Boolean fields answer
+ * "does this cache hold something right now?" — sufficient for asserting that
+ * onIdleResume() reset them. Numeric fields (`lastKnownMessageCount`,
+ * `transformCount`, `overheadEma`, `distilledBudgetHighWater`) expose the
+ * calibration state used by Bug 1's levers (per-session overhead isolation +
+ * distilled-prefix budget hysteresis).
  */
 export function inspectSessionState(sessionID: string): {
   hasPrefixCache: boolean;
@@ -1134,6 +1209,8 @@ export function inspectSessionState(sessionID: string): {
   transformCount: number;
   bustSpiralAlerted: boolean;
   bustSpiralColdStartLogged: boolean;
+  overheadEma: number | null;
+  distilledBudgetHighWater: number;
 } | null {
   const state = sessionStates.get(sessionID);
   if (!state) return null;
@@ -1150,6 +1227,8 @@ export function inspectSessionState(sessionID: string): {
     transformCount: state.transformCount,
     bustSpiralAlerted: state.bustSpiralAlerted,
     bustSpiralColdStartLogged: state.bustSpiralColdStartLogged,
+    overheadEma: state.overheadEma,
+    distilledBudgetHighWater: state.distilledBudgetHighWater,
   };
 }
 
@@ -2254,24 +2333,39 @@ export function importDedupDecisions(sessionID: string, json: string): void {
   }
 }
 
-// For testing only — reset prefix cache state for a specific session (or all)
+// For testing only — reset prefix cache state for a specific session (or all).
+// Also clears the Bug 1 distilled-budget high-water (same lifecycle as the
+// prefix — the high-water only makes sense when a prefix has been rendered).
 export function resetPrefixCache(sessionID?: string) {
   if (sessionID) {
     const state = sessionStates.get(sessionID);
-    if (state) state.prefixCache = null;
+    if (state) {
+      state.prefixCache = null;
+      state.distilledBudgetHighWater = 0;
+    }
   } else {
-    for (const state of sessionStates.values()) state.prefixCache = null;
+    for (const state of sessionStates.values()) {
+      state.prefixCache = null;
+      state.distilledBudgetHighWater = 0;
+    }
   }
 }
 
-// For testing only — reset distillation snapshot for a specific session (or all)
+// For testing only — reset distillation snapshot for a specific session (or all).
+// Also clears the Bug 1 distilled-budget high-water (prefix invalidated when the
+// distillation set changes).
 export function resetDistillationSnapshot(sessionID?: string) {
   if (sessionID) {
     const state = sessionStates.get(sessionID);
-    if (state) state.distillationSnapshot = null;
-  } else {
-    for (const state of sessionStates.values())
+    if (state) {
       state.distillationSnapshot = null;
+      state.distilledBudgetHighWater = 0;
+    }
+  } else {
+    for (const state of sessionStates.values()) {
+      state.distillationSnapshot = null;
+      state.distilledBudgetHighWater = 0;
+    }
   }
 }
 
@@ -2318,9 +2412,15 @@ type RawWindowCache = {
 export function resetRawWindowCache(sessionID?: string) {
   if (sessionID) {
     const state = sessionStates.get(sessionID);
-    if (state) state.rawWindowCache = null;
+    if (state) {
+      state.rawWindowCache = null;
+      state.distilledBudgetHighWater = 0;
+    }
   } else {
-    for (const state of sessionStates.values()) state.rawWindowCache = null;
+    for (const state of sessionStates.values()) {
+      state.rawWindowCache = null;
+      state.distilledBudgetHighWater = 0;
+    }
   }
 }
 
@@ -2626,7 +2726,7 @@ export function isLargeColdStart(input: {
   const sid = input.sessionID ?? input.messages[0]?.info.sessionID;
   const sessState = sid ? getSessionState(sid) : makeSessionState();
   if (sessState.lastKnownInput > 0) return false;
-  const overhead = getOverhead();
+  const overhead = getOverhead(sid);
   const sessLtmTokens =
     input.ltmTokens ?? (sid ? sessState.ltmTokens : ltmTokensFallback);
   const expectedInput =
@@ -2645,11 +2745,14 @@ function transformInner(input: {
   sessionID?: string;
 }): TransformResult {
   const cfg = config();
-  const overhead = getOverhead();
 
   // --- Session state (must precede budget computation) ---
   const sid = input.sessionID ?? input.messages[0]?.info.sessionID;
   const sessState = sid ? getSessionState(sid) : makeSessionState();
+
+  // Per-session overhead (Bug 1, lever 2): a session's own calibrated overhead,
+  // not a global EMA blended across heterogeneous concurrent sessions.
+  const overhead = getOverhead(sid);
 
   // Usable = full context minus output reservation minus fixed overhead (system + tools)
   // minus LTM tokens already injected into the system prompt this turn.
@@ -2657,11 +2760,16 @@ function transformInner(input: {
   //
   // NOTE: `usable` is sensitive to BOTH `contextLimit` (set per-turn from the
   // model spec, which can climb as models.dev data warms from a cold fallback)
-  // and `overhead` (a shared EMA from calibrate()). Anything derived as a
+  // and `overhead` (per-session EMA from calibrate() since Bug 1 lever 2 — see
+  // `calibratedOverhead` for the now-fallback global). Anything derived as a
   // fraction of `usable` — e.g. distilled/raw budgets — therefore scales with a
   // large context window. Downstream economic decisions must not treat such a
   // budget as the real compressed size (see the tier gate's compressedEstimate
   // clamp below).
+  // LTM is subtracted EXACTLY ONCE (sessLtmTokens here) — `calibrate` no longer
+  // folds LTM into `overhead` (Bug 1, lever 3): documented intent was system
+  // + tools only, but the previous code double-counted LTM via
+  // actualInput − bodyEstimate (which INCLUDED LTM).
   const sessLtmTokens = sid ? sessState.ltmTokens : ltmTokensFallback;
   const usableRaw = Math.max(
     0,
@@ -3102,29 +3210,40 @@ function transformInner(input: {
       );
     }
 
+    // Distilled-prefix budget hysteresis (Bug 1, lever 1). On the layer-1 stable
+    // stage, gate the trim against the high-water budget, not the raw per-turn
+    // budget. Residual overhead-EMA wobble (even per-session) nudges
+    // stageDistBudget a few K each turn; near the prefix size that flip-flops the
+    // trim and front-busts messages[0]. The high-water only ratchets UP, so once
+    // the prefix is admitted it stays byte-stable until the prefix GENUINELY
+    // outgrows the best budget ever seen. Escalated stages (2-3) keep the raw
+    // stage budget — they intentionally clamp toward the cost ceiling.
+    const useHighWater = stage.useStableWindow && !!sid;
+    const trimBudget = useHighWater
+      ? effectiveDistilledBudget(
+          stageDistBudget,
+          sessState.distilledBudgetHighWater,
+        )
+      : stageDistBudget;
+
     // Budget-aware prefix trim: if the rendered prefix still exceeds this
-    // stage's distilled budget, drop gen-0 distillations (selectDistillations
-    // always preserves meta/gen>=1) until it fits — instead of handing tryFit
-    // an over-budget prefix, which returns null and escalates the layer. A
-    // meta-distillation rewrite forces a full re-render (cacheValid=false) whose
-    // size can blow past every stage's budget, falling through to emergency
-    // Layer 4 even when the session has ample headroom (the distilled-prefix
-    // front-bust). Trimming keeps the session at a compressed layer (1-3) with
-    // the prefix PRESENT, so messages[0] stays byte-stable across turns.
-    // NOTE: on a STEADY warm turn (unchanged budget) the cached prefix already
-    // fits, so this block does not fire and messages[0/1] stay byte-identical.
-    // It CAN fire on the warm path when stageDistBudget contracts below the
-    // frozen prefix (usable / LTM / overhead-EMA drift) — re-rendering a smaller
-    // prefix and busting the front once. That is still strictly better than the
-    // pre-fix behavior in that case, which fell through to emergency Layer 4 and
-    // then thrashed 0<->4 (a front-bust every other turn); here we re-stabilize
-    // at a compressed layer immediately. Edge case: if even meta (gen>=1) entries
-    // alone exceed the budget, the search converges to an empty prefix (dropping
-    // meta) rather than escalating — preferable to a Layer-4 fallthrough.
-    if (stagePrefixTokens > stageDistBudget && stageDistillations.length > 0) {
+    // stage's (effective) distilled budget, drop gen-0 distillations
+    // (selectDistillations always preserves meta/gen>=1) until it fits — instead
+    // of handing tryFit an over-budget prefix, which returns null and escalates
+    // the layer. A meta-distillation rewrite forces a full re-render
+    // (cacheValid=false) whose size can blow past every stage's budget, falling
+    // through to emergency Layer 4 even when the session has ample headroom (the
+    // distilled-prefix front-bust). Trimming keeps the session at a compressed
+    // layer (1-3) with the prefix PRESENT, so messages[0] stays byte-stable.
+    // NOTE: on a STEADY warm turn the cached prefix already fits, so this block
+    // does not fire and messages[0/1] stay byte-identical. With the high-water
+    // gate it ALSO does not fire on minor budget contraction (the Bug 1 fix).
+    // Edge case: if even meta (gen>=1) entries alone exceed the budget, the
+    // search converges to an empty prefix (dropping meta) rather than escalating.
+    if (stagePrefixTokens > trimBudget && stageDistillations.length > 0) {
       let lo = 0;
       let hi = stageDistillations.length;
-      // Largest count whose rendered prefix fits stageDistBudget (binary search).
+      // Largest count whose rendered prefix fits trimBudget (binary search).
       while (lo < hi) {
         const mid = Math.ceil((lo + hi) / 2);
         const candidate = selectDistillations(stageDistillations, mid);
@@ -3132,7 +3251,7 @@ function transformInner(input: {
           (sum, m) => sum + estimateMessage(m),
           0,
         );
-        if (tokens <= stageDistBudget) lo = mid;
+        if (tokens <= trimBudget) lo = mid;
         else hi = mid - 1;
       }
       const fitted = selectDistillations(stageDistillations, lo);
@@ -3150,11 +3269,14 @@ function transformInner(input: {
       "layer" | "usable" | "distilledBudget" | "rawBudget" | "refreshLtm"
     > | null;
     if (stage.useStableWindow && sid) {
+      // Use the high-water (trimBudget) so the stable stage admits the same
+      // prefix the trim gate kept — otherwise tryFitStable's own
+      // `prefixTokens > distilledBudget` guard would reject it and escalate.
       result = tryFitStable({
         messages: dedupMessages,
         prefix: stagePrefix,
         prefixTokens: stagePrefixTokens,
-        distilledBudget: stageDistBudget,
+        distilledBudget: trimBudget,
         rawBudget: stageRawBudget,
         sessionID: sid,
         sessState,
@@ -3163,12 +3285,15 @@ function transformInner(input: {
       // Reset raw window cache when leaving stage 0 — higher stages use full
       // scans and already break the prompt cache. Must fire even when stage 1
       // is skipped via effectiveMinLayer (e.g. forceMinLayer = 3).
+      // trimBudget === stageDistBudget here (useHighWater is false on escalated
+      // stages), so the high-water never relaxes an escalated stage's clamp.
       sessState.rawWindowCache = null;
+      sessState.distilledBudgetHighWater = 0;
       result = tryFit({
         messages: dedupMessages,
         prefix: stagePrefix,
         prefixTokens: stagePrefixTokens,
-        distilledBudget: stageDistBudget,
+        distilledBudget: trimBudget,
         rawBudget: stageRawBudget,
         strip: stage.strip,
         protectedTurns: stage.protectedTurns,
@@ -3176,6 +3301,16 @@ function transformInner(input: {
     }
 
     if (result && fitsWithSafetyMargin(result)) {
+      // Ratchet the distilled-budget high-water on a successful layer-1 fit
+      // (Bug 1, lever 1). It only ever increases, so a later turn whose budget
+      // dipped (overhead-EMA wobble) still admits the already-rendered prefix
+      // without a re-trim. Reset on escalation/idle (alongside rawWindowCache).
+      if (useHighWater) {
+        sessState.distilledBudgetHighWater = Math.max(
+          sessState.distilledBudgetHighWater,
+          stageDistBudget,
+        );
+      }
       // Trigger urgent distillation when: (a) higher stages always need it, or
       // (b) stage 0 with no distillations = first time in gradient mode.
       if (urgentDistillationEnabled && sid && (s > 0 || cached.tokens === 0)) {
@@ -3196,6 +3331,7 @@ function transformInner(input: {
 
   // All compression stages exhausted — reset raw window cache before emergency.
   sessState.rawWindowCache = null;
+  sessState.distilledBudgetHighWater = 0;
 
   // Layer 4: Emergency — last 2 distillations + token-budget raw tail.
   // We do NOT strip tool parts here: doing so would cause an infinite tool-call loop because

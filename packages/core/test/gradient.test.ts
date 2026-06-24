@@ -46,6 +46,9 @@ import {
   isLargeColdStart,
   saveGradientState,
   evictSession,
+  getOverhead,
+  getLastTransformEstimate,
+  effectiveDistilledBudget,
   type ModelBudget,
 } from "../src/gradient";
 import type { LoreMessage, LorePart, LoreMessageWithParts } from "../src/types";
@@ -2171,6 +2174,206 @@ describe("gradient — distilled-prefix front-bust (spurious Layer 4 + thrash)",
       sessionID: SID,
     });
     expect(r2.layer).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bug 1 — distilled-prefix oscillation (`usable` swing → messages[0] churn)
+// ---------------------------------------------------------------------------
+// Production session `1GYu` burned ~$94/hr re-rendering the distilled prefix
+// (messages[0]) ~40% of turns while held at Layer 1. Root cause: `usable`
+// (hence `distilledBudget`) swung turn-to-turn, tripping the budget-aware prefix
+// trim (the front-bust). Three levers, all here:
+//   Lever 2 — per-session overhead EMA (was a contaminated module-global).
+//   Lever 3 — overhead excludes injected LTM (was double-counted vs `usable`).
+//   Lever 1 — distilled-prefix budget hysteresis (high-water, like the raw pin).
+describe("gradient — usable/overhead oscillation (Bug 1)", () => {
+  describe("lever 2 — per-session overhead isolation", () => {
+    test("one session's overhead calibration does not contaminate another's", () => {
+      setModelLimits({ context: 1_000_000, output: 32_000 });
+      resetCalibration();
+      const A = "oh-iso-A";
+      const B = "oh-iso-B";
+      const mk = (sid: string) =>
+        Array.from({ length: 4 }, (_, i) =>
+          makeMsg(`${sid}-${i}`, i % 2 === 0 ? "user" : "assistant", "hi", sid),
+        );
+      const msgsA = mk(A);
+      const msgsB = mk(B);
+      // Seed transform estimates so calibrate() has a baseline to subtract.
+      transform({ messages: msgsA, projectPath: PROJECT, sessionID: A });
+      transform({ messages: msgsB, projectPath: PROJECT, sessionID: B });
+      // A: small overhead (10K). B: huge overhead (500K).
+      calibrate(getLastTransformEstimate(A) + 10_000, A, msgsA.length);
+      calibrate(getLastTransformEstimate(B) + 500_000, B, msgsB.length);
+      expect(getOverhead(A)).toBe(10_000);
+      expect(getOverhead(B)).toBe(500_000);
+      // B keeps calibrating high — must NOT drag A toward a shared blend.
+      transform({ messages: msgsB, projectPath: PROJECT, sessionID: B });
+      calibrate(getLastTransformEstimate(B) + 500_000, B, msgsB.length);
+      transform({ messages: msgsB, projectPath: PROJECT, sessionID: B });
+      calibrate(getLastTransformEstimate(B) + 500_000, B, msgsB.length);
+      // Pre-fix (global EMA, sessionID ignored): getOverhead(A) is dragged
+      // toward B's 500K and is no longer 10K.
+      expect(getOverhead(A)).toBe(10_000);
+      resetCalibration();
+      setModelLimits({ context: 10_000, output: 2_000 });
+      calibrate(0);
+    });
+
+    test("usable stays put for a session next to a noisy neighbor", () => {
+      setModelLimits({ context: 1_000_000, output: 32_000 });
+      resetCalibration();
+      const A = "oh-stable-A";
+      const B = "oh-stable-B";
+      const mk = (sid: string) =>
+        Array.from({ length: 4 }, (_, i) =>
+          makeMsg(`${sid}-${i}`, i % 2 === 0 ? "user" : "assistant", "hi", sid),
+        );
+      const msgsA = mk(A);
+      const msgsB = mk(B);
+      transform({ messages: msgsA, projectPath: PROJECT, sessionID: A });
+      calibrate(getLastTransformEstimate(A) + 10_000, A, msgsA.length);
+      const usableA = new Set<number>();
+      for (const swing of [120_000, 500_000, 80_000, 600_000, 90_000]) {
+        // Neighbor B calibrates wildly...
+        transform({ messages: msgsB, projectPath: PROJECT, sessionID: B });
+        calibrate(getLastTransformEstimate(B) + swing, B, msgsB.length);
+        // ...A's usable must stay constant (A's own overhead is untouched).
+        const r = transform({
+          messages: msgsA,
+          projectPath: PROJECT,
+          sessionID: A,
+        });
+        usableA.add(r.usable);
+      }
+      expect(
+        usableA.size,
+        `A's usable took ${usableA.size} distinct values ` +
+          `(${[...usableA].join(",")}) due to a noisy neighbor — global ` +
+          `overhead-EMA contamination (the production 20x swing).`,
+      ).toBe(1);
+      resetCalibration();
+      setModelLimits({ context: 10_000, output: 2_000 });
+      calibrate(0);
+    });
+  });
+
+  describe("lever 3 — overhead excludes injected LTM (no double-count)", () => {
+    test("calibrate() subtracts LTM so overhead is system+tools only, and usable counts LTM once", () => {
+      setModelLimits({ context: 1_000_000, output: 32_000 });
+      resetCalibration();
+      const SID = "oh-ltm-sess";
+      const msgs = Array.from({ length: 4 }, (_, i) =>
+        makeMsg(`l3-${i}`, i % 2 === 0 ? "user" : "assistant", "hi", SID),
+      );
+      setLtmTokens(20_000, SID);
+      transform({ messages: msgs, projectPath: PROJECT, sessionID: SID });
+      const est = getLastTransformEstimate(SID);
+      // Real input = body(est) + host/tools(50K) + injected LTM(20K).
+      calibrate(est + 50_000 + 20_000, SID, msgs.length);
+      // Overhead must be host/tools ONLY — LTM is NOT part of "overhead"
+      // (the comment at the `usable` computation says LTM is subtracted
+      // separately). Pre-fix it was actualInput - bodyEstimate = 70K.
+      expect(getOverhead(SID)).toBe(50_000);
+      // usable subtracts LTM exactly once (via sessLtmTokens), not twice.
+      const r = transform({
+        messages: msgs,
+        projectPath: PROJECT,
+        sessionID: SID,
+      });
+      expect(r.usable).toBe(1_000_000 - 32_000 - 50_000 - 20_000);
+      setLtmTokens(0, SID);
+      resetCalibration();
+      setModelLimits({ context: 10_000, output: 2_000 });
+      calibrate(0);
+    });
+  });
+
+  describe("lever 1 — distilled-prefix budget hysteresis", () => {
+    test("effectiveDistilledBudget never shrinks below the high-water mark", () => {
+      expect(effectiveDistilledBudget(4_000, 6_000)).toBe(6_000); // high-water wins
+      expect(effectiveDistilledBudget(8_000, 6_000)).toBe(8_000); // budget grew past hw
+      expect(effectiveDistilledBudget(5_000, 0)).toBe(5_000); // no high-water yet
+    });
+
+    test("keeps messages[0] byte-identical across an overhead-driven budget dip (no re-trim)", () => {
+      const PID = "/test/lever1-hyst-project";
+      const HSID = "lever1-hyst-sess";
+      const pid = ensureProject(PID);
+      let ctr = 0;
+      const seed = (n: number, chars: number) => {
+        for (let i = 0; i < n; i++) {
+          db()
+            .query(
+              `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              crypto.randomUUID(),
+              pid,
+              HSID,
+              "",
+              "[]",
+              `Distillation ${i}: ${"o".repeat(chars)}`,
+              "[]",
+              0,
+              Math.ceil(chars / 3),
+              0,
+              Date.now() + ctr++,
+            );
+        }
+      };
+      db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
+      resetCalibration(HSID);
+      resetPrefixCache(HSID);
+      resetRawWindowCache(HSID);
+      resetDistillationSnapshot(HSID);
+      setModelLimits({ context: 100_000, output: 4_000 });
+      calibrate(0);
+      // ~15K-token prefix: fits turn-1 budget (distilledBudget 24K) but exceeds
+      // the dipped turn-2 budget (10K). Small raw so the pin leaves headroom.
+      seed(10, 4_500);
+      const conv = [
+        ...Array.from({ length: 20 }, (_, i) =>
+          makeMsg(
+            `h-${i}`,
+            i % 2 === 0 ? "user" : "assistant",
+            "r".repeat(900),
+            HSID,
+          ),
+        ),
+        makeMsg("h-final", "user", "next", HSID),
+      ];
+      // Turn 1: post-idle forces Layer >= 1; full prefix rendered; high-water pinned at 24K.
+      setLastTurnAtForTest(HSID, Date.now() - 10 * 60_000);
+      onIdleResume(HSID, 5 * 60_000);
+      const r1 = transform({
+        messages: conv,
+        projectPath: PID,
+        sessionID: HSID,
+      });
+      expect(r1.layer).toBeGreaterThanOrEqual(1);
+      const prefix1 = JSON.stringify([r1.messages[0], r1.messages[1]]);
+      // Drive overhead UP to ~56K so usable→40K, distilledBudget→10K (< 15K prefix).
+      // Without hysteresis the trim fires and re-renders a smaller prefix (bust).
+      // Omit messageCount: keep lastKnownMessageCount at 0 (the legitimate
+      // "calibrated but window-size-not-yet-known" state) so the prefix-present
+      // floor holds at Layer >= 1 via lastLayer rather than spuriously releasing
+      // (turn-1's compressed window incl. prefix is larger than this raw input).
+      calibrate(getLastTransformEstimate(HSID) + 56_000, HSID);
+      const r2 = transform({
+        messages: [...conv, makeMsg("h-step", "assistant", "ok", HSID)],
+        projectPath: PID,
+        sessionID: HSID,
+      });
+      expect(r2.layer).toBeGreaterThanOrEqual(1);
+      const prefix2 = JSON.stringify([r2.messages[0], r2.messages[1]]);
+      expect(prefix2).toBe(prefix1);
+      db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
+      setModelLimits({ context: 10_000, output: 2_000 });
+      calibrate(0);
+    });
   });
 });
 
