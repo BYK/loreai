@@ -1185,7 +1185,11 @@ export async function embed(
 ): Promise<Float32Array[]> {
   const provider = getProvider();
   if (!provider) throw new Error("No embedding provider available");
-  return provider.embed(texts, inputType);
+  const vecs = await provider.embed(texts, inputType);
+  // Enforce the L2-normalization invariant at the single chokepoint so the JS
+  // dot-product path and sqlite-vec's vec_distance_cosine() always agree. See
+  // l2Normalize() for the full rationale.
+  return vecs.map(l2Normalize);
 }
 
 // ---------------------------------------------------------------------------
@@ -1206,6 +1210,38 @@ export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
     dot += a[i] * b[i];
   }
   return dot;
+}
+
+/**
+ * Return an L2-normalized (unit-length) copy of a vector.
+ *
+ * System-wide invariant: every vector produced by {@link embed} is
+ * L2-normalized. Two consumers depend on this and would silently DIVERGE if it
+ * were violated:
+ *   1. {@link cosineSimilarity} (the JS brute-force path) is a bare dot product
+ *      — it only equals cosine similarity for unit vectors.
+ *   2. sqlite-vec's `vec_distance_cosine()` (the native fast path) normalizes
+ *      internally, so a non-normalized stored vector would score differently on
+ *      the two paths (e.g. stored [2,0,0] vs query [1,0,0]: JS dot → 2.0, vec →
+ *      1.0), breaking vec/JS parity and producing similarities outside [-1, 1].
+ *
+ * Providers (local ONNX, Voyage, OpenAI) already return ~unit vectors, so this
+ * is idempotent in practice. It is applied unconditionally at the single
+ * {@link embed} chokepoint to make the invariant true *by construction* rather
+ * than by provider convention — guarding against drift if a provider ever
+ * returns non-normalized output.
+ *
+ * A zero or non-finite vector cannot be normalized and is returned unchanged
+ * (matches {@link cosineSimilarity}'s zero-vector handling, which returns 0).
+ */
+export function l2Normalize(vec: Float32Array): Float32Array {
+  let sumSq = 0;
+  for (let i = 0; i < vec.length; i++) sumSq += vec[i] * vec[i];
+  const norm = Math.sqrt(sumSq);
+  if (!(norm > 0) || !Number.isFinite(norm)) return vec;
+  const out = new Float32Array(vec.length);
+  for (let i = 0; i < vec.length; i++) out[i] = vec[i] / norm;
+  return out;
 }
 
 // ---------------------------------------------------------------------------

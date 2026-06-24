@@ -70,6 +70,67 @@ describe("sqlite-vec extension loading", () => {
   });
 });
 
+// `vectorSearch` accepts an excludeCategories filter that must be honoured on
+// BOTH the vec fast-path and the JS fallback. We seed two entries with
+// IDENTICAL embeddings differing only by category, so without the filter both
+// tie for the top slot; the excluded one must disappear.
+describe("vectorSearch excludeCategories", () => {
+  function seedTwoCategories(pid: string): void {
+    db().query("DELETE FROM knowledge").run();
+    const now = Date.now();
+    const stmt = db().query(
+      "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, embedding, logical_id) VALUES (?, ?, ?, '', '', ?, ?, ?, ?)",
+    );
+    stmt.run(
+      "k-keep",
+      pid,
+      "decision",
+      now,
+      now,
+      toBlob(unit([1, 0, 0])),
+      "k-keep",
+    );
+    stmt.run(
+      "k-drop",
+      pid,
+      "preference",
+      now,
+      now,
+      toBlob(unit([1, 0, 0])),
+      "k-drop",
+    );
+  }
+
+  test("excludes the named category on the vec path", () => {
+    if (!isVecAvailable()) return; // JS leg below covers the fallback branch
+    const pid = ensureProject(PROJECT);
+    seedTwoCategories(pid);
+    const ids = vectorSearch(new Float32Array([1, 0, 0]), 10, [
+      "preference",
+    ]).map((h) => h.id);
+    expect(ids).toContain("k-keep");
+    expect(ids).not.toContain("k-drop");
+  });
+
+  test("excludes the named category on the JS fallback path", () => {
+    const pid = ensureProject(PROJECT);
+    seedTwoCategories(pid);
+    close();
+    process.env.LORE_DISABLE_VEC = "1";
+    try {
+      expect(isVecAvailable()).toBe(false);
+      const ids = vectorSearch(new Float32Array([1, 0, 0]), 10, [
+        "preference",
+      ]).map((h) => h.id);
+      expect(ids).toContain("k-keep");
+      expect(ids).not.toContain("k-drop");
+    } finally {
+      delete process.env.LORE_DISABLE_VEC;
+      close(); // re-enable vec for subsequent suites
+    }
+  });
+});
+
 describe("vectorSearchDistillations / vectorSearchAllDistillations", () => {
   beforeEach(() => {
     db().query("DELETE FROM distillations").run();

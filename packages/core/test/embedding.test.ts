@@ -4,6 +4,7 @@ import { db, ensureProject } from "../src/db";
 import { LOCAL_MODEL_PATH_ENV } from "../src/embedding-vendor";
 import {
   cosineSimilarity,
+  l2Normalize,
   toBlob,
   fromBlob,
   isAvailable,
@@ -59,6 +60,56 @@ describe("cosineSimilarity", () => {
   test("both zero vectors return 0", () => {
     const a = new Float32Array([0, 0, 0]);
     expect(cosineSimilarity(a, a)).toBe(0);
+  });
+});
+
+describe("l2Normalize", () => {
+  test("normalizes a non-unit vector to unit length", () => {
+    const out = l2Normalize(new Float32Array([3, 4, 0])); // norm 5
+    expect(out[0]).toBeCloseTo(0.6, 6);
+    expect(out[1]).toBeCloseTo(0.8, 6);
+    expect(out[2]).toBeCloseTo(0, 6);
+    const norm = Math.sqrt(Array.from(out).reduce((s, x) => s + x * x, 0));
+    expect(norm).toBeCloseTo(1.0, 6);
+  });
+
+  test("is idempotent on an already-unit vector", () => {
+    const u = new Float32Array([0.6, 0.8, 0]);
+    const out = l2Normalize(u);
+    for (let i = 0; i < u.length; i++) expect(out[i]).toBeCloseTo(u[i], 6);
+  });
+
+  test("returns a zero vector unchanged (cannot normalize)", () => {
+    const out = l2Normalize(new Float32Array([0, 0, 0]));
+    expect(Array.from(out)).toEqual([0, 0, 0]);
+  });
+});
+
+describe("embed() enforces the L2-normalization invariant", () => {
+  // The JS dot-product path and sqlite-vec's vec_distance_cosine() only agree
+  // for unit vectors. embed() must normalize provider output so the invariant
+  // holds by construction regardless of what a provider returns.
+  test("normalizes provider output even when the provider returns a non-unit vector", async () => {
+    const token = _saveAndClearProvider();
+    try {
+      // Inject a mock provider returning a deliberately NON-normalized vector.
+      _restoreProvider({
+        provider: {
+          maxBatchSize: 8,
+          async embed(_texts: string[], _inputType: "document" | "query") {
+            return [new Float32Array([3, 4, 0])]; // norm 5
+          },
+        },
+      });
+      const [vec] = await embed(["anything"], "document");
+      const norm = Math.sqrt(Array.from(vec).reduce((s, x) => s + x * x, 0));
+      // Fails if embed() drops `.map(l2Normalize)` (would observe norm ≈ 5).
+      expect(norm).toBeCloseTo(1.0, 6);
+      expect(vec[0]).toBeCloseTo(0.6, 6);
+      expect(vec[1]).toBeCloseTo(0.8, 6);
+    } finally {
+      _restoreProvider(token);
+    }
   });
 });
 
