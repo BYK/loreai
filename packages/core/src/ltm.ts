@@ -2257,9 +2257,14 @@ export function searchScored(input: {
         const params = pid
           ? [title, content, category, matchExpr, pid, limit]
           : [title, content, category, matchExpr, limit];
-        return db()
-          .query(ftsSQL)
-          .all(...params) as ScoredKnowledgeEntry[];
+        return (
+          db()
+            .query(ftsSQL)
+            .all(...params)
+            // Hydrate metadata (#627 Phase 1); hydrateKnowledgeEntry preserves
+            // the extra `rank` column via spread, so ScoredKnowledgeEntry holds.
+            .map(hydrateKnowledgeEntry) as ScoredKnowledgeEntry[]
+        );
       },
       input.termWeights,
     );
@@ -2305,9 +2310,13 @@ export function searchScoredOtherProjects(input: {
       input.query,
       (matchExpr) => {
         const params = [title, content, category, matchExpr, excludePid, limit];
-        return db()
-          .query(ftsSQL)
-          .all(...params) as ScoredKnowledgeEntry[];
+        return (
+          db()
+            .query(ftsSQL)
+            .all(...params)
+            // Hydrate metadata (#627 Phase 1) — see searchScored above.
+            .map(hydrateKnowledgeEntry) as ScoredKnowledgeEntry[]
+        );
       },
       input.termWeights,
     );

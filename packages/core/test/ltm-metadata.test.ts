@@ -7,6 +7,8 @@ import {
   getByLogical,
   hydrateKnowledgeEntry,
   logicalIdOf,
+  searchScored,
+  searchScoredOtherProjects,
   type KnowledgeMetadata,
 } from "../src/ltm";
 
@@ -295,5 +297,50 @@ describe("single-row getters hydrate metadata (Seer #14858326, #627 Phase 1)", (
 
   test("getByLogical() returns null for a missing logical id", () => {
     expect(getByLogical("nonexistent-logical-id")).toBeNull();
+  });
+});
+
+describe("scored search hydrates metadata (Seer #14860239, #627 Phase 1)", () => {
+  test("searchScored returns parsed metadata objects", () => {
+    const projectPath = nextProject();
+    create({
+      projectPath,
+      category: "decision",
+      title: "Zircon storage engine choice",
+      content: "we picked the zircon engine for durability",
+      scope: "project",
+      metadata: { gitHead: "5cored1234beef" },
+    });
+    const results = searchScored({ query: "zircon", projectPath });
+    const hit = results.find((r) => r.title === "Zircon storage engine choice");
+    expect(hit).toBeDefined();
+    // The bug: raw FTS rows left metadata as a JSON string.
+    expect(typeof hit!.metadata).toBe("object");
+    expect(hit!.metadata).toEqual({ gitHead: "5cored1234beef" });
+    // The extra FTS `rank` column survives hydration (spread preserves it).
+    expect(typeof hit!.rank).toBe("number");
+  });
+
+  test("searchScoredOtherProjects returns parsed metadata objects", () => {
+    const ownerProject = nextProject();
+    const otherProject = nextProject();
+    create({
+      projectPath: ownerProject,
+      category: "decision",
+      title: "Quokka deployment runbook",
+      content: "the quokka rollout uses blue-green",
+      scope: "project",
+      metadata: { gitHead: "0ther9999cafe" },
+    });
+    // Search from a DIFFERENT project so the owner project's entry surfaces as
+    // a cross-project ("tunnel") result.
+    const results = searchScoredOtherProjects({
+      query: "quokka",
+      excludeProjectPath: otherProject,
+    });
+    const hit = results.find((r) => r.title === "Quokka deployment runbook");
+    expect(hit).toBeDefined();
+    expect(typeof hit!.metadata).toBe("object");
+    expect(hit!.metadata).toEqual({ gitHead: "0ther9999cafe" });
   });
 });
