@@ -4650,6 +4650,7 @@ describe("tier-based context management", () => {
       consecutiveBusts: number;
       transformCount: number;
       layer: number;
+      capFit: boolean;
     }
     function captureHook(): HookCall[] {
       const calls: HookCall[] = [];
@@ -4661,6 +4662,7 @@ describe("tier-based context management", () => {
             consecutiveBusts: info.consecutiveBusts,
             transformCount: info.transformCount,
             layer: info.layer,
+            capFit: info.capFit,
           }),
         onSpiral: (info) =>
           calls.push({
@@ -4669,6 +4671,7 @@ describe("tier-based context management", () => {
             consecutiveBusts: info.consecutiveBusts,
             transformCount: info.transformCount,
             layer: info.layer,
+            capFit: info.capFit,
           }),
         onRecovered: (info) =>
           calls.push({
@@ -4677,6 +4680,7 @@ describe("tier-based context management", () => {
             consecutiveBusts: info.consecutiveBusts,
             transformCount: info.transformCount,
             layer: info.layer,
+            capFit: info.capFit,
           }),
       });
       return calls;
@@ -4952,15 +4956,26 @@ describe("tier-based context management", () => {
     // ----- #952 follow-up tests -----
 
     test("tier-gate bypass with large LTM cache: NOT cap-fit, fires onSpiral past grace (#952)", () => {
-      // Regression for #952 Finding #1. The original cap-fit hardcode
-      // checked `layer0Input <= layer0Ceiling` (full input INCLUDING LTM
-      // delta). A naive `getTier(totalTokens) === 0` check would also
-      // suppress the alert for tier-gate bypass sessions whose message-only
-      // totalTokens happen to fit under the cap, even though the full
-      // expectedInput (incl. LTM) is over the cap. Fix: transformInner now
-      // sets `capFit: true` ONLY on the cap-fit passthrough path; the
-      // detection reads that field directly. This test reproduces the
-      // suppressed-alert edge case.
+      // Regression for #952 Finding #1 — the DISCRIMINATING case that proves
+      // why `result.capFit` is needed instead of a post-hoc
+      // `layer === 0 && getTier(totalTokens) === 0` check.
+      //
+      // The original cap-fit hardcode checked `layer0Input <= layer0Ceiling`
+      // (full input INCLUDING the LTM delta). A post-hoc tier check on
+      // `totalTokens` is structurally LOOSER, because the tier-gate bypass
+      // returns `totalTokens` as the message-only figure (expectedInput minus
+      // the LTM delta — see transformInner). So a session whose raw messages
+      // fit tier 0 but whose FULL input (messages + a large LTM injection) is
+      // over the layer-0 cap would be wrongly classified cap-fit and have its
+      // spiral alert suppressed.
+      //
+      // This test constructs exactly that disagreement:
+      //   full input  = lastKnownInput(150K) + newMsgTokens(~0.9K) + ltmDelta(120K)
+      //               ≈ 271K  → OVER the 200K l0cap → tier-gate bypass (layer 0)
+      //   totalTokens = full input − ltmDelta ≈ 151K → tier 0
+      // so `layer === 0 && getTier(totalTokens) === 0` is TRUE (the OLD buggy
+      // predicate suppresses), but `result.capFit` is FALSE (the alert must
+      // fire). Reverting Fix #1 makes the final assertion fail.
       const msgs = Array.from({ length: 8 }, (_, i) =>
         makeMsg(
           `ltm-${i}`,
@@ -4969,10 +4984,13 @@ describe("tier-based context management", () => {
           SID,
         ),
       );
-      // Over-cap full input (635K > 200K l0cap), but messageTokens after
-      // subtracting the LTM delta will be < 200K → message-only tier=0.
-      calibrate(635_000, SID, msgs.length);
-      setCachePricing(0, 0); // shouldCompress declines → tier-gate bypass
+      // Calibrate with LTM at 0 so the baseline delta is 0, THEN inject a large
+      // LTM cache so the transform sees a +120K LTM delta. The delta pushes the
+      // full input over the cap while the message-only total stays in tier 0.
+      setLtmTokens(0, SID);
+      calibrate(150_000, SID, msgs.length); // captures lastKnownLtm = 0
+      setLtmTokens(120_000, SID); // ltmDelta = 120K at transform time
+      setCachePricing(0, 0); // shouldCompress declines → tier-gate bypass (path b)
       for (let i = 0; i < 4; i++) recordCacheUsage(440_000, 0, 2, SID);
       setTransformCountForTest(SID, COLD_START_GRACE_TURNS + 1);
 
@@ -4983,15 +5001,52 @@ describe("tier-based context management", () => {
           projectPath: PROJECT,
           sessionID: SID,
         });
+        // Tier-gate bypass: over-cap full input, passed through at layer 0,
+        // explicitly NOT cap-fit.
         expect(result.layer).toBe(0);
+        expect(result.capFit).toBe(false);
+        // THE DISCRIMINATING CONDITION: the message-only totalTokens is tier 0,
+        // so the old `layer === 0 && getTier(totalTokens) === 0` predicate is
+        // TRUE and would suppress the alert. capFit:false fires it correctly.
+        expect(getTier(result.totalTokens)).toBe(0);
         // Genuine exhaustion (over-cap on full input) → MUST fire onSpiral.
-        // The previous `isCapFit = layer === 0 && getTier(totalTokens) === 0`
-        // check would have suppressed this. With `result.capFit` set ONLY
-        // on the cap-fit passthrough path (false on tier-gate bypass), the
-        // alert now fires correctly.
         expect(calls.map((c) => c.kind)).toEqual(["spiral"]);
         expect(calls[0].consecutiveBusts).toBeGreaterThanOrEqual(2);
         expect(calls[0].layer).toBe(0);
+        // The capFit field propagates to the hook payload (false here).
+        expect(calls[0].capFit).toBe(false);
+      } finally {
+        setBustSpiralHook(null);
+      }
+    });
+
+    test("cap-fit cold-start breadcrumb carries capFit:true to the hook (#952)", () => {
+      // Locks the BustSpiralInfo.capFit propagation for the TRUE case (NIT-B):
+      // the cold-start breadcrumb fires even for genuine cap-fit sessions (it is
+      // useful telemetry regardless of cap-fit), and the payload must report
+      // capFit:true so gateway dashboards can distinguish "fits but busting
+      // structurally" from "over the cap and busting from growth". Hardcoding
+      // capFit:false in the bustSpiralInfo builder makes this assertion fail.
+      const msgs = [
+        makeMsg("ccs-1", "user", "Hello", SID),
+        makeMsg("ccs-2", "assistant", "Hi", SID),
+      ];
+      calibrate(50_000, SID, msgs.length); // under 200K l0cap → cap-fit passthrough
+      setCachePricing(0, 0);
+      for (let i = 0; i < 4; i++) recordCacheUsage(100_000, 0, 3, SID);
+
+      const calls = captureHook();
+      try {
+        // Fresh session → transformCount becomes 1 → within grace → onColdStart.
+        const result = transform({
+          messages: msgs,
+          projectPath: PROJECT,
+          sessionID: SID,
+        });
+        expect(result.layer).toBe(0);
+        expect(result.capFit).toBe(true);
+        expect(calls.map((c) => c.kind)).toEqual(["coldStart"]);
+        expect(calls[0].capFit).toBe(true);
       } finally {
         setBustSpiralHook(null);
       }
