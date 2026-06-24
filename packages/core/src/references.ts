@@ -30,6 +30,10 @@ export type Reference =
       kind: "command";
       runner: "pnpm" | "npm" | "yarn" | "make";
       script: string;
+      /** True when an explicit `run` verb preceded the script (`pnpm run X`).
+       *  A bare `pnpm X` is ambiguous with a noun phrase ("npm registry") and is
+       *  resolved confirm-only (never "missing"). `make` is always false. */
+      explicit: boolean;
       raw: string;
     };
 
@@ -113,7 +117,11 @@ const PM_BUILTINS = new Set([
   "access",
 ]);
 
-const PM_CMD_RE = /\b(pnpm|npm|yarn)\s+(?:run\s+)?([A-Za-z][A-Za-z0-9:_-]*)/g;
+// Group 2 captures the explicit `run` verb (if present) so resolution can
+// distinguish an unambiguous `pnpm run X` (a script invocation that may be
+// "missing") from a bare `npm X` (which may be a noun phrase like "npm registry"
+// and must never penalize).
+const PM_CMD_RE = /\b(pnpm|npm|yarn)\s+(run\s+)?([A-Za-z][A-Za-z0-9:_-]*)/g;
 const MAKE_CMD_RE = /\bmake\s+([A-Za-z][A-Za-z0-9:_-]*)/g;
 
 // Inline-code / fenced-code spans (the inner text between backtick runs).
@@ -201,12 +209,13 @@ export function extractReferences(text: string): Reference[] {
   for (const line of codeLines(text)) {
     for (const m of line.matchAll(PM_CMD_RE)) {
       const runner = m[1] as "pnpm" | "npm" | "yarn";
-      const script = m[2];
+      const explicit = m[2] !== undefined; // had a `run` verb
+      const script = m[3];
       if (PM_BUILTINS.has(script)) continue;
       const raw = m[0];
       if (seen.has(raw)) continue;
       seen.add(raw);
-      out.push({ kind: "command", runner, script, raw });
+      out.push({ kind: "command", runner, script, explicit, raw });
     }
 
     for (const m of line.matchAll(MAKE_CMD_RE)) {
@@ -214,7 +223,13 @@ export function extractReferences(text: string): Reference[] {
       const raw = m[0];
       if (seen.has(raw)) continue;
       seen.add(raw);
-      out.push({ kind: "command", runner: "make", script, raw });
+      out.push({
+        kind: "command",
+        runner: "make",
+        script,
+        explicit: false,
+        raw,
+      });
     }
   }
 
@@ -260,23 +275,21 @@ export function resolveRefAgainstView(
   view: RepoView,
 ): RefStatus {
   if (ref.kind === "command") {
-    // `make`/`yarn` are common English words: even inside a backtick span a
-    // `make X`/`yarn X` token can't be definitively distinguished from prose
-    // ("make sense", "yarn about"). Per the load-bearing invariant, an ABSENT
-    // make target / yarn script is therefore UNKNOWN (neutral) — these runners
-    // can only ever *confirm* a reference, never break it. `pnpm`/`npm` are not
-    // English words, so a backticked `pnpm/npm X` is unambiguously a command and
-    // an absent script IS "missing".
+    // `make` has no `run` verb and "make X" reads as prose ("make sense"); it is
+    // confirm-only — an absent target is UNKNOWN (neutral), never "missing".
     if (ref.runner === "make") {
       if (view.makeTargets == null) return "unknown";
       return view.makeTargets.has(ref.script) ? "ok" : "unknown";
     }
-    if (ref.runner === "yarn") {
-      if (view.scripts == null) return "unknown";
-      return view.scripts.has(ref.script) ? "ok" : "unknown";
-    }
+    // pnpm/npm/yarn resolve against package.json scripts. A present script is
+    // "ok" either way. For an ABSENT script we only penalize ("missing") when the
+    // reference was an EXPLICIT `<pm> run <script>` — a bare `<pm> <word>` is
+    // ambiguous with a noun phrase ("npm registry", "yarn about", "pnpm
+    // workspace") and must stay neutral ("unknown"). (Mirrors the explicit-verb
+    // guard from the verifier-detection fix in PR #927.)
     if (view.scripts == null) return "unknown";
-    return view.scripts.has(ref.script) ? "ok" : "missing";
+    if (view.scripts.has(ref.script)) return "ok";
+    return ref.explicit ? "missing" : "unknown";
   }
 
   // file ref

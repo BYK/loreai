@@ -261,6 +261,26 @@ describe("DirectFsResolver", () => {
     expect(await resolve("`yarn lint`")).toBe("ok");
   });
 
+  // Regression (#939 round-3 review): pnpm/npm are common technical NOUNS, so a
+  // bare `npm registry` / `pnpm workspace` is a noun phrase, not a command. Only
+  // an EXPLICIT `<pm> run <script>` may resolve "missing"; a bare `<pm> <word>`
+  // that isn't a script is "unknown" (neutral), never penalized.
+  test("explicit `pnpm run <absent>` → missing (legit removed-script signal)", async () => {
+    expect(await resolve("`pnpm run nope`")).toBe("missing");
+  });
+  test("bare `npm <noun>` (registry/package) → unknown, never missing", async () => {
+    expect(await resolve("`npm registry`")).toBe("unknown");
+    expect(await resolve("`npm package`")).toBe("unknown");
+    expect(await resolve("`pnpm workspace`")).toBe("unknown");
+  });
+  test("bare `pnpm <present-script>` still resolves ok", async () => {
+    // fixture package.json has a `build` script.
+    expect(await resolve("`pnpm build`")).toBe("ok");
+  });
+  test("bare `pnpm <absent-script>` → unknown (neutral, NOT missing)", async () => {
+    expect(await resolve("`pnpm deploy`")).toBe("unknown");
+  });
+
   test("dot-dir file (e.g. .github/workflows/release.yml) resolves ok", async () => {
     expect(await resolve(".github/workflows/release.yml")).toBe("ok");
   });
@@ -435,10 +455,12 @@ describe("Direct-FS ↔ SyntheticProbe parity (real ref-by-ref comparison)", () 
     "/etc/foo.ts:1", // absolute
     "../escape.ts:1", // out of tree
     ".github/workflows/release.yml", // dot-dir file
-    "`pnpm run lint`", // present script
-    "`pnpm run nope`", // absent script
+    "`pnpm run lint`", // explicit present script
+    "`pnpm run nope`", // explicit absent script → missing
+    "`pnpm build`", // bare present script → ok
+    "`npm registry`", // bare absent (noun phrase) → unknown
     "`make check`", // present target
-    "`make nope`", // absent target
+    "`make nope`", // absent target → unknown
   ])("Direct-FS and SyntheticProbe agree on %j", async (raw) => {
     const refs = extractReferences(raw);
     expect(refs.length).toBeGreaterThan(0);
