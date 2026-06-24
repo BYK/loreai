@@ -111,6 +111,9 @@ importers:
       semver:
         specifier: ^7.7.3
         version: 7.8.2
+      sqlite-vec:
+        specifier: 0.1.9
+        version: 0.1.9
     devDependencies:
       '@loreai/core':
         specifier: workspace:*
