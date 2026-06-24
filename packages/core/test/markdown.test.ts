@@ -3,6 +3,7 @@ import fc from "fast-check";
 import { remark } from "remark";
 import {
   normalize,
+  iterateToFixpoint,
   unescapeMarkdown,
   sanitizeSurrogates,
   inline,
@@ -85,6 +86,79 @@ describe("normalize", () => {
   test("preserves already-normalized markdown", () => {
     const input = "## Heading\n\n* item 1\n* item 2\n";
     expect(normalize(input)).toBe(input);
+  });
+});
+
+describe("iterateToFixpoint (#970)", () => {
+  // The real markdown roundtrip is monotone and always converges, so its cycle
+  // and cap branches are unreachable with real inputs. These synthetic steps
+  // drive each of the three exit branches deterministically.
+
+  test("returns the fixpoint and stops detecting it via the seen-set", () => {
+    // step appends "!" until length 3, then is the identity (a fixpoint).
+    const calls: string[] = [];
+    const step = (s: string) => {
+      calls.push(s);
+      return s.length < 3 ? `${s}!` : s;
+    };
+    // seed "a" → "a!" → "a!!" → "a!!" (fixpoint after 2 transitions). The
+    // fixpoint is several passes from the seed, so it can only be detected by
+    // remembering intermediate outputs (the seen-set) — NOT by comparing to
+    // the seed. Exactly 3 step calls: "a", "a!", "a!!" (the last re-emits
+    // "a!!", which is already in the set, so we stop). A missing seen.add
+    // would loop all the way to the cap instead.
+    expect(iterateToFixpoint("a", step)).toBe("a!!");
+    expect(calls).toEqual(["a", "a!", "a!!"]);
+  });
+
+  test("preserves single-roundtrip behavior when already at a fixpoint", () => {
+    let count = 0;
+    const step = (s: string) => {
+      count++;
+      return s; // identity: seed is already a fixpoint
+    };
+    expect(iterateToFixpoint("stable", step)).toBe("stable");
+    // exactly one comparison call, then immediate return
+    expect(count).toBe(1);
+  });
+
+  test("detects an oscillation (cycle) and stops early instead of hitting the cap", () => {
+    // step oscillates A→B→A→B…; it never reaches a fixpoint.
+    let count = 0;
+    const step = (s: string) => {
+      count++;
+      return s === "A" ? "B" : "A";
+    };
+    // seed "A": next "B" (new), next "A" (already seen) → cycle, return "A".
+    expect(iterateToFixpoint("A", step, 8)).toBe("A");
+    // stopped after detecting the repeat, well before the 8-pass cap.
+    expect(count).toBe(2);
+  });
+
+  test("returns the last result after exhausting the cap without converging", () => {
+    // step strictly grows forever, so it never converges and never repeats.
+    let count = 0;
+    const step = (s: string) => {
+      count++;
+      return `${s}x`;
+    };
+    // seed "" with cap 3 → "x" → "xx" → "xxx"; cap reached, return last.
+    expect(iterateToFixpoint("", step, 3)).toBe("xxx");
+    expect(count).toBe(3);
+  });
+
+  test("respects a custom maxPasses bound", () => {
+    const step = (s: string) => `${s}x`;
+    expect(iterateToFixpoint("", step, 1)).toBe("x");
+    expect(iterateToFixpoint("", step, 5)).toBe("xxxxx");
+  });
+
+  test("normalize delegates to the fixpoint iterator (real roundtrip converges)", () => {
+    // A genuine escape-growth input still converges to a true fixpoint via the
+    // shared iterator — neither the cycle nor cap branch fires.
+    const R = "***___## ***---***_{u|___## ";
+    const out = normalize(R);
+    expect(normalize(out)).toBe(out);
   });
 });
 
