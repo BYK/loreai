@@ -1196,9 +1196,12 @@ export interface BustSpiralInfo {
   transformCount: number;
   /** Current gradient layer (0 = raw passthrough, 4 = emergency). */
   layer: number;
-  /** Optional upstream cache telemetry, when available. */
-  cacheWriteTokens?: number;
-  cacheReadTokens?: number;
+  /** True when this transform took the cap-fit passthrough path (see
+   *  TransformResult.capFit). Propagated so gateway-side dashboards can
+   *  distinguish "session fits with headroom but is busting structurally"
+   *  from "session is over the cap and busting from growth" without needing
+   *  to re-derive the path from layer+totalTokens. */
+  capFit: boolean;
 }
 
 /** Optional hook the gateway registers to surface bust-spiral events.
@@ -1227,13 +1230,14 @@ export function setBustSpiralHook(h: BustSpiralHook | null): void {
 function bustSpiralInfo(
   sid: string,
   state: SessionState,
-  layer: number,
+  result: TransformResult,
 ): BustSpiralInfo {
   return {
     sessionID: sid,
     consecutiveBusts: state.consecutiveBusts,
     transformCount: state.transformCount,
-    layer,
+    layer: result.layer,
+    capFit: result.capFit,
   };
 }
 
@@ -1252,43 +1256,49 @@ function bustSpiralInfo(
 function maybeDetectBustSpiral(
   sid: string | undefined,
   state: SessionState,
-  layer: number,
-  totalTokens: number,
+  result: TransformResult,
 ): void {
   if (!sid) return;
   const busts = state.consecutiveBusts;
   const inGrace = state.transformCount <= COLD_START_GRACE_TURNS;
 
-  // The cap-fit passthrough (layer 0, tier 0) returns a session that fits
-  // the layer-0 cap with headroom — its busts come from structural causes
-  // (e.g. a prompt-delta position drift after post-idle recompression), not
-  // genuine context growth. Skip the alert for sub-cap sessions even past
-  // the cold-start grace window. Mirrors the original cap-fit hardcode
-  // `unsustainable: false` from #797's earlier design.
-  const isCapFit = layer === 0 && getTier(totalTokens) === 0;
+  // Cap-fit suppression: when transformInner took the cap-fit passthrough
+  // path (layer 0, fits layer-0 cap with headroom, fits under hard ceiling),
+  // the result is marked `capFit: true`. Busts there come from structural
+  // causes (e.g. prompt-delta position drift after post-idle recompression),
+  // not genuine context growth — the original code hardcoded
+  // `unsustainable: false` here. Faithfully mirrored via the explicit field
+  // (NOT post-hoc `layer === 0 && getTier(totalTokens) === 0`, which is
+  // structurally looser and would also mask tier-gate bypass sessions with
+  // large LTM — see #952). Cold-start breadcrumb still fires for cap-fit
+  // sessions; only the past-grace spiral alert is suppressed.
+  const isCapFit = result.capFit;
 
   if (busts >= SUSTAINED_BUST_THRESHOLD) {
     if (inGrace && !state.bustSpiralColdStartLogged) {
       state.bustSpiralColdStartLogged = true;
       // Cold-start breadcrumb fires even for cap-fit sub-cap sessions —
       // useful telemetry for the cold-start phase regardless of cap-fit.
-      bustSpiralHook?.onColdStart?.(bustSpiralInfo(sid, state, layer));
+      bustSpiralHook?.onColdStart?.(bustSpiralInfo(sid, state, result));
     } else if (!inGrace && !state.bustSpiralAlerted && !isCapFit) {
       state.bustSpiralAlerted = true;
-      bustSpiralHook?.onSpiral?.(bustSpiralInfo(sid, state, layer));
+      bustSpiralHook?.onSpiral?.(bustSpiralInfo(sid, state, result));
     }
     return;
   }
 
-  // Recovery — an alerted episode ended. Clear the debounce flag so a future
-  // spiral alerts again. Also clear the cold-start flag so the next cold-start
-  // episode (in a new process run) can log a fresh breadcrumb.
+  // Recovery — an alerted episode ended. Clear the bustSpiralAlerted
+  // debounce so a future spiral alerts again. bustSpiralColdStartLogged is
+  // intentionally NOT cleared: the cold-start grace window is bounded by
+  // transformCount for the lifetime of the process, and within that window
+  // we want a single breadcrumb per session, not one per bust→recovery→bust
+  // cycle. Clearing it here would allow multiple onColdStart fires for the
+  // same session within the same cold-start phase (#952 follow-up to #797).
   if (busts === 0) {
     const hadAlert = state.bustSpiralAlerted;
     state.bustSpiralAlerted = false;
-    state.bustSpiralColdStartLogged = false;
     if (hadAlert) {
-      bustSpiralHook?.onRecovered?.(bustSpiralInfo(sid, state, layer));
+      bustSpiralHook?.onRecovered?.(bustSpiralInfo(sid, state, result));
     }
   }
 }
@@ -2413,6 +2423,7 @@ function tryFitStable(input: {
         distilledTokens: input.prefixTokens,
         rawTokens: pinnedTokens,
         totalTokens: total,
+        capFit: false,
       };
     }
     // Pinned window is too large for both budgets — fall through to rescan.
@@ -2525,6 +2536,14 @@ export type TransformResult = {
    *  of this transform. Surfaced so callers (and the bust-spiral detection in
    *  transform()) can observe the current bust pressure. */
   consecutiveBusts?: number;
+  /** True when this transform took the cap-fit passthrough path (layer 0
+   *  AND session fits the layer-0 cap with headroom AND fits under the hard
+   *  ceiling). Drives the bust-spiral suppression for sessions whose busts
+   *  come from structural causes (e.g. prompt-delta position drift after
+   *  post-idle recompression), not genuine context growth (#952 follow-up
+   *  to #797). Set only by the cap-fit passthrough return path; all other
+   *  returns set this to false. */
+  capFit: boolean;
 };
 
 // Per-session urgent distillation tracking.
@@ -2928,6 +2947,7 @@ function transformInner(input: {
       distilledBudget,
       rawBudget,
       refreshLtm: false,
+      capFit: true,
     };
   }
 
@@ -2992,6 +3012,7 @@ function transformInner(input: {
         rawBudget,
         refreshLtm: false,
         consecutiveBusts: busts,
+        capFit: false,
       };
     }
   }
@@ -3168,6 +3189,7 @@ function transformInner(input: {
         rawBudget,
         refreshLtm: false,
         consecutiveBusts: sid ? getSessionState(sid).consecutiveBusts : 0,
+        capFit: false,
       };
     }
   }
@@ -3256,6 +3278,7 @@ function transformInner(input: {
     rawBudget,
     refreshLtm: true,
     consecutiveBusts: busts,
+    capFit: false,
   };
 }
 
@@ -3351,7 +3374,7 @@ export function transform(input: {
     // emit an info-level breadcrumb; past-grace spirals fire a high-severity
     // Sentry alert (debounced per episode, cleared on recovery). No-op when no
     // hook is registered (CLI/tests).
-    maybeDetectBustSpiral(sid, state, result.layer, result.totalTokens);
+    maybeDetectBustSpiral(sid, state, result);
 
     log.info(
       `gradient: session=${sid} layer=${result.layer} tokens=${result.totalTokens}` +
@@ -3558,5 +3581,6 @@ function tryFit(input: {
     distilledTokens: input.prefixTokens,
     rawTokens,
     totalTokens: total,
+    capFit: false,
   };
 }

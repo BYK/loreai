@@ -1,16 +1,16 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { setupBustSpiralCapture } from "../src/sentry";
-import { setBustSpiralHook } from "@loreai/core";
+import * as core from "@loreai/core";
 
-describe("bust-spiral Sentry wiring (#797)", () => {
+describe("bust-spiral Sentry wiring (#797 / #952)", () => {
   beforeEach(() => {
-    setBustSpiralHook(null);
+    core.setBustSpiralHook(null);
   });
 
   it("setupBustSpiralCapture is safe to call when Sentry is not initialized", () => {
-    // Sentry is not initialized in the test process. The wrapper must still
-    // be safe to call (registers a hook, all hook paths gated on
-    // Sentry.isInitialized() so they no-op cleanly).
+    // Sentry is not initialized in the test process (no DSN configured).
+    // The wrapper must register a hook regardless; all hook paths gate on
+    // Sentry.isInitialized() at call time, so Sentry-off is a clean no-op.
     expect(() => setupBustSpiralCapture()).not.toThrow();
   });
 
@@ -25,34 +25,49 @@ describe("bust-spiral Sentry wiring (#797)", () => {
     }).not.toThrow();
   });
 
+  it("registers a hook via setBustSpiralHook with all three callbacks", () => {
+    // Spy on the core setter to capture the hook the wrapper installs. This
+    // is the load-bearing check: if setupBustSpiralCapture ever stops
+    // calling setBustSpiralHook, or registers a hook with a different
+    // shape, this test breaks.
+    const spy = vi.spyOn(core, "setBustSpiralHook");
+    try {
+      setupBustSpiralCapture();
+      expect(spy).toHaveBeenCalledOnce();
+      const hook = spy.mock.calls[0][0] as core.BustSpiralHook;
+      // Hook shape: all three callbacks should be present (or null/undefined
+      // per the optional interface, but production installs all three).
+      expect(hook.onColdStart).toBeTypeOf("function");
+      expect(hook.onSpiral).toBeTypeOf("function");
+      expect(hook.onRecovered).toBeTypeOf("function");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("calling the registered hook does not throw when Sentry is not initialized", () => {
-    // setBustSpiralHook is the same setter the wrapper uses; simulate the
-    // gateway's wiring by registering a no-op hook and verifying the
-    // pattern that `setupBustSpiralCapture` would install (each branch
-    // gated on Sentry.isInitialized() and a safe no-op otherwise).
-    const info = {
-      sessionID: "test-sess",
-      consecutiveBusts: 3,
-      transformCount: 5,
-      layer: 0,
-    };
-    setBustSpiralHook({
-      onColdStart: () => {
-        // Mirrors the Sentry branch: `if (!Sentry.isInitialized()) return;`
-        // In the test process Sentry is not initialized, so this is a no-op.
-      },
-      onSpiral: () => {
-        // ditto
-      },
-      onRecovered: () => {
-        // ditto
-      },
-    });
-    // Trigger each callback by triggering a transform-driven detection.
-    // We can't easily simulate that here without the full pipeline; the
-    // important assertion is that registering + calling the hook shape
-    // works without throwing — which the test process itself proves.
-    expect(info.sessionID).toBe("test-sess");
-    expect(setBustSpiralHook).toBeTypeOf("function");
+    // The real Sentry behavior (captureMessage at error level, etc.) is
+    // verified by the production code reading the wrapper — vi.mock on
+    // @sentry/bun doesn't reach the production namespace import cleanly
+    // (alias resolution). The no-op-when-Sentry-off path is the
+    // load-bearing one: a thrown error from telemetry would break the
+    // request path, which is the standing invariant.
+    const spy = vi.spyOn(core, "setBustSpiralHook");
+    try {
+      setupBustSpiralCapture();
+      const hook = spy.mock.calls[0][0] as core.BustSpiralHook;
+      const info: core.BustSpiralInfo = {
+        sessionID: "s",
+        consecutiveBusts: 3,
+        transformCount: 5,
+        layer: 0,
+        capFit: false,
+      };
+      expect(() => hook.onColdStart?.(info)).not.toThrow();
+      expect(() => hook.onSpiral?.(info)).not.toThrow();
+      expect(() => hook.onRecovered?.(info)).not.toThrow();
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
