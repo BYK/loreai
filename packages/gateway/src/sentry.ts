@@ -566,10 +566,7 @@ export function setupEmbeddingFailureCapture(): void {
 // Bust-spiral alerting (#797)
 // ---------------------------------------------------------------------------
 
-import {
-  setBustSpiralHook,
-  type BustSpiralInfo,
-} from "@loreai/core";
+import { setBustSpiralHook, type BustSpiralInfo } from "@loreai/core";
 
 /**
  * Wire core's bust-spiral detection hook to Sentry. Called once at startup.
