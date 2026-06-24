@@ -5,29 +5,35 @@ import * as data from "../src/data";
 
 // The /ui/costs page runs three cross-project bulk aggregates (#561):
 // aggregateTokensBySessionAll, aggregateDistillationsBySessionAll and
-// listAllRecentSessions. The expensive one is the "earliest assistant message
-// per session" lookup inside aggregateTokensBySessionAll: a subquery that
-// filters role='assistant' AND created_at>=? and groups by session_id. With
-// only single-column indexes SQLite full-SCANs idx_temporal_session for it
-// (~360ms at ~200K messages).
+// listAllRecentSessions. Two migrations make them index-only scans:
 //
-// v56 adds a SINGLE index for exactly that access pattern:
-//   idx_temporal_role_session_created ON temporal_messages(role, session_id, created_at)
-// → a covering equality seek on role='assistant' that streams the GROUP BY in
-// (session_id, created_at) order. Measured ~8x faster on that query.
+// v57 — idx_temporal_role_session_created ON temporal_messages(role, session_id,
+//   created_at). Targets the "earliest assistant message per session" subquery
+//   inside aggregateTokensBySessionAll (role='assistant' AND created_at>=?
+//   GROUP BY session_id). A covering equality seek on role='assistant' that
+//   streams the GROUP BY; measured ~8x faster (~360ms -> ~42ms at ~200K rows).
 //
-// We deliberately do NOT add a (created_at, session_id) index for the token-sum,
-// distillation or recent-session aggregates: EXPLAIN QUERY PLAN (measured at both
-// low and high created_at selectivity) shows the planner always prefers the
-// session-ordered idx_temporal_session / idx_distillation_session scan there, so
-// such an index would be pure write amplification with no read benefit. The
-// "deliberately unindexed" tests below pin that decision so it isn't quietly
-// reverted by a future contributor adding write-amplification-only indexes.
+// v58 — COVERING indexes for the other two aggregates, which still did a per-row
+//   heap lookup for the aggregated/projected column:
+//     idx_temporal_session_created_tokens ON (session_id, created_at, tokens)
+//       — token-sum: SUM(tokens) ... WHERE created_at>=? GROUP BY session_id.
+//     idx_temporal_project_session_created ON (project_id, session_id, created_at)
+//       — listAllRecentSessions: COUNT/MIN/MAX(created_at) GROUP BY proj,session.
+//   EXPLAIN flips from "SCAN ... USING INDEX" to "... USING COVERING INDEX"
+//   (index-only, no heap reads); measured ~2-3.5x faster on token-sum and the
+//   win grows as the table outgrows the page cache. These wider indexes have the
+//   old narrow idx_temporal_session / idx_temporal_project_session as exact
+//   left-prefixes, so v58 DROPs the narrow ones (net index count unchanged) — the
+//   same prefix-cleanup pattern used in migration v6.
+//
+// We still deliberately do NOT add a (created_at, session_id) index (created_at-
+// leading): the planner prefers the session-ordered covering scans, so it would
+// be pure write amplification. The "deliberately unindexed" test below pins that.
 //
 // The SQL strings asserted in the plan tests are kept byte-identical to the
-// production queries (temporal.ts: aggregateTokensBySessionAll,
-// data.ts: aggregateDistillationsBySessionAll). The correctness tests drive the
-// real exported functions so the path under test cannot silently drift.
+// production queries (temporal.ts: aggregateTokensBySessionAll, data.ts:
+// listAllRecentSessions + aggregateDistillationsBySessionAll). The correctness
+// tests drive the real exported functions so the path cannot silently drift.
 
 const PROJECT = "/test/cost-bulk-queries/project";
 
@@ -54,6 +60,23 @@ const SQL_META_FULL = `SELECT t.session_id, t.metadata
    ) m ON m.session_id = t.session_id AND t.created_at = m.min_at
    WHERE t.role = 'assistant'
    GROUP BY t.session_id`;
+// data.ts listAllRecentSessions — the recent-session aggregate. v58 covers its
+// COUNT/MIN/MAX(created_at) GROUP BY (project_id, session_id) with an index-only
+// scan via idx_temporal_project_session_created.
+const SQL_RECENT = `SELECT
+     t.project_id,
+     p.path AS project_path,
+     p.name AS project_name,
+     t.session_id,
+     COUNT(*) AS message_count,
+     MIN(t.created_at) AS first_message_at,
+     MAX(t.created_at) AS last_message_at
+   FROM temporal_messages t
+   JOIN projects p ON p.id = t.project_id
+   WHERE t.created_at >= ?
+   GROUP BY t.project_id, t.session_id
+   ORDER BY MAX(t.created_at) DESC
+   LIMIT ?`;
 // data.ts aggregateDistillationsBySessionAll (full projection: call_type +
 // token_count are NOT covered by any (created_at, session_id) index — this is
 // why such an index is not worth adding).
@@ -83,7 +106,7 @@ function listIndexNames(table: string): Set<string> {
 
 const SINCE_MS = () => Date.now() - 90 * 86_400_000;
 
-describe("cost-page bulk query indexes (migration v56)", () => {
+describe("cost-page bulk query indexes (migrations v57 + v58)", () => {
   beforeAll(() => {
     const pid = ensureProject(PROJECT);
     const insertMsg = db().query(
@@ -138,7 +161,7 @@ describe("cost-page bulk query indexes (migration v56)", () => {
   });
 
   describe("index existence", () => {
-    test("v56 added idx_temporal_role_session_created", () => {
+    test("v57 added idx_temporal_role_session_created", () => {
       expect(
         listIndexNames("temporal_messages").has(
           "idx_temporal_role_session_created",
@@ -146,10 +169,23 @@ describe("cost-page bulk query indexes (migration v56)", () => {
       ).toBe(true);
     });
 
+    test("v58 added the two covering indexes and dropped their narrow prefixes", () => {
+      const names = listIndexNames("temporal_messages");
+      // The wider covering indexes exist...
+      expect(names.has("idx_temporal_session_created_tokens")).toBe(true);
+      expect(names.has("idx_temporal_project_session_created")).toBe(true);
+      // ...and the narrow indexes they subsume (exact left-prefixes) are gone.
+      // If a future change re-adds them it is pure write amplification — the
+      // covering indexes already serve every access pattern (see below).
+      expect(names.has("idx_temporal_session")).toBe(false);
+      expect(names.has("idx_temporal_project_session")).toBe(false);
+    });
+
     test("no (created_at, session_id) write-amplification index was added", () => {
-      // Guards the deliberate decision documented in migration v56: these
-      // indexes were measured to be unused by every costs-page query, so they
-      // must NOT exist. If a future migration adds one, prove its value first.
+      // Guards a deliberate decision: a created_at-LEADING index was measured to
+      // be unused by every costs-page query (the planner prefers the session-
+      // ordered covering scans), so it must NOT exist. Distinct from the v58
+      // session-leading covering indexes, which ARE used. Prove value first.
       expect(
         listIndexNames("temporal_messages").has("idx_temporal_created_session"),
       ).toBe(false);
@@ -180,17 +216,54 @@ describe("cost-page bulk query indexes (migration v56)", () => {
       );
     });
 
-    test("token-sum and distillation aggregates run index-backed (no full heap scan)", () => {
-      // These intentionally have no (created_at, session_id) index — the planner
-      // uses the session-ordered index to stream the GROUP BY. This pins that
-      // they remain index-backed rather than regressing to a brute table scan.
+    test("token-sum aggregate runs as an index-only COVERING scan (v58)", () => {
+      // SUM(tokens) ... GROUP BY session_id must stream off the v58 covering
+      // index with NO per-row heap lookup. Dropping the index (or removing
+      // `tokens` from it) flips this from COVERING back to a heap SCAN.
       const tokenPlan = explainPlan(SQL_TOKEN_SUMS, SINCE_MS());
-      expect(tokenPlan).toContain("USING INDEX");
+      expect(tokenPlan).toContain("idx_temporal_session_created_tokens");
+      expect(tokenPlan).toMatch(/USING COVERING INDEX/);
       expect(tokenPlan).not.toMatch(/SCAN temporal_messages(?! USING)/);
+    });
 
+    test("recent-session aggregate runs as an index-only COVERING scan (v58)", () => {
+      // COUNT/MIN/MAX(created_at) GROUP BY (project_id, session_id) must search
+      // the temporal_messages side (`t`) via the v58 covering index — never a
+      // brute heap scan. The small projects side (`p`) may still be SCANned.
+      const recentPlan = explainPlan(SQL_RECENT, SINCE_MS(), 50_000);
+      expect(recentPlan).toContain("idx_temporal_project_session_created");
+      expect(recentPlan).toMatch(/USING COVERING INDEX/);
+      expect(recentPlan).not.toContain("SCAN t");
+    });
+
+    test("distillation aggregate stays index-backed (no full heap scan)", () => {
+      // distillations is small and its projection (call_type, token_count) is
+      // intentionally NOT covered — the planner streams the GROUP BY off the
+      // session-ordered index. Pin that it stays index-backed, not a brute scan.
       const distillPlan = explainPlan(SQL_DISTILL, SINCE_MS());
       expect(distillPlan).toContain("USING INDEX");
       expect(distillPlan).not.toMatch(/SCAN distillations(?! USING)/);
+    });
+
+    test("session-scoped lookups stay index-backed after the narrow indexes are dropped", () => {
+      // Subsumption guard: idx_temporal_session served `WHERE session_id = ?`
+      // [ORDER BY created_at]. The v58 (session_id, created_at, tokens) index has
+      // session_id as its leftmost column, so it must serve these too — and the
+      // ORDER BY created_at is satisfied by index order (no temp b-tree sort).
+      const orderPlan = explainPlan(
+        `SELECT id FROM temporal_messages WHERE session_id = ? ORDER BY created_at`,
+        "cqb-sess-5",
+      );
+      expect(orderPlan).toContain("idx_temporal_session_created_tokens");
+      expect(orderPlan).not.toMatch(/SCAN temporal_messages(?! USING)/);
+      expect(orderPlan).not.toContain("USE TEMP B-TREE");
+
+      // `WHERE session_id = ? AND distilled = 0` must also remain index-backed.
+      const distilledPlan = explainPlan(
+        `SELECT id FROM temporal_messages WHERE session_id = ? AND distilled = 0`,
+        "cqb-sess-5",
+      );
+      expect(distilledPlan).not.toMatch(/SCAN temporal_messages(?! USING)/);
     });
   });
 

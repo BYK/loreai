@@ -1450,6 +1450,42 @@ const MIGRATIONS: string[] = [
   CREATE INDEX IF NOT EXISTS idx_temporal_role_session_created
     ON temporal_messages (role, session_id, created_at);
   `,
+
+  `
+  -- Version 58: COVER the remaining /ui/costs aggregates so they run index-only.
+  --
+  -- v57 (above) indexed the role='assistant' metadata subquery. The other two hot
+  -- aggregates still streamed their GROUP BY off a session-ordered index but did a
+  -- heap lookup for every scanned row to read the aggregated/projected column:
+  --   • aggregateTokensBySessionAll token-sum — SUM(tokens) ... WHERE created_at>=?
+  --     GROUP BY session_id — grouped off idx_temporal_session(session_id) but read
+  --     the tokens column from the table for each of ~200K rows.
+  --   • listAllRecentSessions — COUNT(*) / MIN(created_at) / MAX(created_at)
+  --     GROUP BY (project_id, session_id) — grouped off idx_temporal_project_session
+  --     but read created_at from the table per row.
+  --
+  -- Widening those two indexes to COVER the columns each query touches turns both
+  -- into index-only scans (no per-row heap reads). EXPLAIN flips from
+  -- "SCAN ... USING INDEX" to "... USING COVERING INDEX"; measured ~2-3.5x faster
+  -- on the token-sum query at ~200K messages, and the win grows as the table
+  -- outgrows the page cache. This deliberately supersedes the "token-sum
+  -- projection isn't covered anyway" note in v57 for the token-sum step.
+  --
+  -- The wider indexes have the dropped narrow indexes as exact left-prefixes, so
+  -- the narrow ones are now redundant and dropped (same prefix-cleanup pattern as
+  -- version 6 above). idx_temporal_project_session was additionally already a
+  -- left-prefix of idx_temporal_project_session_distilled. Net index count on
+  -- temporal_messages is unchanged: two narrow indexes become two covering ones.
+  -- All former session-scoped lookups (WHERE session_id=? [ORDER BY created_at],
+  -- WHERE session_id=? AND distilled=0) remain index-backed via the new indexes.
+  -- (See cost-bulk-queries.test.ts for the plan/correctness pins and mutation.)
+  CREATE INDEX IF NOT EXISTS idx_temporal_session_created_tokens
+    ON temporal_messages (session_id, created_at, tokens);
+  CREATE INDEX IF NOT EXISTS idx_temporal_project_session_created
+    ON temporal_messages (project_id, session_id, created_at);
+  DROP INDEX IF EXISTS idx_temporal_session;
+  DROP INDEX IF EXISTS idx_temporal_project_session;
+  `,
 ];
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -2042,6 +2078,16 @@ function recoverMissingObjects(database: Database) {
   database.exec(`
     CREATE INDEX IF NOT EXISTS idx_temporal_role_session_created
       ON temporal_messages(role, session_id, created_at);
+  `);
+  // Version 58: covering indexes for the costs-page token-sum and recent-session
+  // aggregates. Self-heal a fully-migrated DB that lost one (re-creation is a
+  // no-op when present). The redundant narrow predecessors are intentionally NOT
+  // recreated here — leaving them absent matches the migrated end-state.
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_temporal_session_created_tokens
+      ON temporal_messages(session_id, created_at, tokens);
+    CREATE INDEX IF NOT EXISTS idx_temporal_project_session_created
+      ON temporal_messages(project_id, session_id, created_at);
   `);
   // Version 36: session project binding. Recover each column independently in
   // case a partial ALTER (e.g. the first succeeded, the second was skipped on a

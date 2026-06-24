@@ -59,7 +59,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(57);
+    expect(row.version).toBe(58);
   });
 
   test("v55: confidence/last_reinforced_at moved to knowledge_meta, exposed via view", () => {
@@ -116,7 +116,7 @@ describe("db", () => {
     const ver = fresh.query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(ver.version).toBe(57);
+    expect(ver.version).toBe(58);
     // Register + JOIN view were rebuilt and are queryable (confidence exposed).
     expect(
       fresh
@@ -302,7 +302,6 @@ describe("db", () => {
       .all() as Array<{ name: string }>;
     const names = indexes.map((i) => i.name);
     // Compound indexes added in version 6
-    expect(names).toContain("idx_temporal_project_session");
     expect(names).toContain("idx_temporal_project_session_distilled");
     expect(names).toContain("idx_temporal_project_distilled_created");
     expect(names).toContain("idx_distillation_project_session");
@@ -311,6 +310,13 @@ describe("db", () => {
     expect(names).not.toContain("idx_temporal_project");
     expect(names).not.toContain("idx_temporal_distilled");
     expect(names).not.toContain("idx_distillation_project");
+    // Version 58: covering indexes for the costs-page aggregates replaced the
+    // narrow idx_temporal_session / idx_temporal_project_session, which are now
+    // exact left-prefixes of the wider covering indexes and must be dropped.
+    expect(names).toContain("idx_temporal_session_created_tokens");
+    expect(names).toContain("idx_temporal_project_session_created");
+    expect(names).not.toContain("idx_temporal_session");
+    expect(names).not.toContain("idx_temporal_project_session");
   });
 
   test("ensureProject creates and returns id", () => {
