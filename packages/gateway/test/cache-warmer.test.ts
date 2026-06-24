@@ -3200,7 +3200,7 @@ describe("creditWarmupHit", () => {
 
   test("credits a hit using the warmup's refreshed prefix tokens (Bug B)", () => {
     const warmup = makeWarmup({ lastWarmupRefreshTokens: 168_000 });
-    const outcome = creditWarmupHit(warmup, 30_000, 300_000);
+    const outcome = creditWarmupHit(warmup, 30_000, 300_000, 168_000);
     expect(outcome.hit).toBe(true);
     // Savings must be credited against the prefix the WARMUP refreshed,
     // NOT a (smaller) returning-turn read.
@@ -3210,18 +3210,18 @@ describe("creditWarmupHit", () => {
 
   test("consumes the warmup — clears lastWarmupAt and refresh tokens", () => {
     const warmup = makeWarmup();
-    creditWarmupHit(warmup, 30_000, 300_000);
+    creditWarmupHit(warmup, 30_000, 300_000, 168_000);
     expect(warmup.lastWarmupAt).toBe(0);
     expect(warmup.lastWarmupRefreshTokens).toBe(0);
     // A second attempt on the consumed warmup is a no-op (no double credit).
-    const second = creditWarmupHit(warmup, 30_000, 300_000);
+    const second = creditWarmupHit(warmup, 30_000, 300_000, 168_000);
     expect(second.hit).toBe(false);
     expect(warmup.warmupHits).toBe(1);
   });
 
   test("no hit when the return came after TTL expired", () => {
     const warmup = makeWarmup();
-    const outcome = creditWarmupHit(warmup, 400_000, 300_000);
+    const outcome = creditWarmupHit(warmup, 400_000, 300_000, 168_000);
     expect(outcome.hit).toBe(false);
     expect(outcome.creditedTokens).toBe(0);
     expect(warmup.warmupHits).toBe(0);
@@ -3233,7 +3233,7 @@ describe("creditWarmupHit", () => {
     // lastWarmupAt set (e.g. inherited/restored blob) but the session never
     // fired a warmup itself → no proof of payment → no savings.
     const warmup = makeWarmup({ totalWarmups: 0, warmupHits: 0 });
-    const outcome = creditWarmupHit(warmup, 30_000, 300_000);
+    const outcome = creditWarmupHit(warmup, 30_000, 300_000, 168_000);
     expect(outcome.hit).toBe(false);
     expect(outcome.creditedTokens).toBe(0);
     expect(warmup.warmupHits).toBe(0);
@@ -3245,17 +3245,45 @@ describe("creditWarmupHit", () => {
   test("phantom guard: no hit when lastWarmupRefreshTokens is missing (Bug A)", () => {
     // Old blob without the refresh-token field (undefined → no proof).
     const warmup = makeWarmup({ lastWarmupRefreshTokens: undefined });
-    const outcome = creditWarmupHit(warmup, 30_000, 300_000);
+    const outcome = creditWarmupHit(warmup, 30_000, 300_000, 168_000);
     expect(outcome.hit).toBe(false);
     expect(warmup.warmupHits).toBe(0);
     expect(warmup.lastWarmupAt).toBe(0);
   });
 
   test("no-op when warmup state is undefined or lastWarmupAt is 0", () => {
-    expect(creditWarmupHit(undefined, 30_000, 300_000).hit).toBe(false);
+    expect(creditWarmupHit(undefined, 30_000, 300_000, 0).hit).toBe(false);
     const warmup = makeWarmup({ lastWarmupAt: 0 });
-    expect(creditWarmupHit(warmup, 30_000, 300_000).hit).toBe(false);
+    expect(creditWarmupHit(warmup, 30_000, 300_000, 0).hit).toBe(false);
     expect(warmup.warmupHits).toBe(0);
+  });
+
+  test("no hit when the returning turn did NOT read the warmed cache (cacheRead=0)", () => {
+    // Bug C: creditWarmupHit used to credit based ONLY on (a) paid-for-warmup
+    // and (b) returned-within-TTL — never confirmed the returning turn actually
+    // read the cache. A returning turn that didn't use the warmed prefix
+    // (different content, eviction by another path, etc.) was booked as full
+    // savings anyway → warmup hit rate and TTL-savings counters inflated.
+    // Production artifact: cache-warmer logs showed warmupHits climbing while
+    // cost-tracker TTL/warmup savings exceeded the actual cache_read input.
+    const warmup = makeWarmup({ lastWarmupRefreshTokens: 168_000 });
+    const outcome = creditWarmupHit(warmup, 30_000, 300_000, 0);
+    expect(outcome.hit).toBe(false);
+    expect(outcome.creditedTokens).toBe(0);
+    expect(warmup.warmupHits).toBe(0);
+    // Warmup markers still consumed — a later turn must not re-credit.
+    expect(warmup.lastWarmupAt).toBe(0);
+    expect(warmup.lastWarmupRefreshTokens).toBe(0);
+  });
+
+  test("credits a hit when the returning turn DID read the warmed cache (cacheRead>0)", () => {
+    // Positive case for the cacheRead gate — when the returning turn reads
+    // any amount of the warmed prefix, we credit as before.
+    const warmup = makeWarmup({ lastWarmupRefreshTokens: 168_000 });
+    const outcome = creditWarmupHit(warmup, 30_000, 300_000, 42_000);
+    expect(outcome.hit).toBe(true);
+    expect(outcome.creditedTokens).toBe(168_000);
+    expect(warmup.warmupHits).toBe(1);
   });
 });
 

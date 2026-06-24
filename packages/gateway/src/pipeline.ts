@@ -4763,6 +4763,7 @@ function postResponse(
           sessionState.warmup,
           sinceWarmup,
           ttlMs,
+          usage.cacheReadInputTokens ?? 0,
         );
         if (outcome.hit) {
           warmupHitThisTurn = true;

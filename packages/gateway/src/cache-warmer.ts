@@ -2102,6 +2102,7 @@ export function creditWarmupHit(
   warmup: WarmupState | undefined,
   sinceWarmupMs: number,
   ttlMs: number,
+  cacheReadTokens: number,
 ): WarmupHitOutcome {
   const noHit: WarmupHitOutcome = { hit: false, creditedTokens: 0 };
   if (!warmup?.lastWarmupAt) return noHit;
@@ -2120,6 +2121,15 @@ export function creditWarmupHit(
 
   // Returned too late — cache already expired, no benefit.
   if (sinceWarmupMs >= ttlMs) return noHit;
+
+  // Bug C: the returning turn must have actually READ the warmed cache.
+  // A warmup refreshes the prefix, but the returning turn might use a
+  // completely different context (pivot to different topic, different tool
+  // chain, concurrent session evicted the cache). Without this check the
+  // savings are phantom: warmupHits and creditedTokens are booked even when
+  // the API reported zero cache read for this turn, inflating the hit rate
+  // and warping the ROI analysis.
+  if (cacheReadTokens <= 0) return noHit;
 
   warmup.warmupHits++;
   return { hit: true, creditedTokens: refreshTokens };
