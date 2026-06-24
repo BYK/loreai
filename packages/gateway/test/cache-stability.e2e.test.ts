@@ -756,6 +756,112 @@ describe("cache stability (e2e)", () => {
     );
   });
 
+  it("ranking churn with NO DB change emits NO delta and keeps the prefix byte-stable (the cause=incremental bust)", async () => {
+    // T1 regression for the production bust (session 1LYkXZ7jkiHHnqPl): the delta
+    // fired on per-turn relevance-ranking churn (the forSession selection picks a
+    // different subset each turn) even though NO knowledge changed in the DB,
+    // rewriting a deep-prefix message every turn → ~250k tokens rewritten per
+    // turn. We force the recompute path (overflow set + near-zero idle-resume so
+    // forSession re-scores every turn) and VARY the query topic each turn so the
+    // selected subset churns — but never mutate the DB. The DB-sourced trigger
+    // must emit ZERO delta rows, and the cached system prefix must stay
+    // byte-identical. Under the old selection-based trigger, the churn wrote
+    // (and rewrote) a "Superseded" delta → this test fails (mutation-verified).
+    const topics = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
+    const turns = Array.from({ length: 6 }, (_, i) => ({
+      // Each turn foregrounds a DIFFERENT topic so forSession re-ranks which
+      // entries are top-K → the selected subset churns turn-to-turn.
+      userMessage: `Turn ${i}: focus on the ${topics[i % topics.length]} subsystem; tell me about ${topics[i % topics.length]} internals.`,
+      assistantText: `Noted on ${topics[i % topics.length]} ${i}.`,
+    }));
+    harness = await createHarness({
+      fixtures: makeConversationFixtures(turns),
+    });
+
+    const projectPath = `/tmp/lore-rank-churn-${Date.now()}`;
+    const clientSessionID = `rank-churn-client-${Date.now()}`;
+    const headers = {
+      "x-lore-project": projectPath,
+      "x-lore-session-id": clientSessionID,
+    };
+    // Near-zero idle-resume threshold → each turn (after a tiny delay) clears it
+    // → forSession recompute on the next turn (the path that can emit a delta).
+    mkdirSync(projectPath, { recursive: true });
+    writeFileSync(
+      `${projectPath}/.lore.json`,
+      JSON.stringify({ idleResumeMinutes: 0.0005 }),
+    );
+
+    const { ltm } = await import("@loreai/core");
+    // Seed many entries spread across the topics, enough to overflow the
+    // system[2] budget so the SELECTED subset is a moving target as the query
+    // topic changes — reproducing the ranking churn without any DB mutation.
+    const SEED_PER_TOPIC = 6;
+    for (const topic of topics) {
+      for (let i = 0; i < SEED_PER_TOPIC; i++) {
+        ltm.create({
+          projectPath,
+          scope: "project",
+          crossProject: false,
+          category: i % 2 ? "gotcha" : "pattern",
+          title: `${topic} subsystem note ${String(i).padStart(2, "0")}`,
+          content:
+            `${topic} subsystem detail ${i}. ` +
+            `The ${topic} internals and ${topic} pipeline matter here. `.repeat(
+              15,
+            ),
+        });
+      }
+    }
+
+    const history: unknown[] = [];
+    let sessionID = "";
+    for (let i = 0; i < turns.length; i++) {
+      if (i > 0) await new Promise((r) => setTimeout(r, 80));
+      const resp = await harness.chat(
+        makeBody(turns[i].userMessage, history),
+        "test-key",
+        headers,
+      );
+      expect(resp.status).toBe(200);
+      await resp.json();
+      history.push({ role: "user", content: turns[i].userMessage });
+      history.push({
+        role: "assistant",
+        content: [{ type: "text", text: turns[i].assistantText }],
+      });
+      if (i === 0) {
+        const rows = harness.queryDB<{ session_id: string }>(
+          "SELECT session_id FROM session_state ORDER BY updated_at DESC LIMIT 1",
+        );
+        sessionID = rows[0]?.session_id ?? "";
+        expect(sessionID).not.toBe("");
+      }
+      // NB: intentionally NO ltm.update / ltm.remove anywhere — the DB is frozen.
+    }
+
+    // The core guarantee: no genuine knowledge mutation → ZERO durable-delta
+    // rows, regardless of how the relevance selection churned across turns.
+    const deltaRows = harness.queryDB<{ seq: number; content: string }>(
+      "SELECT seq, content FROM session_prompt_deltas WHERE session_id = ? ORDER BY seq",
+      [sessionID],
+    );
+    expect(
+      deltaRows.length,
+      `expected ZERO delta rows on pure ranking churn (no DB change), got ` +
+        `${deltaRows.length} — the selection-based trigger rewrote a delta on ` +
+        `mere re-ranking, which is the cause=incremental bust`,
+    ).toBe(0);
+
+    // And the cached system prefix must be byte-identical once established
+    // (turn 2+), proving the churn never rewrote system[2] either.
+    const bodies = harness.upstreamBodies();
+    const steady = systemBlocks(bodies[1]);
+    for (let i = 2; i < bodies.length; i++) {
+      expect(systemBlocks(bodies[i])).toEqual(steady);
+    }
+  });
+
   it("coalesces MULTIPLE successive knowledge changes into ONE position-stable delta row", async () => {
     // Regression for the durable-delta accumulation that busts the cache every
     // turn: pre-fix, EACH material knowledge-set change appended a NEW
