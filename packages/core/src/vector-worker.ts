@@ -49,6 +49,10 @@ try {
     type: "init-error",
     error: err instanceof Error ? err.message : String(err),
   });
+  // A failed reader open is persistent — don't linger as an idle thread waiting
+  // for searches we can't serve. Exit so the pool reclaims us (its exit handler
+  // is idempotent with the init-error above). Deferred so the message flushes.
+  setTimeout(() => process.exit(1), 0);
 }
 
 let shutdownRequested = false;

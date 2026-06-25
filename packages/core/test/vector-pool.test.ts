@@ -181,6 +181,51 @@ describe("vector-pool health", () => {
   });
 });
 
+describe("vector-pool structural-failure latch (review #989)", () => {
+  it("latches broken after repeated worker deaths (no respawn storm)", async () => {
+    // Every dispatched worker dies — a stand-in for a broken bundle / a worker
+    // that crashes on load (which surfaces asynchronously as exit).
+    _setTestVectorWorkerFactory(factoryReturning((w) => w.die()));
+    for (let i = 0; i < 12; i++) {
+      expect(await tryPoolVectorSearch(KNOWLEDGE, QUERY)).toBeNull();
+    }
+    const spawnedAtLatch = FakeWorker.instances.length;
+    // Latched: further calls neither spawn a worker nor throw.
+    expect(await tryPoolVectorSearch(KNOWLEDGE, QUERY)).toBeNull();
+    expect(FakeWorker.instances.length).toBe(spawnedAtLatch);
+  });
+
+  it("terminates a dead worker instead of leaking its thread", async () => {
+    _setTestVectorWorkerFactory(
+      factoryReturning((w, msg) => w.reply(msg.id, [])),
+    );
+    await tryPoolVectorSearch(KNOWLEDGE, QUERY);
+    const victim = FakeWorker.instances[0];
+    victim.die();
+    expect(victim.terminated).toBe(false);
+    // The next search runs ensurePool, which must terminate the dead worker.
+    await tryPoolVectorSearch(KNOWLEDGE, QUERY);
+    expect(victim.terminated).toBe(true);
+  });
+
+  it("clears the timer when postMessage throws (no leaked timer)", async () => {
+    // A throw in the Promise executor rejects regardless, so asserting null is
+    // vacuous — the actual S2 bug is the 5 s ref'd timer left armed. Assert it
+    // was cleared (pre-fix: 1 leaked timer; post-fix: 0).
+    vi.useFakeTimers();
+    _setTestVectorWorkerFactory((() => {
+      const w = new FakeWorker(() => {});
+      // Simulate the worker dying between leastBusy() and postMessage().
+      w.postMessage = (() => {
+        throw new Error("dead pipe");
+      }) as never;
+      return w;
+    }) as never);
+    expect(await tryPoolVectorSearch(KNOWLEDGE, QUERY)).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
 describe("embedding.vectorSearch routes through the pool", () => {
   it("returns the pool's hits, not the in-process scan", async () => {
     _setTestVectorWorkerFactory(

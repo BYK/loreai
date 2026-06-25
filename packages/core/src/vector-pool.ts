@@ -44,6 +44,13 @@ const VECTOR_SEARCH_TIMEOUT_MS = 5_000;
  *  unblock the main loop, not to parallelize an infrequent, sub-ms scan. */
 const DEFAULT_POOL_SIZE = 2;
 
+/** Consecutive structural failures (worker death / load failure / reader-open
+ *  failure) — with no healthy reply in between — that latch the pool broken.
+ *  A persistently unresolvable worker (missing bundle, bad DB path) would
+ *  otherwise respawn on every call; latching makes it fall back to the
+ *  in-process path for the rest of the process. */
+const MAX_STRUCTURAL_FAILURES = 6;
+
 type Hits = VectorHit[] | DistillationVectorHit[];
 
 interface Pending {
@@ -62,6 +69,11 @@ let workers: PoolWorker[] = [];
 let nextRequestId = 0;
 /** Latched true after spawning fails — stops per-call retry storms. */
 let poolBroken = false;
+/** Consecutive structural failures since the last healthy reply. */
+let structuralFailures = 0;
+/** True while shutting the pool down, so terminate()-induced exits aren't
+ *  counted as structural failures. */
+let shuttingDown = false;
 
 /** Test seam: when set, the pool builds workers with this factory instead of
  *  spawning a real `node:worker_threads` Worker. Never set in production. */
@@ -152,6 +164,42 @@ function failAll(pw: PoolWorker, err: Error): void {
   pw.inflight.clear();
 }
 
+/**
+ * Count a structural failure (worker death / load failure / reader-open
+ * failure). After MAX_STRUCTURAL_FAILURES in a row with no healthy reply, latch
+ * the pool broken and terminate any survivors so callers fall back to the
+ * in-process path for the rest of the process instead of respawn-storming.
+ */
+function recordStructuralFailure(): void {
+  if (shuttingDown || poolBroken) return;
+  structuralFailures++;
+  if (structuralFailures < MAX_STRUCTURAL_FAILURES) return;
+  poolBroken = true;
+  log.info(
+    "vector worker pool disabled (repeated worker failures) — using in-process vector search",
+  );
+  for (const w of workers) {
+    try {
+      void w.worker.terminate();
+    } catch {
+      // best-effort
+    }
+  }
+  workers = [];
+}
+
+/**
+ * Mark a worker dead exactly once: reject its in-flight work and count it
+ * toward the structural-failure latch. Idempotent — a worker that posts an
+ * init-error and then exits is counted a single time.
+ */
+function markDead(pw: PoolWorker, err: Error): void {
+  if (pw.dead) return;
+  pw.dead = true;
+  failAll(pw, err);
+  recordStructuralFailure();
+}
+
 function makeWorker(): PoolWorker | null {
   try {
     const worker = spawnWorker({ dbPath: dbPath() });
@@ -162,6 +210,8 @@ function makeWorker(): PoolWorker | null {
     worker.on("message", (msg: VectorWorkerOutbound) => {
       switch (msg.type) {
         case "result": {
+          // A healthy reply clears the structural-failure streak.
+          structuralFailures = 0;
           const pending = pw.inflight.get(msg.id);
           if (pending) {
             pw.inflight.delete(msg.id);
@@ -171,6 +221,8 @@ function makeWorker(): PoolWorker | null {
           break;
         }
         case "error": {
+          // Per-request failure (NOT a worker death) — reject just this
+          // request; the worker keeps serving. Caller falls back in-process.
           const pending = pw.inflight.get(msg.id);
           if (pending) {
             pw.inflight.delete(msg.id);
@@ -180,9 +232,8 @@ function makeWorker(): PoolWorker | null {
           break;
         }
         case "init-error": {
-          // Reader connection failed to open — this worker is useless.
-          pw.dead = true;
-          failAll(pw, new Error(`vector worker init failed: ${msg.error}`));
+          // Reader connection failed to open — the worker is structurally dead.
+          markDead(pw, new Error(`vector worker init failed: ${msg.error}`));
           break;
         }
         // "ready" is informational; nothing to do.
@@ -190,13 +241,11 @@ function makeWorker(): PoolWorker | null {
     });
 
     worker.on("error", (err: Error) => {
-      pw.dead = true;
-      failAll(pw, err instanceof Error ? err : new Error(String(err)));
+      markDead(pw, err instanceof Error ? err : new Error(String(err)));
     });
 
     worker.on("exit", () => {
-      pw.dead = true;
-      failAll(pw, new Error("vector worker exited"));
+      markDead(pw, new Error("vector worker exited"));
     });
 
     return pw;
@@ -215,7 +264,17 @@ function makeWorker(): PoolWorker | null {
 /** Ensure the pool is populated with live workers; replace dead slots. Returns
  *  the live workers (possibly empty if spawning failed). */
 function ensurePool(): PoolWorker[] {
-  // Drop dead workers.
+  // Terminate and drop dead workers. A worker that hit init-error keeps its
+  // message loop alive, so we must terminate it explicitly or it leaks a thread.
+  for (const w of workers) {
+    if (w.dead) {
+      try {
+        void w.worker.terminate();
+      } catch {
+        // best-effort
+      }
+    }
+  }
   workers = workers.filter((w) => !w.dead);
   const target = desiredPoolSize();
   while (workers.length < target) {
@@ -258,8 +317,21 @@ export async function tryPoolVectorSearch(
         reject(new Error("vector worker search timed out"));
       }, VECTOR_SEARCH_TIMEOUT_MS);
       pw.inflight.set(id, { resolve, reject, timer });
-      const msg: VectorWorkerInbound = { type: "search", id, spec, embedding };
-      pw.worker.postMessage(msg);
+      try {
+        const msg: VectorWorkerInbound = {
+          type: "search",
+          id,
+          spec,
+          embedding,
+        };
+        pw.worker.postMessage(msg);
+      } catch (err) {
+        // The worker died in the window after leastBusy() picked it. Clean up
+        // the timer + inflight entry (don't leak them) and fall back.
+        clearTimeout(timer);
+        pw.inflight.delete(id);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
     });
   } catch (err) {
     log.info(
@@ -270,8 +342,11 @@ export async function tryPoolVectorSearch(
   }
 }
 
-/** Tear down the pool (test teardown + process reset). Idempotent. */
+/** Tear down the pool (test teardown + process reset). Idempotent. The
+ *  shuttingDown guard keeps the terminate()-induced worker exits below from
+ *  being counted as structural failures. */
 export function shutdownVectorPool(): void {
+  shuttingDown = true;
   for (const pw of workers) {
     failAll(pw, new Error("vector pool shutting down"));
     try {
@@ -288,9 +363,11 @@ export function shutdownVectorPool(): void {
   workers = [];
 }
 
-/** For tests: reset all pool state (workers, broken latch, request ids). */
+/** For tests: reset all pool state (workers, latches, counters, request ids). */
 export function _resetVectorPoolForTest(): void {
   shutdownVectorPool();
   poolBroken = false;
   nextRequestId = 0;
+  structuralFailures = 0;
+  shuttingDown = false;
 }
