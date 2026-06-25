@@ -45,6 +45,10 @@ setMaxListeners(15);
 import * as Sentry from "@sentry/bun";
 import { log } from "@loreai/core";
 import { VERSION } from "./src/cli/version";
+import {
+  eventHasTransientError,
+  isTransientErrorMessage,
+} from "./src/transient-errors";
 
 /**
  * Build-time debug ID for sourcemap resolution, injected by esbuild.
@@ -115,32 +119,6 @@ const sentryEnabled = isTestRunner
     : false;
 
 if (sentryEnabled && !Sentry.isInitialized()) {
-  // Transient network errors that are expected in a long-running LLM proxy.
-  // These are not actionable bugs — they occur when clients disconnect,
-  // upstreams are temporarily unavailable, or network conditions degrade.
-  const TRANSIENT_ERROR_PATTERNS = [
-    /\bEPIPE\b/,
-    /socket connection was closed unexpectedly/i,
-    /ZlibError/,
-    /The operation timed out/i,
-    /Worker upstream exhausted \d+ retries/,
-    /Worker upstream auth error/,
-    /embedding worker/i,
-    /WASM fatal error/,
-    /LocalProviderUnavailableError/,
-    /ECONNRESET\b/,
-    /ECONNREFUSED\b/,
-    // Remote embedding fallback with invalid/placeholder API key (OpenAI SDK format)
-    /Incorrect API key provided/i,
-    // ONNX runtime init failures on various platforms
-    /Cannot find package 'onnxruntime-node'/,
-    /LoadLibrary failed/,
-    /Protobuf parsing failed/,
-    // Bun doesn't implement getSystemErrorMap from node:util —
-    // this crashes the Sentry SDK itself during error processing
-    /getSystemErrorMap/,
-  ];
-
   Sentry.init({
     dsn: "https://0282201d6a3df3bc46423e61012ae62b@o275100.ingest.us.sentry.io/4511355222622208",
 
@@ -170,16 +148,7 @@ if (sentryEnabled && !Sentry.isInitialized()) {
     // Each exception in the chain is tested independently so a real bug
     // wrapping a transient cause isn't accidentally silenced.
     beforeSend(event) {
-      const values = event.exception?.values;
-      if (
-        values?.some((v) => {
-          const msg = `${v.type}: ${v.value}`;
-          return TRANSIENT_ERROR_PATTERNS.some((re) => re.test(msg));
-        })
-      ) {
-        return null;
-      }
-      return event;
+      return eventHasTransientError(event) ? null : event;
     },
   });
 
@@ -191,7 +160,7 @@ if (sentryEnabled && !Sentry.isInitialized()) {
     info: (message, attrs) => Sentry.logger.info(message, attrs),
     warn: (message, attrs) => Sentry.logger.warn(message, attrs),
     error: (message, attrs) => {
-      if (!TRANSIENT_ERROR_PATTERNS.some((re) => re.test(message))) {
+      if (!isTransientErrorMessage(message)) {
         Sentry.logger.error(message, attrs);
       }
     },
