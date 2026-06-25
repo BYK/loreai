@@ -170,6 +170,21 @@ export const MIN_INPUT_TOKENS_FOR_WARMING = 50_000;
  *  ensures at least 30% return probability before the first warmup. */
 export const MIN_RETURN_PROBABILITY_FLOOR = 0.3;
 
+/** Size-proportional warmup-margin scaling (5m TTL only). The headroom a prefix
+ *  needs to clear its largest block's per-block TTL boundary is ABSOLUTE (a
+ *  function of prefix size), not a fraction of the TTL — so the 45s base gets a
+ *  per-token term. ~0.27ms/token puts a 164K prefix at ~44s of added headroom
+ *  (→ ~89s total margin), matching observed warmup round-trip + boundary jitter
+ *  for large multi-block prefixes. See computeWarmupMargin. */
+export const MARGIN_PER_TOKEN_MS = 0.27;
+
+/** Absolute cap on the size-driven margin term. Bounds the margin with a fixed
+ *  tail instead of a fraction of the TTL: a fraction would balloon the 1h margin
+ *  to 24min (warm with 36min of life left = thrash), and even on 5m would warm
+ *  too early. With this cap the 5m margin tops out at 45s + 90s = 135s (the cap
+ *  bites only past ~333K-token prefixes). */
+export const MAX_SIZE_MARGIN_MS = 90_000;
+
 // ---------------------------------------------------------------------------
 // Per-bucket circuit breaker
 // ---------------------------------------------------------------------------
@@ -925,12 +940,50 @@ function ensureCacheBreakpoint(body: {
 }
 
 /**
+ * How early before TTL expiry to fire the warmup, scaled by prefix size.
+ *
+ * The 5m base of 45s is too tight for LARGE multi-block prefixes: a big
+ * conversation block sitting against the 5-minute wall can cross its per-block
+ * TTL boundary inside the headroom window, so the warmup lands as a partial
+ * (head block refreshed, large block rewritten). The headroom needed to clear
+ * that boundary is ABSOLUTE (a function of prefix size), not a fraction of the
+ * TTL, so we add a size-proportional term capped by an absolute tail
+ * (MAX_SIZE_MARGIN_MS).
+ *
+ * The 1h base of 300s already dwarfs the headroom any realistic prefix needs,
+ * so 1h stays flat — only the 5m path scales. `prefixTokens` is the session's
+ * last input-token count (state.lastInputTokens); 0 (the default for callers
+ * without a session, e.g. unit tests) reproduces the original flat base.
+ */
+export function computeWarmupMargin(ttlMs: number, prefixTokens = 0): number {
+  const base = ttlMs === 3_600_000 ? 300_000 : 45_000;
+  // 1h base already covers any prefix's boundary headroom — keep it flat.
+  if (ttlMs === 3_600_000) return base;
+  // Guard non-finite/negative prefixTokens: a NaN would propagate through the
+  // arithmetic to a NaN margin, which silently bypasses BOTH the cooldown and
+  // window gates (`x < ttlMs - NaN` is false) → warm on every idle tick.
+  const safeTokens = Number.isFinite(prefixTokens)
+    ? Math.max(0, prefixTokens)
+    : 0;
+  const sizeTerm = Math.min(
+    safeTokens * MARGIN_PER_TOKEN_MS,
+    MAX_SIZE_MARGIN_MS,
+  );
+  return base + sizeTerm;
+}
+
+/**
  * Build an Anthropic warming profile for a given model and TTL.
+ *
+ * `prefixTokens` (the session's last input-token count) scales the 5m warmup
+ * margin so large prefixes fire earlier; see computeWarmupMargin. Defaults to 0
+ * (flat base) for callers without a live session.
  */
 export function buildAnthropicProfile(
   model: string,
   ttl: "5m" | "1h",
   upstreamBase?: string,
+  prefixTokens = 0,
 ): CacheWarmingProfile {
   const route = resolveUpstreamRoute(model);
   // || (not ??): an empty-string upstreamBase (header-less Anthropic sessions)
@@ -946,9 +999,11 @@ export function buildAnthropicProfile(
   const cacheWriteCost = ttl === "1h" ? baseCacheWrite * 2 : baseCacheWrite;
 
   const ttlMs = ttl === "1h" ? 3_600_000 : 300_000;
-  // For 5m TTL: warm in the last 45s (4:15–5:00)
-  // For 1h TTL: warm in the last 5m (55:00–60:00)
-  const warmupMarginMs = ttl === "1h" ? 300_000 : 45_000;
+  // Size-aware margin: the 5m base (45s) is too tight for large multi-block
+  // prefixes, which can cross a per-block TTL boundary inside the headroom
+  // window and land the warmup as a partial. 1h stays flat at 300s. See
+  // computeWarmupMargin.
+  const warmupMarginMs = computeWarmupMargin(ttlMs, prefixTokens);
 
   return {
     ttlMs,
@@ -973,9 +1028,13 @@ export function buildVertexProfile(
   model: string,
   ttl: "5m" | "1h",
   upstreamBase: string,
+  prefixTokens = 0,
 ): CacheWarmingProfile {
   const region = vertexRegionFromUrl(upstreamBase) ?? "global";
-  const base = buildAnthropicProfile(model, ttl);
+  // Vertex Claude uses Anthropic prompt caching, so it is exposed to the same
+  // large-prefix TTL-race partial — thread prefixTokens so the 5m margin scales
+  // (computeWarmupMargin), matching the first-party/proxied/bedrock paths.
+  const base = buildAnthropicProfile(model, ttl, undefined, prefixTokens);
   return {
     ...base,
     upstreamUrl: `https://${vertexHost(region)}`,
@@ -1025,6 +1084,7 @@ export function resolveProfile(
   ttl: "5m" | "1h" | undefined,
   upstreamBase?: string,
   providerID?: string,
+  prefixTokens = 0,
 ): CacheWarmingProfile | null {
   if (!model || !protocol) return null;
 
@@ -1036,7 +1096,7 @@ export function resolveProfile(
     const vRoute = resolveUpstreamRoute(model);
     const vHost = upstreamBase || vRoute?.url;
     if (!vHost || !isVertexHost(vHost)) return null;
-    return buildVertexProfile(model, ttl ?? "5m", vHost);
+    return buildVertexProfile(model, ttl ?? "5m", vHost, prefixTokens);
   }
 
   // Only Anthropic protocol for now — OpenAI has automatic prefix caching with
@@ -1075,7 +1135,12 @@ export function resolveProfile(
     providerID === "amazon-bedrock" ||
     (!!warmupHost && isBedrockMantleHost(warmupHost));
   if (isBedrockMantle) {
-    return buildAnthropicProfile(model, ttl ?? "5m", upstreamBase);
+    return buildAnthropicProfile(
+      model,
+      ttl ?? "5m",
+      upstreamBase,
+      prefixTokens,
+    );
   }
 
   const isAnthropic =
@@ -1083,7 +1148,34 @@ export function resolveProfile(
     (!!warmupHost && isAnthropicFirstPartyHost(warmupHost));
   if (!isAnthropic) return null;
 
-  return buildAnthropicProfile(model, ttl ?? "5m", upstreamBase);
+  return buildAnthropicProfile(model, ttl ?? "5m", upstreamBase, prefixTokens);
+}
+
+/**
+ * Resolve a warming profile from a live session's state. Single seam shared by
+ * the live warming loop (idle.ts) and the dashboard snapshot so the upstream
+ * routing AND the size-aware warmup margin (state.lastInputTokens →
+ * computeWarmupMargin) can never diverge between "what we report" and "what we
+ * actually warm". Keep both call sites routed through here.
+ */
+export function resolveProfileForSession(
+  state: SessionState,
+): CacheWarmingProfile | null {
+  return resolveProfile(
+    state.lastUpstream?.model,
+    state.lastUpstream?.protocol,
+    state.resolvedConversationTTL,
+    // Pass the session's real upstream URL + providerID so the warmer warms
+    // only true-Anthropic sessions (first-party host OR providerID "anthropic",
+    // incl. proxied Anthropic) and never sends a compat provider's key to
+    // api.anthropic.com (MiniMax 401 loop).
+    state.lastUpstream?.url,
+    state.lastUpstream?.providerID,
+    // Size-aware warmup margin: large prefixes fire earlier so a big
+    // conversation block doesn't cross its per-block TTL boundary before the
+    // warmup lands (computeWarmupMargin).
+    state.lastInputTokens ?? 0,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1572,16 +1664,8 @@ export function computeWarmingSnapshot(
   // Survival & return probability
   const survivalAtIdle = survivalFunction(blendedHist, idleMs);
 
-  const profile = resolveProfile(
-    state.lastUpstream?.model,
-    state.lastUpstream?.protocol,
-    state.resolvedConversationTTL,
-    state.lastUpstream?.url,
-    // Match the live warming path (idle.ts) so the dashboard snapshot doesn't
-    // under-report a profile for proxied-Anthropic sessions (providerID
-    // "anthropic" + non-first-party host).
-    state.lastUpstream?.providerID,
-  );
+  // Shared seam with the live warming path (idle.ts) — see resolveProfileForSession.
+  const profile = resolveProfileForSession(state);
   const ttlMs = profile?.ttlMs ?? 300_000;
   const warmupMarginMs = profile?.warmupMarginMs ?? 45_000;
 

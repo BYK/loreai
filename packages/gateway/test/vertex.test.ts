@@ -273,6 +273,39 @@ describe("resolveProfile — vertex warming", () => {
     expect("model" in warmup).toBe(false);
     expect(warmup.anthropic_version).toBe("vertex-2023-10-16");
   });
+
+  test("threads prefixTokens through to a size-scaled 5m margin", () => {
+    // Vertex Claude uses Anthropic prompt caching, so it is exposed to the same
+    // large-prefix TTL-race partial as the first-party path — the size-aware
+    // margin must apply here too (computeWarmupMargin).
+    const flat = resolveProfile(
+      "claude-opus-4-8",
+      "vertex",
+      "5m",
+      vertexBase,
+      "google-vertex",
+    );
+    const scaled = resolveProfile(
+      "claude-opus-4-8",
+      "vertex",
+      "5m",
+      vertexBase,
+      "google-vertex",
+      164_807,
+    );
+    expect(flat?.warmupMarginMs).toBe(45_000);
+    expect(scaled?.warmupMarginMs).toBeCloseTo(89_497.89, 2);
+    // 1h vertex stays flat regardless of prefix size.
+    const oneHour = resolveProfile(
+      "claude-opus-4-8",
+      "vertex",
+      "1h",
+      vertexBase,
+      "google-vertex",
+      1_000_000,
+    );
+    expect(oneHour?.warmupMarginMs).toBe(300_000);
+  });
 });
 
 describe("vertex-auth — ADC token seam", () => {

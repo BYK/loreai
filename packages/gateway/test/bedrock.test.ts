@@ -193,4 +193,26 @@ describe("resolveProfile — bedrock-mantle warming", () => {
       resolveProfile("gpt-5.5", "openai", "5m", undefined, "openai"),
     ).toBeNull();
   });
+
+  test("threads prefixTokens through to a size-scaled 5m margin", () => {
+    // Bedrock-mantle rides the Anthropic profile, so it must scale the 5m margin
+    // for large prefixes like the first-party/vertex paths (computeWarmupMargin).
+    const flat = resolveProfile(
+      "claude-haiku-4-5",
+      "anthropic",
+      "5m",
+      mantleBase,
+      "bedrock",
+    );
+    const scaled = resolveProfile(
+      "claude-haiku-4-5",
+      "anthropic",
+      "5m",
+      mantleBase,
+      "bedrock",
+      164_807,
+    );
+    expect(flat?.warmupMarginMs).toBe(45_000);
+    expect(scaled?.warmupMarginMs).toBeCloseTo(89_497.89, 2);
+  });
 });

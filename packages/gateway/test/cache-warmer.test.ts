@@ -7,7 +7,11 @@ import {
   blendHistograms,
   prepareAnthropicWarmupBody,
   buildAnthropicProfile,
+  computeWarmupMargin,
+  MARGIN_PER_TOKEN_MS,
+  MAX_SIZE_MARGIN_MS,
   resolveProfile,
+  resolveProfileForSession,
   shouldWarm,
   checkCircuitBreaker,
   isCircuitBreakerTripped,
@@ -1457,6 +1461,50 @@ describe("shouldWarm", () => {
     expect(shouldWarm(stateRecent, profile, hist, now)).toBe(false);
   });
 
+  test("size-scaled margin warms EARLIER in the live gate than a flat margin would", () => {
+    // End-to-end proof that the size-scaled margin is load-bearing in the
+    // actual warm/no-warm decision (not just in computeWarmupMargin): with the
+    // SAME session state, a large-prefix profile (capped 135s margin → window
+    // threshold = 300s − 135s = 165s) warms, while a flat-45s profile (threshold
+    // 255s) does NOT — the ONLY difference is the margin. intoWindow is 200s.
+    const now = Date.now();
+    const baseState = () =>
+      makeSessionState({
+        lastRequestTime: now - 200_000, // intoWindow = 200_000 % 300_000 = 200s
+        warmup: {
+          lastWarmupAt: now - 260_000, // 260s ago — past BOTH cooldowns (165s & 255s)
+          warmupCount: 1,
+          totalWarmups: 1,
+          warmupHits: 1, // ROI gate: hit rate >= 20%
+          disabled: false,
+        },
+        cacheAnalytics: {
+          ...makeCacheAnalytics(),
+          lastRequestBody: compressBody(
+            '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+          ),
+        },
+      });
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
+
+    // Large prefix → margin caps at 45s + 90s = 135s → threshold 165s.
+    const scaled = buildAnthropicProfile(
+      "claude-sonnet-4-20250514",
+      "5m",
+      undefined,
+      400_000,
+    );
+    expect(scaled.warmupMarginMs).toBe(135_000);
+    // 200s >= 165s → in margin → warms.
+    expect(shouldWarm(baseState(), scaled, hist, now)).toBe(true);
+
+    // Flat margin 45s → threshold 255s. 200s < 255s → NOT in margin → no warm.
+    const flat = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    expect(flat.warmupMarginMs).toBe(45_000);
+    expect(shouldWarm(baseState(), flat, hist, now)).toBe(false);
+  });
+
   test("forceKeepWarm still respects circuit breaker", () => {
     const now = Date.now();
     const state = makeSessionState({
@@ -1595,6 +1643,152 @@ describe("resolveProfile — Anthropic first-party host gate (cross-provider 401
       resolveProfile("gpt-5", "openai", "5m", "https://api.openai.com"),
     ).toBeNull();
   });
+
+  test("threads prefixTokens through to a size-scaled 5m margin", () => {
+    // resolveProfile is the function both the live warming path (idle.ts) and
+    // the dashboard snapshot call — it must forward prefixTokens to
+    // buildAnthropicProfile so large prefixes fire earlier.
+    const flat = resolveProfile(
+      "claude-sonnet-4-20250514",
+      "anthropic",
+      "5m",
+      "https://api.anthropic.com",
+      "anthropic",
+    );
+    const scaled = resolveProfile(
+      "claude-sonnet-4-20250514",
+      "anthropic",
+      "5m",
+      "https://api.anthropic.com",
+      "anthropic",
+      164_807,
+    );
+    expect(flat?.warmupMarginMs).toBe(45_000);
+    expect(scaled?.warmupMarginMs).toBeCloseTo(89_497.89, 2);
+  });
+});
+
+describe("resolveProfileForSession — shared idle/snapshot seam", () => {
+  // resolveProfileForSession is the SINGLE seam both the live warming loop
+  // (idle.ts — the path that actually pays for warmups) and the dashboard
+  // snapshot route through. This test guards state.lastInputTokens →
+  // computeWarmupMargin for BOTH consumers at once: mutating the one
+  // `state.lastInputTokens ?? 0` inside the seam makes the scaled case fail.
+  test("threads state.lastInputTokens through to a size-scaled 5m margin", () => {
+    const flat = resolveProfileForSession(
+      makeSessionState({ lastInputTokens: 0 }),
+    );
+    const scaled = resolveProfileForSession(
+      makeSessionState({ lastInputTokens: 164_807 }),
+    );
+    expect(flat?.warmupMarginMs).toBe(45_000);
+    expect(scaled?.warmupMarginMs).toBeCloseTo(89_497.89, 2);
+    expect(scaled?.warmupMarginMs).toBeGreaterThan(flat?.warmupMarginMs ?? 0);
+  });
+
+  test("returns null for a non-warmable session (preserves routing gate)", () => {
+    // A foreign anthropic-compat host must still be skipped — the seam must not
+    // weaken the routing gate while adding the margin term.
+    const profile = resolveProfileForSession(
+      makeSessionState({
+        lastInputTokens: 200_000,
+        lastUpstream: {
+          url: "https://api.minimax.io/anthropic",
+          protocol: "anthropic" as const,
+          model: "MiniMax-M3",
+          headers: {},
+          providerID: "minimax-coding-plan",
+        },
+      }),
+    );
+    expect(profile).toBeNull();
+  });
+});
+
+describe("computeWarmupMargin — size-scaled 5m warmup margin", () => {
+  test("5m base: no prefix (default) reproduces the original flat 45s base", () => {
+    // Back-compat: callers without a live session pass nothing → flat base.
+    expect(computeWarmupMargin(300_000)).toBe(45_000);
+    expect(computeWarmupMargin(300_000, 0)).toBe(45_000);
+  });
+
+  test("1h stays flat at 300s regardless of prefix size", () => {
+    expect(computeWarmupMargin(3_600_000)).toBe(300_000);
+    expect(computeWarmupMargin(3_600_000, 0)).toBe(300_000);
+    // Even a huge prefix must not move the 1h margin (would warm 24min early).
+    expect(computeWarmupMargin(3_600_000, 1_000_000)).toBe(300_000);
+  });
+
+  test("5m scales linearly with prefix size below the cap (pins the constant)", () => {
+    // Literal expectation pins MARGIN_PER_TOKEN_MS (0.27) and the 45s base:
+    // 100_000 × 0.27 = 27_000 added → 72_000 total.
+    expect(computeWarmupMargin(300_000, 100_000)).toBeCloseTo(72_000, 3);
+    // Same value expressed via the constants (readability / intent).
+    expect(computeWarmupMargin(300_000, 100_000)).toBeCloseTo(
+      45_000 + 100_000 * MARGIN_PER_TOKEN_MS,
+      6,
+    );
+  });
+
+  test("5m: the 164K production-incident prefix gets ~44s of extra headroom", () => {
+    // Session 1F4OWImUH0Nhn4x3: 164_807-token prefix landed a 27% partial with
+    // the flat 45s margin. Size term = 164_807 × 0.27 ≈ 44_498ms → ~89.5s total.
+    expect(computeWarmupMargin(300_000, 164_807)).toBeCloseTo(89_497.89, 2);
+  });
+
+  test("5m: size term is capped at MAX_SIZE_MARGIN_MS (absolute tail, not a TTL fraction)", () => {
+    // Cap bites past ~333K tokens (333_333 × 0.27 ≈ 90_000). A 1M-token prefix
+    // is clamped: 45_000 + min(270_000, 90_000) = 135_000.
+    expect(computeWarmupMargin(300_000, 1_000_000)).toBe(45_000 + 90_000);
+    expect(computeWarmupMargin(300_000, 1_000_000)).toBe(
+      45_000 + MAX_SIZE_MARGIN_MS,
+    );
+    // Cap is monotone-flat above the knee: 2M tokens gives the same value.
+    expect(computeWarmupMargin(300_000, 2_000_000)).toBe(135_000);
+  });
+
+  test("5m: margin is monotonically non-decreasing in prefix size", () => {
+    const sizes = [0, 50_000, 100_000, 164_807, 333_333, 500_000, 1_000_000];
+    for (let i = 1; i < sizes.length; i++) {
+      expect(computeWarmupMargin(300_000, sizes[i])).toBeGreaterThanOrEqual(
+        computeWarmupMargin(300_000, sizes[i - 1]),
+      );
+    }
+  });
+
+  test("5m: margin never reaches the TTL (cooldown ttlMs - margin stays positive)", () => {
+    // Hard invariant: cooldownMs = max(ttlMs - warmupMarginMs, 0) must stay > 0,
+    // otherwise warming would fire continuously. Max 5m margin = 135_000 < 300_000.
+    for (const tokens of [0, 164_807, 333_333, 1_000_000, 10_000_000]) {
+      expect(computeWarmupMargin(300_000, tokens)).toBeLessThan(300_000);
+    }
+  });
+
+  test("negative / non-finite prefixTokens is clamped to the flat base", () => {
+    expect(computeWarmupMargin(300_000, -100)).toBe(45_000);
+    expect(computeWarmupMargin(300_000, -1_000_000)).toBe(45_000);
+    // NaN/Infinity must NOT propagate to the margin: a NaN margin makes both
+    // `cooldownMs = max(ttlMs - NaN, 0)` and every `x < ttlMs - NaN` window gate
+    // misbehave (the comparison is false) → warming would fire every idle tick.
+    expect(computeWarmupMargin(300_000, Number.NaN)).toBe(45_000);
+    expect(computeWarmupMargin(300_000, Number.POSITIVE_INFINITY)).toBe(45_000);
+  });
+
+  test("INVARIANT: max 5m margin stays below ttlMs/2 (no two warmups per window)", () => {
+    // A warmup fires when intoWindow >= ttlMs - margin, with cooldown
+    // ttlMs - margin. Two warmups can land in one 5m window only if
+    // margin >= ttlMs - margin ⟺ margin >= ttlMs/2 = 150_000. The size cap must
+    // keep the worst-case margin strictly under that, or a larger cap would
+    // silently reintroduce the double-warm cost regression this PR fixes.
+    const maxMargin = 45_000 + MAX_SIZE_MARGIN_MS;
+    expect(maxMargin).toBeLessThan(300_000 / 2);
+    // And computeWarmupMargin can never exceed that worst case, for any input.
+    for (const tokens of [0, 333_333, 1_000_000, Number.MAX_SAFE_INTEGER]) {
+      expect(computeWarmupMargin(300_000, tokens)).toBeLessThanOrEqual(
+        maxMargin,
+      );
+    }
+  });
 });
 
 describe("buildAnthropicProfile", () => {
@@ -1608,9 +1802,32 @@ describe("buildAnthropicProfile", () => {
     );
   });
 
+  test("5m TTL: prefixTokens threads through to a size-scaled margin", () => {
+    const flat = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const scaled = buildAnthropicProfile(
+      "claude-sonnet-4-20250514",
+      "5m",
+      undefined,
+      164_807,
+    );
+    expect(flat.warmupMarginMs).toBe(45_000);
+    expect(scaled.warmupMarginMs).toBeCloseTo(89_497.89, 2);
+    expect(scaled.warmupMarginMs).toBeGreaterThan(flat.warmupMarginMs);
+  });
+
   test("1h TTL has correct parameters", () => {
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "1h");
     expect(profile.ttlMs).toBe(3_600_000);
+    expect(profile.warmupMarginMs).toBe(300_000);
+  });
+
+  test("1h TTL: prefixTokens does NOT scale the margin (stays flat 300s)", () => {
+    const profile = buildAnthropicProfile(
+      "claude-sonnet-4-20250514",
+      "1h",
+      undefined,
+      1_000_000,
+    );
     expect(profile.warmupMarginMs).toBe(300_000);
   });
 
@@ -2672,6 +2889,46 @@ describe("shouldWarm tool-call warming", () => {
     const snap = computeWarmingSnapshot(state, now);
     expect(snap.shouldWarmNow).toBe(false);
     expect(snap.notWarmingReason).toContain("Distilled prefix churning");
+    setPrefixChurnForTest(sid, 0); // cleanup
+  });
+
+  test("WIRING: a large prefix opens the warmup window earlier (state.lastInputTokens → snapshot margin)", () => {
+    // End-to-end wiring proof: computeWarmingSnapshot builds the profile
+    // internally from state.lastInputTokens, so a large prefix scales the 5m
+    // margin and opens the window earlier. At idleMs=200s the SAME session
+    // warms with a 300K prefix (margin 126s → window opens at 174s) but is
+    // "still too early" with a 60K prefix (margin 61.2s → window opens at
+    // 238.8s). A mutation passing 0 (flat 45s margin → window at 255s) would
+    // make the 300K case fail. Tool-call path is used because it bypasses the
+    // survival/return-probability model, isolating the window decision.
+    const sid = "margin-wiring-session";
+    setPrefixChurnForTest(sid, 0); // defensive: no churn suppression
+    const now = Date.now();
+    const warmup = {
+      lastWarmupAt: now - 270_000,
+      warmupCount: 1,
+      totalWarmups: 10,
+      warmupHits: 10, // clears ROI + evidence gates
+      disabled: false,
+    };
+    // idleMs = 200s, between the two window-open thresholds.
+    const big = makeToolCallState({
+      sessionID: sid,
+      lastRequestTime: now - 200_000,
+      lastInputTokens: 300_000,
+      warmup,
+    });
+    expect(computeWarmingSnapshot(big, now).shouldWarmNow).toBe(true);
+
+    const small = makeToolCallState({
+      sessionID: sid,
+      lastRequestTime: now - 200_000,
+      lastInputTokens: 60_000, // still ≥ MIN_INPUT_TOKENS_FOR_WARMING
+      warmup,
+    });
+    const snap = computeWarmingSnapshot(small, now);
+    expect(snap.shouldWarmNow).toBe(false);
+    expect(snap.notWarmingReason).toContain("not in warmup window");
     setPrefixChurnForTest(sid, 0); // cleanup
   });
 

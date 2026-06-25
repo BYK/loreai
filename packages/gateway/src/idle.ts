@@ -57,7 +57,7 @@ import {
   warmupBucketKey,
   isWarmupAuthDisabled,
   clearWarmupAuthDisabled,
-  resolveProfile,
+  resolveProfileForSession,
   blendedHistogramForSession,
   shouldWarm,
   executeWarmup,
@@ -551,17 +551,10 @@ export function startIdleScheduler(
       // Ensure global histograms are loaded from SQLite for this project
       loadGlobalHistograms(state.projectPath);
 
-      const profile = resolveProfile(
-        state.lastUpstream?.model,
-        state.lastUpstream?.protocol,
-        state.resolvedConversationTTL,
-        // Pass the session's real upstream URL + providerID so the warmer warms
-        // only true-Anthropic sessions (first-party host OR providerID
-        // "anthropic", incl. proxied Anthropic) and never sends a compat
-        // provider's key to api.anthropic.com (MiniMax 401 loop).
-        state.lastUpstream?.url,
-        state.lastUpstream?.providerID,
-      );
+      // Shared seam with the dashboard snapshot (computeWarmingSnapshot) so the
+      // upstream routing + size-aware warmup margin never diverge. See
+      // resolveProfileForSession.
+      const profile = resolveProfileForSession(state);
       if (!profile) continue;
 
       // Skip only this session's tripped (model, upstream) bucket — other
