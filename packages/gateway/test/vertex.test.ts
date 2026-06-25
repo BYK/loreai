@@ -77,9 +77,7 @@ describe("vertexRawPredictUrl", () => {
   });
 
   test("builds a regional :rawPredict URL (non-streaming)", () => {
-    expect(
-      vertexRawPredictUrl("us-east1", "p", "claude-opus-4-8", false),
-    ).toBe(
+    expect(vertexRawPredictUrl("us-east1", "p", "claude-opus-4-8", false)).toBe(
       "https://us-east1-aiplatform.googleapis.com/v1/projects/p/locations/us-east1/publishers/anthropic/models/claude-opus-4-8:rawPredict",
     );
   });

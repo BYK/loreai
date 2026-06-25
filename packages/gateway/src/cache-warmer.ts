@@ -1897,7 +1897,9 @@ export async function executeWarmup(
   //    (Vertex is not a Claude Code billing endpoint). The session credential
   //    is irrelevant — Vertex auth is the GCP token lore mints.
   //  - Anthropic (default): the session credential + cch re-sign to /v1/messages.
-  const headers: Record<string, string> = { "content-type": "application/json" };
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+  };
   let requestUrl: string;
   let signedBody: string;
 
