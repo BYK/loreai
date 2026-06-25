@@ -1609,12 +1609,12 @@ function applyKnowledgeMetaRegister(database: Database): void {
 }
 
 // ---------------------------------------------------------------------------
-// session_rollup — materialized per-session aggregates for /ui/costs (v59, #981)
+// session_rollup — materialized per-session aggregates for /ui/costs (v60, #981)
 // ---------------------------------------------------------------------------
 
 /**
  * Schema + maintenance triggers for `session_rollup`, all `IF NOT EXISTS` so it
- * can run from the v59 migration AND self-heal from `recoverMissingObjects`.
+ * can run from the v60 migration AND self-heal from `recoverMissingObjects`.
  *
  * One row per `(project_id, session_id)` holds exactly the costs-page inputs:
  *   - temporal_messages: message_count, token_sum, first/last_message_at, and the
@@ -1887,7 +1887,7 @@ export function rebuildDirtySessionRollups(database: Database = db()): void {
 
 /**
  * Reconstruct the entire session_rollup table from the source tables. Used by the
- * v59 backfill and by recovery. Idempotent (truncate + repopulate). Three grouped
+ * v60 backfill and by recovery. Idempotent (truncate + repopulate). Three grouped
  * passes that benefit from the v57/v58 covering indexes (#981).
  */
 export function rebuildAllSessionRollups(database: Database = db()): void {
@@ -1941,7 +1941,7 @@ export function rebuildAllSessionRollups(database: Database = db()): void {
   `);
 }
 
-/** v59 migration step: create the rollup objects then backfill from source. */
+/** v60 migration step: create the rollup objects then backfill from source. */
 function applySessionRollup(database: Database): void {
   ensureSessionRollup(database);
   rebuildAllSessionRollups(database);
