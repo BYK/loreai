@@ -2084,7 +2084,7 @@ function getLLMClient(config: GatewayConfig): LLMClient {
       workerUpstreams,
       getWorkerAuth,
       defaultModel,
-      { dedicatedWorkerKey: !!workerApiKey },
+      { dedicatedWorkerKey: !!workerApiKey, vertexProject: config.vertexProject },
     );
 
     // Workers always use the same provider as the session. Route worker

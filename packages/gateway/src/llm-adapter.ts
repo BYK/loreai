@@ -43,6 +43,13 @@ import { upstreamFetch } from "./fetch";
 import { extractJSONFromSSE } from "./translate/types";
 import { isBedrockMantleHost, toMantleModelId } from "./translate/bedrock";
 import {
+  toVertexBody,
+  toVertexModelId,
+  vertexRawPredictUrl,
+  vertexRegionFromUrl,
+} from "./translate/vertex";
+import { getVertexAccessToken, resolveVertexProject } from "./vertex-auth";
+import {
   recordWorkerFailure,
   markWorkerPaused,
   isWorkerIncapable,
@@ -317,7 +324,11 @@ export function normalizeOpenAIUsage(
  * `/backend-api` serves ONLY the Responses API (`/codex/responses`), so it gets
  * a dedicated `"openai-codex-responses"` worker protocol that speaks Responses.
  */
-type WorkerProtocol = "anthropic" | "openai" | "openai-codex-responses";
+type WorkerProtocol =
+  | "anthropic"
+  | "openai"
+  | "openai-codex-responses"
+  | "vertex";
 
 /** Upstream URL, wire protocol, and provider label for a resolved target. */
 type ProviderTarget = {
@@ -352,23 +363,22 @@ export function resolveWorkerProtocol(
   }
   // 1. Explicit protocol from caller (threaded from UpstreamSnapshot)
   if (explicit) {
-    // Vertex collapses to "anthropic" for worker calls (same wire shape).
-    // NOTE: AWS Bedrock is NOT a distinct worker protocol — it is reached via
-    // the bedrock-mantle endpoint, whose snapshot protocol is already
-    // "anthropic" (the provider route carries `bedrockMantle: true`, protocol
-    // "anthropic"). Bedrock worker calls therefore route to the session's
-    // mantle upstream over the normal Anthropic path with the client's Bedrock
-    // API key — no SigV4, no separate LORE_WORKER_UPSTREAM workaround.
-    return explicit === "anthropic" || explicit === "vertex"
-      ? "anthropic"
-      : "openai";
+    // Vertex is a DISTINCT worker protocol: it speaks the Anthropic Messages
+    // body but to a :rawPredict URL (model in the path) authenticated with a
+    // GCP OAuth2 token — buildVertexWorkerRequest handles all three. It must
+    // NOT collapse to "anthropic" (that would POST to /v1/messages with an
+    // x-api-key). NOTE: AWS Bedrock is NOT a distinct worker protocol — it is
+    // reached via the bedrock-mantle endpoint, whose snapshot protocol is
+    // already "anthropic" (route carries `bedrockMantle: true`), so Bedrock
+    // worker calls route to the mantle upstream over the normal Anthropic path.
+    if (explicit === "vertex") return "vertex";
+    return explicit === "anthropic" ? "anthropic" : "openai";
   }
   // 2. Route table lookup
   const route = resolveProviderRoute(providerID);
   if (route?.protocol) {
-    return route.protocol === "anthropic" || route.protocol === "vertex"
-      ? "anthropic"
-      : "openai";
+    if (route.protocol === "vertex") return "vertex";
+    return route.protocol === "anthropic" ? "anthropic" : "openai";
   }
   // 3. Default: anthropic (safest for unknown/aggregator providers)
   return "anthropic";
@@ -799,10 +809,73 @@ function parseResponsesWorkerResponse(data: {
 }
 
 /**
+ * Build a Google Vertex AI (Claude) worker request: an Anthropic Messages body
+ * POSTed to the `:rawPredict` URL (model in the path, non-streaming) and
+ * authenticated with a GCP OAuth2 bearer token (ADC). Async because minting the
+ * token and resolving the project are async.
+ *
+ * The region is read from the session's vertex base URL (`target.url`, the
+ * authoritative endpoint); the project prefers the threaded config value, else
+ * derives from ADC. No client credential reaches the wire — Vertex auth is the
+ * GCP token, so `cred` is intentionally ignored. No billing block (Vertex is
+ * not a Claude Code billing endpoint).
+ */
+async function buildVertexWorkerRequest(
+  target: ProviderTarget,
+  model: { providerID: string; modelID: string },
+  system: string,
+  user: string,
+  maxTokens: number,
+  vertexProject?: string,
+  temperature?: number,
+): Promise<{ url: string; headers: Record<string, string>; body: string }> {
+  const region = vertexRegionFromUrl(target.url) ?? "global";
+  const project = await resolveVertexProject(vertexProject ?? "");
+  if (!project) {
+    throw new Error(
+      "Vertex worker: no GCP project. Set GOOGLE_CLOUD_PROJECT (or " +
+        "LORE_VERTEX_PROJECT), or ensure Application Default Credentials " +
+        "provide a project.",
+    );
+  }
+  const vertexModel = toVertexModelId(model.modelID);
+  const token = await getVertexAccessToken();
+  // Worker system prompt is static across bursts → cache it. Use bare ephemeral
+  // (5m) rather than the 1h extended-ttl beta of uncertain Vertex support.
+  const systemBlocks = system
+    ? [
+        {
+          type: "text" as const,
+          text: system,
+          cache_control: { type: "ephemeral" as const },
+        },
+      ]
+    : undefined;
+  const body = JSON.stringify(
+    toVertexBody({
+      max_tokens: maxTokens,
+      ...(temperature != null && { temperature }),
+      system: systemBlocks,
+      messages: [{ role: "user", content: user }],
+    }),
+  );
+  return {
+    url: vertexRawPredictUrl(region, project, vertexModel, false),
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body,
+  };
+}
+
+/**
  * Dispatch to the correct worker request builder for a resolved target.
  * Single source of truth so adding a protocol touches exactly one place.
+ * Async: the Vertex builder mints a GCP OAuth2 token; the other builders are
+ * synchronous and resolve immediately.
  */
-function buildWorkerRequest(
+async function buildWorkerRequest(
   target: ProviderTarget,
   cred: AuthCredential,
   model: { providerID: string; modelID: string },
@@ -811,7 +884,8 @@ function buildWorkerRequest(
   maxTokens: number,
   sessionID?: string,
   temperature?: number,
-): { url: string; headers: Record<string, string>; body: string } {
+  vertexProject?: string,
+): Promise<{ url: string; headers: Record<string, string>; body: string }> {
   switch (target.protocol) {
     case "openai-codex-responses":
       // Codex omits max_output_tokens (rejected by ChatGPT) — no maxTokens arg.
@@ -832,6 +906,16 @@ function buildWorkerRequest(
         system,
         user,
         maxTokens,
+        temperature,
+      );
+    case "vertex":
+      return buildVertexWorkerRequest(
+        target,
+        model,
+        system,
+        user,
+        maxTokens,
+        vertexProject,
         temperature,
       );
     default:
@@ -979,9 +1063,13 @@ export function createGatewayLLMClient(
   upstreams: { anthropic: string; openai: string },
   getAuth: (sessionID?: string, providerID?: string) => AuthCredential | null,
   defaultModel: { providerID: string; modelID: string },
-  opts?: { dedicatedWorkerKey?: boolean },
+  opts?: { dedicatedWorkerKey?: boolean; vertexProject?: string },
 ): LLMClient {
   const hasDedicatedKey = opts?.dedicatedWorkerKey === true;
+  // Configured GCP project for Vertex workers (else derived from ADC at call
+  // time). Threaded so an explicit LORE_VERTEX_PROJECT (without GOOGLE_CLOUD_*)
+  // is honored — the session base URL carries the region but never the project.
+  const factoryVertexProject = opts?.vertexProject;
   return {
     async prompt(system, user, opts) {
       const model = opts?.model ?? defaultModel;
@@ -1100,7 +1188,7 @@ export function createGatewayLLMClient(
       }
 
       // Build protocol-specific request
-      let req = buildWorkerRequest(
+      let req = await buildWorkerRequest(
         target,
         cred,
         model,
@@ -1109,6 +1197,7 @@ export function createGatewayLLMClient(
         maxTokens,
         opts?.sessionID,
         opts?.temperature,
+        factoryVertexProject,
       );
 
       // Track this call so temporal capture can skip it
@@ -1422,7 +1511,7 @@ export function createGatewayLLMClient(
                   log.info(
                     `worker auth error ${response.status}, credential refreshed — retrying: ${text.slice(0, 200)}`,
                   );
-                  req = buildWorkerRequest(
+                  req = await buildWorkerRequest(
                     target,
                     freshCred,
                     model,
@@ -1431,6 +1520,7 @@ export function createGatewayLLMClient(
                     maxTokens,
                     opts?.sessionID,
                     opts?.temperature,
+                    factoryVertexProject,
                   );
                   retryCount++;
                   continue;
