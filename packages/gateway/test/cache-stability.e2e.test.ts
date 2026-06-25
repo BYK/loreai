@@ -1597,15 +1597,21 @@ describe("cache stability (e2e)", () => {
         JSON.stringify({ budget: { maxLayer0Tokens: 40000 } }),
       );
 
-      // Large messages so the raw window overflows rawBudget and the gradient
-      // pins a layer-1 SUB-window at the ceiling. Each message ≈ 8K tokens
-      // (~24K chars), so a single user+assistant pair (~16K tokens) is a large
-      // fraction of rawBudget — enough that one turn's growth trips the pin's
-      // 15% hysteresis on its own. Pre-fix that forces a re-pin at the ceiling
-      // and a boundary advance EVERY turn; the fix evicts a chunk so the
-      // boundary holds for many turns between steps.
+      // A large BASE history (forces compression to layer 1 via the 40K cost
+      // cap) plus SMALL per-turn messages. Decoupling base size from per-turn
+      // growth is deliberate: the raw-window pin's chunked eviction can only be
+      // meaningfully tested when one turn's growth is a MODERATE fraction of the
+      // eviction chunk (~0.4 × rawBudget) — so the boundary holds for a few turns
+      // then advances in a step. Sized for the scale-correct budgets (Part B:
+      // body budgets divide by BODY_TOKEN_RATIO, so rawBudget is ~1.68× smaller
+      // than the pre-fix value; the old fixture used 8K-token messages whose
+      // single-pair growth (~16K) exceeded the post-fix eviction chunk, forcing a
+      // re-pin every turn — that was a knife-edge calibration to the old scale,
+      // not a real per-turn-march regression).
       const big = (label: string) =>
         `${label} ${"lorem ipsum dolor ".repeat(1_350)}`;
+      const small = (label: string) =>
+        `${label} ${"lorem ipsum dolor ".repeat(180)}`;
       const TOTAL_TURNS = 14;
       const BASE_PAIRS = 14; // ~28 base messages × ~8K ≈ 224K → well over budget
 
@@ -1613,11 +1619,12 @@ describe("cache stability (e2e)", () => {
         makeFixtureEntry({
           seq: i,
           requestMessages: [],
-          responseText: big(`assistant reply ${i}`),
+          responseText: small(`assistant reply ${i}`),
           model: DEFAULT_MODEL,
-          // Realistic growing large input so calibrate() tracks the true body
-          // size and the gradient pins a real layer-1 sub-window.
-          inputTokens: 120_000 + i * 8_000,
+          // The layer-1 window is pinned (bounded by rawBudget), so the real
+          // input is ~constant turn-over-turn — a small drift keeps calibrate()
+          // tracking a stable overhead without collapsing usable.
+          inputTokens: 120_000 + i * 1_000,
           outputTokens: 1_200,
         }),
       );
@@ -1653,7 +1660,7 @@ describe("cache stability (e2e)", () => {
       const observedLayers: number[] = [];
       for (let turn = 0; turn < TOTAL_TURNS; turn++) {
         history.push(
-          toGatewayMessage(textTurn("user", big(`turnuser${turn}end`))),
+          toGatewayMessage(textTurn("user", small(`turnuser${turn}end`))),
         );
         const resp = await harness.chat(
           makeGatewayBody(history),
@@ -1663,7 +1670,7 @@ describe("cache stability (e2e)", () => {
         expect(resp.status).toBe(200);
         await resp.json();
         history.push(
-          toGatewayMessage(textTurn("assistant", big(`turnasst${turn}end`))),
+          toGatewayMessage(textTurn("assistant", small(`turnasst${turn}end`))),
         );
 
         if (turn === 0) {
@@ -1727,6 +1734,16 @@ describe("cache stability (e2e)", () => {
         `raw-window start boundary marched on every steady-state turn — ${detail}. ` +
           `The layer-1 pin must hold the boundary on at least some turns, evicting ` +
           `only in occasional chunks (regression: per-turn window march).`,
+      ).toBeGreaterThan(0);
+      // Non-vacuity guard: the window must ALSO advance at least once over the
+      // run, proving chunked eviction genuinely happens (the pin is not simply
+      // frozen because the messages never fill it). A frozen window that never
+      // evicts would grow unbounded — so this guards the opposite failure mode
+      // too. Together with `holds > 0`, this asserts true CHUNKED eviction.
+      expect(
+        advances,
+        `raw-window never advanced — the test is not exercising eviction at all ` +
+          `(vacuous): ${detail}`,
       ).toBeGreaterThan(0);
     } finally {
       if (prevIdleTimeout === undefined) delete process.env.LORE_IDLE_TIMEOUT;

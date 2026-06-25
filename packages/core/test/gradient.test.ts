@@ -52,6 +52,7 @@ import {
   getOverhead,
   getLastTransformEstimate,
   effectiveDistilledBudget,
+  BODY_TOKEN_RATIO,
   type ModelBudget,
 } from "../src/gradient";
 import type { LoreMessage, LorePart, LoreMessageWithParts } from "../src/types";
@@ -410,10 +411,14 @@ describe("gradient — lazy raw window eviction (Approach B)", () => {
   test("raw window advances only when the new message forces eviction", () => {
     resetRawWindowCache();
 
-    // context=3000, output=500 → usable=2500, rawBudget=floor(2500*0.4)=1000
-    // Each 400-char message ≈ 154 tokens (400 chars/3 + 20 overhead).
-    // 22 messages ≈ 3388 > 2500 → gradient fires.
-    setModelLimits({ context: 3_000, output: 500 });
+    // context=4000, output=500 → usable=3500, bodyUsable=floor(3500/1.68)=2083,
+    // rawBudget=floor(2083*0.4)=833. Each 400-char message ≈ 154 chars/3 tokens
+    // (400/3 + 20). 22 messages ≈ 3388; uncalibrated layer decision inflates by
+    // 1.5 → 5082 > maxInput 3500 → gradient fires (Layer 1). The huge C(2000)
+    // current turn ≈ 687 chars/3 fits within rawBudget 833, so it stays at Layer
+    // 1 (does not escalate on the current-turn guard). Sized post the
+    // chars/3→real scale fix (budgets divide by BODY_TOKEN_RATIO).
+    setModelLimits({ context: 4_000, output: 500 });
     calibrate(0);
 
     const SESS2 = "lazy-evict-tight";
@@ -2206,16 +2211,20 @@ describe("gradient — usable/overhead oscillation (Bug 1)", () => {
       // Seed transform estimates so calibrate() has a baseline to subtract.
       transform({ messages: msgsA, projectPath: PROJECT, sessionID: A });
       transform({ messages: msgsB, projectPath: PROJECT, sessionID: B });
-      // A: small overhead (10K). B: huge overhead (500K).
-      calibrate(getLastTransformEstimate(A) + 10_000, A, msgsA.length);
-      calibrate(getLastTransformEstimate(B) + 500_000, B, msgsB.length);
+      // A: small overhead (10K). B: huge overhead (500K). actualInput is REAL
+      // tokens, so the body term is the REAL body (chars/3 estimate × ratio);
+      // calibrate inflates the estimate the same way, leaving overhead = +N.
+      const realBody = (sid: string) =>
+        Math.round(getLastTransformEstimate(sid) * BODY_TOKEN_RATIO);
+      calibrate(realBody(A) + 10_000, A, msgsA.length);
+      calibrate(realBody(B) + 500_000, B, msgsB.length);
       expect(getOverhead(A)).toBe(10_000);
       expect(getOverhead(B)).toBe(500_000);
       // B keeps calibrating high — must NOT drag A toward a shared blend.
       transform({ messages: msgsB, projectPath: PROJECT, sessionID: B });
-      calibrate(getLastTransformEstimate(B) + 500_000, B, msgsB.length);
+      calibrate(realBody(B) + 500_000, B, msgsB.length);
       transform({ messages: msgsB, projectPath: PROJECT, sessionID: B });
-      calibrate(getLastTransformEstimate(B) + 500_000, B, msgsB.length);
+      calibrate(realBody(B) + 500_000, B, msgsB.length);
       // Pre-fix (global EMA, sessionID ignored): getOverhead(A) is dragged
       // toward B's 500K and is no longer 10K.
       expect(getOverhead(A)).toBe(10_000);
@@ -2273,11 +2282,17 @@ describe("gradient — usable/overhead oscillation (Bug 1)", () => {
       setLtmTokens(20_000, SID);
       transform({ messages: msgs, projectPath: PROJECT, sessionID: SID });
       const est = getLastTransformEstimate(SID);
-      // Real input = body(est) + host/tools(50K) + injected LTM(20K).
-      calibrate(est + 50_000 + 20_000, SID, msgs.length);
+      // Real input = body(REAL = est×ratio) + host/tools(50K) + injected
+      // LTM(20K). calibrate inflates the chars/3 estimate by the same ratio, so
+      // overhead nets out to host/tools (50K) only.
+      calibrate(
+        Math.round(est * BODY_TOKEN_RATIO) + 50_000 + 20_000,
+        SID,
+        msgs.length,
+      );
       // Overhead must be host/tools ONLY — LTM is NOT part of "overhead"
       // (the comment at the `usable` computation says LTM is subtracted
-      // separately). Pre-fix it was actualInput - bodyEstimate = 70K.
+      // separately).
       expect(getOverhead(SID)).toBe(50_000);
       // usable subtracts LTM exactly once (via sessLtmTokens), not twice.
       const r = transform({
@@ -2377,6 +2392,69 @@ describe("gradient — usable/overhead oscillation (Bug 1)", () => {
       setModelLimits({ context: 10_000, output: 2_000 });
       calibrate(0);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Overhead/body scale decoupling — the usable-collapse root cause
+// ---------------------------------------------------------------------------
+// `calibrate` computes overhead = actualInput(REAL) − messageEstimate(chars/3) ×
+// BODY_TOKEN_RATIO − ltm. Before the scale fix it subtracted the UN-inflated
+// chars/3 estimate, so ~0.40·body_real leaked into `overhead`. For a large body
+// that ballooned overhead, collapsed `usable`, and forced the session to Layer 4
+// where the distilled prefix re-renders every turn (the messages[1] every-turn
+// cache bust). These guard that overhead is TRUE system+tools and stays stable
+// as the body grows, so usable does NOT collapse.
+describe("gradient — overhead/body scale decoupling (usable-collapse fix)", () => {
+  const SID = "overhead-scale-sess";
+
+  test("overhead stays at TRUE system+tools (does not absorb the body) → usable does not collapse", () => {
+    setModelLimits({ context: 200_000, output: 32_000 }); // maxInput = 168K
+    resetCalibration(SID);
+    const TRUE_OVERHEAD = 48_000;
+    // A large conversation whose chars/3 estimate undercounts the real body.
+    const msgs = Array.from({ length: 40 }, (_, i) =>
+      makeMsg(
+        `os-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "w".repeat(3_000),
+        SID,
+      ),
+    );
+    // Several turns: the per-session overhead EMA must SETTLE at the true
+    // overhead, not ratchet up with the body (the production collapse signature).
+    let est = 0;
+    for (let t = 0; t < 6; t++) {
+      transform({ messages: msgs, projectPath: PROJECT, sessionID: SID });
+      est = getLastTransformEstimate(SID);
+      // actualInput is REAL: the model saw the real body (est × ratio) plus the
+      // true 48K system+tools. calibrate must inflate the estimate the same way.
+      calibrate(
+        Math.round(est * BODY_TOKEN_RATIO) + TRUE_OVERHEAD,
+        SID,
+        msgs.length,
+      );
+    }
+    // Sanity: the body estimate is large enough that a pre-fix leak (~0.4×body)
+    // would be a big fraction of usable — i.e. this scenario actually exercises
+    // the collapse, so the assertions below are not vacuous.
+    expect(est).toBeGreaterThan(20_000);
+
+    // Overhead settled at ~true system+tools, NOT inflated by the body.
+    expect(getOverhead(SID)).toBe(TRUE_OVERHEAD);
+    // usable stays near the real available context (168K − 48K = 120K), NOT
+    // collapsed to ~25K. (Reverting the calibrate inflation drives overhead to
+    // ~TRUE_OVERHEAD + 0.4·body and usable well below 100K → this fails.)
+    const r = transform({
+      messages: msgs,
+      projectPath: PROJECT,
+      sessionID: SID,
+    });
+    expect(r.usable).toBeGreaterThan(100_000);
+
+    resetCalibration(SID);
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0);
   });
 });
 
@@ -4410,9 +4488,12 @@ describe("tier-based context management", () => {
       // usable stays the full ~968K (LTM / economics read this).
       expect(result.usable).toBeGreaterThan(900_000);
       // Base budgets scale off the full usable — NOT the 40K cap (which would
-      // give rawBudget = 40K*0.4 = 16K).
-      expect(result.rawBudget).toBe(Math.floor(result.usable * 0.4));
-      expect(result.distilledBudget).toBe(Math.floor(result.usable * 0.25));
+      // give rawBudget = 40K*0.4 = 16K). They are on the chars/3 body scale
+      // (bodyUsable = usable / BODY_TOKEN_RATIO) so they compare apples-to-apples
+      // with the chars/3 message estimates.
+      const bodyUsable = Math.floor(result.usable / BODY_TOKEN_RATIO);
+      expect(result.rawBudget).toBe(Math.floor(bodyUsable * 0.4));
+      expect(result.distilledBudget).toBe(Math.floor(bodyUsable * 0.25));
       expect(result.rawBudget).toBeGreaterThan(40_000);
     });
 
@@ -4527,22 +4608,24 @@ describe("tier-based context management", () => {
       expect(result.usable).toBeGreaterThan(900_000);
     });
 
-    test("hard-ceiling guard: a rebuilt over-ceiling window escalates instead of shipping (calibrated)", () => {
+    test("scale-correct budgets prevent an over-ceiling window: the SHIPPED window fits the REAL ceiling", () => {
       // Cost cap disabled on a 200K model so budgetUsable === usable === maxInput
-      // (168K). A forced layer-2 window fills prefix (0.25) + raw (0.5) ≈ 0.75 ×
-      // 168K ≈ 126K; its chars/3 estimate undercounts the real tokenizer ~1.5×,
-      // so 126K*1.5 = 189K > 168K maxInput. Pre-fix, a CALIBRATED session got a
-      // free pass (`fitsWithSafetyMargin` returned true unconditionally) and
-      // shipped that over-ceiling window → "prompt is too long". Post-fix the
-      // guard rejects it and the loop escalates to a tighter layer.
+      // (168K). A forced layer-2 window is sized as fractions of `usable` REAL
+      // tokens: prefix 0.25 + raw 0.5 = 0.75 × usable REAL. Pre-scale-fix the
+      // budgets were chars/3 fractions of usable, so the window's REAL size
+      // (×1.68) was 0.75×168K×1.68 = 212K > 168K and overflowed ("prompt is too
+      // long"; the old `fitsWithSafetyMargin` free-passed calibrated sessions).
+      // Post-fix the BODY budgets divide by BODY_TOKEN_RATIO, so the window's
+      // REAL size is at most 0.75×usable = 126K < 168K — the overflow is
+      // prevented at the budget level, and `fitsWithSafetyMargin` (now real-scale
+      // with overhead+ltm) remains a backstop for un-evictable oversized turns.
       setModelLimits({ context: 200_000, output: 32_000 }); // maxInput = 168K
       setMaxLayer0Tokens(0); // disabled → budgetUsable === usable === 168K
       calibrate(0);
 
-      // Prefix budget at layer 2 = 0.25*168K = 42K tokens; seed well past it so
-      // the prefix fills its budget after the binary-search trim.
+      // Seed distillate well past the layer-2 prefix budget and provide far more
+      // raw than the layer-2 raw budget, so both windows fill their budgets.
       seedDistillations(10, 18_000); // 10 × 6K tokens = 60K tokens of distillate
-      // Raw budget at layer 2 = 0.5*168K = 84K tokens; provide far more.
       const msgs = Array.from({ length: 150 }, (_, i) =>
         makeMsg(
           `hc-${i}`,
@@ -4552,9 +4635,9 @@ describe("tier-based context management", () => {
         ),
       );
 
-      // Mark the session calibrated WITHOUT a prior transform (so the shared
-      // overhead EMA is not perturbed and usable stays at the true 168K). This
-      // is the exact condition the pre-fix free pass applied to.
+      // Mark the session calibrated WITHOUT a prior transform (lastTransformEstimate
+      // stays 0, so calibrate does not move overhead) — overhead stays 0 and
+      // usable stays the true 168K.
       calibrate(120_000, SID, msgs.length);
       setForceMinLayer(2, SID);
 
@@ -4565,11 +4648,15 @@ describe("tier-based context management", () => {
       });
 
       const maxInput = 200_000 - 32_000; // 168K
-      // The guard rejected the over-ceiling layer-2 window and escalated past
-      // the forced layer (pre-fix this stayed at layer 2 and overflowed).
-      expect(result.layer).toBeGreaterThanOrEqual(3);
-      // Whatever layer it lands on, the SHIPPED window must fit the hard ceiling.
-      expect(result.totalTokens).toBeLessThanOrEqual(maxInput);
+      // The window ships at the forced layer (no escalation needed — the budgets
+      // already keep it under the ceiling).
+      expect(result.layer).toBeGreaterThanOrEqual(2);
+      // 🔴 The SHIPPED window must fit the REAL ceiling — assert in REAL tokens
+      // (chars/3 × BODY_TOKEN_RATIO + overhead 0 + ltm 0), the same quantity the
+      // API counts. This is STRICTLY STRONGER than the old chars/3-only check.
+      expect(result.totalTokens * BODY_TOKEN_RATIO).toBeLessThanOrEqual(
+        maxInput,
+      );
     });
   });
 

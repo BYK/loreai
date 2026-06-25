@@ -143,6 +143,27 @@ const FREE_WRITE_LAYER0_FRACTION = 0.65;
 export const UNCALIBRATED_SAFETY = 1.5;
 
 /**
+ * Empirical ratio of REAL provider tokens to the gradient's chars/3 body
+ * estimate (validated ~1.63–1.68 across 200+ turn-pairs). Used to keep the
+ * budget math on a single, consistent scale (issue: distilled-prefix churn from
+ * usable-collapse):
+ *
+ *  - calibrate(): overhead = actualInput(REAL) − messageEstimate×RATIO − ltm, so
+ *    `overhead` is TRUE system+tools and does NOT silently absorb the body
+ *    undercount. Previously overhead absorbed ~0.40·body_real, which for large
+ *    growing sessions inflated overhead to ~125K on a 200K model, collapsed
+ *    `usable` to ~25K, and forced the session to Layer 4 where the distilled
+ *    prefix is re-rendered every turn (the messages[1] cache bust).
+ *  - body budgets: a body of B_real real tokens has a chars/3 estimate
+ *    B_real/RATIO, so a REAL-token budget is converted to the chars/3 scale the
+ *    body estimates are measured in by dividing by RATIO (so the body occupies
+ *    at most `fraction × usable` REAL tokens).
+ *  - fitsWithSafetyMargin(): the acceptance gate inflates the chars/3 body back
+ *    to real and adds overhead+ltm before comparing to maxInput.
+ */
+export const BODY_TOKEN_RATIO = 1.68;
+
+/**
  * True when the session's upstream has reported zero cache_creation_input_tokens
  * for at least {@link NO_CACHE_WRITE_THRESHOLD} consecutive turns.  Covers both
  * free-write-cache providers (e.g. MiniMax passive caching) and non-caching
@@ -1072,7 +1093,17 @@ export function calibrate(
   // to compare against). Allow when both are 0 (test setup to zero overhead) or
   // when we have a real transform estimate.
   if (messageEstimate > 0 || actualInput === 0) {
-    const overhead = Math.max(0, actualInput - messageEstimate - ltm);
+    // Scale fix: `actualInput` is REAL provider tokens but `messageEstimate`
+    // (lastTransformEstimate) is the chars/3 body estimate, which undercounts by
+    // ~BODY_TOKEN_RATIO. Subtracting the un-inflated estimate leaked
+    // ~0.40·body_real into `overhead`, so for large/growing sessions overhead
+    // ballooned (~125K on a 200K model), `usable` collapsed (~25K), the session
+    // was forced to Layer 4, and the distilled prefix re-rendered every turn
+    // (the messages[1] cache bust). Inflate the body estimate to the real scale
+    // first so `overhead` is TRUE system+tools only and stays stable as the body
+    // grows. (messageEstimate===0 ⇒ overhead = actualInput − ltm, unchanged.)
+    const realMessageEstimate = Math.round(messageEstimate * BODY_TOKEN_RATIO);
+    const overhead = Math.max(0, actualInput - realMessageEstimate - ltm);
     // Lever 2 (Bug 1): the per-session EMA is authoritative — getOverhead()
     // prefers it. The module-global EMA is still updated, but only serves as
     // the first-turn seed / no-session fallback. A single shared global blended
@@ -2843,9 +2874,19 @@ function transformInner(input: {
   // at quality boundaries.
   const usable = usableRaw;
 
-  const distilledBudget = Math.floor(usable * cfg.budget.distilled);
+  // `usable` is REAL provider tokens (contextLimit/overhead/ltm are all real,
+  // and `overhead` is now TRUE system+tools — it no longer absorbs the chars/3
+  // body undercount). The body budgets below are compared against chars/3 body
+  // estimates (estimateMessage), so convert the real body space to the chars/3
+  // scale by dividing by BODY_TOKEN_RATIO. This makes the distilled/raw windows
+  // occupy at most `fraction × usable` REAL tokens — honoring cfg.budget.* — and
+  // keeps the comparison apples-to-apples. (Overflow is guarded separately by
+  // fitsWithSafetyMargin, which inflates back to real and adds overhead+ltm.)
+  const bodyUsable = Math.floor(usable / BODY_TOKEN_RATIO);
+
+  const distilledBudget = Math.floor(bodyUsable * cfg.budget.distilled);
   // Base raw budget. May be overridden below for post-idle compact mode.
-  let rawBudget = Math.floor(usable * cfg.budget.raw);
+  let rawBudget = Math.floor(bodyUsable * cfg.budget.raw);
 
   // --- Escalated-stage budget ceiling (layers 2-3 only) ---
   // The ESCALATED compression stages (layer 2: rawFrac 0.5; layer 3: rawFrac
@@ -2916,19 +2957,26 @@ function transformInner(input: {
   // is only the stage-loop acceptance gate (the layer-0 / tier-gate paths use
   // their own `maxInput * HARD_CEILING_MARGIN` checks against expectedInput).
   //
-  // The layer-1 stable window is effectively bounded to ~0.65*usable (prefix
-  // 0.25 + raw 0.4), so `total * 1.5 = 0.975*usable <= maxInput` and layer 1
-  // is never falsely rejected in the normal regime. The stable-window
-  // hysteresis (up to 1.15x raw) can push the worst case to ~0.71*usable, which
-  // exceeds maxInput only when overhead+LTM is a tiny (<~6%) slice of the
-  // window — and in that regime the real (1.5x) size genuinely approaches the
-  // ceiling, so escalating one layer is the correct, safe response, not a
-  // spurious reject.
+  // Scale-correct check: inflate the chars/3 body (result.totalTokens) back to
+  // REAL tokens via BODY_TOKEN_RATIO and add the real overhead + LTM (which are
+  // NOT in result.totalTokens — it is the message body only). Compare to
+  // maxInput. This is exact: it is the same quantity the API counts. Body
+  // budgets are now sized as fractions of `usable` REAL tokens (bodyUsable =
+  // usable/RATIO chars/3), so the layer-1 window real-total is
+  // 0.65*(maxInput−overhead−ltm) + overhead + ltm = 0.65*maxInput +
+  // 0.35*(overhead+ltm) < maxInput — never falsely rejected in the normal
+  // regime, even with the 1.15x stable-window hysteresis (~0.71). The old check
+  // (`totalTokens * 1.5 <= maxInput`) ignored overhead+ltm; with the bigger
+  // post-fix budgets it would have under-counted and risked shipping an
+  // over-ceiling window.
   function fitsWithSafetyMargin(
     result: { totalTokens: number } | null,
   ): boolean {
     if (!result) return false;
-    return result.totalTokens * UNCALIBRATED_SAFETY <= maxInput;
+    return (
+      result.totalTokens * BODY_TOKEN_RATIO + overhead + sessLtmTokens <=
+      maxInput
+    );
   }
 
   // --- Sticky layer guard (Option C) ---
@@ -3005,11 +3053,12 @@ function transformInner(input: {
     sessState.postIdleCompact = false;
     // Skip layer 0 — don't pass through all raw messages on a cold cache.
     effectiveMinLayer = Math.max(effectiveMinLayer, 1) as SafetyLayer;
-    // Use a tighter raw budget on cold cache to limit write cost.
-    rawBudget = Math.floor(usable * 0.2);
+    // Use a tighter raw budget on cold cache to limit write cost. chars/3 scale
+    // (bodyUsable) to match the body estimates, same as the base rawBudget.
+    rawBudget = Math.floor(bodyUsable * 0.2);
     log.info(
       `post-idle compact: session=${sid} rawBudget=${rawBudget}` +
-        ` (${Math.floor(usable * cfg.budget.raw)}→${rawBudget})`,
+        ` (${Math.floor(bodyUsable * cfg.budget.raw)}→${rawBudget})`,
     );
   }
 
@@ -3246,12 +3295,22 @@ function transformInner(input: {
     //     actually shrink toward the cap. A null fraction on an escalated stage
     //     (e.g. layer 2's distFrac) falls back to the configured base fraction,
     //     still clamped to the ceiling.
+    // `stageBudgetUsable` is REAL tokens (min of real usable and the real cost
+    // ceiling); divide by BODY_TOKEN_RATIO so the escalated body budgets land on
+    // the same chars/3 scale as the body estimates (matching distilledBudget/
+    // rawBudget above).
     const isEscalated = stageLayer > 1;
     const stageRawBudget = isEscalated
-      ? Math.floor(stageBudgetUsable * (stage.rawFrac ?? cfg.budget.raw))
+      ? Math.floor(
+          (stageBudgetUsable * (stage.rawFrac ?? cfg.budget.raw)) /
+            BODY_TOKEN_RATIO,
+        )
       : rawBudget;
     const stageDistBudget = isEscalated
-      ? Math.floor(stageBudgetUsable * (stage.distFrac ?? cfg.budget.distilled))
+      ? Math.floor(
+          (stageBudgetUsable * (stage.distFrac ?? cfg.budget.distilled)) /
+            BODY_TOKEN_RATIO,
+        )
       : distilledBudget;
 
     // Determine prefix: if distLimit is finite, re-render with trimmed distillations.
@@ -3415,10 +3474,12 @@ function transformInner(input: {
     0,
   );
 
-  // Token budget for the raw tail. clamp(usable * 0.25, 2K, 8K).
+  // Token budget for the raw tail. clamp(bodyUsable * 0.25, 2K, 8K) — chars/3
+  // scale (bodyUsable) to match estimateMessage; the 2K/8K clamp dominates
+  // except on very small contexts.
   const tailBudget = Math.max(
     2_000,
-    Math.min(8_000, Math.floor(usable * 0.25)),
+    Math.min(8_000, Math.floor(bodyUsable * 0.25)),
   );
 
   // Current turn is always included (non-negotiable — dropping it causes
