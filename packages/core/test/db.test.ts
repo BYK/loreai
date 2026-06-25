@@ -764,6 +764,14 @@ describe("db", () => {
         Date.now(),
       );
 
+    // Outcome-reward injection log row scoped to the source project (#996): it
+    // must follow the entries to the target, not orphan when source is deleted.
+    db()
+      .query(
+        "INSERT INTO knowledge_session_injections (session_id, logical_id, project_id, created_at, credited) VALUES (?, ?, ?, ?, 0)",
+      )
+      .run("session-merge", crypto.randomUUID(), sourceId, Date.now());
+
     // Verify source has data
     const sourceMsgsBefore = (
       db()
@@ -806,6 +814,26 @@ describe("db", () => {
         .get(targetId) as { c: number }
     ).c;
     expect(targetKnowledge).toBe(1);
+
+    // Injection log must have moved to target — none left orphaned under source
+    // (#996). If unmoved, these rows become permanently unreachable once the
+    // source project row is deleted, and outcome-reward crediting breaks.
+    const sourceInjections = (
+      db()
+        .query(
+          "SELECT COUNT(*) as c FROM knowledge_session_injections WHERE project_id = ?",
+        )
+        .get(sourceId) as { c: number }
+    ).c;
+    expect(sourceInjections).toBe(0);
+    const targetInjections = (
+      db()
+        .query(
+          "SELECT COUNT(*) as c FROM knowledge_session_injections WHERE project_id = ?",
+        )
+        .get(targetId) as { c: number }
+    ).c;
+    expect(targetInjections).toBe(1);
 
     // Source path should be registered as alias of target
     const alias = db()

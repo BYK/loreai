@@ -2225,6 +2225,14 @@ export function mergeProjectInternal(sourceId: string, targetId: string): void {
       targetId,
       sourceId,
     );
+    // Outcome-reward injection log (#497): carries a project_id that must follow
+    // the entries to the target, or its rows orphan once the source project row
+    // is deleted below AND crediting breaks (creditSessionOutcome queries by the
+    // session's current project). A plain UPDATE is safe — the PK is
+    // (session_id, logical_id), so re-pointing project_id can't conflict. (#996)
+    d.query(
+      "UPDATE knowledge_session_injections SET project_id = ? WHERE project_id = ?",
+    ).run(targetId, sourceId);
     // knowledge_transfers: re-point the "recalled in" foreign project. A plain
     // UPDATE would violate the composite PK when a (knowledge_id, targetId) row
     // already exists, so merge the counts via UPSERT then delete the leftover
