@@ -198,6 +198,35 @@ describe("resolveProfile — vertex warming", () => {
     );
     expect(profile).toBeNull();
   });
+
+  test("warmup body strips stream/model and keeps anthropic_version", () => {
+    // Regression: prepareAnthropicWarmupBody re-adds `stream:false`, which
+    // Vertex rejects. The vertex profile must re-strip it (and `model`).
+    const profile = resolveProfile(
+      "claude-opus-4-8",
+      "vertex",
+      "5m",
+      vertexBase,
+      "google-vertex",
+    );
+    expect(profile).not.toBeNull();
+    // A stored Vertex body (as lastRequestBody would hold) carrying a stray
+    // stream/model — the warmup transform must remove both.
+    const stored = JSON.stringify({
+      anthropic_version: "vertex-2023-10-16",
+      model: "claude-opus-4-8",
+      stream: true,
+      max_tokens: 1024,
+      system: [
+        { type: "text", text: "s", cache_control: { type: "ephemeral" } },
+      ],
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const warmup = JSON.parse(profile?.prepareWarmupBody(stored) ?? "{}");
+    expect("stream" in warmup).toBe(false);
+    expect("model" in warmup).toBe(false);
+    expect(warmup.anthropic_version).toBe("vertex-2023-10-16");
+  });
 });
 
 describe("vertex-auth — ADC token seam", () => {

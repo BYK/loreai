@@ -50,6 +50,7 @@ import { resolveUpstreamRoute } from "./config";
 import { isBedrockMantleHost } from "./translate/bedrock";
 import {
   isVertexHost,
+  toVertexBody,
   toVertexModelId,
   vertexRawPredictUrl,
   vertexRegionFromUrl,
@@ -976,10 +977,26 @@ export function buildVertexProfile(
   upstreamBase: string,
 ): CacheWarmingProfile {
   const region = vertexRegionFromUrl(upstreamBase) ?? "global";
+  const base = buildAnthropicProfile(model, ttl);
   return {
-    ...buildAnthropicProfile(model, ttl),
+    ...base,
     upstreamUrl: `https://${region}-aiplatform.googleapis.com`,
     authMode: "vertex",
+    // prepareAnthropicWarmupBody re-adds `stream:false` and (for billing
+    // sessions) leaves the body shaped for Anthropic. Vertex rejects a body
+    // `stream` field (the URL verb selects streaming) and needs `model` absent
+    // + `anthropic_version` present — so run the prepared body back through the
+    // canonical Vertex transform. The stored body is already the Vertex body,
+    // so this only re-strips the `stream` that prepareWarmupBody re-injected.
+    prepareWarmupBody: (storedBody: string) =>
+      JSON.stringify(
+        toVertexBody(
+          JSON.parse(base.prepareWarmupBody(storedBody)) as Record<
+            string,
+            unknown
+          >,
+        ),
+      ),
   };
 }
 

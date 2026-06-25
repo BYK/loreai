@@ -79,7 +79,14 @@ export async function getVertexAccessToken(): Promise<string> {
 export async function resolveVertexProject(
   configured: string,
 ): Promise<string> {
-  if (configured) return configured;
+  // Cache the configured project too: the conversation path resolves it with
+  // config.vertexProject on the first turn, so a later warmer call (which has
+  // no config in scope and passes "") reuses it — covers a LORE_VERTEX_PROJECT
+  // that ADC's getProjectId() would not see.
+  if (configured) {
+    cachedProject = configured;
+    return configured;
+  }
   if (cachedProject !== null) return cachedProject;
   try {
     cachedProject = (await getAuth().getProjectId()) ?? "";
