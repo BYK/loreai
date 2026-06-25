@@ -1486,6 +1486,24 @@ const MIGRATIONS: string[] = [
   DROP INDEX IF EXISTS idx_temporal_session;
   DROP INDEX IF EXISTS idx_temporal_project_session;
   `,
+
+  `
+  -- Version 59: knowledge_symbol_presence — per-entry record that a cited code
+  -- symbol was once confirmed present in the repo (#911). The symbol
+  -- reference-validity check only DECAYS confidence when a symbol that was
+  -- previously present goes absent (genuine rename/removal drift). An
+  -- external/historical/rejected-alternative mention that was never present here
+  -- never gets a row, so it can never be penalized — this is what keeps symbol
+  -- validation on the safe side of the "cannot verify ≠ broken" invariant.
+  -- Keyed by the stable logical_id (matches knowledge_ref_validity /
+  -- knowledge_session_injections / knowledge_meta) so it survives version edits.
+  CREATE TABLE IF NOT EXISTS knowledge_symbol_presence (
+    logical_id      TEXT NOT NULL,
+    symbol          TEXT NOT NULL,
+    last_present_at INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (logical_id, symbol)
+  );
+  `,
 ];
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -1956,6 +1974,12 @@ function recoverMissingObjects(database: Database) {
       broken     INTEGER NOT NULL DEFAULT 0,
       total      INTEGER NOT NULL DEFAULT 0,
       checked_at INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS knowledge_symbol_presence (
+      logical_id      TEXT NOT NULL,
+      symbol          TEXT NOT NULL,
+      last_present_at INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (logical_id, symbol)
     );
     CREATE TABLE IF NOT EXISTS knowledge_transfers (
       knowledge_id           TEXT NOT NULL,

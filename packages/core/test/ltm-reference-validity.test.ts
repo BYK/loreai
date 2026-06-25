@@ -188,10 +188,11 @@ describe("validateProjectReferences (#627 Phase 0)", () => {
   });
 });
 
-// Cited-symbol validation end-to-end (#911): a symbol miss must flow through the
-// SAME penalty machinery as a file miss (one flat −0.1, neutral when
-// unverifiable). Needs a real git work tree (`git grep`), so these git-init the
-// per-test root.
+// Cited-symbol validation end-to-end (#911): symbols use a presence HISTORY. A
+// symbol only decays confidence when it was PREVIOUSLY confirmed present and is
+// now absent (genuine rename/removal drift). A never-present mention (external
+// lib, historical/renamed-away name, rejected alternative) is a strict no-op.
+// Needs a real git work tree (`git grep`), so these git-init the per-test root.
 describe.skipIf(process.platform === "win32")(
   "validateProjectReferences — cited symbols (#911)",
   () => {
@@ -200,17 +201,49 @@ describe.skipIf(process.platform === "win32")(
       execFileSync("git", ["add", "-A"], { cwd: root });
     };
 
-    test("absent symbol (file:line still valid) → penalized once", async () => {
-      // real.ts exists and line 3 is in range, so Phase-0's file/line check says
-      // "ok" — only the symbol check catches that `removedHelperFn` is gone.
-      const id = seed("`removedHelperFn` lives in src/real.ts:3");
+    test("drift: a symbol once present, now absent → penalized once", async () => {
+      writeFileSync(
+        join(root, "src", "real.ts"),
+        "export function keptHelper() {}\na\nb\nc\n",
+      );
+      const id = seed("`keptHelper` lives in src/real.ts:1");
       gitInit();
-      const res = await ltm.validateProjectReferences(root, resolver());
-      expect(res.penalized).toBe(1);
+      const t0 = Date.now();
+      // Pass 1: symbol present → records presence, no penalty.
+      const p1 = await ltm.validateProjectReferences(root, resolver(), t0);
+      expect(p1.penalized).toBe(0);
+      expect(conf(id)).toBe(1.0);
+      // The symbol is removed from the repo.
+      writeFileSync(join(root, "src", "real.ts"), "a\nb\nc\nd\n");
+      execFileSync("git", ["add", "-A"], { cwd: root });
+      // Pass 2, after the 24h gate: absent + prior presence → drift → penalize.
+      const p2 = await ltm.validateProjectReferences(
+        root,
+        resolver(),
+        t0 + ltm.REFCHECK_INTERVAL_MS + 1,
+      );
+      expect(p2.penalized).toBe(1);
       expect(conf(id)).toBeCloseTo(1.0 - ltm.REFERENCE_DRIFT_PENALTY, 5);
     });
 
-    test("present symbol → no penalty", async () => {
+    // 🔴 BLOCKER regression: an absent symbol that was NEVER present here (React's
+    // useState, a rejected alternative, a renamed-away name) must NOT penalize a
+    // perfectly valid entry — "cannot verify ≠ broken".
+    test("never-present mention (external/historical) absent → neutral", async () => {
+      writeFileSync(
+        join(root, "src", "real.ts"),
+        "export const keptHelper = 1;\n",
+      );
+      const id = seed(
+        "Unlike React's `useState`, we use signals. See src/real.ts:1",
+      );
+      gitInit();
+      const res = await ltm.validateProjectReferences(root, resolver());
+      expect(res.penalized).toBe(0);
+      expect(conf(id)).toBe(1.0);
+    });
+
+    test("present symbol → no penalty, and presence is recorded", async () => {
       writeFileSync(
         join(root, "src", "real.ts"),
         "export const keptHelper = 1;\n",
@@ -220,12 +253,19 @@ describe.skipIf(process.platform === "win32")(
       const res = await ltm.validateProjectReferences(root, resolver());
       expect(res.penalized).toBe(0);
       expect(conf(id)).toBe(1.0);
+      const lid = ltm.get(id)?.logical_id;
+      const row = db()
+        .query(
+          "SELECT 1 FROM knowledge_symbol_presence WHERE logical_id = ? AND symbol = ?",
+        )
+        .get(lid, "keptHelper");
+      expect(row).toBeTruthy();
     });
 
     test("non-git repo → symbol unverifiable, never penalizes (neutral)", async () => {
-      // No gitInit(): presentSymbols is null → symbol "unknown" → no signal. The
+      // No gitInit(): presence is null → symbol "unknown" → no signal. The
       // co-cited file ref is valid, so the entry is checked but not penalized.
-      const id = seed("`removedHelperFn` lives in src/real.ts:3");
+      const id = seed("`keptHelper` lives in src/real.ts:3");
       const res = await ltm.validateProjectReferences(root, resolver());
       expect(res.penalized).toBe(0);
       expect(conf(id)).toBe(1.0);

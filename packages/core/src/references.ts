@@ -334,14 +334,19 @@ export interface RepoView {
   scripts: Set<string> | null;
   /** Makefile target names, or null if no Makefile. */
   makeTargets: Set<string> | null;
-  /** Cited symbol names confirmed to occur somewhere in tracked source
-   *  (word-boundary grep). `null` when symbol presence couldn't be determined
-   *  (non-git repo, `find` fallback, grep unavailable) — every symbol ref then
-   *  resolves "unknown" (neutral). When non-null, membership IS the answer: a
-   *  cited symbol absent from this set was searched-for and not found → repo-wide
-   *  absent → "missing". Presence-only (any occurrence, incl. usages/comments);
-   *  the asymmetry keeps us from ever emitting a false "missing" (#911). */
+  /** Cited symbol names confirmed PRESENT (word-boundary occurrence anywhere in
+   *  tracked source, incl. usages/comments). `null` when symbol presence is
+   *  entirely unavailable (non-git repo, `find` fallback) — every symbol ref then
+   *  resolves "unknown" (neutral). Subset of `searchedSymbols`. (#911) */
   presentSymbols: Set<string> | null;
+  /** Cited symbol names the resolver DEFINITIVELY searched for (grep ran and
+   *  returned found/not-found). A symbol in `searchedSymbols` but not
+   *  `presentSymbols` is confirmed-ABSENT → "missing"; a symbol that was NOT
+   *  searched (grep errored, e.g. exit 128) is omitted from both sets → "unknown"
+   *  (neutral), never a false "missing". `null` whenever `presentSymbols` is null.
+   *  This is what keeps a transient grep error off the dangerous side of the 🔴
+   *  invariant. (#911) */
+  searchedSymbols: Set<string> | null;
   /** Line count for a repo-relative file, or null if it can't be determined. */
   lineCount(relpath: string): number | null;
   /** True when the file walk was truncated by WALK_FILE_CAP — file-not-found is
@@ -356,13 +361,20 @@ export function resolveRefAgainstView(
   view: RepoView,
 ): RefStatus {
   if (ref.kind === "symbol") {
-    // Presence-only resolution (#911). null → couldn't grep → neutral. Otherwise
-    // membership decides: found anywhere → ok; searched-and-absent → missing. We
-    // deliberately accept usage/comment occurrences as "ok" — declining
-    // definition-vs-usage precision keeps us off the dangerous (false-"missing")
-    // side of the 🔴 invariant.
+    // Presence resolution (#911), three-way so a grep error is never a false
+    // "missing": no presence info at all → neutral; found → ok; searched and not
+    // found → missing (confirmed absent); searched-set present but this name not
+    // in it (grep errored for it) → neutral. "Found anywhere" (incl.
+    // usage/comment) counts as ok — declining definition-vs-usage precision keeps
+    // us off the dangerous side of the 🔴 invariant. NOTE: a "missing" here is
+    // only ACTED ON by validateProjectReferences when the symbol was previously
+    // confirmed present (drift); a never-present external/historical mention is a
+    // no-op. The pure verdict stays presence-shaped so both modes agree.
     if (view.presentSymbols == null) return "unknown";
-    return view.presentSymbols.has(ref.name) ? "ok" : "missing";
+    if (view.presentSymbols.has(ref.name)) return "ok";
+    if (view.searchedSymbols != null && !view.searchedSymbols.has(ref.name))
+      return "unknown"; // not definitively searched (grep error) → neutral
+    return "missing"; // searched and absent
   }
 
   if (ref.kind === "command") {
@@ -486,47 +498,65 @@ export class DirectFsResolver implements ReferenceResolver {
     const names = [
       ...new Set(refs.flatMap((r) => (r.kind === "symbol" ? [r.name] : []))),
     ];
+    const sym = this.symbolPresence(names);
     const view: RepoView = {
       ...this.repoView(),
-      presentSymbols: this.symbolPresence(names),
+      presentSymbols: sym?.present ?? null,
+      searchedSymbols: sym?.searched ?? null,
     };
     const map = new Map<string, RefStatus>();
     for (const ref of refs) map.set(ref.raw, resolveRefAgainstView(ref, view));
     return map;
   }
 
-  /** Which of `names` occur (word-boundary) anywhere in tracked source. Returns
-   *  null when symbol presence can't be determined (root isn't a git work tree /
-   *  git unavailable) so every symbol ref stays "unknown" (neutral). An empty
-   *  input yields an empty Set (nothing to search), which is irrelevant since
-   *  there are then no symbol refs to resolve. */
-  private symbolPresence(names: string[]): Set<string> | null {
-    if (names.length === 0) return new Set();
-    const inTree = spawnSync(
+  /** Which of `names` are present vs definitively searched, via `git grep`.
+   *  Returns null when symbol presence can't be determined at all (root isn't a
+   *  git work tree / git unavailable) → every symbol ref stays "unknown". An
+   *  empty input yields empty sets (irrelevant — no symbol refs to resolve).
+   *
+   *  Greps from the repo TOPLEVEL (not `this.root`) so a symbol defined in a
+   *  sibling package of a monorepo still resolves — matching the synthetic
+   *  probe's `cd $(git rev-parse --show-toplevel)` so the two modes agree (SF3).
+   *  `GIT_*` env is scrubbed so a gateway launched under a stray `GIT_DIR` /
+   *  `GIT_INDEX_FILE` can't grep the wrong repo and mass-false-miss (SF2).
+   *  A grep exit of 0=present, 1=absent; ANY other status (128 error, signal)
+   *  leaves the name UNSEARCHED → "unknown" (SF1) — never a false "missing". */
+  private symbolPresence(
+    names: string[],
+  ): { present: Set<string>; searched: Set<string> } | null {
+    if (names.length === 0) return { present: new Set(), searched: new Set() };
+    const env = scrubbedGitEnv();
+    const top = spawnSync(
       "git",
-      ["-C", this.root, "rev-parse", "--is-inside-work-tree"],
-      { encoding: "utf8" },
+      ["-C", this.root, "rev-parse", "--show-toplevel"],
+      { encoding: "utf8", env },
     );
-    if (inTree.status !== 0 || inTree.stdout.trim() !== "true") return null;
+    if (top.status !== 0) return null;
+    const cwd = top.stdout.trim();
+    if (!cwd) return null;
     const present = new Set<string>();
+    const searched = new Set<string>();
     for (const name of names) {
       // Defense-in-depth: extraction already guarantees this charset, but assert
       // again so a future regex change can't turn a name into a grep argument we
-      // can't reason about. A non-conforming name is left ABSENT-but-unsearched,
-      // so it must resolve neutral — but since it can't be extracted, this never
-      // fires in practice.
+      // can't reason about. A non-conforming name is left UNSEARCHED → neutral.
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) continue;
-      // `-q` short-circuits on first hit (bounded output, fast on common ids);
-      // `-w` whole word (so `foo` never matches `foobar`); `-F` fixed string;
-      // `--` so a name can't be read as a flag.
-      const r = spawnSync(
-        "git",
-        ["-C", this.root, "grep", "-qwF", "--", name],
-        { encoding: "utf8" },
-      );
-      if (r.status === 0) present.add(name);
+      // `-q` short-circuits on first hit (bounded, fast); `-w` whole word (so
+      // `foo` never matches `foobar`); `-F` fixed string; `--` so a name can't be
+      // read as a flag.
+      const r = spawnSync("git", ["-C", cwd, "grep", "-qwF", "--", name], {
+        encoding: "utf8",
+        env,
+      });
+      if (r.status === 0) {
+        present.add(name);
+        searched.add(name);
+      } else if (r.status === 1) {
+        searched.add(name); // definitively absent
+      }
+      // any other status (e.g. 128 / null) → unsearched → "unknown" (neutral)
     }
-    return present;
+    return { present, searched };
   }
 
   private repoView(): RepoView {
@@ -538,9 +568,10 @@ export class DirectFsResolver implements ReferenceResolver {
       filesLower: walk.filesLower,
       basenames: walk.basenames,
       truncated: walk.truncated,
-      // Placeholder — symbol presence is computed per batch in resolve() and
+      // Placeholders — symbol presence is computed per batch in resolve() and
       // overlaid; the cached file/command view never carries it.
       presentSymbols: null,
+      searchedSymbols: null,
       scripts: readScripts(safeRead(join(root, "package.json"))),
       makeTargets: readMakeTargets(
         safeRead(join(root, "Makefile")) ??
@@ -628,11 +659,32 @@ const PROBE_PKG = "===LORE-PKG===";
 const PROBE_MAKE = "===LORE-MAKE===";
 const PROBE_LINES = "===LORE-LINES===";
 // #911 symbol section. PROBE_SYMS opens it; PROBE_SYMS_OK is emitted ONLY inside
-// the `git`-present branch, so the parser can tell "grep ran, found none" (→ an
-// empty Set, real misses) from "grep didn't run" (→ null, neutral). Without this
-// marker an empty section would be ambiguous and could mass-penalize.
+// the `git`-present branch (so "grep ran" is distinguishable from "git absent");
+// PROBE_SYMS_DONE is emitted ONLY after every per-symbol grep completed, so a
+// truncated probe (output cut mid-section) yields a NULL set instead of a partial
+// one that would false-"missing" the un-emitted symbols (SF4). Between OK and
+// DONE, each searched symbol emits `name\t1` (present) or `name\t0` (absent); a
+// grep that errored emits nothing → the name stays UNSEARCHED → "unknown".
 const PROBE_SYMS = "===LORE-SYMS===";
 const PROBE_SYMS_OK = "===LORE-SYMS-OK===";
+const PROBE_SYMS_DONE = "===LORE-SYMS-DONE===";
+
+/** A copy of the process env with git context-overrides removed, so a `git grep`
+ *  the gateway spawns can't be redirected to the wrong repo (or a `/dev/null`
+ *  index) by an inherited `GIT_DIR` / `GIT_INDEX_FILE` / `GIT_WORK_TREE` and
+ *  mass-false-miss every symbol (#911 SF2). */
+function scrubbedGitEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const k of [
+    "GIT_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_WORK_TREE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_COMMON_DIR",
+  ])
+    delete env[k];
+  return env;
+}
 
 /**
  * Build the read-only shell probe that emits a repo snapshot: the tracked file
@@ -658,17 +710,20 @@ export function buildRefcheckProbeScript(refs: Reference[]): string {
   const refset = `|${[...basenames].join("|")}|`;
 
   // Cited symbols (#911), identifier-charset only (single-quote-safe; assert
-  // again as defense-in-depth). One `git grep -qwF` per symbol, emitted as a
-  // literal command list (no shell `for … in` so an empty list is a non-issue);
-  // a matched symbol echoes its own name back. The grep runs from the repo root
-  // (the leading `cd` subshell) so it agrees with Direct-FS.
+  // again as defense-in-depth). One grep per symbol, emitted as a literal command
+  // list (no shell `for … in`, so an empty list is a non-issue). Each emits
+  // `name\t1` (present) or `name\t0` (absent); a grep that ERRORED (exit 128, not
+  // 0/1) emits nothing → the parser leaves it UNSEARCHED → "unknown" (SF1). The
+  // grep runs from the repo root (leading `cd` subshell) so it agrees with the
+  // toplevel-scoped Direct-FS grep.
   const symbols = new Set<string>();
   for (const ref of refs) {
     if (ref.kind !== "symbol") continue;
     if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(ref.name)) symbols.add(ref.name);
   }
   const symbolLines = [...symbols].map(
-    (s) => `git grep -qwF -- '${s}' 2>/dev/null && printf '%s\\n' '${s}'`,
+    (s) =>
+      `git grep -qwF -- '${s}' 2>/dev/null; case $? in 0) printf '%s\\t1\\n' '${s}';; 1) printf '%s\\t0\\n' '${s}';; esac`,
   );
   // Run the snapshot from the REPO ROOT, not the client's CWD. `git ls-files`
   // (and the `find` fallback) emit paths relative to the working directory, but
@@ -689,18 +744,20 @@ export function buildRefcheckProbeScript(refs: Reference[]): string {
     `printf '%s\\n' '${PROBE_LINES}'`,
     `__refset='${refset}'`,
     `printf '%s\\n' "$__f" | while IFS= read -r f; do bn=$(printf '%s' "\${f##*/}" | tr '[:upper:]' '[:lower:]'); case "$__refset" in *"|$bn|"*) printf '%s\\t%s\\n' "$f" "$(wc -l < "$f" 2>/dev/null)";; esac; done`,
-    // Symbol section: the OK marker is printed ONLY when this IS a git work tree,
-    // so the parser distinguishes "ran, none found" from "couldn't run".
+    // Symbol section: OK is printed only inside a git work tree (so the parser
+    // tells "ran" from "git absent"); DONE is printed only after EVERY per-symbol
+    // grep completed, so a truncated probe → no DONE → neutral (SF4), never a
+    // partial set that false-misses the un-emitted symbols.
     `printf '%s\\n' '${PROBE_SYMS}'`,
     `if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then`,
     `printf '%s\\n' '${PROBE_SYMS_OK}'`,
     ...symbolLines,
+    `printf '%s\\n' '${PROBE_SYMS_DONE}'`,
     `fi`,
-    // Force a 0 exit: the last `git grep -q` returns 1 when a symbol is absent,
-    // which would otherwise make the whole probe exit non-zero → the client's
-    // tool marks it `isError` → the ENTIRE refcheck batch goes neutral (no
-    // penalties at all). A trailing `true` keeps a legitimately-missing symbol
-    // a "missing", not a silent batch abort.
+    // Force a 0 exit: a per-symbol `git grep -q` returns 1 when absent, which
+    // would otherwise make the whole probe exit non-zero → the client tool marks
+    // it `isError` → the ENTIRE refcheck batch goes neutral. A trailing `true`
+    // keeps a legitimately-absent symbol a real signal, not a silent batch abort.
     `true`,
     `)`,
   ].join("\n");
@@ -754,22 +811,38 @@ export function parseProbeSnapshot(text: string): RepoView | null {
     if (path && !Number.isNaN(n)) lineCounts.set(path, n + 1); // +1: trailing-newline lenience, mirrors Direct-FS split
   }
 
-  // Symbol presence (#911): null unless the section exists AND carries the OK
-  // marker (= the client ran `git grep`). "Ran, found none" is a real empty Set
-  // (genuine misses); "didn't run" / "old probe" is null (neutral).
+  // Symbol presence (#911): both sets are null unless the section is bounded by
+  // BOTH the OK marker (client ran `git grep`) AND the DONE marker (every grep
+  // completed — output not truncated). Each `name\t1` line is present+searched;
+  // `name\t0` is searched-absent; an errored grep emitted nothing → unsearched →
+  // "unknown". Missing OK (git absent) / missing DONE (truncated) / old probe →
+  // null (neutral), so a degenerate or cut-off probe can never false-"missing".
   let presentSymbols: Set<string> | null = null;
+  let searchedSymbols: Set<string> | null = null;
   if (symsAt !== -1) {
     const symsBlock = text.slice(symsAt + PROBE_SYMS.length);
     const okAt = symsBlock.indexOf(PROBE_SYMS_OK);
-    if (okAt !== -1) {
-      const set = new Set<string>();
+    const doneAt = symsBlock.indexOf(PROBE_SYMS_DONE);
+    if (okAt !== -1 && doneAt !== -1 && doneAt > okAt) {
+      const present = new Set<string>();
+      const searched = new Set<string>();
       for (const raw of symsBlock
-        .slice(okAt + PROBE_SYMS_OK.length)
+        .slice(okAt + PROBE_SYMS_OK.length, doneAt)
         .split("\n")) {
-        const s = raw.trim();
-        if (s && /^[A-Za-z_][A-Za-z0-9_]*$/.test(s)) set.add(s);
+        const tab = raw.indexOf("\t");
+        if (tab === -1) continue;
+        const name = raw.slice(0, tab).trim();
+        const bit = raw.slice(tab + 1).trim();
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) continue;
+        if (bit === "1") {
+          present.add(name);
+          searched.add(name);
+        } else if (bit === "0") {
+          searched.add(name);
+        }
       }
-      presentSymbols = set;
+      presentSymbols = present;
+      searchedSymbols = searched;
     }
   }
 
@@ -778,6 +851,7 @@ export function parseProbeSnapshot(text: string): RepoView | null {
     filesLower,
     basenames,
     presentSymbols,
+    searchedSymbols,
     scripts: readScripts(pkgBlock.trim() || null),
     makeTargets: readMakeTargets(makeBlock.trim() || null),
     lineCount: (rel) => lineCounts.get(rel) ?? null,

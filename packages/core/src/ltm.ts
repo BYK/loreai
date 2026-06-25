@@ -1124,6 +1124,20 @@ export async function validateProjectReferences(
 
   let checked = 0;
   let penalized = 0;
+  // Symbol drift uses a presence HISTORY (#911): a symbol only counts as broken
+  // when it was previously confirmed present in this repo and is now absent (a
+  // genuine rename/removal). A symbol that was NEVER present here (external lib,
+  // historical/renamed-away mention, rejected alternative) never gets a row, so
+  // it can never penalize — this is what keeps symbol validation on the safe
+  // side of "cannot verify ≠ broken".
+  const recordSymbolPresent = db().query(
+    `INSERT INTO knowledge_symbol_presence (logical_id, symbol, last_present_at)
+       VALUES (?, ?, ?)
+     ON CONFLICT(logical_id, symbol) DO UPDATE SET last_present_at = excluded.last_present_at`,
+  );
+  const wasSymbolPresent = db().query(
+    `SELECT 1 FROM knowledge_symbol_presence WHERE logical_id = ? AND symbol = ?`,
+  );
   // Stamp the 24h gate in a `finally`, OUTSIDE the penalty transaction. If a
   // write inside the transaction throws, `withTransaction` rolls back the whole
   // batch — but the gate MUST still advance, otherwise the next idle tick re-runs
@@ -1137,6 +1151,24 @@ export async function validateProjectReferences(
         let total = 0; // refs with a DEFINITIVE status (ok|missing); excludes unknown
         for (const ref of refs) {
           const st = statusMap.get(ref.raw);
+          if (ref.kind === "symbol") {
+            if (st === "ok") {
+              // Confirmed present now — record so a later disappearance reads as
+              // drift. Counts as a definitive (verifiable) ref, never broken.
+              recordSymbolPresent.run(logicalId, ref.name, now);
+              total++;
+            } else if (st === "missing") {
+              // Confirmed ABSENT. Only drift (broken) if we have proof it was
+              // present before; otherwise a strict no-op (never-present mention).
+              if (wasSymbolPresent.get(logicalId, ref.name)) {
+                broken++;
+                total++;
+              }
+            }
+            // "unknown" → neutral, not counted
+            continue;
+          }
+          // file / command refs: a definitive "missing" is directly broken.
           if (st === "missing") {
             broken++;
             total++;
