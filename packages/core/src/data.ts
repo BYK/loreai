@@ -1180,6 +1180,17 @@ export function moveSessions(
       )
       .run(toId, fromProjectId, ...allIds);
 
+    // Outcome-reward injection log (#497) is keyed on session_id and scoped by
+    // project_id; creditSessionOutcome filters on the session's CURRENT project,
+    // so the rows must follow the session to the target or its credits are
+    // silently dropped (and the rows orphan if the source project is later
+    // deleted). Mirror the per-session re-point above. (#996)
+    database
+      .query(
+        `UPDATE knowledge_session_injections SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
+      )
+      .run(toId, fromProjectId, ...allIds);
+
     // Re-bind session_state to the target project path (confident, not provisional).
     database
       .query(

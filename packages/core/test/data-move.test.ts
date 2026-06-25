@@ -87,6 +87,19 @@ function insertKnowledge(
     .run(id, 0.8, now, now);
 }
 
+function insertInjection(
+  projectId: string,
+  sessionId: string,
+  logicalId: string,
+): void {
+  db()
+    .query(
+      `INSERT INTO knowledge_session_injections (session_id, logical_id, project_id, created_at, credited)
+       VALUES (?, ?, ?, ?, 0)`,
+    )
+    .run(sessionId, logicalId, projectId, Date.now());
+}
+
 function countInProject(table: string, projectId: string): number {
   return (
     db()
@@ -112,6 +125,7 @@ describe("moveSessions", () => {
     database.query("DELETE FROM session_prompt_deltas").run();
     database.query("DELETE FROM knowledge WHERE embedding IS NOT NULL").run();
     database.query("DELETE FROM knowledge").run();
+    database.query("DELETE FROM knowledge_session_injections").run();
     database.query("DELETE FROM session_state").run();
 
     pidA = ensureProject(PROJECT_A);
@@ -185,6 +199,21 @@ describe("moveSessions", () => {
     expect(countInProject("knowledge", pidB)).toBe(1);
     // Unlinked knowledge stayed
     expect(countInProject("knowledge", pidA)).toBe(1);
+  });
+
+  test("moves outcome-reward injection log rows with the session (#996)", () => {
+    insertMessage(pidA, SESSION_1, "msg-inj-1");
+    insertInjection(pidA, SESSION_1, "k-inj-moved");
+    insertInjection(pidA, SESSION_2, "k-inj-stay"); // other session — stays
+
+    data.moveSessions([SESSION_1], pidA, PROJECT_B);
+
+    // The moved session's injections must follow it: creditSessionOutcome filters
+    // on the session's CURRENT project, so leaving them under A silently drops the
+    // credits (and orphans the rows if A is later deleted).
+    expect(countInProject("knowledge_session_injections", pidB)).toBe(1);
+    // The unmoved session's injection stayed in A.
+    expect(countInProject("knowledge_session_injections", pidA)).toBe(1);
   });
 
   test("updates session_state project_path and provisional flag", () => {
