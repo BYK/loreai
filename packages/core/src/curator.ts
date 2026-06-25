@@ -282,7 +282,11 @@ export function applyOps(
     detectedRelations?: DetectedRelation[];
     /** Worker model that produced these ops (for v35 source attribution). */
     workerModel?: { providerID: string; modelID: string };
-    /** #627 Phase 1: per-entry metadata stamped on every "create" op. */
+    /**
+     * #627: per-entry provenance for this run. Phase 1 stamps it on "create" ops;
+     * Phase 2 also threads it through "update" (content changes) and "delete"
+     * (death certs). Absent/empty → prior commit anchor is forward-copied.
+     */
     metadata?: KnowledgeMetadata;
   },
 ): {
@@ -386,7 +390,13 @@ export function applyOps(
             ? op.content.slice(0, MAX_ENTRY_CONTENT_LENGTH) +
               " [truncated — entry too long]"
             : op.content;
-        ltm.update(op.id, { content, confidence: op.confidence });
+        // #627 Phase 2: stamp the edit with the session's commit anchor so a
+        // content change refreshes provenance (a no-op when metadata is absent).
+        ltm.update(op.id, {
+          content,
+          confidence: op.confidence,
+          metadata: input.metadata,
+        });
         // Key on the stable logical_id: a content change appends a new version, so
         // op.id is now a superseded version id. idsToSync + the delta channel must
         // reference the logical_id to resolve the current version downstream.
@@ -417,7 +427,8 @@ export function applyOps(
           title: entry.title,
           prevContent: entry.content,
         });
-        ltm.remove(op.id);
+        // #627 Phase 2: record the delete-time commit anchor on the death cert.
+        ltm.remove(op.id, input.metadata);
         deleted++;
       }
     }

@@ -319,6 +319,14 @@ export function appendVersion(
     content?: string;
     category?: string;
     isDeleted?: boolean;
+    /**
+     * #627 Phase 2: stamp the NEW version with fresh provenance (the commit the
+     * edit/delete happened at). When omitted — or empty (`{}` → NULL via
+     * stringifyMetadata) — the prior version's metadata is forward-copied via
+     * `COALESCE(?, metadata)`, so a caller with no session gitHead (CLI import,
+     * dashboard delete) never wipes a previously-recorded commit anchor.
+     */
+    metadata?: KnowledgeMetadata;
   } = {},
 ): string | null {
   const newId = uuidv7();
@@ -351,7 +359,7 @@ export function appendVersion(
            logical_id, version, is_deleted, is_current)
          SELECT
            ?, project_id, COALESCE(?, category), COALESCE(?, title), COALESCE(?, content),
-           source_session, cross_project, created_at, ?, metadata, NULL,
+           source_session, cross_project, created_at, ?, COALESCE(?, metadata), NULL,
            created_by, updated_by, sensitivity, promotion_status, promoted_at,
            approval_status, approved_by, approved_at, source_user_id, source_entry_id,
            last_accessed_at, worker_provider_id, worker_model_id,
@@ -364,6 +372,9 @@ export function appendVersion(
         overrides.title ?? null,
         overrides.content ?? null,
         now,
+        // #627 Phase 2: a non-empty override stamps the new version; NULL (absent
+        // or `{}`) makes COALESCE forward-copy the prior version's metadata.
+        stringifyMetadata(overrides.metadata),
         overrides.isDeleted ? 1 : 0,
         cur.id,
       );
@@ -452,6 +463,12 @@ export function update(
     confidence?: number;
     updatedBy?: string;
     sensitivity?: Sensitivity;
+    /**
+     * #627 Phase 2: provenance for the edit. Applied ONLY when a content change
+     * appends a new version — a metric/sensitivity-only update mutates no version
+     * row (A2 rows are immutable), so the existing gitHead correctly stands.
+     */
+    metadata?: KnowledgeMetadata;
   },
 ) {
   // A2 (#823): content is IMMUTABLE per version. A content change appends a new
@@ -466,7 +483,10 @@ export function update(
   if (input.content !== undefined) {
     const cur = getByLogical(logicalId);
     if (cur && cur.content !== input.content) {
-      appendVersion(logicalId, { content: input.content });
+      appendVersion(logicalId, {
+        content: input.content,
+        metadata: input.metadata,
+      });
       appended = true;
     }
   }
@@ -519,15 +539,17 @@ export function update(
   }
 }
 
-export function remove(id: string) {
+export function remove(id: string, metadata?: KnowledgeMetadata) {
   // A2 (#823): delete = append an immutable is_deleted "death-certificate"
   // version (ordinary append, no physical DELETE). The death cert IS the
   // tombstone + resurrection guard: knowledge_current excludes it, the FTS
   // triggers drop its posting, and isTombstoned() detects it so a stale .lore.md
   // re-import can't resurrect the entry. Keyed on the stable logical_id.
+  // #627 Phase 2: the death cert records the delete-time gitHead (provenance for
+  // `lore why`); absent → forward-copies the entry's last commit anchor.
   const logicalId = logicalIdOf(id);
   if (!getByLogical(logicalId)) return; // already deleted or unknown — no-op
-  appendVersion(logicalId, { isDeleted: true });
+  appendVersion(logicalId, { isDeleted: true, metadata });
   // The row is NOT physically deleted, so FK ON DELETE CASCADE no longer fires —
   // clean cross-references explicitly, all keyed on the logical_id.
   db()

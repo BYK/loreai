@@ -7,8 +7,10 @@ import {
   getByLogical,
   hydrateKnowledgeEntry,
   logicalIdOf,
+  remove,
   searchScored,
   searchScoredOtherProjects,
+  update,
   type KnowledgeMetadata,
 } from "../src/ltm";
 
@@ -342,5 +344,143 @@ describe("scored search hydrates metadata (Seer #14860239, #627 Phase 1)", () =>
     expect(hit).toBeDefined();
     expect(typeof hit!.metadata).toBe("object");
     expect(hit!.metadata).toEqual({ gitHead: "0ther9999cafe" });
+  });
+});
+
+describe("update()/remove() refresh metadata on new versions (#627 Phase 2)", () => {
+  // Helper: read the metadata column straight off the current base-table row
+  // (including is_deleted death certs, which knowledge_current hides).
+  const rawCurrentMetadata = (logicalId: string): string | null => {
+    const row = db()
+      .query(
+        "SELECT metadata FROM knowledge WHERE logical_id = ? AND is_current = 1 LIMIT 1",
+      )
+      .get(logicalId) as { metadata: string | null } | undefined;
+    return row ? row.metadata : null;
+  };
+
+  test("content-changing update stamps the new version with fresh gitHead", () => {
+    const projectPath = nextProject();
+    const id = create({
+      projectPath,
+      category: "decision",
+      title: "Index strategy",
+      content: "original content at commit A",
+      scope: "project",
+      metadata: { gitHead: "aaaaaaa" },
+    });
+    update(id, {
+      content: "revised content at commit B",
+      metadata: { gitHead: "bbbbbbb" },
+    });
+    const after = getByLogical(logicalIdOf(id));
+    expect(after?.content).toBe("revised content at commit B");
+    // The bug (Phase 1): appendVersion forward-copied the mint-time gitHead.
+    expect(after?.metadata).toEqual({ gitHead: "bbbbbbb" });
+  });
+
+  test("content-changing update with NO metadata forward-copies prior gitHead", () => {
+    const projectPath = nextProject();
+    const id = create({
+      projectPath,
+      category: "decision",
+      title: "Forward-copy entry",
+      content: "v1 content",
+      scope: "project",
+      metadata: { gitHead: "ccccccc" },
+    });
+    // No metadata supplied (e.g. a CLI/.lore.md caller with no session gitHead).
+    update(id, { content: "v2 content" });
+    const after = getByLogical(logicalIdOf(id));
+    expect(after?.content).toBe("v2 content");
+    expect(after?.metadata).toEqual({ gitHead: "ccccccc" });
+  });
+
+  test("content-changing update with empty metadata forward-copies (never wipes)", () => {
+    const projectPath = nextProject();
+    const id = create({
+      projectPath,
+      category: "decision",
+      title: "Empty-meta entry",
+      content: "v1 content",
+      scope: "project",
+      metadata: { gitHead: "ddddddd" },
+    });
+    // An empty session metadata must not erase a previously-recorded gitHead.
+    update(id, { content: "v2 content", metadata: {} });
+    const after = getByLogical(logicalIdOf(id));
+    expect(after?.metadata).toEqual({ gitHead: "ddddddd" });
+  });
+
+  test("metric-only update (no content change) leaves metadata untouched", () => {
+    const projectPath = nextProject();
+    const id = create({
+      projectPath,
+      category: "decision",
+      title: "Metric-only entry",
+      content: "stable content",
+      scope: "project",
+      metadata: { gitHead: "eeeeeee" },
+    });
+    // No content change → no new version → metadata stays on the v1 row even
+    // though a fresh gitHead is supplied. Version rows are immutable (A2).
+    update(id, { confidence: 0.9, metadata: { gitHead: "fffffff" } });
+    const after = getByLogical(logicalIdOf(id));
+    expect(after?.metadata).toEqual({ gitHead: "eeeeeee" });
+  });
+
+  test("byte-identical re-observation does not append → metadata untouched", () => {
+    const projectPath = nextProject();
+    const id = create({
+      projectPath,
+      category: "decision",
+      title: "Re-observed entry",
+      content: "unchanged content",
+      scope: "project",
+      metadata: { gitHead: "1111111" },
+    });
+    update(id, {
+      content: "unchanged content",
+      metadata: { gitHead: "2222222" },
+    });
+    const after = getByLogical(logicalIdOf(id));
+    expect(after?.metadata).toEqual({ gitHead: "1111111" });
+  });
+
+  test("remove() stamps the death-cert version with the delete-time gitHead", () => {
+    const projectPath = nextProject();
+    const id = create({
+      projectPath,
+      category: "decision",
+      title: "Doomed entry",
+      content: "about to be deleted",
+      scope: "project",
+      metadata: { gitHead: "3333333" },
+    });
+    const logicalId = logicalIdOf(id);
+    remove(id, { gitHead: "4444444" });
+    // The entry is gone from the live view…
+    expect(getByLogical(logicalId)).toBeNull();
+    // …but the immutable death-cert version records where it was deleted.
+    expect(rawCurrentMetadata(logicalId)).toBe(
+      JSON.stringify({ gitHead: "4444444" }),
+    );
+  });
+
+  test("remove() with no metadata forward-copies the entry's last gitHead", () => {
+    const projectPath = nextProject();
+    const id = create({
+      projectPath,
+      category: "decision",
+      title: "Doomed entry (forward-copy)",
+      content: "about to be deleted",
+      scope: "project",
+      metadata: { gitHead: "5555555" },
+    });
+    const logicalId = logicalIdOf(id);
+    remove(id);
+    expect(rawCurrentMetadata(logicalId)).toBe(
+      JSON.stringify({ gitHead: "5555555" }),
+    );
   });
 });

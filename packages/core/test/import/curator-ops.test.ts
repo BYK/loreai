@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { ensureProject } from "../../src/db";
+import { db, ensureProject } from "../../src/db";
 import * as ltm from "../../src/ltm";
 import { parseOps, applyOps, type CuratorOp } from "../../src/curator";
 
@@ -177,5 +177,56 @@ describe("applyOps", () => {
 
     const result = applyOps(ops, { projectPath: PROJECT_PATH });
     expect(result.deleted).toBe(0);
+  });
+
+  // #627 Phase 2: applyOps threads the session's commit anchor into the
+  // update/delete paths (not just create) so a content edit refreshes provenance.
+  test("update op stamps the session gitHead onto a content change", () => {
+    const id = ltm.create({
+      projectPath: PROJECT_PATH,
+      category: "decision",
+      title: "Phase 2 update wiring",
+      content: "minted at commit A",
+      scope: "project",
+      metadata: { gitHead: "aaaaaaa" },
+    });
+    const ops: CuratorOp[] = [
+      { op: "update", id, content: "revised at commit B", confidence: 0.7 },
+    ];
+    const result = applyOps(ops, {
+      projectPath: PROJECT_PATH,
+      metadata: { gitHead: "bbbbbbb" },
+    });
+    expect(result.updated).toBe(1);
+    const after = ltm.getByLogical(ltm.logicalIdOf(id));
+    expect(after?.content).toBe("revised at commit B");
+    expect(after?.metadata).toEqual({ gitHead: "bbbbbbb" });
+  });
+
+  test("delete op stamps the session gitHead onto the death cert", () => {
+    const id = ltm.create({
+      projectPath: PROJECT_PATH,
+      category: "decision",
+      title: "Phase 2 delete wiring",
+      content: "minted at commit A",
+      scope: "project",
+      metadata: { gitHead: "aaaaaaa" },
+    });
+    const logicalId = ltm.logicalIdOf(id);
+    const ops: CuratorOp[] = [
+      { op: "delete", id, reason: "superseded at commit B" },
+    ];
+    const result = applyOps(ops, {
+      projectPath: PROJECT_PATH,
+      metadata: { gitHead: "bbbbbbb" },
+    });
+    expect(result.deleted).toBe(1);
+    expect(ltm.getByLogical(logicalId)).toBeNull();
+    const row = db()
+      .query(
+        "SELECT metadata FROM knowledge WHERE logical_id = ? AND is_current = 1 LIMIT 1",
+      )
+      .get(logicalId) as { metadata: string | null } | undefined;
+    expect(row?.metadata).toBe(JSON.stringify({ gitHead: "bbbbbbb" }));
   });
 });
