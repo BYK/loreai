@@ -116,18 +116,21 @@ const LTM_BUDGET_STEP = 8_000;
 const NO_CACHE_WRITE_THRESHOLD = 3;
 
 /** EMA smoothing for the per-session prefix-churn rate (fraction of recent real
- *  turns that were `prefix-rewrite` busts). 0.35 ≈ a ~3-turn effective window:
- *  rewrites every ≤3 turns hold the EMA above PREFIX_CHURN_WARM_BLOCK, while a
- *  single one-off rewrite bumps to ~0.35 then decays below it within ~2 clean
- *  turns. */
+ *  turns that were `prefix-rewrite` busts). ~3-turn effective window. */
 export const PREFIX_CHURN_ALPHA = 0.35;
 
 /** Prefix-churn rate at/above which the cache warmer suppresses warming. While
  *  the distilled prefix is being rewritten this often, every warmup lands as a
  *  partial (it refreshes a prefix the next real turn replaces) — pure waste.
  *  Warming re-arms automatically once real turns stop rewriting the prefix and
- *  the EMA decays below this threshold. */
-export const PREFIX_CHURN_WARM_BLOCK = 0.35;
+ *  the EMA decays below this threshold.
+ *
+ *  🔴 Set STRICTLY ABOVE PREFIX_CHURN_ALPHA so a SINGLE one-off rewrite (which
+ *  bumps the from-zero EMA to exactly ALPHA) does NOT block — that warmup would
+ *  land as a clean refresh because the prefix is now stable again. Only SUSTAINED
+ *  churn trips it: two consecutive rewrites give EMA ≈ 0.58, and a rewrite every
+ *  ≤2 turns holds the EMA above this threshold. */
+export const PREFIX_CHURN_WARM_BLOCK = 0.4;
 
 /** Layer-0 ceiling fraction for free-write sessions.
  *  65% of maxInput ≈ 109k for 200k context → ~59k headroom for tool-heavy turns. */

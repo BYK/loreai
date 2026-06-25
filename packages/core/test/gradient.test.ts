@@ -4648,12 +4648,18 @@ describe("tier-based context management", () => {
       });
 
       const maxInput = 200_000 - 32_000; // 168K
-      // The window ships at the forced layer (no escalation needed — the budgets
-      // already keep it under the ceiling).
-      expect(result.layer).toBeGreaterThanOrEqual(2);
-      // 🔴 The SHIPPED window must fit the REAL ceiling — assert in REAL tokens
-      // (chars/3 × BODY_TOKEN_RATIO + overhead 0 + ltm 0), the same quantity the
-      // API counts. This is STRICTLY STRONGER than the old chars/3-only check.
+      // 🔴 Ships at EXACTLY the forced layer 2 — NO escalation. This is the
+      // discriminating assertion: the budget fix keeps the layer-2 window under
+      // the real ceiling, so fitsWithSafetyMargin accepts it and the loop does
+      // NOT escalate. Reverting the budget /RATIO makes the layer-2 window
+      // overflow → fitsWithSafetyMargin rejects → the loop escalates all the way
+      // to the Layer-4 emergency tail (a tiny window). `toBe(2)` fails on that
+      // revert; `toBeGreaterThanOrEqual(2)` would NOT (Layer 4 satisfies it),
+      // making the test vacuous.
+      expect(result.layer).toBe(2);
+      // The SHIPPED window also fits the REAL ceiling — assert in REAL tokens
+      // (chars/3 × BODY_TOKEN_RATIO + overhead 0 + ltm 0), the quantity the API
+      // counts. Strictly stronger than the old chars/3-only check.
       expect(result.totalTokens * BODY_TOKEN_RATIO).toBeLessThanOrEqual(
         maxInput,
       );
