@@ -71,6 +71,7 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 |---|---|
 | `LORE_DB_PATH` | Resolved path of the SQLite database file. Reads `LORE_DB_PATH` first; falls back to `${dataDir}/lore.db` (typically `~/.local/share/lore/lore.db`). The test preload (`packages/core/test/setup.ts`) sets `LORE_DB_PATH` to a temp directory so tests never touch the production DB. Setting it to a non-existent path will create the file on first use. The gateway itself does not set this — it expects a stable location for the DB so the SQLite WAL and FTS5 indices persist across restarts. Env: `LORE_DB_PATH`. |
 | `LORE_DISABLE_VEC` | LORE_DISABLE_VEC=1 forces the JS brute-force vector-search path. Useful as a production kill-switch if the native extension causes issues, and as a test seam for the JS fallback. Set before the first `db()` call — once attempted=true is sticky for the connection lifetime, the env var won't be re-read until resetVecState() runs (in close()). |
+| `LORE_DISABLE_VEC_WORKER` | Kill switch: force the in-process vector-search path, disabling the off-thread read-worker pool. Default-on escape hatch, not opt-in. |
 | `LORE_NO_DB_TRACING` | LORE_NO_DB_TRACING=1 returns the raw connection instead of the query-tracing Proxy (disables automatic per-query DB spans). |
 
 ## How variables are evaluated

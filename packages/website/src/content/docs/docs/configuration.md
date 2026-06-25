@@ -159,7 +159,7 @@ Recall and search pipeline tuning: FTS weights, query expansion, vector boost, e
 | `queryExpansionMaxTerms` | number | `8` | min 2, max 20 | Max query terms (after stopword removal) for LLM expansion. Longer queries skip expansion. Default: 8. |
 | `vectorBoostWeight` | number | `1.5` | min 1, max 5 | RRF weight multiplier for vector search lists (when query has enough terms). Set to 1.0 to disable. Default: 1.5. |
 | `vectorBoostMinTerms` | number | `2` | min 1, max 10 | Minimum meaningful query terms (after stopword removal) to activate vector boost. Default: 2. |
-| `embeddings` | object | `{"enabled":true,"provider":"local","model":"nomic-ai/nomic-embed-text-v1.5","dimensions":768}` |  | Vector embedding search provider, model, and dimensions. |
+| `embeddings` | object | `{"enabled":true,"provider":"local","model":"nomic-ai/nomic-embed-text-v1.5","dimensions":768,"workerOffload":true,"workerPoolSize":2}` |  | Vector embedding search provider, model, and dimensions. |
 | `recall` | object | `{"charBudget":12000,"relevanceFloor":0.15,"maxResults":15,"absoluteFloor":0}` |  | Recall output formatting and result-count limits. |
 
 ### `search.ftsWeights`
@@ -182,6 +182,8 @@ Vector embedding search provider, model, and dimensions.
 | `provider` | enum | `"local"` |  | Embedding provider. "local" (no API key, on-device), "voyage" (VOYAGE_API_KEY), "openai" (OPENAI_API_KEY). Default: "local". |
 | `model` | string | `"nomic-ai/nomic-embed-text-v1.5"` |  | Model ID for the embedding provider. Default depends on provider. |
 | `dimensions` | number | `768` | min 64, max 2048 | Embedding dimensions. Default: 768 (local) / 1024 (voyage) / 1536 (openai). Local Nomic v1.5 supports Matryoshka: 64, 128, 256, 512, 768. |
+| `workerOffload` | boolean | `true` |  | Run vector searches on a read-worker pool off the main event loop. Kill switch (default true); set false to force the in-process path. |
+| `workerPoolSize` | number | `2` | min 1, max 16 | Number of read-worker threads for off-thread vector search. Default: 2. |
 
 ### `search.recall`
 

@@ -77,6 +77,8 @@ export function _setTestVectorWorkerFactory(
 /** Whether the pool should be used at all. */
 function poolEnabled(): boolean {
   if (poolBroken) return false;
+  // Kill switch: force the in-process vector-search path, disabling the
+  // off-thread read-worker pool. Default-on escape hatch, not opt-in.
   if (process.env.LORE_DISABLE_VEC_WORKER === "1") return false;
   // With a test factory installed the pool is explicitly under test.
   if (testWorkerFactory) return true;
