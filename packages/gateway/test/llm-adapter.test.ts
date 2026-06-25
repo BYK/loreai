@@ -30,6 +30,7 @@ import { upstreamFetch } from "../src/fetch";
 import { clearAllCosts, getSessionCosts } from "../src/cost-tracker";
 import { recordWorkerFailure, markWorkerPaused } from "../src/worker-health";
 import { captureSessionHeaders, captureBillingPrefix } from "../src/cch";
+import { _setTestVertexTokenProvider } from "../src/vertex-auth";
 
 // Claude Code billing-header system prompt — marks a session as an OAuth
 // billing session so worker calls replay its sniffed anthropic-beta header.
@@ -698,6 +699,82 @@ describe("createGatewayLLMClient.prompt", () => {
     expect(url).toContain("api.anthropic.com");
     const body = JSON.parse(init?.body as string) as Record<string, unknown>;
     expect(body.model).toBe("claude-haiku-4-5");
+  });
+
+  test("vertex worker posts to :rawPredict with a GCP bearer and strips the client key", async () => {
+    // A Vertex session's worker (distillation/curation) must POST the Anthropic
+    // body to the per-model :rawPredict URL authenticated with lore's GCP OAuth2
+    // bearer — NEVER the client x-api-key / anthropic-version header. Guards the
+    // credential swap (a regression that forwarded the client key would leak it
+    // to GCP and 401 every background call).
+    _setTestVertexTokenProvider(() => Promise.resolve("test-vertex-token"));
+    try {
+      mockFetch.mockResolvedValue(anthropicResponse());
+      const client = createGatewayLLMClient(
+        UPSTREAMS,
+        () => ({ scheme: "api-key", value: "client-key-ignored-for-vertex" }),
+        { providerID: "vertex", modelID: "claude-opus-4-8" },
+        { vertexProject: "test-vertex-project" },
+      );
+
+      const text = await client.prompt("system", "user", {
+        sessionID: "sess-vertex",
+        workerID: "lore-distill",
+        upstreamUrl: "https://global-aiplatform.googleapis.com",
+        upstreamProviderID: "vertex",
+        protocol: "vertex",
+      });
+
+      expect(text).toBe("hello from worker");
+      const [url, init] = mockFetch.mock.calls[0];
+      expect(url).toBe(
+        "https://global-aiplatform.googleapis.com/v1/projects/test-vertex-project/locations/global/publishers/anthropic/models/claude-opus-4-8:rawPredict",
+      );
+      const headers = init?.headers as Record<string, string>;
+      expect(headers.Authorization).toBe("Bearer test-vertex-token");
+      expect(headers["x-api-key"]).toBeUndefined();
+      expect(headers["anthropic-version"]).toBeUndefined();
+      const body = JSON.parse(init?.body as string) as Record<string, unknown>;
+      expect(body.anthropic_version).toBe("vertex-2023-10-16");
+      expect("model" in body).toBe(false);
+      expect("stream" in body).toBe(false);
+    } finally {
+      _setTestVertexTokenProvider(null);
+    }
+  });
+
+  test("vertex worker proceeds even when the client sends NO credential", async () => {
+    // Vertex auth is lore's GCP token, so a client sending no x-api-key is the
+    // legitimate gateway-holds-credentials case. Background distillation/curation
+    // must still run (a missing client key must NOT disable it for vertex).
+    _setTestVertexTokenProvider(() => Promise.resolve("test-vertex-token"));
+    try {
+      mockFetch.mockResolvedValue(anthropicResponse());
+      const client = createGatewayLLMClient(
+        UPSTREAMS,
+        () => null, // client provided no credential
+        { providerID: "vertex", modelID: "claude-opus-4-8" },
+        { vertexProject: "test-vertex-project" },
+      );
+
+      const text = await client.prompt("system", "user", {
+        sessionID: "sess-vertex-nokey",
+        workerID: "lore-distill",
+        upstreamUrl: "https://global-aiplatform.googleapis.com",
+        upstreamProviderID: "vertex",
+        protocol: "vertex",
+      });
+
+      expect(text).toBe("hello from worker");
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const [url, init] = mockFetch.mock.calls[0];
+      expect(url).toContain(":rawPredict");
+      expect((init?.headers as Record<string, string>).Authorization).toBe(
+        "Bearer test-vertex-token",
+      );
+    } finally {
+      _setTestVertexTokenProvider(null);
+    }
   });
 
   test("returns null without calling upstream when no auth is available", async () => {

@@ -71,7 +71,14 @@ export function vertexRawPredictUrl(
   stream: boolean,
 ): string {
   const verb = stream ? "streamRawPredict" : "rawPredict";
-  const encodedModel = encodeURIComponent(model);
+  // Encode the model id for safe path use, but PRESERVE a literal "@": Vertex
+  // model ids carry an "@YYYYMMDD" date suffix, and every published Vertex
+  // example (and Google's own SDK) puts the unencoded "@" in the path — it is a
+  // valid RFC 3986 `pchar`, so no encoding is required. Emitting "%40" instead
+  // risks a 404 on every dated model id; the literal "@" is the doc-matching,
+  // round-trip-safe form. (`encodeURIComponent` would otherwise turn "@"→"%40";
+  // nothing else in a Claude model id needs encoding.)
+  const encodedModel = encodeURIComponent(model).replace(/%40/g, "@");
   return `https://${region}-aiplatform.googleapis.com/v1/projects/${project}/locations/${region}/publishers/anthropic/models/${encodedModel}:${verb}`;
 }
 

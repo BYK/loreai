@@ -1081,16 +1081,6 @@ export function createGatewayLLMClient(
         return null;
       }
 
-      const cred = getAuth(opts?.sessionID, model.providerID);
-      if (!cred) {
-        log.warn("no auth credentials available for worker call");
-        recordWorkerFailure(
-          opts?.sessionID ?? "_unknown",
-          opts?.workerID ?? "unknown",
-          "no-auth",
-        );
-        return null;
-      }
       const upstreamOverride = opts?.upstreamUrl;
       // The explicit protocol hint comes from the SESSION's upstream. Only
       // honor it when the worker model belongs to the same provider as the
@@ -1106,6 +1096,30 @@ export function createGatewayLLMClient(
         model.providerID,
         sameProviderAsSession ? opts?.protocol : undefined,
       );
+
+      // Vertex authenticates with lore's own GCP OAuth2 bearer token (minted
+      // inside buildVertexWorkerRequest); the client credential is IGNORED on
+      // the wire. A Vertex client legitimately sends NO key — the
+      // gateway-holds-credentials model, identical to the conversation and
+      // warmer paths — so we must NOT fail-closed on a missing client
+      // credential for the vertex worker path (doing so silently disabled ALL
+      // background distillation/curation for such sessions). Synthesize a
+      // placeholder so the shared worker pipeline proceeds; it is never sent
+      // upstream (the vertex builder constructs its own headers and ignores it).
+      const cred =
+        getAuth(opts?.sessionID, model.providerID) ??
+        (protocol === "vertex"
+          ? ({ scheme: "bearer", value: "" } as AuthCredential)
+          : null);
+      if (!cred) {
+        log.warn("no auth credentials available for worker call");
+        recordWorkerFailure(
+          opts?.sessionID ?? "_unknown",
+          opts?.workerID ?? "unknown",
+          "no-auth",
+        );
+        return null;
+      }
       const target = resolveTarget(
         upstreams,
         protocol,

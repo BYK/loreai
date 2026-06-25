@@ -52,11 +52,19 @@ export async function getVertexAccessToken(): Promise<string> {
   try {
     token = await getAuth().getAccessToken();
   } catch (err) {
+    // Log the raw ADC failure to stderr so the operator can debug it, but do
+    // NOT embed it in the thrown message: this Error can propagate to the
+    // client (the conversation path surfaces it), and the raw ADC error may
+    // reveal local file paths / project hints. Keep the client message generic
+    // but actionable.
+    console.error(
+      "[lore] Vertex ADC token mint failed:",
+      (err as Error).message,
+    );
     throw new Error(
       "Vertex: failed to obtain a GCP access token via Application Default " +
         "Credentials. Run `gcloud auth application-default login`, or set " +
-        "GOOGLE_APPLICATION_CREDENTIALS to a service-account key JSON. " +
-        `(${(err as Error).message})`,
+        "GOOGLE_APPLICATION_CREDENTIALS to a service-account key JSON.",
     );
   }
   if (!token) {
@@ -87,11 +95,18 @@ export async function resolveVertexProject(
     cachedProject = configured;
     return configured;
   }
-  if (cachedProject !== null) return cachedProject;
+  // Only short-circuit on a CACHED NON-EMPTY value. A previous empty/failed
+  // ADC lookup must NEVER be cached as "" — that would permanently disable
+  // Vertex for the process lifetime after a single transient metadata-server
+  // hiccup. On empty/error we return "" without caching, so the next call
+  // re-probes (the caller fails this turn with a clear "project not set" error
+  // and recovers automatically once ADC provides a project).
+  if (cachedProject) return cachedProject;
   try {
-    cachedProject = (await getAuth().getProjectId()) ?? "";
+    const derived = (await getAuth().getProjectId()) ?? "";
+    if (derived) cachedProject = derived;
+    return derived;
   } catch {
-    cachedProject = "";
+    return "";
   }
-  return cachedProject;
 }

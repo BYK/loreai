@@ -5794,10 +5794,21 @@ async function handlePassthrough(
   const { response: upstreamResponse, effectiveProtocol } =
     await forwardToUpstream(req, config);
 
+  // Vertex speaks the native Anthropic wire format (Anthropic SSE for streaming
+  // and the native Anthropic JSON shape for non-streaming), so for passthrough
+  // routing it is wire-equivalent to "anthropic". Without this mapping a
+  // streaming meta request (title-gen/summary) on a Vertex session would take
+  // the cross-protocol branch below and get drained through extractJSONFromSSE,
+  // which returns only the last SSE data line ({"type":"message_stop"}) → an
+  // EMPTY response. Collapse vertex→anthropic here so a same-wire client
+  // (anthropic) streams through unchanged.
+  const wireProtocol: typeof effectiveProtocol =
+    effectiveProtocol === "vertex" ? "anthropic" : effectiveProtocol;
+
   // When upstream and client use the same protocol, pass through unchanged.
   // Cross-protocol translation is only needed when provider routing maps
   // to a different protocol (e.g., OpenAI client → Anthropic upstream).
-  if (effectiveProtocol === req.protocol) {
+  if (wireProtocol === req.protocol) {
     if (req.stream && upstreamResponse.body) {
       return new Response(upstreamResponse.body, {
         status: upstreamResponse.status,
@@ -5818,8 +5829,8 @@ async function handlePassthrough(
   // client's wire format (reuses the same translation infrastructure as
   // conversation turns).
   if (req.stream && upstreamResponse.body) {
-    if (effectiveProtocol === "anthropic") {
-      // Anthropic SSE upstream → translate to client's format
+    if (wireProtocol === "anthropic") {
+      // Anthropic SSE upstream (incl. Vertex) → translate to client's format
       const anthropicSSE = new Response(upstreamResponse.body, {
         status: upstreamResponse.status,
         headers: {
@@ -5838,7 +5849,7 @@ async function handlePassthrough(
     // Other cross-protocol streaming combos: accumulate + re-emit
     const resp = await accumulateNonStreamResponse(
       upstreamResponse,
-      effectiveProtocol,
+      wireProtocol,
     );
     return nonStreamHttpResponse(resp, req.protocol, req.stream);
   }
@@ -5846,7 +5857,7 @@ async function handlePassthrough(
   // Non-streaming cross-protocol: accumulate + re-emit
   const resp = await accumulateNonStreamResponse(
     upstreamResponse,
-    effectiveProtocol,
+    wireProtocol,
   );
   return nonStreamHttpResponse(resp, req.protocol, req.stream);
 }

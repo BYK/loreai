@@ -46,7 +46,7 @@ import { decompressBody } from "./cache-analytics";
 import { resolveAuth, authHeaders, markAuthStale } from "./auth";
 import { recordWorkerFailure, recordWorkerSuccess } from "./worker-health";
 import { resignBody } from "./cch";
-import { resolveUpstreamRoute } from "./config";
+import { loadConfig, resolveUpstreamRoute } from "./config";
 import { isBedrockMantleHost } from "./translate/bedrock";
 import {
   isVertexHost,
@@ -1925,7 +1925,12 @@ export async function executeWarmup(
     if (!model) return noResult;
     const region = vertexRegionFromUrl(profile.upstreamUrl) ?? "global";
     try {
-      const project = await resolveVertexProject("");
+      // Thread the configured project (LORE_VERTEX_PROJECT / GOOGLE_CLOUD_PROJECT)
+      // explicitly: after a restart the warmer can fire before any live
+      // conversation turn has populated resolveVertexProject's cache, and ADC's
+      // getProjectId() does NOT see LORE_VERTEX_PROJECT — so passing "" here
+      // would skip warmups ("no GCP project") for LORE_VERTEX_PROJECT-only users.
+      const project = await resolveVertexProject(loadConfig().vertexProject);
       if (!project) {
         log.warn(
           `cache-warmer: no GCP project for vertex session=${state.sessionID.slice(0, 16)}, skipping`,

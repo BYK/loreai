@@ -82,10 +82,17 @@ describe("vertexRawPredictUrl", () => {
     );
   });
 
-  test("URL-encodes the model id (the @ in a dated id)", () => {
-    expect(
-      vertexRawPredictUrl("global", "p", "claude-haiku-4-5@20251001", false),
-    ).toContain("models/claude-haiku-4-5%4020251001:rawPredict");
+  test("keeps a literal @ in a dated model id (no %40 encoding)", () => {
+    // Vertex (and Google's SDK) expect the unencoded "@" in the path; "%40"
+    // risks a 404. Guard against a regression back to encodeURIComponent's "%40".
+    const url = vertexRawPredictUrl(
+      "global",
+      "p",
+      "claude-haiku-4-5@20251001",
+      false,
+    );
+    expect(url).toContain("models/claude-haiku-4-5@20251001:rawPredict");
+    expect(url).not.toContain("%40");
   });
 });
 
