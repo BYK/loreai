@@ -20,6 +20,7 @@
 // `SyntheticProbeResolver` via a single `RepoView` + `resolveRefAgainstView`, so
 // the two modes can never silently diverge.
 
+import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute, join, normalize } from "node:path";
 
@@ -34,6 +35,19 @@ export type Reference =
        *  A bare `pnpm X` is ambiguous with a noun phrase ("npm registry") and is
        *  resolved confirm-only (never "missing"). `make` is always false. */
       explicit: boolean;
+      raw: string;
+    }
+  | {
+      /** A cited code identifier (function / const / class / type name) that the
+       *  entry claims still exists — e.g. "`evaluateCacheStrategy` called only
+       *  from `cache-warmer.ts:1252`" (#911). Only extracted when (a) inside a
+       *  backtick span, (b) the entry ALSO has a file ref (the adjacency bound),
+       *  and (c) the token is "codey" (PascalCase / camelCase / has `_` / was
+       *  call-like). Resolution is presence-only (grep), never AST: present
+       *  anywhere in tracked source → ok; searched-and-absent repo-wide →
+       *  missing; grep unavailable → unknown. */
+      kind: "symbol";
+      name: string;
       raw: string;
     };
 
@@ -124,6 +138,27 @@ const PM_BUILTINS = new Set([
 const PM_CMD_RE = /\b(pnpm|npm|yarn)\s+(run\s+)?([A-Za-z][A-Za-z0-9:_-]*)/g;
 const MAKE_CMD_RE = /\bmake\s+([A-Za-z][A-Za-z0-9:_-]*)/g;
 
+// Candidate code identifiers inside a backtick span (#911). The charset is the
+// grep-safe identifier set `[A-Za-z_][A-Za-z0-9_]*` ON PURPOSE — every extracted
+// name must be safe to embed in `git grep -F -- <name>` and in the client probe
+// without any escaping, and a name we can't grep must never be coined (it would
+// resolve "missing" on a Set absence). `$`-bearing identifiers are simply not
+// extracted (false negative, the safe direction). Group 1 is the identifier; the
+// trailing `\(?` lets us tell a call-site (`foo(`) from a bare token.
+const SYMBOL_CAND_RE = /([A-Za-z_][A-Za-z0-9_]*)(\()?/g;
+
+// A token is treated as a cited *symbol* (not prose) only when it carries a code
+// marker: it was call-like (`foo(`), PascalCase/camelCase (an internal case
+// change), or snake/CONSTANT_CASE (an `_`). Bare marker-free lowercase words
+// (`run`, `total`, `state`, `file`) read as prose and are rejected — this gate is
+// the load-bearing false-positive killer for the 🔴 never-penalize invariant.
+function isCodeySymbol(name: string, callLike: boolean): boolean {
+  if (callLike) return true;
+  if (name.includes("_")) return true;
+  // mixed case covers both camelCase (`sessionID`) and PascalCase (`RepoView`).
+  return /[a-z]/.test(name) && /[A-Z]/.test(name);
+}
+
 // Inline-code / fenced-code spans (the inner text between backtick runs).
 // Command references are extracted ONLY from inside code spans, and only ever
 // per single line (see codeLines). Knowledge entries consistently backtick-wrap
@@ -204,6 +239,11 @@ export function extractReferences(text: string): Reference[] {
     });
   }
 
+  // Symbol refs are only meaningful when the entry also anchors a file (the
+  // adjacency bound from #911): a backtick identifier with no co-cited file is
+  // too unmoored to act on. Computed once, before the code-span scan.
+  const hasFileRef = out.some((r) => r.kind === "file");
+
   // Commands only from inside backtick code spans, matched PER LINE (see
   // codeLines rationale) so neither separate spans nor separate lines can fuse
   // a runner with an unrelated following token into a phantom command.
@@ -231,6 +271,19 @@ export function extractReferences(text: string): Reference[] {
         explicit: false,
         raw,
       });
+    }
+
+    // Symbols: only when the entry anchors a file (adjacency bound) and the
+    // token passes the codey-shape gate. `raw` is the bare name (a `foo` and a
+    // `foo(` citation dedupe to one resolve).
+    if (!hasFileRef) continue;
+    for (const m of line.matchAll(SYMBOL_CAND_RE)) {
+      const name = m[1];
+      const callLike = m[2] !== undefined;
+      if (!isCodeySymbol(name, callLike)) continue;
+      if (seen.has(name)) continue;
+      seen.add(name);
+      out.push({ kind: "symbol", name, raw: name });
     }
   }
 
@@ -281,6 +334,14 @@ export interface RepoView {
   scripts: Set<string> | null;
   /** Makefile target names, or null if no Makefile. */
   makeTargets: Set<string> | null;
+  /** Cited symbol names confirmed to occur somewhere in tracked source
+   *  (word-boundary grep). `null` when symbol presence couldn't be determined
+   *  (non-git repo, `find` fallback, grep unavailable) — every symbol ref then
+   *  resolves "unknown" (neutral). When non-null, membership IS the answer: a
+   *  cited symbol absent from this set was searched-for and not found → repo-wide
+   *  absent → "missing". Presence-only (any occurrence, incl. usages/comments);
+   *  the asymmetry keeps us from ever emitting a false "missing" (#911). */
+  presentSymbols: Set<string> | null;
   /** Line count for a repo-relative file, or null if it can't be determined. */
   lineCount(relpath: string): number | null;
   /** True when the file walk was truncated by WALK_FILE_CAP — file-not-found is
@@ -294,6 +355,16 @@ export function resolveRefAgainstView(
   ref: Reference,
   view: RepoView,
 ): RefStatus {
+  if (ref.kind === "symbol") {
+    // Presence-only resolution (#911). null → couldn't grep → neutral. Otherwise
+    // membership decides: found anywhere → ok; searched-and-absent → missing. We
+    // deliberately accept usage/comment occurrences as "ok" — declining
+    // definition-vs-usage precision keeps us off the dangerous (false-"missing")
+    // side of the 🔴 invariant.
+    if (view.presentSymbols == null) return "unknown";
+    return view.presentSymbols.has(ref.name) ? "ok" : "missing";
+  }
+
   if (ref.kind === "command") {
     // `make` has no `run` verb and "make X" reads as prose ("make sense"); it is
     // confirm-only — an absent target is UNKNOWN (neutral), never "missing".
@@ -409,10 +480,53 @@ export class DirectFsResolver implements ReferenceResolver {
 
   // biome-ignore lint/suspicious/useAwait: async to satisfy the ReferenceResolver interface
   async resolve(refs: Reference[]): Promise<Map<string, RefStatus> | null> {
-    const view = this.repoView();
+    // The file/command view is ref-independent and cached. Symbol presence IS
+    // ref-dependent (we grep for exactly the cited names), so compute it per
+    // batch and overlay it onto a fresh view for this call (#911).
+    const names = [
+      ...new Set(refs.flatMap((r) => (r.kind === "symbol" ? [r.name] : []))),
+    ];
+    const view: RepoView = {
+      ...this.repoView(),
+      presentSymbols: this.symbolPresence(names),
+    };
     const map = new Map<string, RefStatus>();
     for (const ref of refs) map.set(ref.raw, resolveRefAgainstView(ref, view));
     return map;
+  }
+
+  /** Which of `names` occur (word-boundary) anywhere in tracked source. Returns
+   *  null when symbol presence can't be determined (root isn't a git work tree /
+   *  git unavailable) so every symbol ref stays "unknown" (neutral). An empty
+   *  input yields an empty Set (nothing to search), which is irrelevant since
+   *  there are then no symbol refs to resolve. */
+  private symbolPresence(names: string[]): Set<string> | null {
+    if (names.length === 0) return new Set();
+    const inTree = spawnSync(
+      "git",
+      ["-C", this.root, "rev-parse", "--is-inside-work-tree"],
+      { encoding: "utf8" },
+    );
+    if (inTree.status !== 0 || inTree.stdout.trim() !== "true") return null;
+    const present = new Set<string>();
+    for (const name of names) {
+      // Defense-in-depth: extraction already guarantees this charset, but assert
+      // again so a future regex change can't turn a name into a grep argument we
+      // can't reason about. A non-conforming name is left ABSENT-but-unsearched,
+      // so it must resolve neutral — but since it can't be extracted, this never
+      // fires in practice.
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) continue;
+      // `-q` short-circuits on first hit (bounded output, fast on common ids);
+      // `-w` whole word (so `foo` never matches `foobar`); `-F` fixed string;
+      // `--` so a name can't be read as a flag.
+      const r = spawnSync(
+        "git",
+        ["-C", this.root, "grep", "-qwF", "--", name],
+        { encoding: "utf8" },
+      );
+      if (r.status === 0) present.add(name);
+    }
+    return present;
   }
 
   private repoView(): RepoView {
@@ -424,6 +538,9 @@ export class DirectFsResolver implements ReferenceResolver {
       filesLower: walk.filesLower,
       basenames: walk.basenames,
       truncated: walk.truncated,
+      // Placeholder — symbol presence is computed per batch in resolve() and
+      // overlaid; the cached file/command view never carries it.
+      presentSymbols: null,
       scripts: readScripts(safeRead(join(root, "package.json"))),
       makeTargets: readMakeTargets(
         safeRead(join(root, "Makefile")) ??
@@ -510,6 +627,12 @@ export class NoopResolver implements ReferenceResolver {
 const PROBE_PKG = "===LORE-PKG===";
 const PROBE_MAKE = "===LORE-MAKE===";
 const PROBE_LINES = "===LORE-LINES===";
+// #911 symbol section. PROBE_SYMS opens it; PROBE_SYMS_OK is emitted ONLY inside
+// the `git`-present branch, so the parser can tell "grep ran, found none" (→ an
+// empty Set, real misses) from "grep didn't run" (→ null, neutral). Without this
+// marker an empty section would be ambiguous and could mass-penalize.
+const PROBE_SYMS = "===LORE-SYMS===";
+const PROBE_SYMS_OK = "===LORE-SYMS-OK===";
 
 /**
  * Build the read-only shell probe that emits a repo snapshot: the tracked file
@@ -533,6 +656,20 @@ export function buildRefcheckProbeScript(refs: Reference[]): string {
   }
   // `|a.ts|b.ts|` — a glob-case membership test; basenames are metachar-free.
   const refset = `|${[...basenames].join("|")}|`;
+
+  // Cited symbols (#911), identifier-charset only (single-quote-safe; assert
+  // again as defense-in-depth). One `git grep -qwF` per symbol, emitted as a
+  // literal command list (no shell `for … in` so an empty list is a non-issue);
+  // a matched symbol echoes its own name back. The grep runs from the repo root
+  // (the leading `cd` subshell) so it agrees with Direct-FS.
+  const symbols = new Set<string>();
+  for (const ref of refs) {
+    if (ref.kind !== "symbol") continue;
+    if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(ref.name)) symbols.add(ref.name);
+  }
+  const symbolLines = [...symbols].map(
+    (s) => `git grep -qwF -- '${s}' 2>/dev/null && printf '%s\\n' '${s}'`,
+  );
   // Run the snapshot from the REPO ROOT, not the client's CWD. `git ls-files`
   // (and the `find` fallback) emit paths relative to the working directory, but
   // knowledge refs are repo-root-relative (`packages/core/src/db.ts:42`). An
@@ -552,6 +689,19 @@ export function buildRefcheckProbeScript(refs: Reference[]): string {
     `printf '%s\\n' '${PROBE_LINES}'`,
     `__refset='${refset}'`,
     `printf '%s\\n' "$__f" | while IFS= read -r f; do bn=$(printf '%s' "\${f##*/}" | tr '[:upper:]' '[:lower:]'); case "$__refset" in *"|$bn|"*) printf '%s\\t%s\\n' "$f" "$(wc -l < "$f" 2>/dev/null)";; esac; done`,
+    // Symbol section: the OK marker is printed ONLY when this IS a git work tree,
+    // so the parser distinguishes "ran, none found" from "couldn't run".
+    `printf '%s\\n' '${PROBE_SYMS}'`,
+    `if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then`,
+    `printf '%s\\n' '${PROBE_SYMS_OK}'`,
+    ...symbolLines,
+    `fi`,
+    // Force a 0 exit: the last `git grep -q` returns 1 when a symbol is absent,
+    // which would otherwise make the whole probe exit non-zero → the client's
+    // tool marks it `isError` → the ENTIRE refcheck batch goes neutral (no
+    // penalties at all). A trailing `true` keeps a legitimately-missing symbol
+    // a "missing", not a silent batch abort.
+    `true`,
     `)`,
   ].join("\n");
 }
@@ -565,10 +715,16 @@ export function parseProbeSnapshot(text: string): RepoView | null {
   const linesAt = text.indexOf(PROBE_LINES);
   if (makeAt === -1 || linesAt === -1) return null;
 
+  // The symbol section (if any) follows PROBE_LINES, so the lines block ends
+  // where it begins. Older probes have no PROBE_SYMS — lines run to EOF.
+  const symsAt = text.indexOf(PROBE_SYMS);
   const fileBlock = text.slice(0, pkgAt);
   const pkgBlock = text.slice(pkgAt + PROBE_PKG.length, makeAt);
   const makeBlock = text.slice(makeAt + PROBE_MAKE.length, linesAt);
-  const linesBlock = text.slice(linesAt + PROBE_LINES.length);
+  const linesBlock = text.slice(
+    linesAt + PROBE_LINES.length,
+    symsAt === -1 ? text.length : symsAt,
+  );
 
   const files = new Set<string>();
   const filesLower = new Map<string, string[]>();
@@ -598,10 +754,30 @@ export function parseProbeSnapshot(text: string): RepoView | null {
     if (path && !Number.isNaN(n)) lineCounts.set(path, n + 1); // +1: trailing-newline lenience, mirrors Direct-FS split
   }
 
+  // Symbol presence (#911): null unless the section exists AND carries the OK
+  // marker (= the client ran `git grep`). "Ran, found none" is a real empty Set
+  // (genuine misses); "didn't run" / "old probe" is null (neutral).
+  let presentSymbols: Set<string> | null = null;
+  if (symsAt !== -1) {
+    const symsBlock = text.slice(symsAt + PROBE_SYMS.length);
+    const okAt = symsBlock.indexOf(PROBE_SYMS_OK);
+    if (okAt !== -1) {
+      const set = new Set<string>();
+      for (const raw of symsBlock
+        .slice(okAt + PROBE_SYMS_OK.length)
+        .split("\n")) {
+        const s = raw.trim();
+        if (s && /^[A-Za-z_][A-Za-z0-9_]*$/.test(s)) set.add(s);
+      }
+      presentSymbols = set;
+    }
+  }
+
   return {
     files,
     filesLower,
     basenames,
+    presentSymbols,
     scripts: readScripts(pkgBlock.trim() || null),
     makeTargets: readMakeTargets(makeBlock.trim() || null),
     lineCount: (rel) => lineCounts.get(rel) ?? null,

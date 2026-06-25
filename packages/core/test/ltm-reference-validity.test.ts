@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -186,3 +187,48 @@ describe("validateProjectReferences (#627 Phase 0)", () => {
     expect(row).toMatchObject({ broken: 1, total: 2 });
   });
 });
+
+// Cited-symbol validation end-to-end (#911): a symbol miss must flow through the
+// SAME penalty machinery as a file miss (one flat −0.1, neutral when
+// unverifiable). Needs a real git work tree (`git grep`), so these git-init the
+// per-test root.
+describe.skipIf(process.platform === "win32")(
+  "validateProjectReferences — cited symbols (#911)",
+  () => {
+    const gitInit = (): void => {
+      execFileSync("git", ["init", "-q"], { cwd: root });
+      execFileSync("git", ["add", "-A"], { cwd: root });
+    };
+
+    test("absent symbol (file:line still valid) → penalized once", async () => {
+      // real.ts exists and line 3 is in range, so Phase-0's file/line check says
+      // "ok" — only the symbol check catches that `removedHelperFn` is gone.
+      const id = seed("`removedHelperFn` lives in src/real.ts:3");
+      gitInit();
+      const res = await ltm.validateProjectReferences(root, resolver());
+      expect(res.penalized).toBe(1);
+      expect(conf(id)).toBeCloseTo(1.0 - ltm.REFERENCE_DRIFT_PENALTY, 5);
+    });
+
+    test("present symbol → no penalty", async () => {
+      writeFileSync(
+        join(root, "src", "real.ts"),
+        "export const keptHelper = 1;\n",
+      );
+      const id = seed("`keptHelper` lives in src/real.ts:1");
+      gitInit();
+      const res = await ltm.validateProjectReferences(root, resolver());
+      expect(res.penalized).toBe(0);
+      expect(conf(id)).toBe(1.0);
+    });
+
+    test("non-git repo → symbol unverifiable, never penalizes (neutral)", async () => {
+      // No gitInit(): presentSymbols is null → symbol "unknown" → no signal. The
+      // co-cited file ref is valid, so the entry is checked but not penalized.
+      const id = seed("`removedHelperFn` lives in src/real.ts:3");
+      const res = await ltm.validateProjectReferences(root, resolver());
+      expect(res.penalized).toBe(0);
+      expect(conf(id)).toBe(1.0);
+    });
+  },
+);
