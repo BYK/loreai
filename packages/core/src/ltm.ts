@@ -552,8 +552,10 @@ export function update(
  *
  * This is the LOCAL-ONLY purge registry: only add tables whose rows are pure
  * local derived state. Do NOT add synced convergent registers (e.g.
- * knowledge_meta) — a local DELETE there would diverge from tombstone semantics
- * once team sync lands.
+ * knowledge_meta) — a local DELETE there would diverge from its
+ * convergent-register sync/merge semantics (confidence LWW->merge) once team
+ * sync lands. (Note: "tombstone" elsewhere in this file means the A2 is_deleted
+ * death-cert version, not the retired knowledge_tombstones table.)
  */
 export const LOGICAL_ID_BOOKKEEPING_TABLES = [
   "knowledge_ref_validity",
