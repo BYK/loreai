@@ -20,7 +20,11 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import { DEFAULT_PORT, type GatewayConfig } from "./config";
 import { bootstrapDailySpend, getDailyBudget } from "./cost-tracker";
-import { setupEmbeddingFailureCapture, setupBustSpiralCapture } from "./sentry";
+import {
+  setupEmbeddingFailureCapture,
+  setupBustSpiralCapture,
+  setupReadPathTimingCapture,
+} from "./sentry";
 import type { GatewayRequest } from "./translate/types";
 import { parseAnthropicRequest } from "./translate/anthropic";
 import { parseOpenAIRequest } from "./translate/openai";
@@ -364,6 +368,10 @@ export async function startServer(config: GatewayConfig): Promise<{
   // Wire cache-bust-spiral detection to Sentry (#797). Same idempotency
   // guarantee as the embedding hook above.
   setupBustSpiralCapture();
+
+  // Wire read-path timing (forSession/recall) to Sentry (#966 B). Same
+  // idempotency guarantee — the hook is assigned, not stacked.
+  setupReadPathTimingCapture();
 
   // Shared fetch handler for all server instances.
   const fetch = async (req: Request): Promise<Response> => {

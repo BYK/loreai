@@ -13,6 +13,7 @@ import * as latReader from "./lat-reader";
 import * as ltm from "./ltm";
 import * as temporal from "./temporal";
 import * as embedding from "./embedding";
+import { ReadPathTimer } from "./read-telemetry";
 import * as entities from "./entities";
 import * as toolTrace from "./tool-trace";
 import * as log from "./log";
@@ -623,6 +624,12 @@ export async function searchRecall(
     return [];
   }
 
+  // Measure the read path's main-thread blocking cost (#966 B). Awaits below
+  // (LLM expansion, embed, the pool-backed vector searches) are wrapped so the
+  // remainder of the wall time is this call's own synchronous FTS/hydration/RRF
+  // work. Emitted just before the return.
+  const timer = new ReadPathTimer();
+
   const queryTerms = filterTerms(query);
   const queryTermCount = queryTerms.length;
 
@@ -644,7 +651,9 @@ export async function searchRecall(
     queryTermCount <= expansionMaxTerms
   ) {
     try {
-      queries = await expandQuery(llm, query, undefined, sessionID);
+      queries = await timer.await(
+        expandQuery(llm, query, undefined, sessionID),
+      );
     } catch (err) {
       log.info("recall: query expansion failed, using original:", err);
     }
@@ -856,11 +865,13 @@ export async function searchRecall(
   // Vector search on the original query (not expansions — avoid redundant embeds).
   if (embedding.isAvailable() && scope !== "session") {
     try {
-      const [queryVec] = await embedding.embed([query], "query");
+      const [queryVec] = await timer.await(embedding.embed([query], "query"));
 
       // Knowledge vector search
       if (knowledgeEnabled) {
-        const vectorHits = await embedding.vectorSearch(queryVec, limit);
+        const vectorHits = await timer.await(
+          embedding.vectorSearch(queryVec, limit),
+        );
         const vectorTagged: TaggedResult[] = [];
         for (const hit of vectorHits) {
           const entry = ltm.get(hit.id);
@@ -886,9 +897,8 @@ export async function searchRecall(
 
       // Distillation vector search
       if (scope !== "knowledge") {
-        const distVectorHits = await embedding.vectorSearchDistillations(
-          queryVec,
-          limit,
+        const distVectorHits = await timer.await(
+          embedding.vectorSearchDistillations(queryVec, limit),
         );
         const distVectorTagged: TaggedResult[] = distVectorHits
           .map((hit): TaggedResult | null => {
@@ -916,10 +926,8 @@ export async function searchRecall(
       // Temporal vector search (includes distilled — embeddings preserved by markDistilled)
       if (scope !== "knowledge") {
         const pid = ensureProject(projectPath);
-        const temporalVectorHits = await embedding.vectorSearchTemporal(
-          queryVec,
-          pid,
-          limit,
+        const temporalVectorHits = await timer.await(
+          embedding.vectorSearchTemporal(queryVec, pid, limit),
         );
         const temporalVectorTagged: TaggedResult[] = temporalVectorHits
           .map((hit): TaggedResult | null => {
@@ -956,9 +964,8 @@ export async function searchRecall(
         // user references by name from another project resolves semantically
         // too. `infra` stays project-scoped.
         const entPid = ensureProject(projectPath);
-        const entityVectorHits = await embedding.vectorSearchEntities(
-          queryVec,
-          limit,
+        const entityVectorHits = await timer.await(
+          embedding.vectorSearchEntities(queryVec, limit),
         );
         const entityVectorTagged: TaggedResult[] = entityVectorHits
           .map((hit): TaggedResult | null => {
@@ -1219,6 +1226,7 @@ export async function searchRecall(
   // are the ones that appeared in multiple lists — capping preserves those
   // while dropping the long tail of single-list noise.
   const maxResults = limit * 3;
+  timer.emit("recall", fused.length, scope);
   return fused.slice(0, maxResults);
 }
 

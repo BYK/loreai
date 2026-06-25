@@ -563,6 +563,50 @@ export function setupEmbeddingFailureCapture(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Read-path timing (#966 B — measure-before-offload)
+// ---------------------------------------------------------------------------
+
+import { setReadPathTimingHook, type ReadPathTiming } from "@loreai/core";
+
+/**
+ * Wire core's read-path timing hook to Sentry. Called once at startup. Emits a
+ * distribution per `forSession` (per turn) / `recall` (per tool call) so we can
+ * see — across all installs, incl. nightly — how much SYNCHRONOUS main-thread
+ * time these hot read paths still cost now that the O(n) vector scan runs
+ * off-thread (#966/#989). This is the data that decides whether further
+ * offloading (FTS / hydration / scoring) is worth it. Never throws.
+ */
+export function setupReadPathTimingCapture(): void {
+  setReadPathTimingHook((t: ReadPathTiming) => {
+    if (!Sentry.isInitialized()) return;
+    try {
+      const attributes: Record<string, string> = { op: t.op };
+      if (t.scope) attributes.scope = t.scope;
+      Sentry.metrics.distribution("lore.readpath.total_ms", t.totalMs, {
+        unit: "millisecond",
+        attributes,
+      });
+      Sentry.metrics.distribution(
+        "lore.readpath.sync_blocking_ms",
+        t.syncBlockingMs,
+        { unit: "millisecond", attributes },
+      );
+      Sentry.metrics.distribution("lore.readpath.awaited_ms", t.awaitedMs, {
+        unit: "millisecond",
+        attributes,
+      });
+      Sentry.metrics.distribution(
+        "lore.readpath.candidates",
+        t.candidateCount,
+        { attributes },
+      );
+    } catch {
+      // Telemetry must never break the read path.
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Bust-spiral alerting (#797)
 // ---------------------------------------------------------------------------
 

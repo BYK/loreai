@@ -242,6 +242,10 @@ export {
   clearWorkspaceCache,
 } from "./workspace";
 export { workerSessionIDs, isWorkerSession } from "./worker";
+export {
+  setReadPathTimingHook,
+  type ReadPathTiming,
+} from "./read-telemetry";
 export { distillLimiter, curatorLimiter } from "./session-limiter";
 export {
   installFetchInterceptor,
