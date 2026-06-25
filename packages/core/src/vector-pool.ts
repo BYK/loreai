@@ -305,12 +305,15 @@ export async function tryPoolVectorSearch(
   embedding: Float32Array,
 ): Promise<Hits | null> {
   if (!poolEnabled()) return null;
-  const live = ensurePool();
-  const pw = leastBusy(live);
-  if (!pw) return null;
-
-  const id = nextRequestId++;
+  // Everything below is wrapped so the "never throws" contract holds by
+  // construction — any unexpected throw (e.g. from ensurePool) resolves to null
+  // and the caller runs the in-process path.
   try {
+    const live = ensurePool();
+    const pw = leastBusy(live);
+    if (!pw) return null;
+
+    const id = nextRequestId++;
     return await new Promise<Hits>((resolve, reject) => {
       const timer = setTimeout(() => {
         pw.inflight.delete(id);

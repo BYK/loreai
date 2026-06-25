@@ -30,8 +30,9 @@ export type DistillationVectorHit = {
 };
 
 /** Discriminated description of one of the five vector searches. The query
- *  embedding is passed separately (so it can be transferred zero-copy across
- *  the worker boundary). */
+ *  embedding is passed separately and STRUCTURED-CLONED across the worker
+ *  boundary (~3 KB for 768 dims) — never transferred: a transfer would detach
+ *  the caller's buffer and corrupt the in-process fallback that reuses it. */
 export type VectorQuerySpec =
   | { kind: "knowledge"; limit: number; excludeCategories?: string[] }
   | { kind: "entities"; limit: number }
