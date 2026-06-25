@@ -1882,20 +1882,21 @@ export function rebuildDirtySessionRollups(database: Database = db()): void {
     .query("SELECT project_id, session_id FROM session_rollup WHERE dirty = 1")
     .all() as Array<{ project_id: string; session_id: string }>;
   // Fast path: nothing dirty. This is the common case on the /ui/costs read
-  // path, so don't open a (write-locking) transaction when there's no work.
+  // path, so don't open a transaction when there's no work.
   if (dirty.length === 0) return;
   // A bulk prune/clear can flag many sessions dirty at once; recomputing each in
   // its own auto-commit on this read path is N fsyncs of write-amplification
-  // (cf. the ~23x seedOutbox slowdown). Batch the whole rebuild into ONE
-  // transaction on this same handle. Reached only via listSessionRollups (read
-  // path) / recovery / tests — never from within another transaction.
-  database.exec("BEGIN IMMEDIATE");
+  // (cf. the ~23x seedOutbox slowdown). Batch the whole rebuild into ONE unit.
+  // A SAVEPOINT (not BEGIN) makes this safe whether called at top level (the
+  // /ui/costs read path) OR nested inside an existing transaction.
+  database.exec("SAVEPOINT rebuild_dirty_rollups");
   try {
     for (const r of dirty)
       recomputeSessionRollupRow(database, r.project_id, r.session_id);
-    database.exec("COMMIT");
+    database.exec("RELEASE rebuild_dirty_rollups");
   } catch (e) {
-    database.exec("ROLLBACK");
+    database.exec("ROLLBACK TO rebuild_dirty_rollups");
+    database.exec("RELEASE rebuild_dirty_rollups");
     throw e;
   }
 }
@@ -1906,54 +1907,66 @@ export function rebuildDirtySessionRollups(database: Database = db()): void {
  * passes that benefit from the v57/v58 covering indexes (#981).
  */
 export function rebuildAllSessionRollups(database: Database = db()): void {
-  database.exec("DELETE FROM session_rollup");
-  // Pass 1: per-session message_count / token_sum / first/last_message_at.
-  database.exec(`
-    INSERT INTO session_rollup (
-      project_id, session_id, message_count, token_sum, first_message_at, last_message_at
-    )
-    SELECT project_id, session_id, COUNT(*), COALESCE(SUM(tokens), 0),
-           MIN(created_at), MAX(created_at)
-      FROM temporal_messages
-     GROUP BY project_id, session_id;
-  `);
-  // Pass 2: earliest assistant row per session (tie-break created_at ASC, rowid ASC).
-  // Every session with an assistant message already has a row from pass 1, so the
-  // ON CONFLICT branch always applies.
-  database.exec(`
-    INSERT INTO session_rollup (
-      project_id, session_id, first_assistant_rowid, first_assistant_at, first_assistant_metadata
-    )
-    SELECT project_id, session_id, rid, created_at, metadata FROM (
-      SELECT project_id, session_id, rowid AS rid, created_at, metadata,
-             ROW_NUMBER() OVER (
-               PARTITION BY project_id, session_id ORDER BY created_at ASC, rowid ASC
-             ) AS rn
-        FROM temporal_messages WHERE role = 'assistant'
-    ) WHERE rn = 1
-    ON CONFLICT(project_id, session_id) DO UPDATE SET
-      first_assistant_rowid = excluded.first_assistant_rowid,
-      first_assistant_at = excluded.first_assistant_at,
-      first_assistant_metadata = excluded.first_assistant_metadata;
-  `);
-  // Pass 3: distillation counts/tokens per session (may create distill-only rows).
-  database.exec(`
-    INSERT INTO session_rollup (
-      project_id, session_id, distill_calls, distill_batch_calls,
-      distill_token_sum, distill_batch_token_sum
-    )
-    SELECT project_id, session_id, COUNT(*),
-           COALESCE(SUM(CASE WHEN call_type = 'batch' THEN 1 ELSE 0 END), 0),
-           COALESCE(SUM(token_count), 0),
-           COALESCE(SUM(CASE WHEN call_type = 'batch' THEN token_count ELSE 0 END), 0)
-      FROM distillations
-     GROUP BY project_id, session_id
-    ON CONFLICT(project_id, session_id) DO UPDATE SET
-      distill_calls = excluded.distill_calls,
-      distill_batch_calls = excluded.distill_batch_calls,
-      distill_token_sum = excluded.distill_token_sum,
-      distill_batch_token_sum = excluded.distill_batch_token_sum;
-  `);
+  // Atomic truncate+repopulate: a crash between the DELETE and the final INSERT
+  // would otherwise leave the table empty/partial. A SAVEPOINT (not BEGIN) keeps
+  // this safe whether called at top level (migration runs in autocommit) OR
+  // nested inside an existing transaction.
+  database.exec("SAVEPOINT rebuild_all_rollups");
+  try {
+    database.exec("DELETE FROM session_rollup");
+    // Pass 1: per-session message_count / token_sum / first/last_message_at.
+    database.exec(`
+      INSERT INTO session_rollup (
+        project_id, session_id, message_count, token_sum, first_message_at, last_message_at
+      )
+      SELECT project_id, session_id, COUNT(*), COALESCE(SUM(tokens), 0),
+             MIN(created_at), MAX(created_at)
+        FROM temporal_messages
+       GROUP BY project_id, session_id;
+    `);
+    // Pass 2: earliest assistant row per session (tie-break created_at ASC, rowid ASC).
+    // Every session with an assistant message already has a row from pass 1, so the
+    // ON CONFLICT branch always applies.
+    database.exec(`
+      INSERT INTO session_rollup (
+        project_id, session_id, first_assistant_rowid, first_assistant_at, first_assistant_metadata
+      )
+      SELECT project_id, session_id, rid, created_at, metadata FROM (
+        SELECT project_id, session_id, rowid AS rid, created_at, metadata,
+               ROW_NUMBER() OVER (
+                 PARTITION BY project_id, session_id ORDER BY created_at ASC, rowid ASC
+               ) AS rn
+          FROM temporal_messages WHERE role = 'assistant'
+      ) WHERE rn = 1
+      ON CONFLICT(project_id, session_id) DO UPDATE SET
+        first_assistant_rowid = excluded.first_assistant_rowid,
+        first_assistant_at = excluded.first_assistant_at,
+        first_assistant_metadata = excluded.first_assistant_metadata;
+    `);
+    // Pass 3: distillation counts/tokens per session (may create distill-only rows).
+    database.exec(`
+      INSERT INTO session_rollup (
+        project_id, session_id, distill_calls, distill_batch_calls,
+        distill_token_sum, distill_batch_token_sum
+      )
+      SELECT project_id, session_id, COUNT(*),
+             COALESCE(SUM(CASE WHEN call_type = 'batch' THEN 1 ELSE 0 END), 0),
+             COALESCE(SUM(token_count), 0),
+             COALESCE(SUM(CASE WHEN call_type = 'batch' THEN token_count ELSE 0 END), 0)
+        FROM distillations
+       GROUP BY project_id, session_id
+      ON CONFLICT(project_id, session_id) DO UPDATE SET
+        distill_calls = excluded.distill_calls,
+        distill_batch_calls = excluded.distill_batch_calls,
+        distill_token_sum = excluded.distill_token_sum,
+        distill_batch_token_sum = excluded.distill_batch_token_sum;
+    `);
+    database.exec("RELEASE rebuild_all_rollups");
+  } catch (e) {
+    database.exec("ROLLBACK TO rebuild_all_rollups");
+    database.exec("RELEASE rebuild_all_rollups");
+    throw e;
+  }
 }
 
 /** v60 migration step: create the rollup objects then backfill from source. */

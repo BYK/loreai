@@ -371,6 +371,42 @@ describe("session_rollup", () => {
         expect(got.get(sid), `rollup row for ${sid}`).toEqual(row);
     });
 
+    test("dirty rebuild is safe inside an existing transaction", () => {
+      // The rebuild uses a SAVEPOINT (not BEGIN), so a future caller that
+      // invokes it from within an open transaction must not crash with
+      // "cannot start a transaction within a transaction".
+      const pid = ensureProject("/test/session-rollup/nested-dirty");
+      const sid = "s1";
+      const a = insertMsg(pid, sid, "assistant", 10, 100, "first");
+      insertMsg(pid, sid, "assistant", 20, 200, "second");
+      deleteMsg(a); // earliest assistant deleted → session is dirty
+
+      db().exec("BEGIN");
+      expect(() => rebuildDirtySessionRollups(db())).not.toThrow();
+      db().exec("COMMIT");
+
+      const row = db()
+        .query(
+          "SELECT first_assistant_metadata, dirty FROM session_rollup WHERE project_id=? AND session_id=?",
+        )
+        .get(pid, sid) as { first_assistant_metadata: string; dirty: number };
+      expect(row.first_assistant_metadata).toBe("second");
+      expect(row.dirty).toBe(0);
+    });
+
+    test("full rebuild is safe (and atomic) inside an existing transaction", () => {
+      const pid = ensureProject("/test/session-rollup/nested-all");
+      const sid = "s1";
+      insertMsg(pid, sid, "assistant", 10, 100, "a");
+      insertDistill(pid, sid, 100, "batch", 150);
+
+      db().exec("BEGIN");
+      expect(() => rebuildAllSessionRollups(db())).not.toThrow();
+      db().exec("COMMIT");
+
+      assertConsistent(pid);
+    });
+
     test("re-store changes token_sum by the delta only", () => {
       const pid = ensureProject("/test/session-rollup/restore");
       const sid = "s1";
