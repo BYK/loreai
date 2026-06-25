@@ -319,6 +319,11 @@ export async function tryPoolVectorSearch(
         pw.inflight.delete(id);
         reject(new Error("vector worker search timed out"));
       }, VECTOR_SEARCH_TIMEOUT_MS);
+      // The worker is already unref'd (makeWorker), so an in-flight search must
+      // not be the thing that keeps the event loop alive: unref the timeout too,
+      // or a pending request delays process exit by up to
+      // VECTOR_SEARCH_TIMEOUT_MS on shutdown. (review #989)
+      timer.unref();
       pw.inflight.set(id, { resolve, reject, timer });
       try {
         const msg: VectorWorkerInbound = {

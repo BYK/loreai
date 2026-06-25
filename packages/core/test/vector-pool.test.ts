@@ -42,6 +42,12 @@ class FakeWorker extends EventEmitter {
   die(code = 1): void {
     this.emit("exit", code);
   }
+  initError(error: string): void {
+    this.emit("message", { type: "init-error", error });
+  }
+  crash(err: Error): void {
+    this.emit("error", err);
+  }
 }
 
 function factoryReturning(
@@ -204,6 +210,70 @@ describe("vector-pool structural-failure latch (review #989)", () => {
     victim.die();
     expect(victim.terminated).toBe(false);
     // The next search runs ensurePool, which must terminate the dead worker.
+    await tryPoolVectorSearch(KNOWLEDGE, QUERY);
+    expect(victim.terminated).toBe(true);
+  });
+
+  it("unref()'s the per-request timeout timer so a pending search can't delay exit", async () => {
+    // The actual review-#989 bug: the 5 s timeout timer was ref'd, so an
+    // in-flight search would hold the event loop open on shutdown even though
+    // the worker is unref'd. Spy on the real timer object's unref() — asserting
+    // it's called is the only non-vacuous check (removing the source line fails
+    // this). The worker replies synchronously, so the timer is also cleared and
+    // never leaks.
+    const realSetTimeout = globalThis.setTimeout;
+    const unref = vi.fn();
+    const spy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+      handler: () => void,
+      ms?: number,
+      ...rest: unknown[]
+    ) => {
+      const t = realSetTimeout(handler, ms, ...rest);
+      (t as unknown as { unref: () => void }).unref = unref;
+      return t;
+    }) as never);
+    try {
+      _setTestVectorWorkerFactory(
+        factoryReturning((w, msg) =>
+          w.reply(msg.id, [{ id: "ok", similarity: 1 }]),
+        ),
+      );
+      await tryPoolVectorSearch(KNOWLEDGE, QUERY);
+      expect(unref).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("treats a worker init-error message as a structural death", async () => {
+    // A reader connection that fails to open surfaces as an init-error message,
+    // marking the worker structurally dead. Asserting only null would be vacuous
+    // (the 5s timeout fallback also resolves null); instead assert the dead
+    // worker is terminated on the next ensurePool — a side effect the timeout
+    // path never produces. Pre-fix mutation (init-error → no markDead): the
+    // victim stays alive and this fails.
+    _setTestVectorWorkerFactory(
+      factoryReturning((w, msg) => w.reply(msg.id, [])),
+    );
+    await tryPoolVectorSearch(KNOWLEDGE, QUERY); // healthy worker spawned
+    const victim = FakeWorker.instances[0];
+    victim.initError("reader open failed"); // init-error message → markDead
+    expect(victim.terminated).toBe(false);
+    // The next search runs ensurePool, which must terminate the dead worker.
+    await tryPoolVectorSearch(KNOWLEDGE, QUERY);
+    expect(victim.terminated).toBe(true);
+  });
+
+  it("treats a worker 'error' event as a structural death", async () => {
+    // Same non-vacuous shape as above: a crashed worker must be recognized as
+    // dead and terminated on the next ensurePool, not merely produce a null.
+    _setTestVectorWorkerFactory(
+      factoryReturning((w, msg) => w.reply(msg.id, [])),
+    );
+    await tryPoolVectorSearch(KNOWLEDGE, QUERY); // healthy worker spawned
+    const victim = FakeWorker.instances[0];
+    victim.crash(new Error("worker thread crashed")); // error event → markDead
+    expect(victim.terminated).toBe(false);
     await tryPoolVectorSearch(KNOWLEDGE, QUERY);
     expect(victim.terminated).toBe(true);
   });
