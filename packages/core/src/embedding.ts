@@ -37,6 +37,24 @@ import {
   type WorkerOutbound,
   type WorkerInitData,
 } from "./embedding-worker-types";
+import {
+  runVectorQuery,
+  toBlob,
+  type DistillationVectorHit,
+  type VectorHit,
+} from "./vector-query";
+
+// The cosine/BLOB helpers moved to ./vector-query (a leaf module the read
+// worker can import without pulling in the provider chain). Re-exported here so
+// existing `embedding.toBlob` / `embedding.cosineSimilarity` / `embedding.fromBlob`
+// call sites across the codebase keep working unchanged.
+export {
+  cosineSimilarity,
+  fromBlob,
+  toBlob,
+  type DistillationVectorHit,
+  type VectorHit,
+} from "./vector-query";
 
 /** Timeout for embedding API fetch calls (ms). Prevents a hanging API from
  *  blocking the recall tool indefinitely. 10s is generous for typical 100-500ms
@@ -1197,22 +1215,6 @@ export async function embed(
 // ---------------------------------------------------------------------------
 
 /**
- * Cosine similarity between two L2-normalized Float32Array vectors.
- * All vectors in the system (local ONNX, Voyage, OpenAI) are L2-normalized
- * at embedding time, so dot product === cosine similarity. This skips the
- * per-vector norm accumulations and sqrt calls (~2× faster).
- * Returns -1.0 to 1.0 where 1.0 = identical direction.
- */
-export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
-  const len = a.length;
-  let dot = 0;
-  for (let i = 0; i < len; i++) {
-    dot += a[i] * b[i];
-  }
-  return dot;
-}
-
-/**
  * Return an L2-normalized (unit-length) copy of a vector.
  *
  * System-wide invariant: every vector produced by {@link embed} is
@@ -1245,54 +1247,8 @@ export function l2Normalize(vec: Float32Array): Float32Array {
 }
 
 // ---------------------------------------------------------------------------
-// Top-k selection (avoids full sort of the scored array)
-// ---------------------------------------------------------------------------
-
-/**
- * Maintain a bounded descending-sorted array of the top k items by score.
- * For small k (10–50) and moderate n (200–500), the O(n*k) insert is faster
- * than O(n log n) sort due to lower constant factors and no allocation.
- */
-function topKInsert<T extends { similarity: number }>(
-  topK: T[],
-  item: T,
-  k: number,
-): void {
-  const score = item.similarity;
-  const len = topK.length;
-  if (len >= k && score <= topK[len - 1].similarity) return;
-  // Binary search for insert position in the descending-sorted array
-  let lo = 0;
-  let hi = len;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    if (topK[mid].similarity > score) lo = mid + 1;
-    else hi = mid;
-  }
-  topK.splice(lo, 0, item);
-  if (topK.length > k) topK.length = k;
-}
-
-// ---------------------------------------------------------------------------
-// BLOB conversion
-// ---------------------------------------------------------------------------
-
-/** Convert Float32Array to Buffer for SQLite BLOB storage. */
-export function toBlob(arr: Float32Array): Buffer {
-  return Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength);
-}
-
-/** Convert SQLite BLOB (Buffer/Uint8Array) back to Float32Array. */
-export function fromBlob(blob: Buffer | Uint8Array): Float32Array {
-  const bytes = new Uint8Array(blob);
-  return new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
-}
-
-// ---------------------------------------------------------------------------
 // Vector search — knowledge
 // ---------------------------------------------------------------------------
-
-type VectorHit = { id: string; similarity: number };
 
 /**
  * Search all knowledge entries with embeddings by cosine similarity.
@@ -1310,42 +1266,11 @@ export function vectorSearch(
   limit = 10,
   excludeCategories?: string[],
 ): VectorHit[] {
-  if (isVecAvailable()) {
-    try {
-      let sql =
-        "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM knowledge_current WHERE embedding IS NOT NULL AND confidence > 0.2";
-      const params: unknown[] = [toBlob(queryEmbedding)];
-      if (excludeCategories?.length) {
-        sql += ` AND category NOT IN (${excludeCategories.map(() => "?").join(",")})`;
-        params.push(...excludeCategories);
-      }
-      sql += " ORDER BY similarity DESC LIMIT ?";
-      params.push(limit);
-      return db()
-        .query(sql)
-        .all(...params) as VectorHit[];
-    } catch {
-      // fall through to JS brute-force
-    }
-  }
-  let sql =
-    "SELECT id, embedding FROM knowledge_current WHERE embedding IS NOT NULL AND confidence > 0.2";
-  const params: string[] = [];
-  if (excludeCategories?.length) {
-    sql += ` AND category NOT IN (${excludeCategories.map(() => "?").join(",")})`;
-    params.push(...excludeCategories);
-  }
-  const rows = db()
-    .query(sql)
-    .all(...params) as Array<{ id: string; embedding: Buffer }>;
-
-  const topK: VectorHit[] = [];
-  for (const row of rows) {
-    const vec = fromBlob(row.embedding);
-    const sim = cosineSimilarity(queryEmbedding, vec);
-    topKInsert(topK, { id: row.id, similarity: sim }, limit);
-  }
-  return topK;
+  return runVectorQuery(db(), isVecAvailable(), queryEmbedding, {
+    kind: "knowledge",
+    limit,
+    excludeCategories,
+  }) as VectorHit[];
 }
 
 /**
@@ -1356,28 +1281,10 @@ export function vectorSearchEntities(
   queryEmbedding: Float32Array,
   limit = 10,
 ): VectorHit[] {
-  if (isVecAvailable()) {
-    try {
-      return db()
-        .query(
-          "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM entities WHERE embedding IS NOT NULL ORDER BY similarity DESC LIMIT ?",
-        )
-        .all(toBlob(queryEmbedding), limit) as VectorHit[];
-    } catch {
-      // fall through to JS brute-force
-    }
-  }
-  const rows = db()
-    .query("SELECT id, embedding FROM entities WHERE embedding IS NOT NULL")
-    .all() as Array<{ id: string; embedding: Buffer }>;
-
-  const topK: VectorHit[] = [];
-  for (const row of rows) {
-    const vec = fromBlob(row.embedding);
-    const sim = cosineSimilarity(queryEmbedding, vec);
-    topKInsert(topK, { id: row.id, similarity: sim }, limit);
-  }
-  return topK;
+  return runVectorQuery(db(), isVecAvailable(), queryEmbedding, {
+    kind: "entities",
+    limit,
+  }) as VectorHit[];
 }
 
 // ---------------------------------------------------------------------------
@@ -1392,41 +1299,15 @@ export function vectorSearchDistillations(
   queryEmbedding: Float32Array,
   limit = 10,
 ): VectorHit[] {
-  if (isVecAvailable()) {
-    try {
-      return db()
-        .query(
-          "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM distillations WHERE embedding IS NOT NULL AND archived = 0 ORDER BY similarity DESC LIMIT ?",
-        )
-        .all(toBlob(queryEmbedding), limit) as VectorHit[];
-    } catch {
-      // fall through to JS brute-force
-    }
-  }
-  const rows = db()
-    .query(
-      "SELECT id, embedding FROM distillations WHERE embedding IS NOT NULL AND archived = 0",
-    )
-    .all() as Array<{ id: string; embedding: Buffer }>;
-
-  const topK: VectorHit[] = [];
-  for (const row of rows) {
-    const vec = fromBlob(row.embedding);
-    const sim = cosineSimilarity(queryEmbedding, vec);
-    topKInsert(topK, { id: row.id, similarity: sim }, limit);
-  }
-  return topK;
+  return runVectorQuery(db(), isVecAvailable(), queryEmbedding, {
+    kind: "distillations",
+    limit,
+  }) as VectorHit[];
 }
 
 // ---------------------------------------------------------------------------
 // Vector search — all distillations (including archived)
 // ---------------------------------------------------------------------------
-
-export type DistillationVectorHit = {
-  id: string;
-  session_id: string;
-  similarity: number;
-};
 
 /**
  * Search ALL distillations (including archived) with embeddings by cosine
@@ -1441,52 +1322,16 @@ export type DistillationVectorHit = {
  * Pure brute-force — fine for ~200 entries per project. Safety-capped
  * at 500 rows to prevent excessive CPU on long-running projects.
  */
-const MAX_DISTILLATION_VECTOR_ROWS = 500;
-
 export function vectorSearchAllDistillations(
   queryEmbedding: Float32Array,
   projectId: string,
   limit = 20,
 ): DistillationVectorHit[] {
-  if (isVecAvailable()) {
-    try {
-      // Rank by similarity within the same most-recent candidate window the JS
-      // path uses (created_at DESC, capped at MAX_DISTILLATION_VECTOR_ROWS).
-      return db()
-        .query(
-          "SELECT id, session_id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM (SELECT id, session_id, embedding FROM distillations WHERE embedding IS NOT NULL AND project_id = ? ORDER BY created_at DESC LIMIT ?) ORDER BY similarity DESC LIMIT ?",
-        )
-        .all(
-          toBlob(queryEmbedding),
-          projectId,
-          MAX_DISTILLATION_VECTOR_ROWS,
-          limit,
-        ) as DistillationVectorHit[];
-    } catch {
-      // fall through to JS brute-force
-    }
-  }
-  const rows = db()
-    .query(
-      "SELECT id, session_id, embedding FROM distillations WHERE embedding IS NOT NULL AND project_id = ? ORDER BY created_at DESC LIMIT ?",
-    )
-    .all(projectId, MAX_DISTILLATION_VECTOR_ROWS) as Array<{
-    id: string;
-    session_id: string;
-    embedding: Buffer;
-  }>;
-
-  const topK: DistillationVectorHit[] = [];
-  for (const row of rows) {
-    const vec = fromBlob(row.embedding);
-    const sim = cosineSimilarity(queryEmbedding, vec);
-    topKInsert(
-      topK,
-      { id: row.id, session_id: row.session_id, similarity: sim },
-      limit,
-    );
-  }
-  return topK;
+  return runVectorQuery(db(), isVecAvailable(), queryEmbedding, {
+    kind: "allDistillations",
+    projectId,
+    limit,
+  }) as DistillationVectorHit[];
 }
 
 // ---------------------------------------------------------------------------
@@ -1619,37 +1464,12 @@ export function vectorSearchTemporal(
   limit = 10,
   sessionId?: string,
 ): VectorHit[] {
-  if (isVecAvailable()) {
-    try {
-      const vsql = sessionId
-        ? "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM temporal_messages WHERE embedding IS NOT NULL AND project_id = ? AND session_id = ? ORDER BY similarity DESC LIMIT ?"
-        : "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM temporal_messages WHERE embedding IS NOT NULL AND project_id = ? ORDER BY similarity DESC LIMIT ?";
-      const vparams: unknown[] = sessionId
-        ? [toBlob(queryEmbedding), projectId, sessionId, limit]
-        : [toBlob(queryEmbedding), projectId, limit];
-      return db()
-        .query(vsql)
-        .all(...vparams) as VectorHit[];
-    } catch {
-      // fall through to JS brute-force
-    }
-  }
-  const sql = sessionId
-    ? "SELECT id, embedding FROM temporal_messages WHERE embedding IS NOT NULL AND project_id = ? AND session_id = ?"
-    : "SELECT id, embedding FROM temporal_messages WHERE embedding IS NOT NULL AND project_id = ?";
-  const params = sessionId ? [projectId, sessionId] : [projectId];
-
-  const rows = db()
-    .query(sql)
-    .all(...params) as Array<{ id: string; embedding: Buffer }>;
-
-  const topK: VectorHit[] = [];
-  for (const row of rows) {
-    const vec = fromBlob(row.embedding);
-    const sim = cosineSimilarity(queryEmbedding, vec);
-    topKInsert(topK, { id: row.id, similarity: sim }, limit);
-  }
-  return topK;
+  return runVectorQuery(db(), isVecAvailable(), queryEmbedding, {
+    kind: "temporal",
+    projectId,
+    limit,
+    sessionId,
+  }) as VectorHit[];
 }
 
 // ---------------------------------------------------------------------------
