@@ -48,6 +48,13 @@ import { recordWorkerFailure, recordWorkerSuccess } from "./worker-health";
 import { resignBody } from "./cch";
 import { resolveUpstreamRoute } from "./config";
 import { isBedrockMantleHost } from "./translate/bedrock";
+import {
+  isVertexHost,
+  toVertexModelId,
+  vertexRawPredictUrl,
+  vertexRegionFromUrl,
+} from "./translate/vertex";
+import { getVertexAccessToken, resolveVertexProject } from "./vertex-auth";
 import { getModelEntrySync, getWorkerModel } from "./worker-model";
 import { recordWarmupCost } from "./cost-tracker";
 import { upstreamFetch } from "./fetch";
@@ -831,8 +838,13 @@ export type CacheWarmingProfile = {
   warmupMarginMs: number;
   /** Prepare the stored body for a warmup request. */
   prepareWarmupBody: (storedBody: string) => string;
-  /** Upstream URL to send the warmup to. */
+  /** Upstream URL to send the warmup to. For Vertex (authMode "vertex") this is
+   *  the region BASE host (`https://{region}-aiplatform.googleapis.com`);
+   *  executeWarmup rebuilds the per-model `:rawPredict` URL from it. */
   upstreamUrl: string;
+  /** Auth/transport mode. Default (undefined) = Anthropic: session credential +
+   *  cch re-sign. "vertex" = GCP OAuth2 bearer (ADC), no cch, rawPredict URL. */
+  authMode?: "vertex";
 };
 
 /**
@@ -950,6 +962,28 @@ export function buildAnthropicProfile(
 }
 
 /**
+ * Build a warming profile for a Google Vertex AI (Claude) session. Vertex
+ * supports Anthropic prompt caching, and warming hits the SESSION's own Vertex
+ * host with lore's GCP credentials (the same auth real turns use), so it is
+ * safe to warm (unlike foreign anthropic-compat hosts). Pricing reuses the
+ * Anthropic profile (Vertex Claude pricing tracks the Anthropic API). The
+ * stored `upstreamUrl` is the region base — executeWarmup rebuilds the
+ * per-model `:rawPredict` URL and attaches the OAuth2 bearer.
+ */
+export function buildVertexProfile(
+  model: string,
+  ttl: "5m" | "1h",
+  upstreamBase: string,
+): CacheWarmingProfile {
+  const region = vertexRegionFromUrl(upstreamBase) ?? "global";
+  return {
+    ...buildAnthropicProfile(model, ttl),
+    upstreamUrl: `https://${region}-aiplatform.googleapis.com`,
+    authMode: "vertex",
+  };
+}
+
+/**
  * True only for Anthropic's first-party API host. Anthropic-compatible
  * providers (MiniMax `api.minimax.io/anthropic`, Fireworks, Kimi, …) report
  * `protocol:"anthropic"` but do NOT support Anthropic prompt-cache warming and
@@ -978,6 +1012,17 @@ export function resolveProfile(
   providerID?: string,
 ): CacheWarmingProfile | null {
   if (!model || !protocol) return null;
+
+  // Google Vertex AI (Claude): supports Anthropic prompt caching. The warmup
+  // hits the session's own Vertex host with lore's GCP credentials, so it is
+  // always safe to warm (no foreign-key-to-anthropic.com hazard). Detected by
+  // the explicit vertex provider id OR a vertex aiplatform host.
+  if (protocol === "vertex") {
+    const vRoute = resolveUpstreamRoute(model);
+    const vHost = upstreamBase || vRoute?.url;
+    if (!vHost || !isVertexHost(vHost)) return null;
+    return buildVertexProfile(model, ttl ?? "5m", vHost);
+  }
 
   // Only Anthropic protocol for now — OpenAI has automatic prefix caching with
   // no explicit warming API. (Bedrock rides the anthropic protocol via mantle.)
@@ -1846,42 +1891,87 @@ export async function executeWarmup(
   // Prepare for warmup (max_tokens:0, strip incompatible fields)
   const warmupBody = profile.prepareWarmupBody(storedBody);
 
-  // Resolve auth for this session — use the provider from lastUpstream
-  // to avoid cross-contamination when the session uses multiple providers.
-  const cred = resolveAuth(state.sessionID, state.lastUpstream?.providerID);
-  if (!cred) {
-    log.warn(
-      `cache-warmer: no auth for session=${state.sessionID.slice(0, 16)}, skipping`,
-    );
-    recordWorkerFailure(state.sessionID, "cache-warmer", "no-auth");
-    return noResult;
+  // Build URL + headers + body. Two modes:
+  //  - Vertex (authMode "vertex"): GCP OAuth2 bearer (ADC), a per-model
+  //    :rawPredict URL rebuilt from the region base, and NO cch re-sign
+  //    (Vertex is not a Claude Code billing endpoint). The session credential
+  //    is irrelevant — Vertex auth is the GCP token lore mints.
+  //  - Anthropic (default): the session credential + cch re-sign to /v1/messages.
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  let requestUrl: string;
+  let signedBody: string;
+
+  if (profile.authMode === "vertex") {
+    const model = state.lastUpstream?.model;
+    if (!model) return noResult;
+    const region = vertexRegionFromUrl(profile.upstreamUrl) ?? "global";
+    try {
+      const project = await resolveVertexProject("");
+      if (!project) {
+        log.warn(
+          `cache-warmer: no GCP project for vertex session=${state.sessionID.slice(0, 16)}, skipping`,
+        );
+        recordWorkerFailure(state.sessionID, "cache-warmer", "no-auth");
+        return noResult;
+      }
+      const token = await getVertexAccessToken();
+      headers.Authorization = `Bearer ${token}`;
+      requestUrl = vertexRawPredictUrl(
+        region,
+        project,
+        toVertexModelId(model),
+        false,
+      );
+    } catch (err) {
+      // ADC unavailable / token mint failed — skip this tick rather than
+      // crashing the warmer loop. Telemetry must never break the idle loop.
+      log.warn(
+        `cache-warmer: vertex auth failed for session=${state.sessionID.slice(0, 16)}: ${(err as Error).message}`,
+      );
+      recordWorkerFailure(state.sessionID, "cache-warmer", "no-auth");
+      return noResult;
+    }
+    // No cch re-sign for Vertex (no billing header) — send the warmup as-is.
+    signedBody = warmupBody;
+    // Apply user-supplied LORE_UPSTREAM_EXTRA_HEADERS as the final overlay.
+    for (const [key, value] of Object.entries(upstreamExtraHeaders)) {
+      headers[key] = value;
+    }
+  } else {
+    // Resolve auth for this session — use the provider from lastUpstream
+    // to avoid cross-contamination when the session uses multiple providers.
+    const cred = resolveAuth(state.sessionID, state.lastUpstream?.providerID);
+    if (!cred) {
+      log.warn(
+        `cache-warmer: no auth for session=${state.sessionID.slice(0, 16)}, skipping`,
+      );
+      recordWorkerFailure(state.sessionID, "cache-warmer", "no-auth");
+      return noResult;
+    }
+    headers["anthropic-version"] = "2023-06-01";
+    Object.assign(headers, authHeaders(cred));
+
+    // Forward anthropic-beta from the last real request so beta-gated body
+    // fields (e.g. context_management) are accepted by the upstream API.
+    const betaHeader = state.lastUpstream?.headers["anthropic-beta"];
+    if (betaHeader) {
+      headers["anthropic-beta"] = betaHeader;
+    }
+
+    // Apply user-supplied LORE_UPSTREAM_EXTRA_HEADERS as the final overlay so
+    // corporate-proxy / LiteLLM / Cloudflare AI Gateway / service-account
+    // scenarios work for cache-warming calls too.
+    for (const [key, value] of Object.entries(upstreamExtraHeaders)) {
+      headers[key] = value;
+    }
+
+    // Re-sign the cch billing header. The cch hash covers the entire
+    // serialized body, and we changed max_tokens/stream. The cch is
+    // billing verification only — NOT part of the cache key.
+    const firstUserText = extractFirstUserText(storedBody);
+    signedBody = resignBody(warmupBody, firstUserText);
+    requestUrl = profile.upstreamUrl;
   }
-
-  const headers: Record<string, string> = {
-    "content-type": "application/json",
-    "anthropic-version": "2023-06-01",
-    ...authHeaders(cred),
-  };
-
-  // Forward anthropic-beta from the last real request so beta-gated body
-  // fields (e.g. context_management) are accepted by the upstream API.
-  const betaHeader = state.lastUpstream?.headers["anthropic-beta"];
-  if (betaHeader) {
-    headers["anthropic-beta"] = betaHeader;
-  }
-
-  // Apply user-supplied LORE_UPSTREAM_EXTRA_HEADERS as the final overlay so
-  // corporate-proxy / LiteLLM / Cloudflare AI Gateway / service-account
-  // scenarios work for cache-warming calls too.
-  for (const [key, value] of Object.entries(upstreamExtraHeaders)) {
-    headers[key] = value;
-  }
-
-  // Re-sign the cch billing header. The cch hash covers the entire
-  // serialized body, and we changed max_tokens/stream. The cch is
-  // billing verification only — NOT part of the cache key.
-  const firstUserText = extractFirstUserText(storedBody);
-  const signedBody = resignBody(warmupBody, firstUserText);
 
   log.info(
     `cache-warmer: sending warmup for session=${state.sessionID.slice(0, 16)} ` +
@@ -1889,7 +1979,7 @@ export async function executeWarmup(
   );
 
   try {
-    const response = await upstreamFetch(profile.upstreamUrl, {
+    const response = await upstreamFetch(requestUrl, {
       method: "POST",
       headers,
       body: signedBody,
