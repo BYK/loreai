@@ -324,7 +324,7 @@ describe("ltm.findSemanticDuplicate — preference-specific threshold", () => {
     // preference threshold, but BELOW the conservative global 0.935.
     vectorSpy = vi
       .spyOn(embedding, "vectorSearch")
-      .mockImplementation(() => [{ id: existingId, similarity: 0.9 }]);
+      .mockImplementation(async () => [{ id: existingId, similarity: 0.9 }]);
   });
 
   afterEach(() => {
@@ -1124,12 +1124,14 @@ describe("ltm.forSession — vector-path set stability (regression #727)", () =>
       .spyOn(embedding, "embed")
       .mockResolvedValue([new Float32Array([1, 0, 0])]);
     // vectorSearch returns the current turn's per-entry similarities.
-    vectorSpy = vi.spyOn(embedding, "vectorSearch").mockImplementation(() =>
-      [...currentScores.entries()].map(([id, similarity]) => ({
-        id,
-        similarity,
-      })),
-    );
+    vectorSpy = vi
+      .spyOn(embedding, "vectorSearch")
+      .mockImplementation(async () =>
+        [...currentScores.entries()].map(([id, similarity]) => ({
+          id,
+          similarity,
+        })),
+      );
   });
 
   afterEach(() => {

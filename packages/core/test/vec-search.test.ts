@@ -56,7 +56,7 @@ describe("sqlite-vec extension loading", () => {
   // normalizes internally while the JS dot product does not. Stored [2,0,0]
   // vs query [1,0,0]: vec → cosine 1.0; JS → raw dot 2.0. Asserting ~1.0 fails
   // if the vec branch is removed.
-  test("vec branch is exercised when available (not silent fallback)", () => {
+  test("vec branch is exercised when available (not silent fallback)", async () => {
     if (!isVecAvailable()) return; // JS-only runtime: nothing to prove here
     const pid = ensureProject(PROJECT);
     db().query("DELETE FROM knowledge").run();
@@ -73,7 +73,7 @@ describe("sqlite-vec extension loading", () => {
         toBlob(new Float32Array([2, 0, 0])),
         "k-nonnorm",
       );
-    const hits = vectorSearch(new Float32Array([1, 0, 0]), 1);
+    const hits = await vectorSearch(new Float32Array([1, 0, 0]), 1);
     expect(hits.length).toBe(1);
     expect(hits[0].similarity).toBeCloseTo(1.0, 5); // vec (normalized), not 2.0 (raw dot)
   });
@@ -148,27 +148,27 @@ describe("vectorSearch excludeCategories", () => {
     );
   }
 
-  test("excludes the named category on the vec path", () => {
+  test("excludes the named category on the vec path", async () => {
     if (!isVecAvailable()) return; // JS leg below covers the fallback branch
     const pid = ensureProject(PROJECT);
     seedTwoCategories(pid);
-    const ids = vectorSearch(new Float32Array([1, 0, 0]), 10, [
-      "preference",
-    ]).map((h) => h.id);
+    const ids = (
+      await vectorSearch(new Float32Array([1, 0, 0]), 10, ["preference"])
+    ).map((h) => h.id);
     expect(ids).toContain("k-keep");
     expect(ids).not.toContain("k-drop");
   });
 
-  test("excludes the named category on the JS fallback path", () => {
+  test("excludes the named category on the JS fallback path", async () => {
     const pid = ensureProject(PROJECT);
     seedTwoCategories(pid);
     close();
     process.env.LORE_DISABLE_VEC = "1";
     try {
       expect(isVecAvailable()).toBe(false);
-      const ids = vectorSearch(new Float32Array([1, 0, 0]), 10, [
-        "preference",
-      ]).map((h) => h.id);
+      const ids = (
+        await vectorSearch(new Float32Array([1, 0, 0]), 10, ["preference"])
+      ).map((h) => h.id);
       expect(ids).toContain("k-keep");
       expect(ids).not.toContain("k-drop");
     } finally {
@@ -204,14 +204,17 @@ describe("vectorSearchDistillations / vectorSearchAllDistillations", () => {
       );
   }
 
-  test("ranks by similarity and excludes archived", () => {
+  test("ranks by similarity and excludes archived", async () => {
     const pid = ensureProject(PROJECT);
     insertDistillation("d-near", pid, unit([1, 0, 0]));
     insertDistillation("d-mid", pid, unit([0.6, 0.4, 0]));
     insertDistillation("d-far", pid, unit([0, 1, 0]));
     insertDistillation("d-archived", pid, unit([1, 0, 0]), { archived: 1 });
 
-    const hits = vectorSearchDistillations(new Float32Array([1, 0, 0]), 10);
+    const hits = await vectorSearchDistillations(
+      new Float32Array([1, 0, 0]),
+      10,
+    );
     const ids = hits.map((h) => h.id);
     expect(ids).toEqual(["d-near", "d-mid", "d-far"]);
     expect(ids).not.toContain("d-archived");
@@ -219,7 +222,7 @@ describe("vectorSearchDistillations / vectorSearchAllDistillations", () => {
     expect(hits[1].similarity).toBeGreaterThan(hits[2].similarity);
   });
 
-  test("allDistillations includes archived and returns session_id", () => {
+  test("allDistillations includes archived and returns session_id", async () => {
     const pid = ensureProject(PROJECT);
     insertDistillation("a-near", pid, unit([1, 0, 0]), {
       archived: 1,
@@ -227,7 +230,7 @@ describe("vectorSearchDistillations / vectorSearchAllDistillations", () => {
     });
     insertDistillation("a-far", pid, unit([0, 1, 0]), { session: "sY" });
 
-    const hits = vectorSearchAllDistillations(
+    const hits = await vectorSearchAllDistillations(
       new Float32Array([1, 0, 0]),
       pid,
       10,
@@ -257,21 +260,25 @@ describe("vectorSearchTemporal", () => {
       .run(id, pid, session, now, toBlob(vec));
   }
 
-  test("ranks by similarity, scoped to project", () => {
+  test("ranks by similarity, scoped to project", async () => {
     const pid = ensureProject(PROJECT);
     insertTemporal("t-near", pid, "s1", unit([1, 0, 0]));
     insertTemporal("t-far", pid, "s1", unit([0, 1, 0]));
 
-    const hits = vectorSearchTemporal(new Float32Array([1, 0, 0]), pid, 10);
+    const hits = await vectorSearchTemporal(
+      new Float32Array([1, 0, 0]),
+      pid,
+      10,
+    );
     expect(hits.map((h) => h.id)).toEqual(["t-near", "t-far"]);
   });
 
-  test("optional session scoping", () => {
+  test("optional session scoping", async () => {
     const pid = ensureProject(PROJECT);
     insertTemporal("t-s1", pid, "s1", unit([1, 0, 0]));
     insertTemporal("t-s2", pid, "s2", unit([1, 0, 0]));
 
-    const hits = vectorSearchTemporal(
+    const hits = await vectorSearchTemporal(
       new Float32Array([1, 0, 0]),
       pid,
       10,
@@ -291,7 +298,7 @@ describe("vec path vs JS fallback parity", () => {
     close();
   });
 
-  test("identical top-k from vec and JS paths on the same data", () => {
+  test("identical top-k from vec and JS paths on the same data", async () => {
     const pid = ensureProject(PROJECT);
     db().query("DELETE FROM knowledge").run();
     // 40 deterministic pseudo-random normalized vectors in 8 dims.
@@ -314,13 +321,13 @@ describe("vec path vs JS fallback parity", () => {
 
     // Vec path (only meaningful when the extension is actually loaded).
     const skipVecLeg = !isVecAvailable();
-    const vecHits = vectorSearch(query, 10);
+    const vecHits = await vectorSearch(query, 10);
 
     // Force the JS fallback: kill-switch + fresh connection.
     close();
     process.env.LORE_DISABLE_VEC = "1";
     expect(isVecAvailable()).toBe(false);
-    const jsHits = vectorSearch(query, 10);
+    const jsHits = await vectorSearch(query, 10);
 
     // Restore vec for the rest of the suite.
     delete process.env.LORE_DISABLE_VEC;

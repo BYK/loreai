@@ -331,7 +331,7 @@ describe("vectorSearch", () => {
     db().query("DELETE FROM knowledge").run();
   });
 
-  test("returns entries sorted by similarity descending", () => {
+  test("returns entries sorted by similarity descending", async () => {
     const pid = ensureProject(PROJECT);
     const now = Date.now();
 
@@ -391,7 +391,7 @@ describe("vectorSearch", () => {
       );
 
     const query = new Float32Array([1, 0, 0]);
-    const results = vectorSearch(query, 10);
+    const results = await vectorSearch(query, 10);
 
     expect(results.length).toBe(3);
     expect(results[0].id).toBe("embed-a");
@@ -402,7 +402,7 @@ describe("vectorSearch", () => {
     expect(results[2].similarity).toBeCloseTo(0.0, 3);
   });
 
-  test("respects limit parameter", () => {
+  test("respects limit parameter", async () => {
     const pid = ensureProject(PROJECT);
     const now = Date.now();
 
@@ -426,11 +426,11 @@ describe("vectorSearch", () => {
     }
 
     const query = new Float32Array([1, 0, 0]);
-    const results = vectorSearch(query, 2);
+    const results = await vectorSearch(query, 2);
     expect(results.length).toBe(2);
   });
 
-  test("skips entries without embeddings", () => {
+  test("skips entries without embeddings", async () => {
     const pid = ensureProject(PROJECT);
     const now = Date.now();
 
@@ -466,13 +466,13 @@ describe("vectorSearch", () => {
       );
 
     const query = new Float32Array([1, 0, 0]);
-    const results = vectorSearch(query, 10);
+    const results = await vectorSearch(query, 10);
 
     expect(results.length).toBe(1);
     expect(results[0].id).toBe("embed-yes");
   });
 
-  test("skips low-confidence entries", () => {
+  test("skips low-confidence entries", async () => {
     const pid = ensureProject(PROJECT);
     const now = Date.now();
 
@@ -516,7 +516,7 @@ describe("vectorSearch", () => {
       .run("embed-low", 0.1, now, now);
 
     const query = new Float32Array([1, 0, 0]);
-    const results = vectorSearch(query, 10);
+    const results = await vectorSearch(query, 10);
 
     expect(results.length).toBe(1);
     expect(results[0].id).toBe("embed-high");
@@ -541,17 +541,17 @@ describe("vectorSearchEntities", () => {
       .run(id, pid, name, now, now, toBlob(vec));
   }
 
-  test("returns entities sorted by similarity descending", () => {
+  test("returns entities sorted by similarity descending", async () => {
     insertEntity("ent-a", "Exact", new Float32Array([1, 0, 0]));
     insertEntity("ent-b", "Orthogonal", new Float32Array([0, 1, 0]));
     insertEntity("ent-c", "Close", new Float32Array([0.9, 0.1, 0]));
 
-    const results = vectorSearchEntities(new Float32Array([1, 0, 0]), 10);
+    const results = await vectorSearchEntities(new Float32Array([1, 0, 0]), 10);
     expect(results.map((r) => r.id)).toEqual(["ent-a", "ent-c", "ent-b"]);
     expect(results[0].similarity).toBeCloseTo(1, 5);
   });
 
-  test("ignores entities with no embedding and respects limit", () => {
+  test("ignores entities with no embedding and respects limit", async () => {
     insertEntity("ent-x", "Has vec", new Float32Array([1, 0, 0]));
     const pid = ensureProject(PROJECT);
     const now = Date.now();
@@ -561,7 +561,7 @@ describe("vectorSearchEntities", () => {
       )
       .run(pid, now, now);
 
-    const results = vectorSearchEntities(new Float32Array([1, 0, 0]), 1);
+    const results = await vectorSearchEntities(new Float32Array([1, 0, 0]), 1);
     expect(results.length).toBe(1);
     expect(results[0].id).toBe("ent-x");
   });
@@ -663,7 +663,7 @@ describeLocalProvider("LocalProvider integration", () => {
     }
 
     const [queryVec] = await embed(["database schema changes"], "query");
-    const results = vectorSearch(queryVec, 3);
+    const results = await vectorSearch(queryVec, 3);
 
     expect(results.length).toBe(3);
     // The PostgreSQL entry should be most relevant

@@ -516,12 +516,35 @@ export const LoreConfig = z.object({
             .describe(
               "Embedding dimensions. Default: 768 (local) / 1024 (voyage) / 1536 (openai). Local Nomic v1.5 supports Matryoshka: 64, 128, 256, 512, 768.",
             ),
+          /** Run vector searches on a read-worker pool (off the main event
+           *  loop) instead of synchronously on the main thread. Default: true.
+           *  This is a kill switch, not opt-in — set to false to force the
+           *  in-process path if the pool ever misbehaves. */
+          workerOffload: z
+            .boolean()
+            .default(true)
+            .describe(
+              "Run vector searches on a read-worker pool off the main event loop. Kill switch (default true); set false to force the in-process path.",
+            ),
+          /** Number of read-worker threads in the vector-search pool. Each owns
+           *  its own read-only DB connection. Default: 2. */
+          workerPoolSize: z
+            .number()
+            .int()
+            .min(1)
+            .max(16)
+            .default(2)
+            .describe(
+              "Number of read-worker threads for off-thread vector search. Default: 2.",
+            ),
         })
         .default({
           enabled: true,
           provider: "local",
           model: "nomic-ai/nomic-embed-text-v1.5",
           dimensions: 768,
+          workerOffload: true,
+          workerPoolSize: 2,
         })
         .describe("Vector embedding search provider, model, and dimensions."),
       /** Recall output formatting — controls how search results are presented to the agent. */
@@ -588,6 +611,8 @@ export const LoreConfig = z.object({
         provider: "local" as const,
         model: "nomic-ai/nomic-embed-text-v1.5",
         dimensions: 768,
+        workerOffload: true,
+        workerPoolSize: 2,
       },
       recall: {
         charBudget: 12000,

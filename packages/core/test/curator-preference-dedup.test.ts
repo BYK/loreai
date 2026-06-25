@@ -37,7 +37,7 @@ describe("curator dedupePreferenceCreates", () => {
     // below the global 0.935.
     vectorSpy = vi
       .spyOn(embedding, "vectorSearch")
-      .mockImplementation(() => [{ id: existingId, similarity: 0.9 }]);
+      .mockImplementation(async () => [{ id: existingId, similarity: 0.9 }]);
   });
 
   afterEach(() => {

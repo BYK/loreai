@@ -118,7 +118,11 @@ async function _detect(input: {
 
   // Step 2: Search for similar distillations across the project (wide net)
   const pid = ensureProject(input.projectPath);
-  const hits = embedding.vectorSearchAllDistillations(vec, pid, MAX_CANDIDATES);
+  const hits = await embedding.vectorSearchAllDistillations(
+    vec,
+    pid,
+    MAX_CANDIDATES,
+  );
 
   // Step 3: Filter candidates — above lower threshold, exclude self
   const candidates = hits.filter(

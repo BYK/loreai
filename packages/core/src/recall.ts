@@ -860,7 +860,7 @@ export async function searchRecall(
 
       // Knowledge vector search
       if (knowledgeEnabled) {
-        const vectorHits = embedding.vectorSearch(queryVec, limit);
+        const vectorHits = await embedding.vectorSearch(queryVec, limit);
         const vectorTagged: TaggedResult[] = [];
         for (const hit of vectorHits) {
           const entry = ltm.get(hit.id);
@@ -886,7 +886,7 @@ export async function searchRecall(
 
       // Distillation vector search
       if (scope !== "knowledge") {
-        const distVectorHits = embedding.vectorSearchDistillations(
+        const distVectorHits = await embedding.vectorSearchDistillations(
           queryVec,
           limit,
         );
@@ -916,7 +916,7 @@ export async function searchRecall(
       // Temporal vector search (includes distilled — embeddings preserved by markDistilled)
       if (scope !== "knowledge") {
         const pid = ensureProject(projectPath);
-        const temporalVectorHits = embedding.vectorSearchTemporal(
+        const temporalVectorHits = await embedding.vectorSearchTemporal(
           queryVec,
           pid,
           limit,
@@ -956,7 +956,7 @@ export async function searchRecall(
         // user references by name from another project resolves semantically
         // too. `infra` stays project-scoped.
         const entPid = ensureProject(projectPath);
-        const entityVectorHits = embedding.vectorSearchEntities(
+        const entityVectorHits = await embedding.vectorSearchEntities(
           queryVec,
           limit,
         );

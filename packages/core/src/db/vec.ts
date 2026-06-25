@@ -111,6 +111,37 @@ export function loadVecExtension(database: Database): void {
   );
 }
 
+/**
+ * Load sqlite-vec into an ARBITRARY connection and report whether it took.
+ *
+ * Unlike {@link loadVecExtension} this is pure per-connection: it does NOT
+ * touch the module-level `attempted`/`vecAvailable` singleton state and does
+ * not log. Used by read-worker reader connections (vector-pool.ts), each of
+ * which loads the extension independently on its own connection and tracks its
+ * own availability. Never throws — a failure returns `false` and the caller
+ * routes to the JS brute-force fallback.
+ */
+export function loadVecForConnection(database: Database): boolean {
+  if (process.env.LORE_DISABLE_VEC === "1") return false;
+  try {
+    const path = resolveExtensionPath();
+    if (!path) return false;
+    const conn = database as unknown as {
+      loadExtension: (p: string) => void;
+      enableLoadExtension?: (on: boolean) => void;
+    };
+    conn.enableLoadExtension?.(true);
+    conn.loadExtension(path);
+    conn.enableLoadExtension?.(false);
+    const row = database.query("SELECT vec_version() AS v").get() as
+      | { v?: string }
+      | undefined;
+    return typeof row?.v === "string" && row.v.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 /** Whether sqlite-vec loaded successfully on the active connection. */
 export function isVecAvailable(): boolean {
   return vecAvailable;

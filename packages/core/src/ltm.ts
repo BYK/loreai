@@ -769,7 +769,7 @@ export async function findSemanticDuplicate(input: {
   }
   // Search a few nearest neighbors, then keep only those visible to this
   // project (same project or cross-project) — vectorSearch is global.
-  const hits = embedding.vectorSearch(vec, 10);
+  const hits = await embedding.vectorSearch(vec, 10);
   for (const hit of hits) {
     if (hit.similarity < threshold) break; // sorted desc
     const row = db()
@@ -1824,7 +1824,7 @@ export async function forSession(
     let vectorScores: Map<string, number>;
     try {
       const [contextVec] = await embedding.embed([sessionContext], "query");
-      const hits = embedding.vectorSearch(contextVec, 50, excludeFilter);
+      const hits = await embedding.vectorSearch(contextVec, 50, excludeFilter);
       vectorScores = new Map(hits.map((h) => [h.id, h.similarity]));
     } catch (err) {
       log.warn("Vector scoring failed, falling back to FTS5:", err);

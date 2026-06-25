@@ -42,7 +42,9 @@ import {
   toBlob,
   type DistillationVectorHit,
   type VectorHit,
+  type VectorQuerySpec,
 } from "./vector-query";
+import { tryPoolVectorSearch } from "./vector-pool";
 
 // The cosine/BLOB helpers moved to ./vector-query (a leaf module the read
 // worker can import without pulling in the provider chain). Re-exported here so
@@ -1261,30 +1263,43 @@ export function l2Normalize(vec: Float32Array): Float32Array {
  *   Useful when preferences are injected in a separate system block and
  *   shouldn't compete for vector search slots with context-bound entries.
  */
-export function vectorSearch(
+/**
+ * Run `spec` on the read-worker pool when it's enabled and healthy (off the
+ * main event loop), otherwise synchronously in-process. The pool call never
+ * throws — it returns null when unavailable so we transparently fall back.
+ */
+async function poolOrInProcess(
+  spec: VectorQuerySpec,
+  queryEmbedding: Float32Array,
+): Promise<VectorHit[] | DistillationVectorHit[]> {
+  const pooled = await tryPoolVectorSearch(spec, queryEmbedding);
+  if (pooled !== null) return pooled;
+  return runVectorQuery(db(), isVecAvailable(), queryEmbedding, spec);
+}
+
+export async function vectorSearch(
   queryEmbedding: Float32Array,
   limit = 10,
   excludeCategories?: string[],
-): VectorHit[] {
-  return runVectorQuery(db(), isVecAvailable(), queryEmbedding, {
-    kind: "knowledge",
-    limit,
-    excludeCategories,
-  }) as VectorHit[];
+): Promise<VectorHit[]> {
+  return (await poolOrInProcess(
+    { kind: "knowledge", limit, excludeCategories },
+    queryEmbedding,
+  )) as VectorHit[];
 }
 
 /**
  * Search all entities with embeddings by cosine similarity.
  * Returns top-k entities sorted by similarity descending.
  */
-export function vectorSearchEntities(
+export async function vectorSearchEntities(
   queryEmbedding: Float32Array,
   limit = 10,
-): VectorHit[] {
-  return runVectorQuery(db(), isVecAvailable(), queryEmbedding, {
-    kind: "entities",
-    limit,
-  }) as VectorHit[];
+): Promise<VectorHit[]> {
+  return (await poolOrInProcess(
+    { kind: "entities", limit },
+    queryEmbedding,
+  )) as VectorHit[];
 }
 
 // ---------------------------------------------------------------------------
@@ -1295,14 +1310,14 @@ export function vectorSearchEntities(
  * Search non-archived distillations with embeddings by cosine similarity.
  * Returns top-k entries sorted by similarity descending.
  */
-export function vectorSearchDistillations(
+export async function vectorSearchDistillations(
   queryEmbedding: Float32Array,
   limit = 10,
-): VectorHit[] {
-  return runVectorQuery(db(), isVecAvailable(), queryEmbedding, {
-    kind: "distillations",
-    limit,
-  }) as VectorHit[];
+): Promise<VectorHit[]> {
+  return (await poolOrInProcess(
+    { kind: "distillations", limit },
+    queryEmbedding,
+  )) as VectorHit[];
 }
 
 // ---------------------------------------------------------------------------
@@ -1322,16 +1337,15 @@ export function vectorSearchDistillations(
  * Pure brute-force — fine for ~200 entries per project. Safety-capped
  * at 500 rows to prevent excessive CPU on long-running projects.
  */
-export function vectorSearchAllDistillations(
+export async function vectorSearchAllDistillations(
   queryEmbedding: Float32Array,
   projectId: string,
   limit = 20,
-): DistillationVectorHit[] {
-  return runVectorQuery(db(), isVecAvailable(), queryEmbedding, {
-    kind: "allDistillations",
-    projectId,
-    limit,
-  }) as DistillationVectorHit[];
+): Promise<DistillationVectorHit[]> {
+  return (await poolOrInProcess(
+    { kind: "allDistillations", projectId, limit },
+    queryEmbedding,
+  )) as DistillationVectorHit[];
 }
 
 // ---------------------------------------------------------------------------
@@ -1458,18 +1472,16 @@ export function embedTemporalMessage(id: string, content: string): void {
  *
  * Scoped to a single project. Optionally scoped to a single session.
  */
-export function vectorSearchTemporal(
+export async function vectorSearchTemporal(
   queryEmbedding: Float32Array,
   projectId: string,
   limit = 10,
   sessionId?: string,
-): VectorHit[] {
-  return runVectorQuery(db(), isVecAvailable(), queryEmbedding, {
-    kind: "temporal",
-    projectId,
-    limit,
-    sessionId,
-  }) as VectorHit[];
+): Promise<VectorHit[]> {
+  return (await poolOrInProcess(
+    { kind: "temporal", projectId, limit, sessionId },
+    queryEmbedding,
+  )) as VectorHit[];
 }
 
 // ---------------------------------------------------------------------------

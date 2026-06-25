@@ -188,7 +188,7 @@ export async function findRepeatedInstructions(input: {
 
     // Path A: Vector search (when embeddings succeeded)
     if (candidateEmbeddings.length > i) {
-      const hits = embedding.vectorSearchAllDistillations(
+      const hits = await embedding.vectorSearchAllDistillations(
         candidateEmbeddings[i],
         pid,
         20,
