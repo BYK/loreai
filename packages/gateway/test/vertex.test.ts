@@ -11,6 +11,7 @@
  */
 import { afterEach, describe, expect, test } from "vitest";
 import {
+  buildVertexUpstream,
   isVertexHost,
   toVertexBody,
   toVertexModelId,
@@ -285,5 +286,120 @@ describe("vertex-auth — ADC token seam", () => {
   test("resolveVertexProject prefers the configured project (no ADC call)", async () => {
     _setTestVertexTokenProvider(() => Promise.resolve("t"));
     expect(await resolveVertexProject("explicit-proj")).toBe("explicit-proj");
+  });
+});
+
+describe("buildVertexUpstream — conversation transport rewrite", () => {
+  // A representative `buildAnthropicRequest` result: Claude Code forwards
+  // x-api-key, anthropic-version, AND anthropic-beta (prompt-caching/extended-
+  // cache-ttl/context-1m beta tokens); the body carries model + stream.
+  const baseOpts = () => ({
+    anthropicHeaders: {
+      "content-type": "application/json",
+      "x-api-key": "sk-ant-client-key",
+      "anthropic-version": "2023-06-01",
+      "anthropic-beta":
+        "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11",
+      "user-agent": "claude-cli/2.0",
+    } as Record<string, string>,
+    anthropicBody: {
+      model: "claude-opus-4-5",
+      stream: true,
+      max_tokens: 1024,
+      messages: [{ role: "user", content: "hi" }],
+    } as Record<string, unknown>,
+    configRegion: "global",
+    project: "my-proj",
+    model: "claude-opus-4-5",
+    stream: true,
+    token: "gcp-oauth-token",
+  });
+
+  test("strips x-api-key, anthropic-version AND anthropic-beta; sets the bearer", () => {
+    // Regression for Seer #14881922/0: anthropic-beta is an api.anthropic.com-
+    // only header; forwarding it to Vertex risks a 400. It must be removed, like
+    // x-api-key and anthropic-version already were.
+    const { headers } = buildVertexUpstream({
+      ...baseOpts(),
+      effectiveUpstreamBase: "https://aiplatform.googleapis.com",
+    });
+    expect("x-api-key" in headers).toBe(false);
+    expect("anthropic-version" in headers).toBe(false);
+    expect("anthropic-beta" in headers).toBe(false);
+    expect(headers.Authorization).toBe("Bearer gcp-oauth-token");
+    // Non-Anthropic forwarded headers (e.g. content-type, user-agent) survive.
+    expect(headers["content-type"]).toBe("application/json");
+    expect(headers["user-agent"]).toBe("claude-cli/2.0");
+  });
+
+  test("does not mutate the caller's header object", () => {
+    const opts = {
+      ...baseOpts(),
+      effectiveUpstreamBase: "https://aiplatform.googleapis.com",
+    };
+    buildVertexUpstream(opts);
+    // The source headers are untouched (a fresh copy is rewritten).
+    expect(opts.anthropicHeaders["anthropic-beta"]).toBe(
+      "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11",
+    );
+    expect(opts.anthropicHeaders["x-api-key"]).toBe("sk-ant-client-key");
+  });
+
+  test("transforms the body: drops model/stream, injects anthropic_version", () => {
+    const { body } = buildVertexUpstream({
+      ...baseOpts(),
+      effectiveUpstreamBase: "https://aiplatform.googleapis.com",
+    });
+    expect(body.anthropic_version).toBe(VERTEX_ANTHROPIC_VERSION);
+    expect("model" in body).toBe(false);
+    expect("stream" in body).toBe(false);
+    expect(body.max_tokens).toBe(1024);
+  });
+
+  test("honors an X-Lore-Upstream-URL regional override for the URL region", () => {
+    // Regression for Seer #14881922/1: a regional X-Lore-Upstream-URL must win
+    // over config.vertexRegion (which here is "global"). The override host's
+    // region is parsed and threaded into the rawPredict URL.
+    const { url } = buildVertexUpstream({
+      ...baseOpts(),
+      effectiveUpstreamBase: "https://us-east1-aiplatform.googleapis.com",
+    });
+    expect(url).toBe(
+      "https://us-east1-aiplatform.googleapis.com/v1/projects/my-proj/locations/us-east1/publishers/anthropic/models/claude-opus-4-5@20251101:streamRawPredict",
+    );
+  });
+
+  test("falls back to configRegion when the base is the self-built global host", () => {
+    // No header override → effectiveUpstreamBase is the self-built global host;
+    // vertexRegionFromUrl round-trips configRegion ("global" → bare host + path).
+    const { url } = buildVertexUpstream({
+      ...baseOpts(),
+      configRegion: "global",
+      effectiveUpstreamBase: "https://aiplatform.googleapis.com",
+    });
+    expect(url).toBe(
+      "https://aiplatform.googleapis.com/v1/projects/my-proj/locations/global/publishers/anthropic/models/claude-opus-4-5@20251101:streamRawPredict",
+    );
+  });
+
+  test("falls back to configRegion when the base is not a Vertex host", () => {
+    // A non-Vertex effectiveUpstreamBase (e.g. a proxy/multi-region endpoint
+    // vertexRegionFromUrl can't parse) → configRegion is used, never null/"".
+    const { url } = buildVertexUpstream({
+      ...baseOpts(),
+      configRegion: "europe-west1",
+      effectiveUpstreamBase: "https://aiplatform.eu.rep.googleapis.com",
+    });
+    expect(url).toContain("https://europe-west1-aiplatform.googleapis.com/");
+    expect(url).toContain("/locations/europe-west1/");
+  });
+
+  test("selects the :rawPredict verb for a non-streaming request", () => {
+    const { url } = buildVertexUpstream({
+      ...baseOpts(),
+      stream: false,
+      effectiveUpstreamBase: "https://aiplatform.googleapis.com",
+    });
+    expect(url.endsWith(":rawPredict")).toBe(true);
   });
 });

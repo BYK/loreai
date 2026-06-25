@@ -861,6 +861,12 @@ async function buildVertexWorkerRequest(
   );
   return {
     url: vertexRawPredictUrl(region, project, vertexModel, false),
+    // The documented Vertex rawPredict header set is exactly these two (see
+    // https://docs.claude.com/en/api/claude-on-vertex-ai). NEVER add
+    // `anthropic-beta` here: it's an api.anthropic.com-only header. Worker
+    // prompt caching is driven by the cache_control block on `systemBlocks`
+    // above (a GA Vertex feature), NOT a beta header — so its absence does not
+    // disable caching, while forwarding it would risk a Vertex 400.
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,

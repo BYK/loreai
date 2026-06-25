@@ -149,3 +149,67 @@ export function vertexRegionFromUrl(url: string): string | null {
 export function isVertexHost(url: string): boolean {
   return vertexRegionFromUrl(url) !== null;
 }
+
+/** HTTP headers that only `api.anthropic.com` understands. They MUST be removed
+ * before forwarding to Vertex's rawPredict endpoint:
+ *   - `x-api-key`: replaced by the GCP OAuth2 bearer (set by the caller);
+ *   - `anthropic-version`: carried in the body (`anthropic_version`) on Vertex;
+ *   - `anthropic-beta`: an api.anthropic.com-only header. Prompt caching on
+ *     Vertex is driven by `cache_control` body blocks (a GA feature), NOT a beta
+ *     header, so dropping it never disables caching — but forwarding an
+ *     unrecognized beta token (e.g. `extended-cache-ttl-…`) risks a 400. The
+ *     documented Vertex header set is exactly content-type + Authorization (see
+ *     https://docs.claude.com/en/api/claude-on-vertex-ai).
+ */
+const ANTHROPIC_ONLY_HEADERS = [
+  "x-api-key",
+  "anthropic-version",
+  "anthropic-beta",
+] as const;
+
+/**
+ * Apply the Vertex transport rewrite to an already-built Anthropic upstream
+ * request (the `{ headers, body }` from `buildAnthropicRequest`). Pure and
+ * synchronous so it is unit-testable in isolation — the caller supplies the
+ * async-resolved GCP `project` and OAuth2 `token`. Produces the final Vertex
+ * `:rawPredict` / `:streamRawPredict` request:
+ *   - region: parsed from `effectiveUpstreamBase` so an explicit
+ *     `X-Lore-Upstream-URL` regional endpoint (chosen for latency/compliance)
+ *     wins, falling back to `configRegion`. In the no-override case
+ *     `effectiveUpstreamBase` is the self-built `https://<vertexHost(configRegion)>`,
+ *     so `vertexRegionFromUrl` round-trips `configRegion`;
+ *   - url: the per-model rawPredict URL for that region/project (the verb
+ *     selects streaming);
+ *   - body: the Anthropic body with `model`/`stream` dropped and
+ *     `anthropic_version` injected (`toVertexBody`);
+ *   - headers: the forwarded Anthropic headers with the api.anthropic.com-only
+ *     headers stripped (see `ANTHROPIC_ONLY_HEADERS`) and the GCP bearer set.
+ */
+export function buildVertexUpstream(opts: {
+  anthropicHeaders: Record<string, string>;
+  anthropicBody: Record<string, unknown>;
+  effectiveUpstreamBase: string;
+  configRegion: string;
+  project: string;
+  model: string;
+  stream: boolean;
+  token: string;
+}): {
+  url: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+} {
+  const region =
+    vertexRegionFromUrl(opts.effectiveUpstreamBase) ?? opts.configRegion;
+  const url = vertexRawPredictUrl(
+    region,
+    opts.project,
+    toVertexModelId(opts.model),
+    opts.stream,
+  );
+  const body = toVertexBody(opts.anthropicBody);
+  const headers = { ...opts.anthropicHeaders };
+  for (const h of ANTHROPIC_ONLY_HEADERS) delete headers[h];
+  headers.Authorization = `Bearer ${opts.token}`;
+  return { url, headers, body };
+}

@@ -143,12 +143,7 @@ import {
   isBedrockMantleDispatch,
   toMantleModelId,
 } from "./translate/bedrock";
-import {
-  toVertexBody,
-  toVertexModelId,
-  vertexHost,
-  vertexRawPredictUrl,
-} from "./translate/vertex";
+import { buildVertexUpstream, vertexHost } from "./translate/vertex";
 import { getVertexAccessToken, resolveVertexProject } from "./vertex-auth";
 import {
   buildOpenAIUpstreamRequest,
@@ -3437,22 +3432,26 @@ async function forwardToUpstream(
           "provide a project.",
       );
     }
-    url = vertexRawPredictUrl(
-      config.vertexRegion,
-      project,
-      toVertexModelId(req.model),
-      req.stream,
-    );
-    body = toVertexBody(result.body as Record<string, unknown>);
-    // Auth: GCP OAuth2 bearer (ADC) replaces the client credential. Drop the
-    // x-api-key and the anthropic-version HTTP header (version is in the body
-    // now). cch billing re-signing is gated on effectiveProtocol==="anthropic"
-    // below, so it never fires for Vertex.
+    // Auth: GCP OAuth2 bearer (ADC) replaces the client credential. cch billing
+    // re-signing is gated on effectiveProtocol==="anthropic" below, so it never
+    // fires for Vertex. The transport rewrite (region from an X-Lore-Upstream-URL
+    // override else config, rawPredict URL, toVertexBody, and stripping the
+    // api.anthropic.com-only headers + setting the bearer) is a pure helper so
+    // it can be unit-tested in isolation — see buildVertexUpstream.
     const token = await getVertexAccessToken();
-    headers = { ...result.headers };
-    delete headers["x-api-key"];
-    delete headers["anthropic-version"];
-    headers.Authorization = `Bearer ${token}`;
+    const vt = buildVertexUpstream({
+      anthropicHeaders: result.headers,
+      anthropicBody: result.body as Record<string, unknown>,
+      effectiveUpstreamBase,
+      configRegion: config.vertexRegion,
+      project,
+      model: req.model,
+      stream: req.stream,
+      token,
+    });
+    url = vt.url;
+    headers = vt.headers;
+    body = vt.body;
   } else {
     // For non-native-Anthropic upstreams (MiniMax, Fireworks, etc.), downgrade
     // extended cache TTL ("1h") to standard 5-minute ephemeral — the "1h" TTL
