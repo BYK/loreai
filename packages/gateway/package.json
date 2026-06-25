@@ -41,7 +41,9 @@
     "dist/index.cjs",
     "dist/index.d.cts",
     "dist/ort-wasm-simd-threaded.mjs",
-    "dist/ort-wasm-simd-threaded.wasm"
+    "dist/ort-wasm-simd-threaded.wasm",
+    "dist/vector-worker.cjs",
+    "dist/vector-worker.js"
   ],
   "engines": {
     "node": ">=22.15"

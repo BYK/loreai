@@ -545,6 +545,40 @@ async function buildBinary() {
   renameSync(workerBundlePath, workerAssetPath);
 
   // -------------------------------------------------------------------------
+  // Step 1c: esbuild vector-search worker bundle
+  // -------------------------------------------------------------------------
+  // The read-worker pool (core/vector-pool.ts) spawns this off the main thread.
+  // Tiny and self-contained: node:sqlite (via the "node" condition) + the pure
+  // runVectorQuery logic. No ONNX/transformers/WASM. sqlite-vec is stubbed (same
+  // as the main SEA bundle), so the worker uses the JS brute-force fallback —
+  // the off-thread benefit holds regardless of the native fast path.
+  const vectorWorkerBundlePath = join(stagingDir, "sea-vector-worker.cjs");
+  const vectorWorkerSrc = join(repoRoot, "packages/core/src/vector-worker.ts");
+
+  await esbuild.build({
+    entryPoints: [vectorWorkerSrc],
+    bundle: true,
+    format: "cjs",
+    target: "node22",
+    platform: "node",
+    conditions: ["node"],
+    external: ["sharp"],
+    plugins: [binaryExternalsPlugin(), stubSqliteVecPlugin()],
+    outfile: vectorWorkerBundlePath,
+    sourcemap: "linked",
+    minify: true,
+    logLevel: "info",
+    legalComments: "none",
+  });
+
+  console.log(`✓ esbuild vector worker: ${vectorWorkerBundlePath}`);
+
+  // Rename to `vector-worker.cjs` so the fossilize asset key matches what
+  // sea-entry.ts reads at runtime (`vector-worker.cjs`).
+  const vectorWorkerAssetPath = join(stagingDir, "vector-worker.cjs");
+  renameSync(vectorWorkerBundlePath, vectorWorkerAssetPath);
+
+  // -------------------------------------------------------------------------
   // Post-process: patch createRequire in both bundles
   // -------------------------------------------------------------------------
   // In CJS output, esbuild shims import.meta to {}, making
@@ -696,6 +730,10 @@ async function buildBinary() {
       src: "ort-wasm-simd-threaded.wasm",
     },
     "worker.cjs": { file: "worker.cjs", src: "worker.cjs" },
+    "vector-worker.cjs": {
+      file: "vector-worker.cjs",
+      src: "vector-worker.cjs",
+    },
   };
   if (vendorModelDir) {
     for (const rel of MODEL_FILES) {

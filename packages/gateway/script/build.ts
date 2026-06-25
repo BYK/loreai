@@ -69,6 +69,7 @@ async function buildLibrary() {
       "embedding-worker.js",
       'export * from "../../core/src/embedding-worker.ts";\n',
     ],
+    ["vector-worker.js", 'export * from "../../core/src/vector-worker.ts";\n'],
   ];
 
   for (const [filename, content] of shims) {

@@ -89,7 +89,17 @@ async function buildTarget(target: "node" | "bun") {
     outfile: join(outdir, "embedding-worker.js"),
   });
 
-  console.log(`✓ built dist/${target}/index.js + embedding-worker.js`);
+  // Vector-search worker bundle — same rationale as the embedding worker.
+  // Spawned by the read-worker pool (vector-pool.ts) via `new Worker(url)`.
+  await esbuild.build({
+    ...targetOptions,
+    entryPoints: [join(packageDir, "src/vector-worker.ts")],
+    outfile: join(outdir, "vector-worker.js"),
+  });
+
+  console.log(
+    `✓ built dist/${target}/index.js + embedding-worker.js + vector-worker.js`,
+  );
 }
 
 console.log("Building @loreai/core (node + bun targets)...");

@@ -51,6 +51,13 @@ const data = sea.getRawAsset("worker.cjs");
 (globalThis as Record<string, unknown>).__LORE_WORKER_SOURCE__ =
   Buffer.from(data).toString("utf8");
 
+// Vector-search worker source (read-worker pool, core/vector-pool.ts). Same
+// pattern as the embedding worker above: the pool reads this global and spawns
+// `new Worker(src, { eval: true, ... })`.
+const vectorWorkerData = sea.getRawAsset("vector-worker.cjs");
+(globalThis as Record<string, unknown>).__LORE_VECTOR_WORKER_SOURCE__ =
+  Buffer.from(vectorWorkerData).toString("utf8");
+
 // ---------------------------------------------------------------------------
 // 2. Vendor model materialization
 // ---------------------------------------------------------------------------

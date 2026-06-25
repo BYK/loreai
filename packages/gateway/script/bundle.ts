@@ -244,6 +244,55 @@ await esbuild.build({
 });
 
 // ---------------------------------------------------------------------------
+// Vector-search worker — separate CJS file next to index.cjs
+// ---------------------------------------------------------------------------
+// The vector-search read-worker pool (core/vector-pool.ts) spawns this via
+// node:worker_threads. Tiny by design: SQLite driver (node:sqlite via the
+// "node" condition) + sqlite-vec (external native extension) + the pure
+// runVectorQuery logic. No ONNX/transformers, so no ort-web redirect or WASM.
+
+await esbuild.build({
+  entryPoints: [join(packageDir, "..", "core", "src", "vector-worker.ts")],
+  bundle: true,
+  format: "cjs",
+  target: "node22",
+  platform: "node",
+  // Resolve #db/driver → driver.node.ts (node:sqlite)
+  conditions: ["node"],
+  external: ["node:*", "sqlite-vec"],
+  outfile: join(distDir, "vector-worker.cjs"),
+  sourcemap: false,
+  minify: true,
+  logLevel: "info",
+  legalComments: "none",
+  inject: [importMetaUrlShim],
+  define: {
+    "import.meta.url": "import_meta_url",
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Vector-search worker (ESM) — for the Bun ESM bundle
+// ---------------------------------------------------------------------------
+// Resolved by the pool via import.meta.url → ./vector-worker.js under Bun.
+// conditions: ["bun"] so #db/driver resolves to driver.bun.ts (bun:sqlite).
+
+await esbuild.build({
+  entryPoints: [join(packageDir, "..", "core", "src", "vector-worker.ts")],
+  bundle: true,
+  format: "esm",
+  target: "esnext",
+  platform: "node",
+  conditions: ["bun"],
+  external: ["bun:*", "node:*", "sqlite-vec"],
+  outfile: join(distDir, "vector-worker.js"),
+  sourcemap: false,
+  minify: true,
+  logLevel: "info",
+  legalComments: "none",
+});
+
+// ---------------------------------------------------------------------------
 // Ship onnxruntime-web WASM runtime next to the worker bundles
 // ---------------------------------------------------------------------------
 // The worker bundles redirect onnxruntime-node → onnxruntime-web (WASM). At
@@ -475,6 +524,8 @@ console.log(`  dist/index.cjs            — CJS bundle (Node.js, node:sqlite)`)
 console.log(`  dist/index.bun.js         — ESM bundle (Bun, bun:sqlite)`);
 console.log(`  dist/embedding-worker.cjs — embedding worker CJS (Node.js)`);
 console.log(`  dist/embedding-worker.js  — embedding worker ESM (Bun)`);
+console.log(`  dist/vector-worker.cjs    — vector-search worker CJS (Node.js)`);
+console.log(`  dist/vector-worker.js     — vector-search worker ESM (Bun)`);
 console.log(`  dist/ort-wasm-simd-threaded.{mjs,wasm} — ONNX WASM runtime`);
 console.log(`  dist/bin.cjs              — CLI wrapper`);
 console.log(`  dist/index.d.cts          — type declarations`);
