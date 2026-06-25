@@ -562,6 +562,15 @@ export function clearProject(projectPath: string): ClearResult {
         "DELETE FROM knowledge_transfers WHERE recalled_in_project_id = ? OR knowledge_id IN (SELECT logical_id FROM knowledge WHERE project_id = ?)",
       )
       .run(pid, pid);
+    // Per-entry validation bookkeeping keyed on logical_id (no FK CASCADE) —
+    // delete BEFORE knowledge so the subquery still sees the rows (#990).
+    for (const table of ltm.LOGICAL_ID_BOOKKEEPING_TABLES) {
+      database
+        .query(
+          `DELETE FROM ${table} WHERE logical_id IN (SELECT logical_id FROM knowledge WHERE project_id = ?)`,
+        )
+        .run(pid);
+    }
     database.query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
     database
       .query("DELETE FROM temporal_messages WHERE project_id = ?")
@@ -676,6 +685,15 @@ export function deleteProject(projectId: string): ClearResult | null {
         "DELETE FROM knowledge_transfers WHERE recalled_in_project_id = ? OR knowledge_id IN (SELECT logical_id FROM knowledge WHERE project_id = ?)",
       )
       .run(projectId, projectId);
+    // Per-entry validation bookkeeping keyed on logical_id (no FK CASCADE) —
+    // delete BEFORE knowledge so the subquery still sees the rows (#990).
+    for (const table of ltm.LOGICAL_ID_BOOKKEEPING_TABLES) {
+      database
+        .query(
+          `DELETE FROM ${table} WHERE logical_id IN (SELECT logical_id FROM knowledge WHERE project_id = ?)`,
+        )
+        .run(projectId);
+    }
     database.query("DELETE FROM knowledge WHERE project_id = ?").run(projectId);
     database
       .query("DELETE FROM temporal_messages WHERE project_id = ?")
@@ -745,6 +763,15 @@ export function clearKnowledge(projectPath: string): number {
       "DELETE FROM knowledge_transfers WHERE knowledge_id IN (SELECT logical_id FROM knowledge WHERE project_id = ?)",
     )
     .run(pid);
+  // Per-entry validation bookkeeping keyed on logical_id (no FK CASCADE) —
+  // delete BEFORE knowledge so the subquery still sees the rows (#990).
+  for (const table of ltm.LOGICAL_ID_BOOKKEEPING_TABLES) {
+    db()
+      .query(
+        `DELETE FROM ${table} WHERE logical_id IN (SELECT logical_id FROM knowledge WHERE project_id = ?)`,
+      )
+      .run(pid);
+  }
   db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
 
   invalidateProjectsCache();

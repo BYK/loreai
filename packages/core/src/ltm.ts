@@ -539,6 +539,26 @@ export function update(
   }
 }
 
+/**
+ * Per-entry bookkeeping tables that have a `logical_id` column and no FK
+ * CASCADE to the `knowledge` row. Under A2 (#823) a deleted entry's row is never
+ * physically removed (delete = append a death-cert version), so CASCADE never
+ * fires; and the bulk data-purge paths (clearProject / deleteProject /
+ * clearKnowledge) physically delete `knowledge` rows while bypassing remove().
+ * Every knowledge hard-delete path must purge these explicitly or their rows
+ * orphan. Centralized here so a new such table is wired into all delete paths by
+ * editing one list. (#990; introduced by #911 / PR #988.)
+ *
+ * This is the LOCAL-ONLY purge registry: only add tables whose rows are pure
+ * local derived state. Do NOT add synced convergent registers (e.g.
+ * knowledge_meta) — a local DELETE there would diverge from tombstone semantics
+ * once team sync lands.
+ */
+export const LOGICAL_ID_BOOKKEEPING_TABLES = [
+  "knowledge_ref_validity",
+  "knowledge_symbol_presence",
+] as const;
+
 export function remove(id: string, metadata?: KnowledgeMetadata) {
   // A2 (#823): delete = append an immutable is_deleted "death-certificate"
   // version (ordinary append, no physical DELETE). The death cert IS the
@@ -561,6 +581,11 @@ export function remove(id: string, metadata?: KnowledgeMetadata) {
   db()
     .query("DELETE FROM knowledge_transfers WHERE knowledge_id = ?")
     .run(logicalId);
+  // Per-entry validation bookkeeping (no FK CASCADE) — purge so it doesn't
+  // orphan once the entry is tombstoned. Table names are compile-time constants.
+  for (const table of LOGICAL_ID_BOOKKEEPING_TABLES) {
+    db().query(`DELETE FROM ${table} WHERE logical_id = ?`).run(logicalId);
+  }
 }
 
 /** True when the entry for this logical_id was deleted (tombstoned). */
