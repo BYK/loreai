@@ -23,6 +23,7 @@ import {
   onProjectMutation,
   loadParentChildMap,
   invalidateParentChildCache,
+  rebuildDirtySessionRollups,
 } from "./db";
 import { getGitRemote } from "./git";
 import * as ltm from "./ltm";
@@ -387,6 +388,78 @@ export function aggregateDistillationsBySessionAll(opts?: {
     });
   }
   return result;
+}
+
+/**
+ * One materialized session row from `session_rollup`, joined to its project, with
+ * everything the costs page needs in a single read (#981). Replaces the three
+ * O(N temporal_messages) bulk aggregates (`listAllRecentSessions`,
+ * `aggregateTokensBySessionAll`, `aggregateDistillationsBySessionAll`).
+ */
+export type SessionRollupSummary = {
+  project_id: string;
+  project_path: string;
+  project_name: string | null;
+  session_id: string;
+  message_count: number;
+  first_message_at: number;
+  last_message_at: number;
+  /** Whole-session SUM(tokens). */
+  total_tokens: number;
+  /** Metadata of the earliest assistant message (for model detection), or null. */
+  first_assistant_metadata: string | null;
+  distill_total_calls: number;
+  distill_batch_calls: number;
+  distill_total_tokens: number;
+  distill_batch_tokens: number;
+};
+
+/**
+ * List per-session rollup rows (across ALL projects) for the costs page. Reads the
+ * materialized `session_rollup` table — O(sessions), independent of the total
+ * `temporal_messages` count — instead of scanning every message row.
+ *
+ * `sinceMs` scopes to sessions last active on/after the cutoff (filters
+ * `last_message_at`); unlike the old per-message `created_at >= sinceMs` filter,
+ * the token/count totals are whole-session. With the 90-day costs window and
+ * short-lived sessions these are equivalent (a session is effectively always
+ * entirely inside or outside the window), and the whole-session total no longer
+ * splits a boundary-straddling session.
+ *
+ * Resolves any `dirty` rollup rows from source first (a delete of an extreme row
+ * defers the MIN/MAX/earliest-assistant recompute to read time), so the returned
+ * values always match a full recompute.
+ */
+export function listSessionRollups(opts?: {
+  sinceMs?: number;
+  limit?: number;
+}): SessionRollupSummary[] {
+  const sinceMs = opts?.sinceMs ?? 0;
+  const limit = opts?.limit ?? 50_000;
+  rebuildDirtySessionRollups(db());
+  return db()
+    .query(
+      `SELECT
+         sr.project_id,
+         p.path AS project_path,
+         p.name AS project_name,
+         sr.session_id,
+         sr.message_count,
+         sr.first_message_at,
+         sr.last_message_at,
+         sr.token_sum AS total_tokens,
+         sr.first_assistant_metadata,
+         sr.distill_calls AS distill_total_calls,
+         sr.distill_batch_calls,
+         sr.distill_token_sum AS distill_total_tokens,
+         sr.distill_batch_token_sum AS distill_batch_tokens
+       FROM session_rollup sr
+       JOIN projects p ON p.id = sr.project_id
+       WHERE sr.message_count > 0 AND sr.last_message_at >= ?
+       ORDER BY sr.last_message_at DESC
+       LIMIT ?`,
+    )
+    .all(sinceMs, limit) as SessionRollupSummary[];
 }
 
 /** Get a single distillation by ID (or resolved prefix). */
@@ -1142,6 +1215,15 @@ export function moveSessions(
     database
       .query(
         `UPDATE distillations SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
+      )
+      .run(toId, fromProjectId, ...allIds);
+
+    // Re-point the session rollup set-based: the project_id UPDATEs above do NOT
+    // fire the rollup triggers (scoped to content/tokens/metadata + insert/delete),
+    // so move the rows here. session_id is globally unique ⇒ no PK collision.
+    database
+      .query(
+        `UPDATE session_rollup SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
       )
       .run(toId, fromProjectId, ...allIds);
 

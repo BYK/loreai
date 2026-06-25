@@ -131,6 +131,9 @@ export {
   getInstanceId,
   runUpsert,
   withTransaction,
+  ensureSessionRollup,
+  rebuildDirtySessionRollups,
+  rebuildAllSessionRollups,
   close,
 } from "./db";
 export {

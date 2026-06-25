@@ -15,7 +15,6 @@ import { AUTOCOMPACT_THRESHOLD } from "./compaction";
 import {
   log,
   data,
-  temporal,
   loadAllSessionCosts,
   getKV,
   setKV,
@@ -1088,14 +1087,11 @@ export function computeHistoricalEstimates(
       projectById.set(p.id, p);
     }
 
-    // Bulk queries: 4 total instead of 3P+2 (one per table across all projects).
-    const allSessions = data.listAllRecentSessions({
-      sinceMs: scanCutoffMs,
-    });
-    const tokenAggs = temporal.aggregateTokensBySessionAll({
-      sinceMs: scanCutoffMs,
-    });
-    const distillAggs = data.aggregateDistillationsBySessionAll({
+    // Single bulk read from the materialized session_rollup table (#981):
+    // O(sessions), independent of total temporal_messages count. Replaces the
+    // three O(N-messages) bulk aggregates (recent sessions + token sums +
+    // distillation counts) with one row-per-session lookup.
+    const allSessions = data.listSessionRollups({
       sinceMs: scanCutoffMs,
     });
 
@@ -1109,26 +1105,23 @@ export function computeHistoricalEstimates(
       totals.sessionCount++;
       totals.messageCount += sess.message_count;
 
-      const tokenAgg = tokenAggs.get(sess.session_id);
-      const distillAgg = distillAggs.get(sess.session_id);
-
       // --- Determine model for this session ---
       // Use the earliest assistant message's metadata (user messages have
       // "unknown"). Falls back to the default estimation model.
       let model = DEFAULT_ESTIMATION_MODEL;
-      const m = extractModelFromMetadata(tokenAgg?.first_assistant_metadata);
+      const m = extractModelFromMetadata(sess.first_assistant_metadata);
       if (m) model = m;
 
       // --- 1. Estimate distillation overhead ---
       // Use worker model pricing — distillations run on the worker, not
-      // conversation model. The grouped aggregate gives total token_count
-      // split by call_type, so the batch discount (50%) is applied to the
-      // actual batch token sum — equivalent to the old per-row loop.
-      const totalDistillCalls = distillAgg?.total_calls ?? 0;
-      const sessionBatchCalls = distillAgg?.batch_calls ?? 0;
+      // conversation model. The rollup gives total token_count split by
+      // call_type, so the batch discount (50%) is applied to the actual batch
+      // token sum — equivalent to the old per-row loop.
+      const totalDistillCalls = sess.distill_total_calls;
+      const sessionBatchCalls = sess.distill_batch_calls;
       const sessionDirectCalls = totalDistillCalls - sessionBatchCalls;
-      const batchTokens = distillAgg?.batch_tokens ?? 0;
-      const directTokens = (distillAgg?.total_tokens ?? 0) - batchTokens;
+      const batchTokens = sess.distill_batch_tokens;
+      const directTokens = sess.distill_total_tokens - batchTokens;
       const perTokenCost = (estOut: number, mult: number) =>
         ((estOut * 3) / 1_000_000) * workerPricing.input * mult +
         (estOut / 1_000_000) * workerPricing.output * mult;
@@ -1147,7 +1140,7 @@ export function computeHistoricalEstimates(
       // are discarded in the per-message sim but counted by the division).
       // This is only a fallback — sessions with persisted snapshots (the common
       // case) use real data from live tracking.
-      const sessionTokens = tokenAgg?.total_tokens ?? 0;
+      const sessionTokens = sess.total_tokens;
       let avoidedCompactions = 0;
       if (sessionTokens > AUTOCOMPACT_THRESHOLD) {
         // First compaction at AUTOCOMPACT_THRESHOLD, then every

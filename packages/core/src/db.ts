@@ -1504,6 +1504,27 @@ const MIGRATIONS: string[] = [
     PRIMARY KEY (logical_id, symbol)
   );
   `,
+
+  `
+  -- Version 60: materialized per-session rollup for the /ui/costs page (#981).
+  --
+  -- v57/v58 made the three costs-page bulk aggregates index-only, but they are
+  -- still O(N temporal_messages) scans that re-degrade as the table outgrows the
+  -- page cache. This migration introduces session_rollup — one row per
+  -- (project_id, session_id) holding the costs-page inputs (token_sum,
+  -- message_count, first/last_message_at, earliest-assistant metadata, and the
+  -- distillation call_type counts/tokens). It is maintained incrementally by
+  -- triggers on temporal_messages and distillations, so the costs page reads
+  -- ~hundreds of session rows instead of scanning ~200K message rows
+  -- (O(sessions) not O(messages)).
+  --
+  -- The table, its indexes, the maintenance triggers AND the one-time backfill
+  -- from existing rows are all performed by a JS step (applySessionRollup),
+  -- special-cased in migrate() by SESSION_ROLLUP_MIGRATION_INDEX. Doing it in JS
+  -- lets the SAME idempotent routine run from recoverMissingObjects (self-heal a
+  -- dropped/empty rollup) and reuse the canonical rebuild query in tests/recovery.
+  -- This string is intentionally a no-op marker so MIGRATIONS.length still counts.
+  `,
 ];
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -1512,6 +1533,12 @@ const MIGRATIONS: string[] = [
 // apply would throw "no such column" and boot-loop (mirrors VACUUM's special
 // casing). The MIGRATIONS entry at this index is a no-op documentation marker.
 const KNOWLEDGE_META_MIGRATION_INDEX = 54; // 0-based index of version-55
+
+// Index of the migration whose work (create session_rollup + triggers + backfill)
+// is performed by a JS step instead of plain SQL, so the same idempotent routine
+// can run from recoverMissingObjects and reuse the canonical rebuild query. The
+// MIGRATIONS entry at this index is a no-op documentation marker.
+const SESSION_ROLLUP_MIGRATION_INDEX = 59; // 0-based index of version-60
 
 /**
  * Idempotent, column-presence-aware application of the v55 knowledge_meta register
@@ -1579,6 +1606,345 @@ function applyKnowledgeMetaRegister(database: Database): void {
       FROM knowledge k
       LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id
      WHERE k.is_current = 1 AND k.is_deleted = 0;`);
+}
+
+// ---------------------------------------------------------------------------
+// session_rollup — materialized per-session aggregates for /ui/costs (v59, #981)
+// ---------------------------------------------------------------------------
+
+/**
+ * Schema + maintenance triggers for `session_rollup`, all `IF NOT EXISTS` so it
+ * can run from the v59 migration AND self-heal from `recoverMissingObjects`.
+ *
+ * One row per `(project_id, session_id)` holds exactly the costs-page inputs:
+ *   - temporal_messages: message_count, token_sum, first/last_message_at, and the
+ *     earliest-assistant row (identity + created_at + metadata, for model detection);
+ *   - distillations: call/token counts split by call_type.
+ *
+ * Maintenance invariants (see #981 plan):
+ *   - token_sum / message_count / distill_* are EXACT O(1) deltas on every write.
+ *   - The only values that cannot be maintained by a pure delta are the MIN/MAX
+ *     (first/last_message_at) and the earliest-assistant row when the extreme row
+ *     is DELETED. Those mark `dirty=1`; the read path / rebuild recomputes the
+ *     session lazily — so even bulk prune/clear stays O(1) per source row.
+ *   - The UPDATE trigger is scoped `AFTER UPDATE OF content, tokens, metadata`,
+ *     which fires ONLY for `temporal.store()`'s re-store. project_id/session_id/
+ *     created_at/role are immutable on that path; the project_id moves done by
+ *     mergeProjectInternal / moveSessions intentionally do NOT fire it and instead
+ *     re-point the rollup rows set-based.
+ *   - distillations.call_type / token_count are immutable after insert, so there
+ *     is no distillation UPDATE trigger (archived/embedding changes don't count).
+ *   - Earliest-assistant tie-break is (created_at ASC, rowid ASC) everywhere
+ *     (insert trigger, recompute, full rebuild) so incremental == recompute.
+ */
+const SESSION_ROLLUP_SCHEMA_SQL = `
+  CREATE TABLE IF NOT EXISTS session_rollup (
+    project_id               TEXT NOT NULL REFERENCES projects(id),
+    session_id               TEXT NOT NULL,
+    message_count            INTEGER NOT NULL DEFAULT 0,
+    token_sum                INTEGER NOT NULL DEFAULT 0,
+    first_message_at         INTEGER,
+    last_message_at          INTEGER,
+    first_assistant_rowid    INTEGER,
+    first_assistant_at       INTEGER,
+    first_assistant_metadata TEXT,
+    distill_calls            INTEGER NOT NULL DEFAULT 0,
+    distill_batch_calls      INTEGER NOT NULL DEFAULT 0,
+    distill_token_sum        INTEGER NOT NULL DEFAULT 0,
+    distill_batch_token_sum  INTEGER NOT NULL DEFAULT 0,
+    dirty                    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (project_id, session_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_session_rollup_last  ON session_rollup(last_message_at);
+  CREATE INDEX IF NOT EXISTS idx_session_rollup_dirty ON session_rollup(dirty) WHERE dirty = 1;
+
+  -- temporal_messages INSERT: extend the running aggregates; adopt the new row as
+  -- earliest-assistant when it is an assistant strictly earlier than the current
+  -- one (tie-break: smaller rowid). All RHS expressions in the DO UPDATE see the
+  -- pre-update row values (SQLite UPSERT semantics), so the three first_assistant_*
+  -- assignments share one consistent comparison.
+  CREATE TRIGGER IF NOT EXISTS temporal_rollup_insert
+  AFTER INSERT ON temporal_messages
+  BEGIN
+    INSERT INTO session_rollup (
+      project_id, session_id, message_count, token_sum,
+      first_message_at, last_message_at,
+      first_assistant_rowid, first_assistant_at, first_assistant_metadata, dirty
+    ) VALUES (
+      NEW.project_id, NEW.session_id, 1, COALESCE(NEW.tokens, 0),
+      NEW.created_at, NEW.created_at,
+      CASE WHEN NEW.role = 'assistant' THEN NEW.rowid END,
+      CASE WHEN NEW.role = 'assistant' THEN NEW.created_at END,
+      CASE WHEN NEW.role = 'assistant' THEN NEW.metadata END,
+      0
+    )
+    ON CONFLICT(project_id, session_id) DO UPDATE SET
+      message_count = message_count + 1,
+      token_sum = token_sum + COALESCE(NEW.tokens, 0),
+      -- COALESCE first: the row may have been seeded by a distillation insert
+      -- (message-less), leaving first/last_message_at NULL; scalar MIN/MAX would
+      -- otherwise propagate that NULL forever once a distill-only row exists.
+      first_message_at = MIN(COALESCE(first_message_at, NEW.created_at), NEW.created_at),
+      last_message_at = MAX(COALESCE(last_message_at, NEW.created_at), NEW.created_at),
+      first_assistant_rowid = CASE
+        WHEN NEW.role = 'assistant' AND (
+          first_assistant_at IS NULL OR NEW.created_at < first_assistant_at
+          OR (NEW.created_at = first_assistant_at AND NEW.rowid < first_assistant_rowid)
+        ) THEN NEW.rowid ELSE first_assistant_rowid END,
+      first_assistant_at = CASE
+        WHEN NEW.role = 'assistant' AND (
+          first_assistant_at IS NULL OR NEW.created_at < first_assistant_at
+          OR (NEW.created_at = first_assistant_at AND NEW.rowid < first_assistant_rowid)
+        ) THEN NEW.created_at ELSE first_assistant_at END,
+      first_assistant_metadata = CASE
+        WHEN NEW.role = 'assistant' AND (
+          first_assistant_at IS NULL OR NEW.created_at < first_assistant_at
+          OR (NEW.created_at = first_assistant_at AND NEW.rowid < first_assistant_rowid)
+        ) THEN NEW.metadata ELSE first_assistant_metadata END;
+  END;
+
+  -- temporal_messages re-store (only content/tokens/metadata change): apply the
+  -- token delta and refresh the earliest-assistant metadata iff THIS row is it.
+  CREATE TRIGGER IF NOT EXISTS temporal_rollup_update
+  AFTER UPDATE OF content, tokens, metadata ON temporal_messages
+  BEGIN
+    UPDATE session_rollup SET
+      token_sum = token_sum - COALESCE(OLD.tokens, 0) + COALESCE(NEW.tokens, 0),
+      first_assistant_metadata = CASE
+        WHEN NEW.rowid = first_assistant_rowid THEN NEW.metadata
+        ELSE first_assistant_metadata END
+    WHERE project_id = NEW.project_id AND session_id = NEW.session_id;
+  END;
+
+  -- temporal_messages DELETE: exact count/token deltas; mark dirty when an extreme
+  -- (first/last message or the earliest-assistant row) is removed so the session is
+  -- recomputed lazily. Drop the rollup row once the session has no rows at all.
+  CREATE TRIGGER IF NOT EXISTS temporal_rollup_delete
+  AFTER DELETE ON temporal_messages
+  BEGIN
+    UPDATE session_rollup SET
+      message_count = message_count - 1,
+      token_sum = token_sum - COALESCE(OLD.tokens, 0),
+      dirty = CASE
+        WHEN OLD.rowid = first_assistant_rowid
+          OR OLD.created_at = first_message_at
+          OR OLD.created_at = last_message_at
+        THEN 1 ELSE dirty END
+    WHERE project_id = OLD.project_id AND session_id = OLD.session_id;
+    DELETE FROM session_rollup
+    WHERE project_id = OLD.project_id AND session_id = OLD.session_id
+      AND message_count <= 0 AND distill_calls <= 0;
+  END;
+
+  -- distillations INSERT/DELETE: pure SUM/COUNT deltas (no extremes → never dirty).
+  CREATE TRIGGER IF NOT EXISTS distillation_rollup_insert
+  AFTER INSERT ON distillations
+  BEGIN
+    INSERT INTO session_rollup (
+      project_id, session_id,
+      distill_calls, distill_batch_calls, distill_token_sum, distill_batch_token_sum
+    ) VALUES (
+      NEW.project_id, NEW.session_id, 1,
+      CASE WHEN NEW.call_type = 'batch' THEN 1 ELSE 0 END,
+      COALESCE(NEW.token_count, 0),
+      CASE WHEN NEW.call_type = 'batch' THEN COALESCE(NEW.token_count, 0) ELSE 0 END
+    )
+    ON CONFLICT(project_id, session_id) DO UPDATE SET
+      distill_calls = distill_calls + 1,
+      distill_batch_calls = distill_batch_calls
+        + CASE WHEN NEW.call_type = 'batch' THEN 1 ELSE 0 END,
+      distill_token_sum = distill_token_sum + COALESCE(NEW.token_count, 0),
+      distill_batch_token_sum = distill_batch_token_sum
+        + CASE WHEN NEW.call_type = 'batch' THEN COALESCE(NEW.token_count, 0) ELSE 0 END;
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS distillation_rollup_delete
+  AFTER DELETE ON distillations
+  BEGIN
+    UPDATE session_rollup SET
+      distill_calls = distill_calls - 1,
+      distill_batch_calls = distill_batch_calls
+        - CASE WHEN OLD.call_type = 'batch' THEN 1 ELSE 0 END,
+      distill_token_sum = distill_token_sum - COALESCE(OLD.token_count, 0),
+      distill_batch_token_sum = distill_batch_token_sum
+        - CASE WHEN OLD.call_type = 'batch' THEN COALESCE(OLD.token_count, 0) ELSE 0 END
+    WHERE project_id = OLD.project_id AND session_id = OLD.session_id;
+    DELETE FROM session_rollup
+    WHERE project_id = OLD.project_id AND session_id = OLD.session_id
+      AND message_count <= 0 AND distill_calls <= 0;
+  END;
+`;
+
+/** Create the session_rollup table + maintenance triggers if missing (idempotent). */
+export function ensureSessionRollup(database: Database): void {
+  database.exec(SESSION_ROLLUP_SCHEMA_SQL);
+}
+
+/**
+ * Recompute one session's rollup row from the source tables and clear its dirty
+ * flag. Bounded by the session's own row count (uses the session-scoped indexes).
+ * If the session has neither messages nor distillations, the row is removed.
+ */
+function recomputeSessionRollupRow(
+  database: Database,
+  projectId: string,
+  sessionId: string,
+): void {
+  const t = database
+    .query(
+      `SELECT COUNT(*) AS c, COALESCE(SUM(tokens), 0) AS toks,
+              MIN(created_at) AS first_at, MAX(created_at) AS last_at
+         FROM temporal_messages WHERE project_id = ? AND session_id = ?`,
+    )
+    .get(projectId, sessionId) as {
+    c: number;
+    toks: number;
+    first_at: number | null;
+    last_at: number | null;
+  };
+  const fa = database
+    .query(
+      `SELECT rowid AS rid, created_at, metadata
+         FROM temporal_messages
+        WHERE project_id = ? AND session_id = ? AND role = 'assistant'
+        ORDER BY created_at ASC, rowid ASC LIMIT 1`,
+    )
+    .get(projectId, sessionId) as {
+    rid: number;
+    created_at: number;
+    metadata: string | null;
+  } | null;
+  const d = database
+    .query(
+      `SELECT COUNT(*) AS calls,
+              COALESCE(SUM(CASE WHEN call_type = 'batch' THEN 1 ELSE 0 END), 0) AS batch_calls,
+              COALESCE(SUM(token_count), 0) AS toks,
+              COALESCE(SUM(CASE WHEN call_type = 'batch' THEN token_count ELSE 0 END), 0) AS batch_toks
+         FROM distillations WHERE project_id = ? AND session_id = ?`,
+    )
+    .get(projectId, sessionId) as {
+    calls: number;
+    batch_calls: number;
+    toks: number;
+    batch_toks: number;
+  };
+
+  if (t.c === 0 && d.calls === 0) {
+    database
+      .query(
+        "DELETE FROM session_rollup WHERE project_id = ? AND session_id = ?",
+      )
+      .run(projectId, sessionId);
+    return;
+  }
+  database
+    .query(
+      `INSERT INTO session_rollup (
+         project_id, session_id, message_count, token_sum,
+         first_message_at, last_message_at,
+         first_assistant_rowid, first_assistant_at, first_assistant_metadata,
+         distill_calls, distill_batch_calls, distill_token_sum, distill_batch_token_sum, dirty
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+       ON CONFLICT(project_id, session_id) DO UPDATE SET
+         message_count = excluded.message_count,
+         token_sum = excluded.token_sum,
+         first_message_at = excluded.first_message_at,
+         last_message_at = excluded.last_message_at,
+         first_assistant_rowid = excluded.first_assistant_rowid,
+         first_assistant_at = excluded.first_assistant_at,
+         first_assistant_metadata = excluded.first_assistant_metadata,
+         distill_calls = excluded.distill_calls,
+         distill_batch_calls = excluded.distill_batch_calls,
+         distill_token_sum = excluded.distill_token_sum,
+         distill_batch_token_sum = excluded.distill_batch_token_sum,
+         dirty = 0`,
+    )
+    .run(
+      projectId,
+      sessionId,
+      t.c,
+      t.toks,
+      t.first_at,
+      t.last_at,
+      fa?.rid ?? null,
+      fa?.created_at ?? null,
+      fa?.metadata ?? null,
+      d.calls,
+      d.batch_calls,
+      d.toks,
+      d.batch_toks,
+    );
+}
+
+/** Recompute every session_rollup row currently flagged dirty. */
+export function rebuildDirtySessionRollups(database: Database = db()): void {
+  const dirty = database
+    .query("SELECT project_id, session_id FROM session_rollup WHERE dirty = 1")
+    .all() as Array<{ project_id: string; session_id: string }>;
+  for (const r of dirty)
+    recomputeSessionRollupRow(database, r.project_id, r.session_id);
+}
+
+/**
+ * Reconstruct the entire session_rollup table from the source tables. Used by the
+ * v59 backfill and by recovery. Idempotent (truncate + repopulate). Three grouped
+ * passes that benefit from the v57/v58 covering indexes (#981).
+ */
+export function rebuildAllSessionRollups(database: Database = db()): void {
+  database.exec("DELETE FROM session_rollup");
+  // Pass 1: per-session message_count / token_sum / first/last_message_at.
+  database.exec(`
+    INSERT INTO session_rollup (
+      project_id, session_id, message_count, token_sum, first_message_at, last_message_at
+    )
+    SELECT project_id, session_id, COUNT(*), COALESCE(SUM(tokens), 0),
+           MIN(created_at), MAX(created_at)
+      FROM temporal_messages
+     GROUP BY project_id, session_id;
+  `);
+  // Pass 2: earliest assistant row per session (tie-break created_at ASC, rowid ASC).
+  // Every session with an assistant message already has a row from pass 1, so the
+  // ON CONFLICT branch always applies.
+  database.exec(`
+    INSERT INTO session_rollup (
+      project_id, session_id, first_assistant_rowid, first_assistant_at, first_assistant_metadata
+    )
+    SELECT project_id, session_id, rid, created_at, metadata FROM (
+      SELECT project_id, session_id, rowid AS rid, created_at, metadata,
+             ROW_NUMBER() OVER (
+               PARTITION BY project_id, session_id ORDER BY created_at ASC, rowid ASC
+             ) AS rn
+        FROM temporal_messages WHERE role = 'assistant'
+    ) WHERE rn = 1
+    ON CONFLICT(project_id, session_id) DO UPDATE SET
+      first_assistant_rowid = excluded.first_assistant_rowid,
+      first_assistant_at = excluded.first_assistant_at,
+      first_assistant_metadata = excluded.first_assistant_metadata;
+  `);
+  // Pass 3: distillation counts/tokens per session (may create distill-only rows).
+  database.exec(`
+    INSERT INTO session_rollup (
+      project_id, session_id, distill_calls, distill_batch_calls,
+      distill_token_sum, distill_batch_token_sum
+    )
+    SELECT project_id, session_id, COUNT(*),
+           COALESCE(SUM(CASE WHEN call_type = 'batch' THEN 1 ELSE 0 END), 0),
+           COALESCE(SUM(token_count), 0),
+           COALESCE(SUM(CASE WHEN call_type = 'batch' THEN token_count ELSE 0 END), 0)
+      FROM distillations
+     GROUP BY project_id, session_id
+    ON CONFLICT(project_id, session_id) DO UPDATE SET
+      distill_calls = excluded.distill_calls,
+      distill_batch_calls = excluded.distill_batch_calls,
+      distill_token_sum = excluded.distill_token_sum,
+      distill_batch_token_sum = excluded.distill_batch_token_sum;
+  `);
+}
+
+/** v59 migration step: create the rollup objects then backfill from source. */
+function applySessionRollup(database: Database): void {
+  ensureSessionRollup(database);
+  rebuildAllSessionRollups(database);
 }
 
 /**
@@ -1814,6 +2180,10 @@ function migrate(database: Database) {
       // Destructive (DROP COLUMN) + non-idempotent-as-SQL: run the column-aware
       // JS step so a partial apply can't boot-loop on re-run (see the fn doc).
       applyKnowledgeMetaRegister(database);
+    } else if (i === SESSION_ROLLUP_MIGRATION_INDEX) {
+      // Create session_rollup + maintenance triggers, then backfill from source.
+      // Done in JS so the same idempotent routine self-heals from recovery (#981).
+      applySessionRollup(database);
     } else {
       try {
         database.exec(MIGRATIONS[i]);
@@ -2113,6 +2483,25 @@ function recoverMissingObjects(database: Database) {
     CREATE INDEX IF NOT EXISTS idx_temporal_project_session_created
       ON temporal_messages(project_id, session_id, created_at);
   `);
+  // Version 60: session_rollup table + maintenance triggers. Recreate them if a
+  // fully-migrated DB lost them (no-op when present). If the table came back empty
+  // while the source still has rows, the backfill was lost too — rebuild it once.
+  // (A genuinely empty DB skips the rebuild: no source rows ⇒ nothing to do.)
+  ensureSessionRollup(database);
+  {
+    const hasRollup = database
+      .query("SELECT 1 FROM session_rollup LIMIT 1")
+      .get() as unknown;
+    if (!hasRollup) {
+      const hasMessages = database
+        .query("SELECT 1 FROM temporal_messages LIMIT 1")
+        .get() as unknown;
+      const hasDistill = database
+        .query("SELECT 1 FROM distillations LIMIT 1")
+        .get() as unknown;
+      if (hasMessages || hasDistill) rebuildAllSessionRollups(database);
+    }
+  }
   // Version 36: session project binding. Recover each column independently in
   // case a partial ALTER (e.g. the first succeeded, the second was skipped on a
   // prior failure) left the table missing a column.
@@ -2213,6 +2602,13 @@ export function mergeProjectInternal(sourceId: string, targetId: string): void {
       targetId,
       sourceId,
     );
+    // Re-point the session rollup set-based: the temporal/distillation project_id
+    // UPDATEs above do NOT fire the rollup triggers (scoped to content/tokens/
+    // metadata + insert/delete), so move the rows here. session_id is globally
+    // unique ⇒ no (target, session_id) PK collision.
+    d.query(
+      "UPDATE session_rollup SET project_id = ? WHERE project_id = ?",
+    ).run(targetId, sourceId);
     d.query("UPDATE lat_sections SET project_id = ? WHERE project_id = ?").run(
       targetId,
       sourceId,
