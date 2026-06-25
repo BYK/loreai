@@ -87,7 +87,6 @@ function poolEnabled(): boolean {
 }
 
 function desiredPoolSize(): number {
-  if (testWorkerFactory) return 1;
   const n = config().search.embeddings.workerPoolSize;
   return typeof n === "number" && n >= 1 ? Math.floor(n) : DEFAULT_POOL_SIZE;
 }
