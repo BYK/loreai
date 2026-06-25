@@ -620,21 +620,6 @@ export type WarmupState = {
    * attribution to prevent phantom savings.
    */
   lastWarmupRefreshTokens?: number;
-  /**
-   * Rolling window (FIFO — oldest evicted from the front, capped at
-   * WRITE_EFFICIENCY_WINDOW) of per-warmup cache-WRITE efficiency =
-   * cacheRead / (cacheRead + cacheWrite)
-   * from each warmup's own response usage. This is the fraction of the warmed
-   * prefix that was already cached (cheap read) vs freshly written (expensive).
-   *
-   * 🔴 Distinct from `warmupHits/totalWarmups` (USER-RETURN probability): a
-   * large, actively-growing session reliably returns (return-rate ~1.0) yet
-   * each full-body warm writes ~550K to refresh only the ~37K stable prefix
-   * (efficiency ~6%) — pure waste the return-rate guard cannot see. shouldWarm
-   * stops warming when this stays chronically low. Scrubbed on session-identity
-   * change alongside lastWarmupRefreshTokens (no cross-session bleed).
-   */
-  writeEfficiencySamples?: number[];
 };
 
 /** Result from a warmup request — used for circuit breaker and metrics. */

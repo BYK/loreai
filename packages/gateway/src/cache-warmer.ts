@@ -35,6 +35,8 @@ import {
   getCacheSizeSnapshot,
   getCacheStrategy,
   estimateMetaDistillCostPerCall,
+  getPrefixChurnRate,
+  PREFIX_CHURN_WARM_BLOCK,
 } from "@loreai/core";
 import type {
   InterTurnHistogram,
@@ -138,13 +140,6 @@ export const MIN_WARMUPS_FOR_ROI_CHECK = 5;
  *  1 in 4 warmups must result in a confirmed user return. */
 export const MIN_SESSION_HIT_RATE = 0.25;
 
-/** Minimum cache-WRITE efficiency (cacheRead / (cacheRead + cacheWrite), from
- *  each warmup's own response) to continue warming. Below this, the warmup is
- *  writing far more than it reuses — e.g. a large, actively-growing session
- *  whose full-body warm refreshes only the ~37K stable prefix (efficiency ~6%)
- *  while writing ~550K every time. Distinct from MIN_SESSION_HIT_RATE, which
- *  measures user-return probability, not write efficiency. */
-export const MIN_WRITE_EFFICIENCY = 0.2;
 /**
  * Shadow-mode (PR2a) cap on the `expectedFutureTurns` proxy fed into the shared
  * cache-economics evaluator. Until PR2b derives a principled mean-residual-life
@@ -153,11 +148,6 @@ export const MIN_WRITE_EFFICIENCY = 0.2;
  * dominate the ongoing-cost term while we are only MEASURING. Behavior-neutral.
  */
 export const SHADOW_FUTURE_TURNS_CAP = 50;
-/** Minimum number of recorded warmup-efficiency samples before the
- *  write-efficiency gate engages (avoid acting on one noisy sample). */
-export const MIN_WARMUPS_FOR_EFFICIENCY_CHECK = 3;
-/** Rolling window size for per-session warmup write-efficiency samples. */
-export const WRITE_EFFICIENCY_WINDOW = 5;
 
 /** Minimum total input tokens (input + cache_read + cache_creation) before
  *  warming is eligible. Below this threshold the absolute savings per hit
@@ -363,12 +353,15 @@ export function pruneExpiredCircuitBreakers(now: number = Date.now()): number {
 /**
  * Record a warmup result for a bucket and check its circuit breaker.
  *
- * A "failure" is a warmup where cacheCreationTokens > 0 AND cacheReadTokens === 0
- * AND the cached prefix should still have been alive (`cacheLikelyAlive`). When
- * the cache had already expired, a fresh write is the warmer legitimately
- * re-priming a cold cache — NOT a body/prefix mismatch — so it is neutral
- * (neither increments nor resets the counter). Likewise non-2xx responses
- * (`result.ok === false`, e.g. thinking-session 400s) are neutral.
+ * 🔴 All-or-nothing: a warmup replays the stored body during idle (no tail
+ * growth), so a healthy warmup is 100% cacheRead / 0 cacheCreation. ANY
+ * cacheCreation > 0 while the cached prefix should still have been alive
+ * (`cacheLikelyAlive`) is a body-divergence DEFECT — whether a partial
+ * (cacheRead > 0 too) or a full miss (cacheRead === 0). Both count as failures;
+ * a partial is NOT "fine". Only a CLEAN refresh (cacheRead > 0 AND
+ * cacheCreation === 0) clears accumulated failures. When the cache had already
+ * expired (`!cacheLikelyAlive`), a write is the warmer legitimately re-priming a
+ * cold cache — neutral. Non-2xx responses (`result.ok === false`) are neutral.
  *
  * Returns true if the bucket's breaker is tripped (warming should stop).
  */
@@ -381,12 +374,7 @@ export function checkCircuitBreaker(
   ensureCircuitBreakersLoaded();
   if (isCircuitBreakerTripped(bucketKey, now)) return true;
 
-  if (
-    result.ok &&
-    result.cacheCreationTokens > 0 &&
-    result.cacheReadTokens === 0 &&
-    cacheLikelyAlive
-  ) {
+  if (result.ok && result.cacheCreationTokens > 0 && cacheLikelyAlive) {
     const entry = circuitBreakers.get(bucketKey) ?? {
       failures: 0,
       tripped: false,
@@ -394,8 +382,9 @@ export function checkCircuitBreaker(
     };
     entry.failures++;
     circuitBreakers.set(bucketKey, entry);
+    const kind = result.cacheReadTokens > 0 ? "partial" : "uncached";
     log.error(
-      `cache-warmer CIRCUIT BREAKER: warmup caused uncached write for ` +
+      `cache-warmer CIRCUIT BREAKER: warmup caused ${kind} write for ` +
         `bucket=${bucketKey.slice(0, 24)} ` +
         `(${entry.failures}/${CIRCUIT_BREAKER_MAX_FAILURES}). ` +
         `cacheCreation=${result.cacheCreationTokens} cacheRead=${result.cacheReadTokens}`,
@@ -407,15 +396,20 @@ export function checkCircuitBreaker(
       emitWarmupCircuitBreakerMetric();
       log.error(
         `cache-warmer CIRCUIT BREAKER TRIPPED for bucket=${bucketKey.slice(0, 24)}: ` +
-          `${CIRCUIT_BREAKER_MAX_FAILURES} uncached warmups detected. Warming disabled for ` +
-          `this (session, model, upstream) until it decays in ` +
+          `${CIRCUIT_BREAKER_MAX_FAILURES} divergent (partial/uncached) warmups detected. ` +
+          `Warming disabled for this (session, model, upstream) until it decays in ` +
           `${Math.round(CIRCUIT_BREAKER_DECAY_MS / 3_600_000)}h or is reset. This indicates ` +
           `warmup bodies don't match the cached prefix — investigate cache key assumptions.`,
       );
       return true;
     }
-  } else if (result.ok && result.cacheReadTokens > 0) {
-    // Confirmed cache read — clear any accumulated (non-tripped) failures.
+  } else if (
+    result.ok &&
+    result.cacheReadTokens > 0 &&
+    result.cacheCreationTokens === 0
+  ) {
+    // Clean 100% refresh — clear any accumulated (non-tripped) failures. A
+    // partial (cacheCreation > 0) does NOT reach here; it is a failure above.
     const entry = circuitBreakers.get(bucketKey);
     if (entry && !entry.tripped) circuitBreakers.delete(bucketKey);
   }
@@ -865,12 +859,15 @@ export function prepareAnthropicWarmupBody(storedBody: string): string {
   // Strip structured output format (incompatible with max_tokens: 0)
   delete body.output_config;
 
-  // Ensure a cache breakpoint is present. The stored body comes from
-  // cache-analytics' normalized copy, which strips `cache_control` markers (so
-  // breakpoint movement doesn't pollute divergence analysis). Without a
-  // breakpoint the warmup writes NOTHING to the cache — silently neutering
-  // every warmup — so we re-add one on the last content block of the last
-  // message (Anthropic's standard placement, and what the real turns used).
+  // Ensure a cache breakpoint is present. NOTE: since the #943 raw-body fix,
+  // lastRequestBody stores the RAW as-sent body, which already carries the real
+  // turn's FULL multi-breakpoint layout (system[1] stableLtm, tools,
+  // conversation) — so ensureCacheBreakpoint is a NO-OP here (it returns early
+  // when any breakpoint is present). It remains only as a defensive backstop for
+  // the degenerate case of a stored body with zero breakpoints (which would
+  // otherwise write NOTHING to the cache), re-adding one on the last block of the
+  // last message. Replaying the real breakpoints verbatim is what makes a healthy
+  // warmup a 100% refresh.
   ensureCacheBreakpoint(body);
 
   return JSON.stringify(body);
@@ -1044,34 +1041,6 @@ export function resolveProfile(
  *  - Initial commitment (first TTL window): full ROI analysis
  *  - Continuation (subsequent windows): check break-even cap + re-evaluate
  */
-/**
- * Chronically-low cache-WRITE efficiency guard. Returns true when the session
- * has enough warmup-efficiency samples AND their average is below
- * MIN_WRITE_EFFICIENCY — i.e. the full-body warm keeps re-writing a prefix that
- * won't survive to the next real turn (large/growing session), wasting spend
- * the return-rate guard cannot detect. Returns false (do not block) when there
- * are too few samples to judge.
- */
-export function warmupWriteEfficiencyTooLow(
-  warmup: WarmupState | undefined,
-): boolean {
-  const samples = warmup?.writeEfficiencySamples ?? [];
-  if (samples.length < MIN_WARMUPS_FOR_EFFICIENCY_CHECK) return false;
-  const avg = samples.reduce((a, b) => a + b, 0) / samples.length;
-  return avg < MIN_WRITE_EFFICIENCY;
-}
-
-/** Human-readable dashboard reason for the write-efficiency gate. */
-export function warmupWriteEfficiencyReason(
-  warmup: WarmupState | undefined,
-): string {
-  const samples = warmup?.writeEfficiencySamples ?? [];
-  const avg = samples.length
-    ? (samples.reduce((a, b) => a + b, 0) / samples.length) * 100
-    : 0;
-  return `Write efficiency too low (${avg.toFixed(0)}% < ${(MIN_WRITE_EFFICIENCY * 100).toFixed(0)}%) — full-body warm refreshes only a small stable prefix`;
-}
-
 export function shouldWarm(
   state: SessionState,
   profile: CacheWarmingProfile,
@@ -1090,6 +1059,25 @@ export function shouldWarm(
 
   // No stored body to replay — nothing to warm
   if (!state.cacheAnalytics.lastRequestBody) return false;
+
+  // Prefix-churn gate. While meta-distillation is actively rewriting the
+  // distilled prefix (messages[0/1]), a warmup is pure waste: it replays the
+  // stored body and refreshes a prefix the very next real turn will REPLACE, so
+  // it lands as a partial (reads only the stable system+tools prefix, rewrites
+  // everything after). The real turns themselves bust at messages[1] every turn
+  // in this regime, so no warmup can help. Suppress warming until real turns stop
+  // rewriting the prefix (the EMA decays below the threshold) — then warmups land
+  // as clean 100% refreshes. Applies to ALL paths, including forced
+  // /lore:warm:keep, since warming a churning prefix never pays off. Independent
+  // of the circuit breaker (which trips on uncached WRITES, a lagging signal).
+  if (getPrefixChurnRate(state.sessionID) >= PREFIX_CHURN_WARM_BLOCK) {
+    log.info(
+      `cache-warmer: skip warmup for session=${state.sessionID.slice(0, 16)} — ` +
+        `distilled prefix churning (churn=${getPrefixChurnRate(state.sessionID).toFixed(2)} >= ` +
+        `${PREFIX_CHURN_WARM_BLOCK}); warmups would land as partials`,
+    );
+    return false;
+  }
 
   const elapsed = now - state.lastRequestTime;
   const { ttlMs, warmupMarginMs, cacheReadCostPerMTok, cacheMissCostPerMTok } =
@@ -1151,19 +1139,11 @@ export function shouldWarm(
     );
     const cyclesSpent = state.warmup?.warmupCount ?? 0;
 
-    // Write-efficiency guard: stop warming a large/growing session whose
-    // full-body warms refresh only a tiny stable prefix (chronically low
-    // cacheRead/(read+write)). Independent of the return-rate guard above.
-    // 🔴 Gated on `cyclesSpent >= 1`: the FIRST warmup of every break
-    // (cyclesSpent === 0) must ALWAYS be funded — it is the irreducible probe
-    // that REFRESHES writeEfficiencySamples. writeEfficiencySamples is lifetime/
-    // durable (not reset per-break, persists across restart), so blocking the
-    // first probe on stale samples would permanently lock out a session whose
-    // prefix has since re-stabilized (it could never record a fresh, higher
-    // sample). Matches the evidence-gate invariant below.
-    if (cyclesSpent >= 1 && warmupWriteEfficiencyTooLow(state.warmup)) {
-      return false;
-    }
+    // (Write-efficiency averaging guard removed — superseded by the prefix-churn
+    // gate at the top of shouldWarm, which predicts partials from the FREE
+    // real-turn prefix-rewrite signal instead of paying a partial warmup to
+    // learn. Any residual partial-while-alive is now a circuit-breaker DEFECT,
+    // not a tolerated cost.)
 
     // 🔴 Evidence gate (Bug C): ALWAYS fund the first warmup of a break
     // (cyclesSpent === 0 — the probe that learns if this slow tool returns
@@ -1336,10 +1316,8 @@ export function shouldWarm(
     const hitRate = (state.warmup?.warmupHits ?? 0) / lifetime;
     if (hitRate < MIN_SESSION_HIT_RATE) return false;
   }
-  // Write-efficiency guard: stop warming a large/growing session whose
-  // full-body warms refresh only a tiny stable prefix (chronically low
-  // cacheRead/(read+write)). Independent of the return-rate guard above.
-  if (warmupWriteEfficiencyTooLow(state.warmup)) return false;
+  // (Write-efficiency averaging guard removed — superseded by the prefix-churn
+  // gate at the top of shouldWarm. See note in the tool-call path above.)
 
   // Read the unified strategy (stored by the eval block above). When confident,
   // this is the PRIMARY warm/no-warm decision (PR2b flip): `hold-warm` → warm,
@@ -1605,6 +1583,8 @@ export function computeWarmingSnapshot(
       notWarmingReason = "Warming disabled in config";
     } else if (!state.cacheAnalytics.lastRequestBody) {
       notWarmingReason = "No stored request body";
+    } else if (getPrefixChurnRate(state.sessionID) >= PREFIX_CHURN_WARM_BLOCK) {
+      notWarmingReason = `Distilled prefix churning (churn=${getPrefixChurnRate(state.sessionID).toFixed(2)} >= ${PREFIX_CHURN_WARM_BLOCK}) — warmups would land as partials`;
     } else if (!profile) {
       notWarmingReason = "No warming profile (non-Anthropic or unknown model)";
     } else if (state.warmup?.forceKeepWarm) {
@@ -1643,13 +1623,6 @@ export function computeWarmingSnapshot(
           100
         ).toFixed(0);
         notWarmingReason = `Tool call: session hit rate too low (${hitRate}% < ${(MIN_SESSION_HIT_RATE * 100).toFixed(0)}%)`;
-      } else if (
-        // Mirror shouldWarm: the efficiency gate skips the first probe of a
-        // break (cyclesSpent===0), so the snapshot must too.
-        (state.warmup?.warmupCount ?? 0) >= 1 &&
-        warmupWriteEfficiencyTooLow(state.warmup)
-      ) {
-        notWarmingReason = warmupWriteEfficiencyReason(state.warmup);
       } else if (
         (state.warmup?.warmupCount ?? 0) >= 1 &&
         (state.warmup?.warmupHits ?? 0) < TOOL_CALL_MIN_HITS_FOR_CONTINUATION
@@ -1695,8 +1668,6 @@ export function computeWarmingSnapshot(
         100
       ).toFixed(0);
       notWarmingReason = `Session hit rate too low (${hitRate}% < ${(MIN_SESSION_HIT_RATE * 100).toFixed(0)}% after ${state.warmup?.totalWarmups} warmups)`;
-    } else if (warmupWriteEfficiencyTooLow(state.warmup)) {
-      notWarmingReason = warmupWriteEfficiencyReason(state.warmup);
     } else if (isFirstWindow && idleMs < ttlMs - warmupMarginMs) {
       notWarmingReason = "Cache still fresh";
     } else if (pReturns <= thresholdVal) {
@@ -1963,12 +1934,25 @@ export async function executeWarmup(
           `input=${totalInput} cacheRead=${cacheReadTokens} hit=${hitRate} breakpoints=${breakpoints} cost=${costStr}`,
       );
     } else if (cacheReadTokens > 0 && cacheCreationTokens > 0) {
-      // Partial hit — some breakpoints read, some written (e.g. conversation
-      // breakpoint expired but system/tools still cached). This is fine.
-      log.info(
+      // Partial — read the stable prefix but rewrote the rest. On an idle replay
+      // of the stored body this should NOT happen: a healthy warmup is 100%
+      // read. A partial while the cache should still be alive is a body-divergence
+      // DEFECT (here, almost always the distilled prefix churning) — NOT "fine".
+      // checkCircuitBreaker (below) treats it as a failure when cacheLikelyAlive.
+      const ageSec =
+        lastCacheTouch > 0
+          ? Math.round((Date.now() - lastCacheTouch) / 1000)
+          : -1;
+      const logFn = cacheLikelyAlive ? log.warn : log.info;
+      logFn(
         `cache-warmer: ~ partial session=${sid} ` +
           `input=${totalInput} cacheRead=${cacheReadTokens} cacheWrite=${cacheCreationTokens} ` +
-          `hit=${hitRate} breakpoints=${breakpoints} cost=${costStr}`,
+          `hit=${hitRate} breakpoints=${breakpoints} cost=${costStr} ` +
+          `cacheLikelyAlive=${cacheLikelyAlive} ageSinceCacheTouch=${ageSec}s` +
+          (cacheLikelyAlive
+            ? " — DIVERGENCE: cache should have been live but warmup only partially " +
+              "matched (warmup body ≠ cached prefix; usually distilled-prefix churn)"
+            : " — partial expired-cache re-prime (some breakpoints aged out)"),
       );
     } else {
       // cacheRead=0: the warmup wrote a fresh cache instead of refreshing an
@@ -2036,23 +2020,10 @@ export async function executeWarmup(
     // attribution to prevent phantom savings.
     state.warmup.lastWarmupRefreshTokens = cacheReadTokens;
 
-    // Record this warmup's cache-WRITE efficiency = read / (read + write) into
-    // a bounded rolling window. A chronically low average means the full-body
-    // warm is mostly re-writing a prefix that won't survive to the next real
-    // turn (large/growing session); shouldWarm uses it to stop wasteful warming.
-    // Skip when the denominator is 0 (uncached/error — no signal).
-    if (cacheReadTokens + cacheCreationTokens > 0) {
-      const efficiency =
-        cacheReadTokens / (cacheReadTokens + cacheCreationTokens);
-      const samples = state.warmup.writeEfficiencySamples ?? [];
-      samples.push(efficiency);
-      if (samples.length > WRITE_EFFICIENCY_WINDOW) {
-        samples.splice(0, samples.length - WRITE_EFFICIENCY_WINDOW);
-      }
-      state.warmup.writeEfficiencySamples = samples;
-    }
-
-    // Check circuit breaker for this (session, model, upstream) bucket.
+    // Check circuit breaker for this (session, model, upstream) bucket. A
+    // partial OR uncached write while the cache should have been alive is a
+    // divergence DEFECT (all-or-nothing): it trips the breaker after
+    // CIRCUIT_BREAKER_MAX_FAILURES, and only a clean 100% refresh clears it.
     checkCircuitBreaker(result, breakerBucket, cacheLikelyAlive);
 
     // Clear worker-health failure state on successful warmup.

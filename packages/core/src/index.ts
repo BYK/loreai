@@ -177,9 +177,13 @@ export {
   // gaps without sleeping. Not part of the public API.
   setLastTurnAtForTest,
   setConsecutiveBustsForTest,
+  setPrefixChurnForTest,
   setTransformCountForTest,
   inspectSessionState,
   getConsecutiveBusts,
+  getPrefixChurnRate,
+  PREFIX_CHURN_ALPHA,
+  PREFIX_CHURN_WARM_BLOCK,
   BUST_PRESSURE_THRESHOLD,
   DEEP_IDLE_MS,
   COLD_START_GRACE_TURNS,

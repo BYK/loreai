@@ -9,10 +9,6 @@ import {
   buildAnthropicProfile,
   resolveProfile,
   shouldWarm,
-  warmupWriteEfficiencyTooLow,
-  MIN_WRITE_EFFICIENCY,
-  MIN_WARMUPS_FOR_EFFICIENCY_CHECK,
-  WRITE_EFFICIENCY_WINDOW,
   checkCircuitBreaker,
   isCircuitBreakerTripped,
   getCircuitBreakerStatus,
@@ -56,6 +52,8 @@ import {
   setCacheSizeSnapshot,
   setCachePricing,
   evictSession,
+  setPrefixChurnForTest,
+  PREFIX_CHURN_WARM_BLOCK,
 } from "@loreai/core";
 import { decideSkipCompact } from "../src/pipeline";
 // ---------------------------------------------------------------------------
@@ -644,7 +642,7 @@ describe("circuit breaker", () => {
     expect(getCircuitBreakerStatus(BUCKET).failures).toBe(0);
   });
 
-  test("partial hits (read > 0 + creation > 0) reset counter", () => {
+  test("partial hits (read > 0 + creation > 0) do NOT reset — they are failures (all-or-nothing)", () => {
     const bad = makeWarmupResult({
       cacheReadTokens: 0,
       cacheCreationTokens: 50000,
@@ -654,9 +652,27 @@ describe("circuit breaker", () => {
       cacheCreationTokens: 20000,
     });
 
+    // A partial is a body-divergence DEFECT, not a recovery: it must NOT clear
+    // accumulated failures. Two uncached + one partial = 3 failures → tripped.
+    checkCircuitBreaker(bad, BUCKET, true); // failure 1
+    checkCircuitBreaker(bad, BUCKET, true); // failure 2
+    checkCircuitBreaker(partial, BUCKET, true); // failure 3 (NOT a reset)
+    expect(isCircuitBreakerTripped(BUCKET)).toBe(true);
+  });
+
+  test("a clean 100% refresh (read > 0, creation === 0) DOES reset the counter", () => {
+    const bad = makeWarmupResult({
+      cacheReadTokens: 0,
+      cacheCreationTokens: 50000,
+    });
+    const refresh = makeWarmupResult({
+      cacheReadTokens: 168000,
+      cacheCreationTokens: 0,
+    });
+
     checkCircuitBreaker(bad, BUCKET, true); // 1
     checkCircuitBreaker(bad, BUCKET, true); // 2
-    checkCircuitBreaker(partial, BUCKET, true); // has reads → reset
+    checkCircuitBreaker(refresh, BUCKET, true); // clean refresh → reset to 0
     checkCircuitBreaker(bad, BUCKET, true); // 1
     expect(isCircuitBreakerTripped(BUCKET)).toBe(false);
   });
@@ -907,54 +923,112 @@ describe("circuit breaker persistence", () => {
 // shouldWarm decision function
 // ---------------------------------------------------------------------------
 
-describe("warmupWriteEfficiencyTooLow", () => {
-  test("false when fewer than the minimum samples (insufficient evidence)", () => {
-    const samples = Array(MIN_WARMUPS_FOR_EFFICIENCY_CHECK - 1).fill(0.01);
+describe("circuit breaker — all-or-nothing divergence (partial counts as failure)", () => {
+  const alive = true;
+  beforeEach(() => resetCircuitBreaker());
+
+  test("a PARTIAL warmup while the cache is alive counts as a failure (not 'fine')", () => {
+    const bucket = "cb-partial-alive";
+    // 3 partials (cacheRead>0 AND cacheCreation>0) → tripped. Under the old
+    // model these hit the recovery branch and were ignored.
+    for (let i = 0; i < 2; i++) {
+      expect(
+        checkCircuitBreaker(
+          { ok: true, cacheReadTokens: 40_000, cacheCreationTokens: 100_000 },
+          bucket,
+          alive,
+        ),
+      ).toBe(false);
+    }
     expect(
-      warmupWriteEfficiencyTooLow({
-        lastWarmupAt: 0,
-        warmupCount: 0,
-        totalWarmups: samples.length,
-        warmupHits: 0,
-        disabled: false,
-        writeEfficiencySamples: samples,
-      }),
-    ).toBe(false);
+      checkCircuitBreaker(
+        { ok: true, cacheReadTokens: 40_000, cacheCreationTokens: 100_000 },
+        bucket,
+        alive,
+      ),
+    ).toBe(true); // 3rd → tripped
+    expect(isCircuitBreakerTripped(bucket)).toBe(true);
   });
 
-  test("true when avg efficiency is below the threshold over enough samples", () => {
+  test("a full UNCACHED warmup while alive also counts (read=0)", () => {
+    const bucket = "cb-uncached-alive";
+    for (let i = 0; i < 3; i++) {
+      checkCircuitBreaker(
+        { ok: true, cacheReadTokens: 0, cacheCreationTokens: 200_000 },
+        bucket,
+        alive,
+      );
+    }
+    expect(isCircuitBreakerTripped(bucket)).toBe(true);
+  });
+
+  test("a PARTIAL does NOT clear accumulated failures (only a clean refresh does)", () => {
+    const bucket = "cb-partial-no-clear";
+    // 2 partials → 2 failures (not tripped)
+    checkCircuitBreaker(
+      { ok: true, cacheReadTokens: 30_000, cacheCreationTokens: 90_000 },
+      bucket,
+      alive,
+    );
+    checkCircuitBreaker(
+      { ok: true, cacheReadTokens: 30_000, cacheCreationTokens: 90_000 },
+      bucket,
+      alive,
+    );
+    // Another partial must NOT reset; it is the 3rd failure → trips.
     expect(
-      warmupWriteEfficiencyTooLow({
-        lastWarmupAt: 0,
-        warmupCount: 0,
-        totalWarmups: 3,
-        warmupHits: 0,
-        disabled: false,
-        writeEfficiencySamples: [0.06, 0.06, 0.06],
-      }),
+      checkCircuitBreaker(
+        { ok: true, cacheReadTokens: 30_000, cacheCreationTokens: 90_000 },
+        bucket,
+        alive,
+      ),
     ).toBe(true);
   });
 
-  test("false when avg efficiency is at/above the threshold", () => {
-    const atThreshold = MIN_WRITE_EFFICIENCY + 0.01;
+  test("a CLEAN 100% refresh (write=0) clears accumulated failures", () => {
+    const bucket = "cb-clean-clears";
+    checkCircuitBreaker(
+      { ok: true, cacheReadTokens: 30_000, cacheCreationTokens: 90_000 },
+      bucket,
+      alive,
+    );
+    checkCircuitBreaker(
+      { ok: true, cacheReadTokens: 30_000, cacheCreationTokens: 90_000 },
+      bucket,
+      alive,
+    );
+    // Clean refresh clears the 2 accumulated failures.
+    checkCircuitBreaker(
+      { ok: true, cacheReadTokens: 150_000, cacheCreationTokens: 0 },
+      bucket,
+      alive,
+    );
+    // Two more partials must NOT trip (counter was reset to 0).
+    checkCircuitBreaker(
+      { ok: true, cacheReadTokens: 30_000, cacheCreationTokens: 90_000 },
+      bucket,
+      alive,
+    );
     expect(
-      warmupWriteEfficiencyTooLow({
-        lastWarmupAt: 0,
-        warmupCount: 0,
-        totalWarmups: 3,
-        warmupHits: 0,
-        disabled: false,
-        writeEfficiencySamples: [atThreshold, atThreshold, atThreshold],
-      }),
+      checkCircuitBreaker(
+        { ok: true, cacheReadTokens: 30_000, cacheCreationTokens: 90_000 },
+        bucket,
+        alive,
+      ),
     ).toBe(false);
+    expect(isCircuitBreakerTripped(bucket)).toBe(false);
   });
 
-  test("false for undefined warmup / no samples", () => {
-    expect(warmupWriteEfficiencyTooLow(undefined)).toBe(false);
-  });
-
-  test("window size constant is positive (rolling window bounded)", () => {
-    expect(WRITE_EFFICIENCY_WINDOW).toBeGreaterThan(0);
+  test("a write while the cache had EXPIRED (!cacheLikelyAlive) is neutral", () => {
+    const bucket = "cb-expired-neutral";
+    for (let i = 0; i < 5; i++) {
+      checkCircuitBreaker(
+        { ok: true, cacheReadTokens: 0, cacheCreationTokens: 200_000 },
+        bucket,
+        /* cacheLikelyAlive */ false,
+      );
+    }
+    expect(isCircuitBreakerTripped(bucket)).toBe(false);
   });
 });
 
@@ -1053,13 +1127,16 @@ describe("shouldWarm", () => {
     expect(shouldWarm(state, profile, hist, now)).toBe(false);
   });
 
-  test("returns FALSE when write-efficiency is chronically low, even with a perfect return rate", () => {
-    // Regression: a large/growing session reliably returns (return-rate ~1.0,
-    // passes MIN_SESSION_HIT_RATE) but each full-body warm refreshes only the
-    // ~37K stable prefix (efficiency ~6%) while writing ~550K — pure waste. The
-    // return-rate guard cannot see this; the write-efficiency guard must block.
+  test("returns FALSE when the distilled prefix is churning, even with a perfect return rate", () => {
+    // Root cause: the distilled prefix (messages[1]) is rewritten by
+    // meta-distillation nearly every turn, so a warmup that replays the stored
+    // body lands as a partial (refreshes a prefix the next real turn replaces).
+    // The session reliably returns (return-rate ~1.0, passes MIN_SESSION_HIT_RATE)
+    // yet warming is pure waste — the prefix-churn gate must block it.
+    const sid = "churn-gate-block-session";
     const now = Date.now();
     const state = makeSessionState({
+      sessionID: sid,
       lastRequestTime: now - 270_000,
       warmup: {
         lastWarmupAt: 0,
@@ -1067,7 +1144,6 @@ describe("shouldWarm", () => {
         totalWarmups: 10,
         warmupHits: 10, // perfect RETURN rate — return-guard would pass
         disabled: false,
-        writeEfficiencySamples: [0.06, 0.06, 0.06, 0.08, 0.06], // ~6% WRITE efficiency
       },
       cacheAnalytics: {
         ...makeCacheAnalytics(),
@@ -1076,16 +1152,20 @@ describe("shouldWarm", () => {
         ),
       },
     });
+    setPrefixChurnForTest(sid, PREFIX_CHURN_WARM_BLOCK + 0.1);
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
     const hist = createHistogram();
     for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
 
     expect(shouldWarm(state, profile, hist, now)).toBe(false);
+    setPrefixChurnForTest(sid, 0); // cleanup (shared process-global core state)
   });
 
-  test("returns TRUE when write-efficiency is healthy (gate does not over-block)", () => {
+  test("returns TRUE when the prefix is stable (churn below threshold)", () => {
+    const sid = "churn-gate-allow-session";
     const now = Date.now();
     const state = makeSessionState({
+      sessionID: sid,
       lastRequestTime: now - 270_000,
       warmup: {
         lastWarmupAt: 0,
@@ -1093,7 +1173,6 @@ describe("shouldWarm", () => {
         totalWarmups: 10,
         warmupHits: 10,
         disabled: false,
-        writeEfficiencySamples: [0.9, 0.85, 0.95, 0.88, 0.92], // healthy
       },
       cacheAnalytics: {
         ...makeCacheAnalytics(),
@@ -1102,11 +1181,13 @@ describe("shouldWarm", () => {
         ),
       },
     });
+    setPrefixChurnForTest(sid, PREFIX_CHURN_WARM_BLOCK - 0.1);
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
     const hist = createHistogram();
     for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
 
     expect(shouldWarm(state, profile, hist, now)).toBe(true);
+    setPrefixChurnForTest(sid, 0); // cleanup
   });
 
   test("returns false when session has too few turns", () => {
@@ -2286,44 +2367,27 @@ describe("shouldWarm tool-call warming", () => {
     expect(shouldWarm(state, profile, hist, now)).toBe(false);
   });
 
-  test("ALWAYS funds the FIRST warmup of a break (cyclesSpent=0) even when write-efficiency is chronically low", () => {
-    // 🔴 The first probe of every break refreshes writeEfficiencySamples (which
-    // is lifetime/durable). Blocking it on stale low samples would permanently
-    // lock the session out (it could never record a fresh sample). The
-    // efficiency gate must be skipped when warmupCount===0.
+  test("BLOCKS tool-call warming when the distilled prefix is churning (gate applies to ALL paths)", () => {
+    // The prefix-churn gate sits at the top of shouldWarm, so it suppresses even
+    // the tool-call fast path (which otherwise bypasses survival analysis).
+    const sid = "churn-gate-toolcall-session";
     const now = Date.now();
     const state = makeToolCallState({
+      sessionID: sid,
       warmup: {
         lastWarmupAt: 0,
-        warmupCount: 0, // first probe of THIS break
+        warmupCount: 0, // first probe of the break — normally funded
         totalWarmups: 10,
         warmupHits: 10,
         disabled: false,
-        writeEfficiencySamples: [0.06, 0.06, 0.06, 0.06, 0.06], // chronically low
       },
     });
-    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
-    const hist = createHistogram();
-
-    expect(shouldWarm(state, profile, hist, now)).toBe(true);
-  });
-
-  test("BLOCKS a continuation warmup (cyclesSpent>=1) when write-efficiency is chronically low", () => {
-    const now = Date.now();
-    const state = makeToolCallState({
-      warmup: {
-        lastWarmupAt: 0,
-        warmupCount: 1, // continuation within the break
-        totalWarmups: 10,
-        warmupHits: 10,
-        disabled: false,
-        writeEfficiencySamples: [0.06, 0.06, 0.06, 0.06, 0.06],
-      },
-    });
+    setPrefixChurnForTest(sid, PREFIX_CHURN_WARM_BLOCK + 0.1);
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
     const hist = createHistogram();
 
     expect(shouldWarm(state, profile, hist, now)).toBe(false);
+    setPrefixChurnForTest(sid, 0); // cleanup
   });
 
   test("returns false after MAX_TOOL_CALL_WARMING_MS exceeded", () => {
@@ -2590,22 +2654,25 @@ describe("shouldWarm tool-call warming", () => {
     expect(snap.notWarmingReason).toBeNull();
   });
 
-  test("snapshot reports the write-efficiency reason when chronically low (continuation)", () => {
+  test("snapshot reports the prefix-churn reason when the prefix is churning", () => {
+    const sid = "churn-gate-snapshot-session";
     const now = Date.now();
     const state = makeToolCallState({
+      sessionID: sid,
       lastRequestTime: now - 270_000,
       warmup: {
         lastWarmupAt: now - 270_000, // past cooldown
-        warmupCount: 1, // continuation — past the first-probe carve-out
+        warmupCount: 1,
         totalWarmups: 10,
         warmupHits: 10, // clears the return-rate guard
         disabled: false,
-        writeEfficiencySamples: [0.06, 0.06, 0.06, 0.06, 0.06],
       },
     });
+    setPrefixChurnForTest(sid, PREFIX_CHURN_WARM_BLOCK + 0.1);
     const snap = computeWarmingSnapshot(state, now);
     expect(snap.shouldWarmNow).toBe(false);
-    expect(snap.notWarmingReason).toContain("Write efficiency too low");
+    expect(snap.notWarmingReason).toContain("Distilled prefix churning");
+    setPrefixChurnForTest(sid, 0); // cleanup
   });
 
   test("Bug C: snapshot falls through to cycle-cap reason past the gate branch", () => {

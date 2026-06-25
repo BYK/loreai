@@ -115,6 +115,20 @@ const LTM_BUDGET_STEP = 8_000;
 /** Consecutive zero-cache-write turns before treating the session as free-write. */
 const NO_CACHE_WRITE_THRESHOLD = 3;
 
+/** EMA smoothing for the per-session prefix-churn rate (fraction of recent real
+ *  turns that were `prefix-rewrite` busts). 0.35 ≈ a ~3-turn effective window:
+ *  rewrites every ≤3 turns hold the EMA above PREFIX_CHURN_WARM_BLOCK, while a
+ *  single one-off rewrite bumps to ~0.35 then decays below it within ~2 clean
+ *  turns. */
+export const PREFIX_CHURN_ALPHA = 0.35;
+
+/** Prefix-churn rate at/above which the cache warmer suppresses warming. While
+ *  the distilled prefix is being rewritten this often, every warmup lands as a
+ *  partial (it refreshes a prefix the next real turn replaces) — pure waste.
+ *  Warming re-arms automatically once real turns stop rewriting the prefix and
+ *  the EMA decays below this threshold. */
+export const PREFIX_CHURN_WARM_BLOCK = 0.35;
+
 /** Layer-0 ceiling fraction for free-write sessions.
  *  65% of maxInput ≈ 109k for 200k context → ~59k headroom for tool-heavy turns. */
 const FREE_WRITE_LAYER0_FRACTION = 0.65;
@@ -362,6 +376,22 @@ export function recordCacheUsage(
       );
     }
 
+    // Prefix-churn EMA: a FREE, per-real-turn signal of how often the distilled
+    // prefix (messages[0/1]) is being rewritten by meta-distillation. Updated on
+    // every real cache event (total>0): 1 when this turn was a prefix-rewrite
+    // bust, 0 otherwise — so it decays on clean/incremental turns. The cache
+    // warmer reads it (getPrefixChurnRate) to suppress warming while the prefix
+    // is actively churning: warming a prefix that the next real turn will rewrite
+    // is pure waste (the warmup refreshes a prefix that is about to be replaced).
+    // A one-off rewrite (e.g. a single compaction) bumps the EMA once and decays;
+    // only SUSTAINED churn (rewrites every few turns) holds it above the block
+    // threshold. `idle-resume` busts are NOT churn (indicator 0) — a cold-cache
+    // re-warm is unrelated to prefix rewriting.
+    const prefixRewriteIndicator = bustCause === "prefix-rewrite" ? 1 : 0;
+    state.prefixChurnEma =
+      PREFIX_CHURN_ALPHA * prefixRewriteIndicator +
+      (1 - PREFIX_CHURN_ALPHA) * state.prefixChurnEma;
+
     // Free-write detection: track consecutive turns with zero cache writes.
     // Covers providers with free passive caching (e.g. MiniMax) and
     // non-caching providers. Both produce the same observable signal.
@@ -508,6 +538,12 @@ type SessionState = {
    *  Not persisted to DB — rebuilds from live API responses (same rationale as
    *  consecutiveBusts: stale values from a prior process would be incorrect). */
   zeroCacheWriteTurns: number;
+  /** EMA (0..1) of how often recent real turns were `prefix-rewrite` busts —
+   *  i.e. how actively meta-distillation is rewriting the distilled prefix
+   *  (messages[0/1]). Read by the cache warmer (getPrefixChurnRate) to suppress
+   *  warming a churning prefix. Not persisted (rebuilds from live API responses,
+   *  same rationale as consecutiveBusts). */
+  prefixChurnEma: number;
   /** Number of transform() calls observed for this session in the current
    *  process. Starts at 0 for a freshly-tracked session and is NOT restored
    *  from the DB (same rationale as consecutiveBusts). Drives the cold-start
@@ -588,6 +624,7 @@ function makeSessionState(): SessionState {
     consecutiveHighLayer: 0,
     consecutiveBusts: 0,
     zeroCacheWriteTurns: 0,
+    prefixChurnEma: 0,
     transformCount: 0,
     bustSpiralAlerted: false,
     bustSpiralColdStartLogged: false,
@@ -1205,6 +1242,7 @@ export function inspectSessionState(sessionID: string): {
   distillationSnapshot: DistillationSnapshot | null;
   consecutiveBusts: number;
   zeroCacheWriteTurns: number;
+  prefixChurnEma: number;
   lastKnownMessageCount: number;
   transformCount: number;
   bustSpiralAlerted: boolean;
@@ -1223,6 +1261,7 @@ export function inspectSessionState(sessionID: string): {
     distillationSnapshot: state.distillationSnapshot,
     consecutiveBusts: state.consecutiveBusts,
     zeroCacheWriteTurns: state.zeroCacheWriteTurns,
+    prefixChurnEma: state.prefixChurnEma,
     lastKnownMessageCount: state.lastKnownMessageCount,
     transformCount: state.transformCount,
     bustSpiralAlerted: state.bustSpiralAlerted,
@@ -1230,6 +1269,19 @@ export function inspectSessionState(sessionID: string): {
     overheadEma: state.overheadEma,
     distilledBudgetHighWater: state.distilledBudgetHighWater,
   };
+}
+
+/**
+ * Return the prefix-churn rate (0..1 EMA) for a session (read-only). High values
+ * mean meta-distillation is actively rewriting the distilled prefix, so warming
+ * the prefix is wasteful (the next real turn will replace it). Returns 0 when the
+ * session has no in-memory state — the safe default (no churn → warming allowed).
+ *
+ * Uses Map.get() (not getSessionState) to avoid creating phantom SessionState
+ * entries — same rationale as getConsecutiveBusts.
+ */
+export function getPrefixChurnRate(sessionID: string): number {
+  return sessionStates.get(sessionID)?.prefixChurnEma ?? 0;
 }
 
 /**
@@ -1473,6 +1525,15 @@ export function setConsecutiveBustsForTest(
   busts: number,
 ): void {
   getSessionState(sessionID).consecutiveBusts = busts;
+}
+
+/**
+ * For testing only — set the session's prefix-churn EMA (0..1). Used to drive the
+ * cache warmer's prefix-churn gate without replaying real prefix-rewrite turns.
+ * Creates the session state if not present.
+ */
+export function setPrefixChurnForTest(sessionID: string, churn: number): void {
+  getSessionState(sessionID).prefixChurnEma = churn;
 }
 
 /**

@@ -31,6 +31,9 @@ import {
   setBustSpiralHook,
   prefixPresentFloorApplies,
   recordCacheUsage,
+  getPrefixChurnRate,
+  PREFIX_CHURN_ALPHA,
+  PREFIX_CHURN_WARM_BLOCK,
   setCachePricing,
   effectiveMetaThreshold,
   BUST_PRESSURE_THRESHOLD,
@@ -6572,5 +6575,55 @@ describe("issue #796: isLargeColdStart + cold-start force-compress", () => {
       // And below pressure, the 3-arg shape returns config.
       expect(effectiveMetaThreshold(0, DEFAULT_CONFIG, 1)).toBe(DEFAULT_CONFIG);
     });
+  });
+});
+
+describe("prefix-churn EMA (recordCacheUsage → getPrefixChurnRate)", () => {
+  // A prefix-rewrite bust: cacheWrite dominates (bustRatio > 0.5) and the
+  // gateway has classified the cause as a distilled-prefix rewrite.
+  const prefixRewrite = (sid: string) =>
+    recordCacheUsage(120_000, 40_000, 2, sid, false, "prefix-rewrite");
+  // A clean/incremental turn: a real cache read, small write.
+  const cleanTurn = (sid: string) =>
+    recordCacheUsage(500, 160_000, 2, sid, false, "incremental");
+
+  test("getPrefixChurnRate is 0 for an unknown session (non-creating, safe default)", () => {
+    expect(getPrefixChurnRate("prefix-churn-unknown-sess")).toBe(0);
+    // Must NOT have created phantom state (mirrors getConsecutiveBusts).
+    expect(inspectSessionState("prefix-churn-unknown-sess")).toBeNull();
+  });
+
+  test("one prefix-rewrite bust raises the EMA from 0 to exactly PREFIX_CHURN_ALPHA", () => {
+    const sid = "prefix-churn-exact-sess";
+    prefixRewrite(sid);
+    expect(getPrefixChurnRate(sid)).toBeCloseTo(PREFIX_CHURN_ALPHA, 10);
+  });
+
+  test("sustained prefix-rewrite busts hold the EMA above the warm-block threshold", () => {
+    const sid = "prefix-churn-sustained-sess";
+    for (let i = 0; i < 4; i++) prefixRewrite(sid);
+    expect(getPrefixChurnRate(sid)).toBeGreaterThanOrEqual(
+      PREFIX_CHURN_WARM_BLOCK,
+    );
+  });
+
+  test("the EMA decays below the threshold after enough clean turns", () => {
+    const sid = "prefix-churn-decay-sess";
+    for (let i = 0; i < 5; i++) prefixRewrite(sid);
+    expect(getPrefixChurnRate(sid)).toBeGreaterThanOrEqual(
+      PREFIX_CHURN_WARM_BLOCK,
+    );
+    // Clean turns must pull it back down so warming re-arms.
+    for (let i = 0; i < 5; i++) cleanTurn(sid);
+    expect(getPrefixChurnRate(sid)).toBeLessThan(PREFIX_CHURN_WARM_BLOCK);
+  });
+
+  test("idle-resume busts do NOT raise churn (a cold re-warm is not prefix churn)", () => {
+    const sid = "prefix-churn-idle-sess";
+    // Many cold-cache re-warms classified as idle-resume — indicator 0.
+    for (let i = 0; i < 5; i++) {
+      recordCacheUsage(200_000, 0, 2, sid, true, "idle-resume");
+    }
+    expect(getPrefixChurnRate(sid)).toBe(0);
   });
 });

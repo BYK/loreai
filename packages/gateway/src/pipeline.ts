@@ -2621,9 +2621,6 @@ function getOrCreateSession(
         if ((state.warmup.totalWarmups ?? 0) === 0) {
           state.warmup.lastWarmupAt = 0;
           state.warmup.lastWarmupRefreshTokens = 0;
-          // Scrub write-efficiency samples too — they must never bleed across a
-          // session-identity change (inherited blob), same as refresh tokens.
-          state.warmup.writeEfficiencySamples = [];
         }
       } catch {
         log.warn(

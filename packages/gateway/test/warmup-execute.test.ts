@@ -23,7 +23,9 @@ vi.mock("../src/fetch", () => ({
 import {
   executeWarmup,
   buildAnthropicProfile,
-  WRITE_EFFICIENCY_WINDOW,
+  isCircuitBreakerTripped,
+  warmupBucketKey,
+  resetCircuitBreaker,
 } from "../src/cache-warmer";
 import { setSessionAuth, _resetAuthForTest } from "../src/auth";
 import { clearAllCosts } from "../src/cost-tracker";
@@ -151,69 +153,57 @@ describe("executeWarmup → lastWarmupRefreshTokens (Bug B producer)", () => {
   });
 });
 
-describe("executeWarmup → writeEfficiencySamples (efficiency gate producer)", () => {
-  test("records read/(read+write) efficiency on a partial warmup", async () => {
-    globalThis.fetch = fetchReturningUsage({
-      input_tokens: 5,
-      cache_read_input_tokens: 30_000,
-      cache_creation_input_tokens: 470_000, // 30k/(30k+470k) = 0.06
-    }) as unknown as typeof fetch;
+describe("executeWarmup → all-or-nothing circuit breaker (partial-while-alive is a DEFECT)", () => {
+  beforeEach(() => resetCircuitBreaker());
 
-    const state = makeState();
+  const partialUsage = {
+    input_tokens: 5,
+    cache_read_input_tokens: 30_000,
+    cache_creation_input_tokens: 470_000, // partial: read>0 AND write>0
+  };
+  const refreshUsage = {
+    input_tokens: 5,
+    cache_read_input_tokens: 168_000,
+    cache_creation_input_tokens: 0, // clean 100% refresh
+  };
+
+  test("3 partial-while-alive warmups trip the breaker (a partial is NOT 'fine')", async () => {
+    const state = makeState(); // lastRequestTime 4.5min ago → cacheLikelyAlive
     const profile = buildAnthropicProfile(MODEL, "5m");
-    await executeWarmup(state, profile);
+    const bucket = warmupBucketKey(state);
 
-    const samples = state.warmup?.writeEfficiencySamples ?? [];
-    expect(samples).toHaveLength(1);
-    expect(samples[0]).toBeCloseTo(0.06, 2);
+    globalThis.fetch = fetchReturningUsage(
+      partialUsage,
+    ) as unknown as typeof fetch;
+    await executeWarmup(state, profile);
+    await executeWarmup(state, profile);
+    expect(isCircuitBreakerTripped(bucket)).toBe(false); // 2 failures
+    await executeWarmup(state, profile);
+    expect(isCircuitBreakerTripped(bucket)).toBe(true); // 3rd → tripped
   });
 
-  test("records 1.0 on a perfect refresh (cacheWrite=0) — keeps the average healthy", async () => {
-    globalThis.fetch = fetchReturningUsage({
-      input_tokens: 5,
-      cache_read_input_tokens: 168_000,
-      cache_creation_input_tokens: 0,
-    }) as unknown as typeof fetch;
-
+  test("a clean 100% refresh clears accumulated partial failures", async () => {
     const state = makeState();
     const profile = buildAnthropicProfile(MODEL, "5m");
+    const bucket = warmupBucketKey(state);
+
+    globalThis.fetch = fetchReturningUsage(
+      partialUsage,
+    ) as unknown as typeof fetch;
+    await executeWarmup(state, profile); // failure 1
+    await executeWarmup(state, profile); // failure 2
+
+    globalThis.fetch = fetchReturningUsage(
+      refreshUsage,
+    ) as unknown as typeof fetch;
+    await executeWarmup(state, profile); // clean refresh → clears
+
+    globalThis.fetch = fetchReturningUsage(
+      partialUsage,
+    ) as unknown as typeof fetch;
     await executeWarmup(state, profile);
-
-    const samples = state.warmup?.writeEfficiencySamples ?? [];
-    expect(samples).toHaveLength(1);
-    expect(samples[0]).toBe(1);
-  });
-
-  test("does NOT record a sample when read+write is 0 (no signal)", async () => {
-    globalThis.fetch = fetchReturningUsage({
-      input_tokens: 5,
-      cache_read_input_tokens: 0,
-      cache_creation_input_tokens: 0,
-    }) as unknown as typeof fetch;
-
-    const state = makeState();
-    const profile = buildAnthropicProfile(MODEL, "5m");
     await executeWarmup(state, profile);
-
-    expect(state.warmup?.writeEfficiencySamples ?? []).toHaveLength(0);
-  });
-
-  test("rolling window is capped at WRITE_EFFICIENCY_WINDOW (oldest evicted)", async () => {
-    globalThis.fetch = fetchReturningUsage({
-      input_tokens: 5,
-      cache_read_input_tokens: 30_000,
-      cache_creation_input_tokens: 470_000,
-    }) as unknown as typeof fetch;
-
-    const profile = buildAnthropicProfile(MODEL, "5m");
-    const state = makeState();
-    // Fire more warmups than the window size; cooldown is bypassed because
-    // executeWarmup itself does not gate on cooldown (shouldWarm does).
-    for (let i = 0; i < WRITE_EFFICIENCY_WINDOW + 3; i++) {
-      await executeWarmup(state, profile);
-    }
-    expect(state.warmup?.writeEfficiencySamples ?? []).toHaveLength(
-      WRITE_EFFICIENCY_WINDOW,
-    );
+    // Only 2 failures since the clear → not tripped.
+    expect(isCircuitBreakerTripped(bucket)).toBe(false);
   });
 });
