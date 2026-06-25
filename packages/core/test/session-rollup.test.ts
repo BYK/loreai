@@ -329,6 +329,48 @@ describe("session_rollup", () => {
       assertConsistent(pid);
     });
 
+    test("a single rebuild resolves many sessions dirtied at once", () => {
+      // Mirrors a bulk prune/clear: many sessions get an extreme deleted in one
+      // burst, so all are flagged dirty before any rebuild runs. The batched
+      // rebuild (one transaction) must resolve every one of them.
+      const pid = ensureProject("/test/session-rollup/batch-dirty");
+      const N = 12;
+      for (let i = 0; i < N; i++) {
+        const sid = `s${i}`;
+        // earliest assistant + a later message, then delete the earliest
+        // assistant → defers a recompute (dirty=1) without touching the others.
+        const a = insertMsg(pid, sid, "assistant", 10, 100 + i, `a-${i}`);
+        insertMsg(pid, sid, "assistant", 20, 1000 + i, `keep-${i}`);
+        deleteMsg(a);
+      }
+      const dirtyCount = (
+        db()
+          .query(
+            "SELECT COUNT(*) AS c FROM session_rollup WHERE project_id=? AND dirty=1",
+          )
+          .get(pid) as { c: number }
+      ).c;
+      expect(dirtyCount).toBe(N); // all dirty, none rebuilt yet
+
+      rebuildDirtySessionRollups(db());
+
+      // No dirty rows remain and every session matches a full recompute.
+      expect(
+        (
+          db()
+            .query(
+              "SELECT COUNT(*) AS c FROM session_rollup WHERE project_id=? AND dirty=1",
+            )
+            .get(pid) as { c: number }
+        ).c,
+      ).toBe(0);
+      const got = materializedRollups(pid);
+      const ref = referenceRollups(pid);
+      expect(got.size).toBe(N);
+      for (const [sid, row] of ref)
+        expect(got.get(sid), `rollup row for ${sid}`).toEqual(row);
+    });
+
     test("re-store changes token_sum by the delta only", () => {
       const pid = ensureProject("/test/session-rollup/restore");
       const sid = "s1";

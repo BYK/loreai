@@ -1881,8 +1881,23 @@ export function rebuildDirtySessionRollups(database: Database = db()): void {
   const dirty = database
     .query("SELECT project_id, session_id FROM session_rollup WHERE dirty = 1")
     .all() as Array<{ project_id: string; session_id: string }>;
-  for (const r of dirty)
-    recomputeSessionRollupRow(database, r.project_id, r.session_id);
+  // Fast path: nothing dirty. This is the common case on the /ui/costs read
+  // path, so don't open a (write-locking) transaction when there's no work.
+  if (dirty.length === 0) return;
+  // A bulk prune/clear can flag many sessions dirty at once; recomputing each in
+  // its own auto-commit on this read path is N fsyncs of write-amplification
+  // (cf. the ~23x seedOutbox slowdown). Batch the whole rebuild into ONE
+  // transaction on this same handle. Reached only via listSessionRollups (read
+  // path) / recovery / tests — never from within another transaction.
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    for (const r of dirty)
+      recomputeSessionRollupRow(database, r.project_id, r.session_id);
+    database.exec("COMMIT");
+  } catch (e) {
+    database.exec("ROLLBACK");
+    throw e;
+  }
 }
 
 /**
