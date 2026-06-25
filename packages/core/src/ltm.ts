@@ -587,6 +587,14 @@ export function remove(id: string, metadata?: KnowledgeMetadata) {
   for (const table of LOGICAL_ID_BOOKKEEPING_TABLES) {
     db().query(`DELETE FROM ${table} WHERE logical_id = ?`).run(logicalId);
   }
+  // Outcome-reward injection log (#497): same orphan class, but keyed on a
+  // composite (session_id, logical_id) PK + carries a project_id, so it can't
+  // ride LOGICAL_ID_BOOKKEEPING_TABLES (uniform single logical_id shape). Purge
+  // by logical_id here; the project/session bulk-delete paths sweep it by their
+  // own scope. (#996)
+  db()
+    .query("DELETE FROM knowledge_session_injections WHERE logical_id = ?")
+    .run(logicalId);
 }
 
 /** True when the entry for this logical_id was deleted (tombstoned). */
