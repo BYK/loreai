@@ -24,6 +24,7 @@
 
 import type { Database } from "#db/driver";
 import * as sqliteVec from "sqlite-vec";
+import * as log from "../log";
 
 let vecAvailable = false;
 let attempted = false;
@@ -60,10 +61,26 @@ export function loadVecExtension(database: Database): void {
   // test seam for the JS fallback. Set before the first `db()` call — once
   // attempted=true is sticky for the connection lifetime, the env var won't be
   // re-read until resetVecState() runs (in close()).
-  if (process.env.LORE_DISABLE_VEC === "1") return; // kill-switch → JS fallback
+  if (process.env.LORE_DISABLE_VEC === "1") {
+    log.info(
+      "sqlite-vec: disabled via LORE_DISABLE_VEC — using JS brute-force vector search",
+    );
+    return; // kill-switch → JS fallback
+  }
+  // Capture success details and emit the "enabled" line OUTSIDE the try block,
+  // so a misbehaving log sink can never flip vecAvailable back to false after a
+  // genuine load. The loader's contract (never throw, fall back on failure)
+  // stays intact.
+  let loadedPath: string | null = null;
+  let version = "unknown";
   try {
     const path = resolveExtensionPath();
-    if (!path) return;
+    if (!path) {
+      log.warn(
+        "sqlite-vec: no native binary for this platform/runtime — using JS brute-force vector search",
+      );
+      return;
+    }
     // node:sqlite gates the loadExtension() C-API behind enableLoadExtension();
     // bun:sqlite has no such method (extensions enabled by default on Linux).
     const conn = database as unknown as {
@@ -76,11 +93,22 @@ export function loadVecExtension(database: Database): void {
     // the loaded functions stay available for the connection's lifetime.
     conn.enableLoadExtension?.(false);
     // Confirm registration before trusting the fast path.
-    database.query("SELECT vec_version()").get();
+    const row = database.query("SELECT vec_version() AS v").get() as
+      | { v?: string }
+      | undefined;
+    version = row?.v ?? "unknown";
+    loadedPath = path;
     vecAvailable = true;
-  } catch {
+  } catch (e) {
     vecAvailable = false;
+    log.warn(
+      `sqlite-vec: native extension failed to load (${(e as Error).message}) — using JS brute-force vector search`,
+    );
+    return;
   }
+  log.info(
+    `sqlite-vec: native vector search enabled (${version}, ${loadedPath})`,
+  );
 }
 
 /** Whether sqlite-vec loaded successfully on the active connection. */

@@ -1,6 +1,15 @@
-import { afterAll, beforeEach, describe, expect, test } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  test,
+  vi,
+} from "vitest";
 import { close, db, ensureProject } from "../src/db";
 import { isVecAvailable } from "../src/db/vec";
+import * as log from "../src/log";
 import {
   toBlob,
   vectorSearch,
@@ -67,6 +76,44 @@ describe("sqlite-vec extension loading", () => {
     const hits = vectorSearch(new Float32Array([1, 0, 0]), 1);
     expect(hits.length).toBe(1);
     expect(hits[0].similarity).toBeCloseTo(1.0, 5); // vec (normalized), not 2.0 (raw dot)
+  });
+});
+
+// The loader emits exactly one status line per connection so a deploy can be
+// verified from `journalctl` (LORE_DEBUG=1) without a manual probe: an "enabled"
+// line on the native path, or a reason on each fallback. These tests pin those
+// lines so the diagnostic can't silently regress.
+describe("loadVecExtension startup logging", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete process.env.LORE_DISABLE_VEC;
+    close(); // fresh connection (+ reset vec state) for the next test/suite
+  });
+
+  function infoLines(spy: ReturnType<typeof vi.spyOn>): string[] {
+    return spy.mock.calls.map((c: unknown[]) => c.map(String).join(" "));
+  }
+
+  test("logs the enabled line on supported runtimes", () => {
+    if (!nodeSupportsVec()) return; // JS-only runtime: see the kill-switch leg
+    close(); // drop the connection opened by earlier suites + reset vec state
+    const info = vi.spyOn(log, "info");
+    ensureProject(PROJECT); // opens a fresh connection → runs loadVecExtension
+    expect(isVecAvailable()).toBe(true);
+    expect(
+      infoLines(info).some((l) => l.includes("native vector search enabled")),
+    ).toBe(true);
+  });
+
+  test("logs the disabled reason under the LORE_DISABLE_VEC kill-switch", () => {
+    close(); // reset vec state so the env var is re-read on the next open
+    process.env.LORE_DISABLE_VEC = "1";
+    const info = vi.spyOn(log, "info");
+    ensureProject(PROJECT);
+    expect(isVecAvailable()).toBe(false);
+    expect(infoLines(info).some((l) => l.includes("LORE_DISABLE_VEC"))).toBe(
+      true,
+    );
   });
 });
 
