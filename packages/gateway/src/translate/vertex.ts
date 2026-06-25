@@ -57,12 +57,26 @@ export function toVertexModelId(model: string): string {
 }
 
 /**
+ * Resolve the Vertex aiplatform host for a region. The `global` endpoint is
+ * special-cased: it is served from the BARE `aiplatform.googleapis.com` host
+ * (NOT `global-aiplatform.googleapis.com`, which resolves but 404s on the
+ * rawPredict path — verified live against a real project). Every regional
+ * endpoint uses the `{region}-aiplatform.googleapis.com` prefix form. The URL
+ * path still carries `locations/global` for the global endpoint.
+ */
+export function vertexHost(region: string): string {
+  return region === "global"
+    ? "aiplatform.googleapis.com"
+    : `${region}-aiplatform.googleapis.com`;
+}
+
+/**
  * Build the Vertex AI `rawPredict`/`streamRawPredict` URL.
  *
- * Format (regional and global both use the `{region}-aiplatform` host; for the
- * recommended `global` endpoint this is `global-aiplatform.googleapis.com` with
- * `locations/global`):
- *   https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/publishers/anthropic/models/{model}:{verb}
+ * Format:
+ *   https://{host}/v1/projects/{project}/locations/{region}/publishers/anthropic/models/{model}:{verb}
+ * where {host} is `aiplatform.googleapis.com` for the global endpoint and
+ * `{region}-aiplatform.googleapis.com` for regional endpoints (see vertexHost).
  */
 export function vertexRawPredictUrl(
   region: string,
@@ -79,7 +93,7 @@ export function vertexRawPredictUrl(
   // round-trip-safe form. (`encodeURIComponent` would otherwise turn "@"→"%40";
   // nothing else in a Claude model id needs encoding.)
   const encodedModel = encodeURIComponent(model).replace(/%40/g, "@");
-  return `https://${region}-aiplatform.googleapis.com/v1/projects/${project}/locations/${region}/publishers/anthropic/models/${encodedModel}:${verb}`;
+  return `https://${vertexHost(region)}/v1/projects/${project}/locations/${region}/publishers/anthropic/models/${encodedModel}:${verb}`;
 }
 
 /**
@@ -97,31 +111,40 @@ export function toVertexBody(
   return { anthropic_version: VERTEX_ANTHROPIC_VERSION, ...rest };
 }
 
-/** Matches a Vertex aiplatform host and captures the region/endpoint segment. */
-const VERTEX_HOST_RE = /^([a-z0-9-]+)-aiplatform\.googleapis\.com$/;
+/**
+ * Matches a Vertex aiplatform host and captures the region segment. The region
+ * prefix is OPTIONAL: the bare `aiplatform.googleapis.com` is the global
+ * endpoint (region segment absent → treated as `"global"`), while
+ * `{region}-aiplatform.googleapis.com` carries an explicit region. The legacy
+ * `global-aiplatform.googleapis.com` form also parses (captures `"global"`) so a
+ * manually-configured upstream self-heals to the bare host on the next rebuild.
+ */
+const VERTEX_HOST_RE = /^(?:([a-z0-9-]+)-)?aiplatform\.googleapis\.com$/;
 
 /**
  * Extract the Vertex region/endpoint segment from a base URL or host
  * (`https://us-east1-aiplatform.googleapis.com` → `"us-east1"`,
- * `global-aiplatform.googleapis.com` → `"global"`). Returns null when the host
- * is not a Vertex aiplatform endpoint. Authoritative source of a worker's
- * region — it's the session's actual upstream host.
+ * `aiplatform.googleapis.com` → `"global"`). Returns null when the host is not a
+ * Vertex aiplatform endpoint. Authoritative source of a worker's region — it's
+ * the session's actual upstream host.
  */
 export function vertexRegionFromUrl(url: string): string | null {
   try {
     const host = url.includes("://") ? new URL(url).hostname : url;
     const m = host.match(VERTEX_HOST_RE);
-    return m ? m[1] : null;
+    // m[1] is undefined for the bare `aiplatform.googleapis.com` global host.
+    return m ? (m[1] ?? "global") : null;
   } catch {
     return null;
   }
 }
 
 /**
- * True if `url` (a base URL or host) is a Vertex AI aiplatform endpoint
- * (`{region}-aiplatform.googleapis.com`, including `global-aiplatform…`). Used
- * to recognize a Vertex session for worker/warmer model remapping when routing
- * was set via `LORE_UPSTREAM_*` rather than the provider header.
+ * True if `url` (a base URL or host) is a Vertex AI aiplatform endpoint — the
+ * bare `aiplatform.googleapis.com` (global) or `{region}-aiplatform.googleapis.com`
+ * (regional, including the legacy `global-aiplatform…`). Used to recognize a
+ * Vertex session for worker/warmer model remapping when routing was set via
+ * `LORE_UPSTREAM_*` rather than the provider header.
  */
 export function isVertexHost(url: string): boolean {
   return vertexRegionFromUrl(url) !== null;

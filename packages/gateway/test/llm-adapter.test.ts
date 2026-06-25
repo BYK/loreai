@@ -720,6 +720,8 @@ describe("createGatewayLLMClient.prompt", () => {
       const text = await client.prompt("system", "user", {
         sessionID: "sess-vertex",
         workerID: "lore-distill",
+        // Legacy global-aiplatform base — the worker must self-heal it to the
+        // bare aiplatform host when it rebuilds the rawPredict URL.
         upstreamUrl: "https://global-aiplatform.googleapis.com",
         upstreamProviderID: "vertex",
         protocol: "vertex",
@@ -728,7 +730,7 @@ describe("createGatewayLLMClient.prompt", () => {
       expect(text).toBe("hello from worker");
       const [url, init] = mockFetch.mock.calls[0];
       expect(url).toBe(
-        "https://global-aiplatform.googleapis.com/v1/projects/test-vertex-project/locations/global/publishers/anthropic/models/claude-opus-4-8:rawPredict",
+        "https://aiplatform.googleapis.com/v1/projects/test-vertex-project/locations/global/publishers/anthropic/models/claude-opus-4-8:rawPredict",
       );
       const headers = init?.headers as Record<string, string>;
       expect(headers.Authorization).toBe("Bearer test-vertex-token");
@@ -760,7 +762,7 @@ describe("createGatewayLLMClient.prompt", () => {
       const text = await client.prompt("system", "user", {
         sessionID: "sess-vertex-nokey",
         workerID: "lore-distill",
-        upstreamUrl: "https://global-aiplatform.googleapis.com",
+        upstreamUrl: "https://aiplatform.googleapis.com",
         upstreamProviderID: "vertex",
         protocol: "vertex",
       });

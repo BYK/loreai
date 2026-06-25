@@ -15,6 +15,7 @@ import {
   toVertexBody,
   toVertexModelId,
   VERTEX_ANTHROPIC_VERSION,
+  vertexHost,
   vertexRawPredictUrl,
   vertexRegionFromUrl,
 } from "../src/translate/vertex";
@@ -68,12 +69,21 @@ describe("toVertexModelId", () => {
 });
 
 describe("vertexRawPredictUrl", () => {
-  test("builds the global :streamRawPredict URL", () => {
-    expect(
-      vertexRawPredictUrl("global", "my-proj", "claude-opus-4-8", true),
-    ).toBe(
-      "https://global-aiplatform.googleapis.com/v1/projects/my-proj/locations/global/publishers/anthropic/models/claude-opus-4-8:streamRawPredict",
+  test("builds the global :streamRawPredict URL on the bare aiplatform host", () => {
+    // The global endpoint is served from the BARE `aiplatform.googleapis.com`
+    // host — NOT `global-aiplatform.googleapis.com` (which resolves but 404s on
+    // the rawPredict path, verified live). The path still carries
+    // `locations/global`. Regression guard for that live-confirmed bug.
+    const url = vertexRawPredictUrl(
+      "global",
+      "my-proj",
+      "claude-opus-4-8",
+      true,
     );
+    expect(url).toBe(
+      "https://aiplatform.googleapis.com/v1/projects/my-proj/locations/global/publishers/anthropic/models/claude-opus-4-8:streamRawPredict",
+    );
+    expect(url).not.toContain("global-aiplatform.googleapis.com");
   });
 
   test("builds a regional :rawPredict URL (non-streaming)", () => {
@@ -129,11 +139,27 @@ describe("toVertexBody", () => {
   });
 });
 
+describe("vertexHost", () => {
+  test("global → bare aiplatform host; regional → prefixed host", () => {
+    expect(vertexHost("global")).toBe("aiplatform.googleapis.com");
+    expect(vertexHost("us-east5")).toBe("us-east5-aiplatform.googleapis.com");
+    // Regression: global must NEVER produce the dead global-aiplatform host.
+    expect(vertexHost("global")).not.toBe("global-aiplatform.googleapis.com");
+  });
+});
+
 describe("vertexRegionFromUrl / isVertexHost", () => {
   test("extracts the region from base URL or bare host", () => {
     expect(
       vertexRegionFromUrl("https://us-east1-aiplatform.googleapis.com"),
     ).toBe("us-east1");
+    // The bare host is the global endpoint.
+    expect(vertexRegionFromUrl("https://aiplatform.googleapis.com")).toBe(
+      "global",
+    );
+    expect(vertexRegionFromUrl("aiplatform.googleapis.com")).toBe("global");
+    // Legacy global-aiplatform host still parses to "global" so a manually
+    // configured upstream self-heals to the bare host on the next rebuild.
     expect(vertexRegionFromUrl("global-aiplatform.googleapis.com")).toBe(
       "global",
     );
@@ -179,7 +205,8 @@ describe("resolveWorkerProtocol — vertex (distinct, not collapsed)", () => {
 });
 
 describe("resolveProfile — vertex warming", () => {
-  const vertexBase = "https://global-aiplatform.googleapis.com";
+  // Bare host = the global endpoint (NOT global-aiplatform; see vertexHost).
+  const vertexBase = "https://aiplatform.googleapis.com";
 
   test("warms a vertex session (provider id + host)", () => {
     const profile = resolveProfile(
@@ -193,6 +220,17 @@ describe("resolveProfile — vertex warming", () => {
     expect(profile?.authMode).toBe("vertex");
     // upstreamUrl is the region base — executeWarmup rebuilds the rawPredict URL.
     expect(profile?.upstreamUrl).toBe(vertexBase);
+  });
+
+  test("normalizes a legacy global-aiplatform base to the bare host", () => {
+    const profile = resolveProfile(
+      "claude-opus-4-8",
+      "vertex",
+      "5m",
+      "https://global-aiplatform.googleapis.com",
+      "google-vertex",
+    );
+    expect(profile?.upstreamUrl).toBe("https://aiplatform.googleapis.com");
   });
 
   test("skips a vertex protocol with a non-vertex host (no leak)", () => {

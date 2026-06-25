@@ -127,7 +127,9 @@ describe("X-Lore-Provider: vertex routing (Vertex AI Claude)", () => {
     expect(text).toContain("hi from vertex");
 
     // The UpstreamSnapshot must record protocol "vertex" + the Vertex base URL.
-    const vertexBase = "https://global-aiplatform.googleapis.com";
+    // Region "global" → the BARE aiplatform host (NOT global-aiplatform, which
+    // 404s on rawPredict — verified live).
+    const vertexBase = "https://aiplatform.googleapis.com";
     let snapshotProtocol: string | undefined;
     let snapshotUrl: string | undefined;
     for (let i = 0; i < 20; i++) {

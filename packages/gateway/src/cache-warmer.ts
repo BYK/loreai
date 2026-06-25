@@ -52,6 +52,7 @@ import {
   isVertexHost,
   toVertexBody,
   toVertexModelId,
+  vertexHost,
   vertexRawPredictUrl,
   vertexRegionFromUrl,
 } from "./translate/vertex";
@@ -980,7 +981,7 @@ export function buildVertexProfile(
   const base = buildAnthropicProfile(model, ttl);
   return {
     ...base,
-    upstreamUrl: `https://${region}-aiplatform.googleapis.com`,
+    upstreamUrl: `https://${vertexHost(region)}`,
     authMode: "vertex",
     // prepareAnthropicWarmupBody re-adds `stream:false` and (for billing
     // sessions) leaves the body shaped for Anthropic. Vertex rejects a body

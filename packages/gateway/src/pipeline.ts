@@ -146,6 +146,7 @@ import {
 import {
   toVertexBody,
   toVertexModelId,
+  vertexHost,
   vertexRawPredictUrl,
 } from "./translate/vertex";
 import { getVertexAccessToken, resolveVertexProject } from "./vertex-auth";
@@ -3327,7 +3328,7 @@ async function forwardToUpstream(
   const selfBuiltUpstreamUrl = bedrockMantle
     ? bedrockMantleUrl(config.bedrockRegion)
     : effectiveProtocol === "vertex"
-      ? `https://${config.vertexRegion}-aiplatform.googleapis.com`
+      ? `https://${vertexHost(config.vertexRegion)}`
       : null;
   const effectiveUpstreamBase =
     headerUpstream ??
@@ -4901,7 +4902,7 @@ function postResponse(
     const lpSelfBuiltUrl = lpBedrockMantle
       ? bedrockMantleUrl(config.bedrockRegion)
       : snapshotProtocol === "vertex"
-        ? `https://${config.vertexRegion}-aiplatform.googleapis.com`
+        ? `https://${vertexHost(config.vertexRegion)}`
         : null;
 
     const upstreamSnapshot: UpstreamSnapshot = {
