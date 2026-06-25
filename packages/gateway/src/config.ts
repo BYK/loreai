@@ -48,9 +48,11 @@ export interface GatewayConfig {
   /** AWS Bedrock region (selects the bedrock-mantle endpoint). Default: from
    *  AWS_REGION/AWS_DEFAULT_REGION env or "us-east-1". */
   bedrockRegion: string;
-  /** Google Vertex AI project ID. Required. From GOOGLE_CLOUD_PROJECT env. */
+  /** Google Vertex AI project ID. From GOOGLE_CLOUD_PROJECT env; when empty it
+   *  is derived from Application Default Credentials at request time. */
   vertexProject: string;
-  /** Google Vertex AI region. Default: from GOOGLE_CLOUD_REGION/GOOGLE_CLOUD_LOCATION env or "us-central1" */
+  /** Google Vertex AI region/endpoint. Default "global" (the recommended global
+   *  endpoint — no regional premium). From GOOGLE_CLOUD_REGION/GOOGLE_CLOUD_LOCATION env. */
   vertexRegion: string;
   /** Idle timeout in seconds before triggering background work. Default: 60 */
   idleTimeoutSeconds: number;
@@ -220,7 +222,7 @@ export function loadConfig(): GatewayConfig {
       env.LORE_VERTEX_REGION ??
       env.GOOGLE_CLOUD_REGION ??
       env.GOOGLE_CLOUD_LOCATION ??
-      "us-central1",
+      "global",
     // Hosted mode is always a remote gateway (no shared filesystem with clients).
     // Auto-detect from bind address when neither flag is explicitly set.
     remoteGateway: remoteGatewayEnv || hostedModeEnv || autoDetected,
@@ -501,14 +503,24 @@ const PROVIDER_ROUTES: Record<string, ProviderRoute> = {
     protocol: "anthropic",
     bedrockMantle: true,
   },
-  // --- Google Vertex AI ---
-  // NOTE: Vertex AI support is part 2 of issue #870 and is NOT yet implemented.
-  // The vertex protocol is registered in the type system for forward compatibility,
-  // but PROVIDER_ROUTES deliberately does NOT include vertex/vertex-anthropic
-  // entries. Adding them here would let X-Lore-Provider: vertex requests reach
-  // forwardToUpstream and fall through to the default Anthropic handler (wrong
-  // auth + wrong body), silently breaking requests. The entries will be added
-  // when the Vertex handler lands in part 2.
+  // --- Google Vertex AI (Claude via :rawPredict, GCP OAuth2/ADC) ---
+  // url is null because the region-specific Vertex URL is built at request time
+  // (`{region}-aiplatform.googleapis.com/.../publishers/anthropic/models/…`).
+  // The `vertex` protocol triggers pipeline.ts's self-URL-building branch (like
+  // bedrock-mantle) — it must NOT fall through to the Anthropic handler.
+  // `google-vertex` / `google-vertex-anthropic` are opencode's provider ids.
+  vertex: {
+    url: null,
+    protocol: "vertex",
+  },
+  "google-vertex": {
+    url: null,
+    protocol: "vertex",
+  },
+  "google-vertex-anthropic": {
+    url: null,
+    protocol: "vertex",
+  },
 };
 
 /**

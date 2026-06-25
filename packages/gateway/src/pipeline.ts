@@ -144,6 +144,12 @@ import {
   toMantleModelId,
 } from "./translate/bedrock";
 import {
+  toVertexBody,
+  toVertexModelId,
+  vertexRawPredictUrl,
+} from "./translate/vertex";
+import { getVertexAccessToken, resolveVertexProject } from "./vertex-auth";
+import {
   buildOpenAIUpstreamRequest,
   buildOpenAIResponse,
 } from "./translate/openai";
@@ -3406,14 +3412,43 @@ async function forwardToUpstream(
     headers = result.headers;
     body = result.body;
   } else if (effectiveProtocol === "vertex") {
-    // Vertex AI is part 2 of issue #870 and has no upstream builder yet. Fail
-    // LOUD rather than silently falling through to the Anthropic builder below
-    // (which would POST Anthropic-shaped, x-api-key-authed requests to a Vertex
-    // URL). No PROVIDER_ROUTES entry produces "vertex" today, so this is a
-    // forward guard for when the route lands without its handler.
-    throw new Error(
-      "Vertex AI upstream is not yet implemented (issue #870 part 2)",
+    // Google Vertex AI (Claude): the native Anthropic Messages API over GCP
+    // OAuth2. Reuse buildAnthropicRequest (incl. cache_control), then apply the
+    // three Vertex transforms — model id in the URL path (+ the :rawPredict vs
+    // :streamRawPredict verb selects streaming), `anthropic_version` in the body
+    // (toVertexBody), and a GCP bearer token for auth (replacing the client
+    // x-api-key). The 1h extended-cache-ttl is an Anthropic beta of uncertain
+    // Vertex support, so downgrade to 5m — the same safe default used for other
+    // non-native Anthropic hosts (mantle / MiniMax / Fireworks).
+    const effectiveCache = cache
+      ? { ...cache, systemTTL: "5m" as const, conversationTTL: "5m" as const }
+      : cache;
+    const result = buildAnthropicRequest(req, effectiveCache);
+
+    const project = await resolveVertexProject(config.vertexProject);
+    if (!project) {
+      throw new Error(
+        "Vertex: no GCP project configured. Set GOOGLE_CLOUD_PROJECT (or " +
+          "LORE_VERTEX_PROJECT), or ensure Application Default Credentials " +
+          "provide a project.",
+      );
+    }
+    url = vertexRawPredictUrl(
+      config.vertexRegion,
+      project,
+      toVertexModelId(req.model),
+      req.stream,
     );
+    body = toVertexBody(result.body as Record<string, unknown>);
+    // Auth: GCP OAuth2 bearer (ADC) replaces the client credential. Drop the
+    // x-api-key and the anthropic-version HTTP header (version is in the body
+    // now). cch billing re-signing is gated on effectiveProtocol==="anthropic"
+    // below, so it never fires for Vertex.
+    const token = await getVertexAccessToken();
+    headers = { ...result.headers };
+    delete headers["x-api-key"];
+    delete headers["anthropic-version"];
+    headers.Authorization = `Bearer ${token}`;
   } else {
     // For non-native-Anthropic upstreams (MiniMax, Fireworks, etc.), downgrade
     // extended cache TTL ("1h") to standard 5-minute ephemeral — the "1h" TTL
