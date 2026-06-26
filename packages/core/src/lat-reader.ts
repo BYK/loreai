@@ -15,6 +15,7 @@ import { remark } from "remark";
 import type { Root, Heading, Paragraph, Text } from "mdast";
 import { db, ensureProject } from "./db";
 import { sha256 } from "#db/driver";
+import { offloadAll } from "./read-offload";
 import { extractTopTerms, runRelaxedSearch } from "./search";
 import * as log from "./log";
 import { isHostedMode } from "./hosted";
@@ -343,11 +344,11 @@ export function searchScored(input: {
  *
  * @returns Scored entries sorted by score descending, capped at maxTokens budget
  */
-export function scoreForSession(
+export async function scoreForSession(
   projectPath: string,
   sessionContext: string,
   maxTokens: number,
-): LatSection[] {
+): Promise<LatSection[]> {
   if (!hasLatDir(projectPath)) return [];
 
   const pid = ensureProject(projectPath);
@@ -358,9 +359,10 @@ export function scoreForSession(
 
   let results: Array<LatSection & { rank: number }>;
   try {
-    results = db()
-      .query(
-        `SELECT s.id, s.project_id, s.file, s.heading, s.depth, s.content,
+    // Offload the BM25 OR-scan to the read-worker pool (in-process fallback).
+    // lat_sections is not written on the hot path → staleness-tolerant. #966 B.
+    results = (await offloadAll(
+      `SELECT s.id, s.project_id, s.file, s.heading, s.depth, s.content,
                 s.content_hash, s.first_paragraph, s.updated_at,
                 bm25(lat_sections_fts, 6.0, 2.0) as rank
          FROM lat_sections_fts f
@@ -368,8 +370,8 @@ export function scoreForSession(
          WHERE lat_sections_fts MATCH ?
          AND s.project_id = ?
          ORDER BY rank`,
-      )
-      .all(q, pid) as Array<LatSection & { rank: number }>;
+      [q, pid],
+    )) as Array<LatSection & { rank: number }>;
   } catch {
     return [];
   }

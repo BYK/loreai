@@ -3,25 +3,32 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   _resetVectorPoolForTest,
   _setTestVectorWorkerFactory,
+  READ_JOB_TIMED_OUT,
   shutdownVectorPool,
+  tryPoolRead,
   tryPoolVectorSearch,
   VECTOR_SEARCH_TIMED_OUT,
   vectorSearchTimeoutMs,
 } from "../src/vector-pool";
+import type { ReadJobSpec } from "../src/read-job";
 import type {
   VectorWorkerInbound,
   VectorWorkerInitData,
 } from "../src/vector-worker-types";
 
 // A deterministic stand-in for a node:worker_threads Worker. `onSearch` decides
-// how the fake responds to each "search" message, so each test drives the pool
-// through a specific path (result / error / timeout / death).
+// how the fake responds to each "search" message; `onRead` to each "read"
+// message — so each test drives the pool through a specific path (result /
+// error / timeout / death).
 class FakeWorker extends EventEmitter {
   static instances: FakeWorker[] = [];
   terminated = false;
   readonly index: number;
 
-  constructor(readonly onSearch: (w: FakeWorker, msg: { id: number }) => void) {
+  constructor(
+    readonly onSearch: (w: FakeWorker, msg: { id: number }) => void,
+    readonly onRead?: (w: FakeWorker, msg: { id: number }) => void,
+  ) {
     super();
     this.index = FakeWorker.instances.length;
     FakeWorker.instances.push(this);
@@ -29,6 +36,7 @@ class FakeWorker extends EventEmitter {
   unref(): void {}
   postMessage(msg: VectorWorkerInbound): void {
     if (msg.type === "search") this.onSearch(this, msg);
+    else if (msg.type === "read") this.onRead?.(this, msg);
   }
   terminate(): Promise<number> {
     this.terminated = true;
@@ -37,6 +45,9 @@ class FakeWorker extends EventEmitter {
   }
   reply(id: number, hits: unknown[]): void {
     this.emit("message", { type: "result", id, hits });
+  }
+  replyRead(id: number, rows: unknown): void {
+    this.emit("message", { type: "read-result", id, rows });
   }
   replyError(id: number, error: string): void {
     this.emit("message", { type: "error", id, error });
@@ -59,6 +70,20 @@ function factoryReturning(
     d: VectorWorkerInitData,
   ) => never;
 }
+
+function factoryReturningRead(
+  onRead: (w: FakeWorker, msg: { id: number }) => void,
+): (d: VectorWorkerInitData) => never {
+  return (() => new FakeWorker(() => {}, onRead)) as unknown as (
+    d: VectorWorkerInitData,
+  ) => never;
+}
+
+const READ_JOB: ReadJobSpec = {
+  sql: "SELECT id FROM knowledge_current WHERE project_id = ?",
+  params: ["p1"],
+  mode: "all",
+};
 
 const QUERY = new Float32Array([1, 0, 0]);
 const KNOWLEDGE = { kind: "knowledge" as const, limit: 10 };
@@ -430,6 +455,79 @@ describe("vector-pool timeout cancellation (#1006 follow-up)", () => {
     await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
     expect(await first).toBe(VECTOR_SEARCH_TIMED_OUT);
     expect(await collateral).toBeNull();
+  });
+});
+
+describe("vector-pool generic read jobs (tryPoolRead)", () => {
+  it("routes a read through the pool and returns { rows }", async () => {
+    const rows = [{ id: "a" }, { id: "b" }];
+    _setTestVectorWorkerFactory(
+      factoryReturningRead((w, msg) => w.replyRead(msg.id, rows)),
+    );
+    const res = await tryPoolRead(READ_JOB);
+    expect(res).toEqual({ rows });
+  });
+
+  it("wraps a no-row null reply as { rows: null }, not a bare null", async () => {
+    // Load-bearing: a `.get()` that matched no row legitimately resolves null.
+    // The { rows } wrapper distinguishes "pool ran it, result was null" from
+    // "pool unavailable" (a bare null → caller re-runs in-process). Dropping the
+    // wrapper would make the caller needlessly re-query.
+    _setTestVectorWorkerFactory(
+      factoryReturningRead((w, msg) => w.replyRead(msg.id, null)),
+    );
+    const res = await tryPoolRead({
+      sql: "SELECT 1 WHERE 0",
+      params: [],
+      mode: "get",
+    });
+    expect(res).not.toBeNull();
+    expect(res).toEqual({ rows: null });
+  });
+
+  it("returns null (fall back) when LORE_DISABLE_VEC_WORKER=1, never spawns", async () => {
+    process.env.LORE_DISABLE_VEC_WORKER = "1";
+    _setTestVectorWorkerFactory(
+      factoryReturningRead((w, msg) => w.replyRead(msg.id, [{ id: "x" }])),
+    );
+    expect(await tryPoolRead(READ_JOB)).toBeNull();
+    expect(FakeWorker.instances.length).toBe(0);
+  });
+
+  it("returns null when the worker reports a per-request error", async () => {
+    _setTestVectorWorkerFactory(
+      factoryReturningRead((w, msg) => w.replyError(msg.id, "bad sql")),
+    );
+    expect(await tryPoolRead(READ_JOB)).toBeNull();
+  });
+
+  it("resolves READ_JOB_TIMED_OUT (not null) and retires the wedged worker on timeout", async () => {
+    // Same #1006 contract as vector search: a read timeout means the worker is
+    // slow, NOT that the pool is unavailable. Returning the sentinel (not null)
+    // tells offload helpers to degrade to empty instead of re-running the scan
+    // in-process (which would re-block the loop). The wedged worker is retired.
+    vi.useFakeTimers();
+    let served: FakeWorker | undefined;
+    _setTestVectorWorkerFactory(
+      factoryReturningRead((w) => {
+        served = w; // receive the read but never reply → force a timeout
+      }),
+    );
+    const p = tryPoolRead(READ_JOB);
+    await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
+    expect(await p).toBe(READ_JOB_TIMED_OUT);
+    expect(served?.terminated).toBe(true);
+  });
+
+  it("shares one worker pool across reads (spawns once)", async () => {
+    _setTestVectorWorkerFactory(
+      factoryReturningRead((w, msg) => w.replyRead(msg.id, [])),
+    );
+    await tryPoolRead(READ_JOB);
+    const afterFirst = FakeWorker.instances.length;
+    expect(afterFirst).toBeGreaterThan(0);
+    await tryPoolRead(READ_JOB);
+    expect(FakeWorker.instances.length).toBe(afterFirst);
   });
 });
 

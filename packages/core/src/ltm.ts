@@ -10,6 +10,7 @@ import {
   runRelaxedSearch,
 } from "./search";
 import * as embedding from "./embedding";
+import { offloadAll } from "./read-offload";
 import { ReadPathTimer } from "./read-telemetry";
 import { sessionVerifierVerdict } from "./tool-trace";
 import * as latReader from "./lat-reader";
@@ -1617,7 +1618,9 @@ function isBlanketEligible(entry: KnowledgeEntry, pid: string): boolean {
  *
  * Returns a Map of entry ID → normalized score (0–1).
  */
-function scoreEntriesFTS(sessionContext: string): Map<string, number> {
+async function scoreEntriesFTS(
+  sessionContext: string,
+): Promise<Map<string, number>> {
   const terms = extractTopTerms(sessionContext);
   if (!terms.length) return new Map();
 
@@ -1625,16 +1628,17 @@ function scoreEntriesFTS(sessionContext: string): Map<string, number> {
   const { title, content, category } = ftsWeights();
 
   try {
-    const results = db()
-      .query(
-        `SELECT k.id, bm25(knowledge_fts, ?, ?, ?) as rank
+    // Offload the BM25 OR-scan to the read-worker pool (in-process fallback).
+    // knowledge_fts is not written on the hot path → staleness-tolerant. #966 B.
+    const results = (await offloadAll(
+      `SELECT k.id, bm25(knowledge_fts, ?, ?, ?) as rank
           FROM knowledge_fts f
           CROSS JOIN knowledge k ON k.rowid = f.rowid
          LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id
           WHERE knowledge_fts MATCH ?
           AND COALESCE(m.confidence, 1.0) > 0.2`,
-      )
-      .all(title, content, category, q) as Array<{
+      [title, content, category, q],
+    )) as Array<{
       id: string;
       rank: number;
     }>;
@@ -1765,25 +1769,30 @@ export async function forSession(
     categoryParams = excludeFilter;
   }
 
-  // --- 1. Load project-specific entries ---
-  const projectEntries = db()
-    .query(
-      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
+  // --- 1 & 2. Load project-specific + cross-project candidates ---
+  // These two unbounded `knowledge_current` scans are the heaviest synchronous
+  // reads on this per-turn path. Offload them to the read-worker pool (with an
+  // in-process fallback) and run them in parallel, so the main event loop stays
+  // free while a worker scans. Knowledge is not written on the hot per-message
+  // path, so a worker's read-only snapshot is safe (staleness-tolerant). #966 B.
+  const projectSql = `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
        WHERE project_id = ? AND cross_project = 0 AND confidence > 0.2${categoryClause}
-       ORDER BY confidence DESC, updated_at DESC`,
-    )
-    .all(pid, ...categoryParams)
-    .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
-
-  // --- 2. Load cross-project candidates ---
-  const crossEntries = db()
-    .query(
-      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
+       ORDER BY confidence DESC, updated_at DESC`;
+  const crossSql = `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
        WHERE (project_id IS NULL OR cross_project = 1) AND confidence > 0.2${categoryClause}
-       ORDER BY confidence DESC, updated_at DESC`,
-    )
-    .all(...categoryParams)
-    .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
+       ORDER BY confidence DESC, updated_at DESC`;
+  const [projectRows, crossRows] = await timer.await(
+    Promise.all([
+      offloadAll(projectSql, [pid, ...categoryParams]),
+      offloadAll(crossSql, [...categoryParams]),
+    ]),
+  );
+  const projectEntries = (projectRows as Record<string, unknown>[]).map(
+    hydrateKnowledgeEntry,
+  ) as KnowledgeEntry[];
+  const crossEntries = (crossRows as Record<string, unknown>[]).map(
+    hydrateKnowledgeEntry,
+  ) as KnowledgeEntry[];
 
   if (!crossEntries.length && !projectEntries.length) return [];
 
@@ -1809,7 +1818,7 @@ export async function forSession(
     const foreignPrefs = crossEntries.filter((e) => !isBlanketEligible(e, pid));
     let relevantForeign: KnowledgeEntry[] = [];
     if (foreignPrefs.length && options?.contextHint?.trim()) {
-      const ftsScores = scoreEntriesFTS(options.contextHint);
+      const ftsScores = await scoreEntriesFTS(options.contextHint);
       relevantForeign = foreignPrefs.filter(
         (e) => (ftsScores.get(e.id) ?? 0) > 0,
       );
@@ -1913,7 +1922,7 @@ export async function forSession(
       // Hybrid scoring: vector search only covers entries with stored embeddings.
       // Entries without embeddings (e.g. newly created, async embed not yet done)
       // fall back to FTS5 so they aren't invisible to scoring.
-      const ftsScores = scoreEntriesFTS(sessionContext);
+      const ftsScores = await scoreEntriesFTS(sessionContext);
 
       // Score project entries: prefer vector similarity, fall back to FTS5
       const rawScored: Scored[] = projectEntries.map((entry) => {
@@ -1949,7 +1958,7 @@ export async function forSession(
         });
     } else {
       // Vector failed — fall through to FTS5
-      const ftsScores = scoreEntriesFTS(sessionContext);
+      const ftsScores = await scoreEntriesFTS(sessionContext);
       ({ scoredProject, scoredCross } = scoreFTS(
         projectEntries,
         crossEntries,
@@ -1958,7 +1967,7 @@ export async function forSession(
     }
   } else if (sessionContext.trim().length > 20) {
     // Embeddings unavailable — use FTS5 BM25 as fallback
-    const ftsScores = scoreEntriesFTS(sessionContext);
+    const ftsScores = await scoreEntriesFTS(sessionContext);
     ({ scoredProject, scoredCross } = scoreFTS(
       projectEntries,
       crossEntries,
@@ -2043,7 +2052,7 @@ export async function forSession(
   // lat.md sections compete for the remaining token budget (shared LTM pool).
   // They are scored separately by BM25 relevance against the same session context.
   if (latReader.hasLatDir(projectPath) && used < maxTokens) {
-    const latSections = latReader.scoreForSession(
+    const latSections = await latReader.scoreForSession(
       projectPath,
       sessionContext,
       maxTokens - used,

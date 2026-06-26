@@ -17,6 +17,7 @@
 
 import { parentPort, workerData } from "node:worker_threads";
 import { openReaderConnection, type ReaderConnection } from "./db/reader";
+import { type ReadJobConn, runReadJob } from "./read-job";
 import { runVectorQuery } from "./vector-query";
 import type {
   VectorWorkerInbound,
@@ -78,6 +79,32 @@ port.on("message", (msg: VectorWorkerInbound) => {
           msg.spec,
         );
         post({ type: "result", id: msg.id, hits });
+      } catch (err) {
+        // Per-request failure — reject just this request, keep serving. The
+        // pool resolves it via the in-process fallback.
+        post({
+          type: "error",
+          id: msg.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      break;
+    }
+    case "read": {
+      if (shutdownRequested) return;
+      const conn = reader;
+      if (!conn) {
+        post({
+          type: "error",
+          id: msg.id,
+          error: "reader connection unavailable",
+        });
+        return;
+      }
+      try {
+        // The connection is query_only=TRUE, so a read job can only SELECT.
+        const rows = runReadJob(conn.db as unknown as ReadJobConn, msg.spec);
+        post({ type: "read-result", id: msg.id, rows });
       } catch (err) {
         // Per-request failure — reject just this request, keep serving. The
         // pool resolves it via the in-process fallback.

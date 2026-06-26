@@ -147,10 +147,10 @@ More detail follows.
   });
 
   describe("scoreForSession", () => {
-    test("scores sections against session context", () => {
+    test("scores sections against session context", async () => {
       latReader.refresh(PROJECT);
 
-      const sections = latReader.scoreForSession(
+      const sections = await latReader.scoreForSession(
         PROJECT,
         "authentication middleware pipeline request handling",
         5000, // generous budget
@@ -159,11 +159,11 @@ More detail follows.
       expect(sections.length).toBeGreaterThan(0);
     });
 
-    test("respects token budget", () => {
+    test("respects token budget", async () => {
       latReader.refresh(PROJECT);
 
       // Very tight budget — should only fit a few sections
-      const sections = latReader.scoreForSession(
+      const sections = await latReader.scoreForSession(
         PROJECT,
         "authentication middleware pipeline",
         50, // very tight
