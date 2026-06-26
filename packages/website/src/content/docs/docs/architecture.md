@@ -39,36 +39,26 @@ Once a request lands in the gateway, two flows kick off in parallel: a **request
 
 **System + LTM + Meta-Distillations + Distillations + Delta Updates + Conversation**
 
+They stack into one contiguous prompt, read top to bottom — the cache-stable blocks on top (green is the LTM cache-write anchor), the volatile message tail at the bottom:
+
 ```mermaid
-%%{init: {"flowchart": {"nodeSpacing": 22, "rankSpacing": 6, "padding": 14}}}%%
-flowchart TB
-    subgraph Sources["Three-tier memory · sources"]
-        direction LR
-        T1["Tier 1 · Temporal<br/>raw messages"]:::tier
-        T2["Tier 2 · Distillation<br/>gen-0 + gen-1+"]:::tier
-        T3["Tier 3 · LTM<br/>curated knowledge"]:::tier
-        T1 ~~~ T2 ~~~ T3
-    end
-
-    subgraph Stack["What the model sees · one stacked prompt, top → bottom"]
-        direction TB
-        B1["System — system[0]<br/>harness rules + Lore identity · cache-stable"]:::sys
-        B2["LTM — system[1]<br/>preferences · entities · knowledge catalog<br/>frozen baseline, cached 1h · cache-write anchor"]:::pinned
-        B3["LTM — system[2]<br/>context-bound entries · diff-pinned, 5m cache"]:::pinned
-        B4["Meta-Distillations + Distillations<br/>distilled prefix at the head of the messages"]:::distill
-        B5["Delta Updates<br/>knowledge deltas in the tail · volatile"]:::tail
-        B6["Conversation<br/>raw message tail"]:::tail
-        B1 ~~~ B2 ~~~ B3 ~~~ B4 ~~~ B5 ~~~ B6
-    end
-
-    Sources --> Stack --> Call["Upstream LLM call"]:::ext
-
-    classDef tier fill:#f7f2e8,stroke:#5a8f63,color:#1a3320
-    classDef sys fill:#ececec,stroke:#888,color:#333
-    classDef pinned fill:#8fba96,stroke:#1a3320,color:#1a3320
-    classDef distill fill:#c4ddc7,stroke:#1a3320,color:#1a3320
-    classDef tail fill:#ececec,stroke:#888,color:#333
-    classDef ext fill:#ececec,stroke:#888,color:#333
+block-beta
+  columns 1
+  B1["System · system[0]<br/>harness rules + Lore identity · cache-stable"]
+  B2["LTM · system[1]<br/>preferences · entities · knowledge catalog<br/>frozen baseline, cached 1h · cache-write anchor"]
+  B3["LTM · system[2]<br/>context-bound entries · diff-pinned, 5m cache"]
+  B4["Meta-Distillations + Distillations<br/>distilled prefix at the head of the messages"]
+  B5["Delta Updates<br/>knowledge deltas in the tail · volatile"]
+  B6["Conversation<br/>raw message tail · volatile"]
+  classDef sys fill:#ececec,stroke:#888,color:#333
+  classDef pinned fill:#8fba96,stroke:#1a3320,color:#1a3320
+  classDef distill fill:#c4ddc7,stroke:#1a3320,color:#1a3320
+  class B1 sys
+  class B2 pinned
+  class B3 pinned
+  class B4 distill
+  class B5 sys
+  class B6 sys
 ```
 
 The formula's parts map onto the wire in the order the model reads them. **System** is `system[0]` — the harness rules and Lore's identity, cache-stable. **LTM** spans two system blocks: `system[1]` holds the stable baseline (preferences, known entities, and a knowledge catalog), frozen for the session and cached at a 1-hour TTL — it's the cache-write anchor — while `system[2]` holds the context-bound entries, re-pinned only when they materially change (see the [LTM pin invariant](#the-ltm-pin-frozen-baseline) below). **Meta-Distillations** and **Distillations** are not a system block at all: they ride at the head of the message array as a distilled prefix, kept byte-stable so appending a new turn stays cheap. **Delta Updates** and **Conversation** fill the rest of the message tail (volatile, ID-referenced, not cache-stable). The gradient's job is to compose these pieces within the context-window budget on every turn; the next section zooms in on that composition.
