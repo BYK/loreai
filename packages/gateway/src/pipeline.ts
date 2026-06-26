@@ -825,18 +825,21 @@ function parseDeltaMessage(raw: string): GatewayMessage | null {
  * @internal Exported for tests.
  */
 /**
- * Decide whether the durable knowledge-delta must be reset (deleted +
- * recomputed) on THIS turn because the gradient compressed the conversation.
+ * Decide whether the durable knowledge-delta must be re-anchored on THIS turn
+ * because the gradient compressed the conversation.
  *
  * The delta's persisted `insertAt` is a frozen absolute index into the
  * gradient-transformed message array. That array is non-stationary: when the
  * gradient compresses (raw-window eviction / layer escalation), the content at
  * each absolute index shifts, so a once-tool-pair-safe index can drift into a
  * tool_use/tool_result pair. A compressing turn ALSO busts the conversation
- * prompt cache anyway, so this is the right moment to throw the stale delta
- * away and recompute a fresh, tool-pair-safe, near-tail position — paying the
- * (already-incurred) bust once instead of destructively stripping a real tool
- * pair every subsequent turn.
+ * prompt cache anyway, so this is the right moment to re-anchor the blocks to a
+ * fresh, tool-pair-safe, near-tail position (preserving their content AND `mut`
+ * signatures via reanchorExistingDelta) — paying the (already-incurred) bust
+ * once instead of destructively stripping a real tool pair every subsequent
+ * turn. Re-anchoring (not deleting) keeps the advancing surfaced set intact, so
+ * a fresh delta this same turn appends only its new increment rather than
+ * re-deriving the full cumulative pin→DB wall.
  *
  * Layer-only predicate: a compressing turn is any turn at a compressed layer
  * (>= 1) whose layer DIFFERS from the previous turn (entering, escalating, or
@@ -915,6 +918,38 @@ export function reanchorExistingDelta(
     });
   }
   return reInsertAt;
+}
+
+/**
+ * Compression-reset action for the durable knowledge delta — the single
+ * call-site decision behind a testable seam. On a turn where the gradient
+ * reshuffled the message array (`shouldResetDeltaOnCompression`), the persisted
+ * blocks' frozen absolute `insertAt` can drift into a tool pair, so the blocks
+ * are re-anchored to a fresh tool-pair-safe near-tail index against the CURRENT
+ * array. No-op (returns null) when this is not a compressing turn or there is
+ * no delta to move.
+ *
+ * 🔴 Re-anchors (via reanchorExistingDelta, preserving each block's content AND
+ * its `mut` signature) — it does NOT delete. Deleting the blocks here wiped the
+ * surfaced-set history, so a fresh delta produced on the SAME turn re-derived
+ * the ENTIRE cumulative pin→DB wall from the frozen baseline. As background
+ * consolidation tombstoned/edited more pinned entries over a session, that wall
+ * kept growing, so every compression+change turn re-rendered a larger
+ * deep-prefix block and busted the conversation cache — the regrowth churn
+ * #1013 only trimmed. Re-anchoring keeps advanceSurfacedKeys intact, so the
+ * append that follows contributes ONLY the genuinely-new increment (or nothing).
+ *
+ * @internal Exported for tests (guards the reanchor-not-delete call-site
+ * choice, which the inline form left un-testable).
+ */
+export function reanchorDeltaOnCompression(
+  sessionID: string,
+  projectPath: string,
+  messages: GatewayMessage[],
+  deltaCompressed: boolean,
+): number | null {
+  if (!deltaCompressed) return null;
+  return reanchorExistingDelta(sessionID, projectPath, messages);
 }
 
 export function safeDeltaInsertIndex(
@@ -7251,27 +7286,22 @@ async function handleConversationTurn(
     result.layer,
     sessionState.lastTurnWasIdle ?? false,
   );
-  if (deltaCompressed) {
-    if (pendingKnowledgeDelta) {
-      // New knowledge delta is being produced this turn anyway — drop the stale
-      // row so appendKnowledgePromptDelta computes a FRESH insertAt below
-      // (no persisted row to reuse) instead of re-freezing the drifted index.
-      deleteSessionPromptDelta(sessionID);
-    } else {
-      // No new knowledge this turn, but the array reshuffled: re-anchor the
-      // EXISTING delta (same content) to a fresh tool-pair-safe near-tail index
-      // so it doesn't replay at a drifted position.
-      const reInsertAt = reanchorExistingDelta(
-        sessionID,
-        projectPath,
-        modifiedReq.messages,
-      );
-      if (reInsertAt !== null) {
-        log.info(
-          `prompt-delta: re-anchored durable delta for session ${sessionID.slice(0, 16)} after compression (layer ${sessionState.lastDeltaLayer ?? 0}→${result.layer}, insertAt=${reInsertAt})`,
-        );
-      }
-    }
+  // On a compressing turn the gradient reshuffled the array; re-anchor the
+  // durable delta blocks (preserving content + `mut`) to a fresh tool-pair-safe
+  // index. 🔴 Re-anchor — NOT delete — even when a fresh knowledge delta is
+  // produced this turn (see reanchorDeltaOnCompression): deleting wiped the
+  // surfaced-set history, so the append below re-derived the full cumulative
+  // pin→DB wall every compression+change turn (the regrowth #1013 only trimmed).
+  const reInsertAt = reanchorDeltaOnCompression(
+    sessionID,
+    projectPath,
+    modifiedReq.messages,
+    deltaCompressed,
+  );
+  if (reInsertAt !== null) {
+    log.info(
+      `prompt-delta: re-anchored durable delta for session ${sessionID.slice(0, 16)} after compression (layer ${sessionState.lastDeltaLayer ?? 0}→${result.layer}, insertAt=${reInsertAt})`,
+    );
   }
 
   if (pendingKnowledgeDelta) {

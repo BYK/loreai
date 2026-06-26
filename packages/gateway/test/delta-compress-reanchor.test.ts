@@ -11,11 +11,12 @@
  *
  *   1. `safeDeltaInsertIndex` must NEVER return an index immediately after an
  *      assistant containing a tool_use (it walks back before the assistant).
- *   2. On a compressing/layer-changing turn the caller deletes the stored
- *      delta (`deleteSessionPromptDelta`) and recomputes a fresh index; on a
- *      stable turn the stored index is left frozen.
+ *   2. On a compressing/layer-changing turn the caller RE-ANCHORS the stored
+ *      delta blocks to a fresh index (preserving content + `mut`) — it does NOT
+ *      delete them; on a stable turn the stored index is left frozen.
  *   3. `shouldResetDeltaOnCompression(prevLayer, curLayer)` is the pure
- *      predicate gating that delete/recompute decision.
+ *      predicate gating that re-anchor decision; `reanchorDeltaOnCompression`
+ *      is the call-site action it gates.
  *
  * Some of these APIs are not implemented yet — tests that exercise an
  * unimplemented symbol fail cleanly (typeof check) rather than crashing
@@ -36,12 +37,16 @@ import {
   removeOrphanedToolResults,
   shouldResetDeltaOnCompression,
   reanchorExistingDelta,
+  reanchorDeltaOnCompression,
+  appendKnowledgePromptDelta,
+  fnv1a,
 } from "../src/pipeline";
 import {
   appendSessionPromptDelta,
   deleteSessionPromptDelta,
   listSessionPromptDeltas,
   ensureProject,
+  ltm,
 } from "@loreai/core";
 import type {
   GatewayContentBlock,
@@ -837,5 +842,267 @@ describe("multi-block re-anchor — placement across distinct + shared positions
     // Stable on replay.
     const b = applySessionPromptDeltas(layout, sessionID);
     expect(snapshot(b)).toBe(snapshot(a));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. reanchorDeltaOnCompression — the call-site reset action (reanchor, not delete)
+//
+// The regrowth churn #1013 only trimmed: on a compressing turn that ALSO
+// produced a fresh knowledge delta, the call site DELETED the persisted blocks
+// and let the append below re-derive the FULL cumulative pin→DB wall from the
+// frozen baseline. As consolidation tombstoned/edited more pinned entries over
+// a session, that wall grew, so every compression+change turn re-rendered a
+// larger deep-prefix block and busted the cache. The fix re-anchors the blocks
+// (preserving their `mut` signatures) so the surfaced set stays advanced and
+// the append contributes only the genuinely-new increment.
+// ---------------------------------------------------------------------------
+describe("reanchorDeltaOnCompression — re-anchors (never deletes) on a compressing turn", () => {
+  const PROJECT = "/tmp/lore-delta-reset-action";
+  const keyOf = (id: string, title: string, content: string): string =>
+    `${id}:${fnv1a(`${title}\x1f${content}`)}`;
+
+  test("is exported as a function", () => {
+    expect(typeof reanchorDeltaOnCompression).toBe("function");
+  });
+
+  test("NOT compressing (deltaCompressed=false): no-op, returns null, blocks untouched", () => {
+    const sessionID = `reset-noop-${Date.now()}-${Math.random()}`;
+    const projectID = ensureProject(PROJECT);
+    appendSessionPromptDelta({
+      sessionID,
+      projectID,
+      selector: JSON.stringify({
+        target: "messages",
+        insertAt: 2,
+        mut: { changed: [{ id: "k1", h: "h1" }], removed: [] },
+      }),
+      content: JSON.stringify({
+        role: "user",
+        content: [{ type: "text", text: "block" }],
+      }),
+    });
+
+    const result = reanchorDeltaOnCompression(
+      sessionID,
+      PROJECT,
+      [user(text("u0")), assistant(text("a1")), user(text("u2"))],
+      false,
+    );
+
+    expect(result).toBeNull();
+    const rows = listSessionPromptDeltas(sessionID);
+    expect(rows).toHaveLength(1);
+    // insertAt left frozen, mut preserved.
+    expect(JSON.parse(rows[0].selector)).toMatchObject({
+      insertAt: 2,
+      mut: { changed: [{ id: "k1", h: "h1" }] },
+    });
+  });
+
+  test("compressing (deltaCompressed=true): re-anchors the blocks AND preserves their mut (does not delete)", () => {
+    const sessionID = `reset-reanchor-${Date.now()}-${Math.random()}`;
+    const projectID = ensureProject(PROJECT);
+    appendSessionPromptDelta({
+      sessionID,
+      projectID,
+      // Stale frozen index (99) far past the post-compact array end.
+      selector: JSON.stringify({
+        target: "messages",
+        insertAt: 99,
+        mut: { changed: [{ id: "k7", h: "hh" }], removed: ["k8"] },
+      }),
+      content: JSON.stringify({
+        role: "user",
+        content: [{ type: "text", text: "surfaced block" }],
+      }),
+    });
+
+    const messages = [
+      user(text("u0")),
+      assistant(text("a1")),
+      user(text("u2")),
+    ];
+    const reInsertAt = reanchorDeltaOnCompression(
+      sessionID,
+      PROJECT,
+      messages,
+      true,
+    );
+
+    // Re-anchored to a fresh in-bounds index, NOT the stale 99.
+    expect(reInsertAt).not.toBeNull();
+    expect(reInsertAt).not.toBe(99);
+    expect(reInsertAt).toBeLessThanOrEqual(messages.length);
+
+    // The block SURVIVES (was re-anchored, not deleted) and keeps its mut.
+    const rows = listSessionPromptDeltas(sessionID);
+    expect(rows).toHaveLength(1);
+    const selector = JSON.parse(rows[0].selector) as {
+      insertAt: number;
+      mut?: { changed?: Array<{ id: string }>; removed?: string[] };
+    };
+    expect(selector.insertAt).toBe(reInsertAt);
+    expect(selector.mut?.changed).toEqual([{ id: "k7", h: "hh" }]);
+    expect(selector.mut?.removed).toEqual(["k8"]);
+  });
+
+  test("returns null when there is no delta to re-anchor", () => {
+    const sessionID = `reset-empty-${Date.now()}-${Math.random()}`;
+    ensureProject(PROJECT);
+    expect(
+      reanchorDeltaOnCompression(sessionID, PROJECT, [user(text("hi"))], true),
+    ).toBeNull();
+    expect(listSessionPromptDeltas(sessionID)).toHaveLength(0);
+  });
+
+  // THE regression guard for #1013's root cause: fire-once ACROSS compression
+  // resets. A surfaced change must not be re-derived every compressing turn.
+  test("an already-surfaced change is NOT re-derived across repeated compression resets (fire-once)", () => {
+    const id = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Regrowth guard entry",
+      content: "v1 original.",
+    });
+    const pinKey = keyOf(id, "Regrowth guard entry", "v1 original.");
+    const sessionID = `reset-fireonce-${Date.now()}-${Math.random()}`;
+
+    // A genuine content edit (curator/consolidation) lands in the DB.
+    ltm.update(id, { content: "v2 materially changed." });
+
+    // Turn 1 (no compression): the change is surfaced once → one block appended.
+    const wrote1 = appendKnowledgePromptDelta({
+      sessionID,
+      projectPath: PROJECT,
+      insertAt: 2,
+      previousKeys: [pinKey],
+      nextKeys: [pinKey],
+      entries: [],
+    });
+    expect(wrote1).toBe(true);
+    expect(listSessionPromptDeltas(sessionID)).toHaveLength(1);
+    expect(
+      JSON.parse(listSessionPromptDeltas(sessionID)[0].content).content[0].text,
+    ).toContain("v2 materially changed.");
+
+    // Turns 2..6: each is a COMPRESSION turn that ALSO carries a pending delta.
+    // Replicate the pipeline call-site order exactly: re-anchor, then append.
+    // With the fix the surfaced set stays advanced past the block, so NOTHING
+    // new is derived. With the old delete-on-reset, the wiped mut history makes
+    // appendKnowledgePromptDelta re-derive the v1→v2 change EVERY turn.
+    const messages = [
+      user(text("u0")),
+      assistant(text("a1")),
+      user(text("u2")),
+    ];
+    const reFires: boolean[] = [];
+    for (let turn = 0; turn < 5; turn++) {
+      reanchorDeltaOnCompression(sessionID, PROJECT, messages, true);
+      reFires.push(
+        appendKnowledgePromptDelta({
+          sessionID,
+          projectPath: PROJECT,
+          insertAt: 2,
+          previousKeys: [pinKey],
+          nextKeys: [pinKey],
+          entries: [],
+        }),
+      );
+    }
+
+    // Fire-once: the change was surfaced on turn 1 only; every reset thereafter
+    // re-anchors the existing block and appends nothing.
+    expect(reFires).toEqual([false, false, false, false, false]);
+    // Exactly one block ever exists (no per-reset re-derivation / accumulation).
+    const finalRows = listSessionPromptDeltas(sessionID);
+    expect(finalRows).toHaveLength(1);
+    // It still records the surfaced change in its mut (surfaced set advanced).
+    const mut = JSON.parse(finalRows[0].selector).mut as {
+      changed: Array<{ id: string }>;
+    };
+    expect(mut.changed.map((c) => c.id)).toContain(id);
+  });
+
+  // Across a reset, a NEW genuine mutation (different entry) still surfaces —
+  // the fix preserves fire-once WITHOUT muting real new changes.
+  test("a genuinely-new change after a reset still surfaces (only its increment)", () => {
+    const a = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Entry A (surfaced first)",
+      content: "a-v1.",
+    });
+    const b = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Entry B (changes after reset)",
+      content: "b-v1.",
+    });
+    const aKey = keyOf(a, "Entry A (surfaced first)", "a-v1.");
+    const bKey = keyOf(b, "Entry B (changes after reset)", "b-v1.");
+    const sessionID = `reset-newchange-${Date.now()}-${Math.random()}`;
+    const pin = [aKey, bKey];
+    const messages = [
+      user(text("u0")),
+      assistant(text("a1")),
+      user(text("u2")),
+    ];
+
+    // A changes and is surfaced (block 1).
+    ltm.update(a, { content: "a-v2." });
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 2,
+        previousKeys: pin,
+        nextKeys: pin,
+        entries: [],
+      }),
+    ).toBe(true);
+
+    // Compression reset; A must NOT re-fire (already surfaced).
+    reanchorDeltaOnCompression(sessionID, PROJECT, messages, true);
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 2,
+        previousKeys: pin,
+        nextKeys: pin,
+        entries: [],
+      }),
+    ).toBe(false);
+
+    // Now B genuinely changes; after another reset it SHOULD surface as a new
+    // increment (block 2) — its delta text carries only B, not A.
+    ltm.update(b, { content: "b-v2 changed." });
+    reanchorDeltaOnCompression(sessionID, PROJECT, messages, true);
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 2,
+        previousKeys: pin,
+        nextKeys: pin,
+        entries: [],
+      }),
+    ).toBe(true);
+
+    const rows = listSessionPromptDeltas(sessionID);
+    expect(rows).toHaveLength(2);
+    // The newest block surfaces B's new content and only B in its mut.
+    const newest = rows[rows.length - 1];
+    expect(JSON.parse(newest.content).content[0].text).toContain(
+      "b-v2 changed.",
+    );
+    const newestMut = JSON.parse(newest.selector).mut as {
+      changed: Array<{ id: string }>;
+    };
+    expect(newestMut.changed.map((c) => c.id)).toEqual([b]);
   });
 });
