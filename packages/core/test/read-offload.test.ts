@@ -1,6 +1,11 @@
 import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { offloadAll, offloadGet } from "../src/read-offload";
+import {
+  offloadAll,
+  offloadAllOrTimeout,
+  offloadGet,
+  READ_JOB_TIMED_OUT,
+} from "../src/read-offload";
 import {
   _resetVectorPoolForTest,
   _setTestVectorWorkerFactory,
@@ -122,5 +127,27 @@ describe("read-offload worker-timeout degradation (#1006)", () => {
     const p = offloadGet("SELECT 'in-process' AS x", []);
     await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
     expect(await p).toBeNull();
+  });
+});
+
+describe("offloadAllOrTimeout (surfaces the timeout instead of degrading)", () => {
+  it("returns the pool rows on success", async () => {
+    poolReturning([{ x: "ok" }]);
+    expect(await offloadAllOrTimeout("SELECT 1", [])).toEqual([{ x: "ok" }]);
+  });
+
+  it("falls back in-process when the pool is unavailable", async () => {
+    // No factory installed → pool inert → identical in-process query.
+    expect(await offloadAllOrTimeout("SELECT ? AS x", ["v"])).toEqual([
+      { x: "v" },
+    ]);
+  });
+
+  it("surfaces READ_JOB_TIMED_OUT (NOT []) on timeout, so callers can degrade together", async () => {
+    vi.useFakeTimers();
+    poolHanging();
+    const p = offloadAllOrTimeout("SELECT 'in-process' AS x", []);
+    await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
+    expect(await p).toBe(READ_JOB_TIMED_OUT);
   });
 });

@@ -7,10 +7,16 @@ import {
   afterEach,
   vi,
 } from "vitest";
+import { EventEmitter } from "node:events";
 import { uuidv7 } from "uuidv7";
 import { db, ensureProject } from "../src/db";
 import * as ltm from "../src/ltm";
 import * as embedding from "../src/embedding";
+import {
+  _resetVectorPoolForTest,
+  _setTestVectorWorkerFactory,
+  vectorSearchTimeoutMs,
+} from "../src/vector-pool";
 
 // UUID v7 pattern: starts with version nibble 7, variant bits 10xxxxxx
 const UUID_V7_RE =
@@ -498,6 +504,97 @@ describe("ltm.forSession", () => {
     expect(found).toBeDefined();
     // It must be the project-specific entry (cross_project = 0)
     expect(found?.cross_project).toBe(0);
+  });
+
+  test("degrades to [] when a candidate-scan worker times out (#1006 symmetric degrade)", async () => {
+    // Force the read-worker pool ON with a worker that receives the candidate
+    // scans but NEVER replies → both scans time out. forSession must degrade the
+    // whole LTM injection to [] rather than re-run the wedged scans on the main
+    // thread (re-blocking the loop) or inject a lopsided partial set.
+    ltm.create({
+      projectPath: PROJ,
+      category: "decision",
+      title:
+        "Entry present in the DB but unreachable while the worker is wedged",
+      content: "would be injected if the candidate scan completed",
+      scope: "project",
+      crossProject: false,
+    });
+
+    class HangingWorker extends EventEmitter {
+      unref(): void {}
+      terminate(): Promise<number> {
+        this.emit("exit", 0);
+        return Promise.resolve(0);
+      }
+      postMessage(): void {
+        // never reply → forces the per-request timeout
+      }
+    }
+
+    _resetVectorPoolForTest();
+    _setTestVectorWorkerFactory((() => new HangingWorker()) as never);
+    vi.useFakeTimers();
+    try {
+      const p = ltm.forSession(PROJ, SESSION, 10_000);
+      // Advance past the per-request timeout so both candidate scans time out.
+      await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
+      expect(await p).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+      _setTestVectorWorkerFactory(null);
+      _resetVectorPoolForTest();
+    }
+  });
+
+  test("degrades to [] when ONLY ONE candidate scan times out (symmetric, guards ||)", async () => {
+    // Asymmetric case: the project scan's worker wedges (times out) while the
+    // cross scan resolves (its worker errors → in-process fallback). forSession
+    // must still degrade to [] rather than inject the lopsided cross-only set.
+    // Guards the `||` symmetric check (a `&&` would proceed with a partial set).
+    ltm.create({
+      projectPath: PROJ,
+      category: "decision",
+      title: "Project entry dropped on partial timeout",
+      content: "would be injected if its scan completed",
+      scope: "project",
+      crossProject: false,
+    });
+
+    let spawnIdx = 0;
+    class SplitWorker extends EventEmitter {
+      readonly i = spawnIdx++;
+      unref(): void {}
+      terminate(): Promise<number> {
+        this.emit("exit", 0);
+        return Promise.resolve(0);
+      }
+      postMessage(msg: { type: string; id: number }): void {
+        if (msg.type !== "read") return;
+        // Dispatch order is [project → worker 0, cross → worker 1]. Worker 0
+        // hangs (project scan times out); worker 1 reports a per-request error so
+        // the cross scan falls back in-process (a NON-timeout resolution).
+        if (this.i === 0) return;
+        this.emit("message", {
+          type: "error",
+          id: msg.id,
+          error: "force in-process fallback",
+        });
+      }
+    }
+
+    _resetVectorPoolForTest();
+    _setTestVectorWorkerFactory((() => new SplitWorker()) as never);
+    vi.useFakeTimers();
+    try {
+      const p = ltm.forSession(PROJ, SESSION, 10_000);
+      await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
+      expect(await p).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+      _setTestVectorWorkerFactory(null);
+      _resetVectorPoolForTest();
+    }
   });
 
   test("deterministic ordering — equal-score entries keep a stable order (fix B)", async () => {

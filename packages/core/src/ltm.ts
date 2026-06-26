@@ -10,7 +10,11 @@ import {
   runRelaxedSearch,
 } from "./search";
 import * as embedding from "./embedding";
-import { offloadAll } from "./read-offload";
+import {
+  offloadAll,
+  offloadAllOrTimeout,
+  READ_JOB_TIMED_OUT,
+} from "./read-offload";
 import { ReadPathTimer } from "./read-telemetry";
 import { sessionVerifierVerdict } from "./tool-trace";
 import * as latReader from "./lat-reader";
@@ -1783,10 +1787,21 @@ export async function forSession(
        ORDER BY confidence DESC, updated_at DESC`;
   const [projectRows, crossRows] = await timer.await(
     Promise.all([
-      offloadAll(projectSql, [pid, ...categoryParams]),
-      offloadAll(crossSql, [...categoryParams]),
+      offloadAllOrTimeout(projectSql, [pid, ...categoryParams]),
+      offloadAllOrTimeout(crossSql, [...categoryParams]),
     ]),
   );
+  // Symmetric degrade: if EITHER scan's worker wedged (timeout), drop the whole
+  // LTM injection for this turn rather than inject a lopsided partial set (e.g.
+  // cross-project entries without the usually-more-relevant project-specific
+  // half). Re-running the wedged scan in-process would re-block the loop the
+  // offload exists to keep free (#1006); the next turn retries against a freshly
+  // respawned worker. A 10s timeout on these small-table scans is near-impossible
+  // in practice — this is a safety valve, not a common path.
+  if (projectRows === READ_JOB_TIMED_OUT || crossRows === READ_JOB_TIMED_OUT) {
+    timer.emit("forSession", 0);
+    return [];
+  }
   const projectEntries = (projectRows as Record<string, unknown>[]).map(
     hydrateKnowledgeEntry,
   ) as KnowledgeEntry[];

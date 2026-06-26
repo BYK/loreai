@@ -18,6 +18,10 @@ import { db } from "./db";
 import type { ReadParam } from "./read-job";
 import { READ_JOB_TIMED_OUT, tryPoolRead } from "./vector-pool";
 
+// Re-exported so callers that coordinate several reads (e.g. forSession's two
+// candidate scans) can detect a per-read timeout and degrade them together.
+export { READ_JOB_TIMED_OUT } from "./vector-pool";
+
 /**
  * Run a multi-row read off-thread when the pool is available, else in-process.
  * Returns the raw rows (caller maps/hydrates on the main thread). The pool path
@@ -35,6 +39,26 @@ export async function offloadAll(
 ): Promise<unknown[]> {
   const res = await tryPoolRead({ sql, params, mode: "all" });
   if (res === READ_JOB_TIMED_OUT) return [];
+  if (res) return res.rows as unknown[];
+  return db()
+    .query(sql)
+    .all(...params) as unknown[];
+}
+
+/**
+ * Like {@link offloadAll}, but surfaces a worker TIMEOUT to the caller as
+ * {@link READ_JOB_TIMED_OUT} instead of silently degrading to `[]`. Use when
+ * several reads must share fate: e.g. forSession runs two `knowledge_current`
+ * candidate scans in parallel and must degrade BOTH together on a timeout
+ * rather than inject a lopsided partial set (one pool succeeding while the other
+ * wedges). Pool-unavailable still falls back to the identical in-process query.
+ */
+export async function offloadAllOrTimeout(
+  sql: string,
+  params: ReadParam[],
+): Promise<unknown[] | typeof READ_JOB_TIMED_OUT> {
+  const res = await tryPoolRead({ sql, params, mode: "all" });
+  if (res === READ_JOB_TIMED_OUT) return READ_JOB_TIMED_OUT;
   if (res) return res.rows as unknown[];
   return db()
     .query(sql)
