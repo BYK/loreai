@@ -1278,8 +1278,8 @@ async function poolOrInProcess(
   const pooled = await tryPoolVectorSearch(spec, queryEmbedding);
   // Timed out: the worker is alive but slow. Return empty — degrading this one
   // recall — rather than re-running the O(n) scan on the main thread, which
-  // re-blocks the event loop (the stall bug). Worker-query cancellation and a
-  // recency cap on the scan land in follow-up PRs.
+  // re-blocks the event loop (the stall bug). The pool cancels the timed-out
+  // worker query (terminates + respawns) so it recovers for the next caller.
   if (pooled === VECTOR_SEARCH_TIMED_OUT) return [];
   if (pooled !== null) return pooled;
   return runVectorQuery(db(), isVecAvailable(), queryEmbedding, spec);

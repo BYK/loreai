@@ -190,6 +190,36 @@ function failAll(pw: PoolWorker, err: Error): void {
 }
 
 /**
+ * Cancel a timed-out search by retiring its worker.
+ *
+ * A worker runs `runVectorQuery` synchronously, so a query that blew the
+ * timeout can't be interrupted from JS — the only way to stop the doomed scan
+ * (and free the thread it's pinning) is to terminate the worker. Leaving it
+ * running while we delete the in-flight entry — the pre-cancellation behavior —
+ * made the still-busy worker look idle to {@link leastBusy}, so new searches
+ * piled up behind the stuck scan in its message queue. {@link ensurePool}
+ * respawns a fresh worker on the next call, restoring capacity.
+ *
+ * Crucially this is NOT counted as a structural failure: a timeout is slowness,
+ * not a broken worker, and latching the pool broken after repeated timeouts
+ * would send every caller back to the in-process path — reintroducing the very
+ * main-thread stall the timeout exists to prevent. Setting `dead` first makes
+ * the terminate()-induced `exit` handler's {@link markDead} a no-op, so the
+ * structural-failure latch is never touched. Collateral in-flight requests on
+ * the same worker are rejected so their callers fall back in-process.
+ */
+function retireTimedOutWorker(pw: PoolWorker): void {
+  if (pw.dead) return;
+  pw.dead = true;
+  failAll(pw, new Error("vector worker terminated after search timeout"));
+  try {
+    void pw.worker.terminate();
+  } catch {
+    // best-effort — the exit handler (markDead) is already a no-op via `dead`.
+  }
+}
+
+/**
  * Count a structural failure (worker death / load failure / reader-open
  * failure). After MAX_STRUCTURAL_FAILURES in a row with no healthy reply, latch
  * the pool broken and terminate any survivors so callers fall back to the
@@ -350,12 +380,14 @@ export async function tryPoolVectorSearch(
           pw.inflight.delete(id);
           // Resolve a sentinel (don't reject → don't fall back in-process):
           // the worker is alive but slow; re-running this scan on the main
-          // thread re-blocks the event loop. The abandoned worker query keeps
-          // running until it finishes (cancellation lands in a follow-up).
+          // thread re-blocks the event loop. Then cancel the doomed query by
+          // terminating its (uninterruptible, synchronously-scanning) worker so
+          // the pool recovers instead of piling new work behind the stuck scan.
           log.info(
-            `vector worker search timed out after ${timeoutMs}ms — returning empty (not re-running in-process)`,
+            `vector worker search timed out after ${timeoutMs}ms — terminating the wedged worker, returning empty (not re-running in-process)`,
           );
           resolve(VECTOR_SEARCH_TIMED_OUT);
+          retireTimedOutWorker(pw);
         }, timeoutMs);
         // The worker is already unref'd (makeWorker), so an in-flight search must
         // not be the thing that keeps the event loop alive: unref the timeout too,

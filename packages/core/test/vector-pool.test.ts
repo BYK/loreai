@@ -290,9 +290,8 @@ describe("vector-pool structural-failure latch (review #989)", () => {
     // A reader connection that fails to open surfaces as an init-error message,
     // marking the worker structurally dead. Asserting only null would be vacuous
     // (the timeout fallback also resolves the sentinel); instead assert the dead
-    // worker is terminated on the next ensurePool — a side effect the timeout
-    // path never produces. Pre-fix mutation (init-error → no markDead): the
-    // victim stays alive and this fails.
+    // worker is terminated on the next ensurePool. Pre-fix mutation (init-error
+    // -> no markDead): the victim stays alive and this fails.
     _setTestVectorWorkerFactory(
       factoryReturning((w, msg) => w.reply(msg.id, [])),
     );
@@ -334,6 +333,95 @@ describe("vector-pool structural-failure latch (review #989)", () => {
     }) as never);
     expect(await tryPoolVectorSearch(KNOWLEDGE, QUERY)).toBeNull();
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("vector-pool timeout cancellation (#1006 follow-up)", () => {
+  it("terminates the wedged worker on timeout (cancelling its uninterruptible scan)", async () => {
+    vi.useFakeTimers();
+    let served: FakeWorker | undefined;
+    _setTestVectorWorkerFactory(
+      factoryReturning((w) => {
+        served = w; // receive the search but never reply → force a timeout
+      }),
+    );
+    const p = tryPoolVectorSearch(KNOWLEDGE, QUERY);
+    await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
+    expect(await p).toBe(VECTOR_SEARCH_TIMED_OUT);
+    // The worker running the doomed synchronous scan is terminated so its thread
+    // is freed and leastBusy() stops routing new work behind the stuck scan.
+    expect(served?.terminated).toBe(true);
+  });
+
+  it("recovers after a timeout: the next search runs on a live worker", async () => {
+    vi.useFakeTimers();
+    let mode: "hang" | "reply" = "hang";
+    _setTestVectorWorkerFactory(
+      factoryReturning((w, msg) => {
+        if (mode === "reply") w.reply(msg.id, [{ id: "ok", similarity: 1 }]);
+      }),
+    );
+    const timedOut = tryPoolVectorSearch(KNOWLEDGE, QUERY);
+    await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
+    expect(await timedOut).toBe(VECTOR_SEARCH_TIMED_OUT);
+
+    mode = "reply";
+    vi.useRealTimers();
+    // Pool must recover: the next search is served by a live worker (not stuck
+    // behind the wedged one, not the in-process-fallback null).
+    expect(await tryPoolVectorSearch(KNOWLEDGE, QUERY)).toEqual([
+      { id: "ok", similarity: 1 },
+    ]);
+    expect(FakeWorker.instances.some((w) => !w.terminated)).toBe(true);
+  });
+
+  it("never latches the pool broken on repeated timeouts (slowness != structural failure)", async () => {
+    vi.useFakeTimers();
+    let mode: "hang" | "reply" = "hang";
+    _setTestVectorWorkerFactory(
+      factoryReturning((w, msg) => {
+        if (mode === "reply") w.reply(msg.id, [{ id: "ok", similarity: 1 }]);
+      }),
+    );
+    // Far more consecutive timeouts than MAX_STRUCTURAL_FAILURES (6). If a
+    // timeout counted as a structural failure, the pool would latch broken and
+    // every later caller would get null (the in-process fallback) — exactly the
+    // main-thread stall the worker offload exists to avoid.
+    for (let i = 0; i < 10; i++) {
+      const p = tryPoolVectorSearch(KNOWLEDGE, QUERY);
+      await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
+      expect(await p).toBe(VECTOR_SEARCH_TIMED_OUT);
+    }
+    mode = "reply";
+    vi.useRealTimers();
+    // Still alive: a replying worker is served rather than bypassed.
+    expect(await tryPoolVectorSearch(KNOWLEDGE, QUERY)).toEqual([
+      { id: "ok", similarity: 1 },
+    ]);
+  });
+
+  it("rejects collateral in-flight requests on a terminated worker (they fall back to null)", async () => {
+    vi.useFakeTimers();
+    // Pool size is 2 (DEFAULT_POOL_SIZE). Park a request on each worker, then a
+    // third lands back on worker 0 (leastBusy tie → first). When worker 0's first
+    // request times out, worker 0 is terminated, so the THIRD request — collateral,
+    // which never itself exceeded the timeout — is rejected → null (in-process
+    // fallback), NOT resolved as the timeout sentinel.
+    const seen: number[] = [];
+    _setTestVectorWorkerFactory(
+      factoryReturning((w) => {
+        seen.push(w.index); // never reply
+      }),
+    );
+    const first = tryPoolVectorSearch(KNOWLEDGE, QUERY); // → worker 0
+    first.catch(() => {});
+    const filler = tryPoolVectorSearch(KNOWLEDGE, QUERY); // → worker 1
+    filler.catch(() => {});
+    const collateral = tryPoolVectorSearch(KNOWLEDGE, QUERY); // → worker 0 (2 in-flight)
+    expect(seen).toEqual([0, 1, 0]);
+    await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
+    expect(await first).toBe(VECTOR_SEARCH_TIMED_OUT);
+    expect(await collateral).toBeNull();
   });
 });
 
