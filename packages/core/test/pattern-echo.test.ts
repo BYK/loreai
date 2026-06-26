@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db, ensureProject } from "../src/db";
 import * as embedding from "../src/embedding";
-import { detectPatternEchoes, PATTERN_COOLDOWN_MS } from "../src/pattern-echo";
+import {
+  _resetPatternEchoCooldownForTest,
+  detectPatternEchoes,
+  PATTERN_COOLDOWN_MS,
+} from "../src/pattern-echo";
 import type { LLMClient } from "../src/types";
 
 // pattern-echo runs two jobs at the gen-0 distillation hook: (1) embed + store
@@ -31,6 +35,9 @@ describe("pattern-echo cooldown", () => {
   let searchSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
+    // Clear the module-global cooldown map so cases never leak into each other
+    // (isolation no longer relies on each test using a unique session ID).
+    _resetPatternEchoCooldownForTest();
     // A deterministic embedding so the embed + store step succeeds without ONNX.
     embedSpy = vi
       .spyOn(embedding, "embed")

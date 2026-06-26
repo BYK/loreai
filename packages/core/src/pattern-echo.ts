@@ -62,6 +62,12 @@ export const PATTERN_COOLDOWN_MS = 10 * 60 * 1000;
 
 const lastExtraction = new Map<string, number>();
 
+/** Test seam: clear the per-session cooldown state so suites don't leak the
+ *  module-global map across cases. Never called in production. */
+export function _resetPatternEchoCooldownForTest(): void {
+  lastExtraction.clear();
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
