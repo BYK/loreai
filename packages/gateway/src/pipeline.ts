@@ -71,7 +71,7 @@ import {
   deleteSessionPromptDelta,
   listSessionPromptDeltas,
   updateSessionPromptDeltaSelector,
-  withTransaction,
+  withSavepoint,
   loadHeaderSessionIndex,
   isHostedMode,
   enableHostedMode,
@@ -912,9 +912,9 @@ export function reanchorExistingDelta(
   // Atomic delete + re-append so a crash mid-rewrite can never leave the
   // session with a partial block set (which would drop surfaced-set history and
   // force a one-time full re-derive). Runs on every compressing turn now, so
-  // crash-safety is cheap insurance. No nesting risk: the delete/append helpers
-  // are single-statement and this is never called inside another transaction.
-  withTransaction(() => {
+  // crash-safety is cheap insurance. Uses a SAVEPOINT (not BEGIN) so it stays
+  // safe if a future refactor ever calls this from inside an outer transaction.
+  withSavepoint("reanchor_delta", () => {
     deleteSessionPromptDelta(sessionID);
     for (const p of preserved) {
       appendSessionPromptDelta({

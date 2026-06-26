@@ -2791,6 +2791,41 @@ export function withTransaction<T>(fn: () => T): T {
   }
 }
 
+/**
+ * Run `fn` inside a named SAVEPOINT, releasing it on success and (on error)
+ * rolling back to then releasing it before re-throwing. Returns the callback's
+ * value.
+ *
+ * Unlike {@link withTransaction} (`BEGIN IMMEDIATE`, which throws if a
+ * transaction is already open), a SAVEPOINT is safe whether called at top level
+ * OR nested inside an existing transaction — SQLite permits nested savepoints
+ * but not nested `BEGIN`s. At top level the first SAVEPOINT implicitly opens a
+ * transaction, so this is also atomic when called standalone. Use this for a
+ * write unit that may, now or in a future refactor, run inside an outer
+ * transaction (see `rebuildDirtySessionRollups`/`rebuildAllSessionRollups`).
+ *
+ * `name` must be a bare SQL identifier (it is interpolated into the statement,
+ * never a bind parameter); a non-identifier is rejected to prevent injection.
+ */
+export function withSavepoint<T>(name: string, fn: () => T): T {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+    throw new Error(
+      `withSavepoint: invalid savepoint name ${JSON.stringify(name)}`,
+    );
+  }
+  const d = db();
+  d.exec(`SAVEPOINT ${name}`);
+  try {
+    const result = fn();
+    d.exec(`RELEASE ${name}`);
+    return result;
+  } catch (e) {
+    d.exec(`ROLLBACK TO ${name}`);
+    d.exec(`RELEASE ${name}`);
+    throw e;
+  }
+}
+
 // Project management
 
 /**

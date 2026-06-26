@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach } from "vitest";
-import { db, runUpsert, withTransaction } from "../src/db";
+import { db, runUpsert, withTransaction, withSavepoint } from "../src/db";
 
 describe("runUpsert", () => {
   beforeEach(() => {
@@ -92,5 +92,74 @@ describe("withTransaction", () => {
       c: number;
     };
     expect(count.c).toBe(0);
+  });
+});
+
+describe("withSavepoint", () => {
+  beforeEach(() => {
+    db().exec("CREATE TABLE IF NOT EXISTS _t_sp (k TEXT PRIMARY KEY)");
+    db().query("DELETE FROM _t_sp").run();
+  });
+
+  const count = () =>
+    (db().query("SELECT COUNT(*) c FROM _t_sp").get() as { c: number }).c;
+
+  test("commits on success and returns the callback value (top level)", () => {
+    const result = withSavepoint("sp_ok", () => {
+      db().query("INSERT INTO _t_sp (k) VALUES (?)").run("a");
+      return 42;
+    });
+    expect(result).toBe(42);
+    expect(count()).toBe(1);
+  });
+
+  test("rolls back on throw (row absent) and re-throws", () => {
+    expect(() =>
+      withSavepoint("sp_boom", () => {
+        db().query("INSERT INTO _t_sp (k) VALUES (?)").run("a");
+        throw new Error("boom");
+      }),
+    ).toThrow("boom");
+    expect(count()).toBe(0);
+  });
+
+  test("is safe nested INSIDE an open transaction (the BEGIN-nesting trap)", () => {
+    // This is the property withTransaction lacks: a nested BEGIN throws
+    // "cannot start a transaction within a transaction". A SAVEPOINT does not.
+    const result = withTransaction(() => {
+      db().query("INSERT INTO _t_sp (k) VALUES (?)").run("outer");
+      return withSavepoint("sp_nested", () => {
+        db().query("INSERT INTO _t_sp (k) VALUES (?)").run("inner");
+        return "ok";
+      });
+    });
+    expect(result).toBe("ok");
+    expect(count()).toBe(2);
+  });
+
+  test("inner savepoint rollback does not abort the outer transaction", () => {
+    withTransaction(() => {
+      db().query("INSERT INTO _t_sp (k) VALUES (?)").run("outer");
+      // Inner unit fails and is rolled back to its savepoint; the outer txn
+      // (and its "outer" row) must survive and commit.
+      expect(() =>
+        withSavepoint("sp_inner_fail", () => {
+          db().query("INSERT INTO _t_sp (k) VALUES (?)").run("inner");
+          throw new Error("inner boom");
+        }),
+      ).toThrow("inner boom");
+    });
+    const rows = db().query("SELECT k FROM _t_sp ORDER BY k").all() as Array<{
+      k: string;
+    }>;
+    expect(rows.map((r) => r.k)).toEqual(["outer"]);
+  });
+
+  test("rejects a non-identifier savepoint name (injection guard)", () => {
+    expect(() => withSavepoint("bad; DROP TABLE _t_sp", () => 1)).toThrow(
+      /invalid savepoint name/,
+    );
+    // The guard fires before any SQL runs, so the table is untouched.
+    expect(count()).toBe(0);
   });
 });

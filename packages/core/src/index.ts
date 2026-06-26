@@ -131,6 +131,7 @@ export {
   getInstanceId,
   runUpsert,
   withTransaction,
+  withSavepoint,
   ensureSessionRollup,
   rebuildDirtySessionRollups,
   rebuildAllSessionRollups,
