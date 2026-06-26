@@ -1,5 +1,6 @@
 ---
-title: "Why memory is not enough: you need context management"
+title: "Why memory is not enough"
+subtitle: "You need context management"
 description: A long-term memory store remembers what you said last week. It can't manage the context window that's overflowing right now. Those are two different problems, and only one of them is getting solved.
 pubDate: 2026-06-26
 author: Lore Team

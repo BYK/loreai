@@ -17,6 +17,7 @@ const { Content } = await render(post);
     <header>
       <p class="eyebrow">{post.data.author}</p>
       <h1>{post.data.title}</h1>
+      {post.data.subtitle && <p class="blog-subtitle">{post.data.subtitle}</p>}
       <time datetime={post.data.pubDate.toISOString()}>
         {post.data.pubDate.toLocaleDateString("en", { month: "long", day: "numeric", year: "numeric" })}
       </time>
