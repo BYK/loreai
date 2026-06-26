@@ -44,7 +44,7 @@ import {
   type VectorHit,
   type VectorQuerySpec,
 } from "./vector-query";
-import { tryPoolVectorSearch } from "./vector-pool";
+import { tryPoolVectorSearch, VECTOR_SEARCH_TIMED_OUT } from "./vector-pool";
 
 // The cosine/BLOB helpers moved to ./vector-query (a leaf module the read
 // worker can import without pulling in the provider chain). Re-exported here so
@@ -1273,6 +1273,11 @@ async function poolOrInProcess(
   queryEmbedding: Float32Array,
 ): Promise<VectorHit[] | DistillationVectorHit[]> {
   const pooled = await tryPoolVectorSearch(spec, queryEmbedding);
+  // Timed out: the worker is alive but slow. Return empty — degrading this one
+  // recall — rather than re-running the O(n) scan on the main thread, which
+  // re-blocks the event loop (the stall bug). Worker-query cancellation and a
+  // recency cap on the scan land in follow-up PRs.
+  if (pooled === VECTOR_SEARCH_TIMED_OUT) return [];
   if (pooled !== null) return pooled;
   return runVectorQuery(db(), isVecAvailable(), queryEmbedding, spec);
 }

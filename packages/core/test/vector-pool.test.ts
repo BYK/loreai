@@ -5,6 +5,8 @@ import {
   _setTestVectorWorkerFactory,
   shutdownVectorPool,
   tryPoolVectorSearch,
+  VECTOR_SEARCH_TIMED_OUT,
+  vectorSearchTimeoutMs,
 } from "../src/vector-pool";
 import type {
   VectorWorkerInbound,
@@ -117,12 +119,16 @@ describe("vector-pool fallback paths (resolve null, never throw)", () => {
     expect(await tryPoolVectorSearch(KNOWLEDGE, QUERY)).toBeNull();
   });
 
-  it("returns null when the worker never replies (timeout)", async () => {
+  it("resolves the timeout sentinel (NOT null) when the worker never replies", async () => {
+    // The sentinel is what tells the caller "the worker is slow — return empty,
+    // don't re-run the scan in-process". Asserting the sentinel (not null) is
+    // the non-vacuous guard: pre-fix the timeout rejected → caught → null, so
+    // this would fail. (null is reserved for pool disabled/broken/errored.)
     vi.useFakeTimers();
     _setTestVectorWorkerFactory(factoryReturning(() => {}));
     const p = tryPoolVectorSearch(KNOWLEDGE, QUERY);
-    await vi.advanceTimersByTimeAsync(5_001);
-    expect(await p).toBeNull();
+    await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
+    expect(await p).toBe(VECTOR_SEARCH_TIMED_OUT);
   });
 
   it("returns null and latches broken when spawning throws (no retry)", async () => {
@@ -306,5 +312,27 @@ describe("embedding.vectorSearch routes through the pool", () => {
     const { vectorSearch } = await import("../src/embedding");
     const hits = await vectorSearch(QUERY, 5);
     expect(hits).toEqual([{ id: "via-pool", similarity: 0.42 }]);
+  });
+
+  it("returns empty on pool timeout and does NOT re-run the scan in-process", async () => {
+    // The stall bug: on a pool timeout the consumer used to fall back to the
+    // synchronous O(n) scan on the main thread. Spy on the in-process query so
+    // the guard is non-vacuous — pre-fix this spy WOULD be called (and its
+    // result returned); post-fix the consumer returns [] without touching it.
+    const vq = await import("../src/vector-query");
+    const { vectorSearch } = await import("../src/embedding");
+    const spy = vi
+      .spyOn(vq, "runVectorQuery")
+      .mockReturnValue([{ id: "IN-PROCESS", similarity: 1 }]);
+    try {
+      _setTestVectorWorkerFactory(factoryReturning(() => {})); // never replies
+      vi.useFakeTimers();
+      const p = vectorSearch(QUERY, 5);
+      await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
+      expect(await p).toEqual([]);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

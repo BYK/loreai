@@ -36,9 +36,31 @@ import type {
   VectorWorkerOutbound,
 } from "./vector-worker-types";
 
-/** Per-request timeout. A hung worker must never hang recall — on timeout we
- *  reject (→ caller falls back in-process). Generous vs. a sub-ms vec scan. */
-const VECTOR_SEARCH_TIMEOUT_MS = 5_000;
+/** Per-request timeout. A hung/slow worker must never hang recall. On timeout
+ *  we resolve {@link VECTOR_SEARCH_TIMED_OUT} (NOT reject, NOT in-process
+ *  fallback): the worker is alive but slow, so re-running the same O(n) scan on
+ *  the main thread would just re-block the event loop — that was the stall bug.
+ *  Generous vs. a sub-ms vec scan; override with LORE_VEC_SEARCH_TIMEOUT_MS. */
+const DEFAULT_VECTOR_SEARCH_TIMEOUT_MS = 10_000;
+
+/** Resolved (never rejected) by {@link tryPoolVectorSearch} when the pool was
+ *  used but the request exceeded {@link vectorSearchTimeoutMs}. Distinct from
+ *  `null` — which means the pool was disabled / broken / errored and the caller
+ *  SHOULD run the in-process path. On a timeout the caller must instead return
+ *  an empty result and leave the main thread free. */
+export const VECTOR_SEARCH_TIMED_OUT = Symbol("vector-search-timed-out");
+
+/** Resolve the per-request timeout, honoring LORE_VEC_SEARCH_TIMEOUT_MS (a
+ *  positive integer in ms). Falls back to {@link DEFAULT_VECTOR_SEARCH_TIMEOUT_MS}
+ *  when unset or invalid. Read per call to match the kill-switch env pattern. */
+export function vectorSearchTimeoutMs(): number {
+  const raw = process.env.LORE_VEC_SEARCH_TIMEOUT_MS;
+  if (raw !== undefined) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) return Math.floor(n);
+  }
+  return DEFAULT_VECTOR_SEARCH_TIMEOUT_MS;
+}
 
 /** Default worker count when config doesn't specify. Small: the goal is to
  *  unblock the main loop, not to parallelize an infrequent, sub-ms scan. */
@@ -296,14 +318,18 @@ function leastBusy(live: PoolWorker[]): PoolWorker | null {
 }
 
 /**
- * Run a vector search on the pool. Resolves to the hits, or to `null` when the
- * pool is disabled/unavailable/failed (the caller then runs the in-process
- * path). Never rejects.
+ * Run a vector search on the pool. Resolves to:
+ *   - the hits, on success;
+ *   - `null` when the pool is disabled/unavailable/failed → the caller runs the
+ *     in-process path;
+ *   - {@link VECTOR_SEARCH_TIMED_OUT} when the request timed out → the caller
+ *     returns an empty result WITHOUT re-running the scan on the main thread.
+ * Never rejects.
  */
 export async function tryPoolVectorSearch(
   spec: VectorQuerySpec,
   embedding: Float32Array,
-): Promise<Hits | null> {
+): Promise<Hits | null | typeof VECTOR_SEARCH_TIMED_OUT> {
   if (!poolEnabled()) return null;
   // Everything below is wrapped so the "never throws" contract holds by
   // construction — any unexpected throw (e.g. from ensurePool) resolves to null
@@ -314,33 +340,43 @@ export async function tryPoolVectorSearch(
     if (!pw) return null;
 
     const id = nextRequestId++;
-    return await new Promise<Hits>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        pw.inflight.delete(id);
-        reject(new Error("vector worker search timed out"));
-      }, VECTOR_SEARCH_TIMEOUT_MS);
-      // The worker is already unref'd (makeWorker), so an in-flight search must
-      // not be the thing that keeps the event loop alive: unref the timeout too,
-      // or a pending request delays process exit by up to
-      // VECTOR_SEARCH_TIMEOUT_MS on shutdown. (review #989)
-      timer.unref();
-      pw.inflight.set(id, { resolve, reject, timer });
-      try {
-        const msg: VectorWorkerInbound = {
-          type: "search",
-          id,
-          spec,
-          embedding,
-        };
-        pw.worker.postMessage(msg);
-      } catch (err) {
-        // The worker died in the window after leastBusy() picked it. Clean up
-        // the timer + inflight entry (don't leak them) and fall back.
-        clearTimeout(timer);
-        pw.inflight.delete(id);
-        reject(err instanceof Error ? err : new Error(String(err)));
-      }
-    });
+    const timeoutMs = vectorSearchTimeoutMs();
+    return await new Promise<Hits | typeof VECTOR_SEARCH_TIMED_OUT>(
+      (resolve, reject) => {
+        const timer = setTimeout(() => {
+          pw.inflight.delete(id);
+          // Resolve a sentinel (don't reject → don't fall back in-process):
+          // the worker is alive but slow; re-running this scan on the main
+          // thread re-blocks the event loop. The abandoned worker query keeps
+          // running until it finishes (cancellation lands in a follow-up).
+          log.info(
+            `vector worker search timed out after ${timeoutMs}ms — returning empty (not re-running in-process)`,
+          );
+          resolve(VECTOR_SEARCH_TIMED_OUT);
+        }, timeoutMs);
+        // The worker is already unref'd (makeWorker), so an in-flight search must
+        // not be the thing that keeps the event loop alive: unref the timeout too,
+        // or a pending request delays process exit by up to the timeout on
+        // shutdown. (review #989)
+        timer.unref();
+        pw.inflight.set(id, { resolve, reject, timer });
+        try {
+          const msg: VectorWorkerInbound = {
+            type: "search",
+            id,
+            spec,
+            embedding,
+          };
+          pw.worker.postMessage(msg);
+        } catch (err) {
+          // The worker died in the window after leastBusy() picked it. Clean up
+          // the timer + inflight entry (don't leak them) and fall back.
+          clearTimeout(timer);
+          pw.inflight.delete(id);
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      },
+    );
   } catch (err) {
     log.info(
       "vector worker search failed; using in-process fallback:",
