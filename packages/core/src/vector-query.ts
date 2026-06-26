@@ -51,6 +51,33 @@ export type VectorQuerySpec =
  */
 export const MAX_DISTILLATION_VECTOR_ROWS = 500;
 
+/**
+ * Recency cap for the `temporal` brute-force scan — the most-recent N raw
+ * messages (per project, or per session when session-scoped) that a vector
+ * search will score.
+ *
+ * STOPGAP — remove once an ANN index replaces brute-force scanning.
+ * ----------------------------------------------------------------------------
+ * `temporal_messages` is the rawest, highest-cardinality tier (100K+ rows on
+ * busy installs), and every `vectorSearch*` over it was an UNBOUNDED O(n)
+ * cosine scan — the dominant cost behind the pathological recall latency in
+ * issue #999. This cap bounds the expensive cosine work to a fixed window.
+ *
+ * Capping by `created_at DESC` (rather than randomly) is architecturally
+ * coherent, not just a perf hack: the temporal tier is "recent raw context",
+ * while older messages are distilled into the distillation tier, which recall
+ * searches separately (see {@link MAX_DISTILLATION_VECTOR_ROWS}). So old
+ * content stays reachable via distillations even though it ages out of the
+ * temporal vector window.
+ *
+ * 🔴 This cap exists ONLY because we brute-force every row. Once a real ANN
+ * index lands (DiskANN via sqlite-vec ≥0.1.10's `vec0`, tracked under #999),
+ * search becomes sublinear and there is no reason to hide older rows from it —
+ * DELETE this constant and the `ORDER BY created_at DESC LIMIT` it drives, and
+ * let the index see the whole corpus.
+ */
+export const MAX_TEMPORAL_VECTOR_ROWS = 4000;
+
 // ---------------------------------------------------------------------------
 // Math + BLOB helpers (moved here from embedding.ts so the worker can share
 // them without pulling in the provider chain). Re-exported from embedding.ts
@@ -322,21 +349,34 @@ function runTemporal(
 ): VectorHit[] {
   if (vecAvailable) {
     try {
+      // Score only the most-recent MAX_TEMPORAL_VECTOR_ROWS rows (the same
+      // candidate window the JS path uses below). STOPGAP — see
+      // MAX_TEMPORAL_VECTOR_ROWS: drop the inner ORDER BY/LIMIT once an ANN
+      // index replaces brute-force scanning (#999).
       const vsql = sessionId
-        ? "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM temporal_messages WHERE embedding IS NOT NULL AND project_id = ? AND session_id = ? ORDER BY similarity DESC LIMIT ?"
-        : "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM temporal_messages WHERE embedding IS NOT NULL AND project_id = ? ORDER BY similarity DESC LIMIT ?";
+        ? "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM (SELECT id, embedding FROM temporal_messages WHERE embedding IS NOT NULL AND project_id = ? AND session_id = ? ORDER BY created_at DESC LIMIT ?) ORDER BY similarity DESC LIMIT ?"
+        : "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM (SELECT id, embedding FROM temporal_messages WHERE embedding IS NOT NULL AND project_id = ? ORDER BY created_at DESC LIMIT ?) ORDER BY similarity DESC LIMIT ?";
       const vparams: unknown[] = sessionId
-        ? [toBlob(queryEmbedding), projectId, sessionId, limit]
-        : [toBlob(queryEmbedding), projectId, limit];
+        ? [
+            toBlob(queryEmbedding),
+            projectId,
+            sessionId,
+            MAX_TEMPORAL_VECTOR_ROWS,
+            limit,
+          ]
+        : [toBlob(queryEmbedding), projectId, MAX_TEMPORAL_VECTOR_ROWS, limit];
       return conn.query(vsql).all(...vparams) as VectorHit[];
     } catch {
       // fall through to JS brute-force
     }
   }
+  // STOPGAP recency cap — see MAX_TEMPORAL_VECTOR_ROWS (#999).
   const sql = sessionId
-    ? "SELECT id, embedding FROM temporal_messages WHERE embedding IS NOT NULL AND project_id = ? AND session_id = ?"
-    : "SELECT id, embedding FROM temporal_messages WHERE embedding IS NOT NULL AND project_id = ?";
-  const params = sessionId ? [projectId, sessionId] : [projectId];
+    ? "SELECT id, embedding FROM temporal_messages WHERE embedding IS NOT NULL AND project_id = ? AND session_id = ? ORDER BY created_at DESC LIMIT ?"
+    : "SELECT id, embedding FROM temporal_messages WHERE embedding IS NOT NULL AND project_id = ? ORDER BY created_at DESC LIMIT ?";
+  const params = sessionId
+    ? [projectId, sessionId, MAX_TEMPORAL_VECTOR_ROWS]
+    : [projectId, MAX_TEMPORAL_VECTOR_ROWS];
 
   const rows = conn.query(sql).all(...params) as Array<{
     id: string;

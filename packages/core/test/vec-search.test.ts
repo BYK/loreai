@@ -7,7 +7,7 @@ import {
   test,
   vi,
 } from "vitest";
-import { close, db, ensureProject } from "../src/db";
+import { close, db, ensureProject, withTransaction } from "../src/db";
 import { isVecAvailable } from "../src/db/vec";
 import * as log from "../src/log";
 import {
@@ -17,6 +17,7 @@ import {
   vectorSearchDistillations,
   vectorSearchTemporal,
 } from "../src/embedding";
+import { MAX_TEMPORAL_VECTOR_ROWS } from "../src/vector-query";
 
 // Whether the running Node build supports the sqlite-vec extension. `node:sqlite`
 // gained `allowExtension` in Node 23.5; below that we expect the JS fallback.
@@ -251,13 +252,13 @@ describe("vectorSearchTemporal", () => {
     pid: string,
     session: string,
     vec: Float32Array,
+    createdAt?: number,
   ): void {
-    const now = Date.now();
     db()
       .query(
         "INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at, embedding) VALUES (?, ?, ?, 'user', 'msg', 0, 0, ?, ?)",
       )
-      .run(id, pid, session, now, toBlob(vec));
+      .run(id, pid, session, createdAt ?? Date.now(), toBlob(vec));
   }
 
   test("ranks by similarity, scoped to project", async () => {
@@ -285,6 +286,50 @@ describe("vectorSearchTemporal", () => {
       "s1",
     );
     expect(hits.map((h) => h.id)).toEqual(["t-s1"]);
+  });
+
+  // Stopgap recency cap (MAX_TEMPORAL_VECTOR_ROWS): only the most-recent N rows
+  // are scored, so a vector search can never fan out across an unbounded
+  // temporal_messages table. Guards both the vec subquery and the JS LIMIT.
+  test("recency cap ages the oldest rows out of the temporal vector window", async () => {
+    const pid = ensureProject(PROJECT);
+    db().query("DELETE FROM temporal_messages").run();
+    const match = unit([1, 0, 0]);
+    const noMatch = unit([0, 1, 0]);
+    // The oldest row uniquely matches the query but sits one slot *beyond* the
+    // window: cap non-matching rows sit on top of it, and a newest row also
+    // matches. With the cap, only "t-recent" comes back; "t-old" is invisible.
+    // Without the cap both matches would tie for #1 — that's the regression
+    // this guards (revert the cap → "t-old" reappears → this fails).
+    withTransaction(() => {
+      insertTemporal("t-old", pid, "s1", match, 1);
+      for (let i = 0; i < MAX_TEMPORAL_VECTOR_ROWS; i++) {
+        insertTemporal(`t-mid-${i}`, pid, "s1", noMatch, 1_000 + i);
+      }
+      insertTemporal("t-recent", pid, "s1", match, 9_000_000);
+    });
+
+    const assertCapped = async () => {
+      const ids = (
+        await vectorSearchTemporal(new Float32Array([1, 0, 0]), pid, 10)
+      ).map((h) => h.id);
+      expect(ids).toContain("t-recent"); // newest match survives the cap
+      expect(ids).not.toContain("t-old"); // oldest match aged out of the window
+    };
+
+    // Default path (vec when the runtime supports it).
+    await assertCapped();
+
+    // Force the JS brute-force fallback over the SAME rows and re-check.
+    close();
+    process.env.LORE_DISABLE_VEC = "1";
+    try {
+      expect(isVecAvailable()).toBe(false);
+      await assertCapped();
+    } finally {
+      delete process.env.LORE_DISABLE_VEC;
+      close(); // re-enable vec for subsequent suites
+    }
   });
 });
 
