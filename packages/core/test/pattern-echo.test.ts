@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db, ensureProject } from "../src/db";
 import * as embedding from "../src/embedding";
-import { detectPatternEchoes } from "../src/pattern-echo";
+import { detectPatternEchoes, PATTERN_COOLDOWN_MS } from "../src/pattern-echo";
 import type { LLMClient } from "../src/types";
 
 // pattern-echo runs two jobs at the gen-0 distillation hook: (1) embed + store
@@ -94,5 +94,58 @@ describe("pattern-echo cooldown", () => {
     // Distinct sessions each get their own attempt — the cooldown is keyed by
     // sessionID, so session B is not blocked by session A.
     expect(searchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("allows a fresh attempt once the cooldown expires", async () => {
+    vi.useFakeTimers();
+    try {
+      const pid = ensureProject(PROJECT);
+      insertDistill("e1", pid, "s-exp");
+      insertDistill("e2", pid, "s-exp");
+      const base = {
+        observations: "obs",
+        projectPath: PROJECT,
+        sessionID: "s-exp",
+        llm: stubLLM(),
+      };
+
+      await detectPatternEchoes({ ...base, distillId: "e1" });
+      expect(searchSpy).toHaveBeenCalledTimes(1);
+
+      // Still within the cooldown → skipped.
+      await detectPatternEchoes({ ...base, distillId: "e2" });
+      expect(searchSpy).toHaveBeenCalledTimes(1);
+
+      // Past the cooldown → a new attempt runs.
+      vi.advanceTimersByTime(PATTERN_COOLDOWN_MS + 1);
+      await detectPatternEchoes({ ...base, distillId: "e2" });
+      expect(searchSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not arm the cooldown when the embed fails (a transient error doesn't suppress 10 min)", async () => {
+    const pid = ensureProject(PROJECT);
+    insertDistill("f1", pid, "s-fail");
+    insertDistill("f2", pid, "s-fail");
+    const base = {
+      observations: "obs",
+      projectPath: PROJECT,
+      sessionID: "s-fail",
+      llm: stubLLM(),
+    };
+
+    // First attempt: the embed throws (job 1) before the cooldown is armed, so
+    // the failure is swallowed by detectPatternEchoes' .catch and the session is
+    // NOT suppressed. (Guards the embed-before-arm ordering: arming first would
+    // wrongly block the session for 10 min after one provider hiccup.)
+    embedSpy.mockRejectedValueOnce(new Error("embed boom"));
+    await detectPatternEchoes({ ...base, distillId: "f1" });
+    expect(searchSpy).not.toHaveBeenCalled();
+
+    // The embed recovers on the next segment → detection runs (not rate-limited).
+    await detectPatternEchoes({ ...base, distillId: "f2" });
+    expect(searchSpy).toHaveBeenCalledTimes(1);
   });
 });

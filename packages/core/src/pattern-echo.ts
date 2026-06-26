@@ -54,7 +54,7 @@ const MAX_ECHO_SEGMENTS = 5;
 const MAX_CANDIDATES = 20;
 
 /** Rate limit: at most 1 pattern extraction per session per 10 minutes. */
-const PATTERN_COOLDOWN_MS = 10 * 60 * 1000;
+export const PATTERN_COOLDOWN_MS = 10 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Rate limit state
@@ -123,9 +123,18 @@ async function _detect(input: {
   // commit to an attempt — it used to be set only after a successful
   // ltm.create() (below), so the common "no pattern this time" outcome never
   // armed it and the full search + cluster ran on every gen-0 distillation.
+  const now = Date.now();
   const lastTime = lastExtraction.get(input.sessionID) ?? 0;
-  if (Date.now() - lastTime < PATTERN_COOLDOWN_MS) return;
-  lastExtraction.set(input.sessionID, Date.now());
+  if (now - lastTime < PATTERN_COOLDOWN_MS) return;
+  // Arm the cooldown, and opportunistically evict entries that have already aged
+  // out of the window. A stale entry is a no-op for the check above, so eviction
+  // is behavior-neutral — it just keeps this per-session map from growing without
+  // bound now that we write one entry per distilling session (not only per
+  // pattern created). This runs at most once per session per cooldown.
+  for (const [sid, ts] of lastExtraction) {
+    if (now - ts >= PATTERN_COOLDOWN_MS) lastExtraction.delete(sid);
+  }
+  lastExtraction.set(input.sessionID, now);
 
   // Step 2: Search for similar distillations across the project (wide net)
   const pid = ensureProject(input.projectPath);
