@@ -134,6 +134,11 @@ const OPTIONS = {
   // or the failure reason. Used by CI to catch model-load regressions
   // that --print-vendor-info alone wouldn't surface.
   "check-embeddings": { type: "boolean" as const },
+  // Hidden diagnostic: verifies the native sqlite-vec extension actually
+  // loaded (prints `ok vec_version=...`) or that the binary fell back to the
+  // JS brute-force path (`fallback ...`). Used by CI to confirm the SEA binary
+  // embeds + loads the vec0 extension.
+  "check-vec": { type: "boolean" as const },
 } as const;
 
 // Populate the set used by extractAgentArgs to distinguish lore's own flags
@@ -250,6 +255,37 @@ export async function _cli(): Promise<void> {
         console.error(
           `  cause: ${cause instanceof Error ? (cause.stack ?? cause.message) : String(cause)}`,
         );
+      process.exit(1);
+    }
+    return;
+  }
+
+  // --check-vec (hidden). Confirms the native sqlite-vec extension loaded on
+  // the main DB connection — inside the SEA it's extracted from the embedded
+  // per-target asset by native-loader.cjs. Prints `ok vec_version=<v>` when
+  // native search is active, or `fallback (...)` when the JS brute-force path
+  // is in use. Used by CI to verify the embed-asset → load chain.
+  if (values["check-vec"]) {
+    const { db, isVecAvailable } = await import("@loreai/core");
+    const { safeExit } = await import("./exit");
+    try {
+      const conn = db();
+      if (!isVecAvailable()) {
+        console.log(
+          "fallback (native sqlite-vec not loaded — using JS brute-force)",
+        );
+        safeExit(0);
+        return;
+      }
+      const row = conn.query("SELECT vec_version() AS v").get() as
+        | { v?: string }
+        | undefined;
+      console.log(`ok vec_version=${row?.v ?? "unknown"}`);
+      safeExit(0);
+    } catch (err: unknown) {
+      console.error(
+        `✗ check-vec failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
       process.exit(1);
     }
     return;

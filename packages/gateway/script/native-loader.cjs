@@ -117,6 +117,37 @@ if (globalThis.__LORE_WASM_READY__) {
       wasm: wasmPath,
     };
 
+    // sqlite-vec native loadable extension. The build embeds one binary per
+    // target as `vec0-<target>.<ext>` (see vendor-sqlite-vec.ts /
+    // build-binary-sea.ts). Extract only the one matching this platform and
+    // register its path; `db/vec.ts` prefers globalThis.__LORE_VEC_EXTENSION_PATH__
+    // over the (stubbed) npm wrapper. Runs in worker threads too (the vector
+    // pool's reader connections load it) — each thread has its own globalThis.
+    try {
+      const vecOs = process.platform === "win32" ? "windows" : process.platform;
+      const vecExt =
+        process.platform === "win32"
+          ? "dll"
+          : process.platform === "darwin"
+            ? "dylib"
+            : "so";
+      const vecKey = `vec0-${vecOs}-${process.arch}.${vecExt}`;
+      const vecPath = path.join(targetDir, `vec0.${vecExt}`);
+      // The main thread runs first (at startup, before any worker spawns) and
+      // (re)writes unconditionally — overwriting any stale file from a reused
+      // pid. Worker threads share the pid/tmp dir, so they skip the write when
+      // the main thread already produced it: this avoids a concurrent-write
+      // race on the shared path while still self-healing if it's somehow absent.
+      const { isMainThread } = require("node:worker_threads");
+      if (isMainThread || !fs.existsSync(vecPath)) {
+        fs.writeFileSync(vecPath, Buffer.from(sea.getRawAsset(vecKey)));
+      }
+      globalThis.__LORE_VEC_EXTENSION_PATH__ = vecPath;
+    } catch {
+      // Asset absent (build without vec staging) or extraction failed — leave
+      // the global unset so db/vec.ts uses the JS brute-force fallback.
+    }
+
     globalThis.__LORE_WASM_READY__ = true;
   }
 }

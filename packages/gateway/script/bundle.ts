@@ -60,9 +60,9 @@ mkdirSync(distDir, { recursive: true });
 // onnxruntime-node: .node native binaries that esbuild can't handle.
 // sharp: image processing for vision models, not needed for text embeddings.
 // sqlite-vec: resolves a native loadable extension (vec0.{so,dylib,dll}) at
-//   runtime via its platform optionalDependency — must stay external. (The SEA
-//   binary stubs it and uses the JS fallback for now; embedding the extension
-//   as an asset is deferred — see #956.)
+//   runtime via its platform optionalDependency — must stay external on the npm
+//   path. (The SEA binary embeds the extension per-target as an asset and sets
+//   __LORE_VEC_EXTENSION_PATH__ at runtime — see build-binary-sea.ts / #956.)
 const external = ["node:*", "onnxruntime-node", "sharp", "sqlite-vec"];
 
 // Remap @sentry/bun → @sentry/node so the CJS bundle gets Node-native

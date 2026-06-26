@@ -132,7 +132,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: .vendor-build
-          key: vendor-${{ hashFiles('packages/core/package.json', 'packages/gateway/script/vendor-embeddings.ts', 'packages/gateway/script/vendor-paths.ts') }}
+          key: vendor-${{ hashFiles('packages/core/package.json', 'packages/gateway/script/vendor-embeddings.ts', 'packages/gateway/script/vendor-paths.ts', 'packages/gateway/script/vendor-sqlite-vec.ts') }}
 
       - name: Populate vendor staging (cache miss)
         if: steps.vendor-cache.outputs.cache-hit != 'true'
@@ -322,6 +322,14 @@ jobs:
           # registration check alone wouldn't surface.
           ./packages/gateway/dist-bin/lore-linux-x64 --check-embeddings \
             || (echo "::error::--check-embeddings failed in linux-x64 binary"; exit 1)
+
+          # Verify the embedded sqlite-vec extension actually loads (native
+          # vector search), not the JS brute-force fallback. Catches a broken
+          # asset-embed / extraction chain in the SEA binary.
+          vec=$(./packages/gateway/dist-bin/lore-linux-x64 --check-vec)
+          echo "Vec info: $vec"
+          echo "$vec" | grep -q '^ok vec_version=' \
+            || (echo "::error::native sqlite-vec not loaded in linux-x64 binary: $vec"; exit 1)
 
           # Start gateway, hit health endpoint, shut down
           ./packages/gateway/dist-bin/lore-linux-x64 start -p 7991 &
@@ -666,7 +674,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: .vendor-build
-          key: vendor-${{ hashFiles('packages/core/package.json', 'packages/gateway/script/vendor-embeddings.ts', 'packages/gateway/script/vendor-paths.ts') }}
+          key: vendor-${{ hashFiles('packages/core/package.json', 'packages/gateway/script/vendor-embeddings.ts', 'packages/gateway/script/vendor-paths.ts', 'packages/gateway/script/vendor-sqlite-vec.ts') }}
 
       - name: Populate vendor staging (cache miss)
         if: steps.vendor-cache.outputs.cache-hit != 'true'
@@ -701,6 +709,19 @@ jobs:
             || (echo "::error::vendor not embedded in ${{ matrix.target }} binary"; exit 1)
           "$BIN" --check-embeddings \
             || (echo "::error::--check-embeddings failed in ${{ matrix.target }} binary"; exit 1)
+          # Verify the embedded sqlite-vec extension loads. On macOS, loading an
+          # unsigned extracted .dylib from a codesigned binary may be blocked by
+          # library validation — treat darwin as a non-fatal warning until that
+          # is resolved (it degrades to the JS fallback, never crashes).
+          vec=$("$BIN" --check-vec)
+          echo "Vec info: $vec"
+          if echo "$vec" | grep -q '^ok vec_version='; then
+            echo "native sqlite-vec OK (${{ matrix.target }})"
+          elif [ "${{ matrix.target }}" = "darwin-arm64" ]; then
+            echo "::warning::native sqlite-vec not loaded in darwin-arm64 (dylib codesigning?) — JS fallback in use: $vec"
+          else
+            echo "::error::native sqlite-vec not loaded in ${{ matrix.target }} binary: $vec"; exit 1
+          fi
 
   # ---------------------------------------------------------------------------
   # Nightly: build all platforms, generate patches, publish to GHCR
@@ -739,7 +760,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: .vendor-build
-          key: vendor-${{ hashFiles('packages/core/package.json', 'packages/gateway/script/vendor-embeddings.ts', 'packages/gateway/script/vendor-paths.ts') }}
+          key: vendor-${{ hashFiles('packages/core/package.json', 'packages/gateway/script/vendor-embeddings.ts', 'packages/gateway/script/vendor-paths.ts', 'packages/gateway/script/vendor-sqlite-vec.ts') }}
 
       - name: Populate vendor staging (cache miss)
         if: steps.vendor-cache.outputs.cache-hit != 'true'
@@ -847,6 +868,13 @@ jobs:
             || (echo "::error::vendor not embedded in darwin-arm64 binary"; exit 1)
           "$BIN" --check-embeddings \
             || (echo "::error::--check-embeddings failed in darwin-arm64 binary"; exit 1)
+          # Non-fatal on macOS (see binary-smoke-native): unsigned extracted
+          # .dylib may be blocked by library validation; degrades to JS fallback.
+          vec=$("$BIN" --check-vec)
+          echo "Vec info: $vec"
+          echo "$vec" | grep -q '^ok vec_version=' \
+            && echo "native sqlite-vec OK (darwin-arm64)" \
+            || echo "::warning::native sqlite-vec not loaded in darwin-arm64 (dylib codesigning?) — JS fallback in use: $vec"
 
       - name: Verify code signature
         run: |

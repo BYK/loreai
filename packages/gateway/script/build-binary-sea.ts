@@ -47,6 +47,7 @@ import { parseArgs } from "node:util";
 import { PLACEHOLDER_DEBUG_ID, injectDebugId } from "./debug-id";
 import { MODEL_DIR_NAME, MODEL_FILES } from "./vendor-paths";
 import { findOrtWebDir, ortWebRedirectPlugin } from "./ort-web-plugin";
+import { ensureVecBinaries, vecAssetKey } from "./vendor-sqlite-vec";
 import { fossilize } from "fossilize";
 
 const require = createRequire(import.meta.url);
@@ -204,15 +205,21 @@ function binaryExternalsPlugin(): esbuild.Plugin {
 }
 
 // ---------------------------------------------------------------------------
-// esbuild: stub `sqlite-vec` in the SEA bundle
+// esbuild: stub `sqlite-vec`'s path resolver in the SEA bundle
 // ---------------------------------------------------------------------------
-// The `sqlite-vec` npm package resolves its native loadable extension from a
+// The `sqlite-vec` npm wrapper resolves its native loadable extension from a
 // platform optionalDependency in node_modules — which doesn't exist inside the
-// fossilize binary. We stub it to a no-op so the bundle builds; the SEA path
-// loads the extension from an embedded asset instead (it sets
-// `globalThis.__LORE_VEC_EXTENSION_PATH__`, which db/vec.ts prefers). Until
-// that asset is embedded, the binary transparently uses the JS brute-force
-// fallback. See #956.
+// fossilize binary, so its `getLoadablePath()` can't work there. We replace the
+// wrapper with a no-op so the bundle builds without dragging in (or failing to
+// resolve) the platform package.
+//
+// This does NOT disable native vector search: the extension is embedded as a
+// per-target SEA asset (`vec0-<target>.<ext>`, staged below) and extracted at
+// runtime by native-loader.cjs, which sets `globalThis.__LORE_VEC_EXTENSION_PATH__`.
+// `db/vec.ts` prefers that global over `getLoadablePath()`, so the stubbed
+// fallback is simply never reached in the SEA. If the asset is somehow missing,
+// `getLoadablePath()` returns undefined and the binary transparently uses the JS
+// brute-force fallback. See #956 / #999.
 function stubSqliteVecPlugin(): esbuild.Plugin {
   return {
     name: "stub-sqlite-vec",
@@ -549,9 +556,14 @@ async function buildBinary() {
   // -------------------------------------------------------------------------
   // The read-worker pool (core/vector-pool.ts) spawns this off the main thread.
   // Tiny and self-contained: node:sqlite (via the "node" condition) + the pure
-  // runVectorQuery logic. No ONNX/transformers/WASM. sqlite-vec is stubbed (same
-  // as the main SEA bundle), so the worker uses the JS brute-force fallback —
-  // the off-thread benefit holds regardless of the native fast path.
+  // runVectorQuery logic. No ONNX/transformers/WASM.
+  //
+  // It injects native-loader.cjs like the other bundles so that — inside the
+  // SEA — each worker thread extracts the embedded sqlite-vec extension and sets
+  // `globalThis.__LORE_VEC_EXTENSION_PATH__` in its own thread. Worker threads
+  // don't share globalThis with the main process, so without this the pool's
+  // `loadVecForConnection` would find no path and fall back to the JS scan,
+  // defeating native vector search on the hot (off-thread) path.
   const vectorWorkerBundlePath = join(stagingDir, "sea-vector-worker.cjs");
   const vectorWorkerSrc = join(repoRoot, "packages/core/src/vector-worker.ts");
 
@@ -564,6 +576,7 @@ async function buildBinary() {
     conditions: ["node"],
     external: ["sharp"],
     plugins: [binaryExternalsPlugin(), stubSqliteVecPlugin()],
+    inject: [join(here, "native-loader.cjs")],
     outfile: vectorWorkerBundlePath,
     sourcemap: "linked",
     minify: true,
@@ -712,6 +725,16 @@ async function buildBinary() {
     }
   }
 
+  // Stage the native sqlite-vec loadable extension for every target in this
+  // build. fossilize embeds a single shared asset set into each platform
+  // binary, so we key each one as `vec0-<target>.<ext>`; at runtime
+  // native-loader.cjs extracts only the one matching the running platform.
+  // The binaries are tiny (~160 KB each), so embedding all targets is cheap.
+  const vecBinaries = await ensureVecBinaries(targets);
+  for (const [target, binPath] of vecBinaries) {
+    stageAsset(vecAssetKey(target), binPath);
+  }
+
   // Write a Vite-style manifest. Fossilize uses `entry.file` as the
   // SEA asset key and joins the manifest's dir to locate the file.
   interface ManifestEntry {
@@ -740,6 +763,10 @@ async function buildBinary() {
       const key = `model/${rel}`;
       manifest[key] = { file: key, src: key };
     }
+  }
+  for (const target of vecBinaries.keys()) {
+    const key = vecAssetKey(target);
+    manifest[key] = { file: key, src: key };
   }
 
   const manifestPath = join(stagingDir, "asset-manifest.json");

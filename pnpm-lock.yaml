@@ -136,6 +136,9 @@ importers:
       fossilize:
         specifier: ^0.10.1
         version: 0.10.1
+      tar:
+        specifier: ^7.4.3
+        version: 7.5.16
       undici:
         specifier: ^7.28.0
         version: 7.28.0
