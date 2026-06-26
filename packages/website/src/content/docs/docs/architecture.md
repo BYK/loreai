@@ -40,15 +40,15 @@ Once a request lands in the gateway, two flows kick off in parallel: a **request
 **System + LTM + Meta-Distillations + Distillations + Delta Updates + Conversation**
 
 ```mermaid
+%%{init: {"flowchart": {"nodeSpacing": 22, "rankSpacing": 14}}}%%
 flowchart TB
     subgraph Sources["Three-tier memory · sources"]
         direction LR
         T1["Tier 1 · Temporal<br/>raw messages"]:::tier
         T2["Tier 2 · Distillation<br/>gen-0 + gen-1+"]:::tier
         T3["Tier 3 · LTM<br/>curated knowledge"]:::tier
+        T1 ~~~ T2 ~~~ T3
     end
-
-    G["Gradient context manager<br/>picks a layer and composes the prompt<br/>within the cost-aware budget, every turn"]:::gradient
 
     subgraph Stack["What the model sees · one stacked prompt, top → bottom"]
         direction TB
@@ -58,13 +58,12 @@ flowchart TB
         B4["Meta-Distillations + Distillations<br/>distilled prefix at the head of the messages"]:::distill
         B5["Delta Updates<br/>knowledge deltas in the tail · volatile"]:::tail
         B6["Conversation<br/>raw message tail"]:::tail
-        B1 --- B2 --- B3 --- B4 --- B5 --- B6
+        B1 ~~~ B2 ~~~ B3 ~~~ B4 ~~~ B5 ~~~ B6
     end
 
-    Sources --> G --> Stack --> Call["Upstream LLM call"]:::ext
+    Sources --> Stack --> Call["Upstream LLM call"]:::ext
 
     classDef tier fill:#f7f2e8,stroke:#5a8f63,color:#1a3320
-    classDef gradient fill:#c4ddc7,stroke:#1a3320,stroke-width:2px,color:#1a3320
     classDef sys fill:#ececec,stroke:#888,color:#333
     classDef pinned fill:#8fba96,stroke:#1a3320,color:#1a3320
     classDef distill fill:#c4ddc7,stroke:#1a3320,color:#1a3320
@@ -247,23 +246,23 @@ Results are fused with reciprocal rank fusion (RRF) and re-ranked. A query-expan
 The diagram below shows the recall pipeline. **Vector search is per-source, not a separate stage** — four of the five sources (LTM, distillations, temporal messages, entities) run both an FTS5 query and a vector query, and both lists feed the same RRF. Cross-project LTM and `lat.md` sections are FTS-only because embeddings only cover per-project rows. The vector scans run on a small **worker-thread pool** (default 2 workers, each with its own read-only database connection), so a large similarity scan never blocks the gateway's event loop; a scan that exceeds its timeout returns empty rather than falling back to a blocking main-thread scan.
 
 ```mermaid
-flowchart LR
-    Q["recall('query')"]:::ext --> Pre["Pre-stage<br/>• query expansion (short queries, gated)<br/>• entity alias expansion (always)"]:::stage
+flowchart TB
+    Q["recall('query')"]:::ext --> Pre["Pre-stage<br/>• query expansion · short queries, gated<br/>• entity alias expansion · always"]:::stage
     Pre --> Search
+    Note["vector scans run on a worker-thread pool<br/>off the event loop"]:::note -.-> Search
 
     subgraph Search["Parallel search · every source runs at once"]
-        direction TB
-        LTM["LTM knowledge · FTS5 + vector"]:::src
-        Dist["Distillations gen-0/1+ · FTS5 + vector"]:::src
-        Temp["Temporal messages · FTS5 + vector"]:::src
-        Ent["Entities · FTS5 + vector"]:::src
-        Cross["Cross-project LTM · FTS5 only"]:::srcf
+        direction LR
+        LTM["LTM knowledge<br/>FTS5 + vector"]:::src
+        Dist["Distillations gen-0/1+<br/>FTS5 + vector"]:::src
+        Temp["Temporal messages<br/>FTS5 + vector"]:::src
+        Ent["Entities<br/>FTS5 + vector"]:::src
+        Cross["Cross-project LTM<br/>FTS5 only"]:::srcf
     end
 
-    Pool["vector scans run on a<br/>worker-thread pool<br/>(off the event loop)"]:::note -.-> Search
-
-    Search --> RRF["RRF fusion<br/>up to 14 lists"]:::stage --> Rank["Hybrid rank<br/>+ budget cap"]:::stage --> Out["Tool-result<br/>markdown"]:::stage
-
+    Search --> RRF["RRF fusion · up to 14 lists"]:::stage
+    RRF --> Rank["Hybrid rank · + budget cap"]:::stage
+    Rank --> Out["Tool-result markdown"]:::stage
     Out --> Map["source_id → raw<br/>d: distillation → temporal · t: temporal (raw)<br/>k: knowledge (standalone) · e: entity (name + aliases)"]:::map
 
     classDef ext fill:#ececec,stroke:#888,color:#333
