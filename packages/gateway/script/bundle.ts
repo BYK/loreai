@@ -148,6 +148,13 @@ await esbuild.build({
   // fetch.ts) so it is never bundled or evaluated under Bun — real undici@7
   // hangs on streaming response reads under Bun, so the Bun path uses native
   // fetch instead and never touches undici.
+  //
+  // NOTE: undici is external here but only a devDependency — the same shape
+  // that broke @loreai/core in #998. It stays safe ONLY because the Bun path
+  // never imports it (the undici import is Node-only and lazy). If the Bun
+  // path ever imports undici, it must become a runtime dependency. By
+  // contrast, @loreai/core IS imported under Bun, so it is a runtime
+  // dependency (guarded by test/bundle-exports.test.ts).
   external: [
     "bun:*",
     "node:*",
