@@ -50,10 +50,13 @@ const DEFAULT_VECTOR_SEARCH_TIMEOUT_MS = 10_000;
  *  an empty result and leave the main thread free. */
 export const VECTOR_SEARCH_TIMED_OUT = Symbol("vector-search-timed-out");
 
-/** Resolve the per-request timeout, honoring LORE_VEC_SEARCH_TIMEOUT_MS (a
- *  positive integer in ms). Falls back to {@link DEFAULT_VECTOR_SEARCH_TIMEOUT_MS}
- *  when unset or invalid. Read per call to match the kill-switch env pattern. */
+/** Resolve the per-request vector-search timeout. Read per call (not cached)
+ *  to match the kill-switch env pattern. */
 export function vectorSearchTimeoutMs(): number {
+  // LORE_VEC_SEARCH_TIMEOUT_MS overrides the per-request vector-search timeout
+  // (a positive integer in milliseconds; invalid or non-positive values are
+  // ignored). Defaults to 10000 (10s). On timeout, recall degrades to an empty
+  // result instead of re-running the O(n) scan on the main thread.
   const raw = process.env.LORE_VEC_SEARCH_TIMEOUT_MS;
   if (raw !== undefined) {
     const n = Number(raw);

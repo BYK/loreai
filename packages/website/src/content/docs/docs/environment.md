@@ -73,6 +73,7 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 | `LORE_DISABLE_VEC` | LORE_DISABLE_VEC=1 forces the JS brute-force vector-search path. Useful as a production kill-switch if the native extension causes issues, and as a test seam for the JS fallback. Set before the first `db()` call — once attempted=true is sticky for the connection lifetime, the env var won't be re-read until resetVecState() runs (in close()). |
 | `LORE_DISABLE_VEC_WORKER` | Kill switch: force the in-process vector-search path, disabling the off-thread read-worker pool. Default-on escape hatch, not opt-in. |
 | `LORE_NO_DB_TRACING` | LORE_NO_DB_TRACING=1 returns the raw connection instead of the query-tracing Proxy (disables automatic per-query DB spans). |
+| `LORE_VEC_SEARCH_TIMEOUT_MS` | LORE_VEC_SEARCH_TIMEOUT_MS overrides the per-request vector-search timeout (a positive integer in milliseconds; invalid or non-positive values are ignored). Defaults to 10000 (10s). On timeout, recall degrades to an empty result instead of re-running the O(n) scan on the main thread. |
 
 ## How variables are evaluated
 

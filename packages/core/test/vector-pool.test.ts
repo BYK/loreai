@@ -72,6 +72,7 @@ afterEach(() => {
   _setTestVectorWorkerFactory(null);
   _resetVectorPoolForTest();
   delete process.env.LORE_DISABLE_VEC_WORKER;
+  delete process.env.LORE_VEC_SEARCH_TIMEOUT_MS;
   vi.useRealTimers();
 });
 
@@ -108,6 +109,40 @@ describe("vector-pool kill switch / disable", () => {
     const hits = await tryPoolVectorSearch(KNOWLEDGE, QUERY);
     expect(hits).toBeNull();
     expect(FakeWorker.instances.length).toBe(0);
+  });
+});
+
+describe("vectorSearchTimeoutMs env override", () => {
+  const DEFAULT_MS = 10_000;
+
+  it("uses the 10s default when unset", () => {
+    delete process.env.LORE_VEC_SEARCH_TIMEOUT_MS;
+    expect(vectorSearchTimeoutMs()).toBe(DEFAULT_MS);
+  });
+
+  it("honors a valid positive integer override", () => {
+    process.env.LORE_VEC_SEARCH_TIMEOUT_MS = "2500";
+    expect(vectorSearchTimeoutMs()).toBe(2500);
+  });
+
+  it("floors a fractional value", () => {
+    process.env.LORE_VEC_SEARCH_TIMEOUT_MS = "100.9";
+    expect(vectorSearchTimeoutMs()).toBe(100);
+  });
+
+  it.each([
+    "abc",
+    "",
+    "  ",
+    "0",
+    "-5",
+    "Infinity",
+    "NaN",
+  ])("ignores invalid/non-positive value %j and falls back to the default", (raw) => {
+    // Guards the setTimeout(Infinity)/NaN foot-gun: a bad value must never
+    // arm a never-firing (or immediately-firing) timer.
+    process.env.LORE_VEC_SEARCH_TIMEOUT_MS = raw;
+    expect(vectorSearchTimeoutMs()).toBe(DEFAULT_MS);
   });
 });
 
@@ -221,7 +256,7 @@ describe("vector-pool structural-failure latch (review #989)", () => {
   });
 
   it("unref()'s the per-request timeout timer so a pending search can't delay exit", async () => {
-    // The actual review-#989 bug: the 5 s timeout timer was ref'd, so an
+    // The actual review-#989 bug: the per-request timeout timer was ref'd, so an
     // in-flight search would hold the event loop open on shutdown even though
     // the worker is unref'd. Spy on the real timer object's unref() — asserting
     // it's called is the only non-vacuous check (removing the source line fails
@@ -254,7 +289,7 @@ describe("vector-pool structural-failure latch (review #989)", () => {
   it("treats a worker init-error message as a structural death", async () => {
     // A reader connection that fails to open surfaces as an init-error message,
     // marking the worker structurally dead. Asserting only null would be vacuous
-    // (the 5s timeout fallback also resolves null); instead assert the dead
+    // (the timeout fallback also resolves the sentinel); instead assert the dead
     // worker is terminated on the next ensurePool — a side effect the timeout
     // path never produces. Pre-fix mutation (init-error → no markDead): the
     // victim stays alive and this fails.
@@ -286,7 +321,7 @@ describe("vector-pool structural-failure latch (review #989)", () => {
 
   it("clears the timer when postMessage throws (no leaked timer)", async () => {
     // A throw in the Promise executor rejects regardless, so asserting null is
-    // vacuous — the actual S2 bug is the 5 s ref'd timer left armed. Assert it
+    // vacuous — the actual S2 bug is the per-request ref'd timer left armed. Assert it
     // was cleared (pre-fix: 1 leaked timer; post-fix: 0).
     vi.useFakeTimers();
     _setTestVectorWorkerFactory((() => {

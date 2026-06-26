@@ -1266,7 +1266,10 @@ export function l2Normalize(vec: Float32Array): Float32Array {
 /**
  * Run `spec` on the read-worker pool when it's enabled and healthy (off the
  * main event loop), otherwise synchronously in-process. The pool call never
- * throws — it returns null when unavailable so we transparently fall back.
+ * throws: it returns null when unavailable (disabled/broken/errored) so we
+ * transparently fall back in-process, or the VECTOR_SEARCH_TIMED_OUT sentinel
+ * when the worker is alive but slow — in which case we return an empty result
+ * rather than re-running the scan on the main thread.
  */
 async function poolOrInProcess(
   spec: VectorQuerySpec,
