@@ -116,6 +116,52 @@ describe("dependency manifest invariants (#998)", () => {
     expect(pkgJson.devDependencies?.["@loreai/core"]).toBeUndefined();
   });
 
+  // Internal packages each consumer imports at RUNTIME. #998 happened in the
+  // plugin's dependency chain (@loreai/opencode → @loreai/gateway → external
+  // @loreai/core), so presence — not just spec correctness — is asserted for
+  // every link. devDependencies are never installed for a transitively-
+  // consumed published package, which is exactly how #998 manifested.
+  const requiredInternalDeps: Record<string, string[]> = {
+    gateway: ["@loreai/core"],
+    opencode: ["@loreai/core", "@loreai/gateway"],
+    pi: ["@loreai/core", "@loreai/gateway"],
+  };
+
+  test("internal @loreai/* deps are present runtime deps, never devDeps", () => {
+    for (const [name, required] of Object.entries(requiredInternalDeps)) {
+      const manifest = JSON.parse(
+        readFileSync(join(packageDir, "..", name, "package.json"), "utf8"),
+      ) as {
+        name: string;
+        dependencies?: Record<string, string>;
+        devDependencies?: Record<string, string>;
+      };
+      const deps = manifest.dependencies ?? {};
+      const devDeps = manifest.devDependencies ?? {};
+
+      // (a) Every internal package consumed at runtime MUST be a declared
+      //     runtime dependency. This is the core #998 invariant: the package
+      //     that exhibited the bug (@loreai/opencode) is presence-checked, not
+      //     merely spec-checked, so moving a link back into devDependencies
+      //     fails here even if no externalized-import scan covers it.
+      for (const dep of required) {
+        expect(
+          deps[dep],
+          `${manifest.name} consumes ${dep} at runtime; it MUST be in "dependencies"`,
+        ).toBeDefined();
+      }
+
+      // (b) No internal @loreai/* package may hide in devDependencies — that
+      //     is the exact shape of #998 (runtime use + devDependency declaration).
+      for (const dep of Object.keys(devDeps)) {
+        expect(
+          dep.startsWith("@loreai/"),
+          `${manifest.name} declares ${dep} in devDependencies; internal @loreai/* packages must be runtime deps (#998)`,
+        ).toBe(false);
+      }
+    }
+  });
+
   test("internal @loreai/* deps use workspace:* across gateway, opencode, pi", () => {
     // A single shared @loreai/core instance is only guaranteed when every
     // consumer references the internal packages at the same version.
@@ -123,7 +169,7 @@ describe("dependency manifest invariants (#998)", () => {
     // time, keeping all packages unified per release. A pinned/divergent
     // version could install two @loreai/core copies → two _originalFetch
     // values → infinite fetch loop (gateway → interceptor → gateway → …).
-    for (const name of ["gateway", "opencode", "pi"]) {
+    for (const name of Object.keys(requiredInternalDeps)) {
       const manifest = JSON.parse(
         readFileSync(join(packageDir, "..", name, "package.json"), "utf8"),
       ) as {
