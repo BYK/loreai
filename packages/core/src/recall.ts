@@ -27,9 +27,10 @@ import {
   filterTerms,
   ftsQuery,
   reciprocalRankFusion,
-  runRelaxedSearch,
+  runRelaxedSearchAsync,
   termIDF,
 } from "./search";
+import { offloadAllOrTimeout, READ_JOB_TIMED_OUT } from "./read-offload";
 import { inline } from "./markdown";
 
 // ---------------------------------------------------------------------------
@@ -177,7 +178,7 @@ function searchDistillationsLike(input: {
     .all(...allParams) as Distillation[];
 }
 
-function searchDistillationsScored(input: {
+async function searchDistillationsScored(input: {
   projectPath: string;
   query: string;
   sessionID?: string;
@@ -185,7 +186,7 @@ function searchDistillationsScored(input: {
   /** IDF weights from `termIDF()` — when provided, the relaxed cascade
    *  drops common terms first instead of short ones. */
   termWeights?: Map<string, number>;
-}): ScoredDistillation[] {
+}): Promise<ScoredDistillation[]> {
   const pid = ensureProject(input.projectPath);
   const limit = input.limit ?? 10;
 
@@ -204,15 +205,17 @@ function searchDistillationsScored(input: {
        ORDER BY rank LIMIT ?`;
 
   try {
-    return runRelaxedSearch(
+    return await runRelaxedSearchAsync(
       input.query,
-      (matchExpr) => {
+      async (matchExpr) => {
         const params = input.sessionID
           ? [matchExpr, pid, input.sessionID, limit]
           : [matchExpr, pid, limit];
-        return db()
-          .query(ftsSQL)
-          .all(...params) as ScoredDistillation[];
+        // Staleness-tolerant distillation FTS scan — offload off the event loop
+        // (#966 B). The selected columns are lean (no embedding BLOB).
+        const rows = await offloadAllOrTimeout(ftsSQL, params);
+        if (rows === READ_JOB_TIMED_OUT) return null;
+        return rows as ScoredDistillation[];
       },
       input.termWeights,
     );
@@ -708,12 +711,12 @@ export async function searchRecall(
     if (knowledgeEnabled && scope !== "session") {
       try {
         knowledgeResults.push(
-          ...ltm.searchScored({
+          ...(await ltm.searchScored({
             query: q,
             projectPath,
             limit,
             termWeights: idfWeights,
-          }),
+          })),
         );
       } catch (err) {
         log.error("recall: knowledge search failed:", err);
@@ -724,13 +727,13 @@ export async function searchRecall(
     if (scope !== "knowledge") {
       try {
         distillationResults.push(
-          ...searchDistillationsScored({
+          ...(await searchDistillationsScored({
             projectPath,
             query: q,
             sessionID: scope === "session" ? sessionID : undefined,
             limit,
             termWeights: idfWeights,
-          }),
+          })),
         );
       } catch (err) {
         log.error("recall: distillation search failed:", err);
@@ -741,13 +744,13 @@ export async function searchRecall(
     if (scope !== "knowledge") {
       try {
         temporalResults.push(
-          ...temporal.searchScored({
+          ...(await temporal.searchScored({
             projectPath,
             query: q,
             sessionID: scope === "session" ? sessionID : undefined,
             limit,
             termWeights: idfWeights,
-          }),
+          })),
         );
       } catch (err) {
         log.error("recall: temporal search failed:", err);
@@ -999,7 +1002,7 @@ export async function searchRecall(
   // lat.md section search
   if (scope !== "session" && latReader.hasLatDir(projectPath)) {
     try {
-      const latResults = latReader.searchScored({
+      const latResults = await latReader.searchScored({
         query,
         projectPath,
         limit,
@@ -1023,7 +1026,7 @@ export async function searchRecall(
   // Cross-project knowledge discovery — only in "all" scope.
   if (knowledgeEnabled && scope === "all") {
     try {
-      const crossProjectResults = ltm.searchScoredOtherProjects({
+      const crossProjectResults = await ltm.searchScoredOtherProjects({
         query,
         excludeProjectPath: projectPath,
         limit,

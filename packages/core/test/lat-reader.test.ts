@@ -114,10 +114,10 @@ More detail follows.
   });
 
   describe("searchScored", () => {
-    test("finds sections by keyword", () => {
+    test("finds sections by keyword", async () => {
       latReader.refresh(PROJECT);
 
-      const results = latReader.searchScored({
+      const results = await latReader.searchScored({
         query: "authentication OAuth",
         projectPath: PROJECT,
         limit: 5,
@@ -133,10 +133,10 @@ More detail follows.
       expect(hasAuth).toBe(true);
     });
 
-    test("returns empty for non-matching query", () => {
+    test("returns empty for non-matching query", async () => {
       latReader.refresh(PROJECT);
 
-      const results = latReader.searchScored({
+      const results = await latReader.searchScored({
         query: "xyzzyplugh nonexistent",
         projectPath: PROJECT,
         limit: 5,

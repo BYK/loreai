@@ -389,6 +389,58 @@ export function runRelaxedSearch<T>(
   return [];
 }
 
+/**
+ * Async counterpart of {@link runRelaxedSearch} for callers whose `runner`
+ * dispatches the FTS scan off the main thread (the read-worker pool — see
+ * read-offload.ts). The cascade logic is byte-identical: exact AND first, then
+ * progressively relaxed AND queries (least-significant term dropped first),
+ * full OR last; stop at the first step that produces results.
+ *
+ * The runner's return type carries one extra signal beyond the sync version:
+ *
+ *   - `T[]` (non-empty) → hits found; return them (cascade stops).
+ *   - `T[]` (empty)     → this step ran and found nothing; try the next, looser
+ *                          cascade step (identical to the sync version).
+ *   - `null`            → ABORT the whole cascade and return `[]` now. This is
+ *                          how a runner reports that the off-thread read TIMED
+ *                          OUT: re-issuing the looser cascade steps would just
+ *                          stack more worker timeouts (each up to ~10s), and the
+ *                          #1006 invariant forbids re-running the scan on the
+ *                          main thread to "recover" a wedged pool. A genuine
+ *                          empty result must therefore be `[]`, never `null`.
+ *
+ * Keeping the abort signal as a plain `null` (rather than importing the pool's
+ * timeout sentinel) leaves this module offload-agnostic — the runner owns the
+ * sentinel→null translation. In-process FTS errors are still surfaced by the
+ * runner THROWING (so the caller's existing try/catch → LIKE fallback fires);
+ * `null` is reserved exclusively for the don't-retry timeout case.
+ */
+export async function runRelaxedSearchAsync<T>(
+  raw: string,
+  runner: (matchExpr: string) => Promise<T[] | null>,
+  termWeights?: Map<string, number>,
+): Promise<T[]> {
+  // First try exact AND (all terms)
+  const q = ftsQuery(raw);
+  if (q === EMPTY_QUERY) return [];
+
+  const andResults = await runner(q);
+  if (andResults === null) return [];
+  if (andResults.length) return andResults;
+
+  // Try progressively relaxed queries — with IDF weights, the cascade keeps
+  // rare/discriminative terms longer instead of dropping them early.
+  const cascade = ftsQueryRelaxed(raw, 3, termWeights);
+  for (const relaxed of cascade) {
+    if (relaxed === EMPTY_QUERY) continue;
+    const results = await runner(relaxed);
+    if (results === null) return [];
+    if (results.length) return results;
+  }
+
+  return [];
+}
+
 // ---------------------------------------------------------------------------
 // Term extraction (Phase 3)
 // ---------------------------------------------------------------------------

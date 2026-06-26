@@ -8,6 +8,7 @@ import {
   extractTopTerms,
   filterTerms,
   runRelaxedSearch,
+  runRelaxedSearchAsync,
 } from "./search";
 import * as embedding from "./embedding";
 import {
@@ -2347,14 +2348,14 @@ export type ScoredKnowledgeEntry = KnowledgeEntry & { rank: number };
  * Search with BM25 scores included. Returns results with raw FTS5 rank values
  * for use in cross-source score fusion (RRF).
  */
-export function searchScored(input: {
+export async function searchScored(input: {
   query: string;
   projectPath?: string;
   limit?: number;
   /** IDF weights from `termIDF()` — when provided, the relaxed cascade
    *  drops common terms first instead of short ones. */
   termWeights?: Map<string, number>;
-}): ScoredKnowledgeEntry[] {
+}): Promise<ScoredKnowledgeEntry[]> {
   const limit = input.limit ?? 20;
 
   const pid = input.projectPath ? ensureProject(input.projectPath) : null;
@@ -2376,20 +2377,22 @@ export function searchScored(input: {
        ORDER BY rank LIMIT ?`;
 
   try {
-    return runRelaxedSearch(
+    return await runRelaxedSearchAsync(
       input.query,
-      (matchExpr) => {
+      async (matchExpr) => {
         const params = pid
           ? [title, content, category, matchExpr, pid, limit]
           : [title, content, category, matchExpr, limit];
-        return (
-          db()
-            .query(ftsSQL)
-            .all(...params)
-            // Hydrate metadata (#627 Phase 1); hydrateKnowledgeEntry preserves
-            // the extra `rank` column via spread, so ScoredKnowledgeEntry holds.
-            .map(hydrateKnowledgeEntry) as ScoredKnowledgeEntry[]
-        );
+        // Staleness-tolerant knowledge FTS scan — offload off the event loop
+        // (#966 B). KNOWLEDGE_COLS_K excludes the embedding BLOB, so the rows are
+        // structured-clone-safe across the worker boundary.
+        const rows = await offloadAllOrTimeout(ftsSQL, params);
+        if (rows === READ_JOB_TIMED_OUT) return null;
+        // Hydrate metadata (#627 Phase 1) on the main thread; hydrateKnowledgeEntry
+        // preserves the extra `rank` column via spread, so ScoredKnowledgeEntry holds.
+        return (rows as Record<string, unknown>[]).map(
+          hydrateKnowledgeEntry,
+        ) as ScoredKnowledgeEntry[];
       },
       input.termWeights,
     );
@@ -2404,14 +2407,14 @@ export function searchScored(input: {
  * Used by the recall tool in "all" scope to surface relevant knowledge from
  * the user's other projects ("tunnel" discovery across projects).
  */
-export function searchScoredOtherProjects(input: {
+export async function searchScoredOtherProjects(input: {
   query: string;
   excludeProjectPath: string;
   limit?: number;
   /** IDF weights from `termIDF()` — when provided, the relaxed cascade
    *  drops common terms first instead of short ones. */
   termWeights?: Map<string, number>;
-}): ScoredKnowledgeEntry[] {
+}): Promise<ScoredKnowledgeEntry[]> {
   const limit = input.limit ?? 10;
 
   const excludePid = ensureProject(input.excludeProjectPath);
@@ -2431,17 +2434,18 @@ export function searchScoredOtherProjects(input: {
      ORDER BY rank LIMIT ?`;
 
   try {
-    return runRelaxedSearch(
+    return await runRelaxedSearchAsync(
       input.query,
-      (matchExpr) => {
+      async (matchExpr) => {
         const params = [title, content, category, matchExpr, excludePid, limit];
-        return (
-          db()
-            .query(ftsSQL)
-            .all(...params)
-            // Hydrate metadata (#627 Phase 1) — see searchScored above.
-            .map(hydrateKnowledgeEntry) as ScoredKnowledgeEntry[]
-        );
+        // Staleness-tolerant cross-project knowledge FTS scan — offload off the
+        // event loop (#966 B). KNOWLEDGE_COLS_K excludes the embedding BLOB.
+        const rows = await offloadAllOrTimeout(ftsSQL, params);
+        if (rows === READ_JOB_TIMED_OUT) return null;
+        // Hydrate metadata (#627 Phase 1) on the main thread — see searchScored above.
+        return (rows as Record<string, unknown>[]).map(
+          hydrateKnowledgeEntry,
+        ) as ScoredKnowledgeEntry[];
       },
       input.termWeights,
     );

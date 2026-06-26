@@ -1,5 +1,6 @@
 import { db, ensureProject } from "./db";
-import { runRelaxedSearch } from "./search";
+import { runRelaxedSearch, runRelaxedSearchAsync } from "./search";
+import { offloadAllOrTimeout, READ_JOB_TIMED_OUT } from "./read-offload";
 import { sanitizeSurrogates } from "./markdown";
 import * as embedding from "./embedding";
 import {
@@ -519,7 +520,7 @@ export type ScoredTemporalMessage = TemporalMessage & { rank: number };
  * Search with BM25 scores included. Returns results with raw FTS5 rank values
  * for use in cross-source score fusion (RRF).
  */
-export function searchScored(input: {
+export async function searchScored(input: {
   projectPath: string;
   query: string;
   sessionID?: string;
@@ -527,30 +528,41 @@ export function searchScored(input: {
   /** IDF weights from `termIDF()` — when provided, the relaxed cascade
    *  drops common terms first instead of short ones. */
   termWeights?: Map<string, number>;
-}): ScoredTemporalMessage[] {
+}): Promise<ScoredTemporalMessage[]> {
   const pid = ensureProject(input.projectPath);
   const limit = input.limit ?? 20;
 
+  // Lean column list (NOT `m.*`): the `embedding` BLOB must never cross the
+  // read-worker boundary (read-job contract in read-job.ts), and selecting it
+  // is pure waste even in-process — `ScoredTemporalMessage` has no embedding
+  // field. Mirrors the hydration SELECT in recall.ts.
   const ftsSQL = input.sessionID
-    ? `SELECT m.*, rank FROM temporal_fts f
+    ? `SELECT m.id, m.project_id, m.session_id, m.role, m.content, m.tokens,
+              m.distilled, m.created_at, m.metadata, rank
+       FROM temporal_fts f
        CROSS JOIN temporal_messages m ON m.rowid = f.rowid
        WHERE f.content MATCH ? AND m.project_id = ? AND m.session_id = ?
        ORDER BY rank LIMIT ?`
-    : `SELECT m.*, rank FROM temporal_fts f
+    : `SELECT m.id, m.project_id, m.session_id, m.role, m.content, m.tokens,
+              m.distilled, m.created_at, m.metadata, rank
+       FROM temporal_fts f
        CROSS JOIN temporal_messages m ON m.rowid = f.rowid
        WHERE f.content MATCH ? AND m.project_id = ?
        ORDER BY rank LIMIT ?`;
 
   try {
-    return runRelaxedSearch(
+    return await runRelaxedSearchAsync(
       input.query,
-      (matchExpr) => {
+      async (matchExpr) => {
         const params = input.sessionID
           ? [matchExpr, pid, input.sessionID, limit]
           : [matchExpr, pid, limit];
-        return db()
-          .query(ftsSQL)
-          .all(...params) as ScoredTemporalMessage[];
+        // Staleness-tolerant FTS scan over the largest table (temporal_messages)
+        // — the real 3.5–7.5s main-thread blocker (#966 B). Offload it; a worker
+        // timeout aborts the cascade (null) instead of re-blocking the loop.
+        const rows = await offloadAllOrTimeout(ftsSQL, params);
+        if (rows === READ_JOB_TIMED_OUT) return null;
+        return rows as ScoredTemporalMessage[];
       },
       input.termWeights,
     );

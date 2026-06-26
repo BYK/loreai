@@ -303,7 +303,7 @@ describe("single-row getters hydrate metadata (Seer #14858326, #627 Phase 1)", (
 });
 
 describe("scored search hydrates metadata (Seer #14860239, #627 Phase 1)", () => {
-  test("searchScored returns parsed metadata objects", () => {
+  test("searchScored returns parsed metadata objects", async () => {
     const projectPath = nextProject();
     create({
       projectPath,
@@ -313,7 +313,7 @@ describe("scored search hydrates metadata (Seer #14860239, #627 Phase 1)", () =>
       scope: "project",
       metadata: { gitHead: "5cored1234beef" },
     });
-    const results = searchScored({ query: "zircon", projectPath });
+    const results = await searchScored({ query: "zircon", projectPath });
     const hit = results.find((r) => r.title === "Zircon storage engine choice");
     expect(hit).toBeDefined();
     // The bug: raw FTS rows left metadata as a JSON string.
@@ -323,7 +323,7 @@ describe("scored search hydrates metadata (Seer #14860239, #627 Phase 1)", () =>
     expect(typeof hit!.rank).toBe("number");
   });
 
-  test("searchScoredOtherProjects returns parsed metadata objects", () => {
+  test("searchScoredOtherProjects returns parsed metadata objects", async () => {
     const ownerProject = nextProject();
     const otherProject = nextProject();
     create({
@@ -336,7 +336,7 @@ describe("scored search hydrates metadata (Seer #14860239, #627 Phase 1)", () =>
     });
     // Search from a DIFFERENT project so the owner project's entry surfaces as
     // a cross-project ("tunnel") result.
-    const results = searchScoredOtherProjects({
+    const results = await searchScoredOtherProjects({
       query: "quokka",
       excludeProjectPath: otherProject,
     });

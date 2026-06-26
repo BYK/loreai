@@ -15,8 +15,12 @@ import { remark } from "remark";
 import type { Root, Heading, Paragraph, Text } from "mdast";
 import { db, ensureProject } from "./db";
 import { sha256 } from "#db/driver";
-import { offloadAll } from "./read-offload";
-import { extractTopTerms, runRelaxedSearch } from "./search";
+import {
+  offloadAll,
+  offloadAllOrTimeout,
+  READ_JOB_TIMED_OUT,
+} from "./read-offload";
+import { extractTopTerms, runRelaxedSearchAsync } from "./search";
 import * as log from "./log";
 import { isHostedMode } from "./hosted";
 
@@ -305,14 +309,14 @@ export function refresh(projectPath: string): number {
  * Search lat sections by FTS5 with BM25 scoring.
  * Uses progressive AND relaxation before falling back to OR.
  */
-export function searchScored(input: {
+export async function searchScored(input: {
   query: string;
   projectPath: string;
   limit?: number;
   /** IDF weights from `termIDF()` — when provided, the relaxed cascade
    *  drops common terms first instead of short ones. */
   termWeights?: Map<string, number>;
-}): ScoredLatSection[] {
+}): Promise<ScoredLatSection[]> {
   const limit = input.limit ?? 10;
 
   const pid = ensureProject(input.projectPath);
@@ -327,10 +331,15 @@ export function searchScored(input: {
        ORDER BY rank LIMIT ?`;
 
   try {
-    return runRelaxedSearch(
+    return await runRelaxedSearchAsync(
       input.query,
-      (matchExpr) =>
-        db().query(ftsSQL).all(matchExpr, pid, limit) as ScoredLatSection[],
+      async (matchExpr) => {
+        // Staleness-tolerant lat.md FTS scan — offload off the event loop
+        // (#966 B). Columns are lean (no embedding BLOB).
+        const rows = await offloadAllOrTimeout(ftsSQL, [matchExpr, pid, limit]);
+        if (rows === READ_JOB_TIMED_OUT) return null;
+        return rows as ScoredLatSection[];
+      },
       input.termWeights,
     );
   } catch {

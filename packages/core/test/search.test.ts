@@ -11,6 +11,7 @@ import {
   extractTopTerms,
   exactTermMatchRank,
   termIDF,
+  runRelaxedSearchAsync,
 } from "../src/search";
 import { db, ensureProject } from "../src/db";
 
@@ -820,6 +821,79 @@ describe("search", () => {
         expect(idf).toBeGreaterThan(0);
         expect(Number.isFinite(idf)).toBe(true);
       }
+    });
+  });
+
+  // The off-thread (#966 B) cascade runner. The runner's `null` return is the
+  // pool-timeout abort signal; `[]` means "ran, no hits — relax further".
+  describe("runRelaxedSearchAsync", () => {
+    test("returns the exact-AND hits without relaxing when AND matches", async () => {
+      const calls: string[] = [];
+      const out = await runRelaxedSearchAsync(
+        "alpha beta gamma delta",
+        async (m) => {
+          calls.push(m);
+          return [{ id: m }];
+        },
+      );
+      expect(out).toEqual([{ id: ftsQuery("alpha beta gamma delta") }]);
+      expect(calls).toHaveLength(1); // AND hit — cascade never attempted
+    });
+
+    test("aborts the whole cascade and returns [] when the AND step times out (null)", async () => {
+      // null = the off-thread read timed out → ABORT. Re-issuing the looser
+      // steps would stack more worker timeouts, and the #1006 invariant forbids
+      // re-running in-process. A genuine empty result must be [], never null.
+      // Mutating the `=== null` guard to treat null as "keep relaxing" makes
+      // this either loop with extra calls or throw on `null.length`.
+      const calls: string[] = [];
+      const out = await runRelaxedSearchAsync(
+        "alpha beta gamma delta",
+        async (m) => {
+          calls.push(m);
+          return null;
+        },
+      );
+      expect(out).toEqual([]);
+      expect(calls).toHaveLength(1); // aborted immediately
+    });
+
+    test("aborts mid-cascade on a null and does not try the remaining looser queries", async () => {
+      // 5 terms > minTerms(3): the AND miss yields a multi-step relaxed cascade.
+      const calls: string[] = [];
+      const out = await runRelaxedSearchAsync(
+        "alpha beta gamma delta epsilon",
+        async () => {
+          calls.push("x");
+          // Exact AND finds nothing; the first relaxed step then times out.
+          return calls.length === 1 ? [] : null;
+        },
+      );
+      expect(out).toEqual([]);
+      expect(calls).toHaveLength(2); // AND (empty) + first relaxed (null→abort)
+    });
+
+    test("relaxes past an empty AND to a later cascade step that matches", async () => {
+      const calls: string[] = [];
+      const out = await runRelaxedSearchAsync(
+        "alpha beta gamma delta epsilon",
+        async () => {
+          calls.push("x");
+          return calls.length >= 2 ? [{ id: "relaxed" }] : [];
+        },
+      );
+      expect(out).toEqual([{ id: "relaxed" }]);
+      expect(calls.length).toBeGreaterThanOrEqual(2);
+    });
+
+    test("short-circuits a stopwords-only query without calling the runner", async () => {
+      let called = false;
+      const out = await runRelaxedSearchAsync("the of are was", async () => {
+        called = true;
+        return [{ id: "nope" }];
+      });
+      expect(out).toEqual([]);
+      expect(called).toBe(false);
     });
   });
 });

@@ -128,6 +128,36 @@ describe("temporal", () => {
     expect(results[0].content).toContain("OAuth");
   });
 
+  test("searchScored returns lean columns (no embedding BLOB) — offload-safe", async () => {
+    // Use a DEDICATED project so this seeded row never perturbs the cumulative
+    // count/order-sensitive tests that share PROJECT.
+    const LEAN_PROJECT = "/test/temporal/lean-cols";
+    temporal.store({
+      projectPath: LEAN_PROJECT,
+      info: makeMessage("msg-lean", "user", "sess-lean"),
+      parts: makeParts("msg-lean", "lean offload columns probe"),
+    });
+    // Give the row a non-null embedding BLOB. `SELECT m.*` would marshal this
+    // BLOB across the read-worker boundary (forbidden by the read-job contract)
+    // and waste bytes even in-process; the lean column list must drop it.
+    db()
+      .query("UPDATE temporal_messages SET embedding = ? WHERE id = ?")
+      .run(new Uint8Array([1, 2, 3, 4]), "msg-lean");
+
+    const results = await temporal.searchScored({
+      projectPath: LEAN_PROJECT,
+      query: "offload columns probe",
+    });
+    const hit = results.find((r) => r.id === "msg-lean");
+    expect(hit).toBeDefined();
+    // The fix: the SELECT enumerates lean columns and omits `embedding`.
+    // Reverting to `SELECT m.*` re-introduces the key and fails this.
+    expect("embedding" in hit!).toBe(false);
+    // The columns recall actually consumes survive.
+    expect(hit!.content).toContain("offload");
+    expect(typeof hit!.rank).toBe("number");
+  });
+
   test("search respects session scope", () => {
     temporal.store({
       projectPath: PROJECT,
