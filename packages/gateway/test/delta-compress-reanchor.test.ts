@@ -339,7 +339,13 @@ describe("persisted delta + backstop keeps the tool pair intact", () => {
 // ---------------------------------------------------------------------------
 // 5. Stable turn keeps insertAt frozen; compressing turn re-anchors
 // ---------------------------------------------------------------------------
-describe("layer-transition gates the delete/recompute of the persisted delta", () => {
+// These exercise the PREDICATE (shouldResetDeltaOnCompression) and the
+// deleteSessionPromptDelta PRIMITIVE directly. The call-site action that the
+// predicate gates is now reanchorDeltaOnCompression (re-anchor, never delete) —
+// covered end-to-end in §7. deleteSessionPromptDelta is still a real primitive
+// (used by reanchorExistingDelta + the MAX_DELTA_BLOCKS coalesce), so these
+// remain valid contract tests for it.
+describe("layer-transition predicate + deleteSessionPromptDelta primitive", () => {
   test("STABLE turn (1,1): predicate false => row left frozen at insertAt=5", () => {
     expect(typeof shouldResetDeltaOnCompression).toBe("function");
     expect(typeof listSessionPromptDeltas).toBe("function");

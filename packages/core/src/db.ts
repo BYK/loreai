@@ -3658,15 +3658,17 @@ export function updateSessionPromptDeltaSelector(
 }
 
 /**
- * Delete all persisted prompt-delta rows for a session.
+ * Delete all persisted prompt-delta rows for a session. No-op when no rows
+ * exist.
  *
- * Used when the gradient compresses (a cache-busting layer change): the
- * durable delta's `insertAt` is a frozen absolute index into the
- * gradient-transformed message array, which is non-stationary — compression
- * reshuffles what sits at each index, so a once-safe index can drift into a
- * tool_use/tool_result pair. Rather than tracking/validating the frozen index,
- * we delete the row on compression so the same turn recomputes the delta
- * (position + content) fresh against the new array. No-op when no rows exist.
+ * NOTE: this is no longer the compression-reset action. A compressing turn now
+ * RE-ANCHORS the blocks — preserving their content and `mut` surfaced-set
+ * history — via the gateway's `reanchorExistingDelta`, rather than deleting
+ * them. (Deleting on every compression wiped that history and forced a full
+ * pin→DB re-derive each turn, a growing cache-bust wall.) This primitive is
+ * still used (a) internally by that re-anchor as its delete-then-re-append
+ * step, and (b) by the bounded `MAX_DELTA_BLOCKS` coalesce that intentionally
+ * collapses accumulated blocks back into one cumulative block.
  */
 export function deleteSessionPromptDelta(sessionID: string): void {
   db()
