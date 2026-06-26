@@ -433,13 +433,18 @@ describe("vector-pool timeout cancellation (#1006 follow-up)", () => {
     ]);
   });
 
-  it("rejects collateral in-flight requests on a terminated worker (they fall back to null)", async () => {
+  it("degrades collateral in-flight requests on a timed-out worker as TIMEOUT (never null/in-process)", async () => {
     vi.useFakeTimers();
     // Pool size is 2 (DEFAULT_POOL_SIZE). Park a request on each worker, then a
     // third lands back on worker 0 (leastBusy tie → first). When worker 0's first
-    // request times out, worker 0 is terminated, so the THIRD request — collateral,
-    // which never itself exceeded the timeout — is rejected → null (in-process
-    // fallback), NOT resolved as the timeout sentinel.
+    // request times out, worker 0 is terminated. The THIRD request — collateral,
+    // which never itself exceeded the timeout — must RESOLVE as the timeout
+    // sentinel so its caller degrades to empty, NOT reject → null. Pre-fix
+    // (failAll rejected collateral) it became null → the caller re-ran the scan
+    // synchronously in-process, re-blocking the main thread — the #1006 stall,
+    // amplified once the whole recall FTS fan-out shares the pool (Seer #1005
+    // r3480447643). Asserting the sentinel (not null) is the non-vacuous guard:
+    // reverting to `failAll(pw, …)` in retireTimedOutWorker fails this.
     const seen: number[] = [];
     _setTestVectorWorkerFactory(
       factoryReturning((w) => {
@@ -454,7 +459,7 @@ describe("vector-pool timeout cancellation (#1006 follow-up)", () => {
     expect(seen).toEqual([0, 1, 0]);
     await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
     expect(await first).toBe(VECTOR_SEARCH_TIMED_OUT);
-    expect(await collateral).toBeNull();
+    expect(await collateral).toBe(VECTOR_SEARCH_TIMED_OUT);
   });
 });
 
@@ -517,6 +522,32 @@ describe("vector-pool generic read jobs (tryPoolRead)", () => {
     await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
     expect(await p).toBe(READ_JOB_TIMED_OUT);
     expect(served?.terminated).toBe(true);
+  });
+
+  it("degrades a collateral read on a timed-out worker as READ_JOB_TIMED_OUT (not null/in-process)", async () => {
+    // The PR2 recall fan-out routes its FTS scans through offloadAllOrTimeout,
+    // which re-runs the scan IN-PROCESS only on a bare null; READ_JOB_TIMED_OUT
+    // makes it degrade to empty instead. A collateral read queued behind a
+    // wedged scan must therefore resolve the sentinel, not null — otherwise one
+    // slow temporal FTS scan re-blocks the event loop with every other recall
+    // sub-query sharing that worker (Seer #1005 r3480447643). This is the read
+    // analogue of the vector collateral test above.
+    vi.useFakeTimers();
+    const seen: number[] = [];
+    _setTestVectorWorkerFactory(
+      factoryReturningRead((w) => {
+        seen.push(w.index); // never reply
+      }),
+    );
+    const first = tryPoolRead(READ_JOB); // → worker 0
+    first.catch(() => {});
+    const filler = tryPoolRead(READ_JOB); // → worker 1
+    filler.catch(() => {});
+    const collateral = tryPoolRead(READ_JOB); // → worker 0 (2 in-flight)
+    expect(seen).toEqual([0, 1, 0]);
+    await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
+    expect(await first).toBe(READ_JOB_TIMED_OUT);
+    expect(await collateral).toBe(READ_JOB_TIMED_OUT);
   });
 
   it("shares one worker pool across reads (spawns once)", async () => {

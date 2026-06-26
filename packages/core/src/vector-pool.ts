@@ -208,11 +208,32 @@ function spawnWorker(initData: VectorWorkerInitData): Worker {
   return new Worker(workerUrl, { workerData: initData });
 }
 
-/** Reject and clear every in-flight request on a worker (death/timeout). */
+/** Reject and clear every in-flight request on a worker. Used for STRUCTURAL
+ *  deaths (crash / `error` / `exit` / init-error / shutdown): the worker is
+ *  genuinely gone, so the rejection routes each caller to the in-process
+ *  fallback where it still gets a correct result. */
 function failAll(pw: PoolWorker, err: Error): void {
   for (const [, p] of pw.inflight) {
     clearTimeout(p.timer);
     p.reject(err);
+  }
+  pw.inflight.clear();
+}
+
+/** Resolve every in-flight request on a worker with the timeout marker (NOT a
+ *  rejection) and clear them. Used when a worker is retired for a TIMEOUT: the
+ *  requests queued behind the wedged synchronous scan must DEGRADE to an empty
+ *  result, exactly like the request that actually blew the timeout. Rejecting
+ *  them instead (the old `failAll` behavior) routed each one to the in-process
+ *  fallback in `offloadAllOrTimeout` / `tryPoolVectorSearch`, re-blocking the
+ *  main thread with the very synchronous scans the offload exists to avoid —
+ *  the #1006 stall, amplified once the whole recall FTS fan-out shares the pool
+ *  (Seer PR #1005 r3480447643). A timeout is slowness, not breakage, so (like
+ *  {@link retireTimedOutWorker}) this never counts a structural failure. */
+function timeoutAll(pw: PoolWorker): void {
+  for (const [, p] of pw.inflight) {
+    clearTimeout(p.timer);
+    p.resolve(POOL_REQUEST_TIMED_OUT);
   }
   pw.inflight.clear();
 }
@@ -237,12 +258,14 @@ function failAll(pw: PoolWorker, err: Error): void {
  * main-thread stall the timeout exists to prevent. Setting `dead` first makes
  * the terminate()-induced `exit` handler's {@link markDead} a no-op, so the
  * structural-failure latch is never touched. Collateral in-flight requests on
- * the same worker are rejected so their callers fall back in-process.
+ * the same worker are RESOLVED as timeouts (see {@link timeoutAll}) — never
+ * rejected — so their callers degrade to an empty result instead of re-running
+ * the scan on the main thread (Seer PR #1005 r3480447643).
  */
 function retireTimedOutWorker(pw: PoolWorker): void {
   if (pw.dead) return;
   pw.dead = true;
-  failAll(pw, new Error("vector worker terminated after search timeout"));
+  timeoutAll(pw);
   try {
     void pw.worker.terminate();
   } catch {
