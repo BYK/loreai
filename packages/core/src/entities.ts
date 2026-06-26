@@ -856,8 +856,14 @@ function withAliases(rows: Entity[]): EntityWithAliases[] {
 /**
  * Offloaded counterpart to {@link batchLoadAliases} (#966). The single
  * `entity_aliases IN (...)` scan runs on the read-worker pool instead of the
- * main thread. `entity_aliases` carries only TEXT/INTEGER columns, so the rows
- * are structured-clone-safe across the worker boundary.
+ * main thread.
+ *
+ * 🔴 Clone-safety invariant: `SELECT *` is only safe here because
+ * `entity_aliases` carries no BLOB column (id/entity_id/alias_type/alias_value/
+ * source are TEXT, created_at is INTEGER) — all structured-clone-safe across the
+ * worker boundary. If a BLOB column (e.g. an embedding) is ever added to
+ * `entity_aliases`, this MUST switch to an explicit non-BLOB column list, or the
+ * BLOB will be copied across the boundary on every recall.
  */
 async function batchLoadAliasesOffloaded(
   entityIds: string[],
@@ -1073,6 +1079,11 @@ export async function searchAsync(input: {
   const nameParams = pid ? [fts, pid, limit] : [fts, limit];
   const aliasParams = pid ? [fts, pid, limit] : [fts, limit];
 
+  // Independent degrade (each scan → [] on pool timeout) is deliberate here,
+  // unlike forSession's shared-fate offloadAllOrTimeout (#966 B). Entity FTS is
+  // a best-effort supplemental RRF list: under a partial pool timeout, keeping
+  // whichever scan succeeded (a valid subset of matches) is preferable to
+  // discarding both. A partial set is never *wrong* data — only degraded recall.
   const [nameMatches, aliasMatches] = (await Promise.all([
     offloadAll(nameSQL, nameParams),
     offloadAll(aliasSQL, aliasParams),
@@ -1201,6 +1212,7 @@ export async function searchCrossProjectReposAsync(input: {
        ORDER BY rank
        LIMIT ?`;
 
+  // Independent degrade (see searchAsync) — best-effort supplemental RRF list.
   const [nameMatches, aliasMatches] = (await Promise.all([
     offloadAll(nameSQL, [fts, pid, limit]),
     offloadAll(aliasSQL, [fts, pid, limit]),

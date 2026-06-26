@@ -1,6 +1,8 @@
 import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ensureProject } from "../src/db";
+import * as entities from "../src/entities";
+import * as ltm from "../src/ltm";
 import * as temporal from "../src/temporal";
 import * as latReader from "../src/lat-reader";
 import {
@@ -145,5 +147,74 @@ describe("recall FTS searches degrade on a pool read timeout (#966 B)", () => {
     expect(out).toEqual(pooled);
     // The exact-AND query already matched, so the cascade never relaxed.
     expect(FakeReadWorker.reads).toBe(1);
+  });
+});
+
+// PR3 (#966): the entity FTS + vector-hit hydration helpers also dispatch
+// through the read-worker pool. Under the default test config these run
+// in-process; installing a factory proves the offload path actually works
+// end-to-end (success round-trip + graceful degrade) against the live pool.
+describe("PR3 recall hydration helpers go through the pool (#966)", () => {
+  const PROJ = "/test/recall-offload-timeout/pr3";
+
+  it("ltm.getManyOffloaded: returns the worker's rows on the SUCCESS path", async () => {
+    const pid = ensureProject(PROJ);
+    // A single IN-query is dispatched; the fake worker supplies the rows so the
+    // result is independent of DB contents — this proves getManyOffloaded reads
+    // from the pool, not the main-thread connection.
+    const pooled = [
+      {
+        id: "pooled-k-1",
+        logical_id: "pooled-k-1",
+        project_id: pid,
+        category: "decision",
+        title: "Pooled knowledge",
+        content: "from the worker",
+        metadata: "{}",
+        confidence: 1.0,
+        created_at: 1,
+        updated_at: 1,
+      },
+    ];
+    installReadFactory((w, id) => w.replyRead(id, pooled));
+    const map = await ltm.getManyOffloaded(["pooled-k-1"]);
+    expect(map.size).toBe(1);
+    expect(map.get("pooled-k-1")?.title).toBe("Pooled knowledge");
+    // metadata hydrated on the main thread (string → object)
+    expect(map.get("pooled-k-1")?.metadata).toEqual({});
+    expect(FakeReadWorker.reads).toBe(1);
+  });
+
+  it("ltm.getManyOffloaded: a worker timeout degrades to an empty map (no re-run)", async () => {
+    vi.useFakeTimers();
+    installReadFactory(() => {
+      /* never reply */
+    });
+    ensureProject(PROJ);
+    const p = ltm.getManyOffloaded(["never-replied"]);
+    for (let i = 0; i < 6; i++) {
+      await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
+    }
+    expect((await p).size).toBe(0);
+    // offloadAll degrades to [] — single dispatch, no in-process re-run.
+    expect(FakeReadWorker.reads).toBe(1);
+  });
+
+  it("entities.searchAsync: a worker timeout degrades to [] (both FTS scans)", async () => {
+    vi.useFakeTimers();
+    installReadFactory(() => {
+      /* never reply */
+    });
+    ensureProject(PROJ);
+    const p = entities.searchAsync({
+      query: "alpha beta gamma",
+      projectPath: PROJ,
+    });
+    for (let i = 0; i < 6; i++) {
+      await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
+    }
+    expect(await p).toEqual([]);
+    // name + alias scans dispatched in parallel; alias-load is skipped (no rows).
+    expect(FakeReadWorker.reads).toBe(2);
   });
 });

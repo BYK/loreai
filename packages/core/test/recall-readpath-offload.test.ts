@@ -152,6 +152,40 @@ describe("entities.getManyWithAliasesOffloaded (#966)", () => {
     expect(map.get(a.id)?.aliases.map((x) => x.alias_value)).toContain("Al");
   });
 
+  test("alias ordering matches getWithAliases for a multi-alias entity", async () => {
+    // Guards the offloaded `ORDER BY alias_type, alias_value` — a single-alias
+    // entity can't catch an ordering regression, so seed several aliases across
+    // types and assert the offloaded hydration preserves the same order.
+    const ent = entities.create({
+      projectPath: PROJECT,
+      entityType: "person",
+      canonicalName: "Multi Alias Person",
+      aliases: [
+        { type: "nickname", value: "Zed" },
+        { type: "nickname", value: "Abe" },
+        { type: "github", value: "ghhandle" },
+        { type: "email", value: "x@example.test" },
+      ],
+    });
+    const map = await entities.getManyWithAliasesOffloaded([ent.id]);
+    const offloadedOrder = map
+      .get(ent.id)
+      ?.aliases.map((a) => `${a.alias_type}:${a.alias_value}`);
+    const syncOrder = entities
+      .getWithAliases(ent.id)
+      ?.aliases.map((a) => `${a.alias_type}:${a.alias_value}`);
+    expect(offloadedOrder).toEqual(syncOrder);
+    // And the order is the documented (alias_type, alias_value) sort. create()
+    // also auto-adds a `name:` alias from the canonical name.
+    expect(offloadedOrder).toEqual([
+      "email:x@example.test",
+      "github:ghhandle",
+      "name:Multi Alias Person",
+      "nickname:Abe",
+      "nickname:Zed",
+    ]);
+  });
+
   test("empty id list → empty map (no query issued)", async () => {
     expect((await entities.getManyWithAliasesOffloaded([])).size).toBe(0);
   });
