@@ -1439,28 +1439,50 @@ export function formatForPrompt(entities: EntityWithAliases[]): string {
  *
  * Called after knowledge entry create/update in the curator pipeline.
  */
-export function syncEntityRefs(knowledgeId: string, content: string): number {
+/**
+ * The full entity + alias registry used to match entity mentions in content.
+ * Loading this is two full-table scans, so callers that re-sync many entries in
+ * a loop (the curator) should load it ONCE via {@link syncEntityRefsBatch}
+ * rather than once per entry.
+ */
+export interface EntityMatchRegistry {
+  entities: Array<{ id: string; canonical_name: string }>;
+  aliases: Array<{ entity_id: string; alias_value: string }>;
+}
+
+/** Load the entity + alias registry (two full-table scans). */
+function loadEntityMatchRegistry(): EntityMatchRegistry {
+  const entities = db()
+    .query("SELECT id, canonical_name FROM entities")
+    .all() as Array<{ id: string; canonical_name: string }>;
+  const aliases = db()
+    .query("SELECT entity_id, alias_value FROM entity_aliases")
+    .all() as Array<{ entity_id: string; alias_value: string }>;
+  return { entities, aliases };
+}
+
+export function syncEntityRefs(
+  knowledgeId: string,
+  content: string,
+  registry?: EntityMatchRegistry,
+): number {
   // Entity refs key on the stable logical_id (A2, #823) so they survive version
   // appends. The FK to knowledge(id) stays satisfied because logical_id equals
   // the never-physically-deleted first version's id.
   const logicalId = logicalIdOf(knowledgeId);
 
-  // Clear existing refs for this knowledge entry
+  // Clear existing refs for this knowledge entry. Runs even when the registry is
+  // empty so stale refs are purged after all matching entities are removed.
   db()
     .query("DELETE FROM knowledge_entity_refs WHERE knowledge_id = ?")
     .run(logicalId);
 
-  // Get all entities for fast matching
-  const allEntities = db()
-    .query("SELECT id, canonical_name FROM entities")
-    .all() as Array<{ id: string; canonical_name: string }>;
+  // Load the entities + aliases for matching. A batch caller passes a preloaded
+  // registry so this isn't re-read once per entry (the curator N+1, #1010).
+  const { entities: allEntities, aliases: allAliases } =
+    registry ?? loadEntityMatchRegistry();
 
   if (!allEntities.length) return 0;
-
-  // Also load all aliases for matching
-  const allAliases = db()
-    .query("SELECT entity_id, alias_value FROM entity_aliases")
-    .all() as Array<{ entity_id: string; alias_value: string }>;
 
   const contentLower = content.toLowerCase();
   const linkedEntityIds = new Set<string>();
@@ -1505,6 +1527,32 @@ export function syncEntityRefs(knowledgeId: string, content: string): number {
   }
 
   return count;
+}
+
+/**
+ * Re-sync entity refs for many entries while loading the entity/alias registry
+ * exactly ONCE for the whole batch (the per-entry reload was the curator's N+1,
+ * #1010). Per-item failures are logged and skipped so one bad entry can't abort
+ * the rest — mirroring the curator's prior per-entry try/catch.
+ *
+ * @returns Total number of (knowledge, entity) links written across all items.
+ */
+export function syncEntityRefsBatch(
+  items: ReadonlyArray<{ id: string; content: string }>,
+): number {
+  if (!items.length) return 0;
+  // Load once. New entities are only created AFTER the curator's ref-sync loop,
+  // so this snapshot stays authoritative for the whole batch.
+  const registry = loadEntityMatchRegistry();
+  let total = 0;
+  for (const item of items) {
+    try {
+      total += syncEntityRefs(item.id, item.content, registry);
+    } catch (err) {
+      log.warn(`entity ref sync failed for ${item.id}:`, err);
+    }
+  }
+  return total;
 }
 
 // ---------------------------------------------------------------------------

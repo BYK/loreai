@@ -437,18 +437,17 @@ export function applyOps(
   // Sync cross-references for created/updated entries. idsToSync holds stable
   // logical_ids; resolve the current version for its (possibly newly-appended)
   // content. syncRefs/syncEntityRefs key the refs on the logical_id internally.
+  const entityRefItems: Array<{ id: string; content: string }> = [];
   for (const id of idsToSync) {
     ltm.syncRefs(id);
-    // Also sync entity references (detect entity mentions in content)
+    // Collect content for a single batched entity-ref sync — syncEntityRefsBatch
+    // loads the entities/aliases registry once instead of once per entry (#1010).
     const entry = ltm.getByLogical(id);
-    if (entry) {
-      try {
-        entities.syncEntityRefs(id, entry.content);
-      } catch (err) {
-        log.warn(`entity ref sync failed for ${id}:`, err);
-      }
-    }
+    if (entry) entityRefItems.push({ id, content: entry.content });
   }
+  // Batch handles per-item errors internally (logs + skips), mirroring the prior
+  // per-entry try/catch so one bad entry can't abort the rest.
+  entities.syncEntityRefsBatch(entityRefItems);
 
   // Create detected entities (metadata merged on dedup via create())
   if (input.detectedEntities?.length) {
