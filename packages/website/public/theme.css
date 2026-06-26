@@ -1082,3 +1082,79 @@ footer {
   body { cursor: auto; }
   .cursor { display: none; }
 }
+
+/* Mobile navigation (hamburger) for the marketing pages.
+   Hidden on desktop; the existing .nav-links handle wide viewports. */
+.nav-mobile { display: none; }
+
+.nav-burger {
+  list-style: none;
+  display: inline-flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+  width: 2.6rem;
+  height: 2.6rem;
+  padding: 0 .55rem;
+  border: 1px solid rgba(196, 221, 199, .28);
+  border-radius: 4px;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+.nav-burger::-webkit-details-marker { display: none; }
+.nav-burger span {
+  display: block;
+  height: 2px;
+  width: 100%;
+  background: var(--c0);
+  border-radius: 2px;
+  transition: transform .25s var(--ease), opacity .2s ease;
+}
+.nav-mobile[open] .nav-burger span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
+.nav-mobile[open] .nav-burger span:nth-child(2) { opacity: 0; }
+.nav-mobile[open] .nav-burger span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
+
+.nav-mobile-panel { display: none; }
+.nav-mobile[open] .nav-mobile-panel {
+  display: flex;
+  flex-direction: column;
+  position: absolute;
+  top: calc(100% + .7rem);
+  right: 0;
+  min-width: 220px;
+  padding: .7rem;
+  background: var(--ink);
+  border: 1px solid rgba(255, 255, 255, .08);
+  border-radius: 6px;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, .38);
+}
+.nav-mobile-panel ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.nav-mobile-panel li a {
+  display: block;
+  padding: .6rem .5rem;
+  font-family: var(--sans);
+  font-size: 1rem;
+  color: rgba(247, 242, 232, .85);
+  transition: color .2s ease;
+}
+.nav-mobile-panel li a:hover { color: var(--c0); }
+.nav-mobile-cta {
+  margin-top: .5rem;
+  text-align: center;
+  font-size: .95rem;
+  padding: .6rem 1rem;
+}
+
+@media (max-width: 900px) {
+  /* Show the hamburger and declutter the bar; links live in the panel. */
+  .nav-mobile { display: block; position: relative; }
+  .nav-right > .nav-socials,
+  .nav-right > .nav-btn { display: none; }
+  .nav-right { gap: 1rem; }
+}

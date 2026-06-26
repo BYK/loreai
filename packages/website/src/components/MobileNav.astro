@@ -1,0 +1,31 @@
+---
+const base = import.meta.env.BASE_URL;
+
+const links = [
+  { label: "The Problem", href: `${base}#problem` },
+  { label: "How It Works", href: `${base}#how` },
+  { label: "Features", href: `${base}#features` },
+  { label: "Why Lore", href: `${base}different/` },
+  { label: "Docs", href: `${base}docs/` },
+  { label: "Blog", href: `${base}blog/` },
+  { label: "Folk Lore", href: `${base}#waitlist` },
+];
+---
+
+<details class="nav-mobile">
+  <summary class="nav-burger" aria-label="Toggle navigation menu">
+    <span></span><span></span><span></span>
+  </summary>
+  <div class="nav-mobile-panel">
+    <ul>
+      {
+        links.map((link) => (
+          <li>
+            <a href={link.href}>{link.label}</a>
+          </li>
+        ))
+      }
+    </ul>
+    <a href={`${base}docs/`} class="nav-btn nav-mobile-cta">Get Started</a>
+  </div>
+</details>
