@@ -310,11 +310,20 @@ describe("vectorSearchTemporal", () => {
     });
 
     const assertCapped = async () => {
-      const ids = (
+      // Project-only path (the shape the sole production caller uses).
+      const projIds = (
         await vectorSearchTemporal(new Float32Array([1, 0, 0]), pid, 10)
       ).map((h) => h.id);
-      expect(ids).toContain("t-recent"); // newest match survives the cap
-      expect(ids).not.toContain("t-old"); // oldest match aged out of the window
+      expect(projIds).toContain("t-recent"); // newest match survives the cap
+      expect(projIds).not.toContain("t-old"); // oldest match aged out of window
+      // Session-scoped path exercises the separate session cap params (the
+      // 5-tuple vec / 3-tuple JS bindings). All rows live in session "s1", so
+      // the recency window — and thus the result — is identical.
+      const sessIds = (
+        await vectorSearchTemporal(new Float32Array([1, 0, 0]), pid, 10, "s1")
+      ).map((h) => h.id);
+      expect(sessIds).toContain("t-recent");
+      expect(sessIds).not.toContain("t-old");
     };
 
     // Default path (vec when the runtime supports it).
