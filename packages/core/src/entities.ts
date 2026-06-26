@@ -522,6 +522,12 @@ export function mergeSelfPersonDuplicates(
     .query(`SELECT ${ENTITY_COLS} FROM entities WHERE entity_type = 'person'`)
     .all() as Entity[];
 
+  // Batch-load every person's aliases in a single query instead of one query
+  // per person. Behaviorally equivalent to per-iteration reads: a person's own
+  // aliases never change as we merge *other* persons into self, and the self
+  // match set (selfIdentityValues) is already a frozen pre-loop snapshot.
+  const personAliasMap = batchLoadAliases(persons.map((p) => p.id));
+
   // For each person, check for an identity match against self.
   let mergedCount = 0;
   for (const person of persons) {
@@ -530,14 +536,7 @@ export function mergeSelfPersonDuplicates(
       matched = `name:${person.canonical_name}`;
     } else {
       // Check identity-typed alias overlap only.
-      const personAliases = db()
-        .query(
-          "SELECT alias_type, alias_value FROM entity_aliases WHERE entity_id = ?",
-        )
-        .all(person.id) as Array<{
-        alias_type: AliasType;
-        alias_value: string;
-      }>;
+      const personAliases = personAliasMap.get(person.id) ?? [];
       const hit = personAliases.find(
         (a) =>
           IDENTITY_ALIAS_TYPES.has(a.alias_type) &&
@@ -834,15 +833,22 @@ function batchLoadAliases(entityIds: string[]): Map<string, EntityAlias[]> {
   if (!entityIds.length) return map;
   // Initialize empty arrays for all IDs
   for (const id of entityIds) map.set(id, []);
-  // Single query to fetch all aliases for the given entities
-  const placeholders = entityIds.map(() => "?").join(",");
-  const allAliases = db()
-    .query(
-      `SELECT * FROM entity_aliases WHERE entity_id IN (${placeholders}) ORDER BY alias_type, alias_value`,
-    )
-    .all(...entityIds) as EntityAlias[];
-  for (const a of allAliases) {
-    map.get(a.entity_id)?.push(a);
+  // Chunk the IN list to stay under SQLite's bound-variable ceiling (matches
+  // countMatchingTemporalIds in db.ts). Chunks partition entityIds, so every
+  // alias of a given entity lands in exactly one chunk — per-entity ordering
+  // from the per-chunk ORDER BY is preserved.
+  const CHUNK = 900;
+  for (let i = 0; i < entityIds.length; i += CHUNK) {
+    const chunk = entityIds.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => "?").join(",");
+    const allAliases = db()
+      .query(
+        `SELECT * FROM entity_aliases WHERE entity_id IN (${placeholders}) ORDER BY alias_type, alias_value`,
+      )
+      .all(...chunk) as EntityAlias[];
+    for (const a of allAliases) {
+      map.get(a.entity_id)?.push(a);
+    }
   }
   return map;
 }
