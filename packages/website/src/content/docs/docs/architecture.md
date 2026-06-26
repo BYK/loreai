@@ -243,7 +243,7 @@ The recall tool is the escape hatch when neither the in-context prefix nor the g
 
 Results are fused with reciprocal rank fusion (RRF) and re-ranked. A query-expansion-aware boost is applied to vector results when the query has enough terms (≥2 after stopword removal) — single-term queries stay on BM25 because that's where it wins.
 
-The diagram below shows the recall pipeline. **Vector search is per-source, not a separate stage** — four of the five sources (LTM, distillations, temporal messages, entities) run both an FTS5 query and a vector query, and both lists feed the same RRF. Cross-project LTM and `lat.md` sections are FTS-only because embeddings only cover per-project rows. The vector scans run on a small **worker-thread pool** (default 2 workers, each with its own read-only database connection), so a large similarity scan never blocks the gateway's event loop; a scan that exceeds its timeout returns empty rather than falling back to a blocking main-thread scan.
+The diagram below shows the recall pipeline. **Vector search is per-source, not a separate stage** — four of the five sources shown (LTM, distillations, temporal messages, entities) run both an FTS5 query and a vector query, and both lists feed the same RRF. The fifth — cross-project LTM — plus the `lat.md` sections are FTS-only, because the vector index only covers the current project's rows. The vector scans run on a small **worker-thread pool** (default 2 workers, each with its own read-only database connection), so a large similarity scan never blocks the gateway's event loop; a scan that exceeds its timeout returns empty rather than falling back to a blocking main-thread scan.
 
 ```mermaid
 flowchart TB
@@ -277,4 +277,4 @@ When the scope is `all` and the session already has its own results, recall down
 
 ## What this means in practice
 
-You should not have to think about context management. The gradient engine handles layer escalation, the cost-aware cap keeps you in the cheap layer for as long as possible, distillation preserves the details that summaries lose, and the recall tool gives you a way out when none of the layers have what you need. The settings that *are* worth tuning (cost targets, distillation thresholds, embedding provider) are surfaced in the [configuration reference](/docs/configuration/).
+You should not have to think about context management. The gradient engine handles layer escalation, the cost-aware cap keeps you in the cheap layer for as long as possible, distillation preserves the details that summaries lose, and the recall tool gives you a way out when none of the layers have what you need. The settings that *are* worth tuning (cost targets, distillation thresholds, embedding provider) are surfaced in the [configuration reference](../configuration/).

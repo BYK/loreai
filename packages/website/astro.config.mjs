@@ -213,12 +213,16 @@ export default defineConfig({
         // the .ec-line divs and call mermaid.render() directly. Mermaid's
         // "neutral" theme is a safe default for both light and dark
         // Starlight themes; theme-aware switching (reading
-        // document.documentElement.dataset.theme) is a follow-up.
+        // document.documentElement.dataset.theme) is a follow-up. The
+        // version is pinned to an exact release for reproducible diagram
+        // output; SRI is not used because integrity hashes do not apply to
+        // bare ESM `import` URLs, and the render call already degrades
+        // gracefully to the source text on failure (see the catch below).
         {
           tag: "script",
           attrs: { type: "module" },
           content: [
-            'import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";',
+            'import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.16.0/dist/mermaid.esm.min.mjs";',
             'mermaid.initialize({ startOnLoad: false, theme: "neutral", securityLevel: "loose", fontFamily: "var(--sl-font)" });',
             "const blocks = document.querySelectorAll('pre[data-language=\"mermaid\"]');",
             "for (const pre of blocks) {",
