@@ -106,15 +106,26 @@ async function _detect(input: {
   model?: { providerID: string; modelID: string };
   metadata?: KnowledgeMetadata;
 }): Promise<void> {
-  // Rate limit check
-  const lastTime = lastExtraction.get(input.sessionID) ?? 0;
-  if (Date.now() - lastTime < PATTERN_COOLDOWN_MS) return;
-
-  // Step 1: Embed the new distillation (awaited, not fire-and-forget)
+  // Step 1: Embed the new distillation and store it. This is the
+  // embedDistillation() replacement at the gen-0 hook (see distillation.ts), so
+  // it MUST run for every segment — independent of the pattern-detection rate
+  // limit below — or the segment is never vector-searchable. (Previously the
+  // rate-limit check sat above this, so a segment arriving within the cooldown
+  // got no embedding stored at all: a latent recall gap.)
   const [vec] = await embedding.embed([input.observations], "document");
   db()
     .query("UPDATE distillations SET embedding = ? WHERE id = ?")
     .run(embedding.toBlob(vec), input.distillId);
+
+  // Rate limit the EXPENSIVE pattern detection that follows (project-wide vector
+  // search + clustering + an LLM extraction call): at most one attempt per
+  // session per 10 minutes. Arm the cooldown UNCONDITIONALLY the moment we
+  // commit to an attempt — it used to be set only after a successful
+  // ltm.create() (below), so the common "no pattern this time" outcome never
+  // armed it and the full search + cluster ran on every gen-0 distillation.
+  const lastTime = lastExtraction.get(input.sessionID) ?? 0;
+  if (Date.now() - lastTime < PATTERN_COOLDOWN_MS) return;
+  lastExtraction.set(input.sessionID, Date.now());
 
   // Step 2: Search for similar distillations across the project (wide net)
   const pid = ensureProject(input.projectPath);
@@ -237,7 +248,6 @@ async function _detect(input: {
       metadata: input.metadata,
     });
     log.info(`pattern echo created preference: "${pattern.title}"`);
-    lastExtraction.set(input.sessionID, Date.now());
   } catch {
     // ltm.create() dedup guard handles duplicates — swallow
   }
