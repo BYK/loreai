@@ -304,6 +304,26 @@ export function applyOps(
   const idsToSync: string[] = [];
   const changedEntries: ChangedEntry[] = [];
 
+  // Resolve the owning project id at most once, lazily. input.projectPath is
+  // loop-invariant, so the per-op ownership guards below must not re-query the
+  // projects table on every update/delete op. Resolved lazily — not eagerly —
+  // so a batch that never reaches an ownership guard (create-only, cross-project
+  // creates, or empty ops) keeps the prior behavior of never touching the
+  // projects table here. ensureProject is a get-or-create side effect, so an
+  // eager call could mint a project row for a batch that the per-op path would
+  // have left untouched.
+  let projectIdResolved = false;
+  let projectIdCache: string | null = null;
+  const ownerProjectId = (): string | null => {
+    if (!projectIdResolved) {
+      projectIdCache = input.projectPath
+        ? ensureProject(input.projectPath)
+        : null;
+      projectIdResolved = true;
+    }
+    return projectIdCache;
+  };
+
   for (const op of ops) {
     if (op.op === "create") {
       if (input.skipCreate) continue;
@@ -380,8 +400,7 @@ export function applyOps(
         // Guard: don't mutate entries owned by a different project.
         // Cross-project entries (project_id=NULL or same project) are safe.
         if (entry.project_id !== null && input.projectPath) {
-          const pid = ensureProject(input.projectPath);
-          if (entry.project_id !== pid) continue;
+          if (entry.project_id !== ownerProjectId()) continue;
         }
         const prevContent = entry.content;
         const content =
@@ -417,8 +436,7 @@ export function applyOps(
       if (entry) {
         // Guard: don't delete entries owned by a different project.
         if (entry.project_id !== null && input.projectPath) {
-          const pid = ensureProject(input.projectPath);
-          if (entry.project_id !== pid) continue;
+          if (entry.project_id !== ownerProjectId()) continue;
         }
         changedEntries.push({
           op: "deleted",
