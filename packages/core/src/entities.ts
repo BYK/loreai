@@ -1492,6 +1492,35 @@ export function knowledgeForEntity(entityId: string): string[] {
   return rows.map((r) => r.knowledge_id);
 }
 
+/**
+ * Batch-count knowledge references for a set of entities in a single query.
+ * Avoids the N+1 of calling `knowledgeForEntity().length` per entity when
+ * relevance-ranking a large entity registry. Entities with no refs are absent
+ * from the returned map (callers should default to 0).
+ */
+export function knowledgeRefCounts(entityIds: string[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  if (!entityIds.length) return counts;
+  // Chunk the IN list to stay under SQLite's bound-variable ceiling (matches
+  // countMatchingTemporalIds in db.ts). Counts are per-entity, so results across
+  // chunks are disjoint and simply unioned into the map.
+  const CHUNK = 900;
+  for (let i = 0; i < entityIds.length; i += CHUNK) {
+    const chunk = entityIds.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = db()
+      .query(
+        `SELECT entity_id, COUNT(*) AS n
+         FROM knowledge_entity_refs
+         WHERE entity_id IN (${placeholders})
+         GROUP BY entity_id`,
+      )
+      .all(...chunk) as Array<{ entity_id: string; n: number }>;
+    for (const r of rows) counts.set(r.entity_id, r.n);
+  }
+  return counts;
+}
+
 // ---------------------------------------------------------------------------
 // Session injection — hybrid cap-based entity selection
 // ---------------------------------------------------------------------------
@@ -1535,12 +1564,14 @@ export function entitiesForSession(
     return guaranteed.slice(0, cap);
   }
 
-  // Relevance-rank remaining by knowledge ref count (more refs = more relevant)
+  // Relevance-rank remaining by knowledge ref count (more refs = more relevant).
+  // Batch-load all ref counts in one query instead of one query per entity.
   const slots = cap - guaranteed.length;
-  const scored = remaining.map((e) => {
-    const refCount = knowledgeForEntity(e.id).length;
-    return { entity: e, score: refCount };
-  });
+  const refCounts = knowledgeRefCounts(remaining.map((e) => e.id));
+  const scored = remaining.map((e) => ({
+    entity: e,
+    score: refCounts.get(e.id) ?? 0,
+  }));
   scored.sort((a, b) => b.score - a.score);
 
   return [...guaranteed, ...scored.slice(0, slots).map((s) => s.entity)];
