@@ -40,7 +40,7 @@ Once a request lands in the gateway, two flows kick off in parallel: a **request
 **System + LTM + Meta-Distillations + Distillations + Delta Updates + Conversation**
 
 ```mermaid
-%%{init: {"flowchart": {"nodeSpacing": 22, "rankSpacing": 14}}}%%
+%%{init: {"flowchart": {"nodeSpacing": 22, "rankSpacing": 6, "padding": 14}}}%%
 flowchart TB
     subgraph Sources["Three-tier memory · sources"]
         direction LR
