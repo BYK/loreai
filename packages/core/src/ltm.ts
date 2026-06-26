@@ -1809,7 +1809,15 @@ export async function forSession(
     hydrateKnowledgeEntry,
   ) as KnowledgeEntry[];
 
-  if (!crossEntries.length && !projectEntries.length) return [];
+  if (!crossEntries.length && !projectEntries.length) {
+    // Empty-knowledge fast path (new project, or all entries below the
+    // confidence floor). Emit before returning so the FASTEST path is
+    // represented in the read-path metrics — otherwise the distribution is
+    // skewed toward slower, non-empty turns and #966 B is decided on biased
+    // data. Mirrors the timeout early return above (Seer, PR #993).
+    timer.emit("forSession", 0);
+    return [];
+  }
 
   // --- Preference-only fast path ---
   // Preferences are unconditional user directives — relevance scoring harms them.

@@ -87,4 +87,25 @@ describe("forSession fires the read-path timing hook", () => {
     expect((t as ReadPathTiming).totalMs).toBeGreaterThanOrEqual(0);
     expect((t as ReadPathTiming).syncBlockingMs).toBeGreaterThanOrEqual(0);
   });
+
+  it("emits op=forSession (candidateCount 0) on the empty-knowledge fast path (Seer #993)", async () => {
+    // A project with NO knowledge entries hits the `!crossEntries && !
+    // projectEntries` early return — the FASTEST path. It must still emit, or
+    // the read-path distribution is skewed toward slower, non-empty turns.
+    const PROJECT = `/test/read-telemetry/forsession-empty-${Date.now()}`;
+
+    const seen: ReadPathTiming[] = [];
+    setReadPathTimingHook((t) => seen.push(t));
+
+    const out = await ltm.forSession(PROJECT, "s-empty", 4000);
+    expect(out).toEqual([]);
+
+    const t = seen.find((x) => x.op === "forSession");
+    expect(
+      t,
+      "empty-knowledge forSession must still emit timing",
+    ).toBeDefined();
+    expect((t as ReadPathTiming).candidateCount).toBe(0);
+    expect((t as ReadPathTiming).syncBlockingMs).toBeGreaterThanOrEqual(0);
+  });
 });
