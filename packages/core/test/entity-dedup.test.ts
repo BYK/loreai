@@ -306,6 +306,47 @@ describe("entity dedup — adaptive calibration (kind='entity')", () => {
     expect(entities.getEntityDedupFeedbackCount(pid)).toBe(1);
   });
 
+  test("recordEntityAutoSignals batches all inserts in one transaction (#1010)", () => {
+    const pid = ensureProject(PROJECT);
+    // Three high-similarity, undecided pairs → three reject signals → three
+    // INSERTs that must land inside a single transaction. `merged`/`suggested`
+    // are empty so no pair is treated as decided; names come from `names`.
+    const result = {
+      merged: [],
+      suggested: [],
+      pairSimilarities: new Map([
+        [entities.entityPairKey("a", "b"), 0.85],
+        [entities.entityPairKey("a", "c"), 0.9],
+        [entities.entityPairKey("b", "c"), 0.88],
+      ]),
+      names: new Map([
+        ["a", "Entity A"],
+        ["b", "Entity B"],
+        ["c", "Entity C"],
+      ]),
+    } satisfies entities.EntityDedupResult;
+
+    // Spy on the live connection's exec() to count BEGIN statements. Inserts go
+    // through query().run(), so the only BEGIN can come from withTransaction().
+    const conn = db() as unknown as { exec(sql: string): unknown };
+    const realExec = conn.exec.bind(conn);
+    let begins = 0;
+    conn.exec = (sql: string) => {
+      if (/^\s*BEGIN/i.test(sql)) begins++;
+      return realExec(sql);
+    };
+    try {
+      entities.recordEntityAutoSignals(pid, result);
+    } finally {
+      conn.exec = realExec;
+    }
+
+    // All three signals are recorded...
+    expect(entities.getEntityDedupFeedbackCount(pid)).toBe(3);
+    // ...inside exactly one transaction (would be 0 BEGINs before the fix).
+    expect(begins).toBe(1);
+  });
+
   test("calibrateEntityDedupThreshold returns null below 20 samples", () => {
     const pid = ensureProject(PROJECT);
     for (let i = 0; i < 5; i++) {

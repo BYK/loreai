@@ -6,7 +6,7 @@
  * formatting for system prompt injection and recall query expansion.
  */
 import { uuidv7 } from "uuidv7";
-import { db, ensureProject, getKV, setKV } from "./db";
+import { db, ensureProject, getKV, setKV, withTransaction } from "./db";
 import { ftsQuery, ftsQueryOr, EMPTY_QUERY, filterTerms } from "./search";
 import { config } from "./config";
 import { getGitUser } from "./git";
@@ -2045,18 +2045,24 @@ export function recordEntityAutoSignals(
   );
   const capped = signals.slice(0, ENTITY_AUTO_SIGNAL_MAX_PAIRS);
 
-  pruneEntityDedupFeedback(projectId);
+  // Prune + insert atomically in one transaction. Without this each
+  // recordEntityDedupFeedback() below auto-commits on its own (up to
+  // ENTITY_AUTO_SIGNAL_MAX_PAIRS write-lock cycles per sweep); wrapping
+  // collapses the sweep into a single commit and keeps prune+insert consistent.
+  withTransaction(() => {
+    pruneEntityDedupFeedback(projectId);
 
-  for (const s of capped) {
-    recordEntityDedupFeedback({
-      projectId,
-      entryATitle: s.entryATitle,
-      entryBTitle: s.entryBTitle,
-      similarity: s.similarity,
-      accepted: false,
-      source: "auto_dedup",
-    });
-  }
+    for (const s of capped) {
+      recordEntityDedupFeedback({
+        projectId,
+        entryATitle: s.entryATitle,
+        entryBTitle: s.entryBTitle,
+        similarity: s.similarity,
+        accepted: false,
+        source: "auto_dedup",
+      });
+    }
+  });
 }
 
 /** Get all entity feedback for a project (for calibration). */

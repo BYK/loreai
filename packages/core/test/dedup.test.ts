@@ -451,6 +451,50 @@ describe("dedup — feedback recording", () => {
     expect(feedback[0].source).toBe("auto_dedup");
   });
 
+  test("recordAutoSignals batches all feedback inserts in one transaction (#1010)", () => {
+    const pid = ensureProject(PROJECT);
+    // Three high-similarity, non-merged pairs → three reject signals → three
+    // INSERTs. `clusters` is empty so none is treated as a merged pair, and
+    // titles come straight from `entryTitles`. The N+1 being guarded here is
+    // one auto-commit per inserted row; the fix wraps the whole sweep in a
+    // single transaction.
+    const result = {
+      clusters: [],
+      totalRemoved: 0,
+      pairSimilarities: new Map([
+        [dedupPairKey("a", "b"), 0.85],
+        [dedupPairKey("a", "c"), 0.9],
+        [dedupPairKey("b", "c"), 0.88],
+      ]),
+      entryTitles: new Map([
+        ["a", "Reject signal title A"],
+        ["b", "Reject signal title B"],
+        ["c", "Reject signal title C"],
+      ]),
+    } satisfies ltm.DedupResult;
+
+    // Spy on the live connection's exec() to count BEGIN statements. Inserts go
+    // through query().run(), so the only BEGIN can come from withTransaction().
+    const conn = db() as unknown as { exec(sql: string): unknown };
+    const realExec = conn.exec.bind(conn);
+    let begins = 0;
+    conn.exec = (sql: string) => {
+      if (/^\s*BEGIN/i.test(sql)) begins++;
+      return realExec(sql);
+    };
+    try {
+      ltm.recordAutoSignals(pid, result);
+    } finally {
+      conn.exec = realExec;
+    }
+
+    // All three signals are recorded...
+    expect(ltm.getDedupFeedbackCount(pid)).toBe(3);
+    // ...inside exactly one transaction (would be 0 BEGINs before the fix:
+    // every recordDedupFeedback() auto-committed on its own).
+    expect(begins).toBe(1);
+  });
+
   test("recordAutoSignals filters out pairs below 0.80 similarity", async () => {
     const id1 = createEntry({ title: "Unique entry for low sim alpha" });
     const id2 = createEntry({ title: "Unique entry for low sim beta" });

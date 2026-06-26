@@ -3278,22 +3278,27 @@ export function recordDedupResultFeedback(
   accepted: boolean,
   source: DedupFeedbackSource,
 ): void {
-  for (const cluster of result.clusters) {
-    for (const merged of cluster.merged) {
-      const pk = dedupPairKey(cluster.surviving.id, merged.id);
-      const similarity = result.pairSimilarities.get(pk);
-      if (similarity != null && similarity > 0) {
-        recordDedupFeedback({
-          projectId,
-          entryATitle: cluster.surviving.title,
-          entryBTitle: merged.title,
-          similarity,
-          accepted,
-          source,
-        });
+  // Batch every row into a single transaction: each recordDedupFeedback() is a
+  // standalone INSERT that would otherwise auto-commit on its own (one write
+  // lock cycle per merged pair). Wrapping makes the whole signal set atomic.
+  withTransaction(() => {
+    for (const cluster of result.clusters) {
+      for (const merged of cluster.merged) {
+        const pk = dedupPairKey(cluster.surviving.id, merged.id);
+        const similarity = result.pairSimilarities.get(pk);
+        if (similarity != null && similarity > 0) {
+          recordDedupFeedback({
+            projectId,
+            entryATitle: cluster.surviving.title,
+            entryBTitle: merged.title,
+            similarity,
+            accepted,
+            source,
+          });
+        }
       }
     }
-  }
+  });
 }
 
 /**
@@ -3362,19 +3367,25 @@ export function recordAutoSignals(
   );
   const capped = signals.slice(0, AUTO_SIGNAL_MAX_PAIRS);
 
-  // Prune old feedback to prevent unbounded table growth
-  pruneDedupFeedback(projectId);
+  // Prune + insert atomically in a single transaction. Without this each
+  // recordDedupFeedback() below auto-commits on its own (up to
+  // AUTO_SIGNAL_MAX_PAIRS write-lock cycles per sweep); wrapping collapses the
+  // whole sweep into one commit and keeps prune+insert consistent.
+  withTransaction(() => {
+    // Prune old feedback to prevent unbounded table growth
+    pruneDedupFeedback(projectId);
 
-  for (const s of capped) {
-    recordDedupFeedback({
-      projectId,
-      entryATitle: s.entryATitle,
-      entryBTitle: s.entryBTitle,
-      similarity: s.similarity,
-      accepted: false,
-      source: "auto_dedup",
-    });
-  }
+    for (const s of capped) {
+      recordDedupFeedback({
+        projectId,
+        entryATitle: s.entryATitle,
+        entryBTitle: s.entryBTitle,
+        similarity: s.similarity,
+        accepted: false,
+        source: "auto_dedup",
+      });
+    }
+  });
 }
 
 /** Get all feedback for a project (for calibration). */
