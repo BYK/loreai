@@ -577,13 +577,19 @@ describe("cache stability (e2e)", () => {
     expect(turn3Messages).toContain(
       "Updated context-bound knowledge that must arrive as a durable prompt delta",
     );
-    expect(turn3Messages).toContain("Additional Changed Knowledge");
-    expect(turn3Messages).toContain("Changed huge durable delta marker");
+    // The large changed entry overflows the delta render budget. It is no longer
+    // dumped as a truncated half-entry ("Additional Changed Knowledge"); instead
+    // it is folded into the actionable recall-by-id index so it is referenced
+    // (not silently dropped) and the model can recall its full current content.
+    expect(turn3Messages).not.toContain("Additional Changed Knowledge");
+    expect(turn3Messages).not.toContain("Superseded");
+    expect(turn3Messages).toContain("Other relevant knowledge");
+    expect(turn3Messages).toContain(`[k:${largeContextID}]`);
     expect(turn4Messages).toContain("Lore knowledge update");
     expect(turn4Messages).toContain(
       "Updated context-bound knowledge that must arrive as a durable prompt delta",
     );
-    expect(turn4Messages).toContain("Changed huge durable delta marker");
+    expect(turn4Messages).toContain(`[k:${largeContextID}]`);
 
     const rows = harness.queryDB<{
       seq: number;
@@ -602,7 +608,7 @@ describe("cache stability (e2e)", () => {
     expect(selector.target).toBe("messages");
     expect(Number.isInteger(selector.insertAt)).toBe(true);
     expect(rows[0].content).toContain("Updated context-bound knowledge");
-    expect(rows[0].content).toContain("Changed huge durable delta marker");
+    expect(rows[0].content).toContain(`[k:${largeContextID}]`);
   });
 
   it("budget-overflow knowledge surfaces as a recall-by-id ToC in system[1] (A) and the delta (B) [#917]", async () => {
@@ -983,17 +989,14 @@ describe("cache stability (e2e)", () => {
     expect(rows[0].content).toBe(block0First?.content);
   });
 
-  it("supersessions on different turns are ALL preserved across the appended block sequence (incl. restart)", async () => {
-    // Append-only correctness: two entries superseded on two different turns
-    // must BOTH remain surfaced. In the append-only model each removal appends
-    // its own immutable block, so the supersessions live across the SEQUENCE of
-    // blocks (not one rewritten row). The advancing surfaced-set reconstruction
-    // — frozen pin baseline + each block's stashed mutation signature — is what
-    // keeps the earlier supersession from being dropped AND keeps the later one
-    // from re-surfacing the earlier (already-surfaced) entry. The reconstruction
-    // is durable: it is rebuilt purely from the persisted blocks, so it survives
-    // a restart with no extra state. We exercise force layer 4 + a restart
-    // between the two removals to prove it.
+  it("genuine supersessions on different turns surface NO delta and keep system[2] byte-stable (incl. restart)", async () => {
+    // Trim (quality + cost): a removals-only diff no longer injects a mid-session
+    // "Superseded — ignore these ids" delta — that list was content the model
+    // could not reliably act on, and its per-turn churn was the dominant
+    // cache-bust driver. Here two entries are genuinely removed on two different
+    // turns (with a restart between them) under forced layer 4: NO delta block is
+    // appended, and the frozen system[2] pin stays byte-identical the whole time
+    // (the stale entries are simply left pinned until the next session refresh).
     const turns = Array.from({ length: 7 }, (_, i) => ({
       userMessage: `Cumulative turn ${i}: continue.`,
       assistantText: `Cumulative response ${i}.`,
@@ -1072,43 +1075,31 @@ describe("cache stability (e2e)", () => {
       "SELECT seq, content FROM session_prompt_deltas WHERE session_id = ? ORDER BY seq",
       [sessionID],
     );
-    // Two distinct removals on two turns → two appended blocks (A's, then B's).
+    // Removals-only → NOTHING is appended. (A removal still advances the surfaced
+    // set when it rides a genuine content change, but on its own it never
+    // produces a delta block.)
     expect(
       rows.length,
-      `expected two appended supersession blocks, got seqs=${rows
+      `expected NO appended delta blocks for removals-only, got seqs=${rows
         .map((r) => r.seq)
         .join(",")}`,
-    ).toBe(2);
+    ).toBe(0);
 
-    // Across the WHOLE block sequence, BOTH A and B must be surfaced as
-    // superseded — exactly once each (no drop, no duplicate re-surface despite
-    // the restart between the two removals).
-    const allText = rows
-      .map((r) =>
-        (JSON.parse(r.content) as { content: Array<{ text?: string }> }).content
-          .map((b) => b.text ?? "")
-          .join(""),
-      )
-      .join("\n");
-    for (const r of rows) {
-      const blockText = (
-        JSON.parse(r.content) as { content: Array<{ text?: string }> }
-      ).content
-        .map((b) => b.text ?? "")
-        .join("");
-      expect(blockText).toContain("Superseded Long-term Knowledge");
+    // The frozen system[2] pin must stay byte-identical across every turn after
+    // it froze — the genuine removals (and the restart between them) must never
+    // rewrite or recompute it.
+    const bodies = harness.upstreamBodies();
+    const steadySystem = systemBlocks(bodies[1]);
+    for (let i = 2; i < bodies.length; i++) {
+      expect(
+        systemBlocks(bodies[i]),
+        `system blocks changed on turn ${i + 1} after a genuine removal — the ` +
+          `frozen system[2] pin must never be rewritten by a removal`,
+      ).toEqual(steadySystem);
     }
-    const bulletCount = (allText.match(/\n\* \[/g) ?? []).length;
-    expect(
-      bulletCount,
-      `expected 2 superseded bullets across the block sequence (A on turn 2, ` +
-        `B on turn 4), got ${bulletCount}. A count of 1 means a supersession ` +
-        `was dropped; >2 means an already-surfaced removal re-fired (the ` +
-        `advancing surfaced-set didn't survive the restart). Blocks: ${allText}`,
-    ).toBe(2);
   });
 
-  it("removed LTM entries are replayed as durable superseded deltas without rewriting system[2]", async () => {
+  it("removed LTM entries surface NO mid-session delta and keep system[2] byte-stable", async () => {
     const turns = Array.from({ length: 4 }, (_, i) => ({
       userMessage: `Removal delta turn ${i}: continue the work.`,
       assistantText: `Removal delta response ${i}.`,
@@ -1174,18 +1165,17 @@ describe("cache stability (e2e)", () => {
 
     const turn3Messages = serializedMessages(bodies[2]);
     const turn4Messages = serializedMessages(bodies[3]);
-    expect(turn3Messages).toContain("Superseded Long-term Knowledge");
-    expect(turn3Messages).toContain(contextID.slice(0, 8));
-    expect(turn4Messages).toContain("Superseded Long-term Knowledge");
-    expect(turn4Messages).toContain(contextID.slice(0, 8));
+    // Removals-only no longer surface a mid-session message: the deleted entry
+    // is left pinned (stale) in the frozen system[2] until the next session
+    // refresh, and no "Superseded" delta is injected to bust the cache.
+    expect(turn3Messages).not.toContain("Superseded");
+    expect(turn4Messages).not.toContain("Superseded");
 
     const rows = harness.queryDB<{ content: string }>(
       "SELECT content FROM session_prompt_deltas WHERE session_id = ? ORDER BY seq",
       [sessionID],
     );
-    expect(rows).toHaveLength(1);
-    expect(rows[0].content).toContain("Superseded Long-term Knowledge");
-    expect(rows[0].content).toContain(contextID.slice(0, 8));
+    expect(rows).toHaveLength(0);
   });
 
   it("frozen system[1] survives a mid-session preference DELETE across a restart (ses_14b9bf3d… incident)", async () => {
@@ -1357,7 +1347,7 @@ describe("cache stability (e2e)", () => {
     expect(bodies[2]).not.toContain("Mid-session minted preference");
   });
 
-  it("normal LTM refresh preserves system[2] and emits durable removal deltas", async () => {
+  it("normal LTM refresh preserves system[2] and surfaces NO removal delta", async () => {
     const turns = Array.from({ length: 4 }, (_, i) => ({
       userMessage: `Normal removal delta turn ${i}: continue the work.`,
       assistantText: `Normal removal delta response ${i}.`,
@@ -1422,8 +1412,15 @@ describe("cache stability (e2e)", () => {
     expect(systemBlocks(bodies[3])).toEqual(steadySystem);
 
     const turn3Messages = serializedMessages(bodies[2]);
-    expect(turn3Messages).toContain("Superseded Long-term Knowledge");
-    expect(turn3Messages).toContain(contextID.slice(0, 8));
+    // A removal during a normal (non-emergency) refresh must keep system[2]
+    // byte-stable (asserted above) and must NOT inject a "Superseded" delta —
+    // removals-only no longer surface mid-session.
+    expect(turn3Messages).not.toContain("Superseded");
+    const rows = harness.queryDB<{ content: string }>(
+      "SELECT content FROM session_prompt_deltas WHERE session_id = ? ORDER BY seq",
+      [sessionID],
+    );
+    expect(rows).toHaveLength(0);
   });
 
   it("cached system blocks stay byte-stable across gradient compression layers", async () => {

@@ -111,7 +111,13 @@ describe("append-only durable knowledge deltas", () => {
     expect(contents[1]).toContain("B AFTER — changed.");
   });
 
-  it("a persistent removal, once surfaced, does NOT re-fire on later turns (the 1LYkXZ fix)", () => {
+  it("a persistent removal-only surfaces NO block, ever (removals are not injected mid-session; supersedes the 1LYkXZ fix)", () => {
+    // Trim (quality + cost): a removals-only diff no longer injects a mid-session
+    // delta at all. The old "Superseded — ignore these ids" list was content the
+    // model could not reliably act on, and even surfacing it ONCE per genuine
+    // removal added cache churn. The 1LYkXZ bust (re-detecting + re-writing the
+    // same removal every turn) is now trivially impossible: the removal produces
+    // zero writes on turn 1 AND every later turn.
     const doomed = ltm.create({
       projectPath: PROJECT,
       scope: "project",
@@ -126,7 +132,7 @@ describe("append-only durable knowledge deltas", () => {
 
     ltm.remove(doomed); // genuine, permanent deletion
 
-    // Turn 1: the removal is surfaced.
+    // Turn 1: a removal alone surfaces nothing.
     const wrote1 = appendKnowledgePromptDelta({
       sessionID,
       projectPath: PROJECT,
@@ -135,8 +141,8 @@ describe("append-only durable knowledge deltas", () => {
       nextKeys: [],
       entries: [],
     });
-    // Turn 2..N: the pin baseline still lists the (gone) entry, but it was
-    // already surfaced — the advanced surfaced set drops it, so no new block.
+    // Turn 2..N: the pin baseline still lists the (gone) entry every turn (the
+    // original bug condition), but it must never produce a block.
     const laterWrites: boolean[] = [];
     for (let turn = 0; turn < 5; turn++) {
       laterWrites.push(
@@ -151,10 +157,10 @@ describe("append-only durable knowledge deltas", () => {
       );
     }
 
-    expect(wrote1).toBe(true);
+    expect(wrote1).toBe(false);
     expect(laterWrites).toEqual([false, false, false, false, false]);
-    // Exactly ONE block total, ever — not one per turn.
-    expect(listSessionPromptDeltas(sessionID)).toHaveLength(1);
+    // Zero blocks, ever — a removal-only never busts the cache.
+    expect(listSessionPromptDeltas(sessionID)).toHaveLength(0);
   });
 
   it("an appended block is immutable — a later append never rewrites earlier blocks", () => {

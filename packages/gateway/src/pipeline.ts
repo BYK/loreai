@@ -1261,7 +1261,16 @@ export function buildKnowledgeDeltaMessage(
     title: string;
   }>,
 ): GatewayMessage | null {
-  if (!entries.length && !removedIds.length) return null;
+  // Emit ONLY when there is genuine new/changed knowledge to surface. A
+  // removals-only diff (a pinned entry deleted/superseded by background
+  // consolidation, or dropped from the selected set) no longer injects a
+  // mid-session message: a "## Superseded — ignore these ids" list is content
+  // the model cannot reliably act on, and its per-turn churn was the dominant
+  // cache-bust driver on long sessions (read floored, deep-prefix rewritten
+  // every turn). The removal is still recorded in the block's `mut` signature
+  // by the caller (advanceSurfacedKeys), so the surfaced set still advances;
+  // the stale pin is simply left for the next session start to refresh.
+  if (!entries.length) return null;
   const renderedIds: string[] = [];
   let rendered = formatKnowledge(
     entries.map((entry) => ({
@@ -1285,52 +1294,25 @@ export function buildKnowledgeDeltaMessage(
     renderedIds.push(entry.id);
   }
   rendered ??= "";
-  const renderedIDSet = new Set(renderedIds);
-  // Sort the overflow ("Additional Changed Knowledge") deterministically by id
-  // before slicing. `entries` arrives in forSession() ranking order, which is
-  // volatile per turn (relevance scoring), so an unsorted slice could pick a
-  // different 3 entries / different order across turns → a byte-different delta
-  // even when nothing materially changed → a needless cache bust. The primary
-  // `rendered` section is already order-stabilized by formatKnowledge; this
-  // makes the overflow section byte-stable too.
-  const skipped = entries
-    .filter((entry) => !renderedIDSet.has(entry.id))
-    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  const skippedRendered = skipped.length
-    ? `\n\n## Additional Changed Knowledge (truncated)\n\n${skipped
-        .slice(0, 3)
-        .map((entry) => {
-          const truncated =
-            entry.content.length > 500
-              ? `${entry.content.slice(0, 500)}...`
-              : entry.content;
-          return `* **[${entry.id.slice(0, 8)}]${entry.title}**: ${truncated}`;
-        })
-        .join("\n")}${
-        skipped.length > 3
-          ? `\n* ${skipped.length - 3} more changed entr${skipped.length - 3 === 1 ? "y" : "ies"} omitted; older pinned system[2] entries for those IDs are stale.`
-          : ""
-      }`
-    : "";
-  const removals = removedIds.length
-    ? `\n\n## Superseded Long-term Knowledge\n\nIgnore any older pinned system[2] entries with these IDs; they are no longer in the current selected knowledge set:\n${removedIds.map((id) => `* [${id.slice(0, 8)}]`).join("\n")}`
-    : "";
-  // #917 overflow ToC: a compact index of relevance-scored entries that didn't
-  // fit the system[2] budget, so the agent can recall them on demand. Exclude
-  // ids already shown above (changed/rendered) or listed as superseded — listing
-  // a "recall this" id that's also "ignore this" would contradict. Sort by id
-  // (NOT relevance order, which churns per turn) so the section is byte-stable
-  // across turns and only changes when the overflow SET changes — same cache-
-  // stability rationale as the "Additional Changed Knowledge" slice above. The
-  // section never appears alone: the early return above bails when there is no
-  // material change, so overflow only ever rides a delta that already exists.
-  const shownOrRemoved = new Set<string>([
-    ...entries.map((e) => e.id),
-    ...removedIds,
-  ]);
-  const tocEntries = (overflow ?? [])
-    .filter((e) => !shownOrRemoved.has(e.id))
-    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  // Fold two groups into ONE compact, ACTIONABLE recall-by-id index:
+  //  (1) changed entries that overflowed the full-render budget above —
+  //      surfaced as `[k:id]` hints instead of the old "Additional Changed
+  //      Knowledge (truncated)" dump (3 cut-off entries + "N more omitted",
+  //      which the model couldn't act on);
+  //  (2) #917 relevance-scored overflow that didn't fit system[2].
+  // Sort by id (NOT relevance order, which churns per turn) so the section is
+  // byte-stable across turns and only changes when the SET changes — preserving
+  // the conversation prompt cache. Skip ids already fully rendered above, and
+  // any removed id (a tombstoned entry must never be suggested for recall).
+  const removedSet = new Set(removedIds);
+  const tocSeen = new Set<string>(renderedIds);
+  const tocEntries: Array<{ id: string; title: string; category: string }> = [];
+  for (const e of [...entries, ...(overflow ?? [])]) {
+    if (tocSeen.has(e.id) || removedSet.has(e.id)) continue;
+    tocSeen.add(e.id);
+    tocEntries.push({ id: e.id, title: e.title, category: e.category });
+  }
+  tocEntries.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const tocRendered = tocEntries.length
     ? `\n\n## Other relevant knowledge (recall by id for detail)\n\n${tocEntries
         .slice(0, OVERFLOW_TOC_MAX)
@@ -1349,8 +1331,6 @@ export function buildKnowledgeDeltaMessage(
         text:
           "[Lore knowledge update: durable prompt delta. This message is inserted by Lore and replayed byte-identically on later turns until an intentional cache reset.]\n\n" +
           rendered +
-          skippedRendered +
-          removals +
           tocRendered,
       },
     ],

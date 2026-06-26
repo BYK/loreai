@@ -221,7 +221,13 @@ describe("detectSurfacedMutations — genuine DB mutation, not ranking churn", (
     expect(listSessionPromptDeltas(sessionID)).toHaveLength(0);
   });
 
-  it("WIRING: genuine deletion of a pinned entry → superseded delta IS written", () => {
+  it("WIRING: genuine deletion of a pinned entry ALONE → NO delta (removals-only not surfaced)", () => {
+    // Trim (quality + cost): a removals-only diff no longer injects a mid-session
+    // message. A "## Superseded — ignore these ids" list is content the model
+    // cannot reliably act on, and the per-turn churn of that list was the
+    // dominant cache-bust driver on long sessions. The deletion is left for the
+    // next session's pin refresh; if a genuine CHANGE later rides through, the
+    // removal is folded into that block's `mut` signature (next test).
     const id = ltm.create({
       projectPath: PROJECT,
       scope: "project",
@@ -247,8 +253,63 @@ describe("detectSurfacedMutations — genuine DB mutation, not ranking churn", (
       entries: [],
     });
 
+    expect(wrote).toBe(false);
+    expect(listSessionPromptDeltas(sessionID)).toHaveLength(0);
+  });
+
+  it("WIRING: deletion that rides a genuine change → delta written, removal in mut (advances surfaced set), no 'Superseded' text", () => {
+    // The removal still has to ADVANCE the surfaced set so it isn't re-detected
+    // forever. When it rides a real content change, the appended block records
+    // it in `mut.removed` (consumed by advanceSurfacedKeys) even though the
+    // rendered text no longer carries a "Superseded" section.
+    const changedId = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Pinned then edited (rides)",
+      content: "Before.",
+    });
+    const deletedId = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Pinned then deleted (rides)",
+      content: "Will be removed alongside a change.",
+    });
+    const sessionID = `wiring-ride-${Date.now()}`;
+    const changedKey = keyOf(
+      changedId,
+      "Pinned then edited (rides)",
+      "Before.",
+    );
+    const deletedKey = keyOf(
+      deletedId,
+      "Pinned then deleted (rides)",
+      "Will be removed alongside a change.",
+    );
+
+    ltm.update(changedId, { content: "After — materially changed." });
+    ltm.remove(deletedId);
+
+    const wrote = appendKnowledgePromptDelta({
+      sessionID,
+      projectPath: PROJECT,
+      insertAt: 5,
+      previousKeys: [changedKey, deletedKey],
+      nextKeys: [changedKey],
+      entries: [],
+    });
+
     expect(wrote).toBe(true);
-    expect(deltaText(sessionID)).toContain("Superseded Long-term Knowledge");
+    const text = deltaText(sessionID);
+    expect(text).toContain("After — materially changed.");
+    expect(text).not.toContain("Superseded");
+    // The removal must be recorded in the block's mutation signature.
+    const [row] = listSessionPromptDeltas(sessionID);
+    const selector = JSON.parse(row.selector) as {
+      mut?: { removed?: string[] };
+    };
+    expect(selector.mut?.removed ?? []).toContain(deletedId);
   });
 
   it("WIRING: genuine content change of a pinned entry → changed delta IS written", () => {
