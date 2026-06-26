@@ -193,12 +193,15 @@ function failAll(pw: PoolWorker, err: Error): void {
  * Cancel a timed-out search by retiring its worker.
  *
  * A worker runs `runVectorQuery` synchronously, so a query that blew the
- * timeout can't be interrupted from JS — the only way to stop the doomed scan
- * (and free the thread it's pinning) is to terminate the worker. Leaving it
- * running while we delete the in-flight entry — the pre-cancellation behavior —
- * made the still-busy worker look idle to {@link leastBusy}, so new searches
- * piled up behind the stuck scan in its message queue. {@link ensurePool}
- * respawns a fresh worker on the next call, restoring capacity.
+ * timeout can't be interrupted from JS — terminating the worker is the only way
+ * to reclaim the thread it's pinning (V8 tears it down once the in-progress
+ * native call returns). The immediate, guaranteed effect is de-routing: marking
+ * it `dead` drops it from {@link leastBusy} and {@link ensurePool} right away.
+ * Leaving it running while we delete the in-flight entry — the pre-cancellation
+ * behavior — made the still-busy worker look idle to {@link leastBusy}, so new
+ * searches piled up behind the stuck scan in its message queue.
+ * {@link ensurePool} respawns a fresh worker on the next call, restoring
+ * capacity.
  *
  * Crucially this is NOT counted as a structural failure: a timeout is slowness,
  * not a broken worker, and latching the pool broken after repeated timeouts

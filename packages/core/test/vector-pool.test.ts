@@ -353,26 +353,34 @@ describe("vector-pool timeout cancellation (#1006 follow-up)", () => {
     expect(served?.terminated).toBe(true);
   });
 
-  it("recovers after a timeout: the next search runs on a live worker", async () => {
+  it("recovers after a timeout: the next search is NOT routed to the wedged worker", async () => {
     vi.useFakeTimers();
     let mode: "hang" | "reply" = "hang";
+    // Tag each reply with the serving worker's index so we can prove which
+    // worker handled the recovery search.
     _setTestVectorWorkerFactory(
       factoryReturning((w, msg) => {
-        if (mode === "reply") w.reply(msg.id, [{ id: "ok", similarity: 1 }]);
+        if (mode === "reply") {
+          w.reply(msg.id, [{ id: `from-${w.index}`, similarity: 1 }]);
+        }
       }),
     );
+    // First search lands on worker 0 (leastBusy tie → first) and hangs.
     const timedOut = tryPoolVectorSearch(KNOWLEDGE, QUERY);
     await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
     expect(await timedOut).toBe(VECTOR_SEARCH_TIMED_OUT);
+    const wedged = FakeWorker.instances[0];
+    expect(wedged.index).toBe(0);
+    expect(wedged.terminated).toBe(true);
 
     mode = "reply";
     vi.useRealTimers();
-    // Pool must recover: the next search is served by a live worker (not stuck
-    // behind the wedged one, not the in-process-fallback null).
-    expect(await tryPoolVectorSearch(KNOWLEDGE, QUERY)).toEqual([
-      { id: "ok", similarity: 1 },
-    ]);
-    expect(FakeWorker.instances.some((w) => !w.terminated)).toBe(true);
+    // The follow-up must be served by a different, live worker — NOT the wedged
+    // one. Pre-cancellation (worker 0 left alive, in-flight deleted), leastBusy
+    // sees worker 0 as idle and reuses it → the result would be tagged "from-0".
+    const hits = await tryPoolVectorSearch(KNOWLEDGE, QUERY);
+    expect(hits).toHaveLength(1);
+    expect(hits).not.toContainEqual({ id: "from-0", similarity: 1 });
   });
 
   it("never latches the pool broken on repeated timeouts (slowness != structural failure)", async () => {
