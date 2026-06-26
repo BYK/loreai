@@ -30,7 +30,11 @@ import {
   runRelaxedSearchAsync,
   termIDF,
 } from "./search";
-import { offloadAllOrTimeout, READ_JOB_TIMED_OUT } from "./read-offload";
+import {
+  offloadAll,
+  offloadAllOrTimeout,
+  READ_JOB_TIMED_OUT,
+} from "./read-offload";
 import { inline } from "./markdown";
 
 // ---------------------------------------------------------------------------
@@ -228,6 +232,34 @@ async function searchDistillationsScored(input: {
       limit,
     }).map((dist, i) => ({ ...dist, rank: -(10 - i) }));
   }
+}
+
+/**
+ * Batch-hydrate vector-search hits with a single `WHERE id IN (...)` scan
+ * offloaded onto the read-worker pool (#966). Replaces the previous per-hit
+ * `db().query(...).get(hit.id)` loops, which ran one synchronous indexed lookup
+ * per hit on the main event loop. `selectPrefix` MUST be a `SELECT ... WHERE id
+ * IN`-shaped fragment with a lean column list (no embedding BLOB) so rows are
+ * structured-clone-safe across the worker boundary. Returns a map keyed by row
+ * id; callers iterate the hits in similarity order, preserving ranking and
+ * dropping misses exactly as the per-hit loops did. On pool timeout
+ * `offloadAll` resolves to `[]`, so a slow worker degrades to "no hits for this
+ * source" rather than re-blocking the main thread.
+ */
+async function hydrateVectorRows<T extends { id: string }>(
+  hits: ReadonlyArray<{ id: string }>,
+  selectPrefix: string,
+): Promise<Map<string, T>> {
+  const map = new Map<string, T>();
+  if (!hits.length) return map;
+  const ids = hits.map((h) => h.id);
+  const placeholders = ids.map(() => "?").join(",");
+  const rows = (await offloadAll(
+    `${selectPrefix} (${placeholders})`,
+    ids,
+  )) as T[];
+  for (const row of rows) map.set(row.id, row);
+  return map;
 }
 
 // ---------------------------------------------------------------------------
@@ -875,9 +907,13 @@ export async function searchRecall(
         const vectorHits = await timer.await(
           embedding.vectorSearch(queryVec, limit),
         );
+        // Batch-hydrate hits off-thread (#966) instead of N per-hit ltm.get().
+        const entryMap = await timer.await(
+          ltm.getManyOffloaded(vectorHits.map((h) => h.id)),
+        );
         const vectorTagged: TaggedResult[] = [];
         for (const hit of vectorHits) {
-          const entry = ltm.get(hit.id);
+          const entry = entryMap.get(hit.id);
           if (entry) {
             vectorTagged.push({
               source: "knowledge",
@@ -903,13 +939,16 @@ export async function searchRecall(
         const distVectorHits = await timer.await(
           embedding.vectorSearchDistillations(queryVec, limit),
         );
+        // Batch-hydrate hits off-thread (#966) instead of N per-hit point reads.
+        const distMap = await timer.await(
+          hydrateVectorRows<Distillation>(
+            distVectorHits,
+            "SELECT id, observations, generation, created_at, session_id, c_norm, r_compression FROM distillations WHERE id IN",
+          ),
+        );
         const distVectorTagged: TaggedResult[] = distVectorHits
           .map((hit): TaggedResult | null => {
-            const row = db()
-              .query(
-                "SELECT id, observations, generation, created_at, session_id, c_norm, r_compression FROM distillations WHERE id = ?",
-              )
-              .get(hit.id) as Distillation | null;
+            const row = distMap.get(hit.id);
             if (!row) return null;
             return {
               source: "distillation",
@@ -932,13 +971,16 @@ export async function searchRecall(
         const temporalVectorHits = await timer.await(
           embedding.vectorSearchTemporal(queryVec, pid, limit),
         );
+        // Batch-hydrate hits off-thread (#966) instead of N per-hit point reads.
+        const temporalMap = await timer.await(
+          hydrateVectorRows<temporal.TemporalMessage>(
+            temporalVectorHits,
+            "SELECT id, project_id, session_id, role, content, tokens, distilled, created_at, metadata FROM temporal_messages WHERE id IN",
+          ),
+        );
         const temporalVectorTagged: TaggedResult[] = temporalVectorHits
           .map((hit): TaggedResult | null => {
-            const row = db()
-              .query(
-                "SELECT id, project_id, session_id, role, content, tokens, distilled, created_at, metadata FROM temporal_messages WHERE id = ?",
-              )
-              .get(hit.id) as temporal.TemporalMessage | null;
+            const row = temporalMap.get(hit.id);
             if (!row) return null;
             return {
               source: "temporal",
@@ -970,9 +1012,16 @@ export async function searchRecall(
         const entityVectorHits = await timer.await(
           embedding.vectorSearchEntities(queryVec, limit),
         );
+        // Batch-hydrate hits off-thread (#966) instead of N per-hit
+        // getWithAliases() calls (entity row + alias load each).
+        const entMap = await timer.await(
+          entities.getManyWithAliasesOffloaded(
+            entityVectorHits.map((h) => h.id),
+          ),
+        );
         const entityVectorTagged: TaggedResult[] = entityVectorHits
           .map((hit): TaggedResult | null => {
-            const ent = entities.getWithAliases(hit.id);
+            const ent = entMap.get(hit.id);
             if (!ent) return null;
             const visible =
               ent.project_id === entPid ||
@@ -1059,7 +1108,9 @@ export async function searchRecall(
   // "session" and "knowledge" scopes.
   if (scope === "all" || scope === "project") {
     try {
-      const entityResults = entities.search({ query, projectPath, limit });
+      const entityResults = await timer.await(
+        entities.searchAsync({ query, projectPath, limit }),
+      );
       if (entityResults.length) {
         allRrfLists.push({
           items: entityResults.map((item, i) => ({
@@ -1082,11 +1133,13 @@ export async function searchRecall(
   // `e:` key as the entity list so RRF merges them. `infra` stays excluded.
   if (scope === "all") {
     try {
-      const crossRepos = entities.searchCrossProjectRepos({
-        query,
-        excludeProjectPath: projectPath,
-        limit,
-      });
+      const crossRepos = await timer.await(
+        entities.searchCrossProjectReposAsync({
+          query,
+          excludeProjectPath: projectPath,
+          limit,
+        }),
+      );
       if (crossRepos.length) {
         allRrfLists.push({
           items: crossRepos.map((item, i) => ({

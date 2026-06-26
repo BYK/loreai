@@ -8,6 +8,7 @@
 import { uuidv7 } from "uuidv7";
 import { db, ensureProject, getKV, setKV, withTransaction } from "./db";
 import { ftsQuery, ftsQueryOr, EMPTY_QUERY, filterTerms } from "./search";
+import { offloadAll } from "./read-offload";
 import { config } from "./config";
 import { getGitUser } from "./git";
 import * as log from "./log";
@@ -852,6 +853,62 @@ function withAliases(rows: Entity[]): EntityWithAliases[] {
   return rows.map((e) => ({ ...e, aliases: aliasMap.get(e.id) ?? [] }));
 }
 
+/**
+ * Offloaded counterpart to {@link batchLoadAliases} (#966). The single
+ * `entity_aliases IN (...)` scan runs on the read-worker pool instead of the
+ * main thread. `entity_aliases` carries only TEXT/INTEGER columns, so the rows
+ * are structured-clone-safe across the worker boundary.
+ */
+async function batchLoadAliasesOffloaded(
+  entityIds: string[],
+): Promise<Map<string, EntityAlias[]>> {
+  const map = new Map<string, EntityAlias[]>();
+  if (!entityIds.length) return map;
+  // Initialize empty arrays for all IDs (mirrors batchLoadAliases)
+  for (const id of entityIds) map.set(id, []);
+  const placeholders = entityIds.map(() => "?").join(",");
+  const allAliases = (await offloadAll(
+    `SELECT * FROM entity_aliases WHERE entity_id IN (${placeholders}) ORDER BY alias_type, alias_value`,
+    entityIds,
+  )) as EntityAlias[];
+  for (const a of allAliases) {
+    map.get(a.entity_id)?.push(a);
+  }
+  return map;
+}
+
+/** Offloaded counterpart to {@link withAliases} (#966). */
+async function withAliasesOffloaded(
+  rows: Entity[],
+): Promise<EntityWithAliases[]> {
+  const aliasMap = await batchLoadAliasesOffloaded(rows.map((e) => e.id));
+  return rows.map((e) => ({ ...e, aliases: aliasMap.get(e.id) ?? [] }));
+}
+
+/**
+ * Batch-hydrate entities + aliases by id, offloaded (#966). Used by recall's
+ * entity vector hydration to replace N per-hit `getWithAliases()` calls with a
+ * single `entities IN (...)` scan plus one offloaded alias load. `ENTITY_COLS`
+ * excludes the embedding BLOB, so rows are clone-safe across the worker
+ * boundary. Returns a map keyed by entity id; ids with no live row are absent
+ * from the map (callers drop them, matching `getWithAliases()` returning null).
+ */
+export async function getManyWithAliasesOffloaded(
+  ids: string[],
+): Promise<Map<string, EntityWithAliases>> {
+  const map = new Map<string, EntityWithAliases>();
+  if (!ids.length) return map;
+  const placeholders = ids.map(() => "?").join(",");
+  const rows = (await offloadAll(
+    `SELECT ${ENTITY_COLS} FROM entities WHERE id IN (${placeholders})`,
+    ids,
+  )) as Entity[];
+  for (const e of await withAliasesOffloaded(rows)) {
+    map.set(e.id, e);
+  }
+  return map;
+}
+
 /** List entities for a project, optionally including cross-project entities. */
 export function forProject(
   projectPath: string,
@@ -968,6 +1025,72 @@ export function search(input: {
 }
 
 /**
+ * Offloaded counterpart to {@link search} (#966). The two FTS scans (canonical
+ * name + alias) and the alias hydration run on the read-worker pool instead of
+ * the main event loop. `ENTITY_COLS_E` excludes the embedding BLOB, so rows are
+ * structured-clone-safe across the worker boundary. Behaviour (filtering,
+ * merge/dedupe order, limit) is identical to {@link search}.
+ */
+export async function searchAsync(input: {
+  query: string;
+  projectPath?: string;
+  limit?: number;
+}): Promise<EntityWithAliases[]> {
+  const limit = input.limit ?? 20;
+  const fts = ftsQueryOr(input.query);
+  if (fts === EMPTY_QUERY) return [];
+
+  const pid = input.projectPath ? ensureProject(input.projectPath) : null;
+
+  const nameSQL = pid
+    ? `SELECT ${ENTITY_COLS_E}
+         FROM entities e
+         JOIN entities_fts f ON f.rowid = e.rowid
+         WHERE entities_fts MATCH ? AND (e.project_id = ? OR e.project_id IS NULL OR e.cross_project = 1)
+         ORDER BY rank
+         LIMIT ?`
+    : `SELECT ${ENTITY_COLS_E}
+         FROM entities e
+         JOIN entities_fts f ON f.rowid = e.rowid
+         WHERE entities_fts MATCH ?
+         ORDER BY rank
+         LIMIT ?`;
+  const aliasSQL = pid
+    ? `SELECT DISTINCT ${ENTITY_COLS_E}
+         FROM entities e
+         JOIN entity_aliases a ON a.entity_id = e.id
+         JOIN entity_aliases_fts af ON af.rowid = a.rowid
+         WHERE entity_aliases_fts MATCH ? AND (e.project_id = ? OR e.project_id IS NULL OR e.cross_project = 1)
+         ORDER BY rank
+         LIMIT ?`
+    : `SELECT DISTINCT ${ENTITY_COLS_E}
+         FROM entities e
+         JOIN entity_aliases a ON a.entity_id = e.id
+         JOIN entity_aliases_fts af ON af.rowid = a.rowid
+         WHERE entity_aliases_fts MATCH ?
+         ORDER BY rank
+         LIMIT ?`;
+  const nameParams = pid ? [fts, pid, limit] : [fts, limit];
+  const aliasParams = pid ? [fts, pid, limit] : [fts, limit];
+
+  const [nameMatches, aliasMatches] = (await Promise.all([
+    offloadAll(nameSQL, nameParams),
+    offloadAll(aliasSQL, aliasParams),
+  ])) as [Entity[], Entity[]];
+
+  // Merge and dedupe (preserve name-match ordering first) — identical to search()
+  const seen = new Set<string>();
+  const merged: Entity[] = [];
+  for (const e of [...nameMatches, ...aliasMatches]) {
+    if (seen.has(e.id)) continue;
+    seen.add(e.id);
+    merged.push(e);
+  }
+
+  return withAliasesOffloaded(merged.slice(0, limit));
+}
+
+/**
  * Search `repo` entities owned by *other* projects, by FTS5 on canonical name
  * and alias values. Used by recall's "all" scope to resolve cross-project
  * repository references (e.g. "the sentry-cli typescript project" mentioned
@@ -1038,6 +1161,60 @@ export function searchCrossProjectRepos(input: {
   }
 
   return withAliases(merged.slice(0, limit));
+}
+
+/**
+ * Offloaded counterpart to {@link searchCrossProjectRepos} (#966). FTS scans +
+ * alias hydration run on the read-worker pool. Behaviour is identical to the
+ * synchronous version.
+ */
+export async function searchCrossProjectReposAsync(input: {
+  query: string;
+  excludeProjectPath: string;
+  limit?: number;
+}): Promise<EntityWithAliases[]> {
+  const limit = input.limit ?? 20;
+  const fts = ftsQueryOr(input.query);
+  if (fts === EMPTY_QUERY) return [];
+
+  const pid = ensureProject(input.excludeProjectPath);
+
+  const nameSQL = `SELECT ${ENTITY_COLS_E}
+       FROM entities e
+       JOIN entities_fts f ON f.rowid = e.rowid
+       WHERE entities_fts MATCH ?
+         AND e.entity_type = 'repo'
+         AND e.cross_project = 0
+         AND e.project_id IS NOT NULL
+         AND e.project_id != ?
+       ORDER BY rank
+       LIMIT ?`;
+  const aliasSQL = `SELECT DISTINCT ${ENTITY_COLS_E}
+       FROM entities e
+       JOIN entity_aliases a ON a.entity_id = e.id
+       JOIN entity_aliases_fts af ON af.rowid = a.rowid
+       WHERE entity_aliases_fts MATCH ?
+         AND e.entity_type = 'repo'
+         AND e.cross_project = 0
+         AND e.project_id IS NOT NULL
+         AND e.project_id != ?
+       ORDER BY rank
+       LIMIT ?`;
+
+  const [nameMatches, aliasMatches] = (await Promise.all([
+    offloadAll(nameSQL, [fts, pid, limit]),
+    offloadAll(aliasSQL, [fts, pid, limit]),
+  ])) as [Entity[], Entity[]];
+
+  const seen = new Set<string>();
+  const merged: Entity[] = [];
+  for (const e of [...nameMatches, ...aliasMatches]) {
+    if (seen.has(e.id)) continue;
+    seen.add(e.id);
+    merged.push(e);
+  }
+
+  return withAliasesOffloaded(merged.slice(0, limit));
 }
 
 // ---------------------------------------------------------------------------

@@ -2465,6 +2465,31 @@ export function get(id: string): KnowledgeEntry | null {
 }
 
 /**
+ * Batch-hydrate current knowledge entries by id, offloaded (#966). Replaces N
+ * per-hit `get()` calls in recall's knowledge vector hydration with a single
+ * `knowledge_current IN (...)` scan on the read-worker pool. `KNOWLEDGE_COLS`
+ * excludes the embedding BLOB, so rows are structured-clone-safe across the
+ * worker boundary. Returns a map keyed by id; ids with no current/live row are
+ * absent from the map (callers drop them, matching `get()` returning null).
+ */
+export async function getManyOffloaded(
+  ids: string[],
+): Promise<Map<string, KnowledgeEntry>> {
+  const map = new Map<string, KnowledgeEntry>();
+  if (!ids.length) return map;
+  const placeholders = ids.map(() => "?").join(",");
+  const rows = (await offloadAll(
+    `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE id IN (${placeholders})`,
+    ids,
+  )) as Record<string, unknown>[];
+  for (const row of rows) {
+    const entry = hydrateKnowledgeEntry(row) as KnowledgeEntry;
+    map.set(entry.id, entry);
+  }
+  return map;
+}
+
+/**
  * Fetch the current entry for a stable `logical_id` (A2, #823). Cross-reference
  * consumers (entity refs, wiki-links, `.lore.md` markers) store `logical_id`, so
  * they must resolve back through this — `get(id)` would miss the entry once a
