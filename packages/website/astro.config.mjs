@@ -220,7 +220,7 @@ export default defineConfig({
           content: [
             'import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";',
             'mermaid.initialize({ startOnLoad: false, theme: "neutral", securityLevel: "loose", fontFamily: "var(--sl-font)" });',
-            'const blocks = document.querySelectorAll(\'pre[data-language="mermaid"]\');',
+            "const blocks = document.querySelectorAll('pre[data-language=\"mermaid\"]');",
             "for (const pre of blocks) {",
             "  const source = Array.from(pre.querySelectorAll('.ec-line')).map((l) => l.textContent).join('\\n');",
             "  if (!source.trim()) continue;",
