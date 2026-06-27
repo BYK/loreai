@@ -113,11 +113,11 @@ describe("--check-vec CLI diagnostic", () => {
   test("db error: prints failure and exits 1", async () => {
     state.dbThrows = true;
 
-    await expect(_cli()).rejects.toThrow("__exit:1");
+    await _cli();
 
     expect(errSpy).toHaveBeenCalledWith(
       expect.stringContaining("✗ check-vec failed: db boom"),
     );
-    expect(safeExit).not.toHaveBeenCalled();
+    expect(safeExit).toHaveBeenCalledWith(1);
   });
 });

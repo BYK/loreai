@@ -328,7 +328,7 @@ jobs:
           # asset-embed / extraction chain in the SEA binary.
           vec=$(./packages/gateway/dist-bin/lore-linux-x64 --check-vec)
           echo "Vec info: $vec"
-          echo "$vec" | grep -q '^ok vec_version=' \
+          echo "$vec" | grep -q '^ok vec_version=v' \
             || (echo "::error::native sqlite-vec not loaded in linux-x64 binary: $vec"; exit 1)
 
           # Start gateway, hit health endpoint, shut down
@@ -715,7 +715,7 @@ jobs:
           # is resolved (it degrades to the JS fallback, never crashes).
           vec=$("$BIN" --check-vec)
           echo "Vec info: $vec"
-          if echo "$vec" | grep -q '^ok vec_version='; then
+          if echo "$vec" | grep -q '^ok vec_version=v'; then
             echo "native sqlite-vec OK (${{ matrix.target }})"
           elif [ "${{ matrix.target }}" = "darwin-arm64" ]; then
             echo "::warning::native sqlite-vec not loaded in darwin-arm64 (dylib codesigning?) — JS fallback in use: $vec"
@@ -872,7 +872,7 @@ jobs:
           # .dylib may be blocked by library validation; degrades to JS fallback.
           vec=$("$BIN" --check-vec)
           echo "Vec info: $vec"
-          echo "$vec" | grep -q '^ok vec_version=' \
+          echo "$vec" | grep -q '^ok vec_version=v' \
             && echo "native sqlite-vec OK (darwin-arm64)" \
             || echo "::warning::native sqlite-vec not loaded in darwin-arm64 (dylib codesigning?) — JS fallback in use: $vec"
 

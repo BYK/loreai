@@ -31,6 +31,8 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
+  rmSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -113,6 +115,29 @@ export function vecBinaryCachePath(
   );
 }
 
+/** Place a file at `dest` atomically: `produce` writes to a temp path in the
+ *  same directory, then we rename it into place. A rename on the same
+ *  filesystem is atomic, so an interrupted run (CI cancel / OOM / SIGTERM)
+ *  never leaves a truncated `vec0.*` at the cache-key path — which the next
+ *  build (and the persisted `.vendor-build/` CI cache) would otherwise treat
+ *  as a valid cache hit and embed, silently breaking native vector search. */
+function placeAtomically(
+  dest: string,
+  produce: (tmpPath: string) => void,
+): void {
+  const tmp = `${dest}.tmp-${process.pid}`;
+  try {
+    produce(tmp);
+    renameSync(tmp, dest);
+  } finally {
+    try {
+      if (existsSync(tmp)) unlinkSync(tmp);
+    } catch {
+      // best-effort cleanup
+    }
+  }
+}
+
 async function downloadAndExtract(
   target: VendorTarget,
   version: string,
@@ -128,29 +153,34 @@ async function downloadAndExtract(
     );
   }
   const buf = Buffer.from(await res.arrayBuffer());
-  const destDir = dirname(dest);
-  const tmpTgz = join(destDir, `${pkg}-${version}.tgz`);
-  writeFileSync(tmpTgz, buf);
+  // Stage the download + extraction in a temp dir so a partial result never
+  // lands at the cache path; only the finished file is renamed into place.
+  const stage = join(dirname(dest), `.tmp-${process.pid}-${target}`);
+  mkdirSync(stage, { recursive: true });
   try {
+    const tmpTgz = join(stage, `${pkg}-${version}.tgz`);
+    writeFileSync(tmpTgz, buf);
     // npm tarballs nest everything under `package/`; strip:1 drops it, and the
     // filter keeps only the single loadable-extension file.
     await tarExtract({
       file: tmpTgz,
-      cwd: destDir,
+      cwd: stage,
       strip: 1,
       filter: (p) => p === `package/vec0.${ext}`,
     });
+    const extracted = join(stage, `vec0.${ext}`);
+    if (!existsSync(extracted)) {
+      throw new Error(
+        `vendor-sqlite-vec: extracted ${pkg}@${version} but vec0.${ext} not found`,
+      );
+    }
+    renameSync(extracted, dest);
   } finally {
     try {
-      unlinkSync(tmpTgz);
+      rmSync(stage, { recursive: true, force: true });
     } catch {
-      // best-effort
+      // best-effort cleanup
     }
-  }
-  if (!existsSync(dest)) {
-    throw new Error(
-      `vendor-sqlite-vec: extracted ${pkg}@${version} but vec0.${ext} not found at ${dest}`,
-    );
   }
 }
 
@@ -168,16 +198,24 @@ export async function ensureVecBinary(
 
   mkdirSync(dirname(dest), { recursive: true });
 
-  const { pkg, ext } = VEC_TARGET_INFO[target];
-
-  // Fast path: the host's own platform package is already installed.
+  // Fast path: when building for the host, reuse the already-installed
+  // extension instead of hitting the network. The per-platform package
+  // (`sqlite-vec-<os>-<arch>`) is a *transitive* optionalDependency, so under
+  // pnpm it isn't resolvable from packages/gateway|core — only the wrapper's
+  // `getLoadablePath()` finds it (it resolves its own sibling in `.pnpm/`).
   if (target === hostTarget()) {
     try {
-      const installed = require.resolve(`${pkg}/vec0.${ext}`, {
+      const wrapper = require.resolve("sqlite-vec", {
         paths: [packageDir, join(repoRoot, "packages/core")],
       });
-      copyFileSync(installed, dest);
-      return dest;
+      const { getLoadablePath } = require(wrapper) as {
+        getLoadablePath?: () => string;
+      };
+      const installed = getLoadablePath?.();
+      if (installed && existsSync(installed)) {
+        placeAtomically(dest, (tmp) => copyFileSync(installed, tmp));
+        return dest;
+      }
     } catch {
       // not installed / not resolvable — fall through to download
     }

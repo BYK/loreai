@@ -268,26 +268,29 @@ export async function _cli(): Promise<void> {
   if (values["check-vec"]) {
     const { db, isVecAvailable } = await import("@loreai/core");
     const { safeExit } = await import("./exit");
+    let ok = false;
     try {
       const conn = db();
       if (!isVecAvailable()) {
         console.log(
           "fallback (native sqlite-vec not loaded — using JS brute-force)",
         );
-        safeExit(0);
-        return;
+      } else {
+        const row = conn.query("SELECT vec_version() AS v").get() as
+          | { v?: string }
+          | undefined;
+        console.log(`ok vec_version=${row?.v ?? "unknown"}`);
       }
-      const row = conn.query("SELECT vec_version() AS v").get() as
-        | { v?: string }
-        | undefined;
-      console.log(`ok vec_version=${row?.v ?? "unknown"}`);
-      safeExit(0);
+      ok = true;
     } catch (err: unknown) {
       console.error(
         `✗ check-vec failed: ${err instanceof Error ? err.message : String(err)}`,
       );
-      process.exit(1);
     }
+    // Exit outside the try so a throw on the success path can't be mis-reported
+    // as a check failure; safeExit (not process.exit) on both paths avoids the
+    // Bun NAPI teardown hang.
+    safeExit(ok ? 0 : 1);
     return;
   }
 
