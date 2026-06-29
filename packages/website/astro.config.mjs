@@ -6,6 +6,7 @@ import {
   generateAssetsEagerly,
 } from "./integrations/favicon-assets";
 import prefixBaseLinks from "./integrations/prefix-base-links.mjs";
+import { publicationUri } from "./src/lib/standard-site";
 
 const prNumber = process.env.PR_NUMBER;
 const base = prNumber ? `/_preview/pr-${prNumber}/` : "/";
@@ -119,6 +120,15 @@ export default defineConfig({
             type: "application/rss+xml",
             title: "Lore Blog",
             href: `https://withlore.ai${base}rss.xml`,
+          },
+        },
+        // standard.site publication discovery hint (verified via
+        // /.well-known/site.standard.publication)
+        {
+          tag: "link",
+          attrs: {
+            rel: "site.standard.publication",
+            href: publicationUri(),
           },
         },
         // Open Graph

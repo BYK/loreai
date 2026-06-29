@@ -1,6 +1,7 @@
 ---
 import { getCollection, render } from "astro:content";
 import BlogLayout from "../../layouts/BlogLayout.astro";
+import { documentUri } from "../../lib/standard-site";
 
 export async function getStaticPaths() {
   const posts = (await getCollection("blog")).filter((post) => !post.data.draft);
@@ -11,7 +12,11 @@ const { post } = Astro.props;
 const { Content } = await render(post);
 ---
 
-<BlogLayout title={post.data.title} description={post.data.description}>
+<BlogLayout
+  title={post.data.title}
+  description={post.data.description}
+  documentUri={documentUri(post.id)}
+>
   <article class="blog-post">
     <a class="blog-back" href={`${import.meta.env.BASE_URL}blog/`}>Back to blog</a>
     <header>

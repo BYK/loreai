@@ -1,5 +1,6 @@
 ---
 import ogImageManifest from "../generated/og-image.json";
+import { publicationUri } from "../lib/standard-site";
 
 interface Props {
   title: string;
@@ -51,3 +52,9 @@ const imageUrl = `${site}${base}${ogImageManifest.filename}`;
   title="Lore Blog"
   href={`${site}${base}rss.xml`}
 />
+
+<!--
+  standard.site publication discovery hint. This is a hint only; the
+  authoritative check is the /.well-known/site.standard.publication endpoint.
+-->
+<link rel="site.standard.publication" href={publicationUri()} />

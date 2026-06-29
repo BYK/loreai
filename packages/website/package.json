@@ -6,7 +6,8 @@
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
-    "check": "astro check"
+    "check": "astro check",
+    "publish:standard-site": "node scripts/publish-standard-site.mjs"
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.4",
