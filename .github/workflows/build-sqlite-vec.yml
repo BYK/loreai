@@ -12,6 +12,16 @@ name: Build sqlite-vec binaries
 
 on:
   workflow_dispatch:
+  # Rebuild + verify whenever the binary's inputs change (vendored source,
+  # patches, the build recipe, or this workflow). Runs on any branch so a PR
+  # that touches these paths produces fresh artifacts to commit; normal pushes
+  # that don't touch them never trigger the matrix.
+  push:
+    paths:
+      - 'packages/sqlite-vec-vendored/upstream/**'
+      - 'packages/sqlite-vec-vendored/patches/**'
+      - 'packages/sqlite-vec-vendored/scripts/build.sh'
+      - '.github/workflows/build-sqlite-vec.yml'
 
 permissions:
   contents: read
