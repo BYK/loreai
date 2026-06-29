@@ -15,10 +15,14 @@
  *
  * Idempotent: records use deterministic rkeys (publication "self", documents =
  * post slug) written with putRecord, so re-running updates them in place rather
- * than creating duplicates.
+ * than creating duplicates. After upserting the current set, it prunes document
+ * records that no longer have a matching post (unpublished drafts, deleted
+ * posts, or renamed slugs) so the PDS stays in sync with the published blog.
  */
 
 import { readFile } from "node:fs/promises";
+import { argv } from "node:process";
+import { fileURLToPath } from "node:url";
 
 const HANDLE = process.env.BSKY_HANDLE ?? "withlore.ai";
 const PASSWORD = process.env.BSKY_APP_PASSWORD;
@@ -65,6 +69,37 @@ async function resolvePds(did) {
   )?.serviceEndpoint;
   if (!pds) fail(`no PDS endpoint in DID document for ${did}`);
   return pds;
+}
+
+async function listAllRecords(pds, repo, collection) {
+  const records = [];
+  let cursor;
+  do {
+    const query = { repo, collection, limit: "100" };
+    if (cursor) query.cursor = cursor;
+    const page = await xrpcGet(pds, "com.atproto.repo.listRecords", query);
+    const batch = page.records ?? [];
+    records.push(...batch);
+    // Stop when a page returns nothing, even if the PDS still hands back a
+    // cursor, so an always-present cursor can never spin forever.
+    cursor = batch.length > 0 ? page.cursor : undefined;
+  } while (cursor);
+  return records;
+}
+
+/**
+ * Pure diff: given the document records currently in the repo and the set of
+ * rkeys the build wants to keep, return the rkeys that should be deleted.
+ * Exported for unit testing.
+ */
+export function computeOrphanRkeys(existingRecords, keepRkeys) {
+  const keep = keepRkeys instanceof Set ? keepRkeys : new Set(keepRkeys);
+  const orphans = [];
+  for (const rec of existingRecords) {
+    const rkey = rec.uri.split("/").pop();
+    if (rkey && !keep.has(rkey)) orphans.push(rkey);
+  }
+  return orphans;
 }
 
 async function readManifest() {
@@ -150,9 +185,41 @@ async function main() {
     console.log(`✓ put ${uri}`);
   }
 
+  // Prune document records with no matching post. Runs only after every current
+  // record has been upserted above, so a failure mid-run never strands the blog
+  // without its live records.
+  let deleted = 0;
+  if (manifest.documents.length === 0) {
+    // A broken or empty build must never be able to wipe the whole collection.
+    console.warn(
+      "⚠ manifest has no documents — skipping orphan cleanup to avoid deleting every record",
+    );
+  } else {
+    const collection = manifest.documents[0].record.$type;
+    const keep = new Set(manifest.documents.map((doc) => doc.rkey));
+    const existing = await listAllRecords(pds, session.did, collection);
+    const orphans = computeOrphanRkeys(existing, keep);
+    for (const rkey of orphans) {
+      await xrpcPost(
+        pds,
+        "com.atproto.repo.deleteRecord",
+        { repo: session.did, collection, rkey },
+        session.accessJwt,
+      );
+      console.log(`✓ deleted orphan at://${session.did}/${collection}/${rkey}`);
+      deleted += 1;
+    }
+    if (deleted === 0) console.log("✓ no orphaned document records to prune");
+  }
+
   console.log(
-    `\nDone — published 1 publication + ${manifest.documents.length} document(s).`,
+    `\nDone — published 1 publication + ${manifest.documents.length} ` +
+      `document(s)${deleted > 0 ? `, pruned ${deleted} orphan(s)` : ""}.`,
   );
 }
 
-main().catch((err) => fail(err instanceof Error ? err.message : String(err)));
+// Only run when invoked directly (`node publish-standard-site.mjs`), not when
+// imported by a test that exercises the pure helpers above.
+if (argv[1] && fileURLToPath(import.meta.url) === argv[1]) {
+  main().catch((err) => fail(err instanceof Error ? err.message : String(err)));
+}
