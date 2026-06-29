@@ -123,6 +123,51 @@ export function buildPublicationRecord(): PublicationRecord {
   };
 }
 
+/**
+ * Upper bound on a document record's `textContent`, in UTF-8 bytes.
+ *
+ * `textContent` is supplementary — the canonical post lives on the site at the
+ * record's `path` — so it is safe to truncate. The AT Protocol repository spec
+ * delegates the hard maximum record size to PDS implementations rather than
+ * fixing a number (see https://atproto.com/specs/repository, "Security
+ * Considerations"), so we impose a conservative self-bound: generous enough
+ * that no realistic post is trimmed (the largest current post is ~11.5 KB),
+ * while keeping records and firehose events from growing without limit.
+ */
+export const MAX_TEXT_CONTENT_BYTES = 64 * 1024;
+
+const TRUNCATION_MARKER = "\n[truncated]";
+
+/**
+ * Clamp `text` to at most `maxBytes` UTF-8 bytes for use as a record's
+ * `textContent`. Never splits a multi-byte code point, prefers a whitespace
+ * boundary so it does not cut mid-word, and appends a marker so consumers can
+ * tell the text was trimmed. The result is always <= `maxBytes` bytes.
+ */
+export function capTextContent(
+  text: string,
+  maxBytes = MAX_TEXT_CONTENT_BYTES,
+): string {
+  const encoder = new TextEncoder();
+  const encoded = encoder.encode(text);
+  if (encoded.length <= maxBytes) return text;
+
+  const budget = Math.max(
+    0,
+    maxBytes - encoder.encode(TRUNCATION_MARKER).length,
+  );
+  // Decode the byte-prefix; a trailing partial code point becomes U+FFFD, which
+  // we drop so the output is always valid UTF-8 within budget.
+  let head = new TextDecoder("utf-8").decode(encoded.subarray(0, budget));
+  if (head.endsWith("\uFFFD")) head = head.slice(0, -1);
+  // Back off to a whitespace boundary when one is close, so we cut between words
+  // rather than mid-word; keep the hard cut if the tail has no late whitespace
+  // (e.g. one enormous token) so we never collapse to near-empty.
+  const atBoundary = head.replace(/\S+$/, "").trimEnd();
+  if (atBoundary.length >= head.length * 0.8) head = atBoundary;
+  return `${head.trimEnd()}${TRUNCATION_MARKER}`;
+}
+
 export interface DocumentInput {
   slug: string;
   title: string;
@@ -158,6 +203,6 @@ export function buildDocumentRecord(input: DocumentInput): DocumentRecord {
   if (input.description) record.description = input.description;
   if (input.updatedAt) record.updatedAt = input.updatedAt;
   if (input.tags && input.tags.length > 0) record.tags = input.tags;
-  if (input.textContent) record.textContent = input.textContent;
+  if (input.textContent) record.textContent = capTextContent(input.textContent);
   return record;
 }
