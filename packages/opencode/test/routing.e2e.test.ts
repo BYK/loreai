@@ -1,22 +1,35 @@
 /**
- * End-to-end test: the OpenCode plugin's routing config against a REAL
+ * End-to-end test: the OpenCode plugin's REAL active path against a REAL
  * in-process Lore gateway (upstream mocked — no real API call).
  *
- * Proves that:
- *   - `applyLoreProviderConfig` pins a provider's `options.baseURL` to the
- *     gateway, and
- *   - the gateway actually serves `/v1/messages` and returns a response when
- *     called with the `x-lore-*` headers the plugin's `chat.headers` hook
- *     injects.
+ * Unlike the config-hook units (index.test.ts) and per-project header units
+ * (session-state.test.ts) — which run with the plugin inert under
+ * `NODE_ENV=test` — this test forces the plugin active via
+ * `LORE_OPENCODE_FORCE_ACTIVE=1` and points it at a controlled gateway via
+ * `LORE_GATEWAY_URL`, then proves the wiring the whole #1036/#1039 series
+ * exists to guard:
+ *   1. the plugin DISCOVERS the gateway (gatewayBase is resolved, not ""),
+ *      so its `config` hook actually pins provider baseURLs to it,
+ *   2. the `chat.headers` hook injects the `x-lore-*` attribution headers, and
+ *   3. the process-wide fetch interceptor it installs transparently reroutes a
+ *      provider call (`api.anthropic.com`) through the gateway to the upstream.
  *
- * Complements the existing config-hook units (index.test.ts), per-project
- * header units (session-state.test.ts), and the gateway startup smoke test
- * (gateway-smoke.test.ts).
+ * If discovery or interceptor install regressed, gatewayBase would stay "" and
+ * `applyLoreProviderConfig` would no-op (test 1 fails) and `globalThis.fetch`
+ * would stay un-patched so the provider call would escape to the real network
+ * (test 3 fails) — i.e. these assertions are non-vacuous against the failure
+ * mode this series guards.
  */
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import type { Hooks, PluginInput } from "@opencode-ai/plugin";
 import { LorePlugin } from "../src/index";
-import { applyLoreProviderConfig } from "../src/internal";
+
+// Capture the pristine fetch BEFORE the plugin installs its interceptor so we
+// can restore it in afterAll. The interceptor patches `globalThis.fetch`
+// process-wide; leaving it patched would corrupt every other test in this
+// worker. (The plugin only installs once per process and never under
+// NODE_ENV=test unless LORE_OPENCODE_FORCE_ACTIVE=1.)
+const originalFetch = globalThis.fetch;
 
 function createMockClient() {
   return {
@@ -53,6 +66,8 @@ describe("opencode plugin — e2e routing against a real gateway", () => {
   let stopServer: () => void;
   let hooks: Hooks;
   let upstreamCalls = 0;
+  // Snapshot the env vars we mutate so we restore the process exactly.
+  const savedEnv: Record<string, string | undefined> = {};
 
   beforeAll(async () => {
     const gwPkg = "@loreai/gateway";
@@ -93,6 +108,22 @@ describe("opencode plugin — e2e routing against a real gateway", () => {
     stopServer = () => server.stop();
     baseURL = `http://127.0.0.1:${server.port}`;
 
+    // Force the plugin's ACTIVE path while keeping NODE_ENV=test, and point
+    // discovery at the gateway we just started. Clearing the remote/disabled
+    // vars guarantees discovery resolves to LORE_GATEWAY_URL deterministically.
+    for (const key of [
+      "LORE_OPENCODE_FORCE_ACTIVE",
+      "LORE_GATEWAY_URL",
+      "LORE_REMOTE_URL",
+      "LORE_DISABLED",
+    ]) {
+      savedEnv[key] = process.env[key];
+    }
+    process.env.LORE_OPENCODE_FORCE_ACTIVE = "1";
+    process.env.LORE_GATEWAY_URL = baseURL;
+    delete process.env.LORE_REMOTE_URL;
+    delete process.env.LORE_DISABLED;
+
     hooks = await LorePlugin({
       client: createMockClient(),
       project: { id: "proj-e2e" } as unknown as PluginInput["project"],
@@ -105,6 +136,14 @@ describe("opencode plugin — e2e routing against a real gateway", () => {
 
   afterAll(async () => {
     stopServer?.();
+    // Restore the pristine fetch the plugin's interceptor patched — otherwise
+    // every later test in this worker routes through a now-dead gateway.
+    globalThis.fetch = originalFetch;
+    // Restore env vars exactly as they were.
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     // Mirror the gateway harness teardown so no pipeline timers / interceptor
     // state leak into other tests sharing this worker.
     try {
@@ -125,19 +164,32 @@ describe("opencode plugin — e2e routing against a real gateway", () => {
     }
   });
 
-  test("applyLoreProviderConfig pins provider baseURL to the gateway /v1", () => {
+  test("the plugin discovered the gateway and installed the fetch interceptor", () => {
+    // If discovery/interceptor-install regressed, the plugin would have stayed
+    // inert (gatewayBase "") and never patched fetch.
+    expect(globalThis.fetch).not.toBe(originalFetch);
+  });
+
+  test("the plugin's config hook pins provider baseURL to the discovered gateway", async () => {
     const cfg: Record<string, unknown> = {
       provider: { anthropic: { options: { apiKey: "x" } } },
     };
-    applyLoreProviderConfig(cfg, baseURL);
+    // Drive the REAL plugin hook (not applyLoreProviderConfig directly): this
+    // only pins a baseURL if the plugin actually resolved gatewayBase via
+    // discovery. An inert plugin (gatewayBase "") would no-op and leave the
+    // user's provider config untouched.
+    await hooks.config?.(cfg);
     const provider = (
-      cfg.provider as Record<string, { options: { baseURL: string } }>
+      cfg.provider as Record<
+        string,
+        { options: { baseURL: string; apiKey: string } }
+      >
     ).anthropic;
     expect(provider.options.baseURL).toBe(`${baseURL}/v1`);
-    // Existing options are preserved.
-    expect((provider.options as unknown as { apiKey: string }).apiKey).toBe(
-      "x",
-    );
+    // Existing user options are preserved through the merge.
+    expect(provider.options.apiKey).toBe("x");
+    // And built-in compaction is disabled by the same hook.
+    expect(cfg.compaction).toEqual({ auto: false, prune: false });
   });
 
   test("chat.headers injects x-lore attribution headers", async () => {
@@ -158,8 +210,14 @@ describe("opencode plugin — e2e routing against a real gateway", () => {
     expect(output.headers["x-lore-provider"]).toBe("anthropic");
   });
 
-  test("the gateway serves /v1/messages and returns the mocked response", async () => {
-    const res = await fetch(`${baseURL}/v1/messages`, {
+  test("the installed interceptor reroutes a provider call through the gateway to the upstream", async () => {
+    const before = upstreamCalls;
+    // A bare provider call (as the @ai-sdk would make) to a REMOTE host. The
+    // interceptor the plugin installed rewrites api.anthropic.com → gateway,
+    // which forwards to the mocked upstream. The x-lore-* headers mimic what
+    // chat.headers would have attached on a real turn (the interceptor
+    // preserves all original headers and adds x-lore-upstream-url).
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -181,6 +239,8 @@ describe("opencode plugin — e2e routing against a real gateway", () => {
       content: Array<{ type: string; text: string }>;
     };
     expect(body.content[0].text).toBe("hello from mock upstream");
-    expect(upstreamCalls).toBeGreaterThan(0);
+    // The call to the remote provider host was rerouted to the in-process
+    // gateway (not the real network), which hit the mocked upstream.
+    expect(upstreamCalls).toBeGreaterThan(before);
   });
 });

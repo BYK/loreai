@@ -161,6 +161,26 @@ function reapStaleProjectState(): void {
 /** Memoized lore init promise — ensures concurrent plugin calls don't race. */
 let loreInitPromise: Promise<string | null> | null = null;
 
+/**
+ * Whether the plugin should stay inert (skip gateway probe/start and the
+ * process-wide fetch interceptor). True under test runners — `NODE_ENV=test`
+ * or a `.test.` argv entry — so unrelated package suites don't accidentally
+ * spin up a gateway or patch `globalThis.fetch`.
+ *
+ * Tests that need the active discovery → interceptor → routing path set
+ * `LORE_OPENCODE_FORCE_ACTIVE=1` and point the plugin at a controlled
+ * in-process gateway via `LORE_GATEWAY_URL`. The force flag keeps
+ * `NODE_ENV=test` (so `log` stays file-suppressed and the DB isolated) while
+ * exercising the real wiring. Mirrors the Pi extension's `LORE_PI_FORCE_ACTIVE`.
+ */
+function isInertTestEnv(): boolean {
+  if (process.env.LORE_OPENCODE_FORCE_ACTIVE === "1") return false;
+  return (
+    process.env.NODE_ENV === "test" ||
+    process.argv.some((a) => a.includes(".test."))
+  );
+}
+
 export const LorePlugin: Plugin = async (ctx) => {
   // Initialize lore — only probe/start once per process.
   const loreDisabled =
@@ -168,9 +188,7 @@ export const LorePlugin: Plugin = async (ctx) => {
   let loreActive = processLoreActive;
   let gatewayBase = processLoreBase;
   if (!processInitDone) {
-    const inTestEnv =
-      process.env.NODE_ENV === "test" ||
-      process.argv.some((a) => a.includes(".test."));
+    const inTestEnv = isInertTestEnv();
 
     if (!loreDisabled && !inTestEnv) {
       // Memoize so concurrent LorePlugin calls don't race on probe→spawn.
@@ -203,9 +221,7 @@ export const LorePlugin: Plugin = async (ctx) => {
   }
 
   if (!loreActive && !loreDisabled) {
-    const inTestEnv =
-      process.env.NODE_ENV === "test" ||
-      process.argv.some((a) => a.includes(".test."));
+    const inTestEnv = isInertTestEnv();
     if (!inTestEnv) {
       const base = "Lore failed to start — memory features are unavailable.";
       const msg = lastGatewayStartError
@@ -386,8 +402,12 @@ export const LorePlugin: Plugin = async (ctx) => {
             return headers;
           },
         });
-        process.stderr.write(`[lore] routing through ${gatewayBase}\n`);
-        process.stderr.write(`[lore] dashboard: ${gatewayBase}/ui\n`);
+        // Suppressed in test env (mirrors the `[lore] active:` banner above)
+        // so the force-active e2e path doesn't pollute vitest output.
+        if (process.env.NODE_ENV !== "test") {
+          process.stderr.write(`[lore] routing through ${gatewayBase}\n`);
+          process.stderr.write(`[lore] dashboard: ${gatewayBase}/ui\n`);
+        }
       }
 
       processInitDone = true;
