@@ -1528,6 +1528,206 @@ export function knowledgeRefCounts(entityIds: string[]): Map<string, number> {
 }
 
 // ---------------------------------------------------------------------------
+// Graph traversal — entity-graph fan-in for recall
+// ---------------------------------------------------------------------------
+
+/**
+ * Batch-load the knowledge logical_ids that reference each of the given
+ * entities, in a single query. Returns a map keyed by entity id; entities with
+ * no refs map to an empty array. `knowledge_entity_refs.knowledge_id` stores the
+ * STABLE logical_id (A2, #823) — callers resolve the current entry via
+ * `ltm.getByLogical`, never `ltm.get`.
+ */
+function knowledgeRefsForEntities(entityIds: string[]): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  if (!entityIds.length) return map;
+  for (const id of entityIds) map.set(id, []);
+  // Chunk to stay under SQLite's bound-variable ceiling (matches the other
+  // batch helpers). Each entity's refs land in exactly one chunk.
+  const CHUNK = 900;
+  for (let i = 0; i < entityIds.length; i += CHUNK) {
+    const chunk = entityIds.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = db()
+      .query(
+        `SELECT entity_id, knowledge_id FROM knowledge_entity_refs WHERE entity_id IN (${placeholders})`,
+      )
+      .all(...chunk) as Array<{ entity_id: string; knowledge_id: string }>;
+    for (const r of rows) map.get(r.entity_id)?.push(r.knowledge_id);
+  }
+  return map;
+}
+
+/**
+ * Batch-load the 1-hop relation neighbors of each given entity, in a single
+ * query. Returns a map keyed by the input entity id → the ids of entities it is
+ * directly related to (either side of `entity_relations`). Input ids with no
+ * relations map to an empty array.
+ *
+ * A relation may connect two input ids in different chunks, so the same row can
+ * be returned by more than one chunk's query; pushing the neighbor twice is
+ * harmless because {@link graphExpand} deduplicates neighbors before use.
+ */
+function neighborsForEntities(entityIds: string[]): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  if (!entityIds.length) return map;
+  for (const id of entityIds) map.set(id, []);
+  const inputSet = new Set(entityIds);
+  // Each id is bound twice (entity_a IN, entity_b IN), so halve the chunk size
+  // relative to the single-bind helpers to stay under the variable ceiling.
+  const CHUNK = 450;
+  for (let i = 0; i < entityIds.length; i += CHUNK) {
+    const chunk = entityIds.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = db()
+      .query(
+        `SELECT entity_a, entity_b FROM entity_relations
+         WHERE entity_a IN (${placeholders}) OR entity_b IN (${placeholders})`,
+      )
+      .all(...chunk, ...chunk) as Array<{
+      entity_a: string;
+      entity_b: string;
+    }>;
+    for (const r of rows) {
+      if (inputSet.has(r.entity_a)) map.get(r.entity_a)?.push(r.entity_b);
+      if (inputSet.has(r.entity_b)) map.get(r.entity_b)?.push(r.entity_a);
+    }
+  }
+  return map;
+}
+
+/** A knowledge entry reached by traversing the entity graph from the seeds. */
+export type GraphKnowledgeHit = {
+  /** Stable logical_id (resolve with `ltm.getByLogical`). */
+  logicalId: string;
+  /** Smallest hop distance from any seed (0 = directly linked to a seed). */
+  depth: number;
+  /** Number of distinct seeds/neighbors in the matched subgraph that reference
+   *  this entry — a local centrality signal for THIS query. */
+  reach: number;
+  /** Ordering score: `1/(1+depth) · (1+ln(reach))`. Only the induced order is
+   *  consumed (recall fuses by list position via RRF). */
+  score: number;
+};
+
+/** A 1-hop neighbor entity reached by traversing the relation graph. */
+export type GraphEntityHit = {
+  id: string;
+  /** Hop distance from the nearest seed (always 1 today). */
+  depth: number;
+  /** Ordering score: `1/(1+depth) · (1+ln(1+globalRefCount))`. */
+  score: number;
+};
+
+export type GraphExpansion = {
+  knowledge: GraphKnowledgeHit[];
+  entities: GraphEntityHit[];
+};
+
+const GRAPH_DEFAULTS = {
+  maxSeeds: 8,
+  maxNeighbors: 12,
+  maxKnowledge: 20,
+} as const;
+
+/**
+ * Entity-graph fan-in for recall.
+ *
+ * Lore builds an entity graph — `knowledge_entity_refs` (entity ↔ knowledge) and
+ * `entity_relations` (entity ↔ entity) — but historically only the dashboard
+ * traversed it; search never did. This walks that graph from a set of seed
+ * entities (the entities a query matched lexically/semantically) and surfaces:
+ *
+ *   1. Knowledge entries linked to the seeds (depth 0) and to their 1-hop
+ *      relation neighbors (depth 1).
+ *   2. The 1-hop neighbor entities themselves.
+ *
+ * Results are scored with depth-decay × log-centrality and returned in score
+ * order. The scores exist only to ORDER the lists — recall feeds them to RRF,
+ * which fuses by list position, so absolute magnitudes are irrelevant. Ordering
+ * ties break deterministically by id so the output is stable across runs.
+ *
+ * Pure read-only graph traversal: bounded by `maxSeeds`/`maxNeighbors`/
+ * `maxKnowledge`, no visibility filtering (the caller applies project
+ * visibility when hydrating, mirroring `search()`/`ltm.searchScored()`).
+ */
+export function graphExpand(
+  seedEntityIds: string[],
+  opts?: { maxSeeds?: number; maxNeighbors?: number; maxKnowledge?: number },
+): GraphExpansion {
+  const maxSeeds = opts?.maxSeeds ?? GRAPH_DEFAULTS.maxSeeds;
+  const maxNeighbors = opts?.maxNeighbors ?? GRAPH_DEFAULTS.maxNeighbors;
+  const maxKnowledge = opts?.maxKnowledge ?? GRAPH_DEFAULTS.maxKnowledge;
+
+  // Dedupe + cap seeds, preserving caller order (best matches first).
+  const seeds: string[] = [];
+  const seedSet = new Set<string>();
+  for (const id of seedEntityIds) {
+    if (seedSet.has(id)) continue;
+    seedSet.add(id);
+    seeds.push(id);
+    if (seeds.length >= maxSeeds) break;
+  }
+  if (!seeds.length) return { knowledge: [], entities: [] };
+
+  // Depth-1 neighbors via the relation graph. A seed is depth 0, so neighbors
+  // that are themselves seeds are excluded from the neighbor set.
+  const neighborMap = neighborsForEntities(seeds);
+  const neighborSet = new Set<string>();
+  for (const nbrs of neighborMap.values()) {
+    for (const nbr of nbrs) {
+      if (!seedSet.has(nbr)) neighborSet.add(nbr);
+    }
+  }
+  // Cap neighbors deterministically (sorted by id) so the bound is stable.
+  const neighbors = [...neighborSet].sort().slice(0, maxNeighbors);
+
+  // Entity depth map: seeds = 0, neighbors = 1.
+  const entityDepth = new Map<string, number>();
+  for (const s of seeds) entityDepth.set(s, 0);
+  for (const n of neighbors) entityDepth.set(n, 1);
+
+  // Knowledge fan-in: every logical_id referenced by any seed or neighbor.
+  // Track the shallowest reaching depth and how many distinct entities reach it.
+  const refMap = knowledgeRefsForEntities([...entityDepth.keys()]);
+  const kAgg = new Map<string, { depth: number; reach: number }>();
+  for (const [entId, logicalIds] of refMap) {
+    const depth = entityDepth.get(entId) ?? 0;
+    for (const lid of logicalIds) {
+      const cur = kAgg.get(lid);
+      if (cur) {
+        cur.reach += 1;
+        if (depth < cur.depth) cur.depth = depth;
+      } else {
+        kAgg.set(lid, { depth, reach: 1 });
+      }
+    }
+  }
+  const knowledge: GraphKnowledgeHit[] = [...kAgg.entries()]
+    .map(([logicalId, { depth, reach }]) => ({
+      logicalId,
+      depth,
+      reach,
+      score: (1 / (1 + depth)) * (1 + Math.log(reach)),
+    }))
+    .sort((a, b) => b.score - a.score || (a.logicalId < b.logicalId ? -1 : 1))
+    .slice(0, maxKnowledge);
+
+  // Neighbor-entity scoring: depth-decay × log of the neighbor's global
+  // knowledge-ref count (a well-connected neighbor is more likely relevant).
+  const refCounts = knowledgeRefCounts(neighbors);
+  const entitiesScored: GraphEntityHit[] = neighbors
+    .map((id) => ({
+      id,
+      depth: 1,
+      score: (1 / (1 + 1)) * (1 + Math.log(1 + (refCounts.get(id) ?? 0))),
+    }))
+    .sort((a, b) => b.score - a.score || (a.id < b.id ? -1 : 1));
+
+  return { knowledge, entities: entitiesScored };
+}
+
+// ---------------------------------------------------------------------------
 // Session injection — hybrid cap-based entity selection
 // ---------------------------------------------------------------------------
 

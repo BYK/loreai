@@ -1154,6 +1154,109 @@ export async function searchRecall(
     }
   }
 
+  // Entity-graph fan-in: Lore builds an entity graph (knowledge_entity_refs +
+  // entity_relations) but search historically never traversed it — only the
+  // dashboard did. Walk that graph from the entities this query already matched
+  // (collected into the entity-tagged lists above) and surface (a) knowledge
+  // entries linked to those entities and their 1-hop relation neighbors, and
+  // (b) the neighbor entities themselves. Emitted as supplemental RRF lists with
+  // the same `k:`/`e:` keys, so graph-reachable items merge with (and are
+  // boosted by) the keyword/vector lists, while items reachable ONLY via the
+  // graph enter as fresh candidates. Gated to scopes that surface entities.
+  if (
+    (searchConfig?.graphExpansion ?? true) &&
+    (scope === "all" || scope === "project")
+  ) {
+    try {
+      // Seeds = entities matched lexically/semantically (entity FTS + vector +
+      // cross-repo). They were already visibility-filtered at their source, so
+      // seeding from them never leaks another project's project-scoped entity.
+      const seedIds = new Set<string>();
+      for (const list of allRrfLists) {
+        for (const it of list.items) {
+          if (it.source === "entity") seedIds.add(it.item.id);
+        }
+      }
+
+      if (seedIds.size) {
+        const expansion = entities.graphExpand([...seedIds], {
+          maxSeeds: 8,
+          maxNeighbors: 12,
+          maxKnowledge: limit * 2,
+        });
+        const graphWeight = searchConfig?.graphBoostWeight ?? 1.0;
+        const gpid = ensureProject(projectPath);
+
+        // (a) Graph-linked knowledge, ordered by graph score (depth-decay ×
+        // local reach). Hydrated via getByLogical (refs store logical_ids) and
+        // visibility-filtered to mirror ltm.searchScored — a knowledge entry
+        // linked to a shared entity may belong to another project. Same `k:`
+        // key as the BM25/vector knowledge lists so RRF merges, not duplicates.
+        if (knowledgeEnabled && expansion.knowledge.length) {
+          const graphKnowledge: TaggedResult[] = [];
+          for (const gk of expansion.knowledge) {
+            const entry = ltm.getByLogical(gk.logicalId);
+            if (!entry) continue;
+            const visible =
+              entry.project_id === gpid ||
+              entry.project_id === null ||
+              entry.cross_project === 1;
+            if (!visible) continue;
+            graphKnowledge.push({
+              source: "knowledge",
+              item: { ...entry, rank: -gk.score },
+            });
+          }
+          if (graphKnowledge.length) {
+            // Apply the same session-aware knowledge downweight the other
+            // knowledge lists use, so graph knowledge is deprioritized
+            // consistently when session-specific content exists.
+            const kgWeight = scope === "all" && hasSessionResults ? 0.6 : 1.0;
+            allRrfLists.push({
+              items: graphKnowledge,
+              key: (r) => `k:${r.item.id}`,
+              weight: graphWeight * kgWeight,
+            });
+          }
+        }
+
+        // (b) 1-hop neighbor entities, ordered by graph score. Hydrated +
+        // visibility-filtered (same predicate entities.search uses). Same `e:`
+        // key as the entity FTS/vector lists so RRF merges them.
+        if (expansion.entities.length) {
+          const neighborMap = await timer.await(
+            entities.getManyWithAliasesOffloaded(
+              expansion.entities.map((e) => e.id),
+            ),
+          );
+          const graphEntities: TaggedResult[] = [];
+          for (const ge of expansion.entities) {
+            const ent = neighborMap.get(ge.id);
+            if (!ent) continue;
+            const visible =
+              ent.project_id === gpid ||
+              ent.project_id === null ||
+              ent.cross_project === 1;
+            if (!visible) continue;
+            graphEntities.push({
+              source: "entity",
+              item: { ...ent, rank: -ge.score },
+            });
+          }
+          if (graphEntities.length) {
+            allRrfLists.push({
+              items: graphEntities,
+              key: (r) => `e:${r.item.id}`,
+              weight: graphWeight,
+            });
+          }
+        }
+      }
+    } catch (err) {
+      log.info("recall: entity-graph expansion failed (non-fatal):", err);
+    }
+  }
+
   // Distillation quality list: rank distillation candidates by a quality score
   // that combines temporal clustering (c_norm) and age. Segments with low c_norm
   // (uniformly distributed timestamps) are considered higher quality than bursty

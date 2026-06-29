@@ -471,6 +471,32 @@ export const LoreConfig = z.object({
         .describe(
           "Minimum meaningful query terms (after stopword removal) to activate vector boost. Default: 2.",
         ),
+      /** Enable entity-graph fan-in for the recall tool. Default: true.
+       *  When an entity matches the query, recall traverses the entity graph
+       *  (knowledge_entity_refs + entity_relations) to also surface knowledge
+       *  linked to that entity and its 1-hop relation neighbors, scored by
+       *  depth-decay. Emitted as supplemental RRF lists: graph reachability only
+       *  ADDS fusion weight to a result, never removes a keyword/vector match's
+       *  own contribution (though a strongly graph-boosted item can still outrank
+       *  a weak keyword-only one). */
+      graphExpansion: z
+        .boolean()
+        .default(true)
+        .describe(
+          "Enable entity-graph fan-in (linked knowledge + 1-hop relation neighbors) for the recall tool. Default: true.",
+        ),
+      /** RRF weight multiplier for the entity-graph fan-in lists. Higher values
+       *  give graph-reachable knowledge/entities more influence in fusion. Set
+       *  to 0 to neutralize the graph signal without disabling traversal.
+       *  Default: 1.0. */
+      graphBoostWeight: z
+        .number()
+        .min(0)
+        .max(5)
+        .default(1.0)
+        .describe(
+          "RRF weight multiplier for entity-graph fan-in lists. Set to 0 to neutralize. Default: 1.0.",
+        ),
       /** Vector embedding search.
        *  Supports multiple providers:
        *  - "local" (default): @huggingface/transformers + nomic-embed-text-v1.5, no API key needed.
@@ -606,6 +632,8 @@ export const LoreConfig = z.object({
       queryExpansionMaxTerms: 8,
       vectorBoostWeight: 1.5,
       vectorBoostMinTerms: 2,
+      graphExpansion: true,
+      graphBoostWeight: 1.0,
       embeddings: {
         enabled: true,
         provider: "local" as const,

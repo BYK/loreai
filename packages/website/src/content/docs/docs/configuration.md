@@ -159,6 +159,8 @@ Recall and search pipeline tuning: FTS weights, query expansion, vector boost, e
 | `queryExpansionMaxTerms` | number | `8` | min 2, max 20 | Max query terms (after stopword removal) for LLM expansion. Longer queries skip expansion. Default: 8. |
 | `vectorBoostWeight` | number | `1.5` | min 1, max 5 | RRF weight multiplier for vector search lists (when query has enough terms). Set to 1.0 to disable. Default: 1.5. |
 | `vectorBoostMinTerms` | number | `2` | min 1, max 10 | Minimum meaningful query terms (after stopword removal) to activate vector boost. Default: 2. |
+| `graphExpansion` | boolean | `true` |  | Enable entity-graph fan-in (linked knowledge + 1-hop relation neighbors) for the recall tool. Default: true. |
+| `graphBoostWeight` | number | `1` | min 0, max 5 | RRF weight multiplier for entity-graph fan-in lists. Set to 0 to neutralize. Default: 1.0. |
 | `embeddings` | object | `{"enabled":true,"provider":"local","model":"nomic-ai/nomic-embed-text-v1.5","dimensions":768,"workerOffload":true,"workerPoolSize":2}` |  | Vector embedding search provider, model, and dimensions. |
 | `recall` | object | `{"charBudget":12000,"relevanceFloor":0.15,"maxResults":15,"absoluteFloor":0}` |  | Recall output formatting and result-count limits. |
 
