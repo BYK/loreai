@@ -377,8 +377,9 @@ jobs:
         run: pnpm run build
 
       # Pack each workspace package into its own tarball. Craft's npm target
-      # with `workspaces: true` discovers all four and publishes them in
-      # dependency order (@loreai/core → @loreai/opencode + @loreai/pi + @loreai/gateway).
+      # with `workspaces: true` discovers all five and publishes them in
+      # dependency order (@loreai/sqlite-vec-vendored → @loreai/core →
+      # @loreai/opencode + @loreai/pi + @loreai/gateway).
       #
       # We use `pnpm pack` (not `npm pack`) because pnpm automatically rewrites
       # `workspace:*` dependency specifiers to the actual version being packed.
@@ -392,7 +393,7 @@ jobs:
         if: startsWith(github.ref, 'refs/heads/release/')
         run: |
           mkdir -p dist-tarballs
-          for pkg in packages/core packages/opencode packages/pi packages/gateway; do
+          for pkg in packages/sqlite-vec-vendored packages/core packages/opencode packages/pi packages/gateway; do
             echo "Packing $pkg"
             (cd "$pkg" && pnpm pack --pack-destination ../../dist-tarballs)
           done
@@ -505,8 +506,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # The generator imports from the workspace, so we need the workspace
       # built once. The build step is cheap (no native binaries) and
-      # guarantees `packages/core/dist` exists for the import.
-      - run: pnpm --filter @loreai/core run build
+      # guarantees `packages/core/dist` exists for the import. The `...` suffix
+      # also builds core's workspace dep (@loreai/sqlite-vec-vendored), whose
+      # dist core's declaration emit must resolve.
+      - run: pnpm --filter "@loreai/core..." run build
       - run: pnpm run check:docs
 
   # ---------------------------------------------------------------------------

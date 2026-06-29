@@ -1,0 +1,65 @@
+Fix AVX/AVX2 SIMD dispatch: use target attributes and runtime CPU detection
+
+Upstream: https://github.com/asg017/sqlite-vec/pull/307  (Fixes asg017/sqlite-vec#302)
+Commit:   b1c8b216c108dedb10eb0c79665a11b19e4b7de4
+Author:   Trenton Holmes <797416+stumpylog@users.noreply.github.com>
+
+- Add __attribute__((target("avx,avx2"))) to l2_sqr_float_avx and
+  __attribute__((target("avx2"))) to distance_hamming_avx2, confining
+  AVX2 codegen to those two functions only.
+- Add __builtin_cpu_supports("avx2") runtime guards (cached in a
+  static local) at both dispatch sites so pre-AVX2 CPUs take the
+  scalar path instead of SIGILL.
+
+NOTE: this is a trimmed extraction of upstream commit b1c8b216. The original
+commit also drops `-mavx -mavx2` from the upstream Makefile; we do not vendor
+that Makefile (build.sh compiles directly and never passes global -mavx/-mavx2,
+matching the fix's intent). The two unrelated Rust criterion benchmark commits
+in PR #307 (build.rs include paths, simd_dispatch.rs) are omitted as
+build-irrelevant. Both guarded blocks live inside `#ifdef SQLITE_VEC_ENABLE_AVX`,
+so this patch is a no-op on targets built without that define (e.g. Windows/MSVC,
+linux-arm64, darwin-arm64), where __attribute__/__builtin_cpu_supports are never
+compiled.
+
+diff --git a/sqlite-vec.c b/sqlite-vec.c
+index 7af3b6a..fd1ad9a 100644
+--- a/sqlite-vec.c
++++ b/sqlite-vec.c
+@@ -86,6 +86,7 @@ enum VectorElementType {
+ #define PORTABLE_ALIGN32 __attribute__((aligned(32)))
+ #define PORTABLE_ALIGN64 __attribute__((aligned(64)))
+ 
++__attribute__((target("avx,avx2")))
+ static f32 l2_sqr_float_avx(const void *pVect1v, const void *pVect2v,
+                             const void *qty_ptr) {
+   f32 *pVect1 = (f32 *)pVect1v;
+@@ -417,7 +418,9 @@ static f32 distance_l2_sqr_float(const void *a, const void *b, const void *d) {
+   }
+ #endif
+ #ifdef SQLITE_VEC_ENABLE_AVX
+-  if (((*(const size_t *)d) % 16 == 0)) {
++  static int has_avx2 = -1;
++  if (has_avx2 < 0) has_avx2 = __builtin_cpu_supports("avx2");
++  if (has_avx2 && ((*(const size_t *)d) % 16 == 0)) {
+     return l2_sqr_float_avx(a, b, d);
+   }
+ #endif
+@@ -713,6 +716,7 @@ static f32 distance_hamming_neon(const u8 *a, const u8 *b, size_t n_bytes) {
+  * AVX2 Hamming distance using VPSHUFB-based popcount.
+  * Processes 32 bytes (256 bits) per iteration.
+  */
++__attribute__((target("avx2")))
+ static f32 distance_hamming_avx2(const u8 *a, const u8 *b, size_t n_bytes) {
+   const u8 *pEnd = a + n_bytes;
+ 
+@@ -815,7 +819,9 @@ static f32 distance_hamming(const void *a, const void *b, const void *d) {
+   }
+ #endif
+ #ifdef SQLITE_VEC_ENABLE_AVX
+-  if (n_bytes >= 32) {
++  static int has_avx2 = -1;
++  if (has_avx2 < 0) has_avx2 = __builtin_cpu_supports("avx2");
++  if (has_avx2 && n_bytes >= 32) {
+     return distance_hamming_avx2((const u8 *)a, (const u8 *)b, n_bytes);
+   }
+ #endif

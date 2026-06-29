@@ -59,11 +59,17 @@ mkdirSync(distDir, { recursive: true });
 // External: Node built-ins + native/unused deps from @huggingface/transformers.
 // onnxruntime-node: .node native binaries that esbuild can't handle.
 // sharp: image processing for vision models, not needed for text embeddings.
-// sqlite-vec: resolves a native loadable extension (vec0.{so,dylib,dll}) at
-//   runtime via its platform optionalDependency — must stay external on the npm
-//   path. (The SEA binary embeds the extension per-target as an asset and sets
+// @loreai/sqlite-vec-vendored: resolves a native loadable extension
+//   (vec0.{so,dylib,dll}) from its own prebuilt/ dir via import.meta.url — must
+//   stay external on the npm path so that URL points at the installed package.
+//   (The SEA binary embeds the extension per-target as an asset and sets
 //   __LORE_VEC_EXTENSION_PATH__ at runtime — see build-binary-sea.ts / #956.)
-const external = ["node:*", "onnxruntime-node", "sharp", "sqlite-vec"];
+const external = [
+  "node:*",
+  "onnxruntime-node",
+  "sharp",
+  "@loreai/sqlite-vec-vendored",
+];
 
 // Remap @sentry/bun → @sentry/node so the CJS bundle gets Node-native
 // Sentry integrations (http server instrumentation via diagnostics_channel)
@@ -161,7 +167,7 @@ await esbuild.build({
     "undici",
     "onnxruntime-node",
     "sharp",
-    "sqlite-vec",
+    "@loreai/sqlite-vec-vendored",
     "@loreai/core",
   ],
   outfile: join(distDir, "index.bun.js"),
@@ -255,7 +261,7 @@ await esbuild.build({
 // ---------------------------------------------------------------------------
 // The vector-search read-worker pool (core/vector-pool.ts) spawns this via
 // node:worker_threads. Tiny by design: SQLite driver (node:sqlite via the
-// "node" condition) + sqlite-vec (external native extension) + the pure
+// "node" condition) + @loreai/sqlite-vec-vendored (external native ext) + pure
 // runVectorQuery logic. No ONNX/transformers, so no ort-web redirect or WASM.
 
 await esbuild.build({
@@ -266,7 +272,7 @@ await esbuild.build({
   platform: "node",
   // Resolve #db/driver → driver.node.ts (node:sqlite)
   conditions: ["node"],
-  external: ["node:*", "sqlite-vec"],
+  external: ["node:*", "@loreai/sqlite-vec-vendored"],
   outfile: join(distDir, "vector-worker.cjs"),
   sourcemap: false,
   minify: true,
@@ -291,7 +297,7 @@ await esbuild.build({
   target: "esnext",
   platform: "node",
   conditions: ["bun"],
-  external: ["bun:*", "node:*", "sqlite-vec"],
+  external: ["bun:*", "node:*", "@loreai/sqlite-vec-vendored"],
   outfile: join(distDir, "vector-worker.js"),
   sourcemap: false,
   minify: true,

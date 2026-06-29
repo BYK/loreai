@@ -44,7 +44,16 @@ mkdirSync(distDir, { recursive: true });
 // onnxruntime-node: .node native binaries that esbuild can't bundle (transitive
 //   dep of @huggingface/transformers).
 // sharp: image processing for vision models, not needed for text embeddings.
-const external = ["node:*", "bun:*", "onnxruntime-node", "sharp"];
+// @loreai/sqlite-vec-vendored: resolves its prebuilt vec0.{so,dylib,dll} via
+//   `import.meta.url`; it MUST stay external so that URL points at the installed
+//   package (with its prebuilt/ dir), not core's bundled dist.
+const external = [
+  "node:*",
+  "bun:*",
+  "onnxruntime-node",
+  "sharp",
+  "@loreai/sqlite-vec-vendored",
+];
 
 /** @type {esbuild.BuildOptions} */
 const commonOptions: esbuild.BuildOptions = {

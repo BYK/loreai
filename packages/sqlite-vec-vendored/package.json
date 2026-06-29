@@ -1,0 +1,48 @@
+{
+  "name": "@loreai/sqlite-vec-vendored",
+  "version": "0.34.0",
+  "type": "module",
+  "license": "FSL-1.1-Apache-2.0",
+  "description": "Vendored sqlite-vec 0.1.10-alpha.4 loadable extension (DiskANN + rescore) with prebuilt binaries for Lore",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "build:native": "bash scripts/build.sh"
+  },
+  "files": [
+    "dist/",
+    "prebuilt/",
+    "SOURCE.md",
+    "README.md",
+    "LICENSE-APACHE",
+    "LICENSE-MIT"
+  ],
+  "engines": {
+    "node": ">=22.5"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BYK/loreai.git",
+    "directory": "packages/sqlite-vec-vendored"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "lore",
+    "sqlite",
+    "sqlite-vec",
+    "vector-search",
+    "diskann",
+    "loadable-extension"
+  ],
+  "author": "BYK"
+}

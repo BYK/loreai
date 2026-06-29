@@ -11,6 +11,10 @@ export default defineConfig({
     alias: {
       "@loreai/core": path.resolve(__dirname, "packages/core/src"),
       "@loreai/gateway": path.resolve(__dirname, "packages/gateway/src"),
+      "@loreai/sqlite-vec-vendored": path.resolve(
+        __dirname,
+        "packages/sqlite-vec-vendored/src",
+      ),
     },
   },
   test: {
@@ -19,6 +23,7 @@ export default defineConfig({
       "packages/core/test/**/*.test.ts",
       "packages/gateway/test/**/*.test.ts",
       "packages/opencode/test/**/*.test.ts",
+      "packages/sqlite-vec-vendored/test/**/*.test.ts",
     ],
     // Preload test setup for DB isolation
     setupFiles: ["./packages/core/test/setup.ts"],

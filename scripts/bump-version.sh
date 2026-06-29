@@ -1,5 +1,5 @@
 #!/bin/bash
-# Pre-release version bump for all four Lore workspace packages.
+# Pre-release version bump for all five Lore workspace packages.
 #
 # Why this exists instead of letting craft auto-bump:
 #
@@ -33,7 +33,8 @@ for f in \
   packages/core/package.json \
   packages/gateway/package.json \
   packages/opencode/package.json \
-  packages/pi/package.json; do
+  packages/pi/package.json \
+  packages/sqlite-vec-vendored/package.json; do
   # Preserve trailing newline by piping through jq then appending.
   tmp="$(mktemp)"
   jq --arg v "$NEW_VERSION" '.version = $v' "$f" > "$tmp"
