@@ -22,7 +22,7 @@ we vendor the binaries here and depend on this package instead of `sqlite-vec`.
 | Repo | https://github.com/asg017/sqlite-vec |
 | Tag | `v0.1.10-alpha.4` |
 | Source tarball sha256 | `dbb3f0ee83bd2788d84a9e1ff3edfaac74ccb017c1de20fb044b0a9feb2210df` |
-| Vendored SQLite headers | amalgamation `3.45.3` (`sqlite-amalgamation-3450300`), public domain |
+| Vendored SQLite headers | amalgamation `3.47.0` (`sqlite-amalgamation-3470000`), public domain |
 
 `upstream/` holds the **pristine** subset we compile:
 
@@ -35,7 +35,13 @@ we vendor the binaries here and depend on this package instead of `sqlite-vec`.
   left undefined, matching upstream's default).
 - `sqlite-vec.h.tmpl`, `VERSION` — header template + version string; `build.sh`
   generates `sqlite-vec.h` from these.
-- `vendor/sqlite3.h`, `vendor/sqlite3ext.h` — SQLite 3.45.3 headers.
+- `vendor/sqlite3.h`, `vendor/sqlite3ext.h` — SQLite 3.47.0 amalgamation
+  headers. (Upstream's `vendor.sh` pins 3.45.3; we vendor 3.47.0. The loadable
+  extension only uses the long-stable `sqlite3_api_routines` surface via
+  `SQLITE_EXTENSION_INIT2`, so the host SQLite — node:sqlite / bun:sqlite —
+  provides the runtime implementation; the header version only affects which
+  API slots are visible at compile time. All four binaries are built and
+  functionally verified against these headers in CI.)
 
 ## Patches
 
@@ -92,3 +98,10 @@ artifacts from that workflow. Building natively per platform side-steps the
 bundles (core's esbuild, the gateway bundle) so `import.meta.url` resolves to the
 installed package and the `prebuilt/` lookup works. The gateway SEA packer uses
 `getLoadablePathForTarget()` to embed every platform's extension.
+
+This package is **ESM-only** (it uses `import.meta.url`), unlike the dual-mode
+`sqlite-vec` npm wrapper it replaces. `@loreai/core` imports it from ESM, and the
+gateway's CJS bundle `require()`s it — `require()` of an ESM module is supported
+unflagged on Node ≥ 22.12, which the gateway's `engines.node` (`>=22.15`)
+guarantees. There is no top-level `await`, so the synchronous `require(ESM)`
+path is safe.
