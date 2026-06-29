@@ -8,6 +8,7 @@
 import { describe, test, expect } from "vitest";
 import {
   brotliCompressSync,
+  deflateRawSync,
   deflateSync,
   gzipSync,
   zstdCompressSync,
@@ -90,6 +91,13 @@ describe("compressBody / decompressBody round-trip", () => {
     expect(() => decompressBody(new Uint8Array([1, 2, 3]), "snappy")).toThrow(
       /Unsupported/,
     );
+  });
+
+  test("deflate decode falls back to raw DEFLATE (no zlib header)", () => {
+    // Some clients send raw DEFLATE streams; decompressBody must inflate them
+    // via the inflateRawSync fallback when the zlib-header parse fails.
+    const raw = deflateRawSync(Buffer.from(SAMPLE, "utf8"));
+    expect(decompressBody(raw, "deflate").toString("utf8")).toBe(SAMPLE);
   });
 });
 
