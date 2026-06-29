@@ -67,5 +67,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: vec0-${{ matrix.target }}
-          path: packages/sqlite-vec-vendored/prebuilt/${{ matrix.target }}/vec0.*
+          path: |
+            packages/sqlite-vec-vendored/prebuilt/${{ matrix.target }}/vec0.so
+            packages/sqlite-vec-vendored/prebuilt/${{ matrix.target }}/vec0.dylib
+            packages/sqlite-vec-vendored/prebuilt/${{ matrix.target }}/vec0.dll
           if-no-files-found: error

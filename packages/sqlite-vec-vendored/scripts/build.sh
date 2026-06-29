@@ -116,6 +116,9 @@ if [ "$TARGET" = "windows-x64" ]; then
   MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
     cl.exe /nologo /O2 /I vendor /D SQLITE_VEC_ENABLE_DISKANN=1 /D SQLITE_VEC_ENABLE_RESCORE \
       /LD sqlite-vec.c /Fe:"$OUT_WIN"
+  # /LD emits an import lib + exports table next to the DLL; neither is needed
+  # to load the extension at runtime, so drop them — only vec0.dll ships.
+  rm -f "$OUT_DIR/vec0.lib" "$OUT_DIR/vec0.exp"
 else
   CC="${CC:-cc}"
   CFLAGS="-fPIC -shared -Wall -Wextra -Ivendor/ -O3 $COMMON_DEFS"
