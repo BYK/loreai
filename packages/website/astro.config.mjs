@@ -111,6 +111,16 @@ export default defineConfig({
             href: `${base}apple-touch-icon.png`,
           },
         },
+        // RSS feed autodiscovery
+        {
+          tag: "link",
+          attrs: {
+            rel: "alternate",
+            type: "application/rss+xml",
+            title: "Lore Blog",
+            href: `https://withlore.ai${base}rss.xml`,
+          },
+        },
         // Open Graph
         {
           tag: "meta",
