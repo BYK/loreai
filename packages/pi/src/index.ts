@@ -14,206 +14,37 @@
  * and becomes inert — no hooks are registered and Pi runs without
  * memory features.
  *
+ * Routine status is logged through the core `log` module (file-based,
+ * terminal-suppressed) — NEVER via console/stdout/stderr — because Pi
+ * runs a full-screen TUI that any raw terminal write would corrupt.
+ *
  * Installation (in user's `~/.pi/agent/extensions/`):
  *   import lore from "@loreai/pi";
  *   export default lore;
  *
  * Or as a Pi package:
  *   pi install npm:@loreai/pi
+ *
+ * Pure/testable logic (gateway discovery, provider-registration shaping,
+ * session-id derivation, the compaction request) lives in `./internal.ts`.
  */
-import { createHash } from "node:crypto";
 import { getGitRemote, installFetchInterceptor, log } from "@loreai/core";
 import type {
   ExtensionAPI,
   SessionBeforeCompactEvent,
   SessionStartEvent,
 } from "@earendil-works/pi-coding-agent";
-
-// Pi doesn't re-export these event result types at the top level — inline their
-// minimal shape here to avoid depending on an internal package path.
-type SessionBeforeCompactResult = {
-  cancel?: boolean;
-  compaction?: {
-    summary: string;
-    firstKeptEntryId: string;
-    tokensBefore: number;
-    details?: unknown;
-  };
-};
-
-/**
- * Providers whose wire protocol the Lore gateway can proxy, split by SDK
- * protocol so we can set the correct `baseUrl` for each group.
- *
- * - Anthropic SDK appends `/v1/messages` to baseURL → pass gateway root.
- * - OpenAI SDK appends `/chat/completions` or `/responses` to baseURL
- *   and expects it to already include `/v1` → pass `${gateway}/v1`.
- *
- * Providers using other protocols (Google SDK, AWS Bedrock SDK,
- * Mistral conversations) are not redirected.
- *
- * For local/self-hosted providers, set `LORE_UPSTREAM_<PROVIDER>=<url>`
- * (e.g. `LORE_UPSTREAM_VLLM=http://localhost:8000`) so the gateway knows
- * where to forward requests. Cloud providers are routed automatically by
- * model name prefix.
- */
-
-/** Anthropic-messages API → gateway POST /v1/messages */
-const ANTHROPIC_PROVIDERS = [
-  "anthropic",
-  "fireworks",
-  "minimax",
-  "minimax-cn",
-  "kimi-coding",
-] as const;
-
-/** OpenAI-completions / OpenAI-responses API → gateway POST /v1/chat/completions or /v1/responses */
-const OPENAI_PROVIDERS = [
-  // openai-completions API
-  "github-copilot",
-  "deepseek",
-  "xai",
-  "groq",
-  "cerebras",
-  "openrouter",
-  "huggingface",
-  "zai",
-  "opencode",
-  "opencode-go",
-  "vercel-ai-gateway",
-  // openai-responses API
-  "openai",
-  // Codex (ChatGPT) — OpenAI Responses wire format. Registered with the
-  // standard `${gatewayBase}/v1` baseUrl; the Codex provider appends
-  // `/codex/responses` itself, landing on the gateway's `/v1/codex/responses`
-  // route. The Codex WSS attempt targets the same baseUrl and is rejected by
-  // the HTTP-only gateway, so Pi falls back to SSE through Lore (no bypass).
-  "openai-codex",
-  // Local / self-hosted (OpenAI-compatible)
-  "vllm",
-  "llamacpp",
-  "ollama",
-  "lmstudio",
-  "jan",
-  "localai",
-  "tgi",
-  "tabbyml",
-  "litellm",
-] as const;
-
-/** All providers that can be routed through the gateway. */
-const GATEWAY_PROVIDERS: readonly string[] = [
-  ...ANTHROPIC_PROVIDERS,
-  ...OPENAI_PROVIDERS,
-];
-
-/** Default ports to probe when looking for a running gateway (must match gateway defaults). */
-const KNOWN_GATEWAY_PORTS = [3207, 5673];
+import {
+  buildProviderRegistrations,
+  resolveGatewayUrl,
+  runCompaction,
+  type SessionBeforeCompactResult,
+  sessionIDFor,
+  startInProcess,
+} from "./internal";
 
 /** Guard against double-installing the fetch interceptor if Pi re-initializes. */
 let fetchInterceptorInstalled = false;
-
-/**
- * Check if the Lore gateway is reachable at the given base URL.
- * Short timeout so this doesn't delay Pi startup noticeably.
- */
-async function probeGateway(
-  baseURL: string,
-  timeoutMs = 1500,
-): Promise<boolean> {
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    const res = await fetch(`${baseURL}/health`, { signal: controller.signal });
-    clearTimeout(timer);
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Resolve the gateway URL by probing known ports and reading the port file.
- *
- * Order: LORE_GATEWAY_URL env var → port file → known default ports (3207, 5673).
- * Returns the URL of a running gateway, or null if none found.
- */
-async function resolveGatewayUrl(): Promise<string | null> {
-  // 0. Remote gateway — skip local discovery/startup entirely.
-  if (process.env.LORE_REMOTE_URL) {
-    const url = process.env.LORE_REMOTE_URL.replace(/\/$/, "");
-    if (await probeGateway(url)) return url;
-    log.info(
-      `pi: remote gateway at ${url} not reachable, falling through to local discovery`,
-    );
-  }
-
-  // 1. Explicit env var — probe it to verify it's actually reachable.
-  if (process.env.LORE_GATEWAY_URL) {
-    const url = process.env.LORE_GATEWAY_URL.replace(/\/$/, "");
-    if (await probeGateway(url)) return url;
-    // env var set but gateway unreachable — fall through to discovery
-  }
-
-  // 2. Build probe list: port file first (handles random port), then known defaults.
-  const probePorts = new Set<number>();
-  try {
-    const gw = "@loreai/gateway";
-    const { readPortFile } = await import(/* webpackIgnore: true */ gw);
-    const portfilePort = readPortFile();
-    if (portfilePort) probePorts.add(portfilePort);
-  } catch {
-    /* gateway package not available — skip port file */
-  }
-  for (const p of KNOWN_GATEWAY_PORTS) probePorts.add(p);
-
-  // 3. Probe each port.
-  for (const port of probePorts) {
-    const url = `http://127.0.0.1:${port}`;
-    if (await probeGateway(url)) return url;
-  }
-
-  return null;
-}
-
-/**
- * Start the gateway server in-process by importing @loreai/gateway as a library.
- * The published CJS bundle includes Node.js polyfills that shim Bun.serve()
- * to node:http.createServer(), so this works under both Bun and Node.js.
- *
- * Uses startGateway() which handles the full port fallback chain
- * (3207 → 5673 → random) and port file management automatically.
- * Returns the URL of the started gateway, or null on failure.
- */
-async function startInProcess(): Promise<string | null> {
-  try {
-    // Dynamic import — the gateway may be resolved from src (workspace) or
-    // dist/index.cjs (npm). Use a variable to prevent tsc from resolving the
-    // module at compile time (the .d.cts only exists after building).
-    const gw = "@loreai/gateway";
-    const { startGateway } = await import(/* webpackIgnore: true */ gw);
-    const handle = await startGateway({ quiet: true, local: true });
-    const url = `http://127.0.0.1:${handle.port}`;
-
-    if (!handle.owned) {
-      log.info(`pi: reusing existing gateway at ${url}`);
-    }
-
-    return url;
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    log.warn("pi: failed to start gateway in-process:", msg);
-    return null;
-  }
-}
-
-/**
- * Derive a stable session identifier from Pi's current session file path.
- */
-function sessionIDFor(sessionFile: string | undefined): string {
-  if (!sessionFile) return `pi-ephemeral-${process.pid}`;
-  return `pi-${createHash("sha256").update(sessionFile).digest("hex").slice(0, 24)}`;
-}
 
 /**
  * Pi extension entry point.
@@ -307,39 +138,15 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
    * once the real session ID is known.
    */
   function registerProviders(): void {
-    const baseHeaders: Record<string, string> = {
-      "x-lore-session-id": currentSessionID,
-      "x-lore-project": projectPath,
-    };
-    // Inject git remote so the gateway can group worktrees/clones of the
-    // same repo without filesystem access (important for remote gateways).
-    const remote = getGitRemote(projectPath);
-    if (remote) baseHeaders["x-lore-git-remote"] = remote;
-
-    // Anthropic SDK appends `/v1/messages` to baseURL — pass gateway root.
-    const anthropicBase = gatewayBase;
-    // OpenAI SDK expects baseURL to already include `/v1` — it only appends
-    // `/chat/completions` or `/responses`. Matches the pattern in agents.ts.
-    const openaiBase = `${gatewayBase}/v1`;
-
-    const anthropicSet: ReadonlySet<string> = new Set(ANTHROPIC_PROVIDERS);
-
-    for (const provider of GATEWAY_PROVIDERS) {
-      const headers: Record<string, string> = {
-        ...baseHeaders,
-        // Inject provider ID so the gateway uses provider-based routing
-        // (correct protocol + upstream URL) instead of model-prefix guessing.
-        "x-lore-provider": provider,
-      };
-      // For local/custom providers, inject the original upstream URL so the
-      // gateway can forward requests to the correct endpoint. The user sets
-      // LORE_UPSTREAM_<PROVIDER>=<url> in their environment.
-      const envKey = `LORE_UPSTREAM_${provider.toUpperCase().replace(/-/g, "_")}`;
-      const upstream = process.env[envKey];
-      if (upstream) {
-        headers["x-lore-upstream-url"] = upstream;
-      }
-      const baseUrl = anthropicSet.has(provider) ? anthropicBase : openaiBase;
+    const registrations = buildProviderRegistrations({
+      gatewayBase,
+      sessionID: currentSessionID,
+      projectPath,
+      // Resolve the git remote for the CURRENT project path so worktrees that
+      // switch on session_start get the right remote.
+      gitRemote: getGitRemote(projectPath) ?? undefined,
+    });
+    for (const { provider, baseUrl, headers } of registrations) {
       pi.registerProvider(provider, { baseUrl, headers });
     }
   }
@@ -373,55 +180,15 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
     async (
       event: SessionBeforeCompactEvent,
       _ctx,
-    ): Promise<SessionBeforeCompactResult | undefined> => {
-      try {
-        const res = await fetch(`${gatewayBase}/v1/compact`, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-lore-session-id": currentSessionID,
-          },
-          body: JSON.stringify({
-            project_path: projectPath,
-            previous_summary: event.preparation.previousSummary,
-          }),
-        });
-
-        if (!res.ok) {
-          // Gateway returned an error — fall back to Pi's default compaction.
-          const errBody = await res.text().catch(() => "");
-          // A 404 `session_not_found` is expected when this session was never
-          // routed through Lore (e.g. a provider Lore doesn't proxy, or a
-          // websocket-only transport that bypassed the gateway). That's not a
-          // failure — log it quietly and let Pi's default compaction run.
-          if (res.status === 404 && errBody.includes("session_not_found")) {
-            log.info(
-              "pi: lore compaction unavailable — this session was not routed " +
-                "through Lore; falling back to Pi compaction.",
-            );
-            return undefined;
-          }
-          log.warn(
-            `pi: compaction endpoint returned ${res.status}: ${errBody}`,
-          );
-          return undefined;
-        }
-
-        const { summary } = (await res.json()) as { summary: string };
-        if (!summary) return undefined;
-
-        return {
-          compaction: {
-            summary,
-            firstKeptEntryId: event.preparation.firstKeptEntryId,
-            tokensBefore: event.preparation.tokensBefore,
-          },
-        };
-      } catch (err) {
-        log.warn("pi: custom compaction failed, falling back to default:", err);
-        return undefined;
-      }
-    },
+    ): Promise<SessionBeforeCompactResult | undefined> =>
+      runCompaction({
+        gatewayBase,
+        sessionID: currentSessionID,
+        projectPath,
+        previousSummary: event.preparation.previousSummary,
+        firstKeptEntryId: event.preparation.firstKeptEntryId,
+        tokensBefore: event.preparation.tokensBefore,
+      }),
   );
 }
 
