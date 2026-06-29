@@ -50,3 +50,9 @@ actionlint
 # Mutation testing (Stryker) — issue #832
 reports/
 .stryker-tmp/
+
+# Python (lore-hermes plugin tests)
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/

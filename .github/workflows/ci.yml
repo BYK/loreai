@@ -1334,10 +1334,33 @@ jobs:
           LORE_INTEGRATION: '1'
           NODE_NO_WARNINGS: '1'
 
+  # ---------------------------------------------------------------------------
+  # Hermes (Python) plugin tests.
+  #
+  # The lore-hermes plugin is Python; its pytest suite is not covered by the
+  # Node/Vitest `test` job. Run it on a Python runtime so a broken Hermes
+  # adapter can't ship undetected. Gated on the code path filter like the
+  # other heavy jobs.
+  # ---------------------------------------------------------------------------
+  hermes-test:
+    name: Hermes plugin tests (Python)
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install lore-hermes with test extras
+        run: pip install -e "packages/hermes[test]"
+      - name: Run hermes tests
+        run: python -m pytest packages/hermes/tests/ -q
+
   ci-status:
     name: CI Status
     if: always()
-    needs: [changes, test, binary-smoke-native, check-docs, check-links, check-preview-links, check-social, check-patches, actionlint, sync-integration]
+    needs: [changes, test, binary-smoke-native, check-docs, check-links, check-preview-links, check-social, check-patches, actionlint, sync-integration, hermes-test]
     runs-on: ubuntu-latest
     steps:
       - name: Check CI result
@@ -1398,6 +1421,15 @@ jobs:
             syncItResult="${{ needs.sync-integration.result }}"
             if [ "$syncItResult" != "success" ]; then
               echo "::error::sync-integration did not succeed (result: $syncItResult)"
+              exit 1
+            fi
+          fi
+          # hermes-test is required whenever code changed (self-gates on the
+          # code path filter); "skipped" on unrelated changes is treated as pass.
+          if [ "${{ needs.changes.outputs.code }}" == "true" ]; then
+            hermesResult="${{ needs.hermes-test.result }}"
+            if [ "$hermesResult" != "success" ]; then
+              echo "::error::hermes-test did not succeed (result: $hermesResult)"
               exit 1
             fi
           fi
