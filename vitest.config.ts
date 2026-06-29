@@ -24,6 +24,7 @@ export default defineConfig({
       "packages/gateway/test/**/*.test.ts",
       "packages/opencode/test/**/*.test.ts",
       "packages/sqlite-vec-vendored/test/**/*.test.ts",
+      "packages/pi/test/**/*.test.ts",
     ],
     // Preload test setup for DB isolation
     setupFiles: ["./packages/core/test/setup.ts"],

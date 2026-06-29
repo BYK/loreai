@@ -43,3 +43,11 @@ const imageUrl = `${site}${base}${ogImageManifest.filename}`;
 <meta name="twitter:description" content={description} />
 <meta name="twitter:image" content={imageUrl} />
 <meta name="twitter:site" content="@withLoreAI" />
+
+<!-- RSS feed autodiscovery -->
+<link
+  rel="alternate"
+  type="application/rss+xml"
+  title="Lore Blog"
+  href={`${site}${base}rss.xml`}
+/>
