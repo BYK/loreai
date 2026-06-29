@@ -17,6 +17,7 @@
 
 import { parentPort, workerData } from "node:worker_threads";
 import { openReaderConnection, type ReaderConnection } from "./db/reader";
+import { resolveReadMode, readStorageMode } from "./db/vec-store";
 import { type ReadJobConn, runReadJob } from "./read-job";
 import { runVectorQuery } from "./vector-query";
 import type {
@@ -72,12 +73,15 @@ port.on("message", (msg: VectorWorkerInbound) => {
         return;
       }
       try {
-        const hits = runVectorQuery(
-          conn.db,
+        // Resolve the read mode per request from this worker's OWN connection
+        // (its sqlite-vec availability is fixed at open; the DB's storage mode
+        // is read fresh each time so a mid-process blob→vec0 flip on the main
+        // thread is picked up via WAL without respawning the worker).
+        const readMode = resolveReadMode(
+          readStorageMode(conn.db),
           conn.vecAvailable,
-          msg.embedding,
-          msg.spec,
         );
+        const hits = runVectorQuery(conn.db, readMode, msg.embedding, msg.spec);
         post({ type: "result", id: msg.id, hits });
       } catch (err) {
         // Per-request failure — reject just this request, keep serving. The

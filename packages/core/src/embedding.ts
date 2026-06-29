@@ -16,6 +16,12 @@
 import { freemem } from "node:os";
 import { db } from "./db";
 import { isVecAvailable } from "./db/vec";
+import {
+  clearAllEmbeddings,
+  readStorageMode,
+  resolveReadMode,
+  storeEmbedding,
+} from "./db/vec-store";
 import { config } from "./config";
 import * as log from "./log";
 import { vendorModelInfo } from "./embedding-vendor";
@@ -39,7 +45,6 @@ import {
 } from "./embedding-worker-types";
 import {
   runVectorQuery,
-  toBlob,
   type DistillationVectorHit,
   type VectorHit,
   type VectorQuerySpec,
@@ -1282,7 +1287,8 @@ async function poolOrInProcess(
   // worker query (terminates + respawns) so it recovers for the next caller.
   if (pooled === VECTOR_SEARCH_TIMED_OUT) return [];
   if (pooled !== null) return pooled;
-  return runVectorQuery(db(), isVecAvailable(), queryEmbedding, spec);
+  const readMode = resolveReadMode(readStorageMode(db()), isVecAvailable());
+  return runVectorQuery(db(), readMode, queryEmbedding, spec);
 }
 
 export async function vectorSearch(
@@ -1374,9 +1380,7 @@ export function embedKnowledgeEntry(
   const text = `${title}\n${content}`;
   embed([text], "document")
     .then(([vec]) => {
-      db()
-        .query("UPDATE knowledge SET embedding = ? WHERE id = ?")
-        .run(toBlob(vec), id);
+      storeEmbedding(db(), "knowledge", id, vec);
     })
     .catch((err) => {
       if (err instanceof LocalProviderUnavailableError) return;
@@ -1412,9 +1416,7 @@ export function embedEntity(
   if (!text) return;
   embed([text], "document")
     .then(([vec]) => {
-      db()
-        .query("UPDATE entities SET embedding = ? WHERE id = ?")
-        .run(toBlob(vec), id);
+      storeEmbedding(db(), "entities", id, vec);
     })
     .catch((err) => {
       if (err instanceof LocalProviderUnavailableError) return;
@@ -1431,9 +1433,7 @@ export function embedDistillation(id: string, observations: string): void {
   if (!isAvailable()) return;
   embed([observations], "document")
     .then(([vec]) => {
-      db()
-        .query("UPDATE distillations SET embedding = ? WHERE id = ?")
-        .run(toBlob(vec), id);
+      storeEmbedding(db(), "distillations", id, vec);
     })
     .catch((err) => {
       if (err instanceof LocalProviderUnavailableError) return;
@@ -1455,9 +1455,7 @@ export function embedTemporalMessage(id: string, content: string): void {
 
   embed([content], "document")
     .then(([vec]) => {
-      db()
-        .query("UPDATE temporal_messages SET embedding = ? WHERE id = ?")
-        .run(toBlob(vec), id);
+      storeEmbedding(db(), "temporal", id, vec);
     })
     .catch((err) => {
       if (err instanceof LocalProviderUnavailableError) return;
@@ -1548,10 +1546,7 @@ export function checkConfigChange(): boolean {
     const total =
       knowledgeCount.n + distillCount.n + temporalCount.n + entityCount.n;
     if (total > 0) {
-      db().query("UPDATE knowledge SET embedding = NULL").run();
-      db().query("UPDATE distillations SET embedding = NULL").run();
-      db().query("UPDATE temporal_messages SET embedding = NULL").run();
-      db().query("UPDATE entities SET embedding = NULL").run();
+      clearAllEmbeddings(db());
       log.info(
         `embedding config changed (${stored.value} → ${current}), cleared ${total} stale embeddings`,
       );
@@ -1808,12 +1803,9 @@ export async function backfillEmbeddings(): Promise<number> {
         batch.map((b) => b.text),
         "document",
       );
-      const update = db().prepare(
-        "UPDATE knowledge SET embedding = ? WHERE id = ?",
-      );
 
       for (let j = 0; j < batch.length; j++) {
-        update.run(toBlob(vectors[j]), batch[j].id);
+        storeEmbedding(db(), "knowledge", batch[j].id, vectors[j]);
         embedded++;
       }
     } catch (err) {
@@ -1880,12 +1872,9 @@ export async function backfillDistillationEmbeddings(): Promise<number> {
         batch.map((b) => b.text),
         "document",
       );
-      const update = db().prepare(
-        "UPDATE distillations SET embedding = ? WHERE id = ?",
-      );
 
       for (let j = 0; j < batch.length; j++) {
-        update.run(toBlob(vectors[j]), batch[j].id);
+        storeEmbedding(db(), "distillations", batch[j].id, vectors[j]);
         embedded++;
       }
     } catch (err) {
@@ -1971,12 +1960,9 @@ export async function backfillEntityEmbeddings(): Promise<number> {
         batch.map((b) => b.text),
         "document",
       );
-      const update = db().prepare(
-        "UPDATE entities SET embedding = ? WHERE id = ?",
-      );
 
       for (let j = 0; j < batch.length; j++) {
-        update.run(toBlob(vectors[j]), batch[j].id);
+        storeEmbedding(db(), "entities", batch[j].id, vectors[j]);
         embedded++;
       }
     } catch (err) {

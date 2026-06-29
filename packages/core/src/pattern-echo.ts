@@ -14,6 +14,7 @@
  */
 
 import { db, ensureProject } from "./db";
+import { storeEmbedding } from "./db/vec-store";
 import * as embedding from "./embedding";
 import * as ltm from "./ltm";
 import type { KnowledgeMetadata } from "./ltm";
@@ -119,9 +120,7 @@ async function _detect(input: {
   // rate-limit check sat above this, so a segment arriving within the cooldown
   // got no embedding stored at all: a latent recall gap.)
   const [vec] = await embedding.embed([input.observations], "document");
-  db()
-    .query("UPDATE distillations SET embedding = ? WHERE id = ?")
-    .run(embedding.toBlob(vec), input.distillId);
+  storeEmbedding(db(), "distillations", input.distillId, vec);
 
   // Rate limit the EXPENSIVE pattern detection that follows (project-wide vector
   // search + clustering + an LLM extraction call): at most one attempt per

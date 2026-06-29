@@ -9,9 +9,12 @@
 //
 // It MUST stay leaf-level: no transformers.js, no provider chain, no `db()`
 // singleton, no config. The caller supplies the connection and a flag telling
-// us whether sqlite-vec is loaded on THAT connection (the two threads load the
-// extension independently). Keeping this self-contained is what lets the worker
-// bundle stay tiny — see build plumbing in packages/gateway/script.
+// us which {@link VecReadMode} to run on THAT connection (the two threads load
+// the extension independently, and the read mode collapses that capability with
+// the DB's storage layout — see db/vec-store.ts). Keeping this self-contained is
+// what lets the worker bundle stay tiny — see build plumbing in packages/gateway/script.
+
+import type { VecReadMode } from "./db/vec-store";
 
 /** A minimal structural view of a SQLite connection — just what the vector
  *  queries need. Satisfied by both node:sqlite and bun:sqlite connections. */
@@ -143,10 +146,17 @@ export function fromBlob(blob: Buffer | Uint8Array): Float32Array {
 /**
  * Run one of the five vector searches against `conn`.
  *
- * `vecAvailable` indicates whether sqlite-vec is loaded on `conn`. When true we
- * use the native `vec_distance_cosine()` scan; on any error (or when false) we
- * fall back to the pure-JS brute force. Both paths return the same ordering and
- * scores for L2-normalized vectors (the system-wide invariant) — see db/vec.ts.
+ * `readMode` (resolved by the caller from the DB's storage layout × this
+ * connection's sqlite-vec availability — see db/vec-store.ts) selects the
+ * strategy:
+ *   - `blob-native` uses the native `vec_distance_cosine()` scan, falling back
+ *     to the pure-JS brute force on any error;
+ *   - `blob-js` runs the pure-JS brute force directly;
+ *   - `vec0` (DiskANN KNN) is not implemented until the cutover PR;
+ *   - `degraded` (vec0 layout but no extension) returns `[]` — vector recall is
+ *     impossible without the blobs, so we degrade gracefully rather than crash.
+ * The blob paths return the same ordering and scores for L2-normalized vectors
+ * (the system-wide invariant) — see db/vec.ts.
  *
  * Returns `DistillationVectorHit[]` for `kind === "allDistillations"` and
  * `VectorHit[]` for every other kind. The two share the same row shape minus
@@ -154,21 +164,21 @@ export function fromBlob(blob: Buffer | Uint8Array): Float32Array {
  */
 export function runVectorQuery(
   conn: VectorQueryConn,
-  vecAvailable: boolean,
+  readMode: VecReadMode,
   queryEmbedding: Float32Array,
   spec: VectorQuerySpec,
 ): VectorHit[] | DistillationVectorHit[] {
   switch (spec.kind) {
     case "knowledge":
-      return runKnowledge(conn, vecAvailable, queryEmbedding, spec);
+      return runKnowledge(conn, readMode, queryEmbedding, spec);
     case "entities":
-      return runEntities(conn, vecAvailable, queryEmbedding, spec.limit);
+      return runEntities(conn, readMode, queryEmbedding, spec.limit);
     case "distillations":
-      return runDistillations(conn, vecAvailable, queryEmbedding, spec.limit);
+      return runDistillations(conn, readMode, queryEmbedding, spec.limit);
     case "allDistillations":
       return runAllDistillations(
         conn,
-        vecAvailable,
+        readMode,
         queryEmbedding,
         spec.projectId,
         spec.limit,
@@ -176,7 +186,7 @@ export function runVectorQuery(
     case "temporal":
       return runTemporal(
         conn,
-        vecAvailable,
+        readMode,
         queryEmbedding,
         spec.projectId,
         spec.limit,
@@ -185,14 +195,30 @@ export function runVectorQuery(
   }
 }
 
+/**
+ * Guard the `vec0` read mode out of the blob helpers: the DiskANN read path
+ * lands in the cutover PR, and `vec0` is unreachable today because no DB is ever
+ * flipped to the vec0 storage mode. Throwing (rather than silently scanning the
+ * wrong layout) makes a premature cutover loud. Each helper handles `degraded`
+ * inline with an early `return []`; after that and this guard, `readMode` is
+ * always `blob-native` or `blob-js`.
+ */
+function assertBlobReadMode(readMode: VecReadMode): void {
+  if (readMode === "vec0") {
+    throw new Error("vec0 read path is not implemented until the cutover PR");
+  }
+}
+
 function runKnowledge(
   conn: VectorQueryConn,
-  vecAvailable: boolean,
+  readMode: VecReadMode,
   queryEmbedding: Float32Array,
   spec: { limit: number; excludeCategories?: string[] },
 ): VectorHit[] {
+  if (readMode === "degraded") return [];
+  assertBlobReadMode(readMode);
   const { limit, excludeCategories } = spec;
-  if (vecAvailable) {
+  if (readMode === "blob-native") {
     try {
       let sql =
         "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM knowledge_current WHERE embedding IS NOT NULL AND confidence > 0.2";
@@ -231,11 +257,13 @@ function runKnowledge(
 
 function runEntities(
   conn: VectorQueryConn,
-  vecAvailable: boolean,
+  readMode: VecReadMode,
   queryEmbedding: Float32Array,
   limit: number,
 ): VectorHit[] {
-  if (vecAvailable) {
+  if (readMode === "degraded") return [];
+  assertBlobReadMode(readMode);
+  if (readMode === "blob-native") {
     try {
       return conn
         .query(
@@ -261,11 +289,13 @@ function runEntities(
 
 function runDistillations(
   conn: VectorQueryConn,
-  vecAvailable: boolean,
+  readMode: VecReadMode,
   queryEmbedding: Float32Array,
   limit: number,
 ): VectorHit[] {
-  if (vecAvailable) {
+  if (readMode === "degraded") return [];
+  assertBlobReadMode(readMode);
+  if (readMode === "blob-native") {
     try {
       return conn
         .query(
@@ -293,12 +323,14 @@ function runDistillations(
 
 function runAllDistillations(
   conn: VectorQueryConn,
-  vecAvailable: boolean,
+  readMode: VecReadMode,
   queryEmbedding: Float32Array,
   projectId: string,
   limit: number,
 ): DistillationVectorHit[] {
-  if (vecAvailable) {
+  if (readMode === "degraded") return [];
+  assertBlobReadMode(readMode);
+  if (readMode === "blob-native") {
     try {
       // Rank by similarity within the same most-recent candidate window the JS
       // path uses (created_at DESC, capped at MAX_DISTILLATION_VECTOR_ROWS).
@@ -341,13 +373,15 @@ function runAllDistillations(
 
 function runTemporal(
   conn: VectorQueryConn,
-  vecAvailable: boolean,
+  readMode: VecReadMode,
   queryEmbedding: Float32Array,
   projectId: string,
   limit: number,
   sessionId?: string,
 ): VectorHit[] {
-  if (vecAvailable) {
+  if (readMode === "degraded") return [];
+  assertBlobReadMode(readMode);
+  if (readMode === "blob-native") {
     try {
       // Score only the most-recent MAX_TEMPORAL_VECTOR_ROWS rows (the same
       // candidate window the JS path uses below). STOPGAP — see
