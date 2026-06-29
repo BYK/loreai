@@ -79,7 +79,7 @@ it does hold, it reads best at the edges, not buried in the middle
 ([*Lost in the Middle*](https://arxiv.org/abs/2307.03172)).
 
 RAG has one honest advantage: it's cheaper to pull a few snippets than to carry the whole
-history. But that only pays off when a small slice can stand in for everything else, and an
+history. But that only pays off when a small slice can substitute for everything else, and an
 agent session is the opposite case. RAG can only add to the window, never stand in for it.
 
 ## What managing the window actually looks like
