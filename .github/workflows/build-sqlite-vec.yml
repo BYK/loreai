@@ -26,6 +26,11 @@ on:
 permissions:
   contents: read
 
+# Cancel a superseded matrix run when a newer commit lands on the same ref.
+concurrency:
+  group: build-sqlite-vec-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: ${{ matrix.target }}
