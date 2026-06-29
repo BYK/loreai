@@ -22,7 +22,7 @@
  *   pi install npm:@loreai/pi
  */
 import { createHash } from "node:crypto";
-import { getGitRemote, installFetchInterceptor } from "@loreai/core";
+import { getGitRemote, installFetchInterceptor, log } from "@loreai/core";
 import type {
   ExtensionAPI,
   SessionBeforeCompactEvent,
@@ -143,7 +143,7 @@ async function resolveGatewayUrl(): Promise<string | null> {
   if (process.env.LORE_REMOTE_URL) {
     const url = process.env.LORE_REMOTE_URL.replace(/\/$/, "");
     if (await probeGateway(url)) return url;
-    console.info(
+    log.info(
       `pi: remote gateway at ${url} not reachable, falling through to local discovery`,
     );
   }
@@ -196,13 +196,13 @@ async function startInProcess(): Promise<string | null> {
     const url = `http://127.0.0.1:${handle.port}`;
 
     if (!handle.owned) {
-      console.info(`pi: reusing existing gateway at ${url}`);
+      log.info(`pi: reusing existing gateway at ${url}`);
     }
 
     return url;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    console.info("pi: failed to start gateway in-process:", msg);
+    log.warn("pi: failed to start gateway in-process:", msg);
     return null;
   }
 }
@@ -227,21 +227,28 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
   let loreActive = false;
   const loreDisabled =
     process.env.LORE_DISABLED === "1" || process.env.LORE_DISABLED === "true";
-  const inTestEnv = process.env.NODE_ENV === "test";
+  // The extension is inert under `NODE_ENV=test` so unrelated package test
+  // suites don't accidentally probe/start a gateway. Tests that need the
+  // extension active set `LORE_PI_FORCE_ACTIVE=1` and point it at a controlled
+  // in-process gateway via `LORE_GATEWAY_URL`. This keeps `NODE_ENV=test` (so
+  // `log` stays file-suppressed and the DB stays isolated) while exercising the
+  // real wiring.
+  const inTestEnv =
+    process.env.NODE_ENV === "test" && process.env.LORE_PI_FORCE_ACTIVE !== "1";
 
   if (!loreDisabled && !inTestEnv) {
     // Try to find a running gateway first (probes port file + known ports).
     const existingUrl = await resolveGatewayUrl();
     if (existingUrl) {
-      console.info(`pi: gateway detected at ${existingUrl}`);
+      log.info(`pi: gateway detected at ${existingUrl}`);
       gatewayBase = existingUrl;
       loreActive = true;
     } else {
       // No running gateway — start one in-process (handles fallback chain).
-      console.info("pi: starting gateway in-process…");
+      log.info("pi: starting gateway in-process…");
       const startedUrl = await startInProcess();
       if (startedUrl) {
-        console.info(`pi: gateway started in-process at ${startedUrl}`);
+        log.info(`pi: gateway started in-process at ${startedUrl}`);
         gatewayBase = startedUrl;
         loreActive = true;
       }
@@ -252,13 +259,13 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
     const msg =
       "Lore failed to start — memory features are unavailable. " +
       "Ensure @loreai/gateway is installed.";
-    console.error("pi:", msg);
+    log.error("pi:", msg);
     return;
   }
 
   if (!loreActive) return;
 
-  console.info(`pi: routing providers through ${gatewayBase}`);
+  log.info(`pi: routing providers through ${gatewayBase}`);
 
   // ---------------------------------------------------------------------------
   // Session tracking — used for provider header injection and compaction.
@@ -388,13 +395,13 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
           // websocket-only transport that bypassed the gateway). That's not a
           // failure — log it quietly and let Pi's default compaction run.
           if (res.status === 404 && errBody.includes("session_not_found")) {
-            console.info(
+            log.info(
               "pi: lore compaction unavailable — this session was not routed " +
                 "through Lore; falling back to Pi compaction.",
             );
             return undefined;
           }
-          console.error(
+          log.warn(
             `pi: compaction endpoint returned ${res.status}: ${errBody}`,
           );
           return undefined;
@@ -411,10 +418,7 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
           },
         };
       } catch (err) {
-        console.error(
-          "pi: custom compaction failed, falling back to default:",
-          err,
-        );
+        log.warn("pi: custom compaction failed, falling back to default:", err);
         return undefined;
       }
     },

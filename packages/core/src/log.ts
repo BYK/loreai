@@ -72,7 +72,14 @@ export function traceDbQuery<T>(sql: string, fn: () => T): T {
 // Helpers
 // ---------------------------------------------------------------------------
 
-const isDebug = !!process.env.LORE_DEBUG;
+// Match the gateway config's `isTruthy` semantics: only "1" or "true" enable
+// debug. The naive `!!process.env.LORE_DEBUG` treated `LORE_DEBUG=0` and
+// `LORE_DEBUG=false` as ENABLED (non-empty strings are truthy), which meant a
+// user who set `LORE_DEBUG=0` to silence Lore still got `[lore]` status lines
+// printed to stderr — fatal inside a full-screen TUI (e.g. the Pi agent).
+const isDebug =
+  process.env.LORE_DEBUG === "1" ||
+  process.env.LORE_DEBUG?.toLowerCase() === "true";
 
 /** Format variadic args into a single string for the sink. */
 function formatArgs(args: unknown[]): string {

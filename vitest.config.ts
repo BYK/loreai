@@ -19,6 +19,7 @@ export default defineConfig({
       "packages/core/test/**/*.test.ts",
       "packages/gateway/test/**/*.test.ts",
       "packages/opencode/test/**/*.test.ts",
+      "packages/pi/test/**/*.test.ts",
     ],
     // Preload test setup for DB isolation
     setupFiles: ["./packages/core/test/setup.ts"],

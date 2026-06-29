@@ -11,7 +11,7 @@ import { startServer, bracketHost } from "../server";
 import { resetPipelineState } from "../pipeline";
 import { writePortFile, removePortFile, readPortFile } from "../portfile";
 import { writePidFile, removePidFile } from "../pidfile";
-import { dataDir, embedding } from "@loreai/core";
+import { dataDir, embedding, log } from "@loreai/core";
 import { safeExit } from "./exit";
 import { installSignalShutdown } from "./shutdown";
 
@@ -300,6 +300,18 @@ export async function startGateway(
 ): Promise<GatewayHandle> {
   const config = loadConfig();
 
+  // In-process callers (OpenCode plugin, Pi extension) pass `quiet: true`.
+  // They run inside the host agent's full-screen TUI, where ANY stdout/stderr
+  // write corrupts the rendered screen. Route the gateway's own startup/
+  // shutdown notices through the core `log` module (file-based, terminal-
+  // suppressed) when quiet; otherwise keep the visible `console.error` notices
+  // for the `lore start` CLI.
+  const quiet = opts.quiet === true;
+  const notify = (msg: string): void => {
+    if (quiet) log.warn(msg);
+    else console.error(`[lore] ${msg}`);
+  };
+
   // CLI overrides
   if (opts.port !== undefined) {
     config.port = opts.port;
@@ -420,7 +432,7 @@ export async function startGateway(
       const shutdown = async () => {
         if (shutdownStarted) return;
         shutdownStarted = true;
-        console.error("[lore] Shutting down…");
+        notify("Shutting down…");
         boundServer.stop();
         removePortFile(actualPort);
         removePidFile();
@@ -436,8 +448,8 @@ export async function startGateway(
       };
 
       if (candidatePort === 0) {
-        console.error(
-          `[lore] Preferred ports (${DEFAULT_PORTS.join(", ")}) were unavailable; using port ${actualPort}`,
+        notify(
+          `Preferred ports (${DEFAULT_PORTS.join(", ")}) were unavailable; using port ${actualPort}`,
         );
       }
 
@@ -499,8 +511,8 @@ export async function startGateway(
       if (nextIdx < portsToTry.length) {
         const nextPort = portsToTry[nextIdx];
         const nextLabel = nextPort === 0 ? "random port" : String(nextPort);
-        console.error(
-          `[lore] Port ${candidatePort} in use (not a lore gateway), trying ${nextLabel}…`,
+        notify(
+          `Port ${candidatePort} in use (not a lore gateway), trying ${nextLabel}…`,
         );
       }
     }
