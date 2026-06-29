@@ -38,6 +38,7 @@ import {
   handleResponsesCompactEndpoint,
 } from "./pipeline";
 import { upstreamFetch } from "./fetch";
+import { decodeRequestBody } from "./http-body";
 
 // ---------------------------------------------------------------------------
 // Version — best-effort from package.json, falls back gracefully
@@ -156,7 +157,9 @@ async function handleAnthropicMessages(
 ): Promise<Response> {
   let body: unknown;
   try {
-    body = await req.json();
+    // Transparently decode any Content-Encoding (Codex sends zstd by default)
+    // before JSON-parsing — raw compressed bytes would otherwise fail to parse.
+    body = JSON.parse(await decodeRequestBody(req));
   } catch {
     return errorResponse(400, "invalid_request_error", "Invalid JSON body");
   }
@@ -236,7 +239,9 @@ async function handleOpenAIChatCompletions(
 ): Promise<Response> {
   let body: unknown;
   try {
-    body = await req.json();
+    // Transparently decode any Content-Encoding (Codex sends zstd by default)
+    // before JSON-parsing — raw compressed bytes would otherwise fail to parse.
+    body = JSON.parse(await decodeRequestBody(req));
   } catch {
     return errorResponse(400, "invalid_request_error", "Invalid JSON body");
   }
@@ -268,7 +273,9 @@ async function handleOpenAIResponses(
 ): Promise<Response> {
   let body: unknown;
   try {
-    body = await req.json();
+    // Transparently decode any Content-Encoding (Codex sends zstd by default)
+    // before JSON-parsing — raw compressed bytes would otherwise fail to parse.
+    body = JSON.parse(await decodeRequestBody(req));
   } catch {
     return errorResponse(400, "invalid_request_error", "Invalid JSON body");
   }
@@ -309,7 +316,9 @@ async function handleOpenAICodexResponses(
 ): Promise<Response> {
   let body: unknown;
   try {
-    body = await req.json();
+    // Transparently decode any Content-Encoding (Codex sends zstd by default)
+    // before JSON-parsing — raw compressed bytes would otherwise fail to parse.
+    body = JSON.parse(await decodeRequestBody(req));
   } catch {
     return errorResponse(400, "invalid_request_error", "Invalid JSON body");
   }

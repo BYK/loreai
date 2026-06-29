@@ -290,6 +290,7 @@ import {
   deserializeRecallStore,
 } from "./recall";
 import { upstreamFetch } from "./fetch";
+import { decodeRequestBody, encodeUpstreamBody } from "./http-body";
 import {
   findReadTool,
   findShellTool,
@@ -3540,6 +3541,18 @@ async function forwardToUpstream(
     );
   }
 
+  // Re-compress the upstream body with the client's original Content-Encoding
+  // (Codex sends `zstd` by default) so the upstream receives the same wire
+  // encoding the client used. `content-encoding` is gateway-owned (never
+  // forwarded by the builders) — set it here to match the bytes we actually
+  // send. `serializedBody` (the uncompressed JSON) stays the return value so
+  // cache analytics / the cache-warmer keep comparing uncompressed prefixes.
+  const { body: upstreamBody, contentEncoding } = encodeUpstreamBody(
+    serializedBody,
+    req.rawHeaders["content-encoding"],
+  );
+  if (contentEncoding) headers["content-encoding"] = contentEncoding;
+
   const effectiveInterceptor = interceptor ?? activeInterceptor;
 
   if (effectiveInterceptor) {
@@ -3551,7 +3564,7 @@ async function forwardToUpstream(
         upstreamFetch(url, {
           method: "POST",
           headers,
-          body: serializedBody,
+          body: upstreamBody,
         }),
     );
     return { response, serializedBody, effectiveProtocol };
@@ -3560,7 +3573,7 @@ async function forwardToUpstream(
   const response = await upstreamFetch(url, {
     method: "POST",
     headers,
-    body: serializedBody,
+    body: upstreamBody,
   });
   return { response, serializedBody, effectiveProtocol };
 }
@@ -5510,7 +5523,8 @@ export async function handleCompactEndpoint(
 ): Promise<Response> {
   let body: { project_path?: string; previous_summary?: string };
   try {
-    body = (await req.json()) as typeof body;
+    // Decode any Content-Encoding (e.g. zstd) before JSON-parsing.
+    body = JSON.parse(await decodeRequestBody(req)) as typeof body;
   } catch {
     return new Response(
       JSON.stringify({
@@ -5646,7 +5660,10 @@ export async function handleResponsesCompactEndpoint(
   config: GatewayConfig,
 ): Promise<Response> {
   // Read the body as text so we can both parse it and replay it for passthrough.
-  const bodyText = await req.text();
+  // Decode any Content-Encoding (Codex sends zstd by default) first — otherwise
+  // the raw compressed bytes fail to JSON.parse and the passthrough replays
+  // undecodable bytes upstream.
+  const bodyText = await decodeRequestBody(req);
   let body: Record<string, unknown>;
   try {
     body = JSON.parse(bodyText) as Record<string, unknown>;
@@ -5772,6 +5789,14 @@ async function passthroughResponsesCompact(
   const openAiBeta = rawHeaders["openai-beta"];
   if (openAiBeta) headers["openai-beta"] = openAiBeta;
 
+  // Re-compress with the client's original Content-Encoding (Codex sends zstd):
+  // `bodyText` was decoded on ingress, so replay it in the same wire encoding.
+  const { body: passthroughBody, contentEncoding } = encodeUpstreamBody(
+    bodyText,
+    rawHeaders["content-encoding"],
+  );
+  if (contentEncoding) headers["content-encoding"] = contentEncoding;
+
   // Apply user-supplied LORE_UPSTREAM_EXTRA_HEADERS as a final overlay so
   // corporate proxies / LiteLLM team-routing tokens / Cloudflare AI Gateway
   // / service-account scenarios work for compaction-passthrough calls too.
@@ -5781,7 +5806,7 @@ async function passthroughResponsesCompact(
     const upstream = await upstreamFetch(upstreamUrl, {
       method: "POST",
       headers,
-      body: bodyText,
+      body: passthroughBody,
     });
     return new Response(upstream.body, {
       status: upstream.status,

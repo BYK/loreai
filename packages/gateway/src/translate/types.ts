@@ -649,6 +649,11 @@ const GATEWAY_MANAGED_HEADERS = new Set([
   "connection",
   "transfer-encoding",
   "accept-encoding",
+  // Body encoding is gateway-owned: the gateway decodes the client body and
+  // re-serializes (then re-compresses) it, so it sets `content-encoding` on the
+  // upstream request to match the bytes it actually sends. Forwarding the
+  // client's raw value would mislabel the re-serialized body (issue #1032).
+  "content-encoding",
   // Lore-specific (injected by fetch interceptor / plugin hooks)
   "x-lore-provider",
   "x-lore-upstream-url",

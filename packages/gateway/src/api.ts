@@ -29,7 +29,7 @@ import {
 import type { GatewayConfig } from "./config";
 import { createGatewayLLMClient } from "./llm-adapter";
 import { resolveAuth } from "./auth";
-import { zstdDecompressSync } from "node:zlib";
+import { decodeRequestBody } from "./http-body";
 
 // ---------------------------------------------------------------------------
 // Route matching (adapted from ui.ts)
@@ -72,18 +72,11 @@ function errorResponse(
 }
 
 /**
- * Parse request body with optional zstd decompression.
- * Checks `Content-Encoding: zstd` header — if present, decompresses
- * the raw bytes before JSON-parsing.
+ * Parse a request body, transparently decoding any supported `Content-Encoding`
+ * (zstd from the remote CLI, plus gzip/br/deflate) before JSON-parsing.
  */
 async function parseBody<T = unknown>(req: Request): Promise<T> {
-  const encoding = req.headers.get("content-encoding");
-  if (encoding === "zstd") {
-    const raw = new Uint8Array(await req.arrayBuffer());
-    const decompressed = zstdDecompressSync(raw);
-    return JSON.parse(new TextDecoder().decode(decompressed)) as T;
-  }
-  return (await req.json()) as T;
+  return JSON.parse(await decodeRequestBody(req)) as T;
 }
 
 /**

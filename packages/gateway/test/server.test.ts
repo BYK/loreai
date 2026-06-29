@@ -13,6 +13,7 @@
  */
 import { describe, test, expect, beforeAll, afterAll } from "vitest";
 import { connect } from "node:net";
+import { zstdCompressSync } from "node:zlib";
 import { startServer } from "../src/server";
 import { loadConfig } from "../src/config";
 import type { GatewayConfig } from "../src/config";
@@ -81,6 +82,32 @@ describe("server routing", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: "{ this is not valid json",
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as {
+      error: { type: string; message: string };
+    };
+    expect(body.error.type).toBe("invalid_request_error");
+    expect(body.error.message).toBe("Invalid JSON body");
+  });
+
+  // A zstd-compressed body (as Codex sends) is decoded first; if the *decoded*
+  // text is still not valid JSON, the handler returns the same 400 — proving
+  // the decode path runs before JSON parsing (issue #1032).
+  test.each([
+    "/v1/messages",
+    "/v1/chat/completions",
+    "/v1/responses",
+    "/v1/codex/responses",
+  ])("POST %s with a zstd body of invalid JSON returns 400", async (path) => {
+    const compressed = zstdCompressSync(Buffer.from("{ not json after all"));
+    const res = await fetch(`${baseURL}${path}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "content-encoding": "zstd",
+      },
+      body: compressed,
     });
     expect(res.status).toBe(400);
     const body = (await res.json()) as {
