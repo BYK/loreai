@@ -27,6 +27,14 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # The Bluesky app password that authenticates the standard.site record
+    # publish lives in the `production` environment, so the job must opt into
+    # it to read the secret. Mapped to a (possibly empty) env var so the
+    # "Publish standard.site records" step below can be skipped via `if` when
+    # the secret is not configured (e.g. forks).
+    environment: production
+    env:
+      BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
     steps:
       - uses: actions/checkout@v6
 
@@ -77,3 +85,11 @@ jobs:
           branch: gh-pages
           clean-exclude: _preview
           force: false
+
+      - name: Publish standard.site records to the @withlore.ai PDS
+        # Idempotent putRecord upsert with deterministic rkeys, so this runs on
+        # every production deploy and keeps the AT Protocol records in sync with
+        # the blog. Reads the freshly built dist/standard-site.json. Skipped
+        # automatically when BSKY_APP_PASSWORD is not configured.
+        if: ${{ env.BSKY_APP_PASSWORD != '' }}
+        run: pnpm --filter '@loreai/website' publish:standard-site
