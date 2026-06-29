@@ -111,6 +111,18 @@ async function main() {
   });
   console.log(`✓ authenticated as ${HANDLE} (${session.did}) on ${pds}`);
 
+  // The records embed a hardcoded DID (their AT-URIs). If BSKY_HANDLE was
+  // overridden to a different account, we would otherwise write the blog's
+  // records into the wrong repo. Refuse unless the authenticated identity owns
+  // the DID the records are addressed to.
+  const recordDid = manifest.publication.uri.split("/")[2];
+  if (session.did !== recordDid) {
+    fail(
+      `authenticated DID (${session.did}) does not match the DID in the ` +
+        `records (${recordDid}); refusing to publish to the wrong repo`,
+    );
+  }
+
   const records = [
     {
       collection: manifest.publication.record.$type,

@@ -91,5 +91,13 @@ jobs:
         # every production deploy and keeps the AT Protocol records in sync with
         # the blog. Reads the freshly built dist/standard-site.json. Skipped
         # automatically when BSKY_APP_PASSWORD is not configured.
+        #
+        # continue-on-error: the site already deployed in the step above and is
+        # valid on its own (on-page .well-known + <link> verification). Syncing
+        # the PDS records is a best-effort, idempotent side effect that
+        # self-heals on the next deploy, so a transient PDS outage must not mark
+        # an otherwise-successful deploy as failed. A real failure still surfaces
+        # as a step annotation on the run.
         if: ${{ env.BSKY_APP_PASSWORD != '' }}
+        continue-on-error: true
         run: pnpm --filter '@loreai/website' publish:standard-site

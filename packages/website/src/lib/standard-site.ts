@@ -46,8 +46,29 @@ export function publicationUri(): string {
   return `at://${PUBLICATION_DID}/${PUBLICATION_COLLECTION}/${PUBLICATION_RKEY}`;
 }
 
-/** Documents are keyed by their post slug for stable, idempotent AT-URIs. */
+/**
+ * AT Protocol record-key syntax: 1–512 chars from `[A-Za-z0-9._~:-]`, and never
+ * `.` or `..`. See https://atproto.com/specs/record-key.
+ */
+const RECORD_KEY_RE = /^[A-Za-z0-9._~:-]{1,512}$/;
+
+/**
+ * Documents are keyed by their post slug for stable, idempotent AT-URIs.
+ *
+ * Astro derives the slug from the file path and keeps `/` for nested
+ * directories plus any unicode letters — both illegal in a record key. Rather
+ * than silently mangle the slug (which would desync the on-page `<link>` from
+ * the published record), fail the build loudly so a problematic slug is a
+ * deliberate decision, not a broken AT-URI / rejected PDS write.
+ */
 export function documentRkey(slug: string): string {
+  if (slug === "." || slug === ".." || !RECORD_KEY_RE.test(slug)) {
+    throw new Error(
+      `Blog slug "${slug}" is not a valid AT Protocol record key ` +
+        "(allowed: 1–512 chars of A–Z a–z 0–9 . _ ~ : - ; not '.' or '..'). " +
+        "Rename the post file or add an explicit slug mapping in standard-site.ts.",
+    );
+  }
   return slug;
 }
 
