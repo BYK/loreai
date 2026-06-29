@@ -11,38 +11,28 @@ tags:
 ---
 
 Ask anyone building agents what "memory" means and you'll get the same answer: a place to
-store facts and decisions so the agent can retrieve them later. A vector DB, a knowledge
-graph, a directory of notes, take your pick. It remembers what you discussed last week.
-That part is real, it's useful, and there are now solid tools that do it well.
+store facts and decisions so the agent can pull them back later. A vector DB, a knowledge
+graph, a folder of notes, take your pick. It remembers what you discussed last week, and
+there are good tools that do this well now.
 
-Now ask a different question. What happens when the session you're in *right now* crosses
+Now ask the harder question. What happens when the session you're in *right now* crosses
 180K tokens and the agent starts forgetting how it began?
 
-The answer you tend to get is a list of chores.
+The usual answer is a list of chores. Spin up a background agent. Write the plan to a file,
+then a second, then a third. Open a trail of GitHub issues. Leave notes in scratch markdown.
+Keep a tidy `AGENTS.md` and prompt more carefully while you're at it. Every one of these is
+the same move: manually push state out of the window and hope it finds its way back. That's
+you doing the filing. Maybe your tools file it for you now, straight from the conversation,
+so you never lift a finger. Better, but capture was never the hard part. The question is what
+stays in the window *this turn*, and saving something to a store, by hand or automatically,
+doesn't decide that.
 
-Spin up a background agent so the heavy work stays off your main thread. Write the plan to
-a file. Then a second plan, and a third, stacked on top of each other. Open a trail of
-GitHub issues. Leave notes in scratch markdown files. Keep a tidy `AGENTS.md`, and prompt
-more carefully while you're at it. Every one of these is the same move: manually push state
-*out* of the window and hope it finds its way back when it matters. That isn't managing
-your context. It's you doing the filing.
-
-Maybe your tools handle that filing for you now, pulling it straight from the conversation
-so you never lift a finger. Better, but capture was never the hard part. What gets written
-down isn't the question. What stays in the window *this turn* is, and saving it off to a
-store, by hand or automatically, doesn't decide that.
-
-And when the filing isn't enough, when the window actually fills mid-task, the one
-automatic mechanism every major agent ships finally kicks in: compaction. The client
-summarizes the older turns into a lossy blob, drops the originals from the window, and hands
-you back an agent that was a genius a minute ago and now can't quite remember its own name.
-
-This is the fix we all quietly accepted, or got talked into, for something that happens
-*every single session*. Often more than once in the same one. Sit with that for a second:
-the most predictable failure in agentic coding, the one you can set your watch by, and the
-state of the art is a guillotine that drops the moment you fall behind. Nobody set out to
-confuse context management with memory. We just decided the window was your problem to
-babysit, and moved on. So why has nobody built the thing that actually keeps up?
+When the filing isn't enough and the window fills mid-task, the one automatic mechanism every
+major agent ships kicks in: compaction. The client crushes the older turns into a lossy blob,
+drops the originals, and hands you back an agent that was a genius a minute ago and now can't
+quite remember its own name. We all quietly accepted this for something that happens every
+session, often more than once: the most predictable failure in agentic coding, answered by a
+guillotine. So why has nobody built the thing that keeps up?
 
 ## Two problems hiding behind one word
 
@@ -79,48 +69,43 @@ search over it. That's genuinely better, and it's worth saying so. But searching
 something *you* have to do, after you've already noticed something went missing, and
 whatever you pull back lands in the same window that was overflowing in the first place.
 You found the needle, and the haystack is still on fire. And automating the search doesn't
-save it: async, agent-native retrieval still drops what it finds into the same window, and
+save it: async, agent-native RAG still drops what it finds into the same window, and
 still never decides what *leaves* it.
 
-There's a quieter cost on top of that: models use what's already in the window far more
-reliably than what they have to go fetch. Hand a model the relevant text in-context and it
-beats retrieving the same text on quality
-([Li et al.](https://arxiv.org/abs/2407.16833)), and what it does hold, it reads best at the
-front and back of the window, not buried in the middle
-([*Lost in the Middle*](https://arxiv.org/abs/2307.03172)). Retrieval does have one honest
-advantage worth naming: it can be cheaper, because pulling a few relevant snippets into the
-prompt costs less than carrying the whole history. But that discount only exists if a small
-slice can stand in for everything else, and an agent session doesn't work that way. The
-window only grows as you go, the conversation *is* the context, and against a closed model
-from OpenAI or Anthropic you can't reach in and swap it for a slice. Retrieval can only add
-to the window, never stand in for it. The cheap version of RAG isn't on the table; the one
-you can run just makes the window bigger.
+There's a deeper reason the window wins. A model uses what's already in front of it far more
+reliably than what it has to fetch: hand it the relevant text in context and it beats RAG on
+the same text ([Li et al.](https://arxiv.org/abs/2407.16833)), and what
+it does hold, it reads best at the edges, not buried in the middle
+([*Lost in the Middle*](https://arxiv.org/abs/2307.03172)).
+
+RAG has one honest advantage: it's cheaper to pull a few snippets than to carry the whole
+history. But that only pays off when a small slice can stand in for everything else, and an
+agent session is the opposite case. RAG can only add to the window, never stand in for it.
 
 ## What managing the window actually looks like
 
 Two hundred turns deep, that means keeping the auth decision and the path of the file you're
-editing, and dropping the stale 4,000-token test dump, without anyone having to ask. To make
+editing while dropping the stale 4,000-token test dump, without anyone having to ask. To make
 that call on every turn, instead of letting a blunt summarizer maul the whole thing at the
 boundary, a few things have to be true:
 
-- **A distilled prefix, not a flattened summary.** Compress the early conversation into a
-  dense, structured record of what was established: the decisions, the shape of the work,
-  the constraints. Keep that record at the *front* of the window where the model can always
-  see it. Not "a paragraph about the first hour". The load-bearing facts, kept.
-- **Gradual, layered compression, not a cliff.** Full passthrough while there's room. As
-  pressure builds, compress the raw turns behind the distilled prefix. Under more pressure,
-  strip what ages worst first: stale tool output, redundant dumps. Emergency compression is
-  the last resort, not the opening move.
-- **Calibrated from real token counts, not guesses.** The window is a hard budget. What
-  gets cut should follow the actual token counts the API reports back, and what each
-  model's real context and pricing are. Not a character cap hardcoded once and forgotten.
-- **Some things are never cut.** The most recent turns stay intact, always. Whatever
-  happens upstream, the live edge of the conversation is protected. That's where the work
-  is happening.
+- **Keep a distilled prefix at the front.** Compress the early conversation into a dense,
+  structured record of what was established: the decisions, the shape of the work, the
+  constraints. That record stays pinned to the *front* of the window where the model can
+  always see it, carrying the load-bearing facts the rest of the work leans on.
+- **Compress gradually, in layers.** Full passthrough while there's room. As pressure
+  builds, compress the raw turns behind the distilled prefix. Under more pressure, strip what
+  ages worst first: stale tool output, redundant dumps. Emergency compression stays the last
+  resort.
+- **Calibrate from the real token counts.** The window is a hard budget. What gets cut
+  should follow the actual token counts the API reports back, and what each model's real
+  context and pricing are. A character cap hardcoded once and forgotten tracks none of that.
+- **Protect the live edge.** The most recent turns stay intact, always. Whatever happens
+  upstream, the active end of the conversation is where the work is happening, so it stays
+  whole.
 
-The point isn't cleverness. It's that *something is actively deciding what stays in the
-window on every turn*, in the loop, instead of a one-shot summarizer flattening the session
-the moment it overflows.
+What matters here is the loop: *something is actively deciding what stays in the window on
+every turn*, instead of a one-shot summarizer flattening the session the moment it overflows.
 
 ## Two layers, one stack
 
@@ -155,7 +140,7 @@ Observational Memory lives inside the Mastra framework. The memory is excellent.
 packaging is the constraint. Almost no one is going to replace the coding agent they
 already rely on just to get a context-management layer.
 
-## A layer, not a harness
+## Unhook it from the harness
 
 So that's the gap: take the same ideas and unhook them from the harness. Deliver them as a
 layer that works with whatever agent you're already using, on whatever provider you're
@@ -165,8 +150,7 @@ Here's the distinction that actually matters, and it's easy to miss now that eve
 calls itself memory. A store is a tool the agent reaches for: it sits off to the side and
 answers when it's asked, however clever the asking has gotten. A layer sits *in the request
 path*. Every turn flows through it, and it can reshape that turn before the model ever sees
-it. That position, in the path instead of beside it, is the only one from which you can
-manage the live window at all.
+it. That position is the only one from which you can manage the live window at all.
 
 It's also the most invasive seat in the system, and that's worth being honest about. A
 thing that sees every token of every session only earns that seat if it's *yours*: a single
@@ -198,8 +182,8 @@ requests you were already paying for.
 And once memory lives in that layer instead of inside one agent, it stops belonging to any
 single agent. Your context follows you. Move from Claude Code to Codex to OpenCode, or reach
 for a different agent on a different task, and the same memory comes along. A team running a
-mix shares one knowledge base instead of three separate silos. That portability isn't the
-trick. It's just what falls out once the memory no longer lives inside the harness.
+mix shares one knowledge base instead of three separate silos. Portability comes free once
+the memory no longer lives inside the harness.
 
 Memory is the wedge. The layer is the platform.
 
