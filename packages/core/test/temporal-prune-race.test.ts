@@ -36,6 +36,27 @@ function throwingSink(match: RegExp, err: Error): LogSink {
   };
 }
 
+/** Like `throwingSink` but also records every `warn` message into `warns`, so a
+ *  test can assert when a persistent miss escalates from info to warn. */
+function recordingThrowingSink(
+  match: RegExp,
+  err: Error,
+  warns: string[],
+): LogSink {
+  return {
+    info() {},
+    warn(...args: unknown[]) {
+      warns.push(args.map(String).join(" "));
+    },
+    error() {},
+    captureException() {},
+    withDbSpan<T>(sql: string, fn: () => T): T {
+      if (match.test(sql)) throw err;
+      return fn();
+    },
+  };
+}
+
 function seedDistilledMessage(ageMs: number): string {
   const pid = ensureProject(PROJECT);
   const id = `prune-msg-${crypto.randomUUID()}`;
@@ -140,6 +161,80 @@ describe("temporal.prune resilience to a db()-swap missing-table race (#1001)", 
     registerSink(passthroughSink);
     expect(temporalCount()).toBe(1); // Pass 1 delete never ran
     expect(distillationExists(arch)).toBe(false); // Pass 3 ran despite Pass 1 failing
+  });
+
+  test("a missing-object error while resolving the project (setup) skips the whole tick", () => {
+    const msg = seedDistilledMessage(10 * DAY); // Pass 1 would delete this if prune proceeded
+    expect(msg).toBeTruthy();
+
+    // ensureProject's `SELECT … FROM projects` races the swap and throws
+    // no-such-table *before* any pass runs. The whole tick must no-op, not abort.
+    registerSink(
+      throwingSink(
+        /FROM projects WHERE path/,
+        new Error("no such table: projects"),
+      ),
+    );
+
+    let result: { ttlDeleted: number; capDeleted: number } | undefined;
+    expect(() => {
+      result = prune({
+        projectPath: PROJECT,
+        retentionDays: 1,
+        maxStorageMB: 999_999,
+      });
+    }).not.toThrow();
+
+    expect(result).toEqual({ ttlDeleted: 0, capDeleted: 0 });
+    registerSink(passthroughSink);
+    expect(temporalCount()).toBe(1); // setup skipped → no pass deleted anything
+  });
+
+  test("a persistent missing-object skip escalates from info to warn after N consecutive ticks", () => {
+    const opts = {
+      projectPath: PROJECT,
+      retentionDays: 1,
+      maxStorageMB: 999_999,
+    };
+
+    // A clean prune first resets the consecutive-skip streak to a known 0, so
+    // this test is independent of whichever tests ran before it.
+    registerSink(passthroughSink);
+    prune(opts);
+
+    const warns: string[] = [];
+    registerSink(
+      recordingThrowingSink(
+        /DELETE FROM distillations/,
+        new Error("no such table: distillations"),
+        warns,
+      ),
+    );
+
+    // The first two consecutive missing-object ticks stay quiet (info only):
+    // a transient swap window must not spam warn.
+    prune(opts);
+    prune(opts);
+    expect(warns).toHaveLength(0);
+
+    // The third consecutive miss crosses the escalation threshold → warn.
+    prune(opts);
+    expect(warns.length).toBeGreaterThanOrEqual(1);
+    expect(warns[0]).toMatch(/consecutive/i);
+
+    // A subsequent clean tick clears the streak so warn does not persist.
+    registerSink(passthroughSink);
+    prune(opts);
+    const warnsAfterRecovery: string[] = [];
+    registerSink(
+      recordingThrowingSink(
+        /DELETE FROM distillations/,
+        new Error("no such table: distillations"),
+        warnsAfterRecovery,
+      ),
+    );
+    prune(opts);
+    expect(warnsAfterRecovery).toHaveLength(0);
   });
 
   test("a non-missing-object error propagates (not swallowed)", () => {
