@@ -655,6 +655,19 @@ describe("getModelEntrySync", () => {
     expect(entry.limit?.context).toBe(1_000_000);
   });
 
+  test("offline fallback prices claude-sonnet-5 at its real cost, not the generic default", () => {
+    // claude-sonnet-5 is the anthropic worker default + a common session model.
+    // Its FALLBACK_PRICING prefix must NOT collide with claude-sonnet-4 and must
+    // resolve to the real $2/$10 instead of the generic $3/$15 unknown default.
+    const entry = getModelEntrySync("claude-sonnet-5");
+    expect(entry.cost?.input).toBe(2);
+    expect(entry.cost?.output).toBe(10);
+    expect(entry.cost?.cache_read).toBe(0.2);
+    expect(entry.cost?.cache_write).toBe(2.5);
+    expect(entry.limit?.context).toBe(1_000_000);
+    expect(entry.limit?.output).toBe(128_000);
+  });
+
   test("returns cached data after fetchModelData populates cache", async () => {
     globalThis.fetch = vi.fn(() =>
       Promise.resolve(

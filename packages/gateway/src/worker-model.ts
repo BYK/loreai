@@ -115,6 +115,15 @@ const FALLBACK_PRICING: Array<{
   },
   // Worker model defaults
   {
+    prefix: "claude-sonnet-5",
+    input: 2,
+    output: 10,
+    cache_read: 0.2,
+    cache_write: 2.5,
+    context: 1_000_000,
+    outputLimit: 128_000,
+  },
+  {
     prefix: "claude-sonnet-4",
     input: 3,
     output: 15,
