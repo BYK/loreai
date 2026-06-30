@@ -69,9 +69,13 @@ const SMOKE_TABLE = "temp.__lore_vec0_smoke";
  * incapable runtime). Never throws.
  */
 export function vec0KnnSmokeOk(database: Database): boolean {
-  // A JSON-text vector is accepted by sqlite-vec for both INSERT and MATCH, so
-  // the probe needs no Float32Array/Buffer plumbing (keeps this loader a leaf).
-  const probe = "[1, 0, 0, 0]";
+  // Bind the probe vector as a Float32Array BLOB — byte-for-byte the same param
+  // shape every production vec0 read/write uses (`toBlob()` in vector-query.ts /
+  // vec-store.ts). Mirroring the real path means the probe proves exactly what
+  // production relies on, identically under node:sqlite and bun:sqlite (a raw
+  // Buffer binds as a BLOB on both; a JSON-text vector would exercise a
+  // different, less-tested binding). `Buffer` is a runtime global — no import.
+  const probe = Buffer.from(new Float32Array([1, 0, 0, 0]).buffer);
   try {
     database.query(`DROP TABLE IF EXISTS ${SMOKE_TABLE}`).run();
     database
