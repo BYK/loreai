@@ -1945,9 +1945,11 @@ export async function forSession(
     try {
       const [contextVec] = await timer.await(
         embedding.embed([sessionContext], "query"),
+        "embed",
       );
       const hits = await timer.await(
         embedding.vectorSearch(contextVec, 50, excludeFilter),
+        "vectorSearch",
       );
       vectorScores = new Map(hits.map((h) => [h.id, h.similarity]));
     } catch (err) {

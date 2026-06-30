@@ -595,6 +595,17 @@ export function setupReadPathTimingCapture(): void {
         unit: "millisecond",
         attributes,
       });
+      // #999: split the awaited bucket into embed vs vector-search so the next
+      // telemetry pass can attribute the pathological awaited latency.
+      Sentry.metrics.distribution("lore.readpath.embed_ms", t.embedMs, {
+        unit: "millisecond",
+        attributes,
+      });
+      Sentry.metrics.distribution(
+        "lore.readpath.vector_search_ms",
+        t.vectorSearchMs,
+        { unit: "millisecond", attributes },
+      );
       Sentry.metrics.distribution(
         "lore.readpath.candidates",
         t.candidateCount,

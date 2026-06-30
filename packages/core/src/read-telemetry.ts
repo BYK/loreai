@@ -24,11 +24,20 @@ export interface ReadPathTiming {
   totalMs: number;
   /** Sum of awaited (off-thread / async) time: embed + pool vector search. */
   awaitedMs: number;
+  /** Awaited time spent in `embedding.embed(...)` (subset of awaitedMs). #999. */
+  embedMs: number;
+  /** Awaited time spent in `embedding.vectorSearch(...)` (subset of awaitedMs).
+   *  #999: split out so the next telemetry pass attributes the pathological
+   *  awaited latency to embed vs vector-search rather than one opaque bucket. */
+  vectorSearchMs: number;
   /** totalMs - awaitedMs — approximate main-thread blocking time. */
   syncBlockingMs: number;
   /** Number of candidate rows the call scored (context for the blocking cost). */
   candidateCount: number;
 }
+
+/** Named awaited sub-buckets attributed within {@link ReadPathTimer.await}. */
+export type AwaitBucket = "embed" | "vectorSearch";
 
 let readPathTimingHook: ((t: ReadPathTiming) => void) | null = null;
 
@@ -49,14 +58,26 @@ export function setReadPathTimingHook(
 export class ReadPathTimer {
   private readonly start = performance.now();
   awaited = 0;
+  /** Awaited time attributed to embed / vector-search sub-buckets (#999). Each
+   *  is a subset of `awaited`; the remainder (e.g. FTS / hydration awaits) is
+   *  counted in `awaited` only. */
+  embed = 0;
+  vectorSearch = 0;
 
-  /** Time the suspension across one awaited promise. */
-  async await<T>(p: Promise<T>): Promise<T> {
+  /**
+   * Time the suspension across one awaited promise. When `bucket` is given, the
+   * elapsed time is additionally attributed to that named sub-bucket (#999) on
+   * top of the total `awaited` accumulator.
+   */
+  async await<T>(p: Promise<T>, bucket?: AwaitBucket): Promise<T> {
     const s = performance.now();
     try {
       return await p;
     } finally {
-      this.awaited += performance.now() - s;
+      const dt = performance.now() - s;
+      this.awaited += dt;
+      if (bucket === "embed") this.embed += dt;
+      else if (bucket === "vectorSearch") this.vectorSearch += dt;
     }
   }
 
@@ -76,6 +97,8 @@ export class ReadPathTimer {
         scope,
         totalMs,
         awaitedMs: this.awaited,
+        embedMs: this.embed,
+        vectorSearchMs: this.vectorSearch,
         syncBlockingMs: Math.max(0, totalMs - this.awaited),
         candidateCount,
       });

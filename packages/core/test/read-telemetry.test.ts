@@ -62,6 +62,41 @@ describe("ReadPathTimer", () => {
     });
     expect(() => new ReadPathTimer().emit("forSession", 1)).not.toThrow();
   });
+
+  it("attributes embed and vectorSearch awaits to their sub-buckets (#999)", async () => {
+    let captured: ReadPathTiming | undefined;
+    setReadPathTimingHook((t) => {
+      captured = t;
+    });
+
+    const timer = new ReadPathTimer();
+    await timer.await(sleep(20), "embed");
+    await timer.await(sleep(20), "vectorSearch");
+    await timer.await(sleep(20)); // unlabeled — counted in awaited only
+    timer.emit("forSession", 3);
+
+    const t = captured as ReadPathTiming;
+    // Each labeled await lands in its own bucket (~20ms; allow scheduling slack).
+    expect(t.embedMs).toBeGreaterThanOrEqual(10);
+    expect(t.vectorSearchMs).toBeGreaterThanOrEqual(10);
+    // Both buckets are subsets of awaited…
+    expect(t.embedMs + t.vectorSearchMs).toBeLessThanOrEqual(t.awaitedMs + 1);
+    // …and the unlabeled await is in awaited but in NEITHER bucket, so awaited
+    // exceeds the bucket sum by roughly the third (~20ms) suspension.
+    expect(t.awaitedMs).toBeGreaterThanOrEqual(
+      t.embedMs + t.vectorSearchMs + 10,
+    );
+  });
+
+  it("embedMs/vectorSearchMs are 0 when no sub-bucket awaits occur", () => {
+    let captured: ReadPathTiming | undefined;
+    setReadPathTimingHook((t) => {
+      captured = t;
+    });
+    new ReadPathTimer().emit("recall", 0);
+    expect((captured as ReadPathTiming).embedMs).toBe(0);
+    expect((captured as ReadPathTiming).vectorSearchMs).toBe(0);
+  });
 });
 
 describe("forSession fires the read-path timing hook", () => {

@@ -900,12 +900,16 @@ export async function searchRecall(
   // Vector search on the original query (not expansions — avoid redundant embeds).
   if (embedding.isAvailable() && scope !== "session") {
     try {
-      const [queryVec] = await timer.await(embedding.embed([query], "query"));
+      const [queryVec] = await timer.await(
+        embedding.embed([query], "query"),
+        "embed",
+      );
 
       // Knowledge vector search
       if (knowledgeEnabled) {
         const vectorHits = await timer.await(
           embedding.vectorSearch(queryVec, limit),
+          "vectorSearch",
         );
         // Batch-hydrate hits off-thread (#966) instead of N per-hit ltm.get().
         const entryMap = await timer.await(
@@ -938,6 +942,7 @@ export async function searchRecall(
       if (scope !== "knowledge") {
         const distVectorHits = await timer.await(
           embedding.vectorSearchDistillations(queryVec, limit),
+          "vectorSearch",
         );
         // Batch-hydrate hits off-thread (#966) instead of N per-hit point reads.
         const distMap = await timer.await(
@@ -970,6 +975,7 @@ export async function searchRecall(
         const pid = ensureProject(projectPath);
         const temporalVectorHits = await timer.await(
           embedding.vectorSearchTemporal(queryVec, pid, limit),
+          "vectorSearch",
         );
         // Batch-hydrate hits off-thread (#966) instead of N per-hit point reads.
         const temporalMap = await timer.await(
@@ -1011,6 +1017,7 @@ export async function searchRecall(
         const entPid = ensureProject(projectPath);
         const entityVectorHits = await timer.await(
           embedding.vectorSearchEntities(queryVec, limit),
+          "vectorSearch",
         );
         // Batch-hydrate hits off-thread (#966) instead of N per-hit
         // getWithAliases() calls (entity row + alias load each).
