@@ -1478,6 +1478,46 @@ export function embedDistillation(id: string, observations: string): void {
 }
 
 /**
+ * Hard cap on how many vec0 chunks a single temporal message may fan out to.
+ * A normal turn has a handful of parts; this only bites a pathological message
+ * (e.g. hundreds of parallel tool calls). Past the cap the overflow units are
+ * folded into ONE final chunk, so the per-message chunk count — which is both
+ * `temporal_vec` rows AND the size of the KNN window `runTemporal` must collapse
+ * by max-sim (then widen-retry over) — stays bounded, without silently dropping
+ * any unit's text from the vector (FTS indexes the full content regardless).
+ */
+export const MAX_TEMPORAL_CHUNKS_PER_MESSAGE = 64;
+
+/**
+ * Embed `texts` in token-area-bounded sub-batches (via {@link nextBatch}) and
+ * return the vectors in input order. The multi-vector temporal write hands us
+ * one text per part-aware unit; a single `embed()` posts the WHOLE array to the
+ * worker as one padded tensor, so a message with many large prose/reasoning
+ * units could OOM-thrash the worker (the ×0.7 backoff lowers per-input length,
+ * not input count). Sub-batching keeps each worker request's peak tensor within
+ * MAX_BATCH_TOKEN_AREA, mirroring the backfill paths. All-or-nothing: a failure
+ * in any batch rejects before the caller stores, so a partial chunk set is never
+ * written (storeTemporalChunks DELETEs-then-INSERTs the complete set).
+ */
+async function embedInTokenBatches(
+  texts: string[],
+  inputType: "document" | "query",
+): Promise<Float32Array[]> {
+  const items = texts.map((text) => ({ text }));
+  const out: Float32Array[] = [];
+  for (let i = 0; i < items.length; ) {
+    const batch = nextBatch(items, i);
+    i += batch.length;
+    const vecs = await embed(
+      batch.map((b) => b.text),
+      inputType,
+    );
+    out.push(...vecs);
+  }
+  return out;
+}
+
+/**
  * Embed a temporal message and store the result in the DB.
  * Fire-and-forget — errors are logged, never thrown.
  * Only called for undistilled messages; once distilled, the embedding
@@ -1501,11 +1541,22 @@ export function embedTemporalMessage(id: string, content: string): void {
   // The blob layout has a single `embedding` column per row, so it falls back to
   // ONE vector over the joined units (the prior single part-selective vector).
   if (readStorageMode(db()) === "vec0") {
-    const texts = buildEmbeddingUnits(content)
+    let texts = buildEmbeddingUnits(content)
       .map((u) => u.text)
       .filter((t) => t.trim().length > 0);
     if (!texts.length) return;
-    embed(texts, "document")
+    // Bound the per-message chunk fan-out (#1072): past the cap, fold the
+    // overflow tail into the final chunk so the chunk count stays bounded
+    // without dropping any unit's text from the vector.
+    if (texts.length > MAX_TEMPORAL_CHUNKS_PER_MESSAGE) {
+      texts = [
+        ...texts.slice(0, MAX_TEMPORAL_CHUNKS_PER_MESSAGE - 1),
+        texts.slice(MAX_TEMPORAL_CHUNKS_PER_MESSAGE - 1).join("\n"),
+      ];
+    }
+    // Sub-batch the unit embeds so a many-unit message never posts one oversized
+    // tensor to the worker; accumulate all vectors, then store the complete set.
+    embedInTokenBatches(texts, "document")
       .then((vecs) => {
         storeTemporalChunks(db(), id, vecs);
       })
