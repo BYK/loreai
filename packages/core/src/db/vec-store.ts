@@ -259,6 +259,52 @@ function storeEmbeddingVec0(
 }
 
 /**
+ * Persist the MULTI-VECTOR embedding for one temporal message: one `temporal_vec`
+ * chunk per part-aware unit (see `buildEmbeddingUnits`), keyed `<messageId>#<ord>`.
+ *
+ * vec0-only — the `blob` layout has a single `embedding` column per row and so
+ * cannot hold N vectors; the caller keeps a single part-selective vector there
+ * via {@link storeEmbedding}. NO-OP outside vec0 mode.
+ *
+ * Re-embed semantics: a content update calls this again, so it first DELETEs
+ * ALL chunks of the message (by the aux `message_id`) then re-inserts the new
+ * set — vec0 has no upsert, and the chunk count can change between embeds, so a
+ * per-`chunk_id` replace would orphan now-removed ords. Partition (and aux)
+ * values come from the just-written base row; if it is gone (a delete raced the
+ * fire-and-forget embed) there is nothing to index — skip. The DELETE + N
+ * INSERTs are left unguarded (matching {@link storeEmbedding}'s vec0 path): a
+ * crash mid-loop leaves the message with fewer chunks until its next re-embed —
+ * bounded, non-corrupting, and the read collapses whatever chunks exist.
+ */
+export function storeTemporalChunks(
+  conn: EmbeddingWriteConn,
+  messageId: string,
+  vecs: Float32Array[],
+): void {
+  if (readStorageMode(conn) !== "vec0") return;
+  const row = conn
+    .query("SELECT project_id, session_id FROM temporal_messages WHERE id = ?")
+    .get(messageId) as
+    | { project_id: string; session_id: string }
+    | null
+    | undefined;
+  if (!row) return;
+  conn.query("DELETE FROM temporal_vec WHERE message_id = ?").run(messageId);
+  const insert = conn.query(
+    "INSERT INTO temporal_vec(chunk_id, message_id, project_id, session_id, embedding) VALUES (?, ?, ?, ?, ?)",
+  );
+  for (let ord = 0; ord < vecs.length; ord++) {
+    insert.run(
+      `${messageId}#${ord}`,
+      messageId,
+      row.project_id,
+      row.session_id,
+      toBlob(vecs[ord]),
+    );
+  }
+}
+
+/**
  * Delete the embeddings for `ids` on `table`.
  *
  * NO-OP in blob layout: the embedding lives on the base row, so whatever deleted

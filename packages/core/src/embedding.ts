@@ -30,10 +30,11 @@ import {
   resolveReadMode,
   setStorageMode,
   storeEmbedding,
+  storeTemporalChunks,
 } from "./db/vec-store";
 import { config } from "./config";
 import * as log from "./log";
-import { buildEmbeddingText } from "./embedding-units";
+import { buildEmbeddingText, buildEmbeddingUnits } from "./embedding-units";
 import { vendorModelInfo } from "./embedding-vendor";
 import {
   MIN_EMBED_TOKENS,
@@ -1488,13 +1489,35 @@ export function embedTemporalMessage(id: string, content: string): void {
   // to be useful in vector search and would waste embedding capacity.
   if (content.length < 50) return;
 
-  // Embed a part-selective reduction of the content rather than the raw text:
-  // large `[tool:…]` outputs are dropped (header + first line kept) so they can
-  // no longer evict prose/reasoning from the head or dilute the mean-pooled
-  // vector. The full content stays in `content` + FTS for keyword recall.
+  // Part-aware embedding: split the stored content back into its units (prose,
+  // reasoning, reduced tool envelopes — see buildEmbeddingUnits). Large
+  // `[tool:…]` outputs keep only header + first line so they can no longer evict
+  // prose/reasoning from the head or dilute the vector. The full content stays
+  // in `content` + FTS for keyword recall regardless.
+  //
+  // vec0 stores each unit as its OWN chunk in `temporal_vec` (multi-vector): a
+  // tool output or a specific reasoning step can then match on its own without
+  // diluting prose, and the read collapses chunks back to one hit per message.
+  // The blob layout has a single `embedding` column per row, so it falls back to
+  // ONE vector over the joined units (the prior single part-selective vector).
+  if (readStorageMode(db()) === "vec0") {
+    const texts = buildEmbeddingUnits(content)
+      .map((u) => u.text)
+      .filter((t) => t.trim().length > 0);
+    if (!texts.length) return;
+    embed(texts, "document")
+      .then((vecs) => {
+        storeTemporalChunks(db(), id, vecs);
+      })
+      .catch((err) => {
+        if (err instanceof LocalProviderUnavailableError) return;
+        log.error("embedding failed for temporal message", id, ":", err);
+      });
+    return;
+  }
+
   const text = buildEmbeddingText(content);
   if (!text) return;
-
   embed([text], "document")
     .then(([vec]) => {
       storeEmbedding(db(), "temporal", id, vec);

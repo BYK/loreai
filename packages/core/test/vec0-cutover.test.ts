@@ -26,9 +26,17 @@ import {
   readVecDimension,
   setStorageMode,
   storeEmbedding,
+  storeTemporalChunks,
 } from "../src/db/vec-store";
-import { maybeCutoverToVec0 } from "../src/embedding";
+import {
+  _restoreProvider,
+  _saveAndClearProvider,
+  embedTemporalMessage,
+  maybeCutoverToVec0,
+} from "../src/embedding";
 import * as ltm from "../src/ltm";
+import { partsToText } from "../src/temporal";
+import type { LorePart } from "../src/types";
 import {
   fromBlob,
   runVectorQuery,
@@ -769,5 +777,203 @@ describe("mode-aware detection predicates", () => {
     expect(missingEmbeddingSql("temporal", "vec0")).toBe(
       "id NOT IN (SELECT message_id FROM temporal_vec)",
     );
+  });
+});
+
+// --- Phase 2 multi-vector temporal writes -----------------------------------
+// Part fixtures mirror temporal.partsToText so content is byte-identical to prod.
+function textPart(text: string): LorePart {
+  return { type: "text", text } as LorePart;
+}
+function reasoningPart(text: string): LorePart {
+  return { type: "reasoning", text } as LorePart;
+}
+function toolPart(tool: string, output: string): LorePart {
+  return {
+    type: "tool",
+    tool,
+    state: { status: "completed", output },
+  } as unknown as LorePart;
+}
+function chunkIds(messageId: string): string[] {
+  return (
+    db()
+      .query(
+        "SELECT chunk_id FROM temporal_vec WHERE message_id = ? ORDER BY chunk_id",
+      )
+      .all(messageId) as Array<{ chunk_id: string }>
+  ).map((r) => r.chunk_id);
+}
+
+describeVec("multi-vector temporal writes (storeTemporalChunks)", () => {
+  test("writes one vec0 chunk per vector, keyed <id>#<ord> with partition + aux", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporal("m1", "sX", 1000);
+    storeTemporalChunks(db(), "m1", [
+      v(1, 0, 0, 0),
+      v(0, 1, 0, 0),
+      v(0, 0, 1, 0),
+    ]);
+
+    const rows = db()
+      .query(
+        "SELECT chunk_id, message_id, project_id, session_id FROM temporal_vec WHERE message_id = 'm1' ORDER BY chunk_id",
+      )
+      .all() as Array<{
+      chunk_id: string;
+      message_id: string;
+      project_id: string;
+      session_id: string;
+    }>;
+    expect(rows.map((r) => r.chunk_id)).toEqual(["m1#0", "m1#1", "m1#2"]);
+    expect(
+      rows.every(
+        (r) =>
+          r.message_id === "m1" &&
+          r.project_id === pid &&
+          r.session_id === "sX",
+      ),
+    ).toBe(true);
+  });
+
+  test("re-embed replaces the WHOLE chunk set (a per-chunk-id upsert would orphan removed ords)", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporal("m1", "sX", 1000);
+    storeTemporalChunks(db(), "m1", [
+      v(1, 0, 0, 0),
+      v(0, 1, 0, 0),
+      v(0, 0, 1, 0),
+    ]);
+    // Re-embed to FEWER chunks: #1 and #2 must be deleted, not left dangling.
+    storeTemporalChunks(db(), "m1", [v(0, 0, 0, 1)]);
+    expect(chunkIds("m1")).toEqual(["m1#0"]);
+  });
+
+  test("is a no-op (and never throws) outside vec0 mode", () => {
+    // resetToBlob() left us in blob layout with no temporal_vec table at all.
+    insTemporal("m1", "sX", 1000);
+    expect(() =>
+      storeTemporalChunks(db(), "m1", [v(1, 0, 0, 0)]),
+    ).not.toThrow();
+    const base = db()
+      .query("SELECT embedding FROM temporal_messages WHERE id = 'm1'")
+      .get() as { embedding: Buffer | null };
+    expect(base.embedding).toBeNull(); // multi-vector never touches the blob col
+  });
+
+  test("skips when the base message row is gone (a delete raced the embed)", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    expect(() =>
+      storeTemporalChunks(db(), "ghost", [v(1, 0, 0, 0)]),
+    ).not.toThrow();
+    expect(chunkIds("ghost")).toEqual([]);
+  });
+
+  test("embedTemporalMessage (vec0) embeds each part-aware unit and stores one chunk per unit", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporal("m1", "sX", 1000);
+    const content = partsToText([
+      textPart("Investigating the failure."),
+      reasoningPart("Likely the parser."),
+      toolPart("read", `src/parse.ts\n${"BODY ".repeat(2000)}`),
+    ]);
+
+    let captured: string[] | null = null;
+    const token = _saveAndClearProvider();
+    try {
+      _restoreProvider({
+        provider: {
+          maxBatchSize: 8,
+          async embed(texts: string[]) {
+            captured = texts;
+            return texts.map((_t, i) => v(1, i, 0, 0));
+          },
+        },
+      });
+      embedTemporalMessage("m1", content);
+      // Fire-and-forget: poll until the embed → storeTemporalChunks chain lands.
+      for (let i = 0; i < 100; i++) {
+        if (
+          (
+            db()
+              .query(
+                "SELECT COUNT(*) n FROM temporal_vec WHERE message_id = 'm1'",
+              )
+              .get() as { n: number }
+          ).n >= 3
+        ) {
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    } finally {
+      _restoreProvider(token);
+    }
+
+    // One embed text per unit; the tool BODY is dropped (header + first line).
+    expect(captured).toEqual([
+      "Investigating the failure.",
+      "[reasoning] Likely the parser.",
+      "[tool:read] src/parse.ts",
+    ]);
+    expect((captured as unknown as string[]).join("\n")).not.toContain("BODY");
+    // And exactly three chunks were written, one per unit.
+    expect(chunkIds("m1")).toEqual(["m1#0", "m1#1", "m1#2"]);
+  });
+
+  test("embedTemporalMessage (vec0) drops empty/whitespace units — no empty chunk", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporal("m1", "sX", 1000);
+    // A whitespace-only text part sits between two real units; it must be
+    // filtered out so the embedder never sees an empty string and no empty
+    // chunk is written (ords stay dense over the surviving units).
+    const content = partsToText([
+      textPart("   "),
+      textPart("Investigating the parser bug in detail."),
+      toolPart("read", "src/parse.ts\nirrelevant body"),
+    ]);
+
+    let captured: string[] | null = null;
+    const token = _saveAndClearProvider();
+    try {
+      _restoreProvider({
+        provider: {
+          maxBatchSize: 8,
+          async embed(texts: string[]) {
+            captured = texts;
+            return texts.map((_t, i) => v(1, i, 0, 0));
+          },
+        },
+      });
+      embedTemporalMessage("m1", content);
+      for (let i = 0; i < 100; i++) {
+        if (
+          (
+            db()
+              .query(
+                "SELECT COUNT(*) n FROM temporal_vec WHERE message_id = 'm1'",
+              )
+              .get() as { n: number }
+          ).n >= 2
+        ) {
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    } finally {
+      _restoreProvider(token);
+    }
+
+    // The whitespace unit is gone: only the two real units are embedded/stored.
+    expect(captured).toEqual([
+      "Investigating the parser bug in detail.",
+      "[tool:read] src/parse.ts",
+    ]);
+    expect(chunkIds("m1")).toEqual(["m1#0", "m1#1"]);
   });
 });
