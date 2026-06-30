@@ -32,6 +32,7 @@ import {
   _restoreProvider,
   _saveAndClearProvider,
   embedTemporalMessage,
+  MAX_TEMPORAL_CHUNKS_PER_MESSAGE,
   maybeCutoverToVec0,
 } from "../src/embedding";
 import * as ltm from "../src/ltm";
@@ -975,5 +976,110 @@ describeVec("multi-vector temporal writes (storeTemporalChunks)", () => {
       "[tool:read] src/parse.ts",
     ]);
     expect(chunkIds("m1")).toEqual(["m1#0", "m1#1"]);
+  });
+
+  test("embedTemporalMessage (vec0) sub-batches the unit embeds — never one oversized worker request", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporal("m1", "sX", 1000);
+    // 9 units > MAX_BACKFILL_CHUNK (8) so nextBatch must split into >1 worker
+    // request; if the path ever reverts to a single embed() call this drops to
+    // one batch and the assertion below fails.
+    const units = Array.from(
+      { length: 9 },
+      (_, i) => `Investigating step ${i} of the parser regression.`,
+    );
+    const content = partsToText(units.map((u) => textPart(u)));
+
+    const calls: string[][] = [];
+    const token = _saveAndClearProvider();
+    try {
+      _restoreProvider({
+        provider: {
+          maxBatchSize: 8,
+          async embed(texts: string[]) {
+            calls.push([...texts]);
+            return texts.map((_t, i) => v(1, i, 0, 0));
+          },
+        },
+      });
+      embedTemporalMessage("m1", content);
+      for (let i = 0; i < 200; i++) {
+        if (
+          (
+            db()
+              .query(
+                "SELECT COUNT(*) n FROM temporal_vec WHERE message_id = 'm1'",
+              )
+              .get() as { n: number }
+          ).n >= 9
+        ) {
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    } finally {
+      _restoreProvider(token);
+    }
+
+    // The embed was split across multiple worker requests...
+    expect(calls.length).toBeGreaterThan(1);
+    // ...yet every unit was embedded exactly once, in order, and stored.
+    expect(calls.flat()).toEqual(units);
+    expect(chunkIds("m1").length).toBe(9);
+  });
+
+  test("embedTemporalMessage (vec0) caps chunk fan-out, folding the overflow tail into the final chunk", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporal("m1", "sX", 1000);
+    const cap = MAX_TEMPORAL_CHUNKS_PER_MESSAGE;
+    // One more unit than the cap allows → exactly `cap` chunks, with the last
+    // two units merged into the final chunk (nothing dropped from the vector).
+    const units = Array.from(
+      { length: cap + 1 },
+      (_, i) => `unit-${i}-distinct-payload`,
+    );
+    const content = partsToText(units.map((u) => textPart(u)));
+
+    const calls: string[][] = [];
+    const token = _saveAndClearProvider();
+    try {
+      _restoreProvider({
+        provider: {
+          maxBatchSize: 8,
+          async embed(texts: string[]) {
+            calls.push([...texts]);
+            return texts.map((_t, i) => v(1, i, 0, 0));
+          },
+        },
+      });
+      embedTemporalMessage("m1", content);
+      for (let i = 0; i < 400; i++) {
+        if (
+          (
+            db()
+              .query(
+                "SELECT COUNT(*) n FROM temporal_vec WHERE message_id = 'm1'",
+              )
+              .get() as { n: number }
+          ).n >= cap
+        ) {
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    } finally {
+      _restoreProvider(token);
+    }
+
+    const flat = calls.flat();
+    // Fan-out is bounded at the cap, not cap+1.
+    expect(flat.length).toBe(cap);
+    expect(chunkIds("m1").length).toBe(cap);
+    // The final chunk's text merges the two overflow units — neither is dropped.
+    const last = flat[flat.length - 1];
+    expect(last).toContain(`unit-${cap - 1}-`);
+    expect(last).toContain(`unit-${cap}-`);
   });
 });
