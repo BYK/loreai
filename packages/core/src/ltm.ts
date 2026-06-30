@@ -1,5 +1,10 @@
 import { uuidv7 } from "uuidv7";
 import { db, ensureProject, getKV, setKV, withTransaction } from "./db";
+import {
+  deleteEmbeddings,
+  embeddingByIdSource,
+  readStorageMode,
+} from "./db/vec-store";
 import { config } from "./config";
 import {
   ftsQuery,
@@ -352,22 +357,30 @@ export function appendVersion(
       )
       .get(logicalId) as { id: string } | undefined;
     if (!cur) return false;
+    // vec0 layout has no `embedding` column on `knowledge` (dropped at cutover):
+    // omit it from the forward-copy, and drop the demoted version's vec0 row so
+    // knowledge_vec holds only current versions (the new version is re-embedded
+    // by the caller). Both are no-ops in blob layout.
+    const mode = readStorageMode(db());
+    const embCol = mode === "vec0" ? "" : "embedding, ";
+    const embSel = mode === "vec0" ? "" : "NULL, ";
     db().query("UPDATE knowledge SET is_current = 0 WHERE id = ?").run(cur.id);
+    deleteEmbeddings(db(), "knowledge", [cur.id]);
     db()
       .query(
         // confidence/last_reinforced_at are NOT copied — they live on the register
         // (knowledge_meta), keyed by the stable logical_id, unchanged by an append.
         `INSERT INTO knowledge (
            id, project_id, category, title, content, source_session, cross_project,
-           created_at, updated_at, metadata, embedding, created_by,
+           created_at, updated_at, metadata, ${embCol}created_by,
            updated_by, sensitivity, promotion_status, promoted_at, approval_status,
            approved_by, approved_at, source_user_id, source_entry_id, last_accessed_at,
            worker_provider_id, worker_model_id,
            logical_id, version, is_deleted, is_current)
          SELECT
            ?, project_id, COALESCE(?, category), COALESCE(?, title), COALESCE(?, content),
-           source_session, cross_project, created_at, ?, COALESCE(?, metadata), NULL,
-           created_by, updated_by, sensitivity, promotion_status, promoted_at,
+           source_session, cross_project, created_at, ?, COALESCE(?, metadata), ${embSel}created_by,
+           updated_by, sensitivity, promotion_status, promoted_at,
            approval_status, approved_by, approved_at, source_user_id, source_entry_id,
            last_accessed_at, worker_provider_id, worker_model_id,
            logical_id, version + 1, ?, 1
@@ -2917,9 +2930,14 @@ function _dedup(
     const entryIds = entries.map((e) => e.id);
     // Build parameterized IN clause for the entry IDs
     const placeholders = entryIds.map(() => "?").join(",");
+    const src = embeddingByIdSource(
+      "knowledge",
+      readStorageMode(db()),
+      "knowledge_current",
+    );
     const rows = db()
       .query(
-        `SELECT id, embedding FROM knowledge_current WHERE embedding IS NOT NULL AND id IN (${placeholders})`,
+        `SELECT id, embedding FROM ${src.table} WHERE id IN (${placeholders})${src.presenceFilter}`,
       )
       .all(...entryIds) as Array<{ id: string; embedding: Buffer }>;
     for (const row of rows) {
@@ -3147,9 +3165,14 @@ export function promoteCrossProject(opts?: {
   {
     const ids = candidates.map((e) => e.id);
     const placeholders = ids.map(() => "?").join(",");
+    const src = embeddingByIdSource(
+      "knowledge",
+      readStorageMode(db()),
+      "knowledge_current",
+    );
     const rows = db()
       .query(
-        `SELECT id, embedding FROM knowledge_current WHERE embedding IS NOT NULL AND id IN (${placeholders})`,
+        `SELECT id, embedding FROM ${src.table} WHERE id IN (${placeholders})${src.presenceFilter}`,
       )
       .all(...ids) as Array<{ id: string; embedding: Buffer }>;
     for (const row of rows) {

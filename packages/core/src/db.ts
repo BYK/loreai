@@ -1,5 +1,10 @@
 import { Database } from "#db/driver";
-import { loadVecExtension, resetVecState } from "./db/vec";
+import { isVecAvailable, loadVecExtension, resetVecState } from "./db/vec";
+import {
+  ensureVec0Store,
+  readStorageMode,
+  readVecDimension,
+} from "./db/vec-store";
 import { join, dirname } from "node:path";
 import { chmodSync, mkdirSync } from "node:fs";
 import { getGitRemote } from "./git";
@@ -2062,6 +2067,16 @@ export function db(): Database {
   // before the tracing Proxy wrap. Never throws — when unavailable, vector
   // search falls back to the pure-JS brute-force path (see db/vec.ts).
   loadVecExtension(database);
+  // For an already-vec0 DB on a capable runtime, ensure the vec0 tables exist
+  // BEFORE any read can reach them — the blob→vec0 cutover only runs later, in
+  // runStartupBackfill. Recovery uses the persisted dimension (set at cutover);
+  // a fresh DB stays blob until that cutover, and an incapable runtime (vec
+  // unavailable → reads degrade to []) skips this. vec0 tables are local,
+  // non-synced derived data, so creating them after installSyncCapture is safe.
+  if (isVecAvailable() && readStorageMode(database) === "vec0") {
+    const dim = readVecDimension(database);
+    if (dim !== null) ensureVec0Store(database, dim);
+  }
   // Wrap the connection in the query-tracing Proxy AFTER migrate() and sync
   // change-capture are installed on the RAW connection, so (a) migration and
   // TEMP-trigger setup queries are never traced / re-entrant, and (b) the

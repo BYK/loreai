@@ -75,10 +75,10 @@ describe("readStorageMode", () => {
 });
 
 // ---------------------------------------------------------------------------
-// runVectorQuery — contract for the two non-BLOB read modes (PR3 placeholders)
+// runVectorQuery — "degraded" short-circuits before touching the connection
 // ---------------------------------------------------------------------------
 
-describe("runVectorQuery non-blob read modes", () => {
+describe("runVectorQuery degraded read mode", () => {
   const specs: VectorQuerySpec[] = [
     { kind: "knowledge", limit: 5 },
     { kind: "entities", limit: 5 },
@@ -88,7 +88,7 @@ describe("runVectorQuery non-blob read modes", () => {
   ];
 
   // A connection that explodes if touched — proves "degraded" short-circuits
-  // before running any SQL (no blobs exist to scan in the vec0 layout).
+  // before running any SQL (vec0 tables are unreadable without the extension).
   const explodingConn = {
     query(): { all(): unknown[] } {
       throw new Error("degraded must not query the connection");
@@ -101,12 +101,6 @@ describe("runVectorQuery non-blob read modes", () => {
     test(`degraded → [] without querying (${spec.kind})`, () => {
       expect(runVectorQuery(explodingConn, "degraded", query, spec)).toEqual(
         [],
-      );
-    });
-
-    test(`vec0 → throws (not implemented until cutover) (${spec.kind})`, () => {
-      expect(() => runVectorQuery(explodingConn, "vec0", query, spec)).toThrow(
-        /vec0 read path is not implemented/,
       );
     });
   }

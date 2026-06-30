@@ -14,7 +14,11 @@
  */
 
 import { db, ensureProject } from "./db";
-import { storeEmbedding } from "./db/vec-store";
+import {
+  embeddingByIdSource,
+  readStorageMode,
+  storeEmbedding,
+} from "./db/vec-store";
 import * as embedding from "./embedding";
 import * as ltm from "./ltm";
 import type { KnowledgeMetadata } from "./ltm";
@@ -296,9 +300,16 @@ function clusterBySimilarity(
   // Load embeddings for all candidates
   const ids = candidates.map((c) => c.id);
   const placeholders = ids.map(() => "?").join(",");
+  // vec0 layout keeps distillation vectors (and the session_id aux column) in
+  // distillation_vec, not the base table — read from whichever holds them.
+  const src = embeddingByIdSource(
+    "distillations",
+    readStorageMode(db()),
+    "distillations",
+  );
   const rows = db()
     .query(
-      `SELECT id, session_id, embedding FROM distillations WHERE id IN (${placeholders}) AND embedding IS NOT NULL`,
+      `SELECT id, session_id, embedding FROM ${src.table} WHERE id IN (${placeholders})${src.presenceFilter}`,
     )
     .all(...ids) as Array<{
     id: string;

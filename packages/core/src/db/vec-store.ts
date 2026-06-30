@@ -51,6 +51,14 @@ export type EmbeddingTable =
 /** `kv_meta` key recording this DB file's {@link VecStorageMode}. */
 export const VEC_STORAGE_MODE_KEY = "vec.storage_mode";
 
+/**
+ * `kv_meta` key recording the vector dimension the `vec0` tables were created
+ * with. vec0 fixes the dimension at DDL time (`float[N]`), but the embedding
+ * dimension is configurable (768 local / 1024 voyage / 1536 openai). On a
+ * dimension change {@link ensureVec0Store} drops + recreates the tables.
+ */
+export const VEC_DIMENSION_KEY = "vec.dimension";
+
 /** Logical table → physical base table name. */
 const BASE_TABLE: Record<EmbeddingTable, string> = {
   knowledge: "knowledge",
@@ -59,14 +67,60 @@ const BASE_TABLE: Record<EmbeddingTable, string> = {
   temporal: "temporal_messages",
 };
 
+/** Logical table → `vec0` virtual table name. */
+const VEC_TABLE: Record<EmbeddingTable, string> = {
+  knowledge: "knowledge_vec",
+  entities: "entity_vec",
+  distillations: "distillation_vec",
+  temporal: "temporal_vec",
+};
+
+/**
+ * DDL for the four `vec0` tables at vector dimension `dim`. Uses the FLAT
+ * (default float) vec0 index — EXACT recall (1.0) with PARTITION KEY filter
+ * pushdown. (DiskANN was evaluated and rejected: in this vendored build it
+ * supports neither partition keys nor metadata columns, inserts ~400× slower,
+ * and is only approximate — see PR4 notes.) Partition keys shard the index so a
+ * session/project-scoped query touches only the matching rows; `temporal_vec`
+ * is chunk-keyed (`chunk_id`, `+message_id`) ahead of multi-vector chunking
+ * (single-vector era writes exactly one chunk per message: `chunk_id = id#0`).
+ * `CREATE … IF NOT EXISTS` so the routine is idempotent / re-runnable.
+ */
+export function vec0Ddl(dim: number): string[] {
+  return [
+    `CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_vec USING vec0(id TEXT PRIMARY KEY, embedding float[${dim}] distance_metric=cosine)`,
+    `CREATE VIRTUAL TABLE IF NOT EXISTS entity_vec USING vec0(id TEXT PRIMARY KEY, embedding float[${dim}] distance_metric=cosine)`,
+    `CREATE VIRTUAL TABLE IF NOT EXISTS distillation_vec USING vec0(id TEXT PRIMARY KEY, project_id TEXT PARTITION KEY, +session_id TEXT, embedding float[${dim}] distance_metric=cosine)`,
+    `CREATE VIRTUAL TABLE IF NOT EXISTS temporal_vec USING vec0(chunk_id TEXT PRIMARY KEY, +message_id TEXT, project_id TEXT PARTITION KEY, session_id TEXT PARTITION KEY, embedding float[${dim}] distance_metric=cosine)`,
+  ];
+}
+
+/** The four `vec0` virtual table names, in dependency-free order. */
+export const VEC_TABLES = Object.freeze([
+  "knowledge_vec",
+  "entity_vec",
+  "distillation_vec",
+  "temporal_vec",
+]) as readonly string[];
+
 /** Minimal connection shape for reading the stored storage mode. */
 export interface StorageModeConn {
   query(sql: string): { get(...params: unknown[]): unknown };
 }
 
-/** Minimal connection shape for writing embeddings. */
+/**
+ * Connection shape for writing embeddings and managing the vec0 store. The
+ * vec0 write paths additionally need `get` (look up a row's partition values /
+ * the stored dimension) and `all` (none today, kept for symmetry), so this is a
+ * superset of {@link StorageModeConn}. Satisfied by both node:sqlite and
+ * bun:sqlite connections (and the traced `db()` Proxy).
+ */
 export interface EmbeddingWriteConn {
-  query(sql: string): { run(...params: unknown[]): unknown };
+  query(sql: string): {
+    run(...params: unknown[]): unknown;
+    get(...params: unknown[]): unknown;
+    all(...params: unknown[]): unknown[];
+  };
 }
 
 /**
@@ -105,10 +159,13 @@ export function resolveReadMode(
  * Persist one embedding for `id` on `table`.
  *
  * Centralizes the previously-scattered `UPDATE … SET embedding = ?` sites so the
- * vec0 write path lands in exactly one place later. Today (blob layout) it
- * writes the Float32 vector as a BLOB on the base row. Uses `conn.query()` so
- * the prepared statement is driver-cached across backfill-loop calls (same cost
- * as the dedicated prepared statement the loops used before).
+ * write layout lives in one place. Branches on this DB's {@link VecStorageMode}:
+ *   - `blob` → write the Float32 vector as a BLOB on the base row;
+ *   - `vec0` → `INSERT OR REPLACE` into the table's `vec0` index (partition/aux
+ *     values are read from the base row, which the caller has already inserted).
+ *
+ * Uses `conn.query()` so the prepared statement is driver-cached across
+ * backfill-loop calls.
  */
 export function storeEmbedding(
   conn: EmbeddingWriteConn,
@@ -116,20 +173,346 @@ export function storeEmbedding(
   id: string,
   vec: Float32Array,
 ): void {
+  if (readStorageMode(conn) === "vec0") {
+    storeEmbeddingVec0(conn, table, id, vec);
+    return;
+  }
   conn
     .query(`UPDATE ${BASE_TABLE[table]} SET embedding = ? WHERE id = ?`)
     .run(toBlob(vec), id);
 }
 
 /**
+ * `vec0` write path for {@link storeEmbedding}. `knowledge`/`entities` key
+ * directly on `id`; `distillations`/`temporal` read their immutable partition
+ * (and aux) values from the just-written base row. If the base row is gone (a
+ * delete raced the fire-and-forget embed), there is nothing to index — skip.
+ */
+function storeEmbeddingVec0(
+  conn: EmbeddingWriteConn,
+  table: EmbeddingTable,
+  id: string,
+  vec: Float32Array,
+): void {
+  const blob = toBlob(vec);
+  switch (table) {
+    case "knowledge":
+      conn
+        .query(
+          "INSERT OR REPLACE INTO knowledge_vec(id, embedding) VALUES (?, ?)",
+        )
+        .run(id, blob);
+      return;
+    case "entities":
+      conn
+        .query("INSERT OR REPLACE INTO entity_vec(id, embedding) VALUES (?, ?)")
+        .run(id, blob);
+      return;
+    case "distillations": {
+      const row = conn
+        .query("SELECT project_id, session_id FROM distillations WHERE id = ?")
+        .get(id) as
+        | { project_id: string; session_id: string }
+        | null
+        | undefined;
+      if (!row) return;
+      conn
+        .query(
+          "INSERT OR REPLACE INTO distillation_vec(id, project_id, session_id, embedding) VALUES (?, ?, ?, ?)",
+        )
+        .run(id, row.project_id, row.session_id, blob);
+      return;
+    }
+    case "temporal": {
+      const row = conn
+        .query(
+          "SELECT project_id, session_id FROM temporal_messages WHERE id = ?",
+        )
+        .get(id) as
+        | { project_id: string; session_id: string }
+        | null
+        | undefined;
+      if (!row) return;
+      conn
+        .query(
+          "INSERT OR REPLACE INTO temporal_vec(chunk_id, message_id, project_id, session_id, embedding) VALUES (?, ?, ?, ?, ?)",
+        )
+        .run(`${id}#0`, id, row.project_id, row.session_id, blob);
+      return;
+    }
+  }
+}
+
+/**
+ * Delete the embeddings for `ids` on `table`.
+ *
+ * NO-OP in blob layout: the embedding lives on the base row, so whatever deleted
+ * the base row already removed it. Only the `vec0` layout keeps a separate index
+ * row that must be deleted explicitly. `temporal_vec` is chunk-keyed, so it is
+ * deleted by the aux `message_id` column (removes every chunk of each message).
+ * Chunked under SQLite's bound-variable ceiling.
+ */
+export function deleteEmbeddings(
+  conn: EmbeddingWriteConn,
+  table: EmbeddingTable,
+  ids: string[],
+): void {
+  if (!ids.length) return;
+  if (readStorageMode(conn) !== "vec0") return;
+  const vt = VEC_TABLE[table];
+  const keyCol = table === "temporal" ? "message_id" : "id";
+  const CHUNK = 900;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const batch = ids.slice(i, i + CHUNK);
+    const ph = batch.map(() => "?").join(",");
+    conn.query(`DELETE FROM ${vt} WHERE ${keyCol} IN (${ph})`).run(...batch);
+  }
+}
+
+/**
  * Clear ALL embeddings across all four tables — used when the embedding config
- * changes (provider/model/dimension swap) and every stored vector becomes
- * incompatible. Today (blob layout) it NULLs the base BLOB columns; the vec0
- * layout will instead empty the vec0 tables.
+ * changes (provider/model swap, same dimension) and every stored vector becomes
+ * incompatible. Blob layout NULLs the base BLOB columns; vec0 layout empties the
+ * `vec0` tables. (A *dimension* change additionally requires recreating the
+ * fixed-width vec0 tables — see {@link ensureVec0Store}.)
  */
 export function clearAllEmbeddings(conn: EmbeddingWriteConn): void {
+  if (readStorageMode(conn) === "vec0") {
+    for (const vt of VEC_TABLES) conn.query(`DELETE FROM ${vt}`).run();
+    return;
+  }
   conn.query("UPDATE knowledge SET embedding = NULL").run();
   conn.query("UPDATE distillations SET embedding = NULL").run();
   conn.query("UPDATE temporal_messages SET embedding = NULL").run();
   conn.query("UPDATE entities SET embedding = NULL").run();
+}
+
+// ---------------------------------------------------------------------------
+// vec0 store lifecycle (DDL + kv_meta bookkeeping)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the dimension the `vec0` tables were created with (kv_meta
+ * {@link VEC_DIMENSION_KEY}), or `null` when unset / unparseable. Mirrors
+ * {@link readStorageMode}'s defensive read.
+ */
+export function readVecDimension(conn: StorageModeConn): number | null {
+  try {
+    const row = conn
+      .query("SELECT value FROM kv_meta WHERE key = ?")
+      .get(VEC_DIMENSION_KEY) as { value?: string } | null | undefined;
+    const n = row?.value != null ? Number(row.value) : Number.NaN;
+    return Number.isInteger(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+function setKv(conn: EmbeddingWriteConn, key: string, value: string): void {
+  conn
+    .query(
+      "INSERT INTO kv_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?",
+    )
+    .run(key, value, value);
+}
+
+/** Persist this DB file's {@link VecStorageMode}. */
+export function setStorageMode(
+  conn: EmbeddingWriteConn,
+  mode: VecStorageMode,
+): void {
+  setKv(conn, VEC_STORAGE_MODE_KEY, mode);
+}
+
+/**
+ * Idempotently ensure the four `vec0` tables exist at vector dimension `dim`.
+ *
+ * - First call / already at `dim`: `CREATE … IF NOT EXISTS` (no-op if present).
+ * - Stored dimension differs from `dim` (provider/model dimension swap): DROP +
+ *   recreate at `dim`. The fixed-width vec0 tables cannot hold the new width;
+ *   callers clear + re-embed around this, so dropping the rows is expected.
+ *
+ * Records `dim` under {@link VEC_DIMENSION_KEY}. Does NOT flip the storage mode
+ * or backfill — see the cutover in embedding.ts. Re-runnable: a crash between
+ * the DROP and the CREATE just re-runs both next time (`IF (NOT) EXISTS`).
+ */
+export function ensureVec0Store(conn: EmbeddingWriteConn, dim: number): void {
+  const storedDim = readVecDimension(conn);
+  if (storedDim !== null && storedDim !== dim) {
+    for (const vt of VEC_TABLES) conn.query(`DROP TABLE IF EXISTS ${vt}`).run();
+  }
+  for (const ddl of vec0Ddl(dim)) conn.query(ddl).run();
+  setKv(conn, VEC_DIMENSION_KEY, String(dim));
+}
+
+// ---------------------------------------------------------------------------
+// blob → vec0 cutover helpers (pure SQL relocation; no re-embedding)
+// ---------------------------------------------------------------------------
+
+/** Whether the base table for `table` still has its `embedding` BLOB column.
+ *  The cutover drops it per table; this gates the per-table copy so a re-run
+ *  after a partial cutover skips already-migrated tables (the v55 boot-loop
+ *  lesson — never read a dropped column). */
+export function embeddingColumnExists(
+  conn: EmbeddingWriteConn,
+  table: EmbeddingTable,
+): boolean {
+  try {
+    const rows = conn
+      .query(`PRAGMA table_info(${BASE_TABLE[table]})`)
+      .all() as Array<{ name: string }>;
+    return rows.some((r) => r.name === "embedding");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Copy existing blob embeddings on `table` into its `vec0` index via a single
+ * idempotent `INSERT OR REPLACE … SELECT` (FLAT vec0 inserts at ~0.12 ms/vec, so
+ * even 106K temporal rows finish in ~13 s). Pure relocation — no re-embedding.
+ * Knowledge copies from `knowledge_current` so only current-version ids land in
+ * `knowledge_vec` (matching the read-path join); temporal derives the
+ * single-vector-era `chunk_id` (`id || '#0'`) and carries partition + aux values.
+ */
+export function copyBlobsToVec0(
+  conn: EmbeddingWriteConn,
+  table: EmbeddingTable,
+): void {
+  switch (table) {
+    case "knowledge":
+      conn
+        .query(
+          "INSERT OR REPLACE INTO knowledge_vec(id, embedding) SELECT id, embedding FROM knowledge_current WHERE embedding IS NOT NULL",
+        )
+        .run();
+      return;
+    case "entities":
+      conn
+        .query(
+          "INSERT OR REPLACE INTO entity_vec(id, embedding) SELECT id, embedding FROM entities WHERE embedding IS NOT NULL",
+        )
+        .run();
+      return;
+    case "distillations":
+      conn
+        .query(
+          "INSERT OR REPLACE INTO distillation_vec(id, project_id, session_id, embedding) SELECT id, project_id, session_id, embedding FROM distillations WHERE embedding IS NOT NULL",
+        )
+        .run();
+      return;
+    case "temporal":
+      conn
+        .query(
+          "INSERT OR REPLACE INTO temporal_vec(chunk_id, message_id, project_id, session_id, embedding) SELECT id || '#0', id, project_id, session_id, embedding FROM temporal_messages WHERE embedding IS NOT NULL",
+        )
+        .run();
+      return;
+  }
+}
+
+/** Drop the base `embedding` BLOB column for `table` (reclaims its space via
+ *  SQLite's table rewrite). Presence-aware: a re-run after the column is gone
+ *  swallows the "no such column" error. The `knowledge_current` view's `k.*`
+ *  expands at query time, so it adapts automatically. */
+export function dropEmbeddingColumn(
+  conn: EmbeddingWriteConn,
+  table: EmbeddingTable,
+): void {
+  try {
+    conn.query(`ALTER TABLE ${BASE_TABLE[table]} DROP COLUMN embedding`).run();
+  } catch {
+    // already dropped on a prior (crashed) cutover run — idempotent.
+  }
+}
+
+/**
+ * Reclaim dangling `vec0` rows whose backing base row no longer exists — a bulk
+ * project / session / prune delete removes base rows but not the separate vec0
+ * rows. These rows are already HARMLESS for correctness (recall hydration drops
+ * a hit whose base row is missing, and a deleted project's rows live in their
+ * own partition), so this is a bloat / recall-quality backstop, not a fix. Run
+ * once at startup in vec0 mode. `knowledge_vec` is pinned to CURRENT versions
+ * (the read path joins `knowledge_current`); `temporal_vec` keys on the aux
+ * `message_id`. One bounded pass per table.
+ */
+export function gcVec0DanglingRows(conn: EmbeddingWriteConn): void {
+  conn
+    .query(
+      "DELETE FROM knowledge_vec WHERE id NOT IN (SELECT id FROM knowledge_current)",
+    )
+    .run();
+  conn
+    .query("DELETE FROM entity_vec WHERE id NOT IN (SELECT id FROM entities)")
+    .run();
+  conn
+    .query(
+      "DELETE FROM distillation_vec WHERE id NOT IN (SELECT id FROM distillations)",
+    )
+    .run();
+  conn
+    .query(
+      "DELETE FROM temporal_vec WHERE message_id NOT IN (SELECT id FROM temporal_messages)",
+    )
+    .run();
+}
+
+// ---------------------------------------------------------------------------
+// Mode-aware "missing/has embedding" predicates for backfill detection
+// ---------------------------------------------------------------------------
+
+function vecKeyCol(table: EmbeddingTable): string {
+  return table === "temporal" ? "message_id" : "id";
+}
+
+/**
+ * WHERE fragment selecting rows of `table` that are MISSING an embedding under
+ * `mode`: blob → `embedding IS NULL`; vec0 → `id NOT IN (SELECT <key> FROM
+ * <t>_vec)` (the blob column no longer exists in vec0 mode). `alias` prefixes
+ * the base column reference (e.g. `"e"` → `e.id …`).
+ */
+export function missingEmbeddingSql(
+  table: EmbeddingTable,
+  mode: VecStorageMode,
+  alias = "",
+): string {
+  const p = alias ? `${alias}.` : "";
+  if (mode === "vec0") {
+    return `${p}id NOT IN (SELECT ${vecKeyCol(table)} FROM ${VEC_TABLE[table]})`;
+  }
+  return `${p}embedding IS NULL`;
+}
+
+/** WHERE fragment selecting rows of `table` that HAVE an embedding under `mode`
+ *  — the complement of {@link missingEmbeddingSql}. */
+export function hasEmbeddingSql(
+  table: EmbeddingTable,
+  mode: VecStorageMode,
+  alias = "",
+): string {
+  const p = alias ? `${alias}.` : "";
+  if (mode === "vec0") {
+    return `${p}id IN (SELECT ${vecKeyCol(table)} FROM ${VEC_TABLE[table]})`;
+  }
+  return `${p}embedding IS NOT NULL`;
+}
+
+/**
+ * Resolve the FROM table + presence filter for a by-id embedding POINT read
+ * (`… WHERE id IN (…)`, NOT a KNN — vec0 supports primary-key SELECTs without
+ * `MATCH`, returning the stored vector as the same float32 BLOB). blob layout
+ * reads the base table/view + `AND embedding IS NOT NULL`; vec0 layout reads the
+ * `vec0` table (every row has a vector → no filter). The caller supplies its
+ * blob-mode source (e.g. `knowledge_current`). Only the `id`, `embedding`, and —
+ * for distillations — `session_id` columns are guaranteed on both layouts.
+ * Id-keyed tables only (knowledge/entities/distillations); temporal is
+ * chunk-keyed and not point-read this way.
+ */
+export function embeddingByIdSource(
+  table: EmbeddingTable,
+  mode: VecStorageMode,
+  blobTable: string,
+): { table: string; presenceFilter: string } {
+  if (mode === "vec0") return { table: VEC_TABLE[table], presenceFilter: "" };
+  return { table: blobTable, presenceFilter: " AND embedding IS NOT NULL" };
 }

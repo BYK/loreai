@@ -18,8 +18,17 @@ import { db } from "./db";
 import { isVecAvailable } from "./db/vec";
 import {
   clearAllEmbeddings,
+  copyBlobsToVec0,
+  dropEmbeddingColumn,
+  type EmbeddingTable,
+  embeddingColumnExists,
+  ensureVec0Store,
+  gcVec0DanglingRows,
+  hasEmbeddingSql,
+  missingEmbeddingSql,
   readStorageMode,
   resolveReadMode,
+  setStorageMode,
   storeEmbedding,
 } from "./db/vec-store";
 import { config } from "./config";
@@ -1288,7 +1297,19 @@ async function poolOrInProcess(
   if (pooled === VECTOR_SEARCH_TIMED_OUT) return [];
   if (pooled !== null) return pooled;
   const readMode = resolveReadMode(readStorageMode(db()), isVecAvailable());
-  return runVectorQuery(db(), readMode, queryEmbedding, spec);
+  try {
+    return runVectorQuery(db(), readMode, queryEmbedding, spec);
+  } catch (err) {
+    // Safety net for the vec0 read path, which (unlike the blob paths) has no
+    // in-line JS fallback: a vec0 `MATCH` can throw transiently — e.g. during a
+    // dimension change, when the query embedding's width no longer matches the
+    // vec0 table — and we must degrade THIS recall to empty (FTS/keyword recall
+    // still answers) rather than crash, per the never-crash contract. The pool
+    // already logged any worker-path failure; log the in-process one too so a
+    // systematic break stays visible.
+    log.error("in-process vector search failed; returning empty:", err);
+    return [];
+  }
 }
 
 export async function vectorSearch(
@@ -1523,33 +1544,30 @@ export function checkConfigChange(): boolean {
 
   if (stored && stored.value === current) return false;
 
+  const mode = readStorageMode(db());
+
+  // A vec0-store DB whose extension didn't load (degraded) cannot manage its
+  // embeddings — it can neither count/clear the unreadable vec0 tables nor
+  // recreate them. Leave the stored fingerprint UNCHANGED so the change is
+  // re-detected and handled the next time the DB opens on a capable runtime.
+  if (mode === "vec0" && !isVecAvailable()) return false;
+
   // Config changed (or first run) — clear all embeddings in all tables
   if (stored) {
-    const knowledgeCount = db()
-      .query(
-        "SELECT COUNT(*) as n FROM knowledge_current WHERE embedding IS NOT NULL",
-      )
-      .get() as { n: number };
-    const distillCount = db()
-      .query(
-        "SELECT COUNT(*) as n FROM distillations WHERE embedding IS NOT NULL",
-      )
-      .get() as { n: number };
-    const temporalCount = db()
-      .query(
-        "SELECT COUNT(*) as n FROM temporal_messages WHERE embedding IS NOT NULL",
-      )
-      .get() as { n: number };
-    const entityCount = db()
-      .query("SELECT COUNT(*) as n FROM entities WHERE embedding IS NOT NULL")
-      .get() as { n: number };
     const total =
-      knowledgeCount.n + distillCount.n + temporalCount.n + entityCount.n;
+      mode === "vec0" ? countVec0Embeddings() : countBlobEmbeddings();
     if (total > 0) {
       clearAllEmbeddings(db());
       log.info(
         `embedding config changed (${stored.value} → ${current}), cleared ${total} stale embeddings`,
       );
+    }
+    // A *dimension* change makes the fixed-width vec0 tables incompatible:
+    // recreate them at the new dimension (clearAllEmbeddings emptied the old
+    // rows; ensureVec0Store drops + recreates when the stored dim differs, and
+    // is a no-op for a same-dimension model/provider swap).
+    if (mode === "vec0") {
+      ensureVec0Store(db(), config().search.embeddings.dimensions);
     }
   }
 
@@ -1561,6 +1579,74 @@ export function checkConfigChange(): boolean {
     .run(EMBEDDING_CONFIG_KEY, current, current);
 
   return true;
+}
+
+/** Count blob-layout embeddings across all four tables (config-change logging). */
+function countBlobEmbeddings(): number {
+  const n = (sql: string) => (db().query(sql).get() as { n: number }).n;
+  return (
+    n(
+      "SELECT COUNT(*) as n FROM knowledge_current WHERE embedding IS NOT NULL",
+    ) +
+    n("SELECT COUNT(*) as n FROM distillations WHERE embedding IS NOT NULL") +
+    n(
+      "SELECT COUNT(*) as n FROM temporal_messages WHERE embedding IS NOT NULL",
+    ) +
+    n("SELECT COUNT(*) as n FROM entities WHERE embedding IS NOT NULL")
+  );
+}
+
+/** Count vec0-layout embeddings across all four `vec0` tables. Only reached on a
+ *  capable runtime (degraded short-circuits earlier). */
+function countVec0Embeddings(): number {
+  const n = (sql: string) => (db().query(sql).get() as { n: number }).n;
+  return (
+    n("SELECT COUNT(*) as n FROM knowledge_vec") +
+    n("SELECT COUNT(*) as n FROM distillation_vec") +
+    n("SELECT COUNT(*) as n FROM temporal_vec") +
+    n("SELECT COUNT(*) as n FROM entity_vec")
+  );
+}
+
+/** The four embedding-bearing logical tables, in cutover order. */
+const EMBEDDING_TABLES: readonly EmbeddingTable[] = [
+  "knowledge",
+  "entities",
+  "distillations",
+  "temporal",
+];
+
+/**
+ * One-time blob→vec0 cutover. NO-OP unless sqlite-vec is loadable on this
+ * runtime AND the DB is still in blob layout (so an already-vec0 DB, or an
+ * incapable runtime, skips). Idempotent / resumable: each table's
+ * copy-then-drop is gated on the base `embedding` column still existing, so a
+ * crash mid-cutover re-runs only the unfinished tables (never reads a dropped
+ * column — the v55 boot-loop lesson). The storage mode flips LAST, only once
+ * every table's blobs have been relocated and dropped.
+ */
+function maybeCutoverToVec0(): void {
+  if (!isVecAvailable()) return;
+  if (readStorageMode(db()) !== "blob") return;
+
+  const dim = config().search.embeddings.dimensions;
+  ensureVec0Store(db(), dim);
+
+  for (const table of EMBEDDING_TABLES) {
+    if (!embeddingColumnExists(db(), table)) continue; // already migrated
+    copyBlobsToVec0(db(), table);
+    dropEmbeddingColumn(db(), table);
+  }
+
+  setStorageMode(db(), "vec0");
+  try {
+    // Best-effort: return the pages freed by the dropped blob columns (notably
+    // ~320MB of temporal vectors) to the OS. No-op unless auto_vacuum is on.
+    db().query("PRAGMA incremental_vacuum").run();
+  } catch {
+    // ignore — space is already reclaimed within the DB file by DROP COLUMN.
+  }
+  log.info(`vec0 storage cutover complete (dim=${dim})`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1622,20 +1708,42 @@ function emptyBackfillStats(): BackfillStats {
 export async function runStartupBackfill(): Promise<BackfillStats> {
   if (!isAvailable()) return emptyBackfillStats();
 
+  // Handle an embedding-config change, then attempt the one-time blob→vec0
+  // cutover (both no-ops in the steady state). Order matters: a config change
+  // clears stale blobs BEFORE the cutover relocates the survivors, so the vec0
+  // tables are never seeded with vectors from a since-changed model/dimension.
+  checkConfigChange();
+  maybeCutoverToVec0();
+
+  const mode = readStorageMode(db());
+
+  // A vec0-store DB on a runtime that cannot load sqlite-vec: the blob columns
+  // are gone and the vec0 tables are unreadable. No backfill is possible — vector
+  // recall degrades to empty (FTS still answers) and re-converges when the DB is
+  // next opened on a capable runtime.
+  if (resolveReadMode(mode, isVecAvailable()) === "degraded") {
+    log.warn(
+      "vec0 storage but sqlite-vec unavailable — skipping embedding backfill " +
+        "(vector recall is FTS-only until reopened on a capable runtime)",
+    );
+    return emptyBackfillStats();
+  }
+
   // Surface backlog up-front so a slow startup is self-explanatory in logs.
-  // Counts use the same predicates the backfill loops use, so the two
-  // numbers always match what we're about to do.
+  // Counts use the same mode-aware predicates the backfill loops use, so the
+  // two numbers always match what we're about to do. (In vec0 mode the blob
+  // column is gone — "pending" means a base row absent from the vec0 index.)
   const pendingKnowledge = (
     db()
       .query(
-        "SELECT COUNT(*) as n FROM knowledge_current WHERE embedding IS NULL AND confidence > 0.2",
+        `SELECT COUNT(*) as n FROM knowledge_current WHERE ${missingEmbeddingSql("knowledge", mode)} AND confidence > 0.2`,
       )
       .get() as { n: number }
   ).n;
   const pendingDistillations = (
     db()
       .query(
-        "SELECT COUNT(*) as n FROM distillations WHERE embedding IS NULL AND archived = 0 AND observations != ''",
+        `SELECT COUNT(*) as n FROM distillations WHERE ${missingEmbeddingSql("distillations", mode)} AND archived = 0 AND observations != ''`,
       )
       .get() as { n: number }
   ).n;
@@ -1654,6 +1762,10 @@ export async function runStartupBackfill(): Promise<BackfillStats> {
   const distillationEmbedded = await backfillDistillationEmbeddings();
   const entityEmbedded = await backfillEntityEmbeddings();
 
+  // Startup backstop: reclaim vec0 rows orphaned by bulk base-row deletes
+  // (project/session/prune) since the last run. Harmless if there are none.
+  if (mode === "vec0") gcVec0DanglingRows(db());
+
   // Coverage stats — always log to stderr so the problem is visible.
   const kTotal = (
     db()
@@ -1665,7 +1777,7 @@ export async function runStartupBackfill(): Promise<BackfillStats> {
   const kWithEmb = (
     db()
       .query(
-        "SELECT COUNT(*) as n FROM knowledge_current WHERE embedding IS NOT NULL AND confidence > 0.2",
+        `SELECT COUNT(*) as n FROM knowledge_current WHERE ${hasEmbeddingSql("knowledge", mode)} AND confidence > 0.2`,
       )
       .get() as { n: number }
   ).n;
@@ -1681,7 +1793,7 @@ export async function runStartupBackfill(): Promise<BackfillStats> {
       .query(
         // Mirror dTotal's predicate (incl. observations != '') so the coverage
         // numerator is always a subset of the denominator (never reads "11/10").
-        "SELECT COUNT(*) as n FROM distillations WHERE embedding IS NOT NULL AND archived = 0 AND observations != ''",
+        `SELECT COUNT(*) as n FROM distillations WHERE ${hasEmbeddingSql("distillations", mode)} AND archived = 0 AND observations != ''`,
       )
       .get() as { n: number }
   ).n;
@@ -1780,9 +1892,10 @@ export async function backfillEmbeddings(): Promise<number> {
   const provider = getProvider();
   if (!provider) return 0;
 
+  const mode = readStorageMode(db());
   const rows = db()
     .query(
-      "SELECT id, title, content FROM knowledge_current WHERE embedding IS NULL AND confidence > 0.2",
+      `SELECT id, title, content FROM knowledge_current WHERE ${missingEmbeddingSql("knowledge", mode)} AND confidence > 0.2`,
     )
     .all() as Array<{ id: string; title: string; content: string }>;
 
@@ -1843,9 +1956,10 @@ export async function backfillDistillationEmbeddings(): Promise<number> {
   const provider = getProvider();
   if (!provider) return 0;
 
+  const mode = readStorageMode(db());
   const rows = db()
     .query(
-      "SELECT id, observations FROM distillations WHERE embedding IS NULL AND archived = 0 AND observations != ''",
+      `SELECT id, observations FROM distillations WHERE ${missingEmbeddingSql("distillations", mode)} AND archived = 0 AND observations != ''`,
     )
     .all() as Array<{ id: string; observations: string }>;
 
@@ -1923,6 +2037,7 @@ export async function backfillEntityEmbeddings(): Promise<number> {
   // Bun's bun:sqlite rejects GROUP_CONCAT(DISTINCT col, separator) with two
   // arguments when DISTINCT is used ("DISTINCT aggregates must have exactly
   // one argument"). Use a subquery to deduplicate aliases instead.
+  const mode = readStorageMode(db());
   const rows = db()
     .query(
       `SELECT e.id AS id, e.canonical_name AS canonical_name,
@@ -1930,7 +2045,7 @@ export async function backfillEntityEmbeddings(): Promise<number> {
                FROM (SELECT DISTINCT alias_value FROM entity_aliases WHERE entity_id = e.id) da
               ) AS aliases
        FROM entities e
-       WHERE e.embedding IS NULL`,
+       WHERE ${missingEmbeddingSql("entities", mode, "e")}`,
     )
     .all() as Array<{
     id: string;

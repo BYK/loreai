@@ -7,6 +7,7 @@
  */
 import { uuidv7 } from "uuidv7";
 import { db, ensureProject, getKV, setKV, withTransaction } from "./db";
+import { embeddingByIdSource, readStorageMode } from "./db/vec-store";
 import { ftsQuery, ftsQueryOr, EMPTY_QUERY, filterTerms } from "./search";
 import { offloadAll } from "./read-offload";
 import { config } from "./config";
@@ -1908,9 +1909,15 @@ export async function deduplicateEntities(
   {
     const ids = entities.map((e) => e.id);
     const placeholders = ids.map(() => "?").join(",");
+    // vec0 layout keeps entity vectors in entity_vec, not the base column.
+    const src = embeddingByIdSource(
+      "entities",
+      readStorageMode(db()),
+      "entities",
+    );
     const rows = db()
       .query(
-        `SELECT id, embedding FROM entities WHERE embedding IS NOT NULL AND id IN (${placeholders})`,
+        `SELECT id, embedding FROM ${src.table} WHERE id IN (${placeholders})${src.presenceFilter}`,
       )
       .all(...ids) as Array<{ id: string; embedding: Buffer }>;
     for (const row of rows) {
