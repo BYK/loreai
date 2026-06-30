@@ -879,13 +879,26 @@ async function batchLoadAliasesOffloaded(
   if (!entityIds.length) return map;
   // Initialize empty arrays for all IDs (mirrors batchLoadAliases)
   for (const id of entityIds) map.set(id, []);
-  const placeholders = entityIds.map(() => "?").join(",");
-  const allAliases = (await offloadAll(
-    `SELECT * FROM entity_aliases WHERE entity_id IN (${placeholders}) ORDER BY alias_type, alias_value`,
-    entityIds,
-  )) as EntityAlias[];
-  for (const a of allAliases) {
-    map.get(a.entity_id)?.push(a);
+  // Chunk the IN list to stay under SQLite's bound-variable ceiling (mirrors the
+  // sync batchLoadAliases). Chunks partition entityIds, so every alias of a given
+  // entity lands in exactly one chunk — per-entity ordering from the per-chunk
+  // ORDER BY is preserved. One offloadAll round-trip per chunk.
+  const CHUNK = 900;
+  const chunks: Promise<unknown[]>[] = [];
+  for (let i = 0; i < entityIds.length; i += CHUNK) {
+    const chunk = entityIds.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => "?").join(",");
+    chunks.push(
+      offloadAll(
+        `SELECT * FROM entity_aliases WHERE entity_id IN (${placeholders}) ORDER BY alias_type, alias_value`,
+        chunk,
+      ),
+    );
+  }
+  for (const rows of await Promise.all(chunks)) {
+    for (const a of rows as EntityAlias[]) {
+      map.get(a.entity_id)?.push(a);
+    }
   }
   return map;
 }
@@ -911,11 +924,23 @@ export async function getManyWithAliasesOffloaded(
 ): Promise<Map<string, EntityWithAliases>> {
   const map = new Map<string, EntityWithAliases>();
   if (!ids.length) return map;
-  const placeholders = ids.map(() => "?").join(",");
-  const rows = (await offloadAll(
-    `SELECT ${ENTITY_COLS} FROM entities WHERE id IN (${placeholders})`,
-    ids,
-  )) as Entity[];
+  // Chunk the IN list at 900 (mirrors batchLoadAliasesOffloaded). Chunks
+  // partition ids, so each entity row comes back from exactly one chunk; the
+  // unioned set is order-independent here (callers key by id). One offloadAll
+  // round-trip per chunk.
+  const CHUNK = 900;
+  const chunks: Promise<unknown[]>[] = [];
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => "?").join(",");
+    chunks.push(
+      offloadAll(
+        `SELECT ${ENTITY_COLS} FROM entities WHERE id IN (${placeholders})`,
+        chunk,
+      ),
+    );
+  }
+  const rows = (await Promise.all(chunks)).flat() as Entity[];
   for (const e of await withAliasesOffloaded(rows)) {
     map.set(e.id, e);
   }
