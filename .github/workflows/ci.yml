@@ -325,11 +325,16 @@ jobs:
 
           # Verify the embedded sqlite-vec extension actually loads (native
           # vector search), not the JS brute-force fallback. Catches a broken
-          # asset-embed / extraction chain in the SEA binary.
+          # asset-embed / extraction chain in the SEA binary. Two assertions:
+          # the main DB connection AND the off-thread read-worker pool (the path
+          # production vector search runs on) must both load the extension —
+          # the worker thread extracts/loads it independently (#1033).
           vec=$(./packages/gateway/dist-bin/lore-linux-x64 --check-vec)
           echo "Vec info: $vec"
           echo "$vec" | grep -q '^ok vec_version=v' \
             || (echo "::error::native sqlite-vec not loaded in linux-x64 binary: $vec"; exit 1)
+          echo "$vec" | grep -q '^ok worker vec_available=true' \
+            || (echo "::error::native sqlite-vec not loaded on the read-worker path in linux-x64 binary: $vec"; exit 1)
 
           # Start gateway, hit health endpoint, shut down
           ./packages/gateway/dist-bin/lore-linux-x64 start -p 7991 &
@@ -722,6 +727,17 @@ jobs:
           else
             echo "::error::native sqlite-vec not loaded in ${{ matrix.target }} binary: $vec"; exit 1
           fi
+          # Same assertion for the off-thread read-worker pool — the path
+          # production vector search actually runs on. The worker thread
+          # extracts and loads the extension independently of the main thread
+          # (#1033), so a green main-thread line above does not prove it.
+          if echo "$vec" | grep -q '^ok worker vec_available=true'; then
+            echo "native sqlite-vec read-worker path OK (${{ matrix.target }})"
+          elif [ "${{ matrix.target }}" = "darwin-arm64" ]; then
+            echo "::warning::native sqlite-vec not loaded on the read-worker path in darwin-arm64 (dylib codesigning?) — JS fallback in use: $vec"
+          else
+            echo "::error::native sqlite-vec not loaded on the read-worker path in ${{ matrix.target }} binary: $vec"; exit 1
+          fi
 
   # ---------------------------------------------------------------------------
   # Nightly: build all platforms, generate patches, publish to GHCR
@@ -875,6 +891,11 @@ jobs:
           echo "$vec" | grep -q '^ok vec_version=v' \
             && echo "native sqlite-vec OK (darwin-arm64)" \
             || echo "::warning::native sqlite-vec not loaded in darwin-arm64 (dylib codesigning?) — JS fallback in use: $vec"
+          # Read-worker pool path (#1033). Non-fatal on macOS for the same
+          # dylib-codesigning reason — degrades to the JS fallback, never crashes.
+          echo "$vec" | grep -q '^ok worker vec_available=true' \
+            && echo "native sqlite-vec read-worker path OK (darwin-arm64)" \
+            || echo "::warning::native sqlite-vec not loaded on the read-worker path in darwin-arm64 (dylib codesigning?) — JS fallback in use: $vec"
 
       - name: Verify code signature
         run: |

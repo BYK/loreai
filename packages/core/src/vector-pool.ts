@@ -543,6 +543,108 @@ export async function tryPoolRead(
   return { rows: r.value };
 }
 
+/** Outcome of {@link checkVecWorker}: a one-shot probe of the off-thread
+ *  read-pool path that production vector search actually runs on. */
+export interface VecWorkerCheck {
+  /** - `"ready"`       → the worker opened its reader connection; then
+   *                      `vecAvailable` reports whether native sqlite-vec
+   *                      loaded ON THE WORKER THREAD.
+   *  - `"init-error"`  → the worker failed to open its reader connection.
+   *  - `"timeout"`     → no `ready`/`init-error` arrived within the deadline.
+   *  - `"spawn-error"` → the worker couldn't be spawned, errored, or exited
+   *                      before reporting readiness. */
+  status: "ready" | "init-error" | "timeout" | "spawn-error";
+  /** Native sqlite-vec availability on the worker's own connection. Only
+   *  meaningful when `status === "ready"`; `false` for every failure status. */
+  vecAvailable: boolean;
+  /** Diagnostic detail for the non-`ready` statuses. */
+  error?: string;
+}
+
+/**
+ * One-shot diagnostic: spawn a SINGLE read-pool worker exactly the way
+ * production does (via {@link spawnWorker} — same SEA
+ * `__LORE_VECTOR_WORKER_SOURCE__` / npm sibling-file resolution), wait for its
+ * `ready` (or `init-error`) message, and report whether native sqlite-vec
+ * loaded ON THE WORKER THREAD.
+ *
+ * This is the off-thread analogue of the main-thread `isVecAvailable()` check.
+ * `--check-vec` alone only proves the main DB connection's extract+load works;
+ * it never spawns the pool, so it can't prove the worker-thread path that recall
+ * actually uses. Each worker opens its own reader connection and runs
+ * `loadVecForConnection`, which inside the SEA resolves the embedded extension
+ * via the worker thread's OWN `__LORE_VEC_EXTENSION_PATH__` handshake (set by
+ * native-loader.cjs under the `isMainThread`/exists-skip guard). A `ready` reply
+ * with `vecAvailable === true` proves that whole worker-thread chain (#1033).
+ *
+ * Independent of the live pool: it spawns a throwaway worker and never touches
+ * the shared `workers[]`, the `poolBroken` latch, or the structural-failure
+ * counter. Honors the test worker-factory seam. Never throws — failures surface
+ * as a non-`ready` status. The probe worker is always terminated before
+ * resolving.
+ */
+export async function checkVecWorker(
+  timeoutMs = DEFAULT_VECTOR_SEARCH_TIMEOUT_MS,
+): Promise<VecWorkerCheck> {
+  let worker: Worker;
+  try {
+    worker = spawnWorker({ dbPath: dbPath() });
+  } catch (err) {
+    return {
+      status: "spawn-error",
+      vecAvailable: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  return await new Promise<VecWorkerCheck>((resolve) => {
+    let settled = false;
+    const finish = (result: VecWorkerCheck): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        // Tear down the throwaway probe worker. The terminate()-induced `exit`
+        // re-enters `finish`, but the `settled` guard makes it a no-op.
+        void worker.terminate();
+      } catch {
+        // best-effort
+      }
+      resolve(result);
+    };
+
+    const timer = setTimeout(
+      () => finish({ status: "timeout", vecAvailable: false }),
+      timeoutMs,
+    );
+
+    worker.on("message", (msg: VectorWorkerOutbound) => {
+      if (msg.type === "ready") {
+        finish({ status: "ready", vecAvailable: msg.vecAvailable });
+      } else if (msg.type === "init-error") {
+        finish({ status: "init-error", vecAvailable: false, error: msg.error });
+      }
+      // result/read-result/error can't occur — the probe never posts a request.
+    });
+    worker.on("error", (err: Error) => {
+      finish({
+        status: "spawn-error",
+        vecAvailable: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+    worker.on("exit", () => {
+      // An exit before `ready`/`init-error` is a structural probe failure. After
+      // `finish` the terminate()-induced exit is a no-op (settled guard above).
+      finish({
+        status: "spawn-error",
+        vecAvailable: false,
+        error: "worker exited before reporting readiness",
+      });
+    });
+  });
+}
+
 /** Tear down the pool (test teardown + process reset). Idempotent. The
  *  shuttingDown guard keeps the terminate()-induced worker exits below from
  *  being counted as structural failures. */

@@ -260,13 +260,22 @@ export async function _cli(): Promise<void> {
     return;
   }
 
-  // --check-vec (hidden). Confirms the native sqlite-vec extension loaded on
-  // the main DB connection — inside the SEA it's extracted from the embedded
-  // per-target asset by native-loader.cjs. Prints `ok vec_version=<v>` when
-  // native search is active, or `fallback (...)` when the JS brute-force path
-  // is in use. Used by CI to verify the embed-asset → load chain.
+  // --check-vec (hidden). Confirms the native sqlite-vec extension loads on
+  // BOTH connection paths — inside the SEA each is extracted from the embedded
+  // per-target asset by native-loader.cjs.
+  //
+  //   1. Main DB connection: prints `ok vec_version=<v>` when native search is
+  //      active, or `fallback (...)` when the JS brute-force path is in use.
+  //   2. Off-thread read-worker pool (the path production vector search runs
+  //      on): spawns one probe worker that opens its OWN reader connection in
+  //      its OWN worker_threads thread and loads the extension there. Prints
+  //      `ok worker vec_available=true` / `worker fallback (...)`. A green
+  //      main-thread line does NOT prove this worker-thread chain — #1033.
+  //
+  // The exit code stays tied only to an unexpected throw (matching the
+  // main-thread `fallback` being exit 0); CI greps these lines per platform.
   if (values["check-vec"]) {
-    const { db, isVecAvailable } = await import("@loreai/core");
+    const { db, isVecAvailable, checkVecWorker } = await import("@loreai/core");
     const { safeExit } = await import("./exit");
     let ok = false;
     try {
@@ -280,6 +289,24 @@ export async function _cli(): Promise<void> {
           | { v?: string }
           | undefined;
         console.log(`ok vec_version=${row?.v ?? "unknown"}`);
+      }
+
+      // Independently verify the off-thread read-pool path (#1033). `db()` above
+      // has created/migrated the file, so the worker's reader open will find it.
+      const w = await checkVecWorker();
+      if (w.status === "ready" && w.vecAvailable) {
+        console.log("ok worker vec_available=true");
+      } else if (w.status === "ready") {
+        console.log(
+          "worker fallback (native sqlite-vec not loaded in worker — using JS brute-force)",
+        );
+      } else {
+        // Structural probe failure (spawn/init/timeout). Surface it on stdout so
+        // the captured `--check-vec` output shows why the worker assertion fails,
+        // without changing the exit code — CI's grep is the per-platform gate.
+        console.log(
+          `worker check failed: ${w.status}${w.error ? ` (${w.error})` : ""}`,
+        );
       }
       ok = true;
     } catch (err: unknown) {

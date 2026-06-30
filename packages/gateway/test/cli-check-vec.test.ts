@@ -19,6 +19,14 @@ const { state, safeExit } = vi.hoisted(() => ({
     // `undefined` simulates `SELECT vec_version()` returning a row with no `v`.
     vecVersion: "v0.1.9" as string | undefined,
     dbThrows: false,
+    // Drives the off-thread read-pool probe (checkVecWorker). Defaults to a
+    // healthy native worker so the main-thread assertions in existing tests
+    // keep exiting 0.
+    worker: {
+      status: "ready" as "ready" | "init-error" | "timeout" | "spawn-error",
+      vecAvailable: true,
+      error: undefined as string | undefined,
+    },
   },
   safeExit: vi.fn(),
 }));
@@ -39,6 +47,11 @@ vi.mock("@loreai/core", async (importOriginal) => {
         }),
       };
     },
+    checkVecWorker: async () => ({
+      status: state.worker.status,
+      vecAvailable: state.worker.vecAvailable,
+      error: state.worker.error,
+    }),
   };
 });
 
@@ -59,6 +72,7 @@ describe("--check-vec CLI diagnostic", () => {
     state.vecAvailable = true;
     state.vecVersion = "v0.1.9";
     state.dbThrows = false;
+    state.worker = { status: "ready", vecAvailable: true, error: undefined };
     safeExit.mockClear();
     process.argv = ["node", "lore", "--check-vec"];
     logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -87,6 +101,47 @@ describe("--check-vec CLI diagnostic", () => {
     expect(logSpy).toHaveBeenCalledWith("ok vec_version=v0.1.9");
     expect(safeExit).toHaveBeenCalledWith(0);
     expect(errSpy).not.toHaveBeenCalled();
+  });
+
+  test("worker native available: prints the off-thread worker line", async () => {
+    state.worker = { status: "ready", vecAvailable: true, error: undefined };
+
+    await _cli();
+
+    expect(logSpy).toHaveBeenCalledWith("ok vec_version=v0.1.9");
+    expect(logSpy).toHaveBeenCalledWith("ok worker vec_available=true");
+    expect(safeExit).toHaveBeenCalledWith(0);
+    expect(errSpy).not.toHaveBeenCalled();
+  });
+
+  test("worker fallback: prints worker fallback, still exits 0", async () => {
+    state.worker = { status: "ready", vecAvailable: false, error: undefined };
+
+    await _cli();
+
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining("worker fallback (native sqlite-vec not loaded"),
+    );
+    // A worker fallback is platform-expected (e.g. darwin dylib codesigning) —
+    // exit 0, exactly like the main-thread fallback. CI's grep is the gate.
+    expect(safeExit).toHaveBeenCalledWith(0);
+  });
+
+  test("worker structural failure: prints reason on stdout, still exits 0", async () => {
+    state.worker = {
+      status: "init-error",
+      vecAvailable: false,
+      error: "open boom",
+    };
+
+    await _cli();
+
+    expect(logSpy).toHaveBeenCalledWith(
+      "worker check failed: init-error (open boom)",
+    );
+    // Exit code is unchanged (only an unexpected throw flips it); CI's
+    // `grep ^ok worker` is what fails the smoke on a real regression.
+    expect(safeExit).toHaveBeenCalledWith(0);
   });
 
   test("native available but version row empty: prints 'unknown'", async () => {

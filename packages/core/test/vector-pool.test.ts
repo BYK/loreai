@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   _resetVectorPoolForTest,
   _setTestVectorWorkerFactory,
+  checkVecWorker,
   READ_JOB_TIMED_OUT,
   shutdownVectorPool,
   tryPoolRead,
@@ -42,6 +43,9 @@ class FakeWorker extends EventEmitter {
     this.terminated = true;
     this.emit("exit", 0);
     return Promise.resolve(0);
+  }
+  ready(vecAvailable: boolean): void {
+    this.emit("message", { type: "ready", vecAvailable });
   }
   reply(id: number, hits: unknown[]): void {
     this.emit("message", { type: "result", id, hits });
@@ -594,5 +598,97 @@ describe("embedding.vectorSearch routes through the pool", () => {
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+describe("checkVecWorker (off-thread read-pool vec probe, #1033)", () => {
+  // The real worker posts `ready` at construction; checkVecWorker attaches its
+  // listeners synchronously after spawn, so the fake must emit on a macrotask
+  // (after the listeners exist) — emitting synchronously in the constructor
+  // would be missed, exactly unlike a real worker_threads MessagePort which
+  // buffers until a listener is attached.
+  function factoryEmitting(
+    action: (w: FakeWorker) => void,
+  ): (d: VectorWorkerInitData) => never {
+    return (() => {
+      const w = new FakeWorker(() => {});
+      setTimeout(() => action(w), 0);
+      return w;
+    }) as unknown as (d: VectorWorkerInitData) => never;
+  }
+
+  it("reports ready + vecAvailable=true when the worker loads native vec", async () => {
+    _setTestVectorWorkerFactory(factoryEmitting((w) => w.ready(true)));
+    const r = await checkVecWorker();
+    expect(r).toEqual({ status: "ready", vecAvailable: true });
+    // The probe worker is always torn down before resolving.
+    expect(FakeWorker.instances[0]?.terminated).toBe(true);
+  });
+
+  it("reports ready + vecAvailable=false when the worker falls back to JS", async () => {
+    _setTestVectorWorkerFactory(factoryEmitting((w) => w.ready(false)));
+    const r = await checkVecWorker();
+    expect(r).toEqual({ status: "ready", vecAvailable: false });
+  });
+
+  it("reports init-error when the worker's reader connection fails to open", async () => {
+    _setTestVectorWorkerFactory(
+      factoryEmitting((w) => w.initError("open boom")),
+    );
+    const r = await checkVecWorker();
+    expect(r).toEqual({
+      status: "init-error",
+      vecAvailable: false,
+      error: "open boom",
+    });
+  });
+
+  it("reports spawn-error when the worker emits 'error'", async () => {
+    _setTestVectorWorkerFactory(
+      factoryEmitting((w) => w.crash(new Error("crash boom"))),
+    );
+    const r = await checkVecWorker();
+    expect(r).toEqual({
+      status: "spawn-error",
+      vecAvailable: false,
+      error: "crash boom",
+    });
+  });
+
+  it("reports spawn-error when the worker exits before reporting readiness", async () => {
+    _setTestVectorWorkerFactory(factoryEmitting((w) => w.die(1)));
+    const r = await checkVecWorker();
+    expect(r.status).toBe("spawn-error");
+    expect(r.vecAvailable).toBe(false);
+    expect(r.error).toContain("exited before reporting readiness");
+  });
+
+  it("reports spawn-error when spawning throws synchronously", async () => {
+    _setTestVectorWorkerFactory((() => {
+      throw new Error("no worker");
+    }) as unknown as (d: VectorWorkerInitData) => never);
+    const r = await checkVecWorker();
+    expect(r).toEqual({
+      status: "spawn-error",
+      vecAvailable: false,
+      error: "no worker",
+    });
+  });
+
+  it("reports timeout when the worker never reports readiness", async () => {
+    // Worker that never emits ready/init-error/exit (stays silent).
+    _setTestVectorWorkerFactory(factoryEmitting(() => {}));
+    const r = await checkVecWorker(20);
+    expect(r).toEqual({ status: "timeout", vecAvailable: false });
+    // The wedged probe worker is terminated so it can't leak a thread.
+    expect(FakeWorker.instances[0]?.terminated).toBe(true);
+  });
+
+  it("spawns exactly one probe worker via the factory seam", async () => {
+    // Guards against accidental real-worker spawns in unit tests: with a factory
+    // installed, exactly one fake is created per probe.
+    _setTestVectorWorkerFactory(factoryEmitting((w) => w.ready(true)));
+    await checkVecWorker();
+    expect(FakeWorker.instances.length).toBe(1);
   });
 });
