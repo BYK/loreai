@@ -59,12 +59,14 @@ export const MAX_DISTILLATION_VECTOR_ROWS = 500;
  * messages (per project, or per session when session-scoped) that a vector
  * search will score.
  *
- * STOPGAP — remove once an ANN index replaces brute-force scanning.
+ * BLOB-STORE-ONLY — applies to the `blob-native` / `blob-js` read paths only.
  * ----------------------------------------------------------------------------
  * `temporal_messages` is the rawest, highest-cardinality tier (100K+ rows on
- * busy installs), and every `vectorSearch*` over it was an UNBOUNDED O(n)
- * cosine scan — the dominant cost behind the pathological recall latency in
- * issue #999. This cap bounds the expensive cosine work to a fixed window.
+ * busy installs), and a brute-force `vectorSearch*` over it is an O(n) cosine
+ * scan — the dominant cost behind the pathological recall latency in issue
+ * #999. This cap bounds that expensive cosine work to a fixed window on the
+ * runtimes that can ONLY brute-force (sqlite-vec unavailable, so the DB stays
+ * in blob layout).
  *
  * Capping by `created_at DESC` (rather than randomly) is architecturally
  * coherent, not just a perf hack: the temporal tier is "recent raw context",
@@ -73,11 +75,10 @@ export const MAX_DISTILLATION_VECTOR_ROWS = 500;
  * content stays reachable via distillations even though it ages out of the
  * temporal vector window.
  *
- * 🔴 This cap exists ONLY because we brute-force every row. Once a real ANN
- * index lands (DiskANN via sqlite-vec ≥0.1.10's `vec0`, tracked under #999),
- * search becomes sublinear and there is no reason to hide older rows from it —
- * DELETE this constant and the `ORDER BY created_at DESC LIMIT` it drives, and
- * let the index see the whole corpus.
+ * 🔴 The cap is NOT applied on the `vec0` path: a DB that cut over to `vec0`
+ * storage serves temporal search from the FLAT-vec0 KNN index, which is
+ * sublinear and sees the WHOLE corpus — the `ORDER BY created_at DESC LIMIT`
+ * this constant drives exists only in the blob branches of `runTemporal`.
  */
 export const MAX_TEMPORAL_VECTOR_ROWS = 4000;
 
@@ -184,11 +185,12 @@ export function fromBlob(blob: Buffer | Uint8Array): Float32Array {
  *   - `blob-native` uses the native `vec_distance_cosine()` scan, falling back
  *     to the pure-JS brute force on any error;
  *   - `blob-js` runs the pure-JS brute force directly;
- *   - `vec0` (DiskANN KNN) is not implemented until the cutover PR;
+ *   - `vec0` runs exact FLAT-vec0 KNN (`MATCH … AND k = ?`) over the whole
+ *     corpus — no recency cap, since the index is sublinear, not brute force;
  *   - `degraded` (vec0 layout but no extension) returns `[]` — vector recall is
  *     impossible without the blobs, so we degrade gracefully rather than crash.
- * The blob paths return the same ordering and scores for L2-normalized vectors
- * (the system-wide invariant) — see db/vec.ts.
+ * The blob and vec0 paths return the same ordering and scores for L2-normalized
+ * vectors (the system-wide invariant) — see db/vec.ts.
  *
  * Returns `DistillationVectorHit[]` for `kind === "allDistillations"` and
  * `VectorHit[]` for every other kind. The two share the same row shape minus

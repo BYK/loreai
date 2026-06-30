@@ -1841,6 +1841,11 @@ export async function runStartupBackfill(): Promise<BackfillStats> {
   ).n;
 
   const parts: string[] = [];
+  // Lead with the storage mode + native availability so silent degradation is
+  // visible at a glance: `storage_mode=vec0 vec=off` means this DB cut over to
+  // vec0-only storage but sqlite-vec did not load here, so vector recall is
+  // FTS-only until reopened on a capable runtime.
+  parts.push(`storage_mode=${mode} vec=${isVecAvailable() ? "on" : "off"}`);
   if (knowledgeEmbedded > 0 || distillationEmbedded > 0 || entityEmbedded > 0) {
     parts.push(
       `backfilled ${knowledgeEmbedded} knowledge + ${distillationEmbedded} distillations + ${entityEmbedded} entities`,

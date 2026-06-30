@@ -47,6 +47,58 @@ function resolveExtensionPath(): string | null {
   }
 }
 
+/** Scratch table name for the load-time vec0 KNN probe (temp schema, so it is
+ *  private to the connection and never touches the on-disk DB). */
+const SMOKE_TABLE = "temp.__lore_vec0_smoke";
+
+/**
+ * Prove the `vec0` KNN path actually works on THIS host — not merely that the
+ * extension's scalar SQL functions registered.
+ *
+ * `vec_version()` only confirms the functions loaded; it does NOT exercise the
+ * `vec0` virtual table or the `MATCH … AND k = ?` KNN operator, which can fail
+ * independently (e.g. a binary that loads yet whose `vec0` module is broken on
+ * a particular CPU / SQLite build). That distinction is now load-bearing: once
+ * a DB has cut over to vec0-only storage the base `embedding` BLOB columns are
+ * dropped, so there is no brute-force column left to fall back to — a `vec0`
+ * that loads-but-doesn't-work would make every vector read throw at query time
+ * with no recovery. Probe the real round-trip once at load: build a tiny temp
+ * `vec0` table, insert one row, run a `k = 1` MATCH, and confirm the hit. Any
+ * throw or miss ⇒ report unavailable so callers route to the JS fallback (which
+ * still has BLOBs to scan, because a vec0-only DB never reaches this on an
+ * incapable runtime). Never throws.
+ */
+export function vec0KnnSmokeOk(database: Database): boolean {
+  // A JSON-text vector is accepted by sqlite-vec for both INSERT and MATCH, so
+  // the probe needs no Float32Array/Buffer plumbing (keeps this loader a leaf).
+  const probe = "[1, 0, 0, 0]";
+  try {
+    database.query(`DROP TABLE IF EXISTS ${SMOKE_TABLE}`).run();
+    database
+      .query(
+        `CREATE VIRTUAL TABLE ${SMOKE_TABLE} USING vec0(` +
+          "id TEXT PRIMARY KEY, embedding float[4] distance_metric=cosine)",
+      )
+      .run();
+    database
+      .query(`INSERT INTO ${SMOKE_TABLE}(id, embedding) VALUES ('probe', ?)`)
+      .run(probe);
+    const hit = database
+      .query(`SELECT id FROM ${SMOKE_TABLE} WHERE embedding MATCH ? AND k = 1`)
+      .get(probe) as { id?: string } | undefined;
+    database.query(`DROP TABLE ${SMOKE_TABLE}`).run();
+    return hit?.id === "probe";
+  } catch {
+    // Best-effort cleanup so a retry on the same connection starts clean.
+    try {
+      database.query(`DROP TABLE IF EXISTS ${SMOKE_TABLE}`).run();
+    } catch {
+      /* ignore — the connection is about to fall back to JS anyway */
+    }
+    return false;
+  }
+}
+
 /**
  * Attempt to load sqlite-vec into the given connection. Runs once per process
  * (guarded by `attempted`); call `resetVecState()` when the connection closes
@@ -97,6 +149,14 @@ export function loadVecExtension(database: Database): void {
       | { v?: string }
       | undefined;
     version = row?.v ?? "unknown";
+    // …and confirm the vec0 KNN path itself works, not just the scalar funcs —
+    // a loads-but-broken vec0 has no blob fallback on a cut-over DB.
+    if (!vec0KnnSmokeOk(database)) {
+      log.warn(
+        `sqlite-vec: extension loaded (${version}) but vec0 KNN smoke test failed — using JS brute-force vector search`,
+      );
+      return; // vecAvailable stays false → JS fallback
+    }
     loadedPath = path;
     vecAvailable = true;
   } catch (e) {
@@ -136,7 +196,10 @@ export function loadVecForConnection(database: Database): boolean {
     const row = database.query("SELECT vec_version() AS v").get() as
       | { v?: string }
       | undefined;
-    return typeof row?.v === "string" && row.v.length > 0;
+    if (typeof row?.v !== "string" || row.v.length === 0) return false;
+    // Each worker reader trusts its OWN connection, so each must prove vec0 KNN
+    // works here too — not just that the version string came back.
+    return vec0KnnSmokeOk(database);
   } catch {
     return false;
   }

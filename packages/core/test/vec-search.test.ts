@@ -7,8 +7,9 @@ import {
   test,
   vi,
 } from "vitest";
+import { Database } from "#db/driver";
 import { close, db, ensureProject, withTransaction } from "../src/db";
-import { isVecAvailable } from "../src/db/vec";
+import { isVecAvailable, vec0KnnSmokeOk } from "../src/db/vec";
 import * as log from "../src/log";
 import {
   toBlob,
@@ -115,6 +116,48 @@ describe("loadVecExtension startup logging", () => {
     expect(infoLines(info).some((l) => l.includes("LORE_DISABLE_VEC"))).toBe(
       true,
     );
+  });
+});
+
+// The load-time vec0 KNN smoke guard. `vec_version()` only proves the scalar
+// SQL functions registered; the loader additionally round-trips a tiny vec0 KNN
+// query before trusting the native fast path. This matters because a cut-over
+// (vec0-only) DB has no base `embedding` BLOB column to fall back to — a
+// loads-but-broken vec0 must be demoted to the JS fallback here, not discovered
+// at query time.
+describe("vec0 KNN smoke guard (vec0KnnSmokeOk)", () => {
+  test("passes on a vec-loaded connection and is repeatable", () => {
+    if (!isVecAvailable()) return; // JS-only runtime: nothing to probe
+    ensureProject(PROJECT); // ensure the shared connection is open + vec-loaded
+    // Twice over, to prove the probe drops its scratch table each call so a
+    // re-probe on the same connection still works (the worker-reader pattern).
+    expect(vec0KnnSmokeOk(db())).toBe(true);
+    expect(vec0KnnSmokeOk(db())).toBe(true);
+  });
+
+  test("leaves no scratch table behind", () => {
+    if (!isVecAvailable()) return;
+    ensureProject(PROJECT);
+    vec0KnnSmokeOk(db());
+    const leftover = db()
+      .query(
+        "SELECT name FROM temp.sqlite_master WHERE name = '__lore_vec0_smoke'",
+      )
+      .get() as { name?: string } | null | undefined;
+    expect(leftover ?? null).toBeNull();
+  });
+
+  // Fail-closed / non-vacuous: a connection that never loaded sqlite-vec has no
+  // `vec0` module, so `CREATE VIRTUAL TABLE … USING vec0` throws and the guard
+  // reports false. If the guard ever stopped genuinely exercising vec0 (e.g.
+  // returned a constant `true`), THIS assertion would fail — which is the point.
+  test("fails closed when the vec0 module is absent", () => {
+    const raw = new Database(":memory:"); // no loadExtension → no vec0 module
+    try {
+      expect(vec0KnnSmokeOk(raw)).toBe(false);
+    } finally {
+      raw.close();
+    }
   });
 });
 
