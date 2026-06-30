@@ -138,6 +138,62 @@ describeVec("vec0 write + read round-trip", () => {
     );
   });
 
+  test("storeEmbedding re-embed overwrites the existing vec0 row (upsert without INSERT OR REPLACE)", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insKnowledge("k1", "t", "c");
+    insDistillation("d1", "s");
+    insTemporal("t1", "sX", 1000);
+
+    // Store an embedding, then a DIFFERENT one for the SAME id. vec0 in our
+    // pinned sqlite-vec rejects `INSERT OR REPLACE`/UPSERT on virtual tables, so
+    // the write path must DELETE-by-key then INSERT. If it ever reverts to
+    // `INSERT OR REPLACE`, the second write throws "UNIQUE constraint failed"
+    // and this test fails (non-vacuous guard). Covers all three keyings: plain
+    // id (knowledge), id + partition lookup (distillations), chunk_id (temporal).
+    storeEmbedding(db(), "knowledge", "k1", v(1, 0, 0, 0));
+    storeEmbedding(db(), "knowledge", "k1", v(0, 1, 0, 0));
+    storeEmbedding(db(), "distillations", "d1", v(1, 0, 0, 0));
+    storeEmbedding(db(), "distillations", "d1", v(0, 1, 0, 0));
+    storeEmbedding(db(), "temporal", "t1", v(1, 0, 0, 0));
+    storeEmbedding(db(), "temporal", "t1", v(0, 1, 0, 0));
+
+    // Exactly one row survives per id, holding the SECOND (overwriting) vector.
+    const kn = db()
+      .query("SELECT COUNT(*) n FROM knowledge_vec WHERE id = 'k1'")
+      .get() as { n: number };
+    expect(kn.n).toBe(1);
+    const kRow = db()
+      .query("SELECT embedding FROM knowledge_vec WHERE id = 'k1'")
+      .get() as { embedding: Uint8Array };
+    expect(Array.from(fromBlob(kRow.embedding))).toEqual(
+      Array.from(v(0, 1, 0, 0)),
+    );
+
+    const dn = db()
+      .query("SELECT COUNT(*) n FROM distillation_vec WHERE id = 'd1'")
+      .get() as { n: number };
+    expect(dn.n).toBe(1);
+    const dRow = db()
+      .query("SELECT embedding FROM distillation_vec WHERE id = 'd1'")
+      .get() as { embedding: Uint8Array };
+    expect(Array.from(fromBlob(dRow.embedding))).toEqual(
+      Array.from(v(0, 1, 0, 0)),
+    );
+
+    // temporal is chunk-keyed (`id#0`): still exactly one chunk, new vector.
+    const tn = db()
+      .query("SELECT COUNT(*) n FROM temporal_vec WHERE message_id = 't1'")
+      .get() as { n: number };
+    expect(tn.n).toBe(1);
+    const tRow = db()
+      .query("SELECT embedding FROM temporal_vec WHERE chunk_id = 't1#0'")
+      .get() as { embedding: Uint8Array };
+    expect(Array.from(fromBlob(tRow.embedding))).toEqual(
+      Array.from(v(0, 1, 0, 0)),
+    );
+  });
+
   test("runVectorQuery vec0 returns hits ranked by cosine, post-filtering confidence", () => {
     setStorageMode(db(), "vec0");
     ensureVec0Store(db(), DIM);

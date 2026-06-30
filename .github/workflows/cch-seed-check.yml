@@ -33,9 +33,8 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
       # scripts/check-cc-version.ts imports the gateway -> @loreai/core chain,
-      # which resolves to packages/core/dist. Build core (and its workspace dep
-      # @loreai/sqlite-vec-vendored, via the `...` suffix) so the import succeeds.
-      - run: pnpm --filter "@loreai/core..." run build
+      # which resolves to packages/core/dist. Build core so the import succeeds.
+      - run: pnpm --filter @loreai/core run build
 
       - name: Check for new Claude Code versions
         id: check
@@ -101,9 +100,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # scripts/extract-cch-seed.ts (and the cch test) import the gateway ->
       # @loreai/core chain, which resolves to packages/core/dist. Build core
-      # (and its workspace dep @loreai/sqlite-vec-vendored, via `...`) so the
-      # imports succeed.
-      - run: pnpm --filter "@loreai/core..." run build
+      # so the imports succeed.
+      - run: pnpm --filter @loreai/core run build
 
       - name: Extract and apply all missing seeds
         id: extract

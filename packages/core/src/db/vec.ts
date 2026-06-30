@@ -15,15 +15,15 @@
 // precision, so the two paths return the same ordering and the same scores.
 //
 // The loader is PATH-BASED (resolve a .so/.dylib/.dll path, then loadExtension)
-// so the same code serves both the npm path (binary from the vendored
-// `@loreai/sqlite-vec-vendored` package, via `getLoadablePath()`) and the SEA
-// path (binary extracted from an embedded asset; the extractor sets
+// so the same code serves both the npm path (binary from the sqlite-vec
+// package's platform optionalDependency, via `getLoadablePath()`) and the
+// future SEA path (binary extracted from an embedded asset; the extractor sets
 // `globalThis.__LORE_VEC_EXTENSION_PATH__` — see native-loader.cjs / #956).
 //
 // Never throws. A failure leaves availability `false` and callers fall back.
 
 import type { Database } from "#db/driver";
-import * as sqliteVec from "@loreai/sqlite-vec-vendored";
+import * as sqliteVec from "sqlite-vec";
 import * as log from "../log";
 
 let vecAvailable = false;
@@ -37,9 +37,8 @@ function resolveExtensionPath(): string | null {
     .__LORE_VEC_EXTENSION_PATH__;
   if (typeof seaPath === "string" && seaPath.length > 0) return seaPath;
   try {
-    // `getLoadablePath()` reads the vendored package's prebuilt binary path for
-    // this platform. In the SEA bundle the package is stubbed, so this returns
-    // undefined and the SEA-embedded path (above) is used instead.
+    // `getLoadablePath()` reads the platform optionalDependency's binary path.
+    // In the SEA bundle `sqlite-vec` is stubbed, so this returns undefined.
     const getPath = (sqliteVec as { getLoadablePath?: () => string })
       .getLoadablePath;
     return typeof getPath === "function" ? (getPath() ?? null) : null;

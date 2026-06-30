@@ -205,13 +205,13 @@ function binaryExternalsPlugin(): esbuild.Plugin {
 }
 
 // ---------------------------------------------------------------------------
-// esbuild: stub `@loreai/sqlite-vec-vendored`'s path resolver in the SEA bundle
+// esbuild: stub `sqlite-vec`'s path resolver in the SEA bundle
 // ---------------------------------------------------------------------------
-// The vendored package resolves its prebuilt loadable extension from its own
-// `prebuilt/` dir via import.meta.url — which doesn't exist inside the fossilize
-// binary, so its `getLoadablePath()` can't work there. We replace the package
-// with a no-op so the bundle builds without dragging in (or failing to resolve)
-// the prebuilt directory.
+// The `sqlite-vec` npm wrapper resolves its native loadable extension from a
+// platform optionalDependency in node_modules — which doesn't exist inside the
+// fossilize binary, so its `getLoadablePath()` can't work there. We replace the
+// wrapper with a no-op so the bundle builds without dragging in (or failing to
+// resolve) the platform package.
 //
 // This does NOT disable native vector search: the extension is embedded as a
 // per-target SEA asset (`vec0-<target>.<ext>`, staged below) and extracted at
@@ -224,8 +224,8 @@ function stubSqliteVecPlugin(): esbuild.Plugin {
   return {
     name: "stub-sqlite-vec",
     setup(build) {
-      build.onResolve({ filter: /^@loreai\/sqlite-vec-vendored$/ }, () => ({
-        path: "@loreai/sqlite-vec-vendored",
+      build.onResolve({ filter: /^sqlite-vec$/ }, () => ({
+        path: "sqlite-vec",
         namespace: "stub-sqlite-vec",
       }));
       build.onLoad({ filter: /.*/, namespace: "stub-sqlite-vec" }, () => ({

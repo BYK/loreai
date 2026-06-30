@@ -9,9 +9,8 @@
 //            Searched by `vec_distance_cosine()` when sqlite-vec is loaded, or
 //            the pure-JS brute force otherwise. This is the only mode today.
 //   "vec0" — embeddings live in dedicated sqlite-vec `vec0` virtual tables and
-//            are searched by DiskANN KNN. The base BLOB columns are dropped.
-//            (Write + read cutover lands in a later PR; the type + plumbing are
-//            introduced here so that change is small and behavioral.)
+//            are searched by the FLAT vec0 KNN (exact recall). The base BLOB
+//            columns are dropped once a DB file is fully cut over.
 //
 // The EFFECTIVE behavior of a connection is a function of BOTH the DB's stored
 // layout AND whether sqlite-vec actually loaded on THAT connection (the two
@@ -33,7 +32,7 @@ export type VecStorageMode = "blob" | "vec0";
  * (storage mode × sqlite-vec availability):
  *   - `blob-native`  blob layout, sqlite-vec loaded → `vec_distance_cosine()`.
  *   - `blob-js`      blob layout, no sqlite-vec → pure-JS brute force.
- *   - `vec0`         vec0 layout, sqlite-vec loaded → DiskANN KNN (PR4).
+ *   - `vec0`         vec0 layout, sqlite-vec loaded → FLAT vec0 KNN (exact).
  *   - `degraded`     vec0 layout but sqlite-vec unavailable → vector recall is
  *                    impossible (no blobs to fall back to). Reads return `[]`,
  *                    writes no-op; FTS/keyword recall still works. Never crashes;
@@ -78,9 +77,10 @@ const VEC_TABLE: Record<EmbeddingTable, string> = {
 /**
  * DDL for the four `vec0` tables at vector dimension `dim`. Uses the FLAT
  * (default float) vec0 index — EXACT recall (1.0) with PARTITION KEY filter
- * pushdown. (DiskANN was evaluated and rejected: in this vendored build it
- * supports neither partition keys nor metadata columns, inserts ~400× slower,
- * and is only approximate — see PR4 notes.) Partition keys shard the index so a
+ * pushdown. (DiskANN was evaluated and rejected: it supports neither partition
+ * keys nor metadata columns, inserts ~400× slower, and is only approximate; it
+ * is not even compiled into the upstream `sqlite-vec` build we ship.) Partition
+ * keys shard the index so a
  * session/project-scoped query touches only the matching rows; `temporal_vec`
  * is chunk-keyed (`chunk_id`, `+message_id`) ahead of multi-vector chunking
  * (single-vector era writes exactly one chunk per message: `chunk_id = id#0`).
@@ -161,8 +161,9 @@ export function resolveReadMode(
  * Centralizes the previously-scattered `UPDATE … SET embedding = ?` sites so the
  * write layout lives in one place. Branches on this DB's {@link VecStorageMode}:
  *   - `blob` → write the Float32 vector as a BLOB on the base row;
- *   - `vec0` → `INSERT OR REPLACE` into the table's `vec0` index (partition/aux
- *     values are read from the base row, which the caller has already inserted).
+ *   - `vec0` → replace the row in the table's `vec0` index (DELETE-by-key then
+ *     INSERT — vec0 has no `INSERT OR REPLACE`/UPSERT; partition/aux values are
+ *     read from the base row, which the caller has already inserted).
  *
  * Uses `conn.query()` so the prepared statement is driver-cached across
  * backfill-loop calls.
@@ -195,17 +196,25 @@ function storeEmbeddingVec0(
   vec: Float32Array,
 ): void {
   const blob = toBlob(vec);
+  // vec0 in our pinned sqlite-vec supports neither `INSERT OR REPLACE` nor
+  // `ON CONFLICT … DO UPDATE` on virtual tables, so an upsert is DELETE-by-key
+  // then INSERT. The DELETE is a no-op on first write and removes the prior
+  // index row on a re-embed. A crash in the gap leaves the base row without an
+  // index row; for knowledge/entities/distillations startup backfill re-indexes
+  // any base row missing from its vec0 table. temporal has no startup backfill,
+  // but it is write-once (one chunk per message, never re-embedded), so its
+  // DELETE is always a no-op and there is no overwrite to lose.
   switch (table) {
     case "knowledge":
+      conn.query("DELETE FROM knowledge_vec WHERE id = ?").run(id);
       conn
-        .query(
-          "INSERT OR REPLACE INTO knowledge_vec(id, embedding) VALUES (?, ?)",
-        )
+        .query("INSERT INTO knowledge_vec(id, embedding) VALUES (?, ?)")
         .run(id, blob);
       return;
     case "entities":
+      conn.query("DELETE FROM entity_vec WHERE id = ?").run(id);
       conn
-        .query("INSERT OR REPLACE INTO entity_vec(id, embedding) VALUES (?, ?)")
+        .query("INSERT INTO entity_vec(id, embedding) VALUES (?, ?)")
         .run(id, blob);
       return;
     case "distillations": {
@@ -216,9 +225,10 @@ function storeEmbeddingVec0(
         | null
         | undefined;
       if (!row) return;
+      conn.query("DELETE FROM distillation_vec WHERE id = ?").run(id);
       conn
         .query(
-          "INSERT OR REPLACE INTO distillation_vec(id, project_id, session_id, embedding) VALUES (?, ?, ?, ?)",
+          "INSERT INTO distillation_vec(id, project_id, session_id, embedding) VALUES (?, ?, ?, ?)",
         )
         .run(id, row.project_id, row.session_id, blob);
       return;
@@ -233,11 +243,13 @@ function storeEmbeddingVec0(
         | null
         | undefined;
       if (!row) return;
+      const chunkId = `${id}#0`;
+      conn.query("DELETE FROM temporal_vec WHERE chunk_id = ?").run(chunkId);
       conn
         .query(
-          "INSERT OR REPLACE INTO temporal_vec(chunk_id, message_id, project_id, session_id, embedding) VALUES (?, ?, ?, ?, ?)",
+          "INSERT INTO temporal_vec(chunk_id, message_id, project_id, session_id, embedding) VALUES (?, ?, ?, ?, ?)",
         )
-        .run(`${id}#0`, id, row.project_id, row.session_id, blob);
+        .run(chunkId, id, row.project_id, row.session_id, blob);
       return;
     }
   }
@@ -368,9 +380,10 @@ export function embeddingColumnExists(
 }
 
 /**
- * Copy existing blob embeddings on `table` into its `vec0` index via a single
- * idempotent `INSERT OR REPLACE … SELECT` (FLAT vec0 inserts at ~0.12 ms/vec, so
- * even 106K temporal rows finish in ~13 s). Pure relocation — no re-embedding.
+ * Copy existing blob embeddings on `table` into its `vec0` index via an
+ * idempotent `INSERT … SELECT` that skips ids already present (FLAT vec0 inserts
+ * at ~0.12 ms/vec, so even 106K temporal rows finish in ~13 s). Pure relocation
+ * — no re-embedding.
  * Knowledge copies from `knowledge_current` so only current-version ids land in
  * `knowledge_vec` (matching the read-path join); temporal derives the
  * single-vector-era `chunk_id` (`id || '#0'`) and carries partition + aux values.
@@ -379,32 +392,38 @@ export function copyBlobsToVec0(
   conn: EmbeddingWriteConn,
   table: EmbeddingTable,
 ): void {
+  // vec0 (our pinned sqlite-vec) has no `INSERT OR REPLACE`, so idempotence /
+  // resumability comes from skipping ids already present in the vec0 table via
+  // `WHERE … NOT IN (SELECT <pk> FROM <vec0>)`. On the first pass the vec0 table
+  // is empty so every eligible row copies; a re-run after a partial copy only
+  // inserts the remainder. Embeddings are static during the one-time cutover, so
+  // skipping an already-copied id (rather than replacing it) is equivalent.
   switch (table) {
     case "knowledge":
       conn
         .query(
-          "INSERT OR REPLACE INTO knowledge_vec(id, embedding) SELECT id, embedding FROM knowledge_current WHERE embedding IS NOT NULL",
+          "INSERT INTO knowledge_vec(id, embedding) SELECT id, embedding FROM knowledge_current WHERE embedding IS NOT NULL AND id NOT IN (SELECT id FROM knowledge_vec)",
         )
         .run();
       return;
     case "entities":
       conn
         .query(
-          "INSERT OR REPLACE INTO entity_vec(id, embedding) SELECT id, embedding FROM entities WHERE embedding IS NOT NULL",
+          "INSERT INTO entity_vec(id, embedding) SELECT id, embedding FROM entities WHERE embedding IS NOT NULL AND id NOT IN (SELECT id FROM entity_vec)",
         )
         .run();
       return;
     case "distillations":
       conn
         .query(
-          "INSERT OR REPLACE INTO distillation_vec(id, project_id, session_id, embedding) SELECT id, project_id, session_id, embedding FROM distillations WHERE embedding IS NOT NULL",
+          "INSERT INTO distillation_vec(id, project_id, session_id, embedding) SELECT id, project_id, session_id, embedding FROM distillations WHERE embedding IS NOT NULL AND id NOT IN (SELECT id FROM distillation_vec)",
         )
         .run();
       return;
     case "temporal":
       conn
         .query(
-          "INSERT OR REPLACE INTO temporal_vec(chunk_id, message_id, project_id, session_id, embedding) SELECT id || '#0', id, project_id, session_id, embedding FROM temporal_messages WHERE embedding IS NOT NULL",
+          "INSERT INTO temporal_vec(chunk_id, message_id, project_id, session_id, embedding) SELECT id || '#0', id, project_id, session_id, embedding FROM temporal_messages WHERE embedding IS NOT NULL AND (id || '#0') NOT IN (SELECT chunk_id FROM temporal_vec)",
         )
         .run();
       return;
