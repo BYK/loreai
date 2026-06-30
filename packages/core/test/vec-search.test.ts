@@ -163,22 +163,57 @@ describe("vec0 KNN smoke guard (vec0KnnSmokeOk)", () => {
       raw.close();
     }
   });
+
+  // The probe writes (CREATE temp table + INSERT), so it requires a writable
+  // connection. This is WHY only the main writer connection runs it and the
+  // query_only reader path (loadVecForConnection) does not — see below.
+  test("returns false on a query_only (read-only) connection", () => {
+    if (!isVecAvailable()) return;
+    ensureProject(PROJECT);
+    const raw = new Database(":memory:");
+    loadVecForConnection(raw); // vec0 module IS loaded on this connection…
+    raw.exec("PRAGMA query_only = TRUE"); // …but writes are now forbidden
+    try {
+      // false because the probe can't write — NOT because vec0 is missing
+      // (read-only `MATCH` would still work; see the reader-path test below).
+      expect(vec0KnnSmokeOk(raw)).toBe(false);
+    } finally {
+      raw.close();
+    }
+  });
 });
 
 // Worker readers load sqlite-vec on their OWN connection via
 // `loadVecForConnection` (see db/reader.ts) — a path the main-connection tests
-// never exercise (the gap tracked in #1033). It must reach the same verdict as
-// the main loader: load + KNN smoke both pass on a capable runtime, JS fallback
-// otherwise. Here it runs against a throwaway in-memory connection.
+// never exercise (the gap tracked in #1033). Unlike the main loader it does NOT
+// run the write-based vec0 KNN smoke, because reader connections are opened
+// `query_only = TRUE`; the host-level vec0 capability is proven once on the
+// writable main connection. Here it runs against throwaway in-memory connections.
 describe("loadVecForConnection (worker reader path)", () => {
-  test("loads + smoke-passes iff the runtime is vec-capable", () => {
+  test("loads on a fresh connection iff the runtime is vec-capable", () => {
     ensureProject(PROJECT); // (re)open the main connection so isVecAvailable() is current
     const raw = new Database(":memory:");
     try {
-      // A worker reader must reach the SAME verdict as the main loader: the
-      // per-connection load and the vec0 KNN smoke both succeed (true) on a
-      // capable runtime, and route to the JS fallback (false) on one without
-      // the extension.
+      // Reaches the same load verdict as the main loader: extension loads +
+      // vec_version() comes back (true) on a capable runtime, JS fallback
+      // (false) on one without the extension.
+      expect(loadVecForConnection(raw)).toBe(isVecAvailable());
+    } finally {
+      raw.close();
+    }
+  });
+
+  // 🔴 Regression guard (the bug the SEA binary smoke test caught): a real
+  // reader connection is `query_only = TRUE`, so it can only SELECT. A
+  // write-based vec0 probe (CREATE temp table + INSERT) would throw
+  // "readonly database" and FALSELY demote a working read-only connection to
+  // the JS fallback. `loadVecForConnection` must therefore NOT probe with
+  // writes — a query_only reader must still report vec available.
+  test("reports vec available on a query_only reader connection", () => {
+    ensureProject(PROJECT);
+    const raw = new Database(":memory:");
+    raw.exec("PRAGMA query_only = TRUE"); // mirror db/reader.ts
+    try {
       expect(loadVecForConnection(raw)).toBe(isVecAvailable());
     } finally {
       raw.close();

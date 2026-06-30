@@ -67,6 +67,13 @@ const SMOKE_TABLE = "temp.__lore_vec0_smoke";
  * throw or miss ⇒ report unavailable so callers route to the JS fallback (which
  * still has BLOBs to scan, because a vec0-only DB never reaches this on an
  * incapable runtime). Never throws.
+ *
+ * 🔴 Requires a WRITABLE connection: the probe CREATEs a temp table and INSERTs
+ * a row, so it throws "readonly database" on a `query_only` connection. Run it
+ * only on the main writer connection (`loadVecExtension`). Reader connections
+ * (db/reader.ts, `query_only = TRUE`) must NOT use it — their read-only
+ * `MATCH … k = ?` works fine and the host-level capability is already proven by
+ * the main loader.
  */
 export function vec0KnnSmokeOk(database: Database): boolean {
   // Bind the probe vector as a Float32Array BLOB — byte-for-byte the same param
@@ -200,10 +207,16 @@ export function loadVecForConnection(database: Database): boolean {
     const row = database.query("SELECT vec_version() AS v").get() as
       | { v?: string }
       | undefined;
-    if (typeof row?.v !== "string" || row.v.length === 0) return false;
-    // Each worker reader trusts its OWN connection, so each must prove vec0 KNN
-    // works here too — not just that the version string came back.
-    return vec0KnnSmokeOk(database);
+    // NOTE: deliberately NO vec0 KNN smoke here. Reader connections are opened
+    // `query_only = TRUE` (see db/reader.ts), so the write-based smoke (it
+    // CREATEs + INSERTs into a temp vec0 table) would throw "readonly database"
+    // and falsely demote a perfectly-good read-only connection to JS fallback.
+    // The vec0 KNN capability is a property of the host + extension binary, not
+    // of an individual connection — it is proven once on the writable main
+    // connection in `loadVecExtension`. A reader loads the SAME binary on the
+    // SAME host, so a successful `vec_version()` is sufficient here; its actual
+    // job (read-only `MATCH … k = ?`) works fine under `query_only`.
+    return typeof row?.v === "string" && row.v.length > 0;
   } catch {
     return false;
   }
