@@ -1203,26 +1203,47 @@ async function distillSegment(input: {
     // Action tag counting: extract tags from this segment, then count
     // how many distinct sessions contain the same tag across the project.
     // When a tag appears in 3+ sessions, it's a strong behavioral signal.
-    const tags = extractActionTags(result.observations);
-    if (tags.length > 0) {
+    // Only mint preferences for curated tags we have a deliberate canonical
+    // title for. `tagToTitle` title-cases any string, so without this gate a
+    // spurious regex match becomes a garbage entry (e.g. "A Z" from a literal
+    // `[a-z]` range) that pollutes system[1] and busts the prompt cache when
+    // later deleted by consolidation (ses_14b9bf3d… incident).
+    const knownTags = extractActionTags(result.observations).filter(
+      isKnownActionTag,
+    );
+    if (knownTags.length > 0) {
       const pid = ensureProject(input.projectPath);
-      for (const tag of tags) {
-        // Only mint preferences for curated tags we have a deliberate canonical
-        // title for. `tagToTitle` title-cases any string, so without this gate a
-        // spurious regex match becomes a garbage entry (e.g. "A Z" from a literal
-        // `[a-z]` range) that pollutes system[1] and busts the prompt cache when
-        // later deleted by consolidation (ses_14b9bf3d… incident).
-        if (!isKnownActionTag(tag)) continue;
-        try {
-          const tagPattern = `%[${tag}]%`;
-          const rows = db()
-            .query(
-              `SELECT COUNT(DISTINCT session_id) as cnt FROM distillations
-               WHERE project_id = ? AND observations LIKE ?`,
-            )
-            .get(pid, tagPattern) as { cnt: number } | null;
-          const sessionCount = rows?.cnt ?? 0;
-          if (sessionCount >= 3) {
+      // #1023: compute every tag's distinct-session count in ONE scan instead
+      // of one leading-wildcard `observations LIKE` full-scan per tag. The
+      // per-tag `COUNT(DISTINCT CASE WHEN … THEN session_id END)` columns are
+      // evaluated in a single pass and are mutually independent (a NULL CASE
+      // result is ignored by COUNT(DISTINCT …)), so each cN matches what the
+      // old per-tag query returned. (The `distillations` table is NOT under the
+      // knowledge append-only freeze — #1016 — so this scan is safe to batch;
+      // the per-survivor `knowledge_current` LOWER(title) lookup below stays
+      // per-tag and is deferred until the freeze lifts.)
+      let counts: Record<string, number> | null = null;
+      try {
+        const countCols = knownTags
+          .map(
+            (_, i) =>
+              `COUNT(DISTINCT CASE WHEN observations LIKE ? THEN session_id END) AS c${i}`,
+          )
+          .join(", ");
+        const patterns = knownTags.map((tag) => `%[${tag}]%`);
+        counts = db()
+          .query(`SELECT ${countCols} FROM distillations WHERE project_id = ?`)
+          .get(...patterns, pid) as Record<string, number> | null;
+      } catch {
+        // Count scan failed — skip minting this run.
+        counts = null;
+      }
+      if (counts) {
+        for (let i = 0; i < knownTags.length; i++) {
+          const tag = knownTags[i];
+          const sessionCount = (counts[`c${i}`] as number | undefined) ?? 0;
+          if (sessionCount < 3) continue;
+          try {
             const prefTitle = tagToTitle(tag);
             // Pre-check: same dedup-silent return issue as the gotcha branch
             // above — ltm.create() returns the existing ID on dedup but
@@ -1253,9 +1274,9 @@ async function distillSegment(input: {
             log.info(
               `action tag '${tag}' found in ${sessionCount} sessions — created preference`,
             );
+          } catch {
+            // Dedup guard or DB error — swallow
           }
-        } catch {
-          // Dedup guard or DB error — swallow
         }
       }
     }
