@@ -199,11 +199,14 @@ function storeEmbeddingVec0(
   // vec0 in our pinned sqlite-vec supports neither `INSERT OR REPLACE` nor
   // `ON CONFLICT … DO UPDATE` on virtual tables, so an upsert is DELETE-by-key
   // then INSERT. The DELETE is a no-op on first write and removes the prior
-  // index row on a re-embed. A crash in the gap leaves the base row without an
-  // index row; for knowledge/entities/distillations startup backfill re-indexes
-  // any base row missing from its vec0 table. temporal has no startup backfill,
-  // but it is write-once (one chunk per message, never re-embedded), so its
-  // DELETE is always a no-op and there is no overwrite to lose.
+  // index row on a re-embed. A crash in the two-statement gap leaves the base
+  // row without an index row; for knowledge/entities/distillations startup
+  // backfill re-indexes any base row missing from its vec0 table. temporal has
+  // no startup backfill and DOES re-embed on content update (see temporal.ts
+  // store()), so a crash in that gap silently drops one message's vector until
+  // the next re-embed of the same id. The window is two adjacent synchronous
+  // statements (sub-ms) and the blast radius is one message missing from vector
+  // (not FTS) recall — bounded and non-corrupting, hence left unguarded here.
   switch (table) {
     case "knowledge":
       conn.query("DELETE FROM knowledge_vec WHERE id = ?").run(id);
