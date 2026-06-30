@@ -99,6 +99,19 @@ export const MAX_TEMPORAL_VECTOR_ROWS = 4000;
 export const VEC0_FILTER_OVERFETCH = 4;
 
 /**
+ * Over-fetch multiplier for the chunk-keyed `temporal_vec` KNN read. A temporal
+ * message has MANY chunks under multi-vector part-aware embedding (one per
+ * text/reasoning/tool unit — see `buildEmbeddingUnits`), so a bare `k = limit`
+ * could return `limit` *chunks* that collapse to far fewer than `limit` distinct
+ * messages. So we ask the index for {@link TEMPORAL_CHUNK_OVERFETCH}`× limit`
+ * chunk candidates, collapse them to messages by max-sim (a message scores as
+ * its best-matching chunk), and re-`LIMIT` to `limit`. Tunable; clamped to
+ * {@link VEC0_MAX_K}. Degenerate-safe: in the single-chunk-per-message era this
+ * just widens a candidate window that the collapse reduces 1:1 — same result.
+ */
+export const TEMPORAL_CHUNK_OVERFETCH = 8;
+
+/**
  * sqlite-vec's hard ceiling on a KNN `k` (`SQLITE_VEC_VEC0_K_MAX`): a `MATCH …
  * AND k = N` with N > 4096 errors. Every vec0 `k` we bind is clamped to this.
  */
@@ -478,16 +491,48 @@ function runTemporal(
     // project_id (and session_id when scoped) are PARTITION KEYs → the index
     // scans only the matching shard (session-scoped is ~sub-ms). Cap removed:
     // the index sees the full history, not a recency window. `temporal_vec` is
-    // chunk-keyed; in the single-vector era there is exactly one chunk per
-    // message, so `k = limit` yields `limit` distinct messages and `message_id`
-    // (aux) is the message id callers hydrate by.
-    const vsql = sessionId
-      ? "SELECT message_id AS id, 1 - distance AS similarity FROM temporal_vec WHERE embedding MATCH ? AND k = ? AND project_id = ? AND session_id = ? ORDER BY distance"
-      : "SELECT message_id AS id, 1 - distance AS similarity FROM temporal_vec WHERE embedding MATCH ? AND k = ? AND project_id = ? ORDER BY distance";
-    const vparams: unknown[] = sessionId
-      ? [toBlob(queryEmbedding), vecK(limit), projectId, sessionId]
-      : [toBlob(queryEmbedding), vecK(limit), projectId];
-    return conn.query(vsql).all(...vparams) as VectorHit[];
+    // chunk-keyed and a message may carry MANY chunks (multi-vector part-aware
+    // embedding), so a bare `k = limit` could return `limit` *chunks* that
+    // collapse to far fewer than `limit` distinct messages. Over-fetch
+    // `TEMPORAL_CHUNK_OVERFETCH × limit` chunk candidates (nearest-first), then
+    // collapse to one hit per message by max-sim — the message scores as its
+    // best-matching chunk and is returned exactly once. The collapse is done in
+    // JS rather than an outer `GROUP BY` because SQLite flattens a derived table
+    // into the aggregating parent, which makes the vec0 KNN see a non-`distance`
+    // ORDER BY and rejects the query; keeping the KNN standalone (its proven
+    // `k = ? … ORDER BY distance` form) and grouping the bounded result set (≤ k
+    // ≤ VEC0_MAX_K rows) in JS sidesteps that entirely. Degenerate-safe: with one
+    // chunk per message the collapse is 1:1.
+    const run = (k: number): VectorHit[] => {
+      const vsql = sessionId
+        ? "SELECT message_id AS id, 1 - distance AS similarity FROM temporal_vec WHERE embedding MATCH ? AND k = ? AND project_id = ? AND session_id = ? ORDER BY distance"
+        : "SELECT message_id AS id, 1 - distance AS similarity FROM temporal_vec WHERE embedding MATCH ? AND k = ? AND project_id = ? ORDER BY distance";
+      const vparams: unknown[] = sessionId
+        ? [toBlob(queryEmbedding), k, projectId, sessionId]
+        : [toBlob(queryEmbedding), k, projectId];
+      const chunkHits = conn.query(vsql).all(...vparams) as VectorHit[];
+      // Keep each message's best (max) sim. `chunkHits` is nearest-first, so the
+      // first-seen sim for an id is already its best and Map insertion order is
+      // best-first; the stable sort then orders messages by similarity with
+      // nearest-chunk-first tie-breaking.
+      const bestByMessage = new Map<string, number>();
+      for (const h of chunkHits) {
+        const prev = bestByMessage.get(h.id);
+        if (prev === undefined || h.similarity > prev) {
+          bestByMessage.set(h.id, h.similarity);
+        }
+      }
+      return [...bestByMessage.entries()]
+        .map(([id, similarity]) => ({ id, similarity }))
+        .sort((a, b) => b.similarity - a.similarity)
+        .slice(0, limit);
+    };
+    const k0 = vecK(limit * TEMPORAL_CHUNK_OVERFETCH);
+    const hits = run(k0);
+    // Chunk-collapse attrition can leave < limit distinct messages even when more
+    // exist deeper (a few messages own the k-nearest chunks); widen to the max
+    // KNN window, mirroring runKnowledge/runDistillations' post-filter widen.
+    return hits.length >= limit || k0 >= VEC0_MAX_K ? hits : run(VEC0_MAX_K);
   }
   assertBlobReadMode(readMode);
   if (readMode === "blob-native") {

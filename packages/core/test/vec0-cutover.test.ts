@@ -32,6 +32,7 @@ import * as ltm from "../src/ltm";
 import {
   fromBlob,
   runVectorQuery,
+  TEMPORAL_CHUNK_OVERFETCH,
   toBlob,
   type VectorHit,
 } from "../src/vector-query";
@@ -230,6 +231,106 @@ describeVec("vec0 write + read round-trip", () => {
       limit: 10,
     }) as VectorHit[];
     expect(scoped.map((h) => h.id)).toEqual(["a"]); // partition pushdown excludes sY
+  });
+
+  test("temporal vec0 read collapses a message's many chunks to one max-sim hit", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporal("t1", "sX", 1000);
+    insTemporal("t2", "sX", 2000);
+
+    // Multi-vector: t1 carries TWO chunks — #0 orthogonal to the query (sim 0),
+    // #1 identical to it (sim 1). t2 carries ONE chunk, moderately near (sim
+    // 0.6). The read must return each message ONCE, scored by its BEST chunk.
+    const insChunk = (chunkId: string, msgId: string, vec: Float32Array) =>
+      db()
+        .query(
+          "INSERT INTO temporal_vec(chunk_id, message_id, project_id, session_id, embedding) VALUES (?, ?, ?, ?, ?)",
+        )
+        .run(chunkId, msgId, pid, "sX", toBlob(vec));
+    insChunk("t1#0", "t1", v(0, 1, 0, 0));
+    insChunk("t1#1", "t1", v(1, 0, 0, 0));
+    insChunk("t2#0", "t2", v(0.6, 0.8, 0, 0));
+
+    const hits = runVectorQuery(db(), "vec0", v(1, 0, 0, 0), {
+      kind: "temporal",
+      projectId: pid,
+      sessionId: "sX",
+      limit: 10,
+    }) as VectorHit[];
+
+    // t1's two chunks collapse to a SINGLE hit (not one per chunk).
+    expect(hits.filter((h) => h.id === "t1")).toHaveLength(1);
+    // Ranked by best chunk: t1 (max-sim ≈ 1) ahead of t2 (≈ 0.6).
+    expect(hits.map((h) => h.id)).toEqual(["t1", "t2"]);
+    // t1 is scored by its NEAREST chunk (#1, sim ≈ 1), not its far chunk (#0, 0).
+    expect(hits.find((h) => h.id === "t1")?.similarity).toBeCloseTo(1, 5);
+  });
+
+  test("temporal vec0 read collapses chunks across sessions when scoped to project only", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporal("t1", "sX", 1000);
+    insTemporal("t2", "sY", 2000);
+    // No sessionId → the project-scoped SQL branch. t1's two chunks live in
+    // session sX, t2's single chunk in sY; both must surface, t1 deduped.
+    const insChunk = (
+      chunkId: string,
+      msgId: string,
+      sess: string,
+      vec: Float32Array,
+    ) =>
+      db()
+        .query(
+          "INSERT INTO temporal_vec(chunk_id, message_id, project_id, session_id, embedding) VALUES (?, ?, ?, ?, ?)",
+        )
+        .run(chunkId, msgId, pid, sess, toBlob(vec));
+    insChunk("t1#0", "t1", "sX", v(0, 1, 0, 0));
+    insChunk("t1#1", "t1", "sX", v(1, 0, 0, 0));
+    insChunk("t2#0", "t2", "sY", v(0.6, 0.8, 0, 0));
+
+    const hits = runVectorQuery(db(), "vec0", v(1, 0, 0, 0), {
+      kind: "temporal",
+      projectId: pid,
+      limit: 10,
+    }) as VectorHit[];
+
+    expect(hits.filter((h) => h.id === "t1")).toHaveLength(1);
+    expect(hits.map((h) => h.id)).toEqual(["t1", "t2"]);
+    expect(hits.find((h) => h.id === "t1")?.similarity).toBeCloseTo(1, 5);
+  });
+
+  test("temporal vec0 read widens the KNN window when chunk-collapse under-fills limit", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    for (const id of ["hot", "m1", "m2", "m3"]) insTemporal(id, "sX", 1000);
+    const insChunk = (chunkId: string, msgId: string, vec: Float32Array) =>
+      db()
+        .query(
+          "INSERT INTO temporal_vec(chunk_id, message_id, project_id, session_id, embedding) VALUES (?, ?, ?, ?, ?)",
+        )
+        .run(chunkId, msgId, pid, "sX", toBlob(vec));
+    // "hot" owns MORE than the first window's worth of nearest chunks (all
+    // identical to the query). The first KNN window is k0 = limit ×
+    // TEMPORAL_CHUNK_OVERFETCH chunks; flooding hot beyond that means the window
+    // is entirely hot's chunks, so the collapse yields a SINGLE message — the
+    // read must widen the window to recover m1/m2/m3, then slice to the 2 best.
+    const k0 = 2 * TEMPORAL_CHUNK_OVERFETCH;
+    for (let i = 0; i < k0 + 8; i++) insChunk(`hot#${i}`, "hot", v(1, 0, 0, 0));
+    insChunk("m1#0", "m1", v(0.9, 0.44, 0, 0)); // ≈0.898
+    insChunk("m2#0", "m2", v(0.8, 0.6, 0, 0)); // 0.8
+    insChunk("m3#0", "m3", v(0.7, 0.71, 0, 0)); // ≈0.702
+
+    const hits = runVectorQuery(db(), "vec0", v(1, 0, 0, 0), {
+      kind: "temporal",
+      projectId: pid,
+      sessionId: "sX",
+      limit: 2,
+    }) as VectorHit[];
+
+    // Without the widen-retry the first window is all "hot" → only 1 message;
+    // the widen recovers the next-best message and the slice trims to 2.
+    expect(hits.map((h) => h.id)).toEqual(["hot", "m1"]);
   });
 });
 
