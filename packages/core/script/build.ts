@@ -44,7 +44,12 @@ mkdirSync(distDir, { recursive: true });
 // onnxruntime-node: .node native binaries that esbuild can't bundle (transitive
 //   dep of @huggingface/transformers).
 // sharp: image processing for vision models, not needed for text embeddings.
-const external = ["node:*", "bun:*", "onnxruntime-node", "sharp"];
+// sqlite-vec: resolves a native loadable extension (vec0.{so,dylib,dll}) at
+//   runtime via its platform optionalDependency through `getLoadablePath()`. It
+//   MUST stay external so that resolution points at the installed package, not
+//   core's bundled dist — otherwise the native vec0 load silently fails and
+//   vector search degrades. Mirrors the gateway bundle's external list.
+const external = ["node:*", "bun:*", "onnxruntime-node", "sharp", "sqlite-vec"];
 
 /** @type {esbuild.BuildOptions} */
 const commonOptions: esbuild.BuildOptions = {
