@@ -33,6 +33,7 @@ import {
 } from "./db/vec-store";
 import { config } from "./config";
 import * as log from "./log";
+import { buildEmbeddingText } from "./embedding-units";
 import { vendorModelInfo } from "./embedding-vendor";
 import {
   MIN_EMBED_TOKENS,
@@ -1487,7 +1488,14 @@ export function embedTemporalMessage(id: string, content: string): void {
   // to be useful in vector search and would waste embedding capacity.
   if (content.length < 50) return;
 
-  embed([content], "document")
+  // Embed a part-selective reduction of the content rather than the raw text:
+  // large `[tool:…]` outputs are dropped (header + first line kept) so they can
+  // no longer evict prose/reasoning from the head or dilute the mean-pooled
+  // vector. The full content stays in `content` + FTS for keyword recall.
+  const text = buildEmbeddingText(content);
+  if (!text) return;
+
+  embed([text], "document")
     .then(([vec]) => {
       storeEmbedding(db(), "temporal", id, vec);
     })

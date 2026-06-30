@@ -29,8 +29,11 @@ export const EMBED_BACKOFF_FACTOR = 0.7;
  *  attention) may use when sizing the initial cap. Deliberately conservative:
  *  on a constrained host a higher value risks tipping into swap (the exact
  *  event-loop stall we're avoiding), and because embedding quality plateaus
- *  above ~2048 tokens (single-vector embeddings of long text are diluted, and
- *  recall chunks long content), a low cap costs almost nothing in quality. A
+ *  above ~2048 tokens (a single vector over long text is a diluted mean-pool
+ *  centroid regardless of cap; temporal-message embeddings additionally drop
+ *  bulky tool-output bodies before embedding via buildEmbeddingUnits, and the
+ *  full text stays keyword-searchable in FTS), a low cap costs almost nothing
+ *  in quality. A
  *  box that genuinely has headroom recovers via the freemem-gated re-probe; an
  *  optimistic start is corrected by the ×0.7 backoff. */
 export const EMBED_MEM_FRACTION = 0.5;
