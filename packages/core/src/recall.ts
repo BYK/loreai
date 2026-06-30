@@ -1183,19 +1183,31 @@ export async function searchRecall(
           maxSeeds: 8,
           maxNeighbors: 12,
           maxKnowledge: limit * 2,
+          // Skip the knowledge fan-in (and its refs query) when this recall
+          // won't surface knowledge anyway (F4, #1048).
+          includeKnowledge: knowledgeEnabled,
         });
         const graphWeight = searchConfig?.graphBoostWeight ?? 1.0;
         const gpid = ensureProject(projectPath);
 
         // (a) Graph-linked knowledge, ordered by graph score (depth-decay ×
-        // local reach). Hydrated via getByLogical (refs store logical_ids) and
-        // visibility-filtered to mirror ltm.searchScored — a knowledge entry
-        // linked to a shared entity may belong to another project. Same `k:`
-        // key as the BM25/vector knowledge lists so RRF merges, not duplicates.
-        if (knowledgeEnabled && expansion.knowledge.length) {
+        // local reach). Batch-hydrated by logical_id on the read-worker pool
+        // (#1048) — refs store logical_ids, and this replaces N synchronous
+        // getByLogical() calls on the hot path, mirroring the neighbor-entity
+        // offload below and the #966 read path. Visibility-filtered to mirror
+        // ltm.searchScored — a knowledge entry linked to a shared entity may
+        // belong to another project. Same `k:` key as the BM25/vector knowledge
+        // lists so RRF merges, not duplicates. The list is already empty when
+        // knowledge is disabled (gated via includeKnowledge at graphExpand).
+        if (expansion.knowledge.length) {
+          const knowledgeMap = await timer.await(
+            ltm.getManyByLogicalOffloaded(
+              expansion.knowledge.map((gk) => gk.logicalId),
+            ),
+          );
           const graphKnowledge: TaggedResult[] = [];
           for (const gk of expansion.knowledge) {
-            const entry = ltm.getByLogical(gk.logicalId);
+            const entry = knowledgeMap.get(gk.logicalId);
             if (!entry) continue;
             const visible =
               entry.project_id === gpid ||

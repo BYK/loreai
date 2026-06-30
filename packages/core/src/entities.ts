@@ -1654,11 +1654,20 @@ const GRAPH_DEFAULTS = {
  */
 export function graphExpand(
   seedEntityIds: string[],
-  opts?: { maxSeeds?: number; maxNeighbors?: number; maxKnowledge?: number },
+  opts?: {
+    maxSeeds?: number;
+    maxNeighbors?: number;
+    maxKnowledge?: number;
+    includeKnowledge?: boolean;
+  },
 ): GraphExpansion {
   const maxSeeds = opts?.maxSeeds ?? GRAPH_DEFAULTS.maxSeeds;
   const maxNeighbors = opts?.maxNeighbors ?? GRAPH_DEFAULTS.maxNeighbors;
   const maxKnowledge = opts?.maxKnowledge ?? GRAPH_DEFAULTS.maxKnowledge;
+  // When the caller won't surface knowledge (recall with knowledge disabled),
+  // skip the knowledge fan-in entirely — no point issuing the
+  // `knowledge_entity_refs` query just to discard the result (F4, #1048).
+  const includeKnowledge = opts?.includeKnowledge ?? true;
 
   // Dedupe + cap seeds, preserving caller order (best matches first).
   const seeds: string[] = [];
@@ -1690,29 +1699,34 @@ export function graphExpand(
 
   // Knowledge fan-in: every logical_id referenced by any seed or neighbor.
   // Track the shallowest reaching depth and how many distinct entities reach it.
-  const refMap = knowledgeRefsForEntities([...entityDepth.keys()]);
-  const kAgg = new Map<string, { depth: number; reach: number }>();
-  for (const [entId, logicalIds] of refMap) {
-    const depth = entityDepth.get(entId) ?? 0;
-    for (const lid of logicalIds) {
-      const cur = kAgg.get(lid);
-      if (cur) {
-        cur.reach += 1;
-        if (depth < cur.depth) cur.depth = depth;
-      } else {
-        kAgg.set(lid, { depth, reach: 1 });
+  // Skipped wholesale when the caller doesn't surface knowledge (F4, #1048) so
+  // the `knowledge_entity_refs` query never runs for a discarded result.
+  let knowledge: GraphKnowledgeHit[] = [];
+  if (includeKnowledge) {
+    const refMap = knowledgeRefsForEntities([...entityDepth.keys()]);
+    const kAgg = new Map<string, { depth: number; reach: number }>();
+    for (const [entId, logicalIds] of refMap) {
+      const depth = entityDepth.get(entId) ?? 0;
+      for (const lid of logicalIds) {
+        const cur = kAgg.get(lid);
+        if (cur) {
+          cur.reach += 1;
+          if (depth < cur.depth) cur.depth = depth;
+        } else {
+          kAgg.set(lid, { depth, reach: 1 });
+        }
       }
     }
+    knowledge = [...kAgg.entries()]
+      .map(([logicalId, { depth, reach }]) => ({
+        logicalId,
+        depth,
+        reach,
+        score: (1 / (1 + depth)) * (1 + Math.log(reach)),
+      }))
+      .sort((a, b) => b.score - a.score || (a.logicalId < b.logicalId ? -1 : 1))
+      .slice(0, maxKnowledge);
   }
-  const knowledge: GraphKnowledgeHit[] = [...kAgg.entries()]
-    .map(([logicalId, { depth, reach }]) => ({
-      logicalId,
-      depth,
-      reach,
-      score: (1 / (1 + depth)) * (1 + Math.log(reach)),
-    }))
-    .sort((a, b) => b.score - a.score || (a.logicalId < b.logicalId ? -1 : 1))
-    .slice(0, maxKnowledge);
 
   // Neighbor-entity scoring: depth-decay × log of the neighbor's global
   // knowledge-ref count (a well-connected neighbor is more likely relevant).

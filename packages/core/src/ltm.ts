@@ -2528,6 +2528,37 @@ export function getByLogical(logicalId: string): KnowledgeEntry | null {
 }
 
 /**
+ * Batch-hydrate current knowledge entries by stable `logical_id` (A2, #823),
+ * offloaded (#966/#1048). The `logical_id` analogue of {@link getManyOffloaded}:
+ * cross-reference consumers (entity refs, wiki-links, `.lore.md` markers) store
+ * `logical_id`, so recall's entity-graph fan-in hydrates through this rather than
+ * N synchronous `getByLogical()` calls on the hot path. `knowledge_current` holds
+ * exactly one row per `logical_id`, so the map keys are unique. `KNOWLEDGE_COLS`
+ * excludes the embedding BLOB, keeping rows structured-clone-safe across the
+ * worker boundary. `logical_id`s with no current/live row are absent from the map
+ * (callers drop them, matching `getByLogical()` returning null). A worker timeout
+ * degrades to an empty map (see {@link offloadAll}) — graph knowledge is a
+ * supplemental RRF list, so a degraded turn simply omits it rather than re-block
+ * the event loop with an in-process re-query.
+ */
+export async function getManyByLogicalOffloaded(
+  logicalIds: string[],
+): Promise<Map<string, KnowledgeEntry>> {
+  const map = new Map<string, KnowledgeEntry>();
+  if (!logicalIds.length) return map;
+  const placeholders = logicalIds.map(() => "?").join(",");
+  const rows = (await offloadAll(
+    `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE logical_id IN (${placeholders})`,
+    logicalIds,
+  )) as Record<string, unknown>[];
+  for (const row of rows) {
+    const entry = hydrateKnowledgeEntry(row) as KnowledgeEntry;
+    map.set(entry.logical_id, entry);
+  }
+  return map;
+}
+
+/**
  * Resolve any knowledge id — a current version id, a SUPERSEDED version id, or a
  * logical_id — to its stable logical_id. Reads the BASE table (not the view) so
  * it still resolves a superseded version; falls back to the input id if unknown

@@ -193,6 +193,35 @@ describe("entities.graphExpand — graph traversal scoring", () => {
     const exp = entities.graphExpand([root.id], { maxNeighbors: 2 });
     expect(exp.entities.length).toBe(2);
   });
+
+  test("includeKnowledge:false skips the knowledge fan-in (F4) but still returns neighbors", () => {
+    const seed = entities.create({
+      entityType: "person",
+      canonicalName: "Hub Person",
+      crossProject: true,
+    });
+    const neighbor = entities.create({
+      entityType: "person",
+      canonicalName: "Spoke Person",
+      crossProject: true,
+    });
+    entities.addRelation(seed.id, neighbor.id, "colleague", { source: "test" });
+    seedLinkedKnowledge({
+      projectPath: PROJECT,
+      entityId: seed.id,
+      title: "Linked fact",
+      content: "Reachable only through the entity graph.",
+    });
+
+    // Default (includeKnowledge true) surfaces the linked knowledge.
+    expect(entities.graphExpand([seed.id]).knowledge.length).toBeGreaterThan(0);
+
+    // includeKnowledge:false drops knowledge entirely (the refs query is never
+    // issued); neighbor-entity expansion is unaffected.
+    const exp = entities.graphExpand([seed.id], { includeKnowledge: false });
+    expect(exp.knowledge).toEqual([]);
+    expect(exp.entities.some((e) => e.id === neighbor.id)).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -383,5 +412,67 @@ describe("searchRecall — entity-graph fan-in", () => {
         (r) => r.item.source === "knowledge" && r.item.item.logical_id === k,
       ),
     ).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unit tests — ltm.getManyByLogicalOffloaded (batch graph-knowledge hydration)
+// ---------------------------------------------------------------------------
+
+describe("ltm.getManyByLogicalOffloaded — batch logical-id hydration", () => {
+  const PROJECT = "/test/recall-graph/offload";
+
+  beforeEach(() => {
+    cleanup();
+    ensureProject(PROJECT);
+  });
+
+  test("hydrates current entries keyed by logical_id, resolving through a superseded version", async () => {
+    const a = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "decision",
+      title: "Alpha entry",
+      content: "alpha v1 body",
+    });
+    const b = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "decision",
+      title: "Bravo entry",
+      content: "bravo original body",
+    });
+    // Supersede A: appendVersion mints a fresh id, so the CURRENT row's id no
+    // longer equals the logical_id — the case `get(id)` would miss but keying by
+    // logical_id must still resolve.
+    ltm.update(a, { content: "alpha v2 updated body" });
+
+    const map = await ltm.getManyByLogicalOffloaded([a, b]);
+    expect(map.size).toBe(2);
+    // Keyed by the stable logical_id (a/b ARE logical_ids), not the version id.
+    expect(map.get(a)?.logical_id).toBe(a);
+    expect(map.get(a)?.id).not.toBe(a); // current version superseded v1
+    expect(map.get(a)?.content).toContain("v2"); // returns CURRENT content
+    expect(map.get(b)?.content).toContain("bravo");
+  });
+
+  test("absent logical_ids are dropped; empty input yields an empty map", async () => {
+    const live = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "decision",
+      title: "Live entry",
+      content: "present body",
+    });
+
+    const map = await ltm.getManyByLogicalOffloaded([
+      live,
+      "missing-logical-id",
+    ]);
+    expect(map.size).toBe(1);
+    expect(map.has(live)).toBe(true);
+    expect(map.has("missing-logical-id")).toBe(false);
+
+    expect((await ltm.getManyByLogicalOffloaded([])).size).toBe(0);
   });
 });
