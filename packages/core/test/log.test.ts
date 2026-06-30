@@ -107,6 +107,26 @@ describe("log stderr silencing (embedded/TUI mode)", () => {
     expect(sink.captureException).not.toHaveBeenCalled();
   });
 
+  it("shares the silence flag across SEPARATE core module instances (bundled-gateway safety)", async () => {
+    // The in-process gateway can be a second, independently-bundled copy of
+    // @loreai/core (its Node/CJS bundle inlines core). The plugin silences via
+    // its own copy; the gateway logs via its bundled copy. A module-level flag
+    // would not cross that boundary — so the flag must be process-global.
+    const first = await freshLog(undefined);
+    first.silenceStderr(true);
+
+    // A genuinely different module instance (as the gateway's bundled core is
+    // at runtime) must observe the flag set by the first instance.
+    vi.resetModules();
+    const second = await import("../src/log");
+    expect(second).not.toBe(first);
+    expect(second.isStderrSilenced()).toBe(true);
+
+    // ...and clearing it from the second instance is seen by the first.
+    second.silenceStderr(false);
+    expect(first.isStderrSilenced()).toBe(false);
+  });
+
   it("silenceStderr(false) restores stderr visibility", async () => {
     const log = await freshLog(undefined);
     log.silenceStderr(true);
