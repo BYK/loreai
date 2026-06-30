@@ -515,15 +515,21 @@ export function analyzeCacheTurn(
 
   // Compare with previous body if available
   if (analytics.lastRequestBody !== null) {
-    // lastRequestBody is stored RAW (with cache_control intact) for the warmer;
-    // normalize on read so the divergence comparison stays apples-to-apples.
-    // Byte-identical to the old path: both apply normalizeBodyForComparison
-    // exactly once to the same raw bytes (old: normalize-then-store; now:
-    // store-then-normalize) — so prevBody, and every value derived from it, is
-    // unchanged.
-    const prevBody = normalizeBodyForComparison(
-      decompressBody(analytics.lastRequestBody),
-    );
+    // We need the previous turn's NORMALIZED body for an apples-to-apples
+    // divergence comparison. That exact string was already computed last turn
+    // (it was that turn's `normalizedBody`), so reuse the memoized copy and
+    // skip a full re-normalization of the whole previous body. The memo is
+    // stored zstd-compressed and written together with `lastRequestBody` (see
+    // the write site below); `lastRequestBody` is assigned a non-null value in
+    // exactly one place, so whenever this guard passes the memo reflects the
+    // same body. The fallback branch covers callers/fixtures that built this
+    // analytics object without the optional memo field; `lastRequestBody`
+    // keeps the RAW (cache_control intact) body for the warmer, so
+    // normalize-on-read stays byte-identical to storing the normalized form
+    // directly.
+    const prevBody = analytics.lastNormalizedBody
+      ? decompressBody(analytics.lastNormalizedBody)
+      : normalizeBodyForComparison(decompressBody(analytics.lastRequestBody));
     const prevLength = prevBody.length;
     const currLength = normalizedBody.length;
 
@@ -624,6 +630,15 @@ export function analyzeCacheTurn(
   // length — it is only the divergence-ratio denominator (prefixMatchBytes is
   // measured on normalized bodies).
   analytics.lastRequestBody = compressBody(currentBody);
+  // Memoize the normalized form for next turn's divergence comparison. Stored
+  // compressed (these bodies compress ~99.9%, so the extra blob is a few
+  // hundred bytes) and written here alongside the raw body. This is the ONLY
+  // place `lastRequestBody` is assigned a non-null value, and the divergence
+  // reader above only consults `lastNormalizedBody` under the `!== null` guard,
+  // so the two never desync — the reset sites that set `lastRequestBody = null`
+  // simply skip the guard, and the stale memo (never read) is overwritten here
+  // on the next analyzed turn. No reset-site changes required.
+  analytics.lastNormalizedBody = compressBody(normalizedBody);
   analytics.lastRequestBodyLength = normalizedBody.length;
   analytics.lastCacheRead = cacheRead;
   analytics.lastCacheCreation = cacheCreation;

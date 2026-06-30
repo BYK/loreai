@@ -629,6 +629,134 @@ describe("analyzeCacheTurn", () => {
 });
 
 // ---------------------------------------------------------------------------
+// analyzeCacheTurn — normalized-body memoization (#1078)
+// ---------------------------------------------------------------------------
+
+describe("analyzeCacheTurn — normalized-body memoization", () => {
+  // A body that carries volatile tokens (cch + cache_control) so that
+  // normalizeBodyForComparison actually transforms it — otherwise the memo and
+  // a fresh normalize would be trivially equal even if the memo were ignored.
+  function turnBody(userText: string): string {
+    return JSON.stringify({
+      model: "opus",
+      max_tokens: 1000,
+      system: [
+        { type: "text", text: "host cch=deadbeef;" },
+        {
+          type: "text",
+          text: "stable ltm",
+          cache_control: { type: "ephemeral" },
+        },
+      ],
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: userText,
+              cache_control: { type: "ephemeral" },
+            },
+          ],
+        },
+      ],
+    });
+  }
+
+  test("stores the NORMALIZED body compressed, alongside the RAW body", () => {
+    const analytics = makeCacheAnalytics();
+    const body = turnBody("hello");
+
+    analyzeCacheTurn(analytics, body, makeUsage());
+
+    // Raw body retains cache_control for the warmer …
+    const rawStored = analytics.lastRequestBody;
+    if (!rawStored) throw new Error("lastRequestBody should be set");
+    expect(decompressBody(rawStored)).toBe(body);
+    // … while the memo holds exactly the normalized form (cache_control + cch
+    // stripped), i.e. what a re-normalization would have produced.
+    const memoStored = analytics.lastNormalizedBody;
+    if (!memoStored) throw new Error("lastNormalizedBody should be set");
+    expect(decompressBody(memoStored)).toBe(normalizeBodyForComparison(body));
+  });
+
+  test("memoized path is byte-identical to the decompress+normalize fallback", () => {
+    const body1 = turnBody("hello");
+    const body2 = turnBody("hello there, how are you today");
+
+    // Path A: normal flow — turn 2 reuses the memo from turn 1.
+    const a = makeCacheAnalytics();
+    analyzeCacheTurn(a, body1, makeUsage());
+    const withMemo = analyzeCacheTurn(a, body2, makeUsage());
+
+    // Path B: identical inputs, but drop the memo after turn 1 so turn 2 is
+    // forced down the legacy decompress(raw)+normalize fallback.
+    const b = makeCacheAnalytics();
+    analyzeCacheTurn(b, body1, makeUsage());
+    b.lastNormalizedBody = undefined;
+    const withFallback = analyzeCacheTurn(b, body2, makeUsage());
+
+    // Every divergence-derived field must match — the memo is a pure
+    // performance shortcut with no behavioral effect.
+    expect(withMemo.prefixMatchBytes).toBe(withFallback.prefixMatchBytes);
+    expect(withMemo.prefixMatchPercent).toBe(withFallback.prefixMatchPercent);
+    expect(withMemo.divergencePoint).toBe(withFallback.divergencePoint);
+    expect(withMemo.divergenceReason).toBe(withFallback.divergenceReason);
+    expect(a.lastRequestBodyLength).toBe(b.lastRequestBodyLength);
+  });
+
+  test("the memo actually drives the comparison (mutation guard)", () => {
+    // If the reader ignored lastNormalizedBody and always re-normalized the raw
+    // body, corrupting the memo would have no effect. Prove it is consulted: a
+    // corrupted memo makes an otherwise-identical turn report divergence.
+    const analytics = makeCacheAnalytics();
+    const body = turnBody("hello");
+
+    analyzeCacheTurn(analytics, body, makeUsage());
+    analytics.lastNormalizedBody = compressBody(
+      normalizeBodyForComparison(turnBody("a completely different message")),
+    );
+
+    const result = analyzeCacheTurn(analytics, body, makeUsage());
+
+    // Same raw body twice would normally be <identical>; the poisoned memo
+    // forces an early divergence instead.
+    expect(result.divergencePoint).not.toBe("<identical>");
+    expect(result.prefixMatchPercent).toBeLessThan(1);
+  });
+
+  test("a stale memo left after a reset is never consulted", () => {
+    // Reset-safety invariant: `lastRequestBody === null` is the guard, so a
+    // stale `lastNormalizedBody` left behind by an earlier turn must NOT leak
+    // into a later comparison. Simulate a mid-session cache reset that nulls the
+    // raw body but (adversarially) leaves a poisoned memo behind.
+    const analytics = makeCacheAnalytics();
+    analyzeCacheTurn(analytics, turnBody("first epoch"), makeUsage());
+
+    // Reset the raw body (what every reset site does) but keep a poisoned memo.
+    analytics.lastRequestBody = null;
+    analytics.lastNormalizedBody = compressBody(
+      normalizeBodyForComparison(turnBody("poison from a previous epoch")),
+    );
+
+    // Next turn: the null guard must skip comparison entirely (first-turn),
+    // never touching the stale memo, and re-establish fresh state.
+    const afterReset = analyzeCacheTurn(
+      analytics,
+      turnBody("second"),
+      makeUsage(),
+    );
+    expect(afterReset.divergencePoint).toBe("<first-turn>");
+
+    // The turn after that repeats the same body: it must be identical, proving
+    // the memo now in effect is the fresh one from `afterReset`, not the poison.
+    const repeat = analyzeCacheTurn(analytics, turnBody("second"), makeUsage());
+    expect(repeat.divergencePoint).toBe("<identical>");
+    expect(repeat.prefixMatchPercent).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // normalizeBodyForComparison
 // ---------------------------------------------------------------------------
 

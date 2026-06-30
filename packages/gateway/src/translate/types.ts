@@ -378,6 +378,15 @@ export type CacheTurnAnalysis = {
 export type CacheAnalytics = {
   /** Deflate-compressed serialized request body from the last turn. */
   lastRequestBody: Uint8Array | null;
+  /**
+   * zstd-compressed NORMALIZED form of `lastRequestBody`, memoized so the next
+   * turn's divergence comparison can skip re-running `normalizeBodyForComparison`
+   * over the whole previous body. Optional so callers/fixtures that build this
+   * object without it still type-check; when absent the reader falls back to
+   * decompress + normalize. Written together with `lastRequestBody`, which is
+   * assigned a non-null value in exactly one place, so it stays consistent
+   * under the non-null guard. */
+  lastNormalizedBody?: Uint8Array | null;
   /** Uncompressed byte length of lastRequestBody (for prefix match %). */
   lastRequestBodyLength: number;
   /** cache_read_input_tokens from last API response. */
