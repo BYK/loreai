@@ -174,29 +174,62 @@ export interface UpstreamRouteContext {
   ingressProtocol: string;
   /** The wire protocol actually used upstream after routing/translation. */
   effectiveProtocol: string;
+  /** Origin (`scheme://host[:port]`) of the ingress protocol's native upstream. */
+  ingressOrigin: string;
+  /** Origin of the destination actually used after routing/translation. */
+  effectiveOrigin: string;
+}
+
+/** Raw routing facts the forwarding path already computed, pre-derivation. */
+export interface UpstreamRouteFacts {
+  /** Raw `X-Lore-Upstream-URL` header value (truthy ⇒ explicit URL override). */
+  upstreamUrlHeader: string | null | undefined;
+  /** Raw `X-Lore-Provider` header value (truthy ⇒ explicit provider override). */
+  providerHeader: string | null | undefined;
+  /** The wire protocol the request arrived as (`req.protocol`). */
+  ingressProtocol: string;
+  /** The wire protocol actually used upstream after routing/translation. */
+  effectiveProtocol: string;
+  /** Base URL of the ingress protocol's native upstream (config default). */
+  ingressUpstreamBase: string;
+  /** Base URL of the destination actually used after routing/translation. */
+  effectiveUpstreamBase: string;
+}
+
+/**
+ * Parse a base URL to its origin (`scheme://host[:port]`). Falls back to the
+ * raw string when it is not a parseable URL — two distinct unparseable bases
+ * then still compare as "changed", which biases to the safe (uncompressed)
+ * branch.
+ */
+function originOf(base: string): string {
+  try {
+    return new URL(base).origin;
+  } catch {
+    return base;
+  }
 }
 
 /**
  * Build an {@link UpstreamRouteContext} from the raw routing facts the
  * forwarding path already computed.
  *
- * Centralizing the derivation here (the `!!` header coercions and the field
- * placement) keeps it pure and unit-testable: the call site forwards the four
- * values it already has instead of re-deriving booleans in an inline object
- * literal that no test can reach. See the `buildUpstreamRouteContext` tests for
- * the locked truth table.
+ * Centralizing the derivation here (the `!!` header coercions and the
+ * base-URL → origin parsing) keeps it pure and unit-testable: the call site
+ * forwards the values it already has instead of re-deriving them in an inline
+ * object literal that no test can reach. See the `buildUpstreamRouteContext`
+ * tests for the locked truth table.
  */
 export function buildUpstreamRouteContext(
-  upstreamUrlHeader: string | null | undefined,
-  providerHeader: string | null | undefined,
-  ingressProtocol: string,
-  effectiveProtocol: string,
+  facts: UpstreamRouteFacts,
 ): UpstreamRouteContext {
   return {
-    hasUpstreamUrlOverride: !!upstreamUrlHeader,
-    hasProviderOverride: !!providerHeader,
-    ingressProtocol,
-    effectiveProtocol,
+    hasUpstreamUrlOverride: !!facts.upstreamUrlHeader,
+    hasProviderOverride: !!facts.providerHeader,
+    ingressProtocol: facts.ingressProtocol,
+    effectiveProtocol: facts.effectiveProtocol,
+    ingressOrigin: originOf(facts.ingressUpstreamBase),
+    effectiveOrigin: originOf(facts.effectiveUpstreamBase),
   };
 }
 
@@ -214,28 +247,34 @@ export function buildUpstreamRouteContext(
  *   - an explicit `X-Lore-Provider` override (the plugin/user named the
  *     provider — this is how the real Codex path routes to openai-codex).
  *
- * When the gateway itself AUTO-translates the wire protocol with no explicit
- * destination (e.g. a bare Anthropic client whose model-prefix route resolves
- * to an OpenAI backend), the request is being sent to a backend family the
- * client never targeted, which may reject the encoding. In that case forward
- * uncompressed — an uncompressed body is accepted by every endpoint. (#1032
- * follow-up: scope re-compression so a gateway-translated route never replays
- * the client's encoding.)
+ * When the gateway itself AUTO-routes to a destination the client never
+ * targeted with no explicit override — either by translating the wire protocol
+ * (e.g. a bare Anthropic client whose model-prefix route resolves to an OpenAI
+ * backend) OR by re-routing to a different provider host on the same protocol
+ * (e.g. a bare OpenAI client whose `deepseek-*` model resolves to
+ * `api.deepseek.com`) — that backend may reject the encoding. In that case
+ * forward uncompressed; an uncompressed body is accepted by every endpoint.
  *
- * Note: the signal is wire-protocol translation, not provider identity. A
- * same-protocol re-route to a different concrete provider (e.g. an OpenAI-
- * protocol client whose model route resolves to another OpenAI-protocol
- * backend) is treated as a native passthrough and stays trusted. This is safe
- * today because the only client that compresses requests is Codex, which is
- * `openai-responses` in/out AND provider-tagged; if a future client compresses
- * over a same-protocol auto-route, this would need to also distrust on provider
- * change.
+ * The trust signal is therefore the DESTINATION: re-encode only when the
+ * upstream origin equals the ingress protocol's native upstream origin (a true
+ * native passthrough), or when the destination was explicitly chosen
+ * (`X-Lore-Upstream-URL` / `X-Lore-Provider`). The protocol-inequality term is
+ * kept as a belt-and-suspenders fallback for the (impossible-in-practice) case
+ * where an origin fails to parse. This also makes Vertex/Bedrock a non-issue:
+ * both are reachable only via the explicit `X-Lore-Provider` override, so they
+ * short-circuit to trusted and never reach the origin comparison.
+ *
+ * No live behavior change today: the only client that compresses requests is
+ * Codex, which is always provider-tagged → trusted before this check. This is
+ * the faithful completion of the "trust explicit overrides, distrust gateway
+ * auto-routing" design (#1032 follow-up).
  */
 export function mayReencodeUpstream(route: UpstreamRouteContext): boolean {
   const autoCrossRouted =
     !route.hasUpstreamUrlOverride &&
     !route.hasProviderOverride &&
-    route.effectiveProtocol !== route.ingressProtocol;
+    (route.effectiveProtocol !== route.ingressProtocol ||
+      route.effectiveOrigin !== route.ingressOrigin);
   return !autoCrossRouted;
 }
 
@@ -243,8 +282,9 @@ export function mayReencodeUpstream(route: UpstreamRouteContext): boolean {
  * Route-aware wrapper around {@link encodeUpstreamBody}: re-applies the
  * client's `Content-Encoding` only when {@link mayReencodeUpstream} permits it
  * for the resolved route; otherwise forwards the body uncompressed (always
- * safe). This is the single chokepoint every forwarding path calls so the
- * protocol-scoped re-encoding can never be bypassed at an individual call site.
+ * safe). Both forwarding call sites (the main upstream forward and the
+ * compaction passthrough) route through this single chokepoint so the
+ * destination-scoped re-encoding cannot be bypassed at an individual call site.
  */
 export function encodeUpstreamBodyForRoute(
   serializedBody: string,

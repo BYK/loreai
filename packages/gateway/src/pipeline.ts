@@ -3553,21 +3553,29 @@ async function forwardToUpstream(
   // cache analytics / the cache-warmer keep comparing uncompressed prefixes.
   //
   // Scope re-encoding to the destination the client targeted: only replay the
-  // encoding on a native passthrough (no protocol translation) or an explicit
-  // destination override (X-Lore-Upstream-URL / X-Lore-Provider). If the gateway
-  // auto-translated the wire protocol with no explicit destination, the upstream
-  // is a backend the client never targeted and may reject the encoding — forward
-  // uncompressed (always accepted). See mayReencodeUpstream for the rationale,
-  // including why the signal is protocol translation, not provider id (#1032).
+  // encoding on a native passthrough (the upstream origin equals the ingress
+  // protocol's native upstream) or an explicit destination override
+  // (X-Lore-Upstream-URL / X-Lore-Provider). If the gateway auto-routed to a
+  // different destination with no explicit override — by translating the wire
+  // protocol OR re-routing to a different provider host on the same protocol —
+  // the upstream is a backend the client never targeted and may reject the
+  // encoding, so forward uncompressed (always accepted). See mayReencodeUpstream
+  // for the rationale (#1032).
+  const ingressUpstreamBase =
+    req.protocol === "anthropic"
+      ? config.upstreamAnthropic
+      : config.upstreamOpenAI;
   const { body: upstreamBody, contentEncoding } = encodeUpstreamBodyForRoute(
     serializedBody,
     req.rawHeaders["content-encoding"],
-    buildUpstreamRouteContext(
-      headerUpstream,
-      providerID,
-      req.protocol,
+    buildUpstreamRouteContext({
+      upstreamUrlHeader: headerUpstream,
+      providerHeader: providerID,
+      ingressProtocol: req.protocol,
       effectiveProtocol,
-    ),
+      ingressUpstreamBase,
+      effectiveUpstreamBase,
+    }),
   );
   if (contentEncoding) headers["content-encoding"] = contentEncoding;
 
@@ -5816,12 +5824,14 @@ async function passthroughResponsesCompact(
   const { body: passthroughBody, contentEncoding } = encodeUpstreamBodyForRoute(
     bodyText,
     rawHeaders["content-encoding"],
-    buildUpstreamRouteContext(
-      undefined,
-      undefined,
-      "openai-responses",
-      "openai-responses",
-    ),
+    buildUpstreamRouteContext({
+      upstreamUrlHeader: undefined,
+      providerHeader: undefined,
+      ingressProtocol: "openai-responses",
+      effectiveProtocol: "openai-responses",
+      ingressUpstreamBase: config.upstreamOpenAI,
+      effectiveUpstreamBase: config.upstreamOpenAI,
+    }),
   );
   if (contentEncoding) headers["content-encoding"] = contentEncoding;
 

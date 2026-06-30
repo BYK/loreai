@@ -30,6 +30,9 @@
  */
 import * as https from "node:https";
 import * as http from "node:http";
+// Type-only import: erased at compile time, so it never pulls undici into the
+// Bun bundle (where undici is marked external and the Bun path is used instead).
+import type { Dispatcher } from "undici";
 
 type UndiciModule = typeof import("undici");
 type UndiciHandles = {
@@ -42,6 +45,26 @@ const isBun = typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
 
 /** Memoized undici fetch + shared timeout-disabled dispatcher (Node path only). */
 let undiciHandles: UndiciHandles | null = null;
+
+/**
+ * Test-only override for the upstream undici dispatcher (Node path).
+ *
+ * `upstreamFetch` passes an *explicit* `dispatcher` to undici's `fetch`, which
+ * overrides `setGlobalDispatcher` — so a `MockAgent` cannot intercept upstream
+ * calls via the global. This seam lets a test inject a `MockAgent` (or any
+ * dispatcher) so it can capture/assert the exact bytes and headers the gateway
+ * writes to the wire — fully in-process, with no real network, DNS, or TLS.
+ * Mirrors the `setUpstreamInterceptor` test seam in pipeline.ts. Pass `null` to
+ * restore the default timeout-disabled Agent. No effect under Bun.
+ */
+let dispatcherOverride: Dispatcher | null = null;
+
+/** Inject (or clear, with `null`) the upstream dispatcher. Tests only. */
+export function setUpstreamDispatcherForTest(
+  dispatcher: Dispatcher | null,
+): void {
+  dispatcherOverride = dispatcher;
+}
 
 /**
  * Lazily load undici and build a dispatcher with body/header timeouts disabled.
@@ -171,6 +194,9 @@ export async function upstreamFetch(
   const { fetch: undiciFetch, dispatcher } = await getUndici();
   return undiciFetch(
     input as Parameters<UndiciModule["fetch"]>[0],
-    { ...init, dispatcher } as Parameters<UndiciModule["fetch"]>[1],
+    {
+      ...init,
+      dispatcher: dispatcherOverride ?? dispatcher,
+    } as Parameters<UndiciModule["fetch"]>[1],
   ) as unknown as Promise<Response>;
 }
