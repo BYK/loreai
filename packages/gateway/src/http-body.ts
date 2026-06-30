@@ -177,24 +177,59 @@ export interface UpstreamRouteContext {
 }
 
 /**
+ * Build an {@link UpstreamRouteContext} from the raw routing facts the
+ * forwarding path already computed.
+ *
+ * Centralizing the derivation here (the `!!` header coercions and the field
+ * placement) keeps it pure and unit-testable: the call site forwards the four
+ * values it already has instead of re-deriving booleans in an inline object
+ * literal that no test can reach. See the `buildUpstreamRouteContext` tests for
+ * the locked truth table.
+ */
+export function buildUpstreamRouteContext(
+  upstreamUrlHeader: string | null | undefined,
+  providerHeader: string | null | undefined,
+  ingressProtocol: string,
+  effectiveProtocol: string,
+): UpstreamRouteContext {
+  return {
+    hasUpstreamUrlOverride: !!upstreamUrlHeader,
+    hasProviderOverride: !!providerHeader,
+    ingressProtocol,
+    effectiveProtocol,
+  };
+}
+
+/**
  * Decide whether the gateway may re-apply the client's request `Content-
  * Encoding` to the upstream request for this route.
  *
- * The client only compresses because it knows the provider IT targeted accepts
- * the encoding (e.g. Codex zstd → the ChatGPT codex backend). The gateway may
- * replay that encoding only when forwarding to a destination the client or user
- * actually chose:
- *   - a native passthrough (same wire protocol, no re-routing),
+ * The client only compresses because it knows the destination IT targeted
+ * accepts the encoding (e.g. Codex zstd → the ChatGPT codex backend). The
+ * gateway may replay that encoding only when it did NOT translate the wire
+ * protocol itself, or when the destination was explicitly chosen:
+ *   - a native passthrough (the upstream wire protocol equals the ingress
+ *     protocol — the gateway did not translate),
  *   - an explicit `X-Lore-Upstream-URL` override (the user owns the URL), or
  *   - an explicit `X-Lore-Provider` override (the plugin/user named the
  *     provider — this is how the real Codex path routes to openai-codex).
  *
  * When the gateway itself AUTO-translates the wire protocol with no explicit
  * destination (e.g. a bare Anthropic client whose model-prefix route resolves
- * to an OpenAI backend), the request is being sent to a provider family the
+ * to an OpenAI backend), the request is being sent to a backend family the
  * client never targeted, which may reject the encoding. In that case forward
  * uncompressed — an uncompressed body is accepted by every endpoint. (#1032
- * follow-up: scope re-compression to the same provider the client targeted.)
+ * follow-up: scope re-compression so a gateway-translated route never replays
+ * the client's encoding.)
+ *
+ * Note: the signal is wire-protocol translation, not provider identity. A
+ * same-protocol re-route to a different concrete provider (e.g. an OpenAI-
+ * protocol client whose model route resolves to another OpenAI-protocol
+ * backend) is treated as a native passthrough and stays trusted. This is safe
+ * today because the only client that compresses requests is Codex, which is
+ * `openai-responses` in/out AND provider-tagged; if a future client compresses
+ * over a same-protocol auto-route, this would need to also distrust on provider
+ * change.
  */
 export function mayReencodeUpstream(route: UpstreamRouteContext): boolean {
   const autoCrossRouted =
@@ -208,8 +243,8 @@ export function mayReencodeUpstream(route: UpstreamRouteContext): boolean {
  * Route-aware wrapper around {@link encodeUpstreamBody}: re-applies the
  * client's `Content-Encoding` only when {@link mayReencodeUpstream} permits it
  * for the resolved route; otherwise forwards the body uncompressed (always
- * safe). This is the single chokepoint the forwarding path calls so the
- * same-provider scoping can never be bypassed at an individual call site.
+ * safe). This is the single chokepoint every forwarding path calls so the
+ * protocol-scoped re-encoding can never be bypassed at an individual call site.
  */
 export function encodeUpstreamBodyForRoute(
   serializedBody: string,

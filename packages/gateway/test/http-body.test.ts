@@ -15,6 +15,7 @@ import {
   zstdDecompressSync,
 } from "node:zlib";
 import {
+  buildUpstreamRouteContext,
   compressBody,
   decodeRequestBody,
   decompressBody,
@@ -224,6 +225,66 @@ describe("mayReencodeUpstream", () => {
         effectiveProtocol: "openai",
       }),
     ).toBe(false);
+  });
+});
+
+describe("buildUpstreamRouteContext", () => {
+  test("derives hasUpstreamUrlOverride from header truthiness", () => {
+    expect(
+      buildUpstreamRouteContext("https://up.example", null, "a", "b")
+        .hasUpstreamUrlOverride,
+    ).toBe(true);
+    for (const empty of [null, undefined, ""]) {
+      expect(
+        buildUpstreamRouteContext(empty, null, "a", "b").hasUpstreamUrlOverride,
+      ).toBe(false);
+    }
+  });
+
+  test("derives hasProviderOverride from header truthiness", () => {
+    expect(
+      buildUpstreamRouteContext(null, "openai-codex", "a", "b")
+        .hasProviderOverride,
+    ).toBe(true);
+    for (const empty of [null, undefined, ""]) {
+      expect(
+        buildUpstreamRouteContext(null, empty, "a", "b").hasProviderOverride,
+      ).toBe(false);
+    }
+  });
+
+  test("maps ingress/effective protocols to the right fields (not swapped)", () => {
+    // Distinct sentinel values catch an ingress/effective swap — the exact
+    // mis-wiring that would silently disable the auto-cross-route guard.
+    const ctx = buildUpstreamRouteContext(null, null, "INGRESS", "EFFECTIVE");
+    expect(ctx.ingressProtocol).toBe("INGRESS");
+    expect(ctx.effectiveProtocol).toBe("EFFECTIVE");
+  });
+
+  test("composes with mayReencodeUpstream into the full route truth table", () => {
+    // Lock the raw-inputs → decision path end to end (the wiring the call site
+    // depends on), not just the boolean already-derived context.
+    const decide = (
+      url: string | null,
+      provider: string | null,
+      ingress: string,
+      effective: string,
+    ) =>
+      mayReencodeUpstream(
+        buildUpstreamRouteContext(url, provider, ingress, effective),
+      );
+    // Auto cross-route (no overrides, protocol translated) → distrust.
+    expect(decide(null, null, "anthropic", "openai")).toBe(false);
+    // Native passthrough (no overrides, same protocol) → trust.
+    expect(decide(null, null, "openai-responses", "openai-responses")).toBe(
+      true,
+    );
+    // Explicit URL override, even when translated → trust.
+    expect(decide("https://up.example", null, "anthropic", "openai")).toBe(
+      true,
+    );
+    // Explicit provider override (real Codex path), even translated → trust.
+    expect(decide(null, "openai-codex", "anthropic", "openai")).toBe(true);
   });
 });
 
