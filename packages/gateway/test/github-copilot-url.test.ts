@@ -187,6 +187,16 @@ describe("buildOpenAIChatCompletionsUrl", () => {
     );
   });
 
+  test("Google Gemini host uses the /v1beta/openai path (issue #1070)", () => {
+    expect(
+      buildOpenAIChatCompletionsUrl(
+        "https://generativelanguage.googleapis.com",
+      ),
+    ).toBe(
+      "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    );
+  });
+
   test("standard provider keeps the /v1 segment", () => {
     expect(buildOpenAIChatCompletionsUrl("https://api.openai.com")).toBe(
       "https://api.openai.com/v1/chat/completions",

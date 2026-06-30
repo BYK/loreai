@@ -474,39 +474,56 @@ function buildOpenAIStreamResponse(resp: GatewayResponse): Response {
 // ---------------------------------------------------------------------------
 
 /**
- * Hosts whose OpenAI-compatible Chat Completions endpoint is served WITHOUT the
- * conventional `/v1` path segment. GitHub Copilot serves chat completions at
- * `https://api.githubcopilot.com/chat/completions`; prepending `/v1` yields
- * `404 page not found` (issue #1052). Keyed by hostname so it holds regardless
- * of which routing tier produced the base URL.
+ * Default Chat Completions path appended to a bare provider origin. Most
+ * OpenAI-compatible providers serve at `<base>/v1/chat/completions`.
+ */
+const DEFAULT_OPENAI_CHAT_COMPLETIONS_PATH = "/v1/chat/completions";
+
+/**
+ * Hosts whose OpenAI-compatible Chat Completions endpoint is NOT served at the
+ * conventional `<base>/v1/chat/completions`. Maps hostname → the exact path the
+ * gateway must append to the provider origin instead:
+ *
+ *  - GitHub Copilot omits the `/v1` segment entirely (`/chat/completions`);
+ *    prepending `/v1` yields `404 page not found` (issue #1052).
+ *  - Google's Gemini OpenAI-compatibility layer serves under
+ *    `/v1beta/openai/chat/completions`; `/v1/chat/completions` 404s (issue
+ *    #1070).
+ *
+ * Keyed by hostname so the override holds regardless of which routing tier
+ * produced the base URL.
  *
  * Foreground requests that come through the fetch interceptor forward verbatim
- * to the client's original endpoint (see `verbatimUpstreamUrl`); this allowlist
- * covers the paths the gateway must RECONSTRUCT from scratch — background worker
- * requests (which have no original request) and any provider configured via
- * `LORE_UPSTREAM_<PROVIDER>` with no preserved endpoint path.
+ * to the client's original endpoint (see `verbatimUpstreamUrl`); this map covers
+ * the paths the gateway must RECONSTRUCT from scratch — background worker
+ * requests (which have no original request to forward) and any provider invoked
+ * purely via its `X-Lore-Provider` route with no preserved endpoint path.
  */
-const OPENAI_ROOT_PATH_HOSTS: ReadonlySet<string> = new Set([
-  "api.githubcopilot.com",
-]);
+const OPENAI_HOST_CHAT_COMPLETIONS_PATHS: ReadonlyMap<string, string> = new Map(
+  [
+    ["api.githubcopilot.com", "/chat/completions"],
+    ["generativelanguage.googleapis.com", "/v1beta/openai/chat/completions"],
+  ],
+);
 
 /**
  * Build the OpenAI Chat Completions upstream URL for an upstream base.
  *
  * Most OpenAI-compatible providers serve at `<base>/v1/chat/completions`, so the
  * route tables store a bare origin and the gateway appends `/v1/...`. Hosts in
- * `OPENAI_ROOT_PATH_HOSTS` omit the `/v1` segment. Falls back to the `/v1` form
- * when `base` cannot be parsed as a URL.
+ * `OPENAI_HOST_CHAT_COMPLETIONS_PATHS` use a different endpoint path (e.g. no
+ * `/v1` segment, or a `/v1beta/openai/...` prefix). Falls back to the default
+ * `/v1` form when `base` cannot be parsed as a URL.
  */
 export function buildOpenAIChatCompletionsUrl(base: string): string {
-  let hostname: string | null = null;
+  let path = DEFAULT_OPENAI_CHAT_COMPLETIONS_PATH;
   try {
-    hostname = new URL(base).hostname;
+    const hostname = new URL(base).hostname;
+    path = OPENAI_HOST_CHAT_COMPLETIONS_PATHS.get(hostname) ?? path;
   } catch {
-    hostname = null;
+    // Unparseable base (e.g. a bare placeholder) — keep the default `/v1` path.
   }
-  const prefix = hostname && OPENAI_ROOT_PATH_HOSTS.has(hostname) ? "" : "/v1";
-  return `${base}${prefix}/chat/completions`;
+  return `${base}${path}`;
 }
 
 export function buildOpenAIUpstreamRequest(

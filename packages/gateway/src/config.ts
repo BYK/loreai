@@ -495,10 +495,11 @@ export type ProviderRoute = {
  *
  * URLs must NOT include `/v1` — the gateway appends `/v1/messages`,
  * `/v1/chat/completions`, or `/v1/responses` itself. The exception is providers
- * whose API omits the `/v1` segment (GitHub Copilot serves chat completions at
- * `/chat/completions`, issue #1052): foreground requests forward verbatim to the
- * client's original endpoint (see `verbatimUpstreamUrl`), and reconstructed
- * paths (background workers) are handled host-aware by
+ * whose Chat Completions API is served at a non-`/v1` path (GitHub Copilot at
+ * `/chat/completions`, issue #1052; Google Gemini's OpenAI layer at
+ * `/v1beta/openai/chat/completions`, issue #1070): foreground requests forward
+ * verbatim to the client's original endpoint (see `verbatimUpstreamUrl`), and
+ * reconstructed paths (background workers) are handled host-aware by
  * `buildOpenAIChatCompletionsUrl` in `translate/openai.ts`.
  *
  * Data sourced from models.dev provider database (https://models.dev/providers).
