@@ -9,9 +9,11 @@
  * upstream.
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { zstdCompressSync } from "node:zlib";
+import { createServer, type Server } from "node:http";
+import { zstdCompressSync, zstdDecompressSync } from "node:zlib";
 import type { Harness } from "./helpers/harness";
 import { createHarness } from "./helpers/harness";
+import { setUpstreamInterceptor } from "../src/pipeline";
 import {
   makeConversationFixtures,
   STANDARD_TOOLS,
@@ -119,5 +121,83 @@ describe("zstd-compressed request bodies (issue #1032)", () => {
     const upstream = harness.upstreamBodies();
     expect(upstream.length).toBe(1);
     expect(upstream[0]).toContain(marker);
+  });
+
+  it("re-compresses the transformed body with the client's Content-Encoding before forwarding upstream", async () => {
+    // The replay interceptor short-circuits before `makeReal()`, so it never
+    // exercises the bytes actually written to the wire. Stand up a real mock
+    // upstream, route the gateway at it via `x-lore-upstream-url`, and override
+    // the interceptor to genuinely call `makeReal()` — then inspect what the
+    // upstream received: zstd-compressed bytes plus a matching
+    // `content-encoding` header (NOT the uncompressed JSON). This is the guard
+    // for the re-compression wiring in `forwardToUpstream`.
+    const marker = "recompress-upstream-marker-7f3a";
+    let captured: { encoding: string | undefined; raw: Buffer } | undefined;
+    const upstream: Server = await new Promise((resolve) => {
+      const s = createServer((r, res) => {
+        const chunks: Buffer[] = [];
+        r.on("data", (c: Buffer) => chunks.push(c));
+        r.on("end", () => {
+          captured = {
+            encoding: r.headers["content-encoding"] as string | undefined,
+            raw: Buffer.concat(chunks),
+          };
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(
+            JSON.stringify({
+              id: "msg_recompress",
+              type: "message",
+              role: "assistant",
+              model: DEFAULT_MODEL,
+              content: [{ type: "text", text: "ok" }],
+              stop_reason: "end_turn",
+              usage: { input_tokens: 1, output_tokens: 1 },
+            }),
+          );
+        });
+      });
+      s.listen(0, () => resolve(s));
+    });
+    const upstreamPort = (upstream.address() as { port: number }).port;
+
+    harness = await createHarness({
+      fixtures: makeConversationFixtures([
+        { userMessage: marker, assistantText: "ok" },
+      ]),
+    });
+    // Replace the harness replay interceptor with one that actually forwards to
+    // the (mock) upstream, so the real `upstreamFetch(body)` path runs.
+    setUpstreamInterceptor((_body, _model, _streaming, makeReal) => makeReal());
+
+    const compressed = zstdCompressSync(
+      Buffer.from(JSON.stringify(anthropicBody(marker))),
+    );
+    try {
+      await fetch(`${harness.baseURL}/v1/messages`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-encoding": "zstd",
+          "x-api-key": "test-key",
+          "anthropic-version": "2023-06-01",
+          "x-lore-project": process.cwd(),
+          "x-lore-upstream-url": `http://127.0.0.1:${upstreamPort}`,
+        },
+        body: compressed,
+      });
+
+      expect(captured).toBeDefined();
+      const cap = captured as { encoding: string | undefined; raw: Buffer };
+      // Gateway re-applied the client's zstd encoding to the upstream request.
+      expect(cap.encoding).toBe("zstd");
+      // The upstream body is genuinely zstd (decodes back to the transformed
+      // request containing the marker) — not the uncompressed JSON string.
+      const decoded = zstdDecompressSync(cap.raw).toString("utf8");
+      expect(decoded).toContain(marker);
+      // Belt-and-suspenders: the raw bytes are NOT plain JSON.
+      expect(() => JSON.parse(cap.raw.toString("utf8"))).toThrow();
+    } finally {
+      upstream.close();
+    }
   });
 });
