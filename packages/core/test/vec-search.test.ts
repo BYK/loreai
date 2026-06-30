@@ -9,7 +9,11 @@ import {
 } from "vitest";
 import { Database } from "#db/driver";
 import { close, db, ensureProject, withTransaction } from "../src/db";
-import { isVecAvailable, vec0KnnSmokeOk } from "../src/db/vec";
+import {
+  isVecAvailable,
+  loadVecForConnection,
+  vec0KnnSmokeOk,
+} from "../src/db/vec";
 import * as log from "../src/log";
 import {
   toBlob,
@@ -157,6 +161,40 @@ describe("vec0 KNN smoke guard (vec0KnnSmokeOk)", () => {
       expect(vec0KnnSmokeOk(raw)).toBe(false);
     } finally {
       raw.close();
+    }
+  });
+});
+
+// Worker readers load sqlite-vec on their OWN connection via
+// `loadVecForConnection` (see db/reader.ts) — a path the main-connection tests
+// never exercise (the gap tracked in #1033). It must reach the same verdict as
+// the main loader: load + KNN smoke both pass on a capable runtime, JS fallback
+// otherwise. Here it runs against a throwaway in-memory connection.
+describe("loadVecForConnection (worker reader path)", () => {
+  test("loads + smoke-passes iff the runtime is vec-capable", () => {
+    ensureProject(PROJECT); // (re)open the main connection so isVecAvailable() is current
+    const raw = new Database(":memory:");
+    try {
+      // A worker reader must reach the SAME verdict as the main loader: the
+      // per-connection load and the vec0 KNN smoke both succeed (true) on a
+      // capable runtime, and route to the JS fallback (false) on one without
+      // the extension.
+      expect(loadVecForConnection(raw)).toBe(isVecAvailable());
+    } finally {
+      raw.close();
+    }
+  });
+
+  test("honours the LORE_DISABLE_VEC kill-switch", () => {
+    const prev = process.env.LORE_DISABLE_VEC;
+    process.env.LORE_DISABLE_VEC = "1";
+    const raw = new Database(":memory:");
+    try {
+      expect(loadVecForConnection(raw)).toBe(false);
+    } finally {
+      raw.close();
+      if (prev === undefined) delete process.env.LORE_DISABLE_VEC;
+      else process.env.LORE_DISABLE_VEC = prev;
     }
   });
 });
