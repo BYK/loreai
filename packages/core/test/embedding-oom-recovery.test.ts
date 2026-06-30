@@ -100,7 +100,11 @@ describe("embedding OOM recovery (worker-mock)", () => {
   });
 
   it("OOM exit lowers the cap ×0.7, persists it, respawns, and re-submits the in-flight request at the lowered cap", async () => {
-    _persistEmbedCap(8192); // fresh provider starts at the model max
+    // freeMemBytes=0 → reconcileEmbedCap trusts this cap as-is regardless of
+    // host free memory, so the provider deterministically starts at the model
+    // max (otherwise a freemem swing under parallel CI load reconciles down to
+    // the memory-model cap and this test flakes).
+    _persistEmbedCap(8192, 0);
     const fakes = installFakeWorkers();
 
     const promise = embed(["hello world"], "query");
@@ -135,7 +139,9 @@ describe("embedding OOM recovery (worker-mock)", () => {
   });
 
   it("OOM at the floor latches FTS-only and rejects the pending request (no respawn)", async () => {
-    _persistEmbedCap(MIN_EMBED_TOKENS); // fresh provider starts at the floor
+    // freeMemBytes=0 → trusted as-is (see the model-max test), so the provider
+    // deterministically starts at the floor regardless of host free memory.
+    _persistEmbedCap(MIN_EMBED_TOKENS, 0);
     const fakes = installFakeWorkers();
 
     const result = settle(embed(["hello world"], "query"));
@@ -155,7 +161,7 @@ describe("embedding OOM recovery (worker-mock)", () => {
   });
 
   it("rejects pending requests when the respawn itself fails synchronously", async () => {
-    _persistEmbedCap(8192);
+    _persistEmbedCap(8192, 0);
     let calls = 0;
     const fakes: FakeWorker[] = [];
     _setTestWorkerFactory(() => {
@@ -182,7 +188,7 @@ describe("embedding OOM recovery (worker-mock)", () => {
   });
 
   it("descends the full backoff ladder to the floor across repeated OOMs, then latches", async () => {
-    _persistEmbedCap(8192);
+    _persistEmbedCap(8192, 0);
     const fakes = installFakeWorkers();
 
     const result = settle(embed(["hello world"], "query"));

@@ -141,9 +141,19 @@ function computeInitialEmbedCap(): number {
   );
 }
 
-/** For tests: persist a learned embedding cap (kv_meta round-trip). */
-export function _persistEmbedCap(cap: number): void {
-  persistEmbedCap(cap);
+/**
+ * For tests: persist a learned embedding cap (kv_meta round-trip).
+ *
+ * `freeMemBytes` defaults to the live `freemem()`. Tests that need a
+ * deterministic start cap pass `0`: `reconcileEmbedCap` treats a non-positive
+ * learn-time baseline as ratio = 1, so the persisted cap is always trusted
+ * as-is — independent of how much free memory the host happens to have. Without
+ * this, a host whose free memory swings >25% between persist and provider
+ * construction (e.g. a CI box running the full suite in parallel) reconciles to
+ * the freemem-derived model cap instead, making the start cap non-deterministic.
+ */
+export function _persistEmbedCap(cap: number, freeMemBytes?: number): void {
+  persistEmbedCap(cap, freeMemBytes);
 }
 
 /** For tests: read the persisted embedding cap (or null when absent/corrupt). */
