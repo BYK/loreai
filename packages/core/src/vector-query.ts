@@ -98,8 +98,19 @@ export const MAX_TEMPORAL_VECTOR_ROWS = 4000;
  */
 export const VEC0_FILTER_OVERFETCH = 4;
 
+/**
+ * sqlite-vec's hard ceiling on a KNN `k` (`SQLITE_VEC_VEC0_K_MAX`): a `MATCH …
+ * AND k = N` with N > 4096 errors. Every vec0 `k` we bind is clamped to this.
+ */
+export const VEC0_MAX_K = 4096;
+
+/** Clamp a desired KNN candidate count to {@link VEC0_MAX_K}. */
+function vecK(n: number): number {
+  return Math.min(n, VEC0_MAX_K);
+}
+
 function overfetchK(limit: number): number {
-  return Math.max(limit * VEC0_FILTER_OVERFETCH, limit + 50);
+  return vecK(Math.max(limit * VEC0_FILTER_OVERFETCH, limit + 50));
 }
 
 // ---------------------------------------------------------------------------
@@ -239,19 +250,27 @@ function runKnowledge(
   if (readMode === "vec0") {
     // DiskANN-free FLAT vec0: exact KNN over the whole corpus (no recency cap).
     // Post-filter confidence/category (mutable / per-version) by joining the
-    // current-version view; over-fetch so attrition leaves >= limit survivors.
-    let sql =
-      "WITH knn AS (SELECT id, distance FROM knowledge_vec WHERE embedding MATCH ? AND k = ?) " +
-      "SELECT knn.id AS id, 1 - knn.distance AS similarity " +
-      "FROM knn JOIN knowledge_current c ON c.id = knn.id WHERE c.confidence > 0.2";
-    const params: unknown[] = [toBlob(queryEmbedding), overfetchK(limit)];
-    if (excludeCategories?.length) {
-      sql += ` AND c.category NOT IN (${excludeCategories.map(() => "?").join(",")})`;
-      params.push(...excludeCategories);
-    }
-    sql += " ORDER BY knn.distance LIMIT ?";
-    params.push(limit);
-    return conn.query(sql).all(...params) as VectorHit[];
+    // current-version view; over-fetch so attrition leaves >= limit survivors,
+    // and widen to a full scan if that still under-fills (blob-mode parity).
+    const run = (k: number): VectorHit[] => {
+      let sql =
+        "WITH knn AS (SELECT id, distance FROM knowledge_vec WHERE embedding MATCH ? AND k = ?) " +
+        "SELECT knn.id AS id, 1 - knn.distance AS similarity " +
+        "FROM knn JOIN knowledge_current c ON c.id = knn.id WHERE c.confidence > 0.2";
+      const params: unknown[] = [toBlob(queryEmbedding), k];
+      if (excludeCategories?.length) {
+        sql += ` AND c.category NOT IN (${excludeCategories.map(() => "?").join(",")})`;
+        params.push(...excludeCategories);
+      }
+      sql += " ORDER BY knn.distance LIMIT ?";
+      params.push(limit);
+      return conn.query(sql).all(...params) as VectorHit[];
+    };
+    const k0 = overfetchK(limit);
+    const hits = run(k0);
+    // Post-filter attrition can leave < limit even when more valid rows exist
+    // deeper; widen to the max KNN window (blob-mode parity, capped at 4096).
+    return hits.length >= limit || k0 >= VEC0_MAX_K ? hits : run(VEC0_MAX_K);
   }
   assertBlobReadMode(readMode);
   if (readMode === "blob-native") {
@@ -303,7 +322,7 @@ function runEntities(
       .query(
         "SELECT id, 1 - distance AS similarity FROM entity_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance",
       )
-      .all(toBlob(queryEmbedding), limit) as VectorHit[];
+      .all(toBlob(queryEmbedding), vecK(limit)) as VectorHit[];
   }
   assertBlobReadMode(readMode);
   if (readMode === "blob-native") {
@@ -339,15 +358,20 @@ function runDistillations(
   if (readMode === "degraded") return [];
   if (readMode === "vec0") {
     // `archived` flips on meta-distillation (mutable) → post-filter via join,
-    // over-fetching so attrition leaves >= limit non-archived survivors.
-    return conn
-      .query(
-        "WITH knn AS (SELECT id, distance FROM distillation_vec WHERE embedding MATCH ? AND k = ?) " +
-          "SELECT knn.id AS id, 1 - knn.distance AS similarity " +
-          "FROM knn JOIN distillations d ON d.id = knn.id WHERE d.archived = 0 " +
-          "ORDER BY knn.distance LIMIT ?",
-      )
-      .all(toBlob(queryEmbedding), overfetchK(limit), limit) as VectorHit[];
+    // over-fetching so attrition leaves >= limit non-archived survivors, and
+    // widening to a full scan if that still under-fills (blob-mode parity).
+    const run = (k: number): VectorHit[] =>
+      conn
+        .query(
+          "WITH knn AS (SELECT id, distance FROM distillation_vec WHERE embedding MATCH ? AND k = ?) " +
+            "SELECT knn.id AS id, 1 - knn.distance AS similarity " +
+            "FROM knn JOIN distillations d ON d.id = knn.id WHERE d.archived = 0 " +
+            "ORDER BY knn.distance LIMIT ?",
+        )
+        .all(toBlob(queryEmbedding), k, limit) as VectorHit[];
+    const k0 = overfetchK(limit);
+    const hits = run(k0);
+    return hits.length >= limit || k0 >= VEC0_MAX_K ? hits : run(VEC0_MAX_K);
   }
   assertBlobReadMode(readMode);
   if (readMode === "blob-native") {
@@ -393,7 +417,11 @@ function runAllDistillations(
       .query(
         "SELECT id, session_id, 1 - distance AS similarity FROM distillation_vec WHERE embedding MATCH ? AND k = ? AND project_id = ? ORDER BY distance",
       )
-      .all(toBlob(queryEmbedding), limit, projectId) as DistillationVectorHit[];
+      .all(
+        toBlob(queryEmbedding),
+        vecK(limit),
+        projectId,
+      ) as DistillationVectorHit[];
   }
   assertBlobReadMode(readMode);
   if (readMode === "blob-native") {
@@ -457,8 +485,8 @@ function runTemporal(
       ? "SELECT message_id AS id, 1 - distance AS similarity FROM temporal_vec WHERE embedding MATCH ? AND k = ? AND project_id = ? AND session_id = ? ORDER BY distance"
       : "SELECT message_id AS id, 1 - distance AS similarity FROM temporal_vec WHERE embedding MATCH ? AND k = ? AND project_id = ? ORDER BY distance";
     const vparams: unknown[] = sessionId
-      ? [toBlob(queryEmbedding), limit, projectId, sessionId]
-      : [toBlob(queryEmbedding), limit, projectId];
+      ? [toBlob(queryEmbedding), vecK(limit), projectId, sessionId]
+      : [toBlob(queryEmbedding), vecK(limit), projectId];
     return conn.query(vsql).all(...vparams) as VectorHit[];
   }
   assertBlobReadMode(readMode);

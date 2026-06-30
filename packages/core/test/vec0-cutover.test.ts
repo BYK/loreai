@@ -16,6 +16,7 @@ import {
   copyBlobsToVec0,
   deleteEmbeddings,
   dropEmbeddingColumn,
+  embeddingByIdSource,
   embeddingColumnExists,
   ensureVec0Store,
   gcVec0DanglingRows,
@@ -26,6 +27,7 @@ import {
   setStorageMode,
   storeEmbedding,
 } from "../src/db/vec-store";
+import { maybeCutoverToVec0 } from "../src/embedding";
 import * as ltm from "../src/ltm";
 import {
   fromBlob,
@@ -226,20 +228,29 @@ describeVec("blob → vec0 cutover", () => {
       .run(toBlob(v(0, 0, 1, 0)));
   }
 
-  /** Mirror maybeCutoverToVec0() using the exported helpers. */
+  const TABLES = [
+    "knowledge",
+    "entities",
+    "distillations",
+    "temporal",
+  ] as const;
+
+  /** Mirror maybeCutoverToVec0() at the test dimension: flip BEFORE drop, then
+   *  reclaim — so mode==="blob" never coexists with a dropped column. */
   function runCutover(): void {
-    ensureVec0Store(db(), DIM);
-    for (const table of [
-      "knowledge",
-      "entities",
-      "distillations",
-      "temporal",
-    ] as const) {
-      if (!embeddingColumnExists(db(), table)) continue;
-      copyBlobsToVec0(db(), table);
-      dropEmbeddingColumn(db(), table);
+    if (readStorageMode(db()) === "blob") {
+      ensureVec0Store(db(), DIM);
+      for (const table of TABLES) {
+        if (embeddingColumnExists(db(), table)) copyBlobsToVec0(db(), table);
+      }
+      setStorageMode(db(), "vec0");
     }
-    setStorageMode(db(), "vec0");
+    if (readStorageMode(db()) === "vec0") {
+      for (const table of TABLES) {
+        if (embeddingColumnExists(db(), table))
+          dropEmbeddingColumn(db(), table);
+      }
+    }
   }
 
   test("relocates blobs, drops base columns, flips the mode, and reads from vec0", () => {
@@ -454,6 +465,136 @@ describeVec("delete maintenance + GC", () => {
         }
       ).n,
     ).toBe(0);
+  });
+});
+
+describeVec("maybeCutoverToVec0 (real orchestration, config dim = 768)", () => {
+  const TABLES = [
+    "knowledge",
+    "entities",
+    "distillations",
+    "temporal",
+  ] as const;
+  // The real function uses the configured embedding dimension (768 in tests),
+  // so seed blobs at that width.
+  function v768(lead: number): Float32Array {
+    const a = new Float32Array(768);
+    a[lead] = 1; // already unit-norm
+    return a;
+  }
+
+  test("full cutover: flips mode, drops every column, populates vec0; idempotent", () => {
+    insKnowledge("k1");
+    insTemporal("t1", "s", 1);
+    db()
+      .query("UPDATE knowledge SET embedding = ? WHERE id='k1'")
+      .run(toBlob(v768(0)));
+    db()
+      .query("UPDATE temporal_messages SET embedding = ? WHERE id='t1'")
+      .run(toBlob(v768(1)));
+    expect(readStorageMode(db())).toBe("blob");
+
+    maybeCutoverToVec0();
+
+    expect(readStorageMode(db())).toBe("vec0");
+    for (const t of TABLES) expect(embeddingColumnExists(db(), t)).toBe(false);
+    expect(
+      (
+        db().query("SELECT COUNT(*) n FROM knowledge_vec").get() as {
+          n: number;
+        }
+      ).n,
+    ).toBe(1);
+    // idempotent re-run is a no-op (mode already vec0, columns already gone)
+    expect(() => maybeCutoverToVec0()).not.toThrow();
+    expect(readStorageMode(db())).toBe("vec0");
+  });
+
+  test("B1: resumes a crash mid-reclaim (mode=vec0, only some columns dropped)", () => {
+    // Simulate the post-flip / partial-drop state a crash can leave behind.
+    ensureVec0Store(db(), 768);
+    setStorageMode(db(), "vec0");
+    dropEmbeddingColumn(db(), "knowledge"); // knowledge dropped; others remain
+    expect(embeddingColumnExists(db(), "entities")).toBe(true);
+
+    maybeCutoverToVec0(); // reclaim finishes the remaining drops
+
+    expect(readStorageMode(db())).toBe("vec0");
+    for (const t of TABLES) expect(embeddingColumnExists(db(), t)).toBe(false);
+  });
+});
+
+describeVec("post-filter over-fetch widening (S1)", () => {
+  test("distillations: returns `limit` non-archived even when nearer rows are all archived", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    // 60 archived rows nearest the query (beyond the initial over-fetch window
+    // of overfetchK(3)=53), and 3 non-archived rows slightly farther. The first
+    // KNN window is all-archived → 0 survivors → must widen to a full scan.
+    for (let i = 0; i < 60; i++) {
+      insDistillation(`arch${i}`, "s", 1);
+      storeEmbedding(db(), "distillations", `arch${i}`, v(1, 0, 0, 0));
+    }
+    for (let i = 0; i < 3; i++) {
+      insDistillation(`live${i}`, "s", 0);
+      storeEmbedding(db(), "distillations", `live${i}`, v(0.9, 0.1, 0, 0));
+    }
+    const hits = runVectorQuery(db(), "vec0", v(1, 0, 0, 0), {
+      kind: "distillations",
+      limit: 3,
+    }) as VectorHit[];
+    expect(hits.length).toBe(3);
+    expect(hits.every((h) => h.id.startsWith("live"))).toBe(true);
+  });
+});
+
+describeVec("by-id vector point reads in vec0 mode (S2)", () => {
+  test("embeddingByIdSource reads vectors (and the distillation session_id aux) back from vec0", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insKnowledge("k1");
+    insDistillation("d1", "sess-A", 0);
+    db()
+      .query(
+        "INSERT INTO entities (id, project_id, entity_type, canonical_name, cross_project, created_at, updated_at) VALUES ('e1', ?, 'tool', 'E', 0, ?, ?)",
+      )
+      .run(pid, Date.now(), Date.now());
+    storeEmbedding(db(), "knowledge", "k1", v(1, 0, 0, 0));
+    storeEmbedding(db(), "entities", "e1", v(0, 1, 0, 0));
+    storeEmbedding(db(), "distillations", "d1", v(0, 0, 1, 0));
+
+    // knowledge (mirrors the ltm.ts by-id reads, source view knowledge_current)
+    const ks = embeddingByIdSource("knowledge", "vec0", "knowledge_current");
+    const krow = db()
+      .query(
+        `SELECT id, embedding FROM ${ks.table} WHERE id IN ('k1')${ks.presenceFilter}`,
+      )
+      .get() as { embedding: Uint8Array };
+    expect(Array.from(fromBlob(krow.embedding))).toEqual(
+      Array.from(v(1, 0, 0, 0)),
+    );
+
+    // entities (mirrors entities.ts dedup)
+    const es = embeddingByIdSource("entities", "vec0", "entities");
+    expect(
+      db()
+        .query(
+          `SELECT id FROM ${es.table} WHERE id IN ('e1')${es.presenceFilter}`,
+        )
+        .all().length,
+    ).toBe(1);
+
+    // distillations WITH session_id aux (mirrors pattern-echo.ts)
+    const ds = embeddingByIdSource("distillations", "vec0", "distillations");
+    const drow = db()
+      .query(
+        `SELECT id, session_id, embedding FROM ${ds.table} WHERE id IN ('d1')${ds.presenceFilter}`,
+      )
+      .get() as { session_id: string; embedding: Uint8Array };
+    expect(drow.session_id).toBe("sess-A");
+    expect(Array.from(fromBlob(drow.embedding))).toEqual(
+      Array.from(v(0, 0, 1, 0)),
+    );
   });
 });
 

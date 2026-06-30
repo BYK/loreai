@@ -1625,28 +1625,49 @@ const EMBEDDING_TABLES: readonly EmbeddingTable[] = [
  * column — the v55 boot-loop lesson). The storage mode flips LAST, only once
  * every table's blobs have been relocated and dropped.
  */
-function maybeCutoverToVec0(): void {
+export function maybeCutoverToVec0(): void {
   if (!isVecAvailable()) return;
-  if (readStorageMode(db()) !== "blob") return;
 
-  const dim = config().search.embeddings.dimensions;
-  ensureVec0Store(db(), dim);
-
-  for (const table of EMBEDDING_TABLES) {
-    if (!embeddingColumnExists(db(), table)) continue; // already migrated
-    copyBlobsToVec0(db(), table);
-    dropEmbeddingColumn(db(), table);
+  if (readStorageMode(db()) === "blob") {
+    const dim = config().search.embeddings.dimensions;
+    ensureVec0Store(db(), dim);
+    // Relocate every existing blob into vec0 BEFORE flipping the mode. The copy
+    // is idempotent (INSERT OR REPLACE) and does NOT drop anything, so a crash
+    // here leaves mode="blob" with the base columns still INTACT — the copy
+    // simply re-runs next startup. 🔴 INVARIANT: columns are dropped only AFTER
+    // the flip below, so mode==="blob" always implies the embedding columns
+    // still exist; no blob-mode query can ever read a half-dropped column (the
+    // v55 boot-loop hazard).
+    for (const table of EMBEDDING_TABLES) {
+      if (embeddingColumnExists(db(), table)) copyBlobsToVec0(db(), table);
+    }
+    // Flip once vec0 is fully populated and authoritative.
+    setStorageMode(db(), "vec0");
+    log.info(`vec0 storage cutover complete (dim=${dim})`);
   }
 
-  setStorageMode(db(), "vec0");
-  try {
-    // Best-effort: return the pages freed by the dropped blob columns (notably
-    // ~320MB of temporal vectors) to the OS. No-op unless auto_vacuum is on.
-    db().query("PRAGMA incremental_vacuum").run();
-  } catch {
-    // ignore — space is already reclaimed within the DB file by DROP COLUMN.
+  // Reclaim: drop any leftover base embedding columns. Runs STRICTLY in vec0
+  // mode (mode never reverts to blob), so no blob-mode reader can observe a
+  // half-dropped column. Presence-aware + idempotent → resumable across a crash
+  // mid-drop (the next startup finishes the remaining columns).
+  if (readStorageMode(db()) === "vec0") {
+    let droppedAny = false;
+    for (const table of EMBEDDING_TABLES) {
+      if (embeddingColumnExists(db(), table)) {
+        dropEmbeddingColumn(db(), table);
+        droppedAny = true;
+      }
+    }
+    if (droppedAny) {
+      try {
+        // Best-effort: return the freed pages (notably ~320MB of temporal
+        // vectors) to the OS. No-op unless auto_vacuum is on.
+        db().query("PRAGMA incremental_vacuum").run();
+      } catch {
+        // ignore — space is already reclaimed within the DB file by DROP COLUMN.
+      }
+    }
   }
-  log.info(`vec0 storage cutover complete (dim=${dim})`);
 }
 
 // ---------------------------------------------------------------------------
