@@ -641,7 +641,8 @@ function buildOpenAIWorkerRequest(
 
   return {
     // Background workers have no original request to forward verbatim, so the
-    // URL is reconstructed host-aware (GitHub Copilot omits `/v1`, issue #1052).
+    // URL is reconstructed host-aware (GitHub Copilot omits `/v1`, issue #1052;
+    // Google Gemini serves `/v1beta/openai/...`, issue #1070).
     url: buildOpenAIChatCompletionsUrl(target.url),
     headers: {
       "Content-Type": "application/json",
