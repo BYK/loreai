@@ -9,6 +9,7 @@ import {
   discoverWorkspaceRoot,
   UNATTRIBUTED_PROJECT_PREFIX,
   isUnattributedProjectPath,
+  log,
 } from "@loreai/core";
 
 // ---------------------------------------------------------------------------
@@ -875,9 +876,7 @@ function parsePort(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
   const n = Number.parseInt(value, 10);
   if (Number.isNaN(n) || n < 0 || n > 65535) {
-    console.error(
-      `[lore] warning: invalid port "${value}", using default ${fallback}`,
-    );
+    log.notice(`warning: invalid port "${value}", using default ${fallback}`);
     return fallback;
   }
   return n;
@@ -887,9 +886,7 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
   const n = Number.parseInt(value, 10);
   if (Number.isNaN(n) || n <= 0) {
-    console.error(
-      `[lore] warning: invalid value "${value}", using default ${fallback}`,
-    );
+    log.notice(`warning: invalid value "${value}", using default ${fallback}`);
     return fallback;
   }
   return n;
@@ -903,9 +900,7 @@ function parseNonNegativeInt(
   if (!value) return fallback;
   const n = Number.parseInt(value, 10);
   if (Number.isNaN(n) || n < 0) {
-    console.error(
-      `[lore] warning: invalid value "${value}", using default ${fallback}`,
-    );
+    log.notice(`warning: invalid value "${value}", using default ${fallback}`);
     return fallback;
   }
   return n;
@@ -976,8 +971,8 @@ export function parseCurlHeaders(
     if (!line) continue;
     const colonIdx = line.indexOf(":");
     if (colonIdx <= 0) {
-      console.error(
-        `[lore] warning: ignoring malformed LORE_UPSTREAM_EXTRA_HEADERS line: ${JSON.stringify(line)}`,
+      log.notice(
+        `warning: ignoring malformed LORE_UPSTREAM_EXTRA_HEADERS line: ${JSON.stringify(line)}`,
       );
       continue;
     }
@@ -989,8 +984,8 @@ export function parseCurlHeaders(
     // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional control-character sanitization
     const value = rawValue.replace(/[\x00-\x1f\x7f]/g, "").trim();
     if (!name || !/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name)) {
-      console.error(
-        `[lore] warning: ignoring invalid header name in LORE_UPSTREAM_EXTRA_HEADERS: ${JSON.stringify(rawName)}`,
+      log.notice(
+        `warning: ignoring invalid header name in LORE_UPSTREAM_EXTRA_HEADERS: ${JSON.stringify(rawName)}`,
       );
       continue;
     }

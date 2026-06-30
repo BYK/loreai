@@ -14,6 +14,7 @@
  * Reuses `parseSSEStream` from the Anthropic stream module since the
  * underlying SSE wire format is the same.
  */
+import { log } from "@loreai/core";
 import {
   ZERO_USAGE,
   type GatewayContentBlock,
@@ -695,7 +696,7 @@ export function translateAnthropicStreamToResponses(
           }
         }
       } catch (err) {
-        console.error("[lore] openai-responses stream translation error:", err);
+        log.error("openai-responses stream translation error:", err);
         // Emit a response.failed event so clients don't hang waiting
         try {
           controller.enqueue(

@@ -9,6 +9,7 @@
 import { existsSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { isStderrSilenced } from "./log";
 
 const OLD_DIR_NAME = "opencode-lore";
 const NEW_DIR_NAME = "lore";
@@ -48,8 +49,14 @@ function migrateDataDir(): void {
   try {
     if (existsSync(oldDir) && !existsSync(newDir)) {
       renameSync(oldDir, newDir);
-      // Can't use the lore logger here (circular dep), so use stderr.
-      console.error(`[lore] migrated data directory: ${oldDir} → ${newDir}`);
+      // The full logger would re-enter dataDir() (it resolves the log-file path
+      // through here), so we still write to stderr directly — but honor the
+      // embedded/TUI silence flag so this one-time notice can never corrupt a
+      // host TUI. `isStderrSilenced()` is a side-effect-free getter, so the
+      // log↔data-dir module cycle stays safe.
+      if (!isStderrSilenced()) {
+        console.error(`[lore] migrated data directory: ${oldDir} → ${newDir}`);
+      }
     }
   } catch {
     // Permission error, cross-device rename, concurrent process already

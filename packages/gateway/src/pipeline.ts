@@ -2277,8 +2277,8 @@ export function resolveSessionProjectPath(
       !staleHeaderWarned.has(sessionState.sessionID)
     ) {
       staleHeaderWarned.add(sessionState.sessionID);
-      console.error(
-        `[lore] warning: session ${sessionState.sessionID.slice(0, 16)} sent ` +
+      log.notice(
+        `warning: session ${sessionState.sessionID.slice(0, 16)} sent ` +
           `X-Lore-Project header "${result.overrodeHeaderPath}" but its system ` +
           `prompt's working directory is "${projectPath}" — trusting the ` +
           `inferred path. A stale/static X-Lore-Project header (e.g. a fixed ` +
@@ -2366,8 +2366,8 @@ export function resolveSessionProjectPath(
     const detail = config.remoteGateway
       ? `routed to provisional bucket ${projectPath}`
       : `falling back to process.cwd() (${projectPath})`;
-    console.error(
-      `[lore] warning: could not determine project for session ` +
+    log.notice(
+      `warning: could not determine project for session ` +
         `${sessionState.sessionID.slice(0, 16)} — ${detail}. ` +
         `Data may be misattributed. Fix: launch your agent via \`lore run\`, ` +
         `or have your client send the "X-Lore-Project: /path/to/project" header ` +

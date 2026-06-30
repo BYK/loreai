@@ -17,6 +17,7 @@
  * events, and `createStreamAccumulator` to build the internal GatewayResponse
  * (for pipeline post-processing that may read it).
  */
+import { log } from "@loreai/core";
 import { ZERO_USAGE } from "../translate/types";
 import { parseSSEStream, createStreamAccumulator } from "./anthropic";
 
@@ -312,7 +313,7 @@ export function translateAnthropicStreamToOpenAI(
         } catch {
           // Controller may already be closed
         }
-        console.error("[lore] openai stream translation error:", err);
+        log.error("openai stream translation error:", err);
       } finally {
         try {
           controller.close();

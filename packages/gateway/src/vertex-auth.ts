@@ -14,6 +14,7 @@
  * the access token and refreshes it before expiry, so `getVertexAccessToken`
  * is cheap to call per request.
  */
+import { log } from "@loreai/core";
 import { GoogleAuth } from "google-auth-library";
 
 /** OAuth2 scope required to call Vertex AI (aiplatform). */
@@ -57,10 +58,7 @@ export async function getVertexAccessToken(): Promise<string> {
     // client (the conversation path surfaces it), and the raw ADC error may
     // reveal local file paths / project hints. Keep the client message generic
     // but actionable.
-    console.error(
-      "[lore] Vertex ADC token mint failed:",
-      (err as Error).message,
-    );
+    log.error("Vertex ADC token mint failed:", (err as Error).message);
     throw new Error(
       "Vertex: failed to obtain a GCP access token via Application Default " +
         "Credentials. Run `gcloud auth application-default login`, or set " +

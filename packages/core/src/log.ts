@@ -81,6 +81,43 @@ const isDebug =
   process.env.LORE_DEBUG === "1" ||
   process.env.LORE_DEBUG?.toLowerCase() === "true";
 
+// ---------------------------------------------------------------------------
+// Embedded / TUI-safe mode
+// ---------------------------------------------------------------------------
+
+// When the gateway runs *in-process* inside a host that owns a full-screen TUI
+// — the Pi extension and the OpenCode plugin both `import("@loreai/gateway")`
+// and call `startGateway()` rather than spawning a separate process — ANY byte
+// written to stdout/stderr corrupts that TUI. This is the exact class of bug
+// that broke Pi on Windows (raw `console.*` lines bleeding into the render),
+// and `log.error` is just as fatal there as a stray `console.log`.
+//
+// The host enables this switch once, on activation, via `silenceStderr()`.
+// From then on the logger writes ONLY to the persistent log file and the
+// registered {@link LogSink} (e.g. Sentry) — NEVER to stderr, for every level
+// including `error`, and even when `LORE_DEBUG=1`. The TUI is sacrosanct;
+// operators read embedded-gateway logs with `lore logs` or by running the
+// gateway standalone. Standalone `lore`/CLI processes never call this, so they
+// keep full stderr visibility.
+let stderrSilenced = false;
+
+/**
+ * Silence ALL stderr output from the logger (`info`/`warn`/`notice`/`error`),
+ * unconditionally — including when `LORE_DEBUG=1`. The file sink and the
+ * registered {@link LogSink} keep receiving everything, so nothing is lost.
+ *
+ * Call this from a host that runs the gateway in-process inside a full-screen
+ * TUI (the Pi extension, the OpenCode plugin). Idempotent.
+ */
+export function silenceStderr(silenced = true): void {
+  stderrSilenced = silenced;
+}
+
+/** Whether stderr output is currently silenced (embedded/TUI mode). */
+export function isStderrSilenced(): boolean {
+  return stderrSilenced;
+}
+
 /** Format variadic args into a single string for the sink. */
 function formatArgs(args: unknown[]): string {
   return args
@@ -175,7 +212,7 @@ function writeToFile(level: string, message: string): void {
 
 /** Log an informational status message. Suppressed unless LORE_DEBUG=1. */
 export function info(...args: unknown[]): void {
-  if (isDebug) console.error("[lore]", ...args);
+  if (isDebug && !stderrSilenced) console.error("[lore]", ...args);
   const msg = formatArgs(args);
   sink?.info(msg);
   writeToFile("info", msg);
@@ -183,7 +220,22 @@ export function info(...args: unknown[]): void {
 
 /** Log a warning. Suppressed unless LORE_DEBUG=1. */
 export function warn(...args: unknown[]): void {
-  if (isDebug) console.error("[lore] WARN:", ...args);
+  if (isDebug && !stderrSilenced) console.error("[lore] WARN:", ...args);
+  const msg = formatArgs(args);
+  sink?.warn(msg);
+  writeToFile("warn", msg);
+}
+
+/**
+ * Log a user-facing notice — a warning the user likely needs to act on (e.g.
+ * data misattribution, an ignored malformed env var). Unlike {@link warn} it
+ * is NOT debug-gated, so it stays visible on a standalone CLI/terminal; unlike
+ * {@link error} it is reported to the sink at *warning* severity (these are not
+ * failures, so they must not inflate the error stream). Like every level it is
+ * silenced on stderr in embedded/TUI mode but still hits the file and sink.
+ */
+export function notice(...args: unknown[]): void {
+  if (!stderrSilenced) console.error("[lore]", ...args);
   const msg = formatArgs(args);
   sink?.warn(msg);
   writeToFile("warn", msg);
@@ -191,7 +243,7 @@ export function warn(...args: unknown[]): void {
 
 /** Log an error. Always visible — these indicate real failures. */
 export function error(...args: unknown[]): void {
-  console.error("[lore]", ...args);
+  if (!stderrSilenced) console.error("[lore]", ...args);
   const msg = formatArgs(args);
   sink?.error(msg);
   writeToFile("error", msg);

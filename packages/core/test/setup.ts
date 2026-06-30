@@ -1,8 +1,9 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterAll } from "vitest";
+import { afterAll, afterEach } from "vitest";
 import { close } from "../src/db";
+import { silenceStderr } from "../src/log";
 
 // Create an isolated temporary database for the entire test run.
 // This prevents test fixtures from leaking into the live lore DB
@@ -78,6 +79,15 @@ globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
   }
   return realFetch(input, init);
 }) as typeof globalThis.fetch;
+
+// The Pi/OpenCode plugins flip `log.silenceStderr()` when they activate inside
+// their TUI host. A force-active plugin test (LORE_*_FORCE_ACTIVE=1) would
+// otherwise leave stderr silenced for the rest of the fork — hiding logs from,
+// or vacuating "no output" assertions in, unrelated test files that share it.
+// Reset after every test so silenced state never crosses a test boundary.
+afterEach(() => {
+  silenceStderr(false);
+});
 
 afterAll(() => {
   close();

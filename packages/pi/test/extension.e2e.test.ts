@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import lorePiExtension from "../src/index";
 import { ANTHROPIC_PROVIDERS, OPENAI_PROVIDERS } from "../src/internal";
 
