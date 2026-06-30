@@ -955,6 +955,302 @@ describe("dynamic cheaper-model discovery", () => {
 });
 
 // ---------------------------------------------------------------------------
+// family-based worker resolution (newest cheap-tier member of a family)
+// ---------------------------------------------------------------------------
+
+describe("family-based worker resolution", () => {
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    resetWorkerModelState();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    resetWorkerModelState();
+  });
+
+  const LIMIT = { context: 200_000, output: 64_000 };
+
+  /** Warm the models.dev cache with a raw response carrying family metadata. */
+  async function warmCache(response: unknown): Promise<void> {
+    globalThis.fetch = vi.fn(() =>
+      Promise.resolve(new Response(JSON.stringify(response), { status: 200 })),
+    ) as unknown as typeof fetch;
+    resetWorkerModelState();
+    await fetchModelData();
+  }
+
+  test("anthropic expensive session resolves to the NEWEST sonnet in family (not the stale hardcoded id)", async () => {
+    await warmCache({
+      anthropic: {
+        api: "https://api.anthropic.com/v1",
+        models: {
+          "claude-opus-4-6": {
+            id: "claude-opus-4-6",
+            family: "claude-opus",
+            release_date: "2026-01-05",
+            cost: { input: 5, output: 25, cache_read: 0.5 },
+            limit: LIMIT,
+          },
+          "claude-sonnet-4-6": {
+            id: "claude-sonnet-4-6",
+            family: "claude-sonnet",
+            release_date: "2026-02-17",
+            cost: { input: 3, output: 15, cache_read: 0.3 },
+            limit: LIMIT,
+          },
+          // Newer sonnet generation — this is what the worker should track.
+          "claude-sonnet-5": {
+            id: "claude-sonnet-5",
+            family: "claude-sonnet",
+            release_date: "2026-06-01",
+            cost: { input: 3, output: 15, cache_read: 0.3 },
+            limit: LIMIT,
+          },
+          // Same cheap tier, DIFFERENT family — must be excluded.
+          "claude-haiku-4-5": {
+            id: "claude-haiku-4-5",
+            family: "claude-haiku",
+            release_date: "2025-10-15",
+            cost: { input: 1, output: 5, cache_read: 0.1 },
+            limit: LIMIT,
+          },
+        },
+      },
+    });
+
+    const result = getWorkerModel({
+      providerID: "anthropic",
+      model: "claude-opus-4-6",
+    });
+
+    expect(result?.providerID).toBe("anthropic");
+    // Newest in the claude-sonnet family, NOT the hardcoded claude-sonnet-4-6.
+    expect(result?.modelID).toBe("claude-sonnet-5");
+  });
+
+  test("codex: tracks the newest MINI in family, never upgrades to the full codex (codex caveat)", async () => {
+    await warmCache({
+      anthropic: { api: "https://api.anthropic.com/v1", models: {} },
+      "openai-codex": {
+        api: "https://api.openai.com/v1",
+        models: {
+          "gpt-5.5": {
+            id: "gpt-5.5",
+            family: "gpt",
+            release_date: "2026-03-01",
+            cost: { input: 5, output: 30, cache_read: 1.25 },
+            limit: LIMIT,
+          },
+          "gpt-5.1-codex": {
+            id: "gpt-5.1-codex",
+            family: "gpt-codex",
+            release_date: "2025-11-13",
+            cost: { input: 1.25, output: 10, cache_read: 0.125 },
+            limit: LIMIT,
+          },
+          "gpt-5.1-codex-mini": {
+            id: "gpt-5.1-codex-mini",
+            family: "gpt-codex",
+            release_date: "2025-11-13",
+            cost: { input: 0.25, output: 2, cache_read: 0.025 },
+            limit: LIMIT,
+          },
+          // NEWER full codex — cheaper than the session but NOT a mini; the
+          // cheap-variant filter must exclude it so we never upgrade tier.
+          "gpt-5.3-codex": {
+            id: "gpt-5.3-codex",
+            family: "gpt-codex",
+            release_date: "2026-02-05",
+            cost: { input: 1.25, output: 10, cache_read: 0.125 },
+            limit: LIMIT,
+          },
+          // NEWER mini — this is the one the worker should track.
+          "gpt-5.4-codex-mini": {
+            id: "gpt-5.4-codex-mini",
+            family: "gpt-codex",
+            release_date: "2026-04-01",
+            cost: { input: 0.3, output: 2.5, cache_read: 0.03 },
+            limit: LIMIT,
+          },
+        },
+      },
+    });
+
+    const result = getWorkerModel({
+      providerID: "openai-codex",
+      model: "gpt-5.5",
+    });
+
+    expect(result?.providerID).toBe("openai-codex");
+    // Newest cheap-variant in gpt-codex: NOT the newer full gpt-5.3-codex,
+    // NOT the stale hardcoded gpt-5.1-codex-mini.
+    expect(result?.modelID).toBe("gpt-5.4-codex-mini");
+  });
+
+  test("cost guard: a newer family member priced at/above the session is rejected for an older cheaper one", async () => {
+    await warmCache({
+      anthropic: {
+        api: "https://api.anthropic.com/v1",
+        models: {
+          // Session model priced at $2/M (above the $1.50 downgrade threshold).
+          "claude-opus-4-6": {
+            id: "claude-opus-4-6",
+            family: "claude-opus",
+            release_date: "2026-01-05",
+            cost: { input: 2, output: 10, cache_read: 0.2 },
+            limit: LIMIT,
+          },
+          "claude-sonnet-4-6": {
+            id: "claude-sonnet-4-6",
+            family: "claude-sonnet",
+            release_date: "2026-02-17",
+            cost: { input: 1.5, output: 7.5, cache_read: 0.15 },
+            limit: LIMIT,
+          },
+          // Newer sonnet but PRICIER than the session ($2.5 ≥ $2) — the cost
+          // guard must skip it, leaving the older, cheaper sonnet-4-6.
+          "claude-sonnet-5": {
+            id: "claude-sonnet-5",
+            family: "claude-sonnet",
+            release_date: "2026-06-01",
+            cost: { input: 2.5, output: 12, cache_read: 0.25 },
+            limit: LIMIT,
+          },
+        },
+      },
+    });
+
+    const result = getWorkerModel({
+      providerID: "anthropic",
+      model: "claude-opus-4-6",
+    });
+
+    expect(result?.providerID).toBe("anthropic");
+    // sonnet-5 is newer but pricier than the $2 session → rejected by the
+    // cost guard; the older but cheaper sonnet-4-6 wins.
+    expect(result?.modelID).toBe("claude-sonnet-4-6");
+  });
+
+  test("offline fallback: with no models.dev data, uses the hardcoded WORKER_DEFAULTS id", async () => {
+    // Fetch fails → cachedModelData stays null → family resolution returns
+    // undefined → caller falls back to the hardcoded modelID.
+    globalThis.fetch = vi.fn(() =>
+      Promise.reject(new Error("offline")),
+    ) as unknown as typeof fetch;
+    resetWorkerModelState();
+    await fetchModelData();
+    expect(isModelDataLoaded()).toBe(false);
+
+    const result = getWorkerModel({
+      providerID: "anthropic",
+      model: "claude-opus-4-6",
+    });
+
+    expect(result?.providerID).toBe("anthropic");
+    // Hardcoded WORKER_DEFAULTS offline fallback (current newest sonnet).
+    expect(result?.modelID).toBe("claude-sonnet-5");
+  });
+
+  test("unknown provider: family-aware pick favors the NEWEST member of the cheapest family", async () => {
+    // google isn't in WORKER_DEFAULTS → findCheaperSameProviderModel path.
+    // The absolute-cheapest is an OLD flash-lite; a NEWER flash-lite is still
+    // cheaper than the session. Family-aware resolution must pick the newer one.
+    await warmCache({
+      anthropic: { api: "https://api.anthropic.com/v1", models: {} },
+      google: {
+        api: "https://generativelanguage.googleapis.com/v1beta",
+        models: {
+          "gemini-3.1-pro": {
+            id: "gemini-3.1-pro",
+            family: "gemini-pro",
+            release_date: "2026-05-01",
+            cost: { input: 4, output: 20 },
+            limit: LIMIT,
+          },
+          // Cheapest model overall, but an OLD generation.
+          "gemini-2.5-flash-lite": {
+            id: "gemini-2.5-flash-lite",
+            family: "gemini-flash-lite",
+            release_date: "2025-06-01",
+            cost: { input: 0.1, output: 0.4 },
+            limit: LIMIT,
+          },
+          // Same (cheapest) family, NEWER, still far cheaper than the session.
+          "gemini-3-flash-lite": {
+            id: "gemini-3-flash-lite",
+            family: "gemini-flash-lite",
+            release_date: "2026-04-01",
+            cost: { input: 0.15, output: 0.6 },
+            limit: LIMIT,
+          },
+          // Cheaper than session but a DIFFERENT (pricier) family — must lose
+          // to the flash-lite family chosen by lowest cost.
+          "gemini-3-flash": {
+            id: "gemini-3-flash",
+            family: "gemini-flash",
+            release_date: "2026-04-15",
+            cost: { input: 1, output: 5 },
+            limit: LIMIT,
+          },
+        },
+      },
+    });
+
+    const result = getWorkerModel({
+      providerID: "google",
+      model: "gemini-3.1-pro",
+    });
+
+    expect(result?.providerID).toBe("google");
+    // Newest in the cheapest (flash-lite) family — NOT the older
+    // gemini-2.5-flash-lite, NOT the pricier gemini-3-flash family.
+    expect(result?.modelID).toBe("gemini-3-flash-lite");
+  });
+
+  test("unknown provider: without family metadata, falls back to absolute cheapest", async () => {
+    // No family fields → Pass 2 is skipped → original cheapest-by-cost behavior.
+    await warmCache({
+      anthropic: { api: "https://api.anthropic.com/v1", models: {} },
+      google: {
+        api: "https://generativelanguage.googleapis.com/v1beta",
+        models: {
+          "gemini-3.1-pro": {
+            id: "gemini-3.1-pro",
+            release_date: "2026-05-01",
+            cost: { input: 4, output: 20 },
+            limit: LIMIT,
+          },
+          "gemini-3-flash": {
+            id: "gemini-3-flash",
+            release_date: "2026-04-15",
+            cost: { input: 1, output: 5 },
+            limit: LIMIT,
+          },
+          "gemini-3-flash-lite": {
+            id: "gemini-3-flash-lite",
+            release_date: "2026-04-01",
+            cost: { input: 0.15, output: 0.6 },
+            limit: LIMIT,
+          },
+        },
+      },
+    });
+
+    const result = getWorkerModel({
+      providerID: "google",
+      model: "gemini-3.1-pro",
+    });
+
+    expect(result?.providerID).toBe("google");
+    // Absolute cheapest, since there is no family metadata to refine on.
+    expect(result?.modelID).toBe("gemini-3-flash-lite");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // resetWorkerModelState
 // ---------------------------------------------------------------------------
 

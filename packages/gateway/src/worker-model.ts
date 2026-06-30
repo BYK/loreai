@@ -41,6 +41,14 @@ const SUPPORTED_PROVIDERS = ["anthropic", "openai"] as const;
 /** Shape of a model entry in the models.dev JSON API. */
 export type ModelsDevEntry = {
   id: string;
+  /**
+   * models.dev model family (e.g. "claude-sonnet", "gpt-mini", "gpt-codex").
+   * Groups successive generations of the same tier so worker defaults can
+   * track the newest member instead of pinning a hardcoded ID that goes stale.
+   */
+  family?: string;
+  /** ISO `YYYY-MM-DD` release date — lexicographically sortable == chronological. */
+  release_date?: string;
   cost?: {
     input?: number;
     output?: number;
@@ -419,13 +427,20 @@ export function clearModelDataCache(): void {
  * Find a cheaper model from the same provider using models.dev pricing data.
  *
  * For providers without hardcoded WORKER_DEFAULTS (Google, MiniMax, xAI, etc.),
- * this searches the cached models.dev data for a model that:
- *   1. Belongs to the same provider
- *   2. Costs less than the session model (input price)
- *   3. Has the lowest input cost among candidates (cheapest available)
- *   4. Is not the session model itself
+ * this is family-aware so a discovered worker tracks new generations the same
+ * way the hardcoded WORKER_DEFAULTS do (via `resolveNewestInFamily`):
  *
- * Returns the model ID of the cheapest alternative, or undefined if none found.
+ *   1. Pass 1 — find the absolute cheapest same-provider model strictly cheaper
+ *      than the session (input price). Its family identifies the cheapest TIER.
+ *   2. Pass 2 — within that cheapest family, return the NEWEST member that is
+ *      still cheaper than the session. This avoids pinning an obsolete model
+ *      just because it's a few cents cheaper than its modern sibling (e.g.
+ *      gemini-2.5-flash-lite over a newer gemini-3-flash-lite), while staying
+ *      in the same cost tier and never exceeding the session price.
+ *
+ * Falls back to the Pass-1 cheapest when the cheapest model has no family
+ * metadata (preserving the original cheapest-by-cost behavior offline).
+ * Returns undefined if no cheaper model exists.
  */
 function findCheaperSameProviderModel(
   providerID: string,
@@ -435,29 +450,115 @@ function findCheaperSameProviderModel(
   const providerModelIds = cachedProviderModels?.get(providerID);
   if (!providerModelIds || !cachedModelData) return undefined;
 
+  // Pass 1: cheapest same-provider model cheaper than the session.
   let cheapestId: string | undefined;
   let cheapestCost = sessionInputCost;
-
+  let cheapestFamily: string | undefined;
   for (const modelId of providerModelIds) {
     if (modelId === sessionModelID) continue;
     const entry = cachedModelData.get(modelId);
     if (entry?.cost?.input == null) continue;
-    // Must be cheaper than the session model AND cheaper than any
-    // candidate we've found so far
     if (entry.cost.input < cheapestCost) {
       cheapestCost = entry.cost.input;
       cheapestId = modelId;
+      cheapestFamily = entry.family;
+    }
+  }
+  if (!cheapestId) return undefined;
+
+  // Pass 2: within the cheapest family, prefer the newest member that is still
+  // cheaper than the session (release_date desc, then id desc tie-break).
+  let resolvedId = cheapestId;
+  if (cheapestFamily) {
+    let bestDate = cachedModelData.get(cheapestId)?.release_date ?? "";
+    for (const modelId of providerModelIds) {
+      if (modelId === sessionModelID) continue;
+      const entry = cachedModelData.get(modelId);
+      if (entry?.family !== cheapestFamily) continue;
+      if (entry.cost?.input == null || entry.cost.input >= sessionInputCost) {
+        continue;
+      }
+      const date = entry.release_date ?? "";
+      if (date > bestDate || (date === bestDate && modelId > resolvedId)) {
+        bestDate = date;
+        resolvedId = modelId;
+      }
     }
   }
 
-  if (cheapestId) {
-    log.info(
-      `dynamic worker model: ${providerID}/${cheapestId} ($${cheapestCost}/M) ` +
-        `instead of ${sessionModelID} ($${sessionInputCost}/M)`,
-    );
+  const resolvedCost = cachedModelData.get(resolvedId)?.cost?.input;
+  log.info(
+    `dynamic worker model: ${providerID}/${resolvedId} ($${resolvedCost}/M` +
+      `${cheapestFamily ? `, family ${cheapestFamily}` : ""}) ` +
+      `instead of ${sessionModelID} ($${sessionInputCost}/M)`,
+  );
+
+  return resolvedId;
+}
+
+/**
+ * Resolve the NEWEST model in a target family from models.dev data.
+ *
+ * Replaces a hardcoded worker model ID (e.g. "claude-sonnet-4-6") with the
+ * freshest equivalent the provider currently ships (e.g. "claude-sonnet-5"),
+ * so worker defaults don't go stale as new model generations land.
+ *
+ * A candidate qualifies when it:
+ *   1. Belongs to `providerID` (per the models.dev provider→models index).
+ *   2. Has models.dev `family === family`.
+ *   3. Passes `isCheapVariant(id)` — the SAME predicate that decides whether a
+ *      session model is "already cheap". Within a family this discriminates the
+ *      cheap tier from the full tier. This is the codex caveat: family
+ *      "gpt-codex" contains both gpt-5.x-codex AND gpt-5.x-codex-mini; only the
+ *      mini is a valid worker, so "newest in family" must never upgrade to the
+ *      full codex.
+ *   4. Costs strictly less than `maxInputCost` ($/M) when pricing is known — a
+ *      defensive cost-aware guard so a newer family member can never be pricier
+ *      than the session model. Unknown pricing is allowed through (it already
+ *      passed the family + cheap-variant filters).
+ *
+ * Returns the newest qualifying model ID (release_date desc, then id desc as a
+ * deterministic tie-break), or undefined when none qualify / the cache is cold
+ * — in which case the caller falls back to the hardcoded `WORKER_DEFAULTS` ID.
+ */
+function resolveNewestInFamily(
+  providerID: string,
+  family: string,
+  isCheapVariant: (id: string) => boolean,
+  maxInputCost: number,
+): string | undefined {
+  const providerModelIds = cachedProviderModels?.get(providerID);
+  if (!providerModelIds || !cachedModelData) return undefined;
+
+  let bestId: string | undefined;
+  let bestDate = "";
+  for (const id of providerModelIds) {
+    const entry = cachedModelData.get(id);
+    if (!entry || entry.family !== family) continue;
+    if (!isCheapVariant(id)) continue;
+    // Cost guard: skip family members priced at/above the session model.
+    // Missing pricing is permitted — it already cleared the cheap-variant gate.
+    const input = entry.cost?.input;
+    if (input != null && input >= maxInputCost) continue;
+
+    // release_date is ISO YYYY-MM-DD, so string comparison is chronological.
+    const date = entry.release_date ?? "";
+    if (
+      bestId === undefined ||
+      date > bestDate ||
+      (date === bestDate && id > bestId)
+    ) {
+      bestId = id;
+      bestDate = date;
+    }
   }
 
-  return cheapestId;
+  if (bestId) {
+    log.info(
+      `worker model: newest in family ${providerID}/${family} → ${bestId}`,
+    );
+  }
+  return bestId;
 }
 
 // ---------------------------------------------------------------------------
@@ -484,32 +585,57 @@ function findCheaperSameProviderModel(
  */
 const WORKER_DEFAULTS: Record<
   string,
-  { providerID: string; modelID: string; alreadyCheap: (id: string) => boolean }
+  {
+    providerID: string;
+    modelID: string;
+    /**
+     * models.dev family the worker should track. When set, the cost-aware
+     * default resolves to the NEWEST cheap-tier member of this family
+     * (via `resolveNewestInFamily`), and `modelID` becomes the offline
+     * fallback used only when models.dev data is unavailable or yields
+     * no qualifying candidate.
+     */
+    family?: string;
+    alreadyCheap: (id: string) => boolean;
+  }
 > = {
-  // Anthropic: sonnet-4-6 matches opus quality on distillation at 40% lower cost
+  // Anthropic: sonnet matches opus quality on distillation at lower cost.
+  // family "claude-sonnet" tracks the newest sonnet live from models.dev; the
+  // modelID is only the OFFLINE fallback, so keep it on the current newest
+  // (claude-sonnet-5, $2/$10 — cheaper AND newer than the old sonnet-4-6 pin).
   anthropic: {
     providerID: "anthropic",
-    modelID: "claude-sonnet-4-6",
+    modelID: "claude-sonnet-5",
+    family: "claude-sonnet",
     alreadyCheap: (id) => id.includes("sonnet") || id.includes("haiku"),
   },
-  // OpenAI: gpt-5.4-mini matched gpt-5.4 exactly (24 obs each) at 70% lower cost
+  // OpenAI: gpt-5.4-mini matched gpt-5.4 exactly (24 obs each) at 70% lower cost.
+  // family "gpt-mini" tracks the newest mini (gpt-5.x-mini, gpt-4.1-mini, ...).
   openai: {
     providerID: "openai",
     modelID: "gpt-5.4-mini",
+    family: "gpt-mini",
     alreadyCheap: (id) => id.includes("mini") || id.includes("nano"),
   },
   // Codex (ChatGPT): the backend serves cheaper models on the same endpoint.
   // gpt-5.1-codex-mini ($0.25/$2) vs gpt-5.5 ($5/$30) — ~20x cheaper input,
   // same provider, same OAuth credential, same /codex/responses endpoint.
+  // CAVEAT: family "gpt-codex" also contains the FULL gpt-5.x-codex models;
+  // the `alreadyCheap` (mini/spark) filter inside resolveNewestInFamily keeps
+  // us on the mini tier so "newest in family" never upgrades to full codex.
   "openai-codex": {
     providerID: "openai-codex",
     modelID: "gpt-5.1-codex-mini",
+    family: "gpt-codex",
     alreadyCheap: (id) => id.includes("mini") || id.includes("spark"),
   },
-  // GitHub Copilot proxies multiple providers — match by model ID prefix
+  // GitHub Copilot proxies multiple providers — match by model ID prefix.
+  // No `family`: Copilot's family resolution is handled by
+  // resolveGitHubCopilotWorker (model IDs use different formatting, e.g.
+  // "claude-sonnet-4.6"), so this entry serves only as a last-resort fallback.
   "github-copilot": {
     providerID: "github-copilot",
-    modelID: "gpt-5.4-mini", // default; overridden by _resolveGitHubCopilotWorker
+    modelID: "gpt-5.4-mini", // default; overridden by resolveGitHubCopilotWorker
     alreadyCheap: (id) =>
       id.includes("mini") ||
       id.includes("nano") ||
@@ -618,9 +744,20 @@ export function getWorkerModel(session?: {
       } else {
         const mapping = WORKER_DEFAULTS[effectiveProvider];
         if (mapping && !mapping.alreadyCheap(effectiveModelID)) {
+          // Prefer the newest cheap-tier member of the target family from
+          // models.dev (so the worker tracks new generations automatically);
+          // fall back to the hardcoded modelID when data is cold/unavailable.
+          const newest = mapping.family
+            ? resolveNewestInFamily(
+                mapping.providerID,
+                mapping.family,
+                mapping.alreadyCheap,
+                inputCost,
+              )
+            : undefined;
           costAwareDefault = {
             providerID: mapping.providerID,
-            modelID: mapping.modelID,
+            modelID: newest ?? mapping.modelID,
           };
         }
         // Unknown providers: try to find a cheaper model from the same
