@@ -273,4 +273,12 @@ export interface WorkerInitData {
      *  (config.json, tokenizer.json, onnx/model_quantized.onnx, …). */
     localModelPath: string;
   } | null;
+  /** Snapshot of the host's stderr-silence state at spawn time. A worker thread
+   *  has its OWN `globalThis`, so the main thread's `log.silenceStderr()`
+   *  process-global can't reach it — we pass the value explicitly instead. When
+   *  true (the plugin/in-process-gateway TUI mode), the worker must not write a
+   *  single byte to stderr, which would corrupt the host's full-screen render.
+   *  The worker gates its `console.warn` diagnostics on this flag inline (it runs
+   *  as raw .ts and can't value-import siblings — see embedding-worker.ts). */
+  stderrSilenced?: boolean;
 }

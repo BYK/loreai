@@ -42,6 +42,9 @@ const port = parentPort;
 
 const init = workerData as WorkerInitData;
 const { modelId, dimensions, vendorModel } = init;
+// Snapshot of the host's stderr-silence state (see WorkerInitData). When true,
+// every diagnostic below stays off stderr so it can't corrupt the host's TUI.
+const stderrSilenced = init.stderrSilenced ?? false;
 
 /**
  * Main-thread-owned input token cap (see `WorkerInitData.maxTokens`). Every
@@ -208,9 +211,14 @@ async function ensurePipeline(): Promise<void> {
             // localProviderKnownBroken=true), which would brick the provider
             // even though we're about to retry successfully. Only the .catch
             // below (a genuine final failure) may post init-error.
-            console.warn(
-              `[embedding-worker] model corrupt (${msg}); purged cache, retrying download once`,
-            );
+            // Gate on the host's stderr-silence flag (see WorkerInitData) — in a
+            // host TUI any raw byte corrupts the render. The flag is inlined here
+            // because the worker runs as raw .ts and can't value-import siblings.
+            if (!stderrSilenced) {
+              console.warn(
+                `[embedding-worker] model corrupt (${msg}); purged cache, retrying download once`,
+              );
+            }
             // Retry once. If this throws, it propagates to the .catch below and
             // marks the worker permanently failed.
             await loadPipeline();
@@ -521,10 +529,14 @@ async function processEmbed(req: EmbedRequest): Promise<void> {
       // reject the request before the backoff can re-submit it. The main
       // thread reconstructs OOM context from the pending request for telemetry.
       if (isOomError(raw)) {
-        console.warn(
-          `[lore] ONNX OOM at ≤${effectiveMax} tokens (batch=${req.texts.length}, ` +
-            `longest≈${longest} chars) — respawning worker at a lower cap`,
-        );
+        // Silenced in host-TUI mode (see WorkerInitData.stderrSilenced); the
+        // main thread reconstructs OOM telemetry, so nothing diagnostic is lost.
+        if (!stderrSilenced) {
+          console.warn(
+            `[lore] ONNX OOM at ≤${effectiveMax} tokens (batch=${req.texts.length}, ` +
+              `longest≈${longest} chars) — respawning worker at a lower cap`,
+          );
+        }
         process.exit(EMBED_OOM_EXIT_CODE);
         return; // unreachable, but makes intent clear
       }

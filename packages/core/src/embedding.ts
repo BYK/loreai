@@ -533,6 +533,9 @@ class LocalProvider implements EmbeddingProvider {
         dimensions: this.dimensions,
         maxTokens: this.maxTokens,
         vendorModel: vendor ? { localModelPath: vendor.localModelPath } : null,
+        // Snapshot the host's silence state — the worker's own `globalThis`
+        // can't see the main thread's flag (re-read on every OOM respawn).
+        stderrSilenced: log.isStderrSilenced(),
       };
 
       if (testWorkerFactory) {

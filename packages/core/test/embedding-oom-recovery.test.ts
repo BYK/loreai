@@ -14,6 +14,7 @@ import {
 } from "../src/embedding";
 import { backoffEmbedCap, MIN_EMBED_TOKENS } from "../src/embedding-cap";
 import { EMBED_OOM_EXIT_CODE } from "../src/embedding-worker-types";
+import { isStderrSilenced, silenceStderr } from "../src/log";
 
 // Exercises the stateful OOM-recovery lifecycle in LocalProvider that the pure
 // cap math can't reach: the worker on("exit") OOM branch → handleOomBackoff →
@@ -213,5 +214,26 @@ describe("embedding OOM recovery (worker-mock)", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.err).toBeInstanceOf(LocalProviderUnavailableError);
     expect(isAvailable()).toBe(false);
+  });
+
+  it("snapshots the host's stderr-silence flag into workerData on every spawn", async () => {
+    // A worker thread has its OWN globalThis, so the main thread's
+    // log.silenceStderr() can't reach it — the value must ride in via workerData
+    // or the worker's [lore] OOM line corrupts the host TUI. The global test
+    // setup resets the silence flag after each test.
+    _persistEmbedCap(8192, 0);
+    const seen: Array<boolean | undefined> = [];
+    _setTestWorkerFactory((initData) => {
+      seen.push(initData.stderrSilenced);
+      return new FakeWorker() as unknown as Worker;
+    });
+
+    silenceStderr(true);
+    expect(isStderrSilenced()).toBe(true);
+    void settle(embed(["hello world"], "query"));
+    await flush();
+
+    // The spawn captured the live silence state (true), not a hardcoded default.
+    expect(seen.at(-1)).toBe(true);
   });
 });
