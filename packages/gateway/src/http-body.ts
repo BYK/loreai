@@ -163,3 +163,61 @@ export function encodeUpstreamBody(
     return { body: serializedBody, contentEncoding: null };
   }
 }
+
+/** The routing facts that decide whether re-encoding is safe for a request. */
+export interface UpstreamRouteContext {
+  /** An `X-Lore-Upstream-URL` header explicitly redirected the destination. */
+  hasUpstreamUrlOverride: boolean;
+  /** An `X-Lore-Provider` header explicitly named the destination provider. */
+  hasProviderOverride: boolean;
+  /** The wire protocol the request arrived as (`req.protocol`). */
+  ingressProtocol: string;
+  /** The wire protocol actually used upstream after routing/translation. */
+  effectiveProtocol: string;
+}
+
+/**
+ * Decide whether the gateway may re-apply the client's request `Content-
+ * Encoding` to the upstream request for this route.
+ *
+ * The client only compresses because it knows the provider IT targeted accepts
+ * the encoding (e.g. Codex zstd → the ChatGPT codex backend). The gateway may
+ * replay that encoding only when forwarding to a destination the client or user
+ * actually chose:
+ *   - a native passthrough (same wire protocol, no re-routing),
+ *   - an explicit `X-Lore-Upstream-URL` override (the user owns the URL), or
+ *   - an explicit `X-Lore-Provider` override (the plugin/user named the
+ *     provider — this is how the real Codex path routes to openai-codex).
+ *
+ * When the gateway itself AUTO-translates the wire protocol with no explicit
+ * destination (e.g. a bare Anthropic client whose model-prefix route resolves
+ * to an OpenAI backend), the request is being sent to a provider family the
+ * client never targeted, which may reject the encoding. In that case forward
+ * uncompressed — an uncompressed body is accepted by every endpoint. (#1032
+ * follow-up: scope re-compression to the same provider the client targeted.)
+ */
+export function mayReencodeUpstream(route: UpstreamRouteContext): boolean {
+  const autoCrossRouted =
+    !route.hasUpstreamUrlOverride &&
+    !route.hasProviderOverride &&
+    route.effectiveProtocol !== route.ingressProtocol;
+  return !autoCrossRouted;
+}
+
+/**
+ * Route-aware wrapper around {@link encodeUpstreamBody}: re-applies the
+ * client's `Content-Encoding` only when {@link mayReencodeUpstream} permits it
+ * for the resolved route; otherwise forwards the body uncompressed (always
+ * safe). This is the single chokepoint the forwarding path calls so the
+ * same-provider scoping can never be bypassed at an individual call site.
+ */
+export function encodeUpstreamBodyForRoute(
+  serializedBody: string,
+  rawEncoding: string | null | undefined,
+  route: UpstreamRouteContext,
+): { body: BodyInit; contentEncoding: string | null } {
+  return encodeUpstreamBody(
+    serializedBody,
+    mayReencodeUpstream(route) ? rawEncoding : null,
+  );
+}

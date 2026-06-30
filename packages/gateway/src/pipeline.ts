@@ -290,7 +290,11 @@ import {
   deserializeRecallStore,
 } from "./recall";
 import { upstreamFetch } from "./fetch";
-import { decodeRequestBody, encodeUpstreamBody } from "./http-body";
+import {
+  decodeRequestBody,
+  encodeUpstreamBody,
+  encodeUpstreamBodyForRoute,
+} from "./http-body";
 import {
   findReadTool,
   findShellTool,
@@ -3547,9 +3551,22 @@ async function forwardToUpstream(
   // forwarded by the builders) — set it here to match the bytes we actually
   // send. `serializedBody` (the uncompressed JSON) stays the return value so
   // cache analytics / the cache-warmer keep comparing uncompressed prefixes.
-  const { body: upstreamBody, contentEncoding } = encodeUpstreamBody(
+  //
+  // Scope re-encoding to the same provider the client targeted: only replay the
+  // encoding on a native passthrough or an explicit destination override
+  // (X-Lore-Upstream-URL / X-Lore-Provider). If the gateway auto-translated the
+  // wire protocol with no explicit destination, the upstream is a provider the
+  // client never targeted and may reject the encoding — forward uncompressed
+  // (always accepted). See mayReencodeUpstream for the rationale (#1032).
+  const { body: upstreamBody, contentEncoding } = encodeUpstreamBodyForRoute(
     serializedBody,
     req.rawHeaders["content-encoding"],
+    {
+      hasUpstreamUrlOverride: !!headerUpstream,
+      hasProviderOverride: !!providerID,
+      ingressProtocol: req.protocol,
+      effectiveProtocol,
+    },
   );
   if (contentEncoding) headers["content-encoding"] = contentEncoding;
 
