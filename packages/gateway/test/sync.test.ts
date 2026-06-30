@@ -592,6 +592,51 @@ describe("BLOCKER regressions", () => {
   });
 });
 
+// The sync scheduler runs IN-PROCESS inside the Pi/OpenCode plugins, which own
+// a full-screen TUI. Its background error notices used to be raw `console.error`
+// — any byte of which corrupts the render (the class of bug that broke Pi on
+// Windows). They now route through `@loreai/core`'s `log`, so the host's
+// `silenceStderr()` switch suppresses them. This drives a REAL migrated site (a
+// transient push-upsert error → `log.notice("sync: push upsert …")`).
+describe("sync — in-process TUI safety", () => {
+  let stderr: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    stderr.mockRestore();
+    // Never leak silenced state into other files sharing this worker.
+    log.silenceStderr(false);
+  });
+
+  async function pushWithTransientError(): Promise<void> {
+    syncData.enableSync("basic");
+    insertKnowledge("k1", "hello");
+    // Non-quota, non-poison → falls through to the transient `log.notice`.
+    upsertError = { code: "08006", message: "network" };
+    await pushOnce(makeClient() as never);
+  }
+
+  test("a sync error is visible on a standalone CLI (the leak we guard)", async () => {
+    log.silenceStderr(false);
+    await pushWithTransientError();
+    const wrote = stderr.mock.calls.some((args: unknown[]) =>
+      args.join(" ").includes("sync: push upsert"),
+    );
+    expect(wrote).toBe(true);
+  });
+
+  test("silenceStderr() suppresses sync's stderr writes (in-process/TUI mode)", async () => {
+    log.silenceStderr(true);
+    await pushWithTransientError();
+    // Raw `console.error` would ignore the switch and still corrupt the TUI;
+    // routing through `log` is what makes this silence-able.
+    expect(stderr).not.toHaveBeenCalled();
+  });
+});
+
 describe("pullOnce", () => {
   test("applies a new remote row and a tombstone", async () => {
     syncData.enableSync("basic");

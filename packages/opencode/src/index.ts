@@ -10,7 +10,11 @@ import {
 // exported from the entry module as a plugin; leaking these helpers pushed
 // `undefined` into the host hooks array and crashed it on event dispatch
 // (`undefined is not an object (evaluating 'A.event')`). See ./internal.ts.
-import { applyLoreProviderConfig, probeGateway } from "./internal";
+import {
+  applyLoreProviderConfig,
+  probeGateway,
+  surfaceGatewayUnavailable,
+} from "./internal";
 
 /**
  * Lore plugin for OpenCode — transparent LLM proxy routing.
@@ -191,8 +195,9 @@ export const LorePlugin: Plugin = async (ctx) => {
     const inTestEnv = isInertTestEnv();
 
     // We're loaded by a real OpenCode process, which owns a full-screen TUI:
-    // any byte on stdout/stderr corrupts the render. Silence stderr for the
-    // core logger — shared with the in-process gateway — so NOTHING (not even
+    // any byte on stdout/stderr corrupts the render. Flip the core logger's
+    // process-global silence flag — which the in-process gateway's own (bundled)
+    // copy of `core` reads off `globalThis` too — so NOTHING (not even
     // `log.error` or gateway warnings) reaches the terminal. Everything still
     // lands in the log file + Sentry sink (`lore logs`). Skipped under inert
     // test mode so unrelated suites keep their console.
@@ -242,7 +247,10 @@ export const LorePlugin: Plugin = async (ctx) => {
               " (or `run build` for a dev checkout)."
             : "")
         : `${base} Ensure @loreai/gateway is installed.`;
-      log.error(msg);
+      // `log.error` is silenced on stderr in embedded/TUI mode, so it alone is
+      // invisible to a user in the OpenCode TUI. Also raise a TUI-safe toast so
+      // a totally-failed gateway isn't a silent no-op (Daniel's Windows report).
+      surfaceGatewayUnavailable(ctx.client, msg);
     }
   }
 

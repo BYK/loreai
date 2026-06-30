@@ -10,9 +10,12 @@
  * `applyLoreProviderConfig` returns `undefined`, so the host crashed on the
  * first hook dispatch with `undefined is not an object (evaluating 'A.event')`
  * (the `?.` guards the `.event` property, not the `undefined` hook element).
- * Keeping them in a separate module means the entry module exposes only the
- * plugin function itself, while tests can still import them here.
+ *  Keeping them in a separate module means the entry module exposes only the
+ *  plugin function itself, while tests can still import them here.
  */
+
+import type { PluginInput } from "@opencode-ai/plugin";
+import { log } from "@loreai/core";
 
 /**
  * Pin every opencode provider's `options.baseURL` to the Lore gateway.
@@ -75,5 +78,44 @@ export async function probeGateway(
     return res.ok;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Surface a fatal "Lore is unavailable" condition to the user.
+ *
+ * In embedded/TUI mode the core logger's stderr is hard-silenced (see
+ * `log.silenceStderr()` at plugin activation), so `log.error` alone lands only
+ * in the log file + Sentry sink — invisible to a user sitting inside OpenCode's
+ * full-screen TUI. A toast is the one channel that is BOTH user-visible and
+ * TUI-safe: `showToast` posts to the OpenCode server over HTTP and is rendered
+ * inside the TUI's own render loop, so it never writes a raw byte to the
+ * terminal and cannot corrupt the screen (unlike the `process.stderr.write`
+ * this replaced).
+ *
+ * Fire-and-forget and swallow EVERY failure: a missing/headless TUI, or an
+ * older server without the `/tui/show-toast` route, must never turn a
+ * degraded-but-running session into a crash.
+ */
+export function surfaceGatewayUnavailable(
+  client: PluginInput["client"] | undefined,
+  message: string,
+): void {
+  // File + Sentry sink (silenced on stderr in embedded mode).
+  log.error(message);
+  try {
+    const pending = client?.tui?.showToast({
+      body: { title: "Lore", message, variant: "error" },
+    });
+    // The SDK call defaults to throwOnError=false (resolves rather than
+    // rejects), but guard `.catch` defensively in case a mock/older client
+    // returns a bare promise — a rejected toast must never bubble up.
+    (
+      pending as
+        | { catch?: (cb: (reason: unknown) => void) => unknown }
+        | undefined
+    )?.catch?.(() => {});
+  } catch {
+    // showToast threw synchronously — never propagate a notification failure.
   }
 }

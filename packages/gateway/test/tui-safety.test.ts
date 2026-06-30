@@ -13,8 +13,11 @@ import { parseCurlHeaders } from "../src/config";
  * in config.ts emits a `[lore]` warning on a malformed header line) to prove:
  *   1. the site routes through `@loreai/core`'s `log`, not raw `console.*`;
  *   2. `silenceStderr()` called via the `@loreai/core` barrel reaches code in
- *      the *gateway* package — i.e. both packages share one `log` instance,
- *      which is exactly the cross-package wiring the plugins rely on.
+ *      the *gateway* package. (Under vitest both resolve to the same `core`
+ *      source module. In PRODUCTION the bundled gateway inlines its OWN copy of
+ *      `core`, so the flag instead bridges the two copies via a process-global
+ *      on `globalThis` — that separate bundled-boundary case is covered by
+ *      core/test/log.test.ts's cross-instance test, not this one.)
  */
 describe("in-process gateway TUI safety", () => {
   let stderr: ReturnType<typeof vi.spyOn>;

@@ -22,7 +22,7 @@
  *                          skipped).
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { syncData, getKV, setKV } from "@loreai/core";
+import { syncData, getKV, setKV, log } from "@loreai/core";
 import { getAuthedClient } from "./supabase";
 
 const PAGE = 200;
@@ -214,9 +214,7 @@ async function pushEntry(
       .update(tombstone)
       .match(decomposeId(table, effectiveId));
     if (error) {
-      console.error(
-        `sync: push delete ${table}/${effectiveId}: ${error.message}`,
-      );
+      log.notice(`sync: push delete ${table}/${effectiveId}: ${error.message}`);
       return "stop"; // transient; keep pending so the delete isn't lost
     }
     const prev = syncData.getSyncState(table, effectiveId);
@@ -263,14 +261,14 @@ async function pushEntry(
     const kind = classifyPushError(error);
     if (kind === "quota") {
       if (!res.quotaHit) res.quotaHit = { table, message: error.message };
-      console.error(`sync: quota on ${table} — ${error.message}`);
+      log.notice(`sync: quota on ${table} — ${error.message}`);
       return "stop"; // pause THIS table; keep the row pending (a delete frees it)
     }
     if (kind === "poison") {
       // The row violates a size/other CHECK and can NEVER be uploaded. Do NOT
       // pause the table (that would wedge it forever) — record it and advance
       // past it so the rest of the table keeps syncing.
-      console.error(
+      log.notice(
         `sync: dropping unsyncable ${table}/${effectiveId}: ${error.message}`,
       );
       syncData.recordConflict(table, effectiveId, "rejected_unsyncable", row);
@@ -282,9 +280,7 @@ async function pushEntry(
       });
       return "ok";
     }
-    console.error(
-      `sync: push upsert ${table}/${effectiveId}: ${error.message}`,
-    );
+    log.notice(`sync: push upsert ${table}/${effectiveId}: ${error.message}`);
     return "stop"; // transient — keep pending so we retry (never lose a write)
   }
 
@@ -346,7 +342,7 @@ export async function pullOnce(client: SupabaseClient): Promise<SyncResult> {
       q = q.gte("updated_at", sinceIso);
       const { data, error } = await q;
       if (error) {
-        console.error(`sync: pull ${meta.table}: ${error.message}`);
+        log.notice(`sync: pull ${meta.table}: ${error.message}`);
         break;
       }
       const rows = (data ?? []) as Array<Record<string, unknown>>;
@@ -419,7 +415,7 @@ async function drainTimestamp(
     for (const c of cols) q = q.order(c, { ascending: true });
     const { data, error } = await q.limit(PAGE);
     if (error) {
-      console.error(`sync: pull drain ${meta.table}: ${error.message}`);
+      log.notice(`sync: pull drain ${meta.table}: ${error.message}`);
       break;
     }
     let rows = (data ?? []) as Array<Record<string, unknown>>;
@@ -438,7 +434,7 @@ async function drainTimestamp(
         .order(cols[1], { ascending: true })
         .limit(PAGE);
       if (nextErr) {
-        console.error(`sync: pull drain ${meta.table}: ${nextErr.message}`);
+        log.notice(`sync: pull drain ${meta.table}: ${nextErr.message}`);
         break;
       }
       rows = (next ?? []) as Array<Record<string, unknown>>;
@@ -587,13 +583,13 @@ export function startSyncScheduler(
     inflight = syncOnce()
       .then((r) => {
         if (r.quotaHit) {
-          console.error(
+          log.notice(
             `sync: quota reached on ${r.quotaHit.table}; that table paused until next change`,
           );
         }
       })
       .catch((e) =>
-        console.error(`sync: background cycle failed: ${(e as Error).message}`),
+        log.error(`sync: background cycle failed: ${(e as Error).message}`),
       )
       .finally(() => {
         inflight = null;

@@ -68,8 +68,9 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
     process.env.NODE_ENV === "test" && process.env.LORE_PI_FORCE_ACTIVE !== "1";
 
   // We're being loaded by a real Pi process, which owns a full-screen TUI: any
-  // byte on stdout/stderr corrupts the render. Silence stderr for the core
-  // logger — which the in-process gateway shares — so NOTHING (not even
+  // byte on stdout/stderr corrupts the render. Flip the core logger's
+  // process-global silence flag — which the in-process gateway's own (bundled)
+  // copy of `core` reads off `globalThis` too — so NOTHING (not even
   // `log.error` or gateway warnings) can reach the terminal. Everything still
   // lands in the log file and Sentry sink; read it with `lore logs`. Skipped
   // under inert test mode so unrelated suites in the same worker keep their
