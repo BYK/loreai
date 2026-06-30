@@ -473,6 +473,42 @@ function buildOpenAIStreamResponse(resp: GatewayResponse): Response {
 // GatewayRequest → OpenAI upstream request
 // ---------------------------------------------------------------------------
 
+/**
+ * Hosts whose OpenAI-compatible Chat Completions endpoint is served WITHOUT the
+ * conventional `/v1` path segment. GitHub Copilot serves chat completions at
+ * `https://api.githubcopilot.com/chat/completions`; prepending `/v1` yields
+ * `404 page not found` (issue #1052). Keyed by hostname so it holds regardless
+ * of which routing tier produced the base URL.
+ *
+ * Foreground requests that come through the fetch interceptor forward verbatim
+ * to the client's original endpoint (see `verbatimUpstreamUrl`); this allowlist
+ * covers the paths the gateway must RECONSTRUCT from scratch — background worker
+ * requests (which have no original request) and any provider configured via
+ * `LORE_UPSTREAM_<PROVIDER>` with no preserved endpoint path.
+ */
+const OPENAI_ROOT_PATH_HOSTS: ReadonlySet<string> = new Set([
+  "api.githubcopilot.com",
+]);
+
+/**
+ * Build the OpenAI Chat Completions upstream URL for an upstream base.
+ *
+ * Most OpenAI-compatible providers serve at `<base>/v1/chat/completions`, so the
+ * route tables store a bare origin and the gateway appends `/v1/...`. Hosts in
+ * `OPENAI_ROOT_PATH_HOSTS` omit the `/v1` segment. Falls back to the `/v1` form
+ * when `base` cannot be parsed as a URL.
+ */
+export function buildOpenAIChatCompletionsUrl(base: string): string {
+  let hostname: string | null = null;
+  try {
+    hostname = new URL(base).hostname;
+  } catch {
+    hostname = null;
+  }
+  const prefix = hostname && OPENAI_ROOT_PATH_HOSTS.has(hostname) ? "" : "/v1";
+  return `${base}${prefix}/chat/completions`;
+}
+
 export function buildOpenAIUpstreamRequest(
   req: GatewayRequest,
   upstreamBase: string,
@@ -538,7 +574,7 @@ export function buildOpenAIUpstreamRequest(
   }
 
   return {
-    url: `${upstreamBase}/v1/chat/completions`,
+    url: buildOpenAIChatCompletionsUrl(upstreamBase),
     headers,
     body,
   };

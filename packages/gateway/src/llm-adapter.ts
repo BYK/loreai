@@ -41,6 +41,7 @@ import {
 import { recordWorkerCost } from "./cost-tracker";
 import { upstreamFetch } from "./fetch";
 import { extractJSONFromSSE } from "./translate/types";
+import { buildOpenAIChatCompletionsUrl } from "./translate/openai";
 import { isBedrockMantleHost, toMantleModelId } from "./translate/bedrock";
 import {
   toVertexBody,
@@ -639,7 +640,9 @@ function buildOpenAIWorkerRequest(
   messages.push({ role: "user", content: user });
 
   return {
-    url: `${target.url}/v1/chat/completions`,
+    // Background workers have no original request to forward verbatim, so the
+    // URL is reconstructed host-aware (GitHub Copilot omits `/v1`, issue #1052).
+    url: buildOpenAIChatCompletionsUrl(target.url),
     headers: {
       "Content-Type": "application/json",
       ...authHeaders(cred),

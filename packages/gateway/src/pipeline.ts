@@ -105,6 +105,8 @@ import {
   extractProjectHeader,
   resolveUpstreamRoute,
   extractUpstreamUrlHeader,
+  extractUpstreamPathHeader,
+  verbatimUpstreamUrl,
   extractProviderHeader,
   resolveLastSeenProvider,
   resolveProviderRoute,
@@ -3291,6 +3293,9 @@ async function forwardToUpstream(
   // Preserve "openai-responses" from ingress — model prefix routing returns
   // "openai" for OpenAI models, but we must not downgrade the wire protocol.
   const headerUpstream = extractUpstreamUrlHeader(req.rawHeaders);
+  // The client's ORIGINAL endpoint pathname (set by the fetch interceptor), used
+  // below to forward verbatim instead of synthesizing a canonical `/v1/...` path.
+  const headerUpstreamPath = extractUpstreamPathHeader(req.rawHeaders);
   const providerID = extractProviderHeader(req.rawHeaders);
   let providerRoute = providerID ? resolveProviderRoute(providerID) : null;
   // Dynamic fallback: look up unknown providers from models.dev cache.
@@ -3506,6 +3511,24 @@ async function forwardToUpstream(
       (body as { model?: string }).model = toMantleModelId(req.model);
     }
   }
+
+  // Verbatim endpoint passthrough (#1052): when the fetch interceptor preserved
+  // the client's original endpoint path (x-lore-upstream-path) AND we are a pure
+  // passthrough — same host (headerUpstream is the highest-priority base, so it
+  // equals effectiveUpstreamBase) and same wire protocol (no translation) — POST
+  // to the exact original endpoint instead of the reconstructed canonical path.
+  // This is what lets providers whose endpoint omits `/v1` (GitHub Copilot's
+  // `/chat/completions`) or uses a non-standard prefix work without an allowlist.
+  // No-ops for the standard `/v1/...` case (verbatim == reconstructed), and the
+  // protocol-equality guard excludes vertex/bedrock and any translated turn.
+  url = verbatimUpstreamUrl({
+    reconstructedUrl: url,
+    effectiveUpstreamBase,
+    headerUpstream,
+    upstreamPath: headerUpstreamPath,
+    effectiveProtocol,
+    ingressProtocol: req.protocol,
+  });
 
   // Apply user-supplied LORE_UPSTREAM_EXTRA_HEADERS as the final overlay so
   // corporate proxies, LiteLLM team-routing tokens, Cloudflare AI Gateway

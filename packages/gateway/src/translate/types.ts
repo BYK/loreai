@@ -657,6 +657,7 @@ const GATEWAY_MANAGED_HEADERS = new Set([
   // Lore-specific (injected by fetch interceptor / plugin hooks)
   "x-lore-provider",
   "x-lore-upstream-url",
+  "x-lore-upstream-path",
   "x-lore-session-id",
   "x-lore-project",
   "x-lore-git-remote",

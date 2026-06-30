@@ -375,6 +375,92 @@ export function extractUpstreamUrlHeader(
   }
 }
 
+/** Maximum allowed length for an upstream path header value. */
+const MAX_UPSTREAM_PATH_LENGTH = 512;
+
+/**
+ * Extract and validate the `X-Lore-Upstream-Path` header from a request.
+ *
+ * Set by the fetch interceptor to the client's ORIGINAL endpoint pathname (the
+ * full pathname, e.g. `/chat/completions`, `/v1/messages`, or a prefixed
+ * `/api/v1/chat/completions`). Lets the gateway forward to the exact endpoint
+ * the SDK intended instead of synthesizing a canonical `/v1/...` path — required
+ * for providers whose endpoint omits `/v1` (GitHub Copilot, issue #1052).
+ *
+ * Returns the sanitized absolute path, or `undefined` when absent/invalid. The
+ * value is only ever appended to an already-resolved upstream origin (see
+ * `verbatimUpstreamUrl`), so it can never change the destination host; these
+ * checks are defense-in-depth against a malformed/hostile header.
+ */
+export function extractUpstreamPathHeader(
+  headers: Record<string, string>,
+): string | undefined {
+  const raw = headers["x-lore-upstream-path"];
+  if (!raw) return undefined;
+
+  // Sanitize: strip control characters, trim.
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional control-character sanitization
+  const sanitized = raw.replace(/[\x00-\x1f\x7f]/g, "").trim();
+  if (!sanitized || sanitized.length > MAX_UPSTREAM_PATH_LENGTH)
+    return undefined;
+  // Must be a single absolute path: one leading slash (reject protocol-relative
+  // `//host`), no whitespace, no `..` traversal.
+  if (!sanitized.startsWith("/") || sanitized.startsWith("//"))
+    return undefined;
+  if (sanitized.includes("..") || /\s/.test(sanitized)) return undefined;
+  return sanitized;
+}
+
+/**
+ * Decide the final upstream URL, preferring verbatim passthrough of the client's
+ * original endpoint over the gateway-reconstructed canonical path.
+ *
+ * Returns `origin(effectiveUpstreamBase) + upstreamPath` (the client's original
+ * URL) when ALL hold; otherwise returns `reconstructedUrl` unchanged:
+ *  - `headerUpstream` is present — the base came from the original host via
+ *    `X-Lore-Upstream-URL` (the highest-priority routing tier), so we are NOT
+ *    rerouting to a different provider;
+ *  - `upstreamPath` is present — the interceptor preserved the endpoint;
+ *  - `effectiveProtocol === ingressProtocol` — we are NOT translating wire
+ *    protocols (which would change the endpoint shape; e.g. anthropic↔openai),
+ *    and the path belongs to the protocol we're actually speaking. This also
+ *    excludes `vertex` (a distinct effectiveProtocol with its own URL shape).
+ *
+ * Anchoring at the base ORIGIN (not the base string) reproduces the original URL
+ * exactly even when the base carries a prefix already contained in the full
+ * pathname (OpenRouter `/api`, Fireworks `/inference`) — never doubling it.
+ */
+export function verbatimUpstreamUrl(params: {
+  reconstructedUrl: string;
+  effectiveUpstreamBase: string;
+  headerUpstream: string | undefined;
+  upstreamPath: string | undefined;
+  effectiveProtocol: "anthropic" | "openai" | "openai-responses" | "vertex";
+  ingressProtocol: "anthropic" | "openai" | "openai-responses" | "vertex";
+}): string {
+  const {
+    reconstructedUrl,
+    effectiveUpstreamBase,
+    headerUpstream,
+    upstreamPath,
+    effectiveProtocol,
+    ingressProtocol,
+  } = params;
+  if (!headerUpstream || !upstreamPath) return reconstructedUrl;
+  // Only forward verbatim on a standard wire protocol whose endpoint we did NOT
+  // translate. `vertex` builds a distinct `:rawPredict` URL (model in the path)
+  // and must never be overridden; the equality check below also rejects any
+  // translated turn (e.g. anthropic ingress → openai egress).
+  if (effectiveProtocol === "vertex" || effectiveProtocol !== ingressProtocol) {
+    return reconstructedUrl;
+  }
+  try {
+    return new URL(effectiveUpstreamBase).origin + upstreamPath;
+  } catch {
+    return reconstructedUrl;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Provider-ID-based routing
 // ---------------------------------------------------------------------------
@@ -408,7 +494,12 @@ export type ProviderRoute = {
  * header, this table is consulted BEFORE the model-prefix UPSTREAM_ROUTES.
  *
  * URLs must NOT include `/v1` — the gateway appends `/v1/messages`,
- * `/v1/chat/completions`, or `/v1/responses` itself.
+ * `/v1/chat/completions`, or `/v1/responses` itself. The exception is providers
+ * whose API omits the `/v1` segment (GitHub Copilot serves chat completions at
+ * `/chat/completions`, issue #1052): foreground requests forward verbatim to the
+ * client's original endpoint (see `verbatimUpstreamUrl`), and reconstructed
+ * paths (background workers) are handled host-aware by
+ * `buildOpenAIChatCompletionsUrl` in `translate/openai.ts`.
  *
  * Data sourced from models.dev provider database (https://models.dev/providers).
  * Protocol derived from the provider's SDK package: `@ai-sdk/anthropic` →

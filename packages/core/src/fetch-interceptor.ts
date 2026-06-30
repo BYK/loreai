@@ -177,7 +177,21 @@ export function detectProtocolFromBody(bodyStr: string): BodyProtocol | null {
   }
 }
 
-type Rewrite = { gatewayUrl: string; upstreamBase: string };
+type Rewrite = {
+  gatewayUrl: string;
+  upstreamBase: string;
+  /**
+   * The client's ORIGINAL upstream endpoint pathname (e.g. `/chat/completions`,
+   * `/v1/messages`, or a prefixed `/api/v1/chat/completions`). Forwarded to the
+   * gateway as `x-lore-upstream-path` so it can POST to the exact endpoint the
+   * SDK intended instead of synthesizing a canonical `/v1/...` path. This is the
+   * full pathname (NOT the post-base suffix) so the gateway can reconstruct the
+   * original URL as `origin(base) + pathname` regardless of any base prefix —
+   * required for providers whose endpoint omits `/v1` (GitHub Copilot's
+   * `/chat/completions`, issue #1052) or uses a non-standard prefix.
+   */
+  upstreamPath: string;
+};
 
 /**
  * Rewrite an intercepted URL to the gateway, handling both standard /v1/...
@@ -192,6 +206,7 @@ function interceptUrl(upstream: URL, gateway: URL): Rewrite | null {
     return {
       gatewayUrl: `${gateway.origin}${upstream.pathname.slice(v1Idx)}${upstream.search}`,
       upstreamBase: upstream.origin + upstream.pathname.slice(0, v1Idx),
+      upstreamPath: upstream.pathname,
     };
   }
   // Try non-standard path rewrites (e.g. /codex/responses → /v1/codex/responses)
@@ -203,6 +218,7 @@ function interceptUrl(upstream: URL, gateway: URL): Rewrite | null {
         gatewayUrl: `${gateway.origin}${canonical}${upstream.search}`,
         upstreamBase:
           upstream.origin + upstream.pathname.slice(0, -suffix.length),
+        upstreamPath: upstream.pathname,
       };
     }
   }
@@ -239,6 +255,7 @@ export function interceptUrlForProtocol(
   return {
     gatewayUrl: `${gateway.origin}${gatewayPath}${upstream.search}`,
     upstreamBase,
+    upstreamPath: upstream.pathname,
   };
 }
 
@@ -290,7 +307,8 @@ export function shouldIntercept(url: string, gatewayBase: string): boolean {
  * The interceptor:
  * 1. Checks if the outgoing URL matches a known LLM API path
  * 2. Rewrites the URL to the gateway, preserving the path
- * 3. Adds `X-Lore-Upstream-URL` with the original upstream base
+ * 3. Adds `X-Lore-Upstream-URL` (base) and `X-Lore-Upstream-Path` (original
+ *    endpoint pathname, for verbatim forwarding)
  * 4. Injects dynamic `X-Lore-*` context headers from `getHeaders()`
  * 5. Preserves ALL original headers (auth, content-type, etc.)
  *
@@ -322,7 +340,8 @@ export function getOriginalFetch(): typeof globalThis.fetch {
 /**
  * Build the gateway-bound headers for an intercepted request: preserve all
  * original headers (auth, content-type, etc.), set `X-Lore-Upstream-URL` to
- * the resolved upstream base, and inject dynamic `X-Lore-*` context headers.
+ * the resolved upstream base, `X-Lore-Upstream-Path` to the original endpoint
+ * pathname, and inject dynamic `X-Lore-*` context headers.
  *
  * Shared by both the URL-matched path (Path 1) and the body-detected path
  * (Path 2) so header handling can never drift between them.
@@ -331,6 +350,7 @@ function buildGatewayHeaders(
   input: RequestInfo | URL,
   init: RequestInit | undefined,
   upstreamBase: string,
+  upstreamPath: string,
   config: FetchInterceptorConfig,
 ): Headers {
   // Handle both `fetch(url, {headers})` and `fetch(new Request(url, {headers}))`.
@@ -344,6 +364,15 @@ function buildGatewayHeaders(
   // Pass the original upstream base URL (everything before the API path).
   // The gateway uses this as the highest-priority routing signal.
   headers.set("x-lore-upstream-url", upstreamBase);
+
+  // Pass the client's ORIGINAL endpoint pathname so the gateway can forward
+  // verbatim instead of synthesizing a canonical `/v1/...` path. This is what
+  // lets providers whose endpoint omits `/v1` (GitHub Copilot's
+  // `/chat/completions`, issue #1052) or uses a non-standard prefix work as a
+  // pure passthrough. Only set when it's a sane absolute path.
+  if (upstreamPath.startsWith("/")) {
+    headers.set("x-lore-upstream-path", upstreamPath);
+  }
 
   // Inject dynamic context headers (session ID, project, git remote, etc.).
   // Only set if not already present — per-request hooks may have set them.
@@ -434,6 +463,7 @@ export function installFetchInterceptor(
         input,
         init,
         rewrite.upstreamBase,
+        rewrite.upstreamPath,
         config,
       );
       log.info(
@@ -456,6 +486,7 @@ export function installFetchInterceptor(
           input,
           init,
           rewrite.upstreamBase,
+          rewrite.upstreamPath,
           config,
         );
         log.info(
