@@ -4690,6 +4690,109 @@ export function recordCacheTurnUsage(
 }
 
 /**
+ * Persist a turn's temporal messages — the latest user message + the assistant
+ * response — and their tool-call traces. Extracted from postResponse() as a
+ * testable seam (#1084).
+ *
+ * The four writes (user store + tool-calls, then assistant store + tool-calls)
+ * are batched into a SINGLE savepoint so the post-response phase commits ONCE
+ * instead of ~4 times, cutting SQLite writer + WAL contention. `resolveToolResults`
+ * is pure in-memory (temporal-adapter.ts) and MUST run BETWEEN the two stores —
+ * the user message is stored with its ORIGINAL tool_result content, before
+ * resolveToolResults strips it — so it stays inside the same savepoint. The
+ * stores are idempotent UPSERTs keyed by message id, so the all-or-nothing
+ * rollback on a mid-batch error is recoverable: the next turn re-includes and
+ * re-stores these messages.
+ *
+ * In no-store mode (amnesia / x-lore-no-store) ONLY the in-memory resolve runs;
+ * nothing is written (but resolveToolResults still mutates `loreMessages`, which
+ * downstream reconstruct-after-eviction relies on).
+ */
+export function storeTurnTemporal(input: {
+  loreMessages: LoreMessageWithParts[];
+  /** The upstream assistant response content blocks (resp.content). */
+  assistantContentBlocks: GatewayContentBlock[];
+  usage: GatewayUsage;
+  model: string;
+  projectPath: string;
+  sessionID: string;
+  noStore: boolean;
+}): void {
+  const { loreMessages, projectPath, sessionID, noStore } = input;
+
+  if (noStore) {
+    // Still resolve tool results in-memory (needed downstream), but write nothing.
+    resolveToolResults(loreMessages);
+    return;
+  }
+
+  // Resolve (and, if needed, lazily backfill/merge) the project OUTSIDE the
+  // savepoint. `ensureProject` can reach `mergeProjectInternal`'s raw
+  // `BEGIN IMMEDIATE` on the NULL-git_remote backfill-with-conflict path, which
+  // would nest inside the savepoint's transaction and throw "cannot start a
+  // transaction within a transaction". Warming it here makes the `ensureProject`
+  // calls inside temporal.store / recordToolCalls cheap cache hits. (#1084.)
+  ensureProject(projectPath);
+
+  withSavepoint("post_response_temporal", () => {
+    // Store the latest user message BEFORE resolveToolResults — we want the
+    // original content (including tool_result text), not the placeholder
+    // "[tool results provided]" that resolveToolResults creates after merging.
+    for (let i = loreMessages.length - 1; i >= 0; i--) {
+      if (loreMessages[i].info.role === "user") {
+        temporal.store({
+          projectPath,
+          info: loreMessages[i].info,
+          parts: loreMessages[i].parts,
+        });
+        // The latest user message carries tool_result blocks that resolve the
+        // PRIOR assistant turn's tool calls — record their outcomes
+        // (status/error/duration) keyed by call_id.
+        temporal.recordToolCalls({
+          projectPath,
+          info: loreMessages[i].info,
+          parts: loreMessages[i].parts,
+        });
+        break;
+      }
+    }
+
+    // Resolve tool results for gradient transform (merges tool_result into
+    // assistant parts, strips from user messages — needed for reconstruct-
+    // after-eviction pattern but not for temporal storage above).
+    resolveToolResults(loreMessages);
+
+    // Build and store the assistant response message.
+    // Strip recall marker text blocks — they contain the raw query string and
+    // pollute FTS results with self-referential noise.
+    const assistantContent = input.assistantContentBlocks.filter(
+      (b) => !(b.type === "text" && isRecallMarker(b.text)),
+    );
+    const assistantMsg = gatewayMessagesToLore(
+      [{ role: "assistant", content: assistantContent }],
+      sessionID,
+    )[0];
+    updateAssistantMessageTokens(assistantMsg, input.usage, input.model);
+    if (assistantContent.length > 0) {
+      temporal.store({
+        projectPath,
+        info: assistantMsg.info,
+        parts: assistantMsg.parts,
+      });
+    }
+    // Always record structured tool-call traces — even when the assistant
+    // content is empty after recall-marker stripping, or when partsToText would
+    // produce empty content (tool-only / all-failed turns). Tool parts survive
+    // the text-only recall-marker filter above.
+    temporal.recordToolCalls({
+      projectPath,
+      info: assistantMsg.info,
+      parts: assistantMsg.parts,
+    });
+  });
+}
+
+/**
  * Run after a successful response: calibrate, store temporal messages,
  * and schedule background work (distillation, curation).
  */
@@ -4774,64 +4877,18 @@ function postResponse(
     // tool_result UPDATE is a harmless no-op (no phantom 'pending' rows leak).
     const noStore =
       sessionState.amnesia || req.rawHeaders["x-lore-no-store"] === "true";
-    if (!noStore) {
-      // Store the latest user message BEFORE resolveToolResults — we want the
-      // original content (including tool_result text), not the placeholder
-      // "[tool results provided]" that resolveToolResults creates after merging.
-      for (let i = loreMessages.length - 1; i >= 0; i--) {
-        if (loreMessages[i].info.role === "user") {
-          temporal.store({
-            projectPath,
-            info: loreMessages[i].info,
-            parts: loreMessages[i].parts,
-          });
-          // The latest user message carries tool_result blocks that resolve
-          // the PRIOR assistant turn's tool calls — record their outcomes
-          // (status/error/duration) keyed by call_id.
-          temporal.recordToolCalls({
-            projectPath,
-            info: loreMessages[i].info,
-            parts: loreMessages[i].parts,
-          });
-          break;
-        }
-      }
-    }
 
-    // Resolve tool results for gradient transform (merges tool_result into
-    // assistant parts, strips from user messages — needed for reconstruct-
-    // after-eviction pattern but not for temporal storage above).
-    resolveToolResults(loreMessages);
-
-    if (!noStore) {
-      // Build and store the assistant response message.
-      // Strip recall marker text blocks — they contain the raw query string
-      // and pollute FTS results with self-referential noise.
-      const assistantContent = resp.content.filter(
-        (b) => !(b.type === "text" && isRecallMarker(b.text)),
-      );
-      const assistantMsg = gatewayMessagesToLore(
-        [{ role: "assistant", content: assistantContent }],
-        sessionID,
-      )[0];
-      updateAssistantMessageTokens(assistantMsg, usage, resp.model);
-      if (assistantContent.length > 0) {
-        temporal.store({
-          projectPath,
-          info: assistantMsg.info,
-          parts: assistantMsg.parts,
-        });
-      }
-      // Always record structured tool-call traces — even when the assistant
-      // content is empty after recall-marker stripping, or when partsToText
-      // would produce empty content (tool-only / all-failed turns). Tool parts
-      // survive the text-only recall-marker filter above.
-      temporal.recordToolCalls({
-        projectPath,
-        info: assistantMsg.info,
-        parts: assistantMsg.parts,
-      });
-    }
+    // Persist (and tool-trace) this turn's messages, batched into one savepoint.
+    // Extracted seam — see storeTurnTemporal (#1084).
+    storeTurnTemporal({
+      loreMessages,
+      assistantContentBlocks: resp.content,
+      usage,
+      model: resp.model,
+      projectPath,
+      sessionID,
+      noStore,
+    });
 
     // Update session state (persisted in the batched save after messageCount update)
     sessionState.turnsSinceCuration =
