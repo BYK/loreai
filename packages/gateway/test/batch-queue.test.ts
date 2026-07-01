@@ -27,6 +27,7 @@ import {
   isTemperatureUnsupportedModel,
   markTemperatureUnsupported,
 } from "../src/llm-adapter";
+import { _setModelDataForTest, clearModelDataCache } from "../src/worker-model";
 
 const TEST_AUTH: AuthCredential = { scheme: "api-key", value: "test-key" };
 const getTestAuth = () => TEST_AUTH;
@@ -1267,9 +1268,11 @@ describe("BatchLLMClient", () => {
 describe("BatchLLMClient temperature capability", () => {
   beforeEach(() => {
     _resetTemperatureUnsupportedModels();
+    clearModelDataCache();
   });
   afterEach(() => {
     _resetTemperatureUnsupportedModels();
+    clearModelDataCache();
   });
 
   test("Anthropic batch omits temperature for a model learned to reject it", async () => {
@@ -1318,6 +1321,76 @@ describe("BatchLLMClient temperature capability", () => {
       UPSTREAMS,
       getTestAuth,
       DEFAULT_MODEL,
+      {
+        flushIntervalMs: 60_000,
+        maxQueueSize: 1,
+      },
+    );
+
+    client.prompt("sys", "msg", { workerID: "lore-distill", temperature: 0 });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(fetchCalls[0]?.body?.requests[0]?.params.temperature).toBe(0);
+
+    await client.shutdown();
+  });
+
+  test("Anthropic batch omits temperature UPFRONT for a model models.dev marks temperature:false (no prior 400)", async () => {
+    const inner = createMockLLMClient();
+    // models.dev says this model dropped the sampling `temperature` param.
+    // The batch path must strip it on the FIRST submit — before any 400 — so
+    // it never wastes a round-trip on a guaranteed-to-error item.
+    _setModelDataForTest({
+      "claude-sonnet-5": { id: "claude-sonnet-5", temperature: false },
+    });
+    pushFetchResponse(true, 200, {
+      id: "msgbatch_datatempstrip",
+      processing_status: "in_progress",
+    });
+
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      getTestAuth,
+      { providerID: "anthropic", modelID: "claude-sonnet-5" },
+      {
+        flushIntervalMs: 60_000,
+        maxQueueSize: 1,
+      },
+    );
+
+    client.prompt("sys", "msg", { workerID: "lore-distill", temperature: 0 });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const params = fetchCalls[0]?.body?.requests[0]?.params;
+    expect(params).toBeDefined();
+    expect(params).not.toHaveProperty("temperature");
+    // Proactive strip came from models.dev data, NOT the runtime learning net.
+    expect(
+      isTemperatureUnsupportedModel({
+        providerID: "anthropic",
+        modelID: "claude-sonnet-5",
+      }),
+    ).toBe(false);
+
+    await client.shutdown();
+  });
+
+  test("Anthropic batch keeps temperature when models.dev marks the model temperature:true", async () => {
+    const inner = createMockLLMClient();
+    _setModelDataForTest({
+      "claude-sonnet-4-5": { id: "claude-sonnet-4-5", temperature: true },
+    });
+    pushFetchResponse(true, 200, {
+      id: "msgbatch_datatempkeep",
+      processing_status: "in_progress",
+    });
+
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      getTestAuth,
+      { providerID: "anthropic", modelID: "claude-sonnet-4-5" },
       {
         flushIntervalMs: 60_000,
         maxQueueSize: 1,

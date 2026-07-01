@@ -38,6 +38,7 @@ import {
   isTemperatureUnsupported400,
   isTemperatureUnsupportedModel,
   markTemperatureUnsupported,
+  modelRejectsTemperatureByData,
   normalizeOpenAIUsage,
 } from "./llm-adapter";
 import { upstreamFetch } from "./fetch";
@@ -526,8 +527,12 @@ function systemToText(
  * includes it. The single-request path retries-then-strips + learns the model
  * (see llm-adapter's `temperatureUnsupportedModels`), but a batch item has no
  * per-item retry — a submitted item that includes an unsupported `temperature`
- * just errors — so we must omit it UPFRONT here, consulting the same shared
- * learned set (also fed by this path's own errored-item handler below).
+ * just errors — so we must omit it UPFRONT here. We consult two sources: the
+ * models.dev capability data (`modelRejectsTemperatureByData` — proactive, so
+ * even the FIRST batch for a deprecated-sampling model omits it and never
+ * wastes a round-trip) and the shared runtime learned set
+ * (`isTemperatureUnsupportedModel` — the fallback for models absent from
+ * models.dev, also fed by this path's own errored-item handler below).
  *
  * Returns the original object (no copy) when `temperature` is absent or the
  * model is not known to reject it.
@@ -536,15 +541,14 @@ function paramsWithSupportedTemperature(item: {
   providerID: string;
   params: PendingRequest["params"];
 }): PendingRequest["params"] {
-  if (
-    item.params.temperature == null ||
-    !isTemperatureUnsupportedModel({
+  if (item.params.temperature == null) return item.params;
+  const rejectsTemperature =
+    modelRejectsTemperatureByData(item.params.model) ||
+    isTemperatureUnsupportedModel({
       providerID: item.providerID,
       modelID: item.params.model,
-    })
-  ) {
-    return item.params;
-  }
+    });
+  if (!rejectsTemperature) return item.params;
   const { temperature: _omit, ...rest } = item.params;
   return rest;
 }
