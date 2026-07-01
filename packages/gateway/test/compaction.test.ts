@@ -11,6 +11,8 @@ import {
   COMPACTION_SYSTEM_PATTERNS,
   COMPACTION_USER_PATTERNS,
   maxReportedUsageForModel,
+  autocompactThresholdForModel,
+  AUTOCOMPACT_THRESHOLD,
   DEFAULT_MAX_REPORTED_USAGE,
   scaleUsageForClient,
 } from "../src/compaction";
@@ -873,6 +875,45 @@ describe("maxReportedUsageForModel", () => {
 
   test("never returns negative for tiny windows", () => {
     expect(maxReportedUsageForModel(1_000, 20_000)).toBe(0);
+  });
+});
+
+describe("autocompactThresholdForModel", () => {
+  test("200K model reproduces the historical 167K auto-compact point", () => {
+    // effective = 200_000 - min(64_000, 20_000) = 180_000; − 13_000 = 167_000.
+    expect(autocompactThresholdForModel(200_000, 64_000)).toBe(167_000);
+    // ...and equals the retained fallback constant exactly.
+    expect(autocompactThresholdForModel(200_000, 64_000)).toBe(
+      AUTOCOMPACT_THRESHOLD,
+    );
+  });
+
+  test("1M model triggers far higher than the old 167K constant", () => {
+    // effective = 1_000_000 - 20_000 = 980_000; − 13_000 = 967_000. This is the
+    // #983 fix: a 1M host does NOT auto-compact at 167K.
+    expect(autocompactThresholdForModel(1_000_000, 64_000)).toBe(967_000);
+  });
+
+  test("max-output below the 20K reserve is used as-is", () => {
+    // effective = 1_000_000 - 5_000 = 995_000; − 13_000 = 982_000.
+    expect(autocompactThresholdForModel(1_000_000, 5_000)).toBe(982_000);
+  });
+
+  test("is the unscaled sibling of maxReportedUsageForModel (no 0.9x)", () => {
+    for (const [cw, mo] of [
+      [200_000, 64_000],
+      [1_000_000, 64_000],
+      [400_000, 8_000],
+    ] as const) {
+      expect(maxReportedUsageForModel(cw, mo)).toBe(
+        Math.floor(0.9 * autocompactThresholdForModel(cw, mo)),
+      );
+    }
+  });
+
+  test("floors at 0 for windows too small to compact", () => {
+    // effective = 30_000 - 20_000 = 10_000; − 13_000 = −3_000 → 0.
+    expect(autocompactThresholdForModel(30_000, 20_000)).toBe(0);
   });
 });
 

@@ -121,6 +121,25 @@ export function maxReportedUsageForModel(
 }
 
 /**
+ * The host agent's auto-compact TRIGGER point for a model with the given
+ * context window and max-output budget: the UNSCALED `effective − 13k`
+ * (`contextWindow − min(maxOutput, 20k) − 13k`), **not** the `0.9×` reporting
+ * cap. This is the point a host like Claude Code would auto-compact, which is
+ * what the cost-tracker's counterfactual "avoided compactions" estimate models
+ * — distinct from {@link maxReportedUsageForModel}, the client-usage cap.
+ *
+ * For a 200K-context model this returns 167_000 (== {@link AUTOCOMPACT_THRESHOLD}).
+ */
+export function autocompactThresholdForModel(
+  contextWindow: number,
+  maxOutputTokens: number,
+): number {
+  const effective =
+    contextWindow - Math.min(maxOutputTokens, MAX_OUTPUT_RESERVE);
+  return Math.max(0, effective - AUTOCOMPACT_BUFFER_TOKENS);
+}
+
+/**
  * Cap used when the model's real window is unknown — preserves the historical
  * 200K-model behavior (floor(167_000 × 0.9) = 150_300).
  */

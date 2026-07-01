@@ -11,7 +11,11 @@
  */
 
 import { getModelEntrySync, getWorkerModel } from "./worker-model";
-import { AUTOCOMPACT_THRESHOLD } from "./compaction";
+import {
+  AUTOCOMPACT_THRESHOLD,
+  MAX_OUTPUT_RESERVE,
+  autocompactThresholdForModel,
+} from "./compaction";
 import {
   log,
   data,
@@ -738,6 +742,49 @@ export function recordWarmupCost(
 const POST_COMPACTION_CONTEXT = 30_000;
 
 /**
+ * Per-model auto-compact threshold for the counterfactual estimate. Mirrors
+ * pipeline.ts `maxReportedUsageForModelID`, but returns the UNSCALED auto-compact
+ * trigger point (what a host like Claude Code compacts at) rather than the 0.9×
+ * client-usage reporting cap. An empty/unknown model falls back to the historical
+ * 200K-model value ({@link AUTOCOMPACT_THRESHOLD}), preserving prior behavior.
+ *
+ * Fixes #983: the hardcoded 167K constant assumed a 200K-context model, so the
+ * "avoided compactions" estimate was wrong for other windows — e.g. a 1M-context
+ * model was counted as compacting ~5.8× too often.
+ */
+export function autocompactThresholdForModelID(modelID?: string): number {
+  if (!modelID) return AUTOCOMPACT_THRESHOLD;
+  const entry = getModelEntrySync(modelID);
+  const contextWindow = entry.limit?.context ?? 200_000;
+  const maxOutput = entry.limit?.output ?? MAX_OUTPUT_RESERVE;
+  return autocompactThresholdForModel(contextWindow, maxOutput);
+}
+
+/**
+ * Counterfactual "avoided compactions" for a session that reached
+ * `sessionTokens` uncompressed, given the host's per-model auto-compact
+ * `threshold` and its post-compaction context size. The host compacts once at
+ * `threshold`, then every `(threshold − postCompactionContext)` tokens of
+ * growth thereafter.
+ *
+ * Returns 0 when the model is too small to model meaningfully — i.e.
+ * `threshold ≤ postCompactionContext`, where the stride would be non-positive
+ * and the estimate would run away (#983). This keeps pathologically small
+ * windows conservative (0) rather than emitting an absurd count.
+ */
+export function estimateAvoidedCompactions(
+  sessionTokens: number,
+  threshold: number,
+  postCompactionContext: number,
+): number {
+  if (threshold <= postCompactionContext || sessionTokens <= threshold) {
+    return 0;
+  }
+  const stride = threshold - postCompactionContext;
+  return 1 + Math.floor((sessionTokens - threshold) / stride);
+}
+
+/**
  * Estimate the total cost of a single compaction event.
  *
  * Includes three components:
@@ -834,7 +881,16 @@ export function updateShadowContext(
   costs._lastActualInput = totalInputTokens;
   costs._lastOutputTokens = outputTokens;
 
-  if (costs._shadowContextTokens > AUTOCOMPACT_THRESHOLD) {
+  // Per-model auto-compact trigger (#983). The `> POST_COMPACTION_CONTEXT`
+  // guard skips pathologically small windows (threshold ≤ post-compaction
+  // size), where a shadow compaction would immediately re-trigger every turn —
+  // report 0 for those rather than a runaway count (matches the prior 167K
+  // constant's effective 0 for tiny models, while fixing large-window overcount).
+  const threshold = autocompactThresholdForModelID(conversationModel);
+  if (
+    threshold > POST_COMPACTION_CONTEXT &&
+    costs._shadowContextTokens > threshold
+  ) {
     costs.counterfactual.avoidedCompactions++;
     costs.counterfactual.avoidedCompactionCost += estimateCompactionCost(
       workerModel,
@@ -1141,17 +1197,13 @@ export function computeHistoricalEstimates(
       // This is only a fallback — sessions with persisted snapshots (the common
       // case) use real data from live tracking.
       const sessionTokens = sess.total_tokens;
-      let avoidedCompactions = 0;
-      if (sessionTokens > AUTOCOMPACT_THRESHOLD) {
-        // First compaction at AUTOCOMPACT_THRESHOLD, then every
-        // (AUTOCOMPACT_THRESHOLD - POST_COMPACTION_CONTEXT) tokens thereafter.
-        const stride = AUTOCOMPACT_THRESHOLD - POST_COMPACTION_CONTEXT;
-        avoidedCompactions =
-          1 +
-          Math.floor(
-            (sessionTokens - AUTOCOMPACT_THRESHOLD) / Math.max(stride, 1),
-          );
-      }
+      // Per-model auto-compact threshold (#983): the hardcoded 167K constant
+      // assumed a 200K-context model and over/under-counted for other windows.
+      const avoidedCompactions = estimateAvoidedCompactions(
+        sessionTokens,
+        autocompactThresholdForModelID(model),
+        POST_COMPACTION_CONTEXT,
+      );
 
       const sessionCompactionCost =
         avoidedCompactions * estimateCompactionCost(workerModelID, model);
