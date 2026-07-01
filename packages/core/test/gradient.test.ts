@@ -3548,7 +3548,7 @@ describe("onIdleResume", () => {
     expect(result.triggered).toBe(false);
   });
 
-  test("skipCompact=true skips postIdleCompact but still does housekeeping", () => {
+  test("skipCompact=true drops the snapshot, sets cameOutOfIdle, and skips compact", () => {
     const now = 1_000_000_000_000;
     setLastTurnAtForTest(SID, now - 2 * ONE_HOUR_MS);
 
@@ -3559,13 +3559,16 @@ describe("onIdleResume", () => {
     }
 
     const state = inspectSessionState(SID);
-    // Housekeeping still happens:
-    expect(state?.hasPrefixCache).toBe(false);
-    expect(state?.hasRawWindowCache).toBe(false);
-    expect(state?.cameOutOfIdle).toBe(true);
+    // Still-happening housekeeping on a warm resume: the prewarm snapshot is a
+    // perf-only artifact (re-loaded on demand), and the host's LTM handling
+    // still keys off cameOutOfIdle.
     expect(state?.distillationSnapshot).toBeNull();
-    // But compaction is skipped:
+    expect(state?.cameOutOfIdle).toBe(true);
+    // Compaction is skipped (cache is warm)...
     expect(state?.postIdleCompact).toBe(false);
+    // ...and the byte-identity caches are PRESERVED so the warm prefix survives.
+    // (Preservation of populated caches is proven end-to-end in the
+    // "distillation snapshot caching" describe; here nothing was populated.)
   });
 
   test("skipCompact=false (default) sets postIdleCompact when idle", () => {
@@ -3923,6 +3926,126 @@ describe("gradient — distillation snapshot caching", () => {
       .map((m) => m.parts.map((p) => ("text" in p ? p.text : "")).join())
       .join();
     expect(allText).toContain("Post-idle observation");
+  });
+
+  // Regression (warm idle resume): when the cache warmer keeps the upstream
+  // prompt cache alive across an idle gap, the caller passes skipCompact=true.
+  // The byte-identity caches (distilled prefix + raw-window pin) MUST survive so
+  // the next real turn replays the exact warm prefix. Clearing them re-renders
+  // messages[0/1] and re-pins the window at messages[2] — a full cache write
+  // that throws away the warming spend. This was the dominant divergence cause
+  // ("distilled conversation prefix changed (meta-distillation rewrite)").
+  test("warm idle resume (skipCompact) preserves the distilled prefix byte-for-byte", () => {
+    insertDistillation({
+      sessionID: SID,
+      observations: "- Warm-resume baseline observation",
+    });
+    const projectPath = `/test/${PID_KEY}`;
+    const messages1 = Array.from({ length: 16 }, (_, i) =>
+      makeMsg(
+        `warm-idle-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "X".repeat(1_000),
+        SID,
+      ),
+    );
+    setForceMinLayer(1, SID);
+    const result1 = transform({
+      messages: messages1,
+      projectPath,
+      sessionID: SID,
+    });
+    expect(result1.layer).toBeGreaterThanOrEqual(1);
+    expect(inspectSessionState(SID)?.hasPrefixCache).toBe(true);
+    expect(inspectSessionState(SID)?.hasRawWindowCache).toBe(true);
+
+    const prefixText1 = result1.messages
+      .filter((m) => m.info.id.startsWith("lore-distilled"))
+      .map((m) => m.parts.map((p) => ("text" in p ? p.text : "")).join())
+      .join();
+    expect(prefixText1).toContain("Warm-resume baseline observation");
+
+    // Background distillation lands during the idle gap.
+    insertDistillation({
+      sessionID: SID,
+      observations: "- Observation added while the user was idle",
+    });
+
+    // The warmer kept the cache alive → skipCompact=true. Caches must survive.
+    setLastTurnAtForTest(SID, Date.now() - 600_000);
+    const idle = onIdleResume(SID, 60_000, Date.now(), /* skipCompact */ true);
+    expect(idle.triggered).toBe(true);
+    expect(inspectSessionState(SID)?.hasPrefixCache).toBe(true);
+    expect(inspectSessionState(SID)?.hasRawWindowCache).toBe(true);
+
+    // Next turn appends a new user message; the frozen prefix must be
+    // byte-identical and must NOT fold in the idle-distilled row.
+    const messages2 = [
+      ...messages1,
+      makeMsg("warm-idle-return", "user", "Back after a break", SID),
+    ];
+    setForceMinLayer(1, SID);
+    const result2 = transform({
+      messages: messages2,
+      projectPath,
+      sessionID: SID,
+    });
+    const prefixText2 = result2.messages
+      .filter((m) => m.info.id.startsWith("lore-distilled"))
+      .map((m) => m.parts.map((p) => ("text" in p ? p.text : "")).join())
+      .join();
+    expect(prefixText2).toBe(prefixText1);
+    expect(prefixText2).not.toContain("while the user was idle");
+  });
+
+  // Companion guard: a provably-cold resume (skipCompact=false — no warmup kept
+  // the cache alive) must STILL reset the caches and fold in freshly-distilled
+  // rows. This guards against an over-eager "always preserve" regression.
+  test("cold idle resume (no skipCompact) resets caches and folds in new distillations", () => {
+    insertDistillation({
+      sessionID: SID,
+      observations: "- Cold-resume baseline observation",
+    });
+    const projectPath = `/test/${PID_KEY}`;
+    const messages1 = Array.from({ length: 16 }, (_, i) =>
+      makeMsg(
+        `cold-idle-${i}`,
+        i % 2 === 0 ? "user" : "assistant",
+        "X".repeat(1_000),
+        SID,
+      ),
+    );
+    setForceMinLayer(1, SID);
+    transform({ messages: messages1, projectPath, sessionID: SID });
+    expect(inspectSessionState(SID)?.hasPrefixCache).toBe(true);
+    expect(inspectSessionState(SID)?.hasRawWindowCache).toBe(true);
+
+    insertDistillation({
+      sessionID: SID,
+      observations: "- Observation added while the cache was cold",
+    });
+
+    // No warmup → cache provably cold → skipCompact=false (default).
+    setLastTurnAtForTest(SID, Date.now() - 600_000);
+    const idle = onIdleResume(SID, 60_000, Date.now(), /* skipCompact */ false);
+    expect(idle.triggered).toBe(true);
+    expect(inspectSessionState(SID)?.hasPrefixCache).toBe(false);
+    expect(inspectSessionState(SID)?.hasRawWindowCache).toBe(false);
+
+    const messages2 = [
+      ...messages1,
+      makeMsg("cold-idle-return", "user", "Back after a long break", SID),
+    ];
+    setForceMinLayer(1, SID);
+    const result2 = transform({
+      messages: messages2,
+      projectPath,
+      sessionID: SID,
+    });
+    const allText = result2.messages
+      .map((m) => m.parts.map((p) => ("text" in p ? p.text : "")).join())
+      .join();
+    expect(allText).toContain("while the cache was cold");
   });
 
   // Regression: loadDistillations orders by (created_at, id). Two rows written

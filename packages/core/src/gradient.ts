@@ -717,12 +717,18 @@ function getSessionState(sessionID: string): SessionState {
  * scored against the conversation context as it was on the previous turn,
  * which may have drifted significantly in N hours.
  *
- * On resume after `thresholdMs`:
+ * On resume after `thresholdMs` (cold cache — `skipCompact` false):
  *   - reset the distilled prefix cache (next turn re-renders from scratch)
  *   - reset the raw window pin cache (next turn picks a fresh cutoff)
  *   - set `cameOutOfIdle` so the OpenCode host can also clear `ltmSessionCache`
  *     and bypass the conversation-vs-LTM cost comparison in the LTM
  *     degraded-recovery branch
+ *
+ * When `skipCompact` is true the upstream cache is still warm, so the
+ * byte-identity caches (prefix, raw-window pin, distilled high-water, dedup
+ * memo) are PRESERVED — re-rendering/re-pinning them would bust the warm prefix
+ * the warmer paid to keep alive. `cameOutOfIdle` is still set (the host's LTM
+ * handling is unaffected) and `postIdleCompact` is left false.
  *
  * Importantly, this does NOT touch:
  *   - reasoning blocks (Anthropic's April 23 postmortem identifies dropping
@@ -737,12 +743,14 @@ function getSessionState(sessionID: string): SessionState {
  * Set `thresholdMs <= 0` to disable. Returns true if a reset fired so the
  * caller can log/observe.
  *
- * @param skipCompact  When true, perform all idle-resume housekeeping
- *   (clear caches, set cameOutOfIdle) but do NOT set postIdleCompact.
- *   Used when the caller knows the upstream prompt cache is still warm
- *   (e.g. cache warmer recently refreshed it) — compacting would produce
- *   a different prompt body that doesn't match the warmed prefix, causing
- *   a cache bust and wasting the warming cost.
+ * @param skipCompact  When true, the caller knows the upstream prompt cache is
+ *   still warm (e.g. the cache warmer recently refreshed it across the idle
+ *   gap). In that case onIdleResume PRESERVES the byte-identity caches (prefix,
+ *   raw-window pin, distilled high-water, dedup memo) and does NOT set
+ *   postIdleCompact — re-rendering the prefix or compacting would produce a
+ *   different prompt body that no longer matches the warmed prefix, busting the
+ *   cache and wasting the warming cost. It still drops the prewarm snapshot and
+ *   sets cameOutOfIdle. When false (cache provably cold) all caches are reset.
  */
 export function onIdleResume(
   sessionID: string,
@@ -755,15 +763,27 @@ export function onIdleResume(
   if (state.lastTurnAt === 0) return { triggered: false }; // first turn — nothing to refresh
   const idleMs = now - state.lastTurnAt;
   if (idleMs < thresholdMs) return { triggered: false };
-  state.prefixCache = null;
-  state.rawWindowCache = null;
-  // Cold cache → the prefix will be re-rendered/re-pinned, so drop the distilled
-  // high-water too (Bug 1, lever 1; same lifecycle as the raw-window pin).
-  state.distilledBudgetHighWater = 0;
+  // When the caller reports the upstream prompt cache is still warm
+  // (`skipCompact` — e.g. the cache warmer kept it alive across the idle gap),
+  // PRESERVE the byte-identity caches. Clearing them forces the next turn to
+  // re-render the distilled prefix (busts messages[0/1]) and re-pin the raw
+  // window (busts messages[2]) — throwing away the exact warm prefix the warmer
+  // paid to maintain, and turning a warm resume into a full cache write. Only
+  // when the cache is provably cold do we refresh them (a bust is unavoidable
+  // then, so we take the opportunity to fold in fresh distillations / re-pin).
+  if (!skipCompact) {
+    state.prefixCache = null;
+    state.rawWindowCache = null;
+    // Cold cache → the prefix will be re-rendered/re-pinned, so drop the distilled
+    // high-water too (Bug 1, lever 1; same lifecycle as the raw-window pin).
+    state.distilledBudgetHighWater = 0;
+    // Cache is cold after idle eviction — a fresh window will be rebuilt, so the
+    // stable-dedup memo can reset too (its purpose is warm-cache stability).
+    state.dedupDecisions.clear();
+  }
+  // The prewarm snapshot is a pure perf optimization (re-loaded on demand) and
+  // does not affect the frozen prefix bytes — safe to drop on any idle resume.
   state.distillationSnapshot = null;
-  // Cache is cold after idle eviction — a fresh window will be rebuilt, so the
-  // stable-dedup memo can reset too (its purpose is warm-cache stability).
-  state.dedupDecisions.clear();
   state.cameOutOfIdle = true;
   state.postIdleCompact = !skipCompact;
   return { triggered: true, idleMs };
