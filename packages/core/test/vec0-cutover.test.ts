@@ -6,7 +6,7 @@
 // All run against the real vec0-capable test connection (the vendored sqlite-vec
 // loads in the node test runtime). The suite is skipped if the extension is
 // somehow unavailable so a vec-less CI lane stays green.
-import { afterAll, beforeEach, describe, expect, test } from "vitest";
+import { afterAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { config } from "../src/config";
 import { close, db, ensureProject, getKV, setKV } from "../src/db";
 import { isVecAvailable } from "../src/db/vec";
@@ -35,10 +35,12 @@ import {
   backfillTemporalEmbeddings,
   checkConfigChange,
   embedTemporalMessage,
+  LocalProviderUnavailableError,
   MAX_TEMPORAL_CHUNKS_PER_MESSAGE,
   maybeCutoverToVec0,
   resetTemporalRechunkProgress,
 } from "../src/embedding";
+import * as log from "../src/log";
 import * as ltm from "../src/ltm";
 import { partsToText } from "../src/temporal";
 import type { LorePart } from "../src/types";
@@ -1223,6 +1225,15 @@ describeVec("temporal re-chunk backfill (backfillTemporalEmbeddings)", () => {
     "[tool:read] src/parse.ts",
   ];
 
+  // A single-unit message (one prose part, no reasoning/tool parts) comfortably
+  // over the 50-char embed floor, so each row triggers exactly ONE embed call —
+  // the per-embed cursor snapshots then line up one-to-one with rows.
+  const LONG = partsToText([
+    textPart(
+      "A single prose unit comfortably over the fifty character embed floor.",
+    ),
+  ]);
+
   function insTemporalContent(
     id: string,
     content: string,
@@ -1473,5 +1484,140 @@ describeVec("temporal re-chunk backfill (backfillTemporalEmbeddings)", () => {
       expect(await backfillTemporalEmbeddings()).toBe(0);
       expect(calls).toEqual([]);
     });
+  });
+
+  test("checkpoints the cursor after each row, not once per page (mid-page progress is durable)", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    // Three single-unit rows land in one page (< TEMPORAL_RECHUNK_PAGE). Each
+    // embed call snapshots the persisted cursor: with per-row checkpointing,
+    // row K sees row K-1's id already durable; with per-page checkpointing all
+    // three snapshots would still be null (nothing is persisted until the page
+    // ends), so a restart mid-page would redo the whole page and — on a machine
+    // that restarts more often than a page takes — never converge.
+    insTemporalContent("r1", LONG);
+    insTemporalContent("r2", LONG);
+    insTemporalContent("r3", LONG);
+
+    const seen: (string | null)[] = [];
+    const token = _saveAndClearProvider();
+    try {
+      _restoreProvider({
+        provider: {
+          maxBatchSize: 8,
+          async embed(texts: string[]) {
+            seen.push(getKV(CURSOR_KEY));
+            return texts.map((_t, i) => v(1, i, 0, 0));
+          },
+        },
+      });
+      expect(await backfillTemporalEmbeddings()).toBe(3);
+    } finally {
+      _restoreProvider(token);
+    }
+
+    // By the time row K is embedded, row K-1's id is already durable.
+    expect(seen).toEqual([null, "r1", "r2"]);
+    expect(getKV(CURSOR_KEY)).toBe("r3");
+    expect(getKV(DONE_KEY)).toBe("1");
+  });
+
+  test("mid-page checkpoint pins at the retry point after a transient failure (crash-safe gap)", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporalContent("p1", POISON); // transient-fails this pass
+    insTemporalContent("p2", LONG); // succeeds after the failure
+    insTemporalContent("p3", LONG); // succeeds
+
+    // Snapshot the persisted cursor at each embed. Once p1 fails, retryFrom is
+    // pinned at its predecessor (""), and EVERY subsequent per-row checkpoint
+    // must persist that retry point — not the advancing cursor — so a crash
+    // before the pass ends still resumes at the gap (p1) rather than skipping
+    // it. If the checkpoint wrote the bare `cursor`, p2/p3 would observe "p1"/
+    // "p2" and a crash would latch done over the un-retried gap.
+    const seen: (string | null)[] = [];
+    const token = _saveAndClearProvider();
+    try {
+      _restoreProvider({
+        provider: {
+          maxBatchSize: 8,
+          async embed(texts: string[]) {
+            seen.push(getKV(CURSOR_KEY));
+            if (texts.some((t) => t.includes("POISON"))) {
+              throw new Error("simulated remote 429");
+            }
+            return texts.map((_t, i) => v(1, i, 0, 0));
+          },
+        },
+      });
+      await backfillTemporalEmbeddings();
+    } finally {
+      _restoreProvider(token);
+    }
+
+    expect(seen).toEqual([null, "", ""]);
+    // End-of-pass rewind leaves the durable cursor at the gap, un-latched.
+    expect(getKV(CURSOR_KEY)).toBe("");
+    expect(getKV(DONE_KEY)).toBeNull();
+  });
+
+  test("a mid-page provider outage stops at the last completed row without latching done", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporalContent("r1", LONG);
+    insTemporalContent("r2", LONG); // provider goes away on this row
+    insTemporalContent("r3", LONG);
+
+    // The per-row checkpoint moved WHERE the outage stop persists its cursor, so
+    // guard it directly: the break must fire before the row's cursor advance and
+    // before its checkpoint, leaving the durable cursor at the last COMPLETED row
+    // (r1) so the next startup resumes and retries the outage row — never latches
+    // done over the gap.
+    let call = 0;
+    const token = _saveAndClearProvider();
+    try {
+      _restoreProvider({
+        provider: {
+          maxBatchSize: 8,
+          async embed(texts: string[]) {
+            call++;
+            if (call === 2) throw new LocalProviderUnavailableError();
+            return texts.map((_t, i) => v(1, i, 0, 0));
+          },
+        },
+      });
+      expect(await backfillTemporalEmbeddings()).toBe(1); // only r1 completed
+    } finally {
+      _restoreProvider(token);
+    }
+
+    expect(getKV(CURSOR_KEY)).toBe("r1"); // not advanced past the outage row
+    expect(getKV(DONE_KEY)).toBeNull(); // walk didn't reach the end
+    expect(chunkIds("r1").length).toBe(1); // completed before the outage
+    expect(chunkIds("r2")).toEqual([]); // outage row — untouched
+    expect(chunkIds("r3")).toEqual([]); // never reached
+  });
+
+  test("logs the up-front backlog so a long walk is visible in the logs", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporalContent("m1", MULTI);
+    insTemporalContent("m2", MULTI);
+    insTemporalContent("short", "tiny"); // < 50 chars — excluded from the count
+
+    const info = vi.spyOn(log, "info");
+    try {
+      await withProvider(async () => {
+        expect(await backfillTemporalEmbeddings()).toBe(2);
+      });
+      const lines = info.mock.calls.map((c: unknown[]) =>
+        c.map(String).join(" "),
+      );
+      expect(
+        lines.some((l) => /temporal re-chunk: 2 messages to scan/.test(l)),
+      ).toBe(true);
+    } finally {
+      info.mockRestore();
+    }
   });
 });

@@ -2365,14 +2365,38 @@ export async function backfillTemporalEmbeddings(): Promise<number> {
 
   let cursor = getKV(TEMPORAL_RECHUNK_CURSOR_KEY) ?? "";
   let processed = 0;
+  let scanned = 0;
   // Resume point of the FIRST row that hit a transient error this pass. We keep
   // walking past it (so one hiccup never stalls the whole corpus) but rewind
   // here at the end so the next startup retries it rather than latching done
   // over the gap. Holds the cursor value from BEFORE that row (its predecessor),
   // so `id > retryFrom` re-includes the failed row.
   let retryFrom: string | null = null;
-  const PROGRESS_INTERVAL = 1000;
-  let nextProgressAt = PROGRESS_INTERVAL;
+
+  // Up-front backlog so a long walk is explainable from the logs. The corpus is
+  // 100k+ rows and, under embed-pool contention, converges at single-digit
+  // rows/min — without this line a multi-hour (or, across restarts, multi-day)
+  // walk is completely invisible. Counts rows still to scan from the resume
+  // cursor; runs once per process (the walk is one-shot per config).
+  const backlog = (
+    db()
+      .query(
+        `SELECT COUNT(*) AS n FROM temporal_messages
+         WHERE id > ? AND length(content) >= 50`,
+      )
+      .get(cursor) as { n: number }
+  ).n;
+  if (backlog > 0) {
+    log.info(
+      `temporal re-chunk: ${backlog} messages to scan${cursor ? " (resuming)" : ""}`,
+    );
+  }
+
+  // Wall-clock heartbeat rather than a per-N-rows milestone: at the observed
+  // throughput a 1000-row milestone can be hours away, so a time cadence keeps
+  // the walk visible regardless of speed.
+  const PROGRESS_INTERVAL_MS = 30_000;
+  let lastProgressAt = Date.now();
 
   for (;;) {
     // `length(content) >= 50` mirrors embedTemporalMessage's short-message skip,
@@ -2437,24 +2461,32 @@ export async function backfillTemporalEmbeddings(): Promise<number> {
         if (retryFrom === null) retryFrom = cursor;
       }
       cursor = row.id;
+      scanned++;
+
+      // Checkpoint after EVERY row, not once per page. At the observed
+      // throughput a 256-row page can take ~an hour; per-page checkpointing
+      // loses the whole page on any restart in that window, so on a machine
+      // that restarts more often than a page takes the walk never converges —
+      // it re-does the same leading rows forever. Once a row has failed this
+      // pass, pin the persisted cursor at the first failure (`retryFrom`) so a
+      // later crash still resumes there and retries it; the in-memory `cursor`
+      // keeps advancing so the current pass finishes the corpus. Re-doing a row
+      // is idempotent (storeTemporalChunks replaces the whole chunk set).
+      setKV(TEMPORAL_RECHUNK_CURSOR_KEY, retryFrom ?? cursor);
+
+      if (Date.now() - lastProgressAt >= PROGRESS_INTERVAL_MS) {
+        log.info(
+          `re-chunking temporal messages: ${processed} re-chunked, ${scanned} scanned…`,
+        );
+        lastProgressAt = Date.now();
+      }
     }
 
-    // Persist the page's end cursor. Once a row has failed this pass, pin the
-    // persisted cursor at the first failure (`retryFrom`) so a later stop or a
-    // crash still resumes there and retries it — the in-memory `cursor` keeps
-    // advancing so the current pass finishes the corpus. A crash mid-page redoes
-    // the page on the next run (idempotent via storeTemporalChunks).
-    setKV(TEMPORAL_RECHUNK_CURSOR_KEY, retryFrom ?? cursor);
     if (stop) break;
-
-    if (processed >= nextProgressAt) {
-      log.info(`re-chunking temporal messages: ${processed}…`);
-      nextProgressAt = processed + PROGRESS_INTERVAL;
-    }
   }
 
   if (processed > 0) {
-    log.info(`re-chunked ${processed} temporal messages`);
+    log.info(`re-chunked ${processed} temporal messages (${scanned} scanned)`);
   }
   return processed;
 }
