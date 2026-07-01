@@ -230,6 +230,44 @@ export function isAnthropicClaudeModel(modelID: string): boolean {
 }
 
 /**
+ * Decide whether a worker request to this model should carry
+ * `thinking:{type:"disabled"}`.
+ *
+ * PRIMARY (data-driven): models.dev `reasoning_options`. A `toggle` entry marks
+ * a model whose adaptive thinking is ON BY DEFAULT (claude-sonnet-5) and must be
+ * turned off explicitly. `effort`-only (claude-opus-4-8, gpt-5) and
+ * `budget_tokens` (claude-sonnet-4-5) models run WITHOUT thinking unless it is
+ * requested, so they need no opt-out — returning false avoids an unnecessary
+ * param. This generalizes across providers/generations with no hardcoded list.
+ *
+ * FALLBACK (offline-safe): when models.dev has NO reasoning data for the model
+ * (API outage, or an id newer than the models.dev snapshot), fall back to the
+ * Claude-id heuristic so an on-by-default Claude model is still covered when the
+ * data is unavailable — a models.dev outage must never silently re-break workers.
+ * Sending the param is a harmless no-op for off-by-default Claude models, and the
+ * runtime learning net strips it for any model that rejects it.
+ */
+export function workerThinkingOnByDefault(model: { modelID: string }): boolean {
+  const opts = getModelEntrySync(model.modelID).reasoning_options;
+  if (Array.isArray(opts) && opts.length > 0) {
+    return opts.some((o) => o?.type === "toggle");
+  }
+  return isAnthropicClaudeModel(model.modelID);
+}
+
+/**
+ * models.dev-driven check: does this model reject a non-default sampling
+ * `temperature`? True for the deprecated-sampling generation (claude-sonnet-5,
+ * claude-opus-4-7/4-8, gpt-5, o3, …) where `temperature` is `false`. Used to
+ * strip `temperature` PROACTIVELY (before the first 400); the runtime
+ * learning net (`isTemperatureUnsupportedModel`) remains the fallback for
+ * models absent from models.dev or during an outage.
+ */
+export function modelRejectsTemperatureByData(modelID: string): boolean {
+  return getModelEntrySync(modelID).temperature === false;
+}
+
+/**
  * Companion to the temperature-capability learning above, for the `thinking`
  * param. Workers send `thinking:{type:"disabled"}` to genuine Anthropic Claude
  * models to suppress adaptive thinking (see `buildAnthropicWorkerRequest`).
@@ -970,6 +1008,7 @@ async function buildVertexWorkerRequest(
   maxTokens: number,
   vertexProject?: string,
   temperature?: number,
+  disableThinking = false,
 ): Promise<{ url: string; headers: Record<string, string>; body: string }> {
   const region = vertexRegionFromUrl(target.url) ?? "global";
   const project = await resolveVertexProject(vertexProject ?? "");
@@ -997,6 +1036,11 @@ async function buildVertexWorkerRequest(
     toVertexBody({
       max_tokens: maxTokens,
       ...(temperature != null && { temperature }),
+      // Vertex serves Claude over the Anthropic Messages body shape, so the same
+      // adaptive-thinking-on-by-default applies (sonnet-5). `thinking:{type:
+      // "disabled"}` passes through toVertexBody and turns it off. See
+      // buildAnthropicWorkerRequest for the full rationale.
+      ...(disableThinking && { thinking: { type: "disabled" } }),
       system: systemBlocks,
       messages: [{ role: "user", content: user }],
     }),
@@ -1066,6 +1110,7 @@ async function buildWorkerRequest(
         maxTokens,
         vertexProject,
         temperature,
+        disableThinking,
       );
     default:
       return buildAnthropicWorkerRequest(
@@ -1351,22 +1396,31 @@ export function createGatewayLLMClient(
         }
       }
 
-      // Resolve the effective sampling temperature. Models we've already
-      // observed to reject `temperature` (see markTemperatureUnsupported) get
-      // it omitted upfront so we don't burn a wasted 400 round-trip per call.
-      // A runtime-learned 400 below flips this to undefined for the retry.
-      let effectiveTemperature = isTemperatureUnsupportedModel(model)
-        ? undefined
-        : opts?.temperature;
+      // Resolve the effective sampling temperature. It is omitted upfront when
+      // models.dev marks the model as not accepting a non-default `temperature`
+      // (the deprecated-sampling generation: sonnet-5, opus-4.7+, gpt-5, o3 …)
+      // OR when we've already learned it at runtime from a 400 — so we don't
+      // burn a wasted round-trip. A runtime-learned 400 below also flips this to
+      // undefined for the retry (the offline/models.dev-gap safety net).
+      let effectiveTemperature =
+        isTemperatureUnsupportedModel(model) ||
+        modelRejectsTemperatureByData(model.modelID)
+          ? undefined
+          : opts?.temperature;
 
-      // Resolve whether to disable thinking. Genuine Anthropic Claude workers
-      // send `thinking:{type:"disabled"}` to suppress adaptive thinking (see
-      // buildAnthropicWorkerRequest); a model observed to reject the param gets
-      // it omitted upfront. A runtime-learned 400 below flips this to false for
-      // the retry. Excludes the Bedrock mantle path and compat providers.
+      // Resolve whether to disable thinking. Adaptive thinking is ON BY DEFAULT
+      // on the newest generation (claude-sonnet-5 today) and otherwise burns the
+      // `max_tokens` budget on a thinking block, starving the visible text and
+      // yielding an empty worker response. `workerThinkingOnByDefault` decides
+      // this data-drivenly from models.dev `reasoning_options` (with a Claude-id
+      // fallback when the data is unavailable). Gated to the Anthropic Messages
+      // wire protocols — "anthropic" (direct + Bedrock mantle) and "vertex" —
+      // the only builders that emit the `thinking` field. A model observed to
+      // reject the param gets it omitted upfront; a runtime-learned 400 below
+      // flips this to false for the retry.
       let effectiveDisableThinking =
-        isAnthropicClaudeModel(model.modelID) &&
-        !isBedrockMantleHost(target.url) &&
+        (target.protocol === "anthropic" || target.protocol === "vertex") &&
+        workerThinkingOnByDefault(model) &&
         !isThinkingUnsupportedModel(model);
 
       // The credential in effect for the CURRENT attempt. Starts as `cred`; an

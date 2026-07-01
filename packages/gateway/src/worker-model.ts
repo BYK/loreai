@@ -88,6 +88,24 @@ export type ModelsDevEntry = {
     cache_write?: number;
   };
   limit?: { context?: number; output?: number };
+  /**
+   * Whether the model accepts a non-default sampling `temperature` (and
+   * `top_p`/`top_k`). `false` on the deprecated-sampling generation
+   * (claude-sonnet-5, claude-opus-4-7/4-8, gpt-5, o3, …), which 400s any
+   * request that sets it. Drives the proactive temperature strip on worker
+   * requests. Absent for models.dev entries that predate the field.
+   */
+  temperature?: boolean;
+  /** Whether the model has any extended/adaptive reasoning capability. */
+  reasoning?: boolean;
+  /**
+   * The reasoning control shapes the model exposes. The `toggle` type marks a
+   * model whose adaptive thinking is ON BY DEFAULT and is turned off with
+   * `thinking:{type:"disabled"}` (claude-sonnet-5). `effort`-only
+   * (claude-opus-4-8, gpt-5) and `budget_tokens` (claude-sonnet-4-5) models run
+   * WITHOUT thinking unless it is explicitly requested, so they need no opt-out.
+   */
+  reasoning_options?: Array<{ type?: string }>;
 };
 
 /** Shape of the models.dev JSON API response (subset we care about). */
@@ -458,6 +476,20 @@ export function clearModelDataCache(): void {
   cachedModelDataAt = 0;
   inflightFetch = null;
   lastReadyAttemptAt = 0;
+  resolutionMemo = new Map();
+  resolutionMemoVersion = -1;
+}
+
+/**
+ * Test-only: seed the models.dev cache directly (no network) so
+ * `getModelEntrySync` returns known capability entries. Bumps the snapshot
+ * version so any resolution memo is invalidated.
+ */
+export function _setModelDataForTest(
+  entries: Record<string, ModelsDevEntry>,
+): void {
+  cachedModelData = new Map(Object.entries(entries));
+  cachedModelDataAt = Date.now();
   resolutionMemo = new Map();
   resolutionMemoVersion = -1;
 }

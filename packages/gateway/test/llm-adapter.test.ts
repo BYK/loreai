@@ -25,9 +25,12 @@ import {
   isAnthropicClaudeModel,
   isThinkingUnsupportedModel,
   markThinkingUnsupported,
+  workerThinkingOnByDefault,
+  modelRejectsTemperatureByData,
   _resetTemperatureUnsupportedModels,
   _resetThinkingUnsupportedModels,
 } from "../src/llm-adapter";
+import { _setModelDataForTest, clearModelDataCache } from "../src/worker-model";
 import {
   getConsecutiveTrips,
   resetBackgroundLimiter,
@@ -1871,7 +1874,7 @@ describe("worker thinking disabled for Anthropic Claude models", () => {
     expect(bodyOf(0)).not.toHaveProperty("thinking");
   });
 
-  test("bedrock mantle Claude worker does NOT send a thinking param (untested body field on mantle; cannot hit the OAuth thinking trigger)", async () => {
+  test("bedrock mantle Claude worker disables thinking (Anthropic Messages shape; sonnet-5-gen adaptive thinking is on by default on Bedrock too)", async () => {
     mockFetch.mockResolvedValue(okResponse());
     const client = createGatewayLLMClient(
       UPSTREAMS,
@@ -1887,9 +1890,135 @@ describe("worker thinking disabled for Anthropic Claude models", () => {
       protocol: "anthropic",
     });
 
-    expect(bodyOf(0)).not.toHaveProperty("thinking");
-    // Sanity: it IS a Claude model, just scoped out by the mantle-host guard.
+    expect(bodyOf(0)?.thinking).toEqual({ type: "disabled" });
+    // The body model is the mantle catalog id.
     expect(bodyOf(0)?.model).toBe("anthropic.claude-haiku-4-5");
+  });
+
+  // -------------------------------------------------------------------------
+  // Data-driven capability from models.dev (thinking + temperature).
+  // -------------------------------------------------------------------------
+  describe("driven by models.dev capability data", () => {
+    afterEach(() => {
+      clearModelDataCache();
+    });
+
+    test("workerThinkingOnByDefault: toggle → true; effort/budget_tokens/none → false", () => {
+      _setModelDataForTest({
+        "claude-sonnet-5": {
+          id: "claude-sonnet-5",
+          reasoning: true,
+          reasoning_options: [{ type: "toggle" }, { type: "effort" }],
+        },
+        "claude-opus-4-8": {
+          id: "claude-opus-4-8",
+          reasoning: true,
+          reasoning_options: [{ type: "effort" }],
+        },
+        "claude-sonnet-4-5": {
+          id: "claude-sonnet-4-5",
+          reasoning: true,
+          reasoning_options: [{ type: "budget_tokens" }],
+        },
+        "some-nonreasoning": { id: "some-nonreasoning", reasoning: false },
+      });
+      expect(workerThinkingOnByDefault({ modelID: "claude-sonnet-5" })).toBe(
+        true,
+      );
+      // On-by-default only for `toggle`; effort/budget_tokens run without
+      // thinking unless asked, so no opt-out param is needed.
+      expect(workerThinkingOnByDefault({ modelID: "claude-opus-4-8" })).toBe(
+        false,
+      );
+      expect(workerThinkingOnByDefault({ modelID: "claude-sonnet-4-5" })).toBe(
+        false,
+      );
+      expect(workerThinkingOnByDefault({ modelID: "some-nonreasoning" })).toBe(
+        false,
+      );
+    });
+
+    test("workerThinkingOnByDefault: falls back to the Claude-id heuristic when models.dev has no data (offline safety)", () => {
+      clearModelDataCache(); // no models.dev data available
+      // A models.dev outage must NOT stop us disabling thinking on Claude models.
+      expect(workerThinkingOnByDefault({ modelID: "claude-sonnet-5" })).toBe(
+        true,
+      );
+      expect(workerThinkingOnByDefault({ modelID: "MiniMax-M1" })).toBe(false);
+    });
+
+    test("effort-only model (opus-4-8) does NOT get a thinking param when models.dev data is present", async () => {
+      _setModelDataForTest({
+        "claude-opus-4-8": {
+          id: "claude-opus-4-8",
+          reasoning: true,
+          reasoning_options: [{ type: "effort" }],
+        },
+      });
+      mockFetch.mockResolvedValue(okResponse());
+      const client = createGatewayLLMClient(
+        UPSTREAMS,
+        () => ({ scheme: "api-key", value: "sk-ant-test" }),
+        { providerID: "anthropic", modelID: "claude-opus-4-8" },
+      );
+      await client.prompt("system", "user", {
+        sessionID: "sess-effort",
+        workerID: "lore-distill",
+        model: { providerID: "anthropic", modelID: "claude-opus-4-8" },
+      });
+      expect(bodyOf(0)).not.toHaveProperty("thinking");
+    });
+
+    test("modelRejectsTemperatureByData reflects the models.dev temperature flag", () => {
+      _setModelDataForTest({
+        "claude-sonnet-5": { id: "claude-sonnet-5", temperature: false },
+        "claude-sonnet-4-5": { id: "claude-sonnet-4-5", temperature: true },
+      });
+      expect(modelRejectsTemperatureByData("claude-sonnet-5")).toBe(true);
+      expect(modelRejectsTemperatureByData("claude-sonnet-4-5")).toBe(false);
+      // Unknown model (no data) → not proactively stripped (learning net covers).
+      expect(modelRejectsTemperatureByData("mystery-model")).toBe(false);
+    });
+
+    test("temperature is stripped upfront (no 400 needed) when models.dev marks the model temperature:false", async () => {
+      _setModelDataForTest({
+        "claude-sonnet-5": { id: "claude-sonnet-5", temperature: false },
+      });
+      mockFetch.mockResolvedValue(okResponse());
+      const client = createGatewayLLMClient(
+        UPSTREAMS,
+        () => ({ scheme: "api-key", value: "sk-ant-test" }),
+        { providerID: "anthropic", modelID: "claude-sonnet-5" },
+      );
+      await client.prompt("system", "user", {
+        sessionID: "sess-temp-data",
+        workerID: "lore-distill",
+        model: { providerID: "anthropic", modelID: "claude-sonnet-5" },
+        temperature: 0,
+      });
+      // Single attempt, no 400 round-trip — temperature omitted from the start.
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(bodyOf(0)).not.toHaveProperty("temperature");
+    });
+
+    test("temperature is kept when models.dev marks the model temperature:true", async () => {
+      _setModelDataForTest({
+        "claude-sonnet-4-5": { id: "claude-sonnet-4-5", temperature: true },
+      });
+      mockFetch.mockResolvedValue(okResponse());
+      const client = createGatewayLLMClient(
+        UPSTREAMS,
+        () => ({ scheme: "api-key", value: "sk-ant-test" }),
+        { providerID: "anthropic", modelID: "claude-sonnet-4-5" },
+      );
+      await client.prompt("system", "user", {
+        sessionID: "sess-temp-keep-data",
+        workerID: "lore-distill",
+        model: { providerID: "anthropic", modelID: "claude-sonnet-4-5" },
+        temperature: 0,
+      });
+      expect(bodyOf(0)?.temperature).toBe(0);
+    });
   });
 
   test("retries once without the thinking param on a thinking-unsupported 400, then succeeds and learns", async () => {
