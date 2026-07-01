@@ -1598,6 +1598,59 @@ describeVec("temporal re-chunk backfill (backfillTemporalEmbeddings)", () => {
     expect(chunkIds("r3")).toEqual([]); // never reached
   });
 
+  test("idle-gate: parks before each row's embed and resumes when it clears", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporalContent("r1", LONG);
+
+    // shouldPause is consulted BEFORE the embed and re-polled until it clears.
+    // Busy on the first check, idle after → the row parks once, then embeds.
+    const events: string[] = [];
+    let checks = 0;
+    const shouldPause = () => {
+      const paused = checks === 0;
+      checks++;
+      events.push(paused ? "pause" : "go");
+      return paused;
+    };
+    const token = _saveAndClearProvider();
+    try {
+      _restoreProvider({
+        provider: {
+          maxBatchSize: 8,
+          async embed(texts: string[]) {
+            events.push("embed");
+            return texts.map((_t, i) => v(1, i, 0, 0));
+          },
+        },
+      });
+      expect(await backfillTemporalEmbeddings({ shouldPause })).toBe(1);
+    } finally {
+      _restoreProvider(token);
+    }
+
+    // Gate checked → park → gate checked → clear → embed. Without gating the
+    // sequence would be just ["embed"].
+    expect(events).toEqual(["pause", "go", "embed"]);
+  });
+
+  test("idle-gate: a throwing shouldPause never bricks the walk", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporalContent("r1", LONG);
+
+    // A buggy host predicate must be treated as "not paused" so the walk still
+    // converges (rather than rejecting out of the fire-and-forget backfill).
+    const shouldPause = () => {
+      throw new Error("host predicate blew up");
+    };
+    await withProvider(async () => {
+      expect(await backfillTemporalEmbeddings({ shouldPause })).toBe(1);
+    });
+    expect(chunkIds("r1").length).toBe(1);
+    expect(getKV(DONE_KEY)).toBe("1");
+  });
+
   test("logs the up-front backlog so a long walk is visible in the logs", async () => {
     setStorageMode(db(), "vec0");
     ensureVec0Store(db(), DIM);

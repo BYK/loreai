@@ -1869,7 +1869,24 @@ function emptyBackfillStats(): BackfillStats {
   };
 }
 
-export async function runStartupBackfill(): Promise<BackfillStats> {
+/** Host-supplied knobs for {@link runStartupBackfill}. */
+export interface BackfillOptions {
+  /**
+   * Idle-gate for the heavy, resumable temporal re-chunk walk. Consulted before
+   * each row; while it returns `true` the walk parks (re-polling) and resumes
+   * once it clears. `@loreai/core` has no view of host activity, so the host
+   * supplies the policy — the gateway pauses while background work is paused
+   * (circuit breaker) or a session was active within the idle window. Progress
+   * is durable per-row, so a long park just resumes later from the last
+   * checkpoint. Only the temporal walk is gated; the small knowledge/
+   * distillation/entity backfills run unthrottled.
+   */
+  shouldPause?: () => boolean;
+}
+
+export async function runStartupBackfill(
+  opts: BackfillOptions = {},
+): Promise<BackfillStats> {
   if (!isAvailable()) return emptyBackfillStats();
 
   // Handle an embedding-config change, then attempt the one-time blob→vec0
@@ -1927,8 +1944,11 @@ export async function runStartupBackfill(): Promise<BackfillStats> {
   const entityEmbedded = await backfillEntityEmbeddings();
   // Re-chunk pre-multi-vector temporal survivors into the vec0 layout. Resumable
   // + done-flagged, so this is the heavy walk only on the first vec0 run (and
-  // again after a config change); a no-op in blob mode and once converged.
-  const temporalRechunked = await backfillTemporalEmbeddings();
+  // again after a config change); a no-op in blob mode and once converged. Idle-
+  // gated (opts.shouldPause) so it yields the shared embed pool to live traffic.
+  const temporalRechunked = await backfillTemporalEmbeddings({
+    shouldPause: opts.shouldPause,
+  });
 
   // Startup backstop: reclaim vec0 rows orphaned by bulk base-row deletes
   // (project/session/prune) since the last run. Harmless if there are none.
@@ -2305,6 +2325,47 @@ const TEMPORAL_RECHUNK_PAGE = 256;
  * forever (it keeps its legacy single vector + FTS, so recall still works).
  */
 const MAX_TEMPORAL_RECHUNK_RETRY_PASSES = 3;
+/**
+ * Poll interval while the temporal walk is parked waiting for the host to go
+ * idle. Short enough to resume promptly once traffic stops; a parked walk is
+ * otherwise idle (one predicate call + one timer per tick).
+ */
+const TEMPORAL_RECHUNK_PAUSE_POLL_MS = 250;
+
+/**
+ * Park while the host-supplied idle-gate says to defer to live traffic. Returns
+ * as soon as the gate clears (or immediately if no gate). A gate that throws is
+ * treated as "not paused" — a buggy host predicate must never wedge the walk.
+ */
+async function awaitBackfillIdle(
+  shouldPause: (() => boolean) | undefined,
+): Promise<void> {
+  if (!shouldPause) return;
+  // Edge-triggered logging: because this call blocks until the host is idle,
+  // one busy stretch (however many rows it spans) yields exactly one park/resume
+  // pair — so a long park is visible in the logs instead of looking like a wedge.
+  let parked = false;
+  for (;;) {
+    let paused = false;
+    try {
+      paused = shouldPause();
+    } catch {
+      break; // never let a throwing gate brick the walk
+    }
+    if (!paused) break;
+    if (!parked) {
+      parked = true;
+      log.info("temporal re-chunk parked — deferring to live traffic");
+    }
+    await new Promise<void>((resolve) => {
+      const t = setTimeout(resolve, TEMPORAL_RECHUNK_PAUSE_POLL_MS);
+      // Don't let a parked walk hold the process open on its own; the host's
+      // server keeps it alive, and if it doesn't, resuming next start is fine.
+      (t as { unref?: () => void }).unref?.();
+    });
+  }
+  if (parked) log.info("temporal re-chunk resumed");
+}
 
 /**
  * Reset the temporal re-chunk progress so the next {@link runStartupBackfill}
@@ -2354,7 +2415,9 @@ export function resetTemporalRechunkProgress(): void {
  *
  * Returns the number of messages re-chunked (successfully) in this invocation.
  */
-export async function backfillTemporalEmbeddings(): Promise<number> {
+export async function backfillTemporalEmbeddings(
+  opts: { shouldPause?: () => boolean } = {},
+): Promise<number> {
   const provider = getProvider();
   if (!provider) return 0;
 
@@ -2439,6 +2502,11 @@ export async function backfillTemporalEmbeddings(): Promise<number> {
 
     let stop = false;
     for (const row of rows) {
+      // Idle-gate before starting this row's embed so the walk yields the shared
+      // embed pool to live traffic. Parking here is safe: the previous row is
+      // already checkpointed, so a park (or a crash while parked) resumes from
+      // the last durable cursor.
+      await awaitBackfillIdle(opts.shouldPause);
       try {
         // Count only messages that actually got a chunk set written. A row that
         // reduces to zero embeddable units (store() never persists one, but the

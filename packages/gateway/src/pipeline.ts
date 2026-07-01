@@ -78,6 +78,7 @@ import {
   enableHostedMode,
   importLoreFileAs,
   resolveWorkspaces,
+  DEEP_IDLE_MS,
 } from "@loreai/core";
 
 import type {
@@ -200,6 +201,7 @@ import {
 } from "./auth";
 import type { UpstreamInterceptor } from "./recorder";
 import { startIdleScheduler, buildIdleWorkHandler } from "./idle";
+import { makeTemporalBackfillGate } from "./backfill-gate";
 import { buildSessionMetadata } from "./session-metadata";
 import {
   makeWorkerHealth,
@@ -562,6 +564,24 @@ const subagentParentPendingLogged = new Set<string>();
 /** Read-only access to live session states (for dashboard rendering). */
 export function getActiveSessions(): ReadonlyMap<string, SessionState> {
   return sessions;
+}
+
+/**
+ * Build the idle-gate handed to the temporal re-chunk backfill, wired to live
+ * gateway state: park the walk while the background circuit breaker is tripped
+ * or any session was active within {@link DEEP_IDLE_MS}. Exported so the wiring
+ * (not just the pure {@link makeTemporalBackfillGate} policy) is unit-testable.
+ */
+export function buildTemporalBackfillGate(): () => boolean {
+  return makeTemporalBackfillGate({
+    // Global breaker: a coarse "system is degraded" backstop. It chiefly tracks
+    // remote LLM failures, so for a local embed provider the real gate is the
+    // session-activity check below; the breaker just avoids piling work on
+    // during an outage.
+    isPaused: () => isBackgroundPaused(),
+    activeSessions: () => getActiveSessions().values(),
+    windowMs: DEEP_IDLE_MS,
+  });
 }
 
 /**
@@ -1995,7 +2015,14 @@ async function initIfNeeded(
     log.info("metric backfill failed:", e);
   }
   if (process.env.NODE_ENV !== "test") {
-    spanStartupBackfill(() => embedding.runStartupBackfill()).catch((e) => {
+    // Idle-gate the heavy temporal re-chunk walk so it yields the shared embed
+    // pool to live traffic: park while the breaker is tripped or a session was
+    // active within DEEP_IDLE_MS, resume once the host is quiet.
+    spanStartupBackfill(() =>
+      embedding.runStartupBackfill({
+        shouldPause: buildTemporalBackfillGate(),
+      }),
+    ).catch((e) => {
       log.error("embedding backfill failed:", e);
     });
   }
