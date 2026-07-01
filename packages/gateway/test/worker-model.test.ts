@@ -20,6 +20,13 @@ import {
   lookupProviderRoute,
   type ModelsDevEntry,
 } from "../src/worker-model";
+// Capability consumers — asserted end-to-end against the real merge so the
+// multi-provider last-writer-wins collision (fixed here) can't silently
+// re-disable the #1109 worker thinking/temperature behavior.
+import {
+  modelRejectsTemperatureByData,
+  workerThinkingOnByDefault,
+} from "../src/llm-adapter";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -708,6 +715,176 @@ describe("getModelEntrySync", () => {
     expect(entry.cost?.output).toBe(15);
     expect(entry.limit?.context).toBe(200_000);
     expect(entry.limit?.output).toBe(8_192);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Canonical-provider capability resolution (multi-provider collision)
+// ---------------------------------------------------------------------------
+
+describe("canonical-provider capability resolution", () => {
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    clearModelDataCache();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    resetWorkerModelState();
+    clearModelDataCache();
+  });
+
+  const mockResponse = (resp: unknown) => {
+    globalThis.fetch = vi.fn(() =>
+      Promise.resolve(new Response(JSON.stringify(resp), { status: 200 })),
+    ) as unknown as typeof fetch;
+  };
+
+  // Reproduces the REAL models.dev shape: the vendor (anthropic) defines the
+  // bare id FIRST, then aggregators/proxies redefine it later with divergent
+  // capability flags. Under naive last-writer-wins the aggregator clobbers the
+  // vendor — this fixture makes that failure mode observable.
+  const collisionResponse = {
+    anthropic: {
+      api: "https://api.anthropic.com",
+      npm: "@ai-sdk/anthropic",
+      models: {
+        "claude-sonnet-5": {
+          id: "claude-sonnet-5",
+          temperature: false,
+          reasoning: true,
+          reasoning_options: [{ type: "toggle" }, { type: "effort" }],
+          cost: { input: 3, output: 15, cache_read: 0.3 },
+          limit: { context: 1_000_000, output: 128_000 },
+        },
+        "claude-opus-4-8": {
+          id: "claude-opus-4-8",
+          temperature: false,
+          reasoning: true,
+          reasoning_options: [{ type: "effort" }],
+          cost: { input: 5, output: 25, cache_read: 0.5 },
+          limit: { context: 1_000_000, output: 128_000 },
+        },
+      },
+    },
+    // Iterated AFTER anthropic — would win the keys under last-writer-wins.
+    azure: {
+      models: {
+        // Wrong temperature flag (Anthropic says false).
+        "claude-opus-4-8": {
+          id: "claude-opus-4-8",
+          temperature: true,
+          reasoning: true,
+          reasoning_options: [{ type: "effort" }],
+        },
+      },
+    },
+    "github-copilot": {
+      models: {
+        // Missing the `toggle` reasoning option (Anthropic has it).
+        "claude-sonnet-5": {
+          id: "claude-sonnet-5",
+          temperature: false,
+          reasoning: true,
+          reasoning_options: [{ type: "effort" }],
+        },
+      },
+    },
+  };
+
+  test("vendor entry wins reasoning_options over a toggle-less aggregator (F1)", async () => {
+    mockResponse(collisionResponse);
+    await fetchModelData();
+
+    const opts = getModelEntrySync("claude-sonnet-5").reasoning_options;
+    expect(opts?.some((o) => o?.type === "toggle")).toBe(true);
+    // End-to-end: the #1109 headline behavior must engage with live data.
+    expect(workerThinkingOnByDefault({ modelID: "claude-sonnet-5" })).toBe(
+      true,
+    );
+  });
+
+  test("vendor entry wins temperature flag over an aggregator that reports temperature:true (F3)", async () => {
+    mockResponse(collisionResponse);
+    await fetchModelData();
+
+    expect(getModelEntrySync("claude-opus-4-8").temperature).toBe(false);
+    expect(modelRejectsTemperatureByData("claude-opus-4-8")).toBe(true);
+    // sonnet-5 is temperature:false at both vendor and aggregator — still true.
+    expect(modelRejectsTemperatureByData("claude-sonnet-5")).toBe(true);
+  });
+
+  test("re-apply does not disturb models only an aggregator defines", async () => {
+    mockResponse({
+      ...collisionResponse,
+      "some-aggregator": {
+        models: {
+          "exotic-model-9": {
+            id: "exotic-model-9",
+            temperature: false,
+            cost: { input: 1, output: 2, cache_read: 0.1 },
+            limit: { context: 100_000, output: 8_192 },
+          },
+        },
+      },
+    });
+    await fetchModelData();
+    expect(getModelEntrySync("exotic-model-9").temperature).toBe(false);
+    expect(getModelEntrySync("exotic-model-9").cost?.input).toBe(1);
+  });
+
+  test("forward-prefix resolves a dated id to the LONGEST (most specific) base (F4)", async () => {
+    mockResponse({
+      anthropic: {
+        models: {
+          // Ancestor id inserted FIRST — naive first-hit prefix would pick it.
+          "claude-opus-4": {
+            id: "claude-opus-4",
+            temperature: true,
+            reasoning_options: [{ type: "effort" }],
+          },
+          "claude-opus-4-8": {
+            id: "claude-opus-4-8",
+            temperature: false,
+            reasoning_options: [{ type: "effort" }],
+          },
+        },
+      },
+    });
+    await fetchModelData();
+
+    // Dated variant must resolve to claude-opus-4-8 (temp:false), not the
+    // shorter claude-opus-4 ancestor (temp:true) that was inserted first.
+    const entry = getModelEntrySync("claude-opus-4-8-20260101");
+    expect(entry.temperature).toBe(false);
+    expect(modelRejectsTemperatureByData("claude-opus-4-8-20260101")).toBe(
+      true,
+    );
+  });
+
+  test("reverse-prefix resolves a base/family id to the newest member deterministically (F4)", async () => {
+    mockResponse({
+      anthropic: {
+        models: {
+          "claude-opus-4-5": {
+            id: "claude-opus-4-5",
+            temperature: true,
+            reasoning_options: [{ type: "effort" }],
+          },
+          "claude-opus-4-8": {
+            id: "claude-opus-4-8",
+            temperature: false,
+            reasoning_options: [{ type: "effort" }],
+          },
+        },
+      },
+    });
+    await fetchModelData();
+
+    // "claude-opus-4-" is a prefix of both; newest (4-8) wins by numeric compare.
+    expect(getModelEntrySync("claude-opus-4-").id).toBe("claude-opus-4-8");
   });
 });
 

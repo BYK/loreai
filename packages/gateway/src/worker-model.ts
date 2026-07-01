@@ -70,6 +70,24 @@ function currentResolutionMemo(): Map<string, string | undefined> {
 /** Providers to fetch pricing data for from models.dev. */
 const SUPPORTED_PROVIDERS = ["anthropic", "openai"] as const;
 
+/**
+ * First-party model vendors whose models.dev entry is AUTHORITATIVE for a given
+ * bare model id.
+ *
+ * models.dev lists the same bare id (e.g. `claude-sonnet-5`, `gpt-5`) under many
+ * providers — the vendor plus aggregators/proxies (github-copilot, azure,
+ * opencode, llmgateway, …) — and their capability flags frequently disagree
+ * with the vendor's own. Because the flat model map is keyed by BARE id with
+ * last-writer-wins, an aggregator iterated after the vendor silently clobbers
+ * the vendor's correct data (real cases: github-copilot lists `claude-sonnet-5`
+ * with NO `toggle` reasoning option, so adaptive-thinking-on detection breaks;
+ * azure lists `claude-opus-4-8` as `temperature:true`, so proactive
+ * temperature-strip breaks). We re-apply these vendors LAST so their canonical
+ * entry wins regardless of provider ordering in the JSON. Later entries win, so
+ * order least→most authoritative.
+ */
+const CANONICAL_MODEL_PROVIDERS = ["openai", "anthropic"] as const;
+
 /** Shape of a model entry in the models.dev JSON API. */
 export type ModelsDevEntry = {
   id: string;
@@ -226,6 +244,68 @@ function fallbackEntry(modelID: string): ModelsDevEntry {
 }
 
 /**
+ * Normalize a raw models.dev model entry: stamp the id and derive `cache_write`
+ * cost when the source omits it (typically 1.25× input price). Returns a fresh
+ * object with a fresh `cost` so the source JSON is never mutated.
+ */
+function normalizeModelEntry(
+  modelId: string,
+  entry: ModelsDevEntry,
+): ModelsDevEntry {
+  const e: ModelsDevEntry = { ...entry, id: modelId };
+  if (e.cost && e.cost.cache_write == null && e.cost.input != null) {
+    e.cost = { ...e.cost, cache_write: e.cost.input * 1.25 };
+  }
+  return e;
+}
+
+/**
+ * Among map ids satisfying `pred`, pick the LONGEST (most specific); break
+ * length ties with a numeric-aware compare so the newest generation wins
+ * (`claude-opus-4-8` over `claude-opus-4-5`). This makes prefix resolution
+ * deterministic instead of returning the first hit in insertion order.
+ */
+function longestMatchingEntry(
+  map: Map<string, ModelsDevEntry>,
+  pred: (id: string) => boolean,
+): ModelsDevEntry | null {
+  let bestId: string | null = null;
+  let best: ModelsDevEntry | null = null;
+  for (const [id, entry] of map) {
+    if (!pred(id)) continue;
+    if (
+      bestId === null ||
+      id.length > bestId.length ||
+      (id.length === bestId.length &&
+        id.localeCompare(bestId, "en", { numeric: true }) > 0)
+    ) {
+      bestId = id;
+      best = entry;
+    }
+  }
+  return best;
+}
+
+/**
+ * Resolve a model id against the models.dev map: exact match, then the longest
+ * entry id that is a prefix of the requested id (dated/variant ids →
+ * most-specific base), then the longest entry id that the requested id is a
+ * prefix of (base/family id → most-specific known member). Deterministic
+ * regardless of provider/JSON ordering. Returns null when nothing matches.
+ */
+function matchModelEntry(
+  map: Map<string, ModelsDevEntry>,
+  modelID: string,
+): ModelsDevEntry | null {
+  const exact = map.get(modelID);
+  if (exact) return exact;
+  return (
+    longestMatchingEntry(map, (id) => modelID.startsWith(id)) ??
+    longestMatchingEntry(map, (id) => id.startsWith(modelID))
+  );
+}
+
+/**
  * Fetch model data from models.dev for supported providers.
  *
  * Single HTTP request, cached for 1 hour. Returns a map of
@@ -275,12 +355,7 @@ export function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
         if (providerModels && typeof providerModels === "object") {
           const modelIds: string[] = [];
           for (const [modelId, entry] of Object.entries(providerModels)) {
-            const e: ModelsDevEntry = { ...entry, id: modelId };
-            // Compute cache_write cost if not provided (typically 1.25× input price)
-            if (e.cost && e.cost.cache_write == null && e.cost.input != null) {
-              e.cost.cache_write = e.cost.input * 1.25;
-            }
-            modelData.set(modelId, e);
+            modelData.set(modelId, normalizeModelEntry(modelId, entry));
             modelIds.push(modelId);
           }
           providerModelsIndex.set(providerID, modelIds);
@@ -295,6 +370,21 @@ export function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
           // Strip trailing /v1 — gateway appends /v1/messages or /v1/chat/completions.
           const url = api.replace(/\/v1\/?$/, "");
           providerRoutes.set(providerID, { url, protocol });
+        }
+      }
+
+      // Second pass: re-apply first-party vendors so their canonical capability
+      // data (temperature, reasoning_options) wins over any aggregator/proxy
+      // that defined the same bare model id earlier in the JSON. See
+      // CANONICAL_MODEL_PROVIDERS. `.set()` on an existing key updates the value
+      // in place without changing insertion order, so prefix/index ordering is
+      // preserved — only the (previously order-dependent) capability flags are
+      // corrected.
+      for (const providerID of CANONICAL_MODEL_PROVIDERS) {
+        const providerModels = data[providerID]?.models;
+        if (!providerModels || typeof providerModels !== "object") continue;
+        for (const [modelId, entry] of Object.entries(providerModels)) {
+          modelData.set(modelId, normalizeModelEntry(modelId, entry));
         }
       }
 
@@ -371,22 +461,7 @@ export function lookupProviderRoute(providerID: string): ProviderRoute | null {
  */
 export async function getModelEntry(modelID: string): Promise<ModelsDevEntry> {
   const data = await fetchModelData();
-
-  // Exact match
-  const exact = data.get(modelID);
-  if (exact) return exact;
-
-  // Prefix match: find the entry whose ID is a prefix of the requested model
-  for (const [id, entry] of data) {
-    if (modelID.startsWith(id)) return entry;
-  }
-
-  // Reverse prefix: find if the requested model is a prefix of any entry
-  for (const [id, entry] of data) {
-    if (id.startsWith(modelID)) return entry;
-  }
-
-  return fallbackEntry(modelID);
+  return matchModelEntry(data, modelID) ?? fallbackEntry(modelID);
 }
 
 /**
@@ -399,22 +474,7 @@ export async function getModelEntry(modelID: string): Promise<ModelsDevEntry> {
  */
 export function getModelEntrySync(modelID: string): ModelsDevEntry {
   if (!cachedModelData) return fallbackEntry(modelID);
-
-  // Exact match
-  const exact = cachedModelData.get(modelID);
-  if (exact) return exact;
-
-  // Prefix match
-  for (const [id, entry] of cachedModelData) {
-    if (modelID.startsWith(id)) return entry;
-  }
-
-  // Reverse prefix
-  for (const [id, entry] of cachedModelData) {
-    if (id.startsWith(modelID)) return entry;
-  }
-
-  return fallbackEntry(modelID);
+  return matchModelEntry(cachedModelData, modelID) ?? fallbackEntry(modelID);
 }
 
 /** True when models.dev data has been loaded into the in-memory cache. */

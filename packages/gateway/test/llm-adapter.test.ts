@@ -1895,6 +1895,45 @@ describe("worker thinking disabled for Anthropic Claude models", () => {
     expect(bodyOf(0)?.model).toBe("anthropic.claude-haiku-4-5");
   });
 
+  test("vertex Claude worker disables thinking (threads thinking:{type:disabled} through toVertexBody)", async () => {
+    // Vertex-served sonnet-5 has the same adaptive-thinking-on default; the
+    // disable flag must survive the vertex body transform. Guards against a
+    // silent regression where buildVertexWorkerRequest drops `disableThinking`.
+    _setModelDataForTest({
+      "claude-sonnet-5": {
+        id: "claude-sonnet-5",
+        reasoning: true,
+        reasoning_options: [{ type: "toggle" }, { type: "effort" }],
+      },
+    });
+    _setTestVertexTokenProvider(() => Promise.resolve("test-vertex-token"));
+    try {
+      mockFetch.mockResolvedValue(okResponse());
+      const client = createGatewayLLMClient(
+        UPSTREAMS,
+        () => ({ scheme: "api-key", value: "client-key-ignored-for-vertex" }),
+        { providerID: "vertex", modelID: "claude-sonnet-5" },
+        { vertexProject: "test-vertex-project" },
+      );
+
+      await client.prompt("system", "user", {
+        sessionID: "sess-vertex-think",
+        workerID: "lore-distill",
+        upstreamUrl: "https://aiplatform.googleapis.com",
+        upstreamProviderID: "vertex",
+        protocol: "vertex",
+      });
+
+      // toVertexBody preserves `thinking`, so the disabled flag reaches the wire.
+      expect(bodyOf(0)?.thinking).toEqual({ type: "disabled" });
+      // Vertex body never carries model/stream (belt-and-suspenders sanity).
+      expect("model" in (bodyOf(0) ?? {})).toBe(false);
+    } finally {
+      _setTestVertexTokenProvider(null);
+      clearModelDataCache();
+    }
+  });
+
   // -------------------------------------------------------------------------
   // Data-driven capability from models.dev (thinking + temperature).
   // -------------------------------------------------------------------------
@@ -2116,5 +2155,84 @@ describe("worker thinking disabled for Anthropic Claude models", () => {
     expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(isThinkingUnsupportedModel(model)).toBe(false);
     expect(call).toBe(1);
+  });
+
+  test("does not strip thinking for a 400 that mentions 'thinking' without a rejection verb", async () => {
+    // The word "thinking" alone must NOT trigger a strip — only a genuine
+    // rejection (deprecated/unsupported/not permitted/…) should. Guards the
+    // rejection-verb clause of isThinkingUnsupported400. NB: the body must avoid
+    // every verb, including "invalid" (so no `invalid_request_error` type here).
+    let call = 0;
+    mockFetch.mockImplementation(async () => {
+      call++;
+      return new Response(
+        JSON.stringify({
+          type: "error",
+          error: {
+            type: "bad_request",
+            message: "the thinking field value is too large",
+          },
+        }),
+        { status: 400 },
+      );
+    });
+
+    const model = { providerID: "anthropic", modelID: "claude-sonnet-5" };
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      model,
+    );
+
+    const result = await client.prompt("system", "user", {
+      sessionID: "sess-think-verbless",
+      workerID: "lore-distill",
+      model,
+    });
+
+    expect(result).toBeNull();
+    // "thinking" present but no rejection verb → no strip retry, single attempt.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(isThinkingUnsupportedModel(model)).toBe(false);
+    expect(call).toBe(1);
+  });
+
+  test("does not learn the model when the thinking-stripped retry still fails", async () => {
+    // call 1: thinking-unsupported 400 → strip + retry.
+    // call 2: an UNRELATED 400 → thinking was not the (only) cause, so the model
+    // must NOT be learned (learning is deferred to a successful retry). Mirror of
+    // the temperature-suite symmetry test.
+    let call = 0;
+    mockFetch.mockImplementation(async () => {
+      call++;
+      if (call === 1) {
+        return new Response(THINKING_UNSUPPORTED_400, { status: 400 });
+      }
+      return new Response(
+        JSON.stringify({
+          error: { type: "invalid_request_error", message: "bad max_tokens" },
+        }),
+        { status: 400 },
+      );
+    });
+
+    const model = { providerID: "anthropic", modelID: "claude-legacy-3" };
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      model,
+    );
+
+    const result = await client.prompt("system", "user", {
+      sessionID: "sess-think-strip-fail",
+      workerID: "lore-distill",
+      model,
+    });
+
+    expect(result).toBeNull();
+    expect(mockFetch).toHaveBeenCalledTimes(2); // stripped once, still failed
+    expect(bodyOf(1)).not.toHaveProperty("thinking"); // strip did happen
+    // But the model is NOT learned — the retry never confirmed the cure.
+    expect(isThinkingUnsupportedModel(model)).toBe(false);
   });
 });
