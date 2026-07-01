@@ -411,7 +411,8 @@ describeVec("blob → vec0 cutover", () => {
     if (readStorageMode(db()) === "blob") {
       ensureVec0Store(db(), DIM);
       for (const table of TABLES) {
-        if (embeddingColumnExists(db(), table)) copyBlobsToVec0(db(), table);
+        if (embeddingColumnExists(db(), table))
+          copyBlobsToVec0(db(), table, DIM);
       }
       setStorageMode(db(), "vec0");
     }
@@ -460,8 +461,8 @@ describeVec("blob → vec0 cutover", () => {
   test("is idempotent / resumable (re-running copy never duplicates)", () => {
     seedBlobs();
     ensureVec0Store(db(), DIM);
-    copyBlobsToVec0(db(), "knowledge");
-    copyBlobsToVec0(db(), "knowledge"); // re-run (crash-resume)
+    copyBlobsToVec0(db(), "knowledge", DIM);
+    copyBlobsToVec0(db(), "knowledge", DIM); // re-run (crash-resume)
     expect(
       (
         db().query("SELECT COUNT(*) n FROM knowledge_vec").get() as {
@@ -494,6 +495,112 @@ describeVec("blob → vec0 cutover", () => {
       .query("SELECT COUNT(*) n FROM knowledge_vec WHERE id = 'k1'")
       .get() as { n: number };
     expect(oldVec.n).toBe(0);
+  });
+
+  test("skips a stale-dimension blob instead of aborting the whole cutover", () => {
+    // Valid DIM-dim blobs for k1 / d1 / t1.
+    seedBlobs();
+    // A temporal row whose blob was written under a DIFFERENT embedding
+    // dimension: 2 floats = 8 bytes, vs DIM*4 = 16. Before the guard, the single
+    // bulk `INSERT … SELECT` fed this into a fixed-width `float[DIM]` vec0 column,
+    // which sqlite-vec rejects ("Expected 4 dimensions but received 2"), aborting
+    // the ENTIRE cutover and stranding the DB in blob mode on every startup.
+    insTemporal("t_stale", "s", 2000);
+    db()
+      .query("UPDATE temporal_messages SET embedding = ? WHERE id='t_stale'")
+      .run(toBlob(new Float32Array([0.6, 0.8])));
+
+    // One bad row must not brick the migration for the whole corpus.
+    expect(() => runCutover()).not.toThrow();
+    expect(readStorageMode(db())).toBe("vec0");
+
+    // The valid-dim temporal row relocated; the stale-dim row was skipped.
+    const tids = (
+      db()
+        .query("SELECT message_id FROM temporal_vec ORDER BY message_id")
+        .all() as { message_id: string }[]
+    ).map((r) => r.message_id);
+    expect(tids).toEqual(["t1"]);
+    // Valid-dim blobs on the other tables still migrated normally.
+    expect(
+      (
+        db().query("SELECT COUNT(*) n FROM knowledge_vec").get() as {
+          n: number;
+        }
+      ).n,
+    ).toBe(1);
+    expect(
+      (
+        db().query("SELECT COUNT(*) n FROM distillation_vec").get() as {
+          n: number;
+        }
+      ).n,
+    ).toBe(1);
+  });
+
+  test("a skipped stale-dimension row is removed and then recreated by the re-embed backfill", async () => {
+    // The stale-dim row carries real content (>= 50 chars) so the full-corpus
+    // re-chunk backfill will re-embed it. The whole point: its wrong-dim vector
+    // is REMOVED by the cutover (skipped from the copy, base column dropped) and
+    // REGENERATED at the correct dimension from its source text.
+    const content =
+      "The parser regression needs a completely fresh embedding vector here.";
+    expect(content.length).toBeGreaterThanOrEqual(50);
+    db()
+      .query(
+        "INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at) VALUES ('t_stale', ?, 's', 'user', ?, 0, 0, 3000)",
+      )
+      .run(pid, content);
+    db()
+      .query("UPDATE temporal_messages SET embedding = ? WHERE id='t_stale'")
+      .run(toBlob(new Float32Array([0.6, 0.8]))); // wrong dim → skipped
+
+    runCutover();
+    expect(readStorageMode(db())).toBe("vec0");
+    // Removed: the stale-dim vector did not survive the copy.
+    expect(
+      (
+        db()
+          .query(
+            "SELECT COUNT(*) n FROM temporal_vec WHERE message_id='t_stale'",
+          )
+          .get() as { n: number }
+      ).n,
+    ).toBe(0);
+
+    // Recreated: backfillTemporalEmbeddings walks the full corpus and rebuilds
+    // the row's vectors from `content`. Clear the walk's KV flags so it is
+    // un-armed, then run it under a deterministic DIM-length mock provider.
+    db()
+      .query("DELETE FROM kv_meta WHERE key IN (?, ?, ?)")
+      .run(
+        "lore:temporal_rechunk.done",
+        "lore:temporal_rechunk.cursor",
+        "lore:temporal_rechunk.attempts",
+      );
+    const token = _saveAndClearProvider();
+    try {
+      _restoreProvider({
+        provider: {
+          maxBatchSize: 8,
+          async embed(texts: string[]) {
+            return texts.map(() => v(1, 0, 0, 0));
+          },
+        },
+      });
+      expect(await backfillTemporalEmbeddings()).toBe(1);
+    } finally {
+      _restoreProvider(token);
+    }
+
+    // The row now has a correctly-dimensioned vec0 chunk (DIM*4 bytes).
+    const rows = db()
+      .query(
+        "SELECT length(embedding) AS n FROM temporal_vec WHERE message_id='t_stale'",
+      )
+      .all() as { n: number }[];
+    expect(rows.length).toBeGreaterThanOrEqual(1);
+    expect(rows.every((r) => r.n === DIM * 4)).toBe(true);
   });
 });
 

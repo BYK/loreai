@@ -1763,7 +1763,7 @@ export function maybeCutoverToVec0(): void {
     // still exist; no blob-mode query can ever read a half-dropped column (the
     // v55 boot-loop hazard).
     for (const table of EMBEDDING_TABLES) {
-      if (embeddingColumnExists(db(), table)) copyBlobsToVec0(db(), table);
+      if (embeddingColumnExists(db(), table)) copyBlobsToVec0(db(), table, dim);
     }
     // Flip once vec0 is fully populated and authoritative.
     setStorageMode(db(), "vec0");

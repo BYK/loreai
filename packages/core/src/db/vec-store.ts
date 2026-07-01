@@ -440,6 +440,7 @@ export function embeddingColumnExists(
 export function copyBlobsToVec0(
   conn: EmbeddingWriteConn,
   table: EmbeddingTable,
+  dim: number,
 ): void {
   // vec0 (our pinned sqlite-vec) has no `INSERT OR REPLACE`, so idempotence /
   // resumability comes from skipping ids already present in the vec0 table via
@@ -447,32 +448,48 @@ export function copyBlobsToVec0(
   // is empty so every eligible row copies; a re-run after a partial copy only
   // inserts the remainder. Embeddings are static during the one-time cutover, so
   // skipping an already-copied id (rather than replacing it) is equivalent.
+  //
+  // 🔴 Dimension guard (`length(embedding) = dim * 4`): a correctly-dimensioned
+  // embedding is exactly `dim * 4` bytes (Float32 = 4 bytes/element). A legacy
+  // blob written under a DIFFERENT embedding dimension (e.g. a short-lived
+  // 384-dim window among today's 768-dim rows) would make sqlite-vec's
+  // fixed-width vec0 INSERT throw "Expected N dimensions but received M" — and
+  // because the copy is one bulk `INSERT … SELECT`, a SINGLE stale row aborts the
+  // ENTIRE cutover, stranding the DB in blob mode on every subsequent startup.
+  // Skip stale-dim blobs here instead: the row is simply absent from vec0 after
+  // the copy, and the very next re-embed backfill in the same startup pass
+  // regenerates it at the correct dimension from its source text
+  // (knowledge/entities/distillations via `missingEmbeddingSql` = NOT IN <vec
+  // table>; temporal via the full re-chunk walk in backfillTemporalEmbeddings).
+  // Net effect: the stale vector is removed and recreated — one bad row can never
+  // brick the migration for the whole corpus.
+  const expectedBytes = dim * 4;
   switch (table) {
     case "knowledge":
       conn
         .query(
-          "INSERT INTO knowledge_vec(id, embedding) SELECT id, embedding FROM knowledge_current WHERE embedding IS NOT NULL AND id NOT IN (SELECT id FROM knowledge_vec)",
+          `INSERT INTO knowledge_vec(id, embedding) SELECT id, embedding FROM knowledge_current WHERE embedding IS NOT NULL AND length(embedding) = ${expectedBytes} AND id NOT IN (SELECT id FROM knowledge_vec)`,
         )
         .run();
       return;
     case "entities":
       conn
         .query(
-          "INSERT INTO entity_vec(id, embedding) SELECT id, embedding FROM entities WHERE embedding IS NOT NULL AND id NOT IN (SELECT id FROM entity_vec)",
+          `INSERT INTO entity_vec(id, embedding) SELECT id, embedding FROM entities WHERE embedding IS NOT NULL AND length(embedding) = ${expectedBytes} AND id NOT IN (SELECT id FROM entity_vec)`,
         )
         .run();
       return;
     case "distillations":
       conn
         .query(
-          "INSERT INTO distillation_vec(id, project_id, session_id, embedding) SELECT id, project_id, session_id, embedding FROM distillations WHERE embedding IS NOT NULL AND id NOT IN (SELECT id FROM distillation_vec)",
+          `INSERT INTO distillation_vec(id, project_id, session_id, embedding) SELECT id, project_id, session_id, embedding FROM distillations WHERE embedding IS NOT NULL AND length(embedding) = ${expectedBytes} AND id NOT IN (SELECT id FROM distillation_vec)`,
         )
         .run();
       return;
     case "temporal":
       conn
         .query(
-          "INSERT INTO temporal_vec(chunk_id, message_id, project_id, session_id, embedding) SELECT id || '#0', id, project_id, session_id, embedding FROM temporal_messages WHERE embedding IS NOT NULL AND (id || '#0') NOT IN (SELECT chunk_id FROM temporal_vec)",
+          `INSERT INTO temporal_vec(chunk_id, message_id, project_id, session_id, embedding) SELECT id || '#0', id, project_id, session_id, embedding FROM temporal_messages WHERE embedding IS NOT NULL AND length(embedding) = ${expectedBytes} AND (id || '#0') NOT IN (SELECT chunk_id FROM temporal_vec)`,
         )
         .run();
       return;
