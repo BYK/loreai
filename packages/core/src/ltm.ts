@@ -21,6 +21,7 @@ import {
   offloadAllOrTimeout,
   READ_JOB_TIMED_OUT,
 } from "./read-offload";
+import type { ReadParam } from "./read-job";
 import { ReadPathTimer } from "./read-telemetry";
 import { sessionVerifierVerdict } from "./tool-trace";
 import * as latReader from "./lat-reader";
@@ -838,31 +839,79 @@ export async function findSemanticDuplicate(input: {
   return null;
 }
 
+/**
+ * Build the `knowledge_current` candidate query shared by {@link forProject}
+ * and its off-thread twin {@link forProjectOffloaded}, so both paths run
+ * byte-identical SQL + params and only the execution thread differs.
+ */
+function forProjectQuery(
+  pid: string,
+  includeCross: boolean,
+): { sql: string; params: ReadParam[] } {
+  const sql = includeCross
+    ? `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
+         WHERE (project_id = ? OR (project_id IS NULL) OR (cross_project = 1))
+         AND confidence > 0.2
+         ORDER BY confidence DESC, updated_at DESC`
+    : `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
+         WHERE project_id = ?
+         AND confidence > 0.2
+         ORDER BY confidence DESC, updated_at DESC`;
+  return { sql, params: [pid] };
+}
+
 export function forProject(
   projectPath: string,
   includeCross = true,
 ): KnowledgeEntry[] {
   const pid = ensureProject(projectPath);
-  if (includeCross) {
+  const { sql, params } = forProjectQuery(pid, includeCross);
+  return db()
+    .query(sql)
+    .all(...params)
+    .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
+}
+
+/**
+ * Off-thread twin of {@link forProject}: runs the identical `knowledge_current`
+ * scan through the read-worker pool so this unbounded scan doesn't block the
+ * main event loop on the first-turn / compaction critical path. #1080.
+ *
+ * The result is ALWAYS the same set `forProject` would return — this is purely
+ * a "run the same query off-thread when possible" optimization, never a
+ * behavior change:
+ *   - pool available   → a worker runs the scan; we hydrate its rows.
+ *   - pool unavailable → `offloadAllOrTimeout` falls back to the identical
+ *                        in-process query (same SQL + params).
+ *   - worker TIMEOUT   → we re-run the scan IN-PROCESS rather than degrade to
+ *                        an empty set. This is deliberate and differs from the
+ *                        per-turn `forSession` path (which drops to [] on
+ *                        timeout, #1006): `forProject` feeds the DURABLY FROZEN
+ *                        system[1] knowledge catalog and the offline-compaction
+ *                        summary. A spuriously-empty result there would be
+ *                        frozen for the whole session / baked into the summary,
+ *                        so correctness wins over the "never re-block on
+ *                        timeout" rule for this small, once-per-session scan.
+ *
+ * `ensureProject()` may write, so it stays on the main thread (as read-offload
+ * requires); only the read itself is offloaded.
+ */
+export async function forProjectOffloaded(
+  projectPath: string,
+  includeCross = true,
+): Promise<KnowledgeEntry[]> {
+  const pid = ensureProject(projectPath);
+  const { sql, params } = forProjectQuery(pid, includeCross);
+  const rows = await offloadAllOrTimeout(sql, params);
+  if (rows === READ_JOB_TIMED_OUT) {
     return db()
-      .query(
-        `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
-         WHERE (project_id = ? OR (project_id IS NULL) OR (cross_project = 1))
-         AND confidence > 0.2
-         ORDER BY confidence DESC, updated_at DESC`,
-      )
-      .all(pid)
+      .query(sql)
+      .all(...params)
       .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
   }
-  return db()
-    .query(
-      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
-       WHERE project_id = ?
-       AND confidence > 0.2
-       ORDER BY confidence DESC, updated_at DESC`,
-    )
-    .all(pid)
-    .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
+  return (rows as Record<string, unknown>[]).map(
+    hydrateKnowledgeEntry,
+  ) as KnowledgeEntry[];
 }
 
 /**

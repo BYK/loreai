@@ -1149,6 +1149,178 @@ describe("ltm.forSession", () => {
 });
 
 // ---------------------------------------------------------------------------
+// forProjectOffloaded — off-thread twin of forProject (#1080)
+// ---------------------------------------------------------------------------
+
+describe("ltm.forProjectOffloaded (#1080)", () => {
+  const PROJ = "/test/ltm/forproject-offload";
+  // Track every logical_id we mint so cleanup is SURGICAL: this block seeds a
+  // global cross-project entry (project_id IS NULL) which sibling blocks' by
+  // project_id cleanups would NOT reap, so a broad delete here would either
+  // leak into later blocks (e.g. #727's forSession budget) or clobber their
+  // globals. Deleting exactly what we created avoids both.
+  const created: string[] = [];
+
+  function cleanup(): void {
+    if (!created.length) return;
+    const placeholders = created.map(() => "?").join(",");
+    db()
+      .query(`DELETE FROM knowledge WHERE logical_id IN (${placeholders})`)
+      .run(...created);
+    created.length = 0;
+  }
+
+  beforeEach(() => {
+    ensureProject(PROJ);
+    cleanup();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    _setTestVectorWorkerFactory(null);
+    _resetVectorPoolForTest();
+    cleanup();
+  });
+
+  function seed(): void {
+    created.push(
+      ltm.create({
+        projectPath: PROJ,
+        category: "decision",
+        title: "Project-scoped decision",
+        content: "belongs to this project only",
+        scope: "project",
+        crossProject: false,
+        // Non-null metadata so hydrateKnowledgeEntry (JSON string → object) is
+        // an OBSERVABLE transform — the pool-rows test would miss a dropped
+        // hydration otherwise (a null-metadata row hydrates to itself).
+        metadata: { gitHead: "deadbee" },
+      }),
+    );
+    created.push(
+      ltm.create({
+        category: "preference",
+        title: "Global preference",
+        content: "shared across all projects",
+        scope: "global",
+        crossProject: true,
+      }),
+    );
+    // Below the confidence floor — must be excluded by BOTH paths.
+    const lowId = ltm.create({
+      projectPath: PROJ,
+      category: "pattern",
+      title: "Decayed entry",
+      content: "should never surface",
+      scope: "project",
+      crossProject: false,
+    });
+    created.push(lowId);
+    ltm.update(lowId, { confidence: 0.1 });
+  }
+
+  test("with the pool inert, returns exactly what the sync forProject returns", async () => {
+    seed();
+    for (const includeCross of [true, false]) {
+      const sync = ltm.forProject(PROJ, includeCross);
+      const offloaded = await ltm.forProjectOffloaded(PROJ, includeCross);
+      // Same rows, same deterministic order (confidence DESC, updated_at DESC).
+      expect(offloaded.map((e) => e.id)).toEqual(sync.map((e) => e.id));
+      expect(offloaded).toEqual(sync);
+      // Sanity: the below-floor entry is filtered out; the visible one is present.
+      expect(offloaded.some((e) => e.title === "Decayed entry")).toBe(false);
+      expect(offloaded.some((e) => e.title === "Project-scoped decision")).toBe(
+        true,
+      );
+    }
+  });
+
+  test("prefers the pool's result over the in-process scan when the pool serves it", async () => {
+    seed();
+    // A worker that answers every read with an EMPTY set. The DB genuinely has
+    // rows, so an empty result can ONLY come from the pool — proving the offload
+    // path is actually taken (not silently re-queried in-process).
+    class EmptyPoolWorker extends EventEmitter {
+      unref(): void {}
+      terminate(): Promise<number> {
+        this.emit("exit", 0);
+        return Promise.resolve(0);
+      }
+      postMessage(msg: { type: string; id: number }): void {
+        if (msg.type !== "read") return;
+        this.emit("message", { type: "read-result", id: msg.id, rows: [] });
+      }
+    }
+    _resetVectorPoolForTest();
+    _setTestVectorWorkerFactory((() => new EmptyPoolWorker()) as never);
+
+    expect(ltm.forProject(PROJ, true).length).toBeGreaterThan(0);
+    expect(await ltm.forProjectOffloaded(PROJ, true)).toEqual([]);
+  });
+
+  test("hydrates the pool's real rows in order (offloaded == in-process)", async () => {
+    // The positive path: a worker that actually SERVES the query (running it
+    // against the same db() from the fake worker) must produce entries that are
+    // byte-for-byte equal to the in-process scan — proving the offloaded rows
+    // are hydrated and ordered identically, not just that empty/timeout degrade.
+    seed();
+    const expected = ltm.forProject(PROJ, true);
+    expect(expected.length).toBeGreaterThan(0);
+
+    class ServingWorker extends EventEmitter {
+      unref(): void {}
+      terminate(): Promise<number> {
+        this.emit("exit", 0);
+        return Promise.resolve(0);
+      }
+      postMessage(msg: {
+        type: string;
+        id: number;
+        spec?: { sql: string; params: unknown[] };
+      }): void {
+        if (msg.type !== "read" || !msg.spec) return;
+        // Run the real parameterized query so the pool returns genuine rows.
+        const rows = db()
+          .query(msg.spec.sql)
+          .all(...msg.spec.params);
+        this.emit("message", { type: "read-result", id: msg.id, rows });
+      }
+    }
+    _resetVectorPoolForTest();
+    _setTestVectorWorkerFactory((() => new ServingWorker()) as never);
+
+    const offloaded = await ltm.forProjectOffloaded(PROJ, true);
+    expect(offloaded).toEqual(expected);
+  });
+
+  test("on a worker TIMEOUT falls back to the full in-process scan (never a spurious empty)", async () => {
+    // The frozen system[1] catalog / compaction summary must reflect the real
+    // knowledge set. A pool timeout must NOT yield [] (which would be frozen for
+    // the whole session) — forProjectOffloaded re-runs the scan in-process.
+    seed();
+    const expected = ltm.forProject(PROJ, true);
+    expect(expected.length).toBeGreaterThan(0);
+
+    class HangingWorker extends EventEmitter {
+      unref(): void {}
+      terminate(): Promise<number> {
+        this.emit("exit", 0);
+        return Promise.resolve(0);
+      }
+      postMessage(): void {
+        // never reply → forces the per-request timeout
+      }
+    }
+    _resetVectorPoolForTest();
+    _setTestVectorWorkerFactory((() => new HangingWorker()) as never);
+    vi.useFakeTimers();
+    const p = ltm.forProjectOffloaded(PROJ, true);
+    await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
+    expect((await p).map((e) => e.id)).toEqual(expected.map((e) => e.id));
+  });
+});
+
+// ---------------------------------------------------------------------------
 // REGRESSION: system[2] cache-bust via vector-scored set churn (#727).
 //
 // The cache-bust bug only manifests on the VECTOR scoring path (embeddings

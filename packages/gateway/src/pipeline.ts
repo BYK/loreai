@@ -5419,7 +5419,7 @@ export async function generateCompactionSummary(opts: {
   const distillations = distillation.loadForSession(projectPath, sessionID);
   const cfg = loreConfig();
   const entries = cfg.knowledge.enabled
-    ? ltm.forProject(projectPath, cfg.crossProject)
+    ? await ltm.forProjectOffloaded(projectPath, cfg.crossProject)
     : [];
   const knowledge = entries.length
     ? formatKnowledge(
@@ -6688,8 +6688,7 @@ async function handleConversationTurn(
         // handled separately by the knowledge delta (#917 "B").
         let knowledgeTocText = "";
         try {
-          const catalog = ltm
-            .forProject(projectPath, false)
+          const catalog = (await ltm.forProjectOffloaded(projectPath, false))
             .filter((e) => e.category !== "preference")
             .map((e) => ({ id: e.id, category: e.category, title: e.title }));
           knowledgeTocText = buildKnowledgeCatalogText(
