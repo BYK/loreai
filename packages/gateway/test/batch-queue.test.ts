@@ -9,7 +9,10 @@
  *  - Shutdown drains the queue
  */
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
-import { createBatchLLMClient } from "../src/batch-queue";
+import {
+  createBatchLLMClient,
+  extractAnthropicError,
+} from "../src/batch-queue";
 
 // Bridge: upstreamFetch now uses undici's own fetch (not globalThis.fetch),
 // so tests that mock globalThis.fetch need this shim to intercept calls.
@@ -960,6 +963,286 @@ describe("BatchLLMClient", () => {
     // Restore original mock
     globalThis.fetch = prevFetch;
 
+    await client.shutdown();
+  });
+
+  // -------------------------------------------------------------------------
+  // Errored-result parsing (regression: "batch item … errored: error: undefined")
+  // -------------------------------------------------------------------------
+
+  describe("extractAnthropicError", () => {
+    test("reads the nested ErrorResponse envelope (real Anthropic shape)", () => {
+      // Anthropic wraps the cause in `{ type: "error", request_id, error: { type, message } }`.
+      expect(
+        extractAnthropicError(
+          {
+            type: "error",
+            request_id: "req_1",
+            error: {
+              type: "invalid_request_error",
+              message: "max_tokens: too large",
+            },
+          },
+          "errored",
+        ),
+      ).toBe("invalid_request_error: max_tokens: too large");
+    });
+
+    test("tolerates a flattened envelope ({ type, message } at top level)", () => {
+      expect(
+        extractAnthropicError(
+          { type: "overloaded_error", message: "Overloaded" },
+          "errored",
+        ),
+      ).toBe("overloaded_error: Overloaded");
+    });
+
+    test("falls back to the outcome string, never yields 'error: undefined'", () => {
+      // The old bug: reading `.type`/`.message` off the envelope produced
+      // "error: undefined". The fallback must be the outcome, not undefined.
+      expect(extractAnthropicError({ type: "error" }, "errored")).toBe(
+        "errored",
+      );
+      expect(extractAnthropicError(undefined, "canceled")).toBe("canceled");
+      expect(extractAnthropicError({ type: "error" }, "errored")).not.toContain(
+        "undefined",
+      );
+    });
+  });
+
+  test("anthropic errored result surfaces the real message, not 'error: undefined'", async () => {
+    const inner = createMockLLMClient();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    let capturedCustomId = "";
+    let callIndex = 0;
+    const prevFetch = globalThis.fetch;
+
+    // @ts-expect-error — mock fetch
+    globalThis.fetch = async (url: string, init?: RequestInit) => {
+      const u = String(url);
+      const method = init?.method ?? "GET";
+      const idx = callIndex++;
+
+      // 0: batch submit — capture the generated custom_id so results correlate
+      if (idx === 0) {
+        expect(u).toBe(`${UPSTREAMS.anthropic}/v1/messages/batches`);
+        expect(method).toBe("POST");
+        const body = JSON.parse(init?.body as string) as {
+          requests: Array<{ custom_id: string }>;
+        };
+        capturedCustomId = body.requests[0]?.custom_id ?? "";
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          text: async () => JSON.stringify({ id: "msgbatch_err" }),
+          json: async () => ({ id: "msgbatch_err" }),
+        };
+      }
+
+      // 1: poll — batch has ended
+      if (idx === 1) {
+        expect(u).toContain("/v1/messages/batches/msgbatch_err");
+        const pollBody = {
+          processing_status: "ended",
+          results_url: `${UPSTREAMS.anthropic}/v1/messages/batches/msgbatch_err/results`,
+        };
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          text: async () => JSON.stringify(pollBody),
+          json: async () => pollBody,
+        };
+      }
+
+      // 2: results — one errored row with the real nested envelope
+      if (idx === 2) {
+        expect(u).toContain("/results");
+        const jsonl = JSON.stringify({
+          custom_id: capturedCustomId,
+          result: {
+            type: "errored",
+            error: {
+              type: "error",
+              request_id: "req_1",
+              error: {
+                type: "invalid_request_error",
+                message: "max_tokens: too large",
+              },
+            },
+          },
+        });
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          text: async () => jsonl,
+          json: async () => JSON.parse(jsonl),
+        };
+      }
+
+      return {
+        ok: false,
+        status: 500,
+        statusText: "Error",
+        text: async () => "unexpected",
+        json: async () => ({}),
+      };
+    };
+
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      getTestAuth,
+      DEFAULT_MODEL,
+      { flushIntervalMs: 60_000, maxQueueSize: 1, pollIntervalMs: 50 },
+    );
+
+    const promise = client.prompt("sys", "user msg", {
+      workerID: "lore-distill",
+    });
+
+    await new Promise((r) => setTimeout(r, 300));
+    const result = await promise;
+
+    // Errored items resolve to null (background caller degrades gracefully)
+    expect(result).toBeNull();
+
+    const logged = errorSpy.mock.calls
+      .map((c) => c.map((a) => String(a)).join(" "))
+      .join("\n");
+    expect(logged).toContain("invalid_request_error: max_tokens: too large");
+    expect(logged).not.toContain("errored: error: undefined");
+
+    const s = client.stats();
+    expect(s.totalFailed).toBe(1);
+
+    errorSpy.mockRestore();
+    globalThis.fetch = prevFetch;
+    await client.shutdown();
+  });
+
+  test("openai errored result includes the response body error message", async () => {
+    const inner = createMockLLMClient();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    let capturedCustomId = "";
+    let callIndex = 0;
+    const prevFetch = globalThis.fetch;
+
+    // @ts-expect-error — mock fetch
+    globalThis.fetch = async (url: string, init?: RequestInit) => {
+      const u = String(url);
+      const idx = callIndex++;
+
+      // 0: file upload — capture custom_id from the uploaded JSONL
+      if (idx === 0) {
+        expect(u).toContain("/v1/files");
+        if (init?.body instanceof FormData) {
+          const file = init.body.get("file") as Blob;
+          const parsed = JSON.parse(await file.text());
+          capturedCustomId = parsed.custom_id;
+        }
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          text: async () => JSON.stringify({ id: "file-batch-err" }),
+          json: async () => ({ id: "file-batch-err" }),
+        };
+      }
+
+      // 1: batch create
+      if (idx === 1) {
+        expect(u).toContain("/v1/batches");
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          text: async () => JSON.stringify({ id: "batch_err" }),
+          json: async () => ({ id: "batch_err" }),
+        };
+      }
+
+      // 2: poll — completed
+      if (idx === 2) {
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          text: async () =>
+            JSON.stringify({
+              status: "completed",
+              output_file_id: "file-results",
+            }),
+          json: async () => ({
+            status: "completed",
+            output_file_id: "file-results",
+          }),
+        };
+      }
+
+      // 3: download results — errored row with a real error body
+      if (idx === 3) {
+        expect(u).toContain("/v1/files/file-results/content");
+        const jsonl = JSON.stringify({
+          custom_id: capturedCustomId,
+          response: {
+            status_code: 400,
+            body: {
+              error: {
+                type: "invalid_request_error",
+                message: "context_length_exceeded",
+              },
+            },
+          },
+        });
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          text: async () => jsonl,
+          json: async () => JSON.parse(jsonl),
+        };
+      }
+
+      return {
+        ok: false,
+        status: 500,
+        statusText: "Error",
+        text: async () => "unexpected",
+        json: async () => ({}),
+      };
+    };
+
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      getTestAuth,
+      DEFAULT_MODEL,
+      { flushIntervalMs: 60_000, maxQueueSize: 1, pollIntervalMs: 50 },
+    );
+
+    const promise = client.prompt("sys", "user msg", {
+      model: { providerID: "openai", modelID: "gpt-5.4-mini" },
+      workerID: "lore-distill",
+    });
+
+    await new Promise((r) => setTimeout(r, 300));
+    const result = await promise;
+
+    expect(result).toBeNull();
+
+    const logged = errorSpy.mock.calls
+      .map((c) => c.map((a) => String(a)).join(" "))
+      .join("\n");
+    expect(logged).toContain("HTTP 400");
+    expect(logged).toContain("context_length_exceeded");
+
+    errorSpy.mockRestore();
+    globalThis.fetch = prevFetch;
     await client.shutdown();
   });
 });

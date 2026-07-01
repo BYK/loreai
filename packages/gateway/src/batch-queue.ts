@@ -178,6 +178,37 @@ function groupKey(cred: AuthCredential, providerID: string): string {
   return `${authFingerprint(cred)}|${providerID}`;
 }
 
+/**
+ * Extract a human-readable error string from an Anthropic batch errored result.
+ *
+ * Anthropic's `MessageBatchErroredResult.error` is an `ErrorResponse` envelope:
+ * `{ type: "error", request_id, error: { type, message } }`. The real cause is
+ * the nested `error.error` object; the envelope's own `type` is always the
+ * literal "error" and it carries no `message`. Reading the envelope directly is
+ * what produced the unhelpful `error: undefined` log lines.
+ *
+ * Falls back to a flattened `{ type, message }` shape (some proxies flatten the
+ * envelope) and finally to the outcome string, so the result is never
+ * `undefined`.
+ */
+export function extractAnthropicError(
+  error:
+    | {
+        type?: string;
+        request_id?: string | null;
+        error?: { type?: string; message?: string };
+        message?: string;
+      }
+    | undefined,
+  fallbackOutcome: string,
+): string {
+  const inner = error?.error;
+  if (inner?.message) return `${inner.type ?? "error"}: ${inner.message}`;
+  // Tolerate a flattened envelope where the message sits at the top level.
+  if (error?.message) return `${error.type ?? "error"}: ${error.message}`;
+  return fallbackOutcome;
+}
+
 // authDisableKey removed — batch disable tracking is now per-session, not per-credential.
 
 // ---------------------------------------------------------------------------
@@ -294,7 +325,19 @@ export function createAnthropicBatchProvider(
                 model?: string;
                 usage?: AnthropicUsage;
               };
-              error?: { type: string; message: string };
+              // Anthropic wraps errored results in an `ErrorResponse` envelope:
+              // `{ type: "error", request_id, error: { type, message } }`.
+              // The actual cause lives in the nested `error.error` object — the
+              // envelope's own `type` is always the literal string "error" and it
+              // has no `message`. Reading the envelope directly is what produced
+              // the useless "error: undefined" log lines.
+              error?: {
+                type?: string;
+                request_id?: string | null;
+                error?: { type?: string; message?: string };
+                // Some proxies flatten the envelope — tolerate a top-level message.
+                message?: string;
+              };
             };
           };
 
@@ -317,9 +360,7 @@ export function createAnthropicBatchProvider(
               text: null,
               usage: null,
               model: null,
-              error: row.result.error
-                ? `${row.result.error.type}: ${row.result.error.message}`
-                : row.result.type,
+              error: extractAnthropicError(row.result.error, row.result.type),
             });
           }
         } catch {
@@ -420,6 +461,7 @@ async function downloadOpenAIResults(
               completion_tokens?: number;
               prompt_tokens_details?: { cached_tokens?: number };
             };
+            error?: { message?: string; type?: string; code?: string | null };
           };
         };
       };
@@ -434,13 +476,16 @@ async function downloadOpenAIResults(
           model: body.model ?? null,
         });
       } else {
+        const errBody = row.response.body?.error;
         results.push({
           customId: row.custom_id,
           outcome: "errored",
           text: null,
           usage: null,
           model: null,
-          error: `HTTP ${row.response.status_code}`,
+          error: errBody?.message
+            ? `HTTP ${row.response.status_code} ${errBody.type ?? ""}: ${errBody.message}`.trim()
+            : `HTTP ${row.response.status_code}`,
         });
       }
     } catch {
@@ -940,6 +985,29 @@ export function createBatchLLMClient(
             log.error(
               `batch item ${result.customId} errored: ${result.error ?? "unknown"}`,
             );
+            // These are background jobs (distillation/curation/embeddings) that
+            // fail silently to the caller (resolved null). Capture so the real
+            // cause is tracked, not just logged. Grouped by provider to keep
+            // noise bounded; the actual error text is in `extra`.
+            if (Sentry.isInitialized()) {
+              Sentry.captureException(
+                new Error(`batch item errored: ${result.error ?? "unknown"}`),
+                {
+                  fingerprint: [
+                    "LOREAI-GATEWAY",
+                    "batch-item-errored",
+                    batch.provider.name,
+                  ],
+                  extra: {
+                    provider: batch.provider.name,
+                    customId: result.customId,
+                    model: pending.params.model,
+                    workerID: pending.workerID,
+                    error: result.error ?? "unknown",
+                  },
+                },
+              );
+            }
             break;
           case "canceled":
           case "expired":
