@@ -99,9 +99,6 @@ importers:
 
   packages/gateway:
     dependencies:
-      '@loreai/core':
-        specifier: workspace:*
-        version: link:../core
       '@supabase/supabase-js':
         specifier: ^2.58.0
         version: 2.108.1
@@ -121,6 +118,9 @@ importers:
         specifier: 0.1.9
         version: 0.1.9
     devDependencies:
+      '@loreai/core':
+        specifier: workspace:*
+        version: link:../core
       '@sentry/bun':
         specifier: ^10.52.0
         version: 10.56.0
