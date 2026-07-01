@@ -1,9 +1,13 @@
 import { describe, it, expect } from "vitest";
 import {
+  DEFAULT_MAX_EMBED_POOL,
+  EMBED_POOL_ABS_MAX,
   MIN_EMBED_TOKENS,
   MODEL_MAX_TOKENS,
+  PER_WORKER_MEM_BUDGET_BYTES,
   backoffEmbedCap,
   clampEmbedCap,
+  desiredEmbedPoolSize,
   memoryModelEmbedCap,
   reconcileEmbedCap,
   reprobeEmbedCap,
@@ -189,5 +193,49 @@ describe("reprobeEmbedCap", () => {
     expect(reprobeEmbedCap(1000, 64 * GB, 5000)).toBe(Math.round(1000 / 0.7));
     // Already at ceiling−1 → no upward movement (never re-OOMs the same cap).
     expect(reprobeEmbedCap(2399, 64 * GB, 2400)).toBe(2399);
+  });
+});
+
+describe("desiredEmbedPoolSize", () => {
+  it("returns 1 when free memory can't fit a second worker budget", () => {
+    // A single per-worker budget (~1.13GB) or less → only the primary worker.
+    expect(desiredEmbedPoolSize(0)).toBe(1);
+    expect(desiredEmbedPoolSize(PER_WORKER_MEM_BUDGET_BYTES)).toBe(1);
+    // Just under two budgets is still 1 (need a full budget of *headroom*).
+    expect(desiredEmbedPoolSize(2 * PER_WORKER_MEM_BUDGET_BYTES - 1)).toBe(1);
+  });
+
+  it("grows to the default cap (2) when memory is ample", () => {
+    expect(desiredEmbedPoolSize(2 * PER_WORKER_MEM_BUDGET_BYTES)).toBe(
+      DEFAULT_MAX_EMBED_POOL,
+    );
+    expect(desiredEmbedPoolSize(64 * GB)).toBe(DEFAULT_MAX_EMBED_POOL);
+  });
+
+  it("honors an explicit configured ceiling above the default when memory allows", () => {
+    expect(desiredEmbedPoolSize(64 * GB, 4)).toBe(4);
+    // Fractional/loose configured values are floored.
+    expect(desiredEmbedPoolSize(64 * GB, 3.9)).toBe(3);
+  });
+
+  it("caps configured at the absolute max", () => {
+    expect(desiredEmbedPoolSize(1024 * GB, 100)).toBe(EMBED_POOL_ABS_MAX);
+  });
+
+  it("memory-gates a high configured ceiling down to what fits", () => {
+    // Config asks for 4 but only ~3 budgets of RAM are free → 3.
+    expect(desiredEmbedPoolSize(3 * PER_WORKER_MEM_BUDGET_BYTES, 4)).toBe(3);
+    // Config asks for 4 but memory only fits the primary → 1.
+    expect(desiredEmbedPoolSize(PER_WORKER_MEM_BUDGET_BYTES, 4)).toBe(1);
+  });
+
+  it("configured=1 forces a single worker regardless of memory", () => {
+    expect(desiredEmbedPoolSize(1024 * GB, 1)).toBe(1);
+  });
+
+  it("never returns below 1, even for absurd/invalid inputs", () => {
+    expect(desiredEmbedPoolSize(Number.NaN)).toBe(1);
+    expect(desiredEmbedPoolSize(-100)).toBe(1);
+    expect(desiredEmbedPoolSize(0, 8)).toBe(1);
   });
 });

@@ -68,6 +68,63 @@ export interface PersistedEmbedCap {
   freeMemBytes: number;
 }
 
+/** Reference sequence length used to size the per-worker memory budget for pool
+ *  growth. Generous on purpose: a worker's steady-state footprint is the model
+ *  baseline plus the O(L²) attention peak, and the pool only adds a worker when a
+ *  whole such budget is free — so it errs toward under- rather than over-
+ *  provisioning memory. */
+export const EMBED_POOL_BUDGET_REF_TOKENS = 2048;
+
+/** Approximate memory one local embedding worker needs: the model/runtime
+ *  baseline ({@link EMBED_MODEL_BASELINE_BYTES}) plus the O(L²) attention peak at
+ *  {@link EMBED_POOL_BUDGET_REF_TOKENS}. A second (or Nth) worker is only spawned
+ *  when this much memory is free, so the pool never multiplies memory pressure on
+ *  a constrained host (each worker adds a full ~680 MB baseline that the ×0.7
+ *  cap-backoff cannot reclaim — only fewer workers can). */
+export const PER_WORKER_MEM_BUDGET_BYTES =
+  EMBED_MODEL_BASELINE_BYTES +
+  EMBED_ATTENTION_BYTES_PER_TOKEN_SQ *
+    EMBED_POOL_BUDGET_REF_TOKENS *
+    EMBED_POOL_BUDGET_REF_TOKENS;
+
+/** Default upper bound on local embedding workers when memory allows and no
+ *  explicit override is set. Two workers remove the cross-session serialization
+ *  for the common query-vs-backfill case; more multiplies model memory for
+ *  diminishing return on single-threaded WASM inference. */
+export const DEFAULT_MAX_EMBED_POOL = 2;
+
+/** Hard ceiling on the embedding pool regardless of config (matches the config
+ *  schema max for `search.embeddings.embedPoolSize`). */
+export const EMBED_POOL_ABS_MAX = 8;
+
+/**
+ * Memory-gated target size for the local embedding worker pool.
+ *
+ * `configured` (from `search.embeddings.embedPoolSize` or `LORE_EMBED_POOL_SIZE`)
+ * sets the ceiling; when omitted it defaults to {@link DEFAULT_MAX_EMBED_POOL}.
+ * The ceiling is then capped by how many {@link PER_WORKER_MEM_BUDGET_BYTES}-sized
+ * workers fit in `freeBytes` — but never below 1: the primary worker always runs
+ * (its own OOM backoff, not pool-sizing, protects a constrained host, exactly as
+ * today's single-worker behavior). Pure so the pool math is unit-testable; the
+ * caller passes `os.freemem()`.
+ */
+export function desiredEmbedPoolSize(
+  freeBytes: number,
+  configured?: number,
+): number {
+  const ceiling =
+    configured != null && Number.isFinite(configured) && configured >= 1
+      ? Math.min(Math.floor(configured), EMBED_POOL_ABS_MAX)
+      : DEFAULT_MAX_EMBED_POOL;
+  if (ceiling <= 1) return 1;
+  const free = Number.isFinite(freeBytes) && freeBytes > 0 ? freeBytes : 0;
+  const affordable = Math.max(
+    1,
+    Math.floor(free / PER_WORKER_MEM_BUDGET_BYTES),
+  );
+  return Math.min(ceiling, affordable);
+}
+
 /** Clamp a raw cap estimate into the valid [MIN, MODEL_MAX] range. */
 export function clampEmbedCap(n: number): number {
   if (!Number.isFinite(n)) return MIN_EMBED_TOKENS;

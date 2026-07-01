@@ -186,6 +186,7 @@ Vector embedding search provider, model, and dimensions.
 | `dimensions` | number | `768` | min 64, max 2048 | Embedding dimensions. Default: 768 (local) / 1024 (voyage) / 1536 (openai). Local Nomic v1.5 supports Matryoshka: 64, 128, 256, 512, 768. |
 | `workerOffload` | boolean | `true` |  | Run vector searches on a read-worker pool off the main event loop. Kill switch (default true); set false to force the in-process path. |
 | `workerPoolSize` | number | `2` | min 1, max 16 | Number of read-worker threads for off-thread vector search. Default: 2. |
+| `embedPoolSize` | number | — | min 1, max 8 | Number of local embedding worker threads (each loads its own ~137MB model). Default: memory-gated (1–2). Override with LORE_EMBED_POOL_SIZE. |
 
 ### `search.recall`
 
