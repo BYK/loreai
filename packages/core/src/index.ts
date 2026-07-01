@@ -265,6 +265,7 @@ export {
   type VecReadLatencyStat,
   vecReadLatencyStats,
   vecReadLatencyTotalSamples,
+  formatVecReadLatencyHeartbeat,
   _resetVecReadLatencyForTest,
 } from "./vec-latency";
 export { distillLimiter, curatorLimiter } from "./session-limiter";

@@ -124,6 +124,24 @@ export function vecReadLatencyTotalSamples(): number {
   return totalRecorded;
 }
 
+/**
+ * Render the per-cohort rolling p50/p95 as a single heartbeat line for the
+ * gateway idle log, e.g. `vec0 p50=12ms p95=45ms n=203 | degraded p50=...`.
+ * Returns null when there are no samples yet (nothing to log). Latencies are
+ * rounded to whole milliseconds.
+ */
+export function formatVecReadLatencyHeartbeat(
+  stats: VecReadLatencyStat[] = vecReadLatencyStats(),
+): string | null {
+  if (stats.length === 0) return null;
+  return stats
+    .map(
+      (s) =>
+        `${s.readMode} p50=${Math.round(s.p50)}ms p95=${Math.round(s.p95)}ms n=${s.count}`,
+    )
+    .join(" | ");
+}
+
 /** Test-only: clear all windows, the total counter, and the hook. */
 export function _resetVecReadLatencyForTest(): void {
   windows.clear();

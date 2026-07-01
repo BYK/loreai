@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "vitest";
 import {
   _resetVecReadLatencyForTest,
+  formatVecReadLatencyHeartbeat,
   recordVecReadLatency,
   setVecReadLatencyHook,
   VEC_LATENCY_WINDOW,
@@ -100,6 +101,18 @@ describe("vec-latency rolling telemetry", () => {
     expect(() => recordVecReadLatency("vec0", 5)).not.toThrow();
     const [s] = vecReadLatencyStats();
     expect(s.count).toBe(1);
+  });
+
+  test("heartbeat line renders rounded per-cohort p50/p95, or null when empty", () => {
+    // Nothing recorded yet → nothing to log.
+    expect(formatVecReadLatencyHeartbeat()).toBeNull();
+
+    recordVecReadLatency("vec0", 12.6);
+    recordVecReadLatency("degraded", 9000);
+    // Sorted by readMode (degraded < vec0); latencies rounded to whole ms.
+    expect(formatVecReadLatencyHeartbeat()).toBe(
+      "degraded p50=9000ms p95=9000ms n=1 | vec0 p50=13ms p95=13ms n=1",
+    );
   });
 
   test("dropped hook stops receiving samples", () => {

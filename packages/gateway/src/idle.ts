@@ -40,7 +40,7 @@ import {
   evictSession as evictGradientSession,
   distillLimiter,
   curatorLimiter,
-  vecReadLatencyStats,
+  formatVecReadLatencyHeartbeat,
   vecReadLatencyTotalSamples,
 } from "@loreai/core";
 import type { CacheStrategy, ChangedEntry, LLMClient } from "@loreai/core";
@@ -391,18 +391,8 @@ export function startIdleScheduler(
       const totalReads = vecReadLatencyTotalSamples();
       if (totalReads > lastVecLatencyLogged) {
         lastVecLatencyLogged = totalReads;
-        const stats = vecReadLatencyStats();
-        if (stats.length > 0) {
-          const summary = stats
-            .map(
-              (s) =>
-                `${s.readMode} p50=${Math.round(s.p50)}ms p95=${Math.round(
-                  s.p95,
-                )}ms n=${s.count}`,
-            )
-            .join(" | ");
-          log.info(`vec read latency (rolling): ${summary}`);
-        }
+        const summary = formatVecReadLatencyHeartbeat();
+        if (summary) log.info(`vec read latency (rolling): ${summary}`);
       }
     } catch {
       // Telemetry must never break the idle loop.
