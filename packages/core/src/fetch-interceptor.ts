@@ -315,13 +315,43 @@ export function shouldIntercept(url: string, gatewayBase: string): boolean {
  * Returns a cleanup function that restores the original `globalThis.fetch`.
  */
 /**
- * The original `globalThis.fetch` captured before any interceptor was
- * installed. The gateway (which may run in the same process) must use
- * this for its own upstream calls to avoid being intercepted in a loop.
+ * Process-global slot holding the original `globalThis.fetch` captured before
+ * any interceptor was installed. The gateway (which may run in the same
+ * process) must use this for its own upstream calls to avoid being intercepted
+ * in a loop.
  *
- * Null until `installFetchInterceptor()` is called.
+ * Keyed via `Symbol.for(...)` — a *process-global* registry — so that EVERY
+ * copy of this module in the process reads and writes the SAME handle, no
+ * matter how many times @loreai/core is bundled/instantiated (e.g. the
+ * OpenCode plugin's copy plus a copy inlined into the in-process gateway
+ * bundle). With a module-scoped variable instead, each copy keeps a private
+ * handle: one copy installs the interceptor (patching `globalThis.fetch`)
+ * while a second copy's `getOriginalFetch()` still reads `null` and falls back
+ * to `globalThis.fetch` — which IS the interceptor — producing an infinite
+ * request loop (gateway → interceptor → gateway → …). Sharing this handle is
+ * what makes it safe to inline core into the Bun bundle (issue #1027; see
+ * gateway `script/bundle.ts`).
+ *
+ * The slot is unset until `installFetchInterceptor()` is called, and released
+ * (set back to `null`) by its cleanup.
  */
-let _originalFetch: typeof globalThis.fetch | null = null;
+const ORIGINAL_FETCH_KEY = Symbol.for("lore.fetchInterceptor.originalFetch");
+
+/** Read the shared original-fetch handle. Returns `null` when unset. */
+function readOriginalFetchSlot(): typeof globalThis.fetch | null {
+  return (
+    (globalThis as Record<symbol, typeof globalThis.fetch | null | undefined>)[
+      ORIGINAL_FETCH_KEY
+    ] ?? null
+  );
+}
+
+/** Write (or, with `null`, release) the shared original-fetch handle. */
+function writeOriginalFetchSlot(fn: typeof globalThis.fetch | null): void {
+  (globalThis as Record<symbol, typeof globalThis.fetch | null>)[
+    ORIGINAL_FETCH_KEY
+  ] = fn;
+}
 
 /**
  * Return the original, un-intercepted `fetch` function.
@@ -334,7 +364,7 @@ let _originalFetch: typeof globalThis.fetch | null = null;
  * Returns `globalThis.fetch` if no interceptor has been installed.
  */
 export function getOriginalFetch(): typeof globalThis.fetch {
-  return _originalFetch ?? globalThis.fetch;
+  return readOriginalFetchSlot() ?? globalThis.fetch;
 }
 
 /**
@@ -390,15 +420,17 @@ function buildGatewayHeaders(
 export function installFetchInterceptor(
   config: FetchInterceptorConfig,
 ): () => void {
-  // Guard against double-install: if already installed, the second call
-  // would capture the *first* interceptor as _originalFetch, corrupting
-  // the chain. Return a no-op cleanup instead.
-  if (_originalFetch !== null) {
+  // Guard against double-install ACROSS ALL COPIES of this module in the
+  // process: a non-null shared slot means some copy already installed the
+  // interceptor. Installing again would capture the *first* interceptor as the
+  // "original", corrupting the chain (and, across copies, is the exact
+  // infinite-loop shape #1027 guards against). Return a no-op cleanup instead.
+  if (readOriginalFetchSlot() !== null) {
     return () => {};
   }
 
-  _originalFetch = globalThis.fetch;
-  const originalFetch = _originalFetch;
+  const originalFetch = globalThis.fetch;
+  writeOriginalFetchSlot(originalFetch);
 
   // Pre-parse the gateway URL once — avoids constructing a new URL object on
   // every fetch call in the process (tool executions, file downloads, etc.).
@@ -513,9 +545,10 @@ export function installFetchInterceptor(
   // on newer Node.js) so the patched function satisfies `typeof fetch`.
   globalThis.fetch = Object.assign(interceptor, originalFetch);
 
-  // Return cleanup function that restores the original fetch
+  // Return cleanup function that restores the original fetch and releases the
+  // shared slot so a later install can re-capture it.
   return () => {
     globalThis.fetch = originalFetch;
-    _originalFetch = null;
+    writeOriginalFetchSlot(null);
   };
 }
