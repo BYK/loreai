@@ -1311,33 +1311,79 @@ export async function validateProjectReferences(
  * (turn N+1) via `validateProjectReferences` with a `SyntheticProbeResolver`,
  * which re-gathers from the SAME query, so the two are consistent by construction.
  */
-export function peekProjectRefs(
-  projectPath: string,
-  now: number = Date.now(),
-): { gated: boolean; refs: Reference[] } {
-  const pid = ensureProject(projectPath);
+// Shared by peekProjectRefs and its off-thread twin so both scan byte-identical
+// SQL + params (only the execution thread differs).
+const PROJECT_REFS_SQL = `SELECT title, content FROM knowledge_current
+        WHERE project_id = ? AND cross_project = 0 AND confidence > ?`;
+
+/** True when the 24h reference-check rate gate is still closed for `pid`. */
+function refcheckGated(pid: string, now: number): boolean {
   const proj = db()
     .query("SELECT last_refcheck_at FROM projects WHERE id = ?")
     .get(pid) as { last_refcheck_at: number | null } | null;
   const last = proj?.last_refcheck_at ?? 0;
-  if (now - last < REFCHECK_INTERVAL_MS) return { gated: true, refs: [] };
+  return now - last < REFCHECK_INTERVAL_MS;
+}
 
-  const rows = db()
-    .query(
-      `SELECT title, content FROM knowledge_current
-        WHERE project_id = ? AND cross_project = 0 AND confidence > ?`,
-    )
-    .all(pid, DEAD_CONFIDENCE_FLOOR) as Array<{
-    title: string;
-    content: string;
-  }>;
+/** Dedupe extracted references from the scanned (title, content) rows into a
+ *  stable union keyed by `ref.raw` — shared by the sync and offloaded peeks. */
+function dedupeProjectRefs(
+  rows: Array<{ title: string; content: string }>,
+): Reference[] {
   const union = new Map<string, Reference>();
   for (const r of rows) {
     for (const ref of extractReferences(`${r.title}\n${r.content}`)) {
       if (!union.has(ref.raw)) union.set(ref.raw, ref);
     }
   }
-  return { gated: false, refs: [...union.values()] };
+  return [...union.values()];
+}
+
+export function peekProjectRefs(
+  projectPath: string,
+  now: number = Date.now(),
+): { gated: boolean; refs: Reference[] } {
+  const pid = ensureProject(projectPath);
+  if (refcheckGated(pid, now)) return { gated: true, refs: [] };
+
+  const rows = db()
+    .query(PROJECT_REFS_SQL)
+    .all(pid, DEAD_CONFIDENCE_FLOOR) as Array<{
+    title: string;
+    content: string;
+  }>;
+  return { gated: false, refs: dedupeProjectRefs(rows) };
+}
+
+/**
+ * Off-thread twin of {@link peekProjectRefs}: the (unbounded) `knowledge_current`
+ * scan runs through the read-worker pool so it doesn't block the main event loop
+ * on the pre-forward synthetic-probe path. #1083 (mirrors #1080 / #1081). The
+ * cheap single-row rate-gate read and the `extractReferences` CPU stay on the
+ * main thread (the pool only runs SQL).
+ *
+ * Returns the same result `peekProjectRefs` would: on a worker TIMEOUT the scan
+ * is re-run in-process rather than degrading to an empty ref set, so the
+ * synthetic-probe driver never silently skips a drift check because of a
+ * transient pool stall. `ensureProject()` (may write) stays on the main thread.
+ */
+export async function peekProjectRefsOffloaded(
+  projectPath: string,
+  now: number = Date.now(),
+): Promise<{ gated: boolean; refs: Reference[] }> {
+  const pid = ensureProject(projectPath);
+  if (refcheckGated(pid, now)) return { gated: true, refs: [] };
+
+  const params: ReadParam[] = [pid, DEAD_CONFIDENCE_FLOOR];
+  const offloaded = await offloadAllOrTimeout(PROJECT_REFS_SQL, params);
+  const rows = (
+    offloaded === READ_JOB_TIMED_OUT
+      ? db()
+          .query(PROJECT_REFS_SQL)
+          .all(...params)
+      : offloaded
+  ) as Array<{ title: string; content: string }>;
+  return { gated: false, refs: dedupeProjectRefs(rows) };
 }
 
 /**

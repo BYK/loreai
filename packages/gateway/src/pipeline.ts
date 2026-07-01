@@ -7340,7 +7340,7 @@ async function handleConversationTurn(
           cfg.knowledge.enabled &&
           cfg.knowledge.referenceValidation
         ) {
-          const peek = ltm.peekProjectRefs(projectPath);
+          const peek = await ltm.peekProjectRefsOffloaded(projectPath);
           if (!peek.gated && peek.refs.length > 0) {
             block = buildCombinedResolveRefcheckBlock(
               target,
