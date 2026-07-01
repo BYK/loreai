@@ -6662,7 +6662,7 @@ async function handleConversationTurn(
         let entitiesText = "";
         if (cfg.knowledge.maxEntityInject > 0) {
           try {
-            const sessionEntities = entities.entitiesForSession(
+            const sessionEntities = await entities.entitiesForSessionOffloaded(
               projectPath,
               cfg.knowledge.maxEntityInject,
             );

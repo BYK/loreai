@@ -9,7 +9,12 @@ import { uuidv7 } from "uuidv7";
 import { db, ensureProject, getKV, setKV, withTransaction } from "./db";
 import { embeddingByIdSource, readStorageMode } from "./db/vec-store";
 import { ftsQuery, ftsQueryOr, EMPTY_QUERY, filterTerms } from "./search";
-import { offloadAll } from "./read-offload";
+import {
+  offloadAll,
+  offloadAllOrTimeout,
+  READ_JOB_TIMED_OUT,
+} from "./read-offload";
+import type { ReadParam } from "./read-job";
 import { config } from "./config";
 import { getGitUser } from "./git";
 import * as log from "./log";
@@ -947,31 +952,75 @@ export async function getManyWithAliasesOffloaded(
   return map;
 }
 
+/**
+ * Build the `entities` catalog query shared by {@link forProject} and its
+ * off-thread twin {@link forProjectOffloaded}, so both paths run byte-identical
+ * SQL + params and only the execution thread differs.
+ */
+function forProjectEntityQuery(
+  pid: string,
+  includeCross: boolean,
+): { sql: string; params: ReadParam[] } {
+  const sql = includeCross
+    ? `SELECT ${ENTITY_COLS} FROM entities
+         WHERE project_id = ? OR project_id IS NULL OR cross_project = 1
+         ORDER BY entity_type, canonical_name`
+    : `SELECT ${ENTITY_COLS} FROM entities
+         WHERE project_id = ?
+         ORDER BY entity_type, canonical_name`;
+  return { sql, params: [pid] };
+}
+
 /** List entities for a project, optionally including cross-project entities. */
 export function forProject(
   projectPath: string,
   includeCross = true,
 ): EntityWithAliases[] {
   const pid = ensureProject(projectPath);
-  let rows: Entity[];
-  if (includeCross) {
-    rows = db()
-      .query(
-        `SELECT ${ENTITY_COLS} FROM entities
-         WHERE project_id = ? OR project_id IS NULL OR cross_project = 1
-         ORDER BY entity_type, canonical_name`,
-      )
-      .all(pid) as Entity[];
-  } else {
-    rows = db()
-      .query(
-        `SELECT ${ENTITY_COLS} FROM entities
-         WHERE project_id = ?
-         ORDER BY entity_type, canonical_name`,
-      )
-      .all(pid) as Entity[];
-  }
+  const { sql, params } = forProjectEntityQuery(pid, includeCross);
+  const rows = db()
+    .query(sql)
+    .all(...params) as Entity[];
+  return withAliases(rows);
+}
 
+/**
+ * Off-thread twin of {@link forProject}: runs the identical (unbounded)
+ * `entities` catalog scan through the read-worker pool so it doesn't block the
+ * main event loop on the first-turn stable-block critical path. #1081 (mirrors
+ * ltm.forProjectOffloaded / #1080).
+ *
+ * The result is ALWAYS the same set `forProject` would return — purely "run the
+ * same scan off-thread when possible", never a behavior change:
+ *   - pool available   → a worker runs the entity scan; we hydrate its rows.
+ *   - pool unavailable → `offloadAllOrTimeout` falls back to the identical
+ *                        in-process query.
+ *   - worker TIMEOUT   → we re-run the entity scan IN-PROCESS rather than
+ *                        degrade to []. This feeds the DURABLY FROZEN system[1]
+ *                        entities block; a spuriously-empty result there would
+ *                        be frozen for the whole session, so correctness wins
+ *                        over the "never re-block on timeout" rule for this
+ *                        small, once-per-session scan (same rationale as #1080).
+ *
+ * Only the heaviest (unbounded) entity scan is offloaded; the bounded alias
+ * load stays in-process via `withAliases`, so aliases are always attached
+ * exactly as the sync path would (no per-chunk alias-timeout degradation).
+ * `ensureProject()` may write, so it stays on the main thread.
+ */
+export async function forProjectOffloaded(
+  projectPath: string,
+  includeCross = true,
+): Promise<EntityWithAliases[]> {
+  const pid = ensureProject(projectPath);
+  const { sql, params } = forProjectEntityQuery(pid, includeCross);
+  const offloaded = await offloadAllOrTimeout(sql, params);
+  const rows = (
+    offloaded === READ_JOB_TIMED_OUT
+      ? db()
+          .query(sql)
+          .all(...params)
+      : offloaded
+  ) as Entity[];
   return withAliases(rows);
 }
 
@@ -1782,14 +1831,18 @@ export function graphExpand(
  *
  * The curator always uses `forProject()` directly (needs the full list).
  */
-export function entitiesForSession(
-  projectPath: string,
-  maxInject?: number,
+/**
+ * Relevance-rank a project's entity catalog down to `cap` for injection. Shared
+ * by {@link entitiesForSession} and {@link entitiesForSessionOffloaded} so the
+ * two differ ONLY in how the catalog is fetched (in-process vs offloaded); the
+ * ranking is byte-identical. `relationsFor` / `knowledgeRefCounts` are bounded
+ * (self relations, then a batched IN over the overflow set) and only run when
+ * the catalog exceeds `cap`, so they stay in-process.
+ */
+function rankEntitiesForSession(
+  all: EntityWithAliases[],
+  cap: number,
 ): EntityWithAliases[] {
-  const cap = maxInject ?? config().knowledge.maxEntityInject;
-  if (cap === 0) return [];
-
-  const all = forProject(projectPath);
   if (all.length <= cap) return all;
 
   // Always include self entity + entities related to self
@@ -1821,6 +1874,31 @@ export function entitiesForSession(
   scored.sort((a, b) => b.score - a.score);
 
   return [...guaranteed, ...scored.slice(0, slots).map((s) => s.entity)];
+}
+
+export function entitiesForSession(
+  projectPath: string,
+  maxInject?: number,
+): EntityWithAliases[] {
+  const cap = maxInject ?? config().knowledge.maxEntityInject;
+  if (cap === 0) return [];
+  return rankEntitiesForSession(forProject(projectPath), cap);
+}
+
+/**
+ * Off-thread twin of {@link entitiesForSession}: fetches the project entity
+ * catalog via {@link forProjectOffloaded} (worker pool) and applies the exact
+ * same ranking. Returns the same set `entitiesForSession` would — the offload
+ * is purely to keep the first-turn stable-block build off the main thread.
+ * #1081.
+ */
+export async function entitiesForSessionOffloaded(
+  projectPath: string,
+  maxInject?: number,
+): Promise<EntityWithAliases[]> {
+  const cap = maxInject ?? config().knowledge.maxEntityInject;
+  if (cap === 0) return [];
+  return rankEntitiesForSession(await forProjectOffloaded(projectPath), cap);
 }
 
 // ---------------------------------------------------------------------------
