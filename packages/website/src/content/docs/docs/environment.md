@@ -17,6 +17,15 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 |---|---|
 | `LORE_BACKGROUND_CONCURRENCY` | Resolve the upper bound for background concurrency. `LORE_BACKGROUND_CONCURRENCY` is a hard ceiling override (escape hatch for large multi-tenant hosts); otherwise the built-in MAX applies. Clamped to a sane [1, 32]. |
 
+## Upstream + worker pipeline
+
+| Variable | Description |
+|---|---|
+| `LORE_DAILY_BUDGET` | Get the effective daily budget in USD. Resolution priority: 1. `LORE_DAILY_BUDGET` env var (override for automation / CI) 2. DB-persisted value from `kv_meta` (set via UI) 3. 0 (disabled) |
+| `LORE_MAX_RETRIES` | Number of times a worker upstream call retries a transient failure before falling back to the caller's own handling (default: 8). Override with the LORE_MAX_RETRIES env var. |
+| `LORE_WARMING_ENABLED` | Whether cache warming is enabled. Resolution priority (highest first): 1. `LORE_WARMING_ENABLED` env var — "0"/"false"/"off"/"no" disable, anything else enables (override for automation / CI). 2. DB-persisted KV override, set via the dashboard or `/lore:warm:on\|off` ("1" = on, "0" = off). Absent → fall through. 3. `cache.warming.enabled` from `.lore.json` (schema default: true). This makes the file-only config flag runtime-settable without a restart — mirroring the daily-budget toggle. The gate lives in `shouldWarm`, so warming can be turned off globally the moment it stops paying for itself. |
+| `LORE_WORKER_MODEL` | Env var override — highest priority. Useful for global worker model configuration without per-project .lore.json (e.g. routing all workers to MiniMax). Format: "providerID/modelID" or just "modelID" (defaults to anthropic provider). |
+
 ## CLI / `lore` command
 
 | Variable | Description |
@@ -50,14 +59,6 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 | `LORE_VERTEX_REGION` | _no description in source_ |
 | `LORE_WORKER_API_KEY`<br>**Default:** `undefined` | Standalone API key for background worker calls (distillation, curation, consolidation, etc.). When set, workers authenticate with this key instead of the session's client credential — enabling workers to use a different provider (e.g. MiniMax) than the session's Anthropic key. Env: LORE_WORKER_API_KEY |
 | `LORE_WORKER_UPSTREAM` | Custom upstream URL for background worker calls. When set, all worker HTTP calls route to this URL instead of the default upstream URLs. Enables routing workers to a different provider (e.g. MiniMax's Anthropic-compatible endpoint) while sessions continue using Anthropic. Env: LORE_WORKER_UPSTREAM |
-
-## Upstream + worker pipeline
-
-| Variable | Description |
-|---|---|
-| `LORE_DAILY_BUDGET` | Get the effective daily budget in USD. Resolution priority: 1. `LORE_DAILY_BUDGET` env var (override for automation / CI) 2. DB-persisted value from `kv_meta` (set via UI) 3. 0 (disabled) |
-| `LORE_MAX_RETRIES` | Number of times a worker upstream call retries a transient failure before falling back to the caller's own handling (default: 8). Override with the LORE_MAX_RETRIES env var. |
-| `LORE_WORKER_MODEL` | Env var override — highest priority. Useful for global worker model configuration without per-project .lore.json (e.g. routing all workers to MiniMax). Format: "providerID/modelID" or just "modelID" (defaults to anthropic provider). |
 
 ## Pipeline + idle work
 
