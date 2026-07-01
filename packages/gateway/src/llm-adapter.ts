@@ -218,6 +218,18 @@ function isTemperatureUnsupported400(body: string): boolean {
 }
 
 /**
+ * True when a worker model is a genuine Anthropic Claude model (not an
+ * anthropic-compat third party like MiniMax / vLLM served over the Anthropic
+ * wire protocol). Every real Claude model id contains "claude" — direct
+ * (`claude-sonnet-5`), Bedrock mantle (`anthropic.claude-…`), and Vertex
+ * (`claude-…`). Compat providers use their own model ids (e.g. `MiniMax-M1`),
+ * so they are naturally excluded.
+ */
+export function isAnthropicClaudeModel(modelID: string): boolean {
+  return /claude/i.test(modelID);
+}
+
+/**
  * Unified retry policy (modeled on Claude Code's `getRetryDelay`).
  *
  * A single policy governs every worker call — urgent or background, 429 or
@@ -602,10 +614,26 @@ function buildAnthropicWorkerRequest(
     ? toMantleModelId(model.modelID)
     : model.modelID;
 
+  // Explicitly disable extended/adaptive thinking for genuine Anthropic Claude
+  // workers. Workers do deterministic single-shot summarization (distillation /
+  // curation) and never benefit from thinking. Newer models (claude-sonnet-5+)
+  // use ADAPTIVE thinking that is silently activated by the replayed Claude Code
+  // OAuth fingerprint (`oauth-2025-04-20` beta on api.anthropic.com). When active,
+  // the model spends its budget on a thinking block and can return an EMPTY
+  // thinking block with no visible text — the worker then sees a "no usable text"
+  // empty response and the whole distill/curate loop degrades. `{type:"disabled"}`
+  // is accepted (and a no-op) by all current Claude models. Scoped OUT of the
+  // Bedrock mantle path (Bedrock is strict about request-body fields and never
+  // carries the OAuth fingerprint, so it can't hit this) and out of compat
+  // providers (model id lacks "claude").
+  const disableThinking =
+    isAnthropicClaudeModel(model.modelID) && !isBedrockMantleHost(target.url);
+
   let body = JSON.stringify({
     model: upstreamModelID,
     max_tokens: maxTokens,
     ...(temperature != null && { temperature }),
+    ...(disableThinking && { thinking: { type: "disabled" } }),
     system: systemPayload,
     messages: [{ role: "user", content: user }],
   });

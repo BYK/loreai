@@ -22,6 +22,7 @@ import {
   resolveWorkerProtocol,
   AUTH_ERROR_CODES,
   isTemperatureUnsupportedModel,
+  isAnthropicClaudeModel,
   _resetTemperatureUnsupportedModels,
 } from "../src/llm-adapter";
 import {
@@ -1722,5 +1723,154 @@ describe("worker temperature capability", () => {
     expect(betaOf(2)).not.toContain("context-1m");
     expect(betaOf(2)).toContain("oauth-2025-04-20");
     expect(bodyOf(2)).not.toHaveProperty("temperature");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Worker thinking suppression.
+//
+// Workers do deterministic single-shot summarization (distillation/curation)
+// and never benefit from extended/adaptive thinking. Newer Claude models
+// (claude-sonnet-5+) use ADAPTIVE thinking that is silently activated by the
+// replayed Claude Code OAuth fingerprint (`oauth-2025-04-20` beta on
+// api.anthropic.com). When active, the model can return an EMPTY thinking block
+// with no visible text — the worker then sees a "no usable text" empty response
+// and the whole distill/curate loop degrades. We send `thinking:{type:"disabled"}`
+// on genuine Anthropic Claude worker requests to force plain text output.
+// ---------------------------------------------------------------------------
+describe("worker thinking disabled for Anthropic Claude models", () => {
+  const mockFetch = vi.mocked(upstreamFetch);
+
+  const UPSTREAMS = {
+    anthropic: "https://api.anthropic.com",
+    openai: "https://api.openai.com",
+  };
+
+  afterEach(() => {
+    mockFetch.mockReset();
+    clearAllCosts();
+    resetBackgroundLimiter();
+  });
+
+  function bodyOf(callIndex: number): Record<string, unknown> | undefined {
+    const raw = mockFetch.mock.calls[callIndex]?.[1]?.body;
+    if (typeof raw !== "string") return undefined;
+    return JSON.parse(raw) as Record<string, unknown>;
+  }
+
+  function betaOf(callIndex: number): string | undefined {
+    const headers = mockFetch.mock.calls[callIndex]?.[1]?.headers as
+      | Record<string, string>
+      | undefined;
+    if (!headers) return undefined;
+    const key = Object.keys(headers).find(
+      (k) => k.toLowerCase() === "anthropic-beta",
+    );
+    return key ? headers[key] : undefined;
+  }
+
+  const okResponse = () =>
+    new Response(
+      JSON.stringify({
+        content: [{ type: "text", text: "ok" }],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+
+  test("isAnthropicClaudeModel matches real Claude ids and excludes compat providers", () => {
+    expect(isAnthropicClaudeModel("claude-sonnet-5")).toBe(true);
+    expect(isAnthropicClaudeModel("claude-haiku-4-5")).toBe(true);
+    expect(isAnthropicClaudeModel("anthropic.claude-haiku-4-5")).toBe(true); // Bedrock mantle id
+    expect(isAnthropicClaudeModel("MiniMax-M1")).toBe(false);
+    expect(isAnthropicClaudeModel("gpt-5")).toBe(false);
+  });
+
+  test("genuine Anthropic Claude worker request disables thinking", async () => {
+    mockFetch.mockResolvedValue(okResponse());
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      { providerID: "anthropic", modelID: "claude-sonnet-5" },
+    );
+
+    await client.prompt("system", "user", {
+      sessionID: "sess-think-basic",
+      workerID: "lore-distill",
+      model: { providerID: "anthropic", modelID: "claude-sonnet-5" },
+    });
+
+    expect(bodyOf(0)?.thinking).toEqual({ type: "disabled" });
+  });
+
+  test("OAuth-fingerprint Claude worker (the failing production path) disables thinking despite the replayed interleaved-thinking beta", async () => {
+    mockFetch.mockResolvedValue(okResponse());
+    // Simulate a Claude Code OAuth session: billing prefix marks it, and the
+    // sniffed anthropic-beta (with the interleaved-thinking flag that would
+    // otherwise let sonnet-5 emit an empty thinking block) is replayed onto
+    // worker calls.
+    captureBillingPrefix("sess-think-oauth", BILLING_SYSTEM);
+    captureSessionHeaders("sess-think-oauth", {
+      "anthropic-beta": "oauth-2025-04-20,interleaved-thinking-2025-05-14",
+    });
+
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "oauth-token" }),
+      { providerID: "anthropic", modelID: "claude-sonnet-5" },
+    );
+
+    await client.prompt("system", "user", {
+      sessionID: "sess-think-oauth",
+      workerID: "lore-distill",
+      model: { providerID: "anthropic", modelID: "claude-sonnet-5" },
+    });
+
+    // The interleaved-thinking beta IS replayed (unchanged behavior)...
+    expect(betaOf(0)).toContain("interleaved-thinking");
+    // ...but thinking is explicitly disabled, so the model cannot burn its
+    // budget on an (empty) thinking block and starve the visible text.
+    expect(bodyOf(0)?.thinking).toEqual({ type: "disabled" });
+  });
+
+  test("anthropic-compat (non-Claude) worker does NOT send a thinking param", async () => {
+    mockFetch.mockResolvedValue(okResponse());
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "mm-key" }),
+      { providerID: "minimax", modelID: "MiniMax-M1" },
+    );
+
+    await client.prompt("system", "user", {
+      sessionID: "sess-think-mm",
+      workerID: "lore-distill",
+      model: { providerID: "minimax", modelID: "MiniMax-M1" },
+      protocol: "anthropic",
+      upstreamProviderID: "minimax",
+      upstreamUrl: "https://api.minimaxi.chat",
+    });
+
+    expect(bodyOf(0)).not.toHaveProperty("thinking");
+  });
+
+  test("bedrock mantle Claude worker does NOT send a thinking param (untested body field on mantle; cannot hit the OAuth thinking trigger)", async () => {
+    mockFetch.mockResolvedValue(okResponse());
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "bedrock-key" }),
+      { providerID: "bedrock", modelID: "claude-haiku-4-5" },
+    );
+
+    await client.prompt("system", "user", {
+      sessionID: "sess-think-bedrock",
+      workerID: "lore-distill",
+      upstreamUrl: "https://bedrock-mantle.us-east-1.api.aws/anthropic",
+      upstreamProviderID: "bedrock",
+      protocol: "anthropic",
+    });
+
+    expect(bodyOf(0)).not.toHaveProperty("thinking");
+    // Sanity: it IS a Claude model, just scoped out by the mantle-host guard.
+    expect(bodyOf(0)?.model).toBe("anthropic.claude-haiku-4-5");
   });
 });
