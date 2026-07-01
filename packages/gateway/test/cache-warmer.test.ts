@@ -3522,12 +3522,33 @@ describe("creditWarmupHit", () => {
     };
   }
 
-  test("credits a hit using the warmup's refreshed prefix tokens (Bug B)", () => {
+  test("full-prefix read credits the full refreshed prefix (Bug B)", () => {
     const warmup = makeWarmup({ lastWarmupRefreshTokens: 168_000 });
+    // Returning turn read the ENTIRE warmed prefix → full credit.
     const outcome = creditWarmupHit(warmup, 30_000, 300_000, 168_000);
     expect(outcome.hit).toBe(true);
-    // Savings must be credited against the prefix the WARMUP refreshed,
-    // NOT a (smaller) returning-turn read.
+    expect(outcome.creditedTokens).toBe(168_000);
+    expect(warmup.warmupHits).toBe(1);
+  });
+
+  test("partial read credits pro-rata, not the full refreshed prefix (Bug B)", () => {
+    // The returning turn diverged from the warmed prefix (breakpoint shift /
+    // tool-use continuation) and only read 42K of the 168K warmup. Realized
+    // savings are 42K — crediting the full 168K would overstate ROI.
+    const warmup = makeWarmup({ lastWarmupRefreshTokens: 168_000 });
+    const outcome = creditWarmupHit(warmup, 30_000, 300_000, 42_000);
+    expect(outcome.hit).toBe(true);
+    expect(outcome.creditedTokens).toBe(42_000);
+    expect(warmup.warmupHits).toBe(1);
+  });
+
+  test("read larger than the warmed prefix is capped at refreshTokens (Bug B)", () => {
+    // The turn read 200K (extra came from normal turn caching, not the warmup).
+    // The warmup only refreshed 168K, so credit is capped there — never credit
+    // the warmup for reads it did not cause.
+    const warmup = makeWarmup({ lastWarmupRefreshTokens: 168_000 });
+    const outcome = creditWarmupHit(warmup, 30_000, 300_000, 200_000);
+    expect(outcome.hit).toBe(true);
     expect(outcome.creditedTokens).toBe(168_000);
     expect(warmup.warmupHits).toBe(1);
   });
@@ -3602,11 +3623,11 @@ describe("creditWarmupHit", () => {
 
   test("credits a hit when the returning turn DID read the warmed cache (cacheRead>0)", () => {
     // Positive case for the cacheRead gate — when the returning turn reads
-    // any amount of the warmed prefix, we credit as before.
+    // any amount of the warmed prefix, we credit a (pro-rata) hit.
     const warmup = makeWarmup({ lastWarmupRefreshTokens: 168_000 });
     const outcome = creditWarmupHit(warmup, 30_000, 300_000, 42_000);
     expect(outcome.hit).toBe(true);
-    expect(outcome.creditedTokens).toBe(168_000);
+    expect(outcome.creditedTokens).toBe(42_000);
     expect(warmup.warmupHits).toBe(1);
   });
 });

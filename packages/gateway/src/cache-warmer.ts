@@ -2258,12 +2258,17 @@ export type WarmupHitOutcome = {
  * along in a restored/inherited warmupState blob, booking savings against a
  * session whose warmup cost lives elsewhere.
  *
- * 🔴 Savings token source (Bug B): when a hit is credited, the caller MUST
- * use `creditedTokens` (the prefix the warmup refreshed), NOT the returning
- * turn's cacheReadInputTokens — which is often ~10× smaller (tool-use
- * continuation / breakpoint shift). Known residual: when the returning turn
- * reads only PART of the warmed prefix (0 < read < refreshTokens), the full
- * `refreshTokens` is still credited — the gate below is binary, not pro-rata.
+ * 🔴 Savings token source (Bug B — pro-rata): when a hit is credited, the
+ * savings equal the tokens the returning turn ACTUALLY read from the warmed
+ * prefix, capped at what the warmup refreshed: `min(cacheReadTokens,
+ * refreshTokens)`. Unconditionally crediting the full `refreshTokens`
+ * overstated savings whenever the returning turn diverged from the warmed
+ * prefix and read only part of it (0 < read < refreshTokens) — e.g. a
+ * breakpoint shift or tool-use continuation — which inflated warmup ROI and
+ * warped the hit-rate gate for future warming. The cap also prevents crediting
+ * the warmup for reads it did not cause (read > refreshTokens from normal turn
+ * caching). A full-prefix read (read >= refreshTokens) still credits the full
+ * refreshTokens, so the common well-behaved case is unchanged.
  *
  * 🔴 Read-confirmation guard (Bug C): a hit is ONLY attributed when the
  * returning turn ACTUALLY READ the warmed cache (`cacheReadTokens > 0`). The
@@ -2315,7 +2320,12 @@ export function creditWarmupHit(
   if (cacheReadTokens <= 0) return noHit;
 
   warmup.warmupHits++;
-  return { hit: true, creditedTokens: refreshTokens };
+  // Pro-rata (Bug B): realized savings = what this turn actually read from the
+  // warmed prefix, capped at what the warmup refreshed. See the docstring.
+  return {
+    hit: true,
+    creditedTokens: Math.min(cacheReadTokens, refreshTokens),
+  };
 }
 
 // ---------------------------------------------------------------------------

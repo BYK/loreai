@@ -4952,8 +4952,8 @@ function postResponse(
       // Track warmup hit: user returned after THIS session warmed the cache.
       // creditWarmupHit consumes the warmup (clears lastWarmupAt + refresh
       // tokens), guards against phantom savings (Bug A: only credits when this
-      // session paid for the warmup), and returns the prefix the warmup
-      // refreshed for savings (Bug B: NOT the returning turn's smaller read).
+      // session paid for the warmup), and returns the pro-rata savings
+      // (Bug B: min(returning-turn cache read, prefix the warmup refreshed)).
       if (sessionState.warmup?.lastWarmupAt) {
         const ttlMs =
           sessionState.resolvedConversationTTL === "1h" ? 3_600_000 : 300_000;
