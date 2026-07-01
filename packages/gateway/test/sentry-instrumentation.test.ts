@@ -18,6 +18,7 @@ const stats = {
   knowledgeWithEmbedding: 0,
   distillationTotal: 0,
   distillationWithEmbedding: 0,
+  temporalRechunked: 0,
 };
 
 // Sentry is not initialized in the test process, so these exercise the

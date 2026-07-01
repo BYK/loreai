@@ -14,7 +14,7 @@
  */
 
 import { freemem } from "node:os";
-import { db } from "./db";
+import { db, getKV, setKV } from "./db";
 import { isVecAvailable } from "./db/vec";
 import {
   clearAllEmbeddings,
@@ -1518,10 +1518,54 @@ async function embedInTokenBatches(
 }
 
 /**
+ * Build the part-aware multi-vector chunk set for one temporal message and
+ * write it to `temporal_vec`. Awaitable so the fire-and-forget write path
+ * ({@link embedTemporalMessage}) and the resumable re-chunk backfill
+ * ({@link backfillTemporalEmbeddings}) share one implementation.
+ *
+ * vec0 only — the caller guarantees vec0 mode. Splits the stored content back
+ * into its units (prose, reasoning, reduced tool envelopes), drops empties,
+ * caps the per-message chunk fan-out (#1072), sub-batches the embeds, then
+ * stores the COMPLETE set. `storeTemporalChunks` DELETEs-then-INSERTs by
+ * `message_id`, so a re-embed replaces the whole set and the chunk count may
+ * shrink or grow. Returns the number of chunks written (0 when the message has
+ * no embeddable units — in which case nothing is stored OR deleted, so an
+ * existing chunk set is never wiped without a replacement).
+ */
+async function embedAndStoreTemporalChunks(
+  id: string,
+  content: string,
+): Promise<number> {
+  let texts = buildEmbeddingUnits(content)
+    .map((u) => u.text)
+    .filter((t) => t.trim().length > 0);
+  if (!texts.length) return 0;
+  // Bound the per-message chunk fan-out (#1072): past the cap, fold the
+  // overflow tail into the final chunk so the chunk count stays bounded
+  // without dropping any unit's text from the vector.
+  if (texts.length > MAX_TEMPORAL_CHUNKS_PER_MESSAGE) {
+    texts = [
+      ...texts.slice(0, MAX_TEMPORAL_CHUNKS_PER_MESSAGE - 1),
+      texts.slice(MAX_TEMPORAL_CHUNKS_PER_MESSAGE - 1).join("\n"),
+    ];
+  }
+  // Sub-batch the unit embeds so a many-unit message never posts one oversized
+  // tensor to the worker; accumulate all vectors, then store the complete set.
+  const vecs = await embedInTokenBatches(texts, "document");
+  storeTemporalChunks(db(), id, vecs);
+  return vecs.length;
+}
+
+/**
  * Embed a temporal message and store the result in the DB.
  * Fire-and-forget — errors are logged, never thrown.
- * Only called for undistilled messages; once distilled, the embedding
- * is NULLed (semantic content captured by distillation embedding).
+ *
+ * Called at message-write time (temporal.store) for the message's current
+ * content. Distilled messages KEEP their embeddings — they stay in the vector
+ * search path (markDistilled only flips the flag; nothing clears the vector),
+ * so this is the only place a message's vector is created at write time. The
+ * resumable backfill ({@link backfillTemporalEmbeddings}) re-chunks pre-policy
+ * survivors of the whole corpus.
  */
 export function embedTemporalMessage(id: string, content: string): void {
   if (!isAvailable()) return;
@@ -1541,29 +1585,10 @@ export function embedTemporalMessage(id: string, content: string): void {
   // The blob layout has a single `embedding` column per row, so it falls back to
   // ONE vector over the joined units (the prior single part-selective vector).
   if (readStorageMode(db()) === "vec0") {
-    let texts = buildEmbeddingUnits(content)
-      .map((u) => u.text)
-      .filter((t) => t.trim().length > 0);
-    if (!texts.length) return;
-    // Bound the per-message chunk fan-out (#1072): past the cap, fold the
-    // overflow tail into the final chunk so the chunk count stays bounded
-    // without dropping any unit's text from the vector.
-    if (texts.length > MAX_TEMPORAL_CHUNKS_PER_MESSAGE) {
-      texts = [
-        ...texts.slice(0, MAX_TEMPORAL_CHUNKS_PER_MESSAGE - 1),
-        texts.slice(MAX_TEMPORAL_CHUNKS_PER_MESSAGE - 1).join("\n"),
-      ];
-    }
-    // Sub-batch the unit embeds so a many-unit message never posts one oversized
-    // tensor to the worker; accumulate all vectors, then store the complete set.
-    embedInTokenBatches(texts, "document")
-      .then((vecs) => {
-        storeTemporalChunks(db(), id, vecs);
-      })
-      .catch((err) => {
-        if (err instanceof LocalProviderUnavailableError) return;
-        log.error("embedding failed for temporal message", id, ":", err);
-      });
+    embedAndStoreTemporalChunks(id, content).catch((err) => {
+      if (err instanceof LocalProviderUnavailableError) return;
+      log.error("embedding failed for temporal message", id, ":", err);
+    });
     return;
   }
 
@@ -1664,6 +1689,10 @@ export function checkConfigChange(): boolean {
     if (mode === "vec0") {
       ensureVec0Store(db(), config().search.embeddings.dimensions);
     }
+    // The clear wiped temporal vectors too, and temporal has no dedicated
+    // backfill loop above — re-arm the resumable re-chunk walk so it refills
+    // the corpus under the new model/dimension on this same startup.
+    resetTemporalRechunkProgress();
   }
 
   // Store new fingerprint
@@ -1805,6 +1834,7 @@ export interface BackfillStats {
   knowledgeWithEmbedding: number;
   distillationTotal: number;
   distillationWithEmbedding: number;
+  temporalRechunked: number;
 }
 
 function emptyBackfillStats(): BackfillStats {
@@ -1818,6 +1848,7 @@ function emptyBackfillStats(): BackfillStats {
     knowledgeWithEmbedding: 0,
     distillationTotal: 0,
     distillationWithEmbedding: 0,
+    temporalRechunked: 0,
   };
 }
 
@@ -1877,6 +1908,10 @@ export async function runStartupBackfill(): Promise<BackfillStats> {
   const knowledgeEmbedded = await backfillEmbeddings();
   const distillationEmbedded = await backfillDistillationEmbeddings();
   const entityEmbedded = await backfillEntityEmbeddings();
+  // Re-chunk pre-multi-vector temporal survivors into the vec0 layout. Resumable
+  // + done-flagged, so this is the heavy walk only on the first vec0 run (and
+  // again after a config change); a no-op in blob mode and once converged.
+  const temporalRechunked = await backfillTemporalEmbeddings();
 
   // Startup backstop: reclaim vec0 rows orphaned by bulk base-row deletes
   // (project/session/prune) since the last run. Harmless if there are none.
@@ -1920,9 +1955,14 @@ export async function runStartupBackfill(): Promise<BackfillStats> {
   // vec0-only storage but sqlite-vec did not load here, so vector recall is
   // FTS-only until reopened on a capable runtime.
   parts.push(`storage_mode=${mode} vec=${isVecAvailable() ? "on" : "off"}`);
-  if (knowledgeEmbedded > 0 || distillationEmbedded > 0 || entityEmbedded > 0) {
+  if (
+    knowledgeEmbedded > 0 ||
+    distillationEmbedded > 0 ||
+    entityEmbedded > 0 ||
+    temporalRechunked > 0
+  ) {
     parts.push(
-      `backfilled ${knowledgeEmbedded} knowledge + ${distillationEmbedded} distillations + ${entityEmbedded} entities`,
+      `backfilled ${knowledgeEmbedded} knowledge + ${distillationEmbedded} distillations + ${entityEmbedded} entities + ${temporalRechunked} temporal re-chunked`,
     );
   }
   parts.push(
@@ -1940,6 +1980,7 @@ export async function runStartupBackfill(): Promise<BackfillStats> {
     knowledgeWithEmbedding: kWithEmb,
     distillationTotal: dTotal,
     distillationWithEmbedding: dWithEmb,
+    temporalRechunked,
   };
 }
 
@@ -2221,4 +2262,182 @@ export async function backfillEntityEmbeddings(): Promise<number> {
     log.info(`embedded ${embedded} entities`);
   }
   return embedded;
+}
+
+// ---------------------------------------------------------------------------
+// Backfill — temporal messages (multi-vector re-chunk)
+// ---------------------------------------------------------------------------
+
+/** KV key: id of the last temporal message re-chunked by the backfill walk. */
+const TEMPORAL_RECHUNK_CURSOR_KEY = "lore:temporal_rechunk.cursor";
+/** KV key: "1" once the walk has reached the end of the corpus. */
+const TEMPORAL_RECHUNK_DONE_KEY = "lore:temporal_rechunk.done";
+/** KV key: how many passes have ended with a still-unembeddable row. */
+const TEMPORAL_RECHUNK_ATTEMPTS_KEY = "lore:temporal_rechunk.attempts";
+/**
+ * Rows fetched per page of the resumable temporal re-chunk walk. Bounds the
+ * working-set memory (the corpus is 100k+ rows with large tool-output content)
+ * and the redo cost of a crash mid-page.
+ */
+const TEMPORAL_RECHUNK_PAGE = 256;
+/**
+ * Cap on passes that end with a row still failing to embed. A transient remote
+ * failure (429/5xx surfaces as a plain Error, not LocalProviderUnavailableError)
+ * makes the walk rewind and retry on the next startup rather than latch done
+ * over the gap; this bounds that so a genuinely un-embeddable row can't loop
+ * forever (it keeps its legacy single vector + FTS, so recall still works).
+ */
+const MAX_TEMPORAL_RECHUNK_RETRY_PASSES = 3;
+
+/**
+ * Reset the temporal re-chunk progress so the next {@link runStartupBackfill}
+ * walks the whole corpus again. Called when an embedding-config change clears
+ * all vectors — the temporal corpus has no other repopulation path, so the
+ * walk is what refills it under the new model/dimension.
+ */
+export function resetTemporalRechunkProgress(): void {
+  setKV(TEMPORAL_RECHUNK_DONE_KEY, "0");
+  setKV(TEMPORAL_RECHUNK_CURSOR_KEY, "");
+  setKV(TEMPORAL_RECHUNK_ATTEMPTS_KEY, "0");
+}
+
+/**
+ * Re-chunk existing temporal messages into the multi-vector vec0 layout.
+ *
+ * New messages are embedded part-aware at write time, but messages written
+ * before the multi-vector policy — and every survivor of the blob→vec0 cutover,
+ * which copies a single legacy vector as one `#0` chunk — still carry a single
+ * vector. Distilled messages KEEP their embeddings and stay in the vector
+ * search path, so the legacy set is the WHOLE corpus, not just the undistilled
+ * tail. This walks it and re-embeds each message through the same multi-vector
+ * path the write path uses.
+ *
+ * Properties:
+ *  - vec0-only: in blob mode there is one vector per row regardless, so this is
+ *    a no-op and does NOT latch the done flag — it runs after a future cutover.
+ *  - resumable: a KV cursor advances as the walk progresses; an interrupted run
+ *    resumes from the last persisted id. `storeTemporalChunks` replaces the
+ *    whole chunk set per message, so re-doing rows is idempotent.
+ *  - stable order, not chronological: temporal ids come from the upstream agent
+ *    (not lore), so `id` may not be time-ordered. The walk only needs a stable,
+ *    unique key — `id TEXT PRIMARY KEY`, `ORDER BY id ASC` (BINARY) — to visit
+ *    every pre-existing row exactly once. New rows inserted below the cursor are
+ *    already correct from write time, so skipping them is harmless.
+ *  - never wedges, never latches over a gap: a row that throws a plain Error
+ *    (e.g. a remote 429/5xx — local worker failures surface as
+ *    LocalProviderUnavailableError and stop the walk cleanly) is skipped so the
+ *    100k+ walk keeps converging, but the pass rewinds the cursor to the first
+ *    such row so the next startup retries it instead of latching done over the
+ *    gap. Bounded by {@link MAX_TEMPORAL_RECHUNK_RETRY_PASSES} so an
+ *    un-embeddable row can't loop forever.
+ *  - bounded memory: pages the scan instead of loading the whole corpus.
+ *  - converges once: a done flag latches at the end of a clean walk; subsequent
+ *    startups skip it. {@link resetTemporalRechunkProgress} re-arms it after a
+ *    model/dimension change.
+ *
+ * Returns the number of messages re-chunked (successfully) in this invocation.
+ */
+export async function backfillTemporalEmbeddings(): Promise<number> {
+  const provider = getProvider();
+  if (!provider) return 0;
+
+  // Multi-vector chunking only exists in vec0 mode. Skip WITHOUT latching done
+  // so a later cutover to vec0 still triggers the walk.
+  if (readStorageMode(db()) !== "vec0") return 0;
+  if (getKV(TEMPORAL_RECHUNK_DONE_KEY) === "1") return 0;
+
+  let cursor = getKV(TEMPORAL_RECHUNK_CURSOR_KEY) ?? "";
+  let processed = 0;
+  // Resume point of the FIRST row that hit a transient error this pass. We keep
+  // walking past it (so one hiccup never stalls the whole corpus) but rewind
+  // here at the end so the next startup retries it rather than latching done
+  // over the gap. Holds the cursor value from BEFORE that row (its predecessor),
+  // so `id > retryFrom` re-includes the failed row.
+  let retryFrom: string | null = null;
+  const PROGRESS_INTERVAL = 1000;
+  let nextProgressAt = PROGRESS_INTERVAL;
+
+  for (;;) {
+    // `length(content) >= 50` mirrors embedTemporalMessage's short-message skip,
+    // so the walk never embeds a message the write path would have ignored.
+    const rows = db()
+      .query(
+        `SELECT id, content FROM temporal_messages
+         WHERE id > ? AND length(content) >= 50
+         ORDER BY id ASC LIMIT ?`,
+      )
+      .all(cursor, TEMPORAL_RECHUNK_PAGE) as Array<{
+      id: string;
+      content: string;
+    }>;
+
+    if (!rows.length) {
+      if (retryFrom === null) {
+        // Clean pass reached the end — latch done; subsequent startups skip it.
+        setKV(TEMPORAL_RECHUNK_DONE_KEY, "1");
+        setKV(TEMPORAL_RECHUNK_ATTEMPTS_KEY, "0");
+      } else {
+        // Some rows failed this pass. Rewind to the first of them so the next
+        // startup retries — up to a bounded number of passes, after which we
+        // latch done and leave the stragglers on their legacy single vector.
+        const attempts =
+          Number(getKV(TEMPORAL_RECHUNK_ATTEMPTS_KEY) ?? "0") + 1;
+        if (attempts >= MAX_TEMPORAL_RECHUNK_RETRY_PASSES) {
+          log.warn(
+            `temporal re-chunk giving up after ${attempts} passes with unembeddable rows`,
+          );
+          setKV(TEMPORAL_RECHUNK_DONE_KEY, "1");
+          setKV(TEMPORAL_RECHUNK_ATTEMPTS_KEY, "0");
+        } else {
+          setKV(TEMPORAL_RECHUNK_ATTEMPTS_KEY, String(attempts));
+          setKV(TEMPORAL_RECHUNK_CURSOR_KEY, retryFrom);
+        }
+      }
+      break;
+    }
+
+    let stop = false;
+    for (const row of rows) {
+      try {
+        // Count only messages that actually got a chunk set written. A row that
+        // reduces to zero embeddable units (store() never persists one, but the
+        // walk reads rows directly) still advances the cursor below — it just
+        // isn't counted so the "re-chunked N" tally stays honest.
+        const chunks = await embedAndStoreTemporalChunks(row.id, row.content);
+        if (chunks > 0) processed++;
+      } catch (err) {
+        // Provider went away mid-run — stop WITHOUT advancing past this row or
+        // latching done; the next startup resumes from the persisted cursor.
+        if (err instanceof LocalProviderUnavailableError) {
+          log.info("temporal embedding backfill stopped: provider unavailable");
+          stop = true;
+          break;
+        }
+        // A transient/row-specific failure (e.g. a remote 429/5xx). Keep walking
+        // so one bad row never stalls the corpus, but remember the earliest
+        // failure (its predecessor cursor) so the pass doesn't latch over it.
+        log.error("temporal embedding backfill row failed", row.id, ":", err);
+        if (retryFrom === null) retryFrom = cursor;
+      }
+      cursor = row.id;
+    }
+
+    // Persist the page's end cursor. Once a row has failed this pass, pin the
+    // persisted cursor at the first failure (`retryFrom`) so a later stop or a
+    // crash still resumes there and retries it — the in-memory `cursor` keeps
+    // advancing so the current pass finishes the corpus. A crash mid-page redoes
+    // the page on the next run (idempotent via storeTemporalChunks).
+    setKV(TEMPORAL_RECHUNK_CURSOR_KEY, retryFrom ?? cursor);
+    if (stop) break;
+
+    if (processed >= nextProgressAt) {
+      log.info(`re-chunking temporal messages: ${processed}…`);
+      nextProgressAt = processed + PROGRESS_INTERVAL;
+    }
+  }
+
+  if (processed > 0) {
+    log.info(`re-chunked ${processed} temporal messages`);
+  }
+  return processed;
 }

@@ -241,6 +241,7 @@ describe("local provider unavailable fallback", () => {
       knowledgeWithEmbedding: 0,
       distillationTotal: 0,
       distillationWithEmbedding: 0,
+      temporalRechunked: 0,
     });
   });
 });

@@ -7,7 +7,8 @@
 // loads in the node test runtime). The suite is skipped if the extension is
 // somehow unavailable so a vec-less CI lane stays green.
 import { afterAll, beforeEach, describe, expect, test } from "vitest";
-import { close, db, ensureProject } from "../src/db";
+import { config } from "../src/config";
+import { close, db, ensureProject, getKV, setKV } from "../src/db";
 import { isVecAvailable } from "../src/db/vec";
 import {
   VEC_DIMENSION_KEY,
@@ -31,9 +32,12 @@ import {
 import {
   _restoreProvider,
   _saveAndClearProvider,
+  backfillTemporalEmbeddings,
+  checkConfigChange,
   embedTemporalMessage,
   MAX_TEMPORAL_CHUNKS_PER_MESSAGE,
   maybeCutoverToVec0,
+  resetTemporalRechunkProgress,
 } from "../src/embedding";
 import * as ltm from "../src/ltm";
 import { partsToText } from "../src/temporal";
@@ -1081,5 +1085,286 @@ describeVec("multi-vector temporal writes (storeTemporalChunks)", () => {
     const last = flat[flat.length - 1];
     expect(last).toContain(`unit-${cap - 1}-`);
     expect(last).toContain(`unit-${cap}-`);
+  });
+});
+
+describeVec("temporal re-chunk backfill (backfillTemporalEmbeddings)", () => {
+  const DONE_KEY = "lore:temporal_rechunk.done";
+  const CURSOR_KEY = "lore:temporal_rechunk.cursor";
+  const ATTEMPTS_KEY = "lore:temporal_rechunk.attempts";
+  const CONFIG_KEY = "lore:embedding_config";
+
+  // kv_meta persists across cases within a file; resetToBlob() only clears the
+  // storage-mode/dimension keys, so clear the walk's flags (+ the embedding
+  // config fingerprint) here so each case starts un-armed.
+  beforeEach(() => {
+    db()
+      .query("DELETE FROM kv_meta WHERE key IN (?, ?, ?, ?)")
+      .run(DONE_KEY, CURSOR_KEY, ATTEMPTS_KEY, CONFIG_KEY);
+  });
+
+  // A 3-unit message (prose + reasoning + reduced tool envelope), well over the
+  // 50-char embed threshold; the tool BODY never reaches the embedder.
+  const MULTI = partsToText([
+    textPart("Investigating the parser regression in detail."),
+    reasoningPart("Likely the tokenizer boundary."),
+    toolPart("read", `src/parse.ts\n${"BODY ".repeat(200)}`),
+  ]);
+  const MULTI_UNITS = [
+    "Investigating the parser regression in detail.",
+    "[reasoning] Likely the tokenizer boundary.",
+    "[tool:read] src/parse.ts",
+  ];
+
+  function insTemporalContent(
+    id: string,
+    content: string,
+    distilled = 0,
+  ): void {
+    db()
+      .query(
+        "INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at) VALUES (?, ?, 'sX', 'user', ?, 0, ?, 0)",
+      )
+      .run(id, pid, content, distilled);
+  }
+
+  // Run `body` with a deterministic mock provider; `calls` records each worker
+  // request so the tests can assert what was (and wasn't) embedded. `shouldThrow`
+  // lets a case simulate a transient remote failure (a plain Error, NOT
+  // LocalProviderUnavailableError) on batches whose text matches.
+  async function withProviderThrowing(
+    shouldThrow: (texts: string[]) => boolean,
+    body: (calls: string[][]) => Promise<void>,
+  ): Promise<void> {
+    const calls: string[][] = [];
+    const token = _saveAndClearProvider();
+    try {
+      _restoreProvider({
+        provider: {
+          maxBatchSize: 8,
+          async embed(texts: string[]) {
+            calls.push([...texts]);
+            if (shouldThrow(texts)) throw new Error("simulated remote 429");
+            return texts.map((_t, i) => v(1, i, 0, 0));
+          },
+        },
+      });
+      await body(calls);
+    } finally {
+      _restoreProvider(token);
+    }
+  }
+
+  function withProvider(
+    body: (calls: string[][]) => Promise<void>,
+  ): Promise<void> {
+    return withProviderThrowing(() => false, body);
+  }
+
+  // A single-unit message whose text carries a POISON marker the throwing
+  // provider keys on.
+  const POISON = partsToText([
+    textPart("This message triggers a simulated remote failure POISON."),
+  ]);
+  const isPoison = (texts: string[]) => texts.some((t) => t.includes("POISON"));
+
+  test("re-chunks legacy single-vector messages (incl. distilled) into the multi-vector set, then latches done", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    // A DISTILLED row — it keeps its embedding and stays in the search path, so
+    // the walk must re-chunk it too (this is the whole point of "full corpus").
+    insTemporalContent("m1", MULTI, /* distilled */ 1);
+    storeTemporalChunks(db(), "m1", [v(1, 0, 0, 0)]); // legacy: a single #0 chunk
+    expect(chunkIds("m1")).toEqual(["m1#0"]);
+
+    await withProvider(async (calls) => {
+      expect(await backfillTemporalEmbeddings()).toBe(1);
+      // The three part-aware units were embedded; the tool BODY was dropped.
+      expect(calls.flat()).toEqual(MULTI_UNITS);
+      expect(calls.flat().join("\n")).not.toContain("BODY");
+    });
+
+    // The single legacy chunk was replaced by the complete multi-vector set.
+    expect(chunkIds("m1")).toEqual(["m1#0", "m1#1", "m1#2"]);
+    // Walk reached the end → latched done, cursor at the last id.
+    expect(getKV(DONE_KEY)).toBe("1");
+    expect(getKV(CURSOR_KEY)).toBe("m1");
+  });
+
+  test("is a no-op in blob mode and does NOT latch done (a later cutover must still run it)", async () => {
+    // resetToBlob() left us in blob layout (no temporal_vec table at all).
+    insTemporalContent("m1", MULTI);
+    await withProvider(async (calls) => {
+      expect(await backfillTemporalEmbeddings()).toBe(0);
+      expect(calls).toEqual([]); // provider never touched
+    });
+    expect(getKV(DONE_KEY)).toBeNull(); // NOT latched
+  });
+
+  test("does nothing once done is latched (one-shot)", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporalContent("m1", MULTI);
+    setKV(DONE_KEY, "1");
+    await withProvider(async (calls) => {
+      expect(await backfillTemporalEmbeddings()).toBe(0);
+      expect(calls).toEqual([]);
+    });
+    expect(chunkIds("m1")).toEqual([]); // nothing embedded
+  });
+
+  test("resumes from the persisted cursor — rows at or below it are skipped", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporalContent("m1", MULTI);
+    insTemporalContent("m2", MULTI);
+    insTemporalContent("m3", MULTI);
+    setKV(CURSOR_KEY, "m2"); // resume strictly after m2
+
+    await withProvider(async () => {
+      expect(await backfillTemporalEmbeddings()).toBe(1); // only m3
+    });
+
+    expect(chunkIds("m1")).toEqual([]); // below the cursor — untouched
+    expect(chunkIds("m2")).toEqual([]); // == cursor — excluded (id > cursor)
+    expect(chunkIds("m3").length).toBe(3); // re-chunked
+    expect(getKV(CURSOR_KEY)).toBe("m3");
+    expect(getKV(DONE_KEY)).toBe("1");
+  });
+
+  test("skips messages below the 50-char embed threshold", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporalContent("a_short", "too short"); // < 50 chars — skipped
+    insTemporalContent("b_long", MULTI);
+
+    await withProvider(async () => {
+      expect(await backfillTemporalEmbeddings()).toBe(1);
+    });
+
+    expect(chunkIds("a_short")).toEqual([]);
+    expect(chunkIds("b_long").length).toBe(3);
+  });
+
+  test("resetTemporalRechunkProgress re-arms the walk after it has converged", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporalContent("m1", MULTI);
+
+    await withProvider(async () => {
+      expect(await backfillTemporalEmbeddings()).toBe(1);
+    });
+    expect(getKV(DONE_KEY)).toBe("1");
+
+    // Already done → a second walk is a no-op.
+    await withProvider(async (calls) => {
+      expect(await backfillTemporalEmbeddings()).toBe(0);
+      expect(calls).toEqual([]);
+    });
+
+    // Re-arm (as checkConfigChange does after clearing vectors).
+    resetTemporalRechunkProgress();
+    expect(getKV(DONE_KEY)).toBe("0");
+    expect(getKV(CURSOR_KEY)).toBe("");
+
+    // Now it walks the corpus again.
+    await withProvider(async () => {
+      expect(await backfillTemporalEmbeddings()).toBe(1);
+    });
+    expect(chunkIds("m1").length).toBe(3);
+  });
+
+  test("checkConfigChange re-arms the temporal walk after a detected config change", () => {
+    setStorageMode(db(), "vec0");
+    // Build the vec0 store at the REAL config dimension so checkConfigChange's
+    // ensureVec0Store(configDim) is a no-op (no DROP/recreate) — the wiring
+    // assertion is then independent of the model's embedding dimension.
+    ensureVec0Store(db(), config().search.embeddings.dimensions);
+    setKV(DONE_KEY, "1"); // pretend a prior session converged
+    setKV(CONFIG_KEY, "stale-fingerprint"); // force a detected change
+
+    expect(checkConfigChange()).toBe(true);
+
+    // The clear wiped temporal vectors, so the walk is re-armed to refill them.
+    expect(getKV(DONE_KEY)).toBe("0");
+    expect(getKV(CURSOR_KEY)).toBe("");
+  });
+
+  test("counts only messages that actually got chunks — a no-unit row advances but isn't counted", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    // A >=50-char row that reduces to zero embeddable units (all whitespace →
+    // the lone text unit trims empty and is filtered). store() never persists
+    // such a row, but the walk reads rows directly, so it must advance the
+    // cursor + latch done WITHOUT being counted or writing a chunk.
+    insTemporalContent("m1", " ".repeat(60));
+    insTemporalContent("m2", MULTI);
+
+    await withProvider(async (calls) => {
+      expect(await backfillTemporalEmbeddings()).toBe(1); // only m2 counted
+      expect(calls.flat()).toEqual(MULTI_UNITS); // embedder never saw the empty row
+    });
+
+    expect(chunkIds("m1")).toEqual([]); // no chunk written for the empty row
+    expect(chunkIds("m2").length).toBe(3);
+    expect(getKV(DONE_KEY)).toBe("1"); // walk still reached the end
+    expect(getKV(CURSOR_KEY)).toBe("m2"); // and advanced past the empty row
+  });
+
+  test("a transient row error skips forward but does NOT latch done — the next startup retries it", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporalContent("m1", POISON); // fails on this pass (simulated 429)
+    insTemporalContent("m2", MULTI); // succeeds
+
+    // Pass 1: m1 throws a plain Error, the walk skips forward to embed m2, but
+    // rewinds the cursor to retry m1 instead of latching done over the gap.
+    await withProviderThrowing(isPoison, async () => {
+      expect(await backfillTemporalEmbeddings()).toBe(1); // only m2 succeeded
+    });
+    expect(chunkIds("m1")).toEqual([]); // errored — left on its legacy vector
+    expect(chunkIds("m2").length).toBe(3); // re-chunked
+    expect(getKV(DONE_KEY)).toBeNull(); // NOT latched — there was a gap
+    expect(getKV(ATTEMPTS_KEY)).toBe("1");
+    expect(getKV(CURSOR_KEY)).toBe(""); // rewound to before the first failure
+
+    // Pass 2: the transient error is gone; the walk resumes from the rewind,
+    // re-chunks m1, and now latches done.
+    await withProvider(async () => {
+      expect(await backfillTemporalEmbeddings()).toBe(2); // m1 + m2 (idempotent)
+    });
+    expect(chunkIds("m1")).toEqual(["m1#0"]); // POISON is one unit → one chunk
+    expect(getKV(DONE_KEY)).toBe("1");
+    expect(getKV(ATTEMPTS_KEY)).toBe("0");
+  });
+
+  test("a permanently un-embeddable row is given up on after the bounded passes", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporalContent("m1", POISON); // always fails
+
+    // Each pass rewinds and retries; after MAX_TEMPORAL_RECHUNK_RETRY_PASSES the
+    // walk gives up and latches done (m1 stays on its legacy single vector).
+    await withProviderThrowing(isPoison, async () => {
+      expect(await backfillTemporalEmbeddings()).toBe(0);
+      expect(getKV(DONE_KEY)).toBeNull();
+      expect(getKV(ATTEMPTS_KEY)).toBe("1");
+
+      expect(await backfillTemporalEmbeddings()).toBe(0);
+      expect(getKV(DONE_KEY)).toBeNull();
+      expect(getKV(ATTEMPTS_KEY)).toBe("2");
+
+      // Third pass hits the cap → give up, latch done, clear the counter.
+      expect(await backfillTemporalEmbeddings()).toBe(0);
+      expect(getKV(DONE_KEY)).toBe("1");
+      expect(getKV(ATTEMPTS_KEY)).toBe("0");
+    });
+    expect(chunkIds("m1")).toEqual([]);
+
+    // Done is latched, so further startups are a no-op even while still failing.
+    await withProviderThrowing(isPoison, async (calls) => {
+      expect(await backfillTemporalEmbeddings()).toBe(0);
+      expect(calls).toEqual([]);
+    });
   });
 });
