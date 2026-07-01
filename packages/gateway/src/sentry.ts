@@ -567,6 +567,7 @@ export function setupEmbeddingFailureCapture(): void {
 // ---------------------------------------------------------------------------
 
 import { setReadPathTimingHook, type ReadPathTiming } from "@loreai/core";
+import { setVecReadLatencyHook, type VecReadLatencySample } from "@loreai/core";
 
 /**
  * Wire core's read-path timing hook to Sentry. Called once at startup. Emits a
@@ -611,6 +612,53 @@ export function setupReadPathTimingCapture(): void {
         t.candidateCount,
         { attributes },
       );
+    } catch {
+      // Telemetry must never break the read path.
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Vector KNN read-latency (#1065 — confirm the vec0 win in production)
+// ---------------------------------------------------------------------------
+
+/**
+ * Derive the (storage_mode, vec_available) tag pair from a read cohort so a
+ * healthy vec0 host is separable from a silently degraded JS-fallback host:
+ *   - vec0         → storage=vec0, vec_available=true
+ *   - degraded     → storage=vec0, vec_available=false  (vec0 layout, no ext)
+ *   - blob-native  → storage=blob, vec_available=true
+ *   - blob-js      → storage=blob, vec_available=false
+ */
+export function vecCohortTags(readMode: VecReadLatencySample["readMode"]): {
+  read_mode: string;
+  storage_mode: string;
+  vec_available: string;
+} {
+  const storageVec = readMode === "vec0" || readMode === "degraded";
+  const native = readMode === "vec0" || readMode === "blob-native";
+  return {
+    read_mode: readMode,
+    storage_mode: storageVec ? "vec0" : "blob",
+    vec_available: native ? "true" : "false",
+  };
+}
+
+/**
+ * Wire core's vector-read-latency hook to Sentry. Called once at startup. Emits
+ * one distribution per vector KNN read (`poolOrInProcess`), tagged by cohort, so
+ * p50/p95 read latency is queryable across all installs (incl. nightly) —
+ * proving the #999/#1051 vec0 latency win on real DBs and surfacing a host that
+ * silently degraded to JS brute force. Never throws.
+ */
+export function setupVecReadLatencyCapture(): void {
+  setVecReadLatencyHook((s: VecReadLatencySample) => {
+    if (!Sentry.isInitialized()) return;
+    try {
+      Sentry.metrics.distribution("lore.vec.read_latency_ms", s.elapsedMs, {
+        unit: "millisecond",
+        attributes: vecCohortTags(s.readMode),
+      });
     } catch {
       // Telemetry must never break the read path.
     }

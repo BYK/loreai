@@ -25,6 +25,7 @@ import {
   setupEmbeddingFailureCapture,
   setupBustSpiralCapture,
   setupReadPathTimingCapture,
+  setupVecReadLatencyCapture,
 } from "./sentry";
 import type { GatewayRequest } from "./translate/types";
 import { parseAnthropicRequest } from "./translate/anthropic";
@@ -382,6 +383,10 @@ export async function startServer(config: GatewayConfig): Promise<{
   // Wire read-path timing (forSession/recall) to Sentry (#966 B). Same
   // idempotency guarantee — the hook is assigned, not stacked.
   setupReadPathTimingCapture();
+
+  // Wire vector KNN read-latency to Sentry (#1065 — confirm the vec0 win). Same
+  // idempotency guarantee — the hook is assigned, not stacked.
+  setupVecReadLatencyCapture();
 
   // Shared fetch handler for all server instances.
   const fetch = async (req: Request): Promise<Response> => {

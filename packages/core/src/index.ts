@@ -257,6 +257,16 @@ export {
   setReadPathTimingHook,
   type ReadPathTiming,
 } from "./read-telemetry";
+export {
+  recordVecReadLatency,
+  setVecReadLatencyHook,
+  VEC_LATENCY_WINDOW,
+  type VecReadLatencySample,
+  type VecReadLatencyStat,
+  vecReadLatencyStats,
+  vecReadLatencyTotalSamples,
+  _resetVecReadLatencyForTest,
+} from "./vec-latency";
 export { distillLimiter, curatorLimiter } from "./session-limiter";
 export {
   installFetchInterceptor,

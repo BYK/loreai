@@ -40,6 +40,8 @@ import {
   evictSession as evictGradientSession,
   distillLimiter,
   curatorLimiter,
+  vecReadLatencyStats,
+  vecReadLatencyTotalSamples,
 } from "@loreai/core";
 import type { CacheStrategy, ChangedEntry, LLMClient } from "@loreai/core";
 import {
@@ -364,6 +366,10 @@ export function startIdleScheduler(
   // tick after startup runs it once (catches entries that decayed while the
   // gateway was down), then at most once per GLOBAL_DEAD_SWEEP_INTERVAL_MS.
   let lastGlobalDeadSweepAt = 0;
+  // Cumulative vector-read count at the last heartbeat log (#1065). The
+  // heartbeat only logs when new reads happened since the last tick, so idle
+  // periods stay quiet instead of repeating a stale p50/p95 line every tick.
+  let lastVecLatencyLogged = 0;
 
   // Begin sampling event-loop delay for the periodic resource gauge below.
   startResourceMonitor();
@@ -375,6 +381,32 @@ export function startIdleScheduler(
     // Periodic process-resource + event-loop-lag gauge (~30s). Cheap, gated on
     // Sentry being initialized, and never throws.
     emitResourceGauge();
+
+    // Vector KNN read-latency heartbeat (#1065): log the rolling p50/p95 per
+    // (storage × vec) cohort so a healthy vec0 host (sub-second) is visibly
+    // separable from a degraded JS-fallback host (multi-second) in per-install
+    // logs — the local counterpart to the Sentry distribution. Gated on new
+    // reads since the last tick so idle periods stay quiet. Never throws out.
+    try {
+      const totalReads = vecReadLatencyTotalSamples();
+      if (totalReads > lastVecLatencyLogged) {
+        lastVecLatencyLogged = totalReads;
+        const stats = vecReadLatencyStats();
+        if (stats.length > 0) {
+          const summary = stats
+            .map(
+              (s) =>
+                `${s.readMode} p50=${Math.round(s.p50)}ms p95=${Math.round(
+                  s.p95,
+                )}ms n=${s.count}`,
+            )
+            .join(" | ");
+          log.info(`vec read latency (rolling): ${summary}`);
+        }
+      }
+    } catch {
+      // Telemetry must never break the idle loop.
+    }
 
     // Scale background concurrency to the live session count before scheduling
     // this tick's work. The idle scheduler owns the sessions Map, so doing it

@@ -14,6 +14,7 @@
  */
 
 import { freemem } from "node:os";
+import { performance } from "node:perf_hooks";
 import { db, getKV, setKV } from "./db";
 import { isVecAvailable } from "./db/vec";
 import {
@@ -34,6 +35,7 @@ import {
 } from "./db/vec-store";
 import { config } from "./config";
 import * as log from "./log";
+import { recordVecReadLatency } from "./vec-latency";
 import { buildEmbeddingText, buildEmbeddingUnits } from "./embedding-units";
 import { vendorModelInfo } from "./embedding-vendor";
 import {
@@ -1304,26 +1306,41 @@ async function poolOrInProcess(
   spec: VectorQuerySpec,
   queryEmbedding: Float32Array,
 ): Promise<VectorHit[] | DistillationVectorHit[]> {
-  const pooled = await tryPoolVectorSearch(spec, queryEmbedding);
-  // Timed out: the worker is alive but slow. Return empty — degrading this one
-  // recall — rather than re-running the O(n) scan on the main thread, which
-  // re-blocks the event loop (the stall bug). The pool cancels the timed-out
-  // worker query (terminates + respawns) so it recovers for the next caller.
-  if (pooled === VECTOR_SEARCH_TIMED_OUT) return [];
-  if (pooled !== null) return pooled;
-  const readMode = resolveReadMode(readStorageMode(db()), isVecAvailable());
+  // #1065: record the wall-clock latency of every vector KNN read (pool
+  // round-trip + IPC, or the in-process fallback scan) tagged by the DB's
+  // (storage layout × sqlite-vec availability) cohort, so the gateway can prove
+  // the vec0 latency win (p50/p95) and spot a silently degraded JS-fallback
+  // host. storage_mode is DB-global and vec availability is process-global (the
+  // main thread and the workers load the extension together), so this
+  // main-thread resolution faithfully labels the worker path too. The lookup is
+  // a single indexed kv_meta point read (microseconds). Purely additive: the
+  // query path below is unchanged — the fallback re-resolves its own readMode.
+  const started = performance.now();
+  const cohort = resolveReadMode(readStorageMode(db()), isVecAvailable());
   try {
-    return runVectorQuery(db(), readMode, queryEmbedding, spec);
-  } catch (err) {
-    // Safety net for the vec0 read path, which (unlike the blob paths) has no
-    // in-line JS fallback: a vec0 `MATCH` can throw transiently — e.g. during a
-    // dimension change, when the query embedding's width no longer matches the
-    // vec0 table — and we must degrade THIS recall to empty (FTS/keyword recall
-    // still answers) rather than crash, per the never-crash contract. The pool
-    // already logged any worker-path failure; log the in-process one too so a
-    // systematic break stays visible.
-    log.error("in-process vector search failed; returning empty:", err);
-    return [];
+    const pooled = await tryPoolVectorSearch(spec, queryEmbedding);
+    // Timed out: the worker is alive but slow. Return empty — degrading this one
+    // recall — rather than re-running the O(n) scan on the main thread, which
+    // re-blocks the event loop (the stall bug). The pool cancels the timed-out
+    // worker query (terminates + respawns) so it recovers for the next caller.
+    if (pooled === VECTOR_SEARCH_TIMED_OUT) return [];
+    if (pooled !== null) return pooled;
+    const readMode = resolveReadMode(readStorageMode(db()), isVecAvailable());
+    try {
+      return runVectorQuery(db(), readMode, queryEmbedding, spec);
+    } catch (err) {
+      // Safety net for the vec0 read path, which (unlike the blob paths) has no
+      // in-line JS fallback: a vec0 `MATCH` can throw transiently — e.g. during a
+      // dimension change, when the query embedding's width no longer matches the
+      // vec0 table — and we must degrade THIS recall to empty (FTS/keyword recall
+      // still answers) rather than crash, per the never-crash contract. The pool
+      // already logged any worker-path failure; log the in-process one too so a
+      // systematic break stays visible.
+      log.error("in-process vector search failed; returning empty:", err);
+      return [];
+    }
+  } finally {
+    recordVecReadLatency(cohort, performance.now() - started);
   }
 }
 
