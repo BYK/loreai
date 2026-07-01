@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach } from "vitest";
-import { db, ensureProject } from "@loreai/core";
+import { db, ensureProject, saveSessionCosts } from "@loreai/core";
 import {
   computeHistoricalEstimates,
   invalidateHistoricalCache,
@@ -218,6 +218,38 @@ describe("computeHistoricalEstimates (session_rollup read path #981)", () => {
     );
     expect(s).toBeDefined();
     expect(s?.avoidedCompactions).toBe(3);
+  });
+
+  test("accumulates persisted warmup COST alongside savings (net visibility)", () => {
+    const pid = ensureProject("/test/cost-historical/warmupnet", "hist-wn");
+    const sid = "sess-warmup-net";
+    const now = Date.now();
+    // A message so the session appears in the rollup iteration.
+    insertMsg(pid, sid, "assistant", 100, now, null);
+    // Persisted live-session snapshot: the warmup SAVED $0.20 but COST $0.50 —
+    // net-negative. Both must flow into totals so the summary/UI can show net.
+    saveSessionCosts(sid, {
+      conversationCost: 1.0,
+      workerCost: 0.5, // includes the warmup cost bucket
+      conversationTurns: 4,
+      cacheReadTokens: 1000,
+      cacheWriteTokens: 500,
+      warmupSavings: 0.2,
+      warmupCost: 0.5,
+      warmupHits: 2,
+      ttlSavings: 0,
+      ttlHits: 0,
+      batchSavings: 0,
+      avoidedCompactions: 0,
+      avoidedCompactionCost: 0,
+    });
+
+    const totals = computeHistoricalEstimates().totals;
+    expect(totals.warmupSavings).toBeCloseTo(0.2);
+    expect(totals.warmupCost).toBeCloseTo(0.5);
+    // The net the summary line / dashboard reports is savings − cost (negative
+    // here — the whole point of surfacing the paired cost).
+    expect(totals.warmupSavings - totals.warmupCost).toBeCloseTo(-0.3);
   });
 
   test("batch estimate: a session with no usable model metadata keeps the 167K trigger", () => {

@@ -2841,8 +2841,11 @@ function pageCosts(): string {
     // Savings breakdown (compact list)
     if (liveTotalSavings !== 0) {
       const savingsItems: string[] = [];
-      if (liveWarmupSavings > 0)
-        savingsItems.push(`Cache warming: ${formatUSD(liveWarmupSavings)}`);
+      if (liveWarmupSavings > 0 || liveWarmupCost > 0)
+        savingsItems.push(
+          `Cache warming: net ${formatUSD(liveWarmupSavings - liveWarmupCost)} ` +
+            `(${formatUSD(liveWarmupSavings)} saved &minus; ${formatUSD(liveWarmupCost)} cost)`,
+        );
       if (liveTtlSavings > 0)
         savingsItems.push(`1h TTL: ${formatUSD(liveTtlSavings)}`);
       if (liveBatchSavings > 0)
@@ -2912,7 +2915,7 @@ function pageCosts(): string {
     body += `</td></tr>
         <tr class="section-header"><td colspan="2" style="padding-top:0.8em"><strong>Estimated Savings</strong></td></tr>
         <tr><td>Avoided compactions</td><td>${formatUSD(hist.avoidedCompactionCost)} <span style="color:var(--fg3);font-size:0.85em">(&times;${hist.avoidedCompactions})</span></td></tr>
-        ${hist.warmupSavings > 0 ? `<tr><td>Cache warming</td><td>${formatUSD(hist.warmupSavings)} <span style="color:var(--fg3);font-size:0.85em">(${hist.warmupHits} hits)</span></td></tr>` : ""}
+        ${hist.warmupSavings > 0 || hist.warmupCost > 0 ? `<tr><td>Cache warming (net)</td><td><strong style="color:${hist.warmupSavings - hist.warmupCost >= 0 ? "#10b981" : "#e06c75"}">${formatUSD(hist.warmupSavings - hist.warmupCost)}</strong> <span style="color:var(--fg3);font-size:0.85em">(${formatUSD(hist.warmupSavings)} saved &minus; ${formatUSD(hist.warmupCost)} cost, ${hist.warmupHits} hits)</span></td></tr>` : ""}
         ${hist.ttlSavings > 0 ? `<tr><td>1h TTL extension</td><td>${formatUSD(hist.ttlSavings)} <span style="color:var(--fg3);font-size:0.85em">(${hist.ttlHits} hits)</span></td></tr>` : ""}
         ${hist.batchSavings > 0 ? `<tr><td>Batch API discount</td><td>${formatUSD(hist.batchSavings)}</td></tr>` : ""}
         <tr style="border-top:1px solid var(--border)"><td><strong>${histNetSavings >= 0 ? "Net estimated savings" : "Net estimated overhead"}</strong></td><td><strong style="color:${histNetSavings >= 0 ? "#10b981" : "#e06c75"}">${histNetSavings >= 0 ? formatUSD(histNetSavings) : formatUSD(Math.abs(histNetSavings))}</strong></td></tr>

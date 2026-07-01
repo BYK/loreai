@@ -59,7 +59,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(60);
+    expect(row.version).toBe(61);
   });
 
   test("v55: confidence/last_reinforced_at moved to knowledge_meta, exposed via view", () => {
@@ -116,7 +116,7 @@ describe("db", () => {
     const ver = fresh.query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(ver.version).toBe(60);
+    expect(ver.version).toBe(61);
     // Register + JOIN view were rebuilt and are queryable (confidence exposed).
     expect(
       fresh
@@ -877,6 +877,7 @@ describe("db", () => {
       cacheReadTokens: 50000,
       cacheWriteTokens: 5000,
       warmupSavings: 0.12,
+      warmupCost: 0.09,
       warmupHits: 3,
       ttlSavings: 0.34,
       ttlHits: 7,
@@ -898,6 +899,7 @@ describe("db", () => {
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
       warmupSavings: 0,
+      warmupCost: 0,
       warmupHits: 0,
       ttlSavings: 0,
       ttlHits: 0,
@@ -912,6 +914,7 @@ describe("db", () => {
       cacheReadTokens: 100000,
       cacheWriteTokens: 10000,
       warmupSavings: 0.5,
+      warmupCost: 0.3,
       warmupHits: 5,
       ttlSavings: 0.8,
       ttlHits: 10,
@@ -937,6 +940,7 @@ describe("db", () => {
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
       warmupSavings: 0,
+      warmupCost: 0,
       warmupHits: 0,
       ttlSavings: 0,
       ttlHits: 0,
@@ -993,6 +997,7 @@ describe("db", () => {
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
       warmupSavings: 0.1,
+      warmupCost: 0.05,
       warmupHits: 1,
       ttlSavings: 0,
       ttlHits: 0,
@@ -1432,6 +1437,7 @@ describe("db", () => {
       cacheReadTokens: 1000,
       cacheWriteTokens: 2000,
       warmupSavings: 0.02,
+      warmupCost: 0.015,
       warmupHits: 1,
       ttlSavings: 0.01,
       ttlHits: 2,

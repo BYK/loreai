@@ -118,6 +118,7 @@ function persistSessionCosts(sessionID: string): void {
       cacheReadTokens: costs.conversation.cacheReadTokens,
       cacheWriteTokens: costs.conversation.cacheWriteTokens,
       warmupSavings: costs.counterfactual.warmupSavings,
+      warmupCost: costs.workers.warmup.cost,
       warmupHits: costs.counterfactual.warmupHits,
       ttlSavings: costs.counterfactual.ttlSavings,
       ttlHits: costs.counterfactual.ttlHits,

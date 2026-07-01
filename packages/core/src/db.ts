@@ -1530,6 +1530,16 @@ const MIGRATIONS: string[] = [
   -- dropped/empty rollup) and reuse the canonical rebuild query in tests/recovery.
   -- This string is intentionally a no-op marker so MIGRATIONS.length still counts.
   `,
+
+  `
+  -- Version 61: persist the per-session cache-warmup COST bucket separately.
+  -- session_state already stores warmup_savings / warmup_hits, but the warmup
+  -- request cost was only rolled into the aggregate worker_cost — so the cost
+  -- dashboard/log could show warmup savings without the paired cost, making a
+  -- net-negative warmer look profitable. This column lets cost-tracker surface
+  -- warmupNet = warmup_savings - warmup_cost.
+  ALTER TABLE session_state ADD COLUMN warmup_cost REAL NOT NULL DEFAULT 0;
+  `,
 ];
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -3150,6 +3160,8 @@ export type SessionCostSnapshot = {
   cacheReadTokens: number;
   cacheWriteTokens: number;
   warmupSavings: number;
+  /** Cache-warmup request cost (read+write), so warmupNet = savings − cost. */
+  warmupCost: number;
   warmupHits: number;
   ttlSavings: number;
   ttlHits: number;
@@ -3171,9 +3183,9 @@ export function saveSessionCosts(
       `INSERT INTO session_state (session_id, force_min_layer, updated_at,
          conversation_cost, worker_cost, conversation_turns,
          cache_read_tokens, cache_write_tokens,
-         warmup_savings, warmup_hits, ttl_savings, ttl_hits, batch_savings,
+         warmup_savings, warmup_cost, warmup_hits, ttl_savings, ttl_hits, batch_savings,
          avoided_compactions, avoided_compaction_cost)
-       VALUES (?, COALESCE((SELECT force_min_layer FROM session_state WHERE session_id = ?), 0), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, COALESCE((SELECT force_min_layer FROM session_state WHERE session_id = ?), 0), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(session_id) DO UPDATE SET
          conversation_cost = excluded.conversation_cost,
          worker_cost = excluded.worker_cost,
@@ -3181,6 +3193,7 @@ export function saveSessionCosts(
          cache_read_tokens = excluded.cache_read_tokens,
          cache_write_tokens = excluded.cache_write_tokens,
          warmup_savings = excluded.warmup_savings,
+         warmup_cost = excluded.warmup_cost,
          warmup_hits = excluded.warmup_hits,
          ttl_savings = excluded.ttl_savings,
          ttl_hits = excluded.ttl_hits,
@@ -3199,6 +3212,7 @@ export function saveSessionCosts(
       costs.cacheReadTokens,
       costs.cacheWriteTokens,
       costs.warmupSavings,
+      costs.warmupCost,
       costs.warmupHits,
       costs.ttlSavings,
       costs.ttlHits,
@@ -3219,7 +3233,7 @@ export function loadSessionCosts(
     .query(
       `SELECT conversation_cost, worker_cost, conversation_turns,
               cache_read_tokens, cache_write_tokens,
-              warmup_savings, warmup_hits, ttl_savings, ttl_hits, batch_savings,
+              warmup_savings, warmup_cost, warmup_hits, ttl_savings, ttl_hits, batch_savings,
               avoided_compactions, avoided_compaction_cost
        FROM session_state WHERE session_id = ?`,
     )
@@ -3230,6 +3244,7 @@ export function loadSessionCosts(
     cache_read_tokens: number;
     cache_write_tokens: number;
     warmup_savings: number;
+    warmup_cost: number;
     warmup_hits: number;
     ttl_savings: number;
     ttl_hits: number;
@@ -3245,6 +3260,7 @@ export function loadSessionCosts(
     cacheReadTokens: row.cache_read_tokens,
     cacheWriteTokens: row.cache_write_tokens,
     warmupSavings: row.warmup_savings,
+    warmupCost: row.warmup_cost,
     warmupHits: row.warmup_hits,
     ttlSavings: row.ttl_savings,
     ttlHits: row.ttl_hits,
@@ -3263,7 +3279,7 @@ export function loadAllSessionCosts(): Map<string, SessionCostSnapshot> {
     .query(
       `SELECT session_id, conversation_cost, worker_cost, conversation_turns,
               cache_read_tokens, cache_write_tokens,
-              warmup_savings, warmup_hits, ttl_savings, ttl_hits, batch_savings,
+              warmup_savings, warmup_cost, warmup_hits, ttl_savings, ttl_hits, batch_savings,
               avoided_compactions, avoided_compaction_cost
        FROM session_state
        WHERE conversation_turns > 0 OR warmup_savings > 0 OR ttl_savings > 0 OR batch_savings > 0`,
@@ -3276,6 +3292,7 @@ export function loadAllSessionCosts(): Map<string, SessionCostSnapshot> {
     cache_read_tokens: number;
     cache_write_tokens: number;
     warmup_savings: number;
+    warmup_cost: number;
     warmup_hits: number;
     ttl_savings: number;
     ttl_hits: number;
@@ -3292,6 +3309,7 @@ export function loadAllSessionCosts(): Map<string, SessionCostSnapshot> {
       cacheReadTokens: row.cache_read_tokens,
       cacheWriteTokens: row.cache_write_tokens,
       warmupSavings: row.warmup_savings,
+      warmupCost: row.warmup_cost,
       warmupHits: row.warmup_hits,
       ttlSavings: row.ttl_savings,
       ttlHits: row.ttl_hits,

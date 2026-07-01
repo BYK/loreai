@@ -145,6 +145,8 @@ export type HistoricalEstimates = {
     avoidedCompactions: number;
     avoidedCompactionCost: number;
     warmupSavings: number;
+    /** Cache-warmup request cost (read+write) across all sessions. */
+    warmupCost: number;
     warmupHits: number;
     ttlSavings: number;
     ttlHits: number;
@@ -1105,6 +1107,7 @@ export function computeHistoricalEstimates(
     avoidedCompactions: 0,
     avoidedCompactionCost: 0,
     warmupSavings: 0,
+    warmupCost: 0,
     warmupHits: 0,
     ttlSavings: 0,
     ttlHits: 0,
@@ -1236,6 +1239,7 @@ export function computeHistoricalEstimates(
           avoidedCompactionCost: persisted.avoidedCompactionCost,
         };
         totals.warmupSavings += persisted.warmupSavings;
+        totals.warmupCost += persisted.warmupCost;
         totals.warmupHits += persisted.warmupHits;
         totals.ttlSavings += persisted.ttlSavings;
         totals.ttlHits += persisted.ttlHits;
@@ -1304,7 +1308,8 @@ export function computeHistoricalEstimates(
       `worker overhead=$${totals.totalWorkerCost.toFixed(4)} (distillation-only=$${totals.distillationCost.toFixed(4)}), ` +
       `conversation=$${totals.persistedConversationCost.toFixed(4)}, ` +
       `avoided compactions=${totals.avoidedCompactions} ($${totals.avoidedCompactionCost.toFixed(4)}), ` +
-      `warmup=$${totals.warmupSavings.toFixed(4)} (${totals.warmupHits} hits), ` +
+      `warmup=net $${(totals.warmupSavings - totals.warmupCost).toFixed(4)} ` +
+      `($${totals.warmupSavings.toFixed(4)} savings − $${totals.warmupCost.toFixed(4)} cost, ${totals.warmupHits} hits), ` +
       `ttl=$${totals.ttlSavings.toFixed(4)} (${totals.ttlHits} hits), ` +
       `batch=$${totals.batchSavings.toFixed(4)}`,
   );
