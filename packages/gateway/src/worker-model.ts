@@ -35,6 +35,38 @@ let cachedModelDataAt = 0;
 let inflightFetch: Promise<Map<string, ModelsDevEntry>> | null = null;
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
+/**
+ * Memoized worker-model resolutions (both `resolveNewestInFamily` and
+ * `findCheaperSameProviderModel`).
+ *
+ * A resolution is a pure function of the models.dev snapshot — versioned by
+ * `cachedModelDataAt` — plus its query inputs, so the answer cannot change until
+ * the snapshot does. Reusing it skips the (cheap) rescan, but the real win is
+ * logging: `getWorkerModel()` runs on ~10 background hot paths (idle loop,
+ * cache-warmer, cost-tracker, pipeline), so without memoization each idle cycle
+ * re-emits the same INFO line ~4×. Memoizing collapses it to exactly one line
+ * per genuinely-new outcome, and correctly re-announces after a models.dev
+ * refresh changes the answer (new snapshot version → memo rebuilt).
+ *
+ * Keyed by a `\x1f`-joined tuple; stores `undefined` for memoized negative
+ * results (distinguished from "absent" via `Map.has`). Rebuilt lazily when the
+ * snapshot version advances and reset in `clearModelDataCache()`.
+ */
+let resolutionMemo = new Map<string, string | undefined>();
+let resolutionMemoVersion = -1;
+
+/**
+ * Return the resolution memo valid for the current models.dev snapshot,
+ * rebuilding it when the snapshot version (`cachedModelDataAt`) has advanced.
+ */
+function currentResolutionMemo(): Map<string, string | undefined> {
+  if (resolutionMemoVersion !== cachedModelDataAt) {
+    resolutionMemo = new Map();
+    resolutionMemoVersion = cachedModelDataAt;
+  }
+  return resolutionMemo;
+}
+
 /** Providers to fetch pricing data for from models.dev. */
 const SUPPORTED_PROVIDERS = ["anthropic", "openai"] as const;
 
@@ -426,6 +458,8 @@ export function clearModelDataCache(): void {
   cachedModelDataAt = 0;
   inflightFetch = null;
   lastReadyAttemptAt = 0;
+  resolutionMemo = new Map();
+  resolutionMemoVersion = -1;
 }
 
 // ---------------------------------------------------------------------------
@@ -459,6 +493,10 @@ function findCheaperSameProviderModel(
   const providerModelIds = cachedProviderModels?.get(providerID);
   if (!providerModelIds || !cachedModelData) return undefined;
 
+  const memo = currentResolutionMemo();
+  const memoKey = `cheaper\x1f${providerID}\x1f${sessionModelID}\x1f${sessionInputCost}`;
+  if (memo.has(memoKey)) return memo.get(memoKey);
+
   // Pass 1: cheapest same-provider model cheaper than the session.
   let cheapestId: string | undefined;
   let cheapestCost = sessionInputCost;
@@ -473,7 +511,10 @@ function findCheaperSameProviderModel(
       cheapestFamily = entry.family;
     }
   }
-  if (!cheapestId) return undefined;
+  if (!cheapestId) {
+    memo.set(memoKey, undefined);
+    return undefined;
+  }
 
   // Pass 2: within the cheapest family, prefer the newest member that is still
   // cheaper than the session (release_date desc, then numeric-aware id desc so
@@ -507,6 +548,7 @@ function findCheaperSameProviderModel(
       `instead of ${sessionModelID} ($${sessionInputCost}/M)`,
   );
 
+  memo.set(memoKey, resolvedId);
   return resolvedId;
 }
 
@@ -546,6 +588,10 @@ function resolveNewestInFamily(
   const providerModelIds = cachedProviderModels?.get(providerID);
   if (!providerModelIds || !cachedModelData) return undefined;
 
+  const memo = currentResolutionMemo();
+  const memoKey = `family\x1f${providerID}\x1f${family}\x1f${maxInputCost}`;
+  if (memo.has(memoKey)) return memo.get(memoKey);
+
   let bestId: string | undefined;
   let bestDate = "";
   for (const id of providerModelIds) {
@@ -577,6 +623,7 @@ function resolveNewestInFamily(
       `worker model: newest in family ${providerID}/${family} → ${bestId}`,
     );
   }
+  memo.set(memoKey, bestId);
   return bestId;
 }
 

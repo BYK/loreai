@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import { log } from "@loreai/core";
 
 // Bridge: upstreamFetch now uses undici's own fetch (not globalThis.fetch),
 // so tests that mock globalThis.fetch need this shim to intercept calls.
@@ -1364,6 +1365,192 @@ describe("family-based worker resolution", () => {
     expect(result?.providerID).toBe("google");
     // Absolute cheapest, since there is no family metadata to refine on.
     expect(result?.modelID).toBe("gemini-3-flash-lite");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolution memoization (skip rescan + collapse the per-call INFO log)
+// ---------------------------------------------------------------------------
+
+describe("worker-model resolution memoization", () => {
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    resetWorkerModelState();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    resetWorkerModelState();
+    vi.restoreAllMocks();
+  });
+
+  const LIMIT = { context: 200_000, output: 64_000 };
+
+  async function warmCache(response: unknown): Promise<void> {
+    globalThis.fetch = vi.fn(() =>
+      Promise.resolve(new Response(JSON.stringify(response), { status: 200 })),
+    ) as unknown as typeof fetch;
+    resetWorkerModelState();
+    await fetchModelData();
+  }
+
+  /** Anthropic snapshot whose newest cheap-tier sonnet is `newestSonnetId`. */
+  function anthropicSnapshot(newestSonnetId: string) {
+    return {
+      anthropic: {
+        api: "https://api.anthropic.com/v1",
+        models: {
+          "claude-opus-4-6": {
+            id: "claude-opus-4-6",
+            family: "claude-opus",
+            release_date: "2026-01-05",
+            cost: { input: 5, output: 25, cache_read: 0.5 },
+            limit: LIMIT,
+          },
+          "claude-sonnet-5": {
+            id: "claude-sonnet-5",
+            family: "claude-sonnet",
+            release_date: "2026-02-17",
+            cost: { input: 3, output: 15, cache_read: 0.3 },
+            limit: LIMIT,
+          },
+          [newestSonnetId]: {
+            id: newestSonnetId,
+            family: "claude-sonnet",
+            release_date: "2026-06-01",
+            cost: { input: 3, output: 15, cache_read: 0.3 },
+            limit: LIMIT,
+          },
+        },
+      },
+    };
+  }
+
+  const familyLines = (spy: ReturnType<typeof vi.spyOn>): unknown[][] =>
+    (spy.mock.calls as unknown[][]).filter(
+      (c) =>
+        typeof c[0] === "string" &&
+        c[0].includes("worker model: newest in family"),
+    );
+
+  test("family path: the 'newest in family' line is logged once per snapshot despite repeated getWorkerModel calls", async () => {
+    await warmCache(anthropicSnapshot("claude-sonnet-6"));
+
+    // Spy AFTER warming so we only observe resolution logs, not fetch logs.
+    const infoSpy = vi.spyOn(log, "info").mockImplementation(() => {});
+
+    for (let i = 0; i < 5; i++) {
+      const r = getWorkerModel({
+        providerID: "anthropic",
+        model: "claude-opus-4-6",
+      });
+      expect(r?.modelID).toBe("claude-sonnet-6");
+    }
+
+    // Without memoization this fires 5×; memoized it collapses to exactly 1.
+    expect(familyLines(infoSpy)).toHaveLength(1);
+  });
+
+  test("unknown-provider path: the 'dynamic worker model' line is logged once per snapshot despite repeated calls", async () => {
+    await warmCache({
+      anthropic: { api: "https://api.anthropic.com/v1", models: {} },
+      google: {
+        api: "https://generativelanguage.googleapis.com/v1beta",
+        models: {
+          "gemini-3.1-pro": {
+            id: "gemini-3.1-pro",
+            family: "gemini-pro",
+            release_date: "2026-05-01",
+            cost: { input: 4, output: 20 },
+            limit: LIMIT,
+          },
+          "gemini-3-flash-lite": {
+            id: "gemini-3-flash-lite",
+            family: "gemini-flash-lite",
+            release_date: "2026-04-01",
+            cost: { input: 0.15, output: 0.6 },
+            limit: LIMIT,
+          },
+        },
+      },
+    });
+
+    const infoSpy = vi.spyOn(log, "info").mockImplementation(() => {});
+
+    for (let i = 0; i < 5; i++) {
+      const r = getWorkerModel({
+        providerID: "google",
+        model: "gemini-3.1-pro",
+      });
+      expect(r?.modelID).toBe("gemini-3-flash-lite");
+    }
+
+    const dynamicLines = infoSpy.mock.calls.filter(
+      (c) => typeof c[0] === "string" && c[0].includes("dynamic worker model:"),
+    );
+    expect(dynamicLines).toHaveLength(1);
+  });
+
+  test("distinct query inputs are memoized independently (no cross-key collision)", async () => {
+    // One snapshot serving both the family path (anthropic) and the
+    // cheaper path (google) — repeated calls to each must each log once,
+    // proving the memo key discriminates rather than sharing one slot.
+    await warmCache({
+      anthropic: anthropicSnapshot("claude-sonnet-6").anthropic,
+      google: {
+        api: "https://generativelanguage.googleapis.com/v1beta",
+        models: {
+          "gemini-3.1-pro": {
+            id: "gemini-3.1-pro",
+            family: "gemini-pro",
+            release_date: "2026-05-01",
+            cost: { input: 4, output: 20 },
+            limit: LIMIT,
+          },
+          "gemini-3-flash-lite": {
+            id: "gemini-3-flash-lite",
+            family: "gemini-flash-lite",
+            release_date: "2026-04-01",
+            cost: { input: 0.15, output: 0.6 },
+            limit: LIMIT,
+          },
+        },
+      },
+    } as unknown);
+
+    const infoSpy = vi.spyOn(log, "info").mockImplementation(() => {});
+
+    getWorkerModel({ providerID: "anthropic", model: "claude-opus-4-6" });
+    getWorkerModel({ providerID: "anthropic", model: "claude-opus-4-6" });
+    getWorkerModel({ providerID: "google", model: "gemini-3.1-pro" });
+    getWorkerModel({ providerID: "google", model: "gemini-3.1-pro" });
+
+    expect(familyLines(infoSpy)).toHaveLength(1);
+    const dynamicLines = infoSpy.mock.calls.filter(
+      (c) => typeof c[0] === "string" && c[0].includes("dynamic worker model:"),
+    );
+    expect(dynamicLines).toHaveLength(1);
+  });
+
+  test("a new models.dev snapshot re-resolves (memo is snapshot-scoped, never permanently stale)", async () => {
+    await warmCache(anthropicSnapshot("claude-sonnet-6"));
+    expect(
+      getWorkerModel({ providerID: "anthropic", model: "claude-opus-4-6" })
+        ?.modelID,
+    ).toBe("claude-sonnet-6");
+
+    // A later refresh introduces an even newer sonnet. The memo must not pin
+    // the stale answer — resolution reflects the new snapshot and re-announces.
+    const infoSpy = vi.spyOn(log, "info").mockImplementation(() => {});
+    await warmCache(anthropicSnapshot("claude-sonnet-7"));
+
+    expect(
+      getWorkerModel({ providerID: "anthropic", model: "claude-opus-4-6" })
+        ?.modelID,
+    ).toBe("claude-sonnet-7");
+    expect(familyLines(infoSpy).length).toBeGreaterThanOrEqual(1);
   });
 });
 
