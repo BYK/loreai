@@ -21,6 +21,8 @@ import {
   normalizeOpenAIUsage,
   resolveWorkerProtocol,
   AUTH_ERROR_CODES,
+  isTemperatureUnsupportedModel,
+  _resetTemperatureUnsupportedModels,
 } from "../src/llm-adapter";
 import {
   getConsecutiveTrips,
@@ -1308,5 +1310,198 @@ describe("worker beta capability validation", () => {
     expect(betaOf(1)).toBeDefined();
     expect(betaOf(1)).not.toContain("context-1m");
     expect(betaOf(1)).toContain("oauth-2025-04-20");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Temperature-vs-model capability + runtime 400-retry-without-temperature
+//
+// Worker call sites set `temperature: 0` for reproducible distillation/curation.
+// Newer models (e.g. claude-sonnet-5) DEPRECATED the sampling param and reject
+// any request carrying it with a 400 ("`temperature` is deprecated for this
+// model."), which broke every worker on that model. We (1) retry once with the
+// temperature param removed on such a 400, and (2) learn the fact so subsequent
+// worker calls to that model omit temperature upfront.
+// ---------------------------------------------------------------------------
+
+describe("worker temperature capability", () => {
+  const mockFetch = vi.mocked(upstreamFetch);
+
+  const UPSTREAMS = {
+    anthropic: "https://api.anthropic.com",
+    openai: "https://api.openai.com",
+  };
+
+  beforeEach(() => {
+    _resetTemperatureUnsupportedModels();
+  });
+
+  afterEach(() => {
+    mockFetch.mockReset();
+    clearAllCosts();
+    resetBackgroundLimiter();
+    _resetTemperatureUnsupportedModels();
+  });
+
+  function bodyOf(callIndex: number): Record<string, unknown> | undefined {
+    const init = mockFetch.mock.calls[callIndex]?.[1];
+    const raw = init?.body;
+    if (typeof raw !== "string") return undefined;
+    return JSON.parse(raw) as Record<string, unknown>;
+  }
+
+  const TEMP_DEPRECATED_400 = JSON.stringify({
+    type: "error",
+    error: {
+      type: "invalid_request_error",
+      message: "`temperature` is deprecated for this model.",
+    },
+  });
+
+  test("sends temperature upfront for a model not known to reject it", async () => {
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          content: [{ type: "text", text: "ok" }],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      { providerID: "anthropic", modelID: "claude-opus-4-8" },
+    );
+
+    await client.prompt("system", "user", {
+      sessionID: "sess-temp-ok",
+      workerID: "lore-distill",
+      model: { providerID: "anthropic", modelID: "claude-opus-4-8" },
+      temperature: 0,
+    });
+
+    expect(bodyOf(0)?.temperature).toBe(0);
+  });
+
+  test("retries once without temperature on a deprecation 400, then succeeds", async () => {
+    let call = 0;
+    mockFetch.mockImplementation(async () => {
+      call++;
+      if (call === 1) {
+        return new Response(TEMP_DEPRECATED_400, { status: 400 });
+      }
+      return new Response(
+        JSON.stringify({
+          content: [{ type: "text", text: "recovered" }],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      { providerID: "anthropic", modelID: "claude-sonnet-5" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      sessionID: "sess-temp-400",
+      workerID: "lore-distill",
+      model: { providerID: "anthropic", modelID: "claude-sonnet-5" },
+      temperature: 0,
+    });
+
+    expect(result).toBe("recovered");
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    // First attempt carried temperature; the retry dropped it entirely.
+    expect(bodyOf(0)?.temperature).toBe(0);
+    expect(bodyOf(1)).toBeDefined();
+    expect(bodyOf(1)).not.toHaveProperty("temperature");
+    // The model is now learned as temperature-unsupported.
+    expect(
+      isTemperatureUnsupportedModel({
+        providerID: "anthropic",
+        modelID: "claude-sonnet-5",
+      }),
+    ).toBe(true);
+  });
+
+  test("omits temperature upfront on the next call once a model is learned", async () => {
+    // First call: 400 then recover (teaches the set).
+    let call = 0;
+    mockFetch.mockImplementation(async () => {
+      call++;
+      if (call === 1) {
+        return new Response(TEMP_DEPRECATED_400, { status: 400 });
+      }
+      return new Response(
+        JSON.stringify({
+          content: [{ type: "text", text: "ok" }],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      { providerID: "anthropic", modelID: "claude-sonnet-5" },
+    );
+
+    const opts = {
+      sessionID: "sess-temp-learn",
+      workerID: "lore-distill",
+      model: { providerID: "anthropic", modelID: "claude-sonnet-5" },
+      temperature: 0,
+    };
+
+    await client.prompt("system", "user", opts);
+    expect(mockFetch).toHaveBeenCalledTimes(2); // 400 + retry
+
+    // Second prompt to the same model: no wasted round-trip — temperature is
+    // omitted on the FIRST request, so a single 200 call suffices.
+    await client.prompt("system", "user", opts);
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    expect(bodyOf(2)).toBeDefined();
+    expect(bodyOf(2)).not.toHaveProperty("temperature");
+  });
+
+  test("does not strip temperature for an unrelated 400", async () => {
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          type: "error",
+          error: { type: "invalid_request_error", message: "bad max_tokens" },
+        }),
+        { status: 400 },
+      ),
+    );
+
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      { providerID: "anthropic", modelID: "claude-sonnet-5" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      sessionID: "sess-temp-unrelated",
+      workerID: "lore-distill",
+      model: { providerID: "anthropic", modelID: "claude-sonnet-5" },
+      temperature: 0,
+    });
+
+    // Unrelated 400 → no retry, no learning.
+    expect(result).toBeNull();
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(
+      isTemperatureUnsupportedModel({
+        providerID: "anthropic",
+        modelID: "claude-sonnet-5",
+      }),
+    ).toBe(false);
   });
 });
