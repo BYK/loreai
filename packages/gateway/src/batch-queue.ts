@@ -34,7 +34,12 @@ import {
   type AnthropicUsage,
 } from "./sentry";
 import { recordWorkerCost } from "./cost-tracker";
-import { normalizeOpenAIUsage } from "./llm-adapter";
+import {
+  isTemperatureUnsupported400,
+  isTemperatureUnsupportedModel,
+  markTemperatureUnsupported,
+  normalizeOpenAIUsage,
+} from "./llm-adapter";
 import { upstreamFetch } from "./fetch";
 
 // ---------------------------------------------------------------------------
@@ -77,7 +82,11 @@ export interface BatchProvider {
    */
   submit(
     auth: AuthCredential,
-    items: Array<{ customId: string; params: PendingRequest["params"] }>,
+    items: Array<{
+      customId: string;
+      providerID: string;
+      params: PendingRequest["params"];
+    }>,
   ): Promise<string | "auth-error" | "not-found" | null>;
   /** Poll a batch for completion. */
   poll(auth: AuthCredential, batchId: string): Promise<PollResult>;
@@ -234,7 +243,7 @@ export function createAnthropicBatchProvider(
     async submit(auth, items) {
       const requests = items.map((item) => ({
         custom_id: item.customId,
-        params: item.params,
+        params: paramsWithSupportedTemperature(item),
       }));
 
       const url = `${baseUrl}/v1/messages/batches`;
@@ -510,6 +519,36 @@ function systemToText(
   return system.map((b) => b.text).join("\n");
 }
 
+/**
+ * Return the item's Messages params with `temperature` omitted when the target
+ * model has been observed to reject it. Newer models (claude-sonnet-5, GPT-5 /
+ * o-series) DEPRECATE the sampling `temperature` param and 400 any request that
+ * includes it. The single-request path retries-then-strips + learns the model
+ * (see llm-adapter's `temperatureUnsupportedModels`), but a batch item has no
+ * per-item retry — a submitted item that includes an unsupported `temperature`
+ * just errors — so we must omit it UPFRONT here, consulting the same shared
+ * learned set (also fed by this path's own errored-item handler below).
+ *
+ * Returns the original object (no copy) when `temperature` is absent or the
+ * model is not known to reject it.
+ */
+function paramsWithSupportedTemperature(item: {
+  providerID: string;
+  params: PendingRequest["params"];
+}): PendingRequest["params"] {
+  if (
+    item.params.temperature == null ||
+    !isTemperatureUnsupportedModel({
+      providerID: item.providerID,
+      modelID: item.params.model,
+    })
+  ) {
+    return item.params;
+  }
+  const { temperature: _omit, ...rest } = item.params;
+  return rest;
+}
+
 /** Max batch age for OpenAI (4 hours). OpenAI allows up to 24h but we don't
  *  want to wait that long for background work results. */
 const OPENAI_MAX_BATCH_AGE_MS = 4 * 60 * 60 * 1000; // 4 hours
@@ -531,24 +570,25 @@ export function createOpenAIBatchProvider(upstreamUrl: string): BatchProvider {
     async submit(auth, items) {
       // 1. Build JSONL content — one line per request
       const lines = items.map((item) => {
+        const params = paramsWithSupportedTemperature(item);
         const messages: Array<{ role: string; content: string }> = [];
-        if (item.params.system) {
+        if (params.system) {
           messages.push({
             role: "system",
-            content: systemToText(item.params.system),
+            content: systemToText(params.system),
           });
         }
-        messages.push(...item.params.messages);
+        messages.push(...params.messages);
 
         return JSON.stringify({
           custom_id: item.customId,
           method: "POST",
           url: "/v1/chat/completions",
           body: {
-            model: item.params.model,
-            max_completion_tokens: item.params.max_tokens,
-            ...(item.params.temperature != null && {
-              temperature: item.params.temperature,
+            model: params.model,
+            max_completion_tokens: params.max_tokens,
+            ...(params.temperature != null && {
+              temperature: params.temperature,
             }),
             messages,
           },
@@ -765,7 +805,11 @@ export function createBatchLLMClient(
     try {
       const batchId = await provider.submit(
         auth,
-        items.map((item) => ({ customId: item.customId, params: item.params })),
+        items.map((item) => ({
+          customId: item.customId,
+          providerID: item.providerID,
+          params: item.params,
+        })),
       );
 
       if (!batchId || batchId === "auth-error" || batchId === "not-found") {
@@ -980,6 +1024,16 @@ export function createBatchLLMClient(
             break;
           }
           case "errored":
+            // Learn a "temperature is deprecated" rejection so subsequent
+            // submits (batch AND single-request) omit `temperature` upfront for
+            // this model instead of re-erroring every item. Feeds the same
+            // shared set consulted by paramsWithSupportedTemperature().
+            if (result.error && isTemperatureUnsupported400(result.error)) {
+              markTemperatureUnsupported({
+                providerID: pending.providerID,
+                modelID: pending.params.model,
+              });
+            }
             pending.resolve(null); // Match inner client behavior (null on error)
             totalFailed++;
             log.error(

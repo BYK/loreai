@@ -208,7 +208,7 @@ export function _resetTemperatureUnsupportedModels(): void {
  * verb so an unrelated 400 that merely mentions temperature can't trigger the
  * one-shot temperature-stripped retry.
  */
-function isTemperatureUnsupported400(body: string): boolean {
+export function isTemperatureUnsupported400(body: string): boolean {
   return (
     /temperature/i.test(body) &&
     /\b(deprecated|unsupported|no\s+longer\s+supported|not\s+(?:a\s+)?support(?:ed)?|removed|not\s+allowed|cannot\s+be\s+(?:set|used|specified))\b/i.test(

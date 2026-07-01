@@ -22,6 +22,11 @@ vi.mock("../src/fetch", () => ({
 }));
 import type { LLMClient } from "@loreai/core";
 import type { AuthCredential } from "../src/auth";
+import {
+  _resetTemperatureUnsupportedModels,
+  isTemperatureUnsupportedModel,
+  markTemperatureUnsupported,
+} from "../src/llm-adapter";
 
 const TEST_AUTH: AuthCredential = { scheme: "api-key", value: "test-key" };
 const getTestAuth = () => TEST_AUTH;
@@ -51,6 +56,7 @@ interface BatchCreateBody {
     params: {
       model: string;
       max_tokens: number;
+      temperature?: number;
       system: string | Array<{ type: string; text: string }>;
       messages: Array<{ role: string; content: string }>;
     };
@@ -1242,6 +1248,182 @@ describe("BatchLLMClient", () => {
     expect(logged).toContain("context_length_exceeded");
 
     errorSpy.mockRestore();
+    globalThis.fetch = prevFetch;
+    await client.shutdown();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Temperature capability on the batch path.
+//
+// Newer models (claude-sonnet-5, GPT-5 / o-series) DEPRECATE the sampling
+// `temperature` param and 400 any request carrying it. The single-request path
+// retries-then-strips + learns the model; a batch item has no per-item retry, so
+// a submitted item carrying an unsupported `temperature` just errors. The batch
+// submit must omit `temperature` upfront for models learned to reject it (shared
+// set with the single path), and it must LEARN from a batch item that errors
+// with a deprecation message so the next submit self-heals.
+// ---------------------------------------------------------------------------
+describe("BatchLLMClient temperature capability", () => {
+  beforeEach(() => {
+    _resetTemperatureUnsupportedModels();
+  });
+  afterEach(() => {
+    _resetTemperatureUnsupportedModels();
+  });
+
+  test("Anthropic batch omits temperature for a model learned to reject it", async () => {
+    const inner = createMockLLMClient();
+    // Model already learned as temperature-unsupported (e.g. from a prior
+    // single-request 400 or an earlier batch error).
+    markTemperatureUnsupported({
+      providerID: "anthropic",
+      modelID: "claude-sonnet-4-20250514",
+    });
+    pushFetchResponse(true, 200, {
+      id: "msgbatch_tempstrip",
+      processing_status: "in_progress",
+    });
+
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      getTestAuth,
+      DEFAULT_MODEL,
+      {
+        flushIntervalMs: 60_000,
+        maxQueueSize: 1,
+      },
+    );
+
+    client.prompt("sys", "msg", { workerID: "lore-distill", temperature: 0 });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const params = fetchCalls[0]?.body?.requests[0]?.params;
+    expect(params).toBeDefined();
+    expect(params).not.toHaveProperty("temperature");
+
+    await client.shutdown();
+  });
+
+  test("Anthropic batch keeps temperature for a model that supports it", async () => {
+    const inner = createMockLLMClient();
+    pushFetchResponse(true, 200, {
+      id: "msgbatch_tempkeep",
+      processing_status: "in_progress",
+    });
+
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      getTestAuth,
+      DEFAULT_MODEL,
+      {
+        flushIntervalMs: 60_000,
+        maxQueueSize: 1,
+      },
+    );
+
+    client.prompt("sys", "msg", { workerID: "lore-distill", temperature: 0 });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(fetchCalls[0]?.body?.requests[0]?.params.temperature).toBe(0);
+
+    await client.shutdown();
+  });
+
+  test("learns temperature-unsupported from a batch item that errors with a deprecation message", async () => {
+    const inner = createMockLLMClient();
+    const MODEL = { providerID: "anthropic", modelID: "claude-sonnet-5" };
+
+    // Full Anthropic batch lifecycle, ordered: create → poll(ended) → results.
+    let capturedCustomId = "";
+    const prevFetch = globalThis.fetch;
+    let idx = 0;
+    // @ts-expect-error — mock fetch
+    globalThis.fetch = async (url: string, init?: RequestInit) => {
+      const i = idx++;
+      // 0: batch create — capture the generated custom_id for the results row.
+      if (i === 0) {
+        expect(String(url)).toContain("/v1/messages/batches");
+        const body = JSON.parse(init?.body as string);
+        capturedCustomId = body.requests[0].custom_id;
+        // Not-yet-learned model: temperature IS carried into the submit.
+        expect(body.requests[0].params.temperature).toBe(0);
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          text: async () => JSON.stringify({ id: "msgbatch_learn" }),
+          json: async () => ({ id: "msgbatch_learn" }),
+        };
+      }
+      // 1: poll — batch ended.
+      if (i === 1) {
+        const poll = {
+          processing_status: "ended",
+          results_url:
+            "https://api.anthropic.com/v1/messages/batches/msgbatch_learn/results",
+        };
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          text: async () => JSON.stringify(poll),
+          json: async () => poll,
+        };
+      }
+      // 2: results JSONL — one errored row with the temperature-deprecation message.
+      if (i === 2) {
+        const jsonl = JSON.stringify({
+          custom_id: capturedCustomId,
+          result: {
+            type: "errored",
+            error: {
+              type: "invalid_request_error",
+              message: "`temperature` is deprecated for this model.",
+            },
+          },
+        });
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          text: async () => jsonl,
+          json: async () => JSON.parse(jsonl),
+        };
+      }
+      return {
+        ok: false,
+        status: 500,
+        statusText: "Error",
+        text: async () => "unexpected",
+        json: async () => ({}),
+      };
+    };
+
+    const client = createBatchLLMClient(inner, UPSTREAMS, getTestAuth, MODEL, {
+      flushIntervalMs: 60_000,
+      maxQueueSize: 1,
+      pollIntervalMs: 50,
+    });
+
+    // Pre-condition: not yet learned.
+    expect(isTemperatureUnsupportedModel(MODEL)).toBe(false);
+
+    const promise = client.prompt("sys", "msg", {
+      workerID: "lore-distill",
+      model: MODEL,
+      temperature: 0,
+    });
+
+    await new Promise((r) => setTimeout(r, 300));
+
+    // Errored item resolves null (matches inner-client-on-error behavior)...
+    expect(await promise).toBeNull();
+    // ...and the model is now learned so the NEXT submit omits temperature.
+    expect(isTemperatureUnsupportedModel(MODEL)).toBe(true);
+
     globalThis.fetch = prevFetch;
     await client.shutdown();
   });
