@@ -1405,6 +1405,155 @@ describe("BatchLLMClient temperature capability", () => {
     await client.shutdown();
   });
 
+  test("OpenAI batch omits temperature UPFRONT for a model models.dev marks temperature:false", async () => {
+    // The OpenAI submit path builds JSONL (not the anthropic requests[] shape),
+    // so it needs its own coverage: the proactive strip must apply there too or
+    // every gpt-5/o3 batch item 400s. Capture the uploaded JSONL and assert the
+    // per-line body omits `temperature`.
+    const inner = createMockLLMClient();
+    _setModelDataForTest({ "gpt-5": { id: "gpt-5", temperature: false } });
+
+    let capturedJsonl = "";
+    const prevFetch = globalThis.fetch;
+    // @ts-expect-error — mock fetch to capture the FormData file upload
+    globalThis.fetch = async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      if (
+        typeof url === "string" &&
+        url.includes("/v1/files") &&
+        init?.body instanceof FormData
+      ) {
+        const file = (init.body as FormData).get("file") as Blob;
+        if (file) capturedJsonl = await file.text();
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          text: async () => JSON.stringify({ id: "file-temp" }),
+          json: async () => ({ id: "file-temp" }),
+        };
+      }
+      if (
+        typeof url === "string" &&
+        url.includes("/v1/batches") &&
+        method === "POST"
+      ) {
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          text: async () => JSON.stringify({ id: "batch-temp" }),
+          json: async () => ({ id: "batch-temp" }),
+        };
+      }
+      return {
+        ok: false,
+        status: 500,
+        text: async () => "unexpected",
+        json: async () => ({}),
+      };
+    };
+
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      getTestAuth,
+      DEFAULT_MODEL,
+      {
+        flushIntervalMs: 60_000,
+        maxQueueSize: 1,
+      },
+    );
+
+    client.prompt("sys", "msg", {
+      model: { providerID: "openai", modelID: "gpt-5" },
+      workerID: "lore-distill",
+      temperature: 0,
+    });
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(capturedJsonl).not.toBe("");
+    const line = JSON.parse(capturedJsonl) as { body: Record<string, unknown> };
+    expect(line.body.model).toBe("gpt-5");
+    expect(line.body).not.toHaveProperty("temperature");
+
+    globalThis.fetch = prevFetch;
+    await client.shutdown();
+  });
+
+  test("OpenAI batch keeps temperature for a model that supports it", async () => {
+    const inner = createMockLLMClient();
+    _setModelDataForTest({
+      "gpt-5.4-mini": { id: "gpt-5.4-mini", temperature: true },
+    });
+
+    let capturedJsonl = "";
+    const prevFetch = globalThis.fetch;
+    // @ts-expect-error — mock fetch to capture the FormData file upload
+    globalThis.fetch = async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      if (
+        typeof url === "string" &&
+        url.includes("/v1/files") &&
+        init?.body instanceof FormData
+      ) {
+        const file = (init.body as FormData).get("file") as Blob;
+        if (file) capturedJsonl = await file.text();
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          text: async () => JSON.stringify({ id: "file-keep" }),
+          json: async () => ({ id: "file-keep" }),
+        };
+      }
+      if (
+        typeof url === "string" &&
+        url.includes("/v1/batches") &&
+        method === "POST"
+      ) {
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          text: async () => JSON.stringify({ id: "batch-keep" }),
+          json: async () => ({ id: "batch-keep" }),
+        };
+      }
+      return {
+        ok: false,
+        status: 500,
+        text: async () => "unexpected",
+        json: async () => ({}),
+      };
+    };
+
+    const client = createBatchLLMClient(
+      inner,
+      UPSTREAMS,
+      getTestAuth,
+      DEFAULT_MODEL,
+      {
+        flushIntervalMs: 60_000,
+        maxQueueSize: 1,
+      },
+    );
+
+    client.prompt("sys", "msg", {
+      model: { providerID: "openai", modelID: "gpt-5.4-mini" },
+      workerID: "lore-distill",
+      temperature: 0,
+    });
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(capturedJsonl).not.toBe("");
+    const line = JSON.parse(capturedJsonl) as { body: Record<string, unknown> };
+    expect(line.body.temperature).toBe(0);
+
+    globalThis.fetch = prevFetch;
+    await client.shutdown();
+  });
+
   test("learns temperature-unsupported from a batch item that errors with a deprecation message", async () => {
     const inner = createMockLLMClient();
     const MODEL = { providerID: "anthropic", modelID: "claude-sonnet-5" };
