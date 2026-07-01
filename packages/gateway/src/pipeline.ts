@@ -240,6 +240,7 @@ import {
   clearWarmupAuthDisabled,
   creditWarmupHit,
   resetCircuitBreaker,
+  setWarmingEnabled,
 } from "./cache-warmer";
 import {
   setSentryRequestContext,
@@ -8326,7 +8327,7 @@ async function handleLoreSlashCommand(
   log.warn(`unknown slash command: ${text}`);
   return slashResponse(
     req,
-    `Unknown command: ${text}. Available: /lore:curate, /lore:warm:stop|keep|auto, /lore:amnesia:on|off`,
+    `Unknown command: ${text}. Available: /lore:curate, /lore:warm:stop|keep|auto|on|off|reset, /lore:amnesia:on|off`,
     `msg_lore_${Date.now()}`,
   );
 }
@@ -8389,6 +8390,8 @@ function handleAmnesiaSlashCommand(
  * `/lore:warm:auto` — returns to normal survival-analysis-driven mode.
  * `/lore:warm:reset` — clears ALL tripped circuit-breaker buckets (re-enables
  *   warming that was disabled after repeated uncached warmups).
+ * `/lore:warm:off` — disables cache warming GLOBALLY (persisted override).
+ * `/lore:warm:on` — re-enables cache warming globally.
  *
  * Returns a synthetic Anthropic-format response if a command was matched,
  * or null to continue normal processing.
@@ -8404,7 +8407,9 @@ function handleWarmupSlashCommand(
   const isKeep = lower === "/lore:warm:keep";
   const isAuto = lower === "/lore:warm:auto";
   const isReset = lower === "/lore:warm:reset";
-  if (!isStop && !isKeep && !isAuto && !isReset) return null;
+  const isOff = lower === "/lore:warm:off";
+  const isOn = lower === "/lore:warm:on";
+  if (!isStop && !isKeep && !isAuto && !isReset && !isOff && !isOn) return null;
 
   // Reset is a breaker-wide admin action — clear every tripped bucket and
   // return immediately (it does not depend on resolving this session).
@@ -8416,6 +8421,22 @@ function handleWarmupSlashCommand(
     return slashResponse(
       req,
       "Cache warming circuit breaker reset.",
+      `msg_lore_${Date.now()}`,
+    );
+  }
+
+  // on/off are GLOBAL admin actions (persisted KV override) — apply and return
+  // immediately, independent of this session.
+  if (isOff || isOn) {
+    setWarmingEnabled(isOn);
+    log.info(
+      `cache-warmer: /lore:warm:${isOn ? "on" : "off"} received — warming globally ${isOn ? "enabled" : "disabled"}`,
+    );
+    return slashResponse(
+      req,
+      isOn
+        ? "Cache warming enabled globally."
+        : "Cache warming disabled globally.",
       `msg_lore_${Date.now()}`,
     );
   }

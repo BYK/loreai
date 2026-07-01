@@ -136,6 +136,57 @@ const CIRCUIT_BREAKER_MAX_FAILURES = 3;
  *  Buckets can also be cleared immediately via resetCircuitBreaker(). */
 export const CIRCUIT_BREAKER_DECAY_MS = 6 * 3_600_000; // 6 hours
 
+/** KV key for the runtime cache-warming on/off override (set via UI / slash). */
+const WARMING_ENABLED_KV_KEY = "warming_enabled";
+
+/**
+ * Whether cache warming is enabled. Resolution priority (highest first):
+ *   1. `LORE_WARMING_ENABLED` env var — "0"/"false"/"off"/"no" disable,
+ *      anything else enables (override for automation / CI).
+ *   2. DB-persisted KV override, set via the dashboard or `/lore:warm:on|off`
+ *      ("1" = on, "0" = off). Absent → fall through.
+ *   3. `cache.warming.enabled` from `.lore.json` (schema default: true).
+ *
+ * This makes the file-only config flag runtime-settable without a restart —
+ * mirroring the daily-budget toggle. The gate lives in `shouldWarm`, so warming
+ * can be turned off globally the moment it stops paying for itself.
+ */
+export function isWarmingEnabled(): boolean {
+  const env = process.env.LORE_WARMING_ENABLED;
+  if (env != null && env.trim() !== "") {
+    return !/^(0|false|off|no)$/i.test(env.trim());
+  }
+  try {
+    const kv = getKV(WARMING_ENABLED_KV_KEY);
+    if (kv === "0") return false;
+    if (kv === "1") return true;
+  } catch {
+    // DB not initialized yet (e.g. early startup) — fall through to config.
+  }
+  return loreConfig().cache.warming.enabled;
+}
+
+/**
+ * Read the runtime KV override directly (no env / config fallback). Returns
+ * `true`/`false` when an override is set, or `null` when unset (so the UI can
+ * show "following config default"). Used only for display.
+ */
+export function getWarmingEnabledOverride(): boolean | null {
+  try {
+    const kv = getKV(WARMING_ENABLED_KV_KEY);
+    if (kv === "0") return false;
+    if (kv === "1") return true;
+  } catch {
+    // DB not ready — treat as no override.
+  }
+  return null;
+}
+
+/** Persist the runtime warming on/off override (survives restarts). */
+export function setWarmingEnabled(enabled: boolean): void {
+  setKV(WARMING_ENABLED_KV_KEY, enabled ? "1" : "0");
+}
+
 /** Gap duration floor (ms) separating "active coding turns" from "breaks".
  *  3 minutes is well past typical agent think time (10s–60s) but before
  *  the 5m TTL warmup window (4:15–5:00). */
@@ -1210,7 +1261,9 @@ export function shouldWarm(
   if (state.isSubagent) return false;
 
   const cfg = loreConfig();
-  if (!cfg.cache.warming.enabled) return false;
+  // Runtime-settable (env / KV override / config default) so warming can be
+  // disabled globally without a restart — see isWarmingEnabled().
+  if (!isWarmingEnabled()) return false;
 
   // No stored body to replay — nothing to warm
   if (!state.cacheAnalytics.lastRequestBody) return false;
@@ -1726,8 +1779,8 @@ export function computeWarmingSnapshot(
       notWarmingReason = "Circuit breaker tripped";
     } else if (state.isSubagent) {
       notWarmingReason = "Sub-agent session (ephemeral)";
-    } else if (!cfg.cache.warming.enabled) {
-      notWarmingReason = "Warming disabled in config";
+    } else if (!isWarmingEnabled()) {
+      notWarmingReason = "Warming disabled (config/override)";
     } else if (!state.cacheAnalytics.lastRequestBody) {
       notWarmingReason = "No stored request body";
     } else if (getPrefixChurnRate(state.sessionID) >= PREFIX_CHURN_WARM_BLOCK) {

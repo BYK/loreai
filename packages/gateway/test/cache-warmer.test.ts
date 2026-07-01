@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import {
   createHistogram,
   recordGap,
@@ -38,6 +38,9 @@ import {
   BREAK_FLOOR_MS,
   creditWarmupHit,
   computeWarmingSnapshot,
+  isWarmingEnabled,
+  getWarmingEnabledOverride,
+  setWarmingEnabled,
   _resetForTest,
   _forceReloadForTest,
 } from "../src/cache-warmer";
@@ -3887,5 +3890,83 @@ describe("shouldWarm Phase A freshness + Phase B continuation (PR2b coverage)", 
       shouldWarm(makeState(sid, now, 310_000), p, shortBreakHist(), now),
     ).toBe(false);
     evictSession(sid);
+  });
+});
+
+describe("global warming toggle (isWarmingEnabled / setWarmingEnabled)", () => {
+  const ENV_KEY = "LORE_WARMING_ENABLED";
+  let savedEnv: string | undefined;
+
+  beforeEach(() => {
+    _resetForTest();
+    savedEnv = process.env[ENV_KEY];
+    delete process.env[ENV_KEY];
+    // Clear any persisted KV override so each test starts from config default.
+    setKV("warming_enabled", "");
+  });
+
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env[ENV_KEY];
+    else process.env[ENV_KEY] = savedEnv;
+    setKV("warming_enabled", "");
+  });
+
+  test("defaults to enabled (config default) with no override", () => {
+    expect(getWarmingEnabledOverride()).toBeNull();
+    expect(isWarmingEnabled()).toBe(true);
+  });
+
+  test("setWarmingEnabled(false) persists a disabling KV override", () => {
+    setWarmingEnabled(false);
+    expect(getWarmingEnabledOverride()).toBe(false);
+    expect(isWarmingEnabled()).toBe(false);
+    setWarmingEnabled(true);
+    expect(getWarmingEnabledOverride()).toBe(true);
+    expect(isWarmingEnabled()).toBe(true);
+  });
+
+  test("env var overrides the KV override (off wins even when KV says on)", () => {
+    setWarmingEnabled(true);
+    process.env[ENV_KEY] = "off";
+    expect(isWarmingEnabled()).toBe(false);
+    // getWarmingEnabledOverride reflects only the KV layer (for display).
+    expect(getWarmingEnabledOverride()).toBe(true);
+  });
+
+  test("env var can force-enable even when KV says off", () => {
+    setWarmingEnabled(false);
+    for (const v of ["1", "true", "on"]) {
+      process.env[ENV_KEY] = v;
+      expect(isWarmingEnabled()).toBe(true);
+    }
+    for (const v of ["0", "false", "off", "no"]) {
+      process.env[ENV_KEY] = v;
+      expect(isWarmingEnabled()).toBe(false);
+    }
+  });
+
+  test("shouldWarm returns false when warming is globally disabled", () => {
+    const now = Date.now();
+    // Identical to the "returns true when in warmup window" positive case.
+    const makeWarmeable = () =>
+      makeSessionState({
+        lastRequestTime: now - 270_000,
+        cacheAnalytics: {
+          ...makeCacheAnalytics(),
+          lastRequestBody: compressBody(
+            '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+          ),
+        },
+      });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
+
+    // Sanity: warms when enabled (default).
+    expect(shouldWarm(makeWarmeable(), profile, hist, now)).toBe(true);
+
+    // Disabled globally → never warms, regardless of survival analysis.
+    setWarmingEnabled(false);
+    expect(shouldWarm(makeWarmeable(), profile, hist, now)).toBe(false);
   });
 });

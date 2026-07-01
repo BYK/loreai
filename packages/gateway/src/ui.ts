@@ -44,6 +44,9 @@ import {
   computeWarmingSnapshot,
   getCircuitBreakerSummary,
   resetCircuitBreaker,
+  isWarmingEnabled,
+  getWarmingEnabledOverride,
+  setWarmingEnabled,
   getGlobalHistogramsSnapshot,
   HISTOGRAM_BINS,
   BLEND_PSEUDOCOUNT,
@@ -2441,6 +2444,31 @@ function pageWarming(): string {
   ]);
   body += `<h1>Cache Warming</h1>`;
 
+  // Global on/off toggle. Warming replays the last request to keep the prompt
+  // cache warm across breaks; when it stops paying for itself (see the net on
+  // the Costs page) it can be disabled globally here without a restart.
+  const warmingOn = isWarmingEnabled();
+  const warmingOverride = getWarmingEnabledOverride();
+  const warmingEnvOverride = process.env.LORE_WARMING_ENABLED;
+  body += `<div class="card" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+    <div>
+      <strong>Cache warming is ${warmingOn ? '<span style="color:var(--success,#10b981)">ON</span>' : '<span style="color:var(--danger)">OFF</span>'}</strong>
+      <div style="font-size:0.85em;color:var(--fg2)">${
+        warmingEnvOverride && warmingEnvOverride.trim() !== ""
+          ? `Forced by env var <code>LORE_WARMING_ENABLED=${esc(warmingEnvOverride)}</code>`
+          : warmingOverride === null
+            ? "Following config default (cache.warming.enabled)"
+            : "Runtime override active (overrides .lore.json)"
+      }</div>
+    </div>`;
+  if (!(warmingEnvOverride && warmingEnvOverride.trim() !== "")) {
+    body += `<form class="inline" method="POST" action="/ui/api/warming/enabled" style="margin-left:auto">
+      <input type="hidden" name="enabled" value="${warmingOn ? "0" : "1"}">
+      <button type="submit" class="btn">${warmingOn ? "Disable warming" : "Enable warming"}</button>
+    </form>`;
+  }
+  body += `</div>`;
+
   const activeSessions = getActiveSessions();
   const cbSummary = getCircuitBreakerSummary();
 
@@ -3747,6 +3775,15 @@ export async function handleUIRequest(
       resetCircuitBreaker();
       const referer = req.headers.get("referer");
       return redirect(referer ?? "/ui/warming");
+    }
+
+    // Global cache-warming on/off toggle (persisted KV override).
+    // Matched before the :sessionId/:mode route (single-segment path).
+    if (pathname === "/ui/api/warming/enabled") {
+      const formData = await req.formData();
+      const raw = formData.get("enabled");
+      setWarmingEnabled(raw === "1" || raw === "true" || raw === "on");
+      return redirect("/ui/warming");
     }
 
     // Set warming mode for a live session
