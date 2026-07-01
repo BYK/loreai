@@ -27,7 +27,6 @@
     "start": "tsx src/index.ts"
   },
   "dependencies": {
-    "@loreai/core": "workspace:*",
     "@supabase/supabase-js": "^2.58.0",
     "google-auth-library": "^10.9.0",
     "p-limit": "7",
@@ -69,6 +68,7 @@
   ],
   "author": "BYK",
   "devDependencies": {
+    "@loreai/core": "workspace:*",
     "@sentry/bun": "^10.52.0",
     "@types/bun": "^1.2.0",
     "@types/qrcode-terminal": "^0.12.2",

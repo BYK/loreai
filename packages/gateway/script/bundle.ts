@@ -134,27 +134,29 @@ await esbuild.build({
   target: "esnext",
   platform: "node",
   conditions: ["bun"],
-  // @loreai/core MUST be external in the Bun ESM bundle. When the gateway
-  // runs in-process alongside the OpenCode plugin, both must share a single
-  // module instance of @loreai/core — specifically the _originalFetch
-  // variable in fetch-interceptor.ts. If core is bundled into the gateway,
-  // installFetchInterceptor() (called by the plugin) sets _originalFetch
-  // on the plugin's copy while getOriginalFetch() (called by the gateway)
-  // reads from the bundled copy (always null → returns globalThis.fetch =
-  // the interceptor). This creates an infinite request loop: gateway →
-  // interceptor → gateway → interceptor → …
+  // @loreai/core is INLINED into the Bun ESM bundle (like the CJS bundle).
   //
-  // `undici` is external (and lazily imported only on the Node path in
+  // History: core used to be kept external here so the OpenCode plugin's copy
+  // of core and the in-process gateway's copy shared ONE module instance —
+  // specifically the `_originalFetch` handle in fetch-interceptor.ts. With two
+  // separate copies, installFetchInterceptor() (plugin) would set its copy's
+  // handle while getOriginalFetch() (gateway) read the other copy's null and
+  // fell back to globalThis.fetch = the interceptor → infinite request loop.
+  // Externalizing core is also what forced it to be a runtime dependency
+  // (#1024), dragging core's ~480 MB ML tree into raw-npm gateway installs.
+  //
+  // That invariant now lives in a process-global: fetch-interceptor.ts stores
+  // the original fetch under Symbol.for("lore.fetchInterceptor.originalFetch"),
+  // so every copy of core in the process agrees on one handle regardless of how
+  // many times core is bundled/instantiated (#1027). Inlining is therefore
+  // safe — and removes the external-core dep + its transitive weight.
+  //
+  // `undici` stays external (and is lazily imported only on the Node path in
   // fetch.ts) so it is never bundled or evaluated under Bun — real undici@7
   // hangs on streaming response reads under Bun, so the Bun path uses native
-  // fetch instead and never touches undici.
-  //
-  // NOTE: undici is external here but only a devDependency — the same shape
-  // that broke @loreai/core in #998. It stays safe ONLY because the Bun path
-  // never imports it (the undici import is Node-only and lazy). If the Bun
-  // path ever imports undici, it must become a runtime dependency. By
-  // contrast, @loreai/core IS imported under Bun, so it is a runtime
-  // dependency (guarded by test/bundle-exports.test.ts).
+  // fetch instead and never touches undici. It is safe as a devDependency ONLY
+  // because the Bun path never imports it (the undici import is Node-only and
+  // lazy); if the Bun path ever imports undici, it must become a runtime dep.
   external: [
     "bun:*",
     "node:*",
@@ -162,7 +164,6 @@ await esbuild.build({
     "onnxruntime-node",
     "sharp",
     "sqlite-vec",
-    "@loreai/core",
   ],
   outfile: join(distDir, "index.bun.js"),
   sourcemap: false,

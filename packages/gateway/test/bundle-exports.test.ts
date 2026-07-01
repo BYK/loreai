@@ -58,39 +58,39 @@ describe.skipIf(!hasBundle)("bundle exports", () => {
   // (regression guard for issue #998)
   // -------------------------------------------------------------------------
 
-  test("externalized @loreai/* imports in the Bun bundle are runtime deps", () => {
-    // The Bun ESM bundle keeps @loreai/core external on purpose (see
-    // script/bundle.ts) so the plugin and the in-process gateway share one
-    // module instance of @loreai/core. For that external import to resolve in
-    // published / standalone installs (e.g. OpenCode's embedded Bun loading
-    // the plugin directly), every externalized @loreai/* package MUST be a
-    // runtime dependency — not a devDependency, which consumers never install.
-    // Issue #998 regressed exactly this: @loreai/core was external + devDep.
+  test("@loreai/core is inlined (not externalized) in the Bun bundle (#1027)", () => {
+    // The Bun ESM bundle now INLINES @loreai/core (see script/bundle.ts): the
+    // shared-original-fetch invariant moved to a Symbol.for process-global, so
+    // multiple core copies in one process are safe and there is no longer a
+    // reason to keep core external. Inlining is what lets us drop the
+    // external-core runtime dep and its ~480 MB ML tree (#1024/#1026).
     const content = readFileSync(join(distDir, "index.bun.js"), "utf8");
 
-    // Dev shim (`export * from "../src/index.ts";`) does not exercise the
-    // externalized-core artifact, so there is nothing to assert. The real
-    // minified bundle is present under `pnpm test` because the root `pretest`
-    // runs `pnpm --filter @loreai/gateway run bundle`.
+    // Dev shim (`export * from "../src/index.ts";`) is not the real artifact,
+    // so there is nothing to assert. The real minified bundle is present under
+    // `pnpm test` because the root `pretest` runs
+    // `pnpm --filter @loreai/gateway run bundle`.
     if (content.trimStart().startsWith("export *")) return;
 
     // Match import CONTEXTS only — static `from "@loreai/x"` and dynamic
     // `import("@loreai/x")`. A bare-string scan would false-match the bundle's
     // embedded package.json (self-name "@loreai/gateway") and the doctor/setup
-    // string literals mentioning "@loreai/opencode"; requiring those as deps
-    // would be a self-dependency or a dependency cycle.
+    // string literals mentioning "@loreai/opencode".
     const importContext = /(?:from|import)\s*\(?\s*["'](@loreai\/[\w-]+)["']/g;
     const specifiers = new Set<string>();
     for (const match of content.matchAll(importContext)) {
       specifiers.add(match[1]);
     }
 
-    // Non-vacuous guard: @loreai/core is externalized by design (the shared
-    // _originalFetch invariant), so the scan must actually find it. If this
-    // ever fails, either the bundle stopped externalizing core (revisit the
-    // fetch-loop invariant in script/bundle.ts) or the regex needs updating.
-    expect(specifiers.has("@loreai/core")).toBe(true);
+    // Non-vacuous guard: core must be INLINED — the scan must NOT find it as an
+    // import specifier. If this fails, the bundle regressed to externalizing
+    // core, which would reintroduce the external-core runtime dependency and
+    // the shared-instance fetch-loop concern (revisit script/bundle.ts +
+    // fetch-interceptor.ts's Symbol.for global before changing this).
+    expect(specifiers.has("@loreai/core")).toBe(false);
 
+    // Any @loreai/* that IS still externalized (none today) must be a declared
+    // runtime dependency so it resolves in published installs (the #998 shape).
     const deps = (pkgJson.dependencies ?? {}) as Record<string, string>;
     for (const specifier of specifiers) {
       expect(
@@ -109,11 +109,17 @@ describe.skipIf(!hasBundle)("bundle exports", () => {
 // only the bun shim exists).
 // ---------------------------------------------------------------------------
 
-describe("dependency manifest invariants (#998)", () => {
-  test("@loreai/core is a runtime dependency, not a devDependency", () => {
+describe("dependency manifest invariants (#998, #1027)", () => {
+  test("@loreai/core is a build-only devDependency of gateway (inlined, #1027)", () => {
     // The on-disk source manifest — NOT the copy embedded in the bundle text.
-    expect(pkgJson.dependencies?.["@loreai/core"]).toBeDefined();
-    expect(pkgJson.devDependencies?.["@loreai/core"]).toBeUndefined();
+    // gateway inlines core into BOTH bundles (script/bundle.ts), so the
+    // published package never imports @loreai/core at runtime. It must NOT be a
+    // runtime dependency (that dragged core's ~480 MB ML tree into raw-npm
+    // gateway installs — #1024/#1026); it stays a devDependency because the
+    // bundle build needs core's source. Contrast opencode/pi below, which
+    // import core at runtime and therefore MUST keep it as a runtime dep.
+    expect(pkgJson.dependencies?.["@loreai/core"]).toBeUndefined();
+    expect(pkgJson.devDependencies?.["@loreai/core"]).toBe("workspace:*");
   });
 
   // Internal packages each consumer imports at RUNTIME. #998 happened in the
@@ -121,8 +127,10 @@ describe("dependency manifest invariants (#998)", () => {
   // @loreai/core), so presence — not just spec correctness — is asserted for
   // every link. devDependencies are never installed for a transitively-
   // consumed published package, which is exactly how #998 manifested.
+  //
+  // gateway is intentionally ABSENT here: it inlines core (build-only devDep,
+  // #1027), so it has no internal @loreai/* runtime dependency to guard.
   const requiredInternalDeps: Record<string, string[]> = {
-    gateway: ["@loreai/core"],
     opencode: ["@loreai/core", "@loreai/gateway"],
     pi: ["@loreai/core", "@loreai/gateway"],
   };
@@ -163,21 +171,25 @@ describe("dependency manifest invariants (#998)", () => {
   });
 
   test("internal @loreai/* deps use workspace:* across gateway, opencode, pi", () => {
-    // A single shared @loreai/core instance is only guaranteed when every
-    // consumer references the internal packages at the same version.
-    // `workspace:*` is rewritten to the exact release version at `pnpm pack`
-    // time, keeping all packages unified per release. A pinned/divergent
-    // version could install two @loreai/core copies → two _originalFetch
-    // values → infinite fetch loop (gateway → interceptor → gateway → …).
-    for (const name of Object.keys(requiredInternalDeps)) {
+    // Every internal @loreai/* reference — runtime OR build-only — must be
+    // `workspace:*`, which `pnpm pack` rewrites to the exact release version so
+    // all packages stay unified per release. Checks devDependencies too so
+    // gateway's build-only core reference (#1027) is covered. (The old
+    // "two copies → two _originalFetch → fetch loop" rationale no longer
+    // applies: the handle is a Symbol.for process-global shared by all copies.)
+    for (const name of ["gateway", "opencode", "pi"]) {
       const manifest = JSON.parse(
         readFileSync(join(packageDir, "..", name, "package.json"), "utf8"),
       ) as {
         name: string;
         dependencies?: Record<string, string>;
+        devDependencies?: Record<string, string>;
       };
-      const deps = manifest.dependencies ?? {};
-      for (const [dep, spec] of Object.entries(deps)) {
+      const allDeps = {
+        ...(manifest.dependencies ?? {}),
+        ...(manifest.devDependencies ?? {}),
+      };
+      for (const [dep, spec] of Object.entries(allDeps)) {
         if (dep.startsWith("@loreai/")) {
           expect(spec, `${manifest.name} → ${dep}`).toBe("workspace:*");
         }
