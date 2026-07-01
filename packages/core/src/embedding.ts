@@ -2049,11 +2049,29 @@ export function maybeCutoverToVec0(): void {
     // the flip below, so mode==="blob" always implies the embedding columns
     // still exist; no blob-mode query can ever read a half-dropped column (the
     // v55 boot-loop hazard).
+    let staleSkipped = 0;
     for (const table of EMBEDDING_TABLES) {
-      if (embeddingColumnExists(db(), table)) copyBlobsToVec0(db(), table, dim);
+      if (embeddingColumnExists(db(), table))
+        staleSkipped += copyBlobsToVec0(db(), table, dim);
     }
     // Flip once vec0 is fully populated and authoritative.
     setStorageMode(db(), "vec0");
+    // Arm the temporal re-chunk walk so backfillTemporalEmbeddings definitely
+    // runs this startup and re-embeds every row skipped above (plus every legacy
+    // single-vector row) at the correct dimension. This is a no-op today — the
+    // done flag can only be latched from INSIDE a vec0-mode run of that walk, so
+    // a machine transitioning from blob mode never has it set — but calling it at
+    // the exact blob->vec0 transition hard-guards that invariant against future
+    // refactors and self-documents that the walk is (re)armed here.
+    resetTemporalRechunkProgress();
+    if (staleSkipped > 0) {
+      // Rare corpus corruption (blobs written under a different dimension). The
+      // rows were skipped from the copy and will be re-embedded at `dim` by the
+      // backfills below; surface it so an operator can see it happened.
+      log.notice(
+        `vec0 cutover skipped ${staleSkipped} stale-dimension embedding blob(s) (not ${dim}-dim / ${dim * 4} bytes); they will be re-embedded by the startup backfills`,
+      );
+    }
     log.info(`vec0 storage cutover complete (dim=${dim})`);
   }
 
@@ -2693,6 +2711,13 @@ export async function backfillTemporalEmbeddings(
 
   // Multi-vector chunking only exists in vec0 mode. Skip WITHOUT latching done
   // so a later cutover to vec0 still triggers the walk.
+  //
+  // 🔴 Ordering invariant: this vec0-mode guard MUST come BEFORE the done-flag
+  // check below. Because the flag can therefore only ever be latched from inside
+  // a vec0-mode run, a blob-mode run can never set it — which is what guarantees
+  // the first walk after a blob->vec0 cutover is always armed and re-embeds the
+  // rows that cutover skipped. (maybeCutoverToVec0 also explicitly re-arms the
+  // walk on cutover as belt-and-suspenders.) Do not reorder these two lines.
   if (readStorageMode(db()) !== "vec0") return 0;
   if (getKV(TEMPORAL_RECHUNK_DONE_KEY) === "1") return 0;
 

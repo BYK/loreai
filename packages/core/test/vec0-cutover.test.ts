@@ -604,6 +604,29 @@ describeVec("blob → vec0 cutover", () => {
     expect(rows.length).toBeGreaterThanOrEqual(1);
     expect(rows.every((r) => r.n === DIM * 4)).toBe(true);
   });
+
+  test("copyBlobsToVec0 returns the count of stale-dimension blobs it skipped", () => {
+    ensureVec0Store(db(), DIM);
+    insTemporal("t_ok", "s", 1);
+    insTemporal("t_bad1", "s", 2);
+    insTemporal("t_bad2", "s", 3);
+    db()
+      .query("UPDATE temporal_messages SET embedding = ? WHERE id='t_ok'")
+      .run(toBlob(v(1, 0, 0, 0))); // valid DIM-dim
+    db()
+      .query("UPDATE temporal_messages SET embedding = ? WHERE id='t_bad1'")
+      .run(toBlob(new Float32Array([0.1, 0.2]))); // 2-dim → stale
+    db()
+      .query("UPDATE temporal_messages SET embedding = ? WHERE id='t_bad2'")
+      .run(toBlob(new Float32Array([0.1, 0.2, 0.3]))); // 3-dim → stale
+
+    // Two stale-dim blobs skipped; the one valid blob relocated.
+    expect(copyBlobsToVec0(db(), "temporal", DIM)).toBe(2);
+    expect(
+      (db().query("SELECT COUNT(*) n FROM temporal_vec").get() as { n: number })
+        .n,
+    ).toBe(1);
+  });
 });
 
 describeVec("recency-cap removal (vec0 sees the whole corpus)", () => {
@@ -800,6 +823,110 @@ describeVec("maybeCutoverToVec0 (real orchestration, config dim = 768)", () => {
 
     expect(readStorageMode(db())).toBe("vec0");
     for (const t of TABLES) expect(embeddingColumnExists(db(), t)).toBe(false);
+  });
+
+  test("the real cutover skips a stale-dimension blob (768) and still completes", () => {
+    // Exercises the real maybeCutoverToVec0 stale-skip path end-to-end (not just
+    // the test-dimension mirror): a valid 768-dim row alongside a legacy 384-dim
+    // (1536-byte) blob. (The operator notice is covered by the next test.)
+    insTemporal("t_ok", "s", 1);
+    insTemporal("t_stale", "s", 2);
+    db()
+      .query("UPDATE temporal_messages SET embedding = ? WHERE id='t_ok'")
+      .run(toBlob(v768(0)));
+    db()
+      .query("UPDATE temporal_messages SET embedding = ? WHERE id='t_stale'")
+      .run(toBlob(new Float32Array(384))); // wrong dim → skipped, not aborted
+    expect(readStorageMode(db())).toBe("blob");
+
+    expect(() => maybeCutoverToVec0()).not.toThrow();
+
+    expect(readStorageMode(db())).toBe("vec0");
+    const tids = (
+      db()
+        .query("SELECT message_id FROM temporal_vec ORDER BY message_id")
+        .all() as { message_id: string }[]
+    ).map((r) => r.message_id);
+    expect(tids).toEqual(["t_ok"]); // valid relocated; stale-dim skipped
+  });
+
+  test("re-arms the temporal re-chunk walk on cutover so skipped/legacy rows get re-embedded", () => {
+    // A stale done flag from a hypothetical prior state. The flag cannot actually
+    // latch in blob mode (see the ordering invariant in backfillTemporalEmbeddings),
+    // but the cutover must clear it regardless so a future refactor can never
+    // strand the post-cutover temporal walk — that walk is what recreates the
+    // stale-dim blobs this migration deliberately skips.
+    setKV("lore:temporal_rechunk.done", "1");
+    setKV("lore:temporal_rechunk.cursor", "some-old-cursor");
+    insKnowledge("k1");
+    db()
+      .query("UPDATE knowledge SET embedding = ? WHERE id='k1'")
+      .run(toBlob(v768(0)));
+    expect(readStorageMode(db())).toBe("blob");
+
+    maybeCutoverToVec0();
+
+    expect(readStorageMode(db())).toBe("vec0");
+    // Armed again: done cleared to "0", cursor reset to the start of the corpus.
+    expect(getKV("lore:temporal_rechunk.done")).toBe("0");
+    expect(getKV("lore:temporal_rechunk.cursor")).toBe("");
+  });
+
+  test("emits a single operator notice with the count SUMMED across tables", () => {
+    // Seed stale-dim (384-dim, 1536-byte) blobs in TWO different base tables so
+    // the notice must sum copyBlobsToVec0's per-table returns — a per-table-only
+    // count would report 1, not 2. Each table also gets a valid 768-dim row so
+    // the cutover relocates real data alongside the skips.
+    const stale = () => toBlob(new Float32Array(384));
+    insKnowledge("k_ok");
+    insKnowledge("k_stale");
+    insTemporal("t_ok", "s", 1);
+    insTemporal("t_stale", "s", 2);
+    db()
+      .query("UPDATE knowledge SET embedding = ? WHERE id='k_ok'")
+      .run(toBlob(v768(0)));
+    db()
+      .query("UPDATE knowledge SET embedding = ? WHERE id='k_stale'")
+      .run(stale());
+    db()
+      .query("UPDATE temporal_messages SET embedding = ? WHERE id='t_ok'")
+      .run(toBlob(v768(1)));
+    db()
+      .query("UPDATE temporal_messages SET embedding = ? WHERE id='t_stale'")
+      .run(stale());
+    expect(readStorageMode(db())).toBe("blob");
+
+    const noticeSpy = vi.spyOn(log, "notice").mockImplementation(() => {});
+    try {
+      maybeCutoverToVec0();
+      // Exactly one notice, carrying the SUM (2) across knowledge + temporal —
+      // not a per-table 1, and not silence (a forced sum of 0 would skip it).
+      expect(noticeSpy).toHaveBeenCalledTimes(1);
+      expect(noticeSpy.mock.calls[0][0]).toContain(
+        "2 stale-dimension embedding blob(s)",
+      );
+    } finally {
+      noticeSpy.mockRestore();
+    }
+    expect(readStorageMode(db())).toBe("vec0");
+  });
+
+  test("emits NO operator notice when the corpus has no stale-dim blobs", () => {
+    // Guards the `staleSkipped > 0` gate: a clean corpus must cut over silently.
+    insKnowledge("k_ok");
+    db()
+      .query("UPDATE knowledge SET embedding = ? WHERE id='k_ok'")
+      .run(toBlob(v768(0)));
+    expect(readStorageMode(db())).toBe("blob");
+
+    const noticeSpy = vi.spyOn(log, "notice").mockImplementation(() => {});
+    try {
+      maybeCutoverToVec0();
+      expect(noticeSpy).not.toHaveBeenCalled();
+    } finally {
+      noticeSpy.mockRestore();
+    }
+    expect(readStorageMode(db())).toBe("vec0");
   });
 });
 

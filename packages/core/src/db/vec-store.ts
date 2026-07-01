@@ -441,7 +441,7 @@ export function copyBlobsToVec0(
   conn: EmbeddingWriteConn,
   table: EmbeddingTable,
   dim: number,
-): void {
+): number {
   // vec0 (our pinned sqlite-vec) has no `INSERT OR REPLACE`, so idempotence /
   // resumability comes from skipping ids already present in the vec0 table via
   // `WHERE … NOT IN (SELECT <pk> FROM <vec0>)`. On the first pass the vec0 table
@@ -458,41 +458,63 @@ export function copyBlobsToVec0(
   // ENTIRE cutover, stranding the DB in blob mode on every subsequent startup.
   // Skip stale-dim blobs here instead: the row is simply absent from vec0 after
   // the copy, and the very next re-embed backfill in the same startup pass
-  // regenerates it at the correct dimension from its source text
-  // (knowledge/entities/distillations via `missingEmbeddingSql` = NOT IN <vec
-  // table>; temporal via the full re-chunk walk in backfillTemporalEmbeddings).
-  // Net effect: the stale vector is removed and recreated — one bad row can never
-  // brick the migration for the whole corpus.
+  // regenerates every SEARCH-ELIGIBLE skipped row at the correct dimension from
+  // its source text (knowledge/entities/distillations via `missingEmbeddingSql`
+  // = NOT IN <vec table>; temporal via the full re-chunk walk in
+  // backfillTemporalEmbeddings). Rows outside a backfill's own eligibility filter
+  // (low-confidence knowledge, archived/empty distillations, sub-50-char
+  // temporal) simply lose an already-unsearchable stale vector — no search
+  // regression, since a wrong-dim blob is unusable in every mode anyway. Either
+  // way, one bad row can never brick the migration for the whole corpus.
+  //
+  // Returns the number of stale-dim blobs skipped so the caller can surface a
+  // one-time notice (this is rare corpus corruption an operator should see).
   const expectedBytes = dim * 4;
+  const staleSkipped = (source: string): number =>
+    (
+      conn
+        .query(
+          `SELECT COUNT(*) AS n FROM ${source} WHERE embedding IS NOT NULL AND length(embedding) <> ${expectedBytes}`,
+        )
+        .get() as { n: number }
+    ).n;
   switch (table) {
-    case "knowledge":
+    case "knowledge": {
+      const skipped = staleSkipped("knowledge_current");
       conn
         .query(
           `INSERT INTO knowledge_vec(id, embedding) SELECT id, embedding FROM knowledge_current WHERE embedding IS NOT NULL AND length(embedding) = ${expectedBytes} AND id NOT IN (SELECT id FROM knowledge_vec)`,
         )
         .run();
-      return;
-    case "entities":
+      return skipped;
+    }
+    case "entities": {
+      const skipped = staleSkipped("entities");
       conn
         .query(
           `INSERT INTO entity_vec(id, embedding) SELECT id, embedding FROM entities WHERE embedding IS NOT NULL AND length(embedding) = ${expectedBytes} AND id NOT IN (SELECT id FROM entity_vec)`,
         )
         .run();
-      return;
-    case "distillations":
+      return skipped;
+    }
+    case "distillations": {
+      const skipped = staleSkipped("distillations");
       conn
         .query(
           `INSERT INTO distillation_vec(id, project_id, session_id, embedding) SELECT id, project_id, session_id, embedding FROM distillations WHERE embedding IS NOT NULL AND length(embedding) = ${expectedBytes} AND id NOT IN (SELECT id FROM distillation_vec)`,
         )
         .run();
-      return;
-    case "temporal":
+      return skipped;
+    }
+    case "temporal": {
+      const skipped = staleSkipped("temporal_messages");
       conn
         .query(
           `INSERT INTO temporal_vec(chunk_id, message_id, project_id, session_id, embedding) SELECT id || '#0', id, project_id, session_id, embedding FROM temporal_messages WHERE embedding IS NOT NULL AND length(embedding) = ${expectedBytes} AND (id || '#0') NOT IN (SELECT chunk_id FROM temporal_vec)`,
         )
         .run();
-      return;
+      return skipped;
+    }
   }
 }
 
