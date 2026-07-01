@@ -14,6 +14,8 @@ import {
   _saveAndClearProvider,
   _restoreProvider,
   embed,
+  recallEmbedsInFlight,
+  _setRecallEmbedsInFlightForTest,
   runStartupBackfill,
   LocalProviderUnavailableError,
   pickRemoteFallback,
@@ -109,6 +111,114 @@ describe("embed() enforces the L2-normalization invariant", () => {
       expect(vec[1]).toBeCloseTo(0.8, 6);
     } finally {
       _restoreProvider(token);
+    }
+  });
+});
+
+describe("recallEmbedsInFlight (temporal backfill idle signal)", () => {
+  // A gated mock provider whose embed() blocks until the test releases it, so we
+  // can observe the in-flight counter WHILE an embed is outstanding.
+  function gatedProvider() {
+    let release!: () => void;
+    let reject!: (e: Error) => void;
+    const gate = new Promise<void>((res, rej) => {
+      release = res;
+      reject = rej;
+    });
+    return {
+      release,
+      reject,
+      token: {
+        provider: {
+          maxBatchSize: 8,
+          async embed(texts: string[], _inputType: "document" | "query") {
+            await gate;
+            return texts.map(() => new Float32Array([1, 0, 0]));
+          },
+        },
+      },
+    };
+  }
+
+  beforeEach(() => _setRecallEmbedsInFlightForTest(0));
+  afterEach(() => _setRecallEmbedsInFlightForTest(0));
+
+  test("counts a single-text query embed while in flight, clears after it settles", async () => {
+    const saved = _saveAndClearProvider();
+    const { release, token } = gatedProvider();
+    try {
+      _restoreProvider(token);
+      expect(recallEmbedsInFlight()).toBe(0);
+      const p = embed(["find the thing"], "query"); // recall lookup
+      // Increment happens synchronously before the first await inside embed().
+      expect(recallEmbedsInFlight()).toBe(1);
+      release();
+      await p;
+      expect(recallEmbedsInFlight()).toBe(0);
+    } finally {
+      _restoreProvider(saved);
+    }
+  });
+
+  test("does NOT count document embeds (write-time + the backfill's own load)", async () => {
+    const saved = _saveAndClearProvider();
+    const { release, token } = gatedProvider();
+    try {
+      _restoreProvider(token);
+      const p = embed(["a stored message"], "document");
+      expect(recallEmbedsInFlight()).toBe(0); // document embeds are not recall
+      release();
+      await p;
+      expect(recallEmbedsInFlight()).toBe(0);
+    } finally {
+      _restoreProvider(saved);
+    }
+  });
+
+  test("does NOT count a multi-text query embed (only single-text is a recall lookup)", async () => {
+    const saved = _saveAndClearProvider();
+    const { release, token } = gatedProvider();
+    try {
+      _restoreProvider(token);
+      const p = embed(["q1", "q2"], "query");
+      expect(recallEmbedsInFlight()).toBe(0);
+      release();
+      await p;
+      expect(recallEmbedsInFlight()).toBe(0);
+    } finally {
+      _restoreProvider(saved);
+    }
+  });
+
+  test("decrements even when the provider rejects (finally, not a leak)", async () => {
+    const saved = _saveAndClearProvider();
+    const { reject, token } = gatedProvider();
+    try {
+      _restoreProvider(token);
+      const p = embed(["boom"], "query");
+      expect(recallEmbedsInFlight()).toBe(1);
+      reject(new Error("provider blew up"));
+      await expect(p).rejects.toThrow("provider blew up");
+      // A leaked "busy" here would wedge the backfill forever.
+      expect(recallEmbedsInFlight()).toBe(0);
+    } finally {
+      _restoreProvider(saved);
+    }
+  });
+
+  test("tracks concurrent recall embeds additively", async () => {
+    const saved = _saveAndClearProvider();
+    const a = gatedProvider();
+    try {
+      _restoreProvider(a.token);
+      const p1 = embed(["one"], "query");
+      const p2 = embed(["two"], "query");
+      expect(recallEmbedsInFlight()).toBe(2);
+      a.release();
+      await Promise.all([p1, p2]);
+      expect(recallEmbedsInFlight()).toBe(0);
+    } finally {
+      _restoreProvider(saved);
     }
   });
 });

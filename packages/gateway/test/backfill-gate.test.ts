@@ -2,69 +2,65 @@ import { describe, expect, test } from "vitest";
 import { makeTemporalBackfillGate } from "../src/backfill-gate";
 
 describe("makeTemporalBackfillGate", () => {
-  test("parks when background work is paused (breaker tripped), regardless of sessions", () => {
+  test("parks when background work is paused (breaker tripped), regardless of embed load", () => {
     const gate = makeTemporalBackfillGate({
       isPaused: () => true,
-      activeSessions: () => [],
-      windowMs: 1000,
-      now: () => 10_000,
+      isEmbedBusy: () => false,
     });
     expect(gate()).toBe(true);
   });
 
-  test("parks when a session was active within the window", () => {
+  test("parks when the embed worker is serving a live recall lookup", () => {
     const gate = makeTemporalBackfillGate({
       isPaused: () => false,
-      activeSessions: () => [{ lastRequestTime: 9_600 }],
-      windowMs: 1000,
-      now: () => 10_000, // 400ms ago < 1000ms window
+      isEmbedBusy: () => true,
     });
     expect(gate()).toBe(true);
   });
 
-  test("runs when all sessions are idle beyond the window and the breaker is clear", () => {
+  test("runs when the breaker is clear and the embed worker is idle", () => {
     const gate = makeTemporalBackfillGate({
       isPaused: () => false,
-      activeSessions: () => [
-        { lastRequestTime: 0 },
-        { lastRequestTime: 8_000 },
-      ],
-      windowMs: 1000,
-      now: () => 10_000, // most recent is 2000ms ago >= window
+      isEmbedBusy: () => false,
     });
     expect(gate()).toBe(false);
   });
 
-  test("runs when there are no active sessions and the breaker is clear", () => {
+  test("parks when both signals are set", () => {
     const gate = makeTemporalBackfillGate({
-      isPaused: () => false,
-      activeSessions: () => [],
-      windowMs: 1000,
-      now: () => 10_000,
+      isPaused: () => true,
+      isEmbedBusy: () => true,
     });
-    expect(gate()).toBe(false);
+    expect(gate()).toBe(true);
   });
 
-  test("boundary: activity exactly windowMs ago does NOT park (strict <)", () => {
+  test("short-circuits: a tripped breaker parks without consulting embed load", () => {
+    let embedChecked = false;
     const gate = makeTemporalBackfillGate({
-      isPaused: () => false,
-      activeSessions: () => [{ lastRequestTime: 9_000 }],
-      windowMs: 1000,
-      now: () => 10_000, // exactly 1000ms ago
+      isPaused: () => true,
+      isEmbedBusy: () => {
+        embedChecked = true;
+        return false;
+      },
     });
-    expect(gate()).toBe(false);
+    expect(gate()).toBe(true);
+    expect(embedChecked).toBe(false);
   });
 
-  test("re-reads sessions live on every call (no snapshot)", () => {
-    let sessions: Array<{ lastRequestTime: number }> = [];
+  test("re-reads both signals live on every call (no snapshot)", () => {
+    let paused = false;
+    let busy = false;
     const gate = makeTemporalBackfillGate({
-      isPaused: () => false,
-      activeSessions: () => sessions,
-      windowMs: 1000,
-      now: () => 10_000,
+      isPaused: () => paused,
+      isEmbedBusy: () => busy,
     });
     expect(gate()).toBe(false); // idle
-    sessions = [{ lastRequestTime: 9_500 }]; // a request just arrived
+    busy = true; // a recall embed just started
     expect(gate()).toBe(true); // reflected without rebuilding the gate
+    busy = false;
+    paused = true; // breaker trips
+    expect(gate()).toBe(true);
+    paused = false;
+    expect(gate()).toBe(false); // both clear again
   });
 });

@@ -78,7 +78,6 @@ import {
   enableHostedMode,
   importLoreFileAs,
   resolveWorkspaces,
-  DEEP_IDLE_MS,
 } from "@loreai/core";
 
 import type {
@@ -569,18 +568,21 @@ export function getActiveSessions(): ReadonlyMap<string, SessionState> {
 /**
  * Build the idle-gate handed to the temporal re-chunk backfill, wired to live
  * gateway state: park the walk while the background circuit breaker is tripped
- * or any session was active within {@link DEEP_IDLE_MS}. Exported so the wiring
- * (not just the pure {@link makeTemporalBackfillGate} policy) is unit-testable.
+ * OR the shared embedding worker is serving a live recall lookup. Exported so
+ * the wiring (not just the pure {@link makeTemporalBackfillGate} policy) is
+ * unit-testable.
  */
 export function buildTemporalBackfillGate(): () => boolean {
   return makeTemporalBackfillGate({
     // Global breaker: a coarse "system is degraded" backstop. It chiefly tracks
-    // remote LLM failures, so for a local embed provider the real gate is the
-    // session-activity check below; the breaker just avoids piling work on
-    // during an outage.
+    // remote LLM failures, so it just avoids piling work on during an outage.
     isPaused: () => isBackgroundPaused(),
-    activeSessions: () => getActiveSessions().values(),
-    windowMs: DEEP_IDLE_MS,
+    // The real throttle: yield the shared embedding worker to latency-sensitive
+    // recall. Session activity was the old signal, but "a session pinged us
+    // recently" says nothing about the embed worker's spare capacity right now —
+    // on a busy multi-session host it kept the walk parked indefinitely. An
+    // empty recall-embed queue is the direct, live measure of that capacity.
+    isEmbedBusy: () => embedding.recallEmbedsInFlight() > 0,
   });
 }
 
@@ -2016,8 +2018,8 @@ async function initIfNeeded(
   }
   if (process.env.NODE_ENV !== "test") {
     // Idle-gate the heavy temporal re-chunk walk so it yields the shared embed
-    // pool to live traffic: park while the breaker is tripped or a session was
-    // active within DEEP_IDLE_MS, resume once the host is quiet.
+    // pool to live traffic: park while the breaker is tripped or a live recall
+    // embed is in flight, resume the instant the worker drains.
     spanStartupBackfill(() =>
       embedding.runStartupBackfill({
         shouldPause: buildTemporalBackfillGate(),

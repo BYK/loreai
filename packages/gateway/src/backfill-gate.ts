@@ -8,10 +8,14 @@
  * before each row; this module supplies that policy.
  *
  * Policy: park the walk while background work is paused (a tripped circuit
- * breaker signals the whole system is degraded) OR any session was active
- * within `windowMs` (a request is likely in-flight or imminent). The walk
- * resumes once the host is quiet. Because the walk checkpoints per row, parking
- * for long stretches is free — it just resumes from the last durable cursor.
+ * breaker signals the whole system is degraded) OR the shared embedding worker
+ * is serving a live recall lookup (a single-query embed is in flight). Gating on
+ * the *actual shared resource* — not session activity — is what lets the walk
+ * make progress on a busy multi-session host: a session being "recently active"
+ * says nothing about whether the embed worker has spare capacity *right now*,
+ * whereas an empty recall-embed queue does. The walk resumes the instant the
+ * worker drains, and because it checkpoints per row, parking for long stretches
+ * is free — it just resumes from the last durable cursor.
  *
  * Factored out of the wiring as a pure factory over injected dependencies so it
  * is unit-testable without the pipeline's module state.
@@ -19,12 +23,12 @@
 export interface TemporalBackfillGateDeps {
   /** Whether background LLM/embed work is currently paused (circuit breaker). */
   isPaused: () => boolean;
-  /** Live view of tracked sessions; re-read on every gate call. */
-  activeSessions: () => Iterable<{ lastRequestTime: number }>;
-  /** A session touched more recently than this (ms) counts as "active". */
-  windowMs: number;
-  /** Clock injection point for tests. Defaults to `Date.now`. */
-  now?: () => number;
+  /**
+   * Whether the shared embedding worker is currently serving latency-sensitive
+   * recall work (≥1 single-query embed in flight). Re-read on every gate call so
+   * it reflects the worker's live load, never a stale snapshot.
+   */
+  isEmbedBusy: () => boolean;
 }
 
 /**
@@ -34,14 +38,5 @@ export interface TemporalBackfillGateDeps {
 export function makeTemporalBackfillGate(
   deps: TemporalBackfillGateDeps,
 ): () => boolean {
-  const now = deps.now ?? Date.now;
-  return () => {
-    if (deps.isPaused()) return true;
-    const t = now();
-    for (const s of deps.activeSessions()) {
-      // Strict `<`: activity exactly `windowMs` ago is no longer "active".
-      if (t - s.lastRequestTime < deps.windowMs) return true;
-    }
-    return false;
-  };
+  return () => deps.isPaused() || deps.isEmbedBusy();
 }

@@ -898,8 +898,7 @@ class LocalProvider implements EmbeddingProvider {
     const id = this.nextRequestId++;
     // Recall queries (single query-type texts) get high priority so they
     // jump ahead of any queued backfill batches in the worker.
-    const priority =
-      inputType === "query" && texts.length === 1 ? "high" : "normal";
+    const priority = isRecallEmbed(texts, inputType) ? "high" : "normal";
 
     const payload: EmbedRequest = {
       type: "embed",
@@ -1218,6 +1217,55 @@ export function isAvailable(): boolean {
 // ---------------------------------------------------------------------------
 
 /**
+ * A single-text `query` embed is a recall lookup — the latency-sensitive
+ * request path (the recall tool and forSession LTM ranking), as opposed to
+ * batch/document writes. This is the single source of truth for that
+ * classification: the worker uses it to assign "high" priority (see
+ * {@link LocalProvider.embed}) and {@link embed} uses it to track in-flight
+ * recall load for the temporal backfill's idle-gate. Both sites call this one
+ * predicate so the "mirrors the worker" invariant can never silently drift.
+ */
+function isRecallEmbed(
+  texts: string[],
+  inputType: "document" | "query",
+): boolean {
+  return inputType === "query" && texts.length === 1;
+}
+
+/**
+ * Number of recall (single query-text) embeds currently in flight through
+ * {@link embed}. The temporal re-chunk backfill reads this (via
+ * {@link recallEmbedsInFlight}) to yield the shared embedding worker to
+ * latency-sensitive recall lookups: it parks a page while a recall embed is
+ * outstanding and resumes the instant the worker drains.
+ *
+ * Only single-text `query` embeds are counted — that is exactly the class the
+ * worker itself marks "high priority" (see LocalProvider.embed). Document/batch
+ * embeds (write-time message/knowledge/entity embeds AND the backfill's own
+ * embeds) are deliberately NOT counted, so the backfill never gates against its
+ * own load or against fire-and-forget background writes.
+ */
+let _recallEmbedsInFlight = 0;
+
+/**
+ * Live count of in-flight recall (single query-text) embeds — the temporal
+ * re-chunk backfill's idle signal. Read on every gate poll so it reflects the
+ * shared worker's current recall load, never a stale snapshot.
+ */
+export function recallEmbedsInFlight(): number {
+  return _recallEmbedsInFlight;
+}
+
+/**
+ * Test seam: force the in-flight recall-embed counter to a known value so the
+ * gateway's idle-gate wiring can be exercised deterministically without driving
+ * a real (async, provider-dependent) embed. Test-only.
+ */
+export function _setRecallEmbedsInFlightForTest(n: number): void {
+  _recallEmbedsInFlight = n;
+}
+
+/**
  * Generate embeddings for the given texts using the configured provider.
  *
  * Remote providers (voyage, openai) are explicit opt-in via
@@ -1236,11 +1284,23 @@ export async function embed(
 ): Promise<Float32Array[]> {
   const provider = getProvider();
   if (!provider) throw new Error("No embedding provider available");
-  const vecs = await provider.embed(texts, inputType);
-  // Enforce the L2-normalization invariant at the single chokepoint so the JS
-  // dot-product path and sqlite-vec's vec_distance_cosine() always agree. See
-  // l2Normalize() for the full rationale.
-  return vecs.map(l2Normalize);
+  // A single-text query embed is a recall lookup (see isRecallEmbed — the same
+  // predicate the worker uses for high priority). Track it in flight so the
+  // temporal re-chunk backfill can yield the shared worker while recall is
+  // active. The counter is decremented in `finally` so a rejected embed
+  // (provider gone, OOM, timeout) can never leak a permanent "busy" that would
+  // wedge the backfill forever.
+  const isRecall = isRecallEmbed(texts, inputType);
+  if (isRecall) _recallEmbedsInFlight++;
+  try {
+    const vecs = await provider.embed(texts, inputType);
+    // Enforce the L2-normalization invariant at the single chokepoint so the JS
+    // dot-product path and sqlite-vec's vec_distance_cosine() always agree. See
+    // l2Normalize() for the full rationale.
+    return vecs.map(l2Normalize);
+  } finally {
+    if (isRecall) _recallEmbedsInFlight--;
+  }
 }
 
 // ---------------------------------------------------------------------------
