@@ -33,6 +33,7 @@ import {
   curator,
   log,
   transform,
+  prewarmDistillationSnapshot,
   isLargeColdStart,
   setModelLimits,
   setLtmTokens,
@@ -6983,6 +6984,14 @@ async function handleConversationTurn(
   // --- 7. Gradient transform on messages ---
   // loreMessages was built + resolved once before the LTM block (step 6) so the
   // turn-1 LTM decision and this transform share identical input. Reuse it.
+  //
+  // Pre-load the session's distillation snapshot off-thread first (#1082): the
+  // sync transform() below would otherwise run an unbounded distillation scan on
+  // this pre-upstream critical path. prewarm populates the same per-session
+  // snapshot transform() reads, so its loadDistillationsCached hits the cache
+  // instead of the DB. On a pool timeout it's a no-op and transform() falls back
+  // to the identical in-process load.
+  await prewarmDistillationSnapshot(projectPath, sessionID, loreMessages);
   const result = transform({
     messages: loreMessages,
     projectPath,

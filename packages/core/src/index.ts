@@ -153,6 +153,7 @@ export {
 } from "./hosted";
 export {
   transform,
+  prewarmDistillationSnapshot,
   setModelLimits,
   setMaxLayer0Tokens,
   computeLayer0Cap,

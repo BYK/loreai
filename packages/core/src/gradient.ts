@@ -15,6 +15,8 @@ import {
 import { config } from "./config";
 import { formatDistillations } from "./prompt";
 import { normalize } from "./markdown";
+import { offloadAllOrTimeout, READ_JOB_TIMED_OUT } from "./read-offload";
+import type { ReadParam } from "./read-job";
 import * as log from "./log";
 
 type MessageWithParts = LoreMessageWithParts;
@@ -1617,6 +1619,36 @@ type Distillation = {
   source_ids: string[];
 };
 
+// Build the non-archived distillation query shared by {@link loadDistillations}
+// and its off-thread twin {@link loadDistillationsOffloaded}, so both run
+// byte-identical SQL + params (only the execution thread differs).
+//
+// id tie-break — never let same-ms rows reorder and bust the cache.
+// created_at is Date.now() (ms precision); two rows written in the same
+// millisecond would otherwise have an undefined relative order across
+// queries, flipping the distilledPrefixCached validity anchor and forcing
+// an unnecessary full prefix re-render. Distillation ids are random
+// (crypto.randomUUID, v4), so (created_at, id) is NOT chronological for
+// same-ms rows — but it IS a stable, deterministic total order, which is
+// exactly what cache stability requires.
+function distillationsQuery(
+  pid: string,
+  sessionID?: string,
+): { sql: string; params: ReadParam[] } {
+  const sql = sessionID
+    ? "SELECT id, observations, generation, token_count, created_at, session_id, r_compression, c_norm, source_ids FROM distillations WHERE project_id = ? AND session_id = ? AND archived = 0 ORDER BY created_at ASC, id ASC"
+    : "SELECT id, observations, generation, token_count, created_at, session_id, r_compression, c_norm, source_ids FROM distillations WHERE project_id = ? AND archived = 0 ORDER BY created_at ASC, id ASC";
+  return { sql, params: sessionID ? [pid, sessionID] : [pid] };
+}
+
+type RawDistillationRow = Omit<Distillation, "source_ids"> & {
+  source_ids: string;
+};
+
+function hydrateDistillationRow(r: RawDistillationRow): Distillation {
+  return { ...r, source_ids: r.source_ids ? JSON.parse(r.source_ids) : [] };
+}
+
 // Load non-archived distillations for the in-context prefix.
 // Archived gen-0 entries (preserved after meta-distillation) are excluded here
 // but remain searchable via the recall tool's searchDistillations().
@@ -1625,27 +1657,30 @@ function loadDistillations(
   sessionID?: string,
 ): Distillation[] {
   const pid = ensureProject(projectPath);
-  // id tie-break — never let same-ms rows reorder and bust the cache.
-  // created_at is Date.now() (ms precision); two rows written in the same
-  // millisecond would otherwise have an undefined relative order across
-  // queries, flipping the distilledPrefixCached validity anchor and forcing
-  // an unnecessary full prefix re-render. Distillation ids are random
-  // (crypto.randomUUID, v4), so (created_at, id) is NOT chronological for
-  // same-ms rows — but it IS a stable, deterministic total order, which is
-  // exactly what cache stability requires.
-  const query = sessionID
-    ? "SELECT id, observations, generation, token_count, created_at, session_id, r_compression, c_norm, source_ids FROM distillations WHERE project_id = ? AND session_id = ? AND archived = 0 ORDER BY created_at ASC, id ASC"
-    : "SELECT id, observations, generation, token_count, created_at, session_id, r_compression, c_norm, source_ids FROM distillations WHERE project_id = ? AND archived = 0 ORDER BY created_at ASC, id ASC";
-  const params = sessionID ? [pid, sessionID] : [pid];
+  const { sql, params } = distillationsQuery(pid, sessionID);
   const rows = db()
-    .query(query)
-    .all(...params) as Array<
-    Omit<Distillation, "source_ids"> & { source_ids: string }
-  >;
-  return rows.map((r) => ({
-    ...r,
-    source_ids: r.source_ids ? JSON.parse(r.source_ids) : [],
-  }));
+    .query(sql)
+    .all(...params) as RawDistillationRow[];
+  return rows.map(hydrateDistillationRow);
+}
+
+// Off-thread twin of {@link loadDistillations}: runs the identical (unbounded,
+// session-length-growing) distillation scan through the read-worker pool so it
+// doesn't block the main event loop on the pre-upstream critical path. #1082.
+//
+// Returns the same rows `loadDistillations(projectPath, sessionID)` would, or
+// `null` on a worker TIMEOUT — the caller (prewarm) then leaves the snapshot
+// untouched so `transform()`'s in-process `loadDistillationsCached` does the
+// identical sync load (no behavior change, just no offload benefit that turn).
+async function loadDistillationsOffloaded(
+  projectPath: string,
+  sessionID: string,
+): Promise<Distillation[] | null> {
+  const pid = ensureProject(projectPath);
+  const { sql, params } = distillationsQuery(pid, sessionID);
+  const rows = await offloadAllOrTimeout(sql, params);
+  if (rows === READ_JOB_TIMED_OUT) return null;
+  return (rows as RawDistillationRow[]).map(hydrateDistillationRow);
 }
 
 // Cached distillation loader — avoids hitting the DB on every transform() call.
@@ -1660,14 +1695,9 @@ function loadDistillationsCached(
   messages: MessageWithParts[],
   sessState: SessionState,
 ): Distillation[] {
-  // Find the last user message ID in the input
-  let lastUserMsgId: string | null = null;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].info.role === "user") {
-      lastUserMsgId = messages[i].info.id;
-      break;
-    }
-  }
+  // Find the last user message ID in the input (shared with prewarm so both
+  // compute an identical turn-boundary cache key).
+  const lastUserMsgId = lastUserMessageId(messages);
 
   const snapshot = sessState.distillationSnapshot;
 
@@ -1686,6 +1716,65 @@ function loadDistillationsCached(
   );
 
   return rows;
+}
+
+/**
+ * Find the last user message id in `messages` — the turn-boundary cache key used
+ * by both {@link loadDistillationsCached} and {@link prewarmDistillationSnapshot}.
+ */
+function lastUserMessageId(messages: MessageWithParts[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].info.role === "user") return messages[i].info.id;
+  }
+  return null;
+}
+
+/**
+ * Pre-load the session's distillation snapshot OFF-THREAD before the (sync)
+ * `transform()` runs, so the unbounded distillation scan stays off the
+ * pre-upstream critical path. #1082 (part of #1077 workstream B).
+ *
+ * `transform()` is synchronous, so it cannot await the read itself. Instead the
+ * pipeline (which is async) calls this first: it runs the SAME turn-boundary
+ * cache-key check as `loadDistillationsCached` and, on a cache miss, loads the
+ * distillations via the read-worker pool and populates
+ * `sessState.distillationSnapshot`. `transform()`'s later
+ * `loadDistillationsCached` then finds a matching snapshot and returns it
+ * WITHOUT touching the DB.
+ *
+ * Zero behavior change — the rows and ordering are exactly what the sync load
+ * would produce:
+ *   - cache hit (same last user message → still in a tool-call chain): no-op.
+ *   - cache miss + pool serves/falls back in-process: snapshot populated.
+ *   - cache miss + worker TIMEOUT: snapshot left untouched, so `transform()`
+ *     does the identical in-process load (no offload benefit this turn).
+ *
+ * Uses the same `getSessionState(sessionID)` singleton `transform()` reads, so
+ * the populated snapshot is visible to it. `ensureProject()` runs on the main
+ * thread inside the offloaded loader; only the scan is offloaded.
+ */
+export async function prewarmDistillationSnapshot(
+  projectPath: string,
+  sessionID: string | undefined,
+  messages: MessageWithParts[],
+): Promise<void> {
+  if (!sessionID) return;
+  const sessState = getSessionState(sessionID);
+  const lastUserMsgId = lastUserMessageId(messages);
+
+  // Cache hit: same user message = still in the same tool-call chain → the sync
+  // loadDistillationsCached will reuse this snapshot; nothing to preload.
+  const snapshot = sessState.distillationSnapshot;
+  if (snapshot && snapshot.lastUserMsgId === lastUserMsgId) return;
+
+  const rows = await loadDistillationsOffloaded(projectPath, sessionID);
+  if (rows === null) return; // worker timeout → let transform() do the sync load
+
+  sessState.distillationSnapshot = { rows, lastUserMsgId };
+  log.info(
+    `distillation prewarm: ${rows.length} rows` +
+      ` (user msg ${lastUserMsgId?.substring(0, 16) ?? "none"})`,
+  );
 }
 
 // Strip all <system-reminder>...</system-reminder> blocks from message text.
