@@ -1199,9 +1199,17 @@ export function computeHistoricalEstimates(
       const sessionTokens = sess.total_tokens;
       // Per-model auto-compact threshold (#983): the hardcoded 167K constant
       // assumed a 200K-context model and over/under-counted for other windows.
+      // Pass the *extracted* model (`m`, null when the session has no usable
+      // metadata) — NOT the pricing-defaulted `model`. `model` falls back to
+      // DEFAULT_ESTIMATION_MODEL (a 1M-window model) purely to price the
+      // compaction cost; adopting its 967K trigger for metadata-less sessions
+      // would silently drop their historical "avoided compactions" ~7×. An
+      // unknown model must keep the historical 167K trigger, matching the live
+      // path (which passes `conversationModel`, undefined when unknown) and the
+      // documented `autocompactThresholdForModelID(undefined)` contract.
       const avoidedCompactions = estimateAvoidedCompactions(
         sessionTokens,
-        autocompactThresholdForModelID(model),
+        autocompactThresholdForModelID(m ?? undefined),
         POST_COMPACTION_CONTEXT,
       );
 

@@ -159,4 +159,81 @@ describe("computeHistoricalEstimates (session_rollup read path #981)", () => {
     expect(est.totals.sessionCount).toBe(1);
     expect(est.sessions[0].sessionId).toBe("sess-live");
   });
+
+  // --- #983: the batch "avoided compactions" estimate is per-model ---
+  // The counterfactual host compacts once at the model's auto-compact trigger,
+  // then every (trigger − 30K post-compaction) tokens thereafter. A 600K-token
+  // session therefore yields a model-dependent count:
+  //   • 1M-window model  → trigger 967K  → 600K < 967K            ⇒ 0
+  //   • 200K-window model → trigger 178808 → 1 + ⌊421192/148808⌋  ⇒ 3
+  //   • no usable metadata → trigger 167K (AUTOCOMPACT_THRESHOLD) ⇒ 4
+  // The pre-#983 hardcoded 167K constant would have reported 4 for every one.
+
+  test("batch estimate: a 1M-window model under its trigger avoids 0 compactions", () => {
+    const pid = ensureProject("/test/cost-historical/1m", "hist-1m");
+    const sid = "sess-1m";
+    const now = Date.now();
+    // 600K tokens, model = Sonnet 4 (1M window ⇒ 967K trigger).
+    insertMsg(
+      pid,
+      sid,
+      "assistant",
+      600_000,
+      now,
+      JSON.stringify({
+        modelID: "claude-sonnet-4-20250514",
+        providerID: "anthropic",
+      }),
+    );
+
+    const s = computeHistoricalEstimates().sessions.find(
+      (x) => x.sessionId === sid,
+    );
+    expect(s).toBeDefined();
+    // 600K is below the 967K trigger ⇒ the host would not have compacted at
+    // all. The old 167K constant would wrongly report 4. Kills the batch-site
+    // "revert to constant" mutation.
+    expect(s?.avoidedCompactions).toBe(0);
+  });
+
+  test("batch estimate: a 200K-window model over its trigger avoids several", () => {
+    const pid = ensureProject("/test/cost-historical/200k", "hist-200k");
+    const sid = "sess-200k";
+    const now = Date.now();
+    // 600K tokens, model = 3.5 Sonnet (200K window ⇒ 178808 trigger).
+    insertMsg(
+      pid,
+      sid,
+      "assistant",
+      600_000,
+      now,
+      JSON.stringify({
+        modelID: "claude-3-5-sonnet-20241022",
+        providerID: "anthropic",
+      }),
+    );
+
+    const s = computeHistoricalEstimates().sessions.find(
+      (x) => x.sessionId === sid,
+    );
+    expect(s).toBeDefined();
+    expect(s?.avoidedCompactions).toBe(3);
+  });
+
+  test("batch estimate: a session with no usable model metadata keeps the 167K trigger", () => {
+    const pid = ensureProject("/test/cost-historical/nomodel", "hist-nomodel");
+    const sid = "sess-nomodel";
+    const now = Date.now();
+    // 600K tokens, but no extractable model (null metadata). The threshold must
+    // fall back to AUTOCOMPACT_THRESHOLD (167K) — NOT the pricing-default
+    // DEFAULT_ESTIMATION_MODEL (a 1M-window model), which would drop the count
+    // to 0 and shift historical dashboards ~7× for untracked sessions.
+    insertMsg(pid, sid, "assistant", 600_000, now, null);
+
+    const s = computeHistoricalEstimates().sessions.find(
+      (x) => x.sessionId === sid,
+    );
+    expect(s).toBeDefined();
+    expect(s?.avoidedCompactions).toBe(4);
+  });
 });
