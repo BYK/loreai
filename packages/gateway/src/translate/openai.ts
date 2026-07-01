@@ -510,20 +510,40 @@ const OPENAI_HOST_CHAT_COMPLETIONS_PATHS: ReadonlyMap<string, string> = new Map(
  * Build the OpenAI Chat Completions upstream URL for an upstream base.
  *
  * Most OpenAI-compatible providers serve at `<base>/v1/chat/completions`, so the
- * route tables store a bare origin and the gateway appends `/v1/...`. Hosts in
- * `OPENAI_HOST_CHAT_COMPLETIONS_PATHS` use a different endpoint path (e.g. no
- * `/v1` segment, or a `/v1beta/openai/...` prefix). Falls back to the default
- * `/v1` form when `base` cannot be parsed as a URL.
+ * route tables store a bare origin and the gateway appends `/v1/...`. Two
+ * exceptions are handled, in priority order:
+ *
+ *  1. Hosts in `OPENAI_HOST_CHAT_COMPLETIONS_PATHS` use a fixed non-`/v1`
+ *     endpoint path (GitHub Copilot's `/chat/completions`, issue #1052; Google's
+ *     `/v1beta/openai/...`, issue #1070). These hosts' route bases are bare
+ *     origins, so the mapped path is simply appended.
+ *  2. A base whose pathname already ends in a version segment (e.g. Z.AI's
+ *     user-configured `.../api/paas/v4`, issue #1093) serves Chat Completions at
+ *     `<base>/chat/completions`; appending the default `/v1` would duplicate the
+ *     version (`.../v4/v1/chat/completions`) and 404. Such bases come from
+ *     user-supplied `LORE_UPSTREAM_<PROVIDER>` values (`url: null` routes) where
+ *     the host cannot be keyed in the static map above. Appending only
+ *     `/chat/completions` is also a no-op harmless normalization for a base that
+ *     already carries `/v1`.
+ *
+ * Falls back to the default `/v1` form when `base` cannot be parsed as a URL.
  */
 export function buildOpenAIChatCompletionsUrl(base: string): string {
-  let path = DEFAULT_OPENAI_CHAT_COMPLETIONS_PATH;
   try {
-    const hostname = new URL(base).hostname;
-    path = OPENAI_HOST_CHAT_COMPLETIONS_PATHS.get(hostname) ?? path;
+    const { hostname, pathname } = new URL(base);
+    const hostPath = OPENAI_HOST_CHAT_COMPLETIONS_PATHS.get(hostname);
+    if (hostPath !== undefined) {
+      return `${base}${hostPath}`;
+    }
+    // Base already ends in a version segment (`/v4`, `/v1`, …) → the API path is
+    // just `/chat/completions`; a `/v1` prefix would double the version.
+    if (/\/v\d+$/.test(pathname)) {
+      return `${base}/chat/completions`;
+    }
   } catch {
     // Unparseable base (e.g. a bare placeholder) — keep the default `/v1` path.
   }
-  return `${base}${path}`;
+  return `${base}${DEFAULT_OPENAI_CHAT_COMPLETIONS_PATH}`;
 }
 
 export function buildOpenAIUpstreamRequest(

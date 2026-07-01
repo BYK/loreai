@@ -494,13 +494,15 @@ export type ProviderRoute = {
  * header, this table is consulted BEFORE the model-prefix UPSTREAM_ROUTES.
  *
  * URLs must NOT include `/v1` — the gateway appends `/v1/messages`,
- * `/v1/chat/completions`, or `/v1/responses` itself. The exception is providers
- * whose Chat Completions API is served at a non-`/v1` path (GitHub Copilot at
- * `/chat/completions`, issue #1052; Google Gemini's OpenAI layer at
- * `/v1beta/openai/chat/completions`, issue #1070): foreground requests forward
- * verbatim to the client's original endpoint (see `verbatimUpstreamUrl`), and
- * reconstructed paths (background workers) are handled host-aware by
- * `buildOpenAIChatCompletionsUrl` in `translate/openai.ts`.
+ * `/v1/chat/completions`, or `/v1/responses` itself. There are exceptions whose
+ * Chat Completions API is served at a non-`/v1` path: GitHub Copilot at
+ * `/chat/completions` (issue #1052) and Google Gemini's OpenAI layer at
+ * `/v1beta/openai/chat/completions` (issue #1070), both keyed by host; and
+ * providers whose user-supplied base already carries a version segment (Z.AI's
+ * `.../api/paas/v4`, issue #1093), detected by the base pathname. In every case
+ * foreground requests forward verbatim to the client's original endpoint (see
+ * `verbatimUpstreamUrl`), and reconstructed paths (background workers) are
+ * handled by `buildOpenAIChatCompletionsUrl` in `translate/openai.ts`.
  *
  * Data sourced from models.dev provider database (https://models.dev/providers).
  * Protocol derived from the provider's SDK package: `@ai-sdk/anthropic` →
@@ -542,7 +544,12 @@ const PROVIDER_ROUTES: Record<string, ProviderRoute> = {
     url: "https://router.huggingface.co",
     protocol: "openai",
   },
-  zai: { url: null, protocol: "openai" }, // uses /v4 path — user sets LORE_UPSTREAM_ZAI
+  // Z.AI serves OpenAI-compat chat completions under `/v4` (not `/v1`). The user
+  // sets LORE_UPSTREAM_ZAI to Z.AI's documented base (e.g.
+  // `https://api.z.ai/api/paas/v4`), which already carries the `/v4` version
+  // segment; `buildOpenAIChatCompletionsUrl` appends only `/chat/completions`
+  // for a version-suffixed base so the worker path lands on `/v4/...` (#1093).
+  zai: { url: null, protocol: "openai" },
   "vercel-ai-gateway": { url: null, protocol: null },
   // --- OpenAI Responses protocol ---
   openai: {

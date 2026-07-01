@@ -209,6 +209,36 @@ describe("buildOpenAIChatCompletionsUrl", () => {
     );
   });
 
+  test("version-suffixed base appends only /chat/completions — Z.AI (issue #1093)", () => {
+    // The user-supplied LORE_UPSTREAM_ZAI already carries the `/v4` version, so a
+    // `/v1` prefix would double it (`.../v4/v1/chat/completions`) and 404.
+    expect(buildOpenAIChatCompletionsUrl("https://api.z.ai/api/paas/v4")).toBe(
+      "https://api.z.ai/api/paas/v4/chat/completions",
+    );
+  });
+
+  test("version-suffixed base — Z.AI coding-plan prefix (issue #1093)", () => {
+    expect(
+      buildOpenAIChatCompletionsUrl("https://api.z.ai/api/coding/paas/v4"),
+    ).toBe("https://api.z.ai/api/coding/paas/v4/chat/completions");
+  });
+
+  test("base already ending in /v1 is not doubled", () => {
+    // A self-hosted server configured with an explicit `/v1` root: appending
+    // only `/chat/completions` yields the correct single-`/v1` URL.
+    expect(buildOpenAIChatCompletionsUrl("http://localhost:8000/v1")).toBe(
+      "http://localhost:8000/v1/chat/completions",
+    );
+  });
+
+  test("non-numeric version-like suffix does NOT trigger the rule", () => {
+    // `/v1beta` is not a bare `/vN` segment (regex boundary guard): a host not in
+    // the static map falls back to the conventional `/v1/chat/completions`.
+    expect(buildOpenAIChatCompletionsUrl("https://example.com/v1beta")).toBe(
+      "https://example.com/v1beta/v1/chat/completions",
+    );
+  });
+
   test("falls back to the /v1 form when the base is not a URL", () => {
     expect(buildOpenAIChatCompletionsUrl("not a url")).toBe(
       "not a url/v1/chat/completions",
@@ -247,5 +277,11 @@ describe("buildOpenAIUpstreamRequest — reconstructed URL is host-aware", () =>
     expect(
       buildOpenAIUpstreamRequest(makeReq(), "https://api.openai.com").url,
     ).toBe("https://api.openai.com/v1/chat/completions");
+  });
+
+  test("Z.AI versioned base → /v4/chat/completions (issue #1093)", () => {
+    expect(
+      buildOpenAIUpstreamRequest(makeReq(), "https://api.z.ai/api/paas/v4").url,
+    ).toBe("https://api.z.ai/api/paas/v4/chat/completions");
   });
 });
