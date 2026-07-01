@@ -1334,6 +1334,8 @@ describe("worker temperature capability", () => {
 
   beforeEach(() => {
     _resetTemperatureUnsupportedModels();
+    vi.mocked(recordWorkerFailure).mockClear();
+    vi.mocked(markWorkerPaused).mockClear();
   });
 
   afterEach(() => {
@@ -1348,6 +1350,16 @@ describe("worker temperature capability", () => {
     const raw = init?.body;
     if (typeof raw !== "string") return undefined;
     return JSON.parse(raw) as Record<string, unknown>;
+  }
+
+  function betaOf(callIndex: number): string | undefined {
+    const init = mockFetch.mock.calls[callIndex]?.[1];
+    const headers = init?.headers as Record<string, string> | undefined;
+    if (!headers) return undefined;
+    const key = Object.keys(headers).find(
+      (k) => k.toLowerCase() === "anthropic-beta",
+    );
+    return key ? headers[key] : undefined;
   }
 
   const TEMP_DEPRECATED_400 = JSON.stringify({
@@ -1427,6 +1439,10 @@ describe("worker temperature capability", () => {
         modelID: "claude-sonnet-5",
       }),
     ).toBe(true);
+    // A recovered temperature-strip retry is NOT a worker failure: the health
+    // ladder must not be incremented and the session must not be soft-paused.
+    expect(recordWorkerFailure).not.toHaveBeenCalled();
+    expect(markWorkerPaused).not.toHaveBeenCalled();
   });
 
   test("omits temperature upfront on the next call once a model is learned", async () => {
@@ -1503,5 +1519,208 @@ describe("worker temperature capability", () => {
         modelID: "claude-sonnet-5",
       }),
     ).toBe(false);
+  });
+
+  test("does not learn the model when the temperature-stripped retry still fails", async () => {
+    // call 1: temperature-deprecated 400 → strip + retry.
+    // call 2: an UNRELATED 400 → temperature was not the (only) cause, so the
+    // model must NOT be learned (learning is deferred to a successful retry).
+    let call = 0;
+    mockFetch.mockImplementation(async () => {
+      call++;
+      if (call === 1) {
+        return new Response(TEMP_DEPRECATED_400, { status: 400 });
+      }
+      return new Response(
+        JSON.stringify({
+          error: { type: "invalid_request_error", message: "bad max_tokens" },
+        }),
+        { status: 400 },
+      );
+    });
+
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      { providerID: "anthropic", modelID: "claude-sonnet-5" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      sessionID: "sess-temp-fail",
+      workerID: "lore-distill",
+      model: { providerID: "anthropic", modelID: "claude-sonnet-5" },
+      temperature: 0,
+    });
+
+    expect(result).toBeNull();
+    expect(mockFetch).toHaveBeenCalledTimes(2); // stripped once, still failed
+    expect(bodyOf(1)).not.toHaveProperty("temperature"); // strip did happen
+    // But the model is NOT learned — the retry never confirmed the cure.
+    expect(
+      isTemperatureUnsupportedModel({
+        providerID: "anthropic",
+        modelID: "claude-sonnet-5",
+      }),
+    ).toBe(false);
+  });
+
+  test("temperature-strip rebuild uses the refreshed credential (not the stale one) after an auth refresh in the same call", async () => {
+    // call 1: 401 → auth refresh (getAuth now returns the fresh key), rebuild.
+    // call 2: temperature 400 → strip + rebuild. The rebuild MUST sign with the
+    //         refreshed key, not the original stale one that already 401'd.
+    // call 3: 200.
+    let call = 0;
+    mockFetch.mockImplementation(async () => {
+      call++;
+      if (call === 1) return new Response("unauthorized", { status: 401 });
+      if (call === 2) return new Response(TEMP_DEPRECATED_400, { status: 400 });
+      return new Response(
+        JSON.stringify({
+          content: [{ type: "text", text: "recovered" }],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    let authCall = 0;
+    const getAuth = () => {
+      authCall++;
+      return {
+        scheme: "api-key" as const,
+        value: authCall === 1 ? "sk-ant-stale" : "sk-ant-fresh",
+      };
+    };
+
+    const client = createGatewayLLMClient(UPSTREAMS, getAuth, {
+      providerID: "anthropic",
+      modelID: "claude-sonnet-5",
+    });
+
+    const result = await client.prompt("system", "user", {
+      sessionID: "sess-temp-authrefresh",
+      workerID: "lore-distill",
+      model: { providerID: "anthropic", modelID: "claude-sonnet-5" },
+      temperature: 0,
+    });
+
+    const keyOf = (i: number): string | undefined => {
+      const init = mockFetch.mock.calls[i]?.[1];
+      const headers = init?.headers as Record<string, string> | undefined;
+      return headers?.["x-api-key"];
+    };
+
+    expect(result).toBe("recovered");
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    expect(keyOf(1)).toBe("sk-ant-fresh"); // auth rebuild adopted the fresh key
+    expect(keyOf(2)).toBe("sk-ant-fresh"); // temperature rebuild kept the fresh key
+    expect(bodyOf(2)).not.toHaveProperty("temperature");
+  });
+
+  test("strips temperature on the OpenAI Chat Completions worker path too", async () => {
+    let call = 0;
+    mockFetch.mockImplementation(async () => {
+      call++;
+      if (call === 1) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              message: "Unsupported parameter: 'temperature' is not supported.",
+              type: "invalid_request_error",
+            },
+          }),
+          { status: 400 },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: "recovered" } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "sk-openai-test" }),
+      { providerID: "openai", modelID: "gpt-5" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      sessionID: "sess-temp-openai",
+      workerID: "lore-distill",
+      model: { providerID: "openai", modelID: "gpt-5" },
+      protocol: "openai",
+      temperature: 0,
+    });
+
+    expect(result).toBe("recovered");
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(bodyOf(0)?.temperature).toBe(0);
+    expect(bodyOf(1)).toBeDefined();
+    expect(bodyOf(1)).not.toHaveProperty("temperature");
+  });
+
+  test("a model needing BOTH a beta strip AND a temperature strip recovers (temperature rebuild does not resurrect the stripped beta)", async () => {
+    // Server returns the beta error FIRST, then the temperature error — the
+    // adversarial order: the temperature rebuild goes through buildWorkerRequest
+    // whose upfront filter KEEPS context-1m for a 1M-capable model, so without
+    // re-applying the runtime beta strip the third attempt would carry the beta
+    // again and 400-loop (betaStripped already latched).
+    let call = 0;
+    mockFetch.mockImplementation(async () => {
+      call++;
+      if (call === 1) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              type: "invalid_request_error",
+              message:
+                "The long context beta is not yet available for this subscription.",
+            },
+          }),
+          { status: 400 },
+        );
+      }
+      if (call === 2) {
+        return new Response(TEMP_DEPRECATED_400, { status: 400 });
+      }
+      return new Response(
+        JSON.stringify({
+          content: [{ type: "text", text: "recovered" }],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    // opus-4-8 is 1M-capable in the fallback table, so the upfront filter keeps
+    // context-1m; the OAuth session replays the beta + oauth gate.
+    captureBillingPrefix("sess-both", BILLING_SYSTEM);
+    captureSessionHeaders("sess-both", {
+      "anthropic-beta": "oauth-2025-04-20,context-1m-2025-08-07",
+    });
+
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "oauth-token" }),
+      { providerID: "anthropic", modelID: "claude-opus-4-8" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      sessionID: "sess-both",
+      workerID: "lore-distill",
+      model: { providerID: "anthropic", modelID: "claude-opus-4-8" },
+      temperature: 0,
+    });
+
+    expect(result).toBe("recovered");
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    // Final attempt: neither the context-1m beta nor temperature is present,
+    // and the OAuth gate is preserved so it still authenticates.
+    expect(betaOf(2)).not.toContain("context-1m");
+    expect(betaOf(2)).toContain("oauth-2025-04-20");
+    expect(bodyOf(2)).not.toHaveProperty("temperature");
   });
 });

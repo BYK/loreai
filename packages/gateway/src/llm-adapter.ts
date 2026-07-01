@@ -211,7 +211,7 @@ export function _resetTemperatureUnsupportedModels(): void {
 function isTemperatureUnsupported400(body: string): boolean {
   return (
     /temperature/i.test(body) &&
-    /\b(deprecated|unsupported|not\s+supported|no\s+longer\s+supported|removed|not\s+allowed|cannot\s+be\s+(?:set|used|specified))\b/i.test(
+    /\b(deprecated|unsupported|no\s+longer\s+supported|not\s+(?:a\s+)?support(?:ed)?|removed|not\s+allowed|cannot\s+be\s+(?:set|used|specified))\b/i.test(
       body,
     )
   );
@@ -1281,10 +1281,17 @@ export function createGatewayLLMClient(
         ? undefined
         : opts?.temperature;
 
+      // The credential in effect for the CURRENT attempt. Starts as `cred`; an
+      // auth-error refresh reassigns it so every later rebuild in the retry loop
+      // (e.g. the temperature-strip rebuild) signs with the fresh key rather
+      // than the stale one that just 401'd. Typed non-null (assigned only from
+      // non-null values) so the closure keeps the `if (!cred)` guard's narrowing.
+      let activeCred: AuthCredential = cred;
+
       // Build protocol-specific request
       let req = await buildWorkerRequest(
         target,
-        cred,
+        activeCred,
         model,
         system,
         user,
@@ -1371,6 +1378,14 @@ export function createGatewayLLMClient(
               finalStatus = response.status;
 
               if (response.ok) {
+                // If a prior attempt stripped `temperature` and the request now
+                // succeeds (2xx), temperature really was the culprit — learn it
+                // so future calls to this model omit it upfront. Deferred to
+                // success (rather than marking on the 400 heuristic match) so a
+                // regex false-positive on an unrelated 400 can never permanently
+                // mislabel a model that actually supports temperature.
+                if (temperatureStripped) markTemperatureUnsupported(model);
+
                 // Guard: some providers return SSE even when stream: false
                 // was sent. Extract JSON from the data: lines instead.
                 const ct = response.headers.get("content-type") ?? "";
@@ -1604,13 +1619,16 @@ export function createGatewayLLMClient(
                 const credentialChanged =
                   !!freshCred && freshCred.value !== cred.value;
                 if (credentialChanged && attempt === 0) {
-                  // Credential changed — rebuild request and retry once
+                  // Credential changed — adopt it as the current credential so
+                  // any subsequent rebuild (e.g. the temperature-strip retry)
+                  // uses the fresh key, then rebuild request and retry once.
+                  activeCred = freshCred;
                   log.info(
                     `worker auth error ${response.status}, credential refreshed — retrying: ${text.slice(0, 200)}`,
                   );
                   req = await buildWorkerRequest(
                     target,
-                    freshCred,
+                    activeCred,
                     model,
                     system,
                     user,
@@ -1745,11 +1763,10 @@ export function createGatewayLLMClient(
                   isTemperatureUnsupported400(text)
                 ) {
                   temperatureStripped = true;
-                  markTemperatureUnsupported(model);
                   effectiveTemperature = undefined;
                   req = await buildWorkerRequest(
                     target,
-                    cred,
+                    activeCred,
                     model,
                     system,
                     user,
@@ -1758,6 +1775,16 @@ export function createGatewayLLMClient(
                     effectiveTemperature,
                     factoryVertexProject,
                   );
+                  // Rebuilding restores the freshly-built header set, which
+                  // resurrects a beta we may have already stripped at runtime
+                  // (the upfront capability filter KEEPS context-1m for a
+                  // 1M-capable model like sonnet-5, so a subscription-not-
+                  // entitled beta 400 is only cured by the runtime strip). If a
+                  // model needed BOTH fixes, re-apply the beta strip so the
+                  // temperature rebuild doesn't regress it into a beta-400 loop.
+                  if (betaStripped) {
+                    req = { ...req, headers: stripBetaHeaders(req.headers) };
+                  }
                   log.warn(
                     `worker 400 reports temperature is unsupported — retrying once without the temperature param ` +
                       `(model=${model.providerID}/${model.modelID}, worker=${opts?.workerID ?? "unknown"}): ${text.slice(0, 160)}`,
