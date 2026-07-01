@@ -1007,16 +1007,20 @@ describe("family-based worker resolution", () => {
             cost: { input: 5, output: 25, cache_read: 0.5 },
             limit: LIMIT,
           },
-          "claude-sonnet-4-6": {
-            id: "claude-sonnet-4-6",
+          // Hardcoded WORKER_DEFAULTS offline fallback id.
+          "claude-sonnet-5": {
+            id: "claude-sonnet-5",
             family: "claude-sonnet",
             release_date: "2026-02-17",
             cost: { input: 3, output: 15, cache_read: 0.3 },
             limit: LIMIT,
           },
           // Newer sonnet generation — this is what the worker should track.
-          "claude-sonnet-5": {
-            id: "claude-sonnet-5",
+          // Deliberately DISTINCT from the hardcoded fallback (claude-sonnet-5)
+          // so a disabled/cold resolver (which returns the fallback) fails this
+          // assertion instead of coincidentally passing.
+          "claude-sonnet-6": {
+            id: "claude-sonnet-6",
             family: "claude-sonnet",
             release_date: "2026-06-01",
             cost: { input: 3, output: 15, cache_read: 0.3 },
@@ -1040,8 +1044,9 @@ describe("family-based worker resolution", () => {
     });
 
     expect(result?.providerID).toBe("anthropic");
-    // Newest in the claude-sonnet family, NOT the hardcoded claude-sonnet-4-6.
-    expect(result?.modelID).toBe("claude-sonnet-5");
+    // Newest in the claude-sonnet family (claude-sonnet-6), NOT the hardcoded
+    // fallback claude-sonnet-5 — proving the resolver read models.dev.
+    expect(result?.modelID).toBe("claude-sonnet-6");
   });
 
   test("codex: tracks the newest MINI in family, never upgrades to the full codex (codex caveat)", async () => {
@@ -1088,6 +1093,17 @@ describe("family-based worker resolution", () => {
             cost: { input: 0.3, output: 2.5, cache_read: 0.03 },
             limit: LIMIT,
           },
+          // NEWEST full codex overall (newer than the newest mini) and still
+          // cheaper than the $5 session. Only the cheap-variant filter keeps the
+          // worker off this tier — without it, "newest in family" would pick
+          // this. Guards SHOULD-FIX #2: makes the codex-caveat test non-vacuous.
+          "gpt-5.6-codex": {
+            id: "gpt-5.6-codex",
+            family: "gpt-codex",
+            release_date: "2026-08-01",
+            cost: { input: 1.25, output: 10, cache_read: 0.125 },
+            limit: LIMIT,
+          },
         },
       },
     });
@@ -1098,8 +1114,8 @@ describe("family-based worker resolution", () => {
     });
 
     expect(result?.providerID).toBe("openai-codex");
-    // Newest cheap-variant in gpt-codex: NOT the newer full gpt-5.3-codex,
-    // NOT the stale hardcoded gpt-5.1-codex-mini.
+    // Newest cheap-variant in gpt-codex: NOT the NEWER full gpt-5.6-codex,
+    // NOT the older full gpt-5.3-codex, NOT the stale hardcoded gpt-5.1-codex-mini.
     expect(result?.modelID).toBe("gpt-5.4-codex-mini");
   });
 
@@ -1145,6 +1161,94 @@ describe("family-based worker resolution", () => {
     // sonnet-5 is newer but pricier than the $2 session → rejected by the
     // cost guard; the older but cheaper sonnet-4-6 wins.
     expect(result?.modelID).toBe("claude-sonnet-4-6");
+  });
+
+  test("cost guard: a NEWER family member with UNKNOWN pricing is skipped for a known-cheap older one", async () => {
+    // A member with no cost.input cannot be proven to clear the price cap, so it
+    // must not be selected over a known-cheap sibling (guards NIT #3 — an
+    // unknown-price member must never bypass "never pricier than session").
+    await warmCache({
+      anthropic: {
+        api: "https://api.anthropic.com/v1",
+        models: {
+          "claude-opus-4-6": {
+            id: "claude-opus-4-6",
+            family: "claude-opus",
+            release_date: "2026-01-05",
+            cost: { input: 5, output: 25, cache_read: 0.5 },
+            limit: LIMIT,
+          },
+          // Older, but with KNOWN cheap pricing.
+          "claude-sonnet-5": {
+            id: "claude-sonnet-5",
+            family: "claude-sonnet",
+            release_date: "2026-02-17",
+            cost: { input: 3, output: 15, cache_read: 0.3 },
+            limit: LIMIT,
+          },
+          // NEWER, but pricing is UNKNOWN (no cost field) → must be skipped.
+          "claude-sonnet-6": {
+            id: "claude-sonnet-6",
+            family: "claude-sonnet",
+            release_date: "2026-06-01",
+            limit: LIMIT,
+          },
+        },
+      },
+    });
+
+    const result = getWorkerModel({
+      providerID: "anthropic",
+      model: "claude-opus-4-6",
+    });
+
+    expect(result?.providerID).toBe("anthropic");
+    // The unknown-price claude-sonnet-6 is skipped; the known-cheap
+    // claude-sonnet-5 wins even though it is older.
+    expect(result?.modelID).toBe("claude-sonnet-5");
+  });
+
+  test("tie-break: same release_date picks the numerically newer generation (-10 > -9)", async () => {
+    // Two same-family members share a release_date; the id tie-break must be
+    // numeric-aware so "claude-sonnet-4-10" beats "claude-sonnet-4-9" (plain
+    // string compare would wrongly pick -9). Guards NIT #4.
+    await warmCache({
+      anthropic: {
+        api: "https://api.anthropic.com/v1",
+        models: {
+          "claude-opus-4-6": {
+            id: "claude-opus-4-6",
+            family: "claude-opus",
+            release_date: "2026-01-05",
+            cost: { input: 5, output: 25, cache_read: 0.5 },
+            limit: LIMIT,
+          },
+          "claude-sonnet-4-9": {
+            id: "claude-sonnet-4-9",
+            family: "claude-sonnet",
+            release_date: "2026-05-01",
+            cost: { input: 3, output: 15, cache_read: 0.3 },
+            limit: LIMIT,
+          },
+          "claude-sonnet-4-10": {
+            id: "claude-sonnet-4-10",
+            family: "claude-sonnet",
+            release_date: "2026-05-01",
+            cost: { input: 3, output: 15, cache_read: 0.3 },
+            limit: LIMIT,
+          },
+        },
+      },
+    });
+
+    const result = getWorkerModel({
+      providerID: "anthropic",
+      model: "claude-opus-4-6",
+    });
+
+    expect(result?.providerID).toBe("anthropic");
+    // Numeric-aware tie-break: -10 is newer than -9 despite string ordering.
+    expect(result?.modelID).toBe("claude-sonnet-4-10");
   });
 
   test("offline fallback: with no models.dev data, uses the hardcoded WORKER_DEFAULTS id", async () => {

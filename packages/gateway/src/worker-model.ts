@@ -476,7 +476,8 @@ function findCheaperSameProviderModel(
   if (!cheapestId) return undefined;
 
   // Pass 2: within the cheapest family, prefer the newest member that is still
-  // cheaper than the session (release_date desc, then id desc tie-break).
+  // cheaper than the session (release_date desc, then numeric-aware id desc so
+  // "-10" sorts after "-9").
   let resolvedId = cheapestId;
   if (cheapestFamily) {
     let bestDate = cachedModelData.get(cheapestId)?.release_date ?? "";
@@ -488,7 +489,11 @@ function findCheaperSameProviderModel(
         continue;
       }
       const date = entry.release_date ?? "";
-      if (date > bestDate || (date === bestDate && modelId > resolvedId)) {
+      if (
+        date > bestDate ||
+        (date === bestDate &&
+          modelId.localeCompare(resolvedId, "en", { numeric: true }) > 0)
+      ) {
         bestDate = date;
         resolvedId = modelId;
       }
@@ -521,14 +526,16 @@ function findCheaperSameProviderModel(
  *      "gpt-codex" contains both gpt-5.x-codex AND gpt-5.x-codex-mini; only the
  *      mini is a valid worker, so "newest in family" must never upgrade to the
  *      full codex.
- *   4. Costs strictly less than `maxInputCost` ($/M) when pricing is known — a
- *      defensive cost-aware guard so a newer family member can never be pricier
- *      than the session model. Unknown pricing is allowed through (it already
- *      passed the family + cheap-variant filters).
+ *   4. Has KNOWN pricing that costs strictly less than `maxInputCost` ($/M) — a
+ *      cost-aware guard so a worker is never pricier than the session model.
+ *      Members with unknown pricing are skipped: we cannot prove they clear the
+ *      cap, so the caller falls back to the known-cheap hardcoded default rather
+ *      than guessing.
  *
- * Returns the newest qualifying model ID (release_date desc, then id desc as a
- * deterministic tie-break), or undefined when none qualify / the cache is cold
- * — in which case the caller falls back to the hardcoded `WORKER_DEFAULTS` ID.
+ * Returns the newest qualifying model ID (release_date desc, then numeric-aware
+ * id desc as a deterministic tie-break), or undefined when none qualify / the
+ * cache is cold — in which case the caller falls back to the hardcoded
+ * `WORKER_DEFAULTS` ID.
  */
 function resolveNewestInFamily(
   providerID: string,
@@ -545,17 +552,20 @@ function resolveNewestInFamily(
     const entry = cachedModelData.get(id);
     if (!entry || entry.family !== family) continue;
     if (!isCheapVariant(id)) continue;
-    // Cost guard: skip family members priced at/above the session model.
-    // Missing pricing is permitted — it already cleared the cheap-variant gate.
+    // Cost guard: skip family members priced at/above the session model, and
+    // members with unknown pricing — we cannot prove they clear the cap, so we
+    // fall back to the known-cheap hardcoded default instead of guessing.
     const input = entry.cost?.input;
-    if (input != null && input >= maxInputCost) continue;
+    if (input == null || input >= maxInputCost) continue;
 
     // release_date is ISO YYYY-MM-DD, so string comparison is chronological.
+    // Tie-break on id with numeric awareness so "-10" sorts after "-9".
     const date = entry.release_date ?? "";
     if (
       bestId === undefined ||
       date > bestDate ||
-      (date === bestDate && id > bestId)
+      (date === bestDate &&
+        id.localeCompare(bestId, "en", { numeric: true }) > 0)
     ) {
       bestId = id;
       bestDate = date;
