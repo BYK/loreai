@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 import {
   isOomError,
@@ -6,6 +8,7 @@ import {
   isTransformersInferenceDumpLine,
   resolveModelCacheDir,
   shouldHealCorruptModel,
+  TRANSFORMERS_INFERENCE_DUMP_PREFIXES,
 } from "../src/embedding-worker-types";
 
 describe("isCorruptModelError", () => {
@@ -133,6 +136,33 @@ describe("isTransformersInferenceDumpLine", () => {
     "",
   ])("does NOT match unrelated console.error output: %s", (line) => {
     expect(isTransformersInferenceDumpLine(line)).toBe(false);
+  });
+});
+
+describe("TRANSFORMERS_INFERENCE_DUMP_PREFIXES inline copy stays in sync", () => {
+  // embedding-worker.ts inlines a byte-identical copy of these prefixes because
+  // the worker is spawned by Node's native resolver and can't runtime-import
+  // this `.ts` (same constraint as isOomError/isWasmFatalError). The worker
+  // module executes top-level code on import (it throws when parentPort is
+  // absent), so we can't import its value — instead we parse the array literal
+  // out of the source and assert deep equality. This fails CI the moment the
+  // two copies drift, per the reviewer's request on PR #1120.
+  test("worker source literal matches the canonical array", () => {
+    const workerSrc = readFileSync(
+      fileURLToPath(new URL("../src/embedding-worker.ts", import.meta.url)),
+      "utf8",
+    );
+    const block = workerSrc.match(
+      /const TRANSFORMERS_INFERENCE_DUMP_PREFIXES\s*=\s*\[([\s\S]*?)\]/,
+    );
+    expect(
+      block,
+      "inline prefixes array not found in embedding-worker.ts",
+    ).not.toBeNull();
+    const inline = [...(block?.[1] ?? "").matchAll(/"((?:[^"\\]|\\.)*)"/g)].map(
+      (m) => m[1].replace(/\\(.)/g, "$1"),
+    );
+    expect(inline).toEqual([...TRANSFORMERS_INFERENCE_DUMP_PREFIXES]);
   });
 });
 
