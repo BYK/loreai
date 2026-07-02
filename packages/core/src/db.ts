@@ -3282,7 +3282,7 @@ export function loadAllSessionCosts(): Map<string, SessionCostSnapshot> {
               warmup_savings, warmup_cost, warmup_hits, ttl_savings, ttl_hits, batch_savings,
               avoided_compactions, avoided_compaction_cost
        FROM session_state
-       WHERE conversation_turns > 0 OR warmup_savings > 0 OR ttl_savings > 0 OR batch_savings > 0`,
+       WHERE conversation_turns > 0 OR warmup_savings > 0 OR warmup_cost > 0 OR ttl_savings > 0 OR batch_savings > 0`,
     )
     .all() as Array<{
     session_id: string;

@@ -128,6 +128,7 @@ export type HistoricalEstimates = {
       workerCost: number;
       conversationTurns: number;
       warmupSavings: number;
+      warmupCost: number;
       warmupHits: number;
       ttlSavings: number;
       ttlHits: number;
@@ -1231,6 +1232,7 @@ export function computeHistoricalEstimates(
           workerCost: persisted.workerCost,
           conversationTurns: persisted.conversationTurns,
           warmupSavings: persisted.warmupSavings,
+          warmupCost: persisted.warmupCost,
           warmupHits: persisted.warmupHits,
           ttlSavings: persisted.ttlSavings,
           ttlHits: persisted.ttlHits,

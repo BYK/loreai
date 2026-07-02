@@ -2841,10 +2841,13 @@ function pageCosts(): string {
     // Savings breakdown (compact list)
     if (liveTotalSavings !== 0) {
       const savingsItems: string[] = [];
+      // Gross warming savings (consistent with the other gross savings items);
+      // the warming cost is part of the worker overhead already netted into the
+      // "Net savings/overhead" header, and is noted here so profitability is
+      // visible without double-subtracting.
       if (liveWarmupSavings > 0 || liveWarmupCost > 0)
         savingsItems.push(
-          `Cache warming: net ${formatUSD(liveWarmupSavings - liveWarmupCost)} ` +
-            `(${formatUSD(liveWarmupSavings)} saved &minus; ${formatUSD(liveWarmupCost)} cost)`,
+          `Cache warming: ${formatUSD(liveWarmupSavings)} saved (cost ${formatUSD(liveWarmupCost)} in overhead)`,
         );
       if (liveTtlSavings > 0)
         savingsItems.push(`1h TTL: ${formatUSD(liveTtlSavings)}`);
@@ -2912,10 +2915,17 @@ function pageCosts(): string {
     if (hist.totalWorkerCost !== hist.distillationCost) {
       body += ` <span style="color:var(--fg3);font-size:0.85em">(distillation-only estimate: ${formatUSD(hist.distillationCost)})</span>`;
     }
-    body += `</td></tr>
-        <tr class="section-header"><td colspan="2" style="padding-top:0.8em"><strong>Estimated Savings</strong></td></tr>
+    body += `</td></tr>`;
+    // Break out the cache-warmup cost as a visible component of worker overhead.
+    // It is ALREADY included in totalWorkerCost above (so the net below is not
+    // double-subtracted) — this row just surfaces how much of the overhead is
+    // warming, paired with the gross warming savings in the Savings section.
+    if (hist.warmupCost > 0) {
+      body += `<tr><td style="padding-left:1.4em;color:var(--fg3);font-size:0.9em">— incl. cache warming</td><td style="color:var(--fg3);font-size:0.9em">${formatUSD(hist.warmupCost)}</td></tr>`;
+    }
+    body += `<tr class="section-header"><td colspan="2" style="padding-top:0.8em"><strong>Estimated Savings</strong></td></tr>
         <tr><td>Avoided compactions</td><td>${formatUSD(hist.avoidedCompactionCost)} <span style="color:var(--fg3);font-size:0.85em">(&times;${hist.avoidedCompactions})</span></td></tr>
-        ${hist.warmupSavings > 0 || hist.warmupCost > 0 ? `<tr><td>Cache warming (net)</td><td><strong style="color:${hist.warmupSavings - hist.warmupCost >= 0 ? "#10b981" : "#e06c75"}">${formatUSD(hist.warmupSavings - hist.warmupCost)}</strong> <span style="color:var(--fg3);font-size:0.85em">(${formatUSD(hist.warmupSavings)} saved &minus; ${formatUSD(hist.warmupCost)} cost, ${hist.warmupHits} hits)</span></td></tr>` : ""}
+        ${hist.warmupSavings > 0 ? `<tr><td>Cache warming</td><td>${formatUSD(hist.warmupSavings)} <span style="color:var(--fg3);font-size:0.85em">(${hist.warmupHits} hits, cost ${formatUSD(hist.warmupCost)} above &rarr; net ${formatUSD(hist.warmupSavings - hist.warmupCost)})</span></td></tr>` : ""}
         ${hist.ttlSavings > 0 ? `<tr><td>1h TTL extension</td><td>${formatUSD(hist.ttlSavings)} <span style="color:var(--fg3);font-size:0.85em">(${hist.ttlHits} hits)</span></td></tr>` : ""}
         ${hist.batchSavings > 0 ? `<tr><td>Batch API discount</td><td>${formatUSD(hist.batchSavings)}</td></tr>` : ""}
         <tr style="border-top:1px solid var(--border)"><td><strong>${histNetSavings >= 0 ? "Net estimated savings" : "Net estimated overhead"}</strong></td><td><strong style="color:${histNetSavings >= 0 ? "#10b981" : "#e06c75"}">${histNetSavings >= 0 ? formatUSD(histNetSavings) : formatUSD(Math.abs(histNetSavings))}</strong></td></tr>
