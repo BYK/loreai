@@ -217,6 +217,48 @@ describe("commandSetup — Pi", () => {
   });
 });
 
+describe("commandSetup — Hermes", () => {
+  const hermesPath = () => join(home, ".hermes", ".env");
+  let origHermesHome: string | undefined;
+
+  beforeEach(() => {
+    // hermesEnvPath honors HERMES_HOME; keep the test on the temp HOME's
+    // ~/.hermes rather than a stray override from the environment.
+    origHermesHome = process.env.HERMES_HOME;
+    delete process.env.HERMES_HOME;
+  });
+  afterEach(() => {
+    if (origHermesHome === undefined) delete process.env.HERMES_HOME;
+    else process.env.HERMES_HOME = origHermesHome;
+  });
+
+  it("writes the env pair with a backup block and undoes it", async () => {
+    // Seed a pre-existing OPENAI_BASE_URL + an unrelated secret.
+    mkdirSync(join(home, ".hermes"), { recursive: true });
+    writeFileSync(
+      hermesPath(),
+      "NOUS_API_KEY=sk-abc\nOPENAI_BASE_URL=https://nous/v1\n",
+    );
+
+    await commandSetup(["hermes"], { port: 3299 });
+
+    const env = readFileSync(hermesPath(), "utf8");
+    expect(env).toContain("OPENAI_BASE_URL=http://127.0.0.1:3299/v1");
+    expect(env).toContain("HERMES_INFERENCE_PROVIDER=custom");
+    expect(env).toContain("lore setup backup");
+    expect(env).toContain("NOUS_API_KEY=sk-abc"); // preserved
+
+    await commandSetup(["undo", "hermes"], {});
+
+    const restored = readFileSync(hermesPath(), "utf8");
+    // Prior base URL restored; the provider key (unset before) removed.
+    expect(restored).toContain("OPENAI_BASE_URL=https://nous/v1");
+    expect(restored).not.toContain("HERMES_INFERENCE_PROVIDER");
+    expect(restored).toContain("NOUS_API_KEY=sk-abc");
+    expect(restored).not.toContain("lore setup backup");
+  });
+});
+
 describe("commandSetup — undo with nothing to restore", () => {
   it("reports nothing to undo across all apps", async () => {
     await commandSetup(["undo"], {});

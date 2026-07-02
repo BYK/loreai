@@ -411,3 +411,184 @@ function setTomlTopLevelKeyRaw(
   const beforeStr = before.length > 0 ? `${before.join("\n")}\n` : "";
   return `${beforeStr}${newLine}\n\n${after.join("\n")}`;
 }
+
+// ---------------------------------------------------------------------------
+// dotenv backup (Hermes) — `#`-commented block at the top of `~/.hermes/.env`
+// ---------------------------------------------------------------------------
+//
+// Hermes has no config-file base-URL setting the gateway can write; it reads
+// `OPENAI_BASE_URL` + `HERMES_INFERENCE_PROVIDER` from `~/.hermes/.env` (loaded
+// via python-dotenv at startup). `.env` is a flat `KEY=value` file with `#`
+// comments and no `[section]` nesting, so this mirrors the Codex TOML backup
+// (commented block + revert-only-if-unchanged) minus the section handling and
+// with bare (unquoted) values written as `KEY=value`.
+
+const ENV_BACKUP_HEADER =
+  "# lore setup backup — original values (run `lore setup undo hermes` to restore):";
+const ENV_BACKUP_FOOTER = "# end lore setup backup";
+const ENV_UNSET = "(was unset)";
+const ENV_LORE_SET = " # lore-set ";
+
+/** Match `KEY=`, `KEY =`, or `export KEY=` (dotenv-style), capturing nothing. */
+function envAssignPattern(key: string): RegExp {
+  return new RegExp(
+    `^\\s*(?:export\\s+)?${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*=`,
+  );
+}
+
+/** Split off a single trailing newline so we don't carry an empty last line. */
+function envLines(content: string): string[] {
+  const c = content.endsWith("\n") ? content.slice(0, -1) : content;
+  return c === "" ? [] : c.split("\n");
+}
+
+/** Re-join lines to a file body with exactly one trailing newline (or ""). */
+function envJoin(lines: string[]): string {
+  return lines.length ? `${lines.join("\n")}\n` : "";
+}
+
+/** Read a dotenv key's raw value (trimmed), or null if absent/commented. */
+export function getEnvValue(content: string, key: string): string | null {
+  const valuePattern = new RegExp(
+    `^\\s*(?:export\\s+)?${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*=\\s*(.*?)\\s*$`,
+  );
+  for (const line of envLines(content)) {
+    if (/^\s*#/.test(line)) continue;
+    const m = valuePattern.exec(line);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+/** Upsert `KEY=value` (replaces the first live occurrence, else appends). */
+export function setEnvValueRaw(
+  content: string,
+  key: string,
+  value: string,
+): string {
+  const lines = envLines(content);
+  const pattern = envAssignPattern(key);
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*#/.test(lines[i])) continue;
+    if (pattern.test(lines[i])) {
+      lines[i] = `${key}=${value}`;
+      return envJoin(lines);
+    }
+  }
+  lines.push(`${key}=${value}`);
+  return envJoin(lines);
+}
+
+/** Delete every live (non-comment) assignment of `key`. */
+export function deleteEnvKey(content: string, key: string): string {
+  const pattern = envAssignPattern(key);
+  const out = envLines(content).filter(
+    (l) => /^\s*#/.test(l) || !pattern.test(l),
+  );
+  return envJoin(out);
+}
+
+/**
+ * Build the commented `.env` backup block from the *original* content and the
+ * values lore is about to write (`loreValues`: KEY → bare value). Returns null
+ * if a block already exists (preserve the true original) or there are no keys.
+ */
+export function buildEnvBackupBlock(
+  content: string,
+  loreValues: Record<string, string>,
+): string | null {
+  if (content.includes(ENV_BACKUP_HEADER)) return null;
+  const keys = Object.keys(loreValues);
+  if (keys.length === 0) return null;
+  const lines = [ENV_BACKUP_HEADER];
+  for (const key of keys) {
+    const prior = getEnvValue(content, key);
+    const priorPart =
+      prior === null ? `${key} ${ENV_UNSET}` : `${key}=${prior}`;
+    lines.push(`#   ${priorPart}${ENV_LORE_SET}${loreValues[key]}`);
+  }
+  lines.push(ENV_BACKUP_FOOTER);
+  return lines.join("\n");
+}
+
+/** Prepend a backup block to the content (block carries no trailing newline). */
+export function prependEnvBackupBlock(content: string, block: string): string {
+  return content ? `${block}\n${content}` : `${block}\n`;
+}
+
+/**
+ * Restore a Hermes `.env` from its commented backup block. Per recorded key:
+ * revert to the prior value (or delete if originally unset) **only when the
+ * file still holds the value lore wrote** — a value the user changed after
+ * setup is left untouched and reported as skipped. The block is removed only
+ * when every key was reverted.
+ */
+export function restoreEnvBackup(content: string): {
+  content: string;
+  summary: RestoreSummary;
+} {
+  const lines = content.split("\n");
+  const start = lines.findIndex((l) => l.trim() === ENV_BACKUP_HEADER);
+  if (start === -1) {
+    return {
+      content,
+      summary: { hadBackup: false, restored: [], skipped: [] },
+    };
+  }
+  let end = start;
+  while (end < lines.length && lines[end].trim() !== ENV_BACKUP_FOOTER) end++;
+  if (end >= lines.length) {
+    // Footer missing (block hand-edited/corrupted). Refuse to touch the file.
+    return {
+      content,
+      summary: { hadBackup: false, restored: [], skipped: [] },
+    };
+  }
+
+  const restored: string[] = [];
+  const skipped: string[] = [];
+  const entryLines = lines.slice(start + 1, end);
+  let result = content;
+
+  for (const raw of entryLines) {
+    const body = raw.replace(/^#\s*/, "");
+    const sepIdx = body.indexOf(ENV_LORE_SET);
+    if (sepIdx === -1) continue; // not a recognized entry line
+    const priorPart = body.slice(0, sepIdx).trim();
+    const loreValue = body.slice(sepIdx + ENV_LORE_SET.length).trim();
+
+    let key: string;
+    let priorValue: string | null;
+    if (priorPart.endsWith(ENV_UNSET)) {
+      key = priorPart.slice(0, -ENV_UNSET.length).trim();
+      priorValue = null; // was unset → undo should delete it
+    } else {
+      const eq = priorPart.indexOf("=");
+      if (eq <= 0) continue;
+      key = priorPart.slice(0, eq).trim();
+      priorValue = priorPart.slice(eq + 1).trim();
+    }
+
+    // Revert-only-if-unchanged: skip if the user changed the value after setup.
+    if (getEnvValue(result, key) !== loreValue) {
+      skipped.push(key);
+      continue;
+    }
+    result =
+      priorValue === null
+        ? deleteEnvKey(result, key)
+        : setEnvValueRaw(result, key, priorValue);
+    restored.push(key);
+  }
+
+  // Strip the backup block only when everything was reverted.
+  if (skipped.length === 0) {
+    const out = result.split("\n");
+    const s = out.findIndex((l) => l.trim() === ENV_BACKUP_HEADER);
+    let e = s;
+    while (e < out.length && out[e].trim() !== ENV_BACKUP_FOOTER) e++;
+    result = [...out.slice(0, s), ...out.slice(e + 1)].join("\n");
+  }
+
+  return { content: result, summary: { hadBackup: true, restored, skipped } };
+}

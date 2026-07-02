@@ -12,6 +12,12 @@ import {
   buildTomlBackupBlock,
   prependTomlBackupBlock,
   restoreTomlBackup,
+  getEnvValue,
+  setEnvValueRaw,
+  deleteEnvKey,
+  buildEnvBackupBlock,
+  prependEnvBackupBlock,
+  restoreEnvBackup,
 } from "../src/cli/setup-backup";
 
 // ---------------------------------------------------------------------------
@@ -312,5 +318,143 @@ describe("deleteTomlTopLevelKey", () => {
     const out = deleteTomlTopLevelKey(c, "openai_base_url");
     expect(out).not.toContain('openai_base_url = "x"');
     expect(out).toContain('openai_base_url = "nested"');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dotenv primitives (Hermes)
+// ---------------------------------------------------------------------------
+
+describe("getEnvValue", () => {
+  it("reads a bare value and ignores commented lines", () => {
+    const c =
+      "# OPENAI_BASE_URL=commented\nOPENAI_BASE_URL=http://x/v1\nFOO=bar\n";
+    expect(getEnvValue(c, "OPENAI_BASE_URL")).toBe("http://x/v1");
+    expect(getEnvValue(c, "FOO")).toBe("bar");
+  });
+
+  it("handles an `export` prefix and surrounding whitespace", () => {
+    expect(
+      getEnvValue("export OPENAI_BASE_URL = http://x/v1 \n", "OPENAI_BASE_URL"),
+    ).toBe("http://x/v1");
+  });
+
+  it("returns null when the key is absent or only commented", () => {
+    expect(getEnvValue("FOO=bar\n", "OPENAI_BASE_URL")).toBeNull();
+    expect(getEnvValue("# OPENAI_BASE_URL=x\n", "OPENAI_BASE_URL")).toBeNull();
+  });
+});
+
+describe("setEnvValueRaw", () => {
+  it("replaces the first live occurrence in place", () => {
+    const c = "FOO=1\nOPENAI_BASE_URL=old\nBAR=2\n";
+    expect(setEnvValueRaw(c, "OPENAI_BASE_URL", "new")).toBe(
+      "FOO=1\nOPENAI_BASE_URL=new\nBAR=2\n",
+    );
+  });
+
+  it("appends when absent, with exactly one trailing newline", () => {
+    expect(setEnvValueRaw("FOO=1\n", "OPENAI_BASE_URL", "new")).toBe(
+      "FOO=1\nOPENAI_BASE_URL=new\n",
+    );
+    expect(setEnvValueRaw("", "OPENAI_BASE_URL", "new")).toBe(
+      "OPENAI_BASE_URL=new\n",
+    );
+  });
+
+  it("does not touch a commented-out key (appends instead)", () => {
+    expect(
+      setEnvValueRaw("# OPENAI_BASE_URL=old\n", "OPENAI_BASE_URL", "new"),
+    ).toBe("# OPENAI_BASE_URL=old\nOPENAI_BASE_URL=new\n");
+  });
+});
+
+describe("deleteEnvKey", () => {
+  it("removes live assignments but keeps comments", () => {
+    const c = "# OPENAI_BASE_URL=keepme\nOPENAI_BASE_URL=live\nFOO=1\n";
+    expect(deleteEnvKey(c, "OPENAI_BASE_URL")).toBe(
+      "# OPENAI_BASE_URL=keepme\nFOO=1\n",
+    );
+  });
+});
+
+describe("dotenv backup block round-trip", () => {
+  const lore = {
+    OPENAI_BASE_URL: "http://127.0.0.1:3207/v1",
+    HERMES_INFERENCE_PROVIDER: "custom",
+  };
+
+  it("records prior values (or '(was unset)') and restores them", () => {
+    const original =
+      "OPENAI_BASE_URL=https://inference-api.nousresearch.com/v1\nMY_TOKEN=secret\n";
+    const block = buildEnvBackupBlock(original, lore);
+    expect(block).not.toBeNull();
+    // Prior OPENAI_BASE_URL captured; HERMES_INFERENCE_PROVIDER was unset.
+    expect(block).toContain(
+      "OPENAI_BASE_URL=https://inference-api.nousresearch.com/v1 # lore-set http://127.0.0.1:3207/v1",
+    );
+    expect(block).toContain("HERMES_INFERENCE_PROVIDER (was unset)");
+
+    // Apply lore's values under the block (what updateHermesEnv does).
+    let content = original;
+    for (const [k, v] of Object.entries(lore))
+      content = setEnvValueRaw(content, k, v);
+    content = prependEnvBackupBlock(content, block as string);
+    expect(getEnvValue(content, "OPENAI_BASE_URL")).toBe(
+      "http://127.0.0.1:3207/v1",
+    );
+
+    // Undo: prior URL restored, the unset provider key removed, unrelated var kept.
+    const { content: restored, summary } = restoreEnvBackup(content);
+    expect(summary.hadBackup).toBe(true);
+    expect(summary.restored.sort()).toEqual([
+      "HERMES_INFERENCE_PROVIDER",
+      "OPENAI_BASE_URL",
+    ]);
+    expect(getEnvValue(restored, "OPENAI_BASE_URL")).toBe(
+      "https://inference-api.nousresearch.com/v1",
+    );
+    expect(getEnvValue(restored, "HERMES_INFERENCE_PROVIDER")).toBeNull();
+    expect(restored).toContain("MY_TOKEN=secret");
+    expect(restored).not.toContain("lore setup backup");
+  });
+
+  it("skips a value the user changed after setup and keeps the block", () => {
+    const block = buildEnvBackupBlock("", lore) as string;
+    let content = "";
+    for (const [k, v] of Object.entries(lore))
+      content = setEnvValueRaw(content, k, v);
+    content = prependEnvBackupBlock(content, block);
+    // User edits OPENAI_BASE_URL after setup.
+    content = setEnvValueRaw(
+      content,
+      "OPENAI_BASE_URL",
+      "http://user-changed/v1",
+    );
+
+    const { content: restored, summary } = restoreEnvBackup(content);
+    expect(summary.skipped).toContain("OPENAI_BASE_URL");
+    expect(summary.restored).toContain("HERMES_INFERENCE_PROVIDER");
+    // User's change is preserved; block retained (not everything reverted).
+    expect(getEnvValue(restored, "OPENAI_BASE_URL")).toBe(
+      "http://user-changed/v1",
+    );
+    expect(restored).toContain("lore setup backup");
+  });
+
+  it("returns null when a block already exists (preserve the true original)", () => {
+    const withBlock = prependEnvBackupBlock(
+      "OPENAI_BASE_URL=http://x/v1\n",
+      buildEnvBackupBlock("", lore) as string,
+    );
+    expect(buildEnvBackupBlock(withBlock, lore)).toBeNull();
+  });
+
+  it("refuses to restore a corrupted block (missing footer)", () => {
+    const content =
+      "# lore setup backup — original values (run `lore setup undo hermes` to restore):\n#   FOO (was unset) # lore-set x\nOPENAI_BASE_URL=x\n";
+    const { content: result, summary } = restoreEnvBackup(content);
+    expect(summary.hadBackup).toBe(false);
+    expect(result).toBe(content); // byte-identical — nothing touched
   });
 });

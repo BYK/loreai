@@ -7,6 +7,8 @@ import {
   updateClaudeCodeSettings,
   updatePiModelsConfig,
   piModelsConfigPath,
+  updateHermesEnv,
+  hermesEnvPath,
   opencodePluginSpec,
 } from "../src/cli/setup";
 import { homedir } from "node:os";
@@ -692,6 +694,80 @@ describe("piModelsConfigPath", () => {
     } finally {
       if (saved === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = saved;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// updateHermesEnv
+// ---------------------------------------------------------------------------
+
+describe("updateHermesEnv", () => {
+  // Hermes wants OPENAI_BASE_URL WITH /v1 (the setup writer's baseUrl already
+  // carries it), unlike Claude Code which strips it.
+  const BASE = "http://127.0.0.1:3207/v1";
+
+  test("sets both keys with a backup block on an empty file", () => {
+    const result = updateHermesEnv("", BASE);
+    expect(result).toContain("OPENAI_BASE_URL=http://127.0.0.1:3207/v1");
+    expect(result).toContain("HERMES_INFERENCE_PROVIDER=custom");
+    // Backup block records both as previously unset.
+    expect(result).toContain("lore setup backup");
+    expect(result).toContain("OPENAI_BASE_URL (was unset)");
+    expect(result).toContain("HERMES_INFERENCE_PROVIDER (was unset)");
+    expect(result.endsWith("\n")).toBe(true);
+  });
+
+  test("preserves unrelated vars and comments; records the prior base URL", () => {
+    const original =
+      "# my hermes env\nNOUS_API_KEY=sk-abc\nOPENAI_BASE_URL=https://nous/v1\n";
+    const result = updateHermesEnv(original, BASE);
+    expect(result).toContain("NOUS_API_KEY=sk-abc");
+    expect(result).toContain("# my hermes env");
+    expect(result).toContain("OPENAI_BASE_URL=http://127.0.0.1:3207/v1");
+    // Prior URL captured in the backup block for undo.
+    expect(result).toContain(
+      "OPENAI_BASE_URL=https://nous/v1 # lore-set http://127.0.0.1:3207/v1",
+    );
+    // Only one live OPENAI_BASE_URL assignment remains (the lore one).
+    const live = result
+      .split("\n")
+      .filter((l) => /^\s*OPENAI_BASE_URL=/.test(l));
+    expect(live).toEqual(["OPENAI_BASE_URL=http://127.0.0.1:3207/v1"]);
+  });
+
+  test("is idempotent (no second backup block, same output)", () => {
+    const first = updateHermesEnv("", BASE);
+    const second = updateHermesEnv(first, BASE);
+    expect(second).toBe(first);
+    // Exactly one backup block (the footer appears once per block).
+    expect(second.match(/# end lore setup backup/g)?.length).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hermesEnvPath
+// ---------------------------------------------------------------------------
+
+describe("hermesEnvPath", () => {
+  test("defaults to ~/.hermes/.env", () => {
+    const saved = process.env.HERMES_HOME;
+    delete process.env.HERMES_HOME;
+    try {
+      expect(hermesEnvPath()).toBe(join(homedir(), ".hermes", ".env"));
+    } finally {
+      if (saved !== undefined) process.env.HERMES_HOME = saved;
+    }
+  });
+
+  test("honors HERMES_HOME", () => {
+    const saved = process.env.HERMES_HOME;
+    process.env.HERMES_HOME = "/custom/hermes";
+    try {
+      expect(hermesEnvPath()).toBe("/custom/hermes/.env");
+    } finally {
+      if (saved === undefined) delete process.env.HERMES_HOME;
+      else process.env.HERMES_HOME = saved;
     }
   });
 });

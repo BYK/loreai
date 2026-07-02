@@ -23,6 +23,7 @@ let home: string;
 let origHome: string | undefined;
 let origXdg: string | undefined;
 let origPiDir: string | undefined;
+let origHermesHome: string | undefined;
 let logSpy: MockInstance;
 let errSpy: MockInstance;
 
@@ -36,12 +37,15 @@ beforeEach(() => {
   origHome = process.env.HOME;
   origXdg = process.env.XDG_DATA_HOME;
   origPiDir = process.env.PI_CODING_AGENT_DIR;
+  origHermesHome = process.env.HERMES_HOME;
   home = mkdtempSync(join(tmpdir(), "lore-doctor-"));
   process.env.HOME = home;
   process.env.XDG_DATA_HOME = join(home, "data");
-  // Pin Pi's agent dir under the temp HOME so the inventory stays hermetic
-  // regardless of a stray PI_CODING_AGENT_DIR in the runner's environment.
+  // Pin Pi's agent dir and Hermes's home under the temp HOME so the inventory
+  // stays hermetic regardless of stray PI_CODING_AGENT_DIR / HERMES_HOME in the
+  // runner's environment.
   process.env.PI_CODING_AGENT_DIR = join(home, ".pi", "agent");
+  process.env.HERMES_HOME = join(home, ".hermes");
   logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
   errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -55,6 +59,8 @@ afterEach(() => {
   else process.env.XDG_DATA_HOME = origXdg;
   if (origPiDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = origPiDir;
+  if (origHermesHome === undefined) delete process.env.HERMES_HOME;
+  else process.env.HERMES_HOME = origHermesHome;
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -337,14 +343,15 @@ describe("formatFinding", () => {
 });
 
 describe("collectInventory (integration)", () => {
-  it("returns all-four-apps inventory with missing files on a clean HOME", () => {
+  it("returns all-five-apps inventory with missing files on a clean HOME", () => {
     const all = collectInventory();
-    expect(all).toHaveLength(4);
+    expect(all).toHaveLength(5);
     expect(all.map((i) => i.app)).toEqual([
       "Claude Code",
       "Codex",
       "OpenCode",
       "Pi",
+      "Hermes",
     ]);
     for (const inv of all) {
       expect(inv.fileExists).toBe(false);

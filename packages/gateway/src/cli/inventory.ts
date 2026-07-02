@@ -10,12 +10,13 @@ import { existsSync, readFileSync } from "node:fs";
 import {
   claudeCodeSettingsPath,
   codexConfigPath,
+  hermesEnvPath,
   opencodeConfigPath,
   piModelsConfigPath,
   readJsonConfig,
 } from "./setup";
 import { getPath, LORE_BACKUP_KEY } from "./setup-backup";
-import { getTomlTopLevelValue } from "./setup-backup";
+import { getEnvValue, getTomlTopLevelValue } from "./setup-backup";
 import { readPortFile } from "../portfile";
 import { probeGateway } from "./start";
 import { VERSION } from "./version";
@@ -245,6 +246,27 @@ export function collectPiInventory(): AppInventory {
   return { app: "Pi", file, fileExists, rows, hasBackup };
 }
 
+/** Collect inventory for Hermes (dotenv). Reads `~/.hermes/.env`. */
+export function collectHermesInventory(): AppInventory {
+  const file = hermesEnvPath();
+  const fileExists = existsSync(file);
+  const rows: InventoryRow[] = [];
+  let hasBackup = false;
+  if (fileExists) {
+    const content = readFileSync(file, "utf8");
+    hasBackup = content.includes("lore setup backup");
+    const url = getEnvValue(content, "OPENAI_BASE_URL");
+    rows.push({
+      app: "Hermes",
+      file,
+      fileExists,
+      key: "OPENAI_BASE_URL",
+      routing: url === null ? { kind: "unset" } : classifyRoutingValue(url),
+    });
+  }
+  return { app: "Hermes", file, fileExists, rows, hasBackup };
+}
+
 /** Collect inventory for all supported apps. */
 export function collectInventory(): AppInventory[] {
   return [
@@ -252,6 +274,7 @@ export function collectInventory(): AppInventory[] {
     collectCodexInventory(),
     collectOpencodeInventory(),
     collectPiInventory(),
+    collectHermesInventory(),
   ];
 }
 

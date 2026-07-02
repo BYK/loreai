@@ -28,6 +28,10 @@ import {
   buildTomlBackupBlock,
   prependTomlBackupBlock,
   restoreTomlBackup,
+  buildEnvBackupBlock,
+  prependEnvBackupBlock,
+  restoreEnvBackup,
+  setEnvValueRaw,
   type RestoreSummary,
 } from "./setup-backup";
 
@@ -110,6 +114,16 @@ const SUPPORTED_APPS: AppSetup[] = [
     // No Lore plugin for Claude Code — Anthropic controls the API surface
     // and there's no plugin host. The ANTHROPIC_BASE_URL env var is the
     // only integration point.
+  },
+  {
+    agentName: "hermes",
+    displayName: "Hermes Agent",
+    run: (baseUrl) => setupHermes(baseUrl),
+    undo: undoHermes,
+    // No Lore plugin registered here — Hermes reads `OPENAI_BASE_URL` +
+    // `HERMES_INFERENCE_PROVIDER` from `~/.hermes/.env` (python-dotenv) at
+    // launch. That env pair is the whole integration; the `lore-hermes`
+    // plugin is a separate `pip install` concern.
   },
   {
     agentName: "pi",
@@ -956,6 +970,78 @@ function setupPi(baseUrl: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// Hermes setup
+// ---------------------------------------------------------------------------
+
+/**
+ * Path to Hermes's dotenv file.
+ *
+ * Hermes loads `${HERMES_HOME}/.env` (default `~/.hermes`) via python-dotenv at
+ * startup (`load_hermes_dotenv`), so this is where a persistent gateway
+ * redirect belongs. We honor `HERMES_HOME` for relocated installs.
+ */
+export function hermesEnvPath(): string {
+  const home = process.env.HERMES_HOME || join(homedir(), ".hermes");
+  return join(home, ".env");
+}
+
+/**
+ * Rewrite Hermes's `.env` to route through the gateway. Sets `OPENAI_BASE_URL`
+ * (the gateway URL, WITH `/v1` — Hermes speaks the OpenAI-compatible wire
+ * format) and `HERMES_INFERENCE_PROVIDER=custom` so Hermes picks up the custom
+ * endpoint. Mirrors exactly what `lore run hermes` injects (see `agents.ts`),
+ * but persisted so a standalone `hermes` routes correctly without `lore run`.
+ *
+ * Prepends a `#`-commented backup block recording prior values (for
+ * `lore setup undo hermes`), and upserts the two keys in place — preserving
+ * every other line (comments, credentials, unrelated vars). Idempotent.
+ */
+export function updateHermesEnv(content: string, baseUrl: string): string {
+  const loreValues: Record<string, string> = {
+    // `baseUrl` already carries `/v1` (normalizeBaseUrl contract), which is
+    // exactly what Hermes wants for OPENAI_BASE_URL.
+    OPENAI_BASE_URL: baseUrl,
+    HERMES_INFERENCE_PROVIDER: "custom",
+  };
+  // Build the backup from the ORIGINAL content (prior values) before we edit.
+  const block = buildEnvBackupBlock(content, loreValues);
+  let result = content;
+  for (const [key, value] of Object.entries(loreValues)) {
+    result = setEnvValueRaw(result, key, value);
+  }
+  return block ? prependEnvBackupBlock(result, block) : result;
+}
+
+function setupHermes(baseUrl: string): void {
+  const configPath = hermesEnvPath();
+  mkdirSync(dirname(configPath), { recursive: true });
+
+  let content = "";
+  try {
+    content = readFileSync(configPath, "utf8");
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+  }
+
+  const updated = updateHermesEnv(content, baseUrl);
+  writeFileSync(configPath, updated, "utf8");
+
+  console.log(`[lore] Hermes Agent configured to use Lore gateway.`);
+  console.log(`[lore]   OPENAI_BASE_URL=${baseUrl}`);
+  console.log(
+    `[lore]   HERMES_INFERENCE_PROVIDER=custom (routes to the gateway endpoint)`,
+  );
+  console.log(`[lore]   Config: ${configPath}`);
+  console.log(`[lore]`);
+  console.log(
+    `[lore] Note: a named model.provider in ~/.hermes/config.yaml overrides`,
+  );
+  console.log(
+    `[lore] these env vars — set provider: custom there too if you use one.`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Undo (`lore setup undo [app]`)
 // ---------------------------------------------------------------------------
 
@@ -979,6 +1065,22 @@ function undoOpencode(): RestoreSummary {
 
 function undoPi(): RestoreSummary {
   return undoJsonApp(piModelsConfigPath());
+}
+
+function undoHermes(): RestoreSummary {
+  const configPath = hermesEnvPath();
+  let content: string;
+  try {
+    content = readFileSync(configPath, "utf8");
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+      return { hadBackup: false, restored: [], skipped: [] };
+    }
+    throw e;
+  }
+  const { content: restored, summary } = restoreEnvBackup(content);
+  if (summary.hadBackup) writeFileSync(configPath, restored, "utf8");
+  return summary;
 }
 
 function undoCodex(): RestoreSummary {
