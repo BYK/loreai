@@ -2838,8 +2838,10 @@ function pageCosts(): string {
       });
     }
 
-    // Savings breakdown (compact list)
-    if (liveTotalSavings !== 0) {
+    // Savings breakdown (compact list). Also render when the only signal is a
+    // warming COST (net exactly zero but money was spent) so warming spend is
+    // never hidden — matches the historical table's behavior.
+    if (liveTotalSavings !== 0 || liveWarmupCost > 0) {
       const savingsItems: string[] = [];
       // Gross warming savings (consistent with the other gross savings items);
       // the warming cost is part of the worker overhead already netted into the
