@@ -591,7 +591,8 @@ export function startIdleScheduler(
       if (isCircuitBreakerTripped(warmupBucketKey(state), now)) continue;
 
       const blendedHist = blendedHistogramForSession(state);
-      if (!shouldWarm(state, profile, blendedHist, now)) continue;
+      if (!shouldWarm(state, profile, blendedHist, now, warmingGloballyEnabled))
+        continue;
 
       warmupInProgress.add(sessionID);
       executeWarmup(state, profile, config.upstreamExtraHeaders)

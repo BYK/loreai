@@ -2472,10 +2472,12 @@ function pageWarming(): string {
   const activeSessions = getActiveSessions();
   const cbSummary = getCircuitBreakerSummary();
 
-  // Build warming snapshots once — used for both stat cards and table
+  // Build warming snapshots once — used for both stat cards and table.
+  // Pass the already-resolved warmingOn so the snapshot builder doesn't re-read
+  // the global warming-enabled flag from KV once per session (N+1).
   const snapshotMap = new Map<string, WarmingSnapshot>();
   for (const [sid, state] of activeSessions) {
-    snapshotMap.set(sid, computeWarmingSnapshot(state));
+    snapshotMap.set(sid, computeWarmingSnapshot(state, Date.now(), warmingOn));
   }
 
   // Build unified rows (shared with Costs page)
@@ -2895,9 +2897,14 @@ function pageCosts(): string {
 
     // Per-session table (unified: cost + warming columns)
     const activeSessions = getActiveSessions();
+    // Resolve the global warming-enabled flag once (avoid a per-session KV read).
+    const warmingOn = isWarmingEnabled();
     const snapshotMap = new Map<string, WarmingSnapshot>();
     for (const [sid, state] of activeSessions) {
-      snapshotMap.set(sid, computeWarmingSnapshot(state));
+      snapshotMap.set(
+        sid,
+        computeWarmingSnapshot(state, Date.now(), warmingOn),
+      );
     }
     body += `<h3>Per Session</h3>`;
     body += renderLiveSessionsTable(

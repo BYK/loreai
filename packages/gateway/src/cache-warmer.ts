@@ -1252,6 +1252,10 @@ export function shouldWarm(
   profile: CacheWarmingProfile,
   blendedHist: InterTurnHistogram,
   now: number = Date.now(),
+  // Runtime warming kill-switch. Defaults to a fresh resolve, but per-session
+  // loop callers (idle.ts) pass a value hoisted out of the loop so the KV read
+  // for this global flag happens once, not once per session (N+1).
+  warmingEnabled: boolean = isWarmingEnabled(),
 ): boolean {
   // Per-bucket kill switch — always respected, even with /lore:warm:keep.
   if (isCircuitBreakerTripped(warmupBucketKey(state), now)) return false;
@@ -1263,7 +1267,7 @@ export function shouldWarm(
   const cfg = loreConfig();
   // Runtime-settable (env / KV override / config default) so warming can be
   // disabled globally without a restart — see isWarmingEnabled().
-  if (!isWarmingEnabled()) return false;
+  if (!warmingEnabled) return false;
 
   // No stored body to replay — nothing to warm
   if (!state.cacheAnalytics.lastRequestBody) return false;
@@ -1703,6 +1707,9 @@ export type WarmingSnapshot = {
 export function computeWarmingSnapshot(
   state: SessionState,
   now: number = Date.now(),
+  // See shouldWarm(): loop callers (the dashboard pages) pass a hoisted value
+  // so the global warming-enabled KV read happens once, not once per session.
+  warmingEnabled: boolean = isWarmingEnabled(),
 ): WarmingSnapshot {
   const cfg = loreConfig();
   const idleMs = now - state.lastRequestTime;
@@ -1779,7 +1786,7 @@ export function computeWarmingSnapshot(
       notWarmingReason = "Circuit breaker tripped";
     } else if (state.isSubagent) {
       notWarmingReason = "Sub-agent session (ephemeral)";
-    } else if (!isWarmingEnabled()) {
+    } else if (!warmingEnabled) {
       notWarmingReason = "Warming disabled (config/override)";
     } else if (!state.cacheAnalytics.lastRequestBody) {
       notWarmingReason = "No stored request body";
