@@ -81,13 +81,15 @@ about you, so they are not subject to the same erosion as things Lore inferred.
 ## When two things disagree, you get told, not overruled
 
 Opposing rules are never quietly merged. "Always use tabs" and "always use spaces" are not
-two versions of one fact, and collapsing them would be Lore deciding for you. Both are kept,
-ranked by confidence, and a genuine contradiction is meant to be surfaced for you to settle,
-not resolved behind your back.
+two versions of one fact, and collapsing them would be Lore deciding for you. Both are kept
+and ranked by confidence.
 
-The layer's job here is narrow on purpose: notice the conflict, and hand it to you. Picking a
-winner silently is exactly the kind of decision a memory system should not be making on its
-own.
+A genuine contradiction still needs settling, so Lore looks for these in the background and
+flags the pair for you: on the knowledge dashboard, or from `lore data contradictions`. You
+pick the rule that still holds, or you keep both. Lore never merges them and never deletes the
+losing side on its own. The layer's job here is narrow on purpose: notice the conflict and hand
+it to you. Picking a winner silently is exactly the kind of decision a memory system should not
+be making.
 
 ## Nothing is really deleted
 
