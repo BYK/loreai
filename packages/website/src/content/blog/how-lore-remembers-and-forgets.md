@@ -10,11 +10,19 @@ tags:
   - agents
 ---
 
-The field is converging on an idea: agents should manage their own context. Give the
-model tools to edit its own instructions, let it decide what to keep and what to drop, teach
-it to notice when its own memory is going stale. It is a genuinely interesting bet, and the
-teams chasing it are doing real work. Writing those principles down, out in the open, is a
-good instinct too.
+Everywhere you look, agents are being taught to fix themselves. Self-healing loops,
+self-improving memory, a model that reads back its own transcript, rewrites its own
+instructions, and prunes whatever it decides has gone stale. There is real energy here, and
+some of it genuinely works.
+
+Here is the catch, and it is an old one. Self-correction is the hardest kind. Whatever made a
+mistake is usually the worst-placed thing to catch it, because from the inside the mistake
+still looks like a reasonable call. People hit this constantly, which is why we lean on
+outside help: an editor for the draft you have read too many times, a reviewer for the code
+you are sure is fine, a colleague who remembers you already tried that back in March. The
+whole value is that they are not you. A model sits in the same spot. Once it has written a
+shaky assumption into its own memory, it is not the thing you can count on to go back and
+find the error.
 
 Lore takes a different road to the same destination. You never have to manage memory, and
 neither does the agent. A fixed set of rules, enforced by the layer that sits in the request
@@ -22,6 +30,12 @@ path, makes the call on every turn instead. That distinction matters more than i
 set of principles written *for* an agent is guidance, and it holds only when the agent is
 paying attention. The same principles built *into* the layer are guarantees. They hold
 whether or not anyone is paying attention that turn.
+
+And because that layer sits outside the model, a model swap does not take your memory with
+it. A newer model arrives brilliant and completely unfamiliar with your work, the way a new
+hire does; the layer is the institutional memory already in the room, so the model is useful
+on the first turn instead of the fiftieth. Change the engine as often as you like. The
+assistant, and everything it has learned, stays.
 
 So here are the rules Lore runs on. Not aspirations we hope a cooperative model follows: the
 actual behavior of the layer that touches every token.
@@ -35,6 +49,12 @@ This is the whole reason capture lives in the layer. Memory you have to reach fo
 you will forget to reach for, right at the moment you are heads-down on the actual problem.
 The filing was never the hard part, and it should never be your job. If a rule for managing
 memory depends on you (or the agent) remembering to invoke it, it is already broken.
+
+Getting it back works the same way. When memory only returns because the agent thought to
+call a search tool, the knowledge can be sitting right there and never reach the model,
+because nobody went looking. Lore surfaces what is relevant on its own, and keeps a recall
+tool for when the agent wants to dig deeper, so recall does not hang on the agent's
+discipline on any given turn either.
 
 ## Being surfaced is not being right
 
@@ -97,8 +117,9 @@ the part you replace. The knowledge is the part you keep.
 
 ## Boring on purpose
 
-None of this says self-managing agents are the wrong idea. An agent that edits its own memory
-is an exciting direction, and we are glad people are pushing on it.
+Making a model better at checking itself is worth doing, and we hope it keeps improving. But
+the corrections you can lean on are the ones that do not wait for the model to notice, this
+turn, that it was wrong. Those come from outside it.
 
 Lore's bet is narrower, and honestly a little boring in the way infrastructure should be: the
 rules that decide what stays, what fades, and what gets surfaced ought to hold on every single
