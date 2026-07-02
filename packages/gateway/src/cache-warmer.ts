@@ -2270,6 +2270,14 @@ export type WarmupHitOutcome = {
  * caching). A full-prefix read (read >= refreshTokens) still credits the full
  * refreshTokens, so the common well-behaved case is unchanged.
  *
+ * Residual (unavoidable): Anthropic reports only an AGGREGATE
+ * `cache_read_input_tokens`, not a per-breakpoint split. If the returning turn
+ * reads a small slice of the warmed prefix PLUS a separately-cached block whose
+ * combined total is still <= refreshTokens, the whole read is attributed to the
+ * warmup even though part of it wasn't the warmed prefix. The cap only rules out
+ * over-attribution when the aggregate read EXCEEDS refreshTokens. This is still
+ * strictly closer to reality than crediting the full refreshTokens.
+ *
  * 🔴 Read-confirmation guard (Bug C): a hit is ONLY attributed when the
  * returning turn ACTUALLY READ the warmed cache (`cacheReadTokens > 0`). The
  * warmup refreshes the prefix, but the returning turn can pivot to a different

@@ -4970,9 +4970,9 @@ function postResponse(
             sessionState.lastUpstream?.model ?? req.model,
             sessionState.resolvedConversationTTL ?? "5m",
           );
-          // Record counterfactual savings against the prefix the WARMUP
-          // refreshed — without warming these reads would have been a full
-          // cache write.
+          // Record counterfactual savings = the pro-rata credit
+          // min(returning-turn cache read, prefix the warmup refreshed) —
+          // without warming these reads would have been a full cache write.
           if (outcome.creditedTokens > 0) {
             recordWarmupHit(
               sessionID,
@@ -4984,7 +4984,7 @@ function postResponse(
           log.info(
             `cache-warmer: HIT session=${sessionID.slice(0, 16)} ` +
               `user returned ${(sinceWarmup / 1000).toFixed(0)}s after warmup ` +
-              `(refreshed=${outcome.creditedTokens} tokens)`,
+              `(credited=${outcome.creditedTokens} tokens)`,
           );
         }
       }
