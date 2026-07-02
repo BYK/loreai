@@ -238,8 +238,18 @@ export const AGENTS: AgentDef[] = [
     detect: () => whichSync("hermes"),
     envVars: (url, cwd) => {
       const env: Record<string, string> = {
-        // Hermes uses OPENAI_BASE_URL for custom OpenAI-compatible endpoints.
-        // Force provider to "custom" so Hermes picks up the base URL.
+        // Route Hermes through the gateway. Both keys are undocumented in the
+        // official env-vars reference but verified honored against hermes-agent
+        // 0.18.0 (see #649):
+        //   • OPENAI_BASE_URL — read as the custom OpenAI-compatible base URL
+        //     (auxiliary_client.py os.getenv("OPENAI_BASE_URL")).
+        //   • HERMES_INFERENCE_PROVIDER — selects the provider; resolution
+        //     order is CLI flag > config.yaml `model.provider` > this env var
+        //     > "auto" (cli.py). So "custom" makes a stock Hermes pick up
+        //     OPENAI_BASE_URL, but a named `model.provider` in
+        //     ~/.hermes/config.yaml takes precedence over it.
+        // `lore setup hermes` persists this same pair to ~/.hermes/.env for
+        // standalone (non-`lore run`) launches.
         OPENAI_BASE_URL: `${url}/v1`,
         HERMES_INFERENCE_PROVIDER: "custom",
       };
