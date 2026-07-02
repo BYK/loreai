@@ -883,18 +883,52 @@ function parseDeltaMessage(raw: string): GatewayMessage | null {
  * steady layer-1 session resumes at layer 1. That movement is not a layer
  * change, so the layer comparison alone misses it and the frozen absolute
  * insertAt is replayed into a differently-shaped array, busting the prompt
- * cache. `outOfIdle` captures that case: any compressed-layer (>= 1) turn that
- * came out of idle also resets the delta.
+ * cache. `idleRecompacted` captures that case.
+ *
+ * 🔴 `idleRecompacted` must be TRUE only when the post-idle resume ACTUALLY
+ * recompacted (onIdleResume with `!cacheWarm`, which clears the byte-identity
+ * caches and rebuilds the raw window). A WARM idle resume (`cacheWarm` /
+ * skipCompact, PR #1102) PRESERVES the distilled prefix and raw-window pin
+ * byte-for-byte — the array does NOT reshuffle, so the delta's insertAt is
+ * still valid and re-anchoring it is pure harm: it moves the delta off its
+ * cached position and busts the very warm cache skipCompact was protecting.
+ * Passing raw `lastTurnWasIdle` here (the pre-fix behavior) re-anchored on
+ * every idle resume, which is what produced the observed 100%→9% "dramatic hit
+ * rate drop" busts on large sessions whose returning turn was warm-preserved
+ * (divergence at the delta's OLD index, e.g. messages[349].role, prefixMatch
+ * ~82% — the conversation was intact, only the delta had moved).
  *
  * @internal Exported for tests.
  */
 export function shouldResetDeltaOnCompression(
   prevLayer: number,
   curLayer: number,
-  outOfIdle = false,
+  idleRecompacted = false,
 ): boolean {
   if (curLayer < 1) return false;
-  return curLayer !== prevLayer || outOfIdle;
+  return curLayer !== prevLayer || idleRecompacted;
+}
+
+/**
+ * True when a post-idle resume ACTUALLY recompacted — i.e. reshuffled the
+ * gradient-transformed array — and therefore the durable delta must be
+ * re-anchored. This is the `idleRecompacted` input to
+ * {@link shouldResetDeltaOnCompression}.
+ *
+ * 🔴 A resume reshuffles ONLY when it was NOT cache-warm. When `cacheWarm` is
+ * true (skipCompact — PR #1102), onIdleResume PRESERVES the distilled prefix
+ * and raw-window pin byte-for-byte, so the array is unchanged and the delta's
+ * frozen insertAt is still valid; re-anchoring would move the delta off its
+ * cached position and bust the very warm cache skipCompact was protecting.
+ * Only a `!cacheWarm` resume clears those caches and rebuilds the raw window.
+ *
+ * @internal Exported for tests (guards the `&& !cacheWarm` fix against revert).
+ */
+export function idleResumeReshuffled(
+  lastTurnWasIdle: boolean,
+  cacheWarm: boolean,
+): boolean {
+  return lastTurnWasIdle && !cacheWarm;
 }
 
 /**
@@ -7478,13 +7512,24 @@ async function handleConversationTurn(
   // de-escalating compression), and (2) a POST-IDLE COMPACT, which rebuilds the
   // array (the distilled prefix grows, the raw window is rebuilt) while STAYING
   // at the same layer — a steady layer-1 session resumes at layer 1. The layer
-  // comparison alone misses (2), so `lastTurnWasIdle` covers that same-layer
-  // reshuffle (the false "unsustainable conversation" cache-bust on a tier-0
-  // post-idle session, which #786's layer-only check did not catch).
+  // comparison alone misses (2).
+  //
+  // 🔴 But (2) only reshuffles when the resume ACTUALLY recompacted. A WARM
+  // idle resume (`cacheWarm` / skipCompact — PR #1102) PRESERVES the distilled
+  // prefix and raw-window pin byte-for-byte, so the array does NOT reshuffle
+  // and the delta's insertAt stays valid. Gating on raw `lastTurnWasIdle`
+  // re-anchored the delta on those warm resumes too, moving it off its cached
+  // position and busting the very cache skipCompact was protecting (observed:
+  // 100%→9% drops at the delta's old index on large sessions). So a post-idle
+  // resume counts as a reshuffle ONLY when it was NOT cache-warm.
+  const idleRecompacted = idleResumeReshuffled(
+    sessionState.lastTurnWasIdle ?? false,
+    cacheWarm,
+  );
   const deltaCompressed = shouldResetDeltaOnCompression(
     sessionState.lastDeltaLayer ?? 0,
     result.layer,
-    sessionState.lastTurnWasIdle ?? false,
+    idleRecompacted,
   );
   // On a compressing turn the gradient reshuffled the array; re-anchor the
   // durable delta blocks (preserving content + `mut`) to a fresh tool-pair-safe

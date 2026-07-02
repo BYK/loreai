@@ -36,6 +36,7 @@ import {
   applySessionPromptDeltas,
   removeOrphanedToolResults,
   shouldResetDeltaOnCompression,
+  idleResumeReshuffled,
   reanchorExistingDelta,
   reanchorDeltaOnCompression,
   appendKnowledgePromptDelta,
@@ -179,6 +180,40 @@ describe("shouldResetDeltaOnCompression — layer-transition predicate", () => {
   test("TRUE layer-4 refresh from layer 3 (3,4)", () => {
     expect(typeof shouldResetDeltaOnCompression).toBe("function");
     expect(shouldResetDeltaOnCompression(3, 4)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2b. idleResumeReshuffled — a WARM idle resume must NOT count as a reshuffle
+//     (regression guard for the delta-reanchor cache-bust fix). A warm resume
+//     (skipCompact, PR #1102) preserves the array byte-for-byte, so re-anchoring
+//     the delta there busts the very cache it was protecting (observed 100%→9%
+//     drops at the delta's old index on large sessions).
+// ---------------------------------------------------------------------------
+describe("idleResumeReshuffled — only a NON-warm post-idle resume reshuffles", () => {
+  test("cold recompacting resume (idle + !warm) => reshuffle => re-anchor", () => {
+    expect(idleResumeReshuffled(true, false)).toBe(true);
+  });
+
+  test("🔴 WARM resume (idle + cacheWarm) => NO reshuffle => NO re-anchor", () => {
+    // The fix: a warm/skipCompact resume preserves the caches, so the delta
+    // must stay put. If this ever returns true again, the delta re-anchors on
+    // warm resumes and busts the warm cache (the bug this guards).
+    expect(idleResumeReshuffled(true, true)).toBe(false);
+  });
+
+  test("not an idle resume => never a reshuffle (warm or cold)", () => {
+    expect(idleResumeReshuffled(false, false)).toBe(false);
+    expect(idleResumeReshuffled(false, true)).toBe(false);
+  });
+
+  test("wires into shouldResetDeltaOnCompression: warm same-layer resume does NOT reset", () => {
+    // layer unchanged (1→1) + warm idle resume => idleRecompacted false => no reset.
+    const warmResume = idleResumeReshuffled(true, true);
+    expect(shouldResetDeltaOnCompression(1, 1, warmResume)).toBe(false);
+    // Same session, but the resume actually recompacted => reset.
+    const coldResume = idleResumeReshuffled(true, false);
+    expect(shouldResetDeltaOnCompression(1, 1, coldResume)).toBe(true);
   });
 });
 
