@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import {
   messagesToText,
   truncateToolOutputsInContent,
@@ -12,7 +12,21 @@ import {
   detectAssertions,
   detectToolFailures,
   run,
+  settleBackgroundWork,
 } from "../src/distillation";
+
+// run() does NOT await pattern-echo detection / document embeds when non-urgent
+// (they must not slow the caller). In this file that background work — which
+// mints knowledge via ltm.create() → ensureProject() — can otherwise resolve
+// after a test finishes and vitest restores env / the harness closes the DB,
+// tripping the production-DB guard in ensureProject (issue #885). Draining after
+// every test in THIS file keeps all distillation-originated background work
+// inside the test's temp-DB window. Scoped here (not global setup.ts) because
+// forcing embedding completion mid-suite changes vector-search results in
+// embedding-dependent tests (recall-graph / ltm.forSession).
+afterEach(async () => {
+  await settleBackgroundWork();
+});
 import { distillationUser } from "../src/prompt";
 import * as ltm from "../src/ltm";
 import type * as temporal from "../src/temporal";

@@ -1484,6 +1484,29 @@ export async function vectorSearchAllDistillations(
  * Fire-and-forget — errors are logged, never thrown.
  * The entry remains usable via FTS even if embedding fails.
  */
+// Fire-and-forget document embeds (knowledge, distillation, entity) must not
+// block the write path, so callers don't await them. They are tracked here so
+// tests can drain them at the test boundary via settleDocumentEmbeds(): a
+// promise that resolves AFTER the harness closes/swaps the DB would otherwise
+// write to the wrong DB or log spurious errors (issue #885). No-op in
+// production, which never calls the drain.
+const _docEmbedsInFlight = new Set<Promise<unknown>>();
+function trackDocEmbed(p: Promise<unknown>): void {
+  _docEmbedsInFlight.add(p);
+  void p.finally(() => _docEmbedsInFlight.delete(p));
+}
+
+/**
+ * Await all in-flight fire-and-forget document embeds (knowledge / distillation
+ * / entity). Test-only drain hook — production never calls it. Loops so embeds
+ * spawned while draining (rare) are also awaited.
+ */
+export async function settleDocumentEmbeds(): Promise<void> {
+  while (_docEmbedsInFlight.size > 0) {
+    await Promise.allSettled([..._docEmbedsInFlight]);
+  }
+}
+
 export function embedKnowledgeEntry(
   id: string,
   title: string,
@@ -1491,14 +1514,16 @@ export function embedKnowledgeEntry(
 ): void {
   if (!isAvailable()) return;
   const text = `${title}\n${content}`;
-  embed([text], "document")
-    .then(([vec]) => {
-      storeEmbedding(db(), "knowledge", id, vec);
-    })
-    .catch((err) => {
-      if (err instanceof LocalProviderUnavailableError) return;
-      log.error("embedding failed for knowledge entry", id, ":", err);
-    });
+  trackDocEmbed(
+    embed([text], "document")
+      .then(([vec]) => {
+        storeEmbedding(db(), "knowledge", id, vec);
+      })
+      .catch((err) => {
+        if (err instanceof LocalProviderUnavailableError) return;
+        log.error("embedding failed for knowledge entry", id, ":", err);
+      }),
+  );
 }
 
 /**
@@ -1527,14 +1552,16 @@ export function embedEntity(
   }
   const text = parts.join(" ");
   if (!text) return;
-  embed([text], "document")
-    .then(([vec]) => {
-      storeEmbedding(db(), "entities", id, vec);
-    })
-    .catch((err) => {
-      if (err instanceof LocalProviderUnavailableError) return;
-      log.error("embedding failed for entity", id, ":", err);
-    });
+  trackDocEmbed(
+    embed([text], "document")
+      .then(([vec]) => {
+        storeEmbedding(db(), "entities", id, vec);
+      })
+      .catch((err) => {
+        if (err instanceof LocalProviderUnavailableError) return;
+        log.error("embedding failed for entity", id, ":", err);
+      }),
+  );
 }
 
 /**
@@ -1544,14 +1571,16 @@ export function embedEntity(
  */
 export function embedDistillation(id: string, observations: string): void {
   if (!isAvailable()) return;
-  embed([observations], "document")
-    .then(([vec]) => {
-      storeEmbedding(db(), "distillations", id, vec);
-    })
-    .catch((err) => {
-      if (err instanceof LocalProviderUnavailableError) return;
-      log.error("embedding failed for distillation", id, ":", err);
-    });
+  trackDocEmbed(
+    embed([observations], "document")
+      .then(([vec]) => {
+        storeEmbedding(db(), "distillations", id, vec);
+      })
+      .catch((err) => {
+        if (err instanceof LocalProviderUnavailableError) return;
+        log.error("embedding failed for distillation", id, ":", err);
+      }),
+  );
 }
 
 /**

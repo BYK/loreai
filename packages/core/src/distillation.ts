@@ -31,6 +31,34 @@ export { workerSessionIDs };
 
 type TemporalMessage = temporal.TemporalMessage;
 
+// Non-urgent run() does NOT await pattern-echo detection (it must not slow the
+// caller's response), so the echo promise — which mints knowledge via
+// ltm.create() → ensureProject() — outlives run(). In tests that promise can
+// resolve AFTER the harness restores env / closes the DB, tripping the
+// production-DB guard in ensureProject (issue #885). Track it here so tests can
+// drain it at the test boundary via settleBackgroundWork(). No-op in production.
+const inFlightBackground = new Set<Promise<unknown>>();
+function trackBackground(p: Promise<unknown>): void {
+  const tracked = p.catch((err) => {
+    log.warn("distillation background work failed:", err);
+  });
+  inFlightBackground.add(tracked);
+  void tracked.finally(() => inFlightBackground.delete(tracked));
+}
+
+/**
+ * Await all in-flight fire-and-forget distillation background work (pattern-echo
+ * detection). Test-only drain hook — production never calls it. Also drains any
+ * document embeds spawned by the echo's ltm.create() calls, so no embedding
+ * promise resolves against a torn-down DB either.
+ */
+export async function settleBackgroundWork(): Promise<void> {
+  while (inFlightBackground.size > 0) {
+    await Promise.allSettled([...inFlightBackground]);
+  }
+  await embedding.settleDocumentEmbeds();
+}
+
 /**
  * Compression health ratio: k / √N.
  *
@@ -1169,6 +1197,7 @@ async function distillSegment(input: {
       metadata: input.metadata,
     });
     if (input.urgent) await echoPromise;
+    else trackBackground(echoPromise);
   } else if (embedding.isAvailable()) {
     embedding.embedDistillation(distillId, result.observations);
   }
