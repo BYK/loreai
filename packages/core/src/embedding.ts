@@ -1059,7 +1059,10 @@ class EmbeddingPool implements EmbeddingProvider {
       // honor an explicit config/env ceiling, else default to one worker.
       this.ceiling = configuredEmbedPoolSize() ?? 1;
     } else {
-      this.ceiling = desiredEmbedPoolSize(freemem(), configuredEmbedPoolSize());
+      this.ceiling = desiredEmbedPoolSize(
+        this.liveFreemem(),
+        configuredEmbedPoolSize(),
+      );
     }
   }
 

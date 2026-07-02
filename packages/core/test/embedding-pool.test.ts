@@ -96,13 +96,18 @@ describe("EmbeddingPool dispatch (#999)", () => {
   let savedProvider: unknown;
   let savedVoyage: string | undefined;
   let savedOpenAI: string | undefined;
+  let savedPoolEnv: string | undefined;
+  let savedNodeEnv: string | undefined;
 
   beforeEach(() => {
     // Force the local provider (no remote fallback) and a fresh instance.
     savedVoyage = process.env.VOYAGE_API_KEY;
     savedOpenAI = process.env.OPENAI_API_KEY;
+    savedPoolEnv = process.env.LORE_EMBED_POOL_SIZE;
+    savedNodeEnv = process.env.NODE_ENV;
     delete process.env.VOYAGE_API_KEY;
     delete process.env.OPENAI_API_KEY;
+    delete process.env.LORE_EMBED_POOL_SIZE;
     _resetLocalProviderProbe();
     savedProvider = _saveAndClearProvider();
   });
@@ -115,6 +120,12 @@ describe("EmbeddingPool dispatch (#999)", () => {
     _restoreProvider(savedProvider);
     if (savedVoyage !== undefined) process.env.VOYAGE_API_KEY = savedVoyage;
     if (savedOpenAI !== undefined) process.env.OPENAI_API_KEY = savedOpenAI;
+    if (savedPoolEnv !== undefined)
+      process.env.LORE_EMBED_POOL_SIZE = savedPoolEnv;
+    else delete process.env.LORE_EMBED_POOL_SIZE;
+    // Restore NODE_ENV (a couple of tests flip it to exercise the production path).
+    if (savedNodeEnv !== undefined) process.env.NODE_ENV = savedNodeEnv;
+    else delete process.env.NODE_ENV;
   });
 
   it("dispatches concurrent embeds to distinct workers in parallel", async () => {
@@ -190,6 +201,67 @@ describe("EmbeddingPool dispatch (#999)", () => {
     expect(outcome.ok).toBe(false);
     // The module-global broken latch is shared across the pool → FTS-only.
     expect(isAvailable()).toBe(false);
+  });
+
+  it("LORE_EMBED_POOL_SIZE sets the ceiling (env-driven, no test override)", async () => {
+    process.env.LORE_EMBED_POOL_SIZE = "2";
+    _setPoolFreememForTest(64 * GB);
+    const fakes = installFakeWorkers();
+
+    const p1 = embed(["alpha"], "query");
+    const p2 = embed(["beta"], "query");
+    await flush();
+
+    expect(fakes).toHaveLength(2);
+    fakes[0].completeAll();
+    fakes[1].completeAll();
+    await Promise.all([p1, p2]);
+  });
+
+  it("ignores an invalid LORE_EMBED_POOL_SIZE and falls back to a single worker", async () => {
+    process.env.LORE_EMBED_POOL_SIZE = "not-a-number";
+    _setPoolFreememForTest(64 * GB);
+    const fakes = installFakeWorkers();
+
+    const p1 = embed(["alpha"], "query");
+    const p2 = embed(["beta"], "query");
+    await flush();
+
+    // Invalid env → undefined → default ceiling of 1 in test mode.
+    expect(fakes).toHaveLength(1);
+    fakes[0].completeAll();
+    await Promise.all([p1, p2]);
+  });
+
+  it("outside test mode, sizes the pool from free memory (production path)", async () => {
+    // Flip out of NODE_ENV=test so the constructor takes the memory-gated
+    // branch; the freemem seam keeps it deterministic.
+    process.env.NODE_ENV = "production";
+    _setPoolFreememForTest(64 * GB); // ample → default ceiling of 2
+    const fakes = installFakeWorkers();
+
+    const p1 = embed(["alpha"], "query");
+    const p2 = embed(["beta"], "query");
+    await flush();
+
+    expect(fakes).toHaveLength(2);
+    fakes[0].completeAll();
+    fakes[1].completeAll();
+    await Promise.all([p1, p2]);
+  });
+
+  it("outside test mode with tight memory, sizes the pool to a single worker", async () => {
+    process.env.NODE_ENV = "production";
+    _setPoolFreememForTest(0); // no headroom → ceiling 1
+    const fakes = installFakeWorkers();
+
+    const p1 = embed(["alpha"], "query");
+    const p2 = embed(["beta"], "query");
+    await flush();
+
+    expect(fakes).toHaveLength(1);
+    fakes[0].completeAll();
+    await Promise.all([p1, p2]);
   });
 
   it("shuts down every worker in the pool", async () => {
