@@ -1888,6 +1888,51 @@ async function pageUserKnowledge(): Promise<string> {
     }
   }
 
+  // Open knowledge contradictions (#1123): pairs of entries the idle worker
+  // judged to give OPPOSITE instructions. Surfaced for the user to resolve —
+  // keep one side, or keep both. We never auto-merge or auto-delete; the
+  // destructive "keep this one" action is an explicit user choice.
+  try {
+    const contradictions = ltm.listOpenContradictions();
+    if (contradictions.length > 0) {
+      body += `<div class="banner" style="border:1px solid #d06000;background:#fff3e6;padding:12px 16px;border-radius:6px;margin:12px 0;">`;
+      body += `<strong>${contradictions.length} possible ${contradictions.length === 1 ? "contradiction" : "contradictions"} in your knowledge.</strong> Two entries give opposite instructions — keep the one that still applies, or keep both. Also via <code>lore data contradictions</code>.`;
+      body += `<div style="margin-top:10px;display:flex;flex-direction:column;gap:8px;">`;
+      const MAX_CONTRADICTIONS = 25;
+      let shownC = 0;
+      for (const c of contradictions) {
+        if (shownC >= MAX_CONTRADICTIONS) break;
+        shownC++;
+        const a = esc(truncate(c.titleA, 40));
+        const b = esc(truncate(c.titleB, 40));
+        body += `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">`;
+        body += `<span><a href="/ui/knowledge/${esc(c.logicalIdA)}">${a}</a> <span style="color:#d06000;">&harr;</span> <a href="/ui/knowledge/${esc(c.logicalIdB)}">${b}</a></span>`;
+        if (c.rationale) {
+          body += `<span class="muted" style="color:#888;">${esc(truncate(c.rationale, 80))}</span>`;
+        }
+        // Keep A → delete B (destructive: confirm).
+        body += `<form method="POST" action="/ui/api/contradiction/resolve/${esc(c.logicalIdA)}/${esc(c.logicalIdB)}" style="display:inline;" onsubmit="return confirm('Keep &quot;${a}&quot; and delete &quot;${b}&quot;?');">`;
+        body += `<button type="submit" style="font-size:12px;padding:2px 8px;">Keep &ldquo;${a}&rdquo;</button>`;
+        body += `</form>`;
+        // Keep B → delete A (destructive: confirm).
+        body += `<form method="POST" action="/ui/api/contradiction/resolve/${esc(c.logicalIdB)}/${esc(c.logicalIdA)}" style="display:inline;" onsubmit="return confirm('Keep &quot;${b}&quot; and delete &quot;${a}&quot;?');">`;
+        body += `<button type="submit" style="font-size:12px;padding:2px 8px;">Keep &ldquo;${b}&rdquo;</button>`;
+        body += `</form>`;
+        // Keep both → dismiss (suppress; never re-judged).
+        body += `<form method="POST" action="/ui/api/contradiction/dismiss/${esc(c.logicalIdA)}/${esc(c.logicalIdB)}" style="display:inline;">`;
+        body += `<button type="submit" style="font-size:12px;padding:2px 8px;" title="Not a conflict — keep both, stop showing this">Keep both</button>`;
+        body += `</form>`;
+        body += `</div>`;
+      }
+      if (contradictions.length > shownC) {
+        body += `<span class="muted" style="color:#888;">…and ${contradictions.length - shownC} more. Use <code>lore data contradictions</code>.</span>`;
+      }
+      body += `</div></div>`;
+    }
+  } catch (err) {
+    log.warn("contradiction suggestions failed (non-fatal):", err);
+  }
+
   // Batch-load cross-project transfer counts (#506) to avoid N+1 queries.
   const transferCounts = ltm.transferCounts();
 
@@ -3635,6 +3680,37 @@ export async function handleUIRequest(
           source: "dashboard",
         });
       }
+      return redirect("/ui/knowledge");
+    }
+
+    // Resolve a contradiction (#1123): keep one entry, remove the other. This is
+    // an explicit user choice — the detector never auto-deletes. remove() also
+    // purges the pair row (it references both logical_ids), so it leaves the
+    // open list either way.
+    const resolveContradiction = matchRoute(
+      pathname,
+      "/ui/api/contradiction/resolve/:keepId/:removeId",
+    );
+    if (resolveContradiction) {
+      const { keepId, removeId } = resolveContradiction;
+      if (keepId !== removeId && kget(removeId)) {
+        ltm.remove(removeId);
+      }
+      return redirect("/ui/knowledge");
+    }
+
+    // Keep both entries: dismiss the contradiction so it stops surfacing and is
+    // never re-judged (#1123).
+    const dismissContradiction = matchRoute(
+      pathname,
+      "/ui/api/contradiction/dismiss/:idA/:idB",
+    );
+    if (dismissContradiction) {
+      ltm.setContradictionStatus(
+        dismissContradiction.idA,
+        dismissContradiction.idB,
+        "dismissed",
+      );
       return redirect("/ui/knowledge");
     }
 
