@@ -53,6 +53,7 @@ import {
 } from "./embedding-cap";
 import {
   EMBED_OOM_EXIT_CODE,
+  isMissingLocalStackError,
   isWasmFatalError,
   type EmbedRequest,
   type WorkerInbound,
@@ -641,11 +642,25 @@ class LocalProvider implements EmbeddingProvider {
             localProviderKnownBroken = true;
             if (!localProviderErrorLogged) {
               localProviderErrorLogged = true;
-              log.error(
-                `local embedding provider failed to init: ${msg.error}. ` +
-                  `Set search.embeddings.provider in .lore.json to use a remote provider.`,
-                new Error(`embedding worker init failed: ${msg.error}`),
-              );
+              // Distinguish "optional local-embedding stack not installed"
+              // (#1026 — an expected, actionable degraded state) from a genuine
+              // init failure. Both latch the provider broken and degrade recall
+              // to FTS-only; only the log severity/message differs.
+              if (isMissingLocalStackError(msg.error)) {
+                log.warn(
+                  "local embedding dependencies not installed " +
+                    "(optional '@huggingface/transformers' / 'onnxruntime-node' absent) — " +
+                    "recall will use FTS-only search. Reinstall without --omit=optional to " +
+                    "enable local embeddings, or set search.embeddings.provider in .lore.json " +
+                    "to a remote provider (voyage/openai) with the matching API key.",
+                );
+              } else {
+                log.error(
+                  `local embedding provider failed to init: ${msg.error}. ` +
+                    `Set search.embeddings.provider in .lore.json to use a remote provider.`,
+                  new Error(`embedding worker init failed: ${msg.error}`),
+                );
+              }
             }
             for (const [, p] of this.pendingRequests) {
               p.reject(new LocalProviderUnavailableError(msg.error));
@@ -2175,7 +2190,22 @@ export interface BackfillOptions {
 export async function runStartupBackfill(
   opts: BackfillOptions = {},
 ): Promise<BackfillStats> {
-  if (!isAvailable()) return emptyBackfillStats();
+  if (!isAvailable()) {
+    // Make the degraded state visible in the startup path — this early return
+    // was previously silent, so a consumer who omitted the optional
+    // local-embedding stack (#1026), or is on a remote provider without a key,
+    // had no startup signal that backfill (and vector recall) is off. Gate on
+    // `enabled` so a deliberate `search.embeddings.enabled: false` stays quiet.
+    // `isAvailable()` already emits the local-broken FTS-only line once; this is
+    // the startup-scoped, backfill-specific companion.
+    if (config().search.embeddings.enabled !== false) {
+      log.info(
+        "startup embedding backfill skipped — embeddings unavailable " +
+          "(recall will use FTS-only search)",
+      );
+    }
+    return emptyBackfillStats();
+  }
 
   // Handle an embedding-config change, then attempt the one-time blob→vec0
   // cutover (both no-ops in the steady state). Order matters: a config change

@@ -161,6 +161,31 @@ export function isWasmFatalError(msg: string): boolean {
 }
 
 /**
+ * Detect that the OPTIONAL local-embedding stack is simply not installed, as
+ * opposed to installed-but-broken. `@huggingface/transformers` (and its native
+ * transitive deps `onnxruntime-node` / `onnxruntime-web` / `sharp`) is an
+ * `optionalDependency` of `@loreai/core` (#1026): a consumer on remote
+ * embeddings — or the SEA binary, which ships its own runtime — can install
+ * with `--omit=optional` and drop ~480 MB of ML runtime. When absent, the
+ * worker's `import("@huggingface/transformers")` (or, since transformers is
+ * bundled, its transitive `require("onnxruntime-node")`) throws a module-/
+ * package-not-found error rather than a runtime crash.
+ *
+ * We surface THIS as an expected, actionable degraded state (warn → FTS-only),
+ * distinct from a genuine init failure (error). Match requires BOTH a
+ * module-not-found signal AND a reference to one of the optional packages, so an
+ * unrelated resolution error (e.g. a missing model file) is never misclassified.
+ */
+export function isMissingLocalStackError(msg: string): boolean {
+  const moduleNotFound =
+    /ERR_MODULE_NOT_FOUND|Cannot find (?:module|package)|Could not locate the bindings file/i.test(
+      msg,
+    );
+  if (!moduleNotFound) return false;
+  return /@huggingface\/transformers|onnxruntime|\bsharp\b/i.test(msg);
+}
+
+/**
  * The two leading strings transformers.js' `sessionRun()` (models.js) passes to
  * `console.error` when `session.run` throws, before it re-throws: the error
  * message, and a dump of every input tensor's metadata AND `.data`. For our

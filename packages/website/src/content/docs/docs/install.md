@@ -27,6 +27,16 @@ You can also run the gateway directly with npm:
 npx @loreai/gateway
 ```
 
+## Slimmer installs (remote embeddings)
+
+Lore's on-device (local) embeddings run through `@huggingface/transformers` and the ONNX runtime — about 480 MB of ML runtime that's pulled in when you `npm install` a Lore package (`@loreai/core`, `@loreai/opencode`, `@loreai/pi`). It's an **optional dependency**, so if you use a remote embedding provider — or don't need vector recall — you can skip it:
+
+```bash
+npm install @loreai/opencode --omit=optional
+```
+
+With the stack absent, recall degrades gracefully to FTS-only keyword search. To keep semantic recall without the local runtime, set a remote provider in `.lore.json` (`search.embeddings.provider` = `voyage` or `openai`, with the matching API key). The hosted install script and the standalone binary are unaffected — they ship their own runtime and never read `node_modules`.
+
 ## Existing Conversations
 
 Lore can import previous coding conversations so a new project memory does not start from a blank slate:
