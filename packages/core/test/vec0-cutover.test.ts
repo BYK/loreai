@@ -42,7 +42,7 @@ import {
 } from "../src/embedding";
 import * as log from "../src/log";
 import * as ltm from "../src/ltm";
-import { partsToText } from "../src/temporal";
+import { partsToText, prune } from "../src/temporal";
 import type { LorePart } from "../src/types";
 import {
   fromBlob,
@@ -1799,5 +1799,110 @@ describeVec("temporal re-chunk backfill (backfillTemporalEmbeddings)", () => {
     } finally {
       info.mockRestore();
     }
+  });
+});
+
+describeVec("prune drops the pruned rows' vec0 chunks (no orphans)", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+
+  function insDistilledTemporal(id: string, ageDays: number, size = 100): void {
+    db()
+      .query(
+        "INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at) VALUES (?, ?, 's', 'user', ?, ?, 1, ?)",
+      )
+      .run(
+        id,
+        pid,
+        "x".repeat(size),
+        Math.ceil(size / 4),
+        Date.now() - ageDays * DAY,
+      );
+  }
+  function insArchivedDistillation(
+    id: string,
+    ageDays: number,
+    archived: 0 | 1,
+  ): void {
+    db()
+      .query(
+        "INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, created_at, archived) VALUES (?, ?, 's', '', '', 'obs', '', 0, 0, ?, ?)",
+      )
+      .run(id, pid, Date.now() - ageDays * DAY, archived);
+  }
+  const tvec = (id: string) =>
+    (
+      db()
+        .query("SELECT COUNT(*) n FROM temporal_vec WHERE message_id = ?")
+        .get(id) as { n: number }
+    ).n;
+  const dvec = (id: string) =>
+    (
+      db()
+        .query("SELECT COUNT(*) n FROM distillation_vec WHERE id = ?")
+        .get(id) as { n: number }
+    ).n;
+
+  test("TTL pass drops the pruned message's temporal_vec chunk, keeps survivors'", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insDistilledTemporal("t_old", 130);
+    insDistilledTemporal("t_new", 10);
+    storeEmbedding(db(), "temporal", "t_old", v(1, 0, 0, 0));
+    storeEmbedding(db(), "temporal", "t_new", v(0, 1, 0, 0));
+    expect(tvec("t_old")).toBe(1);
+    expect(tvec("t_new")).toBe(1);
+
+    const res = prune({
+      projectPath: PROJECT,
+      retentionDays: 120,
+      maxStorageMB: 1024,
+    });
+    expect(res.ttlDeleted).toBe(1);
+
+    // The pruned message's chunk is gone — NOT left dangling in temporal_vec —
+    // while the survivor keeps its chunk.
+    expect(tvec("t_old")).toBe(0);
+    expect(tvec("t_new")).toBe(1);
+  });
+
+  test("size-cap pass drops the evicted messages' temporal_vec chunks", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    const size = 400 * 1024; // 3 × ~400 KB = ~1.2 MB, cap 1 MB → oldest evicted
+    insDistilledTemporal("c_old", 5, size);
+    insDistilledTemporal("c_mid", 3, size);
+    insDistilledTemporal("c_new", 1, size);
+    storeEmbedding(db(), "temporal", "c_old", v(1, 0, 0, 0));
+    storeEmbedding(db(), "temporal", "c_mid", v(0, 1, 0, 0));
+    storeEmbedding(db(), "temporal", "c_new", v(0, 0, 1, 0));
+
+    const res = prune({
+      projectPath: PROJECT,
+      retentionDays: 120,
+      maxStorageMB: 1,
+    });
+    expect(res.capDeleted).toBeGreaterThan(0);
+
+    // The oldest was evicted → its chunk must be gone too; the newest survives.
+    expect(tvec("c_old")).toBe(0);
+    expect(tvec("c_new")).toBe(1);
+  });
+
+  test("archived-distillation pass drops the pruned distillation_vec rows", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insArchivedDistillation("d_old_arch", 130, 1); // old + archived → pruned
+    insArchivedDistillation("d_new_arch", 10, 1); // recent archived → kept
+    insArchivedDistillation("d_old_live", 130, 0); // old but not archived → kept
+    storeEmbedding(db(), "distillations", "d_old_arch", v(1, 0, 0, 0));
+    storeEmbedding(db(), "distillations", "d_new_arch", v(0, 1, 0, 0));
+    storeEmbedding(db(), "distillations", "d_old_live", v(0, 0, 1, 0));
+    expect(dvec("d_old_arch")).toBe(1);
+
+    prune({ projectPath: PROJECT, retentionDays: 120, maxStorageMB: 1024 });
+
+    expect(dvec("d_old_arch")).toBe(0); // pruned row's vec chunk dropped
+    expect(dvec("d_new_arch")).toBe(1); // recent archived kept
+    expect(dvec("d_old_live")).toBe(1); // non-archived kept
   });
 });

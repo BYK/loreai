@@ -1,4 +1,5 @@
 import { db, ensureProject } from "./db";
+import { deleteEmbeddings } from "./db/vec-store";
 import { runRelaxedSearch, runRelaxedSearchAsync } from "./search";
 import { offloadAllOrTimeout, READ_JOB_TIMED_OUT } from "./read-offload";
 import { sanitizeSurrogates } from "./markdown";
@@ -730,21 +731,28 @@ export function prune(input: {
   // eligible rows before deletion to get the accurate number deleted.
   let ttlDeleted = 0;
   try {
-    const ttlEligible = (
+    // Select the ids first (instead of a bare COUNT) so we can also drop the
+    // messages' vec0 chunks: in vec0 mode the vectors live in the separate
+    // `temporal_vec` virtual table, so the base-row DELETE below leaves them
+    // dangling. `deleteEmbeddings` is a no-op in blob mode and when the list is
+    // empty. (The startup `gcVec0DanglingRows` sweep remains the catch-all
+    // backstop for orphans from other paths / a crash mid-delete.)
+    const ttlIds = (
       database
         .query(
-          "SELECT COUNT(*) as c FROM temporal_messages WHERE project_id = ? AND distilled = 1 AND created_at < ?",
+          "SELECT id FROM temporal_messages WHERE project_id = ? AND distilled = 1 AND created_at < ?",
         )
-        .get(pid, cutoff) as { c: number }
-    ).c;
-    if (ttlEligible > 0) {
+        .all(pid, cutoff) as { id: string }[]
+    ).map((r) => r.id);
+    if (ttlIds.length > 0) {
       database
         .query(
           "DELETE FROM temporal_messages WHERE project_id = ? AND distilled = 1 AND created_at < ?",
         )
         .run(pid, cutoff);
+      deleteEmbeddings(database, "temporal", ttlIds);
     }
-    ttlDeleted = ttlEligible;
+    ttlDeleted = ttlIds.length;
   } catch (e) {
     if (!isMissingObjectError(e)) throw e;
     sawMissingObject = true;
@@ -791,6 +799,8 @@ export function prune(input: {
         database
           .query(`DELETE FROM temporal_messages WHERE id IN (${placeholders})`)
           .run(...toDelete);
+        // Drop the evicted messages' vec0 chunks too (see Pass 1 rationale).
+        deleteEmbeddings(database, "temporal", toDelete);
         // toDelete.length is the accurate count — result.changes is inflated by FTS triggers.
         capDeleted = toDelete.length;
       }
@@ -808,11 +818,23 @@ export function prune(input: {
   // Archived gen-0 distillations are kept for recall search but don't need
   // to live forever — they follow the same retention policy as temporal messages.
   try {
-    database
-      .query(
-        "DELETE FROM distillations WHERE project_id = ? AND archived = 1 AND created_at < ?",
-      )
-      .run(pid, cutoff);
+    // Select ids first so the matching `distillation_vec` chunks can be dropped
+    // alongside the base rows (same vec0-orphan reasoning as Pass 1).
+    const archivedIds = (
+      database
+        .query(
+          "SELECT id FROM distillations WHERE project_id = ? AND archived = 1 AND created_at < ?",
+        )
+        .all(pid, cutoff) as { id: string }[]
+    ).map((r) => r.id);
+    if (archivedIds.length > 0) {
+      database
+        .query(
+          "DELETE FROM distillations WHERE project_id = ? AND archived = 1 AND created_at < ?",
+        )
+        .run(pid, cutoff);
+      deleteEmbeddings(database, "distillations", archivedIds);
+    }
   } catch (e) {
     if (!isMissingObjectError(e)) throw e;
     sawMissingObject = true;

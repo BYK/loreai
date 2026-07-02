@@ -140,10 +140,10 @@ describe("temporal.prune resilience to a db()-swap missing-table race (#1001)", 
     seedDistilledMessage(10 * DAY);
     const arch = seedArchivedDistillation(10 * DAY);
 
-    // Pass 1's COUNT throws no-such-table; Passes 2-3 must still execute.
+    // Pass 1's id-select throws no-such-table; Passes 2-3 must still execute.
     registerSink(
       throwingSink(
-        /SELECT COUNT\(\*\) as c FROM temporal_messages/,
+        /SELECT id FROM temporal_messages/,
         new Error("no such table: temporal_messages"),
       ),
     );
@@ -205,7 +205,7 @@ describe("temporal.prune resilience to a db()-swap missing-table race (#1001)", 
     const warns: string[] = [];
     registerSink(
       recordingThrowingSink(
-        /DELETE FROM distillations/,
+        /SELECT id FROM distillations/,
         new Error("no such table: distillations"),
         warns,
       ),
@@ -228,7 +228,7 @@ describe("temporal.prune resilience to a db()-swap missing-table race (#1001)", 
     const warnsAfterRecovery: string[] = [];
     registerSink(
       recordingThrowingSink(
-        /DELETE FROM distillations/,
+        /SELECT id FROM distillations/,
         new Error("no such table: distillations"),
         warnsAfterRecovery,
       ),
