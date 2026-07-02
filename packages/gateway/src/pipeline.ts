@@ -6592,6 +6592,13 @@ async function handleConversationTurn(
   // is free and beneficial). Falls back to isCacheWarm when non-confident.
   const econ = getCacheStrategy(sessionID);
   const cacheWarm = decideSkipCompact(econ, isCacheWarm(sessionState));
+  // `cacheWarm` also tells onIdleResume to PRESERVE the byte-identity caches
+  // (distilled prefix + raw-window pin) so the warm prefix survives the resume.
+  // A false-positive here (isCacheWarm true but the warmed bytes actually
+  // diverged) is safe: preserving at worst defers folding idle-distilled rows
+  // into the prefix by one cold cycle — never a worse cache bust than clearing
+  // (both produce a full write on a genuine miss; the preserved body is ≤ the
+  // re-rendered one).
   const idleResult = onIdleResume(
     sessionID,
     thresholdMs,
