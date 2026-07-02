@@ -1,33 +1,34 @@
 /**
- * Regression battery for the SHARED original-fetch handle (#1027).
+ * Regression battery for the SHARED original-fetch handle (#1027, #1107).
  *
  * The fetch interceptor stores the pre-install `globalThis.fetch` in a
- * process-global keyed by `Symbol.for(...)` so that EVERY copy of
- * @loreai/core in the process agrees on the same original fetch — even when
- * core is bundled/instantiated more than once (e.g. the OpenCode plugin's
- * copy plus a copy inlined into the in-process gateway bundle).
+ * process-global keyed by `Symbol.for(...)`. It backs the cross-copy
+ * double-install guard so that EVERY copy of @loreai/core in the process
+ * agrees a single interceptor is installed — even when core is
+ * bundled/instantiated more than once (e.g. the OpenCode plugin's copy plus a
+ * copy inlined into the in-process gateway bundle).
  *
- * Without a shared handle, each module copy keeps a private module-scoped
- * `_originalFetch`: one copy installs the interceptor (patching
- * `globalThis.fetch`) while a second copy's `getOriginalFetch()` still reads
- * `null` and falls back to `globalThis.fetch` — which IS the interceptor —
- * producing an infinite request loop. These tests pin that invariant.
+ * Without a shared handle, each module copy keeps a private module-scoped slot:
+ * one copy installs the interceptor (patching `globalThis.fetch`) while a
+ * second copy's guard still sees `null` and installs AGAIN, stacking
+ * interceptors (copy B captures copy A's interceptor as its "original") — an
+ * infinite request loop (gateway → interceptor → gateway → …). These tests pin
+ * that invariant by observing the shared slot directly (the internal handle is
+ * not exported — see #1107).
  *
  * Tests 3 and 4 load two *independent* module instances (via
  * `vi.resetModules()` + dynamic import) to simulate the two-copies-in-one-
- * process scenario. They FAIL against a module-scoped `_originalFetch` and
- * PASS with the shared `Symbol.for` global.
+ * process scenario. They FAIL against a module-scoped slot and PASS with the
+ * shared `Symbol.for` global.
  */
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
-import {
-  installFetchInterceptor,
-  getOriginalFetch,
-} from "../src/fetch-interceptor";
+import { installFetchInterceptor } from "../src/fetch-interceptor";
 
 const ORIGINAL_FETCH_KEY = Symbol.for("lore.fetchInterceptor.originalFetch");
 const GATEWAY = "http://127.0.0.1:3207";
 const config = { gatewayBase: GATEWAY, getHeaders: () => ({}) };
 
+/** Read the process-global slot the interceptor stores the real fetch in. */
 function slot(): unknown {
   return (globalThis as Record<symbol, unknown>)[ORIGINAL_FETCH_KEY];
 }
@@ -53,36 +54,34 @@ describe("fetch-interceptor — shared original-fetch global (#1027)", () => {
   test("install captures the pre-install fetch into the shared Symbol.for slot", () => {
     const cleanup = installFetchInterceptor(config);
     try {
-      // The shared handle holds the REAL fetch, not the interceptor.
+      // The shared handle holds the REAL fetch...
       expect(slot()).toBe(trueOriginal);
-      // globalThis.fetch has been patched to the interceptor.
+      // ...and globalThis.fetch has been patched to the interceptor.
       expect(globalThis.fetch).not.toBe(trueOriginal);
-      // getOriginalFetch reads the shared handle.
-      expect(getOriginalFetch()).toBe(trueOriginal);
     } finally {
       cleanup();
     }
     // Cleanup restores the live fetch and releases the shared handle.
     expect(globalThis.fetch).toBe(trueOriginal);
-    expect(getOriginalFetch()).toBe(globalThis.fetch);
+    expect(slot() ?? null).toBeNull();
   });
 
-  test("getOriginalFetch returns the real fetch, never the installed interceptor", () => {
+  test("the shared slot holds the real fetch, never the installed interceptor", () => {
     const cleanup = installFetchInterceptor(config);
     try {
-      const original = getOriginalFetch();
-      expect(original).toBe(trueOriginal);
-      // The crux: it must NOT resolve to globalThis.fetch (the interceptor),
-      // which would be self-referential and loop.
-      expect(original).not.toBe(globalThis.fetch);
+      // The crux: the stored handle must be the true original, NOT
+      // globalThis.fetch (the interceptor). A self-referential handle is what
+      // loops.
+      expect(slot()).toBe(trueOriginal);
+      expect(slot()).not.toBe(globalThis.fetch);
     } finally {
       cleanup();
     }
   });
 
-  test("a second module copy resolves the same original fetch (cross-copy loop guard)", async () => {
-    // Two independently-evaluated module instances = two copies of core in
-    // one process. They share globalThis but have distinct module scopes.
+  test("a second module copy shares the slot and does not re-install (cross-copy loop guard)", async () => {
+    // Two independently-evaluated module instances = two copies of core in one
+    // process. They share globalThis but have distinct module scopes.
     vi.resetModules();
     const modA = await import("../src/fetch-interceptor");
     vi.resetModules();
@@ -90,22 +89,27 @@ describe("fetch-interceptor — shared original-fetch global (#1027)", () => {
     // Sanity: genuinely distinct module instances.
     expect(modB.installFetchInterceptor).not.toBe(modA.installFetchInterceptor);
 
-    const cleanup = modA.installFetchInterceptor(config);
+    const cleanupA = modA.installFetchInterceptor(config);
     try {
-      // Copy A patched globalThis.fetch to its interceptor.
-      expect(globalThis.fetch).not.toBe(trueOriginal);
-      // Copy B — separate module scope, empty private state — must still see
-      // the TRUE original via the shared global, not the interceptor. Under a
-      // module-scoped _originalFetch this returned globalThis.fetch (the
-      // interceptor) → infinite fetch loop.
-      expect(modB.getOriginalFetch()).toBe(trueOriginal);
-      expect(modB.getOriginalFetch()).not.toBe(globalThis.fetch);
+      const interceptorA = globalThis.fetch;
+      // Copy A patched globalThis.fetch and set the shared slot to the real fetch.
+      expect(interceptorA).not.toBe(trueOriginal);
+      expect(slot()).toBe(trueOriginal);
+
+      // Copy B — a SEPARATE module scope with its own (empty) private state —
+      // sees the shared slot as already set and MUST no-op: it must not
+      // re-patch globalThis.fetch (which would capture A's interceptor as B's
+      // "original" and stack a second layer → infinite loop). Under a
+      // module-scoped slot, B's guard sees null and re-patches here.
+      modB.installFetchInterceptor(config);
+      expect(globalThis.fetch).toBe(interceptorA); // unchanged by B
+      expect(slot()).toBe(trueOriginal); // shared slot untouched
     } finally {
-      cleanup();
+      cleanupA();
     }
   });
 
-  test("a second copy's install is a no-op while another copy owns the interceptor", async () => {
+  test("a second copy's cleanup is a no-op while another copy owns the interceptor", async () => {
     vi.resetModules();
     const modA = await import("../src/fetch-interceptor");
     vi.resetModules();
@@ -116,22 +120,18 @@ describe("fetch-interceptor — shared original-fetch global (#1027)", () => {
       const interceptorA = globalThis.fetch;
       expect(interceptorA).not.toBe(trueOriginal);
 
-      // Copy B must detect the shared slot is already set and NOT re-patch
-      // globalThis.fetch — re-patching would capture A's interceptor as B's
-      // "original", stacking a second interception layer.
+      // B's install no-ops (slot already set) and returns a no-op cleanup.
       const cleanupB = modB.installFetchInterceptor(config);
-      expect(globalThis.fetch).toBe(interceptorA); // unchanged by B
-      expect(modB.getOriginalFetch()).toBe(trueOriginal);
-
-      // B's cleanup is a no-op: it must not tear down A's interceptor nor
-      // release the shared handle A still owns.
+      // Calling it must NOT tear down A's interceptor nor release the shared
+      // handle A still owns.
       cleanupB();
       expect(globalThis.fetch).toBe(interceptorA);
-      expect(getOriginalFetch()).toBe(trueOriginal);
+      expect(slot()).toBe(trueOriginal);
     } finally {
       cleanupA();
     }
     // Only A's cleanup restores; the process is back to the live fetch.
-    expect(getOriginalFetch()).toBe(globalThis.fetch);
+    expect(globalThis.fetch).toBe(trueOriginal);
+    expect(slot() ?? null).toBeNull();
   });
 });

@@ -41,7 +41,10 @@ import { vendorModelInfo } from "./embedding-vendor";
 import {
   MIN_EMBED_TOKENS,
   MODEL_MAX_TOKENS,
+  PER_WORKER_MEM_BUDGET_BYTES,
+  EMBED_POOL_ABS_MAX,
   backoffEmbedCap,
+  desiredEmbedPoolSize,
   memoryModelEmbedCap,
   reconcileEmbedCap,
   reprobeEmbedCap,
@@ -960,6 +963,182 @@ class LocalProvider implements EmbeddingProvider {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Local embedding worker pool (#999)
+// ---------------------------------------------------------------------------
+
+/** Resolve the configured embedding-pool ceiling: `LORE_EMBED_POOL_SIZE` wins
+ *  (the escape hatch — `=1` forces today's single worker), then
+ *  `search.embeddings.embedPoolSize`, else `undefined` (memory-gated default).
+ *  Read per-construction (not cached) so config reloads / env changes take
+ *  effect on the next provider. Invalid values are ignored (fall through). */
+function configuredEmbedPoolSize(): number | undefined {
+  const raw = process.env.LORE_EMBED_POOL_SIZE;
+  if (raw !== undefined) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 1) return Math.floor(n);
+    // invalid env → ignore, fall through to config
+  }
+  const cfg = config().search.embeddings.embedPoolSize;
+  if (typeof cfg === "number" && Number.isFinite(cfg) && cfg >= 1) {
+    return Math.floor(cfg);
+  }
+  return undefined;
+}
+
+/** Test seam: exposes {@link configuredEmbedPoolSize} so suites can assert the
+ *  env/config resolution + invalid-value fall-through (invalid env must resolve
+ *  to `undefined`, never `NaN`) without spinning up a pool. */
+export function _configuredEmbedPoolSize(): number | undefined {
+  return configuredEmbedPoolSize();
+}
+
+/** Test-only override of the embedding-pool ceiling (null clears). Sets the
+ *  construction-time ceiling directly, bypassing the freemem-based sizing so
+ *  suites don't depend on the host's actual RAM. */
+let testEmbedPoolSize: number | null = null;
+export function _setEmbedPoolSizeForTest(n: number | null): void {
+  testEmbedPoolSize = n;
+}
+
+/** Test-only override for the pool's LIVE per-spawn memory gate (null → real
+ *  `os.freemem()`). Lets suites drive the "grow when memory allows" vs "stay at
+ *  one worker when memory is tight" paths deterministically. */
+let testPoolFreememBytes: number | null = null;
+export function _setPoolFreememForTest(bytes: number | null): void {
+  testPoolFreememBytes = bytes;
+}
+
+/** One worker slot: a {@link LocalProvider} and the number of embed requests the
+ *  pool currently has in flight against it. The pool is the sole caller of each
+ *  provider's `embed()`, so it tracks in-flight itself — no LocalProvider surface
+ *  change. `inflight` stays accurate across a provider's OOM respawn because the
+ *  original `embed()` promise stays pending until the resubmit finally settles. */
+interface EmbedSlot {
+  provider: LocalProvider;
+  inflight: number;
+}
+
+/**
+ * A pool of {@link LocalProvider} workers so concurrent embeds run in parallel
+ * instead of serializing through a single worker (#999). Mirrors
+ * `vector-pool.ts`, but over the stateful embedding provider rather than raw
+ * workers — each LocalProvider keeps its full, tested per-worker lifecycle (OOM
+ * ×0.7 backoff + respawn + resubmit, corrupt-model self-heal, WASM-fatal latch,
+ * cap re-probe, bounded shutdown). This class adds ONLY cross-worker dispatch.
+ *
+ * Dispatch: least-busy live provider. Query jump-ahead is preserved by the
+ * existing IN-WORKER priority queue (`embedding-worker.ts`) — a high-priority
+ * single-text query floats ahead of any backfill batches queued in whichever
+ * worker it lands on. With an idle worker available (the common query-vs-backfill
+ * case) a query waits zero; worst case it waits one in-flight batch (token-area
+ * ≤ 4096 → sub-second), versus today's unbounded cross-session serialization.
+ *
+ * Growth is LAZY and MEMORY-GATED: worker 0 spawns on the first embed (today's
+ * behavior); a secondary spawns only under genuine concurrent demand, below the
+ * ceiling, AND when a full {@link PER_WORKER_MEM_BUDGET_BYTES} is free at spawn
+ * time — so a light or constrained host never loads a second ~680 MB model. The
+ * module-global `localProviderKnownBroken` latch is shared across all workers, so
+ * a deterministic model failure (init-error / WASM-fatal / floor-OOM) on any
+ * worker degrades the whole provider to FTS-only, exactly as today.
+ */
+class EmbeddingPool implements EmbeddingProvider {
+  readonly maxBatchSize = 256;
+
+  private readonly modelId: string;
+  private readonly dimensions: number;
+  /** Memory-gated ceiling, fixed at construction (durable — no mid-session
+   *  recompute). Live freemem re-gates each actual spawn on top of this. */
+  private readonly ceiling: number;
+  private readonly slots: EmbedSlot[] = [];
+
+  constructor(modelId: string, dimensions: number) {
+    this.modelId = modelId;
+    this.dimensions = dimensions;
+    if (testEmbedPoolSize != null) {
+      // Deterministic test override — bypass the memory gate entirely.
+      this.ceiling = Math.max(
+        1,
+        Math.min(Math.floor(testEmbedPoolSize), EMBED_POOL_ABS_MAX),
+      );
+    } else if (process.env.NODE_ENV === "test") {
+      // Keep existing single-worker suites deterministic regardless of CI RAM:
+      // honor an explicit config/env ceiling (clamped like the prod branch),
+      // else default to one worker.
+      this.ceiling = Math.max(
+        1,
+        Math.min(configuredEmbedPoolSize() ?? 1, EMBED_POOL_ABS_MAX),
+      );
+    } else {
+      this.ceiling = desiredEmbedPoolSize(
+        this.liveFreemem(),
+        configuredEmbedPoolSize(),
+      );
+    }
+  }
+
+  /** Pick the slot to dispatch the next request to, growing the pool lazily
+   *  when there's concurrent demand, headroom below the ceiling, and memory. */
+  private pickSlot(): EmbedSlot {
+    // Primary worker: always present (its own OOM backoff, not pool sizing,
+    // protects a constrained host — identical to today's single worker).
+    if (this.slots.length === 0) return this.spawnSlot();
+
+    let best = this.slots[0];
+    for (const s of this.slots) {
+      if (s.inflight < best.inflight) best = s;
+    }
+
+    // Every worker is busy: add capacity if we're below the ceiling and a full
+    // per-worker memory budget is free right now (re-checked live, so a box that
+    // has since gone tight won't load another ~680 MB model).
+    if (
+      best.inflight > 0 &&
+      this.slots.length < this.ceiling &&
+      this.liveFreemem() >= PER_WORKER_MEM_BUDGET_BYTES
+    ) {
+      return this.spawnSlot();
+    }
+    return best;
+  }
+
+  /** Free memory for the live per-spawn gate; overridable in tests. */
+  private liveFreemem(): number {
+    return testPoolFreememBytes != null ? testPoolFreememBytes : freemem();
+  }
+
+  private spawnSlot(): EmbedSlot {
+    const slot: EmbedSlot = {
+      provider: new LocalProvider(this.modelId, this.dimensions),
+      inflight: 0,
+    };
+    this.slots.push(slot);
+    return slot;
+  }
+
+  async embed(
+    texts: string[],
+    inputType: "document" | "query",
+  ): Promise<Float32Array[]> {
+    const slot = this.pickSlot();
+    slot.inflight++;
+    try {
+      return await slot.provider.embed(texts, inputType);
+    } finally {
+      slot.inflight--;
+    }
+  }
+
+  /** Shut every worker down and clear the pool. Resolves once all have exited
+   *  (or been force-terminated). Idempotent. */
+  shutdown(): Promise<void> {
+    const providers = this.slots.splice(0).map((s) => s.provider);
+    return Promise.all(providers.map((p) => p.shutdown())).then(
+      () => undefined,
+    );
+  }
+}
+
 /** Minimal worker surface needed to shut a worker down — lets tests inject a
  *  fake worker without spawning a real thread. */
 export interface ShutdownableWorker {
@@ -1053,10 +1232,12 @@ function getProvider(): EmbeddingProvider | null {
   switch (providerName) {
     case "local": {
       // Construct the provider optimistically — the ONNX model init
-      // happens lazily in the worker thread on first `embed()` call.
+      // happens lazily in the worker thread(s) on first `embed()` call.
       // If it fails, `LocalProviderUnavailableError` marks the provider
-      // as broken and callers degrade to FTS-only search.
-      cachedProvider = new LocalProvider(model, cfg.dimensions);
+      // as broken and callers degrade to FTS-only search. The pool wraps
+      // one or more LocalProvider workers (memory-gated) so concurrent
+      // embeds run in parallel instead of serializing (#999).
+      cachedProvider = new EmbeddingPool(model, cfg.dimensions);
       break;
     }
     case "voyage": {
@@ -1086,12 +1267,12 @@ function getProvider(): EmbeddingProvider | null {
 }
 
 /** Reset cached provider — called when config changes.
- *  Shuts down the worker thread if the current provider is a LocalProvider.
- *  Returns a promise that resolves once any worker has fully exited.
+ *  Shuts down the worker thread(s) if the current provider is a local pool.
+ *  Returns a promise that resolves once all workers have fully exited.
  *  Callers that need clean teardown (tests) should await the result. */
 export function resetProvider(): Promise<void> {
   let shutdownPromise: Promise<void> = Promise.resolve();
-  if (cachedProvider instanceof LocalProvider) {
+  if (cachedProvider instanceof EmbeddingPool) {
     shutdownPromise = cachedProvider.shutdown();
   }
   cachedProvider = undefined;
@@ -1104,7 +1285,7 @@ export function resetProvider(): Promise<void> {
  *  files) from spawning a new worker after cleanup. */
 export function _shutdownAndDisable(): Promise<void> {
   let shutdownPromise: Promise<void> = Promise.resolve();
-  if (cachedProvider instanceof LocalProvider) {
+  if (cachedProvider instanceof EmbeddingPool) {
     shutdownPromise = cachedProvider.shutdown();
   }
   cachedProvider = null; // null (not undefined) → getProvider() returns null, won't create new
@@ -1198,7 +1379,7 @@ export function pickRemoteFallback(): {
 export function isAvailable(): boolean {
   const provider = getProvider();
   if (!provider) return false;
-  if (provider instanceof LocalProvider && localProviderKnownUnavailable()) {
+  if (provider instanceof EmbeddingPool && localProviderKnownUnavailable()) {
     // One-time log so the user knows why vector search is degraded.
     if (!localProviderErrorLogged) {
       localProviderErrorLogged = true;

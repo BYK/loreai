@@ -563,6 +563,21 @@ export const LoreConfig = z.object({
             .describe(
               "Number of read-worker threads for off-thread vector search. Default: 2.",
             ),
+          /** Number of local ONNX embedding worker threads (each loads its own
+           *  ~137MB model). Distinct from workerPoolSize (the cheap DB-only
+           *  vector pool) because an embedding worker's memory footprint is far
+           *  larger. Omit to let lore size the pool from available memory
+           *  (1 on constrained hosts, up to 2 when there's headroom). Override
+           *  with LORE_EMBED_POOL_SIZE. */
+          embedPoolSize: z
+            .number()
+            .int()
+            .min(1)
+            .max(8)
+            .optional()
+            .describe(
+              "Number of local embedding worker threads (each loads its own ~137MB model). Default: memory-gated (1–2). Override with LORE_EMBED_POOL_SIZE.",
+            ),
         })
         .default({
           enabled: true,

@@ -138,16 +138,16 @@ await esbuild.build({
   //
   // History: core used to be kept external here so the OpenCode plugin's copy
   // of core and the in-process gateway's copy shared ONE module instance —
-  // specifically the `_originalFetch` handle in fetch-interceptor.ts. With two
-  // separate copies, installFetchInterceptor() (plugin) would set its copy's
-  // handle while getOriginalFetch() (gateway) read the other copy's null and
-  // fell back to globalThis.fetch = the interceptor → infinite request loop.
-  // Externalizing core is also what forced it to be a runtime dependency
-  // (#1024), dragging core's ~480 MB ML tree into raw-npm gateway installs.
+  // specifically the original-fetch handle in fetch-interceptor.ts. With two
+  // separate copies, installFetchInterceptor()'s double-install guard saw its
+  // own copy's empty handle and each copy installed its own interceptor,
+  // stacking them into an infinite request loop (gateway → interceptor →
+  // gateway → …). Externalizing core is also what forced it to be a runtime
+  // dependency (#1024), dragging core's ~480 MB ML tree into raw-npm installs.
   //
   // That invariant now lives in a process-global: fetch-interceptor.ts stores
   // the original fetch under Symbol.for("lore.fetchInterceptor.originalFetch"),
-  // so every copy of core in the process agrees on one handle regardless of how
+  // so every copy of core in the process shares one handle regardless of how
   // many times core is bundled/instantiated (#1027). Inlining is therefore
   // safe — and removes the external-core dep + its transitive weight.
   //

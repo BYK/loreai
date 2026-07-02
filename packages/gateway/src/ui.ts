@@ -2962,7 +2962,7 @@ function pageCosts(): string {
     }
     body += `<tr class="section-header"><td colspan="2" style="padding-top:0.8em"><strong>Estimated Savings</strong></td></tr>
         <tr><td>Avoided compactions</td><td>${formatUSD(hist.avoidedCompactionCost)} <span style="color:var(--fg3);font-size:0.85em">(&times;${hist.avoidedCompactions})</span></td></tr>
-        ${hist.warmupSavings > 0 ? `<tr><td>Cache warming</td><td>${formatUSD(hist.warmupSavings)} <span style="color:var(--fg3);font-size:0.85em">(${hist.warmupHits} hits, cost ${formatUSD(hist.warmupCost)} above &rarr; net ${formatUSD(hist.warmupSavings - hist.warmupCost)})</span></td></tr>` : ""}
+        ${hist.warmupSavings > 0 || hist.warmupCost > 0 ? `<tr><td>Cache warming</td><td>${formatUSD(hist.warmupSavings)} <span style="color:var(--fg3);font-size:0.85em">(${hist.warmupHits} hits, cost ${formatUSD(hist.warmupCost)} above &rarr; net ${formatUSD(hist.warmupSavings - hist.warmupCost)})</span></td></tr>` : ""}
         ${hist.ttlSavings > 0 ? `<tr><td>1h TTL extension</td><td>${formatUSD(hist.ttlSavings)} <span style="color:var(--fg3);font-size:0.85em">(${hist.ttlHits} hits)</span></td></tr>` : ""}
         ${hist.batchSavings > 0 ? `<tr><td>Batch API discount</td><td>${formatUSD(hist.batchSavings)}</td></tr>` : ""}
         <tr style="border-top:1px solid var(--border)"><td><strong>${histNetSavings >= 0 ? "Net estimated savings" : "Net estimated overhead"}</strong></td><td><strong style="color:${histNetSavings >= 0 ? "#10b981" : "#e06c75"}">${histNetSavings >= 0 ? formatUSD(histNetSavings) : formatUSD(Math.abs(histNetSavings))}</strong></td></tr>
