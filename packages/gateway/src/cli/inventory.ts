@@ -11,6 +11,7 @@ import {
   claudeCodeSettingsPath,
   codexConfigPath,
   opencodeConfigPath,
+  piModelsConfigPath,
   readJsonConfig,
 } from "./setup";
 import { getPath, LORE_BACKUP_KEY } from "./setup-backup";
@@ -220,12 +221,37 @@ export function collectOpencodeInventory(): AppInventory {
   return { app: "OpenCode", file, fileExists, rows, hasBackup };
 }
 
+/** Collect inventory for Pi (JSON). Reads `~/.pi/agent/models.json`. */
+export function collectPiInventory(): AppInventory {
+  const file = piModelsConfigPath();
+  const fileExists = existsSync(file);
+  const rows: InventoryRow[] = [];
+  let hasBackup = false;
+  if (fileExists) {
+    const cfg = readJsonConfig(file);
+    hasBackup = LORE_BACKUP_KEY in cfg;
+    // `anthropic` is the representative provider (gateway root). If setup ran,
+    // every gateway-routable provider carries a baseUrl; probing one is enough.
+    const url = getPath(cfg, "providers.anthropic.baseUrl");
+    rows.push({
+      app: "Pi",
+      file,
+      fileExists,
+      key: "providers.anthropic.baseUrl",
+      routing:
+        typeof url === "string" ? classifyRoutingValue(url) : { kind: "unset" },
+    });
+  }
+  return { app: "Pi", file, fileExists, rows, hasBackup };
+}
+
 /** Collect inventory for all supported apps. */
 export function collectInventory(): AppInventory[] {
   return [
     collectClaudeCodeInventory(),
     collectCodexInventory(),
     collectOpencodeInventory(),
+    collectPiInventory(),
   ];
 }
 

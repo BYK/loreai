@@ -22,6 +22,7 @@ import {
 let home: string;
 let origHome: string | undefined;
 let origXdg: string | undefined;
+let origPiDir: string | undefined;
 let logSpy: MockInstance;
 let errSpy: MockInstance;
 
@@ -34,9 +35,13 @@ function logged(): string {
 beforeEach(() => {
   origHome = process.env.HOME;
   origXdg = process.env.XDG_DATA_HOME;
+  origPiDir = process.env.PI_CODING_AGENT_DIR;
   home = mkdtempSync(join(tmpdir(), "lore-doctor-"));
   process.env.HOME = home;
   process.env.XDG_DATA_HOME = join(home, "data");
+  // Pin Pi's agent dir under the temp HOME so the inventory stays hermetic
+  // regardless of a stray PI_CODING_AGENT_DIR in the runner's environment.
+  process.env.PI_CODING_AGENT_DIR = join(home, ".pi", "agent");
   logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
   errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -48,6 +53,8 @@ afterEach(() => {
   else process.env.HOME = origHome;
   if (origXdg === undefined) delete process.env.XDG_DATA_HOME;
   else process.env.XDG_DATA_HOME = origXdg;
+  if (origPiDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = origPiDir;
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -330,9 +337,15 @@ describe("formatFinding", () => {
 });
 
 describe("collectInventory (integration)", () => {
-  it("returns all-three-apps inventory with missing files on a clean HOME", () => {
+  it("returns all-four-apps inventory with missing files on a clean HOME", () => {
     const all = collectInventory();
-    expect(all).toHaveLength(3);
+    expect(all).toHaveLength(4);
+    expect(all.map((i) => i.app)).toEqual([
+      "Claude Code",
+      "Codex",
+      "OpenCode",
+      "Pi",
+    ]);
     for (const inv of all) {
       expect(inv.fileExists).toBe(false);
       expect(inv.rows).toEqual([]);

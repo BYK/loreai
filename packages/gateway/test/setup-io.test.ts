@@ -163,6 +163,60 @@ describe("commandSetup — OpenCode", () => {
   });
 });
 
+describe("commandSetup — Pi", () => {
+  const piPath = () => join(home, ".pi", "agent", "models.json");
+  let origPiDir: string | undefined;
+
+  beforeEach(() => {
+    // The path helper honors PI_CODING_AGENT_DIR; ensure the test uses the
+    // temp HOME's ~/.pi/agent, not a stray override from the environment.
+    origPiDir = process.env.PI_CODING_AGENT_DIR;
+    delete process.env.PI_CODING_AGENT_DIR;
+  });
+  afterEach(() => {
+    if (origPiDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = origPiDir;
+  });
+
+  it("writes provider baseURLs (protocol split) with a backup and undoes it", async () => {
+    // Seed an existing custom provider to prove deep-merge preservation.
+    mkdirSync(join(home, ".pi", "agent"), { recursive: true });
+    writeFileSync(
+      piPath(),
+      JSON.stringify({
+        providers: { myllm: { baseUrl: "http://localhost:8000", models: [] } },
+      }),
+    );
+
+    await commandSetup(["pi"], { port: 3299 });
+
+    const cfg = JSON.parse(readFileSync(piPath(), "utf8"));
+    // Anthropic-family → gateway root; OpenAI-family → root + /v1.
+    expect(cfg.providers.anthropic.baseUrl).toBe("http://127.0.0.1:3299");
+    expect(cfg.providers.openai.baseUrl).toBe("http://127.0.0.1:3299/v1");
+    expect(cfg.providers.openrouter.baseUrl).toBe("http://127.0.0.1:3299/v1");
+    // Pre-existing custom provider preserved.
+    expect(cfg.providers.myllm).toEqual({
+      baseUrl: "http://localhost:8000",
+      models: [],
+    });
+    expect(cfg._loreBackup).toBeDefined();
+
+    await commandSetup(["undo", "pi"], {});
+
+    const restored = JSON.parse(readFileSync(piPath(), "utf8"));
+    // Lore-set providers on a config that had none of them → undo removes them.
+    expect(restored.providers.anthropic).toBeUndefined();
+    expect(restored.providers.openai).toBeUndefined();
+    // The user's own provider survives the undo.
+    expect(restored.providers.myllm).toEqual({
+      baseUrl: "http://localhost:8000",
+      models: [],
+    });
+    expect(restored._loreBackup).toBeUndefined();
+  });
+});
+
 describe("commandSetup — undo with nothing to restore", () => {
   it("reports nothing to undo across all apps", async () => {
     await commandSetup(["undo"], {});

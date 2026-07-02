@@ -15,7 +15,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { CLAUDE_CODE_FIRST_PARTY_ENV } from "../cch";
 import { readPortFile } from "../portfile";
@@ -110,6 +110,18 @@ const SUPPORTED_APPS: AppSetup[] = [
     // No Lore plugin for Claude Code — Anthropic controls the API surface
     // and there's no plugin host. The ANTHROPIC_BASE_URL env var is the
     // only integration point.
+  },
+  {
+    agentName: "pi",
+    displayName: "Pi",
+    run: (baseUrl) => setupPi(baseUrl),
+    undo: undoPi,
+    // The `@loreai/pi` extension is the richer path (dynamic per-provider
+    // routing + attribution headers), but it's installed via Pi's own
+    // `~/.pi/settings.json` `packages` array + `pi install`, not npm. This
+    // handler writes the static `models.json` baseURL overrides — the
+    // equivalent of opencode's `--no-plugin` fallback — which is all the
+    // gateway can wire up without shelling out to `pi`.
   },
 ];
 
@@ -811,6 +823,139 @@ function setupClaudeCode(baseUrl: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// pi setup
+// ---------------------------------------------------------------------------
+
+/**
+ * Path to Pi's custom-models config file.
+ *
+ * Pi resolves its agent dir from `PI_CODING_AGENT_DIR` (if set) or
+ * `~/.pi/agent`, then reads `models.json` from it (see Pi's `getAgentDir()` /
+ * `model-registry` loader). We honor the override so a user with a relocated
+ * agent dir gets the file Pi actually reads.
+ */
+export function piModelsConfigPath(): string {
+  const agentDir =
+    process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+  return join(agentDir, "models.json");
+}
+
+/**
+ * Pi providers that speak the Anthropic Messages wire format → routed to the
+ * gateway ROOT (no `/v1`; the gateway exposes `/v1/messages` itself).
+ * OpenAI-family providers get `${root}/v1`.
+ *
+ * These two lists mirror `ANTHROPIC_PROVIDERS` / `OPENAI_PROVIDERS` in
+ * `packages/pi/src/internal.ts` — the exact set the `@loreai/pi` extension
+ * registers at runtime. Kept in sync manually because the gateway must not
+ * depend on `@loreai/pi`. Writing a bare `baseUrl` override is valid for any
+ * provider id (Pi's `validateModelsConfig` allows override-only entries); it
+ * only *routes* Pi's built-in providers, and is a harmless no-op for the rest
+ * until the user defines models for them — same trade-off as opencode's
+ * write-all fallback list.
+ */
+const PI_ANTHROPIC_PROVIDERS = [
+  "anthropic",
+  "fireworks",
+  "minimax",
+  "minimax-cn",
+  "kimi-coding",
+] as const;
+
+const PI_OPENAI_PROVIDERS = [
+  "github-copilot",
+  "deepseek",
+  "xai",
+  "groq",
+  "cerebras",
+  "openrouter",
+  "huggingface",
+  "zai",
+  "opencode",
+  "opencode-go",
+  "vercel-ai-gateway",
+  "openai",
+  "openai-codex",
+  "vllm",
+  "llamacpp",
+  "ollama",
+  "lmstudio",
+  "jan",
+  "localai",
+  "tgi",
+  "tabbyml",
+  "litellm",
+] as const;
+
+/**
+ * Deep-merge gateway `baseUrl` overrides for every Lore-routable Pi provider
+ * into `models.json`, using the protocol split (Anthropic-family → `root`,
+ * OpenAI-family → `${root}/v1`).
+ *
+ * `root` is the gateway origin WITHOUT the trailing `/v1` (the setup writer's
+ * `baseUrl` always carries `/v1`, so callers strip it before passing here).
+ *
+ * Preserves any existing custom providers, models, and overrides; idempotent
+ * (re-running produces the same object).
+ */
+export function updatePiModelsConfig(
+  config: Record<string, unknown>,
+  root: string,
+): Record<string, unknown> {
+  const providers: Record<string, { baseUrl: string }> = {};
+  for (const id of PI_ANTHROPIC_PROVIDERS) providers[id] = { baseUrl: root };
+  for (const id of PI_OPENAI_PROVIDERS) {
+    providers[id] = { baseUrl: `${root}/v1` };
+  }
+  return deepMerge(config, { providers });
+}
+
+function setupPi(baseUrl: string): void {
+  const configPath = piModelsConfigPath();
+  mkdirSync(dirname(configPath), { recursive: true });
+
+  // Anthropic-family Pi providers hit the gateway root; OpenAI-family get
+  // `/v1`. `baseUrl` arrives with `/v1` (setup writer contract) so strip it
+  // back to the origin first.
+  const root = baseUrl.replace(/\/v1$/, "");
+
+  const existing = readJsonConfig(configPath);
+
+  // Record the exact values lore is about to set so undo reverts only if the
+  // file still holds them (a value the user changed post-setup is left alone).
+  const loreValues: Record<string, unknown> = {};
+  for (const id of PI_ANTHROPIC_PROVIDERS) {
+    loreValues[`providers.${id}.baseUrl`] = root;
+  }
+  for (const id of PI_OPENAI_PROVIDERS) {
+    loreValues[`providers.${id}.baseUrl`] = `${root}/v1`;
+  }
+
+  const backup = captureJsonBackup(existing, loreValues);
+  const updated = updatePiModelsConfig(existing, root);
+  attachJsonBackup(updated, backup);
+  writeFileSync(configPath, `${JSON.stringify(updated, null, 2)}\n`, "utf8");
+
+  const total = PI_ANTHROPIC_PROVIDERS.length + PI_OPENAI_PROVIDERS.length;
+  console.log(`[lore] Pi configured to use Lore gateway.`);
+  console.log(
+    `[lore]   providers.<id>.baseUrl set for all ${total} gateway-routable providers`,
+  );
+  console.log(
+    `[lore]     Anthropic-family → "${root}"; OpenAI-family → "${root}/v1"`,
+  );
+  console.log(`[lore]   Config: ${configPath}`);
+  console.log(`[lore]`);
+  console.log(
+    `[lore] For dynamic per-provider routing + memory features, install the`,
+  );
+  console.log(
+    `[lore] @loreai/pi extension: add "npm:@loreai/pi@latest" to the "packages"`,
+  );
+  console.log(`[lore] array in ~/.pi/settings.json, then run: pi install`);
+}
+
+// ---------------------------------------------------------------------------
 // Undo (`lore setup undo [app]`)
 // ---------------------------------------------------------------------------
 
@@ -830,6 +975,10 @@ function undoClaudeCode(): RestoreSummary {
 
 function undoOpencode(): RestoreSummary {
   return undoJsonApp(opencodeConfigPath());
+}
+
+function undoPi(): RestoreSummary {
+  return undoJsonApp(piModelsConfigPath());
 }
 
 function undoCodex(): RestoreSummary {

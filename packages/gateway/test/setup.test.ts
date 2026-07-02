@@ -5,8 +5,12 @@ import {
   setTopLevelKey,
   updateOpencodeConfig,
   updateClaudeCodeSettings,
+  updatePiModelsConfig,
+  piModelsConfigPath,
   opencodePluginSpec,
 } from "../src/cli/setup";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 // ---------------------------------------------------------------------------
 // normalizeBaseUrl
@@ -584,5 +588,110 @@ describe("opencodePluginSpec", () => {
     const modified = opencodePluginSpec.apply(config);
     expect(modified).toBe(true);
     expect(config.plugin).toEqual(["@loreai/opencode"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// updatePiModelsConfig
+// ---------------------------------------------------------------------------
+
+describe("updatePiModelsConfig", () => {
+  // `root` is the gateway origin WITHOUT /v1 (setupPi strips it before calling).
+  const ROOT = "http://127.0.0.1:3207";
+
+  test("routes Anthropic-family to the root and OpenAI-family to /v1", () => {
+    const result = updatePiModelsConfig({}, ROOT);
+    const providers = result.providers as Record<string, { baseUrl: string }>;
+    // Anthropic Messages providers → gateway root (no /v1).
+    expect(providers.anthropic.baseUrl).toBe(ROOT);
+    expect(providers.fireworks.baseUrl).toBe(ROOT);
+    expect(providers.minimax.baseUrl).toBe(ROOT);
+    // OpenAI-family providers → root + /v1.
+    expect(providers.openai.baseUrl).toBe(`${ROOT}/v1`);
+    expect(providers.openrouter.baseUrl).toBe(`${ROOT}/v1`);
+    expect(providers.groq.baseUrl).toBe(`${ROOT}/v1`);
+    expect(providers.ollama.baseUrl).toBe(`${ROOT}/v1`);
+    // Full set is written (5 Anthropic + 22 OpenAI = 27).
+    expect(Object.keys(providers).length).toBeGreaterThanOrEqual(20);
+  });
+
+  test("never suffixes an Anthropic-family provider with /v1", () => {
+    const providers = updatePiModelsConfig({}, ROOT).providers as Record<
+      string,
+      { baseUrl: string }
+    >;
+    for (const id of ["anthropic", "fireworks", "minimax", "kimi-coding"]) {
+      expect(providers[id].baseUrl).toBe(ROOT);
+      expect(providers[id].baseUrl.endsWith("/v1")).toBe(false);
+    }
+  });
+
+  test("preserves existing custom providers and unrelated keys", () => {
+    const existing = {
+      providers: {
+        myllm: { baseUrl: "http://localhost:8000", models: [{ id: "x" }] },
+        // A user override of a provider lore also manages — lore wins.
+        anthropic: { baseUrl: "https://api.anthropic.com" },
+      },
+      $schema: "https://pi/schema.json",
+    };
+    const result = updatePiModelsConfig(existing, ROOT);
+    const providers = result.providers as Record<string, unknown>;
+    // Custom provider untouched.
+    expect(providers.myllm).toEqual({
+      baseUrl: "http://localhost:8000",
+      models: [{ id: "x" }],
+    });
+    // Managed provider re-pointed at the gateway.
+    expect((providers.anthropic as { baseUrl: string }).baseUrl).toBe(ROOT);
+    // Unrelated top-level keys preserved.
+    expect(result.$schema).toBe("https://pi/schema.json");
+  });
+
+  test("is idempotent", () => {
+    const first = updatePiModelsConfig({}, ROOT);
+    const second = updatePiModelsConfig(first, ROOT);
+    expect(second).toEqual(first);
+  });
+
+  test("re-points every managed provider when re-run with a new gateway", () => {
+    const first = updatePiModelsConfig({}, "http://old:3207");
+    const second = updatePiModelsConfig(first, "http://new:9999");
+    const p = second.providers as Record<string, { baseUrl: string }>;
+    expect(p.anthropic.baseUrl).toBe("http://new:9999");
+    expect(p.openai.baseUrl).toBe("http://new:9999/v1");
+    // No stale old-gateway URL remains anywhere.
+    for (const { baseUrl } of Object.values(p)) {
+      expect(baseUrl.startsWith("http://new:9999")).toBe(true);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// piModelsConfigPath
+// ---------------------------------------------------------------------------
+
+describe("piModelsConfigPath", () => {
+  test("defaults to ~/.pi/agent/models.json", () => {
+    const saved = process.env.PI_CODING_AGENT_DIR;
+    delete process.env.PI_CODING_AGENT_DIR;
+    try {
+      expect(piModelsConfigPath()).toBe(
+        join(homedir(), ".pi", "agent", "models.json"),
+      );
+    } finally {
+      if (saved !== undefined) process.env.PI_CODING_AGENT_DIR = saved;
+    }
+  });
+
+  test("honors PI_CODING_AGENT_DIR", () => {
+    const saved = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = "/custom/pi/dir";
+    try {
+      expect(piModelsConfigPath()).toBe("/custom/pi/dir/models.json");
+    } finally {
+      if (saved === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = saved;
+    }
   });
 });
