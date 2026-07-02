@@ -84,20 +84,44 @@ export function ortNodeVersion(): string {
   return v;
 }
 
+/** onnxruntime-node's `bin/napi-v3` root, under which each platform's files
+ *  live in `<process.platform>/<process.arch>/` subdirs. */
+export function ortNodeBinRoot(): string {
+  return join(ortNodeDir(), "bin", "napi-v3");
+}
+
 /**
- * The set of files to embed for `target`: every file in the platform's bin dir,
- * MINUS longer-versioned aliases of another file. e.g. linux ships both
+ * The native files for one onnxruntime-node platform, given its `bin/napi-v3`
+ * subdir (e.g. `"linux/x64"`, `"win32/arm64"`). Returns every file in the dir
+ * MINUS longer-versioned aliases of another file: linux ships both
  * `libonnxruntime.so.1` (the SONAME the addon's NEEDED entry references) and
- * `libonnxruntime.so.1.21.0` (identical bytes); we keep the SONAME and drop the
- * duplicate to avoid embedding ~21 MB twice. darwin's `libonnxruntime.1.21.0.
+ * `libonnxruntime.so.1.21.0` (identical bytes) — we keep the SONAME and drop the
+ * duplicate to avoid shipping ~21 MB twice. darwin's `libonnxruntime.1.21.0.
  * dylib` has no shorter alias so it's kept; windows' `onnxruntime.dll` /
  * `DirectML.dll` are kept. Version-robust: no hard-coded library filenames.
+ * Throws if the dir is missing or lacks the addon.
  */
-function targetFiles(dir: string): string[] {
+export function collectOrtFiles(
+  binSubdir: string,
+): Array<{ file: string; srcPath: string }> {
+  const dir = join(ortNodeBinRoot(), binSubdir);
+  if (!existsSync(dir)) {
+    throw new Error(
+      `vendor-ort-native: onnxruntime-node bin dir missing: ${dir}`,
+    );
+  }
   const all = readdirSync(dir).filter((f) => !f.startsWith("."));
   // Drop F when some other G is a strict prefix of F followed by "." — i.e. F is
   // a longer-versioned alias (libX.so.1.21.0 vs the SONAME libX.so.1).
-  return all.filter((f) => !all.some((g) => g !== f && f.startsWith(`${g}.`)));
+  const kept = all.filter(
+    (f) => !all.some((g) => g !== f && f.startsWith(`${g}.`)),
+  );
+  if (!kept.includes(ORT_BINDING_FILE)) {
+    throw new Error(
+      `vendor-ort-native: ${ORT_BINDING_FILE} not found in ${dir}`,
+    );
+  }
+  return kept.map((file) => ({ file, srcPath: join(dir, file) }));
 }
 
 /** Absolute source path + asset key for every native file of every target.
@@ -109,30 +133,17 @@ export function ortNativeAssets(
   VendorTarget,
   Array<{ assetKey: string; srcPath: string; file: string }>
 > {
-  const binRoot = join(ortNodeDir(), "bin", "napi-v3");
   const out = new Map<
     VendorTarget,
     Array<{ assetKey: string; srcPath: string; file: string }>
   >();
   for (const target of targets) {
-    const dir = join(binRoot, ORT_TARGET_SUBDIR[target]);
-    if (!existsSync(dir)) {
-      throw new Error(
-        `vendor-ort-native: onnxruntime-node bin dir missing for ${target}: ${dir}`,
-      );
-    }
-    const files = targetFiles(dir);
-    if (!files.includes(ORT_BINDING_FILE)) {
-      throw new Error(
-        `vendor-ort-native: ${ORT_BINDING_FILE} not found for ${target} in ${dir}`,
-      );
-    }
     out.set(
       target,
-      files.map((file) => ({
+      collectOrtFiles(ORT_TARGET_SUBDIR[target]).map(({ file, srcPath }) => ({
         file,
+        srcPath,
         assetKey: ortAssetKey(target, file),
-        srcPath: join(dir, file),
       })),
     );
   }
