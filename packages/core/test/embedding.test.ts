@@ -14,6 +14,7 @@ import {
   _saveAndClearProvider,
   _restoreProvider,
   embed,
+  formatTemporalRechunkProgress,
   recallEmbedsInFlight,
   _setRecallEmbedsInFlightForTest,
   runStartupBackfill,
@@ -112,6 +113,39 @@ describe("embed() enforces the L2-normalization invariant", () => {
     } finally {
       _restoreProvider(token);
     }
+  });
+});
+
+describe("formatTemporalRechunkProgress", () => {
+  test("reports a cumulative one-decimal percentage", () => {
+    expect(formatTemporalRechunkProgress(30688, 226527, 18)).toBe(
+      "temporal re-chunk: 13.5% complete (30688/226527 messages) · +18 re-chunked this run",
+    );
+  });
+
+  test("a clean, fully-scanned corpus reads as exactly 100%", () => {
+    // done === total is what `baseDone + scanned` reaches on a clean pass.
+    expect(formatTemporalRechunkProgress(2, 2, 2)).toContain(
+      "100% complete (2/2",
+    );
+  });
+
+  test("total === 0 reads as 100% (nothing to do), never NaN/Infinity", () => {
+    expect(formatTemporalRechunkProgress(0, 0, 0)).toContain(
+      "100% complete (0/0",
+    );
+  });
+
+  test("clamps to 100% if done somehow exceeds total", () => {
+    expect(formatTemporalRechunkProgress(5, 4, 1)).toContain(
+      "100% complete (5/4",
+    );
+  });
+
+  test("a fresh run (nothing done yet) reads as 0%", () => {
+    expect(formatTemporalRechunkProgress(0, 1000, 0)).toContain(
+      "0% complete (0/1000",
+    );
   });
 });
 

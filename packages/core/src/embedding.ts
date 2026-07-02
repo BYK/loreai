@@ -2738,6 +2738,25 @@ export function resetTemporalRechunkProgress(): void {
 }
 
 /**
+ * Cumulative-progress line for the temporal re-chunk walk. `done`/`total` count
+ * embeddable (>=50 char) messages across ALL runs, so the percentage keeps
+ * climbing over restarts — unlike the per-process counters, which reset to zero
+ * on every boot. `thisRun` is what the current invocation re-chunked. A zero
+ * `total` reads as 100% (nothing to do). The percentage is clamped to 100 and
+ * rendered to one decimal. Exported for testing. See {@link
+ * backfillTemporalEmbeddings} for how `done = baseDone + scanned` is derived.
+ */
+export function formatTemporalRechunkProgress(
+  done: number,
+  total: number,
+  thisRun: number,
+): string {
+  const pct =
+    total > 0 ? Math.min(100, Math.round((done / total) * 1000) / 10) : 100;
+  return `temporal re-chunk: ${pct}% complete (${done}/${total} messages) · +${thisRun} re-chunked this run`;
+}
+
+/**
  * Re-chunk existing temporal messages into the multi-vector vec0 layout.
  *
  * New messages are embedded part-aware at write time, but messages written
@@ -2814,9 +2833,29 @@ export async function backfillTemporalEmbeddings(
       )
       .get(cursor) as { n: number }
   ).n;
+  // Denominator for cumulative progress: ALL embeddable messages, not just the
+  // remaining backlog, so the heartbeat shows a percentage that keeps climbing
+  // across restarts instead of the per-process tally that resets to zero on every
+  // boot. `baseDone` is what prior runs already covered (rows at/below the resume
+  // cursor); the walk's SELECT is itself filtered to `length >= 50`, so `scanned`
+  // counts embeddable rows and `baseDone + scanned` reaches exactly `total` on a
+  // clean pass (→ 100%). Gated on `backlog > 0`: when nothing remains the loop
+  // latches done without iterating, so `total`/`baseDone` are never read — no
+  // point paying for a second full-table COUNT on that path.
+  let total = 0;
+  let baseDone = 0;
   if (backlog > 0) {
+    total = (
+      db()
+        .query(
+          `SELECT COUNT(*) AS n FROM temporal_messages WHERE length(content) >= 50`,
+        )
+        .get() as { n: number }
+    ).n;
+    baseDone = Math.max(0, total - backlog);
+    const basePct = total > 0 ? Math.round((baseDone / total) * 1000) / 10 : 0;
     log.info(
-      `temporal re-chunk: ${backlog} messages to scan${cursor ? " (resuming)" : ""}`,
+      `temporal re-chunk: ${backlog} messages to scan (${baseDone}/${total} already done, ${basePct}%)${cursor ? ", resuming" : ""}`,
     );
   }
 
@@ -2909,7 +2948,7 @@ export async function backfillTemporalEmbeddings(
 
       if (Date.now() - lastProgressAt >= PROGRESS_INTERVAL_MS) {
         log.info(
-          `re-chunking temporal messages: ${processed} re-chunked, ${scanned} scanned…`,
+          formatTemporalRechunkProgress(baseDone + scanned, total, processed),
         );
         lastProgressAt = Date.now();
       }
@@ -2919,7 +2958,9 @@ export async function backfillTemporalEmbeddings(
   }
 
   if (processed > 0) {
-    log.info(`re-chunked ${processed} temporal messages (${scanned} scanned)`);
+    log.info(
+      formatTemporalRechunkProgress(baseDone + scanned, total, processed),
+    );
   }
   return processed;
 }

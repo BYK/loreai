@@ -2149,8 +2149,60 @@ describeVec("temporal re-chunk backfill (backfillTemporalEmbeddings)", () => {
       const lines = info.mock.calls.map((c: unknown[]) =>
         c.map(String).join(" "),
       );
+      // Startup line surfaces the backlog AND the cumulative baseline (fresh run
+      // ⇒ 0/2 done). `short` (<50 chars) is excluded from both counts.
       expect(
-        lines.some((l) => /temporal re-chunk: 2 messages to scan/.test(l)),
+        lines.some((l) =>
+          /temporal re-chunk: 2 messages to scan \(0\/2 already done, 0%\)/.test(
+            l,
+          ),
+        ),
+      ).toBe(true);
+      // On a clean completion `baseDone + scanned === total`, so the final line
+      // reads exactly 100% — the cumulative metric, not a per-process tally.
+      expect(
+        lines.some((l) =>
+          /temporal re-chunk: 100% complete \(2\/2 messages\)/.test(l),
+        ),
+      ).toBe(true);
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  test("cumulative progress counts prior runs (resuming), not just this process", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporalContent("m1", MULTI);
+    insTemporalContent("m2", MULTI);
+    insTemporalContent("m3", MULTI);
+    insTemporalContent("m4", MULTI);
+    setKV(CURSOR_KEY, "m2"); // pretend m1,m2 were re-chunked in a prior run
+
+    const info = vi.spyOn(log, "info");
+    try {
+      await withProvider(async () => {
+        expect(await backfillTemporalEmbeddings()).toBe(2); // only m3,m4 this run
+      });
+      const lines = info.mock.calls.map((c: unknown[]) =>
+        c.map(String).join(" "),
+      );
+      // startup: 2 remain, but 2 of 4 are already done (50%) — resuming
+      expect(
+        lines.some((l) =>
+          /temporal re-chunk: 2 messages to scan \(2\/4 already done, 50%\), resuming/.test(
+            l,
+          ),
+        ),
+      ).toBe(true);
+      // completion: cumulative 4/4 (100%), NOT the per-process 2/4 — this is what
+      // distinguishes `baseDone + scanned` from `processed`.
+      expect(
+        lines.some((l) =>
+          /temporal re-chunk: 100% complete \(4\/4 messages\) · \+2 re-chunked this run/.test(
+            l,
+          ),
+        ),
       ).toBe(true);
     } finally {
       info.mockRestore();
