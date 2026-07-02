@@ -8,7 +8,14 @@
 // somehow unavailable so a vec-less CI lane stays green.
 import { afterAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { config } from "../src/config";
-import { close, db, ensureProject, getKV, setKV } from "../src/db";
+import {
+  close,
+  db,
+  ensureProject,
+  getKV,
+  mergeProjectInternal,
+  setKV,
+} from "../src/db";
 import { isVecAvailable } from "../src/db/vec";
 import {
   VEC_DIMENSION_KEY,
@@ -25,6 +32,7 @@ import {
   missingEmbeddingSql,
   readStorageMode,
   readVecDimension,
+  repartitionVec0Project,
   setStorageMode,
   storeEmbedding,
   storeTemporalChunks,
@@ -49,6 +57,7 @@ import {
   clearTemporal,
   deleteDistillation,
   deleteSession,
+  moveSessions,
 } from "../src/data";
 import { partsToText, prune } from "../src/temporal";
 import type { LorePart } from "../src/types";
@@ -978,6 +987,142 @@ describeVec("data.ts deletes reclaim vec0 orphans (#1132)", () => {
         .all()
         .map((r) => (r as { id: string }).id),
     ).toEqual(["dB"]);
+  });
+});
+
+describeVec("moving a project re-points vec0 partition keys (#1138)", () => {
+  // Enumerate a partition directly (proves the partition-key VALUE was re-pointed).
+  const inT = (p: string) =>
+    db()
+      .query("SELECT message_id AS id FROM temporal_vec WHERE project_id = ?")
+      .all(p)
+      .map((r) => (r as { id: string }).id)
+      .sort();
+  const inD = (p: string) =>
+    db()
+      .query("SELECT id FROM distillation_vec WHERE project_id = ?")
+      .all(p)
+      .map((r) => (r as { id: string }).id)
+      .sort();
+  // Exercise the REAL read path (vector-query.ts:510): partition-filtered KNN.
+  const recallT = (p: string) =>
+    db()
+      .query(
+        "SELECT message_id AS id FROM temporal_vec WHERE embedding MATCH ? AND k = ? AND project_id = ? ORDER BY distance",
+      )
+      .all(toBlob(v(1, 0, 0, 0)), 10, p)
+      .map((r) => (r as { id: string }).id)
+      .sort();
+
+  test("repartitionVec0Project re-points a session's chunks; other sessions stay", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    const pidB = ensureProject("/test/vec0-move-B");
+    // sess1 (moved): two messages with DISTINCT vectors + a distillation.
+    insTemporal("t1", "sess1", 1);
+    insTemporal("t2", "sess1", 2);
+    insDistillation("d1", "sess1", 0);
+    // sess2 (same source project): a temporal AND a distillation that must STAY.
+    // The distillation sibling guards the aux-column session_id filter against
+    // over-moving (the inverse of the bug being fixed).
+    insTemporal("t_keep", "sess2", 1);
+    insDistillation("d_keep", "sess2", 0);
+    storeEmbedding(db(), "temporal", "t1", v(1, 0, 0, 0));
+    storeEmbedding(db(), "temporal", "t2", v(0, 1, 0, 0));
+    storeEmbedding(db(), "distillations", "d1", v(1, 0, 0, 0));
+    storeEmbedding(db(), "temporal", "t_keep", v(0, 0, 1, 0));
+    storeEmbedding(db(), "distillations", "d_keep", v(0, 0, 1, 0));
+
+    repartitionVec0Project(db(), pid, pidB, ["sess1"]);
+
+    expect(inT(pidB)).toEqual(["t1", "t2"]); // sess1 chunks now under B
+    expect(inT(pid)).toEqual(["t_keep"]); // sess2 temporal stays in A
+    expect(inD(pidB)).toEqual(["d1"]);
+    expect(inD(pid)).toEqual(["d_keep"]); // sess2 distillation stays in A
+    // Embedding fidelity: a KNN probe under B ranks the exact-match vector first
+    // (a corrupted/renormalized round-trip would scramble this ordering).
+    expect(
+      db()
+        .query(
+          "SELECT message_id AS id FROM temporal_vec WHERE embedding MATCH ? AND k = ? AND project_id = ? ORDER BY distance",
+        )
+        .all(toBlob(v(0, 1, 0, 0)), 2, pidB)
+        .map((r) => (r as { id: string }).id),
+    ).toEqual(["t2", "t1"]); // t2 (exact match) nearest, then t1
+    // And the moved chunk is recallable under B, not A.
+    expect(recallT(pid)).toEqual(["t_keep"]);
+  });
+
+  test("repartitionVec0Project with no sessionIds moves the WHOLE project (merge)", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    const pidB = ensureProject("/test/vec0-move-B2");
+    insTemporal("t1", "sess1", 1);
+    insTemporal("t2", "sess2", 1);
+    insDistillation("d1", "sess1", 0);
+    storeEmbedding(db(), "temporal", "t1", v(1, 0, 0, 0));
+    storeEmbedding(db(), "temporal", "t2", v(1, 0, 0, 0));
+    storeEmbedding(db(), "distillations", "d1", v(1, 0, 0, 0));
+
+    repartitionVec0Project(db(), pid, pidB); // no session filter
+
+    expect(inT(pidB)).toEqual(["t1", "t2"]);
+    expect(inT(pid)).toEqual([]);
+    expect(inD(pidB)).toEqual(["d1"]);
+  });
+
+  test("repartitionVec0Project is a no-op when from === to, on empty ids, and in blob mode", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    const pidB = ensureProject("/test/vec0-move-B3");
+    insTemporal("t1", "sess1", 1);
+    storeEmbedding(db(), "temporal", "t1", v(1, 0, 0, 0));
+
+    repartitionVec0Project(db(), pid, pid, ["sess1"]); // from === to
+    repartitionVec0Project(db(), pid, pidB, []); // empty session list
+    expect(inT(pid)).toEqual(["t1"]); // untouched by both
+
+    setStorageMode(db(), "blob");
+    expect(() =>
+      repartitionVec0Project(db(), pid, pidB, ["sess1"]),
+    ).not.toThrow(); // blob no-op
+  });
+
+  test("moveSessions makes the moved session recallable under the new project", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporal("m1", "moveSess", 1);
+    insDistillation("md1", "moveSess", 0);
+    storeEmbedding(db(), "temporal", "m1", v(1, 0, 0, 0));
+    storeEmbedding(db(), "distillations", "md1", v(1, 0, 0, 0));
+
+    const toPath = "/test/vec0-move-target";
+    moveSessions(["moveSess"], pid, toPath);
+    const pidTarget = ensureProject(toPath);
+
+    // Before this fix, these vec rows stayed under `pid` and were invisible to a
+    // search scoped to the new project.
+    expect(recallT(pidTarget)).toEqual(["m1"]);
+    expect(inD(pidTarget)).toEqual(["md1"]);
+    expect(inT(pid)).toEqual([]);
+    expect(inD(pid)).toEqual([]);
+  });
+
+  test("mergeProjectInternal re-points the source project's vec0 rows", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    const target = ensureProject("/test/vec0-merge-target");
+    insTemporal("s1", "sess1", 1);
+    insDistillation("sd1", "sess1", 0);
+    storeEmbedding(db(), "temporal", "s1", v(1, 0, 0, 0));
+    storeEmbedding(db(), "distillations", "sd1", v(1, 0, 0, 0));
+
+    mergeProjectInternal(pid, target);
+
+    expect(inT(target)).toEqual(["s1"]);
+    expect(inD(target)).toEqual(["sd1"]);
+    expect(inT(pid)).toEqual([]);
+    expect(inD(pid)).toEqual([]);
   });
 });
 

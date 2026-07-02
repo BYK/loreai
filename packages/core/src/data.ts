@@ -35,6 +35,7 @@ import {
   type EmbeddingTable,
   gcVec0DanglingRows,
   readStorageMode,
+  repartitionVec0Project,
 } from "./db/vec-store";
 
 /**
@@ -1293,6 +1294,13 @@ export function moveSessions(
         `UPDATE distillations SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
       )
       .run(toId, fromProjectId, ...allIds);
+
+    // vec0: the base project_id UPDATEs above leave temporal_vec/distillation_vec
+    // partitioned under the OLD project. vec0 forbids UPDATE of a partition key,
+    // so re-point by DELETE+reINSERT — inside this transaction so a failure rolls
+    // the whole move back (a stale partition silently breaks scoped recall and
+    // has no orphan-sweep backstop). No-op in blob mode.
+    repartitionVec0Project(database, fromProjectId, toId, allIds);
 
     // Re-point the session rollup set-based: the project_id UPDATEs above do NOT
     // fire the rollup triggers (scoped to content/tokens/metadata + insert/delete),

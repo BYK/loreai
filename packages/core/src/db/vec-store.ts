@@ -571,6 +571,103 @@ export function gcVec0DanglingRows(
   for (const t of tables) conn.query(VEC0_DANGLING_SWEEP[t]).run();
 }
 
+/** Rows re-pointed per pass — bounds memory when a whole-project merge moves a
+ *  large `temporal_vec` (each row carries a full embedding blob). */
+const REPARTITION_BATCH = 500;
+
+/**
+ * Re-point the `project_id` PARTITION KEY of a project's `temporal_vec` /
+ * `distillation_vec` rows when their base rows move to another project (a session
+ * move or a whole-project merge). vec0 rejects `UPDATE` on a PARTITION KEY column
+ * ("UPDATE on partition key columns are not supported yet"), so we DELETE each
+ * index row and re-INSERT it under `toProjectId`, preserving the stored embedding
+ * and the (unchanged) `session_id`. No-op outside vec0 mode.
+ *
+ * `sessionIds`: when provided, restricts to those sessions (session move); when
+ * omitted, moves EVERY row of `fromProjectId` (project merge).
+ *
+ * NOT best-effort — callers MUST run this inside the move transaction and let a
+ * failure roll the whole move back. A stale partition key silently breaks
+ * project-scoped vector recall for the moved rows and has no backstop: the row
+ * is mis-partitioned, not orphaned, so `gcVec0DanglingRows` never repairs it.
+ * (`knowledge_vec` / `entity_vec` have no partition key, so they need no move.)
+ */
+export function repartitionVec0Project(
+  conn: EmbeddingWriteConn,
+  fromProjectId: string,
+  toProjectId: string,
+  sessionIds?: string[],
+): void {
+  if (fromProjectId === toProjectId) return; // moving a row out of its own scope
+  if (sessionIds && sessionIds.length === 0) return;
+  if (readStorageMode(conn) !== "vec0") return;
+
+  // One scope for a merge; chunk the session `IN (…)` list under the bound-var
+  // ceiling for a session move. Draining `LIMIT`ed batches terminates because a
+  // moved row's `project_id` no longer matches `fromProjectId` (guarded above so
+  // from≠to keeps the working set shrinking).
+  const scopes: Array<{ where: string; params: unknown[] }> =
+    sessionIds === undefined
+      ? [{ where: "project_id = ?", params: [fromProjectId] }]
+      : chunkIds(sessionIds, 900).map((batch) => ({
+          where: `project_id = ? AND session_id IN (${batch.map(() => "?").join(",")})`,
+          params: [fromProjectId, ...batch],
+        }));
+
+  // Hoist the constant DELETE/INSERT statements (the SELECT's WHERE is dynamic).
+  const delT = conn.query("DELETE FROM temporal_vec WHERE chunk_id = ?");
+  const insT = conn.query(
+    "INSERT INTO temporal_vec(chunk_id, message_id, project_id, session_id, embedding) VALUES (?, ?, ?, ?, ?)",
+  );
+  const delD = conn.query("DELETE FROM distillation_vec WHERE id = ?");
+  const insD = conn.query(
+    "INSERT INTO distillation_vec(id, project_id, session_id, embedding) VALUES (?, ?, ?, ?)",
+  );
+
+  for (const { where, params } of scopes) {
+    // temporal_vec: chunk_id PK, +message_id aux, project_id + session_id PARTITION.
+    const selT = `SELECT chunk_id, message_id, session_id, embedding FROM temporal_vec WHERE ${where} LIMIT ${REPARTITION_BATCH}`;
+    for (;;) {
+      const rows = conn.query(selT).all(...params) as Array<{
+        chunk_id: string;
+        message_id: string;
+        session_id: string;
+        embedding: Uint8Array;
+      }>;
+      if (rows.length === 0) break;
+      for (const r of rows) delT.run(r.chunk_id);
+      for (const r of rows)
+        insT.run(
+          r.chunk_id,
+          r.message_id,
+          toProjectId,
+          r.session_id,
+          r.embedding,
+        );
+    }
+    // distillation_vec: id PK, project_id PARTITION, +session_id aux.
+    const selD = `SELECT id, session_id, embedding FROM distillation_vec WHERE ${where} LIMIT ${REPARTITION_BATCH}`;
+    for (;;) {
+      const rows = conn.query(selD).all(...params) as Array<{
+        id: string;
+        session_id: string;
+        embedding: Uint8Array;
+      }>;
+      if (rows.length === 0) break;
+      for (const r of rows) delD.run(r.id);
+      for (const r of rows)
+        insD.run(r.id, toProjectId, r.session_id, r.embedding);
+    }
+  }
+}
+
+/** Split `ids` into chunks of at most `size` (SQLite bound-variable ceiling). */
+function chunkIds(ids: string[], size: number): string[][] {
+  const out: string[][] = [];
+  for (let i = 0; i < ids.length; i += size) out.push(ids.slice(i, i + size));
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Mode-aware "missing/has embedding" predicates for backfill detection
 // ---------------------------------------------------------------------------

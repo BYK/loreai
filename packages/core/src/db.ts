@@ -4,6 +4,7 @@ import {
   ensureVec0Store,
   readStorageMode,
   readVecDimension,
+  repartitionVec0Project,
 } from "./db/vec-store";
 import { join, dirname } from "node:path";
 import { chmodSync, mkdirSync } from "node:fs";
@@ -2655,6 +2656,11 @@ export function mergeProjectInternal(sourceId: string, targetId: string): void {
       targetId,
       sourceId,
     );
+    // vec0: re-point temporal_vec/distillation_vec off the source partition (vec0
+    // forbids UPDATE of a partition key, so DELETE+reINSERT). Whole-project merge
+    // ⇒ no session filter. Inside the transaction so a failure rolls the merge
+    // back; no-op in blob mode. (knowledge_vec/entity_vec have no partition key.)
+    repartitionVec0Project(d, sourceId, targetId);
     // Re-point the session rollup set-based: the temporal/distillation project_id
     // UPDATEs above do NOT fire the rollup triggers (scoped to content/tokens/
     // metadata + insert/delete), so move the rows here. session_id is globally
