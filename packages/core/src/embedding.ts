@@ -986,6 +986,13 @@ function configuredEmbedPoolSize(): number | undefined {
   return undefined;
 }
 
+/** Test seam: exposes {@link configuredEmbedPoolSize} so suites can assert the
+ *  env/config resolution + invalid-value fall-through (invalid env must resolve
+ *  to `undefined`, never `NaN`) without spinning up a pool. */
+export function _configuredEmbedPoolSize(): number | undefined {
+  return configuredEmbedPoolSize();
+}
+
 /** Test-only override of the embedding-pool ceiling (null clears). Sets the
  *  construction-time ceiling directly, bypassing the freemem-based sizing so
  *  suites don't depend on the host's actual RAM. */
@@ -1056,8 +1063,12 @@ class EmbeddingPool implements EmbeddingProvider {
       );
     } else if (process.env.NODE_ENV === "test") {
       // Keep existing single-worker suites deterministic regardless of CI RAM:
-      // honor an explicit config/env ceiling, else default to one worker.
-      this.ceiling = configuredEmbedPoolSize() ?? 1;
+      // honor an explicit config/env ceiling (clamped like the prod branch),
+      // else default to one worker.
+      this.ceiling = Math.max(
+        1,
+        Math.min(configuredEmbedPoolSize() ?? 1, EMBED_POOL_ABS_MAX),
+      );
     } else {
       this.ceiling = desiredEmbedPoolSize(
         this.liveFreemem(),

@@ -5,11 +5,13 @@ import {
   embed,
   isAvailable,
   resetProvider,
+  _configuredEmbedPoolSize,
   _resetLocalProviderProbe,
   _restoreProvider,
   _saveAndClearProvider,
   _setEmbedPoolSizeForTest,
   _setPoolFreememForTest,
+  _setRecallEmbedsInFlightForTest,
   _setTestWorkerFactory,
 } from "../src/embedding";
 
@@ -116,6 +118,7 @@ describe("EmbeddingPool dispatch (#999)", () => {
     _setTestWorkerFactory(null);
     _setEmbedPoolSizeForTest(null);
     _setPoolFreememForTest(null);
+    _setRecallEmbedsInFlightForTest(0); // defensive: don't leak a stuck count
     _resetLocalProviderProbe();
     _restoreProvider(savedProvider);
     if (savedVoyage !== undefined) process.env.VOYAGE_API_KEY = savedVoyage;
@@ -231,6 +234,42 @@ describe("EmbeddingPool dispatch (#999)", () => {
     expect(fakes).toHaveLength(1);
     fakes[0].completeAll();
     await Promise.all([p1, p2]);
+  });
+
+  // Direct assertions on the resolver so a regression in its validation is
+  // caught even where the pool's downstream sanitizers (`?? 1`,
+  // desiredEmbedPoolSize) would mask it via the worker count. Guards the
+  // load-bearing "invalid env resolves to undefined (fall through), never NaN"
+  // contract: dropping the isFinite/>=1 guard leaks NaN and fails these.
+  describe("configuredEmbedPoolSize resolution", () => {
+    it("returns undefined for an unset env (memory-gated default)", () => {
+      delete process.env.LORE_EMBED_POOL_SIZE;
+      expect(_configuredEmbedPoolSize()).toBeUndefined();
+    });
+
+    it("returns undefined (not NaN) for a non-numeric env", () => {
+      process.env.LORE_EMBED_POOL_SIZE = "not-a-number";
+      expect(_configuredEmbedPoolSize()).toBeUndefined();
+    });
+
+    it("returns undefined for a partially-numeric env (strict Number, not parseInt)", () => {
+      process.env.LORE_EMBED_POOL_SIZE = "2x";
+      expect(_configuredEmbedPoolSize()).toBeUndefined();
+    });
+
+    it("floors a valid numeric env to an integer", () => {
+      process.env.LORE_EMBED_POOL_SIZE = "3";
+      expect(_configuredEmbedPoolSize()).toBe(3);
+      process.env.LORE_EMBED_POOL_SIZE = "3.9";
+      expect(_configuredEmbedPoolSize()).toBe(3);
+    });
+
+    it("rejects out-of-range env values (< 1) as undefined", () => {
+      process.env.LORE_EMBED_POOL_SIZE = "0";
+      expect(_configuredEmbedPoolSize()).toBeUndefined();
+      process.env.LORE_EMBED_POOL_SIZE = "-4";
+      expect(_configuredEmbedPoolSize()).toBeUndefined();
+    });
   });
 
   it("outside test mode, sizes the pool from free memory (production path)", async () => {
