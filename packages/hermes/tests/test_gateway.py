@@ -60,11 +60,19 @@ class TestEnsureGateway:
     """Test gateway startup logic."""
 
     def test_returns_existing_gateway(self):
-        """If gateway is already running, returns its URL without starting."""
-        with patch("lore_hermes.gateway.find_gateway", return_value="http://127.0.0.1:3207"):
+        """If a gateway is already running, returns its URL without starting one.
+
+        Asserts the "without starting" claim explicitly: no subprocess is
+        spawned. Without the Popen assertion the mutation that always spawns a
+        process survives locally (it's only incidentally caught on CI runners
+        that have no ``lore`` binary on PATH) — see #1042 Finding 2.
+        """
+        with patch("lore_hermes.gateway.find_gateway", return_value="http://127.0.0.1:3207"), \
+             patch("subprocess.Popen") as popen:
             from lore_hermes.gateway import ensure_gateway
 
             assert ensure_gateway() == "http://127.0.0.1:3207"
+            popen.assert_not_called()
 
     def test_returns_none_when_no_binary(self):
         """No lore binary on PATH → None."""
