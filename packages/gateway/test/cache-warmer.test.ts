@@ -31,6 +31,7 @@ import {
   maxProfitableCycles,
   MAX_TOOL_CALL_WARMING_MS,
   MIN_WARMUPS_FOR_ROI_CHECK,
+  EMERGENCY_COMPACTION_LAYER,
   MIN_RETURN_PROBABILITY_FLOOR,
   TOOL_CALL_MAX_CYCLES,
   TOOL_CALL_MIN_HITS_FOR_CONTINUATION,
@@ -60,6 +61,7 @@ import {
   setCachePricing,
   evictSession,
   setPrefixChurnForTest,
+  setLastTransformLayerForTest,
   PREFIX_CHURN_WARM_BLOCK,
 } from "@loreai/core";
 import { decideSkipCompact } from "../src/pipeline";
@@ -1195,6 +1197,74 @@ describe("shouldWarm", () => {
 
     expect(shouldWarm(state, profile, hist, now)).toBe(true);
     setPrefixChurnForTest(sid, 0); // cleanup
+  });
+
+  test("returns FALSE when the session is under emergency compaction (layer >= 3), even with a perfect return rate", () => {
+    // A session at gradient Layer 3/4 re-renders its distilled prefix every
+    // turn, so a warmup replaying the stored body lands as a partial the next
+    // real turn discards (observed: Layer 4 sessions produced hit=4%/10% $3+
+    // warmups). The prefix-churn EMA lags and can dip below threshold between
+    // rewrites; the layer is a direct read that must block regardless.
+    const sid = "emergency-layer-block-session";
+    const now = Date.now();
+    const state = makeSessionState({
+      sessionID: sid,
+      lastRequestTime: now - 270_000,
+      warmup: {
+        lastWarmupAt: 0,
+        warmupCount: 0,
+        totalWarmups: 10,
+        warmupHits: 10, // perfect RETURN rate — return-guard would pass
+        disabled: false,
+      },
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
+      },
+    });
+    // Churn EMA below threshold so ONLY the layer gate can block (isolates it).
+    setPrefixChurnForTest(sid, PREFIX_CHURN_WARM_BLOCK - 0.1);
+    setLastTransformLayerForTest(sid, EMERGENCY_COMPACTION_LAYER);
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+    setPrefixChurnForTest(sid, 0); // cleanup (shared process-global core state)
+    setLastTransformLayerForTest(sid, 0);
+  });
+
+  test("returns TRUE when the session is below the emergency layer (layer < 3, prefix stable)", () => {
+    const sid = "emergency-layer-allow-session";
+    const now = Date.now();
+    const state = makeSessionState({
+      sessionID: sid,
+      lastRequestTime: now - 270_000,
+      warmup: {
+        lastWarmupAt: 0,
+        warmupCount: 0,
+        totalWarmups: 10,
+        warmupHits: 10,
+        disabled: false,
+      },
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
+      },
+    });
+    setPrefixChurnForTest(sid, PREFIX_CHURN_WARM_BLOCK - 0.1);
+    setLastTransformLayerForTest(sid, 2); // heavy compression but below emergency
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(true);
+    setPrefixChurnForTest(sid, 0); // cleanup
+    setLastTransformLayerForTest(sid, 0);
   });
 
   test("returns false when session has too few turns", () => {

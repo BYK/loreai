@@ -185,6 +185,7 @@ export {
   setLastTurnAtForTest,
   setConsecutiveBustsForTest,
   setPrefixChurnForTest,
+  setLastTransformLayerForTest,
   setTransformCountForTest,
   inspectSessionState,
   getConsecutiveBusts,
@@ -201,6 +202,7 @@ export {
   evaluateCacheStrategy,
   getCacheStrategy,
   getCacheSizeSnapshot,
+  getLastTransformLayer,
   // #797: bust-spiral alerting hook. The gateway registers this once at
   // startup (`setupBustSpiralCapture`) to surface cache-bust spirals to Sentry
   // (cold-start info-breadcrumb + past-grace error alert + recovery breadcrumb).

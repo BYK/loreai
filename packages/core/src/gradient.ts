@@ -964,6 +964,21 @@ export function getCacheSizeSnapshot(
   return { full: state.cacheSizeFull, compressed: state.cacheSizeCompressed };
 }
 
+/**
+ * The gradient layer the session's most recent real transform() landed on
+ * (0 = raw passthrough … 4 = emergency). Returns null when the session has
+ * never been transformed in-process (gradient has no state for it) so callers
+ * fail open. Non-creating (`sessionStates.get`) so a background warmer can
+ * never materialize a phantom session. Warmups replay a stored body and do NOT
+ * call transform(), so this reflects the last genuine turn's compression state
+ * — the signal the warmer uses to skip sessions whose prefix is being
+ * aggressively re-rendered under emergency compaction.
+ */
+export function getLastTransformLayer(sessionID: string): number | null {
+  const state = sessionStates.get(sessionID);
+  return state ? state.lastLayer : null;
+}
+
 // LTM tokens injected via system transform hook this turn.
 // Per-session when a sessionID is provided (preferred), with a module-level
 // fallback for callers that don't have a session ID.
@@ -1590,6 +1605,19 @@ export function setConsecutiveBustsForTest(
  */
 export function setPrefixChurnForTest(sessionID: string, churn: number): void {
   getSessionState(sessionID).prefixChurnEma = churn;
+}
+
+/**
+ * Test-only: set the per-session `lastLayer` (the layer the most recent
+ * transform() landed on) that {@link getLastTransformLayer} reports. Lets the
+ * warmer's emergency-compaction gate be exercised without running a full
+ * transform() to force the session into an emergency layer.
+ */
+export function setLastTransformLayerForTest(
+  sessionID: string,
+  layer: SafetyLayer,
+): void {
+  getSessionState(sessionID).lastLayer = layer;
 }
 
 /**

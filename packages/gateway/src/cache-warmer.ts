@@ -33,6 +33,7 @@ import {
   evaluateCacheStrategy,
   strategyWantsWarming,
   getCacheSizeSnapshot,
+  getLastTransformLayer,
   getCacheStrategy,
   estimateMetaDistillCostPerCall,
   getPrefixChurnRate,
@@ -199,6 +200,19 @@ export const MIN_WARMUPS_FOR_ROI_CHECK = 5;
  *  warming is empirically unprofitable and we stop. 25% means at least
  *  1 in 4 warmups must result in a confirmed user return. */
 export const MIN_SESSION_HIT_RATE = 0.25;
+
+/**
+ * Gradient layer at/above which a session is treated as under *emergency
+ * compaction* and warming is hard-blocked. Layer 4 is the emergency tail and
+ * Layer 3 the heavy-compression band just below it; in both, the raw window is
+ * cut and re-cut every turn so the distilled prefix re-renders, and the stored
+ * body a warmup replays no longer matches the cached prefix — warmups land as
+ * expensive partial writes ($1-3 on large Opus contexts) that the next real
+ * turn immediately discards (observed Jul 2026: session under Layer 4 produced
+ * hit=4%/10% warmups at $3+). The prefix-churn EMA is the general signal but
+ * lags and dips between rewrites; the layer is a direct read of the session's
+ * current compression state. See getLastTransformLayer(). */
+export const EMERGENCY_COMPACTION_LAYER = 3;
 
 /**
  * Shadow-mode (PR2a) cap on the `expectedFutureTurns` proxy fed into the shared
@@ -1291,6 +1305,26 @@ export function shouldWarm(
     return false;
   }
 
+  // Emergency-compaction gate. A session at gradient Layer >= 3 is aggressively
+  // re-rendering its distilled prefix every turn (the raw window is cut and
+  // re-cut), so the stored body a warmup replays no longer matches the cached
+  // prefix — the warmup lands as an expensive partial write the next real turn
+  // discards. This is a DIRECT read of the session's current compression state,
+  // complementing the prefix-churn EMA above, which lags and can dip below its
+  // threshold between rewrites (how these sessions slip through). getLastTransformLayer
+  // reflects the last genuine turn (warmups don't call transform()); null =
+  // never transformed in-process → fail open. Blocks ALL paths (incl.
+  // /lore:warm:keep) — an emergency-compacted prefix never warms cleanly.
+  const lastLayer = getLastTransformLayer(state.sessionID);
+  if (lastLayer !== null && lastLayer >= EMERGENCY_COMPACTION_LAYER) {
+    log.info(
+      `cache-warmer: skip warmup for session=${state.sessionID.slice(0, 16)} — ` +
+        `session under emergency compaction (layer=${lastLayer} >= ${EMERGENCY_COMPACTION_LAYER}); ` +
+        `warmups would land as partials`,
+    );
+    return false;
+  }
+
   const elapsed = now - state.lastRequestTime;
   const { ttlMs, warmupMarginMs, cacheReadCostPerMTok, cacheMissCostPerMTok } =
     profile;
@@ -1792,6 +1826,11 @@ export function computeWarmingSnapshot(
       notWarmingReason = "No stored request body";
     } else if (getPrefixChurnRate(state.sessionID) >= PREFIX_CHURN_WARM_BLOCK) {
       notWarmingReason = `Distilled prefix churning (churn=${getPrefixChurnRate(state.sessionID).toFixed(2)} >= ${PREFIX_CHURN_WARM_BLOCK}) — warmups would land as partials`;
+    } else if (
+      (getLastTransformLayer(state.sessionID) ?? 0) >=
+      EMERGENCY_COMPACTION_LAYER
+    ) {
+      notWarmingReason = `Emergency compaction (layer=${getLastTransformLayer(state.sessionID)} >= ${EMERGENCY_COMPACTION_LAYER}) — prefix re-renders every turn, warmups would land as partials`;
     } else if (!profile) {
       notWarmingReason = "No warming profile (non-Anthropic or unknown model)";
     } else if (state.warmup?.forceKeepWarm) {
