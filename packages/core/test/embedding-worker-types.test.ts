@@ -140,18 +140,24 @@ describe("isTransformersInferenceDumpLine", () => {
 });
 
 describe("TRANSFORMERS_INFERENCE_DUMP_PREFIXES inline copy stays in sync", () => {
-  // embedding-worker.ts inlines a byte-identical copy of these prefixes because
-  // the worker is spawned by Node's native resolver and can't runtime-import
-  // this `.ts` (same constraint as isOomError/isWasmFatalError). The worker
-  // module executes top-level code on import (it throws when parentPort is
-  // absent), so we can't import its value — instead we parse the array literal
-  // out of the source and assert deep equality. This fails CI the moment the
-  // two copies drift, per the reviewer's request on PR #1120.
-  test("worker source literal matches the canonical array", () => {
-    const workerSrc = readFileSync(
-      fileURLToPath(new URL("../src/embedding-worker.ts", import.meta.url)),
-      "utf8",
-    );
+  // embedding-worker.ts inlines a byte-identical copy of both the prefixes AND
+  // the isTransformersInferenceDumpLine predicate, because the worker is spawned
+  // by Node's native resolver and can't runtime-import this `.ts` (same
+  // constraint as isOomError/isWasmFatalError). The worker module executes
+  // top-level code on import (it throws when parentPort is absent), so we can't
+  // import its values — instead we parse them out of the source and assert they
+  // match the canonical. This fails CI the moment the copies drift (data OR
+  // logic), per the reviewer's request on PR #1120.
+  const workerSrc = readFileSync(
+    fileURLToPath(new URL("../src/embedding-worker.ts", import.meta.url)),
+    "utf8",
+  );
+  const typesSrc = readFileSync(
+    fileURLToPath(new URL("../src/embedding-worker-types.ts", import.meta.url)),
+    "utf8",
+  );
+
+  test("worker source prefixes literal matches the canonical array", () => {
     const block = workerSrc.match(
       /const TRANSFORMERS_INFERENCE_DUMP_PREFIXES\s*=\s*\[([\s\S]*?)\]/,
     );
@@ -163,6 +169,26 @@ describe("TRANSFORMERS_INFERENCE_DUMP_PREFIXES inline copy stays in sync", () =>
       (m) => m[1].replace(/\\(.)/g, "$1"),
     );
     expect(inline).toEqual([...TRANSFORMERS_INFERENCE_DUMP_PREFIXES]);
+  });
+
+  test("worker inline predicate body matches the canonical function", () => {
+    // Extract the isTransformersInferenceDumpLine body from each source and
+    // compare whitespace-normalized (robust to formatting). Guards against the
+    // matching LOGIC drifting (e.g. startsWith→includes, dropping the typeof
+    // guard) even when the prefix DATA is unchanged.
+    const bodyOf = (src: string): string => {
+      const m = src.match(
+        /function isTransformersInferenceDumpLine\(arg: unknown\): boolean \{([\s\S]*?)\n\}/,
+      );
+      expect(
+        m,
+        "isTransformersInferenceDumpLine not found (worker or canonical)",
+      ).not.toBeNull();
+      return (m?.[1] ?? "").replace(/\s+/g, " ").trim();
+    };
+    const workerBody = bodyOf(workerSrc);
+    expect(workerBody.length).toBeGreaterThan(0);
+    expect(workerBody).toBe(bodyOf(typesSrc));
   });
 });
 

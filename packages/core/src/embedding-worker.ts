@@ -474,6 +474,18 @@ const TRANSFORMERS_INFERENCE_DUMP_PREFIXES = [
   "Inputs given to model:",
 ];
 
+// Byte-identical inline copy of the canonical `isTransformersInferenceDumpLine`
+// in embedding-worker-types.ts. Both the prefixes array AND this function body
+// are drift-guarded by embedding-worker-types.test.ts, so the worker's actual
+// filtering logic (not just the data) can't silently diverge from the
+// unit-tested canonical.
+function isTransformersInferenceDumpLine(arg: unknown): boolean {
+  return (
+    typeof arg === "string" &&
+    TRANSFORMERS_INFERENCE_DUMP_PREFIXES.some((p) => arg.startsWith(p))
+  );
+}
+
 /** Temporarily drop transformers.js' inference-error tensor dump; returns a
  *  restore fn. Everything else on console.error passes through untouched. Safe
  *  because the worker runs inferences strictly sequentially — there is never a
@@ -481,13 +493,7 @@ const TRANSFORMERS_INFERENCE_DUMP_PREFIXES = [
 function suppressTransformersInferenceDump(): () => void {
   const original = console.error;
   console.error = (...args: unknown[]): void => {
-    const first = args[0];
-    if (
-      typeof first === "string" &&
-      TRANSFORMERS_INFERENCE_DUMP_PREFIXES.some((p) => first.startsWith(p))
-    ) {
-      return;
-    }
+    if (isTransformersInferenceDumpLine(args[0])) return;
     original(...args);
   };
   return () => {
