@@ -161,6 +161,41 @@ export function isWasmFatalError(msg: string): boolean {
 }
 
 /**
+ * The two leading strings transformers.js' `sessionRun()` (models.js) passes to
+ * `console.error` when `session.run` throws, before it re-throws: the error
+ * message, and a dump of every input tensor's metadata AND `.data`. For our
+ * feature-extraction pipeline that data is `input_ids` / `attention_mask` /
+ * `token_type_ids` — thousands of token IDs (~21K values at the 8192-token cap).
+ *
+ * A memory-driven OOM is an EXPECTED, recovered event in this worker (the main
+ * thread drives the ×0.7 cap backoff + fresh-heap respawn), so on a cold start
+ * this dumps ~60 lines of noise 1–2× before the cap converges. It is emitted by
+ * transformers.js — NOT the ORT C++ logger — so `logSeverityLevel` does not gate
+ * it; the only lever is filtering these lines. Matching is by leading string so
+ * the interpolated error text is irrelevant; if a future transformers release
+ * renames them the dump merely reappears (no functional change).
+ */
+export const TRANSFORMERS_INFERENCE_DUMP_PREFIXES = [
+  "An error occurred during model execution:",
+  "Inputs given to model:",
+] as const;
+
+/**
+ * True when `arg` is the first argument of one of transformers.js'
+ * inference-error `console.error` dump lines (see
+ * {@link TRANSFORMERS_INFERENCE_DUMP_PREFIXES}). Used by the worker to drop that
+ * dump for the duration of a single (expected-to-maybe-OOM) inference. Non-string
+ * args (e.g. the formatted-inputs object) never match — only the leading string
+ * line is tested, and dropping it takes its trailing object with it.
+ */
+export function isTransformersInferenceDumpLine(arg: unknown): boolean {
+  return (
+    typeof arg === "string" &&
+    TRANSFORMERS_INFERENCE_DUMP_PREFIXES.some((p) => arg.startsWith(p))
+  );
+}
+
+/**
  * Detect a corrupt / incomplete model file on disk. The most common cause is a
  * truncated HF Hub download (e.g. a 137MB ONNX model where only 87MB was written
  * before the connection dropped): the file header parses but the protobuf body

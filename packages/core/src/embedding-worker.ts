@@ -450,6 +450,51 @@ function truncateTexts(texts: string[], maxTokens: number): string[] {
 // isOomError and isWasmFatalError are imported from embedding-worker-types.ts
 // (shared with the main thread to prevent classification drift).
 
+// transformers.js' sessionRun() (models.js) wraps `session.run` in a try/catch
+// that, on ANY inference error, does two console.error() calls before
+// re-throwing: the error message, and a dump of every input tensor INCLUDING
+// its `.data` — for us that's `input_ids`/`attention_mask`/`token_type_ids`,
+// thousands of token IDs (~21K values at the 8192-token cap). A memory-driven
+// OOM is an EXPECTED, recovered event here (the main thread drives the ×0.7 cap
+// backoff + fresh-heap respawn), so that dump is pure journal noise, emitted
+// 1–2× per cold start. It is NOT gated by ORT's logSeverityLevel (it's
+// transformers.js, not the ORT C++ logger — verified: setting logSeverityLevel:4
+// leaves the dump unchanged), so the only lever is filtering these two lines.
+// Nothing actionable is lost: transformers re-throws the error, and
+// processEmbed() below classifies+surfaces it (OOM → respawn+resubmit; otherwise
+// → posted error).
+//
+// Inlined here — kept in sync with the canonical
+// `isTransformersInferenceDumpLine` / `TRANSFORMERS_INFERENCE_DUMP_PREFIXES` in
+// embedding-worker-types.ts (unit-tested there) — for the same reason as
+// isOomError/isWasmFatalError above: the worker is spawned by Node's native
+// resolver, which can't map a runtime `.js` import back to this `.ts` source.
+const TRANSFORMERS_INFERENCE_DUMP_PREFIXES = [
+  "An error occurred during model execution:",
+  "Inputs given to model:",
+];
+
+/** Temporarily drop transformers.js' inference-error tensor dump; returns a
+ *  restore fn. Everything else on console.error passes through untouched. Safe
+ *  because the worker runs inferences strictly sequentially — there is never a
+ *  concurrent runInference to race the console.error swap. */
+function suppressTransformersInferenceDump(): () => void {
+  const original = console.error;
+  console.error = (...args: unknown[]): void => {
+    const first = args[0];
+    if (
+      typeof first === "string" &&
+      TRANSFORMERS_INFERENCE_DUMP_PREFIXES.some((p) => first.startsWith(p))
+    ) {
+      return;
+    }
+    original(...args);
+  };
+  return () => {
+    console.error = original;
+  };
+}
+
 /** Run inference on `texts` and return per-text vectors. */
 async function runInference(texts: string[]): Promise<Float32Array[]> {
   // `ensurePipeline()` (awaited by the caller) guarantees both `pipe` and
@@ -462,8 +507,16 @@ async function runInference(texts: string[]): Promise<Float32Array[]> {
 
   // Run feature extraction with mean pooling.
   // truncation: true caps each text at the model's max length (8192 tokens
-  // for Nomic v1.5) as a last-resort safety net.
-  const output = await pipeline(texts, { pooling: "mean", truncation: true });
+  // for Nomic v1.5) as a last-resort safety net. The console.error filter is
+  // installed only around this call (see suppressTransformersInferenceDump) to
+  // swallow transformers.js' input-tensor dump on the expected OOM path.
+  const restoreConsole = suppressTransformersInferenceDump();
+  let output: Awaited<ReturnType<typeof pipeline>>;
+  try {
+    output = await pipeline(texts, { pooling: "mean", truncation: true });
+  } finally {
+    restoreConsole();
+  }
 
   // Post-process following Nomic's recipe:
   //   1. Layer normalization over the full hidden dimension

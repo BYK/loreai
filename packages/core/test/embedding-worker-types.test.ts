@@ -3,6 +3,7 @@ import {
   isOomError,
   isWasmFatalError,
   isCorruptModelError,
+  isTransformersInferenceDumpLine,
   resolveModelCacheDir,
   shouldHealCorruptModel,
 } from "../src/embedding-worker-types";
@@ -98,6 +99,40 @@ describe("resolveModelCacheDir", () => {
     ["/cache", "/"],
   ])("returns null for unusable input cacheDir=%s id=%s", (dir, id) => {
     expect(resolveModelCacheDir(dir as string | null, id)).toBeNull();
+  });
+});
+
+describe("isTransformersInferenceDumpLine", () => {
+  test.each([
+    // The exact leading lines observed from transformers.js on a real WASM OOM
+    // (models.js sessionRun catch → console.error x2), 8192-token input.
+    'An error occurred during model execution: "286288496".',
+    'An error occurred during model execution: "Missing the following inputs: attention_mask.',
+    "Inputs given to model:",
+  ])("matches the transformers inference-error dump line: %s", (line) => {
+    expect(isTransformersInferenceDumpLine(line)).toBe(true);
+  });
+
+  test.each([
+    // Non-string first args (e.g. the formatted-inputs object logged as the
+    // SECOND console.error arg) must never match — only the leading string
+    // line is dropped, which takes its trailing object with it.
+    [{ input_ids: { data: new BigInt64Array(3) } }],
+    [12345],
+    [null],
+    [undefined],
+  ])("does NOT match a non-string arg: %s", (arg) => {
+    expect(isTransformersInferenceDumpLine(arg)).toBe(false);
+  });
+
+  test.each([
+    "[lore] ONNX OOM at ≤4962 tokens — respawning worker at a lower cap",
+    "An error occurred", // truncated — not the transformers prefix
+    "Error: something else entirely",
+    "inputs given to model:", // case-sensitive: real line is capitalized
+    "",
+  ])("does NOT match unrelated console.error output: %s", (line) => {
+    expect(isTransformersInferenceDumpLine(line)).toBe(false);
   });
 });
 
