@@ -533,35 +533,42 @@ export function dropEmbeddingColumn(
   }
 }
 
+/** The anti-join that reclaims one vec table's dangling rows. `knowledge_vec` is
+ *  pinned to CURRENT versions (the read path joins `knowledge_current`);
+ *  `temporal_vec` keys on the aux `message_id` (one message → many chunks). */
+const VEC0_DANGLING_SWEEP: Record<EmbeddingTable, string> = {
+  knowledge:
+    "DELETE FROM knowledge_vec WHERE id NOT IN (SELECT id FROM knowledge_current)",
+  entities: "DELETE FROM entity_vec WHERE id NOT IN (SELECT id FROM entities)",
+  distillations:
+    "DELETE FROM distillation_vec WHERE id NOT IN (SELECT id FROM distillations)",
+  temporal:
+    "DELETE FROM temporal_vec WHERE message_id NOT IN (SELECT id FROM temporal_messages)",
+};
+
+const ALL_EMBEDDING_TABLES: readonly EmbeddingTable[] = [
+  "knowledge",
+  "entities",
+  "distillations",
+  "temporal",
+];
+
 /**
  * Reclaim dangling `vec0` rows whose backing base row no longer exists — a bulk
  * project / session / prune delete removes base rows but not the separate vec0
  * rows. These rows are already HARMLESS for correctness (recall hydration drops
  * a hit whose base row is missing, and a deleted project's rows live in their
- * own partition), so this is a bloat / recall-quality backstop, not a fix. Run
- * once at startup in vec0 mode. `knowledge_vec` is pinned to CURRENT versions
- * (the read path joins `knowledge_current`); `temporal_vec` keys on the aux
- * `message_id`. One bounded pass per table.
+ * own partition), so this is a bloat / recall-quality backstop, not a fix. Runs
+ * at startup in vec0 mode (all tables) and after a bulk base-row delete (scoped
+ * to the tables that delete touched — see `data.ts`). One bounded anti-join pass
+ * per requested table; each is a single scan (cheaper than a per-id delete on
+ * the un-indexed `temporal_vec.message_id` aux column for large id sets).
  */
-export function gcVec0DanglingRows(conn: EmbeddingWriteConn): void {
-  conn
-    .query(
-      "DELETE FROM knowledge_vec WHERE id NOT IN (SELECT id FROM knowledge_current)",
-    )
-    .run();
-  conn
-    .query("DELETE FROM entity_vec WHERE id NOT IN (SELECT id FROM entities)")
-    .run();
-  conn
-    .query(
-      "DELETE FROM distillation_vec WHERE id NOT IN (SELECT id FROM distillations)",
-    )
-    .run();
-  conn
-    .query(
-      "DELETE FROM temporal_vec WHERE message_id NOT IN (SELECT id FROM temporal_messages)",
-    )
-    .run();
+export function gcVec0DanglingRows(
+  conn: EmbeddingWriteConn,
+  tables: readonly EmbeddingTable[] = ALL_EMBEDDING_TABLES,
+): void {
+  for (const t of tables) conn.query(VEC0_DANGLING_SWEEP[t]).run();
 }
 
 // ---------------------------------------------------------------------------

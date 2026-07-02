@@ -29,6 +29,34 @@ import { getGitRemote } from "./git";
 import * as ltm from "./ltm";
 import * as agentsFile from "./agents-file";
 import { config as loreConfig } from "./config";
+import * as log from "./log";
+import {
+  deleteEmbeddings,
+  type EmbeddingTable,
+  gcVec0DanglingRows,
+  readStorageMode,
+} from "./db/vec-store";
+
+/**
+ * Reclaim the vec0 index rows orphaned by a bulk base-row delete. In vec0 mode a
+ * row's vector lives in a separate virtual table, so `DELETE FROM knowledge |
+ * temporal_messages | distillations` leaves it dangling; the once-per-startup
+ * sweep would otherwise not reclaim it until the next restart (issue #1132). We
+ * anti-join-sweep only the vec tables the caller actually deleted from — one
+ * scan each, which beats a per-id delete on the un-indexed `temporal_vec`
+ * message_id for large scopes, and correctly follows `knowledge_current`.
+ *
+ * Best-effort: a no-op in blob mode, and any failure is swallowed (the startup
+ * `gcVec0DanglingRows` + recall hydration-drop remain the backstop), so vec
+ * bookkeeping can never fail a user's delete.
+ */
+function reclaimVec0Orphans(tables: readonly EmbeddingTable[]): void {
+  try {
+    if (readStorageMode(db()) === "vec0") gcVec0DanglingRows(db(), tables);
+  } catch (e) {
+    log.warn("vec0 orphan reclaim after delete failed (harmless):", e);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -662,6 +690,9 @@ export function clearProject(projectPath: string): ClearResult {
     throw e;
   }
 
+  // Base rows are gone (committed above) — reclaim their now-dangling vec0 chunks.
+  reclaimVec0Orphans(["knowledge", "temporal", "distillations"]);
+
   // Regenerate or delete .lore.md depending on toggle
   if (existsSync(projectPath)) {
     try {
@@ -804,6 +835,9 @@ export function deleteProject(projectId: string): ClearResult | null {
     throw e;
   }
 
+  // Base rows are gone (committed above) — reclaim their now-dangling vec0 chunks.
+  reclaimVec0Orphans(["knowledge", "temporal", "distillations"]);
+
   // Invalidate the .lore.md file cache for all known paths so that
   // shouldImportLoreFile() re-checks the file if this project path
   // is reused. Without this, the stale cache causes the import to be
@@ -864,6 +898,7 @@ export function clearKnowledge(projectPath: string): number {
     .query("DELETE FROM knowledge_session_injections WHERE project_id = ?")
     .run(pid);
   db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+  reclaimVec0Orphans(["knowledge"]);
 
   invalidateProjectsCache();
   invalidateGlobalStatsCache();
@@ -894,6 +929,7 @@ export function clearTemporal(projectPath: string): number {
   ).c;
 
   db().query("DELETE FROM temporal_messages WHERE project_id = ?").run(pid);
+  reclaimVec0Orphans(["temporal"]);
 
   invalidateProjectsCache();
   invalidateGlobalStatsCache();
@@ -911,6 +947,7 @@ export function clearDistillations(projectPath: string): number {
   ).c;
 
   db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
+  reclaimVec0Orphans(["distillations"]);
 
   invalidateProjectsCache();
   invalidateGlobalStatsCache();
@@ -935,6 +972,19 @@ export function deleteDistillation(id: string): boolean {
   const existing = getDistillation(id);
   if (!existing) return false;
   db().query("DELETE FROM distillations WHERE id = ?").run(id);
+  // Single known id → point-delete its vec0 chunk (indexed by the vec PK); no
+  // need for the whole-table anti-join sweep here. Best-effort like
+  // reclaimVec0Orphans: no-op in blob mode, and any failure is swallowed (the
+  // base row is already gone; the startup sweep + hydration-drop backstop it) so
+  // vec bookkeeping can never fail a delete that already succeeded.
+  try {
+    deleteEmbeddings(db(), "distillations", [id]);
+  } catch (e) {
+    log.warn(
+      "vec0 chunk delete after distillation delete failed (harmless):",
+      e,
+    );
+  }
   invalidateProjectsCache();
   invalidateGlobalStatsCache();
   return true;
@@ -991,6 +1041,9 @@ export function deleteSession(
   database
     .query("DELETE FROM knowledge_session_injections WHERE session_id = ?")
     .run(sessionId);
+
+  // Reclaim the session's now-dangling temporal/distillation vec0 chunks.
+  reclaimVec0Orphans(["temporal", "distillations"]);
 
   invalidateProjectsCache();
   invalidateGlobalStatsCache();

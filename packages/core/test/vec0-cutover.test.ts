@@ -42,6 +42,14 @@ import {
 } from "../src/embedding";
 import * as log from "../src/log";
 import * as ltm from "../src/ltm";
+import {
+  clearDistillations,
+  clearKnowledge,
+  clearProject,
+  clearTemporal,
+  deleteDistillation,
+  deleteSession,
+} from "../src/data";
 import { partsToText, prune } from "../src/temporal";
 import type { LorePart } from "../src/types";
 import {
@@ -754,6 +762,36 @@ describeVec("delete maintenance + GC", () => {
     ).toEqual(["keepT"]);
   });
 
+  test("gcVec0DanglingRows sweeps ONLY the requested tables", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    // Orphan rows (no backing base row) in two different vec tables.
+    db()
+      .query(
+        "INSERT INTO temporal_vec(chunk_id, message_id, project_id, session_id, embedding) VALUES ('oT#0','oT',?,'s',?)",
+      )
+      .run(pid, toBlob(v(0, 1, 0, 0)));
+    db()
+      .query(
+        "INSERT INTO distillation_vec(id, project_id, session_id, embedding) VALUES ('oD',?,'s',?)",
+      )
+      .run(pid, toBlob(v(0, 1, 0, 0)));
+
+    gcVec0DanglingRows(db(), ["temporal"]); // filter: temporal only
+
+    expect(
+      (db().query("SELECT COUNT(*) n FROM temporal_vec").get() as { n: number })
+        .n,
+    ).toBe(0); // swept
+    expect(
+      (
+        db().query("SELECT COUNT(*) n FROM distillation_vec").get() as {
+          n: number;
+        }
+      ).n,
+    ).toBe(1); // NOT requested → left intact
+  });
+
   test("clearAllEmbeddings empties vec0 tables in vec0 mode", () => {
     setStorageMode(db(), "vec0");
     ensureVec0Store(db(), DIM);
@@ -767,6 +805,179 @@ describeVec("delete maintenance + GC", () => {
         }
       ).n,
     ).toBe(0);
+  });
+});
+
+describeVec("data.ts deletes reclaim vec0 orphans (#1132)", () => {
+  const tvec = () =>
+    (db().query("SELECT COUNT(*) n FROM temporal_vec").get() as { n: number })
+      .n;
+  const dvec = () =>
+    (
+      db().query("SELECT COUNT(*) n FROM distillation_vec").get() as {
+        n: number;
+      }
+    ).n;
+  const kvec = () =>
+    (db().query("SELECT COUNT(*) n FROM knowledge_vec").get() as { n: number })
+      .n;
+
+  test("clearTemporal reclaims temporal_vec chunks, leaves distillation_vec", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporal("t1", "s", 1);
+    insDistillation("d1", "s", 0);
+    storeEmbedding(db(), "temporal", "t1", v(1, 0, 0, 0));
+    storeEmbedding(db(), "distillations", "d1", v(1, 0, 0, 0));
+    expect(tvec()).toBe(1);
+
+    clearTemporal(PROJECT);
+
+    expect(tvec()).toBe(0); // reclaimed
+    expect(dvec()).toBe(1); // table filter left distillations alone
+  });
+
+  test("clearDistillations reclaims distillation_vec, leaves temporal_vec", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporal("t1", "s", 1);
+    insDistillation("d1", "s", 0);
+    storeEmbedding(db(), "temporal", "t1", v(1, 0, 0, 0));
+    storeEmbedding(db(), "distillations", "d1", v(1, 0, 0, 0));
+
+    clearDistillations(PROJECT);
+
+    expect(dvec()).toBe(0);
+    expect(tvec()).toBe(1);
+  });
+
+  test("clearKnowledge reclaims knowledge_vec", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insKnowledge("k1");
+    storeEmbedding(db(), "knowledge", "k1", v(1, 0, 0, 0));
+    expect(kvec()).toBe(1);
+
+    clearKnowledge(PROJECT);
+
+    expect(kvec()).toBe(0);
+  });
+
+  test("deleteDistillation point-deletes its vec0 chunk, keeps others", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insDistillation("d1", "s", 0);
+    insDistillation("d2", "s", 0);
+    storeEmbedding(db(), "distillations", "d1", v(1, 0, 0, 0));
+    storeEmbedding(db(), "distillations", "d2", v(0, 1, 0, 0));
+
+    deleteDistillation("d1");
+
+    expect(
+      db()
+        .query("SELECT id FROM distillation_vec ORDER BY id")
+        .all()
+        .map((r) => (r as { id: string }).id),
+    ).toEqual(["d2"]);
+  });
+
+  test("deleteSession reclaims that session's chunks, keeps other sessions'", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporal("t_s1", "s1", 1);
+    insDistillation("d_s1", "s1", 0);
+    insTemporal("t_s2", "s2", 1);
+    storeEmbedding(db(), "temporal", "t_s1", v(1, 0, 0, 0));
+    storeEmbedding(db(), "distillations", "d_s1", v(1, 0, 0, 0));
+    storeEmbedding(db(), "temporal", "t_s2", v(0, 1, 0, 0));
+
+    deleteSession(PROJECT, "s1");
+
+    expect(
+      db()
+        .query("SELECT message_id FROM temporal_vec ORDER BY message_id")
+        .all()
+        .map((r) => (r as { message_id: string }).message_id),
+    ).toEqual(["t_s2"]); // s1's temporal chunk gone, s2's kept
+    expect(dvec()).toBe(0); // s1's distillation chunk gone
+  });
+
+  test("clearProject reclaims all three vec tables", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insKnowledge("k1");
+    insTemporal("t1", "s", 1);
+    insDistillation("d1", "s", 0);
+    storeEmbedding(db(), "knowledge", "k1", v(1, 0, 0, 0));
+    storeEmbedding(db(), "temporal", "t1", v(1, 0, 0, 0));
+    storeEmbedding(db(), "distillations", "d1", v(1, 0, 0, 0));
+
+    clearProject(PROJECT);
+
+    expect(kvec()).toBe(0);
+    expect(tvec()).toBe(0);
+    expect(dvec()).toBe(0);
+  });
+
+  test("clearing one project leaves ANOTHER project's vec0 rows intact", () => {
+    // The reclaim sweep is a GLOBAL anti-join, not project-scoped. This pins the
+    // load-bearing safety property: it only ever removes a vec row whose base row
+    // is gone, so a live sibling project is never touched.
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    const pidB = ensureProject("/test/vec0-cutover-other");
+    // Project A (the harness PROJECT/pid) — will be cleared.
+    insKnowledge("kA");
+    insTemporal("tA", "s", 1);
+    insDistillation("dA", "s", 0);
+    // Project B — inserted against pidB directly; must survive.
+    db()
+      .query(
+        "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, logical_id) VALUES ('kB', ?, 'test', '', '', 0, 0, 'kB')",
+      )
+      .run(pidB);
+    db()
+      .query(
+        "INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at) VALUES ('tB', ?, 's', 'user', 'm', 0, 0, 1)",
+      )
+      .run(pidB);
+    db()
+      .query(
+        "INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, created_at, archived) VALUES ('dB', ?, 's', '', '', 'obs', '', 0, 0, 0, 0)",
+      )
+      .run(pidB);
+    for (const [t, id] of [
+      ["knowledge", "kA"],
+      ["temporal", "tA"],
+      ["distillations", "dA"],
+      ["knowledge", "kB"],
+      ["temporal", "tB"],
+      ["distillations", "dB"],
+    ] as const) {
+      storeEmbedding(db(), t, id, v(1, 0, 0, 0));
+    }
+
+    clearProject(PROJECT); // project A only
+
+    // A's chunks reclaimed; B's untouched because B's base rows still exist.
+    expect(
+      db()
+        .query("SELECT id FROM knowledge_vec ORDER BY id")
+        .all()
+        .map((r) => (r as { id: string }).id),
+    ).toEqual(["kB"]);
+    expect(
+      db()
+        .query("SELECT message_id FROM temporal_vec ORDER BY message_id")
+        .all()
+        .map((r) => (r as { message_id: string }).message_id),
+    ).toEqual(["tB"]);
+    expect(
+      db()
+        .query("SELECT id FROM distillation_vec ORDER BY id")
+        .all()
+        .map((r) => (r as { id: string }).id),
+    ).toEqual(["dB"]);
   });
 });
 
