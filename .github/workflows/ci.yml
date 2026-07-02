@@ -27,6 +27,7 @@ jobs:
     outputs:
       code: ${{ steps.force.outputs.code || steps.filter.outputs.code }}
       docs: ${{ steps.filter.outputs.docs }}
+      hermes: ${{ steps.force.outputs.hermes || steps.filter.outputs.hermes }}
     steps:
       - uses: actions/checkout@v6
 
@@ -60,13 +61,20 @@ jobs:
               - 'packages/core/src/config.ts'
               - 'packages/gateway/src/**/*.ts'
               - 'packages/core/src/**/*.ts'
+            # The real-hermes ABC check installs an external `hermes-agent`, so
+            # scope it to hermes changes only — it must never gate unrelated PRs.
+            hermes:
+              - 'packages/hermes/**'
+              - '.github/workflows/ci.yml'
 
       # Force code=true on main/release pushes — these always run full CI.
       # dorny/paths-filter only matters for PRs.
       - name: Force full CI on main/release push
         id: force
         if: github.event_name == 'push'
-        run: echo "code=true" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "code=true" >> "$GITHUB_OUTPUT"
+          echo "hermes=true" >> "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------------------
   # Lint GitHub Actions workflow files (catches schema errors, empty `with:`
@@ -1403,10 +1411,50 @@ jobs:
       - name: Run hermes tests
         run: python -m pytest packages/hermes/tests/ -q
 
+  # ---------------------------------------------------------------------------
+  # Real-hermes ContextEngine ABC check (#1136).
+  #
+  # `hermes-test` runs the unit suite against a hand-maintained STUB of the
+  # Hermes `ContextEngine` ABC, so it can't catch *upstream* drift (a new/renamed
+  # abstract method would make `LoreContextEngine` un-instantiable in production
+  # while the stubbed suite stays green). This job installs the REAL, unpinned
+  # `hermes-agent` and runs a standalone script (outside pytest, so the stub is
+  # never injected) that (1) fails on snapshot drift and (2) fails if our engine
+  # no longer conforms.
+  #
+  # Scoped to `packages/hermes/**` changes so it never gates unrelated PRs, and
+  # the install step is `continue-on-error` so a transient/unsupported
+  # `hermes-agent` can't hard-block a hermes PR — the check self-skips and the
+  # job stays green (the stubbed contract test in `hermes-test` still ran).
+  # ---------------------------------------------------------------------------
+  hermes-real-abc:
+    name: Hermes real ContextEngine ABC (drift + conformance)
+    needs: [changes]
+    if: needs.changes.outputs.hermes == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install real hermes-agent + lore-hermes
+        id: install
+        continue-on-error: true
+        run: |
+          python -m pip install --upgrade pip
+          pip install hermes-agent
+          pip install -e packages/hermes
+      - name: Real ContextEngine ABC drift + conformance
+        if: steps.install.outcome == 'success'
+        run: python packages/hermes/scripts/check_real_context_engine.py
+      - name: Note skipped real-ABC check
+        if: steps.install.outcome != 'success'
+        run: echo "::warning::Skipped real-hermes ABC check — hermes-agent could not be installed (transient or unsupported runtime). The stubbed contract test still ran in hermes-test."
+
   ci-status:
     name: CI Status
     if: always()
-    needs: [changes, test, binary-smoke-native, check-docs, check-links, check-preview-links, check-social, check-patches, actionlint, sync-integration, hermes-test]
+    needs: [changes, test, binary-smoke-native, check-docs, check-links, check-preview-links, check-social, check-patches, actionlint, sync-integration, hermes-test, hermes-real-abc]
     runs-on: ubuntu-latest
     steps:
       - name: Check CI result
@@ -1476,6 +1524,19 @@ jobs:
             hermesResult="${{ needs.hermes-test.result }}"
             if [ "$hermesResult" != "success" ]; then
               echo "::error::hermes-test did not succeed (result: $hermesResult)"
+              exit 1
+            fi
+          fi
+          # hermes-real-abc is required only when packages/hermes changed (it
+          # self-gates on the hermes path filter); "skipped" otherwise is pass.
+          # It tolerates hermes-agent install failures (job stays green), so a
+          # genuine failure here means real upstream ABC drift or a conformance
+          # break — both actionable in-PR (update tests/contract_spec.py and/or
+          # LoreContextEngine).
+          if [ "${{ needs.changes.outputs.hermes }}" == "true" ]; then
+            hermesAbcResult="${{ needs.hermes-real-abc.result }}"
+            if [ "$hermesAbcResult" != "success" ]; then
+              echo "::error::hermes-real-abc did not succeed (result: $hermesAbcResult)"
               exit 1
             fi
           fi

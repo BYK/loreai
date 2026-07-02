@@ -40,8 +40,10 @@ if "agent.context_engine" not in sys.modules:
         abstract would make this stub *stricter* than reality.
 
         Drift caveat: this is hand-maintained. Upstream Hermes adding a *new*
-        abstract method is only caught by the real-Hermes integration path
-        (``packages/hermes/test-integration.sh``), not by this unit suite.
+        abstract method is caught by the real-Hermes check
+        (``scripts/check_real_context_engine.py``, run by the CI
+        ``hermes-real-abc`` job — #1136), not by this stubbed unit suite. The
+        snapshot itself lives in ``tests/contract_spec.py``.
         """
 
         def __init__(self, **kwargs):  # concrete upstream — permissive base

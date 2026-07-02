@@ -14,18 +14,17 @@ mirroring the real Hermes contract's abstract-method set. These tests prove:
 
 Residual gap (documented, not fixed here): this checks our engine against a
 hand-maintained SNAPSHOT of the contract (hermes-agent==0.18.0), not live
-upstream Hermes. Upstream adding a *new* abstract method is only caught by
-``packages/hermes/test-integration.sh`` (needs a full Hermes install).
+upstream Hermes. Upstream adding a *new* abstract method is caught separately
+by ``scripts/check_real_context_engine.py`` — the real-Hermes drift +
+conformance check wired into CI by #1136 (and by the full-install
+``packages/hermes/test-integration.sh``).
 """
 
 import abc
 
 import pytest
 
-# The abstract-method set this repo mirrors, per hermes-agent==0.18.0.
-EXPECTED_ABSTRACT_METHODS = frozenset(
-    {"name", "should_compress", "compress", "update_from_response"}
-)
+from tests.contract_spec import EXPECTED_ABSTRACT_METHODS
 
 
 def test_stub_context_engine_is_an_enforcing_abc():
