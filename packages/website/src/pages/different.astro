@@ -387,6 +387,20 @@ const base = import.meta.env.BASE_URL;
       </div>
       <div class="bc bc-3 sr">
         <div>
+          <p class="bc-tag">Learning in token space</p>
+          <h3 class="bc-t">Knowledge that <em>outlives the model</em></h3>
+          <p class="bc-b">Fine-tuning bakes what an agent learns into weights you can't read, can't move,
+            and lose the moment you upgrade the model. Lore learns in <em>token space</em> instead — durable
+            knowledge in plain text, not parameter updates. That's why you can read every entry, carry the
+            same knowledge across providers and model generations, and roll back a line instead of retraining.
+            The model is the part you swap; your knowledge is the part that stays.</p>
+        </div>
+        <div class="code-block">
+          <code><span class="ck"># Learned once. Portable across</span><br><span class="ck"># every model and provider.</span><br><br><span class="cv">$</span> cat .lore.md<br><span class="ck">* **Auth**: refresh tokens in the</span><br><span class="ck">  middleware, never per route.</span></code>
+        </div>
+      </div>
+      <div class="bc bc-3 sr">
+        <div>
           <p class="bc-tag">Proven where it's hardest</p>
           <h3 class="bc-t">The advantage grows with the session</h3>
           <p class="bc-b">On a real 5-day, 2.3M-token coding session, Lore averaged 4.0/5 on recall versus 2.4/5
