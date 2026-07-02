@@ -12,7 +12,11 @@ import {
   _saveAndClearProvider,
   _setTestWorkerFactory,
 } from "../src/embedding";
-import { backoffEmbedCap, MIN_EMBED_TOKENS } from "../src/embedding-cap";
+import {
+  backoffEmbedCap,
+  MIN_EMBED_TOKENS,
+  WASM_SUSTAINABLE_MAX_TOKENS,
+} from "../src/embedding-cap";
 import { EMBED_OOM_EXIT_CODE } from "../src/embedding-worker-types";
 import { isStderrSilenced, silenceStderr } from "../src/log";
 
@@ -101,10 +105,11 @@ describe("embedding OOM recovery (worker-mock)", () => {
   });
 
   it("OOM exit lowers the cap ×0.7, persists it, respawns, and re-submits the in-flight request at the lowered cap", async () => {
-    // freeMemBytes=0 → reconcileEmbedCap trusts this cap as-is regardless of
-    // host free memory, so the provider deterministically starts at the model
-    // max (otherwise a freemem swing under parallel CI load reconciles down to
-    // the memory-model cap and this test flakes).
+    // freeMemBytes=0 → reconcileEmbedCap trusts this cap regardless of host free
+    // memory (otherwise a freemem swing under parallel CI load reconciles to the
+    // memory-model cap and this test flakes). The persisted 8192 is deliberately
+    // STALE (learned before the WASM bound) — the provider must start at the
+    // WASM ceiling, not 8192, exercising the trust-band bound in the live path.
     _persistEmbedCap(8192, 0);
     const fakes = installFakeWorkers();
 
@@ -114,7 +119,7 @@ describe("embedding OOM recovery (worker-mock)", () => {
     expect(fakes).toHaveLength(1);
     const first = fakes[0].lastPosted();
     expect(first.type).toBe("embed");
-    expect(first.maxTokens).toBe(8192);
+    expect(first.maxTokens).toBe(WASM_SUSTAINABLE_MAX_TOKENS);
 
     // The worker OOMs on the oversized input → exits with the OOM code.
     fakes[0].emit("exit", EMBED_OOM_EXIT_CODE);
@@ -124,7 +129,9 @@ describe("embedding OOM recovery (worker-mock)", () => {
     expect(fakes).toHaveLength(2);
     const resubmitted = fakes[1].lastPosted();
     expect(resubmitted.id).toBe(first.id);
-    expect(resubmitted.maxTokens).toBe(backoffEmbedCap(8192)); // 5734
+    expect(resubmitted.maxTokens).toBe(
+      backoffEmbedCap(WASM_SUSTAINABLE_MAX_TOKENS),
+    );
     expect(resubmitted.maxTokens).toBeLessThan(first.maxTokens);
     // The lowered cap was persisted so a restart doesn't re-walk the backoff.
     expect(_readPersistedEmbedCap()?.cap).toBe(resubmitted.maxTokens);

@@ -66,6 +66,10 @@ export const EMBED_CAP_TRUST_BAND = 0.25;
 export interface PersistedEmbedCap {
   cap: number;
   freeMemBytes: number;
+  /** Highest cap (tokens) known to have OOMed, persisted across restarts so a
+   *  memory-rich reboot never re-probes back up to a cap the WASM heap has
+   *  already rejected. Absent/0 = none learned yet. */
+  knownBadCap?: number;
 }
 
 /** Reference sequence length used to size the per-worker memory budget for pool
@@ -131,18 +135,54 @@ export function clampEmbedCap(n: number): number {
   return Math.max(MIN_EMBED_TOKENS, Math.min(MODEL_MAX_TOKENS, Math.round(n)));
 }
 
+/** ONNX WASM runtime linear-memory hard cap. The bundled
+ *  `ort-wasm-simd-threaded` build declares `Memory({ initial: 256,
+ *  maximum: 65536, shared: true })` → 65536 pages × 64 KiB = 4 GiB (measured on
+ *  the built worker, #999). Unlike host RAM this is FIXED regardless of how much
+ *  free memory the box has — so a cap sized purely from `os.freemem()` can exceed
+ *  it on a memory-rich host and OOM the WASM heap. */
+export const EMBED_WASM_HEAP_MAX_BYTES = 4 * 1024 * 1024 * 1024;
+
+/** Fraction of the WASM hard cap usable for the transient O(L²) attention
+ *  allocation (after the model/runtime baseline) before OOM. Headroom (0.85)
+ *  absorbs WASM heap fragmentation and ORT's non-attention intermediates — the
+ *  real OOM fires a bit below the theoretical 4 GiB. Combined with the measured
+ *  baseline/K this yields ~4950 tokens, matching the observed safe convergence
+ *  (≤4962) on a 4 GiB-WASM host (#999). */
+export const EMBED_WASM_HEAP_USABLE_FRACTION = 0.85;
+
+/** Hard token ceiling implied by the fixed WASM heap cap (host-RAM-independent):
+ *  `sqrt((MAX·fraction − baseline) / K)`. Every freemem-derived cap is bounded by
+ *  this, so a memory-rich host never *starts* above what the WASM heap can hold
+ *  (the OOM-backoff only corrects *downward*, so an over-sized start OOMs 1–2×
+ *  every boot until it re-converges — exactly the failure this prevents). */
+export const WASM_SUSTAINABLE_MAX_TOKENS = clampEmbedCap(
+  Math.sqrt(
+    (EMBED_WASM_HEAP_MAX_BYTES * EMBED_WASM_HEAP_USABLE_FRACTION -
+      EMBED_MODEL_BASELINE_BYTES) /
+      EMBED_ATTENTION_BYTES_PER_TOKEN_SQ,
+  ),
+);
+
 /** Lower the cap one backoff step, never below the floor. */
 export function backoffEmbedCap(cap: number): number {
   return Math.max(Math.round(cap * EMBED_BACKOFF_FACTOR), MIN_EMBED_TOKENS);
 }
 
-/** Size the token cap from free memory and the O(L²) attention model. */
+/** Size the token cap from free memory and the O(L²) attention model, bounded by
+ *  the fixed WASM heap ceiling ({@link WASM_SUSTAINABLE_MAX_TOKENS}). The freemem
+ *  term guards against host-memory thrashing (too big for RAM → swap); the WASM
+ *  bound guards against the fixed 4 GiB linear-memory cap (too big for the heap →
+ *  OOM) that host RAM says nothing about. */
 export function memoryModelEmbedCap(freeBytes: number): number {
   const budget = Math.max(
     freeBytes * EMBED_MEM_FRACTION - EMBED_MODEL_BASELINE_BYTES,
     0,
   );
-  return clampEmbedCap(Math.sqrt(budget / EMBED_ATTENTION_BYTES_PER_TOKEN_SQ));
+  return Math.min(
+    clampEmbedCap(Math.sqrt(budget / EMBED_ATTENTION_BYTES_PER_TOKEN_SQ)),
+    WASM_SUSTAINABLE_MAX_TOKENS,
+  );
 }
 
 /**
@@ -151,20 +191,42 @@ export function memoryModelEmbedCap(freeBytes: number): number {
  * cap (avoids re-walking the backoff every restart — the "recurs on every
  * restart" failure). When memory has materially grown, re-probe upward via the
  * model; when it has materially shrunk, take the safer of model vs learned.
+ *
+ * `knownBadCap` (a cap that has OOMed, persisted across restarts) is a hard
+ * ceiling on the result: a rising `os.freemem()` does NOT prove the fixed WASM
+ * heap can grow (see {@link reprobeEmbedCap}), so a memory-rich reboot must never
+ * re-probe back up to or past a cap the heap already rejected — the exact
+ * every-boot-OOM this guards against.
  */
 export function reconcileEmbedCap(
   freeBytes: number,
   stored: PersistedEmbedCap | null,
   modelCap: number,
+  knownBadCap = 0,
 ): number {
-  if (!stored) return modelCap;
-  const ratio = stored.freeMemBytes > 0 ? freeBytes / stored.freeMemBytes : 1;
-  if (ratio >= 1 - EMBED_CAP_TRUST_BAND && ratio <= 1 + EMBED_CAP_TRUST_BAND) {
-    return clampEmbedCap(stored.cap);
-  }
-  return freeBytes > stored.freeMemBytes
-    ? modelCap
-    : clampEmbedCap(Math.min(modelCap, stored.cap));
+  const reconciled = ((): number => {
+    if (!stored) return modelCap;
+    const ratio = stored.freeMemBytes > 0 ? freeBytes / stored.freeMemBytes : 1;
+    if (
+      ratio >= 1 - EMBED_CAP_TRUST_BAND &&
+      ratio <= 1 + EMBED_CAP_TRUST_BAND
+    ) {
+      return clampEmbedCap(stored.cap);
+    }
+    return freeBytes > stored.freeMemBytes
+      ? modelCap
+      : clampEmbedCap(Math.min(modelCap, stored.cap));
+  })();
+  // Bound EVERY path by the fixed WASM heap ceiling — not just the model-derived
+  // ones. The trust-band branch returns a persisted `stored.cap` verbatim, so a
+  // stale cap learned before this bound existed (e.g. an old 7000 read after an
+  // upgrade) would otherwise slip through and OOM once. knownBadCap (a
+  // per-host-learned OOM) tightens it further when present.
+  const ceiling =
+    knownBadCap > 0
+      ? Math.min(WASM_SUSTAINABLE_MAX_TOKENS, knownBadCap - 1)
+      : WASM_SUSTAINABLE_MAX_TOKENS;
+  return clampEmbedCap(Math.min(reconciled, ceiling));
 }
 
 /**
@@ -192,8 +254,13 @@ export function shouldReprobeEmbedCap(
  * `knownBadCap` (the highest cap that has OOMed in this process, 0 = none) is a
  * hard ceiling: a rising `os.freemem()` does not guarantee the WASM heap can
  * actually grow that far (fragmentation, racing allocations), so we never
- * re-probe *up to or past* a cap that already failed. A process restart
- * re-evaluates from scratch and can exceed it if memory genuinely grew.
+ * re-probe *up to or past* a cap that already failed.
+ *
+ * The result is also hard-bounded by {@link WASM_SUSTAINABLE_MAX_TOKENS} so this
+ * path can never yield a cap above the fixed WASM heap ceiling — even if handed
+ * an above-ceiling `cap` (the `Math.max(cap, …)` "never step down" clause would
+ * otherwise propagate it). This makes the "no cap exceeds the WASM ceiling"
+ * invariant locally enforced here, not merely inherited from a bounded input.
  */
 export function reprobeEmbedCap(
   cap: number,
@@ -203,5 +270,8 @@ export function reprobeEmbedCap(
   const stepped = Math.round(cap / EMBED_BACKOFF_FACTOR);
   let ceiling = memoryModelEmbedCap(freeBytes);
   if (knownBadCap > 0) ceiling = Math.min(ceiling, knownBadCap - 1);
-  return clampEmbedCap(Math.max(cap, Math.min(stepped, ceiling)));
+  return Math.min(
+    clampEmbedCap(Math.max(cap, Math.min(stepped, ceiling))),
+    WASM_SUSTAINABLE_MAX_TOKENS,
+  );
 }

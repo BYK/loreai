@@ -118,17 +118,28 @@ function readPersistedEmbedCap(): PersistedEmbedCap | null {
     ) {
       return null;
     }
-    return { cap: parsed.cap, freeMemBytes: parsed.freeMemBytes };
+    return {
+      cap: parsed.cap,
+      freeMemBytes: parsed.freeMemBytes,
+      ...(typeof parsed.knownBadCap === "number" && parsed.knownBadCap > 0
+        ? { knownBadCap: parsed.knownBadCap }
+        : {}),
+    };
   } catch {
     return null;
   }
 }
 
-function persistEmbedCap(cap: number, freeMemBytes: number = freemem()): void {
+function persistEmbedCap(
+  cap: number,
+  freeMemBytes: number = freemem(),
+  knownBadCap = 0,
+): void {
   try {
     const value = JSON.stringify({
       cap,
       freeMemBytes,
+      ...(knownBadCap > 0 ? { knownBadCap } : {}),
     } satisfies PersistedEmbedCap);
     db()
       .query(
@@ -148,12 +159,15 @@ function persistEmbedCap(cap: number, freeMemBytes: number = freemem()): void {
  * current free memory; a materially larger free pool lets the cap re-probe
  * upward on restart (in lieu of continuous additive increase). Always clamped.
  */
-function computeInitialEmbedCap(): number {
+function computeInitialEmbedCap(
+  persisted: PersistedEmbedCap | null = readPersistedEmbedCap(),
+): number {
   const free = freemem();
   return reconcileEmbedCap(
     free,
-    readPersistedEmbedCap(),
+    persisted,
     memoryModelEmbedCap(free),
+    persisted?.knownBadCap ?? 0,
   );
 }
 
@@ -168,8 +182,12 @@ function computeInitialEmbedCap(): number {
  * construction (e.g. a CI box running the full suite in parallel) reconciles to
  * the freemem-derived model cap instead, making the start cap non-deterministic.
  */
-export function _persistEmbedCap(cap: number, freeMemBytes?: number): void {
-  persistEmbedCap(cap, freeMemBytes);
+export function _persistEmbedCap(
+  cap: number,
+  freeMemBytes?: number,
+  knownBadCap?: number,
+): void {
+  persistEmbedCap(cap, freeMemBytes, knownBadCap);
 }
 
 /** For tests: read the persisted embedding cap (or null when absent/corrupt). */
@@ -496,7 +514,13 @@ class LocalProvider implements EmbeddingProvider {
   constructor(modelId: string, dimensions: number) {
     this.modelId = modelId;
     this.dimensions = dimensions;
-    this.maxTokens = computeInitialEmbedCap();
+    // Seed lastOomCap from the persisted known-bad cap so an upward re-probe in
+    // THIS process still respects a ceiling the WASM heap rejected in a PRIOR
+    // one (a rising freemem doesn't prove the fixed heap grew). Read once and
+    // reuse for the initial cap to avoid a second kv_meta round-trip.
+    const persisted = readPersistedEmbedCap();
+    this.lastOomCap = persisted?.knownBadCap ?? 0;
+    this.maxTokens = computeInitialEmbedCap(persisted);
     this.capFreememAtLearn = freemem();
   }
 
@@ -745,7 +769,7 @@ class LocalProvider implements EmbeddingProvider {
     const prev = this.maxTokens;
     this.maxTokens = next;
     this.capFreememAtLearn = free;
-    persistEmbedCap(next, free);
+    persistEmbedCap(next, free, this.lastOomCap);
     log.info(
       `embedding cap re-probed up: ≤${prev} → ≤${next} tokens (free memory recovered)`,
     );
@@ -818,7 +842,9 @@ class LocalProvider implements EmbeddingProvider {
     // Anchor the re-probe baseline at OOM-time free memory: only climb back up
     // once memory has genuinely recovered (≥ EMBED_REPROBE_RATIO × this).
     this.capFreememAtLearn = free;
-    persistEmbedCap(capAfter, free);
+    // Persist the known-bad cap alongside the backed-off cap so the NEXT process
+    // start won't re-probe up to it even if the box reboots with more free RAM.
+    persistEmbedCap(capAfter, free, this.lastOomCap);
     log.info(
       `embedding worker OOM at ≤${capBefore} tokens — backing off to ≤${capAfter} ` +
         `and respawning on a fresh heap (${batchSize} in-flight, longest≈${longestChars} chars)`,

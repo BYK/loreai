@@ -46,4 +46,25 @@ describe("embedding cap persistence", () => {
     writeRaw(JSON.stringify({ cap: 1000 }));
     expect(_readPersistedEmbedCap()).toBeNull();
   });
+
+  it("round-trips a known-bad cap across the persistence boundary", () => {
+    _persistEmbedCap(1000, 4 * 1024 * 1024 * 1024, 3000);
+    const stored = _readPersistedEmbedCap();
+    expect(stored?.cap).toBe(1000);
+    expect(stored?.knownBadCap).toBe(3000);
+  });
+
+  it("omits knownBadCap when none is learned (0 / undefined)", () => {
+    _persistEmbedCap(1000);
+    expect(_readPersistedEmbedCap()?.knownBadCap).toBeUndefined();
+    _persistEmbedCap(1000, undefined, 0);
+    expect(_readPersistedEmbedCap()?.knownBadCap).toBeUndefined();
+  });
+
+  it("ignores a non-positive or non-numeric persisted knownBadCap", () => {
+    writeRaw(JSON.stringify({ cap: 1000, freeMemBytes: 1, knownBadCap: 0 }));
+    expect(_readPersistedEmbedCap()?.knownBadCap).toBeUndefined();
+    writeRaw(JSON.stringify({ cap: 1000, freeMemBytes: 1, knownBadCap: "x" }));
+    expect(_readPersistedEmbedCap()?.knownBadCap).toBeUndefined();
+  });
 });
