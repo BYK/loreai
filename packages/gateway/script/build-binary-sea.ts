@@ -46,8 +46,9 @@ import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { PLACEHOLDER_DEBUG_ID, injectDebugId } from "./debug-id";
 import { MODEL_DIR_NAME, MODEL_FILES } from "./vendor-paths";
-import { findOrtWebDir, ortWebRedirectPlugin } from "./ort-web-plugin";
+import { ortNativePlugin } from "./ort-native-plugin";
 import { ensureVecBinaries, vecAssetKey } from "./vendor-sqlite-vec";
+import { ortNativeAssets } from "./vendor-ort-native";
 import { fossilize } from "fossilize";
 
 const require = createRequire(import.meta.url);
@@ -189,19 +190,17 @@ function prepareVendorModelCache(target: CompileTarget): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// esbuild: onnxruntime-node → onnxruntime-web (WASM) redirect
+// esbuild: native onnxruntime-node (NOT WASM) for the SEA binary
 // ---------------------------------------------------------------------------
-// The onnxruntime-node → onnxruntime-web redirect + transformers.js wasmPaths
-// patch live in the shared ./ort-web-plugin module (also used by bundle.ts).
-// The binary path vendors the WASM as SEA assets and sets
-// __LORE_VENDOR_WASM_PATHS__ on globalThis (via native-loader.cjs) before the
-// worker evaluates, so the wasmPaths replacement reads from that global.
+// The SEA binary bundles the REAL native onnxruntime-node (2.7–4.1× faster than
+// single-threaded WASM, scales with cores, no 4 GiB WASM-heap cap — #999). The
+// native addon (.node) + its shared libs ride along as per-target SEA assets
+// (staged below via ortNativeAssets) and native-loader.cjs extracts them + sets
+// globalThis.__LORE_ORT_BINDING_PATH__ before any worker evaluates; the plugin
+// rewrites onnxruntime-node's binding.js to require that path. See
+// ort-native-plugin.ts / vendor-ort-native.ts.
 function binaryExternalsPlugin(): esbuild.Plugin {
-  return ortWebRedirectPlugin({
-    repoRoot,
-    wasmPathsExpr:
-      "globalThis.__LORE_VENDOR_WASM_PATHS__ || ONNX_ENV.wasm.wasmPaths",
-  });
+  return ortNativePlugin({ repoRoot });
 }
 
 // ---------------------------------------------------------------------------
@@ -492,8 +491,8 @@ async function buildBinary() {
       stubSqliteVecPlugin(),
     ],
     inject: [
-      // Runs FIRST: extracts WASM files from SEA assets and registers
-      // __LORE_VENDOR_WASM_PATHS__ on globalThis.
+      // Runs FIRST: extracts the native onnxruntime-node addon (+ sqlite-vec)
+      // from SEA assets and registers __LORE_ORT_BINDING_PATH__ on globalThis.
       join(here, "native-loader.cjs"),
     ],
     outfile: bundlePath,
@@ -511,8 +510,6 @@ async function buildBinary() {
       // doesn't reliably produce a stringified array in esbuild).
       __LORE_MODEL_FILES__: JSON.stringify(MODEL_FILES.join(",")),
       __LORE_MODEL_DIR_NAME__: JSON.stringify(MODEL_DIR_NAME),
-      __LORE_WASM_MJS_ASSET__: JSON.stringify("ort-wasm-simd-threaded.mjs"),
-      __LORE_WASM_BIN_ASSET__: JSON.stringify("ort-wasm-simd-threaded.wasm"),
       // (No __LORE_WORKER_PATH_ENV__ — the worker is now passed as
       // a source string at runtime via globalThis.__LORE_WORKER_SOURCE__,
       // not a file path. See packages/gateway/src/cli/sea-entry.ts.)
@@ -660,38 +657,6 @@ async function buildBinary() {
   // --asset-manifest. The manifest's `entry.file` field is the asset
   // key, and `entry.src` (or `file` path) is where fossilize reads
   // the bytes from.
-  const ortWebDir = findOrtWebDir(repoRoot);
-  const wasmMjsPath = join(ortWebDir, "dist", "ort-wasm-simd-threaded.mjs");
-  const wasmBinPath = join(ortWebDir, "dist", "ort-wasm-simd-threaded.wasm");
-
-  // Patch the WASM file to disable pthread Worker spawning. Node 24
-  // doesn't expose `Worker` as a global, so the WASM file's
-  // `new Worker(new URL(import.meta.url), ...)` call fails with
-  // "Received undefined" when used from a Node CJS bundle. Since
-  // lore's workload is single-text embedding and we already force
-  // `numThreads=1` via transformers.js, pthreads aren't needed.
-  // We replace the Qb function body with a no-op. The function
-  // body is single-line in the minified WASM bundle, so a regex
-  // anchored on its declaration and the trailing `}` works.
-  const originalWasmMjs = readFileSync(wasmMjsPath, "utf-8");
-  const patchedWasmMjs = originalWasmMjs.replace(
-    /function Qb\(\)\{var a=new Worker\(new URL\(import\.meta\.url\),\{type:"module",workerData:"em-pthread",name:"em-pthread"\}\);Q\.push\(a\)\}/,
-    "function Qb(){}",
-  );
-  // Verify the patch landed before writing to avoid leaving
-  // unpatched content on disk if the upstream WASM layout changes.
-  if (!patchedWasmMjs.includes("function Qb(){}")) {
-    throw new Error(
-      "Failed to patch WASM file (Qb() regex didn't match). " +
-        "The onnxruntime-web WASM layout may have changed.",
-    );
-  }
-  // Write patched WASM to a side path so we don't mutate the source.
-  const patchedWasmMjsPath = join(stagingDir, "ort-wasm-simd-threaded.mjs");
-  writeFileSync(patchedWasmMjsPath, patchedWasmMjs);
-  const patchedWasmBinPath = join(stagingDir, "ort-wasm-simd-threaded.wasm");
-  copyFileSync(wasmBinPath, patchedWasmBinPath);
-
   // Copy each asset into the staging dir under its final key name.
   // We use a hardlink (when possible) to avoid duplicating 132 MB of
   // model files. Falls back to copyFileSync on filesystems that don't
@@ -713,11 +678,8 @@ async function buildBinary() {
     return dest;
   };
 
-  // Patched files are already in stagingDir under their final keys.
-  // No need to stage again (stageAsset would no-op or fail on
-  // src == dest).
-  // worker.cjs was already moved to stagingDir/worker.cjs by the
-  // renameSync call above. No need to stage again.
+  // worker.cjs / vector-worker.cjs were already moved to stagingDir by the
+  // renameSync calls above. No need to stage again.
 
   if (vendorModelDir) {
     for (const rel of MODEL_FILES) {
@@ -735,6 +697,32 @@ async function buildBinary() {
     stageAsset(vecAssetKey(target), binPath);
   }
 
+  // Stage the native onnxruntime-node addon + its shared libraries for every
+  // target. Like vec0, fossilize embeds one shared asset set into each binary,
+  // so we key each file as `ort-<target>-<file>`; native-loader.cjs extracts
+  // only the set matching the running platform into one dir (replicating the
+  // package's sibling layout so the addon's $ORIGIN/@loader_path/DLL-search
+  // resolution finds libonnxruntime). ~22–37 MB per target — meaningful but
+  // dwarfed by the ~137 MB embedded model. See vendor-ort-native.ts.
+  const ortAssets = ortNativeAssets(targets);
+  for (const files of ortAssets.values()) {
+    for (const { assetKey, srcPath } of files) {
+      stageAsset(assetKey, srcPath);
+    }
+  }
+  // Runtime manifest of the ORT native file set per target. native-loader.cjs
+  // reads it to learn the (version-specific, e.g. libonnxruntime.1.21.0.dylib)
+  // filenames to extract for the running platform — so filenames live in ONE
+  // place (vendor-ort-native.ts) instead of being duplicated in the loader.
+  const ortFileManifest: Record<string, string[]> = {};
+  for (const [target, files] of ortAssets) {
+    ortFileManifest[target] = files.map((f) => f.file);
+  }
+  writeFileSync(
+    join(stagingDir, "ort-manifest.json"),
+    JSON.stringify(ortFileManifest),
+  );
+
   // Write a Vite-style manifest. Fossilize uses `entry.file` as the
   // SEA asset key and joins the manifest's dir to locate the file.
   interface ManifestEntry {
@@ -744,14 +732,6 @@ async function buildBinary() {
     name?: string;
   }
   const manifest: Record<string, ManifestEntry> = {
-    "ort-wasm-simd-threaded.mjs": {
-      file: "ort-wasm-simd-threaded.mjs",
-      src: "ort-wasm-simd-threaded.mjs",
-    },
-    "ort-wasm-simd-threaded.wasm": {
-      file: "ort-wasm-simd-threaded.wasm",
-      src: "ort-wasm-simd-threaded.wasm",
-    },
     "worker.cjs": { file: "worker.cjs", src: "worker.cjs" },
     "vector-worker.cjs": {
       file: "vector-worker.cjs",
@@ -768,6 +748,15 @@ async function buildBinary() {
     const key = vecAssetKey(target);
     manifest[key] = { file: key, src: key };
   }
+  for (const files of ortAssets.values()) {
+    for (const { assetKey } of files) {
+      manifest[assetKey] = { file: assetKey, src: assetKey };
+    }
+  }
+  manifest["ort-manifest.json"] = {
+    file: "ort-manifest.json",
+    src: "ort-manifest.json",
+  };
 
   const manifestPath = join(stagingDir, "asset-manifest.json");
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));

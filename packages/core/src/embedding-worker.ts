@@ -249,20 +249,20 @@ async function ensurePipeline(): Promise<void> {
  * so it can be retried after a corrupt-model purge. Throws on any failure.
  */
 async function loadPipeline(): Promise<void> {
-  // npm/dev path: the bundled worker redirects onnxruntime-node →
-  // onnxruntime-web (WASM) and the gateway bundle ships the WASM runtime
-  // (ort-wasm-simd-threaded.{mjs,wasm}) next to this file in dist/. Point
-  // transformers.js' patched wasmPaths read at those sibling files so the
-  // WASM loads locally instead of from the jsdelivr CDN (wrong variant +
-  // requires network). The binary path sets __LORE_VENDOR_WASM_PATHS__ via
-  // native-loader.cjs instead, so we only act when neither global is set and
-  // we're not in vendored (binary) mode. Guarded by existsSync so dev/test
-  // (which run the raw .ts with the real native onnxruntime-node and have no
+  // npm dist-only path: the npm worker bundle redirects onnxruntime-node →
+  // onnxruntime-web (WASM) and ships the WASM runtime (ort-wasm-simd-threaded.
+  // {mjs,wasm}) next to this file in dist/ — this keeps `npm install`/AUR
+  // dist-only installs (no node_modules) self-contained (#763). Point
+  // transformers.js' patched wasmPaths at those sibling files so the WASM loads
+  // locally instead of from the jsdelivr CDN (wrong variant + requires network).
+  // The standalone SEA binary does NOT take this path: it bundles the native
+  // onnxruntime-node addon (extracted by native-loader.cjs) and runs in
+  // `vendorModel` mode, so `!vendorModel` short-circuits below. Guarded by
+  // existsSync so dev/test (raw .ts with the real native onnxruntime-node and no
   // sibling WASM) are unaffected — the block is simply inert there.
   const globals = globalThis as Record<string, unknown>;
   if (
     !vendorModel &&
-    !globals.__LORE_VENDOR_WASM_PATHS__ &&
     !globals.__LORE_NPM_WASM_PATHS__ &&
     typeof __filename === "string"
   ) {
@@ -293,18 +293,17 @@ async function loadPipeline(): Promise<void> {
     env.allowRemoteModels = false;
   }
 
-  // Force single-threaded WASM execution to avoid Bun's buggy
-  // shared-memory/pthread WASM paths. The threaded build uses
-  // `new WebAssembly.Memory({shared:true})` which triggers open Bun bugs:
+  // WASM-only tuning: force single-threaded WASM execution to avoid Bun's buggy
+  // shared-memory/pthread WASM paths (the npm dist path may run under Bun). The
+  // threaded build uses `new WebAssembly.Memory({shared:true})` which triggers
+  // open Bun bugs:
   //   - oven-sh/bun#25677: SharedArrayBuffer writes invisible to workers
   //   - oven-sh/bun#31158: SIGPWR storm with native threads + WASM
   //   - oven-sh/bun#18145: $bunfs + WASM Aborted() in --compile binaries
-  // Single-thread avoids all three. The ~2× batch speed advantage of
-  // threading is batch-only (single-text is identical) and lore's workload
-  // is incremental single-text embeds, so no practical throughput loss.
-  //
-  // Access the ONNX WASM config via the env object exposed by transformers.js.
-  // `env.backends.onnx.wasm` is the ORT WebAssemblyFlags interface.
+  // Single-thread avoids all three. This touches only `env.backends.onnx.wasm`,
+  // which the native onnxruntime-node backend (SEA binary + dev/test) ignores —
+  // native uses its own multi-threaded intra-op pool (a key reason the SEA
+  // switched to native: it scales with cores, #999). So this is a no-op there.
   const wasmEnv = (env as Record<string, unknown>).backends as
     | { onnx?: { wasm?: { numThreads?: number; proxy?: boolean } } }
     | undefined;
@@ -317,10 +316,10 @@ async function loadPipeline(): Promise<void> {
   // dtype: 'q8' selects the INT8 quantized ONNX variant (model_quantized.onnx)
   // which is ~137MB for Nomic v1.5 vs ~547MB for the full FP32 model.
   //
-  // device: "cpu" — in npm mode, transformers.js uses onnxruntime-node
-  // (native CPU). In the compiled binary, onnxruntime-node is redirected
-  // to onnxruntime-web by the build plugin, which handles "cpu" via its
-  // WASM+SIMD backend (API-compatible, ~2x faster on batch workloads).
+  // device: "cpu" — the SEA binary and dev/test use the native onnxruntime-node
+  // CPU backend (multi-threaded). The npm dist-only bundle redirects
+  // onnxruntime-node → onnxruntime-web, which serves "cpu" via its WASM+SIMD
+  // backend (API-compatible).
   pipe = (await pipeline("feature-extraction", modelId, {
     dtype: "q8",
     device: "cpu",

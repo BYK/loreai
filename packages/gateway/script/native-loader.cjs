@@ -1,57 +1,54 @@
 /**
- * Runtime loader for fossilize-based standalone binary.
+ * Runtime loader for the fossilize-based standalone binary.
  *
  * This file is auto-injected at the top of the bundled CJS by esbuild's
- * `inject:` config. It runs before any other module evaluates, in both
- * the main process and any worker thread spawned by it.
+ * `inject:` config. It runs before any other module evaluates, in both the main
+ * process and any worker thread spawned by it.
  *
- * The standalone binary uses the WASM backend of `@huggingface/transformers`
- * (i.e. `onnxruntime-web`'s Node entry — same approach the prior Bun
- * `--compile` build used). This is the path of least resistance: WASM
- * runs correctly under Node's V8 engine (the bugs that forced this
- * migration were specific to Bun's WASM engine — see
- * `oven-sh/bun#18145`, `#25677`, `#31158`).
+ * The standalone binary runs the REAL native `onnxruntime-node` (not the WASM
+ * `onnxruntime-web`). Native ORT is multiple times faster than the
+ * single-threaded WASM backend, scales with cores, and has no fixed 4 GiB
+ * WASM-heap ceiling (#999). esbuild can't inline a `.node` addon, so the addon
+ * (+ its shared libraries) rides along as per-target SEA assets and is extracted
+ * here at startup — exactly how the native `sqlite-vec`/vec0 extension ships.
  *
- * Responsibilities:
+ * Responsibilities (only inside a Node SEA — a no-op otherwise):
  *
- * 1. If running inside a Node SEA (fossilize binary):
- *    a. Extract the two WASM runtime files
- *       (`ort-wasm-simd-threaded.mjs` and `ort-wasm-simd-threaded.wasm`)
- *       from SEA assets to a stable tmp dir on disk.
- *    b. Register their paths on `globalThis.__LORE_VENDOR_WASM_PATHS__`
- *       so the bundled `transformers.js` (patched via the shared
- *       `ortWebRedirectPlugin` in `ort-web-plugin.ts`) can load them
- *       without going to the CDN fallback.
+ *   1. Extract the native onnxruntime-node addon + its shared libraries for the
+ *      running platform into a per-pid tmp dir (replicating the package's
+ *      sibling layout so the addon's $ORIGIN/@loader_path/DLL-search resolution
+ *      finds `libonnxruntime`), and register the addon path on
+ *      `globalThis.__LORE_ORT_BINDING_PATH__`. The bundled onnxruntime-node's
+ *      `binding.js` is patched (see `ort-native-plugin.ts`) to `require` that
+ *      path instead of the node_modules-relative one that doesn't exist here.
  *
- * 2. If NOT running inside a SEA (npm CJS bundle, dev mode, tests):
- *    Do nothing. The npm CJS bundle handles WASM itself — it ships
- *    `ort-wasm-simd-threaded.{mjs,wasm}` in `dist/` and `embedding-worker.ts`
- *    registers `globalThis.__LORE_NPM_WASM_PATHS__` at runtime (also patched
- *    away from the CDN by `ortWebRedirectPlugin`). Dev/test use the real
- *    native `onnxruntime-node` from `node_modules`.
+ *   2. Extract the native `sqlite-vec` loadable extension and register it on
+ *      `globalThis.__LORE_VEC_EXTENSION_PATH__` (preferred by `db/vec.ts`).
  *
- * The extraction uses a per-pid tmp dir, so each process gets a
- * fresh copy. The OS reaps /tmp on reboot, so disk leaks are
- * bounded. The `--worker` argv flag causes the binary to run as a
- * worker thread (see sea-entry.ts); the shim is harmless in worker
- * mode — both threads need their own copy of the WASM files (cheap
- * at ~11 MB and avoids cross-thread fs races).
+ * Outside a SEA (npm CJS bundle, dev mode, tests): do nothing. The npm bundle
+ * uses the WASM backend and ships `ort-wasm-simd-threaded.{mjs,wasm}` in `dist/`
+ * (see `ort-web-plugin.ts` / `bundle.ts`); dev/test use the real native
+ * `onnxruntime-node` from `node_modules` directly.
  *
- * IMPORTANT: This file is intentionally CJS (not TS) so esbuild's
- * `inject:` mechanism treats it as the very first module in the bundle
- * without any transpilation or hoisting surprises. The corresponding
- * `node:sea` and `node:fs` requires are Node built-ins and resolve
- * at runtime.
+ * The extraction uses a per-pid tmp dir so concurrent worker threads don't race,
+ * and the OS reaps /tmp on reboot so disk leaks are bounded. NOTE: like the
+ * pre-existing vec0 extraction, the addon is `dlopen`ed from /tmp — a `noexec`
+ * /tmp mount makes both fall back (native ORT → FTS-only; vec0 → JS scan).
+ *
+ * IMPORTANT: This file is intentionally CJS (not TS) so esbuild's `inject:`
+ * mechanism treats it as the very first module in the bundle without any
+ * transpilation or hoisting surprises. The `node:*` requires are Node built-ins
+ * and resolve at runtime.
  */
 "use strict";
 
 // Idempotency guard: if the shim already ran in this process, exit.
-if (globalThis.__LORE_WASM_READY__) {
+if (globalThis.__LORE_NATIVE_READY__) {
   // No-op on second injection.
 } else {
-  // Detect SEA mode. `node:sea` is only available in Node 20+; the
-  // require itself is safe to attempt because Node throws synchronously
-  // if the module doesn't exist, which we catch and treat as "not SEA".
+  // Detect SEA mode. `node:sea` is only available in Node 20+; the require
+  // itself is safe to attempt because Node throws synchronously if the module
+  // doesn't exist, which we catch and treat as "not SEA".
   let isSea = false;
   try {
     isSea = require("node:sea").isSea();
@@ -64,65 +61,56 @@ if (globalThis.__LORE_WASM_READY__) {
     const path = require("node:path");
     const os = require("node:os");
     const sea = require("node:sea");
+    const { isMainThread } = require("node:worker_threads");
 
-    // Expose `Worker` as a global so the WASM runtime (loaded via
-    // dynamic `import()`) can spawn pthreads. Node doesn't ship
-    // `Worker` as a global — only via `require("node:worker_threads")`
-    // — but the WASM bundle references it as a free variable. Bun's
-    // runtime provides it natively; under Node we polyfill it here.
-    // (The original Bun-compiled binary worked for this same reason.)
-    if (typeof globalThis.Worker === "undefined") {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      globalThis.Worker = require("node:worker_threads").Worker;
-    }
-
-    // The WASM runtime's `new Worker(new URL(import.meta.url), ...)`
-    // call expects `import.meta.url` to be a string. When the WASM file
-    // is loaded as ESM in a CJS bundle, this works. But the Worker
-    // constructor in Node also needs the URL to be parseable as a
-    // file URL or string. We ensure the path is absolute so the URL
-    // conversion always succeeds.
-    // (No-op — handled by the WASM file's URL construction.)
-
-    // Per-pid tmp dir so concurrent worker threads don't race on file
-    // writes. The OS reaps /tmp on reboot, so leaks are bounded.
-    const targetDir = path.join(os.tmpdir(), "lore-wasm", `pid-${process.pid}`);
-
-    // The two WASM runtime files we need. The asset keys are the
-    // paths passed to fossilize's --assets flag (see build-binary-sea.ts).
-    const wasmMjsKey =
-      typeof __LORE_WASM_MJS_ASSET__ === "string"
-        ? __LORE_WASM_MJS_ASSET__
-        : "ort-wasm-simd-threaded.mjs";
-    const wasmBinKey =
-      typeof __LORE_WASM_BIN_ASSET__ === "string"
-        ? __LORE_WASM_BIN_ASSET__
-        : "ort-wasm-simd-threaded.wasm";
-
+    // Per-pid tmp dir so concurrent worker threads don't race on file writes.
+    const targetDir = path.join(
+      os.tmpdir(),
+      "lore-native",
+      `pid-${process.pid}`,
+    );
     fs.mkdirSync(targetDir, { recursive: true });
-    const mjsPath = path.join(targetDir, "ort-wasm-simd-threaded.mjs");
-    const wasmPath = path.join(targetDir, "ort-wasm-simd-threaded.wasm");
-    fs.writeFileSync(mjsPath, Buffer.from(sea.getRawAsset(wasmMjsKey)));
-    fs.writeFileSync(wasmPath, Buffer.from(sea.getRawAsset(wasmBinKey)));
 
-    // Register for the bundled transformers.js (patched via
-    // binaryExternalsPlugin to read wasmPaths from this global).
-    // On Windows, absolute paths (e.g. C:\...) passed to dynamic
-    // import() are rejected because 'C:' looks like a URL scheme.
-    // Convert the mjs path to a file:// URL so the ESM loader
-    // accepts it on all platforms. The wasm path is read via fs
-    // (not import()), so it stays as a plain file path.
-    globalThis.__LORE_VENDOR_WASM_PATHS__ = {
-      mjs: require("node:url").pathToFileURL(mjsPath).href,
-      wasm: wasmPath,
+    // The main thread runs first (at startup, before any worker spawns) and
+    // (re)writes unconditionally — overwriting any stale file from a reused pid.
+    // Worker threads share the pid/tmp dir, so they skip the write when the main
+    // thread already produced it: avoids a concurrent-write race on the shared
+    // path while still self-healing if it's somehow absent.
+    const writeAsset = (dest, key) => {
+      if (isMainThread || !fs.existsSync(dest)) {
+        fs.writeFileSync(dest, Buffer.from(sea.getRawAsset(key)));
+      }
     };
 
-    // sqlite-vec native loadable extension. The build embeds one binary per
-    // target as `vec0-<target>.<ext>` (see vendor-sqlite-vec.ts /
-    // build-binary-sea.ts). Extract only the one matching this platform and
-    // register its path; `db/vec.ts` prefers globalThis.__LORE_VEC_EXTENSION_PATH__
-    // over the (stubbed) npm wrapper. Runs in worker threads too (the vector
-    // pool's reader connections load it) — each thread has its own globalThis.
+    // 1. Native onnxruntime-node addon + shared libraries. The build embeds one
+    //    set per target as `ort-<target>-<file>` plus an `ort-manifest.json`
+    //    listing the (version-specific) filenames per target. Extract only the
+    //    running platform's set into `targetDir` and register the addon path.
+    try {
+      const ortTarget = `${process.platform === "win32" ? "windows" : process.platform}-${process.arch}`;
+      const ortManifest = JSON.parse(
+        Buffer.from(sea.getRawAsset("ort-manifest.json")).toString("utf8"),
+      );
+      const files = ortManifest[ortTarget];
+      if (Array.isArray(files) && files.length > 0) {
+        for (const f of files) {
+          writeAsset(path.join(targetDir, f), `ort-${ortTarget}-${f}`);
+        }
+        globalThis.__LORE_ORT_BINDING_PATH__ = path.join(
+          targetDir,
+          "onnxruntime_binding.node",
+        );
+      }
+    } catch {
+      // Asset missing / extraction failed — leave the global unset. The patched
+      // binding.js then throws a clear error, the embedding provider marks
+      // itself unavailable, and search degrades to FTS-only.
+    }
+
+    // 2. sqlite-vec native loadable extension. Extract the one matching this
+    //    platform and register its path; `db/vec.ts` prefers this global over
+    //    the (stubbed) npm wrapper. Runs in worker threads too (the vector
+    //    pool's reader connections load it) — each thread has its own globalThis.
     try {
       const vecOs = process.platform === "win32" ? "windows" : process.platform;
       const vecExt =
@@ -133,21 +121,13 @@ if (globalThis.__LORE_WASM_READY__) {
             : "so";
       const vecKey = `vec0-${vecOs}-${process.arch}.${vecExt}`;
       const vecPath = path.join(targetDir, `vec0.${vecExt}`);
-      // The main thread runs first (at startup, before any worker spawns) and
-      // (re)writes unconditionally — overwriting any stale file from a reused
-      // pid. Worker threads share the pid/tmp dir, so they skip the write when
-      // the main thread already produced it: this avoids a concurrent-write
-      // race on the shared path while still self-healing if it's somehow absent.
-      const { isMainThread } = require("node:worker_threads");
-      if (isMainThread || !fs.existsSync(vecPath)) {
-        fs.writeFileSync(vecPath, Buffer.from(sea.getRawAsset(vecKey)));
-      }
+      writeAsset(vecPath, vecKey);
       globalThis.__LORE_VEC_EXTENSION_PATH__ = vecPath;
     } catch {
       // Asset absent (build without vec staging) or extraction failed — leave
       // the global unset so db/vec.ts uses the JS brute-force fallback.
     }
 
-    globalThis.__LORE_WASM_READY__ = true;
+    globalThis.__LORE_NATIVE_READY__ = true;
   }
 }
