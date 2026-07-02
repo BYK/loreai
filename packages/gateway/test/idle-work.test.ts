@@ -29,6 +29,7 @@ import { resetPipelineState } from "../src/pipeline";
 import { compressBody } from "../src/cache-analytics";
 import {
   ltm,
+  embedding,
   loadSessionCosts,
   db,
   ensureProject,
@@ -881,5 +882,109 @@ describe("buildIdleWorkHandler", () => {
     const persisted = loadSessionCosts("idle-cost");
     expect(persisted).not.toBeNull();
     expect(persisted?.conversationTurns).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildIdleWorkHandler — contradiction detection wiring (#1123, idle step 4.5)
+// ---------------------------------------------------------------------------
+// The pure gate (contradictionCooldownActive) is unit-tested in
+// contradiction-throttle.test.ts; here we prove the handler actually runs the
+// detector AND that it is throttled per project — including the "arm the
+// cooldown even on a nothing-found pass" invariant (the pattern-echo gotcha).
+describe("buildIdleWorkHandler — contradiction detection (#1123)", () => {
+  const F32 = (xs: number[]) => Buffer.from(new Float32Array(xs).buffer);
+
+  // Create entries and force deterministic embedding blobs, draining the
+  // fire-and-forget embed from create() first so our vectors are final.
+  async function seedKnowledge(
+    projectPath: string,
+    rows: Array<{ title: string; vec: number[] }>,
+  ): Promise<void> {
+    const ids = rows.map((r) =>
+      ltm.create({
+        projectPath,
+        category: "preference",
+        title: r.title,
+        content: `${r.title} — body`,
+        scope: "project",
+        confidence: 0.9,
+      }),
+    );
+    await embedding.settleDocumentEmbeds();
+    for (let i = 0; i < ids.length; i++) {
+      db()
+        .query("UPDATE knowledge SET embedding = ? WHERE id = ?")
+        .run(F32(rows[i].vec), ids[i]);
+    }
+  }
+
+  function contradictLLM(): LLMClient {
+    return {
+      prompt: vi.fn(async () =>
+        JSON.stringify({ contradict: true, reason: "opposed" }),
+      ),
+    } as unknown as LLMClient;
+  }
+
+  async function runIdle(
+    sessionID: string,
+    projectPath: string,
+    llm: LLMClient,
+  ): Promise<void> {
+    // Force getWorkerModel() truthy so the model-gated step 4.5 runs.
+    const prev = process.env.LORE_WORKER_MODEL;
+    process.env.LORE_WORKER_MODEL = "anthropic/claude-haiku-4-5";
+    try {
+      await buildIdleWorkHandler(llm)(
+        sessionID,
+        makeSessionState({ sessionID, projectPath, turnsSinceCuration: 0 }),
+      );
+    } finally {
+      if (prev === undefined) delete process.env.LORE_WORKER_MODEL;
+      else process.env.LORE_WORKER_MODEL = prev;
+    }
+  }
+
+  test("step 4.5 detects and records a contradiction from the idle handler", async () => {
+    const projectPath = makeProjectDir();
+    await seedKnowledge(projectPath, [
+      { title: "Always use tabs", vec: [1, 0, 0] },
+      { title: "Always use spaces", vec: [1, 0, 0] }, // same topic → candidate
+    ]);
+
+    await runIdle("idle-contra-detect", projectPath, contradictLLM());
+
+    expect(ltm.listOpenContradictions(projectPath)).toHaveLength(1);
+  });
+
+  test("detection is throttled per project — cooldown armed even on a nothing-found pass", async () => {
+    const projectPath = makeProjectDir();
+    // Pass 1 sees only UNRELATED entries (orthogonal → no candidate pair): it
+    // finds nothing, but MUST still arm the per-project cooldown.
+    await seedKnowledge(projectPath, [
+      { title: "Rule about auth", vec: [1, 0, 0] },
+      { title: "Rule about css", vec: [0, 1, 0] },
+    ]);
+    await runIdle("idle-contra-pass1", projectPath, contradictLLM());
+    expect(ltm.listOpenContradictions(projectPath)).toHaveLength(0);
+
+    // Introduce a genuine contradiction (same topic as the auth rule).
+    await seedKnowledge(projectPath, [
+      { title: "Never force push", vec: [1, 0, 0] },
+      { title: "Always force push", vec: [1, 0, 0] },
+    ]);
+
+    // Pass 2 (different session, same project, within the window) is throttled,
+    // so the new contradiction is NOT detected. Without the unconditional arm in
+    // pass 1, this pass would run and record it.
+    await runIdle("idle-contra-pass2", projectPath, contradictLLM());
+    expect(ltm.listOpenContradictions(projectPath)).toHaveLength(0);
+
+    // Sanity: the contradicting entries really are present (so the pass-2 zero is
+    // due to the throttle, not because consolidation removed them).
+    const titles = ltm.forProject(projectPath, true).map((e) => e.title);
+    expect(titles).toContain("Never force push");
+    expect(titles).toContain("Always force push");
   });
 });

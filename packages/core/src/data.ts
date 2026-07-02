@@ -919,8 +919,6 @@ export function clearKnowledge(projectPath: string): number {
     .run(pid);
   // Contradiction pairs (#1123): purge any pair touching this project's entries
   // before the knowledge rows go (composite key, can't ride the loop).
-  // Contradiction pairs (#1123): purge any pair touching this project's entries
-  // before the knowledge rows go (composite key, can't ride the loop).
   db()
     .query(
       `DELETE FROM knowledge_contradictions

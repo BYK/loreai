@@ -138,7 +138,17 @@ export async function detectContradictions(input: {
     )
     .all(...ids) as Array<{ id: string; embedding: Buffer }>;
   const vecById = new Map<string, Float32Array>();
-  for (const r of rows) vecById.set(r.id, embedding.fromBlob(r.embedding));
+  for (const r of rows) {
+    try {
+      vecById.set(r.id, embedding.fromBlob(r.embedding));
+    } catch {
+      // A corrupted/truncated embedding blob must not abort the whole pass:
+      // detectContradictions throwing here would exit with the cooldown already
+      // armed, silently disabling detection for this project for an hour. Skip
+      // the bad entry (a later pass re-embeds it) — mirrors the dedup guard.
+      log.info(`contradiction: skipping corrupted embedding for entry ${r.id}`);
+    }
+  }
 
   const items: PairItem[] = [];
   const byLogical = new Map<string, KnowledgeEntry>();

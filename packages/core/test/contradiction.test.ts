@@ -333,6 +333,38 @@ describe("detectContradictions", () => {
     expect(prompt).not.toHaveBeenCalled();
   });
 
+  it("skips a corrupted embedding blob instead of aborting the whole pass", async () => {
+    const P = "/test/contra/corrupt-blob";
+    // Two valid, contradicting entries + one whose embedding blob is corrupt.
+    await seed(P, "Always cache aggressively", "cache it", v(1, 0, 0));
+    await seed(P, "Never cache anything", "no caching", v(1, 0, 0));
+    const bad = await seed(P, "Unrelated corrupt entry", "x", v(0, 1, 0));
+    // Overwrite the bad entry with a truncated blob (3 bytes) and make fromBlob
+    // throw for it, delegating to the real impl for the two valid entries.
+    db()
+      .query("UPDATE knowledge SET embedding = ? WHERE id = ?")
+      .run(Buffer.from([9, 9, 9]), bad);
+    const realFromBlob = embedding.fromBlob;
+    vi.spyOn(embedding, "fromBlob").mockImplementation((blob) => {
+      if ((blob as Buffer).length === 3) throw new Error("corrupt blob");
+      return realFromBlob(blob);
+    });
+    const { llm, prompt } = stubLLM(
+      JSON.stringify({ contradict: true, reason: "opposed" }),
+    );
+
+    // Must NOT throw; the two valid entries are still judged and the
+    // contradiction is still found.
+    const res = await detectContradictions({
+      projectPath: P,
+      sessionID: "s",
+      llm,
+    });
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(res).toEqual({ judged: 1, found: 1 });
+    expect(ltm.listOpenContradictions(P)).toHaveLength(1);
+  });
+
   it("does not judge topically-unrelated pairs (below the similarity floor)", async () => {
     const P = "/test/contra/detect-unrelated";
     // Orthogonal embeddings → cosine 0 → never a candidate → judge never runs.
