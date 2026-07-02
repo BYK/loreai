@@ -30,7 +30,8 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { PLACEHOLDER_DEBUG_ID, injectDebugId } from "./debug-id";
-import { findOrtWebDir, ortWebRedirectPlugin } from "./ort-web-plugin";
+import { findOrtWebDir } from "./ort-web-plugin";
+import { ortNpmDualPlugin } from "./ort-npm-plugin";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const packageDir = dirname(here);
@@ -191,12 +192,13 @@ await esbuild.build({
   target: "node22",
   platform: "node",
   conditions: ["node"],
-  // onnxruntime-node is redirected to onnxruntime-web (WASM) by the plugin so
-  // the npm bundle has no native-module dependency. The WASM runtime files are
-  // copied into dist/ below and located at runtime via __LORE_NPM_WASM_PATHS__
-  // (set in embedding-worker.ts). sharp is stubbed by the plugin.
+  // Dual backend: bundle the real onnxruntime-node (graceful binding patch) AND
+  // onnxruntime-web (WASM). At runtime the worker prefers the native addon from
+  // the per-platform @loreai/onnxruntime-<target> optionalDependency, falling
+  // back to the shipped WASM (located via __LORE_NPM_WASM_PATHS__) for dist-only
+  // installs (#763). sharp is stubbed by the plugin. See ort-npm-plugin.ts.
   plugins: [
-    ortWebRedirectPlugin({
+    ortNpmDualPlugin({
       repoRoot,
       wasmPathsExpr:
         "globalThis.__LORE_NPM_WASM_PATHS__ || ONNX_ENV.wasm.wasmPaths",
@@ -227,18 +229,14 @@ await esbuild.build({
   platform: "node",
   conditions: ["bun"],
   external: ["bun:*", "node:*"],
-  // Same onnxruntime-node → onnxruntime-web redirect as the CJS worker, for
-  // consistency and defense-in-depth. NOTE: this is NOT the worker the
-  // opencode/pi (Bun) path actually loads — under Bun, the gateway bundle
-  // keeps @loreai/core external (see the index.bun.js build above), so
-  // LocalProvider runs from core's own dist and spawns core's
-  // dist/bun/embedding-worker.js (which still uses the native onnxruntime-node
-  // that ships as a non-optional dep of @huggingface/transformers in a
-  // raw-deps install). This gateway-side ESM worker only matters if the
-  // gateway's own Bun bundle is run as a standalone worker host. The bug
-  // (#763) is on the dist-only CJS path → embedding-worker.cjs (fixed above).
+  // Same dual-backend plugin as the CJS worker. @loreai/core is now INLINED
+  // into index.bun.js (see that build above, #1027), so the opencode (Bun) path
+  // spawns THIS worker (dist/embedding-worker.js), not core's — so it must also
+  // prefer native ORT with a WASM fallback. (Confirmed: Bun dlopens the ORT
+  // .node addon fine.) The dist-only WASM path (#763) is preserved by the
+  // fallback branch.
   plugins: [
-    ortWebRedirectPlugin({
+    ortNpmDualPlugin({
       repoRoot,
       wasmPathsExpr:
         "globalThis.__LORE_NPM_WASM_PATHS__ || ONNX_ENV.wasm.wasmPaths",

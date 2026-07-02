@@ -249,34 +249,50 @@ async function ensurePipeline(): Promise<void> {
  * so it can be retried after a corrupt-model purge. Throws on any failure.
  */
 async function loadPipeline(): Promise<void> {
-  // npm dist-only path: the npm worker bundle redirects onnxruntime-node →
-  // onnxruntime-web (WASM) and ships the WASM runtime (ort-wasm-simd-threaded.
-  // {mjs,wasm}) next to this file in dist/ — this keeps `npm install`/AUR
-  // dist-only installs (no node_modules) self-contained (#763). Point
-  // transformers.js' patched wasmPaths at those sibling files so the WASM loads
-  // locally instead of from the jsdelivr CDN (wrong variant + requires network).
-  // The standalone SEA binary does NOT take this path: it bundles the native
-  // onnxruntime-node addon (extracted by native-loader.cjs) and runs in
-  // `vendorModel` mode, so `!vendorModel` short-circuits below. Guarded by
-  // existsSync so dev/test (raw .ts with the real native onnxruntime-node and no
-  // sibling WASM) are unaffected — the block is simply inert there.
+  // npm gateway bundle path: prefer NATIVE ONNX Runtime, fall back to the
+  // bundled WASM. This bundle ships the WASM runtime (ort-wasm-simd-threaded.
+  // {mjs,wasm}) next to this worker, so their presence is the "am I the npm
+  // bundle?" signal. dev/test (raw .ts, real native onnxruntime-node, no sibling
+  // WASM) and the SEA binary (vendorModel mode; native via
+  // __LORE_ORT_BINDING_PATH__ set by native-loader.cjs) don't match, so this
+  // block stays inert there.
+  //
+  // Native: if the per-platform `@loreai/onnxruntime-<target>` package is
+  // installed (optionalDependencies gated by os/cpu — npm-12-safe, no
+  // postinstall download), resolve its addon and set __LORE_ORT_BINDING_PATH__;
+  // the graceful-patched onnxruntime-node binding then loads it and
+  // transformers.js uses native (2.7–4.1× faster than WASM, #999).
+  //
+  // Fallback (dist-only / unsupported platform): point transformers' wasmPaths
+  // at the shipped WASM files (local, not the jsdelivr CDN). The bundle's
+  // onnxruntime-node shim (ort-npm-plugin.ts) sees no __LORE_ORT_BINDING_PATH__
+  // and resolves to onnxruntime-web, so transformers' IS_NODE_ENV branch (which
+  // registers the "cpu" device) drives WASM — keeping dist-only/AUR installs
+  // self-contained (#763).
   const globals = globalThis as Record<string, unknown>;
-  if (
-    !vendorModel &&
-    !globals.__LORE_NPM_WASM_PATHS__ &&
-    typeof __filename === "string"
-  ) {
+  if (!vendorModel && typeof __filename === "string") {
     const { dirname, join } = await import("node:path");
     const { pathToFileURL } = await import("node:url");
     const { existsSync } = await import("node:fs");
     const distDir = dirname(__filename);
     const wasmMjs = join(distDir, "ort-wasm-simd-threaded.mjs");
     const wasmBin = join(distDir, "ort-wasm-simd-threaded.wasm");
-    if (existsSync(wasmMjs) && existsSync(wasmBin)) {
-      globals.__LORE_NPM_WASM_PATHS__ = {
-        mjs: pathToFileURL(wasmMjs).href,
-        wasm: wasmBin,
-      };
+    const isNpmBundle = existsSync(wasmMjs) && existsSync(wasmBin);
+    if (
+      isNpmBundle &&
+      !globals.__LORE_ORT_BINDING_PATH__ &&
+      !globals.__LORE_NPM_WASM_PATHS__
+    ) {
+      const { resolveNativeOrtBindingPath } = await import("./ort-native");
+      const nativePath = resolveNativeOrtBindingPath(__filename);
+      if (nativePath) {
+        globals.__LORE_ORT_BINDING_PATH__ = nativePath;
+      } else {
+        globals.__LORE_NPM_WASM_PATHS__ = {
+          mjs: pathToFileURL(wasmMjs).href,
+          wasm: wasmBin,
+        };
+      }
     }
   }
 
