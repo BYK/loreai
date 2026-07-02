@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as data from "../src/data";
 import { db, ensureProject } from "../src/db";
 import { storeEmbedding } from "../src/db/vec-store";
 import * as embedding from "../src/embedding";
@@ -217,6 +218,25 @@ describe("contradiction store", () => {
     // Row physically purged, not just hidden by the JOIN.
     expect(ltm.contradictionExists(a, b)).toBe(false);
     expect(ltm.listOpenContradictions(P)).toHaveLength(0);
+  });
+
+  it("bulk clearKnowledge() purges contradiction rows (no orphans)", async () => {
+    const P = "/test/contra/store-clear";
+    const a = await seed(P, "X is required", "always x", v(1, 0, 0));
+    const b = await seed(P, "X is forbidden", "never x", v(1, 0, 0));
+    ltm.recordContradiction({
+      logicalIdA: a,
+      logicalIdB: b,
+      projectId: ensureProject(P),
+      similarity: 0.95,
+      rationale: "r",
+    });
+    expect(ltm.contradictionExists(a, b)).toBe(true);
+
+    // Bulk delete goes straight to DELETE FROM knowledge (not through remove()),
+    // so it must clean up knowledge_contradictions itself or leave orphans.
+    data.clearKnowledge(P);
+    expect(ltm.contradictionExists(a, b)).toBe(false);
   });
 });
 

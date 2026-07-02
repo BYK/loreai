@@ -679,6 +679,16 @@ export function clearProject(projectPath: string): ClearResult {
     database
       .query("DELETE FROM knowledge_session_injections WHERE project_id = ?")
       .run(pid);
+    // Contradiction pairs (#1123) reference TWO logical_ids, so they can't ride
+    // a single-column project sweep — purge any pair touching this project's
+    // entries BEFORE the knowledge rows go, while the subquery can still see them.
+    database
+      .query(
+        `DELETE FROM knowledge_contradictions
+         WHERE logical_id_a IN (SELECT logical_id FROM knowledge WHERE project_id = ?)
+            OR logical_id_b IN (SELECT logical_id FROM knowledge WHERE project_id = ?)`,
+      )
+      .run(pid, pid);
     database.query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
     database
       .query("DELETE FROM temporal_messages WHERE project_id = ?")
@@ -811,6 +821,15 @@ export function deleteProject(projectId: string): ClearResult | null {
     database
       .query("DELETE FROM knowledge_session_injections WHERE project_id = ?")
       .run(projectId);
+    // Contradiction pairs (#1123): purge any pair touching this project's
+    // entries before the knowledge rows go (composite key, can't ride the loop).
+    database
+      .query(
+        `DELETE FROM knowledge_contradictions
+         WHERE logical_id_a IN (SELECT logical_id FROM knowledge WHERE project_id = ?)
+            OR logical_id_b IN (SELECT logical_id FROM knowledge WHERE project_id = ?)`,
+      )
+      .run(projectId, projectId);
     database.query("DELETE FROM knowledge WHERE project_id = ?").run(projectId);
     database
       .query("DELETE FROM temporal_messages WHERE project_id = ?")
@@ -898,6 +917,17 @@ export function clearKnowledge(projectPath: string): number {
   db()
     .query("DELETE FROM knowledge_session_injections WHERE project_id = ?")
     .run(pid);
+  // Contradiction pairs (#1123): purge any pair touching this project's entries
+  // before the knowledge rows go (composite key, can't ride the loop).
+  // Contradiction pairs (#1123): purge any pair touching this project's entries
+  // before the knowledge rows go (composite key, can't ride the loop).
+  db()
+    .query(
+      `DELETE FROM knowledge_contradictions
+       WHERE logical_id_a IN (SELECT logical_id FROM knowledge WHERE project_id = ?)
+          OR logical_id_b IN (SELECT logical_id FROM knowledge WHERE project_id = ?)`,
+    )
+    .run(pid, pid);
   db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
   reclaimVec0Orphans(["knowledge"]);
 
