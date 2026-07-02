@@ -645,6 +645,140 @@ export async function checkVecWorker(
   });
 }
 
+/** Outcome of {@link checkReadOffload}: a one-shot round-trip of a generic
+ *  read job through the off-thread read-pool worker. */
+export interface ReadOffloadCheck {
+  /** - `"ok"`          → the worker opened its reader connection, ran the read
+   *                      job, and returned the expected row off the main thread.
+   *  - `"init-error"`  → the worker failed to open its reader connection.
+   *  - `"read-error"`  → the worker received the job but threw running it.
+   *  - `"bad-result"`  → the worker replied but with an unexpected row shape.
+   *  - `"timeout"`     → no terminal reply arrived within the deadline.
+   *  - `"spawn-error"` → the worker couldn't be spawned, errored, or exited
+   *                      before replying. */
+  status:
+    | "ok"
+    | "init-error"
+    | "read-error"
+    | "bad-result"
+    | "timeout"
+    | "spawn-error";
+  /** Diagnostic detail for the non-`ok` statuses. */
+  error?: string;
+}
+
+/** Correlation id for the single probe read request. */
+const READ_OFFLOAD_PROBE_ID = 1;
+
+/**
+ * One-shot diagnostic: spawn a SINGLE read-pool worker exactly the way
+ * production does (via {@link spawnWorker} — same SEA
+ * `__LORE_VECTOR_WORKER_SOURCE__` / npm sibling-file resolution), wait for its
+ * `ready`, then dispatch a trivial parameterized `read` job and assert the
+ * `read-result` round-trips back off the main thread.
+ *
+ * This is the read-job analogue of {@link checkVecWorker}. Where `--check-vec`
+ * only proves the worker can OPEN its connection (`ready`), this proves the full
+ * generic read seam the recall + `forSession` fan-out actually rides on: the
+ * embedded `vector-worker.cjs` asset resolves, the worker boots, its transitive
+ * `read-job.ts` handler bundled, and a `{ sql, params, mode }` job executes on
+ * the worker's own query-only connection and returns a structured-cloned row.
+ * That whole chain rode in on the vector-worker asset with ZERO SEA-build
+ * changes when the read-pool generalized (#989/#1005/#1012/#1019) — this guards
+ * the otherwise-untested seam inside a built binary (#1029).
+ *
+ * The probe uses a fixed `SELECT 1` job, so it needs no schema and can't be
+ * perturbed by data; a `read-error`/`bad-result` therefore means the worker's
+ * read path itself is broken, not the query.
+ *
+ * Config-independent: it spawns the worker DIRECTLY, bypassing `poolEnabled()`
+ * (so neither `search.workerOffload` nor `LORE_DISABLE_VEC_WORKER` can mask a
+ * broken seam), and like {@link checkVecWorker} it never touches the shared
+ * `workers[]`, the `poolBroken` latch, or the structural-failure counter.
+ * Honors the test worker-factory seam. Never throws — failures surface as a
+ * non-`ok` status. The probe worker is always terminated before resolving.
+ */
+export async function checkReadOffload(
+  timeoutMs = DEFAULT_VECTOR_SEARCH_TIMEOUT_MS,
+): Promise<ReadOffloadCheck> {
+  let worker: Worker;
+  try {
+    worker = spawnWorker({ dbPath: dbPath() });
+  } catch (err) {
+    return {
+      status: "spawn-error",
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  return await new Promise<ReadOffloadCheck>((resolve) => {
+    let settled = false;
+    const finish = (result: ReadOffloadCheck): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        // Tear down the throwaway probe worker. The terminate()-induced `exit`
+        // re-enters `finish`, but the `settled` guard makes it a no-op.
+        void worker.terminate();
+      } catch {
+        // best-effort
+      }
+      resolve(result);
+    };
+
+    const timer = setTimeout(() => finish({ status: "timeout" }), timeoutMs);
+
+    worker.on("message", (msg: VectorWorkerOutbound) => {
+      if (msg.type === "ready") {
+        // Reader connection opened — now exercise the read path itself. A fixed
+        // `SELECT 1` needs no schema and returns a known row.
+        try {
+          worker.postMessage({
+            type: "read",
+            id: READ_OFFLOAD_PROBE_ID,
+            spec: { sql: "SELECT 1 AS one", params: [], mode: "get" },
+          } as VectorWorkerInbound);
+        } catch (err) {
+          finish({
+            status: "spawn-error",
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      } else if (msg.type === "init-error") {
+        finish({ status: "init-error", error: msg.error });
+      } else if (
+        msg.type === "read-result" &&
+        msg.id === READ_OFFLOAD_PROBE_ID
+      ) {
+        const row = msg.rows as { one?: unknown } | null;
+        finish(
+          row && row.one === 1
+            ? { status: "ok" }
+            : { status: "bad-result", error: JSON.stringify(msg.rows) },
+        );
+      } else if (msg.type === "error" && msg.id === READ_OFFLOAD_PROBE_ID) {
+        finish({ status: "read-error", error: msg.error });
+      }
+      // A "result" (vector search) reply can't occur — the probe never posts one.
+    });
+    worker.on("error", (err: Error) => {
+      finish({
+        status: "spawn-error",
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+    worker.on("exit", () => {
+      // An exit before a terminal reply is a structural probe failure. After
+      // `finish` the terminate()-induced exit is a no-op (settled guard above).
+      finish({
+        status: "spawn-error",
+        error: "worker exited before returning a read result",
+      });
+    });
+  });
+}
+
 /** Tear down the pool (test teardown + process reset). Idempotent. The
  *  shuttingDown guard keeps the terminate()-induced worker exits below from
  *  being counted as structural failures. */

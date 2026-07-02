@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   _resetVectorPoolForTest,
   _setTestVectorWorkerFactory,
+  checkReadOffload,
   checkVecWorker,
   READ_JOB_TIMED_OUT,
   shutdownVectorPool,
@@ -689,6 +690,127 @@ describe("checkVecWorker (off-thread read-pool vec probe, #1033)", () => {
     // installed, exactly one fake is created per probe.
     _setTestVectorWorkerFactory(factoryEmitting((w) => w.ready(true)));
     await checkVecWorker();
+    expect(FakeWorker.instances.length).toBe(1);
+  });
+});
+
+describe("checkReadOffload (off-thread read-job round-trip probe, #1029)", () => {
+  // Like the real worker, the fake must emit on a macrotask (after
+  // checkReadOffload attaches its listeners). `onReadReply` decides how the fake
+  // answers the `read` request checkReadOffload posts once it sees `ready`.
+  function factoryReadProbe(
+    onReadReply: (w: FakeWorker, id: number) => void,
+    vecAvailable = true,
+  ): (d: VectorWorkerInitData) => never {
+    return (() => {
+      const w = new FakeWorker(
+        () => {},
+        (worker, msg) => onReadReply(worker, msg.id),
+      );
+      setTimeout(() => w.ready(vecAvailable), 0);
+      return w;
+    }) as unknown as (d: VectorWorkerInitData) => never;
+  }
+
+  // A worker that emits an arbitrary lifecycle action (init-error / crash /
+  // silence) on a macrotask and never answers a read request.
+  function factoryEmitting(
+    action: (w: FakeWorker) => void,
+  ): (d: VectorWorkerInitData) => never {
+    return (() => {
+      const w = new FakeWorker(() => {});
+      setTimeout(() => action(w), 0);
+      return w;
+    }) as unknown as (d: VectorWorkerInitData) => never;
+  }
+
+  it("reports ok when the worker boots and round-trips the read job", async () => {
+    _setTestVectorWorkerFactory(
+      factoryReadProbe((w, id) => w.replyRead(id, { one: 1 })),
+    );
+    const r = await checkReadOffload();
+    expect(r).toEqual({ status: "ok" });
+    // The probe worker is always torn down before resolving.
+    expect(FakeWorker.instances[0]?.terminated).toBe(true);
+  });
+
+  it("reports init-error when the worker's reader connection fails to open", async () => {
+    _setTestVectorWorkerFactory(
+      factoryEmitting((w) => w.initError("open boom")),
+    );
+    const r = await checkReadOffload();
+    expect(r).toEqual({ status: "init-error", error: "open boom" });
+  });
+
+  it("reports read-error when the worker throws running the job", async () => {
+    _setTestVectorWorkerFactory(
+      factoryReadProbe((w, id) => w.replyError(id, "scan boom")),
+    );
+    const r = await checkReadOffload();
+    expect(r).toEqual({ status: "read-error", error: "scan boom" });
+  });
+
+  it("reports bad-result when the worker returns an unexpected row", async () => {
+    _setTestVectorWorkerFactory(
+      factoryReadProbe((w, id) => w.replyRead(id, { one: 2 })),
+    );
+    const r = await checkReadOffload();
+    expect(r.status).toBe("bad-result");
+    expect(r.error).toBe(JSON.stringify({ one: 2 }));
+  });
+
+  it("reports bad-result when the worker returns a null row", async () => {
+    _setTestVectorWorkerFactory(
+      factoryReadProbe((w, id) => w.replyRead(id, null)),
+    );
+    const r = await checkReadOffload();
+    expect(r.status).toBe("bad-result");
+  });
+
+  it("reports spawn-error when the worker emits 'error'", async () => {
+    _setTestVectorWorkerFactory(
+      factoryEmitting((w) => w.crash(new Error("crash boom"))),
+    );
+    const r = await checkReadOffload();
+    expect(r).toEqual({ status: "spawn-error", error: "crash boom" });
+  });
+
+  it("reports spawn-error when the worker exits before returning a result", async () => {
+    // Boots (ready) but dies when the read request arrives — no read-result.
+    _setTestVectorWorkerFactory(factoryReadProbe((w) => w.die(1)));
+    const r = await checkReadOffload();
+    expect(r.status).toBe("spawn-error");
+    expect(r.error).toContain("exited before returning a read result");
+  });
+
+  it("reports spawn-error when spawning throws synchronously", async () => {
+    _setTestVectorWorkerFactory((() => {
+      throw new Error("no worker");
+    }) as unknown as (d: VectorWorkerInitData) => never);
+    const r = await checkReadOffload();
+    expect(r).toEqual({ status: "spawn-error", error: "no worker" });
+  });
+
+  it("reports timeout when the worker never boots", async () => {
+    // Worker that never emits ready/init-error/exit (stays silent).
+    _setTestVectorWorkerFactory(factoryEmitting(() => {}));
+    const r = await checkReadOffload(20);
+    expect(r).toEqual({ status: "timeout" });
+    // The wedged probe worker is terminated so it can't leak a thread.
+    expect(FakeWorker.instances[0]?.terminated).toBe(true);
+  });
+
+  it("spawns directly, bypassing the poolEnabled kill switch", async () => {
+    // checkReadOffload must probe the worker seam even when the pool is disabled
+    // by config/env — otherwise a disabled ambient config would mask a broken
+    // SEA seam. With LORE_DISABLE_VEC_WORKER set (poolEnabled() → false), it
+    // still spawns and round-trips.
+    process.env.LORE_DISABLE_VEC_WORKER = "1";
+    _setTestVectorWorkerFactory(
+      factoryReadProbe((w, id) => w.replyRead(id, { one: 1 })),
+    );
+    const r = await checkReadOffload();
+    expect(r).toEqual({ status: "ok" });
     expect(FakeWorker.instances.length).toBe(1);
   });
 });

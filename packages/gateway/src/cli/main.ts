@@ -139,6 +139,11 @@ const OPTIONS = {
   // JS brute-force path (`fallback ...`). Used by CI to confirm the SEA binary
   // embeds + loads the vec0 extension.
   "check-vec": { type: "boolean" as const },
+  // Hidden diagnostic: round-trips a trivial generic read job through the
+  // off-thread read-worker pool (prints `ok read-offload via worker`) to prove
+  // the embedded vector-worker asset + read-job seam works inside the SEA
+  // binary — the path recall/forSession fan-out rides on (#1029).
+  "check-read-offload": { type: "boolean" as const },
 } as const;
 
 // Populate the set used by extractAgentArgs to distinguish lore's own flags
@@ -317,6 +322,41 @@ export async function _cli(): Promise<void> {
     // Exit outside the try so a throw on the success path can't be mis-reported
     // as a check failure; safeExit (not process.exit) on both paths avoids the
     // Bun NAPI teardown hang.
+    safeExit(ok ? 0 : 1);
+    return;
+  }
+
+  // --check-read-offload (hidden). Proves the off-thread read-worker seam works
+  // end-to-end inside a built binary: spawns one read-pool worker exactly the
+  // way production does (embedded `vector-worker.cjs` asset), boots its reader
+  // connection, and round-trips a trivial `SELECT 1` read job back off the main
+  // thread. Unlike --check-vec (native sqlite-vec may legitimately be absent →
+  // JS fallback is OK), the read seam is pure JS + node:sqlite and MUST work on
+  // every platform, so anything but a worker round-trip is a hard failure. CI
+  // greps `^ok read-offload via worker` per platform AND checks the exit code.
+  if (values["check-read-offload"]) {
+    const { db, checkReadOffload } = await import("@loreai/core");
+    const { safeExit } = await import("./exit");
+    let ok = false;
+    try {
+      // Create/migrate the DB file so the worker's reader connection can open it.
+      db();
+      const r = await checkReadOffload();
+      if (r.status === "ok") {
+        console.log("ok read-offload via worker");
+        ok = true;
+      } else {
+        // Surface the failing status on stdout so the captured output shows why
+        // the assertion failed; the exit code is the gate.
+        console.log(
+          `read-offload failed: ${r.status}${r.error ? ` (${r.error})` : ""}`,
+        );
+      }
+    } catch (err: unknown) {
+      console.error(
+        `✗ check-read-offload failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     safeExit(ok ? 0 : 1);
     return;
   }

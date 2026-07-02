@@ -336,6 +336,16 @@ jobs:
           echo "$vec" | grep -q '^ok worker vec_available=true' \
             || (echo "::error::native sqlite-vec not loaded on the read-worker path in linux-x64 binary: $vec"; exit 1)
 
+          # Round-trip a generic read job through the off-thread read-worker pool
+          # (recall / forSession fan-out rides on this). Guards the SEA seam that
+          # rode in on the vector-worker asset with zero build changes (#1029).
+          # Unlike --check-vec (native vec may legitimately fall back), the read
+          # path is pure JS + node:sqlite and MUST work everywhere — fatal.
+          ro=$(./packages/gateway/dist-bin/lore-linux-x64 --check-read-offload || true)
+          echo "Read-offload: $ro"
+          echo "$ro" | grep -q '^ok read-offload via worker' \
+            || (echo "::error::read-worker offload seam broken in linux-x64 binary: $ro"; exit 1)
+
           # Start gateway, hit health endpoint, shut down
           ./packages/gateway/dist-bin/lore-linux-x64 start -p 7991 &
           SERVER_PID=$!
@@ -738,6 +748,15 @@ jobs:
           else
             echo "::error::native sqlite-vec not loaded on the read-worker path in ${{ matrix.target }} binary: $vec"; exit 1
           fi
+          # Round-trip a generic read job through the off-thread read-worker pool
+          # — the seam recall / forSession fan-out rides on, which rode into the
+          # SEA on the vector-worker asset with zero build changes (#1029). Pure
+          # JS + node:sqlite (no native vec), so it is FATAL on every target,
+          # including darwin (unlike the --check-vec worker line above).
+          ro=$("$BIN" --check-read-offload || true)
+          echo "Read-offload: $ro"
+          echo "$ro" | grep -q '^ok read-offload via worker' \
+            || (echo "::error::read-worker offload seam broken in ${{ matrix.target }} binary: $ro"; exit 1)
 
   # ---------------------------------------------------------------------------
   # Nightly: build all platforms, generate patches, publish to GHCR
@@ -896,6 +915,12 @@ jobs:
           echo "$vec" | grep -q '^ok worker vec_available=true' \
             && echo "native sqlite-vec read-worker path OK (darwin-arm64)" \
             || echo "::warning::native sqlite-vec not loaded on the read-worker path in darwin-arm64 (dylib codesigning?) — JS fallback in use: $vec"
+          # Generic read-job round-trip through the read-worker pool (#1029).
+          # Pure JS + node:sqlite (no dylib), so it is FATAL here too.
+          ro=$("$BIN" --check-read-offload || true)
+          echo "Read-offload: $ro"
+          echo "$ro" | grep -q '^ok read-offload via worker' \
+            || (echo "::error::read-worker offload seam broken in darwin-arm64 binary: $ro"; exit 1)
 
       - name: Verify code signature
         run: |

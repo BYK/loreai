@@ -76,7 +76,12 @@ export { isTextPart, isReasoningPart, isToolPart } from "./types";
 
 export { dataDir } from "./data-dir";
 export { isVecAvailable } from "./db/vec";
-export { checkVecWorker, type VecWorkerCheck } from "./vector-pool";
+export {
+  checkVecWorker,
+  type VecWorkerCheck,
+  checkReadOffload,
+  type ReadOffloadCheck,
+} from "./vector-pool";
 export { load, config, type LoreConfig } from "./config";
 export {
   db,
