@@ -540,9 +540,11 @@ function runTemporal(
   if (readMode === "blob-native") {
     try {
       // Score only the most-recent MAX_TEMPORAL_VECTOR_ROWS rows (the same
-      // candidate window the JS path uses below). STOPGAP — see
-      // MAX_TEMPORAL_VECTOR_ROWS: drop the inner ORDER BY/LIMIT once an ANN
-      // index replaces brute-force scanning (#999).
+      // candidate window the JS path uses below). This recency cap is the
+      // BLOB-FALLBACK bound: the ANN replacement it once stood in for (#999,
+      // resolved) already shipped as the uncapped, whole-corpus FLAT-vec0 KNN
+      // path above — this branch runs only when sqlite-vec is unavailable and the
+      // DB stays in blob layout. See MAX_TEMPORAL_VECTOR_ROWS.
       const vsql = sessionId
         ? "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM (SELECT id, embedding FROM temporal_messages WHERE embedding IS NOT NULL AND project_id = ? AND session_id = ? ORDER BY created_at DESC LIMIT ?) ORDER BY similarity DESC LIMIT ?"
         : "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM (SELECT id, embedding FROM temporal_messages WHERE embedding IS NOT NULL AND project_id = ? ORDER BY created_at DESC LIMIT ?) ORDER BY similarity DESC LIMIT ?";
@@ -560,7 +562,8 @@ function runTemporal(
       // fall through to JS brute-force
     }
   }
-  // STOPGAP recency cap — see MAX_TEMPORAL_VECTOR_ROWS (#999).
+  // Blob-fallback recency cap (JS brute-force). The primary path is the uncapped
+  // whole-corpus vec0 KNN above (#999, resolved); see MAX_TEMPORAL_VECTOR_ROWS.
   const sql = sessionId
     ? "SELECT id, embedding FROM temporal_messages WHERE embedding IS NOT NULL AND project_id = ? AND session_id = ? ORDER BY created_at DESC LIMIT ?"
     : "SELECT id, embedding FROM temporal_messages WHERE embedding IS NOT NULL AND project_id = ? ORDER BY created_at DESC LIMIT ?";

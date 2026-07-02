@@ -1941,6 +1941,20 @@ export async function vectorSearchTemporal(
  * Build a config fingerprint from provider + model + dimensions.
  * Used to detect when the embedding config changes (provider swap, model swap,
  * dimension change) so we can clear stale embeddings and re-embed.
+ *
+ * 🟡 Scope note for FUTURE chunk/text-policy migrations: this fingerprint keys
+ * ONLY on provider/model/dimensions — it deliberately does NOT include the
+ * embedding TEXT policy (how a message is split into units / which parts are
+ * embedded; see buildEmbeddingUnits). So changing that policy does NOT bump the
+ * fingerprint, and the stale-embedding clear + backfill triggered here will NOT
+ * fire for a pure policy change. Today the temporal re-chunk backfill re-embeds
+ * the whole corpus under a new policy only because it is armed by an explicit KV
+ * done-flag (see TEMPORAL_RECHUNK_DONE_KEY / resetTemporalRechunkProgress) that
+ * is reset on vec0 cutover — NOT by this fingerprint. If a future migration
+ * changes the chunk/text policy again WITHOUT a storage cutover, re-arm the walk
+ * deliberately — fold a policy-version token into the done-flag key, or call
+ * resetTemporalRechunkProgress() from the migration — because this fingerprint
+ * will stay silent.
  */
 function configFingerprint(): string {
   const cfg = config().search.embeddings;
