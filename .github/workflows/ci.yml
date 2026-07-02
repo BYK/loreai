@@ -430,6 +430,13 @@ jobs:
           (cd "$mirror_dir" && tar -czf "$GITHUB_WORKSPACE/dist-tarballs/opencode-lore-${version}.tgz" package)
           rm -rf "$mirror_dir"
 
+          # Native ONNX Runtime per-platform packages (@loreai/onnxruntime-<os>-<arch>):
+          # pack all 6 and inject them as optionalDependencies into the gateway
+          # tarball (in place). Lets `npm i`/plugin installs use native ORT, with
+          # the bundled WASM as the dist-only fallback (#763). See pack-ort-npm.ts.
+          pnpm tsx packages/gateway/script/pack-ort-npm.ts \
+            --version "$version" --tarballs "$GITHUB_WORKSPACE/dist-tarballs"
+
           echo "--- Final tarballs: ---"
           ls -la dist-tarballs/
           echo "--- Package name in each: ---"

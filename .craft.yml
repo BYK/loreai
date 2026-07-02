@@ -45,6 +45,16 @@ targets:
     access: public
     oidc: true
     includeNames: /^opencode-lore-\d.*\.tgz$/
+  # Native ONNX Runtime per-platform packages (@loreai/onnxruntime-<os>-<arch>),
+  # packed by CI's pack-ort-npm.ts. Non-workspace targets (generated at pack
+  # time, not in the root `workspaces`), so scope them by tarball name. The
+  # gateway's optionalDependencies pin these exact versions; npm's os/cpu gating
+  # installs only the matching one. See ort-platform-package.ts / ort-npm-plugin.ts.
+  - name: npm
+    id: onnxruntime-native
+    access: public
+    oidc: true
+    includeNames: /^loreai-onnxruntime-.*\.tgz$/
   # Create GitHub Release with binaries and delta patches attached.
   # The includeNames filter ensures only .gz binaries and .patch deltas
   # are uploaded as release assets — npm tarballs are published via the
