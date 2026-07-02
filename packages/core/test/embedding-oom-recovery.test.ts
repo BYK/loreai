@@ -15,7 +15,7 @@ import {
 import {
   backoffEmbedCap,
   MIN_EMBED_TOKENS,
-  WASM_SUSTAINABLE_MAX_TOKENS,
+  EMBED_TOKEN_CEILING,
 } from "../src/embedding-cap";
 import { EMBED_OOM_EXIT_CODE } from "../src/embedding-worker-types";
 import { isStderrSilenced, silenceStderr } from "../src/log";
@@ -119,7 +119,7 @@ describe("embedding OOM recovery (worker-mock)", () => {
     expect(fakes).toHaveLength(1);
     const first = fakes[0].lastPosted();
     expect(first.type).toBe("embed");
-    expect(first.maxTokens).toBe(WASM_SUSTAINABLE_MAX_TOKENS);
+    expect(first.maxTokens).toBe(EMBED_TOKEN_CEILING);
 
     // The worker OOMs on the oversized input → exits with the OOM code.
     fakes[0].emit("exit", EMBED_OOM_EXIT_CODE);
@@ -129,9 +129,7 @@ describe("embedding OOM recovery (worker-mock)", () => {
     expect(fakes).toHaveLength(2);
     const resubmitted = fakes[1].lastPosted();
     expect(resubmitted.id).toBe(first.id);
-    expect(resubmitted.maxTokens).toBe(
-      backoffEmbedCap(WASM_SUSTAINABLE_MAX_TOKENS),
-    );
+    expect(resubmitted.maxTokens).toBe(backoffEmbedCap(EMBED_TOKEN_CEILING));
     expect(resubmitted.maxTokens).toBeLessThan(first.maxTokens);
     // The lowered cap was persisted so a restart doesn't re-walk the backoff.
     expect(_readPersistedEmbedCap()?.cap).toBe(resubmitted.maxTokens);

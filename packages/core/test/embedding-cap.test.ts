@@ -5,7 +5,7 @@ import {
   MIN_EMBED_TOKENS,
   MODEL_MAX_TOKENS,
   PER_WORKER_MEM_BUDGET_BYTES,
-  WASM_SUSTAINABLE_MAX_TOKENS,
+  EMBED_TOKEN_CEILING,
   backoffEmbedCap,
   clampEmbedCap,
   desiredEmbedPoolSize,
@@ -81,8 +81,8 @@ describe("memoryModelEmbedCap", () => {
     // the O(L²) attention at that length — so a memory-rich box is capped at the
     // WASM-sustainable ceiling (~4948) rather than MODEL_MAX_TOKENS (8192). This
     // is what prevents the OOM-on-every-boot on machines with lots of free RAM.
-    expect(memoryModelEmbedCap(64 * GB)).toBe(WASM_SUSTAINABLE_MAX_TOKENS);
-    expect(WASM_SUSTAINABLE_MAX_TOKENS).toBeLessThan(MODEL_MAX_TOKENS);
+    expect(memoryModelEmbedCap(64 * GB)).toBe(EMBED_TOKEN_CEILING);
+    expect(EMBED_TOKEN_CEILING).toBeLessThan(MODEL_MAX_TOKENS);
   });
 
   it("sizes a constrained host (~2.7 GB free, like Onur's box) well below 4096", () => {
@@ -111,21 +111,21 @@ describe("memoryModelEmbedCap", () => {
   });
 });
 
-describe("WASM_SUSTAINABLE_MAX_TOKENS", () => {
+describe("EMBED_TOKEN_CEILING", () => {
   it("is a fixed ceiling below the model max, in the measured ~4900 range", () => {
     // Derived from the 4 GiB WASM MAXIMUM_MEMORY (measured on the built worker)
     // × 0.85 headroom, minus baseline, over K. Must sit below MODEL_MAX_TOKENS
     // (that's the whole point) and near the observed safe convergence (≤4962).
-    expect(WASM_SUSTAINABLE_MAX_TOKENS).toBeLessThan(MODEL_MAX_TOKENS);
-    expect(WASM_SUSTAINABLE_MAX_TOKENS).toBeGreaterThan(4000);
-    expect(WASM_SUSTAINABLE_MAX_TOKENS).toBeLessThanOrEqual(5200);
+    expect(EMBED_TOKEN_CEILING).toBeLessThan(MODEL_MAX_TOKENS);
+    expect(EMBED_TOKEN_CEILING).toBeGreaterThan(4000);
+    expect(EMBED_TOKEN_CEILING).toBeLessThanOrEqual(5200);
   });
 
   it("is the binding ceiling once free RAM is large enough to hit it", () => {
     // Below the crossover the freemem term binds; above it, the WASM ceiling
     // does — and the result never exceeds the WASM ceiling regardless of RAM.
     for (const free of [16, 32, 64, 256]) {
-      expect(memoryModelEmbedCap(free * GB)).toBe(WASM_SUSTAINABLE_MAX_TOKENS);
+      expect(memoryModelEmbedCap(free * GB)).toBe(EMBED_TOKEN_CEILING);
     }
   });
 });
@@ -196,9 +196,7 @@ describe("reconcileEmbedCap", () => {
     // free memory is stable — must be pulled down to the ceiling, not run at
     // 7000 (which would OOM the 4 GiB heap once before the backoff re-converges).
     const stale = { cap: 7000, freeMemBytes: 1 * GB };
-    expect(reconcileEmbedCap(1 * GB, stale, 8192)).toBe(
-      WASM_SUSTAINABLE_MAX_TOKENS,
-    );
+    expect(reconcileEmbedCap(1 * GB, stale, 8192)).toBe(EMBED_TOKEN_CEILING);
   });
 });
 
@@ -243,7 +241,7 @@ describe("reprobeEmbedCap", () => {
     // propagate a stale above-ceiling cap. Handed 8192, reprobe self-bounds to
     // the WASM ceiling rather than returning 8192 (which would OOM the 4 GiB heap).
     expect(reprobeEmbedCap(MODEL_MAX_TOKENS, 64 * GB)).toBe(
-      WASM_SUSTAINABLE_MAX_TOKENS,
+      EMBED_TOKEN_CEILING,
     );
     // A normal in-range cap still steps up as before (bound is a no-op here).
     expect(reprobeEmbedCap(2000, 64 * GB)).toBe(Math.round(2000 / 0.7)); // 2857
