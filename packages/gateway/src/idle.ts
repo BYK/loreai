@@ -62,6 +62,7 @@ import {
   resolveProfileForSession,
   blendedHistogramForSession,
   shouldWarm,
+  isWarmingEnabled,
   executeWarmup,
   loadGlobalHistograms,
   flushGlobalHistograms,
@@ -551,7 +552,13 @@ export function startIdleScheduler(
     // buckets whose session was evicted (never re-queried on the read path).
     pruneExpiredCircuitBreakers(now);
 
+    // Global kill-switch, hoisted out of the per-session loop so a disabled
+    // deployment doesn't do a getKV per session per tick for a global flag.
+    // shouldWarm() still re-checks isWarmingEnabled() on the per-request path.
+    const warmingGloballyEnabled = isWarmingEnabled();
+
     for (const [sessionID, state] of sessions) {
+      if (!warmingGloballyEnabled) break;
       if (warmupInProgress.has(sessionID)) continue;
 
       // Skip sessions with stale auth credentials — warmup would just 401

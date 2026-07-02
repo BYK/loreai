@@ -63,6 +63,21 @@ describe("Pipeline — /lore:* slash commands", () => {
     ).toContain("Cache warming set to auto");
   });
 
+  it("handles global /lore:warm:off and /lore:warm:on (persisted toggle)", async () => {
+    const { isWarmingEnabled } = await import("../src/cache-warmer");
+    harness = await createHarness({ fixtures: [] });
+
+    const off = await harness.chat(slashBody("/lore:warm:off"));
+    expect(off.status).toBe(200);
+    expect(await textOf(off)).toContain("Cache warming disabled globally");
+    expect(isWarmingEnabled()).toBe(false);
+
+    const on = await harness.chat(slashBody("/lore:warm:on"));
+    expect(on.status).toBe(200);
+    expect(await textOf(on)).toContain("Cache warming enabled globally");
+    expect(isWarmingEnabled()).toBe(true);
+  });
+
   it("returns a helpful error for an unknown /lore:* command", async () => {
     harness = await createHarness({ fixtures: [] });
 
