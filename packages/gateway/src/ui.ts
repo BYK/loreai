@@ -3697,7 +3697,14 @@ export async function handleUIRequest(
     );
     if (resolveContradiction) {
       const { keepId, removeId } = resolveContradiction;
-      if (keepId !== removeId && kget(removeId)) {
+      // Only act on a real, recorded contradiction pair — never let this
+      // endpoint become a generic "delete any entry" via a crafted URL.
+      // contradictionExists is order-independent.
+      if (
+        keepId !== removeId &&
+        ltm.contradictionExists(keepId, removeId) &&
+        kget(removeId)
+      ) {
         ltm.remove(removeId);
       }
       return redirect("/ui/knowledge");

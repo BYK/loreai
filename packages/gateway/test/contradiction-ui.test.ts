@@ -119,6 +119,33 @@ describe("contradictions dashboard (#1123)", () => {
     expect(ltm.contradictionExists(a, b)).toBe(false);
   });
 
+  it("resolve is a no-op when no contradiction is recorded between the two ids", async () => {
+    // Two entries that exist but were never flagged as contradicting.
+    const x = ltm.create({
+      projectPath: PROJECT,
+      category: "preference",
+      title: "Standalone rule X",
+      content: "x",
+      scope: "project",
+      confidence: 0.9,
+    });
+    const y = ltm.create({
+      projectPath: PROJECT,
+      category: "preference",
+      title: "Standalone rule Y",
+      content: "y",
+      scope: "project",
+      confidence: 0.9,
+    });
+    expect(ltm.contradictionExists(x, y)).toBe(false);
+
+    const res = await post(`/ui/api/contradiction/resolve/${x}/${y}`);
+    expect(res.status).toBe(302);
+    // Neither entry deleted — the endpoint is not a generic delete.
+    expect(ltm.get(x)).not.toBeNull();
+    expect(ltm.get(y)).not.toBeNull();
+  });
+
   it("resolve is a no-op when keep and remove are the same id", async () => {
     const { a } = seedPair("Rule one", "Rule two");
     const res = await post(`/ui/api/contradiction/resolve/${a}/${a}`);
