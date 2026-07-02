@@ -316,21 +316,22 @@ export function shouldIntercept(url: string, gatewayBase: string): boolean {
  */
 /**
  * Process-global slot holding the original `globalThis.fetch` captured before
- * any interceptor was installed. The gateway (which may run in the same
- * process) must use this for its own upstream calls to avoid being intercepted
- * in a loop.
+ * any interceptor was installed. It backs the cross-copy double-install guard
+ * in `installFetchInterceptor()`: a non-null slot means some copy of this
+ * module already patched `globalThis.fetch`, so later installs no-op instead
+ * of stacking interceptors.
  *
  * Keyed via `Symbol.for(...)` — a *process-global* registry — so that EVERY
  * copy of this module in the process reads and writes the SAME handle, no
  * matter how many times @loreai/core is bundled/instantiated (e.g. the
  * OpenCode plugin's copy plus a copy inlined into the in-process gateway
  * bundle). With a module-scoped variable instead, each copy keeps a private
- * handle: one copy installs the interceptor (patching `globalThis.fetch`)
- * while a second copy's `getOriginalFetch()` still reads `null` and falls back
- * to `globalThis.fetch` — which IS the interceptor — producing an infinite
- * request loop (gateway → interceptor → gateway → …). Sharing this handle is
- * what makes it safe to inline core into the Bun bundle (issue #1027; see
- * gateway `script/bundle.ts`).
+ * handle, its guard sees `null`, and each installs its own interceptor —
+ * stacking them (copy B's interceptor captures copy A's as its "original"),
+ * which is the exact infinite-loop shape (gateway → interceptor → gateway → …)
+ * that once forced core to stay external. Sharing this handle is what makes it
+ * safe to inline core into the Bun bundle (issue #1027; see gateway
+ * `script/bundle.ts`).
  *
  * The slot is unset until `installFetchInterceptor()` is called, and released
  * (set back to `null`) by its cleanup.
@@ -351,20 +352,6 @@ function writeOriginalFetchSlot(fn: typeof globalThis.fetch | null): void {
   (globalThis as Record<symbol, typeof globalThis.fetch | null>)[
     ORIGINAL_FETCH_KEY
   ] = fn;
-}
-
-/**
- * Return the original, un-intercepted `fetch` function.
- *
- * When the gateway runs in-process alongside the plugin, it shares
- * `globalThis.fetch` — which the interceptor patches. The gateway must
- * use this function for its own upstream calls to avoid being caught by
- * the interceptor in an infinite loop.
- *
- * Returns `globalThis.fetch` if no interceptor has been installed.
- */
-export function getOriginalFetch(): typeof globalThis.fetch {
-  return readOriginalFetchSlot() ?? globalThis.fetch;
 }
 
 /**

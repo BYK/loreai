@@ -1,9 +1,9 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 
 // Mock the upstream fetch wrapper so the adapter's retry loop is driven by our
-// stubbed responses regardless of whether a fetch interceptor is installed
-// (stubbing globalThis.fetch alone would silently break if `getOriginalFetch`
-// had captured the real fetch).
+// stubbed responses regardless of whether a fetch interceptor is installed on
+// globalThis.fetch (upstreamFetch is the gateway's own upstream path and does
+// not go through globalThis.fetch, so mocking it is the reliable seam).
 vi.mock("../src/fetch", () => ({ upstreamFetch: vi.fn() }));
 vi.mock("../src/worker-health", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/worker-health")>();
