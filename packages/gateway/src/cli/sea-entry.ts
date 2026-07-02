@@ -5,8 +5,8 @@
  *
  * Architecture:
  * - The native loader shim (auto-injected by esbuild's `inject:`)
- *   runs FIRST and extracts the WASM runtime files to a per-pid
- *   tmp dir.
+ *   runs FIRST and extracts the native onnxruntime-node addon (+ the
+ *   sqlite-vec extension) to a per-pid tmp dir.
  * - This file (sea-entry.ts) reads the embedding worker source
  *   from a SEA asset and exposes it via
  *   `globalThis.__LORE_WORKER_SOURCE__` so `embedding.ts` can

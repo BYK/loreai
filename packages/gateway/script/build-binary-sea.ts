@@ -482,8 +482,9 @@ async function buildBinary() {
     target: "node22",
     platform: "node",
     conditions: ["node"],
-    // sharp is for vision models, unused. onnxruntime-node is redirected
-    // to onnxruntime-web by the plugin. The WASM runtime is API-compatible.
+    // sharp is for vision models, unused (also stubbed by the plugin).
+    // onnxruntime-node is bundled natively; ort-native-plugin patches its
+    // binding.js to load the addon extracted by native-loader.cjs.
     external: ["sharp"],
     plugins: [
       binaryExternalsPlugin(),

@@ -1,17 +1,17 @@
 /**
- * Shared esbuild plugin: redirect `onnxruntime-node` → `onnxruntime-web`
- * (WASM, Node entry) and patch transformers.js' CDN wasmPaths fallback.
+ * esbuild plugin: redirect `onnxruntime-node` → `onnxruntime-web` (WASM, Node
+ * entry) and patch transformers.js' CDN wasmPaths fallback.
  *
- * Used by both build pipelines:
- *   - `build-binary-sea.ts` (standalone binary): vendors WASM as SEA assets
- *     and sets `globalThis.__LORE_VENDOR_WASM_PATHS__` at runtime.
- *   - `bundle.ts` (npm package): ships the WASM files in `dist/` and sets
- *     `globalThis.__LORE_NPM_WASM_PATHS__` at runtime (see embedding-worker.ts).
- *
- * Without this redirect, the npm worker bundle leaves `onnxruntime-node`
- * (a native `.node` backend that esbuild can't bundle) as an external
- * `require`, which fails for dist-only installs (npm/AUR) with
+ * Used ONLY by `bundle.ts` (the npm package): it ships the WASM files in `dist/`
+ * and sets `globalThis.__LORE_NPM_WASM_PATHS__` at runtime (see
+ * embedding-worker.ts). Without this redirect, the npm worker bundle leaves
+ * `onnxruntime-node` (a native `.node` backend that esbuild can't bundle) as an
+ * external `require`, which fails for dist-only installs (npm/AUR) with
  * "Cannot find module 'onnxruntime-node'" (see GitHub issue #763).
+ *
+ * The standalone SEA binary does NOT use this: it bundles the native
+ * onnxruntime-node addon as a per-target SEA asset (see `ort-native-plugin.ts`),
+ * which is faster and has no 4 GiB WASM-heap cap (#999).
  */
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -50,9 +50,8 @@ export interface OrtWebPluginOptions {
   repoRoot: string;
   /**
    * The replacement RHS for transformers.js' `ONNX_ENV.wasm.wasmPaths = <CDN>`
-   * assignment. The value is read at runtime to locate the local WASM files:
-   *   - binary: `globalThis.__LORE_VENDOR_WASM_PATHS__ || ONNX_ENV.wasm.wasmPaths`
-   *   - npm:    `globalThis.__LORE_NPM_WASM_PATHS__ || ONNX_ENV.wasm.wasmPaths`
+   * assignment. The value is read at runtime to locate the local WASM files
+   * (npm path): `globalThis.__LORE_NPM_WASM_PATHS__ || ONNX_ENV.wasm.wasmPaths`.
    */
   wasmPathsExpr: string;
 }
