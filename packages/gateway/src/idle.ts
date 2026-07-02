@@ -16,6 +16,7 @@ import { join } from "node:path";
 import {
   temporal,
   distillation,
+  contradiction,
   curator,
   ltm,
   DirectFsResolver,
@@ -212,6 +213,39 @@ export function consolidationCooldownActive(
     return false;
   if (topCategoryCount > cooldown.topCategoryCount) return false;
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Contradiction detection throttle (#1123)
+// ---------------------------------------------------------------------------
+
+/**
+ * Last time a contradiction-detection pass STARTED for a project (resolved
+ * project ID). Armed unconditionally the moment a pass begins so a
+ * "nothing found" outcome still throttles the next attempt — otherwise the full
+ * embed + judge scan would rerun every idle tick (the pattern-echo throttle
+ * gotcha). Keyed by canonical project ID like the consolidation cooldown so N
+ * worktrees of one repo share a single bucket.
+ */
+const contradictionCooldown = new Map<string, number>();
+
+/**
+ * Projects with an in-flight contradiction pass — thundering-herd guard across
+ * concurrent idle sessions for the same project (set before the await, cleared
+ * in a finally), mirroring consolidationInProgress.
+ */
+const contradictionInProgress = new Set<string>();
+
+/** Minimum interval between contradiction-detection passes per project. */
+export const CONTRADICTION_COOLDOWN_MS = 60 * 60 * 1000; // 1h
+
+/** Pure decision: is contradiction detection still on cooldown for this project? */
+export function contradictionCooldownActive(
+  lastAttemptAt: number | undefined,
+  now: number,
+): boolean {
+  if (lastAttemptAt === undefined) return false;
+  return now - lastAttemptAt < CONTRADICTION_COOLDOWN_MS;
 }
 
 /**
@@ -773,6 +807,8 @@ export function evictIdleSessions(
     if (!projectStillActive) {
       consolidationCooldown.delete(evictedProjectId);
       consolidationInProgress.delete(evictedProjectId);
+      contradictionCooldown.delete(evictedProjectId);
+      contradictionInProgress.delete(evictedProjectId);
     }
 
     // GC the shared quota cache only when no remaining session uses this
@@ -1192,6 +1228,50 @@ export function buildIdleWorkHandler(
         }
       } catch (e) {
         log.error("idle consolidation error:", e);
+      }
+    }
+
+    // 4.5 Contradiction detection (#1123). Idle-time, LLM-gated: find genuinely
+    // OPPOSING knowledge pairs and record them for the user to resolve on the
+    // dashboard / CLI. Never merges or deletes — the affirmative of the
+    // consolidation "opposing rules are never duplicates" invariant. Runs AFTER
+    // consolidation so it judges the post-merge entry set (paraphrase duplicates
+    // already collapsed), and is throttled / in-flight-guarded like it.
+    if (allowWorker && cfg.knowledge.enabled && model) {
+      try {
+        const now = Date.now();
+        if (
+          contradictionCooldownActive(
+            contradictionCooldown.get(projectId),
+            now,
+          ) ||
+          contradictionInProgress.has(projectId)
+        ) {
+          // Throttled or a pass is already in flight for this project — skip.
+        } else {
+          // Arm the cooldown UNCONDITIONALLY before the work: a "nothing found"
+          // pass must still throttle the next attempt (pattern-echo gotcha).
+          contradictionCooldown.set(projectId, now);
+          contradictionInProgress.add(projectId);
+          try {
+            const res = await contradiction.detectContradictions({
+              projectPath,
+              sessionID,
+              llm,
+              model,
+            });
+            if (res.found > 0) {
+              log.info(
+                `contradiction detection: ${res.found} new contradiction(s) surfaced ` +
+                  `(${res.judged} judged) in ${projectPath}`,
+              );
+            }
+          } finally {
+            contradictionInProgress.delete(projectId);
+          }
+        }
+      } catch (e) {
+        log.error("idle contradiction detection error:", e);
       }
     }
 

@@ -1541,6 +1541,31 @@ const MIGRATIONS: string[] = [
   -- warmupNet = warmup_savings - warmup_cost.
   ALTER TABLE session_state ADD COLUMN warmup_cost REAL NOT NULL DEFAULT 0;
   `,
+
+  `
+  -- Version 62: knowledge_contradictions — idle-detected pairs of knowledge
+  -- entries that genuinely OPPOSE each other (the affirmative of the
+  -- consolidation "opposing rules are NEVER duplicates — never merge them"
+  -- invariant, prompt.ts). Detection ONLY: we surface the pair for the user to
+  -- resolve on the dashboard / CLI, never auto-merge or auto-delete (#1123).
+  -- Keyed by the two stable logical_ids in canonical (a <= b) order so a pair
+  -- is stored exactly once regardless of detection order. A sidecar table like
+  -- knowledge_meta / knowledge_symbol_presence — it never touches the frozen
+  -- append-only knowledge table.
+  CREATE TABLE IF NOT EXISTS knowledge_contradictions (
+    logical_id_a TEXT NOT NULL,
+    logical_id_b TEXT NOT NULL,
+    project_id   TEXT,
+    similarity   REAL NOT NULL DEFAULT 0,
+    rationale    TEXT,
+    status       TEXT NOT NULL DEFAULT 'open',
+    detected_at  INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL,
+    PRIMARY KEY (logical_id_a, logical_id_b)
+  );
+  CREATE INDEX IF NOT EXISTS idx_knowledge_contradictions_status
+    ON knowledge_contradictions (status);
+  `,
 ];
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -2405,6 +2430,19 @@ function recoverMissingObjects(database: Database) {
       last_present_at INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (logical_id, symbol)
     );
+    CREATE TABLE IF NOT EXISTS knowledge_contradictions (
+      logical_id_a TEXT NOT NULL,
+      logical_id_b TEXT NOT NULL,
+      project_id   TEXT,
+      similarity   REAL NOT NULL DEFAULT 0,
+      rationale    TEXT,
+      status       TEXT NOT NULL DEFAULT 'open',
+      detected_at  INTEGER NOT NULL,
+      updated_at   INTEGER NOT NULL,
+      PRIMARY KEY (logical_id_a, logical_id_b)
+    );
+    CREATE INDEX IF NOT EXISTS idx_knowledge_contradictions_status
+      ON knowledge_contradictions (status);
     CREATE TABLE IF NOT EXISTS knowledge_transfers (
       knowledge_id           TEXT NOT NULL,
       recalled_in_project_id TEXT NOT NULL,

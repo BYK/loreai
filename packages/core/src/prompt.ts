@@ -1147,3 +1147,41 @@ ${echoParts}
 
 Identify the common behavioral pattern the user is demonstrating across these ${input.echoCount + 1} instances.`;
 }
+
+// ---------------------------------------------------------------------------
+// Contradiction judge (#1123)
+// ---------------------------------------------------------------------------
+
+export const CONTRADICTION_JUDGE_SYSTEM = `You are a long-term memory auditor. You are given TWO knowledge entries that a user's AI coding assistant has stored about how to work in their project. Your ONLY job is to decide whether the two entries DIRECTLY CONTRADICT each other — such that a person could not follow BOTH at the same time.
+
+A contradiction means the entries give mutually exclusive instructions about the SAME subject at the SAME scope: same thing, opposite directive. Entries that DO contradict:
+- "Always use tabs for indentation" vs "Always use spaces for indentation"
+- "Never mock the database in tests" vs "Always mock the database in tests"
+- "Deploy from the main branch only" vs "Deploy from the release branch only"
+
+Entries that do NOT contradict (do not flag these):
+- Different scope/subject: "Use tabs in Go files" vs "Use spaces in Python files"
+- Complementary rules: "Add tests after implementing a feature" vs "Run the linter before committing"
+- A general rule and a coexisting specific exception: "Prefer async handlers" vs "Use a sync handler for the health check"
+- Two phrasings of the SAME rule (that is a duplicate, not a contradiction)
+- Merely sharing a topic or words without opposing directives
+
+Precision matters far more than recall. When in doubt, answer false. A false alarm wastes the user's attention; a missed contradiction is harmless and can be caught later.
+
+Respond with a single JSON object:
+{ "contradict": true | false, "reason": "one concise sentence naming the exact conflict, or why they do not conflict" }
+
+Output ONLY valid JSON. No markdown fences, no explanation, no preamble.`;
+
+export function contradictionJudgeUser(input: {
+  a: { title: string; content: string };
+  b: { title: string; content: string };
+}): string {
+  return `ENTRY A:
+${input.a.title}: ${input.a.content}
+
+ENTRY B:
+${input.b.title}: ${input.b.content}
+
+Do these two entries directly contradict each other?`;
+}

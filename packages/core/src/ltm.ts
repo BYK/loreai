@@ -617,6 +617,15 @@ export function remove(id: string, metadata?: KnowledgeMetadata) {
   db()
     .query("DELETE FROM knowledge_session_injections WHERE logical_id = ?")
     .run(logicalId);
+  // Contradiction pairs reference TWO logical_ids, so they can't ride the
+  // single-column LOGICAL_ID_BOOKKEEPING_TABLES loop. Purge any pair that
+  // touches this entry — a contradiction against a now-deleted entry is moot
+  // (the user resolved it by removing one side, or it was pruned). (#1123)
+  db()
+    .query(
+      "DELETE FROM knowledge_contradictions WHERE logical_id_a = ? OR logical_id_b = ?",
+    )
+    .run(logicalId, logicalId);
 }
 
 /** True when the entry for this logical_id was deleted (tombstoned). */
@@ -3449,6 +3458,160 @@ export function getDismissedKnowledgePairs(): Set<string> {
     dismissed.add(`${r.entry_b_title}\x1f${r.entry_a_title}`);
   }
   return dismissed;
+}
+
+// ---------------------------------------------------------------------------
+// Contradiction pairs (#1123)
+//
+// Idle-time detection records pairs of knowledge entries that genuinely OPPOSE
+// each other (see contradiction.ts). This is the affirmative of the
+// consolidation "never merge opposing rules" invariant: we NEVER auto-merge or
+// auto-delete — we only surface the pair for the user to resolve (dashboard /
+// CLI). Pairs are keyed by the two stable logical_ids in canonical (a <= b)
+// order so a pair maps to exactly one row regardless of detection order.
+// ---------------------------------------------------------------------------
+
+export type ContradictionStatus = "open" | "resolved" | "dismissed";
+
+export interface OpenContradiction {
+  logicalIdA: string;
+  logicalIdB: string;
+  titleA: string;
+  titleB: string;
+  similarity: number;
+  rationale: string | null;
+  detectedAt: number;
+}
+
+/** Canonical (a <= b) ordering so a pair maps to exactly one PK row. */
+export function contradictionPairKey(a: string, b: string): [string, string] {
+  return a <= b ? [a, b] : [b, a];
+}
+
+/**
+ * Record a detected contradiction pair. Canonicalizes order. Idempotent via
+ * INSERT OR IGNORE: a pair that already exists (in ANY status) is left
+ * untouched, so a previously resolved/dismissed pair is never re-opened and its
+ * detection timestamp never churns. Returns true when a NEW row was inserted.
+ */
+export function recordContradiction(input: {
+  logicalIdA: string;
+  logicalIdB: string;
+  projectId: string | null;
+  similarity: number;
+  rationale: string | null;
+}): boolean {
+  const [a, b] = contradictionPairKey(input.logicalIdA, input.logicalIdB);
+  if (a === b) return false; // never pair an entry with itself
+  const now = Date.now();
+  const res = db()
+    .query(
+      `INSERT OR IGNORE INTO knowledge_contradictions
+         (logical_id_a, logical_id_b, project_id, similarity, rationale, status, detected_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'open', ?, ?)`,
+    )
+    .run(a, b, input.projectId, input.similarity, input.rationale, now, now);
+  return res.changes > 0;
+}
+
+/**
+ * Record that a candidate pair was JUDGED and found NOT to contradict. Stored as
+ * status 'cleared' so the detector never re-judges it (bounds LLM cost and stops
+ * high-similarity non-contradicting pairs from starving the per-pass judge
+ * budget). Never surfaced. INSERT OR IGNORE so an already-recorded pair (open or
+ * otherwise) is left untouched.
+ */
+export function recordContradictionCleared(input: {
+  logicalIdA: string;
+  logicalIdB: string;
+  projectId: string | null;
+  similarity: number;
+}): void {
+  const [a, b] = contradictionPairKey(input.logicalIdA, input.logicalIdB);
+  if (a === b) return;
+  const now = Date.now();
+  db()
+    .query(
+      `INSERT OR IGNORE INTO knowledge_contradictions
+         (logical_id_a, logical_id_b, project_id, similarity, rationale, status, detected_at, updated_at)
+       VALUES (?, ?, ?, ?, NULL, 'cleared', ?, ?)`,
+    )
+    .run(a, b, input.projectId, input.similarity, now, now);
+}
+
+/**
+ * Has this pair already been recorded (in ANY status)? The detector uses this
+ * to judge each candidate pair at most once — bounding LLM cost and, crucially,
+ * never re-surfacing a pair the user already dismissed or resolved.
+ */
+export function contradictionExists(a0: string, b0: string): boolean {
+  const [a, b] = contradictionPairKey(a0, b0);
+  const row = db()
+    .query(
+      `SELECT COUNT(*) AS n FROM knowledge_contradictions
+       WHERE logical_id_a = ? AND logical_id_b = ?`,
+    )
+    .get(a, b) as { n: number };
+  return row.n > 0;
+}
+
+/**
+ * All OPEN contradictions, hydrated with both entries' current titles. Pairs
+ * where either entry no longer exists in `knowledge_current` (deleted /
+ * tombstoned) are excluded by the JOIN — a stale pair is never surfaced even if
+ * the row lingers. Optionally scoped to a project (its own + cross-project).
+ */
+export function listOpenContradictions(projectPath?: string): OpenContradiction[] {
+  const pid = projectPath ? ensureProject(projectPath) : null;
+  const rows = db()
+    .query(
+      `SELECT c.logical_id_a, c.logical_id_b, c.similarity, c.rationale, c.detected_at,
+              ka.title AS title_a, kb.title AS title_b
+         FROM knowledge_contradictions c
+         JOIN knowledge_current ka ON ka.logical_id = c.logical_id_a
+         JOIN knowledge_current kb ON kb.logical_id = c.logical_id_b
+        WHERE c.status = 'open'
+        ${pid ? "AND (c.project_id = ? OR c.project_id IS NULL)" : ""}
+        ORDER BY c.detected_at DESC`,
+    )
+    .all(...(pid ? [pid] : [])) as Array<{
+    logical_id_a: string;
+    logical_id_b: string;
+    similarity: number;
+    rationale: string | null;
+    detected_at: number;
+    title_a: string;
+    title_b: string;
+  }>;
+  return rows.map((r) => ({
+    logicalIdA: r.logical_id_a,
+    logicalIdB: r.logical_id_b,
+    titleA: r.title_a,
+    titleB: r.title_b,
+    similarity: r.similarity,
+    rationale: r.rationale,
+    detectedAt: r.detected_at,
+  }));
+}
+
+/**
+ * Set the status of a contradiction pair (canonicalized). Used by the dashboard
+ * resolve/dismiss endpoints and the CLI. A "resolved" pair usually accompanies
+ * a `remove()` of the losing entry (which also purges the row); "dismissed"
+ * keeps both entries but suppresses the pair from future surfacing.
+ */
+export function setContradictionStatus(
+  a0: string,
+  b0: string,
+  status: ContradictionStatus,
+): void {
+  const [a, b] = contradictionPairKey(a0, b0);
+  db()
+    .query(
+      `UPDATE knowledge_contradictions SET status = ?, updated_at = ?
+       WHERE logical_id_a = ? AND logical_id_b = ?`,
+    )
+    .run(status, Date.now(), a, b);
 }
 
 /**

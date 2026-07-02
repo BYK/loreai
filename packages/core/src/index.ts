@@ -28,6 +28,7 @@ export {
 export * as syncData from "./sync-data";
 export * as data from "./data";
 export * as distillation from "./distillation";
+export * as contradiction from "./contradiction";
 export * as curator from "./curator";
 export type { ChangedEntry } from "./curator";
 export * as embedding from "./embedding";

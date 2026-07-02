@@ -903,6 +903,44 @@ function promptChoice(
   });
 }
 
+/**
+ * `lore data contradictions` — list open contradictions detected between
+ * knowledge entries (#1123). Read-only surface; resolve them on the dashboard
+ * (/ui/knowledge) or by editing/removing one side of the pair.
+ */
+async function cmdContradictions(
+  args: string[],
+  flags: Record<string, unknown>,
+): Promise<void> {
+  const { ltm } = await import("@loreai/core");
+  const asJson = !!flags.json;
+  const projectPath = resolve((flags.project as string) ?? process.cwd());
+  const items = ltm.listOpenContradictions(projectPath);
+
+  if (asJson) {
+    console.log(JSON.stringify(items, null, 2));
+    return;
+  }
+  if (!items.length) {
+    console.log("No open contradictions.");
+    return;
+  }
+
+  console.log(`${items.length} open contradiction(s):\n`);
+  for (const c of items) {
+    console.log(`  "${c.titleA}"`);
+    console.log(`    vs "${c.titleB}"`);
+    if (c.rationale) console.log(`    reason: ${c.rationale}`);
+    console.log(
+      `    similarity ${c.similarity.toFixed(3)}   detected ${formatDate(c.detectedAt)}`,
+    );
+    console.log("");
+  }
+  console.log(
+    "Resolve in the dashboard (/ui/knowledge), or edit/remove one side to clear it.",
+  );
+}
+
 async function cmdDedup(
   _args: string[],
   flags: Record<string, unknown>,
@@ -2660,6 +2698,7 @@ Subcommands:
   recover               Re-import knowledge from .lore.md / AGENTS.md files
   reground-entities     Re-derive entities (people, tools, ...) from history (needs a running gateway)
   dedup                 Find and remove duplicate knowledge entries (all projects)
+  contradictions        List knowledge entries that contradict each other (#1123)
   reindex               Rebuild embedding vectors (after model/config change)
   rerank                Re-score preference confidence by directive strength
   cache-stats           Show cache-bust counters (system[0] cache-alignment gate)
@@ -3180,6 +3219,9 @@ export async function commandData(
       break;
     case "dedup":
       await cmdDedup(subArgs, values);
+      break;
+    case "contradictions":
+      await cmdContradictions(subArgs, values);
       break;
     case "reindex":
       await cmdReindex(values);
