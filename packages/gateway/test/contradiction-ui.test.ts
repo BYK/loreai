@@ -66,6 +66,27 @@ describe("contradictions dashboard (#1123)", () => {
     expect(html).toContain("/ui/api/contradiction/dismiss/");
   });
 
+  it("uses a static confirm() so a title with quotes can't break the delete guard", async () => {
+    // esc() renders ' as &#39; and " as &quot;; the browser HTML-decodes those
+    // back to ' / " inside an inline onsubmit handler. If the title were
+    // interpolated into confirm('...'), a title like "Don't ..." would break the
+    // JS string and the form would submit (delete!) with NO confirmation.
+    seedPair("Don't use global state", 'Always use "global" state');
+    const url = new URL("http://localhost/ui/knowledge");
+    const res = await handleUIRequest(new Request(url), url);
+    const html = await res.text();
+
+    // Confirm text is static — no user title inside the inline JS.
+    expect(html).toContain(
+      "confirm('Delete the other entry and keep this one? This cannot be undone.')",
+    );
+    // The old interpolated pattern must never come back.
+    expect(html).not.toContain("confirm('Keep");
+    expect(html).not.toMatch(/confirm\('[^']*Don&#39;t/);
+    // The banner still renders the (HTML-escaped) titles in text context.
+    expect(html).toContain("Don&#39;t use global state");
+  });
+
   it("dismiss keeps both entries but removes the pair from the open list", async () => {
     const { a, b } = seedPair("Deploy from main", "Deploy from release");
     expect(ltm.listOpenContradictions()).toHaveLength(1);

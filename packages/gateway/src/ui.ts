@@ -1910,12 +1910,16 @@ async function pageUserKnowledge(): Promise<string> {
         if (c.rationale) {
           body += `<span class="muted" style="color:#888;">${esc(truncate(c.rationale, 80))}</span>`;
         }
-        // Keep A → delete B (destructive: confirm).
-        body += `<form method="POST" action="/ui/api/contradiction/resolve/${esc(c.logicalIdA)}/${esc(c.logicalIdB)}" style="display:inline;" onsubmit="return confirm('Keep &quot;${a}&quot; and delete &quot;${b}&quot;?');">`;
+        // Keep A → delete B. The confirm() text is intentionally STATIC — never
+        // interpolate a title into an inline onsubmit handler: esc() emits &#39;
+        // / &quot; for quotes, which the browser HTML-decodes back to ' / " inside
+        // the JS string literal, breaking confirm() so the form would submit
+        // (and delete) WITHOUT a prompt. The row above already shows both titles.
+        body += `<form method="POST" action="/ui/api/contradiction/resolve/${esc(c.logicalIdA)}/${esc(c.logicalIdB)}" style="display:inline;" onsubmit="return confirm('Delete the other entry and keep this one? This cannot be undone.');">`;
         body += `<button type="submit" style="font-size:12px;padding:2px 8px;">Keep &ldquo;${a}&rdquo;</button>`;
         body += `</form>`;
-        // Keep B → delete A (destructive: confirm).
-        body += `<form method="POST" action="/ui/api/contradiction/resolve/${esc(c.logicalIdB)}/${esc(c.logicalIdA)}" style="display:inline;" onsubmit="return confirm('Keep &quot;${b}&quot; and delete &quot;${a}&quot;?');">`;
+        // Keep B → delete A (static confirm, same escaping reason as above).
+        body += `<form method="POST" action="/ui/api/contradiction/resolve/${esc(c.logicalIdB)}/${esc(c.logicalIdA)}" style="display:inline;" onsubmit="return confirm('Delete the other entry and keep this one? This cannot be undone.');">`;
         body += `<button type="submit" style="font-size:12px;padding:2px 8px;">Keep &ldquo;${b}&rdquo;</button>`;
         body += `</form>`;
         // Keep both → dismiss (suppress; never re-judged).
