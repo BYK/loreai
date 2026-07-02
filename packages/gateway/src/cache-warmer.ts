@@ -2426,6 +2426,14 @@ export function creditWarmupHit(
   // and warping the ROI analysis.
   if (cacheReadTokens <= 0) return noHit;
 
+  // `warmupHits` is a RETURN-FREQUENCY counter (binary +1), NOT a savings
+  // figure — it feeds the session ROI gate `warmupHits/totalWarmups >=
+  // MIN_SESSION_HIT_RATE`, which asks "did the user come back and read the
+  // warmed cache at all." Binary is correct there: a return is a return. Do NOT
+  // confuse this with the SAVINGS, which ARE pro-rata below (Bug B). An earlier
+  // note claimed a partial read "credits the full refreshTokens" — that was the
+  // pre-#1105 behavior and is no longer true: `creditedTokens` is the capped
+  // min() and is the only value booked as savings (pipeline recordWarmupHit).
   warmup.warmupHits++;
   // Pro-rata (Bug B): realized savings = what this turn actually read from the
   // warmed prefix, capped at what the warmup refreshed. See the docstring.

@@ -4667,6 +4667,10 @@ export function recordCacheTurnUsage(
       usage.cacheCreationInputTokens ?? 0,
       model,
       turnAnalysis.relocatable,
+      // Distinguish a free cold-boundary prefix-rewrite (rode along with an
+      // idle-resume write that was happening anyway) from an avoidable warm one
+      // (meta-distillation leaking onto a live cache) — see emitCacheBustMetric.
+      turnWasIdleResume,
     );
     // Persist a durable counter so the issue #791 "is system[0] dynamic
     // content a material cache-bust cause?" gate survives gateway restarts

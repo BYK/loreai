@@ -212,6 +212,19 @@ export function setCacheAnalyticsAttributes(
  * Emits a counter per cause category and a distribution of cache-write
  * token counts, both tagged by cause and model. Enables identifying which
  * bust causes dominate and tracking improvements over time.
+ *
+ * The `idle_resume` tag separates AVOIDABLE busts from FREE ones — critical for
+ * the `prefix-rewrite` cause in particular. `categorizeBust` labels ANY
+ * messages[0/1] divergence with cache creation as `prefix-rewrite` BEFORE it
+ * checks post-idle (cache-analytics.ts), so `cause=prefix-rewrite` alone
+ * conflates two very different events: a rewrite against a still-warm cache
+ * (a real, avoidable loss — meta-distillation should never run warm) versus a
+ * rewrite that merely rode along with an already-cold idle-resume boundary
+ * (free — that write was happening regardless). Tagging idle_resume lets a
+ * query isolate the leak: `lore.cache_bust_tokens{cause=prefix-rewrite,
+ * idle_resume=false}` is the avoidable spend and should stay ~0; a sustained
+ * non-zero value means meta-distillation is leaking onto warm caches. Multiply
+ * the token distribution by the model's cache_write price for the $ figure.
  */
 export function emitCacheBustMetric(
   cause: string,
@@ -219,16 +232,20 @@ export function emitCacheBustMetric(
   model: string,
   /** issue #791: whether a system[0] divergence looked relocatable. */
   relocatable = false,
+  /** True when this bust was a post-idle cold-cache re-warm (the write was
+   *  unavoidable). Distinguishes free cold-boundary rewrites from avoidable
+   *  warm ones — see the idle_resume note above. */
+  isIdleResume = false,
 ): void {
   if (!Sentry.isInitialized()) return;
 
   Sentry.metrics.count("lore.cache_bust", 1, {
-    attributes: { cause, model, relocatable },
+    attributes: { cause, model, relocatable, idle_resume: isIdleResume },
   });
 
   if (writeTokens > 0) {
     Sentry.metrics.distribution("lore.cache_bust_tokens", writeTokens, {
-      attributes: { cause, model, relocatable },
+      attributes: { cause, model, relocatable, idle_resume: isIdleResume },
       unit: "token",
     });
   }
