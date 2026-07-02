@@ -22,9 +22,9 @@ describe("contradictionCooldownActive", () => {
 
   it("allows a new pass once the cooldown window has elapsed", () => {
     const now = 5_000_000;
-    expect(contradictionCooldownActive(now - CONTRADICTION_COOLDOWN_MS, now)).toBe(
-      false,
-    );
+    expect(
+      contradictionCooldownActive(now - CONTRADICTION_COOLDOWN_MS, now),
+    ).toBe(false);
     expect(
       contradictionCooldownActive(now - (CONTRADICTION_COOLDOWN_MS + 1), now),
     ).toBe(false);

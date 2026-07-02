@@ -3561,7 +3561,9 @@ export function contradictionExists(a0: string, b0: string): boolean {
  * tombstoned) are excluded by the JOIN — a stale pair is never surfaced even if
  * the row lingers. Optionally scoped to a project (its own + cross-project).
  */
-export function listOpenContradictions(projectPath?: string): OpenContradiction[] {
+export function listOpenContradictions(
+  projectPath?: string,
+): OpenContradiction[] {
   const pid = projectPath ? ensureProject(projectPath) : null;
   const rows = db()
     .query(

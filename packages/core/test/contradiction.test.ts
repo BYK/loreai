@@ -136,7 +136,12 @@ describe("contradiction store", () => {
   it("never re-opens a dismissed pair; dismiss removes it from the open list", async () => {
     const P = "/test/contra/store-dismiss";
     const a = await seed(P, "Always use tabs", "tabs everywhere", v(1, 0, 0));
-    const b = await seed(P, "Always use spaces", "spaces everywhere", v(1, 0, 0));
+    const b = await seed(
+      P,
+      "Always use spaces",
+      "spaces everywhere",
+      v(1, 0, 0),
+    );
     ltm.recordContradiction({
       logicalIdA: a,
       logicalIdB: b,
@@ -170,9 +175,9 @@ describe("contradiction store", () => {
     });
     expect(ltm.contradictionExists("c1", "c2")).toBe(true);
     expect(
-      ltm.listOpenContradictions().some(
-        (c) => c.logicalIdA === "c1" || c.logicalIdB === "c1",
-      ),
+      ltm
+        .listOpenContradictions()
+        .some((c) => c.logicalIdA === "c1" || c.logicalIdB === "c1"),
     ).toBe(false);
   });
 
@@ -224,7 +229,11 @@ describe("detectContradictions", () => {
       JSON.stringify({ contradict: true, reason: "tabs vs spaces" }),
     );
 
-    const res = await detectContradictions({ projectPath: P, sessionID: "s", llm });
+    const res = await detectContradictions({
+      projectPath: P,
+      sessionID: "s",
+      llm,
+    });
 
     expect(prompt).toHaveBeenCalledTimes(1);
     expect(res).toEqual({ judged: 1, found: 1 });
@@ -239,13 +248,22 @@ describe("detectContradictions", () => {
 
   it("records NO contradiction (and clears the pair) when the judge says no conflict", async () => {
     const P = "/test/contra/detect-false";
-    const a = await seed(P, "Add tests after a feature", "write tests", v(1, 0, 0));
+    const a = await seed(
+      P,
+      "Add tests after a feature",
+      "write tests",
+      v(1, 0, 0),
+    );
     const b = await seed(P, "Run the linter before commit", "lint", v(1, 0, 0));
     const { llm, prompt } = stubLLM(
       JSON.stringify({ contradict: false, reason: "complementary" }),
     );
 
-    const res = await detectContradictions({ projectPath: P, sessionID: "s", llm });
+    const res = await detectContradictions({
+      projectPath: P,
+      sessionID: "s",
+      llm,
+    });
 
     expect(prompt).toHaveBeenCalledTimes(1);
     expect(res).toEqual({ judged: 1, found: 0 });
@@ -262,11 +280,19 @@ describe("detectContradictions", () => {
       JSON.stringify({ contradict: true, reason: "opposed" }),
     );
 
-    const first = await detectContradictions({ projectPath: P, sessionID: "s", llm });
+    const first = await detectContradictions({
+      projectPath: P,
+      sessionID: "s",
+      llm,
+    });
     expect(first).toEqual({ judged: 1, found: 1 });
 
     // Second pass: the pair is already recorded → skipped, no LLM call.
-    const second = await detectContradictions({ projectPath: P, sessionID: "s", llm });
+    const second = await detectContradictions({
+      projectPath: P,
+      sessionID: "s",
+      llm,
+    });
     expect(second).toEqual({ judged: 0, found: 0 });
     expect(prompt).toHaveBeenCalledTimes(1);
     expect(ltm.listOpenContradictions(P)).toHaveLength(1);
@@ -278,7 +304,11 @@ describe("detectContradictions", () => {
     const { llm, prompt } = stubLLM(
       JSON.stringify({ contradict: true, reason: "x" }),
     );
-    const res = await detectContradictions({ projectPath: P, sessionID: "s", llm });
+    const res = await detectContradictions({
+      projectPath: P,
+      sessionID: "s",
+      llm,
+    });
     expect(res).toEqual({ judged: 0, found: 0 });
     expect(prompt).not.toHaveBeenCalled();
   });
@@ -291,7 +321,11 @@ describe("detectContradictions", () => {
     const { llm, prompt } = stubLLM(
       JSON.stringify({ contradict: true, reason: "x" }),
     );
-    const res = await detectContradictions({ projectPath: P, sessionID: "s", llm });
+    const res = await detectContradictions({
+      projectPath: P,
+      sessionID: "s",
+      llm,
+    });
     expect(res).toEqual({ judged: 0, found: 0 });
     expect(prompt).not.toHaveBeenCalled();
   });

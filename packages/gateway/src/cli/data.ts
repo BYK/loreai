@@ -909,7 +909,7 @@ function promptChoice(
  * (/ui/knowledge) or by editing/removing one side of the pair.
  */
 async function cmdContradictions(
-  args: string[],
+  _args: string[],
   flags: Record<string, unknown>,
 ): Promise<void> {
   const { ltm } = await import("@loreai/core");
