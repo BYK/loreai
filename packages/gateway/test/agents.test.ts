@@ -235,3 +235,43 @@ describe("Codex agent cliArgs", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// GitHub Copilot CLI agent
+// ---------------------------------------------------------------------------
+
+describe("GitHub Copilot CLI agent envVars", () => {
+  const copilot = AGENTS.find((a) => a.name === "copilot");
+  if (!copilot) throw new Error("copilot agent not registered");
+
+  test("registered with the `copilot` binary", () => {
+    expect(copilot.binary).toBe("copilot");
+  });
+
+  test("sets COPILOT_API_URL to the bare gateway origin (no /v1)", () => {
+    // Copilot posts to the ORIGIN's bare /chat/completions, so COPILOT_API_URL
+    // must be the gateway origin without a /v1 suffix.
+    const env = copilot.envVars(
+      "http://127.0.0.1:3207",
+      "/home/user/my-project",
+    );
+    expect(env.COPILOT_API_URL).toBe("http://127.0.0.1:3207");
+  });
+
+  test("COPILOT_API_URL tracks the gateway URL", () => {
+    const env = copilot.envVars("http://192.168.1.50:5673", "/tmp/test");
+    expect(env.COPILOT_API_URL).toBe("http://192.168.1.50:5673");
+  });
+
+  test("sets LORE_PROJECT to cwd", () => {
+    const env = copilot.envVars("http://127.0.0.1:3207", "/home/user/proj");
+    expect(env.LORE_PROJECT).toBe("/home/user/proj");
+  });
+
+  test("does NOT set COPILOT_PROVIDER_* (leaves the user's BYOK config alone)", () => {
+    const env = copilot.envVars("http://127.0.0.1:3207", "/tmp/test");
+    expect(env.COPILOT_PROVIDER_BASE_URL).toBeUndefined();
+    expect(env.COPILOT_PROVIDER_TYPE).toBeUndefined();
+    expect(env.COPILOT_PROVIDER_API_KEY).toBeUndefined();
+  });
+});

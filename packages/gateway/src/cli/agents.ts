@@ -263,6 +263,36 @@ export const AGENTS: AgentDef[] = [
       return env;
     },
   },
+  {
+    name: "copilot",
+    displayName: "GitHub Copilot CLI",
+    binary: "copilot",
+    detect: () => whichSync("copilot"),
+    envVars: (url, cwd) => {
+      // GitHub Copilot CLI talks to the Copilot API (normally
+      // api.githubcopilot.com) in OpenAI wire format, performing its own GitHub→
+      // Copilot token exchange and setting a `Copilot-Integration-Id` header.
+      // `COPILOT_API_URL` overrides that API base — verified in the @github/copilot
+      // loader, which returns it verbatim as the Copilot API URL when set — so
+      // pointing it at the gateway makes Copilot's model calls flow through Lore.
+      // Copilot posts to the ORIGIN's bare `/chat/completions` (its API omits the
+      // /v1 segment), which the gateway accepts; the gateway recognizes the
+      // integration header and forwards to the github-copilot upstream (see
+      // forwardToUpstream). Use the bare origin (no /v1 suffix).
+      //
+      // This intercepts Copilot's DEFAULT (GitHub-hosted) models. BYOK users
+      // point COPILOT_PROVIDER_BASE_URL at the gateway themselves, so we leave
+      // the COPILOT_PROVIDER_* vars untouched.
+      const env: Record<string, string> = { COPILOT_API_URL: url };
+      // Project attribution. Copilot has no env→header mapping for model calls,
+      // so the gateway attributes the project from cwd / system-prompt inference;
+      // these are exported for consistency with other agents and future use.
+      env.LORE_PROJECT = cwd;
+      const remote = safeRemote(cwd);
+      if (remote) env.LORE_GIT_REMOTE = remote;
+      return env;
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
