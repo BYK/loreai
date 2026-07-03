@@ -422,8 +422,15 @@ export async function startServer(config: GatewayConfig): Promise<{
         return await handleAnthropicMessages(req, config);
       }
 
-      // POST /v1/chat/completions — OpenAI protocol
-      if (method === "POST" && pathname === "/v1/chat/completions") {
+      // POST /v1/chat/completions — OpenAI protocol.
+      // The bare `/chat/completions` (no /v1) form is accepted too: GitHub
+      // Copilot CLI redirected via COPILOT_API_URL posts to the origin's bare
+      // path (its API omits the /v1 segment, like api.githubcopilot.com).
+      if (
+        method === "POST" &&
+        (pathname === "/v1/chat/completions" ||
+          pathname === "/chat/completions")
+      ) {
         return await handleOpenAIChatCompletions(req, config);
       }
 
@@ -437,7 +444,12 @@ export async function startServer(config: GatewayConfig): Promise<{
         return await handleOpenAICodexResponses(req, config);
       }
 
-      // POST /v1/responses — OpenAI Responses API protocol
+      // POST /v1/responses — OpenAI Responses API protocol.
+      // NOTE: the bare `/responses` (no /v1) form used by GitHub Copilot CLI's
+      // Responses wire API (GPT-5 series) is intentionally NOT accepted yet — the
+      // responses upstream builder emits `${base}/v1/responses`, which would 404
+      // against api.githubcopilot.com (its endpoints omit /v1). Wiring that needs
+      // a host-aware responses path (like buildOpenAIChatCompletionsUrl) first.
       if (method === "POST" && pathname === "/v1/responses") {
         return await handleOpenAIResponses(req, config);
       }

@@ -109,6 +109,7 @@ import {
   extractUpstreamPathHeader,
   verbatimUpstreamUrl,
   extractProviderHeader,
+  hasCopilotIntegrationHeader,
   resolveLastSeenProvider,
   resolveProviderRoute,
   unattributedBucketPath,
@@ -3367,6 +3368,22 @@ async function forwardToUpstream(
   // Non-blocking — returns cached data or null (triggers background refresh).
   if (!providerRoute && providerID) {
     providerRoute = lookupProviderRoute(providerID);
+  }
+  // GitHub Copilot CLI (default GitHub-hosted mode) is redirected at the gateway
+  // via COPILOT_API_URL. It sends OpenAI-format requests with its own exchanged
+  // Copilot bearer token and a `Copilot-Integration-Id` header, but has no way to
+  // set X-Lore-Provider — so its model ids (gpt-*, claude-*, gemini-*) would route
+  // by model prefix to the WRONG upstream (api.openai.com / api.anthropic.com).
+  // Treat the integration header as the routing signal → github-copilot upstream
+  // (api.githubcopilot.com). Explicit X-Lore-Provider and X-Lore-Upstream-URL
+  // (incl. BYOK, where the user points COPILOT_PROVIDER_BASE_URL at the gateway)
+  // still win, since both set providerRoute / headerUpstream first.
+  if (
+    !providerRoute &&
+    !headerUpstream &&
+    hasCopilotIntegrationHeader(req.rawHeaders)
+  ) {
+    providerRoute = resolveProviderRoute("github-copilot");
   }
   const modelRoute = resolveUpstreamRoute(req.model);
 

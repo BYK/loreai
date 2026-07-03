@@ -661,6 +661,25 @@ export function extractProviderHeader(
 }
 
 /**
+ * True when the request carries a non-empty `Copilot-Integration-Id` header —
+ * the marker GitHub Copilot CLI sets on every model-API call (in both its
+ * default GitHub-hosted mode and any mode where it exchanges a Copilot token).
+ *
+ * Copilot CLI's default mode is redirected at the gateway via `COPILOT_API_URL`,
+ * but the CLI has no way to set `X-Lore-Provider`, so this header is the only
+ * signal that a request should route to the `github-copilot` upstream
+ * (api.githubcopilot.com) rather than being sent to api.openai.com /
+ * api.anthropic.com by model-prefix routing. Any non-empty integration id
+ * counts (e.g. `copilot-cli`, `vscode-chat`).
+ */
+export function hasCopilotIntegrationHeader(
+  headers: Record<string, string>,
+): boolean {
+  const raw = headers["copilot-integration-id"];
+  return typeof raw === "string" && raw.trim().length > 0;
+}
+
+/**
  * Reverse map: normalized upstream base URL → provider id.
  *
  * Built once from PROVIDER_ROUTES at module load. Each route's `url` is run
