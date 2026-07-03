@@ -12,23 +12,27 @@ import { execFileSync } from "node:child_process";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { type PgHarness, startPgHarness } from "./helpers/pg-harness";
 
-/** Free-tier defaults (mirror supabase/migrations/0003) — restored after quota tests. */
+/** Free-tier defaults (mirror supabase/migrations/0003 + 0009) — restored after quota tests. */
 const FREE_LIMITS: Record<string, number> = {
   knowledge: 500,
   entities: 30,
   entity_aliases: 300,
   entity_relations: 300,
   knowledge_entity_refs: 2000,
+  knowledge_meta: 500,
+  knowledge_meta_crdt: 5000,
 };
 
-// Mirrors the free-tier max_bytes seeded in 0007_scope_seam.sql — used to restore
-// byte caps in afterEach so setByteCap() mutations never leak across tests.
+// Mirrors the free-tier max_bytes seeded in 0007_scope_seam.sql + 0009 — used to
+// restore byte caps in afterEach so setByteCap() mutations never leak across tests.
 const FREE_BYTE_LIMITS: Record<string, number> = {
   knowledge: 8388608,
   entities: 1048576,
   entity_aliases: 2097152,
   entity_relations: 2097152,
   knowledge_entity_refs: 1048576,
+  knowledge_meta: 524288,
+  knowledge_meta_crdt: 1048576,
 };
 
 // Skip decision must be known at COLLECTION time (before beforeAll), so the
@@ -448,6 +452,91 @@ describe.skipIf(gate())("sync migrations — quota + anti-abuse", () => {
     );
     expect(err.code).toBe("42501");
   });
+
+  // --- A2 3b-2 metric tables: prove the enforce_row_quota probe branches work
+  // (0007's generic `id` probe would 42703 on the logical_id/replica_id keys). ---
+
+  it("caps knowledge_meta inserts at the free-tier row cap (logical_id key probe)", async () => {
+    const a = await h.createUser();
+    await setCap("knowledge_meta", 2);
+    const ins = (lid: string) =>
+      h.asUser(a, (c) =>
+        c.query(
+          "insert into public.knowledge_meta (logical_id, scope_id, base_confidence) values ($1,$2,0.9)",
+          [lid, a],
+        ),
+      );
+    await ins("m1");
+    await ins("m2");
+    const err = await expectError(() => ins("m3"));
+    expect(err.code).toBe("23514"); // quota, NOT 42703 (undefined_column)
+    expect(err.message).toMatch(/quota exceeded/i);
+  });
+
+  it("caps knowledge_meta_crdt inserts at the free-tier row cap (composite key probe)", async () => {
+    const a = await h.createUser();
+    await setCap("knowledge_meta_crdt", 2);
+    const ins = (lid: string, rep: string) =>
+      h.asUser(a, (c) =>
+        c.query(
+          "insert into public.knowledge_meta_crdt (logical_id, replica_id, scope_id, pos, neg) values ($1,$2,$3,0.1,0)",
+          [lid, rep, a],
+        ),
+      );
+    await ins("k1", "rA");
+    await ins("k1", "rB"); // same logical_id, different replica → distinct row
+    const err = await expectError(() => ins("k2", "rA"));
+    expect(err.code).toBe("23514");
+    expect(err.message).toMatch(/quota exceeded/i);
+  });
+
+  it("re-pushing a knowledge_meta_crdt counter is an UPDATE, not new growth", async () => {
+    // The client overwrites its OWN replica's counter as it grows. That upsert
+    // resolves to UPDATE (PK exists) → not counted as a new physical row, so an
+    // at-cap user can keep advancing their counter.
+    const a = await h.createUser();
+    await setCap("knowledge_meta_crdt", 1);
+    const upsert = (pos: number) =>
+      h.asUser(a, (c) =>
+        c.query(
+          `insert into public.knowledge_meta_crdt (logical_id, replica_id, scope_id, pos, neg)
+           values ('g1','rA',$1,$2,0)
+           on conflict (scope_id, logical_id, replica_id) do update set pos=excluded.pos`,
+          [a, pos],
+        ),
+      );
+    await upsert(0.1); // physical row 1 = cap
+    const grown = await upsert(0.5); // UPDATE-in-disguise, must NOT be quota-blocked
+    expect(grown.rowCount).toBe(1);
+    const u = await usage(a, "knowledge_meta_crdt");
+    expect(Number(u.row_count)).toBe(1); // still one physical row
+  });
+
+  it("a forged cross-scope write does NOT leak the victim's quota state (oracle closed)", async () => {
+    // A BEFORE-trigger runs before RLS WITH CHECK, so an unguarded enforce_row_quota
+    // would read the VICTIM's tier/usage and echo "N of M rows" for a forged
+    // scope_id — an at-cap existence oracle. The guard short-circuits before that
+    // read; RLS then rejects the (always-doomed) forged row generically.
+    const victim = await h.createUser();
+    const attacker = await h.createUser();
+    await setCap("knowledge_meta", 1);
+    await h.asUser(victim, (c) =>
+      c.query(
+        "insert into public.knowledge_meta (logical_id, scope_id, base_confidence) values ('v1',$1,0.9)",
+        [victim],
+      ),
+    ); // victim now at cap
+    const err = await expectError(() =>
+      h.asUser(attacker, (c) =>
+        c.query(
+          "insert into public.knowledge_meta (logical_id, scope_id, base_confidence) values ('x',$1,0.9)",
+          [victim],
+        ),
+      ),
+    );
+    expect(err.code).toBe("42501"); // RLS, NOT the 23514 numeric quota oracle
+    expect(err.message).not.toMatch(/\d+ of \d+ rows/i); // no count leak
+  });
 });
 
 describe.skipIf(gate())("sync migrations — scope seam", () => {
@@ -506,3 +595,174 @@ describe.skipIf(gate())("sync migrations — scope seam", () => {
     expect(err.code).toBe("23514");
   });
 });
+
+describe.skipIf(gate())(
+  "sync migrations — knowledge_meta convergent register (A2 3b-2, 0009)",
+  () => {
+    it("RLS: a user cannot read another user's knowledge_meta rows", async () => {
+      const a = await h.createUser();
+      const b = await h.createUser();
+      await h.asUser(a, (c) =>
+        c.query(
+          "insert into public.knowledge_meta (logical_id, scope_id, base_confidence) values ('r1',$1,0.7)",
+          [a],
+        ),
+      );
+      const seen = await h.asUser(b, (c) =>
+        c
+          .query("select logical_id from public.knowledge_meta")
+          .then((r) => r.rowCount),
+      );
+      expect(seen).toBe(0);
+    });
+
+    it("RLS: a user cannot read another user's knowledge_meta_crdt rows", async () => {
+      const a = await h.createUser();
+      const b = await h.createUser();
+      await h.asUser(a, (c) =>
+        c.query(
+          "insert into public.knowledge_meta_crdt (logical_id, replica_id, scope_id, pos, neg) values ('r1','rA',$1,0.2,0)",
+          [a],
+        ),
+      );
+      const seen = await h.asUser(b, (c) =>
+        c
+          .query("select logical_id from public.knowledge_meta_crdt")
+          .then((r) => r.rowCount),
+      );
+      expect(seen).toBe(0);
+    });
+
+    it("RLS: a user cannot write into another user's scope", async () => {
+      const a = await h.createUser();
+      const b = await h.createUser();
+      // b tries to insert a row owned by a (scope_id = a) → WITH CHECK rejects.
+      const err = await expectError(() =>
+        h.asUser(b, (c) =>
+          c.query(
+            "insert into public.knowledge_meta (logical_id, scope_id, base_confidence) values ('x',$1,0.5)",
+            [a],
+          ),
+        ),
+      );
+      expect(err.code).toBe("42501");
+    });
+
+    it("author_id defaults to the writer; forging it is rejected (WITH CHECK)", async () => {
+      const a = await h.createUser();
+      const other = await h.createUser();
+      // default path: author_id = auth.uid()
+      await h.asUser(a, (c) =>
+        c.query(
+          "insert into public.knowledge_meta (logical_id, scope_id, base_confidence) values ('ok',$1,0.9)",
+          [a],
+        ),
+      );
+      const row = await h.asUser(a, (c) =>
+        c
+          .query(
+            "select author_id from public.knowledge_meta where logical_id='ok'",
+          )
+          .then((r) => r.rows[0]),
+      );
+      expect(row.author_id).toBe(a);
+      // forged author_id on own scope → 42501
+      const err = await expectError(() =>
+        h.asUser(a, (c) =>
+          c.query(
+            "insert into public.knowledge_meta (logical_id, scope_id, author_id, base_confidence) values ('forge',$1,$2,0.9)",
+            [a, other],
+          ),
+        ),
+      );
+      expect(err.code).toBe("42501");
+    });
+
+    it("scope_id is immutable on knowledge_meta_crdt (re-parent rejected)", async () => {
+      const a = await h.createUser();
+      const other = await h.createUser();
+      await h.asUser(a, (c) =>
+        c.query(
+          "insert into public.knowledge_meta_crdt (logical_id, replica_id, scope_id, pos, neg) values ('im','rA',$1,0.1,0)",
+          [a],
+        ),
+      );
+      const err = await expectError(() =>
+        h.asUser(a, (c) =>
+          c.query(
+            "update public.knowledge_meta_crdt set scope_id=$1 where logical_id='im'",
+            [other],
+          ),
+        ),
+      );
+      expect(err.code).toBe("23514");
+    });
+
+    it("rejects a poisoned base_confidence (NaN / out-of-range) — protects the peer sum", async () => {
+      const a = await h.createUser();
+      for (const bad of ["NaN", "2.0", "-0.5"]) {
+        const err = await expectError(() =>
+          h.asUser(a, (c) =>
+            c.query(
+              "insert into public.knowledge_meta (logical_id, scope_id, base_confidence) values ($1,$2,$3)",
+              [`b_${bad}`, a, bad],
+            ),
+          ),
+        );
+        expect(err.code).toBe("23514"); // size/numeric check_violation
+      }
+    });
+
+    it("rejects poisoned CRDT counters (negative / NaN / Infinity)", async () => {
+      const a = await h.createUser();
+      // pos poisoned
+      for (const bad of ["-1", "NaN", "Infinity"]) {
+        const err = await expectError(() =>
+          h.asUser(a, (c) =>
+            c.query(
+              "insert into public.knowledge_meta_crdt (logical_id, replica_id, scope_id, pos, neg) values ($1,'rA',$2,$3,0)",
+              [`p_${bad}`, a, bad],
+            ),
+          ),
+        );
+        expect(err.code).toBe("23514");
+      }
+      // neg poisoned
+      const err = await expectError(() =>
+        h.asUser(a, (c) =>
+          c.query(
+            "insert into public.knowledge_meta_crdt (logical_id, replica_id, scope_id, pos, neg) values ('n1','rA',$1,0,'Infinity')",
+            [a],
+          ),
+        ),
+      );
+      expect(err.code).toBe("23514");
+    });
+
+    it("usage counter tracks the physical footprint of the metric tables", async () => {
+      const a = await h.createUser();
+      await h.asUser(a, (c) =>
+        c.query(
+          "insert into public.knowledge_meta_crdt (logical_id, replica_id, scope_id, pos, neg) values ('u1','rA',$1,0.1,0)",
+          [a],
+        ),
+      );
+      const { rows } = await h.client.query(
+        "select row_count from public.user_table_usage where scope_id=$1 and table_name='knowledge_meta_crdt'",
+        [a],
+      );
+      expect(Number(rows[0].row_count)).toBe(1);
+      // hard delete → physical -1
+      await h.asUser(a, (c) =>
+        c.query(
+          "delete from public.knowledge_meta_crdt where logical_id='u1' and replica_id='rA'",
+        ),
+      );
+      const after = await h.client.query(
+        "select row_count from public.user_table_usage where scope_id=$1 and table_name='knowledge_meta_crdt'",
+        [a],
+      );
+      expect(Number(after.rows[0].row_count)).toBe(0);
+    });
+  },
+);

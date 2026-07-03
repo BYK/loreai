@@ -13,7 +13,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { db, ensureProject, setKV, syncData } from "@loreai/core";
+import { db, ensureProject, ltm, setKV, syncData } from "@loreai/core";
 import {
   afterAll,
   afterEach,
@@ -93,6 +93,8 @@ beforeEach(async () => {
   for (const t of [
     "knowledge_entity_refs",
     "knowledge",
+    "knowledge_meta_crdt",
+    "knowledge_meta",
     "entity_aliases",
     "entity_relations",
     "entities",
@@ -123,6 +125,8 @@ beforeEach(async () => {
   for (const t of [
     "knowledge_entity_refs",
     "knowledge",
+    "knowledge_meta_crdt",
+    "knowledge_meta",
     "entities",
     "entity_aliases",
     "entity_relations",
@@ -200,6 +204,96 @@ describe.skipIf(SKIP)("sync engine ↔ real Postgres/PostgREST", () => {
     const r = await pullOnce(client);
     expect(r.pulled).toBe(0); // echo is a no-op
     expect(syncData.getRowById("knowledge", "k1")?.content).toBe("round-trip");
+  });
+
+  it("round-trips the confidence register (knowledge_meta + knowledge_meta_crdt) through the real engine", async () => {
+    // The core of the migration: a real create() writes a base register row, and a
+    // reinforce() records a PN-counter delta. Both must push cleanly through
+    // supabase-js → PostgREST → Postgres (no 22008 timestamp / PGRST204 phantom-
+    // column errors the docstring warns about), landing with the right values.
+    syncData.enableSync("basic");
+    const id = ltm.create({
+      projectPath: "/tmp/lore-engine-it",
+      scope: "project",
+      category: "decision",
+      title: "Register RT",
+      content: "register round-trip",
+      confidence: 0.6,
+    });
+    ltm.reinforce(id, 0.05); // → one knowledge_meta_crdt (pos=0.05) on this replica
+    const r = await pushOnce(clientFor(uid));
+    expect(r.pushed).toBeGreaterThanOrEqual(2); // knowledge + meta (+ crdt)
+
+    // base_confidence landed immutably at the create-time value (NOT the
+    // materialized 0.65) on knowledge_meta.
+    const meta = await h.asUser(uid, (c) =>
+      c
+        .query(
+          "select base_confidence from public.knowledge_meta where logical_id=$1",
+          [id],
+        )
+        .then((x) => x.rows),
+    );
+    expect(meta).toHaveLength(1);
+    expect(Number(meta[0].base_confidence)).toBeCloseTo(0.6, 6);
+
+    // The PN-counter row carries the positive delta on this device's replica.
+    const crdt = await h.asUser(uid, (c) =>
+      c
+        .query(
+          "select pos, neg from public.knowledge_meta_crdt where logical_id=$1",
+          [id],
+        )
+        .then((x) => x.rows),
+    );
+    expect(crdt).toHaveLength(1);
+    expect(Number(crdt[0].pos)).toBeCloseTo(0.05, 6);
+    expect(Number(crdt[0].neg)).toBe(0);
+
+    // Re-push is a no-op (content hash stable → no ping-pong).
+    expect((await pushOnce(clientFor(uid))).pushed).toBe(0);
+  });
+
+  it("merges a peer's confidence counter on pull (per-key MAX convergence)", async () => {
+    // Device A creates + reinforces an entry, pushes it.
+    syncData.enableSync("basic");
+    const id = ltm.create({
+      projectPath: "/tmp/lore-engine-it",
+      scope: "project",
+      category: "decision",
+      title: "Converge",
+      content: "converge body",
+      confidence: 0.5,
+    });
+    ltm.reinforce(id, 0.1); // local replica pos=0.1
+    await pushOnce(clientFor(uid));
+
+    // Simulate a SECOND device's counter for the same logical entry landing on the
+    // remote (a different replica_id). On pull it must MAX-merge in, not clobber.
+    await h.asUser(uid, (c) =>
+      c.query(
+        `insert into public.knowledge_meta_crdt (logical_id, replica_id, scope_id, pos, neg)
+         values ($1,'replica-B',$2,0.2,0)`,
+        [id, uid],
+      ),
+    );
+    setKV("sync.pull.knowledge_meta_crdt", "0|"); // re-pull from the start
+    await pullOnce(clientFor(uid));
+
+    // Both replicas' counters now present locally; materialized confidence folds
+    // in both: base 0.5 + local 0.1 + peer 0.2 = 0.8.
+    const rows = db()
+      .query(
+        "SELECT replica_id, pos FROM knowledge_meta_crdt WHERE logical_id = ? ORDER BY replica_id",
+      )
+      .all(id) as Array<{ replica_id: string; pos: number }>;
+    expect(rows.length).toBe(2);
+    const conf = (
+      db()
+        .query("SELECT confidence FROM knowledge_meta WHERE logical_id = ?")
+        .get(id) as { confidence: number }
+    ).confidence;
+    expect(conf).toBeCloseTo(0.8, 6);
   });
 
   it("pulls a row written by another device (same account)", async () => {
