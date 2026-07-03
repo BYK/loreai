@@ -147,6 +147,15 @@ const SUPPORTED_APPS: AppSetup[] = [
     // copilot` / export guidance; there is nothing to persist, so `undo` is an
     // informational no-op. Inventory reads COPILOT_API_URL from the environment.
   },
+  {
+    agentName: "gemini",
+    displayName: "Gemini CLI",
+    run: (baseUrl) => setupGemini(baseUrl),
+    undo: undoGemini,
+    // Gemini CLI reads GOOGLE_GEMINI_BASE_URL from ~/.gemini/.env (dotenv), so
+    // this persists the base URL there — the native generateContent equivalent
+    // of the Hermes env writer.
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -1103,6 +1112,62 @@ function setupCopilot(baseUrl: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// Gemini CLI setup
+// ---------------------------------------------------------------------------
+
+/** Path to Gemini CLI's dotenv file (`~/.gemini/.env`). */
+export function geminiEnvPath(): string {
+  return join(homedir(), ".gemini", ".env");
+}
+
+/**
+ * Rewrite Gemini CLI's `~/.gemini/.env` to route through the gateway. Sets
+ * `GOOGLE_GEMINI_BASE_URL` to the bare gateway origin (Gemini appends
+ * `/v1beta/models/...` itself, so strip a trailing `/v1`). Prepends a
+ * `#`-commented backup block and upserts the key in place (preserving every
+ * other line, e.g. `GEMINI_API_KEY`). Idempotent.
+ */
+export function updateGeminiEnv(content: string, baseUrl: string): string {
+  const root = copilotApiUrlFromBaseUrl(baseUrl); // strips a trailing /v1
+  const loreValues: Record<string, string> = {
+    GOOGLE_GEMINI_BASE_URL: root,
+  };
+  const block = buildEnvBackupBlock(content, loreValues);
+  let result = content;
+  for (const [key, value] of Object.entries(loreValues)) {
+    result = setEnvValueRaw(result, key, value);
+  }
+  return block ? prependEnvBackupBlock(result, block) : result;
+}
+
+function setupGemini(baseUrl: string): void {
+  const configPath = geminiEnvPath();
+  mkdirSync(dirname(configPath), { recursive: true });
+
+  let content = "";
+  try {
+    content = readFileSync(configPath, "utf8");
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+  }
+
+  const updated = updateGeminiEnv(content, baseUrl);
+  writeFileSync(configPath, updated, "utf8");
+
+  const root = copilotApiUrlFromBaseUrl(baseUrl);
+  console.log(`[lore] Gemini CLI configured to use Lore gateway.`);
+  console.log(`[lore]   GOOGLE_GEMINI_BASE_URL=${root}`);
+  console.log(`[lore]   Config: ${configPath}`);
+  console.log(`[lore]`);
+  console.log(
+    `[lore] Uses GEMINI_API_KEY auth. If Gemini CLI doesn't load ~/.gemini/.env,`,
+  );
+  console.log(
+    `[lore] export GOOGLE_GEMINI_BASE_URL in your shell, or use: lore run gemini`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Undo (`lore setup undo [app]`)
 // ---------------------------------------------------------------------------
 
@@ -1156,6 +1221,22 @@ function undoCopilot(): RestoreSummary {
   );
   console.log(`[lore] profile to stop routing through the gateway.`);
   return { hadBackup: false, restored: [], skipped: [] };
+}
+
+function undoGemini(): RestoreSummary {
+  const configPath = geminiEnvPath();
+  let content: string;
+  try {
+    content = readFileSync(configPath, "utf8");
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+      return { hadBackup: false, restored: [], skipped: [] };
+    }
+    throw e;
+  }
+  const { content: restored, summary } = restoreEnvBackup(content);
+  if (summary.hadBackup) writeFileSync(configPath, restored, "utf8");
+  return summary;
 }
 
 function undoCodex(): RestoreSummary {

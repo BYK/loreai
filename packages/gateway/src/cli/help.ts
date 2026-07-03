@@ -22,7 +22,7 @@ Commands:
   setup [app]         Configure an AI app to route through lore. Prefer \`lore run\`
                        for terminal agents; use setup for GUI/IDE agents lore can't
                        launch, paired with a background gateway (\`lore start --bg\`).
-                       Supported: claude-code, codex, opencode, pi, hermes, copilot
+                       Supported: claude-code, codex, opencode, pi, hermes, copilot, gemini
                        \`setup undo [app]\` reverts a previous setup (restores
                        the backup lore saved before it changed your config)
                        \`setup status\` prints a read-only inventory of what

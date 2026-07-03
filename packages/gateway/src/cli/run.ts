@@ -101,7 +101,7 @@ async function resolveLaunchTarget(
   if (detected.length === 0) {
     console.error("[lore] No known AI agents found on PATH.");
     console.error(
-      "[lore] Install one of: Claude Code (claude), Codex (codex), Pi (pi), OpenCode (opencode), Hermes (hermes), GitHub Copilot CLI (copilot)",
+      "[lore] Install one of: Claude Code (claude), Codex (codex), Pi (pi), OpenCode (opencode), Hermes (hermes), GitHub Copilot CLI (copilot), Gemini CLI (gemini)",
     );
     console.error(`[lore] Or run with an explicit command: lore run <command>`);
     console.error(

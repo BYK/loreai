@@ -275,3 +275,31 @@ describe("GitHub Copilot CLI agent envVars", () => {
     expect(env.COPILOT_PROVIDER_API_KEY).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Gemini CLI agent
+// ---------------------------------------------------------------------------
+
+describe("Gemini CLI agent envVars", () => {
+  const gemini = AGENTS.find((a) => a.name === "gemini");
+  if (!gemini) throw new Error("gemini agent not registered");
+
+  test("registered with the `gemini` binary", () => {
+    expect(gemini.binary).toBe("gemini");
+  });
+
+  test("sets GOOGLE_GEMINI_BASE_URL to the bare gateway origin (no /v1)", () => {
+    const env = gemini.envVars("http://127.0.0.1:3207", "/home/user/proj");
+    expect(env.GOOGLE_GEMINI_BASE_URL).toBe("http://127.0.0.1:3207");
+  });
+
+  test("GOOGLE_GEMINI_BASE_URL tracks the gateway URL", () => {
+    const env = gemini.envVars("http://127.0.0.1:5673", "/tmp/test");
+    expect(env.GOOGLE_GEMINI_BASE_URL).toBe("http://127.0.0.1:5673");
+  });
+
+  test("sets LORE_PROJECT to cwd", () => {
+    const env = gemini.envVars("http://127.0.0.1:3207", "/home/user/proj");
+    expect(env.LORE_PROJECT).toBe("/home/user/proj");
+  });
+});

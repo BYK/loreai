@@ -11,6 +11,7 @@ import {
   claudeCodeSettingsPath,
   codexConfigPath,
   hermesEnvPath,
+  geminiEnvPath,
   opencodeConfigPath,
   piModelsConfigPath,
   readJsonConfig,
@@ -267,6 +268,27 @@ export function collectHermesInventory(): AppInventory {
   return { app: "Hermes", file, fileExists, rows, hasBackup };
 }
 
+/** Collect inventory for the Gemini CLI (dotenv). Reads `~/.gemini/.env`. */
+export function collectGeminiInventory(): AppInventory {
+  const file = geminiEnvPath();
+  const fileExists = existsSync(file);
+  const rows: InventoryRow[] = [];
+  let hasBackup = false;
+  if (fileExists) {
+    const content = readFileSync(file, "utf8");
+    hasBackup = content.includes("lore setup backup");
+    const url = getEnvValue(content, "GOOGLE_GEMINI_BASE_URL");
+    rows.push({
+      app: "Gemini",
+      file,
+      fileExists,
+      key: "GOOGLE_GEMINI_BASE_URL",
+      routing: url === null ? { kind: "unset" } : classifyRoutingValue(url),
+    });
+  }
+  return { app: "Gemini", file, fileExists, rows, hasBackup };
+}
+
 /**
  * Collect inventory for GitHub Copilot CLI. Copilot has no config-file endpoint
  * override — routing is controlled entirely by the `COPILOT_API_URL` env var —
@@ -300,6 +322,7 @@ export function collectInventory(): AppInventory[] {
     collectOpencodeInventory(),
     collectPiInventory(),
     collectHermesInventory(),
+    collectGeminiInventory(),
     collectCopilotInventory(),
   ];
 }

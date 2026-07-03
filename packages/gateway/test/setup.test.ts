@@ -9,6 +9,8 @@ import {
   piModelsConfigPath,
   updateHermesEnv,
   hermesEnvPath,
+  updateGeminiEnv,
+  geminiEnvPath,
   copilotApiUrlFromBaseUrl,
   opencodePluginSpec,
 } from "../src/cli/setup";
@@ -792,5 +794,35 @@ describe("copilotApiUrlFromBaseUrl", () => {
 
   test("does not strip a /v1 that is not a trailing segment", () => {
     expect(copilotApiUrlFromBaseUrl("http://host/v1x")).toBe("http://host/v1x");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// updateGeminiEnv / geminiEnvPath (Gemini CLI)
+// ---------------------------------------------------------------------------
+
+describe("updateGeminiEnv", () => {
+  test("sets GOOGLE_GEMINI_BASE_URL to the bare origin (strips /v1) + backup", () => {
+    const result = updateGeminiEnv(
+      "GEMINI_API_KEY=secret\n",
+      "http://127.0.0.1:3207/v1",
+    );
+    expect(result).toContain("GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:3207");
+    // Preserves unrelated keys and records a backup block.
+    expect(result).toContain("GEMINI_API_KEY=secret");
+    expect(result).toContain("lore setup backup");
+  });
+
+  test("upserts in place on rerun (idempotent key)", () => {
+    const once = updateGeminiEnv("", "http://127.0.0.1:3299/v1");
+    const twice = updateGeminiEnv(once, "http://127.0.0.1:3299/v1");
+    const occurrences = twice.split("GOOGLE_GEMINI_BASE_URL=").length - 1;
+    expect(occurrences).toBe(1);
+  });
+});
+
+describe("geminiEnvPath", () => {
+  test("defaults to ~/.gemini/.env", () => {
+    expect(geminiEnvPath()).toBe(join(homedir(), ".gemini", ".env"));
   });
 });

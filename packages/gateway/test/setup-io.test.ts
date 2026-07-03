@@ -312,3 +312,28 @@ describe("commandSetup — GitHub Copilot CLI", () => {
     expect(logged()).toContain("COPILOT_API_URL");
   });
 });
+
+describe("commandSetup — Gemini CLI", () => {
+  const geminiPath = () => join(home, ".gemini", ".env");
+
+  it("writes GOOGLE_GEMINI_BASE_URL to ~/.gemini/.env with a backup, then undoes", async () => {
+    mkdirSync(join(home, ".gemini"), { recursive: true });
+    writeFileSync(geminiPath(), "GEMINI_API_KEY=sk-abc\n");
+
+    await commandSetup(["gemini"], { port: 3299 });
+
+    const env = readFileSync(geminiPath(), "utf8");
+    // Bare origin (no /v1) — Gemini appends /v1beta/models/... itself.
+    expect(env).toContain("GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:3299");
+    expect(env).not.toContain("http://127.0.0.1:3299/v1");
+    expect(env).toContain("GEMINI_API_KEY=sk-abc"); // preserved
+    expect(env).toContain("lore setup backup");
+
+    await commandSetup(["undo", "gemini"], {});
+
+    const restored = readFileSync(geminiPath(), "utf8");
+    expect(restored).not.toContain("GOOGLE_GEMINI_BASE_URL");
+    expect(restored).toContain("GEMINI_API_KEY=sk-abc");
+    expect(restored).not.toContain("lore setup backup");
+  });
+});

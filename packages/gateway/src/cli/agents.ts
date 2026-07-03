@@ -293,6 +293,28 @@ export const AGENTS: AgentDef[] = [
       return env;
     },
   },
+  {
+    name: "gemini",
+    displayName: "Gemini CLI",
+    binary: "gemini",
+    detect: () => whichSync("gemini"),
+    envVars: (url, cwd) => {
+      // Google's Gemini CLI (GEMINI_API_KEY mode) reads GOOGLE_GEMINI_BASE_URL
+      // as the base origin for the native Generative Language API — it appends
+      // `/v1beta/models/{model}:generateContent` itself, so pass the bare gateway
+      // origin (no /v1). Gemini's security rule allows plain HTTP only for
+      // localhost / 127.0.0.1 / [::1], which the local gateway satisfies. The
+      // gateway speaks the native generateContent protocol and forwards to
+      // generativelanguage.googleapis.com.
+      const env: Record<string, string> = { GOOGLE_GEMINI_BASE_URL: url };
+      // Project attribution (Gemini has no env→header mapping for model calls;
+      // the gateway attributes from cwd / system-prompt inference).
+      env.LORE_PROJECT = cwd;
+      const remote = safeRemote(cwd);
+      if (remote) env.LORE_GIT_REMOTE = remote;
+      return env;
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------

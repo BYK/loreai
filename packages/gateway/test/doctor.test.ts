@@ -350,15 +350,16 @@ describe("formatFinding", () => {
 });
 
 describe("collectInventory (integration)", () => {
-  it("returns all-six-apps inventory with missing files on a clean HOME", () => {
+  it("returns all-seven-apps inventory with missing files on a clean HOME", () => {
     const all = collectInventory();
-    expect(all).toHaveLength(6);
+    expect(all).toHaveLength(7);
     expect(all.map((i) => i.app)).toEqual([
       "Claude Code",
       "Codex",
       "OpenCode",
       "Pi",
       "Hermes",
+      "Gemini",
       "Copilot",
     ]);
     for (const inv of all) {
