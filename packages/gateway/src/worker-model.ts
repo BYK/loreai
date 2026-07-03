@@ -787,6 +787,17 @@ const WORKER_DEFAULTS: Record<
     family: "gpt-codex",
     alreadyCheap: (id) => id.includes("mini") || id.includes("spark"),
   },
+  // Google Gemini: flash matches pro quality on distillation at far lower cost.
+  // family "gemini-flash" tracks the newest flash/lite tier from models.dev; the
+  // modelID is the OFFLINE fallback. Applies when the session tags
+  // X-Lore-Provider: google (opencode/pi); a bare native Gemini CLI session (no
+  // provider header) falls back to the session model, which is still correct.
+  google: {
+    providerID: "google",
+    modelID: "gemini-2.5-flash",
+    family: "gemini-flash",
+    alreadyCheap: (id) => id.includes("flash") || id.includes("lite"),
+  },
   // GitHub Copilot proxies multiple providers — match by model ID prefix.
   // No `family`: Copilot's family resolution is handled by
   // resolveGitHubCopilotWorker (model IDs use different formatting, e.g.

@@ -270,6 +270,12 @@ describe("resolveWorkerProtocol", () => {
     );
   });
 
+  test("explicit 'gemini' stays 'gemini' (does NOT collapse to openai)", () => {
+    expect(resolveWorkerProtocol("google", "gemini")).toBe("gemini");
+    // Even against an unrelated provider id, the explicit hint wins.
+    expect(resolveWorkerProtocol("anthropic", "gemini")).toBe("gemini");
+  });
+
   // Priority 2: route table lookup
   test("anthropic provider resolves to 'anthropic' via route table", () => {
     expect(resolveWorkerProtocol("anthropic")).toBe("anthropic");

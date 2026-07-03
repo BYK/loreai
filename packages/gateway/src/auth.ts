@@ -42,6 +42,13 @@ export function extractAuth(
   const apiKey = headers["x-api-key"] || headers["X-Api-Key"];
   if (apiKey) return { scheme: "api-key", value: apiKey };
 
+  // Google Gemini's native API authenticates with `x-goog-api-key`. Capture it
+  // as an api-key credential so gemini sessions get a stable identity and their
+  // background workers can resolve auth (worker builders emit it as
+  // `x-goog-api-key`, not the generic `x-api-key`, via buildGeminiWorkerRequest).
+  const googKey = headers["x-goog-api-key"] || headers["X-Goog-Api-Key"];
+  if (googKey) return { scheme: "api-key", value: googKey };
+
   const authHeader = headers.authorization || headers.Authorization;
   if (authHeader) {
     const match = /^Bearer\s+(\S+)$/i.exec(authHeader);

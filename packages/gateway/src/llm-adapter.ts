@@ -536,12 +536,16 @@ export function resolveWorkerProtocol(
     // already "anthropic" (route carries `bedrockMantle: true`), so Bedrock
     // worker calls route to the mantle upstream over the normal Anthropic path.
     if (explicit === "vertex") return "vertex";
+    // Gemini is a DISTINCT worker protocol: native generateContent (model in the
+    // URL path, x-goog-api-key auth) — it must NOT collapse to "openai".
+    if (explicit === "gemini") return "gemini";
     return explicit === "anthropic" ? "anthropic" : "openai";
   }
   // 2. Route table lookup
   const route = resolveProviderRoute(providerID);
   if (route?.protocol) {
     if (route.protocol === "vertex") return "vertex";
+    if (route.protocol === "gemini") return "gemini";
     return route.protocol === "anthropic" ? "anthropic" : "openai";
   }
   // 3. Default: anthropic (safest for unknown/aggregator providers)
@@ -836,6 +840,71 @@ function buildOpenAIWorkerRequest(
 }
 
 /**
+ * Build a native Gemini `generateContent` worker request. Gemini authenticates
+ * with an API key via `x-goog-api-key` (NOT Bearer), carries the model in the
+ * URL path, and uses `systemInstruction` + `contents` + `generationConfig`.
+ */
+function buildGeminiWorkerRequest(
+  target: ProviderTarget,
+  cred: AuthCredential,
+  model: { providerID: string; modelID: string },
+  system: string,
+  user: string,
+  maxTokens: number,
+  temperature?: number,
+): { url: string; headers: Record<string, string>; body: string } {
+  const generationConfig: Record<string, unknown> = {
+    maxOutputTokens: maxTokens,
+  };
+  if (temperature != null) generationConfig.temperature = temperature;
+  const body: Record<string, unknown> = {
+    contents: [{ role: "user", parts: [{ text: user }] }],
+    generationConfig,
+  };
+  if (system) body.systemInstruction = { parts: [{ text: system }] };
+  return {
+    url: `${target.url}/v1beta/models/${encodeURIComponent(model.modelID)}:generateContent`,
+    headers: {
+      "Content-Type": "application/json",
+      "x-goog-api-key": cred.value,
+    },
+    body: JSON.stringify(body),
+  };
+}
+
+/** Parse a native Gemini `generateContent` worker response into `{text,usage,model}`. */
+function parseGeminiWorkerResponse(data: {
+  candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+  usageMetadata?: {
+    promptTokenCount?: number;
+    candidatesTokenCount?: number;
+    cachedContentTokenCount?: number;
+  };
+  modelVersion?: string;
+}): {
+  text: string | null;
+  usage: AnthropicUsage | null;
+  model: string | null;
+} {
+  const parts = data.candidates?.[0]?.content?.parts ?? [];
+  const text =
+    parts
+      .filter((p) => typeof p.text === "string")
+      .map((p) => p.text)
+      .join("") || null;
+  const um = data.usageMetadata;
+  const usage: AnthropicUsage | null = um
+    ? {
+        input_tokens: um.promptTokenCount ?? 0,
+        output_tokens: um.candidatesTokenCount ?? 0,
+        cache_read_input_tokens: um.cachedContentTokenCount ?? 0,
+        cache_creation_input_tokens: 0,
+      }
+    : null;
+  return { text, usage, model: data.modelVersion ?? null };
+}
+
+/**
  * Build an OpenAI **Responses API** worker request for `openai-codex`.
  *
  * ChatGPT's `/backend-api` serves only the Responses API, so worker calls use
@@ -1113,6 +1182,16 @@ async function buildWorkerRequest(
         temperature,
         disableThinking,
       );
+    case "gemini":
+      return buildGeminiWorkerRequest(
+        target,
+        cred,
+        model,
+        system,
+        user,
+        maxTokens,
+        temperature,
+      );
     default:
       return buildAnthropicWorkerRequest(
         target,
@@ -1140,6 +1219,10 @@ function parseWorkerResponse(
       );
     case "openai":
       return parseOpenAIResponse(rawData as OpenAIChatResponse);
+    case "gemini":
+      return parseGeminiWorkerResponse(
+        rawData as Parameters<typeof parseGeminiWorkerResponse>[0],
+      );
     default:
       return parseAnthropicResponse(
         rawData as Parameters<typeof parseAnthropicResponse>[0],
