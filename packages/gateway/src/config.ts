@@ -435,8 +435,18 @@ export function verbatimUpstreamUrl(params: {
   effectiveUpstreamBase: string;
   headerUpstream: string | undefined;
   upstreamPath: string | undefined;
-  effectiveProtocol: "anthropic" | "openai" | "openai-responses" | "vertex" | "gemini";
-  ingressProtocol: "anthropic" | "openai" | "openai-responses" | "vertex" | "gemini";
+  effectiveProtocol:
+    | "anthropic"
+    | "openai"
+    | "openai-responses"
+    | "vertex"
+    | "gemini";
+  ingressProtocol:
+    | "anthropic"
+    | "openai"
+    | "openai-responses"
+    | "vertex"
+    | "gemini";
 }): string {
   const {
     reconstructedUrl,
