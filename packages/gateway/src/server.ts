@@ -30,6 +30,7 @@ import {
 import type { GatewayRequest } from "./translate/types";
 import { parseAnthropicRequest } from "./translate/anthropic";
 import { parseOpenAIRequest } from "./translate/openai";
+import { parseGeminiRequest } from "./translate/gemini";
 import {
   parseOpenAICodexRequest,
   parseOpenAIResponsesRequest,
@@ -269,6 +270,53 @@ async function handleOpenAIChatCompletions(
   }
 }
 
+/**
+ * Matches a native Gemini `generateContent` endpoint path, capturing the model
+ * id and the verb. Version-prefix-agnostic (`/v1beta/models/...`,
+ * `/v1/models/...`, or bare `/models/...`) so both the Gemini CLI
+ * (`GOOGLE_GEMINI_BASE_URL` → `/v1beta/...`) and `@ai-sdk/google` (baseURL
+ * pinned to `${gateway}/v1` → `/v1/...`) are matched.
+ */
+const GEMINI_PATH_RE =
+  /\/models\/([^/:]+):(generateContent|streamGenerateContent)$/;
+
+async function handleGeminiGenerateContent(
+  req: Request,
+  config: GatewayConfig,
+  model: string,
+  stream: boolean,
+): Promise<Response> {
+  let body: unknown;
+  try {
+    body = JSON.parse(await decodeRequestBody(req));
+  } catch {
+    return errorResponse(400, "invalid_request_error", "Invalid JSON body");
+  }
+
+  let gatewayReq: GatewayRequest;
+  try {
+    gatewayReq = parseGeminiRequest(
+      body,
+      headersToRecord(req.headers),
+      model,
+      stream,
+    );
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Failed to parse request";
+    return errorResponse(400, "invalid_request_error", msg);
+  }
+
+  try {
+    // Pipeline returns the response in the client's native Gemini wire format
+    // (generateContent JSON or streamGenerateContent SSE).
+    return withCors(await handleRequest(gatewayReq, config));
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Pipeline error";
+    log.error(`pipeline error: ${msg}`);
+    return errorResponse(502, "api_error", `Gateway pipeline error: ${msg}`);
+  }
+}
+
 async function handleOpenAIResponses(
   req: Request,
   config: GatewayConfig,
@@ -432,6 +480,21 @@ export async function startServer(config: GatewayConfig): Promise<{
           pathname === "/chat/completions")
       ) {
         return await handleOpenAIChatCompletions(req, config);
+      }
+
+      // POST /v1beta/models/{model}:generateContent (or :streamGenerateContent)
+      // — native Google Gemini protocol. Version-prefix-agnostic (see
+      // GEMINI_PATH_RE) so the Gemini CLI and @ai-sdk/google both match.
+      if (method === "POST") {
+        const gm = pathname.match(GEMINI_PATH_RE);
+        if (gm) {
+          return await handleGeminiGenerateContent(
+            req,
+            config,
+            gm[1],
+            gm[2] === "streamGenerateContent",
+          );
+        }
       }
 
       // POST /v1/responses/compact — Codex compaction (Responses API)

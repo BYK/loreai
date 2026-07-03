@@ -442,6 +442,9 @@ export function stripContextWarnings(messages: GatewayMessage[]): void {
  * output on user messages for commit indicators. Used to trigger curation at
  * commit boundaries — natural checkpoints where decisions crystallize.
  */
+/** Default upstream origin for native Gemini (Generative Language API). */
+const GEMINI_DEFAULT_UPSTREAM = "https://generativelanguage.googleapis.com";
+
 const GIT_COMMIT_RE = /\bgit\s+commit\b/i;
 function containsGitCommit(req: GatewayRequest): boolean {
   for (const msg of req.messages) {
@@ -3449,7 +3452,15 @@ async function forwardToUpstream(
   const effectiveProtocol =
     req.protocol === "openai-responses"
       ? "openai-responses"
-      : (providerRouteUsable?.protocol ?? modelRoute?.protocol ?? req.protocol);
+      : req.protocol === "gemini"
+        ? // Native Gemini ingress stays gemini unless an explicit provider route
+          // overrides it (cross-routing). Do NOT let the `gemini-` model-prefix
+          // route — which is the OpenAI-compat layer (protocol "openai") — hijack
+          // a native generateContent request back to Chat Completions.
+          (providerRouteUsable?.protocol ?? "gemini")
+        : (providerRouteUsable?.protocol ??
+          modelRoute?.protocol ??
+          req.protocol);
 
   // Self-URL-building routes derive their base from config (region), not from
   // the route tables. This must take precedence over `modelRoute?.url`: a
@@ -3477,7 +3488,12 @@ async function forwardToUpstream(
     modelRoute?.url ??
     (effectiveProtocol === "anthropic"
       ? config.upstreamAnthropic
-      : config.upstreamOpenAI);
+      : effectiveProtocol === "gemini"
+        ? // Native Gemini default upstream (Generative Language API). `gemini-*`
+          // models resolve this via modelRoute.url already; this covers a native
+          // gemini ingress whose model id doesn't match the `gemini-` prefix.
+          GEMINI_DEFAULT_UPSTREAM
+        : config.upstreamOpenAI);
 
   // Warn when a provider route exists but has no URL and no header override —
   // the request will fall through to config defaults which likely have wrong
@@ -3608,7 +3624,10 @@ async function forwardToUpstream(
           system: [req.system, ...ltmParts].filter(Boolean).join("\n\n"),
         }
       : req;
-    const result = buildGeminiUpstreamRequest(reqWithLtm, effectiveUpstreamBase);
+    const result = buildGeminiUpstreamRequest(
+      reqWithLtm,
+      effectiveUpstreamBase,
+    );
     url = result.url;
     headers = result.headers;
     body = result.body;
@@ -5165,9 +5184,12 @@ function postResponse(
       | "gemini" =
       req.protocol === "openai-responses"
         ? "openai-responses"
-        : (lpRouteUsable?.protocol ??
-          resolveUpstreamRoute(req.model)?.protocol ??
-          req.protocol);
+        : req.protocol === "gemini"
+          ? // Mirror forwardToUpstream: native gemini ingress stays gemini.
+            (lpRouteUsable?.protocol ?? "gemini")
+          : (lpRouteUsable?.protocol ??
+            resolveUpstreamRoute(req.model)?.protocol ??
+            req.protocol);
     // Mirror forwardToUpstream exactly (same shared predicate).
     const lpBedrockMantle = isBedrockMantleDispatch(
       lpRouteUsable,
