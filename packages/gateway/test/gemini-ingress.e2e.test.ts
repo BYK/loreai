@@ -43,6 +43,7 @@ function geminiUpstreamResponse(): Response {
 async function sendGemini(
   harness: Harness,
   path: string,
+  extraHeaders: Record<string, string> = {},
 ): Promise<{
   upstreamUrl: string;
   upstreamBody: unknown;
@@ -63,6 +64,7 @@ async function sendGemini(
       "content-type": "application/json",
       "x-goog-api-key": "test-key",
       "x-lore-project": "/tmp/gemini-e2e",
+      ...extraHeaders,
     },
     body: JSON.stringify({
       contents: [{ role: "user", parts: [{ text: "hi" }] }],
@@ -137,5 +139,25 @@ describe("native Gemini ingress → generativelanguage upstream (full pipeline)"
       "/v1/models/gemini-2.5-pro:generateContent",
     );
     expect(upstreamUrl).toContain("generativelanguage.googleapis.com");
+  });
+
+  test("opencode/pi shape: X-Lore-Provider: google stays native gemini (not openai-compat)", async () => {
+    // The @ai-sdk/google provider is tagged x-lore-provider: google by the
+    // opencode/pi plugins. The google provider route is protocol "openai"
+    // (compat layer) — but a native generateContent ingress must NOT be
+    // downgraded to /v1beta/openai/chat/completions.
+    harness = await createHarness({ fixtures: [] });
+    const { upstreamUrl, upstreamBody } = await sendGemini(
+      harness,
+      "/v1/models/gemini-2.5-pro:generateContent",
+      { "x-lore-provider": "google" },
+    );
+    expect(upstreamUrl).toBe(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
+    );
+    expect(upstreamUrl).not.toContain("/openai/");
+    const ub = JSON.parse(String(upstreamBody)) as Record<string, unknown>;
+    expect(ub.contents).toBeDefined();
+    expect(ub.messages).toBeUndefined();
   });
 });

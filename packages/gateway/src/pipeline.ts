@@ -3453,11 +3453,14 @@ async function forwardToUpstream(
     req.protocol === "openai-responses"
       ? "openai-responses"
       : req.protocol === "gemini"
-        ? // Native Gemini ingress stays gemini unless an explicit provider route
-          // overrides it (cross-routing). Do NOT let the `gemini-` model-prefix
-          // route — which is the OpenAI-compat layer (protocol "openai") — hijack
-          // a native generateContent request back to Chat Completions.
-          (providerRouteUsable?.protocol ?? "gemini")
+        ? // A native Gemini ingress ALWAYS stays gemini. The provider route still
+          // supplies the upstream URL (e.g. X-Lore-Provider: google →
+          // generativelanguage), but its protocol must not downgrade a native
+          // generateContent request: the `gemini-` model-prefix route and the
+          // `google` provider route are both the OpenAI-compat layer
+          // (protocol "openai"), which would wrongly re-translate to Chat
+          // Completions. opencode/pi's @ai-sdk/google speaks native generateContent.
+          "gemini"
         : (providerRouteUsable?.protocol ??
           modelRoute?.protocol ??
           req.protocol);
@@ -5185,8 +5188,8 @@ function postResponse(
       req.protocol === "openai-responses"
         ? "openai-responses"
         : req.protocol === "gemini"
-          ? // Mirror forwardToUpstream: native gemini ingress stays gemini.
-            (lpRouteUsable?.protocol ?? "gemini")
+          ? // Mirror forwardToUpstream: native gemini ingress always stays gemini.
+            "gemini"
           : (lpRouteUsable?.protocol ??
             resolveUpstreamRoute(req.model)?.protocol ??
             req.protocol);
