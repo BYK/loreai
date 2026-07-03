@@ -296,3 +296,19 @@ describe("commandSetup — argument handling", () => {
     process.exitCode = 0;
   });
 });
+
+describe("commandSetup — GitHub Copilot CLI", () => {
+  it("prints COPILOT_API_URL guidance (no config file) and undoes cleanly", async () => {
+    // Copilot has no config-file endpoint field; setup is guidance-only. It must
+    // not throw and must surface the bare-origin export + the `lore run` path.
+    await commandSetup(["copilot"], { port: 3299 });
+    const out = logged();
+    expect(out).toContain("export COPILOT_API_URL=http://127.0.0.1:3299");
+    expect(out).toContain("lore run copilot");
+    // No config file is written for Copilot.
+
+    // Undo is an informational no-op (nothing was persisted).
+    await commandSetup(["undo", "copilot"], {});
+    expect(logged()).toContain("COPILOT_API_URL");
+  });
+});

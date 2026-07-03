@@ -137,6 +137,16 @@ const SUPPORTED_APPS: AppSetup[] = [
     // equivalent of opencode's `--no-plugin` fallback — which is all the
     // gateway can wire up without shelling out to `pi`.
   },
+  {
+    agentName: "copilot",
+    displayName: "GitHub Copilot CLI",
+    run: (baseUrl) => setupCopilot(baseUrl),
+    undo: undoCopilot,
+    // Copilot CLI has NO config-file endpoint override — interception is only
+    // via the COPILOT_API_URL env var. `run` prints the required `lore run
+    // copilot` / export guidance; there is nothing to persist, so `undo` is an
+    // informational no-op. Inventory reads COPILOT_API_URL from the environment.
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -1042,6 +1052,57 @@ function setupHermes(baseUrl: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// GitHub Copilot CLI setup
+// ---------------------------------------------------------------------------
+
+/**
+ * Derive the value COPILOT_API_URL should hold from the setup base URL. Copilot
+ * CLI posts to the ORIGIN's bare `/chat/completions` (its API omits the /v1
+ * segment), so strip a trailing `/v1`. Pure.
+ */
+export function copilotApiUrlFromBaseUrl(baseUrl: string): string {
+  return baseUrl.endsWith("/v1") ? baseUrl.slice(0, -3) : baseUrl;
+}
+
+/**
+ * "Configure" GitHub Copilot CLI to route through Lore.
+ *
+ * Unlike every other supported agent, Copilot CLI exposes NO config-file field
+ * for its API endpoint — interception is only possible via the `COPILOT_API_URL`
+ * environment variable (verified against the @github/copilot binary: it returns
+ * that var verbatim as the Copilot API URL when set). There is therefore nothing
+ * to persist to a config file; instead we print the exact export the user needs
+ * and recommend `lore run copilot` for the zero-config path. `lore setup status`
+ * / `doctor` read COPILOT_API_URL to show the current routing.
+ */
+function setupCopilot(baseUrl: string): void {
+  const apiUrl = copilotApiUrlFromBaseUrl(baseUrl);
+  console.log(`[lore] GitHub Copilot CLI routes through Lore via an env var.`);
+  console.log(
+    `[lore] It has no config-file endpoint override, so either launch it with:`,
+  );
+  console.log(`[lore]`);
+  console.log(`[lore]     lore run copilot`);
+  console.log(`[lore]`);
+  console.log(
+    `[lore] (which sets COPILOT_API_URL for that session automatically), or add`,
+  );
+  console.log(
+    `[lore] this to your shell profile (~/.bashrc, ~/.zshrc, …) for standalone use:`,
+  );
+  console.log(`[lore]`);
+  console.log(`[lore]     export COPILOT_API_URL=${apiUrl}`);
+  console.log(`[lore]`);
+  console.log(
+    `[lore] This intercepts Copilot's default GitHub-hosted models. If you use a`,
+  );
+  console.log(
+    `[lore] BYOK provider instead, point COPILOT_PROVIDER_BASE_URL=${apiUrl}/v1`,
+  );
+  console.log(`[lore] at the gateway.`);
+}
+
+// ---------------------------------------------------------------------------
 // Undo (`lore setup undo [app]`)
 // ---------------------------------------------------------------------------
 
@@ -1081,6 +1142,20 @@ function undoHermes(): RestoreSummary {
   const { content: restored, summary } = restoreEnvBackup(content);
   if (summary.hadBackup) writeFileSync(configPath, restored, "utf8");
   return summary;
+}
+
+function undoCopilot(): RestoreSummary {
+  // `lore setup copilot` never persists anything (Copilot CLI has no config-file
+  // endpoint field), so there is nothing to restore. Tell the user how to stop
+  // routing and return an empty summary.
+  console.log(
+    `[lore] GitHub Copilot CLI setup is env-var based (COPILOT_API_URL); lore`,
+  );
+  console.log(
+    `[lore] wrote no config. Remove the COPILOT_API_URL export from your shell`,
+  );
+  console.log(`[lore] profile to stop routing through the gateway.`);
+  return { hadBackup: false, restored: [], skipped: [] };
 }
 
 function undoCodex(): RestoreSummary {

@@ -9,6 +9,7 @@ import {
   piModelsConfigPath,
   updateHermesEnv,
   hermesEnvPath,
+  copilotApiUrlFromBaseUrl,
   opencodePluginSpec,
 } from "../src/cli/setup";
 import { homedir } from "node:os";
@@ -769,5 +770,27 @@ describe("hermesEnvPath", () => {
       if (saved === undefined) delete process.env.HERMES_HOME;
       else process.env.HERMES_HOME = saved;
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// copilotApiUrlFromBaseUrl (GitHub Copilot CLI)
+// ---------------------------------------------------------------------------
+
+describe("copilotApiUrlFromBaseUrl", () => {
+  test("strips a trailing /v1 (Copilot posts to the bare origin)", () => {
+    expect(copilotApiUrlFromBaseUrl("http://127.0.0.1:3207/v1")).toBe(
+      "http://127.0.0.1:3207",
+    );
+  });
+
+  test("leaves a bare origin unchanged", () => {
+    expect(copilotApiUrlFromBaseUrl("http://127.0.0.1:3207")).toBe(
+      "http://127.0.0.1:3207",
+    );
+  });
+
+  test("does not strip a /v1 that is not a trailing segment", () => {
+    expect(copilotApiUrlFromBaseUrl("http://host/v1x")).toBe("http://host/v1x");
   });
 });

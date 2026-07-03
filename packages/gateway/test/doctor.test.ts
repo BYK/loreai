@@ -24,6 +24,7 @@ let origHome: string | undefined;
 let origXdg: string | undefined;
 let origPiDir: string | undefined;
 let origHermesHome: string | undefined;
+let origCopilotApiUrl: string | undefined;
 let logSpy: MockInstance;
 let errSpy: MockInstance;
 
@@ -38,6 +39,10 @@ beforeEach(() => {
   origXdg = process.env.XDG_DATA_HOME;
   origPiDir = process.env.PI_CODING_AGENT_DIR;
   origHermesHome = process.env.HERMES_HOME;
+  origCopilotApiUrl = process.env.COPILOT_API_URL;
+  // Copilot inventory reads COPILOT_API_URL from the environment; unset it so a
+  // stray value in the runner doesn't leak into the "clean" assertions.
+  delete process.env.COPILOT_API_URL;
   home = mkdtempSync(join(tmpdir(), "lore-doctor-"));
   process.env.HOME = home;
   process.env.XDG_DATA_HOME = join(home, "data");
@@ -61,6 +66,8 @@ afterEach(() => {
   else process.env.PI_CODING_AGENT_DIR = origPiDir;
   if (origHermesHome === undefined) delete process.env.HERMES_HOME;
   else process.env.HERMES_HOME = origHermesHome;
+  if (origCopilotApiUrl === undefined) delete process.env.COPILOT_API_URL;
+  else process.env.COPILOT_API_URL = origCopilotApiUrl;
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -343,21 +350,42 @@ describe("formatFinding", () => {
 });
 
 describe("collectInventory (integration)", () => {
-  it("returns all-five-apps inventory with missing files on a clean HOME", () => {
+  it("returns all-six-apps inventory with missing files on a clean HOME", () => {
     const all = collectInventory();
-    expect(all).toHaveLength(5);
+    expect(all).toHaveLength(6);
     expect(all.map((i) => i.app)).toEqual([
       "Claude Code",
       "Codex",
       "OpenCode",
       "Pi",
       "Hermes",
+      "Copilot",
     ]);
     for (const inv of all) {
       expect(inv.fileExists).toBe(false);
       expect(inv.rows).toEqual([]);
       expect(inv.hasBackup).toBe(false);
     }
+  });
+
+  it("reports Copilot routing from the COPILOT_API_URL env var", () => {
+    process.env.COPILOT_API_URL = "http://127.0.0.1:3299";
+    const all = collectInventory();
+    const copilot = all.find((i) => i.app === "Copilot")!;
+    expect(copilot.fileExists).toBe(true);
+    const row = copilot.rows.find((r) => r.key === "COPILOT_API_URL")!;
+    expect(row.routing).toEqual({
+      kind: "lore",
+      value: "http://127.0.0.1:3299",
+    });
+  });
+
+  it("Copilot inventory is empty when COPILOT_API_URL is unset", () => {
+    delete process.env.COPILOT_API_URL;
+    const all = collectInventory();
+    const copilot = all.find((i) => i.app === "Copilot")!;
+    expect(copilot.fileExists).toBe(false);
+    expect(copilot.rows).toEqual([]);
   });
 
   it("collects lore-routed values after setup", async () => {

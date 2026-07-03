@@ -267,6 +267,31 @@ export function collectHermesInventory(): AppInventory {
   return { app: "Hermes", file, fileExists, rows, hasBackup };
 }
 
+/**
+ * Collect inventory for GitHub Copilot CLI. Copilot has no config-file endpoint
+ * override — routing is controlled entirely by the `COPILOT_API_URL` env var —
+ * so this reports that env var rather than a file. A row is emitted only when
+ * the var is set, mirroring the "unconfigured → empty" shape of the file-based
+ * collectors (`fileExists` maps to "the env var is present").
+ */
+export function collectCopilotInventory(): AppInventory {
+  const file = "environment";
+  const value = process.env.COPILOT_API_URL;
+  const isSet = value !== undefined && value !== "";
+  const rows: InventoryRow[] = isSet
+    ? [
+        {
+          app: "Copilot",
+          file,
+          fileExists: true,
+          key: "COPILOT_API_URL",
+          routing: classifyRoutingValue(value),
+        },
+      ]
+    : [];
+  return { app: "Copilot", file, fileExists: isSet, rows, hasBackup: false };
+}
+
 /** Collect inventory for all supported apps. */
 export function collectInventory(): AppInventory[] {
   return [
@@ -275,6 +300,7 @@ export function collectInventory(): AppInventory[] {
     collectOpencodeInventory(),
     collectPiInventory(),
     collectHermesInventory(),
+    collectCopilotInventory(),
   ];
 }
 
