@@ -626,6 +626,54 @@ describe("analyzeCacheTurn", () => {
       /message at position 1 content changed/,
     );
   });
+
+  test("tail growth after idle is classified as returning-turn growth, NOT an edit", () => {
+    const analytics = makeCacheAnalytics();
+    // prev: the stored (pre-idle) body. curr: the returning turn — identical
+    // messages plus several NEW ones appended at the tail. prev's messages
+    // array CLOSES (`]`) exactly where curr CONTINUES (`,`). Because the
+    // divergence lands >2 messages back from curr's tail, the generic
+    // classifier calls it "earlier message modified"; the refinement must
+    // recognize the `]`→`,` signature and relabel it as tail growth.
+    const msg = (r: string, c: string) => ({ role: r, content: c });
+    const prev = JSON.stringify({
+      model: "opus",
+      messages: [
+        msg("user", "one"),
+        msg("assistant", "two"),
+        msg("user", "three"),
+        msg("assistant", "four"),
+      ],
+      tools: [],
+    });
+    const curr = JSON.stringify({
+      model: "opus",
+      messages: [
+        msg("user", "one"),
+        msg("assistant", "two"),
+        msg("user", "three"),
+        msg("assistant", "four"),
+        msg("user", "five"),
+        msg("assistant", "six"),
+        msg("user", "seven"),
+        msg("assistant", "eight"),
+      ],
+      tools: [],
+    });
+
+    analyzeCacheTurn(analytics, prev, makeUsage(), undefined, 4);
+    // messageCount=8 → the divergence at the append boundary (≈position 4) is
+    // >2 back from the tail, so the generic classifier says "earlier message
+    // modified" — exactly the misleading case the refinement must catch.
+    const result = analyzeCacheTurn(analytics, curr, makeUsage(), undefined, 8);
+
+    expect(result.divergenceReason).toBe(
+      "returning-turn tail growth (previous messages are a prefix — " +
+        "cache miss on resume, not a content edit)",
+    );
+    // Must NOT be the misleading "earlier message modified" verdict.
+    expect(result.divergenceReason).not.toMatch(/earlier message modified/);
+  });
 });
 
 // ---------------------------------------------------------------------------

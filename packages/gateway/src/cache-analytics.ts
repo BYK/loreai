@@ -548,6 +548,26 @@ export function analyzeCacheTurn(
         analytics.turnCount,
       );
 
+      // Refine the misleading "earlier message modified" verdict. When the
+      // previous body CLOSES the messages array (`]`) exactly where this body
+      // CONTINUES it (`,`), the previous turn's messages are a structural prefix
+      // of this turn's — the divergence is TAIL GROWTH (the returning turn
+      // appended messages), NOT a mid-conversation content edit. This is the
+      // signature of an idle-resume cache miss: the body is fine, but the
+      // returning turn can't reuse the cache and falls back to the nearest
+      // breakpoint. The generic label made these look like content edits at
+      // messages[N] and obscured that the real cost is the missing interior
+      // breakpoint (addressed by the distilled-prefix breakpoint, PR #1155).
+      if (
+        divergenceReason.startsWith("earlier message modified") &&
+        prevBody[prefixMatchBytes] === "]" &&
+        normalizedBody[prefixMatchBytes] === ","
+      ) {
+        divergenceReason =
+          "returning-turn tail growth (previous messages are a prefix — " +
+          "cache miss on resume, not a content edit)";
+      }
+
       // system[0] cache-alignment measurement (issue #791): when the first
       // divergence lands in the agent-owned host prompt, decide whether the
       // changed span is relocatable dynamic content (a date/timestamp/uuid)
