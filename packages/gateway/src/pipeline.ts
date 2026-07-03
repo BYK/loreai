@@ -7650,6 +7650,14 @@ async function handleConversationTurn(
     cacheTools: true,
     cacheConversation: true,
     conversationTTL: resolvedConversationTTL,
+    // Lore's distilled prefix (buildPrefixMessages) is the first 2 messages
+    // (a [user, assistant] pair) whenever distillation is active
+    // (distilledTokens > 0), and always sits at the front of the transformed
+    // array ([...prefix, ...rawWindow]); the durable delta is inserted near the
+    // tail and orphan-removal never touches the front, so [0,1] stay the prefix.
+    // Passing 2 places an interior breakpoint on its boundary so a raw-window
+    // divergence falls back to the cached prefix instead of the ~54K head.
+    distilledPrefixLength: result.distilledTokens > 0 ? 2 : 0,
   };
 
   // --- Daily budget + OAuth quota throttle ---

@@ -321,6 +321,29 @@ export type AnthropicCacheOptions = {
    * Only applies when `cacheConversation` is true.
    */
   conversationTTL?: "5m" | "1h";
+
+  /**
+   * Number of leading messages that form Lore's stable distilled prefix
+   * (`buildPrefixMessages` output: a [user, assistant] pair, so 0 or 2). When
+   * `> 0` AND there is a raw window beyond it, an EXTRA `cache_control`
+   * breakpoint is placed on the last block of `messages[distilledPrefixLength-1]`.
+   *
+   * Rationale: without it the conversation has ONE breakpoint (the moving tail),
+   * so ANY mid-conversation divergence (window shift, tool-result resolution,
+   * post-idle re-render) collapses the whole conversation block back to the
+   * system+tools head (~54K observed). The distilled prefix is Lore-generated
+   * and byte-stable between meta-distillations, so a breakpoint at its boundary
+   * gives a much closer fallback: a raw-window divergence keeps the prefix cached
+   * instead of re-writing it. Uses the 4th (and last) Anthropic breakpoint slot
+   * — the other three are system[1], tools, and the conversation tail.
+   *
+   * The breakpoint inherits the 1h `systemTTL` (like tools): the prefix is
+   * stable, so the longer eviction window is what lets it survive an idle gap
+   * and be read (not re-written) on the returning turn.
+   *
+   * Only applies when `cacheConversation` is true.
+   */
+  distilledPrefixLength?: number;
 };
 
 // ---------------------------------------------------------------------------
@@ -442,6 +465,26 @@ export function buildAnthropicRequest(
   // the last message. Anthropic's 20-block lookback finds the prior turn's
   // breakpoint, reads the cached prefix, and writes only the new tail.
   if (cache?.cacheConversation && messages.length > 0) {
+    // Interior breakpoint on the distilled-prefix boundary. The prefix is
+    // Lore-generated and byte-stable between meta-distillations; a breakpoint
+    // here means a mid-conversation divergence in the raw window falls back to
+    // the cached prefix (~124K) instead of collapsing to the system+tools head
+    // (~54K). Uses a 1h TTL (like tools) so it survives an idle gap and is read
+    // — not re-written — on the returning turn. Guarded to only fire when there
+    // is a raw window beyond the prefix (else the tail breakpoint below already
+    // covers it, and a second breakpoint on the same block is wasted).
+    const prefixLen = cache.distilledPrefixLength ?? 0;
+    if (prefixLen > 0 && prefixLen < messages.length) {
+      const prefixMsg = messages[prefixLen - 1];
+      const prefixBlock = prefixMsg?.content[prefixMsg.content.length - 1];
+      if (prefixBlock) {
+        (prefixBlock as Record<string, unknown>).cache_control =
+          cache.systemTTL === "1h"
+            ? { type: "ephemeral", ttl: "1h" }
+            : { type: "ephemeral" };
+      }
+    }
+
     const lastMsg = messages[messages.length - 1];
     const lastBlock = lastMsg?.content[lastMsg.content.length - 1];
     if (lastBlock) {

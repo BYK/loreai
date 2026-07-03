@@ -307,6 +307,115 @@ describe("buildAnthropicRequest — conversation caching", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Distilled-prefix interior breakpoint (the 4th breakpoint). Prevents a
+// mid-conversation divergence from collapsing the whole conversation block
+// back to the ~54K system+tools head by caching the stable distilled prefix
+// separately.
+// ---------------------------------------------------------------------------
+
+describe("buildAnthropicRequest — distilled-prefix breakpoint", () => {
+  // [prefix-user, prefix-assistant, raw-user, raw-assistant]: prefixLen=2, tail=3
+  function prefixReq() {
+    return makeRequest({
+      messages: [
+        { role: "user", content: [{ type: "text", text: "<distilled user>" }] },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "<distilled assistant summary>" }],
+        },
+        { role: "user", content: [{ type: "text", text: "real question" }] },
+        { role: "assistant", content: [{ type: "text", text: "real answer" }] },
+      ],
+    });
+  }
+
+  test("places an interior breakpoint on the prefix boundary (messages[1])", () => {
+    const body = getBody(prefixReq(), {
+      cacheConversation: true,
+      distilledPrefixLength: 2,
+    });
+    const messages = body.messages as Array<{
+      content: Array<Record<string, unknown>>;
+    }>;
+    // messages[1] (end of distilled prefix) gets a breakpoint...
+    expect(messages[1].content[0].cache_control).toEqual({ type: "ephemeral" });
+    // ...and the tail (messages[3]) still gets one...
+    expect(messages[3].content[0].cache_control).toEqual({ type: "ephemeral" });
+    // ...but messages[0] and the mid-window message[2] do NOT.
+    expect(messages[0].content[0].cache_control).toBeUndefined();
+    expect(messages[2].content[0].cache_control).toBeUndefined();
+  });
+
+  test("inherits 1h TTL from systemTTL (stable prefix survives idle)", () => {
+    const body = getBody(prefixReq(), {
+      cacheConversation: true,
+      systemTTL: "1h",
+      distilledPrefixLength: 2,
+    });
+    const messages = body.messages as Array<{
+      content: Array<Record<string, unknown>>;
+    }>;
+    expect(messages[1].content[0].cache_control).toEqual({
+      type: "ephemeral",
+      ttl: "1h",
+    });
+  });
+
+  test("no interior breakpoint when distilledPrefixLength is 0/absent (back-compat)", () => {
+    for (const cache of [
+      { cacheConversation: true },
+      { cacheConversation: true, distilledPrefixLength: 0 },
+    ] as AnthropicCacheOptions[]) {
+      const body = getBody(prefixReq(), cache);
+      const messages = body.messages as Array<{
+        content: Array<Record<string, unknown>>;
+      }>;
+      // Only the tail carries a breakpoint; nothing interior.
+      expect(messages[0].content[0].cache_control).toBeUndefined();
+      expect(messages[1].content[0].cache_control).toBeUndefined();
+      expect(messages[2].content[0].cache_control).toBeUndefined();
+      expect(messages[3].content[0].cache_control).toEqual({
+        type: "ephemeral",
+      });
+    }
+  });
+
+  test("no interior breakpoint when the prefix IS the whole conversation (tail covers it)", () => {
+    // prefixLen == messages.length → guard (prefixLen < length) skips it, so we
+    // never double-place two breakpoints on the same (last) block.
+    const req = makeRequest({
+      messages: [
+        { role: "user", content: [{ type: "text", text: "<distilled user>" }] },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "<distilled assistant>" }],
+        },
+      ],
+    });
+    const body = getBody(req, {
+      cacheConversation: true,
+      distilledPrefixLength: 2,
+    });
+    const messages = body.messages as Array<{
+      content: Array<Record<string, unknown>>;
+    }>;
+    // messages[0] no breakpoint; only the tail (messages[1]) gets exactly one.
+    expect(messages[0].content[0].cache_control).toBeUndefined();
+    expect(messages[1].content[0].cache_control).toEqual({ type: "ephemeral" });
+  });
+
+  test("total conversation breakpoints never exceed 2 (interior + tail)", () => {
+    const body = getBody(prefixReq(), {
+      cacheConversation: true,
+      systemTTL: "1h",
+      distilledPrefixLength: 2,
+    });
+    const n = JSON.stringify(body.messages).match(/"cache_control"/g)?.length;
+    expect(n).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Combined: system + conversation caching (conversation turn config)
 // ---------------------------------------------------------------------------
 
