@@ -167,6 +167,15 @@ import {
 } from "./stream/openai-responses";
 import { translateAnthropicStreamToOpenAI } from "./stream/openai";
 import {
+  buildGeminiUpstreamRequest,
+  buildGeminiResponse,
+  parseGeminiResponseJSON,
+} from "./translate/gemini";
+import {
+  accumulateGeminiSSEStream,
+  translateAnthropicStreamToGemini,
+} from "./stream/gemini";
+import {
   createStreamAccumulator,
   createRecallAwareAccumulator,
   parseSSEStream,
@@ -2641,6 +2650,9 @@ function syntheticToolUseResponse(
     if (req.protocol === "openai-responses") {
       return translateAnthropicStreamToResponses(anthropicSSE);
     }
+    if (req.protocol === "gemini") {
+      return translateAnthropicStreamToGemini(anthropicSSE);
+    }
     return anthropicSSE;
   }
 
@@ -3585,6 +3597,21 @@ async function forwardToUpstream(
     url = vt.url;
     headers = vt.headers;
     body = vt.body;
+  } else if (effectiveProtocol === "gemini") {
+    // Google Gemini native generateContent. Inject LTM into the system prompt
+    // (Gemini maps `system` → `systemInstruction`), same as the OpenAI branches
+    // above — Anthropic-style separate system blocks don't apply here.
+    const ltmParts = [cache?.stableLtmSystem, cache?.ltmSystem].filter(Boolean);
+    const reqWithLtm = ltmParts.length
+      ? {
+          ...req,
+          system: [req.system, ...ltmParts].filter(Boolean).join("\n\n"),
+        }
+      : req;
+    const result = buildGeminiUpstreamRequest(reqWithLtm, effectiveUpstreamBase);
+    url = result.url;
+    headers = result.headers;
+    body = result.body;
   } else {
     // For non-native-Anthropic upstreams (MiniMax, Fireworks, etc.), downgrade
     // extended cache TTL ("1h") to standard 5-minute ephemeral — the "1h" TTL
@@ -4283,6 +4310,8 @@ async function accumulateNonStreamResponse(
       return accumulateOpenAINonStreamJSON(json);
     case "openai-responses":
       return accumulateResponsesNonStreamJSON(json);
+    case "gemini":
+      return parseGeminiResponseJSON(json);
     default:
       // Anthropic (incl. Bedrock via bedrock-mantle, which returns the native
       // Anthropic non-streaming JSON shape).
@@ -4612,6 +4641,8 @@ function nonStreamHttpResponse(
       scaledResp,
       clientStream ?? false,
     );
+  } else if (clientProtocol === "gemini") {
+    clientResp = buildGeminiResponse(scaledResp, clientStream ?? false);
   } else {
     // Anthropic or unspecified — default format
     const body = buildAnthropicNonStreamResponse(scaledResp);
@@ -5703,6 +5734,9 @@ async function handleCompaction(
     if (req.protocol === "openai-responses") {
       return translateAnthropicStreamToResponses(anthropicSSE);
     }
+    if (req.protocol === "gemini") {
+      return translateAnthropicStreamToGemini(anthropicSSE);
+    }
     return anthropicSSE;
   }
 
@@ -6116,6 +6150,9 @@ async function handlePassthrough(
       }
       if (req.protocol === "openai-responses") {
         return translateAnthropicStreamToResponses(anthropicSSE);
+      }
+      if (req.protocol === "gemini") {
+        return translateAnthropicStreamToGemini(anthropicSSE);
       }
     }
     // Other cross-protocol streaming combos: accumulate + re-emit
@@ -8087,6 +8124,13 @@ async function handleConversationTurn(
       return finalizeWithRecall(resp);
     }
 
+    if (effectiveProtocol === "gemini") {
+      // Gemini native streaming — accumulate the SSE frames, then re-emit via
+      // the recall-aware finalizer (same buffered pattern as the OpenAI paths).
+      const resp = await accumulateGeminiSSEStream(upstreamResponse);
+      return finalizeWithRecall(resp);
+    }
+
     // Anthropic streaming: forward events and accumulate in parallel.
     // Pass recall context so the accumulator can intercept recall tool_use.
     const hasRecallTool = modifiedReq.tools.some(
@@ -8112,6 +8156,9 @@ async function handleConversationTurn(
     }
     if (req.protocol === "openai-responses") {
       return translateAnthropicStreamToResponses(anthropicSSE);
+    }
+    if (req.protocol === "gemini") {
+      return translateAnthropicStreamToGemini(anthropicSSE);
     }
     return anthropicSSE;
   }
@@ -8736,6 +8783,9 @@ function slashResponse(
     }
     if (req.protocol === "openai-responses") {
       return translateAnthropicStreamToResponses(anthropicSSE);
+    }
+    if (req.protocol === "gemini") {
+      return translateAnthropicStreamToGemini(anthropicSSE);
     }
     return anthropicSSE;
   }
