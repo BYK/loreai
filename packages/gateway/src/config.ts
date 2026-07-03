@@ -237,7 +237,7 @@ export function loadConfig(): GatewayConfig {
 
 export type UpstreamRoute = {
   url: string;
-  protocol: "anthropic" | "openai" | "openai-responses" | "vertex";
+  protocol: "anthropic" | "openai" | "openai-responses" | "vertex" | "gemini";
 };
 
 /**
@@ -250,7 +250,7 @@ export type UpstreamRoute = {
 const UPSTREAM_ROUTES: Array<{
   prefix: string;
   url: string;
-  protocol: "anthropic" | "openai" | "openai-responses" | "vertex";
+  protocol: "anthropic" | "openai" | "openai-responses" | "vertex" | "gemini";
 }> = [
   // Anthropic
   {
@@ -435,8 +435,8 @@ export function verbatimUpstreamUrl(params: {
   effectiveUpstreamBase: string;
   headerUpstream: string | undefined;
   upstreamPath: string | undefined;
-  effectiveProtocol: "anthropic" | "openai" | "openai-responses" | "vertex";
-  ingressProtocol: "anthropic" | "openai" | "openai-responses" | "vertex";
+  effectiveProtocol: "anthropic" | "openai" | "openai-responses" | "vertex" | "gemini";
+  ingressProtocol: "anthropic" | "openai" | "openai-responses" | "vertex" | "gemini";
 }): string {
   const {
     reconstructedUrl,
@@ -476,7 +476,13 @@ export type ProviderRoute = {
   /** Wire protocol for this upstream. When `null`, the ingress protocol is
    *  preserved — use this for proxy/aggregator providers (OpenCode Zen,
    *  Vercel AI Gateway, etc.) that accept whichever protocol the client sends. */
-  protocol: "anthropic" | "openai" | "openai-responses" | "vertex" | null;
+  protocol:
+    | "anthropic"
+    | "openai"
+    | "openai-responses"
+    | "vertex"
+    | "gemini"
+    | null;
   /** AWS Bedrock via the `bedrock-mantle` endpoint. When true, the gateway
    *  builds the region-specific mantle URL (`bedrock-mantle.<region>.api.aws/
    *  anthropic`) as the upstream base and remaps `body.model` to the mantle

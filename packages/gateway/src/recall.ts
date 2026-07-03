@@ -437,7 +437,8 @@ export type RecallProtocol =
   | "anthropic"
   | "openai"
   | "openai-responses"
-  | "vertex";
+  | "vertex"
+  | "gemini";
 
 /**
  * Injected upstream dependencies for recall follow-up execution.

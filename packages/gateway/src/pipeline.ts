@@ -3342,7 +3342,12 @@ type UpstreamResult = {
   /** The serialized JSON body sent to the upstream provider. */
   serializedBody: string;
   /** The wire protocol used for the upstream request (may differ from ingress). */
-  effectiveProtocol: "anthropic" | "openai" | "openai-responses" | "vertex";
+  effectiveProtocol:
+    | "anthropic"
+    | "openai"
+    | "openai-responses"
+    | "vertex"
+    | "gemini";
 };
 
 /**
@@ -4258,7 +4263,8 @@ async function accumulateNonStreamResponse(
     | "anthropic"
     | "openai"
     | "openai-responses"
-    | "vertex" = "anthropic",
+    | "vertex"
+    | "gemini" = "anthropic",
 ): Promise<GatewayResponse> {
   // Some providers (e.g. DeepSeek) return SSE-formatted responses even when
   // stream: false was sent. Detect this via content-type and extract the JSON
@@ -5124,7 +5130,8 @@ function postResponse(
       | "anthropic"
       | "openai"
       | "openai-responses"
-      | "vertex" =
+      | "vertex"
+      | "gemini" =
       req.protocol === "openai-responses"
         ? "openai-responses"
         : (lpRouteUsable?.protocol ??

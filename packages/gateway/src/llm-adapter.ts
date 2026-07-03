@@ -491,7 +491,8 @@ type WorkerProtocol =
   | "anthropic"
   | "openai"
   | "openai-codex-responses"
-  | "vertex";
+  | "vertex"
+  | "gemini";
 
 /** Upstream URL, wire protocol, and provider label for a resolved target. */
 type ProviderTarget = {
@@ -516,7 +517,7 @@ type ProviderTarget = {
  */
 export function resolveWorkerProtocol(
   providerID: string,
-  explicit?: "anthropic" | "openai" | "openai-responses" | "vertex",
+  explicit?: "anthropic" | "openai" | "openai-responses" | "vertex" | "gemini",
 ): WorkerProtocol {
   // openai-codex MUST use the Responses API — its backend has no Chat
   // Completions endpoint. This takes precedence over the explicit hint
