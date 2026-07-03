@@ -674,6 +674,61 @@ describe("analyzeCacheTurn", () => {
     // Must NOT be the misleading "earlier message modified" verdict.
     expect(result.divergenceReason).not.toMatch(/earlier message modified/);
   });
+
+  test("extending a message's content array is NOT relabeled as tail growth", () => {
+    // Sentry bot #15026759: the `]`→`,` transition also fires when a nested
+    // `content` array grows (e.g. a tool_use block appended to an existing
+    // assistant message). That is a genuine content edit at messages[N] — the
+    // path is `messages[N].content[M]`, so the bare-path guard must reject it.
+    const analytics = makeCacheAnalytics();
+    const t = (text: string) => ({
+      role: "user",
+      content: [{ type: "text", text }],
+    });
+    // message[2]'s content array gains a tool_use block. With 6 messages, idx=2
+    // is mid-conversation (not <=1, not within the last 2) → the classifier says
+    // "earlier message modified", so the outer guard passes and the bare-path
+    // guard is what must reject it (path is messages[2].content[1]).
+    const prev = JSON.stringify({
+      model: "opus",
+      messages: [
+        t("m0"),
+        t("m1"),
+        { role: "assistant", content: [{ type: "text", text: "look" }] },
+        t("m3"),
+        t("m4"),
+        t("m5"),
+      ],
+      tools: [],
+    });
+    const curr = JSON.stringify({
+      model: "opus",
+      messages: [
+        t("m0"),
+        t("m1"),
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "look" },
+            { type: "tool_use", id: "t1", name: "bash", input: {} },
+          ],
+        },
+        t("m3"),
+        t("m4"),
+        t("m5"),
+      ],
+      tools: [],
+    });
+
+    analyzeCacheTurn(analytics, prev, makeUsage(), undefined, 6);
+    const result = analyzeCacheTurn(analytics, curr, makeUsage(), undefined, 6);
+
+    // A real mid-message content edit — the path is nested (messages[2].content),
+    // so it must NOT be relabeled as tail growth.
+    expect(result.divergencePoint).toMatch(/^messages\[2\]\.content/);
+    expect(result.divergenceReason).not.toMatch(/returning-turn tail growth/);
+    expect(result.divergenceReason).toMatch(/earlier message modified/);
+  });
 });
 
 // ---------------------------------------------------------------------------

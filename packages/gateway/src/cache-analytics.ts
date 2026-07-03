@@ -560,6 +560,12 @@ export function analyzeCacheTurn(
       // breakpoint (addressed by the distilled-prefix breakpoint, PR #1155).
       if (
         divergenceReason.startsWith("earlier message modified") &&
+        // Bare top-level `messages[N]` only. The `]`→`,` transition also occurs
+        // when a nested `content` array grows (e.g. a tool_use block appended to
+        // an existing message) — there the path is `messages[N].content[M]`, a
+        // genuine content edit we must NOT relabel. A top-level element boundary
+        // maps to a bare `messages[N]`.
+        /^messages\[\d+\]$/.test(divergencePoint) &&
         prevBody[prefixMatchBytes] === "]" &&
         normalizedBody[prefixMatchBytes] === ","
       ) {
