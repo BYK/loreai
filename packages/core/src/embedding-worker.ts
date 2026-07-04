@@ -336,10 +336,30 @@ async function loadPipeline(): Promise<void> {
   // CPU backend (multi-threaded). The npm dist-only bundle redirects
   // onnxruntime-node → onnxruntime-web, which serves "cpu" via its WASM+SIMD
   // backend (API-compatible).
-  pipe = (await pipeline("feature-extraction", modelId, {
+  // Native ORT sizes its intra-op thread pool to the HOST core count, which is
+  // cgroup-CPU-blind — a CPU-quota'd container oversubscribes (one memory arena
+  // per thread → RSS inflation). Cap it to the cgroup-aware parallelism on the
+  // native path only (WASM is already forced single-thread via env above). A
+  // strict no-op on unconstrained hosts (see nativeIntraOpThreads). `globals`
+  // (captured above) only carries __LORE_NPM_WASM_PATHS__ when the npm bundle
+  // fell back to WASM; every other path (SEA vendorModel, native binding,
+  // dev/test) is native onnxruntime-node.
+  const pipelineOptions: Record<string, unknown> = {
     dtype: "q8",
     device: "cpu",
-  })) as unknown as FeatureExtractionPipeline;
+  };
+  if (!globals.__LORE_NPM_WASM_PATHS__) {
+    const { nativeIntraOpThreads } = await import("./ort-native");
+    const intraOpNumThreads = nativeIntraOpThreads();
+    if (intraOpNumThreads !== undefined) {
+      pipelineOptions.session_options = { intraOpNumThreads };
+    }
+  }
+  pipe = (await pipeline(
+    "feature-extraction",
+    modelId,
+    pipelineOptions,
+  )) as unknown as FeatureExtractionPipeline;
 
   // Guard against Callable pattern failure: @huggingface/transformers
   // uses Object.setPrototypeOf(closure, new.target.prototype) in the

@@ -14,6 +14,7 @@
  * platform), resolution returns null and the worker falls back to WASM.
  */
 import { createRequire } from "node:module";
+import { availableParallelism, cpus } from "node:os";
 
 /** The npm target key for a platform: `<process.platform>-<process.arch>`
  *  (e.g. "linux-x64", "darwin-arm64", "win32-arm64"). Matches the package name
@@ -53,4 +54,40 @@ export function resolveNativeOrtBindingPath(fromPath: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Intra-op thread count to hand native ONNX Runtime, or `undefined` to leave
+ * ORT's own default in place.
+ *
+ * Native ORT sizes its intra-op pool to `std::thread::hardware_concurrency()`
+ * (the HOST physical-core count), which is cgroup-CPU-blind. In a CPU-quota'd
+ * container (Docker/Railway/K8s) it oversubscribes: each intra-op thread carries
+ * its own memory arena, so a 1-vCPU container on a 32-core host spawns ~32
+ * threads → wasted RSS (the axis PR #1168's memory clamp doesn't cover) plus
+ * context-switch thrash against the quota.
+ *
+ * `os.availableParallelism()` is cgroup-CPU-aware (libuv `uv_available_parallelism`:
+ * cgroup v2 `cpu.max`, v1 CFS quota, `sched_getaffinity`). We cap ONLY when the
+ * process is genuinely restricted — `availableParallelism() < os.cpus().length`
+ * (the logical-core count `os.cpus()` reports from the host). On an unconstrained
+ * host the two are equal, so we return `undefined` and never touch ORT's default;
+ * critically, this also avoids RAISING the thread count above ORT's physical-core
+ * default on a hyper-threaded host (where logical > physical). So this is a
+ * strict no-op except inside a CPU-limited container, where it returns the
+ * quota-sized count (floored at 1) to stop the oversubscription.
+ */
+export function nativeIntraOpThreads(
+  parallelism: number = availableParallelism(),
+  logicalCpus: number = cpus().length,
+): number | undefined {
+  const avail =
+    Number.isFinite(parallelism) && parallelism >= 1
+      ? Math.floor(parallelism)
+      : 1;
+  const total =
+    Number.isFinite(logicalCpus) && logicalCpus >= 1
+      ? Math.floor(logicalCpus)
+      : avail;
+  return avail < total ? avail : undefined;
 }

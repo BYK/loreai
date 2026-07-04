@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   ORT_NATIVE_BINDING_FILE,
+  nativeIntraOpThreads,
   ortNativePackageName,
   ortPlatformTarget,
   resolveNativeOrtBindingPath,
@@ -46,5 +47,39 @@ describe("ort-native runtime resolution", () => {
     expect(
       resolveNativeOrtBindingPath("/nonexistent/lore-test/x.js"),
     ).toBeNull();
+  });
+});
+
+describe("nativeIntraOpThreads", () => {
+  test("returns undefined on an unconstrained host (avail == logical) — no-op", () => {
+    // ORT keeps its own physical-core default; we must not touch it.
+    expect(nativeIntraOpThreads(4, 4)).toBeUndefined();
+    expect(nativeIntraOpThreads(8, 8)).toBeUndefined();
+    expect(nativeIntraOpThreads(1, 1)).toBeUndefined();
+  });
+
+  test("returns undefined when avail exceeds logical (never raises threads)", () => {
+    // Defensive: availableParallelism should never exceed cpus().length, but if
+    // it did we must not push ORT ABOVE its physical-core default (RSS regression
+    // on hyper-threaded hosts).
+    expect(nativeIntraOpThreads(8, 4)).toBeUndefined();
+  });
+
+  test("caps to the cgroup-limited parallelism inside a CPU-quota'd container", () => {
+    // 2 vCPU quota on an 8-core host → cap intra-op threads to 2, not 8.
+    expect(nativeIntraOpThreads(2, 8)).toBe(2);
+    expect(nativeIntraOpThreads(1, 16)).toBe(1);
+  });
+
+  test("floors fractional / invalid parallelism, never below 1", () => {
+    expect(nativeIntraOpThreads(2.9, 8)).toBe(2);
+    expect(nativeIntraOpThreads(0, 8)).toBe(1);
+    expect(nativeIntraOpThreads(Number.NaN, 8)).toBe(1);
+    expect(nativeIntraOpThreads(-4, 8)).toBe(1);
+  });
+
+  test("defaults reflect the live host (>=1 or undefined, never throws)", () => {
+    const v = nativeIntraOpThreads();
+    expect(v === undefined || (Number.isInteger(v) && v >= 1)).toBe(true);
   });
 });
