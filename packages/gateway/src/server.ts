@@ -293,14 +293,18 @@ async function handleGeminiGenerateContent(
     return errorResponse(400, "invalid_request_error", "Invalid JSON body");
   }
 
+  const headers = headersToRecord(req.headers);
+  // Normalize `?key=` query-form auth (REST / google-generativeai clients) to
+  // the `x-goog-api-key` header — the upstream URL is rebuilt, so a query param
+  // would otherwise be dropped and the call would 401. Header form wins.
+  if (!headers["x-goog-api-key"] && !headers["X-Goog-Api-Key"]) {
+    const key = new URL(req.url).searchParams.get("key");
+    if (key) headers["x-goog-api-key"] = key;
+  }
+
   let gatewayReq: GatewayRequest;
   try {
-    gatewayReq = parseGeminiRequest(
-      body,
-      headersToRecord(req.headers),
-      model,
-      stream,
-    );
+    gatewayReq = parseGeminiRequest(body, headers, model, stream);
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Failed to parse request";
     return errorResponse(400, "invalid_request_error", msg);

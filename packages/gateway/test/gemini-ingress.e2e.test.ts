@@ -47,6 +47,7 @@ async function sendGemini(
 ): Promise<{
   upstreamUrl: string;
   upstreamBody: unknown;
+  upstreamHeaders: Record<string, string> | undefined;
   clientJson: unknown;
 }> {
   const { setUpstreamInterceptor } = await import("../src/pipeline");
@@ -77,6 +78,9 @@ async function sendGemini(
   return {
     upstreamUrl: String(call[0]),
     upstreamBody: (call[1] as { body?: unknown } | undefined)?.body,
+    upstreamHeaders: (
+      call[1] as { headers?: Record<string, string> } | undefined
+    )?.headers,
     clientJson,
   };
 }
@@ -138,7 +142,41 @@ describe("native Gemini ingress → generativelanguage upstream (full pipeline)"
       harness,
       "/v1/models/gemini-2.5-pro:generateContent",
     );
-    expect(upstreamUrl).toContain("generativelanguage.googleapis.com");
+    // Full native path (not just the host — which the openai-compat URL shares).
+    expect(upstreamUrl).toBe(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
+    );
+  });
+
+  test("?key= query auth is normalized to the x-goog-api-key upstream header", async () => {
+    harness = await createHarness({ fixtures: [] });
+    const { setUpstreamInterceptor } = await import("../src/pipeline");
+    setUpstreamInterceptor(async (_b, _m, _s, makeReal) => makeReal());
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue(geminiUpstreamResponse());
+
+    // REST/google-generativeai style: key in the query, NO x-goog-api-key header.
+    await fetch(
+      `${harness.baseURL}/v1beta/models/gemini-2.5-pro:generateContent?key=qkey123`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-lore-project": "/tmp/gemini-e2e",
+        },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: "hi" }] }],
+        }),
+      },
+    );
+
+    expect(mockFetch).toHaveBeenCalled();
+    const headers = (
+      mockFetch.mock.calls[0][1] as
+        | { headers?: Record<string, string> }
+        | undefined
+    )?.headers;
+    expect(headers?.["x-goog-api-key"]).toBe("qkey123");
   });
 
   test("opencode/pi shape: X-Lore-Provider: google stays native gemini (not openai-compat)", async () => {

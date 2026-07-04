@@ -20,20 +20,14 @@ import type {
   GatewayUsage,
 } from "../translate/types";
 import { ZERO_USAGE } from "../translate/types";
-import { buildGeminiResponseBody } from "../translate/gemini";
+import {
+  buildGeminiResponseBody,
+  geminiUsageFromMetadata,
+  mapGeminiFinishReason,
+} from "../translate/gemini";
 import { parseSSEStream, createStreamAccumulator } from "./anthropic";
 
 type GeminiPart = Record<string, unknown>;
-
-function mapGeminiFinishReason(reason: unknown, hasToolCall: boolean): string {
-  if (hasToolCall) return "tool_use";
-  switch (String(reason ?? "")) {
-    case "MAX_TOKENS":
-      return "max_tokens";
-    default:
-      return "end_turn";
-  }
-}
 
 /**
  * Accumulate an upstream Gemini SSE (`?alt=sse`) response into a
@@ -49,6 +43,7 @@ export async function accumulateGeminiSSEStream(
   }
 
   let textContent = "";
+  let thinkingContent = "";
   const toolUses: Array<{ name: string; input: unknown }> = [];
   let finishReason: unknown;
   let model = "";
@@ -78,7 +73,10 @@ export async function accumulateGeminiSSEStream(
       : [];
     for (const p of parts) {
       if (typeof p.text === "string") {
-        textContent += p.text;
+        // Keep reasoning-summary parts (`thought: true`) out of the visible
+        // answer text — accumulate them into a separate thinking block.
+        if (p.thought === true) thinkingContent += p.text;
+        else textContent += p.text;
       } else if (p.functionCall && typeof p.functionCall === "object") {
         const fc = p.functionCall as { name?: unknown; args?: unknown };
         toolUses.push({ name: String(fc.name ?? ""), input: fc.args ?? {} });
@@ -86,23 +84,14 @@ export async function accumulateGeminiSSEStream(
     }
     if (first.finishReason != null) finishReason = first.finishReason;
 
+    // usageMetadata is cumulative across frames; last non-null wins.
     const um = parsed.usageMetadata as Record<string, unknown> | undefined;
-    if (um) {
-      usage = {
-        inputTokens:
-          typeof um.promptTokenCount === "number" ? um.promptTokenCount : 0,
-        outputTokens:
-          typeof um.candidatesTokenCount === "number"
-            ? um.candidatesTokenCount
-            : 0,
-      };
-      if (typeof um.cachedContentTokenCount === "number") {
-        usage.cacheReadInputTokens = um.cachedContentTokenCount;
-      }
-    }
+    if (um) usage = geminiUsageFromMetadata(um);
   }
 
   const blocks: GatewayContentBlock[] = [];
+  if (thinkingContent)
+    blocks.push({ type: "thinking", thinking: thinkingContent });
   if (textContent) blocks.push({ type: "text", text: textContent });
   for (const tu of toolUses) {
     blocks.push({

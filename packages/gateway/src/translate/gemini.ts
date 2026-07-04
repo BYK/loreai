@@ -15,7 +15,9 @@
  *     NAME, so we synthesize the internal tool-use id from the name;
  *   - tools are `[{functionDeclarations:[{name,description,parameters}]}]`;
  *   - generation params live under `generationConfig`;
- *   - auth is an API key via the `x-goog-api-key` header (or `?key=` query).
+ *   - auth is an API key via the `x-goog-api-key` header. Clients that use the
+ *     `?key=` query form instead have it normalized to that header at ingress
+ *     (see `handleGeminiGenerateContent`), since the upstream URL is rebuilt.
  */
 import type {
   GatewayContentBlock,
@@ -52,6 +54,13 @@ function partsText(container: unknown): string {
 /** Map a single Gemini content part to a gateway content block. */
 function partToBlock(part: GeminiPart): GatewayContentBlock | null {
   if (typeof part.text === "string") {
+    // A `thought: true` part is the model's private reasoning summary
+    // (thinkingConfig.includeThoughts). It must NOT be concatenated with the
+    // visible answer — map it to a distinct thinking block so egress can keep
+    // the `thought` flag and clients can tell reasoning from answer.
+    if (part.thought === true) {
+      return { type: "thinking", thinking: part.text };
+    }
     return { type: "text", text: part.text };
   }
   if (part.functionCall && typeof part.functionCall === "object") {
@@ -173,9 +182,10 @@ function blockToGeminiParts(block: GatewayContentBlock): GeminiPart[] {
     case "text":
       return block.text ? [{ text: block.text }] : [];
     case "thinking":
-      // Gemini has no client-visible thinking wire field on input — project to
-      // text so the content is not silently dropped.
-      return block.thinking ? [{ text: block.thinking }] : [];
+      // Re-emit as a Gemini thought part (`text` + `thought: true`) so a
+      // reasoning summary round-trips as reasoning — never merged into the
+      // visible answer text.
+      return block.thinking ? [{ text: block.thinking, thought: true }] : [];
     case "tool_use":
       return [{ functionCall: { name: block.name, args: block.input ?? {} } }];
     case "tool_result": {
@@ -198,9 +208,10 @@ function blockToGeminiParts(block: GatewayContentBlock): GeminiPart[] {
 /**
  * Build the upstream Gemini request `{url, headers, body}` from a
  * `GatewayRequest`. Injects the (LTM-augmented) system prompt as
- * `systemInstruction`. Auth is the API key via `x-goog-api-key` (forwarded from
- * the client; falls back to the `?key=` form the client used, both of which
- * `forwardClientHeaders` preserves).
+ * `systemInstruction`. Auth is the API key via the `x-goog-api-key` header
+ * (forwarded from the client by `forwardClientHeaders`; a client `?key=` query
+ * param is normalized to this header at ingress). The upstream URL is rebuilt
+ * from scratch, so query-string auth is NOT preserved on the URL itself.
  */
 export function buildGeminiUpstreamRequest(
   req: GatewayRequest,
@@ -262,34 +273,64 @@ export function buildGeminiUpstreamRequest(
 // Gemini response → GatewayResponse
 // ---------------------------------------------------------------------------
 
-/** Map a Gemini `finishReason` + tool presence to an internal stop reason. */
-function mapGeminiFinishReason(reason: unknown, hasToolCall: boolean): string {
+/**
+ * Map a Gemini `finishReason` + tool presence to an internal stop reason.
+ *
+ * Abnormal reasons (SAFETY, RECITATION, BLOCKLIST, PROHIBITED_CONTENT, SPII,
+ * MALFORMED_FUNCTION_CALL, OTHER, …) are preserved VERBATIM so a proxied client
+ * still sees the real block/filter signal instead of a laundered "STOP".
+ * `toGeminiFinishReason` echoes any such preserved value back on egress. Only
+ * the truly-normal reasons are normalized to the internal model. A block reason
+ * takes precedence over `hasToolCall` (a filtered turn is not a tool turn).
+ */
+export function mapGeminiFinishReason(
+  reason: unknown,
+  hasToolCall: boolean,
+): string {
+  const r = String(reason ?? "");
+  const isNormal =
+    r === "" ||
+    r === "STOP" ||
+    r === "MAX_TOKENS" ||
+    r === "FINISH_REASON_UNSPECIFIED";
+  if (!isNormal) return r; // preserve verbatim
   if (hasToolCall) return "tool_use";
-  switch (String(reason ?? "")) {
-    case "MAX_TOKENS":
-      return "max_tokens";
-    case "STOP":
-    case "":
-      return "end_turn";
-    default:
-      return "end_turn";
-  }
+  if (r === "MAX_TOKENS") return "max_tokens";
+  return "end_turn";
 }
 
-/** Parse Gemini `usageMetadata` into `GatewayUsage`. */
-function parseGeminiUsage(json: Record<string, unknown>): GatewayUsage {
-  const um = json.usageMetadata as Record<string, unknown> | undefined;
+/**
+ * Convert a Gemini `usageMetadata` object into `GatewayUsage`. Shared by the
+ * non-streaming parser and the SSE accumulator (single source of truth — avoids
+ * drift). Gemini bills thinking separately in `thoughtsTokenCount`; fold it into
+ * outputTokens (the internal model is Anthropic-shaped, where output_tokens
+ * INCLUDES thinking). Omitting it undercounts output for the gateway's
+ * cost-aware routing and understates the client's total.
+ */
+export function geminiUsageFromMetadata(
+  um: Record<string, unknown> | undefined,
+): GatewayUsage {
   if (!um) return { ...ZERO_USAGE };
+  const candidates =
+    typeof um.candidatesTokenCount === "number" ? um.candidatesTokenCount : 0;
+  const thoughts =
+    typeof um.thoughtsTokenCount === "number" ? um.thoughtsTokenCount : 0;
   const usage: GatewayUsage = {
     inputTokens:
       typeof um.promptTokenCount === "number" ? um.promptTokenCount : 0,
-    outputTokens:
-      typeof um.candidatesTokenCount === "number" ? um.candidatesTokenCount : 0,
+    outputTokens: candidates + thoughts,
   };
   if (typeof um.cachedContentTokenCount === "number") {
     usage.cacheReadInputTokens = um.cachedContentTokenCount;
   }
   return usage;
+}
+
+/** Parse Gemini `usageMetadata` into `GatewayUsage`. */
+function parseGeminiUsage(json: Record<string, unknown>): GatewayUsage {
+  return geminiUsageFromMetadata(
+    json.usageMetadata as Record<string, unknown> | undefined,
+  );
 }
 
 /**
@@ -300,6 +341,9 @@ export function parseGeminiResponseJSON(
   json: Record<string, unknown>,
 ): GatewayResponse {
   const candidates = Array.isArray(json.candidates) ? json.candidates : [];
+  // LIMITATION: the internal model holds a single response, so when a client
+  // requests `candidateCount > 1` only candidates[0] is surfaced. Multi-candidate
+  // fan-out is a documented follow-up, not currently supported.
   const first = (candidates[0] ?? {}) as Record<string, unknown>;
   const content = (first.content ?? {}) as Record<string, unknown>;
   const parts = Array.isArray(content.parts)
@@ -315,11 +359,22 @@ export function parseGeminiResponseJSON(
     blocks.push(block);
   }
 
+  // Prompt-level block: Gemini returns NO candidates plus
+  // `promptFeedback.blockReason`. Surface that reason as the stop reason instead
+  // of laundering it into a fake `end_turn`/STOP, so the client sees the block.
+  const promptFeedback = json.promptFeedback as
+    | { blockReason?: unknown }
+    | undefined;
+  const stopReason =
+    candidates.length === 0 && promptFeedback?.blockReason
+      ? String(promptFeedback.blockReason)
+      : mapGeminiFinishReason(first.finishReason, hasToolCall);
+
   return {
     id: String(json.responseId ?? ""),
     model: String(json.modelVersion ?? ""),
     content: blocks,
-    stopReason: mapGeminiFinishReason(first.finishReason, hasToolCall),
+    stopReason,
     usage: parseGeminiUsage(json),
   };
 }
@@ -334,9 +389,15 @@ function toGeminiFinishReason(stopReason: string): string {
     case "max_tokens":
     case "length":
       return "MAX_TOKENS";
-    default:
-      // end_turn, tool_use, stop — Gemini reports STOP even for tool calls.
+    case "end_turn":
+    case "tool_use":
+    case "stop":
+    case "":
+      // Gemini reports STOP even for tool calls.
       return "STOP";
+    default:
+      // A preserved Gemini block reason (SAFETY, RECITATION, …) — echo verbatim.
+      return stopReason;
   }
 }
 

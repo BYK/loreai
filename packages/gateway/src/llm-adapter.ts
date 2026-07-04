@@ -862,11 +862,18 @@ function buildGeminiWorkerRequest(
     generationConfig,
   };
   if (system) body.systemInstruction = { parts: [{ text: system }] };
+  // Gemini API-key auth uses `x-goog-api-key`; OAuth/Code-Assist sessions use a
+  // Bearer token. Be scheme-aware so a bearer credential is never shoved into
+  // the api-key header (which would silently misauth).
+  const authHeader: Record<string, string> =
+    cred.scheme === "bearer"
+      ? { Authorization: `Bearer ${cred.value}` }
+      : { "x-goog-api-key": cred.value };
   return {
     url: `${target.url}/v1beta/models/${encodeURIComponent(model.modelID)}:generateContent`,
     headers: {
       "Content-Type": "application/json",
-      "x-goog-api-key": cred.value,
+      ...authHeader,
     },
     body: JSON.stringify(body),
   };

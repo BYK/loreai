@@ -328,6 +328,102 @@ describe("parseGeminiResponseJSON", () => {
     });
     expect(resp.usage).toEqual({ inputTokens: 0, outputTokens: 0 });
   });
+
+  test("thought part → thinking block, NOT merged into visible text", () => {
+    const resp = parseGeminiResponseJSON({
+      candidates: [
+        {
+          content: {
+            role: "model",
+            parts: [
+              { text: "secret reasoning", thought: true },
+              { text: "visible answer" },
+            ],
+          },
+          finishReason: "STOP",
+        },
+      ],
+    });
+    expect(resp.content).toEqual([
+      { type: "thinking", thinking: "secret reasoning" },
+      { type: "text", text: "visible answer" },
+    ]);
+  });
+
+  test("thoughtsTokenCount is folded into outputTokens", () => {
+    const resp = parseGeminiResponseJSON({
+      candidates: [{ content: { parts: [{ text: "x" }] } }],
+      usageMetadata: {
+        promptTokenCount: 100,
+        candidatesTokenCount: 20,
+        thoughtsTokenCount: 500,
+      },
+    });
+    expect(resp.usage).toEqual({ inputTokens: 100, outputTokens: 520 });
+  });
+
+  test("SAFETY finishReason is preserved verbatim (not laundered to end_turn)", () => {
+    const resp = parseGeminiResponseJSON({
+      candidates: [{ content: { parts: [] }, finishReason: "SAFETY" }],
+    });
+    expect(resp.stopReason).toBe("SAFETY");
+  });
+
+  test("prompt-level block (no candidates) surfaces promptFeedback.blockReason", () => {
+    const resp = parseGeminiResponseJSON({
+      promptFeedback: { blockReason: "SAFETY" },
+      usageMetadata: { promptTokenCount: 8 },
+    });
+    expect(resp.content).toEqual([]);
+    expect(resp.stopReason).toBe("SAFETY");
+  });
+
+  test("multi-candidate: only candidates[0] is surfaced (documented limitation)", () => {
+    const resp = parseGeminiResponseJSON({
+      candidates: [
+        { content: { parts: [{ text: "cand0" }] }, finishReason: "STOP" },
+        { content: { parts: [{ text: "cand1" }] }, finishReason: "STOP" },
+      ],
+    });
+    expect(resp.content).toEqual([{ type: "text", text: "cand0" }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Egress: thinking + preserved finishReason round-trip
+// ---------------------------------------------------------------------------
+
+describe("buildGeminiResponseBody — thinking + block reason", () => {
+  test("thinking block re-emits as a thought part (thought:true), separate from text", () => {
+    const b = buildGeminiResponseBody({
+      id: "r",
+      model: "gemini-2.5-pro",
+      content: [
+        { type: "thinking", thinking: "reasoning" },
+        { type: "text", text: "answer" },
+      ],
+      stopReason: "end_turn",
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+    const cand = (b.candidates as Array<Record<string, unknown>>)[0];
+    const parts = (cand.content as { parts: unknown[] }).parts;
+    expect(parts).toEqual([
+      { text: "reasoning", thought: true },
+      { text: "answer" },
+    ]);
+  });
+
+  test("preserved block reason echoes verbatim on egress finishReason", () => {
+    const b = buildGeminiResponseBody({
+      id: "r",
+      model: "m",
+      content: [],
+      stopReason: "SAFETY",
+      usage: { inputTokens: 1, outputTokens: 0 },
+    });
+    const cand = (b.candidates as Array<Record<string, unknown>>)[0];
+    expect(cand.finishReason).toBe("SAFETY");
+  });
 });
 
 // ---------------------------------------------------------------------------

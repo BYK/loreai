@@ -86,6 +86,63 @@ describe("accumulateGeminiSSEStream", () => {
     const resp = await accumulateGeminiSSEStream(res);
     expect(resp.usage?.cacheReadInputTokens).toBe(6);
   });
+
+  test("thought deltas stay out of visible text (separate thinking block)", async () => {
+    const res = sse([
+      {
+        candidates: [
+          {
+            content: {
+              role: "model",
+              parts: [{ text: "reasoning", thought: true }],
+            },
+          },
+        ],
+      },
+      {
+        candidates: [
+          { content: { role: "model", parts: [{ text: "answer" }] } },
+        ],
+      },
+      {
+        candidates: [
+          { content: { role: "model", parts: [] }, finishReason: "STOP" },
+        ],
+      },
+    ]);
+    const resp = await accumulateGeminiSSEStream(res);
+    expect(resp.content).toEqual([
+      { type: "thinking", thinking: "reasoning" },
+      { type: "text", text: "answer" },
+    ]);
+  });
+
+  test("thoughtsTokenCount folded into outputTokens", async () => {
+    const res = sse([
+      {
+        candidates: [
+          { content: { parts: [{ text: "x" }] }, finishReason: "STOP" },
+        ],
+        usageMetadata: {
+          promptTokenCount: 10,
+          candidatesTokenCount: 2,
+          thoughtsTokenCount: 40,
+        },
+      },
+    ]);
+    const resp = await accumulateGeminiSSEStream(res);
+    expect(resp.usage).toEqual({ inputTokens: 10, outputTokens: 42 });
+  });
+
+  test("SAFETY finishReason preserved verbatim", async () => {
+    const res = sse([
+      {
+        candidates: [{ content: { parts: [] }, finishReason: "SAFETY" }],
+      },
+    ]);
+    const resp = await accumulateGeminiSSEStream(res);
+    expect(resp.stopReason).toBe("SAFETY");
+  });
 });
 
 // ---------------------------------------------------------------------------
