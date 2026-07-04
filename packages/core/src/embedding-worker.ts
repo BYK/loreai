@@ -213,26 +213,41 @@ async function ensurePipeline(): Promise<void> {
         // (the model ships in the binary — re-downloading isn't appropriate and
         // the path is read-only).
         if (!vendorModel && isCorruptModelError(msg)) {
-          const healed = await purgeCachedModel();
-          if (healed) {
-            // Diagnostic only — do NOT post `init-error` here. The main thread
-            // treats `init-error` as a permanent break (sets
-            // localProviderKnownBroken=true), which would brick the provider
-            // even though we're about to retry successfully. Only the .catch
-            // below (a genuine final failure) may post init-error.
-            // Gate on the host's stderr-silence flag (see WorkerInitData) — in a
-            // host TUI any raw byte corrupts the render. The flag is inlined here
-            // because the worker runs as raw .ts and can't value-import siblings.
+          // Integrity-gate the DESTRUCTIVE purge: if the model files are present,
+          // correctly sized, and start with a valid ONNX header, the parse
+          // failure was almost certainly transient — e.g. the file was read
+          // while a concurrent process was still writing it during a
+          // multi-instance restart. Deleting a good ~137 MB model then would be
+          // strictly worse (a failed re-download, e.g. offline, bricks it). Retry
+          // the load once WITHOUT purging; a fresh-worker respawn on the main
+          // thread (the init-retry cooldown) is the next line of defense.
+          // Gate diagnostics on the host's stderr-silence flag (see
+          // WorkerInitData) — a raw byte corrupts a host TUI render. Inlined
+          // because the worker runs as raw .ts and can't value-import siblings.
+          const intact = await cachedModelLooksIntact();
+          if (intact) {
             if (!stderrSilenced) {
               console.warn(
-                `[embedding-worker] model corrupt (${msg}); purged cache, retrying download once`,
+                `[embedding-worker] model parse failed but on-disk files look intact (${msg}); retrying load without purging`,
               );
             }
-            // Retry once. If this throws, it propagates to the .catch below and
-            // marks the worker permanently failed.
+            // Retry once. If it still fails, it propagates to the .catch below.
             await loadPipeline();
           } else {
-            throw err;
+            const healed = await purgeCachedModel();
+            if (healed) {
+              // Diagnostic only — do NOT post `init-error` here; the main thread
+              // treats it as a break. Only the .catch below (a genuine final
+              // failure) may post init-error.
+              if (!stderrSilenced) {
+                console.warn(
+                  `[embedding-worker] model corrupt (${msg}); purged cache, retrying download once`,
+                );
+              }
+              await loadPipeline();
+            } else {
+              throw err;
+            }
           }
         } else {
           throw err;
@@ -416,6 +431,56 @@ async function purgeCachedModel(): Promise<boolean> {
   } catch {
     // If we can't resolve/remove the cache, retrying the download is pointless.
     return false;
+  }
+}
+
+/** Inlined copy of MIN_ONNX_FILE_BYTES from embedding-worker-types.ts — the
+ *  worker runs as raw .ts and can't value-import siblings (see the classifier
+ *  note above). Keep in sync with `looksLikeIntactOnnxFile`. */
+const MIN_ONNX_FILE_BYTES = 1024 * 1024;
+
+/**
+ * Best-effort integrity check of the cached model's ONNX file(s): present,
+ * plausibly sized (≥ 1 MiB), and starting with the ONNX/protobuf header byte
+ * (field 1 `ir_version`, wire tag 0x08). Returns true only when EVERY `.onnx`
+ * file passes — i.e. the on-disk model looks loadable, so a parse failure was
+ * likely transient and the corrupt-model self-heal must NOT purge it. Returns
+ * false on ANY uncertainty (missing dir / read error), so the caller falls back
+ * to the safe purge + re-download path. Never throws. Mirrors the pure
+ * `looksLikeIntactOnnxFile` predicate in embedding-worker-types.ts.
+ */
+async function cachedModelLooksIntact(): Promise<boolean> {
+  try {
+    const { env } = await import("@huggingface/transformers");
+    const cacheDir = (env as { cacheDir?: string }).cacheDir;
+    const modelDir = resolveModelCacheDir(cacheDir, modelId);
+    if (!modelDir) return false;
+    const { readdir, stat, open } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const onnxDir = join(modelDir, "onnx");
+    let onnxFiles: string[];
+    try {
+      onnxFiles = (await readdir(onnxDir)).filter((f) => f.endsWith(".onnx"));
+    } catch {
+      return false; // no onnx dir → can't verify → allow the purge fallback
+    }
+    if (onnxFiles.length === 0) return false;
+    for (const name of onnxFiles) {
+      const file = join(onnxDir, name);
+      const { size } = await stat(file);
+      if (size < MIN_ONNX_FILE_BYTES) return false; // truncated / empty
+      const fh = await open(file, "r");
+      try {
+        const head = Buffer.alloc(1);
+        const { bytesRead } = await fh.read(head, 0, 1, 0);
+        if (bytesRead < 1 || head[0] !== 0x08) return false; // not an ONNX proto
+      } finally {
+        await fh.close();
+      }
+    }
+    return true;
+  } catch {
+    return false; // uncertain → safe fallback to purge
   }
 }
 

@@ -12,6 +12,7 @@ import {
   _resetLocalProviderProbe,
   _restoreProvider,
   _saveAndClearProvider,
+  _setLocalInitCooldownMsForTest,
   _setTestWorkerFactory,
 } from "../src/embedding";
 import { isMissingLocalStackError } from "../src/embedding-worker-types";
@@ -152,6 +153,7 @@ describe("init-error classification (worker-mock)", () => {
   afterEach(() => {
     registerSink(passthroughSink);
     _setTestWorkerFactory(null);
+    _setLocalInitCooldownMsForTest(null);
     _resetLocalProviderProbe();
     _restoreProvider(savedProvider);
     if (savedVoyage !== undefined) process.env.VOYAGE_API_KEY = savedVoyage;
@@ -189,7 +191,8 @@ describe("init-error classification (worker-mock)", () => {
     expect(errors).toHaveLength(0);
   });
 
-  it("genuine init failure → ERROR 'failed to init', latches FTS-only", async () => {
+  it("genuine init failures retry, then ERROR 'failed to init' + latch after the budget", async () => {
+    _setLocalInitCooldownMsForTest(0); // drive the retries without waiting
     const fakes: FakeWorker[] = [];
     _setTestWorkerFactory(() => {
       const f = new FakeWorker();
@@ -197,21 +200,31 @@ describe("init-error classification (worker-mock)", () => {
       return f as unknown as Worker;
     });
 
-    const result = settle(embed(["hello"], "query"));
-    await flush();
+    // A genuine (non-missing-stack) init failure is now RETRIED with a fresh
+    // worker rather than latching on the first failure — only after the retry
+    // budget (3 attempts) is exhausted does it error + degrade permanently.
+    const GENUINE = "model load failed: corrupt tokenizer.json";
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const result = settle(embed(["hello"], "query"));
+      await flush();
+      const worker = fakes.at(-1);
+      if (!worker) throw new Error("no worker spawned");
+      worker.emit("message", { type: "init-error", error: GENUINE });
+      await flush();
+      const r = await result;
+      expect(r.ok).toBe(false);
+      if (attempt < 3) expect(isAvailable()).toBe(true); // still retryable
+    }
 
-    fakes[0].emit("message", {
-      type: "init-error",
-      error: "model load failed: corrupt tokenizer.json",
-    });
-    await flush();
-
-    const r = await result;
-    expect(r.ok).toBe(false);
-    expect(isAvailable()).toBe(false);
+    expect(isAvailable()).toBe(false); // budget exhausted → permanently FTS-only
 
     const errors = logs.filter((l) => l.level === "error");
     const warns = logs.filter((l) => l.level === "warn");
+    // Intermediate attempts warn (retry, not the benign not-installed message);
+    // the terminal failure errors.
+    expect(warns.some((l) => /init failed \(attempt/i.test(l.message))).toBe(
+      true,
+    );
     expect(errors.some((l) => /failed to init/i.test(l.message))).toBe(true);
     // The install-guidance warn is reserved for the not-installed case.
     expect(warns.some((l) => /not installed/i.test(l.message))).toBe(false);

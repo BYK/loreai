@@ -452,16 +452,42 @@ export class LocalProviderUnavailableError extends Error {
   }
 }
 
-/** Tracks whether the local provider has been probed and found unavailable.
- *  Set to true after the first worker init failure so subsequent calls
- *  to `isAvailable()` short-circuit. */
+/** PERMANENT break: the local provider is disabled for the rest of the process
+ *  lifetime (recall degrades to FTS-only). Set only for a non-self-healing cause
+ *  — the optional embedding stack is absent, a WASM-fatal abort, a floor OOM, or
+ *  the transient-init-retry budget below being exhausted. */
 let localProviderKnownBroken = false;
 let localProviderErrorLogged = false;
 
-/** For tests: reset the local provider probe state. */
+// --- Transient init-failure retry (self-heal a one-off worker init failure) ---
+// A single model-init failure used to latch the provider FTS-only for the whole
+// process lifetime. But a transient failure — e.g. the ONNX model file read
+// while a concurrent process was still writing it during a multi-instance
+// restart, or momentary memory pressure — should self-heal: reject the in-flight
+// requests, wait a cooldown, then respawn a FRESH worker (a new init attempt) on
+// the next embed. Only latch permanently after LOCAL_INIT_MAX_ATTEMPTS
+// consecutive failures, or immediately for a cause that will never self-heal
+// (the optional stack being absent).
+const LOCAL_INIT_MAX_ATTEMPTS = 3;
+let localInitFailures = 0;
+/** Epoch ms; `> 0` means "cooling down after a transient init failure — retry a
+ *  fresh worker once `Date.now()` reaches it". Reset to 0 on retry/recovery. */
+let localInitRetryAt = 0;
+let localInitCooldownMs = 30_000;
+
+/** Test seam: shorten the init-retry cooldown so the retry path is drivable
+ *  without real time (`0` → the next availability check retries immediately;
+ *  `null` restores the production default). */
+export function _setLocalInitCooldownMsForTest(ms: number | null): void {
+  localInitCooldownMs = ms ?? 30_000;
+}
+
+/** For tests: reset the local provider probe + transient-retry state. */
 export function _resetLocalProviderProbe(): void {
   localProviderKnownBroken = false;
   localProviderErrorLogged = false;
+  localInitFailures = 0;
+  localInitRetryAt = 0;
 }
 
 /** For tests: simulate the local provider being unavailable, without
@@ -678,6 +704,17 @@ class LocalProvider implements EmbeddingProvider {
             if (pending) {
               this.pendingRequests.delete(msg.id);
               this.updateWorkerRef();
+              // A successful embed means init succeeded — clear any transient
+              // init-failure debt so a future one-off blip gets the full retry
+              // budget again (and re-enables the one-time failure log).
+              if (localInitFailures > 0 || localInitRetryAt > 0) {
+                log.info(
+                  `local embedding provider recovered after ${localInitFailures} failed init attempt(s)`,
+                );
+                localInitFailures = 0;
+                localInitRetryAt = 0;
+                localProviderErrorLogged = false;
+              }
               pending.resolve(msg.vectors);
             }
             break;
@@ -709,14 +746,13 @@ class LocalProvider implements EmbeddingProvider {
             // LocalProviderUnavailableError on all pending + future requests.
             this.workerInitError = msg.error;
             this.workerReady = false;
-            localProviderKnownBroken = true;
-            if (!localProviderErrorLogged) {
-              localProviderErrorLogged = true;
-              // Distinguish "optional local-embedding stack not installed"
-              // (#1026 — an expected, actionable degraded state) from a genuine
-              // init failure. Both latch the provider broken and degrade recall
-              // to FTS-only; only the log severity/message differs.
-              if (isMissingLocalStackError(msg.error)) {
+            if (isMissingLocalStackError(msg.error)) {
+              // Optional local-embedding stack not installed (#1026 — an
+              // expected, actionable degraded state that will NOT self-heal on
+              // its own). Latch permanently; recall degrades to FTS-only.
+              localProviderKnownBroken = true;
+              if (!localProviderErrorLogged) {
+                localProviderErrorLogged = true;
                 log.warn(
                   "local embedding dependencies not installed " +
                     "(optional '@huggingface/transformers' / 'onnxruntime-node' absent) — " +
@@ -724,11 +760,30 @@ class LocalProvider implements EmbeddingProvider {
                     "enable local embeddings, or set search.embeddings.provider in .lore.json " +
                     "to a remote provider (voyage/openai) with the matching API key.",
                 );
+              }
+            } else {
+              // A potentially transient failure (e.g. a model read that raced a
+              // concurrent writer during a multi-instance restart, momentary
+              // memory pressure). Retry a FRESH worker after a cooldown rather
+              // than disabling local embeddings for the whole process lifetime;
+              // only give up (latch) once the retry budget is exhausted.
+              localInitFailures++;
+              if (localInitFailures >= LOCAL_INIT_MAX_ATTEMPTS) {
+                localProviderKnownBroken = true;
+                localInitRetryAt = 0;
+                if (!localProviderErrorLogged) {
+                  localProviderErrorLogged = true;
+                  log.error(
+                    `local embedding provider failed to init after ${localInitFailures} attempts: ${msg.error}. ` +
+                      `Set search.embeddings.provider in .lore.json to use a remote provider.`,
+                    new Error(`embedding worker init failed: ${msg.error}`),
+                  );
+                }
               } else {
-                log.error(
-                  `local embedding provider failed to init: ${msg.error}. ` +
-                    `Set search.embeddings.provider in .lore.json to use a remote provider.`,
-                  new Error(`embedding worker init failed: ${msg.error}`),
+                localInitRetryAt = Date.now() + localInitCooldownMs;
+                log.warn(
+                  `local embedding init failed (attempt ${localInitFailures}/${LOCAL_INIT_MAX_ATTEMPTS}): ${msg.error}. ` +
+                    `Retrying with a fresh worker after a cooldown; recall is FTS-only until then.`,
                 );
               }
             }
@@ -1471,16 +1526,27 @@ export function pickRemoteFallback(): {
 export function isAvailable(): boolean {
   const provider = getProvider();
   if (!provider) return false;
-  if (provider instanceof EmbeddingPool && localProviderKnownUnavailable()) {
-    // One-time log so the user knows why vector search is degraded.
-    if (!localProviderErrorLogged) {
-      localProviderErrorLogged = true;
-      log.info(
-        "local embedding provider unavailable — recall will use FTS-only search. " +
-          "To use a remote provider, set search.embeddings.provider in .lore.json.",
-      );
+  if (provider instanceof EmbeddingPool) {
+    if (localProviderKnownUnavailable()) {
+      // One-time log so the user knows why vector search is degraded.
+      if (!localProviderErrorLogged) {
+        localProviderErrorLogged = true;
+        log.info(
+          "local embedding provider unavailable — recall will use FTS-only search. " +
+            "To use a remote provider, set search.embeddings.provider in .lore.json.",
+        );
+      }
+      return false;
     }
-    return false;
+    if (localInitRetryAt > 0) {
+      // A transient init failure is cooling down before its next retry.
+      if (Date.now() < localInitRetryAt) return false; // FTS-only until then
+      // Cooldown elapsed → discard the failed pool (fire-and-forget shutdown of
+      // its dead worker) so getProvider() spawns a FRESH worker — a new init
+      // attempt — on the next embed.
+      localInitRetryAt = 0;
+      void resetProvider();
+    }
   }
   return true;
 }

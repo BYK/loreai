@@ -305,6 +305,30 @@ export function shouldHealCorruptModel(
   return !isVendored && isCorruptModelError(errorMessage);
 }
 
+/** Minimum plausible size for a real ONNX model file. A truncated/aborted
+ *  download, an empty file, or an HTML error page saved as the model is far
+ *  smaller (the nomic q8 model is ~137 MB). Used to distinguish a genuinely
+ *  corrupt/partial file (safe to purge + re-download) from a transient parse
+ *  failure of an INTACT file (must NOT be destroyed — a failed re-download,
+ *  e.g. offline, would leave us worse off). */
+export const MIN_ONNX_FILE_BYTES = 1024 * 1024; // 1 MiB
+
+/**
+ * True when an on-disk ONNX file looks structurally intact: plausibly sized AND
+ * beginning with the ONNX/protobuf header byte. A serialized ONNX ModelProto
+ * starts with field 1 (`ir_version`), whose protobuf wire tag is `0x08`; a
+ * truncated head, an empty file, or a non-protobuf payload (HTML error page)
+ * fails this. Pure predicate (the worker performs the fs read); extracted for
+ * testability. When this is true a parse failure was almost certainly transient,
+ * so the corrupt-model self-heal must NOT purge the file.
+ */
+export function looksLikeIntactOnnxFile(
+  sizeBytes: number,
+  firstByte: number | undefined,
+): boolean {
+  return sizeBytes >= MIN_ONNX_FILE_BYTES && firstByte === 0x08;
+}
+
 // ---------------------------------------------------------------------------
 // workerData contract
 // ---------------------------------------------------------------------------

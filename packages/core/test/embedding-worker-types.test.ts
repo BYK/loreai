@@ -6,6 +6,8 @@ import {
   isWasmFatalError,
   isCorruptModelError,
   isTransformersInferenceDumpLine,
+  looksLikeIntactOnnxFile,
+  MIN_ONNX_FILE_BYTES,
   resolveModelCacheDir,
   shouldHealCorruptModel,
   TRANSFORMERS_INFERENCE_DUMP_PREFIXES,
@@ -189,6 +191,28 @@ describe("TRANSFORMERS_INFERENCE_DUMP_PREFIXES inline copy stays in sync", () =>
     const workerBody = bodyOf(workerSrc);
     expect(workerBody.length).toBeGreaterThan(0);
     expect(workerBody).toBe(bodyOf(typesSrc));
+  });
+});
+
+describe("looksLikeIntactOnnxFile", () => {
+  const OK = MIN_ONNX_FILE_BYTES + 1;
+
+  test("true for a plausibly-sized file with the ONNX protobuf header (0x08)", () => {
+    // ~137 MB nomic q8 model, first byte 0x08 (field 1 = ir_version).
+    expect(looksLikeIntactOnnxFile(137_296_292, 0x08)).toBe(true);
+    expect(looksLikeIntactOnnxFile(OK, 0x08)).toBe(true);
+  });
+
+  test("false when the file is too small (truncated / empty / error page)", () => {
+    expect(looksLikeIntactOnnxFile(0, 0x08)).toBe(false);
+    expect(looksLikeIntactOnnxFile(MIN_ONNX_FILE_BYTES - 1, 0x08)).toBe(false);
+  });
+
+  test("false when the header byte is not the ONNX protobuf tag", () => {
+    // e.g. an HTML error page ('<' = 0x3c) saved as the model, or a bad head.
+    expect(looksLikeIntactOnnxFile(OK, 0x3c)).toBe(false);
+    expect(looksLikeIntactOnnxFile(OK, 0x00)).toBe(false);
+    expect(looksLikeIntactOnnxFile(OK, undefined)).toBe(false);
   });
 });
 
