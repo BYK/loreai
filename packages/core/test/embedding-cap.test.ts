@@ -8,6 +8,7 @@ import {
   EMBED_TOKEN_CEILING,
   backoffEmbedCap,
   clampEmbedCap,
+  clampFreeToContainerLimit,
   desiredEmbedPoolSize,
   memoryModelEmbedCap,
   reconcileEmbedCap,
@@ -16,6 +17,74 @@ import {
 } from "../src/embedding-cap";
 
 const GB = 1024 * 1024 * 1024;
+const MB = 1024 * 1024;
+
+describe("clampFreeToContainerLimit", () => {
+  it("is a no-op when unconstrained (constrained <= 0)", () => {
+    // process.constrainedMemory() returns 0 on bare metal / VM without a cgroup
+    // limit → host freemem is authoritative, returned unchanged.
+    expect(clampFreeToContainerLimit(7 * GB, 0)).toBe(7 * GB);
+  });
+
+  it("is a no-op for an invalid/unknown limit (NaN, negative)", () => {
+    expect(clampFreeToContainerLimit(7 * GB, Number.NaN)).toBe(7 * GB);
+    expect(clampFreeToContainerLimit(7 * GB, -1)).toBe(7 * GB);
+  });
+
+  it("is a no-op when the container limit is >= host free (roomy container)", () => {
+    // Burak's box: freemem 6.72 GiB under a 12 GiB cgroup cap → returns freemem
+    // unchanged, so every downstream sizing decision is byte-identical.
+    const hostFree = Math.round(6.72 * GB);
+    expect(clampFreeToContainerLimit(hostFree, 12 * GB)).toBe(hostFree);
+  });
+
+  it("clamps to the limit when the container cap is below host free", () => {
+    // Railway: host reports 7 GiB free but the container is capped at 512 MiB.
+    expect(clampFreeToContainerLimit(7 * GB, 512 * MB)).toBe(512 * MB);
+  });
+
+  it("never raises the figure (monotonic — can only reduce memory use)", () => {
+    for (const limit of [0, 256 * MB, 4 * GB, 12 * GB, 128 * GB]) {
+      expect(clampFreeToContainerLimit(6 * GB, limit)).toBeLessThanOrEqual(
+        6 * GB,
+      );
+    }
+  });
+});
+
+describe("cgroup-aware sizing (clamp composed with pool + cap)", () => {
+  it("keeps the pool at 1 on a tiny container even when host free is huge", () => {
+    // Host lies (7 GiB free) but the cgroup cap is 512 MiB — can't fit even one
+    // full per-worker budget, so the pool must stay at the primary worker.
+    const clamped = clampFreeToContainerLimit(7 * GB, 512 * MB);
+    expect(desiredEmbedPoolSize(clamped)).toBe(1);
+    // Non-vacuous: WITHOUT the clamp the host figure would grow the pool to 2.
+    expect(desiredEmbedPoolSize(7 * GB)).toBe(DEFAULT_MAX_EMBED_POOL);
+  });
+
+  it("scales the per-embed token cap down to the floor on a tiny container", () => {
+    // 384 MiB cap: after the ~680 MB baseline there's no room for attention, so
+    // the memory model floors the token cap (bounds the O(L²) allocation) —
+    // the native primary worker self-limits instead of OOM-killing the cgroup.
+    const clamped = clampFreeToContainerLimit(7 * GB, 384 * MB);
+    expect(memoryModelEmbedCap(clamped)).toBe(MIN_EMBED_TOKENS);
+    // Non-vacuous: the unclamped host figure pins the cap at the ceiling.
+    expect(memoryModelEmbedCap(7 * GB)).toBe(EMBED_TOKEN_CEILING);
+  });
+
+  it("does not change sizing on a roomy/constrained host (Burak's box)", () => {
+    // constrainedMemory() = 12 GiB, freemem in the range this box actually sees.
+    // The clamp is the identity, so pool size AND token cap are unchanged.
+    for (const hostFree of [1 * GB, 3 * GB, Math.round(6.72 * GB), 7 * GB]) {
+      const clamped = clampFreeToContainerLimit(hostFree, 12 * GB);
+      expect(clamped).toBe(hostFree);
+      expect(desiredEmbedPoolSize(clamped)).toBe(
+        desiredEmbedPoolSize(hostFree),
+      );
+      expect(memoryModelEmbedCap(clamped)).toBe(memoryModelEmbedCap(hostFree));
+    }
+  });
+});
 
 describe("clampEmbedCap", () => {
   it("clamps below the floor up to MIN_EMBED_TOKENS", () => {

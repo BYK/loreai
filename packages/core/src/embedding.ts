@@ -44,6 +44,7 @@ import {
   PER_WORKER_MEM_BUDGET_BYTES,
   EMBED_POOL_ABS_MAX,
   backoffEmbedCap,
+  clampFreeToContainerLimit,
   desiredEmbedPoolSize,
   memoryModelEmbedCap,
   reconcileEmbedCap,
@@ -131,9 +132,40 @@ function readPersistedEmbedCap(): PersistedEmbedCap | null {
   }
 }
 
+/** Test seam: override `process.constrainedMemory()` for container-aware sizing
+ *  tests (null → use the real value). */
+let testConstrainedMemoryBytes: number | null = null;
+export function _setConstrainedMemoryForTest(bytes: number | null): void {
+  testConstrainedMemoryBytes = bytes;
+}
+
+/** The process's cgroup memory limit in bytes, or `0` if unconstrained / unknown
+ *  / unsupported by the runtime. `process.constrainedMemory()` is libuv-backed
+ *  (cgroup v1 + v2, no hard-coded paths) and returns `0` when unconstrained; it
+ *  is present in both Node (≥18.15) and Bun. Read live — the paths that consume
+ *  it (pool growth, cap init/re-probe) are infrequent, not per-embed. */
+function constrainedMemoryLimit(): number {
+  if (testConstrainedMemoryBytes != null) return testConstrainedMemoryBytes;
+  const fn = (process as { constrainedMemory?: () => number })
+    .constrainedMemory;
+  const v = typeof fn === "function" ? fn() : 0;
+  return Number.isFinite(v) && v > 0 ? v : 0;
+}
+
+/** Container-aware live free memory: `os.freemem()` clamped to the cgroup memory
+ *  limit ({@link clampFreeToContainerLimit}) so no sizing decision trusts
+ *  host-level free memory inside a memory-capped container. A no-op (returns
+ *  `freemem()` unchanged) when unconstrained or when the container limit exceeds
+ *  host-reported free — so behavior on non-containerized / roomy hosts is
+ *  identical to the pre-cgroup path. Use this for every memory-SIZING read;
+ *  telemetry keeps raw `freemem()` so host vs container stays diagnosable. */
+function containerFreeBytes(): number {
+  return clampFreeToContainerLimit(freemem(), constrainedMemoryLimit());
+}
+
 function persistEmbedCap(
   cap: number,
-  freeMemBytes: number = freemem(),
+  freeMemBytes: number = containerFreeBytes(),
   knownBadCap = 0,
 ): void {
   try {
@@ -163,7 +195,7 @@ function persistEmbedCap(
 function computeInitialEmbedCap(
   persisted: PersistedEmbedCap | null = readPersistedEmbedCap(),
 ): number {
-  const free = freemem();
+  const free = containerFreeBytes();
   return reconcileEmbedCap(
     free,
     persisted,
@@ -522,7 +554,7 @@ class LocalProvider implements EmbeddingProvider {
     const persisted = readPersistedEmbedCap();
     this.lastOomCap = persisted?.knownBadCap ?? 0;
     this.maxTokens = computeInitialEmbedCap(persisted);
-    this.capFreememAtLearn = freemem();
+    this.capFreememAtLearn = containerFreeBytes();
   }
 
   /**
@@ -777,7 +809,7 @@ class LocalProvider implements EmbeddingProvider {
     const now = Date.now();
     if (now - this.lastReprobeAt < EMBED_REPROBE_INTERVAL_MS) return;
     this.lastReprobeAt = now;
-    const free = freemem();
+    const free = containerFreeBytes();
     if (!shouldReprobeEmbedCap(free, this.capFreememAtLearn)) return;
     const next = reprobeEmbedCap(this.maxTokens, free, this.lastOomCap);
     if (next <= this.maxTokens) return;
@@ -847,7 +879,7 @@ class LocalProvider implements EmbeddingProvider {
       return;
     }
 
-    const free = freemem();
+    const free = containerFreeBytes();
     const capAfter = backoffEmbedCap(capBefore);
     this.maxTokens = capAfter;
     // Remember the cap that just OOMed so the upward re-probe never climbs back
@@ -1143,9 +1175,14 @@ class EmbeddingPool implements EmbeddingProvider {
     return best;
   }
 
-  /** Free memory for the live per-spawn gate; overridable in tests. */
+  /** Container-aware free memory for the live per-spawn gate: the injected test
+   *  value (or live `freemem()`) clamped to the cgroup limit, so a memory-capped
+   *  container never spawns a second native-ONNX worker off the host's (much
+   *  larger) free figure. Overridable in tests via {@link _setPoolFreememForTest}
+   *  (host free) and {@link _setConstrainedMemoryForTest} (the cgroup limit). */
   private liveFreemem(): number {
-    return testPoolFreememBytes != null ? testPoolFreememBytes : freemem();
+    const raw = testPoolFreememBytes != null ? testPoolFreememBytes : freemem();
+    return clampFreeToContainerLimit(raw, constrainedMemoryLimit());
   }
 
   private spawnSlot(): EmbedSlot {

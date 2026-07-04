@@ -9,6 +9,7 @@ import {
   _resetLocalProviderProbe,
   _restoreProvider,
   _saveAndClearProvider,
+  _setConstrainedMemoryForTest,
   _setEmbedPoolSizeForTest,
   _setPoolFreememForTest,
   _setRecallEmbedsInFlightForTest,
@@ -110,6 +111,10 @@ describe("EmbeddingPool dispatch (#999)", () => {
     delete process.env.VOYAGE_API_KEY;
     delete process.env.OPENAI_API_KEY;
     delete process.env.LORE_EMBED_POOL_SIZE;
+    // Neutralize any real cgroup limit on the CI box so the _setPoolFreememForTest
+    // injections drive the live gate deterministically (the clamp is a no-op at
+    // limit 0). The container-aware test below opts back in explicitly.
+    _setConstrainedMemoryForTest(0);
     _resetLocalProviderProbe();
     savedProvider = _saveAndClearProvider();
   });
@@ -118,6 +123,7 @@ describe("EmbeddingPool dispatch (#999)", () => {
     _setTestWorkerFactory(null);
     _setEmbedPoolSizeForTest(null);
     _setPoolFreememForTest(null);
+    _setConstrainedMemoryForTest(null);
     _setRecallEmbedsInFlightForTest(0); // defensive: don't leak a stuck count
     _resetLocalProviderProbe();
     _restoreProvider(savedProvider);
@@ -181,6 +187,29 @@ describe("EmbeddingPool dispatch (#999)", () => {
     await flush();
 
     // Both requests queue on the one worker rather than loading a second model.
+    expect(fakes).toHaveLength(1);
+    expect(fakes[0].embedIds).toHaveLength(2);
+
+    fakes[0].completeAll();
+    expect(await p1).toHaveLength(1);
+    expect(await p2).toHaveLength(1);
+  });
+
+  it("stays at a single worker when the cgroup limit can't fit a second (container-aware)", async () => {
+    // The regression that OOM-killed Aditya's Railway container: host freemem is
+    // huge (os.freemem() is cgroup-blind) so the old gate would spawn a second
+    // native-ONNX worker and blow past the container's memory.max → SIGKILL.
+    _setEmbedPoolSizeForTest(2); // ceiling allows 2...
+    _setPoolFreememForTest(64 * GB); // ...and the HOST reports ample free...
+    _setConstrainedMemoryForTest(256 * 1024 * 1024); // ...but the container cap is 256 MiB.
+    const fakes = installFakeWorkers();
+
+    const p1 = embed(["alpha"], "query");
+    const p2 = embed(["beta"], "query");
+    await flush();
+
+    // Clamped to 256 MiB (< one per-worker budget), the pool must NOT load a
+    // second model despite the ceiling and the host's 64 GiB free figure.
     expect(fakes).toHaveLength(1);
     expect(fakes[0].embedIds).toHaveLength(2);
 

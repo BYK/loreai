@@ -129,6 +129,33 @@ export function desiredEmbedPoolSize(
   return Math.min(ceiling, affordable);
 }
 
+/**
+ * Clamp host-reported free memory to the container's cgroup memory limit.
+ *
+ * `constrained` is `process.constrainedMemory()` — the cgroup memory limit in
+ * bytes, or `0` when the process is unconstrained (bare metal / VM) or the limit
+ * is unknown. Inside a memory-capped container `os.freemem()` reports the HOST's
+ * free memory (cgroup-blind), which can be many times larger than the container
+ * can actually allocate: the pool then spawns unbounded native-ONNX workers and
+ * sizes over-large token caps, and the cgroup OOM-killer SIGKILLs the process —
+ * uncatchable, so the ×0.7 OOM backoff never fires (the WASM path self-limited
+ * against its fixed 4 GiB heap; native has no such wall). Clamping to the limit
+ * caps every freemem-derived decision at what the container can actually provide.
+ *
+ * No-op whenever the process is unconstrained (`constrained <= 0`) or the limit
+ * is at least the host free figure (roomy container / bare metal): it returns
+ * `hostFree` unchanged, so sizing is byte-identical to the pre-cgroup behavior
+ * except on a container whose limit is below host-reported free. Monotonic — it
+ * can only lower the figure, never raise it, so it never increases memory use.
+ */
+export function clampFreeToContainerLimit(
+  hostFree: number,
+  constrained: number,
+): number {
+  if (!Number.isFinite(constrained) || constrained <= 0) return hostFree;
+  return Math.min(hostFree, constrained);
+}
+
 /** Clamp a raw cap estimate into the valid [MIN, MODEL_MAX] range. */
 export function clampEmbedCap(n: number): number {
   if (!Number.isFinite(n)) return MIN_EMBED_TOKENS;
