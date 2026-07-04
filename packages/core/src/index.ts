@@ -15,6 +15,8 @@ export * as ltm from "./ltm";
 // also need the WebCrypto/Node global should import that from `node:crypto` to avoid
 // shadowing this named import.
 export * as crypto from "./crypto";
+// Stateful, db-backed key store (C-2, #825): account identity, per-scope DEKs, escrow.
+export * as keystore from "./crypto/keystore";
 export * as references from "./references";
 export {
   DirectFsResolver,

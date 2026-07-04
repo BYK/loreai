@@ -1588,6 +1588,62 @@ const MIGRATIONS: string[] = [
     PRIMARY KEY (logical_id, replica_id)
   );
   `,
+
+  `
+  -- Version 64: client-side encryption key store (C-2, epic #821 "C" / #825).
+  -- v1 personal model: ONE per-USER account identity keypair (X25519). Its secret
+  -- lives here in the LOCAL db in the clear — the local db is already the plaintext
+  -- store (conversations, knowledge) protected by the 0600 file mode; encryption
+  -- protects only what is pushed to the REMOTE. The account key is recovered on other
+  -- devices via passphrase escrow (below) — a per-device keypair is a client-only /
+  -- pairing concern deferred to C-5. account_identity is LOCAL-ONLY, never synced.
+  CREATE TABLE IF NOT EXISTS account_identity (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    public_key  BLOB NOT NULL,
+    secret_key  BLOB NOT NULL,
+    created_at  INTEGER NOT NULL
+  );
+
+  -- Escrow: the account secret key wrapped by an Argon2id(passphrase)-derived KEK, so
+  -- any device with the passphrase recovers it. An optional recovery-code wrapping is
+  -- a second, independent unlock path. The kdf_* params + salt are stored so the KEK
+  -- is reproducible. This row is SYNCED to the server in C-3 (it is ciphertext + KDF
+  -- params only — the server never sees the passphrase or the plaintext secret).
+  -- The recovery wrapping carries its OWN kdf params (recovery_kdf_*), independent of
+  -- the passphrase's — otherwise a passphrase change under different params would
+  -- silently invalidate a preserved recovery code (it is derived under its own salt +
+  -- params). recovery_* columns are all NULL until a recovery code is configured.
+  CREATE TABLE IF NOT EXISTS account_escrow (
+    id               INTEGER PRIMARY KEY CHECK (id = 1),
+    wrapped_secret   BLOB NOT NULL,
+    kdf_salt         BLOB NOT NULL,
+    kdf_t            INTEGER NOT NULL,
+    kdf_m            INTEGER NOT NULL,
+    kdf_p            INTEGER NOT NULL,
+    recovery_wrapped BLOB,
+    recovery_salt    BLOB,
+    recovery_kdf_t   INTEGER,
+    recovery_kdf_m   INTEGER,
+    recovery_kdf_p   INTEGER,
+    key_epoch        INTEGER NOT NULL DEFAULT 0,
+    created_at       INTEGER NOT NULL,
+    updated_at       INTEGER NOT NULL DEFAULT 0
+  );
+
+  -- Per-scope data-encryption key (DEK), wrapped (HPKE) to a member's account public
+  -- key. v1 personal: one row per scope, member_user_id = scope_id = the user. Teams
+  -- (E) add one row per member. wrapped_dek is ciphertext → SYNCED in C-3; the DEK
+  -- plaintext is never persisted (unwrapped on demand, cached in memory).
+  CREATE TABLE IF NOT EXISTS scope_keys (
+    scope_id        TEXT NOT NULL,
+    member_user_id  TEXT NOT NULL,
+    wrapped_dek     BLOB NOT NULL,
+    key_epoch       INTEGER NOT NULL DEFAULT 0,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (scope_id, member_user_id)
+  );
+  `,
 ];
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -2676,6 +2732,29 @@ function recoverMissingObjects(database: Database) {
       PRIMARY KEY (logical_id, replica_id)
     );`);
   }
+
+  // Version 64: encryption key store (C-2, #825). All three tables are plain
+  // CREATE IF NOT EXISTS, so recovery is a straight re-create of any that a partial
+  // apply left missing.
+  database.exec(`CREATE TABLE IF NOT EXISTS account_identity (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    public_key BLOB NOT NULL, secret_key BLOB NOT NULL, created_at INTEGER NOT NULL
+  );`);
+  database.exec(`CREATE TABLE IF NOT EXISTS account_escrow (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    wrapped_secret BLOB NOT NULL, kdf_salt BLOB NOT NULL,
+    kdf_t INTEGER NOT NULL, kdf_m INTEGER NOT NULL, kdf_p INTEGER NOT NULL,
+    recovery_wrapped BLOB, recovery_salt BLOB,
+    recovery_kdf_t INTEGER, recovery_kdf_m INTEGER, recovery_kdf_p INTEGER,
+    key_epoch INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL DEFAULT 0
+  );`);
+  database.exec(`CREATE TABLE IF NOT EXISTS scope_keys (
+    scope_id TEXT NOT NULL, member_user_id TEXT NOT NULL,
+    wrapped_dek BLOB NOT NULL, key_epoch INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (scope_id, member_user_id)
+  );`);
 
   // Version 36: session project binding. Recover each column independently in
   // case a partial ALTER (e.g. the first succeeded, the second was skipped on a
