@@ -24,7 +24,11 @@
     "build": "tsx script/build.ts"
   },
   "dependencies": {
+    "@hpke/core": "^1.9.0",
     "@huggingface/hub": "2.11.0",
+    "@noble/ciphers": "^2.2.0",
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^2.2.0",
     "micromark": "^4.0.0",
     "p-limit": "7",
     "remark": "^15.0.1",

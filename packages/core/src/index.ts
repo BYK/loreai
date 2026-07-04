@@ -11,6 +11,10 @@
 
 export * as temporal from "./temporal";
 export * as ltm from "./ltm";
+// Client-side encryption primitives (C, #825). Namespaced `crypto` — consumers that
+// also need the WebCrypto/Node global should import that from `node:crypto` to avoid
+// shadowing this named import.
+export * as crypto from "./crypto";
 export * as references from "./references";
 export {
   DirectFsResolver,
