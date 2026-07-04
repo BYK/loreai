@@ -21,8 +21,9 @@
  * For the auto-mode classifier this produces an unparseable / wrong verdict.
  * After 3 consecutive bad verdicts Claude Code drops auto mode back to
  * prompting for every action — the "auto mode asks for everything behind the
- * Lore proxy" symptom. The fix is to forward these requests upstream verbatim
- * (`handlePassthrough`), never touching session state or memory.
+ * Lore proxy" symptom. The fix is to forward these requests upstream without
+ * any Lore processing (`handlePassthrough`), never touching session state or
+ * memory.
  */
 import { hasBillingHeader } from "./cch";
 import { inferProjectPathDetailed } from "./config";
@@ -30,26 +31,37 @@ import { isClaudeCodeClient } from "./session";
 import type { GatewayRequest } from "./translate/types";
 
 /**
+ * Claude Code's coding system prompt always contains a `Working directory:`
+ * line (verified in the 2.1.x binary). We match the LABEL only — not the path —
+ * so it recognizes a coding turn regardless of the path format, including a
+ * Windows `Working directory: C:\Users\…` that the POSIX-oriented
+ * `inferProjectPathDetailed` heuristic does not treat as authoritative. It is
+ * absent from every `skipSystemPromptPrefix` side-channel call.
+ */
+const CLAUDE_CODE_CWD_MARKER_RE = /(?:^|\n)[ \t]*Working directory:[ \t]*\S/i;
+
+/**
  * True when a system prompt carries the Claude Code CODING prompt — i.e. it
  * belongs to a real conversation turn (the main session OR a subagent), not a
  * side-channel call.
  *
- * Detected by either signal:
+ * Detected by any signal:
  *   1. the anchored OAuth billing header (present whenever
  *      `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1`, which both `lore run` and
  *      `lore setup` set — the standard Lore configuration); or
- *   2. an AUTHORITATIVE workspace inference ("Working directory:" line, a
- *      `cwd` field, or a CLAUDE/AGENTS/.lore.md path). Claude Code always
- *      embeds the working directory in its coding system prompt (verified in
- *      the 2.1.x binary), including for subagent turns, and it is ABSENT from
- *      every `skipSystemPromptPrefix` side-channel call.
+ *   2. a `Working directory:` marker line — Claude Code always embeds it in its
+ *      coding system prompt (including for subagent turns), for any OS; or
+ *   3. an AUTHORITATIVE workspace inference (a `cwd` field or a
+ *      CLAUDE/AGENTS/.lore.md path), a broader heuristic than signal 2.
  *
- * The two signals are OR-combined so a real turn is recognized even in a manual
- * setup that omits the first-party env var (no billing header, but still a
- * working-directory inference).
+ * The signals are OR-combined so a real turn is recognized even in a manual
+ * setup that omits the first-party env var (no billing header), on any platform
+ * (signal 2 does not require a POSIX-style path). A side-channel call carries
+ * none of these.
  */
 export function hasClaudeCodeCodingPrompt(system: string): boolean {
   if (hasBillingHeader(system)) return true;
+  if (CLAUDE_CODE_CWD_MARKER_RE.test(system)) return true;
   return inferProjectPathDetailed(system)?.authoritative === true;
 }
 
@@ -59,11 +71,12 @@ export function hasClaudeCodeCodingPrompt(system: string): boolean {
  *
  * Conservative by construction: it bypasses ONLY requests that (a) originate
  * from Claude Code (carry `x-claude-code-session-id`) AND (b) lack the coding
- * system prompt. A real coding turn always carries a workspace inference (and,
- * in the standard setup, the billing header), so it is never mis-classified as
- * a side-channel. A side-channel that happened to embed a workspace path would
- * merely fall through to the normal pipeline — a safe (memory-only) miss, never
- * a broken conversation.
+ * system prompt (no billing header, no `Working directory:` marker, no
+ * authoritative workspace inference). A real coding turn carries the marker on
+ * every platform, so it is never mis-classified as a side-channel. Conversely,
+ * a side-channel that somehow embedded a coding-prompt signal would merely fall
+ * through to the normal pipeline — a safe (memory-only) miss, never a broken
+ * conversation.
  */
 export function isClaudeCodeSideChannel(req: GatewayRequest): boolean {
   if (!isClaudeCodeClient(req.rawHeaders)) return false;

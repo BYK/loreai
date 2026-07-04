@@ -111,6 +111,16 @@ describe("hasClaudeCodeCodingPrompt", () => {
       ),
     ).toBe(false);
   });
+
+  test("true for a Windows Working directory (backslash path, no billing header)", () => {
+    // The POSIX-oriented path inference does not treat a backslash path as
+    // authoritative, so the `Working directory:` marker must carry it.
+    expect(
+      hasClaudeCodeCodingPrompt(
+        "You are Claude Code.\nWorking directory: C:\\Users\\dev\\project\n",
+      ),
+    ).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -153,6 +163,22 @@ describe("isClaudeCodeSideChannel", () => {
         makeRequest({
           rawHeaders: { ...CC_SESSION_HEADERS },
           system: "You are Claude Code.\nWorking directory: /home/user/project",
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  test("false: Windows coding turn, manual setup (backslash cwd, no billing header)", () => {
+    // Regression: a Windows `Working directory: C:\...` has no POSIX path for the
+    // inference heuristic, and a manual setup omits the billing header — the
+    // `Working directory:` marker must still classify this as a coding turn so
+    // the user's memory is NOT silently disabled.
+    expect(
+      isClaudeCodeSideChannel(
+        makeRequest({
+          rawHeaders: { ...CC_SESSION_HEADERS },
+          system:
+            "You are Claude Code.\nWorking directory: C:\\Users\\dev\\app",
         }),
       ),
     ).toBe(false);
