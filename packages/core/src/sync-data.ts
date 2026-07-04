@@ -27,6 +27,7 @@ import {
   withSyncApplying,
   withTransaction,
 } from "./db";
+import { putWrappedScopeKey } from "./crypto/keystore";
 import { rematerializeConfidence } from "./ltm";
 
 /**
@@ -68,6 +69,15 @@ export interface SyncTableMeta {
    * server-derived or added separately and are NOT listed here.
    */
   syncColumns: string[];
+  /**
+   * Columns holding BLOB (Uint8Array) data locally that must be base64-encoded to
+   * travel over the PostgREST/JSON wire (the remote stores them as `text`). Encoded
+   * on push (toRemoteRow) and decoded back to a Buffer on apply (applyRemoteUpsert /
+   * a custom handler). NULL passes through unchanged. Must be a subset of syncColumns.
+   * (contentHash already base64s Uint8Array via serializeValue, so hashes are stable
+   * across the encode/decode round-trip.)
+   */
+  blobColumns?: string[];
 }
 
 /** ASCII Unit Separator — joins composite row ids (mirrors the SQL `char(31)`). */
@@ -209,6 +219,55 @@ export const SYNCED_TABLES: Record<SyncTier, SyncTableMeta[]> = {
       ftsTables: [],
       versioned: false, // join table has no content_hash/revision columns
       syncColumns: ["knowledge_id", "entity_id"],
+    },
+    {
+      // Encryption escrow (C-3, #825): the account secret wrapped by a passphrase
+      // KEK (+ optional recovery), so a fresh device recovers the SAME account key.
+      // Single-row locally (id=1); the remote is one row per user, keyed (scope_id,
+      // id). All payload is ciphertext + KDF params — the server never sees plaintext.
+      // Read-write (LWW: the latest passphrase-set wins). BLOB columns travel base64.
+      table: "account_escrow",
+      idColumns: ["id"],
+      ftsTables: [],
+      syncColumns: [
+        "id",
+        "wrapped_secret",
+        "kdf_salt",
+        "kdf_t",
+        "kdf_m",
+        "kdf_p",
+        "recovery_wrapped",
+        "recovery_salt",
+        "recovery_kdf_t",
+        "recovery_kdf_m",
+        "recovery_kdf_p",
+        "key_epoch",
+        // created_at is NOT NULL locally with no default, so it must ride along for
+        // the generic pull INSERT (applyRemoteUpsert). It is stable per row, so both
+        // devices converge on the creator's value (no hash churn).
+        "created_at",
+        "updated_at",
+      ],
+      blobColumns: [
+        "wrapped_secret",
+        "kdf_salt",
+        "recovery_wrapped",
+        "recovery_salt",
+      ],
+    },
+    {
+      // Per-scope DEK wrapped (HPKE) to a member's account key (C-3, #825). v1
+      // personal: local scope_id == member_user_id == auth.uid(), and the remote's
+      // server-derived scope_id IS the encryption scope — so the local `scope_id`
+      // column is NOT synced (idColumns is member_user_id only) and is reconstructed
+      // from remote.scope_id by the custom applyRemoteScopeKey (the generic
+      // stripSyncCols would drop it, leaving the NOT-NULL local column unfilled).
+      // wrapped_dek is ciphertext → base64 on the wire.
+      table: "scope_keys",
+      idColumns: ["member_user_id"],
+      ftsTables: [],
+      syncColumns: ["member_user_id", "wrapped_dek", "key_epoch", "updated_at"],
+      blobColumns: ["wrapped_dek"],
     },
     {
       // Pull-only mirror of the server-authoritative account row. The client
@@ -741,11 +800,30 @@ export function clearSyncState(table: string, rowId: string): void {
  * raises a constraint error rather than silently deleting the other row — the
  * engine catches it and records a conflict.
  */
+/**
+ * Decode a table's base64 blobColumns (string→Buffer) in-place for a pulled row, so
+ * they bind as SQLite BLOBs. NULL/absent pass through. Inverse of the push-side
+ * base64 encode in toRemoteRow. No-op for tables without blobColumns.
+ */
+export function decodeBlobColumns(
+  table: string,
+  row: Record<string, unknown>,
+): Record<string, unknown> {
+  const blobs = meta(table).blobColumns;
+  if (!blobs || blobs.length === 0) return row;
+  for (const c of blobs) {
+    const v = row[c];
+    if (typeof v === "string") row[c] = Buffer.from(v, "base64");
+  }
+  return row;
+}
+
 export function applyRemoteUpsert(
   table: string,
   row: Record<string, unknown>,
 ): void {
   const m = meta(table);
+  decodeBlobColumns(table, row);
   const cols = columns(table).filter(
     (c) => !PAYLOAD_EXCLUDE.has(c) && c in row,
   );
@@ -800,6 +878,29 @@ export function applyRemoteMeta(row: Record<string, unknown>): void {
       .run(logicalId, base, base, Number(row.updated_at ?? 0));
     rematerializeConfidence(logicalId, Date.now());
   });
+}
+
+/**
+ * Apply a pulled `scope_keys` row (C-3, #825). The local table's NOT-NULL
+ * `scope_id` is the encryption scope, which the generic `stripSyncCols` would drop —
+ * so this custom handler reconstructs it from the remote's `scope_id` axis (v1: ==
+ * the puller's own auth.uid()), base64-decodes the wrapped DEK, and upserts via the
+ * keystore (which invalidates its in-memory DEK cache for the scope). Runs under
+ * apply-suppression so the pulled row is not re-enqueued for push. Takes the FULL
+ * remote row (not stripped) because it needs `scope_id`.
+ */
+export function applyRemoteScopeKey(remote: Record<string, unknown>): void {
+  const scopeId = String(remote.scope_id);
+  const memberUserId = String(remote.member_user_id);
+  const wrapped =
+    typeof remote.wrapped_dek === "string"
+      ? new Uint8Array(Buffer.from(remote.wrapped_dek, "base64"))
+      : new Uint8Array(remote.wrapped_dek as Uint8Array);
+  const keyEpoch = Number(remote.key_epoch ?? 0);
+  const updatedAt = Date.parse(String(remote.updated_at ?? "")) || Date.now();
+  withApplying(() =>
+    putWrappedScopeKey(scopeId, memberUserId, wrapped, keyEpoch, updatedAt),
+  );
 }
 
 /**

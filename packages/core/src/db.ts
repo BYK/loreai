@@ -2318,6 +2318,34 @@ function installSyncCapture(database: Database) {
       INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
       VALUES ('knowledge_meta_crdt', new.logical_id || char(31) || new.replica_id, 'upsert', ${ts});
     END;`;
+  // C-3 (#825): encryption key store. account_escrow is single-row (keyed by id=1);
+  // scope_keys is keyed by member_user_id (v1: one scope per user). INSERT + UPDATE
+  // (set/rotate the wrapping); no DELETE (keys/escrow are not deleted in v1).
+  sql += `
+    CREATE TEMP TRIGGER IF NOT EXISTS account_escrow_outbox_ins
+    AFTER INSERT ON account_escrow WHEN (${gate})
+    BEGIN
+      INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
+      VALUES ('account_escrow', new.id, 'upsert', ${ts});
+    END;
+    CREATE TEMP TRIGGER IF NOT EXISTS account_escrow_outbox_upd
+    AFTER UPDATE ON account_escrow WHEN (${gate})
+    BEGIN
+      INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
+      VALUES ('account_escrow', new.id, 'upsert', ${ts});
+    END;
+    CREATE TEMP TRIGGER IF NOT EXISTS scope_keys_outbox_ins
+    AFTER INSERT ON scope_keys WHEN (${gate})
+    BEGIN
+      INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
+      VALUES ('scope_keys', new.member_user_id, 'upsert', ${ts});
+    END;
+    CREATE TEMP TRIGGER IF NOT EXISTS scope_keys_outbox_upd
+    AFTER UPDATE ON scope_keys WHEN (${gate})
+    BEGIN
+      INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
+      VALUES ('scope_keys', new.member_user_id, 'upsert', ${ts});
+    END;`;
   database.exec(sql);
 }
 

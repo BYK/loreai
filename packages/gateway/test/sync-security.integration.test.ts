@@ -21,6 +21,8 @@ const FREE_LIMITS: Record<string, number> = {
   knowledge_entity_refs: 2000,
   knowledge_meta: 500,
   knowledge_meta_crdt: 5000,
+  account_escrow: 2,
+  scope_keys: 100,
 };
 
 // Mirrors the free-tier max_bytes seeded in 0007_scope_seam.sql + 0009 — used to
@@ -33,6 +35,8 @@ const FREE_BYTE_LIMITS: Record<string, number> = {
   knowledge_entity_refs: 1048576,
   knowledge_meta: 524288,
   knowledge_meta_crdt: 1048576,
+  account_escrow: 65536,
+  scope_keys: 262144,
 };
 
 // Skip decision must be known at COLLECTION time (before beforeAll), so the
@@ -150,6 +154,130 @@ describe.skipIf(gate())(
         h.asAnon((c) => c.query("select * from public.knowledge")),
       );
       expect(err.code).toBe("42501"); // no grant to anon
+    });
+  },
+);
+
+describe.skipIf(gate())(
+  "sync migrations — encryption key store (C-3, #825)",
+  () => {
+    const insEscrow = (user: string, scope: string, author?: string) =>
+      h.asUser(user, (c) =>
+        c.query(
+          `insert into public.account_escrow
+           (id, scope_id, author_id, wrapped_secret, kdf_salt, kdf_t, kdf_m, kdf_p)
+         values (1, $1, $2, 'd2VyYXBwZWQ=', 'c2FsdA==', 3, 65536, 1)`,
+          [scope, author ?? scope],
+        ),
+      );
+    const insKey = (
+      user: string,
+      scope: string,
+      member: string,
+      author?: string,
+    ) =>
+      h.asUser(user, (c) =>
+        c.query(
+          `insert into public.scope_keys
+           (member_user_id, scope_id, author_id, wrapped_dek)
+         values ($1, $2, $3, 'd3JhcHBlZERFSw==')`,
+          [member, scope, author ?? scope],
+        ),
+      );
+
+    it("a user cannot read another user's escrow or scope keys (RLS)", async () => {
+      const a = await h.createUser();
+      const b = await h.createUser();
+      await insEscrow(a, a);
+      await insKey(a, a, a);
+      const escrow = await h.asUser(b, (c) =>
+        c.query("select id from public.account_escrow").then((r) => r.rows),
+      );
+      const keys = await h.asUser(b, (c) =>
+        c
+          .query("select member_user_id from public.scope_keys")
+          .then((r) => r.rows),
+      );
+      expect(escrow).toHaveLength(0);
+      expect(keys).toHaveLength(0);
+    });
+
+    it("a user cannot forge scope_id or author_id on the key tables (WITH CHECK)", async () => {
+      const a = await h.createUser();
+      const victim = await h.createUser();
+      expect((await expectError(() => insEscrow(a, victim))).code).toBe(
+        "42501",
+      );
+      expect((await expectError(() => insEscrow(a, a, victim))).code).toBe(
+        "42501",
+      );
+      expect((await expectError(() => insKey(a, victim, a))).code).toBe(
+        "42501",
+      );
+      expect((await expectError(() => insKey(a, a, a, victim))).code).toBe(
+        "42501",
+      );
+    });
+
+    it("scope_id is immutable on the key tables", async () => {
+      const a = await h.createUser();
+      const victim = await h.createUser();
+      await insEscrow(a, a);
+      const err = await expectError(() =>
+        h.asUser(a, (c) =>
+          c.query("update public.account_escrow set scope_id=$1 where id=1", [
+            victim,
+          ]),
+        ),
+      );
+      expect(err.code).toBe("23514");
+    });
+
+    it("account_escrow is single-row per user (CHECK id=1)", async () => {
+      const a = await h.createUser();
+      await insEscrow(a, a);
+      const err = await expectError(() =>
+        h.asUser(a, (c) =>
+          c.query(
+            `insert into public.account_escrow (id, scope_id, wrapped_secret, kdf_salt, kdf_t, kdf_m, kdf_p)
+           values (2, $1, 'eA==', 'eA==', 3, 65536, 1)`,
+            [a],
+          ),
+        ),
+      );
+      expect(err.code).toBe("23514"); // account_escrow_size_ck (id = 1)
+    });
+
+    it("rejects an oversized wrapped blob (size CHECK bounds a direct client)", async () => {
+      const a = await h.createUser();
+      const huge = "A".repeat(5000); // > 4096 cap
+      const err = await expectError(() =>
+        h.asUser(a, (c) =>
+          c.query(
+            `insert into public.scope_keys (member_user_id, scope_id, wrapped_dek)
+           values ($1, $2, $3)`,
+            [a, a, huge],
+          ),
+        ),
+      );
+      expect(err.code).toBe("23514"); // scope_keys_size_ck
+    });
+
+    it("anon has no access to the key tables", async () => {
+      expect(
+        (
+          await expectError(() =>
+            h.asAnon((c) => c.query("select * from public.account_escrow")),
+          )
+        ).code,
+      ).toBe("42501");
+      expect(
+        (
+          await expectError(() =>
+            h.asAnon((c) => c.query("select * from public.scope_keys")),
+          )
+        ).code,
+      ).toBe("42501");
     });
   },
 );
@@ -487,6 +615,50 @@ describe.skipIf(gate())("sync migrations — quota + anti-abuse", () => {
     await ins("k1", "rB"); // same logical_id, different replica → distinct row
     const err = await expectError(() => ins("k2", "rA"));
     expect(err.code).toBe("23514");
+    expect(err.message).toMatch(/quota exceeded/i);
+  });
+
+  it("re-upserting account_escrow is an UPDATE, not new growth (id::int key probe, C-3)", async () => {
+    // account_escrow is single-row (id=1). At a row cap of 1, an ON CONFLICT upsert of
+    // the SAME (scope,id) must be recognized by the id::int probe as existing and defer
+    // to the UPDATE path (no new-row count) — NOT raise 42703/42883 (a broken/text id
+    // probe) nor a false quota error.
+    const a = await h.createUser();
+    await setCap("account_escrow", 1);
+    await h.asUser(a, (c) =>
+      c.query(
+        `insert into public.account_escrow (id, scope_id, wrapped_secret, kdf_salt, kdf_t, kdf_m, kdf_p)
+         values (1, $1, 'dg==', 'cw==', 3, 65536, 1)`,
+        [a],
+      ),
+    );
+    const r = await h.asUser(a, (c) =>
+      c.query(
+        `insert into public.account_escrow (id, scope_id, wrapped_secret, kdf_salt, kdf_t, kdf_m, kdf_p)
+         values (1, $1, 'dmVyMg==', 'cw==', 3, 65536, 1)
+         on conflict (scope_id, id) do update set wrapped_secret = excluded.wrapped_secret`,
+        [a],
+      ),
+    );
+    expect(r.rowCount).toBe(1); // upsert resolved to UPDATE, quota not tripped
+    const u = await usage(a, "account_escrow");
+    expect(Number(u.row_count)).toBe(1); // still one physical row
+  });
+
+  it("caps scope_keys inserts at the free-tier row cap (member_user_id key probe, C-3)", async () => {
+    const a = await h.createUser();
+    await setCap("scope_keys", 2);
+    const ins = (member: string) =>
+      h.asUser(a, (c) =>
+        c.query(
+          "insert into public.scope_keys (member_user_id, scope_id, wrapped_dek) values ($1,$2,'d2s=')",
+          [member, a],
+        ),
+      );
+    await ins("m-1");
+    await ins("m-2");
+    const err = await expectError(() => ins("m-3"));
+    expect(err.code).toBe("23514"); // quota, NOT 42703 (undefined_column)
     expect(err.message).toMatch(/quota exceeded/i);
   });
 

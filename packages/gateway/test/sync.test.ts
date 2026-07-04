@@ -6,7 +6,7 @@ import {
   setKV,
   deleteTeamConfig,
 } from "@loreai/core";
-import { ltm, log, syncData } from "@loreai/core";
+import { ltm, log, keystore, syncData } from "@loreai/core";
 
 // --- Fake Supabase client ----------------------------------------------------
 // In-memory per-table store with the PostgREST surface the engine uses, PLUS
@@ -92,7 +92,37 @@ const REMOTE_COLUMNS: Record<string, Set<string>> = {
     "created_at",
     "updated_at",
   ]),
+  account_escrow: new Set([
+    "id",
+    "wrapped_secret",
+    "kdf_salt",
+    "kdf_t",
+    "kdf_m",
+    "kdf_p",
+    "recovery_wrapped",
+    "recovery_salt",
+    "recovery_kdf_t",
+    "recovery_kdf_m",
+    "recovery_kdf_p",
+    "key_epoch",
+    "created_at",
+    "updated_at",
+    ...SYNC_COLS,
+  ]),
+  scope_keys: new Set([
+    "member_user_id",
+    "wrapped_dek",
+    "key_epoch",
+    "created_at",
+    "updated_at",
+    ...SYNC_COLS,
+  ]),
 };
+
+// The server defaults scope_id/author_id to auth.uid() — simulate a single fixed
+// authed user so pulled rows carry a scope_id (applyRemoteScopeKey reads it). Faithful
+// and harmless for existing tables (applyRemote strips scope_id before local apply).
+const REMOTE_SCOPE = "00000000-0000-4000-8000-000000000001";
 
 function makeClient() {
   return {
@@ -144,7 +174,12 @@ function makeClient() {
           const i = rows.findIndex((r) =>
             idc.every((c) => r[c] === payload[c]),
           );
-          const stamped = { ...payload, updated_at: nextTs() } as RemoteRow;
+          const stamped = {
+            scope_id: REMOTE_SCOPE,
+            author_id: REMOTE_SCOPE,
+            ...payload,
+            updated_at: nextTs(),
+          } as RemoteRow;
           if (i >= 0) rows[i] = stamped;
           else rows.push(stamped);
           return Promise.resolve({ error: null });
@@ -300,6 +335,12 @@ beforeEach(() => {
   db().exec("DELETE FROM knowledge_meta_crdt");
   db().exec("DELETE FROM entities");
   db().exec("DELETE FROM profiles");
+  // C-3 encryption key store (#825): clear the key tables + in-memory keystore
+  // caches between tests.
+  db().exec("DELETE FROM account_identity");
+  db().exec("DELETE FROM account_escrow");
+  db().exec("DELETE FROM scope_keys");
+  keystore.lock();
   db().exec("DELETE FROM sync_outbox");
   db().exec("DELETE FROM sync_state");
   db().exec("DELETE FROM sync_conflicts");
@@ -310,6 +351,8 @@ beforeEach(() => {
     "entity_relations",
     "knowledge_entity_refs",
     "profiles",
+    "account_escrow",
+    "scope_keys",
   ]) {
     setKV(`sync.push.${t}`, "0");
     setKV(`sync.pull.${t}`, "0|");
@@ -1029,5 +1072,72 @@ describe("knowledge_meta register sync (A2 3b-2)", () => {
       syncData.readOutbox(0).filter((e) => e.table_name === "knowledge_meta")
         .length,
     ).toBe(0);
+  });
+});
+
+describe("encryption key store — C-3 (#825)", () => {
+  // v1 invariant: the local encryption scope IS the user, so getScopeKey is called
+  // with the user id (== the server-derived scope_id). Use REMOTE_SCOPE as that id so
+  // a pulled scope_keys row reconstructs a scope_id matching the local getScopeKey arg.
+  const SCOPE = REMOTE_SCOPE;
+
+  test("push base64-encodes BLOB columns for the wire (never a raw Buffer)", async () => {
+    syncData.enableSync("basic");
+    keystore.setPassphrase("pw", { params: { t: 1, m: 256, p: 1 } });
+    await keystore.getScopeKey(SCOPE, SCOPE);
+    await pushOnce(makeClient() as never);
+
+    const escrow = tableRows("account_escrow")[0];
+    expect(typeof escrow.wrapped_secret).toBe("string"); // base64, not a Buffer/object
+    expect(typeof escrow.kdf_salt).toBe("string");
+    expect(escrow.scope_id).toBe(REMOTE_SCOPE); // server-derived
+    const sk = tableRows("scope_keys")[0];
+    expect(typeof sk.wrapped_dek).toBe("string");
+    expect(sk.member_user_id).toBe(SCOPE);
+  });
+
+  test("a fresh device pulls escrow + scope_keys, unlocks, and unwraps the SAME DEK", async () => {
+    syncData.enableSync("basic");
+    // device 1
+    const id1 = keystore.getAccountIdentity();
+    const dek1 = await keystore.getScopeKey(SCOPE, SCOPE);
+    keystore.setPassphrase("hunter2", { params: { t: 1, m: 256, p: 1 } });
+    await pushOnce(makeClient() as never);
+
+    // simulate a fresh device 2 that shares the remote: wipe all local key state +
+    // sync_state, reset the pull cursors, then pull.
+    db().exec("DELETE FROM account_identity");
+    db().exec("DELETE FROM account_escrow");
+    db().exec("DELETE FROM scope_keys");
+    db().exec("DELETE FROM sync_state");
+    keystore.lock();
+    for (const t of ["account_escrow", "scope_keys"])
+      setKV(`sync.pull.${t}`, "0|");
+
+    await pullOnce(makeClient() as never);
+
+    // locked (escrow present, no identity) → unlock → recovers the SAME identity + DEK
+    expect(keystore.hasAccountIdentity()).toBe(false);
+    expect(keystore.unlockWithPassphrase("hunter2")).toBe(true);
+    expect(
+      Buffer.from(keystore.getAccountIdentity().secretKey).equals(
+        Buffer.from(id1.secretKey),
+      ),
+    ).toBe(true);
+    const dek2 = await keystore.getScopeKey(SCOPE, SCOPE);
+    expect(Buffer.from(dek2).equals(Buffer.from(dek1))).toBe(true);
+  });
+
+  test("account_escrow / scope_keys advance their push cursors (never wedge the prune floor)", async () => {
+    syncData.enableSync("basic");
+    keystore.setPassphrase("pw", { params: { t: 1, m: 256, p: 1 } });
+    await keystore.getScopeKey(SCOPE, SCOPE);
+    const r = await pushOnce(makeClient() as never);
+    expect(r.pushed).toBeGreaterThan(0);
+    // The push consumed both tables' outbox entries by advancing their per-table
+    // cursors (entries are pruned later against the min cursor). A non-advancing
+    // cursor is the #828 prune-floor wedge — assert both moved off 0.
+    expect(Number(getKV("sync.push.account_escrow") ?? "0")).toBeGreaterThan(0);
+    expect(Number(getKV("sync.push.scope_keys") ?? "0")).toBeGreaterThan(0);
   });
 });

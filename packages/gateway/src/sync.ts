@@ -241,7 +241,7 @@ async function pushEntry(
   // Only the synced data columns (the remote 0002 contract) — never local-only
   // columns like knowledge.promoted_at, which the remote rejects (PGRST204).
   const payload: Record<string, unknown> = {
-    ...toRemoteRow(syncData.pickSyncColumns(table, row)),
+    ...toRemoteRow(table, syncData.pickSyncColumns(table, row)),
     is_deleted: false,
   };
   // Only versioned tables have content_hash/revision columns remotely; sending
@@ -552,6 +552,10 @@ function applyRemote(
       // A2 3b-2: upsert the immutable base_confidence + re-materialize confidence
       // (the materialized value & local decay clock are never overwritten by pull).
       syncData.applyRemoteMeta(stripSyncCols(remote));
+    } else if (meta.table === "scope_keys") {
+      // C-3 (#825): pass the FULL remote row — the handler reconstructs the local
+      // NOT-NULL scope_id from remote.scope_id (stripSyncCols would drop it).
+      syncData.applyRemoteScopeKey(remote);
     } else {
       syncData.applyRemoteUpsert(meta.table, stripSyncCols(remote));
     }
@@ -680,12 +684,21 @@ function stripSyncCols(
  * raises 22008 (out of range) and would fail every upsert. Symmetric inverse of
  * stripSyncCols.
  */
-function toRemoteRow(row: Record<string, unknown>): Record<string, unknown> {
+function toRemoteRow(
+  table: string,
+  row: Record<string, unknown>,
+): Record<string, unknown> {
   const out: Record<string, unknown> = { ...row };
   for (const k of TS_COLS) {
     if (typeof out[k] === "number") {
       out[k] = new Date(out[k] as number).toISOString();
     }
+  }
+  // Base64-encode BLOB columns for the PostgREST/JSON wire (remote stores `text`).
+  // A Buffer/Uint8Array becomes a base64 string; NULL/absent pass through.
+  for (const c of tableMeta(table).blobColumns ?? []) {
+    const v = out[c];
+    if (v instanceof Uint8Array) out[c] = Buffer.from(v).toString("base64");
   }
   return out;
 }
