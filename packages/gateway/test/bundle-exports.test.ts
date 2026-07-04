@@ -7,25 +7,108 @@
  * - The imported module exports the expected public API
  *
  * Requires the bundle (`pnpm --filter @loreai/gateway run bundle`) to have
- * been built. The root `pretest` script runs the bundle automatically before
- * `pnpm test`, so this test runs in every environment (local + CI). The
- * skipIf guard is defensive — it should never trigger in normal use, but
- * ensures a missing bundle is reported as a skip rather than a confusing
- * file-not-found assertion failure.
+ * been built AND to be up to date with its sources. The root `pretest` script
+ * rebuilds the bundle before `pnpm test`, so it is always fresh there (local +
+ * CI). The skip guard is defensive — it should never trigger under `pnpm test`.
+ *
+ * Two conditions cause a skip (a skip, never a confusing assertion failure):
+ *
+ *  1. MISSING bundle — a dev checkout that only ran `pnpm install` has the
+ *     `index.bun.js` dev shim but no `index.cjs`, so there is nothing to check.
+ *
+ *  2. STALE bundle — `dist/` is older than the sources it is built from. This
+ *     is the trap behind "bundle-export tests are failing on latest main":
+ *     `pretest` only runs for `pnpm test`, NOT for `vitest --watch`, IDE test
+ *     runners, or a direct `vitest run`. After pulling a change to the bundle's
+ *     inputs (e.g. #1027 inlining @loreai/core) WITHOUT rebuilding, those launch
+ *     paths assert against a stale artifact that no longer reflects source — a
+ *     false failure. Treat a stale bundle like a missing one and point the dev
+ *     at `pnpm --filter @loreai/gateway run bundle`.
+ *
+ * This never weakens CI: `pretest` writes the bundle AFTER checkout/build/
+ * typecheck/lint (the last write before vitest), so the artifact mtime is
+ * always newer than every source there — CI is never stale and always runs the
+ * checks strictly.
  */
 import { describe, test, expect } from "vitest";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const packageDir = join(fileURLToPath(import.meta.url), "..", "..");
 const distDir = join(packageDir, "dist");
+const coreSrcDir = join(packageDir, "..", "core", "src");
 const pkgJson = JSON.parse(
   readFileSync(join(packageDir, "package.json"), "utf8"),
 );
-const hasBundle = existsSync(join(distDir, "index.cjs"));
 
-describe.skipIf(!hasBundle)("bundle exports", () => {
+const cjsBundlePath = join(distDir, "index.cjs");
+const bunBundlePath = join(distDir, "index.bun.js");
+const hasBundle = existsSync(cjsBundlePath);
+
+/** Newest mtime (ms) across the given files/directories; dirs walk recursively.
+ *  Unreadable paths are skipped so a broken symlink can't crash the suite. */
+function newestMtimeMs(roots: string[]): number {
+  let newest = 0;
+  const stack = [...roots];
+  while (stack.length > 0) {
+    const p = stack.pop() as string;
+    let st: ReturnType<typeof statSync>;
+    try {
+      st = statSync(p);
+    } catch {
+      continue;
+    }
+    if (st.isDirectory()) {
+      for (const entry of readdirSync(p)) stack.push(join(p, entry));
+    } else if (st.mtimeMs > newest) {
+      newest = st.mtimeMs;
+    }
+  }
+  return newest;
+}
+
+/** Oldest mtime (ms) across the given files; a missing file counts as 0 (stale). */
+function oldestMtimeMs(files: string[]): number {
+  let oldest = Number.POSITIVE_INFINITY;
+  for (const f of files) {
+    try {
+      oldest = Math.min(oldest, statSync(f).mtimeMs);
+    } catch {
+      return 0;
+    }
+  }
+  return Number.isFinite(oldest) ? oldest : 0;
+}
+
+// The bundle inlines gateway/src + core/src; bundle.ts is its build config and
+// package.json drives the files/exports/deps assertions. If any of these is
+// newer than the built artifacts, the artifacts predate the current source.
+const newestSourceMtime = hasBundle
+  ? newestMtimeMs([
+      join(packageDir, "src"),
+      coreSrcDir,
+      join(packageDir, "script", "bundle.ts"),
+      join(packageDir, "package.json"),
+    ])
+  : 0;
+const oldestArtifactMtime = hasBundle
+  ? oldestMtimeMs([cjsBundlePath, bunBundlePath])
+  : 0;
+const bundleStale = hasBundle && newestSourceMtime > oldestArtifactMtime;
+
+if (bundleStale) {
+  console.warn(
+    "[bundle-exports] dist/ bundle is older than its sources — skipping " +
+      "bundle-content checks. Run `pnpm --filter @loreai/gateway run bundle` " +
+      "to refresh it (the root `pretest` hook does this automatically under " +
+      "`pnpm test`).",
+  );
+}
+
+const bundleReady = hasBundle && !bundleStale;
+
+describe.skipIf(!bundleReady)("bundle exports", () => {
   // -------------------------------------------------------------------------
   // Layer 1: Static content checks
   // -------------------------------------------------------------------------
