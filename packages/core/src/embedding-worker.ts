@@ -57,6 +57,15 @@ const stderrSilenced = init.stderrSilenced ?? false;
 const maxTokens = init.maxTokens ?? 2048;
 
 /**
+ * Cgroup-CPU-aware intra-op thread count for native ONNX Runtime, or `undefined`
+ * to leave ORT's own (host-core-sized) default. Computed on the main thread via
+ * `nativeIntraOpThreads()` and passed in — the worker runs as raw .ts and can't
+ * value-import `ort-native` (see the classifier note below). Applied on the
+ * native path only; WASM is already forced single-thread via env.
+ */
+const intraOpThreads = init.intraOpThreads;
+
+/**
  * Worker exit code signalling an input-size-driven ONNX OOM that the main
  * thread recovers from by respawning at a lower token cap (fresh WASM heap).
  * Inlined here — kept in sync with embedding-worker-types.ts — because the
@@ -338,22 +347,19 @@ async function loadPipeline(): Promise<void> {
   // backend (API-compatible).
   // Native ORT sizes its intra-op thread pool to the HOST core count, which is
   // cgroup-CPU-blind — a CPU-quota'd container oversubscribes (one memory arena
-  // per thread → RSS inflation). Cap it to the cgroup-aware parallelism on the
-  // native path only (WASM is already forced single-thread via env above). A
-  // strict no-op on unconstrained hosts (see nativeIntraOpThreads). `globals`
-  // (captured above) only carries __LORE_NPM_WASM_PATHS__ when the npm bundle
-  // fell back to WASM; every other path (SEA vendorModel, native binding,
-  // dev/test) is native onnxruntime-node.
+  // per thread → RSS inflation). The main thread computed the cgroup-aware cap
+  // (nativeIntraOpThreads() → WorkerInitData.intraOpThreads; the worker runs as
+  // raw .ts and can't value-import ort-native — see maxTokens above), a strict
+  // no-op on unconstrained hosts. Apply it on the native path only — WASM is
+  // already forced single-thread via env above; `globals` (captured above) only
+  // carries __LORE_NPM_WASM_PATHS__ when the npm bundle fell back to WASM, so
+  // every other path (SEA vendorModel, native binding, dev/test) is native.
   const pipelineOptions: Record<string, unknown> = {
     dtype: "q8",
     device: "cpu",
   };
-  if (!globals.__LORE_NPM_WASM_PATHS__) {
-    const { nativeIntraOpThreads } = await import("./ort-native");
-    const intraOpNumThreads = nativeIntraOpThreads();
-    if (intraOpNumThreads !== undefined) {
-      pipelineOptions.session_options = { intraOpNumThreads };
-    }
+  if (intraOpThreads !== undefined && !globals.__LORE_NPM_WASM_PATHS__) {
+    pipelineOptions.session_options = { intraOpNumThreads: intraOpThreads };
   }
   pipe = (await pipeline(
     "feature-extraction",

@@ -324,6 +324,14 @@ export interface WorkerInitData {
    *  bounds the O(L²) attention allocation and keeps a constrained host out of
    *  swap. */
   maxTokens: number;
+  /** Intra-op thread count for native ONNX Runtime, or `undefined` to leave
+   *  ORT's own (host-core-sized) default in place. Computed on the main thread
+   *  via `nativeIntraOpThreads()` (the worker runs as raw .ts and can't
+   *  value-import `ort-native` — same constraint as the stderr-silence flag
+   *  below): caps intra-op threads to the cgroup CPU quota only when the process
+   *  is genuinely CPU-restricted, else `undefined` (a strict no-op). The worker
+   *  applies it on the native path only; WASM is already single-threaded. */
+  intraOpThreads?: number;
   /** Vendored model info for binary mode, or null for npm mode.
    *  In binary mode, model files are pre-extracted to a local dir
    *  and we point transformers.js at that path instead of downloading

@@ -38,6 +38,7 @@ import * as log from "./log";
 import { recordVecReadLatency } from "./vec-latency";
 import { buildEmbeddingText, buildEmbeddingUnits } from "./embedding-units";
 import { vendorModelInfo } from "./embedding-vendor";
+import { nativeIntraOpThreads } from "./ort-native";
 import {
   MIN_EMBED_TOKENS,
   MODEL_MAX_TOKENS,
@@ -605,6 +606,10 @@ class LocalProvider implements EmbeddingProvider {
         modelId: this.modelId,
         dimensions: this.dimensions,
         maxTokens: this.maxTokens,
+        // Cgroup-CPU-aware native ORT intra-op cap, computed here on the main
+        // thread (the worker can't value-import ort-native). undefined = no-op
+        // (unconstrained host); applied on the native path only in the worker.
+        intraOpThreads: nativeIntraOpThreads(),
         vendorModel: vendor ? { localModelPath: vendor.localModelPath } : null,
         // Snapshot the host's silence state — the worker's own `globalThis`
         // can't see the main thread's flag (re-read on every OOM respawn).
