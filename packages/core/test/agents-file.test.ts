@@ -33,6 +33,10 @@ import {
   loreFileExists,
   clearLoreFileCache,
   parseEntriesFromSection,
+  resolveAgentsFileName,
+  otherAgentsFileCandidate,
+  AUTO_AGENTS_FILE,
+  AGENTS_FILE_CANDIDATES,
 } from "../src/agents-file";
 import { load } from "../src/config";
 
@@ -1836,5 +1840,97 @@ describe("loreFile.enabled toggle", () => {
   test("deleteLoreFile returns false when the file does not exist", () => {
     expect(existsSync(LORE_FILE_PATH)).toBe(false);
     expect(deleteLoreFile(PROJECT)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveAgentsFileName / otherAgentsFileCandidate — "auto" host selection
+// ---------------------------------------------------------------------------
+
+describe("resolveAgentsFileName", () => {
+  const RES_DIR = join(
+    fileURLToPath(new URL(".", import.meta.url)),
+    "__tmp_resolve_agents__",
+  );
+
+  beforeEach(() => {
+    rmSync(RES_DIR, { recursive: true, force: true });
+    mkdirSync(RES_DIR, { recursive: true });
+  });
+  afterAll(() => rmSync(RES_DIR, { recursive: true, force: true }));
+
+  test("an explicit path is returned verbatim (never auto-resolved)", () => {
+    expect(resolveAgentsFileName("AGENTS.md", { projectPath: RES_DIR })).toBe(
+      "AGENTS.md",
+    );
+    expect(
+      resolveAgentsFileName("CLAUDE.md", {
+        projectPath: RES_DIR,
+        isClaudeCode: false,
+      }),
+    ).toBe("CLAUDE.md");
+    expect(
+      resolveAgentsFileName(".cursor/rules/lore.md", { projectPath: RES_DIR }),
+    ).toBe(".cursor/rules/lore.md");
+  });
+
+  test("auto + Claude Code session → CLAUDE.md", () => {
+    expect(
+      resolveAgentsFileName(AUTO_AGENTS_FILE, {
+        projectPath: RES_DIR,
+        isClaudeCode: true,
+      }),
+    ).toBe("CLAUDE.md");
+  });
+
+  test("auto + non-Claude-Code session → AGENTS.md", () => {
+    expect(
+      resolveAgentsFileName(AUTO_AGENTS_FILE, {
+        projectPath: RES_DIR,
+        isClaudeCode: false,
+      }),
+    ).toBe("AGENTS.md");
+  });
+
+  test("auto + no hint + no existing file → AGENTS.md", () => {
+    expect(
+      resolveAgentsFileName(AUTO_AGENTS_FILE, { projectPath: RES_DIR }),
+    ).toBe("AGENTS.md");
+  });
+
+  test("auto + no hint + existing CLAUDE.md → CLAUDE.md", () => {
+    writeFileSync(join(RES_DIR, "CLAUDE.md"), "# hi\n", "utf8");
+    expect(
+      resolveAgentsFileName(AUTO_AGENTS_FILE, { projectPath: RES_DIR }),
+    ).toBe("CLAUDE.md");
+  });
+
+  test("auto + no hint + only AGENTS.md exists → AGENTS.md", () => {
+    writeFileSync(join(RES_DIR, "AGENTS.md"), "# hi\n", "utf8");
+    expect(
+      resolveAgentsFileName(AUTO_AGENTS_FILE, { projectPath: RES_DIR }),
+    ).toBe("AGENTS.md");
+  });
+
+  test("a client hint wins over existing-file detection", () => {
+    writeFileSync(join(RES_DIR, "CLAUDE.md"), "# hi\n", "utf8");
+    // Non-CC hint must not be overridden by a stray CLAUDE.md on disk.
+    expect(
+      resolveAgentsFileName(AUTO_AGENTS_FILE, {
+        projectPath: RES_DIR,
+        isClaudeCode: false,
+      }),
+    ).toBe("AGENTS.md");
+  });
+
+  test("otherAgentsFileCandidate flips the two auto candidates", () => {
+    expect(otherAgentsFileCandidate("AGENTS.md")).toBe("CLAUDE.md");
+    expect(otherAgentsFileCandidate("CLAUDE.md")).toBe("AGENTS.md");
+    // A custom path has no twin → never strips an unrelated file.
+    expect(otherAgentsFileCandidate(".cursor/rules/lore.md")).toBeNull();
+  });
+
+  test("AGENTS_FILE_CANDIDATES lists exactly the two auto host files", () => {
+    expect([...AGENTS_FILE_CANDIDATES]).toEqual(["AGENTS.md", "CLAUDE.md"]);
   });
 });

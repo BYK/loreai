@@ -64,6 +64,8 @@ import {
   shouldImport,
   importFromFile,
   LORE_FILE,
+  AGENTS_FILE_CANDIDATES,
+  resolveAgentsFileName,
   latReader,
   embedding,
   saveSessionTracking,
@@ -1837,10 +1839,15 @@ function tryImportKnowledge(projectPath: string): boolean {
       }
     } else if (cfg.agentsFile.enabled) {
       const { join } = require("node:path") as typeof import("node:path");
-      const filePath = join(projectPath, cfg.agentsFile.path);
+      // No session hint here — resolve "auto" via existing-file detection
+      // (prefers a CLAUDE.md the idle exporter already wrote, else AGENTS.md).
+      const agentsFileName = resolveAgentsFileName(cfg.agentsFile.path, {
+        projectPath,
+      });
+      const filePath = join(projectPath, agentsFileName);
       if (shouldImport({ projectPath, filePath })) {
         importFromFile({ projectPath, filePath });
-        log.info("imported knowledge from", cfg.agentsFile.path);
+        log.info("imported knowledge from", agentsFileName);
         return true;
       }
     }
@@ -1899,16 +1906,24 @@ function startKnowledgeFileWatcher(projectPath: string): () => void {
     }
   }
 
-  // Watch agents file (AGENTS.md etc.) as fallback
+  // Watch the agents file(s) as fallback. Under "auto" we don't know which
+  // agent will run, so watch BOTH candidates (AGENTS.md + CLAUDE.md); an
+  // explicit path watches just that file.
   if (cfg.agentsFile.enabled) {
-    const agentsFilePath = join(projectPath, cfg.agentsFile.path);
-    if (existsSync(agentsFilePath)) {
-      try {
-        const w = watch(agentsFilePath, onFileChange);
-        w.on("error", () => {});
-        watchers.push(w);
-      } catch {
-        // watch not supported
+    const agentsFileNames =
+      cfg.agentsFile.path === "auto"
+        ? [...AGENTS_FILE_CANDIDATES]
+        : [cfg.agentsFile.path];
+    for (const name of agentsFileNames) {
+      const agentsFilePath = join(projectPath, name);
+      if (existsSync(agentsFilePath)) {
+        try {
+          const w = watch(agentsFilePath, onFileChange);
+          w.on("error", () => {});
+          watchers.push(w);
+        } catch {
+          // watch not supported
+        }
       }
     }
   }

@@ -27,6 +27,9 @@ import {
   exportToFile,
   exportLoreFile,
   exportInlineToAgentsFile,
+  removeLoreSectionFromFile,
+  resolveAgentsFileName,
+  otherAgentsFileCandidate,
   saveSessionCosts,
   saveSessionTracking,
   saveGradientState,
@@ -1296,19 +1299,38 @@ export function buildIdleWorkHandler(
     if (cfg.knowledge.enabled) {
       try {
         if (entries.length > 0) {
+          // Resolve the host filename. The idle exporter is the authoritative
+          // writer, so it feeds the session's client identity: an "auto" path
+          // writes CLAUDE.md for Claude Code sessions (its canonical memory
+          // file) and AGENTS.md otherwise. `header_name` is the persisted
+          // Tier-1 session header — `x-claude-code-session-id` iff Claude Code.
+          const isClaudeCode = state.headerName === "x-claude-code-session-id";
+          const agentsFileName = resolveAgentsFileName(cfg.agentsFile.path, {
+            isClaudeCode,
+            projectPath,
+          });
+          const filePath = join(projectPath, agentsFileName);
+          let wroteAgentsFile = false;
           if (cfg.loreFile.enabled && cfg.agentsFile.enabled) {
-            // Default: .lore.md + AGENTS.md pointer
-            const filePath = join(projectPath, cfg.agentsFile.path);
+            // Default: .lore.md + agents-file pointer
             exportToFile({ projectPath, filePath, entries });
+            wroteAgentsFile = true;
           } else if (cfg.loreFile.enabled) {
             // .lore.md only
             exportLoreFile(projectPath, entries);
           } else if (cfg.agentsFile.enabled) {
-            // Inline knowledge in AGENTS.md (no .lore.md)
-            const filePath = join(projectPath, cfg.agentsFile.path);
+            // Inline knowledge in the agents file (no .lore.md)
             exportInlineToAgentsFile({ projectPath, filePath, entries });
+            wroteAgentsFile = true;
           }
           // else: both disabled — no markdown file
+          // In "auto" mode, strip a stale managed section from the OTHER
+          // candidate so a target flip (AGENTS.md <-> CLAUDE.md) never leaves a
+          // duplicate. Never touches an explicitly configured file's twin.
+          if (wroteAgentsFile && cfg.agentsFile.path === "auto") {
+            const other = otherAgentsFileCandidate(agentsFileName);
+            if (other) removeLoreSectionFromFile(join(projectPath, other));
+          }
         }
       } catch (e) {
         log.error("idle knowledge export error:", e);

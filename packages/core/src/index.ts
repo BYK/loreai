@@ -254,6 +254,10 @@ export {
   clearLoreFileCache,
   importLoreFileAs,
   LORE_FILE,
+  AUTO_AGENTS_FILE,
+  AGENTS_FILE_CANDIDATES,
+  resolveAgentsFileName,
+  otherAgentsFileCandidate,
 } from "./agents-file";
 export {
   discoverWorkspaceRoot,

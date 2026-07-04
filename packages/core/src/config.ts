@@ -742,16 +742,21 @@ export const LoreConfig = z.object({
         .describe(
           "Enable AGENTS.md export/import behaviour. Set to false to disable. Default: true.",
         ),
-      /** Path to the agents file, relative to the project root. */
+      /**
+       * Path to the agents file, relative to the project root, or the "auto"
+       * sentinel (default). "auto" writes CLAUDE.md for Claude Code sessions
+       * (its canonical memory file) and AGENTS.md for every other agent; an
+       * explicit path always overrides.
+       */
       path: z
         .string()
-        .default("AGENTS.md")
+        .default("auto")
         .describe(
-          "Path to the agents file, relative to the project root. Default: 'AGENTS.md'.",
+          "Path to the agents file, relative to the project root, or 'auto' (default) to write CLAUDE.md for Claude Code sessions and AGENTS.md otherwise. Set an explicit path (e.g. 'AGENTS.md' or 'CLAUDE.md') to override.",
         ),
     })
-    .default({ enabled: true, path: "AGENTS.md" })
-    .describe("AGENTS.md export/import configuration."),
+    .default({ enabled: true, path: "auto" })
+    .describe("AGENTS.md/CLAUDE.md export/import configuration."),
   loreFile: z
     .object({
       /** Set to false to disable `.lore.md` export/import. When disabled:

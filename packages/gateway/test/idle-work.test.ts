@@ -9,7 +9,14 @@
  * the batch queue; on an empty DB they are correctly skipped.
  */
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, readdirSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+  existsSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -779,6 +786,65 @@ describe("buildIdleWorkHandler", () => {
     // Default config enables loreFile + agentsFile → writes AGENTS.md (+ .lore.md).
     const files = readdirSync(projectPath);
     expect(files.some((f) => f === "AGENTS.md" || f === ".lore.md")).toBe(true);
+  });
+
+  test("auto: a Claude Code session writes CLAUDE.md and strips a stale AGENTS.md section", async () => {
+    const llm = makeLLM();
+    const handler = buildIdleWorkHandler(llm);
+    const projectPath = makeProjectDir();
+    ltm.create({
+      projectPath,
+      category: "gotcha",
+      title: "Auto target entry",
+      content: "Knowledge content for the auto-target export test.",
+      scope: "project",
+    });
+
+    // Phase 1: a non-Claude-Code session (no CC header) → "auto" resolves to
+    // AGENTS.md. This seeds a real lore-managed section on disk.
+    await handler(
+      "idle-auto-other",
+      makeSessionState({
+        sessionID: "idle-auto-other",
+        projectPath,
+        turnsSinceCuration: 0,
+      }),
+    );
+    const agentsPath = join(projectPath, "AGENTS.md");
+    expect(existsSync(agentsPath)).toBe(true);
+    // Add hand-written content OUTSIDE the managed markers — must be preserved
+    // when the section is later stripped on the target flip.
+    const USER_LINE = "# Hand-written heading kept across the flip";
+    writeFileSync(
+      agentsPath,
+      `${USER_LINE}\n\n${readFileSync(agentsPath, "utf8")}`,
+      "utf8",
+    );
+
+    // Phase 2: a Claude Code session (Tier-1 CC header) → "auto" resolves to
+    // CLAUDE.md, and the stale AGENTS.md managed section is stripped.
+    await handler(
+      "idle-auto-cc",
+      makeSessionState({
+        sessionID: "idle-auto-cc",
+        projectPath,
+        headerName: "x-claude-code-session-id",
+        turnsSinceCuration: 0,
+      }),
+    );
+
+    const claudePath = join(projectPath, "CLAUDE.md");
+    expect(existsSync(claudePath)).toBe(true);
+    // CLAUDE.md now carries the managed pointer section.
+    expect(readFileSync(claudePath, "utf8")).toContain(
+      "For long-term knowledge entries managed by",
+    );
+    // AGENTS.md still exists (user content preserved) but its lore section is gone.
+    const agentsAfter = readFileSync(agentsPath, "utf8");
+    expect(agentsAfter).toContain(USER_LINE);
+    expect(agentsAfter).not.toContain(
+      "For long-term knowledge entries managed by",
+    );
   });
 
   test("runs consolidation when a category is over threshold, then the cooldown skips the next tick", async () => {

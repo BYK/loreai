@@ -14,16 +14,16 @@ afterEach(() => {
 });
 
 describe("LoreConfig — agentsFile schema", () => {
-  test("agentsFile defaults: enabled=true, path=AGENTS.md", () => {
+  test("agentsFile defaults: enabled=true, path=auto", () => {
     const cfg = LoreConfig.parse({});
     expect(cfg.agentsFile.enabled).toBe(true);
-    expect(cfg.agentsFile.path).toBe("AGENTS.md");
+    expect(cfg.agentsFile.path).toBe("auto");
   });
 
   test("agentsFile.enabled can be set to false", () => {
     const cfg = LoreConfig.parse({ agentsFile: { enabled: false } });
     expect(cfg.agentsFile.enabled).toBe(false);
-    expect(cfg.agentsFile.path).toBe("AGENTS.md"); // path still defaults
+    expect(cfg.agentsFile.path).toBe("auto"); // path still defaults
   });
 
   test("agentsFile.path can be customised", () => {
@@ -42,6 +42,11 @@ describe("LoreConfig — agentsFile schema", () => {
   test("agentsFile section is optional — omitting it uses defaults", () => {
     const cfg = LoreConfig.parse({ curator: { enabled: false } });
     expect(cfg.agentsFile.enabled).toBe(true);
+    expect(cfg.agentsFile.path).toBe("auto");
+  });
+
+  test("agentsFile.path can be pinned to an explicit AGENTS.md", () => {
+    const cfg = LoreConfig.parse({ agentsFile: { path: "AGENTS.md" } });
     expect(cfg.agentsFile.path).toBe("AGENTS.md");
   });
 });
@@ -257,6 +262,6 @@ describe("load — reads config from .lore.json", () => {
     mkdirSync(TMP, { recursive: true });
     const cfg = await load(TMP);
     expect(cfg.agentsFile.enabled).toBe(true);
-    expect(cfg.agentsFile.path).toBe("AGENTS.md");
+    expect(cfg.agentsFile.path).toBe("auto");
   });
 });

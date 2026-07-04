@@ -60,6 +60,54 @@ const ALL_START_MARKERS = [
  */
 export const LORE_FILE = ".lore.md";
 
+/**
+ * Sentinel value for `agentsFile.path` that enables per-agent auto-selection of
+ * the host filename (see `resolveAgentsFileName`).
+ */
+export const AUTO_AGENTS_FILE = "auto";
+
+/** Candidate host filenames for the managed section when `path` is "auto". */
+export const AGENTS_FILE_CANDIDATES = ["AGENTS.md", "CLAUDE.md"] as const;
+
+/**
+ * Resolve the configured `agentsFile.path` to a concrete filename.
+ *
+ * A literal path (e.g. "AGENTS.md", "CLAUDE.md", ".cursor/rules/lore.md") is
+ * returned verbatim. The "auto" sentinel resolves per client:
+ *   - Claude Code sessions (`isClaudeCode === true`) → "CLAUDE.md" (Claude
+ *     Code's canonical memory file);
+ *   - other agents (`isClaudeCode === false`) → "AGENTS.md";
+ *   - no client hint (startup import / file watcher / CLI) → an existing
+ *     "CLAUDE.md" in the project if present, else "AGENTS.md".
+ *
+ * The idle exporter is the authoritative writer: it passes the session's client
+ * identity, so the first export creates the right file and the hint-less
+ * read/watch paths then discover it via existing-file detection.
+ */
+export function resolveAgentsFileName(
+  configuredPath: string,
+  opts: { isClaudeCode?: boolean; projectPath: string },
+): string {
+  if (configuredPath !== AUTO_AGENTS_FILE) return configuredPath;
+  if (opts.isClaudeCode === true) return "CLAUDE.md";
+  if (opts.isClaudeCode === false) return "AGENTS.md";
+  return existsSync(join(opts.projectPath, "CLAUDE.md"))
+    ? "CLAUDE.md"
+    : "AGENTS.md";
+}
+
+/**
+ * The other "auto"-mode candidate filename, used to strip a stale managed
+ * section after the resolved target flips between AGENTS.md and CLAUDE.md.
+ * Returns null for a custom (non-candidate) path, so an explicitly configured
+ * file's counterpart is never touched.
+ */
+export function otherAgentsFileCandidate(resolvedName: string): string | null {
+  if (resolvedName === "AGENTS.md") return "CLAUDE.md";
+  if (resolvedName === "CLAUDE.md") return "AGENTS.md";
+  return null;
+}
+
 const LORE_FILE_HEADER =
   "<!-- Managed by lore (https://github.com/BYK/loreai) — manual edits are imported on next session. -->";
 

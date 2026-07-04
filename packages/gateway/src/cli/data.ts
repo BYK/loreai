@@ -2803,6 +2803,9 @@ async function cmdExport(
     exportInlineToAgentsFile,
     deleteLoreFile,
     removeLoreSectionFromFile,
+    resolveAgentsFileName,
+    otherAgentsFileCandidate,
+    AGENTS_FILE_CANDIDATES,
   } = await import("@loreai/core");
   const cfg = loreConfig();
 
@@ -2814,7 +2817,11 @@ async function cmdExport(
   }
 
   const entries = ltm.forProject(projectPath, false);
-  const agentsFilePath = join(projectPath, cfg.agentsFile.path);
+  // No live session here — resolve "auto" via existing-file detection.
+  const agentsFileName = resolveAgentsFileName(cfg.agentsFile.path, {
+    projectPath,
+  });
+  const agentsFilePath = join(projectPath, agentsFileName);
 
   if (entries.length === 0) {
     // No knowledge for this project — fully reconcile the on-disk files so no
@@ -2828,8 +2835,16 @@ async function cmdExport(
     }
     // Strip lore's section from the agents file (pointer in the default config,
     // inline knowledge in the agentsFile-only config). Preserves user content.
-    if (cfg.agentsFile.enabled && removeLoreSectionFromFile(agentsFilePath)) {
-      cleaned.push(agentsFilePath);
+    // Under "auto", clean BOTH candidates since either may hold a stale section.
+    if (cfg.agentsFile.enabled) {
+      const names =
+        cfg.agentsFile.path === "auto"
+          ? [...AGENTS_FILE_CANDIDATES]
+          : [agentsFileName];
+      for (const name of names) {
+        const p = join(projectPath, name);
+        if (removeLoreSectionFromFile(p)) cleaned.push(p);
+      }
     }
     if (cleaned.length) {
       console.log(`No knowledge for ${projectPath} — cleaned stale file(s):`);
@@ -2842,20 +2857,31 @@ async function cmdExport(
   }
 
   const written: string[] = [];
+  let wroteAgentsFile = false;
   if (cfg.loreFile.enabled && cfg.agentsFile.enabled) {
     exportToFile({ projectPath, filePath: agentsFilePath });
     written.push(join(projectPath, ".lore.md"), agentsFilePath);
+    wroteAgentsFile = true;
   } else if (cfg.loreFile.enabled) {
     exportLoreFile(projectPath);
     written.push(join(projectPath, ".lore.md"));
   } else if (cfg.agentsFile.enabled) {
     exportInlineToAgentsFile({ projectPath, filePath: agentsFilePath });
     written.push(agentsFilePath);
+    wroteAgentsFile = true;
   } else {
     console.log(
       "Both loreFile and agentsFile are disabled in config — nothing written.",
     );
     return;
+  }
+  // In "auto" mode, strip a stale managed section from the OTHER candidate so a
+  // target flip never leaves a duplicate (mirrors the idle exporter).
+  if (wroteAgentsFile && cfg.agentsFile.path === "auto") {
+    const other = otherAgentsFileCandidate(agentsFileName);
+    if (other && removeLoreSectionFromFile(join(projectPath, other))) {
+      console.log(`  (removed stale lore section from ${other})`);
+    }
   }
 
   console.log(
