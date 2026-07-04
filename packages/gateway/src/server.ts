@@ -293,11 +293,13 @@ async function handleGeminiGenerateContent(
     return errorResponse(400, "invalid_request_error", "Invalid JSON body");
   }
 
+  // headersToRecord lowercases every key (Web Headers API), so `x-goog-api-key`
+  // is the only case that can be present here.
   const headers = headersToRecord(req.headers);
   // Normalize `?key=` query-form auth (REST / google-generativeai clients) to
   // the `x-goog-api-key` header — the upstream URL is rebuilt, so a query param
   // would otherwise be dropped and the call would 401. Header form wins.
-  if (!headers["x-goog-api-key"] && !headers["X-Goog-Api-Key"]) {
+  if (!headers["x-goog-api-key"]) {
     const key = new URL(req.url).searchParams.get("key");
     if (key) headers["x-goog-api-key"] = key;
   }
