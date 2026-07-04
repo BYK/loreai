@@ -88,6 +88,24 @@ export function hasEscrow(): boolean {
 }
 
 /**
+ * Whether wire encryption is active for this device (C-4). The sync engine gates
+ * knowledge en/decryption on this:
+ *  - "off"    — no escrow: encryption was never set up, so sync stays PLAINTEXT (v1
+ *               default until C-4b wires the passphrase UX). We gate on ESCROW (not a
+ *               bare identity) so we never encrypt with a non-recoverable, escrow-less
+ *               auto-minted key — that data would be unrecoverable on any other device.
+ *  - "locked" — escrow exists but the identity is not installed (a fresh device pulled
+ *               the escrow via C-3 but hasn't unlocked with the passphrase): we can
+ *               NEITHER encrypt nor decrypt, so the engine skips the knowledge table.
+ *  - "on"     — identity present (original device, or a fresh device post-unlock):
+ *               encrypt on push / decrypt on pull.
+ */
+export function encryptionState(): "off" | "locked" | "on" {
+  if (!hasEscrow()) return "off";
+  return hasAccountIdentity() ? "on" : "locked";
+}
+
+/**
  * The account identity keypair. Created on genuine first use (no identity AND no
  * escrow). If an escrow record exists but the identity is absent, this is a fresh
  * device that must unlock first — throws {@link KeystoreLockedError} rather than

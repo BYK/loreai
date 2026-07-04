@@ -37,6 +37,32 @@ beforeEach(() => {
   setTeamConfig("sync.enabled", "1"); // capture triggers active
 });
 
+describe("C-4 keystore.encryptionState", () => {
+  it("is 'off' with no escrow (encryption never set up)", () => {
+    expect(keystore.encryptionState()).toBe("off");
+  });
+
+  it("is 'on' on the original device (escrow + local identity)", () => {
+    keystore.setPassphrase("pw", { params: FAST });
+    expect(keystore.hasEscrow()).toBe(true);
+    expect(keystore.hasAccountIdentity()).toBe(true);
+    expect(keystore.encryptionState()).toBe("on");
+  });
+
+  it("is 'locked' on a fresh device (escrow pulled, identity not installed)", () => {
+    keystore.setPassphrase("pw", { params: FAST });
+    // simulate a fresh device: escrow present (pulled via C-3), identity absent
+    db().exec("DELETE FROM account_identity");
+    keystore.lock();
+    expect(keystore.hasEscrow()).toBe(true);
+    expect(keystore.hasAccountIdentity()).toBe(false);
+    expect(keystore.encryptionState()).toBe("locked");
+    // unlocking installs the identity → "on"
+    expect(keystore.unlockWithPassphrase("pw")).toBe(true);
+    expect(keystore.encryptionState()).toBe("on");
+  });
+});
+
 describe("C-3 registry — encryption key-store tables", () => {
   it("account_escrow and scope_keys are registered, non-pull-only, blobColumns ⊆ syncColumns", () => {
     for (const table of ["account_escrow", "scope_keys"]) {

@@ -28,7 +28,7 @@ const FREE_LIMITS: Record<string, number> = {
 // Mirrors the free-tier max_bytes seeded in 0007_scope_seam.sql + 0009 — used to
 // restore byte caps in afterEach so setByteCap() mutations never leak across tests.
 const FREE_BYTE_LIMITS: Record<string, number> = {
-  knowledge: 8388608,
+  knowledge: 12582912, // 12 MB — widened for wire-encryption overhead (0011, C-4)
   entities: 1048576,
   entity_aliases: 2097152,
   entity_relations: 2097152,
@@ -435,8 +435,8 @@ describe.skipIf(gate())("sync migrations — quota + anti-abuse", () => {
 
   it("caps oversized payloads on every user-controlled column", async () => {
     const a = await h.createUser();
-    const big = "z".repeat(9000);
-    // content (8192 cap)
+    const big = "z".repeat(13000);
+    // content (12288 cap, widened for ciphertext in 0011)
     expect(
       (
         await expectError(() =>
@@ -616,6 +616,36 @@ describe.skipIf(gate())("sync migrations — quota + anti-abuse", () => {
     const err = await expectError(() => ins("k2", "rA"));
     expect(err.code).toBe("23514");
     expect(err.message).toMatch(/quota exceeded/i);
+  });
+
+  it("widens the free knowledge byte cap to 12 MB for ciphertext overhead (0011, C-4)", async () => {
+    const { rows } = await h.client.query(
+      "select max_bytes from public.plan_limits where tier='free' and table_name='knowledge'",
+    );
+    expect(Number(rows[0].max_bytes)).toBe(12582912);
+  });
+
+  it("widens the per-row knowledge content/title CHECK for ciphertext (0011, C-4)", async () => {
+    // A ciphertext content between the old 8192 and new 12288 cap must now be ACCEPTED
+    // (0004 would have rejected it as a check_violation → silent poison-drop).
+    const a = await h.createUser();
+    const r = await h.asUser(a, (c) =>
+      c.query(
+        "insert into public.knowledge (id, scope_id, category, title, content) values ('kc',$1,'p',$2,$3)",
+        [a, "T".repeat(900), "C".repeat(11000)],
+      ),
+    );
+    expect(r.rowCount).toBe(1);
+    // ...but a value past the new cap still fails cleanly (check_violation, not 54000).
+    const err = await expectError(() =>
+      h.asUser(a, (c) =>
+        c.query(
+          "insert into public.knowledge (id, scope_id, category, title, content) values ('kc2',$1,'p','T',$2)",
+          [a, "C".repeat(12289)],
+        ),
+      ),
+    );
+    expect(err.code).toBe("23514");
   });
 
   it("re-upserting account_escrow is an UPDATE, not new growth (id::int key probe, C-3)", async () => {

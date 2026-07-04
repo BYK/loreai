@@ -78,6 +78,14 @@ export interface SyncTableMeta {
    * across the encode/decode round-trip.)
    */
   blobColumns?: string[];
+  /**
+   * TEXT columns encrypted on the sync wire (C-4, #825): sealed to a per-scope DEK and
+   * base64-encoded on push, decrypted on pull, so the server only ever stores
+   * ciphertext. Local storage stays PLAINTEXT (FTS/embeddings unaffected). content_hash
+   * is computed over the plaintext, so it stays cross-device stable. Active only when
+   * `keystore.encryptionState() === "on"`; "off" leaves these plaintext (v1 default).
+   */
+  encryptedColumns?: string[];
 }
 
 /** ASCII Unit Separator — joins composite row ids (mirrors the SQL `char(31)`). */
@@ -113,9 +121,67 @@ const HASH_EXCLUDE = new Set([
 export const SYNCED_TABLES: Record<SyncTier, SyncTableMeta[]> = {
   basic: [
     {
+      // Encryption escrow (C-3, #825): the account secret wrapped by a passphrase
+      // KEK (+ optional recovery), so a fresh device recovers the SAME account key.
+      // Single-row locally (id=1); the remote is one row per user, keyed (scope_id,
+      // id). All payload is ciphertext + KDF params — the server never sees plaintext.
+      // Read-write (LWW: the latest passphrase-set wins). BLOB columns travel base64.
+      //
+      // ORDER (C-4): the key tables are pulled BEFORE `knowledge` so that on a fresh
+      // device the escrow is already local by the time knowledge is applied — making
+      // `encryptionState()` "locked" (skip) rather than "off" (which would passthrough
+      // ciphertext as plaintext). See the pull path in sync.ts.
+      table: "account_escrow",
+      idColumns: ["id"],
+      ftsTables: [],
+      syncColumns: [
+        "id",
+        "wrapped_secret",
+        "kdf_salt",
+        "kdf_t",
+        "kdf_m",
+        "kdf_p",
+        "recovery_wrapped",
+        "recovery_salt",
+        "recovery_kdf_t",
+        "recovery_kdf_m",
+        "recovery_kdf_p",
+        "key_epoch",
+        // created_at is NOT NULL locally with no default, so it must ride along for
+        // the generic pull INSERT (applyRemoteUpsert). It is stable per row, so both
+        // devices converge on the creator's value (no hash churn).
+        "created_at",
+        "updated_at",
+      ],
+      blobColumns: [
+        "wrapped_secret",
+        "kdf_salt",
+        "recovery_wrapped",
+        "recovery_salt",
+      ],
+    },
+    {
+      // Per-scope DEK wrapped (HPKE) to a member's account key (C-3, #825). v1
+      // personal: local scope_id == member_user_id == auth.uid(), and the remote's
+      // server-derived scope_id IS the encryption scope — so the local `scope_id`
+      // column is NOT synced (idColumns is member_user_id only) and is reconstructed
+      // from remote.scope_id by the custom applyRemoteScopeKey (the generic
+      // stripSyncCols would drop it, leaving the NOT-NULL local column unfilled).
+      // wrapped_dek is ciphertext → base64 on the wire. Pulled BEFORE knowledge (C-4).
+      table: "scope_keys",
+      idColumns: ["member_user_id"],
+      ftsTables: [],
+      syncColumns: ["member_user_id", "wrapped_dek", "key_epoch", "updated_at"],
+      blobColumns: ["wrapped_dek"],
+    },
+    {
       table: "knowledge",
       idColumns: ["id"],
       ftsTables: ["knowledge_fts"],
+      // C-4 (#825): the knowledge text is encrypted on the wire (server stores
+      // ciphertext). content is NOT NULL and title is NOT NULL remotely, so a
+      // tombstone scrub sets them to "" (empty, never sealed).
+      encryptedColumns: ["content", "title"],
       syncColumns: [
         "id",
         "project_id",
@@ -219,55 +285,6 @@ export const SYNCED_TABLES: Record<SyncTier, SyncTableMeta[]> = {
       ftsTables: [],
       versioned: false, // join table has no content_hash/revision columns
       syncColumns: ["knowledge_id", "entity_id"],
-    },
-    {
-      // Encryption escrow (C-3, #825): the account secret wrapped by a passphrase
-      // KEK (+ optional recovery), so a fresh device recovers the SAME account key.
-      // Single-row locally (id=1); the remote is one row per user, keyed (scope_id,
-      // id). All payload is ciphertext + KDF params — the server never sees plaintext.
-      // Read-write (LWW: the latest passphrase-set wins). BLOB columns travel base64.
-      table: "account_escrow",
-      idColumns: ["id"],
-      ftsTables: [],
-      syncColumns: [
-        "id",
-        "wrapped_secret",
-        "kdf_salt",
-        "kdf_t",
-        "kdf_m",
-        "kdf_p",
-        "recovery_wrapped",
-        "recovery_salt",
-        "recovery_kdf_t",
-        "recovery_kdf_m",
-        "recovery_kdf_p",
-        "key_epoch",
-        // created_at is NOT NULL locally with no default, so it must ride along for
-        // the generic pull INSERT (applyRemoteUpsert). It is stable per row, so both
-        // devices converge on the creator's value (no hash churn).
-        "created_at",
-        "updated_at",
-      ],
-      blobColumns: [
-        "wrapped_secret",
-        "kdf_salt",
-        "recovery_wrapped",
-        "recovery_salt",
-      ],
-    },
-    {
-      // Per-scope DEK wrapped (HPKE) to a member's account key (C-3, #825). v1
-      // personal: local scope_id == member_user_id == auth.uid(), and the remote's
-      // server-derived scope_id IS the encryption scope — so the local `scope_id`
-      // column is NOT synced (idColumns is member_user_id only) and is reconstructed
-      // from remote.scope_id by the custom applyRemoteScopeKey (the generic
-      // stripSyncCols would drop it, leaving the NOT-NULL local column unfilled).
-      // wrapped_dek is ciphertext → base64 on the wire.
-      table: "scope_keys",
-      idColumns: ["member_user_id"],
-      ftsTables: [],
-      syncColumns: ["member_user_id", "wrapped_dek", "key_epoch", "updated_at"],
-      blobColumns: ["wrapped_dek"],
     },
     {
       // Pull-only mirror of the server-authoritative account row. The client

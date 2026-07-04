@@ -6,7 +6,7 @@ import {
   setKV,
   deleteTeamConfig,
 } from "@loreai/core";
-import { ltm, log, keystore, syncData } from "@loreai/core";
+import { ltm, log, keystore, crypto, syncData } from "@loreai/core";
 
 // --- Fake Supabase client ----------------------------------------------------
 // In-memory per-table store with the PostgREST surface the engine uses, PLUS
@@ -275,9 +275,14 @@ function makeClient() {
 }
 
 let authed = true;
+// The authed user's id (auth.uid()) = the v1 encryption scope; matches the mock's
+// server-injected scope_id (REMOTE_SCOPE) so push-side AAD == pull-side AAD (C-4).
+// Overridable per-test (undefined ⇒ ctx() can't resolve ⇒ push fails closed).
+let mockUserId: string | undefined = "00000000-0000-4000-8000-000000000001";
 vi.mock("../src/supabase", () => ({
   getAuthedClient: () => Promise.resolve(authed ? makeClient() : null),
-  getCurrentUser: () => Promise.resolve({ github_login: "octocat" }),
+  getCurrentUser: () =>
+    Promise.resolve({ github_login: "octocat", user_id: mockUserId }),
 }));
 
 import { pushOnce, pullOnce, syncOnce } from "../src/sync";
@@ -363,6 +368,7 @@ beforeEach(() => {
   poisonIds.clear();
   fixedTs = null;
   authed = true;
+  mockUserId = "00000000-0000-4000-8000-000000000001";
   clock = 1_000_000;
 });
 
@@ -1139,5 +1145,220 @@ describe("encryption key store — C-3 (#825)", () => {
     // cursor is the #828 prune-floor wedge — assert both moved off 0.
     expect(Number(getKV("sync.push.account_escrow") ?? "0")).toBeGreaterThan(0);
     expect(Number(getKV("sync.push.scope_keys") ?? "0")).toBeGreaterThan(0);
+  });
+});
+
+describe("knowledge wire encryption — C-4 (#825)", () => {
+  const SCOPE = REMOTE_SCOPE; // == getCurrentUser().user_id in the mock
+  const FAST = { t: 1, m: 256, p: 1 };
+
+  async function enableEncryption() {
+    keystore.setPassphrase("pw", { params: FAST });
+    await keystore.getScopeKey(SCOPE, SCOPE);
+  }
+
+  // Wipe local knowledge (+ derived) and reset its pull cursor to simulate a device
+  // that must re-pull knowledge from the remote.
+  function resetLocalKnowledge() {
+    db().exec("DELETE FROM knowledge");
+    db().exec("DELETE FROM knowledge_meta");
+    db().exec("DELETE FROM knowledge_meta_crdt");
+    db().exec("DELETE FROM sync_state WHERE table_name='knowledge'");
+    // The wipe above fires the capture trigger (sync enabled) → a DELETE outbox
+    // entry; a genuinely fresh device has none. Drop it + reset cursors so the pull
+    // sees a clean slate (no phantom pendingLocalChange → no spurious conflict).
+    db().exec("DELETE FROM sync_outbox WHERE table_name='knowledge'");
+    setKV("sync.push.knowledge", "0");
+    setKV("sync.pull.knowledge", "0|");
+  }
+
+  test("push seals content + title; the server only ever sees ciphertext", async () => {
+    syncData.enableSync("basic");
+    await enableEncryption();
+    insertKnowledge("k1", "top secret content");
+    await pushOnce(makeClient() as never);
+
+    const row = tableRows("knowledge").find((r) => r.id === "k1") as RemoteRow;
+    expect(row.content).not.toBe("top secret content");
+    expect(crypto.isEnvelope(Buffer.from(String(row.content), "base64"))).toBe(
+      true,
+    );
+    expect(crypto.isEnvelope(Buffer.from(String(row.title), "base64"))).toBe(
+      true,
+    );
+    // content_hash is over the PLAINTEXT local row (not the ciphertext), so it equals
+    // the local hash — the property that keeps it cross-device stable.
+    const local = syncData.getRowById("knowledge", "k1") as Record<
+      string,
+      unknown
+    >;
+    expect(row.content_hash).toBe(syncData.contentHash("knowledge", local));
+  });
+
+  test("pull decrypts back to plaintext, no conflict", async () => {
+    syncData.enableSync("basic");
+    await enableEncryption();
+    insertKnowledge("k1", "top secret content");
+    await pushOnce(makeClient() as never);
+
+    resetLocalKnowledge(); // device-2 (same unlocked keystore) re-pulls
+    const r = await pullOnce(makeClient() as never);
+    expect(currentContent("k1")).toBe("top secret content");
+    expect(r.conflicts).toBe(0);
+  });
+
+  test("encryption OFF (no escrow) pushes content as plaintext", async () => {
+    syncData.enableSync("basic");
+    insertKnowledge("k1", "not a secret");
+    await pushOnce(makeClient() as never);
+    const row = tableRows("knowledge").find((r) => r.id === "k1") as RemoteRow;
+    expect(row.content).toBe("not a secret");
+    expect(crypto.isEnvelope(Buffer.from(String(row.content), "base64"))).toBe(
+      false,
+    );
+  });
+
+  test("a LOCKED device does not push knowledge (can't encrypt) — table paused", async () => {
+    syncData.enableSync("basic");
+    await enableEncryption();
+    insertKnowledge("k1", "secret");
+    db().exec("DELETE FROM account_identity"); // escrow present, identity gone
+    keystore.lock();
+    expect(keystore.encryptionState()).toBe("locked");
+
+    await pushOnce(makeClient() as never);
+    expect(tableRows("knowledge")).toHaveLength(0); // nothing pushed
+    expect(Number(getKV("sync.push.knowledge") ?? "0")).toBe(0); // cursor frozen
+  });
+
+  test("a LOCKED device does not pull knowledge (can't decrypt) — cursor frozen", async () => {
+    syncData.enableSync("basic");
+    await enableEncryption();
+    insertKnowledge("k1", "secret");
+    await pushOnce(makeClient() as never); // remote now holds ciphertext
+
+    resetLocalKnowledge();
+    db().exec("DELETE FROM account_identity");
+    keystore.lock();
+    expect(keystore.encryptionState()).toBe("locked");
+
+    await pullOnce(makeClient() as never);
+    expect(currentContent("k1")).toBeNull(); // knowledge skipped
+    expect(getKV("sync.pull.knowledge")).toBe("0|"); // cursor frozen
+  });
+
+  test("push fails CLOSED: encryption on but unresolvable scope pauses (never leaks plaintext)", async () => {
+    syncData.enableSync("basic");
+    await enableEncryption();
+    expect(keystore.encryptionState()).toBe("on");
+    insertKnowledge("k1", "top secret content");
+    mockUserId = undefined; // scope can't resolve → ctx() is null
+
+    await pushOnce(makeClient() as never);
+    expect(tableRows("knowledge")).toHaveLength(0); // NOT pushed as plaintext
+    expect(Number(getKV("sync.push.knowledge") ?? "0")).toBe(0); // cursor frozen
+  });
+
+  test("round-trips multibyte UTF-8 content through seal/open", async () => {
+    syncData.enableSync("basic");
+    await enableEncryption();
+    const text = "héllo 世界 — naïve façade ☃ 🔐 emoji";
+    insertKnowledge("k1", text);
+    await pushOnce(makeClient() as never);
+    const row = tableRows("knowledge").find((r) => r.id === "k1") as RemoteRow;
+    expect(crypto.isEnvelope(Buffer.from(String(row.content), "base64"))).toBe(
+      true,
+    );
+
+    resetLocalKnowledge();
+    await pullOnce(makeClient() as never);
+    expect(currentContent("k1")).toBe(text);
+  });
+
+  test("a decrypt failure (wrong key / tampered) defers the table, never crashes the cycle", async () => {
+    syncData.enableSync("basic");
+    await enableEncryption();
+    insertKnowledge("k1", "real content");
+    await pushOnce(makeClient() as never);
+    // Tamper: replace the remote ciphertext with an envelope sealed under a DIFFERENT
+    // DEK — a valid envelope this device holds a (wrong) key for → open() throws.
+    const otherDek = new Uint8Array(32).fill(9);
+    const env = crypto.seal(
+      otherDek,
+      new TextEncoder().encode("evil"),
+      crypto.buildAad(SCOPE, "knowledge", "content", "k1"),
+    );
+    const rr = tableRows("knowledge").find((r) => r.id === "k1") as RemoteRow;
+    rr.content = Buffer.from(env).toString("base64");
+
+    resetLocalKnowledge();
+    expect(keystore.encryptionState()).toBe("on");
+    // Must NOT throw (a raw AEAD error would crash the whole cycle).
+    await expect(pullOnce(makeClient() as never)).resolves.toBeDefined();
+    expect(currentContent("k1")).toBeNull(); // not applied
+    expect(getKV("sync.pull.knowledge")).toBe("0|"); // cursor frozen
+  });
+
+  test("a key-resolution failure (corrupt wrapped DEK) defers the table, never crashes", async () => {
+    syncData.enableSync("basic");
+    await enableEncryption();
+    insertKnowledge("k1", "secret");
+    await pushOnce(makeClient() as never); // remote ciphertext under the real DEK
+
+    // Corrupt the wrapped DEK so the next getScopeKey unwrap throws (+ invalidates the
+    // cache). encryptionState stays "on" (identity present). Also clear the REMOTE
+    // scope_keys so the reorder's scope_keys pull can't self-heal it back.
+    keystore.putWrappedScopeKey(
+      SCOPE,
+      SCOPE,
+      new Uint8Array(80).fill(3),
+      0,
+      now(),
+    );
+    tableRows("scope_keys").length = 0;
+    resetLocalKnowledge();
+    expect(keystore.encryptionState()).toBe("on");
+
+    await expect(pullOnce(makeClient() as never)).resolves.toBeDefined(); // no crash
+    expect(currentContent("k1")).toBeNull(); // table deferred
+    expect(getKV("sync.pull.knowledge")).toBe("0|"); // cursor frozen
+  });
+
+  test("OFF-mode plaintext that base64-decodes to look like an envelope is not misread", async () => {
+    // "TEUB…" base64-decodes to bytes starting 0x4C 0x45 0x01 (the envelope magic +
+    // scheme). Without the canonical-base64 guard, decryptColumns would treat this
+    // ordinary plaintext as ciphertext and halt the table in OFF mode.
+    syncData.enableSync("basic");
+    const prose =
+      "TEUB this is ordinary plaintext knowledge that merely starts with base64-looking characters and is long enough to exceed the envelope header length";
+    insertKnowledge("k1", prose);
+    await pushOnce(makeClient() as never);
+    resetLocalKnowledge();
+    expect(keystore.encryptionState()).toBe("off");
+
+    await expect(pullOnce(makeClient() as never)).resolves.toBeDefined();
+    expect(currentContent("k1")).toBe(prose); // synced as plaintext, not aborted
+  });
+
+  test("backstop: an OFF device never stores remote ciphertext as content", async () => {
+    syncData.enableSync("basic");
+    insertKnowledge("k1", "x");
+    await pushOnce(makeClient() as never); // remote k1 (plaintext)
+    // Craft a remote ciphertext row (sealed with a throwaway DEK + the C-4 AAD scheme).
+    const dek = new Uint8Array(32).fill(7);
+    const env = crypto.seal(
+      dek,
+      new TextEncoder().encode("ciphertext-only"),
+      crypto.buildAad(SCOPE, "knowledge", "content", "k1"),
+    );
+    const rr = tableRows("knowledge").find((r) => r.id === "k1") as RemoteRow;
+    rr.content = Buffer.from(env).toString("base64");
+
+    resetLocalKnowledge();
+    expect(keystore.encryptionState()).toBe("off"); // never set a passphrase
+
+    await pullOnce(makeClient() as never);
+    expect(currentContent("k1")).toBeNull(); // aborted — NOT corrupted with ciphertext
+    expect(getKV("sync.pull.knowledge")).toBe("0|"); // cursor frozen
   });
 });

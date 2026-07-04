@@ -22,8 +22,8 @@
  *                          skipped).
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { syncData, getKV, setKV, log } from "@loreai/core";
-import { getAuthedClient } from "./supabase";
+import { syncData, getKV, setKV, log, keystore, crypto } from "@loreai/core";
+import { getAuthedClient, getCurrentUser } from "./supabase";
 
 const PAGE = 200;
 const pushKey = (t: string) => `sync.push.${t}`;
@@ -61,6 +61,112 @@ function classifyPushError(
 }
 
 // ---------------------------------------------------------------------------
+// C-4 (#825): wire encryption of knowledge content/title
+// ---------------------------------------------------------------------------
+
+/** Thrown when a pulled row is ciphertext but no DEK is available (locked/off). */
+class EncryptedContentUnavailable extends Error {}
+
+type EncMode = "off" | "locked" | "on";
+type EncCtx = { scope: string; dek: Uint8Array } | null;
+/** A per-table snapshot of the encryption state handed to the (sync) apply path. */
+type EncSnapshot = { mode: EncMode; ctx: EncCtx };
+
+const utf8 = new TextEncoder();
+const fromUtf8 = new TextDecoder();
+
+/**
+ * Per-cycle encryption resolver. `mode()` is re-read per encrypted table (cheap DB
+ * check) so a just-pulled escrow is visible within the same cycle; `ctx()` resolves
+ * `{scope, dek}` once (scope = auth.uid() = the v1 encryption scope; dek from the
+ * keystore). Only meaningful when `mode() === "on"`.
+ */
+function makeEncryptionResolver() {
+  let cached: EncCtx | undefined;
+  return {
+    mode: (): EncMode => keystore.encryptionState(),
+    // NEVER throws: any resolution failure (no user_id, a corrupt scope_keys row, an
+    // HPKE unwrap error) returns null so callers degrade gracefully — push fails closed
+    // ("stop"), pull defers the table — rather than crashing the whole sync cycle.
+    async ctx(): Promise<EncCtx> {
+      if (cached !== undefined) return cached;
+      try {
+        const scope = (await getCurrentUser())?.user_id;
+        cached = scope
+          ? { scope, dek: await keystore.getScopeKey(scope) }
+          : null;
+      } catch (e) {
+        log.notice(`sync: encryption key unavailable: ${(e as Error).message}`);
+        cached = null;
+      }
+      return cached;
+    },
+  };
+}
+
+/**
+ * Encrypt a push payload's encryptedColumns IN PLACE (seal → base64). Only non-empty
+ * strings are sealed (a tombstone scrub "" stays plaintext). AAD binds each ciphertext
+ * to (scope, table, column, logicalId) so it cannot be transplanted to another
+ * row/column/scope.
+ */
+function encryptColumns(
+  table: string,
+  logicalId: string,
+  payload: Record<string, unknown>,
+  ctx: { scope: string; dek: Uint8Array },
+): void {
+  for (const col of tableMeta(table).encryptedColumns ?? []) {
+    const v = payload[col];
+    if (typeof v !== "string" || v.length === 0) continue;
+    const aad = crypto.buildAad(ctx.scope, table, col, logicalId);
+    payload[col] = Buffer.from(
+      crypto.seal(ctx.dek, utf8.encode(v), aad),
+    ).toString("base64");
+  }
+}
+
+/**
+ * Decrypt a pulled row's encryptedColumns IN PLACE. In "on" mode an envelope column is
+ * opened to plaintext; a non-envelope (legacy plaintext) is left as-is. If a column IS
+ * an envelope but no key is available (mode !== "on"), throws so the caller skips the
+ * table this cycle — never storing ciphertext as local content.
+ */
+function decryptColumns(
+  table: string,
+  logicalId: string,
+  row: Record<string, unknown>,
+  enc: EncSnapshot,
+): void {
+  for (const col of tableMeta(table).encryptedColumns ?? []) {
+    const v = row[col];
+    if (typeof v !== "string" || v.length === 0) continue;
+    const bytes = Buffer.from(v, "base64");
+    // Treat as ciphertext only if it's a real envelope AND canonical base64 (re-encodes
+    // to the same string). This rejects plaintext that leniently base64-decodes to bytes
+    // that merely LOOK like an envelope header — a natural-text false positive that in
+    // "off" mode would otherwise wrongly abort the table. (The full fix, an explicit
+    // per-row scheme flag instead of content-sniffing, is tracked for C-4b.)
+    if (!crypto.isEnvelope(bytes) || bytes.toString("base64") !== v) continue;
+    if (enc.mode !== "on" || !enc.ctx) {
+      throw new EncryptedContentUnavailable(`${table}: no key (locked/off)`);
+    }
+    const aad = crypto.buildAad(enc.ctx.scope, table, col, logicalId);
+    try {
+      row[col] = fromUtf8.decode(crypto.open(enc.ctx.dek, bytes, aad));
+    } catch (e) {
+      // A valid envelope we hold a key for but still can't open (wrong key / tampered /
+      // AAD mismatch) is an integrity failure. NEVER store the ciphertext and NEVER let
+      // a raw AEAD error crash the whole (multi-table) sync cycle — surface it as an
+      // EncryptedContentUnavailable so the caller defers just this table (cursor frozen).
+      throw new EncryptedContentUnavailable(
+        `${table}.${col}: decrypt failed: ${(e as Error).message}`,
+      );
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Push (per table — independent cursor; advance only past confirmed rows)
 // ---------------------------------------------------------------------------
 
@@ -71,12 +177,13 @@ function classifyPushError(
  */
 export async function pushOnce(client: SupabaseClient): Promise<SyncResult> {
   const res: SyncResult = { pushed: 0, pulled: 0, conflicts: 0 };
+  const enc = makeEncryptionResolver();
   for (const meta of syncData.syncedTables("basic")) {
     // Pull-only tables (e.g. profiles) are server-authoritative: the client only
     // reads them. They have no outbox capture trigger, so this is belt-and-
     // suspenders, but it keeps the intent explicit and avoids a needless scan.
     if (meta.pullOnly) continue;
-    await pushTable(client, meta.table, res);
+    await pushTable(client, meta.table, res, enc);
   }
   // Reclaim outbox rows fully pushed across all tables THAT HAVE ENTRIES (seq <=
   // the lowest such cursor) — the outbox is otherwise append-only. A table with
@@ -100,6 +207,7 @@ async function pushTable(
   client: SupabaseClient,
   table: string,
   res: SyncResult,
+  enc: ReturnType<typeof makeEncryptionResolver>,
 ): Promise<void> {
   let cursor = Number(getKV(pushKey(table)) ?? "0");
 
@@ -123,7 +231,7 @@ async function pushTable(
       // Only act on the coalesced (latest) entry for a row; earlier duplicates
       // are covered by it. But every entry still gates cursor advancement.
       if (latestByRow.get(e.row_id) === e) {
-        const outcome = await pushEntry(client, e, res);
+        const outcome = await pushEntry(client, e, res, enc);
         if (outcome === "stop") {
           stop = true;
           break; // do NOT advance past this seq — retry next cycle
@@ -146,6 +254,7 @@ async function pushEntry(
   client: SupabaseClient,
   e: syncData.OutboxEntry,
   res: SyncResult,
+  enc: ReturnType<typeof makeEncryptionResolver>,
 ): Promise<PushOutcome> {
   const { table_name: table, row_id: rowId } = e;
   let op = e.op;
@@ -244,6 +353,22 @@ async function pushEntry(
     ...toRemoteRow(table, syncData.pickSyncColumns(table, row)),
     is_deleted: false,
   };
+  // C-4 (#825): encrypt the content-bearing columns for the wire (server stores only
+  // ciphertext). content_hash above is over the PLAINTEXT row, so it stays cross-device
+  // stable. "locked" means escrow is present but the device isn't unlocked — we can't
+  // encrypt, so pause this (knowledge) table until it is (return "stop", keep pending).
+  if (tableMeta(table).encryptedColumns?.length) {
+    const mode = enc.mode();
+    if (mode === "locked") return "stop";
+    if (mode === "on") {
+      const ctx = await enc.ctx();
+      // Fail CLOSED: if encryption is on but the scope/DEK can't be resolved (e.g. a
+      // missing user_id), pause the table rather than leak plaintext content to the
+      // server. It retries next cycle once the context resolves.
+      if (!ctx) return "stop";
+      encryptColumns(table, effectiveId, payload, ctx);
+    }
+  }
   // Only versioned tables have content_hash/revision columns remotely; sending
   // them to the join table is a PGRST204 schema error (and would never sync it).
   if (tableMeta(table).versioned !== false) {
@@ -322,61 +447,89 @@ function formatCursor(c: KeysetCursor): string {
  */
 export async function pullOnce(client: SupabaseClient): Promise<SyncResult> {
   const res: SyncResult = { pushed: 0, pulled: 0, conflicts: 0 };
+  const encResolver = makeEncryptionResolver();
 
   for (const meta of syncData.syncedTables("basic")) {
     const touchedFts = new Set<string>();
     let cursor = parseCursor(getKV(pullKey(meta.table)));
 
+    // C-4 (#825): resolve the encryption snapshot for an encrypted table. "locked"
+    // (escrow present, not unlocked) → skip the table entirely, leaving its cursor
+    // frozen so it re-pulls after unlock (never storing ciphertext as content). The
+    // key tables are ordered BEFORE knowledge, so on a fresh device the escrow is
+    // already local here → "locked", never a plaintext-passthrough "off".
+    let enc: EncSnapshot = { mode: "off", ctx: null };
+    if (meta.encryptedColumns?.length) {
+      const mode = encResolver.mode();
+      if (mode === "locked") continue;
+      if (mode === "on") {
+        const ctx = await encResolver.ctx(); // never throws (returns null on failure)
+        if (!ctx) continue; // can't resolve the key → defer the table this cycle
+        enc = { mode, ctx };
+      }
+    }
+
     const idc = meta.idColumns[0];
-    for (;;) {
-      const sinceIso = new Date(cursor.ms).toISOString();
-      // Page by (updated_at, id). `gte` includes cursor.ms; the in-memory keyset
-      // skip drops rows already applied. (timestamptz is compared by VALUE, so
-      // Z vs +00:00 / fractional formats are equivalent.)
-      let q = client
-        .from(meta.table)
-        .select("*")
-        .order("updated_at", { ascending: true })
-        .order(idc, { ascending: true })
-        .limit(PAGE);
-      q = q.gte("updated_at", sinceIso);
-      const { data, error } = await q;
-      if (error) {
-        log.notice(`sync: pull ${meta.table}: ${error.message}`);
-        break;
-      }
-      const rows = (data ?? []) as Array<Record<string, unknown>>;
-      if (rows.length === 0) break;
+    try {
+      for (;;) {
+        const sinceIso = new Date(cursor.ms).toISOString();
+        // Page by (updated_at, id). `gte` includes cursor.ms; the in-memory keyset
+        // skip drops rows already applied. (timestamptz is compared by VALUE, so
+        // Z vs +00:00 / fractional formats are equivalent.)
+        let q = client
+          .from(meta.table)
+          .select("*")
+          .order("updated_at", { ascending: true })
+          .order(idc, { ascending: true })
+          .limit(PAGE);
+        q = q.gte("updated_at", sinceIso);
+        const { data, error } = await q;
+        if (error) {
+          log.notice(`sync: pull ${meta.table}: ${error.message}`);
+          break;
+        }
+        const rows = (data ?? []) as Array<Record<string, unknown>>;
+        if (rows.length === 0) break;
 
-      let advanced = false;
-      for (const remote of rows) {
-        const ms = Date.parse(String(remote.updated_at ?? "")) || 0;
-        const rid = syncData.rowIdOf(meta.table, remote);
-        if (ms < cursor.ms || (ms === cursor.ms && rid <= cursor.id)) continue;
-        applyRemote(meta, remote, res, touchedFts);
-        cursor = { ms, id: rid };
-        advanced = true;
-      }
-      setKV(pullKey(meta.table), formatCursor(cursor));
-
-      if (rows.length < PAGE) break; // last page
-
-      if (!advanced) {
-        // A FULL page with no NEW rows ⇒ >PAGE rows share cursor.ms and `gte`
-        // keeps returning the same first PAGE. Drain the REST of this exact
-        // millisecond by id keyset (eq + id>cursor) before resuming — this never
-        // skips a row (we only advance past ids we've actually applied).
-        const drained = await drainTimestamp(
-          client,
-          meta,
-          sinceIso,
-          cursor,
-          res,
-          touchedFts,
-        );
-        cursor = drained;
+        let advanced = false;
+        for (const remote of rows) {
+          const ms = Date.parse(String(remote.updated_at ?? "")) || 0;
+          const rid = syncData.rowIdOf(meta.table, remote);
+          if (ms < cursor.ms || (ms === cursor.ms && rid <= cursor.id))
+            continue;
+          applyRemote(meta, remote, res, touchedFts, enc);
+          cursor = { ms, id: rid };
+          advanced = true;
+        }
         setKV(pullKey(meta.table), formatCursor(cursor));
+
+        if (rows.length < PAGE) break; // last page
+
+        if (!advanced) {
+          // A FULL page with no NEW rows ⇒ >PAGE rows share cursor.ms and `gte`
+          // keeps returning the same first PAGE. Drain the REST of this exact
+          // millisecond by id keyset (eq + id>cursor) before resuming — this never
+          // skips a row (we only advance past ids we've actually applied).
+          const drained = await drainTimestamp(
+            client,
+            meta,
+            sinceIso,
+            cursor,
+            res,
+            touchedFts,
+            enc,
+          );
+          cursor = drained;
+          setKV(pullKey(meta.table), formatCursor(cursor));
+        }
       }
+    } catch (err) {
+      if (!(err instanceof EncryptedContentUnavailable)) throw err;
+      // A ciphertext row we can't decrypt (no key this cycle, or an integrity failure):
+      // abort THIS table WITHOUT persisting a further cursor advance, so it re-pulls
+      // next cycle — never crashing the whole (multi-table) sync. (applyRemote decrypts
+      // BEFORE any side effect, so no partial row was applied.)
+      log.notice(`sync: pull ${meta.table} deferred — ${err.message}`);
     }
 
     for (const fts of touchedFts) syncData.rebuildFts(fts);
@@ -401,6 +554,7 @@ async function drainTimestamp(
   cursor: KeysetCursor,
   res: SyncResult,
   touchedFts: Set<string>,
+  enc: EncSnapshot,
 ): Promise<KeysetCursor> {
   const cols = meta.idColumns;
   // Per-id-column "last applied" values; seed from the cursor's composite id.
@@ -442,7 +596,7 @@ async function drainTimestamp(
     }
 
     for (const remote of rows) {
-      applyRemote(meta, remote, res, touchedFts);
+      applyRemote(meta, remote, res, touchedFts, enc);
       cols.forEach((c, i) => {
         last[i] = String(remote[c]);
       });
@@ -458,6 +612,7 @@ function applyRemote(
   remote: Record<string, unknown>,
   res: SyncResult,
   touchedFts: Set<string>,
+  enc: EncSnapshot,
 ): void {
   const rowId = syncData.rowIdOf(meta.table, remote);
 
@@ -482,6 +637,17 @@ function applyRemote(
   }
 
   const isDeleted = remote.is_deleted === true || remote.is_deleted === 1;
+
+  // C-4 (#825): decrypt an encrypted table's content columns BEFORE any classify /
+  // conflict side effect, so a non-decryptable ciphertext (no key) throws and aborts
+  // the table cleanly with nothing partially applied. Deletes carry no content. The
+  // decrypted row is reused at the apply below.
+  let decrypted: Record<string, unknown> | undefined;
+  if (meta.encryptedColumns?.length && !isDeleted) {
+    decrypted = stripSyncCols(remote);
+    decryptColumns(meta.table, rowId, decrypted, enc);
+  }
+
   // classifyRemoteRow's contract: "remoteHash is null for a tombstone". A delete
   // has no content to compare, so a tombstone is NEVER a content-match "skip".
   // Honor that here regardless of the row's stored content_hash — pushEntry nulls
@@ -547,7 +713,8 @@ function applyRemote(
     // Knowledge applies a remote content change as a new version (append-only),
     // never an in-place upsert of an immutable version (A2, #823).
     if (meta.table === "knowledge") {
-      syncData.applyRemoteKnowledge(stripSyncCols(remote));
+      // `decrypted` is the stripped row with content/title decrypted (C-4).
+      syncData.applyRemoteKnowledge(decrypted ?? stripSyncCols(remote));
     } else if (meta.table === "knowledge_meta") {
       // A2 3b-2: upsert the immutable base_confidence + re-materialize confidence
       // (the materialized value & local decay clock are never overwritten by pull).
