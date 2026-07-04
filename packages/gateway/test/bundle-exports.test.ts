@@ -27,7 +27,7 @@
  */
 import { beforeAll, describe, test, expect } from "vitest";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execSync } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -105,7 +105,10 @@ describe("bundle exports", () => {
         "(pnpm --filter @loreai/gateway run bundle)…\n",
     );
     try {
-      execFileSync("pnpm", ["--filter", "@loreai/gateway", "run", "bundle"], {
+      // execSync goes through the platform shell (a fixed literal command, no
+      // interpolation), so it resolves `pnpm.cmd` on Windows — execFile("pnpm")
+      // would ENOENT there because a .cmd is not directly executable.
+      execSync("pnpm --filter @loreai/gateway run bundle", {
         cwd: repoRoot,
         stdio: "pipe",
         encoding: "utf8",
