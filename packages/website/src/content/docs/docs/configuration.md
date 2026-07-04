@@ -50,7 +50,7 @@ The cleanest way to override a single field is via env var if Lore reads it, or 
 - [`cache`](#cache) — Anthropic prompt cache TTL and speculative warming.
 - [`workspaces`](#workspaces) — Workspace sub-project paths or globs (relative to `.lore.json`). Imported into the root knowledge base on startup. Supports literal paths and single-level globs (e.g. "packages/*").
 - [`crossProject`](#crossProject) — Include cross-project knowledge in compaction summaries and auto-promote knowledge that recurs across 3+ projects. Default: true.
-- [`agentsFile`](#agentsFile) — AGENTS.md export/import configuration.
+- [`agentsFile`](#agentsFile) — AGENTS.md/CLAUDE.md export/import configuration.
 - [`loreFile`](#loreFile) — `.lore.md` export/import configuration.
 - [`user`](#user) — User identity for the self-entity. Falls back to git config user.name / user.email if omitted.
 
@@ -231,12 +231,12 @@ Include cross-project knowledge in compaction summaries and auto-promote knowled
 
 ## `agentsFile`
 
-AGENTS.md export/import configuration.
+AGENTS.md/CLAUDE.md export/import configuration.
 
 | Field | Type | Default | Constraints | Description |
 |---|---|---|---|---|
 | `enabled` | boolean | `true` |  | Enable AGENTS.md export/import behaviour. Set to false to disable. Default: true. |
-| `path` | string | `"AGENTS.md"` |  | Path to the agents file, relative to the project root. Default: 'AGENTS.md'. |
+| `path` | string | `"auto"` |  | Path to the agents file, relative to the project root, or 'auto' (default) to write CLAUDE.md for Claude Code sessions and AGENTS.md otherwise. Set an explicit path (e.g. 'AGENTS.md' or 'CLAUDE.md') to override. |
 
 
 ## `loreFile`
