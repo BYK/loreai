@@ -226,6 +226,7 @@ import {
   resignBody,
 } from "./cch";
 import { isClaudeCodeClient, isRotationEligible } from "./session";
+import { isClaudeCodeSideChannel } from "./side-channel";
 import {
   analyzeCacheTurn,
   categorizeBust,
@@ -8769,6 +8770,22 @@ export async function handleRequest(
     // All /lore:* commands are intercepted here and never forwarded upstream.
     const slashResult = await handleLoreSlashCommand(req, sessions, config);
     if (slashResult) return slashResult;
+
+    // --- Case 0.5: Claude Code side-channel → forward upstream untouched ---
+    // Auto-mode permission classifier, title/topic generation, and subagent
+    // namer/summary calls carry the live session's `x-claude-code-session-id`
+    // but NO coding system prompt (skipSystemPromptPrefix). They must never
+    // enter the pipeline: running them through it injects LTM/distilled
+    // prefixes or (worse) mis-routes them to compaction — corrupting the
+    // auto-mode classifier verdict and tripping Claude Code's 3-strike fallback
+    // that drops auto mode back to prompting for every action. This check MUST
+    // stay ahead of the structural-compaction detection below.
+    if (isClaudeCodeSideChannel(req)) {
+      log.info(
+        `claude-code side-channel: passthrough (messages=${req.messages.length} tools=${req.tools.length} maxTokens=${req.maxTokens})`,
+      );
+      return await handlePassthrough(req, config);
+    }
 
     // --- Case 1: Compaction request → intercept ---
     // Structural detection (session-aware) first, pattern matching as fallback.

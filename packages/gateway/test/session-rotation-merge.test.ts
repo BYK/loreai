@@ -29,12 +29,25 @@ import {
   DEFAULT_SYSTEM,
 } from "./helpers/fixtures";
 
+// A faithful Claude Code coding turn carries the anchored OAuth billing header
+// at system[0] (Claude Code emits it whenever `_CLAUDE_CODE_ASSUME_FIRST_PARTY_
+// BASE_URL=1`, which `lore run`/`lore setup` always set). Without it — and
+// without a "Working directory:" line — a request bearing an
+// `x-claude-code-session-id` is indistinguishable from a Claude Code
+// side-channel call (auto-mode classifier / title gen), which the pipeline
+// now forwards upstream untouched (see side-channel.test.ts). These
+// session-identification regression tests exercise REAL coding turns, so they
+// must present the coding-turn system prompt.
+const CC_BILLING_HEADER =
+  "x-anthropic-billing-header: cc_version=2.1.186; cc_entrypoint=cli; cch=a75d0;\n";
+const CC_CODING_SYSTEM = CC_BILLING_HEADER + DEFAULT_SYSTEM;
+
 function body(userMessage: string): Record<string, unknown> {
   return {
     model: DEFAULT_MODEL,
     max_tokens: 1024,
     stream: false,
-    system: DEFAULT_SYSTEM,
+    system: CC_CODING_SYSTEM,
     messages: [{ role: "user", content: userMessage }],
     tools: STANDARD_TOOLS,
   };
