@@ -140,6 +140,26 @@ describe("temporal re-chunk poison-row liveness", () => {
     expect(getKV(INFLIGHT)).toBe(""); // cleared after it settled
   });
 
+  it("skips only the poison row, still embedding earlier rows the cursor is pinned behind", async () => {
+    // The persisted cursor can sit earlier than the poison row (e.g. pinned at a
+    // transient failure's predecessor). Skipping must step over ONLY the poison
+    // row, not everything between the pin and it — otherwise a transient hiccup
+    // plus a later crash would silently abandon the rows in between.
+    insertMsg("t1", pid);
+    insertMsg("t2", pid);
+    insertMsg("t3", pid);
+    setKV(CURSOR, "t1"); // resume point is behind t2
+    setKV(INFLIGHT, "t3"); // ...but the poison row is t3, two rows ahead
+    setKV(ROW_ATTEMPTS, "1");
+
+    const processed = await backfillTemporalEmbeddings();
+
+    const ids = embeddedIds();
+    expect(ids).toContain("t2"); // the in-between row is still embedded
+    expect(ids).not.toContain("t3"); // only the poison row is skipped
+    expect(processed).toBe(1);
+  });
+
   it("never rewinds the cursor when a stale in-flight marker points at or behind it", async () => {
     insertMsg("t1", pid);
     insertMsg("t2", pid);

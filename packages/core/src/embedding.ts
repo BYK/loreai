@@ -2955,16 +2955,24 @@ export async function backfillTemporalEmbeddings(
   // per-row cursor checkpoint can't cover (the cursor advances only AFTER a
   // successful embed, so a row that reliably OOM-SIGKILLs the process is
   // re-fetched and re-crashes forever). Count the crash; once a row has taken
-  // the process down MAX_TEMPORAL_RECHUNK_ROW_CRASH_ATTEMPTS times, skip it by
-  // advancing the cursor past it so the walk makes progress. The skipped row
-  // keeps its legacy single vector + FTS, exactly like the transient giveup.
+  // the process down MAX_TEMPORAL_RECHUNK_ROW_CRASH_ATTEMPTS times, arm a
+  // one-shot skip so the walk steps over it (by id, when it reaches it) and
+  // makes progress. The skipped row keeps its legacy single vector + FTS,
+  // exactly like the transient-retry giveup.
+  //
+  // We skip by matching the row id in the loop rather than jumping the cursor:
+  // the persisted cursor may be pinned earlier than the poison row (at a
+  // transient failure's `retryFrom`), and jumping straight to the poison row
+  // would also skip those earlier, still-pending rows — abandoning their retries
+  // and any not-yet-embedded work between the pin and the poison row.
+  let poisonSkipId = "";
   const crashedRow = getKV(TEMPORAL_RECHUNK_INFLIGHT_KEY) ?? "";
   if (crashedRow) {
     const rowAttempts =
       Number(getKV(TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY) ?? "0") + 1;
-    // `crashedRow > cursor` guards against ever moving the cursor backwards: the
-    // in-flight row is always the one just past the checkpoint, but a stale
-    // marker (e.g. after a manual cursor rewind) must never rewind progress.
+    // `crashedRow > cursor` guards against a stale marker at/behind the resume
+    // point (e.g. after a manual cursor rewind): only a row still ahead of the
+    // cursor is a live poison-row candidate.
     if (
       rowAttempts >= MAX_TEMPORAL_RECHUNK_ROW_CRASH_ATTEMPTS &&
       crashedRow > cursor
@@ -2973,8 +2981,7 @@ export async function backfillTemporalEmbeddings(
         `temporal re-chunk: row ${crashedRow} crashed the process ` +
           `${rowAttempts}× — skipping it (keeps its legacy vector + FTS)`,
       );
-      cursor = crashedRow;
-      setKV(TEMPORAL_RECHUNK_CURSOR_KEY, cursor);
+      poisonSkipId = crashedRow;
       setKV(TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY, "0");
     } else {
       // Below the threshold: give the row another chance on this run, but
@@ -3079,6 +3086,17 @@ export async function backfillTemporalEmbeddings(
 
     let stop = false;
     for (const row of rows) {
+      // Poison row (armed above): step over it WITHOUT embedding — it keeps its
+      // legacy vector + FTS. One-shot: clear the sentinel so only this single
+      // row is skipped and the walk resumes normally. The cursor still advances
+      // here, so the poison row is durably passed.
+      if (poisonSkipId && row.id === poisonSkipId) {
+        poisonSkipId = "";
+        cursor = row.id;
+        scanned++;
+        setKV(TEMPORAL_RECHUNK_CURSOR_KEY, retryFrom ?? cursor);
+        continue;
+      }
       // Idle-gate before starting this row's embed so the walk yields the shared
       // embed pool to live traffic. Parking here is safe: the previous row is
       // already checkpointed, so a park (or a crash while parked) resumes from
