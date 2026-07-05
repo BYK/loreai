@@ -13,7 +13,8 @@ import {
   _setPoolFreememForTest,
   _setTestWorkerFactory,
 } from "../src/embedding";
-import { memoryModelEmbedCap } from "../src/embedding-cap";
+import { backoffEmbedCap, memoryModelEmbedCap } from "../src/embedding-cap";
+import { EMBED_OOM_EXIT_CODE } from "../src/embedding-worker-types";
 
 // Regression suite for the embedding-pool OOM that SIGKILLed the whole gateway
 // (Onur's report): the pool grew to N workers, each independently sized its
@@ -158,5 +159,37 @@ describe("embedding pool memory sizing (OOM regression)", () => {
     expect(firstCap).toBe(memoryModelEmbedCap(6 * GB));
     expect(secondCap).toBe(memoryModelEmbedCap(2 * GB));
     expect(secondCap).toBeLessThan(firstCap);
+  });
+
+  it("clamps the OOM-respawn resubmit to current free memory, not just the ×0.7 backoff", async () => {
+    // The OOM-respawn resubmit payload is posted directly (no later
+    // effectiveMaxTokens), so it is the ONLY cap on the native-SIGKILL retry
+    // path. Pin the learned cap high, embed while memory is ample, then DROP
+    // free BEFORE the worker OOMs: the resubmit must be sized to the dropped
+    // free, not merely the ×0.7 backoff of the (larger) construction-time cap.
+    _persistEmbedCap(8192, 0);
+    _setEmbedPoolSizeForTest(1); // divisor 1 → isolate the clamp
+    _setContainerFreeForTest(16 * GB);
+    const fakes = installCapturingWorkers();
+
+    void settle(embed(["a document to embed under ample memory"], "document"));
+    await flush();
+    expect(fakes).toHaveLength(1);
+    const first = fakes[0].lastPosted();
+
+    // Memory collapses, then the worker OOM-exits → respawn re-submits the same
+    // request on a fresh worker.
+    _setContainerFreeForTest(2 * GB);
+    fakes[0].emit("exit", EMBED_OOM_EXIT_CODE);
+    await flush();
+
+    expect(fakes.length).toBeGreaterThanOrEqual(2);
+    const resubmitted = fakes[1].lastPosted();
+    expect(resubmitted.id).toBe(first.id);
+    // min(backoff(first), memoryModelEmbedCap(2GB)) === memoryModelEmbedCap(2GB).
+    expect(resubmitted.maxTokens).toBe(memoryModelEmbedCap(2 * GB));
+    expect(resubmitted.maxTokens).toBeLessThan(
+      backoffEmbedCap(first.maxTokens),
+    );
   });
 });
