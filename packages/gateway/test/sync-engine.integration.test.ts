@@ -13,7 +13,15 @@
  */
 import { execFileSync } from "node:child_process";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { db, ensureProject, ltm, setKV, syncData } from "@loreai/core";
+import {
+  crypto,
+  db,
+  ensureProject,
+  keystore,
+  ltm,
+  setKV,
+  syncData,
+} from "@loreai/core";
 import {
   afterAll,
   afterEach,
@@ -22,9 +30,20 @@ import {
   describe,
   expect,
   it,
+  vi,
 } from "vitest";
 import { pullOnce, pushOnce } from "../src/sync";
 import { type PgHarness, startPgHarness } from "./helpers/pg-harness";
+
+// The engine drives real supabase-js clients we pass in explicitly, but the encryption
+// resolver derives the scope from the LOCAL session via getCurrentUser(). These tests
+// aren't locally logged in (they auth via a JWT client), so pin getCurrentUser to the
+// test user so the scope matches the JWT's auth.uid(). All other real exports are kept.
+let mockUid = "";
+vi.mock("../src/supabase", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/supabase")>()),
+  getCurrentUser: () => Promise.resolve(mockUid ? { user_id: mockUid } : null),
+}));
 
 function dockerReady(): boolean {
   try {
@@ -81,6 +100,7 @@ beforeAll(async () => {
   if (SKIP) return;
   h = await startPgHarness({ postgrest: true });
   uid = await h.createUser("engine@test.dev");
+  mockUid = uid; // the encryption scope = this user (matches the JWT's auth.uid())
 }, 240_000);
 
 afterAll(async () => {
@@ -373,3 +393,128 @@ describe.skipIf(SKIP)("sync engine ↔ real Postgres/PostgREST", () => {
     expect(n).toBe(5);
   });
 });
+
+describe.skipIf(SKIP)(
+  "encrypted knowledge round-trip (C-1..C-4b, real engine)",
+  () => {
+    const FAST = { t: 1, m: 256, p: 1 }; // light Argon2id for escrow (test-only)
+
+    // The top-level beforeEach clears knowledge etc. but NOT the local/remote key
+    // tables — wipe those so each encryption test starts from a truly fresh account.
+    beforeEach(async () => {
+      if (SKIP) return;
+      db().exec(
+        "DELETE FROM account_identity; DELETE FROM account_escrow; DELETE FROM scope_keys",
+      );
+      keystore.lock();
+      for (const t of ["account_escrow", "scope_keys"]) {
+        await h.client.query(`DELETE FROM public.${t}`);
+      }
+    });
+
+    it("device-1 encrypts → remote stores CIPHERTEXT → device-2 unlocks + pulls plaintext", async () => {
+      const PLAIN = "top secret knowledge body";
+      const client = clientFor(uid);
+
+      // --- Device 1: arm encryption, create knowledge, push. ---
+      keystore.setPassphrase("correct horse battery", { params: FAST }); // identity + escrow
+      syncData.enableSync("basic");
+      insertKnowledge("ke", PLAIN);
+      const push = await pushOnce(client);
+      expect(push.pushed).toBeGreaterThanOrEqual(1);
+      // NOTE (real gap this e2e surfaced): the DEK row is minted lazily INSIDE the first
+      // push (getScopeKey during encrypt), so its capture lands too late for that cycle —
+      // the encrypted knowledge reaches the remote one cycle BEFORE scope_keys. A fresh
+      // device pulling in that window would mint a divergent DEK. The scheduler self-heals
+      // device-1 within a tick, but the window is a real risk (tracked in #1182: eager-
+      // mint the DEK at `lore sync enable` so scope_keys ships with the first push). Here
+      // a second push flushes it deterministically.
+      await pushOnce(client);
+      const rk = await h.asUser(uid, (c) =>
+        c.query("select 1 from public.scope_keys").then((x) => x.rows),
+      );
+      expect(rk).toHaveLength(1);
+
+      // The remote MUST hold ciphertext, never the plaintext — content AND title are
+      // sealed (C-4), and each is a real envelope over the wire.
+      const remote = await h.asUser(uid, (c) =>
+        c
+          .query("select content, title from public.knowledge where id='ke'")
+          .then((x) => x.rows),
+      );
+      expect(remote).toHaveLength(1);
+      expect(remote[0].content).not.toBe(PLAIN);
+      expect(remote[0].title).not.toBe("T");
+      expect(
+        crypto.isEnvelope(Buffer.from(remote[0].content as string, "base64")),
+      ).toBe(true);
+      expect(
+        crypto.isEnvelope(Buffer.from(remote[0].title as string, "base64")),
+      ).toBe(true);
+
+      // --- Device 2: a fresh device on the SAME account. Wipe ALL local state,
+      // including sync_state AND sync_outbox, so pulls take the clean-apply path a real
+      // fresh device sees (no stale synced-hash, no pending-local-change from the wipe). ---
+      db().exec(
+        "DELETE FROM account_identity; DELETE FROM account_escrow; DELETE FROM scope_keys; DELETE FROM knowledge; DELETE FROM knowledge_meta; DELETE FROM knowledge_meta_crdt; DELETE FROM sync_state; DELETE FROM sync_outbox",
+      );
+      keystore.lock();
+      for (const m of syncData.syncedTables("basic")) {
+        setKV(
+          `sync.pull.${m.table}`,
+          m.pullOnly ? `${Date.now() + 31_536_000_000}|` : "0|",
+        );
+        setKV(`sync.push.${m.table}`, "0");
+      }
+      expect(keystore.encryptionState()).toBe("off"); // nothing local yet
+
+      // First pull brings escrow + scope_keys FIRST → the device is "locked", so the
+      // encrypted knowledge table is skipped (cursor frozen) — never stored as ciphertext.
+      const p1 = await pullOnce(client);
+      expect(p1.conflicts).toBe(0); // fresh device → clean apply, never a conflict
+      expect(keystore.encryptionState()).toBe("locked");
+      expect(syncData.getRowById("knowledge", "ke")).toBeNull();
+
+      // Unlock with the passphrase → recovers device-1's identity → "on".
+      expect(keystore.unlockWithPassphrase("correct horse battery")).toBe(true);
+      expect(keystore.encryptionState()).toBe("on");
+
+      // Second pull now unwraps the DEK and decrypts the knowledge back to plaintext.
+      const p2 = await pullOnce(client);
+      expect(p2.conflicts).toBe(0);
+      expect(syncData.getRowById("knowledge", "ke")?.content).toBe(PLAIN);
+      expect(syncData.getRowById("knowledge", "ke")?.title).toBe("T");
+
+      // No ping-pong: content_hash is over PLAINTEXT, and the pulled rows applied under
+      // capture-suppression (no outbox), so the decrypted device has nothing to push back.
+      expect((await pushOnce(client)).pushed).toBe(0);
+    });
+
+    it("a wrong passphrase does NOT unlock, and knowledge stays deferred", async () => {
+      const client = clientFor(uid);
+      keystore.setPassphrase("the-right-one", { params: FAST });
+      syncData.enableSync("basic");
+      insertKnowledge("kw", "still secret");
+      await pushOnce(client);
+
+      // Fresh device again.
+      db().exec(
+        "DELETE FROM account_identity; DELETE FROM account_escrow; DELETE FROM scope_keys; DELETE FROM knowledge; DELETE FROM knowledge_meta; DELETE FROM knowledge_meta_crdt; DELETE FROM sync_state; DELETE FROM sync_outbox",
+      );
+      keystore.lock();
+      for (const m of syncData.syncedTables("basic")) {
+        setKV(
+          `sync.pull.${m.table}`,
+          m.pullOnly ? `${Date.now() + 31_536_000_000}|` : "0|",
+        );
+      }
+
+      await pullOnce(client); // escrow arrives → locked
+      expect(keystore.encryptionState()).toBe("locked");
+      expect(keystore.unlockWithPassphrase("WRONG")).toBe(false);
+      expect(keystore.encryptionState()).toBe("locked"); // still locked
+      await pullOnce(client);
+      expect(syncData.getRowById("knowledge", "kw")).toBeNull(); // never decrypted
+    });
+  },
+);
