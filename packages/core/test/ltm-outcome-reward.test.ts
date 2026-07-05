@@ -556,12 +556,17 @@ describe("outcome-reward: outcomeImpactMany (batched N+1 fix, LOREAI-GATEWAY-3D)
     expect(ltm.outcomeImpactMany([a]).get(a)).toEqual(ltm.outcomeImpact(a));
   });
 
-  test("de-duplicates repeated ids and returns empty map for empty input", () => {
+  test("counts are not inflated by duplicate ids; empty input → empty map", () => {
     const a = getEntry(makeProjectEntry("dedup-a", 0.5)).logical_id;
     creditOnce(a, "d-a1", "pass");
+    // Requesting the same id repeatedly must not multiply its tally (the id is
+    // collapsed before the aggregate; `IN (a,a,a)` also never matches a row
+    // more than once). Dedup itself is a pure query-size optimization with no
+    // behavioral signature, so this asserts the observable contract only.
     const map = ltm.outcomeImpactMany([a, a, a]);
     expect(map.size).toBe(1);
     expect(map.get(a)).toEqual({ passes: 1, fails: 0 });
+    // Empty input returns an empty map (and issues no query).
     expect(ltm.outcomeImpactMany([]).size).toBe(0);
   });
 });
