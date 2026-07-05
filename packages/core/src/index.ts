@@ -43,6 +43,7 @@ export * as latReader from "./lat-reader";
 export * as entities from "./entities";
 export * as entityRebuild from "./entity-rebuild";
 export * as patternExtract from "./pattern-extract";
+export * as degradationSignals from "./degradation-signals";
 export * as instructionDetect from "./instruction-detect";
 export * as log from "./log";
 export * as conversationImport from "./import";
