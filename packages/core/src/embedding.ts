@@ -13,7 +13,7 @@
  * back silently to FTS-only when unavailable.
  */
 
-import { freemem } from "node:os";
+import { availableParallelism, freemem } from "node:os";
 import { performance } from "node:perf_hooks";
 import { db, getKV, setKV } from "./db";
 import { isVecAvailable } from "./db/vec";
@@ -44,12 +44,14 @@ import {
   MODEL_MAX_TOKENS,
   PER_WORKER_MEM_BUDGET_BYTES,
   EMBED_POOL_ABS_MAX,
+  backfillThrottleSleepMs,
   backoffEmbedCap,
   clampFreeToContainerLimit,
   desiredEmbedPoolSize,
   memoryModelEmbedCap,
   reconcileEmbedCap,
   reprobeEmbedCap,
+  resolveBackfillCpuDuty,
   shouldReprobeEmbedCap,
   type PersistedEmbedCap,
 } from "./embedding-cap";
@@ -1187,6 +1189,42 @@ function configuredEmbedPoolSize(): number | undefined {
  *  to `undefined`, never `NaN`) without spinning up a pool. */
 export function _configuredEmbedPoolSize(): number | undefined {
   return configuredEmbedPoolSize();
+}
+
+/** Resolve the configured backfill CPU duty cycle: `LORE_BACKFILL_CPU_DUTY`
+ *  wins, then `search.embeddings.backfillCpuDuty`, else `undefined` (auto-scaled
+ *  by CPU count — full speed on roomy hosts, gentler on small ones). Invalid
+ *  values are ignored (fall through). Read per-call so config reloads take
+ *  effect. */
+function configuredBackfillCpuDuty(): number | undefined {
+  const raw = process.env.LORE_BACKFILL_CPU_DUTY;
+  if (raw !== undefined) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) return n; // clamped in resolveBackfillCpuDuty
+    // invalid env → ignore, fall through to config
+  }
+  const cfg = config().search.embeddings.backfillCpuDuty;
+  if (typeof cfg === "number" && Number.isFinite(cfg) && cfg > 0) return cfg;
+  return undefined;
+}
+
+/** Test seam: exposes the env/config resolution for {@link backfillThrottleSleepMs}. */
+export function _configuredBackfillCpuDuty(): number | undefined {
+  return configuredBackfillCpuDuty();
+}
+
+/** The inter-row throttle sleep used by the temporal backfill. Indirected behind
+ *  a module variable so tests can observe it (and skip the real timer) without
+ *  wall-clock flakiness. */
+let backfillSleep: (ms: number) => Promise<void> = (ms) =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Test seam: replace the backfill throttle sleep (null restores the default). */
+export function _setBackfillSleepForTest(
+  fn: ((ms: number) => Promise<void>) | null,
+): void {
+  backfillSleep =
+    fn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
 }
 
 /** Test-only override of the embedding-pool ceiling (null clears). Sets the
@@ -3138,6 +3176,14 @@ export async function backfillTemporalEmbeddings(
   const PROGRESS_INTERVAL_MS = 30_000;
   let lastProgressAt = Date.now();
 
+  // CPU duty cycle for this walk: after each row we sleep a fraction of the
+  // time the embed took so a one-time background migration doesn't peg a core on
+  // a weak host. Resolved once per walk (full speed on roomy hosts).
+  const backfillDuty = resolveBackfillCpuDuty(
+    configuredBackfillCpuDuty(),
+    availableParallelism(),
+  );
+
   for (;;) {
     // `length(content) >= 50` mirrors embedTemporalMessage's short-message skip,
     // so the walk never embeds a message the write path would have ignored.
@@ -3202,6 +3248,7 @@ export async function backfillTemporalEmbeddings(
       // cleared the moment the embed settles — success or catchable error — so
       // only a hard process death ever leaves it set.
       setKV(TEMPORAL_RECHUNK_INFLIGHT_KEY, row.id);
+      const embedStartedAt = Date.now();
       try {
         // Count only messages that actually got a chunk set written. A row that
         // reduces to zero embeddable units (store() never persists one, but the
@@ -3254,6 +3301,15 @@ export async function backfillTemporalEmbeddings(
         );
         lastProgressAt = Date.now();
       }
+
+      // CPU throttle: sleep a fraction of the embed time so this one-time
+      // migration doesn't peg a core on a weak host. After the checkpoint, so a
+      // crash while sleeping resumes cleanly. Skipped entirely at full duty.
+      const throttleMs = backfillThrottleSleepMs(
+        Date.now() - embedStartedAt,
+        backfillDuty,
+      );
+      if (throttleMs > 0) await backfillSleep(throttleMs);
     }
 
     if (stop) break;

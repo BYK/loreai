@@ -1,11 +1,14 @@
 import { describe, it, expect } from "vitest";
 import {
+  BACKFILL_MIN_AUTO_DUTY,
+  BACKFILL_THROTTLE_MAX_SLEEP_MS,
   DEFAULT_MAX_EMBED_POOL,
   EMBED_POOL_ABS_MAX,
   MIN_EMBED_TOKENS,
   MODEL_MAX_TOKENS,
   PER_WORKER_MEM_BUDGET_BYTES,
   EMBED_TOKEN_CEILING,
+  backfillThrottleSleepMs,
   backoffEmbedCap,
   clampEmbedCap,
   clampFreeToContainerLimit,
@@ -13,6 +16,7 @@ import {
   memoryModelEmbedCap,
   reconcileEmbedCap,
   reprobeEmbedCap,
+  resolveBackfillCpuDuty,
   shouldReprobeEmbedCap,
 } from "../src/embedding-cap";
 
@@ -367,5 +371,61 @@ describe("desiredEmbedPoolSize", () => {
     expect(desiredEmbedPoolSize(Number.NaN)).toBe(1);
     expect(desiredEmbedPoolSize(-100)).toBe(1);
     expect(desiredEmbedPoolSize(0, 8)).toBe(1);
+  });
+});
+
+describe("resolveBackfillCpuDuty", () => {
+  it("honors an explicit configured value, clamped to [0.1, 1]", () => {
+    // Explicit config/env wins regardless of core count.
+    expect(resolveBackfillCpuDuty(0.5, 2)).toBe(0.5);
+    expect(resolveBackfillCpuDuty(0.5, 64)).toBe(0.5);
+    expect(resolveBackfillCpuDuty(1, 1)).toBe(1);
+    // Out-of-range values are clamped rather than rejected.
+    expect(resolveBackfillCpuDuty(2, 8)).toBe(1);
+    expect(resolveBackfillCpuDuty(0.01, 8)).toBe(0.1);
+  });
+
+  it("auto-scales by CPU count when unconfigured: full speed on roomy hosts", () => {
+    expect(resolveBackfillCpuDuty(undefined, 8)).toBe(1);
+    expect(resolveBackfillCpuDuty(undefined, 16)).toBe(1); // clamped at 1
+    expect(resolveBackfillCpuDuty(undefined, 4)).toBe(0.5); // 4/8
+    expect(resolveBackfillCpuDuty(undefined, 6)).toBe(0.75); // 6/8
+  });
+
+  it("floors the auto duty on small hosts so a large corpus still finishes", () => {
+    // 2/8 = 0.25 < floor → floor; 1 core likewise.
+    expect(resolveBackfillCpuDuty(undefined, 2)).toBe(BACKFILL_MIN_AUTO_DUTY);
+    expect(resolveBackfillCpuDuty(undefined, 1)).toBe(BACKFILL_MIN_AUTO_DUTY);
+  });
+
+  it("fails safe to the floor for a non-finite or non-positive core count", () => {
+    expect(resolveBackfillCpuDuty(undefined, 0)).toBe(BACKFILL_MIN_AUTO_DUTY);
+    expect(resolveBackfillCpuDuty(undefined, Number.NaN)).toBe(
+      BACKFILL_MIN_AUTO_DUTY,
+    );
+    // A non-finite configured value is ignored → auto path.
+    expect(resolveBackfillCpuDuty(Number.NaN, 8)).toBe(1);
+  });
+});
+
+describe("backfillThrottleSleepMs", () => {
+  it("holds the duty cycle: sleep = elapsed·(1−d)/d", () => {
+    expect(backfillThrottleSleepMs(100, 0.5)).toBe(100); // 100·0.5/0.5
+    expect(backfillThrottleSleepMs(100, 0.8)).toBe(25); // 100·0.2/0.8
+    expect(backfillThrottleSleepMs(300, 0.75)).toBe(100); // 300·0.25/0.75
+  });
+
+  it("never throttles at full duty or for a non-positive elapsed", () => {
+    expect(backfillThrottleSleepMs(100, 1)).toBe(0);
+    expect(backfillThrottleSleepMs(100, 1.5)).toBe(0); // duty > 1 guarded
+    expect(backfillThrottleSleepMs(0, 0.5)).toBe(0);
+    expect(backfillThrottleSleepMs(-5, 0.5)).toBe(0);
+  });
+
+  it("caps a single sleep so an outlier embed can't stall the walk", () => {
+    // duty 0.1 over a huge elapsed would ask for 9× elapsed → capped.
+    expect(backfillThrottleSleepMs(10 * 60_000, 0.1)).toBe(
+      BACKFILL_THROTTLE_MAX_SLEEP_MS,
+    );
   });
 });

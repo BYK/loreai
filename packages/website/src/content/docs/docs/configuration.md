@@ -187,6 +187,7 @@ Vector embedding search provider, model, and dimensions.
 | `workerOffload` | boolean | `true` |  | Run vector searches on a read-worker pool off the main event loop. Kill switch (default true); set false to force the in-process path. |
 | `workerPoolSize` | number | `2` | min 1, max 16 | Number of read-worker threads for off-thread vector search. Default: 2. |
 | `embedPoolSize` | number | — | min 1, max 8 | Number of local embedding worker threads (each loads its own ~137MB model). Default: memory-gated (1–2). Override with LORE_EMBED_POOL_SIZE. |
+| `backfillCpuDuty` | number | — | min 0.1, max 1 | Duty cycle (0.1–1.0) for the one-time temporal re-chunk backfill — the fraction of time it may spend embedding, sleeping the rest so it doesn't peg a core on weak hosts. 1.0 = full speed. Default: auto-scaled by CPU count. Override with LORE_BACKFILL_CPU_DUTY. |
 
 ### `search.recall`
 

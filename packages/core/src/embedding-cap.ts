@@ -315,3 +315,58 @@ export function reprobeEmbedCap(
     EMBED_TOKEN_CEILING,
   );
 }
+
+/** CPU-count at/above which the one-time temporal re-chunk backfill runs at full
+ *  speed (no throttle) by default. Below it, the auto duty cycle scales down so a
+ *  weak, few-core host isn't pegged by a background migration. */
+export const BACKFILL_FULLSPEED_CORES = 8;
+
+/** Floor for the auto-scaled duty cycle: even a 1-core host runs the backfill at
+ *  least this fraction of the time, so a large corpus still finishes in bounded
+ *  wall-clock rather than crawling forever. */
+export const BACKFILL_MIN_AUTO_DUTY = 0.4;
+
+/** Hard cap on a single inter-row throttle sleep. Keeps the walk responsive to
+ *  shutdown/reset even if one embed was an outlier (e.g. a huge merged tail),
+ *  and bounds the effect of a pathological duty value. */
+export const BACKFILL_THROTTLE_MAX_SLEEP_MS = 2_000;
+
+/**
+ * Resolve the duty cycle (0.1–1.0) for the temporal re-chunk backfill: the
+ * fraction of wall-clock time it may spend embedding, sleeping the rest so a
+ * background migration doesn't peg a core on a weak host.
+ *
+ * An explicit `configured` value (from `search.embeddings.backfillCpuDuty` or
+ * `LORE_BACKFILL_CPU_DUTY`) always wins, clamped to [0.1, 1]. Otherwise it
+ * auto-scales by logical CPU count: full speed (1.0) at
+ * {@link BACKFILL_FULLSPEED_CORES}+ cores, scaling down linearly to a
+ * {@link BACKFILL_MIN_AUTO_DUTY} floor on smaller hosts. Non-finite/≤0 core
+ * counts fall back to the floor (fail-safe: throttle rather than peg).
+ */
+export function resolveBackfillCpuDuty(
+  configured: number | undefined,
+  cores: number,
+): number {
+  if (configured != null && Number.isFinite(configured)) {
+    return Math.min(1, Math.max(0.1, configured));
+  }
+  if (!Number.isFinite(cores) || cores <= 0) return BACKFILL_MIN_AUTO_DUTY;
+  const scaled = cores / BACKFILL_FULLSPEED_CORES;
+  return Math.min(1, Math.max(BACKFILL_MIN_AUTO_DUTY, scaled));
+}
+
+/**
+ * Inter-row throttle sleep (ms) for a given embed duration and duty cycle. To
+ * hold the duty cycle `d = work / (work + sleep)`, sleep `elapsed·(1−d)/d`.
+ * `duty >= 1` (or non-positive elapsed) → 0 (no throttle). Bounded by
+ * {@link BACKFILL_THROTTLE_MAX_SLEEP_MS}.
+ */
+export function backfillThrottleSleepMs(
+  embedElapsedMs: number,
+  duty: number,
+): number {
+  if (!(duty < 1) || !(embedElapsedMs > 0)) return 0;
+  const d = Math.min(1, Math.max(0.1, duty));
+  const sleep = embedElapsedMs * ((1 - d) / d);
+  return Math.min(BACKFILL_THROTTLE_MAX_SLEEP_MS, Math.round(sleep));
+}
