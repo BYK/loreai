@@ -23,6 +23,7 @@ const DIM = 4;
 const CURSOR = "lore:temporal_rechunk.cursor";
 const INFLIGHT = "lore:temporal_rechunk.inflight";
 const ROW_ATTEMPTS = "lore:temporal_rechunk.row_attempts";
+const SKIP = "lore:temporal_rechunk.skip";
 
 function vec(): Float32Array {
   const a = new Float32Array(DIM);
@@ -195,5 +196,62 @@ describe("temporal re-chunk poison-row liveness", () => {
     expect(ids).not.toContain("t1");
     expect(processed).toBe(0);
     expect(getKV(INFLIGHT)).toBe("");
+  });
+
+  it("re-arms a durable skip on restart even with no in-flight crash this run", async () => {
+    // The skip decision from a prior crash is persisted (SKIP), so it survives a
+    // restart where the in-flight marker is empty and the cursor is pinned behind
+    // the poison row — the row must still be stepped over, not re-embedded.
+    insertMsg("t1", pid);
+    insertMsg("t2", pid);
+    insertMsg("t3", pid);
+    setKV(SKIP, "t2"); // recorded on a prior crash
+    setKV(CURSOR, "t1"); // pinned behind the poison row
+    setKV(INFLIGHT, ""); // no crash this run
+
+    const processed = await backfillTemporalEmbeddings();
+
+    const ids = embeddedIds();
+    expect(ids).not.toContain("t2"); // durable skip honored
+    expect(ids).toContain("t3");
+    expect(processed).toBe(1);
+  });
+
+  it("keeps the durable skip when a transient failure pins the cursor behind the poison row", async () => {
+    // The exact crash-loop scenario: a transient failure on an earlier row pins
+    // the persisted cursor behind the poison row. The poison skip must be
+    // recorded DURABLY so the next restart steps over the row instead of
+    // re-embedding (and re-crashing on) it.
+    insertMsg("t0", pid);
+    insertMsg("t1", pid); // transient-fails → pins retryFrom at t0
+    insertMsg("t2", pid); // poison row, crash-armed this run
+    insertMsg("t3", pid);
+    setKV(CURSOR, ""); // walk from the start
+    setKV(INFLIGHT, "t2"); // crashed mid-embed on t2 last time
+    setKV(ROW_ATTEMPTS, "1"); // this run's detection reaches the skip threshold
+    _restoreProvider({
+      provider: {
+        maxBatchSize: 8,
+        async embed(texts: string[]) {
+          if (texts.some((t) => t.includes("message t1 "))) {
+            throw new Error("transient embed failure");
+          }
+          return texts.map(() => vec());
+        },
+      },
+    });
+
+    const processed = await backfillTemporalEmbeddings();
+
+    const ids = embeddedIds();
+    expect(ids).not.toContain("t2"); // poison row skipped
+    expect(ids).not.toContain("t1"); // transient row failed this pass
+    expect(ids).toContain("t0");
+    expect(ids).toContain("t3");
+    expect(processed).toBe(2); // t0 + t3
+    // The cursor is pinned behind t2 by the transient retryFrom...
+    expect(getKV(CURSOR)).toBe("t0");
+    // ...so the skip MUST persist durably, or the next restart re-crashes on t2.
+    expect(getKV(SKIP)).toBe("t2");
   });
 });

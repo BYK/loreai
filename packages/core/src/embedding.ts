@@ -2813,6 +2813,16 @@ const TEMPORAL_RECHUNK_INFLIGHT_KEY = "lore:temporal_rechunk.inflight";
 /** KV key: how many times the in-flight row above has taken the process down. */
 const TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY = "lore:temporal_rechunk.row_attempts";
 /**
+ * KV key: a poison row the walk has decided to permanently step over. DURABLE
+ * (unlike the in-memory `poisonSkipId`) so the skip survives restart even when
+ * the persisted cursor is pinned BEHIND the poison row — which happens when an
+ * earlier row hit a transient failure this pass (its `retryFrom` pins the cursor
+ * to its predecessor). Without a durable record the per-row checkpoint keeps
+ * writing that pinned cursor, so the poison row is re-fetched and re-crashes the
+ * process on every restart until the transient row's retry passes are exhausted.
+ */
+const TEMPORAL_RECHUNK_SKIP_KEY = "lore:temporal_rechunk.skip";
+/**
  * How many times a single row may crash the whole process before the walk skips
  * it (advances the cursor past it) instead of retrying forever. The row keeps
  * its legacy single vector + FTS, exactly like the transient-retry giveup — a
@@ -2873,6 +2883,7 @@ export function resetTemporalRechunkProgress(): void {
   setKV(TEMPORAL_RECHUNK_ATTEMPTS_KEY, "0");
   setKV(TEMPORAL_RECHUNK_INFLIGHT_KEY, "");
   setKV(TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY, "0");
+  setKV(TEMPORAL_RECHUNK_SKIP_KEY, "");
 }
 
 /**
@@ -2966,6 +2977,17 @@ export async function backfillTemporalEmbeddings(
   // would also skip those earlier, still-pending rows — abandoning their retries
   // and any not-yet-embedded work between the pin and the poison row.
   let poisonSkipId = "";
+
+  // Re-arm a previously-recorded durable skip. This is what makes the skip
+  // survive restarts when the cursor is pinned behind the poison row: the KV
+  // outlives the in-memory `poisonSkipId`, so the row is stepped over on every
+  // pass until the cursor durably moves past it (then the marker is retired).
+  const durableSkip = getKV(TEMPORAL_RECHUNK_SKIP_KEY) ?? "";
+  if (durableSkip) {
+    if (durableSkip > cursor) poisonSkipId = durableSkip;
+    else setKV(TEMPORAL_RECHUNK_SKIP_KEY, ""); // cursor passed it → retire
+  }
+
   const crashedRow = getKV(TEMPORAL_RECHUNK_INFLIGHT_KEY) ?? "";
   if (crashedRow) {
     // `crashedRow > cursor`: a genuine mid-embed crash always leaves the marker
@@ -2986,6 +3008,10 @@ export async function backfillTemporalEmbeddings(
             `${rowAttempts}× — skipping it (keeps its legacy vector + FTS)`,
         );
         poisonSkipId = crashedRow;
+        // Record the skip durably so a cursor pinned behind it (transient
+        // retryFrom) can't cause the row to be re-embedded — and re-crash — on
+        // the next restart.
+        setKV(TEMPORAL_RECHUNK_SKIP_KEY, crashedRow);
         setKV(TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY, "0");
       } else {
         // Below the threshold: give the row another chance on this run, but
@@ -3072,6 +3098,7 @@ export async function backfillTemporalEmbeddings(
         // Clean pass reached the end — latch done; subsequent startups skip it.
         setKV(TEMPORAL_RECHUNK_DONE_KEY, "1");
         setKV(TEMPORAL_RECHUNK_ATTEMPTS_KEY, "0");
+        setKV(TEMPORAL_RECHUNK_SKIP_KEY, "");
       } else {
         // Some rows failed this pass. Rewind to the first of them so the next
         // startup retries — up to a bounded number of passes, after which we
@@ -3084,6 +3111,7 @@ export async function backfillTemporalEmbeddings(
           );
           setKV(TEMPORAL_RECHUNK_DONE_KEY, "1");
           setKV(TEMPORAL_RECHUNK_ATTEMPTS_KEY, "0");
+          setKV(TEMPORAL_RECHUNK_SKIP_KEY, "");
         } else {
           setKV(TEMPORAL_RECHUNK_ATTEMPTS_KEY, String(attempts));
           setKV(TEMPORAL_RECHUNK_CURSOR_KEY, retryFrom);
