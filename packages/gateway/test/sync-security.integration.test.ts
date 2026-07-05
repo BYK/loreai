@@ -282,6 +282,86 @@ describe.skipIf(gate())(
   },
 );
 
+describe.skipIf(gate())(
+  "sync migrations — scope_keys DEK immutability (0012, #825)",
+  () => {
+    // v1 personal: member_user_id == scope_id == author_id == the user. Bind $1 (text,
+    // member_user_id) and $2 (uuid, scope_id/author_id) both from `user`.
+    const insKey = (user: string, dek = "d3JhcHBlZERFSw==") =>
+      h.asUser(user, (c) =>
+        c.query(
+          `insert into public.scope_keys (member_user_id, scope_id, author_id, wrapped_dek)
+           values ($1, $2, $2, $3)`,
+          [user, user, dek],
+        ),
+      );
+    const updKey = (user: string, sql: string) =>
+      h.asUser(user, (c) =>
+        c.query(
+          `update public.scope_keys set ${sql}
+             where scope_id = $1 and member_user_id = $2`,
+          [user, user], // $1 uuid (scope_id), $2 text (member_user_id)
+        ),
+      );
+
+    it("allows a metadata-only update that keeps wrapped_dek", async () => {
+      const a = await h.createUser();
+      await insKey(a);
+      const r = await updKey(a, "content_hash='abc123'");
+      expect(r.rowCount).toBe(1);
+    });
+
+    it("rejects changing wrapped_dek at the same key_epoch (first-write-wins)", async () => {
+      const a = await h.createUser();
+      await insKey(a, "T1JJR0lOQUw="); // "ORIGINAL"
+      const err = await expectError(() =>
+        updKey(a, "wrapped_dek='Q0xPQkJFUg=='"),
+      );
+      expect(err.code).toBe("23514");
+      // the original DEK survives the rejected clobber
+      const { rows } = await h.asUser(a, (c) =>
+        c.query(
+          "select wrapped_dek from public.scope_keys where scope_id=$1::uuid",
+          [a],
+        ),
+      );
+      expect(rows[0].wrapped_dek).toBe("T1JJR0lOQUw=");
+    });
+
+    it("allows changing wrapped_dek at a HIGHER key_epoch (rotation)", async () => {
+      const a = await h.createUser();
+      await insKey(a, "ZXBvY2gw"); // "epoch0"
+      const r = await updKey(a, "wrapped_dek='ZXBvY2gx', key_epoch=1");
+      expect(r.rowCount).toBe(1);
+    });
+
+    it("allows an idempotent upsert of the SAME wrapped_dek (production convergence)", async () => {
+      const a = await h.createUser();
+      await insKey(a, "U0FNRQ=="); // "SAME"
+      const r = await h.asUser(a, (c) =>
+        c.query(
+          `insert into public.scope_keys (member_user_id, scope_id, author_id, wrapped_dek)
+           values ($1, $2, $2, 'U0FNRQ==')
+           on conflict (scope_id, member_user_id)
+             do update set wrapped_dek = excluded.wrapped_dek, updated_at = now()`,
+          [a, a],
+        ),
+      );
+      expect(r.rowCount).toBe(1);
+    });
+
+    it("rejects a LOWER-epoch wrapped_dek change too (<=, not just ==)", async () => {
+      const a = await h.createUser();
+      await insKey(a, "ZXBvY2gw");
+      await updKey(a, "key_epoch=5"); // bump epoch (dek unchanged) — allowed
+      const err = await expectError(() =>
+        updKey(a, "wrapped_dek='TE9XRVI=', key_epoch=2"),
+      );
+      expect(err.code).toBe("23514");
+    });
+  },
+);
+
 describe.skipIf(gate())("sync migrations — tier is server-only", () => {
   it("authenticated cannot set their own tier (column grant)", async () => {
     const a = await h.createUser();
