@@ -669,7 +669,10 @@ class LocalProvider implements EmbeddingProvider {
       const workerInitData: WorkerInitData = {
         modelId: this.modelId,
         dimensions: this.dimensions,
-        maxTokens: this.maxTokens,
+        // Only a fallback for a request that omits maxTokens (every embed()
+        // carries one) — but size it to current free memory too, so even that
+        // fallback path can't drive a native over-allocation.
+        maxTokens: this.effectiveMaxTokens(),
         // Cgroup-CPU-aware native ORT intra-op cap, computed here on the main
         // thread (the worker can't value-import ort-native). undefined = no-op
         // (unconstrained host); applied on the native path only in the worker.
