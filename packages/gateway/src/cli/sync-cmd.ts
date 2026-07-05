@@ -96,6 +96,24 @@ export async function cmdEnable(
     process.exitCode = 1;
     return;
   }
+
+  // Eager-mint the per-scope DEK now that encryption is "on", so scope_keys is enqueued
+  // and ships with the FIRST push. Otherwise it's minted lazily during the first knowledge
+  // encrypt (getScopeKey inside encryptColumns) and its capture lands a cycle later — a
+  // window where a fresh device pulls the ciphertext without the key and mints a DIVERGENT
+  // DEK, which under 0012 first-write-wins can orphan the data (#1182).
+  // Guard on user_id (mirrors the resolver's fail-closed contract) and swallow a transient
+  // mint failure: it degrades to the pre-fix lazy mint rather than aborting a valid enable.
+  if (user.user_id) {
+    try {
+      await keystore.getScopeKey(user.user_id);
+    } catch (e) {
+      console.error(
+        `sync: could not pre-provision the encryption key (will mint on first push): ${(e as Error).message}`,
+      );
+    }
+  }
+
   await runSync();
 }
 

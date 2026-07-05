@@ -3,7 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mock the network + sync layers so cmdEnable is testable (bootstrapEncryption tests
 // inject their own syncKeys and never touch these).
-let mockUser: { github_login?: string } | null = { github_login: "octocat" };
+const TEST_UID = "11111111-1111-4111-8111-111111111111";
+let mockUser: { github_login?: string; user_id?: string } | null = {
+  github_login: "octocat",
+  user_id: TEST_UID,
+};
 let escrowRows: Array<{ id: number }> = [];
 let escrowError: { message: string } | null = null;
 const mockClient = {
@@ -48,11 +52,11 @@ const confirmed = () => Promise.resolve({ confirmed: true });
 
 beforeEach(() => {
   db().exec(
-    "DELETE FROM account_identity; DELETE FROM account_escrow; DELETE FROM scope_keys;",
+    "DELETE FROM account_identity; DELETE FROM account_escrow; DELETE FROM scope_keys; DELETE FROM sync_outbox;",
   );
   keystore.lock();
   if (syncData.isSyncEnabled()) syncData.disableSync();
-  mockUser = { github_login: "octocat" };
+  mockUser = { github_login: "octocat", user_id: TEST_UID };
   escrowRows = [];
   escrowError = null;
   pullOnceMock.mockClear();
@@ -221,6 +225,25 @@ describe("cmdEnable (C-4b activation)", () => {
     expect(syncData.isSyncEnabled()).toBe(true);
     expect(keystore.encryptionState()).toBe("on");
     expect(syncOnceMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("eager-mints the scope DEK so scope_keys ships with the first push (#1182)", async () => {
+    await cmdEnable(prompts({ newPassphrase: vi.fn(async () => "pw") }));
+    expect(keystore.encryptionState()).toBe("on");
+    // The DEK row is minted at enable-time (not lazily during the first encrypt), so it
+    // exists locally AND is enqueued in the outbox before the sync push runs.
+    const rows = (
+      db().query("SELECT COUNT(*) n FROM scope_keys").get() as { n: number }
+    ).n;
+    expect(rows).toBe(1);
+    const queued = (
+      db()
+        .query(
+          "SELECT COUNT(*) n FROM sync_outbox WHERE table_name='scope_keys'",
+        )
+        .get() as { n: number }
+    ).n;
+    expect(queued).toBeGreaterThanOrEqual(1);
   });
 
   it("refuses first-device setup when the escrow check is unreachable (clobber-safe)", async () => {

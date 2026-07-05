@@ -422,13 +422,11 @@ describe.skipIf(SKIP)(
       insertKnowledge("ke", PLAIN);
       const push = await pushOnce(client);
       expect(push.pushed).toBeGreaterThanOrEqual(1);
-      // NOTE (real gap this e2e surfaced): the DEK row is minted lazily INSIDE the first
-      // push (getScopeKey during encrypt), so its capture lands too late for that cycle —
-      // the encrypted knowledge reaches the remote one cycle BEFORE scope_keys. A fresh
-      // device pulling in that window would mint a divergent DEK. The scheduler self-heals
-      // device-1 within a tick, but the window is a real risk (tracked in #1182: eager-
-      // mint the DEK at `lore sync enable` so scope_keys ships with the first push). Here
-      // a second push flushes it deterministically.
+      // NOTE: the DEK row is minted lazily INSIDE the first push (getScopeKey during
+      // encrypt), so its capture lands too late for that cycle. The real CLI path avoids
+      // this by eager-minting at `lore sync enable` (cmdEnable, #1182) so scope_keys ships
+      // with the first push; this engine-level test bypasses cmdEnable, so it flushes the
+      // DEK deterministically with a second push.
       await pushOnce(client);
       const rk = await h.asUser(uid, (c) =>
         c.query("select 1 from public.scope_keys").then((x) => x.rows),
