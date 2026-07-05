@@ -140,6 +140,15 @@ export function _setConstrainedMemoryForTest(bytes: number | null): void {
   testConstrainedMemoryBytes = bytes;
 }
 
+/** Test seam: override the host free-memory read used by every cap-sizing
+ *  decision ({@link containerFreeBytes}), so the pool-aware divisor and the
+ *  per-request current-free clamp can be driven deterministically without
+ *  depending on the CI box's actual RAM (null → real `os.freemem()`). */
+let testHostFreememBytes: number | null = null;
+export function _setContainerFreeForTest(bytes: number | null): void {
+  testHostFreememBytes = bytes;
+}
+
 /** The process's cgroup memory LIMIT in bytes (not free-within-limit), or `0` if
  *  unconstrained / unknown / unsupported by the runtime. `process.constrainedMemory()`
  *  is libuv-backed (cgroup v1 + v2, no hard-coded paths) and returns `0` when
@@ -170,7 +179,8 @@ function constrainedMemoryLimit(): number {
  *  attention peak as headroom. Using cgroup free (`availableMemory()`) instead
  *  would break the no-op guarantee on constrained-but-roomy hosts. */
 function containerFreeBytes(): number {
-  return clampFreeToContainerLimit(freemem(), constrainedMemoryLimit());
+  const raw = testHostFreememBytes != null ? testHostFreememBytes : freemem();
+  return clampFreeToContainerLimit(raw, constrainedMemoryLimit());
 }
 
 function persistEmbedCap(
@@ -201,11 +211,20 @@ function persistEmbedCap(
  * every restart" failure). Otherwise it sizes from the memory model and
  * current free memory; a materially larger free pool lets the cap re-probe
  * upward on restart (in lieu of continuous additive increase). Always clamped.
+ *
+ * `memDivisor` is the number of pool workers this cap must share free memory
+ * with (the pool ceiling; 1 for a standalone provider). Each worker sizes its
+ * transient O(L²) attention budget from `free / memDivisor`, so `memDivisor`
+ * workers running concurrently collectively stay within one worker's worth of
+ * the `EMBED_MEM_FRACTION` budget — otherwise N independently-sized workers each
+ * claim half of free memory and their sum OOMs the host (the exact native
+ * SIGKILL the WASM heap wall used to prevent; see EmbeddingPool).
  */
 function computeInitialEmbedCap(
   persisted: PersistedEmbedCap | null = readPersistedEmbedCap(),
+  memDivisor = 1,
 ): number {
-  const free = containerFreeBytes();
+  const free = containerFreeBytes() / Math.max(1, memDivisor);
   return reconcileEmbedCap(
     free,
     persisted,
@@ -579,18 +598,37 @@ class LocalProvider implements EmbeddingProvider {
    *  upward re-probe never climbs to or past it — a rising os.freemem() does not
    *  prove the WASM heap can grow that far. Cleared only by a process restart. */
   private lastOomCap = 0;
+  /** Number of pool workers this provider shares free memory with (the pool
+   *  ceiling; 1 for a standalone provider). Every free-memory-derived cap is
+   *  sized from `free / memDivisor` so N concurrent workers can't each claim a
+   *  full `EMBED_MEM_FRACTION` share and sum past the host's RAM (BUG: native
+   *  OOM is an uncatchable SIGKILL, so this must be prevented, not recovered). */
+  private readonly memDivisor: number;
 
-  constructor(modelId: string, dimensions: number) {
+  constructor(modelId: string, dimensions: number, memDivisor = 1) {
     this.modelId = modelId;
     this.dimensions = dimensions;
+    this.memDivisor = Math.max(1, memDivisor);
     // Seed lastOomCap from the persisted known-bad cap so an upward re-probe in
     // THIS process still respects a ceiling the WASM heap rejected in a PRIOR
     // one (a rising freemem doesn't prove the fixed heap grew). Read once and
     // reuse for the initial cap to avoid a second kv_meta round-trip.
     const persisted = readPersistedEmbedCap();
     this.lastOomCap = persisted?.knownBadCap ?? 0;
-    this.maxTokens = computeInitialEmbedCap(persisted);
+    this.maxTokens = computeInitialEmbedCap(persisted, this.memDivisor);
     this.capFreememAtLearn = containerFreeBytes();
+  }
+
+  /** The token cap to send with the NEXT request: the learned `maxTokens`
+   *  clamped to what CURRENT free memory supports for this worker's share of
+   *  the pool. Re-evaluated per request (not just at construction) because free
+   *  memory drops as concurrent sessions and sibling workers allocate — and on
+   *  the native ONNX path a too-large allocation triggers the OS OOM-killer
+   *  (uncatchable SIGKILL) instead of a recoverable in-worker OOM. Clamping down
+   *  to live free memory avoids the allocation the ×0.7 backoff can't catch. */
+  private effectiveMaxTokens(): number {
+    const liveCap = memoryModelEmbedCap(containerFreeBytes() / this.memDivisor);
+    return Math.min(this.maxTokens, liveCap);
   }
 
   /**
@@ -880,7 +918,15 @@ class LocalProvider implements EmbeddingProvider {
     this.lastReprobeAt = now;
     const free = containerFreeBytes();
     if (!shouldReprobeEmbedCap(free, this.capFreememAtLearn)) return;
-    const next = reprobeEmbedCap(this.maxTokens, free, this.lastOomCap);
+    // The re-probe ceiling is the memory model over this worker's pool SHARE of
+    // free memory, so climbing back up never lets N workers sum past the host's
+    // RAM. The ratio check above stays on undivided free (it only compares
+    // now-vs-learn, both undivided).
+    const next = reprobeEmbedCap(
+      this.maxTokens,
+      free / this.memDivisor,
+      this.lastOomCap,
+    );
     if (next <= this.maxTokens) return;
     const prev = this.maxTokens;
     this.maxTokens = next;
@@ -1010,8 +1056,9 @@ class LocalProvider implements EmbeddingProvider {
     const worker = this.worker;
     if (!worker) return; // raced with another exit — that handler owns pending
     for (const [, p] of this.pendingRequests) {
-      // Re-submit at the lowered cap so the retry doesn't re-OOM at the old one.
-      p.payload.maxTokens = this.maxTokens;
+      // Re-submit at the lowered cap so the retry doesn't re-OOM at the old one,
+      // further clamped to live free memory for this worker's pool share.
+      p.payload.maxTokens = this.effectiveMaxTokens();
       try {
         worker.postMessage(p.payload satisfies WorkerInbound);
       } catch {
@@ -1051,7 +1098,11 @@ class LocalProvider implements EmbeddingProvider {
       texts: prefixed,
       inputType,
       priority,
-      maxTokens: this.maxTokens,
+      // Clamp to what CURRENT free memory allows for this worker's pool share,
+      // not just the construction-time learned cap — free memory drops as
+      // sibling workers and live sessions allocate, and a native over-allocation
+      // is an uncatchable SIGKILL rather than a recoverable in-worker OOM.
+      maxTokens: this.effectiveMaxTokens(),
     };
 
     return new Promise<Float32Array[]>((resolve, reject) => {
@@ -1256,7 +1307,12 @@ class EmbeddingPool implements EmbeddingProvider {
 
   private spawnSlot(): EmbedSlot {
     const slot: EmbedSlot = {
-      provider: new LocalProvider(this.modelId, this.dimensions),
+      // Pass the pool ceiling as the memory divisor so every worker sizes its
+      // token cap from `free / ceiling`. The ceiling is itself memory-gated
+      // (desiredEmbedPoolSize), so the workers the host is provisioned for
+      // collectively stay within one `EMBED_MEM_FRACTION` share of free memory
+      // instead of each independently claiming half and summing to an OOM.
+      provider: new LocalProvider(this.modelId, this.dimensions, this.ceiling),
       inflight: 0,
     };
     this.slots.push(slot);

@@ -10,6 +10,8 @@ import {
   _resetLocalProviderProbe,
   _restoreProvider,
   _saveAndClearProvider,
+  _setConstrainedMemoryForTest,
+  _setContainerFreeForTest,
   _setTestWorkerFactory,
 } from "../src/embedding";
 import {
@@ -92,12 +94,21 @@ describe("embedding OOM recovery (worker-mock)", () => {
     savedOpenAI = process.env.OPENAI_API_KEY;
     delete process.env.VOYAGE_API_KEY;
     delete process.env.OPENAI_API_KEY;
+    // Pin free memory well above the WASM ceiling's crossover so the per-request
+    // current-free clamp is transparent (effective cap == learned cap). These
+    // tests exercise the OOM-backoff cap math, not the memory clamp, so the box's
+    // actual freemem must not shrink the posted cap (it otherwise flakes: the
+    // first post would be min(ceiling, memoryModelEmbedCap(realFree))).
+    _setConstrainedMemoryForTest(0);
+    _setContainerFreeForTest(16 * 1024 * 1024 * 1024);
     _resetLocalProviderProbe();
     savedProvider = _saveAndClearProvider();
   });
 
   afterEach(() => {
     _setTestWorkerFactory(null);
+    _setContainerFreeForTest(null);
+    _setConstrainedMemoryForTest(null);
     _resetLocalProviderProbe();
     _restoreProvider(savedProvider);
     if (savedVoyage !== undefined) process.env.VOYAGE_API_KEY = savedVoyage;
