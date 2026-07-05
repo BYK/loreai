@@ -2968,25 +2968,33 @@ export async function backfillTemporalEmbeddings(
   let poisonSkipId = "";
   const crashedRow = getKV(TEMPORAL_RECHUNK_INFLIGHT_KEY) ?? "";
   if (crashedRow) {
-    const rowAttempts =
-      Number(getKV(TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY) ?? "0") + 1;
-    // `crashedRow > cursor` guards against a stale marker at/behind the resume
-    // point (e.g. after a manual cursor rewind): only a row still ahead of the
-    // cursor is a live poison-row candidate.
-    if (
-      rowAttempts >= MAX_TEMPORAL_RECHUNK_ROW_CRASH_ATTEMPTS &&
-      crashedRow > cursor
-    ) {
-      log.warn(
-        `temporal re-chunk: row ${crashedRow} crashed the process ` +
-          `${rowAttempts}× — skipping it (keeps its legacy vector + FTS)`,
-      );
-      poisonSkipId = crashedRow;
-      setKV(TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY, "0");
+    // `crashedRow > cursor`: a genuine mid-embed crash always leaves the marker
+    // AHEAD of the persisted cursor (the cursor only advances after a row
+    // completes). A marker at/behind the cursor names an already-passed row —
+    // it can only arise from a manual cursor edit or a reset race, never a real
+    // crash — so treat it as stale: clear it WITHOUT counting a crash, otherwise
+    // a phantom count would bleed into the next genuine poison row. NOTE: this
+    // ordering compares in JS (string `>`) while the walk pages in SQLite
+    // (`id > ? ORDER BY id`, BINARY collation); the two agree for the ASCII ids
+    // temporal_messages uses (agent-supplied session/message ids).
+    if (crashedRow > cursor) {
+      const rowAttempts =
+        Number(getKV(TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY) ?? "0") + 1;
+      if (rowAttempts >= MAX_TEMPORAL_RECHUNK_ROW_CRASH_ATTEMPTS) {
+        log.warn(
+          `temporal re-chunk: row ${crashedRow} crashed the process ` +
+            `${rowAttempts}× — skipping it (keeps its legacy vector + FTS)`,
+        );
+        poisonSkipId = crashedRow;
+        setKV(TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY, "0");
+      } else {
+        // Below the threshold: give the row another chance on this run, but
+        // remember the crash count so a repeat death eventually trips the skip.
+        setKV(TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY, String(rowAttempts));
+      }
     } else {
-      // Below the threshold: give the row another chance on this run, but
-      // remember the crash count so a repeat death eventually trips the skip.
-      setKV(TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY, String(rowAttempts));
+      // Stale marker at/behind the cursor — not a live poison candidate.
+      setKV(TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY, "0");
     }
     setKV(TEMPORAL_RECHUNK_INFLIGHT_KEY, "");
   }
@@ -3132,8 +3140,11 @@ export async function backfillTemporalEmbeddings(
         if (retryFrom === null) retryFrom = cursor;
       }
       // The row settled without taking the process down: clear the in-flight
-      // marker and reset the per-row crash counter so it only ever reflects
-      // consecutive hard deaths on the row now at the cursor.
+      // marker and reset the crash counter. The counter is a single KV (not
+      // per-row), so this reset bounds it to deaths NOT separated by a clean
+      // row. A pinned cursor (transient retryFrom) plus adjacent crashes can
+      // still let one genuine poison row inherit a count of 1 and be skipped a
+      // crash early — always safe (the row keeps its legacy vector + FTS).
       setKV(TEMPORAL_RECHUNK_INFLIGHT_KEY, "");
       setKV(TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY, "0");
       cursor = row.id;

@@ -160,6 +160,25 @@ describe("temporal re-chunk poison-row liveness", () => {
     expect(processed).toBe(1);
   });
 
+  it("treats a stale marker at/behind the cursor as resolved, without counting a crash", async () => {
+    // Only t1 exists and the cursor is already past it, so the walk fetches
+    // nothing and no later clean row can reset the counter for us — the final
+    // counter value is exactly what the entry-detection decided.
+    insertMsg("t1", pid);
+    setKV(CURSOR, "t5"); // resume point already past the marker
+    setKV(INFLIGHT, "t2"); // stale marker BEHIND the cursor
+    setKV(ROW_ATTEMPTS, "0");
+
+    const processed = await backfillTemporalEmbeddings();
+
+    // A stale-behind marker is not a live crash: the counter must stay 0, not be
+    // bumped to 1. (Dropping the `crashedRow > cursor` guard counts it as a
+    // crash and this becomes "1".)
+    expect(processed).toBe(0);
+    expect(getKV(ROW_ATTEMPTS)).toBe("0");
+    expect(getKV(INFLIGHT)).toBe("");
+  });
+
   it("never rewinds the cursor when a stale in-flight marker points at or behind it", async () => {
     insertMsg("t1", pid);
     insertMsg("t2", pid);
