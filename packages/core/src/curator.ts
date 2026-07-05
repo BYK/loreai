@@ -8,7 +8,7 @@ import {
 import * as temporal from "./temporal";
 import * as distillation from "./distillation";
 import * as ltm from "./ltm";
-import type { KnowledgeMetadata } from "./ltm";
+import type { KnowledgeMetadata, OutcomeImpact } from "./ltm";
 import * as entities from "./entities";
 import * as embedding from "./embedding";
 import * as log from "./log";
@@ -1221,30 +1221,48 @@ type ConsolidationEntry = {
   outcome: { passes: number; fails: number };
 };
 
-/**
- * Project a knowledge entry into the consolidation-prompt shape, attaching its
- * value signal so the curator can keep proven-valuable entries when merging
- * duplicates or trimming (#497): current confidence (already folds in the
- * outcome reward/penalty) plus the raw verifier pass/fail co-occurrence record
- * (which discriminates within the confidence cluster). One indexed lookup per
- * entry — cheap, and only on the idle consolidation path.
- */
-function toConsolidationEntry(e: {
+type ConsolidationInput = {
   id: string;
   category: string;
   title: string;
   content: string;
   confidence: number;
   logical_id: string;
-}): ConsolidationEntry {
+};
+
+/**
+ * Project a knowledge entry into the consolidation-prompt shape, attaching its
+ * value signal so the curator can keep proven-valuable entries when merging
+ * duplicates or trimming (#497): current confidence (already folds in the
+ * outcome reward/penalty) plus the raw verifier pass/fail co-occurrence record
+ * (which discriminates within the confidence cluster). Takes a prefetched
+ * outcome map (see {@link toConsolidationEntries}) so a batch of entries costs
+ * one query, not one-per-entry (Sentry LOREAI-GATEWAY-3D N+1).
+ */
+function toConsolidationEntry(
+  e: ConsolidationInput,
+  outcomeByLogicalId: Map<string, OutcomeImpact>,
+): ConsolidationEntry {
   return {
     id: e.id,
     category: e.category,
     title: e.title,
     content: e.content,
     confidence: e.confidence,
-    outcome: ltm.outcomeImpact(e.logical_id),
+    outcome: outcomeByLogicalId.get(e.logical_id) ?? { passes: 0, fails: 0 },
   };
+}
+
+/**
+ * Batch-project entries for the consolidation prompt, fetching every entry's
+ * verifier outcome in a single query up front (instead of one per entry, which
+ * was an N+1 on the idle consolidation path — Sentry LOREAI-GATEWAY-3D).
+ */
+function toConsolidationEntries(
+  entries: ConsolidationInput[],
+): ConsolidationEntry[] {
+  const outcomes = ltm.outcomeImpactMany(entries.map((e) => e.logical_id));
+  return entries.map((e) => toConsolidationEntry(e, outcomes));
 }
 
 export async function consolidate(input: {
@@ -1302,14 +1320,14 @@ export async function consolidate(input: {
 
   if (entries.length <= CONSOLIDATION_BATCH_SIZE) {
     // Small overshoot — send all entries, target is maxEntries
-    entriesForPrompt = entries.map(toConsolidationEntry);
+    entriesForPrompt = toConsolidationEntries(entries);
     batchTarget = cfg.curator.maxEntries;
   } else {
     // Large overshoot — batched mode. Take the lowest-confidence entries.
     // The LLM evaluates this batch and deletes the least valuable ones.
     // Subsequent passes (on future idle ticks) handle the rest.
     const candidates = entries.slice(-CONSOLIDATION_BATCH_SIZE);
-    entriesForPrompt = candidates.map(toConsolidationEntry);
+    entriesForPrompt = toConsolidationEntries(candidates);
     // Target is relative to the batch (not the global total) because the
     // prompt only sees the batch entries. Keep at most half — delete the rest.
     // Each pass deletes ~25 entries, the idle scheduler re-triggers (cooldown
@@ -1342,7 +1360,7 @@ async function consolidateEntries(
     logical_id: string;
   }>,
 ): Promise<{ updated: number; deleted: number }> {
-  const entriesForPrompt = entries.map(toConsolidationEntry);
+  const entriesForPrompt = toConsolidationEntries(entries);
   log.info(
     `consolidation: category-focused — evaluating ${entries.length} "${entries[0]?.category}" entries for near-duplicate merge`,
   );

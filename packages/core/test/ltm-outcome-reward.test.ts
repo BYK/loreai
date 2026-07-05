@@ -499,3 +499,69 @@ describe("outcome-reward: outcomeImpact (observability, #497 follow-up)", () => 
     expect(ltm.outcomeImpact(lid)).toEqual({ passes: 0, fails: 0 });
   });
 });
+
+describe("outcome-reward: outcomeImpactMany (batched N+1 fix, LOREAI-GATEWAY-3D)", () => {
+  let pid: string;
+  beforeEach(() => {
+    pid = ensureProject(PROJECT);
+    db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+    db().query("DELETE FROM tool_calls WHERE project_id = ?").run(pid);
+    db()
+      .query("DELETE FROM knowledge_session_injections WHERE project_id = ?")
+      .run(pid);
+  });
+
+  function creditOnce(
+    logicalId: string,
+    session: string,
+    verdict: "pass" | "fail",
+  ): void {
+    db()
+      .query(
+        `INSERT INTO knowledge_session_injections (session_id, logical_id, project_id, created_at, credited)
+         VALUES (?, ?, ?, ?, 0)`,
+      )
+      .run(session, logicalId, pid, Date.now());
+    insertToolCall(pid, {
+      session,
+      status: verdict === "pass" ? "completed" : "error",
+      verifier: 1,
+    });
+    ltm.creditSessionOutcome(session, PROJECT);
+  }
+
+  test("aggregates per logical_id with no cross-entry bleed", () => {
+    // Distinct counts per entry so a missing `GROUP BY logical_id` (or map
+    // mis-keying) would visibly cross-contaminate the tallies.
+    const a = getEntry(makeProjectEntry("many-a", 0.5)).logical_id;
+    const b = getEntry(makeProjectEntry("many-b", 0.5)).logical_id;
+    const c = getEntry(makeProjectEntry("many-c", 0.5)).logical_id;
+    creditOnce(a, "m-a1", "pass");
+    creditOnce(a, "m-a2", "pass");
+    creditOnce(a, "m-a3", "fail");
+    creditOnce(b, "m-b1", "fail");
+    // c has no injections at all.
+
+    const map = ltm.outcomeImpactMany([a, b, c]);
+    expect(map.get(a)).toEqual({ passes: 2, fails: 1 });
+    expect(map.get(b)).toEqual({ passes: 0, fails: 1 });
+    // Entries with no pass/fail rows are absent (callers default to zeroes).
+    expect(map.has(c)).toBe(false);
+  });
+
+  test("matches the single-lookup outcomeImpact for the same id", () => {
+    const a = getEntry(makeProjectEntry("parity-a", 0.5)).logical_id;
+    creditOnce(a, "p-a1", "pass");
+    creditOnce(a, "p-a2", "fail");
+    expect(ltm.outcomeImpactMany([a]).get(a)).toEqual(ltm.outcomeImpact(a));
+  });
+
+  test("de-duplicates repeated ids and returns empty map for empty input", () => {
+    const a = getEntry(makeProjectEntry("dedup-a", 0.5)).logical_id;
+    creditOnce(a, "d-a1", "pass");
+    const map = ltm.outcomeImpactMany([a, a, a]);
+    expect(map.size).toBe(1);
+    expect(map.get(a)).toEqual({ passes: 1, fails: 0 });
+    expect(ltm.outcomeImpactMany([]).size).toBe(0);
+  });
+});

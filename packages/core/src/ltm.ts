@@ -1609,31 +1609,65 @@ export type OutcomeImpact = {
 };
 
 /**
- * Aggregate the verifier outcomes a knowledge entry has co-occurred with, by its
- * stable `logical_id` (A2). Counts credited injection rows by verdict; 'none'
- * verdicts are not recorded (no signal), so only pass/fail are counted (the
- * `verdict IN ('pass','fail')` filter also excludes still-uncredited NULL rows).
- * Read-only — surfaced by `lore data show` so the reward loop's effect is
- * observable. (A recency / "last verdict" hint is intentionally omitted: the
- * only available timestamp is injection time, not credit time, so it would
- * misreport when an old session is credited late.)
+ * Batched form of {@link outcomeImpact}: aggregate the verifier outcomes for
+ * MANY entries (keyed by stable `logical_id`, A2) in a SINGLE query rather than
+ * one query per entry. The idle consolidation path evaluates dozens of entries
+ * per pass, so the per-entry form was an N+1 (Sentry LOREAI-GATEWAY-3D).
+ *
+ * Counts credited injection rows by verdict; 'none' verdicts are not recorded
+ * (no signal), so only pass/fail are counted (the `verdict IN ('pass','fail')`
+ * filter also excludes still-uncredited NULL rows). Backed by the
+ * `idx_ksi_logical_verdict (logical_id, verdict)` index. A recency / "last
+ * verdict" hint is intentionally omitted: the only available timestamp is
+ * injection time, not credit time, so it would misreport when an old session is
+ * credited late.
+ *
+ * Returns a Map keyed by `logical_id`. IDs with no pass/fail rows are ABSENT
+ * from the map (callers default to `{ passes: 0, fails: 0 }`). De-duplicates the
+ * input; empty input runs no query.
+ */
+export function outcomeImpactMany(
+  logicalIds: string[],
+): Map<string, OutcomeImpact> {
+  const out = new Map<string, OutcomeImpact>();
+  const unique = [...new Set(logicalIds)];
+  if (!unique.length) return out;
+  // SQLite caps host parameters (default 999); chunk well under that.
+  const CHUNK = 900;
+  for (let i = 0; i < unique.length; i += CHUNK) {
+    const batch = unique.slice(i, i + CHUNK);
+    const placeholders = batch.map(() => "?").join(",");
+    const rows = db()
+      .query(
+        `SELECT logical_id, verdict, COUNT(*) AS n
+         FROM knowledge_session_injections
+         WHERE logical_id IN (${placeholders}) AND verdict IN ('pass','fail')
+         GROUP BY logical_id, verdict`,
+      )
+      .all(...batch) as { logical_id: string; verdict: string; n: number }[];
+    for (const r of rows) {
+      let cur = out.get(r.logical_id);
+      if (!cur) {
+        cur = { passes: 0, fails: 0 };
+        out.set(r.logical_id, cur);
+      }
+      if (r.verdict === "pass") cur.passes = r.n;
+      else if (r.verdict === "fail") cur.fails = r.n;
+    }
+  }
+  return out;
+}
+
+/**
+ * Aggregate the verifier outcomes a single knowledge entry has co-occurred with,
+ * by its stable `logical_id`. Read-only — surfaced by `lore data show` so the
+ * reward loop's effect is observable. See {@link outcomeImpactMany} for the
+ * batched form (used on the consolidation path) and the counting semantics.
  */
 export function outcomeImpact(logicalId: string): OutcomeImpact {
-  const rows = db()
-    .query(
-      `SELECT verdict, COUNT(*) AS n
-       FROM knowledge_session_injections
-       WHERE logical_id = ? AND verdict IN ('pass','fail')
-       GROUP BY verdict`,
-    )
-    .all(logicalId) as { verdict: string; n: number }[];
-  let passes = 0;
-  let fails = 0;
-  for (const r of rows) {
-    if (r.verdict === "pass") passes = r.n;
-    else if (r.verdict === "fail") fails = r.n;
-  }
-  return { passes, fails };
+  return (
+    outcomeImpactMany([logicalId]).get(logicalId) ?? { passes: 0, fails: 0 }
+  );
 }
 
 /** Last observed reference-resolution counts for an entry (#627), or null if it
