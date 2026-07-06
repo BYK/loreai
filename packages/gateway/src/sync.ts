@@ -49,6 +49,16 @@ export function __resetQuotaWarnedTables(): void {
   quotaWarnedTables.clear();
 }
 
+/** A live progress tick, emitted per table (on entry) and after each page. */
+export interface SyncProgress {
+  phase: "push" | "pull";
+  table: string;
+  /** Cumulative rows pushed/pulled so far this cycle. */
+  pushed: number;
+  pulled: number;
+}
+export type SyncProgressFn = (p: SyncProgress) => void;
+
 type PushErrorKind = "quota" | "poison" | "transient";
 
 /**
@@ -185,7 +195,10 @@ function decryptColumns(
  * independently: a quota or transient failure on one table never advances its
  * cursor past the unpushed row and never blocks another table.
  */
-export async function pushOnce(client: SupabaseClient): Promise<SyncResult> {
+export async function pushOnce(
+  client: SupabaseClient,
+  onProgress?: SyncProgressFn,
+): Promise<SyncResult> {
   const res: SyncResult = { pushed: 0, pulled: 0, conflicts: 0 };
   const enc = makeEncryptionResolver();
   for (const meta of syncData.syncedTables("basic")) {
@@ -193,7 +206,13 @@ export async function pushOnce(client: SupabaseClient): Promise<SyncResult> {
     // reads them. They have no outbox capture trigger, so this is belt-and-
     // suspenders, but it keeps the intent explicit and avoids a needless scan.
     if (meta.pullOnly) continue;
-    await pushTable(client, meta.table, res, enc);
+    onProgress?.({
+      phase: "push",
+      table: meta.table,
+      pushed: res.pushed,
+      pulled: res.pulled,
+    });
+    await pushTable(client, meta.table, res, enc, onProgress);
   }
   // Reclaim outbox rows fully pushed across all tables THAT HAVE ENTRIES (seq <=
   // the lowest such cursor) — the outbox is otherwise append-only. A table with
@@ -218,6 +237,7 @@ async function pushTable(
   table: string,
   res: SyncResult,
   enc: ReturnType<typeof makeEncryptionResolver>,
+  onProgress?: SyncProgressFn,
 ): Promise<void> {
   let cursor = Number(getKV(pushKey(table)) ?? "0");
 
@@ -253,6 +273,12 @@ async function pushTable(
 
     cursor = safeCursor;
     setKV(pushKey(table), String(cursor));
+    onProgress?.({
+      phase: "push",
+      table,
+      pushed: res.pushed,
+      pulled: res.pulled,
+    });
     if (stop || batch.length < PAGE) break;
   }
 }
@@ -465,11 +491,21 @@ function formatCursor(c: KeysetCursor): string {
  * keyset order), so rows that share a timestamp across a page boundary are never
  * dropped. Timestamps are compared as parsed instants, not lexical ISO strings.
  */
-export async function pullOnce(client: SupabaseClient): Promise<SyncResult> {
+export async function pullOnce(
+  client: SupabaseClient,
+  onProgress?: SyncProgressFn,
+): Promise<SyncResult> {
   const res: SyncResult = { pushed: 0, pulled: 0, conflicts: 0 };
   const encResolver = makeEncryptionResolver();
 
   for (const meta of syncData.syncedTables("basic")) {
+    // Emit BEFORE the locked/skip guards so a skipped table still advances the bar.
+    onProgress?.({
+      phase: "pull",
+      table: meta.table,
+      pushed: res.pushed,
+      pulled: res.pulled,
+    });
     const touchedFts = new Set<string>();
     let cursor = parseCursor(getKV(pullKey(meta.table)));
 
@@ -522,6 +558,12 @@ export async function pullOnce(client: SupabaseClient): Promise<SyncResult> {
           advanced = true;
         }
         setKV(pullKey(meta.table), formatCursor(cursor));
+        onProgress?.({
+          phase: "pull",
+          table: meta.table,
+          pushed: res.pushed,
+          pulled: res.pulled,
+        });
 
         if (rows.length < PAGE) break; // last page
 
@@ -760,15 +802,17 @@ function applyRemote(
 // syncOnce — push then pull
 // ---------------------------------------------------------------------------
 
-export async function syncOnce(): Promise<SyncResult> {
+export async function syncOnce(
+  onProgress?: SyncProgressFn,
+): Promise<SyncResult> {
   if (!syncData.isSyncEnabled()) {
     return { pushed: 0, pulled: 0, conflicts: 0 };
   }
   const client = await getAuthedClient();
   if (!client) return { pushed: 0, pulled: 0, conflicts: 0, notAuthed: true };
 
-  const push = await pushOnce(client);
-  const pull = await pullOnce(client);
+  const push = await pushOnce(client, onProgress);
+  const pull = await pullOnce(client, onProgress);
   return {
     pushed: push.pushed,
     pulled: pull.pulled,

@@ -13,6 +13,7 @@
 import { randomBytes } from "node:crypto";
 import { createInterface } from "node:readline";
 import { keystore, syncData, getKV } from "@loreai/core";
+import type { SyncProgressFn } from "../sync";
 
 export async function commandSync(
   positionals: string[],
@@ -114,7 +115,7 @@ export async function cmdEnable(
     }
   }
 
-  await runSync();
+  await runSync("Performing initial sync…");
 }
 
 /** Prompt callbacks for the encryption bootstrap (injectable for tests). */
@@ -399,9 +400,68 @@ async function cmdNow(): Promise<void> {
 }
 
 /** Run one sync cycle and print a human-readable summary. */
-async function runSync(): Promise<void> {
+interface ProgressOut {
+  write(s: string): void;
+  isTTY?: boolean;
+}
+
+/**
+ * A single-line progress reporter for one sync cycle. On a TTY it redraws a bar that
+ * names the current table (part) and moves as rows push/pull; off a TTY it prints the
+ * header once. The bar advances one step per (phase, table) visited — push every
+ * non-pull-only table, then pull every table.
+ */
+export function makeSyncProgress(
+  header: string,
+  out: ProgressOut = process.stdout,
+): { onProgress: SyncProgressFn; done: () => void } {
+  const tables = syncData.syncedTables("basic");
+  const total = tables.filter((t) => !t.pullOnly).length + tables.length;
+  const tty = !!out.isTTY;
+  const seen = new Set<string>();
+  let lastLen = 0;
+  let headerShown = false;
+
+  const bar = (frac: number, width = 16): string => {
+    const filled = Math.max(0, Math.min(width, Math.round(width * frac)));
+    return "█".repeat(filled) + "░".repeat(width - filled);
+  };
+
+  const onProgress: SyncProgressFn = (p) => {
+    // A rendering failure must NEVER abort the sync cycle (defense-in-depth).
+    try {
+      seen.add(`${p.phase}:${p.table}`);
+      if (!tty) {
+        if (!headerShown) {
+          out.write(`${header}\n`);
+          headerShown = true;
+        }
+        return;
+      }
+      const step = Math.min(seen.size, total);
+      const line =
+        `${header} [${bar(total ? step / total : 1)}] ${step}/${total}  ` +
+        `${p.phase} · ${p.table}   ↑${p.pushed} ↓${p.pulled}`;
+      lastLen = line.length;
+      out.write(`\r${line}`);
+    } catch {
+      // ignore — progress is cosmetic
+    }
+  };
+
+  const done = (): void => {
+    // Clear the progress line so the summary prints on a clean line.
+    if (tty && lastLen > 0) out.write(`\r${" ".repeat(lastLen)}\r`);
+  };
+
+  return { onProgress, done };
+}
+
+async function runSync(header = "Syncing…"): Promise<void> {
   const { syncOnce } = await import("../sync");
-  const r = await syncOnce();
+  const progress = makeSyncProgress(header);
+  const r = await syncOnce(progress.onProgress);
+  progress.done();
   if (r.notAuthed) {
     console.error('Session expired. Run "lore login" again.');
     process.exitCode = 1;

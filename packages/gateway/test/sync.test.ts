@@ -289,6 +289,7 @@ import {
   __resetQuotaWarnedTables,
   pushOnce,
   pullOnce,
+  type SyncProgress,
   syncOnce,
 } from "../src/sync";
 
@@ -595,6 +596,43 @@ describe("BLOCKER regressions", () => {
     expect(tableRows("entities").find((x) => x.id === "e1")).toBeTruthy(); // synced!
     expect(Number(getKV("sync.push.knowledge"))).toBe(0); // knowledge cursor held
     expect(Number(getKV("sync.push.entities"))).toBeGreaterThan(0); // entities advanced
+  });
+
+  test("pushOnce emits progress per table (phase/table + cumulative counts)", async () => {
+    syncData.enableSync("basic");
+    insertKnowledge("k1", "hello");
+    const events: SyncProgress[] = [];
+    await pushOnce(makeClient() as never, (p) => events.push(p));
+    expect(events.every((e) => e.phase === "push")).toBe(true);
+    const kn = events.filter((e) => e.table === "knowledge");
+    expect(kn.length).toBeGreaterThanOrEqual(1);
+    expect(Math.max(...kn.map((e) => e.pushed))).toBeGreaterThanOrEqual(1);
+  });
+
+  test("pullOnce emits a progress event for every synced table (before skip guards)", async () => {
+    syncData.enableSync("basic");
+    const events: SyncProgress[] = [];
+    await pullOnce(makeClient() as never, (p) => events.push(p));
+    const tables = new Set(
+      events.filter((e) => e.phase === "pull").map((e) => e.table),
+    );
+    expect(tables.size).toBe(syncData.syncedTables("basic").length);
+  });
+
+  test("pullOnce still emits for a table SKIPPED while locked (emit precedes the skip guard)", async () => {
+    syncData.enableSync("basic");
+    keystore.setPassphrase("pw", { params: { t: 1, m: 256, p: 1 } });
+    db().exec("DELETE FROM account_identity"); // escrow remains → "locked"
+    keystore.lock();
+    expect(keystore.encryptionState()).toBe("locked");
+    const events: SyncProgress[] = [];
+    await pullOnce(makeClient() as never, (p) => events.push(p));
+    // knowledge is an encrypted table that is skipped while locked, yet its progress
+    // event must still fire — the emit is placed BEFORE the locked `continue` guard so
+    // a skipped table still advances the bar. (Moving the emit after the guard fails this.)
+    expect(
+      events.some((e) => e.phase === "pull" && e.table === "knowledge"),
+    ).toBe(true);
   });
 
   test("a persistent quota pause warns ONCE, not every cycle (log de-spam)", async () => {

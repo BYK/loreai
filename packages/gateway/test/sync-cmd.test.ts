@@ -42,6 +42,7 @@ import {
   cmdEnable,
   type EncryptionPrompts,
   generateRecoveryCode,
+  makeSyncProgress,
   normalizeRecoveryCode,
 } from "../src/cli/sync-cmd";
 
@@ -261,6 +262,51 @@ describe("cmdEnable (C-4b activation)", () => {
     await cmdEnable(prompts());
     expect(syncData.isSyncEnabled()).toBe(false);
     expect(process.exitCode).toBe(1);
+  });
+});
+
+describe("makeSyncProgress (initial-sync progress UX)", () => {
+  it("renders a moving bar naming the current part (table) on a TTY", () => {
+    const writes: string[] = [];
+    const out = { write: (s: string) => writes.push(s), isTTY: true };
+    const { onProgress, done } = makeSyncProgress(
+      "Performing initial sync…",
+      out,
+    );
+    onProgress({ phase: "push", table: "knowledge", pushed: 100, pulled: 0 });
+    onProgress({ phase: "pull", table: "knowledge", pushed: 130, pulled: 40 });
+    const last = writes.at(-1) ?? "";
+    expect(last).toContain("pull · knowledge");
+    expect(last).toContain("↑130 ↓40");
+    expect(last).toMatch(/\[█+░*\]/); // a bar segment
+    done();
+    expect(writes.at(-1)).toMatch(/^\r +\r$/); // line cleared for the summary
+  });
+
+  it("advances the bar as new (phase, table) parts are seen", () => {
+    const writes: string[] = [];
+    const out = { write: (s: string) => writes.push(s), isTTY: true };
+    const { onProgress } = makeSyncProgress("Sync", out);
+    onProgress({ phase: "push", table: "knowledge", pushed: 0, pulled: 0 });
+    const first = Number((writes.at(-1) ?? "").match(/(\d+)\/\d+/)?.[1] ?? "0");
+    onProgress({ phase: "pull", table: "profiles", pushed: 0, pulled: 0 });
+    const second = Number(
+      (writes.at(-1) ?? "").match(/(\d+)\/\d+/)?.[1] ?? "0",
+    );
+    expect(second).toBeGreaterThan(first);
+  });
+
+  it("prints the header once with no bar on a non-TTY", () => {
+    const writes: string[] = [];
+    const out = { write: (s: string) => writes.push(s), isTTY: false };
+    const { onProgress, done } = makeSyncProgress(
+      "Performing initial sync…",
+      out,
+    );
+    onProgress({ phase: "push", table: "knowledge", pushed: 1, pulled: 0 });
+    onProgress({ phase: "push", table: "entities", pushed: 2, pulled: 0 });
+    done();
+    expect(writes).toEqual(["Performing initial sync…\n"]); // once, no bar
   });
 });
 
