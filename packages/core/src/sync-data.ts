@@ -623,8 +623,9 @@ function rowIdExpr(m: SyncTableMeta): string {
  *    a heavily-referenced entity is more useful than a one-off, and the cap is small (30).
  *  - entity_relations: recency (updated_at, then created_at).
  *  - entity_aliases: recency (created_at — the table has no updated_at).
- *  - knowledge_meta: same value order as knowledge (confidence, then recency) so the
- *    surviving meta set matches the surviving knowledge set under their shared cap.
+ *  - knowledge_meta: LIVE entries only (JOIN knowledge_current), same value order as
+ *    knowledge (confidence, then recency), so the surviving meta set matches the
+ *    surviving knowledge set under their shared cap and deleted-entry meta isn't pushed.
  *  - any other table: unordered (no per-row value signal / high enough cap).
  * (knowledge is handled by its own logical_id-keyed branch in seedOutbox.)
  */
@@ -650,10 +651,19 @@ function seedSelect(table: string): string {
     // pruneDeadEntries/consolidation — so they sort last and don't steal live slots.
     // knowledge_meta_crdt's 10x cap won't bind for a single device, so it stays default.)
     case "knowledge_meta":
-      return `SELECT * FROM knowledge_meta
-               ORDER BY confidence DESC,
-                        COALESCE(last_reinforced_at, updated_at) DESC,
-                        logical_id`;
+      // Restrict to LIVE entries (mirrors knowledge_current) so the register aligns
+      // 1:1 with the knowledge seed: a deleted entry's lingering meta (remove() keeps
+      // the register row) can't steal a live entry's slot under the shared 500 cap, and
+      // orphaned meta for deleted entries isn't pushed to the remote. Same value order
+      // as the knowledge seed (confidence, then recency, then logical_id tiebreak).
+      return `SELECT m.* FROM knowledge_meta m
+                JOIN knowledge k
+                  ON k.logical_id = m.logical_id
+                 AND k.is_current = 1
+                 AND k.is_deleted = 0
+               ORDER BY m.confidence DESC,
+                        COALESCE(m.last_reinforced_at, m.updated_at) DESC,
+                        m.logical_id`;
     default:
       return `SELECT * FROM ${table}`;
   }

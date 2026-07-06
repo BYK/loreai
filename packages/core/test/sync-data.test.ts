@@ -437,6 +437,32 @@ describe("knowledgePushPlan — append-only remote mapping keyed by logical_id (
       low,
     ]);
   });
+
+  test("seedOutbox does NOT seed knowledge_meta for a DELETED entry (live-only JOIN)", () => {
+    setTeamConfig("sync.enabled", "1");
+    const mk = (title: string) =>
+      ltm.create({
+        projectPath: "/tmp/lore-meta-live",
+        scope: "project",
+        category: "decision",
+        title,
+        content: "c",
+      });
+    const live = mk("live");
+    const dead = mk("dead");
+    ltm.remove(dead); // append death-cert; remove() keeps the meta register row
+    // Precondition: the dead entry's meta row STILL exists — so its absence from the
+    // seed below is the live-only JOIN, not a purged row (guards a future remove() change).
+    expect(
+      db().query("SELECT 1 FROM knowledge_meta WHERE logical_id = ?").get(dead),
+    ).toBeTruthy();
+    db().exec("DELETE FROM sync_outbox");
+    setKV("sync.push.knowledge_meta", "0");
+    seedOutbox("basic");
+    const ids = outboxFor("knowledge_meta").map((e) => e.row_id);
+    expect(ids).toContain(live);
+    expect(ids).not.toContain(dead); // its lingering meta must not be seeded/synced
+  });
 });
 
 function insertKnowledge(id: string, title: string, content: string): string {
