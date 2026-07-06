@@ -39,6 +39,16 @@ export interface SyncResult {
   notAuthed?: boolean;
 }
 
+// Tables we've already emitted a quota-pause WARN for, so a paused table (retried every
+// cycle) doesn't spam the identical message every interval. Cleared when the table next
+// makes real progress (a slot freed / the cap lifted), so a later re-pause warns once more.
+const quotaWarnedTables = new Set<string>();
+
+/** Test-only: reset the quota-warning dedupe state between cases. */
+export function __resetQuotaWarnedTables(): void {
+  quotaWarnedTables.clear();
+}
+
 type PushErrorKind = "quota" | "poison" | "transient";
 
 /**
@@ -335,6 +345,7 @@ async function pushEntry(
       revision: (prev?.revision ?? 0) + 1,
       remote_updated_at: prev?.remote_updated_at ?? null,
     });
+    quotaWarnedTables.delete(table); // real progress → a future re-pause may warn again
     res.pushed++;
     return "ok";
   }
@@ -389,7 +400,12 @@ async function pushEntry(
     const kind = classifyPushError(error);
     if (kind === "quota") {
       if (!res.quotaHit) res.quotaHit = { table, message: error.message };
-      log.notice(`sync: quota on ${table} — ${error.message}`);
+      // Warn ONCE per pause — the row stays pending and is retried every cycle, so
+      // logging unconditionally spams the same message at the sync interval forever.
+      if (!quotaWarnedTables.has(table)) {
+        log.notice(`sync: quota on ${table} — ${error.message}`);
+        quotaWarnedTables.add(table);
+      }
       return "stop"; // pause THIS table; keep the row pending (a delete frees it)
     }
     if (kind === "poison") {
@@ -417,6 +433,7 @@ async function pushEntry(
     revision,
     remote_updated_at: state?.remote_updated_at ?? null,
   });
+  quotaWarnedTables.delete(table); // real progress → a future re-pause may warn again
   res.pushed++;
   return "ok";
 }
@@ -780,13 +797,8 @@ export function startSyncScheduler(
   const tick = () => {
     if (inflight || !syncData.isSyncEnabled()) return;
     inflight = syncOnce()
-      .then((r) => {
-        if (r.quotaHit) {
-          log.notice(
-            `sync: quota reached on ${r.quotaHit.table}; that table paused until next change`,
-          );
-        }
-      })
+      // A quota pause is already reported once per table by pushEntry (deduped) — no
+      // per-cycle scheduler summary, which would re-spam the same state every interval.
       .catch((e) =>
         log.error(`sync: background cycle failed: ${(e as Error).message}`),
       )

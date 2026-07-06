@@ -285,7 +285,12 @@ vi.mock("../src/supabase", () => ({
     Promise.resolve({ github_login: "octocat", user_id: mockUserId }),
 }));
 
-import { pushOnce, pullOnce, syncOnce } from "../src/sync";
+import {
+  __resetQuotaWarnedTables,
+  pushOnce,
+  pullOnce,
+  syncOnce,
+} from "../src/sync";
 
 const now = () => Date.now();
 function insertKnowledge(id: string, content: string): void {
@@ -328,6 +333,7 @@ function insertRef(kid: string, eid: string): void {
 }
 
 beforeEach(() => {
+  vi.restoreAllMocks(); // don't let a spy leaked by a failed assertion cascade
   deleteTeamConfig("sync.enabled");
   db().exec("DELETE FROM temp._sync_applying");
   db().exec("DELETE FROM knowledge");
@@ -364,6 +370,7 @@ beforeEach(() => {
   }
   remote.clear();
   quotaTables = new Set();
+  __resetQuotaWarnedTables(); // module-level dedupe state persists across tests
   upsertError = null;
   poisonIds.clear();
   fixedTs = null;
@@ -588,6 +595,40 @@ describe("BLOCKER regressions", () => {
     expect(tableRows("entities").find((x) => x.id === "e1")).toBeTruthy(); // synced!
     expect(Number(getKV("sync.push.knowledge"))).toBe(0); // knowledge cursor held
     expect(Number(getKV("sync.push.entities"))).toBeGreaterThan(0); // entities advanced
+  });
+
+  test("a persistent quota pause warns ONCE, not every cycle (log de-spam)", async () => {
+    syncData.enableSync("basic");
+    insertKnowledge("k1", "hello");
+    quotaTables = new Set(["knowledge"]);
+    const notice = vi.spyOn(log, "notice").mockImplementation(() => {});
+    await pushOnce(makeClient() as never); // cycle 1 — warns once
+    await pushOnce(makeClient() as never); // cycle 2 — same pause, must stay silent
+    await pushOnce(makeClient() as never); // cycle 3 — still silent
+    const quotaLogs = notice.mock.calls.filter(([m]) =>
+      String(m).includes("quota on knowledge —"),
+    );
+    expect(quotaLogs).toHaveLength(1);
+    notice.mockRestore();
+  });
+
+  test("quota re-warns once after the table makes progress then re-hits the cap", async () => {
+    syncData.enableSync("basic");
+    insertKnowledge("k1", "hello");
+    quotaTables = new Set(["knowledge"]);
+    const notice = vi.spyOn(log, "notice").mockImplementation(() => {});
+    await pushOnce(makeClient() as never); // warns (1)
+    await pushOnce(makeClient() as never); // silent
+    quotaTables = new Set(); // cap lifts → k1 pushes, clearing the warned flag
+    await pushOnce(makeClient() as never);
+    insertKnowledge("k2", "world");
+    quotaTables = new Set(["knowledge"]); // re-hit the cap
+    await pushOnce(makeClient() as never); // warns again (2)
+    const quotaLogs = notice.mock.calls.filter(([m]) =>
+      String(m).includes("quota on knowledge —"),
+    );
+    expect(quotaLogs).toHaveLength(2);
+    notice.mockRestore();
   });
 
   // (2) MORE than PAGE rows sharing one updated_at must ALL be pulled (the
