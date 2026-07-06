@@ -477,6 +477,10 @@ const msr1Questions: EvalQuestion[] = [
     referenceAnswer:
       "Users were getting rate-limited when trying to log in with email/password after other users did OAuth logins. They received the error 'Too many login attempts, please try again in 15 minutes'.",
     rubric: RUBRICS.multiSessionRecall,
+    // Exact-phrase anchors: a faithful paraphrase (e.g. "too many failed login
+    // attempts") under-counts. Conservative by design — a false negative never
+    // awards unearned credit (see recall-score.ts).
+    expectedFacts: ["Too many login attempts", "15 minutes"],
     metadata: {
       turnIndex: 0,
       difficulty: "easy",
@@ -493,6 +497,7 @@ const msr1Questions: EvalQuestion[] = [
     referenceAnswer:
       "tests/auth/rate-limiter-oauth.test.ts — it has two test cases: one verifying OAuth callbacks don't count against login rate limits, and one verifying login attempts are still rate-limited by email.",
     rubric: RUBRICS.multiSessionRecall,
+    expectedFacts: ["tests/auth/rate-limiter-oauth.test.ts"],
     metadata: { turnIndex: 8, difficulty: "easy", tags: ["file-path", "test"] },
   },
   // Cross-session (session 1 → session 3) — medium
@@ -506,6 +511,7 @@ const msr1Questions: EvalQuestion[] = [
     referenceAnswer:
       "JWT was chosen because the API is consumed by both a React web frontend and a React Native mobile app. Stateless tokens avoid server-side session storage and work well with the existing CDN setup.",
     rubric: RUBRICS.multiSessionRecall,
+    expectedFacts: ["JWT", "React Native"],
     metadata: {
       turnIndex: 2,
       difficulty: "medium",
@@ -537,6 +543,7 @@ const msr1Questions: EvalQuestion[] = [
     referenceAnswer:
       "bcrypt with 12 salt rounds, implemented in src/auth/password.ts. Argon2 was considered but rejected due to better library support for bcrypt in the Node 20 setup.",
     rubric: RUBRICS.multiSessionRecall,
+    expectedFacts: ["bcrypt", "src/auth/password.ts"],
     metadata: {
       turnIndex: 3,
       difficulty: "medium",
@@ -553,6 +560,7 @@ const msr1Questions: EvalQuestion[] = [
     referenceAnswer:
       "PKCE was chosen for three reasons: (1) the mobile app is a public client where PKCE is mandatory, (2) implicit grant is deprecated in OAuth 2.1, and (3) using the same flow for both web and mobile simplifies the codebase.",
     rubric: RUBRICS.multiSessionRecall,
+    expectedFacts: ["PKCE", "public client"],
     metadata: {
       turnIndex: 4,
       difficulty: "medium",

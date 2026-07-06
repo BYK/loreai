@@ -117,6 +117,14 @@ export interface EvalQuestion {
   question: string;
   referenceAnswer: string;
   rubric: ScoringRubric;
+  /**
+   * Ground-truth anchors for justifier-free retrieval scoring (see
+   * `recall-score.ts`). When present, the harness scores retrieval quality
+   * deterministically, separately from the LLM judge's end-task score.
+   */
+  expectedFacts?: string[];
+  /** Stale/superseded facts that must NOT appear (negative controls). */
+  forbiddenFacts?: string[];
   metadata: {
     turnIndex?: number;
     cumulativeTokens?: number;
@@ -144,6 +152,24 @@ export interface JudgeResult {
   tokensUsed: number;
 }
 
+/**
+ * Objective, LLM-free retrieval-quality score for a single question, kept
+ * separate from the judge's end-task composite. Produced by
+ * `recall-score.ts::scoreRetrieval` and present only when the question
+ * declares ground-truth anchors.
+ */
+export interface RetrievalScore {
+  /** matchedFacts / expectedCount; null when the question has no expectedFacts. */
+  factRecall: number | null;
+  expectedCount: number;
+  matchedFacts: string[];
+  missedFacts: string[];
+  /** forbiddenFacts that leaked into the answer (negative-control failures). */
+  leakedStaleFacts: string[];
+  /** All expected present AND nothing forbidden leaked. */
+  pass: boolean;
+}
+
 export interface EvalResult {
   timestamp: string;
   dimension: Dimension;
@@ -153,9 +179,17 @@ export interface EvalResult {
   question: string;
   referenceAnswer: string;
   hypothesis: string;
+  /** LLM judge (end-task quality) per-criterion scores. */
   scores: Record<string, number>;
+  /** LLM judge (end-task quality) weighted composite. */
   compositeScore: number;
   judgeReasoning: string;
+  /**
+   * Objective retrieval-quality score, independent of the judge. Present only
+   * when the question declares ground-truth anchors (`expectedFacts` /
+   * `forbiddenFacts`); omitted otherwise.
+   */
+  retrieval?: RetrievalScore;
   tokens: TokenUsage;
   metadata: Record<string, unknown>;
 }

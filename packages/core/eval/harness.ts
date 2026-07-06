@@ -40,6 +40,7 @@ import {
   estimateTokens,
 } from "./baselines";
 import { judge } from "./judge";
+import { scoreRetrieval } from "./recall-score";
 import type { EvalLLMClient } from "./llm-backend";
 import { createEvalLLMClient, resolveBackend } from "./llm-backend";
 
@@ -1012,8 +1013,22 @@ export async function runScenario(
           tokens = answer.tokens;
         }
 
-        // Score with the judge
+        // Score with the judge (end-task quality)
         const judgeResult = await judge(q, hypothesis, llm, { recallInvoked });
+
+        // Score retrieval quality objectively (justifier-free), independent of
+        // the judge. Present only when the question declares ground-truth
+        // anchors; omitted otherwise so it never dilutes into a vacuous zero.
+        // Skipped in fixture mode (hypothesis is a placeholder, not a real
+        // answer) — mirrors the judge's fixture-mode neutralization so a
+        // structural regression run doesn't look like a memory regression.
+        const retrieval =
+          config.mode === "fixture" || !llm
+            ? undefined
+            : scoreRetrieval(hypothesis, {
+                expectedFacts: q.expectedFacts,
+                forbiddenFacts: q.forbiddenFacts,
+              });
 
         const result: EvalResult = {
           timestamp: new Date().toISOString(),
@@ -1027,6 +1042,7 @@ export async function runScenario(
           scores: judgeResult.scores,
           compositeScore: judgeResult.compositeScore,
           judgeReasoning: judgeResult.reasoning,
+          ...(retrieval ? { retrieval } : {}),
           tokens,
           metadata: {
             difficulty: q.metadata.difficulty,
@@ -1197,7 +1213,35 @@ export function printSummary(results: EvalResult[]): string {
         const avg =
           modeResults.reduce((s, r) => s + r.compositeScore, 0) /
           modeResults.length;
-        parts.push(`${mode} ${avg.toFixed(1)}`);
+        // Objective retrieval metrics (justifier-free), shown separately from
+        // the judge's end-task composite. Only the subset of questions with
+        // ground-truth anchors contribute.
+        const scored = modeResults.filter((r) => r.retrieval !== undefined);
+        let retrievalPart = "";
+        if (scored.length > 0) {
+          const withRecall = scored.filter(
+            (r) => r.retrieval?.factRecall !== null,
+          );
+          const meanRecall =
+            withRecall.length > 0
+              ? withRecall.reduce(
+                  (s, r) => s + (r.retrieval?.factRecall ?? 0),
+                  0,
+                ) / withRecall.length
+              : null;
+          const passRate =
+            scored.filter((r) => r.retrieval?.pass).length / scored.length;
+          // `recall` averages over questions declaring expectedFacts; `pass`/`n`
+          // count all anchored questions. Denominators coincide unless a
+          // question is forbidden-only (a pure negative control).
+          const recallStr =
+            meanRecall !== null
+              ? `recall ${(meanRecall * 100).toFixed(0)}%`
+              : "";
+          const passStr = `pass ${(passRate * 100).toFixed(0)}% (n=${scored.length})`;
+          retrievalPart = ` [${[recallStr, passStr].filter(Boolean).join(", ")}]`;
+        }
+        parts.push(`${mode} ${avg.toFixed(1)}${retrievalPart}`);
       }
 
       lines.push(`  ${scenario}:  ${parts.join("  |  ")}`);

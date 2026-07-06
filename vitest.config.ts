@@ -17,6 +17,10 @@ export default defineConfig({
     // Run all packages' tests
     include: [
       "packages/core/test/**/*.test.ts",
+      // Fast, pure unit tests for the eval suite's own logic (scorers,
+      // analysis). Heavy end-to-end evals live in *.eval.ts and run under
+      // vitest.evals.config.ts, not here.
+      "packages/core/eval/**/*.test.ts",
       "packages/gateway/test/**/*.test.ts",
       "packages/opencode/test/**/*.test.ts",
       "packages/pi/test/**/*.test.ts",

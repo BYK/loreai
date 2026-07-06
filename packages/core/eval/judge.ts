@@ -319,6 +319,14 @@ function buildCriteriaDescription(rubric: ScoringRubric): string {
     .join("\n\n");
 }
 
+// The reference answer is the source of truth. The grader must judge fidelity
+// to it — NOT reward volume. An earlier version of this prompt told the judge
+// that "extra content should score 5" and that the reference was merely a
+// floor; that is the "justifier" inflation pattern #961 exists to avoid (a
+// fluent, padded answer scoring high without actually recalling the ground
+// truth). Retrieval correctness is now scored separately and deterministically
+// in `recall-score.ts`; this judge grades end-task quality only, grounded in
+// the reference.
 const JUDGE_SYSTEM = `You are evaluating an AI assistant's answer about a coding session.
 Score each criterion on a 1-5 integer scale. Return ONLY valid JSON:
 {
@@ -326,11 +334,13 @@ Score each criterion on a 1-5 integer scale. Return ONLY valid JSON:
   "reasoning": "<brief explanation of the scores, 2-3 sentences>"
 }
 
-IMPORTANT: The reference answer is a MINIMUM — the hypothesis may include additional
-correct information beyond the reference. Extra correct details should NOT be penalized.
-Only penalize facts that directly CONTRADICT the reference or are clearly fabricated.
-A hypothesis that covers all reference points PLUS additional accurate context should
-score 5 on factual_accuracy and completeness.
+Ground every score in the reference answer as the source of truth:
+- Credit only claims that the reference supports or that are verifiably
+  consistent with it.
+- Do NOT reward volume. Additional, unverifiable, or off-topic content is not
+  evidence of a better answer and must not raise a score on its own.
+- Penalize claims that contradict the reference or are fabricated, and penalize
+  missing key facts that the reference contains.
 
 Do NOT include any text outside the JSON object.`;
 
