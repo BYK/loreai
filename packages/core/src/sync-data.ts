@@ -615,6 +615,37 @@ function rowIdExpr(m: SyncTableMeta): string {
  * the divergence (current content != the hash that stale upsert synced) and
  * re-seeds it.
  */
+/**
+ * The seed SELECT for a non-knowledge table, VALUE-RANKED so a capped free tier keeps
+ * the MOST USEFUL rows (mirrors the knowledge seed; the push drains the outbox in seq
+ * order and the server rejects once the cap is hit, so seed order = what survives):
+ *  - entities: most-referenced first (by knowledge_entity_refs count), then recency —
+ *    a heavily-referenced entity is more useful than a one-off, and the cap is small (30).
+ *  - entity_relations: recency (updated_at, then created_at).
+ *  - entity_aliases: recency (created_at — the table has no updated_at).
+ *  - any other table: unordered (no per-row value signal / high enough cap).
+ * (knowledge is handled by its own logical_id-keyed branch in seedOutbox.)
+ */
+function seedSelect(table: string): string {
+  switch (table) {
+    // The trailing id is a stable tiebreak so re-seeds are fully deterministic when
+    // the value keys are equal (order only affects cap survival, not cache stability).
+    case "entities":
+      return `SELECT e.* FROM entities e
+                LEFT JOIN (
+                  SELECT entity_id, COUNT(*) AS refs
+                    FROM knowledge_entity_refs GROUP BY entity_id
+                ) r ON r.entity_id = e.id
+               ORDER BY COALESCE(r.refs, 0) DESC, e.updated_at DESC, e.created_at DESC, e.id`;
+    case "entity_relations":
+      return "SELECT * FROM entity_relations ORDER BY updated_at DESC, created_at DESC, id";
+    case "entity_aliases":
+      return "SELECT * FROM entity_aliases ORDER BY created_at DESC, id";
+    default:
+      return `SELECT * FROM ${table}`;
+  }
+}
+
 export function seedOutbox(tier: SyncTier = "basic"): void {
   const now = Date.now();
   const enqueue = db().query(
@@ -686,7 +717,7 @@ export function seedOutbox(tier: SyncTier = "basic"): void {
       // Resolve the synced columns ONCE per table (one PRAGMA table_info) — not
       // per row, which is what `contentHash` would do (an N+1 on large tables).
       const cols = columns(m.table);
-      const rows = db().query(`SELECT * FROM ${m.table}`).all() as Record<
+      const rows = db().query(seedSelect(m.table)).all() as Record<
         string,
         unknown
       >[];

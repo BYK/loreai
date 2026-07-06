@@ -330,6 +330,81 @@ describe("knowledgePushPlan — append-only remote mapping keyed by logical_id (
     const order = outboxFor("knowledge").map((e) => e.row_id);
     expect(order).toEqual([newer, older]); // tie broken by recency
   });
+
+  test("seedOutbox seeds entities by reference count first (most-used), then recency", () => {
+    setTeamConfig("sync.enabled", "1");
+    const pid = ensureProject("/tmp/lore-entity-rank");
+    const mkEntity = (id: string, updatedAt: number) =>
+      db()
+        .query(
+          "INSERT INTO entities (id, project_id, entity_type, canonical_name, created_at, updated_at) VALUES (?, ?, 'tool', ?, ?, ?)",
+        )
+        .run(id, pid, id, updatedAt, updatedAt);
+    // Insert in the REVERSE of the expected value order, and make recency the reverse
+    // of reference count too — so neither storage order NOR a recency-only sort could
+    // reproduce [eA, eB, eC]; only ref-count ranking does.
+    mkEntity("eC", 300); // newest, unreferenced (0)
+    mkEntity("eB", 200); // 1 ref
+    mkEntity("eA", 100); // oldest, most referenced (2)
+    insertKnowledge("k1", "T", "C");
+    insertKnowledge("k2", "T", "C");
+    const mkRef = (kid: string, eid: string) =>
+      db()
+        .query(
+          "INSERT INTO knowledge_entity_refs (knowledge_id, entity_id) VALUES (?, ?)",
+        )
+        .run(kid, eid);
+    mkRef("k1", "eA");
+    mkRef("k2", "eA");
+    mkRef("k1", "eB");
+    db().exec("DELETE FROM sync_outbox"); // clear the insert captures
+    setKV("sync.push.entities", "0");
+    seedOutbox("basic");
+    expect(outboxFor("entities").map((e) => e.row_id)).toEqual([
+      "eA",
+      "eB",
+      "eC",
+    ]);
+  });
+
+  test("seedOutbox seeds entity_relations + entity_aliases by recency (newest first)", () => {
+    setTeamConfig("sync.enabled", "1");
+    const pid = ensureProject("/tmp/lore-entity-rank2");
+    for (const id of ["e1", "e2"])
+      db()
+        .query(
+          "INSERT INTO entities (id, project_id, entity_type, canonical_name, created_at, updated_at) VALUES (?, ?, 'tool', ?, 1, 1)",
+        )
+        .run(id, pid, id);
+    const mkRel = (id: string, updatedAt: number) =>
+      db()
+        .query(
+          "INSERT INTO entity_relations (id, entity_a, entity_b, relation, created_at, updated_at) VALUES (?, 'e1', 'e2', ?, ?, ?)",
+        )
+        .run(id, id, updatedAt, updatedAt);
+    mkRel("rOld", 100);
+    mkRel("rNew", 200);
+    const mkAlias = (id: string, createdAt: number) =>
+      db()
+        .query(
+          "INSERT INTO entity_aliases (id, entity_id, alias_type, alias_value, created_at) VALUES (?, 'e1', 'name', ?, ?)",
+        )
+        .run(id, id, createdAt);
+    mkAlias("aOld", 100);
+    mkAlias("aNew", 200);
+    db().exec("DELETE FROM sync_outbox");
+    setKV("sync.push.entity_relations", "0");
+    setKV("sync.push.entity_aliases", "0");
+    seedOutbox("basic");
+    expect(outboxFor("entity_relations").map((e) => e.row_id)).toEqual([
+      "rNew",
+      "rOld",
+    ]);
+    expect(outboxFor("entity_aliases").map((e) => e.row_id)).toEqual([
+      "aNew",
+      "aOld",
+    ]);
+  });
 });
 
 function insertKnowledge(id: string, title: string, content: string): string {
@@ -375,6 +450,8 @@ beforeEach(() => {
   deleteTeamConfig("sync.enabled");
   db().exec("DELETE FROM temp._sync_applying"); // reset suppression depth
   db().exec("DELETE FROM knowledge_entity_refs");
+  db().exec("DELETE FROM entity_aliases");
+  db().exec("DELETE FROM entity_relations");
   db().exec("DELETE FROM knowledge");
   db().exec("DELETE FROM entities");
   db().exec("DELETE FROM profiles");
