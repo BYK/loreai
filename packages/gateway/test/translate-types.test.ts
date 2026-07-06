@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { ZERO_USAGE, extractJSONFromSSE } from "../src/translate/types";
+import {
+  ZERO_USAGE,
+  extractJSONFromSSE,
+  extractJSONFromSSEText,
+  looksLikeSSE,
+  readCompletionJSON,
+} from "../src/translate/types";
 
 // ---------------------------------------------------------------------------
 // ZERO_USAGE
@@ -92,5 +98,101 @@ describe("extractJSONFromSSE", () => {
     const body = 'data: {"id":"crlf"}\r\ndata: [DONE]\r\n\r\n';
     const json = await extractJSONFromSSE(sseResponse(body));
     expect(json).toEqual({ id: "crlf" });
+  });
+
+  it("tolerates `data:` with no space after the colon", async () => {
+    const json = await extractJSONFromSSE(
+      sseResponse('data:{"id":"nospace"}\n'),
+    );
+    expect(json).toEqual({ id: "nospace" });
+  });
+
+  it("unwraps the openai-responses `response.completed` envelope to the bare response", () => {
+    const body = [
+      "event: response.created",
+      'data: {"type":"response.created","response":{"id":"resp_1"}}',
+      "event: response.completed",
+      'data: {"type":"response.completed","response":{"output_text":"hi","usage":{"input_tokens":3,"output_tokens":1},"model":"gpt-5-codex"}}',
+      "data: [DONE]",
+      "",
+    ].join("\n");
+    // The terminal event's `.response` is returned, NOT the envelope — so the
+    // non-streaming parsers read `output_text`/`usage`/`model` at top level.
+    expect(extractJSONFromSSEText(body)).toEqual({
+      output_text: "hi",
+      usage: { input_tokens: 3, output_tokens: 1 },
+      model: "gpt-5-codex",
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// looksLikeSSE — body-prefix sniffing (content-type may be mislabeled)
+// ---------------------------------------------------------------------------
+
+describe("looksLikeSSE", () => {
+  it("true for a text/event-stream content-type regardless of body", () => {
+    expect(looksLikeSSE("text/event-stream; charset=utf-8", "{}")).toBe(true);
+  });
+
+  it("sniffs SSE bodies even when the content-type is wrong or empty", () => {
+    for (const head of [
+      "data: {",
+      "event: response.created",
+      "id: 1",
+      "retry: 5",
+      ": keepalive",
+    ]) {
+      expect(looksLikeSSE("application/json", `${head}\n`)).toBe(true);
+      expect(looksLikeSSE("", `${head}\n`)).toBe(true);
+    }
+  });
+
+  it("false for a JSON body (object or array), tolerating BOM/leading whitespace", () => {
+    expect(looksLikeSSE("application/json", '{"a":1}')).toBe(false);
+    expect(looksLikeSSE("", "  \n [1,2]")).toBe(false);
+    expect(looksLikeSSE("", '\uFEFF{"a":1}')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// readCompletionJSON — the single safe reader for non-streaming bodies
+// ---------------------------------------------------------------------------
+
+function response(body: string, contentType: string): Response {
+  return new Response(body, { headers: { "content-type": contentType } });
+}
+
+describe("readCompletionJSON", () => {
+  it("parses a normal JSON body", async () => {
+    const json = await readCompletionJSON(
+      response(
+        '{"choices":[{"message":{"content":"hi"}}]}',
+        "application/json",
+      ),
+    );
+    expect(json).toEqual({ choices: [{ message: { content: "hi" } }] });
+  });
+
+  it("does NOT throw on an SSE body that is mislabeled application/json (LOREAI-GATEWAY-38/-1P)", async () => {
+    // A chat/completions SSE stream with the WRONG content-type — calling
+    // response.json() on this throws `Unexpected token 'd', "data: {..."`.
+    const body =
+      'data: {"id":"1","choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}\ndata: [DONE]\n\n';
+    const json = await readCompletionJSON(response(body, "application/json"));
+    expect(json).toEqual({
+      id: "1",
+      choices: [{ delta: { content: "hi" }, finish_reason: "stop" }],
+    });
+  });
+
+  it("handles an openai-responses SSE stream with NO content-type, unwrapping the envelope", async () => {
+    const body = [
+      "event: response.completed",
+      'data: {"type":"response.completed","response":{"output_text":"done","model":"gpt-5-codex"}}',
+      "",
+    ].join("\n");
+    const json = await readCompletionJSON(response(body, ""));
+    expect(json).toEqual({ output_text: "done", model: "gpt-5-codex" });
   });
 });

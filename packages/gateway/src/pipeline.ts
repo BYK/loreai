@@ -97,7 +97,7 @@ import type {
 import {
   applyUpstreamExtraHeaders,
   blocksToText,
-  extractJSONFromSSE,
+  readCompletionJSON,
   forwardClientHeaders,
   ZERO_USAGE,
 } from "./translate/types";
@@ -4315,17 +4315,13 @@ async function accumulateNonStreamResponse(
     | "vertex"
     | "gemini" = "anthropic",
 ): Promise<GatewayResponse> {
-  // Some providers (e.g. DeepSeek) return SSE-formatted responses even when
-  // stream: false was sent. Detect this via content-type and extract the JSON
-  // payload from the SSE data lines instead of calling response.json() which
-  // would throw a SyntaxError on "data: {...}" prefixed text.
-  const ct = upstreamResponse.headers.get("content-type") ?? "";
-  let json: Record<string, unknown>;
-  if (ct.includes("text/event-stream")) {
-    json = await extractJSONFromSSE(upstreamResponse);
-  } else {
-    json = (await upstreamResponse.json()) as Record<string, unknown>;
-  }
+  // Some providers (the ChatGPT/Codex backend, DeepSeek) return SSE-formatted
+  // responses even when stream: false was sent — sometimes WITHOUT the
+  // text/event-stream content-type. readCompletionJSON sniffs the body so a
+  // mislabeled SSE stream is never fed to JSON.parse (which would throw a
+  // SyntaxError on "data: {...}" / "event: ..." prefixed text — LOREAI-GATEWAY-
+  // 38 / -1P).
+  const json = await readCompletionJSON(upstreamResponse);
 
   switch (protocol) {
     case "openai":

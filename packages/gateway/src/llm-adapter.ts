@@ -40,7 +40,7 @@ import {
 } from "./sentry";
 import { recordWorkerCost } from "./cost-tracker";
 import { upstreamFetch } from "./fetch";
-import { extractJSONFromSSE } from "./translate/types";
+import { readCompletionJSON } from "./translate/types";
 import { buildOpenAIChatCompletionsUrl } from "./translate/openai";
 import { isBedrockMantleHost, toMantleModelId } from "./translate/bedrock";
 import {
@@ -1628,12 +1628,15 @@ export function createGatewayLLMClient(
                 // model.
                 if (thinkingStripped) markThinkingUnsupported(model);
 
-                // Guard: some providers return SSE even when stream: false
-                // was sent. Extract JSON from the data: lines instead.
+                // Guard: some providers (the ChatGPT/Codex backend, DeepSeek)
+                // return SSE even when stream: false was sent — sometimes
+                // WITHOUT the text/event-stream content-type. readCompletionJSON
+                // sniffs the body so a mislabeled SSE stream is never fed to
+                // JSON.parse (LOREAI-GATEWAY-38: `Unexpected token 'e', "event:
+                // res"...`) and the openai-responses terminal envelope is
+                // unwrapped to the bare response the parser expects.
                 const ct = response.headers.get("content-type") ?? "";
-                const rawData = ct.includes("text/event-stream")
-                  ? await extractJSONFromSSE(response)
-                  : await response.json();
+                const rawData = await readCompletionJSON(response);
 
                 // A 2xx whose body is a provider error envelope (e.g. OpenRouter
                 // surfacing an upstream timeout as HTTP 200 + {error:{code:504}})

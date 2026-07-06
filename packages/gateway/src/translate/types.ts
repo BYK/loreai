@@ -258,29 +258,67 @@ export const ZERO_USAGE: GatewayUsage = Object.freeze({
 });
 
 /**
- * Extract a JSON payload from an SSE response body.
+ * True when a response body is Server-Sent Events rather than a JSON object —
+ * even if the provider mislabeled or omitted the `content-type`.
+ *
+ * Detected by the header OR by sniffing the body prefix: an SSE stream begins
+ * with an SSE field (`data:` / `event:` / `id:` / `retry:`) or a comment line
+ * (`:`), whereas a JSON body begins with `{` or `[`. Some providers (the
+ * ChatGPT/Codex backend, DeepSeek) return SSE even when a NON-streaming request
+ * was made — and sometimes WITHOUT the `text/event-stream` content-type — so a
+ * header-only check misses them and `JSON.parse`-ing the SSE body throws
+ * (`Unexpected token 'e', "event: res"...` — LOREAI-GATEWAY-38 / -1P).
+ */
+export function looksLikeSSE(contentType: string, body: string): boolean {
+  if (contentType.includes("text/event-stream")) return true;
+  const head = body.replace(/^\uFEFF/, "").trimStart();
+  return /^(?:data|event|id|retry):/.test(head) || head.startsWith(":");
+}
+
+/**
+ * An openai-responses SSE stream terminates with a `response.completed` (or
+ * `.incomplete` / `.failed`) event whose `response` field holds the FULL
+ * response object. `extractJSONFromSSEText` returns the last data line, which is
+ * that terminal event — but the non-streaming parsers expect the bare response
+ * object (`{output, output_text, usage, model}`). Unwrap the envelope so they
+ * read the right shape (otherwise: `text=null` → silent-empty worker output).
+ */
+function unwrapResponsesEnvelope(
+  obj: Record<string, unknown>,
+): Record<string, unknown> {
+  if (
+    typeof obj.type === "string" &&
+    obj.type.startsWith("response.") &&
+    obj.response &&
+    typeof obj.response === "object"
+  ) {
+    return obj.response as Record<string, unknown>;
+  }
+  return obj;
+}
+
+/**
+ * Extract a JSON payload from already-read SSE body text.
  *
  * Some providers (e.g. DeepSeek) return SSE-formatted responses even when
- * `stream: false` was sent. This function reads all `data: ` lines, ignores
- * the `data: [DONE]` sentinel, and returns the **last** non-sentinel data
- * payload as parsed JSON. The final `data:` line contains the full response
- * object in this scenario.
+ * `stream: false` was sent. This reads all `data:` lines, ignores the
+ * `data: [DONE]` sentinel, and returns the **last** non-sentinel data payload as
+ * parsed JSON (the final `data:` line carries the full response object in this
+ * scenario), unwrapping the openai-responses terminal envelope when present.
  *
- * NOTE: This does not handle the SSE spec's multiline `data:` continuation
- * (consecutive `data:` lines joined by `\n`). In practice, providers that
- * return a complete non-streaming response as SSE always send the JSON
- * object on a single `data:` line.
+ * NOTE: does not handle the SSE spec's multiline `data:` continuation
+ * (consecutive `data:` lines joined by `\n`). In practice, providers that return
+ * a complete non-streaming response as SSE send the JSON on a single `data:`
+ * line (or, for openai-responses, in the terminal `response.completed` event).
  */
-export async function extractJSONFromSSE(
-  response: Response,
-): Promise<Record<string, unknown>> {
-  const text = await response.text();
+export function extractJSONFromSSEText(text: string): Record<string, unknown> {
   const lines = text.split("\n");
   let lastPayload: string | null = null;
 
   for (const line of lines) {
-    if (line.startsWith("data: ")) {
-      const payload = line.slice(6).trim();
+    if (line.startsWith("data:")) {
+      // Tolerate both `data: x` and `data:x` (one optional leading space).
+      const payload = line.slice(line.indexOf(":") + 1).trim();
       if (payload && payload !== "[DONE]") {
         lastPayload = payload;
       }
@@ -293,7 +331,34 @@ export async function extractJSONFromSSE(
     );
   }
 
-  return JSON.parse(lastPayload) as Record<string, unknown>;
+  return unwrapResponsesEnvelope(
+    JSON.parse(lastPayload) as Record<string, unknown>,
+  );
+}
+
+/** Extract a JSON payload from an SSE `Response`. */
+export async function extractJSONFromSSE(
+  response: Response,
+): Promise<Record<string, unknown>> {
+  return extractJSONFromSSEText(await response.text());
+}
+
+/**
+ * Read an upstream LLM completion body as JSON, tolerant of providers that
+ * return SSE even for a non-streaming request — INCLUDING those that mislabel or
+ * omit the `content-type`. Reads the body once, sniffs for SSE, then either
+ * extracts the JSON from the data lines or parses the whole body as JSON. This
+ * is the single safe entry point for reading a non-streaming completion body;
+ * calling `response.json()` directly throws on a mislabeled SSE body.
+ */
+export async function readCompletionJSON(
+  response: Response,
+): Promise<Record<string, unknown>> {
+  const contentType = response.headers.get("content-type") ?? "";
+  const text = await response.text();
+  return looksLikeSSE(contentType, text)
+    ? extractJSONFromSSEText(text)
+    : (JSON.parse(text) as Record<string, unknown>);
 }
 
 /** Accumulated response from the upstream provider. */
