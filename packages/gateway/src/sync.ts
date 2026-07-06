@@ -298,15 +298,18 @@ async function pushEntry(
   }
 
   if (op === "delete") {
-    // Null the remote content_hash too, so the tombstone honors the
-    // "remoteHash is null for a tombstone" contract on the wire. The pull side
-    // (applyRemote) already treats is_deleted rows as hash-null, but this also
-    // protects un-upgraded readers during a rollout.
-    // Null the remote content_hash too (tombstone "remoteHash is null" contract).
     const tombstone: Record<string, unknown> = {
       is_deleted: true,
-      content_hash: null,
     };
+    // Only versioned tables have a content_hash column remotely; the join table
+    // (knowledge_entity_refs) does not, so sending it is a PGRST204 schema error that
+    // would wedge the table forever (PGRST204 classifies as transient → infinite retry).
+    // Mirror the upsert path's `meta.versioned` gate. Nulling it honors the tombstone's
+    // "remoteHash is null" contract on the wire (the pull side already treats is_deleted
+    // rows as hash-null, but this also protects un-upgraded readers during a rollout).
+    if (tableMeta(table).versioned !== false) {
+      tombstone.content_hash = null;
+    }
     // Erasure completeness (#823): scrub the deleted knowledge content-bearing
     // columns from the remote tombstone so the bytes don't linger server-side until
     // the sub-PR 4 reaper. The LOCAL death-cert preserves them, and

@@ -215,6 +215,45 @@ describe.skipIf(SKIP)("sync engine ↔ real Postgres/PostgREST", () => {
     expect(ref).toHaveLength(1);
   });
 
+  it("pushes a DELETE for a join-table ref without a phantom content_hash (PGRST204 regression)", async () => {
+    insertKnowledge("k1", "x");
+    db()
+      .query(
+        "INSERT INTO entities (id, project_id, entity_type, canonical_name, created_at, updated_at) VALUES ('e1','p','tool','X',?,?)",
+      )
+      .run(Date.now(), Date.now());
+    syncData.enableSync("basic");
+    db()
+      .query(
+        "INSERT INTO knowledge_entity_refs (knowledge_id, entity_id) VALUES ('k1','e1')",
+      )
+      .run();
+    await pushOnce(clientFor(uid)); // ref upserted (is_deleted=false)
+
+    // Delete the ref locally → capture a delete op → push the tombstone. The join
+    // table is versioned:false (no content_hash column), so the delete payload must
+    // NOT include content_hash, or PostgREST rejects it (PGRST204) and — since that's
+    // not a 23514 — the table wedges on infinite transient retries.
+    db()
+      .query(
+        "DELETE FROM knowledge_entity_refs WHERE knowledge_id='k1' AND entity_id='e1'",
+      )
+      .run();
+    const r = await pushOnce(clientFor(uid));
+    expect(r.pushed).toBe(1); // exactly the ref delete pushed (no PGRST204 wedge)
+
+    // Remote ref is soft-deleted, not errored.
+    const ref = await h.asUser(uid, (c) =>
+      c
+        .query(
+          "select is_deleted from public.knowledge_entity_refs where knowledge_id='k1' and entity_id='e1'",
+        )
+        .then((x) => x.rows),
+    );
+    expect(ref).toHaveLength(1);
+    expect(ref[0].is_deleted).toBe(true);
+  });
+
   it("round-trips push → pull with a stable content hash (no ping-pong)", async () => {
     syncData.enableSync("basic");
     insertKnowledge("k1", "round-trip");
