@@ -623,6 +623,8 @@ function rowIdExpr(m: SyncTableMeta): string {
  *    a heavily-referenced entity is more useful than a one-off, and the cap is small (30).
  *  - entity_relations: recency (updated_at, then created_at).
  *  - entity_aliases: recency (created_at — the table has no updated_at).
+ *  - knowledge_meta: same value order as knowledge (confidence, then recency) so the
+ *    surviving meta set matches the surviving knowledge set under their shared cap.
  *  - any other table: unordered (no per-row value signal / high enough cap).
  * (knowledge is handled by its own logical_id-keyed branch in seedOutbox.)
  */
@@ -641,6 +643,17 @@ function seedSelect(table: string): string {
       return "SELECT * FROM entity_relations ORDER BY updated_at DESC, created_at DESC, id";
     case "entity_aliases":
       return "SELECT * FROM entity_aliases ORDER BY created_at DESC, id";
+    // knowledge_meta shares knowledge's 500-row cap, so seed it in the SAME value order
+    // (confidence, then recency) as the knowledge seed — otherwise the surviving meta set
+    // wouldn't match the surviving knowledge set and synced entries would read as the
+    // default confidence (1.0) on a peer. (Deleted entries are typically low-confidence —
+    // pruneDeadEntries/consolidation — so they sort last and don't steal live slots.
+    // knowledge_meta_crdt's 10x cap won't bind for a single device, so it stays default.)
+    case "knowledge_meta":
+      return `SELECT * FROM knowledge_meta
+               ORDER BY confidence DESC,
+                        COALESCE(last_reinforced_at, updated_at) DESC,
+                        logical_id`;
     default:
       return `SELECT * FROM ${table}`;
   }

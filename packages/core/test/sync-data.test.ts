@@ -405,6 +405,38 @@ describe("knowledgePushPlan — append-only remote mapping keyed by logical_id (
       "aOld",
     ]);
   });
+
+  test("seedOutbox seeds knowledge_meta in the same value order as knowledge (confidence, recency)", () => {
+    setTeamConfig("sync.enabled", "1");
+    const mk = (title: string) =>
+      ltm.create({
+        projectPath: "/tmp/lore-meta-seed",
+        scope: "project",
+        category: "decision",
+        title,
+        content: "c",
+      });
+    // Created low→mid→high, so storage/insertion order is the REVERSE of the expected
+    // confidence order — an unordered seed could not reproduce [high, mid, low].
+    const low = mk("low");
+    const mid = mk("mid");
+    const high = mk("high");
+    const setConf = (lid: string, c: number) =>
+      db()
+        .query("UPDATE knowledge_meta SET confidence = ? WHERE logical_id = ?")
+        .run(c, lid);
+    setConf(high, 0.9);
+    setConf(mid, 0.5);
+    setConf(low, 0.1);
+    db().exec("DELETE FROM sync_outbox"); // clear the create captures
+    setKV("sync.push.knowledge_meta", "0");
+    seedOutbox("basic");
+    expect(outboxFor("knowledge_meta").map((e) => e.row_id)).toEqual([
+      high,
+      mid,
+      low,
+    ]);
+  });
 });
 
 function insertKnowledge(id: string, title: string, content: string): string {
@@ -453,6 +485,8 @@ beforeEach(() => {
   db().exec("DELETE FROM entity_aliases");
   db().exec("DELETE FROM entity_relations");
   db().exec("DELETE FROM knowledge");
+  db().exec("DELETE FROM knowledge_meta");
+  db().exec("DELETE FROM knowledge_meta_crdt");
   db().exec("DELETE FROM entities");
   db().exec("DELETE FROM profiles");
   db().exec("DELETE FROM sync_outbox");
