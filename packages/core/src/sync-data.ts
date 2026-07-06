@@ -653,9 +653,19 @@ export function seedOutbox(tier: SyncTier = "basic"): void {
             WHERE table_name = 'knowledge' AND seq > ? AND row_id = ?
             ORDER BY seq DESC LIMIT 1`,
         );
+        // Value-ranked so a capped free tier syncs the MOST USEFUL entries first. The
+        // push drains the outbox in seq order and the server rejects once the row cap is
+        // hit, so seeding by value (confidence, then recency of use/update) means the
+        // LOWEST-value entries — not arbitrary storage order — are the ones left behind.
+        // knowledge_current is one row per logical_id, so no DISTINCT is needed.
+        // (A meta-less current row reads as confidence 1.0 via the view's COALESCE — the
+        // legacy full-confidence default — so it sorts high, matching that semantics.)
         const lids = db()
           .query(
-            "SELECT DISTINCT COALESCE(logical_id, id) AS lid FROM knowledge_current",
+            `SELECT COALESCE(logical_id, id) AS lid FROM knowledge_current
+              ORDER BY confidence DESC,
+                       COALESCE(last_reinforced_at, updated_at) DESC,
+                       created_at DESC`,
           )
           .all() as { lid: string }[];
         for (const { lid } of lids) {

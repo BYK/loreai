@@ -274,6 +274,62 @@ describe("knowledgePushPlan — append-only remote mapping keyed by logical_id (
     ).n;
     expect(n).toBe(0); // already synced (by logical_id) → not re-enqueued
   });
+
+  test("seedOutbox enqueues knowledge by value (confidence, then recency) so the best entries win the cap", () => {
+    setTeamConfig("sync.enabled", "1");
+    const mk = (title: string) =>
+      ltm.create({
+        projectPath: "/tmp/lore-seed-rank",
+        scope: "project",
+        category: "decision",
+        title,
+        content: "c",
+      });
+    const low = mk("low");
+    const mid = mk("mid");
+    const high = mk("high");
+    // Distinct confidence, deliberately created in NON-value order above so a stable
+    // sort by anything other than value would not reproduce [high, mid, low].
+    const setConf = (lid: string, c: number) =>
+      db()
+        .query("UPDATE knowledge_meta SET confidence = ? WHERE logical_id = ?")
+        .run(c, lid);
+    setConf(high, 0.9);
+    setConf(mid, 0.5);
+    setConf(low, 0.1);
+    db().exec("DELETE FROM sync_outbox"); // clear the create captures
+    setKV("sync.push.knowledge", "0");
+    seedOutbox("basic");
+    const order = outboxFor("knowledge").map((e) => e.row_id);
+    expect(order).toEqual([high, mid, low]); // highest confidence first
+  });
+
+  test("seedOutbox breaks confidence ties by recency (most recently reinforced first)", () => {
+    setTeamConfig("sync.enabled", "1");
+    const mk = (title: string) =>
+      ltm.create({
+        projectPath: "/tmp/lore-seed-tie",
+        scope: "project",
+        category: "decision",
+        title,
+        content: "c",
+      });
+    const older = mk("older");
+    const newer = mk("newer");
+    const setMeta = (lid: string, reinforcedAt: number) =>
+      db()
+        .query(
+          "UPDATE knowledge_meta SET confidence = 0.5, last_reinforced_at = ? WHERE logical_id = ?",
+        )
+        .run(reinforcedAt, lid);
+    setMeta(older, 1000);
+    setMeta(newer, 2000); // equal confidence, newer reinforcement
+    db().exec("DELETE FROM sync_outbox");
+    setKV("sync.push.knowledge", "0");
+    seedOutbox("basic");
+    const order = outboxFor("knowledge").map((e) => e.row_id);
+    expect(order).toEqual([newer, older]); // tie broken by recency
+  });
 });
 
 function insertKnowledge(id: string, title: string, content: string): string {
