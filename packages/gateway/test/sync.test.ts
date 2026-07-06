@@ -19,6 +19,7 @@ interface RemoteRow extends Record<string, unknown> {
 const remote = new Map<string, RemoteRow[]>();
 let quotaTables = new Set<string>();
 let upsertError: { code?: string; message: string } | null = null;
+let updateError: { code?: string; message: string } | null = null;
 const poisonIds = new Set<string>(); // ids the server rejects with a size CHECK (23514)
 let fixedTs: string | null = null; // when set, every write stamps this exact ts
 let clock = 1_000_000;
@@ -187,6 +188,7 @@ function makeClient() {
         update(patch: Record<string, unknown>) {
           return {
             match(filter: Record<string, string>) {
+              if (updateError) return Promise.resolve({ error: updateError });
               for (const r of tableRows(table)) {
                 if (Object.entries(filter).every(([k, v]) => r[k] === v)) {
                   Object.assign(r, patch, { updated_at: nextTs() });
@@ -287,6 +289,7 @@ vi.mock("../src/supabase", () => ({
 
 import {
   __resetQuotaWarnedTables,
+  classifyPushError,
   pushOnce,
   pullOnce,
   type SyncProgress,
@@ -373,6 +376,7 @@ beforeEach(() => {
   quotaTables = new Set();
   __resetQuotaWarnedTables(); // module-level dedupe state persists across tests
   upsertError = null;
+  updateError = null;
   poisonIds.clear();
   fixedTs = null;
   authed = true;
@@ -667,6 +671,119 @@ describe("BLOCKER regressions", () => {
     );
     expect(quotaLogs).toHaveLength(2);
     notice.mockRestore();
+  });
+
+  test("classifyPushError: PGRST schema/parsing → poison; conn/auth/quota → their own kinds", () => {
+    expect(classifyPushError({ code: "PGRST204", message: "col" })).toBe(
+      "poison",
+    ); // schema cache
+    expect(classifyPushError({ code: "PGRST200", message: "rel" })).toBe(
+      "poison",
+    ); // relationship
+    expect(classifyPushError({ code: "PGRST100", message: "parse" })).toBe(
+      "poison",
+    ); // request parsing
+    expect(classifyPushError({ code: "PGRST301", message: "jwt" })).toBe(
+      "transient",
+    ); // auth
+    expect(classifyPushError({ code: "PGRST000", message: "conn" })).toBe(
+      "transient",
+    ); // connection
+    expect(
+      classifyPushError({ code: "23514", message: "quota exceeded for x" }),
+    ).toBe("quota");
+    expect(
+      classifyPushError({ code: "23514", message: 'violates "x_size_ck"' }),
+    ).toBe("poison");
+    expect(classifyPushError({ code: "08006", message: "conn" })).toBe(
+      "transient",
+    );
+    expect(classifyPushError(null)).toBe("transient");
+  });
+
+  test("a delete hitting a permanent schema error (PGRST204) is dropped + advanced, not wedged", async () => {
+    syncData.enableSync("basic");
+    insertKnowledge("k1", "hello");
+    insertEntity("e1");
+    db()
+      .query(
+        "INSERT INTO knowledge_entity_refs (knowledge_id, entity_id) VALUES ('k1','e1')",
+      )
+      .run();
+    await pushOnce(makeClient() as never); // upsert the ref
+    const before = Number(getKV("sync.push.knowledge_entity_refs"));
+    db()
+      .query(
+        "DELETE FROM knowledge_entity_refs WHERE knowledge_id='k1' AND entity_id='e1'",
+      )
+      .run();
+    updateError = {
+      code: "PGRST204",
+      message:
+        "Could not find the 'x' column of 'knowledge_entity_refs' in the schema cache",
+    };
+    await pushOnce(makeClient() as never);
+    const n = (
+      db()
+        .query(
+          "SELECT COUNT(*) n FROM sync_conflicts WHERE table_name='knowledge_entity_refs' AND resolution='rejected_unsyncable'",
+        )
+        .get() as { n: number }
+    ).n;
+    expect(n).toBe(1); // recorded, not silently lost
+    expect(Number(getKV("sync.push.knowledge_entity_refs"))).toBeGreaterThan(
+      before,
+    ); // advanced past the poison delete (not wedged)
+  });
+
+  test("a delete hitting a transient error stays pending (cursor held, retried; never dropped)", async () => {
+    syncData.enableSync("basic");
+    insertKnowledge("k1", "hello");
+    insertEntity("e1");
+    db()
+      .query(
+        "INSERT INTO knowledge_entity_refs (knowledge_id, entity_id) VALUES ('k1','e1')",
+      )
+      .run();
+    await pushOnce(makeClient() as never);
+    const before = Number(getKV("sync.push.knowledge_entity_refs"));
+    db()
+      .query(
+        "DELETE FROM knowledge_entity_refs WHERE knowledge_id='k1' AND entity_id='e1'",
+      )
+      .run();
+    updateError = { code: "08006", message: "connection failure" };
+    await pushOnce(makeClient() as never);
+    const n = (
+      db()
+        .query(
+          "SELECT COUNT(*) n FROM sync_conflicts WHERE resolution='rejected_unsyncable'",
+        )
+        .get() as { n: number }
+    ).n;
+    expect(n).toBe(0); // a transient error must NOT drop the delete
+    expect(Number(getKV("sync.push.knowledge_entity_refs"))).toBe(before); // held → retried
+  });
+
+  test("an UPSERT hitting a permanent schema error (PGRST204) is also dropped + advanced (shared classifier)", async () => {
+    syncData.enableSync("basic");
+    insertKnowledge("k1", "hello");
+    const before = Number(getKV("sync.push.knowledge"));
+    upsertError = {
+      code: "PGRST204",
+      message:
+        "Could not find the 'x' column of 'knowledge' in the schema cache",
+    };
+    await pushOnce(makeClient() as never);
+    const n = (
+      db()
+        .query(
+          "SELECT COUNT(*) n FROM sync_conflicts WHERE table_name='knowledge' AND resolution='rejected_unsyncable'",
+        )
+        .get() as { n: number }
+    ).n;
+    expect(n).toBe(1); // classifier change applies symmetrically to the upsert path
+    expect(Number(getKV("sync.push.knowledge"))).toBeGreaterThan(before); // not wedged
   });
 
   // (2) MORE than PAGE rows sharing one updated_at must ALL be pulled (the

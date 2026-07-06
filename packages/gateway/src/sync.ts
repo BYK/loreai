@@ -65,18 +65,26 @@ type PushErrorKind = "quota" | "poison" | "transient";
  * Classify a PostgREST write error:
  *  - "quota"     : row-count limit (recoverable — a delete frees a slot). Pause
  *                  this table; keep the row pending.
- *  - "poison"    : a size/other CHECK violation (23514 that is NOT a quota
- *                  message). The row can NEVER fit, so pausing the table would
- *                  wedge it forever — instead drop the row past the cursor and
- *                  record it so the rest of the table keeps syncing.
- *  - "transient" : network/5xx/etc. — keep pending and retry next cycle.
+ *  - "poison"    : a permanent client↔schema mismatch the row can NEVER satisfy —
+ *                  a size/other CHECK violation (23514 that is NOT a quota message),
+ *                  or a PostgREST request-shape/schema-cache error (PGRST1xx parsing,
+ *                  PGRST2xx schema/relationship/column, e.g. PGRST204 "column not
+ *                  found"). Pausing would wedge the table forever, so drop the row
+ *                  past the cursor and record it; the rest of the table keeps syncing.
+ *  - "transient" : network/5xx, PostgREST connection (PGRST0xx) and JWT/auth (PGRST3xx),
+ *                  etc. — keep pending and retry next cycle (never lose a write).
  */
-function classifyPushError(
+export function classifyPushError(
   err: { code?: string; message?: string } | null,
 ): PushErrorKind {
   if (!err) return "transient";
   const quota = /quota exceeded/i.test(err.message ?? "");
   if (err.code === "23514") return quota ? "quota" : "poison";
+  // PGRST1xx (request parsing) + PGRST2xx (schema cache: relationship/function/column)
+  // are a permanent payload↔schema mismatch for a request WE generate — the row can
+  // never upload as-is, so treat it as poison rather than retrying forever. PGRST0xx
+  // (connection) and PGRST3xx (JWT/auth) stay transient.
+  if (/^PGRST[12]\d\d$/.test(err.code ?? "")) return "poison";
   return "transient";
 }
 
@@ -338,8 +346,9 @@ async function pushEntry(
       is_deleted: true,
     };
     // Only versioned tables have a content_hash column remotely; the join table
-    // (knowledge_entity_refs) does not, so sending it is a PGRST204 schema error that
-    // would wedge the table forever (PGRST204 classifies as transient → infinite retry).
+    // (knowledge_entity_refs) does not, so sending it is a PGRST204 schema error. This
+    // gate prevents that; and even a stray schema error is now classified as poison
+    // (dropped, not an infinite-retry wedge) by the error handling below.
     // Mirror the upsert path's `meta.versioned` gate. Nulling it honors the tombstone's
     // "remoteHash is null" contract on the wire (the pull side already treats is_deleted
     // rows as hash-null, but this also protects un-upgraded readers during a rollout).
@@ -362,8 +371,32 @@ async function pushEntry(
       .update(tombstone)
       .match(decomposeId(table, effectiveId));
     if (error) {
+      const kind = classifyPushError(error);
+      if (kind === "poison") {
+        // A permanent schema/payload mismatch on the tombstone (e.g. PGRST204) can NEVER
+        // upload — record it and advance PAST it rather than wedging the table on infinite
+        // transient retries. Mirrors the upsert poison path (no res.pushed++, no re-warn).
+        log.notice(
+          `sync: dropping unsyncable delete ${table}/${effectiveId}: ${error.message}`,
+        );
+        syncData.recordConflict(
+          table,
+          effectiveId,
+          "rejected_unsyncable",
+          tombstone,
+        );
+        const prev = syncData.getSyncState(table, effectiveId);
+        syncData.setSyncState(table, effectiveId, {
+          content_hash: null,
+          revision: (prev?.revision ?? 0) + 1,
+          remote_updated_at: prev?.remote_updated_at ?? null,
+        });
+        return "ok"; // advance past the poison delete
+      }
+      // quota (degenerate for a soft-delete) or transient — keep pending and retry so the
+      // delete is never lost.
       log.notice(`sync: push delete ${table}/${effectiveId}: ${error.message}`);
-      return "stop"; // transient; keep pending so the delete isn't lost
+      return "stop";
     }
     const prev = syncData.getSyncState(table, effectiveId);
     syncData.setSyncState(table, effectiveId, {
