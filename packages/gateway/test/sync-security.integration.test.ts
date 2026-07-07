@@ -19,7 +19,7 @@ const FREE_LIMITS: Record<string, number> = {
   entity_aliases: 300,
   entity_relations: 300,
   knowledge_entity_refs: 2000,
-  knowledge_meta: 500,
+  knowledge_meta: 5000, // 0016: headroom above knowledge so metas never bottleneck independently
   knowledge_meta_crdt: 5000,
   account_escrow: 2,
   scope_keys: 100,
@@ -33,7 +33,7 @@ const FREE_BYTE_LIMITS: Record<string, number> = {
   entity_aliases: 2097152,
   entity_relations: 2097152,
   knowledge_entity_refs: 1048576,
-  knowledge_meta: 524288,
+  knowledge_meta: 4194304, // 0016: 4 MB, raised with the row headroom
   knowledge_meta_crdt: 1048576,
   account_escrow: 65536,
   scope_keys: 262144,
@@ -1021,11 +1021,10 @@ describe.skipIf(gate())("sync migrations — knowledge eviction (#1191b)", () =>
       [a],
     );
     expect(ents.rows.map((r) => r.id)).toEqual(["e-hi", "e-new"]); // e-lo evicted
-    // cascade: the victim's alias, ref, and relation are all gone.
+    // Single-entity edges (alias, ref) belong to the victim → cascade-deleted.
     for (const [tbl, col, val] of [
       ["entity_aliases", "id", "al1"],
       ["knowledge_entity_refs", "entity_id", "e-lo"],
-      ["entity_relations", "id", "rel1"],
     ] as const) {
       const r = await h.client.query(
         `select 1 from public.${tbl} where scope_id=$1 and ${col}=$2`,
@@ -1033,6 +1032,80 @@ describe.skipIf(gate())("sync migrations — knowledge eviction (#1191b)", () =>
       );
       expect(r.rowCount).toBe(0);
     }
+    // rel1 (e-lo↔e-hi) is KEPT: its other endpoint e-hi survives, so it's e-hi's edge —
+    // deleting it would be permanent (client never re-pushes). FIX 2 (#1191b, migration 0016).
+    const rel = await h.client.query(
+      "select 1 from public.entity_relations where scope_id=$1 and id='rel1'",
+      [a],
+    );
+    expect(rel.rowCount).toBe(1);
+  });
+
+  it("cascade-deletes a relation only when BOTH endpoints are gone (0016 FIX 2)", async () => {
+    const a = await h.createUser();
+    await setCap("entities", 2);
+    const insE = (id: string, rank: number) =>
+      h.asUser(a, (c) =>
+        c.query(
+          "insert into public.entities (id, scope_id, entity_type, canonical_name, sync_rank) values ($1,$2,'tool','n',$3)",
+          [id, a, rank],
+        ),
+      );
+    await insE("e-hi", 5);
+    await insE("e-lo", 1); // victim
+    const insRel = (id: string, other: string) =>
+      h.asUser(a, (c) =>
+        c.query(
+          "insert into public.entity_relations (id, scope_id, entity_a, entity_b, relation) values ($1,$2,'e-lo',$3,'r')",
+          [id, a, other],
+        ),
+      );
+    await insRel("r-keep", "e-hi"); // other endpoint survives → keep
+    await insRel("r-drop", "e-ghost"); // other endpoint never synced → both gone → drop
+    await insE("e-new", 3); // evicts e-lo
+    const rows = await h.client.query(
+      "select id from public.entity_relations where scope_id=$1 order by id",
+      [a],
+    );
+    // r-keep survives (e-hi is a live synced entity); r-drop is deleted (e-ghost absent).
+    // Under the old OR-cascade, r-keep would ALSO be deleted — this discriminates the fix.
+    expect(rows.rows.map((r) => r.id)).toEqual(["r-keep"]);
+  });
+
+  it("a self-relation on the victim is deleted (both endpoints ARE the victim)", async () => {
+    const a = await h.createUser();
+    await setCap("entities", 2);
+    const insE = (id: string, rank: number) =>
+      h.asUser(a, (c) =>
+        c.query(
+          "insert into public.entities (id, scope_id, entity_type, canonical_name, sync_rank) values ($1,$2,'tool','n',$3)",
+          [id, a, rank],
+        ),
+      );
+    await insE("e-hi", 5);
+    await insE("e-lo", 1); // victim
+    // A self-relation (client normally guards against this — defense-in-depth for direct writers).
+    await h.asUser(a, (c) =>
+      c.query(
+        "insert into public.entity_relations (id, scope_id, entity_a, entity_b, relation) values ('r-self',$1,'e-lo','e-lo','r')",
+        [a],
+      ),
+    );
+    await insE("e-new", 3); // evicts e-lo
+    const rows = await h.client.query(
+      "select 1 from public.entity_relations where scope_id=$1 and id='r-self'",
+      [a],
+    );
+    expect(rows.rowCount).toBe(0); // the victim is its own only endpoint → both gone → deleted
+  });
+
+  it("free knowledge_meta cap has headroom above knowledge (0016 FIX 1)", async () => {
+    // 5000 (10× the knowledge cap) so metas never bottleneck independently of knowledge —
+    // the overflow's metas fitting is what makes the "knowledge_meta limit" message go away.
+    const r = await h.client.query(
+      "select max_rows from public.plan_limits where tier='free' and table_name='knowledge_meta'",
+    );
+    expect(Number(r.rows[0].max_rows)).toBe(5000);
   });
 
   it("does NOT evict an entity when the incoming does not outrank the floor (value guard → pause)", async () => {
