@@ -73,6 +73,25 @@ describe("worker-health", () => {
       expect(getDegradationWarning("s1")).not.toBeNull();
     });
 
+    test("degradation warning points at a REAL CLI command (lore doctor, not lore status)", () => {
+      // Regression (Sergiy's report, 2026-07-06): the warning told users to run
+      // `lore status`, which is not a command — the CLI has `doctor` for
+      // routing/env/auth diagnostics. A warning that hands the user a bogus
+      // command is worse than useless when their workers are already failing.
+      let t = 1_000_000;
+      _setNowForTest(() => t);
+      for (let i = 0; i < 3; i++) {
+        recordWorkerFailure("s1", "lore-distill", "no-auth");
+        t += 5 * 60 * 1000;
+      }
+      t = 1_000_000 + 31 * 60 * 1000;
+      _setNowForTest(() => t);
+      const warning = getDegradationWarning("s1");
+      expect(warning).not.toBeNull();
+      expect(warning).toContain("`lore doctor`");
+      expect(warning).not.toContain("lore status");
+    });
+
     test("sustained 60+ min: critical status", () => {
       let t = 1_000_000;
       _setNowForTest(() => t);

@@ -584,7 +584,7 @@ export function getDegradationWarning(sessionID: string): string | null {
     `[Lore: Background workers (distillation, curation, cache warming) for this session ` +
     `have been failing for ${formatDuration(sustainedMs)}. This is harmful — your ` +
     `context window is not being compressed and long-term knowledge is not being ` +
-    `captured. Likely cause: session authentication has gone stale. Run \`lore status\` ` +
+    `captured. Likely cause: session authentication has gone stale. Run \`lore doctor\` ` +
     `or check the dashboard for details.]`
   );
 }
