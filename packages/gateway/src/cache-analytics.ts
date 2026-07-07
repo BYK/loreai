@@ -38,21 +38,16 @@ export function decompressBody(compressed: Uint8Array): string {
 // ---------------------------------------------------------------------------
 // Warmup cache-divergence probe (env-gated, OFF by default → zero hot-path cost)
 // ---------------------------------------------------------------------------
-//
-// Purpose: definitively distinguish an Anthropic-side cache EVICTION from a
-// warmup request-body DIVERGENCE. We proved (real builder + prepareWarmupBody +
-// zstd + upstream encoding, all byte-identical) that the warmup body's cacheable
-// content equals the last real turn's body — but that rests on the in-memory
-// `lastRequestBody` truly matching what Anthropic cached. This probe closes that
-// gap in production by hashing the cacheable SEGMENTS and:
-//   1. On each real turn: detecting drift of the stable head / distilled prefix
-//      across consecutive turns (a "stable" head that drifts IS a divergence).
-//   2. On each warmup: comparing the signed warmup body's segment hashes to the
-//      last real turn's. Then, with the response cacheRead:
-//        - head hash MATCHES + cacheRead=0  → identical head was evicted (EVICTION)
-//        - head hash DIFFERS               → real body divergence (and where)
-//
-// Enable with LORE_WARMUP_PROBE=1. When unset, callers skip all hashing/parsing.
+
+/**
+ * Env var `LORE_WARMUP_PROBE`: when set to `1`, enables the warmup
+ * cache-divergence diagnostic. It logs SHA comparisons of the cacheable
+ * segments (the stable head `system[0..1]`, tools, and the distilled prefix
+ * `messages[0..1]`) on real turns and warmups to tell an Anthropic-side cache
+ * eviction (segments match, `cacheRead=0`) apart from a warmup request-body
+ * divergence (segments differ). A debugging aid only; off by default, with zero
+ * cost when unset (callers skip all parsing/hashing).
+ */
 export function isWarmupProbeEnabled(): boolean {
   return process.env.LORE_WARMUP_PROBE === "1";
 }

@@ -17,6 +17,12 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 |---|---|
 | `LORE_BACKGROUND_CONCURRENCY` | Resolve the upper bound for background concurrency. `LORE_BACKGROUND_CONCURRENCY` is a hard ceiling override (escape hatch for large multi-tenant hosts); otherwise the built-in MAX applies. Clamped to a sane [1, 32]. |
 
+## cache-analytics
+
+| Variable | Description |
+|---|---|
+| `LORE_WARMUP_PROBE` | Env var `LORE_WARMUP_PROBE`: when set to `1`, enables the warmup cache-divergence diagnostic. It logs SHA comparisons of the cacheable segments (the stable head `system[0..1]`, tools, and the distilled prefix `messages[0..1]`) on real turns and warmups to tell an Anthropic-side cache eviction (segments match, `cacheRead=0`) apart from a warmup request-body divergence (segments differ). A debugging aid only; off by default, with zero cost when unset (callers skip all parsing/hashing). |
+
 ## Upstream + worker pipeline
 
 | Variable | Description |
