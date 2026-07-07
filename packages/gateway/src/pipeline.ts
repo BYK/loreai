@@ -5209,6 +5209,7 @@ function postResponse(
       getWorkerModel(sessionState.lastUpstream)?.modelID ?? "unknown",
       req.model,
       sessionState.resolvedConversationTTL,
+      requestEnablesLongContext(req),
     );
 
     // Mark session dirty for periodic flush (gradient + warming + costs).

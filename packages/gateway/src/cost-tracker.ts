@@ -15,6 +15,7 @@ import {
   AUTOCOMPACT_THRESHOLD,
   MAX_OUTPUT_RESERVE,
   autocompactThresholdForModel,
+  clientMeteredContextWindow,
 } from "./compaction";
 import {
   log,
@@ -746,20 +747,39 @@ const POST_COMPACTION_CONTEXT = 30_000;
 
 /**
  * Per-model auto-compact threshold for the counterfactual estimate. Mirrors
- * pipeline.ts `maxReportedUsageForModelID`, but returns the UNSCALED auto-compact
- * trigger point (what a host like Claude Code compacts at) rather than the 0.9×
- * client-usage reporting cap. An empty/unknown model falls back to the historical
- * 200K-model value ({@link AUTOCOMPACT_THRESHOLD}), preserving prior behavior.
+ * pipeline.ts `maxReportedUsageForModelID` (same client-metered-window
+ * semantics), but returns the UNSCALED auto-compact trigger point (what a host
+ * like Claude Code compacts at) rather than the 0.9× client-usage reporting cap.
+ * An empty/unknown model falls back to the historical 200K-model value
+ * ({@link AUTOCOMPACT_THRESHOLD}).
  *
- * Fixes #983: the hardcoded 167K constant assumed a 200K-context model, so the
- * "avoided compactions" estimate was wrong for other windows — e.g. a 1M-context
- * model was counted as compacting ~5.8× too often.
+ * `longContext` MUST reflect whether the session opted into the 1M window via
+ * the `context-1m` beta ({@link clientMeteredContextWindow}). This is the same
+ * gate the client-usage cap uses (#1214): the counterfactual "would the client
+ * have compacted?" question only makes sense against the window the CLIENT
+ * actually meters — which is 200K unless the request enables long context, even
+ * for a 1M-capable model (e.g. MiniMax-M3 over the Anthropic wire). Defaults to
+ * `false` (conservative 200K) so callers without the signal — and the dominant
+ * third-party-via-Claude-Code case — stay accurate.
+ *
+ * #983 correctly made this per-model, but assumed the client always meters
+ * against the model's real window. That over-counts nothing for genuine
+ * long-context sessions yet UNDER-counts avoided compactions for a 1M model the
+ * client meters against 200K (it assumed the host compacts at ~967K when it
+ * really compacts at ~167K). Gating on the beta reconciles both.
  */
-export function autocompactThresholdForModelID(modelID?: string): number {
+export function autocompactThresholdForModelID(
+  modelID?: string,
+  longContext = false,
+): number {
   if (!modelID) return AUTOCOMPACT_THRESHOLD;
   const entry = getModelEntrySync(modelID);
-  const contextWindow = entry.limit?.context ?? 200_000;
+  const realContextWindow = entry.limit?.context ?? 200_000;
   const maxOutput = entry.limit?.output ?? MAX_OUTPUT_RESERVE;
+  const contextWindow = clientMeteredContextWindow(
+    realContextWindow,
+    longContext,
+  );
   return autocompactThresholdForModel(contextWindow, maxOutput);
 }
 
@@ -857,6 +877,11 @@ export function updateShadowContext(
   workerModel: string,
   conversationModel?: string,
   ttl?: "5m" | "1h",
+  /** Whether the request opted into the 1M window via `context-1m` beta. Gates
+   *  the per-model auto-compact threshold (#1214), matching the client-usage cap:
+   *  a 1M-capable model the client meters against 200K compacts at ~167K, not
+   *  ~967K. Defaults to `false` (conservative 200K). */
+  longContext = false,
 ): void {
   const costs = getOrCreate(sessionID);
 
@@ -889,7 +914,10 @@ export function updateShadowContext(
   // size), where a shadow compaction would immediately re-trigger every turn —
   // report 0 for those rather than a runaway count (matches the prior 167K
   // constant's effective 0 for tiny models, while fixing large-window overcount).
-  const threshold = autocompactThresholdForModelID(conversationModel);
+  const threshold = autocompactThresholdForModelID(
+    conversationModel,
+    longContext,
+  );
   if (
     threshold > POST_COMPACTION_CONTEXT &&
     costs._shadowContextTokens > threshold
@@ -1201,16 +1229,18 @@ export function computeHistoricalEstimates(
       // This is only a fallback — sessions with persisted snapshots (the common
       // case) use real data from live tracking.
       const sessionTokens = sess.total_tokens;
-      // Per-model auto-compact threshold (#983): the hardcoded 167K constant
-      // assumed a 200K-context model and over/under-counted for other windows.
-      // Pass the *extracted* model (`m`, null when the session has no usable
-      // metadata) — NOT the pricing-defaulted `model`. `model` falls back to
-      // DEFAULT_ESTIMATION_MODEL (a 1M-window model) purely to price the
-      // compaction cost; adopting its 967K trigger for metadata-less sessions
-      // would silently drop their historical "avoided compactions" ~7×. An
-      // unknown model must keep the historical 167K trigger, matching the live
-      // path (which passes `conversationModel`, undefined when unknown) and the
-      // documented `autocompactThresholdForModelID(undefined)` contract.
+      // Per-model auto-compact threshold (#983), client-metered-window aware
+      // (#1214). This batched historical path has no per-session `context-1m`
+      // signal, so it uses the conservative default (longContext=false → 200K
+      // clamp): the client-metered threshold for any model it can't confirm was
+      // in long-context mode. This matches the client-usage cap default and the
+      // dominant real case (1M-capable third parties metered against 200K via
+      // Claude Code). New sessions are tracked live with the real beta signal
+      // and prefer the persisted count below, so this coarse fallback only
+      // affects legacy sessions with no snapshot. Pass the *extracted* model
+      // (`m`, null when the session has no usable metadata) — NOT the
+      // pricing-defaulted `model` (which falls back to a 1M-window estimation
+      // model purely to price the compaction cost).
       const avoidedCompactions = estimateAvoidedCompactions(
         sessionTokens,
         autocompactThresholdForModelID(m ?? undefined),

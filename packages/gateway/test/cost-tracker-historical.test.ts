@@ -160,20 +160,27 @@ describe("computeHistoricalEstimates (session_rollup read path #981)", () => {
     expect(est.sessions[0].sessionId).toBe("sess-live");
   });
 
-  // --- #983: the batch "avoided compactions" estimate is per-model ---
+  // --- #983 + #1214: the batch estimate is per-model AND client-metered-window ---
   // The counterfactual host compacts once at the model's auto-compact trigger,
-  // then every (trigger − 30K post-compaction) tokens thereafter. A 600K-token
-  // session therefore yields a model-dependent count:
-  //   • 1M-window model  → trigger 967K  → 600K < 967K            ⇒ 0
+  // then every (trigger − 30K post-compaction) tokens thereafter. The batch path
+  // has no per-session `context-1m` signal, so it meters against the conservative
+  // client default (200K clamp) — the window Claude Code uses unless a session
+  // opted into long context. A 600K-token session therefore yields:
+  //   • 1M-window model, no long-context signal → clamped to 200K → trigger 167K
+  //       → 1 + ⌊433K/137K⌋ ⇒ 4   (#1214: was 0 under the old real-1M assumption)
   //   • 200K-window model → trigger 178808 → 1 + ⌊421192/148808⌋  ⇒ 3
   //   • no usable metadata → trigger 167K (AUTOCOMPACT_THRESHOLD) ⇒ 4
-  // The pre-#983 hardcoded 167K constant would have reported 4 for every one.
+  // The pre-#983 hardcoded 167K constant would report 4 for every one; the
+  // pre-#1214 real-1M assumption would wrongly report 0 for the 1M model — the
+  // MiniMax-M3-via-Claude-Code under-count this fix closes.
 
-  test("batch estimate: a 1M-window model under its trigger avoids 0 compactions", () => {
+  test("batch estimate: a 1M model with no long-context signal is metered at 200K (#1214)", () => {
     const pid = ensureProject("/test/cost-historical/1m", "hist-1m");
     const sid = "sess-1m";
     const now = Date.now();
-    // 600K tokens, model = Sonnet 4 (1M window ⇒ 967K trigger).
+    // 600K tokens, model = Sonnet 4 (real 1M window). With no context-1m signal
+    // the batch path clamps to the 200K client-metered window (trigger 167K), so
+    // 600K ⇒ 1 + ⌊(600K−167K)/137K⌋ = 4.
     insertMsg(
       pid,
       sid,
@@ -190,10 +197,9 @@ describe("computeHistoricalEstimates (session_rollup read path #981)", () => {
       (x) => x.sessionId === sid,
     );
     expect(s).toBeDefined();
-    // 600K is below the 967K trigger ⇒ the host would not have compacted at
-    // all. The old 167K constant would wrongly report 4. Kills the batch-site
-    // "revert to constant" mutation.
-    expect(s?.avoidedCompactions).toBe(0);
+    // #1214: reverting the client-metered clamp in the batch path lets the real
+    // 1M window (967K trigger) back in, dropping this to 0 — kills that mutation.
+    expect(s?.avoidedCompactions).toBe(4);
   });
 
   test("batch estimate: a 200K-window model over its trigger avoids several", () => {
