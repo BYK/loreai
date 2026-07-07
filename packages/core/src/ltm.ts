@@ -2858,6 +2858,62 @@ export function logicalIdOf(id: string): string {
   return row?.logical_id ?? id;
 }
 
+/** A single stored version of a knowledge entry (for `lore log` / `lore diff`, #962). */
+export type KnowledgeVersion = {
+  id: string;
+  logical_id: string;
+  version: number;
+  /** 1 = the current live/deleted head; 0 = a superseded prior version. */
+  is_current: number;
+  /** 1 = a death-cert (deleted) version. */
+  is_deleted: number;
+  category: string;
+  title: string;
+  content: string;
+  created_at: number;
+  updated_at: number;
+  updated_by: string | null;
+};
+
+const VERSION_COLS =
+  "id, logical_id, version, is_current, is_deleted, category, title, content, created_at, updated_at, updated_by";
+
+/**
+ * All stored versions of a knowledge entry, oldest→newest, resolving any version
+ * id OR logical_id via {@link logicalIdOf}. Reads the BASE `knowledge` table (not
+ * `knowledge_current`) so it returns SUPERSEDED and deleted versions too — this is
+ * the append-only history surface (#962). Bounded by compaction (#909): superseded
+ * versions past the retention window are gone by design, so this is the kept window,
+ * not an unbounded log. Empty when the id is unknown.
+ */
+export function versionHistory(id: string): KnowledgeVersion[] {
+  const logicalId = logicalIdOf(id);
+  return db()
+    .query(
+      `SELECT ${VERSION_COLS} FROM knowledge WHERE logical_id = ? ORDER BY version ASC`,
+    )
+    .all(logicalId) as KnowledgeVersion[];
+}
+
+/**
+ * Recent knowledge version-writes for a project, newest first — one row per stored
+ * version (each version = a change). For `lore log --project` (#962). Reads the BASE
+ * table so superseded/deleted versions appear in the timeline. Scoped to the
+ * project's own rows (project_id = pid); global/cross-project entries are viewable
+ * per-entry via `lore log <id>`.
+ */
+export function recentKnowledgeChanges(
+  projectId: string,
+  limit = 20,
+): KnowledgeVersion[] {
+  return db()
+    .query(
+      `SELECT ${VERSION_COLS} FROM knowledge WHERE project_id = ?
+       ORDER BY updated_at DESC, version DESC LIMIT ?`,
+    )
+    .all(projectId, limit) as KnowledgeVersion[];
+}
+
 /**
  * Read the worker source attribution for a knowledge entry. Returns null for
  * legacy entries created before v35 (no attribution recorded) or for entries

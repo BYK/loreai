@@ -34,6 +34,9 @@ Commands:
   import              Import knowledge from prior AI agent conversations
   data <subcommand>   Manage stored data (list, show, clear, delete)
   recall <query>      Search project memory from the command line
+  log [<id>]          Show knowledge version history (an entry's timeline, or
+                       recent changes across the project)
+  diff <id>           Show what changed between two versions of a knowledge entry
   login               Sign in to your Folk Lore account (GitHub or --email)
   logout              Sign out and clear the local session
   whoami              Show the signed-in Folk Lore account
@@ -168,6 +171,9 @@ Examples:
   lore logs -n 100              # Show last 100 lines
   lore logs --path              # Print log file path
   lore recall "error handling"  # Search project memory from CLI
+  lore log                      # Recent knowledge changes in this project
+  lore log <id>                 # Version timeline for one knowledge entry
+  lore diff <id>                # What changed (latest superseded → current)
   lore login                    # Sign in to Folk Lore with GitHub (browser)
   lore login --no-browser       # Headless GitHub sign-in (SSH / remote box)
   lore login --email me@x.com   # Sign in with an email OTP code (needs SMTP)

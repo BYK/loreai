@@ -437,6 +437,18 @@ export async function _cli(): Promise<void> {
         break;
       }
 
+      case "log": {
+        const { commandLog } = await import("./history-cmd");
+        await commandLog(rest, values as Record<string, unknown>);
+        break;
+      }
+
+      case "diff": {
+        const { commandDiff } = await import("./history-cmd");
+        await commandDiff(rest, values as Record<string, unknown>);
+        break;
+      }
+
       case "login": {
         const { commandLogin } = await import("./login");
         await commandLogin(rest, values as Record<string, unknown>);
@@ -510,6 +522,8 @@ export async function _cli(): Promise<void> {
               "doctor",
               "data",
               "recall",
+              "log",
+              "diff",
               "login",
               "logout",
               "whoami",
