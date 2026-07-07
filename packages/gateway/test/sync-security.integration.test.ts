@@ -925,9 +925,11 @@ describe.skipIf(gate())("sync migrations — knowledge eviction (#1191b)", () =>
     expect(err.message).toMatch(/quota exceeded/i);
   });
 
-  it("does NOT evict for other capped tables — entities still raise at the cap", async () => {
+  it("entities with TIED sync_rank pause at the cap (guard is strict >, no churn for no gain)", async () => {
     const a = await h.createUser();
     await setCap("entities", 2);
+    // No sync_rank given → all default to 0, so floor == incoming (0). The strict-`>`
+    // guard means a rank-0 newcomer must NOT displace a rank-0 incumbent — it pauses.
     const ins = (id: string) =>
       h.asUser(a, (c) =>
         c.query(
@@ -938,7 +940,7 @@ describe.skipIf(gate())("sync migrations — knowledge eviction (#1191b)", () =>
     await ins("e1");
     await ins("e2");
     const err = await expectError(() => ins("e3"));
-    expect(err.code).toBe("23514"); // entities not yet evicted (needs sync_rank — PR2b)
+    expect(err.code).toBe("23514"); // 0 > 0 is false → guard blocks eviction → pause
   });
 
   it("evicts the OLDEST entity_relations row by recency (not id) when over the row cap", async () => {
@@ -979,6 +981,80 @@ describe.skipIf(gate())("sync migrations — knowledge eviction (#1191b)", () =>
       [a],
     );
     expect(rows.map((r) => r.id)).toEqual(["al-new"]); // old evicted
+  });
+
+  it("evicts the LOWEST-sync_rank entity (+ cascades its aliases/refs/relations) when a higher-rank entity exceeds the cap", async () => {
+    const a = await h.createUser();
+    await setCap("entities", 2);
+    const insE = (id: string, rank: number) =>
+      h.asUser(a, (c) =>
+        c.query(
+          "insert into public.entities (id, scope_id, entity_type, canonical_name, sync_rank) values ($1,$2,'tool','n',$3)",
+          [id, a, rank],
+        ),
+      );
+    await insE("e-hi", 5);
+    await insE("e-lo", 1); // lowest rank → the victim
+    // Graph edges on the victim, to verify the cascade.
+    await h.asUser(a, (c) =>
+      c.query(
+        "insert into public.entity_aliases (id, scope_id, entity_id, alias_type, alias_value) values ('al1',$1,'e-lo','name','v')",
+        [a],
+      ),
+    );
+    await h.asUser(a, (c) =>
+      c.query(
+        "insert into public.knowledge_entity_refs (scope_id, knowledge_id, entity_id) values ($1,'k1','e-lo')",
+        [a],
+      ),
+    );
+    await h.asUser(a, (c) =>
+      c.query(
+        "insert into public.entity_relations (id, scope_id, entity_a, entity_b, relation) values ('rel1',$1,'e-lo','e-hi','rel')",
+        [a],
+      ),
+    );
+    // incoming rank 3 > floor (e-lo=1) → evict e-lo, admit e-new.
+    await insE("e-new", 3);
+    const ents = await h.client.query(
+      "select id from public.entities where scope_id=$1 order by id",
+      [a],
+    );
+    expect(ents.rows.map((r) => r.id)).toEqual(["e-hi", "e-new"]); // e-lo evicted
+    // cascade: the victim's alias, ref, and relation are all gone.
+    for (const [tbl, col, val] of [
+      ["entity_aliases", "id", "al1"],
+      ["knowledge_entity_refs", "entity_id", "e-lo"],
+      ["entity_relations", "id", "rel1"],
+    ] as const) {
+      const r = await h.client.query(
+        `select 1 from public.${tbl} where scope_id=$1 and ${col}=$2`,
+        [a, val],
+      );
+      expect(r.rowCount).toBe(0);
+    }
+  });
+
+  it("does NOT evict an entity when the incoming does not outrank the floor (value guard → pause)", async () => {
+    const a = await h.createUser();
+    await setCap("entities", 2);
+    const insE = (id: string, rank: number) =>
+      h.asUser(a, (c) =>
+        c.query(
+          "insert into public.entities (id, scope_id, entity_type, canonical_name, sync_rank) values ($1,$2,'tool','n',$3)",
+          [id, a, rank],
+        ),
+      );
+    await insE("e-a", 5);
+    await insE("e-b", 3); // floor = 3
+    // incoming rank 2 ≤ floor(3) → a 0/low-ref newcomer must NOT displace a ranked entity.
+    const err = await expectError(() => insE("e-c", 2));
+    expect(err.code).toBe("23514");
+    const ents = await h.client.query(
+      "select id from public.entities where scope_id=$1 order by id",
+      [a],
+    );
+    expect(ents.rows.map((r) => r.id)).toEqual(["e-a", "e-b"]); // nothing evicted
   });
 
   it("does NOT evict for a PRO tier — a capped pro pauses (eviction is the free-tier valve)", async () => {

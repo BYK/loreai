@@ -247,6 +247,7 @@ export const SYNCED_TABLES: Record<SyncTier, SyncTableMeta[]> = {
         "canonical_name",
         "metadata",
         "cross_project",
+        "sync_rank", // synced ref-count → server value-ranks entities for eviction (#1191b)
         "created_at",
         "updated_at",
       ],

@@ -80,6 +80,7 @@ const REMOTE_COLUMNS: Record<string, Set<string>> = {
     "canonical_name",
     "metadata",
     "cross_project",
+    "sync_rank", // #1191b PR2b: synced ref-count for server-side eviction
     "created_at",
     "updated_at",
     ...SYNC_COLS,

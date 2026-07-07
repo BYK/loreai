@@ -6,6 +6,7 @@ import {
   readStorageMode,
 } from "./db/vec-store";
 import { config } from "./config";
+import { recomputeEntityRank } from "./entities";
 import {
   ftsQuery,
   ftsQueryOr,
@@ -664,9 +665,20 @@ export function remove(id: string, metadata?: KnowledgeMetadata) {
   appendVersion(logicalId, { isDeleted: true, metadata });
   // The row is NOT physically deleted, so FK ON DELETE CASCADE no longer fires —
   // clean cross-references explicitly, all keyed on the logical_id.
+  // Capture the entities that lose a ref BEFORE the delete so their sync_rank
+  // (server eviction value, #1191b PR2b) is recomputed after — otherwise a deleted
+  // entry leaves stale-high entity ranks that never re-sync (hash unchanged).
+  const entitiesLosingRef = (
+    db()
+      .query(
+        "SELECT DISTINCT entity_id FROM knowledge_entity_refs WHERE knowledge_id = ?",
+      )
+      .all(logicalId) as Array<{ entity_id: string }>
+  ).map((r) => r.entity_id);
   db()
     .query("DELETE FROM knowledge_entity_refs WHERE knowledge_id = ?")
     .run(logicalId);
+  for (const entityId of entitiesLosingRef) recomputeEntityRank(entityId);
   db()
     .query("DELETE FROM knowledge_refs WHERE from_id = ? OR to_id = ?")
     .run(logicalId, logicalId);

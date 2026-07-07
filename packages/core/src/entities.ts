@@ -1360,11 +1360,13 @@ export function merge(targetId: string, sourceId: string): void {
     d.query("DELETE FROM entity_aliases WHERE entity_id = ?").run(sourceId);
     d.query("DELETE FROM entities WHERE id = ?").run(sourceId);
 
-    // Update target timestamp
-    d.query("UPDATE entities SET updated_at = ? WHERE id = ?").run(
-      Date.now(),
-      targetId,
-    );
+    // Update target timestamp + recompute its ref-count rank (it absorbed source's
+    // refs). Same UPDATE so the entities sync-capture fires once (#1191b PR2b).
+    d.query(
+      `UPDATE entities SET updated_at = ?, sync_rank =
+         (SELECT COUNT(*) FROM knowledge_entity_refs WHERE entity_id = ?)
+       WHERE id = ?`,
+    ).run(Date.now(), targetId, targetId);
 
     d.exec("COMMIT");
     // Target absorbed source aliases — refresh its dedup embedding.
@@ -1522,6 +1524,43 @@ function logicalIdOf(knowledgeId: string): string {
   return r?.logical_id ?? knowledgeId;
 }
 
+/**
+ * Recompute an entity's synced ref-count rank (`entities.sync_rank`) after a
+ * `knowledge_entity_refs` mutation. MUST be a top-level UPDATE from app code — NOT a
+ * trigger on knowledge_entity_refs — because `recursive_triggers` is OFF, so a nested
+ * trigger's UPDATE would not fire the entities sync-capture/FTS triggers and the rank
+ * change would never sync. The server value-ranks entities by `sync_rank` for eviction
+ * (#1191b PR2b): a new entity starts at 0 refs and its refs aren't synced yet, so the
+ * server can't value the incoming row via a JOIN — the column carries the count on the
+ * row itself. Idempotent; no-op if the entity id doesn't exist.
+ */
+export function recomputeEntityRank(entityId: string): void {
+  db()
+    .query(
+      `UPDATE entities SET sync_rank =
+         (SELECT COUNT(*) FROM knowledge_entity_refs WHERE entity_id = ?)
+       WHERE id = ?`,
+    )
+    .run(entityId, entityId);
+}
+
+/**
+ * Repair any entity whose stored `sync_rank` no longer matches its live ref-count,
+ * writing ONLY the drifted rows (so unchanged entities don't churn the sync outbox).
+ * Used by bulk knowledge purges (clearProject/deleteProject/clearKnowledge) where the
+ * FK ON DELETE CASCADE removes many knowledge_entity_refs at once and per-entity capture
+ * isn't feasible — leaving `sync_rank` stale-high otherwise (#1191b PR2b). A single
+ * entity delete uses the precise {@link recomputeEntityRank} instead.
+ */
+export function resyncStaleEntityRanks(): void {
+  db().exec(
+    `UPDATE entities SET sync_rank =
+       (SELECT COUNT(*) FROM knowledge_entity_refs r WHERE r.entity_id = entities.id)
+     WHERE sync_rank <>
+       (SELECT COUNT(*) FROM knowledge_entity_refs r WHERE r.entity_id = entities.id)`,
+  );
+}
+
 /** Link a knowledge entry to an entity. */
 export function linkKnowledge(knowledgeId: string, entityId: string): void {
   try {
@@ -1531,6 +1570,7 @@ export function linkKnowledge(knowledgeId: string, entityId: string): void {
          VALUES (?, ?)`,
       )
       .run(logicalIdOf(knowledgeId), entityId);
+    recomputeEntityRank(entityId);
   } catch (e: unknown) {
     // FK violation (entity or knowledge entry doesn't exist) — ignore
     if (e instanceof Error && /FOREIGN KEY/i.test(e.message)) {
@@ -1550,6 +1590,7 @@ export function unlinkKnowledge(knowledgeId: string, entityId: string): void {
       "DELETE FROM knowledge_entity_refs WHERE knowledge_id = ? AND entity_id = ?",
     )
     .run(logicalIdOf(knowledgeId), entityId);
+  recomputeEntityRank(entityId);
 }
 
 /** Get all entities referenced by a knowledge entry. */
@@ -2015,6 +2056,18 @@ export function syncEntityRefs(
   // the never-physically-deleted first version's id.
   const logicalId = logicalIdOf(knowledgeId);
 
+  // Capture the entities that WILL lose a ref so their sync_rank is recomputed after the
+  // rebuild (union with the newly-linked set below) — #1191b PR2b.
+  const affected = new Set<string>(
+    (
+      db()
+        .query(
+          "SELECT entity_id FROM knowledge_entity_refs WHERE knowledge_id = ?",
+        )
+        .all(logicalId) as Array<{ entity_id: string }>
+    ).map((r) => r.entity_id),
+  );
+
   // Clear existing refs for this knowledge entry. Runs even when the registry is
   // empty so stale refs are purged after all matching entities are removed.
   db()
@@ -2062,6 +2115,7 @@ export function syncEntityRefs(
           "INSERT OR IGNORE INTO knowledge_entity_refs (knowledge_id, entity_id) VALUES (?, ?)",
         )
         .run(logicalId, entityId);
+      affected.add(entityId);
       count++;
     } catch (e: unknown) {
       // FK violation (entity or knowledge entry doesn't exist) — skip
@@ -2069,6 +2123,9 @@ export function syncEntityRefs(
       throw e;
     }
   }
+
+  // Recompute sync_rank for every entity whose ref-count changed (lost or gained a ref).
+  for (const entityId of affected) recomputeEntityRank(entityId);
 
   return count;
 }

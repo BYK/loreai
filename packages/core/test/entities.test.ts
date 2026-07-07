@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeEach } from "vitest";
-import { db } from "../src/db";
+import { db, ensureProject } from "../src/db";
 import * as entities from "../src/entities";
+import * as ltm from "../src/ltm";
 import { parseResponse, applyOps } from "../src/curator";
 
 const PROJECT = "/test/entities/project";
@@ -1201,5 +1202,98 @@ describe("entities", () => {
       // Audit rows must NOT count toward dedup threshold calibration.
       expect(entities.getEntityDedupFeedbackCount(null)).toBe(0);
     });
+  });
+});
+
+describe("entities.sync_rank (ref-count) maintenance (#1191b PR2b)", () => {
+  const P = "/test/entities/sync-rank";
+  beforeEach(() => {
+    const d = db();
+    d.exec("DELETE FROM knowledge_entity_refs");
+    d.exec("DELETE FROM entities");
+    d.exec("DELETE FROM knowledge");
+    ensureProject(P);
+  });
+
+  const rankOf = (id: string): number =>
+    (
+      db().query("SELECT sync_rank FROM entities WHERE id = ?").get(id) as {
+        sync_rank: number;
+      }
+    ).sync_rank;
+
+  const mkKnowledge = (title: string, content: string): string =>
+    ltm.create({
+      projectPath: P,
+      category: "decision",
+      title,
+      content,
+      scope: "project",
+    });
+
+  test("linkKnowledge / unlinkKnowledge keep sync_rank = ref-count", () => {
+    const e = entities.create({
+      projectPath: P,
+      entityType: "tool",
+      canonicalName: "Widget",
+    });
+    expect(rankOf(e.id)).toBe(0); // fresh entity has no refs
+    const k1 = mkKnowledge("K1", "first body");
+    const k2 = mkKnowledge("K2", "second body");
+    entities.linkKnowledge(k1, e.id);
+    expect(rankOf(e.id)).toBe(1);
+    entities.linkKnowledge(k2, e.id);
+    expect(rankOf(e.id)).toBe(2);
+    entities.linkKnowledge(k2, e.id); // INSERT OR IGNORE → no double count
+    expect(rankOf(e.id)).toBe(2);
+    entities.unlinkKnowledge(k1, e.id);
+    expect(rankOf(e.id)).toBe(1);
+  });
+
+  test("syncEntityRefs recomputes sync_rank for entities that gain AND lose refs", () => {
+    const e = entities.create({
+      projectPath: P,
+      entityType: "tool",
+      canonicalName: "Postgres",
+    });
+    const k = mkKnowledge("DB", "We use Postgres for storage");
+    entities.syncEntityRefs(k, "We use Postgres for storage"); // matches canonical name
+    expect(rankOf(e.id)).toBe(1);
+    // Re-sync with content that no longer mentions the entity → ref dropped, rank → 0.
+    // Exercises the before∪after affected-set recompute (the entity is in the BEFORE set).
+    entities.syncEntityRefs(k, "We switched to a different database");
+    expect(rankOf(e.id)).toBe(0);
+  });
+
+  test("ltm.remove(knowledge) recomputes sync_rank of entities that lose the ref (F-1)", () => {
+    const e = entities.create({
+      projectPath: P,
+      entityType: "tool",
+      canonicalName: "Redis",
+    });
+    const k1 = mkKnowledge("K1", "first body");
+    const k2 = mkKnowledge("K2", "second body");
+    entities.linkKnowledge(k1, e.id);
+    entities.linkKnowledge(k2, e.id);
+    expect(rankOf(e.id)).toBe(2);
+    ltm.remove(k1); // death-cert + explicit ref delete → e loses one ref
+    expect(rankOf(e.id)).toBe(1); // not stale-high
+  });
+
+  test("resyncStaleEntityRanks repairs drift left by a bulk FK-cascade purge (F-1)", () => {
+    const e = entities.create({
+      projectPath: P,
+      entityType: "tool",
+      canonicalName: "Kafka",
+    });
+    const k = mkKnowledge("K", "body");
+    entities.linkKnowledge(k, e.id);
+    expect(rankOf(e.id)).toBe(1);
+    // Simulate a bulk cascade purge that removes refs WITHOUT the per-entity recompute
+    // (what clearProject/deleteProject/clearKnowledge trigger via FK ON DELETE CASCADE).
+    db().exec("DELETE FROM knowledge_entity_refs");
+    expect(rankOf(e.id)).toBe(1); // stale-high until repaired
+    entities.resyncStaleEntityRanks();
+    expect(rankOf(e.id)).toBe(0); // repaired to the live ref-count
   });
 });

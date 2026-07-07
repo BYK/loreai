@@ -1644,6 +1644,19 @@ const MIGRATIONS: string[] = [
     PRIMARY KEY (scope_id, member_user_id)
   );
   `,
+  // v65 (#1191b PR2b): entities.sync_rank — a synced, self-contained ref-count so the
+  // server can value-rank entities for eviction. A new entity starts low-value and its
+  // knowledge_entity_refs aren't synced yet, so the server can't value the INCOMING row
+  // via a JOIN — the column carries the true ref-count on the entity row itself.
+  // Maintained in app code at every knowledge_entity_refs mutation (recursive_triggers is
+  // OFF, so a trigger here would NOT fire the entities sync-capture/FTS triggers). The
+  // backfill re-runs harmlessly on recovery (stripAppliedAlters drops the duplicate ALTER).
+  `
+  ALTER TABLE entities ADD COLUMN sync_rank INTEGER NOT NULL DEFAULT 0;
+  UPDATE entities SET sync_rank = (
+    SELECT COUNT(*) FROM knowledge_entity_refs WHERE entity_id = entities.id
+  );
+  `,
 ];
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -2484,7 +2497,8 @@ function recoverMissingObjects(database: Database) {
       cross_project  INTEGER DEFAULT 0,
       created_at     INTEGER NOT NULL,
       updated_at     INTEGER NOT NULL,
-      embedding      BLOB
+      embedding      BLOB,
+      sync_rank      INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS entity_aliases (
       id          TEXT PRIMARY KEY,

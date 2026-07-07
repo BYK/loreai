@@ -26,6 +26,7 @@ import {
   rebuildDirtySessionRollups,
 } from "./db";
 import { getGitRemote } from "./git";
+import { resyncStaleEntityRanks } from "./entities";
 import * as ltm from "./ltm";
 import * as agentsFile from "./agents-file";
 import { config as loreConfig } from "./config";
@@ -690,6 +691,9 @@ export function clearProject(projectPath: string): ClearResult {
       )
       .run(pid, pid);
     database.query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+    // FK ON DELETE CASCADE just purged this project's knowledge_entity_refs; repair any
+    // entity whose sync_rank drifted so the server eviction value isn't stale (#1191b).
+    resyncStaleEntityRanks();
     database
       .query("DELETE FROM temporal_messages WHERE project_id = ?")
       .run(pid);
@@ -831,6 +835,9 @@ export function deleteProject(projectId: string): ClearResult | null {
       )
       .run(projectId, projectId);
     database.query("DELETE FROM knowledge WHERE project_id = ?").run(projectId);
+    // FK CASCADE purged this project's knowledge_entity_refs — repair drifted entity
+    // sync_rank so the server eviction value isn't stale (#1191b PR2b).
+    resyncStaleEntityRanks();
     database
       .query("DELETE FROM temporal_messages WHERE project_id = ?")
       .run(projectId);
@@ -927,6 +934,9 @@ export function clearKnowledge(projectPath: string): number {
     )
     .run(pid, pid);
   db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+  // FK CASCADE purged this project's knowledge_entity_refs — repair drifted entity
+  // sync_rank so the server eviction value isn't stale (#1191b PR2b).
+  resyncStaleEntityRanks();
   reclaimVec0Orphans(["knowledge"]);
 
   invalidateProjectsCache();
