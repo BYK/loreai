@@ -2667,8 +2667,16 @@ function syntheticToolUseResponse(
     return anthropicSSE;
   }
 
-  // Non-streaming: use the existing format builders.
-  return nonStreamHttpResponse(resp, req.protocol);
+  // Non-streaming: use the existing format builders. (Synthetic tool_use carries
+  // ZERO usage, so the cap never bites — thread longContext anyway for uniform
+  // behavior and to stay correct if this response ever carries real usage.)
+  return nonStreamHttpResponse(
+    resp,
+    req.protocol,
+    req.stream,
+    undefined,
+    requestEnablesLongContext(req),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -5700,7 +5708,13 @@ async function handleCompaction(
     return await handlePassthrough(req, config);
   }
   const resp = buildCompactionResponse(sessionID, summary, req.model);
-  return nonStreamHttpResponse(resp, req.protocol, req.stream);
+  return nonStreamHttpResponse(
+    resp,
+    req.protocol,
+    req.stream,
+    undefined,
+    requestEnablesLongContext(req),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -8784,7 +8798,13 @@ function slashResponse(
     return anthropicSSE;
   }
 
-  return nonStreamHttpResponse(resp, req.protocol, req.stream);
+  return nonStreamHttpResponse(
+    resp,
+    req.protocol,
+    req.stream,
+    undefined,
+    requestEnablesLongContext(req),
+  );
 }
 
 // ---------------------------------------------------------------------------
