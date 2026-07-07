@@ -1,6 +1,7 @@
-import { beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { LoreConfig } from "../src/config";
 import { db, ensureProject } from "../src/db";
+import * as embedding from "../src/embedding";
 import * as entities from "../src/entities";
 import * as ltm from "../src/ltm";
 import { searchRecall } from "../src/recall";
@@ -234,6 +235,17 @@ describe("searchRecall — entity-graph fan-in", () => {
   beforeEach(() => {
     cleanup();
     ensureProject(PROJECT);
+    // These tests isolate the GRAPH fan-in + visibility behavior. Vector search
+    // is a separate retrieval path that can nondeterministically surface a
+    // same-project entry by loose semantic proximity (it was doing so under the
+    // full parallel suite, once background embeds landed — a flake). Force it
+    // off so "reachable only via the graph" is a deterministic premise; the
+    // vector path's own visibility is covered by the dedicated describe below.
+    vi.spyOn(embedding, "isAvailable").mockReturnValue(false);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   test("a query matching an entity surfaces knowledge linked ONLY via the graph (#1)", async () => {
@@ -243,7 +255,8 @@ describe("searchRecall — entity-graph fan-in", () => {
       aliases: [{ type: "nickname", value: "Seylan" }],
       crossProject: true,
     });
-    // Knowledge whose text never mentions "Seylan" — unreachable by FTS/vector.
+    // Knowledge whose text never mentions "Seylan" — unreachable by FTS (and
+    // vector is disabled for this block), so only the graph can surface it.
     const k = seedLinkedKnowledge({
       projectPath: PROJECT,
       entityId: e.id,
@@ -412,6 +425,92 @@ describe("searchRecall — entity-graph fan-in", () => {
         (r) => r.item.source === "knowledge" && r.item.item.logical_id === k,
       ),
     ).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// searchRecall — knowledge VECTOR search project visibility
+//
+// vectorSearch() returns hits globally (not project-scoped), so recall must
+// apply the same visibility predicate to knowledge vector hits that it applies
+// to FTS and entity-vector hits — otherwise a semantic match leaks another
+// project's project-scoped (cross_project = 0) knowledge. Embedding I/O is
+// mocked so the hit set is deterministic regardless of the local model.
+// ---------------------------------------------------------------------------
+
+describe("searchRecall — knowledge vector visibility", () => {
+  const PROJECT = "/test/recall-graph/vec-project";
+  const OTHER = "/test/recall-graph/vec-other";
+
+  beforeEach(() => {
+    cleanup();
+    ensureProject(PROJECT);
+    ensureProject(OTHER);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  test("filters out another project's project-scoped knowledge while keeping cross-project + same-project hits", async () => {
+    // OTHER project, cross_project = 0 — must NEVER surface in PROJECT recall.
+    const otherId = ltm.create({
+      projectPath: OTHER,
+      scope: "project",
+      category: "decision",
+      title: "Other-project secret",
+      content: "Sensitive detail confined to the other project.",
+      crossProject: false,
+    });
+    // Same project — allowed.
+    const mineId = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "decision",
+      title: "My project note",
+      content: "A note that belongs to this project.",
+    });
+    // Cross-project (cross_project = 1) — allowed from anywhere.
+    const sharedId = ltm.create({
+      projectPath: OTHER,
+      scope: "project",
+      category: "decision",
+      title: "Shared cross-project note",
+      content: "A globally shareable note.",
+      crossProject: true,
+    });
+
+    // Force a deterministic vector hit set covering all three entries. For v1
+    // rows the returned logical_id equals the row id vectorSearch would emit.
+    vi.spyOn(embedding, "isAvailable").mockReturnValue(true);
+    vi.spyOn(embedding, "embed").mockResolvedValue([
+      new Float32Array([1, 0, 0]),
+    ]);
+    vi.spyOn(embedding, "vectorSearch").mockResolvedValue([
+      { id: otherId, similarity: 0.99 },
+      { id: mineId, similarity: 0.98 },
+      { id: sharedId, similarity: 0.97 },
+    ]);
+    vi.spyOn(embedding, "vectorSearchDistillations").mockResolvedValue([]);
+    vi.spyOn(embedding, "vectorSearchTemporal").mockResolvedValue([]);
+    vi.spyOn(embedding, "vectorSearchEntities").mockResolvedValue([]);
+
+    const results = await searchRecall({
+      query: "anything",
+      projectPath: PROJECT,
+      scope: "all",
+    });
+    const hasKnowledge = (logicalId: string) =>
+      results.some(
+        (r) =>
+          r.item.source === "knowledge" && r.item.item.logical_id === logicalId,
+      );
+
+    // The other project's project-scoped entry must be filtered out.
+    expect(hasKnowledge(otherId)).toBe(false);
+    // Same-project and cross-project entries are admitted.
+    expect(hasKnowledge(mineId)).toBe(true);
+    expect(hasKnowledge(sharedId)).toBe(true);
   });
 });
 

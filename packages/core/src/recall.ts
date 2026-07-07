@@ -907,6 +907,14 @@ export async function searchRecall(
 
       // Knowledge vector search
       if (knowledgeEnabled) {
+        // vectorSearch is NOT project-scoped, so apply the same visibility
+        // predicate the FTS knowledge search uses — otherwise a semantic match
+        // could leak another project's project-scoped (cross_project = 0)
+        // knowledge into this project's recall. Cross-project DISCOVERY of other
+        // projects' knowledge stays FTS-only (searchScoredOtherProjects); the
+        // vector path mirrors the main, project-scoped search. Mirrors the
+        // entity-vector visibility filter below.
+        const knowledgePid = ensureProject(projectPath);
         const vectorHits = await timer.await(
           embedding.vectorSearch(queryVec, limit),
           "vectorSearch",
@@ -919,6 +927,11 @@ export async function searchRecall(
         for (const hit of vectorHits) {
           const entry = entryMap.get(hit.id);
           if (entry) {
+            const visible =
+              entry.project_id === knowledgePid ||
+              entry.project_id === null ||
+              entry.cross_project === 1;
+            if (!visible) continue;
             vectorTagged.push({
               source: "knowledge",
               item: { ...entry, rank: -hit.similarity },
