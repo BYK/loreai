@@ -871,6 +871,8 @@ describe.skipIf(gate())("sync migrations — knowledge eviction (#1191b)", () =>
     if (gate()) return;
     await setCap("knowledge", 500);
     await setCap("entities", 30);
+    await setCap("entity_aliases", 300);
+    await setCap("entity_relations", 300);
     await setByteCap("knowledge", 12582912);
     await setEvictionBudget(200); // restore default so the low-budget test can't leak
   });
@@ -936,7 +938,47 @@ describe.skipIf(gate())("sync migrations — knowledge eviction (#1191b)", () =>
     await ins("e1");
     await ins("e2");
     const err = await expectError(() => ins("e3"));
-    expect(err.code).toBe("23514"); // eviction is knowledge-only in PR1
+    expect(err.code).toBe("23514"); // entities not yet evicted (needs sync_rank — PR2b)
+  });
+
+  it("evicts the OLDEST entity_relations row by recency (not id) when over the row cap", async () => {
+    const a = await h.createUser();
+    await setCap("entity_relations", 2);
+    // Oldest row gets a HIGHER id so the test isolates updated_at ordering from id order.
+    const insRel = (id: string, ts: string) =>
+      h.asUser(a, (c) =>
+        c.query(
+          "insert into public.entity_relations (id, scope_id, entity_a, entity_b, relation, updated_at) values ($1,$2,'ea','eb','rel',$3)",
+          [id, a, ts],
+        ),
+      );
+    await insRel("r-z", "2020-01-01T00:00:00Z"); // OLDEST, but higher id
+    await insRel("r-a", "2025-01-01T00:00:00Z"); // newer, lower id
+    await insRel("r-new", "2026-01-01T00:00:00Z"); // over cap → evicts r-z (recency), admits
+    const { rows } = await h.client.query(
+      "select id from public.entity_relations where scope_id=$1 order by id",
+      [a],
+    );
+    expect(rows.map((r) => r.id)).toEqual(["r-a", "r-new"]); // r-z evicted, NOT r-a (lowest id)
+  });
+
+  it("evicts the OLDEST entity_aliases row by recency when over the row cap", async () => {
+    const a = await h.createUser();
+    await setCap("entity_aliases", 1);
+    const insAlias = (id: string, ts: string) =>
+      h.asUser(a, (c) =>
+        c.query(
+          "insert into public.entity_aliases (id, scope_id, entity_id, alias_type, alias_value, updated_at) values ($1,$2,'e1','name','v',$3)",
+          [id, a, ts],
+        ),
+      );
+    await insAlias("al-old", "2020-01-01T00:00:00Z");
+    await insAlias("al-new", "2026-01-01T00:00:00Z"); // over cap → evicts al-old, admits al-new
+    const { rows } = await h.client.query(
+      "select id from public.entity_aliases where scope_id=$1",
+      [a],
+    );
+    expect(rows.map((r) => r.id)).toEqual(["al-new"]); // old evicted
   });
 
   it("does NOT evict for a PRO tier — a capped pro pauses (eviction is the free-tier valve)", async () => {
