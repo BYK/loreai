@@ -97,6 +97,7 @@ import type {
 import {
   applyUpstreamExtraHeaders,
   blocksToText,
+  isEmptyCompletion,
   looksLikeSSE,
   forwardClientHeaders,
   ZERO_USAGE,
@@ -270,6 +271,7 @@ import {
   emitCurationMetrics,
   spanStartupBackfill,
   captureClientAbortUnderPressure,
+  captureEmptyCompletion,
   type AnthropicUsage,
 } from "./sentry";
 import {
@@ -8015,6 +8017,28 @@ async function handleConversationTurn(
       requestBody,
       genAiSpan,
     );
+    // Telemetry: flag a completion we're about to hand back with NO usable
+    // content (no text, no tool_use) — the "no response data" class
+    // (github-copilot #1052 follow-up). Checked on the model's response, before
+    // any lore context-warning banner is layered on. Never throws / never
+    // blocks the read path.
+    if (isEmptyCompletion(currentResp)) {
+      const emptyOutputTokens = currentResp.usage?.outputTokens ?? 0;
+      log.warn(
+        `empty completion → client: protocol=${effectiveProtocol} ` +
+          `model=${req.model} stopReason=${currentResp.stopReason} ` +
+          `outputTokens=${emptyOutputTokens} recallDepth=${recallDepth} ` +
+          `session=${sessionState.sessionID.slice(0, 16)}`,
+      );
+      captureEmptyCompletion({
+        protocol: effectiveProtocol,
+        model: req.model,
+        sessionID: sessionState.sessionID,
+        stopReason: currentResp.stopReason,
+        outputTokens: emptyOutputTokens,
+        recallDepth,
+      });
+    }
     const recallHeaders =
       recallDepth > 0 ? { "x-lore-recall-invoked": "true" } : undefined;
     return nonStreamHttpResponse(

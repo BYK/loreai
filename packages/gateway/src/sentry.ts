@@ -742,6 +742,46 @@ export function setupBustSpiralCapture(): void {
   });
 }
 
+/** Diagnostic context for an empty completion (see `captureEmptyCompletion`). */
+export interface EmptyCompletionInfo {
+  /** Upstream/client wire protocol (anthropic | openai | openai-responses | gemini). */
+  protocol: string;
+  /** Model id the request targeted. */
+  model: string;
+  /** Session id (for correlating with other events). */
+  sessionID: string;
+  /** Provider stop reason on the empty response (end_turn, length, …). */
+  stopReason: string;
+  /** Reported output tokens: >0 with empty content ⇒ parse/accumulate bug;
+   * 0 ⇒ the upstream genuinely returned nothing. */
+  outputTokens: number;
+  /** Recall continuation depth when the empty response was finalized. */
+  recallDepth: number;
+}
+
+/**
+ * Capture a warning when the gateway is about to hand the client a completion
+ * with ZERO usable content (no text, no tool_use) — the "no response data"
+ * class (github-copilot #1052 follow-up, and any future silent-empty parser or
+ * accumulator regression). Grouped by `protocol` so a provider-specific
+ * regression aggregates into one issue rather than one-per-session. No-op when
+ * Sentry is off; the caller guards it behind `isEmptyCompletion` and it never
+ * throws, so it is safe on the read path.
+ */
+export function captureEmptyCompletion(info: EmptyCompletionInfo): void {
+  if (!Sentry.isInitialized()) return;
+  Sentry.captureMessage(
+    "Empty completion returned to client (no content blocks)",
+    {
+      level: "warning",
+      fingerprint: ["empty-completion", info.protocol],
+      contexts: {
+        empty_completion: info as unknown as Record<string, unknown>,
+      },
+    },
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Process resource gauge + event-loop lag (periodic, from the idle tick)
 // ---------------------------------------------------------------------------

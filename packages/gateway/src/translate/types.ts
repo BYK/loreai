@@ -110,6 +110,31 @@ export function blocksToText(blocks: GatewayContentBlock[], depth = 0): string {
 }
 
 /**
+ * True when a completion carries NO content the client can act on — no
+ * `tool_use`, no non-whitespace `text`, and no `thinking`/`opaque` block. This
+ * is the "no response data" shape (the client's agent turn ends with nothing):
+ * an empty `content` array, or one holding only whitespace text. `thinking` and
+ * `opaque` blocks count as content (the provider produced *something*), so a
+ * reasoning-only or passthrough response is NOT flagged — keeps the telemetry
+ * that consumes this predicate low-noise. Pure; safe to call on the hot path.
+ */
+export function isEmptyCompletion(resp: GatewayResponse): boolean {
+  for (const block of resp.content) {
+    switch (block.type) {
+      case "tool_use":
+      case "thinking":
+      case "opaque":
+        return false;
+      case "text":
+        if (block.text.trim() !== "") return false;
+        break;
+      // tool_result is not a completion output — ignore.
+    }
+  }
+  return true;
+}
+
+/**
  * Deterministic placeholder for an opaque block. Derives a compact descriptor
  * from common media fields (type, media_type, payload byte length) without
  * embedding the payload itself — so the placeholder is stable and cheap.

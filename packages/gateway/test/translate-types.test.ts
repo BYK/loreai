@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { ZERO_USAGE, looksLikeSSE } from "../src/translate/types";
+import {
+  ZERO_USAGE,
+  isEmptyCompletion,
+  looksLikeSSE,
+  type GatewayContentBlock,
+  type GatewayResponse,
+} from "../src/translate/types";
 
 // ---------------------------------------------------------------------------
 // ZERO_USAGE
@@ -69,5 +75,54 @@ describe("looksLikeSSE", () => {
     expect(looksLikeSSE("text/plain", "id: 12345 not found")).toBe(false);
     expect(looksLikeSSE("text/plain", ": a leading comment line")).toBe(false);
     expect(looksLikeSSE("text/plain", "404 page not found")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isEmptyCompletion — the "no response data" predicate
+// ---------------------------------------------------------------------------
+
+function resp(content: GatewayContentBlock[]): GatewayResponse {
+  return { id: "id", model: "m", content, stopReason: "end_turn" };
+}
+
+describe("isEmptyCompletion", () => {
+  it("true for an empty content array", () => {
+    expect(isEmptyCompletion(resp([]))).toBe(true);
+  });
+
+  it("true when the only text block is empty or whitespace", () => {
+    expect(isEmptyCompletion(resp([{ type: "text", text: "" }]))).toBe(true);
+    expect(isEmptyCompletion(resp([{ type: "text", text: "  \n\t " }]))).toBe(
+      true,
+    );
+  });
+
+  it("false when there is non-whitespace text", () => {
+    expect(isEmptyCompletion(resp([{ type: "text", text: "hi" }]))).toBe(false);
+  });
+
+  it("false when there is a tool_use block (even alongside empty text)", () => {
+    expect(
+      isEmptyCompletion(
+        resp([
+          { type: "text", text: "" },
+          { type: "tool_use", id: "1", name: "f", input: {} },
+        ]),
+      ),
+    ).toBe(false);
+  });
+
+  it("false for reasoning-only (thinking) or passthrough (opaque) content — not the no-data bug", () => {
+    expect(
+      isEmptyCompletion(
+        resp([{ type: "thinking" } as unknown as GatewayContentBlock]),
+      ),
+    ).toBe(false);
+    expect(
+      isEmptyCompletion(
+        resp([{ type: "opaque" } as unknown as GatewayContentBlock]),
+      ),
+    ).toBe(false);
   });
 });
