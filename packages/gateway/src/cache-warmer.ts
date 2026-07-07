@@ -45,7 +45,11 @@ import type {
   SessionState,
   WarmupState,
 } from "./translate/types";
-import { decompressBody } from "./cache-analytics";
+import {
+  cacheSegmentDigest,
+  decompressBody,
+  isWarmupProbeEnabled,
+} from "./cache-analytics";
 import { resolveAuth, authHeaders, markAuthStale } from "./auth";
 import { recordWorkerFailure, recordWorkerSuccess } from "./worker-health";
 import { resignBody } from "./cch";
@@ -2231,6 +2235,45 @@ export async function executeWarmup(
     // bug. Correlating this with the outcome confirms the breakpoint-preserving
     // fix (raw stored body) is working: UNCACHED with breakpoints=1 was the bug.
     const breakpoints = (signedBody.match(/"cache_control"/g) ?? []).length;
+
+    // --- Warmup cache-divergence probe (env-gated) ---
+    // The decisive tiebreaker between EVICTION and body DIVERGENCE. Hash the
+    // signed warmup body's cacheable segments and compare to the last real
+    // turn's (stored by analyzeCacheTurn). Interpretation, combined with the
+    // cacheRead outcome above:
+    //   head MATCH + cacheRead=0  → the identical stable head was evicted by
+    //                               Anthropic (a stable head cannot diverge) →
+    //                               EVICTION, not a body bug.
+    //   head DIFFERS              → the warmup body genuinely diverges from the
+    //                               last real turn at the head → body bug, and
+    //                               the changed segment is named explicitly.
+    // A matching head with a differing prefix/tail localizes the divergence to
+    // the distilled prefix (meta-distillation) or conversation tail.
+    if (isWarmupProbeEnabled()) {
+      const ca = state.cacheAnalytics;
+      const dg = cacheSegmentDigest(signedBody);
+      if (dg) {
+        const cmp = (name: string, warm: string, real: string | undefined) =>
+          `${name}=${warm}${real ? (warm === real ? "==" : `!=${real}`) : "(no-baseline)"}`;
+        log.info(
+          `warmup-probe: WARMUP session=${sid} ` +
+            `${cmp("head", dg.headSha, ca.probeHeadSha)} ` +
+            `${cmp("tools", dg.toolsSha, ca.probeToolsSha)} ` +
+            `${cmp("prefix", dg.prefixSha, ca.probePrefixSha)} ` +
+            `bp=${dg.bpCount} sysBlocks=${dg.systemBlocks} bytes=${dg.bytes} ` +
+            `cacheRead=${cacheReadTokens} cacheWrite=${cacheCreationTokens} ` +
+            `→ ${
+              ca.probeHeadSha && dg.headSha === ca.probeHeadSha
+                ? cacheReadTokens === 0
+                  ? "EVICTION (head identical to last real turn, yet cacheRead=0)"
+                  : "head identical to last real turn"
+                : ca.probeHeadSha
+                  ? "HEAD DIVERGENCE (warmup body head != last real turn head)"
+                  : "no baseline (no real turn analyzed yet this session)"
+            }`,
+        );
+      }
+    }
 
     if (cacheReadTokens > 0 && cacheCreationTokens === 0) {
       log.info(

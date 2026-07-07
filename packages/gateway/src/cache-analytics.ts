@@ -21,6 +21,7 @@ import type {
 } from "./translate/types.ts";
 import { log, type CacheBustCause, type CacheStrategy } from "@loreai/core";
 import { zstdCompressSync, zstdDecompressSync } from "node:zlib";
+import { createHash } from "node:crypto";
 
 // ---------------------------------------------------------------------------
 // Compression helpers (node:zlib zstd, available in Node.js >= 22.15)
@@ -32,6 +33,90 @@ export function compressBody(body: string): Uint8Array {
 
 export function decompressBody(compressed: Uint8Array): string {
   return zstdDecompressSync(compressed).toString();
+}
+
+// ---------------------------------------------------------------------------
+// Warmup cache-divergence probe (env-gated, OFF by default → zero hot-path cost)
+// ---------------------------------------------------------------------------
+//
+// Purpose: definitively distinguish an Anthropic-side cache EVICTION from a
+// warmup request-body DIVERGENCE. We proved (real builder + prepareWarmupBody +
+// zstd + upstream encoding, all byte-identical) that the warmup body's cacheable
+// content equals the last real turn's body — but that rests on the in-memory
+// `lastRequestBody` truly matching what Anthropic cached. This probe closes that
+// gap in production by hashing the cacheable SEGMENTS and:
+//   1. On each real turn: detecting drift of the stable head / distilled prefix
+//      across consecutive turns (a "stable" head that drifts IS a divergence).
+//   2. On each warmup: comparing the signed warmup body's segment hashes to the
+//      last real turn's. Then, with the response cacheRead:
+//        - head hash MATCHES + cacheRead=0  → identical head was evicted (EVICTION)
+//        - head hash DIFFERS               → real body divergence (and where)
+//
+// Enable with LORE_WARMUP_PROBE=1. When unset, callers skip all hashing/parsing.
+export function isWarmupProbeEnabled(): boolean {
+  return process.env.LORE_WARMUP_PROBE === "1";
+}
+
+export type CacheSegmentDigest = {
+  /** SHA (12 hex) of system blocks up to & including the 1h breakpoint — the
+   *  stable "head" (system[0] host prompt + system[1] LTM). system[2]
+   *  (context-bound LTM) is excluded: it rides the conversation cache, not the
+   *  head, so including it would produce false head-drift. */
+  headSha: string;
+  /** SHA (12 hex) of the tools array (1h breakpoint on the last tool). */
+  toolsSha: string;
+  /** SHA (12 hex) of messages[0..1] — Lore's distilled prefix, byte-stable
+   *  between meta-distillations and carrying the #1155 1h interior breakpoint. */
+  prefixSha: string;
+  /** Number of cache_control breakpoints in the serialized body. */
+  bpCount: number;
+  /** Count of system blocks (sanity: 2 or 3). */
+  systemBlocks: number;
+  /** Serialized byte length (uncompressed). */
+  bytes: number;
+};
+
+/**
+ * Hash the cacheable segments of a serialized Anthropic request body. Returns
+ * null on any parse error (never throws — must be safe on the request path).
+ */
+export function cacheSegmentDigest(
+  serializedBody: string,
+): CacheSegmentDigest | null {
+  try {
+    const body = JSON.parse(serializedBody) as Record<string, unknown>;
+    const sha = (v: unknown) =>
+      createHash("sha256")
+        .update(JSON.stringify(v ?? null))
+        .digest("hex")
+        .slice(0, 12);
+
+    const systemBlocks = Array.isArray(body.system)
+      ? (body.system as Array<Record<string, unknown>>)
+      : [];
+    // Head = blocks up to & including the first one carrying a cache_control
+    // (the 1h stable-LTM breakpoint). Falls back to the whole array if none.
+    let headEnd = systemBlocks.length;
+    for (let i = 0; i < systemBlocks.length; i++) {
+      if (systemBlocks[i]?.cache_control) {
+        headEnd = i + 1;
+        break;
+      }
+    }
+    const messages = Array.isArray(body.messages)
+      ? (body.messages as unknown[])
+      : [];
+    return {
+      headSha: sha(systemBlocks.slice(0, headEnd)),
+      toolsSha: sha(body.tools),
+      prefixSha: sha(messages.slice(0, 2)),
+      bpCount: (serializedBody.match(/"cache_control"/g) ?? []).length,
+      systemBlocks: systemBlocks.length,
+      bytes: serializedBody.length,
+    };
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -668,6 +753,39 @@ export function analyzeCacheTurn(
   analytics.lastRequestBodyLength = normalizedBody.length;
   analytics.lastCacheRead = cacheRead;
   analytics.lastCacheCreation = cacheCreation;
+
+  // --- Warmup cache-divergence probe (env-gated) ---
+  // Hash this real turn's cacheable segments; detect drift vs the previous turn
+  // (a "stable" head/prefix that changes IS a divergence source), then store for
+  // the next warmup to compare against. Parsing/hashing is skipped entirely when
+  // the probe is off, so there is zero hot-path cost in production by default.
+  if (isWarmupProbeEnabled()) {
+    const dg = cacheSegmentDigest(currentBody);
+    if (dg) {
+      const sidStr = sessionID ? ` session=${sessionID.slice(0, 16)}` : "";
+      const drift: string[] = [];
+      if (analytics.probeHeadSha && analytics.probeHeadSha !== dg.headSha)
+        drift.push(`head ${analytics.probeHeadSha}->${dg.headSha}`);
+      if (analytics.probeToolsSha && analytics.probeToolsSha !== dg.toolsSha)
+        drift.push(`tools ${analytics.probeToolsSha}->${dg.toolsSha}`);
+      if (analytics.probePrefixSha && analytics.probePrefixSha !== dg.prefixSha)
+        drift.push(`prefix ${analytics.probePrefixSha}->${dg.prefixSha}`);
+      if (drift.length > 0) {
+        log.info(
+          `warmup-probe: turn${sidStr} SEGMENT DRIFT [${drift.join(", ")}] ` +
+            `(a stable-segment change busts the cached prefix)`,
+        );
+      }
+      log.info(
+        `warmup-probe: turn${sidStr} head=${dg.headSha} tools=${dg.toolsSha} ` +
+          `prefix=${dg.prefixSha} bp=${dg.bpCount} sysBlocks=${dg.systemBlocks} ` +
+          `read=${cacheRead} create=${cacheCreation}`,
+      );
+      analytics.probeHeadSha = dg.headSha;
+      analytics.probeToolsSha = dg.toolsSha;
+      analytics.probePrefixSha = dg.prefixSha;
+    }
+  }
 
   const result: CacheTurnAnalysis = {
     turn: analytics.turnCount,

@@ -398,6 +398,15 @@ export type CacheAnalytics = {
   turnCount: number;
   /** Confirmed busts (API returned cacheRead=0 with cacheCreation>0). */
   bustCount: number;
+  /**
+   * Warmup cache-divergence probe (LORE_WARMUP_PROBE=1 only): segment hashes of
+   * the last real turn's body, so a warmup can compare its own segments and
+   * distinguish eviction (segments match, cacheRead=0) from divergence (segments
+   * differ). Undefined when the probe is off. See {@link cacheSegmentDigest}.
+   */
+  probeHeadSha?: string;
+  probeToolsSha?: string;
+  probePrefixSha?: string;
 };
 
 /** Routing snapshot captured from the last successful session request.
