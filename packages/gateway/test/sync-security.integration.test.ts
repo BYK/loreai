@@ -821,6 +821,191 @@ describe.skipIf(gate())("sync migrations — quota + anti-abuse", () => {
   });
 });
 
+describe.skipIf(gate())("sync migrations — knowledge eviction (#1191b)", () => {
+  // Insert a knowledge entry + its meta register (base_confidence = value) as one txn.
+  const insK = (uid: string, id: string, conf: number) =>
+    h.asUser(uid, async (c) => {
+      await c.query(
+        "insert into public.knowledge (id, scope_id, category, title, content) values ($1,$2,'p','T','c')",
+        [id, uid],
+      );
+      await c.query(
+        "insert into public.knowledge_meta (scope_id, logical_id, base_confidence) values ($1,$2,$3)",
+        [uid, id, conf],
+      );
+    });
+  // Eviction cap is admin/migration-managed (sync_config, RLS-locked) — a client
+  // cannot raise its own budget. Tests tune it via the raw admin connection.
+  const setEvictionBudget = (n: number) =>
+    h.client.query(
+      "update public.sync_config set value=$1 where key='eviction_budget_per_hour'",
+      [n],
+    );
+  const liveKnowledge = async (uid: string) => {
+    const { rows } = await h.client.query(
+      "select id from public.knowledge where scope_id=$1 and is_deleted=false order by id",
+      [uid],
+    );
+    return rows.map((r) => r.id as string);
+  };
+  const metaIds = async (uid: string) => {
+    const { rows } = await h.client.query(
+      "select logical_id from public.knowledge_meta where scope_id=$1 order by logical_id",
+      [uid],
+    );
+    return rows.map((r) => r.logical_id as string);
+  };
+  async function setCap(table: string, n: number) {
+    await h.client.query(
+      "update public.plan_limits set max_rows=$1 where tier='free' and table_name=$2",
+      [n, table],
+    );
+  }
+  async function setByteCap(table: string, n: number | null) {
+    await h.client.query(
+      "update public.plan_limits set max_bytes=$1 where tier='free' and table_name=$2",
+      [n, table],
+    );
+  }
+  afterEach(async () => {
+    if (gate()) return;
+    await setCap("knowledge", 500);
+    await setCap("entities", 30);
+    await setByteCap("knowledge", 12582912);
+    await setEvictionBudget(200); // restore default so the low-budget test can't leak
+  });
+
+  it("evicts the LOWEST-confidence entry (+ cascades its meta) when a knowledge INSERT exceeds the row cap", async () => {
+    const a = await h.createUser();
+    await setCap("knowledge", 3);
+    await insK(a, "k1", 0.9);
+    await insK(a, "k2", 0.2); // lowest value
+    await insK(a, "k3", 0.7);
+    // 4th insert exceeds the cap → evicts k2 (lowest), admits k4; count stays at 3.
+    await insK(a, "k4", 0.8);
+    expect(await liveKnowledge(a)).toEqual(["k1", "k3", "k4"]); // k2 evicted, not k4
+    expect(await metaIds(a)).toEqual(["k1", "k3", "k4"]); // meta cascaded with the row
+    const { rows } = await h.client.query(
+      "select row_count from public.user_table_usage where scope_id=$1 and table_name='knowledge'",
+      [a],
+    );
+    expect(Number(rows[0].row_count)).toBe(3); // net stayed at the cap
+  });
+
+  it("also cascade-deletes the evicted entry's knowledge_meta_crdt row", async () => {
+    const a = await h.createUser();
+    await setCap("knowledge", 1);
+    await insK(a, "lo", 0.1);
+    await h.asUser(a, (c) =>
+      c.query(
+        "insert into public.knowledge_meta_crdt (scope_id, logical_id, replica_id, pos, neg) values ($1,'lo','r1',0,0)",
+        [a],
+      ),
+    );
+    await insK(a, "hi", 0.9); // evicts "lo"
+    const crdt = await h.client.query(
+      "select logical_id from public.knowledge_meta_crdt where scope_id=$1",
+      [a],
+    );
+    expect(crdt.rows.map((r) => r.logical_id)).not.toContain("lo");
+    expect(await liveKnowledge(a)).toEqual(["hi"]);
+  });
+
+  it("stops evicting once the per-scope hourly budget is spent (circuit breaker → pause)", async () => {
+    const a = await h.createUser();
+    await setCap("knowledge", 2);
+    await setEvictionBudget(1); // one eviction per hour, then pause
+    await insK(a, "k1", 0.5);
+    await insK(a, "k2", 0.5);
+    await insK(a, "k3", 0.9); // over cap → evicts one (count→1), admits k3
+    const err = await expectError(() => insK(a, "k4", 0.9)); // count 1 ≥ 1 → raise
+    expect(err.code).toBe("23514"); // breaker tripped → normal quota pause
+    expect(err.message).toMatch(/quota exceeded/i);
+  });
+
+  it("does NOT evict for other capped tables — entities still raise at the cap", async () => {
+    const a = await h.createUser();
+    await setCap("entities", 2);
+    const ins = (id: string) =>
+      h.asUser(a, (c) =>
+        c.query(
+          "insert into public.entities (id, scope_id, entity_type, canonical_name) values ($1,$2,'tool','X')",
+          [id, a],
+        ),
+      );
+    await ins("e1");
+    await ins("e2");
+    const err = await expectError(() => ins("e3"));
+    expect(err.code).toBe("23514"); // eviction is knowledge-only in PR1
+  });
+
+  it("does NOT evict for a PRO tier — a capped pro pauses (eviction is the free-tier valve)", async () => {
+    const a = await h.createUser();
+    // tier is server-only (guard_profile_tier) → set it via service_role.
+    await h.asService((c) =>
+      c.query("update public.profiles set tier='pro' where id=$1", [a]),
+    );
+    // give pro a reachable knowledge row cap for the test, then restore.
+    await h.client.query(
+      "update public.plan_limits set max_rows=2 where tier='pro' and table_name='knowledge'",
+    );
+    try {
+      await insK(a, "p1", 0.1);
+      await insK(a, "p2", 0.1);
+      const err = await expectError(() => insK(a, "p3", 0.9)); // pro → raise, NOT evict
+      expect(err.code).toBe("23514");
+      expect(await liveKnowledge(a)).toEqual(["p1", "p2"]); // nothing evicted
+    } finally {
+      await h.client.query(
+        "update public.plan_limits set max_rows=50000 where tier='pro' and table_name='knowledge'",
+      );
+    }
+  });
+
+  it("the eviction budget (sync_config) is NOT client-readable or -writable — the breaker can't be bypassed", async () => {
+    const a = await h.createUser();
+    // No GRANT to authenticated → any access is 42501 (a client cannot raise its own
+    // budget the way a session GUC would allow).
+    expect(
+      (
+        await expectError(() =>
+          h.asUser(a, (c) => c.query("select value from public.sync_config")),
+        )
+      ).code,
+    ).toBe("42501");
+    expect(
+      (
+        await expectError(() =>
+          h.asUser(a, (c) =>
+            c.query("update public.sync_config set value=999999999"),
+          ),
+        )
+      ).code,
+    ).toBe("42501");
+  });
+
+  it("does NOT evict for a BYTE-cap overflow — still raises (row eviction only)", async () => {
+    const a = await h.createUser();
+    await setByteCap("knowledge", 2000); // tiny byte budget, generous row cap
+    await h.asUser(a, (c) =>
+      c.query(
+        "insert into public.knowledge (id, scope_id, category, title, content) values ('b1',$1,'p','T',$2)",
+        [a, "z".repeat(1200)],
+      ),
+    );
+    const err = await expectError(() =>
+      h.asUser(a, (c) =>
+        c.query(
+          "insert into public.knowledge (id, scope_id, category, title, content) values ('b2',$1,'p','T',$2)",
+          [a, "z".repeat(1200)],
+        ),
+      ),
+    );
+    expect(err.code).toBe("23514");
+    expect(err.message).toMatch(/byte quota exceeded/i);
+  });
+});
+
 describe.skipIf(gate())("sync migrations — scope seam", () => {
   it("author_id defaults to the writer; scope_id = author_id in v1", async () => {
     const a = await h.createUser();
