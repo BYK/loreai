@@ -2249,9 +2249,17 @@ export async function executeWarmup(
     //                               the changed segment is named explicitly.
     // A matching head with a differing prefix/tail localizes the divergence to
     // the distilled prefix (meta-distillation) or conversation tail.
+    //
+    // Hash `warmupBody` (PRE-resign), NOT `signedBody`: `resignBody` rewrites
+    // only the cch/cc_version billing token in system[0], which Anthropic strips
+    // before computing its cache key. Hashing the post-resign body would report a
+    // false HEAD DIVERGENCE for OAuth sessions (whose cch is re-signed to a new
+    // value each call). `warmupBody` still carries the real turn's cch verbatim
+    // (prepareWarmupBody never touches system[0]), so it compares symmetrically
+    // against the real turn's stored body that analyzeCacheTurn hashed.
     if (isWarmupProbeEnabled()) {
       const ca = state.cacheAnalytics;
-      const dg = cacheSegmentDigest(signedBody);
+      const dg = cacheSegmentDigest(warmupBody);
       if (dg) {
         const cmp = (name: string, warm: string, real: string | undefined) =>
           `${name}=${warm}${real ? (warm === real ? "==" : `!=${real}`) : "(no-baseline)"}`;
