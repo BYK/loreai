@@ -88,6 +88,26 @@ export function classifyPushError(
   return "transient";
 }
 
+/**
+ * A PULLED row can violate a LOCAL constraint the FK-less remote never enforces —
+ * e.g. an `entity_aliases` / `knowledge_entity_refs` / `entity_relations` row whose
+ * parent entity was never admitted under the entity cap (an orphan on the remote), so
+ * the local `entity_id → entities` FK rejects it. SQLite surfaces these as either a
+ * `SQLITE_CONSTRAINT_*` code (bun:sqlite) or `ERR_SQLITE_ERROR` with errstr/message
+ * "constraint failed" (node:sqlite; FK is errcode 787). Such a row can
+ * never apply as-is, so the puller skips it (poison) instead of aborting the whole sync.
+ */
+export function isSqliteConstraintError(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  const code = String((e as { code?: string }).code ?? "");
+  const errstr = String((e as { errstr?: string }).errstr ?? "");
+  return (
+    code.startsWith("SQLITE_CONSTRAINT") ||
+    (code === "ERR_SQLITE_ERROR" &&
+      /constraint/i.test(`${errstr} ${e.message}`))
+  );
+}
+
 // ---------------------------------------------------------------------------
 // C-4 (#825): wire encryption of knowledge content/title
 // ---------------------------------------------------------------------------
@@ -586,7 +606,29 @@ export async function pullOnce(
           const rid = syncData.rowIdOf(meta.table, remote);
           if (ms < cursor.ms || (ms === cursor.ms && rid <= cursor.id))
             continue;
-          applyRemote(meta, remote, res, touchedFts, enc);
+          try {
+            applyRemote(meta, remote, res, touchedFts, enc);
+          } catch (e) {
+            // A ciphertext row we can't decrypt defers the WHOLE table (outer catch,
+            // no cursor advance) so it re-pulls once the key is available.
+            if (e instanceof EncryptedContentUnavailable) throw e;
+            // A pulled row that violates a LOCAL constraint the FK-less remote never
+            // enforces (e.g. an entity_aliases / knowledge_entity_refs row whose entity
+            // was never admitted under the entity cap → orphan on the remote). It can
+            // never apply as-is, so skip it — advancing the cursor past it so ONE poison
+            // row can't abort the whole multi-table sync or wedge the cursor.
+            if (!isSqliteConstraintError(e)) throw e;
+            res.conflicts++;
+            syncData.recordConflict(
+              meta.table,
+              rid,
+              "pull_constraint_skip",
+              remote,
+            );
+            log.notice(
+              `sync: pull ${meta.table} skipped orphan row ${rid}: ${(e as Error).message}`,
+            );
+          }
           cursor = { ms, id: rid };
           advanced = true;
         }
@@ -691,7 +733,25 @@ async function drainTimestamp(
     }
 
     for (const remote of rows) {
-      applyRemote(meta, remote, res, touchedFts, enc);
+      try {
+        applyRemote(meta, remote, res, touchedFts, enc);
+      } catch (e) {
+        if (e instanceof EncryptedContentUnavailable) throw e;
+        // Orphan/poison pulled row (see the primary pull loop) — skip, don't abort;
+        // `last`/`cursor` still advance below so the drain can't wedge.
+        if (!isSqliteConstraintError(e)) throw e;
+        const rid = syncData.rowIdOf(meta.table, remote);
+        res.conflicts++;
+        syncData.recordConflict(
+          meta.table,
+          rid,
+          "pull_constraint_skip",
+          remote,
+        );
+        log.notice(
+          `sync: pull ${meta.table} skipped orphan row ${rid}: ${(e as Error).message}`,
+        );
+      }
       cols.forEach((c, i) => {
         last[i] = String(remote[c]);
       });

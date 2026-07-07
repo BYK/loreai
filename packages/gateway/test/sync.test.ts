@@ -921,6 +921,115 @@ describe("pullOnce", () => {
     expect(currentContent("kd")).toBeNull(); // death-cert applied → no live current
   });
 
+  test("pull skips an orphan entity_alias (absent FK parent) instead of aborting the whole sync", async () => {
+    syncData.enableSync("basic");
+    // A real local entity so its alias applies; a SECOND alias points at an entity that
+    // was never admitted under the entity cap (an orphan the FK-less remote happily kept).
+    const entId = "11111111-1111-4111-8111-111111111111";
+    syncData.withApplying(() =>
+      db()
+        .query(
+          "INSERT INTO entities (id, entity_type, canonical_name, created_at, updated_at) VALUES (?, 'tool', 'Widget', 1, 1)",
+        )
+        .run(entId),
+    );
+    tableRows("entity_aliases").push({
+      id: "al-ok",
+      entity_id: entId,
+      alias_type: "name",
+      alias_value: "Widget",
+      source: null,
+      created_at: 1,
+      updated_at: new Date(2_000_000).toISOString(),
+    } as never);
+    tableRows("entity_aliases").push({
+      id: "al-orphan",
+      entity_id: "22222222-2222-4222-8222-222222222222", // no such entity → local FK 787
+      alias_type: "name",
+      alias_value: "Ghost",
+      source: null,
+      created_at: 1,
+      updated_at: new Date(2_000_001).toISOString(),
+    } as never);
+
+    // Must NOT throw — one FK-failing row can't abort the whole multi-table sync.
+    const r = await pullOnce(makeClient() as never);
+
+    // Valid alias applied; orphan skipped (its FK parent is absent).
+    expect(
+      db().query("SELECT 1 FROM entity_aliases WHERE id = ?").get("al-ok"),
+    ).not.toBeNull();
+    expect(
+      db().query("SELECT 1 FROM entity_aliases WHERE id = ?").get("al-orphan"),
+    ).toBeNull();
+    // The skip is recorded as a conflict, not a crash — recoverable + diagnosable.
+    expect(r.conflicts).toBeGreaterThanOrEqual(1);
+    expect(
+      db()
+        .query(
+          "SELECT 1 FROM sync_conflicts WHERE table_name = 'entity_aliases' AND row_id = 'al-orphan'",
+        )
+        .get(),
+    ).not.toBeNull();
+  });
+
+  test("drainTimestamp also skips an orphan row sharing one timestamp (does not abort the sync)", async () => {
+    // > PAGE (200) rows on ONE exact updated_at force the primary page to stall and hand
+    // off to drainTimestamp — guarding that the orphan-skip works on the drain path too.
+    syncData.enableSync("basic");
+    const entId = "33333333-3333-4333-8333-333333333333";
+    syncData.withApplying(() =>
+      db()
+        .query(
+          "INSERT INTO entities (id, entity_type, canonical_name, created_at, updated_at) VALUES (?, 'tool', 'Bulk', 1, 1)",
+        )
+        .run(entId),
+    );
+    const ts = new Date(2_000_000).toISOString(); // one exact ms for every row
+    for (let i = 0; i < 205; i++) {
+      tableRows("entity_aliases").push({
+        id: `alias-${String(i).padStart(4, "0")}`,
+        entity_id: entId,
+        alias_type: "name",
+        alias_value: `bulk-${i}`,
+        source: null,
+        created_at: 1,
+        updated_at: ts,
+      } as never);
+    }
+    // Sorts LAST (so it lands in the DRAIN batch, not the first page) and its entity is absent.
+    tableRows("entity_aliases").push({
+      id: "alias-zzzz-orphan",
+      entity_id: "44444444-4444-4444-8444-444444444444",
+      alias_type: "name",
+      alias_value: "bulk-orphan",
+      source: null,
+      created_at: 1,
+      updated_at: ts,
+    } as never);
+
+    const r = await pullOnce(makeClient() as never); // must NOT throw (drain path)
+
+    expect(
+      db()
+        .query("SELECT COUNT(*) AS c FROM entity_aliases WHERE entity_id = ?")
+        .get(entId),
+    ).toEqual({ c: 205 });
+    expect(
+      db()
+        .query("SELECT 1 FROM entity_aliases WHERE id = 'alias-zzzz-orphan'")
+        .get(),
+    ).toBeNull();
+    expect(r.conflicts).toBeGreaterThanOrEqual(1);
+    expect(
+      db()
+        .query(
+          "SELECT 1 FROM sync_conflicts WHERE row_id = 'alias-zzzz-orphan'",
+        )
+        .get(),
+    ).not.toBeNull();
+  });
+
   test("a remote tombstone that RETAINED its content_hash still deletes a content-identical local row", async () => {
     // pushEntry soft-deletes by setting is_deleted=true but leaves the remote
     // content_hash intact (it nulls only the LOCAL sync_state). A client pulling
