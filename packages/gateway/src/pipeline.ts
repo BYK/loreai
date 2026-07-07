@@ -97,7 +97,7 @@ import type {
 import {
   applyUpstreamExtraHeaders,
   blocksToText,
-  readCompletionJSON,
+  looksLikeSSE,
   forwardClientHeaders,
   ZERO_USAGE,
 } from "./translate/types";
@@ -165,7 +165,10 @@ import {
   accumulateResponsesSSEStream,
   translateAnthropicStreamToResponses,
 } from "./stream/openai-responses";
-import { translateAnthropicStreamToOpenAI } from "./stream/openai";
+import {
+  accumulateOpenAISSEStream,
+  translateAnthropicStreamToOpenAI,
+} from "./stream/openai";
 import {
   buildGeminiUpstreamRequest,
   buildGeminiResponse,
@@ -176,6 +179,7 @@ import {
   translateAnthropicStreamToGemini,
 } from "./stream/gemini";
 import {
+  accumulateSSEResponse,
   createStreamAccumulator,
   createRecallAwareAccumulator,
   parseSSEStream,
@@ -4315,14 +4319,34 @@ async function accumulateNonStreamResponse(
     | "vertex"
     | "gemini" = "anthropic",
 ): Promise<GatewayResponse> {
-  // Some providers (the ChatGPT/Codex backend, DeepSeek) return SSE-formatted
-  // responses even when stream: false was sent — sometimes WITHOUT the
-  // text/event-stream content-type. readCompletionJSON sniffs the body so a
-  // mislabeled SSE stream is never fed to JSON.parse (which would throw a
-  // SyntaxError on "data: {...}" / "event: ..." prefixed text — LOREAI-GATEWAY-
-  // 38 / -1P).
-  const json = await readCompletionJSON(upstreamResponse);
+  // Some providers (the ChatGPT/Copilot/Codex backend, DeepSeek) return an SSE
+  // stream even when stream: false was sent — sometimes WITHOUT the
+  // text/event-stream content-type. Sniff the body: if it's SSE, run it through
+  // the protocol's stream accumulator (merges EVERY chunk, so a multi-chunk
+  // stream is reconstructed faithfully — taking only the last data: line would
+  // drop all but the final delta, and JSON.parse-ing the body would throw on
+  // "data: {...}" / "event: ..." text — LOREAI-GATEWAY-38 / -1P). Otherwise
+  // parse the single JSON body.
+  const contentType = upstreamResponse.headers.get("content-type") ?? "";
+  const body = await upstreamResponse.text();
+  if (looksLikeSSE(contentType, body)) {
+    const sse = new Response(body, {
+      headers: { "content-type": "text/event-stream" },
+    });
+    switch (protocol) {
+      case "openai":
+        return accumulateOpenAISSEStream(sse);
+      case "openai-responses":
+        return accumulateResponsesSSEStream(sse);
+      case "gemini":
+        return accumulateGeminiSSEStream(sse);
+      default:
+        // Anthropic wire (incl. Vertex/Bedrock-mantle) SSE.
+        return accumulateSSEResponse(sse);
+    }
+  }
 
+  const json = JSON.parse(body) as Record<string, unknown>;
   switch (protocol) {
     case "openai":
       return accumulateOpenAINonStreamJSON(json);
@@ -4486,130 +4510,6 @@ async function _accumulateStreamResponse(
   }
 
   return accumulator.getResponse();
-}
-
-/**
- * Accumulate a streaming upstream OpenAI Chat Completions SSE response
- * into a GatewayResponse.
- *
- * OpenAI SSE chunks have a different format from Anthropic:
- *   data: {"id":"...","choices":[{"delta":{"content":"..."},"finish_reason":null}]}
- */
-async function accumulateNonStreamOpenAIStream(
-  upstreamResponse: Response,
-): Promise<GatewayResponse> {
-  let id = "";
-  let model = "";
-  let stopReason = "end_turn";
-  let textContent = "";
-  const toolCalls = new Map<
-    number,
-    { id: string; name: string; args: string }
-  >();
-  let inputTokens = 0;
-  let outputTokens = 0;
-  let cachedTokens: number | undefined;
-
-  if (!upstreamResponse.body) {
-    throw new Error("Upstream response has no body");
-  }
-  const reader = upstreamResponse.body.getReader();
-
-  for await (const { data } of parseSSEStream(reader)) {
-    if (data === "[DONE]") break;
-
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = JSON.parse(data) as Record<string, unknown>;
-    } catch {
-      continue;
-    }
-
-    if (typeof parsed.id === "string") id = parsed.id;
-    if (typeof parsed.model === "string") model = parsed.model;
-
-    const choices = parsed.choices as
-      | Array<Record<string, unknown>>
-      | undefined;
-    const firstChoice = choices?.[0];
-    if (firstChoice) {
-      const delta = firstChoice.delta as Record<string, unknown> | undefined;
-      if (delta) {
-        if (typeof delta.content === "string") {
-          textContent += delta.content;
-        }
-        const tcs = delta.tool_calls as
-          | Array<Record<string, unknown>>
-          | undefined;
-        if (tcs) {
-          for (const tc of tcs) {
-            const idx = tc.index as number;
-            const fn = tc.function as Record<string, unknown> | undefined;
-            const existing = toolCalls.get(idx);
-            if (!existing) {
-              toolCalls.set(idx, {
-                id: String(tc.id ?? ""),
-                name: String(fn?.name ?? ""),
-                args: String(fn?.arguments ?? ""),
-              });
-            } else {
-              if (fn?.arguments) existing.args += fn.arguments;
-            }
-          }
-        }
-      }
-      if (typeof firstChoice.finish_reason === "string") {
-        const fr = firstChoice.finish_reason;
-        if (fr === "stop") stopReason = "end_turn";
-        else if (fr === "length") stopReason = "max_tokens";
-        else if (fr === "tool_calls") stopReason = "tool_use";
-      }
-    }
-
-    // Usage is typically in the final chunk
-    const usage = parsed.usage as Record<string, unknown> | undefined;
-    if (usage) {
-      if (typeof usage.prompt_tokens === "number")
-        inputTokens = usage.prompt_tokens as number;
-      if (typeof usage.completion_tokens === "number")
-        outputTokens = usage.completion_tokens as number;
-      const details = usage.prompt_tokens_details as
-        | Record<string, number>
-        | undefined;
-      if (details?.cached_tokens !== undefined)
-        cachedTokens = details.cached_tokens;
-    }
-  }
-
-  const content: GatewayContentBlock[] = [];
-  if (textContent) {
-    content.push({ type: "text", text: textContent });
-  }
-  for (const [, tc] of Array.from(toolCalls.entries()).sort(
-    ([a], [b]) => a - b,
-  )) {
-    let input: unknown = {};
-    if (tc.args) {
-      try {
-        input = JSON.parse(tc.args);
-      } catch {
-        input = tc.args;
-      }
-    }
-    content.push({ type: "tool_use", id: tc.id, name: tc.name, input });
-  }
-
-  return {
-    id,
-    model,
-    content,
-    stopReason,
-    usage: {
-      inputTokens,
-      outputTokens,
-      cacheReadInputTokens: cachedTokens,
-    },
-  };
 }
 
 /**
@@ -6124,11 +6024,11 @@ async function handlePassthrough(
   // Vertex speaks the native Anthropic wire format (Anthropic SSE for streaming
   // and the native Anthropic JSON shape for non-streaming), so for passthrough
   // routing it is wire-equivalent to "anthropic". Without this mapping a
-  // streaming meta request (title-gen/summary) on a Vertex session would take
-  // the cross-protocol branch below and get drained through extractJSONFromSSE,
-  // which returns only the last SSE data line ({"type":"message_stop"}) → an
-  // EMPTY response. Collapse vertex→anthropic here so a same-wire client
-  // (anthropic) streams through unchanged.
+  // streaming meta request (title-gen/summary) on a Vertex session would fail
+  // the same-wire fast path below and get buffered+re-emitted through the
+  // cross-protocol branch instead of streaming through raw. Collapse
+  // vertex→anthropic here so a same-wire client (anthropic) streams through
+  // unchanged.
   const wireProtocol: typeof effectiveProtocol =
     effectiveProtocol === "vertex" ? "anthropic" : effectiveProtocol;
 
@@ -8141,7 +8041,7 @@ async function handleConversationTurn(
     if (effectiveProtocol === "openai") {
       // OpenAI Chat Completions streaming — accumulate and return as
       // non-streaming Anthropic format (same pattern as non-stream path).
-      const resp = await accumulateNonStreamOpenAIStream(upstreamResponse);
+      const resp = await accumulateOpenAISSEStream(upstreamResponse);
       return finalizeWithRecall(resp);
     }
 

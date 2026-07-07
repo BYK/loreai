@@ -67,4 +67,42 @@ describe("worker google URL (#1070)", () => {
     );
     expect(url).not.toContain("/v1/chat/completions");
   });
+
+  test("accumulates a MULTI-CHUNK SSE reply (mislabeled application/json) into the full text", async () => {
+    // An OpenAI-compat provider that streams even for a stream:false worker
+    // request, WITHOUT a text/event-stream content-type. The worker must sniff
+    // the body and merge every chunk — a last-data-line reader would return only
+    // the finish chunk (empty delta) → silent-empty (the finding-#1 gap).
+    // Blank-line-delimited SSE events (per the spec — parseSSEStream needs them).
+    const multichunk = `${[
+      'data: {"choices":[{"delta":{"role":"assistant"}}]}',
+      'data: {"choices":[{"delta":{"content":"Hel"}}]}',
+      'data: {"choices":[{"delta":{"content":"lo"}}]}',
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+      "data: [DONE]",
+    ].join("\n\n")}\n\n`;
+    mockFetch.mockResolvedValue(
+      new Response(multichunk, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      (_sid, providerID) =>
+        providerID === "google"
+          ? { scheme: "bearer", value: "g_worker" }
+          : null,
+      { providerID: "google", modelID: "gemini-2.5-flash" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      sessionID: "sess-google-mc",
+      workerID: "lore-distill",
+      model: { providerID: "google", modelID: "gemini-2.5-flash" },
+    });
+
+    expect(result).toBe("Hello");
+  });
 });

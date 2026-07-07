@@ -40,8 +40,16 @@ import {
 } from "./sentry";
 import { recordWorkerCost } from "./cost-tracker";
 import { upstreamFetch } from "./fetch";
-import { readCompletionJSON } from "./translate/types";
+import {
+  looksLikeSSE,
+  type GatewayContentBlock,
+  type GatewayResponse,
+} from "./translate/types";
 import { buildOpenAIChatCompletionsUrl } from "./translate/openai";
+import { accumulateOpenAISSEStream } from "./stream/openai";
+import { accumulateResponsesSSEStream } from "./stream/openai-responses";
+import { accumulateGeminiSSEStream } from "./stream/gemini";
+import { accumulateSSEResponse } from "./stream/anthropic";
 import { isBedrockMantleHost, toMantleModelId } from "./translate/bedrock";
 import {
   toVertexBody,
@@ -1238,6 +1246,59 @@ function parseWorkerResponse(
 }
 
 /**
+ * Accumulate an SSE upstream worker response into a GatewayResponse using the
+ * protocol's stream accumulator. The ChatGPT/Copilot/Codex backend and some
+ * OpenAI-compatible providers stream even for a non-streaming worker request;
+ * merging every chunk here (rather than reading a single JSON body) makes the
+ * worker read multi-chunk safe and immune to a mislabeled/absent
+ * text/event-stream content-type (LOREAI-GATEWAY-38 / -1P).
+ */
+function accumulateWorkerSSE(
+  protocol: WorkerProtocol,
+  response: Response,
+): Promise<GatewayResponse> {
+  switch (protocol) {
+    case "openai-codex-responses":
+      return accumulateResponsesSSEStream(response);
+    case "gemini":
+      return accumulateGeminiSSEStream(response);
+    case "openai":
+      return accumulateOpenAISSEStream(response);
+    default:
+      // Anthropic wire (incl. Vertex/Bedrock-mantle) SSE.
+      return accumulateSSEResponse(response);
+  }
+}
+
+/**
+ * Project an accumulated GatewayResponse down to the worker result shape
+ * ({ text, usage, model }). Only the visible text blocks form the worker's
+ * text — a response that is purely tool_use (no text) is treated as empty,
+ * matching parseWorkerResponse (workers consume text, not tool calls).
+ */
+function gatewayResponseToWorkerResult(resp: GatewayResponse): {
+  text: string | null;
+  usage: AnthropicUsage | null;
+  model: string | null;
+} {
+  const text = resp.content
+    .filter(
+      (b): b is Extract<GatewayContentBlock, { type: "text" }> =>
+        b.type === "text",
+    )
+    .map((b) => b.text)
+    .join("");
+  const usage: AnthropicUsage | null = resp.usage
+    ? {
+        input_tokens: resp.usage.inputTokens,
+        output_tokens: resp.usage.outputTokens,
+        cache_read_input_tokens: resp.usage.cacheReadInputTokens,
+      }
+    : null;
+  return { text: text || null, usage, model: resp.model || null };
+}
+
+/**
  * Summarize an upstream worker response body for diagnostics when the parser
  * found no usable text. Reports which fields were present (content vs the
  * reasoning/thinking fallbacks), the finish_reason, and a truncated body
@@ -1628,15 +1689,21 @@ export function createGatewayLLMClient(
                 // model.
                 if (thinkingStripped) markThinkingUnsupported(model);
 
-                // Guard: some providers (the ChatGPT/Codex backend, DeepSeek)
-                // return SSE even when stream: false was sent — sometimes
-                // WITHOUT the text/event-stream content-type. readCompletionJSON
-                // sniffs the body so a mislabeled SSE stream is never fed to
-                // JSON.parse (LOREAI-GATEWAY-38: `Unexpected token 'e', "event:
-                // res"...`) and the openai-responses terminal envelope is
-                // unwrapped to the bare response the parser expects.
+                // Guard: some providers (the ChatGPT/Copilot/Codex backend,
+                // DeepSeek) return an SSE stream even when stream: false was
+                // sent — sometimes WITHOUT the text/event-stream content-type.
+                // Sniff the body: if it's SSE, accumulate the whole stream via
+                // the protocol's accumulator (multi-chunk safe) instead of
+                // JSON-parsing it (which would throw on "data: {...}" / "event:
+                // ..." text — LOREAI-GATEWAY-38 / -1P). A streamed body is a
+                // success, so the JSON error-envelope check below never applies
+                // to it (bodyErrCode stays null → the block is skipped).
                 const ct = response.headers.get("content-type") ?? "";
-                const rawData = await readCompletionJSON(response);
+                const bodyText = await response.text();
+                const isSSE = looksLikeSSE(ct, bodyText);
+                const rawData: Record<string, unknown> = isSSE
+                  ? {}
+                  : (JSON.parse(bodyText) as Record<string, unknown>);
 
                 // A 2xx whose body is a provider error envelope (e.g. OpenRouter
                 // surfacing an upstream timeout as HTTP 200 + {error:{code:504}})
@@ -1646,7 +1713,9 @@ export function createGatewayLLMClient(
                 // transient embedded code into the SAME retry/backoff ladder as a
                 // real HTTP-level transient. Non-transient embedded codes fall
                 // through to the normal empty-response handling (no regression). #899
-                const bodyErrCode = extractBodyErrorCode(rawData);
+                const bodyErrCode = isSSE
+                  ? null
+                  : extractBodyErrorCode(rawData);
                 if (bodyErrCode != null && TRANSIENT_CODES.has(bodyErrCode)) {
                   // Trip the breaker once on an embedded 429, matching the
                   // HTTP-level 429 path (background work to this provider pauses
@@ -1733,7 +1802,17 @@ export function createGatewayLLMClient(
                 }
 
                 // Parse response based on protocol
-                const parsed = parseWorkerResponse(target.protocol, rawData);
+                // SSE → accumulate the full stream; JSON → parse the body.
+                const parsed = isSSE
+                  ? gatewayResponseToWorkerResult(
+                      await accumulateWorkerSSE(
+                        target.protocol,
+                        new Response(bodyText, {
+                          headers: { "content-type": "text/event-stream" },
+                        }),
+                      ),
+                    )
+                  : parseWorkerResponse(target.protocol, rawData);
 
                 // Set usage attributes on the span
                 if (parsed.usage) {

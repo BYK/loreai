@@ -7,12 +7,13 @@
  *   1. THROW — the SSE body arrives WITHOUT a `text/event-stream` content-type,
  *      so the old header-only guard fed it to `response.json()` →
  *      `SyntaxError: Unexpected token 'e', "event: res"... is not valid JSON`.
- *   2. SILENT-EMPTY — even with the correct content-type, the last `data:` line
- *      is the `response.completed` ENVELOPE (`{type, response:{...}}`), but the
- *      worker parser reads `output`/`output_text` at top level → `text=null`.
+ *   2. SILENT-EMPTY — a single-`data:`-line reader would return only the last
+ *      delta / terminal event, dropping the text streamed across the earlier
+ *      `output_text.delta` events → `text=null`.
  *
- * `readCompletionJSON` now sniffs the body prefix AND unwraps the responses
- * envelope, so the worker extracts the real text in both cases.
+ * The worker now sniffs the body prefix and runs a detected SSE stream through
+ * the protocol's stream accumulator (`accumulateResponsesSSEStream`), merging
+ * every delta into the full text — regardless of the content-type label.
  */
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 
@@ -30,14 +31,28 @@ const UPSTREAMS = {
   openai: "https://api.openai.com",
 };
 
-/** An openai-responses SSE stream whose terminal event carries the full text. */
+/**
+ * A realistic multi-delta openai-responses SSE stream. The text arrives across
+ * TWO `output_text.delta` events ("worker " + "text") — a stream accumulator
+ * must merge them into "worker text"; a last-`data:`-line reader would drop all
+ * but the final delta.
+ */
 const CODEX_RESPONSES_SSE = [
   "event: response.created",
-  'data: {"type":"response.created","response":{"id":"resp_1"}}',
+  'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5-codex"}}',
+  "",
+  "event: response.output_item.added",
+  'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","role":"assistant"}}',
+  "",
   "event: response.output_text.delta",
-  'data: {"type":"response.output_text.delta","delta":"worker "}',
+  'data: {"type":"response.output_text.delta","output_index":0,"delta":"worker "}',
+  "",
+  "event: response.output_text.delta",
+  'data: {"type":"response.output_text.delta","output_index":0,"delta":"text"}',
+  "",
   "event: response.completed",
-  'data: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"worker text"}]}],"usage":{"input_tokens":5,"output_tokens":2},"model":"gpt-5-codex"}}',
+  'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":5,"output_tokens":2},"model":"gpt-5-codex"}}',
+  "",
   "data: [DONE]",
   "",
 ].join("\n");
@@ -74,15 +89,15 @@ describe("worker codex responses-SSE path", () => {
     resetBackgroundLimiter();
   });
 
-  test("mislabeled SSE (application/json) → extracts text, does NOT throw", async () => {
+  test("mislabeled SSE (application/json) → accumulates full text, does NOT throw", async () => {
     // Before the fix: response.json() on "event: res..." → SyntaxError → null.
     const result = await runCodexWorker("application/json");
     expect(result).toBe("worker text");
   });
 
-  test("correct text/event-stream content-type → unwraps envelope → extracts text", async () => {
-    // Before the fix: extractJSONFromSSE returned the `response.completed`
-    // envelope, so the parser read output_text=undefined → null (silent-empty).
+  test("correct text/event-stream content-type → merges multi-delta stream", async () => {
+    // The two output_text.delta events ("worker " + "text") must be merged; a
+    // last-data-line reader would only ever see the terminal event → empty.
     const result = await runCodexWorker("text/event-stream");
     expect(result).toBe("worker text");
   });

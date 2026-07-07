@@ -18,7 +18,11 @@
  * (for pipeline post-processing that may read it).
  */
 import { log } from "@loreai/core";
-import { ZERO_USAGE } from "../translate/types";
+import {
+  ZERO_USAGE,
+  type GatewayContentBlock,
+  type GatewayResponse,
+} from "../translate/types";
 import { parseSSEStream, createStreamAccumulator } from "./anthropic";
 
 // ---------------------------------------------------------------------------
@@ -342,4 +346,135 @@ export function translateAnthropicStreamToOpenAI(
       connection: "keep-alive",
     },
   });
+}
+
+/**
+ * Accumulate a streaming OpenAI Chat Completions SSE response into a
+ * GatewayResponse.
+ *
+ * Reads EVERY `data:` chunk and merges the incremental `choices[0].delta`
+ * fields (text + tool-call fragments) into a single response — so a
+ * multi-chunk stream is reconstructed faithfully. This is the correct reader
+ * for a non-streaming request whose provider replied with SSE anyway (the
+ * ChatGPT/Copilot backend, DeepSeek): taking only the last `data:` line would
+ * drop all but the final delta.
+ *
+ * OpenAI SSE chunk shape:
+ *   data: {"id":"...","choices":[{"delta":{"content":"..."},"finish_reason":null}]}
+ */
+export async function accumulateOpenAISSEStream(
+  upstreamResponse: Response,
+): Promise<GatewayResponse> {
+  let id = "";
+  let model = "";
+  let stopReason = "end_turn";
+  let textContent = "";
+  const toolCalls = new Map<
+    number,
+    { id: string; name: string; args: string }
+  >();
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cachedTokens: number | undefined;
+
+  if (!upstreamResponse.body) {
+    throw new Error("Upstream response has no body");
+  }
+  const reader = upstreamResponse.body.getReader();
+
+  for await (const { data } of parseSSEStream(reader)) {
+    if (data === "[DONE]") break;
+
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(data) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+
+    if (typeof parsed.id === "string") id = parsed.id;
+    if (typeof parsed.model === "string") model = parsed.model;
+
+    const choices = parsed.choices as
+      | Array<Record<string, unknown>>
+      | undefined;
+    const firstChoice = choices?.[0];
+    if (firstChoice) {
+      const delta = firstChoice.delta as Record<string, unknown> | undefined;
+      if (delta) {
+        if (typeof delta.content === "string") {
+          textContent += delta.content;
+        }
+        const tcs = delta.tool_calls as
+          | Array<Record<string, unknown>>
+          | undefined;
+        if (tcs) {
+          for (const tc of tcs) {
+            const idx = tc.index as number;
+            const fn = tc.function as Record<string, unknown> | undefined;
+            const existing = toolCalls.get(idx);
+            if (!existing) {
+              toolCalls.set(idx, {
+                id: String(tc.id ?? ""),
+                name: String(fn?.name ?? ""),
+                args: String(fn?.arguments ?? ""),
+              });
+            } else {
+              if (fn?.arguments) existing.args += fn.arguments;
+            }
+          }
+        }
+      }
+      if (typeof firstChoice.finish_reason === "string") {
+        const fr = firstChoice.finish_reason;
+        if (fr === "stop") stopReason = "end_turn";
+        else if (fr === "length") stopReason = "max_tokens";
+        else if (fr === "tool_calls") stopReason = "tool_use";
+      }
+    }
+
+    // Usage is typically in the final chunk
+    const usage = parsed.usage as Record<string, unknown> | undefined;
+    if (usage) {
+      if (typeof usage.prompt_tokens === "number")
+        inputTokens = usage.prompt_tokens as number;
+      if (typeof usage.completion_tokens === "number")
+        outputTokens = usage.completion_tokens as number;
+      const details = usage.prompt_tokens_details as
+        | Record<string, number>
+        | undefined;
+      if (details?.cached_tokens !== undefined)
+        cachedTokens = details.cached_tokens;
+    }
+  }
+
+  const content: GatewayContentBlock[] = [];
+  if (textContent) {
+    content.push({ type: "text", text: textContent });
+  }
+  for (const [, tc] of Array.from(toolCalls.entries()).sort(
+    ([a], [b]) => a - b,
+  )) {
+    let input: unknown = {};
+    if (tc.args) {
+      try {
+        input = JSON.parse(tc.args);
+      } catch {
+        input = tc.args;
+      }
+    }
+    content.push({ type: "tool_use", id: tc.id, name: tc.name, input });
+  }
+
+  return {
+    id,
+    model,
+    content,
+    stopReason,
+    usage: {
+      inputTokens,
+      outputTokens,
+      cacheReadInputTokens: cachedTokens,
+    },
+  };
 }
