@@ -127,6 +127,17 @@ export LORE_WORKER_UPSTREAM=https://workers.internal-llm.corp.example.com
 
 Workers use the same provider as the session (cross-provider calls always fail — wrong credentials, wrong API format). If the session uses Anthropic, the workers also call Anthropic-protocol; the `LORE_WORKER_UPSTREAM` value is the URL the workers call.
 
+### Worker cost on OpenRouter
+
+The background worker runs on every session and is the main non-conversation cost. The biggest lever is simply to point the worker at a cheap model — distillation and curation are summarization/extraction tasks that open-weight models handle well at a fraction of a frontier model's price.
+
+When the worker's provider is `openrouter`, Lore does this automatically: worker calls are sent with `provider: { sort: "price" }` (OpenRouter's `:floor` behavior), so each call routes to the cheapest provider serving your chosen worker model. This applies **only** to background worker calls — never the live conversation, which keeps OpenRouter's default load-balancing for reliability.
+
+Two caveats:
+
+- **`:floor` can land on a quantized endpoint.** The cheapest provider is sometimes serving quantized weights (FP8/FP4/INT8). For distillation and curation this is usually fine, but if knowledge quality degrades, pin a specific/higher-precision provider via your worker-model choice or a fuller model slug. See OpenRouter's [provider routing](https://openrouter.ai/docs/guides/routing/provider-selection) for the `quantizations` and `ignore` options.
+- **`:free` worker slugs are viable but rate-limited.** OpenRouter's `:free` models cost $0 in tokens (Lore treats them as free), but free endpoints are capped (~50 requests/day, or 1,000/day with $10+ in credits) and *failed* requests still count against that quota. Use `:free` for light or hobby setups, not a heavily-used worker.
+
 ## Hosted mode
 
 Hosted mode is for running the Lore gateway as a central service that multiple clients connect to from different machines. In hosted mode, the gateway is always a **remote gateway** — it has no shared filesystem with its clients.

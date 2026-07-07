@@ -641,10 +641,17 @@ function resolveTarget(
     return {
       url: upstreamOverride.replace(/\/$/, ""),
       protocol,
-      // Use the friendly provider label for codex; otherwise the protocol is a
-      // reasonable span label for an override target.
+      // Prefer the actual provider label over the protocol. `overrideMatchesModel`
+      // guarantees the override and worker model share a provider, so either the
+      // explicit `overrideProviderID` or the worker `modelProviderID` is the true
+      // provider (e.g. "openrouter"). Using the protocol here (e.g. "openai")
+      // silently mislabels the span AND breaks providerName-gated behavior such as
+      // the OpenRouter `:floor` worker preference in buildOpenAIWorkerRequest.
+      // Codex keeps its friendly label.
       providerName:
-        protocol === "openai-codex-responses" ? "openai-codex" : protocol,
+        protocol === "openai-codex-responses"
+          ? "openai-codex"
+          : (overrideProviderID ?? modelProviderID),
     };
   }
 
@@ -868,6 +875,23 @@ function buildOpenAIWorkerRequest(
   if (system) messages.push({ role: "system", content: system });
   messages.push({ role: "user", content: user });
 
+  // OpenRouter-only cost lever: route background worker calls to the cheapest
+  // provider for the chosen model (equivalent to the `:floor` slug suffix, i.e.
+  // `provider.sort: "price"`). This is safe here because `buildOpenAIWorkerRequest`
+  // only ever builds BACKGROUND worker calls (distillation, curation, query
+  // expansion) — never the live conversation, which goes through the proxy path
+  // and needs OpenRouter's default load-balancing for reliability. Worker calls
+  // are latency-tolerant with no user waiting, so trading load-balancing for the
+  // lowest price is pure upside. The field is OpenRouter-specific; other OpenAI-
+  // protocol providers ignore an unknown `provider` key. NOTE: `:floor` can land
+  // on a quantized endpoint — if distillation/curation quality degrades, a user
+  // can pin precision via their own worker model config (see docs). Other OpenAI-
+  // protocol upstreams never see this block (gated on providerName).
+  const providerPrefs =
+    target.providerName === "openrouter"
+      ? { provider: { sort: "price" } }
+      : undefined;
+
   return {
     // Background workers have no original request to forward verbatim, so the
     // URL is reconstructed host-aware (GitHub Copilot omits `/v1`, issue #1052;
@@ -883,6 +907,7 @@ function buildOpenAIWorkerRequest(
       stream: false,
       ...(temperature != null && { temperature }),
       messages,
+      ...providerPrefs,
     }),
   };
 }

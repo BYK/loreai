@@ -214,4 +214,81 @@ describe("worker cross-provider routing matrix (structural guard)", () => {
     expect(result).toBeNull();
     expect(mockFetch).not.toHaveBeenCalled();
   });
+
+  test("openrouter worker request sets provider.sort='price' (:floor) for cheapest routing", async () => {
+    // Background worker calls are latency-tolerant with no user waiting, so
+    // routing to the cheapest OpenRouter provider is pure upside. The live
+    // conversation never goes through this builder, so its load-balancing is
+    // untouched.
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "or-worker-key" }),
+      { providerID: "openrouter", modelID: "deepseek/deepseek-chat" },
+    );
+
+    await client.prompt("system", "user", {
+      sessionID: "sess-openrouter-floor",
+      workerID: "lore-distill",
+      model: { providerID: "openrouter", modelID: "deepseek/deepseek-chat" },
+      protocol: "openai",
+    });
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const opts = mockFetch.mock.calls[0][1] as { body: string };
+    const body = JSON.parse(opts.body) as {
+      provider?: { sort?: string };
+    };
+    expect(body.provider).toEqual({ sort: "price" });
+  });
+
+  test("openrouter worker request sets :floor even when the session supplies an upstreamUrl (production path)", async () => {
+    // Regression for the resolveTarget override-matches branch: a real OpenRouter
+    // session forwards its endpoint as `upstreamUrl` + `upstreamProviderID`. That
+    // path must still resolve providerName to "openrouter" (not the "openai"
+    // protocol) so the :floor preference fires. Without the fix, resolveTarget
+    // returned providerName=protocol here and the feature was dead in production.
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "or-worker-key" }),
+      { providerID: "openrouter", modelID: "deepseek/deepseek-chat" },
+    );
+
+    await client.prompt("system", "user", {
+      sessionID: "sess-openrouter-upstream-floor",
+      workerID: "lore-distill",
+      model: { providerID: "openrouter", modelID: "deepseek/deepseek-chat" },
+      upstreamUrl: "https://openrouter.ai/api",
+      upstreamProviderID: "openrouter",
+      protocol: "openai",
+    });
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const opts = mockFetch.mock.calls[0][1] as { body: string };
+    const body = JSON.parse(opts.body) as { provider?: { sort?: string } };
+    expect(body.provider).toEqual({ sort: "price" });
+  });
+
+  test("a non-openrouter openai-protocol worker request does NOT set provider.sort (gate is load-bearing)", async () => {
+    // Guard against a vacuous test: the price-sort block is OpenRouter-specific.
+    // A direct openai-protocol provider (deepseek) must NOT carry it.
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "ds-worker-key" }),
+      { providerID: "deepseek", modelID: "deepseek-chat" },
+    );
+
+    await client.prompt("system", "user", {
+      sessionID: "sess-deepseek-nofloor",
+      workerID: "lore-distill",
+      model: { providerID: "deepseek", modelID: "deepseek-chat" },
+      upstreamUrl: "https://api.deepseek.com",
+      upstreamProviderID: "deepseek",
+      protocol: "openai",
+    });
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const opts = mockFetch.mock.calls[0][1] as { body: string };
+    const body = JSON.parse(opts.body) as { provider?: unknown };
+    expect(body.provider).toBeUndefined();
+  });
 });
