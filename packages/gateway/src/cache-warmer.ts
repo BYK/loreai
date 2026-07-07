@@ -47,6 +47,7 @@ import type {
 } from "./translate/types";
 import {
   cacheSegmentDigest,
+  classifyWarmupProbe,
   decompressBody,
   isWarmupProbeEnabled,
 } from "./cache-analytics";
@@ -2238,48 +2239,50 @@ export async function executeWarmup(
 
     // --- Warmup cache-divergence probe (env-gated) ---
     // The decisive tiebreaker between EVICTION and body DIVERGENCE. Hash the
-    // signed warmup body's cacheable segments and compare to the last real
-    // turn's (stored by analyzeCacheTurn). Interpretation, combined with the
-    // cacheRead outcome above:
-    //   head MATCH + cacheRead=0  → the identical stable head was evicted by
-    //                               Anthropic (a stable head cannot diverge) →
-    //                               EVICTION, not a body bug.
-    //   head DIFFERS              → the warmup body genuinely diverges from the
-    //                               last real turn at the head → body bug, and
-    //                               the changed segment is named explicitly.
-    // A matching head with a differing prefix/tail localizes the divergence to
-    // the distilled prefix (meta-distillation) or conversation tail.
+    // warmup body's cacheable segments and compare to the last real turn's
+    // (stored by analyzeCacheTurn). Combined with the cacheRead outcome, the
+    // classifier below distinguishes: HEAD DIVERGENCE (real body bug), plain
+    // read>0 (healthy), EVICTION (identical head yet full miss while the cache
+    // should have been live), and expected TTL expiry. A matching head with a
+    // differing prefix/tail localizes the divergence to the distilled prefix
+    // (meta-distillation) or conversation tail.
     //
-    // Hash `warmupBody` (PRE-resign), NOT `signedBody`: `resignBody` rewrites
-    // only the cch/cc_version billing token in system[0], which Anthropic strips
-    // before computing its cache key. Hashing the post-resign body would report a
-    // false HEAD DIVERGENCE for OAuth sessions (whose cch is re-signed to a new
-    // value each call). `warmupBody` still carries the real turn's cch verbatim
+    // Hash `warmupBody` (PRE-resign), NOT `signedBody`: `resignBody` recomputes
+    // the cch/cc_version billing token over the warmup body (which sets
+    // stream=false, max_tokens=0), so its cch differs from the real turn's even
+    // though Anthropic strips the cch before hashing its cache key. Hashing the
+    // post-resign body would therefore report a false HEAD DIVERGENCE for OAuth
+    // sessions. `warmupBody` carries the real turn's cch verbatim
     // (prepareWarmupBody never touches system[0]), so it compares symmetrically
     // against the real turn's stored body that analyzeCacheTurn hashed.
+    //
+    // Wrapped in try/catch: this is a diagnostic and must never break the warmup
+    // path (a throw here would run before cost/circuit-breaker accounting below).
     if (isWarmupProbeEnabled()) {
-      const ca = state.cacheAnalytics;
-      const dg = cacheSegmentDigest(warmupBody);
-      if (dg) {
-        const cmp = (name: string, warm: string, real: string | undefined) =>
-          `${name}=${warm}${real ? (warm === real ? "==" : `!=${real}`) : "(no-baseline)"}`;
-        log.info(
-          `warmup-probe: WARMUP session=${sid} ` +
-            `${cmp("head", dg.headSha, ca.probeHeadSha)} ` +
-            `${cmp("tools", dg.toolsSha, ca.probeToolsSha)} ` +
-            `${cmp("prefix", dg.prefixSha, ca.probePrefixSha)} ` +
-            `bp=${dg.bpCount} sysBlocks=${dg.systemBlocks} bytes=${dg.bytes} ` +
-            `cacheRead=${cacheReadTokens} cacheWrite=${cacheCreationTokens} ` +
-            `→ ${
-              ca.probeHeadSha && dg.headSha === ca.probeHeadSha
-                ? cacheReadTokens === 0
-                  ? "EVICTION (head identical to last real turn, yet cacheRead=0)"
-                  : "head identical to last real turn"
-                : ca.probeHeadSha
-                  ? "HEAD DIVERGENCE (warmup body head != last real turn head)"
-                  : "no baseline (no real turn analyzed yet this session)"
-            }`,
-        );
+      try {
+        const ca = state.cacheAnalytics;
+        const dg = cacheSegmentDigest(warmupBody);
+        if (dg) {
+          const cmp = (name: string, warm: string, real: string | undefined) =>
+            `${name}=${warm}${real ? (warm === real ? "==" : `!=${real}`) : "(no-baseline)"}`;
+          const verdict = classifyWarmupProbe({
+            hasBaseline: ca.probeHeadSha != null,
+            headMatch: dg.headSha === ca.probeHeadSha,
+            cacheReadTokens,
+            cacheLikelyAlive,
+          });
+          log.info(
+            `warmup-probe: WARMUP session=${sid} ` +
+              `${cmp("head", dg.headSha, ca.probeHeadSha)} ` +
+              `${cmp("tools", dg.toolsSha, ca.probeToolsSha)} ` +
+              `${cmp("prefix", dg.prefixSha, ca.probePrefixSha)} ` +
+              `bp=${dg.bpCount} sysBlocks=${dg.systemBlocks} bytes=${dg.bytes} ` +
+              `cacheRead=${cacheReadTokens} cacheWrite=${cacheCreationTokens} ` +
+              `→ ${verdict}`,
+          );
+        }
+      } catch (err) {
+        log.warn(`warmup-probe: probe failed (ignored): ${err}`);
       }
     }
 

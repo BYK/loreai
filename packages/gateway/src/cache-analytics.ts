@@ -72,6 +72,39 @@ export type CacheSegmentDigest = {
 };
 
 /**
+ * Classify a warmup probe outcome from the head-hash comparison and the
+ * observed cache read. Pure (no I/O) so it can be unit-tested directly.
+ *
+ * - no baseline           → no real turn was analyzed yet this session.
+ * - head DIFFERS          → the warmup body genuinely diverges from the last
+ *                           real turn at the head (a real body bug).
+ * - head MATCH, read > 0  → the warmup read the cache (healthy).
+ * - head MATCH, read = 0, cacheLikelyAlive  → EVICTION: an identical, byte-
+ *                           stable head that should still have been live was
+ *                           nonetheless a full miss (Anthropic-side eviction —
+ *                           a stable head cannot diverge).
+ * - head MATCH, read = 0, !cacheLikelyAlive → expected TTL expiry, NOT
+ *                           eviction (mirrors the sibling `✗ UNCACHED` log,
+ *                           which excludes expiry from the circuit breaker).
+ */
+export function classifyWarmupProbe(args: {
+  hasBaseline: boolean;
+  headMatch: boolean;
+  cacheReadTokens: number;
+  cacheLikelyAlive: boolean;
+}): string {
+  const { hasBaseline, headMatch, cacheReadTokens, cacheLikelyAlive } = args;
+  if (!hasBaseline)
+    return "no baseline (no real turn analyzed yet this session)";
+  if (!headMatch)
+    return "HEAD DIVERGENCE (warmup body head != last real turn head)";
+  if (cacheReadTokens > 0) return "head identical to last real turn";
+  return cacheLikelyAlive
+    ? "EVICTION (head identical to last real turn, yet cacheRead=0 while cache should have been live)"
+    : "expected expiry (head identical; cache aged past TTL, not eviction)";
+}
+
+/**
  * Hash the cacheable segments of a serialized Anthropic request body. Returns
  * null on any parse error (never throws — must be safe on the request path).
  */
@@ -754,31 +787,40 @@ export function analyzeCacheTurn(
   // (a "stable" head/prefix that changes IS a divergence source), then store for
   // the next warmup to compare against. Parsing/hashing is skipped entirely when
   // the probe is off, so there is zero hot-path cost in production by default.
+  // Wrapped in try/catch: this is a diagnostic and must never break the request
+  // path (a throw here would propagate into the response stream's onComplete).
   if (isWarmupProbeEnabled()) {
-    const dg = cacheSegmentDigest(currentBody);
-    if (dg) {
-      const sidStr = sessionID ? ` session=${sessionID.slice(0, 16)}` : "";
-      const drift: string[] = [];
-      if (analytics.probeHeadSha && analytics.probeHeadSha !== dg.headSha)
-        drift.push(`head ${analytics.probeHeadSha}->${dg.headSha}`);
-      if (analytics.probeToolsSha && analytics.probeToolsSha !== dg.toolsSha)
-        drift.push(`tools ${analytics.probeToolsSha}->${dg.toolsSha}`);
-      if (analytics.probePrefixSha && analytics.probePrefixSha !== dg.prefixSha)
-        drift.push(`prefix ${analytics.probePrefixSha}->${dg.prefixSha}`);
-      if (drift.length > 0) {
+    try {
+      const dg = cacheSegmentDigest(currentBody);
+      if (dg) {
+        const sidStr = sessionID ? ` session=${sessionID.slice(0, 16)}` : "";
+        const drift: string[] = [];
+        if (analytics.probeHeadSha && analytics.probeHeadSha !== dg.headSha)
+          drift.push(`head ${analytics.probeHeadSha}->${dg.headSha}`);
+        if (analytics.probeToolsSha && analytics.probeToolsSha !== dg.toolsSha)
+          drift.push(`tools ${analytics.probeToolsSha}->${dg.toolsSha}`);
+        if (
+          analytics.probePrefixSha &&
+          analytics.probePrefixSha !== dg.prefixSha
+        )
+          drift.push(`prefix ${analytics.probePrefixSha}->${dg.prefixSha}`);
+        if (drift.length > 0) {
+          log.info(
+            `warmup-probe: turn${sidStr} SEGMENT DRIFT [${drift.join(", ")}] ` +
+              `(a stable-segment change busts the cached prefix)`,
+          );
+        }
         log.info(
-          `warmup-probe: turn${sidStr} SEGMENT DRIFT [${drift.join(", ")}] ` +
-            `(a stable-segment change busts the cached prefix)`,
+          `warmup-probe: turn${sidStr} head=${dg.headSha} tools=${dg.toolsSha} ` +
+            `prefix=${dg.prefixSha} bp=${dg.bpCount} sysBlocks=${dg.systemBlocks} ` +
+            `read=${cacheRead} create=${cacheCreation}`,
         );
+        analytics.probeHeadSha = dg.headSha;
+        analytics.probeToolsSha = dg.toolsSha;
+        analytics.probePrefixSha = dg.prefixSha;
       }
-      log.info(
-        `warmup-probe: turn${sidStr} head=${dg.headSha} tools=${dg.toolsSha} ` +
-          `prefix=${dg.prefixSha} bp=${dg.bpCount} sysBlocks=${dg.systemBlocks} ` +
-          `read=${cacheRead} create=${cacheCreation}`,
-      );
-      analytics.probeHeadSha = dg.headSha;
-      analytics.probeToolsSha = dg.toolsSha;
-      analytics.probePrefixSha = dg.prefixSha;
+    } catch (err) {
+      log.warn(`warmup-probe: turn probe failed (ignored): ${err}`);
     }
   }
 

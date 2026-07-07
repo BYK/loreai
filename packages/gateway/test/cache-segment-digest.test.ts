@@ -6,6 +6,7 @@ import {
 import {
   type CacheSegmentDigest,
   cacheSegmentDigest,
+  classifyWarmupProbe,
   isWarmupProbeEnabled,
 } from "../src/cache-analytics";
 import type { GatewayRequest } from "../src/translate/types";
@@ -84,5 +85,57 @@ describe("cacheSegmentDigest", () => {
     expect(isWarmupProbeEnabled()).toBe(true);
     if (prev === undefined) delete process.env.LORE_WARMUP_PROBE;
     else process.env.LORE_WARMUP_PROBE = prev;
+  });
+});
+
+describe("classifyWarmupProbe", () => {
+  const base = {
+    headMatch: true,
+    cacheReadTokens: 100,
+    cacheLikelyAlive: true,
+  };
+
+  test("no baseline before any real turn analyzed", () => {
+    expect(classifyWarmupProbe({ ...base, hasBaseline: false })).toMatch(
+      /no baseline/,
+    );
+  });
+
+  test("head mismatch => HEAD DIVERGENCE (the body-bug signal)", () => {
+    expect(
+      classifyWarmupProbe({ ...base, hasBaseline: true, headMatch: false }),
+    ).toMatch(/HEAD DIVERGENCE/);
+  });
+
+  test("head match with a read is healthy", () => {
+    expect(
+      classifyWarmupProbe({
+        ...base,
+        hasBaseline: true,
+        cacheReadTokens: 5000,
+      }),
+    ).toBe("head identical to last real turn");
+  });
+
+  test("head match + read=0 while cache should be live => EVICTION", () => {
+    expect(
+      classifyWarmupProbe({
+        hasBaseline: true,
+        headMatch: true,
+        cacheReadTokens: 0,
+        cacheLikelyAlive: true,
+      }),
+    ).toMatch(/EVICTION/);
+  });
+
+  test("head match + read=0 past TTL => expected expiry, NOT eviction", () => {
+    const v = classifyWarmupProbe({
+      hasBaseline: true,
+      headMatch: true,
+      cacheReadTokens: 0,
+      cacheLikelyAlive: false,
+    });
+    expect(v).toMatch(/expected expiry/);
+    expect(v).not.toMatch(/EVICTION/);
   });
 });
