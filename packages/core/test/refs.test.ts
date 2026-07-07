@@ -181,12 +181,10 @@ describe("knowledge cross-references", () => {
         .all(sourceId);
       expect(refsBefore.length).toBe(1);
 
-      // Delete the target WITHOUT foreign key cascade — simulate a direct
-      // DB deletion that bypasses FK checks (e.g. from bulk SQL operations).
-      // We temporarily disable FKs to leave the orphan ref row intact.
-      db().exec("PRAGMA foreign_keys = OFF");
+      // Delete the target directly. Since v66 dropped the knowledge_refs → knowledge(id)
+      // FK (#909), this leaves the ref row orphaned rather than cascade-deleting it —
+      // exactly the dead-ref state cleanDeadRefs is responsible for GC'ing.
       db().query("DELETE FROM knowledge WHERE id = ?").run(targetId);
-      db().exec("PRAGMA foreign_keys = ON");
 
       // Verify the orphan ref still exists
       const orphanRefs = db()

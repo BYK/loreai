@@ -1657,6 +1657,23 @@ const MIGRATIONS: string[] = [
     SELECT COUNT(*) FROM knowledge_entity_refs WHERE entity_id = entities.id
   );
   `,
+  // Version 66 (#909): drop the ref→knowledge(id) ON DELETE CASCADE FKs so version
+  // compaction can prune the v1 anchor (id == logical_id) without cascade-deleting a
+  // still-live entry's wiki-refs + entity-links. Refs are resolved by logical_id
+  // everywhere (the current version always carries it), so the id-FK guards nothing;
+  // ref integrity is app-managed (ltm.remove + the project-delete paths delete refs
+  // explicitly, cleanDeadRefs GCs orphans), aligning local with the remote (which never
+  // had these FKs). knowledge_entity_refs KEEPS entity_id→entities CASCADE (entities
+  // aren't version-compacted).
+  //
+  // The recreate (CREATE _new / copy / DROP / RENAME) is NOT atomic under plain exec(),
+  // so a crash mid-migration would leave a half-state that boot-loops on retry. It is
+  // performed by a JS SAVEPOINT step (applyRefFkDrop), special-cased in migrate() by
+  // REF_FK_DROP_MIGRATION_INDEX so the whole recreate is all-or-nothing. This string is
+  // a no-op marker so MIGRATIONS.length still counts.
+  `
+  -- Version 66 (#909): see applyRefFkDrop — no-op SQL marker.
+  `,
 ];
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -1671,6 +1688,13 @@ const KNOWLEDGE_META_MIGRATION_INDEX = 54; // 0-based index of version-55
 // can run from recoverMissingObjects and reuse the canonical rebuild query. The
 // MIGRATIONS entry at this index is a no-op documentation marker.
 const SESSION_ROLLUP_MIGRATION_INDEX = 59; // 0-based index of version-60
+
+// Index of the migration whose ref-table recreate (drop the knowledge(id) FKs) is
+// performed atomically by a JS SAVEPOINT step (applyRefFkDrop) instead of plain SQL,
+// so a crash mid-recreate rolls back cleanly and the retry starts from the original
+// tables (plain exec() of CREATE/DROP/RENAME is NOT atomic). The MIGRATIONS entry at
+// this index is a no-op documentation marker.
+const REF_FK_DROP_MIGRATION_INDEX = 65; // 0-based index of version-66
 
 /**
  * Idempotent, column-presence-aware application of the v55 knowledge_meta register
@@ -2384,6 +2408,54 @@ export function withSyncApplying<T>(fn: () => T): T {
 // VACUUM cannot run inside a transaction, so migrate() handles it specially.
 const VACUUM_MIGRATION_INDEX = 2; // 0-based index of version-3 migration
 
+/**
+ * v66 (#909): recreate knowledge_entity_refs + knowledge_refs WITHOUT their
+ * `knowledge(id) ON DELETE CASCADE` FKs, so version compaction can prune the v1 anchor
+ * without cascade-deleting a live entry's refs. Wrapped in a SAVEPOINT so the whole
+ * CREATE _new / copy / DROP / RENAME is atomic: a crash mid-recreate rolls back and the
+ * retry starts from the original tables (plain `exec()` of these statements is NOT
+ * atomic, and a lingering `_new` table would boot-loop the retry — see #909 review).
+ * Idempotent: re-running on already-migrated (FK-less) tables reproduces the same shape.
+ * knowledge_entity_refs KEEPS its entity_id→entities CASCADE; the copy filters orphan
+ * entity refs so the retained FK cannot fail the INSERT under `foreign_keys=ON`.
+ */
+function applyRefFkDrop(database: Database) {
+  database.exec("SAVEPOINT ref_fk_drop");
+  try {
+    database.exec(`
+      DROP TABLE IF EXISTS knowledge_entity_refs_new;
+      CREATE TABLE knowledge_entity_refs_new (
+        knowledge_id TEXT NOT NULL,
+        entity_id    TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+        PRIMARY KEY (knowledge_id, entity_id)
+      );
+      INSERT INTO knowledge_entity_refs_new (knowledge_id, entity_id)
+        SELECT knowledge_id, entity_id FROM knowledge_entity_refs
+         WHERE entity_id IN (SELECT id FROM entities);
+      DROP TABLE knowledge_entity_refs;
+      ALTER TABLE knowledge_entity_refs_new RENAME TO knowledge_entity_refs;
+      CREATE INDEX IF NOT EXISTS idx_knowledge_entity_refs_entity
+        ON knowledge_entity_refs(entity_id);
+
+      DROP TABLE IF EXISTS knowledge_refs_new;
+      CREATE TABLE knowledge_refs_new (
+        from_id TEXT NOT NULL,
+        to_id   TEXT NOT NULL,
+        PRIMARY KEY (from_id, to_id)
+      );
+      INSERT INTO knowledge_refs_new (from_id, to_id)
+        SELECT from_id, to_id FROM knowledge_refs;
+      DROP TABLE knowledge_refs;
+      ALTER TABLE knowledge_refs_new RENAME TO knowledge_refs;
+    `);
+    database.exec("RELEASE ref_fk_drop");
+  } catch (e) {
+    database.exec("ROLLBACK TO ref_fk_drop");
+    database.exec("RELEASE ref_fk_drop");
+    throw e;
+  }
+}
+
 function migrate(database: Database) {
   const row = database
     .query(
@@ -2420,6 +2492,10 @@ function migrate(database: Database) {
       // Create session_rollup + maintenance triggers, then backfill from source.
       // Done in JS so the same idempotent routine self-heals from recovery (#981).
       applySessionRollup(database);
+    } else if (i === REF_FK_DROP_MIGRATION_INDEX) {
+      // Recreate the ref tables without their knowledge(id) FKs, atomically (SAVEPOINT)
+      // so a crash mid-recreate rolls back instead of boot-looping the retry (#909).
+      applyRefFkDrop(database);
     } else {
       try {
         database.exec(MIGRATIONS[i]);
@@ -2510,7 +2586,9 @@ function recoverMissingObjects(database: Database) {
       UNIQUE(alias_type, alias_value)
     );
     CREATE TABLE IF NOT EXISTS knowledge_entity_refs (
-      knowledge_id TEXT NOT NULL REFERENCES knowledge(id) ON DELETE CASCADE,
+      -- knowledge_id has NO FK (v66, #909): compaction may prune the anchor version the
+      -- logical_id points at; ref integrity is app-managed. entity_id keeps its CASCADE.
+      knowledge_id TEXT NOT NULL,
       entity_id    TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
       PRIMARY KEY (knowledge_id, entity_id)
     );

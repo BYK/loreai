@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import * as data from "../src/data";
 import { db, ensureProject } from "../src/db";
+import * as entities from "../src/entities";
 import * as ltm from "../src/ltm";
 
 // #990: every knowledge hard-delete path must purge the per-entry validation
@@ -60,6 +61,35 @@ function bookkeepingCount(logicalId: string): number {
     )
     .get(logicalId) as { c: number };
   return rv.c + sp.c;
+}
+
+// #909: the ref→knowledge(id) FKs were dropped (v66) so version compaction can prune
+// the anchor without cascading a live entry's refs. The project-delete paths that used
+// to lean on that CASCADE must now purge refs explicitly.
+function seedRefs(projectPath: string, logicalId: string): void {
+  const ent = entities.create({
+    projectPath,
+    entityType: "tool",
+    canonicalName: `E-${logicalId.slice(0, 8)}`,
+  });
+  entities.linkKnowledge(logicalId, ent.id); // knowledge_entity_refs, keyed by logical_id
+  db()
+    .query("INSERT INTO knowledge_refs (from_id, to_id) VALUES (?, ?)")
+    .run(logicalId, logicalId); // knowledge_refs (no FK now)
+}
+
+function refCount(logicalId: string): number {
+  const er = db()
+    .query(
+      "SELECT COUNT(*) AS c FROM knowledge_entity_refs WHERE knowledge_id = ?",
+    )
+    .get(logicalId) as { c: number };
+  const kr = db()
+    .query(
+      "SELECT COUNT(*) AS c FROM knowledge_refs WHERE from_id = ? OR to_id = ?",
+    )
+    .get(logicalId, logicalId) as { c: number };
+  return er.c + kr.c;
 }
 
 describe("orphan bookkeeping cleanup on knowledge delete (#990)", () => {
@@ -119,5 +149,70 @@ describe("orphan bookkeeping cleanup on knowledge delete (#990)", () => {
     data.deleteProject(ensureProject(root));
 
     expect(bookkeepingCount(logicalId)).toBe(0);
+  });
+});
+
+describe("ref cleanup after FK de-CASCADE on knowledge delete (#909)", () => {
+  test("clearKnowledge() purges knowledge_entity_refs + knowledge_refs", () => {
+    const { logicalId } = seed();
+    seedRefs(root, logicalId);
+    expect(refCount(logicalId)).toBe(2);
+
+    data.clearKnowledge(root);
+
+    expect(refCount(logicalId)).toBe(0);
+  });
+
+  test("clearProject() purges knowledge_entity_refs + knowledge_refs", () => {
+    const { logicalId } = seed();
+    seedRefs(root, logicalId);
+    expect(refCount(logicalId)).toBe(2);
+
+    data.clearProject(root);
+
+    expect(refCount(logicalId)).toBe(0);
+  });
+
+  test("deleteProject() purges knowledge_entity_refs + knowledge_refs", () => {
+    const { logicalId } = seed();
+    seedRefs(root, logicalId);
+    expect(refCount(logicalId)).toBe(2);
+
+    data.deleteProject(ensureProject(root));
+
+    expect(refCount(logicalId)).toBe(0);
+  });
+
+  test("clearing project A drops a cross-project wiki ref but PRESERVES project B's entry", () => {
+    const rootB = mkdtempSync(join(tmpdir(), "lore-bookkeep-b-"));
+    try {
+      const { logicalId: a } = seed(); // project A (root)
+      const idB = ltm.create({
+        projectPath: rootB,
+        scope: "project",
+        crossProject: false,
+        category: "gotcha",
+        title: "B entry",
+        content: "an entry in another project",
+      });
+      const b = ltm.get(idB)?.logical_id as string;
+      // A cross-project wiki ref A → B (from_id in project A, to_id in project B).
+      db()
+        .query("INSERT INTO knowledge_refs (from_id, to_id) VALUES (?, ?)")
+        .run(a, b);
+
+      data.clearKnowledge(root); // clears project A only
+
+      // The ref from A's (now-deleted) entry is gone — matches the old CASCADE semantics.
+      expect(
+        db()
+          .query("SELECT COUNT(*) AS c FROM knowledge_refs WHERE from_id = ?")
+          .get(a),
+      ).toEqual({ c: 0 });
+      // But project B's entry is untouched (the DELETE is scoped by project_id).
+      expect(ltm.getByLogical(b)?.logical_id).toBe(b);
+    } finally {
+      rmSync(rootB, { recursive: true, force: true });
+    }
   });
 });

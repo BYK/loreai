@@ -459,9 +459,22 @@ export function startIdleScheduler(
             `global sweep: pruned ${pruned.length} dead knowledge entries across all projects`,
           );
         }
-        // Filled the batch → more dead rows likely remain; drain on the next
+        // Compact superseded knowledge versions — bound local storage to a recent window
+        // per logical entry (head + 2 most-recent superseded + <60d), local-only (#909).
+        const compacted = ltm.compactKnowledgeVersions(GLOBAL_DEAD_SWEEP_BATCH);
+        if (compacted > 0) {
+          log.info(
+            `global sweep: compacted ${compacted} superseded knowledge versions`,
+          );
+        }
+        // Either filled its batch → more rows likely remain; drain on the next
         // tick instead of waiting the full interval (re-open the gate).
-        if (pruned.length >= GLOBAL_DEAD_SWEEP_BATCH) lastGlobalDeadSweepAt = 0;
+        if (
+          pruned.length >= GLOBAL_DEAD_SWEEP_BATCH ||
+          compacted >= GLOBAL_DEAD_SWEEP_BATCH
+        ) {
+          lastGlobalDeadSweepAt = 0;
+        }
       } catch (e) {
         log.error("global dead-entry sweep error:", e);
       }

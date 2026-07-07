@@ -690,9 +690,23 @@ export function clearProject(projectPath: string): ClearResult {
             OR logical_id_b IN (SELECT logical_id FROM knowledge WHERE project_id = ?)`,
       )
       .run(pid, pid);
+    // knowledge_entity_refs / knowledge_refs no longer ON DELETE CASCADE (v66, #909) —
+    // purge them explicitly by logical_id BEFORE the knowledge rows go.
+    database
+      .query(
+        "DELETE FROM knowledge_entity_refs WHERE knowledge_id IN (SELECT logical_id FROM knowledge WHERE project_id = ?)",
+      )
+      .run(pid);
+    database
+      .query(
+        `DELETE FROM knowledge_refs
+         WHERE from_id IN (SELECT logical_id FROM knowledge WHERE project_id = ?)
+            OR to_id   IN (SELECT logical_id FROM knowledge WHERE project_id = ?)`,
+      )
+      .run(pid, pid);
     database.query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
-    // FK ON DELETE CASCADE just purged this project's knowledge_entity_refs; repair any
-    // entity whose sync_rank drifted so the server eviction value isn't stale (#1191b).
+    // knowledge_entity_refs was just purged above (no more FK CASCADE) — repair any entity
+    // whose sync_rank drifted so the server eviction value isn't stale (#1191b).
     resyncStaleEntityRanks();
     database
       .query("DELETE FROM temporal_messages WHERE project_id = ?")
@@ -834,9 +848,23 @@ export function deleteProject(projectId: string): ClearResult | null {
             OR logical_id_b IN (SELECT logical_id FROM knowledge WHERE project_id = ?)`,
       )
       .run(projectId, projectId);
+    // knowledge_entity_refs / knowledge_refs no longer ON DELETE CASCADE (v66, #909) —
+    // purge them explicitly by logical_id BEFORE the knowledge rows go.
+    database
+      .query(
+        "DELETE FROM knowledge_entity_refs WHERE knowledge_id IN (SELECT logical_id FROM knowledge WHERE project_id = ?)",
+      )
+      .run(projectId);
+    database
+      .query(
+        `DELETE FROM knowledge_refs
+         WHERE from_id IN (SELECT logical_id FROM knowledge WHERE project_id = ?)
+            OR to_id   IN (SELECT logical_id FROM knowledge WHERE project_id = ?)`,
+      )
+      .run(projectId, projectId);
     database.query("DELETE FROM knowledge WHERE project_id = ?").run(projectId);
-    // FK CASCADE purged this project's knowledge_entity_refs — repair drifted entity
-    // sync_rank so the server eviction value isn't stale (#1191b PR2b).
+    // knowledge_entity_refs was just purged above (no more FK CASCADE) — repair drifted
+    // entity sync_rank so the server eviction value isn't stale (#1191b PR2b).
     resyncStaleEntityRanks();
     database
       .query("DELETE FROM temporal_messages WHERE project_id = ?")
@@ -903,39 +931,63 @@ export function clearKnowledge(projectPath: string): number {
       .get(pid) as { c: number }
   ).c;
 
-  // Clean up transfer metrics before deleting entries (no FK CASCADE).
-  db()
-    .query(
-      "DELETE FROM knowledge_transfers WHERE knowledge_id IN (SELECT logical_id FROM knowledge WHERE project_id = ?)",
-    )
-    .run(pid);
-  // Per-entry validation bookkeeping keyed on logical_id (no FK CASCADE) —
-  // delete BEFORE knowledge so the subquery still sees the rows (#990).
-  for (const table of ltm.LOGICAL_ID_BOOKKEEPING_TABLES) {
-    db()
+  // Purge the entry rows plus every logical_id-keyed dependent in ONE transaction so an
+  // interruption can't leave knowledge half-deleted with dangling bookkeeping/refs
+  // (matches clearProject/deleteProject). Each dependent is deleted BEFORE knowledge so
+  // its `SELECT logical_id ... WHERE project_id` subquery still sees the rows.
+  const database = db();
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    // Transfer metrics (no FK CASCADE).
+    database
       .query(
-        `DELETE FROM ${table} WHERE logical_id IN (SELECT logical_id FROM knowledge WHERE project_id = ?)`,
+        "DELETE FROM knowledge_transfers WHERE knowledge_id IN (SELECT logical_id FROM knowledge WHERE project_id = ?)",
       )
       .run(pid);
+    // Per-entry validation bookkeeping keyed on logical_id (no FK CASCADE), #990.
+    for (const table of ltm.LOGICAL_ID_BOOKKEEPING_TABLES) {
+      database
+        .query(
+          `DELETE FROM ${table} WHERE logical_id IN (SELECT logical_id FROM knowledge WHERE project_id = ?)`,
+        )
+        .run(pid);
+    }
+    // Outcome-reward injection log (#497) carries a project_id column, so sweep it by
+    // project scope directly — also reclaims rows orphaned by a pre-#996 delete.
+    database
+      .query("DELETE FROM knowledge_session_injections WHERE project_id = ?")
+      .run(pid);
+    // Contradiction pairs (#1123): purge any pair touching this project's entries
+    // before the knowledge rows go (composite key, can't ride the loop).
+    database
+      .query(
+        `DELETE FROM knowledge_contradictions
+         WHERE logical_id_a IN (SELECT logical_id FROM knowledge WHERE project_id = ?)
+            OR logical_id_b IN (SELECT logical_id FROM knowledge WHERE project_id = ?)`,
+      )
+      .run(pid, pid);
+    // knowledge_entity_refs / knowledge_refs no longer ON DELETE CASCADE (v66, #909) —
+    // purge them explicitly by logical_id BEFORE the knowledge rows go.
+    database
+      .query(
+        "DELETE FROM knowledge_entity_refs WHERE knowledge_id IN (SELECT logical_id FROM knowledge WHERE project_id = ?)",
+      )
+      .run(pid);
+    database
+      .query(
+        `DELETE FROM knowledge_refs
+         WHERE from_id IN (SELECT logical_id FROM knowledge WHERE project_id = ?)
+            OR to_id   IN (SELECT logical_id FROM knowledge WHERE project_id = ?)`,
+      )
+      .run(pid, pid);
+    database.query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+    database.exec("COMMIT");
+  } catch (e) {
+    database.exec("ROLLBACK");
+    throw e;
   }
-  // Outcome-reward injection log (#497) carries a project_id column, so sweep
-  // it by project scope directly — this also reclaims any rows already orphaned
-  // by a prior delete that predates this fix (#996).
-  db()
-    .query("DELETE FROM knowledge_session_injections WHERE project_id = ?")
-    .run(pid);
-  // Contradiction pairs (#1123): purge any pair touching this project's entries
-  // before the knowledge rows go (composite key, can't ride the loop).
-  db()
-    .query(
-      `DELETE FROM knowledge_contradictions
-       WHERE logical_id_a IN (SELECT logical_id FROM knowledge WHERE project_id = ?)
-          OR logical_id_b IN (SELECT logical_id FROM knowledge WHERE project_id = ?)`,
-    )
-    .run(pid, pid);
-  db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
-  // FK CASCADE purged this project's knowledge_entity_refs — repair drifted entity
-  // sync_rank so the server eviction value isn't stale (#1191b PR2b).
+  // knowledge_entity_refs was just purged above (no more FK CASCADE) — repair drifted
+  // entity sync_rank so the server eviction value isn't stale (#1191b PR2b).
   resyncStaleEntityRanks();
   reclaimVec0Orphans(["knowledge"]);
 

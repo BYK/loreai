@@ -1,5 +1,12 @@
 import { uuidv7 } from "uuidv7";
-import { db, ensureProject, getKV, setKV, withTransaction } from "./db";
+import {
+  db,
+  ensureProject,
+  getKV,
+  setKV,
+  withSyncApplying,
+  withTransaction,
+} from "./db";
 import {
   deleteEmbeddings,
   embeddingByIdSource,
@@ -1059,6 +1066,62 @@ export function pruneDeadEntriesAllProjects(limit = -1): KnowledgeEntry[] {
     .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
   for (const e of dead) remove(e.id);
   return dead;
+}
+
+/** How many most-recent superseded versions to retain per logical entry (#909). */
+const COMPACTION_KEEP_SUPERSEDED = 2;
+/** Superseded versions older than this are dropped even within the keep window (#909). */
+const COMPACTION_MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000; // ~60 days
+
+/**
+ * Bound local storage by pruning superseded (`is_current=0`) knowledge version rows,
+ * keeping a bounded recent window per logical entry (#909, A2 sub-PR 4):
+ *   - the head (`is_current=1` — current live OR death-cert) is NEVER touched, so the
+ *     single-current invariant and deletion propagation are unaffected;
+ *   - keep the {@link COMPACTION_KEEP_SUPERSEDED} most-recent superseded versions per
+ *     logical_id (by version DESC);
+ *   - drop any superseded version older than {@link COMPACTION_MAX_AGE_MS}, even within
+ *     that window.
+ *
+ * Runs under `withSyncApplying`: superseded versions are never individually synced (the
+ * knowledge sync keys on logical_id / the current version), so their deletion must enqueue
+ * NO outbox rows. Safe to prune the v1 anchor (`id == logical_id`) now that the ref FKs are
+ * gone (v66, #909) — refs resolve by logical_id to the live current version, and
+ * `cleanDeadRefs` GCs a ref whose logical_id has no live version. `limit` bounds the per-pass
+ * delete count so the idle caller never runs an unbounded synchronous delete; it re-runs
+ * until the backlog clears. Returns the number of version rows pruned.
+ */
+export function compactKnowledgeVersions(limit = 500): number {
+  const cutoff = Date.now() - COMPACTION_MAX_AGE_MS;
+  return withSyncApplying(() => {
+    const ids = (
+      db()
+        .query(
+          `SELECT id FROM (
+             SELECT id, updated_at,
+                    ROW_NUMBER() OVER (PARTITION BY logical_id ORDER BY version DESC) AS rn
+               FROM knowledge
+              WHERE is_current = 0
+           )
+           WHERE rn > ? OR updated_at < ?
+           LIMIT ?`,
+        )
+        .all(COMPACTION_KEEP_SUPERSEDED, cutoff, limit) as Array<{ id: string }>
+    ).map((r) => r.id);
+    if (ids.length === 0) return 0;
+    // vec0 layout: superseded rows already have no vec entry (appendVersion drops it on
+    // demote); blob layout: the column rides the row delete. No-op if already absent.
+    deleteEmbeddings(db(), "knowledge", ids);
+    const CHUNK = 900; // stay under SQLite's bound-parameter limit
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      const batch = ids.slice(i, i + CHUNK);
+      const ph = batch.map(() => "?").join(",");
+      db()
+        .query(`DELETE FROM knowledge WHERE id IN (${ph})`)
+        .run(...batch);
+    }
+    return ids.length;
+  });
 }
 
 /** Token cost of one entry as the curator prompt renders it (see curatorUser). */
