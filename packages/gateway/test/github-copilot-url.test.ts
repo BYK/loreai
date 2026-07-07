@@ -16,6 +16,7 @@ import { extractUpstreamPathHeader, verbatimUpstreamUrl } from "../src/config";
 import {
   buildOpenAIChatCompletionsUrl,
   buildOpenAIUpstreamRequest,
+  isGitHubCopilotHost,
 } from "../src/translate/openai";
 import type { GatewayRequest } from "../src/translate/types";
 
@@ -187,6 +188,29 @@ describe("buildOpenAIChatCompletionsUrl", () => {
     );
   });
 
+  test("per-plan/regional Copilot hosts also omit /v1 (issue #1052 — individual/business/enterprise)", () => {
+    for (const host of [
+      "api.individual.githubcopilot.com",
+      "api.business.githubcopilot.com",
+      "api.enterprise.githubcopilot.com",
+      "proxy.individual.githubcopilot.com",
+    ]) {
+      expect(buildOpenAIChatCompletionsUrl(`https://${host}`)).toBe(
+        `https://${host}/chat/completions`,
+      );
+    }
+  });
+
+  test("a lookalike host that only CONTAINS the domain is NOT treated as Copilot", () => {
+    // Guards against a naive substring match: this host ends in `.evil.example`,
+    // so it must fall back to the standard /v1 form, not Copilot's root path.
+    expect(
+      buildOpenAIChatCompletionsUrl(
+        "https://api.githubcopilot.com.evil.example",
+      ),
+    ).toBe("https://api.githubcopilot.com.evil.example/v1/chat/completions");
+  });
+
   test("Google Gemini host uses the /v1beta/openai path (issue #1070)", () => {
     expect(
       buildOpenAIChatCompletionsUrl(
@@ -243,6 +267,32 @@ describe("buildOpenAIChatCompletionsUrl", () => {
     expect(buildOpenAIChatCompletionsUrl("not a url")).toBe(
       "not a url/v1/chat/completions",
     );
+  });
+});
+
+describe("isGitHubCopilotHost", () => {
+  test("matches the apex and every subdomain", () => {
+    for (const h of [
+      "githubcopilot.com",
+      "api.githubcopilot.com",
+      "api.individual.githubcopilot.com",
+      "api.business.githubcopilot.com",
+      "api.enterprise.githubcopilot.com",
+      "proxy.individual.githubcopilot.com",
+    ]) {
+      expect(isGitHubCopilotHost(h)).toBe(true);
+    }
+  });
+
+  test("does NOT match lookalikes or unrelated hosts", () => {
+    for (const h of [
+      "api.githubcopilot.com.evil.example",
+      "notgithubcopilot.com",
+      "api.openai.com",
+      "githubcopilot.com.attacker.net",
+    ]) {
+      expect(isGitHubCopilotHost(h)).toBe(false);
+    }
   });
 });
 

@@ -500,11 +500,24 @@ const DEFAULT_OPENAI_CHAT_COMPLETIONS_PATH = "/v1/chat/completions";
  * purely via its `X-Lore-Provider` route with no preserved endpoint path.
  */
 const OPENAI_HOST_CHAT_COMPLETIONS_PATHS: ReadonlyMap<string, string> = new Map(
-  [
-    ["api.githubcopilot.com", "/chat/completions"],
-    ["generativelanguage.googleapis.com", "/v1beta/openai/chat/completions"],
-  ],
+  [["generativelanguage.googleapis.com", "/v1beta/openai/chat/completions"]],
 );
+
+/**
+ * GitHub Copilot serves Chat Completions at `/chat/completions` (NO `/v1`) on
+ * ALL of its hosts, not just `api.githubcopilot.com`. Per-plan/regional hosts
+ * carry a subdomain segment — `api.individual.githubcopilot.com` (free/OSS
+ * quota), `api.business.githubcopilot.com`, `api.enterprise.githubcopilot.com`,
+ * and the `proxy.*` variants — and the token exchange (`copilot_internal/v2/
+ * token`) returns the account's specific host in `endpoints.api`. Matching the
+ * whole domain (not a single host) keeps individual/enterprise accounts from
+ * being reconstructed as `<host>/v1/chat/completions` → 404 (issue #1052).
+ */
+export function isGitHubCopilotHost(hostname: string): boolean {
+  return (
+    hostname === "githubcopilot.com" || hostname.endsWith(".githubcopilot.com")
+  );
+}
 
 /**
  * Build the OpenAI Chat Completions upstream URL for an upstream base.
@@ -513,10 +526,11 @@ const OPENAI_HOST_CHAT_COMPLETIONS_PATHS: ReadonlyMap<string, string> = new Map(
  * route tables store a bare origin and the gateway appends `/v1/...`. Two
  * exceptions are handled, in priority order:
  *
- *  1. Hosts in `OPENAI_HOST_CHAT_COMPLETIONS_PATHS` use a fixed non-`/v1`
- *     endpoint path (GitHub Copilot's `/chat/completions`, issue #1052; Google's
- *     `/v1beta/openai/...`, issue #1070). These hosts' route bases are bare
- *     origins, so the mapped path is simply appended.
+ *  1. GitHub Copilot hosts (any `*.githubcopilot.com`, issue #1052) serve at
+ *     `/chat/completions` with no `/v1`, and hosts in
+ *     `OPENAI_HOST_CHAT_COMPLETIONS_PATHS` use a fixed non-`/v1` endpoint path
+ *     (Google's `/v1beta/openai/...`, issue #1070). These hosts' route bases are
+ *     bare origins, so the mapped path is simply appended.
  *  2. A base whose pathname already ends in a version segment (e.g. Z.AI's
  *     user-configured `.../api/paas/v4`, issue #1093) serves Chat Completions at
  *     `<base>/chat/completions`; appending the default `/v1` would duplicate the
@@ -531,6 +545,11 @@ const OPENAI_HOST_CHAT_COMPLETIONS_PATHS: ReadonlyMap<string, string> = new Map(
 export function buildOpenAIChatCompletionsUrl(base: string): string {
   try {
     const { hostname, pathname } = new URL(base);
+    // GitHub Copilot (all hosts, incl. api.individual/business/enterprise.*)
+    // serves at /chat/completions with no /v1 prefix — issue #1052.
+    if (isGitHubCopilotHost(hostname)) {
+      return `${base}/chat/completions`;
+    }
     const hostPath = OPENAI_HOST_CHAT_COMPLETIONS_PATHS.get(hostname);
     if (hostPath !== undefined) {
       return `${base}${hostPath}`;
