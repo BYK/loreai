@@ -184,7 +184,7 @@ import {
   createStreamAccumulator,
   createRecallAwareAccumulator,
   parseSSEStream,
-  buildSSETextResponse,
+  buildSSEResponse,
   buildSSEToolUseResponse,
   buildKeepaliveCompactionStream,
   formatSSEEvent,
@@ -4563,8 +4563,18 @@ function nonStreamHttpResponse(
     );
   } else if (clientProtocol === "gemini") {
     clientResp = buildGeminiResponse(scaledResp, clientStream ?? false);
+  } else if (clientStream) {
+    // Anthropic (or unspecified) client that requested `stream: true`. The
+    // upstream response was BUFFERED (non-Anthropic upstreams — OpenAI /
+    // Responses / Gemini — are accumulated, not streamed through), so we
+    // synthesize a complete Anthropic SSE stream from it. Returning the
+    // non-streaming JSON body below would leave the client's SDK waiting
+    // forever for an SSE stream it opened the request for — the github-copilot
+    // + Claude-model "response never reaches the UI" bug (#1052). The other
+    // client protocols already honor `clientStream` via their builders above.
+    clientResp = streamHttpResponse(scaledResp);
   } else {
-    // Anthropic or unspecified — default format
+    // Anthropic or unspecified — default non-streaming JSON format.
     const body = buildAnthropicNonStreamResponse(scaledResp);
     clientResp = new Response(JSON.stringify(body), {
       status: 200,
@@ -4584,19 +4594,13 @@ function nonStreamHttpResponse(
  * Convert a GatewayResponse to a streaming SSE HTTP Response.
  */
 function streamHttpResponse(resp: GatewayResponse): Response {
-  // Guard: resp.usage can be undefined at runtime for vLLM / partial responses.
-  const usage = resp.usage ?? ZERO_USAGE;
-
-  // Build the full SSE text for a text-only response
-  const textBlocks = resp.content.filter(
-    (b): b is { type: "text"; text: string } => b.type === "text",
-  );
-  const fullText = textBlocks.map((b) => b.text).join("");
-
-  const sseBody = buildSSETextResponse(resp.id, resp.model, fullText, {
-    inputTokens: usage.inputTokens,
-    outputTokens: usage.outputTokens,
-  });
+  // Synthesize a complete Anthropic SSE stream from the fully-accumulated
+  // response, preserving ALL blocks (text + tool_use + thinking + opaque). This
+  // is used both for synthetic responses (slash commands) and — critically —
+  // when re-emitting a BUFFERED non-Anthropic upstream (OpenAI/Responses/Gemini)
+  // to an Anthropic client that requested `stream: true`. A text-only synthesis
+  // would silently drop tool calls, breaking coding agents (#1052).
+  const sseBody = buildSSEResponse(resp);
 
   return new Response(sseBody, {
     status: 200,

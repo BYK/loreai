@@ -14,6 +14,7 @@ import {
   scaleMessageDeltaUsage,
   buildSSEMessageStart,
   buildSSETextResponse,
+  buildSSEResponse,
   accumulateSSEResponse,
 } from "../src/stream/anthropic";
 import {
@@ -479,5 +480,73 @@ describe("accumulateSSEResponse", () => {
     expect(resp.stopReason).toBe("end_turn");
     expect(resp.usage?.inputTokens).toBe(7);
     expect(resp.usage?.outputTokens).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildSSEResponse — full multi-block synthesis (text + tool_use)
+// ---------------------------------------------------------------------------
+
+describe("buildSSEResponse", () => {
+  test("round-trips a text + tool_use response, preserving the tool call", async () => {
+    const resp: GatewayResponse = {
+      id: "msg_multi",
+      model: "claude-x",
+      content: [
+        { type: "text", text: "Reading the file." },
+        {
+          type: "tool_use",
+          id: "toolu_1",
+          name: "read",
+          input: { path: "a.txt" },
+        },
+      ],
+      stopReason: "tool_use",
+      usage: {
+        inputTokens: 12,
+        outputTokens: 8,
+        cacheReadInputTokens: 0,
+        cacheCreationInputTokens: 0,
+      },
+    };
+
+    const sse = buildSSEResponse(resp);
+    // Well-formed lifecycle.
+    expect(sse).toContain("event: message_start");
+    expect(sse).toContain("event: message_stop");
+
+    const round = await accumulateSSEResponse(new Response(sse));
+    expect(round.id).toBe("msg_multi");
+    expect(round.stopReason).toBe("tool_use");
+    // BOTH blocks survive — a text-only synthesis would have dropped the tool.
+    expect(round.content).toEqual([
+      { type: "text", text: "Reading the file." },
+      {
+        type: "tool_use",
+        id: "toolu_1",
+        name: "read",
+        input: { path: "a.txt" },
+      },
+    ]);
+  });
+
+  test("emits a valid empty-content stream (no blocks)", async () => {
+    const resp: GatewayResponse = {
+      id: "msg_empty",
+      model: "claude-x",
+      content: [],
+      stopReason: "end_turn",
+      usage: {
+        inputTokens: 3,
+        outputTokens: 0,
+        cacheReadInputTokens: 0,
+        cacheCreationInputTokens: 0,
+      },
+    };
+    const round = await accumulateSSEResponse(
+      new Response(buildSSEResponse(resp)),
+    );
+    expect(round.content).toEqual([]);
+    expect(round.stopReason).toBe("end_turn");
   });
 });

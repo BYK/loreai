@@ -656,6 +656,118 @@ export function buildSSETextResponse(
 }
 
 /**
+ * Build a complete Anthropic SSE event sequence from a fully-accumulated
+ * `GatewayResponse`, preserving ALL content blocks — text, thinking, tool_use,
+ * and opaque (image/etc.) — not just text.
+ *
+ * Used when the gateway has BUFFERED a non-Anthropic upstream response
+ * (OpenAI / Responses / Gemini, which are accumulated rather than streamed
+ * through) for an Anthropic-protocol client that requested `stream: true`.
+ * The client's SDK opened the request expecting `text/event-stream`; handing it
+ * a non-streaming JSON body leaves it waiting forever with no output — exactly
+ * the "response reaches the gateway but never makes it to the UI" symptom for
+ * GitHub Copilot + a Claude model via OpenCode's Anthropic SDK (#1052).
+ *
+ * Emits the full lifecycle, one block at a time:
+ *   message_start
+ *   → (content_block_start → content_block_delta* → content_block_stop) per block
+ *   → message_delta → message_stop
+ *
+ * Unlike `buildSSETextResponse` (text-only, for synthetic single-string
+ * responses) this must not drop tool_use blocks — a coding agent whose turn is
+ * a tool call would otherwise receive an empty stream.
+ */
+export function buildSSEResponse(resp: GatewayResponse): string {
+  const events: string[] = [buildSSEMessageStart(resp)];
+
+  resp.content.forEach((block: GatewayContentBlock, index: number) => {
+    let contentBlock: Record<string, unknown>;
+    const deltas: Record<string, unknown>[] = [];
+
+    switch (block.type) {
+      case "text":
+        contentBlock = { type: "text", text: "" };
+        deltas.push({ type: "text_delta", text: block.text });
+        break;
+      case "thinking":
+        contentBlock = { type: "thinking", thinking: "" };
+        deltas.push({ type: "thinking_delta", thinking: block.thinking });
+        if (block.signature != null) {
+          deltas.push({ type: "signature_delta", signature: block.signature });
+        }
+        break;
+      case "tool_use":
+        contentBlock = {
+          type: "tool_use",
+          id: block.id,
+          name: block.name,
+          input: {},
+        };
+        // The full arguments object is delivered as one input_json_delta — the
+        // accumulator on the other side concatenates partial_json then parses.
+        deltas.push({
+          type: "input_json_delta",
+          partial_json: JSON.stringify(block.input ?? {}),
+        });
+        break;
+      case "opaque":
+        // Best-effort: re-emit the original block verbatim as a single-shot
+        // start (no delta). Rare in a response; better than dropping.
+        contentBlock = block.raw;
+        break;
+      default:
+        // tool_result never appears in an assistant response.
+        return;
+    }
+
+    events.push(
+      formatSSEEvent(
+        "content_block_start",
+        JSON.stringify({
+          type: "content_block_start",
+          index,
+          content_block: contentBlock,
+        }),
+      ),
+    );
+    for (const delta of deltas) {
+      events.push(
+        formatSSEEvent(
+          "content_block_delta",
+          JSON.stringify({ type: "content_block_delta", index, delta }),
+        ),
+      );
+    }
+    events.push(
+      formatSSEEvent(
+        "content_block_stop",
+        JSON.stringify({ type: "content_block_stop", index }),
+      ),
+    );
+  });
+
+  const u = resp.usage ?? ZERO_USAGE;
+  events.push(
+    formatSSEEvent(
+      "message_delta",
+      JSON.stringify({
+        type: "message_delta",
+        delta: {
+          stop_reason: resp.stopReason ?? "end_turn",
+          stop_sequence: null,
+        },
+        usage: { output_tokens: u.outputTokens },
+      }),
+    ),
+  );
+  events.push(
+    formatSSEEvent("message_stop", JSON.stringify({ type: "message_stop" })),
+  );
+
+  return events.join("");
+}
+
+/**
  * Build a *live* compaction SSE `Response` that emits keep-alive `ping` events
  * while `summaryPromise` is still pending, then streams the summary text once
  * it resolves.
