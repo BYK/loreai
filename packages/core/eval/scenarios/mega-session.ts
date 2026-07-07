@@ -18,7 +18,7 @@ import type {
 } from "../types";
 
 // Load the extracted session turns from compressed JSON fixture
-const fixtureDir = join(import.meta.dir, ".");
+const fixtureDir = join(import.meta.dirname, ".");
 const compressed = readFileSync(
   join(fixtureDir, "cli-refactor-session.json.gz"),
 );

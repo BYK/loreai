@@ -9,7 +9,12 @@ import {
   inline,
   renderMarkdown,
 } from "../src/markdown";
-import { formatDistillations, formatKnowledge } from "../src/prompt";
+import {
+  formatDistillations,
+  formatKnowledge,
+  RECALLED_CONTEXT_CATEGORY,
+} from "../src/prompt";
+import { RECALLED_CONTEXT_CATEGORY as LTM_RECALLED_CONTEXT_CATEGORY } from "../src/ltm";
 
 const proc = remark();
 
@@ -340,6 +345,52 @@ describe("formatKnowledge", () => {
 
   test("handles empty input", () => {
     expect(formatKnowledge([])).toBe("");
+  });
+
+  test("recalled category renders imperative heading + directive lead-in (prominence)", () => {
+    const result = formatKnowledge([
+      {
+        id: "d:abc123",
+        category: RECALLED_CONTEXT_CATEGORY,
+        title: "Relevant earlier context",
+        content:
+          "orders ride the WHOLESALE channel, EMEA region, warehouse WH-07",
+      },
+    ]);
+    // Imperative heading, NOT the passive capitalized category name "Recalled".
+    expect(result).toContain("Established project context (apply these)");
+    expect(result).not.toContain("### Recalled");
+    // Directive lead-in that tells the model to USE the values, not default.
+    expect(result).toMatch(/authoritative/i);
+    expect(result).toMatch(/do NOT substitute your own/i);
+    // The fact itself is still rendered.
+    expect(result).toContain("WHOLESALE");
+  });
+
+  test("non-recalled categories keep their plain capitalized heading", () => {
+    const result = formatKnowledge([
+      { category: "gotcha", title: "A gotcha", content: "some content" },
+    ]);
+    expect(result).toContain("### Gotcha");
+    expect(result).not.toContain("Established project context");
+  });
+
+  test("recalled rendering is byte-stable across calls (cache-safe)", () => {
+    const entries = [
+      {
+        id: "d:abc123",
+        category: RECALLED_CONTEXT_CATEGORY,
+        title: "Relevant earlier context",
+        content: "channel WHOLESALE, region EMEA",
+      },
+    ];
+    expect(formatKnowledge(entries)).toBe(formatKnowledge(entries));
+  });
+
+  test("RECALLED_CONTEXT_CATEGORY matches ltm.ts producer value (no import cycle)", () => {
+    // prompt.ts defines the constant locally to stay a leaf module; this asserts
+    // it never drifts from ltm.ts's RECALLED_CONTEXT_CATEGORY producer.
+    expect(RECALLED_CONTEXT_CATEGORY).toBe(LTM_RECALLED_CONTEXT_CATEGORY);
   });
 
   test("token budget — only includes entries that fit within maxTokens", () => {

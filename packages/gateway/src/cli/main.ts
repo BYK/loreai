@@ -174,6 +174,14 @@ const OPTIONS = {
   // the embedded vector-worker asset + read-job seam works inside the SEA
   // binary — the path recall/forSession fan-out rides on (#1029).
   "check-read-offload": { type: "boolean" as const },
+  // `lore eval` flags (memory benchmark, #961)
+  scenario: { type: "string" as const },
+  harness: { type: "string" as const },
+  "gw-dist": { type: "string" as const },
+  "cap-context": { type: "string" as const },
+  out: { type: "string" as const },
+  auth: { type: "string" as const },
+  opencode: { type: "string" as const },
 } as const;
 
 // Populate the set used by extractAgentArgs to distinguish lore's own flags
@@ -451,6 +459,12 @@ export async function _cli(): Promise<void> {
         break;
       }
 
+      case "eval": {
+        const { commandEval } = await import("./eval-cmd");
+        await commandEval(rest, values);
+        break;
+      }
+
       case "recall": {
         const { commandRecall } = await import("./recall-cmd");
         await commandRecall(rest, values);
@@ -563,6 +577,7 @@ export async function _cli(): Promise<void> {
               "lint",
               "log",
               "diff",
+              "eval",
               "login",
               "logout",
               "whoami",

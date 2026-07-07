@@ -122,7 +122,7 @@ function parseGateway(raw: string): { host: string; port: number } | undefined {
 const outputPath =
   args.output ||
   resolve(
-    import.meta.dir,
+    import.meta.dirname,
     "results",
     `eval-${new Date().toISOString().slice(0, 19).replace(/[:.]/g, "-")}.jsonl`,
   );

@@ -37,6 +37,10 @@ Commands:
   log [<id>]          Show knowledge version history (an entry's timeline, or
                        recent changes across the project)
   diff <id>           Show what changed between two versions of a knowledge entry
+  eval                Run the memory benchmark (Lore vs native compaction) and
+                       print a fact-retention + cost scorecard (#961)
+                       Flags: --model <p/m> (required), --scenario cross-session|
+                       single-long|both. Protocol: packages/core/eval/live/METHODOLOGY.md
   login               Sign in to your Folk Lore account (GitHub or --email)
   logout              Sign out and clear the local session
   whoami              Show the signed-in Folk Lore account

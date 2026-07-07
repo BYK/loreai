@@ -1,0 +1,14 @@
+{
+  "id": "tiny",
+  "seed": "./seed-min",
+  "sessions": [
+    {
+      "id": "s1",
+      "turns": [
+        {
+          "prompt": "Create src/hello.py with a pure function greet(name) that returns 'Hello, <name>!'. Also, a quick preference: I always prefer f-strings over .format()."
+        }
+      ]
+    }
+  ]
+}

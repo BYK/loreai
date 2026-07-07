@@ -97,17 +97,31 @@ class RateLimiter {
 // Resolve backend from environment
 // ---------------------------------------------------------------------------
 
+/**
+ * Normalize an Anthropic base URL so `${baseUrl}/v1/messages` is always well
+ * formed: drop any trailing slash and a trailing `/v1` segment. This lets
+ * callers pass either `https://host/anthropic` or `https://host/anthropic/v1`.
+ */
+export function normalizeAnthropicBaseUrl(url: string): string {
+  return url.replace(/\/+$/, "").replace(/\/v1$/, "");
+}
+
 export function resolveBackend(
   overrides?: Partial<BackendConfig>,
 ): BackendConfig {
-  // Anthropic direct — preferred when available (no daily limits, best quality)
+  // Anthropic direct — preferred when available (no daily limits, best quality).
+  // ANTHROPIC_BASE_URL (the standard Anthropic-SDK env var) points the backend
+  // at any Anthropic-compatible provider (e.g. MiniMax's /anthropic endpoint).
+  // The base must NOT include the version segment — `/v1/messages` is appended.
   if (process.env.ANTHROPIC_API_KEY) {
     return {
       backend: "anthropic",
       model: "claude-sonnet-4-6",
       judgeModel: "claude-sonnet-4-6",
       apiKey: process.env.ANTHROPIC_API_KEY,
-      baseUrl: "https://api.anthropic.com",
+      baseUrl: normalizeAnthropicBaseUrl(
+        process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com",
+      ),
       ...overrides,
     };
   }
@@ -147,6 +161,32 @@ export function resolveBackend(
     apiKey: "",
     baseUrl: "https://api.anthropic.com",
     ...overrides,
+  };
+}
+
+/**
+ * Dedicated judge backend, independent of the answering model.
+ *
+ * A weak or non-Anthropic answering model must NEVER grade its own output
+ * (self-judging / unreliable grading floors every score). When JUDGE_API_KEY
+ * is set, the judge always runs on Anthropic (Sonnet by default) via the real
+ * Anthropic key + endpoint, regardless of which provider the answering model
+ * uses. Falls back to the shared answering backend when JUDGE_API_KEY is unset
+ * (back-compat: single-provider runs keep working unchanged).
+ */
+export function resolveJudgeBackend(answer: BackendConfig): BackendConfig {
+  const judgeKey = process.env.JUDGE_API_KEY;
+  if (!judgeKey) return answer;
+  const judgeModel =
+    process.env.JUDGE_MODEL || answer.judgeModel || "claude-sonnet-4-5";
+  return {
+    backend: "anthropic",
+    model: judgeModel,
+    judgeModel,
+    apiKey: judgeKey,
+    baseUrl: normalizeAnthropicBaseUrl(
+      process.env.JUDGE_BASE_URL ?? "https://api.anthropic.com",
+    ),
   };
 }
 
@@ -312,16 +352,33 @@ export function createEvalLLMClient(
           return result;
         } catch (err) {
           lastError = err instanceof Error ? err : new Error(String(err));
+          const msg = lastError.message;
 
-          // Handle 429 responses
-          if (lastError.message.includes("429")) {
-            // Transient rate limit — retry with exponential backoff
+           // Detect GitHub's anti-scraping / quota exhaustion page (HTML, not
+          // JSON). NOT a transient limit — daily quota is exhausted or the
+          // token lacks access. Retrying wastes quota.
+          if (msg.includes("429") && msg.includes("scraping")) {
+            throw new Error(
+              "GitHub Models daily quota exhausted or access denied. " +
+                "The API returned GitHub's anti-scraping page instead of a JSON rate-limit error. " +
+                "Wait for daily quota reset or check your token's 'models' scope.",
+            );
+          }
+
+          // Retry transient overload/rate-limit/5xx (429 rate limit, 529
+          // overloaded — common on MiniMax/Anthropic under load — and 500/502/
+          // 503) with exponential backoff. A one-off 529 must not kill a
+          // multi-hour run.
+           if (
+             /\b(429|529|500|502|503)\b/.test(msg) ||
+             /overloaded/i.test(msg)
+           ) {
             const backoffMs = Math.min(
               30_000 * 2 ** attempt, // 30s, 60s, 120s, 240s, 480s
               600_000, // cap at 10 minutes
             );
             console.warn(
-              `  Rate limited (attempt ${attempt + 1}/${MAX_RETRIES + 1}), backing off ${Math.round(backoffMs / 1000)}s...`,
+              `  Transient API error (attempt ${attempt + 1}/${MAX_RETRIES + 1}), backing off ${Math.round(backoffMs / 1000)}s: ${msg.slice(0, 80)}`,
             );
             limiter.backoff(backoffMs);
             await new Promise((r) => setTimeout(r, backoffMs));

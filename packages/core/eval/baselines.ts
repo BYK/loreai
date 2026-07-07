@@ -99,162 +99,240 @@ export function tailWindowBaseline(
 // ---------------------------------------------------------------------------
 
 /**
- * The compaction prompt used by Claude Code and OpenCode.
- * Mirrors the actual production compaction behavior.
+ * OpenCode's ACTUAL production compaction prompt + settings, ported verbatim so
+ * the baseline matches what a real coding agent does (not a hand-rolled proxy).
+ *
+ * Sources (github.com/sst/opencode):
+ *  - System prompt: packages/opencode/src/agent/prompt/compaction.txt
+ *  - Summary template + buildPrompt: packages/core/src/session/compaction.ts
+ *  - Settings: packages/opencode/src/session/compaction.ts + session/overflow.ts
+ *
+ * Real behavior we replicate:
+ *  - Anchored summary: ONE summary is maintained and UPDATED each pass (via a
+ *    <previous-summary> block), not a growing stack of per-pass summaries.
+ *  - Small verbatim tail: preserve_recent_tokens = clamp(usable*0.25, 2K, 8K) →
+ *    effectively ~8K tokens (MAX_PRESERVE_RECENT_TOKENS) for large models, plus
+ *    at least the last 2 turns.
+ *  - Overflow trigger: compact when live tokens >= usable, where
+ *    usable = context - min(20K, maxOutputTokens).
+ *  - Summary output capped at 4096 tokens; tool outputs truncated to 2000 chars.
  */
-const COMPACTION_SYSTEM = `You are a conversation summarizer. Your job is to create a detailed summary of a coding conversation that preserves all important technical details.`;
+const COMPACTION_SYSTEM = `You are an anchored context summarization assistant for coding sessions.
 
-const COMPACTION_USER_TEMPLATE = `Summarize the following conversation excerpt, preserving:
-- All file paths, function names, class names, and variable names mentioned
-- All decisions made and their rationales
-- All error messages, bug descriptions, and their fixes
-- All configuration values, version numbers, and specific quantities
-- The overall goal and current progress
+Summarize only the conversation history you are given. The newest turns may be kept verbatim outside your summary, so focus on the older context that still matters for continuing the work.
 
-Be detailed and specific — do not generalize. Include exact values.
+If the prompt includes a <previous-summary> block, treat it as the current anchored summary. Update it with the new history by preserving still-true details, removing stale details, and merging in new facts.
 
-Conversation to summarize:
+Always follow the exact output structure requested by the user prompt. Keep every section, preserve exact file paths and identifiers when known, and prefer terse bullets over paragraphs.
 
-{{conversation}}`;
+Do not answer the conversation itself. Do not mention that you are summarizing, compacting, or merging context. Respond in the same language as the conversation.`;
+
+const COMPACTION_SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
+<template>
+## Goal
+- [single-sentence task summary]
+
+## Constraints & Preferences
+- [user constraints, preferences, specs, or "(none)"]
+
+## Progress
+### Done
+- [completed work or "(none)"]
+
+### In Progress
+- [current work or "(none)"]
+
+### Blocked
+- [blockers or "(none)"]
+
+## Key Decisions
+- [decision and why, or "(none)"]
+
+## Next Steps
+- [ordered next actions or "(none)"]
+
+## Critical Context
+- [important technical facts, errors, open questions, or "(none)"]
+
+## Relevant Files
+- [file or directory path: why it matters, or "(none)"]
+</template>
+
+Rules:
+- Keep every section, even when empty.
+- Use terse bullets, not prose paragraphs.
+- Preserve exact file paths, commands, error strings, and identifiers when known.
+- Do not mention the summary process or that context was compacted.`;
+
+/** OpenCode's buildPrompt (packages/core/src/session/compaction.ts). */
+function buildCompactionUser(
+  previousSummary: string | undefined,
+  context: string,
+): string {
+  const head = previousSummary
+    ? `Update the anchored summary (shown below in <previous-summary>) using the conversation history that follows.\nPreserve still-true details, remove stale details, and merge in the new facts.\n<previous-summary>\n${previousSummary}\n</previous-summary>`
+    : "Create a new anchored summary from the conversation history that follows.";
+  return [head, COMPACTION_SUMMARY_TEMPLATE, context].join("\n\n");
+}
+
+// Real OpenCode compaction constants (session/compaction.ts + session/overflow.ts)
+const COMPACTION_BUFFER = 20_000; // reserved output headroom (overflow.ts)
+const MIN_PRESERVE_RECENT_TOKENS = 2_000;
+const MAX_PRESERVE_RECENT_TOKENS = 8_000;
+const SUMMARY_OUTPUT_TOKENS = 4_096;
+const MIN_TAIL_TURNS = 2; // DEFAULT_TAIL_TURNS
+
+/** Tool outputs are truncated to 2000 chars in OpenCode's compaction serializer. */
+const COMPACTION_TOOL_OUTPUT_MAX_CHARS = 2_000;
+
+function renderTurnForCompaction(turn: ConversationTurn): string {
+  const role = turn.role === "user" ? "User" : "Assistant";
+  const parts = turn.content
+    .map((part) => {
+      if (part.type === "tool_result") {
+        const body =
+          part.content.length <= COMPACTION_TOOL_OUTPUT_MAX_CHARS
+            ? part.content
+            : `${part.content.slice(0, COMPACTION_TOOL_OUTPUT_MAX_CHARS)}\n[truncated]`;
+        return `[Tool result${part.is_error ? " (error)" : ""}:\n${body}]`;
+      }
+      return renderContentPart(part);
+    })
+    .join("\n");
+  return `${role}:\n${parts}`;
+}
+
+function renderConversationForCompaction(turns: ConversationTurn[]): string {
+  return turns.map(renderTurnForCompaction).join("\n\n---\n\n");
+}
 
 /**
- * Simulate compaction: LLM-summarize the prefix that falls outside
- * the tail window, then return summary + tail.
+ * Faithful port of OpenCode's PROGRESSIVE auto-compaction (the way a real coding
+ * agent manages a long session). Replay turns in order; whenever the live
+ * context (anchored summary + raw tail) reaches `usable = context - reserved`,
+ * fold everything except the small verbatim tail into the anchored summary and
+ * continue. The summary is ANCHORED — one running summary that is UPDATED each
+ * pass via a <previous-summary> block (not a growing stack), exactly as
+ * OpenCode does. Early detail decays compound-style as it is repeatedly
+ * re-summarized through the ~4K-token structured template.
  *
- * Iterative: when the total exceeds `compactionThreshold`, compact the prefix
- * and check again. Real tools (Claude Code) auto-compact at ~83.5% of the
- * context window (~140K for a 200K model). A 400K session triggers 2-3
- * compaction cycles. Each cycle replaces the prefix with a summary, losing
- * more detail.
+ * Settings mirror OpenCode exactly:
+ *  - usable = context - min(20K, maxOutputTokens)         (overflow.ts)
+ *  - verbatim tail = clamp(usable*0.25, 2K, 8K) + ≥2 turns (compaction.ts)
+ *  - summary output capped at 4096 tokens
+ *  - tool outputs truncated to 2000 chars (renderTurnForCompaction)
+ *
+ * Same-session-model summarization is intentional and realistic: real agents
+ * compact with the session model, so a stronger model produces a tighter,
+ * more abstractive summary (loses more verbatim specifics) than a weaker one.
  */
 export async function compactionBaseline(
   turns: ConversationTurn[],
-  tailBudgetTokens: number = 80_000,
   llm: EvalLLMClient,
   modelContextWindow: number = 200_000,
+  maxOutputTokens: number = 32_000,
 ): Promise<string> {
-  // Match real tool behavior: no compaction until the conversation exceeds
-  // the model's effective context window. Claude Code auto-compacts at ~83.5%
-  // of (contextWindow - outputReserve). For a 200K model: ~140K threshold.
-  const compactionThreshold = Math.floor(
-    (modelContextWindow - Math.min(32_000, modelContextWindow * 0.15)) * 0.835,
+  const reserved = Math.min(COMPACTION_BUFFER, maxOutputTokens);
+  const usable = Math.max(0, modelContextWindow - reserved);
+  const tailBudget = Math.min(
+    MAX_PRESERVE_RECENT_TOKENS,
+    Math.max(MIN_PRESERVE_RECENT_TOKENS, Math.floor(usable * 0.25)),
   );
-  const maxCompactions = 4; // safety cap
-  let currentTurns = turns;
+  const SAFETY_CAP = 500;
+
+  // Update the anchored summary with a prefix of raw turns. If the prefix is too
+  // large to summarize in one call, fold it in sequential chunks (each chunk
+  // updates the running anchor) so we never exceed the summarizer's own window.
+  const foldIntoAnchor = async (
+    anchor: string | undefined,
+    prefix: ConversationTurn[],
+  ): Promise<string> => {
+    const safeInput = Math.max(
+      20_000,
+      usable - SUMMARY_OUTPUT_TOKENS - estimateTokens(anchor ?? ""),
+    );
+    const chunks: ConversationTurn[][] = [];
+    let chunk: ConversationTurn[] = [];
+    let chunkTokens = 0;
+    for (const turn of prefix) {
+      const t = turn.tokens ?? estimateTokens(renderTurnForCompaction(turn));
+      if (chunkTokens + t > safeInput && chunk.length > 0) {
+        chunks.push(chunk);
+        chunk = [];
+        chunkTokens = 0;
+      }
+      chunk.push(turn);
+      chunkTokens += t;
+    }
+    if (chunk.length > 0) chunks.push(chunk);
+
+    let current = anchor;
+    for (const c of chunks) {
+      const result = await llm.prompt(
+        COMPACTION_SYSTEM,
+        buildCompactionUser(current, renderConversationForCompaction(c)),
+        { maxTokens: SUMMARY_OUTPUT_TOKENS, temperature: 0 },
+      );
+      current = result.text;
+    }
+    return current ?? "";
+  };
+
+  let window: ConversationTurn[] = []; // raw (un-summarized) recent turns
+  let windowTokens = 0;
+  let anchor: string | undefined; // the single running anchored summary
   let compactionCount = 0;
 
-  while (compactionCount < maxCompactions) {
-    const total = totalTokens(currentTurns);
+  for (const turn of turns) {
+    window.push(turn);
+    windowTokens +=
+      turn.tokens ?? estimateTokens(renderTurnForCompaction(turn));
 
-    // No compaction until the conversation exceeds the threshold (~140K for
-    // a 200K model). This matches real tool behavior — compaction doesn't
-    // trigger at 80K, only when context pressure is real.
-    if (total <= compactionThreshold) break;
+    const liveTokens = windowTokens + estimateTokens(anchor ?? "");
+    if (liveTokens < usable || compactionCount >= SAFETY_CAP) continue;
 
-    // Find the tail window cutoff
+    // Keep the last `tailBudget` tokens verbatim, but always at least the last
+    // MIN_TAIL_TURNS turns.
     let tailTokens = 0;
-    let cutoff = currentTurns.length;
-    for (let i = currentTurns.length - 1; i >= 0; i--) {
-      const turnTokens =
-        currentTurns[i].tokens ?? estimateTokens(renderTurn(currentTurns[i]));
-      if (tailTokens + turnTokens > tailBudgetTokens) {
+    let cutoff = window.length;
+    for (let i = window.length - 1; i >= 0; i--) {
+      const t =
+        window[i].tokens ?? estimateTokens(renderTurnForCompaction(window[i]));
+      const turnsKept = window.length - i;
+      if (tailTokens + t > tailBudget && turnsKept > MIN_TAIL_TURNS) {
         cutoff = i + 1;
         break;
       }
-      tailTokens += turnTokens;
+      tailTokens += t;
       if (i === 0) cutoff = 0;
     }
-
-    const prefix = currentTurns.slice(0, cutoff);
-    const tail = currentTurns.slice(cutoff);
-
-    if (prefix.length === 0) break;
-
-    // Summarize the prefix via LLM. If the prefix exceeds the model's
-    // context window, chunk it into segments and summarize each, then
-    // concatenate the summaries.
-    const MAX_CHUNK_TOKENS = 800_000; // leave room for system prompt + output
-    const prefixTokens = totalTokens(prefix);
-    let summaryText: string;
-
-    if (prefixTokens <= MAX_CHUNK_TOKENS) {
-      // Fits in one call
-      const prefixText = renderConversation(prefix);
-      const userPrompt = COMPACTION_USER_TEMPLATE.replace(
-        "{{conversation}}",
-        prefixText,
-      );
-      const result = await llm.prompt(COMPACTION_SYSTEM, userPrompt, {
-        maxTokens: 4096,
-        temperature: 0,
-      });
-      summaryText = result.text;
-    } else {
-      // Chunk the prefix into segments that fit
-      const chunks: ConversationTurn[][] = [];
-      let chunk: ConversationTurn[] = [];
-      let chunkTokens = 0;
-      for (const turn of prefix) {
-        const t = turn.tokens ?? estimateTokens(renderTurn(turn));
-        if (chunkTokens + t > MAX_CHUNK_TOKENS && chunk.length > 0) {
-          chunks.push(chunk);
-          chunk = [];
-          chunkTokens = 0;
-        }
-        chunk.push(turn);
-        chunkTokens += t;
-      }
-      if (chunk.length > 0) chunks.push(chunk);
-
-      console.log(
-        `  [compaction] prefix too large (${prefixTokens} tok), splitting into ${chunks.length} chunks`,
-      );
-
-      // Summarize each chunk
-      const chunkSummaries: string[] = [];
-      for (let c = 0; c < chunks.length; c++) {
-        const chunkText = renderConversation(chunks[c]);
-        const userPrompt = COMPACTION_USER_TEMPLATE.replace(
-          "{{conversation}}",
-          chunkText,
-        );
-        const result = await llm.prompt(COMPACTION_SYSTEM, userPrompt, {
-          maxTokens: 4096,
-          temperature: 0,
-        });
-        chunkSummaries.push(result.text);
-        console.log(
-          `  [compaction] chunk ${c + 1}/${chunks.length}: ${totalTokens(chunks[c])} tok → ${estimateTokens(result.text)} tok`,
-        );
-      }
-      summaryText = chunkSummaries.join("\n\n---\n\n");
+    let prefix = window.slice(0, cutoff);
+    let tail = window.slice(cutoff);
+    if (prefix.length === 0 && window.length > 1) {
+      prefix = window.slice(0, -1);
+      tail = window.slice(-1);
     }
+    if (prefix.length === 0) continue; // lone turn > usable: can't compact
 
-    // Replace prefix with a synthetic summary turn + keep tail
-    const summaryTurn: ConversationTurn = {
-      role: "assistant",
-      content: [
-        {
-          type: "text",
-          text: `## Compacted Summary (pass ${compactionCount + 1})\n\n${summaryText}`,
-        },
-      ],
-      tokens: estimateTokens(summaryText),
-    };
-    currentTurns = [summaryTurn, ...tail];
+    anchor = await foldIntoAnchor(anchor, prefix);
     compactionCount++;
-
+    window = tail;
+    windowTokens = totalTokens(tail);
     console.log(
-      `  [compaction] pass ${compactionCount}: ${prefix.length} turns summarized → ${estimateTokens(summaryText)} tok, ${currentTurns.length} turns remaining (${totalTokens(currentTurns)} tok)`,
+      `  [compaction] pass ${compactionCount}: folded ${prefix.length} turns → anchor ${estimateTokens(anchor)} tok; tail ${windowTokens} tok`,
     );
   }
 
-  // Final render
-  if (compactionCount === 0) {
-    return renderConversation(currentTurns);
-  }
+  const finalTokens = windowTokens + estimateTokens(anchor ?? "");
+  console.log(
+    `  [compaction] ${compactionCount} progressive compaction(s); final context ${finalTokens} tok (anchor ${estimateTokens(anchor ?? "")}, tail ${windowTokens})`,
+  );
 
-  return renderConversation(currentTurns);
+  const parts: string[] = [];
+  if (anchor) parts.push(`## Summary of earlier conversation\n\n${anchor}`);
+  const tailText = renderConversation(window);
+  if (tailText) parts.push(tailText);
+  return parts.join("\n\n---\n\n");
 }
 
 // ---------------------------------------------------------------------------

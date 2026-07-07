@@ -42,7 +42,11 @@ import {
 import { judge } from "./judge";
 import { scoreRetrieval } from "./recall-score";
 import type { EvalLLMClient } from "./llm-backend";
-import { createEvalLLMClient, resolveBackend } from "./llm-backend";
+import {
+  createEvalLLMClient,
+  resolveBackend,
+  resolveJudgeBackend,
+} from "./llm-backend";
 
 // ---------------------------------------------------------------------------
 // Gateway connection
@@ -69,6 +73,40 @@ export interface GatewayHandle {
  *   - If --gateway is specified, connect to the external gateway
  *   - Otherwise, auto-start an isolated gateway that forwards to real upstream
  */
+/**
+ * When EVAL_UPSTREAM_URL is set, force every gateway request onto a custom
+ * Anthropic-compatible upstream (e.g. MiniMax) via X-Lore-Upstream-URL — the
+ * highest-precedence upstream override — and rewrite the model to the eval's
+ * configured model. Without this, the recorded scenario turns' hardcoded
+ * `claude-*` model names route to api.anthropic.com by model-prefix (ignoring
+ * LORE_UPSTREAM_ANTHROPIC) and a non-Anthropic provider rejects the model.
+ * No-op unless EVAL_UPSTREAM_URL is set, so default eval behavior is unchanged.
+ */
+export function applyUpstreamOverride(
+  requestBody: Record<string, unknown>,
+  model: string,
+): {
+  body: Record<string, unknown>;
+  headers: Record<string, string>;
+} {
+  const headers: Record<string, string> = {};
+
+  // EVAL_PROJECT pins a stable project path so the gateway attributes replay,
+  // curation, and QA to one project (memory is shared and recall works) and
+  // skips synthetic-resolve — which would otherwise inject read/bash probes to
+  // auto-detect cwd. Those probes collide with the QA tool loop: the stub
+  // tool_result gets mis-read as the project path. Setting the header avoids
+  // the whole detection path.
+  const project = process.env.EVAL_PROJECT;
+  if (project) headers["x-lore-project"] = project;
+
+  const upstream = process.env.EVAL_UPSTREAM_URL;
+  if (upstream) headers["x-lore-upstream-url"] = upstream;
+
+  const body = upstream !== undefined ? { ...requestBody, model } : requestBody;
+  return { body, headers };
+}
+
 export async function connectGateway(
   config: EvalConfig,
 ): Promise<GatewayHandle> {
@@ -99,15 +137,26 @@ export async function connectGateway(
     return {
       baseURL,
       async chat(requestBody, headers) {
+        const ov = applyUpstreamOverride(
+          requestBody as Record<string, unknown>,
+          config.model,
+        );
         return fetch(`${baseURL}/v1/messages`, {
           method: "POST",
           headers: {
             "content-type": "application/json",
             "x-api-key": process.env.ANTHROPIC_API_KEY ?? "eval-key",
             "anthropic-version": "2023-06-01",
+            // Route foreground calls via the correct provider route so a
+            // non-Anthropic answering model (MiniMax, DeepSeek, …) forwards to
+            // its own endpoint with valid auth instead of api.anthropic.com.
+            ...(process.env.EVAL_PROVIDER
+              ? { "x-lore-provider": process.env.EVAL_PROVIDER }
+              : {}),
+            ...ov.headers,
             ...headers,
           },
-          body: JSON.stringify(requestBody),
+          body: JSON.stringify(ov.body),
         });
       },
     };
@@ -117,7 +166,7 @@ export async function connectGateway(
   // start an isolated gateway. Otherwise, skip the gateway entirely —
   // questions will be answered via direct LLM calls without Lore processing.
   if (process.env.ANTHROPIC_API_KEY) {
-    return startLiveGateway();
+    return startLiveGateway(config.model);
   }
 
   // No gateway available — return a stub that logs warnings
@@ -183,7 +232,7 @@ async function startFixtureGateway(): Promise<GatewayHandle> {
  * Uses the same harness infrastructure but does NOT wire in a replay
  * interceptor, so requests go to the real upstream (Anthropic, OpenAI, etc).
  */
-async function startLiveGateway(): Promise<GatewayHandle> {
+async function startLiveGateway(model: string): Promise<GatewayHandle> {
   const { unlinkSync, existsSync } = await import("node:fs");
 
   // Create an isolated temp DB
@@ -206,11 +255,21 @@ async function startLiveGateway(): Promise<GatewayHandle> {
   // Dynamic imports so env vars take effect
   const { startServer } = await import("../../gateway/src/server");
   const { loadConfig } = await import("../../gateway/src/config");
-  const { close: closeDB } = await import("@loreai/core");
+  const { close: closeDB, embedding } = await import("@loreai/core");
   const { resetPipelineState } = await import("../../gateway/src/pipeline");
 
   closeDB();
   await resetPipelineState();
+
+  // EVAL_DISABLE_EMBEDDINGS forces FTS-only recall (no local ONNX worker). This
+  // matches how the eval normally runs when onnxruntime-node isn't resolvable,
+  // and sidesteps a flaky/corrupt local model whose native (Napi) abort would
+  // otherwise crash the whole run uncatchably. Recall then uses FTS keyword
+  // search — the same fidelity the recorded baselines were produced with.
+  if (process.env.EVAL_DISABLE_EMBEDDINGS === "1") {
+    embedding._markLocalProviderUnavailable();
+    console.log("  [embedding] local provider disabled (FTS-only recall)");
+  }
 
   // NO replay interceptor — requests go to real upstream
   const config = loadConfig();
@@ -222,15 +281,26 @@ async function startLiveGateway(): Promise<GatewayHandle> {
   return {
     baseURL,
     async chat(requestBody, headers) {
+      const ov = applyUpstreamOverride(
+        requestBody as Record<string, unknown>,
+        model,
+      );
       return fetch(`${baseURL}/v1/messages`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
           "x-api-key": process.env.ANTHROPIC_API_KEY ?? "eval-key",
           "anthropic-version": "2023-06-01",
+          // Route foreground calls via the correct provider route so a
+          // non-Anthropic answering model (MiniMax, DeepSeek, …) forwards to
+          // its own endpoint with valid auth instead of api.anthropic.com.
+          ...(process.env.EVAL_PROVIDER
+            ? { "x-lore-provider": process.env.EVAL_PROVIDER }
+            : {}),
+          ...ov.headers,
           ...headers,
         },
-        body: JSON.stringify(requestBody),
+        body: JSON.stringify(ov.body),
       });
     },
     async teardown() {
@@ -532,6 +602,147 @@ export async function buildLoreContext(
   }
 }
 
+/**
+ * Retrieval diagnostic (EVAL_DIAG_RETRIEVAL=1): for each question, measure
+ * whether each expected fact is (a) stored at all (raw temporal), (b) present
+ * in the CURRENT fixed passive context (buildLoreContext), and (c) present in
+ * relevance-ranked searchRecall@k (real Lore retrieval, per-question).
+ *
+ * This isolates the "facts just there" failure mode — model-independent:
+ *   - not in store        -> absence (distillation/replay gap)
+ *   - in store, not recall -> retrieval ranking/coverage gap
+ *   - in recall, not fixed -> the fixed passive blob is recency-biased; a
+ *                             per-question relevance injection would fix it
+ * Logs per-fact flags (S/F/R) and aggregate rates. Returns nothing.
+ */
+async function runRetrievalDiagnostic(
+  scenario: ScenarioDefinition,
+  fixedContext: string,
+): Promise<void> {
+  const core = (await import("@loreai/core")) as unknown as {
+    searchRecall: (
+      input: unknown,
+    ) => Promise<Array<{ item: unknown; score: number }>>;
+    config: () => { search?: unknown };
+    ensureProject: (p: string) => string;
+    db: () => {
+      query: (sql: string) => { all: (...a: unknown[]) => unknown[] };
+    };
+  };
+  const projectPath = process.env.EVAL_PROJECT || process.cwd();
+  const pid = core.ensureProject(projectPath);
+  const searchConfig = {
+    ...(core.config().search ?? {}),
+    recallLimit: 20,
+    queryExpansion: false,
+  };
+  const fixed = fixedContext.toLowerCase();
+  const storeRows = core
+    .db()
+    .query("SELECT content FROM temporal_messages WHERE project_id = ?")
+    .all(pid) as Array<{ content: string | null }>;
+  const store = storeRows
+    .map((r) => (r.content ?? "").toLowerCase())
+    .join("\n");
+
+  let total = 0;
+  let inStore = 0;
+  let inFixed = 0;
+  let inRecall = 0;
+  const lines: string[] = [];
+  for (const q of scenario.questions) {
+    const facts = q.expectedFacts ?? [];
+    if (facts.length === 0) continue;
+    const results = await core.searchRecall({
+      query: q.question,
+      scope: "all",
+      projectPath,
+      knowledgeEnabled: true,
+      searchConfig,
+    });
+    const recallText = results
+      .map((r) => JSON.stringify(r.item))
+      .join("\n")
+      .toLowerCase();
+    for (const f of facts) {
+      const fl = f.toLowerCase();
+      const s = store.includes(fl);
+      const fx = fixed.includes(fl);
+      const rc = recallText.includes(fl);
+      total++;
+      if (s) inStore++;
+      if (fx) inFixed++;
+      if (rc) inRecall++;
+      lines.push(
+        `[DIAG]  ${s ? "S" : "-"}${fx ? "F" : "-"}${rc ? "R" : "-"}  ${f.slice(0, 44)}  (${q.id})`,
+      );
+    }
+  }
+  const pct = (n: number) => (total ? Math.round((100 * n) / total) : 0);
+  console.log(
+    `\n[DIAG] === retrieval diagnostic: ${total} expected facts across ${scenario.questions.length} questions ===`,
+  );
+  console.log(
+    `[DIAG] in-store: ${inStore} (${pct(inStore)}%) | in fixed passive ctx: ${inFixed} (${pct(inFixed)}%) | in searchRecall@20: ${inRecall} (${pct(inRecall)}%)`,
+  );
+  console.log("[DIAG] legend S=stored F=in-fixed-context R=in-recall@20");
+  for (const l of lines) console.log(l);
+  console.log("[DIAG] === end retrieval diagnostic ===\n");
+}
+
+/**
+ * Per-question relevance-ranked passive context (EVAL_PASSIVE_RECALL=1).
+ *
+ * Feeds the lore arm's in-context memory from relevance-ranked searchRecall
+ * (knowledge + distillations + raw temporal) for THIS question, instead of the
+ * recency-biased fixed blob. This is the "facts just there" path — proactive
+ * recall injection, no reliance on the model calling the recall tool. Mirrors
+ * the product direction: surface relevant memory passively per turn.
+ */
+async function buildRelevanceContext(question: string): Promise<string> {
+  try {
+    const core = (await import("@loreai/core")) as unknown as {
+      searchRecall: (
+        input: unknown,
+      ) => Promise<
+        Array<{ item: { source: string; item: unknown }; score: number }>
+      >;
+      config: () => { search?: unknown };
+    };
+    const projectPath = process.env.EVAL_PROJECT || process.cwd();
+    const searchConfig = {
+      ...(core.config().search ?? {}),
+      recallLimit: 20,
+      queryExpansion: false,
+    };
+    const results = await core.searchRecall({
+      query: question,
+      scope: "all",
+      projectPath,
+      knowledgeEnabled: true,
+      searchConfig,
+    });
+    const top = results[0]?.score ?? 0;
+    const floor = top * 0.1;
+    const kept = (
+      top > 0 ? results.filter((r) => r.score >= floor) : results
+    ).slice(0, 15);
+    const parts = kept.map((r) => {
+      const it = r.item.item as Record<string, unknown>;
+      const text =
+        (it.content as string) ??
+        (it.observations as string) ??
+        (it.text as string) ??
+        JSON.stringify(it);
+      return `[${r.item.source}] ${text}`;
+    });
+    return parts.join("\n\n");
+  } catch (err) {
+    console.warn("  Warning: buildRelevanceContext failed:", err);
+    return "";
+  }
+}
+
 async function getBaselineContext(
   mode: BaselineMode,
   turns: ConversationTurn[],
@@ -542,10 +753,15 @@ async function getBaselineContext(
       return tailWindowBaseline(turns);
     case "compaction": {
       if (!llm) return tailWindowBaseline(turns); // fallback in fixture mode
-      return compactionBaseline(turns, 80_000, llm);
+      return compactionBaseline(turns, llm);
     }
     case "raw":
       return rawBaseline(turns);
+    // Fresh agent with no prior-session memory: answer from nothing. This is
+    // the negative control for multi-session recall — Lore auto-injects prior
+    // sessions, a vanilla agent has none.
+    case "no-memory":
+      return "";
     // Gateway-based baselines (lore, context-only, memory-only) use the
     // gateway's own context management — we don't build a context string.
     // Instead, the question is sent through the gateway which applies
@@ -562,15 +778,61 @@ async function getBaselineContext(
 // Question answering
 // ---------------------------------------------------------------------------
 
+/** Max client-side tool rounds before we force a tools-free final answer. */
+const MAX_TOOL_ROUNDS = 4;
+
+/**
+ * Stub tool_result fed back for the STANDARD_TOOLS (bash/read/write). The eval
+ * has no real filesystem/shell, and Lore's `recall` tool is executed by the
+ * gateway server-side (never surfaced to the client), so the only tool_use
+ * blocks we see are the model trying to inspect an environment that isn't
+ * there. We report no output and nudge it to answer from context.
+ */
+const TOOL_STUB_RESULT =
+  "This tool is not available in the evaluation environment and produced no " +
+  "output. Do not call tools again; answer the question directly and " +
+  "concisely using the information already provided in the conversation.";
+
+interface AnthropicBlock {
+  type: string;
+  text?: string;
+  id?: string;
+  name?: string;
+}
+
+interface AnthropicResponse {
+  content?: AnthropicBlock[];
+  stop_reason?: string;
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+  };
+  error?: { type?: string; message?: string };
+}
+
+function extractText(content: AnthropicBlock[]): string {
+  return content
+    .filter((b) => b.type === "text")
+    .map((b) => b.text ?? "")
+    .join("");
+}
+
 /**
  * Ask a question through the gateway so it gets Lore's full processing:
  * LTM injection in the system prompt, recall tool availability, and
  * distilled context. This is how the "lore" baseline is actually tested.
  *
- * Includes retry logic for rate limit errors (Anthropic 429s) and
- * inter-call delays to stay under the 30K tokens/min org limit.
+ * Runs an agentic tool loop: many models (e.g. MiniMax) obey QA_SYSTEM's "use
+ * all the tools available" literally and reply with a `tool_use` block and no
+ * text. Single-shot extraction would score that as an empty answer. Instead we
+ * feed back a stub tool_result and re-ask, up to MAX_TOOL_ROUNDS, then make one
+ * final tools-free call so even a persistently tool-happy model must produce a
+ * text answer. Claude typically answers on the first turn, so this is a no-op
+ * for it. Includes rate-limit retry with backoff per call.
  */
-async function askQuestionViaGateway(
+export async function askQuestionViaGateway(
   question: string,
   gateway: GatewayHandle,
   model: string,
@@ -582,79 +844,102 @@ async function askQuestionViaGateway(
   const contextPreamble = loreContext
     ? `Here are distilled observations and conversation context from previous coding sessions:\n\n${loreContext}\n\n`
     : "";
-  const requestBody = {
-    model,
-    system: QA_SYSTEM,
-    messages: [
-      {
-        role: "user",
-        content: `${contextPreamble}Answer this question about our previous coding sessions. Be specific and factual. If you don't have enough information, say so.\n\nQuestion: ${question}`,
-      },
-    ],
-    tools: STANDARD_TOOLS,
-    max_tokens: 2048,
-    stream: false,
+  const messages: Array<{ role: string; content: unknown }> = [
+    {
+      role: "user",
+      content: `${contextPreamble}Answer this question about our previous coding sessions. Be specific and factual. If you don't have enough information, say so.\n\nQuestion: ${question}`,
+    },
+  ];
+
+  const tokens: TokenUsage = {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalCost: 0,
+  };
+  let recallInvoked = false;
+
+  // One gateway call with rate-limit retry/backoff.
+  const callOnce = async (withTools: boolean): Promise<AnthropicResponse> => {
+    const requestBody = {
+      model,
+      system: QA_SYSTEM,
+      messages,
+      tools: withTools ? STANDARD_TOOLS : [],
+      max_tokens: 2048,
+      stream: false,
+    };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) {
+        const backoff = 30_000 * 2 ** (attempt - 1);
+        console.warn(
+          `  Gateway rate limited, retrying in ${backoff / 1000}s...`,
+        );
+        await new Promise((r) => setTimeout(r, backoff));
+      }
+      const resp = await gateway.chat(requestBody, {
+        "x-lore-no-store": "true",
+      });
+      if (resp.headers.get("x-lore-recall-invoked") === "true") {
+        recallInvoked = true;
+      }
+      const data = (await resp.json()) as AnthropicResponse;
+      tokens.input += data.usage?.input_tokens ?? 0;
+      tokens.output += data.usage?.output_tokens ?? 0;
+      tokens.cacheRead += data.usage?.cache_read_input_tokens ?? 0;
+      tokens.cacheWrite += data.usage?.cache_creation_input_tokens ?? 0;
+      const text = extractText(data.content ?? []);
+      const errType = data.error?.type ?? "";
+      const transient =
+        errType === "rate_limit_error" ||
+        errType === "overloaded_error" ||
+        text.includes("rate limit") ||
+        text.includes("exceed") ||
+        /\b(429|529|503)\b|overloaded/i.test(data.error?.message ?? "");
+      if (transient && attempt < 2) continue;
+      return data;
+    }
+    return {
+      error: { message: "[Gateway rate limit exceeded after retries]" },
+    };
   };
 
-  // Retry with backoff for rate limit errors
-  for (let attempt = 0; attempt < 3; attempt++) {
-    // Delay between calls to stay under token-per-minute limits.
-    // Anthropic's org limit is often 30K-80K tokens/min; each QA call
-    // with LTM-injected system prompt can be 8K+ tokens.
-    if (attempt > 0) {
-      const backoff = 30_000 * 2 ** (attempt - 1);
-      console.warn(`  Gateway rate limited, retrying in ${backoff / 1000}s...`);
-      await new Promise((r) => setTimeout(r, backoff));
-    }
+  let lastText = "";
+  for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
+    // Final round: drop tools so the model is forced to answer in text.
+    const withTools = round < MAX_TOOL_ROUNDS;
+    const data = await callOnce(withTools);
+    const content = data.content ?? [];
+    const text = extractText(content);
+    if (text) lastText = text;
 
-    const resp = await gateway.chat(requestBody, {
-      "x-lore-no-store": "true",
-    });
-    const recallInvoked = resp.headers.get("x-lore-recall-invoked") === "true";
-    const data = (await resp.json()) as {
-      content?: Array<{ type: string; text?: string }>;
-      usage?: {
-        input_tokens?: number;
-        output_tokens?: number;
-        cache_read_input_tokens?: number;
-        cache_creation_input_tokens?: number;
+    const toolUses = content.filter((b) => b.type === "tool_use");
+    if (!withTools || toolUses.length === 0) {
+      return {
+        hypothesis: text || data.error?.message || "[No response from gateway]",
+        recallInvoked,
+        tokens,
       };
-      error?: { type?: string; message?: string };
-    };
-
-    // Check for rate limit in response
-    const text =
-      data.content
-        ?.filter((b) => b.type === "text")
-        .map((b) => b.text ?? "")
-        .join("") ?? "";
-
-    if (
-      text.includes("rate limit") ||
-      text.includes("exceed") ||
-      data.error?.type === "rate_limit_error"
-    ) {
-      if (attempt < 2) continue; // retry
-      // Last attempt — return the error as the hypothesis so the judge scores it low
     }
 
-    return {
-      hypothesis: text || data.error?.message || "[No response from gateway]",
-      recallInvoked,
-      tokens: {
-        input: data.usage?.input_tokens ?? 0,
-        output: data.usage?.output_tokens ?? 0,
-        cacheRead: data.usage?.cache_read_input_tokens ?? 0,
-        cacheWrite: data.usage?.cache_creation_input_tokens ?? 0,
-        totalCost: 0,
-      },
-    };
+    // Echo the assistant turn verbatim (preserves any thinking-block
+    // signatures the provider requires) and answer each tool_use with a stub.
+    messages.push({ role: "assistant", content });
+    messages.push({
+      role: "user",
+      content: toolUses.map((tu) => ({
+        type: "tool_result",
+        tool_use_id: tu.id,
+        content: TOOL_STUB_RESULT,
+      })),
+    });
   }
 
   return {
-    hypothesis: "[Gateway rate limit exceeded after retries]",
-    recallInvoked: false,
-    tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalCost: 0 },
+    hypothesis: lastText || "[No response from gateway]",
+    recallInvoked,
+    tokens,
   };
 }
 
@@ -886,6 +1171,13 @@ export async function runScenario(
     scenario.applicableBaselines.includes(b),
   );
 
+  // Dedicated judge client — always Anthropic/Sonnet (via JUDGE_API_KEY) so a
+  // weak or non-Anthropic answering model never grades its own output. Falls
+  // back to the answering `llm` when JUDGE_API_KEY is unset (single-provider).
+  const judgeLLM = llm
+    ? createEvalLLMClient(resolveJudgeBackend(llm.config))
+    : undefined;
+
   // Setup hook (e.g., seeding cross-project knowledge)
   let cleanup: (() => Promise<void>) | undefined;
   if (scenario.setup) {
@@ -977,6 +1269,17 @@ export async function runScenario(
         ? await buildLoreContext(allTurns)
         : "";
 
+      // Retrieval diagnostic: measure "facts just there" (passive) vs
+      // relevance-ranked recall, model-independent, then skip the QA loop.
+      if (
+        process.env.EVAL_DIAG_RETRIEVAL === "1" &&
+        isGatewayBaseline &&
+        mode === "lore"
+      ) {
+        await runRetrievalDiagnostic(scenario, loreContext);
+        continue;
+      }
+
       // Ask each question
       for (const q of scenario.questions) {
         let hypothesis: string;
@@ -996,11 +1299,17 @@ export async function runScenario(
         } else if (isGatewayBaseline) {
           // Gateway-based baselines: send the question through the gateway
           // so it gets Lore's LTM injection, recall tool, and distilled context.
+          // EVAL_PASSIVE_RECALL=1: feed a per-question relevance-ranked context
+          // ("facts just there") instead of the recency-biased fixed blob.
+          const perQuestionContext =
+            process.env.EVAL_PASSIVE_RECALL === "1" && mode === "lore"
+              ? await buildRelevanceContext(q.question)
+              : loreContext;
           const answer = await askQuestionViaGateway(
             q.question,
             gateway,
             config.model,
-            loreContext,
+            perQuestionContext,
           );
           hypothesis = answer.hypothesis;
           tokens = answer.tokens;
@@ -1012,8 +1321,10 @@ export async function runScenario(
           tokens = answer.tokens;
         }
 
-        // Score with the judge (end-task quality)
-        const judgeResult = await judge(q, hypothesis, llm, { recallInvoked });
+        // Score with the judge (end-task quality) — dedicated judge client
+        const judgeResult = await judge(q, hypothesis, judgeLLM, {
+          recallInvoked,
+        });
 
         // Score retrieval quality objectively (justifier-free), independent of
         // the judge. Present only when the question declares ground-truth
@@ -1134,6 +1445,8 @@ async function loadScenarios(
         scenarios.push(...mod.scenarios);
         const mega = await import("./scenarios/mega-session");
         scenarios.push(mega.default);
+        const real = await import("./scenarios/real-session");
+        scenarios.push(...real.scenarios);
         break;
       }
       case "recall": {
@@ -1141,6 +1454,8 @@ async function loadScenarios(
         scenarios.push(...mod.scenarios);
         const decision = await import("./scenarios/decision-recall");
         scenarios.push(...decision.scenarios);
+        const realMulti = await import("./scenarios/real-multisession");
+        scenarios.push(...realMulti.scenarios);
         break;
       }
       case "preferences": {

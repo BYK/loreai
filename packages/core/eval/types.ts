@@ -34,7 +34,12 @@ export type BaselineMode =
   | "lore-memory-only"
   | "tail-window"
   | "compaction"
-  | "raw";
+  | "raw"
+  // A fresh agent with NO memory of prior sessions — the realistic vanilla
+  // experience Lore's automatic cross-session injection replaces. Used as the
+  // negative-control arm in multi-session recall tests: it answers with no
+  // prior-session context, so any correct prior-session fact is guessing.
+  | "no-memory";
 
 export const ALL_BASELINES: BaselineMode[] = [
   "lore",
@@ -43,6 +48,10 @@ export const ALL_BASELINES: BaselineMode[] = [
   "tail-window",
   "compaction",
   "raw",
+  // Negative-control arm for multi-session recall (a fresh agent with no prior
+  // memory). Selectable via `--baselines no-memory`; not in the default set,
+  // which stays lore-vs-compaction.
+  "no-memory",
 ];
 
 // ---------------------------------------------------------------------------

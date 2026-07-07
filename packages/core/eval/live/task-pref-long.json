@@ -1,0 +1,74 @@
+{
+  "id": "pref-long",
+  "seed": "./seed-min",
+  "sessions": [
+    {
+      "id": "s1",
+      "turns": [
+        {
+          "blob": "blob-xs.md",
+          "prompt": "Starting the 'orderkit' project (pure Python stdlib, code under src/). Using the reference spec piped below, create src/inventory.py with a pure function stock_level(records, sku) summing quantities for a SKU across a list of record dicts. (Totally unrelated aside, just thinking out loud while it's in my head — nothing to act on or write down: our orders happen to ride the WHOLESALE channel out of the EMEA region, ship from warehouse WH-07, and we keep status values like SUBMITTED uppercase.) Anyway — just the stock_level function for now."
+        },
+        {
+          "blob": "blob-xs.md",
+          "prompt": "Same session. Using the reference spec piped below, create src/text_utils.py with a pure function slugify(s): lowercase, collapse runs of non-alphanumerics to a single hyphen, trim leading/trailing hyphens."
+        },
+        {
+          "blob": "blob-xs.md",
+          "prompt": "Same session. Using the reference spec piped below, create src/dates.py with a pure function days_between(a, b): integer days between two 'YYYY-MM-DD' strings (b minus a)."
+        },
+        {
+          "blob": "blob-xs.md",
+          "prompt": "Same session. Using the reference spec piped below, create src/stats.py with a pure function mean(values): arithmetic mean of a list of numbers as a float, or 0.0 for empty."
+        },
+        {
+          "blob": "blob-xs.md",
+          "prompt": "Same session. Using the reference spec piped below, create src/validate.py with a pure function is_valid_sku(sku): True for a non-empty alphanumeric string else False."
+        },
+        {
+          "blob": "blob-xs.md",
+          "prompt": "Same session. Using the reference spec piped below, create src/strings.py with a pure function truncate(s, n): s unchanged if len(s)<=n else first n-1 chars plus an ellipsis character."
+        },
+        {
+          "blob": "blob-xs.md",
+          "prompt": "Same session. Using the reference spec piped below, create src/lists.py with a pure function chunk(xs, n): split a list into consecutive sublists of length n (last may be shorter)."
+        },
+        {
+          "blob": "blob-xs.md",
+          "prompt": "Same session. Using the reference spec piped below, create src/dicts.py with a pure function deep_get(d, path, default=None): read a value from nested dicts via a dotted path string."
+        },
+        {
+          "blob": "blob-xs.md",
+          "prompt": "Same session. Using the reference spec piped below, create src/mathx.py with a pure function clamp(x, lo, hi): x bounded to the [lo, hi] range."
+        },
+        {
+          "blob": "blob-xs.md",
+          "prompt": "Same session. Using the reference spec piped below, create src/sets_utils.py with a pure function jaccard(a, b): Jaccard similarity of two iterables as a float, 0.0 when both empty."
+        },
+        {
+          "blob": "blob-xs.md",
+          "prompt": "Same session. Using the reference spec piped below, create src/paths.py with a pure function normalize(p): collapse duplicate slashes and resolve '.'/'..' segments in a POSIX-style path string, no filesystem access."
+        },
+        {
+          "blob": "blob-xs.md",
+          "prompt": "Same session. Using the reference spec piped below, create src/colors.py with a pure function hex_to_rgb(h): parse '#RRGGBB' into an (r,g,b) tuple of ints."
+        },
+        {
+          "blob": "blob-xs.md",
+          "prompt": "Same session. Using the reference spec piped below, create src/backoff.py with a pure function delays(attempts, base_ms, cap_ms): list of exponential backoff delays capped at cap_ms."
+        },
+        {
+          "blob": "blob-xs.md",
+          "prompt": "Same session. Using the reference spec piped below, create src/csv_utils.py with a pure function parse_row(line): split a single CSV line into fields, honoring double-quoted fields with embedded commas."
+        },
+        {
+          "blob": "blob-xs.md",
+          "prompt": "Same session. Using the reference spec piped below, create src/ids.py with a pure function short_id(seed): deterministic 8-char lowercase alphanumeric id derived from a string seed (stdlib hashlib only)."
+        },
+        {
+          "prompt": "Now create src/orders_v2.py with a PURE function create_order(customer, items), where items is a list of (product_id, price_cents, qty) tuples. Enforce a maximum of 100 line items, compute the order total in integer cents, and return the order with these fields: customer, status, total_cents, line_count, channel, region, and warehouse. No database — just return the order object. Build it the way I like things done on this orderkit project."
+        }
+      ]
+    }
+  ]
+}

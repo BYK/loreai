@@ -1,5 +1,13 @@
 import type { Root } from "mdast";
-import { serialize, inline, h, ul, liph, strong, t, root } from "./markdown";
+import { serialize, inline, h, ul, liph, strong, t, root, p } from "./markdown";
+
+/**
+ * Category tag for session-relevant context re-surfaced from the agent's own
+ * earlier turns / distilled memory (see ltm.ts `RECALLED_CONTEXT_CATEGORY`).
+ * Defined locally to keep prompt.ts a leaf module (no ltm.ts import → no import
+ * cycle); a round-trip test asserts this equals ltm.ts's producer value.
+ */
+export const RECALLED_CONTEXT_CATEGORY = "recalled";
 
 // All prompts are locked down — they are our core value offering.
 // Do not make these configurable.
@@ -1028,7 +1036,28 @@ export function formatKnowledge(
       if (a.title !== b.title) return a.title < b.title ? -1 : 1;
       return a.content < b.content ? -1 : a.content > b.content ? 1 : 0;
     });
-    children.push(h(3, category.charAt(0).toUpperCase() + category.slice(1)));
+    // The "recalled" category is session-relevant context re-surfaced from the
+    // agent's own earlier turns / distilled memory (facts, values, conventions
+    // stated in passing that have since scrolled out of the live window). A
+    // passive "Recalled" heading reads as background and cheaper models default
+    // to inventing their own values instead of applying these. Render it with an
+    // imperative heading + directive lead-in so the model treats these as
+    // established, authoritative project facts to USE. Deterministic text for a
+    // stable selected set — no cache churn (same invariant as every other
+    // category's fixed heading).
+    if (category === RECALLED_CONTEXT_CATEGORY) {
+      children.push(h(3, "Established project context (apply these)"));
+      children.push(
+        p(
+          "These facts, values, and conventions were stated earlier in this " +
+            "project and are still in force. Treat them as authoritative: use " +
+            "these exact values when they apply, and do NOT substitute your own " +
+            "defaults.",
+        ),
+      );
+    } else {
+      children.push(h(3, category.charAt(0).toUpperCase() + category.slice(1)));
+    }
     children.push(
       ul(
         items.map((i) => {

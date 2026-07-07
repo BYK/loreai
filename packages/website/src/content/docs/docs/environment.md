@@ -36,6 +36,7 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 | Variable | Description |
 |---|---|
 | `LORE_CONFIG_DIR` | Get the Lore config directory. Uses $LORE_CONFIG_DIR if set, otherwise ~/.lore |
+| `LORE_EVAL_HARNESS` | _no description in source_ |
 | `LORE_GIT_REMOTE` | Git remote URL (e.g. `git@github.com:org/repo.git`) of the project the spawned Codex CLI is operating in. Exported by the gateway so a user-defined `env_http_headers` in `~/.codex/config.toml` can map it to a custom header for upstream telemetry. Set only when `git remote get-url origin` returns a value; the gateway does not read this env var itself. |
 | `LORE_HOSTED_MODE` | Hosted/remote mode — disables all filesystem operations that use client-controlled paths (git subprocess, .lore.json/.lore.md read/write, lat.md/ directory scan, file watchers). Env: LORE_HOSTED_MODE. |
 | `LORE_INSTALL_DIR` | Determine the install directory for a curl-installed binary. Priority: 1. $LORE_INSTALL_DIR environment variable 2. ~/.local/bin (if exists AND in $PATH) 3. ~/bin (if exists AND in $PATH) 4. ~/.lore/bin (fallback) |
