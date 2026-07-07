@@ -137,6 +137,8 @@ import {
   assembleOfflineCompaction,
   scaleUsageForClient,
   maxReportedUsageForModel,
+  clientMeteredContextWindow,
+  requestEnablesLongContext,
   MAX_OUTPUT_RESERVE,
   DEFAULT_MAX_REPORTED_USAGE,
 } from "./compaction";
@@ -3795,12 +3797,27 @@ async function forwardToUpstream(
  * `0.9 × (effectiveWindow − 13k)`. An empty/missing model id falls back to the
  * conservative default cap; unknown models use `getModelEntrySync`'s 200K-window
  * fallback entry (still well under a real 200K client's compaction threshold).
+ *
+ * `longContext` MUST reflect whether THIS request opted into the 1M window via
+ * the `context-1m` beta ({@link requestEnablesLongContext}). Without it, the
+ * effective window is clamped to 200K ({@link clientMeteredContextWindow}) so a
+ * 1M-capable third-party model (e.g. MiniMax-M3) the client meters against a
+ * 200K window can't sail past the client's ~167K auto-compact threshold — the
+ * whole point of scaling. Defaults to `false` (conservative) so any caller that
+ * can't determine the beta state gets the safe, compaction-proof cap.
  */
-function maxReportedUsageForModelID(modelID: string): number {
+function maxReportedUsageForModelID(
+  modelID: string,
+  longContext = false,
+): number {
   if (!modelID) return DEFAULT_MAX_REPORTED_USAGE;
   const entry = getModelEntrySync(modelID);
-  const contextWindow = entry.limit?.context ?? 200_000;
+  const realContextWindow = entry.limit?.context ?? 200_000;
   const maxOutput = entry.limit?.output ?? MAX_OUTPUT_RESERVE;
+  const contextWindow = clientMeteredContextWindow(
+    realContextWindow,
+    longContext,
+  );
   return maxReportedUsageForModel(contextWindow, maxOutput);
 }
 
@@ -4523,14 +4540,20 @@ function nonStreamHttpResponse(
   clientProtocol?: GatewayRequest["protocol"],
   clientStream?: boolean,
   extraHeaders?: Record<string, string>,
+  /** Whether the originating request opted into the 1M window via `context-1m`
+   *  beta. Defaults to `false` so the cap is clamped to the 200K-window value —
+   *  the safe, compaction-proof default for callers that don't thread it. */
+  longContext = false,
 ): Response {
   // Guard: resp.usage can be undefined at runtime for vLLM / partial responses.
   const usage = resp.usage ?? ZERO_USAGE;
 
   // Scale usage so the client's token total stays below auto-compact threshold.
   // postResponse() has already consumed the real values for calibration/bustRate.
-  // Cap is per-model (from the response's model), so a 1M-context model isn't
-  // throttled to the 200K cap.
+  // Cap is per-model AND per client-metered-window: a genuine 1M request (with
+  // the context-1m beta) isn't throttled to the 200K cap, but a 1M-capable model
+  // the client meters against 200K (no beta) IS clamped so it can't cross the
+  // client's ~167K auto-compact threshold (#910 regression; MiniMax-M3).
   const scaledUsage = scaleUsageForClient(
     {
       input_tokens: usage.inputTokens,
@@ -4538,7 +4561,7 @@ function nonStreamHttpResponse(
       cache_read_input_tokens: usage.cacheReadInputTokens,
       cache_creation_input_tokens: usage.cacheCreationInputTokens,
     },
-    maxReportedUsageForModelID(resp.model),
+    maxReportedUsageForModelID(resp.model, longContext),
   );
   const scaledResp: GatewayResponse = {
     ...resp,
@@ -6087,7 +6110,13 @@ async function handlePassthrough(
       upstreamResponse,
       wireProtocol,
     );
-    return nonStreamHttpResponse(resp, req.protocol, req.stream);
+    return nonStreamHttpResponse(
+      resp,
+      req.protocol,
+      req.stream,
+      undefined,
+      requestEnablesLongContext(req),
+    );
   }
 
   // Non-streaming cross-protocol: accumulate + re-emit
@@ -6095,7 +6124,13 @@ async function handlePassthrough(
     upstreamResponse,
     wireProtocol,
   );
-  return nonStreamHttpResponse(resp, req.protocol, req.stream);
+  return nonStreamHttpResponse(
+    resp,
+    req.protocol,
+    req.stream,
+    undefined,
+    requestEnablesLongContext(req),
+  );
 }
 
 /**
@@ -7822,6 +7857,10 @@ async function handleConversationTurn(
     let recallDepth = 0;
     let currentModifiedReq = modifiedReq;
     const cumulativeUsage = { ...(resp.usage ?? ZERO_USAGE) };
+    // Whether this request opted into the 1M window (context-1m beta); gates the
+    // client-usage cap so a 1M-capable model the client meters against 200K is
+    // clamped below its ~167K auto-compact threshold (#910 regression).
+    const longContext = requestEnablesLongContext(req);
 
     while (hasRecallToolUse(currentResp) && recallDepth < MAX_RECALL_DEPTH) {
       recallDepth++;
@@ -7876,6 +7915,7 @@ async function handleConversationTurn(
           req.protocol,
           req.stream,
           { "x-lore-recall-invoked": "true" },
+          longContext,
         );
       }
 
@@ -7944,6 +7984,7 @@ async function handleConversationTurn(
           req.protocol,
           req.stream,
           { "x-lore-recall-invoked": "true" },
+          longContext,
         );
       }
 
@@ -7979,6 +8020,7 @@ async function handleConversationTurn(
           req.protocol,
           req.stream,
           { "x-lore-recall-invoked": "true" },
+          longContext,
         );
       }
 
@@ -8052,6 +8094,7 @@ async function handleConversationTurn(
       req.protocol,
       req.stream,
       recallHeaders,
+      longContext,
     );
   };
 
@@ -8094,9 +8137,11 @@ async function handleConversationTurn(
         : undefined,
       warningText,
       sessionState.sessionID,
-      // Cap usage against the model the CLIENT meters against (its requested
-      // model), so a 1M-context model isn't throttled to the 200K cap.
-      maxReportedUsageForModelID(req.model),
+      // Cap usage against the window the CLIENT meters against: the model's real
+      // window only when this request opted into it via the context-1m beta,
+      // else 200K — so a 1M-capable model the client meters against 200K can't
+      // cross its ~167K auto-compact threshold (#910 regression; MiniMax-M3).
+      maxReportedUsageForModelID(req.model, requestEnablesLongContext(req)),
     );
     // Translate to client's wire format if needed. When the upstream is
     // Anthropic but the client speaks OpenAI, wrap the Anthropic SSE stream.

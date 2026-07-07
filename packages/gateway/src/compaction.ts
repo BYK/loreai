@@ -92,6 +92,17 @@ export function estimateTokens(text: string): number {
  * window, not hardcoded. A hardcoded 200K cap (the old behavior) reports ~150K
  * for every model, which on a 1M-context model is wrong by ~6× and on smaller
  * models can trigger premature compaction.
+ *
+ * CRITICAL: "the model's context window" here means the window the CLIENT
+ * meters against, NOT the window models.dev reports. Claude Code only meters
+ * against a >200K window when the request opts into the long-context
+ * (`context-1m`) beta; for every other request — including a 1M-capable
+ * third-party model (e.g. MiniMax-M3 served over the Anthropic wire) that
+ * Claude Code has no metadata for — it meters against a 200K window and
+ * auto-compacts at ~167K. Deriving the cap from the model's real 1M window
+ * (→ 870_300) means the cap never trips, real usage sails past 167K, and the
+ * client auto-compacts anyway. Clamp with {@link clientMeteredContextWindow}
+ * before calling this. (Regression from #910; MiniMax-M3 confirmed via Sentry.)
  */
 export const AUTOCOMPACT_BUFFER_TOKENS = 13_000;
 /** Tokens Claude Code reserves for the compaction summary output. */
@@ -147,6 +158,53 @@ export const DEFAULT_MAX_REPORTED_USAGE = maxReportedUsageForModel(
   200_000,
   MAX_OUTPUT_RESERVE,
 );
+
+/**
+ * The context window a host client assumes for a model it does NOT recognise.
+ *
+ * Claude Code (the reference client for this anti-compaction feature) meters
+ * usage — and triggers auto-compaction — against a 200K window for any model
+ * it has no metadata for. That covers every anthropic-compat third party
+ * (MiniMax, GLM, vLLM, …) served over the Anthropic wire protocol, AND Claude's
+ * own 1M-capable models on requests that do NOT opt into the long-context
+ * (`context-1m`) beta. Only when the request enables that beta does the client
+ * meter against the model's real (larger) window.
+ */
+export const CLIENT_DEFAULT_CONTEXT_WINDOW = 200_000;
+
+/**
+ * The context window the host client actually meters against for a model, given
+ * whether the request opted into the extended (1M) window via the `context-1m`
+ * beta. Without the beta, clamp to {@link CLIENT_DEFAULT_CONTEXT_WINDOW} so the
+ * client-usage cap can never exceed what the client's own auto-compact
+ * threshold allows — otherwise a 1M-context model reported against a 200K-window
+ * client auto-compacts at ~167K despite having ~840K of real headroom left.
+ */
+export function clientMeteredContextWindow(
+  realContextWindow: number,
+  longContextEnabled: boolean,
+): number {
+  return longContextEnabled
+    ? realContextWindow
+    : Math.min(realContextWindow, CLIENT_DEFAULT_CONTEXT_WINDOW);
+}
+
+/**
+ * True when the request opts into the long-context (1M) window via the
+ * `context-1m` beta. This is the exact signal Claude Code uses to switch its
+ * own context meter / auto-compact threshold from the default 200K window to
+ * the model's larger (1M) window — so the client-usage cap must track it (feed
+ * the result into {@link clientMeteredContextWindow}). Case-insensitive;
+ * matches any `context-1m` token inside `anthropic-beta`.
+ */
+export function requestEnablesLongContext(req: GatewayRequest): boolean {
+  for (const [k, v] of Object.entries(req.rawHeaders)) {
+    if (k.toLowerCase() === "anthropic-beta" && /context-1m/i.test(v)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /**
  * Scale usage fields proportionally so the client's total

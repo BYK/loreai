@@ -15,6 +15,8 @@ import {
   AUTOCOMPACT_THRESHOLD,
   DEFAULT_MAX_REPORTED_USAGE,
   scaleUsageForClient,
+  clientMeteredContextWindow,
+  CLIENT_DEFAULT_CONTEXT_WINDOW,
 } from "../src/compaction";
 import type { GatewayRequest } from "../src/translate/types";
 
@@ -961,5 +963,91 @@ describe("scaleUsageForClient", () => {
       maxReportedUsageForModel(200_000, 64_000),
     );
     expect(scaled.input_tokens).toBe(150_300);
+  });
+});
+
+describe("clientMeteredContextWindow", () => {
+  test("clamps a >200K window to 200K when long-context beta is absent", () => {
+    expect(clientMeteredContextWindow(1_000_000, false)).toBe(
+      CLIENT_DEFAULT_CONTEXT_WINDOW,
+    );
+    expect(clientMeteredContextWindow(524_288, false)).toBe(200_000);
+  });
+
+  test("uses the model's real window when long-context beta is present", () => {
+    expect(clientMeteredContextWindow(1_000_000, true)).toBe(1_000_000);
+    expect(clientMeteredContextWindow(524_288, true)).toBe(524_288);
+  });
+
+  test("never inflates a sub-200K window, beta or not", () => {
+    expect(clientMeteredContextWindow(128_000, false)).toBe(128_000);
+    expect(clientMeteredContextWindow(128_000, true)).toBe(128_000);
+  });
+
+  test("CLIENT_DEFAULT_CONTEXT_WINDOW matches the historical 200K default", () => {
+    expect(CLIENT_DEFAULT_CONTEXT_WINDOW).toBe(200_000);
+    // The clamped 1M cap must equal the historical 200K-model default cap.
+    expect(
+      maxReportedUsageForModel(
+        clientMeteredContextWindow(1_000_000, false),
+        20_000,
+      ),
+    ).toBe(DEFAULT_MAX_REPORTED_USAGE);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #910 regression: a 1M-capable model the client meters against a 200K window
+// (e.g. MiniMax-M3 over the Anthropic wire, no context-1m beta) must NOT report
+// usage above the client's ~167K auto-compact threshold. Confirmed via Sentry:
+// MiniMax-M3 real input_tokens topped out at ~163K and Claude Code auto-compacted
+// ("Context limit reached") because the cap resolved to the model's real 1M
+// window (870_300) and scaling never engaged.
+// ---------------------------------------------------------------------------
+describe("client usage cap for a 1M model metered against 200K (#910 / MiniMax-M3)", () => {
+  // Mirror models.dev's MiniMax-M3 entry (context 1M, output 128K).
+  const MINIMAX_M3_WINDOW = 1_000_000;
+  const MINIMAX_M3_OUTPUT = 128_000;
+
+  // This mirrors pipeline.ts `maxReportedUsageForModelID(model, longContext)`.
+  function capFor(realWindow: number, output: number, longContext: boolean) {
+    return maxReportedUsageForModel(
+      clientMeteredContextWindow(realWindow, longContext),
+      output,
+    );
+  }
+
+  test("without context-1m beta: cap stays strictly under the 200K auto-compact threshold", () => {
+    const cap = capFor(MINIMAX_M3_WINDOW, MINIMAX_M3_OUTPUT, false);
+    expect(cap).toBe(150_300);
+    // The whole point: the reported total can never reach the client's trigger.
+    expect(cap).toBeLessThan(AUTOCOMPACT_THRESHOLD); // 167_000
+  });
+
+  test("with context-1m beta: full 1M cap is preserved (no throttle back to 200K)", () => {
+    const cap = capFor(MINIMAX_M3_WINDOW, MINIMAX_M3_OUTPUT, true);
+    expect(cap).toBe(870_300);
+    expect(cap).toBeGreaterThan(DEFAULT_MAX_REPORTED_USAGE);
+  });
+
+  test("usage above the 200K-window threshold is scaled back below it without the beta", () => {
+    // A turn whose real usage (250K) exceeds the client's 167K trigger. Clamped
+    // cap (150_300) scales it down so the client never auto-compacts. Under the
+    // pre-fix behavior (cap 870_300) 250K passes through untouched and trips the
+    // client — this asserts the clamp, not just an already-safe number.
+    const cap = capFor(MINIMAX_M3_WINDOW, MINIMAX_M3_OUTPUT, false);
+    const scaled = scaleUsageForClient(
+      { input_tokens: 250_000, output_tokens: 0 },
+      cap,
+    );
+    const total = scaled.input_tokens + scaled.output_tokens;
+    expect(total).toBeLessThan(AUTOCOMPACT_THRESHOLD);
+  });
+
+  test("with the beta, the same ~163K usage passes through unscaled (well under the 1M cap)", () => {
+    const cap = capFor(MINIMAX_M3_WINDOW, MINIMAX_M3_OUTPUT, true);
+    const usage = { input_tokens: 163_211, output_tokens: 0 };
+    // total (163_211) < cap (870_300) → returned unchanged.
+    expect(scaleUsageForClient(usage, cap)).toBe(usage);
   });
 });
