@@ -621,7 +621,7 @@ function rowIdExpr(m: SyncTableMeta): string {
  * the MOST USEFUL rows (mirrors the knowledge seed; the push drains the outbox in seq
  * order and the server rejects once the cap is hit, so seed order = what survives):
  *  - entities: most-referenced first (by knowledge_entity_refs count), then recency —
- *    a heavily-referenced entity is more useful than a one-off, and the cap is small (30).
+ *    a heavily-referenced entity is more useful than a one-off when the free cap bites.
  *  - entity_relations: recency (updated_at, then created_at).
  *  - entity_aliases: recency (created_at — the table has no updated_at).
  *  - knowledge_meta: LIVE entries only (JOIN knowledge_current), same value order as

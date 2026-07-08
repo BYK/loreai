@@ -49,8 +49,9 @@ Migrations are plain SQL, applied in filename order:
   (RLS only governs ownership, not volume/size):
   - `profiles.tier` + a tunable `plan_limits(tier, table_name → max_rows)` table.
   - `BEFORE INSERT` quota trigger per table (free: knowledge ≤ 500, entities ≤
-    30, aliases ≤ 300, relations ≤ 300, refs ≤ 2000; pro generous; null =
-    unlimited). `SECURITY DEFINER` so it reads tier/limits past RLS.
+    300, aliases ≤ 3000, relations ≤ 1500, refs ≤ 5000; pro generous; null =
+    unlimited). `SECURITY DEFINER` so it reads tier/limits past RLS. (Entity-graph
+    caps raised in 0017 — the graph is cheap and makes knowledge navigable.)
   - `CHECK` constraints capping per-field size (title ≤ 512, content ≤ 8192, …).
   Per-request RATE limiting is intentionally deferred to an edge layer / hosted
   backend (paid tiers); these caps bound storage + cardinality + payload, which
@@ -63,7 +64,7 @@ Migrations are plain SQL, applied in filename order:
     could `PATCH /profiles {tier:'pro'}` and defeat all quotas.)
   - **Every user-controlled TEXT column is size-capped** (not just the obvious
     ones) — row-count caps alone don't bound storage; an uncapped column let a
-    30-row user store 30×~1GB blobs.
+    small-row-cap user store a handful of ~1GB blobs.
   - **DML `GRANT`s to `authenticated`** so PostgREST actually works (RLS is the
     2nd gate; without a table grant every call is denied). Landed in the SAME
     migration as the tier lock so write-access never precedes the guard.

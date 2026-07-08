@@ -15,10 +15,10 @@ import { type PgHarness, startPgHarness } from "./helpers/pg-harness";
 /** Free-tier defaults (mirror supabase/migrations/0003 + 0009) — restored after quota tests. */
 const FREE_LIMITS: Record<string, number> = {
   knowledge: 500,
-  entities: 30,
-  entity_aliases: 300,
-  entity_relations: 300,
-  knowledge_entity_refs: 2000,
+  entities: 300, // 0017: proportionate to knowledge=500 (was 30 — crippled the graph)
+  entity_aliases: 3000, // 0017: ~10x entities (was 300)
+  entity_relations: 1500, // 0017 (was 300)
+  knowledge_entity_refs: 5000, // 0017: ~10 refs/entity (was 2000)
   knowledge_meta: 5000, // 0016: headroom above knowledge so metas never bottleneck independently
   knowledge_meta_crdt: 5000,
   account_escrow: 2,
@@ -869,10 +869,10 @@ describe.skipIf(gate())("sync migrations — knowledge eviction (#1191b)", () =>
   }
   afterEach(async () => {
     if (gate()) return;
-    await setCap("knowledge", 500);
-    await setCap("entities", 30);
-    await setCap("entity_aliases", 300);
-    await setCap("entity_relations", 300);
+    await setCap("knowledge", FREE_LIMITS.knowledge);
+    await setCap("entities", FREE_LIMITS.entities);
+    await setCap("entity_aliases", FREE_LIMITS.entity_aliases);
+    await setCap("entity_relations", FREE_LIMITS.entity_relations);
     await setByteCap("knowledge", 12582912);
     await setEvictionBudget(200); // restore default so the low-budget test can't leak
   });
