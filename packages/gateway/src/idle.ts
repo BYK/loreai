@@ -48,6 +48,11 @@ import {
   vecReadLatencyTotalSamples,
   checkpointWal,
   walSizeBytes,
+  autoVacuumMode,
+  incrementalVacuum,
+  vacuum,
+  freelistBytes,
+  dbFileSizeBytes,
 } from "@loreai/core";
 import type { CacheStrategy, ChangedEntry, LLMClient } from "@loreai/core";
 import {
@@ -161,6 +166,19 @@ const WAL_CHECKPOINT_FLOOR_BYTES = 8 * 1024 * 1024; // 8 MiB
 // A WAL this large that still won't reset means checkpointing is genuinely starved
 // (a reader is continuously pinning a snapshot) — surface it at notice level.
 const WAL_STARVED_NOTICE_BYTES = 512 * 1024 * 1024; // 512 MiB
+
+// Free-page reclaim (#1221). `PRAGMA auto_vacuum` mode 2 = INCREMENTAL.
+const AUTO_VACUUM_INCREMENTAL = 2;
+// Only reclaim once there's a meaningful amount of freelist to return to the OS.
+const FREELIST_RECLAIM_FLOOR_BYTES = 16 * 1024 * 1024; // 16 MiB
+// Bound the per-tick incremental_vacuum so it can't do a huge synchronous truncate.
+const INCREMENTAL_VACUUM_BATCH_PAGES = 2048; // ~8 MiB at a 4 KiB page
+// Largest legacy (auto_vacuum=NONE) DB we'll auto-convert with a full VACUUM inline —
+// above this the VACUUM would block the loop too long, so we point at `lore data vacuum`.
+const SAFE_AUTO_VACUUM_BYTES = 128 * 1024 * 1024; // 128 MiB
+// One-shot per process: a too-large legacy DB is flagged to the user at most once
+// (the small-DB auto-convert path self-gates via the auto_vacuum mode flip instead).
+let legacyVacuumNoticeShown = false;
 
 /**
  * Cooldown tracking for knowledge consolidation.
@@ -502,6 +520,54 @@ export function startIdleScheduler(
       } catch (e) {
         log.error("dead-ref cleanup error:", e);
       }
+    }
+
+    // Free-page reclaim (#1221 follow-up): return space freed by prunes/compaction/
+    // eviction to the OS so the main file can't bloat unboundedly. Runs before the WAL
+    // checkpoint below so the checkpoint flushes any truncation to the main file the
+    // same tick. Never throws out of the loop.
+    try {
+      const mode = autoVacuumMode();
+      if (mode === AUTO_VACUUM_INCREMENTAL) {
+        // Ongoing, cheap: hand freelist pages back to the OS in bounded batches.
+        if (freelistBytes() >= FREELIST_RECLAIM_FLOOR_BYTES) {
+          const r = incrementalVacuum(INCREMENTAL_VACUUM_BATCH_PAGES);
+          if (r.reclaimedBytes > 0)
+            log.info(
+              `db: reclaimed ${Math.round(r.reclaimedBytes / 1e6)}MB of free pages`,
+            );
+        }
+      } else {
+        // A DB created before auto_vacuum was set never returns freed pages (#1221).
+        // A full VACUUM both reclaims AND converts it to INCREMENTAL (after which the
+        // branch above takes over — the mode change self-gates re-runs).
+        const size = dbFileSizeBytes();
+        if (size > SAFE_AUTO_VACUUM_BYTES) {
+          // Too large to compact inline (would block the loop for too long) — point
+          // the user at the explicit command, once per process.
+          if (!legacyVacuumNoticeShown) {
+            legacyVacuumNoticeShown = true;
+            log.notice(
+              `db: ${Math.round(size / 1e6)}MB database has reclaimable free space but is too large to compact automatically — run \`lore data vacuum\` to reclaim it (#1221)`,
+            );
+          }
+        } else if (
+          sessions.size === 0 &&
+          size > 0 &&
+          freelistBytes() >= FREELIST_RECLAIM_FLOOR_BYTES
+        ) {
+          // Small legacy DB, no active session → convert inline. noWait so a stray
+          // reader can't stall the loop; on SQLITE_BUSY it throws (caught below) and
+          // we simply retry a later tick. On success the mode flips to INCREMENTAL,
+          // so this branch won't run again — no one-shot flag needed here.
+          const r = vacuum({ noWait: true });
+          log.notice(
+            `db: converted a legacy database to incremental auto-vacuum, reclaimed ${Math.round(Math.max(0, r.beforeBytes - r.afterBytes) / 1e6)}MB (#1221)`,
+          );
+        }
+      }
+    } catch (e) {
+      log.info("db free-page reclaim error:", e);
     }
 
     // WAL maintenance (#1221): SQLite's PASSIVE auto-checkpoint is starved by the

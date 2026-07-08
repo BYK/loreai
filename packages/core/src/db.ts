@@ -3166,11 +3166,60 @@ export function freelistBytes(): number {
  * file size before/after. Followed by a resetting WAL checkpoint so the VACUUM's
  * churn doesn't linger in the -wal.
  */
-export function vacuum(): { beforeBytes: number; afterBytes: number } {
+export function vacuum(opts?: { noWait?: boolean }): {
+  beforeBytes: number;
+  afterBytes: number;
+} {
+  const conn = db();
   const beforeBytes = dbFileSizeBytes();
-  db().exec("VACUUM");
+  // The mode-converting VACUUM needs a near-exclusive moment; a reader pinning a WAL
+  // snapshot would otherwise make it busy-wait the whole BUSY_TIMEOUT_MS (~5s stall).
+  // `noWait` (used by the idle auto-reclaim, which runs on the event loop) drops the
+  // retry to 0 so it fails fast instead of stalling — the caller retries later. The
+  // explicit `lore data vacuum` command omits it so it waits for the lock as expected.
+  // Register the desired auto_vacuum mode so the following VACUUM bakes it into the
+  // header: this converts a legacy auto_vacuum=NONE DB to INCREMENTAL (the whole point
+  // for #1221). Explicit here — not relying on the open-time pragma — so the idle
+  // small-DB convert reliably flips the mode and never re-VACUUMs on the next tick.
+  // Mirrors the migrate() conversion path. No-op when already INCREMENTAL.
+  conn.exec("PRAGMA auto_vacuum = INCREMENTAL");
+  if (opts?.noWait) conn.exec("PRAGMA busy_timeout = 0");
+  try {
+    conn.exec("VACUUM");
+  } finally {
+    if (opts?.noWait) conn.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+  }
   checkpointWal();
   return { beforeBytes, afterBytes: dbFileSizeBytes() };
+}
+
+/** `PRAGMA auto_vacuum` mode: 0=NONE, 1=FULL, 2=INCREMENTAL. */
+export function autoVacuumMode(): number {
+  const r = db().query("PRAGMA auto_vacuum").get() as
+    | { auto_vacuum: number }
+    | undefined;
+  return r?.auto_vacuum ?? 0;
+}
+
+/**
+ * Reclaim up to `pages` freelist pages via `PRAGMA incremental_vacuum` — the cheap,
+ * ongoing counterpart to a full VACUUM (only works when auto_vacuum=INCREMENTAL).
+ * Runs on the writer connection; like checkpointWal it drops busy_timeout to 0 so a
+ * concurrent write can't make it stall the caller (returns having done what it could).
+ * The truncation lands in the WAL — the next checkpoint flushes it to the main file.
+ * Reclaim is measured by the freelist delta (the file only physically shrinks after
+ * that checkpoint). Returns bytes removed from the freelist.
+ */
+export function incrementalVacuum(pages: number): { reclaimedBytes: number } {
+  const conn = db();
+  const before = freelistBytes();
+  conn.exec("PRAGMA busy_timeout = 0");
+  try {
+    conn.exec(`PRAGMA incremental_vacuum(${pages})`);
+  } finally {
+    conn.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+  }
+  return { reclaimedBytes: Math.max(0, before - freelistBytes()) };
 }
 
 // ---------------------------------------------------------------------------

@@ -156,6 +156,8 @@ export {
   vacuum,
   dbFileSizeBytes,
   freelistBytes,
+  autoVacuumMode,
+  incrementalVacuum,
 } from "./db";
 export {
   normalizeRemoteUrl,
