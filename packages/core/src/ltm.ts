@@ -1976,6 +1976,19 @@ export type KnowledgeCategory =
   | "gotcha";
 
 /** Options for `forSession()` to control entry selection. */
+/** Non-knowledge memory sources that can be folded into the context-bound block. */
+export type ContextSource = "distillation" | "temporal";
+
+/** Default max candidates pulled per context source before packing. */
+export const CONTEXT_SOURCE_LIMIT = 12;
+
+/**
+ * Category tag for synthetic context-bound entries (distillation/temporal
+ * folded into system[2]). Used to exclude them from knowledge-only side effects
+ * (markInjected, transfer metrics, overflow ToC leakage checks).
+ */
+export const RECALLED_CONTEXT_CATEGORY = "recalled";
+
 export type ForSessionOptions = {
   /** Caller-provided context (e.g., user's current message) for relevance
    *  scoring when no session context exists in the DB yet. */
@@ -1998,6 +2011,21 @@ export type ForSessionOptions = {
    * wins, but ties and minor fluctuations don't reshuffle the selected set.
    */
   stickyIds?: Set<string>;
+  /**
+   * Additional memory sources to fold into the context-bound selection so
+   * in-session facts are "just there" without the model calling the recall
+   * tool. When set (and embeddings are available), relevance-ranked
+   * distillation and/or raw temporal candidates are scored by cosine
+   * similarity against the SAME context vector used for knowledge, shaped as
+   * synthetic entries, and merged into the same stickyIds-hysteresis +
+   * deterministic packing pipeline — so the system[2] prompt cache stays
+   * stable. Synthetic entries use recall-id form (`d:<id>`, `t:<id>`) as a
+   * stable, collision-free key. They are NOT knowledge rows: excluded from
+   * markInjected, transfer metrics, AND the overflow ToC (knowledge-only).
+   */
+  includeContextSources?: ContextSource[];
+  /** Max candidates to pull per context source (default CONTEXT_SOURCE_LIMIT). */
+  contextSourceLimit?: number;
   /**
    * Optional sink for the budget-overflow tail (#917). When provided,
    * `forSession` pushes the entries that were relevance-scored but did NOT fit
@@ -2220,6 +2248,10 @@ export async function forSession(
   // --- 4. Score both pools by relevance ---
   let scoredProject: Scored[];
   let scoredCross: Scored[];
+  // Hoisted so the optional context-source fold (step 5b) can reuse the same
+  // embedded context vector — keeping distillation/temporal on the identical
+  // cosine scale as knowledge (no separate embed, no scale mismatch).
+  let contextVec: Float32Array | undefined;
 
   if (sessionContext.trim().length > 20 && embedding.isAvailable()) {
     // Vector scoring: embed session context, score entries by cosine similarity.
@@ -2227,7 +2259,7 @@ export async function forSession(
     // that keyword-based FTS5 misses.
     let vectorScores: Map<string, number>;
     try {
-      const [contextVec] = await timer.await(
+      [contextVec] = await timer.await(
         embedding.embed([sessionContext], "query"),
         "embed",
       );
@@ -2316,6 +2348,26 @@ export async function forSession(
   // the structural "map" that makes specific gotchas/decisions interpretable
   // — without them, a gotcha about a subsystem is harder to contextualize.
   const allScored = [...scoredProject, ...scoredCross];
+
+  // --- 5b. Fold in relevance-ranked context sources (distillation/temporal) ---
+  // Makes in-session facts "just there" (no recall-tool call needed). Scored on
+  // the same cosine scale as knowledge (reuses contextVec), so they compete
+  // fairly and inherit the identical stickyIds hysteresis + deterministic
+  // packing below — the system[2] cache stays stable. Synthetic entries carry
+  // the RECALLED_CONTEXT_CATEGORY tag and recall-id form ids.
+  if (options?.includeContextSources?.length && contextVec) {
+    const contextScored = await timer.await(
+      loadContextSourceCandidates(
+        pid,
+        contextVec,
+        options.includeContextSources,
+        options.contextSourceLimit ?? CONTEXT_SOURCE_LIMIT,
+        sessionID,
+      ),
+      "vectorSearch",
+    );
+    allScored.push(...contextScored);
+  }
 
   // Set-stabilization hysteresis: boost entries that were selected last turn so
   // the budget-boundary subset doesn't churn turn-to-turn (which would bust the
@@ -2428,6 +2480,7 @@ export async function forSession(
   try {
     for (const entry of result) {
       if (entry.category === "lat.md") continue;
+      if (entry.category === RECALLED_CONTEXT_CATEGORY) continue;
       if (entry.cross_project !== 1) continue;
       if (!entry.project_id || entry.project_id === pid) continue;
       if (!shouldRecordTransfer(sessionID, entry.logical_id, pid)) continue;
@@ -2445,10 +2498,15 @@ export async function forSession(
   // relevant" — WITHOUT bumping confidence (that would re-flatten everything to
   // 1.0 and destroy the decay signal). lat.md synthetics are not knowledge rows.
   try {
-    markInjected(
-      result.filter((e) => e.category !== "lat.md").map((e) => e.id),
+    // Only real knowledge rows get reinforced / recorded — lat.md and
+    // recalled-context synthetics are not knowledge and have no confidence
+    // lifecycle or session-injection semantics.
+    const knowledgeResult = result.filter(
+      (e) =>
+        e.category !== "lat.md" && e.category !== RECALLED_CONTEXT_CATEGORY,
     );
-    recordSessionInjections(sessionID, projectPath, result);
+    markInjected(knowledgeResult.map((e) => e.id));
+    recordSessionInjections(sessionID, projectPath, knowledgeResult);
   } catch (err) {
     log.warn("forSession: reinforcement failed (non-fatal):", err);
   }
@@ -2463,12 +2521,172 @@ export async function forSession(
   if (options?.overflowSink) {
     const selectedIds = new Set(result.map((e) => e.id));
     for (const { entry } of allScored) {
+      // Recalled-context synthetics are not knowledge rows — keep the ToC
+      // (rendered as "other relevant knowledge") knowledge-only.
+      if (entry.category === RECALLED_CONTEXT_CATEGORY) continue;
       if (!selectedIds.has(entry.id)) options.overflowSink.push(entry);
     }
   }
 
   timer.emit("forSession", projectEntries.length + crossEntries.length);
   return result;
+}
+
+/** Cap on the inline size of a single recalled temporal message (chars). */
+const RECALLED_TEMPORAL_MAX_CHARS = 2000;
+
+/**
+ * Build synthetic, relevance-scored context entries from non-knowledge sources
+ * (distillation, temporal) using the SAME cosine context vector as knowledge.
+ *
+ * Returned entries are shaped as KnowledgeEntry so they flow through the caller's
+ * stickyIds hysteresis + deterministic packing (cache-stable). Ids use recall-id
+ * form (`d:<id>`, `t:<id>`); category is RECALLED_CONTEXT_CATEGORY so the caller
+ * excludes them from knowledge-only side effects. Temporal search is
+ * project-wide (not session-scoped) so cross-session facts surface. Best-effort:
+ * any source failure is logged and skipped, never throwing on the hot path.
+ */
+async function loadContextSourceCandidates(
+  pid: string,
+  contextVec: Float32Array,
+  sources: ContextSource[],
+  limit: number,
+  _sessionID?: string,
+): Promise<Scored[]> {
+  const out: Scored[] = [];
+
+  const mkEntry = (
+    id: string,
+    title: string,
+    content: string,
+    ts: number,
+  ): KnowledgeEntry => ({
+    id,
+    logical_id: id,
+    project_id: pid,
+    category: RECALLED_CONTEXT_CATEGORY,
+    title,
+    content,
+    source_session: null,
+    cross_project: 0,
+    confidence: 1.0,
+    created_at: ts,
+    updated_at: ts,
+    metadata: null,
+    created_by: null,
+    updated_by: null,
+    sensitivity: "normal",
+    promotion_status: null,
+    promoted_at: null,
+    approval_status: "auto",
+    approved_by: null,
+    approved_at: null,
+    source_user_id: null,
+    source_entry_id: null,
+    last_accessed_at: null,
+    worker_provider_id: null,
+    worker_model_id: null,
+    last_reinforced_at: null,
+  });
+
+  if (sources.includes("distillation")) {
+    try {
+      // vectorSearchDistillations is NOT project-scoped (distillation_vec
+      // partitions by project but the helper takes no pid), so over-fetch and
+      // filter by project_id in hydration — otherwise another project's
+      // distillation could be injected here (cross-project leak). Temporal is
+      // already project-scoped via vectorSearchTemporal(pid). Follow-up: add a
+      // project-scoped distillation vector search to avoid the over-fetch.
+      const hits = await embedding.vectorSearchDistillations(
+        contextVec,
+        limit * 4,
+      );
+      if (hits.length) {
+        const ids = hits.map((h) => h.id);
+        const rows = db()
+          .query(
+            `SELECT id, observations, created_at FROM distillations
+             WHERE archived = 0 AND project_id = ?
+               AND id IN (${ids.map(() => "?").join(",")})`,
+          )
+          .all(pid, ...ids) as Array<{
+          id: string;
+          observations: string | null;
+          created_at: number;
+        }>;
+        const byId = new Map(rows.map((r) => [r.id, r]));
+        let added = 0;
+        for (const h of hits) {
+          if (added >= limit) break;
+          const r = byId.get(h.id);
+          if (!r?.observations) continue;
+          out.push({
+            entry: mkEntry(
+              `d:${r.id}`,
+              "Relevant earlier context",
+              r.observations,
+              r.created_at,
+            ),
+            score: h.similarity,
+          });
+          added++;
+        }
+      }
+    } catch (err) {
+      log.warn(
+        "forSession: distillation context source failed (non-fatal):",
+        err,
+      );
+    }
+  }
+
+  if (sources.includes("temporal")) {
+    try {
+      // Project-wide (sessionId omitted) so facts from EARLIER sessions surface.
+      const hits = await embedding.vectorSearchTemporal(contextVec, pid, limit);
+      if (hits.length) {
+        // temporal_vec is chunk-keyed (`<id>#<n>`); map back to message id.
+        const msgIds = [...new Set(hits.map((h) => h.id.split("#")[0]))];
+        const rows = db()
+          .query(
+            `SELECT id, role, content, created_at FROM temporal_messages
+             WHERE id IN (${msgIds.map(() => "?").join(",")})`,
+          )
+          .all(...msgIds) as Array<{
+          id: string;
+          role: string;
+          content: string | null;
+          created_at: number;
+        }>;
+        const byId = new Map(rows.map((r) => [r.id, r]));
+        const seen = new Set<string>();
+        for (const h of hits) {
+          const mid = h.id.split("#")[0];
+          if (seen.has(mid)) continue;
+          seen.add(mid);
+          const r = byId.get(mid);
+          if (!r?.content) continue;
+          const content =
+            r.content.length > RECALLED_TEMPORAL_MAX_CHARS
+              ? `${r.content.slice(0, RECALLED_TEMPORAL_MAX_CHARS)}…`
+              : r.content;
+          out.push({
+            entry: mkEntry(
+              `t:${r.id}`,
+              `Relevant earlier message (${r.role})`,
+              content,
+              r.created_at,
+            ),
+            score: h.similarity,
+          });
+        }
+      }
+    } catch (err) {
+      log.warn("forSession: temporal context source failed (non-fatal):", err);
+    }
+  }
+
+  return out;
 }
 
 /** Score entries using FTS5 BM25 — extracted for reuse in the vector-fallback path. */

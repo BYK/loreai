@@ -293,6 +293,18 @@ export const LoreConfig = z.object({
         .describe(
           "Lower confidence on entries whose file:line / command references no longer resolve against the repo. Unverifiable refs never penalize. Default: true.",
         ),
+      /** Fold relevance-ranked distillation and/or raw temporal messages into
+       *  the context-bound (system[2]) injection so in-session facts are "just
+       *  there" without the model calling the recall tool. Scored on the same
+       *  cosine scale as knowledge and packed under the same stickyIds
+       *  hysteresis so the prompt cache stays stable. Empty = off (default);
+       *  example: ["distillation","temporal"]. */
+      contextSources: z
+        .array(z.enum(["distillation", "temporal"]))
+        .default([])
+        .describe(
+          "Fold relevance-ranked distillation/temporal memory into the context-bound injection so facts are passively present (no recall tool needed). Empty = off. Default: [].",
+        ),
     })
     .default({
       enabled: true,
@@ -300,6 +312,7 @@ export const LoreConfig = z.object({
       autoToolFailureGotchas: false,
       outcomeReward: true,
       referenceValidation: true,
+      contextSources: [],
     })
     .describe("Long-term knowledge (curator, entity injection) controls."),
   curator: z

@@ -6980,6 +6980,9 @@ async function handleConversationTurn(
               excludeCategories: ["preference"],
               ...(contextHint ? { contextHint } : {}),
               ...(stickyIds.size ? { stickyIds } : {}),
+              ...(cfg.knowledge.contextSources?.length
+                ? { includeContextSources: cfg.knowledge.contextSources }
+                : {}),
               overflowSink,
             },
           );
@@ -7238,6 +7241,9 @@ async function handleConversationTurn(
           excludeCategories: ["preference"],
           ...(contextHint ? { contextHint } : {}),
           ...(stickyIds.size ? { stickyIds } : {}),
+          ...(cfg.knowledge.contextSources?.length
+            ? { includeContextSources: cfg.knowledge.contextSources }
+            : {}),
           overflowSink,
         },
       );
