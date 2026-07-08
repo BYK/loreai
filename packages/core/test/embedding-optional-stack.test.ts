@@ -6,10 +6,12 @@ import { fileURLToPath } from "node:url";
 import type { Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it, test } from "vitest";
 import {
+  computeInitRetryDelayMs,
   embed,
   isAvailable,
   runStartupBackfill,
   LocalProviderUnavailableError,
+  _getLocalInitRetryAtForTest,
   _markLocalProviderUnavailable,
   _resetLocalProviderProbe,
   _restoreProvider,
@@ -230,6 +232,60 @@ describe("init-error classification (worker-mock)", () => {
     expect(errors.some((l) => /failed to init/i.test(l.message))).toBe(true);
     // The install-guidance warn is reserved for the not-installed case.
     expect(warns.some((l) => /not installed/i.test(l.message))).toBe(false);
+  });
+
+  it("transient init failure arms a FAST first retry (~2s), not the 30s ceiling", async () => {
+    _setLocalInitCooldownMsForTest(null); // production ceiling (30s)
+    const fakes: FakeWorker[] = [];
+    _setTestWorkerFactory(() => {
+      const f = new FakeWorker();
+      fakes.push(f);
+      return f as unknown as Worker;
+    });
+
+    const result = settle(embed(["hello"], "query"));
+    await flush();
+    // A cold ORT parse failure — transient, recovers on the next fresh worker.
+    fakes[0].emit("message", {
+      type: "init-error",
+      error: "Can't create a session. ERROR_CODE: 7, protobuf parsing failed",
+    });
+    await flush();
+    await result;
+
+    // The first retry is armed ~2s out (INIT_RETRY_BASE_MS), NOT the flat 30s
+    // the provider used to wait — that flat wait was the entire startup
+    // FTS-only window for a self-healing blip. Fails if reverted to the
+    // fixed-cooldown behaviour (delay would be ~30_000).
+    const delayMs = _getLocalInitRetryAtForTest() - Date.now();
+    expect(delayMs).toBeGreaterThan(1_000);
+    expect(delayMs).toBeLessThanOrEqual(2_000);
+    expect(isAvailable()).toBe(false); // FTS-only during the (now short) cooldown
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Part B2 — init-retry backoff schedule (pure)
+// ---------------------------------------------------------------------------
+
+describe("computeInitRetryDelayMs (init-retry backoff)", () => {
+  test("fast first retry, geometric backoff, clamped to the ceiling", () => {
+    // Production ceiling 30s; LOCAL_INIT_MAX_ATTEMPTS=3 → two retry waits: 2s, 8s.
+    expect(computeInitRetryDelayMs(1, 30_000)).toBe(2_000);
+    expect(computeInitRetryDelayMs(2, 30_000)).toBe(8_000);
+    // 32s (attempt 3) would exceed the ceiling → clamped.
+    expect(computeInitRetryDelayMs(3, 30_000)).toBe(30_000);
+    // A lower ceiling clamps sooner.
+    expect(computeInitRetryDelayMs(2, 5_000)).toBe(5_000);
+  });
+
+  test("ceiling 0 (the test seam) collapses to immediate retry", () => {
+    expect(computeInitRetryDelayMs(1, 0)).toBe(0);
+    expect(computeInitRetryDelayMs(2, 0)).toBe(0);
+  });
+
+  test("guards failures < 1 (never a negative exponent)", () => {
+    expect(computeInitRetryDelayMs(0, 30_000)).toBe(2_000);
   });
 });
 

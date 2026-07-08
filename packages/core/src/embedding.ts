@@ -494,13 +494,41 @@ let localInitFailures = 0;
 /** Epoch ms; `> 0` means "cooling down after a transient init failure — retry a
  *  fresh worker once `Date.now()` reaches it". Reset to 0 on retry/recovery. */
 let localInitRetryAt = 0;
+// Ceiling for the init-retry cooldown; the first retries are much faster (see
+// computeInitRetryDelayMs). Also the test seam: 0 → retry immediately.
 let localInitCooldownMs = 30_000;
 
-/** Test seam: shorten the init-retry cooldown so the retry path is drivable
- *  without real time (`0` → the next availability check retries immediately;
- *  `null` restores the production default). */
+/** Base delay for the first init-retry, and the geometric backoff factor. A
+ *  transient init failure (e.g. a cold ORT "protobuf parsing failed" in the Bun
+ *  worker) reliably recovers on the NEXT fresh-worker respawn, so the first
+ *  retry should be fast; only a genuine failure (which fails the fast retry
+ *  too) needs to back off toward the ceiling to avoid a respawn storm. With
+ *  LOCAL_INIT_MAX_ATTEMPTS=3 the two retry waits are 2s then 8s. */
+const INIT_RETRY_BASE_MS = 2_000;
+const INIT_RETRY_BACKOFF_FACTOR = 4;
+
+/** Cooldown before the Nth fresh-worker init-retry: `base * factor^(N-1)`,
+ *  clamped to `ceilingMs`. Pure (no module state) so the schedule is unit
+ *  testable. `ceilingMs=0` (the test seam) collapses to 0 → retry immediately. */
+export function computeInitRetryDelayMs(
+  failures: number,
+  ceilingMs: number,
+): number {
+  const n = Math.max(1, failures);
+  const backoff = INIT_RETRY_BASE_MS * INIT_RETRY_BACKOFF_FACTOR ** (n - 1);
+  return Math.min(ceilingMs, backoff);
+}
+
+/** Test seam: shorten the init-retry cooldown ceiling so the retry path is
+ *  drivable without real time (`0` → the next availability check retries
+ *  immediately; `null` restores the production default). */
 export function _setLocalInitCooldownMsForTest(ms: number | null): void {
   localInitCooldownMs = ms ?? 30_000;
+}
+
+/** For tests: observe the pending init-retry deadline (epoch ms; 0 = none). */
+export function _getLocalInitRetryAtForTest(): number {
+  return localInitRetryAt;
 }
 
 /** For tests: reset the local provider probe + transient-retry state. */
@@ -823,10 +851,14 @@ class LocalProvider implements EmbeddingProvider {
                   );
                 }
               } else {
-                localInitRetryAt = Date.now() + localInitCooldownMs;
+                const retryDelayMs = computeInitRetryDelayMs(
+                  localInitFailures,
+                  localInitCooldownMs,
+                );
+                localInitRetryAt = Date.now() + retryDelayMs;
                 log.warn(
                   `local embedding init failed (attempt ${localInitFailures}/${LOCAL_INIT_MAX_ATTEMPTS}): ${msg.error}. ` +
-                    `Retrying with a fresh worker after a cooldown; recall is FTS-only until then.`,
+                    `Retrying with a fresh worker in ~${Math.round(retryDelayMs / 1000)}s; recall is FTS-only until then.`,
                 );
               }
             }
