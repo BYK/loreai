@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { createRequire } from "node:module";
@@ -293,7 +294,8 @@ describe("packaging: @huggingface/transformers is optional (#1026)", () => {
   // degrades to FTS-only. Declaring them directly (still optional) links them
   // adjacent to core so the worker resolves them, without affecting the gateway
   // bundle (which inlines core and externalizes onnxruntime-node) or a
-  // --omit=optional install.
+  // --omit=optional install. Pins must track @huggingface/transformers' own
+  // onnxruntime-node/sharp versions so pnpm dedupes to a single instance.
   test("onnxruntime-node and sharp are declared optional too (#1220)", () => {
     for (const dep of ["onnxruntime-node", "sharp"]) {
       expect(pkg.optionalDependencies?.[dep]).toBeTruthy();
@@ -301,24 +303,51 @@ describe("packaging: @huggingface/transformers is optional (#1026)", () => {
     }
   });
 
-  // The resolution invariant the bug violated: whenever the optional stack IS
-  // installed, its native peers must resolve from @loreai/core's location (the
-  // same node_modules the built worker walks). Skipped under --omit=optional /
-  // unsupported platforms where transformers itself isn't installed.
-  const require = createRequire(import.meta.url);
+  // The resolution invariant the bug violated: the built worker resolves the
+  // native backend from @loreai/core's OWN node_modules at runtime. This MUST
+  // run in a real Node subprocess based at the dist worker's path — NOT an
+  // in-process createRequire — because vitest's Vite resolver walks the .pnpm
+  // store directly and passes even with the fix fully reverted (a vacuous test,
+  // caught in the PR #1223 adversarial review). We also SCRUB NODE_PATH: pnpm
+  // points it at .pnpm/node_modules, and an inherited NODE_PATH would let the
+  // subprocess resolve the dep from the virtual store regardless of the fix
+  // (a published/plugin consumer has no such NODE_PATH). The worker file itself
+  // need not exist: Node resolves from its parent directory up through
+  // node_modules. Skipped under --omit=optional / unsupported platforms.
   const stackInstalled = (() => {
     try {
-      require.resolve("@huggingface/transformers");
+      createRequire(import.meta.url).resolve("@huggingface/transformers");
       return true;
     } catch {
       return false;
     }
   })();
+  const workerPath = fileURLToPath(
+    new URL("../dist/node/embedding-worker.js", import.meta.url),
+  );
+  function resolvesInRealNode(dep: string): boolean {
+    const env = { ...process.env };
+    delete env.NODE_PATH;
+    delete env.NODE_OPTIONS;
+    try {
+      execFileSync(
+        process.execPath,
+        [
+          "-e",
+          `require("module").createRequire(${JSON.stringify(workerPath)}).resolve(${JSON.stringify(dep)})`,
+        ],
+        { stdio: "pipe", env },
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
   test.runIf(stackInstalled)(
-    "native backend resolves from @loreai/core when the stack is installed (#1220)",
+    "native backend resolves from @loreai/core's dist worker in a real Node process (#1220)",
     () => {
-      expect(() => require.resolve("onnxruntime-node")).not.toThrow();
-      expect(() => require.resolve("sharp")).not.toThrow();
+      expect(resolvesInRealNode("onnxruntime-node")).toBe(true);
+      expect(resolvesInRealNode("sharp")).toBe(true);
     },
   );
 });
