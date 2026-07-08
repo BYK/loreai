@@ -471,6 +471,9 @@ async function runSync(header = "Syncing…"): Promise<void> {
     `Synced: pushed ${r.pushed}, pulled ${r.pulled}` +
       (r.conflicts
         ? `, ${r.conflicts} conflict(s) resolved (remote wins)`
+        : "") +
+      (r.skipped
+        ? `, ${r.skipped} skipped (couldn't apply locally — mostly records referencing data beyond your plan's sync cap)`
         : ""),
   );
   if (r.quotaHit) {

@@ -953,7 +953,13 @@ describe("pullOnce", () => {
     } as never);
 
     // Must NOT throw — one FK-failing row can't abort the whole multi-table sync.
+    const noticeSpy = vi.spyOn(log, "notice");
     const r = await pullOnce(makeClient() as never);
+
+    // FK orphans are EXPECTED (parent beyond the plan cap) + high-volume on a fresh
+    // device → they must NOT be logged per row (a WARN-per-orphan flood drowns the
+    // console + inflates the Sentry warning stream). Counted + recorded instead.
+    expect(noticeSpy.mock.calls.flat().join(" ")).not.toMatch(/skipped a row/);
 
     // Valid alias applied; orphan skipped (its FK parent is absent).
     expect(
@@ -963,7 +969,7 @@ describe("pullOnce", () => {
       db().query("SELECT 1 FROM entity_aliases WHERE id = ?").get("al-orphan"),
     ).toBeNull();
     // The skip is recorded as a conflict, not a crash — recoverable + diagnosable.
-    expect(r.conflicts).toBeGreaterThanOrEqual(1);
+    expect(r.skipped).toBeGreaterThanOrEqual(1);
     expect(
       db()
         .query(
@@ -971,6 +977,45 @@ describe("pullOnce", () => {
         )
         .get(),
     ).not.toBeNull();
+  });
+
+  test("a non-FK constraint skip (UNIQUE) stays VISIBLE (log.notice) and still counts as skipped", async () => {
+    syncData.enableSync("basic");
+    const entId = "55555555-5555-4555-8555-555555555555";
+    syncData.withApplying(() => {
+      db()
+        .query(
+          "INSERT INTO entities (id, entity_type, canonical_name, created_at, updated_at) VALUES (?, 'tool', 'U', 1, 1)",
+        )
+        .run(entId);
+      // A local alias already occupies UNIQUE(alias_type='name', alias_value='Dup').
+      db()
+        .query(
+          "INSERT INTO entity_aliases (id, entity_id, alias_type, alias_value, source, created_at) VALUES ('local-al', ?, 'name', 'Dup', NULL, 1)",
+        )
+        .run(entId);
+    });
+    // Remote alias: NEW id, entity present (FK passes), but SAME (alias_type, alias_value)
+    // → a local UNIQUE violation, NOT an FK error → the rarer, unexpected skip class.
+    tableRows("entity_aliases").push({
+      id: "remote-al",
+      entity_id: entId,
+      alias_type: "name",
+      alias_value: "Dup",
+      source: null,
+      created_at: 1,
+      updated_at: new Date(2_000_000).toISOString(),
+    } as never);
+
+    const noticeSpy = vi.spyOn(log, "notice");
+    const r = await pullOnce(makeClient() as never);
+
+    // Unexpected non-FK constraint → stays LOUD (visible notice) AND counts as skipped.
+    expect(noticeSpy.mock.calls.flat().join(" ")).toMatch(/skipped a row/);
+    expect(r.skipped).toBeGreaterThanOrEqual(1);
+    expect(
+      db().query("SELECT 1 FROM entity_aliases WHERE id = 'remote-al'").get(),
+    ).toBeNull();
   });
 
   test("drainTimestamp also skips an orphan row sharing one timestamp (does not abort the sync)", async () => {
@@ -1020,7 +1065,7 @@ describe("pullOnce", () => {
         .query("SELECT 1 FROM entity_aliases WHERE id = 'alias-zzzz-orphan'")
         .get(),
     ).toBeNull();
-    expect(r.conflicts).toBeGreaterThanOrEqual(1);
+    expect(r.skipped).toBeGreaterThanOrEqual(1);
     expect(
       db()
         .query(
@@ -1319,7 +1364,12 @@ describe("profiles (pull-only mirror)", () => {
 
 describe("syncOnce", () => {
   test("no-op when disabled; notAuthed when logged out", async () => {
-    expect(await syncOnce()).toEqual({ pushed: 0, pulled: 0, conflicts: 0 });
+    expect(await syncOnce()).toEqual({
+      pushed: 0,
+      pulled: 0,
+      conflicts: 0,
+      skipped: 0,
+    });
     syncData.enableSync("basic");
     authed = false;
     expect((await syncOnce()).notAuthed).toBe(true);

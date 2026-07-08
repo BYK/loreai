@@ -33,6 +33,12 @@ export interface SyncResult {
   pushed: number;
   pulled: number;
   conflicts: number;
+  /**
+   * Pulled rows skipped because they violate a LOCAL constraint the FK-less
+   * remote doesn't enforce (mostly orphan refs/aliases whose entity wasn't synced
+   * under the plan cap). Recorded to `sync_conflicts`; surfaced in the CLI summary.
+   */
+  skipped: number;
   /** Tables whose upload was paused this cycle by a quota limit. */
   quotaHit?: { table: string; message: string };
   /** Set when not logged in / session invalid (caller should prompt login). */
@@ -105,6 +111,26 @@ export function isSqliteConstraintError(e: unknown): boolean {
     code.startsWith("SQLITE_CONSTRAINT") ||
     (code === "ERR_SQLITE_ERROR" &&
       /constraint/i.test(`${errstr} ${e.message}`))
+  );
+}
+
+/**
+ * The FK subset of {@link isSqliteConstraintError}: an orphan whose parent row
+ * wasn't synced (an entity beyond the free-tier cap). This is the EXPECTED,
+ * high-volume skip on a fresh device — so it's counted + recorded to
+ * `sync_conflicts` but NOT logged per row (a WARN-per-orphan flood would drown
+ * the console and inflate the Sentry warning stream). node:sqlite reports FK as
+ * errcode 787; bun:sqlite as `SQLITE_CONSTRAINT_FOREIGNKEY`. A rarer non-FK
+ * constraint skip (UNIQUE/CHECK/NOT NULL) stays visible — see the callers.
+ */
+function isForeignKeyError(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  const code = String((e as { code?: string }).code ?? "");
+  const errcode = (e as { errcode?: number }).errcode;
+  return (
+    code === "SQLITE_CONSTRAINT_FOREIGNKEY" ||
+    errcode === 787 ||
+    /FOREIGN KEY constraint failed/i.test(e.message)
   );
 }
 
@@ -227,7 +253,7 @@ export async function pushOnce(
   client: SupabaseClient,
   onProgress?: SyncProgressFn,
 ): Promise<SyncResult> {
-  const res: SyncResult = { pushed: 0, pulled: 0, conflicts: 0 };
+  const res: SyncResult = { pushed: 0, pulled: 0, conflicts: 0, skipped: 0 };
   const enc = makeEncryptionResolver();
   for (const meta of syncData.syncedTables("basic")) {
     // Pull-only tables (e.g. profiles) are server-authoritative: the client only
@@ -548,7 +574,7 @@ export async function pullOnce(
   client: SupabaseClient,
   onProgress?: SyncProgressFn,
 ): Promise<SyncResult> {
-  const res: SyncResult = { pushed: 0, pulled: 0, conflicts: 0 };
+  const res: SyncResult = { pushed: 0, pulled: 0, conflicts: 0, skipped: 0 };
   const encResolver = makeEncryptionResolver();
 
   for (const meta of syncData.syncedTables("basic")) {
@@ -579,6 +605,7 @@ export async function pullOnce(
     }
 
     const idc = meta.idColumns[0];
+    const skippedBefore = res.skipped;
     try {
       for (;;) {
         const sinceIso = new Date(cursor.ms).toISOString();
@@ -618,16 +645,22 @@ export async function pullOnce(
             // never apply as-is, so skip it — advancing the cursor past it so ONE poison
             // row can't abort the whole multi-table sync or wedge the cursor.
             if (!isSqliteConstraintError(e)) throw e;
-            res.conflicts++;
+            res.skipped++;
             syncData.recordConflict(
               meta.table,
               rid,
               "pull_constraint_skip",
               remote,
             );
-            log.notice(
-              `sync: pull ${meta.table} skipped orphan row ${rid}: ${(e as Error).message}`,
-            );
+            // FK orphans (parent beyond the plan cap) are EXPECTED + high-volume on
+            // a fresh device — count them (surfaced in the CLI summary + recorded to
+            // sync_conflicts) but DON'T log per row, or a WARN-per-orphan flood drowns
+            // the console and inflates the Sentry warning stream. A rarer non-FK skip
+            // (UNIQUE/CHECK/NOT NULL) is unexpected → keep it visible.
+            if (!isForeignKeyError(e))
+              log.notice(
+                `sync: pull ${meta.table} skipped a row (${rid}): ${(e as Error).message}`,
+              );
           }
           cursor = { ms, id: rid };
           advanced = true;
@@ -668,6 +701,14 @@ export async function pullOnce(
       // BEFORE any side effect, so no partial row was applied.)
       log.notice(`sync: pull ${meta.table} deferred — ${err.message}`);
     }
+
+    // One debug-gated summary per table for the (mostly FK-orphan) skips — the
+    // per-row detail is intentionally silent, so this is the diagnosable trace.
+    const skippedHere = res.skipped - skippedBefore;
+    if (skippedHere > 0)
+      log.info(
+        `sync: pull ${meta.table} skipped ${skippedHere} row(s) failing a local constraint (mostly orphans whose parent wasn't synced under the plan cap)`,
+      );
 
     for (const fts of touchedFts) syncData.rebuildFts(fts);
   }
@@ -741,16 +782,19 @@ async function drainTimestamp(
         // `last`/`cursor` still advance below so the drain can't wedge.
         if (!isSqliteConstraintError(e)) throw e;
         const rid = syncData.rowIdOf(meta.table, remote);
-        res.conflicts++;
+        res.skipped++;
         syncData.recordConflict(
           meta.table,
           rid,
           "pull_constraint_skip",
           remote,
         );
-        log.notice(
-          `sync: pull ${meta.table} skipped orphan row ${rid}: ${(e as Error).message}`,
-        );
+        // See the primary loop: FK orphans stay quiet (counted), rarer non-FK
+        // constraint skips stay visible.
+        if (!isForeignKeyError(e))
+          log.notice(
+            `sync: pull ${meta.table} skipped a row (${rid}): ${(e as Error).message}`,
+          );
       }
       cols.forEach((c, i) => {
         last[i] = String(remote[c]);
@@ -899,10 +943,11 @@ export async function syncOnce(
   onProgress?: SyncProgressFn,
 ): Promise<SyncResult> {
   if (!syncData.isSyncEnabled()) {
-    return { pushed: 0, pulled: 0, conflicts: 0 };
+    return { pushed: 0, pulled: 0, conflicts: 0, skipped: 0 };
   }
   const client = await getAuthedClient();
-  if (!client) return { pushed: 0, pulled: 0, conflicts: 0, notAuthed: true };
+  if (!client)
+    return { pushed: 0, pulled: 0, conflicts: 0, skipped: 0, notAuthed: true };
 
   const push = await pushOnce(client, onProgress);
   const pull = await pullOnce(client, onProgress);
@@ -910,6 +955,7 @@ export async function syncOnce(
     pushed: push.pushed,
     pulled: pull.pulled,
     conflicts: push.conflicts + pull.conflicts,
+    skipped: push.skipped + pull.skipped,
     quotaHit: push.quotaHit,
   };
 }

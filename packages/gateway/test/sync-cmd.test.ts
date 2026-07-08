@@ -21,11 +21,13 @@ const pullOnceMock = vi.fn(async () => ({
   pushed: 0,
   pulled: 0,
   conflicts: 0,
+  skipped: 0,
 }));
 const syncOnceMock = vi.fn(async () => ({
   pushed: 0,
   pulled: 0,
   conflicts: 0,
+  skipped: 0,
 }));
 
 vi.mock("../src/supabase", () => ({
