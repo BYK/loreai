@@ -46,6 +46,8 @@ import {
   curatorLimiter,
   formatVecReadLatencyHeartbeat,
   vecReadLatencyTotalSamples,
+  checkpointWal,
+  walSizeBytes,
 } from "@loreai/core";
 import type { CacheStrategy, ChangedEntry, LLMClient } from "@loreai/core";
 import {
@@ -151,6 +153,14 @@ export const GLOBAL_DEAD_SWEEP_INTERVAL_MS = 60 * 60 * 1000; // 1h
  * next tick (every ~30s) instead of waiting the full interval.
  */
 const GLOBAL_DEAD_SWEEP_BATCH = 1000;
+
+// WAL checkpointing (#1221). Only bother attempting a TRUNCATE checkpoint once the
+// -wal has grown past this floor — below it SQLite's own auto-checkpoint suffices
+// and grabbing the lock every tick isn't worth it.
+const WAL_CHECKPOINT_FLOOR_BYTES = 8 * 1024 * 1024; // 8 MiB
+// A WAL this large that still won't reset means checkpointing is genuinely starved
+// (a reader is continuously pinning a snapshot) — surface it at notice level.
+const WAL_STARVED_NOTICE_BYTES = 512 * 1024 * 1024; // 512 MiB
 
 /**
  * Cooldown tracking for knowledge consolidation.
@@ -492,6 +502,30 @@ export function startIdleScheduler(
       } catch (e) {
         log.error("dead-ref cleanup error:", e);
       }
+    }
+
+    // WAL maintenance (#1221): SQLite's PASSIVE auto-checkpoint is starved by the
+    // persistent reader-pool connections (each recall query holds a WAL read-mark),
+    // so the WAL grows unbounded under load (a 5.4 GB -wal was observed). A TRUNCATE
+    // checkpoint on the writer connection resets AND shrinks it during a quiet
+    // window; when a reader is mid-query it returns busy and we retry next tick.
+    // Never throws out of the loop.
+    try {
+      const walBytes = walSizeBytes();
+      if (walBytes >= WAL_CHECKPOINT_FLOOR_BYTES) {
+        const r = checkpointWal();
+        if (r.busy && walBytes >= WAL_STARVED_NOTICE_BYTES) {
+          log.notice(
+            `wal ${Math.round(walBytes / 1e6)}MB not checkpointing — a reader is holding a snapshot; will retry when idle (#1221)`,
+          );
+        } else {
+          log.info(
+            `wal checkpoint: ${Math.round(walBytes / 1e6)}MB → reclaimed ${Math.round(r.reclaimedBytes / 1e6)}MB (busy=${r.busy})`,
+          );
+        }
+      }
+    } catch (e) {
+      log.info("wal checkpoint error:", e);
     }
 
     // --- Idle work (distillation, curation, etc.) ---

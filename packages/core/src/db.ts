@@ -7,7 +7,7 @@ import {
   repartitionVec0Project,
 } from "./db/vec-store";
 import { join, dirname } from "node:path";
-import { chmodSync, mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync, statSync } from "node:fs";
 import { getGitRemote } from "./git";
 import { isHostedMode } from "./hosted";
 import { dataDir } from "./data-dir";
@@ -2208,10 +2208,17 @@ export function db(): Database {
   // Retry for up to 5s when another connection holds the write lock (e.g.
   // backgroundDistill's BEGIN IMMEDIATE overlapping with a recall query).
   // Default is 0ms which throws SQLITE_BUSY immediately.
-  database.exec("PRAGMA busy_timeout = 5000");
+  database.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
   // Return freed pages to the OS incrementally on each transaction commit
   // instead of accumulating a free-page list that bloats the file.
   database.exec("PRAGMA auto_vacuum = INCREMENTAL");
+  // Bound the on-disk WAL (#1221). SQLite's default PASSIVE auto-checkpoint is
+  // starved by the persistent reader-pool connections (each recall query holds a
+  // WAL read-mark), so the WAL can grow unbounded (a 5.4 GB -wal was observed).
+  // journal_size_limit truncates the WAL back to this cap after any checkpoint
+  // that resets it — the backstop for the active TRUNCATE checkpoint the idle
+  // scheduler runs via checkpointWal(). Default is -1 (never truncate).
+  database.exec(`PRAGMA journal_size_limit = ${WAL_JOURNAL_SIZE_LIMIT_BYTES}`);
   migrate(database);
   installSyncCapture(database);
   // Load the sqlite-vec native extension (if available) on the RAW connection,
@@ -3058,12 +3065,76 @@ export function mergeProjectInternal(sourceId: string, targetId: string): void {
 
 export function close() {
   if (instance) {
+    // Reclaim the WAL on a graceful shutdown so the next open doesn't inherit a
+    // huge WAL to recover/checkpoint (#1221). Best-effort — we're closing anyway.
+    // busy_timeout=0 first so a reader mid-query can't make this busy-wait (~5s)
+    // and hang close(); an un-truncated WAL is simply recovered on next open.
+    try {
+      instance.exec("PRAGMA busy_timeout = 0");
+      instance.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    } catch {
+      // ignore — a busy checkpoint or driver quirk must not block close()
+    }
     instance.close();
     instance = undefined;
   }
   // The sqlite-vec extension is loaded per-connection; reset loader state so a
   // subsequent db() on a fresh connection re-attempts the load.
   resetVecState();
+}
+
+/** Write-lock retry window for the writer connection (SQLITE_BUSY handling). */
+const BUSY_TIMEOUT_MS = 5000;
+
+/** Cap the on-disk WAL is truncated back to after a resetting checkpoint (#1221). */
+const WAL_JOURNAL_SIZE_LIMIT_BYTES = 64 * 1024 * 1024; // 64 MiB
+
+/** Bytes of the `-wal` sidecar (0 if absent / :memory:). Cheap stat for #1221 telemetry. */
+export function walSizeBytes(): number {
+  try {
+    return statSync(`${dbPath()}-wal`).size;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Reclaim the WAL with a TRUNCATE checkpoint on the writer connection (#1221).
+ * SQLite's PASSIVE auto-checkpoint is starved by the persistent reader-pool
+ * connections — each recall query holds a WAL read-mark, so the checkpoint can
+ * never obtain the "no reader below the mark" instant needed to reset the log and
+ * the WAL grows unbounded. TRUNCATE resets AND shrinks the file to zero when run
+ * in a quiet window (no reader pinning an older snapshot); when a reader is
+ * mid-query it checkpoints what it can and returns `busy` (a harmless no-op we
+ * retry on the next idle tick). It never blocks indefinitely.
+ */
+export function checkpointWal(): { busy: boolean; reclaimedBytes: number } {
+  // NOTE: for TRUNCATE mode the `log`/`checkpointed` result columns report the
+  // POST-truncation state (0/0) even on success — they can't tell you how much was
+  // reclaimed. Only `busy` is reliable there. So we measure the actual reclaim by
+  // the -wal file-size delta instead.
+  const conn = db();
+  const before = walSizeBytes();
+  // Drop the write-lock retry to 0 around the checkpoint: this runs synchronously on
+  // the gateway event loop, and a TRUNCATE blocked by a reader's read-mark would
+  // otherwise busy-wait the whole BUSY_TIMEOUT_MS (~5s stall) — precisely under the
+  // sustained-reader load that starves the WAL and makes this fire. With timeout 0 it
+  // returns `busy` in ~1ms when it can't reset, and still fully truncates in a quiet
+  // window. Restore the retry window afterward.
+  conn.exec("PRAGMA busy_timeout = 0");
+  let row: { busy: number } | undefined;
+  try {
+    row = conn.query("PRAGMA wal_checkpoint(TRUNCATE)").get() as
+      | { busy: number }
+      | undefined;
+  } finally {
+    conn.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+  }
+  const after = walSizeBytes();
+  return {
+    busy: (row?.busy ?? 0) === 1,
+    reclaimedBytes: Math.max(0, before - after),
+  };
 }
 
 // ---------------------------------------------------------------------------

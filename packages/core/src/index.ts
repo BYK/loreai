@@ -151,6 +151,8 @@ export {
   rebuildDirtySessionRollups,
   rebuildAllSessionRollups,
   close,
+  checkpointWal,
+  walSizeBytes,
 } from "./db";
 export {
   normalizeRemoteUrl,
