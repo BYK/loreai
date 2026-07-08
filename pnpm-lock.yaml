@@ -13,6 +13,7 @@ overrides:
   esbuild: '>=0.28.1'
   '@opentelemetry/core': '>=2.8.0'
   protobufjs: '>=7.6.3'
+  qs: '>=6.15.2'
 
 patchedDependencies:
   '@sentry/node@10.56.0':
@@ -3331,8 +3332,8 @@ packages:
     resolution: {integrity: sha512-EXtzRZmC+YGmGlDFbXKxQiMZNwCLEO6BANKXG4iCtSIM0yqc/pappSx3RIKr4r0uh5JsBckOXeKrB3Iz7mdQpQ==}
     hasBin: true
 
-  qs@6.15.1:
-    resolution: {integrity: sha512-6YHEFRL9mfgcAvql/XhwTvf5jKcOiiupt2FiJxHkiX1z4j7WL8J/jRHYLluORvc1XxB5rV20KoeK00gVJamspg==}
+  qs@6.15.3:
+    resolution: {integrity: sha512-O9gl3zCl5h5blw1KGUzQKhA5oUXSl8rwUIM5o0S3nCXMliSvy5Dzx7/DJcI+SwgICv+IneSZwhBh1oSyEHA71A==}
     engines: {node: '>=0.6'}
 
   radix3@1.1.2:
@@ -8042,8 +8043,9 @@ snapshots:
 
   qrcode-terminal@0.12.0: {}
 
-  qs@6.15.1:
+  qs@6.15.3:
     dependencies:
+      es-define-property: 1.0.1
       side-channel: 1.1.1
 
   radix3@1.1.2: {}
@@ -8580,7 +8582,7 @@ snapshots:
     dependencies:
       des.js: 1.1.0
       js-md4: 0.3.2
-      qs: 6.15.1
+      qs: 6.15.3
       tunnel: 0.0.6
       underscore: 1.13.8
 

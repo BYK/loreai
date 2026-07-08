@@ -26,7 +26,8 @@
       "yaml": ">=2.8.3",
       "esbuild": ">=0.28.1",
       "@opentelemetry/core": ">=2.8.0",
-      "protobufjs": ">=7.6.3"
+      "protobufjs": ">=7.6.3",
+      "qs": ">=6.15.2"
     },
     "patchedDependencies": {
       "@sentry/node@10.56.0": "patches/@sentry__node@10.56.0.patch"
