@@ -37,7 +37,9 @@
     "zod": "^4.3.6"
   },
   "optionalDependencies": {
-    "@huggingface/transformers": "^3.7.1"
+    "@huggingface/transformers": "^3.7.1",
+    "onnxruntime-node": "1.21.0",
+    "sharp": "^0.34.1"
   },
   "devDependencies": {
     "@types/mdast": "^4.0.4"

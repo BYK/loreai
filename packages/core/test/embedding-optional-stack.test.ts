@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { EventEmitter } from "node:events";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import type { Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it, test } from "vitest";
@@ -283,4 +284,41 @@ describe("packaging: @huggingface/transformers is optional (#1026)", () => {
     ).toBeTruthy();
     expect(pkg.dependencies?.["@huggingface/transformers"]).toBeUndefined();
   });
+
+  // #1220: the native ONNX backend (onnxruntime-node) + image codec (sharp) are
+  // deps of @huggingface/transformers, but the worker in packages/core/dist/**
+  // must resolve them at runtime. As transitive-only deps they nest under
+  // .pnpm/@huggingface+transformers/… in a strict-pnpm layout and are
+  // unreachable from dist/ — transformers init throws and recall silently
+  // degrades to FTS-only. Declaring them directly (still optional) links them
+  // adjacent to core so the worker resolves them, without affecting the gateway
+  // bundle (which inlines core and externalizes onnxruntime-node) or a
+  // --omit=optional install.
+  test("onnxruntime-node and sharp are declared optional too (#1220)", () => {
+    for (const dep of ["onnxruntime-node", "sharp"]) {
+      expect(pkg.optionalDependencies?.[dep]).toBeTruthy();
+      expect(pkg.dependencies?.[dep]).toBeUndefined();
+    }
+  });
+
+  // The resolution invariant the bug violated: whenever the optional stack IS
+  // installed, its native peers must resolve from @loreai/core's location (the
+  // same node_modules the built worker walks). Skipped under --omit=optional /
+  // unsupported platforms where transformers itself isn't installed.
+  const require = createRequire(import.meta.url);
+  const stackInstalled = (() => {
+    try {
+      require.resolve("@huggingface/transformers");
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+  test.runIf(stackInstalled)(
+    "native backend resolves from @loreai/core when the stack is installed (#1220)",
+    () => {
+      expect(() => require.resolve("onnxruntime-node")).not.toThrow();
+      expect(() => require.resolve("sharp")).not.toThrow();
+    },
+  );
 });
