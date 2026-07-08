@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import type { Worker } from "node:worker_threads";
-import { afterEach, beforeEach, describe, expect, it, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, test, vi } from "vitest";
 import {
   computeInitRetryDelayMs,
   embed,
@@ -155,6 +155,7 @@ describe("init-error classification (worker-mock)", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     registerSink(passthroughSink);
     _setTestWorkerFactory(null);
     _setLocalInitCooldownMsForTest(null);
@@ -234,8 +235,12 @@ describe("init-error classification (worker-mock)", () => {
     expect(warns.some((l) => /not installed/i.test(l.message))).toBe(false);
   });
 
-  it("transient init failure arms a FAST first retry (~2s), not the 30s ceiling", async () => {
+  it("transient init failure arms a FAST first retry (2s), not the 30s ceiling", async () => {
     _setLocalInitCooldownMsForTest(null); // production ceiling (30s)
+    // Freeze Date ONLY (keep real timers so flush()'s setTimeout still fires) so
+    // the armed deadline is deterministic — no wall-clock/monotonicity guessing.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(0);
     const fakes: FakeWorker[] = [];
     _setTestWorkerFactory(() => {
       const f = new FakeWorker();
@@ -253,13 +258,11 @@ describe("init-error classification (worker-mock)", () => {
     await flush();
     await result;
 
-    // The first retry is armed ~2s out (INIT_RETRY_BASE_MS), NOT the flat 30s
-    // the provider used to wait — that flat wait was the entire startup
-    // FTS-only window for a self-healing blip. Fails if reverted to the
-    // fixed-cooldown behaviour (delay would be ~30_000).
-    const delayMs = _getLocalInitRetryAtForTest() - Date.now();
-    expect(delayMs).toBeGreaterThan(1_000);
-    expect(delayMs).toBeLessThanOrEqual(2_000);
+    // Date frozen at 0 → the deadline IS the backoff delay: exactly 2s
+    // (INIT_RETRY_BASE_MS), NOT the flat 30s the provider used to wait — that
+    // flat wait was the entire startup FTS-only window for a self-healing blip.
+    // Fails if reverted to the fixed-cooldown behaviour (would be 30_000).
+    expect(_getLocalInitRetryAtForTest()).toBe(2_000);
     expect(isAvailable()).toBe(false); // FTS-only during the (now short) cooldown
   });
 });
