@@ -108,7 +108,9 @@ describe("local embedding init retry (transient self-heal)", () => {
   }
 
   it("stays FTS-only during the cooldown without prematurely retrying", async () => {
-    _setLocalInitCooldownMsForTest(60_000); // long → still cooling down
+    // Ceiling well above the first-retry delay; the synchronous checks below
+    // run at t≈0, comfortably inside the (~2s) cooldown, so no premature respawn.
+    _setLocalInitCooldownMsForTest(60_000);
     const fakes = installFakeWorkers();
     await failInit(fakes, TRANSIENT_ERR);
 
