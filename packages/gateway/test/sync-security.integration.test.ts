@@ -1424,3 +1424,91 @@ describe.skipIf(gate())(
     });
   },
 );
+
+describe.skipIf(gate())("sync migrations — tombstone reaper (#909)", () => {
+  async function usageRow(scope: string, table: string) {
+    const { rows } = await h.client.query(
+      "select coalesce(row_count,0)::int as rows, coalesce(byte_count,0)::int as bytes from public.user_table_usage where scope_id=$1 and table_name=$2",
+      [scope, table],
+    );
+    return rows[0] ?? { rows: 0, bytes: 0 };
+  }
+
+  // Ancient (well past any window) vs recent (inside the 90-day window).
+  const ANCIENT = "2020-01-01T00:00:00Z";
+  const recentTs = () => new Date(Date.now() - 5 * 86_400_000).toISOString();
+
+  const insK = (scope: string, id: string, deleted: boolean, ts: string) =>
+    h.asUser(scope, (c) =>
+      c.query(
+        "insert into public.knowledge (id, scope_id, category, title, content, is_deleted, updated_at) values ($1,$2,'pattern','t','c',$3,$4)",
+        [id, scope, deleted, ts],
+      ),
+    );
+
+  it("reaps tombstones older than the window, keeps live + recent, decrements usage, across scopes", async () => {
+    const a = await h.createUser();
+    const b = await h.createUser();
+
+    await insK(a, "k-live", false, ANCIENT); // live → never reaped even though ancient
+    await insK(a, "k-old", true, ANCIENT); // tombstone past the window → reaped
+    await insK(a, "k-recent", true, recentTs()); // tombstone inside the window → kept
+    await h.asUser(a, (c) =>
+      c.query(
+        "insert into public.entity_aliases (id, scope_id, entity_id, alias_type, alias_value, is_deleted, updated_at) values ('al-old',$1,'e1','name','v',true,$2)",
+        [a, ANCIENT],
+      ),
+    );
+    await insK(b, "k-b-old", true, ANCIENT); // other scope → reaped too (global task)
+
+    const before = await usageRow(a, "knowledge");
+    expect(before.rows).toBe(3);
+
+    const { rows: rr } = await h.client.query(
+      "select public.reap_tombstones(90) as n",
+    );
+    expect(Number(rr[0].n)).toBeGreaterThanOrEqual(3); // >= our 3 (reap is global)
+
+    // scope a knowledge: ancient tombstone gone; live + recent kept
+    const { rows: ka } = await h.client.query(
+      "select id from public.knowledge where scope_id=$1 order by id",
+      [a],
+    );
+    expect(ka.map((r) => r.id)).toEqual(["k-live", "k-recent"]);
+    // leaf-table tombstone reaped
+    const { rows: al } = await h.client.query(
+      "select id from public.entity_aliases where scope_id=$1",
+      [a],
+    );
+    expect(al).toHaveLength(0);
+    // cross-scope tombstone reaped
+    const { rows: kb } = await h.client.query(
+      "select id from public.knowledge where scope_id=$1",
+      [b],
+    );
+    expect(kb).toHaveLength(0);
+    // usage counters decremented by the one reaped knowledge row (3 -> 2, fewer bytes)
+    const after = await usageRow(a, "knowledge");
+    expect(after.rows).toBe(2);
+    expect(after.bytes).toBeLessThan(before.bytes);
+  });
+
+  it("is not executable by a normal (authenticated) user — system task only", async () => {
+    const a = await h.createUser();
+    await expect(
+      h.asUser(a, (c) => c.query("select public.reap_tombstones(90)")),
+    ).rejects.toThrow(/permission denied/i);
+  });
+
+  it("retention_days=0 reaps every tombstone but never a live row", async () => {
+    const a = await h.createUser();
+    await insK(a, "k2-live", false, recentTs());
+    await insK(a, "k2-dead", true, recentTs()); // recent, but window 0 → reaped
+    await h.client.query("select public.reap_tombstones(0)");
+    const { rows } = await h.client.query(
+      "select id from public.knowledge where scope_id=$1",
+      [a],
+    );
+    expect(rows.map((r) => r.id)).toEqual(["k2-live"]);
+  });
+});
