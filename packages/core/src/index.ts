@@ -153,6 +153,9 @@ export {
   close,
   checkpointWal,
   walSizeBytes,
+  vacuum,
+  dbFileSizeBytes,
+  freelistBytes,
 } from "./db";
 export {
   normalizeRemoteUrl,

@@ -3137,6 +3137,42 @@ export function checkpointWal(): { busy: boolean; reclaimedBytes: number } {
   };
 }
 
+/** Bytes of the main DB file (0 if absent / :memory:). */
+export function dbFileSizeBytes(): number {
+  try {
+    return statSync(dbPath()).size;
+  } catch {
+    return 0;
+  }
+}
+
+/** Reclaimable free space right now: `freelist_count × page_size`. */
+export function freelistBytes(): number {
+  const fc = db().query("PRAGMA freelist_count").get() as
+    | { freelist_count: number }
+    | undefined;
+  const ps = db().query("PRAGMA page_size").get() as
+    | { page_size: number }
+    | undefined;
+  return (fc?.freelist_count ?? 0) * (ps?.page_size ?? 0);
+}
+
+/**
+ * Full VACUUM: rewrites the whole DB, reclaiming ALL free pages AND applying the
+ * current `auto_vacuum` mode — so a legacy DB created with `auto_vacuum=NONE`
+ * (freed pages never returned to the OS → #1221 main-file bloat) is converted to
+ * INCREMENTAL, after which the idle incremental-vacuum can keep it bounded. Heavy:
+ * takes an exclusive lock and needs ~2× the DB size in transient disk. Returns the
+ * file size before/after. Followed by a resetting WAL checkpoint so the VACUUM's
+ * churn doesn't linger in the -wal.
+ */
+export function vacuum(): { beforeBytes: number; afterBytes: number } {
+  const beforeBytes = dbFileSizeBytes();
+  db().exec("VACUUM");
+  checkpointWal();
+  return { beforeBytes, afterBytes: dbFileSizeBytes() };
+}
+
 // ---------------------------------------------------------------------------
 // Centralized query helpers
 //

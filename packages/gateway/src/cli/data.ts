@@ -1317,6 +1317,40 @@ async function cmdRerank(): Promise<void> {
   }
 }
 
+async function cmdVacuum(): Promise<void> {
+  const remote = getRemoteUrl();
+  if (remote) {
+    console.error(
+      "Error: vacuum is not supported in remote mode (requires local DB access).",
+    );
+    process.exit(1);
+  }
+
+  const { vacuum, dbFileSizeBytes, freelistBytes } = await import(
+    "@loreai/core"
+  );
+  const mb = (b: number) => `${(b / 1e6).toFixed(1)} MB`;
+
+  console.log(
+    `Database: ${mb(dbFileSizeBytes())} (${mb(freelistBytes())} reclaimable free pages)`,
+  );
+  console.log(
+    "Running VACUUM — this rewrites the whole database and can take a while (and ~2× the DB size in free disk) on a large DB…",
+  );
+  try {
+    const { beforeBytes, afterBytes } = vacuum();
+    console.log(
+      `Done — ${mb(beforeBytes)} → ${mb(afterBytes)} (reclaimed ${mb(Math.max(0, beforeBytes - afterBytes))}).`,
+    );
+  } catch (err) {
+    console.error("VACUUM failed:", err);
+    console.error(
+      "If a gateway/agent is running it holds the DB open — stop it and retry (VACUUM needs exclusive access).",
+    );
+    process.exit(1);
+  }
+}
+
 async function cmdReindex(flags?: Record<string, unknown>): Promise<void> {
   const remote = getRemoteUrl();
   if (remote) return cmdReindexRemote(remote, flags ?? {});
@@ -2701,6 +2735,7 @@ Subcommands:
   contradictions        List knowledge entries that contradict each other (#1123)
   reindex               Rebuild embedding vectors (after model/config change)
   rerank                Re-score preference confidence by directive strength
+  vacuum                Reclaim free space from the DB file (full VACUUM; #1221)
   cache-stats           Show cache-bust counters (system[0] cache-alignment gate)
 
 Options:
@@ -3254,6 +3289,9 @@ export async function commandData(
       break;
     case "rerank":
       await cmdRerank();
+      break;
+    case "vacuum":
+      await cmdVacuum();
       break;
     case "cache-stats":
       await cmdCacheStats(subArgs, values);
