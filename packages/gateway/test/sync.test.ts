@@ -979,7 +979,7 @@ describe("pullOnce", () => {
     ).not.toBeNull();
   });
 
-  test("a non-FK constraint skip (UNIQUE) stays VISIBLE (log.notice) and still counts as skipped", async () => {
+  test("resolves a pulled entity_alias UNIQUE collision deterministically — local (lower id) wins, not skipped (#1217)", async () => {
     syncData.enableSync("basic");
     const entId = "55555555-5555-4555-8555-555555555555";
     syncData.withApplying(() => {
@@ -988,17 +988,17 @@ describe("pullOnce", () => {
           "INSERT INTO entities (id, entity_type, canonical_name, created_at, updated_at) VALUES (?, 'tool', 'U', 1, 1)",
         )
         .run(entId);
-      // A local alias already occupies UNIQUE(alias_type='name', alias_value='Dup').
+      // Local alias with the LOWER id occupies UNIQUE(alias_type='name', alias_value='Dup').
       db()
         .query(
-          "INSERT INTO entity_aliases (id, entity_id, alias_type, alias_value, source, created_at) VALUES ('local-al', ?, 'name', 'Dup', NULL, 1)",
+          "INSERT INTO entity_aliases (id, entity_id, alias_type, alias_value, source, created_at) VALUES ('al-local', ?, 'name', 'Dup', NULL, 1)",
         )
         .run(entId);
     });
-    // Remote alias: NEW id, entity present (FK passes), but SAME (alias_type, alias_value)
-    // → a local UNIQUE violation, NOT an FK error → the rarer, unexpected skip class.
+    // Remote alias: HIGHER id, entity present (FK ok), SAME (alias_type, alias_value) →
+    // local UNIQUE collision. Deterministic tiebreak 'al-local' < 'al-remote' → LOCAL wins.
     tableRows("entity_aliases").push({
-      id: "remote-al",
+      id: "al-remote",
       entity_id: entId,
       alias_type: "name",
       alias_value: "Dup",
@@ -1010,12 +1010,68 @@ describe("pullOnce", () => {
     const noticeSpy = vi.spyOn(log, "notice");
     const r = await pullOnce(makeClient() as never);
 
-    // Unexpected non-FK constraint → stays LOUD (visible notice) AND counts as skipped.
-    expect(noticeSpy.mock.calls.flat().join(" ")).toMatch(/skipped a row/);
-    expect(r.skipped).toBeGreaterThanOrEqual(1);
+    // Converged, NOT skipped: no "skipped a row" notice; counted as a conflict.
+    expect(noticeSpy.mock.calls.flat().join(" ")).not.toMatch(/skipped a row/);
+    expect(r.conflicts).toBeGreaterThanOrEqual(1);
+    // Local (lower id) kept; remote loser discarded + recorded.
     expect(
-      db().query("SELECT 1 FROM entity_aliases WHERE id = 'remote-al'").get(),
+      db().query("SELECT 1 FROM entity_aliases WHERE id = 'al-local'").get(),
+    ).not.toBeNull();
+    expect(
+      db().query("SELECT 1 FROM entity_aliases WHERE id = 'al-remote'").get(),
     ).toBeNull();
+    expect(
+      db()
+        .query(
+          "SELECT 1 FROM sync_conflicts WHERE table_name='entity_aliases' AND row_id='al-remote' AND resolution='alias_unique_superseded'",
+        )
+        .get(),
+    ).not.toBeNull();
+  });
+
+  test("resolves a pulled entity_alias UNIQUE collision by applying the remote when it has the lower id (#1217)", async () => {
+    syncData.enableSync("basic");
+    const entId = "66666666-6666-4666-8666-666666666666";
+    syncData.withApplying(() => {
+      db()
+        .query(
+          "INSERT INTO entities (id, entity_type, canonical_name, created_at, updated_at) VALUES (?, 'tool', 'U2', 1, 1)",
+        )
+        .run(entId);
+      // Local alias with the HIGHER id occupies UNIQUE(name, 'Dup2').
+      db()
+        .query(
+          "INSERT INTO entity_aliases (id, entity_id, alias_type, alias_value, source, created_at) VALUES ('al-zzz', ?, 'name', 'Dup2', NULL, 1)",
+        )
+        .run(entId);
+    });
+    // Remote alias with the LOWER id → remote wins → local dropped, remote applied.
+    tableRows("entity_aliases").push({
+      id: "al-aaa",
+      entity_id: entId,
+      alias_type: "name",
+      alias_value: "Dup2",
+      source: null,
+      created_at: 1,
+      updated_at: new Date(2_000_000).toISOString(),
+    } as never);
+
+    const r = await pullOnce(makeClient() as never);
+
+    expect(r.conflicts).toBeGreaterThanOrEqual(1);
+    expect(
+      db().query("SELECT 1 FROM entity_aliases WHERE id = 'al-zzz'").get(),
+    ).toBeNull(); // local loser dropped
+    expect(
+      db().query("SELECT 1 FROM entity_aliases WHERE id = 'al-aaa'").get(),
+    ).not.toBeNull(); // remote winner applied
+    expect(
+      db()
+        .query(
+          "SELECT 1 FROM sync_conflicts WHERE table_name='entity_aliases' AND row_id='al-zzz' AND resolution='alias_unique_superseded'",
+        )
+        .get(),
+    ).not.toBeNull();
   });
 
   test("drainTimestamp also skips an orphan row sharing one timestamp (does not abort the sync)", async () => {
@@ -1070,6 +1126,72 @@ describe("pullOnce", () => {
       db()
         .query(
           "SELECT 1 FROM sync_conflicts WHERE row_id = 'alias-zzzz-orphan'",
+        )
+        .get(),
+    ).not.toBeNull();
+  });
+
+  test("drainTimestamp also converges an alias UNIQUE collision (not just the primary loop) (#1217)", async () => {
+    // The alias convergence must hold on the DRAIN path too (>PAGE rows sharing one ms),
+    // else the guarantee has a gap. Force the drain, land a collider in it, assert it
+    // resolves (converges) rather than skipping.
+    syncData.enableSync("basic");
+    const entId = "77777777-7777-4777-8777-777777777777";
+    syncData.withApplying(() => {
+      db()
+        .query(
+          "INSERT INTO entities (id, entity_type, canonical_name, created_at, updated_at) VALUES (?, 'tool', 'Bulk2', 1, 1)",
+        )
+        .run(entId);
+      // Local alias with a HIGH id occupies UNIQUE(name, 'collide-val').
+      db()
+        .query(
+          "INSERT INTO entity_aliases (id, entity_id, alias_type, alias_value, source, created_at) VALUES ('zzzzzzzz-local', ?, 'name', 'collide-val', NULL, 1)",
+        )
+        .run(entId);
+    });
+    const ts = new Date(2_000_000).toISOString(); // one exact ms for every remote row
+    for (let i = 0; i < 205; i++) {
+      tableRows("entity_aliases").push({
+        id: `alias-${String(i).padStart(4, "0")}`,
+        entity_id: entId,
+        alias_type: "name",
+        alias_value: `bulk-${i}`,
+        source: null,
+        created_at: 1,
+        updated_at: ts,
+      } as never);
+    }
+    // The collider sorts LAST (→ lands in the DRAIN batch) and has a LOWER id than the
+    // local alias ('alias-…' < 'zzzzzzzz-local') → remote wins, dropping the local loser.
+    tableRows("entity_aliases").push({
+      id: "alias-zzzz-collide",
+      entity_id: entId,
+      alias_type: "name",
+      alias_value: "collide-val",
+      source: null,
+      created_at: 1,
+      updated_at: ts,
+    } as never);
+
+    const r = await pullOnce(makeClient() as never); // must NOT throw (drain path)
+
+    expect(r.conflicts).toBeGreaterThanOrEqual(1);
+    // Remote (lower id) winner applied; local (higher id) loser dropped + recorded.
+    expect(
+      db()
+        .query("SELECT 1 FROM entity_aliases WHERE id = 'alias-zzzz-collide'")
+        .get(),
+    ).not.toBeNull();
+    expect(
+      db()
+        .query("SELECT 1 FROM entity_aliases WHERE id = 'zzzzzzzz-local'")
+        .get(),
+    ).toBeNull();
+    expect(
+      db()
+        .query(
+          "SELECT 1 FROM sync_conflicts WHERE row_id = 'zzzzzzzz-local' AND resolution = 'alias_unique_superseded'",
         )
         .get(),
     ).not.toBeNull();

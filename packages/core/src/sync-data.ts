@@ -1340,6 +1340,75 @@ export function recordConflict(
     );
 }
 
+/**
+ * Deterministic convergence for a pulled `entity_aliases` row that violates the local
+ * `UNIQUE(alias_type, alias_value)` the FK-less remote doesn't enforce (#1217). Two
+ * devices can independently mint an alias for the same (type, value) with DIFFERENT ids;
+ * without a rule each device keeps the OTHER's copy and they never converge. The tiebreak
+ * is symmetric — the LOWER alias id wins on EVERY device — so the outcome is identical
+ * regardless of pull order.
+ *
+ * `reapply` re-applies the winning remote row; it's invoked ONLY when the remote wins,
+ * after the losing local row is dropped so the collision is cleared. Returns true when
+ * the conflict is resolved (the caller advances the cursor + counts it), or false to fall
+ * back to the generic constraint skip — either because there is no local (type, value)
+ * collision, or because the remote alias is an FK orphan (its entity isn't admitted under
+ * the cap), in which case the valid local alias must stay.
+ *
+ * The losing local row is deleted WITHOUT sync-suppression, so its removal propagates via
+ * the outbox and the duplicate is cleaned off the remote too (then reaped, #909). The
+ * discarded row is recorded to `sync_conflicts`.
+ */
+export function resolveAliasUniqueConflict(
+  remote: Record<string, unknown>,
+  reapply: () => void,
+): boolean {
+  const at = remote.alias_type;
+  const av = remote.alias_value;
+  const remoteId = remote.id;
+  if (
+    typeof at !== "string" ||
+    typeof av !== "string" ||
+    typeof remoteId !== "string"
+  )
+    return false;
+  const local = db()
+    .query(
+      "SELECT id, entity_id, alias_type, alias_value FROM entity_aliases WHERE alias_type = ? AND alias_value = ?",
+    )
+    .get(at, av) as
+    | { id: string; entity_id: string; alias_type: string; alias_value: string }
+    | undefined;
+  // No local collision, or the very same row (an ordinary update, not a conflict) →
+  // let the caller apply/skip it normally.
+  if (!local || local.id === remoteId) return false;
+
+  if (remoteId < local.id) {
+    // Remote alias has the lower id → it wins. But only proceed if it can actually
+    // apply: its entity must be admitted locally, else it's an FK orphan and the valid
+    // local alias must stay (the caller skips the orphan remote row).
+    const entityId = remote.entity_id;
+    if (
+      typeof entityId !== "string" ||
+      !db().query("SELECT 1 FROM entities WHERE id = ?").get(entityId)
+    )
+      return false;
+    recordConflict(
+      "entity_aliases",
+      local.id,
+      "alias_unique_superseded",
+      local,
+    );
+    db().query("DELETE FROM entity_aliases WHERE id = ?").run(local.id);
+    reapply();
+    return true;
+  }
+
+  // Local alias has the lower id → it wins; discard the remote loser (recorded).
+  recordConflict("entity_aliases", remoteId, "alias_unique_superseded", remote);
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Enable / disable
 // ---------------------------------------------------------------------------

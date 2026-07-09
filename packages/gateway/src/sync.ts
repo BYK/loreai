@@ -134,6 +134,23 @@ function isForeignKeyError(e: unknown): boolean {
   );
 }
 
+/**
+ * A UNIQUE (or PK) constraint violation. Used to route a pulled `entity_aliases` row that
+ * collides with a local row on `UNIQUE(alias_type, alias_value)` into the deterministic
+ * convergence resolver (#1217) instead of the generic skip. node:sqlite reports UNIQUE as
+ * errcode 2067; bun:sqlite as `SQLITE_CONSTRAINT_UNIQUE`.
+ */
+function isUniqueConstraintError(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  const code = String((e as { code?: string }).code ?? "");
+  const errcode = (e as { errcode?: number }).errcode;
+  return (
+    code === "SQLITE_CONSTRAINT_UNIQUE" ||
+    errcode === 2067 ||
+    /UNIQUE constraint failed/i.test(e.message)
+  );
+}
+
 // ---------------------------------------------------------------------------
 // C-4 (#825): wire encryption of knowledge content/title
 // ---------------------------------------------------------------------------
@@ -637,30 +654,18 @@ export async function pullOnce(
             applyRemote(meta, remote, res, touchedFts, enc);
           } catch (e) {
             // A ciphertext row we can't decrypt defers the WHOLE table (outer catch,
-            // no cursor advance) so it re-pulls once the key is available.
-            if (e instanceof EncryptedContentUnavailable) throw e;
-            // A pulled row that violates a LOCAL constraint the FK-less remote never
-            // enforces (e.g. an entity_aliases / knowledge_entity_refs row whose entity
-            // was never admitted under the entity cap → orphan on the remote). It can
-            // never apply as-is, so skip it — advancing the cursor past it so ONE poison
-            // row can't abort the whole multi-table sync or wedge the cursor.
-            if (!isSqliteConstraintError(e)) throw e;
-            res.skipped++;
-            syncData.recordConflict(
-              meta.table,
-              rid,
-              "pull_constraint_skip",
+            // no cursor advance) so it re-pulls once the key is available. Everything
+            // else (constraint) is resolved-or-skipped by the shared handler, then the
+            // cursor advances below so ONE poison row can't wedge the sync.
+            handlePulledRowConstraint(
+              meta,
               remote,
+              rid,
+              e,
+              res,
+              touchedFts,
+              enc,
             );
-            // FK orphans (parent beyond the plan cap) are EXPECTED + high-volume on
-            // a fresh device — count them (surfaced in the CLI summary + recorded to
-            // sync_conflicts) but DON'T log per row, or a WARN-per-orphan flood drowns
-            // the console and inflates the Sentry warning stream. A rarer non-FK skip
-            // (UNIQUE/CHECK/NOT NULL) is unexpected → keep it visible.
-            if (!isForeignKeyError(e))
-              log.notice(
-                `sync: pull ${meta.table} skipped a row (${rid}): ${(e as Error).message}`,
-              );
           }
           cursor = { ms, id: rid };
           advanced = true;
@@ -774,36 +779,65 @@ async function drainTimestamp(
     }
 
     for (const remote of rows) {
+      const rid = syncData.rowIdOf(meta.table, remote);
       try {
         applyRemote(meta, remote, res, touchedFts, enc);
       } catch (e) {
-        if (e instanceof EncryptedContentUnavailable) throw e;
-        // Orphan/poison pulled row (see the primary pull loop) — skip, don't abort;
-        // `last`/`cursor` still advance below so the drain can't wedge.
-        if (!isSqliteConstraintError(e)) throw e;
-        const rid = syncData.rowIdOf(meta.table, remote);
-        res.skipped++;
-        syncData.recordConflict(
-          meta.table,
-          rid,
-          "pull_constraint_skip",
-          remote,
-        );
-        // See the primary loop: FK orphans stay quiet (counted), rarer non-FK
-        // constraint skips stay visible.
-        if (!isForeignKeyError(e))
-          log.notice(
-            `sync: pull ${meta.table} skipped a row (${rid}): ${(e as Error).message}`,
-          );
+        // Same resolve-or-skip as the primary loop (incl. #1217 alias convergence) so
+        // the drain path — used when >PAGE rows share one exact ms — can't diverge or
+        // wedge; `last`/`cursor` still advance below.
+        handlePulledRowConstraint(meta, remote, rid, e, res, touchedFts, enc);
       }
       cols.forEach((c, i) => {
         last[i] = String(remote[c]);
       });
-      cursor = { ms: cursor.ms, id: syncData.rowIdOf(meta.table, remote) };
+      cursor = { ms: cursor.ms, id: rid };
     }
   }
   // Past this millisecond entirely; the next primary page resumes at ms+1.
   return { ms: cursor.ms + 1, id: "" };
+}
+
+/**
+ * Handle a constraint error thrown while applying a pulled row — shared by the primary
+ * pull loop and the `drainTimestamp` path so both converge identically. Rethrows
+ * encryption + non-constraint errors (the caller aborts the table). Otherwise: an
+ * entity_aliases UNIQUE(alias_type, alias_value) collision is resolved deterministically
+ * (#1217, the lower alias id wins on every device); anything else (FK orphan / CHECK /
+ * NOT NULL) is skipped so one poison row can't abort the whole multi-table sync or wedge
+ * the cursor. The caller advances the cursor after this returns.
+ */
+function handlePulledRowConstraint(
+  meta: syncData.SyncTableMeta,
+  remote: Record<string, unknown>,
+  rid: string,
+  e: unknown,
+  res: SyncResult,
+  touchedFts: Set<string>,
+  enc: EncSnapshot,
+): void {
+  if (e instanceof EncryptedContentUnavailable) throw e;
+  if (!isSqliteConstraintError(e)) throw e;
+  if (
+    meta.table === "entity_aliases" &&
+    isUniqueConstraintError(e) &&
+    syncData.resolveAliasUniqueConflict(remote, () =>
+      applyRemote(meta, remote, res, touchedFts, enc),
+    )
+  ) {
+    res.conflicts++;
+    return;
+  }
+  res.skipped++;
+  syncData.recordConflict(meta.table, rid, "pull_constraint_skip", remote);
+  // FK orphans (parent beyond the plan cap) are EXPECTED + high-volume on a fresh device
+  // — count them (surfaced in the CLI summary + recorded to sync_conflicts) but DON'T log
+  // per row, or a WARN-per-orphan flood drowns the console and inflates the Sentry
+  // warning stream. A rarer non-FK skip (CHECK/NOT NULL) is unexpected → keep it visible.
+  if (!isForeignKeyError(e))
+    log.notice(
+      `sync: pull ${meta.table} skipped a row (${rid}): ${(e as Error).message}`,
+    );
 }
 
 function applyRemote(
