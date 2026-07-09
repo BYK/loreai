@@ -39,6 +39,10 @@ import {
   setSyncState,
   SYNCED_TABLES,
   syncedColumns,
+  syncedTables,
+  syncedTablesFor,
+  currentSyncTier,
+  metaFor,
   withApplying,
 } from "../src/sync-data";
 import * as ltm from "../src/ltm";
@@ -1356,5 +1360,51 @@ describe("applyRemoteMeta / applyRemoteMetaCrdt — convergent confidence (A2 3b
     ).last_reinforced_at;
     expect(lra).not.toBeNull();
     expect(lra as number).toBeGreaterThanOrEqual(before);
+  });
+});
+
+describe("tier-aware table selection (D-2, #826)", () => {
+  afterEach(() => db().exec("DELETE FROM profiles"));
+
+  test("syncedTablesFor is cumulative: basic ⊆ pro ⊆ max", () => {
+    const names = (t: "basic" | "pro" | "max") =>
+      syncedTablesFor(t).map((m) => m.table);
+    const basic = names("basic");
+    const pro = names("pro");
+    const max = names("max");
+    // basic equals the registered basic set exactly
+    expect(new Set(basic)).toEqual(
+      new Set(SYNCED_TABLES.basic.map((m) => m.table)),
+    );
+    // cumulative containment: every lower-tier table is present in the higher tier
+    for (const t of basic) expect(pro).toContain(t);
+    for (const t of pro) expect(max).toContain(t);
+    // no duplicate table within a tier's cumulative set
+    expect(new Set(pro).size).toBe(pro.length);
+    // non-cumulative accessor still returns exactly one tier's set
+    expect(syncedTables("basic")).toBe(SYNCED_TABLES.basic);
+  });
+
+  test("currentSyncTier maps the plan tier from the profiles mirror", () => {
+    const setPlan = (tier?: string) => {
+      db().exec("DELETE FROM profiles");
+      if (tier)
+        db().query("INSERT INTO profiles (id, tier) VALUES ('u', ?)").run(tier);
+    };
+    setPlan(); // no profile pulled yet → default
+    expect(currentSyncTier()).toBe("basic");
+    setPlan("free");
+    expect(currentSyncTier()).toBe("basic");
+    setPlan("pro");
+    expect(currentSyncTier()).toBe("pro");
+    setPlan("max");
+    expect(currentSyncTier()).toBe("max");
+    setPlan("enterprise"); // unknown plan → safe default, never throws
+    expect(currentSyncTier()).toBe("basic");
+  });
+
+  test("metaFor resolves any registered table regardless of tier; throws for unknown", () => {
+    expect(metaFor("knowledge").table).toBe("knowledge");
+    expect(() => metaFor("not_a_table")).toThrow(/not a synced table/);
   });
 });

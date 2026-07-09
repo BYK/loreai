@@ -318,12 +318,48 @@ export const SYNCED_TABLES: Record<SyncTier, SyncTableMeta[]> = {
   max: [],
 };
 
+// Every registered table across ALL tiers — so meta()/metaFor() resolve a table
+// regardless of the caller's current tier (a Pro table's shape is tier-independent;
+// tier only gates whether it is SYNCED, not whether its meta exists).
 const META_BY_TABLE = new Map<string, SyncTableMeta>();
-for (const t of SYNCED_TABLES.basic) META_BY_TABLE.set(t.table, t);
+for (const t of [
+  ...SYNCED_TABLES.basic,
+  ...SYNCED_TABLES.pro,
+  ...SYNCED_TABLES.max,
+])
+  META_BY_TABLE.set(t.table, t);
 
-/** The synced table set for a tier (only `basic` is populated today). */
+/** The tables registered for exactly one SyncTier (non-cumulative). */
 export function syncedTables(tier: SyncTier = "basic"): SyncTableMeta[] {
   return SYNCED_TABLES[tier];
+}
+
+/**
+ * The CUMULATIVE synced table set at a SyncTier: basic ⊆ pro ⊆ max. This is what
+ * the engine actually syncs — a Pro user gets the basic tables PLUS the pro ones.
+ * (pro/max are empty until #826/D populates them, so this equals `basic` today.)
+ */
+export function syncedTablesFor(tier: SyncTier): SyncTableMeta[] {
+  const out = [...SYNCED_TABLES.basic];
+  if (tier === "pro" || tier === "max") out.push(...SYNCED_TABLES.pro);
+  if (tier === "max") out.push(...SYNCED_TABLES.max);
+  return out;
+}
+
+/**
+ * Map the user's PLAN tier (currentTier(): 'free'|'pro'|'max') to the SyncTier
+ * whose cumulative table set should sync. free → basic; pro → pro; max → max.
+ */
+export function currentSyncTier(): SyncTier {
+  const plan = currentTier();
+  if (plan === "max") return "max";
+  if (plan === "pro") return "pro";
+  return "basic";
+}
+
+/** Resolve a table's meta regardless of tier (throws if not registered). */
+export function metaFor(table: string): SyncTableMeta {
+  return meta(table);
 }
 
 /**
@@ -675,7 +711,7 @@ function seedSelect(table: string): string {
   }
 }
 
-export function seedOutbox(tier: SyncTier = "basic"): void {
+export function seedOutbox(tier: SyncTier = currentSyncTier()): void {
   const now = Date.now();
   const enqueue = db().query(
     `INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
@@ -693,7 +729,7 @@ export function seedOutbox(tier: SyncTier = "basic"): void {
   // stall on `lore sync enable` for a large knowledge base. (Safe: seedOutbox is
   // only ever reached via enableSync, never from within another transaction.)
   withTransaction(() => {
-    for (const m of syncedTables(tier)) {
+    for (const m of syncedTablesFor(tier)) {
       // Pull-only tables are never pushed — enqueuing them would create outbox
       // entries that pushOnce skips forever, pinning their push cursor at 0 and
       // (via the prune floor) permanently disabling outbox pruning for ALL tables.
@@ -784,10 +820,10 @@ export function seedOutbox(tier: SyncTier = "basic"): void {
  * This is why enable does NOT just seed once: it reconciles, so changes made
  * while sync was disabled are not silently dropped from the push queue.
  */
-export function reconcile(tier: SyncTier = "basic"): void {
+export function reconcile(tier: SyncTier = currentSyncTier()): void {
   const now = Date.now();
   seedOutbox(tier);
-  for (const m of syncedTables(tier)) {
+  for (const m of syncedTablesFor(tier)) {
     // Pull-only tables are never pushed (see seedOutbox) — also skip the
     // delete-tombstone reconciliation so no `profiles` outbox entry is created.
     if (m.pullOnly) continue;
@@ -1494,7 +1530,7 @@ export function isSyncEnabled(): boolean {
  * row recreated after a pending delete still gets a trailing upsert; see
  * `seedOutbox`).
  */
-export function enableSync(tier: SyncTier = "basic"): void {
+export function enableSync(tier: SyncTier = currentSyncTier()): void {
   setTeamConfig(ENABLED_KEY, "1");
   reconcile(tier);
 }
@@ -1518,7 +1554,7 @@ export function disableSync(): void {
  */
 export function assertSyncInvariants(): void {
   const violations: string[] = [];
-  const tables = syncedTables();
+  const tables = syncedTablesFor(currentSyncTier());
 
   // 1. Pull-only tables are server-authoritative and never pushed, so an outbox
   //    entry for one can NEVER advance its push cursor — it pins the prune floor

@@ -56,7 +56,7 @@ export async function cmdEnable(
   }
   const justEnabled = !syncData.isSyncEnabled();
   if (justEnabled) {
-    syncData.enableSync("basic");
+    syncData.enableSync(); // defaults to the current plan's SyncTier
     console.log(
       `Sync enabled for ${formatUser(user)}. Reconciling existing knowledge + entities…`,
     );
@@ -380,7 +380,7 @@ async function cmdStatus(): Promise<void> {
     // Pending = distinct (table,row_id) with an outbox seq beyond that table's
     // push cursor. Cursors are per table.
     const seen = new Set<string>();
-    for (const meta of syncData.syncedTables("basic")) {
+    for (const meta of syncData.syncedTablesFor(syncData.currentSyncTier())) {
       const cursor = Number(getKV(`sync.push.${meta.table}`) ?? "0");
       for (const e of syncData.readOutbox(cursor, 100_000, meta.table)) {
         seen.add(`${e.table_name}\x1f${e.row_id}`);
@@ -415,7 +415,7 @@ export function makeSyncProgress(
   header: string,
   out: ProgressOut = process.stdout,
 ): { onProgress: SyncProgressFn; done: () => void } {
-  const tables = syncData.syncedTables("basic");
+  const tables = syncData.syncedTablesFor(syncData.currentSyncTier());
   const total = tables.filter((t) => !t.pullOnly).length + tables.length;
   const tty = !!out.isTTY;
   const seen = new Set<string>();

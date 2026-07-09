@@ -272,7 +272,7 @@ export async function pushOnce(
 ): Promise<SyncResult> {
   const res: SyncResult = { pushed: 0, pulled: 0, conflicts: 0, skipped: 0 };
   const enc = makeEncryptionResolver();
-  for (const meta of syncData.syncedTables("basic")) {
+  for (const meta of syncData.syncedTablesFor(syncData.currentSyncTier())) {
     // Pull-only tables (e.g. profiles) are server-authoritative: the client only
     // reads them. They have no outbox capture trigger, so this is belt-and-
     // suspenders, but it keeps the intent explicit and avoids a needless scan.
@@ -293,7 +293,7 @@ export async function pushOnce(
   // exclude them too (defense-in-depth: nothing should enqueue them, but if a
   // stray entry existed it must not wedge the prune floor at 0).
   const cursors = syncData
-    .syncedTables("basic")
+    .syncedTablesFor(syncData.currentSyncTier())
     .filter((m) => !m.pullOnly && syncData.hasOutboxEntries(m.table))
     .map((m) => Number(getKV(pushKey(m.table)) ?? "0"));
   if (cursors.length > 0) {
@@ -594,7 +594,7 @@ export async function pullOnce(
   const res: SyncResult = { pushed: 0, pulled: 0, conflicts: 0, skipped: 0 };
   const encResolver = makeEncryptionResolver();
 
-  for (const meta of syncData.syncedTables("basic")) {
+  for (const meta of syncData.syncedTablesFor(syncData.currentSyncTier())) {
     // Emit BEFORE the locked/skip guards so a skipped table still advances the bar.
     onProgress?.({
       phase: "pull",
@@ -992,7 +992,7 @@ async function reportDeviceProgress(client: SupabaseClient): Promise<void> {
     if (!user?.user_id) return;
     const deviceId = syncData.replicaId();
     const rows: Array<Record<string, unknown>> = [];
-    for (const meta of syncData.syncedTables("basic")) {
+    for (const meta of syncData.syncedTablesFor(syncData.currentSyncTier())) {
       if (meta.pullOnly) continue; // pull-only tables (e.g. profiles) are never reaped
       const ms = parseCursor(getKV(pullKey(meta.table))).ms;
       rows.push({
@@ -1145,9 +1145,10 @@ function toRemoteRow(
 }
 
 function tableMeta(table: string): syncData.SyncTableMeta {
-  const meta = syncData.syncedTables("basic").find((m) => m.table === table);
-  if (!meta) throw new Error(`not a synced table: ${table}`);
-  return meta;
+  // Tier-independent: a table's meta exists regardless of the current tier (tier
+  // only gates whether it's synced). Resolving via the registry avoids a
+  // tier-timing edge where a pro table is processed before the mirror flips.
+  return syncData.metaFor(table);
 }
 
 function idColumns(table: string): string[] {
