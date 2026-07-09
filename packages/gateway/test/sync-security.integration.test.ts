@@ -1702,3 +1702,247 @@ describe.skipIf(gate())("sync migrations — reaper watermark (#909)", () => {
     expect(rows[0].n).toBe(1); // upsert updated in place, did not duplicate
   });
 });
+
+describe.skipIf(gate())(
+  "sync migrations — pro tier gate + quota (D, #826)",
+  () => {
+    // Pro-tier plan_limits defaults (0020) — restored after each test so cap
+    // mutations never leak. These tables have NO 'free' row (free is RLS-denied),
+    // so the shared quota suite's FREE_LIMITS afterEach never touches them.
+    const PRO_ROW_CAP: Record<string, number> = {
+      distillations: 200000,
+      temporal_messages: 1000000,
+    };
+    const PRO_BYTE_CAP: Record<string, number> = {
+      distillations: 268435456,
+      temporal_messages: 536870912,
+    };
+
+    const makePro = (uid: string) =>
+      h.asService((c) =>
+        c.query("update public.profiles set tier='pro' where id=$1", [uid]),
+      );
+    const setFree = (uid: string) =>
+      h.asService((c) =>
+        c.query("update public.profiles set tier='free' where id=$1", [uid]),
+      );
+    const setProRowCap = (table: string, n: number) =>
+      h.client.query(
+        "update public.plan_limits set max_rows=$1 where tier='pro' and table_name=$2",
+        [n, table],
+      );
+    const setProByteCap = (table: string, n: number) =>
+      h.client.query(
+        "update public.plan_limits set max_bytes=$1 where tier='pro' and table_name=$2",
+        [n, table],
+      );
+
+    afterEach(async () => {
+      if (gate()) return;
+      for (const [t, n] of Object.entries(PRO_ROW_CAP))
+        await setProRowCap(t, n);
+      for (const [t, n] of Object.entries(PRO_BYTE_CAP))
+        await setProByteCap(t, n);
+    });
+
+    it("current_tier() reflects the profiles mirror", async () => {
+      const a = await h.createUser();
+      const free = await h.asUser(a, (c) =>
+        c.query("select public.current_tier() as t"),
+      );
+      expect(free.rows[0].t).toBe("free");
+      await makePro(a);
+      const pro = await h.asUser(a, (c) =>
+        c.query("select public.current_tier() as t"),
+      );
+      expect(pro.rows[0].t).toBe("pro");
+    });
+
+    it("seeds pro plan_limits for both pro tables and NO free row (free is RLS-denied)", async () => {
+      const { rows } = await h.client.query(
+        "select table_name, max_rows, max_bytes from public.plan_limits where tier='pro' and table_name in ('distillations','temporal_messages') order by table_name",
+      );
+      expect(rows.map((r) => r.table_name)).toEqual([
+        "distillations",
+        "temporal_messages",
+      ]);
+      expect(Number(rows[0].max_rows)).toBe(200000);
+      expect(Number(rows[0].max_bytes)).toBe(268435456);
+      expect(Number(rows[1].max_rows)).toBe(1000000);
+      expect(Number(rows[1].max_bytes)).toBe(536870912);
+      const free = await h.client.query(
+        "select count(*)::int as n from public.plan_limits where tier='free' and table_name in ('distillations','temporal_messages')",
+      );
+      expect(free.rows[0].n).toBe(0);
+    });
+
+    it("a FREE user cannot write pro tables (RLS tier gate → 42501)", async () => {
+      const a = await h.createUser(); // tier defaults to 'free'
+      const d = await expectError(() =>
+        h.asUser(a, (c) =>
+          c.query(
+            "insert into public.distillations (id, scope_id) values ('d1',$1)",
+            [a],
+          ),
+        ),
+      );
+      expect(d.code).toBe("42501");
+      const t = await expectError(() =>
+        h.asUser(a, (c) =>
+          c.query(
+            "insert into public.temporal_messages (id, scope_id) values ('t1',$1)",
+            [a],
+          ),
+        ),
+      );
+      expect(t.code).toBe("42501");
+    });
+
+    it("a PRO user can write; a downgraded ex-pro can still READ but not write", async () => {
+      const a = await h.createUser();
+      await makePro(a);
+      await h.asUser(a, (c) =>
+        c.query(
+          "insert into public.distillations (id, scope_id, narrative) values ('d1',$1,'sealed')",
+          [a],
+        ),
+      );
+      // Downgrade: reads stay open (USING scope_id=auth.uid()), writes blocked.
+      await setFree(a);
+      const seen = await h.asUser(a, (c) =>
+        c.query("select id from public.distillations where scope_id=$1", [a]),
+      );
+      expect(seen.rows.map((r) => r.id)).toEqual(["d1"]);
+      const err = await expectError(() =>
+        h.asUser(a, (c) =>
+          c.query(
+            "insert into public.distillations (id, scope_id) values ('d2',$1)",
+            [a],
+          ),
+        ),
+      );
+      expect(err.code).toBe("42501");
+    });
+
+    it("rejects a forged author_id on pro tables (WITH CHECK → 42501)", async () => {
+      const a = await h.createUser();
+      const b = await h.createUser();
+      await makePro(a);
+      const err = await expectError(() =>
+        h.asUser(a, (c) =>
+          c.query(
+            "insert into public.distillations (id, scope_id, author_id) values ('d1',$1,$2)",
+            [a, b],
+          ),
+        ),
+      );
+      expect(err.code).toBe("42501");
+    });
+
+    it("rejects a forged scope_id on pro tables (WITH CHECK → 42501)", async () => {
+      const a = await h.createUser();
+      const b = await h.createUser();
+      await makePro(a);
+      await makePro(b);
+      // a (pro) tries to write a row OWNED by b's scope → WITH CHECK scope_id=auth.uid() fails.
+      const err = await expectError(() =>
+        h.asUser(a, (c) =>
+          c.query(
+            "insert into public.temporal_messages (id, scope_id) values ('t1',$1)",
+            [b],
+          ),
+        ),
+      );
+      expect(err.code).toBe("42501");
+    });
+
+    it("scope_id is immutable on pro tables (→ 23514)", async () => {
+      const a = await h.createUser();
+      const b = await h.createUser();
+      await makePro(a);
+      await h.asUser(a, (c) =>
+        c.query(
+          "insert into public.distillations (id, scope_id) values ('d1',$1)",
+          [a],
+        ),
+      );
+      const err = await expectError(() =>
+        h.asUser(a, (c) =>
+          c.query(
+            "update public.distillations set scope_id=$2 where id='d1' and scope_id=$1",
+            [a, b],
+          ),
+        ),
+      );
+      expect(err.code).toBe("23514"); // enforce_row_quota immutability guard (BEFORE RLS)
+    });
+
+    it("isolates pro rows across scopes (RLS USING)", async () => {
+      const a = await h.createUser();
+      const b = await h.createUser();
+      await makePro(b);
+      await h.asUser(b, (c) =>
+        c.query(
+          "insert into public.temporal_messages (id, scope_id) values ('tb',$1)",
+          [b],
+        ),
+      );
+      const seen = await h.asUser(a, (c) =>
+        c.query(
+          "select count(*)::int as n from public.temporal_messages where scope_id=$1",
+          [b],
+        ),
+      );
+      expect(seen.rows[0].n).toBe(0); // RLS hides b's rows from a
+    });
+
+    it("caps distillations inserts at the pro row cap (generic id-key probe → 23514)", async () => {
+      const a = await h.createUser();
+      await makePro(a);
+      await setProRowCap("distillations", 2);
+      const ins = (id: string) =>
+        h.asUser(a, (c) =>
+          c.query(
+            "insert into public.distillations (id, scope_id) values ($1,$2)",
+            [id, a],
+          ),
+        );
+      await ins("d1");
+      await ins("d2");
+      const err = await expectError(() => ins("d3"));
+      expect(err.code).toBe("23514"); // quota, NOT 42703 (undefined_column)
+      expect(err.message).toMatch(/quota exceeded/i);
+    });
+
+    it("caps temporal_messages inserts at the pro byte cap (→ 23514)", async () => {
+      const a = await h.createUser();
+      await makePro(a);
+      await setProByteCap("temporal_messages", 2000); // tiny budget, generous rows
+      const ins = (id: string) =>
+        h.asUser(a, (c) =>
+          c.query(
+            "insert into public.temporal_messages (id, scope_id, content) values ($1,$2,$3)",
+            [id, a, "x".repeat(1200)],
+          ),
+        );
+      await ins("t1"); // ~1.2 KB → fits under 2 KB
+      const err = await expectError(() => ins("t2")); // ~2.4 KB → overflows
+      expect(err.code).toBe("23514");
+      expect(err.message).toMatch(/byte quota exceeded/i);
+    });
+
+    it("enforces the encrypted-column size CHECK on distillations (→ 23514)", async () => {
+      const a = await h.createUser();
+      await makePro(a);
+      const err = await expectError(() =>
+        h.asUser(a, (c) =>
+          c.query(
+            "insert into public.distillations (id, scope_id, content_hash) values ('d1',$1,$2)",
+            [a, "x".repeat(65)], // > 64 → distillations_size_ck
+          ),
+        ),
+      );
+      expect(err.code).toBe("23514");
+    });
+  },
+);
