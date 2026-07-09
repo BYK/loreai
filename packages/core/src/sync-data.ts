@@ -1414,6 +1414,67 @@ export function resolveAliasUniqueConflict(
   return true;
 }
 
+/**
+ * #1217, mirror of resolveAliasUniqueConflict for entity_relations' local-only
+ * UNIQUE(entity_a, entity_b, relation): the FK-less remote keys only on `id`, so two
+ * devices can push the SAME relation triple under different ids. On pull, the second one
+ * violates the local triple UNIQUE and was skipped (→ divergence). Resolve it the same
+ * way: the lower `id` wins on EVERY device, so both converge regardless of pull order.
+ *
+ * Unlike aliases, NO FK-orphan guard is needed: the collision matches on entity_a AND
+ * entity_b, so the remote's endpoints are identical to the colliding local row's — which
+ * exist locally (that row's own FK) — so the winner can always apply. (And even if the
+ * reapply threw, the local loser is already gone, so the next pull re-applies cleanly.)
+ */
+export function resolveRelationUniqueConflict(
+  remote: Record<string, unknown>,
+  reapply: () => void,
+): boolean {
+  const ea = remote.entity_a;
+  const eb = remote.entity_b;
+  const rel = remote.relation;
+  const remoteId = remote.id;
+  if (
+    typeof ea !== "string" ||
+    typeof eb !== "string" ||
+    typeof rel !== "string" ||
+    typeof remoteId !== "string"
+  )
+    return false;
+  const local = db()
+    .query(
+      "SELECT id, entity_a, entity_b, relation FROM entity_relations WHERE entity_a = ? AND entity_b = ? AND relation = ?",
+    )
+    .get(ea, eb, rel) as
+    | { id: string; entity_a: string; entity_b: string; relation: string }
+    | undefined;
+  // No local collision, or the very same row (an ordinary update) → apply/skip normally.
+  if (!local || local.id === remoteId) return false;
+
+  if (remoteId < local.id) {
+    // Remote relation has the lower id → it wins: drop the local loser (recorded, and its
+    // unsuppressed delete propagates so the remote duplicate is cleaned up too) then apply.
+    recordConflict(
+      "entity_relations",
+      local.id,
+      "relation_unique_superseded",
+      local,
+    );
+    db().query("DELETE FROM entity_relations WHERE id = ?").run(local.id);
+    reapply();
+    return true;
+  }
+
+  // Local relation has the lower id → it wins; discard the remote loser (recorded).
+  recordConflict(
+    "entity_relations",
+    remoteId,
+    "relation_unique_superseded",
+    remote,
+  );
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Enable / disable
 // ---------------------------------------------------------------------------

@@ -818,15 +818,21 @@ function handlePulledRowConstraint(
 ): void {
   if (e instanceof EncryptedContentUnavailable) throw e;
   if (!isSqliteConstraintError(e)) throw e;
-  if (
-    meta.table === "entity_aliases" &&
-    isUniqueConstraintError(e) &&
-    syncData.resolveAliasUniqueConflict(remote, () =>
-      applyRemote(meta, remote, res, touchedFts, enc),
-    )
-  ) {
-    res.conflicts++;
-    return;
+  // Deterministic convergence for a local-only secondary UNIQUE the FK-less remote
+  // doesn't enforce (entity_aliases (type,value); entity_relations (a,b,relation)): the
+  // lower id wins on every device, so pull order can't leave devices divergent (#1217).
+  // Falls through to the generic skip when there's no local collision / it's an orphan.
+  if (isUniqueConstraintError(e)) {
+    const reapply = () => applyRemote(meta, remote, res, touchedFts, enc);
+    if (
+      (meta.table === "entity_aliases" &&
+        syncData.resolveAliasUniqueConflict(remote, reapply)) ||
+      (meta.table === "entity_relations" &&
+        syncData.resolveRelationUniqueConflict(remote, reapply))
+    ) {
+      res.conflicts++;
+      return;
+    }
   }
   res.skipped++;
   syncData.recordConflict(meta.table, rid, "pull_constraint_skip", remote);

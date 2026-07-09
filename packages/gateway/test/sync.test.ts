@@ -1075,6 +1075,108 @@ describe("pullOnce", () => {
     ).not.toBeNull();
   });
 
+  test("resolves a pulled entity_relations UNIQUE(a,b,relation) collision — local (lower id) wins (#1217)", async () => {
+    syncData.enableSync("basic");
+    const ea = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const eb = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    syncData.withApplying(() => {
+      for (const [id, n] of [
+        [ea, "A"],
+        [eb, "B"],
+      ] as const)
+        db()
+          .query(
+            "INSERT INTO entities (id, entity_type, canonical_name, created_at, updated_at) VALUES (?, 'tool', ?, 1, 1)",
+          )
+          .run(id, n);
+      // Local relation with the LOWER id occupies UNIQUE(entity_a, entity_b, 'knows').
+      db()
+        .query(
+          "INSERT INTO entity_relations (id, entity_a, entity_b, relation, created_at, updated_at) VALUES ('rl-local', ?, ?, 'knows', 1, 1)",
+        )
+        .run(ea, eb);
+    });
+    // Remote relation: HIGHER id, same triple → local UNIQUE collision → local wins.
+    tableRows("entity_relations").push({
+      id: "rl-remote",
+      entity_a: ea,
+      entity_b: eb,
+      relation: "knows",
+      source: null,
+      created_at: 1,
+      updated_at: new Date(2_000_000).toISOString(),
+    } as never);
+
+    const noticeSpy = vi.spyOn(log, "notice");
+    const r = await pullOnce(makeClient() as never);
+
+    expect(noticeSpy.mock.calls.flat().join(" ")).not.toMatch(/skipped a row/);
+    expect(r.conflicts).toBeGreaterThanOrEqual(1);
+    expect(
+      db().query("SELECT 1 FROM entity_relations WHERE id = 'rl-local'").get(),
+    ).not.toBeNull();
+    expect(
+      db().query("SELECT 1 FROM entity_relations WHERE id = 'rl-remote'").get(),
+    ).toBeNull();
+    expect(
+      db()
+        .query(
+          "SELECT 1 FROM sync_conflicts WHERE table_name='entity_relations' AND row_id='rl-remote' AND resolution='relation_unique_superseded'",
+        )
+        .get(),
+    ).not.toBeNull();
+  });
+
+  test("resolves a pulled entity_relations UNIQUE collision by applying the remote when it has the lower id (#1217)", async () => {
+    syncData.enableSync("basic");
+    const ea = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const eb = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    syncData.withApplying(() => {
+      for (const [id, n] of [
+        [ea, "C"],
+        [eb, "D"],
+      ] as const)
+        db()
+          .query(
+            "INSERT INTO entities (id, entity_type, canonical_name, created_at, updated_at) VALUES (?, 'tool', ?, 1, 1)",
+          )
+          .run(id, n);
+      // Local relation with the HIGHER id.
+      db()
+        .query(
+          "INSERT INTO entity_relations (id, entity_a, entity_b, relation, created_at, updated_at) VALUES ('rl-zzz', ?, ?, 'knows', 1, 1)",
+        )
+        .run(ea, eb);
+    });
+    // Remote relation with the LOWER id → remote wins → local dropped, remote applied.
+    tableRows("entity_relations").push({
+      id: "rl-aaa",
+      entity_a: ea,
+      entity_b: eb,
+      relation: "knows",
+      source: null,
+      created_at: 1,
+      updated_at: new Date(2_000_000).toISOString(),
+    } as never);
+
+    const r = await pullOnce(makeClient() as never);
+
+    expect(r.conflicts).toBeGreaterThanOrEqual(1);
+    expect(
+      db().query("SELECT 1 FROM entity_relations WHERE id = 'rl-zzz'").get(),
+    ).toBeNull(); // local loser dropped
+    expect(
+      db().query("SELECT 1 FROM entity_relations WHERE id = 'rl-aaa'").get(),
+    ).not.toBeNull(); // remote winner applied
+    expect(
+      db()
+        .query(
+          "SELECT 1 FROM sync_conflicts WHERE table_name='entity_relations' AND row_id='rl-zzz' AND resolution='relation_unique_superseded'",
+        )
+        .get(),
+    ).not.toBeNull();
+  });
+
   test("drainTimestamp also skips an orphan row sharing one timestamp (does not abort the sync)", async () => {
     // > PAGE (200) rows on ONE exact updated_at force the primary page to stall and hand
     // off to drainTimestamp — guarding that the orphan-skip works on the drain path too.

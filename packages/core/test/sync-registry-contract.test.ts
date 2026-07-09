@@ -107,3 +107,52 @@ describe("SYNCED_TABLES registry contract", () => {
     });
   }
 });
+
+describe("SYNCED_TABLES local-only secondary UNIQUE → convergence handling (#1217)", () => {
+  // A UNIQUE the FK-less remote doesn't enforce (keyed differently from the remote's
+  // upsert conflict target) means a pulled row can collide with a local row → without
+  // deterministic resolution it silently regresses to divergent-on-skip (#1215/#1217).
+  // This maps each such table to how it converges. A NEW table with such a UNIQUE fails
+  // here until it gets a resolver + routing in handlePulledRowConstraint (or is otherwise
+  // documented as handled) — the same fan-out hazard this battery exists to catch.
+  const HANDLED: Record<string, string> = {
+    entity_aliases: "resolveAliasUniqueConflict (#1234)",
+    entity_relations: "resolveRelationUniqueConflict (#1217)",
+    knowledge: "version-aware apply demotes is_current before insert (#897)",
+  };
+
+  const indexCols = (name: string) =>
+    (
+      db().query(`PRAGMA index_info("${name}")`).all() as { name: string }[]
+    ).map((r) => r.name);
+  const sameSet = (a: string[], b: string[]) =>
+    a.length === b.length &&
+    [...a].sort().join("\u0000") === [...b].sort().join("\u0000");
+
+  for (const m of SYNCED_TABLES.basic) {
+    test(`${m.table}: any local-only secondary UNIQUE has convergence handling`, () => {
+      const indexes = db().query(`PRAGMA index_list("${m.table}")`).all() as {
+        name: string;
+        unique: number;
+        origin: string;
+      }[];
+      // origin 'pk' is the remote's key too (ON CONFLICT handles it); a UNIQUE whose
+      // columns == idColumns is likewise the remote conflict target — neither diverges.
+      const localOnly = indexes.filter(
+        (i) =>
+          i.unique === 1 &&
+          i.origin !== "pk" &&
+          !sameSet(indexCols(i.name), m.idColumns),
+      );
+      if (localOnly.length > 0)
+        expect(
+          HANDLED[m.table],
+          `${m.table} has a local-only secondary UNIQUE (${localOnly
+            .map((i) => i.name)
+            .join(
+              ", ",
+            )}) with no convergence handling: a pulled collision would be skipped and leave devices divergent. Add a resolver + route it in handlePulledRowConstraint, then register it in HANDLED.`,
+        ).toBeDefined();
+    });
+  }
+});
