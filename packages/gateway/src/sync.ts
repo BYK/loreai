@@ -973,6 +973,40 @@ function applyRemote(
 // syncOnce — push then pull
 // ---------------------------------------------------------------------------
 
+/**
+ * Report this device's per-table pull progress so the server-side reaper only reaps a
+ * tombstone once EVERY active device in the scope has pulled past it (#909 watermark) —
+ * no client reconcile-by-absence needed, which the eviction model forbids. Best-effort:
+ * a failure never breaks sync. `last_seen` is server-stamped (a client can't fake
+ * activity); `pulled_through` is this device's keyset cursor timestamp per table.
+ */
+async function reportDeviceProgress(client: SupabaseClient): Promise<void> {
+  try {
+    const user = await getCurrentUser();
+    if (!user?.user_id) return;
+    const deviceId = syncData.replicaId();
+    const rows: Array<Record<string, unknown>> = [];
+    for (const meta of syncData.syncedTables("basic")) {
+      if (meta.pullOnly) continue; // pull-only tables (e.g. profiles) are never reaped
+      const ms = parseCursor(getKV(pullKey(meta.table))).ms;
+      rows.push({
+        scope_id: user.user_id,
+        device_id: deviceId,
+        table_name: meta.table,
+        pulled_through: new Date(ms).toISOString(),
+      });
+    }
+    if (rows.length === 0) return;
+    const { error } = await client
+      .from("sync_device_progress")
+      .upsert(rows, { onConflict: "scope_id,device_id,table_name" });
+    if (error)
+      log.info(`sync: device-progress report skipped: ${error.message}`);
+  } catch (e) {
+    log.info(`sync: device-progress report skipped: ${(e as Error).message}`);
+  }
+}
+
 export async function syncOnce(
   onProgress?: SyncProgressFn,
 ): Promise<SyncResult> {
@@ -985,6 +1019,8 @@ export async function syncOnce(
 
   const push = await pushOnce(client, onProgress);
   const pull = await pullOnce(client, onProgress);
+  // Report AFTER the pull so pulled_through reflects the freshly-advanced cursors.
+  await reportDeviceProgress(client);
   return {
     pushed: push.pushed,
     pulled: pull.pulled,

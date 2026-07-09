@@ -1512,3 +1512,193 @@ describe.skipIf(gate())("sync migrations — tombstone reaper (#909)", () => {
     expect(rows.map((r) => r.id)).toEqual(["k2-live"]);
   });
 });
+
+describe.skipIf(gate())("sync migrations — reaper watermark (#909)", () => {
+  const nowIso = () => new Date().toISOString();
+  // Relative dates keep the tests robust to wall-clock. The cutoff is
+  // LEAST(watermark, now()-retention); using cursors OLDER than the 90d floor makes the
+  // WATERMARK the governing bound (so these tests exercise the watermark, not the floor).
+  const daysAgo = (n: number) =>
+    new Date(Date.now() - n * 86_400_000).toISOString();
+
+  const insK = (scope: string, id: string, deleted: boolean, ts: string) =>
+    h.asUser(scope, (c) =>
+      c.query(
+        "insert into public.knowledge (id, scope_id, category, title, content, is_deleted, updated_at) values ($1,$2,'pattern','t','c',$3,$4)",
+        [id, scope, deleted, ts],
+      ),
+    );
+
+  // `last_seen` is server-stamped by a trigger, so a test that needs to backdate a
+  // device's activity bypasses user triggers via session_replication_role (superuser).
+  async function insProgress(
+    scope: string,
+    device: string,
+    table: string,
+    pulledThrough: string,
+    lastSeen: string,
+  ) {
+    await h.client.query("set session_replication_role = replica");
+    try {
+      await h.client.query(
+        `insert into public.sync_device_progress (scope_id, device_id, table_name, pulled_through, last_seen)
+         values ($1,$2,$3,$4,$5)
+         on conflict (scope_id, device_id, table_name)
+         do update set pulled_through = excluded.pulled_through, last_seen = excluded.last_seen`,
+        [scope, device, table, pulledThrough, lastSeen],
+      );
+    } finally {
+      await h.client.query("set session_replication_role = default");
+    }
+  }
+
+  const kIds = async (scope: string) =>
+    (
+      await h.client.query(
+        "select id from public.knowledge where scope_id=$1 order by id",
+        [scope],
+      )
+    ).rows.map((r) => r.id);
+
+  it("reaps a tombstone only once the SLOWEST active device has pulled past it", async () => {
+    const a = await h.createUser();
+    // Both cursors are older than the 90d floor, so the WATERMARK (min = tSlow) governs.
+    const tSlow = daysAgo(200);
+    const tFast = daysAgo(150);
+    await insProgress(a, "dev-slow", "knowledge", tSlow, nowIso());
+    await insProgress(a, "dev-fast", "knowledge", tFast, nowIso());
+    await insK(a, "k-below", true, daysAgo(220)); // < watermark(tSlow) → reaped
+    await insK(a, "k-between", true, daysAgo(175)); // > tSlow → slow device hasn't seen it → kept
+    await h.client.query("select public.reap_tombstones(90, 90)");
+    // k-between is >90d old, so a floor-only reaper would drop it; the watermark keeps it.
+    expect(await kIds(a)).toEqual(["k-between"]);
+  });
+
+  it("does NOT reap a tombstone at exactly a device's cursor ms (strict <, keyset boundary)", async () => {
+    const a = await h.createUser();
+    const boundary = daysAgo(200);
+    await insProgress(a, "dev-slow", "knowledge", boundary, nowIso());
+    await insProgress(a, "dev-fast", "knowledge", daysAgo(150), nowIso());
+    // A row AT exactly the slow device's cursor ms (a higher-id row at that ms may not
+    // have been pulled) must NOT be reaped — the guard is strict `<`, not `<=`.
+    await insK(a, "k-at-boundary", true, boundary);
+    await h.client.query("select public.reap_tombstones(90, 90)");
+    expect(await kIds(a)).toEqual(["k-at-boundary"]);
+  });
+
+  it("excludes an ABANDONED device (stale last_seen) so it can't hold back reaping", async () => {
+    const a = await h.createUser();
+    await insProgress(a, "dev-active", "knowledge", daysAgo(150), nowIso());
+    // Ancient cursor AND ancient last_seen → excluded from the watermark.
+    await insProgress(a, "dev-gone", "knowledge", daysAgo(500), daysAgo(500));
+    // Newer than the abandoned cursor but older than the active one → reaped (only the
+    // active device counts, and it has pulled past this tombstone). If the abandoned
+    // device were counted, the watermark would drop to daysAgo(500) and k-x would survive.
+    await insK(a, "k-x", true, daysAgo(300));
+    await h.client.query("select public.reap_tombstones(90, 90)");
+    expect(await kIds(a)).toEqual([]);
+  });
+
+  it("falls back to the retention floor for a scope whose only device is abandoned", async () => {
+    const a = await h.createUser();
+    // Abandoned device (excluded) → watermark null → LEAST falls back to now()-retention.
+    await insProgress(a, "dev-gone", "knowledge", daysAgo(150), daysAgo(500));
+    await insK(a, "k-old", true, daysAgo(200)); // > retention → reaped by the floor
+    await insK(a, "k-recent", true, daysAgo(10)); // < retention → kept
+    await h.client.query("select public.reap_tombstones(90, 90)");
+    expect(await kIds(a)).toEqual(["k-recent"]);
+  });
+
+  it("holds a tombstone forever while an active device sits behind it (no false reap)", async () => {
+    const a = await h.createUser();
+    // Active device stuck at an old cursor: even a tombstone older than the retention
+    // floor must NOT be reaped — the watermark, not the floor, governs.
+    await insProgress(a, "dev-behind", "knowledge", daysAgo(400), nowIso());
+    await insK(a, "k-ancient", true, daysAgo(300)); // >90d old, but AFTER the device cursor
+    await h.client.query("select public.reap_tombstones(90, 90)");
+    expect(await kIds(a)).toEqual(["k-ancient"]); // NOT reaped despite being > retention old
+  });
+
+  it("cleans up progress rows for devices abandoned beyond 2x the active window", async () => {
+    const a = await h.createUser();
+    await insProgress(
+      a,
+      "dev-ancient",
+      "knowledge",
+      daysAgo(300),
+      daysAgo(300),
+    ); // > 180d
+    await insProgress(a, "dev-fresh", "knowledge", daysAgo(300), nowIso());
+    await h.client.query("select public.reap_tombstones(90, 90)");
+    const { rows } = await h.client.query(
+      "select device_id from public.sync_device_progress where scope_id=$1 order by device_id",
+      [a],
+    );
+    expect(rows.map((r) => r.device_id)).toEqual(["dev-fresh"]);
+  });
+
+  it("server-stamps last_seen on write (a client can't fake activity)", async () => {
+    const a = await h.createUser();
+    await h.asUser(a, (c) =>
+      c.query(
+        "insert into public.sync_device_progress (scope_id, device_id, table_name, pulled_through, last_seen) values ($1,'d','knowledge', now(), '2000-01-01T00:00:00Z')",
+        [a],
+      ),
+    );
+    const { rows } = await h.client.query(
+      "select last_seen from public.sync_device_progress where scope_id=$1",
+      [a],
+    );
+    // Trigger overwrote the client's bogus 2000 value with ~now().
+    expect(new Date(rows[0].last_seen).getTime()).toBeGreaterThan(
+      Date.parse("2020-01-01T00:00:00Z"),
+    );
+  });
+
+  it("RLS: a device cannot read or write another scope's progress", async () => {
+    const a = await h.createUser();
+    const b = await h.createUser();
+    await insProgress(
+      b,
+      "dev-b",
+      "knowledge",
+      "2026-01-01T00:00:00Z",
+      nowIso(),
+    );
+    const seen = await h.asUser(a, (c) =>
+      c.query(
+        "select count(*)::int as n from public.sync_device_progress where scope_id=$1",
+        [b],
+      ),
+    );
+    expect(seen.rows[0].n).toBe(0); // RLS hides b's rows from a
+    await expect(
+      h.asUser(a, (c) =>
+        c.query(
+          "insert into public.sync_device_progress (scope_id, device_id, table_name, pulled_through) values ($1,'x','knowledge', now())",
+          [b],
+        ),
+      ),
+    ).rejects.toThrow(); // WITH CHECK (scope_id = auth.uid()) blocks forging b's scope
+  });
+
+  it("cap trigger allows re-reporting an existing device (the update path never trips it)", async () => {
+    const a = await h.createUser();
+    const reReport = () =>
+      h.asUser(a, (c) =>
+        c.query(
+          `insert into public.sync_device_progress (scope_id, device_id, table_name, pulled_through)
+           values ($1,'d1','knowledge', now())
+           on conflict (scope_id, device_id, table_name) do update set pulled_through = excluded.pulled_through`,
+          [a],
+        ),
+      );
+    await reReport(); // INSERT (well under cap) — allowed
+    await expect(reReport()).resolves.toBeDefined(); // UPDATE via upsert — must NOT raise
+    const { rows } = await h.client.query(
+      "select count(*)::int as n from public.sync_device_progress where scope_id=$1",
+      [a],
+    );
+    expect(rows[0].n).toBe(1); // upsert updated in place, did not duplicate
+  });
+});

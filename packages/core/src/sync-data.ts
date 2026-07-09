@@ -30,6 +30,11 @@ import {
 import { putWrappedScopeKey } from "./crypto/keystore";
 import { rematerializeConfidence } from "./ltm";
 
+// The stable per-device id (also used by the confidence CRDT) doubles as the device id
+// for sync's server-side reaper watermark (#909). Re-exported so the gateway can report
+// this device's pull progress under `syncData.replicaId()`.
+export { replicaId } from "./ltm";
+
 /**
  * Run `fn` with this connection's sync capture suppressed (re-entrant,
  * connection-scoped). Re-exported from `db` so the apply helpers and the engine

@@ -38,6 +38,9 @@ function nextTs(): string {
   return new Date(clock).toISOString();
 }
 function idColumns(table: string): string[] {
+  // sync_device_progress is a control table (not in SYNCED_TABLES); its PK is composite.
+  if (table === "sync_device_progress")
+    return ["scope_id", "device_id", "table_name"];
   return (
     syncData.syncedTables("basic").find((m) => m.table === table)
       ?.idColumns ?? ["id"]
@@ -130,60 +133,58 @@ function makeClient() {
   return {
     from(table: string) {
       return {
-        upsert(payload: Record<string, unknown>) {
-          if (quotaTables.has(table)) {
-            return Promise.resolve({
-              error: { code: "23514", message: `quota exceeded for ${table}` },
-            });
-          }
-          if (poisonIds.has(String(payload.id)))
-            return Promise.resolve({
-              error: {
+        // supabase-js .upsert() accepts a single row OR an array — mirror both.
+        upsert(payload: Record<string, unknown> | Record<string, unknown>[]) {
+          const upsertOne = (
+            one: Record<string, unknown>,
+          ): { code: string; message: string } | null => {
+            if (quotaTables.has(table))
+              return { code: "23514", message: `quota exceeded for ${table}` };
+            if (poisonIds.has(String(one.id)))
+              return {
                 code: "23514",
                 message: `new row violates check constraint "${table}_size_ck"`,
-              },
-            });
-          if (upsertError) return Promise.resolve({ error: upsertError });
-          // Faithful to the remote schema: an unknown column is a PGRST204 (the
-          // join table has NO content_hash/revision columns).
-          const allowed = REMOTE_COLUMNS[table];
-          if (allowed) {
-            for (const k of Object.keys(payload)) {
-              if (!allowed.has(k)) {
-                return Promise.resolve({
-                  error: {
+              };
+            if (upsertError)
+              return upsertError as { code: string; message: string };
+            // Faithful to the remote schema: an unknown column is a PGRST204 (the
+            // join table has NO content_hash/revision columns).
+            const allowed = REMOTE_COLUMNS[table];
+            if (allowed) {
+              for (const k of Object.keys(one)) {
+                if (!allowed.has(k))
+                  return {
                     code: "PGRST204",
                     message: `Could not find the '${k}' column of '${table}' in the schema cache`,
-                  },
-                });
+                  };
               }
             }
-          }
-          // Faithful to timestamptz columns: a bare epoch-ms integer is rejected
-          // (22008) the way real Postgres does — only ISO strings are accepted.
-          for (const k of ["created_at", "updated_at"]) {
-            if (k in payload && typeof payload[k] !== "string") {
-              return Promise.resolve({
-                error: {
+            // Faithful to timestamptz columns: a bare epoch-ms integer is rejected
+            // (22008) the way real Postgres does — only ISO strings are accepted.
+            for (const k of ["created_at", "updated_at"]) {
+              if (k in one && typeof one[k] !== "string")
+                return {
                   code: "22008",
-                  message: `date/time field value out of range: "${payload[k]}"`,
-                },
-              });
+                  message: `date/time field value out of range: "${one[k]}"`,
+                };
             }
+            const rows = tableRows(table);
+            const idc = idColumns(table);
+            const i = rows.findIndex((r) => idc.every((c) => r[c] === one[c]));
+            const stamped = {
+              scope_id: REMOTE_SCOPE,
+              author_id: REMOTE_SCOPE,
+              ...one,
+              updated_at: nextTs(),
+            } as RemoteRow;
+            if (i >= 0) rows[i] = stamped;
+            else rows.push(stamped);
+            return null;
+          };
+          for (const one of Array.isArray(payload) ? payload : [payload]) {
+            const error = upsertOne(one);
+            if (error) return Promise.resolve({ error });
           }
-          const rows = tableRows(table);
-          const idc = idColumns(table);
-          const i = rows.findIndex((r) =>
-            idc.every((c) => r[c] === payload[c]),
-          );
-          const stamped = {
-            scope_id: REMOTE_SCOPE,
-            author_id: REMOTE_SCOPE,
-            ...payload,
-            updated_at: nextTs(),
-          } as RemoteRow;
-          if (i >= 0) rows[i] = stamped;
-          else rows.push(stamped);
           return Promise.resolve({ error: null });
         },
         update(patch: Record<string, unknown>) {
@@ -1505,6 +1506,25 @@ describe("syncOnce", () => {
     // Echo-pull of our own row is a no-op (hash matches) — pulled stays 0.
     expect(r.pulled).toBe(0);
     expect(tableRows("knowledge").find((x) => x.id === "k1")).toBeTruthy();
+  });
+
+  test("reports per-table device pull progress for the reaper watermark (#909)", async () => {
+    syncData.enableSync("basic");
+    insertKnowledge("k1", "hello");
+    await syncOnce();
+    const prog = tableRows("sync_device_progress");
+    const deviceId = syncData.replicaId();
+    // We report every non-pull-only synced table (a superset of the reaper's tables; the
+    // extra rows are inert — the reaper only queries its own table_names).
+    const reported = syncData
+      .syncedTables("basic")
+      .filter((m) => !m.pullOnly)
+      .map((m) => m.table);
+    expect(prog.length).toBe(reported.length);
+    expect(prog.every((r) => r.device_id === deviceId)).toBe(true);
+    expect(new Set(prog.map((r) => r.table_name))).toEqual(new Set(reported));
+    // pulled_through is the device's keyset cursor as an ISO string, never null.
+    expect(prog.every((r) => typeof r.pulled_through === "string")).toBe(true);
   });
 });
 

@@ -194,8 +194,9 @@ function insertMeta(
 // resists a single penalty) — the accepted cost of a faithful additive CRDT.
 
 /** Stable per-device replica id (UUIDv7), minted once into KV. Not cached: the
- *  test suite swaps the DB between cases, so always read it from the live DB. */
-function replicaId(): string {
+ *  test suite swaps the DB between cases, so always read it from the live DB. Also
+ *  reused as the device id for sync's server-side reaper watermark (#909). */
+export function replicaId(): string {
   let id = getKV("sync.replica_id");
   if (!id) {
     id = uuidv7();
