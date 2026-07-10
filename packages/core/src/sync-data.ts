@@ -815,6 +815,11 @@ function knowledgeParentGate(idExpr: string): string {
 function entityParentGate(idExpr: string): string {
   return `EXISTS (SELECT 1 FROM entities e WHERE e.id = ${idExpr} AND ${remoteBackedGate("e.")})`;
 }
+// P2c (#1246): the Pro tables are always project-scoped (project_id NOT NULL, no
+// cross_project) — they sync only when their project is remote-backed.
+function projectRemoteGate(idExpr: string): string {
+  return `EXISTS (SELECT 1 FROM projects p WHERE p.id = ${idExpr} AND p.git_remote IS NOT NULL)`;
+}
 
 function seedSelect(table: string): string {
   switch (table) {
@@ -871,7 +876,9 @@ function seedSelect(table: string): string {
     // D (#826): the compressed-memory backup. Recency order so the newest memory
     // survives the (generous, rarely-binding) pro cap.
     case "distillations":
-      return "SELECT * FROM distillations ORDER BY created_at DESC, id";
+      return `SELECT * FROM distillations
+               WHERE ${projectRemoteGate("project_id")}
+               ORDER BY created_at DESC, id`;
     // D (#826): 🔴 ONLY the distillation-REFERENCED subset ever syncs — an
     // undistilled message must NEVER be enqueued. Restrict to ids present in some
     // distillation's source_ids (json_each), mirroring the fanout capture trigger.
@@ -880,10 +887,12 @@ function seedSelect(table: string): string {
       // json_valid guard: a single corrupt source_ids must not throw and abort the
       // whole seed transaction (source_ids is always JSON.stringify'd, so this is
       // belt-and-suspenders; filter BEFORE json_each so the bad row is skipped).
+      // P2c (#1246): only the referenced subset of REMOTE-BACKED distillations.
       return `SELECT t.* FROM temporal_messages t
                 WHERE t.id IN (
                   SELECT value FROM
-                    (SELECT source_ids FROM distillations WHERE json_valid(source_ids)) d,
+                    (SELECT source_ids FROM distillations
+                      WHERE json_valid(source_ids) AND ${projectRemoteGate("project_id")}) d,
                     json_each(d.source_ids)
                 )
                ORDER BY t.created_at DESC, t.id`;
@@ -1126,6 +1135,26 @@ export function reseedProjectContent(projectId: string): void {
     projectId,
     projectId,
   );
+  // P2c: the Pro tables (distillations + their referenced temporal subset) — ONLY when the
+  // current tier syncs them, else the enqueued rows would be un-pushable orphans that pin
+  // the prune floor. distillations are always project-scoped, so all of this project's
+  // distillations qualify once it is remote-backed; the fanout mirrors the capture trigger.
+  if (
+    syncedTablesFor(currentSyncTier()).some((m) => m.table === "distillations")
+  ) {
+    enqueue(
+      "SELECT 'distillations', id, 'upsert', ? FROM distillations WHERE project_id = ?",
+      now,
+      projectId,
+    );
+    enqueue(
+      `SELECT 'temporal_messages', value, 'upsert', ? FROM
+         (SELECT source_ids FROM distillations WHERE project_id = ? AND json_valid(source_ids)) d,
+         json_each(d.source_ids)`,
+      now,
+      projectId,
+    );
+  }
 }
 onProjectRemoteBackfilled(reseedProjectContent);
 

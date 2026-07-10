@@ -80,6 +80,13 @@ const rowIds = (table: string, op?: string) =>
 beforeEach(() => {
   const pid = ensureProject(PROJECT);
   deleteTeamConfig("sync.enabled");
+  // P2c (#1246): remote-backed → Pro content passes the git_remote gate. Set while sync is
+  // OFF (line above) so it fires no capture; every Pro test uses this same PROJECT.
+  db()
+    .query(
+      "UPDATE projects SET git_remote = 'test:remote' WHERE id = ? AND git_remote IS NULL",
+    )
+    .run(pid);
   db().exec("DELETE FROM temp._sync_applying");
   db().exec("DELETE FROM sync_outbox");
   db().exec("DELETE FROM sync_state");

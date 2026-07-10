@@ -114,8 +114,15 @@ beforeEach(() => {
   db().exec("DELETE FROM temp._sync_applying");
   db().exec("DELETE FROM sync_outbox");
   db().exec("DELETE FROM sync_state");
-  db().exec("DELETE FROM knowledge");
+  // Children first (FK to entities/projects), then parents.
+  db().exec("DELETE FROM knowledge_entity_refs");
+  db().exec("DELETE FROM entity_aliases");
+  db().exec("DELETE FROM entity_relations");
+  db().exec("DELETE FROM knowledge_meta_crdt");
   db().exec("DELETE FROM knowledge_meta");
+  db().exec("DELETE FROM temporal_messages");
+  db().exec("DELETE FROM distillations");
+  db().exec("DELETE FROM knowledge");
   db().exec("DELETE FROM entities");
   db().exec("DELETE FROM profiles");
   db().exec(
@@ -422,5 +429,90 @@ describe("child content git_remote gate — P2b (#1246)", () => {
     expect(outboxRowIds("entity_aliases")).toEqual(["a1"]);
     expect(outboxRowIds("entity_relations")).toEqual(["r1"]);
     expect(outboxRowIds("knowledge_entity_refs")).toEqual([`k1${US}e1`]);
+  });
+});
+
+describe("Pro fanout git_remote gate — P2c (#1246)", () => {
+  function armPro() {
+    db()
+      .query(
+        "INSERT OR REPLACE INTO profiles (id, tier, created_at, updated_at) VALUES ('u','pro',?,?)",
+      )
+      .run(now(), now());
+    reinstallSyncCapture(); // arm the tier-gated distillation-fanout trigger
+  }
+  function insertTemporal(id: string, projectId: string) {
+    db()
+      .query(
+        `INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
+         VALUES (?, ?, 's', 'user', 'x', 1, 1, ?, '{}')`,
+      )
+      .run(id, projectId, now());
+  }
+  function insertDistillation(
+    id: string,
+    projectId: string,
+    sourceIds: string[],
+  ) {
+    db()
+      .query(
+        `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, created_at, archived)
+         VALUES (?, ?, 's', 'n', 'f', 'o', ?, 0, 0, ?, 0)`,
+      )
+      .run(id, projectId, JSON.stringify(sourceIds), now());
+  }
+
+  test("capture: a distillation in a remote-backed project enqueues it + its temporal subset; a remote-less one syncs neither", () => {
+    insertProject("p-remote", "R");
+    insertProject("p-local", null);
+    insertTemporal("t-remote", "p-remote");
+    insertTemporal("t-local", "p-local");
+    armPro();
+    enableSync("pro");
+    db().exec("DELETE FROM sync_outbox");
+    insertDistillation("d-remote", "p-remote", ["t-remote"]);
+    insertDistillation("d-local", "p-local", ["t-local"]);
+    expect(outboxRowIds("distillations")).toEqual(["d-remote"]);
+    expect(outboxRowIds("temporal_messages")).toEqual(["t-remote"]);
+  });
+
+  test("seed: only remote-backed distillations + their temporal are seeded on enable", () => {
+    insertProject("p-remote", "R");
+    insertProject("p-local", null);
+    insertTemporal("t-remote", "p-remote");
+    insertTemporal("t-local", "p-local");
+    insertDistillation("d-remote", "p-remote", ["t-remote"]);
+    insertDistillation("d-local", "p-local", ["t-local"]); // gated out
+    armPro();
+    enableSync("pro"); // reconcile → seedOutbox
+    expect(outboxRowIds("distillations")).toEqual(["d-remote"]);
+    expect(outboxRowIds("temporal_messages")).toEqual(["t-remote"]);
+  });
+
+  test("reseedProjectContent (pro tier): re-enqueues distillations + temporal after the project gains a remote", () => {
+    insertProject("p", null);
+    insertTemporal("t1", "p");
+    armPro();
+    enableSync("pro");
+    insertDistillation("d1", "p", ["t1"]); // gated out (project remote-less)
+    expect(outboxRowIds("distillations")).toEqual([]);
+    expect(outboxRowIds("temporal_messages")).toEqual([]);
+    db().query("UPDATE projects SET git_remote='R' WHERE id='p'").run();
+    reseedProjectContent("p");
+    expect(outboxRowIds("distillations")).toEqual(["d1"]);
+    expect(outboxRowIds("temporal_messages")).toEqual(["t1"]);
+  });
+
+  test("reseedProjectContent (basic tier): does NOT enqueue Pro tables", () => {
+    insertProject("p", null);
+    insertTemporal("t1", "p");
+    // basic tier (no profiles/pro): the fanout trigger isn't armed and pro tables aren't synced.
+    enableSync("basic");
+    // A distillation written under basic never captures; simulate a pre-existing one.
+    insertDistillation("d1", "p", ["t1"]);
+    db().query("UPDATE projects SET git_remote='R' WHERE id='p'").run();
+    reseedProjectContent("p");
+    expect(outboxRowIds("distillations")).toEqual([]); // pro table, basic tier → not enqueued
+    expect(outboxRowIds("temporal_messages")).toEqual([]);
   });
 });

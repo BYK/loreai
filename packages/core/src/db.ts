@@ -2321,6 +2321,11 @@ function installSyncCapture(database: Database) {
     `EXISTS (SELECT 1 FROM knowledge k WHERE COALESCE(k.logical_id, k.id) = ${idExpr} AND ${directGate("k")})`;
   const entityParentGate = (idExpr: string) =>
     `EXISTS (SELECT 1 FROM entities e WHERE e.id = ${idExpr} AND ${directGate("e")})`;
+  // P2c (#1246): the Pro tables (distillations, temporal via the fanout) are ALWAYS
+  // project-scoped (project_id NOT NULL, no cross_project) — so they sync only when their
+  // project is remote-backed. No global/cross exemption applies.
+  const projectRemoteGate = (idExpr: string) =>
+    `EXISTS (SELECT 1 FROM projects p WHERE p.id = ${idExpr} AND p.git_remote IS NOT NULL)`;
   const ops = [
     ["INSERT", "ins", "new", "upsert"],
     ["UPDATE", "upd", "new", "upsert"],
@@ -2495,9 +2500,12 @@ function installSyncCapture(database: Database) {
     // is deduped away by the push-side content_hash check). No DELETE: the local prune
     // is sync-invisible (temporal.prune runs under capture-suppression + clears
     // sync_state), so a pruned local row must NOT tombstone the remote backup.
+    // P2c (#1246): gate on the distillation's project git_remote — gating the INSERT
+    // trigger's WHEN gates BOTH the distillation row AND the temporal fanout in one shot,
+    // so a remote-less project's compressed memory + its referenced messages never upload.
     sql += `
       CREATE TEMP TRIGGER IF NOT EXISTS distillations_outbox_ins
-      AFTER INSERT ON distillations WHEN (${gate})
+      AFTER INSERT ON distillations WHEN (${gate} AND ${projectRemoteGate("new.project_id")})
       BEGIN
         INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
         VALUES ('distillations', new.id, 'upsert', ${ts});
@@ -2505,7 +2513,7 @@ function installSyncCapture(database: Database) {
         SELECT 'temporal_messages', value, 'upsert', ${ts} FROM json_each(new.source_ids);
       END;
       CREATE TEMP TRIGGER IF NOT EXISTS distillations_outbox_upd
-      AFTER UPDATE ON distillations WHEN (${gate})
+      AFTER UPDATE ON distillations WHEN (${gate} AND ${projectRemoteGate("new.project_id")})
       BEGIN
         INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
         VALUES ('distillations', new.id, 'upsert', ${ts});
