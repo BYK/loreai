@@ -119,6 +119,7 @@ beforeEach(async () => {
     "entity_aliases",
     "entity_relations",
     "entities",
+    "projects", // #1246: parent — after its content children above (local FK order)
     "profiles",
     "sync_outbox",
     "sync_state",
@@ -151,6 +152,7 @@ beforeEach(async () => {
     "entities",
     "entity_aliases",
     "entity_relations",
+    "projects", // #1246: no remote content→projects FK, so order-independent here
   ]) {
     await h.client.query(`DELETE FROM public.${t}`);
   }
@@ -446,12 +448,9 @@ describe.skipIf(SKIP)(
       db().exec(
         "DELETE FROM account_identity; DELETE FROM account_escrow; DELETE FROM scope_keys",
       );
-      // #1246: the synced test projects (remote-backed /dev1/* + pulled lore:project/*).
-      db().exec(
-        "DELETE FROM projects WHERE path LIKE '/dev1/%' OR path LIKE 'lore:project/%'",
-      );
+      // #1246: projects (local + remote) are cleaned by the top-level beforeEach.
       keystore.lock();
-      for (const t of ["account_escrow", "scope_keys", "projects"]) {
+      for (const t of ["account_escrow", "scope_keys"]) {
         await h.client.query(`DELETE FROM public.${t}`);
       }
     });
