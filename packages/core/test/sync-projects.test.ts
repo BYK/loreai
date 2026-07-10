@@ -503,6 +503,18 @@ describe("Pro fanout git_remote gate — P2c (#1246)", () => {
     expect(outboxRowIds("temporal_messages")).toEqual(["t1"]);
   });
 
+  test("reseedProjectContent: dedupes a temporal referenced by multiple distillations (#1253)", () => {
+    insertProject("p", null);
+    insertTemporal("t1", "p");
+    armPro();
+    enableSync("pro");
+    insertDistillation("d1", "p", ["t1"]);
+    insertDistillation("d2", "p", ["t1"]); // SAME t1 referenced by both
+    db().query("UPDATE projects SET git_remote='R' WHERE id='p'").run();
+    reseedProjectContent("p");
+    expect(outboxRowIds("temporal_messages")).toEqual(["t1"]); // once, not twice
+  });
+
   test("reseedProjectContent (basic tier): does NOT enqueue Pro tables", () => {
     insertProject("p", null);
     insertTemporal("t1", "p");

@@ -1148,7 +1148,9 @@ export function reseedProjectContent(projectId: string): void {
       projectId,
     );
     enqueue(
-      `SELECT 'temporal_messages', value, 'upsert', ? FROM
+      // DISTINCT: a temporal id referenced by MULTIPLE distillations appears once per
+      // distillation in the json_each expansion — dedupe so it enqueues a single upsert.
+      `SELECT DISTINCT 'temporal_messages', value, 'upsert', ? FROM
          (SELECT source_ids FROM distillations WHERE project_id = ? AND json_valid(source_ids)) d,
          json_each(d.source_ids)`,
       now,
