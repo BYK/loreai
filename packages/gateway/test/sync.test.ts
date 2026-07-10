@@ -5,6 +5,7 @@ import {
   getKV,
   setKV,
   deleteTeamConfig,
+  reinstallSyncCapture,
 } from "@loreai/core";
 import { ltm, log, keystore, crypto, syncData } from "@loreai/core";
 
@@ -121,6 +122,42 @@ const REMOTE_COLUMNS: Record<string, Set<string>> = {
     "created_at",
     "updated_at",
     ...SYNC_COLS,
+  ]),
+  // D (#826) pro tables — faithful to supabase/migrations/0020.
+  distillations: new Set([
+    "id",
+    "project_id",
+    "session_id",
+    "narrative",
+    "facts",
+    "observations",
+    "source_ids",
+    "generation",
+    "token_count",
+    "r_compression",
+    "c_norm",
+    "call_type",
+    "worker_provider_id",
+    "worker_model_id",
+    "archived",
+    "created_at",
+    "updated_at",
+    ...SYNC_COLS, // versioned + has is_deleted
+  ]),
+  // 🔴 temporal_messages is APPEND-ONLY: 0020 has NO is_deleted / content_hash /
+  // revision column. Registering it faithfully means a leaked is_deleted → PGRST204.
+  temporal_messages: new Set([
+    "id",
+    "project_id",
+    "session_id",
+    "role",
+    "content",
+    "tokens",
+    "metadata",
+    "created_at",
+    "updated_at",
+    "scope_id",
+    "author_id",
   ]),
 };
 
@@ -357,6 +394,8 @@ beforeEach(() => {
   db().exec("DELETE FROM account_identity");
   db().exec("DELETE FROM account_escrow");
   db().exec("DELETE FROM scope_keys");
+  db().exec("DELETE FROM distillations");
+  db().exec("DELETE FROM temporal_messages");
   keystore.lock();
   db().exec("DELETE FROM sync_outbox");
   db().exec("DELETE FROM sync_state");
@@ -370,10 +409,15 @@ beforeEach(() => {
     "profiles",
     "account_escrow",
     "scope_keys",
+    "distillations",
+    "temporal_messages",
   ]) {
     setKV(`sync.push.${t}`, "0");
     setKV(`sync.pull.${t}`, "0|");
   }
+  // Reset change-capture to the free-tier baseline (drops any Pro fanout trigger a
+  // prior test installed) so tier-gated capture doesn't leak across tests (#826/D).
+  reinstallSyncCapture();
   remote.clear();
   quotaTables = new Set();
   __resetQuotaWarnedTables(); // module-level dedupe state persists across tests
@@ -433,6 +477,46 @@ describe("pushOnce — happy path", () => {
     expect(r.pushed).toBe(1);
     const row = tableRows("knowledge").find((x) => x.id === "k1");
     expect("promoted_at" in (row ?? {})).toBe(false);
+  });
+
+  test("Pro backup: pushes a distillation + its referenced temporal subset; temporal carries NO is_deleted", async () => {
+    // The strict mock is faithful to 0020: temporal_messages has NO is_deleted column,
+    // so a leaked is_deleted:false → PGRST204 → poison. This test fails without the
+    // appendOnly gate in pushEntry.
+    db()
+      .query(
+        "INSERT OR REPLACE INTO profiles (id, tier, created_at, updated_at) VALUES (?, 'pro', ?, ?)",
+      )
+      .run(mockUserId, now(), now());
+    reinstallSyncCapture(); // arm the tier-gated distillation-fanout trigger
+    syncData.enableSync(); // pro tier → basic ∪ pro
+    const pid = ensureProject("/tmp/lore-sync-engine");
+    const insTemporal = (id: string) =>
+      db()
+        .query(
+          "INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata) VALUES (?, ?, 's', 'user', 'hi', 1, 1, ?, '{}')",
+        )
+        .run(id, pid, now());
+    insTemporal("t1");
+    insTemporal("t2"); // unreferenced — must NEVER sync
+    db()
+      .query(
+        "INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, created_at, archived) VALUES ('d1', ?, 's', 'n', 'f', 'o', ?, 0, 0, ?, 0)",
+      )
+      .run(pid, JSON.stringify(["t1"]), now()); // fanout enqueues d1 + t1 only
+
+    const r = await pushOnce(makeClient() as never);
+
+    expect(r.conflicts).toBe(0); // nothing poisoned
+    const d = tableRows("distillations").find((x) => x.id === "d1");
+    expect(d).toBeTruthy();
+    expect("is_deleted" in (d ?? {})).toBe(true); // versioned → carries is_deleted
+    const t = tableRows("temporal_messages").find((x) => x.id === "t1");
+    expect(t).toBeTruthy();
+    expect("is_deleted" in (t ?? {})).toBe(false); // append-only → NO is_deleted
+    expect(
+      tableRows("temporal_messages").find((x) => x.id === "t2"),
+    ).toBeUndefined(); // undistilled never synced
   });
 
   test("prunes the outbox even when another synced table has no entries", async () => {

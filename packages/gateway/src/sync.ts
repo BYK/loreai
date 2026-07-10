@@ -22,7 +22,15 @@
  *                          skipped).
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { syncData, getKV, setKV, log, keystore, crypto } from "@loreai/core";
+import {
+  syncData,
+  getKV,
+  setKV,
+  log,
+  keystore,
+  crypto,
+  reinstallSyncCapture,
+} from "@loreai/core";
 import { getAuthedClient, getCurrentUser } from "./supabase";
 
 const PAGE = 200;
@@ -405,9 +413,11 @@ async function pushEntry(
   }
 
   if (op === "delete") {
-    const tombstone: Record<string, unknown> = {
-      is_deleted: true,
-    };
+    // Append-only tables (temporal_messages) never enqueue a delete — reconcile skips
+    // them and they have no capture DELETE trigger — so this branch is unreachable for
+    // them; guard defensively anyway (their remote has no is_deleted column).
+    const tombstone: Record<string, unknown> = {};
+    if (!tableMeta(table).appendOnly) tombstone.is_deleted = true;
     // Only versioned tables have a content_hash column remotely; the join table
     // (knowledge_entity_refs) does not, so sending it is a PGRST204 schema error. This
     // gate prevents that; and even a stray schema error is now classified as poison
@@ -487,8 +497,12 @@ async function pushEntry(
   // columns like knowledge.promoted_at, which the remote rejects (PGRST204).
   const payload: Record<string, unknown> = {
     ...toRemoteRow(table, syncData.pickSyncColumns(table, row)),
-    is_deleted: false,
   };
+  // Every table carries is_deleted EXCEPT append-only ones (temporal_messages), whose
+  // remote 0020 schema has no such column — sending it is a PGRST204 that poisons the
+  // whole table (#826/D). versioned is the wrong gate (the join table is versioned:false
+  // yet HAS is_deleted).
+  if (!tableMeta(table).appendOnly) payload.is_deleted = false;
   // C-4 (#825): encrypt the content-bearing columns for the wire (server stores only
   // ciphertext). content_hash above is over the PLAINTEXT row, so it stays cross-device
   // stable. "locked" means escrow is present but the device isn't unlocked — we can't
@@ -1023,8 +1037,22 @@ export async function syncOnce(
   if (!client)
     return { pushed: 0, pulled: 0, conflicts: 0, skipped: 0, notAuthed: true };
 
+  // A profile pull can flip the plan tier (e.g. free→pro after a Stripe upgrade,
+  // or the very first pull on a fresh Pro device). Snapshot before/after so we can
+  // arm/disarm the Pro capture + seed the newly-synced tier (#826/D).
+  const tierBefore = syncData.currentSyncTier();
   const push = await pushOnce(client, onProgress);
   const pull = await pullOnce(client, onProgress);
+  const tierAfter = syncData.currentSyncTier();
+  if (tierAfter !== tierBefore) {
+    // Reconcile the change-capture trigger set to the new tier (installs the Pro
+    // distillation-fanout on upgrade; drops it on downgrade), then reconcile the
+    // outbox so the newly-synced tier's PRE-EXISTING rows (distillations created
+    // before the upgrade) are seeded — capture only sees writes from now on. They
+    // push on the next cycle. reconcile is idempotent for the already-synced tables.
+    reinstallSyncCapture();
+    syncData.reconcile(tierAfter);
+  }
   // Report AFTER the pull so pulled_through reflects the freshly-advanced cursors.
   await reportDeviceProgress(client);
   return {

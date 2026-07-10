@@ -145,6 +145,7 @@ export {
   setMeta,
   getInstanceId,
   runUpsert,
+  reinstallSyncCapture,
   withTransaction,
   withSavepoint,
   ensureSessionRollup,

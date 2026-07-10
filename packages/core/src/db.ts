@@ -2390,7 +2390,58 @@ function installSyncCapture(database: Database) {
       INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
       VALUES ('scope_keys', new.member_user_id, 'upsert', ${ts});
     END;`;
+  // D (#826): Pro-tier distillation-fanout capture. Installed ONLY when the plan
+  // tier (from the pulled profiles mirror) is pro/max — a free user creating
+  // distillations must not accrue un-pushable pro outbox entries that no push cursor
+  // ever drains. On a tier flip the gateway calls reinstallSyncCapture() to add/drop
+  // these (TEMP + IF NOT EXISTS is idempotent; the else-branch DROP removes them on
+  // downgrade).
+  const tierRow = database
+    .query("SELECT tier FROM profiles LIMIT 1")
+    .all()[0] as { tier?: string } | undefined;
+  const isProTier = tierRow?.tier === "pro" || tierRow?.tier === "max";
+  if (isProTier) {
+    // On INSERT: enqueue the distillation AND fan out one temporal_messages outbox
+    // row per referenced source id (json_each over source_ids). This REFERENCED
+    // SUBSET is the ONLY temporal that ever syncs — temporal_messages has NO capture
+    // trigger of its own (captureStrategy "none"), so an undistilled message is never
+    // enqueued. On UPDATE (the archived flip): re-enqueue the distillation only (its
+    // source set is immutable; a no-op non-archived UPDATE such as embedding backfill
+    // is deduped away by the push-side content_hash check). No DELETE: the local prune
+    // is sync-invisible (temporal.prune runs under capture-suppression + clears
+    // sync_state), so a pruned local row must NOT tombstone the remote backup.
+    sql += `
+      CREATE TEMP TRIGGER IF NOT EXISTS distillations_outbox_ins
+      AFTER INSERT ON distillations WHEN (${gate})
+      BEGIN
+        INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
+        VALUES ('distillations', new.id, 'upsert', ${ts});
+        INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
+        SELECT 'temporal_messages', value, 'upsert', ${ts} FROM json_each(new.source_ids);
+      END;
+      CREATE TEMP TRIGGER IF NOT EXISTS distillations_outbox_upd
+      AFTER UPDATE ON distillations WHEN (${gate})
+      BEGIN
+        INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
+        VALUES ('distillations', new.id, 'upsert', ${ts});
+      END;`;
+  } else {
+    sql += `
+      DROP TRIGGER IF EXISTS distillations_outbox_ins;
+      DROP TRIGGER IF EXISTS distillations_outbox_upd;`;
+  }
   database.exec(sql);
+}
+
+/**
+ * Re-run change-capture install on the current connection to reconcile the Pro
+ * distillation-fanout trigger set to the current plan tier (installSyncCapture reads
+ * it from the profiles mirror). Called after a profile pull may have flipped the
+ * tier: TEMP + IF NOT EXISTS makes the re-run idempotent, and the non-pro branch
+ * DROPs the Pro triggers on a downgrade.
+ */
+export function reinstallSyncCapture(database: Database = db()): void {
+  installSyncCapture(database);
 }
 
 /**

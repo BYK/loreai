@@ -1,4 +1,4 @@
-import { db, ensureProject } from "./db";
+import { db, ensureProject, withSyncApplying } from "./db";
 import { deleteEmbeddings } from "./db/vec-store";
 import { runRelaxedSearch, runRelaxedSearchAsync } from "./search";
 import { offloadAllOrTimeout, READ_JOB_TIMED_OUT } from "./read-offload";
@@ -699,6 +699,26 @@ export type PruneResult = {
  * at a real schema problem rather than a transient swap. Root-causing/serializing
  * the swap itself and recovering missing base tables are tracked follow-ups.
  */
+/**
+ * Clear sync_state for locally-pruned Pro-backup rows (#826/D). The prune is
+ * sync-INVISIBLE: the remote backup is bounded by the server reaper + per-scope
+ * quota, NOT by local residency, so a pruned row must never tombstone the remote
+ * (reconcile also skips these append-only tables). Dropping the now-dead sync_state
+ * keeps it from growing unbounded as messages are pruned over a device's lifetime.
+ * Harmless when sync is off (no rows) or the table is un-synced (basic tier).
+ */
+function clearPrunedSyncState(
+  database: ReturnType<typeof db>,
+  table: string,
+  ids: string[],
+): void {
+  if (ids.length === 0) return;
+  const ph = ids.map(() => "?").join(",");
+  database
+    .query(`DELETE FROM sync_state WHERE table_name = ? AND row_id IN (${ph})`)
+    .run(table, ...ids);
+}
+
 export function prune(input: {
   projectPath: string;
   retentionDays: number;
@@ -745,11 +765,16 @@ export function prune(input: {
         .all(pid, cutoff) as { id: string }[]
     ).map((r) => r.id);
     if (ttlIds.length > 0) {
-      database
-        .query(
-          "DELETE FROM temporal_messages WHERE project_id = ? AND distilled = 1 AND created_at < ?",
-        )
-        .run(pid, cutoff);
+      // Capture-suppressed (#826/D): defense-in-depth so a future sync DELETE
+      // trigger can't tombstone the remote backup; also drops the dead sync_state.
+      withSyncApplying(() => {
+        database
+          .query(
+            "DELETE FROM temporal_messages WHERE project_id = ? AND distilled = 1 AND created_at < ?",
+          )
+          .run(pid, cutoff);
+        clearPrunedSyncState(database, "temporal_messages", ttlIds);
+      });
       deleteEmbeddings(database, "temporal", ttlIds);
     }
     ttlDeleted = ttlIds.length;
@@ -796,9 +821,14 @@ export function prune(input: {
 
       if (toDelete.length) {
         const placeholders = toDelete.map(() => "?").join(",");
-        database
-          .query(`DELETE FROM temporal_messages WHERE id IN (${placeholders})`)
-          .run(...toDelete);
+        withSyncApplying(() => {
+          database
+            .query(
+              `DELETE FROM temporal_messages WHERE id IN (${placeholders})`,
+            )
+            .run(...toDelete);
+          clearPrunedSyncState(database, "temporal_messages", toDelete);
+        });
         // Drop the evicted messages' vec0 chunks too (see Pass 1 rationale).
         deleteEmbeddings(database, "temporal", toDelete);
         // toDelete.length is the accurate count — result.changes is inflated by FTS triggers.
@@ -828,11 +858,14 @@ export function prune(input: {
         .all(pid, cutoff) as { id: string }[]
     ).map((r) => r.id);
     if (archivedIds.length > 0) {
-      database
-        .query(
-          "DELETE FROM distillations WHERE project_id = ? AND archived = 1 AND created_at < ?",
-        )
-        .run(pid, cutoff);
+      withSyncApplying(() => {
+        database
+          .query(
+            "DELETE FROM distillations WHERE project_id = ? AND archived = 1 AND created_at < ?",
+          )
+          .run(pid, cutoff);
+        clearPrunedSyncState(database, "distillations", archivedIds);
+      });
       deleteEmbeddings(database, "distillations", archivedIds);
     }
   } catch (e) {

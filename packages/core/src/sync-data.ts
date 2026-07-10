@@ -91,6 +91,29 @@ export interface SyncTableMeta {
    * `keystore.encryptionState() === "on"`; "off" leaves these plaintext (v1 default).
    */
   encryptedColumns?: string[];
+  /**
+   * How local change-capture is installed for this table (installSyncCapture, db.ts):
+   *   "row" (default) — a standard per-row INSERT/UPDATE/DELETE outbox trigger.
+   *   "distillation-fanout" — distillations only: on INSERT enqueue the distillation
+   *     AND fan out one temporal_messages outbox row per id in `source_ids`
+   *     (json_each); on UPDATE re-enqueue the distillation (the archived flip). Its
+   *     referenced temporal subset is the ONLY temporal that ever syncs. Pro-tier
+   *     gated (installed only when the plan tier is pro/max).
+   *   "none" — no own trigger; captured INDIRECTLY (temporal_messages, enqueued by
+   *     the distillation fanout). Distinct from pullOnly, which is never pushed.
+   */
+  captureStrategy?: "row" | "distillation-fanout" | "none";
+  /**
+   * Append-only table whose REMOTE schema has NO `is_deleted` column (temporal_messages,
+   * supabase/migrations/0020 — "no is_deleted reaper"). The push payload must therefore
+   * OMIT `is_deleted` (unlike every other table, where pushEntry sends `is_deleted:false`
+   * on upsert / `true` on delete) — sending it is a PGRST204 that poisons every row. The
+   * client also never deletes/tombstones it (reconcile skips it), so the delete branch is
+   * unreachable; the pull side already treats an absent `is_deleted` as not-deleted.
+   * Defaults to false. (Distinct from `versioned`: the join table is versioned:false yet
+   * HAS is_deleted, so `versioned` is the wrong discriminator here.)
+   */
+  appendOnly?: boolean;
 }
 
 /** ASCII Unit Separator — joins composite row ids (mirrors the SQL `char(31)`). */
@@ -314,7 +337,68 @@ export const SYNCED_TABLES: Record<SyncTier, SyncTableMeta[]> = {
       ],
     },
   ],
-  pro: [],
+  pro: [
+    {
+      // D (#826): the compressed conversation-memory backup. Encrypted on the wire
+      // (narrative/facts/observations sealed to the per-scope DEK). VERSIONED — the
+      // `archived` flip is a real UPDATE that re-pushes (content_hash changes).
+      // Captured via a distillation-fanout trigger that also enqueues the referenced
+      // temporal_messages subset. source_ids stays cleartext (id refs, like FKs).
+      table: "distillations",
+      idColumns: ["id"],
+      ftsTables: ["distillation_fts"],
+      captureStrategy: "distillation-fanout",
+      encryptedColumns: ["narrative", "facts", "observations"],
+      syncColumns: [
+        "id",
+        "project_id",
+        "session_id",
+        "narrative",
+        "facts",
+        "observations",
+        "source_ids",
+        "generation",
+        "token_count",
+        "r_compression",
+        "c_norm",
+        "call_type",
+        "worker_provider_id",
+        "worker_model_id",
+        "archived",
+        "created_at",
+        // No updated_at: the local table has none — the remote server-stamps it
+        // (0020 default now() + BEFORE UPDATE trigger), which is the pull cursor.
+      ],
+    },
+    {
+      // D (#826): ONLY the distillation-REFERENCED subset ever syncs (id ∈ ⋃
+      // distillations.source_ids) — enforced by the fanout capture + the subset-aware
+      // seed/reconcile; an undistilled message never leaves the device. Append-only
+      // (versioned:false); NO own capture trigger (captureStrategy "none" — enqueued
+      // by the distillation fanout). The local `distilled` residency flag is NOT
+      // synced (per-device cache state); a pulled row is marked distilled=1 on apply
+      // so the next prune won't evict a just-restored message. content/metadata are
+      // encrypted on the wire.
+      table: "temporal_messages",
+      idColumns: ["id"],
+      ftsTables: ["temporal_fts"],
+      versioned: false,
+      // Remote 0020 has no is_deleted column — the push payload must omit it.
+      appendOnly: true,
+      captureStrategy: "none",
+      encryptedColumns: ["content", "metadata"],
+      syncColumns: [
+        "id",
+        "project_id",
+        "session_id",
+        "role",
+        "content",
+        "tokens",
+        "metadata",
+        "created_at",
+      ],
+    },
+  ],
   max: [],
 };
 
@@ -706,6 +790,25 @@ function seedSelect(table: string): string {
                ORDER BY m.confidence DESC,
                         COALESCE(m.last_reinforced_at, m.updated_at) DESC,
                         m.logical_id`;
+    // D (#826): the compressed-memory backup. Recency order so the newest memory
+    // survives the (generous, rarely-binding) pro cap.
+    case "distillations":
+      return "SELECT * FROM distillations ORDER BY created_at DESC, id";
+    // D (#826): 🔴 ONLY the distillation-REFERENCED subset ever syncs — an
+    // undistilled message must NEVER be enqueued. Restrict to ids present in some
+    // distillation's source_ids (json_each), mirroring the fanout capture trigger.
+    // Recency order for cap survival; id tiebreak for determinism.
+    case "temporal_messages":
+      // json_valid guard: a single corrupt source_ids must not throw and abort the
+      // whole seed transaction (source_ids is always JSON.stringify'd, so this is
+      // belt-and-suspenders; filter BEFORE json_each so the bad row is skipped).
+      return `SELECT t.* FROM temporal_messages t
+                WHERE t.id IN (
+                  SELECT value FROM
+                    (SELECT source_ids FROM distillations WHERE json_valid(source_ids)) d,
+                    json_each(d.source_ids)
+                )
+               ORDER BY t.created_at DESC, t.id`;
     default:
       return `SELECT * FROM ${table}`;
   }
@@ -827,6 +930,14 @@ export function reconcile(tier: SyncTier = currentSyncTier()): void {
     // Pull-only tables are never pushed (see seedOutbox) — also skip the
     // delete-tombstone reconciliation so no `profiles` outbox entry is created.
     if (m.pullOnly) continue;
+    // D (#826): 🔴 the Pro backup tables (distillations, temporal_messages — any
+    // non-"row" capture strategy) are APPEND-ONLY and sync-invisible on local
+    // deletion. A local prune / project cleanup / cache eviction must NEVER tombstone
+    // the remote backup: the remote is permanent, bounded by the per-scope quota +
+    // server reaper, NOT by local residency (epic #821 decision). They also have no
+    // capture DELETE trigger, so the ONLY way they could tombstone is this pass —
+    // skip it. (Remote lifecycle is the server reaper's job, not the client's.)
+    if (m.captureStrategy && m.captureStrategy !== "row") continue;
     // Knowledge is keyed by logical_id and append-only: "live" means a CURRENT live
     // version exists (knowledge_current), NOT merely a physical row — a deleted
     // entry keeps its demoted/death-cert version rows, so an `id = logical_id`
@@ -1588,7 +1699,15 @@ export function assertSyncInvariants(): void {
 
   // 3. Every outbox / sync_state row references a registered synced table — a
   //    typo or registry drift would silently strand rows the engine can't route.
-  const known = new Set(tables.map((m) => m.table));
+  //    Use ALL registered tables (every tier), NOT the current tier's set: a
+  //    downgraded ex-pro (or a Pro user before the tier mirror loads) legitimately
+  //    holds sync_state/outbox rows for a Pro table while currentSyncTier() is
+  //    basic — that is registry-KNOWN, not drift (#826/D).
+  const known = new Set(
+    [...SYNCED_TABLES.basic, ...SYNCED_TABLES.pro, ...SYNCED_TABLES.max].map(
+      (m) => m.table,
+    ),
+  );
   for (const tbl of ["sync_outbox", "sync_state"] as const) {
     const names = db()
       .query(`SELECT DISTINCT table_name FROM ${tbl}`)

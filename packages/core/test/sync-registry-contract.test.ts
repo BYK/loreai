@@ -16,7 +16,7 @@
  * real push path.
  */
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { db, deleteTeamConfig } from "../src/db";
+import { db, deleteTeamConfig, reinstallSyncCapture } from "../src/db";
 import {
   assertSyncInvariants,
   enableSync,
@@ -26,6 +26,20 @@ import {
 } from "../src/sync-data";
 
 const now = () => Date.now();
+
+// Every registered table across ALL tiers — the battery must cover Pro (#826/D)
+// tables too, not just basic, so a new tier's table inherits every contract.
+const ALL_REGISTERED = [
+  ...SYNCED_TABLES.basic,
+  ...SYNCED_TABLES.pro,
+  ...SYNCED_TABLES.max,
+];
+// Pro-tier tables: their capture triggers are tier-gated (installSyncCapture only
+// installs them when the plan tier is pro/max), so a check needing the trigger
+// present must set tier=pro + reinstall first.
+const PRO_TABLES = new Set(
+  [...SYNCED_TABLES.pro, ...SYNCED_TABLES.max].map((m) => m.table),
+);
 
 /**
  * Live-row factories used by the BEHAVIORAL pull-only checks. EVERY pull-only
@@ -58,15 +72,26 @@ beforeEach(() => {
   db().exec("DELETE FROM temp._sync_applying");
   db().exec("DELETE FROM sync_outbox");
   db().exec("DELETE FROM sync_state");
-  for (const m of SYNCED_TABLES.basic) {
+  for (const m of ALL_REGISTERED) {
     db().exec(`DELETE FROM ${m.table}`);
   }
+  // Reset change-capture to the free-tier baseline: with no profile row,
+  // reinstallSyncCapture() drops any Pro fanout triggers a prior test installed,
+  // so each test starts from the same trigger set.
+  reinstallSyncCapture();
 });
 
 afterEach(() => assertSyncInvariants()); // #834 — continuous invariant guard
 
 describe("SYNCED_TABLES registry contract", () => {
-  for (const m of SYNCED_TABLES.basic) {
+  test("no table is registered in more than one tier", () => {
+    // A table listed in two tiers would clobber META_BY_TABLE (last-wins) and
+    // duplicate it in every syncedTablesFor() cumulative set.
+    const names = ALL_REGISTERED.map((m) => m.table);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  for (const m of ALL_REGISTERED) {
     describe(`${m.table}${m.pullOnly ? " (pull-only)" : ""}`, () => {
       test("idColumns are non-empty and a subset of syncColumns", () => {
         // rowIdOf()/getRowById() read the id columns out of a syncColumns-only
@@ -75,13 +100,25 @@ describe("SYNCED_TABLES registry contract", () => {
         for (const c of m.idColumns) expect(m.syncColumns).toContain(c);
       });
 
-      test("has a change-capture trigger IFF it is not pull-only", () => {
-        // Pull-only tables are server-authoritative; capturing local writes
-        // would enqueue an entry that can never be pushed.
+      test("has its own change-capture trigger IFF not pull-only and captureStrategy != none", () => {
+        // Pull-only tables are server-authoritative; capturing local writes would
+        // enqueue an unpushable entry. captureStrategy "none" (temporal_messages) has
+        // NO own trigger either — it is captured indirectly by the distillation
+        // fanout, so its own trigger would double-enqueue.
+        if (PRO_TABLES.has(m.table)) {
+          // Pro capture is tier-gated — install it by setting the plan tier to pro.
+          db()
+            .query(
+              "INSERT OR REPLACE INTO profiles (id, tier, created_at, updated_at) VALUES ('rc-tier','pro',?,?)",
+            )
+            .run(now(), now());
+          reinstallSyncCapture();
+        }
+        const expectsOwnTrigger = !m.pullOnly && m.captureStrategy !== "none";
         const captured = tempTriggers().some((n) =>
           n.startsWith(`${m.table}_outbox_`),
         );
-        expect(captured).toBe(!m.pullOnly);
+        expect(captured).toBe(expectsOwnTrigger);
       });
 
       if (m.pullOnly) {
@@ -129,7 +166,7 @@ describe("SYNCED_TABLES local-only secondary UNIQUE → convergence handling (#1
     a.length === b.length &&
     [...a].sort().join("\u0000") === [...b].sort().join("\u0000");
 
-  for (const m of SYNCED_TABLES.basic) {
+  for (const m of ALL_REGISTERED) {
     test(`${m.table}: any local-only secondary UNIQUE has convergence handling`, () => {
       const indexes = db().query(`PRAGMA index_list("${m.table}")`).all() as {
         name: string;
