@@ -104,6 +104,7 @@ export {
   projectGitRemote,
   resolveProjectByRemoteOrPath,
   mergeProjectInternal,
+  convergeProjectsByRemote,
   UNATTRIBUTED_PROJECT_PREFIX,
   isUnattributedProjectPath,
   loadForceMinLayer,

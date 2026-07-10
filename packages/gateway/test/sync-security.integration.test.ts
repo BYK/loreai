@@ -23,6 +23,7 @@ const FREE_LIMITS: Record<string, number> = {
   knowledge_meta_crdt: 5000,
   account_escrow: 2,
   scope_keys: 100,
+  projects: 1000, // 0022 (#1246): basic-tier identity mapping, one row per repo
 };
 
 // Mirrors the free-tier max_bytes seeded in 0007_scope_seam.sql + 0009 — used to
@@ -37,6 +38,7 @@ const FREE_BYTE_LIMITS: Record<string, number> = {
   knowledge_meta_crdt: 1048576,
   account_escrow: 65536,
   scope_keys: 262144,
+  projects: 1048576, // 0022 (#1246): 1 MB
 };
 
 // Skip decision must be known at COLLECTION time (before beforeAll), so the
@@ -2019,6 +2021,126 @@ describe.skipIf(gate())(
         "INSERT",
         "SELECT",
       ]); // no UPDATE
+    });
+  },
+);
+
+describe.skipIf(gate())(
+  "sync migrations — projects identity mapping (#1246)",
+  () => {
+    // Basic-tier table (no current_tier() gate). Restore the free row cap after each
+    // test so a lowered cap never leaks (byte cap restored by the shared suite's map).
+    const setRowCap = (n: number) =>
+      h.client.query(
+        "update public.plan_limits set max_rows=$1 where tier='free' and table_name='projects'",
+        [n],
+      );
+    afterEach(async () => {
+      if (gate()) return;
+      await setRowCap(FREE_LIMITS.projects);
+    });
+
+    it("seeds projects plan_limits for BOTH free and pro (basic-tier table)", async () => {
+      const { rows } = await h.client.query(
+        "select tier, max_rows, max_bytes from public.plan_limits where table_name='projects' order by tier",
+      );
+      expect(rows.map((r) => r.tier)).toEqual(["free", "pro"]);
+      expect(Number(rows[0].max_rows)).toBe(1000); // free
+      expect(Number(rows[1].max_rows)).toBe(10000); // pro
+    });
+
+    it("a FREE user CAN write projects (no tier gate, unlike pro tables)", async () => {
+      const a = await h.createUser(); // tier defaults to 'free'
+      await h.asUser(a, (c) =>
+        c.query(
+          "insert into public.projects (id, scope_id, git_remote) values ('p1',$1,'R')",
+          [a],
+        ),
+      );
+      const { rows } = await h.asUser(a, (c) =>
+        c.query("select id from public.projects where scope_id=$1", [a]),
+      );
+      expect(rows.map((r) => r.id)).toEqual(["p1"]);
+    });
+
+    it("isolates projects across scopes (RLS USING)", async () => {
+      const a = await h.createUser();
+      const b = await h.createUser();
+      await h.asUser(b, (c) =>
+        c.query("insert into public.projects (id, scope_id) values ('pb',$1)", [
+          b,
+        ]),
+      );
+      const seen = await h.asUser(a, (c) =>
+        c.query(
+          "select count(*)::int as n from public.projects where scope_id=$1",
+          [b],
+        ),
+      );
+      expect(seen.rows[0].n).toBe(0); // RLS hides b's rows from a
+    });
+
+    it("rejects a forged author_id (WITH CHECK → 42501)", async () => {
+      const a = await h.createUser();
+      const b = await h.createUser();
+      const err = await expectError(() =>
+        h.asUser(a, (c) =>
+          c.query(
+            "insert into public.projects (id, scope_id, author_id) values ('p1',$1,$2)",
+            [a, b],
+          ),
+        ),
+      );
+      expect(err.code).toBe("42501");
+    });
+
+    it("rejects a forged scope_id (WITH CHECK → 42501)", async () => {
+      const a = await h.createUser();
+      const b = await h.createUser();
+      const err = await expectError(() =>
+        h.asUser(a, (c) =>
+          c.query(
+            "insert into public.projects (id, scope_id) values ('p1',$1)",
+            [b],
+          ),
+        ),
+      );
+      expect(err.code).toBe("42501");
+    });
+
+    it("scope_id is immutable (enforce_row_quota guard → 23514)", async () => {
+      const a = await h.createUser();
+      const b = await h.createUser();
+      await h.asUser(a, (c) =>
+        c.query("insert into public.projects (id, scope_id) values ('p1',$1)", [
+          a,
+        ]),
+      );
+      const err = await expectError(() =>
+        h.asUser(a, (c) =>
+          c.query(
+            "update public.projects set scope_id=$2 where id='p1' and scope_id=$1",
+            [a, b],
+          ),
+        ),
+      );
+      expect(err.code).toBe("23514");
+    });
+
+    it("caps projects inserts at the free row cap (generic id-key probe → 23514)", async () => {
+      const a = await h.createUser();
+      await setRowCap(2);
+      const ins = (id: string) =>
+        h.asUser(a, (c) =>
+          c.query(
+            "insert into public.projects (id, scope_id, git_remote) values ($1,$2,'R')",
+            [id, a],
+          ),
+        );
+      await ins("p1");
+      await ins("p2");
+      const err = await expectError(() => ins("p3"));
+      expect(err.code).toBe("23514");
     });
   },
 );

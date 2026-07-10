@@ -156,6 +156,10 @@ describe("SYNCED_TABLES local-only secondary UNIQUE → convergence handling (#1
     entity_aliases: "resolveAliasUniqueConflict (#1234)",
     entity_relations: "resolveRelationUniqueConflict (#1217)",
     knowledge: "version-aware apply demotes is_current before insert (#897)",
+    // path UNIQUE can't collide: applyRemoteProject derives path from the PK id
+    // (lore:project/<id>), which is unique per row, and path is never synced (#1246).
+    projects:
+      "applyRemoteProject derives path from the PK id → path UNIQUE never collides (#1246)",
   };
 
   const indexCols = (name: string) =>

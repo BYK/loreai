@@ -123,6 +123,15 @@ const REMOTE_COLUMNS: Record<string, Set<string>> = {
     "updated_at",
     ...SYNC_COLS,
   ]),
+  // #1246 projects identity mapping — faithful to supabase/migrations/0022. path is
+  // NEVER a remote column (device-local); a leaked path → PGRST204.
+  projects: new Set([
+    "id",
+    "git_remote",
+    "name",
+    "created_at",
+    ...SYNC_COLS, // versioned: content_hash/revision/is_deleted + scope_id/author_id
+  ]),
   // D (#826) pro tables — faithful to supabase/migrations/0020.
   distillations: new Set([
     "id",
@@ -396,6 +405,10 @@ beforeEach(() => {
   db().exec("DELETE FROM scope_keys");
   db().exec("DELETE FROM distillations");
   db().exec("DELETE FROM temporal_messages");
+  // #1246: the synced test projects (remote-backed /local/* + pulled lore:project/*).
+  db().exec(
+    "DELETE FROM projects WHERE path LIKE '/local/%' OR path LIKE 'lore:project/%'",
+  );
   keystore.lock();
   db().exec("DELETE FROM sync_outbox");
   db().exec("DELETE FROM sync_state");
@@ -411,6 +424,7 @@ beforeEach(() => {
     "scope_keys",
     "distillations",
     "temporal_messages",
+    "projects",
   ]) {
     setKV(`sync.push.${t}`, "0");
     setKV(`sync.pull.${t}`, "0|");
@@ -2044,5 +2058,68 @@ describe("knowledge wire encryption — C-4 (#825)", () => {
     await pullOnce(makeClient() as never);
     expect(currentContent("k1")).toBeNull(); // aborted — NOT corrupted with ciphertext
     expect(getKV("sync.pull.knowledge")).toBe("0|"); // cursor frozen
+  });
+});
+
+describe("projects identity sync — #1246", () => {
+  const SCOPE = REMOTE_SCOPE; // == getCurrentUser().user_id in the mock
+  const FAST = { t: 1, m: 256, p: 1 };
+  async function enableEncryption() {
+    keystore.setPassphrase("pw", { params: FAST });
+    await keystore.getScopeKey(SCOPE, SCOPE);
+  }
+  function insertProjectRow(id: string, gitRemote: string | null) {
+    db()
+      .query(
+        "INSERT INTO projects (id, path, name, git_remote, created_at) VALUES (?, ?, 'repo', ?, ?)",
+      )
+      .run(id, `/local/${id}`, gitRemote, Date.now());
+  }
+
+  test("push seals git_remote + name; path (device-local) is never sent", async () => {
+    syncData.enableSync("basic");
+    await enableEncryption();
+    insertProjectRow("pj1", "github.com/o/secret-repo");
+    await pushOnce(makeClient() as never); // strict mock → PGRST204 if path leaks
+
+    const row = tableRows("projects").find((r) => r.id === "pj1") as RemoteRow;
+    expect(row).toBeTruthy();
+    expect(row.git_remote).not.toBe("github.com/o/secret-repo"); // sealed
+    expect(
+      crypto.isEnvelope(Buffer.from(String(row.git_remote), "base64")),
+    ).toBe(true);
+    expect(crypto.isEnvelope(Buffer.from(String(row.name), "base64"))).toBe(
+      true,
+    );
+    expect("path" in row).toBe(false); // never synced
+  });
+
+  test("a remote-less project is never pushed (git_remote gate)", async () => {
+    syncData.enableSync("basic");
+    await enableEncryption();
+    insertProjectRow("pj-none", null);
+    await pushOnce(makeClient() as never);
+    expect(
+      tableRows("projects").find((x) => x.id === "pj-none"),
+    ).toBeUndefined();
+  });
+
+  test("pull seeds a synthetic-path row with the DECRYPTED git_remote", async () => {
+    syncData.enableSync("basic");
+    await enableEncryption();
+    insertProjectRow("pj2", "github.com/o/r2");
+    await pushOnce(makeClient() as never); // remote now holds ciphertext
+
+    // device-2 (same unlocked keystore): drop the local row, re-pull it.
+    db().query("DELETE FROM projects WHERE id = 'pj2'").run();
+    db().exec("DELETE FROM sync_state");
+    setKV("sync.pull.projects", "0|");
+    await pullOnce(makeClient() as never);
+
+    const p = db()
+      .query("SELECT path, git_remote FROM projects WHERE id = 'pj2'")
+      .get() as { path: string; git_remote: string } | null;
+    expect(p?.path).toBe("lore:project/pj2"); // synthetic placeholder
+    expect(p?.git_remote).toBe("github.com/o/r2"); // decrypted on the wire
   });
 });

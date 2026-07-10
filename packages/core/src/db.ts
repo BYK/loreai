@@ -2401,6 +2401,27 @@ function installSyncCapture(database: Database) {
       INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
       VALUES ('scope_keys', new.member_user_id, 'upsert', ${ts});
     END;`;
+  // #1246: projects identity mapping (id→git_remote). Gated on git_remote IS NOT NULL —
+  // only remote-backed projects sync (a remote-less project's random id can't correlate
+  // cross-device; its content would FK-poison on a peer). The UPDATE trigger fires the
+  // git_remote backfill (null→remote) into the outbox. NO DELETE: a merge
+  // (convergeProjectsByRemote) deletes the loser locally, but the remote loser row is left
+  // as benign orphaned data (never tombstoned — is_deleted stays false, so the reaper does
+  // NOT collect it; it is one row/merge, within quota). A DELETE tombstone would instead
+  // race the loser's still-orphaned remote content. path is DEVICE-LOCAL, never synced.
+  sql += `
+    CREATE TEMP TRIGGER IF NOT EXISTS projects_outbox_ins
+    AFTER INSERT ON projects WHEN (${gate} AND new.git_remote IS NOT NULL)
+    BEGIN
+      INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
+      VALUES ('projects', new.id, 'upsert', ${ts});
+    END;
+    CREATE TEMP TRIGGER IF NOT EXISTS projects_outbox_upd
+    AFTER UPDATE ON projects WHEN (${gate} AND new.git_remote IS NOT NULL)
+    BEGIN
+      INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
+      VALUES ('projects', new.id, 'upsert', ${ts});
+    END;`;
   // D (#826): Pro-tier distillation-fanout capture. Installed ONLY when the plan
   // tier (from the pulled profiles mirror) is pro/max — a free user creating
   // distillations must not accrue un-pushable pro outbox entries that no push cursor
@@ -3030,6 +3051,33 @@ function recoverMissingObjects(database: Database) {
  * Used internally during lazy git-remote backfill when two path-only
  * projects are discovered to share the same git remote.
  */
+/**
+ * Deterministically converge projects that share a git_remote (#1246). Two devices can
+ * independently mint a random project_id for the same repo; after they sync each other's
+ * projects mapping, both hold >1 local project for that remote. Merge all into the
+ * lexicographically-smallest id — a winner both devices agree on, so there is NO re-key
+ * ping-pong (a non-deterministic "local wins" would make the two devices merge in
+ * opposite directions forever). mergeProjectInternal re-keys the content + re-enqueues it
+ * under the winner. MUST run AFTER a pull (post-content, so the re-key finds the applied
+ * rows) and OUTSIDE any transaction (mergeProjectInternal opens its own BEGIN IMMEDIATE).
+ */
+export function convergeProjectsByRemote(): void {
+  const dupes = db()
+    .query(
+      "SELECT git_remote FROM projects WHERE git_remote IS NOT NULL GROUP BY git_remote HAVING COUNT(*) > 1",
+    )
+    .all() as { git_remote: string }[];
+  for (const { git_remote } of dupes) {
+    const ids = (
+      db()
+        .query("SELECT id FROM projects WHERE git_remote = ? ORDER BY id")
+        .all(git_remote) as { id: string }[]
+    ).map((r) => r.id);
+    const winner = ids[0]; // lexicographically smallest — identical on every device
+    for (const loser of ids.slice(1)) mergeProjectInternal(loser, winner);
+  }
+}
+
 export function mergeProjectInternal(sourceId: string, targetId: string): void {
   const d = db();
   d.exec("BEGIN IMMEDIATE");

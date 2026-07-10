@@ -203,6 +203,24 @@ export const SYNCED_TABLES: Record<SyncTier, SyncTableMeta[]> = {
       blobColumns: ["wrapped_dek"],
     },
     {
+      // #1246: the cross-device project-identity mapping. project_id is a random
+      // per-device UUID (crypto.randomUUID in ensureProject); git_remote is the ONLY
+      // stable cross-device key. Syncing id→git_remote lets a pulled content row's FK
+      // parent (projects.id) exist on any device, and lets a later local checkout ADOPT
+      // the pulled id via ensureProject's git-remote match (real path becomes an alias).
+      // path is NEVER synced (device-local + sensitive); git_remote + name are ENCRYPTED
+      // (C-4) — repo URLs never reach the server in plaintext (correlation is client-
+      // side). Pulled AFTER the key tables (needs the DEK to decrypt) and BEFORE
+      // knowledge/entities (the FK parent). Applied via applyRemoteProject, which seeds a
+      // synthetic-path row (path is NOT NULL UNIQUE locally, but not synced). No
+      // updated_at column locally — the remote server-stamps it for the pull cursor.
+      table: "projects",
+      idColumns: ["id"],
+      ftsTables: [],
+      encryptedColumns: ["git_remote", "name"],
+      syncColumns: ["id", "git_remote", "name", "created_at"],
+    },
+    {
       table: "knowledge",
       idColumns: ["id"],
       ftsTables: ["knowledge_fts"],
@@ -809,6 +827,12 @@ function seedSelect(table: string): string {
                     json_each(d.source_ids)
                 )
                ORDER BY t.created_at DESC, t.id`;
+    // #1246: only remote-backed projects sync — a remote-less project's random id can't
+    // correlate cross-device (its content would FK-poison on a peer), so it stays local.
+    // Mirrors the capture trigger's git_remote gate. path is not synced (pickSyncColumns
+    // drops it — not in syncColumns).
+    case "projects":
+      return "SELECT * FROM projects WHERE git_remote IS NOT NULL ORDER BY created_at DESC, id";
     default:
       return `SELECT * FROM ${table}`;
   }
@@ -1091,6 +1115,44 @@ export function applyRemoteUpsert(
  * device pulling its OWN pushed rows back (row already local) must keep its native
  * flags — never have its prune clock reset. content/metadata arrive decrypted (C-4).
  */
+/**
+ * Apply a pulled projects identity row (#1246). `row` is the stripped + DECRYPTED remote
+ * row (git_remote/name plaintext). Never applied via the generic upsert because:
+ *  - projects.path is NOT NULL UNIQUE locally but is NOT synced → a new row needs a
+ *    synthetic, non-fs, unique placeholder path (`lore:project/<id>`). A later local
+ *    ensureProject(realPath) git-remote-matches this id and registers realPath as an
+ *    alias; the placeholder stays projects.path but is never used as a filesystem path.
+ *  - COALESCE on update never lets a null incoming clear a locally-known git_remote/name.
+ * A git_remote backfill here can create two local projects for one remote — the post-pull
+ * convergeProjectsByRemote() pass merges them deterministically (min-id winner).
+ */
+export function applyRemoteProject(row: Record<string, unknown>): void {
+  const id = String(row.id);
+  const gitRemote = row.git_remote != null ? String(row.git_remote) : null;
+  const name = row.name != null ? String(row.name) : null;
+  const createdAt = Number(row.created_at) || Date.now();
+  withApplying(() => {
+    const existing = db()
+      .query("SELECT id FROM projects WHERE id = ?")
+      .get(id) as { id: string } | null | undefined;
+    if (existing) {
+      // Update identity fields only; NEVER touch path (device-local). COALESCE keeps a
+      // locally-known git_remote/name if the incoming row hasn't resolved one yet.
+      db()
+        .query(
+          "UPDATE projects SET git_remote = COALESCE(?, git_remote), name = COALESCE(?, name) WHERE id = ?",
+        )
+        .run(gitRemote, name, id);
+    } else {
+      db()
+        .query(
+          "INSERT INTO projects (id, path, name, git_remote, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .run(id, `lore:project/${id}`, name, gitRemote, createdAt);
+    }
+  });
+}
+
 let _temporalLiveColumns: Set<string> | undefined;
 /** Live temporal_messages columns (PRAGMA), memoized — the schema is process-stable. */
 function temporalLiveColumns(): Set<string> {

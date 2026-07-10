@@ -30,6 +30,7 @@ import {
   keystore,
   crypto,
   reinstallSyncCapture,
+  convergeProjectsByRemote,
 } from "@loreai/core";
 import { getAuthedClient, getCurrentUser } from "./supabase";
 
@@ -981,6 +982,11 @@ function applyRemote(
       // and stamp restored_at so the prune keys off local residency, not origin
       // created_at (B3). `decrypted` carries the plaintext content/metadata (C-4).
       syncData.applyRemoteTemporal(decrypted ?? stripSyncCols(remote));
+    } else if (meta.table === "projects") {
+      // #1246: seed a synthetic-path FK parent / backfill identity. `decrypted` carries
+      // the plaintext git_remote/name (C-4). Same-remote dupes are merged post-pull by
+      // convergeProjectsByRemote (see syncOnce).
+      syncData.applyRemoteProject(decrypted ?? stripSyncCols(remote));
     } else {
       syncData.applyRemoteUpsert(meta.table, stripSyncCols(remote));
     }
@@ -1048,6 +1054,18 @@ export async function syncOnce(
   const tierBefore = syncData.currentSyncTier();
   const push = await pushOnce(client, onProgress);
   const pull = await pullOnce(client, onProgress);
+  // #1246: after content is applied, merge any projects that a peer's pulled identity
+  // row revealed to share a git_remote (min-id winner, deterministic → no ping-pong).
+  // Post-content so the re-key finds the applied rows; the re-keyed content re-pushes
+  // next cycle. No-op (a cheap GROUP BY) when there are no same-remote duplicates.
+  // Defensive: a transient merge failure must not abort the whole cycle — retried next tick.
+  try {
+    convergeProjectsByRemote();
+  } catch (e) {
+    log.notice(
+      `sync: project convergence deferred — ${(e as Error).message ?? e}`,
+    );
+  }
   const tierAfter = syncData.currentSyncTier();
   if (tierAfter !== tierBefore) {
     // Reconcile the change-capture trigger set to the new tier (installs the Pro
