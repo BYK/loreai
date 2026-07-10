@@ -757,10 +757,14 @@ export function prune(input: {
     // dangling. `deleteEmbeddings` is a no-op in blob mode and when the list is
     // empty. (The startup `gcVec0DanglingRows` sweep remains the catch-all
     // backstop for orphans from other paths / a crash mid-delete.)
+    // COALESCE(restored_at, created_at) (#826/D): a restored/pulled message keeps its
+    // origin created_at for ordering/recall but ages out on its LOCAL residency clock,
+    // so it survives a full retention window instead of being evicted immediately for
+    // its old origin created_at (B3). restored_at is NULL for native rows (created_at).
     const ttlIds = (
       database
         .query(
-          "SELECT id FROM temporal_messages WHERE project_id = ? AND distilled = 1 AND created_at < ?",
+          "SELECT id FROM temporal_messages WHERE project_id = ? AND distilled = 1 AND COALESCE(restored_at, created_at) < ?",
         )
         .all(pid, cutoff) as { id: string }[]
     ).map((r) => r.id);
@@ -770,7 +774,7 @@ export function prune(input: {
       withSyncApplying(() => {
         database
           .query(
-            "DELETE FROM temporal_messages WHERE project_id = ? AND distilled = 1 AND created_at < ?",
+            "DELETE FROM temporal_messages WHERE project_id = ? AND distilled = 1 AND COALESCE(restored_at, created_at) < ?",
           )
           .run(pid, cutoff);
         clearPrunedSyncState(database, "temporal_messages", ttlIds);
@@ -806,7 +810,9 @@ export function prune(input: {
       // to drop below the cap. Delete them in a single batch.
       const candidates = database
         .query(
-          "SELECT id, LENGTH(content) as size FROM temporal_messages WHERE project_id = ? AND distilled = 1 ORDER BY created_at ASC",
+          // Evict by LOCAL residency (COALESCE(restored_at, created_at)) so a freshly
+          // restored message isn't the first evicted for its old origin created_at (#826/D).
+          "SELECT id, LENGTH(content) as size FROM temporal_messages WHERE project_id = ? AND distilled = 1 ORDER BY COALESCE(restored_at, created_at) ASC",
         )
         .all(pid) as { id: string; size: number }[];
 

@@ -1674,6 +1674,17 @@ const MIGRATIONS: string[] = [
   `
   -- Version 66 (#909): see applyRefFkDrop — no-op SQL marker.
   `,
+  // Version 67 (#826/D): temporal_messages.restored_at — a LOCAL-ONLY residency clock.
+  // A pulled/restored message keeps its ORIGIN created_at (for ordering + recall) but is
+  // stamped restored_at=now on apply (applyRemoteTemporal); the TTL/size prune keys off
+  // COALESCE(restored_at, created_at) so a restored message gets a full LOCAL retention
+  // window instead of being evicted on the very next idle tick despite its old origin
+  // created_at (B3). NULL for native rows (created_at governs). NEVER synced (not in
+  // temporal_messages' syncColumns). Re-runs harmlessly on recovery (stripAppliedAlters
+  // drops the duplicate ALTER).
+  `
+  ALTER TABLE temporal_messages ADD COLUMN restored_at INTEGER;
+  `,
 ];
 
 // Index of the migration whose work is performed by a column-presence-aware JS

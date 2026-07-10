@@ -13,6 +13,7 @@ import {
   reinstallSyncCapture,
 } from "../src/db";
 import {
+  applyRemoteTemporal,
   assertSyncInvariants,
   enableSync,
   getSyncState,
@@ -22,6 +23,8 @@ import {
   setSyncState,
 } from "../src/sync-data";
 import * as temporal from "../src/temporal";
+
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 const PROJECT = "/test/sync/pro";
 const now = () => Date.now();
@@ -181,6 +184,112 @@ describe("assertSyncInvariants spans all tiers (#826/D)", () => {
       remote_updated_at: null,
     });
     expect(() => assertSyncInvariants()).not.toThrow();
+  });
+});
+
+describe("restore residency: pulled temporal survives prune (#826/D, D-4)", () => {
+  const readTemporal = (id: string) =>
+    db()
+      .query(
+        "SELECT distilled, created_at, restored_at FROM temporal_messages WHERE id = ?",
+      )
+      .get(id) as
+      | { distilled: number; created_at: number; restored_at: number | null }
+      | undefined;
+
+  test("a restored (recent restored_at) message SURVIVES TTL prune despite an old created_at; a native one does not", () => {
+    const pid = ensureProject(PROJECT);
+    const old = now() - 200 * DAY_MS; // 200 days old — past a 120-day retention
+    // Native distilled row: restored_at NULL → keyed by created_at → pruned.
+    db()
+      .query(
+        "INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata, restored_at) VALUES ('native', ?, 's', 'user', 'x', 1, 1, ?, '{}', NULL)",
+      )
+      .run(pid, old);
+    // Restored row: same old created_at, but restored_at = now → keyed by residency → kept.
+    db()
+      .query(
+        "INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata, restored_at) VALUES ('restored', ?, 's', 'user', 'x', 1, 1, ?, '{}', ?)",
+      )
+      .run(pid, old, now());
+
+    temporal.prune({
+      projectPath: PROJECT,
+      retentionDays: 120,
+      maxStorageMB: 1024,
+    });
+
+    expect(readTemporal("native")).toBeNull(); // pruned (.get() returns null, not undefined)
+    expect(readTemporal("restored")).toBeTruthy(); // survived
+  });
+
+  test("applyRemoteTemporal INSERT marks distilled=1 + stamps restored_at", () => {
+    const pid = ensureProject(PROJECT);
+    const origin = now() - 300 * DAY_MS;
+    applyRemoteTemporal({
+      id: "r1",
+      project_id: pid,
+      session_id: "s",
+      role: "user",
+      content: "hello",
+      tokens: 1,
+      metadata: "{}",
+      created_at: origin,
+    });
+    const row = readTemporal("r1");
+    expect(row?.distilled).toBe(1); // archival — never re-distilled
+    expect(row?.created_at).toBe(origin); // origin preserved for ordering/recall
+    expect(row?.restored_at).toBeGreaterThan(origin); // residency clock stamped ~now
+  });
+
+  test("applyRemoteTemporal PRESERVES a self-pull-back row's native flags (no clock reset)", () => {
+    const pid = ensureProject(PROJECT);
+    const origin = now() - 300 * DAY_MS;
+    // A device's OWN pushed row already lives locally with native flags (restored_at NULL).
+    db()
+      .query(
+        "INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata, restored_at) VALUES ('own', ?, 's', 'user', 'orig', 1, 1, ?, '{}', NULL)",
+      )
+      .run(pid, origin);
+    // Pulling it back (same content) must NOT stamp restored_at / flip its clock.
+    applyRemoteTemporal({
+      id: "own",
+      project_id: pid,
+      session_id: "s",
+      role: "user",
+      content: "orig",
+      tokens: 1,
+      metadata: "{}",
+      created_at: origin,
+    });
+    const row = readTemporal("own");
+    expect(row?.restored_at).toBeNull(); // native clock preserved
+    expect(row?.distilled).toBe(1);
+  });
+
+  test("applyRemoteTemporal conflict-update PRESERVES an existing distilled=0 flag (never flips active→archival)", () => {
+    const pid = ensureProject(PROJECT);
+    const origin = now() - 300 * DAY_MS;
+    // A local still-ACTIVE (distilled=0) row with the same id: the conflict-update
+    // must touch neither distilled nor restored_at (both excluded from DO UPDATE SET).
+    db()
+      .query(
+        "INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata, restored_at) VALUES ('act', ?, 's', 'user', 'orig', 1, 0, ?, '{}', NULL)",
+      )
+      .run(pid, origin);
+    applyRemoteTemporal({
+      id: "act",
+      project_id: pid,
+      session_id: "s",
+      role: "user",
+      content: "orig",
+      tokens: 1,
+      metadata: "{}",
+      created_at: origin,
+    });
+    const row = readTemporal("act");
+    expect(row?.distilled).toBe(0); // NOT flipped active → archival
+    expect(row?.restored_at).toBeNull(); // NOT stamped
   });
 });
 

@@ -1079,6 +1079,67 @@ export function applyRemoteUpsert(
   });
 }
 
+/**
+ * Apply a pulled temporal_messages row (D, #826). Distinct from the generic upsert
+ * because a RESTORED message needs two LOCAL-ONLY flags that never travel the wire:
+ *  - distilled = 1: it was ALREADY distilled on the source device (that is WHY it
+ *    synced — it is in some distillation's source_ids), so it must NOT be re-distilled
+ *    locally, and it belongs in the archival tier, not the active context window.
+ *  - restored_at = now: the residency clock the TTL/size prune keys off, so a restored
+ *    message survives a full LOCAL retention window despite its old origin created_at.
+ * BOTH are set only on INSERT (a genuine restore) and PRESERVED on conflict-update: a
+ * device pulling its OWN pushed rows back (row already local) must keep its native
+ * flags — never have its prune clock reset. content/metadata arrive decrypted (C-4).
+ */
+let _temporalLiveColumns: Set<string> | undefined;
+/** Live temporal_messages columns (PRAGMA), memoized — the schema is process-stable. */
+function temporalLiveColumns(): Set<string> {
+  if (!_temporalLiveColumns) {
+    _temporalLiveColumns = new Set(
+      (
+        db().query("PRAGMA table_info(temporal_messages)").all() as {
+          name: string;
+        }[]
+      ).map((r) => r.name),
+    );
+  }
+  return _temporalLiveColumns;
+}
+
+export function applyRemoteTemporal(row: Record<string, unknown>): void {
+  const table = "temporal_messages";
+  const m = meta(table);
+  decodeBlobColumns(table, row);
+  const insertRow: Record<string, unknown> = {
+    ...row,
+    distilled: 1,
+    restored_at: Date.now(),
+  };
+  // The ACTUAL table columns (PRAGMA), NOT columns()/syncedColumns — distilled and
+  // restored_at are local-only (not sync columns) but must be written here. Memoized:
+  // the schema is stable for the process, so a large restore doesn't re-PRAGMA per row.
+  const cols = Object.keys(insertRow).filter(
+    (c) => !PAYLOAD_EXCLUDE.has(c) && temporalLiveColumns().has(c),
+  );
+  const placeholders = cols.map(() => "?").join(", ");
+  const conflict = m.idColumns.join(", ");
+  // On conflict, update ONLY the content columns — never distilled/restored_at, so a
+  // self-pull-back of an already-local row keeps its native residency + distilled state.
+  const nonPk = cols.filter(
+    (c) => !m.idColumns.includes(c) && c !== "distilled" && c !== "restored_at",
+  );
+  const onConflict =
+    nonPk.length > 0
+      ? `DO UPDATE SET ${nonPk.map((c) => `${c}=excluded.${c}`).join(", ")}`
+      : "DO NOTHING";
+  const sql = `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${placeholders}) ON CONFLICT(${conflict}) ${onConflict}`;
+  withApplying(() => {
+    db()
+      .query(sql)
+      .run(...cols.map((c) => insertRow[c] as never));
+  });
+}
+
 /** Delete a pulled-as-removed row locally (under apply-suppression). */
 export function applyRemoteDelete(table: string, rowId: string): void {
   const m = meta(table);

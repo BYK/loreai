@@ -976,6 +976,11 @@ function applyRemote(
       // C-3 (#825): pass the FULL remote row — the handler reconstructs the local
       // NOT-NULL scope_id from remote.scope_id (stripSyncCols would drop it).
       syncData.applyRemoteScopeKey(remote);
+    } else if (meta.table === "temporal_messages") {
+      // D (#826): mark the restored message distilled=1 (archival, never re-distill)
+      // and stamp restored_at so the prune keys off local residency, not origin
+      // created_at (B3). `decrypted` carries the plaintext content/metadata (C-4).
+      syncData.applyRemoteTemporal(decrypted ?? stripSyncCols(remote));
     } else {
       syncData.applyRemoteUpsert(meta.table, stripSyncCols(remote));
     }
