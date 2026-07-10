@@ -2503,6 +2503,11 @@ function installSyncCapture(database: Database) {
     // P2c (#1246): gate on the distillation's project git_remote — gating the INSERT
     // trigger's WHEN gates BOTH the distillation row AND the temporal fanout in one shot,
     // so a remote-less project's compressed memory + its referenced messages never upload.
+    // Belt-and-suspenders (#826): the fanout ALSO re-checks each fanned-out temporal's OWN
+    // project git_remote. Normally redundant (a distillation's source_ids reference
+    // messages in the same session⇒same project as the distillation), but should that
+    // invariant ever break, a cross-project source id pointing at a remote-less project's
+    // message would otherwise upload it and FK-poison a peer (temporal FKs projects).
     sql += `
       CREATE TEMP TRIGGER IF NOT EXISTS distillations_outbox_ins
       AFTER INSERT ON distillations WHEN (${gate} AND ${projectRemoteGate("new.project_id")})
@@ -2510,7 +2515,9 @@ function installSyncCapture(database: Database) {
         INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
         VALUES ('distillations', new.id, 'upsert', ${ts});
         INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
-        SELECT 'temporal_messages', value, 'upsert', ${ts} FROM json_each(new.source_ids);
+        SELECT 'temporal_messages', value, 'upsert', ${ts} FROM json_each(new.source_ids)
+         WHERE EXISTS (SELECT 1 FROM temporal_messages t
+                        WHERE t.id = value AND ${projectRemoteGate("t.project_id")});
       END;
       CREATE TEMP TRIGGER IF NOT EXISTS distillations_outbox_upd
       AFTER UPDATE ON distillations WHEN (${gate} AND ${projectRemoteGate("new.project_id")})

@@ -503,6 +503,32 @@ describe("Pro fanout git_remote gate — P2c (#1246)", () => {
     expect(outboxRowIds("temporal_messages")).toEqual(["t1"]);
   });
 
+  test("capture belt-and-suspenders: a foreign remote-less temporal referenced by a remote-backed distillation is NOT fanned out (#826)", () => {
+    insertProject("p-remote", "R");
+    insertProject("p-local", null);
+    insertTemporal("t-same", "p-remote");
+    insertTemporal("t-foreign", "p-local"); // lives in a remote-less project
+    armPro();
+    enableSync("pro");
+    db().exec("DELETE FROM sync_outbox");
+    // Invariant-violating: a remote-backed project's distillation referencing a foreign
+    // remote-less project's temporal. The distillation syncs; the foreign temporal must not.
+    insertDistillation("d1", "p-remote", ["t-same", "t-foreign"]);
+    expect(outboxRowIds("distillations")).toEqual(["d1"]);
+    expect(outboxRowIds("temporal_messages")).toEqual(["t-same"]);
+  });
+
+  test("seed belt-and-suspenders: a foreign remote-less temporal is not seeded (#826)", () => {
+    insertProject("p-remote", "R");
+    insertProject("p-local", null);
+    insertTemporal("t-same", "p-remote");
+    insertTemporal("t-foreign", "p-local");
+    insertDistillation("d1", "p-remote", ["t-same", "t-foreign"]);
+    armPro();
+    enableSync("pro"); // reconcile → seedOutbox
+    expect(outboxRowIds("temporal_messages")).toEqual(["t-same"]);
+  });
+
   test("reseedProjectContent: dedupes a temporal referenced by multiple distillations (#1253)", () => {
     insertProject("p", null);
     insertTemporal("t1", "p");

@@ -887,7 +887,11 @@ function seedSelect(table: string): string {
       // json_valid guard: a single corrupt source_ids must not throw and abort the
       // whole seed transaction (source_ids is always JSON.stringify'd, so this is
       // belt-and-suspenders; filter BEFORE json_each so the bad row is skipped).
-      // P2c (#1246): only the referenced subset of REMOTE-BACKED distillations.
+      // P2c (#1246): only the referenced subset of REMOTE-BACKED distillations. The
+      // trailing `${projectRemoteGate("t.project_id")}` is a belt-and-suspenders (#826):
+      // it re-checks the temporal's OWN project so a cross-project source id (should the
+      // session⇒one-project invariant ever break) can't seed a remote-less project's
+      // message and FK-poison a peer. Mirrors the fanout capture gate.
       return `SELECT t.* FROM temporal_messages t
                 WHERE t.id IN (
                   SELECT value FROM
@@ -895,6 +899,7 @@ function seedSelect(table: string): string {
                       WHERE json_valid(source_ids) AND ${projectRemoteGate("project_id")}) d,
                     json_each(d.source_ids)
                 )
+                  AND ${projectRemoteGate("t.project_id")}
                ORDER BY t.created_at DESC, t.id`;
     // #1246: only remote-backed projects sync — a remote-less project's random id can't
     // correlate cross-device (its content would FK-poison on a peer), so it stays local.
@@ -1150,9 +1155,12 @@ export function reseedProjectContent(projectId: string): void {
     enqueue(
       // DISTINCT: a temporal id referenced by MULTIPLE distillations appears once per
       // distillation in the json_each expansion — dedupe so it enqueues a single upsert.
+      // The EXISTS is the same belt-and-suspenders own-project gate as capture/seed (#826).
       `SELECT DISTINCT 'temporal_messages', value, 'upsert', ? FROM
          (SELECT source_ids FROM distillations WHERE project_id = ? AND json_valid(source_ids)) d,
-         json_each(d.source_ids)`,
+         json_each(d.source_ids)
+        WHERE EXISTS (SELECT 1 FROM temporal_messages t
+                       WHERE t.id = value AND ${projectRemoteGate("t.project_id")})`,
       now,
       projectId,
     );
