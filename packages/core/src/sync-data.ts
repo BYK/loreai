@@ -22,6 +22,7 @@ import {
   deleteTeamConfig,
   getKV,
   getTeamConfig,
+  onProjectRemoteBackfilled,
   setKV,
   setTeamConfig,
   withSyncApplying,
@@ -792,6 +793,19 @@ function rowIdExpr(m: SyncTableMeta): string {
  *  - any other table: unordered (no per-row value signal / high enough cap).
  * (knowledge is handled by its own logical_id-keyed branch in seedOutbox.)
  */
+// P2a (#1246): a PROJECT-SCOPED row (cross_project=0, non-NULL project_id) syncs only if
+// its project is remote-backed (git_remote set) — a remote-less project can't correlate
+// cross-device, so its private data must not upload. GLOBAL / cross-project rows always
+// sync (they retain an origin project_id but aren't tied to its remote). `prefix` qualifies
+// the columns for a joined query (e.g. "e." for the entities alias). Mirrors the capture
+// trigger gate (db.ts installSyncCapture) — the two MUST stay in lockstep.
+function remoteBackedGate(prefix = ""): string {
+  return (
+    `(${prefix}cross_project = 1 OR ${prefix}project_id IS NULL OR ` +
+    `${prefix}project_id IN (SELECT id FROM projects WHERE git_remote IS NOT NULL))`
+  );
+}
+
 function seedSelect(table: string): string {
   switch (table) {
     // The trailing id is a stable tiebreak so re-seeds are fully deterministic when
@@ -802,6 +816,7 @@ function seedSelect(table: string): string {
                   SELECT entity_id, COUNT(*) AS refs
                     FROM knowledge_entity_refs GROUP BY entity_id
                 ) r ON r.entity_id = e.id
+               WHERE ${remoteBackedGate("e.")}
                ORDER BY COALESCE(r.refs, 0) DESC, e.updated_at DESC, e.created_at DESC, e.id`;
     case "entity_relations":
       return "SELECT * FROM entity_relations ORDER BY updated_at DESC, created_at DESC, id";
@@ -905,6 +920,7 @@ export function seedOutbox(tier: SyncTier = currentSyncTier()): void {
         const lids = db()
           .query(
             `SELECT COALESCE(logical_id, id) AS lid FROM knowledge_current
+              WHERE ${remoteBackedGate()}
               ORDER BY confidence DESC,
                        COALESCE(last_reinforced_at, updated_at) DESC,
                        created_at DESC`,
@@ -1010,6 +1026,32 @@ export function reconcile(tier: SyncTier = currentSyncTier()): void {
       .run(now, m.table);
   }
 }
+
+// P2a (#1246): when a project gains a git_remote (ensureProject lazy backfill), re-enqueue
+// the project-scoped content the git_remote gate held back while it was remote-less — the
+// direct-project_id tables gated in P2a (knowledge + entities). Scoped to the one project;
+// NO transaction wrapper (ensureProject may run inside another transaction, and seedOutbox's
+// BEGIN IMMEDIATE would nest). cross_project=0 only: global/cross-project rows were never
+// gated (they always sync) so they're already queued/synced. Only fires when sync is on.
+export function reseedProjectContent(projectId: string): void {
+  if (getTeamConfig(ENABLED_KEY) !== "1") return;
+  const now = Date.now();
+  db()
+    .query(
+      `INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
+         SELECT 'knowledge', COALESCE(logical_id, id), 'upsert', ? FROM knowledge_current
+          WHERE project_id = ? AND cross_project = 0`,
+    )
+    .run(now, projectId);
+  db()
+    .query(
+      `INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
+         SELECT 'entities', id, 'upsert', ? FROM entities
+          WHERE project_id = ? AND cross_project = 0`,
+    )
+    .run(now, projectId);
+}
+onProjectRemoteBackfilled(reseedProjectContent);
 
 // ---------------------------------------------------------------------------
 // Per-row sync state

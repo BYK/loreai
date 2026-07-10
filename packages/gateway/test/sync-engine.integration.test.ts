@@ -16,7 +16,7 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import {
   crypto,
   db,
-  ensureProject,
+  ensureProject as ensureProjectCore,
   keystore,
   ltm,
   resolveProjectByRemoteOrPath,
@@ -162,6 +162,21 @@ beforeEach(async () => {
 afterEach(() => {
   if (!SKIP) syncData.assertSyncInvariants();
 });
+
+// P2a (#1246): content syncs only for REMOTE-BACKED projects. These engine tests exercise
+// content that must reach the real server, so their project must have a git_remote. Stamp
+// it under capture-suppression (raw UPDATE, not ensureProject → no reseed side-effect).
+function ensureProject(path: string, name?: string): string {
+  const id = ensureProjectCore(path, name);
+  syncData.withApplying(() =>
+    db()
+      .query(
+        "UPDATE projects SET git_remote = 'test:remote' WHERE id = ? AND git_remote IS NULL",
+      )
+      .run(id),
+  );
+  return id;
+}
 
 function insertKnowledge(id: string, content: string): void {
   const pid = ensureProject("/tmp/lore-engine-it");

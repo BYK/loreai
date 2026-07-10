@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
   db,
-  ensureProject,
+  ensureProject as ensureProjectDb,
   getKV,
   setKV,
   setTeamConfig,
@@ -48,6 +48,22 @@ import {
 import * as ltm from "../src/ltm";
 
 const now = () => Date.now();
+
+// P2a (#1246): these tests exercise content that must SYNC, so their projects must be
+// REMOTE-BACKED — the git_remote gate skips project-scoped content of a remote-less
+// project. Stamp a git_remote (under capture-suppression so it never enqueues a stray
+// projects/reseed entry). All call sites use this transparently.
+function ensureProject(path: string, name?: string): string {
+  const id = ensureProjectDb(path, name);
+  withApplying(() =>
+    db()
+      .query(
+        "UPDATE projects SET git_remote = 'test:remote' WHERE id = ? AND git_remote IS NULL",
+      )
+      .run(id),
+  );
+  return id;
+}
 
 describe("applyRemoteKnowledge — append-only pull apply (A2, #823)", () => {
   const PROJ = "/tmp/lore-apply-knowledge";
@@ -227,6 +243,7 @@ describe("knowledgePushPlan — append-only remote mapping keyed by logical_id (
   });
 
   test("capture triggers key the knowledge outbox by logical_id for every op (#909)", () => {
+    ensureProject("/tmp/lore-kpp-triggers"); // remote-backed → content passes the P2 gate
     setTeamConfig("sync.enabled", "1");
     db().exec("DELETE FROM sync_outbox");
     const id = ltm.create({
@@ -280,6 +297,7 @@ describe("knowledgePushPlan — append-only remote mapping keyed by logical_id (
   });
 
   test("seedOutbox enqueues knowledge by value (confidence, then recency) so the best entries win the cap", () => {
+    ensureProject("/tmp/lore-seed-rank"); // remote-backed → content passes the P2 gate
     setTeamConfig("sync.enabled", "1");
     const mk = (title: string) =>
       ltm.create({
@@ -309,6 +327,7 @@ describe("knowledgePushPlan — append-only remote mapping keyed by logical_id (
   });
 
   test("seedOutbox breaks confidence ties by recency (most recently reinforced first)", () => {
+    ensureProject("/tmp/lore-seed-tie"); // remote-backed → content passes the P2 gate
     setTeamConfig("sync.enabled", "1");
     const mk = (title: string) =>
       ltm.create({

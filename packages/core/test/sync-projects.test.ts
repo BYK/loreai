@@ -17,6 +17,7 @@ import {
   enableSync,
   readOutbox,
   reconcile,
+  reseedProjectContent,
   setSyncState,
 } from "../src/sync-data";
 
@@ -46,18 +47,31 @@ function getProject(id: string) {
     git_remote: string | null;
   } | null;
 }
-function insertKnowledge(id: string, projectId: string) {
+function insertKnowledge(
+  id: string,
+  projectId: string | null,
+  crossProject = 0,
+) {
   db()
     .query(
-      `INSERT INTO knowledge (id, logical_id, project_id, category, title, content, created_at, updated_at)
-       VALUES (?, ?, ?, 'pattern', 't', 'c', ?, ?)`,
+      `INSERT INTO knowledge (id, logical_id, project_id, category, title, content, cross_project, created_at, updated_at)
+       VALUES (?, ?, ?, 'pattern', 't', 'c', ?, ?, ?)`,
     )
-    .run(id, id, projectId, now(), now());
+    .run(id, id, projectId, crossProject, now(), now());
 }
-const projectOutbox = () =>
+function insertEntity(id: string, projectId: string | null, crossProject = 0) {
+  db()
+    .query(
+      `INSERT INTO entities (id, project_id, entity_type, canonical_name, cross_project, created_at, updated_at)
+       VALUES (?, ?, 'tool', 'n', ?, ?, ?)`,
+    )
+    .run(id, projectId, crossProject, now(), now());
+}
+const outboxRowIds = (table: string) =>
   readOutbox(0, 1000)
-    .filter((e) => e.table_name === "projects")
+    .filter((e) => e.table_name === table)
     .map((e) => e.row_id);
+const projectOutbox = () => outboxRowIds("projects");
 
 beforeEach(() => {
   deleteTeamConfig("sync.enabled");
@@ -199,5 +213,70 @@ describe("git_remote gate (only remote-backed projects sync)", () => {
     const q = projectOutbox();
     expect(q).toContain("seed-r");
     expect(q).not.toContain("seed-none");
+  });
+});
+
+describe("content git_remote gate — P2a (#1246)", () => {
+  test("capture: knowledge/entities of a remote-backed project enqueue; a remote-less one's do NOT", () => {
+    insertProject("p-remote", "R");
+    insertProject("p-local", null);
+    enableSync("basic");
+    insertKnowledge("k-remote", "p-remote");
+    insertKnowledge("k-local", "p-local");
+    insertEntity("e-remote", "p-remote");
+    insertEntity("e-local", "p-local");
+    expect(outboxRowIds("knowledge")).toEqual(["k-remote"]);
+    expect(outboxRowIds("entities")).toEqual(["e-remote"]);
+  });
+
+  test("capture: GLOBAL/cross-project content ALWAYS syncs, even under a remote-less project", () => {
+    insertProject("p-local", null);
+    enableSync("basic");
+    // cross_project=1 retains its origin project_id but is not tied to that remote.
+    insertKnowledge("k-cross", "p-local", 1);
+    insertEntity("e-cross", "p-local", 1);
+    insertKnowledge("k-global", null); // NULL project_id (global)
+    insertEntity("e-global", null);
+    expect(outboxRowIds("knowledge").sort()).toEqual(["k-cross", "k-global"]);
+    expect(outboxRowIds("entities").sort()).toEqual(["e-cross", "e-global"]);
+  });
+
+  test("seed: only remote-backed (+ global/cross) content is seeded on enable", () => {
+    // Created while sync is OFF → exercises the seedSelect gate, not the trigger.
+    insertProject("p-remote", "R");
+    insertProject("p-local", null);
+    insertKnowledge("k-remote", "p-remote");
+    insertKnowledge("k-local", "p-local"); // gated out
+    insertKnowledge("k-cross", "p-local", 1); // global → always seeded
+    insertEntity("e-remote", "p-remote");
+    insertEntity("e-local", "p-local"); // gated out
+    enableSync("basic"); // reconcile → seedOutbox
+    expect(outboxRowIds("knowledge").sort()).toEqual(["k-cross", "k-remote"]);
+    expect(outboxRowIds("entities")).toEqual(["e-remote"]);
+  });
+
+  test("reseedProjectContent: re-enqueues a project's project-scoped content after it gains a remote", () => {
+    // A project created remote-less: its content is NOT captured (gated out)…
+    insertProject("p", null);
+    enableSync("basic");
+    insertKnowledge("k1", "p");
+    insertKnowledge("k2", "p");
+    insertKnowledge("k-cross", "p", 1); // global → already captured
+    insertEntity("e1", "p");
+    expect(outboxRowIds("knowledge")).toEqual(["k-cross"]); // only the global one
+    expect(outboxRowIds("entities")).toEqual([]);
+    // …now the project gains a remote (backfill fires this) → its held-back
+    // project-scoped content is re-enqueued (the global one is NOT re-queued).
+    db().query("UPDATE projects SET git_remote='R' WHERE id='p'").run();
+    reseedProjectContent("p");
+    expect(outboxRowIds("knowledge").sort()).toEqual(["k-cross", "k1", "k2"]);
+    expect(outboxRowIds("entities")).toEqual(["e1"]);
+  });
+
+  test("reseedProjectContent: no-op when sync is disabled", () => {
+    insertProject("p", "R");
+    insertKnowledge("k1", "p");
+    reseedProjectContent("p"); // sync OFF → must not enqueue
+    expect(outboxRowIds("knowledge")).toEqual([]);
   });
 });

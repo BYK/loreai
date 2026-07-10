@@ -1,13 +1,28 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   db,
-  ensureProject,
+  ensureProject as ensureProjectCore,
   getKV,
   setKV,
   deleteTeamConfig,
   reinstallSyncCapture,
 } from "@loreai/core";
 import { ltm, log, keystore, crypto, syncData } from "@loreai/core";
+
+// P2a (#1246): these tests exercise content that must SYNC, so their projects must be
+// REMOTE-BACKED — the git_remote gate skips project-scoped content of a remote-less
+// project. Stamp a git_remote (under capture-suppression → no stray outbox entry).
+function ensureProject(path: string, name?: string): string {
+  const id = ensureProjectCore(path, name);
+  syncData.withApplying(() =>
+    db()
+      .query(
+        "UPDATE projects SET git_remote = 'test:remote' WHERE id = ? AND git_remote IS NULL",
+      )
+      .run(id),
+  );
+  return id;
+}
 
 // --- Fake Supabase client ----------------------------------------------------
 // In-memory per-table store with the PostgREST surface the engine uses, PLUS
@@ -406,8 +421,11 @@ beforeEach(() => {
   db().exec("DELETE FROM distillations");
   db().exec("DELETE FROM temporal_messages");
   // #1246: the synced test projects (remote-backed /local/* + pulled lore:project/*).
+  // Also the /tmp/* content projects — P2a stamps them a git_remote, so a persisted one
+  // would be seeded+pushed at enableSync and skew exact push counts. Cleared here (content
+  // children already deleted above → FK-safe); each test recreates its project fresh.
   db().exec(
-    "DELETE FROM projects WHERE path LIKE '/local/%' OR path LIKE 'lore:project/%'",
+    "DELETE FROM projects WHERE path LIKE '/local/%' OR path LIKE 'lore:project/%' OR path LIKE '/tmp/%'",
   );
   keystore.lock();
   db().exec("DELETE FROM sync_outbox");
@@ -1452,6 +1470,7 @@ describe("pullOnce", () => {
     // (knowledge_current, keyed by logical_id), not the demoted v1 base row that
     // getRowById(id=logical_id) returns. Reverting that fix makes this fail with
     // conflicts=1 / pulled=1 and a stale (v1) sync_conflicts.local_content.
+    ensureProject("/tmp/lore-sync-engine"); // remote-backed → content passes the P2 gate
     syncData.enableSync("basic");
     const id = ltm.create({
       projectPath: "/tmp/lore-sync-engine",
@@ -1481,6 +1500,7 @@ describe("pullOnce", () => {
     // knowledge_current (current version), not getRowById (the demoted v1 row), so
     // the discarded edit recoverable from sync_conflicts.local_content is the real
     // superseded content. Reverting that branch to getRowById makes this fail.
+    ensureProject("/tmp/lore-sync-engine"); // remote-backed → content passes the P2 gate
     syncData.enableSync("basic");
     const id = ltm.create({
       projectPath: "/tmp/lore-sync-engine",
@@ -1512,6 +1532,7 @@ describe("pullOnce", () => {
     // The DELETE capture trigger must record the logical_id, not the version id —
     // otherwise a delete of a version whose id ≠ logical_id targets a remote row
     // that doesn't exist (remote is keyed by logical_id) and silently no-ops.
+    ensureProject("/tmp/lore-sync-engine"); // remote-backed → content passes the P2 gate
     syncData.enableSync("basic");
     const id = ltm.create({
       projectPath: "/tmp/lore-sync-engine",
@@ -1543,6 +1564,7 @@ describe("pullOnce", () => {
     // reconcile() must tombstone by knowledge_current liveness, not physical-row
     // existence — a deleted entry keeps its demoted/death-cert version rows, so an
     // id=logical_id existence check would never reconcile a delete made while OFF.
+    ensureProject("/tmp/lore-sync-engine"); // remote-backed → content passes the P2 gate
     syncData.enableSync("basic");
     const id = ltm.create({
       projectPath: "/tmp/lore-sync-engine",
@@ -1579,6 +1601,7 @@ describe("pullOnce", () => {
     // A physical delete of a non-current version fires op=delete keyed by logical_id.
     // The push delete branch must re-validate liveness: the entry still has a live
     // current version, so this is NOT a deletion — re-push current, don't tombstone.
+    ensureProject("/tmp/lore-sync-engine"); // remote-backed → content passes the P2 gate
     syncData.enableSync("basic");
     const id = ltm.create({
       projectPath: "/tmp/lore-sync-engine",

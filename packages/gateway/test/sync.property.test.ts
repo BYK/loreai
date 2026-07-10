@@ -14,12 +14,27 @@ import fc from "fast-check";
 import {
   db,
   deleteTeamConfig,
-  ensureProject,
+  ensureProject as ensureProjectCore,
   ltm,
   setKV,
   syncData,
 } from "@loreai/core";
 import { describe, expect, test, vi } from "vitest";
+
+// P2a (#1246): content syncs only for REMOTE-BACKED projects (git_remote set). This
+// property test asserts the local live set converges with the remote, so its project
+// must be remote-backed. Stamp a git_remote under capture-suppression (no stray entry).
+function ensureProject(path: string, name?: string): string {
+  const id = ensureProjectCore(path, name);
+  syncData.withApplying(() =>
+    db()
+      .query(
+        "UPDATE projects SET git_remote = 'test:remote' WHERE id = ? AND git_remote IS NULL",
+      )
+      .run(id),
+  );
+  return id;
+}
 
 // --- Faithful in-memory Supabase (PostgREST surface the engine uses) ---------
 interface RemoteRow extends Record<string, unknown> {

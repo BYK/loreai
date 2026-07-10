@@ -30,6 +30,26 @@ function fireProjectMutation(): void {
 }
 
 /**
+ * #1246 (P2): fired when a project's git_remote flips NULL→set (ensureProject lazy
+ * backfill). Content created while the project was remote-less was NOT captured (the
+ * P2 git_remote gate), so it must be re-enqueued now that the project can correlate —
+ * otherwise it would silently stop being backed up until the next `lore sync enable`.
+ * The sync layer registers a handler (avoids a db.ts↔sync-data.ts circular import).
+ */
+let onProjectRemoteBackfilledCb: ((projectId: string) => void) | null = null;
+
+/** Register a handler for git_remote NULL→set backfill. Only one is supported. */
+export function onProjectRemoteBackfilled(
+  cb: ((projectId: string) => void) | null,
+): void {
+  onProjectRemoteBackfilledCb = cb;
+}
+
+function fireProjectRemoteBackfilled(projectId: string): void {
+  onProjectRemoteBackfilledCb?.(projectId);
+}
+
+/**
  * Extract the repository name from a normalized git remote URL.
  *
  * Examples:
@@ -2300,6 +2320,18 @@ function installSyncCapture(database: Database) {
     "entity_aliases",
     "entity_relations",
   ]) {
+    // P2a (#1246): only sync PROJECT-SCOPED content of a REMOTE-BACKED project — a
+    // remote-less project's random id can't correlate cross-device, so its private data
+    // must not upload. GLOBAL / cross-project entries (cross_project=1 or a NULL
+    // project_id) are NOT project-scoped and ALWAYS sync (they retain an origin
+    // project_id but aren't tied to its remote). Applies to the direct-project_id tables
+    // (knowledge, entities); the children (entity_aliases/entity_relations) gate through
+    // their parent entity in a follow-up (P2b), so they stay ungated here.
+    const projectGate =
+      t === "knowledge" || t === "entities"
+        ? " AND (%R.cross_project = 1 OR %R.project_id IS NULL OR " +
+          "EXISTS (SELECT 1 FROM projects p WHERE p.id = %R.project_id AND p.git_remote IS NOT NULL))"
+        : "";
     for (const [evt, suffix, ref, op] of ops) {
       // Knowledge is remote-keyed by logical_id (A2, #823), so capture the
       // logical_id for ALL ops (not the per-version row id). This makes the outbox
@@ -2313,7 +2345,7 @@ function installSyncCapture(database: Database) {
           : `${ref}.id`;
       sql += `
         CREATE TEMP TRIGGER IF NOT EXISTS ${t}_outbox_${suffix}
-        AFTER ${evt} ON ${t} WHEN (${gate})
+        AFTER ${evt} ON ${t} WHEN (${gate}${projectGate.replaceAll("%R", ref)})
         BEGIN
           INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
           VALUES ('${t}', ${rowExpr}, '${op}', ${ts});
@@ -3561,6 +3593,9 @@ export function ensureProject(
         db()
           .query("UPDATE projects SET git_remote = ? WHERE id = ?")
           .run(resolvedRemote, existing.id);
+        // #1246 (P2): the project just became remote-backed — re-seed the content that
+        // was gated out while it was remote-less (else it never gets backed up).
+        fireProjectRemoteBackfilled(existing.id);
       }
     }
     return existing.id;
