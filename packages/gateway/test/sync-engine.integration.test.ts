@@ -19,6 +19,7 @@ import {
   ensureProject,
   keystore,
   ltm,
+  resolveProjectByRemoteOrPath,
   setKV,
   syncData,
 } from "@loreai/core";
@@ -445,8 +446,12 @@ describe.skipIf(SKIP)(
       db().exec(
         "DELETE FROM account_identity; DELETE FROM account_escrow; DELETE FROM scope_keys",
       );
+      // #1246: the synced test projects (remote-backed /dev1/* + pulled lore:project/*).
+      db().exec(
+        "DELETE FROM projects WHERE path LIKE '/dev1/%' OR path LIKE 'lore:project/%'",
+      );
       keystore.lock();
-      for (const t of ["account_escrow", "scope_keys"]) {
+      for (const t of ["account_escrow", "scope_keys", "projects"]) {
         await h.client.query(`DELETE FROM public.${t}`);
       }
     });
@@ -552,6 +557,96 @@ describe.skipIf(SKIP)(
       expect(keystore.encryptionState()).toBe("locked"); // still locked
       await pullOnce(client);
       expect(syncData.getRowById("knowledge", "kw")).toBeNull(); // never decrypted
+    });
+
+    it("device-1 pushes a project + its content → device-2 restores under the seeded FK parent (P1, #1246)", async () => {
+      const REMOTE_URL = "github.com/acme/secret-repo";
+      const client = clientFor(uid);
+
+      // --- Device 1: arm encryption, create a remote-backed project + knowledge under it. ---
+      keystore.setPassphrase("correct horse battery", { params: FAST });
+      syncData.enableSync("basic");
+      db()
+        .query(
+          "INSERT INTO projects (id, path, name, git_remote, created_at) VALUES ('proj-A','/dev1/repo','secret-repo',?,?)",
+        )
+        .run(REMOTE_URL, Date.now());
+      db()
+        .query(
+          `INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at)
+           VALUES ('kp','proj-A','pattern','T','secret body',?,?)`,
+        )
+        .run(Date.now(), Date.now());
+      await pushOnce(client);
+      await pushOnce(client); // flush the lazily-minted DEK (scope_keys), like the knowledge test
+
+      // The remote projects row must hold CIPHERTEXT for git_remote — a repo URL is
+      // identifying metadata and must never reach the server in the clear.
+      const remoteProj = await h.asUser(uid, (c) =>
+        c
+          .query("select git_remote from public.projects where id='proj-A'")
+          .then((x) => x.rows),
+      );
+      expect(remoteProj).toHaveLength(1);
+      expect(remoteProj[0].git_remote).not.toBe(REMOTE_URL);
+      expect(
+        crypto.isEnvelope(
+          Buffer.from(remoteProj[0].git_remote as string, "base64"),
+        ),
+      ).toBe(true);
+      // scope_keys must have landed (flushed by the 2nd push) so device-2 can unlock.
+      const rk = await h.asUser(uid, (c) =>
+        c.query("select 1 from public.scope_keys").then((x) => x.rows),
+      );
+      expect(rk).toHaveLength(1);
+
+      // --- Device 2: a fresh device on the SAME account. Wipe ALL local state incl. projects. ---
+      db().exec(
+        "DELETE FROM account_identity; DELETE FROM account_escrow; DELETE FROM scope_keys; DELETE FROM knowledge; DELETE FROM knowledge_meta; DELETE FROM knowledge_meta_crdt; DELETE FROM projects; DELETE FROM sync_state; DELETE FROM sync_outbox",
+      );
+      keystore.lock();
+      for (const m of syncData.syncedTables("basic")) {
+        setKV(
+          `sync.pull.${m.table}`,
+          m.pullOnly ? `${Date.now() + 31_536_000_000}|` : "0|",
+        );
+        setKV(`sync.push.${m.table}`, "0");
+      }
+      expect(keystore.encryptionState()).toBe("off"); // nothing local yet
+
+      // Pull #1: escrow + scope_keys arrive first → locked; the encrypted projects +
+      // knowledge tables are deferred (cursor frozen), never stored as ciphertext.
+      await pullOnce(client);
+      expect(keystore.encryptionState()).toBe("locked");
+      expect(
+        db().query("SELECT id FROM projects WHERE id='proj-A'").get(),
+      ).toBeNull();
+
+      // Unlock → recovers device-1's identity → "on".
+      expect(keystore.unlockWithPassphrase("correct horse battery")).toBe(true);
+
+      // Pull #2: projects decrypts + seeds the FK parent (it is registered BEFORE knowledge
+      // in the pull order), then the content applies under it.
+      await pullOnce(client);
+
+      // The FK parent exists with a synthetic (non-fs) path + the DECRYPTED git_remote.
+      const localProj = db()
+        .query("SELECT path, git_remote FROM projects WHERE id='proj-A'")
+        .get() as { path: string; git_remote: string } | null;
+      expect(localProj?.path).toBe("lore:project/proj-A"); // synthetic placeholder
+      expect(localProj?.git_remote).toBe(REMOTE_URL); // decrypted on the wire
+
+      // The content is restored under the seeded parent — WITHOUT P1's projects sync this
+      // knowledge would reference a nonexistent local project and poison-skip on pull.
+      expect(syncData.getRowById("knowledge", "kp")?.content).toBe(
+        "secret body",
+      );
+
+      // A later local checkout of the SAME repo would ADOPT proj-A via the git-remote match.
+      expect(resolveProjectByRemoteOrPath(REMOTE_URL)).toBe("proj-A");
+
+      // No ping-pong: pulled rows applied under capture-suppression → nothing to push back.
+      expect((await pushOnce(client)).pushed).toBe(0);
     });
   },
 );
