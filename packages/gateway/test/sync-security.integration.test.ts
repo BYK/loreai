@@ -1944,5 +1944,81 @@ describe.skipIf(gate())(
       );
       expect(err.code).toBe("23514");
     });
+
+    it("temporal_messages is append-only: UPDATE is denied (42501); INSERT/SELECT/DELETE allowed (0021)", async () => {
+      const a = await h.createUser();
+      await makePro(a);
+      await h.asUser(a, (c) =>
+        c.query(
+          "insert into public.temporal_messages (id, scope_id, content) values ('t1',$1,'orig')",
+          [a],
+        ),
+      );
+      // UPDATE is revoked at the privilege level → hard 42501, not a silent no-op.
+      const err = await expectError(() =>
+        h.asUser(a, (c) =>
+          c.query(
+            "update public.temporal_messages set content='rewritten' where id='t1' and scope_id=$1",
+            [a],
+          ),
+        ),
+      );
+      expect(err.code).toBe("42501");
+      // Content is unchanged.
+      const row = await h.asUser(a, (c) =>
+        c.query("select content from public.temporal_messages where id='t1'"),
+      );
+      expect(row.rows[0].content).toBe("orig");
+      // Self-purge (DELETE) is still allowed.
+      await h.asUser(a, (c) =>
+        c.query(
+          "delete from public.temporal_messages where id='t1' and scope_id=$1",
+          [a],
+        ),
+      );
+      const after = await h.asUser(a, (c) =>
+        c.query(
+          "select count(*)::int as n from public.temporal_messages where scope_id=$1",
+          [a],
+        ),
+      );
+      expect(after.rows[0].n).toBe(0);
+    });
+
+    it("distillations still allows UPDATE (the archived flip re-pushes) (0021)", async () => {
+      const a = await h.createUser();
+      await makePro(a);
+      await h.asUser(a, (c) =>
+        c.query(
+          "insert into public.distillations (id, scope_id) values ('d1',$1)",
+          [a],
+        ),
+      );
+      await h.asUser(a, (c) =>
+        c.query(
+          "update public.distillations set archived=true where id='d1' and scope_id=$1",
+          [a],
+        ),
+      );
+      const row = await h.asUser(a, (c) =>
+        c.query("select archived from public.distillations where id='d1'"),
+      );
+      expect(row.rows[0].archived).toBe(true);
+    });
+
+    it("authenticated holds NO UPDATE grant on temporal_messages — guards against a future re-grant (0021)", async () => {
+      // The hard-error (42501) enforcement depends solely on the REVOKE; a careless
+      // future `grant update` would silently downgrade append-only to a 0-row no-op.
+      const grants = await h.client.query(
+        `select privilege_type from information_schema.role_table_grants
+          where grantee='authenticated' and table_schema='public'
+            and table_name='temporal_messages' order by privilege_type`,
+      );
+      expect(grants.rows.map((r) => r.privilege_type)).toEqual([
+        "DELETE",
+        "INSERT",
+        "SELECT",
+      ]); // no UPDATE
+    });
   },
 );
