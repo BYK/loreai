@@ -67,6 +67,42 @@ function insertEntity(id: string, projectId: string | null, crossProject = 0) {
     )
     .run(id, projectId, crossProject, now(), now());
 }
+function insertMeta(logicalId: string) {
+  db()
+    .query(
+      "INSERT INTO knowledge_meta (logical_id, confidence, base_confidence, updated_at) VALUES (?, 1.0, 1.0, ?)",
+    )
+    .run(logicalId, now());
+}
+function insertMetaCrdt(logicalId: string, replica = "rA") {
+  db()
+    .query(
+      "INSERT INTO knowledge_meta_crdt (logical_id, replica_id, pos, neg, updated_at) VALUES (?, ?, 0.1, 0, ?)",
+    )
+    .run(logicalId, replica, now());
+}
+function insertAlias(id: string, entityId: string) {
+  db()
+    .query(
+      "INSERT INTO entity_aliases (id, entity_id, alias_type, alias_value, created_at) VALUES (?, ?, 'name', ?, ?)",
+    )
+    .run(id, entityId, id, now());
+}
+function insertRelation(id: string, a: string, b: string) {
+  db()
+    .query(
+      "INSERT INTO entity_relations (id, entity_a, entity_b, relation, created_at, updated_at) VALUES (?, ?, ?, 'rel', ?, ?)",
+    )
+    .run(id, a, b, now(), now());
+}
+function insertRef(knowledgeId: string, entityId: string) {
+  db()
+    .query(
+      "INSERT INTO knowledge_entity_refs (knowledge_id, entity_id) VALUES (?, ?)",
+    )
+    .run(knowledgeId, entityId);
+}
+const US = String.fromCharCode(31); // composite row_id separator (char(31))
 const outboxRowIds = (table: string) =>
   readOutbox(0, 1000)
     .filter((e) => e.table_name === table)
@@ -278,5 +314,113 @@ describe("content git_remote gate — P2a (#1246)", () => {
     insertKnowledge("k1", "p");
     reseedProjectContent("p"); // sync OFF → must not enqueue
     expect(outboxRowIds("knowledge")).toEqual([]);
+  });
+});
+
+describe("child content git_remote gate — P2b (#1246)", () => {
+  test("capture: children of a remote-backed parent enqueue; of a remote-less parent do NOT", () => {
+    insertProject("p-remote", "R");
+    insertProject("p-local", null);
+    enableSync("basic");
+    insertKnowledge("k-remote", "p-remote");
+    insertKnowledge("k-local", "p-local");
+    insertEntity("e-remote", "p-remote");
+    insertEntity("e-local", "p-local");
+    db().exec("DELETE FROM sync_outbox"); // isolate the children from the parent captures
+    insertMeta("k-remote");
+    insertMeta("k-local");
+    insertMetaCrdt("k-remote");
+    insertMetaCrdt("k-local");
+    insertAlias("a-remote", "e-remote");
+    insertAlias("a-local", "e-local");
+    insertRef("k-remote", "e-remote");
+    insertRef("k-local", "e-local");
+    expect(outboxRowIds("knowledge_meta")).toEqual(["k-remote"]);
+    expect(outboxRowIds("knowledge_meta_crdt")).toEqual([`k-remote${US}rA`]);
+    expect(outboxRowIds("entity_aliases")).toEqual(["a-remote"]);
+    expect(outboxRowIds("knowledge_entity_refs")).toEqual([
+      `k-remote${US}e-remote`,
+    ]);
+  });
+
+  test("capture: a relation syncs only when BOTH endpoints are syncable", () => {
+    insertProject("p-remote", "R");
+    insertProject("p-local", null);
+    enableSync("basic");
+    insertEntity("e1", "p-remote");
+    insertEntity("e2", "p-remote");
+    insertEntity("e3", "p-local"); // remote-less endpoint
+    insertEntity("e-global", "p-local", 1); // cross_project=1 → always syncable
+    db().exec("DELETE FROM sync_outbox");
+    insertRelation("r-both", "e1", "e2"); // both remote-backed → syncs
+    insertRelation("r-global", "e1", "e-global"); // remote-backed + global → syncs
+    insertRelation("r-mixed", "e1", "e3"); // one remote-less → does NOT sync
+    expect(outboxRowIds("entity_relations").sort()).toEqual([
+      "r-both",
+      "r-global",
+    ]);
+  });
+
+  test("capture: children of a GLOBAL parent always sync (even under a remote-less project)", () => {
+    insertProject("p-local", null);
+    enableSync("basic");
+    insertKnowledge("k-cross", "p-local", 1); // cross_project=1
+    insertEntity("e-cross", "p-local", 1);
+    db().exec("DELETE FROM sync_outbox");
+    insertMeta("k-cross");
+    insertAlias("a-cross", "e-cross");
+    expect(outboxRowIds("knowledge_meta")).toEqual(["k-cross"]);
+    expect(outboxRowIds("entity_aliases")).toEqual(["a-cross"]);
+  });
+
+  test("seed: children are gated by parent syncability on enable", () => {
+    insertProject("p-remote", "R");
+    insertProject("p-local", null);
+    insertKnowledge("k-remote", "p-remote");
+    insertKnowledge("k-local", "p-local");
+    insertEntity("e-remote", "p-remote");
+    insertEntity("e-local", "p-local");
+    insertMeta("k-remote");
+    insertMeta("k-local"); // gated out (parent remote-less)
+    insertAlias("a-remote", "e-remote");
+    insertAlias("a-local", "e-local"); // gated out
+    insertRef("k-remote", "e-remote");
+    insertRef("k-local", "e-local"); // gated out
+    enableSync("basic"); // reconcile → seedOutbox
+    expect(outboxRowIds("knowledge_meta")).toEqual(["k-remote"]);
+    expect(outboxRowIds("entity_aliases")).toEqual(["a-remote"]);
+    expect(outboxRowIds("knowledge_entity_refs")).toEqual([
+      `k-remote${US}e-remote`,
+    ]);
+  });
+
+  test("reseedProjectContent: re-enqueues the children after the project gains a remote", () => {
+    insertProject("p", null);
+    enableSync("basic");
+    insertKnowledge("k1", "p");
+    insertEntity("e1", "p");
+    insertEntity("e2", "p");
+    insertMeta("k1");
+    insertMetaCrdt("k1");
+    insertAlias("a1", "e1");
+    insertRelation("r1", "e1", "e2");
+    insertRef("k1", "e1");
+    // All gated out while remote-less.
+    for (const t of [
+      "knowledge_meta",
+      "knowledge_meta_crdt",
+      "entity_aliases",
+      "entity_relations",
+      "knowledge_entity_refs",
+    ])
+      expect(outboxRowIds(t)).toEqual([]);
+    // The project gains a remote → the children are re-enqueued.
+    db().query("UPDATE projects SET git_remote='R' WHERE id='p'").run();
+    reseedProjectContent("p");
+    expect(outboxRowIds("knowledge_meta")).toEqual(["k1"]);
+    expect(outboxRowIds("knowledge_meta_crdt")).toEqual([`k1${US}rA`]);
+    expect(outboxRowIds("entity_aliases")).toEqual(["a1"]);
+    expect(outboxRowIds("entity_relations")).toEqual(["r1"]);
+    expect(outboxRowIds("knowledge_entity_refs")).toEqual([`k1${US}e1`]);
   });
 });

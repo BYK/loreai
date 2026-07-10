@@ -212,7 +212,7 @@ describe.skipIf(SKIP)("sync engine ↔ real Postgres/PostgREST", () => {
     insertKnowledge("k1", "x");
     db()
       .query(
-        "INSERT INTO entities (id, project_id, entity_type, canonical_name, created_at, updated_at) VALUES ('e1','p','tool','X',?,?)",
+        "INSERT INTO entities (id, project_id, entity_type, canonical_name, cross_project, created_at, updated_at) VALUES ('e1',NULL,'tool','X',1,?,?)",
       )
       .run(Date.now(), Date.now());
     syncData.enableSync("basic");
@@ -237,7 +237,7 @@ describe.skipIf(SKIP)("sync engine ↔ real Postgres/PostgREST", () => {
     insertKnowledge("k1", "x");
     db()
       .query(
-        "INSERT INTO entities (id, project_id, entity_type, canonical_name, created_at, updated_at) VALUES ('e1','p','tool','X',?,?)",
+        "INSERT INTO entities (id, project_id, entity_type, canonical_name, cross_project, created_at, updated_at) VALUES ('e1',NULL,'tool','X',1,?,?)",
       )
       .run(Date.now(), Date.now());
     syncData.enableSync("basic");
@@ -288,6 +288,7 @@ describe.skipIf(SKIP)("sync engine ↔ real Postgres/PostgREST", () => {
     // reinforce() records a PN-counter delta. Both must push cleanly through
     // supabase-js → PostgREST → Postgres (no 22008 timestamp / PGRST204 phantom-
     // column errors the docstring warns about), landing with the right values.
+    ensureProject("/tmp/lore-engine-it"); // remote-backed → content passes the P2 gate
     syncData.enableSync("basic");
     const id = ltm.create({
       projectPath: "/tmp/lore-engine-it",

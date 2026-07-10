@@ -430,6 +430,7 @@ describe("knowledgePushPlan — append-only remote mapping keyed by logical_id (
   });
 
   test("seedOutbox seeds knowledge_meta in the same value order as knowledge (confidence, recency)", () => {
+    ensureProject("/tmp/lore-meta-seed"); // remote-backed → meta passes the P2b parent gate
     setTeamConfig("sync.enabled", "1");
     const mk = (title: string) =>
       ltm.create({
@@ -462,6 +463,7 @@ describe("knowledgePushPlan — append-only remote mapping keyed by logical_id (
   });
 
   test("seedOutbox does NOT seed knowledge_meta for a DELETED entry (live-only JOIN)", () => {
+    ensureProject("/tmp/lore-meta-live"); // remote-backed → meta passes the P2b parent gate
     setTeamConfig("sync.enabled", "1");
     const mk = (title: string) =>
       ltm.create({

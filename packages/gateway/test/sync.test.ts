@@ -1754,6 +1754,7 @@ describe("syncOnce", () => {
 describe("knowledge_meta register sync (A2 3b-2)", () => {
   test("pushOnce uploads the base register row AND the CRDT counters", async () => {
     syncData.enableSync("basic");
+    insertKnowledge("k1", "body"); // parent knowledge (remote-backed) → meta passes the P2b gate
     // Capture triggers fire on these local writes (sync enabled) → outbox.
     db()
       .query(

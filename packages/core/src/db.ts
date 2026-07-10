@@ -2308,6 +2308,19 @@ function installSyncCapture(database: Database) {
     "(SELECT value FROM team_config WHERE key='sync.enabled')='1' " +
     "AND NOT EXISTS (SELECT 1 FROM temp._sync_applying)";
   const ts = "CAST(strftime('%s','now') AS INTEGER)*1000";
+  // P2 (#1246) content git_remote gates. A row syncs only if it is REMOTE-BACKED or
+  // GLOBAL — a remote-less project's random id can't correlate cross-device, so its
+  // private data must not upload. `directGate(c)` for a table WITH project_id/cross_project
+  // (knowledge, entities): cross_project=1 (promoted/global) OR NULL project_id OR the
+  // project has a git_remote. `knowledgeParentGate`/`entityParentGate` gate a CHILD (no
+  // project_id of its own) on whether its parent knowledge/entity is itself syncable.
+  const directGate = (c: string) =>
+    `(${c}.cross_project = 1 OR ${c}.project_id IS NULL OR ` +
+    `EXISTS (SELECT 1 FROM projects p WHERE p.id = ${c}.project_id AND p.git_remote IS NOT NULL))`;
+  const knowledgeParentGate = (idExpr: string) =>
+    `EXISTS (SELECT 1 FROM knowledge k WHERE COALESCE(k.logical_id, k.id) = ${idExpr} AND ${directGate("k")})`;
+  const entityParentGate = (idExpr: string) =>
+    `EXISTS (SELECT 1 FROM entities e WHERE e.id = ${idExpr} AND ${directGate("e")})`;
   const ops = [
     ["INSERT", "ins", "new", "upsert"],
     ["UPDATE", "upd", "new", "upsert"],
@@ -2320,19 +2333,21 @@ function installSyncCapture(database: Database) {
     "entity_aliases",
     "entity_relations",
   ]) {
-    // P2a (#1246): only sync PROJECT-SCOPED content of a REMOTE-BACKED project — a
-    // remote-less project's random id can't correlate cross-device, so its private data
-    // must not upload. GLOBAL / cross-project entries (cross_project=1 or a NULL
-    // project_id) are NOT project-scoped and ALWAYS sync (they retain an origin
-    // project_id but aren't tied to its remote). Applies to the direct-project_id tables
-    // (knowledge, entities); the children (entity_aliases/entity_relations) gate through
-    // their parent entity in a follow-up (P2b), so they stay ungated here.
-    const projectGate =
-      t === "knowledge" || t === "entities"
-        ? " AND (%R.cross_project = 1 OR %R.project_id IS NULL OR " +
-          "EXISTS (SELECT 1 FROM projects p WHERE p.id = %R.project_id AND p.git_remote IS NOT NULL))"
-        : "";
     for (const [evt, suffix, ref, op] of ops) {
+      // Direct-project_id tables (P2a): gate every op on the row's own project.
+      // Child tables (P2b): gate INSERT/UPDATE on the PARENT entity's syncability; a
+      // DELETE stays UNGATED — a delete of a never-synced child pushes as a harmless
+      // idempotent no-op, and gating it would depend on the parent still existing, but
+      // the parent (entity) is cascade-deleted FIRST (ON DELETE CASCADE), so an EXISTS
+      // check would spuriously drop a legitimate delete of a previously-synced child.
+      let contentGate = "";
+      if (t === "knowledge" || t === "entities")
+        contentGate = ` AND ${directGate(ref)}`;
+      else if (op !== "delete")
+        contentGate =
+          t === "entity_aliases"
+            ? ` AND ${entityParentGate(`${ref}.entity_id`)}`
+            : ` AND ${entityParentGate(`${ref}.entity_a`)} AND ${entityParentGate(`${ref}.entity_b`)}`;
       // Knowledge is remote-keyed by logical_id (A2, #823), so capture the
       // logical_id for ALL ops (not the per-version row id). This makes the outbox
       // uniformly logical_id-keyed: the push plan + pending checks read the row_id
@@ -2345,18 +2360,21 @@ function installSyncCapture(database: Database) {
           : `${ref}.id`;
       sql += `
         CREATE TEMP TRIGGER IF NOT EXISTS ${t}_outbox_${suffix}
-        AFTER ${evt} ON ${t} WHEN (${gate}${projectGate.replaceAll("%R", ref)})
+        AFTER ${evt} ON ${t} WHEN (${gate}${contentGate})
         BEGIN
           INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
           VALUES ('${t}', ${rowExpr}, '${op}', ${ts});
         END;`;
     }
   }
-  // Join table: composite row_id (knowledge_id || char(31) || entity_id),
-  // insert/delete only (no updatable columns).
+  // Join table: composite row_id (knowledge_id || char(31) || entity_id), insert/delete
+  // only (no updatable columns). P2b: gate INSERT on BOTH parents (the ref links a
+  // knowledge to an entity — both must be syncable); DELETE stays ungated (no-op if never
+  // synced; the parents may be gone by delete time).
   sql += `
     CREATE TEMP TRIGGER IF NOT EXISTS knowledge_entity_refs_outbox_ins
-    AFTER INSERT ON knowledge_entity_refs WHEN (${gate})
+    AFTER INSERT ON knowledge_entity_refs
+    WHEN (${gate} AND ${knowledgeParentGate("new.knowledge_id")} AND ${entityParentGate("new.entity_id")})
     BEGIN
       INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
       VALUES ('knowledge_entity_refs', new.knowledge_id || char(31) || new.entity_id, 'upsert', ${ts});
@@ -2372,16 +2390,17 @@ function installSyncCapture(database: Database) {
   // actually changes — the frequent per-op confidence re-materialization (which
   // only writes the local-derived confidence/updated_at) must NOT churn the outbox.
   // No DELETE (a register row outlives the knowledge entry's death-cert).
+  // P2b (#1246): gate on the parent knowledge's syncability.
   sql += `
     CREATE TEMP TRIGGER IF NOT EXISTS knowledge_meta_outbox_ins
-    AFTER INSERT ON knowledge_meta WHEN (${gate})
+    AFTER INSERT ON knowledge_meta WHEN (${gate} AND ${knowledgeParentGate("new.logical_id")})
     BEGIN
       INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
       VALUES ('knowledge_meta', new.logical_id, 'upsert', ${ts});
     END;
     CREATE TEMP TRIGGER IF NOT EXISTS knowledge_meta_outbox_upd
     AFTER UPDATE ON knowledge_meta
-    WHEN ((${gate}) AND new.base_confidence IS NOT old.base_confidence)
+    WHEN ((${gate}) AND new.base_confidence IS NOT old.base_confidence AND ${knowledgeParentGate("new.logical_id")})
     BEGIN
       INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
       VALUES ('knowledge_meta', new.logical_id, 'upsert', ${ts});
@@ -2391,16 +2410,17 @@ function installSyncCapture(database: Database) {
   // local applyConfidenceDelta only ever writes THIS device's replica row, and
   // pulled peer rows arrive under apply-suppression — so the outbox only carries
   // this device's counters. INSERT + UPDATE (pos/neg grow); no DELETE.
+  // P2b (#1246): gate on the parent knowledge's syncability.
   sql += `
     CREATE TEMP TRIGGER IF NOT EXISTS knowledge_meta_crdt_outbox_ins
-    AFTER INSERT ON knowledge_meta_crdt WHEN (${gate})
+    AFTER INSERT ON knowledge_meta_crdt WHEN (${gate} AND ${knowledgeParentGate("new.logical_id")})
     BEGIN
       INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
       VALUES ('knowledge_meta_crdt', new.logical_id || char(31) || new.replica_id, 'upsert', ${ts});
     END;
     CREATE TEMP TRIGGER IF NOT EXISTS knowledge_meta_crdt_outbox_upd
     AFTER UPDATE ON knowledge_meta_crdt
-    WHEN (${gate} AND (new.pos > old.pos OR new.neg > old.neg))
+    WHEN (${gate} AND (new.pos > old.pos OR new.neg > old.neg) AND ${knowledgeParentGate("new.logical_id")})
     BEGIN
       INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
       VALUES ('knowledge_meta_crdt', new.logical_id || char(31) || new.replica_id, 'upsert', ${ts});

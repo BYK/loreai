@@ -806,6 +806,16 @@ function remoteBackedGate(prefix = ""): string {
   );
 }
 
+// P2b (#1246): a CHILD row (no project_id of its own) syncs iff its PARENT knowledge/entity
+// is itself syncable. Mirrors the capture-trigger parent gates in db.ts installSyncCapture —
+// the two MUST stay in lockstep. `idExpr` is the child's FK column (e.g. "m.logical_id").
+function knowledgeParentGate(idExpr: string): string {
+  return `EXISTS (SELECT 1 FROM knowledge k WHERE COALESCE(k.logical_id, k.id) = ${idExpr} AND ${remoteBackedGate("k.")})`;
+}
+function entityParentGate(idExpr: string): string {
+  return `EXISTS (SELECT 1 FROM entities e WHERE e.id = ${idExpr} AND ${remoteBackedGate("e.")})`;
+}
+
 function seedSelect(table: string): string {
   switch (table) {
     // The trailing id is a stable tiebreak so re-seeds are fully deterministic when
@@ -818,10 +828,25 @@ function seedSelect(table: string): string {
                 ) r ON r.entity_id = e.id
                WHERE ${remoteBackedGate("e.")}
                ORDER BY COALESCE(r.refs, 0) DESC, e.updated_at DESC, e.created_at DESC, e.id`;
+    // P2b (#1246): a relation syncs only if BOTH endpoint entities are syncable (the
+    // relation FKs both; a peer would poison-skip it otherwise). Global/cross-project
+    // entities always qualify.
     case "entity_relations":
-      return "SELECT * FROM entity_relations ORDER BY updated_at DESC, created_at DESC, id";
+      return `SELECT * FROM entity_relations
+               WHERE ${entityParentGate("entity_a")} AND ${entityParentGate("entity_b")}
+               ORDER BY updated_at DESC, created_at DESC, id`;
+    // P2b (#1246): an alias syncs only if its parent entity is syncable.
     case "entity_aliases":
-      return "SELECT * FROM entity_aliases ORDER BY created_at DESC, id";
+      return `SELECT * FROM entity_aliases
+               WHERE ${entityParentGate("entity_id")}
+               ORDER BY created_at DESC, id`;
+    // P2b (#1246): a ref syncs only if BOTH its parents (knowledge + entity) are syncable.
+    case "knowledge_entity_refs":
+      return `SELECT * FROM knowledge_entity_refs
+               WHERE ${knowledgeParentGate("knowledge_id")} AND ${entityParentGate("entity_id")}`;
+    // P2b (#1246): a CRDT counter syncs only if its parent knowledge is syncable.
+    case "knowledge_meta_crdt":
+      return `SELECT c.* FROM knowledge_meta_crdt c WHERE ${knowledgeParentGate("c.logical_id")}`;
     // knowledge_meta shares knowledge's 500-row cap, so seed it in the SAME value order
     // (confidence, then recency) as the knowledge seed — otherwise the surviving meta set
     // wouldn't match the surviving knowledge set and synced entries would read as the
@@ -839,6 +864,7 @@ function seedSelect(table: string): string {
                   ON k.logical_id = m.logical_id
                  AND k.is_current = 1
                  AND k.is_deleted = 0
+               WHERE ${remoteBackedGate("k.")}
                ORDER BY m.confidence DESC,
                         COALESCE(m.last_reinforced_at, m.updated_at) DESC,
                         m.logical_id`;
@@ -1036,20 +1062,70 @@ export function reconcile(tier: SyncTier = currentSyncTier()): void {
 export function reseedProjectContent(projectId: string): void {
   if (getTeamConfig(ENABLED_KEY) !== "1") return;
   const now = Date.now();
-  db()
-    .query(
-      `INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
-         SELECT 'knowledge', COALESCE(logical_id, id), 'upsert', ? FROM knowledge_current
-          WHERE project_id = ? AND cross_project = 0`,
-    )
-    .run(now, projectId);
-  db()
-    .query(
-      `INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
-         SELECT 'entities', id, 'upsert', ? FROM entities
-          WHERE project_id = ? AND cross_project = 0`,
-    )
-    .run(now, projectId);
+  const enqueue = (sql: string, ...params: unknown[]) =>
+    db()
+      .query(
+        `INSERT INTO sync_outbox (table_name, row_id, op, changed_at) ${sql}`,
+      )
+      .run(...params);
+  // The project's own project-scoped rows (this project's cross_project=0 knowledge in
+  // one sub-select, reused for the children so they align 1:1 with the seeded knowledge).
+  // knowledge_current (live-only) so a deleted entry's lingering meta/refs aren't
+  // re-enqueued — matches seedSelect's live-only JOIN, not the any-version capture gate.
+  const projKnowledge =
+    "SELECT COALESCE(logical_id, id) FROM knowledge_current WHERE project_id = ? AND cross_project = 0";
+  const projEntities =
+    "SELECT id FROM entities WHERE project_id = ? AND cross_project = 0";
+  // P2a: the direct-project_id content.
+  enqueue(
+    `SELECT 'knowledge', COALESCE(logical_id, id), 'upsert', ? FROM knowledge_current
+      WHERE project_id = ? AND cross_project = 0`,
+    now,
+    projectId,
+  );
+  enqueue(
+    `SELECT 'entities', id, 'upsert', ? FROM (${projEntities})`,
+    now,
+    projectId,
+  );
+  // P2b: the children, now that their parents are syncable. Single-parent children key
+  // off this project's knowledge/entities; the two-parent children (relations, refs) also
+  // require the OTHER endpoint to be syncable (entity/knowledgeParentGate).
+  enqueue(
+    `SELECT 'knowledge_meta', logical_id, 'upsert', ? FROM knowledge_meta
+      WHERE logical_id IN (${projKnowledge})`,
+    now,
+    projectId,
+  );
+  enqueue(
+    `SELECT 'knowledge_meta_crdt', logical_id || char(31) || replica_id, 'upsert', ?
+       FROM knowledge_meta_crdt WHERE logical_id IN (${projKnowledge})`,
+    now,
+    projectId,
+  );
+  enqueue(
+    `SELECT 'entity_aliases', id, 'upsert', ? FROM entity_aliases
+      WHERE entity_id IN (${projEntities})`,
+    now,
+    projectId,
+  );
+  enqueue(
+    `SELECT 'entity_relations', id, 'upsert', ? FROM entity_relations r
+      WHERE (r.entity_a IN (${projEntities}) OR r.entity_b IN (${projEntities}))
+        AND ${entityParentGate("r.entity_a")} AND ${entityParentGate("r.entity_b")}`,
+    now,
+    projectId,
+    projectId,
+  );
+  enqueue(
+    `SELECT 'knowledge_entity_refs', knowledge_id || char(31) || entity_id, 'upsert', ?
+       FROM knowledge_entity_refs ref
+      WHERE (ref.knowledge_id IN (${projKnowledge}) OR ref.entity_id IN (${projEntities}))
+        AND ${knowledgeParentGate("ref.knowledge_id")} AND ${entityParentGate("ref.entity_id")}`,
+    now,
+    projectId,
+    projectId,
+  );
 }
 onProjectRemoteBackfilled(reseedProjectContent);
 
