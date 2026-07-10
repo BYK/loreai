@@ -16,6 +16,8 @@ import {
   assertSyncInvariants,
   enableSync,
   readOutbox,
+  reconcile,
+  setSyncState,
 } from "../src/sync-data";
 
 const now = () => Date.now();
@@ -136,6 +138,31 @@ describe("convergeProjectsByRemote (deterministic merge)", () => {
       .query("SELECT project_id FROM knowledge WHERE id = 'k-b'")
       .get() as { project_id: string };
     expect(k.project_id).toBe("aaa"); // content re-keyed to the winner
+  });
+
+  test("a merge-loser is NEVER tombstoned by reconcile (projects is delete-invisible)", () => {
+    insertProject("bbb", "R");
+    insertProject("aaa", "R");
+    // Both look previously-pushed (a sync_state row is the trigger for reconcile's
+    // delete-tombstone pass on a now-missing local row).
+    setSyncState("projects", "aaa", {
+      content_hash: "h",
+      revision: 0,
+      remote_updated_at: null,
+    });
+    setSyncState("projects", "bbb", {
+      content_hash: "h",
+      revision: 0,
+      remote_updated_at: null,
+    });
+    enableSync("basic");
+    convergeProjectsByRemote(); // merges bbb → aaa, deletes bbb locally
+    db().exec("DELETE FROM sync_outbox"); // ignore seed / re-key upserts
+    reconcile("basic"); // delete-tombstone pass — must SKIP projects (deleteInvisible)
+    const del = readOutbox(0, 1000).filter(
+      (e) => e.table_name === "projects" && e.op === "delete",
+    );
+    expect(del.map((e) => e.row_id)).not.toContain("bbb"); // loser NOT tombstoned
   });
 
   test("is a no-op when projects have distinct remotes", () => {

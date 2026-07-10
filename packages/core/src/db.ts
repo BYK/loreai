@@ -2404,11 +2404,12 @@ function installSyncCapture(database: Database) {
   // #1246: projects identity mapping (id→git_remote). Gated on git_remote IS NOT NULL —
   // only remote-backed projects sync (a remote-less project's random id can't correlate
   // cross-device; its content would FK-poison on a peer). The UPDATE trigger fires the
-  // git_remote backfill (null→remote) into the outbox. NO DELETE: a merge
-  // (convergeProjectsByRemote) deletes the loser locally, but the remote loser row is left
-  // as benign orphaned data (never tombstoned — is_deleted stays false, so the reaper does
-  // NOT collect it; it is one row/merge, within quota). A DELETE tombstone would instead
-  // race the loser's still-orphaned remote content. path is DEVICE-LOCAL, never synced.
+  // git_remote backfill (null→remote) into the outbox. NO DELETE trigger AND projects is
+  // deleteInvisible (reconcile skips its delete-tombstone pass), so a local deletion — a
+  // convergence merge loser OR a genuine project delete — is fully DELETE-INVISIBLE and
+  // never tombstones the shared remote mapping (a merge loser's content is
+  // re-keyed to the winner, not deleted; a genuine delete must not nuke another device's
+  // still-active project). Bounded by quota, not deletes. path is DEVICE-LOCAL, not synced.
   sql += `
     CREATE TEMP TRIGGER IF NOT EXISTS projects_outbox_ins
     AFTER INSERT ON projects WHEN (${gate} AND new.git_remote IS NOT NULL)

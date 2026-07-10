@@ -121,6 +121,23 @@ describe("SYNCED_TABLES registry contract", () => {
         expect(captured).toBe(expectsOwnTrigger);
       });
 
+      if (m.deleteInvisible) {
+        test("a deleteInvisible table has NO DELETE capture trigger", () => {
+          // deleteInvisible suppresses reconcile's delete-tombstone pass, but a DELETE
+          // capture trigger would tombstone directly on local delete — bypassing the
+          // skip and defeating the flag. So such a table must never grow a *_outbox_del.
+          if (PRO_TABLES.has(m.table)) {
+            db()
+              .query(
+                "INSERT OR REPLACE INTO profiles (id, tier, created_at, updated_at) VALUES ('rc-tier','pro',?,?)",
+              )
+              .run(now(), now());
+            reinstallSyncCapture();
+          }
+          expect(tempTriggers()).not.toContain(`${m.table}_outbox_del`);
+        });
+      }
+
       if (m.pullOnly) {
         test("registers a SAMPLE_ROW (contract completeness)", () => {
           expect(SAMPLE_ROW[m.table]).toBeDefined();

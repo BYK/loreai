@@ -114,6 +114,16 @@ export interface SyncTableMeta {
    * HAS is_deleted, so `versioned` is the wrong discriminator here.)
    */
   appendOnly?: boolean;
+  /**
+   * #1246: the reconcile() delete-tombstone pass SKIPS this table, so a local row deletion
+   * never propagates as a remote tombstone — even though the table HAS its own capture
+   * trigger and is updatable (unlike `appendOnly`, which is about omitting is_deleted for a
+   * remote table that lacks the column). Used by `projects`: a merge-loser's content is
+   * re-keyed (not deleted), and a genuine project delete must not nuke a peer's still-active
+   * project (id→git_remote is shared identity). Distinct from captureStrategy "none" (which
+   * means "no own trigger, enqueued via fanout"). Defaults to false.
+   */
+  deleteInvisible?: boolean;
 }
 
 /** ASCII Unit Separator — joins composite row ids (mirrors the SQL `char(31)`). */
@@ -214,9 +224,18 @@ export const SYNCED_TABLES: Record<SyncTier, SyncTableMeta[]> = {
       // knowledge/entities (the FK parent). Applied via applyRemoteProject, which seeds a
       // synthetic-path row (path is NOT NULL UNIQUE locally, but not synced). No
       // updated_at column locally — the remote server-stamps it for the pull cursor.
+      //
+      // deleteInvisible: projects has its OWN INSERT/UPDATE capture trigger (so it is a
+      // "row" table with a trigger — NOT "none"), but the reconcile() delete-tombstone
+      // pass SKIPS it. A local projects deletion must NEVER tombstone the shared remote
+      // mapping: (a) a convergence merge deletes the loser locally, but its content is
+      // RE-KEYED to the winner (not deleted) so a tombstone would race the re-key; (b) a
+      // genuine project delete on one device must not nuke another device's still-active
+      // project (id→git_remote is shared identity, not per-device state). Bounded by quota.
       table: "projects",
       idColumns: ["id"],
       ftsTables: [],
+      deleteInvisible: true,
       encryptedColumns: ["git_remote", "name"],
       syncColumns: ["id", "git_remote", "name", "created_at"],
     },
@@ -962,6 +981,10 @@ export function reconcile(tier: SyncTier = currentSyncTier()): void {
     // capture DELETE trigger, so the ONLY way they could tombstone is this pass —
     // skip it. (Remote lifecycle is the server reaper's job, not the client's.)
     if (m.captureStrategy && m.captureStrategy !== "row") continue;
+    // #1246: projects has its own trigger (so it is a "row" table) but is delete-invisible
+    // — a local deletion (merge loser or genuine delete) must never tombstone the shared
+    // remote id→git_remote mapping. Skip the delete-tombstone pass for it.
+    if (m.deleteInvisible) continue;
     // Knowledge is keyed by logical_id and append-only: "live" means a CURRENT live
     // version exists (knowledge_current), NOT merely a physical row — a deleted
     // entry keeps its demoted/death-cert version rows, so an `id = logical_id`
