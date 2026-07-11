@@ -303,8 +303,8 @@ describe("dependency manifest invariants (#998, #1027)", () => {
         devDependencies?: Record<string, string>;
       };
       const allDeps = {
-        ...(manifest.dependencies ?? {}),
-        ...(manifest.devDependencies ?? {}),
+        ...manifest.dependencies,
+        ...manifest.devDependencies,
       };
       for (const [dep, spec] of Object.entries(allDeps)) {
         if (dep.startsWith("@loreai/")) {

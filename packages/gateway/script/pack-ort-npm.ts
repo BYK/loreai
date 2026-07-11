@@ -72,7 +72,7 @@ function injectGatewayOptionalDeps(tarballsDir: string, version: string): void {
       optionalDependencies?: Record<string, string>;
     };
     pkg.optionalDependencies = {
-      ...(pkg.optionalDependencies ?? {}),
+      ...pkg.optionalDependencies,
       ...optionalDependencies,
     };
     writeFileSync(pkgJsonPath, `${JSON.stringify(pkg, null, 2)}\n`);

@@ -3758,7 +3758,7 @@ export function ensureProject(
   // Note: LORE_DB_PATH unset is used as a proxy for "production DB". This
   // wouldn't catch the unlikely case of someone explicitly setting LORE_DB_PATH
   // to the default production path, but that's not a realistic scenario.
-  if (!process.env.LORE_DB_PATH && /^\/test\//.test(path)) {
+  if (!process.env.LORE_DB_PATH && path.startsWith("/test/")) {
     throw new Error(
       `Refusing to create project with test path "${path}" in the production DB. ` +
         `Set LORE_DB_PATH to a temp path, or run tests via \`bun test\` from the repo root.`,

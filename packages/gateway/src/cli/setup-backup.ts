@@ -235,7 +235,7 @@ function isTopLevelLine(lines: string[], index: number): boolean {
   for (let i = index - 1; i >= 0; i--) {
     const line = lines[i].trim();
     if (line === "" || line.startsWith("#")) continue;
-    if (/^\[/.test(line)) return false;
+    if (line.startsWith("[")) return false;
   }
   return true;
 }

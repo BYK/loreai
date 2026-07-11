@@ -54,7 +54,7 @@ function trackBackground(p: Promise<unknown>): void {
  */
 export async function settleBackgroundWork(): Promise<void> {
   while (inFlightBackground.size > 0) {
-    await Promise.allSettled([...inFlightBackground]);
+    await Promise.allSettled(inFlightBackground);
   }
   await embedding.settleDocumentEmbeds();
 }

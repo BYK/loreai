@@ -281,10 +281,7 @@ export {
   clearWorkspaceCache,
 } from "./workspace";
 export { workerSessionIDs, isWorkerSession } from "./worker";
-export {
-  setReadPathTimingHook,
-  type ReadPathTiming,
-} from "./read-telemetry";
+export { setReadPathTimingHook, type ReadPathTiming } from "./read-telemetry";
 export {
   recordVecReadLatency,
   setVecReadLatencyHook,

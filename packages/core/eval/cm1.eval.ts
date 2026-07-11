@@ -27,9 +27,8 @@ const scenario = inflateScenario(baseScenario, 400_000, 42);
 // Judge harness — uses Anthropic for LLM-as-judge
 const judgeHarness = createJudgeHarness({
   run: async (input) => {
-    const { resolveBackend, createEvalLLMClient } = await import(
-      "./llm-backend"
-    );
+    const { resolveBackend, createEvalLLMClient } =
+      await import("./llm-backend");
     const llm = createEvalLLMClient(resolveBackend());
     const result = await llm.prompt(
       input.system ??

@@ -980,7 +980,7 @@ async function cmdDedup(
     ? [{ path: explicitProject, name: explicitProject }]
     : data
         .listProjects()
-        .filter((p) => !/^\/test\//.test(p.path))
+        .filter((p) => !p.path.startsWith("/test/"))
         .map((p) => ({ path: p.path, name: p.name ?? p.path }));
 
   if (projects.length === 0) {
@@ -1326,9 +1326,8 @@ async function cmdVacuum(): Promise<void> {
     process.exit(1);
   }
 
-  const { vacuum, dbFileSizeBytes, freelistBytes } = await import(
-    "@loreai/core"
-  );
+  const { vacuum, dbFileSizeBytes, freelistBytes } =
+    await import("@loreai/core");
   const mb = (b: number) => `${(b / 1e6).toFixed(1)} MB`;
 
   console.log(

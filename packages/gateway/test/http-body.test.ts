@@ -105,16 +105,14 @@ describe("compressBody / decompressBody round-trip", () => {
 });
 
 describe("decodeRequestBody", () => {
-  test.each([
-    "zstd",
-    "gzip",
-    "br",
-    "deflate",
-  ])("decodes a %s-compressed body back to the original JSON text", async (enc) => {
-    const text = await decodeRequestBody(reqWith(ENCODERS[enc](SAMPLE), enc));
-    expect(text).toBe(SAMPLE);
-    expect(JSON.parse(text)).toMatchObject({ model: "gpt-5-codex" });
-  });
+  test.each(["zstd", "gzip", "br", "deflate"])(
+    "decodes a %s-compressed body back to the original JSON text",
+    async (enc) => {
+      const text = await decodeRequestBody(reqWith(ENCODERS[enc](SAMPLE), enc));
+      expect(text).toBe(SAMPLE);
+      expect(JSON.parse(text)).toMatchObject({ model: "gpt-5-codex" });
+    },
+  );
 
   test("passes an unencoded body through unchanged", async () => {
     expect(await decodeRequestBody(reqWith(SAMPLE))).toBe(SAMPLE);

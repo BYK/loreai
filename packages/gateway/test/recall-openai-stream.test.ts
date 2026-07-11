@@ -112,14 +112,12 @@ describe("recall interception — OpenAI streaming path", () => {
       JSON.stringify({ search: { queryExpansion: false } }),
     );
 
-    const { setUpstreamInterceptor, resetPipelineState } = await import(
-      "../src/pipeline"
-    );
+    const { setUpstreamInterceptor, resetPipelineState } =
+      await import("../src/pipeline");
     const { startServer } = await import("../src/server");
     const { loadConfig } = await import("../src/config");
-    const { close: closeDB, load: loadLoreConfig } = await import(
-      "@loreai/core"
-    );
+    const { close: closeDB, load: loadLoreConfig } =
+      await import("@loreai/core");
 
     closeDB();
     await resetPipelineState();

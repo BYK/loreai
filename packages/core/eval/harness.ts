@@ -142,9 +142,8 @@ export async function connectGateway(
 async function startFixtureGateway(): Promise<GatewayHandle> {
   // Dynamic import so fixture infra is only loaded when needed
   const { createHarness } = await import("../../gateway/test/helpers/harness");
-  const { makeConversationFixtures } = await import(
-    "../../gateway/test/helpers/fixtures"
-  );
+  const { makeConversationFixtures } =
+    await import("../../gateway/test/helpers/fixtures");
 
   // Create a minimal fixture set — the replay engine will add its own
   // interceptor per scenario

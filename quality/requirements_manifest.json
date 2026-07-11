@@ -13,7 +13,10 @@
       "use_cases": ["UC-02"],
       "candidate_bugs": ["CB-010"],
       "description": "Embedding auto-fallback from local to remote MUST be recoverable — either retry local on a configurable timer or fall back per-request rather than permanently replacing the provider.",
-      "references": ["packages/core/src/embedding.ts:700", "packages/core/src/embedding.ts:502"]
+      "references": [
+        "packages/core/src/embedding.ts:700",
+        "packages/core/src/embedding.ts:502"
+      ]
     },
     {
       "id": "REQ-002",
@@ -24,7 +27,10 @@
       "use_cases": ["UC-02"],
       "candidate_bugs": [],
       "description": "FTS5 fallback to LIKE search SHOULD propagate a degradation signal so callers can log the fallback and optionally adjust scoring behavior.",
-      "references": ["packages/core/src/search.ts:162", "packages/core/src/ltm.ts:272-274"]
+      "references": [
+        "packages/core/src/search.ts:162",
+        "packages/core/src/ltm.ts:272-274"
+      ]
     },
     {
       "id": "REQ-003",
@@ -46,7 +52,10 @@
       "use_cases": ["UC-01", "UC-02"],
       "candidate_bugs": ["CB-002"],
       "description": "Fingerprint-based session identification MUST serialize concurrent lookups to prevent session splits for the same conversation.",
-      "references": ["packages/gateway/src/pipeline.ts:880-975", "packages/gateway/src/session.ts:180"]
+      "references": [
+        "packages/gateway/src/pipeline.ts:880-975",
+        "packages/gateway/src/session.ts:180"
+      ]
     },
     {
       "id": "REQ-005",
@@ -57,7 +66,10 @@
       "use_cases": ["UC-01", "UC-03"],
       "candidate_bugs": [],
       "description": "LTM injection SHOULD preserve the stable/context-bound distinction across all protocol paths to optimize cache behavior, not just for Anthropic.",
-      "references": ["packages/gateway/src/translate/anthropic.ts:369-423", "packages/gateway/src/pipeline.ts:1028-1040"]
+      "references": [
+        "packages/gateway/src/translate/anthropic.ts:369-423",
+        "packages/gateway/src/pipeline.ts:1028-1040"
+      ]
     },
     {
       "id": "REQ-006",
@@ -69,7 +81,11 @@
       "use_cases": ["UC-03", "UC-TOOL-001.a", "UC-TOOL-001.b", "UC-TOOL-001.c"],
       "candidate_bugs": ["CB-006", "CB-008"],
       "description": "All protocol translators MUST preserve tool_result blocks when converting between gateway internal format and upstream wire format.",
-      "references": ["packages/gateway/src/translate/anthropic.ts:369-423", "packages/gateway/src/translate/openai.ts:523-527", "packages/gateway/src/translate/openai-responses.ts:126-131"]
+      "references": [
+        "packages/gateway/src/translate/anthropic.ts:369-423",
+        "packages/gateway/src/translate/openai.ts:523-527",
+        "packages/gateway/src/translate/openai-responses.ts:126-131"
+      ]
     },
     {
       "id": "REQ-007",
@@ -81,7 +97,10 @@
       "use_cases": ["UC-STREAM-001.a", "UC-STREAM-001.b", "UC-STREAM-001.c"],
       "candidate_bugs": ["CB-012"],
       "description": "All streaming translators MUST propagate upstream error events to clients in the target protocol's error format.",
-      "references": ["packages/gateway/src/stream/openai.ts", "packages/gateway/src/stream/openai-responses.ts:687-711"]
+      "references": [
+        "packages/gateway/src/stream/openai.ts",
+        "packages/gateway/src/stream/openai-responses.ts:687-711"
+      ]
     },
     {
       "id": "REQ-008",
@@ -92,7 +111,10 @@
       "use_cases": ["UC-01"],
       "candidate_bugs": [],
       "description": "Gateway discovery logic SHOULD be extracted to a shared module consumed by both OpenCode and Pi plugins to prevent code divergence.",
-      "references": ["packages/opencode/src/index.ts:39-80", "packages/pi/src/index.ts:99-133"]
+      "references": [
+        "packages/opencode/src/index.ts:39-80",
+        "packages/pi/src/index.ts:99-133"
+      ]
     },
     {
       "id": "REQ-009",
@@ -125,7 +147,11 @@
       "use_cases": ["UC-01", "UC-02"],
       "candidate_bugs": ["CB-001"],
       "description": "Session state persistence MUST either restore all persisted fields on load OR remove write-only persistence for transient fields. saveForceMinLayer MUST NOT delete the entire session_state row.",
-      "references": ["packages/core/src/db.ts:891-950", "packages/core/src/db.ts:1019-1031", "packages/core/src/gradient.ts:673-677"]
+      "references": [
+        "packages/core/src/db.ts:891-950",
+        "packages/core/src/db.ts:1019-1031",
+        "packages/core/src/gradient.ts:673-677"
+      ]
     },
     {
       "id": "REQ-012",
@@ -147,7 +173,10 @@
       "use_cases": ["UC-02"],
       "candidate_bugs": [],
       "description": "CLI data commands SHOULD delegate to core functions rather than reimplementing logic (e.g., pairKey) to prevent divergence.",
-      "references": ["packages/gateway/src/cli/data.ts:748", "packages/core/src/ltm.ts"]
+      "references": [
+        "packages/gateway/src/cli/data.ts:748",
+        "packages/core/src/ltm.ts"
+      ]
     },
     {
       "id": "REQ-014",
@@ -158,7 +187,10 @@
       "use_cases": ["UC-02"],
       "candidate_bugs": ["CB-004", "CB-005"],
       "description": "CLI recall SHOULD document query expansion limitations and offer parity with gateway recall where possible.",
-      "references": ["packages/gateway/src/recall.ts:343", "packages/gateway/src/cli/recall-cmd.ts:21"]
+      "references": [
+        "packages/gateway/src/recall.ts:343",
+        "packages/gateway/src/cli/recall-cmd.ts:21"
+      ]
     }
   ]
 }

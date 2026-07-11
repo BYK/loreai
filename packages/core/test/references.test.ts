@@ -782,19 +782,24 @@ describe.skipIf(process.platform === "win32")(
       ["SRC/DB.ts", "ok"], // wrong-case dir+file, no line
       ["DB.ts:3", "ok"], // wrong-case bare basename, in range
       ["src/Db.ts:2", "ok"], // exact case still works
-    ])("real probe and Direct-FS agree on %j (expect %s)", async (raw, expected) => {
-      const refs = extractReferences(raw);
-      const key = refs[0].raw;
-      const direct = (await new DirectFsResolver(root).resolve(refs))?.get(key);
-      // The real shell output drives the synthetic resolver — if the shell's
-      // `tr` fold or lowercased refset regressed, the wrong-case line count
-      // would be absent and the line-bound rows would diverge to "unknown".
-      const synthetic = (
-        await new SyntheticProbeResolver(runProbe(refs)).resolve(refs)
-      )?.get(key);
-      expect(direct).toBe(expected);
-      expect(synthetic).toBe(expected);
-    });
+    ])(
+      "real probe and Direct-FS agree on %j (expect %s)",
+      async (raw, expected) => {
+        const refs = extractReferences(raw);
+        const key = refs[0].raw;
+        const direct = (await new DirectFsResolver(root).resolve(refs))?.get(
+          key,
+        );
+        // The real shell output drives the synthetic resolver — if the shell's
+        // `tr` fold or lowercased refset regressed, the wrong-case line count
+        // would be absent and the line-bound rows would diverge to "unknown".
+        const synthetic = (
+          await new SyntheticProbeResolver(runProbe(refs)).resolve(refs)
+        )?.get(key);
+        expect(direct).toBe(expected);
+        expect(synthetic).toBe(expected);
+      },
+    );
   },
 );
 
@@ -1114,26 +1119,29 @@ describe.skipIf(process.platform === "win32")(
       ["`evaluateCacheStrategy` in src/code.ts:1", "ok"],
       ["`removedHelper` in src/code.ts:1", "missing"],
       ["`fooBar` in src/code.ts:1", "missing"], // substring only → word-boundary miss
-    ])("real probe and Direct-FS agree on %j (symbol → %s)", async (raw, expected) => {
-      const refs = extractReferences(raw);
-      const sym = refs.find((r) => r.kind === "symbol") as { raw: string };
-      const direct = (await new DirectFsResolver(root).resolve(refs))?.get(
-        sym.raw,
-      );
-      const probeOut = execFileSync(
-        "sh",
-        ["-c", buildRefcheckProbeScript(refs)],
-        {
-          cwd: root,
-          encoding: "utf8",
-        },
-      );
-      const synthetic = (
-        await new SyntheticProbeResolver(probeOut).resolve(refs)
-      )?.get(sym.raw);
-      expect(direct).toBe(expected);
-      expect(synthetic).toBe(expected);
-    });
+    ])(
+      "real probe and Direct-FS agree on %j (symbol → %s)",
+      async (raw, expected) => {
+        const refs = extractReferences(raw);
+        const sym = refs.find((r) => r.kind === "symbol") as { raw: string };
+        const direct = (await new DirectFsResolver(root).resolve(refs))?.get(
+          sym.raw,
+        );
+        const probeOut = execFileSync(
+          "sh",
+          ["-c", buildRefcheckProbeScript(refs)],
+          {
+            cwd: root,
+            encoding: "utf8",
+          },
+        );
+        const synthetic = (
+          await new SyntheticProbeResolver(probeOut).resolve(refs)
+        )?.get(sym.raw);
+        expect(direct).toBe(expected);
+        expect(synthetic).toBe(expected);
+      },
+    );
 
     // The probe must exit 0 even when the last symbol grep finds nothing —
     // otherwise the client tool flags `isError` and the WHOLE batch goes neutral.

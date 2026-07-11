@@ -23,9 +23,8 @@ const scenario = mod.default;
 // Judge harness
 const judgeHarness = createJudgeHarness({
   run: async (input) => {
-    const { resolveBackend, createEvalLLMClient } = await import(
-      "./llm-backend"
-    );
+    const { resolveBackend, createEvalLLMClient } =
+      await import("./llm-backend");
     const llm = createEvalLLMClient(resolveBackend());
     const result = await llm.prompt(
       input.system ??

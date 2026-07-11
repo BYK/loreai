@@ -1827,7 +1827,7 @@ async function pageUserKnowledge(): Promise<string> {
       const MAX_DEDUP_PROJECTS = 25;
       const scanProjects = data
         .listProjects()
-        .filter((p) => !/^\/test\//.test(p.path) && p.knowledge_count >= 2)
+        .filter((p) => !p.path.startsWith("/test/") && p.knowledge_count >= 2)
         .sort((a, b) => b.knowledge_count - a.knowledge_count)
         .slice(0, MAX_DEDUP_PROJECTS);
       for (const p of scanProjects) {

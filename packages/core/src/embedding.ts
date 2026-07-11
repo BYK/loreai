@@ -1971,7 +1971,7 @@ function trackDocEmbed(p: Promise<unknown>): void {
  */
 export async function settleDocumentEmbeds(): Promise<void> {
   while (_docEmbedsInFlight.size > 0) {
-    await Promise.allSettled([..._docEmbedsInFlight]);
+    await Promise.allSettled(_docEmbedsInFlight);
   }
 }
 
@@ -2079,7 +2079,7 @@ async function embedInTokenBatches(
 ): Promise<Float32Array[]> {
   const items = texts.map((text) => ({ text }));
   const out: Float32Array[] = [];
-  for (let i = 0; i < items.length; ) {
+  for (let i = 0; i < items.length;) {
     const batch = nextBatch(items, i);
     i += batch.length;
     const vecs = await embed(

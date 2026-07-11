@@ -81,20 +81,19 @@ describe("pi extension — e2e against the real Pi runtime", () => {
     const { close: closeDB } = (await import("@loreai/core")) as unknown as {
       close: () => void;
     };
-    const { setUpstreamInterceptor } = (await import(
-      "../../gateway/src/pipeline"
-    )) as unknown as {
-      setUpstreamInterceptor: (
-        fn:
-          | ((
-              body: unknown,
-              model: string,
-              streaming: boolean,
-              makeReal: () => Promise<Response>,
-            ) => Promise<Response>)
-          | undefined,
-      ) => void;
-    };
+    const { setUpstreamInterceptor } =
+      (await import("../../gateway/src/pipeline")) as unknown as {
+        setUpstreamInterceptor: (
+          fn:
+            | ((
+                body: unknown,
+                model: string,
+                streaming: boolean,
+                makeReal: () => Promise<Response>,
+              ) => Promise<Response>)
+            | undefined,
+        ) => void;
+      };
 
     closeDB();
     await gw.resetPipelineState();
@@ -240,12 +239,11 @@ describe("pi extension — e2e against the real Pi runtime", () => {
     // Mirror the gateway harness teardown so no pipeline timers / interceptor
     // state leak into other tests sharing this worker.
     try {
-      const { setUpstreamInterceptor, resetPipelineState } = (await import(
-        "../../gateway/src/pipeline"
-      )) as unknown as {
-        setUpstreamInterceptor: (fn: undefined) => void;
-        resetPipelineState: (opts?: { fast?: boolean }) => Promise<void>;
-      };
+      const { setUpstreamInterceptor, resetPipelineState } =
+        (await import("../../gateway/src/pipeline")) as unknown as {
+          setUpstreamInterceptor: (fn: undefined) => void;
+          resetPipelineState: (opts?: { fast?: boolean }) => Promise<void>;
+        };
       const { close: closeDB } = (await import("@loreai/core")) as unknown as {
         close: () => void;
       };

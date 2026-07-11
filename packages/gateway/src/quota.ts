@@ -216,7 +216,7 @@ export async function fetchOAuthQuotaSnapshot(
         // Defaults; overridden by the sniffed Claude Code fingerprint below.
         "anthropic-beta": QUOTA_BETA,
         "user-agent": QUOTA_FALLBACK_USER_AGENT,
-        ...(ccHeaders ?? {}),
+        ...ccHeaders,
       },
       signal: AbortSignal.timeout(QUOTA_FETCH_TIMEOUT_MS),
     });

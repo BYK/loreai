@@ -160,20 +160,15 @@ describe("vectorSearchTimeoutMs env override", () => {
     expect(vectorSearchTimeoutMs()).toBe(100);
   });
 
-  it.each([
-    "abc",
-    "",
-    "  ",
-    "0",
-    "-5",
-    "Infinity",
-    "NaN",
-  ])("ignores invalid/non-positive value %j and falls back to the default", (raw) => {
-    // Guards the setTimeout(Infinity)/NaN foot-gun: a bad value must never
-    // arm a never-firing (or immediately-firing) timer.
-    process.env.LORE_VEC_SEARCH_TIMEOUT_MS = raw;
-    expect(vectorSearchTimeoutMs()).toBe(DEFAULT_MS);
-  });
+  it.each(["abc", "", "  ", "0", "-5", "Infinity", "NaN"])(
+    "ignores invalid/non-positive value %j and falls back to the default",
+    (raw) => {
+      // Guards the setTimeout(Infinity)/NaN foot-gun: a bad value must never
+      // arm a never-firing (or immediately-firing) timer.
+      process.env.LORE_VEC_SEARCH_TIMEOUT_MS = raw;
+      expect(vectorSearchTimeoutMs()).toBe(DEFAULT_MS);
+    },
+  );
 });
 
 describe("vector-pool fallback paths (resolve null, never throw)", () => {
